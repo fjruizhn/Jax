@@ -1,0 +1,1277 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AteneaERP — Estudio de Mercado 2026</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg-base:     #0d0d1a;
+      --bg-card:     #13132a;
+      --bg-card2:    #171730;
+      --border:      #1e1e3d;
+      --violet:      #8b5cf6;
+      --violet-lt:   #a78bfa;
+      --violet-dim:  rgba(139,92,246,0.15);
+      --violet-bd:   rgba(139,92,246,0.35);
+      --text-hi:     #f1f0ff;
+      --text-lo:     #9898c0;
+      --text-mid:    #c8c8e8;
+      --green:       #10b981;
+      --amber:       #f59e0b;
+      --red:         #ef4444;
+      --red-dim:     rgba(239,68,68,0.12);
+      --green-dim:   rgba(16,185,129,0.12);
+      --amber-dim:   rgba(245,158,11,0.12);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: var(--bg-base);
+      color: var(--text-hi);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    /* ── PRINT ─────────────────────────────────────────── */
+    @media print {
+      @page { size: letter; margin: 0.5in; }
+      body { background: #fff; color: #111; font-size: 11px; }
+      .no-print { display: none !important; }
+      .header-bar { background: #2d1d6e !important; }
+      .card { border: 1px solid #ccc !important; background: #f9f9f9 !important; break-inside: avoid; }
+      a { color: #5b21b6; }
+      .badge-est  { background: #fef3c7; color: #92400e; }
+      .badge-ver  { background: #d1fae5; color: #065f46; }
+      .badge-no   { background: #fee2e2; color: #991b1b; }
+      .badge-si   { background: #d1fae5; color: #065f46; }
+      .badge-par  { background: #fef3c7; color: #92400e; }
+      .section-title { color: #4c1d95; border-color: #4c1d95; }
+      .conflict-box { background: #fffbeb; border-color: #d97706; }
+      .pending-box  { background: #fff7f7; border-color: #dc2626; }
+      .resolved-box { background: #f0fdf4; border-color: #16a34a; }
+      h1,h2,h3,h4 { color: #1e1b4b; }
+      .metric-value { color: #4c1d95; }
+      .ev-tag-a { background: #ddd6fe; color: #3730a3; }
+      .ev-tag-b { background: #fce7f3; color: #9d174d; }
+      table th { background: #ede9fe !important; color: #1e1b4b !important; }
+      .canon-logo { display: none; }
+    }
+
+    /* ── LAYOUT ─────────────────────────────────────────── */
+    .header-bar {
+      background: linear-gradient(135deg, #1a0a4a 0%, #12063a 50%, #0d0d1a 100%);
+      border-bottom: 1px solid var(--violet-bd);
+      padding: 40px 48px 36px;
+      position: relative;
+      overflow: hidden;
+    }
+    .header-bar::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(ellipse 60% 80% at 80% 50%, rgba(139,92,246,0.08) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .header-inner { max-width: 1100px; margin: 0 auto; position: relative; }
+    .header-eyebrow {
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--violet-lt);
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 32px;
+      font-weight: 800;
+      color: var(--text-hi);
+      letter-spacing: -0.02em;
+    }
+    h1 span { color: var(--violet-lt); }
+    .header-sub {
+      font-size: 15px;
+      color: var(--text-mid);
+      margin-top: 8px;
+      max-width: 640px;
+    }
+    .header-meta {
+      display: flex;
+      gap: 24px;
+      margin-top: 24px;
+      flex-wrap: wrap;
+    }
+    .meta-pill {
+      background: rgba(139,92,246,0.12);
+      border: 1px solid var(--violet-bd);
+      border-radius: 20px;
+      padding: 5px 14px;
+      font-size: 12px;
+      color: var(--violet-lt);
+    }
+    .print-btn {
+      position: absolute;
+      top: 40px;
+      right: 0;
+      background: var(--violet);
+      color: #fff;
+      border: none;
+      padding: 10px 22px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.03em;
+      transition: background 0.2s;
+    }
+    .print-btn:hover { background: var(--violet-lt); color: #1e1b4b; }
+
+    .container { max-width: 1100px; margin: 0 auto; padding: 0 48px 80px; }
+
+    /* ── TOC ─────────────────────────────────────────────── */
+    .toc {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px 28px;
+      margin: 32px 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px 24px;
+    }
+    .toc-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--text-mid);
+      font-size: 13px;
+      text-decoration: none;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+      transition: color 0.15s;
+    }
+    .toc-item:hover { color: var(--violet-lt); }
+    .toc-num {
+      background: var(--violet-dim);
+      color: var(--violet-lt);
+      border-radius: 5px;
+      min-width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    /* ── SECTIONS ────────────────────────────────────────── */
+    section { margin-top: 52px; }
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--violet-lt);
+      border-left: 3px solid var(--violet);
+      padding-left: 12px;
+      margin-bottom: 20px;
+    }
+    h2 {
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--text-hi);
+      margin-bottom: 6px;
+    }
+    h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--violet-lt);
+      margin: 24px 0 12px;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      margin-bottom: 20px;
+    }
+    p.lead {
+      color: var(--text-mid);
+      font-size: 14px;
+      margin-bottom: 20px;
+      line-height: 1.7;
+    }
+
+    /* ── METHODOLOGY NOTE ───────────────────────────────── */
+    .methodology-note {
+      background: var(--violet-dim);
+      border: 1px solid var(--violet-bd);
+      border-radius: 8px;
+      padding: 14px 18px;
+      font-size: 12px;
+      color: var(--text-mid);
+      margin-bottom: 24px;
+      line-height: 1.6;
+    }
+    .methodology-note strong { color: var(--violet-lt); }
+
+    /* ── TABLES ──────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; border-radius: 10px; border: 1px solid var(--border); margin-bottom: 16px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    thead th {
+      background: rgba(139,92,246,0.15);
+      color: var(--violet-lt);
+      font-weight: 700;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 12px 14px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    tbody tr { border-bottom: 1px solid var(--border); }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(139,92,246,0.05); }
+    tbody td {
+      padding: 11px 14px;
+      color: var(--text-mid);
+      vertical-align: top;
+    }
+    tbody td:first-child { color: var(--text-hi); font-weight: 600; }
+    .td-price { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: 12px; }
+
+    /* ── BADGES ──────────────────────────────────────────── */
+    .badge {
+      display: inline-block;
+      border-radius: 4px;
+      padding: 2px 7px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+    .badge-ver  { background: var(--green-dim);  color: var(--green);  border: 1px solid rgba(16,185,129,0.3); }
+    .badge-est  { background: var(--amber-dim);  color: var(--amber);  border: 1px solid rgba(245,158,11,0.3); }
+    .badge-no   { background: var(--red-dim);    color: var(--red);    border: 1px solid rgba(239,68,68,0.3); }
+    .badge-si   { background: var(--green-dim);  color: var(--green);  border: 1px solid rgba(16,185,129,0.3); }
+    .badge-par  { background: var(--amber-dim);  color: var(--amber);  border: 1px solid rgba(245,158,11,0.3); }
+    .badge-canal-si { background: var(--green-dim); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+    .badge-canal-no { background: var(--red-dim);   color: #ff8888;      border: 1px solid rgba(239,68,68,0.2); font-size: 10px; }
+
+    .comp-name { font-size: 13px; font-weight: 700; color: var(--text-hi); }
+    .comp-url  { display: block; font-size: 10px; color: var(--text-lo); text-decoration: none; margin-top: 2px; }
+    .comp-url:hover { color: var(--violet-lt); }
+
+    /* ── METRICS ─────────────────────────────────────────── */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      margin: 20px 0;
+    }
+    .metric-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px 22px;
+      position: relative;
+      overflow: hidden;
+    }
+    .metric-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      background: var(--violet);
+    }
+    .metric-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-lo); margin-bottom: 8px; }
+    .metric-value { font-size: 28px; font-weight: 800; color: var(--violet-lt); line-height: 1.1; }
+    .metric-sub   { font-size: 12px; color: var(--text-lo); margin-top: 6px; }
+    .metric-src   { font-size: 11px; color: var(--text-lo); margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+
+    /* ── CONFLICT BOX ────────────────────────────────────── */
+    .conflict-box {
+      background: rgba(245,158,11,0.08);
+      border: 1px solid rgba(245,158,11,0.35);
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin: 20px 0;
+    }
+    .conflict-box .conflict-title {
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--amber);
+      margin-bottom: 8px;
+    }
+    .conflict-box p { color: var(--text-mid); font-size: 13px; }
+
+    /* ── EVIDENCE COLUMNS ────────────────────────────────── */
+    .ev-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 20px; }
+    @media (max-width: 700px) { .ev-grid { grid-template-columns: 1fr; } }
+    .ev-col { background: var(--bg-card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .ev-tag {
+      display: inline-block;
+      border-radius: 5px;
+      padding: 3px 10px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 14px;
+    }
+    .ev-tag-a { background: rgba(139,92,246,0.2); color: var(--violet-lt); border: 1px solid var(--violet-bd); }
+    .ev-tag-b { background: rgba(16,185,129,0.12); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+    .ev-item {
+      border-bottom: 1px solid var(--border);
+      padding: 12px 0;
+    }
+    .ev-item:last-child { border-bottom: none; }
+    .ev-org { font-size: 12px; font-weight: 700; color: var(--text-hi); }
+    .ev-doc { font-size: 11px; color: var(--violet-lt); font-style: italic; margin: 2px 0; }
+    .ev-year { font-size: 10px; color: var(--text-lo); }
+    .ev-text { font-size: 12px; color: var(--text-mid); margin-top: 6px; line-height: 1.5; }
+    .ev-link { font-size: 10px; color: var(--text-lo); text-decoration: none; display: block; margin-top: 4px; word-break: break-all; }
+    .ev-link:hover { color: var(--violet-lt); }
+    .ev-missing {
+      background: var(--red-dim);
+      border: 1px solid rgba(239,68,68,0.25);
+      border-radius: 8px;
+      padding: 14px;
+      font-size: 12px;
+      color: #ff9999;
+    }
+    .ev-missing strong { color: var(--red); display: block; margin-bottom: 4px; }
+
+    /* ── VERDICT BOX ─────────────────────────────────────── */
+    .verdict-box {
+      background: rgba(139,92,246,0.08);
+      border: 1px solid var(--violet-bd);
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin-top: 20px;
+      font-size: 13px;
+      color: var(--text-mid);
+      line-height: 1.7;
+    }
+    .verdict-box strong { color: var(--violet-lt); }
+
+    /* ── BANK CASES ──────────────────────────────────────── */
+    .bank-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+    .bank-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 18px 20px;
+      border-top: 3px solid var(--green);
+    }
+    .bank-name { font-size: 14px; font-weight: 700; color: var(--text-hi); }
+    .bank-erp  { font-size: 12px; color: var(--violet-lt); margin-top: 2px; }
+    .bank-country { font-size: 11px; color: var(--text-lo); margin-bottom: 10px; }
+    .bank-detail { font-size: 12px; color: var(--text-mid); line-height: 1.5; }
+    .bank-urls { margin-top: 12px; display: flex; flex-direction: column; gap: 3px; }
+    .bank-url { font-size: 10px; color: var(--text-lo); text-decoration: none; word-break: break-all; }
+    .bank-url:hover { color: var(--violet-lt); }
+    .fintech-badge {
+      display: inline-block;
+      font-size: 10px;
+      background: rgba(245,158,11,0.15);
+      color: var(--amber);
+      border: 1px solid rgba(245,158,11,0.3);
+      border-radius: 4px;
+      padding: 2px 7px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    /* ── NOT VERIFIED TABLE ──────────────────────────────── */
+    .nv-row { background: var(--red-dim); }
+    .nv-row td { color: #ff9999 !important; }
+
+    /* ── AUDIT NOTES ─────────────────────────────────────── */
+    .audit-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .pending-box {
+      background: rgba(239,68,68,0.07);
+      border: 1px solid rgba(239,68,68,0.3);
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+    .resolved-box {
+      background: rgba(16,185,129,0.07);
+      border: 1px solid rgba(16,185,129,0.25);
+      border-radius: 10px;
+      padding: 18px 20px;
+    }
+    .audit-status {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      padding: 3px 9px;
+      border-radius: 4px;
+      margin-bottom: 10px;
+    }
+    .status-pending  { background: var(--red-dim);   color: var(--red);   border: 1px solid rgba(239,68,68,0.3); }
+    .status-resolved { background: var(--green-dim); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
+    .audit-title { font-size: 13px; font-weight: 700; color: var(--text-hi); margin-bottom: 8px; line-height: 1.4; }
+    .audit-body  { font-size: 12px; color: var(--text-mid); line-height: 1.6; }
+    .audit-solution { font-size: 12px; color: var(--green); margin-top: 8px; }
+
+    /* ── CHART CONTAINERS ────────────────────────────────── */
+    .chart-wrap { background: var(--bg-card2); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-top: 24px; }
+    .chart-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-lo); margin-bottom: 16px; }
+    .chart-canvas-wrap { position: relative; height: 320px; }
+    .chart-note { font-size: 11px; color: var(--text-lo); margin-top: 10px; font-style: italic; }
+
+    /* ── FOOTER ──────────────────────────────────────────── */
+    .footer {
+      margin-top: 60px;
+      border-top: 1px solid var(--border);
+      padding-top: 24px;
+      font-size: 11px;
+      color: var(--text-lo);
+      display: flex;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .footer a { color: var(--text-lo); text-decoration: none; }
+    .footer a:hover { color: var(--violet-lt); }
+
+    /* ── MISC ────────────────────────────────────────────── */
+    .fe-detail { font-size: 10px; color: var(--text-lo); display: block; margin-top: 2px; }
+    .comp-complexity { font-size: 13px; font-weight: 600; }
+    .complexity-low    { color: var(--green);  }
+    .complexity-mid    { color: var(--amber);  }
+    .complexity-high   { color: var(--red);    }
+    hr.divider { border: none; border-top: 1px solid var(--border); margin: 32px 0; }
+    .tag-note { font-size: 11px; color: var(--text-lo); background: var(--bg-card2); border: 1px solid var(--border); border-radius: 5px; padding: 2px 8px; display: inline-block; }
+  </style>
+</head>
+<body>
+
+<!-- HEADER -->
+<div class="header-bar">
+  <div class="header-inner">
+    <button class="print-btn no-print" onclick="window.print()">⎙ Exportar PDF</button>
+    <div class="header-eyebrow">Informe Ejecutivo · Confidencial</div>
+    <h1>Atenea<span>ERP</span> — Estudio de Mercado 2026</h1>
+    <p class="header-sub">Análisis competitivo, tamaño de mercado, evidencia institucional y canal bancario para la tesis ERP→Crédito en LATAM PyME.</p>
+    <div class="header-meta">
+      <span class="meta-pill">Fuente primaria: Hipatia Research</span>
+      <span class="meta-pill">Síntesis: Jekyll</span>
+      <span class="meta-pill">Bloques 1–4 · Junio 2026</span>
+      <span class="meta-pill">11 competidores analizados</span>
+    </div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- TABLE OF CONTENTS -->
+  <div class="toc no-print">
+    <a class="toc-item" href="#s1"><span class="toc-num">1</span>Tabla Comparativa de Competidores</a>
+    <a class="toc-item" href="#s2"><span class="toc-num">2</span>Métricas de Tamaño de Mercado</a>
+    <a class="toc-item" href="#s3"><span class="toc-num">3</span>Evidencia Tesis ERP → Crédito</a>
+    <a class="toc-item" href="#s4"><span class="toc-num">4</span>Casos Bancarios Verificados</a>
+    <a class="toc-item" href="#s5"><span class="toc-num">5</span>No Verificados</a>
+    <a class="toc-item" href="#s6"><span class="toc-num">A</span>Notas de Auditoría</a>
+  </div>
+
+  <!-- ─────────────────────────────────────────────────────── -->
+  <!-- SECTION 1: COMPETITORS -->
+  <!-- ─────────────────────────────────────────────────────── -->
+  <section id="s1">
+    <div class="section-title">Sección 1</div>
+    <h2>Tabla Comparativa de Competidores</h2>
+    <p class="lead">11 productos ERP/contables de LATAM y globales. Precios verificados por Hipatia; conversiones a USD marcadas como estimado usando tipos de cambio de referencia junio 2026.</p>
+
+    <div class="methodology-note">
+      <strong>Metodología de precios USD:</strong> Precios en moneda local convertidos usando tipos de cambio de referencia junio 2026:
+      COP 4,100/USD · MXN 17.5/USD · CLP 950/USD · BRL 5.5/USD.
+      Los valores convertidos se marcan <span class="badge badge-est">ESTIMADO</span>.
+      Los verificados directamente en USD se marcan <span class="badge badge-ver">VERIFICADO</span>.
+      Los no investigados se marcan <span class="badge badge-no">NO VERIFICADO</span>.
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Producto</th>
+            <th>Precio Entrada (Moneda Local)</th>
+            <th>Precio USD/mes</th>
+            <th>Complejidad PyME</th>
+            <th>FE Multi-País</th>
+            <th>Canal Banco</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>
+              <span class="comp-name">Siigo</span>
+              <a class="comp-url" href="https://www.siigo.com/siigo-nube/planes-y-precios/" target="_blank">siigo.com/precios ↗</a>
+            </td>
+            <td class="td-price">COP 39,900/mes (Emprendedor)<br>COP 55,900/mes (Contador) — sin IVA</td>
+            <td>
+              <span class="badge badge-est">ESTIMADO</span><br>
+              <span class="td-price">~$13.63</span>
+              <span class="fe-detail">COP 55,900 ÷ 4,100</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-mid">Baja–Media</span>
+              <span class="fe-detail">Self-service básico; soporte y capacitación gratuita incluida</span>
+            </td>
+            <td>
+              <span class="badge badge-si">SÍ</span>
+              <span class="fe-detail">Colombia, Ecuador, Perú</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-si">SÍ</span>
+              <span class="fe-detail">Bancolombia, Bancamía</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Alegra</span>
+              <a class="comp-url" href="https://www.alegra.com/precios/" target="_blank">alegra.com/precios ↗</a>
+            </td>
+            <td class="td-price">COP 40,000/mes (anual) · COP 49,900/mes<br>MXN 299/mes (anual) · MXN 399/mes — México</td>
+            <td>
+              <span class="badge badge-est">ESTIMADO</span><br>
+              <span class="td-price">~$12.17</span>
+              <span class="fe-detail">COP 49,900 ÷ 4,100</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-low">Baja</span>
+              <span class="fe-detail">Orientado a emprendedores; onboarding guiado</span>
+            </td>
+            <td>
+              <span class="badge badge-si">SÍ</span>
+              <span class="fe-detail">Colombia, México, Chile, Perú, RD, Panamá, Costa Rica</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-si">SÍ</span>
+              <span class="fe-detail">Bancolombia (15% dto), Bancamía</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Bind ERP</span>
+              <a class="comp-url" href="https://bind.com.mx/precios/" target="_blank">bind.com.mx/precios ↗</a>
+            </td>
+            <td class="td-price">MXN 999/mes (anual)<br>MXN 1,499/mes (mensual)</td>
+            <td>
+              <span class="badge badge-est">ESTIMADO</span><br>
+              <span class="td-price">~$85.66</span>
+              <span class="fe-detail">MXN 1,499 ÷ 17.5</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-mid">Media</span>
+              <span class="fe-detail">ERP completo; curva de aprendizaje mayor; soporte y capacitación disponibles</span>
+            </td>
+            <td>
+              <span class="badge badge-no">NO</span>
+              <span class="fe-detail">Principalmente México (CFDI/SAT)</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Aspel COI</span>
+              <a class="comp-url" href="https://www.aspel.com.mx/productos/precios" target="_blank">aspel.com.mx/precios ↗</a>
+            </td>
+            <td class="td-price">MXN 315/mes (renta 1 user, 1 empresa)<br>MXN 5,300 (licencia perpetua 1 user)</td>
+            <td>
+              <span class="badge badge-est">ESTIMADO</span><br>
+              <span class="td-price">~$18.00</span>
+              <span class="fe-detail">MXN 315 ÷ 17.5</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-high">Media–Alta</span>
+              <span class="fe-detail">Robusto y modular; distribuidor/consultor frecuentemente necesario</span>
+            </td>
+            <td>
+              <span class="badge badge-no">NO</span>
+              <span class="fe-detail">Principalmente México (SAT/CFDI)</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Defontana</span>
+              <a class="comp-url" href="https://www.defontana.com/planes-y-precios/" target="_blank">defontana.com/precios ↗</a>
+            </td>
+            <td class="td-price">CLP 12,990/mes (Plan Emprende)<br>CLP 22,990/mes (Plan Pyme)</td>
+            <td>
+              <span class="badge badge-est">ESTIMADO</span><br>
+              <span class="td-price">~$24.20</span>
+              <span class="fe-detail">CLP 22,990 ÷ 950</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-mid">Media</span>
+              <span class="fe-detail">ERP integral; proceso de implementación/consultoría documentado</span>
+            </td>
+            <td>
+              <span class="badge badge-si">SÍ</span>
+              <span class="fe-detail">Chile, Perú, Colombia, México</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Nubox</span>
+              <a class="comp-url" href="https://www.nubox.com/contabilidad-online/precios/" target="_blank">nubox.com/precios ↗</a>
+            </td>
+            <td class="td-price">CLP 8,990/mes (mensual)<br>CLP 7,192/mes (anual) — Plan Emprendedor</td>
+            <td>
+              <span class="badge badge-est">ESTIMADO</span><br>
+              <span class="td-price">~$9.46</span>
+              <span class="fe-detail">CLP 8,990 ÷ 950</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-low">Baja</span>
+              <span class="fe-detail">Orientado a PyMEs; self-service con tutoriales y soporte</span>
+            </td>
+            <td>
+              <span class="badge badge-no">NO</span>
+              <span class="fe-detail">Principalmente Chile</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">ContaAzul</span>
+              <a class="comp-url" href="https://contaazul.com/planos-e-precos/" target="_blank">contaazul.com/precios ↗</a>
+            </td>
+            <td class="td-price">BRL 99,90/mes (anual)<br>BRL 119,90/mes (mensual) — Plano Essencial</td>
+            <td>
+              <span class="badge badge-est">ESTIMADO</span><br>
+              <span class="td-price">~$21.80</span>
+              <span class="fe-detail">BRL 119,90 ÷ 5.5</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-mid">Baja–Media</span>
+              <span class="fe-detail">Pequeñas empresas/emprendedores en Brasil; fácil básico, curva en módulos avanzados</span>
+            </td>
+            <td>
+              <span class="badge badge-no">NO</span>
+              <span class="fe-detail">Principalmente Brasil (NF-e, NFS-e)</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">QuickBooks</span>
+              <a class="comp-url" href="https://quickbooks.intuit.com/pricing/" target="_blank">quickbooks.intuit.com/pricing ↗</a>
+            </td>
+            <td class="td-price">MXN 150/mes (promo 3m) luego MXN 300/mes — Simple Start México</td>
+            <td>
+              <span class="badge badge-ver">VERIFICADO</span><br>
+              <span class="td-price">$30</span>
+              <span class="fe-detail">Simple Start USA — precio regular</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-mid">Baja–Media</span>
+              <span class="fe-detail">Interfaz intuitiva; soporte amplio; avanzado puede requerir especialista</span>
+            </td>
+            <td>
+              <span class="badge badge-par">PARCIAL</span>
+              <span class="fe-detail">México CFDI nativo; otros mercados requieren integraciones adicionales</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Xero</span>
+              <a class="comp-url" href="https://www.xero.com/us/pricing/" target="_blank">xero.com/us/pricing ↗</a>
+            </td>
+            <td class="td-price">No disponible en moneda LATAM verificada</td>
+            <td>
+              <span class="badge badge-ver">VERIFICADO</span><br>
+              <span class="td-price">$15</span>
+              <span class="fe-detail">Plan Early USA</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-low">Baja</span>
+              <span class="fe-detail">Reconocido por diseño amigable; configuración self-service en horas</span>
+            </td>
+            <td>
+              <span class="badge badge-no">NO</span>
+              <span class="fe-detail">Sin soporte nativo de e-invoicing para LATAM; primario en AU, NZ, UK</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Zoho Books</span>
+              <a class="comp-url" href="https://www.zoho.com/us/books/pricing/" target="_blank">zoho.com/us/books/pricing ↗</a>
+            </td>
+            <td class="td-price">No disponible en moneda LATAM verificada</td>
+            <td>
+              <span class="badge badge-ver">VERIFICADO</span><br>
+              <span class="td-price">$0 / $15 / $20</span>
+              <span class="fe-detail">Free (ing &lt;$50K/año) · Standard anual · Standard mensual</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-mid">Baja–Media</span>
+              <span class="fe-detail">Interfaz limpia; plan gratuito accesible; avanzado con curva en integraciones</span>
+            </td>
+            <td>
+              <span class="badge badge-par">PARCIAL</span>
+              <span class="fe-detail">México CFDI nativo; Colombia con integración de proveedor local; otros países: no confirmado</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+          <tr>
+            <td>
+              <span class="comp-name">Odoo</span>
+              <a class="comp-url" href="https://www.odoo.com/es_ES/pricing" target="_blank">odoo.com/pricing ↗</a>
+            </td>
+            <td class="td-price">No disponible en moneda LATAM verificada</td>
+            <td>
+              <span class="badge badge-ver">VERIFICADO</span><br>
+              <span class="td-price">$0 / $19.90 / $29.90</span>
+              <span class="fe-detail">Free 1-app · Standard anual · Custom anual</span>
+            </td>
+            <td>
+              <span class="comp-complexity complexity-high">Media–Alta</span>
+              <span class="fe-detail">Free app es sencillo; ERP completo multimodular requiere consultor certificado</span>
+            </td>
+            <td>
+              <span class="badge badge-si">SÍ</span>
+              <span class="fe-detail">Módulos de localización por país: MX, CO, CL, PE, AR y otros — vía Odoo App Store</span>
+            </td>
+            <td>
+              <span class="badge badge-canal-no">NO VERIFICADO</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Price Chart -->
+    <div class="chart-wrap no-print">
+      <div class="chart-title">Precio de entrada en USD — comparativo (plan mensual básico)</div>
+      <div class="chart-canvas-wrap">
+        <canvas id="chartPrices"></canvas>
+      </div>
+      <p class="chart-note">Barras grises = estimado por conversión de moneda local (junio 2026). Barras violeta = precio verificado directamente en USD. Bind ERP excluido de escala principal por precio alto ($85.66 — ver tabla).</p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────── -->
+  <!-- SECTION 2: MARKET SIZE -->
+  <!-- ─────────────────────────────────────────────────────── -->
+  <section id="s2">
+    <div class="section-title">Sección 2</div>
+    <h2>Métricas Clave de Tamaño de Mercado</h2>
+    <p class="lead">Tres fuentes institucionales para dimensionar el mercado ERP/cloud para PyMEs. Se documenta el conflicto de fuentes con transparencia — la elección editorial es responsabilidad del equipo de AteneaERP.</p>
+
+    <div class="conflict-box">
+      <div class="conflict-title">⚠ Conflicto de Fuentes — Nota de Auditoría 1 (Pendiente)</div>
+      <p>Las fuentes <strong>Data Horizzon Research</strong> (USD 35,500M) y <strong>Dataintelo</strong> (USD 8,600M) difieren en un factor de ~4x para el mercado ERP para PyMEs en 2024-2025. La discrepancia se atribuye a diferencias en definición de segmento y cobertura geográfica. Este informe presenta ambas cifras. La selección de una única fuente para comunicaciones externas debe hacerse con justificación metodológica explícita.</p>
+    </div>
+
+    <div class="metrics-grid">
+      <div class="metric-card">
+        <div class="metric-label">Mercado ERP para Pequeñas Empresas (broader SMB)</div>
+        <div class="metric-value">$35.5B</div>
+        <div class="metric-sub">Proyección 2033: USD 58.2B · CAGR 5.0%</div>
+        <div class="metric-src">
+          <strong>Fuente:</strong> Data Horizzon Research — <em>"Small Business ERP Software Market Size, Growth, Share &amp; Analysis Report 2033"</em><br>
+          <strong>Año:</strong> 2024–2025
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">Mercado ERP Cloud para PyMEs</div>
+        <div class="metric-value">$41.5B</div>
+        <div class="metric-sub">Proyección 2031: USD 118.5B · CAGR 19.12%</div>
+        <div class="metric-src">
+          <strong>Fuente:</strong> Mordor Intelligence (2025)<br>
+          <strong>Nota:</strong> Cubre específicamente ERP en la nube — métrica más relevante para un producto SaaS
+        </div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">CAGR Segmento PyME — Mercado ERP Global</div>
+        <div class="metric-value">10.7%</div>
+        <div class="metric-sub">2023–2033 · Medianas empresas: 37.56% del mercado ERP global (2025)</div>
+        <div class="metric-src">
+          <strong>Fuente:</strong> Grand View Research (2025)<br>
+          <strong>Nota:</strong> El segmento PyME registra el mayor crecimiento dentro del ERP global
+        </div>
+      </div>
+      <div class="metric-card" style="border-top-color: var(--amber);">
+        <div class="metric-label">Mercado ERP para PyMEs — Estimación alternativa</div>
+        <div class="metric-value" style="color: var(--amber); font-size: 22px;">$8.6B</div>
+        <div class="metric-sub">CAGR 9.5% hasta 2034 <span class="tag-note">⚠ CONFLICTO</span></div>
+        <div class="metric-src">
+          <strong>Fuente:</strong> Dataintelo (2025)<br>
+          <strong>Discrepancia:</strong> ~4x menor a Data Horizzon Research — metodología no comparable confirmada
+        </div>
+      </div>
+    </div>
+
+    <div class="chart-wrap no-print">
+      <div class="chart-title">Comparativo de estimaciones de mercado por fuente (USD miles de millones, año base 2024–2025)</div>
+      <div class="chart-canvas-wrap" style="height: 260px;">
+        <canvas id="chartMarket"></canvas>
+      </div>
+      <p class="chart-note">Las tres estimaciones principales representadas. La cifra de Dataintelo se muestra con relleno diferenciado para visualizar el conflicto de fuentes. Todas son datos verificados directamente de los reportes citados por Hipatia.</p>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────── -->
+  <!-- SECTION 3: EVIDENCE -->
+  <!-- ─────────────────────────────────────────────────────── -->
+  <section id="s3">
+    <div class="section-title">Sección 3</div>
+    <h2>Evidencia de la Tesis: ERP → Acceso a Crédito</h2>
+    <p class="lead">La evidencia se clasifica en dos columnas: evidencia institucional del mecanismo (documentada, verificada) y evidencia directa con cifra (escasa o inexistente para LATAM).</p>
+
+    <div class="ev-grid">
+
+      <!-- COLUMNA A -->
+      <div class="ev-col">
+        <div class="ev-tag ev-tag-a">A — Evidencia Institucional Verificada (mecanismo documentado)</div>
+
+        <div class="ev-item">
+          <div class="ev-org">Banco Mundial / IFC</div>
+          <div class="ev-doc">"Alternative Data Transforming SME Finance"</div>
+          <div class="ev-year">2017</div>
+          <div class="ev-text">800+ prestamistas en 60+ países. Datos contables identificados como primer nivel de datos alternativos que expanden crédito. Brecha: 180–220M de PyMEs con necesidades insatisfechas = USD 2.1–2.6 billones, atribuible a registros financieros inadecuados.</div>
+          <a class="ev-link" href="https://documents.worldbank.org/en/publication/documents-reports/documentdetail/701331497329509915/alternative-data-transforming-sme-finance" target="_blank">documents.worldbank.org ↗</a>
+        </div>
+
+        <div class="ev-item">
+          <div class="ev-org">IFC</div>
+          <div class="ev-doc">"MSME Banking in the Digital Era"</div>
+          <div class="ev-year">Septiembre 2025</div>
+          <div class="ev-text"><em>"Banking services are being integrated into MSME tools such as accounting software, e-commerce platforms, and digital wallets. This enables businesses to access credit, manage cash flow, and make payments within the applications they already use."</em></div>
+          <a class="ev-link" href="https://www.ifc.org/content/dam/ifc/doc/2025/msme-banking-in-the-digital-era.pdf" target="_blank">ifc.org/msme-banking-in-the-digital-era.pdf ↗</a>
+        </div>
+
+        <div class="ev-item">
+          <div class="ev-org">IFC / SME Finance Forum</div>
+          <div class="ev-doc">"MSME Finance Gap Report"</div>
+          <div class="ev-year">Marzo 2025</div>
+          <div class="ev-text">43% de PyMEs formales en países en desarrollo con necesidades financieras insatisfechas. Brecha: USD 4,100 millones. Causa principal: información financiera insuficiente u opaca.</div>
+          <a class="ev-link" href="https://www.smefinanceforum.org/sites/default/files/Data%20Sites%20downloads/IFC%20Report_MAIN%20Final%203%2025.pdf" target="_blank">smefinanceforum.org — IFC Report ↗</a>
+        </div>
+
+        <div class="ev-item">
+          <div class="ev-org">CEPAL (ONU)</div>
+          <div class="ev-doc">"Eliminando barreras: El financiamiento a las PyMEs en América Latina"</div>
+          <div class="ev-year">Año no confirmado en fuente</div>
+          <div class="ev-text">Ausencia de información financiera formalizada identificada como barrera número 1 de acceso al crédito bancario en LATAM. Presentación de estados financieros = condición necesaria para evaluación crediticia.</div>
+          <a class="ev-link" href="https://repositorio.cepal.org/server/api/core/bitstreams/7336fcfb-b028-4188-b089-68107c721da6/content" target="_blank">repositorio.cepal.org ↗</a>
+        </div>
+
+        <div class="ev-item">
+          <div class="ev-org">CAF — Banco de Desarrollo de LATAM</div>
+          <div class="ev-doc">"Acceso al financiamiento de las PyMEs"</div>
+          <div class="ev-year">Año no confirmado en fuente</div>
+          <div class="ev-text">PyMEs con mejores registros contables tienen mayor probabilidad de acceder a crédito formal.</div>
+          <a class="ev-link" href="https://scioteca.caf.com/bitstream/handle/123456789/1752/Acceso%20al%20financiamiento%20de%20las%20pymes.pdf" target="_blank">scioteca.caf.com ↗</a>
+        </div>
+      </div>
+
+      <!-- COLUMNA B -->
+      <div class="ev-col">
+        <div class="ev-tag ev-tag-b">B — Evidencia Directa con Cifra</div>
+
+        <div class="ev-missing">
+          <strong>NO EXISTE — Regresión controlada LATAM</strong>
+          No hay estudio publicado que cuantifique "X% más probabilidad de crédito para empresas que usan software contable" con metodología de regresión controlada para LATAM. La relación causal está documentada como mecanismo (Columna A), pero la cifra directa no está publicada con esa granularidad.
+        </div>
+
+        <div class="ev-item" style="margin-top:16px;">
+          <div class="ev-org">Dato de contexto — México</div>
+          <div class="ev-doc">Acceso PyME mexicanas a financiamiento bancario formal</div>
+          <div class="ev-text"><strong style="color:var(--violet-lt); font-size:22px;">26.5%</strong><br>
+          de PyMEs en México accede a financiamiento bancario formal.</div>
+          <div class="ev-year" style="margin-top:6px;"><span class="badge badge-no">Fuente periodística</span> — Hablemos de Dinero, no estudio institucional</div>
+          <a class="ev-link" href="https://hablemosdedinero.com.mx/credito-para-pymes/" target="_blank">hablemosdedinero.com.mx ↗</a>
+        </div>
+
+        <div class="ev-item">
+          <div class="ev-org">Konfio (México) — Caso operativo más cercano</div>
+          <div class="ev-doc">Scoring crediticio basado en datos SAT (CFDI/facturas electrónicas)</div>
+          <div class="ev-text">Requisito operativo: mínimo 6 meses de facturación electrónica registrada. Es el caso documentado más cercano a "datos contables digitales → crédito PyME" en LATAM. Tasa de aprobación no publicada con cifra verificada.</div>
+          <div class="ev-year"><span class="badge badge-est">Fintech — no banco comercial</span></div>
+          <a class="ev-link" href="https://konfio.mx/credito/" target="_blank">konfio.mx/credito ↗</a>
+          <a class="ev-link" href="https://www.cronista.com/mexico/finanzas-economia/adios-al-rechazo-bancario-como-la-ia-y-los-datos-del-sat-abren-la-llave-del-credito-para-las-pymes/" target="_blank">cronista.com — IA+SAT+crédito PyME ↗</a>
+        </div>
+      </div>
+    </div>
+
+    <div class="verdict-box">
+      <strong>Veredicto de Jekyll:</strong> El mecanismo (registros digitales → asimetría de información reducida → scoring → crédito) está ampliamente documentado por IFC, Banco Mundial, CEPAL y CAF. El efecto cuantificado ("X% más probable de obtener crédito con software ERP") <strong>no existe publicado</strong> en esa granularidad para LATAM. La tesis de negocio de AteneaERP está respaldada por el mecanismo institucional, pero la cifra de impacto directo es una hipótesis pendiente de validación en campo.
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────── -->
+  <!-- SECTION 4: BANK CASES -->
+  <!-- ─────────────────────────────────────────────────────── -->
+  <section id="s4">
+    <div class="section-title">Sección 4</div>
+    <h2>Casos Bancarios Verificados</h2>
+    <p class="lead">4 casos con evidencia pública de alianza banco–software ERP/contable en LATAM. Todos verificados por Hipatia con URL directa.</p>
+
+    <div class="bank-grid">
+      <div class="bank-card">
+        <div class="bank-name">Bancolombia + Alegra</div>
+        <div class="bank-erp">Software: Alegra</div>
+        <div class="bank-country">Colombia · Verificado ✓</div>
+        <div class="bank-detail">
+          <strong>Oferta directa:</strong> 15% de descuento en cualquier plan de Alegra por 1 año para clientes Bancolombia.<br><br>
+          <strong>Alianza Wompi–Alegra:</strong> Digitalización de pagos para 40,000+ mipymes a través de Wompi (pasarela del Grupo Bancolombia).
+        </div>
+        <div class="bank-urls">
+          <a class="bank-url" href="https://www.alegra.com/colombia/alianza/bancolombia/" target="_blank">alegra.com/colombia/alianza/bancolombia ↗</a>
+          <a class="bank-url" href="https://factoring.grupobancolombia.com/wps/portal/negocios/beneficios/alegra" target="_blank">grupobancolombia.com — beneficio Alegra ↗</a>
+          <a class="bank-url" href="https://www.bancolombia.com/acerca-de/sala-prensa/noticias/productos-servicios/alianza-wompi-y-alegra-contabilidad-pyme" target="_blank">bancolombia.com — alianza Wompi+Alegra ↗</a>
+        </div>
+      </div>
+
+      <div class="bank-card">
+        <div class="bank-name">Bancamía + Alegra</div>
+        <div class="bank-erp">Software: Alegra</div>
+        <div class="bank-country">Colombia · Verificado ✓</div>
+        <div class="bank-detail">
+          Alianza activa entre Bancamía (banco especializado en microfinanzas) y Alegra para digitalizar la contabilidad de microempresarios y mipymes.
+        </div>
+        <div class="bank-urls">
+          <a class="bank-url" href="https://www.alegra.com/colombia/alianza/bancamia/" target="_blank">alegra.com/colombia/alianza/bancamia ↗</a>
+        </div>
+      </div>
+
+      <div class="bank-card">
+        <div class="bank-name">Banorte + CONTPAQi</div>
+        <div class="bank-erp">Software: CONTPAQi</div>
+        <div class="bank-country">México · Verificado ✓</div>
+        <div class="bank-detail">
+          Integración gratuita: movimientos bancarios Banorte → CONTPAQi; conciliación bancaria automatizada (de ~6 horas a minutos). Anunciada en Profit 2026 (evento 2025).<br><br>
+          <strong>Alcance declarado:</strong> 1.5 millones de empresas usan CONTPAQi; Banorte atiende ~500,000 PyMEs.
+        </div>
+        <div class="bank-urls">
+          <a class="bank-url" href="https://dplnews.com/banorte-contpaqi-alianza-digitalizar-pymes-mexico/" target="_blank">dplnews.com — alianza Banorte+CONTPAQi ↗</a>
+          <a class="bank-url" href="https://www.cronista.com/mexico/finanzas-economia/banorte-y-contpaqi-se-alian-para-que-las-pymes-integren-banca-y-contabilidad-en-tiempo-real/" target="_blank">cronista.com — banca+contabilidad en tiempo real ↗</a>
+        </div>
+      </div>
+
+      <div class="bank-card" style="border-top-color: var(--amber);">
+        <div class="bank-name">Konfio <span class="fintech-badge">FINTECH · NO BANCO COMERCIAL</span></div>
+        <div class="bank-erp">Datos: SAT / CFDI / Facturación electrónica</div>
+        <div class="bank-country">México · Verificado ✓</div>
+        <div class="bank-detail">
+          Modelo: scoring crediticio basado en datos del SAT (CFDI/facturas electrónicas). Requisito mínimo: 6 meses de facturación electrónica registrada.<br><br>
+          <strong>Relevancia:</strong> Caso más documentado de datos contables digitales → crédito PyME en LATAM. <strong>No es banco comercial</strong> — distinción importante para no sobreestimar la evidencia del canal bancario.
+        </div>
+        <div class="bank-urls">
+          <a class="bank-url" href="https://konfio.mx/credito/" target="_blank">konfio.mx/credito ↗</a>
+          <a class="bank-url" href="https://www.cronista.com/mexico/finanzas-economia/adios-al-rechazo-bancario-como-la-ia-y-los-datos-del-sat-abren-la-llave-del-credito-para-las-pymes/" target="_blank">cronista.com — IA+SAT+crédito PyME ↗</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────── -->
+  <!-- SECTION 5: NOT VERIFIED -->
+  <!-- ─────────────────────────────────────────────────────── -->
+  <section id="s5">
+    <div class="section-title">Sección 5</div>
+    <h2>No Verificados — Bancos Sin Evidencia Pública de Alianza ERP</h2>
+    <p class="lead">Los siguientes bancos fueron investigados por Hipatia (sitio web, sala de prensa, blogs del sector) sin encontrar evidencia pública de alianza con un ERP/software contable específico. "NO VERIFICADO" no implica que la alianza no exista — implica que no está documentada en fuentes públicas accesibles.</p>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Banco</th>
+            <th>País / Región</th>
+            <th>Estado</th>
+            <th>Nota Metodológica</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="nv-row">
+            <td>Ficohsa</td>
+            <td>Honduras</td>
+            <td><span class="badge badge-no">NO VERIFICADO</span></td>
+            <td>Búsqueda en sitio web y comunicados de prensa — sin resultados de alianza ERP</td>
+          </tr>
+          <tr class="nv-row">
+            <td>BAC Credomatic</td>
+            <td>Guatemala, Nicaragua, CR, Honduras, Panamá</td>
+            <td><span class="badge badge-no">NO VERIFICADO</span></td>
+            <td>Búsqueda en sitio web y comunicados de prensa — sin resultados de alianza ERP</td>
+          </tr>
+          <tr class="nv-row">
+            <td>BHD León</td>
+            <td>República Dominicana</td>
+            <td><span class="badge badge-no">NO VERIFICADO</span></td>
+            <td>Búsqueda en sitio web y comunicados de prensa — sin resultados de alianza ERP</td>
+          </tr>
+          <tr class="nv-row">
+            <td>Davivienda</td>
+            <td>Colombia, Costa Rica, Panamá</td>
+            <td><span class="badge badge-no">NO VERIFICADO</span></td>
+            <td>Solo oferta genérica de asistencia PyME — sin alianza ERP/software contable específica</td>
+          </tr>
+          <tr class="nv-row">
+            <td>BBVA México / Colombia</td>
+            <td>México, Colombia, Perú</td>
+            <td><span class="badge badge-no">NO VERIFICADO</span></td>
+            <td>Búsqueda en sitio web y comunicados de prensa — sin resultados de alianza ERP</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="methodology-note" style="margin-top: 16px;">
+      <strong>Alcance de búsqueda documentado:</strong> Sitios web oficiales de cada banco, sección de beneficios para PyMEs, sala de prensa/comunicados y referencias en blogs del sector financiero. No se realizó contacto directo (teléfono, email, RRSS). La exhaustividad de la búsqueda es una nota pendiente (Auditoría 4).
+    </div>
+
+    <h3>Otros datos pendientes de investigación</h3>
+    <div class="card">
+      <ul style="list-style: none; display: flex; flex-direction: column; gap: 10px;">
+        <li><span class="badge badge-no" style="margin-right:8px;">PENDIENTE</span> <span style="color:var(--text-mid)">Penetración de ERP en PyMEs por región (% que usa ERP vs Excel/manual) — corresponde a Bloque 1, no fue respondido por Hipatia</span></li>
+        <li><span class="badge badge-no" style="margin-right:8px;">PENDIENTE</span> <span style="color:var(--text-mid)">Dolor del usuario verificado con links (Reddit, G2, Capterra) — corresponde a Bloque 5, no ejecutado aún</span></li>
+        <li><span class="badge badge-no" style="margin-right:8px;">PENDIENTE</span> <span style="color:var(--text-mid)">Año de publicación de documentos CEPAL y CAF — no confirmado en research de Hipatia</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ─────────────────────────────────────────────────────── -->
+  <!-- SECTION 6: AUDIT NOTES -->
+  <!-- ─────────────────────────────────────────────────────── -->
+  <section id="s6">
+    <div class="section-title">Notas de Auditoría</div>
+    <h2>Estado de Auditoría — Bloques 1–4</h2>
+
+    <div class="audit-grid">
+      <!-- NOTA 1 — PENDIENTE -->
+      <div class="pending-box">
+        <span class="audit-status status-pending">Pendiente</span>
+        <div class="audit-title">Nota 1 — Conflicto no resuelto entre fuentes de mercado ERP PyME</div>
+        <div class="audit-body">
+          Data Horizzon Research y Dataintelo reportan cifras que difieren en un factor de ~4x (USD 35.5B vs. USD 8.6B para 2024–2025). Jekyll documentó ambas pero no resolvió cuál metodología es correcta ni si una incluye segmentos que la otra excluye.<br><br>
+          <strong style="color:#ff9999;">Decisión pendiente del equipo AteneaERP:</strong> (a) presentar como rango, (b) elegir una fuente con justificación metodológica, o (c) descartar una con argumento explícito.
+        </div>
+      </div>
+
+      <!-- NOTA 2 — RESUELTA -->
+      <div class="resolved-box">
+        <span class="audit-status status-resolved">Resuelta</span>
+        <div class="audit-title">Nota 2 — Campo "USD" en tabla de competidores parcialmente poblado</div>
+        <div class="audit-body">
+          Originalmente: 7 competidores sin precio en USD verificado.
+        </div>
+        <div class="audit-solution">
+          ✓ Solución aplicada (Bloque 4): Conversión desde moneda local usando tipos de cambio de referencia junio 2026 (COP 4,100/USD · MXN 17.5/USD · CLP 950/USD · BRL 5.5/USD). Valores convertidos marcados como "ESTIMADO". Valores en USD originales mantenidos como "VERIFICADO".
+        </div>
+      </div>
+
+      <!-- NOTA 3 — RESUELTA -->
+      <div class="resolved-box">
+        <span class="audit-status status-resolved">Resuelta</span>
+        <div class="audit-title">Nota 3 — Campos "Complejidad" y "FE Multi-País" marcados como NO INVESTIGADO</div>
+        <div class="audit-body">
+          Originalmente: columnas sin investigar en Bloques 1–3.
+        </div>
+        <div class="audit-solution">
+          ✓ Solución aplicada (Bloque 4 — Hipatia): Investigación focalizada realizada para los 11 productos. Complejidad categorizada como Baja/Media/Alta con justificación. FE Multi-País clasificada como Sí/No/Parcial con detalle de países. Datos incorporados en tabla de Sección 1.
+        </div>
+      </div>
+
+      <!-- NOTA 4 — PENDIENTE -->
+      <div class="pending-box">
+        <span class="audit-status status-pending">Pendiente</span>
+        <div class="audit-title">Nota 4 — Los NO VERIFICADOS no especifican exhaustividad de búsqueda</div>
+        <div class="audit-body">
+          Se añadió nota metodológica describiendo el alcance (sitio web, sala de prensa, blogs del sector). Sin embargo, no se documentó si hubo intento de contacto directo con los bancos ni el tiempo dedicado por entidad.<br><br>
+          <strong style="color:#ff9999;">Decisión pendiente:</strong> (a) declarar la nota metodológica como suficiente, o (b) realizar búsqueda más profunda (contacto telefónico/email, redes sociales, foros especializados) — especialmente relevante para Ficohsa y BAC Credomatic dado el foco de AteneaERP en Centroamérica.
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <!-- FOOTER -->
+  <div class="footer">
+    <div>
+      <strong style="color:var(--violet-lt);">AteneaERP</strong> — Estudio de Mercado 2026 · Confidencial<br>
+      Fuente primaria: Hipatia Research · Síntesis: Jekyll · Bloques 1–4 · Junio 2026
+    </div>
+    <div style="text-align:right;">
+      Generado por JAX (Hyde) para Fernando Ruiz<br>
+      Todos los datos sin fuente verificada están marcados explícitamente
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<!-- ── CHART.JS ─────────────────────────────────────────────── -->
+<script>
+(function() {
+  const violet     = '#8b5cf6';
+  const violetLt   = '#a78bfa';
+  const amber      = '#f59e0b';
+  const gridColor  = 'rgba(255,255,255,0.06)';
+  const textColor  = '#9898c0';
+
+  Chart.defaults.color = textColor;
+  Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
+  Chart.defaults.font.size = 12;
+
+  /* ─ PRICE CHART ─────────────────────────────────────────── */
+  const priceData = [
+    { label: 'Nubox',      value: 9.46,  verified: false },
+    { label: 'Xero',       value: 15,    verified: true  },
+    { label: 'Alegra',     value: 12.17, verified: false },
+    { label: 'Siigo',      value: 13.63, verified: false },
+    { label: 'Aspel',      value: 18.00, verified: false },
+    { label: 'ContaAzul',  value: 21.80, verified: false },
+    { label: 'Defontana',  value: 24.20, verified: false },
+    { label: 'QuickBooks', value: 30,    verified: true  },
+    { label: 'Zoho Books', value: 15,    verified: true  },
+    { label: 'Odoo',       value: 19.90, verified: true  },
+  ].sort((a, b) => a.value - b.value);
+
+  const ctxP = document.getElementById('chartPrices');
+  if (ctxP) {
+    new Chart(ctxP, {
+      type: 'bar',
+      data: {
+        labels: priceData.map(d => d.label),
+        datasets: [{
+          label: 'USD/mes',
+          data: priceData.map(d => d.value),
+          backgroundColor: priceData.map(d => d.verified
+            ? 'rgba(139,92,246,0.75)'
+            : 'rgba(156,163,175,0.45)'),
+          borderColor: priceData.map(d => d.verified
+            ? '#8b5cf6'
+            : '#6b7280'),
+          borderWidth: 1,
+          borderRadius: 6,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const d = priceData[ctx.dataIndex];
+                return ` $${d.value} USD${d.verified ? ' (verificado)' : ' (estimado)'}`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: gridColor },
+            ticks: { color: textColor }
+          },
+          y: {
+            grid: { color: gridColor },
+            ticks: {
+              color: textColor,
+              callback: v => '$' + v
+            },
+            beginAtZero: true
+          }
+        }
+      }
+    });
+  }
+
+  /* ─ MARKET SIZE CHART ────────────────────────────────────── */
+  const ctxM = document.getElementById('chartMarket');
+  if (ctxM) {
+    new Chart(ctxM, {
+      type: 'bar',
+      data: {
+        labels: [
+          'Data Horizzon Research\n(broader SMB ERP, 2024)',
+          'Mordor Intelligence\n(Cloud SMB ERP, 2025)',
+          'Dataintelo\n(SMB ERP, 2025) ⚠'
+        ],
+        datasets: [{
+          label: 'Mercado USD miles de millones',
+          data: [35.5, 41.49, 8.6],
+          backgroundColor: [
+            'rgba(139,92,246,0.65)',
+            'rgba(139,92,246,0.65)',
+            'rgba(245,158,11,0.55)'
+          ],
+          borderColor: [
+            '#8b5cf6',
+            '#8b5cf6',
+            '#f59e0b'
+          ],
+          borderWidth: 2,
+          borderRadius: 6,
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => ` USD ${ctx.raw}B`
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: { color: gridColor },
+            ticks: {
+              color: textColor,
+              callback: v => '$' + v + 'B'
+            },
+            beginAtZero: true,
+            max: 55
+          },
+          y: {
+            grid: { display: false },
+            ticks: { color: textColor }
+          }
+        }
+      }
+    });
+  }
+})();
+</script>
+
+</body>
+</html>
