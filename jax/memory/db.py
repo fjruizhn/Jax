@@ -1,0 +1,525 @@
+"""
+JAX 2.0 - Conector de Memoria Persistente
+===========================================
+Conecta JAX a su memoria en MariaDB (base jax_memory en hall9000).
+
+Filosofia de diseno (contrato firmado por Claude + DeepSeek + Hipatia):
+  - Driver: aiomysql (Python puro, sin compilar Cython).
+  - Tolerante a fallos: si la base cae, JAX SIGUE conversando. La memoria
+    es un "plus", nunca un punto de falla. Igual que el kill switch.
+  - Pool pequeno (1-5 conexiones), autocommit.
+  - Fire-and-forget al guardar: no agrega latencia a la respuesta de JAX.
+  - Alcance: start/save/end/health_check. La extraccion de hechos
+    (worker batch) es una pieza aparte, no esta.
+
+En memoria de Jairo Urbina.
+"""
+
+import asyncio
+import uuid
+import logging
+import json
+from typing import Optional
+
+import aiomysql
+import httpx
+
+logger = logging.getLogger("jax.memory")
+
+
+# ------------------------------------------------------------
+# Mapeo de faceta -> valor exacto del ENUM `role` en la tabla
+# messages. El esquema define:
+#   ENUM('user','jax_local','jekyll','hyde','hipatia')
+# Si guardamos un valor fuera de ese set, MariaDB RECHAZA el
+# insert en silencio (y como es fire-and-forget, no se nota).
+# Por eso normalizamos SIEMPRE antes de insertar.
+# ------------------------------------------------------------
+_ROLE_MAP = {
+    "user": "user",
+    "jax": "jax_local",
+    "jax_local": "jax_local",
+    "local": "jax_local",
+    "jekyll": "jekyll",
+    "hyde": "hyde",
+    "hipatia": "hipatia",
+}
+
+
+def _normalize_role(role: Optional[str]) -> str:
+    """Traduce cualquier nombre de faceta al valor valido del ENUM.
+    Si no reconoce el valor, cae a 'jax_local' (nunca rompe el insert)."""
+    if not role:
+        return "jax_local"
+    return _ROLE_MAP.get(role.strip().lower(), "jax_local")
+
+
+def db_error_handler(func):
+    """Decorador: cualquier error de DB se loguea y se traga.
+    La conversacion NUNCA se interrumpe por un fallo de memoria."""
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"DB error en {func.__name__}: {e}", exc_info=True)
+            return None
+    return wrapper
+
+
+class MemoryDB:
+    """Memoria persistente de JAX sobre MariaDB."""
+
+    def __init__(self):
+        self.pool: Optional[aiomysql.Pool] = None
+        self.config: dict = {}
+        # CORRECCION (vs diseno de Deep): guardamos referencia fuerte a las
+        # tareas fire-and-forget. Sin esto, Python puede recolectar la tarea
+        # con el garbage collector ANTES de que termine, perdiendo el mensaje
+        # en silencio. Es un gotcha conocido de asyncio.create_task().
+        self._pending_tasks: set[asyncio.Task] = set()
+
+    # --------------------------------------------------------
+    # Ciclo de vida del pool
+    # --------------------------------------------------------
+    async def connect(self, host: str, user: str, password: str,
+                      database: str, port: int = 3306) -> bool:
+        """Inicializa el pool. Devuelve True si conecto, False si fallo
+        (sin lanzar excepcion: JAX debe arrancar aunque la memoria falle)."""
+        self.config = {
+            "host": host,
+            "port": port,
+            "user": user,
+            "password": password,
+            "db": database,
+        }
+        try:
+            self.pool = await aiomysql.create_pool(
+                minsize=1,
+                maxsize=5,
+                autocommit=True,
+                charset="utf8mb4",
+                **self.config,
+            )
+            logger.info(f"MemoryDB conectada a {database}@{host} (pool 1-5)")
+            return True
+        except Exception as e:
+            logger.error(f"MemoryDB no pudo conectar: {e}")
+            self.pool = None
+            return False
+
+    async def close(self):
+        """Cierra el pool tras esperar las tareas pendientes de guardado."""
+        # Esperamos a que terminen los guardados en vuelo (con timeout corto)
+        if self._pending_tasks:
+            try:
+                await asyncio.wait(self._pending_tasks, timeout=3.0)
+            except Exception as e:
+                logger.error(f"Error esperando tareas pendientes: {e}")
+        if self.pool:
+            self.pool.close()
+            await self.pool.wait_closed()
+            logger.info("MemoryDB pool cerrado")
+            self.pool = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self.pool is not None
+
+    # --------------------------------------------------------
+    # Health check (incluye verificacion de VECTOR)
+    # --------------------------------------------------------
+    @db_error_handler
+    async def health_check(self) -> Optional[bool]:
+        """Verifica que la base responde y que VECTOR funciona."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT VEC_ToText(VEC_FromText('[1,2,3]'))")
+                row = await cur.fetchone()
+                return row is not None
+
+    # --------------------------------------------------------
+    # Embeddings (vectorizacion via Ollama local)
+    # --------------------------------------------------------
+    async def get_embedding(self, text: str) -> Optional[list]:
+        """Vectoriza texto con nomic-embed-text via Ollama local.
+        Devuelve lista de 768 floats, o None si falla (JAX sigue sin embeddings)."""
+        try:
+            # nomic-embed-text tiene limite de contexto; truncamos para evitar 500.
+            texto = text[:4000] if len(text) > 4000 else text
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(
+                    "http://localhost:11434/api/embeddings",
+                    json={"model": "nomic-embed-text", "prompt": texto},
+                )
+                resp.raise_for_status()
+                embedding = resp.json().get("embedding")
+                if isinstance(embedding, list) and len(embedding) == 768:
+                    return embedding
+                logger.warning(
+                    f"Embedding con dimension incorrecta: "
+                    f"{len(embedding) if embedding else None}"
+                )
+                return None
+        except Exception as e:
+            logger.error(f"get_embedding fallo: {e}")
+            return None
+
+    # --------------------------------------------------------
+    # Conversaciones
+    # --------------------------------------------------------
+    @db_error_handler
+    async def start_conversation(self, source: str = "terminal") -> Optional[str]:
+        """Crea una conversacion nueva. Devuelve su UUID (o None si fallo)."""
+        if not self.pool:
+            return None
+        conv_uuid = str(uuid.uuid4())
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO conversations (conversation_uuid, source, started_at) "
+                    "VALUES (%s, %s, NOW())",
+                    (conv_uuid, source),
+                )
+        logger.info(f"Conversacion iniciada: {conv_uuid[:8]} ({source})")
+        return conv_uuid
+
+    @db_error_handler
+    async def end_conversation(self, conversation_uuid: Optional[str]) -> Optional[bool]:
+        """Marca la conversacion como terminada y lista para el worker de memoria."""
+        if not self.pool or not conversation_uuid:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE conversations "
+                    "SET ended_at = NOW(), memory_processed = FALSE "
+                    "WHERE conversation_uuid = %s",
+                    (conversation_uuid,),
+                )
+        logger.info(f"Conversacion cerrada: {conversation_uuid[:8]}")
+        return True
+
+    # --------------------------------------------------------
+    # Mensajes (fire-and-forget)
+    # --------------------------------------------------------
+    def save_message(self, conversation_uuid: Optional[str], role: str, content: str,
+                     facet: Optional[str] = None, model: Optional[str] = None,
+                     latency_ms: Optional[int] = None) -> None:
+        """Lanza el guardado en background SIN esperar (latencia 0 para JAX).
+
+        Nota: NO es async a proposito — se llama sin await desde el REPL.
+        La tarea se registra en _pending_tasks para que el GC no la mate."""
+        if not self.pool or not conversation_uuid:
+            return
+        task = asyncio.create_task(
+            self._save_message_impl(conversation_uuid, role, content,
+                                    facet, model, latency_ms)
+        )
+        # Referencia fuerte + auto-limpieza al terminar (fix tasks huerfanas)
+        self._pending_tasks.add(task)
+        task.add_done_callback(self._pending_tasks.discard)
+
+    @db_error_handler
+    async def _save_message_impl(self, conversation_uuid, role, content,
+                                 facet, model, latency_ms):
+        """Guardado real, corre en background. Errores se tragan (decorador)."""
+        role_enum = _normalize_role(role)
+        facet_enum = _normalize_role(facet) if facet else None
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                # 1. conversation_id desde el uuid
+                await cur.execute(
+                    "SELECT id FROM conversations WHERE conversation_uuid = %s",
+                    (conversation_uuid,),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    logger.error(f"Conversacion no encontrada: {conversation_uuid[:8]}")
+                    return
+                conv_id = row[0]
+
+                # 2. turn_number = ultimo + 1
+                await cur.execute(
+                    "SELECT COALESCE(MAX(turn_number), 0) + 1 FROM messages "
+                    "WHERE conversation_id = %s",
+                    (conv_id,),
+                )
+                turn = (await cur.fetchone())[0]
+
+                # 3. insertar el mensaje (role ya normalizado al ENUM)
+                await cur.execute(
+                    "INSERT INTO messages "
+                    "(conversation_id, turn_number, role, content, facet_used, model, latency_ms) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (conv_id, turn, role_enum, content, facet_enum, model, latency_ms),
+                )
+
+                # 4. actualizar contador de turnos
+                await cur.execute(
+                    "UPDATE conversations SET total_turns = total_turns + 1 WHERE id = %s",
+                    (conv_id,),
+                )
+
+        # 5. vectorizar fuera del bloque — no retiene conexion mientras Ollama trabaja
+        embedding = await self.get_embedding(content)
+        if embedding and self.pool:
+            vec_str = json.dumps(embedding)
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE messages SET embedding = VEC_FromText(%s) "
+                        "WHERE conversation_id = %s AND turn_number = %s",
+                        (vec_str, conv_id, turn),
+                    )
+
+        logger.debug(f"Mensaje guardado: conv={conversation_uuid[:8]} turn={turn} role={role_enum}")
+
+    # --------------------------------------------------------
+    # Metodos para el WORKER de extraccion (batch, post-conversacion)
+    # --------------------------------------------------------
+    @db_error_handler
+    async def get_unprocessed_conversations(self, limit: int = 10) -> Optional[list]:
+        """Devuelve conversaciones cerradas que el worker aun no proceso.
+        Retorna lista de dicts {id, conversation_uuid} o None si fallo."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, conversation_uuid FROM conversations "
+                    "WHERE ended_at IS NOT NULL AND memory_processed = FALSE "
+                    "ORDER BY ended_at ASC LIMIT %s",
+                    (limit,),
+                )
+                rows = await cur.fetchall()
+                return [{"id": r[0], "uuid": r[1]} for r in rows]
+
+    @db_error_handler
+    async def get_conversation_messages(self, conv_id: int) -> Optional[list]:
+        """Trae los mensajes de una conversacion, en orden.
+        Retorna lista de dicts {role, content} o None si fallo."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT role, content FROM messages "
+                    "WHERE conversation_id = %s ORDER BY turn_number ASC",
+                    (conv_id,),
+                )
+                rows = await cur.fetchall()
+                return [{"role": r[0], "content": r[1]} for r in rows]
+
+    @db_error_handler
+    async def get_last_session_messages(self, limit: int = 20) -> Optional[list]:
+        """Trae los ultimos N mensajes de la conversacion mas reciente terminada.
+        Devuelve lista de dicts {role, content} en orden cronologico, o None."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id FROM conversations WHERE ended_at IS NOT NULL "
+                    "ORDER BY ended_at DESC LIMIT 1"
+                )
+                row = await cur.fetchone()
+                if not row:
+                    return []
+                last_conv_id = row[0]
+                await cur.execute(
+                    "SELECT role, content FROM messages "
+                    "WHERE conversation_id = %s ORDER BY turn_number DESC LIMIT %s",
+                    (last_conv_id, limit)
+                )
+                rows = await cur.fetchall()
+                return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
+    @db_error_handler
+    async def save_fact(self, fact_text: str, fact_type: str,
+                        source_message_id: Optional[int] = None,
+                        source_facet: Optional[str] = None,
+                        confidence: float = 0.7) -> Optional[bool]:
+        """Guarda un hecho extraido. confidence 0.7 + is_verified=FALSE por
+        defecto: nada entra como verdad absoluta sin que Fernando lo revise."""
+        if not self.pool:
+            return None
+        # Validar fact_type contra el ENUM del esquema
+        valid_types = ("user", "technical", "social", "preference", "project", "financial")
+        ftype = fact_type if fact_type in valid_types else "user"
+        fact_id: Optional[int] = None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO facts "
+                    "(fact_uuid, fact_text, fact_type, confidence, source_message_id, "
+                    "source_facet, is_verified) "
+                    "VALUES (UUID(), %s, %s, %s, %s, %s, FALSE)",
+                    (fact_text, ftype, confidence, source_message_id, source_facet),
+                )
+                await cur.execute("SELECT LAST_INSERT_ID()")
+                fact_id = (await cur.fetchone())[0]
+        # Vectorizar fuera del bloque — no retiene conexion mientras Ollama trabaja
+        if fact_id and self.pool:
+            embedding = await self.get_embedding(fact_text)
+            if embedding:
+                vec_str = json.dumps(embedding)
+                async with self.pool.acquire() as conn:
+                    async with conn.cursor() as cur:
+                        await cur.execute(
+                            "UPDATE facts SET embedding = VEC_FromText(%s) WHERE id = %s",
+                            (vec_str, fact_id),
+                        )
+        return True
+
+    @db_error_handler
+    async def save_decision(self, title: str, chosen: str, reasoning: str,
+                            context: Optional[str] = None) -> Optional[bool]:
+        """Guarda una decision extraida."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO decisions "
+                    "(decision_uuid, title, context, chosen_option, reasoning) "
+                    "VALUES (UUID(), %s, %s, %s, %s)",
+                    (title, context, chosen, reasoning),
+                )
+        return True
+
+    @db_error_handler
+    async def save_action_item(self, description: str,
+                               due_date: Optional[str] = None,
+                               source_conversation_id: Optional[int] = None) -> Optional[bool]:
+        """Guarda un pendiente extraido."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO action_items "
+                    "(action_uuid, description, due_date, source_conversation_id, status) "
+                    "VALUES (UUID(), %s, %s, %s, 'pending')",
+                    (description, due_date, source_conversation_id),
+                )
+        return True
+
+    @db_error_handler
+    async def mark_processed(self, conv_id: int) -> Optional[bool]:
+        """Marca la conversacion como ya procesada por el worker."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE conversations SET memory_processed = TRUE, "
+                    "memory_processed_at = NOW() WHERE id = %s",
+                    (conv_id,),
+                )
+        return True
+
+    # --------------------------------------------------------
+    # Busqueda semantica
+    # --------------------------------------------------------
+    async def search_similar_messages(self, query: str, limit: int = 5) -> list:
+        """Busca mensajes similares a query usando distancia vectorial.
+        Devuelve lista de dicts {content, role, created_at, started_at, distancia}.
+        Si Ollama falla, la base falla, o no hay embeddings: devuelve [] (nunca None)."""
+        if not self.pool:
+            return []
+
+        embedding = await self.get_embedding(query)
+        if embedding is None:
+            return []
+
+        vec_str = json.dumps(embedding)
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT m.content, m.role, m.created_at, c.started_at, "
+                        "VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) AS distancia "
+                        "FROM messages m "
+                        "JOIN conversations c ON m.conversation_id = c.id "
+                        "ORDER BY VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) ASC "
+                        "LIMIT %s",
+                        (vec_str, vec_str, limit),
+                    )
+                    rows = await cur.fetchall()
+                    return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"search_similar_messages fallo: {e}")
+            return []
+
+    # --------------------------------------------------------
+    # Gestion de facts (comando /fact: control de calidad)
+    # --------------------------------------------------------
+    @db_error_handler
+    async def get_facts(self, only_unverified: bool = True,
+                        fact_type: Optional[str] = None,
+                        limit: int = 20) -> Optional[list]:
+        """Lista facts. Por defecto solo los no verificados (a revisar).
+        Devuelve lista de dicts o None si fallo."""
+        if not self.pool:
+            return None
+        query = ("SELECT id, fact_text, fact_type, confidence, is_verified, "
+                 "source_facet, created_at FROM facts")
+        conditions = []
+        params: list = []
+        if only_unverified:
+            conditions.append("is_verified = FALSE")
+        if fact_type:
+            conditions.append("fact_type = %s")
+            params.append(fact_type)
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, tuple(params))
+                return await cur.fetchall()
+
+    @db_error_handler
+    async def verify_fact(self, fact_id: int) -> Optional[bool]:
+        """Marca un fact como verificado. confidence NO se toca (es ortogonal:
+        confidence = certeza del extractor, is_verified = validacion de Fernando)."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                affected = await cur.execute(
+                    "UPDATE facts SET is_verified = TRUE, verified_at = NOW() "
+                    "WHERE id = %s",
+                    (fact_id,),
+                )
+                return affected > 0
+
+    @db_error_handler
+    async def delete_fact(self, fact_id: int) -> Optional[bool]:
+        """Borra un fact. Irreversible — el caller debe confirmar antes."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                affected = await cur.execute(
+                    "DELETE FROM facts WHERE id = %s", (fact_id,)
+                )
+                return affected > 0
+
+    @db_error_handler
+    async def get_fact_text(self, fact_id: int) -> Optional[str]:
+        """Devuelve el texto de un fact (para mostrarlo al confirmar borrado)."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT fact_text FROM facts WHERE id = %s", (fact_id,)
+                )
+                row = await cur.fetchone()
+                return row[0] if row else None

@@ -1,0 +1,35 @@
+# --- Entornos virtuales (no se versionan; se reconstruyen) ---
+.venv/
+*/.venv/
+
+# --- Cache de Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- Bases de datos y binarios de runtime ---
+*.db
+ruvector.db
+
+# --- Estado y logs de runtime ---
+.swarm/
+logs/
+*/logs/
+*.log
+*.out
+
+# --- Backups locales (red de seguridad, no son fuente) ---
+*.backup-*
+*.bak
+*.bak-*
+*.bak.*
+*.FERNANDO-*
+
+# --- Misc ---
+que
+
+# Config local de Claude Code (por máquina)
+.claude/settings.local.json
+
+keyd/

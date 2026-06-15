@@ -1,0 +1,126 @@
+# ============================================================
+#  LAS MANOS — Configuración de capacidades y políticas
+#  Sistema nervioso inhibitorio de JAX
+#  
+#  Diseño: Jekyll (elegancia) + Thot (contención)
+#  Principio: las facetas declaran intención,
+#             LAS MANOS ejecuta capacidades verificadas.
+#
+#  En memoria de Jairo Urbina.
+# ============================================================
+
+[server]
+host = "127.0.0.1"
+port = 7777
+require_mtls = false          # fase 1: token simple. mTLS en fase 2.
+audit_log = "/home/fruiz/jax/las_manos/logs/audit.jsonl"
+kill_switch_path = "/etc/jax/PAUSE"
+
+# ------------------------------------------------------------
+#  AMBIENTES — separación estricta staging vs producción
+# ------------------------------------------------------------
+[environments]
+staging  = ["172.16.20.11"]   # atemai-net
+prod     = ["172.16.20.10"]   # server-rich-hn
+bridge   = ["172.16.20.20"]   # mac mini (solo lectura durante migración)
+local    = ["127.0.0.1", "172.16.20.5"]  # hall9000
+
+# ------------------------------------------------------------
+#  PERMISOS POR FACETA
+#  allowed_envs: en qué ambientes puede operar
+#  allowed_ops:  qué operaciones puede ejecutar
+#  can_write_prod: requiere human gate adicional
+# ------------------------------------------------------------
+[facets.hipatia]
+allowed_envs   = ["staging", "bridge", "local"]
+allowed_ops    = ["ssh_exec_readonly", "read_file", "list_dir", "http_get"]
+can_write_prod = false
+description    = "Investigadora — solo lectura, nunca escribe"
+
+[facets.jekyll]
+allowed_envs   = ["staging", "local"]
+allowed_ops    = ["ssh_exec_readonly", "read_file", "list_dir", "write_file", "validate_json", "validate_yaml"]
+can_write_prod = false
+description    = "Constructor — escribe en staging, nunca en prod"
+
+[facets.thot]
+allowed_envs   = ["staging", "local"]
+allowed_ops    = ["ssh_exec_readonly", "read_file", "list_dir", "audit_log_read"]
+can_write_prod = false
+description    = "Auditor — solo lectura y consulta de logs"
+
+[facets.hyde]
+allowed_envs   = ["staging", "prod", "bridge", "local"]
+allowed_ops    = ["ssh_exec_readonly", "ssh_exec", "read_file", "write_file", "list_dir", "rsync", "http_get", "kill_process"]
+can_write_prod = true         # requiere human_gate=true en el request
+description    = "Ejecutor — acceso completo con human gate en prod"
+
+# ------------------------------------------------------------
+#  OPERACIONES — definición de cada capacidad
+# ------------------------------------------------------------
+[ops.ssh_exec_readonly]
+description  = "Ejecutar comandos de solo lectura en servidor remoto"
+allow_cmds   = ["ls", "cat", "grep", "find", "df", "du", "ps", "systemctl status",
+                 "sudo systemctl status", "curl", "ping", "stat", "head", "tail",
+                 "wc", "echo", "hostname", "id", "whoami", "sqlite3", "mysql -e SHOW",
+                 "mariadb -e SHOW", "sudo sqlite3", "sudo mariadb"]
+deny_patterns = ["rm", "mv", "cp", "chmod", "chown", "dd", "mkfs", "fdisk",
+                  "DROP", "DELETE", "TRUNCATE", "shutdown", "reboot", "kill"]
+requires_dryrun = false
+
+[ops.ssh_exec]
+description  = "Ejecutar comandos arbitrarios en servidor remoto"
+allow_cmds   = ["*"]          # allowlist abierta — Hyde es el ejecutor
+deny_patterns = []            # Thot ya validó el plan antes de llegar aquí
+requires_dryrun = true        # siempre dry-run primero
+requires_human_gate = true    # en prod, Fernando aprueba
+
+[ops.read_file]
+description  = "Leer contenido de archivo en servidor remoto"
+requires_dryrun = false
+
+[ops.write_file]
+description  = "Escribir archivo en servidor remoto"
+requires_dryrun = true
+requires_snapshot = true      # snapshot antes de escribir
+
+[ops.list_dir]
+description  = "Listar directorio en servidor remoto"
+requires_dryrun = false
+
+[ops.rsync]
+description  = "Transferir archivos entre servidores"
+requires_dryrun = true
+requires_snapshot = true
+requires_human_gate = true    # siempre — rsync puede destruir datos
+
+[ops.http_get]
+description  = "Realizar HTTP GET a URL externa"
+requires_dryrun = false
+
+[ops.kill_process]
+description  = "Terminar proceso en servidor remoto"
+requires_dryrun = true
+requires_human_gate = true
+
+[ops.audit_log_read]
+description  = "Leer el log de auditoría de LAS MANOS"
+requires_dryrun = false
+
+[ops.validate_json]
+description  = "Validar sintaxis JSON"
+requires_dryrun = false
+
+[ops.validate_yaml]
+description  = "Validar sintaxis YAML"
+requires_dryrun = false
+
+# ------------------------------------------------------------
+#  HUMAN GATE — tokens de aprobación
+#  Fernando genera un token de un solo uso para aprobar
+#  operaciones que requieren human_gate=true
+# ------------------------------------------------------------
+[human_gate]
+token_ttl_seconds = 300       # 5 minutos para usar el token
+token_length      = 32
+gate_log          = "/home/fruiz/jax/las_manos/logs/gate.jsonl"
