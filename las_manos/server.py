@@ -35,7 +35,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from audit import AuditLog
+from audit import AuditLog, environment_from_target
 from policy import PolicyEngine
 from planner import Planner
 from envelope import IntentEnvelope, validate as validate_envelope
@@ -244,7 +244,13 @@ async def preview_plan(req: IntentEnvelope) -> dict:
     También exige Envelope válido (capa semántica) antes de planear."""
     env_check = validate_envelope(req)
     if not env_check.ok:
-        audit.log_envelope_rejected(request_id=None, reason=env_check.reason)
+        audit.log_envelope_rejected(
+            request_id=None,
+            reason=env_check.reason,
+            environment=environment_from_target(req.target_environment),
+            traffic_class=req.traffic_class,
+            test_run_id=req.test_run_id,
+        )
         raise HTTPException(status_code=422, detail=f"ENVELOPE_REJECTED: {env_check.reason}")
     plan = planner.plan(
         req.facet_id, req.requested_capability, req.target_host, req.params
@@ -258,9 +264,18 @@ async def execute(req: IntentEnvelope) -> dict:
 
     job_id = req.trace_id  # el trace_id del sobre es el id de la intención
 
+    # Procedencia forense (Thot Audit Watch): environment se INFIERE del sobre;
+    # traffic_class y test_run_id los DECLARA la faceta. Una sola fuente, splat
+    # en cada evento de esta intención.
+    fx = {
+        "environment":   environment_from_target(req.target_environment),
+        "traffic_class": req.traffic_class,
+        "test_run_id":   req.test_run_id,
+    }
+
     # ---- 1) KILL SWITCH — antes de absolutamente todo ----
     if _kill_switch_active():
-        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}")
+        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}", **fx)
         raise HTTPException(
             status_code=423,  # Locked
             detail="KILL SWITCH ACTIVO (/etc/jax/PAUSE) — LAS MANOS están detenidas",
@@ -273,6 +288,7 @@ async def execute(req: IntentEnvelope) -> dict:
         target_host=req.target_host,
         payload=req.params,
         job_id=job_id,
+        **fx,
     )
 
     # ---- 2.5) INTENT ENVELOPE — capa semántica (9 condiciones de fallo cerrado).
@@ -281,7 +297,7 @@ async def execute(req: IntentEnvelope) -> dict:
     #          Va ANTES de policy: rechaza toda llamada incompleta primero. ----
     env_check = validate_envelope(req)
     if not env_check.ok:
-        audit.log_envelope_rejected(request_id=request_id, reason=env_check.reason)
+        audit.log_envelope_rejected(request_id=request_id, reason=env_check.reason, **fx)
         raise HTTPException(
             status_code=422, detail=f"ENVELOPE_REJECTED: {env_check.reason}"
         )
@@ -291,6 +307,7 @@ async def execute(req: IntentEnvelope) -> dict:
         capability=req.requested_capability,
         target_environment=req.target_environment,
         risk_level=req.risk_level,
+        **fx,
     )
 
     # ---- 3) Policy check ----
@@ -308,6 +325,7 @@ async def execute(req: IntentEnvelope) -> dict:
         target_host=req.target_host,
         allowed=result.allowed,
         reason=result.reason,
+        **fx,
     )
     if not result.allowed:
         raise HTTPException(status_code=403, detail=result.reason)
@@ -319,6 +337,7 @@ async def execute(req: IntentEnvelope) -> dict:
             request_id=request_id,
             approved=ok,
             token_used=req.approval_token,
+            **fx,
         )
         if not ok:
             raise HTTPException(status_code=401, detail=f"Human gate: {reason}")
@@ -328,17 +347,17 @@ async def execute(req: IntentEnvelope) -> dict:
     if result.requires_dryrun:
         # Kill switch de nuevo: el estado pudo cambiar mientras esperábamos.
         if _kill_switch_active():
-            audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}")
+            audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}", **fx)
             raise HTTPException(status_code=423, detail="KILL SWITCH ACTIVO")
         dryrun_result = await dispatch(
             req.requested_capability, req.target_host, req.params, dry_run=True,
         )
-        audit.log_dryrun(request_id=request_id, plan=dryrun_result)
+        audit.log_dryrun(request_id=request_id, plan=dryrun_result, **fx)
 
     # ---- 6) Ejecución real ----
     # Último chequeo de kill switch: el freno está vivo hasta el último instante.
     if _kill_switch_active():
-        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}")
+        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}", **fx)
         raise HTTPException(status_code=423, detail="KILL SWITCH ACTIVO")
 
     try:
@@ -351,19 +370,21 @@ async def execute(req: IntentEnvelope) -> dict:
             request_id=request_id,
             success=False,
             error=f"Parámetro faltante: {e}",
+            **fx,
         )
         raise HTTPException(status_code=400, detail=f"Parámetro faltante: {e}")
     except Exception as e:  # noqa: BLE001 — todo error queda en el log
-        audit.log_execution(request_id=request_id, success=False, error=str(e))
+        audit.log_execution(request_id=request_id, success=False, error=str(e), **fx)
         raise HTTPException(status_code=500, detail=str(e))
 
     # ---- 6b) ¿El watcher abortó en vuelo? Evento crítico. ----
     if exec_result.get("kill_switch"):
-        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability} [en-vuelo]")
+        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability} [en-vuelo]", **fx)
         audit.log_execution(
             request_id=request_id,
             success=False,
             error="Abortado por kill switch durante la ejecución",
+            **fx,
         )
         raise HTTPException(
             status_code=423,
@@ -378,6 +399,7 @@ async def execute(req: IntentEnvelope) -> dict:
         stderr=exec_result.get("stderr", ""),
         exit_code=exec_result.get("exit_code"),
         error=exec_result.get("error"),
+        **fx,
     )
 
     return {
