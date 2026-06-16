@@ -58,6 +58,39 @@ class AuditLog:
         })
         return request_id
 
+    def log_envelope(
+        self,
+        request_id: str,
+        facet: str,
+        capability: str,
+        target_environment: str,
+        risk_level: str,
+    ) -> None:
+        """Registra un Intent Envelope ACEPTADO (pasó las dos capas)."""
+        self._write({
+            "event":              "ENVELOPE_ACCEPTED",
+            "request_id":         request_id,
+            "facet":              facet,
+            "capability":         capability,
+            "target_environment": target_environment,
+            "risk_level":         risk_level,
+        })
+
+    def log_envelope_rejected(
+        self,
+        request_id: str | None,
+        reason: str,
+        layer: str = "semantica",
+    ) -> None:
+        """Registra un Intent Envelope RECHAZADO — LAS MANOS se negó.
+        layer: 'estructural' (Pydantic) o 'semantica' (envelope.validate)."""
+        self._write({
+            "event":      "ENVELOPE_REJECTED",
+            "request_id": request_id,
+            "layer":      layer,
+            "reason":     reason,
+        })
+
     def log_policy_check(
         self,
         request_id: str,
