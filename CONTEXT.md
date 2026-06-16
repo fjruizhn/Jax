@@ -5,7 +5,7 @@
 
 ## 1. Qué es JAX
 
-JAX (se pronuncia **"Yax"**, J española) es el asistente personal y futura plataforma de orquestación de Fernando Ruiz. Un solo ser con **4 facetas** (no 4 asistentes). Núcleo orquestador propio en **Python puro + asyncio**, sin frameworks. Honra la memoria de **Jairo Urbina**, amigo, socio y pionero del software libre en Honduras — su espíritu va en el system prompt de cada faceta. Easter egg: `IDE1990`.
+JAX (se pronuncia **"Yax"**, J española) es el asistente personal y futura plataforma de orquestación de Fernando Ruiz. Un solo ser con **5 facetas operativas** (jax_local, jekyll, hyde, hipatia, thot — no 5 asistentes). Núcleo orquestador propio en **Python puro + asyncio**, sin frameworks. Honra la memoria de **Jairo Urbina**, amigo, socio y pionero del software libre en Honduras — su espíritu va en el system prompt de cada faceta. Easter egg: `IDE1990`.
 
 Visión: JAX es base y laboratorio de un producto comercial globalmente escalable (multi-AI, multi-usuario, pricing por niveles) y fundación futura para AteneaERP y HAMMURABI.
 
@@ -18,7 +18,7 @@ Visión: JAX es base y laboratorio de un producto comercial globalmente escalabl
 - Audio: parlantes en `plughw:2,0` (card 2, ALC897 Analog, conector verde).
 - Arranque: `cd ~/jax && set -a; source /etc/jax/.env; set +a && PYTHONPATH=. .venv/bin/python -m jax.core.main`
 
-## 3. Las 4 facetas (estado real)
+## 3. Las 5 facetas (estado real)
 
 | Faceta | Icono | Músculo | Modelo | Rol | Voz |
 |---|---|---|---|---|---|
@@ -26,6 +26,7 @@ Visión: JAX es base y laboratorio de un producto comercial globalmente escalabl
 | Hyde | 🔧 | SubprocessMuscle (`claude -p`) | sonnet | Técnico: código, infra | em_santa @1.0 |
 | Jekyll | 🧠 | HttpMuscle (DeepSeek) | deepseek-chat | Humanista erudito, español neutro formal | em_santa @0.85 |
 | Hipatia | 🔍 | HttpMuscle (Gemini + grounding) | gemini | Investigación con fuentes web | ef_dora @1.0 |
+| Thot | ⚖️ | HttpMuscle (OpenAI) | gpt-5.5 | Crítico: abogado del diablo, guardián del largo plazo | em_alex @0.9 |
 
 Notas: llama3.2:3b sigue en `models_allowed` (tareas mecánicas rápidas). qwen2.5:14b permitido, no medido. ⚠️ Gemini en plan gratuito: **rate limits frecuentes** (Hipatia se quedó sin tokens 2 veces el 3-4 jun) — pendiente subir tier o espaciar uso. ⚠️ Jekyll **no tiene búsqueda web**: jamás usarlo como investigador (alucina con confianza; lección aprendida — recomendó config TTS inexistente).
 
@@ -66,13 +67,15 @@ Notas: llama3.2:3b sigue en `models_allowed` (tareas mecánicas rápidas). qwen2
 
 ## 8. Pendientes (en orden de intención)
 
+0. **▶ PRÓXIMO HITO — secuenciado por la Mesa, NO diferido (NO-GO operacional de Thot).** Construir el **INTENT ENVELOPE en LAS MANOS**: 16 campos, **rechaza intenciones incompletas**. Nada se conecta a LAS MANOS hasta que el Envelope exista. Después conectar facetas EN ORDEN: **Thot (auditoría) → Hipatia (lectura) → Jekyll (staging) → Hyde (ejecución)**. Principio: *primero quien mira, después quien sabe, después quien construye, al final quien ejecuta.* ⚠️ Procedencia honesta: es decisión VERBAL de la Mesa — aún NO escrita en `six-impossible-things.html` ni en `missions/` (verificado por grep 15-jun); registrada aquí como pendiente vinculante.
+
 1. **Voz Fase 2: streaming por oraciones** (prompt a Deep listo; cruzar, corregir, construir).
 2b. **EL OIDO**: COMPLETADO jun-4. Pendiente menor: push-to-talk/wake word — va con la TUI propia (LA CARA terminal) o webapp.
 2c. **LA CARA**: webapp ojo de HAL 9000 (disenada 31-may: ojo pulsa al procesar, ondas al hablar, color por faceta; reutiliza Black Diamond Chat + Reverb + React de AteneaERP, ~60% ya existe). Incluye mostrar imagenes y paneles.
 2d. **LAS MANOS**: ✅ COMPLETADO (14-jun, ver §9). Sistema de capacidades/ejecución con permisos por faceta + kill switch en vuelo probado. Pendiente menor: extender a más operaciones (http_get, validate_*) y exponerlo a las facetas vía tool calling.
 2e. Lanzador `jax` instalado (~/.local/bin/jax) — hecho jun-4.
 2. **Chat multiagente / multi-usuario** — diseñar con Deep ANTES de codear. Atado a la decisión de hardware: el cerebro local no escala en una GPU (GPU_SEMAPHORE=1); definir si el producto multi-user usa nube o fierro propio.
-3. **Decisión de hardware** (¿devolver RX 9060 XT por NVIDIA 24-32GB?) — sesión propia, con cabeza fresca, NO de madrugada. La GPU solo importa para Ollama local + voz local; 3 de 4 facetas son nube.
+3. **Decisión de hardware** (¿devolver RX 9060 XT por NVIDIA 24-32GB?) — sesión propia, con cabeza fresca, NO de madrugada. La GPU solo importa para Ollama local + voz local; 4 de 5 facetas son nube/externas (solo jax_local es local).
 4. Hipatia / Gemini: resolver rate limits (tier o espaciado).
 5. Easter egg IDE1990 con voz (ahora que Kokoro existe).
 6. get_datetime como primer superpoder de JAX local (tool calling Ollama).
@@ -104,5 +107,17 @@ Notas: llama3.2:3b sigue en `models_allowed` (tareas mecánicas rápidas). qwen2
   **Caveat honesto:** aborta lo que corre, no revierte lo ya escrito a disco. Para eso el snapshot `.bak`. Defensa en profundidad, no magia. ⚠️ Nota de puerto: LAS MANOS usa SSH **58291** para .11/.10 (probado y funcional); hall9000 (.5) usa 58292 (§2). Reliquia del bautismo: `/tmp/las_manos_bautismo.txt` en .11.
 
 - **2026-06-15: FIX GROUNDING de Hipatia — el bug del fallo silencioso, muerto.** Síntesis de tres voces (Thot/Jekyll/Claude). El bug: `google_search` de Gemini es capacidad, no obligación; cuando "cree saber" inventa con confianza sin avisar, y el código entregaba ese invento como válido. **8 decisiones en un solo cambio íntegro:** (1) `grounding_policy` por tarea (off/auto/required_web/local_context_only) reemplaza `grounding: bool`; (2) Hipatia default **required_web**; (3-4) el SISTEMA pone la etiqueta, SIEMPRE, nunca el modelo; (5) valida `chunks` Y `supports`; (6) retry estricto único antes de fallar cerrado; (7) **origen de autoridad para TODAS las facetas** (jekyll 🧠 / thot 📜 / hyde 🔧 / hipatia dinámico / jax_local 🏠); (8) juramento de Hipatia en su system_prompt. Archivos: `muscles/base.py` (grounding_policy + retry + `_append_authority` + `verificacion_label`), `muscles/subprocess_muscle.py` + `muscles/ollama_muscle.py` (param `authority_origin`), `core/main.py` (lee `grounding:` del .md), `config.toml`. **`invoke(decorate=False)`** para usos internos (clasificador del router + extractor de memoria) — la etiqueta no contamina parseos. **Probado en fuego:** prueba determinista (Hipatia intenta inventar noticias → MuscleInvocationError ✗) + 3 casos reales contra Gemini en vivo (requiere-web → 🔍 5 fuentes; noticias de la semana → 🔍 2 fuentes; local_context_only → 📜). Principio grabado (§7 y Six Impossible Things VIII): "un dato inventado disfrazado de verificado es peor que un 'no sé' honesto".
+
+- **2026-06-15 (CIERRE — La Mesa Redonda ratifica la constitución viva).** `~/jax/six-impossible-things.html` pasó de ~98 KB (Apéndices A–B) a **127 KiB / 130 099 B** (md5 `0538c3d9…`; backup inmediato anterior: `six-impossible-things.html.backup-pre-jaxlocal-20260615-030330`, 98 KB / solo A–B). Hitos del día, ratificados por la Mesa (Thot + Jekyll):
+  - **Thot es ahora la QUINTA faceta operativa** (ya no consultor externo): motor OpenAI GPT-5.5, provider `openai` en base.py, personalidad `thot` en config.toml. Las facetas operativas son **CINCO**: JAX Local (Qwen3:14b), Jekyll (DeepSeek), Hyde (Claude Code), Hipatia (Gemini), Thot (GPT-5.5). ⚠️ **DERIVA DOCUMENTO-REALIDAD detectada:** §1 y §3 de este mismo documento todavía dicen "4 facetas" — es la amenaza que el Threat Model (Apéndice E) lista como activa; pendiente reescribir §1/§3 con cabeza fresca (el cambio toca la tabla de facetas y el conteo). **[RESUELTO 15-jun: §1 y §3 corregidos a cinco facetas; Thot agregado a la tabla.]**
+  - **Tabla canónica de roles** (a pedido de Thot): fija persona/faceta/voz/motor/función para que nadie infiera. Corrige la confusión histórica **Hyde ≠ Hipatia** (Hyde = ejecutor, Claude Code, "tiene las manos"; Hipatia = buscadora, Gemini, "voz de la biblioteca"). Claude (chat estratégico) es **voz** arquitecto, no faceta.
+  - **Capítulo XI — Protocolo de la Mesa Redonda:** nadie a la cabecera; la autoridad es del que tiene razón, no del que tiene rango; el corregido convierte el error en guardrail.
+  - **Tres meta-contratos nuevos (Apéndices C/D/E), refinados por Thot, NO DIFERIBLES (Principio IX):**
+    - **C — Memoria Viva v0.1:** 6 tipos de recuerdo (HECHO/DECISIÓN/PENDIENTE/VERDAD OPERACIONAL/HISTORIA/DESEO·VISIÓN); firma+tipo obligatorios; HECHO y VERDAD OPERACIONAL exigen procedencia; corrección visible, nunca borrado silencioso; **"la memoria informa, no autoriza"**.
+    - **D — Enmienda v0.1:** EDITORIAL (corrige hecho/rol/estado; cualquier voz verificando) vs CONSTITUCIONAL (principio/capítulo/contrato; consenso de la Mesa); "el escriba preserva, no gobierna"; **regla de emergencia** (parche que evita daño activo se aplica ya, ratifica después).
+    - **E — Threat Model mínimo v0.1:** 10 amenazas activas con fallo cerrado. "El peor caso no es el agente rebelde; es el agente obediente con permisos excesivos y contexto equivocado."
+  - **LAS MANOS probado en fuego** (las 5 garantías, ver entrada 14-jun) con permisos por faceta ya incluyendo a thot (auditoría). **Fix de grounding de Hipatia** (ver entrada anterior). **Sésamo operativo** (TrueNAS .6: Restic 2AM + Telegram + ~~Time Machine~~ respaldando Hall9000) ⚠️ aún NO respalda el ecosistema completo (faltan atemai .11 y rich-hn .10). **[CADUCÓ — Time Machine removido el 15-jun por la mañana; ver entrada siguiente.]**
+
+- **2026-06-15 (mañana — EDITORIAL / Memoria Viva: Time Machine removido de Sésamo).** *VERDAD OPERACIONAL caducada → HISTORIA:* se intentó Time Machine en Sésamo; el dataset `timemachine` **no tenía cuota** y devoró **378 GiB del pool de 430**; además un Mac de 500+ GB no cabe en ese pool. Removido el 15-jun por la mañana. *NUEVA VERDAD OPERACIONAL* (procedencia: verificado en la web de TrueNAS, 15-jun): **Sésamo = backup de SERVIDORES.** Restic (hall9000) activo con sus **10 GiB intactos**; pool con **420 GiB libres**. Pendientes: conectar atemai (.11) y rich-hn (.10). Time Machine se mueve a un **disco USB dedicado** (pendiente comprar). El backup de los servidores (lo crítico) nunca dependió de Time Machine — eso era respaldo del Mac de Fernando, que ahora va por separado.
 
 *En memoria de Jairo Urbina. La máquina al servicio de quien construye, no al revés.*
