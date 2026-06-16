@@ -31,12 +31,14 @@ import hashlib
 import tomllib
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from audit import AuditLog
 from policy import PolicyEngine
 from planner import Planner
+from envelope import IntentEnvelope, validate as validate_envelope
 from workers import ssh_worker, file_worker, rsync_worker
 
 
@@ -121,14 +123,9 @@ gate = HumanGate(
 
 
 # ------------------------------------------------------------
-#  Modelos de request
+#  Modelo de request: el Intent Envelope (18 campos + carga operacional).
+#  Definido en envelope.py. Ninguna llamada entra sin sobre completo.
 # ------------------------------------------------------------
-class ExecuteRequest(BaseModel):
-    facet: str
-    operation: str
-    target_host: str
-    params: dict = Field(default_factory=dict)
-    human_gate_token: str | None = None
 
 
 # ------------------------------------------------------------
@@ -202,6 +199,23 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def envelope_structural_rejection(request: Request, exc: RequestValidationError):
+    """Rechazo ESTRUCTURAL del Envelope (capa Pydantic): campo faltante o mal
+    tipado → 422 (condición 1 del contrato). Queda en el audit, igual que los
+    rechazos semánticos: LAS MANOS se niega, y la negativa deja testigo."""
+    campos = sorted({str(e["loc"][-1]) for e in exc.errors()})
+    audit.log_envelope_rejected(
+        request_id=None,
+        reason=f"campos faltantes/mal-tipados: {campos}",
+        layer="estructural",
+    )
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "ENVELOPE_REJECTED (estructural)", "campos": campos},
+    )
+
+
 @app.get("/health")
 async def health() -> dict:
     """Latido del servicio. Reporta también el estado del kill switch."""
@@ -225,21 +239,28 @@ async def audit_tail(n: int = 50) -> dict:
 
 
 @app.post("/plan")
-async def preview_plan(req: ExecuteRequest) -> dict:
-    """Previsualiza el plan SIN ejecutar nada. Para Fernando y Thot."""
-    plan = planner.plan(req.facet, req.operation, req.target_host, req.params)
+async def preview_plan(req: IntentEnvelope) -> dict:
+    """Previsualiza el plan SIN ejecutar nada. Para Fernando y Thot.
+    También exige Envelope válido (capa semántica) antes de planear."""
+    env_check = validate_envelope(req)
+    if not env_check.ok:
+        audit.log_envelope_rejected(request_id=None, reason=env_check.reason)
+        raise HTTPException(status_code=422, detail=f"ENVELOPE_REJECTED: {env_check.reason}")
+    plan = planner.plan(
+        req.facet_id, req.requested_capability, req.target_host, req.params
+    )
     return {"plan": plan.to_dict(), "rendered": plan.render()}
 
 
 @app.post("/execute")
-async def execute(req: ExecuteRequest) -> dict:
+async def execute(req: IntentEnvelope) -> dict:
     """El corazón de LAS MANOS. Todo pasa por aquí, en orden, con testigo."""
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = req.trace_id  # el trace_id del sobre es el id de la intención
 
     # ---- 1) KILL SWITCH — antes de absolutamente todo ----
     if _kill_switch_active():
-        audit.log_kill_switch(triggered_by=f"{req.facet}/{req.operation}")
+        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}")
         raise HTTPException(
             status_code=423,  # Locked
             detail="KILL SWITCH ACTIVO (/etc/jax/PAUSE) — LAS MANOS están detenidas",
@@ -247,25 +268,43 @@ async def execute(req: ExecuteRequest) -> dict:
 
     # ---- 2) Registrar la solicitud ----
     request_id = audit.log_request(
-        facet=req.facet,
-        operation=req.operation,
+        facet=req.facet_id,
+        operation=req.requested_capability,
         target_host=req.target_host,
         payload=req.params,
         job_id=job_id,
     )
 
+    # ---- 2.5) INTENT ENVELOPE — capa semántica (9 condiciones de fallo cerrado).
+    #          La capa estructural (Pydantic) ya rechazó campos faltantes/inválidos
+    #          con 422 antes de llegar aquí. Esta valida las reglas CRUZADAS.
+    #          Va ANTES de policy: rechaza toda llamada incompleta primero. ----
+    env_check = validate_envelope(req)
+    if not env_check.ok:
+        audit.log_envelope_rejected(request_id=request_id, reason=env_check.reason)
+        raise HTTPException(
+            status_code=422, detail=f"ENVELOPE_REJECTED: {env_check.reason}"
+        )
+    audit.log_envelope(
+        request_id=request_id,
+        facet=req.facet_id,
+        capability=req.requested_capability,
+        target_environment=req.target_environment,
+        risk_level=req.risk_level,
+    )
+
     # ---- 3) Policy check ----
-    command = _extract_command(req.operation, req.params)
+    command = _extract_command(req.requested_capability, req.params)
     result = policy.check(
-        facet=req.facet,
-        operation=req.operation,
+        facet=req.facet_id,
+        operation=req.requested_capability,
         target_host=req.target_host,
         command=command,
     )
     audit.log_policy_check(
         request_id=request_id,
-        facet=req.facet,
-        operation=req.operation,
+        facet=req.facet_id,
+        operation=req.requested_capability,
         target_host=req.target_host,
         allowed=result.allowed,
         reason=result.reason,
@@ -275,11 +314,11 @@ async def execute(req: ExecuteRequest) -> dict:
 
     # ---- 4) Human gate (si la política lo exige) ----
     if result.requires_human_gate:
-        ok, reason = gate.validate(req.human_gate_token)
+        ok, reason = gate.validate(req.approval_token)
         audit.log_human_gate(
             request_id=request_id,
             approved=ok,
-            token_used=req.human_gate_token,
+            token_used=req.approval_token,
         )
         if not ok:
             raise HTTPException(status_code=401, detail=f"Human gate: {reason}")
@@ -289,22 +328,22 @@ async def execute(req: ExecuteRequest) -> dict:
     if result.requires_dryrun:
         # Kill switch de nuevo: el estado pudo cambiar mientras esperábamos.
         if _kill_switch_active():
-            audit.log_kill_switch(triggered_by=f"{req.facet}/{req.operation}")
+            audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}")
             raise HTTPException(status_code=423, detail="KILL SWITCH ACTIVO")
         dryrun_result = await dispatch(
-            req.operation, req.target_host, req.params, dry_run=True,
+            req.requested_capability, req.target_host, req.params, dry_run=True,
         )
         audit.log_dryrun(request_id=request_id, plan=dryrun_result)
 
     # ---- 6) Ejecución real ----
     # Último chequeo de kill switch: el freno está vivo hasta el último instante.
     if _kill_switch_active():
-        audit.log_kill_switch(triggered_by=f"{req.facet}/{req.operation}")
+        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}")
         raise HTTPException(status_code=423, detail="KILL SWITCH ACTIVO")
 
     try:
         exec_result = await dispatch(
-            req.operation, req.target_host, req.params, dry_run=False,
+            req.requested_capability, req.target_host, req.params, dry_run=False,
         )
     except KeyError as e:
         # Falta un parámetro requerido por el worker.
@@ -320,7 +359,7 @@ async def execute(req: ExecuteRequest) -> dict:
 
     # ---- 6b) ¿El watcher abortó en vuelo? Evento crítico. ----
     if exec_result.get("kill_switch"):
-        audit.log_kill_switch(triggered_by=f"{req.facet}/{req.operation} [en-vuelo]")
+        audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability} [en-vuelo]")
         audit.log_execution(
             request_id=request_id,
             success=False,
