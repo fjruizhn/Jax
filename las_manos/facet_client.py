@@ -103,6 +103,8 @@ class FacetClient:
         human_gate_required: bool = False,
         approval_token: str | None = None,
         rollback_plan: str | None = None,
+        traffic_class: str = "production",
+        test_run_id: str | None = None,
     ) -> dict:
         """Arma un Intent Envelope COMPLETO y coherente para esta faceta.
 
@@ -135,6 +137,10 @@ class FacetClient:
             ),
             "target_host": target_host,
             "params": params or {},
+            # Procedencia forense (Thot Audit Watch): el cable declara tráfico
+            # real por defecto; los tests pasan su clase explícita.
+            "traffic_class": traffic_class,
+            "test_run_id": test_run_id,
         }
 
     # ── Envío ───────────────────────────────────────────────────────────────

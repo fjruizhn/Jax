@@ -68,6 +68,16 @@ class IntentEnvelope(BaseModel):
     target_host: str
     params: dict = Field(default_factory=dict)
 
+    # ── Procedencia forense — Thot Audit Watch (Mesa, 16-jun-2026) ──────
+    # Metadato para el audit log, NO un campo del contrato. La faceta declara
+    # su clase de tráfico (facet_client envía "production"); los tests la
+    # sobreescriben. Si nadie la declara → "unknown" (fail-safe).
+    traffic_class: Literal[
+        "test_structural", "test_semantic", "dry_run",
+        "production", "adversarial_test", "unknown",
+    ] = "unknown"
+    test_run_id: str | None = None
+
     # Los 18 campos exigen su CLAVE presente (incluso approval_token /
     # rollback_plan, que admiten valor null pero no ausencia). Pydantic
     # rechaza cualquier clave faltante con 422 — esa es la condición 1.
