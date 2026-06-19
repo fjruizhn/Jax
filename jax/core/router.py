@@ -53,12 +53,16 @@ LABELS = {
     "jekyll": "Dr. Jekyll",
     "hipatia": "Hipatia",
     "jax_local": "JAX",
+    "thot": "Thot",
+    "kimi": "Kimi",
 }
 ICONS = {
     "hyde": "🔧",
     "jekyll": "🧠",
     "hipatia": "🔍",
     "jax_local": "🏠",
+    "thot": "📜",
+    "kimi": "⚙️",
 }
 
 # Nombres que el usuario puede usar para referirse a cada faceta.
@@ -75,6 +79,8 @@ ALIASES = {
     "jax local": "jax_local",
     "jax": "jax_local",
     "local": "jax_local",
+    "thot": "thot",
+    "kimi": "kimi",
 }
 
 INVOKE_VERBS = ("trae", "traer", "llama", "llamar", "dame", "traeme",
@@ -118,7 +124,7 @@ ARTS_KEYWORDS = (
 )
 
 # Facetas validas que el clasificador puede devolver.
-VALID_FACETAS = ("hyde", "jekyll", "hipatia", "jax_local")
+VALID_FACETAS = ("hyde", "jekyll", "hipatia", "jax_local", "thot", "kimi")
 
 # Prompt del clasificador. Acotado a proposito: una palabra, nada mas.
 CLASSIFIER_PROMPT = (

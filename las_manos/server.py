@@ -192,12 +192,24 @@ def _kill_switch_active() -> bool:
 # ------------------------------------------------------------
 #  Aplicación
 # ------------------------------------------------------------
+from motor_registry.routes import router as motor_router
+from jacobs.routes import router as jacobs_router
+from jacobs import store as jacobs_store
+
 app = FastAPI(
     title="LAS MANOS",
     description="Sistema de capacidades de JAX — en memoria de Jairo Urbina.",
     version="1.0.0",
 )
 
+
+@app.on_event("startup")
+async def _jacobs_init() -> None:
+    await jacobs_store.init_tables()
+
+
+app.include_router(motor_router)
+app.include_router(jacobs_router)
 
 @app.exception_handler(RequestValidationError)
 async def envelope_structural_rejection(request: Request, exc: RequestValidationError):

@@ -107,7 +107,7 @@ class SubprocessMuscle(Muscle):
             "--print",
             "--output-format", "text",
             "--permission-mode", "acceptEdits",
-            "--allowedTools", "Write,Edit",
+            "--allowedTools", "Write,Edit,Read,Bash",
             "--add-dir", self.workspace_dir,
         ]
 

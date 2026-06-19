@@ -144,12 +144,14 @@ class HttpMuscle(Muscle):
         timeout: float,
         grounding_policy: str = "off",
         authority_origin: str = "",
+        api_url: str = "",
     ) -> None:
         super().__init__(
             name, model_default, models_allowed, system_prompt, timeout,
             authority_origin=authority_origin,
         )
         self.provider = provider
+        self.api_url = api_url  # override de URL para proveedores OpenAI-compatibles
         if grounding_policy not in GROUNDING_POLICIES:
             raise MuscleInvocationError(
                 f"[{name}] grounding_policy '{grounding_policy}' invalido. "
@@ -163,6 +165,10 @@ class HttpMuscle(Muscle):
             self.api_key = os.environ["GEMINI_API_KEY"]
         elif provider == "openai":
             self.api_key = os.environ["OPENAI_API_KEY"]
+        elif provider == "kimi":
+            self.api_key = os.environ["KIMI_API_KEY"]
+        elif provider == "zhipu":
+            self.api_key = os.environ.get("ZHIPU_API_KEY", "")
         else:
             raise MuscleInvocationError(f"[{name}] proveedor desconocido: {provider}")
 
@@ -179,7 +185,7 @@ class HttpMuscle(Muscle):
     ) -> str:
         if self.provider == "deepseek":
             return await self._call_deepseek(prompt, model, history)
-        if self.provider == "openai":
+        if self.provider in ("openai", "kimi", "zhipu"):
             return await self._call_openai(prompt, model, history)
         return await self._call_gemini(prompt, model, history)
 
@@ -209,13 +215,19 @@ class HttpMuscle(Muscle):
                     f"[{self.name}] DeepSeek HTTP {resp.status_code}: {resp.text[:200]}"
                 )
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            msg = data["choices"][0]["message"]
+            texto = msg.get("content") or ""
+            # Kimi K2.7 incluye reasoning_content separado — ignorarlo.
+            # Limpiar auto-etiquetas que el modelo genere dentro del content.
+            lineas = [l for l in texto.splitlines()
+                      if not l.strip().startswith("⚙️ *Origen")]
+            return "\n".join(lineas).strip()
 
 
     async def _call_openai(
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
-        url = "https://api.openai.com/v1/chat/completions"
+        url = self.api_url if self.api_url else "https://api.openai.com/v1/chat/completions"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -236,7 +248,13 @@ class HttpMuscle(Muscle):
                     f"[{self.name}] OpenAI HTTP {resp.status_code}: {resp.text[:200]}"
                 )
             data = resp.json()
-            return data["choices"][0]["message"]["content"]
+            msg = data["choices"][0]["message"]
+            texto = msg.get("content") or ""
+            # Kimi K2.7 incluye reasoning_content separado — ignorarlo.
+            # Limpiar auto-etiquetas que el modelo genere dentro del content.
+            lineas = [l for l in texto.splitlines()
+                      if not l.strip().startswith("⚙️ *Origen")]
+            return "\n".join(lineas).strip()
 
     @staticmethod
     def _extract_gemini(data: dict) -> tuple[str, list, list, list]:
