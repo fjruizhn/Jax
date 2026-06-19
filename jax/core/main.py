@@ -74,6 +74,7 @@ def build_muscles(cfg: dict, timeout_override: float | None = None) -> dict:
                 p["system_prompt"], timeout,
                 grounding_policy=p.get("grounding_policy", "off"),
                 authority_origin=p.get("authority_origin", ""),
+                api_url=p.get("api_url", ""),
             )
         elif ptype == "subprocess":
             muscles[name] = SubprocessMuscle(

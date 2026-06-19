@@ -124,3 +124,85 @@ requires_dryrun = false
 token_ttl_seconds = 300       # 5 minutos para usar el token
 token_length      = 32
 gate_log          = "/home/fruiz/jax/las_manos/logs/gate.jsonl"
+
+# ============================================================
+#  MOTOR REGISTRY — motores de IA especializados
+#  Cada motor es un agente externo que el Motor Registry
+#  puede convocar bajo supervisión. Falla cerrado si el motor
+#  no está habilitado o no existe.
+#
+#  En memoria de Jairo Urbina.
+# ============================================================
+
+[motors.kimi]
+enabled = true
+provider = "kimi"
+api_key_env = "KIMI_API_KEY"
+api_url = "https://api.moonshot.ai/v1/chat/completions"
+model = "kimi-k2.7-code"
+max_context_tokens = 256000
+sandbox_only = true
+default_timeout_seconds = 600
+supports_reasoning = true
+reasoning_default_visibility = "audit_only"
+
+[motors.ada]
+enabled = false
+provider = "zhipu"
+api_key_env = "ZHIPU_API_KEY"
+api_url = "https://api.z.ai/api/paas/v4/chat/completions"
+model = "glm-5.2"
+max_context_tokens = 1000000
+sandbox_only = true
+default_timeout_seconds = 600
+supports_reasoning = false
+
+# ------------------------------------------------------------
+#  CAPABILITIES — tareas que los motores pueden ejecutar
+#  allowed_callers: qué facetas pueden solicitar esta tarea
+#  allowed_motors: qué motores pueden ejecutarla
+#  requires_human_gate: Fernando debe aprobar antes de correr
+# ------------------------------------------------------------
+
+[capabilities.code_swarm]
+allowed_motors = ["kimi"]
+allowed_callers = ["hyde", "ada", "kimi"]
+risk_level = "high"
+sandbox_only = true
+requires_human_gate = true
+max_execution_minutes = 30
+max_recursion_depth = 1
+output_schema = "code_swarm.v1"
+fallback_motor = "ada"
+fallback_mode = "manual_only"
+forbidden_paths = [".env", "secrets/", "private_keys/", "credentials/"]
+
+[capabilities.refactor]
+allowed_motors = ["kimi"]
+allowed_callers = ["hyde", "ada"]
+risk_level = "medium"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 10
+max_recursion_depth = 0
+output_schema = "code_patch.v1"
+
+[capabilities.architecture_review]
+allowed_motors = ["ada"]
+allowed_callers = ["hyde"]
+risk_level = "medium"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 5
+max_recursion_depth = 0
+output_schema = "architecture_review.v1"
+
+[capabilities.bug_hunt]
+allowed_motors = ["kimi"]
+allowed_callers = ["hyde", "ada"]
+risk_level = "high"
+sandbox_only = true
+requires_human_gate = true
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "bug_hunt.v1"

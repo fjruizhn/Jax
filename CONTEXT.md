@@ -1,11 +1,11 @@
 # CONTEXT.md — JAX 2.0 (Biblioteca de Alejandría)
 
-> Documento canónico del proyecto JAX. Última actualización: **15 de junio de 2026** (FIX GROUNDING de Hipatia — fallo silencioso muerto, etiquetas de verificación + origen de autoridad en todas las facetas). Previas: 14-jun (LAS MANOS, kill switch en vuelo); 4-jun (hilo compartido + qwen2.5:7b + VOZ Kokoro + clasificador local).
+> Documento canónico del proyecto JAX. Última actualización: **18 de junio de 2026** (Thot cerrado — GPT-5.5 operativo; Ada bautizada — GLM-5.2, sexta faceta, arquitecta de código, key Z.ai pendiente semana 22-jun; Hefesto/Kimi y Cassandra/Grok definidos como motores futuros por la Mesa). Previas: 14-jun (LAS MANOS, kill switch en vuelo); 4-jun (hilo compartido + qwen2.5:7b + VOZ Kokoro + clasificador local).
 > Regla de la casa: **NO SUPONER. Medir dos veces, cortar después.** Si algo de este documento contradice la realidad del servidor, gana la realidad — y se corrige este documento.
 
 ## 1. Qué es JAX
 
-JAX (se pronuncia **"Yax"**, J española) es el asistente personal y futura plataforma de orquestación de Fernando Ruiz. Un solo ser con **5 facetas operativas** (jax_local, jekyll, hyde, hipatia, thot — no 5 asistentes). Núcleo orquestador propio en **Python puro + asyncio**, sin frameworks. Honra la memoria de **Jairo Urbina**, amigo, socio y pionero del software libre en Honduras — su espíritu va en el system prompt de cada faceta. Easter egg: `IDE1990`.
+JAX (se pronuncia **"Yax"**, J española) es el asistente personal y futura plataforma de orquestación de Fernando Ruiz. Un solo ser con **7 facetas operativas** (jax_local, jekyll, hyde, hipatia, thot, kimi, ada — no 7 asistentes). Núcleo orquestador propio en **Python puro + asyncio**, sin frameworks. Honra la memoria de **Jairo Urbina**, amigo, socio y pionero del software libre en Honduras — su espíritu va en el system prompt de cada faceta. Easter egg: `IDE1990`.
 
 Visión: JAX es base y laboratorio de un producto comercial globalmente escalable (multi-AI, multi-usuario, pricing por niveles) y fundación futura para AteneaERP y HAMMURABI.
 
@@ -13,20 +13,22 @@ Visión: JAX es base y laboratorio de un producto comercial globalmente escalabl
 
 - **hall9000** (172.16.20.5): Ryzen 5 8500G, 30GB RAM, GPU AMD RX 9060 XT 16GB vía **Vulkan** (RADV GFX1200; ROCm inmaduro para gfx1200, diferido). Ubuntu 24.04.4. SSH puerto **58292** (verificado jun-2026; las notas viejas decían 58291).
 - Proyecto: `~/jax/`, venv `~/jax/.venv` (Python 3.12; httpx, pydantic; **sin torch**).
-- Credenciales: `/etc/jax/.env` (chmod 600): DEEPSEEK_API_KEY, GEMINI_API_KEY, JAX_DB_*.
+- Credenciales: `/etc/jax/.env` (chmod 600): DEEPSEEK_API_KEY, GEMINI_API_KEY, OPENAI_API_KEY, KIMI_API_KEY, JAX_DB_*. ZHIPU_API_KEY pendiente (Z.ai abre API semana del 22-jun).
 - Kill Switch: `/etc/jax/PAUSE` (si existe, JAX no invoca músculos).
 - Audio: parlantes en `plughw:2,0` (card 2, ALC897 Analog, conector verde).
 - Arranque: `cd ~/jax && set -a; source /etc/jax/.env; set +a && PYTHONPATH=. .venv/bin/python -m jax.core.main`
 
-## 3. Las 5 facetas (estado real)
+## 3. Las 7 facetas (estado real)
 
 | Faceta | Icono | Músculo | Modelo | Rol | Voz |
 |---|---|---|---|---|---|
-| JAX local | 🏠 | OllamaMuscle (GPU local) | **qwen2.5:7b** (default desde jun-4; 58-84 t/s, 100% GPU, 8.2GB VRAM, ctx 32K) | Conversación cotidiana, privada. Tono hondureño **sobrio**: "maje" con medida, sin groserías, sin modismos ajenos | em_alex @1.0 |
+| JAX local | 🏠 | OllamaMuscle (GPU local) | **qwen3:14b** (actualizado jun-2026; GPU local vía Vulkan) | Conversación cotidiana, privada. Tono hondureño **sobrio**: "maje" con medida, sin groserías, sin modismos ajenos | em_alex @1.0 |
 | Hyde | 🔧 | SubprocessMuscle (`claude -p`) | sonnet | Técnico: código, infra | em_santa @1.0 |
 | Jekyll | 🧠 | HttpMuscle (DeepSeek) | deepseek-chat | Humanista erudito, español neutro formal | em_santa @0.85 |
 | Hipatia | 🔍 | HttpMuscle (Gemini + grounding) | gemini | Investigación con fuentes web | ef_dora @1.0 |
-| Thot | ⚖️ | HttpMuscle (OpenAI) | gpt-5.5 | Crítico: abogado del diablo, guardián del largo plazo | em_alex @0.9 |
+| Thot | 📜 | HttpMuscle (OpenAI) | gpt-5.5 | Crítico: abogado del diablo, guardián del largo plazo | em_alex @0.9 |
+| Kimi | ⚙️ | HttpMuscle (Moonshot AI) | kimi-k2.7-code | Motor de enjambre: coding agéntico, refactors amplios, exploración paralela. Subordinado a Ada/Hyde. | em_alex @1.0 |
+| Ada | 🏛️ | HttpMuscle (Z.ai) | glm-5.2 | Arquitecta de código: 1M contexto, largo horizonte. Nombrada en honor a Ada Lovelace. **Pendiente key Z.ai (semana 22-jun)** | ef_dora @1.0 |
 
 Notas: llama3.2:3b sigue en `models_allowed` (tareas mecánicas rápidas). qwen2.5:14b permitido, no medido. ⚠️ Gemini en plan gratuito: **rate limits frecuentes** (Hipatia se quedó sin tokens 2 veces el 3-4 jun) — pendiente subir tier o espaciar uso. ⚠️ Jekyll **no tiene búsqueda web**: jamás usarlo como investigador (alucina con confianza; lección aprendida — recomendó config TTS inexistente).
 
@@ -56,6 +58,16 @@ Notas: llama3.2:3b sigue en `models_allowed` (tareas mecánicas rápidas). qwen2
 
 ## 7. Método de trabajo (innegociable)
 
+**POLÍTICAS ADN — instaladas 18-jun-2026 en 3 capas:**
+- `~/.claude/CLAUDE.md` — global para Hyde en cualquier proyecto
+- `~/jax-platform/CLAUDE.md` — específico de Axioma Platform
+- `~/jax/CLAUDE.md` — específico de JAX
+- System prompts de Jekyll, Thot y Kimi en `config/config.toml`
+
+Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/Light mode SIEMPRE** (CSS variables, nunca colores hardcodeados), **sin hardcoding de ningún tipo**, backup antes de modificar, verificar con evidencia antes de declarar éxito.
+
+
+
 - **NO SUPONER.** "El que supone se equivoca; es real hasta que él lo sabe." Si no estás 100% seguro, es un posible error y debe saberse. Método científico: medir antes de decidir (ej.: clasificador ~200 ms medido; voz 43.3 s/650 palabras medido).
 - Pasos chicos verificables; mostrar el comando antes de correr; validar en cada fase (wc -l exacto + py_compile).
 - Archivos largos: **NUNCA heredoc pegado** (se corrompe en silencio). Claude crea → Fernando descarga → mv/scp. Heredoc solo para scripts cortos throwaway, verificando.
@@ -75,7 +87,7 @@ Notas: llama3.2:3b sigue en `models_allowed` (tareas mecánicas rápidas). qwen2
 2d. **LAS MANOS**: ✅ COMPLETADO (14-jun, ver §9). Sistema de capacidades/ejecución con permisos por faceta + kill switch en vuelo probado. Pendiente menor: extender a más operaciones (http_get, validate_*) y exponerlo a las facetas vía tool calling.
 2e. Lanzador `jax` instalado (~/.local/bin/jax) — hecho jun-4.
 2. **Chat multiagente / multi-usuario** — diseñar con Deep ANTES de codear. Atado a la decisión de hardware: el cerebro local no escala en una GPU (GPU_SEMAPHORE=1); definir si el producto multi-user usa nube o fierro propio.
-3. **Decisión de hardware** (¿devolver RX 9060 XT por NVIDIA 24-32GB?) — sesión propia, con cabeza fresca, NO de madrugada. La GPU solo importa para Ollama local + voz local; 4 de 5 facetas son nube/externas (solo jax_local es local).
+3. **Decisión de hardware** (¿devolver RX 9060 XT por NVIDIA 24-32GB?) — sesión propia, con cabeza fresca, NO de madrugada. La GPU solo importa para Ollama local + voz local; 6 de 7 facetas son nube/externas (solo jax_local es local).
 4. Hipatia / Gemini: resolver rate limits (tier o espaciado).
 5. Easter egg IDE1990 con voz (ahora que Kokoro existe).
 6. get_datetime como primer superpoder de JAX local (tool calling Ollama).
@@ -120,4 +132,25 @@ Notas: llama3.2:3b sigue en `models_allowed` (tareas mecánicas rápidas). qwen2
 
 - **2026-06-15 (mañana — EDITORIAL / Memoria Viva: Time Machine removido de Sésamo).** *VERDAD OPERACIONAL caducada → HISTORIA:* se intentó Time Machine en Sésamo; el dataset `timemachine` **no tenía cuota** y devoró **378 GiB del pool de 430**; además un Mac de 500+ GB no cabe en ese pool. Removido el 15-jun por la mañana. *NUEVA VERDAD OPERACIONAL* (procedencia: verificado en la web de TrueNAS, 15-jun): **Sésamo = backup de SERVIDORES.** Restic (hall9000) activo con sus **10 GiB intactos**; pool con **420 GiB libres**. Pendientes: conectar atemai (.11) y rich-hn (.10). Time Machine se mueve a un **disco USB dedicado** (pendiente comprar). El backup de los servidores (lo crítico) nunca dependió de Time Machine — eso era respaldo del Mac de Fernando, que ahora va por separado.
 
+- **2026-06-18 (continuación): Motor Registry v0.2 + systemd + Jacobs bautizado.**
+  - **Motor Registry v0.2 ✅:** Kimi real conectada al worker. reasoning_content logueado, invisible al caller. Output validator integrado. Kill switch en vuelo probado. Job lifecycle completo probado en fuego con código real (~94s análisis de worker.py).
+  - **LAS MANOS como servicio systemd ✅:** `/etc/systemd/system/jax-las-manos.service`. Arranca con hall9000, reinicio automático en fallo. `curl /health → alive`.
+  - **Jacobs bautizado ✅:** Director ejecutivo de pipelines multi-faceta. Nombre en honor al **Prof. Raúl Jacobs** — maestro, mentor, director del colegio donde todo comenzó. Módulo de orquestación puro, sin LLM propio. Frase constitucional (Thot): *"Jacobs dirige el proceso, no decide el propósito. Secuencia, delega y reporta; no inventa autoridad."* Diseño aprobado por Mesa unánime. Hyde construyendo v0.1.
+
+- **2026-06-18 (sesión completa — cierre):**
+  - **Jacobs v0.1+v0.2 ✅** — Director ejecutivo de pipelines multi-faceta. En honor al Prof. Raúl Jacobs. Plan builder con JAX Local real. Executor con context propagation (Hipatia→Jekyll→Thot encadenados). Modo autonomous habilitado. Modo supervised con botón APROBAR desde LA CARA. Endpoints: /jacobs/plan, /jacobs/pipeline, /jacobs/pipeline/{id}/resume, /jacobs/pipeline/{id}/approve-step. MariaDB: jacobs_pipelines + jacobs_steps.
+  - **JAX Engine ✅** — Estado vivo del ecosistema, EventBus pub/sub, ResourceManager (admission control sin interrumpir workers en vuelo), WebSocket hub por usuario.
+  - **LA CARA / Axioma Platform v0.2 ✅** — React 19 + Tailwind + Zustand + react-i18next. Tres paneles: facetas (izq), ojo HAL + chat (centro), Director Jacobs + Audit (der). Modos: Chat (todas las facetas), Comando (Hyde autónomo), Pipeline (Jacobs con modal). Kill switch visible siempre. LAS MANOS vivo en barra inferior. WebSocket con reconexión automática. Tres servicios systemd: jax-las-manos (:7777), jax-platform (:8080), jax-platform-frontend (:5173).
+  - **Primer pipeline real de HAMMURABI ✅** — Hipatia (regulaciones CNBS, 10 componentes) → Jekyll (análisis humanista) → Thot (crítica regulatoria). 71KB guardados en ~/jax/workspace/hammurabi-credito-pipeline-001.json.
+  - **Políticas ADN instaladas ✅** — CLAUDE.md global + por proyecto + system prompts de Jekyll/Thot/Kimi. i18n obligatorio, dark/light obligatorio, sin hardcoding.
+  - **Six Impossible Things actualizado ✅** — Flujograma de dos capas (Infraestructura + Facetas), Ada corregida (GLM-5.2 Z.ai), Kimi en firma final, Jacobs en firma final, portada "Axioma · Infraestructura Cognitiva Personal" en serif dorado.
+  - **Rename pendiente:** JAX Platform → **Axioma** (nombre definitivo del producto).
+
 *En memoria de Jairo Urbina. La máquina al servicio de quien construye, no al revés.*
+
+- **2026-06-18: Thot cerrado + Ada bautizada + Mesa Redonda sobre nuevas facetas.**
+  - **Thot ✅ CERRADO:** GPT-5.5 operativo vía API OpenAI. Router actualizado (LABELS/ICONS/ALIASES/VALID_FACETAS). Prueba en fuego: "trae a thot" → juicio semántico real activo. Primera auditoría: identifica supuestos ocultos, pide evidencia antes de validar — comportamiento correcto.
+  - **Ada bautizada — sexta faceta:** GLM-5.2 (Z.ai/Zhipu), nombrada en honor a Ada Lovelace. Arquitecta de código, 1M tokens de contexto, largo horizonte. Especialidad: leer repos completos, sostener coherencia arquitectónica, coding agéntico multi-hora. Supera a Claude Opus 4.7/4.8 en coding blind test (LMArena #2 global). Key Z.ai pendiente — API general abre semana del 22-jun. Motor ya implementado en base.py (_call_openai compatible); solo falta ZHIPU_API_KEY + entrada en config.toml.
+  - **Mesa Redonda — evaluación de Kimi y Grok:** Prompt enviado a Jekyll y Thot. Consenso: Kimi K2.7 Code → **Hefesto** (motor/agente de enjambre subordinado a Ada/Hyde, no faceta constitucional aún). Grok 4.3 → **Cassandra** (radar de señales externas para Hipatia/HAMMURABI, después de Hefesto). Ninguno entra como faceta plena todavía — período probatorio primero. Regla: "No toda inteligencia merece una silla en la Mesa."
+  - **Hardware evaluado:** RTX 5090 32GB para hall9000 — desbloquea qwen3:32b completo (~40+ tok/s), CUDA nativo, fin del dolor ROCm. RAM recomendada: 64GB DDR5 (de 32GB actuales). GLM-5.2 local requiere 256GB+ — no entra ni en RTX 5090 ni en RED QUEEN (96GB); siempre vía API.
+  - **Router:** Thot agregado a LABELS, ICONS, ALIASES, VALID_FACETAS. Backup: router.py.backup-pre-thot-*.
