@@ -219,6 +219,7 @@ async def step_upsert(s: Step) -> None:
                 ON DUPLICATE KEY UPDATE
                     status=VALUES(status),
                     output_ref=VALUES(output_ref),
+                    timeout_seconds=VALUES(timeout_seconds),
                     started_at=VALUES(started_at),
                     finished_at=VALUES(finished_at),
                     error=VALUES(error),

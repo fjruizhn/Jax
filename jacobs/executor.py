@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import time
+import tomllib
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,6 +21,7 @@ import httpx
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
+from jacobs.plan import VALID_CAPABILITIES
 from jacobs.policy import check_kill_switch
 
 logger = logging.getLogger("jacobs.executor")
@@ -36,6 +39,29 @@ _HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
 
 # Facetas que van vía Motor Registry de LAS MANOS
 _MOTOR_FACETS = frozenset({"kimi"})
+
+
+# ----------------------------------------------------------------
+#  Catálogo de capabilities (FASE A §3.4) — vista read-only del contrato que el
+#  Motor Registry valida en las_manos/config.toml. jacobs NO importa
+#  motor_registry (no está en su sys.path standalone); lee el MISMO toml
+#  directamente, igual que motor_registry/routes.py. Falla ABIERTO: si no se
+#  puede cargar, validate_capability no bloquea (es un net secundario, no SPOF).
+# ----------------------------------------------------------------
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "las_manos" / "config.toml"
+try:
+    with open(_CONFIG_PATH, "rb") as _cf:
+        _CATALOG_CAPS: dict = tomllib.load(_cf).get("capabilities", {})
+    logger.info(
+        "Jacobs cargó catálogo de capabilities: %d entradas (%s)",
+        len(_CATALOG_CAPS), _CONFIG_PATH,
+    )
+except Exception as _cfg_err:  # noqa: BLE001
+    logger.warning(
+        "Jacobs no pudo cargar catálogo (%s): %s — validate_capability degradará "
+        "a fail-open", _CONFIG_PATH, _cfg_err,
+    )
+    _CATALOG_CAPS = {}
 
 
 # ----------------------------------------------------------------
@@ -374,12 +400,32 @@ async def _invoke_jax_local(prompt: str, timeout: int) -> dict:
     }
 
 
+# Mapa TOTAL semántica → capability de catálogo (FASE A §3.2).
+# Cero pass-through silencioso: toda capability que el planner puede emitir
+# resuelve a un nombre que EXISTE en el catálogo de las_manos/config.toml.
+# Los alias traducen vocabulario del planner; las identidades dejan explícito
+# que la capability ya es de catálogo. ('assemble' NO va aquí: se cortocircuita
+# mecánicamente en _dispatch_step antes de llegar a cualquier motor.)
 _CAPABILITY_MAP = {
-    "analysis":  "pipeline_analysis",
-    "research":  "pipeline_analysis",
-    "review":    "refactor",
-    "code":      "refactor",
-    "implement": "code_swarm",
+    # --- alias semánticos → capability de catálogo ---
+    "analysis":              "pipeline_analysis",
+    "research":              "pipeline_analysis",
+    "review":                "refactor",
+    "code":                  "refactor",
+    "implement":             "code_swarm",
+    # --- identidad: capabilities que existen con su propio nombre en catálogo ---
+    "generate":              "generate",
+    "reason":                "reason",
+    "design":                "design",
+    "validate_consistency":  "validate_consistency",
+    "reconcile":             "reconcile",
+    "critique":              "critique",
+    "refactor":              "refactor",
+    "pipeline_analysis":     "pipeline_analysis",
+    "implementation":        "implementation",
+    "code_swarm":            "code_swarm",
+    "bug_hunt":              "bug_hunt",
+    "architecture_review":   "architecture_review",
 }
 
 
@@ -495,11 +541,68 @@ def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
 #  Dispatcher principal
 # ----------------------------------------------------------------
 
+def validate_capability(step: Step) -> str | None:
+    """Validación PRE-dispatch en DOS NIVELES (FASE A §3.4, refinado).
+
+    Separa dos preguntas que antes estaban mezcladas. Devuelve un mensaje de
+    error (str) si el step es inválido, o None si es válido.
+
+    NIVEL A — existencia de vocabulario. Aplica a TODOS los facets.
+        ¿step.capability ∈ VALID_CAPABILITIES? Cierra la asimetría (un facet
+        directo con capability inexistente ahora se rechaza). NO mira
+        allowed_motors, por eso NO rompe facets directos cuyo destino de catálogo
+        sea kimi-only — hipatia/research y jekyll/analysis (→ pipeline_analysis,
+        allowed_motors=["kimi"]) PASAN porque 'research'/'analysis' existen en el
+        vocabulario. Es el _fallback_plan, que no se puede romper.
+
+    NIVEL B — contrato del motor. Aplica SOLO a _MOTOR_FACETS (hoy kimi).
+        Mismo contrato que policy.check valida en el Motor Registry, adelantado
+        acá para fallar limpio antes del HTTP: la capability resuelta existe en el
+        catálogo, el facet ∈ allowed_motors y el caller 'jacobs' ∈ allowed_callers.
+        Los facets de API directa NO pasan por aquí (ignoran capability en el
+        dispatch real).
+    """
+    cap = step.capability
+
+    # 'assemble' es mecánico (se cortocircuita antes en _dispatch_step); válido.
+    if cap == "assemble":
+        return None
+
+    # ---- NIVEL A: existencia en el vocabulario cerrado (TODOS los facets) ----
+    if cap not in VALID_CAPABILITIES:
+        return f"capability desconocida: '{cap}' no está en VALID_CAPABILITIES"
+
+    # ---- NIVEL B: contrato de motor (SOLO facets-motor, hoy kimi) ----
+    if step.facet in _MOTOR_FACETS:
+        # Fail-open si el catálogo no cargó: net secundario, no SPOF.
+        if not _CATALOG_CAPS:
+            return None
+        resolved = _CAPABILITY_MAP.get(cap, cap)
+        entry = _CATALOG_CAPS.get(resolved)
+        if entry is None:
+            return (f"capability '{cap}' (→ '{resolved}') no existe en el "
+                    f"catálogo de capabilities")
+        if step.facet not in entry.get("allowed_motors", []):
+            return (f"motor '{step.facet}' no permitido para '{resolved}' "
+                    f"(allowed_motors={entry.get('allowed_motors')})")
+        if "jacobs" not in entry.get("allowed_callers", []):
+            return (f"caller 'jacobs' no autorizado para '{resolved}' "
+                    f"(allowed_callers={entry.get('allowed_callers')})")
+    return None
+
+
 async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     """Selecciona el worker correcto según la faceta."""
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
     if step.capability == "assemble":
         return _assemble_mechanical(step, pipeline)
+
+    # FASE A §3.4: validación uniforme del contrato ANTES de rutear por facet.
+    # Si falla, el step falla limpio (lo captura _run_one_step → _fail_step) sin
+    # haber tocado ninguna API ni el Motor Registry.
+    cap_error = validate_capability(step)
+    if cap_error:
+        raise ValueError(f"Capability inválida (pre-dispatch): {cap_error}")
 
     ctx_input = _build_context_input(step, pipeline)
     prompt    = _enrich_prompt(ctx_input)
@@ -534,17 +637,123 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
 
 
 # ----------------------------------------------------------------
-#  Pipeline runner
+#  Cálculo de olas topológicas a partir del DAG (depends_on)
+# ----------------------------------------------------------------
+
+def _compute_waves(plan: list[Step], done: set[int]) -> list[list[int]]:
+    """Particiona los step_index pendientes en olas topológicas.
+
+    Una ola = todos los steps cuyas dependencias ya están satisfechas (en `done`
+    o completadas en olas previas). Steps sin deps van en la ola 0.
+
+    Respeta SOLO depends_on, no el orden del plan. Si hay ciclo o dep inexistente
+    (plan.py valida 0 <= dep < idx, así que no debería), los steps irresolubles
+    quedan fuera y se loguean — nunca se cuelga. "El que supone se equivoca."
+    """
+    pending = {s.step_index for s in plan if s.step_index not in done}
+    deps_by_idx = {s.step_index: set(s.depends_on or []) for s in plan}
+
+    waves: list[list[int]] = []
+    satisfied = set(done)
+
+    while pending:
+        ready = sorted(
+            idx for idx in pending
+            if deps_by_idx.get(idx, set()) <= satisfied
+        )
+        if not ready:
+            logger.error(
+                "Jacobs: %d steps sin dependencias resolubles (posible ciclo): %s",
+                len(pending), sorted(pending),
+            )
+            break
+        waves.append(ready)
+        for idx in ready:
+            pending.discard(idx)
+            satisfied.add(idx)
+
+    return waves
+
+
+# ----------------------------------------------------------------
+#  Ejecución de UN step (cuerpo del antiguo try/except, extraído)
+# ----------------------------------------------------------------
+
+async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
+    """Ejecuta un step individual. Devuelve True si completó, False si falló.
+
+    Es el cuerpo del antiguo bloque try/except del loop secuencial, extraído sin
+    cambios de lógica para poder lanzarlo en paralelo vía asyncio.gather.
+    Artifacts, persistencia al repo y eventos: idénticos al original.
+    """
+    step.status     = StepStatus.running
+    step.started_at = time.time()
+    await store.step_upsert(step)
+    await store.event_append(
+        pipeline.pipeline_id, "STEP_STARTED",
+        {"step_index": i, "facet": step.facet, "capability": step.capability},
+        step.step_id,
+    )
+
+    try:
+        raw_output = await asyncio.wait_for(
+            _dispatch_step(step, pipeline),
+            timeout=step.timeout_seconds,
+        )
+
+        ref, inline = save_if_large(pipeline.pipeline_id, step.step_id, raw_output)
+        if ref:
+            step.output_ref = ref
+            pipeline.context[f"step_{i}_ref"] = ref
+        else:
+            inline_ref = f"inline:{json.dumps(inline, ensure_ascii=False)}"
+            step.output_ref = inline_ref
+            pipeline.context[f"step_{i}_ref"] = inline_ref
+
+        step.status      = StepStatus.completed
+        step.finished_at = time.time()
+        await store.step_upsert(step)
+        await store.event_append(
+            pipeline.pipeline_id, "STEP_COMPLETED",
+            {"step_index": i, "output_ref": step.output_ref},
+            step.step_id,
+        )
+        try:
+            await _persist_step_to_repo(
+                pipeline_id=pipeline.pipeline_id,
+                pipeline_name=pipeline.name,
+                step_index=i,
+                facet=step.facet,
+                capability=step.capability,
+                raw_output=raw_output,
+            )
+        except Exception as _persist_err:  # noqa: BLE001
+            logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
+        return True
+
+    except asyncio.TimeoutError:
+        await _fail_step(pipeline, step, i, f"Timeout ({step.timeout_seconds}s)")
+        return False
+    except Exception as exc:  # noqa: BLE001
+        await _fail_step(pipeline, step, i, str(exc))
+        return False
+
+
+# ----------------------------------------------------------------
+#  Pipeline runner — DIRECTOR DE ORQUESTA (ejecución por olas)
 # ----------------------------------------------------------------
 
 async def run_pipeline(pipeline: Pipeline) -> None:
     """
-    Ejecuta todos los steps del pipeline en secuencia.
+    Ejecuta el pipeline por OLAS topológicas. Dentro de cada ola, los steps
+    corren EN PARALELO (asyncio.gather). El orden entre olas respeta depends_on.
+
     Modos:
       dry_run    — no ejecuta nada, completa inmediatamente.
-      supervised — pausa con status=interrupted después de cada step;
-                   espera reanudación explícita vía /resume.
-    Hyde siempre se bloquea (blocked_human_gate) hasta /approve-step.
+      supervised — ejecuta UNA ola y pausa (status=interrupted); espera /resume.
+                   La granularidad de aprobación es la OLA, no el step.
+    Hyde: si un step de la ola es hyde sin aprobar, la ola NO se ejecuta y el
+    pipeline se interrumpe hasta /approve-step.
     """
     pipeline_id = pipeline.pipeline_id
 
@@ -553,127 +762,110 @@ async def run_pipeline(pipeline: Pipeline) -> None:
         await store.event_append(pipeline_id, "DRY_RUN_COMPLETE", {"steps": len(pipeline.plan)})
         return
 
-    # Capturar el índice de inicio ANTES de actualizar el estado.
-    # En supervised, solo el step en este índice ejecuta; los siguientes quedan bloqueados.
-    start_index = pipeline.current_step_index
-
     await store.pipeline_update_status(
         pipeline_id, PipelineStatus.running, pipeline.current_step_index, pipeline.context
     )
     await store.event_append(pipeline_id, "PIPELINE_STARTED")
 
-    for i, step in enumerate(pipeline.plan):
-        if i < pipeline.current_step_index:
-            continue
+    # Estado derivado del DAG, no de un cursor lineal: un step está "hecho" si
+    # tiene su ref en context (sobrevive a /resume y al relanzador).
+    done = {
+        i for i in range(len(pipeline.plan))
+        if pipeline.context.get(f"step_{i}_ref")
+    }
 
-        # ---- Kill switch ----
+    waves = _compute_waves(pipeline.plan, done)
+    logger.info(
+        "Jacobs director: %d olas, tamaños=%s (ya completos: %s)",
+        len(waves), [len(w) for w in waves], sorted(done),
+    )
+
+    for wave_num, wave in enumerate(waves):
+        # ---- Kill switch: antes de cada ola ----
         if check_kill_switch():
-            step.status = StepStatus.failed
-            step.error  = "Kill switch activo"
-            await store.step_upsert(step)
+            for i in wave:
+                step = pipeline.plan[i]
+                step.status = StepStatus.failed
+                step.error  = "Kill switch activo"
+                await store.step_upsert(step)
             await store.event_append(
-                pipeline_id, "KILL_SWITCH_ABORTED", {"step_index": i}, step.step_id
+                pipeline_id, "KILL_SWITCH_ABORTED", {"wave": wave_num, "steps": wave}
             )
             await store.pipeline_update_status(pipeline_id, PipelineStatus.aborted)
             return
 
-        # ---- Hyde: bloquear hasta aprobación manual (marca en context) ----
-        if step.facet == "hyde" and not pipeline.context.get(f"hyde_approved_{step.step_id}"):
-            step.status = StepStatus.blocked_human_gate
-            step.error  = "Hyde requiere aprobación manual de Fernando"
-            await store.step_upsert(step)
-            await store.event_append(
-                pipeline_id, "STEP_BLOCKED_HUMAN_GATE",
-                {"step_index": i, "facet": "hyde"},
-                step.step_id,
-            )
+        # ---- Hyde gate: si algún step de la ola es hyde sin aprobar, interrumpir ----
+        hyde_pending = [
+            i for i in wave
+            if pipeline.plan[i].facet == "hyde"
+            and not pipeline.context.get(f"hyde_approved_{pipeline.plan[i].step_id}")
+        ]
+        if hyde_pending:
+            for i in hyde_pending:
+                step = pipeline.plan[i]
+                step.status = StepStatus.blocked_human_gate
+                await store.step_upsert(step)
+                await store.event_append(
+                    pipeline_id, "STEP_BLOCKED_HUMAN_GATE",
+                    {"step_index": i, "facet": "hyde"}, step.step_id,
+                )
             await store.pipeline_update_status(
-                pipeline_id, PipelineStatus.interrupted, i, pipeline.context
+                pipeline_id, PipelineStatus.interrupted, wave[0], pipeline.context
             )
             await store.event_append(
                 pipeline_id, "PIPELINE_INTERRUPTED",
-                {"at_step": i, "reason": "hyde — requiere /approve-step"},
+                {"at_wave": wave_num, "hyde_steps": hyde_pending,
+                 "reason": "hyde — requiere /approve-step"},
             )
             return
 
-        # ---- Supervised: ejecutar solo el step en start_index; bloquear los siguientes ----
-        if pipeline.mode == "supervised" and i > start_index:
-            step.status = StepStatus.blocked
-            await store.step_upsert(step)
-            await store.event_append(
-                pipeline_id, "STEP_BLOCKED",
-                {"step_index": i, "reason": "supervised — awaiting resume"},
-                step.step_id,
-            )
-            await store.pipeline_update_status(
-                pipeline_id, PipelineStatus.interrupted, i, pipeline.context
-            )
-            await store.event_append(
-                pipeline_id, "PIPELINE_INTERRUPTED",
-                {"at_step": i, "reason": "supervised — next step requires resume"},
-            )
-            return
-
-        # ---- Ejecutar step ----
-        step.status     = StepStatus.running
-        step.started_at = time.time()
-        await store.step_upsert(step)
+        # ---- EJECUTAR LA OLA EN PARALELO ----
         await store.event_append(
-            pipeline_id, "STEP_STARTED",
-            {"step_index": i, "facet": step.facet, "capability": step.capability},
-            step.step_id,
+            pipeline_id, "WAVE_STARTED",
+            {"wave": wave_num, "steps": wave, "parallel": len(wave)},
+        )
+        results = await asyncio.gather(*[
+            _run_one_step(pipeline.plan[i], i, pipeline)
+            for i in wave
+        ])
+
+        # Persistir avance del context tras la ola completa.
+        # current_step_index = primer índice NO completado (informativo).
+        next_idx = max(wave) + 1
+        await store.pipeline_update_status(
+            pipeline_id, PipelineStatus.running, next_idx, pipeline.context
         )
 
-        try:
-            raw_output = await asyncio.wait_for(
-                _dispatch_step(step, pipeline),
-                timeout=step.timeout_seconds,
+        # ---- ¿Algún step falló sin skip_on_fail? → abortar ----
+        failed = [
+            i for i, ok in zip(wave, results)
+            if not ok and not pipeline.plan[i].skip_on_fail
+        ]
+        if failed:
+            await store.pipeline_update_status(pipeline_id, PipelineStatus.aborted)
+            await store.event_append(
+                pipeline_id, "PIPELINE_ABORTED",
+                {"at_wave": wave_num, "failed_steps": failed},
             )
+            return
 
-            # ---- Artifact handling ----
-            ref, inline = save_if_large(pipeline_id, step.step_id, raw_output)
-            if ref:
-                step.output_ref             = ref
-                pipeline.context[f"step_{i}_ref"] = ref
-            else:
-                inline_ref = f"inline:{json.dumps(inline, ensure_ascii=False)}"
-                step.output_ref             = inline_ref
-                pipeline.context[f"step_{i}_ref"] = inline_ref
+        await store.event_append(
+            pipeline_id, "WAVE_COMPLETED", {"wave": wave_num, "steps": wave}
+        )
 
-            step.status      = StepStatus.completed
-            step.finished_at = time.time()
-            await store.step_upsert(step)
+        # ---- Supervised: pausar después de cada ola ----
+        if pipeline.mode == "supervised":
             await store.pipeline_update_status(
-                pipeline_id, PipelineStatus.running, i + 1, pipeline.context
+                pipeline_id, PipelineStatus.interrupted, next_idx, pipeline.context
             )
             await store.event_append(
-                pipeline_id, "STEP_COMPLETED",
-                {"step_index": i, "output_ref": step.output_ref},
-                step.step_id,
+                pipeline_id, "PIPELINE_INTERRUPTED",
+                {"after_wave": wave_num, "next_index": next_idx,
+                 "reason": "supervised — awaiting /resume"},
             )
-            try:
-                await _persist_step_to_repo(
-                    pipeline_id=pipeline_id,
-                    pipeline_name=pipeline.name,
-                    step_index=i,
-                    facet=step.facet,
-                    capability=step.capability,
-                    raw_output=raw_output,
-                )
-            except Exception as _persist_err:  # noqa: BLE001
-                logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
+            return
 
-        except asyncio.TimeoutError:
-            await _fail_step(pipeline, step, i, f"Timeout ({step.timeout_seconds}s)")
-            if not step.skip_on_fail:
-                return
-
-        except Exception as exc:  # noqa: BLE001
-            await _fail_step(pipeline, step, i, str(exc))
-            if not step.skip_on_fail:
-                return
-
-    # ---- Todos los steps terminaron ----
+    # ---- Todas las olas terminaron ----
     await store.pipeline_update_status(
         pipeline_id, PipelineStatus.completed, len(pipeline.plan), pipeline.context
     )
