@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import time
+import tomllib
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -19,6 +21,7 @@ import httpx
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
+from jacobs.plan import VALID_CAPABILITIES
 from jacobs.policy import check_kill_switch
 
 logger = logging.getLogger("jacobs.executor")
@@ -36,6 +39,29 @@ _HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
 
 # Facetas que van vía Motor Registry de LAS MANOS
 _MOTOR_FACETS = frozenset({"kimi"})
+
+
+# ----------------------------------------------------------------
+#  Catálogo de capabilities (FASE A §3.4) — vista read-only del contrato que el
+#  Motor Registry valida en las_manos/config.toml. jacobs NO importa
+#  motor_registry (no está en su sys.path standalone); lee el MISMO toml
+#  directamente, igual que motor_registry/routes.py. Falla ABIERTO: si no se
+#  puede cargar, validate_capability no bloquea (es un net secundario, no SPOF).
+# ----------------------------------------------------------------
+_CONFIG_PATH = Path(__file__).resolve().parent.parent / "las_manos" / "config.toml"
+try:
+    with open(_CONFIG_PATH, "rb") as _cf:
+        _CATALOG_CAPS: dict = tomllib.load(_cf).get("capabilities", {})
+    logger.info(
+        "Jacobs cargó catálogo de capabilities: %d entradas (%s)",
+        len(_CATALOG_CAPS), _CONFIG_PATH,
+    )
+except Exception as _cfg_err:  # noqa: BLE001
+    logger.warning(
+        "Jacobs no pudo cargar catálogo (%s): %s — validate_capability degradará "
+        "a fail-open", _CONFIG_PATH, _cfg_err,
+    )
+    _CATALOG_CAPS = {}
 
 
 # ----------------------------------------------------------------
@@ -374,12 +400,32 @@ async def _invoke_jax_local(prompt: str, timeout: int) -> dict:
     }
 
 
+# Mapa TOTAL semántica → capability de catálogo (FASE A §3.2).
+# Cero pass-through silencioso: toda capability que el planner puede emitir
+# resuelve a un nombre que EXISTE en el catálogo de las_manos/config.toml.
+# Los alias traducen vocabulario del planner; las identidades dejan explícito
+# que la capability ya es de catálogo. ('assemble' NO va aquí: se cortocircuita
+# mecánicamente en _dispatch_step antes de llegar a cualquier motor.)
 _CAPABILITY_MAP = {
-    "analysis":  "pipeline_analysis",
-    "research":  "pipeline_analysis",
-    "review":    "refactor",
-    "code":      "refactor",
-    "implement": "code_swarm",
+    # --- alias semánticos → capability de catálogo ---
+    "analysis":              "pipeline_analysis",
+    "research":              "pipeline_analysis",
+    "review":                "refactor",
+    "code":                  "refactor",
+    "implement":             "code_swarm",
+    # --- identidad: capabilities que existen con su propio nombre en catálogo ---
+    "generate":              "generate",
+    "reason":                "reason",
+    "design":                "design",
+    "validate_consistency":  "validate_consistency",
+    "reconcile":             "reconcile",
+    "critique":              "critique",
+    "refactor":              "refactor",
+    "pipeline_analysis":     "pipeline_analysis",
+    "implementation":        "implementation",
+    "code_swarm":            "code_swarm",
+    "bug_hunt":              "bug_hunt",
+    "architecture_review":   "architecture_review",
 }
 
 
@@ -495,11 +541,68 @@ def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
 #  Dispatcher principal
 # ----------------------------------------------------------------
 
+def validate_capability(step: Step) -> str | None:
+    """Validación PRE-dispatch en DOS NIVELES (FASE A §3.4, refinado).
+
+    Separa dos preguntas que antes estaban mezcladas. Devuelve un mensaje de
+    error (str) si el step es inválido, o None si es válido.
+
+    NIVEL A — existencia de vocabulario. Aplica a TODOS los facets.
+        ¿step.capability ∈ VALID_CAPABILITIES? Cierra la asimetría (un facet
+        directo con capability inexistente ahora se rechaza). NO mira
+        allowed_motors, por eso NO rompe facets directos cuyo destino de catálogo
+        sea kimi-only — hipatia/research y jekyll/analysis (→ pipeline_analysis,
+        allowed_motors=["kimi"]) PASAN porque 'research'/'analysis' existen en el
+        vocabulario. Es el _fallback_plan, que no se puede romper.
+
+    NIVEL B — contrato del motor. Aplica SOLO a _MOTOR_FACETS (hoy kimi).
+        Mismo contrato que policy.check valida en el Motor Registry, adelantado
+        acá para fallar limpio antes del HTTP: la capability resuelta existe en el
+        catálogo, el facet ∈ allowed_motors y el caller 'jacobs' ∈ allowed_callers.
+        Los facets de API directa NO pasan por aquí (ignoran capability en el
+        dispatch real).
+    """
+    cap = step.capability
+
+    # 'assemble' es mecánico (se cortocircuita antes en _dispatch_step); válido.
+    if cap == "assemble":
+        return None
+
+    # ---- NIVEL A: existencia en el vocabulario cerrado (TODOS los facets) ----
+    if cap not in VALID_CAPABILITIES:
+        return f"capability desconocida: '{cap}' no está en VALID_CAPABILITIES"
+
+    # ---- NIVEL B: contrato de motor (SOLO facets-motor, hoy kimi) ----
+    if step.facet in _MOTOR_FACETS:
+        # Fail-open si el catálogo no cargó: net secundario, no SPOF.
+        if not _CATALOG_CAPS:
+            return None
+        resolved = _CAPABILITY_MAP.get(cap, cap)
+        entry = _CATALOG_CAPS.get(resolved)
+        if entry is None:
+            return (f"capability '{cap}' (→ '{resolved}') no existe en el "
+                    f"catálogo de capabilities")
+        if step.facet not in entry.get("allowed_motors", []):
+            return (f"motor '{step.facet}' no permitido para '{resolved}' "
+                    f"(allowed_motors={entry.get('allowed_motors')})")
+        if "jacobs" not in entry.get("allowed_callers", []):
+            return (f"caller 'jacobs' no autorizado para '{resolved}' "
+                    f"(allowed_callers={entry.get('allowed_callers')})")
+    return None
+
+
 async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     """Selecciona el worker correcto según la faceta."""
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
     if step.capability == "assemble":
         return _assemble_mechanical(step, pipeline)
+
+    # FASE A §3.4: validación uniforme del contrato ANTES de rutear por facet.
+    # Si falla, el step falla limpio (lo captura _run_one_step → _fail_step) sin
+    # haber tocado ninguna API ni el Motor Registry.
+    cap_error = validate_capability(step)
+    if cap_error:
+        raise ValueError(f"Capability inválida (pre-dispatch): {cap_error}")
 
     ctx_input = _build_context_input(step, pipeline)
     prompt    = _enrich_prompt(ctx_input)
