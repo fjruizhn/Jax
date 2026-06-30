@@ -39,6 +39,23 @@ VALID_FACETS = frozenset({
     "hipatia", "jekyll", "thot", "ada", "kimi", "hyde", "jax_local",
 })
 
+# Espejo de VALID_FACETS para capabilities (FASE A §3.3). Vocabulario CERRADO
+# que el planner puede emitir: todo lo de aquí tiene destino conocido en el
+# catálogo (vía executor._CAPABILITY_MAP) o es mecánico ('assemble'). Una
+# capability fuera de este conjunto se degrada a 'reason' (genérica, segura) en
+# _parse_plan_json — nunca se deja pasar cruda. Debe mantenerse en sync con las
+# claves de _CAPABILITY_MAP + 'assemble'.
+VALID_CAPABILITIES = frozenset({
+    # capabilities del catálogo (las_manos/config.toml)
+    "generate", "reason", "design", "validate_consistency", "reconcile", "critique",
+    "refactor", "pipeline_analysis", "implementation", "code_swarm",
+    "bug_hunt", "architecture_review",
+    # alias semánticos que _CAPABILITY_MAP traduce a catálogo
+    "analysis", "research", "review", "code", "implement",
+    # mecánico: cortocircuito en executor._dispatch_step (no toca motor)
+    "assemble",
+})
+
 # Timeout por capability (segundos). El default cubre design/validate/critique,
 # que procesan contexto acotado y completan holgados en ~50-130s. Las capabilities
 # que acumulan el contexto COMPLETO de N dependencias (reconcile recibe todos los
@@ -354,9 +371,18 @@ class PlanBuilder:
                 int(x) for x in raw_deps
                 if str(x).lstrip("-").isdigit() and 0 <= int(x) < idx
             ]
+            # capability CERRADA al vocabulario conocido (espejo de la mecánica
+            # facet→jax_local de arriba). Fuera del conjunto → degradar a 'reason'.
+            capability = str(item.get("capability", "reason"))[:50]
+            if capability not in VALID_CAPABILITIES:
+                logger.warning(
+                    "Jacobs planner: capability '%s' fuera de VALID_CAPABILITIES "
+                    "→ degradada a 'reason' (segura)", capability,
+                )
+                capability = "reason"
             valid.append({
                 "facet": facet,
-                "capability": str(item.get("capability", "reason"))[:50],
+                "capability": capability,
                 "prompt": str(item.get("prompt", ""))[:2000],
                 "depends_on": depends_on,
             })
