@@ -26,8 +26,16 @@ logs/
 *.bak.*
 *.FERNANDO-*
 
+# --- Artefactos generados por facetas (respuestas de runtime, no son fuente) ---
+# Patrón <hash>_NN_<faceta>.md generado por el motor; bibox-concepto.md y demás docs reales se preservan
+repo/documents/*_[0-9][0-9]_*.md
+
+# --- Web-tasks transitorios (estado de runtime; los briefs hechos a mano sí se versionan) ---
+missions/web-task-*
+
 # --- Misc ---
 que
+.../
 
 # Config local de Claude Code (por máquina)
 .claude/settings.local.json

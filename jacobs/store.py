@@ -214,14 +214,15 @@ async def step_upsert(s: Step) -> None:
                     (step_id, pipeline_id, step_index, facet, capability,
                      input_ref, output_ref, status, timeout_seconds,
                      retries_allowed, skip_on_fail, trace_id,
-                     started_at, finished_at, error)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s)
+                     started_at, finished_at, error, depends_on)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s, %s)
                 ON DUPLICATE KEY UPDATE
                     status=VALUES(status),
                     output_ref=VALUES(output_ref),
                     started_at=VALUES(started_at),
                     finished_at=VALUES(finished_at),
-                    error=VALUES(error)
+                    error=VALUES(error),
+                    depends_on=VALUES(depends_on)
                 """,
                 (
                     s.step_id, s.pipeline_id, s.step_index, s.facet, s.capability,
@@ -229,6 +230,7 @@ async def step_upsert(s: Step) -> None:
                     s.status.value, s.timeout_seconds,
                     s.retries_allowed, s.skip_on_fail, s.trace_id,
                     s.started_at, s.finished_at, s.error,
+                    json.dumps(s.depends_on, ensure_ascii=False),
                 ),
             )
     finally:
@@ -253,6 +255,11 @@ async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
             input_data = json.loads(input_raw)
         except (json.JSONDecodeError, TypeError):
             input_data = {}
+        deps_raw = row.get("depends_on")
+        try:
+            depends_on = json.loads(deps_raw) if deps_raw else []
+        except (json.JSONDecodeError, TypeError):
+            depends_on = []
         result.append(Step(
             step_id=row["step_id"],
             pipeline_id=row["pipeline_id"],
@@ -269,6 +276,7 @@ async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             error=row["error"],
+            depends_on=depends_on,
         ))
     return result
 

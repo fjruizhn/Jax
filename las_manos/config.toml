@@ -49,6 +49,12 @@ allowed_ops    = ["ssh_exec_readonly", "read_file", "list_dir", "audit_log_read"
 can_write_prod = false
 description    = "Auditor — solo lectura y consulta de logs"
 
+[facets.ada]
+allowed_envs   = ["staging", "local"]
+allowed_ops    = ["ssh_exec_readonly", "read_file", "list_dir", "validate_json", "validate_yaml"]
+can_write_prod = false
+description    = "Analítica — lectura y validación; nunca escribe en prod"
+
 [facets.hyde]
 allowed_envs   = ["staging", "prod", "bridge", "local"]
 allowed_ops    = ["ssh_exec_readonly", "ssh_exec", "read_file", "write_file", "list_dir", "rsync", "http_get", "kill_process"]
@@ -147,15 +153,16 @@ supports_reasoning = true
 reasoning_default_visibility = "audit_only"
 
 [motors.ada]
-enabled = false
-provider = "zhipu"
-api_key_env = "ZHIPU_API_KEY"
+enabled = true
+provider = "zai"
+api_key_env = "ZAI_API_KEY"
 api_url = "https://api.z.ai/api/paas/v4/chat/completions"
 model = "glm-5.2"
 max_context_tokens = 1000000
 sandbox_only = true
 default_timeout_seconds = 600
-supports_reasoning = false
+supports_reasoning = true
+reasoning_default_visibility = "audit_only"
 
 # ------------------------------------------------------------
 #  CAPABILITIES — tareas que los motores pueden ejecutar
@@ -179,7 +186,7 @@ forbidden_paths = [".env", "secrets/", "private_keys/", "credentials/"]
 
 [capabilities.refactor]
 allowed_motors = ["kimi"]
-allowed_callers = ["hyde", "ada"]
+allowed_callers = ["hyde", "ada", "jacobs"]
 risk_level = "medium"
 sandbox_only = true
 requires_human_gate = false
@@ -206,3 +213,36 @@ requires_human_gate = true
 max_execution_minutes = 15
 max_recursion_depth = 0
 output_schema = "bug_hunt.v1"
+
+[capabilities.pipeline_analysis]
+allowed_motors = ["kimi"]
+allowed_callers = ["jacobs", "hyde"]
+risk_level = "low"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "analysis.v1"
+
+# ------------------------------------------------------------
+#  implementation — coding agéntico de largo horizonte vía Kimi.
+#  Causa raíz del fallo 0.0s: Jacobs despachaba capability="implementation"
+#  que no existía en este catálogo → REJECTED inmediato. Se define aquí.
+#
+#  Gate humano: requires_human_gate=false ES SEGURO y NO bypassa control.
+#  Evidencia (verificada en código, jun-2026): el worker SOLO llama a la API
+#  de Kimi y guarda el texto (worker.py) — NO ejecuta, NO escribe en remoto,
+#  NO commitea. La única ruta que muta sistemas (Hyde → ssh/write) está SIEMPRE
+#  gateada por /approve-step (executor.py:455). El output de Kimi solo llega a
+#  una acción real a través de un step Hyde aprobado por Fernando.
+# ------------------------------------------------------------
+[capabilities.implementation]
+allowed_motors = ["kimi"]
+allowed_callers = ["jacobs", "hyde"]
+risk_level = "medium"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 30
+max_recursion_depth = 0
+output_schema = "code_patch.v1"
+forbidden_paths = [".env", "secrets/", "private_keys/", "credentials/"]

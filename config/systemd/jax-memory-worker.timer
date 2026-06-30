@@ -1,0 +1,11 @@
+# /etc/systemd/system/jax-memory-worker.timer
+[Unit]
+Description=JAX — Worker de memoria cada 20 min (automatiza la destilacion de facts)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=20min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

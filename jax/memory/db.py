@@ -43,6 +43,9 @@ _ROLE_MAP = {
     "jekyll": "jekyll",
     "hyde": "hyde",
     "hipatia": "hipatia",
+    "thot": "thot",
+    "kimi": "kimi",
+    "ada": "ada",
 }
 
 
@@ -170,19 +173,29 @@ class MemoryDB:
     # Conversaciones
     # --------------------------------------------------------
     @db_error_handler
-    async def start_conversation(self, source: str = "terminal") -> Optional[str]:
-        """Crea una conversacion nueva. Devuelve su UUID (o None si fallo)."""
+    async def start_conversation(self, source: str = "terminal",
+                                 user_id: Optional[int] = None,
+                                 tenant_id: Optional[int] = None,
+                                 project_id: Optional[int] = None) -> Optional[str]:
+        """Crea una conversacion nueva. Devuelve su UUID (o None si fallo).
+
+        Scope de dos niveles (opcional, retrocompatible):
+          - project_id NOT NULL -> memoria de PROYECTO (compartida por el equipo).
+          - project_id NULL     -> memoria INDIVIDUAL de user_id (privada).
+        """
         if not self.pool:
             return None
         conv_uuid = str(uuid.uuid4())
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "INSERT INTO conversations (conversation_uuid, source, started_at) "
-                    "VALUES (%s, %s, NOW())",
-                    (conv_uuid, source),
+                    "INSERT INTO conversations "
+                    "(conversation_uuid, source, started_at, user_id, tenant_id, project_id) "
+                    "VALUES (%s, %s, NOW(), %s, %s, %s)",
+                    (conv_uuid, source, user_id, tenant_id, project_id),
                 )
-        logger.info(f"Conversacion iniciada: {conv_uuid[:8]} ({source})")
+        logger.info(f"Conversacion iniciada: {conv_uuid[:8]} ({source}) "
+                    f"user={user_id} project={project_id}")
         return conv_uuid
 
     @db_error_handler
@@ -283,19 +296,21 @@ class MemoryDB:
     @db_error_handler
     async def get_unprocessed_conversations(self, limit: int = 10) -> Optional[list]:
         """Devuelve conversaciones cerradas que el worker aun no proceso.
-        Retorna lista de dicts {id, conversation_uuid} o None si fallo."""
+        Retorna lista de dicts {id, uuid, user_id, project_id} o None si fallo.
+        user_id/project_id viajan para que los facts hereden el scope de origen."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT id, conversation_uuid FROM conversations "
+                    "SELECT id, conversation_uuid, user_id, project_id FROM conversations "
                     "WHERE ended_at IS NOT NULL AND memory_processed = FALSE "
                     "ORDER BY ended_at ASC LIMIT %s",
                     (limit,),
                 )
                 rows = await cur.fetchall()
-                return [{"id": r[0], "uuid": r[1]} for r in rows]
+                return [{"id": r[0], "uuid": r[1], "user_id": r[2],
+                         "project_id": r[3]} for r in rows]
 
     @db_error_handler
     async def get_conversation_messages(self, conv_id: int) -> Optional[list]:
@@ -341,9 +356,14 @@ class MemoryDB:
     async def save_fact(self, fact_text: str, fact_type: str,
                         source_message_id: Optional[int] = None,
                         source_facet: Optional[str] = None,
-                        confidence: float = 0.7) -> Optional[bool]:
+                        confidence: float = 0.7,
+                        user_id: Optional[int] = None,
+                        project_id: Optional[int] = None) -> Optional[bool]:
         """Guarda un hecho extraido. confidence 0.7 + is_verified=FALSE por
-        defecto: nada entra como verdad absoluta sin que Fernando lo revise."""
+        defecto: nada entra como verdad absoluta sin que Fernando lo revise.
+
+        Scope de dos niveles: project_id NOT NULL -> fact de proyecto (compartido);
+        NULL -> fact individual de user_id."""
         if not self.pool:
             return None
         # Validar fact_type contra el ENUM del esquema
@@ -355,9 +375,10 @@ class MemoryDB:
                 await cur.execute(
                     "INSERT INTO facts "
                     "(fact_uuid, fact_text, fact_type, confidence, source_message_id, "
-                    "source_facet, is_verified) "
-                    "VALUES (UUID(), %s, %s, %s, %s, %s, FALSE)",
-                    (fact_text, ftype, confidence, source_message_id, source_facet),
+                    "source_facet, is_verified, user_id, project_id) "
+                    "VALUES (UUID(), %s, %s, %s, %s, %s, FALSE, %s, %s)",
+                    (fact_text, ftype, confidence, source_message_id, source_facet,
+                     user_id, project_id),
                 )
                 await cur.execute("SELECT LAST_INSERT_ID()")
                 fact_id = (await cur.fetchone())[0]
@@ -376,34 +397,40 @@ class MemoryDB:
 
     @db_error_handler
     async def save_decision(self, title: str, chosen: str, reasoning: str,
-                            context: Optional[str] = None) -> Optional[bool]:
-        """Guarda una decision extraida."""
+                            context: Optional[str] = None,
+                            user_id: Optional[int] = None,
+                            project_id: Optional[int] = None) -> Optional[bool]:
+        """Guarda una decision extraida (con scope de dos niveles)."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "INSERT INTO decisions "
-                    "(decision_uuid, title, context, chosen_option, reasoning) "
-                    "VALUES (UUID(), %s, %s, %s, %s)",
-                    (title, context, chosen, reasoning),
+                    "(decision_uuid, title, context, chosen_option, reasoning, "
+                    "user_id, project_id) "
+                    "VALUES (UUID(), %s, %s, %s, %s, %s, %s)",
+                    (title, context, chosen, reasoning, user_id, project_id),
                 )
         return True
 
     @db_error_handler
     async def save_action_item(self, description: str,
                                due_date: Optional[str] = None,
-                               source_conversation_id: Optional[int] = None) -> Optional[bool]:
-        """Guarda un pendiente extraido."""
+                               source_conversation_id: Optional[int] = None,
+                               user_id: Optional[int] = None,
+                               project_id: Optional[int] = None) -> Optional[bool]:
+        """Guarda un pendiente extraido (con scope de dos niveles)."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "INSERT INTO action_items "
-                    "(action_uuid, description, due_date, source_conversation_id, status) "
-                    "VALUES (UUID(), %s, %s, %s, 'pending')",
-                    (description, due_date, source_conversation_id),
+                    "(action_uuid, description, due_date, source_conversation_id, status, "
+                    "user_id, project_id) "
+                    "VALUES (UUID(), %s, %s, %s, 'pending', %s, %s)",
+                    (description, due_date, source_conversation_id, user_id, project_id),
                 )
         return True
 
@@ -424,8 +451,15 @@ class MemoryDB:
     # --------------------------------------------------------
     # Busqueda semantica
     # --------------------------------------------------------
-    async def search_similar_messages(self, query: str, limit: int = 5) -> list:
+    async def search_similar_messages(self, query: str, limit: int = 5,
+                                      user_id: Optional[int] = None,
+                                      project_id: Optional[int] = None) -> list:
         """Busca mensajes similares a query usando distancia vectorial.
+
+        Scope de dos niveles (opcional):
+          - project_id NOT NULL -> incluye memoria del PROYECTO (compartida).
+          - user_id    NOT NULL -> incluye memoria INDIVIDUAL (project_id IS NULL).
+          - ambos None          -> sin filtro de scope (global; retrocompat REPL viejo).
         Devuelve lista de dicts {content, role, created_at, started_at, distancia}.
         Si Ollama falla, la base falla, o no hay embeddings: devuelve [] (nunca None)."""
         if not self.pool:
@@ -436,6 +470,22 @@ class MemoryDB:
             return []
 
         vec_str = json.dumps(embedding)
+
+        # --- WHERE de scope (dos dimensiones) -----------------------------
+        # (project_id = P)  OR  (project_id IS NULL AND user_id = U)
+        scope_sql = ""
+        scope_params: list = []
+        clauses = []
+        if project_id is not None:
+            clauses.append("c.project_id = %s")
+            scope_params.append(project_id)
+        if user_id is not None:
+            clauses.append("(c.project_id IS NULL AND c.user_id = %s)")
+            scope_params.append(user_id)
+        if clauses:
+            scope_sql = "WHERE (" + " OR ".join(clauses) + ") "
+        # ------------------------------------------------------------------
+
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -444,9 +494,10 @@ class MemoryDB:
                         "VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) AS distancia "
                         "FROM messages m "
                         "JOIN conversations c ON m.conversation_id = c.id "
+                        + scope_sql +
                         "ORDER BY VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) ASC "
                         "LIMIT %s",
-                        (vec_str, vec_str, limit),
+                        ([vec_str] + scope_params + [vec_str, limit]),
                     )
                     rows = await cur.fetchall()
                     return [dict(r) for r in rows]
@@ -460,8 +511,13 @@ class MemoryDB:
     @db_error_handler
     async def get_facts(self, only_unverified: bool = True,
                         fact_type: Optional[str] = None,
-                        limit: int = 20) -> Optional[list]:
+                        limit: int = 20,
+                        user_id: Optional[int] = None,
+                        project_id: Optional[int] = None) -> Optional[list]:
         """Lista facts. Por defecto solo los no verificados (a revisar).
+        Scope de dos niveles opcional (igual que search_similar_messages):
+          - project_id NOT NULL -> facts del proyecto; user_id -> facts individuales.
+          - ambos None -> sin filtro de scope (retrocompat).
         Devuelve lista de dicts o None si fallo."""
         if not self.pool:
             return None
@@ -474,6 +530,16 @@ class MemoryDB:
         if fact_type:
             conditions.append("fact_type = %s")
             params.append(fact_type)
+        # Scope de dos dimensiones (project compartido / individual de user)
+        scope_clauses = []
+        if project_id is not None:
+            scope_clauses.append("project_id = %s")
+            params.append(project_id)
+        if user_id is not None:
+            scope_clauses.append("(project_id IS NULL AND user_id = %s)")
+            params.append(user_id)
+        if scope_clauses:
+            conditions.append("(" + " OR ".join(scope_clauses) + ")")
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY created_at DESC LIMIT %s"

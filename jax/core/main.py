@@ -204,7 +204,7 @@ async def handle_fact_command(db, line: str, pending_delete: dict) -> str:
     )
 
 
-async def run_task(task_file: Path) -> None:
+async def run_task(task_file: Path, facet_cli: str | None = None) -> None:
     """Ejecuta una tarea autónoma desde un archivo .md sin REPL interactivo.
     Escribe el resultado en <nombre>_result.md junto al archivo de entrada."""
     with open(CONFIG_PATH, "rb") as f:
@@ -258,8 +258,11 @@ async def run_task(task_file: Path) -> None:
               f"Borrá {kill_path} para reactivar.")
         sys.exit(1)
 
-    # Elegir faceta
-    if faceta_forzada:
+    # Elegir faceta (precedencia: CLI --facet > cabecera del archivo > router)
+    if facet_cli:
+        faceta = facet_cli
+        print(f"[tarea] Faceta: {faceta} (FORZADA por --facet, router omitido)")
+    elif faceta_forzada:
         if faceta_forzada not in muscles:
             print(f"[tarea] Error: la faceta '{faceta_forzada}' no existe en la config.")
             sys.exit(1)
@@ -311,7 +314,7 @@ async def run_task(task_file: Path) -> None:
         )
 
     except (MuscleError, Exception) as e:
-        error_msg = humanizar_error(label, e)
+        error_msg = str(e) or repr(e) or "error sin detalle"
 
         result_file.write_text(
             f"# Error en tarea: {task_file.name}\n\n{error_msg}\n",
@@ -351,6 +354,14 @@ async def main() -> None:
     )
 
     # --- Memoria persistente (tolerante a fallos) -----------------------
+    # Identidad del REPL (sin hardcode): scope INDIVIDUAL de Fernando, para que
+    # su memoria sea la MISMA entre consola y web (jax-platform /api/chat).
+    def _repl_int(name):
+        v = os.getenv(name, "")
+        return int(v) if v.strip().isdigit() else None
+    repl_uid = _repl_int("JAX_REPL_USER_ID")
+    repl_tid = _repl_int("JAX_REPL_TENANT_ID")
+
     db = MemoryDB()
     conv_uuid = None
     db_ok = await db.connect(
@@ -360,10 +371,11 @@ async def main() -> None:
         database=os.getenv("JAX_DB_NAME", "jax_memory"),
     )
     if db_ok:
-        conv_uuid = await db.start_conversation(source="terminal")
+        conv_uuid = await db.start_conversation(
+            source="terminal", user_id=repl_uid, tenant_id=repl_tid, project_id=None)
 
-        # Inyectar facts en los system_prompts de todas las facetas.
-        facts = await db.get_facts(only_unverified=False, limit=20)
+        # Inyectar facts en los system_prompts de todas las facetas (scope individual).
+        facts = await db.get_facts(only_unverified=False, limit=20, user_id=repl_uid)
         if facts:
             lineas = [f"- {f['fact_text']}" for f in facts]
             memoria_str = "Lo que sé de Fernando:\n" + "\n".join(lineas)
@@ -515,7 +527,8 @@ async def main() -> None:
                 # Se agrega SOLO a este turno — no entra al historial permanente.
                 history_for_invocation = list(historial)
                 if db_ok:
-                    similares = await db.search_similar_messages(user_text, limit=5)
+                    similares = await db.search_similar_messages(
+                        user_text, limit=5, user_id=repl_uid, project_id=None)
                     relevantes = [r for r in similares if r["distancia"] < 0.8]
                     if relevantes:
                         lineas = []
@@ -582,9 +595,27 @@ if __name__ == "__main__":
         "--task", metavar="ARCHIVO.md", type=Path,
         help="Ejecutar una tarea autónoma desde un archivo .md (sin REPL).",
     )
+    parser.add_argument(
+        "--facet",
+        metavar="NOMBRE",
+        default=None,
+        help="Fuerza la faceta en modo --task, saltando el router "
+             "(ej: --facet ada). Sin esta bandera, el router decide.",
+    )
     cli_args = parser.parse_args()
 
+    if cli_args.facet and not cli_args.task:
+        parser.error("--facet solo puede usarse junto con --task")
+
+    if cli_args.facet:
+        from jax.core.router import VALID_FACETAS
+        if cli_args.facet not in VALID_FACETAS:
+            parser.error(
+                f"faceta '{cli_args.facet}' no válida. "
+                f"Válidas: {', '.join(sorted(VALID_FACETAS))}"
+            )
+
     if cli_args.task:
-        asyncio.run(run_task(cli_args.task))
+        asyncio.run(run_task(cli_args.task, facet_cli=cli_args.facet))
     else:
         asyncio.run(main())

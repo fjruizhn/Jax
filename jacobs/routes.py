@@ -340,20 +340,22 @@ async def approve_step(
 #  GET /jacobs/pipeline/{id}/results
 # ----------------------------------------------------------------
 
-def _resolve_ref(ref: str) -> str:
-    """Extrae el texto de resultado de un output_ref (inline o artifact)."""
+def _resolve_ref(ref: str) -> tuple[str, list]:
+    """Extrae texto y fuentes de un output_ref (inline o artifact). Retorna (result, sources)."""
     if not ref:
-        return ""
+        return "", []
     try:
         if ref.startswith("inline:"):
             data = json.loads(ref[7:])
         elif ref.startswith("artifact://"):
             data = read_artifact(ref)
         else:
-            return ref
-        return str(data.get("result") or data.get("text") or json.dumps(data))
+            return ref, []
+        result = str(data.get("result") or data.get("text") or json.dumps(data))
+        sources = data.get("sources") or []
+        return result, sources
     except Exception:
-        return ""
+        return "", []
 
 
 @router.get("/pipeline/{pipeline_id}/results")
@@ -367,7 +369,7 @@ async def get_pipeline_results(pipeline_id: str) -> dict:
 
     steps_data = []
     for step in steps:
-        result_text = _resolve_ref(step.output_ref or "")
+        result_text, sources = _resolve_ref(step.output_ref or "")
         duration = None
         if step.started_at and step.finished_at:
             duration = round(step.finished_at - step.started_at, 2)
@@ -378,6 +380,7 @@ async def get_pipeline_results(pipeline_id: str) -> dict:
             "name":              step.input.get("name", f"{step.facet} — {step.capability}"),
             "status":            step.status.value,
             "result":            result_text,
+            "sources":           sources,
             "duration_seconds":  duration,
             "error":             step.error,
         })
