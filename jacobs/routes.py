@@ -233,23 +233,22 @@ async def resume_pipeline(
 
     await store.event_append(pipeline_id, "PIPELINE_RESUMED", {"by": req.invoked_by})
 
-    # Desbloquear el step actual antes de reanudar
+    # Desbloquear TODOS los steps en estado blocked (una ola supervised pudo
+    # dejar varios). El executor recalcula las olas desde los refs en context,
+    # así que basta con poner los blocked en pending para que entren a su ola.
     steps = await store.steps_by_pipeline(pipeline_id)
-    current_idx = pipeline.current_step_index
-    if current_idx < len(steps):
-        blocked_step = steps[current_idx]
-        if blocked_step.status == StepStatus.blocked:
-            blocked_step.status = StepStatus.pending
-            await store.step_upsert(blocked_step)
+    for s in steps:
+        if s.status == StepStatus.blocked:
+            s.status = StepStatus.pending
+            await store.step_upsert(s)
 
-    # Actualizar plan con steps frescos para el executor
     pipeline.plan = steps
     background.add_task(run_pipeline, pipeline)
 
     return {
         "pipeline_id": pipeline_id,
         "status": "resuming",
-        "from_step": pipeline.current_step_index,
+        "from_index": pipeline.current_step_index,
     }
 
 
@@ -287,52 +286,51 @@ async def approve_step(
         raise HTTPException(status_code=423, detail="Kill switch activo — no se puede aprobar")
 
     steps = await store.steps_by_pipeline(pipeline_id)
-    current_idx = pipeline.current_step_index
-    if current_idx >= len(steps):
-        raise HTTPException(status_code=409, detail="No hay step pendiente de aprobación")
 
-    current_step = steps[current_idx]
-    if current_step.status != StepStatus.blocked_human_gate:
+    # Buscar TODOS los steps en human gate (una ola puede tener varios hyde).
+    gated = [s for s in steps if s.status == StepStatus.blocked_human_gate]
+    if not gated:
         raise HTTPException(
-            status_code=409,
-            detail=(
-                f"El step {current_idx} no está en blocked_human_gate "
-                f"(actual: '{current_step.status.value}')"
-            ),
+            status_code=409, detail="No hay steps pendientes de aprobación (human gate)"
         )
 
-    if current_step.facet != "hyde" and pipeline.mode != "supervised":
-        raise HTTPException(
-            status_code=422,
-            detail="approve-step solo válido para hyde o pipelines en modo supervised",
-        )
+    # En modo no-supervised, approve-step solo aplica a hyde. En supervised,
+    # aplica a cualquier step de la ola pausada.
+    if pipeline.mode != "supervised":
+        non_hyde = [s for s in gated if s.facet != "hyde"]
+        if non_hyde:
+            raise HTTPException(
+                status_code=422,
+                detail="approve-step solo válido para hyde o pipelines en modo supervised",
+            )
 
-    await store.event_append(
-        pipeline_id, "STEP_APPROVED",
-        {"step_index": current_idx, "facet": current_step.facet, "by": req.invoked_by},
-        current_step.step_id,
+    approved_indices = []
+    for current_step in gated:
+        await store.event_append(
+            pipeline_id, "STEP_APPROVED",
+            {"step_index": current_step.step_index, "facet": current_step.facet,
+             "by": req.invoked_by},
+            current_step.step_id,
+        )
+        current_step.status = StepStatus.pending
+        current_step.error  = None
+        await store.step_upsert(current_step)
+        if current_step.facet == "hyde":
+            pipeline.context[f"hyde_approved_{current_step.step_id}"] = True
+        approved_indices.append(current_step.step_index)
+
+    # Persistir las marcas hyde_approved_* en context antes de reanudar.
+    await store.pipeline_update_status(
+        pipeline_id, pipeline.status, pipeline.current_step_index, pipeline.context
     )
-
-    current_step.status = StepStatus.pending
-    current_step.error  = None
-    await store.step_upsert(current_step)
-
-    # Marcar en context que este step hyde fue aprobado, para que el executor
-    # no vuelva a bloquearlo cuando run_pipeline se reanude.
-    if current_step.facet == "hyde":
-        pipeline.context[f"hyde_approved_{current_step.step_id}"] = True
-        await store.pipeline_update_status(
-            pipeline_id, pipeline.status, pipeline.current_step_index, pipeline.context
-        )
 
     pipeline.plan = steps
     background.add_task(run_pipeline, pipeline)
 
     return {
-        "pipeline_id":   pipeline_id,
-        "status":        "resuming",
-        "approved_step": current_idx,
-        "facet":         current_step.facet,
+        "pipeline_id":     pipeline_id,
+        "status":          "resuming",
+        "approved_steps":  approved_indices,
     }
 
 
