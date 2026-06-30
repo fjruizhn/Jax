@@ -1,7 +1,8 @@
 """
 Jacobs — Almacén de artifacts.
 
-Outputs > 1 MB van a disco. El context del pipeline guarda solo la ref.
+Outputs > 60 KB van a disco. El context del pipeline guarda solo la ref.
+SIZE_LIMIT alineado con TEXT de MariaDB (~64 KB) con margen de seguridad.
 En honor al Prof. Raúl Jacobs.
 """
 from __future__ import annotations
@@ -10,12 +11,12 @@ import json
 from pathlib import Path
 
 ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
-SIZE_LIMIT = 1 * 1024 * 1024  # 1 MB
+SIZE_LIMIT = 60_000  # bytes. >60 KB → artifact en archivo (output_ref no aguanta más inline).
 
 
 def save_if_large(pipeline_id: str, step_id: str, data: dict) -> tuple[str | None, dict | None]:
     """
-    Si data serializado supera 1 MB, guarda en archivo y devuelve (ref, None).
+    Si data serializado supera SIZE_LIMIT, guarda en archivo y devuelve (ref, None).
     Si cabe, devuelve (None, data) para guardarlo inline.
     """
     raw = json.dumps(data, ensure_ascii=False)

@@ -13,7 +13,9 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+import traceback
 from pathlib import Path
 
 import tomllib
@@ -41,7 +43,24 @@ _CATALOG = MotorCatalog(_CONFIG)
 _POLICY = MotorPolicy(_CATALOG)
 _KILL_SWITCH_PATH: str = _CONFIG.get("server", {}).get("kill_switch_path", "/etc/jax/PAUSE")
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/motor", tags=["motor_registry"])
+
+
+def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
+    """Done-callback: cierra el punto ciego del create_task fire-and-forget.
+    Cualquier excepción que escape de worker.run (incl. fuera de su try interno)
+    queda en el log con traceback completo, en vez de morir en silencio."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "Excepción no capturada en worker del job %s:\n%s",
+            job_id,
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        )
 
 
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
@@ -88,7 +107,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
         recursion_depth=req.recursion_depth,
     )
 
-    asyncio.create_task(
+    task = asyncio.create_task(
         motor_worker.run(
             job_id=job_id,
             motor=result.resolved_motor,
@@ -100,6 +119,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             kill_switch_path=_KILL_SWITCH_PATH,
         )
     )
+    task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
 
     return MotorDispatchResponse(
         job_id=job_id,

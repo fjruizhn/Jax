@@ -27,6 +27,10 @@ LAS_MANOS_BASE = "http://127.0.0.1:7777"
 OLLAMA_URL     = "http://localhost:11434/api/chat"
 MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 
+# Tope de seguridad para el output COMPLETO de cada dependencia declarada (~15K tokens).
+# Si el ensamble de muchas deps roza la ventana, ajustar y re-verificar con el log de C1.
+MAX_DEP_CONTEXT_CHARS = 60_000
+
 # Facetas que van directo por HTTP a sus APIs
 _HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
 
@@ -55,30 +59,68 @@ def _load_ref(ref: str) -> dict:
     return {}
 
 
+# Regla anti-simulación compartida — fuente única de verdad. Se inyecta en el
+# prompt de CADA step del pipeline (todas las facets, incluido el motor Kimi),
+# porque el path de pipeline NO usa los system_prompt de config.toml.
+_EVIDENCE_RULE = (
+    "REGLA DE EVIDENCIA (innegociable): Nunca simules, inventes ni asumas la "
+    "salida de un comando, log, archivo o llamada a API. Si no lo ejecutaste y "
+    "viste su salida real, NO lo reportes como hecho. Si no podés verificar un "
+    "dato, declarálo como INCÓGNITA — no lo rellenes con suposiciones. Un reporte "
+    "con resultados inventados es peor que no entregar nada. Pegá la evidencia "
+    "cruda, no una descripción de lo que harías. \"El que supone se equivoca.\""
+)
+
+
 def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
-    """Construye el input enriquecido con contexto de steps anteriores."""
+    """Construye el input enriquecido.
+
+    Si el step declara depends_on, carga el output COMPLETO de esas dependencias
+    (hasta MAX_DEP_CONTEXT_CHARS por dep). Si no, resumen 500 chars de los anteriores
+    (comportamiento original — no rompe pipelines triviales).
+    """
     objective = pipeline.context.get("objective", "")
     previous_outputs: list[dict] = []
 
-    for j in range(step.step_index):
+    deps = getattr(step, "depends_on", []) or []
+    if deps:
+        indices = [j for j in deps if 0 <= j < step.step_index]
+        full = True
+    else:
+        indices = list(range(step.step_index))
+        full = False
+
+    for j in indices:
         ref = pipeline.context.get(f"step_{j}_ref", "")
         if not ref:
             continue
-        facet_name = (
-            pipeline.plan[j].facet
-            if j < len(pipeline.plan) else "unknown"
-        )
+        facet_name = pipeline.plan[j].facet if j < len(pipeline.plan) else "unknown"
         try:
             data = _load_ref(ref)
             result_text = data.get("result") or data.get("text") or json.dumps(data)
-            summary = str(result_text)[:500]
+            text = str(result_text)
+            if full:
+                content = text[:MAX_DEP_CONTEXT_CHARS]
+                truncated = len(text) > MAX_DEP_CONTEXT_CHARS
+            else:
+                content = text[:500]
+                truncated = len(text) > 500
         except Exception:  # noqa: BLE001
-            summary = f"[ref: {ref}]"
+            content = f"[ref: {ref}]"
+            truncated = False
         previous_outputs.append({
             "step_index": j,
             "facet": facet_name,
-            "summary": summary,
+            "summary": content,
+            "truncated": truncated,
         })
+
+    total_chars = sum(len(p["summary"]) for p in previous_outputs)
+    logger.info(
+        "Jacobs step %s deps=%s contexto=%d chars%s",
+        step.step_index, deps, total_chars,
+        " [ALGUNA DEP TRUNCADA]" if any(p.get("truncated") for p in previous_outputs) else "",
+    )
 
     return {
         "objective": objective,
@@ -89,17 +131,18 @@ def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
 
 def _enrich_prompt(ctx_input: dict) -> str:
     """Construye el prompt final incluyendo contexto previo."""
-    parts: list[str] = []
+    parts: list[str] = [_EVIDENCE_RULE]
 
     if ctx_input.get("objective"):
         parts.append(f"Objetivo del pipeline: {ctx_input['objective']}")
 
     prev = ctx_input.get("previous_outputs", [])
     if prev:
-        parts.append("\nContexto de pasos anteriores:")
+        parts.append("\nSalidas de las dependencias declaradas (usalas como fuente, no las reinventes):")
         for p in prev:
+            nota = " [TRUNCADO — dependencia excede el tope]" if p.get("truncated") else ""
             parts.append(
-                f"  Paso {p['step_index'] + 1} ({p['facet']}): {p['summary']}"
+                f"\n--- Dependencia: step {p['step_index']} ({p['facet']}){nota} ---\n{p['summary']}"
             )
 
     if ctx_input.get("prompt"):
@@ -248,12 +291,12 @@ async def _invoke_thot(prompt: str, timeout: int) -> dict:
 
 async def _invoke_ada(prompt: str, timeout: int) -> dict:
     """Z.ai GLM-5.2 — diseño de arquitectura. Gracia si la key no está."""
-    api_key = os.environ.get("ZHIPU_API_KEY", "")
+    api_key = os.environ.get("ZAI_API_KEY") or os.environ.get("ZHIPU_API_KEY", "")
     if not api_key:
         return {
             "success": False,
             "facet":   "ada",
-            "result":  "Ada no disponible — ZHIPU_API_KEY no configurada.",
+            "result":  "Ada no disponible — ZAI_API_KEY no configurada.",
             "disabled": True,
         }
     model   = "glm-5.2"
@@ -269,14 +312,37 @@ async def _invoke_ada(prompt: str, timeout: int) -> dict:
         )},
         {"role": "user", "content": prompt},
     ]
-    payload = {"model": model, "messages": messages, "stream": False}
-
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "max_tokens": 131072,
+    }
+    texto = ""
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Z.ai HTTP {resp.status_code}: {resp.text[:200]}")
-        data  = resp.json()
-        texto = data["choices"][0]["message"].get("content", "")
+        async with client.stream("POST", url, headers=headers, json=payload) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                raise RuntimeError(f"Z.ai HTTP {resp.status_code}: {body[:200]!r}")
+            partes = []
+            async for linea in resp.aiter_lines():
+                if not linea or not linea.startswith("data:"):
+                    continue
+                payload_str = linea[5:].strip()
+                if payload_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload_str)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                pieza = delta.get("content")
+                if pieza:
+                    partes.append(pieza)
+            texto = "".join(partes)
 
     return {
         "success": True,
@@ -308,14 +374,32 @@ async def _invoke_jax_local(prompt: str, timeout: int) -> dict:
     }
 
 
+_CAPABILITY_MAP = {
+    "analysis":  "pipeline_analysis",
+    "research":  "pipeline_analysis",
+    "review":    "refactor",
+    "code":      "refactor",
+    "implement": "code_swarm",
+}
+
+
 async def _invoke_motor(step: Step, timeout: int) -> dict:
     """Kimi via Motor Registry de LAS MANOS. Polling hasta completar."""
+    capability = _CAPABILITY_MAP.get(step.capability, step.capability)
+    # Observabilidad: si la capability no estaba en el mapa de traducción, se
+    # despacha cruda al Motor Registry. Antes esto fallaba en 0.0s en silencio.
+    if step.capability not in _CAPABILITY_MAP:
+        logger.warning(
+            "Capability '%s' no está en _CAPABILITY_MAP; se despacha cruda al "
+            "Motor Registry (debe existir como [capabilities.%s] en config.toml).",
+            step.capability, capability,
+        )
     payload = {
         "caller":     "jacobs",
-        "capability": step.capability,
+        "capability": capability,
         "motor":      step.facet,
         "trace_id":   step.trace_id,
-        "prompt":     step.input.get("prompt", json.dumps(step.input)),
+        "prompt":     _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload)
@@ -324,9 +408,12 @@ async def _invoke_motor(step: Step, timeout: int) -> dict:
 
     job_id = dispatch.get("job_id")
     if dispatch.get("status") == "rejected":
-        raise RuntimeError(
-            f"Motor Registry rechazó el job: {dispatch.get('rejected_reason', 'sin razón')}"
+        reason = dispatch.get("rejected_reason", "sin razón")
+        logger.error(
+            "Motor Registry RECHAZÓ job (caller=jacobs, capability=%s, motor=%s): %s",
+            capability, step.facet, reason,
         )
+        raise RuntimeError(f"Motor Registry rechazó el job: {reason}")
     if not job_id:
         raise RuntimeError(f"Motor Registry no devolvió job_id: {dispatch}")
 
@@ -360,11 +447,60 @@ async def _invoke_motor(step: Step, timeout: int) -> dict:
 
 
 # ----------------------------------------------------------------
+#  Ensamble mecánico
+# ----------------------------------------------------------------
+
+def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
+    """Ensamble MECÁNICO del paquete final. Sin LLM. Concatena los outputs de los
+    módulos ya generados (steps de diseño), incluye el manifest que generó este step
+    (si su prompt produjo uno) y los parches de reconciliación. No puede fallar por tamaño."""
+    partes = []
+    partes.append("# PAQUETE MODULAR ENSAMBLADO\n")
+    partes.append(f"# Pipeline: {pipeline.pipeline_id}\n")
+    partes.append(f"# Objetivo: {pipeline.context.get('objective', '')}\n")
+    partes.append(f"# Generado por Jacobs (ensamble mecánico) — {len(pipeline.plan)} steps\n\n")
+
+    skip_caps = {"validate_consistency", "critique", "reconcile", "assemble"}
+    patches_text = ""
+    for j in range(step.step_index):
+        prev = pipeline.plan[j]
+        ref = pipeline.context.get(f"step_{j}_ref", "")
+        if not ref:
+            continue
+        data = _load_ref(ref)
+        result = data.get("result") or data.get("text") or ""
+        if prev.capability == "reconcile":
+            patches_text = str(result)
+            continue
+        if prev.capability in skip_caps:
+            continue
+        partes.append(f"\n{'='*70}\n## MÓDULO (step {j}): {prev.capability}\n{'='*70}\n")
+        partes.append(str(result))
+
+    if patches_text:
+        partes.append(f"\n{'='*70}\n## PARCHES DE RECONCILIACIÓN (correcciones del validador)\n{'='*70}\n")
+        partes.append(patches_text)
+
+    documento = "\n".join(partes)
+    logger.info("Jacobs ensamble mecánico: %d chars de %d módulos", len(documento), step.step_index)
+    return {
+        "success": True,
+        "facet": "ada",
+        "model": "mechanical_assembler",
+        "result": documento,
+    }
+
+
+# ----------------------------------------------------------------
 #  Dispatcher principal
 # ----------------------------------------------------------------
 
 async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     """Selecciona el worker correcto según la faceta."""
+    # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
+    if step.capability == "assemble":
+        return _assemble_mechanical(step, pipeline)
+
     ctx_input = _build_context_input(step, pipeline)
     prompt    = _enrich_prompt(ctx_input)
     timeout   = step.timeout_seconds
@@ -515,6 +651,17 @@ async def run_pipeline(pipeline: Pipeline) -> None:
                 {"step_index": i, "output_ref": step.output_ref},
                 step.step_id,
             )
+            try:
+                await _persist_step_to_repo(
+                    pipeline_id=pipeline_id,
+                    pipeline_name=pipeline.name,
+                    step_index=i,
+                    facet=step.facet,
+                    capability=step.capability,
+                    raw_output=raw_output,
+                )
+            except Exception as _persist_err:  # noqa: BLE001
+                logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
 
         except asyncio.TimeoutError:
             await _fail_step(pipeline, step, i, f"Timeout ({step.timeout_seconds}s)")
@@ -531,6 +678,61 @@ async def run_pipeline(pipeline: Pipeline) -> None:
         pipeline_id, PipelineStatus.completed, len(pipeline.plan), pipeline.context
     )
     await store.event_append(pipeline_id, "PIPELINE_COMPLETED")
+
+
+async def _persist_step_to_repo(
+    pipeline_id: str,
+    pipeline_name: str,
+    step_index: int,
+    facet: str,
+    capability: str,
+    raw_output: dict,
+) -> None:
+    """Guarda el output de un step como .md en ~/jax/repo/documents/"""
+    import aiofiles
+    from pathlib import Path
+
+    repo_dir = Path(os.path.expanduser("~/jax/repo/documents"))
+    repo_dir.mkdir(parents=True, exist_ok=True)
+
+    filename = f"{pipeline_id[:8]}_{step_index:02d}_{facet}.md"
+    filepath = repo_dir / filename
+
+    result_text = raw_output.get("result", "")
+    sources     = raw_output.get("sources", [])
+    model       = raw_output.get("model", "desconocido")
+    success     = raw_output.get("success", False)
+
+    lines = [
+        f"# {pipeline_name}",
+        f"",
+        f"| Campo | Valor |",
+        f"|-------|-------|",
+        f"| Pipeline | `{pipeline_id}` |",
+        f"| Step | {step_index + 1} |",
+        f"| Faceta | {facet} |",
+        f"| Capability | {capability} |",
+        f"| Modelo | {model} |",
+        f"| Estado | {'✓ completado' if success else '✗ fallido'} |",
+        f"",
+        f"## Respuesta",
+        f"",
+        result_text,
+    ]
+
+    if sources:
+        lines += ["", "## Fuentes", ""]
+        for s in sources:
+            title = s.get("title") or s.get("url", "")
+            url   = s.get("url", "")
+            lines.append(f"- [{title}]({url})")
+
+    content = "\n".join(lines)
+
+    async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
+        await f.write(content)
+
+    logger.info("Step output persistido: %s", filename)
 
 
 async def _fail_step(

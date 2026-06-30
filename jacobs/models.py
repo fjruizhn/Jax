@@ -52,6 +52,7 @@ class Step(BaseModel):
     timeout_seconds:  int = 300
     retries_allowed:  int = 0
     skip_on_fail:     bool = False
+    depends_on:       list[int] = Field(default_factory=list)  # step_index de dependencias
     trace_id:         str = Field(default_factory=lambda: str(uuid.uuid4()))
     started_at:       float | None = None
     finished_at:      float | None = None
@@ -106,6 +107,7 @@ class StepSpec(BaseModel):
     input:           dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 300
     skip_on_fail:    bool = False
+    depends_on:      list[int] = Field(default_factory=list)
 
 
 class StepResult(BaseModel):

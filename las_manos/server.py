@@ -24,6 +24,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 import secrets
@@ -205,6 +206,12 @@ app = FastAPI(
 
 @app.on_event("startup")
 async def _jacobs_init() -> None:
+    _jlog = logging.getLogger("jacobs")
+    _jlog.setLevel(logging.INFO)
+    if not _jlog.handlers:
+        _h = logging.StreamHandler()
+        _h.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
+        _jlog.addHandler(_h)
     await jacobs_store.init_tables()
 
 

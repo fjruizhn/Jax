@@ -147,26 +147,35 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
         logger.error(f"conv {conv_id}: JSON no parseable, se reintentara")
         return False
 
+    # Scope de origen: los facts heredan el scope de su conversacion.
+    # project_id NOT NULL -> memoria de proyecto; NULL -> individual de user_id.
+    conv_user = conv.get("user_id")
+    conv_proj = conv.get("project_id")
+
     # Guardar lo extraido (confidence 0.7, is_verified FALSE en facts)
     n_facts = n_dec = n_act = 0
     for f in data.get("facts", []):
         if f.get("text"):
             await db.save_fact(f["text"], f.get("type", "user"),
-                               source_facet="extractor")
+                               source_facet="extractor",
+                               user_id=conv_user, project_id=conv_proj)
             n_facts += 1
     for d in data.get("decisions", []):
         if d.get("title") and d.get("chosen"):
             await db.save_decision(d["title"], d["chosen"],
-                                   d.get("reasoning", ""))
+                                   d.get("reasoning", ""),
+                                   user_id=conv_user, project_id=conv_proj)
             n_dec += 1
     for a in data.get("action_items", []):
         if a.get("description"):
             await db.save_action_item(a["description"], a.get("due_date"),
-                                      source_conversation_id=conv_id)
+                                      source_conversation_id=conv_id,
+                                      user_id=conv_user, project_id=conv_proj)
             n_act += 1
 
     await db.mark_processed(conv_id)
-    logger.info(f"conv {conv_id}: {n_facts} hechos, {n_dec} decisiones, {n_act} pendientes")
+    logger.info(f"conv {conv_id}: {n_facts} hechos, {n_dec} decisiones, {n_act} pendientes "
+                f"(scope user={conv_user} project={conv_proj})")
     return True
 
 

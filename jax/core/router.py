@@ -55,6 +55,7 @@ LABELS = {
     "jax_local": "JAX",
     "thot": "Thot",
     "kimi": "Kimi",
+    "ada": "Ada",
 }
 ICONS = {
     "hyde": "🔧",
@@ -63,6 +64,7 @@ ICONS = {
     "jax_local": "🏠",
     "thot": "📜",
     "kimi": "⚙️",
+    "ada": "⚛️",
 }
 
 # Nombres que el usuario puede usar para referirse a cada faceta.
@@ -81,6 +83,7 @@ ALIASES = {
     "local": "jax_local",
     "thot": "thot",
     "kimi": "kimi",
+    "ada": "ada",
 }
 
 INVOKE_VERBS = ("trae", "traer", "llama", "llamar", "dame", "traeme",
@@ -107,35 +110,111 @@ EASTER_EGG_TEXT = (
     "acompanandote y ayudandote a ser mejor persona."
 )
 
-# Reglas de dominio para modo AUTO (lo obvio, instantaneo).
-TECH_KEYWORDS = (
-    "codigo", "debug", "api", "docker", "servidor", "ssh", "bash",
-    "python", "script", "comando", "infra", "red", "linux", "git",
-    "app", "aplicacion", "programa", "software", "web", "frontend",
-    "backend", "base de datos", "nginx", "desarrolla", "disena",
-)
-RESEARCH_KEYWORDS = (
-    "investiga", "busca", "fuente", "citacion", "paper", "estudio",
-    "noticia", "ultimo", "actual", "quien es", "que paso",
-)
-ARTS_KEYWORDS = (
-    "poesia", "literatura", "filosofia", "pintura", "musica", "arte",
-    "que significa", "sentis", "escribi un poema", "novela", "historia de",
-)
+# Reglas de dominio para modo AUTO — scoring multi-faceta.
+# Hyde NO es destino del auto-routing: es ejecutor, no conversador.
 
-# Facetas validas que el clasificador puede devolver.
-VALID_FACETAS = ("hyde", "jekyll", "hipatia", "jax_local", "thot", "kimi")
+KIMI_KW = frozenset((
+    "codigo", "programar", "programa", "script", "funcion", "clase", "metodo",
+    "modulo", "libreria", "api", "endpoint", "backend", "frontend",
+    "implementar", "implementa", "construir", "refactor", "refactorizar",
+    "refactoriza", "debug", "depurar", "bug", "traceback", "excepcion",
+    "compilar", "test", "tests", "pytest", "variable", "bucle", "array",
+    "regex", "fastapi", "react", "typescript", "javascript", "python", "sql",
+    "docker", "nginx", "commit", "branch", "merge",
+))
+KIMI_STRONG = frozenset((
+    "refactor", "refactoriza", "implementar", "debug", "depurar", "pytest",
+    "fastapi", "docker", "nginx", "endpoint",
+))
 
-# Prompt del clasificador. Acotado a proposito: una palabra, nada mas.
+HIPATIA_KW = frozenset((
+    "busca", "buscar", "investiga", "investigar", "verifica", "verificar",
+    "fuentes", "fuente", "citas", "referencias", "noticias", "noticia",
+    "actualidad", "reciente", "ultima", "ultimo", "vigente", "precio",
+    "precios", "cotizacion", "mercado", "ley", "regulacion", "normativa",
+    "paper", "papers", "estudio", "informe", "estadistica", "lanzamiento",
+    "version actual", "quien es",
+))
+HIPATIA_STRONG = frozenset((
+    "busca", "buscar", "investiga", "investigar", "noticias", "fuentes",
+    "version actual",
+))
+
+JEKYLL_KW = frozenset((
+    "poesia", "poema", "cuento", "novela", "literatura", "ensayo", "arte",
+    "pintura", "musica", "filosofia", "etica", "estetica", "humanidades",
+    "barroco", "renacimiento", "romanticismo", "mito", "mitologia", "simbolo",
+    "simbolismo", "metafora", "narrativa", "personaje", "estilo",
+    "interpretacion", "sentido", "significado", "reflexion", "reflexiona",
+    "contempla", "humanista", "cultura", "historia del arte", "historia cultural",
+))
+JEKYLL_STRONG = frozenset((
+    "poema", "poesia", "filosofia", "literatura", "mitologia",
+    "historia del arte", "barroco",
+))
+
+THOT_KW = frozenset((
+    "audita", "auditar", "auditoria", "critica", "criticar", "criticamente",
+    "cuestiona", "cuestionar", "adversarial", "abogado del diablo", "riesgo",
+    "riesgos", "falla", "fallas", "debilidad", "debilidades", "vulnerabilidad",
+    "vulnerabilidades", "amenaza", "amenazas", "threat model",
+    "modelo de amenazas", "ataque", "donde se rompe", "punto ciego",
+    "supuesto", "supuestos", "contraargumento", "refuta", "refutar",
+    "no-go", "revisa criticamente",
+))
+THOT_STRONG = frozenset((
+    "audita", "auditar", "auditoria", "vulnerabilidad", "vulnerabilidades",
+    "threat model", "adversarial", "refuta",
+))
+
+ADA_KW = frozenset((
+    "formaliza", "formalizar", "formalizacion", "modelo formal", "pseudocodigo",
+    "logica", "demuestra", "demostrar", "demostracion", "prueba formal",
+    "teorema", "lema", "corolario", "axioma", "proposicion", "invariante",
+    "invariantes", "precondicion", "postcondicion", "maquina de estados",
+    "automata", "complejidad", "big o", "o(n)", "estructura de datos",
+    "grafo", "arbol", "matriz", "vector", "ecuacion", "optimizacion",
+    "funcion objetivo", "matematica", "calculo", "algebra", "probabilidad",
+    "determinista", "induccion", "algoritmo",
+))
+ADA_STRONG = frozenset((
+    "formaliza", "formalizar", "demuestra", "demostrar", "teorema",
+    "invariante", "invariantes", "precondicion", "postcondicion",
+    "complejidad", "maquina de estados",
+))
+
+# Facetas validas para invocacion explicita (incluye hyde).
+VALID_FACETAS = ("hyde", "jekyll", "hipatia", "jax_local", "thot", "kimi", "ada")
+
+# Facetas del auto-routing (hyde excluido: es ejecutor, no conversador).
+AUTO_FACETAS = ("jax_local", "kimi", "hipatia", "jekyll", "thot", "ada")
+
+# Prioridad de desempate en scoring (izquierda gana sobre derecha).
+_TIEBREAK = ("hipatia", "thot", "ada", "kimi", "jekyll")
+
+# Mapa faceta → (conjunto_completo, conjunto_strong)
+_KW_SETS = {
+    "kimi":    (KIMI_KW,    KIMI_STRONG),
+    "hipatia": (HIPATIA_KW, HIPATIA_STRONG),
+    "jekyll":  (JEKYLL_KW,  JEKYLL_STRONG),
+    "thot":    (THOT_KW,    THOT_STRONG),
+    "ada":     (ADA_KW,     ADA_STRONG),
+}
+
+# Prompt del clasificador — 6 facetas, hyde nunca elegible.
 CLASSIFIER_PROMPT = (
-    "Sos un clasificador de intencion. Lei el mensaje del usuario y responde "
-    "con UNA SOLA PALABRA, sin explicacion, eligiendo el dominio:\n"
-    "- 'hyde' = tecnico, codigo, infraestructura, programacion, servidores.\n"
-    "- 'jekyll' = humanidades, arte, literatura, filosofia, musica, reflexion.\n"
-    "- 'hipatia' = investigacion, buscar informacion actual, noticias, datos, hechos verificables.\n"
-    "- 'jax_local' = conversacion cotidiana, saludos, charla casual, nada de lo anterior.\n\n"
-    "Mensaje del usuario:\n{texto}\n\n"
-    "Responde SOLO con: hyde, jekyll, hipatia o jax_local"
+    "Sos un clasificador de intencion. Responde con UNA SOLA PALABRA eligiendo la faceta:\n"
+    "- jax_local = charla casual, saludos, conversacion cotidiana, nada de lo de abajo.\n"
+    "- kimi = codigo, programacion, implementacion, debugging, infraestructura tecnica.\n"
+    "- hipatia = investigacion, buscar info actual, noticias, fuentes, hechos verificables.\n"
+    "- jekyll = humanidades, arte, literatura, filosofia, musica, interpretacion, reflexion.\n"
+    "- thot = auditoria critica, riesgos, fallas, vulnerabilidades, revision adversarial.\n"
+    "- ada = formalizacion, logica, algoritmos, demostraciones, matematica, invariantes, complejidad.\n"
+    "Si dudas: interpretacion->jekyll; critica/riesgo->thot; formalizacion/demostracion->ada;\n"
+    "codigo/implementacion->kimi; actualidad/fuentes->hipatia.\n"
+    "NUNCA elijas hyde (es ejecutor, no conversador).\n"
+    "Mensaje:\n{texto}\n"
+    "Responde SOLO con: jax_local, kimi, hipatia, jekyll, thot o ada"
 )
 
 
@@ -194,13 +273,50 @@ class Router:
         return all(p in tokens_saludo for p in palabras)
 
     def _keyword_route(self, text: str) -> str | None:
-        """Reglas de dominio. Devuelve faceta o None si nada matchea."""
-        if any(k in text for k in TECH_KEYWORDS):
-            return "hyde"
-        if any(k in text for k in RESEARCH_KEYWORDS):
-            return "hipatia"
-        if any(k in text for k in ARTS_KEYWORDS):
-            return "jekyll"
+        """Scoring multi-keyword con umbral. Hyde nunca es destino.
+
+        Regla:
+        - score[f] = n° de keywords de f que matchean en text.
+        - top = faceta con mayor score (desempate: _TIEBREAK).
+        - score >= 2 → enrutar a top.
+        - score == 1 y keyword STRONG → enrutar a top.
+        - else → None (el caller cae al clasificador LLM).
+        """
+        scores: dict[str, int] = {}
+        hit_strong: dict[str, bool] = {}
+
+        for faceta, (kws, strong) in _KW_SETS.items():
+            score = 0
+            is_strong = False
+            for kw in kws:
+                if " " in kw:
+                    hit = kw in text
+                else:
+                    hit = bool(re.search(rf"\b{re.escape(kw)}\b", text))
+                if hit:
+                    score += 1
+                    if kw in strong:
+                        is_strong = True
+            scores[faceta] = score
+            hit_strong[faceta] = is_strong
+
+        max_score = max(scores.values())
+        if max_score == 0:
+            return None
+
+        top: str | None = None
+        for faceta in _TIEBREAK:
+            if scores[faceta] == max_score:
+                top = faceta
+                break
+
+        if top is None:
+            return None
+
+        if max_score >= 2:
+            return top
+        if max_score == 1 and hit_strong[top]:
+            return top
         return None
 
     async def _classify(self, user_text: str) -> str | None:
@@ -215,7 +331,7 @@ class Router:
             raw = await self.classifier.invoke(prompt, decorate=False)
             # Limpiar: el modelo puede responder "jekyll." o "Es jekyll".
             cleaned = raw.strip().lower()
-            for faceta in VALID_FACETAS:
+            for faceta in AUTO_FACETAS:
                 if faceta in cleaned:
                     return faceta
             return None  # devolvio algo que no es faceta valida

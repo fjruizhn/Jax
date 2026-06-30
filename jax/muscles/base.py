@@ -24,6 +24,7 @@ import os
 from abc import ABC, abstractmethod
 
 import httpx
+import json
 
 
 # --- Politica de grounding (Decision 1: por TAREA, no por faceta) ------------
@@ -169,6 +170,8 @@ class HttpMuscle(Muscle):
             self.api_key = os.environ["KIMI_API_KEY"]
         elif provider == "zhipu":
             self.api_key = os.environ.get("ZHIPU_API_KEY", "")
+        elif provider == "zai":
+            self.api_key = os.environ.get("ZAI_API_KEY", "")
         else:
             raise MuscleInvocationError(f"[{name}] proveedor desconocido: {provider}")
 
@@ -185,7 +188,7 @@ class HttpMuscle(Muscle):
     ) -> str:
         if self.provider == "deepseek":
             return await self._call_deepseek(prompt, model, history)
-        if self.provider in ("openai", "kimi", "zhipu"):
+        if self.provider in ("openai", "kimi", "zhipu", "zai"):
             return await self._call_openai(prompt, model, history)
         return await self._call_gemini(prompt, model, history)
 
@@ -207,6 +210,7 @@ class HttpMuscle(Muscle):
             "model": model,
             "messages": messages,
             "stream": False,
+            "max_tokens": 131072,
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(url, headers=headers, json=payload)
@@ -239,22 +243,42 @@ class HttpMuscle(Muscle):
         payload = {
             "model": model,
             "messages": messages,
-            "stream": False,
+            "stream": True,
+            "max_tokens": 131072,
         }
+        texto = ""
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code != 200:
-                raise MuscleInvocationError(
-                    f"[{self.name}] OpenAI HTTP {resp.status_code}: {resp.text[:200]}"
-                )
-            data = resp.json()
-            msg = data["choices"][0]["message"]
-            texto = msg.get("content") or ""
-            # Kimi K2.7 incluye reasoning_content separado — ignorarlo.
-            # Limpiar auto-etiquetas que el modelo genere dentro del content.
-            lineas = [l for l in texto.splitlines()
-                      if not l.strip().startswith("⚙️ *Origen")]
-            return "\n".join(lineas).strip()
+            async with client.stream("POST", url, headers=headers, json=payload) as resp:
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    raise MuscleInvocationError(
+                        f"[{self.name}] OpenAI HTTP {resp.status_code}: {body[:200]!r}"
+                    )
+                partes = []
+                async for linea in resp.aiter_lines():
+                    if not linea or not linea.startswith("data:"):
+                        continue
+                    payload_str = linea[5:].strip()      # quita "data:"
+                    if payload_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(payload_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    pieza = delta.get("content")
+                    if pieza:
+                        partes.append(pieza)
+                texto = "".join(partes)
+
+        # Kimi K2.7 incluye reasoning_content separado — ignorarlo (no llega en delta).
+        # Limpiar auto-etiquetas que el modelo genere dentro del content.
+        lineas = [l for l in texto.splitlines()
+                  if not l.strip().startswith("⚙️ *Origen")]
+        return "\n".join(lineas).strip()
 
     @staticmethod
     def _extract_gemini(data: dict) -> tuple[str, list, list, list]:

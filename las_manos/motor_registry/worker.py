@@ -22,6 +22,7 @@ import asyncio
 import logging
 import os
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -181,7 +182,12 @@ async def run(
     try:
         response_json = api_task.result()
     except Exception as exc:
-        logger.error("Error de API en job %s: %s", job_id, exc)
+        # Observabilidad: traceback completo en el log (sin filtrar la API key —
+        # format_exc no vuelca variables locales ni headers).
+        logger.error(
+            "Error de API en job %s: %s\n%s",
+            job_id, exc, traceback.format_exc(),
+        )
         store.update(
             job_id,
             status=JobStatus.FAILED.value,
