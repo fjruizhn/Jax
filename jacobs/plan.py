@@ -61,6 +61,15 @@ _PLAN_SYSTEM = (
     "se equivoca.' (Tu salida sigue siendo SOLO el array JSON.)"
 )
 
+_CLEANROOM_RULE = (
+    "\nREGLA DE AUDITORÍA INDEPENDIENTE (clean-room): el step que audita, valida "
+    "o critica el trabajo de otros steps DEBE usar un facet DISTINTO al de los "
+    "steps que revisa. Un facet no se audita a sí mismo. Si los módulos backend "
+    "y frontend fueron diseñados por 'ada' y 'kimi', su auditor debe ser 'thot' "
+    "(u otro facet que no sea ada ni kimi). La revisión independiente es la "
+    "garantía de calidad: quien produce no es quien aprueba.\n"
+)
+
 _PLAN_SYSTEM_MODULAR = (
     "Eres Jacobs, el Director, planificando trabajo FORMAL COMPLEJO. Generás un plan de "
     "ejecución como JSON (array de objetos), SOLO JSON, sin markdown ni explicaciones.\n\n"
@@ -87,9 +96,35 @@ _PLAN_SYSTEM_MODULAR = (
     "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
     "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
     "PRINCIPIO DE EVIDENCIA (innegociable): no asumas hechos no verificados; si un dato es "
-    "incógnita, incluí un step que lo verifique. 'El que supone se equivoca.'\n\n"
-    "Salida: SOLO el array JSON."
+    "incógnita, incluí un step que lo verifique. 'El que supone se equivoca.'\n"
+    + _CLEANROOM_RULE +
+    "\nSalida: SOLO el array JSON."
 )
+
+
+_AUDIT_CAPABILITIES = frozenset({
+    "validate_consistency", "critique", "review", "audit",
+})
+
+
+def _check_cleanroom(steps: list) -> list[str]:
+    """Devuelve lista de violaciones clean-room (auditor con facet de un dep).
+    No modifica el plan — solo reporta. 'El que supone se equivoca': declarar,
+    no asumir que está bien."""
+    warnings = []
+    by_index = {s.step_index: s for s in steps}
+    for s in steps:
+        if s.capability not in _AUDIT_CAPABILITIES:
+            continue
+        for dep in s.depends_on:
+            dep_step = by_index.get(dep)
+            if dep_step and dep_step.facet == s.facet:
+                warnings.append(
+                    f"step {s.step_index} ({s.facet}/{s.capability}) audita al "
+                    f"step {dep} que es del MISMO facet '{s.facet}' — no es "
+                    f"auditoría independiente"
+                )
+    return warnings
 
 
 class PlanBuilder:
@@ -130,6 +165,8 @@ class PlanBuilder:
                 timeout_seconds=spec.get("timeout_seconds", default_timeout),
                 skip_on_fail=spec.get("skip_on_fail", False),
             ))
+        for w in _check_cleanroom(steps):
+            logger.warning("Jacobs clean-room: %s", w)
         return steps
 
     async def _from_objective(
