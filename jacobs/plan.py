@@ -39,6 +39,18 @@ VALID_FACETS = frozenset({
     "hipatia", "jekyll", "thot", "ada", "kimi", "hyde", "jax_local",
 })
 
+# Timeout por capability (segundos). El default cubre design/validate/critique,
+# que procesan contexto acotado y completan holgados en ~50-130s. Las capabilities
+# que acumulan el contexto COMPLETO de N dependencias (reconcile recibe todos los
+# módulos + hallazgos del validador y genera parches) necesitan más tiempo: con
+# ~22K tokens de entrada, 300s no alcanza y el step muere en asyncio.wait_for.
+# 'assemble' NO va aquí: es mecánico (executor._assemble_mechanical, sin LLM) y
+# completa en milisegundos, así que mantiene el default.
+_DEFAULT_TIMEOUT_SECONDS = 300
+_CAPABILITY_TIMEOUT_SECONDS = {
+    "reconcile": 900,
+}
+
 _PLAN_SYSTEM = (
     "Eres Jacobs, el Director. Tu único trabajo es generar planes de ejecución "
     "como JSON. RESPONDE SOLO CON JSON VÁLIDO. Sin explicaciones, sin markdown, "
@@ -101,15 +113,21 @@ class PlanBuilder:
             # Si viene prompt al nivel del spec (no dentro de input), lo movemos.
             if spec.get("prompt") and "prompt" not in input_data:
                 input_data["prompt"] = spec["prompt"]
+            capability = spec.get("capability", "reason")
+            # Default de timeout según capability; un timeout_seconds explícito en el
+            # spec siempre tiene prioridad.
+            default_timeout = _CAPABILITY_TIMEOUT_SECONDS.get(
+                capability, _DEFAULT_TIMEOUT_SECONDS
+            )
             steps.append(Step(
                 step_id=str(uuid.uuid4()),
                 pipeline_id=pipeline_id,
                 step_index=i,
                 facet=spec.get("facet", "jax_local"),
-                capability=spec.get("capability", "reason"),
+                capability=capability,
                 input=input_data,
                 depends_on=spec.get("depends_on", []),
-                timeout_seconds=spec.get("timeout_seconds", 300),
+                timeout_seconds=spec.get("timeout_seconds", default_timeout),
                 skip_on_fail=spec.get("skip_on_fail", False),
             ))
         return steps

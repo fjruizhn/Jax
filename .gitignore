@@ -33,6 +33,9 @@ repo/documents/*_[0-9][0-9]_*.md
 # --- Web-tasks transitorios (estado de runtime; los briefs hechos a mano sí se versionan) ---
 missions/web-task-*
 
+# --- Almacén de artifacts de Jacobs (outputs grandes de runtime; NO el módulo artifacts.py) ---
+jacobs/artifacts/
+
 # --- Misc ---
 que
 .../
