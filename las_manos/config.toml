@@ -173,7 +173,7 @@ reasoning_default_visibility = "audit_only"
 
 [capabilities.code_swarm]
 allowed_motors = ["kimi"]
-allowed_callers = ["hyde", "ada", "kimi"]
+allowed_callers = ["hyde", "ada", "kimi", "jacobs"]
 risk_level = "high"
 sandbox_only = true
 requires_human_gate = true
@@ -196,7 +196,7 @@ output_schema = "code_patch.v1"
 
 [capabilities.architecture_review]
 allowed_motors = ["ada"]
-allowed_callers = ["hyde"]
+allowed_callers = ["hyde", "jacobs"]
 risk_level = "medium"
 sandbox_only = true
 requires_human_gate = false
@@ -206,7 +206,7 @@ output_schema = "architecture_review.v1"
 
 [capabilities.bug_hunt]
 allowed_motors = ["kimi"]
-allowed_callers = ["hyde", "ada"]
+allowed_callers = ["hyde", "ada", "jacobs"]
 risk_level = "high"
 sandbox_only = true
 requires_human_gate = true
@@ -246,3 +246,74 @@ max_execution_minutes = 30
 max_recursion_depth = 0
 output_schema = "code_patch.v1"
 forbidden_paths = [".env", "secrets/", "private_keys/", "credentials/"]
+
+# ------------------------------------------------------------
+#  FASE A (Capa 1) — capabilities de razonamiento (AUTONOMIA_ANTIERROR.md §3.1)
+#  allowed_motors / allowed_callers / requires_human_gate / output_schema:
+#    valores EXACTOS de la tabla §3.1. Todas 🟢 verde (reversibles, sin gate).
+#  Campos NO especificados en §3.1 (risk_level=low por verde, sandbox_only=true,
+#    max_execution_minutes=15, max_recursion_depth=0): fijados consistentes con
+#    la sibling verde pipeline_analysis. <-- a confirmar por el arquitecto.
+#  output_schema: SOLO el nombre. Los schemas reales son Capa 2 (Fase B).
+#    output_validator falla ABIERTO ante schema desconocido (no bloquea).
+# ------------------------------------------------------------
+
+[capabilities.generate]
+allowed_motors = ["kimi", "ada"]
+allowed_callers = ["jacobs", "hyde", "ada"]
+risk_level = "low"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "generate.v1"
+
+[capabilities.reason]
+allowed_motors = ["ada", "kimi"]
+allowed_callers = ["jacobs", "hyde", "ada", "thot"]
+risk_level = "low"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "reason.v1"
+
+[capabilities.design]
+allowed_motors = ["ada", "kimi"]
+allowed_callers = ["jacobs", "hyde", "ada"]
+risk_level = "low"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "design.v1"
+
+[capabilities.validate_consistency]
+allowed_motors = ["thot", "ada"]
+allowed_callers = ["jacobs", "hyde", "thot"]
+risk_level = "low"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "validation.v1"
+
+[capabilities.reconcile]
+allowed_motors = ["ada", "kimi"]
+allowed_callers = ["jacobs", "hyde", "ada"]
+risk_level = "low"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "reconcile.v1"
+
+[capabilities.critique]
+allowed_motors = ["thot", "ada"]
+allowed_callers = ["jacobs", "hyde", "thot"]
+risk_level = "low"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 15
+max_recursion_depth = 0
+output_schema = "critique.v1"

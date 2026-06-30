@@ -33,6 +33,9 @@ repo/documents/*_[0-9][0-9]_*.md
 # --- Web-tasks transitorios (estado de runtime; los briefs hechos a mano sí se versionan) ---
 missions/web-task-*
 
+# --- Almacén de artifacts de Jacobs (outputs grandes de runtime; NO el módulo artifacts.py) ---
+jacobs/artifacts/
+
 # --- Misc ---
 que
 .../
@@ -41,3 +44,11 @@ que
 .claude/settings.local.json
 
 keyd/
+
+# --- Artefactos generados por ruflo / claude-flow (regenerables con `ruflo init`) ---
+# Toda la huella es auto-generada; nada es fuente de JAX. memory.db/settings.local.json
+# ya quedan cubiertos por *.db y reglas previas; aquí va el resto.
+las_manos/.claude-flow/
+las_manos/.claude/
+las_manos/.mcp.json
+las_manos/CLAUDE.md
