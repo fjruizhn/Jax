@@ -52,3 +52,6 @@ las_manos/.claude-flow/
 las_manos/.claude/
 las_manos/.mcp.json
 las_manos/CLAUDE.md
+.claude-flow/
+.claude/proven-config.json
+.claude/.proven-config-version
