@@ -92,8 +92,8 @@ def build_extractor() -> HttpMuscle:
     return HttpMuscle(
         name="extractor",
         provider="deepseek",
-        model_default="deepseek-chat",
-        models_allowed=["deepseek-chat", "deepseek-reasoner"],
+        model_default="deepseek-v4-flash",
+        models_allowed=["deepseek-v4-flash", "deepseek-v4-pro"],
         system_prompt="Sos un extractor de informacion. Respondes solo con JSON valido.",
         timeout=120.0,
     )
