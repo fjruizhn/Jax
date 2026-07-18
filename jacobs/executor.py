@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import time
 import tomllib
 from pathlib import Path
@@ -62,6 +63,81 @@ except Exception as _cfg_err:  # noqa: BLE001
         "a fail-open", _CONFIG_PATH, _cfg_err,
     )
     _CATALOG_CAPS = {}
+
+
+# ----------------------------------------------------------------
+#  Hyde (v0.3) — system prompt real desde el MISMO config.toml que usa el
+#  CLI viejo (jax/core/main.py → SubprocessMuscle). No se reinventa un prompt
+#  corto para Jacobs como con thot/ada/jekyll: la identidad de Hyde ya está
+#  afinada (Fernando + DeepSeek + Claude) y probada en producción. Fail-open:
+#  si config.toml no está o no tiene la sección, Hyde arranca con un prompt
+#  mínimo en vez de tumbar el step.
+# ----------------------------------------------------------------
+_PERSONALITIES_PATH = Path(__file__).resolve().parent.parent / "config" / "config.toml"
+try:
+    with open(_PERSONALITIES_PATH, "rb") as _pf:
+        _HYDE_CFG: dict = tomllib.load(_pf).get("personalities", {}).get("hyde", {})
+    _HYDE_SYSTEM_PROMPT = (_HYDE_CFG.get("system_prompt") or "").strip()
+    if not _HYDE_SYSTEM_PROMPT:
+        raise ValueError("system_prompt vacío o ausente en [personalities.hyde]")
+except Exception as _hyde_cfg_err:  # noqa: BLE001
+    logger.warning(
+        "Jacobs no pudo leer [personalities.hyde] de %s: %s — Hyde arranca con "
+        "prompt mínimo", _PERSONALITIES_PATH, _hyde_cfg_err,
+    )
+    _HYDE_SYSTEM_PROMPT = (
+        "Sos Hyde, la faceta técnica de JAX. Sé directo, verificá antes de "
+        "afirmar, nada destructivo sin confirmación explícita."
+    )
+
+# jax-las-manos.service corre bajo systemd con PATH mínimo (sin el bin de
+# nvm) — "claude" a secas resuelve en shell interactivo pero NO en el
+# servicio real. shutil.which cubre el caso interactivo/dev; el fallback
+# absoluto (documentado como ruta canónica de Node en CLAUDE.md) cubre el
+# servicio. Verificado con evidencia: systemctl show jax-las-manos -p
+# Environment está vacío, y systemd sin PATH propio usa el default de
+# /etc/environment, que no incluye ~/.nvm.
+HYDE_CLI_PATH = (
+    shutil.which("claude")
+    or "/home/fruiz/.nvm/versions/node/v24.16.0/bin/claude"
+)
+HYDE_WORKSPACE_DIR   = "/home/fruiz/jax/workspace"
+HYDE_MAX_PROMPT_CHARS = 32000
+
+# Semáforo específico de Hyde: el DAG de Jacobs puede programar dos steps
+# `hyde` en la MISMA ola paralela (asyncio.gather), pero el mecanismo que
+# estamos portando (subprocess_muscle.py, CLI viejo) siempre corrió secuencial
+# — nunca hubo dos `claude` escribiendo a la vez en HYDE_WORKSPACE_DIR. Este
+# semáforo serializa solo las invocaciones de Hyde entre sí, sin bloquear a
+# las demás facetas de la misma ola (mismo patrón que GPU_SEMAPHORE en
+# jax/muscles/ollama_muscle.py).
+HYDE_SEMAPHORE = asyncio.Semaphore(1)
+
+
+async def _get_active_model(facet: str, fallback: str) -> str:
+    """Lee el modelo activo de `facet_models` (MariaDB jax_memory, tabla
+    creada por la misión facet_models en jax-platform — mismo esquema, mismo
+    servidor). Fail-open: DB caída, tabla no migrada aún, o sin fila activa
+    → `fallback`. Nunca tumba el step por esto."""
+    try:
+        conn = await store.get_conn()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT model_name FROM facet_models WHERE facet = %s AND is_active = TRUE",
+                    (facet,),
+                )
+                row = await cur.fetchone()
+        finally:
+            conn.close()
+        if row:
+            return row[0]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "No se pudo leer modelo activo de '%s' desde facet_models: %s — "
+            "usando fallback '%s'", facet, exc, fallback,
+        )
+    return fallback
 
 
 # ----------------------------------------------------------------
@@ -400,6 +476,73 @@ async def _invoke_jax_local(prompt: str, timeout: int) -> dict:
     }
 
 
+async def _invoke_hyde(prompt: str, timeout: int) -> dict:
+    """Claude Code CLI (binario `claude`) como subproceso headless — mismo
+    mecanismo de jax/muscles/subprocess_muscle.py, en producción hace meses
+    en el CLI viejo. Adaptado a la firma de Jacobs: sin serialización de
+    historial (Jacobs ya arma el contexto completo en `prompt` vía
+    _enrich_prompt, antes de llegar acá — igual que para las demás facetas)."""
+    model = await _get_active_model("hyde", fallback="sonnet")
+
+    safe_prompt = prompt
+    if len(safe_prompt) > HYDE_MAX_PROMPT_CHARS:
+        safe_prompt = safe_prompt[:HYDE_MAX_PROMPT_CHARS] + "\n[...truncado por Jacobs...]"
+
+    cmd = [
+        HYDE_CLI_PATH,
+        "--model", model,
+        "--append-system-prompt", _HYDE_SYSTEM_PROMPT,
+        "--print",
+        "--output-format", "text",
+        "--permission-mode", "acceptEdits",
+        "--allowedTools", "Write,Edit,Read,Bash",
+        "--add-dir", HYDE_WORKSPACE_DIR,
+    ]
+
+    # Un solo `claude` corriendo a la vez entre steps hyde (ver HYDE_SEMAPHORE).
+    async with HYDE_SEMAPHORE:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=HYDE_WORKSPACE_DIR,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=safe_prompt.encode("utf-8")),
+                timeout=timeout,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # kill() = SIGKILL en asyncio. Necesario en AMBOS casos: si vence
+            # nuestro propio wait_for, o si _run_one_step nos cancela desde
+            # afuera (envuelve _dispatch_step en su PROPIO asyncio.wait_for con
+            # el MISMO timeout — con duraciones iguales, esa cancelación externa
+            # casi siempre llega antes que nuestro TimeoutError interno, como
+            # CancelledError, no TimeoutError). Sin cubrir los dos casos, el
+            # proceso `claude` queda huérfano.
+            proc.kill()
+            await proc.wait()
+            raise
+
+        stdout_str = stdout.decode("utf-8", errors="replace")
+        stderr_str = stderr.decode("utf-8", errors="replace")
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"[hyde] claude exit {proc.returncode}: {stderr_str[:200]}")
+    low = stderr_str.lower()
+    if any(t in low for t in ("error", "fatal", "exception", "failed")):
+        raise RuntimeError(f"[hyde] error en stderr: {stderr_str[:200]}")
+
+    return {
+        "success": True,
+        "facet":   "hyde",
+        "model":   model,
+        "result":  stdout_str.strip(),
+    }
+
+
 # Mapa TOTAL semántica → capability de catálogo (FASE A §3.2).
 # Cero pass-through silencioso: toda capability que el planner puede emitir
 # resuelve a un nombre que EXISTE en el catálogo de las_manos/config.toml.
@@ -621,17 +764,12 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     if step.facet in _MOTOR_FACETS:
         return await _invoke_motor(step, timeout)
     if step.facet == "hyde":
-        # Llegamos aquí solo si Fernando aprobó vía /approve-step.
-        # En v0.2 devuelve placeholder — conexión real pendiente para v0.3.
-        return {
-            "success":  True,
-            "facet":    "hyde",
-            "result":   (
-                "[v0.2] Hyde aprobado por Fernando. "
-                "Conexión a ejecución real pendiente para v0.3."
-            ),
-            "approved": True,
-        }
+        # Llegamos aquí solo si Fernando aprobó vía /approve-step (gate de
+        # aprobación intacto, no tocado en esta misión). v0.3: ejecución real
+        # vía Claude Code CLI (antes placeholder de v0.2).
+        result = await _invoke_hyde(prompt, timeout)
+        result["approved"] = True
+        return result
 
     raise ValueError(f"Faceta desconocida: '{step.facet}'")
 
