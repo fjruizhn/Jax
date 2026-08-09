@@ -27,6 +27,18 @@ import httpx
 import json
 
 from jax.core.crypto_secrets import decrypt_secret
+from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+
+# provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
+# "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
+_PROVIDER_ID_MAP = {
+    "deepseek": "deepseek",
+    "gemini": "gemini",
+    "openai": "openai",
+    "kimi": "moonshot",
+    "zhipu": "zhipu",
+    "zai": "zhipu",
+}
 
 
 # --- Politica de grounding (Decision 1: por TAREA, no por faceta) ------------
@@ -162,20 +174,21 @@ class HttpMuscle(Muscle):
             )
         self.grounding_policy = grounding_policy
 
-        if provider == "deepseek":
-            self.api_key = decrypt_secret(os.environ["DEEPSEEK_API_KEY"])
-        elif provider == "gemini":
-            self.api_key = decrypt_secret(os.environ["GEMINI_API_KEY"])
-        elif provider == "openai":
-            self.api_key = decrypt_secret(os.environ["OPENAI_API_KEY"])
-        elif provider == "kimi":
-            self.api_key = decrypt_secret(os.environ["KIMI_API_KEY"])
-        elif provider == "zhipu":
-            self.api_key = decrypt_secret(os.environ.get("ZHIPU_API_KEY", ""))
-        elif provider == "zai":
-            self.api_key = decrypt_secret(os.environ.get("ZAI_API_KEY", ""))
-        else:
+        if provider not in _PROVIDER_ID_MAP:
             raise MuscleInvocationError(f"[{name}] proveedor desconocido: {provider}")
+        # La api_key NO se resuelve aca: __init__ corre una sola vez al
+        # construir el muscle (vida del proceso). Resolverla aca seria
+        # exactamente el cache de vida de proceso prohibido en el diseño
+        # de Fase 1 (B1.2a) — se resuelve por-request en _resolve_api_key().
+
+    async def _resolve_api_key(self) -> str:
+        provider_id = _PROVIDER_ID_MAP[self.provider]
+        try:
+            return await resolve_credential_instrumented(provider_id)
+        except CredentialUnavailableError as e:
+            raise MuscleInvocationError(
+                f"[{self.name}] sin credencial válida configurada para {provider_id}"
+            ) from e
 
     def _append_authority(self, text: str) -> str:
         # Gemini ya inserta su etiqueta de verificacion (dinamica, segun la
@@ -198,7 +211,7 @@ class HttpMuscle(Muscle):
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
         url = "https://api.deepseek.com/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        headers = {"Authorization": f"Bearer {await self._resolve_api_key()}"}
 
         # messages = system + historial previo + mensaje actual.
         # El historial ya viene en formato {"role": "user"|"assistant", ...},
@@ -235,7 +248,7 @@ class HttpMuscle(Muscle):
     ) -> str:
         url = self.api_url if self.api_url else "https://api.openai.com/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {self.api_key}",
+            "Authorization": f"Bearer {await self._resolve_api_key()}",
             "Content-Type": "application/json",
         }
         messages = [{"role": "system", "content": self.system_prompt}]
@@ -320,9 +333,10 @@ class HttpMuscle(Muscle):
     async def _call_gemini(
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
+        api_key = await self._resolve_api_key()
         url = (
             f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{model}:generateContent?key={self.api_key}"
+            f"models/{model}:generateContent?key={api_key}"
         )
 
         # Gemini usa "contents" con role "user"/"model" (no "assistant") y

@@ -29,6 +29,11 @@ from typing import Any
 import httpx
 
 from motor_registry.catalog import MotorCatalog
+from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+
+# motor (catalogo local) -> provider_id (tabla `credential`). Hoy solo kimi
+# es un motor real via este camino (_MOTOR_FACETS en jacobs/executor.py).
+_MOTOR_PROVIDER_MAP = {"kimi": "moonshot"}
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
@@ -122,13 +127,15 @@ async def run(
         return
 
     # Validar API key
-    api_key = os.environ.get(motor_entry.api_key_env, "")
-    if not api_key:
+    provider_id = _MOTOR_PROVIDER_MAP.get(motor, motor)
+    try:
+        api_key = await resolve_credential_instrumented(provider_id)
+    except CredentialUnavailableError:
         store.update(
             job_id,
             status=JobStatus.FAILED.value,
             finished_at=time.time(),
-            error=f"Variable de entorno '{motor_entry.api_key_env}' no definida o vacía",
+            error=f"Sin credencial válida configurada para '{provider_id}'",
         )
         return
 
