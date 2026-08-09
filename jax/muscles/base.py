@@ -26,6 +26,8 @@ from abc import ABC, abstractmethod
 import httpx
 import json
 
+from jax.core.crypto_secrets import decrypt_secret
+
 
 # --- Politica de grounding (Decision 1: por TAREA, no por faceta) ------------
 #   off                → no buscar. Tarea local o creativa.
@@ -161,17 +163,17 @@ class HttpMuscle(Muscle):
         self.grounding_policy = grounding_policy
 
         if provider == "deepseek":
-            self.api_key = os.environ["DEEPSEEK_API_KEY"]
+            self.api_key = decrypt_secret(os.environ["DEEPSEEK_API_KEY"])
         elif provider == "gemini":
-            self.api_key = os.environ["GEMINI_API_KEY"]
+            self.api_key = decrypt_secret(os.environ["GEMINI_API_KEY"])
         elif provider == "openai":
-            self.api_key = os.environ["OPENAI_API_KEY"]
+            self.api_key = decrypt_secret(os.environ["OPENAI_API_KEY"])
         elif provider == "kimi":
-            self.api_key = os.environ["KIMI_API_KEY"]
+            self.api_key = decrypt_secret(os.environ["KIMI_API_KEY"])
         elif provider == "zhipu":
-            self.api_key = os.environ.get("ZHIPU_API_KEY", "")
+            self.api_key = decrypt_secret(os.environ.get("ZHIPU_API_KEY", ""))
         elif provider == "zai":
-            self.api_key = os.environ.get("ZAI_API_KEY", "")
+            self.api_key = decrypt_secret(os.environ.get("ZAI_API_KEY", ""))
         else:
             raise MuscleInvocationError(f"[{name}] proveedor desconocido: {provider}")
 
