@@ -19,6 +19,7 @@ from typing import Any
 
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from facet_resolver import resolve_facet, ResolvedFacet, FacetUnavailableError
+from model_catalog import record_resolved_version_safe
 
 import httpx
 
@@ -316,6 +317,12 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
             seen.add(uri)
             sources.append({"title": web.get("title", uri), "url": uri})
 
+    # D1.2 — 'modelVersion' es el campo real de Gemini (distinto de 'model'
+    # que usan las APIs OpenAI-compatible abajo). Nota de incertidumbre:
+    # heredado de jax-platform, nunca verificado contra una respuesta real
+    # de Gemini con curl — ver CONTEXT.md.
+    await record_resolved_version_safe(f.key, data.get("modelVersion"))
+
     return {
         "success": True,
         "facet":   f.key,
@@ -349,6 +356,11 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
         data  = resp.json()
         texto = data["choices"][0]["message"].get("content", "")
 
+    # D1.2 — best-effort, fuera del context manager del client: nunca debe
+    # poder romper la respuesta al step (record_resolved_version_safe ya
+    # atrapa sus propias excepciones).
+    await record_resolved_version_safe(f.key, data.get("model"))
+
     return {
         "success": True,
         "facet":   f.key,
@@ -372,6 +384,11 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
             raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
         data  = resp.json()
         texto = data.get("message", {}).get("content", "")
+
+    # D1.2 — capturado por consistencia con los transportes HTTP; ver
+    # CONTEXT.md para la limitacion real (tags de Ollama no son alias
+    # moviles del proveedor, no detecta drift de pesos bajo el mismo tag).
+    await record_resolved_version_safe(f.key, data.get("model"))
 
     return {
         "success": True,
@@ -440,6 +457,10 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     if any(t in low for t in ("error", "fatal", "exception", "failed")):
         raise RuntimeError(f"[hyde] error en stderr: {stderr_str[:200]}")
 
+    # D1.2 (Bloque D) — deliberadamente SIN captura de resolved_version:
+    # --output-format text (arriba) no trae ningun campo de que version
+    # corrio de verdad. Ver CONTEXT.md ("decision previa al wiring de
+    # resolved_version en REPL/Jacobs").
     return {
         "success": True,
         "facet":   "hyde",

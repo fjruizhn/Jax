@@ -28,6 +28,7 @@ import json
 
 from jax.core.crypto_secrets import decrypt_secret
 from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+from jax.core.model_catalog import record_resolved_version_safe
 
 # provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
 # "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
@@ -240,7 +241,12 @@ class HttpMuscle(Muscle):
             # Limpiar auto-etiquetas que el modelo genere dentro del content.
             lineas = [l for l in texto.splitlines()
                       if not l.strip().startswith("⚙️ *Origen")]
-            return "\n".join(lineas).strip()
+
+        # D1.2 — best-effort, fuera del try/response: nunca debe poder
+        # romper la respuesta al usuario (record_resolved_version_safe ya
+        # atrapa sus propias excepciones).
+        await record_resolved_version_safe(self.name, data.get("model"))
+        return "\n".join(lineas).strip()
 
 
     async def _call_openai(
@@ -262,6 +268,7 @@ class HttpMuscle(Muscle):
             "max_tokens": 131072,
         }
         texto = ""
+        resolved_version = None
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
@@ -280,6 +287,11 @@ class HttpMuscle(Muscle):
                         chunk = json.loads(payload_str)
                     except json.JSONDecodeError:
                         continue
+                    # D1.2 — cada chunk trae 'model' (el resuelto, no el
+                    # alias pedido); alcanza con el primero, es constante
+                    # durante todo el stream.
+                    if resolved_version is None:
+                        resolved_version = chunk.get("model")
                     choices = chunk.get("choices") or []
                     if not choices:
                         continue
@@ -288,6 +300,8 @@ class HttpMuscle(Muscle):
                     if pieza:
                         partes.append(pieza)
                 texto = "".join(partes)
+
+        await record_resolved_version_safe(self.name, resolved_version)
 
         # Kimi K2.7 incluye reasoning_content separado — ignorarlo (no llega en delta).
         # Limpiar auto-etiquetas que el modelo genere dentro del content.
@@ -375,17 +389,19 @@ class HttpMuscle(Muscle):
                 return resp.json()
 
         # Intento 1.
-        texto, chunks, supports, queries = self._extract_gemini(await _request())
+        data = await _request()
+        texto, chunks, supports, queries = self._extract_gemini(data)
+        resolved_version = data.get("modelVersion")
 
         # Decision 6: required_web -> UN retry estricto antes de fallar cerrado.
         if policy == "required_web" and not chunks:
-            texto, chunks, supports, queries = self._extract_gemini(
-                await _request(
-                    "Debes usar búsqueda web (google_search) para responder esta "
-                    "consulta. Si por cualquier razón no puedes buscar, responde "
-                    "EXACTAMENTE la palabra: NO_VERIFICADO"
-                )
+            data = await _request(
+                "Debes usar búsqueda web (google_search) para responder esta "
+                "consulta. Si por cualquier razón no puedes buscar, responde "
+                "EXACTAMENTE la palabra: NO_VERIFICADO"
             )
+            texto, chunks, supports, queries = self._extract_gemini(data)
+            resolved_version = data.get("modelVersion") or resolved_version
             if not chunks or texto.strip() == "NO_VERIFICADO":
                 # Fallo cerrado: jamas entregar datos sin verificar disfrazados
                 # de verificados. Un 'no se' honesto es mejor que inventar.
@@ -395,6 +411,12 @@ class HttpMuscle(Muscle):
                     f"para no entregar datos sin verificar. "
                     f"{verificacion_label('failed')}"
                 )
+
+        # D1.2 — best-effort; 'modelVersion' es el campo real de Gemini
+        # (distinto de 'model' que usan las APIs OpenAI-compatible — ver
+        # nota de incertidumbre en CONTEXT.md: heredado de jax-platform,
+        # nunca verificado contra una respuesta real de Gemini con curl).
+        await record_resolved_version_safe(self.name, resolved_version)
 
         # Decision 3 y 4: el SISTEMA decide la etiqueta y SIEMPRE la pone.
         if policy == "local_context_only":
