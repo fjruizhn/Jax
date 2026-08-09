@@ -17,6 +17,7 @@ import logging
 import httpx
 
 from jacobs.models import Step
+from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 
 logger = logging.getLogger("jacobs.plan")
 
@@ -193,7 +194,11 @@ class PlanBuilder:
         max_steps: int,
     ) -> list[Step]:
         dificultad = self._classify_difficulty(objective)
-        if dificultad == "formal" and (os.environ.get("ZAI_API_KEY") or os.environ.get("ZHIPU_API_KEY")):
+        try:
+            _ada_disponible = bool(await resolve_credential_instrumented("zhipu"))
+        except CredentialUnavailableError:
+            _ada_disponible = False
+        if dificultad == "formal" and _ada_disponible:
             logger.info("Jacobs cerebro=Ada (formal) objective=%r", objective[:80])
             specs = await self._ada_plan(objective, max_steps)
             if not specs:
@@ -216,8 +221,9 @@ class PlanBuilder:
         return "trivial"
 
     async def _ada_plan(self, objective: str, max_steps: int) -> list[dict] | None:
-        api_key = os.environ.get("ZAI_API_KEY") or os.environ.get("ZHIPU_API_KEY", "")
-        if not api_key:
+        try:
+            api_key = await resolve_credential_instrumented("zhipu")
+        except CredentialUnavailableError:
             return None
         headers = {
             "Authorization": f"Bearer {api_key}",

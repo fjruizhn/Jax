@@ -17,6 +17,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+
 import httpx
 
 from jacobs import store
@@ -259,7 +261,7 @@ def _enrich_prompt(ctx_input: dict) -> str:
 
 async def _invoke_hipatia(prompt: str, timeout: int) -> dict:
     """Gemini 2.5 Flash con grounding required_web."""
-    api_key = os.environ["GEMINI_API_KEY"]
+    api_key = await resolve_credential_instrumented("gemini")
     model   = "gemini-2.5-flash"
     url     = (
         f"https://generativelanguage.googleapis.com/v1beta/"
@@ -328,7 +330,7 @@ async def _invoke_hipatia(prompt: str, timeout: int) -> dict:
 
 async def _invoke_jekyll(prompt: str, timeout: int) -> dict:
     """DeepSeek V4 Flash — análisis humanista."""
-    api_key = os.environ["DEEPSEEK_API_KEY"]
+    api_key = await resolve_credential_instrumented("deepseek")
     model   = "deepseek-v4-flash"
     url     = "https://api.deepseek.com/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -359,7 +361,7 @@ async def _invoke_jekyll(prompt: str, timeout: int) -> dict:
 
 async def _invoke_thot(prompt: str, timeout: int) -> dict:
     """OpenAI GPT-5.5 — crítica y cuestionamiento."""
-    api_key = os.environ["OPENAI_API_KEY"]
+    api_key = await resolve_credential_instrumented("openai")
     model   = "gpt-5.5"
     url     = "https://api.openai.com/v1/chat/completions"
     headers = {
@@ -393,12 +395,13 @@ async def _invoke_thot(prompt: str, timeout: int) -> dict:
 
 async def _invoke_ada(prompt: str, timeout: int) -> dict:
     """Z.ai GLM-5.2 — diseño de arquitectura. Gracia si la key no está."""
-    api_key = os.environ.get("ZAI_API_KEY") or os.environ.get("ZHIPU_API_KEY", "")
-    if not api_key:
+    try:
+        api_key = await resolve_credential_instrumented("zhipu")
+    except CredentialUnavailableError:
         return {
             "success": False,
             "facet":   "ada",
-            "result":  "Ada no disponible — ZAI_API_KEY no configurada.",
+            "result":  "Ada no disponible — sin credencial válida configurada para zhipu.",
             "disabled": True,
         }
     model   = "glm-5.2"
