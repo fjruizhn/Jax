@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import re
 import os
 import subprocess
@@ -342,6 +343,33 @@ async def main() -> None:
 
     kill_path = cfg["jax"]["kill_switch_path"]
     default_faceta = cfg["jax"].get("default_personality", "jax_local")
+
+    # Bloque C: modelo real desde facet_binding, no config.toml. Se
+    # sobrescribe model_default ANTES de build_muscles() — mismo mecanismo
+    # existente (Muscle.invoke usa model_default como fallback), solo
+    # cambia la fuente. Query unica al arrancar (REPL = sesion unica, no
+    # servicio 24/7 — no justifica resolucion por-request como Jacobs/Mesa
+    # web). Si la DB no responde al boot, cfg["personalities"] ya trae el
+    # model_default de config.toml como fallback — no se rompe el arranque.
+    from jax.core.facet_resolver import load_facet_registry
+    try:
+        registry = await load_facet_registry()
+    except Exception as exc:
+        logging.warning(f"No se pudo cargar facet_registry desde DB, usando config.toml: {exc}")
+        registry = {}
+    for key, info in registry.items():
+        if key in cfg["personalities"]:
+            cfg["personalities"][key]["model_default"] = info["model"]
+
+    if registry:
+        import jax.core.router as router_module
+        router_module.VALID_FACETAS = tuple(registry.keys())
+        router_module.AUTO_FACETAS = tuple(k for k, v in registry.items() if v["auto_selectable"])
+        router_module.LABELS = {k: v["display_name"] for k, v in registry.items() if v["display_name"]}
+        router_module.ICONS = {k: v["icon"] for k, v in registry.items() if v["icon"]}
+    # Si registry esta vacio (DB no respondio), router.py conserva sus
+    # constantes hardcodeadas como fallback de arranque — declarado en el
+    # propio router.py, no es una fuente paralela silenciosa.
 
     muscles = build_muscles(cfg)
 

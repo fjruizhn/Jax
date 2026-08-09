@@ -47,7 +47,11 @@ def _sin_tildes(s: str) -> str:
     nfkd = unicodedata.normalize("NFKD", s)
     return "".join(c for c in nfkd if not unicodedata.combining(c))
 
-# Etiquetas visibles por faceta.
+# FALLBACK de arranque, NO fuente de verdad: main.py:async main() sobrescribe
+# LABELS/ICONS/VALID_FACETAS/AUTO_FACETAS con los valores reales de la tabla
+# `facet` (Bloque C, load_facet_registry()) apenas arranca el REPL. Solo se
+# usan estos valores hardcodeados si la DB no respondio al boot — para que
+# el REPL nunca se rompa por eso. Ver jax-platform/docs/fase2-facetas-diseno.md C1.4.
 LABELS = {
     "hyde": "Mr. Hyde",
     "jekyll": "Dr. Jekyll",
@@ -67,7 +71,10 @@ ICONS = {
     "ada": "⚛️",
 }
 
-# Nombres que el usuario puede usar para referirse a cada faceta.
+# CONSERVADO deliberadamente (C1.4): parsing de input del REPL (typos
+# foneticos como "jeckyll"), no es dato de identidad ni de comportamiento —
+# migrar esto a DB seria sobre-ingenieria para una lista de tolerancia a
+# errores de tipeo de un solo usuario.
 ALIASES = {
     "hyde": "hyde",
     "jaid": "hyde",          # fonetico
@@ -183,13 +190,19 @@ ADA_STRONG = frozenset((
     "complejidad", "maquina de estados",
 ))
 
-# Facetas validas para invocacion explicita (incluye hyde).
+# FALLBACK de arranque (ver nota junto a LABELS arriba) — facetas validas
+# para invocacion explicita (incluye hyde).
 VALID_FACETAS = ("hyde", "jekyll", "hipatia", "jax_local", "thot", "kimi", "ada")
 
-# Facetas del auto-routing (hyde excluido: es ejecutor, no conversador).
+# FALLBACK de arranque — facetas del auto-routing (hyde excluido: es
+# ejecutor, no conversador; esta exclusion SI es logica de negocio real,
+# se conserva incluso cuando la DB responde: load_facet_registry() ya
+# filtra por facet.auto_selectable, que hyde tiene en FALSE en el seed).
 AUTO_FACETAS = ("jax_local", "kimi", "hipatia", "jekyll", "thot", "ada")
 
-# Prioridad de desempate en scoring (izquierda gana sobre derecha).
+# CONSERVADO (C1.4): heuristica de ruteo automatico por palabra clave —
+# politica de negocio (que faceta gana un empate de scoring), no identidad
+# de facetas. Distinto concepto de "que facetas existen".
 _TIEBREAK = ("hipatia", "thot", "ada", "kimi", "jekyll")
 
 # Mapa faceta → (conjunto_completo, conjunto_strong)

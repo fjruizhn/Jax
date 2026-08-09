@@ -91,6 +91,35 @@ async def _query_facet(facet_key: str) -> ResolvedFacet:
     )
 
 
+async def load_facet_registry() -> dict:
+    """Una sola query, para bootstrap SINCRONO-de-arranque (REPL): quien
+    existe, con que modelo, label e icono. A diferencia de resolve_facet()
+    (por-request, con cache/TTL), esto se llama UNA vez al arrancar un
+    proceso de sesion unica — mismo patron que build_muscles() ya usaba
+    para leer config.toml una vez, solo que ahora la fuente es la DB.
+    Devuelve {key: {model, provider_id, display_name, icon, auto_selectable}}."""
+    conn = await _db_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT f.`key`, f.display_name, f.icon, f.auto_selectable, "
+                "b.provider_id, b.model_id "
+                "FROM facet f JOIN facet_binding b ON b.facet_key = f.`key` AND b.role = 'primary' "
+                "WHERE f.status = 'active'"
+            )
+            rows = await cur.fetchall()
+    finally:
+        conn.close()
+    return {
+        key: {
+            "display_name": display_name, "icon": icon,
+            "auto_selectable": bool(auto_sel),
+            "provider_id": provider_id, "model": model_id,
+        }
+        for key, display_name, icon, auto_sel, provider_id, model_id in rows
+    }
+
+
 async def resolve_facet(facet_key: str) -> ResolvedFacet:
     now = time.monotonic()
     cached = _cache.get(facet_key)
