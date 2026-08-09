@@ -19,6 +19,7 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 def _db_cfg() -> dict:
     return {
         "host":     os.getenv("JAX_DB_HOST", "localhost"),
+        "port":     int(os.getenv("JAX_DB_PORT", "3306")),
         "user":     os.getenv("JAX_DB_USER", ""),
         "password": os.getenv("JAX_DB_PASSWORD", ""),
         "db":       os.getenv("JAX_DB_NAME", "jax_memory"),

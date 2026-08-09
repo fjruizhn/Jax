@@ -16,6 +16,7 @@ En memoria de Jairo Urbina.
 """
 
 import asyncio
+import os
 import uuid
 import logging
 import json
@@ -85,9 +86,11 @@ class MemoryDB:
     # Ciclo de vida del pool
     # --------------------------------------------------------
     async def connect(self, host: str, user: str, password: str,
-                      database: str, port: int = 3306) -> bool:
+                      database: str, port: int | None = None) -> bool:
         """Inicializa el pool. Devuelve True si conecto, False si fallo
         (sin lanzar excepcion: JAX debe arrancar aunque la memoria falle)."""
+        if port is None:
+            port = int(os.getenv("JAX_DB_PORT", "3306"))
         self.config = {
             "host": host,
             "port": port,
