@@ -36,6 +36,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from crypto_secrets import decrypt_provider_keys_in_env
+decrypt_provider_keys_in_env()
+
 from audit import AuditLog, environment_from_target
 from policy import PolicyEngine
 from planner import Planner
