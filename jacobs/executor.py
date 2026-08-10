@@ -28,6 +28,7 @@ from jacobs.artifacts import read_artifact, save_if_large
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import VALID_CAPABILITIES
 from jacobs.policy import check_kill_switch
+from jacobs.usage_writer import record_direct_usage
 
 logger = logging.getLogger("jacobs.executor")
 
@@ -255,6 +256,7 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
             return resp.json()
 
     data = await _call()
+    final_data = data
     candidate = data.get("candidates", [{}])[0]
     parts_raw = candidate.get("content", {}).get("parts", []) or []
     texto = "".join(p.get("text", "") for p in parts_raw)
@@ -281,6 +283,16 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
             texto  = texto2
             chunks = chunks2
             queries = meta2.get("webSearchQueries") or []
+            final_data = data2
+
+    # Usage (scope expansion 2026-08-10, mismo campo que jax-platform/backend/
+    # api/chat.py::_call_gemini): tokens de la respuesta que realmente aporto
+    # el `texto` final -- si hubo retry por falta de grounding, es data2, no
+    # el primer data (nota: si hubo retry, el primer llamado tambien consumio
+    # tokens y no se contabilizan aca; limitacion conocida, ver reporte).
+    gemini_usage = final_data.get("usageMetadata") or {}
+    tokens_in  = gemini_usage.get("promptTokenCount", 0)
+    tokens_out = gemini_usage.get("candidatesTokenCount", 0)
 
     sources = []
     seen: set = set()
@@ -305,6 +317,8 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
         "sources": sources,
         "queries": queries,
         "grounded": bool(chunks),
+        "tokens_in":  tokens_in,
+        "tokens_out": tokens_out,
     }
 
 
@@ -335,11 +349,20 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     # atrapa sus propias excepciones).
     await record_resolved_version_safe(f.key, data.get("model"))
 
+    # Usage (scope expansion 2026-08-10, mismo campo que jax-platform/backend/
+    # api/chat.py::_call_openai_compat): jekyll/thot/ada convergen aca, asi
+    # que este solo lugar cubre los 3.
+    usage = data.get("usage") or {}
+    tokens_in  = usage.get("prompt_tokens", 0)
+    tokens_out = usage.get("completion_tokens", 0)
+
     return {
         "success": True,
         "facet":   f.key,
         "model":   f.model,
         "result":  texto,
+        "tokens_in":  tokens_in,
+        "tokens_out": tokens_out,
     }
 
 
@@ -364,11 +387,18 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     # moviles del proveedor, no detecta drift de pesos bajo el mismo tag).
     await record_resolved_version_safe(f.key, data.get("model"))
 
+    # Usage (scope expansion 2026-08-10, mismo campo que jax-platform/backend/
+    # api/chat.py::_call_ollama).
+    tokens_in  = data.get("prompt_eval_count", 0)
+    tokens_out = data.get("eval_count", 0)
+
     return {
         "success": True,
         "facet":   f.key,
         "model":   f.model,
         "result":  texto,
+        "tokens_in":  tokens_in,
+        "tokens_out": tokens_out,
     }
 
 
@@ -663,12 +693,25 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
 
     f = await resolve_facet(step.facet)
 
-    if f.transport == "http_gemini":
-        return await _invoke_http_gemini(f, prompt, timeout)
-    if f.transport == "http_openai_compat":
-        return await _invoke_http_openai_compat(f, prompt, timeout)
-    if f.transport == "ollama":
-        return await _invoke_ollama(f, prompt, timeout)
+    # Transportes HTTP directos (scope expansion 2026-08-10): la Mesa web ya
+    # atribuye costo para estas mismas facetas via jax-platform/backend/api/
+    # chat.py (Tasks 1-4); esto cubre el MISMO transporte cuando lo dispara un
+    # pipeline de Jacobs en vez de un chat directo. record_direct_usage es
+    # fail-soft por su cuenta (sin identidad no escribe; error de DB solo
+    # loguea) -- nunca puede romper un step ya exitoso.
+    if f.transport in ("http_gemini", "http_openai_compat", "ollama"):
+        if f.transport == "http_gemini":
+            result = await _invoke_http_gemini(f, prompt, timeout)
+        elif f.transport == "http_openai_compat":
+            result = await _invoke_http_openai_compat(f, prompt, timeout)
+        else:
+            result = await _invoke_ollama(f, prompt, timeout)
+        await record_direct_usage(
+            pipeline.user_id, pipeline.tenant_id, step.facet,
+            f.provider_id, f.model,
+            result.get("tokens_in", 0), result.get("tokens_out", 0),
+        )
+        return result
     if f.transport == "subprocess":
         # Llegamos aquí solo si Fernando aprobó vía /approve-step (gate de
         # aprobación intacto, no tocado en esta misión).
