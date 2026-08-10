@@ -62,12 +62,21 @@ async def _call_kimi(
     api_key: str,
     prompt: str,
     timeout: float,
+    max_tokens: int = 0,
 ) -> dict:
-    """Llama a la API de Kimi. Devuelve el dict JSON completo de la respuesta."""
+    """Llama a la API de Kimi. Devuelve el dict JSON completo de la respuesta.
+
+    max_tokens (2026-08-10): sin esto, un motor de razonamiento puede gastar
+    todo el completion budget en reasoning_content y devolver `content`
+    cortado a mitad de palabra — bug real reproducido en vivo contra la API
+    de Moonshot. 0/falsy = no mandar el campo (motor sin este limite
+    configurado)."""
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -151,6 +160,7 @@ async def run(
             api_key=api_key,
             prompt=prompt,
             timeout=float(motor_entry.default_timeout_seconds),
+            max_tokens=motor_entry.max_tokens,
         )
     )
     kill_task = asyncio.create_task(_watch_kill_switch(kill_switch_path))
@@ -217,11 +227,24 @@ async def run(
     message = choices[0].get("message", {})
     content: str = message.get("content") or ""
     reasoning_content: str = message.get("reasoning_content") or ""
+    finish_reason = choices[0].get("finish_reason")
+    usage = response_json.get("usage")
 
     if reasoning_content:
         logger.debug(
             "reasoning_content de job %s (%d chars) — solo en log, no expuesto",
             job_id, len(reasoning_content),
+        )
+
+    # Observabilidad (2026-08-10): antes finish_reason/usage se descartaban
+    # por completo — un corte real (finish_reason='length') era
+    # indiagnosticable despues del hecho, solo quedaba `content` truncado
+    # sin ninguna pista de por que.
+    if finish_reason == "length":
+        logger.warning(
+            "job %s cortado por limite de tokens (finish_reason=length) — "
+            "content=%d chars, usage=%s",
+            job_id, len(content), usage,
         )
 
     # Validar output contra el schema de la capability
@@ -238,6 +261,8 @@ async def run(
         result_summary=result_summary,
         # Campos internos — guardados en JSONL, no expuestos en MotorJobView
         _reasoning_content=reasoning_content[:2000] if reasoning_content else None,
+        _finish_reason=finish_reason,
+        _usage=usage,
         _validation_validated=validation["validated"],
         _validation_warning=validation.get("warning"),
         _validation_missing_fields=validation.get("missing_fields") or [],
