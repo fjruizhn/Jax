@@ -37,6 +37,8 @@ class MotorDispatchRequest(BaseModel):
     trace_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     human_gate_token: str | None = None   # requerido si capability.requires_human_gate
     sandbox: bool = True                   # True = no escribe fuera del sandbox
+    user_id:    str | None = None
+    tenant_id:  str | None = None
 
     model_config = {"extra": "forbid"}
 

@@ -97,7 +97,7 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         self._tmpdir.cleanup()
 
-    async def _run_job(self, fake_resp):
+    async def _run_job(self, fake_resp, **run_kwargs):
         job_id = self.store.create(
             caller="jacobs", capability="implementation", motor="kimi",
             trace_id="t1", prompt="prompt de prueba", recursion_depth=0,
@@ -108,6 +108,7 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
                 job_id=job_id, motor="kimi", capability="implementation",
                 prompt="prompt de prueba", context={}, store=self.store,
                 catalog=self.catalog, kill_switch_path=self.kill_switch_path,
+                **run_kwargs,
             )
         return job_id, mock_post
 
@@ -126,6 +127,40 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
         state = self.store._index[job_id]
         assert state.get("_finish_reason") == "stop", state
         assert state.get("_usage", {}).get("completion_tokens") == 866, state
+
+    async def test_run_con_identidad_llama_a_record_motor_usage(self):
+        """Task 7: cuando el dispatch trae user_id/tenant_id (propagados por
+        jacobs/executor.py, Task 6), worker.run debe llamar a
+        record_motor_usage con provider_id/model/tokens reales -- sin tocar
+        la logica de max_tokens/finish_reason/usage capturada arriba."""
+        with patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()) as mock_record:
+            job_id, _ = await self._run_job(
+                _fake_response(
+                    content="respuesta completa", finish_reason="stop",
+                    usage={"prompt_tokens": 46, "completion_tokens": 866, "total_tokens": 912},
+                ),
+                user_id="1", tenant_id="77",
+            )
+        mock_record.assert_awaited_once_with(
+            "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 46, 866,
+        )
+
+    async def test_run_sin_identidad_pasa_none_a_record_motor_usage(self):
+        """Compat con dispatches viejos / sin Jacobs: worker.run no filtra
+        user_id/tenant_id ausentes antes de llamar -- el fail-soft (no
+        escribir sin identidad) vive en record_motor_usage, cubierto por
+        _motor_usage_writer_test.py::test_record_motor_usage_sin_identidad_no_escribe.
+        Aca solo confirmamos que worker sigue completando el job igual (ver
+        test_job_guarda_finish_reason_y_usage) y que pasa None tal cual,
+        sin inventar un default."""
+        with patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()) as mock_record:
+            job_id, _ = await self._run_job(
+                _fake_response(content="respuesta completa", finish_reason="stop"),
+            )
+        mock_record.assert_awaited_once_with(
+            None, None, "kimi", "moonshot", "kimi-k2.7-code", 10, 20,
+        )
+        assert self.store._index[job_id]["status"] == "completed"
 
     async def test_finish_reason_length_queda_registrado(self):
         """El caso real que motivo el fix: si Moonshot corta por limite de

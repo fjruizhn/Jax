@@ -111,6 +111,8 @@ async def run(
     store: JobStore,
     catalog: MotorCatalog,
     kill_switch_path: str,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -267,3 +269,14 @@ async def run(
         _validation_warning=validation.get("warning"),
         _validation_missing_fields=validation.get("missing_fields") or [],
     )
+
+    # Usage tracking (2026-08-10): best-effort, nunca debe romper el job ya
+    # marcado COMPLETED arriba. record_motor_usage es fail-soft por su
+    # cuenta (sin user_id/tenant_id no escribe nada; error de DB solo loguea).
+    from motor_registry.usage_writer import record_motor_usage
+    provider_id = _MOTOR_PROVIDER_MAP.get(motor)
+    if provider_id and usage:
+        await record_motor_usage(
+            user_id, tenant_id, motor, provider_id, motor_entry.model,
+            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+        )
