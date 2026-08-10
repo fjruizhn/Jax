@@ -53,25 +53,45 @@ class ExecutorMotorPayloadTest(unittest.IsolatedAsyncioTestCase):
 
         captured = {}
 
-        class _FakeResp:
+        class _FakeDispatchResp:
             status_code = 202
             def json(self):
                 return {"job_id": "j1", "status": "running"}
             def raise_for_status(self):
                 pass
 
+        class _FakePollResp:
+            status_code = 200
+            def json(self):
+                return {"status": "completed", "result_summary": "ok"}
+            def raise_for_status(self):
+                pass
+
         async def fake_post(self, url, json=None, **kwargs):
             captured["json"] = json
-            return _FakeResp()
+            return _FakeDispatchResp()
 
-        with patch("httpx.AsyncClient.post", fake_post):
-            try:
-                await executor._invoke_motor(step, pipeline, timeout=30)
-            except Exception:
-                pass  # el resto del polling puede fallar en este test acotado; solo interesa el payload inicial
+        async def fake_get(self, url, **kwargs):
+            return _FakePollResp()
+
+        # M2 (2026-08-10): el bare try/except Exception: pass que estaba aca
+        # antes escondia una excepcion REAL -- solo se mockeaba el POST de
+        # /motor/dispatch, asi que el polling que sigue (GET /motor/job/{id})
+        # golpeaba el jax-las-manos real corriendo en este host, que responde
+        # 404 para un job_id inexistente ("j1") y por lo tanto revienta con
+        # httpx.HTTPStatusError -- silenciado por el except, y encima recien
+        # despues de esperar MOTOR_POLL_INTERVAL segundos reales. Mockeando
+        # tambien el GET (y bajando el intervalo de poll a 0) el test corre
+        # rapido, deterministico, sin pegarle a un servicio real, y sin
+        # necesitar ningun try/except.
+        with patch("httpx.AsyncClient.post", fake_post), \
+             patch("httpx.AsyncClient.get", fake_get), \
+             patch("jacobs.executor.MOTOR_POLL_INTERVAL", 0):
+            result = await executor._invoke_motor(step, pipeline, timeout=30)
 
         self.assertEqual(captured["json"].get("user_id"), "1")
         self.assertEqual(captured["json"].get("tenant_id"), "test-tenant")
+        self.assertTrue(result.get("success"))
 
 
 if __name__ == "__main__":

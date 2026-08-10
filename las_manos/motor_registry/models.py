@@ -37,6 +37,13 @@ class MotorDispatchRequest(BaseModel):
     trace_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     human_gate_token: str | None = None   # requerido si capability.requires_human_gate
     sandbox: bool = True                   # True = no escribe fuera del sandbox
+    # TRUST BOUNDARY (2026-08-10): user_id/tenant_id llegan del body del
+    # request SIN verificacion independiente en este endpoint -- la confianza
+    # descansa por completo en que el caller (Jacobs) ya los valido antes de
+    # despachar (jax-platform Task 4) y en que jax-las-manos.service solo
+    # bindea a 127.0.0.1. Este repo ya tuvo IDOR real por asumir el limite de
+    # confianza incorrecto (ver CONTEXT.md 2026-08-08) -- si este puerto se
+    # expone alguna vez publicamente, esto se vuelve un IDOR inmediato.
     user_id:    str | None = None
     tenant_id:  str | None = None
 

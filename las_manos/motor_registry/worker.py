@@ -31,9 +31,16 @@ import httpx
 from motor_registry.catalog import MotorCatalog
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 
-# motor (catalogo local) -> provider_id (tabla `credential`). Hoy solo kimi
-# es un motor real via este camino (_MOTOR_FACETS en jacobs/executor.py).
-_MOTOR_PROVIDER_MAP = {"kimi": "moonshot"}
+# motor (catalogo local) -> provider_id (tabla `credential`/`model`).
+# Verificado 2026-08-10 contra el schema real de la DB: Ada/GLM usa
+# provider_id "zhipu" (NO "zai" -- esa es la clave `provider` interna de
+# las_manos/config.toml [motors.ada], que identifica el motor dentro del
+# catalogo local, distinta del provider_id real que usan las tablas
+# `credential`/`model`). Antes de este fix, ada resolvia credencial contra
+# provider_id="ada" (el fallback .get(motor, motor)) -- nunca coincidia con
+# ninguna fila real, y ademas no generaba fila de uso porque el segundo
+# call site usaba .get(motor) sin fallback (== None).
+_MOTOR_PROVIDER_MAP = {"kimi": "moonshot", "ada": "zhipu"}
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
@@ -273,10 +280,25 @@ async def run(
     # Usage tracking (2026-08-10): best-effort, nunca debe romper el job ya
     # marcado COMPLETED arriba. record_motor_usage es fail-soft por su
     # cuenta (sin user_id/tenant_id no escribe nada; error de DB solo loguea).
+    # provider_id: reutiliza la MISMA variable ya resuelta arriba (linea ~141)
+    # para la credencial -- antes se re-declaraba aca con un default DISTINTO
+    # (.get(motor) sin fallback vs .get(motor, motor)), dos semanticas para
+    # el mismo nombre dentro de la misma funcion, y para cualquier motor sin
+    # entrada en el mapa esta segunda copia daba None en silencio (0 filas
+    # de uso, sin log).
     from motor_registry.usage_writer import record_motor_usage
-    provider_id = _MOTOR_PROVIDER_MAP.get(motor)
     if provider_id and usage:
         await record_motor_usage(
             user_id, tenant_id, motor, provider_id, motor_entry.model,
             usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+        )
+    elif provider_id:
+        # Observabilidad (I2, 2026-08-10): sin este log, un provider que
+        # responde sin bloque 'usage' hace que Costos subreporte sin ningun
+        # rastro -- mismo hueco que finish_reason=='length' ya cierra arriba
+        # para el caso de corte por limite de tokens.
+        logger.warning(
+            "job %s (motor=%s): respuesta sin 'usage' -- no se registra "
+            "fila de costo (tokens desconocidos)",
+            job_id, motor,
         )
