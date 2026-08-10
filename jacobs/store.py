@@ -203,8 +203,12 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         pipeline_id=row["pipeline_id"],
         name=row["name"],
         invoked_by=row["invoked_by"],
-        user_id=row["user_id"],
-        tenant_id=row["tenant_id"],
+        # .get() (M1, 2026-08-10): jacobs_relaunch.py llama pipeline_get() sin
+        # garantizar init_tables() primero -- contra una DB no migrada
+        # (columnas user_id/tenant_id ausentes) esto degrada a None en vez de
+        # KeyError.
+        user_id=row.get("user_id"),
+        tenant_id=row.get("tenant_id"),
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,
