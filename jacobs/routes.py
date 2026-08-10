@@ -129,6 +129,8 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         pipeline_id=pipeline_id,
         name=req.name,
         invoked_by=req.invoked_by,
+        user_id=req.user_id,
+        tenant_id=req.tenant_id,
         mode=req.mode,
         plan=steps,
         max_steps=req.max_steps,
