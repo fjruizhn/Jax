@@ -52,6 +52,18 @@ async def init_tables() -> None:
                     updated_at         DOUBLE NOT NULL
                 )
             """)
+            for col, ddl in [
+                ("user_id", "ALTER TABLE jacobs_pipelines ADD COLUMN user_id VARCHAR(50) NULL"),
+                ("tenant_id", "ALTER TABLE jacobs_pipelines ADD COLUMN tenant_id VARCHAR(50) NULL"),
+            ]:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' AND COLUMN_NAME=%s",
+                    (col,),
+                )
+                (exists,) = await cur.fetchone()
+                if not exists:
+                    await cur.execute(ddl)
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS jacobs_steps (
                     step_id          VARCHAR(36) PRIMARY KEY,
@@ -98,8 +110,8 @@ async def pipeline_create(p: Pipeline) -> None:
                 INSERT INTO jacobs_pipelines
                     (pipeline_id, name, invoked_by, mode, status,
                      plan, current_step_index, max_steps, context_refs,
-                     created_at, updated_at)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s)
+                     created_at, updated_at, user_id, tenant_id)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
                 """,
                 (
                     p.pipeline_id, p.name, p.invoked_by, p.mode, p.status.value,
@@ -107,6 +119,7 @@ async def pipeline_create(p: Pipeline) -> None:
                     p.current_step_index, p.max_steps,
                     json.dumps(p.context, ensure_ascii=False),
                     p.created_at, p.updated_at,
+                    p.user_id, p.tenant_id,
                 ),
             )
     finally:
@@ -190,6 +203,8 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         pipeline_id=row["pipeline_id"],
         name=row["name"],
         invoked_by=row["invoked_by"],
+        user_id=row["user_id"],
+        tenant_id=row["tenant_id"],
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,
