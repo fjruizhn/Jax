@@ -472,7 +472,7 @@ _CAPABILITY_MAP = {
 }
 
 
-async def _invoke_motor(step: Step, timeout: int) -> dict:
+async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
     """Kimi via Motor Registry de LAS MANOS. Polling hasta completar."""
     capability = _CAPABILITY_MAP.get(step.capability, step.capability)
     # Observabilidad: si la capability no estaba en el mapa de traducción, se
@@ -489,6 +489,8 @@ async def _invoke_motor(step: Step, timeout: int) -> dict:
         "motor":      step.facet,
         "trace_id":   step.trace_id,
         "prompt":     _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
+        "user_id":    pipeline.user_id,
+        "tenant_id":  pipeline.tenant_id,
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload)
@@ -657,7 +659,7 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # _run_one_step la captura igual que cualquier otra excepcion — el step
     # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
-        return await _invoke_motor(step, timeout)
+        return await _invoke_motor(step, pipeline, timeout)
 
     f = await resolve_facet(step.facet)
 
