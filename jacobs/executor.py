@@ -118,32 +118,6 @@ HYDE_MAX_PROMPT_CHARS = 32000
 HYDE_SEMAPHORE = asyncio.Semaphore(1)
 
 
-async def _get_active_model(facet: str, fallback: str) -> str:
-    """Lee el modelo activo de `facet_models` (MariaDB jax_memory, tabla
-    creada por la misión facet_models en jax-platform — mismo esquema, mismo
-    servidor). Fail-open: DB caída, tabla no migrada aún, o sin fila activa
-    → `fallback`. Nunca tumba el step por esto."""
-    try:
-        conn = await store.get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT model_name FROM facet_models WHERE facet = %s AND is_active = TRUE",
-                    (facet,),
-                )
-                row = await cur.fetchone()
-        finally:
-            conn.close()
-        if row:
-            return row[0]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "No se pudo leer modelo activo de '%s' desde facet_models: %s — "
-            "usando fallback '%s'", facet, exc, fallback,
-        )
-    return fallback
-
-
 # ----------------------------------------------------------------
 #  Helpers de referencia de artifacts
 # ----------------------------------------------------------------
