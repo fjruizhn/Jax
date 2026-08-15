@@ -509,6 +509,7 @@ class MemoryDB:
                         verify_correction_fn: Optional[
                             Callable[[str, str], Awaitable[bool]]] = None,
                         source_fact_ids: Optional[list] = None,
+                        importance: Optional[int] = None,
                         ) -> Optional[bool]:
         """Guarda un hecho extraido. confidence 0.7 + is_verified=FALSE por
         defecto: nada entra como verdad absoluta sin que Fernando lo revise.
@@ -536,12 +537,19 @@ class MemoryDB:
         fact fue derivado — usado por el worker de sintesis de segundo orden
         (item #8) para que un insight sea trazable hasta los hechos
         verificados que lo originaron. None para facts normales (extraccion
-        directa de conversacion)."""
+        directa de conversacion).
+
+        importance (opcional, 1-5): que tan central es este hecho a la
+        identidad o trabajo de Fernando (NO es lo mismo que confidence, que
+        es la certeza del extractor). Se usa para priorizar que facts
+        sobreviven el limite de get_facts() cuando hay mas de los que
+        entran. Fuera de 1-5 o None -> se guarda NULL (neutral)."""
         if not self.pool:
             return None
         # Validar fact_type contra el ENUM del esquema
         valid_types = ("user", "technical", "social", "preference", "project", "financial")
         ftype = fact_type if fact_type in valid_types else "user"
+        imp = importance if isinstance(importance, int) and 1 <= importance <= 5 else None
 
         # Embedding ANTES del insert: lo necesitamos para decidir dedup/correccion.
         embedding = await self.get_embedding(fact_text)
@@ -560,11 +568,13 @@ class MemoryDB:
                 await cur.execute(
                     "INSERT INTO facts "
                     "(fact_uuid, fact_text, fact_type, confidence, source_message_id, "
-                    "source_facet, is_verified, user_id, project_id, source_fact_ids) "
-                    "VALUES (UUID(), %s, %s, %s, %s, %s, FALSE, %s, %s, %s)",
+                    "source_facet, is_verified, user_id, project_id, source_fact_ids, "
+                    "importance) "
+                    "VALUES (UUID(), %s, %s, %s, %s, %s, FALSE, %s, %s, %s, %s)",
                     (fact_text, ftype, confidence, source_message_id, source_facet,
                      user_id, project_id,
-                     json.dumps(source_fact_ids) if source_fact_ids else None),
+                     json.dumps(source_fact_ids) if source_fact_ids else None,
+                     imp),
                 )
                 await cur.execute("SELECT LAST_INSERT_ID()")
                 fact_id = (await cur.fetchone())[0]
@@ -817,7 +827,7 @@ class MemoryDB:
         if not self.pool:
             return None
         query = ("SELECT id, fact_text, fact_type, confidence, is_verified, "
-                 "source_facet, created_at, source_fact_ids FROM facts")
+                 "source_facet, created_at, source_fact_ids, importance FROM facts")
         conditions = ["superseded_by IS NULL"]
         params: list = []
         if only_unverified:
@@ -839,7 +849,10 @@ class MemoryDB:
             conditions.append("(" + " OR ".join(scope_clauses) + ")")
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY created_at DESC LIMIT %s"
+        # Mas importante primero (NULL = neutral, va al final de los que si
+        # tienen score) — asi si hay que cortar por `limit`, sobreviven los
+        # facts mas centrales, no simplemente los mas recientes.
+        query += " ORDER BY COALESCE(importance, 0) DESC, created_at DESC LIMIT %s"
         params.append(limit)
 
         async with self.pool.acquire() as conn:

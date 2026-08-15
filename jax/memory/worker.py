@@ -94,6 +94,14 @@ true. Si es informacion nueva que no reemplaza nada anterior, "is_correction":
 false. Ante la duda, false (fail-safe: mejor un hecho nuevo de mas que una
 correccion aplicada de menos).
 
+IMPORTANCIA: para cada hecho, calificalo de 1 a 5 en "importance" segun que tan
+CENTRAL es a la identidad o al trabajo de Fernando (NO es que tan seguro estas
+de que sea cierto — eso ya lo cubre confidence, no lo repitas aca):
+1 = detalle menor o de contexto pasajero.
+3 = relevante pero no definitorio.
+5 = definitorio: quien es, a que se dedica, decisiones que dan forma a su trabajo.
+Ante la duda entre dos valores, elegi el mas bajo.
+
 Categorias:
 1. HECHOS: conocimiento duradero sobre Fernando, sus preferencias, proyectos o relaciones.
 2. DECISIONES: elecciones tecnicas o de negocio que se tomaron, con su razon.
@@ -103,7 +111,7 @@ Conversacion:
 {conversation}
 
 Responde UNICAMENTE con JSON valido, sin texto antes ni despues, sin markdown:
-{{"facts": [{{"text": "...", "type": "user|technical|social|preference|project|financial", "is_correction": false}}],
+{{"facts": [{{"text": "...", "type": "user|technical|social|preference|project|financial", "is_correction": false, "importance": 3}}],
 "decisions": [{{"title": "...", "chosen": "...", "reasoning": "..."}}],
 "action_items": [{{"description": "...", "due_date": null}}]}}
 
@@ -267,7 +275,8 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
                                        source_facet="extractor",
                                        user_id=conv_user, project_id=conv_proj,
                                        is_correction=bool(f.get("is_correction", False)),
-                                       verify_correction_fn=verify_correction_fn)
+                                       verify_correction_fn=verify_correction_fn,
+                                       importance=f.get("importance"))
             if saved:
                 n_facts += 1
     for d in data.get("decisions", []):
