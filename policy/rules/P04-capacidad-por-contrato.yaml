@@ -15,3 +15,12 @@ notes: >
   exactamente el modelo "por identidad de facet" que este principio
   rechaza. El mecanismo que P04 exige (R3, contrato de tarea con
   capabilities inyectadas por el orquestador) no está implementado.
+
+  Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE,
+  no CULTURAL — el test es escribible (barrer el código buscando
+  decisiones de capacidad basadas en nombre de facet, fallar si aparecen;
+  que hoy fallaría es el punto). La tensión con `allowed_callers` no es un
+  defecto del corpus, es su primer hallazgo real: una contradicción entre
+  norma declarada y mecanismo implementado, con archivo y línea exactos.
+  `allowed_callers` en las_manos/config.toml es el punto de entrada
+  concreto que R3 tiene que reemplazar cuando se implemente esa fase.
