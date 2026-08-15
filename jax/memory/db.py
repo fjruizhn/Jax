@@ -121,6 +121,33 @@ def detect_completeness_intent(text: str) -> Optional[str]:
     return None
 
 
+# ------------------------------------------------------------
+# Reranking opcional con cross-encoder (item #7). Import perezoso: si
+# sentence-transformers no esta instalado, _get_reranker() devuelve None y
+# el caller sigue sin reranking (no rompe nada). El modelo es chico
+# (~90MB, ms-marco-MiniLM-L-6-v2) y corre en CPU — reordenar un puñado de
+# candidatos no necesita GPU.
+# ------------------------------------------------------------
+_reranker = None
+
+
+def _get_reranker():
+    """Carga el cross-encoder la primera vez que se usa. None si el paquete
+    no esta instalado o si la carga del modelo falla por cualquier motivo."""
+    global _reranker
+    if _reranker is None:
+        try:
+            # Cache de pesos en /opt/jax (140G libres), no en ~/.cache (raiz,
+            # espacio ajustado) — mismo motivo por el que el venv vive ahi.
+            os.environ.setdefault("HF_HOME", "/opt/jax/hf-cache")
+            from sentence_transformers import CrossEncoder
+            _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+        except Exception as e:
+            logger.warning(f"reranker no disponible ({e}), se sigue sin reranking")
+            _reranker = False
+    return _reranker or None
+
+
 def db_error_handler(func):
     """Decorador: cualquier error de DB se loguea y se traga.
     La conversacion NUNCA se interrumpe por un fallo de memoria."""
@@ -612,7 +639,8 @@ class MemoryDB:
         if not self.pool:
             return []
 
-        embedding = await self.get_embedding(_blend_query(query, recent_history))
+        blended_query = _blend_query(query, recent_history)
+        embedding = await self.get_embedding(blended_query)
         if embedding is None:
             return []
 
@@ -653,7 +681,8 @@ class MemoryDB:
         # sobre un pool ya trardo, un embedding cero simplemente da un mal
         # ranking en ese candidato puntual, nunca rompe la query entera.
         decay_lambda = float(os.getenv("JAX_MEMORY_DECAY_LAMBDA", "0.0"))
-        fetch_limit = limit * 3 if decay_lambda else limit
+        rerank_enabled = os.getenv("JAX_MEMORY_RERANK") == "1"
+        fetch_limit = limit * 3 if (decay_lambda or rerank_enabled) else limit
 
         try:
             async with self.pool.acquire() as conn:
@@ -673,19 +702,35 @@ class MemoryDB:
             logger.error(f"search_similar_messages fallo: {e}")
             return []
 
-        if not decay_lambda:
-            return rows
+        if decay_lambda:
+            def _decayed(r: dict) -> float:
+                # distancia reportada NO se toca (el filtro < 0.8 rio arriba
+                # sigue leyendo cosine puro) — el decay solo reordena candidatos.
+                try:
+                    edad_dias = (datetime.now() - r["created_at"]).days
+                    return r["distancia"] + decay_lambda * edad_dias
+                except Exception:
+                    return r["distancia"]  # fail-safe: sin fecha usable, no decae
+            rows.sort(key=_decayed)
 
-        def _decayed(r: dict) -> float:
-            # distancia reportada NO se toca (el filtro < 0.8 rio arriba
-            # sigue leyendo cosine puro) — el decay solo reordena candidatos.
-            try:
-                edad_dias = (datetime.now() - r["created_at"]).days
-                return r["distancia"] + decay_lambda * edad_dias
-            except Exception:
-                return r["distancia"]  # fail-safe: sin fecha usable, no decae
+        # --- Reranking con cross-encoder (item #7, OPCIONAL) ----------------
+        # JAX_MEMORY_RERANK=1 para activarlo. Sin la env var, o sin el paquete
+        # sentence-transformers instalado, esto es un no-op total (fail-safe
+        # de disponibilidad): el orden queda igual al de siempre.
+        if rerank_enabled and rows:
+            reranker = _get_reranker()
+            if reranker is not None:
+                try:
+                    pares = [(blended_query, r["content"]) for r in rows]
+                    scores = reranker.predict(pares)
+                    for r, s in zip(rows, scores):
+                        r["_rerank_score"] = float(s)
+                    rows.sort(key=lambda r: r["_rerank_score"], reverse=True)
+                    for r in rows:
+                        del r["_rerank_score"]
+                except Exception as e:
+                    logger.error(f"reranking fallo, se usa el orden previo: {e}")
 
-        rows.sort(key=_decayed)
         return rows[:limit]
 
     # --------------------------------------------------------
