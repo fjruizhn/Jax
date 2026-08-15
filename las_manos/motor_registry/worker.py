@@ -155,23 +155,26 @@ async def run(
     cap_entry = catalog.get_capability(capability)
     output_schema = cap_entry.output_schema if cap_entry else ""
 
-    # REFORMAS-v3 §3.1.5 (R3.5) — identidad+capabilities+predicados
+    # REFORMAS-v3 R3.5 — identidad+capabilities+predicados
     # inyectados antes del prompt real (quién es, qué capability tiene en
     # esta tarea, qué motores existen y qué puede cada uno, predicados
     # emitibles, protocolo de rechazo tipado CAPABILITY_UNBOUND).
     #
-    # Catálogo mínimo {motor: []} por ahora: MotorCatalog indexa por motor
-    # individual y por capability (catalog.py:47-92) pero no expone una
-    # vista pública invertida {motor: [capabilities]}. Construirla acá
-    # requeriría leer sus atributos internos (_motors/_capabilities) o
-    # sumar un método nuevo a MotorCatalog — ambos, un refactor mayor no
-    # pedido por Fase 1 (ver brief Task 5, nota del ejecutor). Efecto: el
-    # bloque de identidad de este job no lista otros motores del
-    # ecosistema hasta que se exponga ese catálogo completo.
+    # Catálogo vacío {} por ahora: MotorCatalog indexa por motor individual
+    # y por capability (catalog.py:47-92) pero no expone una vista pública
+    # invertida {motor: {"allowed_motors_for": [...]}} (la forma que
+    # build_identity_context espera — dict[str, dict], no dict[str, list]).
+    # Construirla acá requeriría leer sus atributos internos
+    # (_motors/_capabilities) o sumar un método nuevo a MotorCatalog —
+    # ambos, un refactor mayor no pedido por Fase 1 (ver brief Task 5, nota
+    # del ejecutor). {} es type-correct y produce cero "otros motores" — el
+    # mismo efecto práctico que antes, sin el riesgo de que un futuro
+    # catálogo con más de una entrada dispare un AttributeError dentro de
+    # build_identity_context (que hace info.get(...) sobre cada valor).
     identity = build_identity_context(
         motor_name=motor,
         capabilities=[capability],
-        catalog={motor: []},
+        catalog={},
         predicates=_REFORMAS_V3_PREDICATES,
         task_id=job_id,
     )

@@ -1,5 +1,5 @@
 """
-REFORMAS-v3 §3.1.5 (R3.5) — cada motor recibe: quién es, qué capabilities
+REFORMAS-v3 R3.5 — cada motor recibe: quién es, qué capabilities
 tiene en esta tarea, qué motores existen y qué puede cada uno, la lista de
 predicados emitibles, y el protocolo de rechazo tipado.
 """
