@@ -673,6 +673,20 @@ class MemoryDB:
 
         vec_str = json.dumps(embedding)
 
+        # --- Busqueda dual (item nuevo, sugerido por el tutorial de Beelink
+        # v2): ademas del embedding mezclado con el historial, tambien se
+        # busca con el mensaje CRUDO cuando el blend cambio algo. Una
+        # pregunta nueva sin relacion con los ultimos turnos puede diluirse
+        # si solo se busca con la version mezclada. Solo se paga el costo de
+        # un segundo embedding/query cuando realmente hay blend (recent_history
+        # no vacio Y distinto de query) — sin historial, es exactamente el
+        # comportamiento de antes (una sola busqueda).
+        raw_vec_str: Optional[str] = None
+        if recent_history and blended_query != query:
+            raw_embedding = await self.get_embedding(query)
+            if raw_embedding is not None:
+                raw_vec_str = json.dumps(raw_embedding)
+
         # --- WHERE de scope (dos dimensiones) -----------------------------
         # (project_id = P)  OR  (project_id IS NULL AND user_id = U)
         scope_sql = ""
@@ -711,7 +725,7 @@ class MemoryDB:
         rerank_enabled = os.getenv("JAX_MEMORY_RERANK") == "1"
         fetch_limit = limit * 3 if (decay_lambda or rerank_enabled) else limit
 
-        try:
+        async def _run(v: str) -> list:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
@@ -722,9 +736,22 @@ class MemoryDB:
                         + scope_sql +
                         "ORDER BY VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) ASC "
                         "LIMIT %s",
-                        ([vec_str] + scope_params + [vec_str, fetch_limit]),
+                        ([v] + scope_params + [v, fetch_limit]),
                     )
-                    rows = [dict(r) for r in await cur.fetchall()]
+                    return [dict(r) for r in await cur.fetchall()]
+
+        try:
+            rows = await _run(vec_str)
+            if raw_vec_str:
+                rows_raw = await _run(raw_vec_str)
+                # Merge por (content, created_at): si el mismo mensaje salio
+                # en las dos busquedas, se queda con la distancia mas chica.
+                merged: dict[tuple, dict] = {}
+                for r in rows + rows_raw:
+                    key = (r["content"], r["created_at"])
+                    if key not in merged or r["distancia"] < merged[key]["distancia"]:
+                        merged[key] = r
+                rows = sorted(merged.values(), key=lambda r: r["distancia"])[:fetch_limit]
         except Exception as e:
             logger.error(f"search_similar_messages fallo: {e}")
             return []
