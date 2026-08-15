@@ -24,5 +24,17 @@ def test_detects_technical_completeness():
     assert detect_completeness_intent("Que decisiones tecnicas tomamos?") == "technical"
 
 
+def test_detects_user_completeness():
+    assert detect_completeness_intent("Que sabes de mi?") == "user"
+
+
+def test_detects_social_completeness():
+    assert detect_completeness_intent("Quienes son mis socios?") == "social"
+
+
+def test_detects_financial_completeness():
+    assert detect_completeness_intent("Que sabes de mis finanzas?") == "financial"
+
+
 def test_normal_question_returns_none():
     assert detect_completeness_intent("Como se llama el gato de Fernando?") is None
