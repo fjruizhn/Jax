@@ -1,6 +1,8 @@
 # --- Entornos virtuales (no se versionan; se reconstruyen) ---
-.venv/
-*/.venv/
+# Sin barra final: matchea tambien cuando .venv es un symlink (ej: a
+# /opt/jax/venv, para no llenar la particion raiz — ver commit "mueve venv").
+.venv
+*/.venv
 
 # --- Cache de Python ---
 __pycache__/
