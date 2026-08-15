@@ -507,7 +507,8 @@ class MemoryDB:
                         project_id: Optional[int] = None,
                         is_correction: bool = False,
                         verify_correction_fn: Optional[
-                            Callable[[str, str], Awaitable[bool]]] = None
+                            Callable[[str, str], Awaitable[bool]]] = None,
+                        source_fact_ids: Optional[list] = None,
                         ) -> Optional[bool]:
         """Guarda un hecho extraido. confidence 0.7 + is_verified=FALSE por
         defecto: nada entra como verdad absoluta sin que Fernando lo revise.
@@ -529,7 +530,13 @@ class MemoryDB:
             worker.py), no obligatorio. Sin el, se confia en la distancia sola
             (comportamiento de antes).
           - cualquier otro caso (incluido 'unrelated', o sin candidato, o sin
-            embedding) -> inserta normal. Fail-safe: ante duda, INSERT gana."""
+            embedding) -> inserta normal. Fail-safe: ante duda, INSERT gana.
+
+        source_fact_ids (opcional): lista de ids de facts de los que este
+        fact fue derivado — usado por el worker de sintesis de segundo orden
+        (item #8) para que un insight sea trazable hasta los hechos
+        verificados que lo originaron. None para facts normales (extraccion
+        directa de conversacion)."""
         if not self.pool:
             return None
         # Validar fact_type contra el ENUM del esquema
@@ -553,10 +560,11 @@ class MemoryDB:
                 await cur.execute(
                     "INSERT INTO facts "
                     "(fact_uuid, fact_text, fact_type, confidence, source_message_id, "
-                    "source_facet, is_verified, user_id, project_id) "
-                    "VALUES (UUID(), %s, %s, %s, %s, %s, FALSE, %s, %s)",
+                    "source_facet, is_verified, user_id, project_id, source_fact_ids) "
+                    "VALUES (UUID(), %s, %s, %s, %s, %s, FALSE, %s, %s, %s)",
                     (fact_text, ftype, confidence, source_message_id, source_facet,
-                     user_id, project_id),
+                     user_id, project_id,
+                     json.dumps(source_fact_ids) if source_fact_ids else None),
                 )
                 await cur.execute("SELECT LAST_INSERT_ID()")
                 fact_id = (await cur.fetchone())[0]
@@ -809,7 +817,7 @@ class MemoryDB:
         if not self.pool:
             return None
         query = ("SELECT id, fact_text, fact_type, confidence, is_verified, "
-                 "source_facet, created_at FROM facts")
+                 "source_facet, created_at, source_fact_ids FROM facts")
         conditions = ["superseded_by IS NULL"]
         params: list = []
         if only_unverified:

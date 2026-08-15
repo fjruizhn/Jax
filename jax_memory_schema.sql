@@ -72,6 +72,7 @@ CREATE TABLE facts (
     project_id INT NULL,                         -- scope de proyecto (compartida)
     superseded_by INT NULL,                      -- si no-NULL: reemplazado por una correccion
     superseded_at TIMESTAMP NULL,
+    source_fact_ids JSON NULL,                    -- solo en facts de sintesis: de que facts salio
     FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE SET NULL,
     INDEX idx_fact_type (fact_type),
     INDEX idx_confidence (confidence),
