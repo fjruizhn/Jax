@@ -1,0 +1,25 @@
+id: OP03
+statement: >
+  Node.js en server-rich-hn (172.16.20.10) se instala vía el runtime
+  propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
+origin: >
+  Confirmación directa de Fernando Ruiz, verificada por SSH
+  (fruiz@172.16.20.10:58291, 2026-08-15): `which node` resuelve a
+  `/www/server/nodejs/v24.16.0/bin/node` (runtime gestionado por aaPanel);
+  `dpkg -l | grep -iE "nodejs|node-"` sin resultados; sin archivos en
+  `/etc/apt/sources.list.d/` que referencien nodesource. Distinta de la
+  regla ya documentada para hall9000 (~/.claude/CLAUDE.md, jax/CLAUDE.md:
+  "Node.js ... NUNCA NodeSource") — mismo principio, host distinto,
+  mecanismo de instalación distinto (aaPanel vs. nvm).
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: null
+  test: null
+notes: >
+  Verificado en vivo, sin discrepancia. Test escribible: chequeo remoto
+  (SSH) de que `node` resuelve bajo `/www/server/nodejs/` y que no existe
+  paquete `nodejs`/`node-*` vía dpkg ni fuente nodesource — no implementado
+  todavía.
+version: 0.1
+created: 2026-08-15
+amended_by: null
