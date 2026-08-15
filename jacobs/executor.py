@@ -753,8 +753,25 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # FASE A §3.4: validación uniforme del contrato ANTES de rutear por facet.
     # Si falla, el step falla limpio (lo captura _run_one_step → _fail_step) sin
     # haber tocado ninguna API ni el Motor Registry.
+    #
+    # REFORMAS-v3 §3.1.4 — CAPABILITY_UNBOUND se intercepta y reenruta a un
+    # candidate antes de abortar el pipeline. NIVEL A (str) no tiene
+    # candidatos — falla igual que antes. El usuario nunca ve el estado
+    # intermedio: si el reroute encuentra un candidato válido, el pipeline
+    # sigue como si el step hubiera sido asignado a ese facet desde el inicio.
+    tried_facets = {step.facet}
     cap_error = validate_capability(step)
-    if cap_error:
+    while isinstance(cap_error, CapabilityUnbound):
+        untried = [c for c in cap_error.candidates if c not in tried_facets]
+        if not untried:
+            raise ValueError(
+                f"Capability inválida (pre-dispatch, candidatos agotados): "
+                f"{cap_error.to_dict()}"
+            )
+        step = step.model_copy(update={"facet": untried[0]})
+        tried_facets.add(untried[0])
+        cap_error = validate_capability(step)
+    if isinstance(cap_error, str):
         raise ValueError(f"Capability inválida (pre-dispatch): {cap_error}")
 
     ctx_input = _build_context_input(step, pipeline)
