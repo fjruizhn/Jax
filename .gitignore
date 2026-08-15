@@ -23,6 +23,7 @@ logs/
 *.backup-*
 *.bak
 *.bak-*
+backups/
 *.bak.*
 *.FERNANDO-*
 

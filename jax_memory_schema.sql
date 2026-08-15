@@ -68,10 +68,17 @@ CREATE TABLE facts (
     embedding VECTOR(768) NULL,                  -- busqueda semantica (Fase 2)
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    user_id INT NULL,                            -- scope individual (memoria de dos niveles)
+    project_id INT NULL,                         -- scope de proyecto (compartida)
+    superseded_by INT NULL,                      -- si no-NULL: reemplazado por una correccion
+    superseded_at TIMESTAMP NULL,
     FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE SET NULL,
     INDEX idx_fact_type (fact_type),
     INDEX idx_confidence (confidence),
     INDEX idx_expires (expires_at),
+    INDEX idx_facts_user (user_id),
+    INDEX idx_facts_project (project_id),
+    INDEX idx_facts_active (superseded_by),
     FULLTEXT INDEX ft_fact_text (fact_text)
 ) ENGINE=InnoDB;
 
