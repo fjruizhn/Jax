@@ -570,6 +570,35 @@ git commit -m "feat(jacobs): _dispatch_step reenruta ante CAPABILITY_UNBOUND ant
 
 ---
 
+## Checkpoint — parar y confirmar con Fernando antes de Task 5
+
+Tasks 1-4 son de solo lectura y reenrutamiento (nunca cambian qué ve un
+motor). Task 5 es distinta de categoría: toca `motor_registry/worker.py` y
+antepone texto nuevo al prompt de *todos* los motores en producción — es
+la tarea con más superficie para romper comportamiento existente de esta
+fase.
+
+Antes de arrancar Task 5:
+- [ ] Confirmar que Tasks 1-4 están commiteadas y sus tests (incluida la
+      regresión de Step 5 de cada task) pasaron limpio.
+- [ ] Mostrarle a Fernando el diff acumulado de Tasks 1-4 y el texto exacto
+      que `build_identity_context` va a prependear al prompt (Step 1-4 de
+      Task 5 se pueden implementar y testear en aislado sin tocar
+      `worker.py` — hacerlo primero, y parar ahí para el checkpoint antes
+      del Step 5 que sí modifica `worker.py`).
+- [ ] Confirmar los tres detalles marcados para verificar en el código real
+      antes de asumir nada (ver "Puntos que el ejecutor debe verificar" en
+      Self-Review): campo id de `Step`, si `Step` es dataclass o Pydantic
+      (estos dos ya resueltos en Tasks 3-4, reusar lo confirmado), y el
+      nombre real de la(s) función(es) `_call_<motor>` + variable de
+      catálogo en scope de `worker.py` (este es nuevo para Task 5).
+- [ ] Fernando aprueba seguir con el Step 5 de Task 5 (el wiring real en
+      `worker.py`) antes de que el subagente lo ejecute.
+
+No seguir a Step 5 de Task 5 sin ese OK explícito.
+
+---
+
 ### Task 5: Identidad y capabilities inyectadas por motor
 
 **Files:**
