@@ -58,6 +58,28 @@ def _normalize_role(role: Optional[str]) -> str:
     return _ROLE_MAP.get(role.strip().lower(), "jax_local")
 
 
+# ------------------------------------------------------------
+# Deteccion de corriones/duplicados por distancia vectorial.
+# Un solo par de umbrales, dos usos: dedup (item #3) y correccion
+# (item #1) comparten la misma banda "correction_candidate" porque
+# ambas son, en el fondo, la misma pregunta ("hay algo casi igual a
+# esto ya guardado?"), solo que se resuelven distinto segun si el
+# extractor marco is_correction o no.
+# ------------------------------------------------------------
+DUP_DISTANCE_THRESHOLD = 0.05
+CORRECTION_DISTANCE_THRESHOLD = 0.25
+
+
+def classify_fact_distance(distancia: float) -> str:
+    """Clasifica una distancia coseno contra el fact activo mas cercano.
+    Devuelve 'duplicate' | 'correction_candidate' | 'unrelated'."""
+    if distancia < DUP_DISTANCE_THRESHOLD:
+        return "duplicate"
+    if distancia < CORRECTION_DISTANCE_THRESHOLD:
+        return "correction_candidate"
+    return "unrelated"
+
+
 def db_error_handler(func):
     """Decorador: cualquier error de DB se loguea y se traga.
     La conversacion NUNCA se interrumpe por un fallo de memoria."""
@@ -355,23 +377,96 @@ class MemoryDB:
                 rows = await cur.fetchall()
                 return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
 
+    async def _find_nearest_fact(self, embedding: list, user_id: Optional[int],
+                                 project_id: Optional[int]) -> Optional[dict]:
+        """Busca el fact ACTIVO (superseded_by IS NULL) mas cercano al
+        embedding dado, scoped por user_id/project_id igual que
+        search_similar_messages. None si no hay pool, no hay embedding, o
+        no hay ningun fact en ese scope (fail-safe: el caller inserta)."""
+        if not self.pool or not embedding:
+            return None
+        vec_str = json.dumps(embedding)
+        clauses = ["superseded_by IS NULL"]
+        params: list = []
+        scope = []
+        if project_id is not None:
+            scope.append("project_id = %s")
+            params.append(project_id)
+        if user_id is not None:
+            scope.append("(project_id IS NULL AND user_id = %s)")
+            params.append(user_id)
+        if scope:
+            clauses.append("(" + " OR ".join(scope) + ")")
+        where = " AND ".join(clauses)
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT id, fact_text, "
+                        "VEC_DISTANCE_COSINE(embedding, VEC_FromText(%s)) AS distancia "
+                        f"FROM facts WHERE {where} "
+                        "ORDER BY VEC_DISTANCE_COSINE(embedding, VEC_FromText(%s)) ASC "
+                        "LIMIT 1",
+                        ([vec_str] + params + [vec_str]),
+                    )
+                    row = await cur.fetchone()
+                    return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"_find_nearest_fact fallo: {e}")
+            return None
+
+    @db_error_handler
+    async def supersede_fact(self, old_fact_id: int, new_fact_id: int) -> Optional[bool]:
+        """Marca old_fact_id como reemplazado por new_fact_id. No borra nada:
+        la historia de una correccion queda reconstruible."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE facts SET superseded_by = %s, superseded_at = NOW() "
+                    "WHERE id = %s",
+                    (new_fact_id, old_fact_id),
+                )
+        return True
+
     @db_error_handler
     async def save_fact(self, fact_text: str, fact_type: str,
                         source_message_id: Optional[int] = None,
                         source_facet: Optional[str] = None,
                         confidence: float = 0.7,
                         user_id: Optional[int] = None,
-                        project_id: Optional[int] = None) -> Optional[bool]:
+                        project_id: Optional[int] = None,
+                        is_correction: bool = False) -> Optional[bool]:
         """Guarda un hecho extraido. confidence 0.7 + is_verified=FALSE por
         defecto: nada entra como verdad absoluta sin que Fernando lo revise.
 
         Scope de dos niveles: project_id NOT NULL -> fact de proyecto (compartido);
-        NULL -> fact individual de user_id."""
+        NULL -> fact individual de user_id.
+
+        Antes de insertar, busca el fact activo mas cercano en el mismo scope:
+          - 'duplicate' y NO is_correction -> no inserta (devuelve False).
+          - 'correction_candidate' y is_correction -> inserta y marca el viejo
+            como superseded_by el nuevo.
+          - cualquier otro caso (incluido 'unrelated', o sin candidato, o sin
+            embedding) -> inserta normal. Fail-safe: ante duda, INSERT gana."""
         if not self.pool:
             return None
         # Validar fact_type contra el ENUM del esquema
         valid_types = ("user", "technical", "social", "preference", "project", "financial")
         ftype = fact_type if fact_type in valid_types else "user"
+
+        # Embedding ANTES del insert: lo necesitamos para decidir dedup/correccion.
+        embedding = await self.get_embedding(fact_text)
+        candidate = await self._find_nearest_fact(embedding, user_id, project_id) \
+            if embedding else None
+        band = classify_fact_distance(candidate["distancia"]) if candidate else "unrelated"
+
+        if band == "duplicate" and not is_correction:
+            logger.info(f"save_fact: duplicado de fact {candidate['id']}, no se inserta "
+                        f"({fact_text[:60]!r})")
+            return False
+
         fact_id: Optional[int] = None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
@@ -385,17 +480,20 @@ class MemoryDB:
                 )
                 await cur.execute("SELECT LAST_INSERT_ID()")
                 fact_id = (await cur.fetchone())[0]
-        # Vectorizar fuera del bloque — no retiene conexion mientras Ollama trabaja
-        if fact_id and self.pool:
-            embedding = await self.get_embedding(fact_text)
-            if embedding:
-                vec_str = json.dumps(embedding)
-                async with self.pool.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            "UPDATE facts SET embedding = VEC_FromText(%s) WHERE id = %s",
-                            (vec_str, fact_id),
-                        )
+
+        if fact_id and embedding:
+            vec_str = json.dumps(embedding)
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE facts SET embedding = VEC_FromText(%s) WHERE id = %s",
+                        (vec_str, fact_id),
+                    )
+
+        if fact_id and is_correction and band == "correction_candidate":
+            await self.supersede_fact(candidate["id"], fact_id)
+            logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']}")
+
         return True
 
     @db_error_handler

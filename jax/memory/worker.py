@@ -61,11 +61,32 @@ QUE NO es memorable (IGNORALO, no lo extraigas):
 - Pedidos de informacion que ya fueron respondidos en la misma conversacion.
 - Cualquier cosa que no aporte conocimiento duradero sobre Fernando o sus proyectos.
 
+NUNCA extraigas, sin excepcion, aunque parezca memorable o duradero (categorias prohibidas):
+- Salud o condiciones medicas (fisicas o mentales, propias o de terceros).
+- Raza, etnia, u origen nacional.
+- Orientacion sexual o identidad de genero.
+- Estado migratorio o de ciudadania.
+- Afiliacion religiosa o creencias religiosas.
+- Afiliacion o inclinacion politica.
+- Datos financieros sensibles de terceros (salarios, deudas, patrimonio de personas que no son Fernando).
+Esta regla tiene prioridad sobre "que si es memorable": si algo entra en estas categorias, NO
+lo extraigas como hecho aunque sea duradero o relevante. Ante la duda de si algo cae en una
+categoria prohibida, NO lo extraigas.
+
 EJEMPLOS:
 - MAL (NO extraer): "Fernando pregunto por el significado de una palabra rara."
 - MAL (NO extraer): "Fernando esta haciendo una prueba de memoria."
 - BIEN (extraer): "Fernando es banquero de tercera generacion y disena productos financieros para LATAM."
 - BIEN (extraer): "Fernando prefiere infraestructura propia y desconfia de depender de servicios de terceros."
+- BIEN (extraer, is_correction=true): Fernando dijo antes que el modelo activo era
+  qwen3-coder:30b y en esta conversacion dice que ahora es gpt-oss:120b.
+
+CORRECCIONES: si un hecho de esta conversacion CONTRADICE o ACTUALIZA algo que
+Fernando dijo antes (ej: "el modelo activo es X" cuando antes habia dicho que
+era Y; "ya no trabajo en tal empresa"), marca ese hecho con "is_correction":
+true. Si es informacion nueva que no reemplaza nada anterior, "is_correction":
+false. Ante la duda, false (fail-safe: mejor un hecho nuevo de mas que una
+correccion aplicada de menos).
 
 Categorias:
 1. HECHOS: conocimiento duradero sobre Fernando, sus preferencias, proyectos o relaciones.
@@ -76,7 +97,7 @@ Conversacion:
 {conversation}
 
 Responde UNICAMENTE con JSON valido, sin texto antes ni despues, sin markdown:
-{{"facts": [{{"text": "...", "type": "user|technical|social|preference|project|financial"}}],
+{{"facts": [{{"text": "...", "type": "user|technical|social|preference|project|financial", "is_correction": false}}],
 "decisions": [{{"title": "...", "chosen": "...", "reasoning": "..."}}],
 "action_items": [{{"description": "...", "due_date": null}}]}}
 
@@ -156,10 +177,12 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
     n_facts = n_dec = n_act = 0
     for f in data.get("facts", []):
         if f.get("text"):
-            await db.save_fact(f["text"], f.get("type", "user"),
-                               source_facet="extractor",
-                               user_id=conv_user, project_id=conv_proj)
-            n_facts += 1
+            saved = await db.save_fact(f["text"], f.get("type", "user"),
+                                       source_facet="extractor",
+                                       user_id=conv_user, project_id=conv_proj,
+                                       is_correction=bool(f.get("is_correction", False)))
+            if saved:
+                n_facts += 1
     for d in data.get("decisions", []):
         if d.get("title") and d.get("chosen"):
             await db.save_decision(d["title"], d["chosen"],
