@@ -514,8 +514,10 @@ class MemoryDB:
 
         Antes de insertar, busca el fact activo mas cercano en el mismo scope:
           - 'duplicate' y NO is_correction -> no inserta (devuelve False).
-          - 'correction_candidate' y is_correction -> inserta y marca el viejo
-            como superseded_by el nuevo.
+          - is_correction=True y HAY candidato ('duplicate' o
+            'correction_candidate' — una correccion bien parecida en texto
+            puede caer en cualquiera de las dos bandas) -> inserta y marca
+            el viejo como superseded_by el nuevo.
           - cualquier otro caso (incluido 'unrelated', o sin candidato, o sin
             embedding) -> inserta normal. Fail-safe: ante duda, INSERT gana."""
         if not self.pool:
@@ -558,9 +560,10 @@ class MemoryDB:
                         (vec_str, fact_id),
                     )
 
-        if fact_id and is_correction and band == "correction_candidate":
+        if fact_id and is_correction and candidate is not None and band != "unrelated":
             await self.supersede_fact(candidate["id"], fact_id)
-            logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']}")
+            logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
+                        f"(banda={band})")
 
         return True
 
