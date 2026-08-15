@@ -76,14 +76,21 @@ EJEMPLOS:
   ya demostrada en multiples proyectos, por infraestructura autohospedada" — eso conecta
   algo que ningun hecho individual dice.
 
+Cada hecho tiene un id entre corchetes al principio — usalo para citar EXACTAMENTE de que
+hechos sale cada insight, en "source_ids".
+
 Hechos verificados de este scope:
 {facts}
 
 Responde UNICAMENTE con JSON valido, sin texto antes ni despues, sin markdown:
-{{"insights": [{{"text": "...", "type": "user|technical|social|preference|project|financial"}}]}}
+{{"insights": [{{"text": "...", "type": "user|technical|social|preference|project|financial",
+"source_ids": [1, 2]}}]}}
 
-Si no hay ningun patron genuino que conecte estos hechos, devolve la lista vacia. Es
-perfectamente valido devolver una lista vacia — de hecho, es lo mas comun."""
+source_ids es OBLIGATORIO para cada insight: los ids (numeros, sin corchetes) de los hechos
+de entrada que conectaste para llegar a ese insight — minimo 2 (un insight de un solo hecho
+no es un patron, es una repeticion). Si no hay ningun patron genuino que conecte estos
+hechos, devolve la lista vacia. Es perfectamente valido devolver una lista vacia — de
+hecho, es lo mas comun."""
 
 
 def build_synthesizer() -> HttpMuscle:
@@ -107,7 +114,8 @@ async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
     if not facts or len(facts) < MIN_VERIFIED_FACTS:
         return 0
 
-    facts_text = "\n".join(f"- {f['fact_text']}" for f in facts)
+    valid_ids = {f["id"] for f in facts}
+    facts_text = "\n".join(f"[{f['id']}] {f['fact_text']}" for f in facts)
 
     try:
         # decorate=False: igual que worker.py, esto es extraccion interna a
@@ -126,14 +134,19 @@ async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
 
     n_saved = 0
     for insight in data.get("insights", []):
-        if insight.get("text"):
-            saved = await db.save_fact(
-                insight["text"], insight.get("type", "user"),
-                source_facet="synthesis",
-                user_id=user_id, project_id=project_id,
-            )
-            if saved:
-                n_saved += 1
+        if not insight.get("text"):
+            continue
+        # Solo se guardan los ids que realmente vinieron en la entrada — un
+        # id inventado por el LLM (alucinado) se descarta, no rompe el save.
+        source_ids = [i for i in insight.get("source_ids", []) if i in valid_ids]
+        saved = await db.save_fact(
+            insight["text"], insight.get("type", "user"),
+            source_facet="synthesis",
+            user_id=user_id, project_id=project_id,
+            source_fact_ids=source_ids or None,
+        )
+        if saved:
+            n_saved += 1
 
     if n_saved:
         logger.info(f"scope user={user_id} project={project_id}: {n_saved} insight(s) "
