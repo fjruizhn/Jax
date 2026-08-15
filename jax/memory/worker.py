@@ -112,6 +112,27 @@ devolver listas vacias si la conversacion no tiene nada digno de recordar a larg
 JAMAS inventes informacion que no este explicita en la conversacion."""
 
 
+# Verificacion extra antes de aplicar una correccion (ver db.py:save_fact,
+# parametro verify_correction_fn). La distancia vectorial sola puede acertar
+# el candidato equivocado por coincidencia de embedding — esto es un segundo
+# chequeo, mas caro (una llamada LLM mas), pero solo se dispara cuando ya
+# hay un candidato de por medio, no en cada fact.
+VERIFICATION_PROMPT = """Un sistema de memoria detecto que estos dos hechos podrian estar
+relacionados (el nuevo podria ser una correccion del viejo, por similitud de embedding).
+
+HECHO VIEJO (guardado antes): {old}
+HECHO NUEVO (recien extraido, marcado como posible correccion): {new}
+
+Es una correccion real SOLO si el hecho nuevo contradice o actualiza directamente al viejo
+(son sobre la misma cosa, y el nuevo cambia el dato). NO es una correccion si:
+- Son sobre temas distintos que coincidieron por casualidad en el embedding.
+- El nuevo agrega detalle sin contradecir al viejo (eso son dos hechos validos, no uno
+  reemplazando al otro).
+
+Responde UNICAMENTE con JSON, sin texto antes ni despues, sin markdown:
+{{"es_correccion": true}} o {{"es_correccion": false}}"""
+
+
 # Extractor: por defecto DeepSeek (faceta confiable). El system_prompt es
 # minimo porque el prompt de extraccion ya trae toda la instruccion.
 def build_extractor() -> HttpMuscle:
@@ -174,6 +195,23 @@ def _parse_json(raw: str) -> dict | None:
         return None
 
 
+def _build_verify_correction_fn(extractor: HttpMuscle):
+    """Devuelve la funcion que db.save_fact() usa como verify_correction_fn:
+    una llamada LLM extra que confirma si un candidato de correccion es real,
+    antes de que la distancia vectorial sola decida reemplazar un fact.
+    Fail-safe: cualquier error (timeout, JSON invalido) se propaga como
+    excepcion y save_fact ya lo trata como 'no confirmado'."""
+    async def verify(old_text: str, new_text: str) -> bool:
+        raw = await extractor.invoke(
+            VERIFICATION_PROMPT.format(old=old_text, new=new_text), decorate=False
+        )
+        data = _parse_json(raw)
+        if data is None:
+            raise ValueError("verificacion de correccion: JSON no parseable")
+        return bool(data.get("es_correccion", False))
+    return verify
+
+
 async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
     """Procesa UNA conversacion. Devuelve True si la marco procesada."""
     conv_id = conv["id"]
@@ -221,13 +259,15 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
     conv_proj = conv.get("project_id")
 
     # Guardar lo extraido (confidence 0.7, is_verified FALSE en facts)
+    verify_correction_fn = _build_verify_correction_fn(extractor)
     n_facts = n_dec = n_act = 0
     for f in data.get("facts", []):
         if f.get("text"):
             saved = await db.save_fact(f["text"], f.get("type", "user"),
                                        source_facet="extractor",
                                        user_id=conv_user, project_id=conv_proj,
-                                       is_correction=bool(f.get("is_correction", False)))
+                                       is_correction=bool(f.get("is_correction", False)),
+                                       verify_correction_fn=verify_correction_fn)
             if saved:
                 n_facts += 1
     for d in data.get("decisions", []):

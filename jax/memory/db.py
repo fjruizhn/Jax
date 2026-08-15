@@ -21,7 +21,7 @@ import uuid
 import logging
 import json
 from datetime import datetime
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import aiomysql
 import httpx
@@ -505,7 +505,10 @@ class MemoryDB:
                         confidence: float = 0.7,
                         user_id: Optional[int] = None,
                         project_id: Optional[int] = None,
-                        is_correction: bool = False) -> Optional[bool]:
+                        is_correction: bool = False,
+                        verify_correction_fn: Optional[
+                            Callable[[str, str], Awaitable[bool]]] = None
+                        ) -> Optional[bool]:
         """Guarda un hecho extraido. confidence 0.7 + is_verified=FALSE por
         defecto: nada entra como verdad absoluta sin que Fernando lo revise.
 
@@ -517,7 +520,14 @@ class MemoryDB:
           - is_correction=True y HAY candidato ('duplicate' o
             'correction_candidate' — una correccion bien parecida en texto
             puede caer en cualquiera de las dos bandas) -> inserta y marca
-            el viejo como superseded_by el nuevo.
+            el viejo como superseded_by el nuevo, PERO solo si
+            verify_correction_fn (cuando se pasa) confirma que el nuevo texto
+            realmente contradice/actualiza al viejo. La distancia vectorial
+            sola puede acertar el candidato equivocado por coincidencia de
+            embedding (bug real documentado por Beelink) — verify_correction_fn
+            es un chequeo extra opcional (ej: una llamada LLM dedicada desde
+            worker.py), no obligatorio. Sin el, se confia en la distancia sola
+            (comportamiento de antes).
           - cualquier otro caso (incluido 'unrelated', o sin candidato, o sin
             embedding) -> inserta normal. Fail-safe: ante duda, INSERT gana."""
         if not self.pool:
@@ -561,9 +571,23 @@ class MemoryDB:
                     )
 
         if fact_id and is_correction and candidate is not None and band != "unrelated":
-            await self.supersede_fact(candidate["id"], fact_id)
-            logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
-                        f"(banda={band})")
+            confirmado = True
+            if verify_correction_fn is not None:
+                try:
+                    confirmado = await verify_correction_fn(candidate["fact_text"], fact_text)
+                except Exception as e:
+                    # Fail-safe: si el chequeo extra falla, NO se aplica la
+                    # correccion (el candidato podria ser el equivocado) pero
+                    # el fact nuevo ya quedo insertado igual.
+                    logger.error(f"verify_correction_fn fallo: {e}, no se aplica la correccion")
+                    confirmado = False
+            if confirmado:
+                await self.supersede_fact(candidate["id"], fact_id)
+                logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
+                            f"(banda={band})")
+            else:
+                logger.info(f"save_fact: fact {fact_id} NO confirmo correccion sobre "
+                            f"candidato {candidate['id']} (banda={band}), queda como fact nuevo")
 
         return True
 
