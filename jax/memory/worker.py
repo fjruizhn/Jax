@@ -42,6 +42,22 @@ logging.basicConfig(
 logger = logging.getLogger("jax.memory.worker")
 
 
+# Bloque de categorias prohibidas — compartido entre el extractor (worker.py)
+# y el sintetizador de segundo orden (synthesis_worker.py). Una sola fuente
+# de verdad: si esto cambia, cambia para los dos procesos que escriben facts.
+FORBIDDEN_CATEGORIES_BLOCK = """NUNCA extraigas, sin excepcion, aunque parezca memorable o duradero (categorias prohibidas):
+- Salud o condiciones medicas (fisicas o mentales, propias o de terceros).
+- Raza, etnia, u origen nacional.
+- Orientacion sexual o identidad de genero.
+- Estado migratorio o de ciudadania.
+- Afiliacion religiosa o creencias religiosas.
+- Afiliacion o inclinacion politica.
+- Datos financieros sensibles de terceros (salarios, deudas, patrimonio de personas que no son Fernando).
+Esta regla tiene prioridad sobre "que si es memorable": si algo entra en estas categorias, NO
+lo extraigas como hecho aunque sea duradero o relevante. Ante la duda de si algo cae en una
+categoria prohibida, NO lo extraigas."""
+
+
 # Prompt de extraccion. Acotado, pide JSON puro sin adornos.
 EXTRACTION_PROMPT = """Analiza esta conversacion entre Fernando y JAX (su asistente personal).
 Tu trabajo es extraer SOLO lo que valga la pena recordar DENTRO DE SEIS MESES.
@@ -61,17 +77,7 @@ QUE NO es memorable (IGNORALO, no lo extraigas):
 - Pedidos de informacion que ya fueron respondidos en la misma conversacion.
 - Cualquier cosa que no aporte conocimiento duradero sobre Fernando o sus proyectos.
 
-NUNCA extraigas, sin excepcion, aunque parezca memorable o duradero (categorias prohibidas):
-- Salud o condiciones medicas (fisicas o mentales, propias o de terceros).
-- Raza, etnia, u origen nacional.
-- Orientacion sexual o identidad de genero.
-- Estado migratorio o de ciudadania.
-- Afiliacion religiosa o creencias religiosas.
-- Afiliacion o inclinacion politica.
-- Datos financieros sensibles de terceros (salarios, deudas, patrimonio de personas que no son Fernando).
-Esta regla tiene prioridad sobre "que si es memorable": si algo entra en estas categorias, NO
-lo extraigas como hecho aunque sea duradero o relevante. Ante la duda de si algo cae en una
-categoria prohibida, NO lo extraigas.
+""" + FORBIDDEN_CATEGORIES_BLOCK + """
 
 EJEMPLOS:
 - MAL (NO extraer): "Fernando pregunto por el significado de una palabra rara."

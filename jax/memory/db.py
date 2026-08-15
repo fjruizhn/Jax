@@ -738,11 +738,16 @@ class MemoryDB:
     # --------------------------------------------------------
     @db_error_handler
     async def get_facts(self, only_unverified: bool = True,
+                        only_verified: bool = False,
                         fact_type: Optional[str] = None,
                         limit: int = 20,
                         user_id: Optional[int] = None,
                         project_id: Optional[int] = None) -> Optional[list]:
-        """Lista facts. Por defecto solo los no verificados (a revisar).
+        """Lista facts ACTIVOS (superseded_by IS NULL — un fact corregido
+        nunca vuelve a aparecer aca). Por defecto solo los no verificados
+        (a revisar). only_verified=True hace lo opuesto: solo facts que
+        Fernando ya reviso (usado por el sintetizador de segundo orden,
+        item #8 — nunca sintetiza sobre ruido no confirmado).
         Scope de dos niveles opcional (igual que search_similar_messages):
           - project_id NOT NULL -> facts del proyecto; user_id -> facts individuales.
           - ambos None -> sin filtro de scope (retrocompat).
@@ -751,10 +756,12 @@ class MemoryDB:
             return None
         query = ("SELECT id, fact_text, fact_type, confidence, is_verified, "
                  "source_facet, created_at FROM facts")
-        conditions = []
+        conditions = ["superseded_by IS NULL"]
         params: list = []
         if only_unverified:
             conditions.append("is_verified = FALSE")
+        elif only_verified:
+            conditions.append("is_verified = TRUE")
         if fact_type:
             conditions.append("fact_type = %s")
             params.append(fact_type)
@@ -776,6 +783,25 @@ class MemoryDB:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(query, tuple(params))
+                return await cur.fetchall()
+
+    @db_error_handler
+    async def get_scopes_with_verified_facts(self, min_facts: int = 5) -> Optional[list]:
+        """Devuelve los scopes (user_id, project_id) que tienen al menos
+        min_facts facts verificados y activos. Usado por el sintetizador de
+        segundo orden (item #8) para saber sobre que scopes vale la pena
+        correr — nunca sintetiza sobre un scope con pocos facts."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "SELECT user_id, project_id, COUNT(*) AS n_facts FROM facts "
+                    "WHERE is_verified = TRUE AND superseded_by IS NULL "
+                    "GROUP BY user_id, project_id "
+                    "HAVING COUNT(*) >= %s",
+                    (min_facts,),
+                )
                 return await cur.fetchall()
 
     @db_error_handler
