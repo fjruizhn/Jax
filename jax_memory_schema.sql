@@ -73,6 +73,7 @@ CREATE TABLE facts (
     superseded_by INT NULL,                      -- si no-NULL: reemplazado por una correccion
     superseded_at TIMESTAMP NULL,
     source_fact_ids JSON NULL,                    -- solo en facts de sintesis: de que facts salio
+    importance TINYINT NULL,                      -- 1-5, que tan central es a la identidad/trabajo de Fernando
     FOREIGN KEY (source_message_id) REFERENCES messages(id) ON DELETE SET NULL,
     INDEX idx_fact_type (fact_type),
     INDEX idx_confidence (confidence),
