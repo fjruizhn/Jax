@@ -1,0 +1,14 @@
+id: P08
+statement: >
+  La autodeclaración de calidad por parte del modelo no es contractual.
+origin: "REFORMAS-v3.md §2 (Principios), texto verbatim. /opt/jax/docs/REFORMAS-v3.md, sha256 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660"
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Mecanismo previsto: distinción coverage_deterministic (contractual) vs
+  coverage_model_reported (no contractual) de R2 §3.2. No implementado.

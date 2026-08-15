@@ -1,0 +1,21 @@
+id: P09
+statement: >
+  La prosa factual es salida derivada. El modelo emite estructura; el
+  runtime verbaliza. Ningún texto con autoridad se origina directamente
+  en el modelo.
+origin: "REFORMAS-v3.md §2 (Principios), texto verbatim — marcado (nuevo) en el documento. /opt/jax/docs/REFORMAS-v3.md, sha256 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660"
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Núcleo de R1 (cambio arquitectónico principal de v3, §0.1). Test de
+  aceptación ya definido en el propio documento — Apéndice B ("caso de
+  prueba de aceptación de R1"): reproducir el incidente del 2026-08-14
+  22:26-22:28 y verificar que produce ENVELOPE_REJECTED o reclasificación
+  forzada, no prosa con autoridad. No implementado — por eso
+  NORMATIVA_PENDIENTE y no NORMATIVA, aunque el test ya está diseñado en
+  prosa.

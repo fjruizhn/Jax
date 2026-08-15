@@ -1,0 +1,16 @@
+id: P05
+statement: >
+  Local primero. La API es escalamiento, no default.
+origin: "REFORMAS-v3.md §2 (Principios), texto verbatim. /opt/jax/docs/REFORMAS-v3.md, sha256 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660"
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  REFORMAS-v3.md §1.4 documenta violación activa hoy: GPT-OSS-120B
+  "prácticamente ocioso", Qwen3-Coder-30B usado como faceta conversacional
+  ("su peor caso de uso"). Mecanismo previsto: clasificador L0-L3 de R2
+  (§3.2), no implementado.

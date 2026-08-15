@@ -1,0 +1,17 @@
+id: P02
+statement: >
+  Ninguna salida llega al usuario sin pasar por validación. Sin excepción
+  por camino.
+origin: "REFORMAS-v3.md §2 (Principios), texto verbatim. /opt/jax/docs/REFORMAS-v3.md, sha256 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660"
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  REFORMAS-v3.md §1.2 documenta que esta regla está VIOLADA por diseño
+  hoy: "Camino B — Chat" no pasa por ninguna validación
+  (ESTADO: sin validación, sin auditoría, sin procedencia). El mecanismo
+  que la haría cumplir es R1 (§3, no implementado — Fase 2 de §5).

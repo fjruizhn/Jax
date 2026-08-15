@@ -1,0 +1,25 @@
+id: MA01
+statement: >
+  El que supone se equivoca.
+origin: >
+  Marina (atribución). /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md línea
+  15 ("Regla firmada por los cinco") y línea 232; también en
+  /home/fruiz/jax/missions/bridge-migration.md línea 65-66 y línea 223;
+  y citada en REFORMAS-v3.md Apéndice A1. Fraseo alternativo hallado en
+  la misma fuente (AUTONOMIA_ANTIERROR.md, footer, línea 246): "No suponer
+  nunca."
+status: CULTURAL
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Raíz filosófica de [[P01]], [[P03]] y [[P09]] de REFORMAS-v3.md — su
+  propio Apéndice A liga A1 explícitamente a R1 ("Violado por diseño en
+  el camino de chat. R1 lo convierte en imposibilidad estructural").
+  Decisión explícita de esta migración: queda como entrada propia en vez
+  de fusionarse con esas tres reglas, porque su alcance (toda decisión,
+  no solo prosa factual/procedencia/reglas-con-test) es más amplio que
+  cualquiera de ellas por separado.

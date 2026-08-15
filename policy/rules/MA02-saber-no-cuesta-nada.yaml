@@ -1,0 +1,20 @@
+id: MA02
+statement: >
+  Saber no cuesta nada.
+origin: >
+  Marina — "Segundo principio fundacional" (six-impossible-things.html,
+  contexto inmediato del Protocolo Hyde, ver [[HY01]]-[[HY04]]).
+  También en /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y
+  /home/fruiz/jax/missions/bridge-migration.md línea 66 ("Saber no cuesta
+  nada — pregúntale al que de verdad sabe").
+status: CULTURAL
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Ninguna fuente revisada la conecta con un mecanismo de código
+  específico de REFORMAS-v3.md — se mantiene como principio cultural
+  puro, sin forzar una relación que no está escrita.
