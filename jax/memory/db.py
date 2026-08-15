@@ -20,6 +20,7 @@ import os
 import uuid
 import logging
 import json
+from datetime import datetime
 from typing import Optional
 
 import aiomysql
@@ -632,6 +633,28 @@ class MemoryDB:
             scope_sql = "WHERE (" + " OR ".join(clauses) + ") "
         # ------------------------------------------------------------------
 
+        # --- Decay temporal (item #6, OPCIONAL) ----------------------------
+        # DECAY_LAMBDA=0.0 por defecto: se pide exactamente `limit` filas y
+        # el orden queda IDENTICO al de antes de este bloque (mismo query
+        # SQL de siempre, sin tocar).
+        #
+        # Se rechazo prenderlo por defecto porque a la escala actual de JAX
+        # (~100 facts) no hace falta y en Beelink causo una falla silenciosa
+        # de retrieval por horas (ver memoria
+        # beelink-ai-dashboard-memory-system.md). Revisar solo si facts
+        # escala a miles de filas.
+        #
+        # El decay se aplica EN PYTHON sobre el pool de candidatos, no en
+        # SQL: un intento inicial de sumar el decay dentro de
+        # VEC_DISTANCE_COSINE() en la propia query rompio contra filas con
+        # embedding "vector cero" (mensajes sin embedding real, default del
+        # esquema) con "DOUBLE value is out of range" — la MISMA clase de
+        # fragilidad de datos que ya afecto a Beelink. Haciendolo en Python
+        # sobre un pool ya trardo, un embedding cero simplemente da un mal
+        # ranking en ese candidato puntual, nunca rompe la query entera.
+        decay_lambda = float(os.getenv("JAX_MEMORY_DECAY_LAMBDA", "0.0"))
+        fetch_limit = limit * 3 if decay_lambda else limit
+
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -643,13 +666,27 @@ class MemoryDB:
                         + scope_sql +
                         "ORDER BY VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) ASC "
                         "LIMIT %s",
-                        ([vec_str] + scope_params + [vec_str, limit]),
+                        ([vec_str] + scope_params + [vec_str, fetch_limit]),
                     )
-                    rows = await cur.fetchall()
-                    return [dict(r) for r in rows]
+                    rows = [dict(r) for r in await cur.fetchall()]
         except Exception as e:
             logger.error(f"search_similar_messages fallo: {e}")
             return []
+
+        if not decay_lambda:
+            return rows
+
+        def _decayed(r: dict) -> float:
+            # distancia reportada NO se toca (el filtro < 0.8 rio arriba
+            # sigue leyendo cosine puro) — el decay solo reordena candidatos.
+            try:
+                edad_dias = (datetime.now() - r["created_at"]).days
+                return r["distancia"] + decay_lambda * edad_dias
+            except Exception:
+                return r["distancia"]  # fail-safe: sin fecha usable, no decae
+
+        rows.sort(key=_decayed)
+        return rows[:limit]
 
     # --------------------------------------------------------
     # Gestion de facts (comando /fact: control de calidad)
