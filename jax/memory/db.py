@@ -71,6 +71,30 @@ DUP_DISTANCE_THRESHOLD = 0.05
 CORRECTION_DISTANCE_THRESHOLD = 0.25
 
 
+def _validate_importance(importance: Optional[int]) -> Optional[int]:
+    """1-5 valido -> se guarda tal cual. Cualquier otra cosa (fuera de
+    rango, no-entero, None) -> None (neutral, sin score)."""
+    if isinstance(importance, int) and 1 <= importance <= 5:
+        return importance
+    return None
+
+
+def _should_skip_as_duplicate(band: str, is_correction: bool) -> bool:
+    """True si save_fact debe NO insertar (duplicado casi textual, y no es
+    una correccion — una correccion SI se inserta aunque el texto sea casi
+    identico al viejo, ver _should_supersede)."""
+    return band == "duplicate" and not is_correction
+
+
+def _should_supersede(candidate_exists: bool, band: str, is_correction: bool,
+                      verify_confirmed: bool) -> bool:
+    """True si save_fact debe marcar el candidato como superseded_by el
+    fact nuevo. Requiere: hay candidato, el extractor marco is_correction,
+    la banda no es 'unrelated' (esta lo bastante cerca como para ser el
+    mismo tema), y el chequeo de verificacion (si se paso uno) confirmo."""
+    return candidate_exists and is_correction and band != "unrelated" and verify_confirmed
+
+
 def classify_fact_distance(distancia: float) -> str:
     """Clasifica una distancia coseno contra el fact activo mas cercano.
     Devuelve 'duplicate' | 'correction_candidate' | 'unrelated'."""
@@ -153,6 +177,18 @@ def _get_reranker():
             logger.warning(f"reranker no disponible ({e}), se sigue sin reranking")
             _reranker = False
     return _reranker or None
+
+
+def _merge_search_results(rows_a: list, rows_b: list, limit: int) -> list:
+    """Une dos listas de resultados de busqueda (dicts con 'content',
+    'created_at', 'distancia'), dedupe por (content, created_at) quedandose
+    con la distancia mas chica, ordena por distancia y corta a `limit`."""
+    merged: dict = {}
+    for r in rows_a + rows_b:
+        key = (r["content"], r["created_at"])
+        if key not in merged or r["distancia"] < merged[key]["distancia"]:
+            merged[key] = r
+    return sorted(merged.values(), key=lambda r: r["distancia"])[:limit]
 
 
 def db_error_handler(func):
@@ -556,7 +592,7 @@ class MemoryDB:
         # Validar fact_type contra el ENUM del esquema
         valid_types = ("user", "technical", "social", "preference", "project", "financial")
         ftype = fact_type if fact_type in valid_types else "user"
-        imp = importance if isinstance(importance, int) and 1 <= importance <= 5 else None
+        imp = _validate_importance(importance)
 
         # Embedding ANTES del insert: lo necesitamos para decidir dedup/correccion.
         embedding = await self.get_embedding(fact_text)
@@ -564,7 +600,7 @@ class MemoryDB:
             if embedding else None
         band = classify_fact_distance(candidate["distancia"]) if candidate else "unrelated"
 
-        if band == "duplicate" and not is_correction:
+        if _should_skip_as_duplicate(band, is_correction):
             logger.info(f"save_fact: duplicado de fact {candidate['id']}, no se inserta "
                         f"({fact_text[:60]!r})")
             return False
@@ -595,7 +631,7 @@ class MemoryDB:
                         (vec_str, fact_id),
                     )
 
-        if fact_id and is_correction and candidate is not None and band != "unrelated":
+        if fact_id and candidate is not None and is_correction and band != "unrelated":
             confirmado = True
             if verify_correction_fn is not None:
                 try:
@@ -606,7 +642,7 @@ class MemoryDB:
                     # el fact nuevo ya quedo insertado igual.
                     logger.error(f"verify_correction_fn fallo: {e}, no se aplica la correccion")
                     confirmado = False
-            if confirmado:
+            if _should_supersede(True, band, is_correction, confirmado):
                 await self.supersede_fact(candidate["id"], fact_id)
                 logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
                             f"(banda={band})")
@@ -769,14 +805,7 @@ class MemoryDB:
             rows = await _run(vec_str)
             if raw_vec_str:
                 rows_raw = await _run(raw_vec_str)
-                # Merge por (content, created_at): si el mismo mensaje salio
-                # en las dos busquedas, se queda con la distancia mas chica.
-                merged: dict[tuple, dict] = {}
-                for r in rows + rows_raw:
-                    key = (r["content"], r["created_at"])
-                    if key not in merged or r["distancia"] < merged[key]["distancia"]:
-                        merged[key] = r
-                rows = sorted(merged.values(), key=lambda r: r["distancia"])[:fetch_limit]
+                rows = _merge_search_results(rows, rows_raw, fetch_limit)
         except Exception as e:
             logger.error(f"search_similar_messages fallo: {e}")
             return []
