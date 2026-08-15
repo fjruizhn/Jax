@@ -1,0 +1,25 @@
+id: OP05
+statement: >
+  En hall9000, nvme2n1 aloja el sistema operativo, nvme0n1 está montado en
+  /srv/jax-data, y nvme1n1 es el volume group LVM vg_vms.
+origin: >
+  Confirmación directa de Fernando Ruiz (2026-08-15), verificada en vivo
+  con `lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,MODEL`: nvme2n1 (KINGSTON
+  SNV3S1000G) tiene /boot/efi, /boot, / y LVM vg_os (lv_swap, lv_var,
+  lv_docker, lv_jax→/opt/jax, lv_db→/var/lib/mysql); nvme0n1p1 (Samsung SSD
+  9100 PRO 2TB) es XFS montado en /srv/jax-data; nvme1n1p1 (Samsung SSD
+  9100 PRO 2TB) es LVM vg_vms (vm_pool, dev_root, prod_root). Coincide
+  exacto con lo confirmado. Nota: una memoria persistente del asistente,
+  de 2026-06-23, tenía un layout distinto y ya obsoleto para esta misma
+  máquina (nvme0n1p2=/, sdb1=/srv/vms) — no usado como fuente, señalado
+  como corrección pendiente aparte.
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: null
+  test: null
+notes: >
+  Test escribible: parseo de `lsblk -J` verificando el mapeo
+  dispositivo→rol — no implementado todavía.
+version: 0.1
+created: 2026-08-15
+amended_by: null

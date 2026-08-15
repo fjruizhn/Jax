@@ -4,13 +4,13 @@
 # CORPUS — JAX/Axioma, reglas normativas
 
 **Versión del corpus:** 0.1.0
-**SHA256:** `123d9be131bde7b9706aeea01e7e3d831966a538f0d0ba57688a4059595b0a57`
-**Reglas:** 21
+**SHA256:** `8cf5ed5340e08669b299dc8e844fa1f3e9c67d50336ec4bbfdb7c10368c671e2`
+**Reglas:** 25
 
 | Estado | Cantidad |
 |---|---|
 | NORMATIVA | 0 |
-| NORMATIVA_PENDIENTE | 9 |
+| NORMATIVA_PENDIENTE | 13 |
 | CULTURAL | 8 |
 | HISTORICA | 4 |
 
@@ -29,6 +29,58 @@
 - **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
 - **Notas:** El campo forbidden_paths se declara y se carga (config.toml → catalog.py) pero no encontré código que lo verifique en tiempo de ejecución — grep de ".forbidden_paths" en las_manos/*.py y las_manos/motor_registry/*.py fuera de la declaración/carga: sin resultados. El comportamiento de interrupción+Telegram descrito en AUTONOMIA_ANTIERROR.md pertenece a un pipeline de autonomía todavía en fases de implementación (§7 del mismo documento, "Orden de implementación por fases"). Sin test.
 DISCREPANCIA CON LA TAREA: las rutas absolutas citadas en el encargo de esta fase ("/srv/vms, /etc/jax/.env, ~/.ssh") no aparecen en ningún lugar del código ni la documentación de jax/jax-platform bajo ningún nombre — lo único documentado son los cuatro patrones relativos de arriba, aplicados dentro de capabilities de código (code_swarm, implementation), no como una lista global de rutas intocables del sistema. Esta regla migra lo que SÍ existe por escrito; la versión con rutas absolutas queda fuera del corpus (ver sección de reglas orales del informe de fase).
+
+
+
+### OP02 — Toda regla de Policy Routing en el ER7212PC (CASA-RZ) usa un IP Group /32 específico como Source; nunca Source=Default.
+
+- **Enunciado:** Toda regla de Policy Routing en el ER7212PC (CASA-RZ) usa un IP Group /32 específico como Source; nunca Source=Default.
+- **Origen:** Confirmación directa de Fernando Ruiz, verificada por captura de pantalla del Omada Controller (2026-08-15): pestaña Devices → ER7212PC → Config → Routing → Policy Routing muestra 3 reglas activas (ASI Network, Multicable, Hall9000), las tres con Source = IP Group (Server_Bridge, Server_RichHN, Sesamo_NAS, Serveer_BlackTower, Server_Atemai, Server_Hall9000), ninguna con Source=Default. Segunda captura confirma el grupo Server_Hall9000 = IP Subnet 172.16.20.5/32.
+
+- **Estado:** NORMATIVA_PENDIENTE
+- **Mecanismo de cumplimiento:** null
+- **Test:** null
+- **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
+- **Notas:** Verificado visualmente contra la config real del router — no hay discrepancia hoy. Un test automatizado requeriría acceso a la API del Omada Controller (no explorada en esta sesión) para consultar programáticamente las reglas y sus IP Groups; por eso NORMATIVA_PENDIENTE y no NORMATIVA.
+
+
+
+### OP03 — Node.js en server-rich-hn (172.16.20.10) se instala vía el runtime propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
+
+- **Enunciado:** Node.js en server-rich-hn (172.16.20.10) se instala vía el runtime propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
+- **Origen:** Confirmación directa de Fernando Ruiz, verificada por SSH (fruiz@172.16.20.10:58291, 2026-08-15): `which node` resuelve a `/www/server/nodejs/v24.16.0/bin/node` (runtime gestionado por aaPanel); `dpkg -l | grep -iE "nodejs|node-"` sin resultados; sin archivos en `/etc/apt/sources.list.d/` que referencien nodesource. Distinta de la regla ya documentada para hall9000 (~/.claude/CLAUDE.md, jax/CLAUDE.md: "Node.js ... NUNCA NodeSource") — mismo principio, host distinto, mecanismo de instalación distinto (aaPanel vs. nvm).
+
+- **Estado:** NORMATIVA_PENDIENTE
+- **Mecanismo de cumplimiento:** null
+- **Test:** null
+- **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
+- **Notas:** Verificado en vivo, sin discrepancia. Test escribible: chequeo remoto (SSH) de que `node` resuelve bajo `/www/server/nodejs/` y que no existe paquete `nodejs`/`node-*` vía dpkg ni fuente nodesource — no implementado todavía.
+
+
+
+### OP04 — El dominio del proyecto es hamurabi.io (una sola "m"); hammurabi.io (doble "m") pertenece a un tercero y no debe usarse ni confundirse con el propio.
+
+- **Enunciado:** El dominio del proyecto es hamurabi.io (una sola "m"); hammurabi.io (doble "m") pertenece a un tercero y no debe usarse ni confundirse con el propio.
+- **Origen:** Confirmación directa de Fernando Ruiz (2026-08-15). Coincide, casi textual, con una nota en memoria persistente del asistente (jax-memoria-semantica-dos-niveles.md: "Proyecto de prueba HAMURABI (una sola M; 'hammurabi.io' doble M es de terceros)") — no se usó esa memoria como fuente por sí sola en la Fase 0.5 original; se agrega ahora con la confirmación directa como origen primario.
+
+- **Estado:** NORMATIVA_PENDIENTE
+- **Mecanismo de cumplimiento:** null
+- **Test:** null
+- **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
+- **Notas:** Test escribible: grep sobre configuración/código del proyecto (jax, jax-platform, DNS-facing configs) verificando que ninguna referencia usa "hammurabi.io" como si fuera propio — no implementado todavía.
+
+
+
+### OP05 — En hall9000, nvme2n1 aloja el sistema operativo, nvme0n1 está montado en /srv/jax-data, y nvme1n1 es el volume group LVM vg_vms.
+
+- **Enunciado:** En hall9000, nvme2n1 aloja el sistema operativo, nvme0n1 está montado en /srv/jax-data, y nvme1n1 es el volume group LVM vg_vms.
+- **Origen:** Confirmación directa de Fernando Ruiz (2026-08-15), verificada en vivo con `lsblk -o NAME,SIZE,FSTYPE,MOUNTPOINT,MODEL`: nvme2n1 (KINGSTON SNV3S1000G) tiene /boot/efi, /boot, / y LVM vg_os (lv_swap, lv_var, lv_docker, lv_jax→/opt/jax, lv_db→/var/lib/mysql); nvme0n1p1 (Samsung SSD 9100 PRO 2TB) es XFS montado en /srv/jax-data; nvme1n1p1 (Samsung SSD 9100 PRO 2TB) es LVM vg_vms (vm_pool, dev_root, prod_root). Coincide exacto con lo confirmado. Nota: una memoria persistente del asistente, de 2026-06-23, tenía un layout distinto y ya obsoleto para esta misma máquina (nvme0n1p2=/, sdb1=/srv/vms) — no usado como fuente, señalado como corrección pendiente aparte.
+
+- **Estado:** NORMATIVA_PENDIENTE
+- **Mecanismo de cumplimiento:** null
+- **Test:** null
+- **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
+- **Notas:** Test escribible: parseo de `lsblk -J` verificando el mapeo dispositivo→rol — no implementado todavía.
 
 
 
