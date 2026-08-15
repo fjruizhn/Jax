@@ -102,10 +102,17 @@ def _blend_query(user_text: str, recent_history: Optional[list]) -> str:
 # Deteccion por keyword, mismo estilo que el router hibrido de JAX (no
 # hace falta un LLM para esto).
 # ------------------------------------------------------------
+# Orden importa: se evalua de arriba a abajo y gana el primer match. Las mas
+# especificas van primero — "de mis finanzas"/"de mis socios" tambien
+# matchean el patron generico "de mi" de la categoria 'user', asi que 'user'
+# (el catch-all) va al final.
 _COMPLETENESS_PATTERNS = {
     "project": ("que proyectos", "cuales proyectos", "en que proyectos"),
     "preference": ("mis preferencias", "que preferis", "como te gusta que"),
     "technical": ("que decisiones tecnicas", "que elegimos", "que decisiones tomamos"),
+    "social": ("mis relaciones", "que sabes de mis contactos", "quienes son mis socios"),
+    "financial": ("mis finanzas", "que sabes de mis finanzas", "mi situacion financiera"),
+    "user": ("que sabes de mi", "que sabes sobre mi", "todo lo que sabes de mi"),
 }
 
 
