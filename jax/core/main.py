@@ -47,7 +47,7 @@ from jax.core.router import Router
 from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
 from jax.muscles.ollama_muscle import OllamaMuscle
-from jax.memory.db import MemoryDB
+from jax.memory.db import MemoryDB, detect_completeness_intent
 from jax.voice.tts import VoiceEngine
 from jax.voice.ears import EarEngine
 
@@ -555,8 +555,26 @@ async def main() -> None:
                 # Se agrega SOLO a este turno — no entra al historial permanente.
                 history_for_invocation = list(historial)
                 if db_ok:
+                    bloques_memoria = []
+
+                    # Bypass de completeness (item #4): "que proyectos tenes
+                    # activos" necesita TODOS los facts de esa categoria, no
+                    # solo el mas parecido por distancia vectorial.
+                    tipo_completeness = detect_completeness_intent(user_text)
+                    if tipo_completeness:
+                        facts_completos = await db.get_facts(
+                            only_unverified=False, fact_type=tipo_completeness,
+                            limit=20, user_id=repl_uid)
+                        if facts_completos:
+                            lineas_facts = [f"- {f['fact_text']}" for f in facts_completos]
+                            bloques_memoria.append(
+                                f"Todos los hechos guardados de tipo '{tipo_completeness}':\n"
+                                + "\n".join(lineas_facts)
+                            )
+
                     similares = await db.search_similar_messages(
-                        user_text, limit=5, user_id=repl_uid, project_id=None)
+                        user_text, limit=5, user_id=repl_uid, project_id=None,
+                        recent_history=historial)
                     relevantes = [r for r in similares if r["distancia"] < 0.8]
                     if relevantes:
                         lineas = []
@@ -564,13 +582,15 @@ async def main() -> None:
                             fecha = r["started_at"].strftime("%Y-%m-%d") if r["started_at"] else "?"
                             rol = "user" if r["role"] == "user" else "jax"
                             lineas.append(f"[{fecha}] {rol}: {r['content']}")
-                        contexto_semantico = (
+                        bloques_memoria.append(
                             "Conversaciones relevantes de sesiones anteriores:\n"
                             + "\n".join(lineas)
                         )
+
+                    if bloques_memoria:
                         history_for_invocation = [
                             {"role": "user", "content": "[memoria de sesiones anteriores]"},
-                            {"role": "assistant", "content": contexto_semantico},
+                            {"role": "assistant", "content": "\n\n".join(bloques_memoria)},
                         ] + history_for_invocation
 
                 model_override = MODELO_PESADO if (modo_pesado and faceta == FACETA_PESADO) else None

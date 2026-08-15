@@ -80,6 +80,46 @@ def classify_fact_distance(distancia: float) -> str:
     return "unrelated"
 
 
+def _blend_query(user_text: str, recent_history: Optional[list]) -> str:
+    """Combina el mensaje actual con los ultimos 4 turnos (500 chars c/u) del
+    historial de la conversacion en curso, para que el embedding de busqueda
+    capture el hilo, no solo la ultima frase (que puede ser ambigua sola:
+    'y eso por que?'). Sin historial, devuelve user_text sin cambios
+    (comportamiento identico al de antes de este blend)."""
+    if not recent_history:
+        return user_text
+    turnos = recent_history[-4:]
+    piezas = [t["content"][:500] for t in turnos if t.get("content")]
+    piezas.append(user_text)
+    return "\n".join(piezas)
+
+
+# ------------------------------------------------------------
+# Bypass de categoria para preguntas de completeness (item #4). Preguntas
+# tipo "que proyectos tenes activos" no se responden bien con similitud
+# vectorial contra UN fact — necesitan TODOS los facts de una categoria.
+# Deteccion por keyword, mismo estilo que el router hibrido de JAX (no
+# hace falta un LLM para esto).
+# ------------------------------------------------------------
+_COMPLETENESS_PATTERNS = {
+    "project": ("que proyectos", "cuales proyectos", "en que proyectos"),
+    "preference": ("mis preferencias", "que preferis", "como te gusta que"),
+    "technical": ("que decisiones tecnicas", "que elegimos", "que decisiones tomamos"),
+}
+
+
+def detect_completeness_intent(text: str) -> Optional[str]:
+    """Detecta si el texto es una pregunta de 'dame todo lo que sepas de X'
+    en vez de una pregunta puntual. Devuelve el fact_type a barrer completo
+    via get_facts(), o None si es una pregunta normal (solo retrieval
+    semantico, como siempre)."""
+    normalizado = text.lower()
+    for fact_type, patrones in _COMPLETENESS_PATTERNS.items():
+        if any(p in normalizado for p in patrones):
+            return fact_type
+    return None
+
+
 def db_error_handler(func):
     """Decorador: cualquier error de DB se loguea y se traga.
     La conversacion NUNCA se interrumpe por un fallo de memoria."""
@@ -554,19 +594,24 @@ class MemoryDB:
     # --------------------------------------------------------
     async def search_similar_messages(self, query: str, limit: int = 5,
                                       user_id: Optional[int] = None,
-                                      project_id: Optional[int] = None) -> list:
+                                      project_id: Optional[int] = None,
+                                      recent_history: Optional[list] = None) -> list:
         """Busca mensajes similares a query usando distancia vectorial.
 
         Scope de dos niveles (opcional):
           - project_id NOT NULL -> incluye memoria del PROYECTO (compartida).
           - user_id    NOT NULL -> incluye memoria INDIVIDUAL (project_id IS NULL).
           - ambos None          -> sin filtro de scope (global; retrocompat REPL viejo).
+        recent_history (opcional): ultimos turnos [{"role":.., "content":..}] de
+        la conversacion en curso. Si se pasa, el embedding se calcula sobre
+        query + esos turnos (no solo la ultima frase), asi una respuesta corta
+        y ambigua ("y eso por que?") sigue trayendo contexto relevante.
         Devuelve lista de dicts {content, role, created_at, started_at, distancia}.
         Si Ollama falla, la base falla, o no hay embeddings: devuelve [] (nunca None)."""
         if not self.pool:
             return []
 
-        embedding = await self.get_embedding(query)
+        embedding = await self.get_embedding(_blend_query(query, recent_history))
         if embedding is None:
             return []
 
