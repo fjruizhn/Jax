@@ -4,7 +4,7 @@
 # CORPUS — JAX/Axioma, reglas normativas
 
 **Versión del corpus:** 0.1.0
-**SHA256:** `8cf5ed5340e08669b299dc8e844fa1f3e9c67d50336ec4bbfdb7c10368c671e2`
+**SHA256:** `0b0bed6aa5fdf59f478ca926166a098d817b37029f606a1ba71c973490806dcd`
 **Reglas:** 25
 
 | Estado | Cantidad |
@@ -117,6 +117,7 @@ DISCREPANCIA CON LA TAREA: las rutas absolutas citadas en el encargo de esta fas
 - **Test:** null
 - **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
 - **Notas:** Tensión con el sistema actual: las_manos/config.toml ya otorga capabilities vía `allowed_callers` (lista de facetas por nombre) — exactamente el modelo "por identidad de facet" que este principio rechaza. El mecanismo que P04 exige (R3, contrato de tarea con capabilities inyectadas por el orquestador) no está implementado.
+Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTURAL — el test es escribible (barrer el código buscando decisiones de capacidad basadas en nombre de facet, fallar si aparecen; que hoy fallaría es el punto). La tensión con `allowed_callers` no es un defecto del corpus, es su primer hallazgo real: una contradicción entre norma declarada y mecanismo implementado, con archivo y línea exactos. `allowed_callers` en las_manos/config.toml es el punto de entrada concreto que R3 tiene que reemplazar cuando se implemente esa fase.
 
 
 
