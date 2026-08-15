@@ -22,7 +22,7 @@ import httpx
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
-from jacobs.plan import VALID_CAPABILITIES
+from jacobs.plan import VALID_CAPABILITIES, CapabilityUnbound
 from jacobs.policy import check_kill_switch
 
 logger = logging.getLogger("jacobs.executor")
@@ -684,11 +684,11 @@ def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
 #  Dispatcher principal
 # ----------------------------------------------------------------
 
-def validate_capability(step: Step) -> str | None:
+def validate_capability(step: Step) -> CapabilityUnbound | str | None:
     """Validación PRE-dispatch en DOS NIVELES (FASE A §3.4, refinado).
 
-    Separa dos preguntas que antes estaban mezcladas. Devuelve un mensaje de
-    error (str) si el step es inválido, o None si es válido.
+    Separa dos preguntas que antes estaban mezcladas. Devuelve CapabilityUnbound
+    o un mensaje de error (str) si el step es inválido, o None si es válido.
 
     NIVEL A — existencia de vocabulario. Aplica a TODOS los facets.
         ¿step.capability ∈ VALID_CAPABILITIES? Cierra la asimetría (un facet
@@ -704,6 +704,11 @@ def validate_capability(step: Step) -> str | None:
         catálogo, el facet ∈ allowed_motors y el caller 'jacobs' ∈ allowed_callers.
         Los facets de API directa NO pasan por aquí (ignoran capability en el
         dispatch real).
+
+    Devuelve CapabilityUnbound (tipado, REFORMAS-v3 §3.1.4) cuando el motivo
+    de rechazo es un binding capability→motor ausente (NIVEL B) — el
+    scheduler lo reenruta. Devuelve str para NIVEL A (vocabulario cerrado,
+    no es un problema de binding, no tiene candidates que ofrecer).
     """
     cap = step.capability
 
@@ -723,14 +728,19 @@ def validate_capability(step: Step) -> str | None:
         resolved = _CAPABILITY_MAP.get(cap, cap)
         entry = _CATALOG_CAPS.get(resolved)
         if entry is None:
-            return (f"capability '{cap}' (→ '{resolved}') no existe en el "
-                    f"catálogo de capabilities")
+            return CapabilityUnbound(
+                required=[resolved], candidates=[], task_id=step.step_id,
+            )
         if step.facet not in entry.get("allowed_motors", []):
-            return (f"motor '{step.facet}' no permitido para '{resolved}' "
-                    f"(allowed_motors={entry.get('allowed_motors')})")
+            return CapabilityUnbound(
+                required=[resolved],
+                candidates=list(entry.get("allowed_motors", [])),
+                task_id=step.step_id,
+            )
         if "jacobs" not in entry.get("allowed_callers", []):
-            return (f"caller 'jacobs' no autorizado para '{resolved}' "
-                    f"(allowed_callers={entry.get('allowed_callers')})")
+            return CapabilityUnbound(
+                required=[resolved], candidates=[], task_id=step.step_id,
+            )
     return None
 
 
