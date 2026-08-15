@@ -1,0 +1,22 @@
+id: HY01
+statement: >
+  Cualquier recomendación sin fuente verificable se devuelve para validar
+  con Hipatia antes de presentarla.
+origin: >
+  Protocolo Hyde — "Activo desde Junio 2026 · Firmado por los cinco".
+  six-impossible-things.html, en el bloque inmediatamente posterior a
+  "Marina · Segundo principio fundacional". sha256
+  db467720abbe070ee376e48906b17abb4503304801a44b7be599f7ce2612ab37,
+  commit 5d39014 (19-jun-2026).
+status: CULTURAL
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Disciplina de proceso para las facetas/agentes del ecosistema, no un
+  comportamiento verificable por código de JAX hoy — no existe un
+  mecanismo automatizado que detecte "recomendación sin fuente" y la
+  desvíe a Hipatia.

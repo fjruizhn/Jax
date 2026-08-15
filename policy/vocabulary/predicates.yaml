@@ -1,0 +1,47 @@
+# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3, trasladados tal
+# cual — la lista es cerrada y versionada; ampliarla requiere enmienda
+# (según el propio §3.1.3).
+#
+# Fuente: /opt/jax/docs/REFORMAS-v3.md §3.1.3, sha256
+# 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660
+
+predicates:
+  - name: CAPABILITY_AVAILABLE
+    args: [name, mode]
+    source_of_truth: "Registro de capabilities"
+  - name: FACET_EXISTS
+    args: [name, engine]
+    source_of_truth: "Configuración de facetas"
+  - name: ENGINE_STATUS
+    args: [name, status]
+    source_of_truth: "Health check"
+  - name: CONFIG_VALUE
+    args: [path, key, value]
+    source_of_truth: "Archivo de configuración con hash"
+  - name: FILE_EXISTS
+    args: [path, hash]
+    source_of_truth: "Sistema de archivos"
+  - name: AUDIT_EVENT_EXISTS
+    args: [event_hash]
+    source_of_truth: "Audit log"
+  - name: JOB_STATUS
+    args: [job_id, status]
+    source_of_truth: "Scheduler"
+  - name: MEMORY_ENTRY_EXISTS
+    args: [memory_id, scope]
+    source_of_truth: "MariaDB jax_memory"
+
+origin_of_authority_values:
+  # §3.1.4 — cuatro valores, trasladados tal cual.
+  - value: EJECUTADO
+    meaning: "Se corrió una operación y quedó en audit log"
+    requires: "Hash de entrada de auditoría"
+  - value: OBSERVADO
+    meaning: "Se leyó estado del sistema sin mutarlo"
+    requires: "Hash de resultado de herramienta"
+  - value: RECUPERADO
+    meaning: "Memoria o fuente externa"
+    requires: "URI o id resoluble"
+  - value: INFERIDO
+    meaning: "Priors del modelo"
+    requires: "Solo canal analysis/judgment. Prohibido en canal claim."

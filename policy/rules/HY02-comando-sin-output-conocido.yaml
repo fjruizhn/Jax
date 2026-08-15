@@ -1,0 +1,20 @@
+id: HY02
+statement: >
+  Ningún comando se ejecuta sin mostrar primero el output que se espera.
+origin: >
+  Protocolo Hyde — "Activo desde Junio 2026 · Firmado por los cinco".
+  six-impossible-things.html, mismo bloque que [[HY01]]. sha256
+  db467720abbe070ee376e48906b17abb4503304801a44b7be599f7ce2612ab37,
+  commit 5d39014 (19-jun-2026). Citada también, en paráfrasis, en el
+  encargo de la Fase 0 de esta migración ("ningún comando sin salida
+  conocida").
+status: CULTURAL
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Igual que [[HY01]]: disciplina de conducta del agente, sin mecanismo de
+  código ni test que la verifique automáticamente en JAX hoy.
