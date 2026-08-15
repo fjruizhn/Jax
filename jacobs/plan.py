@@ -13,6 +13,7 @@ import json
 import os
 import uuid
 import logging
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -55,6 +56,25 @@ VALID_CAPABILITIES = frozenset({
     # mecánico: cortocircuito en executor._dispatch_step (no toca motor)
     "assemble",
 })
+
+
+@dataclass(frozen=True)
+class CapabilityUnbound:
+    """Rechazo tipado — REFORMAS-v3.md §3.1.4. El scheduler lo intercepta y
+    reenruta a uno de los candidates; el usuario nunca ve este estado."""
+    required: list[str]
+    candidates: list[str]
+    task_id: str
+    status: str = field(default="CAPABILITY_UNBOUND", init=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "required": self.required,
+            "candidates": self.candidates,
+            "task_id": self.task_id,
+        }
+
 
 # Timeout por capability (segundos). El default cubre design/validate/critique,
 # que procesan contexto acotado y completan holgados en ~50-130s. Las capabilities
