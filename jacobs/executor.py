@@ -768,7 +768,7 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
                 f"Capability inválida (pre-dispatch, candidatos agotados): "
                 f"{cap_error.to_dict()}"
             )
-        step = step.model_copy(update={"facet": untried[0]})
+        step.facet = untried[0]
         tried_facets.add(untried[0])
         cap_error = validate_capability(step)
     if isinstance(cap_error, str):
