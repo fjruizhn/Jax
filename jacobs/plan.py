@@ -60,7 +60,7 @@ VALID_CAPABILITIES = frozenset({
 
 @dataclass(frozen=True)
 class CapabilityUnbound:
-    """Rechazo tipado — REFORMAS-v3.md §3.1.4. El scheduler lo intercepta y
+    """Rechazo tipado — REFORMAS-v3.md R3.4. El scheduler lo intercepta y
     reenruta a uno de los candidates; el usuario nunca ve este estado."""
     required: list[str]
     candidates: list[str]
@@ -68,10 +68,13 @@ class CapabilityUnbound:
     status: str = field(default="CAPABILITY_UNBOUND", init=False)
 
     def to_dict(self) -> dict:
+        # frozen=True es shallow: las listas internas siguen siendo mutables.
+        # Devolver copias evita que un caller mute self.required/candidates
+        # a través del dict devuelto.
         return {
             "status": self.status,
-            "required": self.required,
-            "candidates": self.candidates,
+            "required": list(self.required),
+            "candidates": list(self.candidates),
             "task_id": self.task_id,
         }
 

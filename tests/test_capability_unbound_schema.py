@@ -1,4 +1,4 @@
-"""REFORMAS-v3 §3.1.4 — forma exacta del rechazo tipado CAPABILITY_UNBOUND."""
+"""REFORMAS-v3 R3.4 — forma exacta del rechazo tipado CAPABILITY_UNBOUND."""
 from __future__ import annotations
 
 import sys
