@@ -120,6 +120,34 @@ def build_extractor() -> HttpMuscle:
     )
 
 
+# Tamano maximo de conversacion (en chars) que se manda de una sola vez al
+# extractor. ~3000 tokens, conservador para dejar espacio al resto del
+# prompt fijo dentro del contexto de DeepSeek. Conversaciones mas largas se
+# parten en varios pedidos (ver _chunk_conversation).
+MAX_CHARS_PER_EXTRACTION = 12000
+
+
+def _chunk_conversation(conv_text: str, max_chars: int = MAX_CHARS_PER_EXTRACTION) -> list[str]:
+    """Parte conv_text en trozos de hasta max_chars, cortando en limites de
+    linea (nunca a mitad de un mensaje). Conversaciones cortas: un solo
+    trozo (comportamiento identico al de antes de esta funcion)."""
+    if len(conv_text) <= max_chars:
+        return [conv_text]
+    lineas = conv_text.split("\n")
+    chunks: list[str] = []
+    actual: list[str] = []
+    largo = 0
+    for linea in lineas:
+        if largo + len(linea) + 1 > max_chars and actual:
+            chunks.append("\n".join(actual))
+            actual, largo = [], 0
+        actual.append(linea)
+        largo += len(linea) + 1
+    if actual:
+        chunks.append("\n".join(actual))
+    return chunks
+
+
 def _parse_json(raw: str) -> dict | None:
     """Parsea el JSON del extractor, tolerando ```json ... ``` y ruido."""
     if not raw:
@@ -149,24 +177,37 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
         await db.mark_processed(conv_id)
         return True
 
-    # Armar el texto de la conversacion
+    # Armar el texto de la conversacion. Si es muy larga, se parte en varios
+    # pedidos al extractor (item #5): una conversacion larga puede exceder
+    # el contexto util del extractor o inflar costo/latencia sin necesidad.
     conv_text = "\n".join(f"{m['role']}: {m['content']}" for m in messages)
+    chunks = _chunk_conversation(conv_text)
+    if len(chunks) > 1:
+        logger.info(f"conv {conv_id}: conversacion larga ({len(conv_text)} chars), "
+                    f"partida en {len(chunks)} pedidos al extractor")
 
-    # Pedir extraccion al LLM
-    try:
-        # decorate=False: extraccion interna a JSON, sin etiqueta de autoridad
-        # (un sello al final rompería el parseo del JSON).
-        raw = await extractor.invoke(
-            EXTRACTION_PROMPT.format(conversation=conv_text), decorate=False
-        )
-    except Exception as e:
-        logger.error(f"conv {conv_id}: extractor fallo: {e}")
-        return False  # NO marcar procesada: se reintenta en la proxima corrida
+    data: dict = {"facts": [], "decisions": [], "action_items": []}
+    for i, chunk in enumerate(chunks):
+        # Pedir extraccion al LLM
+        try:
+            # decorate=False: extraccion interna a JSON, sin etiqueta de autoridad
+            # (un sello al final rompería el parseo del JSON).
+            raw = await extractor.invoke(
+                EXTRACTION_PROMPT.format(conversation=chunk), decorate=False
+            )
+        except Exception as e:
+            logger.error(f"conv {conv_id}: extractor fallo (chunk {i+1}/{len(chunks)}): {e}")
+            return False  # NO marcar procesada: se reintenta ENTERA en la proxima corrida
 
-    data = _parse_json(raw)
-    if data is None:
-        logger.error(f"conv {conv_id}: JSON no parseable, se reintentara")
-        return False
+        chunk_data = _parse_json(raw)
+        if chunk_data is None:
+            logger.error(f"conv {conv_id}: JSON no parseable (chunk {i+1}/{len(chunks)}), "
+                         f"se reintentara")
+            return False
+
+        data["facts"].extend(chunk_data.get("facts", []))
+        data["decisions"].extend(chunk_data.get("decisions", []))
+        data["action_items"].extend(chunk_data.get("action_items", []))
 
     # Scope de origen: los facts heredan el scope de su conversacion.
     # project_id NOT NULL -> memoria de proyecto; NULL -> individual de user_id.
