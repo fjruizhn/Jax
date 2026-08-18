@@ -100,5 +100,14 @@ def load_vocabulary() -> ClosedVocabulary:
             continue
         if isinstance(value, dict):
             flattened.update(value.keys())
+        elif isinstance(value, list):
+            flattened.update(value)
+        else:
+            raise RuntimeError(
+                f"closed_vocabulary.yaml: la categoría '{key}' tiene un "
+                f"valor de tipo {type(value).__name__}, se esperaba dict "
+                "o list — el barrido léxico no puede aplanarla sin "
+                "silenciar la categoría."
+            )
     config_paths = frozenset(data.get("config_paths") or [])
     return ClosedVocabulary(flattened=frozenset(flattened), config_paths=config_paths)
