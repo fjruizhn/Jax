@@ -208,6 +208,24 @@ def test_file_exists_allowed_directory_prefix_nonexistent_file():
     assert verdict.status == "FACT_MISMATCH"
 
 
+def test_file_exists_directory_entry_returns_verdict_not_exception():
+    # "policy/" está en config_paths de closed_vocabulary.yaml — un claim
+    # con path="policy" coincide con esa entrada de directorio, pasa
+    # _path_allowed(), .exists() es True (el directorio existe), y
+    # .read_bytes() explota con IsADirectoryError si no se captura.
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({}),
+        config_paths_allowlist=frozenset({"policy/"}),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(args={"path": "policy", "hash": "0" * 64})
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "FACT_MISMATCH"
+    assert "directorio" in verdict.detail.lower()
+
+
 def _real_ctx() -> "validator.ValidationContext":
     vocab = loaders.load_vocabulary()
     return validator.load_validation_context(REPO_ROOT, vocab.config_paths)
