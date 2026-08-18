@@ -98,3 +98,22 @@ def test_load_vocabulary_raises_for_malformed_category(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="broken_category"):
         loaders.load_vocabulary()
+
+
+def test_load_vocabulary_tracks_term_categories():
+    vocab = loaders.load_vocabulary()
+    assert "capabilities" in vocab.term_categories["code_swarm"]
+    assert "ops" in vocab.term_categories["ssh_exec"]
+
+
+def test_load_vocabulary_term_in_multiple_categories():
+    vocab = loaders.load_vocabulary()
+    ada_categories = vocab.term_categories["ada"]
+    assert "facets_las_manos" in ada_categories
+    assert "facets_jax" in ada_categories
+    assert "motors" in ada_categories
+
+
+def test_load_vocabulary_config_paths_not_in_term_categories():
+    vocab = loaders.load_vocabulary()
+    assert "policy/" not in vocab.term_categories
