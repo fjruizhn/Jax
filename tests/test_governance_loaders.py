@@ -56,3 +56,14 @@ def test_load_predicates_returns_all_eight():
     assert predicates["CAPABILITY_AVAILABLE"].args == ("name", "mode")
     assert predicates["FILE_EXISTS"].args == ("path", "hash")
     assert predicates["MEMORY_ENTRY_EXISTS"].source_of_truth == "MariaDB jax_memory"
+
+
+def test_load_vocabulary_flattens_categories_and_keeps_config_paths_separate():
+    vocab = loaders.load_vocabulary()
+    assert "code_swarm" in vocab.flattened   # capabilities
+    assert "ssh_exec" in vocab.flattened     # ops
+    assert "hyde" in vocab.flattened         # facets_las_manos / facets_jax
+    assert "jax/policy/" in vocab.config_paths
+    assert "las_manos/config.toml" in vocab.config_paths
+    # config_paths no debe filtrarse al vocabulario léxico plano
+    assert "jax/policy/" not in vocab.flattened
