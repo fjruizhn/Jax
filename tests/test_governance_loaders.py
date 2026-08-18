@@ -67,3 +67,34 @@ def test_load_vocabulary_flattens_categories_and_keeps_config_paths_separate():
     assert "las_manos/config.toml" in vocab.config_paths
     # config_paths no debe filtrarse al vocabulario léxico plano
     assert "policy/" not in vocab.flattened
+
+
+def test_load_vocabulary_includes_list_shaped_categories(tmp_path, monkeypatch):
+    vocab_file = tmp_path / "closed_vocabulary.yaml"
+    vocab_file.write_text(
+        "capabilities:\n  code_swarm: {}\n"
+        "commands:\n  - trae a hyde\n  - invoca a ada\n"
+        "config_paths:\n  - some/path\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loaders, "VOCABULARY_FILE", vocab_file)
+
+    vocab = loaders.load_vocabulary()
+
+    assert "trae a hyde" in vocab.flattened
+    assert "invoca a ada" in vocab.flattened
+    assert "code_swarm" in vocab.flattened
+
+
+def test_load_vocabulary_raises_for_malformed_category(tmp_path, monkeypatch):
+    vocab_file = tmp_path / "closed_vocabulary.yaml"
+    vocab_file.write_text(
+        "capabilities:\n  code_swarm: {}\n"
+        "broken_category: 'not a dict or list'\n"
+        "config_paths:\n  - some/path\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(loaders, "VOCABULARY_FILE", vocab_file)
+
+    with pytest.raises(RuntimeError, match="broken_category"):
+        loaders.load_vocabulary()
