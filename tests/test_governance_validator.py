@@ -13,6 +13,7 @@ Orden de este archivo, a propósito:
 """
 from __future__ import annotations
 
+import hashlib
 import sys
 from pathlib import Path
 
@@ -94,3 +95,74 @@ def test_engine_status_is_resolver_not_implemented_never_valid():
     assert verdict.status == "RESOLVER_NOT_IMPLEMENTED"
     assert verdict.status != "VALID"
     assert "ENGINE_STATUS" in verdict.detail
+
+
+def test_file_exists_rejects_path_outside_allowlist_without_touching_disk(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "tocó el filesystem antes de chequear la allowlist — "
+            "PATH_NOT_ALLOWED debe devolverse sin exists()/read_bytes()"
+        )
+
+    monkeypatch.setattr(Path, "exists", _boom)
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({}),
+        config_paths_allowlist=frozenset({"las_manos/config.toml"}),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(args={"path": "/etc/shadow", "hash": "0" * 64})
+
+    verdict = validator.validate(claim, PREDICATES, ctx)
+
+    assert verdict.status == "PATH_NOT_ALLOWED"
+
+
+def test_file_exists_allowed_path_valid_hash():
+    real_file = REPO_ROOT / "las_manos" / "config.toml"
+    actual_hash = hashlib.sha256(real_file.read_bytes()).hexdigest()
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({}),
+        config_paths_allowlist=frozenset({"las_manos/config.toml"}),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(args={"path": "las_manos/config.toml", "hash": actual_hash})
+
+    verdict = validator.validate(claim, PREDICATES, ctx)
+
+    assert verdict.status == "VALID"
+
+
+def test_file_exists_allowed_path_wrong_hash():
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({}),
+        config_paths_allowlist=frozenset({"las_manos/config.toml"}),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(args={"path": "las_manos/config.toml", "hash": "f" * 64})
+
+    verdict = validator.validate(claim, PREDICATES, ctx)
+
+    assert verdict.status == "FACT_MISMATCH"
+
+
+def test_file_exists_allowed_directory_prefix_nonexistent_file():
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({}),
+        config_paths_allowlist=frozenset({"policy/"}),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(args={"path": "policy/no_existe_este_archivo.yaml", "hash": "0" * 64})
+
+    verdict = validator.validate(claim, PREDICATES, ctx)
+
+    assert verdict.status == "FACT_MISMATCH"
