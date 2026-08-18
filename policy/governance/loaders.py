@@ -20,6 +20,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 GOVERNANCE_DIR = Path(__file__).resolve().parent
 POLICY_DIR = GOVERNANCE_DIR.parent
 PREDICATES_FILE = POLICY_DIR / "vocabulary" / "predicates.yaml"
@@ -58,4 +60,8 @@ def load_templates() -> dict[str, TemplateSpec]:
             f"{recorded}, calculado {current}) — el subsistema de "
             "gobernanza no arranca con templates sin verificar."
         )
-    return {}
+    data = yaml.safe_load(TEMPLATES_FILE.read_text(encoding="utf-8"))
+    return {
+        name: TemplateSpec(status=entry["status"], template=entry.get("template"))
+        for name, entry in data["templates"].items()
+    }

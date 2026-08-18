@@ -38,3 +38,13 @@ def test_load_templates_fails_closed_on_hash_mismatch(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="Hash de"):
         loaders.load_templates()
+
+
+def test_load_templates_happy_path_returns_real_specs():
+    templates = loaders.load_templates()
+    assert templates["CAPABILITY_AVAILABLE"].status == "definida"
+    assert templates["CAPABILITY_AVAILABLE"].template == (
+        "La capability {name} está disponible en modo {mode}."
+    )
+    assert templates["FACET_EXISTS"].status == "pendiente"
+    assert templates["FACET_EXISTS"].template is None
