@@ -22,7 +22,7 @@ import httpx
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
-from jacobs.plan import VALID_CAPABILITIES
+from jacobs.plan import VALID_CAPABILITIES, CapabilityUnbound
 from jacobs.policy import check_kill_switch
 
 logger = logging.getLogger("jacobs.executor")
@@ -684,11 +684,11 @@ def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
 #  Dispatcher principal
 # ----------------------------------------------------------------
 
-def validate_capability(step: Step) -> str | None:
+def validate_capability(step: Step) -> CapabilityUnbound | str | None:
     """Validación PRE-dispatch en DOS NIVELES (FASE A §3.4, refinado).
 
-    Separa dos preguntas que antes estaban mezcladas. Devuelve un mensaje de
-    error (str) si el step es inválido, o None si es válido.
+    Separa dos preguntas que antes estaban mezcladas. Devuelve CapabilityUnbound
+    o un mensaje de error (str) si el step es inválido, o None si es válido.
 
     NIVEL A — existencia de vocabulario. Aplica a TODOS los facets.
         ¿step.capability ∈ VALID_CAPABILITIES? Cierra la asimetría (un facet
@@ -704,6 +704,11 @@ def validate_capability(step: Step) -> str | None:
         catálogo, el facet ∈ allowed_motors y el caller 'jacobs' ∈ allowed_callers.
         Los facets de API directa NO pasan por aquí (ignoran capability en el
         dispatch real).
+
+    Devuelve CapabilityUnbound (tipado, REFORMAS-v3 R3.4) cuando el motivo
+    de rechazo es un binding capability→motor ausente (NIVEL B) — el
+    scheduler lo reenruta. Devuelve str para NIVEL A (vocabulario cerrado,
+    no es un problema de binding, no tiene candidates que ofrecer).
     """
     cap = step.capability
 
@@ -723,14 +728,19 @@ def validate_capability(step: Step) -> str | None:
         resolved = _CAPABILITY_MAP.get(cap, cap)
         entry = _CATALOG_CAPS.get(resolved)
         if entry is None:
-            return (f"capability '{cap}' (→ '{resolved}') no existe en el "
-                    f"catálogo de capabilities")
+            return CapabilityUnbound(
+                required=[resolved], candidates=[], task_id=step.step_id,
+            )
         if step.facet not in entry.get("allowed_motors", []):
-            return (f"motor '{step.facet}' no permitido para '{resolved}' "
-                    f"(allowed_motors={entry.get('allowed_motors')})")
+            return CapabilityUnbound(
+                required=[resolved],
+                candidates=list(entry.get("allowed_motors", [])),
+                task_id=step.step_id,
+            )
         if "jacobs" not in entry.get("allowed_callers", []):
-            return (f"caller 'jacobs' no autorizado para '{resolved}' "
-                    f"(allowed_callers={entry.get('allowed_callers')})")
+            return CapabilityUnbound(
+                required=[resolved], candidates=[], task_id=step.step_id,
+            )
     return None
 
 
@@ -743,8 +753,60 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # FASE A §3.4: validación uniforme del contrato ANTES de rutear por facet.
     # Si falla, el step falla limpio (lo captura _run_one_step → _fail_step) sin
     # haber tocado ninguna API ni el Motor Registry.
+    #
+    # REFORMAS-v3 R3.4 — CAPABILITY_UNBOUND se intercepta y reenruta a un
+    # candidate antes de abortar el pipeline. NIVEL A (str) no tiene
+    # candidatos — falla igual que antes. El usuario nunca ve el estado
+    # intermedio: si el reroute encuentra un candidato válido, el pipeline
+    # sigue como si el step hubiera sido asignado a ese facet desde el inicio.
+    original_facet = step.facet
+    tried_facets = {step.facet}
     cap_error = validate_capability(step)
-    if cap_error:
+    while isinstance(cap_error, CapabilityUnbound):
+        # El reroute SOLO puede apuntar a facets efectivamente despachables
+        # (HTTP o Motor Registry). 'hyde' se excluye a propósito: tiene su
+        # propio gate de aprobación humana en run_pipeline, que chequea
+        # plan[i].facet == "hyde" ANTES de que este código corra — si el
+        # reroute pudiera asignar step.facet = "hyde" después de ese
+        # chequeo, el step ejecutaría con result["approved"] = True sin
+        # aprobación humana real. No alcanzable hoy (ninguna capability
+        # lista "hyde" en allowed_motors), pero a un cambio de config.toml
+        # de distancia. 'jax_local' también queda fuera (no está en ningún
+        # conjunto de dispatch). NOTA: reroute SÍ puede apuntar a
+        # _HTTP_FACETS (ada/thot), que no pasan por la gobernanza del Motor
+        # Registry (allowed_callers, requires_human_gate, sandbox_only,
+        # output_validator) — riesgo real pero hoy dormido, porque ninguna
+        # capability con gate lista más de un motor en allowed_motors. Si
+        # eso cambia, revisar la exigencia del gate para esa capability.
+        untried = [
+            c for c in cap_error.candidates
+            if c not in tried_facets and c in (_HTTP_FACETS | _MOTOR_FACETS)
+        ]
+        if not untried:
+            raise ValueError(
+                f"Capability inválida (pre-dispatch, candidatos agotados): "
+                f"{cap_error.to_dict()} (facet original: {original_facet})"
+            )
+        new_facet = untried[0]
+        logger.warning(
+            "Jacobs reroute: step %s capability='%s' facet '%s' -> '%s' "
+            "(CAPABILITY_UNBOUND, candidatos=%s)",
+            step.step_id, step.capability, step.facet, new_facet, cap_error.candidates,
+        )
+        await store.event_append(
+            pipeline.pipeline_id, "STEP_REROUTED",
+            {
+                "original_facet": step.facet,
+                "new_facet": new_facet,
+                "capability": step.capability,
+                "candidates": cap_error.candidates,
+            },
+            step.step_id,
+        )
+        step.facet = new_facet
+        tried_facets.add(new_facet)
+        cap_error = validate_capability(step)
+    if isinstance(cap_error, str):
         raise ValueError(f"Capability inválida (pre-dispatch): {cap_error}")
 
     ctx_input = _build_context_input(step, pipeline)

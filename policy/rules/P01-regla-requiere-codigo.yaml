@@ -1,0 +1,20 @@
+id: P01
+statement: >
+  Una regla es una regla solo si existe código que puede rechazar un
+  output que la viole.
+origin: "REFORMAS-v3.md §2 (Principios), texto verbatim. /opt/jax/docs/REFORMAS-v3.md, sha256 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660"
+status: CULTURAL
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Es un meta-principio sobre qué cuenta como regla, no una afirmación
+  sobre el comportamiento en runtime de JAX — no hay "output de JAX" que
+  este principio en sí mismo pueda rechazar, por eso CULTURAL y no
+  NORMATIVA_PENDIENTE. tools/validate_corpus.py de este mismo corpus
+  aplica su espíritu a nivel de gobernanza del corpus (rechaza
+  status=NORMATIVA con test=null), pero eso valida metadatos del corpus,
+  no comportamiento de JAX — no se cuenta como enforcement de esta regla.

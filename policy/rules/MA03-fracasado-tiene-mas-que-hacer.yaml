@@ -1,0 +1,19 @@
+id: MA03
+statement: >
+  Mañana es el día que el fracasado tiene más que hacer.
+origin: >
+  Marina — /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y
+  /home/fruiz/jax/missions/bridge-migration.md línea 67; citada en
+  REFORMAS-v3.md Apéndice A3, que la liga explícitamente a R5
+  ("Aplicable a R5. Compuerta de 30 días").
+status: CULTURAL
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  La aplicación concreta y testeable de este axioma vive en [[P06]]/R5
+  (compuerta de 30 días), no en el axioma mismo — el axioma en sí es un
+  principio motivacional general, no un comportamiento de sistema.

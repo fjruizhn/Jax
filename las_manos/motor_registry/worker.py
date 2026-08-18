@@ -29,6 +29,7 @@ from typing import Any
 import httpx
 
 from motor_registry.catalog import MotorCatalog
+from motor_registry.identity_context import build_identity_context
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
@@ -36,6 +37,24 @@ from motor_registry.output_validator import validate
 logger = logging.getLogger(__name__)
 
 _KILL_SWITCH_INTERVAL = 5.0  # segundos entre chequeos durante la ejecución
+
+# Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3. Hardcodeados acá
+# (en vez de parsear el YAML en cada job) porque el codebase no tiene hoy
+# ningún cargador YAML establecido — solo tomllib para config.toml — y
+# sumar uno para un único archivo chico no ameritaba esa dependencia nueva
+# en Fase 1. Fuente versionada y lista cerrada: ./policy/vocabulary/predicates.yaml
+# (raíz del repo — NO las_manos/policy/...). Si ese archivo cambia, esta
+# lista debe actualizarse a mano.
+_REFORMAS_V3_PREDICATES = [
+    "CAPABILITY_AVAILABLE",
+    "FACET_EXISTS",
+    "ENGINE_STATUS",
+    "CONFIG_VALUE",
+    "FILE_EXISTS",
+    "AUDIT_EVENT_EXISTS",
+    "JOB_STATUS",
+    "MEMORY_ENTRY_EXISTS",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -136,13 +155,38 @@ async def run(
     cap_entry = catalog.get_capability(capability)
     output_schema = cap_entry.output_schema if cap_entry else ""
 
+    # REFORMAS-v3 R3.5 — identidad+capabilities+predicados
+    # inyectados antes del prompt real (quién es, qué capability tiene en
+    # esta tarea, qué motores existen y qué puede cada uno, predicados
+    # emitibles, protocolo de rechazo tipado CAPABILITY_UNBOUND).
+    #
+    # Catálogo vacío {} por ahora: MotorCatalog indexa por motor individual
+    # y por capability (catalog.py:47-92) pero no expone una vista pública
+    # invertida {motor: {"allowed_motors_for": [...]}} (la forma que
+    # build_identity_context espera — dict[str, dict], no dict[str, list]).
+    # Construirla acá requeriría leer sus atributos internos
+    # (_motors/_capabilities) o sumar un método nuevo a MotorCatalog —
+    # ambos, un refactor mayor no pedido por Fase 1 (ver brief Task 5, nota
+    # del ejecutor). {} es type-correct y produce cero "otros motores" — el
+    # mismo efecto práctico que antes, sin el riesgo de que un futuro
+    # catálogo con más de una entrada dispare un AttributeError dentro de
+    # build_identity_context (que hace info.get(...) sobre cada valor).
+    identity = build_identity_context(
+        motor_name=motor,
+        capabilities=[capability],
+        catalog={},
+        predicates=_REFORMAS_V3_PREDICATES,
+        task_id=job_id,
+    )
+    prompt_with_identity = identity + "\n---\n" + prompt
+
     # Lanzar tarea HTTP y watcher de kill switch en paralelo
     api_task = asyncio.create_task(
         _call_kimi(
             api_url=motor_entry.api_url,
             model=motor_entry.model,
             api_key=api_key,
-            prompt=prompt,
+            prompt=prompt_with_identity,
             timeout=float(motor_entry.default_timeout_seconds),
         )
     )

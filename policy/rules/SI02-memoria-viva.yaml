@@ -1,0 +1,28 @@
+id: SI02
+statement: >
+  La memoria sin procedencia es otra forma de suposición: todo recuerdo
+  de tipo HECHO requiere fuente verificable, y sin ella se marca "no
+  verificado" — nunca se presenta como hecho con autoridad.
+origin: >
+  six-impossible-things.html, Apéndice C, "El Protocolo de la Memoria
+  Viva v0.1 — sujeto a refinamiento de la Mesa". Nacido 15-jun-2026 por
+  mandato de la Mesa (Thot y Jekyll). sha256
+  db467720abbe070ee376e48906b17abb4503304801a44b7be599f7ce2612ab37,
+  commit 5d39014, 19-jun-2026. Identificado en F0.4
+  (/opt/jax/docs/FASE-0-VERIFICACION.md).
+status: HISTORICA
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Texto explícito del propio artefacto: "Borrador v0.1... sujeto a
+  refinamiento de sus autores" — HISTORICA por declararse borrador, no
+  por haber dejado de regir. Enunciado sintetizado a partir de la prosa
+  del apéndice (a diferencia de P01-P09, esta fuente no trae ya una
+  oración normativa única lista para copiar). Corresponde conceptualmente
+  a [[P03]] de REFORMAS-v3.md (procedencia enlazada a la afirmación). El
+  archivo six-impossible-things.html NO fue modificado por esta
+  migración.

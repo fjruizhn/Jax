@@ -1,0 +1,27 @@
+id: SI01
+statement: >
+  Todo componente que defina verdad, autoridad, permisos, auditoría,
+  reversibilidad, límites, identidad o fallo cerrado debe implementarse
+  antes de habilitar la capacidad que depende de él.
+origin: >
+  six-impossible-things.html, Capítulo IX "La Regla Absoluta",
+  "Principio IX — No Diferimiento Contractual" (atribuido a Thot). sha256
+  db467720abbe070ee376e48906b17abb4503304801a44b7be599f7ce2612ab37,
+  commit 5d39014, 19-jun-2026. Identificado en F0.4
+  (/opt/jax/docs/FASE-0-VERIFICACION.md).
+status: HISTORICA
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  F0.4: existe, sin versión numérica propia distinta del documento
+  contenedor, sin evidencia de ratificación posterior al commit de
+  creación → "existe sin versión → histórico" (criterio del propio §5 de
+  REFORMAS-v3.md). Corresponde conceptualmente a [[P04]]/R3 de
+  REFORMAS-v3.md (capacidades por contrato), aunque REFORMAS-v3.md no
+  cita este principio por nombre — la relación es interpretación de esta
+  migración, no un enlace explícito en las fuentes. El archivo
+  six-impossible-things.html NO fue modificado por esta migración.
