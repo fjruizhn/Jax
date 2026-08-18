@@ -77,7 +77,65 @@ def load_validation_context(
     )
 
 
-_RESOLVERS: dict[str, Callable[["claims.Claim", ValidationContext], Verdict]] = {}
+def _normalize_path(path: str, repo_root: Path) -> Path:
+    p = Path(path)
+    return p if p.is_absolute() else repo_root / p
+
+
+def _path_allowed(path: str, allowlist: frozenset[str], repo_root: Path) -> bool:
+    """Solo aritmética de paths — CERO llamadas a exists()/stat()/read_bytes()."""
+    candidate = _normalize_path(path, repo_root)
+    for entry in allowlist:
+        is_dir_entry = entry.endswith("/")
+        entry_path = _normalize_path(
+            entry.rstrip("/") if is_dir_entry else entry, repo_root
+        )
+        if is_dir_entry:
+            try:
+                candidate.relative_to(entry_path)
+                return True
+            except ValueError:
+                continue
+        elif candidate == entry_path:
+            return True
+    return False
+
+
+def _resolve_file_exists(claim: "claims.Claim", ctx: ValidationContext) -> Verdict:
+    path = claim.args["path"]
+    expected_hash = claim.args["hash"]
+
+    if not _path_allowed(path, ctx.config_paths_allowlist, ctx.repo_root):
+        return Verdict(
+            status="PATH_NOT_ALLOWED",
+            predicate="FILE_EXISTS",
+            detail="Path fuera de la allowlist de config_paths.",
+        )
+
+    candidate = _normalize_path(path, ctx.repo_root)
+    if not candidate.exists():
+        return Verdict(
+            status="FACT_MISMATCH", predicate="FILE_EXISTS", detail=f"'{path}' no existe."
+        )
+
+    actual_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    if actual_hash != expected_hash:
+        return Verdict(
+            status="FACT_MISMATCH",
+            predicate="FILE_EXISTS",
+            detail=(
+                f"'{path}' existe pero su hash no coincide (esperado "
+                f"{expected_hash}, real {actual_hash})."
+            ),
+        )
+    return Verdict(
+        status="VALID", predicate="FILE_EXISTS", detail=f"'{path}' existe con hash verificado."
+    )
+
+
+_RESOLVERS: dict[str, Callable[["claims.Claim", ValidationContext], Verdict]] = {
+    "FILE_EXISTS": _resolve_file_exists,
+}
 _UNIMPLEMENTED_REASONS: dict[str, str] = {
     "ENGINE_STATUS": (
         "ENGINE_STATUS: sin fuente de verdad en el dominio de jax. La "
