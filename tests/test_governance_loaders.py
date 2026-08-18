@@ -63,7 +63,7 @@ def test_load_vocabulary_flattens_categories_and_keeps_config_paths_separate():
     assert "code_swarm" in vocab.flattened   # capabilities
     assert "ssh_exec" in vocab.flattened     # ops
     assert "hyde" in vocab.flattened         # facets_las_manos / facets_jax
-    assert "jax/policy/" in vocab.config_paths
+    assert "policy/" in vocab.config_paths
     assert "las_manos/config.toml" in vocab.config_paths
     # config_paths no debe filtrarse al vocabulario léxico plano
-    assert "jax/policy/" not in vocab.flattened
+    assert "policy/" not in vocab.flattened
