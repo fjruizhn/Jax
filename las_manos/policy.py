@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 @dataclass
 class PolicyResult:
-    allowed: bool
+    ok: bool
     reason: str
     requires_dryrun: bool = False
     requires_snapshot: bool = False
@@ -50,19 +50,27 @@ class PolicyEngine:
 
         # 1) ¿La faceta existe?
         if facet not in self.facets:
-            return PolicyResult(False, f"Faceta desconocida: {facet}")
+            return PolicyResult(ok=False, reason=f"Faceta desconocida: {facet}")
 
         facet_cfg = self.facets[facet]
 
         # 2) ¿La operación existe?
         if operation not in self.ops:
-            return PolicyResult(False, f"Operación desconocida: {operation}")
+            return PolicyResult(ok=False, reason=f"Operación desconocida: {operation}")
 
         # 3) ¿La faceta puede ejecutar esta operación?
-        if operation not in facet_cfg["allowed_ops"]:
+        # REFORMAS-v3 §3 R3.3 — capabilities de solo lectura disponibles a
+        # cualquier motor, otorgadas por contrato de tarea, no por identidad
+        # de facet. Fase 1 desbloquea únicamente read_audit_log (mapeada acá
+        # a la operación real 'audit_log_read'); las otras tres del §3.3
+        # (read_own_config, list_facets_and_capabilities, read_memory) NO
+        # están en el alcance de Fase 1 y siguen gateadas por allowed_ops.
+        CONTRACT_GRANTED_READONLY_OPS = {"audit_log_read"}
+        if operation not in CONTRACT_GRANTED_READONLY_OPS \
+                and operation not in facet_cfg["allowed_ops"]:
             return PolicyResult(
-                False,
-                f"Faceta '{facet}' no autorizada para operación '{operation}'. "
+                ok=False,
+                reason=f"Faceta '{facet}' no autorizada para operación '{operation}'. "
                 f"Permitidas: {facet_cfg['allowed_ops']}"
             )
 
@@ -70,14 +78,14 @@ class PolicyEngine:
         env = self._resolve_env(target_host)
         if env is None:
             return PolicyResult(
-                False, f"Host '{target_host}' no pertenece a ningún ambiente conocido"
+                ok=False, reason=f"Host '{target_host}' no pertenece a ningún ambiente conocido"
             )
 
         # 5) ¿La faceta puede operar en este ambiente?
         if env not in facet_cfg["allowed_envs"]:
             return PolicyResult(
-                False,
-                f"Faceta '{facet}' no autorizada en ambiente '{env}'. "
+                ok=False,
+                reason=f"Faceta '{facet}' no autorizada en ambiente '{env}'. "
                 f"Permitidos: {facet_cfg['allowed_envs']}"
             )
 
@@ -86,7 +94,7 @@ class PolicyEngine:
         # 6) Si hay comando, validar contra allowlist/denylist
         if command is not None:
             cmd_check = self._check_command(operation, op_cfg, command)
-            if not cmd_check.allowed:
+            if not cmd_check.ok:
                 return cmd_check
 
         # 7) ¿Escritura en prod sin permiso?
@@ -94,8 +102,8 @@ class PolicyEngine:
         is_mutating = operation in ("ssh_exec", "write_file", "rsync", "kill_process")
         if is_prod and is_mutating and not facet_cfg.get("can_write_prod", False):
             return PolicyResult(
-                False,
-                f"Faceta '{facet}' no puede mutar producción (can_write_prod=false)"
+                ok=False,
+                reason=f"Faceta '{facet}' no puede mutar producción (can_write_prod=false)"
             )
 
         # PASA — pero con requisitos según la operación
@@ -105,7 +113,7 @@ class PolicyEngine:
             requires_human_gate = True
 
         return PolicyResult(
-            allowed=True,
+            ok=True,
             reason=f"OK: {facet} → {operation} en {env} ({target_host})",
             requires_dryrun=op_cfg.get("requires_dryrun", False),
             requires_snapshot=op_cfg.get("requires_snapshot", False),
@@ -119,22 +127,22 @@ class PolicyEngine:
         for pattern in deny:
             if pattern.lower() in command.lower():
                 return PolicyResult(
-                    False,
-                    f"Comando bloqueado: contiene patrón prohibido '{pattern}'"
+                    ok=False,
+                    reason=f"Comando bloqueado: contiene patrón prohibido '{pattern}'"
                 )
 
         # Allowlist
         allow = op_cfg.get("allow_cmds", [])
         if "*" in allow:
-            return PolicyResult(True, "Comando permitido (allowlist abierta)")
+            return PolicyResult(ok=True, reason="Comando permitido (allowlist abierta)")
 
         # ¿El comando empieza con algún prefijo permitido?
         cmd_stripped = command.strip()
         for allowed_cmd in allow:
             if cmd_stripped.startswith(allowed_cmd):
-                return PolicyResult(True, f"Comando permitido: '{allowed_cmd}'")
+                return PolicyResult(ok=True, reason=f"Comando permitido: '{allowed_cmd}'")
 
         return PolicyResult(
-            False,
-            f"Comando no está en allowlist. Permitidos: {allow}"
+            ok=False,
+            reason=f"Comando no está en allowlist. Permitidos: {allow}"
         )

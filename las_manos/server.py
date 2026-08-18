@@ -345,11 +345,11 @@ async def execute(req: IntentEnvelope) -> dict:
         facet=req.facet_id,
         operation=req.requested_capability,
         target_host=req.target_host,
-        allowed=result.allowed,
+        allowed=result.ok,
         reason=result.reason,
         **fx,
     )
-    if not result.allowed:
+    if not result.ok:
         raise HTTPException(status_code=403, detail=result.reason)
 
     # ---- 4) Human gate (si la política lo exige) ----
