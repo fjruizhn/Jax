@@ -123,10 +123,7 @@ def _resolve_file_exists(claim: "claims.Claim", ctx: ValidationContext) -> Verdi
         return Verdict(
             status="FACT_MISMATCH",
             predicate="FILE_EXISTS",
-            detail=(
-                f"'{path}' existe pero su hash no coincide (esperado "
-                f"{expected_hash}, real {actual_hash})."
-            ),
+            detail=f"'{path}' existe pero su hash no coincide (esperado {expected_hash}).",
         )
     return Verdict(
         status="VALID", predicate="FILE_EXISTS", detail=f"'{path}' existe con hash verificado."
