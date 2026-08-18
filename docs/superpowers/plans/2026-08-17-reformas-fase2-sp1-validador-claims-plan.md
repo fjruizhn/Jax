@@ -1345,7 +1345,11 @@ git commit -m "policy: vocab_sweep.py — barrido léxico puro (governance, Task
   - Un ejemplo renderizado de cada uno con datos de prueba, para juzgar legibilidad real (no solo el template en abstracto).
   - La pregunta explícita: ¿esta forma de leer un claim verificado es aceptable, o hace falta ajustar el fraseo de las plantillas antes de fijarlas con hash (Task 7 las deja versionadas — cambiarlas después implica recalcular `templates_sha256` y recorrer Task 1 de nuevo)?
 
-- [ ] **Step 2: Esperar aprobación explícita de Fernando antes de avanzar a Task 7.** Si pide cambios de fraseo, editarlos en `policy/templates/render_templates.yaml`, volver a correr `policy/tools/template_hash.py --write` (Task 1, Step 5) y commitear ese ajuste antes de tocar `renderer.py`.
+- [ ] **Step 2: Leer las 3 plantillas en voz alta (Fernando, 2026-08-18).** Si suenan mecánicas al leerlas, el problema es la plantilla, no la restricción — hay margen para redactar mejor sin agregar lógica al renderer. Ese es el momento de decidir Q15 (¿la salida verificada se lee peor que la prosa libre?), con las 3 plantillas reales delante, no en abstracto.
+
+- [ ] **Step 3: Registrar qué queda fuera con solo 2 de 8 predicados resueltos (Fernando, 2026-08-18).** Con `CAPABILITY_AVAILABLE` y `FILE_EXISTS` como únicos resolvers reales, la mayoría del contenido que un modelo querría afirmar como claim no va a ser expresable todavía — los otros 6 predicados (`FACET_EXISTS`, `ENGINE_STATUS`, `CONFIG_VALUE`, `AUDIT_EVENT_EXISTS`, `JOB_STATUS`, `MEMORY_ENTRY_EXISTS`) devuelven `RESOLVER_NOT_IMPLEMENTED`. Este es el primer momento donde ese recorte se ve concreto en vez de solo declarado en el spec — es el dato empírico de Q14. Anotar la impresión de Fernando acá o en la memoria `reformas-v3-progreso` antes de seguir.
+
+- [ ] **Step 4: Esperar aprobación explícita de Fernando antes de avanzar a Task 7.** Si pide cambios de fraseo, editarlos en `policy/templates/render_templates.yaml`, volver a correr `policy/tools/template_hash.py --write` (Task 1, Step 5) y commitear ese ajuste antes de tocar `renderer.py`.
 
 ---
 
