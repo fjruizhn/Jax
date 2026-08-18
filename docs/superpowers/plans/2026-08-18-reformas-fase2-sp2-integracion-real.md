@@ -12,6 +12,8 @@
 
 ## Global Constraints
 
+- Esta rama parte de `master` en `jax-platform`, que está 28 commits detrás de `infra/facetas-bloque-d` (MariaDB 12.3, credenciales, `resolve_facet`/`UsageInfo`). Task 3 usa una señal posicional propia (`_canned_reply` flag, seteado en el punto exacto de cada respuesta enlatada) en vez de `UsageInfo`, que no existe en `master`. Evento esperado, sin ETA confirmada: cuando `infra/facetas-bloque-d` mergee, reconciliar reemplazando el flag por la señal `usage is None` que trae esa rama — no antes, no se aceleró el merge de esa rama para este plan.
+
 - Autoridad de todo claim es siempre `"INFERIDO"`, fijada server-side — nunca autodeclarada por el modelo. Ver spec sección 1a. Consecuencia esperada: `shadow_claim_verdicts` va a mostrar 100% `AUTHORITY_INVALID` esta ronda — no es un bug, no "arreglarlo".
 - El modelo solo declara `{"predicate": ..., "args": {...}}` por claim — nunca `authority`/`provenance_ref`/`evidence_pointer`/`scope`.
 - `degradation_reason` es siempre texto libre (`TEXT`), nunca un enum — las formas de incumplimiento de contrato no están catalogadas todavía.

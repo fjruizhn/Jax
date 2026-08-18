@@ -2,20 +2,22 @@
 policy/governance — Barrido léxico contra el vocabulario cerrado
 (REFORMAS-v3.md §3.1.5).
 
-Puro: recibe el vocabulario ya cargado (loaders.load_vocabulary().flattened),
-nunca abre un archivo. Decidir qué hacer con los términos encontrados
-(reformular como claim, rechazar el bloque) es responsabilidad del
-llamador — sub-proyecto 2, fuera de alcance acá.
+Puro: recibe el vocabulario ya cargado y su mapeo de categorías
+(loaders.load_vocabulary().term_categories), nunca abre un archivo.
+Decidir qué hacer con los términos encontrados es responsabilidad del
+llamador — sub-proyecto 2.
 """
 from __future__ import annotations
 
 import re
 
 
-def sweep(text: str, vocabulary: frozenset[str]) -> list[str]:
-    if not vocabulary:
+def sweep(
+    text: str, term_categories: dict[str, frozenset[str]]
+) -> list[tuple[str, frozenset[str]]]:
+    if not term_categories:
         return []
-    terms = sorted((t for t in vocabulary if t), key=len, reverse=True)
+    terms = sorted((t for t in term_categories if t), key=len, reverse=True)
     if not terms:
         return []
     pattern = re.compile(
@@ -23,6 +25,6 @@ def sweep(text: str, vocabulary: frozenset[str]) -> list[str]:
         re.IGNORECASE,
     )
     found = {m.group(0).lower() for m in pattern.finditer(text)}
-    # Map back to the original-cased vocabulary entries whose lowercase form matched.
-    lowered_to_original = {t.lower(): t for t in vocabulary if t}
-    return sorted(lowered_to_original[f] for f in found if f in lowered_to_original)
+    lowered_to_original = {t.lower(): t for t in term_categories if t}
+    matched = [lowered_to_original[f] for f in found if f in lowered_to_original]
+    return sorted((t, term_categories[t]) for t in matched)
