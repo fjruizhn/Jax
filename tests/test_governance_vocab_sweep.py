@@ -27,3 +27,13 @@ def test_sweep_finds_multiple_terms_sorted():
     assert result == sorted(result)
     assert "code_swarm" in result
     assert "trae a hyde" in result
+
+
+def test_sweep_no_false_positive_on_substring_inside_word():
+    vocab = frozenset({"ada"})
+    assert vocab_sweep.sweep("no hay nada que hacer, cada faceta", vocab) == []
+
+
+def test_sweep_case_insensitive_match():
+    vocab = frozenset({"hyde"})
+    assert vocab_sweep.sweep("invocá a HYDE ahora", vocab) == ["hyde"]
