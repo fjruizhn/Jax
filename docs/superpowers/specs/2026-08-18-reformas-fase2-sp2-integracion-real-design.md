@@ -210,10 +210,27 @@ tiene `queued_at` **es** la medición de pérdida.
 
 ## 4. Esquema de datos (`jax_memory`, MariaDB)
 
-Tres tablas nuevas, sin FK dura entre ellas (comparten `conversation_id`
-+ `message_id` para cruzarlas cuando haga falta, pero un fallo en una no
-bloquea a las otras — se escriben desde el mismo proceso, y una FK dura
-convertiría un fallo parcial en fallo total).
+Tres tablas nuevas, sin FK dura entre ellas (comparten `conv_uuid` +
+`shadow_message_id` para cruzarlas cuando haga falta, pero un fallo en
+una no bloquea a las otras — se escriben desde el mismo proceso, y una
+FK dura convertiría un fallo parcial en fallo total).
+
+**Nota sobre `conv_uuid`/`shadow_message_id` (no `conversation_id`/
+`message_id` tal cual se pensó al principio):** `chat.py` tiene acceso a
+`conv_uuid` (el UUID real de `conversations.conversation_uuid`, vía
+`_get_conv_uuid()`) — eso sí es navegable a la conversación real. Pero
+no existe un `message_id` sincrónico: `_memory.save_message()`
+(`jax/jax/memory/db.py`) es fire-and-forget, no devuelve nada, y los
+mensajes se identifican internamente por `(conversation_id interno,
+turn_number)`, calculado async dentro del propio guardado en
+background — ver [[save-message-fire-and-forget-sin-garantia]] en
+memoria del proyecto para el hallazgo completo, que es deuda aparte, no
+de este sub-proyecto. Por eso `shadow_message_id` es un UUID que
+`chat.py` genera él mismo al construir la respuesta — identifica la
+fila de shadow, no una fila real de `messages`. Sigue siendo navegable
+a la conversación (`conv_uuid`) aunque `messages` todavía no tenga el
+mensaje guardado — el test de la tabla debe confirmar exactamente eso
+(ver Task 4, Testing).
 
 ### `shadow_messages`
 
@@ -226,8 +243,8 @@ sobrevivió) no dejaría rastro en ninguna tabla.
 
 | columna | tipo | nota |
 |---|---|---|
-| `conversation_id` | | índice |
-| `message_id` | | |
+| `conv_uuid` | `VARCHAR(36)` | índice — UUID real de `conversations.conversation_uuid`, lo único que `chat.py` tiene disponible (ver nota abajo) |
+| `shadow_message_id` | `CHAR(36)` | UUID generado por `chat.py` al construir la respuesta — NO es un FK a `messages` (ver nota abajo) |
 | `facet` | | índice |
 | `contract_parsed` | bool | |
 | `degradation_reason` | `TEXT` (no `VARCHAR(n)`) | no enum — formas de incumplimiento todavía no catalogadas, y un `VARCHAR` corto trunca justo la información que hace falta |
@@ -243,8 +260,8 @@ Una fila por claim validado.
 
 | columna | tipo | nota |
 |---|---|---|
-| `conversation_id` | | índice |
-| `message_id` | | |
+| `conv_uuid` | `VARCHAR(36)` | índice — UUID real de `conversations.conversation_uuid`, lo único que `chat.py` tiene disponible (ver nota abajo) |
+| `shadow_message_id` | `CHAR(36)` | UUID generado por `chat.py` al construir la respuesta — NO es un FK a `messages` (ver nota abajo) |
 | `predicate` | | |
 | `status` | | VALID / FACT_MISMATCH / RESOLVER_NOT_IMPLEMENTED / etc. |
 | `detail` | | |
@@ -257,8 +274,8 @@ para que `GROUP BY category` funcione directo sin parsear nada.
 
 | columna | tipo | nota |
 |---|---|---|
-| `conversation_id` | | índice |
-| `message_id` | | |
+| `conv_uuid` | `VARCHAR(36)` | índice — UUID real de `conversations.conversation_uuid`, lo único que `chat.py` tiene disponible (ver nota abajo) |
+| `shadow_message_id` | `CHAR(36)` | UUID generado por `chat.py` al construir la respuesta — NO es un FK a `messages` (ver nota abajo) |
 | `channel` | | analysis / judgment |
 | `term` | | |
 | `category` | | índice — capabilities/ops/facets_jax/facets_las_manos/motors/commands |
@@ -287,17 +304,29 @@ fail-closed que ya existe para `load_templates()`).
 - `vocab_sweep.py` sigue siendo puro: cambia qué recibe y qué devuelve,
   no su naturaleza (ciego a política, solo detección léxica).
 
-## 6. Facetas incluidas: las 7, desde el día uno
+## 6. Facetas incluidas: las 6 que llegan al LLM, desde el día uno
 
-No se filtra por política de `grounding` (`off`/`auto`/`required_web`/
-`local_context_only`) — eso sería filtrar la muestra según la hipótesis
-de que grounding predice producción de claims, que es justo lo que el
-shadow existe para verificar. Una faceta que nunca produce claims es un
-dato, no una ausencia de dato. El costo de incluir las 7 es acotado
-(prompt más largo, parseo de JSON — no I/O ni latencia de red extra), y
-sacar después una faceta que no aporta señal es trivial comparado con
-tener que esperar otra ventana de medición si se hubiera excluido de
-entrada.
+La decisión de brainstorming fue "las 7 desde el día uno, sin filtrar
+por política de grounding" — pero al leer `chat.py` para el plan
+apareció un hecho que esa decisión no pudo conocer: **`hyde` nunca
+llama a un LLM en el camino de Mesa web.** `chat()` intercepta
+`facet == "hyde"` con una respuesta enlatada ("Hyde opera en modo tarea
+autónoma...") antes de tocar `_invoke_facet` — no hay texto libre que
+envolver en `{claim/analysis/judgment}`, porque no hay generación. No
+es una exclusión de alcance nueva, es que la premisa "7 facetas
+generan respuesta" era empíricamente falsa; eran 6 desde el arranque
+del producto. El wrapper aplica a `jax_local`, `jekyll`, `hipatia`,
+`thot`, `ada`, `kimi`.
+
+Sobre las 6: no se filtra por política de `grounding` (`off`/`auto`/
+`required_web`/`local_context_only`) — eso sería filtrar la muestra
+según la hipótesis de que grounding predice producción de claims, que
+es justo lo que el shadow existe para verificar. Una faceta que nunca
+produce claims es un dato, no una ausencia de dato. El costo de
+incluir las 6 es acotado (prompt más largo, parseo de JSON — no I/O ni
+latencia de red extra), y sacar después una faceta que no aporta señal
+es trivial comparado con tener que esperar otra ventana de medición si
+se hubiera excluido de entrada.
 
 Dos casos de interés esperados desde el primer día:
 
@@ -320,9 +349,21 @@ no en la experiencia real — el mismo patrón que el sello cosmético
 `origin_of_authority` que §5 de REFORMAS-v3 señaló sin que existiera en
 código: un campo correcto que nadie ve no es gobernanza, es teatro.
 
-Cumple la política global del proyecto sin excepción: string en
-`es.js`/`en.js` (cero hardcoding de texto visible), CSS variables para
-el color (respeta dark/light).
+Cumple la mitad cumplible de la política global del proyecto: string en
+`es.js`/`en.js` (cero hardcoding de texto visible). La otra mitad —CSS
+variables, respeta dark/light— **no tiene con qué cumplirse**: al leer
+`Message.jsx` y el resto de `frontend/src` para este plan, no existe
+ningún sistema de temas en la Mesa web (cero `data-theme`, cero
+`prefers-color-scheme`, cero CSS variables de color en todo el
+frontend) — no es una excepción de `Login.jsx`/`ResetPassword.jsx`
+como decía la memoria del proyecto hasta encontrar esto; es que la Mesa
+entera es hardcoded a oscuro. Construir un sistema de temas para
+resolver esto es YAGNI directo para este sub-proyecto. El footnote usa
+el mismo estilo hardcoded-a-oscuro que sus vecinos en `Message.jsx`
+(`text-slate-500` o equivalente) — consistente con lo que ya existe, no
+una excepción theme-aware aislada que no tendría con qué convivir. Deuda
+preexistente, documentada, no resuelta acá — ver
+[[reformas-v3-progreso]] en memoria del proyecto.
 
 ## 8. Rollback
 
