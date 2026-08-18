@@ -43,6 +43,12 @@ class PredicateSpec:
     source_of_truth: str
 
 
+@dataclass(frozen=True)
+class ClosedVocabulary:
+    flattened: frozenset[str]
+    config_paths: frozenset[str]
+
+
 def _current_templates_hash() -> str:
     return hashlib.sha256(TEMPLATES_FILE.read_bytes()).hexdigest()
 
@@ -84,3 +90,15 @@ def load_predicates() -> dict[str, PredicateSpec]:
         )
         for entry in data["predicates"]
     }
+
+
+def load_vocabulary() -> ClosedVocabulary:
+    data = yaml.safe_load(VOCABULARY_FILE.read_text(encoding="utf-8"))
+    flattened: set[str] = set()
+    for key, value in data.items():
+        if key == "config_paths":
+            continue
+        if isinstance(value, dict):
+            flattened.update(value.keys())
+    config_paths = frozenset(data.get("config_paths") or [])
+    return ClosedVocabulary(flattened=frozenset(flattened), config_paths=config_paths)
