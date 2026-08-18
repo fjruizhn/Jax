@@ -1,0 +1,92 @@
+# Vocabulario cerrado — REFORMAS-v3.md §3.1.5.
+#
+# Poblado DESDE EL SISTEMA (comandos de verificación citados en cada
+# sección), no desde REFORMAS-v3.md — el documento no enumera este
+# vocabulario, solo describe el mecanismo del barrido léxico.
+#
+# NO implementa el barrido de §3.1.5 — es solo el inventario de nombres
+# reales que ese mecanismo, si se construye, tendría que usar.
+
+capabilities:
+  # Fuente: las_manos/config.toml, secciones [capabilities.*]
+  # Verificado: grep -n "^\[capabilities\." las_manos/config.toml (2026-08-15)
+  code_swarm: {}
+  refactor: {}
+  architecture_review: {}
+  bug_hunt: {}
+  pipeline_analysis: {}
+  implementation: {}
+  generate: {}
+  reason: {}
+  design: {}
+  validate_consistency: {}
+  reconcile: {}
+  critique: {}
+
+ops:
+  # Fuente: las_manos/config.toml, secciones [ops.*] — operaciones de bajo
+  # nivel, distintas de las capabilities de arriba.
+  # Nota: REFORMAS-v3.md R3 cita la capability "read_audit_log"; el
+  # nombre real registrado hoy es "audit_log_read" (mismo concepto,
+  # nombre distinto — no armonizado por esta migración, solo constatado).
+  ssh_exec_readonly: {}
+  ssh_exec: {}
+  read_file: {}
+  write_file: {}
+  list_dir: {}
+  rsync: {}
+  http_get: {}
+  kill_process: {}
+  audit_log_read: {}
+  validate_json: {}
+  validate_yaml: {}
+
+facets_las_manos:
+  # Fuente: las_manos/config.toml, secciones [facets.*] — facetas con
+  # permisos configurados para llamar a LAS MANOS. Verificado 2026-08-15.
+  hipatia: {}
+  jekyll: {}
+  thot: {}
+  ada: {}
+  hyde: {}
+
+facets_jax:
+  # Fuente: /home/fruiz/jax/CONTEXT.md §3 ("Las 7 facetas") — roster
+  # completo de JAX, ámbito más amplio que facets_las_manos de arriba
+  # (no todas las facetas de JAX tienen por qué llamar a LAS MANOS).
+  # CONTEXT.md se autodeclara parcialmente desactualizado (ver su propio
+  # encabezado, "§2/§3/§8 siguen desactualizados") — usar con esa reserva.
+  jax_local: {}
+  jekyll: {}
+  hyde: {}
+  hipatia: {}
+  thot: {}
+  kimi: {}
+  ada: {}
+
+motors:
+  # Fuente: las_manos/config.toml, secciones [motors.*]. Lista parcial —
+  # el catálogo completo de motores/modelos vive en la tabla MariaDB
+  # `facet_models` (ver ~/.claude/CLAUDE.md, sección STACK JAX: "modelo
+  # activo vía tabla facet_models, no hardcodear el nombre, cambia") y en
+  # las_manos/model_catalog.py, no auditados exhaustivamente en esta
+  # migración — solo se transcribe lo verificado directamente en
+  # config.toml.
+  kimi: {}
+  ada: {}
+
+config_paths:
+  # Fuente: verificación directa en el filesystem, 2026-08-15.
+  - las_manos/config.toml
+  - /etc/jax/.env
+  - las_manos/logs/audit.jsonl
+  - jax/policy/
+
+commands:
+  # VACÍO — no se encontró un registro de comandos (a diferencia de
+  # capabilities/ops arriba, que sí están en config.toml). El incidente
+  # del Apéndice B de REFORMAS-v3.md menciona un comando `trae a hyde`
+  # como "presuntamente inventado" por una faceta — si existe un registro
+  # real de comandos en algún otro lugar del sistema, no lo encontré. Se
+  # poblaría desde ese registro cuando se identifique/construya.
+  []

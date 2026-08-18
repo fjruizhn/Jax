@@ -1,0 +1,24 @@
+id: SI04
+statement: >
+  El threat model mínimo cubre solo amenazas activas de los sistemas que
+  ya existen; la matriz STRIDE completa, CVSS y diagramas por componente
+  quedan diferidos como profundización posterior.
+origin: >
+  six-impossible-things.html, Apéndice E, "Threat Model Mínimo v0.1 — qué
+  puede matar Neverland". Nacido 15-jun-2026 por mandato de la Mesa.
+  sha256 db467720abbe070ee376e48906b17abb4503304801a44b7be599f7ce2612ab37,
+  commit 5d39014, 19-jun-2026. Identificado en F0.4
+  (/opt/jax/docs/FASE-0-VERIFICACION.md).
+status: HISTORICA
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  El propio texto declara "diferible, madura después" para el threat
+  model profundo — HISTORICA en el sentido de que la especificación
+  misma se declara parcial/provisional, no completa ni ratificada como
+  final. El archivo six-impossible-things.html NO fue modificado por
+  esta migración.

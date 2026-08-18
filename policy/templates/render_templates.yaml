@@ -1,0 +1,42 @@
+# Plantillas de renderer por predicado — REFORMAS-v3.md §3.1.6.
+# Trasladadas tal cual las tres que el documento da como ejemplo. Las
+# cinco restantes (de los ocho predicados de vocabulary/predicates.yaml)
+# NO tienen plantilla en REFORMAS-v3.md — se marcan pendientes, no se
+# inventan (§3.1.6: "El renderer no puede emitir texto para un predicado
+# sin plantilla registrada").
+#
+# Fuente: /opt/jax/docs/REFORMAS-v3.md §3.1.6, sha256
+# 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660
+
+templates:
+  CAPABILITY_AVAILABLE:
+    status: definida
+    template: "La capability {name} está disponible en modo {mode}."
+
+  AUDIT_EVENT_EXISTS:
+    status: definida
+    template: "Existe un evento de auditoría con hash {event_hash}."
+
+  FILE_EXISTS:
+    status: definida
+    template: "El archivo {path} existe (hash {hash})."
+
+  FACET_EXISTS:
+    status: pendiente
+    template: null
+
+  ENGINE_STATUS:
+    status: pendiente
+    template: null
+
+  CONFIG_VALUE:
+    status: pendiente
+    template: null
+
+  JOB_STATUS:
+    status: pendiente
+    template: null
+
+  MEMORY_ENTRY_EXISTS:
+    status: pendiente
+    template: null

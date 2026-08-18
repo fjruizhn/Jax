@@ -1,0 +1,27 @@
+id: SI03
+statement: >
+  Cualquier miembro de la Mesa puede proponer una enmienda; los cambios
+  editoriales se corrigen al verificarse, los constitucionales requieren
+  consenso de la Mesa, y todo cambio se registra con fecha, autor y
+  clase.
+origin: >
+  six-impossible-things.html, Apéndice D, "El Protocolo de Enmienda v0.1
+  — cómo cambia una constitución viva". Nacido 15-jun-2026 por mandato de
+  la Mesa. sha256
+  db467720abbe070ee376e48906b17abb4503304801a44b7be599f7ce2612ab37,
+  commit 5d39014, 19-jun-2026. Identificado en F0.4
+  (/opt/jax/docs/FASE-0-VERIFICACION.md).
+status: HISTORICA
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Enunciado sintetizado combinando las reglas 1, 2 y 4 (numeradas en el
+  original) del apéndice. Sin evidencia, dentro del archivo, de una
+  enmienda posterior registrada aplicándose a sí misma — el propio
+  Protocolo de Enmienda no tiene, hasta donde pude verificar, ninguna
+  enmienda propia documentada. El archivo six-impossible-things.html NO
+  fue modificado por esta migración.

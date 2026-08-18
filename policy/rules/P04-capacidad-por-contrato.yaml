@@ -1,0 +1,40 @@
+id: P04
+statement: >
+  La capacidad se otorga por contrato de tarea, no por identidad de facet.
+origin: "REFORMAS-v3.md §2 (Principios), texto verbatim. /opt/jax/docs/REFORMAS-v3.md, sha256 4099a08c39713c79836eb1ab58fc42e0a3a1357767590cfe281c04ea7ede8660"
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: null
+  test: null
+version: 0.1
+created: 2026-08-15
+amended_by: null
+notes: >
+  Tensión con el sistema actual: son DOS mecanismos identity-based
+  paralelos, no uno, ambos en las_manos/config.toml pero gateados por
+  código distinto:
+
+  1. `facets.<nombre>.allowed_ops` (config.toml líneas 34-60) — gatea las
+     11 operaciones `[ops.*]` (incluida `audit_log_read`) por identidad de
+     faceta, vía `PolicyEngine.check()` en las_manos/policy.py:62.
+  2. `capabilities.<nombre>.allowed_callers` / `allowed_motors`
+     (config.toml líneas 169+) — gatea las capabilities de pipeline
+     (code_swarm, refactor, etc.) por identidad de faceta llamante y de
+     motor destino, vía dos puntos de enforcement redundantes:
+     `jacobs/executor.py:validate_capability()` (líneas 728, 731) y
+     `las_manos/motor_registry/policy.py` (líneas 62, 121).
+
+  El mecanismo que P04 exige (R3, contrato de tarea con capabilities
+  inyectadas por el orquestador) no está implementado en ninguno de los
+  dos.
+
+  Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE,
+  no CULTURAL — el test es escribible (barrer el código buscando
+  decisiones de capacidad basadas en nombre de facet, fallar si aparecen;
+  que hoy fallaría es el punto). La tensión no es un defecto del corpus,
+  es su primer hallazgo real: una contradicción entre norma declarada y
+  DOS mecanismos implementados, con archivo y línea exactos cada uno.
+  Ambos quedan anotados como los puntos de entrada concretos que R3 tiene
+  que reemplazar cuando se implemente esa fase — unificarlos es alcance de
+  R3 completo, no de Fase 1 (que resuelve read_audit_log en (1) y
+  CAPABILITY_UNBOUND en (2) por separado, sin tocar el otro).
