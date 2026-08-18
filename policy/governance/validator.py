@@ -117,6 +117,12 @@ def _resolve_file_exists(claim: "claims.Claim", ctx: ValidationContext) -> Verdi
         return Verdict(
             status="FACT_MISMATCH", predicate="FILE_EXISTS", detail=f"'{path}' no existe."
         )
+    if not candidate.is_file():
+        return Verdict(
+            status="FACT_MISMATCH",
+            predicate="FILE_EXISTS",
+            detail=f"'{path}' existe pero es un directorio, no un archivo.",
+        )
 
     actual_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
     if actual_hash != expected_hash:

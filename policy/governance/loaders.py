@@ -47,6 +47,7 @@ class PredicateSpec:
 class ClosedVocabulary:
     flattened: frozenset[str]
     config_paths: frozenset[str]
+    term_categories: dict[str, frozenset[str]]
 
 
 def _current_templates_hash() -> str:
@@ -95,13 +96,14 @@ def load_predicates() -> dict[str, PredicateSpec]:
 def load_vocabulary() -> ClosedVocabulary:
     data = yaml.safe_load(VOCABULARY_FILE.read_text(encoding="utf-8"))
     flattened: set[str] = set()
+    term_categories: dict[str, set[str]] = {}
     for key, value in data.items():
         if key == "config_paths":
             continue
         if isinstance(value, dict):
-            flattened.update(value.keys())
+            terms = value.keys()
         elif isinstance(value, list):
-            flattened.update(value)
+            terms = value
         else:
             raise RuntimeError(
                 f"closed_vocabulary.yaml: la categoría '{key}' tiene un "
@@ -109,5 +111,12 @@ def load_vocabulary() -> ClosedVocabulary:
                 "o list — el barrido léxico no puede aplanarla sin "
                 "silenciar la categoría."
             )
+        for term in terms:
+            flattened.add(term)
+            term_categories.setdefault(term, set()).add(key)
     config_paths = frozenset(data.get("config_paths") or [])
-    return ClosedVocabulary(flattened=frozenset(flattened), config_paths=config_paths)
+    return ClosedVocabulary(
+        flattened=frozenset(flattened),
+        config_paths=config_paths,
+        term_categories={t: frozenset(cats) for t, cats in term_categories.items()},
+    )
