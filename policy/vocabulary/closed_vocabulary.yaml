@@ -77,10 +77,12 @@ motors:
 
 config_paths:
   # Fuente: verificación directa en el filesystem, 2026-08-15.
+  # Entradas relativas se resuelven contra la RAÍZ DEL REPO (este repo es
+  # jax/, así que "policy/" acá es <repo>/policy — sin prefijo "jax/").
   - las_manos/config.toml
   - /etc/jax/.env
   - las_manos/logs/audit.jsonl
-  - jax/policy/
+  - policy/
 
 commands:
   # VACÍO — no se encontró un registro de comandos (a diferencia de
