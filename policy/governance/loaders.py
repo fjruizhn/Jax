@@ -36,6 +36,13 @@ class TemplateSpec:
     template: str | None
 
 
+@dataclass(frozen=True)
+class PredicateSpec:
+    name: str
+    args: tuple[str, ...]
+    source_of_truth: str
+
+
 def _current_templates_hash() -> str:
     return hashlib.sha256(TEMPLATES_FILE.read_bytes()).hexdigest()
 
@@ -64,4 +71,16 @@ def load_templates() -> dict[str, TemplateSpec]:
     return {
         name: TemplateSpec(status=entry["status"], template=entry.get("template"))
         for name, entry in data["templates"].items()
+    }
+
+
+def load_predicates() -> dict[str, PredicateSpec]:
+    data = yaml.safe_load(PREDICATES_FILE.read_text(encoding="utf-8"))
+    return {
+        entry["name"]: PredicateSpec(
+            name=entry["name"],
+            args=tuple(entry["args"]),
+            source_of_truth=entry["source_of_truth"],
+        )
+        for entry in data["predicates"]
     }

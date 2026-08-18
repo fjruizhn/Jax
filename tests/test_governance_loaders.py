@@ -48,3 +48,11 @@ def test_load_templates_happy_path_returns_real_specs():
     )
     assert templates["FACET_EXISTS"].status == "pendiente"
     assert templates["FACET_EXISTS"].template is None
+
+
+def test_load_predicates_returns_all_eight():
+    predicates = loaders.load_predicates()
+    assert len(predicates) == 8
+    assert predicates["CAPABILITY_AVAILABLE"].args == ("name", "mode")
+    assert predicates["FILE_EXISTS"].args == ("path", "hash")
+    assert predicates["MEMORY_ENTRY_EXISTS"].source_of_truth == "MariaDB jax_memory"
