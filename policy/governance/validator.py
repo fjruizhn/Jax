@@ -20,6 +20,7 @@ claims.py, vocab_sweep.py y renderer.py, que son puros.
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import tomllib
 from dataclasses import dataclass
@@ -79,7 +80,8 @@ def load_validation_context(
 
 def _normalize_path(path: str, repo_root: Path) -> Path:
     p = Path(path)
-    return p if p.is_absolute() else repo_root / p
+    p = p if p.is_absolute() else repo_root / p
+    return Path(os.path.normpath(str(p)))  # lexical only: no stat/readlink, no filesystem I/O
 
 
 def _path_allowed(path: str, allowlist: frozenset[str], repo_root: Path) -> bool:
@@ -91,11 +93,9 @@ def _path_allowed(path: str, allowlist: frozenset[str], repo_root: Path) -> bool
             entry.rstrip("/") if is_dir_entry else entry, repo_root
         )
         if is_dir_entry:
-            try:
-                candidate.relative_to(entry_path)
+            if candidate == entry_path or entry_path in candidate.parents:
                 return True
-            except ValueError:
-                continue
+            continue
         elif candidate == entry_path:
             return True
     return False

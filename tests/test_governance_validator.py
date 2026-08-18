@@ -121,6 +121,29 @@ def test_file_exists_rejects_path_outside_allowlist_without_touching_disk(monkey
     assert verdict.status == "PATH_NOT_ALLOWED"
 
 
+def test_file_exists_rejects_dotdot_traversal_without_touching_disk(monkeypatch):
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "tocó el filesystem para un path con traversal — debía rechazarse por allowlist"
+        )
+
+    monkeypatch.setattr(Path, "exists", _boom)
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({}),
+        config_paths_allowlist=frozenset({"policy/"}),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(args={"path": "policy/../../../../../../etc/passwd", "hash": "0" * 64})
+
+    verdict = validator.validate(claim, PREDICATES, ctx)
+
+    assert verdict.status == "PATH_NOT_ALLOWED"
+
+
 def test_file_exists_allowed_path_valid_hash():
     real_file = REPO_ROOT / "las_manos" / "config.toml"
     actual_hash = hashlib.sha256(real_file.read_bytes()).hexdigest()
@@ -132,6 +155,23 @@ def test_file_exists_allowed_path_valid_hash():
         repo_root=REPO_ROOT,
     )
     claim = _claim(args={"path": "las_manos/config.toml", "hash": actual_hash})
+
+    verdict = validator.validate(claim, PREDICATES, ctx)
+
+    assert verdict.status == "VALID"
+
+
+def test_file_exists_allowed_policy_prefix_valid_hash():
+    real_file = REPO_ROOT / "policy" / "VERSION"
+    actual_hash = hashlib.sha256(real_file.read_bytes()).hexdigest()
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({}),
+        config_paths_allowlist=frozenset({"policy/"}),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(args={"path": "policy/VERSION", "hash": actual_hash})
 
     verdict = validator.validate(claim, PREDICATES, ctx)
 
