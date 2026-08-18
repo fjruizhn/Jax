@@ -83,3 +83,14 @@ def test_validate_authority_inferido_rejected():
     claim = _claim(authority="INFERIDO")
     verdict = validator.validate(claim, PREDICATES, _empty_ctx())
     assert verdict.status == "AUTHORITY_INVALID"
+
+
+def test_engine_status_is_resolver_not_implemented_never_valid():
+    claim = _claim(
+        predicate="ENGINE_STATUS",
+        args={"name": "kimi", "status": "healthy"},
+    )
+    verdict = validator.validate(claim, PREDICATES, _empty_ctx())
+    assert verdict.status == "RESOLVER_NOT_IMPLEMENTED"
+    assert verdict.status != "VALID"
+    assert "ENGINE_STATUS" in verdict.detail
