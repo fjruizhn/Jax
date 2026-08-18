@@ -78,7 +78,39 @@ def load_validation_context(
 
 
 _RESOLVERS: dict[str, Callable[["claims.Claim", ValidationContext], Verdict]] = {}
-_UNIMPLEMENTED_REASONS: dict[str, str] = {}
+_UNIMPLEMENTED_REASONS: dict[str, str] = {
+    "ENGINE_STATUS": (
+        "ENGINE_STATUS: sin fuente de verdad en el dominio de jax. La "
+        "tabla 'model' de jax-platform tiene semántica distinta "
+        "(disponibilidad del provider, no salud del motor). Ver "
+        "REFORMAS-v3 §3.1.3 y el spec de gobernanza, sección 'Por qué "
+        "solo dos resolvers reales'."
+    ),
+    "FACET_EXISTS": (
+        "FACET_EXISTS: sin fuente ni consumidor identificado esta "
+        "ronda. Ver spec de gobernanza, 'Fuera de alcance, "
+        "explícitamente'."
+    ),
+    "CONFIG_VALUE": (
+        "CONFIG_VALUE: sin fuente ni consumidor identificado esta "
+        "ronda. Ver spec de gobernanza, 'Fuera de alcance, "
+        "explícitamente'."
+    ),
+    "AUDIT_EVENT_EXISTS": (
+        "AUDIT_EVENT_EXISTS: sin fuente ni consumidor identificado esta "
+        "ronda. Ver spec de gobernanza, 'Fuera de alcance, "
+        "explícitamente'."
+    ),
+    "JOB_STATUS": (
+        "JOB_STATUS: sin fuente ni consumidor identificado esta ronda. "
+        "Ver spec de gobernanza, 'Fuera de alcance, explícitamente'."
+    ),
+    "MEMORY_ENTRY_EXISTS": (
+        "MEMORY_ENTRY_EXISTS: sin fuente ni consumidor identificado "
+        "esta ronda. Ver spec de gobernanza, 'Fuera de alcance, "
+        "explícitamente'."
+    ),
+}
 
 
 def validate(
