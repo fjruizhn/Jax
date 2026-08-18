@@ -166,3 +166,69 @@ def test_file_exists_allowed_directory_prefix_nonexistent_file():
     verdict = validator.validate(claim, PREDICATES, ctx)
 
     assert verdict.status == "FACT_MISMATCH"
+
+
+def _real_ctx() -> "validator.ValidationContext":
+    vocab = loaders.load_vocabulary()
+    return validator.load_validation_context(REPO_ROOT, vocab.config_paths)
+
+
+def test_capability_available_found_only_in_ops_read_only_mode_matches():
+    ctx = _real_ctx()
+    claim = _claim(
+        predicate="CAPABILITY_AVAILABLE",
+        args={"name": "ssh_exec_readonly", "mode": "read_only"},
+    )
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "VALID"
+
+
+def test_capability_available_found_only_in_ops_mode_mismatch():
+    ctx = _real_ctx()
+    claim = _claim(
+        predicate="CAPABILITY_AVAILABLE",
+        args={"name": "ssh_exec", "mode": "read_only"},  # ssh_exec ES mutante
+    )
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "FACT_MISMATCH"
+
+
+def test_capability_available_found_only_in_catalog_mode_unverified_but_accepted():
+    ctx = _real_ctx()
+    claim = _claim(
+        predicate="CAPABILITY_AVAILABLE",
+        args={"name": "code_swarm", "mode": "read_only"},
+    )
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "VALID"
+
+
+def test_capability_available_not_found_anywhere():
+    ctx = _real_ctx()
+    claim = _claim(
+        predicate="CAPABILITY_AVAILABLE",
+        args={"name": "totalmente_inventado_xyz", "mode": "read_only"},
+    )
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "FACT_MISMATCH"
+
+
+def test_capability_available_source_conflict_when_present_in_both():
+    # Sintético a propósito: hoy [ops.*] y [capabilities.*] son disjuntos
+    # en config.toml (0 solapamiento, verificado en el spec). Se fabrica
+    # el conflicto a mano para probar la rama SOURCE_CONFLICT sin
+    # depender de que el config real cambie.
+    ctx = validator.ValidationContext(
+        ops=frozenset({"code_swarm"}),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({"capabilities": {"code_swarm": {}}}),
+        config_paths_allowlist=frozenset(),
+        repo_root=REPO_ROOT,
+    )
+    claim = _claim(
+        predicate="CAPABILITY_AVAILABLE",
+        args={"name": "code_swarm", "mode": "read_only"},
+    )
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "SOURCE_CONFLICT"
+    assert "code_swarm" in verdict.detail

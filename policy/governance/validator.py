@@ -133,8 +133,59 @@ def _resolve_file_exists(claim: "claims.Claim", ctx: ValidationContext) -> Verdi
     )
 
 
+def _resolve_capability_available(
+    claim: "claims.Claim", ctx: ValidationContext
+) -> Verdict:
+    name = claim.args["name"]
+    mode = claim.args["mode"]
+    in_ops = name in ctx.ops
+    in_catalog = ctx.catalog.get_capability(name) is not None
+
+    if in_ops and in_catalog:
+        return Verdict(
+            status="SOURCE_CONFLICT",
+            predicate="CAPABILITY_AVAILABLE",
+            detail=(
+                f"'{name}' presente en ops y en capabilities — dos "
+                "fuentes de verdad para el mismo nombre (ver P04, "
+                "tensión documentada en el corpus)."
+            ),
+        )
+    if in_ops:
+        derived_mode = "mutating" if name in ctx.mutating_capabilities else "read_only"
+        if mode != derived_mode:
+            return Verdict(
+                status="FACT_MISMATCH",
+                predicate="CAPABILITY_AVAILABLE",
+                detail=(
+                    f"'{name}' tiene mode real '{derived_mode}', el "
+                    f"claim afirma '{mode}'."
+                ),
+            )
+        return Verdict(
+            status="VALID",
+            predicate="CAPABILITY_AVAILABLE",
+            detail=f"'{name}' verificado en ops, mode='{derived_mode}'.",
+        )
+    if in_catalog:
+        return Verdict(
+            status="VALID",
+            predicate="CAPABILITY_AVAILABLE",
+            detail=(
+                f"'{name}' verificado en catálogo de capabilities (mode "
+                "no verificable ahí, aceptado sin contradicción)."
+            ),
+        )
+    return Verdict(
+        status="FACT_MISMATCH",
+        predicate="CAPABILITY_AVAILABLE",
+        detail=f"'{name}' no está en ops ni en capabilities.",
+    )
+
+
 _RESOLVERS: dict[str, Callable[["claims.Claim", ValidationContext], Verdict]] = {
     "FILE_EXISTS": _resolve_file_exists,
+    "CAPABILITY_AVAILABLE": _resolve_capability_available,
 }
 _UNIMPLEMENTED_REASONS: dict[str, str] = {
     "ENGINE_STATUS": (
