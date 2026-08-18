@@ -31,6 +31,32 @@ construir más resolvers todavía (eso sería adivinar casos de uso sin
 tráfico real — el mismo patrón que R5 existe para evitar) ni inventar
 una tercera forma de gobernanza para `analysis`/`judgment` a ciegas.
 
+**Reencuadre del diagnóstico, descubierto al diseñar el mecanismo de
+construcción del claim (ver sección 1a):** el cuello de botella no es
+solo "faltan resolvers". `authority` en un claim de la Mesa web solo
+puede ser honestamente `INFERIDO` — `chat.py` no tiene grounding
+cableado al mecanismo de claims (`_call_gemini` busca siempre, sin
+condicionar a política; los otros transportes no tienen noción de
+grounding en absoluto) — y `INFERIDO` está prohibido en el canal
+`claim` por §3.1.4. **Resultado esperado de esta ronda:
+`shadow_claim_verdicts` va a mostrar 100% `AUTHORITY_INVALID`.** Eso no
+es una falla del validador ni del shadow — es el dato honesto: aunque
+hubiera 8 resolvers en vez de 2, ningún claim llegaría a `VALID` hoy,
+porque ninguno puede acreditar autoridad real. El cuello de botella real
+es que el grounding no está cableado al mecanismo de claims, no la
+cantidad de resolvers. Cablear grounding ahora sería R5 otra vez —
+capacidad construida sin medir cuánto se necesita. Cuando el shadow
+muestre cuántos claims mueren en `AUTHORITY_INVALID` y de qué facetas,
+ese cableo tiene su caso de uso medido — candidato fuerte a ser el
+corazón de Sub-proyecto 3.
+
+**Nota para quien lea `shadow_claim_verdicts` en dos semanas:** un mar de
+filas idénticas `AUTHORITY_INVALID` es el resultado correcto de esta
+ronda, no una señal de que el validador está roto. No "arreglarlo"
+cambiando `authority` a algo distinto de `INFERIDO` sin haber cableado
+grounding de verdad — eso sería la misma autodeclaración de autoridad
+que este mismo hallazgo descartó.
+
 En cambio, este sub-proyecto **instrumenta** lo que hoy no se mide:
 distribución de tráfico por canal (`claim`/`analysis`/`judgment`) y qué
 predicados/categorías de vocabulario intentan las facetas. Esa
@@ -106,6 +132,50 @@ una puerta trasera fail-open:
    incumplimiento de contrato — `contract_parsed=False`. Si se
    mezclaran en el mismo estado, el bug de Kimi quedaría enmascarado
    detrás de "no tuvo claims esta vez".
+
+## 1a. Construcción del `Claim` — qué declara el modelo, qué fija `chat.py`
+
+`policy/governance/claims.py::Claim` exige seis campos: `predicate`,
+`args: dict[str, str]`, `authority`, `provenance_ref`,
+`evidence_pointer`, `scope`. El validador solo verifica `predicate`+
+`args` contra la fuente de verdad real — **`authority` no se valida,
+se confía**. Dejar que el modelo autodeclare `authority` (o cualquiera
+de los otros tres) sería P08 aplicado a metadata: el emisor
+certificando su propia procedencia, el mismo patrón que ya se rechazó
+para `coverage_model_reported` y para el sello cosmético
+`origin_of_authority` — peor incluso, porque sería un campo que el
+sistema *trata* como derivado cuando en realidad es autodeclarado.
+
+**El JSON que pide el wrapper le pide al modelo únicamente:**
+
+```json
+{"predicate": "CAPABILITY_AVAILABLE", "args": {"name": "code_swarm"}}
+```
+
+Dos campos por claim, no seis. `chat.py` completa el resto
+server-side, nunca confiado al modelo:
+
+- `authority` → siempre `"INFERIDO"`. No es una elección conservadora,
+  es la única honesta: ninguna faceta ejecuta código durante un turno
+  de chat (`EJECUTADO` descartado), y `chat.py` no tiene grounding
+  cableado al mecanismo de claims (`RECUPERADO`/`OBSERVADO`
+  descartados — ver el reencuadre de Q14 arriba). Como `INFERIDO` está
+  prohibido en el canal `claim` (§3.1.4), todo claim llega a
+  `validate()` y sale `AUTHORITY_INVALID` antes de tocar un resolver —
+  resultado esperado, documentado arriba.
+- `provenance_ref` → nombre de la faceta (`facet`). Identifica **quién
+  lo dijo**, no evidencia de que lo haya verificado — no hay resultado
+  de herramienta detrás. Documentado así explícitamente para que nadie
+  lo lea en unos meses y asuma que hubo verificación real.
+- `evidence_pointer` → `conversation_id`+`message_id` del turno que lo
+  produjo.
+- `scope` → fijo, ej. `"mesa_web"`.
+
+**Por qué esto también ayuda con Kimi:** pedir dos campos por claim en
+vez de seis reduce el tamaño de la salida estructurada — exactamente
+la variable que se sospecha dispara el corte a 488 bytes. No es la
+motivación principal (la motivación es P08), pero es un efecto
+colateral favorable que vale registrar.
 
 ## 2. Shadow validation — dos objetos distintos
 
