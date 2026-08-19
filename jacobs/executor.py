@@ -633,9 +633,13 @@ def validate_capability(step: Step) -> CapabilityUnbound | str | None:
     NIVEL B — contrato del motor. Aplica SOLO a _MOTOR_FACETS (hoy kimi, jax_local).
         Mismo contrato que policy.check valida en el Motor Registry, adelantado
         acá para fallar limpio antes del HTTP: la capability resuelta existe en el
-        catálogo, el facet ∈ allowed_motors y el caller 'jacobs' ∈ allowed_callers.
-        Los facets de API directa NO pasan por aquí (ignoran capability en el
-        dispatch real).
+        catálogo, (step.motor or step.facet) ∈ allowed_motors y el caller
+        'jacobs' ∈ allowed_callers. Se valida step.motor cuando está seteado
+        porque, desde Task 5, es lo que realmente despacha (_invoke_motor pasa
+        step.motor al Motor Registry, no step.facet) — validar solo step.facet
+        dejaría pasar un step con facet="kimi", motor="ada" a nombre de kimi
+        mientras en realidad despacha ada. Los facets de API directa NO pasan
+        por aquí (ignoran capability en el dispatch real).
 
     Devuelve CapabilityUnbound (tipado, REFORMAS-v3 R3.4) cuando el motivo
     de rechazo es un binding capability→motor ausente (NIVEL B) — el
@@ -663,7 +667,7 @@ def validate_capability(step: Step) -> CapabilityUnbound | str | None:
             return CapabilityUnbound(
                 required=[resolved], candidates=[], task_id=step.step_id,
             )
-        if step.facet not in entry.get("allowed_motors", []):
+        if (step.motor or step.facet) not in entry.get("allowed_motors", []):
             return CapabilityUnbound(
                 required=[resolved],
                 candidates=list(entry.get("allowed_motors", [])),
