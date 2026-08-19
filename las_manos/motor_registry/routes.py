@@ -143,6 +143,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             kill_switch_path=_KILL_SWITCH_PATH,
             user_id=req.user_id,
             tenant_id=req.tenant_id,
+            caller=req.caller,
         )
     )
     task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
