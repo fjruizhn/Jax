@@ -42,6 +42,16 @@ class MotorEntry:
     transport: str = "http_openai_compat"
     model_ref: int = 0
     provider_id: str = ""
+    # T2 (2026-08-19): "desactivar razonamiento por defecto" NO es parejo
+    # entre proveedores -- verificado real: Ollama acepta reasoning_effort=
+    # "none" (funciona), Moonshot/Kimi lo RECHAZA con 400 ("only type=
+    # enabled is allowed for this model"), Zhipu/Ada lo ignora en silencio
+    # (200 pero reasoning_content sigue poblado). worker.py SOLO envia la
+    # senal real cuando transport=="ollama" (unico camino verificado) --
+    # este campo no tiene efecto para los demas transports todavia. Default
+    # True = off salvo que el motor declare lo contrario (DB: motor.
+    # disable_reasoning, migrations.py).
+    disable_reasoning: bool = True
 
 
 @dataclass
@@ -90,6 +100,7 @@ class MotorCatalog:
                 # también desde un dict armado a mano. Mismo patrón que la
                 # línea de 'transport' de arriba (Task 2).
                 provider_id=cfg.get("provider_id", ""),
+                disable_reasoning=cfg.get("disable_reasoning", True),
             )
         for name, cfg in config.get("capabilities", {}).items():
             self._capabilities[name] = CapabilityEntry(
@@ -140,7 +151,7 @@ class MotorCatalog:
                     "SELECT m.`key`, m.model_ref, mo.provider_id, mo.model_id, p.base_url, "
                     "       m.transport, m.max_tokens, m.default_timeout_seconds, "
                     "       m.supports_reasoning, m.reasoning_default_visibility, "
-                    "       m.sandbox_only, m.status "
+                    "       m.disable_reasoning, m.sandbox_only, m.status "
                     "FROM motor m "
                     "JOIN model mo ON mo.id = m.model_ref "
                     "JOIN provider p ON p.id = mo.provider_id"
@@ -149,7 +160,7 @@ class MotorCatalog:
                 # _call_http_openai_compat (Task 3) arma "/chat/completions" sin
                 # host, porque MotorEntry.api_url nunca se pobló desde ningun lado.
                 for (key, model_ref, provider_id, model_id, base_url, transport, max_tokens,
-                     timeout, reasoning, visibility, sandbox, status) in await cur.fetchall():
+                     timeout, reasoning, visibility, disable_reasoning, sandbox, status) in await cur.fetchall():
                     instance._motors[key] = MotorEntry(
                         name=key,
                         enabled=(status == "active"),
@@ -166,6 +177,7 @@ class MotorCatalog:
                         transport=transport,
                         model_ref=model_ref,
                         provider_id=provider_id,
+                        disable_reasoning=bool(disable_reasoning),
                     )
 
                 await cur.execute(

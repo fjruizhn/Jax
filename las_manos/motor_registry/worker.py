@@ -81,6 +81,7 @@ async def _call_http_openai_compat(
     timeout: float,
     max_tokens: int = 0,
     tools: list[dict] | None = None,
+    reasoning_effort: str | None = None,
 ) -> dict:
     """Llama a un endpoint OpenAI-compatible. Usado tanto para
     transport='http_openai_compat' (Kimi/Ada/futuros con API key) como para
@@ -98,7 +99,17 @@ async def _call_http_openai_compat(
     cualquier caller existente. Verificado en vivo contra Ollama+qwen3.6
     (/v1/chat/completions, el mismo endpoint que esta función usa, no el
     nativo /api/chat): acepta 'tools' forma OpenAI y devuelve
-    choices[0].message.tool_calls con finish_reason='tool_calls'."""
+    choices[0].message.tool_calls con finish_reason='tool_calls'.
+
+    reasoning_effort (T2, 2026-08-19): OPCIONAL -- solo el caller (run(),
+    abajo) decide si lo manda, y solo lo hace para transport=='ollama'
+    (unico camino verificado). Probado real contra las 3 APIs con
+    reasoning_effort='none': Ollama lo aplica (content inmediato,
+    finish_reason='stop'); Moonshot/Kimi devuelve 400 "only type=enabled is
+    allowed for this model" (RECHAZA la llamada entera); Zhipu/Ada responde
+    200 pero lo ignora (reasoning_content sigue poblado). Por eso esta
+    función nunca decide sola mandarlo -- el caller ya filtró por transport
+    antes de pasarlo."""
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
@@ -107,6 +118,8 @@ async def _call_http_openai_compat(
         payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -241,6 +254,22 @@ async def run(
     # basado en capability es explícitamente trabajo de otra ronda.
     tools_for_call = TOOLS_CATALOG if motor == "jax_local" else None
 
+    # T2 (2026-08-19): jacobs/plan.py::_llm_plan() ya aplica think:false
+    # contra el endpoint NATIVO /api/chat de Ollama -- este es el mismo
+    # lever para el camino GENERICO (/motor/dispatch, via este worker,
+    # OpenAI-compat /v1/chat/completions). Config vive en el motor
+    # (MotorEntry.disable_reasoning, DB motor.disable_reasoning), no en la
+    # capability/facet: es una propiedad de qué API hay detrás de cada
+    # motor, no una política pareja -- verificado que Moonshot/Kimi
+    # RECHAZA el mismo parámetro con 400 y Zhipu/Ada lo ignora (ver
+    # docstring de _call_http_openai_compat). Override por request: un
+    # caller que sí necesita razonamiento activado para ESTE job puede
+    # pasar context={"reasoning": true} sin tocar el default del motor.
+    want_reasoning = bool(context.get("reasoning"))
+    reasoning_effort = None
+    if motor_entry.transport == "ollama" and motor_entry.disable_reasoning and not want_reasoning:
+        reasoning_effort = "none"
+
     # Lanzar tarea HTTP y watcher de kill switch en paralelo
     api_task = asyncio.create_task(
         call_fn(
@@ -251,6 +280,7 @@ async def run(
             timeout=float(motor_entry.default_timeout_seconds),
             max_tokens=motor_entry.max_tokens,
             tools=tools_for_call,
+            reasoning_effort=reasoning_effort,
         )
     )
     kill_task = asyncio.create_task(_watch_kill_switch(kill_switch_path))
@@ -316,7 +346,17 @@ async def run(
 
     message = choices[0].get("message", {})
     content: str = message.get("content") or ""
-    reasoning_content: str = message.get("reasoning_content") or ""
+    # T3 (2026-08-19): "reasoning_content" es correcto para Moonshot/Kimi y
+    # Zhipu/Ada (verificado real, ambos usan esa clave). Ollama (transport
+    # dispatchable desde hoy mismo, commit 8daf273) usa "reasoning" -- clave
+    # distinta, verificado real contra /v1/chat/completions. Sin este OR,
+    # _reasoning_content quedaba null SIEMPRE para jax_local -- no una
+    # deuda vieja, el bug nació el mismo día que Ollama empezó a pasar por
+    # este código. Se extraen ambas por compatibilidad entre proveedores en
+    # vez de una rama `if provider_id == "ollama"` -- ningún proveedor
+    # conocido manda las dos a la vez, así que no hay ambigüedad real que
+    # resolver eligiendo una sobre la otra.
+    reasoning_content: str = message.get("reasoning_content") or message.get("reasoning") or ""
     finish_reason = choices[0].get("finish_reason")
     tool_calls = message.get("tool_calls") or []
 
