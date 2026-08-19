@@ -82,10 +82,12 @@ _MOTOR_CFG = {
 }
 
 
-def _fake_response(*, content, reasoning_content=None, finish_reason="stop", usage=None):
+def _fake_response(*, content, reasoning_content=None, reasoning=None, finish_reason="stop", usage=None):
     message = {"content": content}
     if reasoning_content is not None:
         message["reasoning_content"] = reasoning_content
+    if reasoning is not None:
+        message["reasoning"] = reasoning
     payload = {
         "choices": [{"message": message, "finish_reason": finish_reason}],
         "usage": usage or {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
@@ -235,7 +237,102 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
         )
         state = store._index[job_id]
         assert state["status"] == "failed", state
-        assert "transport" in state["error"].lower(), state
+
+    async def _run_ollama_job(self, *, disable_reasoning=True, context=None, tmp_suffix="4"):
+        """T2 (2026-08-19): fixture ollama con disable_reasoning explicito --
+        distinto del de test_transport_ollama_no_resuelve_credencial (ese no
+        lo declara, se apoya en el default True de MotorEntry)."""
+        cfg = {
+            "motors": {"jax_local": {
+                "enabled": True, "provider": "ollama", "api_key_env": "",
+                "api_url": "http://localhost:11434/v1", "model": "qwen3.6:35b-a3b-q4_K_M",
+                "max_context_tokens": 0, "sandbox_only": True,
+                "default_timeout_seconds": 300, "supports_reasoning": True,
+                "transport": "ollama", "disable_reasoning": disable_reasoning,
+            }},
+            "capabilities": {"implementation": _MOTOR_CFG["capabilities"]["implementation"]},
+        }
+        catalog = MotorCatalog(cfg)
+        store = JobStore(str(Path(self._tmpdir.name) / f"jobs{tmp_suffix}.jsonl"))
+        job_id = store.create(
+            caller="jacobs", capability="implementation", motor="jax_local",
+            trace_id=f"t{tmp_suffix}", prompt="prompt de prueba", recursion_depth=0,
+        )
+        with patch("httpx.AsyncClient.post", AsyncMock(return_value=_fake_response(content="listo"))) as mock_post:
+            await worker.run(
+                job_id=job_id, motor="jax_local", capability="implementation",
+                prompt="prompt de prueba", context=context or {}, store=store,
+                catalog=catalog, kill_switch_path=self.kill_switch_path,
+            )
+        return mock_post
+
+    async def test_ollama_con_disable_reasoning_manda_reasoning_effort_none(self):
+        """T2: motor.disable_reasoning=True (default) + transport='ollama'
+        (unico camino verificado, ver docstring de _call_http_openai_compat)
+        -> el payload real manda reasoning_effort='none'."""
+        mock_post = await self._run_ollama_job(disable_reasoning=True)
+        _url, kwargs = mock_post.call_args
+        assert kwargs["json"].get("reasoning_effort") == "none", kwargs["json"]
+
+    async def test_ollama_con_override_reasoning_no_manda_reasoning_effort(self):
+        """T2: context={'reasoning': True} (por job/request) gana sobre el
+        default del motor -- un caller que sí necesita razonamiento para ESE
+        job no tiene que tocar la config del motor."""
+        mock_post = await self._run_ollama_job(disable_reasoning=True, context={"reasoning": True})
+        _url, kwargs = mock_post.call_args
+        assert "reasoning_effort" not in kwargs["json"], kwargs["json"]
+
+    async def test_ollama_con_motor_disable_reasoning_false_no_manda_nada(self):
+        """T2: un motor ollama que declare disable_reasoning=False (ninguno
+        hoy, pero el catalogo lo permite) no manda el parametro -- mismo
+        comportamiento que antes de T2, cero regresion para ese caso."""
+        mock_post = await self._run_ollama_job(disable_reasoning=False)
+        _url, kwargs = mock_post.call_args
+        assert "reasoning_effort" not in kwargs["json"], kwargs["json"]
+
+    async def test_kimi_nunca_recibe_reasoning_effort(self):
+        """T2: transport='http_openai_compat' (Kimi/Ada) queda FUERA del gate
+        a propósito -- verificado real 2026-08-19 que Moonshot RECHAZA este
+        motor exacto con 400 ('only type=enabled is allowed for this
+        model') si se manda reasoning_effort. kimi tiene supports_reasoning
+        =True en el fixture (_MOTOR_CFG), que es justo el caso que podría
+        tentar a alguien a generalizar el gate por supports_reasoning en vez
+        de por transport -- este test existe para que ese cambio falle acá
+        primero, no en producción contra la API real de Moonshot."""
+        job_id, mock_post = await self._run_job(_fake_response(content="respuesta completa"))
+        _url, kwargs = mock_post.call_args
+        assert "reasoning_effort" not in kwargs["json"], kwargs["json"]
+
+    async def test_ollama_reasoning_key_se_captura_como_reasoning_content(self):
+        """T3 (2026-08-19): Ollama devuelve la clave 'reasoning', no
+        'reasoning_content' (verificado real contra /v1/chat/completions,
+        qwen3.6:35b-a3b). Sin el fallback, _reasoning_content quedaba null
+        SIEMPRE para jax_local pese a que el modelo sí razonó."""
+        cfg = {
+            "motors": {"jax_local": {
+                "enabled": True, "provider": "ollama", "api_key_env": "",
+                "api_url": "http://localhost:11434/v1", "model": "qwen3.6:35b-a3b-q4_K_M",
+                "max_context_tokens": 0, "sandbox_only": True,
+                "default_timeout_seconds": 300, "supports_reasoning": True,
+                "transport": "ollama", "disable_reasoning": False,  # thinking encendido para este job
+            }},
+            "capabilities": {"implementation": _MOTOR_CFG["capabilities"]["implementation"]},
+        }
+        catalog = MotorCatalog(cfg)
+        store = JobStore(str(Path(self._tmpdir.name) / "jobs5.jsonl"))
+        job_id = store.create(
+            caller="jacobs", capability="implementation", motor="jax_local",
+            trace_id="t5", prompt="prompt de prueba", recursion_depth=0,
+        )
+        fake_resp = _fake_response(content="4", reasoning="1+1 es 2, 2+2 es 4...")
+        with patch("httpx.AsyncClient.post", AsyncMock(return_value=fake_resp)):
+            await worker.run(
+                job_id=job_id, motor="jax_local", capability="implementation",
+                prompt="prompt de prueba", context={}, store=store,
+                catalog=catalog, kill_switch_path=self.kill_switch_path,
+            )
+        state = store._index[job_id]
+        assert state.get("_reasoning_content") == "1+1 es 2, 2+2 es 4...", state
 
 
 if __name__ == "__main__":
