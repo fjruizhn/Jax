@@ -1,7 +1,11 @@
 """
 LAS MANOS — Motor Registry: catálogo de motores y capacidades.
 
-Lee [motors.*] y [capabilities.*] de config.toml.
+MotorCatalog.from_db() lee motor/capability/capability_motor de la DB
+compartida jax_memory (R4 — motor desacoplado de faceta), el camino que usa
+routes.py en producción. El constructor MotorCatalog(dict), dict-shaped
+como [motors.*]/[capabilities.*] de config.toml, se conserva para tests
+que arman el catálogo a mano.
 Construye un mapa en memoria que policy.py consulta.
 
 Falla cerrado: si un motor está disabled o falta en config, no pasa.
