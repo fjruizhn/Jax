@@ -215,6 +215,17 @@ async def _jacobs_init() -> None:
         _h = logging.StreamHandler()
         _h.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
         _jlog.addHandler(_h)
+    # Mismo tratamiento que el logger "jacobs" de arriba: sin un handler
+    # propio, source=db (logger.info en credential_resolver.py) cae en
+    # logging.lastResort (WARNING por default) y nunca llega a journald —
+    # solo source=env_fallback y FAIL_CLOSED quedarían visibles. Necesario
+    # para el criterio de 7 días de B1.4 (ver mismo fix en jax-platform).
+    _credlog = logging.getLogger("credential_resolver")
+    _credlog.setLevel(logging.INFO)
+    if not _credlog.handlers:
+        _ch = logging.StreamHandler()
+        _ch.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
+        _credlog.addHandler(_ch)
     await jacobs_store.init_tables()
 
 
