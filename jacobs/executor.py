@@ -44,7 +44,7 @@ MAX_DEP_CONTEXT_CHARS = 60_000
 _HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
 
 # Facetas que van vía Motor Registry de LAS MANOS
-_MOTOR_FACETS = frozenset({"kimi"})
+_MOTOR_FACETS = frozenset({"kimi", "jax_local"})
 
 
 # ----------------------------------------------------------------
@@ -516,7 +516,7 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
     payload = {
         "caller":     "jacobs",
         "capability": capability,
-        "motor":      step.facet,
+        "motor":      step.motor,  # None = MotorPolicy resuelve por competencia (R4)
         "trace_id":   step.trace_id,
         "prompt":     _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
         "user_id":    pipeline.user_id,

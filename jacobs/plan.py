@@ -200,6 +200,7 @@ class PlanBuilder:
                 pipeline_id=pipeline_id,
                 step_index=i,
                 facet=spec.get("facet", "jax_local"),
+                motor=spec.get("motor"),
                 capability=capability,
                 input=input_data,
                 depends_on=spec.get("depends_on", []),
