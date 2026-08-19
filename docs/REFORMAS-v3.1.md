@@ -90,7 +90,13 @@ Un sistema sin cargas solo se mide por sus errores. No hay contador de trabajo c
 | GPT-OSS-120B (Beelink, 128GB, persistente) | 120B disponible 24/7, costo marginal cero | Prácticamente ocioso |
 | Qwen3-Coder-30B | Extracción, clasificación, triaje sin costo | Usado como facet conversacional — su peor caso de uso |
 | API (DeepSeek, Gemini, OpenAI, GLM, Kimi) | Amplitud y juicio | Tokens en tareas que el local resolvería |
-| Kimi | — | Truncamiento a 488 bytes. Defecto de integración/transporte, no de competencia |
+| Kimi | — | Truncamiento a 488 bytes — corregido, verificado vigente. Ver nota. |
+
+**Nota sobre esta fila (corrección 2026-08-18, no estaba en v3.0):** v3.0 documentaba este truncamiento como defecto abierto. No lo es, y la cronología completa es verificable en `motor_jobs.jsonl`. Bug real el 2026-08-09/10: `kimi-k2.7-code` es modelo de razonamiento, `_call_kimi` (`motor_registry/worker.py`) nunca mandaba `max_tokens`, y `reasoning_content` competía por el mismo budget que `content` — confirmado en vivo contra la API real de Moonshot, no por hipótesis. Corregido el mismo día (`017ba2f`). Un día antes, por un motivo no relacionado (Bloque C, `447d3ec`, 2026-08-08), la ruta de Kimi hacia la Mesa web había quedado blindada (`facet.kimi.transport='motor_registry'`, sin rama en `_invoke_facet` de `chat.py` para ese transporte). Verificado vigente el 2026-08-18 con dos muestras separadas por 8 días en `las_manos/logs/motor_jobs.jsonl` (`_finish_reason: "stop"` en ambas, no `"length"`) — ver `docs/runbooks/verificar-truncamiento-kimi.md` para el método reutilizable.
+
+La cifra de 488 bytes se propagó sin re-verificar contra el código a esta fila de v3.0 y a dos specs de Sub-proyecto 1/2 (17/18-ago) — el plan de SP2 llegó a asumir que Kimi produciría señal de degradación en la Mesa web por este motivo, sin que el código conectara `chat.py` con `motor_registry`. Misma clase de sesgo de A1 que la instancia número siete documentada en Sub-proyecto 2 (§Registro de ejecución): una premisa de diseño, no un dato de color, sin re-verificar antes de construir sobre ella.
+
+**Hallazgo aparte, sin corregir:** Kimi es hoy inalcanzable desde la Mesa web — `chat.py` responde "no disponible" sin invocar la API, porque `_invoke_facet` no tiene rama para `transport='motor_registry'`. No es el mismo bug (no trunca; no responde). Queda en §6-bis como feature gap, no como bug de esta fila.
 
 ---
 
@@ -488,6 +494,7 @@ Estas no estaban resueltas en el listado de correcciones y no se integran como h
 - ¿La reconciliación de `is_canned` (señal posicional de Sub-proyecto 2) con `UsageInfo` de `infra/facetas-bloque-d` coincide en el tiempo con el destrabe de B1.4 (backup, Apéndice B-bis)? Si esa rama de 28 commits son los PRs que esperaban ese criterio, la reconciliación está más cerca de lo que se documentó en Sub-proyecto 2.
 - ¿Cuándo se cablea grounding al mecanismo de claims (§3.1.4)? Depende de que el shadow acumule suficiente tráfico real para que sea una decisión informada, no de una fecha.
 - ¿`ops` y `capabilities` (A7) son el mismo concepto de gobernanza o dos legítimamente distintos? La unificación de R3 no puede avanzar sin responder esto primero.
+- **(nuevo, 2026-08-18)** Kimi es inalcanzable desde la Mesa web — `_invoke_facet` en `chat.py` no tiene rama para `transport='motor_registry'`, cae al fallback "no disponible" sin invocar la API (ver nota en §1.4). ¿Se cablea `chat.py` contra `las_manos:7777/motor/dispatch`, o se retira `kimi` de la whitelist de facetas de la Mesa mientras tanto? Ninguna de las dos está decidida.
 
 ---
 
