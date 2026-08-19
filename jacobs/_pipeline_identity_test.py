@@ -13,7 +13,13 @@ import unittest
 import uuid
 from unittest.mock import patch
 
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+# Forzado (no setdefault): si el proceso llamador ya sourceó /etc/jax/.env
+# (systemd, shell de dev, o un agente), JAX_DB_NAME=jax_memory ya está en
+# os.environ y setdefault() es un no-op — este test escribía pipelines
+# "test"/pending reales en la DB de producción sin pasar por
+# jacobs.policy.validate_create(). Confirmado 2026-08-19: 8 filas huérfanas
+# en jax_memory.jacobs_pipelines por este mecanismo.
+os.environ["JAX_DB_NAME"] = "jax_memory_test"
 
 from jacobs import store
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus

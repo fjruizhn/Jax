@@ -36,6 +36,19 @@ router = APIRouter(prefix="/jacobs", tags=["jacobs"])
 
 _plan_builder = PlanBuilder()
 
+# T2 (2026-08-19): active_count = await store.pipeline_count_active() y el
+# INSERT posterior corrían en conexiones DB separadas, sin lock ni
+# transacción -- dos POST /pipeline concurrentes podían leer el mismo
+# active_count y ambos pasar validate_create(), superando
+# MAX_PARALLEL_PIPELINES. Jacobs corre en un solo proceso uvicorn (sin
+# --workers, confirmado por systemctl/ps) así que un asyncio.Lock() de
+# proceso es válido y cubre el caso real. Se prefiere sobre una transacción
+# con SELECT...FOR UPDATE porque _plan_builder.build() (adentro de la
+# sección crítica) tarda 20-40s llamando a un LLM externo -- mantener esa
+# transacción/fila lockeada todo ese tiempo arriesgaría agotar el pool de
+# conexiones bajo carga real; un lock en memoria no reserva conexión DB.
+_pipeline_create_lock = asyncio.Lock()
+
 
 # ----------------------------------------------------------------
 #  POST /jacobs/plan  — genera plan sin ejecutar
@@ -99,52 +112,57 @@ async def plan_only(req: PlanRequest) -> dict:
 async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTasks) -> dict:
     """Crea un pipeline y lo ejecuta en background."""
 
-    active_count = await store.pipeline_count_active()
-    policy = validate_create(
-        invoked_by=req.invoked_by,
-        mode=req.mode,
-        max_steps=req.max_steps,
-        active_count=active_count,
-        subpipeline_token=req.subpipeline_token,
-    )
-    if not policy.ok:
-        status_code = 423 if "kill switch" in policy.reason.lower() else 422
-        raise HTTPException(status_code=status_code, detail=policy.reason)
+    # Lock de proceso: active_count (lectura) y pipeline_create (escritura)
+    # deben ser atómicos entre sí para que MAX_PARALLEL_PIPELINES sea un
+    # límite real, no una lectura optimista. Incluye build() adentro a
+    # propósito -- ver justificación en _pipeline_create_lock arriba.
+    async with _pipeline_create_lock:
+        active_count = await store.pipeline_count_active()
+        policy = validate_create(
+            invoked_by=req.invoked_by,
+            mode=req.mode,
+            max_steps=req.max_steps,
+            active_count=active_count,
+            subpipeline_token=req.subpipeline_token,
+        )
+        if not policy.ok:
+            status_code = 423 if "kill switch" in policy.reason.lower() else 422
+            raise HTTPException(status_code=status_code, detail=policy.reason)
 
-    pipeline_id = str(uuid.uuid4())
-    steps_spec = [s.model_dump() for s in req.steps] if req.steps else None
-    steps = await _plan_builder.build(
-        pipeline_id=pipeline_id,
-        objective=req.objective,
-        max_steps=req.max_steps,
-        steps_spec=steps_spec,
-    )
+        pipeline_id = str(uuid.uuid4())
+        steps_spec = [s.model_dump() for s in req.steps] if req.steps else None
+        steps = await _plan_builder.build(
+            pipeline_id=pipeline_id,
+            objective=req.objective,
+            max_steps=req.max_steps,
+            steps_spec=steps_spec,
+        )
 
-    # Asignar pipeline_id a cada step
-    for step in steps:
-        step.pipeline_id = pipeline_id
+        # Asignar pipeline_id a cada step
+        for step in steps:
+            step.pipeline_id = pipeline_id
 
-    now = time.time()
-    pipeline = Pipeline(
-        pipeline_id=pipeline_id,
-        name=req.name,
-        invoked_by=req.invoked_by,
-        user_id=req.user_id,
-        tenant_id=req.tenant_id,
-        mode=req.mode,
-        plan=steps,
-        max_steps=req.max_steps,
-        context={"objective": req.objective},
-        created_at=now,
-        updated_at=now,
-    )
+        now = time.time()
+        pipeline = Pipeline(
+            pipeline_id=pipeline_id,
+            name=req.name,
+            invoked_by=req.invoked_by,
+            user_id=req.user_id,
+            tenant_id=req.tenant_id,
+            mode=req.mode,
+            plan=steps,
+            max_steps=req.max_steps,
+            context={"objective": req.objective},
+            created_at=now,
+            updated_at=now,
+        )
 
-    await store.pipeline_create(pipeline)
-    for step in steps:
-        await store.step_upsert(step)
-    await store.event_append(pipeline_id, "PIPELINE_CREATED", {
-        "name": req.name, "mode": req.mode, "steps": len(steps),
-    })
+        await store.pipeline_create(pipeline)
+        for step in steps:
+            await store.step_upsert(step)
+        await store.event_append(pipeline_id, "PIPELINE_CREATED", {
+            "name": req.name, "mode": req.mode, "steps": len(steps),
+        })
 
     # dry_run: no ejecuta en background, solo completa inmediatamente
     if req.mode == "dry_run":
