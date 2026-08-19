@@ -67,11 +67,23 @@ async def test_capability_generate_sin_motor_explicito_resuelve_auto():
     print(f"OK auto: motor resuelto por competencia, job {job}")
 
 
+async def test_thot_motor_nuevo_responde_de_verdad():
+    """El criterio de aceptación #4: registrado por INSERT (Step 3 de esta
+    tarea), sin una línea de código nueva de dispatch -- y responde."""
+    job = await _dispatch_and_wait(
+        caller="jacobs", capability="critique", motor="thot",
+        prompt="En una frase: ¿cuál es el riesgo de no versionar un catálogo de motores?",
+    )
+    assert job["status"] == "completed", job
+    print(f"OK thot (motor nuevo, cero código): {job.get('result_summary', '')[:150]}")
+
+
 async def main():
     await test_qwen_ejecuta_tarea_de_codigo_real()
     await test_kimi_con_motor_explicito_via_pipeline()
     await test_capability_generate_sin_motor_explicito_resuelve_auto()
-    print("E2E: 3/3 OK")
+    await test_thot_motor_nuevo_responde_de_verdad()
+    print("E2E: 4/4 OK")
 
 
 if __name__ == "__main__":
