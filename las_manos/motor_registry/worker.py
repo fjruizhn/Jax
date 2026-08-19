@@ -33,6 +33,7 @@ from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from motor_registry.job_store import JobStore
+from motor_registry.tool_authority import authorize_and_execute_tool_call
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
 from motor_registry.tools_catalog import TOOLS_CATALOG
@@ -165,6 +166,7 @@ async def run(
     kill_switch_path: str,
     user_id: str | None = None,
     tenant_id: str | None = None,
+    caller: str | None = None,
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -368,7 +370,7 @@ async def run(
     # anotado como deuda: reportar éxito desde una rama que no lo es.
     if tool_calls:
         logger.info(
-            "job %s pidió %d tool_call(s) (Fase1, sin ejecutar): %s",
+            "job %s pidió %d tool_call(s): %s",
             job_id, len(tool_calls),
             [
                 {"name": tc.get("function", {}).get("name"),
@@ -376,11 +378,26 @@ async def run(
                 for tc in tool_calls
             ],
         )
+        # GAP2 Fase2 (2026-08-19): el gate de autoridad + la única tool
+        # ejecutable (read_file) viven en tool_authority.py -- acá solo se
+        # invoca por cada tool_call y se acumulan los resultados. Sigue sin
+        # haber segundo turno (fase 3, fuera de alcance): el resultado de
+        # cada tool queda en el job, nunca vuelve al modelo.
+        tool_results = [
+            await authorize_and_execute_tool_call(
+                tool_name=tc.get("function", {}).get("name", ""),
+                arguments_json=tc.get("function", {}).get("arguments", ""),
+                caller=caller or "",
+                job_id=job_id,
+                catalog=catalog,
+            )
+            for tc in tool_calls
+        ]
         store.update(
             job_id,
             status=JobStatus.TOOLS_REQUESTED.value,
             finished_at=time.time(),
-            result_summary=f"Modelo pidió {len(tool_calls)} tool(s), no ejecutadas (Fase1)",
+            result_summary=f"Modelo pidió {len(tool_calls)} tool(s): {[r['decision'] for r in tool_results]}",
             _reasoning_content=reasoning_content[:2000] if reasoning_content else None,
             _finish_reason=finish_reason,
             _tool_calls=[
@@ -388,6 +405,7 @@ async def run(
                  "arguments": tc.get("function", {}).get("arguments")}
                 for tc in tool_calls
             ],
+            _tool_results=tool_results,
         )
         return
     usage = response_json.get("usage")
