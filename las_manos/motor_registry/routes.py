@@ -55,7 +55,13 @@ async def init_motor_catalog() -> None:
     """Llamado desde el startup hook de server.py. Falla cerrado: si la DB
     no responde al arrancar, _CATALOG queda None y cada dispatch rechaza
     explícito (ver check en dispatch abajo) en vez de arrancar con un
-    catálogo vacío en silencio."""
+    catálogo vacío en silencio.
+
+    LIMITACIÓN CONOCIDA (no es bug, fuera de alcance de este fix wave): este
+    catálogo se carga UNA sola vez, acá, al arrancar el proceso. Un motor
+    nuevo dado de alta vía el form de admin (Task 9) queda en la DB pero NO
+    lo ve este proceso hasta reiniciar jax-las-manos.service — no hay
+    endpoint de reload todavía."""
     global _CATALOG, _POLICY
     _CATALOG = await MotorCatalog.from_db()
     _POLICY = MotorPolicy(_CATALOG)
