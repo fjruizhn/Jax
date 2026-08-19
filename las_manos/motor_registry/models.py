@@ -25,6 +25,10 @@ class JobStatus(str, Enum):
     FAILED    = "failed"
     CANCELLED = "cancelled"
     REJECTED  = "rejected"
+    TOOLS_REQUESTED = "tools_requested"  # GAP2 Fase1 (2026-08-19): el modelo
+    # pidió tool_calls y Fase 1 no ejecuta nada -- NO es completed (el
+    # trabajo no terminó) ni failed (no hubo error), es un estado propio
+    # que dice la verdad: hubo un pedido de herramientas sin atender.
 
 
 class MotorDispatchRequest(BaseModel):

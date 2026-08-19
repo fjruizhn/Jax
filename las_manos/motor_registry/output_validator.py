@@ -37,7 +37,7 @@ SCHEMAS: dict[str, list[str]] = {
 }
 
 
-def validate(content: str, schema_name: str) -> dict[str, Any]:
+def validate(content: str, schema_name: str, has_tool_calls: bool = False) -> dict[str, Any]:
     """
     Valida `content` contra `schema_name`.
 
@@ -47,13 +47,36 @@ def validate(content: str, schema_name: str) -> dict[str, Any]:
         missing_fields: list[str]      (campos requeridos ausentes)
         raw:            str            (content original, siempre presente)
         warning:        str | None
+        skipped:        bool           (True si la validación de forma no
+                                         aplica -- ver has_tool_calls)
+
+    has_tool_calls (GAP2 Fase1, 2026-08-19): cuando el motor devuelve
+    tool_calls, la salida estructurada viaja por ESE canal, no por
+    `content` -- `content` puede venir vacío legítimamente (verificado
+    en vivo: Ollama+qwen3.6 devuelve content="" con tool_calls poblado).
+    Validar `content` como si fuera texto libre en ese caso generaría
+    "El motor devolvió texto libre, no JSON" -- falso: no fue un intento
+    fallido de responder en JSON, fue una respuesta correcta por el otro
+    canal. Los dos canales son mutuamente excluyentes; la exclusión se
+    resuelve ACÁ (una sola fuente de verdad), no en cada caller.
     """
+    if has_tool_calls:
+        return {
+            "validated": False,
+            "parsed": None,
+            "missing_fields": [],
+            "raw": content,
+            "warning": None,
+            "skipped": True,
+        }
+
     result: dict[str, Any] = {
         "validated": False,
         "parsed": None,
         "missing_fields": [],
         "raw": content,
         "warning": None,
+        "skipped": False,
     }
 
     # Intentar parsear como JSON
