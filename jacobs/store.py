@@ -189,6 +189,26 @@ async def pipeline_update_status(
         conn.close()
 
 
+async def pipelines_by_status(statuses: list[PipelineStatus]) -> list[Pipeline]:
+    """Usado por jacobs/reaper.py -- lista pipelines en los status dados
+    para evaluar edad/estancamiento. No filtra por antigüedad acá, eso
+    es criterio del reaper."""
+    if not statuses:
+        return []
+    conn = await get_conn()
+    try:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            placeholders = ",".join(["%s"] * len(statuses))
+            await cur.execute(
+                f"SELECT * FROM jacobs_pipelines WHERE status IN ({placeholders})",
+                tuple(s.value for s in statuses),
+            )
+            rows = await cur.fetchall()
+    finally:
+        conn.close()
+    return [_row_to_pipeline(row) for row in rows]
+
+
 async def pipeline_count_active() -> int:
     conn = await get_conn()
     try:

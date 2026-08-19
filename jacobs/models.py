@@ -19,6 +19,8 @@ class PipelineStatus(str, Enum):
     failed      = "failed"
     aborted     = "aborted"
     interrupted = "interrupted"
+    expired     = "expired"  # T4 (2026-08-19): cosechado por jacobs/reaper.py,
+                              # distinto de aborted (decisión humana/API explícita)
 
 
 class StepStatus(str, Enum):

@@ -23,6 +23,7 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -230,6 +231,13 @@ async def _jacobs_init() -> None:
 
     from motor_registry.routes import init_motor_catalog
     await init_motor_catalog()
+
+    # T4 (2026-08-19): barrido al arranque (limpia lo que quedó de un
+    # crash/restart previo, exactamente el caso de los zombies de Bug A)
+    # + timer periódico en background para lo que se genera en caliente.
+    from jacobs.reaper import reap_orphaned_pipelines, start_reaper_loop
+    await reap_orphaned_pipelines()
+    asyncio.create_task(start_reaper_loop())
 
 
 app.include_router(motor_router)

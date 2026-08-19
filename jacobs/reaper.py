@@ -1,0 +1,166 @@
+"""
+Jacobs — Reaper de pipelines huérfanos.
+
+Cosecha pipelines en status no-terminal (pending/running/interrupted)
+que quedaron sin avance real -- el proceso murió a mitad de camino
+(reinicio, timeout de cliente) o son la clase de huérfano descubierta
+en T1.a de la sesión 2026-08-19: interrupted sin owner file, donde el
+cliente nunca confirmó recepción del pipeline_id y /resume queda
+inalcanzable (_require_pipeline_owner en jax-platform devuelve 404 sin
+ese archivo).
+
+Umbrales calibrados post-T1 de la misma sesión: think:false aplicado a
+_llm_plan(), build() medido en 1.3-8.7s en 6 corridas reales (3
+objetivos x think true/false) + 8.1s de verificación end-to-end vía el
+endpoint completo con el objetivo real de Fernando. Antes de ese fix
+build() tardaba 17-37s -- los umbrales de abajo asumen el piso nuevo.
+
+- PENDING_MAX_AGE_SECONDS = 300 (5min): ~35x margen sobre el máximo de
+  creación end-to-end observado (8.7s). Un pipeline pending más viejo
+  que esto nunca llegó a correr background.add_task -- el proceso
+  murió entre el INSERT y el arranque de esa tarea.
+- RUNNING_STALE_SECONDS = 1800 (30min), medido contra updated_at (no
+  created_at) -- un running sano actualiza updated_at en cada
+  transición de step. 2x margen sobre el timeout de step más largo
+  configurado hoy (jacobs/plan.py: _CAPABILITY_TIMEOUT_SECONDS,
+  "reconcile"=900s).
+- INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS = 600 (10min): margen generoso
+  sobre una escritura de owner file que en el camino sano es casi
+  instantánea (<1ms) -- guarda contra el caso raro de disco lento, no
+  contra operación normal.
+
+DEUDA CONOCIDA (T3, sesión 2026-08-19): el chequeo de owner file cruza
+de repo -- lee ~/jax/pipelines/{id}_owner.json, que escribe
+jax-platform/backend/api/pipelines.py, no Jacobs. Si jax-platform
+cambia PIPELINES_DIR, o algún día corren en hosts distintos, este
+chequeo ve "sin owner" en todo y cosecha pipelines legítimos.
+Recomendación pendiente de implementar: mover el ownership a una
+columna owner_ack_at en jacobs_pipelines (misma DB física jax_memory
+que ya comparten ambos servicios), eliminando esta dependencia de
+filesystem. No implementado esta ronda -- requiere migración de
+esquema + reescribir 5 archivos de test de jax-platform, fuera de
+alcance de "implementar el reaper".
+
+En honor al Prof. Raúl Jacobs.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import time
+from pathlib import Path
+
+import httpx
+
+from jacobs import store
+from jacobs.models import PipelineStatus
+
+logger = logging.getLogger("jacobs.reaper")
+
+PENDING_MAX_AGE_SECONDS = 300
+RUNNING_STALE_SECONDS = 1800
+INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS = 600
+SWEEP_INTERVAL_SECONDS = 300  # cada 5 min
+
+# Si un solo barrido cosecha más que esto, no es ruido normal -- es el
+# mismo patrón que produjo los 8 zombies de Bug A (T4 ronda 2026-08-19):
+# el límite duro de pipelines concurrentes agotado por algo que sigue
+# insertando filas fuera del camino normal. Mismo número que
+# jacobs.policy.MAX_PARALLEL_PIPELINES -- si se cosechan más que el
+# cupo total configurado en una sola corrida, hay una fuga activa.
+TELEGRAM_ALERT_THRESHOLD = 3
+
+# Cruce de repo documentado como deuda arriba -- NO es la fuente de
+# verdad, es un chequeo best-effort hasta que T3 se implemente.
+OWNER_FILES_DIR = Path.home() / "jax" / "pipelines"
+
+
+def _has_owner_file(pipeline_id: str) -> bool:
+    return (OWNER_FILES_DIR / f"{pipeline_id}_owner.json").exists()
+
+
+async def _send_telegram_alert(message: str) -> None:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        logger.warning("Reaper: alerta suprimida, TELEGRAM_BOT_TOKEN/CHAT_ID no configurados")
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={"chat_id": chat_id, "text": message},
+            )
+    except Exception:  # fail-soft: la alerta es best-effort, un fallo de red no debe tumbar el reaper ni ocultar que ya cosechó (eso quedó logueado antes de llegar acá)
+        logger.warning("Reaper: no se pudo enviar alerta a Telegram", exc_info=True)
+
+
+async def reap_orphaned_pipelines() -> list[dict]:
+    """Un barrido completo. Encuentra y cosecha pipelines huérfanos,
+    transicionándolos a PipelineStatus.expired. Devuelve la lista de lo
+    cosechado (para logging/alerta/tests). No lanza -- errores por
+    pipeline individual no deben abortar el resto del barrido."""
+    now = time.time()
+    reaped: list[dict] = []
+
+    candidates = await store.pipelines_by_status(
+        [PipelineStatus.pending, PipelineStatus.running, PipelineStatus.interrupted]
+    )
+    for p in candidates:
+        age = now - p.created_at
+        stale_since = now - p.updated_at
+        reason = None
+
+        if p.status == PipelineStatus.pending and age > PENDING_MAX_AGE_SECONDS:
+            reason = f"pending sin avance {age:.0f}s (umbral {PENDING_MAX_AGE_SECONDS}s)"
+        elif p.status == PipelineStatus.running and stale_since > RUNNING_STALE_SECONDS:
+            reason = f"running sin avance {stale_since:.0f}s (umbral {RUNNING_STALE_SECONDS}s)"
+        elif (
+            p.status == PipelineStatus.interrupted
+            and age > INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS
+            and not _has_owner_file(p.pipeline_id)
+        ):
+            reason = (
+                f"interrupted sin owner file, {age:.0f}s "
+                f"(umbral {INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS}s)"
+            )
+
+        if not reason:
+            continue
+
+        try:
+            await store.pipeline_update_status(p.pipeline_id, PipelineStatus.expired)
+            await store.event_append(p.pipeline_id, "REAPED", {
+                "prev_status": p.status.value, "reason": reason,
+            })
+        except Exception:  # fail-soft: un fallo cosechando ESTE pipeline no debe abortar el resto del barrido; el proximo ciclo (SWEEP_INTERVAL_SECONDS) reintenta
+            logger.warning("Reaper: fallo cosechando %s", p.pipeline_id, exc_info=True)
+            continue
+
+        entry = {"pipeline_id": p.pipeline_id, "name": p.name, "prev_status": p.status.value, "reason": reason}
+        reaped.append(entry)
+        logger.warning("Reaper cosechó %s (%s) [%s]: %s", p.pipeline_id, p.name, p.status.value, reason)
+
+    if reaped:
+        if len(reaped) > TELEGRAM_ALERT_THRESHOLD:
+            await _send_telegram_alert(
+                f"⚠️ Reaper de Jacobs cosechó {len(reaped)} pipelines huérfanos en un "
+                f"solo barrido (umbral {TELEGRAM_ALERT_THRESHOLD}) -- posible fuga activa, "
+                f"no ruido normal. Ver logs de jax-las-manos."
+            )
+        else:
+            logger.info("Reaper: %d pipeline(s) cosechado(s), dentro de lo esperado", len(reaped))
+
+    return reaped
+
+
+async def start_reaper_loop() -> None:
+    """Barrido periódico en background. Se llama desde el startup del
+    server además de esto -- ver server.py::_jacobs_init."""
+    while True:
+        try:
+            await reap_orphaned_pipelines()
+        except Exception:  # fail-soft: loop de limpieza en background, mismo patron que jax-platform/jax_engine/owner_cleanup.py -- nunca debe tumbar el proceso, el proximo ciclo reintenta
+            logger.warning("Reaper: barrido periódico falló", exc_info=True)
+        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
