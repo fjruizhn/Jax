@@ -47,6 +47,15 @@ _MOTOR_CFG = {
         "kimi": {
             "enabled": True,
             "provider": "kimi",
+            "transport": "http_openai_compat",
+            # provider_id (2026-08-19, Task 3): en producción esto viene del
+            # JOIN en MotorCatalog.from_db() (ver _catalog_from_db_test.py).
+            # El constructor dict-based (usado solo por tests) no lo derivaba
+            # de nada -- se agrega acá, mismo patrón que 'transport' arriba,
+            # para que worker.py (que ahora lee motor_entry.provider_id en
+            # vez del _MOTOR_PROVIDER_MAP hardcodeado eliminado) siga
+            # resolviendo "moonshot" para kimi en este fixture.
+            "provider_id": "moonshot",
             "api_key_env": "KIMI_API_KEY",
             "api_url": "https://api.moonshot.ai/v1/chat/completions",
             "model": "kimi-k2.7-code",
@@ -172,6 +181,61 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
         state = self.store._index[job_id]
         assert state.get("_finish_reason") == "length", state
         assert state["status"] == "completed"  # el job igual se marca completed -- el dato queda para diagnostico, no bloquea
+
+    async def test_transport_ollama_no_resuelve_credencial(self):
+        """Guard igual a facet_resolver.py:81-82 -- transport='ollama' nunca
+        llama a resolve_credential_instrumented. Si lo hiciera, este test
+        lo detecta porque el mock de credential está seteado para explotar."""
+        cfg = {
+            "motors": {"jax_local": {
+                "enabled": True, "provider": "ollama", "api_key_env": "",
+                "api_url": "http://localhost:11434/v1", "model": "qwen3-coder:30b",
+                "max_context_tokens": 0, "sandbox_only": True,
+                "default_timeout_seconds": 300, "supports_reasoning": False,
+                "transport": "ollama",
+            }},
+            "capabilities": {"implementation": _MOTOR_CFG["capabilities"]["implementation"]},
+        }
+        catalog = MotorCatalog(cfg)
+        store = JobStore(str(Path(self._tmpdir.name) / "jobs2.jsonl"))
+        job_id = store.create(
+            caller="jacobs", capability="implementation", motor="jax_local",
+            trace_id="t2", prompt="prompt de prueba", recursion_depth=0,
+        )
+        boom = AsyncMock(side_effect=AssertionError("no debería resolver credencial para ollama"))
+        with patch.object(worker, "resolve_credential_instrumented", boom), \
+             patch("httpx.AsyncClient.post", AsyncMock(return_value=_fake_response(content="listo"))):
+            await worker.run(
+                job_id=job_id, motor="jax_local", capability="implementation",
+                prompt="prompt de prueba", context={}, store=store,
+                catalog=catalog, kill_switch_path=self.kill_switch_path,
+            )
+        assert store._index[job_id]["status"] == "completed", store._index[job_id]
+
+    async def test_transport_desconocido_falla_explicito_no_silencioso(self):
+        cfg = {
+            "motors": {"futuro": {
+                "enabled": True, "provider": "x", "api_key_env": "", "api_url": "",
+                "model": "x", "max_context_tokens": 0, "sandbox_only": True,
+                "default_timeout_seconds": 300, "supports_reasoning": False,
+                "transport": "subprocess",
+            }},
+            "capabilities": {"implementation": _MOTOR_CFG["capabilities"]["implementation"]},
+        }
+        catalog = MotorCatalog(cfg)
+        store = JobStore(str(Path(self._tmpdir.name) / "jobs3.jsonl"))
+        job_id = store.create(
+            caller="jacobs", capability="implementation", motor="futuro",
+            trace_id="t3", prompt="prompt de prueba", recursion_depth=0,
+        )
+        await worker.run(
+            job_id=job_id, motor="futuro", capability="implementation",
+            prompt="prompt de prueba", context={}, store=store,
+            catalog=catalog, kill_switch_path=self.kill_switch_path,
+        )
+        state = store._index[job_id]
+        assert state["status"] == "failed", state
+        assert "transport" in state["error"].lower(), state
 
 
 if __name__ == "__main__":
