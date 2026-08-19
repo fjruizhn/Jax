@@ -17,6 +17,17 @@ como residuo conocido, igual que Q13 en REFORMAS-v3.1.md para el barrido
 de vocabulario. Esta prueba cierra la instancia mas barata de detectar
 mecanicamente, no el patron completo.
 
+Marcado, no allowlist (triage 2026-08-19, 32 casos revisados uno por uno):
+un except-pass legitimo (fail-soft real: nadie depende de que esa
+operacion haya funcionado) se marca con un comentario en la MISMA linea
+del `except`, formato `# fail-soft: <razon especifica de este sitio>`.
+Sin esa marca, es una violacion -- incluye a proposito el except-pass
+nuevo que alguien escriba mañana sin marcarlo. La razon tiene que
+explicar por que nada aguas abajo cree que la operacion salio bien; una
+marca generica ("# fail-soft: ok") pasaria el test pero no cumple el
+espiritu de la regla -- responsabilidad de quien revisa el PR, el test
+solo puede verificar que la marca existe, no que sea honesta.
+
 Corre con:
   python3 policy/tests/test_no_fail_open_except.py
 
@@ -25,6 +36,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import ast
+import linecache
 import sys
 from pathlib import Path
 
@@ -38,12 +50,7 @@ EXCLUDE_DIR_NAMES = {
     "__pycache__", "dist", "build",
 }
 
-# Rutas donde un except-pass silencioso es una decision de diseño ya
-# documentada, no una instancia nueva del patron -- ver notas al pie.
-ALLOWED = {
-    # best-effort de sincronizacion de provider, ya documentado en
-    # CONTEXT.md como fail-soft deliberado (mismo patron que anthropic).
-}
+FAIL_SOFT_MARKER = "# fail-soft:"
 
 
 def _iter_python_files():
@@ -66,6 +73,7 @@ def _is_bare_pass_except(node: ast.ExceptHandler) -> bool:
 
 
 def find_fail_open_excepts() -> list[str]:
+    linecache.clearcache()
     violations = []
     for path in _iter_python_files():
         try:
@@ -74,8 +82,8 @@ def find_fail_open_excepts() -> list[str]:
             continue
         for node in ast.walk(tree):
             if isinstance(node, ast.ExceptHandler) and _is_bare_pass_except(node):
-                rel = str(path)
-                if rel in ALLOWED:
+                source_line = linecache.getline(str(path), node.lineno)
+                if FAIL_SOFT_MARKER in source_line:
                     continue
                 violations.append(f"{path}:{node.lineno}")
     return violations
