@@ -202,7 +202,7 @@ class VoiceEngine:
                 if pendiente:
                     try:
                         await self._leer_frame()
-                    except Exception:
+                    except Exception:  # fail-soft: drenar un frame en vuelo durante el cierre; sin mas datos el flujo termina igual
                         pass
 
                 # Cierre: sin mas datos, aplay termina solo lo que tenga.
@@ -212,10 +212,10 @@ class VoiceEngine:
                             self.aplay.stdin.close()
                         if not self._cancel.is_set():
                             await self.aplay.wait()
-                    except Exception:
+                    except Exception:  # fail-soft: cierre de aplay durante teardown; ya se esta cancelando la reproduccion
                         pass
                     self.aplay = None
-        except Exception:
+        except Exception:  # fail-soft: cleanup de reproduccion en cancelacion; la voz es best-effort por diseno (ver comentario de la funcion)
             # La voz es un plus: jamas tumba la conversacion.
             pass
 

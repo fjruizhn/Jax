@@ -43,7 +43,7 @@ class JobStore:
                 try:
                     event = json.loads(line)
                     self._index[event["job_id"]] = event
-                except (json.JSONDecodeError, KeyError):
+                except (json.JSONDecodeError, KeyError):  # fail-soft: linea de log JSONL corrupta se descarta; el peor caso es un job ausente del indice (falla cerrado: caller sigue esperando), no uno que aparente exito
                     pass  # línea corrupta — ignorar silenciosamente
 
     def _append(self, event: dict) -> None:
