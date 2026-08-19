@@ -228,6 +228,9 @@ async def _jacobs_init() -> None:
         _credlog.addHandler(_ch)
     await jacobs_store.init_tables()
 
+    from motor_registry.routes import init_motor_catalog
+    await init_motor_catalog()
+
 
 app.include_router(motor_router)
 app.include_router(jacobs_router)

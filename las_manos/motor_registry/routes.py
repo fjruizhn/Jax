@@ -39,11 +39,26 @@ with open(CONFIG_PATH, "rb") as _f:
     _CONFIG = tomllib.load(_f)
 
 _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
-_CATALOG = MotorCatalog(_CONFIG)
-_POLICY = MotorPolicy(_CATALOG)
+# _CATALOG/_POLICY arrancan None -- se pueblan en el startup hook de
+# server.py (init_motor_catalog, abajo). [motors.*]/[capabilities.*] de
+# config.toml ya no se leen (R4 -- catalogo en DB). Ningun otro modulo
+# importa estos dos nombres directamente (verificado: grep -rn "_CATALOG"
+# solo los usa este archivo), asi que reasignarlos acá es seguro.
+_CATALOG: MotorCatalog | None = None
+_POLICY: MotorPolicy | None = None
 _KILL_SWITCH_PATH: str = _CONFIG.get("server", {}).get("kill_switch_path", "/etc/jax/PAUSE")
 
 logger = logging.getLogger(__name__)
+
+
+async def init_motor_catalog() -> None:
+    """Llamado desde el startup hook de server.py. Falla cerrado: si la DB
+    no responde al arrancar, _CATALOG queda None y cada dispatch rechaza
+    explícito (ver check en dispatch abajo) en vez de arrancar con un
+    catálogo vacío en silencio."""
+    global _CATALOG, _POLICY
+    _CATALOG = await MotorCatalog.from_db()
+    _POLICY = MotorPolicy(_CATALOG)
 
 router = APIRouter(prefix="/motor", tags=["motor_registry"])
 
@@ -65,6 +80,9 @@ def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
 
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
+    if _POLICY is None or _CATALOG is None:
+        raise HTTPException(status_code=503, detail="Motor Registry: catálogo no inicializado todavía")
+
     result = _POLICY.check(
         caller=req.caller,
         capability=req.capability,
