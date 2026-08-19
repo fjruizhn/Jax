@@ -80,20 +80,42 @@ def _has_owner_file(pipeline_id: str) -> bool:
     return (OWNER_FILES_DIR / f"{pipeline_id}_owner.json").exists()
 
 
-async def _send_telegram_alert(message: str) -> None:
+async def _send_telegram_alert(message: str) -> dict:
+    """Manda la alerta y devuelve {ok, message_id, error} -- SIEMPRE, nunca
+    None. El caller (reap_orphaned_pipelines) decide qué hacer con el
+    resultado: la cosecha ya ocurrió antes de llegar acá, así que esta
+    función jamás lanza (fail-soft real: un token rotado o un chat_id
+    roto no debe tumbar el barrido) pero tampoco descarta el resultado en
+    silencio -- T1 (2026-08-19): antes de este fix, `ok`/`message_id` de
+    la respuesta de sendMessage se descartaban por completo; la alerta
+    funcionaba "por suerte", sin verificación real de entrega."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         logger.warning("Reaper: alerta suprimida, TELEGRAM_BOT_TOKEN/CHAT_ID no configurados")
-        return
+        return {"ok": False, "message_id": None, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID no configurados"}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.post(
+            resp = await client.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data={"chat_id": chat_id, "text": message},
             )
-    except Exception:  # fail-soft: la alerta es best-effort, un fallo de red no debe tumbar el reaper ni ocultar que ya cosechó (eso quedó logueado antes de llegar acá)
-        logger.warning("Reaper: no se pudo enviar alerta a Telegram", exc_info=True)
+        body = resp.json()
+    except Exception as exc:  # fail-soft: red caída/timeout -- no debe tumbar el reaper
+        logger.error("Reaper: fallo de red enviando alerta a Telegram", exc_info=True)
+        return {"ok": False, "message_id": None, "error": f"{type(exc).__name__}: {exc}"}
+
+    if resp.status_code == 200 and body.get("ok"):
+        message_id = body.get("result", {}).get("message_id")
+        logger.info("Reaper: alerta entregada a Telegram, message_id=%s", message_id)
+        return {"ok": True, "message_id": message_id, "error": None}
+
+    # ok=false o HTTP no-200: Telegram respondió, pero rechazó el envío
+    # (token rotado, chat_id inválido, bot bloqueado, etc). Esto es
+    # exactamente el caso que el código viejo enmascaraba.
+    error = f"HTTP {resp.status_code}: {body.get('description', body)}"
+    logger.error("Reaper: Telegram rechazó la alerta -- %s", error)
+    return {"ok": False, "message_id": None, "error": error}
 
 
 async def reap_orphaned_pipelines() -> list[dict]:
@@ -144,11 +166,29 @@ async def reap_orphaned_pipelines() -> list[dict]:
 
     if reaped:
         if len(reaped) > TELEGRAM_ALERT_THRESHOLD:
-            await _send_telegram_alert(
+            result = await _send_telegram_alert(
                 f"⚠️ Reaper de Jacobs cosechó {len(reaped)} pipelines huérfanos en un "
                 f"solo barrido (umbral {TELEGRAM_ALERT_THRESHOLD}) -- posible fuga activa, "
                 f"no ruido normal. Ver logs de jax-las-manos."
             )
+            # fail-soft: la cosecha YA ocurrió (transiciones + REAPED ya
+            # persistidos arriba) -- no hay nada que abortar. "Visible"
+            # aca significa: log a ERROR (ya lo hace _send_telegram_alert)
+            # + un evento propio en jacobs_events por cada pipeline
+            # cosechado en este barrido, para que quede auditable sin
+            # depender de journalctl ni de que alguien mire Telegram y
+            # note el silencio. Sin esto, un token rotado deja la fuga
+            # activa sin ninguna traza en la DB de que la alerta falló.
+            if not result["ok"]:
+                for entry in reaped:
+                    try:
+                        await store.event_append(entry["pipeline_id"], "REAPER_ALERT_FAILED", {
+                            "batch_size": len(reaped),
+                            "threshold": TELEGRAM_ALERT_THRESHOLD,
+                            "error": result["error"],
+                        })
+                    except Exception:  # fail-soft: si ni la DB responde, ya quedó el log a ERROR de arriba
+                        logger.error("Reaper: no se pudo registrar REAPER_ALERT_FAILED para %s", entry["pipeline_id"], exc_info=True)
         else:
             logger.info("Reaper: %d pipeline(s) cosechado(s), dentro de lo esperado", len(reaped))
 
