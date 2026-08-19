@@ -60,14 +60,20 @@ async def _db_conn() -> aiomysql.Connection:
 
 
 async def _query_facet(facet_key: str) -> ResolvedFacet:
+    """D1.1 paso 4 (fase2-facetas-diseno.md:233-237), completado 2026-08-19:
+    lee el modelo via model_ref -> model.model_id, no b.model_id (texto
+    libre, quedaba desincronizado de las aprobaciones de
+    model_binding_proposal). facet_binding.model_id se conserva de
+    solo-lectura un ciclo de cutover antes de dropearla, no se usa mas aca."""
     conn = await _db_conn()
     try:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT f.transport, f.persona, p.base_url, b.provider_id, b.model_id, b.params "
+                "SELECT f.transport, f.persona, p.base_url, b.provider_id, m.model_id, b.params "
                 "FROM facet f "
                 "JOIN facet_binding b ON b.facet_key = f.`key` AND b.role = 'primary' "
                 "JOIN provider p ON p.id = b.provider_id "
+                "JOIN model m ON m.id = b.model_ref "
                 "WHERE f.`key` = %s AND f.status = 'active'",
                 (facet_key,),
             )
@@ -103,8 +109,9 @@ async def load_facet_registry() -> dict:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT f.`key`, f.display_name, f.icon, f.auto_selectable, "
-                "b.provider_id, b.model_id "
+                "b.provider_id, m.model_id "
                 "FROM facet f JOIN facet_binding b ON b.facet_key = f.`key` AND b.role = 'primary' "
+                "JOIN model m ON m.id = b.model_ref "
                 "WHERE f.status = 'active'"
             )
             rows = await cur.fetchall()
