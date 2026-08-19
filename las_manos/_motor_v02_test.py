@@ -107,7 +107,7 @@ except Exception:
             if h.get("status") == "alive":
                 print(f"Servidor levantó (pid={server_proc.pid}). kill_switch_active={h.get('kill_switch_active')}")
                 break
-        except Exception:
+        except Exception:  # fail-soft: polling con reintento explicito; el else del for ya reporta FAIL y sale con exit 1 si nunca conecta
             pass
     else:
         print(f"{FAIL} Servidor no levantó en 12s")

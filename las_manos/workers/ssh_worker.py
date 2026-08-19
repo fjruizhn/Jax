@@ -50,7 +50,7 @@ async def _kill_switch_watcher(proc, kill_switch_path: str, aborted: dict) -> No
             aborted["flag"] = True
             try:
                 proc.kill()  # SIGKILL al cliente ssh → SIGHUP al remoto (pty)
-            except ProcessLookupError:
+            except ProcessLookupError:  # fail-soft: kill() sobre un proceso que ya pudo haber terminado solo entre el chequeo y el kill (TOCTOU benigno)
                 pass
             return
 

@@ -113,7 +113,7 @@ def _lanzar_workers_background() -> None:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-        except Exception:
+        except Exception:  # fail-soft: Popen de worker desacoplado; si falla el lanzamiento no hay nada que crea que corrio, y el proximo arranque lo reintenta
             pass
 
 

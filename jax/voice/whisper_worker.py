@@ -110,7 +110,7 @@ def main() -> None:
             if wav_path:
                 try:
                     os.unlink(wav_path)
-                except OSError:
+                except OSError:  # fail-soft: unlink de temporal en finally; nadie depende de que el borrado haya funcionado
                     pass
         sys.stdout.write(json.dumps(resp, ensure_ascii=False) + "\n")
         sys.stdout.flush()
