@@ -45,6 +45,8 @@ class Step(BaseModel):
     pipeline_id:      str = ""
     step_index:       int = 0
     facet:            str
+    motor:            str | None = None  # R4: motor explícito, separado de facet.
+                                          # None = MotorPolicy._resolve_motor() elige por competencia.
     capability:       str
     input:            dict[str, Any] = Field(default_factory=dict)
     output_ref:       str | None = None
