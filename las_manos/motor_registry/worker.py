@@ -1,10 +1,11 @@
 """
-LAS MANOS — Motor Registry: worker con Kimi real.
+LAS MANOS — Motor Registry: worker, dispatch por transport (R4).
 
 Ejecuta el job completo:
   1. Marca RUNNING
   2. Verifica kill switch (/etc/jax/PAUSE) antes de llamar
-  3. Llama a la API del motor (Kimi/moonshot) con httpx async
+  3. Llama a la API del motor con httpx async, vía la función de
+     `motor.transport` (ver `_TRANSPORT_DISPATCH`) — no un motor hardcodeado
   4. Comprueba kill switch cada 5s durante la ejecución
   5. Extrae content y reasoning_content de la respuesta
      — reasoning_content: guardado en JSONL como metadata, NO expuesto en la API
@@ -31,17 +32,6 @@ import httpx
 from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
-
-# motor (catalogo local) -> provider_id (tabla `credential`/`model`).
-# Verificado 2026-08-10 contra el schema real de la DB: Ada/GLM usa
-# provider_id "zhipu" (NO "zai" -- esa es la clave `provider` interna de
-# las_manos/config.toml [motors.ada], que identifica el motor dentro del
-# catalogo local, distinta del provider_id real que usan las tablas
-# `credential`/`model`). Antes de este fix, ada resolvia credencial contra
-# provider_id="ada" (el fallback .get(motor, motor)) -- nunca coincidia con
-# ninguna fila real, y ademas no generaba fila de uso porque el segundo
-# call site usaba .get(motor) sin fallback (== None).
-_MOTOR_PROVIDER_MAP = {"kimi": "moonshot", "ada": "zhipu"}
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
@@ -81,7 +71,7 @@ async def _watch_kill_switch(path: str) -> None:
         await asyncio.sleep(_KILL_SWITCH_INTERVAL)
 
 
-async def _call_kimi(
+async def _call_http_openai_compat(
     *,
     api_url: str,
     model: str,
@@ -90,27 +80,39 @@ async def _call_kimi(
     timeout: float,
     max_tokens: int = 0,
 ) -> dict:
-    """Llama a la API de Kimi. Devuelve el dict JSON completo de la respuesta.
+    """Llama a un endpoint OpenAI-compatible. Usado tanto para
+    transport='http_openai_compat' (Kimi/Ada/futuros con API key) como para
+    transport='ollama' (Qwen local, api_key='') -- Ollama expone el mismo
+    formato de request/response en /v1/chat/completions, verificado en vivo
+    (2026-08-18): mismo choices[0].message.content/finish_reason/usage.
 
     max_tokens (2026-08-10): sin esto, un motor de razonamiento puede gastar
     todo el completion budget en reasoning_content y devolver `content`
     cortado a mitad de palabra — bug real reproducido en vivo contra la API
-    de Moonshot. 0/falsy = no mandar el campo (motor sin este limite
-    configurado)."""
+    de Moonshot. 0/falsy = no mandar el campo."""
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(api_url, json=payload, headers=headers)
+        response = await client.post(f"{api_url}/chat/completions", json=payload, headers=headers)
         response.raise_for_status()
         return response.json()
+
+
+# transport -> función de dispatch. Un motor nuevo elige un transporte
+# EXISTENTE por nombre (dato en DB, Task 1/2) -- agregar un transporte
+# nuevo (ej. http_gemini, subprocess) sí requiere código acá, a propósito
+# (R4: los transportes son lógica, los motores son dato).
+_TRANSPORT_DISPATCH = {
+    "http_openai_compat": _call_http_openai_compat,
+    "ollama": _call_http_openai_compat,
+}
 
 
 def _humanize_error(exc: Exception) -> str:
@@ -163,18 +165,32 @@ async def run(
         )
         return
 
-    # Validar API key
-    provider_id = _MOTOR_PROVIDER_MAP.get(motor, motor)
-    try:
-        api_key = await resolve_credential_instrumented(provider_id)
-    except CredentialUnavailableError:
+    # Validar transporte soportado (R4 -- generalizado, ya no solo Kimi)
+    call_fn = _TRANSPORT_DISPATCH.get(motor_entry.transport)
+    if call_fn is None:
         store.update(
             job_id,
             status=JobStatus.FAILED.value,
             finished_at=time.time(),
-            error=f"Sin credencial válida configurada para '{provider_id}'",
+            error=f"transport '{motor_entry.transport}' del motor '{motor}' no tiene dispatcher implementado",
         )
         return
+
+    # Validar API key -- guard igual a facet_resolver.py:81-82: ollama/subprocess
+    # no usan credencial de proveedor gestionada aca.
+    provider_id = motor_entry.provider_id or motor
+    api_key = ""
+    if motor_entry.transport not in ("ollama", "subprocess"):
+        try:
+            api_key = await resolve_credential_instrumented(provider_id)
+        except CredentialUnavailableError:
+            store.update(
+                job_id,
+                status=JobStatus.FAILED.value,
+                finished_at=time.time(),
+                error=f"Sin credencial válida configurada para '{provider_id}'",
+            )
+            return
 
     # Output schema de la capability
     cap_entry = catalog.get_capability(capability)
@@ -207,7 +223,7 @@ async def run(
 
     # Lanzar tarea HTTP y watcher de kill switch en paralelo
     api_task = asyncio.create_task(
-        _call_kimi(
+        call_fn(
             api_url=motor_entry.api_url,
             model=motor_entry.model,
             api_key=api_key,

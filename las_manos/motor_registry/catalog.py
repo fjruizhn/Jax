@@ -82,6 +82,14 @@ class MotorCatalog:
                 reasoning_default_visibility=cfg.get("reasoning_default_visibility", "none"),
                 max_tokens=cfg.get("max_tokens", 0),
                 transport=cfg.get("transport", "http_openai_compat"),
+                # provider_id (2026-08-19, Task 3): en producción viene del
+                # JOIN en from_db() (arriba). El constructor dict-based (solo
+                # tests) no lo derivaba de nada -- se agrega para que
+                # worker.py (que ahora lee motor_entry.provider_id en vez del
+                # _MOTOR_PROVIDER_MAP hardcodeado eliminado) pueda resolverlo
+                # también desde un dict armado a mano. Mismo patrón que la
+                # línea de 'transport' de arriba (Task 2).
+                provider_id=cfg.get("provider_id", ""),
             )
         for name, cfg in config.get("capabilities", {}).items():
             self._capabilities[name] = CapabilityEntry(
