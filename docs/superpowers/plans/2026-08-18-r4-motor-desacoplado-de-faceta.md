@@ -1499,17 +1499,28 @@ export default function PipelineModal({ objective, onClose, onSubmit }) {
 
 Agregar la key `autoMotor` a `frontend/src/i18n/es.js` y `en.js` (`"Auto (por competencia)"` / `"Auto (by competence)"`) — verificar el patrón real de esos archivos (estructura de objeto, no asumir) antes de editar.
 
-- [ ] **Step 8: Rebuild + deploy del frontend**
+- [ ] **Step 8: NO desplegar a producción — build local solamente**
 
-Por regla del proyecto (`jax-platform/CLAUDE.md`, "Rebuild + deploy frontend"):
-```bash
-cd /home/fruiz/jax-platform/frontend && npm run build
-```
-Luego el rsync a la VM dev documentado en ese mismo archivo (Lección operativa #1).
+**Corrección de plan, 2026-08-19 (defecto encontrado en ejecución, no de la
+implementadora):** la regla `jax-platform/CLAUDE.md` ("Rebuild + deploy
+frontend") vale para cambios terminados y mergeados a `master`, no para
+trabajo de una rama sin revisar. Un despliegue real a `axioma-ia.io` desde
+esta rama publica un frontend que llama a `/api/motors/capabilities`,
+endpoint que el backend real de `master` no tiene — 404 en vivo para
+cualquier usuario que abra el modal de Pipeline. Esto pasó una vez
+(revertido por el controlador, ver ledger) y no debe repetirse.
 
-- [ ] **Step 9: Verificación manual en navegador**
+`cd /home/fruiz/jax-platform/frontend && npm run build` está bien —
+generar el bundle en `dist/` para verificación local. **El rsync a la VM
+dev / `axioma-ia.io` NO se ejecuta como parte de ninguna tarea de este
+plan.** El deploy real ocurre una sola vez, después de que la rama
+completa esté mergeada a `master` (fase de `finishing-a-development-branch`).
 
-Abrir la Mesa, pestaña Pipeline, seleccionar Kimi — confirmar que aparece el `<select>` de motor con al menos `kimi` como opción (poblado desde `/api/motors/capabilities`).
+- [ ] **Step 9: Verificación — build local o componente, no navegador contra producción**
+
+Verificar contra el `dist/` local (servirlo con `vite preview` o similar
+desde el worktree) o con los tests de componente ya escritos en este
+task — no contra `axioma-ia.io`, que sigue sirviendo `master` a propósito.
 
 - [ ] **Step 10: Commit**
 
@@ -1808,7 +1819,10 @@ Leer esos archivos completos antes de continuar — la forma exacta de router/au
 
 - [ ] **Step 5: Implementar el componente de frontend, mismo patrón visual/estructural que el admin de provider/model**
 
-- [ ] **Step 6: Rebuild + deploy del frontend** (mismo procedimiento de Task 6, Step 8)
+- [ ] **Step 6: Rebuild local solamente, NO deploy** (corrección de plan
+2026-08-19, ver Task 6 Step 8 — el mismo defecto no se repite acá: sin
+rsync a `axioma-ia.io` desde esta rama, el deploy real va al final,
+después del merge completo)
 
 - [ ] **Step 7: Verificación manual — dar de alta un motor de prueba desde el form, confirmar que aparece en `capability_motor` y que un job real lo despacha**
 
