@@ -367,16 +367,30 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
 
 
 async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
-    """Ollama local — razonamiento local. Modelo desde facet_binding, ya
-    no hardcodeado qwen3:14b (el binding real hoy es qwen3-coder:30b)."""
+    """Ollama local — razonamiento local. Modelo desde facet_binding, ya no
+    hardcodeado (ver plan.py::_llm_plan, mismo patron). f.base_url
+    ("http://localhost:11434/v1") es para el path OpenAI-compat generico
+    (_call_openai_compat) — el endpoint nativo /api/chat que este payload
+    espera (respuesta en data["message"]["content"]) es siempre local y
+    fijo. Solo el modelo viene del facet, nunca la URL — bug real hasta
+    2026-08-19 (404 por concatenar
+    f.base_url + "/api/chat"). jax_local SI esta en VALID_FACETS (plan.py),
+    solo no aparece en la lista de facetas que _llm_plan le sugiere al LLM
+    para auto-generar steps — un pipeline con step facet="jax_local" armado
+    a mano (_from_spec) si lo hubiera disparado.
+    OJO: GPU_SEMAPHORE (jax/muscles/ollama_muscle.py:37) es un
+    asyncio.Semaphore de PROCESO del REPL de JAX -- esta llamada corre en el
+    proceso de jax-las-manos y le pega a Ollama directo por httpx, sin pasar
+    por ese semáforo. No hay exclusión mutua real entre el REPL y Jacobs
+    para el acceso a la GPU (verificado 2026-08-19, sonda T0.a/T1 de
+    latencia de _llm_plan)."""
     payload = {
         "model":    f.model,
         "messages": [{"role": "user", "content": prompt}],
         "stream":   False,
     }
-    url = f"{f.base_url}/api/chat" if f.base_url else OLLAMA_URL
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(OLLAMA_URL, json=payload)
         if resp.status_code != 200:
             raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
         data  = resp.json()
