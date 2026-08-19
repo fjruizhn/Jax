@@ -2,7 +2,9 @@
 Jacobs — PlanBuilder.
 
 Genera un plan (lista de Steps) desde un objetivo textual.
-v0.2: llama a JAX Local (qwen3:14b via Ollama) para descomponer el objetivo.
+v0.2: llama a JAX Local (facet jax_local via Ollama) para descomponer el
+objetivo. Modelo resuelto desde facet_binding, no hardcodeado — ver
+executor.py::_invoke_ollama, mismo patrón.
 Fallback: 3 steps genéricos si Ollama no responde o devuelve JSON inválido.
 
 En honor al Prof. Raúl Jacobs.
@@ -19,12 +21,22 @@ import httpx
 
 from jacobs.models import Step
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+from facet_resolver import resolve_facet, FacetUnavailableError
+from model_catalog import record_resolved_version_safe
 
 logger = logging.getLogger("jacobs.plan")
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "qwen3:14b"
-OLLAMA_TIMEOUT = 120  # segundos — qwen3:14b puede tardar
+OLLAMA_TIMEOUT = 120  # segundos — el modelo local puede tardar
+# T1 (2026-08-19): con think:false medido en 6 corridas reales (3 objetivos
+# x think true/false), eval_count del path think:false fue 181-1159 (el mas
+# alto: objetivo complejo de calculadora, 20 steps). Margen ~2.6x sobre el
+# maximo medido -- cinturon y tirantes: acota el peor caso si algun
+# objetivo dispara generacion inesperada, sin recortar ningun plan real
+# observado. NO es el limite para un eventual fallback con thinking
+# habilitado -- ese path necesitaria su propio budget, mucho mayor (el
+# thinking solo midio 14780-19846 caracteres, ~3700-5000 tokens).
+_LLM_PLAN_NUM_PREDICT = 3000
 
 ADA_URL = "https://api.z.ai/api/paas/v4/chat/completions"
 ADA_MODEL = "glm-5.2"
@@ -339,19 +351,38 @@ class PlanBuilder:
             f'[{{"facet":"hipatia","capability":"research","prompt":"Investiga X"}},'
             f'{{"facet":"jekyll","capability":"analysis","prompt":"Analiza Y"}}]'
         )
+        try:
+            f = await resolve_facet("jax_local")
+        except FacetUnavailableError as exc:
+            logger.warning("JAX Local no disponible para planificación: %s", exc)
+            return None
+
         payload = {
-            "model": OLLAMA_MODEL,
+            "model": f.model,
+            "think": False,
+            "options": {"num_predict": _LLM_PLAN_NUM_PREDICT},
             "messages": [
                 {"role": "system", "content": _PLAN_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
         }
+        # f.base_url ("http://localhost:11434/v1") es para el path OpenAI-compat
+        # generico (_call_openai_compat) — el endpoint nativo /api/chat que este
+        # payload espera (respuesta en data["message"]["content"]) es siempre
+        # local y fijo. Solo el modelo viene del facet, nunca la URL.
+        # OJO: GPU_SEMAPHORE (jax/muscles/ollama_muscle.py:37) es un
+        # asyncio.Semaphore de PROCESO del REPL de JAX -- esta llamada corre
+        # en el proceso de jax-las-manos (Jacobs) y le pega a Ollama directo
+        # por httpx, sin pasar por ese semáforo. No hay exclusión mutua real
+        # entre el REPL y Jacobs para el acceso a la GPU (verificado
+        # 2026-08-19, sonda T0.a/T1 de latencia de _llm_plan).
         try:
             async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
                 resp = await client.post(OLLAMA_URL, json=payload)
                 resp.raise_for_status()
                 data = resp.json()
+                await record_resolved_version_safe(f.key, data.get("model"))
                 content = data.get("message", {}).get("content", "")
                 return self._parse_plan_json(content, max_steps)
         except Exception as exc:  # noqa: BLE001
