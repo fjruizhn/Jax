@@ -187,7 +187,18 @@ por relevar), y `capability_motor` desde cada `allowed_motors`.
   explícitamente vs. `None` (auto).
 - Criterio #4: motor nuevo dado de alta por INSERT directo (antes del
   form) compite y se despacha — sin este test pasando, no se construye
-  el form.
+  el form. **Debe ser un motor real que responda, no un stub que solo
+  prueba el parseo del catálogo.** No hace falta credencial nueva:
+  `provider`/`credential` ya tienen filas activas para `openai`,
+  `anthropic` y `gemini` (las usa Thot/Hyde/Hipatia del lado de la
+  Mesa) — ninguno de los tres existe hoy como `motor` en
+  `motor_registry` (solo `kimi`/`ada`). Registrar cualquiera de esos
+  tres como `motor` nuevo + `capability_motor` prueba el camino
+  completo con infraestructura ya viva, sin setup adicional.
+- **Orden estricto:** la tarea del form de Admin (§5.7) no puede
+  empezar hasta que el criterio #4 pase por INSERT directo. Si el plan
+  la secuencia antes, se está diseñando UI contra un backend sin
+  verificar.
 
 ## 7. Riesgos / decisiones abiertas para el plan
 
