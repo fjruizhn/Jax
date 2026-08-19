@@ -1,0 +1,29 @@
+id: P10
+statement: >
+  Ningún validador o gate puede fallar abierto ante error o ausencia de
+  señal, incluyendo vía excepción sin capturar.
+origin: "REFORMAS-v3.1.md Apéndice C-bis ('El patrón fail-open', nuevo en v3.1), texto verbatim de la propuesta de regla: candidata fuerte a ser la primera regla NORMATIVA del corpus, con siete casos reales de fundamento (backup-hall9000.sh, _HTTP_FACETS, output_validator.py, load_vocabulary(), IsADirectoryError sin capturar, y dos casos adicionales encontrados el 2026-08-19 durante la ejecución de R4: el try/except combinado de MemoryDB/detect_completeness_intent en jax-platform/chat.py, y logging.lastResort tragando el nivel INFO de credential_resolver sin handler propio)."
+status: NORMATIVA_PENDIENTE
+enforcement:
+  mechanism: "policy/tests/test_no_fail_open_except.py — escaneo AST de ambos repos buscando bloques `except` cuyo cuerpo es únicamente `pass` (la forma más pura y mecánicamente detectable del patrón: traga el error sin propagarlo, sin loguearlo, sin rastro)."
+  test: "policy/tests/test_no_fail_open_except.py"
+version: 0.1
+created: 2026-08-19
+amended_by: null
+notes: >
+  El test existe y corre hoy, pero encontró 32 bloques except-pass reales
+  en ambos repos al escribirse (2026-08-19) — la mayoría son
+  probablemente decisiones legítimas de fail-soft (limpieza best-effort,
+  desconexión de WebSocket, sincronización de catálogo no crítica), no
+  instancias del defecto de gobernanza que esta regla nombra, pero
+  ninguna fue triada individualmente todavía. Marcar NORMATIVA sin esa
+  triage sería exactamente el tipo de afirmación sin verificar que este
+  mismo corpus existe para prevenir — "el que supone se equivoca"
+  aplicado al propio corpus. Pasa a NORMATIVA cuando: (a) cada uno de los
+  32 casos se revisa y se agrega a la lista ALLOWED del test con
+  justificación explícita, o se corrige; y (b) el test corre limpio
+  (exit 0) contra el estado real de ambos repos. El scanner no cubre la
+  forma más sutil del patrón (un fallback que retorna éxito por defecto
+  sin excepción de por medio, ej. output_validator.py) — eso queda como
+  residuo conocido, mismo tratamiento que Q13 (barrido de vocabulario)
+  en REFORMAS-v3.1.md.
