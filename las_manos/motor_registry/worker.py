@@ -35,6 +35,7 @@ from credential_resolver import resolve_credential_instrumented, CredentialUnava
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
+from motor_registry.tools_catalog import TOOLS_CATALOG
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ async def _call_http_openai_compat(
     prompt: str,
     timeout: float,
     max_tokens: int = 0,
+    tools: list[dict] | None = None,
 ) -> dict:
     """Llama a un endpoint OpenAI-compatible. Usado tanto para
     transport='http_openai_compat' (Kimi/Ada/futuros con API key) como para
@@ -89,13 +91,22 @@ async def _call_http_openai_compat(
     max_tokens (2026-08-10): sin esto, un motor de razonamiento puede gastar
     todo el completion budget en reasoning_content y devolver `content`
     cortado a mitad de palabra — bug real reproducido en vivo contra la API
-    de Moonshot. 0/falsy = no mandar el campo."""
+    de Moonshot. 0/falsy = no mandar el campo.
+
+    tools (GAP2 Fase1, 2026-08-19): OPCIONAL -- si no se pasa, el payload
+    sale idéntico a antes de este cambio, cero comportamiento nuevo para
+    cualquier caller existente. Verificado en vivo contra Ollama+qwen3.6
+    (/v1/chat/completions, el mismo endpoint que esta función usa, no el
+    nativo /api/chat): acepta 'tools' forma OpenAI y devuelve
+    choices[0].message.tool_calls con finish_reason='tool_calls'."""
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
+    if tools:
+        payload["tools"] = tools
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -221,6 +232,15 @@ async def run(
     )
     prompt_with_identity = identity + "\n---\n" + prompt
 
+    # GAP2 Fase1 (2026-08-19): SOLO jax_local, a propósito. executor.py:731-733
+    # ya documenta que _HTTP_FACETS (ada/thot/kimi-via-http) no pasa por la
+    # gobernanza del Motor Registry (allowed_callers/requires_human_gate/
+    # sandbox_only) -- darles tool_calls antes de resolver eso despertaría
+    # ese riesgo hoy dormido. Este `if` literal es el gate completo de Fase1
+    # (cero mapeo tool->capability, eso es Fase2); reemplazarlo por algo
+    # basado en capability es explícitamente trabajo de otra ronda.
+    tools_for_call = TOOLS_CATALOG if motor == "jax_local" else None
+
     # Lanzar tarea HTTP y watcher de kill switch en paralelo
     api_task = asyncio.create_task(
         call_fn(
@@ -230,6 +250,7 @@ async def run(
             prompt=prompt_with_identity,
             timeout=float(motor_entry.default_timeout_seconds),
             max_tokens=motor_entry.max_tokens,
+            tools=tools_for_call,
         )
     )
     kill_task = asyncio.create_task(_watch_kill_switch(kill_switch_path))
@@ -297,6 +318,38 @@ async def run(
     content: str = message.get("content") or ""
     reasoning_content: str = message.get("reasoning_content") or ""
     finish_reason = choices[0].get("finish_reason")
+    tool_calls = message.get("tool_calls") or []
+
+    # GAP2 Fase1 (2026-08-19): el modelo pidió tools -- Fase1 es
+    # observación pura, cero ejecución, cero segundo turno. NO marcar
+    # COMPLETED (el trabajo no terminó, el modelo está esperando un
+    # resultado que nunca le va a llegar en esta fase) -- ese sería
+    # exactamente el fail-open de output_validator.py que dejamos
+    # anotado como deuda: reportar éxito desde una rama que no lo es.
+    if tool_calls:
+        logger.info(
+            "job %s pidió %d tool_call(s) (Fase1, sin ejecutar): %s",
+            job_id, len(tool_calls),
+            [
+                {"name": tc.get("function", {}).get("name"),
+                 "arguments": tc.get("function", {}).get("arguments")}
+                for tc in tool_calls
+            ],
+        )
+        store.update(
+            job_id,
+            status=JobStatus.TOOLS_REQUESTED.value,
+            finished_at=time.time(),
+            result_summary=f"Modelo pidió {len(tool_calls)} tool(s), no ejecutadas (Fase1)",
+            _reasoning_content=reasoning_content[:2000] if reasoning_content else None,
+            _finish_reason=finish_reason,
+            _tool_calls=[
+                {"name": tc.get("function", {}).get("name"),
+                 "arguments": tc.get("function", {}).get("arguments")}
+                for tc in tool_calls
+            ],
+        )
+        return
     usage = response_json.get("usage")
 
     if reasoning_content:
