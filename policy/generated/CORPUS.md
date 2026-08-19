@@ -4,19 +4,51 @@
 # CORPUS — JAX/Axioma, reglas normativas
 
 **Versión del corpus:** 0.1.0
-**SHA256:** `004cd87fdd76dfa71721408b866d7059104c9371c1515038b19b954a2bb7e72a`
+**SHA256:** `040f32ea14ae2d21bcb53df3d03a7897151e745c388532fd3f603c867c963d60`
 **Reglas:** 27
 
 | Estado | Cantidad |
 |---|---|
-| NORMATIVA | 1 |
-| NORMATIVA_PENDIENTE | 14 |
+| NORMATIVA | 2 |
+| NORMATIVA_PENDIENTE | 13 |
 | CULTURAL | 8 |
 | HISTORICA | 4 |
 
 ---
 
 ## NORMATIVA
+
+### P10 — Ningún validador o gate puede fallar abierto ante error o ausencia de señal, incluyendo vía excepción sin capturar.
+
+- **Enunciado:** Ningún validador o gate puede fallar abierto ante error o ausencia de señal, incluyendo vía excepción sin capturar.
+- **Origen:** REFORMAS-v3.1.md Apéndice C-bis ('El patrón fail-open', nuevo en v3.1), texto verbatim de la propuesta de regla: candidata fuerte a ser la primera regla NORMATIVA del corpus, con siete casos reales de fundamento (backup-hall9000.sh, _HTTP_FACETS, output_validator.py, load_vocabulary(), IsADirectoryError sin capturar, y dos casos adicionales encontrados el 2026-08-19 durante la ejecución de R4: el try/except combinado de MemoryDB/detect_completeness_intent en jax-platform/chat.py, y logging.lastResort tragando el nivel INFO de credential_resolver sin handler propio).
+- **Estado:** NORMATIVA
+- **Mecanismo de cumplimiento:** policy/tests/test_no_fail_open_except.py — escaneo AST de ambos repos buscando bloques `except` cuyo cuerpo es únicamente `pass`. Un except-pass legítimo (fail-soft real, verificado uno por uno: nadie aguas abajo cree que la operación salió bien) se marca `# fail-soft: <razón específica>` en la misma línea del `except`; sin esa marca, es una violación — incluye por diseño el except-pass nuevo que alguien escriba mañana sin marcarlo.
+- **Test:** policy/tests/test_no_fail_open_except.py
+- **Versión:** 0.2 · **Creada:** 2026-08-19 · **Enmendada por:** null
+- **Notas:** Triage completo el 2026-08-19, caso por caso, con el criterio "si esto falla en silencio, ¿alguien más adelante actúa creyendo que salió bien?" (no "¿parece grave?"). De los 32 except-pass reales encontrados: 30 fail-soft legítimos, marcados con `# fail-soft: <razón>` (limpieza best-effort, TOCTOU benigno en reapers, control de flujo estándar de asyncio/WebSocket, tests que capturan una excepción inyectada a propósito). 2 fail-open reales, corregidos de verdad, no marcados:
+1. jax-platform/backend/jax_engine/state.py (_poll_one_pipeline) — si
+   resource_manager.release_pipeline() fallaba tras remove_pipeline(),
+   el cupo concurrente quedaba leakeado para siempre y nada lo
+   reintentaba (remove_pipeline ya había sacado la pipeline del
+   tracking) — exactamente el bug que el comentario original de esa
+   misma función documentaba haber corregido, reproducido por la
+   excepción en vez de por el bug original. Corregido: try/except
+   propio con logger.error(pid, tenant_id, exc_info=True) — no se
+   re-lanza (tumbaría el polling de las demás pipelines del ciclo),
+   pero ya no desaparece sin rastro.
+
+2. jax-platform/backend/api/admin/dashboard.py (_count_configured_keys)
+   — `except Exception: pass` hacía indistinguible ".env no existe" de
+   un error de lectura real (permisos, encoding); el dashboard de
+   superadmin mostraba "0 de N configuradas" como hecho verificado en
+   ambos casos. Corregido: acotado a FileNotFoundError (mismo patrón
+   que chat.py/image.py/admin/keys.py, ya fail-soft legítimo), otros
+   errores se propagan de verdad.
+
+Test corre limpio, exit 0, contra el estado real de ambos repos (verificado el mismo día, no en un momento anterior). El scanner sigue sin cubrir la forma más sutil del patrón (un fallback que retorna éxito por defecto sin excepción de por medio, ej. output_validator.py) — eso queda como residuo conocido, mismo tratamiento que Q13 (barrido de vocabulario) en REFORMAS-v3.1.md.
+
+
 
 ### P11 — Nada llega a producción (axioma-ia.io, o cualquier servicio en vivo) desde una rama que no esté mergeada a master.
 
@@ -203,18 +235,6 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 - **Test:** null
 - **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
 - **Notas:** Núcleo de R1 (cambio arquitectónico principal de v3, §0.1). Test de aceptación ya definido en el propio documento — Apéndice B ("caso de prueba de aceptación de R1"): reproducir el incidente del 2026-08-14 22:26-22:28 y verificar que produce ENVELOPE_REJECTED o reclasificación forzada, no prosa con autoridad. No implementado — por eso NORMATIVA_PENDIENTE y no NORMATIVA, aunque el test ya está diseñado en prosa.
-
-
-
-### P10 — Ningún validador o gate puede fallar abierto ante error o ausencia de señal, incluyendo vía excepción sin capturar.
-
-- **Enunciado:** Ningún validador o gate puede fallar abierto ante error o ausencia de señal, incluyendo vía excepción sin capturar.
-- **Origen:** REFORMAS-v3.1.md Apéndice C-bis ('El patrón fail-open', nuevo en v3.1), texto verbatim de la propuesta de regla: candidata fuerte a ser la primera regla NORMATIVA del corpus, con siete casos reales de fundamento (backup-hall9000.sh, _HTTP_FACETS, output_validator.py, load_vocabulary(), IsADirectoryError sin capturar, y dos casos adicionales encontrados el 2026-08-19 durante la ejecución de R4: el try/except combinado de MemoryDB/detect_completeness_intent en jax-platform/chat.py, y logging.lastResort tragando el nivel INFO de credential_resolver sin handler propio).
-- **Estado:** NORMATIVA_PENDIENTE
-- **Mecanismo de cumplimiento:** policy/tests/test_no_fail_open_except.py — escaneo AST de ambos repos buscando bloques `except` cuyo cuerpo es únicamente `pass` (la forma más pura y mecánicamente detectable del patrón: traga el error sin propagarlo, sin loguearlo, sin rastro).
-- **Test:** policy/tests/test_no_fail_open_except.py
-- **Versión:** 0.1 · **Creada:** 2026-08-19 · **Enmendada por:** null
-- **Notas:** El test existe y corre hoy, pero encontró 32 bloques except-pass reales en ambos repos al escribirse (2026-08-19) — la mayoría son probablemente decisiones legítimas de fail-soft (limpieza best-effort, desconexión de WebSocket, sincronización de catálogo no crítica), no instancias del defecto de gobernanza que esta regla nombra, pero ninguna fue triada individualmente todavía. Marcar NORMATIVA sin esa triage sería exactamente el tipo de afirmación sin verificar que este mismo corpus existe para prevenir — "el que supone se equivoca" aplicado al propio corpus. Pasa a NORMATIVA cuando: (a) cada uno de los 32 casos se revisa y se agrega a la lista ALLOWED del test con justificación explícita, o se corrige; y (b) el test corre limpio (exit 0) contra el estado real de ambos repos. El scanner no cubre la forma más sutil del patrón (un fallback que retorna éxito por defecto sin excepción de por medio, ej. output_validator.py) — eso queda como residuo conocido, mismo tratamiento que Q13 (barrido de vocabulario) en REFORMAS-v3.1.md.
 
 
 
