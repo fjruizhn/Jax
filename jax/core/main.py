@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import re
 import os
 import subprocess
@@ -46,7 +47,7 @@ from jax.core.router import Router
 from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
 from jax.muscles.ollama_muscle import OllamaMuscle
-from jax.memory.db import MemoryDB
+from jax.memory.db import MemoryDB, detect_completeness_intent
 from jax.voice.tts import VoiceEngine
 from jax.voice.ears import EarEngine
 
@@ -343,6 +344,33 @@ async def main() -> None:
     kill_path = cfg["jax"]["kill_switch_path"]
     default_faceta = cfg["jax"].get("default_personality", "jax_local")
 
+    # Bloque C: modelo real desde facet_binding, no config.toml. Se
+    # sobrescribe model_default ANTES de build_muscles() — mismo mecanismo
+    # existente (Muscle.invoke usa model_default como fallback), solo
+    # cambia la fuente. Query unica al arrancar (REPL = sesion unica, no
+    # servicio 24/7 — no justifica resolucion por-request como Jacobs/Mesa
+    # web). Si la DB no responde al boot, cfg["personalities"] ya trae el
+    # model_default de config.toml como fallback — no se rompe el arranque.
+    from jax.core.facet_resolver import load_facet_registry
+    try:
+        registry = await load_facet_registry()
+    except Exception as exc:
+        logging.warning(f"No se pudo cargar facet_registry desde DB, usando config.toml: {exc}")
+        registry = {}
+    for key, info in registry.items():
+        if key in cfg["personalities"]:
+            cfg["personalities"][key]["model_default"] = info["model"]
+
+    if registry:
+        import jax.core.router as router_module
+        router_module.VALID_FACETAS = tuple(registry.keys())
+        router_module.AUTO_FACETAS = tuple(k for k, v in registry.items() if v["auto_selectable"])
+        router_module.LABELS = {k: v["display_name"] for k, v in registry.items() if v["display_name"]}
+        router_module.ICONS = {k: v["icon"] for k, v in registry.items() if v["icon"]}
+    # Si registry esta vacio (DB no respondio), router.py conserva sus
+    # constantes hardcodeadas como fallback de arranque — declarado en el
+    # propio router.py, no es una fuente paralela silenciosa.
+
     muscles = build_muscles(cfg)
 
     # Router hibrido: clasificador LOCAL (jax_local / qwen2.5:7b) para lo
@@ -527,8 +555,26 @@ async def main() -> None:
                 # Se agrega SOLO a este turno — no entra al historial permanente.
                 history_for_invocation = list(historial)
                 if db_ok:
+                    bloques_memoria = []
+
+                    # Bypass de completeness (item #4): "que proyectos tenes
+                    # activos" necesita TODOS los facts de esa categoria, no
+                    # solo el mas parecido por distancia vectorial.
+                    tipo_completeness = detect_completeness_intent(user_text)
+                    if tipo_completeness:
+                        facts_completos = await db.get_facts(
+                            only_unverified=False, fact_type=tipo_completeness,
+                            limit=20, user_id=repl_uid)
+                        if facts_completos:
+                            lineas_facts = [f"- {f['fact_text']}" for f in facts_completos]
+                            bloques_memoria.append(
+                                f"Todos los hechos guardados de tipo '{tipo_completeness}':\n"
+                                + "\n".join(lineas_facts)
+                            )
+
                     similares = await db.search_similar_messages(
-                        user_text, limit=5, user_id=repl_uid, project_id=None)
+                        user_text, limit=5, user_id=repl_uid, project_id=None,
+                        recent_history=historial)
                     relevantes = [r for r in similares if r["distancia"] < 0.8]
                     if relevantes:
                         lineas = []
@@ -536,13 +582,15 @@ async def main() -> None:
                             fecha = r["started_at"].strftime("%Y-%m-%d") if r["started_at"] else "?"
                             rol = "user" if r["role"] == "user" else "jax"
                             lineas.append(f"[{fecha}] {rol}: {r['content']}")
-                        contexto_semantico = (
+                        bloques_memoria.append(
                             "Conversaciones relevantes de sesiones anteriores:\n"
                             + "\n".join(lineas)
                         )
+
+                    if bloques_memoria:
                         history_for_invocation = [
                             {"role": "user", "content": "[memoria de sesiones anteriores]"},
-                            {"role": "assistant", "content": contexto_semantico},
+                            {"role": "assistant", "content": "\n\n".join(bloques_memoria)},
                         ] + history_for_invocation
 
                 model_override = MODELO_PESADO if (modo_pesado and faceta == FACETA_PESADO) else None

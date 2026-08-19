@@ -29,6 +29,7 @@ import asyncio
 
 import httpx
 
+from jax.core.model_catalog import record_resolved_version_safe
 from jax.muscles.base import Muscle, MuscleInvocationError, MuscleTimeoutError
 
 # Semaforo global de GPU: UNA inferencia local a la vez en hall9000.
@@ -84,9 +85,17 @@ class OllamaMuscle(Muscle):
                     )
                 data = resp.json()
                 try:
-                    return data["message"]["content"]
+                    contenido = data["message"]["content"]
                 except (KeyError, TypeError) as exc:
                     raise MuscleInvocationError(
                         f"[{self.name}] respuesta inesperada de Ollama: "
                         f"{str(data)[:200]}"
                     ) from exc
+
+        # D1.2 — capturado por consistencia con los transportes HTTP; ver
+        # CONTEXT.md ("decision previa al wiring de resolved_version en
+        # REPL/Jacobs") para la limitacion real: los tags de Ollama no son
+        # alias moviles del proveedor, un drift de PESOS bajo el mismo tag
+        # no es detectable con este campo (haria falta /api/show + digest).
+        await record_resolved_version_safe(self.name, data.get("model"))
+        return contenido

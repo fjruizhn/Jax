@@ -138,4 +138,9 @@ class SubprocessMuscle(Muscle):
 
         self._check_error(proc.returncode, stderr_str)
 
+        # D1.2 (Bloque D) — deliberadamente SIN captura de resolved_version:
+        # --output-format text (arriba) no trae ningun campo de que version
+        # corrio de verdad. Ver CONTEXT.md ("decision previa al wiring de
+        # resolved_version en REPL/Jacobs") — pasar a --output-format json
+        # es una decision aparte, no tomada en esta corrida.
         return stdout_str.strip()
