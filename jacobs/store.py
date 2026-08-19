@@ -83,6 +83,17 @@ async def init_tables() -> None:
                     error            TEXT
                 )
             """)
+            for col, ddl in [
+                ("motor", "ALTER TABLE jacobs_steps ADD COLUMN motor VARCHAR(30) NULL"),
+            ]:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_steps' AND COLUMN_NAME=%s",
+                    (col,),
+                )
+                (exists,) = await cur.fetchone()
+                if not exists:
+                    await cur.execute(ddl)
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS jacobs_events (
                     id          BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -231,13 +242,14 @@ async def step_upsert(s: Step) -> None:
             await cur.execute(
                 """
                 INSERT INTO jacobs_steps
-                    (step_id, pipeline_id, step_index, facet, capability,
+                    (step_id, pipeline_id, step_index, facet, motor, capability,
                      input_ref, output_ref, status, timeout_seconds,
                      retries_allowed, skip_on_fail, trace_id,
                      started_at, finished_at, error, depends_on)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s, %s)
+                VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s, %s)
                 ON DUPLICATE KEY UPDATE
                     status=VALUES(status),
+                    motor=VALUES(motor),
                     output_ref=VALUES(output_ref),
                     timeout_seconds=VALUES(timeout_seconds),
                     started_at=VALUES(started_at),
@@ -246,7 +258,7 @@ async def step_upsert(s: Step) -> None:
                     depends_on=VALUES(depends_on)
                 """,
                 (
-                    s.step_id, s.pipeline_id, s.step_index, s.facet, s.capability,
+                    s.step_id, s.pipeline_id, s.step_index, s.facet, s.motor, s.capability,
                     json.dumps(s.input, ensure_ascii=False), s.output_ref,
                     s.status.value, s.timeout_seconds,
                     s.retries_allowed, s.skip_on_fail, s.trace_id,
@@ -286,6 +298,7 @@ async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
             pipeline_id=row["pipeline_id"],
             step_index=row["step_index"],
             facet=row["facet"],
+            motor=row.get("motor"),
             capability=row["capability"],
             input=input_data,
             output_ref=row["output_ref"],

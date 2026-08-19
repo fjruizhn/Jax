@@ -12,11 +12,16 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import os
 import unittest
+import uuid
 from unittest.mock import AsyncMock, patch
 
+os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+
+from jacobs import store
 from jacobs.executor import _invoke_motor
-from jacobs.models import Pipeline, Step
+from jacobs.models import Pipeline, Step, StepStatus
 
 
 def _pipeline():
@@ -27,10 +32,12 @@ class StepMotorTest(unittest.IsolatedAsyncioTestCase):
     async def test_motor_explicito_viaja_tal_cual(self):
         step = Step(facet="kimi", capability="implementation", motor="ada")
         pipeline = _pipeline()
-        fake_dispatch = AsyncMock()
-        fake_dispatch.return_value.status_code = 200
-        fake_dispatch.return_value.json = lambda: {"job_id": "j1", "status": "pending"}
-        fake_dispatch.return_value.raise_for_status = lambda: None
+
+        class _DispatchResp:
+            status_code = 200
+            def json(self): return {"job_id": "j1", "status": "pending"}
+            def raise_for_status(self): pass
+
         fake_poll = AsyncMock()
         fake_poll.return_value.status_code = 200
         fake_poll.return_value.json = lambda: {"status": "completed", "result_summary": "ok"}
@@ -40,7 +47,7 @@ class StepMotorTest(unittest.IsolatedAsyncioTestCase):
 
         async def fake_post(self, url, json=None, **kw):
             captured["payload"] = json
-            return fake_dispatch.return_value
+            return _DispatchResp()
 
         with patch("httpx.AsyncClient.post", fake_post), \
              patch("httpx.AsyncClient.get", fake_poll):
@@ -76,6 +83,41 @@ class StepMotorTest(unittest.IsolatedAsyncioTestCase):
             await _invoke_motor(step, pipeline, timeout=5)
 
         assert captured["payload"]["motor"] is None, captured["payload"]
+
+
+class StepMotorPersistenceTest(unittest.IsolatedAsyncioTestCase):
+    """step.motor debe sobrevivir el round-trip por jacobs_steps -- si no, un
+    pin explícito (ej. motor="ada") revierte a None en silencio cada vez que
+    un pipeline pasa por resume_pipeline/approve_step (routes.py), que
+    reconstruyen pipeline.plan entero desde steps_by_pipeline() antes de
+    re-despachar."""
+
+    async def asyncSetUp(self):
+        await store.init_tables()
+
+    async def test_motor_sobrevive_upsert_y_reload(self):
+        pid = str(uuid.uuid4())
+        step = Step(
+            step_id=str(uuid.uuid4()), pipeline_id=pid, step_index=0,
+            facet="kimi", motor="ada", capability="implementation",
+            status=StepStatus.pending, trace_id=str(uuid.uuid4()),
+        )
+        await store.step_upsert(step)
+        reloaded = await store.steps_by_pipeline(pid)
+        self.assertEqual(len(reloaded), 1)
+        self.assertEqual(reloaded[0].motor, "ada")
+
+    async def test_motor_none_sobrevive_upsert_y_reload(self):
+        pid = str(uuid.uuid4())
+        step = Step(
+            step_id=str(uuid.uuid4()), pipeline_id=pid, step_index=0,
+            facet="kimi", motor=None, capability="implementation",
+            status=StepStatus.pending, trace_id=str(uuid.uuid4()),
+        )
+        await store.step_upsert(step)
+        reloaded = await store.steps_by_pipeline(pid)
+        self.assertEqual(len(reloaded), 1)
+        self.assertIsNone(reloaded[0].motor)
 
 
 if __name__ == "__main__":

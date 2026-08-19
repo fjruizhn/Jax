@@ -630,7 +630,7 @@ def validate_capability(step: Step) -> CapabilityUnbound | str | None:
         allowed_motors=["kimi"]) PASAN porque 'research'/'analysis' existen en el
         vocabulario. Es el _fallback_plan, que no se puede romper.
 
-    NIVEL B — contrato del motor. Aplica SOLO a _MOTOR_FACETS (hoy kimi).
+    NIVEL B — contrato del motor. Aplica SOLO a _MOTOR_FACETS (hoy kimi, jax_local).
         Mismo contrato que policy.check valida en el Motor Registry, adelantado
         acá para fallar limpio antes del HTTP: la capability resuelta existe en el
         catálogo, el facet ∈ allowed_motors y el caller 'jacobs' ∈ allowed_callers.
