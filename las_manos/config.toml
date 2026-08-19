@@ -269,7 +269,7 @@ forbidden_paths = [".env", "secrets/", "private_keys/", "credentials/"]
 # ------------------------------------------------------------
 
 [capabilities.generate]
-allowed_motors = ["kimi", "ada"]
+allowed_motors = ["kimi", "ada", "jax_local"]
 allowed_callers = ["jacobs", "hyde", "ada"]
 risk_level = "low"
 sandbox_only = true
@@ -279,7 +279,7 @@ max_recursion_depth = 0
 output_schema = "generate.v1"
 
 [capabilities.reason]
-allowed_motors = ["ada", "kimi"]
+allowed_motors = ["ada", "kimi", "jax_local"]
 allowed_callers = ["jacobs", "hyde", "ada", "thot"]
 risk_level = "low"
 sandbox_only = true
@@ -289,7 +289,7 @@ max_recursion_depth = 0
 output_schema = "reason.v1"
 
 [capabilities.design]
-allowed_motors = ["ada", "kimi"]
+allowed_motors = ["ada", "kimi", "jax_local"]
 allowed_callers = ["jacobs", "hyde", "ada"]
 risk_level = "low"
 sandbox_only = true
@@ -309,7 +309,7 @@ max_recursion_depth = 0
 output_schema = "validation.v1"
 
 [capabilities.reconcile]
-allowed_motors = ["ada", "kimi"]
+allowed_motors = ["ada", "kimi", "jax_local"]
 allowed_callers = ["jacobs", "hyde", "ada"]
 risk_level = "low"
 sandbox_only = true
