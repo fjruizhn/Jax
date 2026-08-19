@@ -17,6 +17,10 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+from facet_resolver import resolve_facet, ResolvedFacet, FacetUnavailableError
+from model_catalog import record_resolved_version_safe
+
 import httpx
 
 from jacobs import store
@@ -24,6 +28,7 @@ from jacobs.artifacts import read_artifact, save_if_large
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import VALID_CAPABILITIES, CapabilityUnbound
 from jacobs.policy import check_kill_switch
+from jacobs.usage_writer import record_direct_usage
 
 logger = logging.getLogger("jacobs.executor")
 
@@ -112,32 +117,6 @@ HYDE_MAX_PROMPT_CHARS = 32000
 # las demás facetas de la misma ola (mismo patrón que GPU_SEMAPHORE en
 # jax/muscles/ollama_muscle.py).
 HYDE_SEMAPHORE = asyncio.Semaphore(1)
-
-
-async def _get_active_model(facet: str, fallback: str) -> str:
-    """Lee el modelo activo de `facet_models` (MariaDB jax_memory, tabla
-    creada por la misión facet_models en jax-platform — mismo esquema, mismo
-    servidor). Fail-open: DB caída, tabla no migrada aún, o sin fila activa
-    → `fallback`. Nunca tumba el step por esto."""
-    try:
-        conn = await store.get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT model_name FROM facet_models WHERE facet = %s AND is_active = TRUE",
-                    (facet,),
-                )
-                row = await cur.fetchone()
-        finally:
-            conn.close()
-        if row:
-            return row[0]
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "No se pudo leer modelo activo de '%s' desde facet_models: %s — "
-            "usando fallback '%s'", facet, exc, fallback,
-        )
-    return fallback
 
 
 # ----------------------------------------------------------------
@@ -257,14 +236,12 @@ def _enrich_prompt(ctx_input: dict) -> str:
 #  Invocadores por faceta
 # ----------------------------------------------------------------
 
-async def _invoke_hipatia(prompt: str, timeout: int) -> dict:
-    """Gemini 2.5 Flash con grounding required_web."""
-    api_key = os.environ["GEMINI_API_KEY"]
-    model   = "gemini-2.5-flash"
-    url     = (
-        f"https://generativelanguage.googleapis.com/v1beta/"
-        f"models/{model}:generateContent?key={api_key}"
-    )
+async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+    """Formato Gemini + grounding required_web. Transporte, no faceta —
+    hoy solo hipatia lo usa, pero cualquier facet con transport=http_gemini
+    entra aca sin codigo nuevo."""
+    model = f.model
+    url = f"{f.base_url}/models/{model}:generateContent?key={f.credential}"
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
     payload  = {
         "contents": contents,
@@ -279,6 +256,7 @@ async def _invoke_hipatia(prompt: str, timeout: int) -> dict:
             return resp.json()
 
     data = await _call()
+    final_data = data
     candidate = data.get("candidates", [{}])[0]
     parts_raw = candidate.get("content", {}).get("parts", []) or []
     texto = "".join(p.get("text", "") for p in parts_raw)
@@ -305,6 +283,16 @@ async def _invoke_hipatia(prompt: str, timeout: int) -> dict:
             texto  = texto2
             chunks = chunks2
             queries = meta2.get("webSearchQueries") or []
+            final_data = data2
+
+    # Usage (scope expansion 2026-08-10, mismo campo que jax-platform/backend/
+    # api/chat.py::_call_gemini): tokens de la respuesta que realmente aporto
+    # el `texto` final -- si hubo retry por falta de grounding, es data2, no
+    # el primer data (nota: si hubo retry, el primer llamado tambien consumio
+    # tokens y no se contabilizan aca; limitacion conocida, ver reporte).
+    gemini_usage = final_data.get("usageMetadata") or {}
+    tokens_in  = gemini_usage.get("promptTokenCount", 0)
+    tokens_out = gemini_usage.get("candidatesTokenCount", 0)
 
     sources = []
     seen: set = set()
@@ -315,174 +303,112 @@ async def _invoke_hipatia(prompt: str, timeout: int) -> dict:
             seen.add(uri)
             sources.append({"title": web.get("title", uri), "url": uri})
 
+    # D1.2 — 'modelVersion' es el campo real de Gemini (distinto de 'model'
+    # que usan las APIs OpenAI-compatible abajo). Nota de incertidumbre:
+    # heredado de jax-platform, nunca verificado contra una respuesta real
+    # de Gemini con curl — ver CONTEXT.md.
+    await record_resolved_version_safe(f.key, data.get("modelVersion"))
+
     return {
         "success": True,
-        "facet":   "hipatia",
+        "facet":   f.key,
         "model":   model,
         "result":  texto,
         "sources": sources,
         "queries": queries,
         "grounded": bool(chunks),
+        "tokens_in":  tokens_in,
+        "tokens_out": tokens_out,
     }
 
 
-async def _invoke_jekyll(prompt: str, timeout: int) -> dict:
-    """DeepSeek V4 Flash — análisis humanista."""
-    api_key = os.environ["DEEPSEEK_API_KEY"]
-    model   = "deepseek-v4-flash"
-    url     = "https://api.deepseek.com/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    messages = [
-        {"role": "system", "content": (
-            "Eres Jekyll, un analista con sensibilidad humanista. "
-            "Reflexionas sobre las implicaciones humanas y sociales de los temas. "
-            "Eres profundo, poético cuando es apropiado, pero siempre concreto."
-        )},
-        {"role": "user", "content": prompt},
-    ]
-    payload = {"model": model, "messages": messages, "stream": False}
+async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+    """Formato chat/completions estilo OpenAI. Transporte, no faceta —
+    jekyll/thot/ada convergen aca (antes eran 3 copias casi identicas con
+    URL/modelo/persona hardcodeados). Sin streaming: jekyll/thot ya lo
+    probaban sin streaming; ada pierde SSE a cambio de una sola funcion
+    para las 3 (simplificacion deliberada, el contenido final es
+    equivalente, solo cambia como se ensambla)."""
+    url = f"{f.base_url}/chat/completions"
+    headers = {"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"}
+    messages = []
+    if f.persona:
+        messages.append({"role": "system", "content": f.persona})
+    messages.append({"role": "user", "content": prompt})
+    payload = {"model": f.model, "messages": messages, "stream": False}
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"DeepSeek HTTP {resp.status_code}: {resp.text[:200]}")
+            raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {resp.text[:200]}")
         data  = resp.json()
         texto = data["choices"][0]["message"].get("content", "")
 
-    return {
-        "success": True,
-        "facet":   "jekyll",
-        "model":   model,
-        "result":  texto,
-    }
+    # D1.2 — best-effort, fuera del context manager del client: nunca debe
+    # poder romper la respuesta al step (record_resolved_version_safe ya
+    # atrapa sus propias excepciones).
+    await record_resolved_version_safe(f.key, data.get("model"))
 
-
-async def _invoke_thot(prompt: str, timeout: int) -> dict:
-    """OpenAI GPT-5.5 — crítica y cuestionamiento."""
-    api_key = os.environ["OPENAI_API_KEY"]
-    model   = "gpt-5.5"
-    url     = "https://api.openai.com/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type":  "application/json",
-    }
-    messages = [
-        {"role": "system", "content": (
-            "Eres Thot, el crítico de JAX. Tu trabajo es cuestionar, "
-            "identificar supuestos peligrosos, riesgos ocultos y fallas de razonamiento. "
-            "Sé preciso, incisivo y honesto. No seas condescendiente."
-        )},
-        {"role": "user", "content": prompt},
-    ]
-    payload = {"model": model, "messages": messages, "stream": False}
-
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"OpenAI HTTP {resp.status_code}: {resp.text[:200]}")
-        data  = resp.json()
-        texto = data["choices"][0]["message"].get("content", "")
+    # Usage (scope expansion 2026-08-10, mismo campo que jax-platform/backend/
+    # api/chat.py::_call_openai_compat): jekyll/thot/ada convergen aca, asi
+    # que este solo lugar cubre los 3.
+    usage = data.get("usage") or {}
+    tokens_in  = usage.get("prompt_tokens", 0)
+    tokens_out = usage.get("completion_tokens", 0)
 
     return {
         "success": True,
-        "facet":   "thot",
-        "model":   model,
+        "facet":   f.key,
+        "model":   f.model,
         "result":  texto,
+        "tokens_in":  tokens_in,
+        "tokens_out": tokens_out,
     }
 
 
-async def _invoke_ada(prompt: str, timeout: int) -> dict:
-    """Z.ai GLM-5.2 — diseño de arquitectura. Gracia si la key no está."""
-    api_key = os.environ.get("ZAI_API_KEY") or os.environ.get("ZHIPU_API_KEY", "")
-    if not api_key:
-        return {
-            "success": False,
-            "facet":   "ada",
-            "result":  "Ada no disponible — ZAI_API_KEY no configurada.",
-            "disabled": True,
-        }
-    model   = "glm-5.2"
-    url     = "https://api.z.ai/api/paas/v4/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type":  "application/json",
-    }
-    messages = [
-        {"role": "system", "content": (
-            "Eres Ada, arquitecta de sistemas. "
-            "Diseñas soluciones técnicas elegantes con rigor matemático."
-        )},
-        {"role": "user", "content": prompt},
-    ]
+async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
+    """Ollama local — razonamiento local. Modelo desde facet_binding, ya
+    no hardcodeado qwen3:14b (el binding real hoy es qwen3-coder:30b)."""
     payload = {
-        "model": model,
-        "messages": messages,
-        "stream": True,
-        "max_tokens": 131072,
-    }
-    texto = ""
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        async with client.stream("POST", url, headers=headers, json=payload) as resp:
-            if resp.status_code != 200:
-                body = await resp.aread()
-                raise RuntimeError(f"Z.ai HTTP {resp.status_code}: {body[:200]!r}")
-            partes = []
-            async for linea in resp.aiter_lines():
-                if not linea or not linea.startswith("data:"):
-                    continue
-                payload_str = linea[5:].strip()
-                if payload_str == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload_str)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                pieza = delta.get("content")
-                if pieza:
-                    partes.append(pieza)
-            texto = "".join(partes)
-
-    return {
-        "success": True,
-        "facet":   "ada",
-        "model":   model,
-        "result":  texto,
-    }
-
-
-async def _invoke_jax_local(prompt: str, timeout: int) -> dict:
-    """qwen3:14b via Ollama — razonamiento local."""
-    payload = {
-        "model":    "qwen3:14b",
+        "model":    f.model,
         "messages": [{"role": "user", "content": prompt}],
         "stream":   False,
     }
+    url = f"{f.base_url}/api/chat" if f.base_url else OLLAMA_URL
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(OLLAMA_URL, json=payload)
+        resp = await client.post(url, json=payload)
         if resp.status_code != 200:
             raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
         data  = resp.json()
         texto = data.get("message", {}).get("content", "")
 
+    # D1.2 — capturado por consistencia con los transportes HTTP; ver
+    # CONTEXT.md para la limitacion real (tags de Ollama no son alias
+    # moviles del proveedor, no detecta drift de pesos bajo el mismo tag).
+    await record_resolved_version_safe(f.key, data.get("model"))
+
+    # Usage (scope expansion 2026-08-10, mismo campo que jax-platform/backend/
+    # api/chat.py::_call_ollama).
+    tokens_in  = data.get("prompt_eval_count", 0)
+    tokens_out = data.get("eval_count", 0)
+
     return {
         "success": True,
-        "facet":   "jax_local",
-        "model":   "qwen3:14b",
+        "facet":   f.key,
+        "model":   f.model,
         "result":  texto,
+        "tokens_in":  tokens_in,
+        "tokens_out": tokens_out,
     }
 
 
-async def _invoke_hyde(prompt: str, timeout: int) -> dict:
+async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     """Claude Code CLI (binario `claude`) como subproceso headless — mismo
     mecanismo de jax/muscles/subprocess_muscle.py, en producción hace meses
     en el CLI viejo. Adaptado a la firma de Jacobs: sin serialización de
     historial (Jacobs ya arma el contexto completo en `prompt` vía
     _enrich_prompt, antes de llegar acá — igual que para las demás facetas)."""
-    model = await _get_active_model("hyde", fallback="sonnet")
+    model = f.model
 
     safe_prompt = prompt
     if len(safe_prompt) > HYDE_MAX_PROMPT_CHARS:
@@ -535,6 +461,10 @@ async def _invoke_hyde(prompt: str, timeout: int) -> dict:
     if any(t in low for t in ("error", "fatal", "exception", "failed")):
         raise RuntimeError(f"[hyde] error en stderr: {stderr_str[:200]}")
 
+    # D1.2 (Bloque D) — deliberadamente SIN captura de resolved_version:
+    # --output-format text (arriba) no trae ningun campo de que version
+    # corrio de verdad. Ver CONTEXT.md ("decision previa al wiring de
+    # resolved_version en REPL/Jacobs").
     return {
         "success": True,
         "facet":   "hyde",
@@ -572,7 +502,7 @@ _CAPABILITY_MAP = {
 }
 
 
-async def _invoke_motor(step: Step, timeout: int) -> dict:
+async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
     """Kimi via Motor Registry de LAS MANOS. Polling hasta completar."""
     capability = _CAPABILITY_MAP.get(step.capability, step.capability)
     # Observabilidad: si la capability no estaba en el mapa de traducción, se
@@ -589,6 +519,8 @@ async def _invoke_motor(step: Step, timeout: int) -> dict:
         "motor":      step.facet,
         "trace_id":   step.trace_id,
         "prompt":     _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
+        "user_id":    pipeline.user_id,
+        "tenant_id":  pipeline.tenant_id,
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload)
@@ -813,27 +745,43 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     prompt    = _enrich_prompt(ctx_input)
     timeout   = step.timeout_seconds
 
-    if step.facet == "hipatia":
-        return await _invoke_hipatia(prompt, timeout)
-    if step.facet == "jekyll":
-        return await _invoke_jekyll(prompt, timeout)
-    if step.facet == "thot":
-        return await _invoke_thot(prompt, timeout)
-    if step.facet == "ada":
-        return await _invoke_ada(prompt, timeout)
-    if step.facet == "jax_local":
-        return await _invoke_jax_local(prompt, timeout)
+    # Despacho por TRANSPORTE (Bloque C — antes era if/elif por nombre de
+    # faceta con modelo/URL hardcodeados en cada rama). resolve_facet() es
+    # FAIL-CLOSED: sin binding activo, FacetUnavailableError sube y
+    # _run_one_step la captura igual que cualquier otra excepcion — el step
+    # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
-        return await _invoke_motor(step, timeout)
-    if step.facet == "hyde":
+        return await _invoke_motor(step, pipeline, timeout)
+
+    f = await resolve_facet(step.facet)
+
+    # Transportes HTTP directos (scope expansion 2026-08-10): la Mesa web ya
+    # atribuye costo para estas mismas facetas via jax-platform/backend/api/
+    # chat.py (Tasks 1-4); esto cubre el MISMO transporte cuando lo dispara un
+    # pipeline de Jacobs en vez de un chat directo. record_direct_usage es
+    # fail-soft por su cuenta (sin identidad no escribe; error de DB solo
+    # loguea) -- nunca puede romper un step ya exitoso.
+    if f.transport in ("http_gemini", "http_openai_compat", "ollama"):
+        if f.transport == "http_gemini":
+            result = await _invoke_http_gemini(f, prompt, timeout)
+        elif f.transport == "http_openai_compat":
+            result = await _invoke_http_openai_compat(f, prompt, timeout)
+        else:
+            result = await _invoke_ollama(f, prompt, timeout)
+        await record_direct_usage(
+            pipeline.user_id, pipeline.tenant_id, step.facet,
+            f.provider_id, f.model,
+            result.get("tokens_in", 0), result.get("tokens_out", 0),
+        )
+        return result
+    if f.transport == "subprocess":
         # Llegamos aquí solo si Fernando aprobó vía /approve-step (gate de
-        # aprobación intacto, no tocado en esta misión). v0.3: ejecución real
-        # vía Claude Code CLI (antes placeholder de v0.2).
-        result = await _invoke_hyde(prompt, timeout)
+        # aprobación intacto, no tocado en esta misión).
+        result = await _invoke_hyde(f, prompt, timeout)
         result["approved"] = True
         return result
 
-    raise ValueError(f"Faceta desconocida: '{step.facet}'")
+    raise ValueError(f"Transporte desconocido para facet '{step.facet}': '{f.transport}'")
 
 
 # ----------------------------------------------------------------

@@ -64,6 +64,8 @@ class Pipeline(BaseModel):
     name:               str
     orchestrator:       str = "Jacobs"
     invoked_by:         str
+    user_id:            str | None = None
+    tenant_id:          str | None = None
     mode:               str
     status:             PipelineStatus = PipelineStatus.pending
     plan:               list[Step] = Field(default_factory=list)
@@ -80,6 +82,8 @@ class PipelineCreateRequest(BaseModel):
     name:             str
     objective:        str
     invoked_by:       str
+    user_id:          str | None = None
+    tenant_id:        str | None = None
     mode:             str
     max_steps:        int = 20
     steps:            list[StepSpec] | None = None

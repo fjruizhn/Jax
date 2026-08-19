@@ -1,8 +1,8 @@
 # /etc/systemd/system/jax-memory-worker.service
 [Unit]
 Description=JAX — Worker de memoria (destila facts/decisiones/pendientes con scope de dos niveles)
-After=network.target mariadb.service
-Wants=mariadb.service
+After=network.target docker.service
+Wants=docker.service
 
 [Service]
 Type=oneshot

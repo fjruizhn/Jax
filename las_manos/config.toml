@@ -151,6 +151,13 @@ sandbox_only = true
 default_timeout_seconds = 600
 supports_reasoning = true
 reasoning_default_visibility = "audit_only"
+# Bug real 2026-08-10: sin esto, el razonamiento se comio mas de la mitad
+# del completion budget con un prompt trivial (usage real verificado:
+# completion_tokens=866, reasoning_tokens=467) — un prompt largo/demandante
+# puede dejar `content` cortado a mitad de palabra. 8000 es punto de partida
+# razonable (holgado sobre lo observado), no un techo medido contra el
+# limite real de Moonshot para este modelo — ajustar si se repite el corte.
+max_tokens = 8000
 
 [motors.ada]
 enabled = true
@@ -163,6 +170,9 @@ sandbox_only = true
 default_timeout_seconds = 600
 supports_reasoning = true
 reasoning_default_visibility = "audit_only"
+# Mismo razonamiento que kimi: tambien supports_reasoning=true, mismo riesgo
+# de que el razonamiento se coma el budget de la respuesta final.
+max_tokens = 8000
 
 # ------------------------------------------------------------
 #  CAPABILITIES — tareas que los motores pueden ejecutar

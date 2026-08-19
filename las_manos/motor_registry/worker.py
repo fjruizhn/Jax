@@ -30,6 +30,18 @@ import httpx
 
 from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
+from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+
+# motor (catalogo local) -> provider_id (tabla `credential`/`model`).
+# Verificado 2026-08-10 contra el schema real de la DB: Ada/GLM usa
+# provider_id "zhipu" (NO "zai" -- esa es la clave `provider` interna de
+# las_manos/config.toml [motors.ada], que identifica el motor dentro del
+# catalogo local, distinta del provider_id real que usan las tablas
+# `credential`/`model`). Antes de este fix, ada resolvia credencial contra
+# provider_id="ada" (el fallback .get(motor, motor)) -- nunca coincidia con
+# ninguna fila real, y ademas no generaba fila de uso porque el segundo
+# call site usaba .get(motor) sin fallback (== None).
+_MOTOR_PROVIDER_MAP = {"kimi": "moonshot", "ada": "zhipu"}
 from motor_registry.job_store import JobStore
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
@@ -76,12 +88,21 @@ async def _call_kimi(
     api_key: str,
     prompt: str,
     timeout: float,
+    max_tokens: int = 0,
 ) -> dict:
-    """Llama a la API de Kimi. Devuelve el dict JSON completo de la respuesta."""
+    """Llama a la API de Kimi. Devuelve el dict JSON completo de la respuesta.
+
+    max_tokens (2026-08-10): sin esto, un motor de razonamiento puede gastar
+    todo el completion budget en reasoning_content y devolver `content`
+    cortado a mitad de palabra — bug real reproducido en vivo contra la API
+    de Moonshot. 0/falsy = no mandar el campo (motor sin este limite
+    configurado)."""
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -116,6 +137,8 @@ async def run(
     store: JobStore,
     catalog: MotorCatalog,
     kill_switch_path: str,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -141,13 +164,15 @@ async def run(
         return
 
     # Validar API key
-    api_key = os.environ.get(motor_entry.api_key_env, "")
-    if not api_key:
+    provider_id = _MOTOR_PROVIDER_MAP.get(motor, motor)
+    try:
+        api_key = await resolve_credential_instrumented(provider_id)
+    except CredentialUnavailableError:
         store.update(
             job_id,
             status=JobStatus.FAILED.value,
             finished_at=time.time(),
-            error=f"Variable de entorno '{motor_entry.api_key_env}' no definida o vacía",
+            error=f"Sin credencial válida configurada para '{provider_id}'",
         )
         return
 
@@ -188,6 +213,7 @@ async def run(
             api_key=api_key,
             prompt=prompt_with_identity,
             timeout=float(motor_entry.default_timeout_seconds),
+            max_tokens=motor_entry.max_tokens,
         )
     )
     kill_task = asyncio.create_task(_watch_kill_switch(kill_switch_path))
@@ -254,11 +280,24 @@ async def run(
     message = choices[0].get("message", {})
     content: str = message.get("content") or ""
     reasoning_content: str = message.get("reasoning_content") or ""
+    finish_reason = choices[0].get("finish_reason")
+    usage = response_json.get("usage")
 
     if reasoning_content:
         logger.debug(
             "reasoning_content de job %s (%d chars) — solo en log, no expuesto",
             job_id, len(reasoning_content),
+        )
+
+    # Observabilidad (2026-08-10): antes finish_reason/usage se descartaban
+    # por completo — un corte real (finish_reason='length') era
+    # indiagnosticable despues del hecho, solo quedaba `content` truncado
+    # sin ninguna pista de por que.
+    if finish_reason == "length":
+        logger.warning(
+            "job %s cortado por limite de tokens (finish_reason=length) — "
+            "content=%d chars, usage=%s",
+            job_id, len(content), usage,
         )
 
     # Validar output contra el schema de la capability
@@ -275,7 +314,35 @@ async def run(
         result_summary=result_summary,
         # Campos internos — guardados en JSONL, no expuestos en MotorJobView
         _reasoning_content=reasoning_content[:2000] if reasoning_content else None,
+        _finish_reason=finish_reason,
+        _usage=usage,
         _validation_validated=validation["validated"],
         _validation_warning=validation.get("warning"),
         _validation_missing_fields=validation.get("missing_fields") or [],
     )
+
+    # Usage tracking (2026-08-10): best-effort, nunca debe romper el job ya
+    # marcado COMPLETED arriba. record_motor_usage es fail-soft por su
+    # cuenta (sin user_id/tenant_id no escribe nada; error de DB solo loguea).
+    # provider_id: reutiliza la MISMA variable ya resuelta arriba (linea ~141)
+    # para la credencial -- antes se re-declaraba aca con un default DISTINTO
+    # (.get(motor) sin fallback vs .get(motor, motor)), dos semanticas para
+    # el mismo nombre dentro de la misma funcion, y para cualquier motor sin
+    # entrada en el mapa esta segunda copia daba None en silencio (0 filas
+    # de uso, sin log).
+    from motor_registry.usage_writer import record_motor_usage
+    if provider_id and usage:
+        await record_motor_usage(
+            user_id, tenant_id, motor, provider_id, motor_entry.model,
+            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+        )
+    elif provider_id:
+        # Observabilidad (I2, 2026-08-10): sin este log, un provider que
+        # responde sin bloque 'usage' hace que Costos subreporte sin ningun
+        # rastro -- mismo hueco que finish_reason=='length' ya cierra arriba
+        # para el caso de corte por limite de tokens.
+        logger.warning(
+            "job %s (motor=%s): respuesta sin 'usage' -- no se registra "
+            "fila de costo (tokens desconocidos)",
+            job_id, motor,
+        )

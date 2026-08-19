@@ -26,6 +26,12 @@ class MotorEntry:
     default_timeout_seconds: int
     supports_reasoning: bool
     reasoning_default_visibility: str = "none"
+    # Bug real 2026-08-10: sin este limite explicito, un motor de
+    # razonamiento puede gastar todo el completion budget en
+    # reasoning_content y dejar `content` cortado a mitad de palabra —
+    # reproducido en vivo contra la API real de Moonshot. 0 = no mandar
+    # max_tokens (compat con motores sin este campo en config.toml).
+    max_tokens: int = 0
 
 
 @dataclass
@@ -64,6 +70,7 @@ class MotorCatalog:
                 default_timeout_seconds=cfg.get("default_timeout_seconds", 300),
                 supports_reasoning=cfg.get("supports_reasoning", False),
                 reasoning_default_visibility=cfg.get("reasoning_default_visibility", "none"),
+                max_tokens=cfg.get("max_tokens", 0),
             )
         for name, cfg in config.get("capabilities", {}).items():
             self._capabilities[name] = CapabilityEntry(
