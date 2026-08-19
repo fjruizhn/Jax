@@ -1,0 +1,23 @@
+id: P11
+statement: >
+  Nada llega a producción (axioma-ia.io, o cualquier servicio en vivo)
+  desde una rama que no esté mergeada a master.
+origin: "Ledger de ejecución del plan R4 (docs/superpowers/plans/2026-08-18-r4-motor-desacoplado-de-faceta.md, jax-platform), corrección de plan commiteada el 2026-08-19 (commit edab23f, 'fix(plan): saca el deploy de frontend a producción de Tasks 6 y 9'): dos incidentes reales el mismo día — un frontend de una rama sin mergear desplegado a axioma-ia.io llamando a un endpoint que master no tenía, 404 en vivo para cualquier usuario real, revertido dos veces en la misma sesión antes de que la regla quedara escrita. Precedente relacionado, mismo día, sin deploy de código pero mismo patrón de fondo: la degradación de producción por checkout de master sin credenciales de infra/facetas-bloque-d."
+status: NORMATIVA
+enforcement:
+  mechanism: "policy/tests/test_no_deploy_from_unmerged_branch.py — compara el hash del bundle JS realmente servido en axioma-ia.io contra un rebuild limpio de origin/master en un worktree temporal. Si difieren, lo desplegado no vino de master."
+  test: "policy/tests/test_no_deploy_from_unmerged_branch.py"
+version: 0.1
+created: 2026-08-19
+amended_by: null
+notes: >
+  Verificado NORMATIVA de verdad, no aspiracional: corrida en vivo el
+  2026-08-19 tras el merge y deploy real de R4 — OK, el bundle
+  desplegado coincide byte a byte (post-hash) con origin/master. La
+  regla es deliberadamente estrecha (solo frontend/axioma-ia.io, solo
+  jax-platform) porque es lo que el incidente real involucró y lo que el
+  test puede verificar hoy sin acceso de escritura a la VM; extenderla a
+  jax-las-manos.service/jax-platform.service (verificar que el proceso
+  corriendo coincide con el commit real, no solo el bundle estático)
+  queda como ampliación futura, no bloqueante para que esta instancia
+  sea NORMATIVA hoy.

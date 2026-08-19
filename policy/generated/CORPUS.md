@@ -4,17 +4,31 @@
 # CORPUS — JAX/Axioma, reglas normativas
 
 **Versión del corpus:** 0.1.0
-**SHA256:** `0b0bed6aa5fdf59f478ca926166a098d817b37029f606a1ba71c973490806dcd`
-**Reglas:** 25
+**SHA256:** `004cd87fdd76dfa71721408b866d7059104c9371c1515038b19b954a2bb7e72a`
+**Reglas:** 27
 
 | Estado | Cantidad |
 |---|---|
-| NORMATIVA | 0 |
-| NORMATIVA_PENDIENTE | 13 |
+| NORMATIVA | 1 |
+| NORMATIVA_PENDIENTE | 14 |
 | CULTURAL | 8 |
 | HISTORICA | 4 |
 
 ---
+
+## NORMATIVA
+
+### P11 — Nada llega a producción (axioma-ia.io, o cualquier servicio en vivo) desde una rama que no esté mergeada a master.
+
+- **Enunciado:** Nada llega a producción (axioma-ia.io, o cualquier servicio en vivo) desde una rama que no esté mergeada a master.
+- **Origen:** Ledger de ejecución del plan R4 (docs/superpowers/plans/2026-08-18-r4-motor-desacoplado-de-faceta.md, jax-platform), corrección de plan commiteada el 2026-08-19 (commit edab23f, 'fix(plan): saca el deploy de frontend a producción de Tasks 6 y 9'): dos incidentes reales el mismo día — un frontend de una rama sin mergear desplegado a axioma-ia.io llamando a un endpoint que master no tenía, 404 en vivo para cualquier usuario real, revertido dos veces en la misma sesión antes de que la regla quedara escrita. Precedente relacionado, mismo día, sin deploy de código pero mismo patrón de fondo: la degradación de producción por checkout de master sin credenciales de infra/facetas-bloque-d.
+- **Estado:** NORMATIVA
+- **Mecanismo de cumplimiento:** policy/tests/test_no_deploy_from_unmerged_branch.py — compara el hash del bundle JS realmente servido en axioma-ia.io contra un rebuild limpio de origin/master en un worktree temporal. Si difieren, lo desplegado no vino de master.
+- **Test:** policy/tests/test_no_deploy_from_unmerged_branch.py
+- **Versión:** 0.1 · **Creada:** 2026-08-19 · **Enmendada por:** null
+- **Notas:** Verificado NORMATIVA de verdad, no aspiracional: corrida en vivo el 2026-08-19 tras el merge y deploy real de R4 — OK, el bundle desplegado coincide byte a byte (post-hash) con origin/master. La regla es deliberadamente estrecha (solo frontend/axioma-ia.io, solo jax-platform) porque es lo que el incidente real involucró y lo que el test puede verificar hoy sin acceso de escritura a la VM; extenderla a jax-las-manos.service/jax-platform.service (verificar que el proceso corriendo coincide con el commit real, no solo el bundle estático) queda como ampliación futura, no bloqueante para que esta instancia sea NORMATIVA hoy.
+
+
 
 ## NORMATIVA_PENDIENTE
 
@@ -116,8 +130,19 @@ DISCREPANCIA CON LA TAREA: las rutas absolutas citadas en el encargo de esta fas
 - **Mecanismo de cumplimiento:** null
 - **Test:** null
 - **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
-- **Notas:** Tensión con el sistema actual: las_manos/config.toml ya otorga capabilities vía `allowed_callers` (lista de facetas por nombre) — exactamente el modelo "por identidad de facet" que este principio rechaza. El mecanismo que P04 exige (R3, contrato de tarea con capabilities inyectadas por el orquestador) no está implementado.
-Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTURAL — el test es escribible (barrer el código buscando decisiones de capacidad basadas en nombre de facet, fallar si aparecen; que hoy fallaría es el punto). La tensión con `allowed_callers` no es un defecto del corpus, es su primer hallazgo real: una contradicción entre norma declarada y mecanismo implementado, con archivo y línea exactos. `allowed_callers` en las_manos/config.toml es el punto de entrada concreto que R3 tiene que reemplazar cuando se implemente esa fase.
+- **Notas:** Tensión con el sistema actual: son DOS mecanismos identity-based paralelos, no uno, ambos en las_manos/config.toml pero gateados por código distinto:
+1. `facets.<nombre>.allowed_ops` (config.toml líneas 34-60) — gatea las
+   11 operaciones `[ops.*]` (incluida `audit_log_read`) por identidad de
+   faceta, vía `PolicyEngine.check()` en las_manos/policy.py:62.
+2. `capabilities.<nombre>.allowed_callers` / `allowed_motors`
+   (config.toml líneas 169+) — gatea las capabilities de pipeline
+   (code_swarm, refactor, etc.) por identidad de faceta llamante y de
+   motor destino, vía dos puntos de enforcement redundantes:
+   `jacobs/executor.py:validate_capability()` (líneas 728, 731) y
+   `las_manos/motor_registry/policy.py` (líneas 62, 121).
+
+El mecanismo que P04 exige (R3, contrato de tarea con capabilities inyectadas por el orquestador) no está implementado en ninguno de los dos.
+Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTURAL — el test es escribible (barrer el código buscando decisiones de capacidad basadas en nombre de facet, fallar si aparecen; que hoy fallaría es el punto). La tensión no es un defecto del corpus, es su primer hallazgo real: una contradicción entre norma declarada y DOS mecanismos implementados, con archivo y línea exactos cada uno. Ambos quedan anotados como los puntos de entrada concretos que R3 tiene que reemplazar cuando se implemente esa fase — unificarlos es alcance de R3 completo, no de Fase 1 (que resuelve read_audit_log en (1) y CAPABILITY_UNBOUND en (2) por separado, sin tocar el otro).
 
 
 
@@ -178,6 +203,18 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 - **Test:** null
 - **Versión:** 0.1 · **Creada:** 2026-08-15 · **Enmendada por:** null
 - **Notas:** Núcleo de R1 (cambio arquitectónico principal de v3, §0.1). Test de aceptación ya definido en el propio documento — Apéndice B ("caso de prueba de aceptación de R1"): reproducir el incidente del 2026-08-14 22:26-22:28 y verificar que produce ENVELOPE_REJECTED o reclasificación forzada, no prosa con autoridad. No implementado — por eso NORMATIVA_PENDIENTE y no NORMATIVA, aunque el test ya está diseñado en prosa.
+
+
+
+### P10 — Ningún validador o gate puede fallar abierto ante error o ausencia de señal, incluyendo vía excepción sin capturar.
+
+- **Enunciado:** Ningún validador o gate puede fallar abierto ante error o ausencia de señal, incluyendo vía excepción sin capturar.
+- **Origen:** REFORMAS-v3.1.md Apéndice C-bis ('El patrón fail-open', nuevo en v3.1), texto verbatim de la propuesta de regla: candidata fuerte a ser la primera regla NORMATIVA del corpus, con siete casos reales de fundamento (backup-hall9000.sh, _HTTP_FACETS, output_validator.py, load_vocabulary(), IsADirectoryError sin capturar, y dos casos adicionales encontrados el 2026-08-19 durante la ejecución de R4: el try/except combinado de MemoryDB/detect_completeness_intent en jax-platform/chat.py, y logging.lastResort tragando el nivel INFO de credential_resolver sin handler propio).
+- **Estado:** NORMATIVA_PENDIENTE
+- **Mecanismo de cumplimiento:** policy/tests/test_no_fail_open_except.py — escaneo AST de ambos repos buscando bloques `except` cuyo cuerpo es únicamente `pass` (la forma más pura y mecánicamente detectable del patrón: traga el error sin propagarlo, sin loguearlo, sin rastro).
+- **Test:** policy/tests/test_no_fail_open_except.py
+- **Versión:** 0.1 · **Creada:** 2026-08-19 · **Enmendada por:** null
+- **Notas:** El test existe y corre hoy, pero encontró 32 bloques except-pass reales en ambos repos al escribirse (2026-08-19) — la mayoría son probablemente decisiones legítimas de fail-soft (limpieza best-effort, desconexión de WebSocket, sincronización de catálogo no crítica), no instancias del defecto de gobernanza que esta regla nombra, pero ninguna fue triada individualmente todavía. Marcar NORMATIVA sin esa triage sería exactamente el tipo de afirmación sin verificar que este mismo corpus existe para prevenir — "el que supone se equivoca" aplicado al propio corpus. Pasa a NORMATIVA cuando: (a) cada uno de los 32 casos se revisa y se agrega a la lista ALLOWED del test con justificación explícita, o se corrige; y (b) el test corre limpio (exit 0) contra el estado real de ambos repos. El scanner no cubre la forma más sutil del patrón (un fallback que retorna éxito por defecto sin excepción de por medio, ej. output_validator.py) — eso queda como residuo conocido, mismo tratamiento que Q13 (barrido de vocabulario) en REFORMAS-v3.1.md.
 
 
 
