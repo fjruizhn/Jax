@@ -34,14 +34,16 @@ class CatalogFromDbTest(unittest.IsolatedAsyncioTestCase):
         catalog = await MotorCatalog.from_db()
         cap = catalog.get_capability("generate")
         assert cap is not None, "capability 'generate' no cargó desde DB"
-        assert cap.allowed_motors == ["kimi", "ada"], cap.allowed_motors
+        # Task 4 agregó jax_local a 'generate' (priority 2, detrás de kimi/ada).
+        assert cap.allowed_motors == ["kimi", "ada", "jax_local"], cap.allowed_motors
 
-    async def test_from_db_capability_sin_thot_no_incluye_motor_inexistente(self):
+    async def test_from_db_capability_critique_incluye_thot_en_orden(self):
         catalog = await MotorCatalog.from_db()
         cap = catalog.get_capability("critique")
         assert cap is not None
-        assert "thot" not in cap.allowed_motors, cap.allowed_motors
-        assert cap.allowed_motors == ["ada"], cap.allowed_motors
+        # Task 8 agregó thot a 'critique' (priority 0, delante de ada).
+        assert "thot" in cap.allowed_motors, cap.allowed_motors
+        assert cap.allowed_motors == ["thot", "ada"], cap.allowed_motors
 
 
 if __name__ == "__main__":
