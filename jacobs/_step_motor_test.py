@@ -6,7 +6,14 @@ porque _invoke_motor siempre mandaba motor=step.facet (executor.py:519
 antes de este fix).
 
 Corre desde /home/fruiz/jax con:
-  PYTHONPATH=/home/fruiz/jax .venv/bin/python jacobs/_step_motor_test.py
+  PYTHONPATH=/home/fruiz/jax .venv/bin/python -m unittest jacobs._step_motor_test
+
+NO como `python jacobs/_step_motor_test.py` directo -- eso pone
+jacobs/ al frente de sys.path y produce una identidad de clase Step
+duplicada entre este archivo y jacobs.executor/jacobs.store, causando
+fallos falsos (AttributeError/payload incorrecto) aunque el código real
+sea correcto. Verificado 2026-08-19: -m unittest da 4/4 verde, el
+invocado directo falla por esto, no por un bug real.
 
 En memoria de Jairo Urbina.
 """
