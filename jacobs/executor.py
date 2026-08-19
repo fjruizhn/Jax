@@ -703,8 +703,12 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
         # chequeo, el step ejecutaría con result["approved"] = True sin
         # aprobación humana real. No alcanzable hoy (ninguna capability
         # lista "hyde" en allowed_motors), pero a un cambio de config.toml
-        # de distancia. 'jax_local' también queda fuera (no está en ningún
-        # conjunto de dispatch). NOTA: reroute SÍ puede apuntar a
+        # de distancia. 'jax_local' (R4: sumado a _MOTOR_FACETS, SÍ es un
+        # conjunto de dispatch) tampoco aparece hoy como candidato de
+        # reroute -- no porque esté excluido del dispatch, sino porque
+        # ninguna capability de config.toml lo lista en allowed_motors
+        # todavía (mismo gap que "hyde": a un cambio de config.toml de
+        # distancia). NOTA: reroute SÍ puede apuntar a
         # _HTTP_FACETS (ada/thot), que no pasan por la gobernanza del Motor
         # Registry (allowed_callers, requires_human_gate, sandbox_only,
         # output_validator) — riesgo real pero hoy dormido, porque ninguna
