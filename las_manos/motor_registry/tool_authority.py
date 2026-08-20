@@ -21,6 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -45,15 +48,26 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "write_file": "file_write",
 }
 
-# Fase 2: SOLO read_file ejecuta de verdad. write_file está declarada
-# (tools_catalog.py) y mapeada (arriba) pero queda fuera de EXECUTABLE_TOOLS
-# a propósito -- Fase 4 la habilita, no un cambio de config silencioso.
-EXECUTABLE_TOOLS: frozenset[str] = frozenset({"read_file"})
+# Fase 4 (2026-08-19): write_file se suma. Reversibilidad en vez de gate
+# humano -- WORKSPACE_ROOT es un repo git propio (ver T1 de la sesión),
+# cada escritura autorizada commitea, el rollback es git reset --hard.
+EXECUTABLE_TOOLS: frozenset[str] = frozenset({"read_file", "write_file"})
+
+# Identidad del autor de los commits automáticos -- distinguible de Fernando
+# (commits manuales) y de Hyde (que corre `claude -p` directo, sin pasar por
+# este módulo). Fijo vía -c, nunca depende de ~/.gitconfig global.
+_GIT_AUTHOR_NAME = "JAX Agent (tool_authority)"
+_GIT_AUTHOR_EMAIL = "jax-agent@localhost"
 
 # 200KB: generoso para código/config real, acota una lectura patológica
 # (o un intento de exfiltrar algo grande) sin necesitar streaming para esta
 # fase de un solo archivo, sin segundo turno.
 MAX_READ_BYTES = 200_000
+# Mismo orden de magnitud que MAX_READ_BYTES -- un archivo HTML/CSS/JS
+# completo real (el caso que motivó todo esto) entra cómodo; una escritura
+# más grande que esto en una sola llamada es la señal atípica, no el caso
+# normal.
+MAX_WRITE_BYTES = 200_000
 
 
 async def _reject(*, job_id: str, tool_name: str, caller: str, reason: str, capability: str | None = None) -> dict:
@@ -129,6 +143,7 @@ def resolve_jailed_path(path_str: str, forbidden_paths: list[str]) -> tuple[Path
 
 async def authorize_and_execute_tool_call(
     *, tool_name: str, arguments_json: str, caller: str, job_id: str, catalog: MotorCatalog,
+    tool_call_id: str = "",
 ) -> dict:
     """Punto de entrada único: resuelve autoridad y, si corresponde,
     ejecuta. Nunca lanza -- toda salida es un dict {tool_name, decision,
@@ -156,10 +171,11 @@ async def authorize_and_execute_tool_call(
         )
 
     if cap.requires_human_gate:
-        # Ningún tool ejecutable hoy mapea a una capability con esto en 1
-        # (file_read=0, write_file no llega acá -- ver check de abajo) pero
-        # el chequeo va primero y es genérico: un tool futuro mapeado a una
-        # capability gateada no debe colarse por descuido de orden.
+        # T3 (Fase 4, 2026-08-19): file_write ya NO tiene esto en 1 -- la
+        # protección pasó a ser jail+forbidden_paths+git+auditoría posterior
+        # (ver CONTEXT.md). El chequeo se queda genérico: una capability
+        # futura que SÍ lo declare (ej. algo fuera del jail) sigue cerrada
+        # por default, sin mecanismo de aprobación en este flujo.
         return await _reject(
             job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
             reason="requires_human_gate=1 y este flujo no tiene mecanismo de aprobación (blocked_human_gate)",
@@ -168,11 +184,9 @@ async def authorize_and_execute_tool_call(
     if tool_name not in EXECUTABLE_TOOLS:
         return await _reject(
             job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
-            reason=f"'{tool_name}' está declarada (tools_catalog.py) y mapeada, pero no es ejecutable en Fase 2",
+            reason=f"'{tool_name}' está declarada (tools_catalog.py) y mapeada, pero no es ejecutable todavía",
         )
 
-    # A partir de acá: únicamente read_file, autorizado. Parseo de
-    # argumentos y jail.
     try:
         args: dict[str, Any] = json.loads(arguments_json) if arguments_json else {}
     except (json.JSONDecodeError, TypeError) as exc:
@@ -187,6 +201,18 @@ async def authorize_and_execute_tool_call(
         return await _reject(
             job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
             reason=jail_reason,
+        )
+
+    if tool_name == "write_file":
+        content = args.get("content")
+        if not isinstance(content, str):
+            return await _reject(
+                job_id=job_id, tool_name=tool_name, caller=caller, capability=capability_key,
+                reason="falta 'content' (string) en los argumentos",
+            )
+        return await _write_file(
+            job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved,
+            content=content, tool_call_id=tool_call_id,
         )
 
     return await _read_file(job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved)
@@ -222,3 +248,119 @@ async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path
 
     logger.info("tool_authority: read_file EJECUTADO job=%s path=%s (%d bytes)", job_id, resolved, size)
     return {"tool_name": tool_name, "decision": "executed", "reason": None, "content": content}
+
+
+def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:
+    """Commitea UN archivo (git add -- <path> puntual, nunca -A -- así un
+    commit del bucle no puede capturar trabajo a medias de Hyde escribiendo
+    en paralelo en otra parte del mismo workspace). Devuelve (ok, sha, error).
+
+    Mensaje lleva job_id y tool_call_id -- traza el commit hasta la
+    iteración exacta del bucle que lo produjo (T1). Autor/committer fijos
+    vía -c, no ~/.gitconfig (distinguible de Fernando/Hyde).
+
+    Nunca lanza: un fallo de git (repo bloqueado, disco lleno) no debe
+    tumbar el job -- la escritura en disco YA ocurrió, fail-closed no es
+    retroactivo. El caller decide qué hacer con (ok=False, error=...)."""
+    rel = resolved.relative_to(WORKSPACE_ROOT)
+    base_cmd = ["git", "-C", str(WORKSPACE_ROOT), "-c", f"user.name={_GIT_AUTHOR_NAME}", "-c", f"user.email={_GIT_AUTHOR_EMAIL}"]
+    try:
+        add = subprocess.run(base_cmd + ["add", "--", str(rel)], capture_output=True, text=True, timeout=10)
+        if add.returncode != 0:
+            return False, None, f"git add falló: {add.stderr.strip()}"
+        commit = subprocess.run(
+            base_cmd + ["commit", "-m", f"tool_authority: write_file {rel} (job={job_id} tool_call={tool_call_id})"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if commit.returncode != 0:
+            # "nothing to commit" pasa si el contenido nuevo es IDÉNTICO al
+            # ya commiteado (el modelo reescribe lo mismo) -- no es un
+            # fallo real, el árbol ya refleja el estado deseado. Cualquier
+            # otro código de salida sí es un fallo real de git.
+            if "nothing to commit" in commit.stdout + commit.stderr:
+                head = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
+                return True, (head.stdout.strip() if head.returncode == 0 else None), None
+            return False, None, f"git commit falló: {commit.stderr.strip()}"
+        sha = subprocess.run(base_cmd + ["rev-parse", "HEAD"], capture_output=True, text=True, timeout=10)
+        return True, (sha.stdout.strip() if sha.returncode == 0 else None), None
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, None, f"{type(exc).__name__}: {exc}"
+
+
+async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Path, content: str, tool_call_id: str) -> dict:
+    size = len(content.encode("utf-8"))
+    if size > MAX_WRITE_BYTES:
+        return await _execution_error(
+            job_id=job_id, tool_name=tool_name, caller=caller,
+            reason=f"contenido excede el límite de escritura ({size} bytes > {MAX_WRITE_BYTES})",
+        )
+
+    # Creación de directorios: el jail ya validó el árbol completo resuelto
+    # (resolve_jailed_path corre sobre resolved, que ya incluye los
+    # componentes intermedios inexistentes -- Path.resolve(strict=False) los
+    # normaliza igual sin poder seguir symlinks que todavía no existen, lo
+    # cual es correcto: un componente que no existe no puede ser un symlink
+    # que escape el jail).
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"no se pudo crear el directorio: {exc}")
+
+    # Escritura atómica: temp file en el MISMO directorio (garantiza que
+    # os.replace sea un rename atómico dentro del mismo filesystem, no una
+    # copia cross-device) + os.replace -- un fallo a mitad de escribir dejaría
+    # el .tmp huérfano, nunca el archivo final truncado. Sobrescritura
+    # permitida a propósito (T2): con git detrás, el contenido previo no se
+    # pierde, queda en el commit anterior.
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=str(resolved.parent), prefix=f".{resolved.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp_path, resolved)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError as exc:
+        return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason=f"error de OS al escribir: {exc}")
+
+    committed, sha, git_error = _git_commit_write(resolved, job_id=job_id, tool_call_id=tool_call_id)
+    if not committed:
+        # T1: la escritura YA ocurrió (arriba) -- no se revierte de forma
+        # retroactiva. Se declara el hueco explícito (sin protección de git
+        # hasta el próximo commit que sí funcione) en vez de mentir con
+        # "executed" silencioso o con un "execution_error" que sugeriría que
+        # el archivo no cambió.
+        logger.error("tool_authority: write_file EJECUTADO pero SIN COMMITEAR job=%s path=%s error=%s", job_id, resolved, git_error)
+        try:
+            await event_append(job_id, "TOOL_CALL_WRITE_UNCOMMITTED", {
+                "tool_name": tool_name, "caller": caller, "path": str(resolved.relative_to(WORKSPACE_ROOT)), "error": git_error,
+            })
+        except Exception:  # fail-soft: mismo criterio que _reject/_execution_error
+            logger.error("tool_authority: no se pudo registrar TOOL_CALL_WRITE_UNCOMMITTED para job %s", job_id, exc_info=True)
+
+    logger.info("tool_authority: write_file EJECUTADO job=%s path=%s (%d bytes) sha=%s", job_id, resolved, size, sha)
+    return {
+        "tool_name": tool_name, "decision": "executed", "reason": None,
+        "content": f"Escrito: {resolved.relative_to(WORKSPACE_ROOT)} ({size} bytes)",
+        "git_committed": committed, "git_sha": sha, "git_error": git_error,
+        "bytes_written": size,
+    }
+
+
+def get_workspace_head() -> str | None:
+    """HEAD actual del repo de workspace, o None si no se pudo leer (repo
+    recién creado sin commits todavía, o git no responde). Usado por
+    worker.py para anclar el rollback de UN job -- se llama ANTES de la
+    primera escritura de ese job."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(WORKSPACE_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None

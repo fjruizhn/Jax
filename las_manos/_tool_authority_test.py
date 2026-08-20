@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -53,9 +54,11 @@ _CAP_CFG = {
         },
         "file_write": {
             "allowed_callers": ["jacobs"], "risk_level": "medium",
-            "sandbox_only": True, "requires_human_gate": True,
+            # T3 (Fase4, 2026-08-19): False en el seed real -- reversibilidad
+            # (jail+git+auditoria) en vez de gate humano.
+            "sandbox_only": True, "requires_human_gate": False,
             "max_execution_minutes": 1, "max_recursion_depth": 0,
-            "output_schema": "",
+            "output_schema": "", "auditor_motor": "thot",
             "forbidden_paths": [".env", "secrets/", "private_keys/", "credentials/"],
         },
     },
@@ -74,9 +77,6 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         (self.workspace / "secrets").mkdir()
         (self.workspace / "secrets" / "key.txt").write_text("fake-secret\n")
         (self.workspace / "secrets" / "link_to_env").symlink_to(self.workspace / ".env")
-        (self.workspace / "unreadable.txt").write_text("sin permisos\n")
-        os.chmod(self.workspace / "unreadable.txt", 0o000)
-        self.addCleanup(lambda: os.chmod(self.workspace / "unreadable.txt", 0o644))
         (self.workspace / "binary.bin").write_bytes(bytes(range(256)))
         (self.workspace / "large.txt").write_text("x" * (tool_authority.MAX_READ_BYTES + 1))
 
@@ -84,6 +84,19 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         outside.write_text("fuera del jail\n")
         self.addCleanup(outside.unlink, missing_ok=True)
         (self.workspace / "escape_symlink.txt").symlink_to(outside)
+
+        # GAP2 Fase4: write_file commitea -- el fixture necesita ser un repo
+        # git real para probar el camino feliz de escritura sin mockear git.
+        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixture inicial"], cwd=self.workspace, check=True)
+
+        # unreadable.txt DESPUÉS del commit inicial -- `git add -A` necesita
+        # leer el contenido para hashear el blob; con chmod 000 ya puesto,
+        # `git add -A` fallaba entero (128) y tumbaba el fixture completo.
+        (self.workspace / "unreadable.txt").write_text("sin permisos\n")
+        os.chmod(self.workspace / "unreadable.txt", 0o000)
+        self.addCleanup(lambda: os.chmod(self.workspace / "unreadable.txt", 0o644))
 
         self._patchers = [
             patch.object(tool_authority, "WORKSPACE_ROOT", self.workspace.resolve()),
@@ -130,29 +143,46 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         assert r["decision"] == "rejected", r
         assert "prohibida" in r["reason"], r
 
-    # --- 5. write_file declarada, no ejecutable -- rechaza limpio, no crashea ---
-    async def test_5_write_file_no_ejecutable_rechaza_limpio(self):
-        r = await self._call("write_file", {"path": "x.txt", "content": "hola"})
-        assert r["decision"] == "rejected", r
-        # file_write tiene requires_human_gate=1 en el seed real -- ese
-        # check corre ANTES del check de EXECUTABLE_TOOLS (orden a
-        # propósito, ver tool_authority.py), así que la razón real es el
-        # gate humano, no "no ejecutable". Ambos caminos rechazan limpio;
-        # se confirma cuál es el que realmente dispara.
-        assert "human_gate" in r["reason"] or "no es ejecutable" in r["reason"], r
+    # --- 5. write_file (Fase4): ejecuta, commitea, y respeta el mismo jail ---
+    async def test_5_write_file_ejecuta_y_commitea(self):
+        r = await self._call("write_file", {"path": "nuevo.txt", "content": "hola mundo"})
+        assert r["decision"] == "executed", r
+        assert r["git_committed"] is True, r
+        assert r["git_sha"], r
+        assert (self.workspace / "nuevo.txt").read_text() == "hola mundo"
+        log = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=self.workspace, capture_output=True, text=True)
+        assert "test-job-id" in log.stdout, log.stdout
 
-    async def test_5b_tool_declarada_no_ejecutable_sin_gate_humano(self):
-        """Variante que aísla el check de EXECUTABLE_TOOLS del check de
-        requires_human_gate -- una capability sin gate pero no ejecutable
-        debe rechazar por la razón correcta, no por la del gate."""
-        cfg = {"capabilities": {"file_write": {**_CAP_CFG["capabilities"]["file_write"], "requires_human_gate": False}}}
-        catalog = MotorCatalog(cfg)
-        r = await tool_authority.authorize_and_execute_tool_call(
-            tool_name="write_file", arguments_json=json.dumps({"path": "x.txt", "content": "hola"}),
-            caller="jacobs", job_id="test-job-id", catalog=catalog,
-        )
+    async def test_5b_write_file_declarada_no_ejecutable_si_EXECUTABLE_TOOLS_no_la_incluye(self):
+        """Confirma que el check de EXECUTABLE_TOOLS sigue siendo un gate
+        real e independiente del de requires_human_gate -- si algún día
+        write_file se saca de EXECUTABLE_TOOLS (rollback de la fase), debe
+        rechazar limpio con la razón correcta, no crashear."""
+        with patch.object(tool_authority, "EXECUTABLE_TOOLS", frozenset({"read_file"})):
+            r = await self._call("write_file", {"path": "x.txt", "content": "hola"})
         assert r["decision"] == "rejected", r
         assert "no es ejecutable" in r["reason"], r
+        assert not (self.workspace / "x.txt").exists()
+
+    async def test_write_file_respeta_forbidden_paths(self):
+        r = await self._call("write_file", {"path": ".env", "content": "malicioso"})
+        assert r["decision"] == "rejected", r
+        assert (self.workspace / ".env").read_text() == "FAKE_KEY=no-es-real\n"  # intacto
+
+    async def test_write_file_crea_directorios_intermedios(self):
+        r = await self._call("write_file", {"path": "sub/dir/x.html", "content": "<h1>hola</h1>"})
+        assert r["decision"] == "executed", r
+        assert (self.workspace / "sub" / "dir" / "x.html").read_text() == "<h1>hola</h1>"
+
+    async def test_write_file_sobrescribe_y_git_conserva_lo_anterior(self):
+        first = await self._call("write_file", {"path": "v.txt", "content": "version 1"})
+        second = await self._call("write_file", {"path": "v.txt", "content": "version 2"})
+        assert first["decision"] == "executed" and second["decision"] == "executed"
+        assert (self.workspace / "v.txt").read_text() == "version 2"
+        show_prev = subprocess.run(
+            ["git", "show", f"{first['git_sha']}:v.txt"], cwd=self.workspace, capture_output=True, text=True,
+        )
+        assert show_prev.stdout == "version 1", show_prev.stdout
 
     # --- 6. tool inventado ---
     async def test_6_tool_inventado_rechaza(self):
@@ -253,7 +283,8 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
             ("read_file", {"path": "/etc/passwd"}),
             ("read_file", {"path": "../x.txt"}),
             ("read_file", {"path": ".env"}),
-            ("write_file", {"path": "x.txt", "content": "y"}),
+            ("write_file", {"path": "/etc/passwd", "content": "y"}),
+            ("write_file", {"path": ".env", "content": "y"}),
             ("nope", {"path": "x"}),
         ]
         for tool_name, args in casos:

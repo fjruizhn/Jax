@@ -59,3 +59,10 @@ las_manos/CLAUDE.md
 .claude/proven-config.json
 .claude/.proven-config-version
 .worktrees/
+
+# GAP2 Fase4 (2026-08-19): workspace/ pasa a ser su propio repo git (ver
+# tool_authority.py) -- deja de trackearse acá para no mezclar commits
+# automáticos del bucle de tool-calling (ni las escrituras manuales de
+# Hyde) con la historia de código fuente. Historia previa (2 commits,
+# jun-2026) queda preservada en este mismo log, solo deja de actualizarse.
+workspace/
