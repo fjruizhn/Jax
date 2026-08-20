@@ -4,10 +4,10 @@ Jacobs — Reaper de pipelines huérfanos.
 Cosecha pipelines en status no-terminal (pending/running/interrupted)
 que quedaron sin avance real -- el proceso murió a mitad de camino
 (reinicio, timeout de cliente) o son la clase de huérfano descubierta
-en T1.a de la sesión 2026-08-19: interrupted sin owner file, donde el
+en T1.a de la sesión 2026-08-19: interrupted sin owner ack, donde el
 cliente nunca confirmó recepción del pipeline_id y /resume queda
 inalcanzable (_require_pipeline_owner en jax-platform devuelve 404 sin
-ese archivo).
+owner_ack_at poblado).
 
 Umbrales calibrados post-T1 de la misma sesión: think:false aplicado a
 _llm_plan(), build() medido en 1.3-8.7s en 6 corridas reales (3
@@ -29,17 +29,20 @@ build() tardaba 17-37s -- los umbrales de abajo asumen el piso nuevo.
   instantánea (<1ms) -- guarda contra el caso raro de disco lento, no
   contra operación normal.
 
-DEUDA CONOCIDA (T3, sesión 2026-08-19): el chequeo de owner file cruza
-de repo -- lee ~/jax/pipelines/{id}_owner.json, que escribe
-jax-platform/backend/api/pipelines.py, no Jacobs. Si jax-platform
-cambia PIPELINES_DIR, o algún día corren en hosts distintos, este
-chequeo ve "sin owner" en todo y cosecha pipelines legítimos.
-Recomendación pendiente de implementar: mover el ownership a una
-columna owner_ack_at en jacobs_pipelines (misma DB física jax_memory
-que ya comparten ambos servicios), eliminando esta dependencia de
-filesystem. No implementado esta ronda -- requiere migración de
-esquema + reescribir 5 archivos de test de jax-platform, fuera de
-alcance de "implementar el reaper".
+RESUELTO (ronda 5, 2026-08-20, T1): el chequeo de owner file cruzaba de
+repo -- leía ~/jax/pipelines/{id}_owner.json, que escribía jax-platform/
+backend/api/pipelines.py, no Jacobs. Si jax-platform cambiaba
+PIPELINES_DIR, o algún día corrían en hosts distintos, ese chequeo veía
+"sin owner" en todo y cosechaba pipelines legítimos. Migrado a la
+columna owner_ack_at en jacobs_pipelines (misma DB física jax_memory que
+ya comparten ambos servicios) -- jax-platform ahora hace un UPDATE
+directo a esa columna con el mismo pool de DB que ya usa para
+capability/motor, sin pasar por Jacobs ni por filesystem. Verificado al
+migrar: 0 owner files vivos en disco (directorio vacío) -- no hubo datos
+que trasladar, solo código. El directorio ~/jax/pipelines/ y los owner
+files viejos (si aparecen) quedan huérfanos en disco, sin lector desde
+este cambio -- no se borran automáticamente (decisión: limpieza manual
+si molestan, no vale la pena un cron para un directorio vacío).
 
 En honor al Prof. Raúl Jacobs.
 """
@@ -49,7 +52,6 @@ import asyncio
 import logging
 import os
 import time
-from pathlib import Path
 
 import httpx
 
@@ -70,14 +72,6 @@ SWEEP_INTERVAL_SECONDS = 300  # cada 5 min
 # jacobs.policy.MAX_PARALLEL_PIPELINES -- si se cosechan más que el
 # cupo total configurado en una sola corrida, hay una fuga activa.
 TELEGRAM_ALERT_THRESHOLD = 3
-
-# Cruce de repo documentado como deuda arriba -- NO es la fuente de
-# verdad, es un chequeo best-effort hasta que T3 se implemente.
-OWNER_FILES_DIR = Path.home() / "jax" / "pipelines"
-
-
-def _has_owner_file(pipeline_id: str) -> bool:
-    return (OWNER_FILES_DIR / f"{pipeline_id}_owner.json").exists()
 
 
 async def send_telegram_alert(message: str) -> dict:
@@ -146,10 +140,10 @@ async def reap_orphaned_pipelines() -> list[dict]:
         elif (
             p.status == PipelineStatus.interrupted
             and age > INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS
-            and not _has_owner_file(p.pipeline_id)
+            and p.owner_ack_at is None
         ):
             reason = (
-                f"interrupted sin owner file, {age:.0f}s "
+                f"interrupted sin owner ack, {age:.0f}s "
                 f"(umbral {INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS}s)"
             )
 
