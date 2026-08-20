@@ -92,16 +92,28 @@ class CapabilityUnbound:
         }
 
 
-# Timeout por capability (segundos). El default cubre design/validate/critique,
-# que procesan contexto acotado y completan holgados en ~50-130s. Las capabilities
-# que acumulan el contexto COMPLETO de N dependencias (reconcile recibe todos los
-# módulos + hallazgos del validador y genera parches) necesitan más tiempo: con
-# ~22K tokens de entrada, 300s no alcanza y el step muere en asyncio.wait_for.
-# 'assemble' NO va aquí: es mecánico (executor._assemble_mechanical, sin LLM) y
-# completa en milisegundos, así que mantiene el default.
+# Timeout por capability (segundos). El default (300s) cubre las capabilities
+# sin evidencia de necesitar mas (validado con jacobs_steps.started_at/
+# finished_at + las_manos/logs/motor_jobs.jsonl, 2026-08-20 -- ver
+# jax-platform backend/db/migrations.py::_CAPABILITY_SEED, mismo alineamiento
+# aplicado a capability.max_execution_minutes en esa misma fecha).
+# 'assemble' NO va aqui: es mecanico (executor._assemble_mechanical, sin LLM)
+# y completa en milisegundos, asi que mantiene el default.
+#
+# reconcile/design/reason SI necesitan mas: las tres acumulan contexto
+# amplio (reconcile: todos los modulos + hallazgos del validador; design/
+# reason: idem segun el objetivo). reconcile ya tenia el fix (incidente
+# aec827a0, ~22K tokens de entrada, 300s no alcanzaba). design/reason se
+# agregan ahora (ronda 4, T2.a) con la MISMA evidencia real que le faltaba
+# al comentario anterior ("completan holgados en ~50-130s" -- correcto para
+# la mayoria de corridas, pero FALSO como garantia: jacobs_steps muestra
+# 1 step 'design' (de 36) y 1 'reason' (de 6) fallando de verdad, exacto en
+# el techo de 300s, dur=300.0s=timeout_seconds, status=failed).
 _DEFAULT_TIMEOUT_SECONDS = 300
 _CAPABILITY_TIMEOUT_SECONDS = {
     "reconcile": 900,
+    "design": 900,
+    "reason": 900,
 }
 
 _PLAN_SYSTEM = (
@@ -203,10 +215,22 @@ class PlanBuilder:
                 input_data["prompt"] = spec["prompt"]
             capability = spec.get("capability", "reason")
             # Default de timeout según capability; un timeout_seconds explícito en el
-            # spec siempre tiene prioridad.
+            # spec siempre tiene prioridad. `spec.get("timeout_seconds")` (sin default)
+            # y no `spec.get("timeout_seconds", default_timeout)`: esta ultima forma
+            # devuelve el VALOR de la clave si esta PRESENTE, aunque sea None -- y
+            # routes.py arma `specs` con StepSpec.model_dump(), que SIEMPRE incluye
+            # la clave. Antes de este fix (ronda 4, T2.a) StepSpec.timeout_seconds
+            # tenia default=300 a nivel Pydantic, asi que la clave llegaba poblada
+            # con 300 aunque el caller nunca la hubiera tocado, pisando el default
+            # por-capability en cualquier pipeline con steps explicitos (no LLM-
+            # planeado). Confirmado en produccion: jacobs_steps muestra 'reconcile'
+            # con timeout_seconds=300 en 1 de 3 corridas reales pese a estar en el
+            # dict con valor 900. `is not None` distingue "ausente/None" de
+            # "0 explicito" (0 es un timeout real, agotado de inmediato).
             default_timeout = _CAPABILITY_TIMEOUT_SECONDS.get(
                 capability, _DEFAULT_TIMEOUT_SECONDS
             )
+            explicit_timeout = spec.get("timeout_seconds")
             steps.append(Step(
                 step_id=str(uuid.uuid4()),
                 pipeline_id=pipeline_id,
@@ -216,7 +240,7 @@ class PlanBuilder:
                 capability=capability,
                 input=input_data,
                 depends_on=spec.get("depends_on", []),
-                timeout_seconds=spec.get("timeout_seconds", default_timeout),
+                timeout_seconds=explicit_timeout if explicit_timeout is not None else default_timeout,
                 skip_on_fail=spec.get("skip_on_fail", False),
             ))
         for w in _check_cleanroom(steps):

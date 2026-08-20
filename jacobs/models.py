@@ -113,7 +113,17 @@ class StepSpec(BaseModel):
     capability:      str
     prompt:          str = ""
     input:           dict[str, Any] = Field(default_factory=dict)
-    timeout_seconds: int = 300
+    # None = sin override explicito del caller. Ronda 4 (2026-08-20, T2.a):
+    # ANTES era int=300 -- un default de Pydantic, no una decision del
+    # caller. routes.py convierte StepSpec a dict via model_dump(), que
+    # SIEMPRE incluye los defaults; PlanBuilder._from_spec() interpretaba
+    # esa presencia como "el caller pidio 300s", pisando el default por-
+    # capability (_CAPABILITY_TIMEOUT_SECONDS) incluso cuando el caller
+    # nunca toco el campo. Confirmado en produccion real: jacobs_steps
+    # muestra 'reconcile' con timeout_seconds=300 en 1 de 3 corridas reales
+    # pese a estar en el dict con valor 900. None deja que _from_spec()
+    # distinga "ausente" de "override real" y aplique el default correcto.
+    timeout_seconds: int | None = None
     skip_on_fail:    bool = False
     depends_on:      list[int] = Field(default_factory=list)
 
