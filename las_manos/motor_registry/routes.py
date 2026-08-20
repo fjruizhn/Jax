@@ -96,6 +96,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
         context_keys=list(req.context.keys()),
         recursion_depth=req.recursion_depth,
         human_gate_token=req.human_gate_token,
+        timeout_seconds=req.timeout_seconds,
     )
 
     if not result.allowed:
