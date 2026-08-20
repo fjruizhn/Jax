@@ -1,0 +1,31 @@
+name: policy
+
+# P10 (REFORMAS-v3.1.md, Apéndice C-bis): ningún validador/gate falla
+# abierto ante error o excepción sin capturar. El enforcer mecánico
+# (policy/tests/test_no_fail_open_except.py) existía desde 2026-08-19 pero
+# nadie lo corría automáticamente -- ni pytest lo descubría (sin función
+# test_*) ni había CI. Wireado 2026-08-20 (pago de deuda, ronda 3) tras
+# encontrar 2 violaciones reales sin marcar en código de GAP2.
+#
+# Alcance conocido: este job solo escanea el árbol de este repo (jax). El
+# test también escanea /home/fruiz/jax-platform cuando corre local con
+# ambos repos presentes en la misma máquina -- CI no tiene ese segundo
+# checkout (jax-platform es un repo GitHub separado), así que el escaneo
+# automático de jax-platform queda pendiente (anotado, no resuelto acá).
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  no-fail-open-except:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
