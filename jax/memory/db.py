@@ -772,6 +772,63 @@ class MemoryDB:
                 return cur.rowcount > 0
 
     @db_error_handler
+    async def save_person(self, name: str, nickname: Optional[str] = None) -> Optional[bool]:
+        """Registra una persona (comando /person new). Escritor EXPLICITO
+        (mismo criterio que projects, ronda 4): reconocer una persona es una
+        decision humana consciente, no algo que JAX deba inferir de una
+        conversacion. NO puebla honor_memory (pendiente deliberado,
+        semantica de Fernando -- ver CONTEXT.md, no proponer significado
+        aca). `name` es NOT NULL en el schema real -- hueco del diseño de
+        ronda 7 (solo listaba nickname/relationship_start/last_mentioned),
+        detectado al implementar."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO people (person_uuid, name, nickname, relationship_start) "
+                    "VALUES (UUID(), %s, %s, CURDATE())",
+                    (name, nickname),
+                )
+        return True
+
+    @db_error_handler
+    async def get_people(self, limit: int = 20) -> Optional[list]:
+        """Lista personas registradas, mas recientes primero (comando
+        /person list)."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "SELECT id, person_uuid, name, nickname, relationship_start, "
+                    "last_mentioned, honor_memory FROM people "
+                    "ORDER BY created_at DESC LIMIT %s",
+                    (limit,),
+                )
+                return await cur.fetchall()
+
+    @db_error_handler
+    async def touch_person_mentions(self, names_or_nicknames: list) -> Optional[int]:
+        """Actualiza last_mentioned=CURDATE() para las personas cuyo name o
+        nickname aparece en `names_or_nicknames` (llamado desde el worker de
+        destilacion, jax/memory/worker.py, sobre las conversaciones que ya
+        procesa cada 20 min -- reusa esa deteccion en vez de construir una
+        nueva, tal como diseñado en ronda 7). Devuelve cuantas filas se
+        actualizaron, o None si fallo."""
+        if not self.pool or not names_or_nicknames:
+            return 0
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                placeholders = ",".join(["%s"] * len(names_or_nicknames))
+                await cur.execute(
+                    f"UPDATE people SET last_mentioned=CURDATE() "
+                    f"WHERE name IN ({placeholders}) OR nickname IN ({placeholders})",
+                    (*names_or_nicknames, *names_or_nicknames),
+                )
+                return cur.rowcount
+
+    @db_error_handler
     async def mark_processed(self, conv_id: int) -> Optional[bool]:
         """Marca la conversacion como ya procesada por el worker."""
         if not self.pool:

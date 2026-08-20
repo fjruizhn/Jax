@@ -283,6 +283,50 @@ async def handle_pendientes_command(db, line: str) -> str:
     )
 
 
+async def handle_person_command(db, line: str) -> str:
+    """Procesa comandos /person. Escritor explicito (/person new) + lector
+    (/person list). honor_memory NUNCA se toca aca -- pendiente deliberado,
+    semantica de Fernando (ver CONTEXT.md)."""
+    parts = line.strip().split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else "help"
+    rest = parts[2] if len(parts) > 2 else ""
+
+    # /person new <nombre> [apodo]
+    if sub == "new":
+        if not rest:
+            return "Uso: /person new <nombre> [apodo]"
+        bits = rest.split(maxsplit=1)
+        name = bits[0]
+        nickname = bits[1] if len(bits) > 1 else None
+        ok = await db.save_person(name, nickname)
+        if ok is None:
+            return "No pude escribir en la memoria (base no disponible)."
+        return f"Persona registrada: {name}" + (f" ({nickname})" if nickname else "")
+
+    # /person list   (atajo: ls)
+    if sub in ("list", "ls"):
+        people = await db.get_people()
+        if people is None:
+            return "No pude leer la memoria (base no disponible)."
+        if not people:
+            return "No hay personas registradas."
+        out = ["Personas registradas:", ""]
+        for p in people:
+            nick = f" ({p['nickname']})" if p["nickname"] else ""
+            mentioned = p["last_mentioned"] or "nunca"
+            out.append(f"  #{p['id']} {p['name']}{nick} -- desde {p['relationship_start']}, mencionado por ultima vez: {mentioned}")
+        out.append("")
+        out.append("Usa: /person new <nombre> [apodo]")
+        return "\n".join(out)
+
+    return (
+        "Comandos de personas:\n"
+        "  /person new <nombre> [apodo]   registra una persona\n"
+        "  /person list                   lista personas registradas\n"
+        "  atajos: ls"
+    )
+
+
 async def run_task(task_file: Path, facet_cli: str | None = None) -> None:
     """Ejecuta una tarea autónoma desde un archivo .md sin REPL interactivo.
     Escribe el resultado en <nombre>_result.md junto al archivo de entrada."""
@@ -599,6 +643,10 @@ async def main() -> None:
                 continue
             if lt.startswith("/pendientes"):
                 salida = await handle_pendientes_command(db, user_text)
+                print(f"\n{salida}")
+                continue
+            if lt.startswith("/person"):
+                salida = await handle_person_command(db, user_text)
                 print(f"\n{salida}")
                 continue
 
