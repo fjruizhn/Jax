@@ -20,6 +20,7 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -32,6 +33,16 @@ import server  # noqa: E402
 from facet_client import FacetClient, FacetRefusal, review_audit  # noqa: E402
 
 ORIGIN = "auditoría de rutina de Thot (Mesa)"
+
+# El host real (mismo que server.py resuelve a "staging" vía policy.environments,
+# ver JAX_ENV_STAGING_HOSTS en /etc/jax/.env) -- no se hardcodea la IP acá para
+# que este test siga probando la RAZÓN correcta del 403 (faceta no autorizada
+# en el ambiente) en vez de degradar a "host desconocido" por un mismatch.
+_STAGING_HOST = os.getenv("JAX_ENV_STAGING_HOSTS", "").split(",")[0].strip()
+assert _STAGING_HOST, (
+    "JAX_ENV_STAGING_HOSTS no seteada -- sourcear /etc/jax/.env "
+    "(set -a; source /etc/jax/.env; set +a) antes de correr este test"
+)
 REVIEW_FILE = Path(__file__).resolve().parent.parent / "missions" / "thot-review-001.md"
 
 
@@ -93,7 +104,7 @@ def criterio_4(thot):
         capability="write_file",
         origin_of_authority=ORIGIN,
         intent_summary="Thot intenta escribir un archivo (no le toca)",
-        target_host="172.16.20.11",   # staging (Thot puede 'estar' pero no mutar)
+        target_host=_STAGING_HOST,   # staging (Thot puede 'estar' pero no mutar)
         target_environment="staging",
         params={"path": "/tmp/thot_intruso", "content": "no debería pasar"},
     )

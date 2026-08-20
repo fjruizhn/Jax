@@ -5,9 +5,9 @@ Login funciona en localhost:5173 pero NO en https://axioma-ia.io
 Tengo demo con sponsors en menos de 30 minutos.
 
 ## Arquitectura de producción
-- Frontend estático: /www/wwwroot/axioma-ia.io/ en atemai-net (172.16.20.11)
-- Backend: hall9000 (172.16.20.5) :8080 — uvicorn PID 177569 (nohup, no systemd)
-- Nginx en atemai-net proxy /api → 172.16.20.5:8080
+- Frontend estático: /www/wwwroot/axioma-ia.io/ en atemai-net (<IP interna, ver /etc/jax/.env>)
+- Backend: hall9000 (<IP interna, ver /etc/jax/.env>) :8080 — uvicorn PID 177569 (nohup, no systemd)
+- Nginx en atemai-net proxy /api → <IP interna, ver /etc/jax/.env>:8080
 - Cloudflare proxy activo en axioma-ia.io
 
 ## Diagnóstico requerido ANTES de tocar nada

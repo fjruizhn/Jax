@@ -18,12 +18,21 @@ kill_switch_path = "/etc/jax/PAUSE"
 
 # ------------------------------------------------------------
 #  AMBIENTES — separación estricta staging vs producción
+#
+#  Las IPs reales NO viven acá (repo público, ronda 9 de apertura) --
+#  se cargan desde JAX_ENV_STAGING_HOSTS / JAX_ENV_PROD_HOSTS /
+#  JAX_ENV_BRIDGE_HOSTS / JAX_ENV_LOCAL_HOSTS en /etc/jax/.env (listas
+#  separadas por coma), sobrescribiendo esta sección en tiempo de carga
+#  (ver server.py, _load_environments()). Sin esas env vars, cada
+#  ambiente queda vacío y PolicyEngine._resolve_env() rechaza cualquier
+#  host -- fail-closed, no un default conocido reintroducido con otro
+#  nombre.
 # ------------------------------------------------------------
 [environments]
-staging  = ["172.16.20.11"]   # atemai-net
-prod     = ["172.16.20.10"]   # server-rich-hn
-bridge   = ["172.16.20.20"]   # mac mini (solo lectura durante migración)
-local    = ["127.0.0.1", "172.16.20.5"]  # hall9000
+staging  = []   # placeholder -- valor real desde JAX_ENV_STAGING_HOSTS
+prod     = []   # placeholder -- valor real desde JAX_ENV_PROD_HOSTS
+bridge   = []   # placeholder -- valor real desde JAX_ENV_BRIDGE_HOSTS
+local    = []   # placeholder -- valor real desde JAX_ENV_LOCAL_HOSTS
 
 # ------------------------------------------------------------
 #  PERMISOS POR FACETA

@@ -33,7 +33,7 @@ Las primeras tres fases se ejecutan SIN necesidad de GO — trabajad en paralelo
 - Hipatia (.11) → bridge (.20) ✅
 
 **ORIGEN — Mac mini bridge**
-- IP: 172.16.20.20, puerto 58291, user fruiz
+- IP: <IP interna, ver /etc/jax/.env>, puerto <puerto, ver /etc/jax/.env>, user fruiz
 - OS: Ubuntu 24.04.4, Hestia 1.9.6
 - Stack mail: Exim + Dovecot
 - MariaDB 11.4 local
@@ -50,7 +50,7 @@ Las primeras tres fases se ejecutan SIN necesidad de GO — trabajad en paralelo
 | gescorphn | gescorp-hn.com | ~7.4GB | WP + Joomla, 13 mail, 2 DBs |
 
 **DESTINO — VM prod server-rich-hn**
-- IP: 172.16.20.10, puerto 58291, user fruiz
+- IP: <IP interna, ver /etc/jax/.env>, puerto <puerto, ver /etc/jax/.env>, user fruiz
 - OS: Ubuntu 24.04, aaPanel PRO
 - Stack: Nginx, PHP 8.3, MariaDB 11.4, Redis
 - Mail: Postfix + Dovecot + rspamd

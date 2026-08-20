@@ -9,15 +9,15 @@ ni modificó nada en ninguno de los dos hosts.
 llamada literalmente `lookingglass`. Fernando confirmó: **`lookingglass` es la
 VM `prod`, todavía sin renombrar.**
 
-- IP: 172.16.20.10
+- IP: <IP interna, ver /etc/jax/.env>
 - Hostname interno: `server-rich-hn`
-- SSH: puerto 58291, usuario `fruiz` (misma clave que hall9000/GitHub,
+- SSH: puerto <puerto, ver /etc/jax/.env>, usuario `fruiz` (misma clave que hall9000/GitHub,
   `hall9000-jax-github`)
 - Confirmado con `systemctl` (no solo puertos abiertos):
   `btpanel.service`, `AdGuardHome.service`, `mysqld.service`,
   `BT-FirewallServices.service` — todos `active running`.
 
-## Paso 2 — Inventario del bridge (172.16.20.20, Hestia)
+## Paso 2 — Inventario del bridge (<IP interna, ver /etc/jax/.env>, Hestia)
 
 Acceso inicial denegado (publickey) hasta que Fernando agregó la clave
 pública al bridge. Confirmado después: hostname `server.rich-hn.com`,
@@ -42,7 +42,7 @@ usuario `admin` del panel, que no cuenta como cliente):
 **Hallazgo fuera de alcance de esta misión, pero real y urgente:** los
 certificados SSL de `sol-lex.com` y `bdihn.com` están vencidos hace más de
 un año (verificado con handshake TLS directo — `openssl s_client` contra
-`172.16.20.20:443`, no asumido de un listado). No es parte de la migración,
+`<IP interna, ver /etc/jax/.env>:443`, no asumido de un listado). No es parte de la migración,
 pero Fernando debería saberlo independientemente de si/cuándo se hace el
 cutover.
 

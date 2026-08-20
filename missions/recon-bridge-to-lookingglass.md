@@ -6,7 +6,7 @@
 ## Contexto
 
 Objetivo final (NO de esta misión, de una futura): migrar los 5 usuarios
-del Mac mini "bridge" (172.16.20.20, Hestia 1.9.6) a la VM "lookingglass"
+del Mac mini "bridge" (<IP interna, ver /etc/jax/.env>, Hestia 1.9.6) a la VM "lookingglass"
 en hall9000 (aaPanel PRO ya instalado), reemplazando el rol que hoy cumple
 Hestia. El bridge NUNCA se toca ni se apaga durante todo el proceso — sigue
 sirviendo producción real hasta que Fernando decida el cutover manual,
@@ -29,11 +29,11 @@ aaPanel efectivamente está corriendo ahí (no asumir — verificar con
 
 ## 2. Inventario completo del bridge (READ-ONLY, sin escribir nada)
 
-Conectar por SSH a 172.16.20.20 (bridge, Hestia) y generar un inventario
+Conectar por SSH a <IP interna, ver /etc/jax/.env> (bridge, Hestia) y generar un inventario
 completo, SOLO lectura:
 
 ```bash
-ssh -p 58291 fruiz@172.16.20.20  # confirmar puerto/usuario real primero
+ssh -p <puerto, ver /etc/jax/.env> fruiz@<IP interna, ver /etc/jax/.env>  # confirmar puerto/usuario real primero
 ```
 
 Para cada uno de los 5 usuarios de Hestia, documentar:

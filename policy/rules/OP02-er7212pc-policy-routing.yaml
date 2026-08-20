@@ -9,7 +9,7 @@ origin: >
   Multicable, Hall9000), las tres con Source = IP Group (Server_Bridge,
   Server_RichHN, Sesamo_NAS, Serveer_BlackTower, Server_Atemai,
   Server_Hall9000), ninguna con Source=Default. Segunda captura confirma
-  el grupo Server_Hall9000 = IP Subnet 172.16.20.5/32.
+  el grupo Server_Hall9000 = IP Subnet <IP interna, ver /etc/jax/.env>.
 status: NORMATIVA_PENDIENTE
 enforcement:
   mechanism: null
