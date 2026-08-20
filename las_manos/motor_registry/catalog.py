@@ -68,6 +68,11 @@ class CapabilityEntry:
     fallback_motor: str | None = None
     fallback_mode: str = "manual_only"
     forbidden_paths: list[str] = field(default_factory=list)
+    # GAP2 Fase4 (2026-08-19): "quien audita" es propiedad de la capability
+    # (mismo eje que risk_level/requires_human_gate), no del motor. None =
+    # auditoria desactivada por default para esa capability -- explicito,
+    # no implicito (ver worker.py, resolucion + override por request).
+    auditor_motor: str | None = None
 
 
 class MotorCatalog:
@@ -116,6 +121,7 @@ class MotorCatalog:
                 fallback_motor=cfg.get("fallback_motor"),
                 fallback_mode=cfg.get("fallback_mode", "manual_only"),
                 forbidden_paths=cfg.get("forbidden_paths", []),
+                auditor_motor=cfg.get("auditor_motor"),
             )
 
     def get_motor(self, name: str) -> MotorEntry | None:
@@ -183,7 +189,8 @@ class MotorCatalog:
                 await cur.execute(
                     "SELECT `key`, risk_level, sandbox_only, requires_human_gate, "
                     "       max_execution_minutes, max_recursion_depth, output_schema, "
-                    "       fallback_motor, fallback_mode, allowed_callers, forbidden_paths "
+                    "       fallback_motor, fallback_mode, allowed_callers, forbidden_paths, "
+                    "       auditor_motor "
                     "FROM capability"
                 )
                 cap_rows = await cur.fetchall()
@@ -199,7 +206,7 @@ class MotorCatalog:
                 allowed_by_cap.setdefault(capability_key, []).append(motor_key)
 
             for (key, risk_level, sandbox_only, gate, max_exec, max_rec, schema,
-                 fallback_motor, fallback_mode, callers, forbidden) in cap_rows:
+                 fallback_motor, fallback_mode, callers, forbidden, auditor_motor) in cap_rows:
                 instance._capabilities[key] = CapabilityEntry(
                     name=key,
                     allowed_motors=allowed_by_cap.get(key, []),
@@ -213,6 +220,7 @@ class MotorCatalog:
                     fallback_motor=fallback_motor,
                     fallback_mode=fallback_mode or "manual_only",
                     forbidden_paths=_json.loads(forbidden) if forbidden else [],
+                    auditor_motor=auditor_motor,
                 )
             return instance
         finally:

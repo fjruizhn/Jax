@@ -80,7 +80,7 @@ def _has_owner_file(pipeline_id: str) -> bool:
     return (OWNER_FILES_DIR / f"{pipeline_id}_owner.json").exists()
 
 
-async def _send_telegram_alert(message: str) -> dict:
+async def send_telegram_alert(message: str) -> dict:
     """Manda la alerta y devuelve {ok, message_id, error} -- SIEMPRE, nunca
     None. El caller (reap_orphaned_pipelines) decide qué hacer con el
     resultado: la cosecha ya ocurrió antes de llegar acá, así que esta
@@ -88,7 +88,12 @@ async def _send_telegram_alert(message: str) -> dict:
     roto no debe tumbar el barrido) pero tampoco descarta el resultado en
     silencio -- T1 (2026-08-19): antes de este fix, `ok`/`message_id` de
     la respuesta de sendMessage se descartaban por completo; la alerta
-    funcionaba "por suerte", sin verificación real de entrega."""
+    funcionaba "por suerte", sin verificación real de entrega.
+
+    Promovida de _send_telegram_alert (privada) a send_telegram_alert
+    (T5, GAP2 Fase4, 2026-08-19): worker.py la reusa para notificar al
+    cierre de jobs que escribieron -- mismo patrón de captura, no
+    duplicado. Único otro caller: reap_orphaned_pipelines, abajo."""
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
@@ -166,14 +171,14 @@ async def reap_orphaned_pipelines() -> list[dict]:
 
     if reaped:
         if len(reaped) > TELEGRAM_ALERT_THRESHOLD:
-            result = await _send_telegram_alert(
+            result = await send_telegram_alert(
                 f"⚠️ Reaper de Jacobs cosechó {len(reaped)} pipelines huérfanos en un "
                 f"solo barrido (umbral {TELEGRAM_ALERT_THRESHOLD}) -- posible fuga activa, "
                 f"no ruido normal. Ver logs de jax-las-manos."
             )
             # fail-soft: la cosecha YA ocurrió (transiciones + REAPED ya
             # persistidos arriba) -- no hay nada que abortar. "Visible"
-            # aca significa: log a ERROR (ya lo hace _send_telegram_alert)
+            # aca significa: log a ERROR (ya lo hace send_telegram_alert)
             # + un evento propio en jacobs_events por cada pipeline
             # cosechado en este barrido, para que quede auditable sin
             # depender de journalctl ni de que alguien mire Telegram y

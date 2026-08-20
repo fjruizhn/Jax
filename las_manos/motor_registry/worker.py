@@ -20,8 +20,10 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
 import time
 import traceback
 from pathlib import Path
@@ -33,7 +35,7 @@ from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from motor_registry.job_store import JobStore
-from motor_registry.tool_authority import authorize_and_execute_tool_call
+from motor_registry.tool_authority import authorize_and_execute_tool_call, get_workspace_head
 from motor_registry.models import JobStatus
 from motor_registry.output_validator import validate
 from motor_registry.tools_catalog import TOOLS_CATALOG
@@ -59,6 +61,12 @@ LOOP_DETECTION_THRESHOLD = int(os.getenv("MOTOR_TOOL_LOOP_DETECTION_THRESHOLD", 
 # no puede exfiltrar un archivo grande de una vez pero sí varios chicos a
 # lo largo de varios turnos.
 MAX_TOTAL_READ_BYTES = int(os.getenv("MOTOR_TOOL_LOOP_MAX_TOTAL_READ_BYTES", "500000"))
+# GAP2 Fase4 (2026-08-19): mismo criterio que MAX_TOTAL_READ_BYTES pero para
+# write_file -- acumulado ACROSS turnos, distinto del cap por-llamada
+# (tool_authority.MAX_WRITE_BYTES). Un agente que no puede escribir un solo
+# archivo gigante sí podría escribir muchos chicos; esto acota el volumen
+# total de disco tocado por job, no solo por llamada.
+MAX_TOTAL_WRITE_BYTES = int(os.getenv("MOTOR_TOOL_LOOP_MAX_TOTAL_WRITE_BYTES", "500000"))
 
 # Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3. Hardcodeados acá
 # (en vez de parsear el YAML en cada job) porque el codebase no tiene hoy
@@ -180,6 +188,186 @@ def _partial_iteration_entry(iteration: int, tool_calls: list[dict], iteration_r
         ],
         "results": iteration_results,
     }
+
+
+# GAP2 Fase4 (T4): timeout propio de la auditoría -- otra llamada a LLM,
+# no puede colgar el job (que ya terminó y quedó COMPLETED). Constante
+# separada de motor.default_timeout_seconds del motor PRODUCTOR: el
+# auditor puede ser un motor distinto con su propio timeout configurado,
+# pero se acota igual con un techo duro acá por si ese configurado es
+# generoso -- la auditoría es best-effort, no debe ser la parte lenta.
+AUDIT_TIMEOUT_SECONDS = int(os.getenv("MOTOR_TOOL_LOOP_AUDIT_TIMEOUT_SECONDS", "60"))
+
+
+def _resolve_auditor_motor(*, producing_motor: str, context: dict, catalog: MotorCatalog) -> tuple[str | None, str]:
+    """Resuelve qué motor audita. Devuelve (motor_key|None, motivo).
+    None = auditoría desactivada (explícito, ver motivo).
+
+    Fuente: capability 'file_write' (auditor_motor) -- es propiedad de la
+    operación auditada, no del motor productor ni de la capability del job
+    (que puede ser 'generate' y no tener nada que ver). Override real por
+    request: context={"auditor": "<motor>"} o context={"auditor": false}
+    para desactivar explícito, mismo patrón que context={"reasoning": true}."""
+    if "auditor" in context:
+        override = context["auditor"]
+        if not override:
+            return None, "desactivado explícito por request (context.auditor)"
+        auditor = str(override)
+        source = "override por request"
+    else:
+        write_cap = catalog.get_capability("file_write")
+        auditor = write_cap.auditor_motor if write_cap else None
+        if not auditor:
+            return None, "sin auditor_motor configurado en capability 'file_write' (default None)"
+        source = "default de capability 'file_write'"
+
+    if auditor == producing_motor:
+        # Decisión explícita: auto-revisión no vale. No es un error del
+        # job (ya corrió y quedó COMPLETED) -- se desactiva la auditoría
+        # para ESTE job con motivo visible, no se bloquea nada retroactivo.
+        return None, f"auditor resuelto ('{auditor}', {source}) es el mismo motor que produjo el trabajo -- auto-revisión rechazada"
+
+    return auditor, source
+
+
+async def _audit_and_notify(
+    *, job_id: str, motor: str, prompt: str, catalog: MotorCatalog,
+    context: dict, files_written: list[dict], job_start_sha: str | None,
+) -> None:
+    """Cierre de un job que escribió: audita (si hay auditor configurado) y
+    notifica por Telegram. Nunca lanza, nunca toca el status del job (ya
+    quedó COMPLETED antes de llamar acá) -- ver docstring de run()."""
+    from jacobs.reaper import send_telegram_alert
+    from motor_registry.tool_authority import WORKSPACE_ROOT
+
+    total_bytes = sum(f["bytes"] for f in files_written)
+    file_list = ", ".join(f"{f['path']} ({f['bytes']}b)" for f in files_written)
+
+    auditor_motor, auditor_source = _resolve_auditor_motor(producing_motor=motor, context=context, catalog=catalog)
+    verdict, verdict_reason = None, None
+
+    if auditor_motor is not None:
+        auditor_entry = catalog.get_motor(auditor_motor)
+        if auditor_entry is None or not auditor_entry.enabled:
+            # T4 (P10 ambiguo, decisión consciente): el auditor configurado
+            # no existe/está deshabilitado en el catálogo -- fail-soft, NO
+            # se revierte trabajo bueno por una configuración rota. Se
+            # marca visible (log ERROR + verdict "unavailable"), no
+            # silencioso.
+            logger.error("job %s: auditor '%s' no disponible en el catálogo -- auditoría omitida", job_id, auditor_motor)
+            verdict, verdict_reason = "unavailable", f"motor '{auditor_motor}' no encontrado o deshabilitado"
+        else:
+            try:
+                diffs = []
+                for f in files_written:
+                    if not f.get("sha"):
+                        continue
+                    r = subprocess.run(
+                        ["git", "-C", str(WORKSPACE_ROOT), "show", f["sha"]],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if r.returncode == 0:
+                        diffs.append(r.stdout[:8000])  # cap defensivo -- no inflar el prompt del auditor sin límite
+                diff_text = "\n\n---\n\n".join(diffs) or "(sin diff disponible)"
+
+                audit_prompt = (
+                    "Sos un auditor de código. Otro agente ejecutó este objetivo:\n"
+                    f"{prompt}\n\nY produjo estos cambios (git show de cada commit):\n{diff_text}\n\n"
+                    "Respondé SOLO con un JSON: "
+                    '{"verdict": "pass"|"pass_with_observations"|"revert", "reason": "<una frase>"}. '
+                    "\"revert\" solo si hay algo genuinamente peligroso o que no cumple el objetivo -- "
+                    "no seas exigente con el estilo."
+                )
+                auditor_api_key = ""
+                if auditor_entry.transport not in ("ollama", "subprocess"):
+                    auditor_api_key = await resolve_credential_instrumented(auditor_entry.provider_id or auditor_motor)
+                auditor_reasoning_effort = "none" if (auditor_entry.transport == "ollama" and auditor_entry.disable_reasoning) else None
+                resp = await asyncio.wait_for(
+                    _call_http_openai_compat(
+                        api_url=auditor_entry.api_url, model=auditor_entry.model, api_key=auditor_api_key,
+                        messages=[{"role": "user", "content": audit_prompt}],
+                        timeout=float(AUDIT_TIMEOUT_SECONDS), max_tokens=auditor_entry.max_tokens,
+                        reasoning_effort=auditor_reasoning_effort,
+                    ),
+                    timeout=AUDIT_TIMEOUT_SECONDS,
+                )
+                raw = resp.get("choices", [{}])[0].get("message", {}).get("content", "")
+                start, end = raw.find("{"), raw.rfind("}")
+                parsed = json.loads(raw[start:end + 1]) if start != -1 and end != -1 else {}
+                verdict = parsed.get("verdict")
+                verdict_reason = parsed.get("reason")
+                if verdict not in ("pass", "pass_with_observations", "revert"):
+                    # Ambigüedad del auditor -- P10 aplicado acá: NO se
+                    # interpreta como "revert" (revertir trabajo bueno tiene
+                    # costo real); se marca degradado, visible, sin castigar
+                    # al productor por una salida del auditor mal formada.
+                    logger.warning("job %s: auditor devolvió verdict no reconocible: %r", job_id, raw[:300])
+                    verdict, verdict_reason = "pass_with_observations", f"auditor no dio un verdict parseable (raw: {raw[:200]!r})"
+            except Exception as exc:  # fail-soft: mismo criterio que arriba -- timeout/red del auditor no revierte trabajo bueno
+                logger.error("job %s: fallo llamando al auditor '%s': %s", job_id, auditor_motor, exc, exc_info=True)
+                verdict, verdict_reason = "unavailable", f"{type(exc).__name__}: {exc}"
+
+    reverted = False
+    if verdict == "revert" and job_start_sha:
+        r = subprocess.run(
+            ["git", "-C", str(WORKSPACE_ROOT), "reset", "--hard", job_start_sha],
+            capture_output=True, text=True, timeout=15,
+        )
+        reverted = r.returncode == 0
+        logger.error("job %s: auditor pidió REVERTIR (%s) -- git reset --hard %s: %s", job_id, verdict_reason, job_start_sha, "OK" if reverted else r.stderr)
+        try:
+            from jacobs.store import event_append
+            await event_append(job_id, "TOOL_WRITE_REVERTED", {"reason": verdict_reason, "sha_before": job_start_sha, "ok": reverted})
+        except Exception:  # fail-soft: mismo criterio del resto del módulo
+            logger.error("job %s: no se pudo registrar TOOL_WRITE_REVERTED", job_id, exc_info=True)
+
+    # Severidad (T5): 🔴 el auditor pidió revertir (haya o no funcionado el
+    # revert -- ambos casos son la señal fuerte). 🟡 se auditó pero con
+    # observaciones, o no se pudo auditar (config rota / auditor caído).
+    # 🟢 pass limpio, o sin auditor configurado (ninguna señal negativa que
+    # dar -- informativo puro).
+    if verdict == "revert":
+        severity = "🔴"
+    elif verdict in ("pass_with_observations", "unavailable"):
+        severity = "🟡"
+    else:
+        severity = "🟢"
+    last_sha = files_written[-1].get("sha") if files_written else None
+    message = (
+        f"{severity} JAX tool-calling: job {job_id} escribió {len(files_written)} archivo(s), {total_bytes} bytes.\n"
+        f"Archivos: {file_list}\n"
+        f"Auditor: {auditor_motor or 'ninguno'} ({auditor_source}) -- veredicto: {verdict or 'sin auditar'}"
+        + (f" ({verdict_reason})" if verdict_reason else "") + "\n"
+        f"sha para revertir: {last_sha or '(sin commit)'}"
+        + (" -- YA REVERTIDO" if reverted else "")
+    )
+    result = await send_telegram_alert(message)
+    if not result["ok"]:
+        logger.error("job %s: notificación de escritura no se pudo entregar: %s", job_id, result["error"])
+
+
+async def _notify_failed_with_writes(*, job_id: str, files_written: list[dict], reason: str) -> None:
+    """T5: 'cota agotada con escrituras hechas' es alerta fuerte -- el job
+    falló mid-loop pero YA escribió (y commiteó) algo antes del corte. Sin
+    esto, esas escrituras quedan en el repo de workspace sin que nadie se
+    entere hasta encontrarlas por accidente. No hay auditor acá (el job no
+    llegó a un final coherente que auditar) -- solo la señal de que hay
+    trabajo a medias commiteado, con el sha para revisarlo/revertirlo a mano."""
+    if not files_written:
+        return
+    from jacobs.reaper import send_telegram_alert
+    total_bytes = sum(f["bytes"] for f in files_written)
+    file_list = ", ".join(f"{f['path']} ({f['bytes']}b)" for f in files_written)
+    last_sha = files_written[-1].get("sha")
+    message = (
+        f"🔴 JAX tool-calling: job {job_id} FALLÓ ({reason}) pero ya había "
+        f"escrito {len(files_written)} archivo(s), {total_bytes} bytes.\n"
+        f"Archivos: {file_list}\nsha del último commit: {last_sha or '(sin commit)'} "
+        "-- revisar a mano, sin auditoría (el job no llegó a un cierre coherente)."
+    )
+    result = await send_telegram_alert(message)
+    if not result["ok"]:
+        logger.error("job %s: notificación de fallo-con-escrituras no se pudo entregar: %s", job_id, result["error"])
 
 
 def _humanize_error(exc: Exception) -> str:
@@ -335,6 +523,9 @@ async def run(
     last_call_signature: tuple[str, str] | None = None
     consecutive_same_calls = 0
     total_read_bytes = 0
+    total_write_bytes = 0
+    files_written: list[dict] = []  # {"path": rel, "bytes": n, "sha": sha} -- para T4/T5 al cierre
+    job_start_sha: str | None = None  # HEAD del workspace ANTES de la 1ra escritura -- ancla del rollback del job entero
     cumulative_prompt_tokens = 0
     cumulative_completion_tokens = 0
     tool_loop_history: list[dict] = []
@@ -350,14 +541,18 @@ async def run(
                 job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
                 error=f"Bucle de tool-calling agotó {MAX_TOOL_LOOP_ITERATIONS} iteraciones sin resolver",
                 _tool_loop_iterations=iteration - 1, _tool_loop_history=tool_loop_history,
+                _files_written=files_written,
             )
+            await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason=f"{MAX_TOOL_LOOP_ITERATIONS} iteraciones agotadas")
             return
         if loop_deadline is not None and time.time() >= loop_deadline:
             store.update(
                 job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
                 error=f"Bucle de tool-calling agotó el presupuesto de tiempo ({timeout_seconds}s) en la iteración {iteration}",
                 _tool_loop_iterations=iteration - 1, _tool_loop_history=tool_loop_history,
+                _files_written=files_written,
             )
+            await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="presupuesto de tiempo agotado")
             return
 
         # --- un turno: dispatch HTTP + watcher de kill switch en paralelo ---
@@ -400,7 +595,9 @@ async def run(
                 status=JobStatus.FAILED.value,
                 finished_at=time.time(),
                 error="killed_by_switch — PAUSE detectado durante la ejecución",
+                _files_written=files_written,
             )
+            await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="killed_by_switch")
             return
 
         try:
@@ -417,7 +614,9 @@ async def run(
                 status=JobStatus.FAILED.value,
                 finished_at=time.time(),
                 error=_humanize_error(exc),
+                _files_written=files_written,
             )
+            await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="error de API del motor")
             return
 
         choices = response_json.get("choices", [])
@@ -427,7 +626,9 @@ async def run(
                 status=JobStatus.FAILED.value,
                 finished_at=time.time(),
                 error="API retornó respuesta sin 'choices' — formato inesperado",
+                _files_written=files_written,
             )
+            await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="respuesta de API sin choices")
             return
 
         message = choices[0].get("message", {})
@@ -534,19 +735,48 @@ async def run(
                     ),
                     _tool_loop_iterations=iteration,
                     _tool_loop_history=tool_loop_history + [_partial_iteration_entry(iteration, tool_calls, iteration_results)],
+                    _files_written=files_written,
                 )
+                await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="bucle detectado")
                 return
+
+            # job_start_sha: HEAD del repo de workspace ANTES de la primera
+            # escritura de ESTE job -- capturado antes de despachar, nunca
+            # después (después ya incluiría el commit que se está por
+            # hacer). Ancla el rollback de "todo lo que escribió este job",
+            # ver T1/T7.
+            if name == "write_file" and job_start_sha is None:
+                job_start_sha = get_workspace_head()
 
             # T2 (requisito no negociable): autoridad se resuelve de CERO en
             # cada tool_call de cada iteración. Sin excepción, sin caché.
             result = await authorize_and_execute_tool_call(
                 tool_name=name, arguments_json=args_json,
                 caller=caller or "", job_id=job_id, catalog=catalog,
+                tool_call_id=tc_id,
             )
             iteration_results.append(result)
 
-            if result["decision"] == "executed" and result.get("content"):
-                total_read_bytes += len(result["content"].encode("utf-8"))
+            if result["decision"] == "executed":
+                if name == "read_file" and result.get("content"):
+                    total_read_bytes += len(result["content"].encode("utf-8"))
+                elif name == "write_file":
+                    # "content" acá es un mensaje de estado ("Escrito: X
+                    # bytes"), NO el contenido del archivo -- el tamaño real
+                    # viene de bytes_written, puesto ahí a propósito por
+                    # tool_authority._write_file para no confundir los dos.
+                    total_write_bytes += result.get("bytes_written", 0)
+                    written_path = None
+                    try:
+                        written_path = json.loads(args_json).get("path")
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    files_written.append({
+                        "path": written_path,
+                        "bytes": result.get("bytes_written", 0),
+                        "sha": result.get("git_sha"),
+                        "git_committed": result.get("git_committed"),
+                    })
 
             # T3: rechazo por autoridad y error operativo reciben el MISMO
             # tratamiento de bucle (se informa al modelo y se continúa) --
@@ -568,7 +798,23 @@ async def run(
                     ),
                     _tool_loop_iterations=iteration,
                     _tool_loop_history=tool_loop_history + [_partial_iteration_entry(iteration, tool_calls, iteration_results)],
+                    _files_written=files_written,
                 )
+                await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="presupuesto acumulado de lectura excedido")
+                return
+
+            if total_write_bytes > MAX_TOTAL_WRITE_BYTES:
+                store.update(
+                    job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                    error=(
+                        f"Presupuesto acumulado de escritura excedido "
+                        f"({total_write_bytes} > {MAX_TOTAL_WRITE_BYTES} bytes) en la iteración {iteration}"
+                    ),
+                    _tool_loop_iterations=iteration,
+                    _tool_loop_history=tool_loop_history + [_partial_iteration_entry(iteration, tool_calls, iteration_results)],
+                    _files_written=files_written,
+                )
+                await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="presupuesto acumulado de escritura excedido")
                 return
 
         tool_loop_history.append(_partial_iteration_entry(iteration, tool_calls, iteration_results))
@@ -595,6 +841,7 @@ async def run(
         _validation_missing_fields=validation.get("missing_fields") or [],
         _tool_loop_iterations=iteration,
         _tool_loop_history=tool_loop_history,
+        _files_written=files_written,
     )
 
     # Usage tracking (2026-08-10): best-effort, nunca debe romper el job ya
@@ -618,4 +865,13 @@ async def run(
             "job %s (motor=%s): respuesta sin 'usage' -- no se registra "
             "fila de costo (tokens desconocidos)",
             job_id, motor,
+        )
+
+    # GAP2 Fase4 (T4/T5): auditoría posterior + notificación -- solo si el
+    # job escribió algo. El job YA quedó COMPLETED arriba: esto es un
+    # revisor, no un gate. Nunca puede tumbar ni revertir el status del job.
+    if files_written:
+        await _audit_and_notify(
+            job_id=job_id, motor=motor, prompt=prompt, catalog=catalog,
+            context=context, files_written=files_written, job_start_sha=job_start_sha,
         )

@@ -57,10 +57,17 @@ _MOTOR_CFG = {
         },
         "file_write": {
             "allowed_callers": ["jacobs"], "risk_level": "medium", "sandbox_only": True,
-            "requires_human_gate": True, "max_execution_minutes": 1,
+            "requires_human_gate": False, "max_execution_minutes": 1,
             "max_recursion_depth": 0, "output_schema": "", "forbidden_paths": _FORBIDDEN,
+            "auditor_motor": "thot",
         },
     },
+}
+_MOTOR_CFG["motors"]["thot"] = {
+    "enabled": True, "provider": "openai", "provider_id": "openai", "api_key_env": "",
+    "api_url": "https://api.openai.com/v1", "model": "gpt-5.5", "max_context_tokens": 0,
+    "sandbox_only": True, "default_timeout_seconds": 60, "supports_reasoning": False,
+    "transport": "http_openai_compat", "disable_reasoning": False,
 }
 
 
@@ -95,7 +102,17 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         ws_patch.start()
         self.addCleanup(ws_patch.stop)
 
-    async def _run(self, responses, **kwargs):
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], cwd=self.workspace, check=True)
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixture"], cwd=self.workspace, check=True)
+
+        self.mock_telegram = AsyncMock(return_value={"ok": True, "message_id": 1, "error": None})
+        telegram_patch = patch("jacobs.reaper.send_telegram_alert", self.mock_telegram)
+        telegram_patch.start()
+        self.addCleanup(telegram_patch.stop)
+
+    async def _run(self, responses, context=None, **kwargs):
         job_id = self.store.create(
             caller="jacobs", capability="generate", motor="jax_local",
             trace_id="t", prompt="objetivo de prueba", recursion_depth=0,
@@ -103,7 +120,7 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         with patch("httpx.AsyncClient.post", AsyncMock(side_effect=responses)) as mock_post:
             await worker.run(
                 job_id=job_id, motor="jax_local", capability="generate",
-                prompt="objetivo de prueba", context={}, store=self.store,
+                prompt="objetivo de prueba", context=context or {}, store=self.store,
                 catalog=self.catalog, kill_switch_path=self.kill_switch_path,
                 caller="jacobs", **kwargs,
             )
@@ -167,15 +184,19 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         assert state["_tool_loop_history"][0]["results"][0]["decision"] == "rejected", state
 
     # --- 6. write_file (requires_human_gate) a mitad del bucle ---
-    async def test_6_write_file_blocked_human_gate_se_informa_y_bucle_sigue(self):
-        state, _ = await self._run([
-            _resp(tool_calls=[_tc("write_file", {"path": "x.txt", "content": "y"})], finish_reason="tool_calls"),
-            _resp(content="no puedo escribir, continúo sin eso", finish_reason="stop"),
-        ])
+    async def test_6_capability_con_requires_human_gate_se_informa_y_bucle_sigue(self):
+        """T3 (Fase4): file_write ya NO tiene requires_human_gate=1 en el
+        seed real, pero el MECANISMO sigue -- una capability que sí lo
+        declare (T6: fuera del jail, efectos externos) debe rechazar mid-
+        bucle igual que antes, informar al modelo, y el bucle sigue."""
+        with patch.dict(self.catalog._capabilities["file_write"].__dict__, {"requires_human_gate": True}):
+            state, _ = await self._run([
+                _resp(tool_calls=[_tc("write_file", {"path": "x.txt", "content": "y"})], finish_reason="tool_calls"),
+                _resp(content="no puedo escribir, continúo sin eso", finish_reason="stop"),
+            ], context={"auditor": False})
         assert state["status"] == "completed", state
         reason = state["_tool_loop_history"][0]["results"][0]["reason"]
         assert "human_gate" in reason, reason
-        # confirma que NO se creó el archivo -- el rechazo fue real, no solo el mensaje
         assert not (self.workspace / "x.txt").exists()
 
     # --- 7. múltiples tool_calls en una respuesta: una autorizada, otra no ---
@@ -291,6 +312,84 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         ])
         assert state["status"] == "failed", state
         assert "killed_by_switch" in state["error"], state
+
+    # --- GAP2 Fase4: write_file en el bucle + auditor + notificación ---
+    def _auditor_resp(self, verdict, reason="ok"):
+        payload = {
+            "choices": [{"message": {"role": "assistant", "content": json.dumps({"verdict": verdict, "reason": reason})},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+        }
+        r = AsyncMock(); r.json = lambda: payload; r.raise_for_status = lambda: None
+        return r
+
+    async def test_write_file_ejecuta_commitea_y_auditor_pass_notifica_verde(self):
+        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+            state, _ = await self._run([
+                _resp(tool_calls=[_tc("write_file", {"path": "out.html", "content": "<h1>hola</h1>"})], finish_reason="tool_calls"),
+                _resp(content="listo, escribí el archivo", finish_reason="stop"),
+                self._auditor_resp("pass", "se ve bien"),
+            ])
+        assert state["status"] == "completed", state
+        assert (self.workspace / "out.html").read_text() == "<h1>hola</h1>"
+        self.mock_telegram.assert_awaited_once()
+        msg = self.mock_telegram.await_args.args[0]
+        assert "🟢" in msg and "thot" in msg and "pass" in msg, msg
+
+    async def test_auditor_revert_deshace_con_git_y_notifica_rojo(self):
+        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+            state, _ = await self._run([
+                _resp(tool_calls=[_tc("write_file", {"path": "malo.html", "content": "contenido malo"})], finish_reason="tool_calls"),
+                _resp(content="listo", finish_reason="stop"),
+                self._auditor_resp("revert", "contenido inaceptable"),
+            ])
+        assert state["status"] == "completed", state  # el JOB sigue completed -- el revert es post-hoc
+        assert not (self.workspace / "malo.html").exists(), "el revert debió deshacer el archivo"
+        msg = self.mock_telegram.await_args.args[0]
+        assert "🔴" in msg and "REVERTIDO" in msg, msg
+
+    async def test_auditor_override_por_request_cambia_el_auditor(self):
+        self.catalog._motors["kimi"] = self.catalog._motors["thot"]  # reusa fixture de motor http_openai_compat
+        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+            state, _ = await self._run([
+                _resp(tool_calls=[_tc("write_file", {"path": "x.txt", "content": "y"})], finish_reason="tool_calls"),
+                _resp(content="listo", finish_reason="stop"),
+                self._auditor_resp("pass"),
+            ], context={"auditor": "kimi"})
+        assert state["status"] == "completed", state
+        msg = self.mock_telegram.await_args.args[0]
+        assert "kimi" in msg and "override por request" in msg, msg
+
+    async def test_auditor_desactivado_por_request_no_llama_auditor(self):
+        state, mock_post = await self._run([
+            _resp(tool_calls=[_tc("write_file", {"path": "x.txt", "content": "y"})], finish_reason="tool_calls"),
+            _resp(content="listo", finish_reason="stop"),
+        ], context={"auditor": False})
+        assert state["status"] == "completed", state
+        assert mock_post.await_count == 2, mock_post.await_count  # nunca llamó al auditor
+        msg = self.mock_telegram.await_args.args[0]
+        assert "sin auditar" in msg or "ninguno" in msg, msg
+
+    async def test_auto_revision_rechazada_si_auditor_es_el_mismo_motor(self):
+        state, mock_post = await self._run([
+            _resp(tool_calls=[_tc("write_file", {"path": "x.txt", "content": "y"})], finish_reason="tool_calls"),
+            _resp(content="listo", finish_reason="stop"),
+        ], context={"auditor": "jax_local"})  # mismo motor que produjo el trabajo
+        assert state["status"] == "completed", state
+        assert mock_post.await_count == 2, mock_post.await_count  # nunca se llamó a sí mismo como auditor
+        msg = self.mock_telegram.await_args.args[0]
+        assert "auto-revisión" in msg or "ninguno" in msg, msg
+
+    async def test_read_after_write_lee_lo_escrito_no_cache(self):
+        state, _ = await self._run([
+            _resp(tool_calls=[_tc("write_file", {"path": "nuevo.txt", "content": "recien escrito"}, "c1")], finish_reason="tool_calls"),
+            _resp(tool_calls=[_tc("read_file", {"path": "nuevo.txt"}, "c2")], finish_reason="tool_calls"),
+            _resp(content="el archivo dice: recien escrito", finish_reason="stop"),
+        ], context={"auditor": False})
+        assert state["status"] == "completed", state
+        read_result = state["_tool_loop_history"][1]["results"][0]
+        assert read_result["decision"] == "executed", read_result
+        assert read_result["content"] == "recien escrito", read_result
 
 
 if __name__ == "__main__":
