@@ -15,7 +15,7 @@ En App.jsx: la ruta protegida debe leer `token` del store (o localStorage) para 
 En useJaxStore.js: verificar que el estado inicial lee el token de localStorage al arrancar (para que al recargar la página el usuario siga autenticado).
 
 ## Verificación
-1. Entrar con fernando@rich-hn.com / ***REMOVED-SEE-JAX-RONDA9-2026-08-20*** → redirige al Dashboard
+1. Entrar con fernando@rich-hn.com / [contraseña, rotada -- ver gestor de secretos] → redirige al Dashboard
 2. Recargar la página → sigue en Dashboard (token persistido)
 3. Logout → redirige a Login
 

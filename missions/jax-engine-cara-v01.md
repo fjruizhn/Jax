@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS jax_users (
 
 Seed obligatorio:
 - tenant_id=1, name="Inversiones Diamante Negro", plan="superadmin"
-- user_id=1, email="fernando@rich-hn.com", role="superadmin", password="***REMOVED-SEE-JAX-RONDA9-2026-08-20***" (hash bcrypt)
+- user_id=1, email="fernando@rich-hn.com", role="superadmin", password desde JAX_SEED_ADMIN_PASSWORD (o generada aleatoria y logueada al arranque si no está seteada, ver db/seed.py) (hash bcrypt)
 
 ## LA CARA — El Ojo HAL 9000
 

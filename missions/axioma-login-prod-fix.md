@@ -11,7 +11,7 @@ Tengo demo con sponsors en menos de 30 minutos.
 - Cloudflare proxy activo en axioma-ia.io
 
 ## Diagnóstico requerido ANTES de tocar nada
-1. curl -X POST https://axioma-ia.io/api/auth/login -H "Content-Type: application/json" -d '{"email":"fernando@rich-hn.com","password":"***REMOVED-SEE-JAX-RONDA9-2026-08-20***"}' -v 2>&1 | head -40
+1. curl -X POST https://axioma-ia.io/api/auth/login -H "Content-Type: application/json" -d '{"email":"fernando@rich-hn.com","password":"<contraseña, ver gestor de secretos>"}' -v 2>&1 | head -40
 2. curl -X OPTIONS https://axioma-ia.io/api/auth/login -H "Origin: https://axioma-ia.io" -H "Access-Control-Request-Method: POST" -v 2>&1 | head -30
 3. ps aux | grep uvicorn
 
