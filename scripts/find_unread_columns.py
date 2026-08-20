@@ -65,6 +65,20 @@ GENERIC_NAMES = {
     "description", "data", "config", "enabled",
 }
 
+# Columnas sin lector por PENDIENTE DELIBERADO, no por olvido -- ver la
+# entrada correspondiente en CONTEXT.md para el porque de cada una. NO
+# tratar como hallazgo nuevo si aparecen sin consumidor; reportarlas aparte
+# con su razon, no mezcladas con las candidatas genuinas.
+DELIBERATE_PENDING = {
+    ("people", "honor_memory"): (
+        "ronda 7 (2026-08-20, T5): people se construye SIN honor_memory. "
+        "Semantica pendiente de definicion de Fernando, no es una decision "
+        "tecnica -- no proponer significado. Los otros 4 campos de people "
+        "(person_uuid, nickname, relationship_start, last_mentioned) SI "
+        "tienen escritor/lector diseñados (ver CONTEXT.md)."
+    ),
+}
+
 
 def _run(cmd: list[str]) -> str:
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
@@ -113,16 +127,26 @@ def main() -> None:
     print(f"{len(columns)} columnas reales en el schema.\n")
 
     candidates: list[tuple[str, str]] = []
+    deliberate: list[tuple[str, str]] = []
     for table, column in columns:
         if column in GENERIC_NAMES:
             continue
         hits = grep_column(column)
-        if not hits:
+        if hits:
+            continue
+        if (table, column) in DELIBERATE_PENDING:
+            deliberate.append((table, column))
+        else:
             candidates.append((table, column))
 
     print(f"=== {len(candidates)} candidatas (sin match fuera de migrations/tests/docs) ===\n")
     for table, column in candidates:
         print(f"{table}.{column}")
+
+    if deliberate:
+        print(f"\n=== {len(deliberate)} pendiente(s) deliberado(s), NO son hallazgo nuevo ===\n")
+        for table, column in deliberate:
+            print(f"{table}.{column} -- {DELIBERATE_PENDING[(table, column)]}")
 
     print(f"\n({len(GENERIC_NAMES)} nombres genéricos excluidos sin investigar: {sorted(GENERIC_NAMES)})")
 
