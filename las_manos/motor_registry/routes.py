@@ -144,6 +144,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             user_id=req.user_id,
             tenant_id=req.tenant_id,
             caller=req.caller,
+            timeout_seconds=req.timeout_seconds,
         )
     )
     task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))

@@ -50,6 +50,12 @@ class MotorDispatchRequest(BaseModel):
     # expone alguna vez publicamente, esto se vuelve un IDOR inmediato.
     user_id:    str | None = None
     tenant_id:  str | None = None
+    # GAP2 Fase3 (2026-08-19): presupuesto de tiempo del bucle de
+    # tool-calling en worker.py -- REUSA step.timeout_seconds (jacobs),
+    # nunca un timeout nuevo por turno. None = sin presupuesto extra (solo
+    # el timeout por-llamada de motor.default_timeout_seconds), compat con
+    # cualquier caller que no lo mande.
+    timeout_seconds: int | None = None
 
     model_config = {"extra": "forbid"}
 
