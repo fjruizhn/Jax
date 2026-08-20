@@ -14,7 +14,7 @@
 | FRONTEND_ORIGIN | `https://axioma-ia.io` ✓ correcto |
 | Uvicorn PID 177569 | Corriendo, accesible |
 | curl externo → Cloudflare → backend | **200 OK + JWT válido** |
-| Último request desde atemai-net (172.16.20.11) | `200 OK` en el log |
+| Último request desde atemai-net (<IP interna, ver /etc/jax/.env>) | `200 OK` en el log |
 
 **Lo que sí pasó antes (en el log):**
 - 3× `422 Unprocessable Entity` — el frontend mandó body en formato incorrecto

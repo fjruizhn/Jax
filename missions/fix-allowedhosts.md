@@ -19,7 +19,7 @@ Archivo: `/home/fruiz/jax-platform/frontend/vite.config.js`
 La entrada `www.axioma-ia.io` es innecesaria — Nginx ya redirige
 `www.axioma-ia.io` → `axioma-ia.io` con 301 antes de que la request llegue a
 Vite (confirmado en `/www/server/panel/vhost/nginx/axioma-ia.io.conf` en
-atemai-net, 172.16.20.11). Simplemente dejar:
+atemai-net, <IP interna, ver /etc/jax/.env>). Simplemente dejar:
 
 ```js
 allowedHosts: ['axioma-ia.io'],
