@@ -10,7 +10,7 @@ faceta: hipatia
 
 **Hardware:**
 - hall9000: Ryzen 5 8500G, RX 9060 XT 16GB RDNA4, 32GB RAM, Ubuntu 24.04.4
-- Red: 172.16.20.5, VMs en 172.16.20.10 (prod) y 172.16.20.12 (dev)
+- Red: <IP interna, ver /etc/jax/.env>, VMs en <IP interna, ver /etc/jax/.env> (prod) y <IP interna, ver /etc/jax/.env> (dev)
 
 **JAX 2.0 actual:**
 - REPL terminal con voz (Kokoro TTS + Whisper STT)

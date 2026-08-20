@@ -1,10 +1,10 @@
 id: OP03
 statement: >
-  Node.js en server-rich-hn (172.16.20.10) se instala vía el runtime
+  Node.js en server-rich-hn (<IP interna, ver /etc/jax/.env>) se instala vía el runtime
   propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
 origin: >
   Confirmación directa de Fernando Ruiz, verificada por SSH
-  (fruiz@172.16.20.10:58291, 2026-08-15): `which node` resuelve a
+  (fruiz@<IP interna, ver /etc/jax/.env>:<puerto, ver /etc/jax/.env>, 2026-08-15): `which node` resuelve a
   `/www/server/nodejs/v24.16.0/bin/node` (runtime gestionado por aaPanel);
   `dpkg -l | grep -iE "nodejs|node-"` sin resultados; sin archivos en
   `/etc/apt/sources.list.d/` que referencien nodesource. Distinta de la

@@ -43,7 +43,7 @@ A continuación, se presenta un diagrama en formato Mermaid que ilustra la arqui
 
 ```mermaid
 graph TD
-    subgraph "HALL9000 (Host: 172.16.20.5)"
+    subgraph "HALL9000 (Host: <IP interna, ver /etc/jax/.env>)"
         subgraph "JAX Core (Python Application)"
             JAX_TUI[JAX TUI - Textual] --> A(Agente JAX/Router)
             A -- "Invoca Modelos" --> Ollama_Local(Ollama (qwen3:14b))
@@ -78,7 +78,7 @@ graph TD
         ZepService -- "Persistencia" --> MariaDB(MariaDB (DB_UNIFICADA))
     end
 
-    subgraph "Red Local (172.16.20.0/24)"
+    subgraph "Red Local (<IP interna, ver /etc/jax/.env>)"
         AteneaERP(AteneaERP Laravel 13 + React 19) --> JaxAPI
         HAMMURABI(HAMMURABI Banking SaaS JP) --> JaxAPI
         ClientBrowser(Cliente WebUI en Browser) --> OpenWebUI
@@ -433,7 +433,7 @@ A continuación, se presenta un diagrama en formato Mermaid que ilustra la arqui
 
 ```mermaid
 graph TD
-    subgraph "HALL9000 (Host: 172.16.20.5)"
+    subgraph "HALL9000 (Host: <IP interna, ver /etc/jax/.env>)"
         subgraph "JAX Core (Python Application)"
             JAX_TUI[JAX TUI - Textual] --> A(Agente JAX/Router)
             A -- "Invoca Modelos" --> Ollama_Local(Ollama (qwen3:14b))
@@ -468,7 +468,7 @@ graph TD
         ZepService -- "Persistencia" --> MariaDB(MariaDB (DB_UNIFICADA))
     end
 
-    subgraph "Red Local (172.16.20.0/24)"
+    subgraph "Red Local (<IP interna, ver /etc/jax/.env>)"
         AteneaERP(AteneaERP Laravel 13 + React 19) --> JaxAPI
         HAMMURABI(HAMMURABI Banking SaaS JP) --> JaxAPI
         ClientBrowser(Cliente WebUI en Browser) --> OpenWebUI

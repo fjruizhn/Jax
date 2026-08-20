@@ -7,7 +7,7 @@
 
 Del recon `recon-bridge-to-lookingglass` (2026-07-18,
 `missions/recon-bridge-to-lookingglass_result.md`): en el bridge (Hestia,
-172.16.20.20) los certificados de `sol-lex.com` (usuario melipaola, vencido
+<IP interna, ver /etc/jax/.env>) los certificados de `sol-lex.com` (usuario melipaola, vencido
 desde 2025-05-03) y `bdihn.com` (usuario bdihn, vencido desde 2025-05-22)
 llevan más de un año vencidos. No forma parte de la migración a
 lookingglass — es un problema de producción real, independiente.
@@ -48,7 +48,7 @@ curl -sI http://sol-lex.com/.well-known/acme-challenge/test 2>&1
 curl -sI http://bdihn.com/.well-known/acme-challenge/test 2>&1
 ```
 
-Confirmar que el dominio resuelve a la IP correcta del bridge (172.16.20.20)
+Confirmar que el dominio resuelve a la IP correcta del bridge (<IP interna, ver /etc/jax/.env>)
 y que el puerto 80 responde para el path de ACME challenge — si el DNS
 apunta a otro lado o el firewall bloquea 80, ahí está la causa.
 

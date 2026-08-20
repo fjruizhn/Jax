@@ -108,7 +108,7 @@ Implementar esquema completo:
 4. Después de cambios frontend: 
    cd ~/jax-platform/frontend && npm run build
    rsync -av dist/ /tmp/axioma-dist/
-   ssh -p 58291 fruiz@172.16.20.11 "sudo cp -r /tmp/axioma-dist/* /www/wwwroot/axioma-ia.io/ && sudo nginx -s reload"
+   ssh -p <puerto, ver /etc/jax/.env> fruiz@<IP interna, ver /etc/jax/.env> "sudo cp -r /tmp/axioma-dist/* /www/wwwroot/axioma-ia.io/ && sudo nginx -s reload"
 5. Verificar cada módulo con evidencia antes de marcar completo
 
 ## Restricciones ADN

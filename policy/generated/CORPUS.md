@@ -81,7 +81,7 @@ DISCREPANCIA CON LA TAREA: las rutas absolutas citadas en el encargo de esta fas
 ### OP02 — Toda regla de Policy Routing en el ER7212PC (CASA-RZ) usa un IP Group /32 específico como Source; nunca Source=Default.
 
 - **Enunciado:** Toda regla de Policy Routing en el ER7212PC (CASA-RZ) usa un IP Group /32 específico como Source; nunca Source=Default.
-- **Origen:** Confirmación directa de Fernando Ruiz, verificada por captura de pantalla del Omada Controller (2026-08-15): pestaña Devices → ER7212PC → Config → Routing → Policy Routing muestra 3 reglas activas (ASI Network, Multicable, Hall9000), las tres con Source = IP Group (Server_Bridge, Server_RichHN, Sesamo_NAS, Serveer_BlackTower, Server_Atemai, Server_Hall9000), ninguna con Source=Default. Segunda captura confirma el grupo Server_Hall9000 = IP Subnet 172.16.20.5/32.
+- **Origen:** Confirmación directa de Fernando Ruiz, verificada por captura de pantalla del Omada Controller (2026-08-15): pestaña Devices → ER7212PC → Config → Routing → Policy Routing muestra 3 reglas activas (ASI Network, Multicable, Hall9000), las tres con Source = IP Group (Server_Bridge, Server_RichHN, Sesamo_NAS, Serveer_BlackTower, Server_Atemai, Server_Hall9000), ninguna con Source=Default. Segunda captura confirma el grupo Server_Hall9000 = IP Subnet <IP interna, ver /etc/jax/.env>.
 
 - **Estado:** NORMATIVA_PENDIENTE
 - **Mecanismo de cumplimiento:** null
@@ -91,10 +91,10 @@ DISCREPANCIA CON LA TAREA: las rutas absolutas citadas en el encargo de esta fas
 
 
 
-### OP03 — Node.js en server-rich-hn (172.16.20.10) se instala vía el runtime propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
+### OP03 — Node.js en server-rich-hn (<IP interna, ver /etc/jax/.env>) se instala vía el runtime propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
 
-- **Enunciado:** Node.js en server-rich-hn (172.16.20.10) se instala vía el runtime propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
-- **Origen:** Confirmación directa de Fernando Ruiz, verificada por SSH (fruiz@172.16.20.10:58291, 2026-08-15): `which node` resuelve a `/www/server/nodejs/v24.16.0/bin/node` (runtime gestionado por aaPanel); `dpkg -l | grep -iE "nodejs|node-"` sin resultados; sin archivos en `/etc/apt/sources.list.d/` que referencien nodesource. Distinta de la regla ya documentada para hall9000 (~/.claude/CLAUDE.md, jax/CLAUDE.md: "Node.js ... NUNCA NodeSource") — mismo principio, host distinto, mecanismo de instalación distinto (aaPanel vs. nvm).
+- **Enunciado:** Node.js en server-rich-hn (<IP interna, ver /etc/jax/.env>) se instala vía el runtime propio de aaPanel, nunca vía NodeSource ni paquete apt del sistema.
+- **Origen:** Confirmación directa de Fernando Ruiz, verificada por SSH (fruiz@<IP interna, ver /etc/jax/.env>:<puerto, ver /etc/jax/.env>, 2026-08-15): `which node` resuelve a `/www/server/nodejs/v24.16.0/bin/node` (runtime gestionado por aaPanel); `dpkg -l | grep -iE "nodejs|node-"` sin resultados; sin archivos en `/etc/apt/sources.list.d/` que referencien nodesource. Distinta de la regla ya documentada para hall9000 (~/.claude/CLAUDE.md, jax/CLAUDE.md: "Node.js ... NUNCA NodeSource") — mismo principio, host distinto, mecanismo de instalación distinto (aaPanel vs. nvm).
 
 - **Estado:** NORMATIVA_PENDIENTE
 - **Mecanismo de cumplimiento:** null
