@@ -42,6 +42,24 @@ logger = logging.getLogger(__name__)
 
 _KILL_SWITCH_INTERVAL = 5.0  # segundos entre chequeos durante la ejecución
 
+# GAP2 Fase3 (2026-08-19): cotas del bucle de tool-calling, configurables
+# por env var (mismo patrón que CREDENTIAL_CACHE_TTL_SECONDS en
+# credential_resolver.py) -- nunca hardcodeadas sin escape.
+# MAX_TOOL_LOOP_ITERATIONS: tope duro de turnos modelo<->tools por job.
+MAX_TOOL_LOOP_ITERATIONS = int(os.getenv("MOTOR_TOOL_LOOP_MAX_ITERATIONS", "5"))
+# LOOP_DETECTION_THRESHOLD: la MISMA tool con los MISMOS argumentos (string
+# crudo) repetida esta cantidad de veces SEGUIDAS corta el bucle antes de
+# agotar las iteraciones completas -- señal más específica que "se acabaron
+# los turnos". 3 = deja lugar a un reintento legítimo (ej. el modelo repite
+# una vez por las dudas) sin tolerar un ciclo real.
+LOOP_DETECTION_THRESHOLD = int(os.getenv("MOTOR_TOOL_LOOP_DETECTION_THRESHOLD", "3"))
+# MAX_TOTAL_READ_BYTES: presupuesto ACUMULADO de bytes leídos por read_file
+# en todo el bucle (no por archivo -- eso ya lo cubre tool_authority.
+# MAX_READ_BYTES por-llamada). Defensa en profundidad contra un agente que
+# no puede exfiltrar un archivo grande de una vez pero sí varios chicos a
+# lo largo de varios turnos.
+MAX_TOTAL_READ_BYTES = int(os.getenv("MOTOR_TOOL_LOOP_MAX_TOTAL_READ_BYTES", "500000"))
+
 # Los ocho predicados cerrados de REFORMAS-v3.md §3.1.3. Hardcodeados acá
 # (en vez de parsear el YAML en cada job) porque el codebase no tiene hoy
 # ningún cargador YAML establecido — solo tomllib para config.toml — y
@@ -78,7 +96,7 @@ async def _call_http_openai_compat(
     api_url: str,
     model: str,
     api_key: str,
-    prompt: str,
+    messages: list[dict],
     timeout: float,
     max_tokens: int = 0,
     tools: list[dict] | None = None,
@@ -110,10 +128,18 @@ async def _call_http_openai_compat(
     allowed for this model" (RECHAZA la llamada entera); Zhipu/Ada responde
     200 pero lo ignora (reasoning_content sigue poblado). Por eso esta
     función nunca decide sola mandarlo -- el caller ya filtró por transport
-    antes de pasarlo."""
+    antes de pasarlo.
+
+    messages (GAP2 Fase3, 2026-08-19): antes era `prompt: str` y esta
+    función armaba el único mensaje user acá adentro -- ahora el caller
+    (run(), que sostiene el historial del bucle de tool-calling) manda la
+    lista completa. Formato de 'tool' verificado real contra Ollama (no
+    inferido de OpenAI): {"role":"assistant","content":...,"tool_calls":[...]}
+    seguido de {"role":"tool","tool_call_id":<mismo id>,"content":<string>}
+    -- un mensaje 'tool' por cada tool_call de la respuesta anterior."""
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": messages,
     }
     if max_tokens:
         payload["max_tokens"] = max_tokens
@@ -138,6 +164,22 @@ _TRANSPORT_DISPATCH = {
     "http_openai_compat": _call_http_openai_compat,
     "ollama": _call_http_openai_compat,
 }
+
+
+def _partial_iteration_entry(iteration: int, tool_calls: list[dict], iteration_results: list[dict]) -> dict:
+    """Entrada de _tool_loop_history para UNA iteración -- funciona tanto al
+    completarla entera (len(iteration_results) == len(tool_calls)) como a
+    mitad de camino (un corte de cota disparado antes de procesar todos los
+    tool_calls de esa respuesta): tool_calls[:len(iteration_results)] recorta
+    a lo que efectivamente ya tiene resultado, nunca más."""
+    return {
+        "iteration": iteration,
+        "tool_calls": [
+            {"name": tc.get("function", {}).get("name"), "arguments": tc.get("function", {}).get("arguments")}
+            for tc in tool_calls[:len(iteration_results)]
+        ],
+        "results": iteration_results,
+    }
 
 
 def _humanize_error(exc: Exception) -> str:
@@ -167,6 +209,7 @@ async def run(
     user_id: str | None = None,
     tenant_id: str | None = None,
     caller: str | None = None,
+    timeout_seconds: int | None = None,
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -272,162 +315,266 @@ async def run(
     if motor_entry.transport == "ollama" and motor_entry.disable_reasoning and not want_reasoning:
         reasoning_effort = "none"
 
-    # Lanzar tarea HTTP y watcher de kill switch en paralelo
-    api_task = asyncio.create_task(
-        call_fn(
-            api_url=motor_entry.api_url,
-            model=motor_entry.model,
-            api_key=api_key,
-            prompt=prompt_with_identity,
-            timeout=float(motor_entry.default_timeout_seconds),
-            max_tokens=motor_entry.max_tokens,
-            tools=tools_for_call,
-            reasoning_effort=reasoning_effort,
-        )
-    )
-    kill_task = asyncio.create_task(_watch_kill_switch(kill_switch_path))
+    # GAP2 Fase3 (2026-08-19): bucle de tool-calling. Formato verificado
+    # REAL contra Ollama (no inferido de OpenAI): un mensaje assistant con
+    # tool_calls, seguido de UN mensaje {"role":"tool","tool_call_id":<id>,
+    # "content":<string>} por CADA tool_call de esa respuesta -- confirmado
+    # con un ciclo de 2 turnos real, el modelo usó el contenido del turno
+    # anterior sin alucinar.
+    #
+    # Requisito no negociable: el gate de autoridad vive EN EL BUCLE, cada
+    # iteración pasa por tool_authority.py de cero -- nunca se cachea una
+    # autorización de un turno anterior (executor.py:731-733: _HTTP_FACETS
+    # no pasa por Motor Registry, no asumir que "ya pasó por acá" cubre el
+    # turno siguiente).
+    messages: list[dict] = [{"role": "user", "content": prompt_with_identity}]
+    # timeout_seconds=0 es un presupuesto real (agotado de inmediato), no
+    # "sin presupuesto" -- `is not None`, nunca la verdad de Python (0 es
+    # falsy y hubiera desactivado el chequeo por completo).
+    loop_deadline = (time.time() + timeout_seconds) if timeout_seconds is not None else None
+    last_call_signature: tuple[str, str] | None = None
+    consecutive_same_calls = 0
+    total_read_bytes = 0
+    cumulative_prompt_tokens = 0
+    cumulative_completion_tokens = 0
+    tool_loop_history: list[dict] = []
+    iteration = 0
 
-    try:
-        done, pending = await asyncio.wait(
-            [api_task, kill_task],
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-    except asyncio.CancelledError:
-        api_task.cancel()
-        kill_task.cancel()
-        store.update(
-            job_id,
-            status=JobStatus.CANCELLED.value,
-            finished_at=time.time(),
-            error="Job cancelado externamente",
-        )
-        raise
+    while True:
+        iteration += 1
+        if iteration > MAX_TOOL_LOOP_ITERATIONS:
+            # T2/T3: nunca completed con salida parcial. El step de Jacobs
+            # (executor.py::_invoke_motor) trata status=='failed' como
+            # terminal-error de inmediato -- no espera a su propio timeout.
+            store.update(
+                job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                error=f"Bucle de tool-calling agotó {MAX_TOOL_LOOP_ITERATIONS} iteraciones sin resolver",
+                _tool_loop_iterations=iteration - 1, _tool_loop_history=tool_loop_history,
+            )
+            return
+        if loop_deadline is not None and time.time() >= loop_deadline:
+            store.update(
+                job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                error=f"Bucle de tool-calling agotó el presupuesto de tiempo ({timeout_seconds}s) en la iteración {iteration}",
+                _tool_loop_iterations=iteration - 1, _tool_loop_history=tool_loop_history,
+            )
+            return
 
-    # Cancelar la tarea que no terminó
-    for task in pending:
-        task.cancel()
-
-    # Kill switch ganó y la API todavía no terminó
-    if kill_task in done and api_task not in done:
-        store.update(
-            job_id,
-            status=JobStatus.FAILED.value,
-            finished_at=time.time(),
-            error="killed_by_switch — PAUSE detectado durante la ejecución",
+        # --- un turno: dispatch HTTP + watcher de kill switch en paralelo ---
+        api_task = asyncio.create_task(
+            call_fn(
+                api_url=motor_entry.api_url,
+                model=motor_entry.model,
+                api_key=api_key,
+                messages=messages,
+                timeout=float(motor_entry.default_timeout_seconds),
+                max_tokens=motor_entry.max_tokens,
+                tools=tools_for_call,
+                reasoning_effort=reasoning_effort,
+            )
         )
-        return
+        kill_task = asyncio.create_task(_watch_kill_switch(kill_switch_path))
 
-    # Obtener resultado de la API (puede lanzar excepción)
-    try:
-        response_json = api_task.result()
-    except Exception as exc:
-        # Observabilidad: traceback completo en el log (sin filtrar la API key —
-        # format_exc no vuelca variables locales ni headers).
-        logger.error(
-            "Error de API en job %s: %s\n%s",
-            job_id, exc, traceback.format_exc(),
-        )
-        store.update(
-            job_id,
-            status=JobStatus.FAILED.value,
-            finished_at=time.time(),
-            error=_humanize_error(exc),
-        )
-        return
+        try:
+            done, pending = await asyncio.wait(
+                [api_task, kill_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            api_task.cancel()
+            kill_task.cancel()
+            store.update(
+                job_id,
+                status=JobStatus.CANCELLED.value,
+                finished_at=time.time(),
+                error="Job cancelado externamente",
+            )
+            raise
 
-    # Extraer content y reasoning_content
-    choices = response_json.get("choices", [])
-    if not choices:
-        store.update(
-            job_id,
-            status=JobStatus.FAILED.value,
-            finished_at=time.time(),
-            error="API retornó respuesta sin 'choices' — formato inesperado",
-        )
-        return
+        for task in pending:
+            task.cancel()
 
-    message = choices[0].get("message", {})
-    content: str = message.get("content") or ""
-    # T3 (2026-08-19): "reasoning_content" es correcto para Moonshot/Kimi y
-    # Zhipu/Ada (verificado real, ambos usan esa clave). Ollama (transport
-    # dispatchable desde hoy mismo, commit 8daf273) usa "reasoning" -- clave
-    # distinta, verificado real contra /v1/chat/completions. Sin este OR,
-    # _reasoning_content quedaba null SIEMPRE para jax_local -- no una
-    # deuda vieja, el bug nació el mismo día que Ollama empezó a pasar por
-    # este código. Se extraen ambas por compatibilidad entre proveedores en
-    # vez de una rama `if provider_id == "ollama"` -- ningún proveedor
-    # conocido manda las dos a la vez, así que no hay ambigüedad real que
-    # resolver eligiendo una sobre la otra.
-    reasoning_content: str = message.get("reasoning_content") or message.get("reasoning") or ""
-    finish_reason = choices[0].get("finish_reason")
-    tool_calls = message.get("tool_calls") or []
+        if kill_task in done and api_task not in done:
+            store.update(
+                job_id,
+                status=JobStatus.FAILED.value,
+                finished_at=time.time(),
+                error="killed_by_switch — PAUSE detectado durante la ejecución",
+            )
+            return
 
-    # GAP2 Fase1 (2026-08-19): el modelo pidió tools -- Fase1 es
-    # observación pura, cero ejecución, cero segundo turno. NO marcar
-    # COMPLETED (el trabajo no terminó, el modelo está esperando un
-    # resultado que nunca le va a llegar en esta fase) -- ese sería
-    # exactamente el fail-open de output_validator.py que dejamos
-    # anotado como deuda: reportar éxito desde una rama que no lo es.
-    if tool_calls:
+        try:
+            response_json = api_task.result()
+        except Exception as exc:
+            # Observabilidad: traceback completo en el log (sin filtrar la API key —
+            # format_exc no vuelca variables locales ni headers).
+            logger.error(
+                "Error de API en job %s (iteración %d): %s\n%s",
+                job_id, iteration, exc, traceback.format_exc(),
+            )
+            store.update(
+                job_id,
+                status=JobStatus.FAILED.value,
+                finished_at=time.time(),
+                error=_humanize_error(exc),
+            )
+            return
+
+        choices = response_json.get("choices", [])
+        if not choices:
+            store.update(
+                job_id,
+                status=JobStatus.FAILED.value,
+                finished_at=time.time(),
+                error="API retornó respuesta sin 'choices' — formato inesperado",
+            )
+            return
+
+        message = choices[0].get("message", {})
+        content: str = message.get("content") or ""
+        # T3 Fase2: "reasoning_content" es correcto para Moonshot/Kimi y
+        # Zhipu/Ada; Ollama usa "reasoning" -- se extraen ambas.
+        reasoning_content: str = message.get("reasoning_content") or message.get("reasoning") or ""
+        finish_reason = choices[0].get("finish_reason")
+        tool_calls = message.get("tool_calls") or []
+        usage = response_json.get("usage") or {}
+        cumulative_prompt_tokens += usage.get("prompt_tokens", 0)
+        cumulative_completion_tokens += usage.get("completion_tokens", 0)
+
+        if reasoning_content:
+            logger.debug(
+                "reasoning_content de job %s iteración %d (%d chars) — solo en log, no expuesto",
+                job_id, iteration, len(reasoning_content),
+            )
+        if finish_reason == "length":
+            logger.warning(
+                "job %s iteración %d cortado por limite de tokens (finish_reason=length) — "
+                "content=%d chars, usage=%s",
+                job_id, iteration, len(content), usage,
+            )
+
+        if not tool_calls:
+            # Fin del bucle: respuesta final, sin más tool_calls. content/
+            # reasoning_content/finish_reason quedan con el valor de ESTE
+            # (último) turno -- son la respuesta real que se entrega.
+            break
+
         logger.info(
-            "job %s pidió %d tool_call(s): %s",
-            job_id, len(tool_calls),
+            "job %s iteración %d pidió %d tool_call(s): %s",
+            job_id, iteration, len(tool_calls),
             [
                 {"name": tc.get("function", {}).get("name"),
                  "arguments": tc.get("function", {}).get("arguments")}
                 for tc in tool_calls
             ],
         )
-        # GAP2 Fase2 (2026-08-19): el gate de autoridad + la única tool
-        # ejecutable (read_file) viven en tool_authority.py -- acá solo se
-        # invoca por cada tool_call y se acumulan los resultados. Sigue sin
-        # haber segundo turno (fase 3, fuera de alcance): el resultado de
-        # cada tool queda en el job, nunca vuelve al modelo.
-        tool_results = [
-            await authorize_and_execute_tool_call(
-                tool_name=tc.get("function", {}).get("name", ""),
-                arguments_json=tc.get("function", {}).get("arguments", ""),
-                caller=caller or "",
-                job_id=job_id,
-                catalog=catalog,
-            )
-            for tc in tool_calls
-        ]
-        store.update(
-            job_id,
-            status=JobStatus.TOOLS_REQUESTED.value,
-            finished_at=time.time(),
-            result_summary=f"Modelo pidió {len(tool_calls)} tool(s): {[r['decision'] for r in tool_results]}",
-            _reasoning_content=reasoning_content[:2000] if reasoning_content else None,
-            _finish_reason=finish_reason,
-            _tool_calls=[
-                {"name": tc.get("function", {}).get("name"),
-                 "arguments": tc.get("function", {}).get("arguments")}
+
+        # Historial: el mensaje assistant con tool_calls va PRIMERO, antes
+        # de los resultados -- Ollama lo exige así (verificado real).
+        messages.append({
+            "role": "assistant",
+            "content": content,
+            "tool_calls": [
+                {
+                    "id": tc.get("id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("function", {}).get("name", ""),
+                        "arguments": tc.get("function", {}).get("arguments", ""),
+                    },
+                }
                 for tc in tool_calls
             ],
-            _tool_results=tool_results,
-        )
-        return
-    usage = response_json.get("usage")
+        })
 
-    if reasoning_content:
-        logger.debug(
-            "reasoning_content de job %s (%d chars) — solo en log, no expuesto",
-            job_id, len(reasoning_content),
-        )
+        # T1: múltiples tool_calls en una sola respuesta -- se ejecutan
+        # TODAS, en el orden que las devolvió el modelo, secuencial (no
+        # asyncio.gather: cada una escribe su propio evento de auditoría vía
+        # tool_authority.py, secuencial evita logs intercalados y no hay
+        # necesidad real de paralelismo para un read_file). Un rechazo de
+        # UNA no aborta las demás de la misma iteración: son autorizaciones
+        # independientes (allowed_callers/forbidden_paths de cada tool_name
+        # se resuelven por separado) -- rechazar la tool B porque la tool A
+        # de la misma respuesta fue rechazada sería castigar una petición
+        # que en sí misma puede ser legítima. El modelo ve el resultado real
+        # de cada una (ejecutado, rechazado, o error) y decide qué hacer con
+        # esa información en la iteración siguiente.
+        iteration_results = []
+        for tc in tool_calls:
+            name = tc.get("function", {}).get("name", "")
+            args_json = tc.get("function", {}).get("arguments", "")
+            tc_id = tc.get("id", "")
 
-    # Observabilidad (2026-08-10): antes finish_reason/usage se descartaban
-    # por completo — un corte real (finish_reason='length') era
-    # indiagnosticable despues del hecho, solo quedaba `content` truncado
-    # sin ninguna pista de por que.
-    if finish_reason == "length":
-        logger.warning(
-            "job %s cortado por limite de tokens (finish_reason=length) — "
-            "content=%d chars, usage=%s",
-            job_id, len(content), usage,
-        )
+            # Detección de loop: la MISMA tool con los MISMOS argumentos
+            # (string crudo, sin normalizar -- si el modelo cambia aunque
+            # sea un espacio ya no cuenta como "lo mismo", intencional: no
+            # queremos falsos positivos por reformateo trivial) repetida
+            # LOOP_DETECTION_THRESHOLD veces seguidas corta el bucle antes
+            # de agotar las 5 iteraciones completas -- señal más específica
+            # y diagnosticable que "se acabaron las iteraciones".
+            signature = (name, args_json)
+            if signature == last_call_signature:
+                consecutive_same_calls += 1
+            else:
+                consecutive_same_calls = 1
+                last_call_signature = signature
 
-    # Validar output contra el schema de la capability
+            if consecutive_same_calls >= LOOP_DETECTION_THRESHOLD:
+                # Auditoría completa: incluye lo YA ejecutado de ESTA
+                # iteración antes del corte (iteration_results), aunque el
+                # for-loop no haya terminado -- sin esto, la última
+                # iteración (la que disparó el corte) quedaba invisible en
+                # _tool_loop_history, encontrado con evidencia (test real)
+                # en esta misma sesión.
+                store.update(
+                    job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                    error=(
+                        f"Bucle detectado: '{name}' con los mismos argumentos "
+                        f"{LOOP_DETECTION_THRESHOLD} veces seguidas (iteración {iteration})"
+                    ),
+                    _tool_loop_iterations=iteration,
+                    _tool_loop_history=tool_loop_history + [_partial_iteration_entry(iteration, tool_calls, iteration_results)],
+                )
+                return
+
+            # T2 (requisito no negociable): autoridad se resuelve de CERO en
+            # cada tool_call de cada iteración. Sin excepción, sin caché.
+            result = await authorize_and_execute_tool_call(
+                tool_name=name, arguments_json=args_json,
+                caller=caller or "", job_id=job_id, catalog=catalog,
+            )
+            iteration_results.append(result)
+
+            if result["decision"] == "executed" and result.get("content"):
+                total_read_bytes += len(result["content"].encode("utf-8"))
+
+            # T3: rechazo por autoridad y error operativo reciben el MISMO
+            # tratamiento de bucle (se informa al modelo y se continúa) --
+            # la distinción TOOL_CALL_REJECTED/TOOL_CALL_EXECUTION_ERROR ya
+            # quedó marcada en jacobs_events por tool_authority.py, que es
+            # donde importa para la señal de seguridad. Acá solo se decide
+            # si el bucle sigue, y en ambos casos la respuesta correcta es
+            # "decile al modelo qué pasó y dejalo reaccionar" -- ver
+            # justificación completa en el mensaje de esta sesión.
+            tool_content = result["content"] if result["decision"] == "executed" else f"ERROR: {result['reason']}"
+            messages.append({"role": "tool", "tool_call_id": tc_id, "content": tool_content})
+
+            if total_read_bytes > MAX_TOTAL_READ_BYTES:
+                store.update(
+                    job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                    error=(
+                        f"Presupuesto acumulado de lectura excedido "
+                        f"({total_read_bytes} > {MAX_TOTAL_READ_BYTES} bytes) en la iteración {iteration}"
+                    ),
+                    _tool_loop_iterations=iteration,
+                    _tool_loop_history=tool_loop_history + [_partial_iteration_entry(iteration, tool_calls, iteration_results)],
+                )
+                return
+
+        tool_loop_history.append(_partial_iteration_entry(iteration, tool_calls, iteration_results))
+        # sigue al siguiente turno del while
+
+    # --- Bucle terminó con respuesta final (content sin tool_calls) ---
     validation = validate(content, output_schema)
     if validation.get("warning"):
         logger.warning("Validación output job %s: %s", job_id, validation["warning"])
@@ -442,26 +589,25 @@ async def run(
         # Campos internos — guardados en JSONL, no expuestos en MotorJobView
         _reasoning_content=reasoning_content[:2000] if reasoning_content else None,
         _finish_reason=finish_reason,
-        _usage=usage,
+        _usage={"prompt_tokens": cumulative_prompt_tokens, "completion_tokens": cumulative_completion_tokens},
         _validation_validated=validation["validated"],
         _validation_warning=validation.get("warning"),
         _validation_missing_fields=validation.get("missing_fields") or [],
+        _tool_loop_iterations=iteration,
+        _tool_loop_history=tool_loop_history,
     )
 
     # Usage tracking (2026-08-10): best-effort, nunca debe romper el job ya
     # marcado COMPLETED arriba. record_motor_usage es fail-soft por su
     # cuenta (sin user_id/tenant_id no escribe nada; error de DB solo loguea).
-    # provider_id: reutiliza la MISMA variable ya resuelta arriba (linea ~141)
-    # para la credencial -- antes se re-declaraba aca con un default DISTINTO
-    # (.get(motor) sin fallback vs .get(motor, motor)), dos semanticas para
-    # el mismo nombre dentro de la misma funcion, y para cualquier motor sin
-    # entrada en el mapa esta segunda copia daba None en silencio (0 filas
-    # de uso, sin log).
+    # Suma de TODOS los turnos del bucle (GAP2 Fase3) -- antes (single-shot)
+    # era el usage de la única llamada; con múltiples turnos, reportar solo
+    # el último hubiera subreportado el costo real de los turnos con tools.
     from motor_registry.usage_writer import record_motor_usage
-    if provider_id and usage:
+    if provider_id and (cumulative_prompt_tokens or cumulative_completion_tokens):
         await record_motor_usage(
             user_id, tenant_id, motor, provider_id, motor_entry.model,
-            usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+            cumulative_prompt_tokens, cumulative_completion_tokens,
         )
     elif provider_id:
         # Observabilidad (I2, 2026-08-10): sin este log, un provider que

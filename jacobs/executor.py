@@ -535,6 +535,11 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
         "prompt":     _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
         "user_id":    pipeline.user_id,
         "tenant_id":  pipeline.tenant_id,
+        # GAP2 Fase3 (2026-08-19): mismo presupuesto que ya gobierna el
+        # polling de abajo (deadline = timeout) -- el bucle de tool-calling
+        # de worker.py lo consume como SU presupuesto de tiempo, no uno
+        # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
+        "timeout_seconds": timeout,
     }
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload)
