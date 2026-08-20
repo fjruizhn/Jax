@@ -692,6 +692,86 @@ class MemoryDB:
         return True
 
     @db_error_handler
+    async def get_decisions(self, limit: int = 20,
+                            user_id: Optional[int] = None,
+                            project_id: Optional[int] = None) -> Optional[list]:
+        """Lista decisiones registradas, mas recientes primero (comando
+        /decisions). Scope de dos niveles opcional, igual que get_facts
+        (sin scope si ambos None -- uso simple del REPL)."""
+        if not self.pool:
+            return None
+        query = ("SELECT id, title, context, chosen_option, reasoning, outcome, "
+                 "made_by_facet, made_at, project_id FROM decisions")
+        conditions = []
+        params: list = []
+        scope_clauses = []
+        if project_id is not None:
+            scope_clauses.append("project_id = %s")
+            params.append(project_id)
+        if user_id is not None:
+            scope_clauses.append("(project_id IS NULL AND user_id = %s)")
+            params.append(user_id)
+        if scope_clauses:
+            conditions.append("(" + " OR ".join(scope_clauses) + ")")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY made_at DESC LIMIT %s"
+        params.append(limit)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, tuple(params))
+                return await cur.fetchall()
+
+    @db_error_handler
+    async def get_action_items(self, limit: int = 20,
+                               status: Optional[str] = "pending",
+                               user_id: Optional[int] = None,
+                               project_id: Optional[int] = None) -> Optional[list]:
+        """Lista pendientes registrados, mas recientes primero (comando
+        /pendientes). status=None trae todos los estados; por defecto solo
+        'pending' (lo accionable, que es lo que Fernando revisa)."""
+        if not self.pool:
+            return None
+        query = ("SELECT id, description, status, due_date, reminder_date, "
+                 "context_facet, completed_at, created_at, project_id FROM action_items")
+        conditions = []
+        params: list = []
+        if status:
+            conditions.append("status = %s")
+            params.append(status)
+        scope_clauses = []
+        if project_id is not None:
+            scope_clauses.append("project_id = %s")
+            params.append(project_id)
+        if user_id is not None:
+            scope_clauses.append("(project_id IS NULL AND user_id = %s)")
+            params.append(user_id)
+        if scope_clauses:
+            conditions.append("(" + " OR ".join(scope_clauses) + ")")
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY created_at DESC LIMIT %s"
+        params.append(limit)
+        async with self.pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(query, tuple(params))
+                return await cur.fetchall()
+
+    @db_error_handler
+    async def mark_action_item_done(self, item_id: int) -> Optional[bool]:
+        """Marca un pendiente como completado (comando /pendientes done)."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE action_items SET status='done', completed_at=NOW() "
+                    "WHERE id=%s",
+                    (item_id,),
+                )
+                return cur.rowcount > 0
+
+    @db_error_handler
     async def mark_processed(self, conv_id: int) -> Optional[bool]:
         """Marca la conversacion como ya procesada por el worker."""
         if not self.pool:
