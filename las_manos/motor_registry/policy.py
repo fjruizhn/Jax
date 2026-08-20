@@ -9,11 +9,24 @@ Valida antes de crear un job:
   5. context no contiene claves prohibidas (secretos)
   6. hay motor habilitado disponible para la capability
   7. ese motor es sandbox_only (v0.1 solo admite sandbox)
+  8. timeout_seconds (si el caller lo pide) no excede capability.max_execution_minutes
 
 Módulo PURO: sin I/O, sin red, testeable en aislamiento.
 Falla cerrado: ante cualquier duda, rechaza.
 
-En memoria de Jairo Urbina.
+Check 8 (ronda 4, 2026-08-20, T2.b): admisión, no circuit breaker. Valida el
+PRESUPUESTO PEDIDO contra el techo declarado de la capability -- no mide
+tiempo transcurrido (este modulo es sincrono/puro, sin reloj). El corte en
+vivo sigue siendo el mismo de siempre: loop_deadline en motor_registry/
+worker.py, alimentado por timeout_seconds (que hoy REUSA Step.timeout_seconds
+de Jacobs, ver comentario en models.py de este mismo modulo) -- este check
+no lo duplica, solo evita que alguien pida un presupuesto mayor al que la
+capability tiene declarado. timeout_seconds=None (el caller no pidio
+presupuesto) no dispara el check -- mismo criterio de compatibilidad que ya
+declaraba MotorDispatchRequest.timeout_seconds ("None = sin presupuesto
+extra, compat con cualquier caller que no lo mande"); no se vuelve
+obligatorio ahora, eso cambiaria comportamiento para callers que hoy no lo
+mandan y no fue lo que se pidio esta ronda.
 """
 from __future__ import annotations
 
@@ -50,6 +63,7 @@ class MotorPolicy:
         context_keys: list[str],
         recursion_depth: int,
         human_gate_token: str | None,
+        timeout_seconds: int | None = None,
     ) -> MotorPolicyResult:
         """Valida el dispatch completo. Devuelve al PRIMER fallo."""
 
@@ -107,6 +121,20 @@ class MotorPolicy:
                 f"Motor '{resolved}' no es sandbox_only. "
                 "Motor Registry v0.1 solo admite motores sandbox.",
             )
+
+        # 8) timeout pedido no excede el techo declarado de la capability.
+        # timeout_seconds=0 es un presupuesto real (agotado de inmediato,
+        # mismo criterio que worker.py) -- `is not None`, nunca la verdad
+        # de Python. timeout_seconds=None (caller no pidio presupuesto) no
+        # dispara el check -- ver docstring del modulo.
+        if timeout_seconds is not None:
+            max_seconds = cap.max_execution_minutes * 60
+            if timeout_seconds > max_seconds:
+                return MotorPolicyResult(
+                    False,
+                    f"timeout_seconds={timeout_seconds} excede el techo de "
+                    f"'{capability}' ({cap.max_execution_minutes} min = {max_seconds}s)",
+                )
 
         return MotorPolicyResult(
             allowed=True,
