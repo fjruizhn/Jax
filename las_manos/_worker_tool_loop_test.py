@@ -50,6 +50,11 @@ _MOTOR_CFG = {
             "requires_human_gate": False, "max_execution_minutes": 15,
             "max_recursion_depth": 0, "output_schema": "",
         },
+        "implementation": {
+            "allowed_callers": ["jacobs"], "risk_level": "medium", "sandbox_only": True,
+            "requires_human_gate": False, "max_execution_minutes": 30,
+            "max_recursion_depth": 0, "output_schema": "code_patch.v1",
+        },
         "file_read": {
             "allowed_callers": ["jacobs"], "risk_level": "medium", "sandbox_only": True,
             "requires_human_gate": False, "max_execution_minutes": 1,
@@ -112,14 +117,14 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         telegram_patch.start()
         self.addCleanup(telegram_patch.stop)
 
-    async def _run(self, responses, context=None, **kwargs):
+    async def _run(self, responses, context=None, capability="generate", **kwargs):
         job_id = self.store.create(
-            caller="jacobs", capability="generate", motor="jax_local",
+            caller="jacobs", capability=capability, motor="jax_local",
             trace_id="t", prompt="objetivo de prueba", recursion_depth=0,
         )
         with patch("httpx.AsyncClient.post", AsyncMock(side_effect=responses)) as mock_post:
             await worker.run(
-                job_id=job_id, motor="jax_local", capability="generate",
+                job_id=job_id, motor="jax_local", capability=capability,
                 prompt="objetivo de prueba", context=context or {}, store=self.store,
                 catalog=self.catalog, kill_switch_path=self.kill_switch_path,
                 caller="jacobs", **kwargs,
@@ -390,6 +395,26 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         read_result = state["_tool_loop_history"][1]["results"][0]
         assert read_result["decision"] == "executed", read_result
         assert read_result["content"] == "recien escrito", read_result
+
+
+    # --- T2: fail-open de output_validator corregido ---
+    async def test_t2_salida_invalida_reintenta_una_vez_y_completa_si_el_reintento_es_valido(self):
+        valid_json = json.dumps({"diff": "x", "files_modified": ["a.py"], "description": "y"})
+        state, mock_post = await self._run([
+            _resp(content="esto no es JSON", finish_reason="stop"),
+            _resp(content=valid_json, finish_reason="stop"),
+        ], capability="implementation", context={"auditor": False})
+        assert state["status"] == "completed", state
+        assert mock_post.await_count == 2, mock_post.await_count  # confirma que SÍ reintentó
+
+    async def test_t2_salida_invalida_tras_reintento_falla_explicito_nunca_completed(self):
+        state, mock_post = await self._run([
+            _resp(content="esto no es JSON", finish_reason="stop"),
+            _resp(content="tampoco esto", finish_reason="stop"),
+        ], capability="implementation", context={"auditor": False})
+        assert state["status"] == "failed", state
+        assert "schema" in state["error"], state
+        assert mock_post.await_count == 2, mock_post.await_count  # un solo reintento, no más
 
 
 if __name__ == "__main__":
