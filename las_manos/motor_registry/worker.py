@@ -800,7 +800,7 @@ async def run(
                     written_path = None
                     try:
                         written_path = json.loads(args_json).get("path")
-                    except (json.JSONDecodeError, TypeError):
+                    except (json.JSONDecodeError, TypeError):  # fail-soft: written_path solo alimenta el texto de la notificacion (ver _notify_failed_with_writes); si falla el parseo queda None y se pierde el nombre en el mensaje, no la escritura real (ya ejecutada) ni sha/bytes/git_committed, que son los campos de los que depende la reversibilidad
                         pass
                     files_written.append({
                         "path": written_path,
