@@ -7,11 +7,20 @@ name: policy
 # test_*) ni había CI. Wireado 2026-08-20 (pago de deuda, ronda 3) tras
 # encontrar 2 violaciones reales sin marcar en código de GAP2.
 #
-# Alcance conocido: este job solo escanea el árbol de este repo (jax). El
-# test también escanea /home/fruiz/jax-platform cuando corre local con
-# ambos repos presentes en la misma máquina -- CI no tiene ese segundo
-# checkout (jax-platform es un repo GitHub separado), así que el escaneo
-# automático de jax-platform queda pendiente (anotado, no resuelto acá).
+# CORREGIDO 2026-08-20 (ronda 4, T3): las rutas del scanner eran absolutas
+# (/home/fruiz/jax, /home/fruiz/jax-platform) -- en este runner ninguna
+# existe, así que este job era un NO-OP TOTAL desde que se wireó (ronda 3):
+# "1 passed in 0.01s" en el log real, cero archivos escaneados, verde sin
+# haber mirado nada. Confirmado con `gh run view --log` de las 2 corridas
+# anteriores. Las rutas ahora se resuelven relativas al propio archivo del
+# test -- portable a cualquier checkout, este incluido.
+#
+# Alcance conocido, real esta vez: este job solo escanea el árbol de este
+# repo (jax). jax-platform es un repo GitHub privado separado sin checkout
+# cruzado acá (necesitaría un PAT/secret nuevo -- decisión de
+# infraestructura, no tomada esta sesión). jax-platform tiene su PROPIA
+# copia de este scanner + workflow, escaneando solo su propio árbol --
+# cobertura real por repo, sin depender de credenciales compartidas.
 
 on:
   push:
