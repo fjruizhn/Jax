@@ -70,6 +70,13 @@ class Pipeline(BaseModel):
     invoked_by:         str
     user_id:            str | None = None
     tenant_id:          str | None = None
+    # Ronda 5 (2026-08-20, T1): reemplaza el owner file en filesystem
+    # (~/jax/pipelines/{id}_owner.json, escrito por jax-platform). None =
+    # jax-platform todavia no confirmo haber recibido pipeline_id y
+    # completado su propio bookkeeping (resource_manager, engine_state) --
+    # mismo significado que "owner file ausente" antes, pero sin cruzar de
+    # repo ni depender de que ambos servicios corran en el mismo host.
+    owner_ack_at:       float | None = None
     mode:               str
     status:             PipelineStatus = PipelineStatus.pending
     plan:               list[Step] = Field(default_factory=list)
