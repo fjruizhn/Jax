@@ -89,6 +89,16 @@ def find_fail_open_excepts() -> list[str]:
     return violations
 
 
+def test_no_fail_open_except() -> None:
+    """Entry point pytest -- mismo escaneo que main(), vía assert en vez de
+    exit code, para que CI (y `pytest` local) lo descubran solos."""
+    violations = find_fail_open_excepts()
+    assert not violations, (
+        f"{len(violations)} except-pass (fail-open) sin marcar '# fail-soft: <razón>':\n"
+        + "\n".join(violations)
+    )
+
+
 def main() -> int:
     violations = find_fail_open_excepts()
     if violations:

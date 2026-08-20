@@ -321,7 +321,7 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
         except BaseException:
             try:
                 os.unlink(tmp_path)
-            except OSError:
+            except OSError:  # fail-soft: cleanup de tmp_path tras error real ya capturado arriba; el `raise` de abajo propaga la falla real, nadie depende de que este unlink haya funcionado
                 pass
             raise
     except OSError as exc:
