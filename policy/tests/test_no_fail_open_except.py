@@ -37,13 +37,36 @@ from __future__ import annotations
 
 import ast
 import linecache
+import os
 import sys
 from pathlib import Path
 
-REPO_ROOTS = [
-    Path("/home/fruiz/jax"),
-    Path("/home/fruiz/jax-platform"),
-]
+# Ronda 4 (2026-08-20, T3): ANTES estas rutas eran absolutas y especificas
+# de la maquina de Fernando (/home/fruiz/...). Confirmado con evidencia real
+# (gh run view del CI wireado en ronda 3) que eso hacia de .github/workflows/
+# policy.yml un NO-OP TOTAL, no cobertura parcial: en el runner de GitHub
+# Actions ninguna de las dos rutas existe (checkout va a /home/runner/work/
+# Jax/Jax), asi que `root.exists()` era False para AMBAS y el scanner
+# recorria cero archivos -- "1 passed in 0.01s" en el log real, imposible
+# para un scan real. El enforcement se sentia completo y no escaneaba nada.
+#
+# jax se resuelve ahora relativo a este archivo (portable a cualquier
+# checkout: CI, otra maquina, otro path). jax-platform sigue sin checkout
+# cruzado en la CI de jax (repo privado separado, requeriria un PAT/secret
+# nuevo -- decision de infraestructura fuera de esta sesion) pero se
+# resuelve por env var si algun dia se configura, o por el sibling local
+# (conveniencia de Fernando en hall9000, no usado en CI).
+_THIS_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _repo_roots() -> list[Path]:
+    roots = [_THIS_REPO_ROOT]
+    env_root = os.environ.get("JAX_PLATFORM_REPO_ROOT")
+    roots.append(Path(env_root) if env_root else _THIS_REPO_ROOT.parent / "jax-platform")
+    return roots
+
+
+REPO_ROOTS = _repo_roots()
 
 EXCLUDE_DIR_NAMES = {
     ".venv", "venv", "node_modules", ".git", ".worktrees", "worktrees",
