@@ -205,6 +205,84 @@ async def handle_fact_command(db, line: str, pending_delete: dict) -> str:
     )
 
 
+async def handle_decisions_command(db, line: str) -> str:
+    """Procesa comandos /decisions. Solo lectura -- las decisiones las
+    escribe el worker de memoria, no el REPL."""
+    parts = line.strip().split()
+    sub = parts[1].lower() if len(parts) > 1 else "help"
+
+    # /decisions list [--limit N]   (atajo: ls)
+    if sub in ("list", "ls"):
+        limit = 20
+        m = re.search(r"--limit (\d+)", line)
+        if m:
+            limit = int(m.group(1))
+        decisions = await db.get_decisions(limit=limit)
+        if decisions is None:
+            return "No pude leer la memoria (base no disponible)."
+        if not decisions:
+            return "No hay decisiones registradas."
+        out = [f"Decisiones (mas recientes primero, hasta {limit}):", ""]
+        for d in decisions:
+            out.append(f"  #{d['id']} [{d['made_at']}] {d['title']}")
+            out.append(f"       Elegido: {d['chosen_option']}")
+            if d["reasoning"]:
+                out.append(f"       Razon: {d['reasoning']}")
+        out.append("")
+        out.append("Usa: /decisions list --limit N")
+        return "\n".join(out)
+
+    return (
+        "Comandos de decisiones:\n"
+        "  /decisions list            ultimas 20 decisiones registradas\n"
+        "  /decisions list --limit N  ultimas N\n"
+        "  atajos: ls"
+    )
+
+
+async def handle_pendientes_command(db, line: str) -> str:
+    """Procesa comandos /pendientes. Lectura + marcar como hecho (unica
+    escritura que tiene sentido aca -- crear pendientes lo hace el worker)."""
+    parts = line.strip().split()
+    sub = parts[1].lower() if len(parts) > 1 else "help"
+    arg = parts[2] if len(parts) > 2 else ""
+
+    # /pendientes list [--all] [--limit N]   (atajo: ls)
+    if sub in ("list", "ls"):
+        status = None if "--all" in line else "pending"
+        limit = 20
+        m = re.search(r"--limit (\d+)", line)
+        if m:
+            limit = int(m.group(1))
+        items = await db.get_action_items(limit=limit, status=status)
+        if items is None:
+            return "No pude leer la memoria (base no disponible)."
+        if not items:
+            return "No hay pendientes." if status == "pending" else "No hay pendientes registrados."
+        out = ["Pendientes " + ("(todos):" if status is None else "(pending):"), ""]
+        for it in items:
+            out.append(f"  [{it['status']}] #{it['id']} ({it['created_at']})")
+            out.append(f"       {it['description']}")
+        out.append("")
+        out.append("Usa: /pendientes done <id>  |  /pendientes list --all")
+        return "\n".join(out)
+
+    # /pendientes done <id>   (atajo: d)
+    if sub in ("done", "d"):
+        if not arg.isdigit():
+            return "Uso: /pendientes done <id>"
+        ok = await db.mark_action_item_done(int(arg))
+        return f"Pendiente #{arg} marcado como hecho." if ok else f"No encontre el pendiente #{arg}."
+
+    return (
+        "Comandos de pendientes:\n"
+        "  /pendientes list            pendientes con status=pending\n"
+        "  /pendientes list --all      todos, cualquier status\n"
+        "  /pendientes done <id>       marca un pendiente como hecho\n"
+        "  atajos: ls, d"
+    )
+
+
 async def run_task(task_file: Path, facet_cli: str | None = None) -> None:
     """Ejecuta una tarea autónoma desde un archivo .md sin REPL interactivo.
     Escribe el resultado en <nombre>_result.md junto al archivo de entrada."""
@@ -513,6 +591,14 @@ async def main() -> None:
             # Comandos de gestion de memoria: tampoco son dialogo.
             if lt.startswith("/fact"):
                 salida = await handle_fact_command(db, user_text, pending_delete)
+                print(f"\n{salida}")
+                continue
+            if lt.startswith("/decisions"):
+                salida = await handle_decisions_command(db, user_text)
+                print(f"\n{salida}")
+                continue
+            if lt.startswith("/pendientes"):
+                salida = await handle_pendientes_command(db, user_text)
                 print(f"\n{salida}")
                 continue
 
