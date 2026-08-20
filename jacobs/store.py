@@ -55,6 +55,9 @@ async def init_tables() -> None:
             for col, ddl in [
                 ("user_id", "ALTER TABLE jacobs_pipelines ADD COLUMN user_id VARCHAR(50) NULL"),
                 ("tenant_id", "ALTER TABLE jacobs_pipelines ADD COLUMN tenant_id VARCHAR(50) NULL"),
+                # Ronda 5 (2026-08-20, T1): reemplaza el owner file de
+                # filesystem -- ver Pipeline.owner_ack_at en models.py.
+                ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -240,6 +243,7 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         # KeyError.
         user_id=row.get("user_id"),
         tenant_id=row.get("tenant_id"),
+        owner_ack_at=row.get("owner_ack_at"),
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,
