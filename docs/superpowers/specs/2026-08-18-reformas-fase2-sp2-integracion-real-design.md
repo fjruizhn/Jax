@@ -381,6 +381,17 @@ En orden:
    para cualquier llamador que no use la categoría — simplemente devuelve
    información extra que nadie consume. Explícito para que nadie la
    revierta "por las dudas" y rompa lo que sí quedó bien.
+5. **El commit `5e6db17` (`fix(db): get_pool() lee JAX_DB_PORT en vez de
+   puerto 3306 hardcodeado`) NUNCA se revierte junto con el resto de esta
+   rama.** Arregla un bug de conectividad a DB real, en vivo, e
+   independiente de este sub-proyecto: `db/connection.py` tenía el puerto
+   3306 hardcodeado, pero la MariaDB real de este host escucha en el 3308
+   (ver `/etc/jax/.env`) — el 3306 no tiene ningún listener acá. Un
+   revert ciego de toda la rama tumbaría la conexión a base de datos del
+   backend entero. Este commit no es parte de la feature de shadow
+   validation; solo comparte rama por orden cronológico de trabajo.
+   Excluirlo explícitamente de cualquier `git revert`/rollback de este
+   branch (hallazgo 3 de la revisión final, 2026-08-18).
 
 ## 9. Testing
 
