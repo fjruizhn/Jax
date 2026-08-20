@@ -21,7 +21,7 @@
 - Varios `401 Unauthorized` — credenciales incorrectas (alguien probó con password malo)
 - Finalmente: `200 OK` desde atemai-net
 
-**No hay nada roto.** El backend responde, CORS está correcto, el JWT se genera. Abrí el browser en `https://axioma-ia.io` ahora mismo — debería entrar sin problema con `fernando@rich-hn.com` / `***REMOVED-SEE-JAX-RONDA9-2026-08-20***`.
+**No hay nada roto.** El backend responde, CORS está correcto, el JWT se genera. Abrí el browser en `https://axioma-ia.io` ahora mismo — debería entrar sin problema con `fernando@rich-hn.com` y su contraseña (ver gestor de secretos).
 
 Si el browser sigue fallando, dime exactamente qué error muestra (el mensaje en pantalla o en la consola del browser) y lo resolvemos en segundos.
 
