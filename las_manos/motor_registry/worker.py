@@ -530,6 +530,7 @@ async def run(
     cumulative_completion_tokens = 0
     tool_loop_history: list[dict] = []
     iteration = 0
+    validation_retried = False
 
     while True:
         iteration += 1
@@ -655,10 +656,40 @@ async def run(
             )
 
         if not tool_calls:
-            # Fin del bucle: respuesta final, sin más tool_calls. content/
-            # reasoning_content/finish_reason quedan con el valor de ESTE
-            # (último) turno -- son la respuesta real que se entrega.
-            break
+            # T2 (2026-08-19): antes, un content que no parseaba como JSON
+            # (o no cumplía el schema) igual marcaba el job COMPLETED con
+            # un warning -- fail-open en el lugar más visible del sistema.
+            # Ahora: si hay schema_name, se valida ACÁ (antes de salir del
+            # bucle) -- válido o sin schema, es la respuesta final (break).
+            # Inválido y todavía no reintentamos: UN reintento (barato con
+            # think:false, mismo criterio que el retry estricto único de
+            # Hipatia/grounding) con el error explícito en el mensaje, para
+            # que el modelo se corrija -- no un segundo intento ciego.
+            # Inválido tras el reintento: FAILED explícito, nunca completed
+            # con una salida que no se puede usar.
+            validation = validate(content, output_schema)
+            if not output_schema or validation["validated"] or validation["skipped"]:
+                break
+            if validation_retried:
+                store.update(
+                    job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                    error=f"Salida no cumple el schema '{output_schema}' tras reintento: {validation['warning']}",
+                    _tool_loop_iterations=iteration, _tool_loop_history=tool_loop_history,
+                    _files_written=files_written, _validation_warning=validation.get("warning"),
+                )
+                await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="salida no cumple el schema tras reintento")
+                return
+            validation_retried = True
+            logger.warning("job %s: salida no cumple schema '%s' (%s) -- reintentando una vez", job_id, output_schema, validation["warning"])
+            messages.append({"role": "assistant", "content": content})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"Tu respuesta anterior no es válida: {validation['warning']}. "
+                    f"Respondé de nuevo, SOLO con el JSON pedido por el schema '{output_schema}', sin texto adicional."
+                ),
+            })
+            continue
 
         logger.info(
             "job %s iteración %d pidió %d tool_call(s): %s",
@@ -821,7 +852,9 @@ async def run(
         # sigue al siguiente turno del while
 
     # --- Bucle terminó con respuesta final (content sin tool_calls) ---
-    validation = validate(content, output_schema)
+    # `validation` ya se calculó adentro del bucle (T2, arriba) para decidir
+    # si esto era la respuesta final o si hacía falta reintentar -- se
+    # reusa, no se recalcula.
     if validation.get("warning"):
         logger.warning("Validación output job %s: %s", job_id, validation["warning"])
 
