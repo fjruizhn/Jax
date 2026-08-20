@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 import secrets
@@ -53,8 +54,22 @@ from workers import ssh_worker, file_worker, rsync_worker
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.toml"
 
+
+def _load_environments() -> dict[str, list[str]]:
+    """Topología real (qué IP pertenece a qué ambiente) vive en
+    /etc/jax/.env vía JAX_ENV_<AMBIENTE>_HOSTS, no en config.toml (repo
+    público, ronda 9). Sin la env var, ese ambiente queda vacío --
+    PolicyEngine._resolve_env() rechaza cualquier host que caiga ahí
+    (fail-closed, ver policy.py), nunca se cae a una IP conocida."""
+    return {
+        env: [h.strip() for h in os.getenv(f"JAX_ENV_{env.upper()}_HOSTS", "").split(",") if h.strip()]
+        for env in ("staging", "prod", "bridge", "local")
+    }
+
+
 with open(CONFIG_PATH, "rb") as f:
     CONFIG = tomllib.load(f)
+CONFIG["environments"] = _load_environments()
 
 SERVER_CFG = CONFIG["server"]
 GATE_CFG = CONFIG["human_gate"]

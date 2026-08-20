@@ -46,7 +46,8 @@ async def rsync_transfer(
     Transfiere `origen_host:origen_path` → `destino_host:destino_path`.
 
     El comando rsync se ejecuta EN el host de destino (pull): el destino
-    se conecta por SSH al origen y jala los archivos. Puerto SSH 58291.
+    se conecta por SSH al origen y jala los archivos, con el puerto/usuario
+    de JAX_SSH_PORT/JAX_SSH_USER (ver ssh_worker.py).
 
     dry_run=True añade --dry-run nativo de rsync: muestra qué pasaría.
     """

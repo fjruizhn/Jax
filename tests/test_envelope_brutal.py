@@ -108,7 +108,7 @@ def casos_semanticos():
     # cond 5 — prod + mutante + human_gate_required=false
     s = sobre_valido()
     s.update(requested_capability="ssh_exec", target_environment="prod",
-             human_gate_required=False, target_host="172.16.20.10",
+             human_gate_required=False, target_host="203.0.113.10",
              kill_switch_scope="per_operation", rollback_plan="restaurar backup")
     yield ("cond 5: prod+mutante+sin human gate", s)
 
@@ -126,7 +126,7 @@ def casos_semanticos():
     # cond 9 — mutante en prod sin rollback_plan
     s = sobre_valido()
     s.update(requested_capability="ssh_exec", target_environment="prod",
-             target_host="172.16.20.10", human_gate_required=True,
+             target_host="203.0.113.10", human_gate_required=True,
              approval_token="tok-123", kill_switch_scope="per_operation",
              rollback_plan=None, params={"command": "echo hola"})
     yield ("cond 9: mutante en prod sin rollback", s)

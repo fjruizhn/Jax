@@ -19,10 +19,14 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
-SSH_PORT = "58291"
-SSH_USER = "fruiz"
+# Puerto/usuario reales viven en /etc/jax/.env (repo público, ronda 9) --
+# sin JAX_SSH_USER seteado, el comando ssh queda mal formado ("@host") y
+# falla ruidosamente en vez de conectar con un usuario adivinado.
+SSH_PORT = os.getenv("JAX_SSH_PORT", "22")
+SSH_USER = os.getenv("JAX_SSH_USER", "")
 # -tt fuerza pseudo-tty → al morir el cliente, sshd manda SIGHUP al remoto.
 SSH_OPTS = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"]
 
