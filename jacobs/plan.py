@@ -64,6 +64,15 @@ VALID_CAPABILITIES = frozenset({
     "generate", "reason", "design", "validate_consistency", "reconcile", "critique",
     "refactor", "pipeline_analysis", "implementation", "code_swarm",
     "bug_hunt", "architecture_review",
+    # GAP2 Fase2 (2026-08-19, tool_authority.py): file_read/file_write viven
+    # en `capability`/`capability_motor` (DB) desde esa ronda pero nunca se
+    # agregaron acá -- P0 (2026-08-22): un step con motor.has_tool_access=
+    # True y capability_motor real que aprueba file_write igual fallaba acá,
+    # NIVEL A de executor.py::validate_capability(), ANTES de llegar a
+    # dispatch. Encontrado en vivo verificando el deploy de T5 (PipelineModal
+    # ahora pide 'file_write' para motores con tools) -- dos fuentes de
+    # verdad en desacuerdo, esta lista estática ganaba en producción.
+    "file_read", "file_write",
     # alias semánticos que _CAPABILITY_MAP traduce a catálogo
     "analysis", "research", "review", "code", "implement",
     # mecánico: cortocircuito en executor._dispatch_step (no toca motor)
