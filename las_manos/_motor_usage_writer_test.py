@@ -19,6 +19,19 @@ from __future__ import annotations
 import os
 import unittest
 
+# T4 (2026-08-22, auditoria usage_writer): setdefault() no pisa un
+# JAX_DB_NAME ya exportado -- si alguien sourcea /etc/jax/.env (JAX_DB_NAME=
+# jax_memory, prod) ANTES de correr este archivo, este test escribe filas
+# reales contra la DB real en silencio. Pasó de verdad esta sesión: la fila
+# huérfana tenant_id=77/tokens 1000-500 en axioma_usage es exactamente este
+# test corrido así. Fail loud en vez de fail silent.
+_existing_db_name = os.environ.get("JAX_DB_NAME")
+if _existing_db_name and _existing_db_name != "jax_memory_test":
+    raise RuntimeError(
+        f"JAX_DB_NAME={_existing_db_name!r} ya está seteado (¿sourceaste "
+        f"/etc/jax/.env?) -- este archivo escribe filas reales a esa DB. "
+        f"Unset JAX_DB_NAME antes de correr este test."
+    )
 os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
 
 from motor_registry import usage_writer

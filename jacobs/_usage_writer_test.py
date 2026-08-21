@@ -15,6 +15,17 @@ from __future__ import annotations
 import os
 import unittest
 
+# T4 (2026-08-22, auditoria usage_writer): mismo guard que
+# las_manos/_motor_usage_writer_test.py -- setdefault() no pisa un
+# JAX_DB_NAME ya exportado, y ese silencio ya escribió una fila real de
+# prueba en axioma_usage esta sesión. Fail loud en vez de fail silent.
+_existing_db_name = os.environ.get("JAX_DB_NAME")
+if _existing_db_name and _existing_db_name != "jax_memory_test":
+    raise RuntimeError(
+        f"JAX_DB_NAME={_existing_db_name!r} ya está seteado (¿sourceaste "
+        f"/etc/jax/.env?) -- este archivo escribe filas reales a esa DB. "
+        f"Unset JAX_DB_NAME antes de correr este test."
+    )
 os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
 
 from jacobs import usage_writer
