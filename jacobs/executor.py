@@ -436,7 +436,20 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         "--print",
         "--output-format", "text",
         "--permission-mode", "acceptEdits",
-        "--allowedTools", "Write,Edit,Read,Bash",
+        # Bash acotado a pwd/ls (2026-08-22, mitigacion parcial post-P0 --
+        # ver jax-hyde-bash-sin-jail-p0 en memoria). "Bash" pelado NO tiene
+        # jail de directorio -- confirmado empiricamente que cat/git diff
+        # --no-index fuera de HYDE_WORKSPACE_DIR se ejecutan sin bloqueo.
+        # "Bash(<cmd> *)" con parentesis SI activa un jail nativo de Claude
+        # Code para un par de formas reconocidas (cat, redireccion) -- pero
+        # NO para interpretes (python3) ni para primitivas escondidas de
+        # comandos como git (git diff --no-index lee cualquier archivo
+        # igual). Esta lista NO cierra el vector: funciona solo porque es
+        # tan chica que Hyde no puede hacer casi nada. Agregar git o un
+        # interprete lo reabre. `ls *` en particular SI deja listar
+        # directorios fuera del workspace (nombres/metadata, no contenido)
+        # -- confirmado, no es solo teorico.
+        "--allowedTools", "Write,Edit,Read,Bash(pwd),Bash(ls *)",
         "--add-dir", HYDE_WORKSPACE_DIR,
     ]
 

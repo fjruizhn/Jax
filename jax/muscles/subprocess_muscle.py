@@ -107,7 +107,14 @@ class SubprocessMuscle(Muscle):
             "--print",
             "--output-format", "text",
             "--permission-mode", "acceptEdits",
-            "--allowedTools", "Write,Edit,Read,Bash",
+            # Bash acotado a pwd/ls (2026-08-22, mismo cambio y misma
+            # justificacion que jacobs/executor.py::_invoke_hyde -- ver
+            # jax-hyde-bash-sin-jail-p0 en memoria). Mitigacion parcial, NO
+            # cierra el vector: "Bash(<cmd> *)" activa un jail nativo de
+            # Claude Code solo para cat/redireccion, no para interpretes ni
+            # para primitivas de git como `git diff --no-index`. `ls *`
+            # deja listar directorios fuera del workspace (confirmado).
+            "--allowedTools", "Write,Edit,Read,Bash(pwd),Bash(ls *)",
             "--add-dir", self.workspace_dir,
         ]
 
