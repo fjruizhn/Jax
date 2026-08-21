@@ -355,13 +355,23 @@ class MemoryDB:
     # --------------------------------------------------------
     def save_message(self, conversation_uuid: Optional[str], role: str, content: str,
                      facet: Optional[str] = None, model: Optional[str] = None,
-                     latency_ms: Optional[int] = None) -> None:
+                     latency_ms: Optional[int] = None) -> "Optional[asyncio.Task]":
         """Lanza el guardado en background SIN esperar (latencia 0 para JAX).
 
-        Nota: NO es async a proposito — se llama sin await desde el REPL.
+        Nota: NO es async a proposito — se llama sin await desde el REPL, que
+        sigue ignorando el valor de retorno igual que siempre (cero cambio de
+        comportamiento ahi). Devuelve el Task en vez de None para que un
+        caller que SI necesite confirmacion (ej. Mesa web, shadow validation)
+        pueda opcionalmente `await` lo que ya se le devuelve hoy y descarta:
+        `task = db.save_message(...); result = await task` da
+        `{"conversation_id": int, "turn_number": int}` si guardo, `None` si
+        fallo (error ya logueado por @db_error_handler, este solo expone el
+        veredicto al caller que lo pida). Ver
+        save-message-fire-and-forget-sin-garantia (memoria, 2026-08-18).
+
         La tarea se registra en _pending_tasks para que el GC no la mate."""
         if not self.pool or not conversation_uuid:
-            return
+            return None
         task = asyncio.create_task(
             self._save_message_impl(conversation_uuid, role, content,
                                     facet, model, latency_ms)
@@ -369,11 +379,16 @@ class MemoryDB:
         # Referencia fuerte + auto-limpieza al terminar (fix tasks huerfanas)
         self._pending_tasks.add(task)
         task.add_done_callback(self._pending_tasks.discard)
+        return task
 
     @db_error_handler
     async def _save_message_impl(self, conversation_uuid, role, content,
                                  facet, model, latency_ms):
-        """Guardado real, corre en background. Errores se tragan (decorador)."""
+        """Guardado real, corre en background. Errores se tragan y se
+        loguean (decorador) -- devuelve None en ese caso. Si guarda bien,
+        devuelve {"conversation_id": int, "turn_number": int} para que un
+        caller que awaitee el Task de save_message() tenga con que
+        identificar la fila real, sin FK nuevo ni cambiar el schema."""
         role_enum = _normalize_role(role)
         facet_enum = _normalize_role(facet) if facet else None
 
@@ -425,6 +440,7 @@ class MemoryDB:
                     )
 
         logger.debug(f"Mensaje guardado: conv={conversation_uuid[:8]} turn={turn} role={role_enum}")
+        return {"conversation_id": conv_id, "turn_number": turn}
 
     # --------------------------------------------------------
     # Metodos para el WORKER de extraccion (batch, post-conversacion)
