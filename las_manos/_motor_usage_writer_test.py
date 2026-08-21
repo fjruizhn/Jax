@@ -54,7 +54,8 @@ async def _fetch_last_usage_row():
     try:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT tokens_in, tokens_out, cost_usd, model, facet FROM axioma_usage ORDER BY id DESC LIMIT 1"
+                "SELECT tokens_in, tokens_out, cost_usd, model, facet, status, job_id, tenant_id, user_id "
+                "FROM axioma_usage ORDER BY id DESC LIMIT 1"
             )
             return await cur.fetchone()
     finally:
@@ -66,19 +67,58 @@ class MotorUsageWriterTest(unittest.IsolatedAsyncioTestCase):
         await _seed_priced_model("moonshot", "kimi-k2.7-code", 0.95, 4.00)
         await usage_writer.record_motor_usage(
             "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 1000, 500,
+            job_id="job-1", status="completed",
         )
         row = await _fetch_last_usage_row()
-        tokens_in, tokens_out, cost_usd, model, facet = row
+        tokens_in, tokens_out, cost_usd, model, facet, status, job_id, tenant_id, user_id = row
         self.assertEqual(tokens_in, 1000)
         self.assertEqual(tokens_out, 500)
         expected = (1000 * 0.95 + 500 * 4.00) / 1_000_000
         self.assertAlmostEqual(float(cost_usd), expected, places=9)
+        self.assertEqual(status, "completed")
+        self.assertEqual(job_id, "job-1")
 
-    async def test_record_motor_usage_sin_identidad_no_escribe(self):
-        row_before = await _fetch_last_usage_row()
-        await usage_writer.record_motor_usage(None, None, "kimi", "moonshot", "kimi-k2.7-code", 100, 50)
-        row_after = await _fetch_last_usage_row()
-        self.assertEqual(row_before, row_after)  # fail-soft: sin identidad, no escribe nada
+    async def test_record_motor_usage_registra_desenlace_failed(self):
+        """T1.b (2026-08-22, auditoria usage_writer): un job fallido gastó
+        tokens igual de reales -- la fila debe existir y decir 'failed', no
+        quedar indistinguible de un éxito ni desaparecer."""
+        await usage_writer.record_motor_usage(
+            "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 300, 120,
+            job_id="job-2", status="failed",
+        )
+        row = await _fetch_last_usage_row()
+        self.assertEqual(row[5], "failed")
+        self.assertEqual(row[6], "job-2")
+
+    async def test_record_motor_usage_sin_identidad_escribe_con_null_y_loguea(self):
+        """T1.c: antes esto retornaba en silencio (fail-open puro) -- un
+        dispatch sin identidad sigue gastando dinero real. Ahora escribe con
+        tenant_id/user_id NULL (distinguible, filtrable) y loguea WARNING,
+        nunca en silencio."""
+        with self.assertLogs("motor_registry.usage_writer", level="WARNING") as cm:
+            await usage_writer.record_motor_usage(
+                None, None, "kimi", "moonshot", "kimi-k2.7-code", 100, 50,
+                job_id="job-3", status="completed",
+            )
+        assert any("sin identidad" in m for m in cm.output), cm.output
+        row = await _fetch_last_usage_row()
+        self.assertEqual(row[6], "job-3")  # la fila SÍ se escribió
+        self.assertIsNone(row[7])  # tenant_id
+        self.assertIsNone(row[8])  # user_id
+
+    async def test_record_motor_usage_reintenta_y_escala_a_error_si_agota_intentos(self):
+        """T1.d: el except que traga pasa a reintentar (2 intentos) y, si
+        agota, escala a logger.error (no solo warning) -- máxima visibilidad
+        posible desde este módulo, ver justificación en el código sobre por
+        qué no jacobs_events (sin pipeline_id en este scope)."""
+        import unittest.mock as mock
+        with mock.patch("motor_registry.usage_writer.aiomysql.connect", side_effect=RuntimeError("DB caída")):
+            with self.assertLogs("motor_registry.usage_writer", level="ERROR") as cm:
+                await usage_writer.record_motor_usage(
+                    "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 100, 50,
+                    job_id="job-4", status="completed",
+                )
+        assert any("job-4" in m and "RuntimeError" in m for m in cm.output), cm.output
 
 
 if __name__ == "__main__":

@@ -154,13 +154,15 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
             )
         mock_record.assert_awaited_once_with(
             "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 46, 866,
+            job_id=job_id, status="completed",
         )
 
     async def test_run_sin_identidad_pasa_none_a_record_motor_usage(self):
         """Compat con dispatches viejos / sin Jacobs: worker.run no filtra
-        user_id/tenant_id ausentes antes de llamar -- el fail-soft (no
-        escribir sin identidad) vive en record_motor_usage, cubierto por
-        _motor_usage_writer_test.py::test_record_motor_usage_sin_identidad_no_escribe.
+        user_id/tenant_id ausentes antes de llamar -- el guard fail-soft
+        (loguear y escribir con NULL, no descartar) vive en
+        record_motor_usage, cubierto por _motor_usage_writer_test.py::
+        test_record_motor_usage_sin_identidad_escribe_con_null_y_loguea.
         Aca solo confirmamos que worker sigue completando el job igual (ver
         test_job_guarda_finish_reason_y_usage) y que pasa None tal cual,
         sin inventar un default."""
@@ -170,6 +172,7 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
             )
         mock_record.assert_awaited_once_with(
             None, None, "kimi", "moonshot", "kimi-k2.7-code", 10, 20,
+            job_id=job_id, status="completed",
         )
         assert self.store._index[job_id]["status"] == "completed"
 

@@ -186,6 +186,47 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         assert state["_tool_loop_iterations"] == 5, state
         assert mock_post.await_count == 5, mock_post.await_count
 
+    # T1.b (2026-08-22, auditoria usage_writer): un job failed debe reportar
+    # usage igual que uno completed -- antes la llamada vivía SOLO en la
+    # rama de éxito.
+    async def test_job_fallido_por_max_iteraciones_registra_usage_con_status_failed(self):
+        responses = [
+            _resp(tool_calls=[_tc("read_file", {"path": f"x{i}.txt"})], finish_reason="tool_calls")
+            for i in range(6)
+        ]
+        with patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()) as mock_usage:
+            state, _ = await self._run(responses)
+        assert state["status"] == "failed", state
+        mock_usage.assert_awaited_once()
+        args, kwargs = mock_usage.await_args
+        assert kwargs["status"] == "failed", kwargs
+        assert kwargs["job_id"] == state["job_id"], kwargs
+        # 5 turnos completados antes del corte, 10/10 tokens cada uno (default de _resp)
+        assert args[5] == 50, args  # tokens_in acumulados
+        assert args[6] == 50, args  # tokens_out acumulados
+
+    async def test_job_fallido_antes_de_llamar_al_llm_no_reporta_usage(self):
+        """Kill switch activo ANTES de iniciar -- 0 tokens gastados, no debe
+        haber llamada a record_motor_usage en absoluto (no fila vacía)."""
+        import os as _os
+        pause_path = str(self.workspace / "PAUSE_PRE")
+        with open(pause_path, "w") as f:
+            f.write("")
+        try:
+            with patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()) as mock_usage:
+                job_id = self.store.create(
+                    caller="jacobs", capability="generate", motor="jax_local",
+                    trace_id="t", prompt="x", recursion_depth=0,
+                )
+                await worker.run(
+                    job_id=job_id, motor="jax_local", capability="generate", prompt="x",
+                    context={}, store=self.store, catalog=self.catalog,
+                    kill_switch_path=pause_path, caller="jacobs",
+                )
+            mock_usage.assert_not_awaited()
+        finally:
+            _os.remove(pause_path)
+
     # --- 3. presupuesto de tiempo ---
     async def test_3_presupuesto_de_tiempo_agotado_falla_explicito(self):
         responses = [

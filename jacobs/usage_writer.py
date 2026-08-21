@@ -61,20 +61,33 @@ async def record_direct_usage(
     tokens_in: int,
     tokens_out: int,
 ) -> None:
-    """Fail-soft en dos sentidos, mismo criterio que
-    motor_registry/usage_writer.py::record_motor_usage: sin user_id/tenant_id
-    no escribe nada (pipeline disparado sin identidad real -- no deberia
-    pasar tras Task 3/6, pero no es este modulo quien lo garantiza), y
-    cualquier error de DB se loguea sin romper el step ya completado (usage
-    tracking best-effort).
+    """Best-effort (usage tracking no debe romper un step ya completado),
+    pero no silencioso.
 
-    tenant_id/user_id: la columna es INT(11) y la DB corre con
-    STRICT_TRANS_TABLES -- el cast a int() se hace SOLO aca, en el sitio del
-    INSERT (nunca en la firma publica de esta funcion ni en la de los 3
-    invocadores de executor.py), mismo motivo que record_usage en
-    jax-platform y record_motor_usage en las_manos ya documentan."""
+    T1.c (2026-08-22, auditoria usage_writer): mismo bug que
+    motor_registry/usage_writer.py::record_motor_usage -- sin user_id/
+    tenant_id esto retornaba SIN loguear. Ahora escribe con tenant_id/
+    user_id NULL (la columna lo permite) y loguea WARNING.
+
+    T1.b (auditoria usage_writer, alcance de esta ronda): el escritor de
+    Motor Registry tenía un bug real -- la llamada vivía solo en la rama de
+    éxito, así que ningún job fallido contabilizaba, confirmado 7/9 jobs
+    reales sin fila. Este escritor (transportes HTTP directos) reconcilió
+    4/4 en la única corrida real disponible -- sin evidencia del mismo
+    problema, NO se tocó el punto de llamada en executor.py::_dispatch_step
+    esta ronda (tocar _invoke_http_gemini/_invoke_http_openai_compat/
+    _invoke_ollama para capturar tokens parciales antes de una excepción
+    sería un cambio no verificado). Deuda declarada, no una garantía.
+
+    tenant_id/user_id: la columna es INT(11) -- el cast a int() se hace
+    SOLO si no es None (None se inserta como NULL real, mismo motivo que
+    record_motor_usage documenta)."""
     if not user_id or not tenant_id:
-        return
+        logger.warning(
+            f"record_direct_usage facet={facet} sin identidad "
+            f"(user_id={user_id!r} tenant_id={tenant_id!r}) -- escribe con "
+            f"tenant_id/user_id NULL, no se descarta"
+        )
     try:
         conn = await aiomysql.connect(**_db_cfg())
         try:
@@ -86,9 +99,13 @@ async def record_direct_usage(
                 await cur.execute(
                     "INSERT INTO axioma_usage (tenant_id, user_id, facet, model, tokens_in, tokens_out, cost_usd, request_type) "
                     "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pipeline')",
-                    (int(tenant_id), int(user_id), facet, model, tokens_in, tokens_out, cost),
+                    (
+                        int(tenant_id) if tenant_id is not None else None,
+                        int(user_id) if user_id is not None else None,
+                        facet, model, tokens_in, tokens_out, cost,
+                    ),
                 )
         finally:
             conn.close()
     except Exception as e:
-        logger.warning(f"record_direct_usage failed facet={facet} reason={type(e).__name__}: {e}")
+        logger.error(f"record_direct_usage failed facet={facet} reason={type(e).__name__}: {e}")

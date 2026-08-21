@@ -536,6 +536,34 @@ async def run(
     job_start_sha: str | None = None  # HEAD del workspace ANTES de la 1ra escritura -- ancla del rollback del job entero
     cumulative_prompt_tokens = 0
     cumulative_completion_tokens = 0
+
+    async def _report_usage(status: str) -> None:
+        # T1.b (2026-08-22, auditoria usage_writer): antes esta llamada
+        # vivía SOLO al final de la rama de éxito -- un job que fallaba
+        # (timeout, error de schema, cualquier cosa) nunca la alcanzaba,
+        # aunque cumulative_prompt_tokens/cumulative_completion_tokens ya
+        # reflejaban tokens reales de turnos completados (confirmado: 7/9
+        # jobs reales en la ventana auditada, todos failed, ninguno con fila
+        # en axioma_usage). Cerrado por closure (job_id/user_id/tenant_id/
+        # motor/provider_id/motor_entry ya están en scope acá) y llamado
+        # antes de CADA `return`/`raise` terminal del bucle -- no antes de
+        # los fallos pre-loop (kill switch, motor/transport/credencial
+        # inexistente): esos genuinamente gastaron 0 tokens, no hay fila
+        # que escribir.
+        if provider_id and (cumulative_prompt_tokens or cumulative_completion_tokens):
+            from motor_registry.usage_writer import record_motor_usage
+            await record_motor_usage(
+                user_id, tenant_id, motor, provider_id, motor_entry.model,
+                cumulative_prompt_tokens, cumulative_completion_tokens,
+                job_id=job_id, status=status,
+            )
+        elif provider_id:
+            logger.warning(
+                "job %s (motor=%s, status=%s): sin tokens acumulados -- no "
+                "se registra fila de costo",
+                job_id, motor, status,
+            )
+
     tool_loop_history: list[dict] = []
     iteration = 0
     validation_retried = False
@@ -553,6 +581,7 @@ async def run(
                 _files_written=files_written,
             )
             await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason=f"{MAX_TOOL_LOOP_ITERATIONS} iteraciones agotadas")
+            await _report_usage("failed")
             return
         if loop_deadline is not None and time.time() >= loop_deadline:
             store.update(
@@ -562,6 +591,7 @@ async def run(
                 _files_written=files_written,
             )
             await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="presupuesto de tiempo agotado")
+            await _report_usage("failed")
             return
 
         # --- un turno: dispatch HTTP + watcher de kill switch en paralelo ---
@@ -593,6 +623,7 @@ async def run(
                 finished_at=time.time(),
                 error="Job cancelado externamente",
             )
+            await _report_usage("cancelled")
             raise
 
         for task in pending:
@@ -607,6 +638,7 @@ async def run(
                 _files_written=files_written,
             )
             await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="killed_by_switch")
+            await _report_usage("failed")
             return
 
         try:
@@ -626,6 +658,7 @@ async def run(
                 _files_written=files_written,
             )
             await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="error de API del motor")
+            await _report_usage("failed")
             return
 
         choices = response_json.get("choices", [])
@@ -638,6 +671,7 @@ async def run(
                 _files_written=files_written,
             )
             await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="respuesta de API sin choices")
+            await _report_usage("failed")
             return
 
         message = choices[0].get("message", {})
@@ -686,6 +720,7 @@ async def run(
                     _files_written=files_written, _validation_warning=validation.get("warning"),
                 )
                 await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="salida no cumple el schema tras reintento")
+                await _report_usage("failed")
                 return
             validation_retried = True
             logger.warning("job %s: salida no cumple schema '%s' (%s) -- reintentando una vez", job_id, output_schema, validation["warning"])
@@ -777,6 +812,7 @@ async def run(
                     _files_written=files_written,
                 )
                 await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="bucle detectado")
+                await _report_usage("failed")
                 return
 
             # job_start_sha: HEAD del repo de workspace ANTES de la primera
@@ -840,6 +876,7 @@ async def run(
                     _files_written=files_written,
                 )
                 await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="presupuesto acumulado de lectura excedido")
+                await _report_usage("failed")
                 return
 
             if total_write_bytes > MAX_TOTAL_WRITE_BYTES:
@@ -854,6 +891,7 @@ async def run(
                     _files_written=files_written,
                 )
                 await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="presupuesto acumulado de escritura excedido")
+                await _report_usage("failed")
                 return
 
         tool_loop_history.append(_partial_iteration_entry(iteration, tool_calls, iteration_results))
@@ -885,28 +923,12 @@ async def run(
         _files_written=files_written,
     )
 
-    # Usage tracking (2026-08-10): best-effort, nunca debe romper el job ya
-    # marcado COMPLETED arriba. record_motor_usage es fail-soft por su
-    # cuenta (sin user_id/tenant_id no escribe nada; error de DB solo loguea).
-    # Suma de TODOS los turnos del bucle (GAP2 Fase3) -- antes (single-shot)
-    # era el usage de la única llamada; con múltiples turnos, reportar solo
-    # el último hubiera subreportado el costo real de los turnos con tools.
-    from motor_registry.usage_writer import record_motor_usage
-    if provider_id and (cumulative_prompt_tokens or cumulative_completion_tokens):
-        await record_motor_usage(
-            user_id, tenant_id, motor, provider_id, motor_entry.model,
-            cumulative_prompt_tokens, cumulative_completion_tokens,
-        )
-    elif provider_id:
-        # Observabilidad (I2, 2026-08-10): sin este log, un provider que
-        # responde sin bloque 'usage' hace que Costos subreporte sin ningun
-        # rastro -- mismo hueco que finish_reason=='length' ya cierra arriba
-        # para el caso de corte por limite de tokens.
-        logger.warning(
-            "job %s (motor=%s): respuesta sin 'usage' -- no se registra "
-            "fila de costo (tokens desconocidos)",
-            job_id, motor,
-        )
+    # T1.b (2026-08-22, auditoria usage_writer): antes había un bloque
+    # explícito acá, solo alcanzable por la rama de éxito. Reemplazado por
+    # _report_usage("completed") -- misma función que ya cubre las 10 ramas
+    # de fallo del bucle arriba, un solo punto de verdad para "cuándo se
+    # emite la fila de costo".
+    await _report_usage("completed")
 
     # GAP2 Fase4 (T4/T5): auditoría posterior + notificación -- solo si el
     # job escribió algo. El job YA quedó COMPLETED arriba: esto es un

@@ -72,11 +72,16 @@ class DirectUsageWriterTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(float(cost_usd), expected, places=9)
         self.assertEqual(request_type, "pipeline")
 
-    async def test_record_direct_usage_sin_identidad_no_escribe(self):
-        row_before = await _fetch_last_usage_row()
-        await usage_writer.record_direct_usage(None, None, "jekyll", "deepseek", "deepseek-v4-flash", 100, 50)
-        row_after = await _fetch_last_usage_row()
-        self.assertEqual(row_before, row_after)  # fail-soft: sin identidad, no escribe nada
+    async def test_record_direct_usage_sin_identidad_escribe_con_null_y_loguea(self):
+        """T1.c (2026-08-22, auditoria usage_writer): mismo bug que
+        motor_registry/usage_writer.py -- antes retornaba en silencio."""
+        with self.assertLogs("jacobs.usage_writer", level="WARNING") as cm:
+            await usage_writer.record_direct_usage(None, None, "jekyll", "deepseek", "deepseek-v4-flash", 100, 50)
+        assert any("sin identidad" in m for m in cm.output), cm.output
+        row = await _fetch_last_usage_row()
+        tokens_in, tokens_out, cost_usd, model, facet, request_type = row
+        self.assertEqual(tokens_in, 100)
+        self.assertEqual(facet, "jekyll")
 
 
 if __name__ == "__main__":

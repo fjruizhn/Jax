@@ -49,9 +49,11 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
+from pathlib import Path
 
 import httpx
 
@@ -194,12 +196,142 @@ async def reap_orphaned_pipelines() -> list[dict]:
     return reaped
 
 
+# ----------------------------------------------------------------
+#  T3 (2026-08-22, auditoria usage_writer) -- reconciliación
+#  motor_jobs.jsonl vs axioma_usage. La única forma de saber que la
+#  contabilidad estaba rota (0/9 dispatches reconciliados) fue que
+#  alguien pidiera auditarla a mano -- esto la convierte en un chequeo
+#  periódico, mismo mecanismo de alerta que reap_orphaned_pipelines.
+# ----------------------------------------------------------------
+
+MOTOR_JOBS_LOG_PATH = os.getenv(
+    "MOTOR_JOBS_LOG_PATH",
+    str(Path(__file__).resolve().parent.parent / "las_manos" / "logs" / "motor_jobs.jsonl"),
+)
+# Ventana de auditoría: jobs viejos (pre-fix de T1.b/c, sin job_id en la fila
+# de axioma_usage aunque exista) nunca van a reconciliar -- arrastrarlos para
+# siempre haría que el chequeo diera 100% de gap para siempre, sin señal.
+# 24h cubre tráfico "bajo el régimen del fix" sin ese ruido histórico.
+RECONCILIATION_WINDOW_SECONDS = 24 * 3600
+# Umbral: el hallazgo real fue 100% (0/9). 20% deja margen para un fallo
+# aislado de DB (2 reintentos agotados, T1.d) sin generar ruido por cada
+# escritura perdida individual -- pero cualquier valor sostenido por encima
+# de esto es la misma clase de problema que el hallazgo original, no ruido.
+RECONCILIATION_ALERT_THRESHOLD_PCT = 20.0
+# No cada barrido de 5min -- leer+parsear el JSONL completo cada vez es
+# más caro que el barrido de pipelines huérfanos (una query indexada). Una
+# vez por hora alcanza para detectar un problema sostenido sin sumar carga.
+RECONCILIATION_CHECK_EVERY_N_SWEEPS = 12  # 12 * 300s = 3600s
+
+
+def _load_terminal_motor_jobs(path: str, since: float) -> list[dict]:
+    """Última línea por job_id (estado final) para jobs completed/failed/
+    cancelled con created_at >= since. has_usage=True solo si el job llegó
+    a acumular _usage (T1.a: los fallos pre-loop -- kill switch, motor/
+    transport/credencial ausente -- genuinamente gastaron 0 tokens, no
+    cuentan como 'esperados')."""
+    jobs: dict[str, dict] = {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:  # fail-soft: línea JSONL corrupta -- mismo criterio que JobStore._load, se descarta, no aborta el chequeo
+                    continue
+                jobs[e["job_id"]] = e
+    except FileNotFoundError:
+        return []
+    out = []
+    for job_id, e in jobs.items():
+        if e.get("status") not in ("completed", "failed", "cancelled"):
+            continue
+        if (e.get("created_at") or 0) < since:
+            continue
+        usage = e.get("_usage") or {}
+        has_usage = bool(usage.get("prompt_tokens") or usage.get("completion_tokens"))
+        out.append({"job_id": job_id, "status": e["status"], "has_usage": has_usage})
+    return out
+
+
+def _compute_reconciliation_gap(motor_jobs: list[dict], usage_job_ids: set) -> dict:
+    """Pura, sin I/O -- job_ids que debían tener fila (has_usage=True) vs
+    los que realmente la tienen en axioma_usage."""
+    expected = [j["job_id"] for j in motor_jobs if j.get("has_usage")]
+    missing = [jid for jid in expected if jid not in usage_job_ids]
+    gap_pct = (len(missing) / len(expected) * 100.0) if expected else 0.0
+    return {
+        "expected": len(expected),
+        "reconciled": len(expected) - len(missing),
+        "missing": missing,
+        "gap_pct": gap_pct,
+    }
+
+
+async def _fetch_reconciled_job_ids(job_ids: list[str]) -> set:
+    if not job_ids:
+        return set()
+    conn = await store.get_conn()
+    try:
+        placeholders = ",".join(["%s"] * len(job_ids))
+        async with conn.cursor() as cur:
+            await cur.execute(
+                f"SELECT job_id FROM axioma_usage WHERE request_type='motor' "
+                f"AND job_id IN ({placeholders})",
+                tuple(job_ids),
+            )
+            return {row[0] for row in await cur.fetchall()}
+    finally:
+        conn.close()
+
+
+async def check_usage_reconciliation() -> dict:
+    """Un chequeo completo. No lanza -- mismo criterio que
+    reap_orphaned_pipelines: un fallo acá no debe tumbar el reaper."""
+    since = time.time() - RECONCILIATION_WINDOW_SECONDS
+    try:
+        motor_jobs = _load_terminal_motor_jobs(MOTOR_JOBS_LOG_PATH, since)
+        expected_ids = [j["job_id"] for j in motor_jobs if j["has_usage"]]
+        reconciled_ids = await _fetch_reconciled_job_ids(expected_ids)
+        result = _compute_reconciliation_gap(motor_jobs, reconciled_ids)
+    except Exception:  # fail-soft: el chequeo de reconciliación no debe tumbar el reaper -- el próximo ciclo reintenta
+        logger.warning("Reaper: chequeo de reconciliación de usage falló", exc_info=True)
+        return {"expected": 0, "reconciled": 0, "missing": [], "gap_pct": 0.0, "error": True}
+
+    if result["expected"] > 0 and result["gap_pct"] > RECONCILIATION_ALERT_THRESHOLD_PCT:
+        logger.error(
+            "Reaper: gap de reconciliación de usage %.1f%% (%d/%d dispatches sin fila en "
+            "axioma_usage, ventana %dh) -- umbral %.0f%%",
+            result["gap_pct"], len(result["missing"]), result["expected"],
+            RECONCILIATION_WINDOW_SECONDS // 3600, RECONCILIATION_ALERT_THRESHOLD_PCT,
+        )
+        await send_telegram_alert(
+            f"⚠️ Jacobs: {result['gap_pct']:.0f}% de los dispatches de Motor Registry "
+            f"({len(result['missing'])}/{result['expected']}) en las últimas "
+            f"{RECONCILIATION_WINDOW_SECONDS // 3600}h no tienen fila de costo en "
+            f"axioma_usage -- gastaron tokens reales sin contabilizar. Ver "
+            f"jacobs.reaper.check_usage_reconciliation / motor_jobs.jsonl."
+        )
+    else:
+        logger.info(
+            "Reaper: reconciliación de usage OK -- %d/%d dispatches con fila (%.1f%% gap)",
+            result["reconciled"], result["expected"], result["gap_pct"],
+        )
+    return result
+
+
 async def start_reaper_loop() -> None:
     """Barrido periódico en background. Se llama desde el startup del
     server además de esto -- ver server.py::_jacobs_init."""
+    sweep_count = 0
     while True:
         try:
             await reap_orphaned_pipelines()
         except Exception:  # fail-soft: loop de limpieza en background, mismo patron que jax-platform/jax_engine/owner_cleanup.py -- nunca debe tumbar el proceso, el proximo ciclo reintenta
             logger.warning("Reaper: barrido periódico falló", exc_info=True)
+        sweep_count += 1
+        if sweep_count % RECONCILIATION_CHECK_EVERY_N_SWEEPS == 0:
+            await check_usage_reconciliation()
         await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
