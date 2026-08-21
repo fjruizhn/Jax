@@ -336,3 +336,36 @@ requires_human_gate = false
 max_execution_minutes = 15
 max_recursion_depth = 0
 output_schema = "critique.v1"
+
+# P0 (2026-08-22): file_read/file_write existen en `capability`/
+# `capability_motor` (DB) desde GAP2 Fase2 (2026-08-19) pero nunca se
+# agregaron acá -- jacobs/executor.py::validate_capability() NIVEL B lee
+# ESTE archivo, no la DB (comentario propio del código: "jacobs NO importa
+# motor_registry... lee el MISMO toml directamente"), y ese archivo quedó
+# desactualizado desde que R4 migró motor_registry a MotorCatalog.from_db().
+# Sin esto, cualquier step con estas capabilities falla pre-dispatch con
+# CAPABILITY_UNBOUND(candidates=[]) aunque T2 (capability_motor real) y
+# has_tool_access lo aprueben -- reproducido en vivo verificando T5.
+# Valores copiados 1:1 de la DB real (SELECT contra `capability`/
+# `capability_motor`, no inventados).
+[capabilities.file_read]
+allowed_motors = ["jax_local", "kimi"]
+allowed_callers = ["jacobs"]
+risk_level = "medium"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 5
+max_recursion_depth = 0
+output_schema = ""
+forbidden_paths = [".env", "secrets/", "private_keys/", "credentials/"]
+
+[capabilities.file_write]
+allowed_motors = ["jax_local", "kimi"]
+allowed_callers = ["jacobs"]
+risk_level = "medium"
+sandbox_only = true
+requires_human_gate = false
+max_execution_minutes = 5
+max_recursion_depth = 0
+output_schema = ""
+forbidden_paths = [".env", "secrets/", "private_keys/", "credentials/"]
