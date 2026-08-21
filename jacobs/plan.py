@@ -258,6 +258,44 @@ def _check_cleanroom(steps: list) -> list[PlanViolation]:
 _TOOL_CAPABILITIES = frozenset({"file_read", "file_write"})
 
 
+def _build_capability_hint(governance: dict[str, dict]) -> str:
+    """T4 (2026-08-22, planner LLM): fragmento del prompt derivado de
+    get_motor_governance() real -- reemplaza el mapa estático facet→capability
+    hardcodeado ("Para código: kimi"). Lo hardcodeado acá es el LOOKUP (qué
+    capability requiere tools), no la ASIGNACIÓN motor→capability -- esa
+    asignación fija fue GOVERNED_FACET_CAPABILITY, el antipatrón que causó el
+    bug de T5 (el picker ignoraba el facet elegido). has_tool_access decide
+    solo, no es una elección del LLM: hoy un único motor lo tiene, pero el
+    nombre se lee en vivo, nunca se hardcodea."""
+    tool_motors = sorted(m for m, g in governance.items() if g["has_tool_access"])
+    if tool_motors:
+        regla_archivos = (
+            "\nREGLA FIJA (no es una elección): si el objetivo necesita LEER o "
+            "ESCRIBIR un archivo real, el step debe usar capability 'file_read' "
+            f"o 'file_write' con motor en: {', '.join(tool_motors)} -- es el "
+            "único (o los únicos) con acceso real a herramientas hoy. Pedirle "
+            "file_read/file_write a cualquier otro motor hace que el plan sea "
+            "rechazado.\n"
+        )
+    else:
+        regla_archivos = (
+            "\nREGLA FIJA: ningún motor tiene acceso a herramientas hoy -- NO "
+            "planifiques steps 'file_read'/'file_write', serían rechazados.\n"
+        )
+
+    lineas = [
+        f"- {motor_key}: {', '.join(sorted(governance[motor_key]['allowed_capabilities'] - _TOOL_CAPABILITIES))}"
+        for motor_key in sorted(governance)
+        if governance[motor_key]["allowed_capabilities"] - _TOOL_CAPABILITIES
+    ]
+    mapa_dinamico = (
+        "\nCapabilities reales por motor (capability_motor, en vivo, sin "
+        "contar file_read/file_write que ya cubrió la regla fija):\n"
+        + "\n".join(lineas) + "\n"
+    ) if lineas else ""
+    return regla_archivos + mapa_dinamico
+
+
 async def _validate_plan_capabilities(steps: list) -> None:
     """T2: valida cada step contra la DB real (capability_motor +
     motor.has_tool_access, jacobs/store.py::get_motor_governance) ANTES de
@@ -372,6 +410,13 @@ class PlanBuilder:
         objective: str,
         max_steps: int,
     ) -> list[Step]:
+        # T4 (2026-08-22): gobernanza real ANTES de gastar en el LLM (Ada es
+        # paga) -- si la DB no responde, build() iba a fallar igual más abajo
+        # en _validate_plan_capabilities, así que fallar acá primero no abre
+        # un modo de fallo nuevo y evita el gasto en un plan que después se
+        # rechazaría sin evidencia de gobernanza real.
+        from jacobs import store as _store
+        capability_hint = _build_capability_hint(await _store.get_motor_governance())
         dificultad = self._classify_difficulty(objective)
         try:
             _ada_disponible = bool(await resolve_credential_instrumented("zhipu"))
@@ -379,13 +424,13 @@ class PlanBuilder:
             _ada_disponible = False
         if dificultad == "formal" and _ada_disponible:
             logger.info("Jacobs cerebro=Ada (formal) objective=%r", objective[:80])
-            specs = await self._ada_plan(objective, max_steps)
+            specs = await self._ada_plan(objective, max_steps, capability_hint)
             if not specs:
                 logger.warning("Ada falló planificando, cayendo a qwen local")
-                specs = await self._llm_plan(objective, max_steps)
+                specs = await self._llm_plan(objective, max_steps, capability_hint)
         else:
             logger.info("Jacobs cerebro=qwen (trivial) objective=%r", objective[:80])
-            specs = await self._llm_plan(objective, max_steps)
+            specs = await self._llm_plan(objective, max_steps, capability_hint)
         if not specs:
             specs = self._fallback_plan(objective)
         return self._from_spec(pipeline_id, specs)
@@ -399,7 +444,9 @@ class PlanBuilder:
             return "formal"
         return "trivial"
 
-    async def _ada_plan(self, objective: str, max_steps: int) -> list[dict] | None:
+    async def _ada_plan(
+        self, objective: str, max_steps: int, capability_hint: str = ""
+    ) -> list[dict] | None:
         try:
             api_key = await resolve_credential_instrumented("zhipu")
         except CredentialUnavailableError:
@@ -441,7 +488,7 @@ class PlanBuilder:
             f"Responde SOLO con el array JSON."
         )
         messages = [
-            {"role": "system", "content": _PLAN_SYSTEM_MODULAR},
+            {"role": "system", "content": _PLAN_SYSTEM_MODULAR + capability_hint},
             {"role": "user", "content": prompt},
         ]
         payload = {
@@ -482,7 +529,9 @@ class PlanBuilder:
             logger.warning("Ada no disponible para planificación: %s", exc)
             return None
 
-    async def _llm_plan(self, objective: str, max_steps: int) -> list[dict] | None:
+    async def _llm_plan(
+        self, objective: str, max_steps: int, capability_hint: str = ""
+    ) -> list[dict] | None:
         prompt = (
             f"Dado este objetivo: {objective}\n\n"
             f"Genera un plan de ejecución con MÁXIMO {max_steps} steps.\n"
@@ -505,7 +554,7 @@ class PlanBuilder:
             "think": False,
             "options": {"num_predict": _LLM_PLAN_NUM_PREDICT},
             "messages": [
-                {"role": "system", "content": _PLAN_SYSTEM},
+                {"role": "system", "content": _PLAN_SYSTEM + capability_hint},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
