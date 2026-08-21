@@ -31,6 +31,7 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import VALID_CAPABILITIES, CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
+from hyde_sandbox import wrap_hyde_command
 
 logger = logging.getLogger("jacobs.executor")
 
@@ -436,14 +437,36 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         "--print",
         "--output-format", "text",
         "--permission-mode", "acceptEdits",
+        # Bash SIN acotar por patron (2026-08-22, configuracion definitiva
+        # post-sandbox -- ver hyde_sandbox.py y jax-hyde-bash-sin-jail-p0 en
+        # memoria). El PR#18 (pwd/ls) fue andamio TEMPORAL mientras no habia
+        # confinamiento real: --allowedTools nunca fue una defensa de
+        # filesystem que sirviera (Bash pelado no tenia jail; "Bash(<cmd> *)"
+        # con parentesis solo cubria cat/redireccion, python3 -c
+        # "open(path).read()" y `git diff --no-index` lo esquivaban igual,
+        # confirmado). Ahora la defensa real es el namespace de montaje de
+        # bwrap (wrap_hyde_command, abajo): lo que no esta bind-mounteado no
+        # existe, sin importar el comando. Verificado en T5 (13 casos
+        # adversariales, incluidos estos dos bypasses) CON "Bash" pelado --
+        # todo bloqueado por el sandbox, cero ayuda del allowlist. Restringir
+        # el allowlist ahora solo volveria a inutilizar a Hyde sin sumar
+        # seguridad real -- la capa que importa es la de abajo.
         "--allowedTools", "Write,Edit,Read,Bash",
         "--add-dir", HYDE_WORKSPACE_DIR,
     ]
 
+    # Sandbox de bubblewrap (2026-08-22, fix de fondo del P0 -- ver
+    # hyde_sandbox.py y jax-hyde-bash-sin-jail-p0 en memoria). Confina a
+    # nivel de namespace de montaje, no de heuristica de --allowedTools.
+    # SandboxUnavailable NO se atrapa acá -- fail-closed (P10): sin bwrap,
+    # el step falla con motivo explícito (_run_one_step ya lo hace vía su
+    # except Exception genérico), nunca corre Hyde sin confinamiento.
+    sandboxed_cmd = wrap_hyde_command(cmd, HYDE_WORKSPACE_DIR)
+
     # Un solo `claude` corriendo a la vez entre steps hyde (ver HYDE_SEMAPHORE).
     async with HYDE_SEMAPHORE:
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            *sandboxed_cmd,
             cwd=HYDE_WORKSPACE_DIR,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
