@@ -52,6 +52,14 @@ class MotorEntry:
     # True = off salvo que el motor declare lo contrario (DB: motor.
     # disable_reasoning, migrations.py).
     disable_reasoning: bool = True
+    # T1 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): antes vivía solo
+    # como `if motor == "jax_local"` en worker.py:488 -- nada podía
+    # preguntarle al sistema qué motores ejecutan tools. Ahora es columna
+    # DB (motor.has_tool_access, migrations.py) leída acá, y worker.py la
+    # CONSUME desde motor_entry en vez de duplicar el nombre hardcodeado.
+    # Default False: ningún motor recibe TOOLS_CATALOG salvo que la DB lo
+    # diga explícitamente (mismo sentido fail-closed que sandbox_only).
+    has_tool_access: bool = False
 
 
 @dataclass
@@ -106,6 +114,7 @@ class MotorCatalog:
                 # línea de 'transport' de arriba (Task 2).
                 provider_id=cfg.get("provider_id", ""),
                 disable_reasoning=cfg.get("disable_reasoning", True),
+                has_tool_access=cfg.get("has_tool_access", False),
             )
         for name, cfg in config.get("capabilities", {}).items():
             self._capabilities[name] = CapabilityEntry(
@@ -157,7 +166,7 @@ class MotorCatalog:
                     "SELECT m.`key`, m.model_ref, mo.provider_id, mo.model_id, p.base_url, "
                     "       m.transport, m.max_tokens, m.default_timeout_seconds, "
                     "       m.supports_reasoning, m.reasoning_default_visibility, "
-                    "       m.disable_reasoning, m.sandbox_only, m.status "
+                    "       m.disable_reasoning, m.sandbox_only, m.status, m.has_tool_access "
                     "FROM motor m "
                     "JOIN model mo ON mo.id = m.model_ref "
                     "JOIN provider p ON p.id = mo.provider_id"
@@ -166,7 +175,8 @@ class MotorCatalog:
                 # _call_http_openai_compat (Task 3) arma "/chat/completions" sin
                 # host, porque MotorEntry.api_url nunca se pobló desde ningun lado.
                 for (key, model_ref, provider_id, model_id, base_url, transport, max_tokens,
-                     timeout, reasoning, visibility, disable_reasoning, sandbox, status) in await cur.fetchall():
+                     timeout, reasoning, visibility, disable_reasoning, sandbox, status,
+                     has_tool_access) in await cur.fetchall():
                     instance._motors[key] = MotorEntry(
                         name=key,
                         enabled=(status == "active"),
@@ -184,6 +194,7 @@ class MotorCatalog:
                         model_ref=model_ref,
                         provider_id=provider_id,
                         disable_reasoning=bool(disable_reasoning),
+                        has_tool_access=bool(has_tool_access),
                     )
 
                 await cur.execute(

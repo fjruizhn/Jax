@@ -12,6 +12,17 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 
+# T2 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): single source de qué
+# facets despachan por HTTP directo vs. Motor Registry de LAS MANOS. Vivía
+# duplicado como _HTTP_FACETS/_MOTOR_FACETS locales en executor.py -- movido
+# acá porque plan.py también lo necesita (validación pre-persist, T2) y
+# plan.py no puede importar executor.py (executor.py ya importa de plan.py,
+# sería circular). executor.py ahora importa estos dos nombres desde acá en
+# vez de definirlos.
+HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
+MOTOR_FACETS = frozenset({"kimi", "jax_local"})
+
+
 class PipelineStatus(str, Enum):
     pending     = "pending"
     running     = "running"

@@ -43,6 +43,7 @@ _MOTOR_CFG = {
         "max_context_tokens": 0, "sandbox_only": True,
         "default_timeout_seconds": 300, "supports_reasoning": True,
         "transport": "ollama", "disable_reasoning": True,
+        "has_tool_access": True,
     }},
     "capabilities": {
         "generate": {
@@ -117,14 +118,14 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         telegram_patch.start()
         self.addCleanup(telegram_patch.stop)
 
-    async def _run(self, responses, context=None, capability="generate", **kwargs):
+    async def _run(self, responses, context=None, capability="generate", motor="jax_local", **kwargs):
         job_id = self.store.create(
-            caller="jacobs", capability=capability, motor="jax_local",
+            caller="jacobs", capability=capability, motor=motor,
             trace_id="t", prompt="objetivo de prueba", recursion_depth=0,
         )
         with patch("httpx.AsyncClient.post", AsyncMock(side_effect=responses)) as mock_post:
             await worker.run(
-                job_id=job_id, motor="jax_local", capability=capability,
+                job_id=job_id, motor=motor, capability=capability,
                 prompt="objetivo de prueba", context=context or {}, store=self.store,
                 catalog=self.catalog, kill_switch_path=self.kill_switch_path,
                 caller="jacobs", **kwargs,
@@ -141,6 +142,37 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         assert state["_tool_loop_iterations"] == 2, state
         assert state["_tool_loop_history"][0]["results"][0]["decision"] == "executed", state
         assert state["result_summary"] == "El archivo dice: contenido de prueba", state
+
+    # --- T1 (diagnóstico pipeline 19ad2c42-cdf): tools_for_call debe leer
+    # motor_entry.has_tool_access, no un `if motor == "jax_local"` literal ---
+    async def test_motor_sin_has_tool_access_no_recibe_catalogo_de_tools(self):
+        """thot no tiene has_tool_access en el fixture (default False) --
+        aunque el modelo "alucine" tool_calls en la respuesta mockeada, el
+        payload real enviado a la API no debe incluir 'tools'."""
+        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+            state, mock_post = await self._run(
+                [_resp(content="listo, sin tools", finish_reason="stop")],
+                motor="thot", capability="critique",
+            )
+        assert state["status"] == "completed", state
+        sent_payload = mock_post.call_args.kwargs["json"]
+        assert "tools" not in sent_payload, sent_payload
+
+    async def test_motor_con_has_tool_access_true_recibe_catalogo_aunque_no_sea_jax_local(self):
+        """Prueba el mecanismo, no solo el resultado: si has_tool_access=True
+        vive en la fuente de verdad (motor.has_tool_access, via catalog) para
+        un motor que NO es 'jax_local', worker.py debe respetarlo -- si
+        todavía comparara motor=="jax_local" a mano, este test fallaría
+        aunque el dato real diga que sí puede."""
+        self.catalog._motors["thot"].has_tool_access = True
+        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+            state, mock_post = await self._run(
+                [_resp(content="listo, con tools ofrecidas", finish_reason="stop")],
+                motor="thot", capability="critique",
+            )
+        assert state["status"] == "completed", state
+        sent_payload = mock_post.call_args.kwargs["json"]
+        assert "tools" in sent_payload, sent_payload
 
     # --- 2. cota de iteraciones ---
     async def test_2_agota_iteraciones_falla_explicito_no_completed(self):

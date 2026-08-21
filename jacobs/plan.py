@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from jacobs.models import Step
+from jacobs.models import MOTOR_FACETS, Step
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
@@ -172,11 +172,55 @@ _AUDIT_CAPABILITIES = frozenset({
 })
 
 
-def _check_cleanroom(steps: list) -> list[str]:
-    """Devuelve lista de violaciones clean-room (auditor con facet de un dep).
-    No modifica el plan — solo reporta. 'El que supone se equivoca': declarar,
-    no asumir que está bien."""
-    warnings = []
+@dataclass(frozen=True)
+class PlanViolation:
+    """Una razón concreta por la que un step del plan no puede ejecutarse.
+    Cada campo existe para que el mensaje de rechazo (T2: 'el error debe
+    decir qué falta') pueda nombrar step/facet/motor/capability sin que el
+    caller tenga que re-derivarlo."""
+    step_index: int
+    facet: str
+    motor: str | None
+    capability: str
+    reason: str
+
+    def to_dict(self) -> dict:
+        return {
+            "step_index": self.step_index, "facet": self.facet,
+            "motor": self.motor, "capability": self.capability,
+            "reason": self.reason,
+        }
+
+
+class PlanRejected(Exception):
+    """T2 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): un plan
+    inejecutable no se persiste. routes.py atrapa esto ANTES de
+    store.pipeline_create() -- ni jacobs_pipelines ni jacobs_steps llegan a
+    tener fila para este plan. El mensaje nombra step/motor/capability/razón
+    para cada violación (no un rechazo opaco) y viaja tal cual al frontend
+    vía HTTPException.detail."""
+
+    def __init__(self, violations: list[PlanViolation]):
+        self.violations = violations
+        detail = "; ".join(
+            f"step {v.step_index} (facet={v.facet}, motor={v.motor or v.facet}, "
+            f"capability={v.capability}): {v.reason}"
+            for v in violations
+        )
+        super().__init__(f"Plan rechazado -- {len(violations)} step(s) inejecutable(s): {detail}")
+
+
+def _check_cleanroom(steps: list) -> list[PlanViolation]:
+    """Devuelve violaciones clean-room (un step audita el trabajo de un dep
+    del MISMO facet -- quien produce no puede ser quien aprueba).
+
+    T3 (2026-08-21): hasta acá esto solo emitía logger.warning, dentro de
+    _from_spec (nunca corría para planes del LLM, _from_objective). Ahora
+    build() (abajo) trata cada violación como bloqueante -- mismo mecanismo
+    que _validate_plan_capabilities (PlanRejected). Verificado contra los 59
+    pipelines históricos en jacobs_steps antes de este cambio: 0 violaciones
+    -- ningún flujo que hoy funciona se rompe."""
+    violations = []
     by_index = {s.step_index: s for s in steps}
     for s in steps:
         if s.capability not in _AUDIT_CAPABILITIES:
@@ -184,12 +228,66 @@ def _check_cleanroom(steps: list) -> list[str]:
         for dep in s.depends_on:
             dep_step = by_index.get(dep)
             if dep_step and dep_step.facet == s.facet:
-                warnings.append(
-                    f"step {s.step_index} ({s.facet}/{s.capability}) audita al "
-                    f"step {dep} que es del MISMO facet '{s.facet}' — no es "
-                    f"auditoría independiente"
-                )
-    return warnings
+                violations.append(PlanViolation(
+                    s.step_index, s.facet, s.motor, s.capability,
+                    f"audita al step {dep}, que es del MISMO facet '{s.facet}' "
+                    f"-- no es auditoría independiente (cleanroom)",
+                ))
+    return violations
+
+
+# T2: capabilities cuya ejecución real implica que el MOTOR llame una tool
+# (TOOLS_CATALOG en las_manos/motor_registry/tools_catalog.py) durante el
+# job, no que devuelva texto/JSON que otra pieza aplique después. Hoy
+# TOOLS_CATALOG solo define read_file/write_file -- este conjunto crece si
+# GAP2 agrega tools nuevas (no antes: no hay forma de inferirlo del nombre
+# de la capability). 'implementation'/'refactor'/etc. quedan AFUERA a
+# propósito: un motor sin tools puede satisfacerlas devolviendo un
+# code_patch.v1 (ver output_validator.py) sin escribir nada él mismo --
+# meterlas acá bloquearía flujos legítimos que hoy funcionan así (kimi/
+# refactor, confirmado contra jax_memory real).
+_TOOL_CAPABILITIES = frozenset({"file_read", "file_write"})
+
+
+async def _validate_plan_capabilities(steps: list) -> None:
+    """T2: valida cada step contra la DB real (capability_motor +
+    motor.has_tool_access, jacobs/store.py::get_motor_governance) ANTES de
+    que build() devuelva el plan. Solo aplica a steps cuyo dispatch real
+    pasa por el Motor Registry de LAS MANOS (jacobs.models.MOTOR_FACETS) --
+    los facets HTTP directos (hipatia/jekyll/thot/ada) no tienen fila de
+    gobernanza que verificar acá, executor.py los despacha sin pasar por
+    worker.py."""
+    from jacobs import store as _store  # import diferido: evita ciclo store<->plan al import time
+
+    relevant = [s for s in steps if (s.motor or s.facet) in MOTOR_FACETS]
+    if not relevant:
+        return
+    governance = await _store.get_motor_governance()
+    violations: list[PlanViolation] = []
+    for step in relevant:
+        motor_key = step.motor or step.facet
+        entry = governance.get(motor_key)
+        if entry is None:
+            violations.append(PlanViolation(
+                step.step_index, step.facet, step.motor, step.capability,
+                f"motor '{motor_key}' no tiene fila en la tabla `motor`",
+            ))
+            continue
+        if step.capability not in entry["allowed_capabilities"]:
+            violations.append(PlanViolation(
+                step.step_index, step.facet, step.motor, step.capability,
+                f"capability '{step.capability}' no está en capability_motor para motor '{motor_key}'",
+            ))
+            continue
+        if step.capability in _TOOL_CAPABILITIES and not entry["has_tool_access"]:
+            violations.append(PlanViolation(
+                step.step_index, step.facet, step.motor, step.capability,
+                f"capability '{step.capability}' requiere ejecutar una tool, pero "
+                f"motor '{motor_key}' no tiene has_tool_access (worker.py no le "
+                f"entrega TOOLS_CATALOG -- ver motor_registry/worker.py)",
+            ))
+    if violations:
+        raise PlanRejected(violations)
 
 
 class PlanBuilder:
@@ -203,8 +301,19 @@ class PlanBuilder:
         steps_spec: list[dict] | None = None,
     ) -> list[Step]:
         if steps_spec:
-            return self._from_spec(pipeline_id, steps_spec)
-        return await self._from_objective(pipeline_id, objective, max_steps)
+            steps = self._from_spec(pipeline_id, steps_spec)
+        else:
+            steps = await self._from_objective(pipeline_id, objective, max_steps)
+        # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
+        # dentro de _from_spec ni _from_objective, para que ningún origen de
+        # plan pueda saltárselo. cleanroom antes solo corría dentro de
+        # _from_spec (nunca para planes del LLM) y solo advertía; ahora
+        # bloquea para los dos caminos, mismo mecanismo que capabilities.
+        cleanroom_violations = _check_cleanroom(steps)
+        if cleanroom_violations:
+            raise PlanRejected(cleanroom_violations)
+        await _validate_plan_capabilities(steps)
+        return steps
 
     def _from_spec(self, pipeline_id: str, specs: list[dict]) -> list[Step]:
         steps = []
@@ -243,8 +352,9 @@ class PlanBuilder:
                 timeout_seconds=explicit_timeout if explicit_timeout is not None else default_timeout,
                 skip_on_fail=spec.get("skip_on_fail", False),
             ))
-        for w in _check_cleanroom(steps):
-            logger.warning("Jacobs clean-room: %s", w)
+        # T3 (2026-08-21): el chequeo de cleanroom se movió a build() -- corre
+        # ahí para AMBOS caminos (acá y _from_objective) y bloquea en vez de
+        # solo loguear. Ver _check_cleanroom / PlanRejected.
         return steps
 
     async def _from_objective(
