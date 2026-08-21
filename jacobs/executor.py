@@ -85,7 +85,7 @@ HYDE_CLI_PATH = (
     shutil.which("claude")
     or "/home/fruiz/.nvm/versions/node/v24.16.0/bin/claude"
 )
-HYDE_WORKSPACE_DIR   = "/home/fruiz/jax/workspace"
+HYDE_WORKSPACE_DIR   = os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")
 HYDE_MAX_PROMPT_CHARS = 32000
 
 # Semáforo específico de Hyde: el DAG de Jacobs puede programar dos steps

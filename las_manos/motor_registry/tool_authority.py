@@ -32,12 +32,14 @@ from motor_registry.catalog import MotorCatalog
 
 logger = logging.getLogger("motor_registry.tool_authority")
 
-# Mismo root que jacobs/executor.py::HYDE_WORKSPACE_DIR -- no una convención
-# paralela. No se importa executor.py directamente (módulo pesado, trae
-# dependencias de pipeline que este gate no necesita); se documenta la
-# fuente de verdad acá para que un cambio futuro de uno se note revisando
-# el otro.
-WORKSPACE_ROOT = Path("/home/fruiz/jax/workspace").resolve()
+# JAX_WORKSPACE_DIR (/etc/jax/.env) es la única fuente de verdad -- mismo
+# valor que jacobs/executor.py::HYDE_WORKSPACE_DIR y
+# jax/muscles/subprocess_muscle.py. No se importa executor.py directamente
+# (módulo pesado, trae dependencias de pipeline que este gate no necesita);
+# los 3 call sites leen la misma env var en vez de repetir el literal (ver
+# DEUDA.md -- mismo patrón de "múltiples fuentes de verdad" de Bloque 3,
+# aplicado acá al path, no al vocabulario de capabilities).
+WORKSPACE_ROOT = Path(os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")).resolve()
 
 # tool_name -> capability key. Nunca un nombre de función libre -- si un
 # tool nuevo se declara en tools_catalog.py sin agregarlo acá, queda

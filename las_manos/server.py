@@ -283,6 +283,25 @@ async def _jacobs_init() -> None:
     except Exception:  # fail-soft: chequeo de metadata, nunca debe tumbar el arranque del servicio
         _jlog.warning("Timeout consistency: chequeo falló, no bloquea el arranque", exc_info=True)
 
+    # Defensa en profundidad (2026-08-21, hallazgo de Bloque 3): workspace/
+    # se perdió DOS veces en 20h porque vivía dentro del árbol de jax/ y
+    # cualquier limpieza del repo padre (filter-repo, git clean -x) se lo
+    # llevaba puesto sin avisar. El fix real es la ubicación
+    # (JAX_WORKSPACE_DIR fuera de ambos repos, ver DEUDA.md) -- este check
+    # es la alarma si ese blindaje falla igual: sin repo git ahí,
+    # write_file EJECUTA sin poder commitear (tool_authority.py ya lo
+    # loguea fuerte por escritura), pero la garantía de reversibilidad
+    # completa está rota desde el arranque, no solo en el primer write.
+    from motor_registry.tool_authority import WORKSPACE_ROOT
+    if not (WORKSPACE_ROOT / ".git").is_dir():
+        _jlog.error(
+            "workspace/ SIN repo git propio en %s -- write_file va a ejecutar "
+            "SIN COMMITEAR (reversibilidad rota). No debería pasar con "
+            "JAX_WORKSPACE_DIR blindado fuera de jax/ -- si esto se dispara, "
+            "algo recreó el directorio sin su .git.",
+            WORKSPACE_ROOT,
+        )
+
 
 app.include_router(motor_router)
 app.include_router(jacobs_router)

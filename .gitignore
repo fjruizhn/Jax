@@ -66,9 +66,12 @@ las_manos/CLAUDE.md
 .claude/.proven-config-version
 .worktrees/
 
-# GAP2 Fase4 (2026-08-19): workspace/ pasa a ser su propio repo git (ver
-# tool_authority.py) -- deja de trackearse acá para no mezclar commits
-# automáticos del bucle de tool-calling (ni las escrituras manuales de
-# Hyde) con la historia de código fuente. Historia previa (2 commits,
-# jun-2026) queda preservada en este mismo log, solo deja de actualizarse.
-workspace/
+# GAP2 Fase4 (2026-08-19): workspace/ vivió acá como directorio gitignored
+# con su propio repo git anidado. Se perdió DOS VECES en 20h (2026-08-21)
+# porque cualquier limpieza del repo padre (filter-repo, git clean -x) se
+# lleva puesto lo que está gitignored, sin avisar -- ver DEUDA.md. Fix real:
+# JAX_WORKSPACE_DIR (/etc/jax/.env) apunta fuera de este árbol, a
+# /home/fruiz/jax-workspace. Esta entrada ya no aplica (nada debería
+# escribir workspace/ acá), se deja sin regla activa a propósito: si algo
+# alguna vez recrea workspace/ DENTRO de jax/, mejor que git lo vea y falle
+# ruidoso a que vuelva a desaparecer en silencio la próxima limpieza.

@@ -47,7 +47,7 @@ class SubprocessMuscle(Muscle):
         system_prompt: str,
         timeout: float,
         cli_path: str = "claude",
-        workspace_dir: str = "/home/fruiz/jax/workspace",
+        workspace_dir: str = os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace"),
         authority_origin: str = "",
     ) -> None:
         super().__init__(
