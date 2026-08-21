@@ -53,31 +53,15 @@ VALID_FACETS = frozenset({
     "hipatia", "jekyll", "thot", "ada", "kimi", "hyde", "jax_local",
 })
 
-# Espejo de VALID_FACETS para capabilities (FASE A §3.3). Vocabulario CERRADO
-# que el planner puede emitir: todo lo de aquí tiene destino conocido en el
-# catálogo (vía executor._CAPABILITY_MAP) o es mecánico ('assemble'). Una
-# capability fuera de este conjunto se degrada a 'reason' (genérica, segura) en
-# _parse_plan_json — nunca se deja pasar cruda. Debe mantenerse en sync con las
-# claves de _CAPABILITY_MAP + 'assemble'.
-VALID_CAPABILITIES = frozenset({
-    # capabilities del catálogo (las_manos/config.toml)
-    "generate", "reason", "design", "validate_consistency", "reconcile", "critique",
-    "refactor", "pipeline_analysis", "implementation", "code_swarm",
-    "bug_hunt", "architecture_review",
-    # GAP2 Fase2 (2026-08-19, tool_authority.py): file_read/file_write viven
-    # en `capability`/`capability_motor` (DB) desde esa ronda pero nunca se
-    # agregaron acá -- P0 (2026-08-22): un step con motor.has_tool_access=
-    # True y capability_motor real que aprueba file_write igual fallaba acá,
-    # NIVEL A de executor.py::validate_capability(), ANTES de llegar a
-    # dispatch. Encontrado en vivo verificando el deploy de T5 (PipelineModal
-    # ahora pide 'file_write' para motores con tools) -- dos fuentes de
-    # verdad en desacuerdo, esta lista estática ganaba en producción.
-    "file_read", "file_write",
-    # alias semánticos que _CAPABILITY_MAP traduce a catálogo
-    "analysis", "research", "review", "code", "implement",
-    # mecánico: cortocircuito en executor._dispatch_step (no toca motor)
-    "assemble",
-})
+# Espejo de VALID_FACETS para capabilities (FASE A §3.3). Vocabulario del
+# planner: fuente única desde Bloque 3 (2026-08-21) es la tabla `capability`
+# real, consultada en vivo por _parse_plan_json (degrada a 'reason' si no
+# existe) y por executor.py::validate_capability() (NIVEL A, rechaza el step
+# si no existe). El frozenset estático que vivía acá (VALID_CAPABILITIES) se
+# desincronizaba de la DB en silencio -- causa raíz de dos P0 reales
+# (2026-08-22, file_read/file_write agregados a la DB pero nunca acá; ver
+# DEUDA.md). 'assemble' sigue siendo mecánico, nunca una fila de `capability`
+# -- cortocircuito en executor._dispatch_step, no toca motor.
 
 
 @dataclass(frozen=True)
@@ -258,7 +242,7 @@ def _check_cleanroom(steps: list) -> list[PlanViolation]:
 _TOOL_CAPABILITIES = frozenset({"file_read", "file_write"})
 
 
-def _build_capability_hint(governance: dict[str, dict]) -> str:
+def _build_capability_hint(governance: dict) -> str:
     """T4 (2026-08-22, planner LLM): fragmento del prompt derivado de
     get_motor_governance() real -- reemplaza el mapa estático facet→capability
     hardcodeado ("Para código: kimi"). Lo hardcodeado acá es el LOOKUP (qué
@@ -266,8 +250,19 @@ def _build_capability_hint(governance: dict[str, dict]) -> str:
     asignación fija fue GOVERNED_FACET_CAPABILITY, el antipatrón que causó el
     bug de T5 (el picker ignoraba el facet elegido). has_tool_access decide
     solo, no es una elección del LLM: hoy un único motor lo tiene, pero el
-    nombre se lee en vivo, nunca se hardcodea."""
-    tool_motors = sorted(m for m, g in governance.items() if g["has_tool_access"])
+    nombre se lee en vivo, nunca se hardcodea.
+
+    Bloque 3 (2026-08-21): governance ahora viene keyed por capability
+    (get_motor_governance extendida) -- invierte a motor->capabilities acá,
+    en memoria, en vez de que get_motor_governance mantenga dos formas
+    paralelas que puedan divergir."""
+    motors = governance["motors"]
+    caps = governance["capabilities"]
+    tool_motors = sorted(m for m, has_tools in motors.items() if has_tools)
+    by_motor: dict[str, set[str]] = {}
+    for cap_key, entry in caps.items():
+        for motor_key in entry["allowed_motors"]:
+            by_motor.setdefault(motor_key, set()).add(cap_key)
     if tool_motors:
         regla_archivos = (
             "\nREGLA FIJA (no es una elección): si el objetivo necesita LEER o "
@@ -284,9 +279,9 @@ def _build_capability_hint(governance: dict[str, dict]) -> str:
         )
 
     lineas = [
-        f"- {motor_key}: {', '.join(sorted(governance[motor_key]['allowed_capabilities'] - _TOOL_CAPABILITIES))}"
-        for motor_key in sorted(governance)
-        if governance[motor_key]["allowed_capabilities"] - _TOOL_CAPABILITIES
+        f"- {motor_key}: {', '.join(sorted(by_motor[motor_key] - _TOOL_CAPABILITIES))}"
+        for motor_key in sorted(by_motor)
+        if by_motor[motor_key] - _TOOL_CAPABILITIES
     ]
     mapa_dinamico = (
         "\nCapabilities reales por motor (capability_motor, en vivo, sin "
@@ -303,30 +298,36 @@ async def _validate_plan_capabilities(steps: list) -> None:
     pasa por el Motor Registry de LAS MANOS (jacobs.models.MOTOR_FACETS) --
     los facets HTTP directos (hipatia/jekyll/thot/ada) no tienen fila de
     gobernanza que verificar acá, executor.py los despacha sin pasar por
-    worker.py."""
+    worker.py.
+
+    Bloque 3 (2026-08-21): governance ahora viene keyed por capability
+    (get_motor_governance extendida) -- misma estructura exacta que
+    consulta validate_capability() en executor.py, no una vista paralela."""
     from jacobs import store as _store  # import diferido: evita ciclo store<->plan al import time
 
     relevant = [s for s in steps if (s.motor or s.facet) in MOTOR_FACETS]
     if not relevant:
         return
     governance = await _store.get_motor_governance()
+    motors = governance["motors"]
+    caps = governance["capabilities"]
     violations: list[PlanViolation] = []
     for step in relevant:
         motor_key = step.motor or step.facet
-        entry = governance.get(motor_key)
-        if entry is None:
+        if motor_key not in motors:
             violations.append(PlanViolation(
                 step.step_index, step.facet, step.motor, step.capability,
                 f"motor '{motor_key}' no tiene fila en la tabla `motor`",
             ))
             continue
-        if step.capability not in entry["allowed_capabilities"]:
+        entry = caps.get(step.capability)
+        if entry is None or motor_key not in entry["allowed_motors"]:
             violations.append(PlanViolation(
                 step.step_index, step.facet, step.motor, step.capability,
                 f"capability '{step.capability}' no está en capability_motor para motor '{motor_key}'",
             ))
             continue
-        if step.capability in _TOOL_CAPABILITIES and not entry["has_tool_access"]:
+        if step.capability in _TOOL_CAPABILITIES and not motors[motor_key]:
             violations.append(PlanViolation(
                 step.step_index, step.facet, step.motor, step.capability,
                 f"capability '{step.capability}' requiere ejecutar una tool, pero "
@@ -524,7 +525,7 @@ class PlanBuilder:
                             partes.append(pieza)
                     content = "".join(partes)
             # Fase D: aquí se capturará el plan de Ada como ejemplo de oro
-            return self._parse_plan_json(content, max_steps)
+            return await self._parse_plan_json(content, max_steps)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Ada no disponible para planificación: %s", exc)
             return None
@@ -576,13 +577,13 @@ class PlanBuilder:
                 data = resp.json()
                 await record_resolved_version_safe(f.key, data.get("model"))
                 content = data.get("message", {}).get("content", "")
-                return self._parse_plan_json(content, max_steps)
+                return await self._parse_plan_json(content, max_steps)
         except Exception as exc:  # noqa: BLE001
             logger.warning("JAX Local no disponible para planificación: %s", exc)
             return None
 
     @staticmethod
-    def _parse_plan_json(text: str, max_steps: int) -> list[dict] | None:
+    async def _parse_plan_json(text: str, max_steps: int) -> list[dict] | None:
         # Extraer el primer bloque JSON del texto (puede venir con markdown o texto extra)
         text = text.strip()
         # Quitar bloques markdown ```json ... ```
@@ -610,6 +611,9 @@ class PlanBuilder:
         if not isinstance(data, list):
             return None
 
+        from jacobs import store as _store  # import diferido: evita ciclo store<->plan al import time
+        governance_caps = (await _store.get_motor_governance())["capabilities"]
+
         # Validar y limpiar cada step
         valid = []
         for idx, item in enumerate(data[:max_steps]):
@@ -626,11 +630,16 @@ class PlanBuilder:
             ]
             # capability CERRADA al vocabulario conocido (espejo de la mecánica
             # facet→jax_local de arriba). Fuera del conjunto → degradar a 'reason'.
+            # Bloque 3 (2026-08-21): VALID_CAPABILITIES (frozenset estático)
+            # eliminado -- misma fuente que validate_capability() de
+            # executor.py (DB real vía get_motor_governance), import diferido
+            # mismo criterio que _validate_plan_capabilities (evita ciclo
+            # store<->plan al import time).
             capability = str(item.get("capability", "reason"))[:50]
-            if capability not in VALID_CAPABILITIES:
+            if capability != "assemble" and capability not in governance_caps:
                 logger.warning(
-                    "Jacobs planner: capability '%s' fuera de VALID_CAPABILITIES "
-                    "→ degradada a 'reason' (segura)", capability,
+                    "Jacobs planner: capability '%s' no existe en la tabla "
+                    "`capability` → degradada a 'reason' (segura)", capability,
                 )
                 capability = "reason"
             valid.append({

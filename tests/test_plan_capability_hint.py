@@ -15,55 +15,62 @@ from jacobs.plan import _build_capability_hint
 from jacobs import store as _store
 
 
+def _gov(motors: dict, caps: dict) -> dict:
+    """Helper: arma la forma real que devuelve get_motor_governance() (Bloque
+    3, keyed por capability) a partir de una notación compacta motor->{cap,...}
+    para no repetir el boilerplate de allowed_motors en cada test."""
+    by_cap: dict[str, list[str]] = {}
+    for motor, cap_set in caps.items():
+        for cap in cap_set:
+            by_cap.setdefault(cap, []).append(motor)
+    return {
+        "motors": motors,
+        "capabilities": {cap: {"allowed_motors": ms} for cap, ms in by_cap.items()},
+    }
+
+
 class CapabilityHintTest(unittest.TestCase):
     def test_regla_fija_nombra_al_unico_motor_con_tool_access(self):
-        governance = {
-            "jax_local": {
-                "allowed_capabilities": {"file_read", "file_write", "generate"},
-                "has_tool_access": True,
+        governance = _gov(
+            motors={"jax_local": True, "kimi": False},
+            caps={
+                "jax_local": {"file_read", "file_write", "generate"},
+                "kimi": {"file_read", "file_write", "implementation"},
             },
-            "kimi": {
-                "allowed_capabilities": {"file_read", "file_write", "implementation"},
-                "has_tool_access": False,
-            },
-        }
+        )
         hint = _build_capability_hint(governance)
         regla, _, resto = hint.partition("Capabilities reales")
         assert "motor en: jax_local" in regla
         assert "kimi" not in regla
 
     def test_regla_fija_lista_todos_los_motores_con_tool_access_si_hay_mas_de_uno(self):
-        governance = {
-            "jax_local": {"allowed_capabilities": {"file_write"}, "has_tool_access": True},
-            "kimi": {"allowed_capabilities": {"file_write"}, "has_tool_access": True},
-        }
+        governance = _gov(
+            motors={"jax_local": True, "kimi": True},
+            caps={"jax_local": {"file_write"}, "kimi": {"file_write"}},
+        )
         hint = _build_capability_hint(governance)
         assert "motor en: jax_local, kimi" in hint
 
     def test_sin_ningun_motor_con_tool_access_advierte_no_planificar_file_ops(self):
-        governance = {"kimi": {"allowed_capabilities": {"generate"}, "has_tool_access": False}}
+        governance = _gov(motors={"kimi": False}, caps={"kimi": {"generate"}})
         hint = _build_capability_hint(governance)
         assert "ningún motor tiene acceso a herramientas" in hint.lower()
         assert "no planifiques" in hint.lower()
 
     def test_mapa_dinamico_excluye_file_read_write_y_lista_capacidades_reales(self):
-        governance = {
-            "kimi": {
-                "allowed_capabilities": {"file_read", "file_write", "critique", "bug_hunt"},
-                "has_tool_access": False,
-            },
-        }
+        governance = _gov(
+            motors={"kimi": False},
+            caps={"kimi": {"file_read", "file_write", "critique", "bug_hunt"}},
+        )
         hint = _build_capability_hint(governance)
         linea_kimi = next(l for l in hint.splitlines() if l.startswith("- kimi:"))
         assert linea_kimi == "- kimi: bug_hunt, critique"
 
     def test_motor_sin_capacidades_no_file_no_aparece_en_el_mapa_dinamico(self):
-        governance = {
-            "jax_local": {
-                "allowed_capabilities": {"file_read", "file_write"},
-                "has_tool_access": True,
-            },
-        }
+        governance = _gov(
+            motors={"jax_local": True},
+            caps={"jax_local": {"file_read", "file_write"}},
+        )
         hint = _build_capability_hint(governance)
         assert "Capabilities reales" not in hint
 

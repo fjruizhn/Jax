@@ -28,7 +28,7 @@ from jacobs.artifacts import read_artifact, save_if_large
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
-from jacobs.plan import VALID_CAPABILITIES, CapabilityUnbound
+from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
 from hyde_sandbox import wrap_hyde_command
@@ -47,29 +47,6 @@ MAX_DEP_CONTEXT_CHARS = 60_000
 # (import de arriba) -- plan.py los necesita para la validación pre-persist
 # y no puede importar este módulo (circular: executor.py ya importa de
 # plan.py). Un solo lugar define la partición, dos módulos la consumen.
-
-
-# ----------------------------------------------------------------
-#  Catálogo de capabilities (FASE A §3.4) — vista read-only del contrato que el
-#  Motor Registry valida en las_manos/config.toml. jacobs NO importa
-#  motor_registry (no está en su sys.path standalone); lee el MISMO toml
-#  directamente, igual que motor_registry/routes.py. Falla ABIERTO: si no se
-#  puede cargar, validate_capability no bloquea (es un net secundario, no SPOF).
-# ----------------------------------------------------------------
-_CONFIG_PATH = Path(__file__).resolve().parent.parent / "las_manos" / "config.toml"
-try:
-    with open(_CONFIG_PATH, "rb") as _cf:
-        _CATALOG_CAPS: dict = tomllib.load(_cf).get("capabilities", {})
-    logger.info(
-        "Jacobs cargó catálogo de capabilities: %d entradas (%s)",
-        len(_CATALOG_CAPS), _CONFIG_PATH,
-    )
-except Exception as _cfg_err:  # noqa: BLE001
-    logger.warning(
-        "Jacobs no pudo cargar catálogo (%s): %s — validate_capability degradará "
-        "a fail-open", _CONFIG_PATH, _cfg_err,
-    )
-    _CATALOG_CAPS = {}
 
 
 # ----------------------------------------------------------------
@@ -511,49 +488,22 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     }
 
 
-# Mapa TOTAL semántica → capability de catálogo (FASE A §3.2).
-# Cero pass-through silencioso: toda capability que el planner puede emitir
-# resuelve a un nombre que EXISTE en el catálogo de las_manos/config.toml.
-# Los alias traducen vocabulario del planner; las identidades dejan explícito
-# que la capability ya es de catálogo. ('assemble' NO va aquí: se cortocircuita
-# mecánicamente en _dispatch_step antes de llegar a cualquier motor.)
-_CAPABILITY_MAP = {
-    # --- alias semánticos → capability de catálogo ---
-    "analysis":              "pipeline_analysis",
-    "research":              "pipeline_analysis",
-    "review":                "refactor",
-    "code":                  "refactor",
-    "implement":             "code_swarm",
-    # --- identidad: capabilities que existen con su propio nombre en catálogo ---
-    "generate":              "generate",
-    "reason":                "reason",
-    "design":                "design",
-    "validate_consistency":  "validate_consistency",
-    "reconcile":             "reconcile",
-    "critique":              "critique",
-    "refactor":              "refactor",
-    "pipeline_analysis":     "pipeline_analysis",
-    "implementation":        "implementation",
-    "code_swarm":            "code_swarm",
-    "bug_hunt":              "bug_hunt",
-    "architecture_review":   "architecture_review",
-}
-
-
 async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
-    """Kimi via Motor Registry de LAS MANOS. Polling hasta completar."""
-    capability = _CAPABILITY_MAP.get(step.capability, step.capability)
-    # Observabilidad: si la capability no estaba en el mapa de traducción, se
-    # despacha cruda al Motor Registry. Antes esto fallaba en 0.0s en silencio.
-    if step.capability not in _CAPABILITY_MAP:
-        logger.warning(
-            "Capability '%s' no está en _CAPABILITY_MAP; se despacha cruda al "
-            "Motor Registry (debe existir como [capabilities.%s] en config.toml).",
-            step.capability, capability,
-        )
+    """Kimi/jax_local via Motor Registry de LAS MANOS. Polling hasta completar.
+
+    Bloque 3 (2026-08-21): _CAPABILITY_MAP eliminado -- resolvía alias
+    semánticos ("analysis"->"pipeline_analysis", etc.) a un nombre de
+    catálogo, pero verificado contra capability_motor real + jacobs_steps
+    histórico: ningún alias tuvo NUNCA una fila en capability_motor ni se
+    usó jamás con un facet-motor (kimi/jax_local) -- los 3 que sí se usan
+    (analysis/research/review) lo hacen exclusivamente con facets HTTP-directos,
+    donde este mapa nunca se consultaba. Muerto, no reemplazado. step.capability
+    llega acá ya validado por NIVEL A/B de validate_capability() (existe en
+    `capability`, el motor está en su allowed_motors) -- se despacha tal cual,
+    sin resolución intermedia."""
     payload = {
         "caller":     "jacobs",
-        "capability": capability,
+        "capability": step.capability,
         "motor":      step.motor,  # None = MotorPolicy resuelve por competencia (R4)
         "trace_id":   step.trace_id,
         "prompt":     _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
@@ -659,30 +609,51 @@ def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
 #  Dispatcher principal
 # ----------------------------------------------------------------
 
-def validate_capability(step: Step) -> CapabilityUnbound | str | None:
-    """Validación PRE-dispatch en DOS NIVELES (FASE A §3.4, refinado).
+async def validate_capability(step: Step) -> CapabilityUnbound | str | None:
+    """Validación PRE-dispatch en DOS NIVELES (FASE A §3.4; Bloque 3
+    2026-08-21: fuente única, DB real vía store.get_motor_governance() --
+    antes NIVEL A leía jacobs/plan.py::VALID_CAPABILITIES (frozenset
+    estático) y NIVEL B leía las_manos/config.toml + _CAPABILITY_MAP
+    (ambos también estáticos, cargados una vez al importar este módulo).
+    Las tres copias se desincronizaban de la DB sin aviso -- causa raíz de
+    dos P0 reales (2026-08-22: VALID_CAPABILITIES sin file_read/file_write
+    pese a existir en la DB desde días antes; config.toml con el mismo
+    hueco). Ver DEUDA.md para el detalle y la evidencia de drift.
 
     Separa dos preguntas que antes estaban mezcladas. Devuelve CapabilityUnbound
     o un mensaje de error (str) si el step es inválido, o None si es válido.
 
-    NIVEL A — existencia de vocabulario. Aplica a TODOS los facets.
-        ¿step.capability ∈ VALID_CAPABILITIES? Cierra la asimetría (un facet
-        directo con capability inexistente ahora se rechaza). NO mira
-        allowed_motors, por eso NO rompe facets directos cuyo destino de catálogo
-        sea kimi-only — hipatia/research y jekyll/analysis (→ pipeline_analysis,
-        allowed_motors=["kimi"]) PASAN porque 'research'/'analysis' existen en el
-        vocabulario. Es el _fallback_plan, que no se puede romper.
+    NIVEL A — existencia de vocabulario. Aplica a TODOS los facets, incluido
+        hyde (verificado en vivo: jacobs_steps tiene un step real,
+        2026-08-21, facet=hyde, capability='execute', rechazado acá con
+        exactamente este mensaje -- caso de prueba de T4).
+        ¿step.capability existe como fila en `capability`? Cierra la
+        asimetría (un facet directo con capability inexistente se rechaza).
+        NO mira allowed_motors, por eso NO rompe facets directos cuyo destino
+        de catálogo sea kimi-only -- hipatia/research y jekyll/analysis
+        (ambos con fila propia en `capability`, sin capability_motor --
+        Bloque 3, T2: nunca se resolvían a través de un alias, ambos nombres
+        se usan tal cual, sin traducción, desde siempre) PASAN porque
+        'research'/'analysis' existen en el vocabulario real. Es el
+        _fallback_plan, que no se puede romper.
 
     NIVEL B — contrato del motor. Aplica SOLO a _MOTOR_FACETS (hoy kimi, jax_local).
         Mismo contrato que policy.check valida en el Motor Registry, adelantado
-        acá para fallar limpio antes del HTTP: la capability resuelta existe en el
-        catálogo, (step.motor or step.facet) ∈ allowed_motors y el caller
+        acá para fallar limpio antes del HTTP: la capability existe en la DB,
+        (step.motor or step.facet) ∈ allowed_motors y el caller
         'jacobs' ∈ allowed_callers. Se valida step.motor cuando está seteado
         porque, desde Task 5, es lo que realmente despacha (_invoke_motor pasa
         step.motor al Motor Registry, no step.facet) — validar solo step.facet
         dejaría pasar un step con facet="kimi", motor="ada" a nombre de kimi
         mientras en realidad despacha ada. Los facets de API directa NO pasan
         por aquí (ignoran capability en el dispatch real).
+
+    Fail-closed (P10): si la DB no responde, store.get_motor_governance()
+    propaga la excepción sin capturarla acá -- _run_one_step ya envuelve
+    _dispatch_step en un try/except general (línea ~936) que falla el step
+    limpio con el motivo real. Sin gobernanza, no se despacha -- nunca un
+    "pasa porque no pude verificar". Ningún caso de fail-soft identificado
+    para esta función; no se marca ninguno.
 
     Devuelve CapabilityUnbound (tipado, REFORMAS-v3 R3.4) cuando el motivo
     de rechazo es un binding capability→motor ausente (NIVEL B) — el
@@ -695,30 +666,25 @@ def validate_capability(step: Step) -> CapabilityUnbound | str | None:
     if cap == "assemble":
         return None
 
-    # ---- NIVEL A: existencia en el vocabulario cerrado (TODOS los facets) ----
-    if cap not in VALID_CAPABILITIES:
-        return f"capability desconocida: '{cap}' no está en VALID_CAPABILITIES"
+    governance = await store.get_motor_governance()
+    caps = governance["capabilities"]
 
-    # ---- NIVEL B: contrato de motor (SOLO facets-motor, hoy kimi) ----
+    # ---- NIVEL A: existencia real en la DB (TODOS los facets) ----
+    entry = caps.get(cap)
+    if entry is None:
+        return f"capability desconocida: '{cap}' no está en la tabla `capability`"
+
+    # ---- NIVEL B: contrato de motor (SOLO facets-motor, hoy kimi/jax_local) ----
     if step.facet in _MOTOR_FACETS:
-        # Fail-open si el catálogo no cargó: net secundario, no SPOF.
-        if not _CATALOG_CAPS:
-            return None
-        resolved = _CAPABILITY_MAP.get(cap, cap)
-        entry = _CATALOG_CAPS.get(resolved)
-        if entry is None:
+        if (step.motor or step.facet) not in entry["allowed_motors"]:
             return CapabilityUnbound(
-                required=[resolved], candidates=[], task_id=step.step_id,
-            )
-        if (step.motor or step.facet) not in entry.get("allowed_motors", []):
-            return CapabilityUnbound(
-                required=[resolved],
-                candidates=list(entry.get("allowed_motors", [])),
+                required=[cap],
+                candidates=list(entry["allowed_motors"]),
                 task_id=step.step_id,
             )
-        if "jacobs" not in entry.get("allowed_callers", []):
+        if "jacobs" not in entry["allowed_callers"]:
             return CapabilityUnbound(
-                required=[resolved], candidates=[], task_id=step.step_id,
+                required=[cap], candidates=[], task_id=step.step_id,
             )
     return None
 
@@ -740,7 +706,7 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # sigue como si el step hubiera sido asignado a ese facet desde el inicio.
     original_facet = step.facet
     tried_facets = {step.facet}
-    cap_error = validate_capability(step)
+    cap_error = await validate_capability(step)
     while isinstance(cap_error, CapabilityUnbound):
         # El reroute SOLO puede apuntar a facets efectivamente despachables
         # (HTTP o Motor Registry). 'hyde' se excluye a propósito: tiene su
@@ -749,12 +715,13 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
         # reroute pudiera asignar step.facet = "hyde" después de ese
         # chequeo, el step ejecutaría con result["approved"] = True sin
         # aprobación humana real. No alcanzable hoy (ninguna capability
-        # lista "hyde" en allowed_motors), pero a un cambio de config.toml
-        # de distancia. 'jax_local' (R4: sumado a _MOTOR_FACETS, SÍ es un
+        # lista "hyde" en allowed_motors), pero a una fila de capability_motor
+        # de distancia (Bloque 3: la DB es la única fuente ahora, un INSERT
+        # directo lo cambiaría). 'jax_local' (R4: sumado a _MOTOR_FACETS, SÍ es un
         # conjunto de dispatch) tampoco aparece hoy como candidato de
         # reroute -- no porque esté excluido del dispatch, sino porque
-        # ninguna capability de config.toml lo lista en allowed_motors
-        # todavía (mismo gap que "hyde": a un cambio de config.toml de
+        # ninguna fila de capability_motor lo lista en allowed_motors
+        # todavía (mismo gap que "hyde": a una fila de capability_motor de
         # distancia). NOTA: reroute SÍ puede apuntar a
         # _HTTP_FACETS (ada/thot), que no pasan por la gobernanza del Motor
         # Registry (allowed_callers, requires_human_gate, sandbox_only,
@@ -788,7 +755,7 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
         )
         step.facet = new_facet
         tried_facets.add(new_facet)
-        cap_error = validate_capability(step)
+        cap_error = await validate_capability(step)
     if isinstance(cap_error, str):
         raise ValueError(f"Capability inválida (pre-dispatch): {cap_error}")
 

@@ -23,12 +23,21 @@ su fecha de última verificación real, no una nueva.
 ## Bloquea trabajo
 
 - **`_HTTP_FACETS` sin gobernanza del Motor Registry.** `hipatia`/`jekyll`/
-  `thot`/`ada` despachan por HTTP directo (`jacobs/executor.py:44`), sin
-  pasar por `MotorPolicy.check()` (los 8 checks que sí aplican a
-  `jax_local`/`kimi`). Migración de ada/thot pendiente de decisión
-  (extender `_CAPABILITY_MAP`, no seed de datos). **Explícitamente
-  diferido a Bloque 3 de esta ronda (2026-08-21) — no tocar en Bloque 2.**
-  Última verificación real: 2026-08-20 (ronda 7, T3).
+  `thot`/`ada` despachan por HTTP directo (`jacobs/executor.py`), sin pasar
+  por `MotorPolicy.check()` (los 8 checks que sí aplican a `jax_local`/`kimi`:
+  caller autorizado, human gate, recursion depth, claves prohibidas, motor
+  habilitado, sandbox_only, techo de timeout). **Bloque 3 (2026-08-21) TOCÓ
+  esto, no lo cerró — precisión pedida explícitamente, no dar por resuelto
+  lo que no está:** el camino HTTP-directo ahora SÍ pasa por NIVEL A de
+  `validate_capability()` (existencia real en la tabla `capability`, DB en
+  vez de un frozenset estático) antes de despachar. Pero eso es solo
+  "¿el nombre de la capability existe?" — NINGUNO de los otros 7 checks de
+  `MotorPolicy.check()` aplica al camino HTTP-directo, sigue siendo
+  exactamente el mismo gap que antes (`allowed_callers`, `requires_human_gate`,
+  `sandbox_only`, techo de `max_execution_minutes` -- cero enforcement para
+  hipatia/jekyll/thot/ada). Migración real (pasar estos 4 facets por el
+  Motor Registry, o replicar los 8 checks en el camino HTTP-directo) sigue
+  sin decisión ni ejecución.
 
 - **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
   excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
@@ -47,16 +56,6 @@ su fecha de última verificación real, no una nueva.
   una ronda anterior (ya corregido ese bug puntual) — el enforcement de
   fondo (el invariante en sí, no solo el test que lo chequea) sigue sin
   mecanismo real. Última verificación: ronda 7-8.
-
-- **`jacobs/executor.py` con múltiples fuentes de verdad para
-  capabilities/motor**, que `capability_motor` ya gobierna en DB: el
-  catálogo vía `MotorCatalog.from_db()`, `las_manos/config.toml` (NIVEL B
-  de `validate_capability()`, desincronizado una vez ya y corregido a
-  mano en 2026-08-22/PR jax#14), y el propio `executor.py`. Riesgo
-  concreto: el mismo bug que ya pasó dos veces (`VALID_CAPABILITIES` sin
-  `file_read`/`file_write`, `config.toml` sin las mismas secciones)
-  vuelve a pasar en la próxima fuente que alguien olvide actualizar.
-  Declarado, no resuelto — última mención: 2026-08-22.
 
 - **`record_direct_usage` (HTTP-directo, ada/thot) sin el fix de
   identidad T1.b** que sí se aplicó a `record_motor_usage`/
@@ -78,6 +77,8 @@ su fecha de última verificación real, no una nueva.
   virtual, PR jax#18, 2026-08-23), pero el problema general para
   cualquier OTRO músculo/automatización que dispare `claude` sigue
   abierto. Ver memoria `jax-hyde-personal-hooks-sin-gobernanza`.
+
+- **`workspace/` nunca se inicializó como repo git propio — `file_write` escribe SIN commitear, la garantía de reversibilidad está rota.** Hallazgo nuevo (2026-08-21, byproducto de la verificación T4 de Bloque 3, no buscado a propósito). El diseño de GAP2 Fase4 (CONTEXT.md:307, 2026-08-19) decía explícitamente "`workspace/` pasa a ser su **propio repo git**" y `.gitignore:74` excluye `workspace/` del repo `jax` acorde a eso — pero `/home/fruiz/jax/workspace/.git` **no existe**. Evidencia real: dispatch real de `file_write` vía `jax_local` (job `18befe1a-dfb5-4ef8-a274-0c87b0ddbd43`, 2026-08-21 10:42:23) escribió el archivo pedido con el contenido exacto (verificado leyendo el disco) pero `tool_authority.py` logueó `"write_file EJECUTADO pero SIN COMMITEAR ... error=git add falló: The following paths are ignored by one of your .gitignore files: workspace"` — el `git add` cae al repo PADRE (`jax`, porque `workspace/.git` no existe, git sube buscando el `.git` más cercano) y ese repo rechaza el `.gitignore`. No es fail-open silencioso (loguea fuerte), pero la reversibilidad de `file_write` (`git reset --hard` como rollback, invariante declarado del diseño) no funciona hoy para ningún write real -- afecta la capability de mayor riesgo del sistema con acceso real a filesystem.
 
 - **Hyde: red sin acotar por dominio/IP, escritura directa a los repos
   reales fuera de alcance, concurrencia de `HYDE_SEMAPHORE` con el
@@ -130,6 +131,38 @@ su fecha de última verificación real, no una nueva.
   ambas copias se detecta con `scripts/check_facet_resolver_sync.py`
   (verificado que detecta drift real; hoy no hay ninguno).
 
+- **4 fuentes de verdad para el vocabulario de capabilities** (`VALID_CAPABILITIES`
+  estático + `las_manos/config.toml [capabilities.*]` + `_CAPABILITY_MAP` +
+  la DB real) — CERRADO 2026-08-21 (Bloque 3, PR jax#24). Las 3 copias
+  estáticas eliminadas; `jacobs/executor.py::validate_capability()` y
+  `jacobs/plan.py::_parse_plan_json`/`_validate_plan_capabilities` consultan
+  ahora la MISMA fuente (`jacobs/store.py::get_motor_governance()`,
+  extendida a vista completa de `capability` -- no solo `allowed_capabilities`,
+  también `allowed_callers` y el resto de campos de gobernanza, para no
+  perder en silencio el chequeo de caller al consolidar).
+  **Evidencia del drift que motivó cerrarlo así, no solo teoría:** 2 de
+  las ~14 capabilities auditadas contra config.toml tenían
+  `max_execution_minutes` desincronizado de la DB real --
+  `code_swarm` (30 en config.toml vs 5 en DB) y `refactor` (10 vs 5).
+  Ninguno de los dos causó bug visible porque NIVEL B nunca chequeaba ese
+  campo -- pero **2 de 14 ya divergidas, sin que nadie lo notara**, es el
+  argumento real de por qué la copia tenía que desaparecer, no una
+  hipótesis. Los 5 alias semánticos de `_CAPABILITY_MAP`
+  (analysis/research/review/code/implement) resultaron estar MUERTOS para
+  Motor Registry -- verificado contra `capability_motor` real (cero filas)
+  y `jacobs_steps` histórico completo (cero steps con esos nombres y un
+  facet-motor; `code`/`implement` cero uso en absoluto, en cualquier
+  facet). No se sembraron como filas de motor-registry (hubiera sido
+  inventar semántica que nunca existió). `analysis`/`research`/`review` SÍ
+  se usan, pero solo con facets HTTP-directos (ada/jekyll/hipatia/thot) --
+  se sembraron como 3 filas de vocabulario puro en `capability` (sin
+  `capability_motor`, `allowed_callers=["jacobs"]` verificado contra
+  `jacobs_steps`/`jacobs_events`: nunca hubo otro caller real). Caso de
+  regresión reproducido explícitamente: `capability='execute'`,
+  `facet='hyde'` (rechazo real en producción, 2026-08-21 04:38, antes de
+  este cambio) sigue rechazándose con mensaje equivalente después del
+  cambio.
+
 - **`save_message()` fire-and-forget sin garantía** — CERRADO 2026-08-21
   (PR jax#21). Ahora devuelve el `Task` en vez de `None`; un caller que
   necesite confirmación puede `await` y recibe
@@ -164,6 +197,16 @@ su fecha de última verificación real, no una nueva.
   bajo de drift, ya causó un bug real una vez (ver PR jax-platform#9,
   2026-08-22) pero el fix de ese bug no incluyó eliminar la duplicación
   en sí, solo corregir el síntoma.
+
+- **`AdminMotors.jsx` ahora lista `analysis`/`research`/`review` como
+  capabilities adjuntables a un motor** — efecto colateral menor de
+  sembrarlas en `capability` (Bloque 3, arriba). Nada las impide
+  técnicamente: un admin podría crear una fila `capability_motor` para
+  alguna de las 3 vía ese formulario, cosa que el diseño de Bloque 3
+  evitó a propósito (son vocabulario puro para HTTP-directo, no
+  capabilities de motor-registry). No es un bug -- nadie lo hizo, y el
+  formulario no rompe nada si lo hicieran -- pero es una superficie que no
+  existía antes de esta sesión. Sin urgencia.
 
 - **Require PR pendiente de activar sobre `master`** — bloqueado por el
   plan de GitHub (Require PR nativo no disponible sin upgrade a Pro); el
