@@ -32,6 +32,7 @@ import asyncio
 import os
 
 from jax.muscles.base import Muscle, MuscleInvocationError, MuscleTimeoutError
+from hyde_sandbox import wrap_hyde_command
 
 MAX_PROMPT_CHARS = 32000
 
@@ -107,19 +108,25 @@ class SubprocessMuscle(Muscle):
             "--print",
             "--output-format", "text",
             "--permission-mode", "acceptEdits",
-            # Bash acotado a pwd/ls (2026-08-22, mismo cambio y misma
-            # justificacion que jacobs/executor.py::_invoke_hyde -- ver
-            # jax-hyde-bash-sin-jail-p0 en memoria). Mitigacion parcial, NO
-            # cierra el vector: "Bash(<cmd> *)" activa un jail nativo de
-            # Claude Code solo para cat/redireccion, no para interpretes ni
-            # para primitivas de git como `git diff --no-index`. `ls *`
-            # deja listar directorios fuera del workspace (confirmado).
-            "--allowedTools", "Write,Edit,Read,Bash(pwd),Bash(ls *)",
+            # Bash SIN acotar por patron (2026-08-22, configuracion
+            # definitiva post-sandbox -- mismo cambio y misma justificacion
+            # que jacobs/executor.py::_invoke_hyde, ver hyde_sandbox.py y
+            # jax-hyde-bash-sin-jail-p0 en memoria). --allowedTools nunca
+            # fue una defensa de filesystem real; el confinamiento de verdad
+            # es el namespace de montaje de bwrap de abajo, verificado en T5
+            # con "Bash" pelado -- todo bloqueado por el sandbox.
+            "--allowedTools", "Write,Edit,Read,Bash",
             "--add-dir", self.workspace_dir,
         ]
 
+        # Sandbox de bubblewrap (2026-08-22, fix de fondo del P0 -- ver
+        # hyde_sandbox.py). SandboxUnavailable NO se atrapa acá -- fail-closed
+        # (P10): sin bwrap, la llamada falla con motivo explícito, nunca
+        # corre Hyde sin confinamiento.
+        sandboxed_cmd = wrap_hyde_command(cmd, self.workspace_dir)
+
         proc = await asyncio.create_subprocess_exec(
-            *cmd,
+            *sandboxed_cmd,
             cwd=self.workspace_dir,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
