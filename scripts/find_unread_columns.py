@@ -71,11 +71,14 @@ GENERIC_NAMES = {
 # con su razon, no mezcladas con las candidatas genuinas.
 DELIBERATE_PENDING = {
     ("people", "honor_memory"): (
-        "ronda 7 (2026-08-20, T5): people se construye SIN honor_memory. "
-        "Semantica pendiente de definicion de Fernando, no es una decision "
-        "tecnica -- no proponer significado. Los otros 4 campos de people "
-        "(person_uuid, nickname, relationship_start, last_mentioned) SI "
-        "tienen escritor/lector diseñados (ver CONTEXT.md)."
+        "Bloque 2 (2026-08-21): semantica definida por Fernando -- cosmetico, "
+        "personalidad conversacional, NO faceta, NO despacha, NO ejecuta. "
+        "Diseño entregado (docs/superpowers/specs/2026-08-21-honor-memory-diseno.md): "
+        "get_honored_mentions(text) de solo lectura + call site en REPL y en "
+        "Jacobs/Mesa antes de armar el prompt. NO implementado a proposito -- "
+        "es la unica pieza de la sesion que cambia tono conversacional en vivo, "
+        "Fernando quiere revisar la redaccion antes de que sea produccion. Ver "
+        "DEUDA.md para el estado vigente."
     ),
 }
 
