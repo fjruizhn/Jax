@@ -1,3 +1,9 @@
+# --- Credenciales locales (nunca deberían vivir en el repo -- defensivo,
+# hoy viven en /etc/jax/.env, fuera de este árbol) ---
+.env
+*.env
+.env.*
+
 # --- Entornos virtuales (no se versionan; se reconstruyen) ---
 # Sin barra final: matchea tambien cuando .venv es un symlink (ej: a
 # /opt/jax/venv, para no llenar la particion raiz — ver commit "mueve venv").
