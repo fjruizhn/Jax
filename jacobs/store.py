@@ -344,31 +344,86 @@ async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
 # ----------------------------------------------------------------
 
 async def get_motor_governance() -> dict[str, dict]:
-    """capability_motor + motor.has_tool_access -- MISMA tabla que
-    /api/motors/capabilities (jax-platform) y MotorCatalog.from_db()
-    (las_manos), no una copia. PlanBuilder.build() la consulta para
-    rechazar un plan ANTES de persistirlo (jacobs/plan.py::
-    _validate_plan_capabilities) -- diagnóstico pipeline 19ad2c42-cdf: el
-    frontend pedía este mismo dato y lo descartaba, dejando pasar planes
-    que nunca podían ejecutarse."""
+    """Vista completa de motor/capability/capability_motor -- MISMA tabla
+    que /api/motors/capabilities (jax-platform) y MotorCatalog.from_db()
+    (las_manos), no una copia.
+
+    Bloque 3 (2026-08-21): extendida de "solo allowed_capabilities +
+    has_tool_access por motor" a la fila `capability` COMPLETA, keyed por
+    capability -- antes devolvía una vista parcial que PlanBuilder.build()
+    (jacobs/plan.py::_validate_plan_capabilities) consultaba para rechazar
+    un plan ANTES de persistirlo, pero le faltaba allowed_callers y el
+    resto de columnas de gobernanza. Sustituir NIVEL B de
+    executor.py::validate_capability() (antes: las_manos/config.toml) por
+    esta función tal cual, sin extenderla, habría eliminado el chequeo de
+    allowed_callers en silencio -- el mismo patrón de dos fuentes que
+    divergen que esta consolidación existe para cerrar. Ahora plan-time
+    (_validate_plan_capabilities) y dispatch-time (validate_capability)
+    miran exactamente la misma estructura, una sola query.
+
+    Devuelve:
+      {"capabilities": {capability_key: {allowed_motors: [motor_key, ...]
+       (orden = capability_motor.priority ASC), allowed_callers: [...],
+       risk_level, sandbox_only, requires_human_gate, max_execution_minutes,
+       max_recursion_depth, output_schema, fallback_motor, fallback_mode,
+       forbidden_paths, auditor_motor}},
+       "motors": {motor_key: has_tool_access (bool)}}
+
+    Costo medido en vivo (2026-08-21, DB real): 3 SELECTs, 0.00024s de
+    ejecución total en el servidor (motor: 4 filas, capability: ~17,
+    capability_motor: ~26) -- insignificante para llamar en cada dispatch,
+    no solo en plan-build."""
     conn = await get_conn()
     try:
         async with conn.cursor() as cur:
             await cur.execute("SELECT `key`, has_tool_access FROM motor")
-            governance: dict[str, dict] = {
-                key: {"allowed_capabilities": set(), "has_tool_access": bool(has_tools)}
-                for key, has_tools in await cur.fetchall()
-            }
-            await cur.execute("SELECT capability_key, motor_key FROM capability_motor")
+            motors: dict[str, bool] = {key: bool(has_tools) for key, has_tools in await cur.fetchall()}
+
+            await cur.execute(
+                "SELECT `key`, risk_level, sandbox_only, requires_human_gate, "
+                "max_execution_minutes, max_recursion_depth, output_schema, "
+                "fallback_motor, fallback_mode, allowed_callers, forbidden_paths, "
+                "auditor_motor FROM capability"
+            )
+            capabilities: dict[str, dict] = {}
+            for (key, risk_level, sandbox_only, gate, max_exec, max_rec, schema,
+                 fallback_motor, fallback_mode, callers, forbidden, auditor_motor) in await cur.fetchall():
+                capabilities[key] = {
+                    "allowed_motors": [],
+                    "allowed_callers": json.loads(callers) if callers else [],
+                    "risk_level": risk_level,
+                    "sandbox_only": bool(sandbox_only),
+                    "requires_human_gate": bool(gate),
+                    "max_execution_minutes": max_exec,
+                    "max_recursion_depth": max_rec,
+                    "output_schema": schema or "",
+                    "fallback_motor": fallback_motor,
+                    "fallback_mode": fallback_mode or "manual_only",
+                    "forbidden_paths": json.loads(forbidden) if forbidden else [],
+                    "auditor_motor": auditor_motor,
+                }
+
+            await cur.execute(
+                "SELECT capability_key, motor_key FROM capability_motor "
+                "ORDER BY capability_key, priority ASC"
+            )
             for capability_key, motor_key in await cur.fetchall():
-                # setdefault cubre una fila de capability_motor para un motor
-                # sin fila propia en `motor` -- no debería pasar (FK), pero
-                # no asumir consistencia entre dos SELECTs no transaccionales.
-                governance.setdefault(motor_key, {"allowed_capabilities": set(), "has_tool_access": False})
-                governance[motor_key]["allowed_capabilities"].add(capability_key)
+                # setdefault cubre una fila de capability_motor para una
+                # capability sin fila propia en `capability` -- no debería
+                # pasar (FK), pero no asumir consistencia entre SELECTs no
+                # transaccionales.
+                capabilities.setdefault(capability_key, {
+                    "allowed_motors": [], "allowed_callers": [], "risk_level": "high",
+                    "sandbox_only": True, "requires_human_gate": True,
+                    "max_execution_minutes": 5, "max_recursion_depth": 0,
+                    "output_schema": "", "fallback_motor": None,
+                    "fallback_mode": "manual_only", "forbidden_paths": [],
+                    "auditor_motor": None,
+                })
+                capabilities[capability_key]["allowed_motors"].append(motor_key)
     finally:
         conn.close()
-    return governance
+    return {"capabilities": capabilities, "motors": motors}
 
 
 # ----------------------------------------------------------------

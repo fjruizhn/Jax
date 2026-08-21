@@ -1,25 +1,33 @@
 """
-Regresión P0 (2026-08-22): file_write/file_read faltaban en VALID_CAPABILITIES
-(jacobs/plan.py) -- GAP2 Fase2 las agregó a la DB (capability, capability_motor)
-pero nunca a esta lista estática. NIVEL A de executor.py::validate_capability()
-rechaza cualquier step con esas capabilities ANTES del dispatch, incluso
-cuando T2 (_validate_plan_capabilities, capability_motor real) las aprueba --
-dos fuentes de verdad en desacuerdo, la más vieja gana en producción.
+Regresión P0 (2026-08-22, original): file_write/file_read faltaban en
+VALID_CAPABILITIES (jacobs/plan.py) -- GAP2 Fase2 las agregó a la DB
+(capability, capability_motor) pero nunca a esa lista estática. NIVEL A de
+executor.py::validate_capability() rechazaba cualquier step con esas
+capabilities ANTES del dispatch, incluso cuando T2 (_validate_plan_capabilities,
+capability_motor real) las aprobaba -- dos fuentes de verdad en desacuerdo,
+la más vieja ganaba en producción.
 
-Encontrado en vivo: un pipeline con step {facet: jax_local, capability:
-file_write, motor: jax_local} -- exactamente lo que PipelineModal.jsx arma
-hoy tras el fix de T5 -- falló con "capability desconocida: 'file_write' no
-está en VALID_CAPABILITIES", pese a que jax_local tiene has_tool_access=True
-y capability_motor lista file_write para jax_local.
+Bloque 3 (2026-08-21): VALID_CAPABILITIES eliminado -- NIVEL A ahora
+consulta la DB real (store.get_motor_governance()) directamente, no una
+copia. Esto reescribe el test para que siga siendo la regresión real: ya
+no puede volver a desincronizarse de la DB porque ES la DB, pero re-verifica
+contra jax_memory real que file_read/file_write existen como filas de
+`capability` -- mismo caso de prueba, mecanismo distinto.
+
+Corre contra la DB real (mismo criterio que tests/test_plan_validation.py).
 """
 from __future__ import annotations
 
-from jacobs.plan import VALID_CAPABILITIES
+import unittest
+
+from jacobs import store
 
 
-def test_file_write_esta_en_valid_capabilities():
-    assert "file_write" in VALID_CAPABILITIES
+class ValidCapabilitiesFileToolsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_file_write_existe_en_capability_real(self):
+        governance = await store.get_motor_governance()
+        assert "file_write" in governance["capabilities"]
 
-
-def test_file_read_esta_en_valid_capabilities():
-    assert "file_read" in VALID_CAPABILITIES
+    async def test_file_read_existe_en_capability_real(self):
+        governance = await store.get_motor_governance()
+        assert "file_read" in governance["capabilities"]
