@@ -25,7 +25,7 @@ from jacobs.models import (
     StepSpec,
     StepStatus,
 )
-from jacobs.plan import PlanBuilder
+from jacobs.plan import PlanBuilder, PlanRejected
 from jacobs.policy import (
     check_kill_switch,
     validate_create,
@@ -48,6 +48,31 @@ _plan_builder = PlanBuilder()
 # transacción/fila lockeada todo ese tiempo arriesgaría agotar el pool de
 # conexiones bajo carga real; un lock en memoria no reserva conexión DB.
 _pipeline_create_lock = asyncio.Lock()
+
+
+async def _build_plan_or_reject(
+    pipeline_id: str, objective: str, max_steps: int, steps_spec: list[dict] | None,
+) -> list[Step]:
+    """T2 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): único punto de
+    entrada a _plan_builder.build() -- si el plan es inejecutable,
+    PlanRejected sube ANTES de que cualquiera de los dos endpoints llame a
+    store.pipeline_create()/pipeline_add_steps(), así que jacobs_pipelines/
+    jacobs_steps nunca llegan a tener fila para este plan. El evento en
+    jacobs_events no depende de que exista una fila en jacobs_pipelines --
+    la tabla no tiene FK a pipeline_id (confirmado: DESCRIBE jacobs_events),
+    así que registrar el rechazo bajo este pipeline_id (nunca persistido
+    como pipeline real) es seguro."""
+    try:
+        return await _plan_builder.build(
+            pipeline_id=pipeline_id, objective=objective,
+            max_steps=max_steps, steps_spec=steps_spec,
+        )
+    except PlanRejected as exc:
+        await store.event_append(
+            pipeline_id, "PLAN_REJECTED",
+            {"violations": [v.to_dict() for v in exc.violations]},
+        )
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 # ----------------------------------------------------------------
@@ -85,12 +110,7 @@ async def plan_only(req: PlanRequest) -> dict:
 
     pipeline_id = str(uuid.uuid4())
     steps_spec = [s.model_dump() for s in req.steps] if req.steps else None
-    steps = await _plan_builder.build(
-        pipeline_id=pipeline_id,
-        objective=req.objective,
-        max_steps=req.max_steps,
-        steps_spec=steps_spec,
-    )
+    steps = await _build_plan_or_reject(pipeline_id, req.objective, req.max_steps, steps_spec)
 
     return {
         "pipeline_id": pipeline_id,
@@ -131,12 +151,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
 
         pipeline_id = str(uuid.uuid4())
         steps_spec = [s.model_dump() for s in req.steps] if req.steps else None
-        steps = await _plan_builder.build(
-            pipeline_id=pipeline_id,
-            objective=req.objective,
-            max_steps=req.max_steps,
-            steps_spec=steps_spec,
-        )
+        steps = await _build_plan_or_reject(pipeline_id, req.objective, req.max_steps, steps_spec)
 
         # Asignar pipeline_id a cada step
         for step in steps:

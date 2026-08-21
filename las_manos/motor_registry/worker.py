@@ -478,14 +478,22 @@ async def run(
     )
     prompt_with_identity = identity + "\n---\n" + prompt
 
-    # GAP2 Fase1 (2026-08-19): SOLO jax_local, a propósito. executor.py:731-733
-    # ya documenta que _HTTP_FACETS (ada/thot/kimi-via-http) no pasa por la
-    # gobernanza del Motor Registry (allowed_callers/requires_human_gate/
-    # sandbox_only) -- darles tool_calls antes de resolver eso despertaría
-    # ese riesgo hoy dormido. Este `if` literal es el gate completo de Fase1
-    # (cero mapeo tool->capability, eso es Fase2); reemplazarlo por algo
-    # basado en capability es explícitamente trabajo de otra ronda.
-    tools_for_call = TOOLS_CATALOG if motor == "jax_local" else None
+    # GAP2 Fase1 (2026-08-19): originalmente `motor == "jax_local"` literal,
+    # a propósito -- executor.py:731-733 documenta que _HTTP_FACETS
+    # (ada/thot/kimi-via-http) no pasa por la gobernanza del Motor Registry
+    # (allowed_callers/requires_human_gate/sandbox_only), y darles tool_calls
+    # antes de resolver eso despertaría ese riesgo hoy dormido.
+    #
+    # T1 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): el string
+    # hardcodeado era una segunda fuente de verdad que nada podía consultar
+    # -- el frontend pedía /motors/capabilities y no tenía de dónde leer
+    # esta señal, así que armaba planes asignando "implementation" a kimi
+    # sin saber que kimi no puede ejecutar tools. Reemplazado por
+    # motor_entry.has_tool_access (columna DB, migrations.py, poblada hoy
+    # solo para jax_local=TRUE -- mismo resultado que el `if` viejo, pero
+    # consultable desde fuera en vez de vivir solo acá). Sigue siendo cero
+    # mapeo tool->capability (eso es Fase2, sin cambios en esta ronda).
+    tools_for_call = TOOLS_CATALOG if motor_entry.has_tool_access else None
 
     # T2 (2026-08-19): jacobs/plan.py::_llm_plan() ya aplica think:false
     # contra el endpoint NATIVO /api/chat de Ollama -- este es el mismo

@@ -340,6 +340,38 @@ async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
 
 
 # ----------------------------------------------------------------
+#  Motor governance (T2, 2026-08-21)
+# ----------------------------------------------------------------
+
+async def get_motor_governance() -> dict[str, dict]:
+    """capability_motor + motor.has_tool_access -- MISMA tabla que
+    /api/motors/capabilities (jax-platform) y MotorCatalog.from_db()
+    (las_manos), no una copia. PlanBuilder.build() la consulta para
+    rechazar un plan ANTES de persistirlo (jacobs/plan.py::
+    _validate_plan_capabilities) -- diagnóstico pipeline 19ad2c42-cdf: el
+    frontend pedía este mismo dato y lo descartaba, dejando pasar planes
+    que nunca podían ejecutarse."""
+    conn = await get_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT `key`, has_tool_access FROM motor")
+            governance: dict[str, dict] = {
+                key: {"allowed_capabilities": set(), "has_tool_access": bool(has_tools)}
+                for key, has_tools in await cur.fetchall()
+            }
+            await cur.execute("SELECT capability_key, motor_key FROM capability_motor")
+            for capability_key, motor_key in await cur.fetchall():
+                # setdefault cubre una fila de capability_motor para un motor
+                # sin fila propia en `motor` -- no debería pasar (FK), pero
+                # no asumir consistencia entre dos SELECTs no transaccionales.
+                governance.setdefault(motor_key, {"allowed_capabilities": set(), "has_tool_access": False})
+                governance[motor_key]["allowed_capabilities"].add(capability_key)
+    finally:
+        conn.close()
+    return governance
+
+
+# ----------------------------------------------------------------
 #  Audit events
 # ----------------------------------------------------------------
 

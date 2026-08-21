@@ -45,6 +45,24 @@ class CatalogFromDbTest(unittest.IsolatedAsyncioTestCase):
         assert "thot" in cap.allowed_motors, cap.allowed_motors
         assert cap.allowed_motors == ["thot", "ada"], cap.allowed_motors
 
+    async def test_from_db_has_tool_access_jax_local_true_kimi_false(self):
+        """T1 (diagnóstico pipeline 19ad2c42-cdf): has_tool_access vivía solo
+        como `if motor == "jax_local"` en worker.py:488, sin fuente
+        consultable. Ahora es columna en `motor` -- este test confirma que
+        MotorCatalog la lee (no la vuelve a hardcodear en otro lado)."""
+        catalog = await MotorCatalog.from_db()
+        jax_local = catalog.get_motor("jax_local")
+        assert jax_local is not None
+        assert jax_local.has_tool_access is True, jax_local
+        kimi = catalog.get_motor("kimi")
+        assert kimi is not None
+        # kimi tiene filas en capability_motor para file_write/file_read
+        # (ronda 7) pero NO recibe el catálogo de tools (worker.py:488,
+        # GAP2 Fase1, posterior) -- esta es exactamente la contradicción
+        # diagnosticada en T2 de la sesión anterior, y has_tool_access=False
+        # es la fuente de verdad que la hace explícita.
+        assert kimi.has_tool_access is False, kimi
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

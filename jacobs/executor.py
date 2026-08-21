@@ -25,6 +25,8 @@ import httpx
 
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
+from jacobs.models import HTTP_FACETS as _HTTP_FACETS
+from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import VALID_CAPABILITIES, CapabilityUnbound
 from jacobs.policy import check_kill_switch
@@ -40,11 +42,10 @@ MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 # Si el ensamble de muchas deps roza la ventana, ajustar y re-verificar con el log de C1.
 MAX_DEP_CONTEXT_CHARS = 60_000
 
-# Facetas que van directo por HTTP a sus APIs
-_HTTP_FACETS = frozenset({"hipatia", "jekyll", "thot", "ada"})
-
-# Facetas que van vía Motor Registry de LAS MANOS
-_MOTOR_FACETS = frozenset({"kimi", "jax_local"})
+# T2 (2026-08-21): _HTTP_FACETS/_MOTOR_FACETS ahora viven en jacobs.models
+# (import de arriba) -- plan.py los necesita para la validación pre-persist
+# y no puede importar este módulo (circular: executor.py ya importa de
+# plan.py). Un solo lugar define la partición, dos módulos la consumen.
 
 
 # ----------------------------------------------------------------
