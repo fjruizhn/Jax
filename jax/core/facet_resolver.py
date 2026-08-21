@@ -1,8 +1,13 @@
 """
 Resolver de facetas — Bloque C (facet/facet_binding como fuente unica
-faceta->modelo). Espejo minimo en jax-platform, jax/core, las_manos, mismo
-patron que credential_resolver.py. Consume resolve_credential_instrumented,
-no reimplementa Fase 1. Ver jax-platform/docs/fase2-facetas-diseno.md.
+faceta->modelo). Archivo unico real dentro de jax (Bloque 2, 2026-08-21):
+las_manos/facet_resolver.py es symlink a este -- jacobs lo importa via
+PYTHONPATH apuntando a las_manos, el REPL via el paquete jax.core. jax-platform
+sigue con copia propia aparte (repo distinto, con su propio
+credential_resolver.py local -- un symlink cruzado de repos no sobrevive un
+clone fresco); ver scripts/check_facet_resolver_sync.py para detectar drift
+entre ambas. Consume resolve_credential_instrumented, no reimplementa Fase 1.
+Ver jax-platform/docs/fase2-facetas-diseno.md.
 """
 import logging
 import os
@@ -11,7 +16,14 @@ from dataclasses import dataclass
 
 import aiomysql
 
-from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+try:
+    # las_manos y jacobs (PYTHONPATH incluye las_manos/, sin la raiz del
+    # paquete jax): credential_resolver.py vive directo en las_manos/.
+    from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+except ImportError:
+    # REPL (PYTHONPATH=. desde la raiz del repo, `python -m jax.core.main`):
+    # las_manos/ no esta en sys.path, solo el paquete jax.core.
+    from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 
 logger = logging.getLogger("facet_resolver")
 
