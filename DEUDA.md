@@ -378,4 +378,18 @@ su fecha de última verificación real, no una nueva.
   failed / 81 passed; los 4 tests del hallazgo lateral #2 ya no cuentan,
   quedaron fuera de la colección de pytest al cuarentenarlos).
 
+- **`_capability_check()` en `facet_bindings.py` -- el badge "Meets" del
+  tab Bindings puede leerse como una garantía más amplia de la que da.**
+  Auditoría 2026-08-24 (síntoma: ada/thot mostraban "✓ Meets" mientras
+  `motor`/`facet_binding` estaban divergentes). El check hace exactamente
+  lo que dice: compara `model.supports_tool_use`/`context_window` (del
+  modelo que `facet_binding.model_ref` apunta hoy) contra lo que la
+  faceta exige -- no es un bug, no valida nada sobre `motor` ni sobre si
+  el modelo aprobado coincide con lo que de verdad se está sirviendo. Es
+  una pregunta ortogonal ("¿el modelo configurado cubre tool_use/
+  contexto?"), por eso pasaba igual estando divergente. El riesgo es de
+  naming/UX: un humano puede asumir que "Meets" certifica más de lo que
+  certifica. No se toca -- anotado a pedido explícito, no forma parte del
+  fix de `motor_resolved`.
+
 En memoria de Jairo Urbina.
