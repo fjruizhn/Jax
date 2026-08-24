@@ -58,7 +58,7 @@ from pathlib import Path
 import httpx
 
 from jacobs import store
-from jacobs.models import PipelineStatus
+from jacobs.models import HTTP_FACETS, PipelineStatus
 
 logger = logging.getLogger("jacobs.reaper")
 
@@ -287,39 +287,161 @@ async def _fetch_reconciled_job_ids(job_ids: list[str]) -> set:
         conn.close()
 
 
+async def _fetch_http_direct_expected(since: float) -> dict[str, int]:
+    """Steps HTTP-directos (hipatia/jekyll/thot/ada) completados en la
+    ventana, por facet. Fuente: jacobs_events -- join STEP_STARTED (trae
+    el facet en el payload) con STEP_COMPLETED por step_id, dentro de la
+    misma tabla. No hay job_id para este camino (record_direct_usage no
+    lo escribe, ver jacobs/usage_writer.py), así que a diferencia de
+    Motor Registry esto NO puede confirmar qué dispatch puntual falta --
+    solo cuántos se esperaban por facet. `ts` es epoch (DOUBLE), inmune
+    a timezone -- comparar directo contra `since` (también epoch)."""
+    conn = await store.get_conn()
+    try:
+        placeholders = ",".join(["%s"] * len(HTTP_FACETS))
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT JSON_UNQUOTE(JSON_EXTRACT(s.payload, '$.facet')) AS facet, "
+                "COUNT(DISTINCT s.step_id) AS n "
+                "FROM jacobs_events s "
+                "JOIN jacobs_events c ON c.step_id = s.step_id AND c.event_type = 'STEP_COMPLETED' "
+                f"WHERE s.event_type = 'STEP_STARTED' "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(s.payload, '$.facet')) IN ({placeholders}) "
+                "AND s.ts >= %s "
+                "GROUP BY facet",
+                (*HTTP_FACETS, since),
+            )
+            return {row[0]: row[1] for row in await cur.fetchall()}
+    finally:
+        conn.close()
+
+
+async def _fetch_http_direct_actual(since: float) -> dict[str, int]:
+    """Filas reales en axioma_usage para esos mismos facets, misma
+    ventana. request_type='pipeline' es el marcador que usa
+    record_direct_usage -- no confundir con 'chat' (Mesa web) ni 'motor'
+    (Motor Registry). `created_at` es TIMESTAMP (sensible a timezone de
+    sesión) -- comparar via UNIX_TIMESTAMP(created_at), nunca con un
+    string de fecha literal: el primer intento de esta misma auditoría
+    (limpieza de axioma_usage, 2026-08-21) perdió 90/106 filas de un
+    WHERE por string de fecha exactamente por este motivo, detectado
+    solo porque se verificó el conteo real del resultado."""
+    conn = await store.get_conn()
+    try:
+        placeholders = ",".join(["%s"] * len(HTTP_FACETS))
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT facet, COUNT(*) AS n FROM axioma_usage "
+                f"WHERE request_type='pipeline' AND facet IN ({placeholders}) "
+                "AND UNIX_TIMESTAMP(created_at) >= %s "
+                "GROUP BY facet",
+                (*HTTP_FACETS, since),
+            )
+            return {row[0]: row[1] for row in await cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _compute_http_direct_gap(expected_by_facet: dict[str, int], actual_by_facet: dict[str, int]) -> dict:
+    """Pura, sin I/O. Aproximada por diseño (aclarado arriba en
+    _fetch_http_direct_expected): compara CONTEOS por facet en la
+    ventana, no dispatches individuales por job_id/step_id como sí hace
+    _compute_reconciliation_gap para Motor Registry. `reconciled` capea
+    el match a min(esperado, real) POR FACET antes de sumar -- si no,
+    un facet con filas de más (otra ventana, otro escritor) taparía un
+    gap real en otro facet distinto al sumar todo junto primero."""
+    facets = sorted(set(expected_by_facet) | set(actual_by_facet))
+    total_expected = sum(expected_by_facet.values())
+    reconciled = sum(min(expected_by_facet.get(f, 0), actual_by_facet.get(f, 0)) for f in facets)
+    missing_by_facet = {
+        f: expected_by_facet.get(f, 0) - actual_by_facet.get(f, 0)
+        for f in facets
+        if expected_by_facet.get(f, 0) > actual_by_facet.get(f, 0)
+    }
+    gap_pct = ((total_expected - reconciled) / total_expected * 100.0) if total_expected else 0.0
+    return {
+        "expected": total_expected,
+        "reconciled": reconciled,
+        "missing_by_facet": missing_by_facet,
+        "gap_pct": gap_pct,
+    }
+
+
 async def check_usage_reconciliation() -> dict:
     """Un chequeo completo. No lanza -- mismo criterio que
-    reap_orphaned_pipelines: un fallo acá no debe tumbar el reaper."""
+    reap_orphaned_pipelines: un fallo acá no debe tumbar el reaper.
+
+    Cubre DOS caminos de dispatch (T5, 2026-08-21 -- el chequeo original
+    solo cubría Motor Registry; hipatia/jekyll/thot/ada no tenían ninguna
+    alerta si record_direct_usage fallaba en silencio, el mismo tipo de
+    punto ciego que motivó este chequeo en primer lugar para Motor
+    Registry). Motor Registry reconcilia por job_id exacto (preciso);
+    HTTP-directo reconcilia por conteo agregado por facet (aproximado,
+    ver _fetch_http_direct_expected) -- cobertura real es mejor que cero
+    cobertura, pero no reemplaza tener job_id/step_id en axioma_usage
+    para ese camino."""
     since = time.time() - RECONCILIATION_WINDOW_SECONDS
+
     try:
         motor_jobs = _load_terminal_motor_jobs(MOTOR_JOBS_LOG_PATH, since)
         expected_ids = [j["job_id"] for j in motor_jobs if j["has_usage"]]
         reconciled_ids = await _fetch_reconciled_job_ids(expected_ids)
-        result = _compute_reconciliation_gap(motor_jobs, reconciled_ids)
+        motor_result = _compute_reconciliation_gap(motor_jobs, reconciled_ids)
     except Exception:  # fail-soft: el chequeo de reconciliación no debe tumbar el reaper -- el próximo ciclo reintenta
-        logger.warning("Reaper: chequeo de reconciliación de usage falló", exc_info=True)
-        return {"expected": 0, "reconciled": 0, "missing": [], "gap_pct": 0.0, "error": True}
+        logger.warning("Reaper: chequeo de reconciliación de usage (Motor Registry) falló", exc_info=True)
+        motor_result = {"expected": 0, "reconciled": 0, "missing": [], "gap_pct": 0.0, "error": True}
 
-    if result["expected"] > 0 and result["gap_pct"] > RECONCILIATION_ALERT_THRESHOLD_PCT:
+    try:
+        http_expected = await _fetch_http_direct_expected(since)
+        http_actual = await _fetch_http_direct_actual(since)
+        http_result = _compute_http_direct_gap(http_expected, http_actual)
+    except Exception:
+        logger.warning("Reaper: chequeo de reconciliación de usage (HTTP-directo) falló", exc_info=True)
+        http_result = {"expected": 0, "reconciled": 0, "missing_by_facet": {}, "gap_pct": 0.0, "error": True}
+
+    if motor_result["expected"] > 0 and motor_result["gap_pct"] > RECONCILIATION_ALERT_THRESHOLD_PCT:
         logger.error(
-            "Reaper: gap de reconciliación de usage %.1f%% (%d/%d dispatches sin fila en "
-            "axioma_usage, ventana %dh) -- umbral %.0f%%",
-            result["gap_pct"], len(result["missing"]), result["expected"],
+            "Reaper: gap de reconciliación de usage (Motor Registry) %.1f%% (%d/%d dispatches "
+            "sin fila en axioma_usage, ventana %dh) -- umbral %.0f%%",
+            motor_result["gap_pct"], len(motor_result["missing"]), motor_result["expected"],
             RECONCILIATION_WINDOW_SECONDS // 3600, RECONCILIATION_ALERT_THRESHOLD_PCT,
         )
         await send_telegram_alert(
-            f"⚠️ Jacobs: {result['gap_pct']:.0f}% de los dispatches de Motor Registry "
-            f"({len(result['missing'])}/{result['expected']}) en las últimas "
+            f"⚠️ Jacobs: {motor_result['gap_pct']:.0f}% de los dispatches de Motor Registry "
+            f"({len(motor_result['missing'])}/{motor_result['expected']}) en las últimas "
             f"{RECONCILIATION_WINDOW_SECONDS // 3600}h no tienen fila de costo en "
             f"axioma_usage -- gastaron tokens reales sin contabilizar. Ver "
             f"jacobs.reaper.check_usage_reconciliation / motor_jobs.jsonl."
         )
     else:
         logger.info(
-            "Reaper: reconciliación de usage OK -- %d/%d dispatches con fila (%.1f%% gap)",
-            result["reconciled"], result["expected"], result["gap_pct"],
+            "Reaper: reconciliación de usage (Motor Registry) OK -- %d/%d dispatches con fila (%.1f%% gap)",
+            motor_result["reconciled"], motor_result["expected"], motor_result["gap_pct"],
         )
-    return result
+
+    if http_result["expected"] > 0 and http_result["gap_pct"] > RECONCILIATION_ALERT_THRESHOLD_PCT:
+        logger.error(
+            "Reaper: gap de reconciliación de usage (HTTP-directo) %.1f%% (%d/%d dispatches "
+            "sin fila en axioma_usage, ventana %dh, faltantes por facet: %s) -- umbral %.0f%%",
+            http_result["gap_pct"], http_result["expected"] - http_result["reconciled"],
+            http_result["expected"], RECONCILIATION_WINDOW_SECONDS // 3600,
+            http_result["missing_by_facet"], RECONCILIATION_ALERT_THRESHOLD_PCT,
+        )
+        await send_telegram_alert(
+            f"⚠️ Jacobs: {http_result['gap_pct']:.0f}% de los dispatches HTTP-directos "
+            f"(hipatia/jekyll/thot/ada) en las últimas "
+            f"{RECONCILIATION_WINDOW_SECONDS // 3600}h no tienen fila de costo en "
+            f"axioma_usage -- por facet: {http_result['missing_by_facet']}. Chequeo "
+            f"aproximado (conteo por facet, sin job_id/step_id) -- ver "
+            f"jacobs.reaper.check_usage_reconciliation / jacobs_events."
+        )
+    else:
+        logger.info(
+            "Reaper: reconciliación de usage (HTTP-directo) OK -- %d/%d dispatches con fila (%.1f%% gap)",
+            http_result["reconciled"], http_result["expected"], http_result["gap_pct"],
+        )
+
+    return {"motor_registry": motor_result, "http_direct": http_result}
 
 
 async def start_reaper_loop() -> None:

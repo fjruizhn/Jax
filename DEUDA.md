@@ -57,13 +57,6 @@ su fecha de última verificación real, no una nueva.
   fondo (el invariante en sí, no solo el test que lo chequea) sigue sin
   mecanismo real. Última verificación: ronda 7-8.
 
-- **`record_direct_usage` (HTTP-directo, ada/thot) sin el fix de
-  identidad T1.b** que sí se aplicó a `record_motor_usage`/
-  `jacobs/usage_writer.py`. Sin evidencia del mismo problema en la única
-  muestra real auditada (4/4 reconcilió), pero tampoco se descartó a
-  fondo — afecta integridad de `axioma_usage` para esos dos facets.
-  Última verificación: 2026-08-22.
-
 - **14 tests de `las_manos` fallan por `host='localhost'` en vez de
   `127.0.0.1:3308`** — mismo patrón que el bug ya documentado de puerto
   dual (3306 stale / 3308 real, ver memoria `jax-dual-mariadb-instances`).
@@ -101,6 +94,102 @@ su fecha de última verificación real, no una nueva.
   refinamientos de defensa en profundidad pendientes.
 
 ## Anotado, no bloquea
+
+- **`record_direct_usage` (HTTP-directo) — auditado 2026-08-21, mismo
+  alcance que T1-T4 de Motor Registry.** T1.b (llamada solo en rama de
+  éxito) NO aplica: se llama inline, inmediatamente después de que cada
+  uno de los 3 invocadores HTTP devuelve `tokens_in`/`tokens_out` reales
+  — no depende de un paso posterior de "marcar completado" como sí le
+  pasaba a `record_motor_usage`. T1.c (guard de identidad silencioso) SÍ
+  aplicaba, y ya está arreglado en el mismo commit `3ec515e` que arregló
+  Motor Registry (loguea WARNING, escribe NULL en vez de descartar).
+  Confirmado con un caso real: el pipeline
+  `8d02047d-9c1b-4da0-9586-db643fd7472d` (2026-08-21 01:22,
+  `user_id`/`tenant_id` NULL) perdió sus 4 dispatches HTTP-directos
+  exactamente por el bug pre-fix — ningún log, ninguna fila — 90 minutos
+  antes del deploy de `3ec515e`. Es el mismo bug que motivó ese commit,
+  no uno nuevo. Sin muestra real POST-fix todavía (cero dispatches
+  HTTP-directos reales desde el deploy de las 02:52 hasta ahora) — el fix
+  está verificado por código y por el caso histórico, no por una corrida
+  fresca. **Asimetría anotada 2026-08-21, no bloqueante:** el `except`
+  de `record_direct_usage` no reintenta (T1.d sí le agregó retry con
+  backoff a `record_motor_usage`) — diferencia real entre los dos
+  escritores, no una decisión deliberada documentada en su momento.
+  Queda registrada como pendiente de bajo riesgo (el camino HTTP-directo
+  tiene tráfico real bajo), no como "aceptada a propósito".
+
+- **`check_usage_reconciliation()` (`jacobs/reaper.py`) cubría solo
+  Motor Registry, no HTTP-directo — CERRADO 2026-08-21.** Extendido para
+  leer también `jacobs_events` (join `STEP_STARTED`+`STEP_COMPLETED` por
+  `step_id`, filtrado a `hipatia`/`jekyll`/`thot`/`ada`) y compararlo
+  contra `axioma_usage` (`request_type='pipeline'`). Verificado en vivo
+  contra la DB real (no solo con los tests unitarios): con ventana de
+  24h reprodujo exactamente el gap histórico ya conocido — 4/8 dispatches
+  HTTP-directos sin fila (el pipeline `8d02047d-...` de la sesión
+  anterior). **Limitación real, no un cierre completo:** este camino no
+  tiene `job_id`/`step_id` en `axioma_usage` (`record_direct_usage` no
+  lo escribe), así que la reconciliación es por CONTEO agregado por
+  facet en la ventana, no 1:1 como Motor Registry — no puede señalar
+  *cuál* dispatch puntual falta, solo si el total de un facet quedó
+  corto. Cobertura real donde antes había cero, documentado como
+  aproximado a propósito (`jacobs/reaper.py::_compute_http_direct_gap`,
+  con test que cubre explícitamente que un exceso en un facet no debe
+  tapar un gap real en otro). 5 tests nuevos en
+  `jacobs/_usage_reconciliation_test.py`, 10/10 verdes junto con los
+  preexistentes.
+
+  **Hallazgo lateral, auditado 2026-08-21 (mismo día, follow-up):** la
+  corrida en vivo mostró Motor Registry con 3/8 dispatches recientes
+  (`3e5329a2`/kimi 01:22:41, `9a6715c3`/jax_local 02:00:10,
+  `b7d1e056`/jax_local 02:46:10) sin fila en `axioma_usage`, gap 37.5%.
+  **No es un bug nuevo — es la misma T1.c (identidad NULL descartada en
+  silencio), no una regresión.** Los 3 corrieron con `user_id`/
+  `tenant_id` NULL bajo el código PRE-fix (`las_manos/server.py`
+  reinició a las 01:22:07 y 01:58:06 con el commit `580e7ce`, que todavía
+  tenía `if not user_id or not tenant_id: return` en
+  `record_motor_usage` — confirmado leyendo esa versión exacta del
+  archivo vía git). El deploy real del fix (`3ec515e`) no ocurrió hasta
+  el reinicio de las 02:52:14 — los 3 quedaron atrapados en la ventana.
+  Confirmado con evidencia post-fix real: el job `fed93949`
+  (2026-08-21 10:41:55, identidad NULL, después del deploy) SÍ escribió
+  fila (`axioma_usage.id=231`, `tenant_id`/`user_id` NULL) — el fix
+  funciona en producción, no es solo lectura de código. Sin acción
+  requerida: los 3 salen de la ventana de 24h entre las 01:22 y las
+  02:46 del 2026-08-22 y el gap baja solo. Efecto secundario esperado
+  del diseño de la ventana (ya documentado en el código,
+  `RECONCILIATION_WINDOW_SECONDS`): un fix deployado a mitad de la
+  ventana deja ruido histórico visible hasta que esa ventana rota
+  completo.
+
+- **`axioma_usage` (prod) contaminada con test fixtures — LIMPIADA
+  2026-08-21.** Auditoría encontró 106/224 filas (47%) sin ningún
+  dispatch real detrás (verificado contra `jacobs_events`/
+  `jacobs_pipelines`/`motor_jobs.jsonl` — cero coincidencia en las 106):
+  90 de 4 ráfagas de timestamp idéntico (suite completa de
+  `las_manos/motor_registry` corrida contra prod) + 16 de fixtures
+  individuales de `las_manos/_motor_usage_writer_test.py` y
+  `jacobs/_usage_writer_test.py` (kimi/jekyll, 1000-500 y 100-50).
+  **Dato para el registro:** el commit `3ec515e` que cerró T1-T4
+  documentó esto como "la fila huérfana" — singular, una sola fila. La
+  auditoría de hoy encontró que la contaminación real era **6× mayor**
+  (16 filas de fixtures individuales, más 90 de ráfagas de suite
+  completa que ni siquiera estaban mencionadas) — el `setdefault()` que
+  no pisaba `JAX_DB_NAME` ya exportado hizo bastante más daño del que se
+  supo en el momento en que se cerró ese commit.
+
+  Backup completo antes de borrar:
+  `~/backups/axioma_usage_test_contamination_cleanup_20260821-165735.sql`
+  (106 filas, verificado con diff id-por-id contra la lista esperada, no
+  solo tamaño de archivo — el primer intento de backup usó un `WHERE
+  created_at IN (...)` con horas locales que `mysqldump` evaluó en UTC
+  por su `SET TIME_ZONE='+00:00'` interno y solo capturó 16/106 filas
+  sin ningún error visible; detectado verificando el conteo real, no
+  confiando en `exit=0`). `DELETE` corrido dentro de una transacción con
+  `ROW_COUNT()` verificado == 106 antes del `COMMIT`. Total de la tabla
+  224 → 118, confirmado. Filas legítimas vecinas (ids 123, 127-130,
+  225-233, con `job_id` real y tokens no redondos) verificadas intactas
+  después. Las 3 fuentes de contaminación ya tienen guard fail-loud
+  desde antes (`3ec515e`/`5eed90b`) — no debería seguir creciendo.
 
 - **`axioma_artifacts`** — CERRADO 2026-08-21 (Bloque 2). Dropeada:
   confirmado 0 filas, 0 writers, 0 readers en ambos repos; la feature que
