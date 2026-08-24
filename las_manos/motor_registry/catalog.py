@@ -171,12 +171,20 @@ class MotorCatalog:
             instance._motors = {}
             instance._capabilities = {}
             async with conn.cursor() as cur:
+                # motor_resolved (no motor): para una clave con faceta homonima
+                # (ada/jax_local/kimi/thot hoy) resuelve el modelo real por
+                # facet_binding, no por motor.model_ref -- ver
+                # jax-platform/backend/db/migrations.py::
+                # _eliminate_motor_model_ref_denormalization. Sin esto, el
+                # payload que Motor Registry manda a la API real (worker.py,
+                # motor_entry.model) podia divergir en silencio de lo que
+                # facet_resolver.py resuelve para el mismo facet_key.
                 await cur.execute(
                     "SELECT m.`key`, m.model_ref, mo.provider_id, mo.model_id, p.base_url, "
                     "       m.transport, m.max_tokens, m.default_timeout_seconds, "
                     "       m.supports_reasoning, m.reasoning_default_visibility, "
                     "       m.disable_reasoning, m.sandbox_only, m.status, m.has_tool_access "
-                    "FROM motor m "
+                    "FROM motor_resolved m "
                     "JOIN model mo ON mo.id = m.model_ref "
                     "JOIN provider p ON p.id = mo.provider_id"
                 )
