@@ -57,11 +57,6 @@ su fecha de última verificación real, no una nueva.
   fondo (el invariante en sí, no solo el test que lo chequea) sigue sin
   mecanismo real. Última verificación: ronda 7-8.
 
-- **14 tests de `las_manos` fallan por `host='localhost'` en vez de
-  `127.0.0.1:3308`** — mismo patrón que el bug ya documentado de puerto
-  dual (3306 stale / 3308 real, ver memoria `jax-dual-mariadb-instances`).
-  Confirmado preexistente en ronda 9 (2026-08-20), no corregido.
-
 - **Sub-agentes de Claude Code sin gobernanza real** (más allá del hook
   que bloqueó un push de prueba en ronda 7). Conectado a un hallazgo P0
   real: cualquier subprocess `claude` futuro lanzado con `$HOME` real
@@ -317,5 +312,70 @@ su fecha de última verificación real, no una nueva.
   todavía (declarado como inferencia de documentación, no hecho probado).
   Parte del procedimiento de apertura pública (B1.5, `jax-block1-apertura-repos-cierre`
   en memoria), pendiente del clic de Fernando.
+
+- **14 (en verdad 18) tests de `las_manos` fallaban por `host='localhost'`
+  en vez de `127.0.0.1:3308` — CERRADO 2026-08-24.** Mismo patrón que el
+  bug ya documentado de puerto dual (3306 stale/muerto / 3308 real, ver
+  memoria `jax-dual-mariadb-instances`). El conteo real al auditar era 18,
+  no 14 (creció con los tests nuevos de reconciliación HTTP-directo del
+  mismo día) -- los 14 originales eran una cifra vieja de ronda 9
+  (2026-08-20) nunca re-verificada.
+
+  **Fix real:** el fallback silencioso a `localhost:3306` vivía duplicado
+  en 19 archivos (patrón deliberado "sin paquete compartido" entre
+  jacobs/las_manos/jax/core -- cada repo se conecta con su propio
+  conector mínimo). Los 19 pasaron de default silencioso a
+  `RuntimeError` explícito si `JAX_DB_HOST`/`JAX_DB_PORT` no están
+  seteados -- producción no se ve afectada (los 4 servicios/timers
+  systemd relevantes cargan `/etc/jax/.env` vía `EnvironmentFile`,
+  confirmado leyendo las unit files, nunca dependieron del default).
+
+  **Dos hallazgos laterales durante la auditoría, ambos cerrados en la
+  misma sesión:**
+  1. `las_manos/_motor_v02_test.py` (ahora
+     `scripts/manual_motor_v02_integration.py`) no era un test real --
+     un script manual de integración cuyo nombre matcheaba el patrón de
+     descubrimiento de pytest (`*_test.py`), con TODO el código a nivel
+     de módulo (sin `if __name__ == "__main__":`). Cualquier `pytest`
+     corrido sobre `las_manos/` lo importaba y disparaba un dispatch
+     real a Kimi contra el LAS MANOS de producción, con polling de
+     hasta 120s, y -- si llegaba a completar -- activaba el kill switch
+     `/etc/jax/PAUSE` de producción vía sudo. Confirmado con `journalctl`:
+     11 dispatches reales disparados durante el propio diagnóstico antes
+     de cuarentenarlo (ningún efecto permanente -- ninguna corrida llegó
+     a tocar PAUSE). Movido fuera de `las_manos/` y renombrado para que
+     pytest deje de descubrirlo.
+  2. `jacobs/_pipeline_motor_e2e_test.py` (ahora
+     `scripts/manual_pipeline_motor_e2e.py`) -- mismo patrón de nombre,
+     pero inofensivo: son `async def test_...()` sin marcador de
+     pytest-asyncio/anyio, y pytest las rechaza de entrada ("async def
+     functions are not natively supported") sin ejecutar nada. Igual
+     cuarentenado -- era falsa cobertura (reportaba FAILED sin haber
+     corrido el e2e real) y mismo riesgo latente si el proyecto agrega
+     algún día un plugin async.
+
+  **Un tercer bug, sin relación, apareció recién al arreglar el
+  fallback:** con host/puerto correctos, 2 tests de
+  `jacobs/_step_motor_test.py` seguían fallando por
+  `Unknown column 'depends_on' in 'INSERT INTO'` -- `jax_memory_test`
+  no tenía esa columna, que sí existe en `jax_memory` (prod). Causa
+  raíz real: `depends_on` se agregó a producción en algún momento vía
+  `ALTER TABLE` manual, sin registrarse en la lista de migración
+  idempotente de `jacobs/store.py::init_tables()` (el mecanismo real de
+  este repo -- no hay carpeta `migrations/`, cada tabla tiene un
+  `CREATE TABLE IF NOT EXISTS` + una lista `(columna, ddl)` chequeada
+  contra `information_schema.COLUMNS`). Como nunca se agregó a esa
+  lista, ninguna DB nueva la recibía -- no solo `jax_memory_test`,
+  cualquier entorno futuro (dev nuevo, restore de desastre) tendría el
+  mismo gap. Agregado a la lista de `jacobs_steps` en `store.py` con el
+  DDL exacto de prod (`LONGTEXT` + collation + `CHECK (json_valid(...))`,
+  confirmado con `SHOW CREATE TABLE` contra `jax_memory`), y aplicado en
+  vivo contra `jax_memory_test` corriendo `init_tables()` de verdad (no
+  un ALTER a mano) -- mismo camino que correría en producción.
+
+  **Resultado final verificado:** suite completa de `las_manos/`
+  (incluye `jacobs/` vía symlink) -- 95 passed, 0 failed (antes: 18
+  failed / 81 passed; los 4 tests del hallazgo lateral #2 ya no cuentan,
+  quedaron fuera de la colección de pytest al cuarentenarlos).
 
 En memoria de Jairo Urbina.

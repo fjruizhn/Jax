@@ -17,9 +17,18 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 
 
 def _db_cfg() -> dict:
+    host = os.environ.get("JAX_DB_HOST")
+    port = os.environ.get("JAX_DB_PORT")
+    if not host or not port:
+        raise RuntimeError(
+            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
+            "silencioso a localhost:3306 (esa instancia está muerta, ver "
+            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
+            "exportalos a mano antes de conectar."
+        )
     return {
-        "host":     os.getenv("JAX_DB_HOST", "localhost"),
-        "port":     int(os.getenv("JAX_DB_PORT", "3306")),
+        "host":     host,
+        "port":     int(port),
         "user":     os.getenv("JAX_DB_USER", ""),
         "password": os.getenv("JAX_DB_PASSWORD", ""),
         "db":       os.getenv("JAX_DB_NAME", "jax_memory"),
@@ -88,6 +97,14 @@ async def init_tables() -> None:
             """)
             for col, ddl in [
                 ("motor", "ALTER TABLE jacobs_steps ADD COLUMN motor VARCHAR(30) NULL"),
+                # depends_on existía en jax_memory (prod) desde antes -- agregado
+                # por fuera de esta lista de migración (ALTER manual, sin
+                # registrar acá), así que nunca se propagó a una DB nueva
+                # (jax_memory_test incluida). Confirmado con SHOW CREATE TABLE
+                # contra jax_memory 2026-08-24 -- DDL exacto, mismo collation.
+                ("depends_on", "ALTER TABLE jacobs_steps ADD COLUMN depends_on LONGTEXT "
+                    "CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
+                    "CHECK (json_valid(depends_on))"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "

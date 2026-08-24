@@ -148,9 +148,18 @@ class MotorCatalog:
         jax_memory -- mismo pool/patron de conexion que credential_resolver.py.
         Reemplaza la lectura de config.toml (TOML queda solo para
         [server]/kill_switch_path y lo que routes.py todavia usa aparte)."""
+        host = os.environ.get("JAX_DB_HOST")
+        port = os.environ.get("JAX_DB_PORT")
+        if not host or not port:
+            raise RuntimeError(
+                "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
+                "silencioso a localhost:3306 (esa instancia está muerta, ver "
+                "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
+                "exportalos a mano antes de conectar."
+            )
         conn = await aiomysql.connect(
-            host=os.getenv("JAX_DB_HOST", "localhost"),
-            port=int(os.getenv("JAX_DB_PORT", "3306")),
+            host=host,
+            port=int(port),
             user=os.getenv("JAX_DB_USER", ""),
             password=os.getenv("JAX_DB_PASSWORD", ""),
             db=os.getenv("JAX_DB_NAME", "jax_memory"),

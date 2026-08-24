@@ -5,8 +5,19 @@ cargado. Verifica el criterio de aceptación 1 y 2 del spec: Qwen ejecuta
 una tarea de código real (no chat), Kimi vía Pipeline con motor explícito
 vs auto.
 
+Movido fuera de jacobs/ y renombrado (2026-08-24, mismo motivo que
+scripts/manual_motor_v02_integration.py): el nombre original
+`_pipeline_motor_e2e_test.py` matcheaba el patrón de descubrimiento
+default de pytest (`*_test.py`). A diferencia de aquel, este SÍ es
+inofensivo bajo pytest -- son funciones `async def test_...()` sin
+marcador de pytest-asyncio/anyio, y pytest las rechaza de entrada
+("async def functions are not natively supported") sin ejecutar nada.
+Pero seguía siendo falsa cobertura (pytest reporta FAILED sin haber
+corrido el e2e real) y el mismo patrón de riesgo si algún día se agrega
+un plugin async al proyecto. Ver DEUDA.md.
+
 Corre desde /home/fruiz/jax con:
-  PYTHONPATH=/home/fruiz/jax .venv/bin/python jacobs/_pipeline_motor_e2e_test.py
+  PYTHONPATH=/home/fruiz/jax .venv/bin/python scripts/manual_pipeline_motor_e2e.py
 
 En memoria de Jairo Urbina.
 """

@@ -39,8 +39,17 @@ from motor_registry import usage_writer
 
 async def _seed_priced_model(provider_id, model_id, price_in, price_out):
     import aiomysql
+    _host = os.environ.get("JAX_DB_HOST")
+    _port = os.environ.get("JAX_DB_PORT")
+    if not _host or not _port:
+        raise RuntimeError(
+            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
+            "silencioso a localhost:3306 (esa instancia está muerta, ver "
+            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
+            "exportalos a mano antes de conectar."
+        )
     conn = await aiomysql.connect(
-        host=os.getenv("JAX_DB_HOST", "localhost"), port=int(os.getenv("JAX_DB_PORT", "3306")),
+        host=_host, port=int(_port),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
         db=os.getenv("JAX_DB_NAME", "jax_memory_test"), autocommit=True,
     )
@@ -59,8 +68,17 @@ async def _seed_priced_model(provider_id, model_id, price_in, price_out):
 
 async def _fetch_last_usage_row():
     import aiomysql
+    _host = os.environ.get("JAX_DB_HOST")
+    _port = os.environ.get("JAX_DB_PORT")
+    if not _host or not _port:
+        raise RuntimeError(
+            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
+            "silencioso a localhost:3306 (esa instancia está muerta, ver "
+            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
+            "exportalos a mano antes de conectar."
+        )
     conn = await aiomysql.connect(
-        host=os.getenv("JAX_DB_HOST", "localhost"), port=int(os.getenv("JAX_DB_PORT", "3306")),
+        host=_host, port=int(_port),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
         db=os.getenv("JAX_DB_NAME", "jax_memory_test"), autocommit=True,
     )

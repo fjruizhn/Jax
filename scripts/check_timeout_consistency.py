@@ -80,9 +80,18 @@ from jacobs.plan import _CAPABILITY_TIMEOUT_SECONDS, _DEFAULT_TIMEOUT_SECONDS  #
 
 
 async def _fetch_db_minutes() -> dict[str, int]:
+    host = os.environ.get("JAX_DB_HOST")
+    port = os.environ.get("JAX_DB_PORT")
+    if not host or not port:
+        raise RuntimeError(
+            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
+            "silencioso a localhost:3306 (esa instancia está muerta, ver "
+            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
+            "exportalos a mano antes de conectar."
+        )
     conn = await aiomysql.connect(
-        host=os.getenv("JAX_DB_HOST", "localhost"),
-        port=int(os.getenv("JAX_DB_PORT", "3306")),
+        host=host,
+        port=int(port),
         user=os.getenv("JAX_DB_USER", ""),
         password=os.getenv("JAX_DB_PASSWORD", ""),
         db=os.getenv("JAX_DB_NAME", "jax_memory"),

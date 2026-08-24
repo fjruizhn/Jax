@@ -300,9 +300,16 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
 
 async def run_once(limit: int = 10) -> None:
     """Una corrida del worker: procesa hasta `limit` conversaciones."""
+    jax_db_host = os.environ.get("JAX_DB_HOST")
+    if not jax_db_host:
+        raise RuntimeError(
+            "JAX_DB_HOST no está seteado -- sin default silencioso a "
+            "localhost (esa instancia está muerta, ver memoria "
+            "jax-dual-mariadb-instances). Sourceá /etc/jax/.env."
+        )
     db = MemoryDB()
     ok = await db.connect(
-        host=os.getenv("JAX_DB_HOST", "localhost"),
+        host=jax_db_host,
         user=os.getenv("JAX_DB_USER", ""),
         password=os.getenv("JAX_DB_PASSWORD", ""),
         database=os.getenv("JAX_DB_NAME", "jax_memory"),

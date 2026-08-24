@@ -1,11 +1,20 @@
 #!/usr/bin/env python3
 """
-Motor Registry v0.2 — pruebas de integración.
+Motor Registry v0.2 — pruebas de integración MANUALES contra producción real
+(dispatch real a Kimi, activa el kill switch /etc/jax/PAUSE vía sudo).
+
+Movido fuera de las_manos/ y renombrado (2026-08-24): el nombre original
+`_motor_v02_test.py` matcheaba el patrón de descubrimiento default de
+pytest (`*_test.py`) pese a ser un script manual sin guard de
+`__main__` -- cualquier `pytest` corrido sobre las_manos/ (o el repo
+completo, vía el symlink las_manos/jacobs) importaba este archivo y
+ejecutaba las 3 pruebas de verdad, incluido el kill switch de
+producción, solo por *coleccionar* los tests. Ver DEUDA.md.
 
 Corre desde /home/fruiz/jax/las_manos con:
   PYTHONPATH=/home/fruiz/jax/las_manos \
   /home/fruiz/jax/las_manos/.venv/bin/python \
-  /home/fruiz/jax/las_manos/_motor_v02_test.py
+  /home/fruiz/jax/scripts/manual_motor_v02_integration.py
 
 Prueba 1 — dispatch real a Kimi
 Prueba 2 — polling hasta completed, verifica result_summary real y que

@@ -223,7 +223,15 @@ class MemoryDB:
         """Inicializa el pool. Devuelve True si conecto, False si fallo
         (sin lanzar excepcion: JAX debe arrancar aunque la memoria falle)."""
         if port is None:
-            port = int(os.getenv("JAX_DB_PORT", "3306"))
+            env_port = os.environ.get("JAX_DB_PORT")
+            if not env_port:
+                raise RuntimeError(
+                    "JAX_DB_PORT no está seteado -- sin default silencioso a "
+                    "3306 (esa instancia está muerta, ver memoria "
+                    "jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
+                    "pasá port= explícito."
+                )
+            port = int(env_port)
         self.config = {
             "host": host,
             "port": port,
