@@ -44,3 +44,13 @@ notes: >
   por defecto sin excepción de por medio, ej. output_validator.py) — eso
   queda como residuo conocido, mismo tratamiento que Q13 (barrido de
   vocabulario) en REFORMAS-v3.1.md.
+
+  Cierre parcial 2026-08-25: output_validator.py (la instancia nombrada
+  explícitamente arriba como "residuo conocido") ya no es fail-open para
+  CUALQUIER schema desconocido -- solo para los 7 declarados-pendientes
+  en producción (_KNOWN_UNIMPLEMENTED_SCHEMAS). Un schema realmente no
+  declarado (typo, capability mal configurada) ahora falla cerrado, con
+  test de regresión (las_manos/_output_validator_test.py). El residuo
+  general del patrón (cualquier función que pueda fallar abierto por
+  valor de retorno en código no registrado en este corpus) sigue sin
+  scanner automatizado -- eso sigue siendo trabajo futuro, no resuelto acá.
