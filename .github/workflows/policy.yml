@@ -24,9 +24,19 @@ name: policy
 
 on:
   push:
-    branches: [master]
+    branches: ["**"]
   pull_request:
-    branches: [master]
+    branches: ["**"]
+    types: [opened, synchronize, reopened, edited]
+
+# Ronda de pago de deuda 2026-08-25: `branches: [master]` dejaba a CUALQUIER
+# PR de una cadena apilada (rama deuda/*-taskN con base deuda/*-taskN-1, no
+# master) sin CI -- descubierto en vivo con PR jax#27 (0 runs hasta
+# retargetear a master a mano). `branches: ["**"]` cubre cualquier base,
+# no solo master. `types` agrega `edited` porque GitHub NO dispara
+# pull_request con los tipos default (opened/synchronize/reopened) cuando
+# se retarget-ea un PR existente -- sin esto, el propio retarget que
+# resuelve el problema de arriba tampoco dispara una corrida sola.
 
 jobs:
   no-fail-open-except:
