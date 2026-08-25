@@ -80,6 +80,19 @@ class OutputValidatorSchemaDesconocidoTest(unittest.TestCase):
         self.assertFalse(result["validated"])
         self.assertIn("no reconocido", result["warning"].lower())
 
+    def test_schema_casi_declarado_no_hereda_el_fail_open_de_su_version_hermana(self):
+        # Caso AMBIGUO real: 'critique.v2' comparte prefijo con
+        # 'critique.v1' (declarado-pendiente, ver _KNOWN_UNIMPLEMENTED_SCHEMAS
+        # abajo) pero NO es el mismo string -- el borde real de la
+        # heurística, donde un bump de version en la DB sin actualizar el
+        # frozenset podría colar fail-open si la comparación fuera por
+        # prefijo/fuzzy en vez de coincidencia EXACTA de string.
+        result = validate('{"cualquier_cosa": 1}', "critique.v2")
+        self.assertFalse(
+            result["validated"],
+            "un near-miss de un schema declarado-pendiente NO debe heredar su fail-open",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
