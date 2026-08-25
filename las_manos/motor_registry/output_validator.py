@@ -2,8 +2,10 @@
 LAS MANOS — Motor Registry: validador de outputs de motores.
 
 Valida la respuesta del motor contra el schema declarado en la capability.
-Falla abierto por schema: si el schema es desconocido, emite warning y sigue.
-Nunca bloquea un job por un schema inválido o faltante.
+Fail-open ACOTADO (P10): un schema declarado pero sin validación de campos
+implementada (ver _KNOWN_UNIMPLEMENTED_SCHEMAS) emite warning y sigue. Un
+schema que ni siquiera está declarado ahí -- typo, capability mal
+configurada -- falla cerrado: el caller lo trata como salida inválida.
 
 Schemas soportados:
   code_swarm.v1       — plan, steps, patches, tests, risk_notes, human_review_needed
@@ -35,6 +37,23 @@ SCHEMAS: dict[str, list[str]] = {
         "bugs_found", "severity", "reproduction_steps", "suggested_fix",
     ],
 }
+
+# Schemas declarados HOY en capability.output_schema (DB de produccion,
+# verificado 2026-08-25) pero sin validacion de campos implementada --
+# fail-open EXPLICITO y ACOTADO a esta lista (deuda registrada, no un
+# descuido): critique, design, generate, pipeline_analysis, reason,
+# reconcile, validate_consistency. Implementarlos requiere saber que
+# campos devuelve cada capability realmente -- fuera de este fix (ver
+# DEUDA.md, item nuevo "schemas de capability sin validacion de campos").
+#
+# Cualquier OTRO nombre que llegue acá y no esté en SCHEMAS tampoco en
+# esta lista es un caso distinto: typo, capability mal configurada, o un
+# nombre nuevo que alguien se olvidó de declarar acá -- ESE sí falla
+# cerrado (P10).
+_KNOWN_UNIMPLEMENTED_SCHEMAS: frozenset[str] = frozenset({
+    "critique.v1", "design.v1", "generate.v1", "analysis.v1",
+    "reason.v1", "reconcile.v1", "validation.v1",
+})
 
 
 def validate(content: str, schema_name: str, has_tool_calls: bool = False) -> dict[str, Any]:
@@ -98,12 +117,28 @@ def validate(content: str, schema_name: str, has_tool_calls: bool = False) -> di
         result["warning"] = "No se especificó schema — validación estructural omitida"
         return result
 
-    # Schema desconocido: warning pero no falla
     required = SCHEMAS.get(schema_name)
     if required is None:
-        result["validated"] = True
-        result["warning"] = f"Schema '{schema_name}' desconocido — validación de campos omitida"
-        logger.warning("Schema desconocido: '%s'", schema_name)
+        if schema_name in _KNOWN_UNIMPLEMENTED_SCHEMAS:
+            # Fail-open EXPLICITO: declarado en produccion, sin schema de
+            # campos implementado todavia. Ver _KNOWN_UNIMPLEMENTED_SCHEMAS.
+            result["validated"] = True
+            result["warning"] = (
+                f"Schema '{schema_name}' declarado pero sin schema de campos "
+                "implementado — validación omitida (deuda conocida)"
+            )
+            logger.warning("Schema declarado-pendiente sin validar: '%s'", schema_name)
+            return result
+        # Schema realmente desconocido: ni implementado ni declarado como
+        # pendiente -- typo o capability mal configurada. Fail-closed (P10):
+        # el caller (worker.py) reintenta una vez y despues marca FAILED,
+        # en vez de completar el job creyendo que algo se validó.
+        result["warning"] = (
+            f"Schema '{schema_name}' no reconocido (ni implementado ni "
+            "declarado como pendiente) — posible typo o capability mal "
+            "configurada"
+        )
+        logger.error("Schema NO reconocido, fallando cerrado: '%s'", schema_name)
         return result
 
     # Verificar campos requeridos
