@@ -413,12 +413,13 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         # con parentesis solo cubria cat/redireccion, python3 -c
         # "open(path).read()" y `git diff --no-index` lo esquivaban igual,
         # confirmado). Ahora la defensa real es el namespace de montaje de
-        # bwrap (wrap_hyde_command, abajo): lo que no esta bind-mounteado no
-        # existe, sin importar el comando. Verificado en T5 (13 casos
-        # adversariales, incluidos estos dos bypasses) CON "Bash" pelado --
-        # todo bloqueado por el sandbox, cero ayuda del allowlist. Restringir
-        # el allowlist ahora solo volveria a inutilizar a Hyde sin sumar
-        # seguridad real -- la capa que importa es la de abajo.
+        # bwrap (ver hyde_sandbox.py::run_sandboxed_claude, abajo): lo que no
+        # esta bind-mounteado no existe, sin importar el comando. Verificado
+        # en T5 (13 casos adversariales, incluidos estos dos bypasses) CON
+        # "Bash" pelado -- todo bloqueado por el sandbox, cero ayuda del
+        # allowlist. Restringir el allowlist ahora solo volveria a
+        # inutilizar a Hyde sin sumar seguridad real -- la capa que importa
+        # es la de abajo.
         "--allowedTools", "Write,Edit,Read,Bash",
         "--add-dir", HYDE_WORKSPACE_DIR,
     ]
