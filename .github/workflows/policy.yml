@@ -53,6 +53,16 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
 
+  no-naked-claude-subprocess:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py -v
+
   output-validator-regression:
     runs-on: ubuntu-latest
     steps:
