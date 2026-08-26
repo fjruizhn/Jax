@@ -57,9 +57,11 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 from pathlib import Path
 
@@ -194,15 +196,40 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
 # Jacobs corre DENTRO del proceso de las_manos (systemd jax-las-manos);
 # el REPL (jax/core/main.py) es un proceso de SO SEPARADO -- confirmado
 # por enumeracion real de imports, 2026-08-25. Un asyncio.Semaphore de
-# modulo no cruza esa frontera. Se usa flock(2) sobre un archivo dentro
-# de workspace_dir en su lugar -- un lock a nivel de kernel, visible por
-# CUALQUIER proceso que abra el mismo path. workspace_dir ya es
-# JAX_WORKSPACE_DIR resuelto por cada llamador (fuente unica en
-# /etc/jax/.env, ver jax-workspace-relocation-fix) -- el lock hereda esa
-# misma fuente de verdad sin leer la env var de nuevo aca.
-_CLAUDE_SUBPROCESS_LOCK_NAME = ".claude_subprocess.lock"
-_CLAUDE_SUBPROCESS_LOCK_TIMEOUT_S = 30.0
+# modulo no cruza esa frontera. Se usa flock(2) sobre un archivo en su
+# lugar -- un lock a nivel de kernel, visible por CUALQUIER proceso que
+# abra el mismo path.
+#
+# DONDE vive ese archivo importa tanto como el lock mismo: NUNCA dentro
+# de workspace_dir. workspace_dir se bindea READ-WRITE dentro del sandbox
+# (ver wrap_hyde_command) -- el propio `claude` confinado, un `rm -rf` de
+# limpieza o una tarea de Hyde a la que le pidieron "ordenar el
+# workspace" podian BORRAR el archivo del lock. flock(2) es del inodo, no
+# del path: borrar el path NO libera al que ya tiene el lock, pero el
+# SIGUIENTE que llame open(path, "w") crea un inodo nuevo y toma su lock
+# al instante -- dos `claude` corriendo a la vez, sin error y sin log, la
+# garantia evaporada en silencio. Por eso el lock vive en el /tmp del
+# HOST, que NO esta bind-mounteado (el sandbox recibe su propio
+# `--tmpfs /tmp` privado, desconectado del host): fuera del alcance del
+# proceso confinado.
+#
+# El nombre del archivo se deriva del workspace_dir resuelto (hash corto)
+# para que workspaces distintos tengan locks independientes -- no un unico
+# lock global. workspace_dir ya es JAX_WORKSPACE_DIR resuelto por cada
+# llamador (fuente unica en /etc/jax/.env, ver
+# jax-workspace-relocation-fix) -- el lock hereda esa misma fuente de
+# verdad sin leer la env var de nuevo aca.
+_CLAUDE_SUBPROCESS_LOCK_DIR_NAME = "jax-claude-subprocess-locks"
 _CLAUDE_SUBPROCESS_LOCK_POLL_S = 0.05
+
+
+def _lock_path_for_workspace(workspace_dir: str) -> Path:
+    """Path del archivo de lock para `workspace_dir`. SIEMPRE fuera de
+    workspace_dir (ver comentario de arriba) -- en el /tmp del host, que
+    el sandbox no ve. El nombre es un hash corto del workspace resuelto:
+    workspaces distintos -> locks independientes."""
+    digest = hashlib.sha256(str(Path(workspace_dir).resolve()).encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / _CLAUDE_SUBPROCESS_LOCK_DIR_NAME / f"{digest}.lock"
 
 
 def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
@@ -216,7 +243,7 @@ def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
     Devuelve el file handle abierto -- el llamador debe pasarlo a
     _release_cross_process_lock (tambien via to_thread) cuando termine,
     en un finally."""
-    lock_path = Path(workspace_dir) / _CLAUDE_SUBPROCESS_LOCK_NAME
+    lock_path = _lock_path_for_workspace(workspace_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fh = open(lock_path, "w")
     deadline = time.monotonic() + timeout
@@ -253,10 +280,24 @@ async def run_sandboxed_claude(
 
     Aplica wrap_hyde_command (sandbox de bwrap, fail-closed via
     SandboxUnavailable si no hay bwrap -- NO se atrapa acá) y serializa
-    con un flock(2) cross-proceso sobre workspace_dir (ver
-    _acquire_cross_process_lock) -- no un asyncio.Semaphore, que no cruza
-    la frontera real entre el proceso de las_manos (Jacobs) y el proceso
-    del REPL.
+    con un flock(2) cross-proceso derivado de workspace_dir (ver
+    _acquire_cross_process_lock / _lock_path_for_workspace) -- no un
+    asyncio.Semaphore, que no cruza la frontera real entre el proceso de
+    las_manos (Jacobs) y el proceso del REPL.
+
+    `timeout` es el presupuesto TOTAL del llamador y se usa para las dos
+    esperas: la del lock y la de la corrida real. Antes la espera del lock
+    tenia una constante fija de 30s, mucho mas corta que los presupuestos
+    reales (300s en la mayoria de los steps de Jacobs, 900s en
+    reconcile/design/reason -- ver jacobs/models.py y jacobs/plan.py). Eso
+    era una regresion funcional frente al asyncio.Semaphore que este lock
+    reemplazo: Jacobs puede programar dos steps `hyde` en la misma ola
+    paralela, y el segundo LEGITIMAMENTE esperaba a que terminara el
+    primero. Con 30s fijos ese segundo step moria sin haber lanzado nada,
+    y _run_one_step lo reportaba como "Timeout (300s)" a los 30 segundos
+    (asyncio.TimeoutError ES TimeoutError desde 3.11) -- una trampa de
+    depuracion. Sigue siendo fail-closed: agotado el presupuesto real,
+    lanza TimeoutError explicito en vez de colgarse para siempre.
 
     Devuelve (proc, stdout, stderr) crudos -- la interpretacion de exit
     code / contenido de stderr queda en el llamador, cada uno con su
@@ -274,8 +315,11 @@ async def run_sandboxed_claude(
     esa clase, no hace falta un tipo nuevo."""
     sandboxed_cmd = wrap_hyde_command(cmd, workspace_dir)
 
+    # El presupuesto del lock es el del llamador, no una constante fija
+    # (ver docstring) -- un step encolado espera lo que su step realmente
+    # dura, como hacia el semaforo viejo.
     lock_fh = await asyncio.to_thread(
-        _acquire_cross_process_lock, workspace_dir, _CLAUDE_SUBPROCESS_LOCK_TIMEOUT_S,
+        _acquire_cross_process_lock, workspace_dir, timeout,
     )
     try:
         proc = await asyncio.create_subprocess_exec(
