@@ -77,11 +77,25 @@ FAIL_SOFT_MARKER = "# fail-soft:"
 
 
 def _iter_python_files():
+    # EXCLUDE_DIR_NAMES se chequea contra las partes RELATIVAS al root, no
+    # contra la ruta absoluta. Con `path.parts` (absoluta), un checkout que
+    # viviera bajo un directorio llamado como cualquiera de los excluidos
+    # -- ej. .../. claude/worktrees/<rama>/, el flujo de desarrollo estandar
+    # de este equipo -- hacia que TODOS los archivos matchearan "worktrees"
+    # y el scanner recorriera CERO archivos, reportando verde sin mirar
+    # nada. Medido: 0 archivos desde este worktree antes del fix, 122
+    # despues. No afectaba al runner de GitHub Actions (su checkout no
+    # contiene esos nombres), pero es el MISMO defecto que la ronda 4
+    # (2026-08-20, T3) ya habia arreglado en las rutas absolutas de este
+    # archivo, y que Task 3 del plan de gobernanza de subprocess arreglo en
+    # el scanner nuevo. Se cierra aca por simetria (review final,
+    # 2026-08-25).
     for root in REPO_ROOTS:
         if not root.exists():
             continue
         for path in root.rglob("*.py"):
-            if any(part in EXCLUDE_DIR_NAMES for part in path.parts):
+            rel_parts = path.relative_to(root).parts
+            if any(part in EXCLUDE_DIR_NAMES for part in rel_parts):
                 continue
             yield path
 

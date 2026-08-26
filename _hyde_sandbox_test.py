@@ -8,8 +8,13 @@ lock. Jacobs corre dentro del proceso de las_manos (systemd
 jax-las-manos); SubprocessMuscle solo lo importa jax/core/main.py, el
 REPL -- un proceso de SO SEPARADO (confirmado por enumeracion real de
 imports, 2026-08-25). Un asyncio.Semaphore de modulo no cruza esa
-frontera -- se usa flock(2) sobre un archivo dentro de workspace_dir en
-su lugar, visible por cualquier proceso que abra el mismo path.
+frontera -- se usa flock(2) en su lugar, visible por cualquier proceso
+que abra el mismo path. El archivo del lock vive en el /tmp del HOST
+(derivado de workspace_dir por hash), NUNCA dentro de workspace_dir: ese
+directorio se bindea read-write dentro del sandbox y el `claude` confinado
+podia borrar el archivo, lo que dejaba al siguiente acquire crear un inodo
+nuevo y correr en paralelo con el holder -- ver
+ClaudeSubprocessLockPathOutsideSandboxTest.
 
 La mayoria de estos tests mockean asyncio.create_subprocess_exec y
 wrap_hyde_command -- no requieren bwrap real. ClaudeSubprocessLockFailClosedTest
@@ -29,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -162,6 +168,84 @@ class ClaudeSubprocessLockFailClosedTest(unittest.TestCase):
                 self.assertIn("lock cross-proceso", str(ctx.exception))
             finally:
                 hyde_sandbox._release_cross_process_lock(holder_fh)
+
+
+class ClaudeSubprocessLockPathOutsideSandboxTest(unittest.TestCase):
+    """Regresion del hallazgo CRITICO de la review final: el archivo del
+    lock vivia DENTRO de workspace_dir, que wrap_hyde_command bindea
+    READ-WRITE dentro del sandbox. El `claude` confinado (o cualquier
+    limpieza del workspace) podia borrarlo; flock(2) es del inodo, asi que
+    el siguiente open(path, "w") creaba un inodo NUEVO y tomaba su lock al
+    instante -- dos claude en paralelo, sin error y sin log. El fix es
+    estructural: el lock vive en el /tmp del HOST, que el sandbox nunca ve
+    (recibe su propio --tmpfs /tmp privado). Si el path del lock no esta
+    dentro de workspace_dir, el proceso confinado no puede tocarlo -- no
+    hay nada que re-simular."""
+
+    def test_el_lock_no_vive_dentro_del_workspace(self):
+        with tempfile.TemporaryDirectory() as ws:
+            lock_path = hyde_sandbox._lock_path_for_workspace(ws)
+            self.assertFalse(
+                lock_path.resolve().is_relative_to(Path(ws).resolve()),
+                f"el lock {lock_path} esta dentro del workspace bindeado RW {ws}",
+            )
+
+    def test_el_handle_devuelto_apunta_fuera_del_workspace(self):
+        # No solo el helper: el archivo REALMENTE abierto por
+        # _acquire_cross_process_lock tiene que estar fuera del workspace.
+        with tempfile.TemporaryDirectory() as ws:
+            fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=5)
+            try:
+                real_path = Path(os.readlink(f"/proc/self/fd/{fh.fileno()}")).resolve()
+                self.assertFalse(
+                    real_path.is_relative_to(Path(ws).resolve()),
+                    f"el lock abierto {real_path} esta dentro del workspace {ws}",
+                )
+                # Y el workspace no queda con ningun archivo de lock dentro.
+                self.assertEqual(
+                    sorted(p.name for p in Path(ws).iterdir()), [],
+                    "quedo un archivo de lock dentro del workspace bindeado RW",
+                )
+            finally:
+                hyde_sandbox._release_cross_process_lock(fh)
+
+    def test_workspaces_distintos_tienen_locks_independientes(self):
+        with tempfile.TemporaryDirectory() as ws_a, tempfile.TemporaryDirectory() as ws_b:
+            self.assertNotEqual(
+                hyde_sandbox._lock_path_for_workspace(ws_a),
+                hyde_sandbox._lock_path_for_workspace(ws_b),
+            )
+            # Y el lock de uno no bloquea al otro.
+            fh_a = hyde_sandbox._acquire_cross_process_lock(ws_a, timeout=5)
+            try:
+                fh_b = hyde_sandbox._acquire_cross_process_lock(ws_b, timeout=1)
+                hyde_sandbox._release_cross_process_lock(fh_b)
+            finally:
+                hyde_sandbox._release_cross_process_lock(fh_a)
+
+
+class ClaudeSubprocessLockTimeoutBudgetTest(unittest.IsolatedAsyncioTestCase):
+    """Regresion del segundo hallazgo CRITICO: la espera del lock usaba
+    una constante fija de 30s en vez del `timeout` del llamador (300s /
+    900s reales en Jacobs), matando steps encolados legitimos y
+    reportandolos como "Timeout (300s)" a los 30 segundos."""
+
+    async def test_usa_el_timeout_del_llamador_para_esperar_el_lock(self):
+        captured = {}
+
+        def fake_acquire(workspace_dir, timeout):
+            captured["timeout"] = timeout
+            raise TimeoutError("lock cross-proceso (fake)")
+
+        with tempfile.TemporaryDirectory() as ws:
+            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: cmd), \
+                 patch.object(hyde_sandbox, "_acquire_cross_process_lock", fake_acquire):
+                with self.assertRaises(TimeoutError):
+                    await hyde_sandbox.run_sandboxed_claude(
+                        ["claude"], ws, "p", timeout=900,
+                    )
+
+        self.assertEqual(captured["timeout"], 900)
 
 
 _CROSS_PROCESS_WORKER = """
