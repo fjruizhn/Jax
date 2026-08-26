@@ -55,9 +55,12 @@ En honor al Prof. Raúl Jacobs.
 """
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 
 REAL_JAX_REPO = "/home/fruiz/jax"
@@ -182,3 +185,116 @@ def wrap_hyde_command(cmd: list[str], workspace_dir: str) -> list[str]:
     argv += ["--chdir", workspace_dir, "--"]
     argv += cmd
     return argv
+
+
+# Serializa TODAS las invocaciones de `claude` sandboxeado entre si, sin
+# importar el llamador NI el proceso de SO -- antes cada uno tenia su
+# propio mecanismo (Jacobs: HYDE_SEMAPHORE en jacobs/executor.py, un
+# asyncio.Semaphore que solo sirve DENTRO de un proceso; REPL: ninguno).
+# Jacobs corre DENTRO del proceso de las_manos (systemd jax-las-manos);
+# el REPL (jax/core/main.py) es un proceso de SO SEPARADO -- confirmado
+# por enumeracion real de imports, 2026-08-25. Un asyncio.Semaphore de
+# modulo no cruza esa frontera. Se usa flock(2) sobre un archivo dentro
+# de workspace_dir en su lugar -- un lock a nivel de kernel, visible por
+# CUALQUIER proceso que abra el mismo path. workspace_dir ya es
+# JAX_WORKSPACE_DIR resuelto por cada llamador (fuente unica en
+# /etc/jax/.env, ver jax-workspace-relocation-fix) -- el lock hereda esa
+# misma fuente de verdad sin leer la env var de nuevo aca.
+_CLAUDE_SUBPROCESS_LOCK_NAME = ".claude_subprocess.lock"
+_CLAUDE_SUBPROCESS_LOCK_TIMEOUT_S = 30.0
+_CLAUDE_SUBPROCESS_LOCK_POLL_S = 0.05
+
+
+def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
+    """BLOQUEANTE -- llamar SOLO via asyncio.to_thread, nunca en el event
+    loop (flock(2) no tiene equivalente async). Sondea con LOCK_NB en vez
+    de bloquear en LOCK_EX puro para poder fail-closed con un timeout
+    explicito: si otro proceso (REPL o las_manos) tiene el lock mas de
+    `timeout` segundos, lanza TimeoutError con mensaje explicito en vez de
+    colgar el thread para siempre.
+
+    Devuelve el file handle abierto -- el llamador debe pasarlo a
+    _release_cross_process_lock (tambien via to_thread) cuando termine,
+    en un finally."""
+    lock_path = Path(workspace_dir) / _CLAUDE_SUBPROCESS_LOCK_NAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                raise TimeoutError(
+                    f"no se pudo adquirir el lock cross-proceso de subprocess "
+                    f"'claude' en {timeout}s ({lock_path}) -- otro proceso "
+                    "(REPL o las_manos) sigue teniendo un claude corriendo. "
+                    "Fail-closed: no se lanza sin exclusion mutua real."
+                )
+            time.sleep(_CLAUDE_SUBPROCESS_LOCK_POLL_S)
+
+
+def _release_cross_process_lock(fh) -> None:
+    """BLOQUEANTE (aunque en la practica instantaneo) -- llamar via
+    asyncio.to_thread por simetria con _acquire_cross_process_lock."""
+    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    fh.close()
+
+
+async def run_sandboxed_claude(
+    cmd: list[str], workspace_dir: str, prompt: str, timeout: float,
+) -> tuple["asyncio.subprocess.Process", bytes, bytes]:
+    """Unico punto de entrada aprobado para lanzar `claude` como subproceso
+    -- ver policy/tests/test_claude_subprocess_solo_via_sandbox.py, que
+    falla el CI si aparece un create_subprocess_exec/create_subprocess_shell
+    de un comando que mencione "claude" fuera de este modulo.
+
+    Aplica wrap_hyde_command (sandbox de bwrap, fail-closed via
+    SandboxUnavailable si no hay bwrap -- NO se atrapa acá) y serializa
+    con un flock(2) cross-proceso sobre workspace_dir (ver
+    _acquire_cross_process_lock) -- no un asyncio.Semaphore, que no cruza
+    la frontera real entre el proceso de las_manos (Jacobs) y el proceso
+    del REPL.
+
+    Devuelve (proc, stdout, stderr) crudos -- la interpretacion de exit
+    code / contenido de stderr queda en el llamador, cada uno con su
+    propio contrato de excepciones (RuntimeError en Jacobs,
+    MuscleInvocationError en el REPL viejo -- no se unifican acá).
+
+    En timeout (de la corrida real O de la espera del lock) o
+    cancelacion: mata el proceso si llego a lanzarse, cosecha el zombie
+    con wait(), y RE-LANZA la excepcion SIN envolver -- CancelledError
+    debe seguir siendo CancelledError (Jacobs cancela _dispatch_step desde
+    afuera con su propio wait_for; envolverla rompe la propagacion real de
+    cancelacion de asyncio). TimeoutError del lock y TimeoutError del
+    wait_for son la misma clase (asyncio.TimeoutError es alias de
+    TimeoutError desde Python 3.11) -- ambos llamadores ya distinguen por
+    esa clase, no hace falta un tipo nuevo."""
+    sandboxed_cmd = wrap_hyde_command(cmd, workspace_dir)
+
+    lock_fh = await asyncio.to_thread(
+        _acquire_cross_process_lock, workspace_dir, _CLAUDE_SUBPROCESS_LOCK_TIMEOUT_S,
+    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *sandboxed_cmd,
+            cwd=workspace_dir,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode("utf-8")),
+                timeout=timeout,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            proc.kill()
+            await proc.wait()
+            raise
+    finally:
+        await asyncio.to_thread(_release_cross_process_lock, lock_fh)
+
+    return proc, stdout, stderr
