@@ -43,6 +43,13 @@ No detecta un lanzamiento de `claude` disfrazado (sin la palabra literal
 nombre) -- eso queda como residuo conocido, mismo criterio que P10 con
 las formas mas sutiles del patron fail-open.
 
+Tampoco detecta imports aliaseados o destructurados de subprocess/os: el
+check de calificacion requiere que la llamada se vea literalmente como
+`subprocess.run(...)` o `os.system(...)` (un ast.Attribute sobre ast.Name
+exacto). `from subprocess import run; run(["claude"])` o `import subprocess
+as sp; sp.run(["claude"])` o `from os import system; system("claude -p")`
+no se detectan hoy -- se consideran un residuo conocido aceptado.
+
 ALCANCE REAL EN CI (misma limitacion honesta que
 test_no_fail_open_except.py, ver tambien el header de
 .github/workflows/policy.yml): _repo_roots() incluye un fallback a
@@ -326,8 +333,8 @@ def test_symlink_del_modulo_aprobado_sigue_exento() -> None:
     """las_manos/hyde_sandbox.py es un symlink a ../hyde_sandbox.py -- el
     mismo archivo, alcanzado por el path por el que lo importa las_manos."""
     symlink = _THIS_REPO_ROOT / "las_manos" / "hyde_sandbox.py"
-    if symlink.exists():
-        assert _is_approved_sandbox_file(_THIS_REPO_ROOT, symlink)
+    assert symlink.is_symlink(), "symlink las_manos/hyde_sandbox.py debe existir"
+    assert _is_approved_sandbox_file(_THIS_REPO_ROOT, symlink)
 
 
 def test_no_naked_claude_subprocess() -> None:
