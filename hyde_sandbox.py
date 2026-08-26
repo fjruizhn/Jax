@@ -61,7 +61,6 @@ import hashlib
 import json
 import os
 import shutil
-import tempfile
 import time
 from pathlib import Path
 
@@ -225,11 +224,16 @@ _CLAUDE_SUBPROCESS_LOCK_POLL_S = 0.05
 
 def _lock_path_for_workspace(workspace_dir: str) -> Path:
     """Path del archivo de lock para `workspace_dir`. SIEMPRE fuera de
-    workspace_dir (ver comentario de arriba) -- en el /tmp del host, que
-    el sandbox no ve. El nombre es un hash corto del workspace resuelto:
+    workspace_dir (ver comentario de arriba) -- en /tmp del HOST (ruta fija,
+    no tempfile.gettempdir()), que el sandbox no ve. Usa una ruta absoluta
+    fija porque DOS procesos INDEPENDIENTES (las_manos systemd y REPL shell)
+    deben computar EXACTAMENTE EL MISMO path sin depender del estado de
+    entorno heredado (si TMPDIR/TEMP/TMP diferente, tomarian dos locks
+    distintos, la misma clase de falla que este todo intenta cerrar, solo
+    trasladada). El nombre es un hash corto del workspace resuelto:
     workspaces distintos -> locks independientes."""
     digest = hashlib.sha256(str(Path(workspace_dir).resolve()).encode("utf-8")).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / _CLAUDE_SUBPROCESS_LOCK_DIR_NAME / f"{digest}.lock"
+    return Path("/tmp") / _CLAUDE_SUBPROCESS_LOCK_DIR_NAME / f"{digest}.lock"
 
 
 def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
@@ -285,8 +289,9 @@ async def run_sandboxed_claude(
     asyncio.Semaphore, que no cruza la frontera real entre el proceso de
     las_manos (Jacobs) y el proceso del REPL.
 
-    `timeout` es el presupuesto TOTAL del llamador y se usa para las dos
-    esperas: la del lock y la de la corrida real. Antes la espera del lock
+    `timeout` se aplica INDEPENDIENTEMENTE a cada una de las dos esperas
+    (adquisicion del lock, luego subprocess communicate) -- el peor caso
+    combinado es hasta ~2×`timeout`, no un presupuesto compartido. Antes la espera del lock
     tenia una constante fija de 30s, mucho mas corta que los presupuestos
     reales (300s en la mayoria de los steps de Jacobs, 900s en
     reconcile/design/reason -- ver jacobs/models.py y jacobs/plan.py). Eso
