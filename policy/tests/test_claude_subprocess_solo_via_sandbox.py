@@ -60,7 +60,8 @@ def _iter_python_files():
         if not root.exists():
             continue
         for path in root.rglob("*.py"):
-            if any(part in EXCLUDE_DIR_NAMES for part in path.parts):
+            rel_parts = path.relative_to(root).parts
+            if any(part in EXCLUDE_DIR_NAMES for part in rel_parts):
                 continue
             yield path
 
