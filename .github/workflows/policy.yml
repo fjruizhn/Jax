@@ -38,6 +38,10 @@ on:
 # se retarget-ea un PR existente -- sin esto, el propio retarget que
 # resuelve el problema de arriba tampoco dispara una corrida sola.
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   no-fail-open-except:
     runs-on: ubuntu-latest
@@ -48,3 +52,13 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
+
+  output-validator-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: PYTHONPATH=las_manos python -m pytest las_manos/_output_validator_test.py -v
