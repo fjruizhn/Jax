@@ -31,7 +31,7 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
-from hyde_sandbox import wrap_hyde_command
+from hyde_sandbox import run_sandboxed_claude
 
 logger = logging.getLogger("jacobs.executor")
 
@@ -87,15 +87,6 @@ HYDE_CLI_PATH = (
 )
 HYDE_WORKSPACE_DIR   = os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")
 HYDE_MAX_PROMPT_CHARS = 32000
-
-# Semáforo específico de Hyde: el DAG de Jacobs puede programar dos steps
-# `hyde` en la MISMA ola paralela (asyncio.gather), pero el mecanismo que
-# estamos portando (subprocess_muscle.py, CLI viejo) siempre corrió secuencial
-# — nunca hubo dos `claude` escribiendo a la vez en HYDE_WORKSPACE_DIR. Este
-# semáforo serializa solo las invocaciones de Hyde entre sí, sin bloquear a
-# las demás facetas de la misma ola (mismo patrón que GPU_SEMAPHORE en
-# jax/muscles/ollama_muscle.py).
-HYDE_SEMAPHORE = asyncio.Semaphore(1)
 
 
 # ----------------------------------------------------------------
@@ -422,53 +413,31 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         # con parentesis solo cubria cat/redireccion, python3 -c
         # "open(path).read()" y `git diff --no-index` lo esquivaban igual,
         # confirmado). Ahora la defensa real es el namespace de montaje de
-        # bwrap (wrap_hyde_command, abajo): lo que no esta bind-mounteado no
-        # existe, sin importar el comando. Verificado en T5 (13 casos
-        # adversariales, incluidos estos dos bypasses) CON "Bash" pelado --
-        # todo bloqueado por el sandbox, cero ayuda del allowlist. Restringir
-        # el allowlist ahora solo volveria a inutilizar a Hyde sin sumar
-        # seguridad real -- la capa que importa es la de abajo.
+        # bwrap (ver hyde_sandbox.py::run_sandboxed_claude, abajo): lo que no
+        # esta bind-mounteado no existe, sin importar el comando. Verificado
+        # en T5 (13 casos adversariales, incluidos estos dos bypasses) CON
+        # "Bash" pelado -- todo bloqueado por el sandbox, cero ayuda del
+        # allowlist. Restringir el allowlist ahora solo volveria a
+        # inutilizar a Hyde sin sumar seguridad real -- la capa que importa
+        # es la de abajo.
         "--allowedTools", "Write,Edit,Read,Bash",
         "--add-dir", HYDE_WORKSPACE_DIR,
     ]
 
-    # Sandbox de bubblewrap (2026-08-22, fix de fondo del P0 -- ver
-    # hyde_sandbox.py y jax-hyde-bash-sin-jail-p0 en memoria). Confina a
-    # nivel de namespace de montaje, no de heuristica de --allowedTools.
+    # Sandbox de bubblewrap + semaforo compartido (ver
+    # hyde_sandbox.py::run_sandboxed_claude -- unico punto de entrada
+    # aprobado para lanzar `claude`, DEUDA.md "gobernanza de sub-agentes").
     # SandboxUnavailable NO se atrapa acá -- fail-closed (P10): sin bwrap,
     # el step falla con motivo explícito (_run_one_step ya lo hace vía su
     # except Exception genérico), nunca corre Hyde sin confinamiento.
-    sandboxed_cmd = wrap_hyde_command(cmd, HYDE_WORKSPACE_DIR)
-
-    # Un solo `claude` corriendo a la vez entre steps hyde (ver HYDE_SEMAPHORE).
-    async with HYDE_SEMAPHORE:
-        proc = await asyncio.create_subprocess_exec(
-            *sandboxed_cmd,
-            cwd=HYDE_WORKSPACE_DIR,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=safe_prompt.encode("utf-8")),
-                timeout=timeout,
-            )
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            # kill() = SIGKILL en asyncio. Necesario en AMBOS casos: si vence
-            # nuestro propio wait_for, o si _run_one_step nos cancela desde
-            # afuera (envuelve _dispatch_step en su PROPIO asyncio.wait_for con
-            # el MISMO timeout — con duraciones iguales, esa cancelación externa
-            # casi siempre llega antes que nuestro TimeoutError interno, como
-            # CancelledError, no TimeoutError). Sin cubrir los dos casos, el
-            # proceso `claude` queda huérfano.
-            proc.kill()
-            await proc.wait()
-            raise
-
-        stdout_str = stdout.decode("utf-8", errors="replace")
-        stderr_str = stderr.decode("utf-8", errors="replace")
+    # TimeoutError/CancelledError tampoco se atrapan acá -- run_sandboxed_claude
+    # ya mató y cosechó el proceso, y necesitamos que la excepción de
+    # asyncio se propague SIN envolver (ver docstring de esa función).
+    proc, stdout, stderr = await run_sandboxed_claude(
+        cmd, HYDE_WORKSPACE_DIR, safe_prompt, timeout,
+    )
+    stdout_str = stdout.decode("utf-8", errors="replace")
+    stderr_str = stderr.decode("utf-8", errors="replace")
 
     if proc.returncode != 0:
         raise RuntimeError(f"[hyde] claude exit {proc.returncode}: {stderr_str[:200]}")

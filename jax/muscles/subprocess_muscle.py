@@ -32,7 +32,7 @@ import asyncio
 import os
 
 from jax.muscles.base import Muscle, MuscleInvocationError, MuscleTimeoutError
-from hyde_sandbox import wrap_hyde_command
+from hyde_sandbox import run_sandboxed_claude
 
 MAX_PROMPT_CHARS = 32000
 
@@ -119,30 +119,16 @@ class SubprocessMuscle(Muscle):
             "--add-dir", self.workspace_dir,
         ]
 
-        # Sandbox de bubblewrap (2026-08-22, fix de fondo del P0 -- ver
-        # hyde_sandbox.py). SandboxUnavailable NO se atrapa acá -- fail-closed
-        # (P10): sin bwrap, la llamada falla con motivo explícito, nunca
-        # corre Hyde sin confinamiento.
-        sandboxed_cmd = wrap_hyde_command(cmd, self.workspace_dir)
-
-        proc = await asyncio.create_subprocess_exec(
-            *sandboxed_cmd,
-            cwd=self.workspace_dir,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
+        # Sandbox de bubblewrap + semaforo compartido con Jacobs (ver
+        # hyde_sandbox.py::run_sandboxed_claude -- unico punto de entrada
+        # aprobado, DEUDA.md "gobernanza de sub-agentes"). SandboxUnavailable
+        # NO se atrapa acá -- fail-closed (P10): sin bwrap, la llamada falla
+        # con motivo explícito, nunca corre Hyde sin confinamiento.
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=safe_prompt.encode("utf-8")),
-                timeout=self.timeout,
+            proc, stdout, stderr = await run_sandboxed_claude(
+                cmd, self.workspace_dir, safe_prompt, self.timeout,
             )
         except asyncio.TimeoutError:
-            # kill() = SIGKILL en asyncio. Matamos el proceso colgado y
-            # cosechamos el zombie con wait() antes de propagar el error.
-            proc.kill()
-            await proc.wait()
             raise MuscleTimeoutError(
                 f"[{self.name}] sin respuesta en {self.timeout}s"
             )
