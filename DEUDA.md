@@ -50,13 +50,6 @@ su fecha de última verificación real, no una nueva.
   identificada como la deuda con más antigüedad, sin ejecutar. Última
   verificación: ronda 6.
 
-- **P10 (fail-open prohibido) sin enforcement real más allá de los tests
-  de política** (`policy/rules/P10-fail-open-prohibido.yaml`). El CI de
-  P10 llegó a reportar éxito corriendo sobre cero archivos escaneados en
-  una ronda anterior (ya corregido ese bug puntual) — el enforcement de
-  fondo (el invariante en sí, no solo el test que lo chequea) sigue sin
-  mecanismo real. Última verificación: ronda 7-8.
-
 - **Sub-agentes de Claude Code sin gobernanza real** (más allá del hook
   que bloqueó un push de prueba en ronda 7). Conectado a un hallazgo P0
   real: cualquier subprocess `claude` futuro lanzado con `$HOME` real
@@ -89,6 +82,29 @@ su fecha de última verificación real, no una nueva.
   refinamientos de defensa en profundidad pendientes.
 
 ## Anotado, no bloquea
+
+- **P10 (fail-open prohibido) en `output_validator.py` — CERRADO
+  2026-08-25 (PRs jax#26/#27/#28/#29/#30).** `validate()` distingue ahora
+  "schema declarado en producción pero sin validación de campos
+  implementada" (`_KNOWN_UNIMPLEMENTED_SCHEMAS`, 7 nombres reales
+  verificados contra `jax_memory` — siguen fail-open a propósito) de
+  "schema genuinamente desconocido" (typo, capability mal configurada —
+  ahora falla cerrado, el caller en `worker.py` reintenta una vez y marca
+  `FAILED`). Caso ambiguo (`critique.v2` vs `critique.v1`, near-miss por
+  bump de versión) probado explícitamente: el membership exacto de
+  string no lo hereda como fail-open. Drift test contra la DB real
+  (`las_manos/_output_validator_db_drift_test.py`, mismo patrón que
+  `motor/facet_binding` cerrado un día antes, otra tabla) + CI real para
+  la suite de regresión (`output-validator-regression` en
+  `policy/rules/... policy.yml`, confirmado corriendo en vivo, no un
+  no-op). **Residuo declarado, no resuelto:** el reintento sigue siendo
+  inútil para un schema genuinamente desconocido (rechaza por nombre,
+  ningún reintento del modelo puede pasar) — optimización de costo, no
+  garantía rota, decisión explícita de no implementarlo esta ronda. Los 7
+  schemas declarados-pendientes siguen sin validación de campos real
+  (implementarlos requiere muestrear qué devuelve cada capability hoy).
+  El residuo GENERAL del patrón fail-open-por-retorno (fuera de esta
+  instancia) sigue sin scanner automatizado — ver `policy/rules/P10-fail-open-prohibido.yaml`.
 
 - **`record_direct_usage` (HTTP-directo) — auditado 2026-08-21, mismo
   alcance que T1-T4 de Motor Registry.** T1.b (llamada solo en rama de
