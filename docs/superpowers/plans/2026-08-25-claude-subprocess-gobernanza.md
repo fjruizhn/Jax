@@ -4,7 +4,11 @@
 
 **Goal:** Los 2 call sites reales que lanzan `claude` como subproceso (`jacobs/executor.py::_invoke_hyde` y `jax/muscles/subprocess_muscle.py::SubprocessMuscle._call`) ya están sandboxeados con bwrap, pero cada uno reimplementa el lanzamiento por separado (uno con semáforo, el otro sin ninguno). Centralizar el lanzamiento en un único punto de entrada aprobado (`hyde_sandbox.py::run_sandboxed_claude`) y agregar un guard de CI que falle si aparece un futuro call site de `claude` fuera de ese punto — cerrando el gap prospectivo que `DEUDA.md` describe ("cualquier OTRO músculo/automatización que dispare `claude`").
 
-**Architecture:** `hyde_sandbox.py` gana una función async (`run_sandboxed_claude`) que posee el ciclo de vida completo del subproceso (armar el bwrap, adquirir un semáforo COMPARTIDO por todos los llamadores, lanzar, comunicar con timeout, matar y cosechar en timeout/cancelación) — devuelve el `Process` ya esperado más stdout/stderr crudos, dejando la interpretación de exit-code/stderr a cada llamador (que hoy difiere: `RuntimeError` en Jacobs, `MuscleInvocationError`/`MuscleTimeoutError` en el REPL — este plan preserva esa diferencia, no la unifica). Un scanner AST nuevo (mismo patrón que `policy/tests/test_no_fail_open_except.py`) falla el CI si algún archivo fuera de `hyde_sandbox.py` llama `asyncio.create_subprocess_exec`/`create_subprocess_shell` Y menciona la palabra "claude" — verificado contra el código real de ambos repos: cero falsos positivos hoy (ningún otro call site de subprocess async menciona "claude").
+**Architecture:** `hyde_sandbox.py` gana una función async (`run_sandboxed_claude`) que posee el ciclo de vida completo del subproceso (armar el bwrap, adquirir un lock cross-proceso vía `flock(2)` sobre un archivo dentro de `workspace_dir`, lanzar, comunicar con timeout, matar y cosechar en timeout/cancelación) — devuelve el `Process` ya esperado más stdout/stderr crudos, dejando la interpretación de exit-code/stderr a cada llamador (que hoy difiere: `RuntimeError` en Jacobs, `MuscleInvocationError`/`MuscleTimeoutError` en el REPL — este plan preserva esa diferencia, no la unifica).
+
+**Corrección aplicada en ejecución (2026-08-25), antes de dispatchear Task 1:** el diseño original de este plan usaba `asyncio.Semaphore(1)` para el lock "compartido". Verificado por enumeración real de imports (no supuesto) que `jacobs/executor.py` corre DENTRO del proceso de `las_manos` (systemd `jax-las-manos`, uvicorn `server:app`) mientras que `SubprocessMuscle` tiene un único importador real, `jax/core/main.py` — el REPL, un proceso de SO SEPARADO. Un `asyncio.Semaphore` de módulo vive en la memoria de un único intérprete y no cruza esa frontera entre procesos: el diseño original no cerraba el gap de concurrencia que el propio plan describe ("dos Hydes concurrentes via callers distintos no se coordinaban entre si"). Se reemplazó por un `flock(2)` sobre `workspace_dir/.claude_subprocess.lock` — visible por cualquier proceso que abra el mismo path, ya que `workspace_dir` es `JAX_WORKSPACE_DIR` resuelto por cada llamador desde la misma fuente única (`/etc/jax/.env`) — corrido en `asyncio.to_thread` (flock es bloqueante, nunca en el event loop) con timeout explícito y fail-closed (`TimeoutError` ruidoso si no se puede adquirir, nunca se sigue sin lock en silencio).
+
+Un scanner AST nuevo (mismo patrón que `policy/tests/test_no_fail_open_except.py`) falla el CI si algún archivo fuera de `hyde_sandbox.py` llama `asyncio.create_subprocess_exec`/`create_subprocess_shell` Y menciona la palabra "claude" — verificado contra el código real de ambos repos: cero falsos positivos hoy (ningún otro call site de subprocess async menciona "claude").
 
 **Tech Stack:** Python 3.12, `asyncio`, `ast` (scanner estático), `unittest.IsolatedAsyncioTestCase` + `unittest.mock.patch`.
 
@@ -25,21 +29,33 @@
 - Create: `_hyde_sandbox_test.py` (raíz de `/home/fruiz/jax`, mismo patrón de ubicación que el propio `hyde_sandbox.py`)
 
 **Interfaces:**
-- Produce: `async def run_sandboxed_claude(cmd: list[str], workspace_dir: str, prompt: str, timeout: float) -> tuple[asyncio.subprocess.Process, bytes, bytes]` — devuelve `(proc, stdout_bytes, stderr_bytes)`. En timeout/cancelación: mata el proceso, cosecha con `wait()`, y re-lanza la excepción de asyncio SIN envolver (`raise` desnudo). Fail-closed sin atrapar: `SandboxUnavailable` (de `wrap_hyde_command`) sube tal cual.
+- Produce: `async def run_sandboxed_claude(cmd: list[str], workspace_dir: str, prompt: str, timeout: float) -> tuple[asyncio.subprocess.Process, bytes, bytes]` — devuelve `(proc, stdout_bytes, stderr_bytes)`. En timeout (de la corrida real O de la espera del lock cross-proceso) / cancelación: mata el proceso si llegó a lanzarse, cosecha con `wait()`, y re-lanza la excepción SIN envolver (`raise` desnudo) — `asyncio.TimeoutError` es alias de `TimeoutError` desde Python 3.11, así que el mismo `except` de cada llamador distingue ambos casos sin cambios. Fail-closed sin atrapar: `SandboxUnavailable` (de `wrap_hyde_command`) sube tal cual.
+- Produce (internas, prefijo `_`): `_acquire_cross_process_lock(workspace_dir: str, timeout: float)` / `_release_cross_process_lock(fh)` — `flock(2)` real sobre `workspace_dir/.claude_subprocess.lock`, BLOQUEANTES, se llaman solo vía `asyncio.to_thread`.
 
-- [ ] **Step 1: Escribir los tests (fallan hoy — la función no existe todavía)**
+- [ ] **Step 1: Escribir los tests (fallan hoy — nada de esto existe todavía)**
 
 ```python
 #!/usr/bin/env python3
 """hyde_sandbox.run_sandboxed_claude() -- unico punto de entrada aprobado
 para lanzar `claude` como subproceso sandboxeado. Antes de este modulo,
 jacobs/executor.py y jax/muscles/subprocess_muscle.py reimplementaban el
-lanzamiento cada uno por su lado -- uno con HYDE_SEMAPHORE, el otro SIN
-NINGUN semaforo (DEUDA.md, "concurrencia de HYDE_SEMAPHORE... no
-reverificada": dos Hydes concurrentes via callers distintos no se
-coordinaban entre si). Estos tests mockean asyncio.create_subprocess_exec
-y wrap_hyde_command -- no requieren bwrap real (ver _hyde_sandbox_integration_test.py
-para la version con bwrap real).
+lanzamiento cada uno por su lado -- uno con HYDE_SEMAPHORE (un
+asyncio.Semaphore, valido solo DENTRO de un proceso), el otro SIN NINGUN
+lock. Jacobs corre dentro del proceso de las_manos (systemd
+jax-las-manos); SubprocessMuscle solo lo importa jax/core/main.py, el
+REPL -- un proceso de SO SEPARADO (confirmado por enumeracion real de
+imports, 2026-08-25). Un asyncio.Semaphore de modulo no cruza esa
+frontera -- se usa flock(2) sobre un archivo dentro de workspace_dir en
+su lugar, visible por cualquier proceso que abra el mismo path.
+
+La mayoria de estos tests mockean asyncio.create_subprocess_exec y
+wrap_hyde_command -- no requieren bwrap real. ClaudeSubprocessLockFailClosedTest
+y ClaudeSubprocessLockRealCrossProcessTest usan flock(2) DE VERDAD (sin
+mock): dos corrutinas del mismo proceso pasarian igual con el
+asyncio.Semaphore viejo, asi que no prueban nada sobre el problema real --
+ClaudeSubprocessLockRealCrossProcessTest lanza dos procesos de Python DE
+VERDAD (subprocess.Popen, no dos tasks de asyncio) para confirmar que el
+lock serializa entre procesos de SO distintos.
 
 Corre con:
   cd /home/fruiz/jax && .venv/bin/python -m pytest _hyde_sandbox_test.py -v
@@ -49,8 +65,13 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import json
+import subprocess
+import sys
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import hyde_sandbox
@@ -85,20 +106,23 @@ class RunSandboxedClaudeWrappingTest(unittest.IsolatedAsyncioTestCase):
             captured_argv["argv"] = argv
             return _FakeProc(fake_communicate)
 
-        with patch.object(hyde_sandbox, "wrap_hyde_command", return_value=["BWRAP_MARKER", "claude"]) as fake_wrap, \
-             patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
-            proc, stdout, stderr = await hyde_sandbox.run_sandboxed_claude(
-                ["claude", "--print"], "/tmp/ws", "prompt", timeout=5,
-            )
+        with tempfile.TemporaryDirectory() as ws:
+            with patch.object(hyde_sandbox, "wrap_hyde_command", return_value=["BWRAP_MARKER", "claude"]) as fake_wrap, \
+                 patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+                proc, stdout, stderr = await hyde_sandbox.run_sandboxed_claude(
+                    ["claude", "--print"], ws, "prompt", timeout=5,
+                )
 
-        fake_wrap.assert_called_once_with(["claude", "--print"], "/tmp/ws")
-        self.assertEqual(captured_argv["argv"], ("BWRAP_MARKER", "claude"))
-        self.assertEqual(stdout, b"hola")
-        self.assertEqual(proc.returncode, 0)
+            fake_wrap.assert_called_once_with(["claude", "--print"], ws)
+            self.assertEqual(captured_argv["argv"], ("BWRAP_MARKER", "claude"))
+            self.assertEqual(stdout, b"hola")
+            self.assertEqual(proc.returncode, 0)
 
 
 class RunSandboxedClaudeConcurrencyTest(unittest.IsolatedAsyncioTestCase):
-    async def test_serializa_dos_invocaciones_concurrentes(self):
+    async def test_serializa_dos_invocaciones_concurrentes_mismo_proceso(self):
+        # Prueba de humo del flujo mockeado -- NO es la prueba de la
+        # propiedad cross-proceso real (ver ClaudeSubprocessLockRealCrossProcessTest).
         events = []
 
         def make_communicate(tag):
@@ -115,12 +139,13 @@ class RunSandboxedClaudeConcurrencyTest(unittest.IsolatedAsyncioTestCase):
             tag = next(counter)
             return _FakeProc(make_communicate(tag))
 
-        with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, ws: cmd), \
-             patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
-            await asyncio.gather(
-                hyde_sandbox.run_sandboxed_claude(["claude"], "/tmp/ws", "p1", timeout=5),
-                hyde_sandbox.run_sandboxed_claude(["claude"], "/tmp/ws", "p2", timeout=5),
-            )
+        with tempfile.TemporaryDirectory() as ws:
+            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: cmd), \
+                 patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+                await asyncio.gather(
+                    hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p1", timeout=5),
+                    hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p2", timeout=5),
+                )
 
         # Serializado de verdad: el segundo "start" debe ocurrir DESPUES del
         # primer "end" -- si corrieran en paralelo, ambos "start" saldrian
@@ -143,32 +168,120 @@ class RunSandboxedClaudeTimeoutTest(unittest.IsolatedAsyncioTestCase):
         async def fake_create_subprocess_exec(*argv, **kwargs):
             return fake_proc
 
-        with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, ws: cmd), \
-             patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
-            with self.assertRaises(asyncio.TimeoutError):
-                await hyde_sandbox.run_sandboxed_claude(["claude"], "/tmp/ws", "p", timeout=0.01)
+        with tempfile.TemporaryDirectory() as ws:
+            with patch.object(hyde_sandbox, "wrap_hyde_command", side_effect=lambda cmd, w: cmd), \
+                 patch("asyncio.create_subprocess_exec", fake_create_subprocess_exec):
+                with self.assertRaises(asyncio.TimeoutError):
+                    await hyde_sandbox.run_sandboxed_claude(["claude"], ws, "p", timeout=0.01)
 
-        self.assertTrue(fake_proc.killed)
-        self.assertTrue(fake_proc.waited)
+            self.assertTrue(fake_proc.killed)
+            self.assertTrue(fake_proc.waited)
+
+
+class ClaudeSubprocessLockFailClosedTest(unittest.TestCase):
+    """flock(2) real, sin mock -- prueba el camino fail-closed: si el lock
+    ya esta tomado, _acquire_cross_process_lock NO se cuelga para siempre,
+    falla con TimeoutError explicito despues del timeout pedido. flock()
+    bloquea entre dos open() distintos del MISMO proceso igual que entre
+    procesos distintos (el lock es del open-file-description, no del
+    proceso) -- valido para probar el timeout sin necesitar un segundo
+    proceso de SO."""
+
+    def test_timeout_explicito_si_el_lock_ya_esta_tomado(self):
+        with tempfile.TemporaryDirectory() as ws:
+            holder_fh = hyde_sandbox._acquire_cross_process_lock(ws, timeout=5)
+            try:
+                start = time.monotonic()
+                with self.assertRaises(TimeoutError) as ctx:
+                    hyde_sandbox._acquire_cross_process_lock(ws, timeout=0.2)
+                elapsed = time.monotonic() - start
+                self.assertGreaterEqual(elapsed, 0.2)
+                self.assertIn("lock cross-proceso", str(ctx.exception))
+            finally:
+                hyde_sandbox._release_cross_process_lock(holder_fh)
+
+
+_CROSS_PROCESS_WORKER = """
+import asyncio, json, sys, time
+sys.path.insert(0, {repo_root!r})
+import hyde_sandbox
+
+async def main():
+    workspace_dir, tag, hold_seconds = sys.argv[1], sys.argv[2], float(sys.argv[3])
+    events = []
+    fh = await asyncio.to_thread(hyde_sandbox._acquire_cross_process_lock, workspace_dir, 10.0)
+    events.append(("start", tag, time.monotonic()))
+    await asyncio.sleep(hold_seconds)
+    events.append(("end", tag, time.monotonic()))
+    await asyncio.to_thread(hyde_sandbox._release_cross_process_lock, fh)
+    print(json.dumps(events))
+
+asyncio.run(main())
+"""
+
+
+class ClaudeSubprocessLockRealCrossProcessTest(unittest.TestCase):
+    """Dos procesos de Python DE VERDAD (subprocess.Popen), no dos tasks
+    de asyncio del mismo proceso -- eso es exactamente lo que un
+    asyncio.Semaphore de modulo pasaria igual, sin probar nada sobre el
+    problema real (Jacobs en el proceso de las_manos vs SubprocessMuscle
+    en el proceso del REPL). time.monotonic() es CLOCK_MONOTONIC, un
+    reloj de todo el sistema (no por-proceso) en Linux -- comparable entre
+    los dos procesos hijos."""
+
+    def test_flock_serializa_entre_dos_procesos_de_so_reales(self):
+        repo_root = str(Path(hyde_sandbox.__file__).resolve().parent)
+        with tempfile.TemporaryDirectory() as ws:
+            with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as script_f:
+                script_f.write(_CROSS_PROCESS_WORKER.format(repo_root=repo_root))
+                script_path = script_f.name
+
+            try:
+                p1 = subprocess.Popen(
+                    [sys.executable, script_path, ws, "A", "0.3"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                p2 = subprocess.Popen(
+                    [sys.executable, script_path, ws, "B", "0.3"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                out1, err1 = p1.communicate(timeout=15)
+                out2, err2 = p2.communicate(timeout=15)
+            finally:
+                Path(script_path).unlink(missing_ok=True)
+
+            self.assertEqual(p1.returncode, 0, err1)
+            self.assertEqual(p2.returncode, 0, err2)
+
+            events = json.loads(out1) + json.loads(out2)
+            starts = sorted(e[2] for e in events if e[0] == "start")
+            ends = sorted(e[2] for e in events if e[0] == "end")
+            self.assertEqual(len(starts), 2)
+            self.assertEqual(len(ends), 2)
+            # Serializado de verdad, entre procesos de SO reales: el
+            # segundo "start" ocurre DESPUES del primer "end".
+            self.assertLess(ends[0], starts[1], f"no se serializó entre procesos: {events}")
 
 
 if __name__ == "__main__":
     unittest.main()
 ```
 
-- [ ] **Step 2: Correr y confirmar que fallan (la función no existe)**
+- [ ] **Step 2: Correr y confirmar que fallan (nada de esto existe todavía)**
 
 Run: `cd /home/fruiz/jax && .venv/bin/python -m pytest _hyde_sandbox_test.py -v`
-Expected: `AttributeError: module 'hyde_sandbox' has no attribute 'run_sandboxed_claude'` en las 3 pruebas.
+Expected: `AttributeError: module 'hyde_sandbox' has no attribute 'run_sandboxed_claude'` (o `'_acquire_cross_process_lock'`/`'_release_cross_process_lock'`) en las 5 pruebas.
 
-- [ ] **Step 3: Implementar `run_sandboxed_claude` en `hyde_sandbox.py`**
+- [ ] **Step 3: Implementar `run_sandboxed_claude` + el lock cross-proceso en `hyde_sandbox.py`**
 
-Agregar `import asyncio` a los imports (línea 58, junto a `json`/`os`/`shutil`):
+Agregar a los imports (línea 58, junto a `json`/`os`/`shutil`):
 ```python
 import asyncio
+import fcntl
 import json
 import os
 import shutil
+import time
 from pathlib import Path
 ```
 
@@ -176,12 +289,59 @@ Agregar al final del archivo (después de `wrap_hyde_command`, línea 185):
 ```python
 
 # Serializa TODAS las invocaciones de `claude` sandboxeado entre si, sin
-# importar el llamador (Jacobs o el REPL viejo) -- antes cada uno tenia su
-# propio semaforo (Jacobs: HYDE_SEMAPHORE en jacobs/executor.py) o ninguno
-# (REPL: jax/muscles/subprocess_muscle.py), asi que dos Hydes concurrentes
-# via callers distintos no se coordinaban entre si (DEUDA.md,
-# "concurrencia de HYDE_SEMAPHORE... no reverificada").
-CLAUDE_SUBPROCESS_SEMAPHORE = asyncio.Semaphore(1)
+# importar el llamador NI el proceso de SO -- antes cada uno tenia su
+# propio mecanismo (Jacobs: HYDE_SEMAPHORE en jacobs/executor.py, un
+# asyncio.Semaphore que solo sirve DENTRO de un proceso; REPL: ninguno).
+# Jacobs corre DENTRO del proceso de las_manos (systemd jax-las-manos);
+# el REPL (jax/core/main.py) es un proceso de SO SEPARADO -- confirmado
+# por enumeracion real de imports, 2026-08-25. Un asyncio.Semaphore de
+# modulo no cruza esa frontera. Se usa flock(2) sobre un archivo dentro
+# de workspace_dir en su lugar -- un lock a nivel de kernel, visible por
+# CUALQUIER proceso que abra el mismo path. workspace_dir ya es
+# JAX_WORKSPACE_DIR resuelto por cada llamador (fuente unica en
+# /etc/jax/.env, ver jax-workspace-relocation-fix) -- el lock hereda esa
+# misma fuente de verdad sin leer la env var de nuevo aca.
+_CLAUDE_SUBPROCESS_LOCK_NAME = ".claude_subprocess.lock"
+_CLAUDE_SUBPROCESS_LOCK_TIMEOUT_S = 30.0
+_CLAUDE_SUBPROCESS_LOCK_POLL_S = 0.05
+
+
+def _acquire_cross_process_lock(workspace_dir: str, timeout: float):
+    """BLOQUEANTE -- llamar SOLO via asyncio.to_thread, nunca en el event
+    loop (flock(2) no tiene equivalente async). Sondea con LOCK_NB en vez
+    de bloquear en LOCK_EX puro para poder fail-closed con un timeout
+    explicito: si otro proceso (REPL o las_manos) tiene el lock mas de
+    `timeout` segundos, lanza TimeoutError con mensaje explicito en vez de
+    colgar el thread para siempre.
+
+    Devuelve el file handle abierto -- el llamador debe pasarlo a
+    _release_cross_process_lock (tambien via to_thread) cuando termine,
+    en un finally."""
+    lock_path = Path(workspace_dir) / _CLAUDE_SUBPROCESS_LOCK_NAME
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(lock_path, "w")
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                raise TimeoutError(
+                    f"no se pudo adquirir el lock cross-proceso de subprocess "
+                    f"'claude' en {timeout}s ({lock_path}) -- otro proceso "
+                    "(REPL o las_manos) sigue teniendo un claude corriendo. "
+                    "Fail-closed: no se lanza sin exclusion mutua real."
+                )
+            time.sleep(_CLAUDE_SUBPROCESS_LOCK_POLL_S)
+
+
+def _release_cross_process_lock(fh) -> None:
+    """BLOQUEANTE (aunque en la practica instantaneo) -- llamar via
+    asyncio.to_thread por simetria con _acquire_cross_process_lock."""
+    fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    fh.close()
 
 
 async def run_sandboxed_claude(
@@ -194,21 +354,31 @@ async def run_sandboxed_claude(
 
     Aplica wrap_hyde_command (sandbox de bwrap, fail-closed via
     SandboxUnavailable si no hay bwrap -- NO se atrapa acá) y serializa
-    contra CLAUDE_SUBPROCESS_SEMAPHORE.
+    con un flock(2) cross-proceso sobre workspace_dir (ver
+    _acquire_cross_process_lock) -- no un asyncio.Semaphore, que no cruza
+    la frontera real entre el proceso de las_manos (Jacobs) y el proceso
+    del REPL.
 
     Devuelve (proc, stdout, stderr) crudos -- la interpretacion de exit
     code / contenido de stderr queda en el llamador, cada uno con su
     propio contrato de excepciones (RuntimeError en Jacobs,
     MuscleInvocationError en el REPL viejo -- no se unifican acá).
 
-    En timeout o cancelacion: mata el proceso, cosecha el zombie con
-    wait(), y RE-LANZA la excepcion de asyncio SIN envolver -- CancelledError
+    En timeout (de la corrida real O de la espera del lock) o
+    cancelacion: mata el proceso si llego a lanzarse, cosecha el zombie
+    con wait(), y RE-LANZA la excepcion SIN envolver -- CancelledError
     debe seguir siendo CancelledError (Jacobs cancela _dispatch_step desde
     afuera con su propio wait_for; envolverla rompe la propagacion real de
-    cancelacion de asyncio)."""
+    cancelacion de asyncio). TimeoutError del lock y TimeoutError del
+    wait_for son la misma clase (asyncio.TimeoutError es alias de
+    TimeoutError desde Python 3.11) -- ambos llamadores ya distinguen por
+    esa clase, no hace falta un tipo nuevo."""
     sandboxed_cmd = wrap_hyde_command(cmd, workspace_dir)
 
-    async with CLAUDE_SUBPROCESS_SEMAPHORE:
+    lock_fh = await asyncio.to_thread(
+        _acquire_cross_process_lock, workspace_dir, _CLAUDE_SUBPROCESS_LOCK_TIMEOUT_S,
+    )
+    try:
         proc = await asyncio.create_subprocess_exec(
             *sandboxed_cmd,
             cwd=workspace_dir,
@@ -225,6 +395,8 @@ async def run_sandboxed_claude(
             proc.kill()
             await proc.wait()
             raise
+    finally:
+        await asyncio.to_thread(_release_cross_process_lock, lock_fh)
 
     return proc, stdout, stderr
 ```
@@ -232,14 +404,14 @@ async def run_sandboxed_claude(
 - [ ] **Step 4: Correr los tests, confirmar que pasan**
 
 Run: `cd /home/fruiz/jax && .venv/bin/python -m pytest _hyde_sandbox_test.py -v`
-Expected: `3 passed`.
+Expected: `5 passed`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 cd /home/fruiz/jax
 git add hyde_sandbox.py _hyde_sandbox_test.py
-git commit -m "feat(hyde_sandbox): agrega run_sandboxed_claude, punto de entrada unico con semaforo compartido"
+git commit -m "feat(hyde_sandbox): agrega run_sandboxed_claude, punto de entrada unico con flock cross-proceso"
 ```
 
 ---
@@ -615,5 +787,6 @@ Política explícita del usuario (2026-08-25): nada va a `DEUDA.md` en este plan
 
 - **Cobertura del spec:** el ítem pedía cerrar el gap prospectivo (futuro musculo sin gobernanza) — Task 1/2 centralizan el único mecanismo real, Task 3 lo convierte en invariante verificable por CI, Task 4 documenta el cierre con precisión.
 - **Consistencia de tipos:** `run_sandboxed_claude` devuelve `(proc, stdout, stderr)` en los 3 usos (Task 1 test, Task 2 Step 2 y Step 3) — mismo orden, mismos tipos (`bytes` crudos, no decodificados, decisión consciente para no imponer un único manejo de encoding a ambos llamadores).
+- **Corrección de diseño (2026-08-25, antes de ejecutar Task 1):** el borrador original de Task 1 usaba `asyncio.Semaphore(1)` como "semáforo compartido". Enumeración real de imports confirmó que `jacobs/executor.py` (dentro del proceso `las_manos`) y `SubprocessMuscle` (único importador real: `jax/core/main.py`, el REPL) corren en procesos de SO distintos — un `asyncio.Semaphore` de módulo no cruza esa frontera, así que el diseño original no cerraba la concurrencia cross-proceso que el propio plan dice resolver. Reemplazado por `flock(2)` sobre `workspace_dir/.claude_subprocess.lock` vía `asyncio.to_thread`, con timeout explícito fail-closed y un test de exclusión con dos procesos de SO reales (`subprocess.Popen`, no dos tasks de asyncio).
 - **Sin placeholders:** todo el código de los 3 tasks es el diff/archivo completo a aplicar.
 - **Dependencia hacia adelante:** el plan `2026-08-25-hyde-semaforo-y-deuda-precision.md` depende de que este plan (Task 1-2) ya esté aplicado — usa `_hyde_sandbox_test.py` como el mismo archivo a extender, no lo recrea.
