@@ -424,7 +424,7 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         "--add-dir", HYDE_WORKSPACE_DIR,
     ]
 
-    # Sandbox de bubblewrap + semaforo compartido (ver
+    # Sandbox de bubblewrap + lock cross-proceso via flock(2) (ver
     # hyde_sandbox.py::run_sandboxed_claude -- unico punto de entrada
     # aprobado para lanzar `claude`, DEUDA.md "gobernanza de sub-agentes").
     # SandboxUnavailable NO se atrapa acá -- fail-closed (P10): sin bwrap,

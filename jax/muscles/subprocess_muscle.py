@@ -9,11 +9,16 @@ Decisiones firmes (Fernando + DeepSeek + Claude), medidas en hall9000:
   - Modelo: --model con alias corto (sonnet/opus/haiku). Verificado.
   - Identidad: --append-system-prompt (suma a Claude Code, no lo reemplaza).
   - --fallback-model APAGADO: el fallo duro de modelo lo maneja JAX, no la CLI.
-  - Invocacion: create_subprocess_exec (lista de args, sin shell). Sin inyeccion.
   - Prompt: por argumento, truncado a 32k chars.
-  - Timeout: proc.kill() (en asyncio kill() = SIGKILL, muerte inmediata — es lo
-    que queremos para un proceso colgado) + await proc.wait() para cosechar
-    el zombie. Sin esto quedan huerfanos y con concurrencia=1 traban todo.
+  - Invocacion y timeout: ya NO se implementan en este archivo. Ambos viven
+    en hyde_sandbox.py::run_sandboxed_claude() — unico punto de entrada
+    aprobado para lanzar `claude` (DEUDA.md, "gobernanza de sub-agentes";
+    lo hace cumplir policy/tests/test_claude_subprocess_solo_via_sandbox.py
+    en CI). Esa funcion arma el subproceso (lista de args, sin shell: sin
+    inyeccion), lo confina con bwrap, lo serializa con un lock
+    cross-proceso (flock(2)) contra Jacobs, y en timeout mata y cosecha el
+    zombie ella misma. Acá solo queda traducir su TimeoutError al
+    MuscleTimeoutError que espera el contrato de Muscle.
 
 MEMORIA DE CONVERSACION (caso especial de Hyde):
   Las otras facetas (HTTP/Ollama) reciben el historial como array de mensajes
@@ -119,7 +124,8 @@ class SubprocessMuscle(Muscle):
             "--add-dir", self.workspace_dir,
         ]
 
-        # Sandbox de bubblewrap + semaforo compartido con Jacobs (ver
+        # Sandbox de bubblewrap + lock cross-proceso (flock) compartido con
+        # Jacobs, que corre en OTRO proceso de SO (ver
         # hyde_sandbox.py::run_sandboxed_claude -- unico punto de entrada
         # aprobado, DEUDA.md "gobernanza de sub-agentes"). SandboxUnavailable
         # NO se atrapa acá -- fail-closed (P10): sin bwrap, la llamada falla
