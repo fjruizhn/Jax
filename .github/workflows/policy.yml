@@ -63,6 +63,23 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py -v
 
+  # El scanner de arriba (no-naked-claude-subprocess) protege que nadie
+  # lance `claude` fuera de hyde_sandbox.py -- pero hasta 2026-08-25 la
+  # COSA PROTEGIDA no se verificaba nunca en CI. _hyde_sandbox_test.py
+  # (escrito en Task 1 del plan de gobernanza de subprocess) prueba
+  # run_sandboxed_claude(), incluido un test real de dos procesos de SO
+  # contra el flock(2) cross-proceso. Sin PYTHONPATH: hyde_sandbox.py y su
+  # test viven los dos en el root del repo.
+  hyde-sandbox-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest _hyde_sandbox_test.py -v
+
   output-validator-regression:
     runs-on: ubuntu-latest
     steps:
