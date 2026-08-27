@@ -42,13 +42,15 @@ su fecha de última verificación real, no una nueva.
      `facet:"jax_local"` (allowed_callers NULL) → `allowed:false`
      ("no configurado -- fail-closed"). **El gate gatea de verdad**, no solo
      deja pasar al legítimo.
-  4. Chat real end-to-end con el enforcement encendido: `hipatia`, `jekyll`
-     y `ada` responden normal. **`thot` devuelve 502 — POR UNA CAUSA AJENA
-     A ESTA RONDA**, ver la entrada propia más abajo (`max_tokens` vs
-     `max_completion_tokens`). El gate SÍ autorizó a `thot`
+  4. Chat real end-to-end con el enforcement encendido: **los 4 facets
+     responden** (`hipatia`, `jekyll`, `thot`, `ada` — verificado
+     2026-08-27 tras cerrar el bug de `thot`, ver su entrada más abajo).
+     En la primera verificación `thot` devolvía 502 por una causa AJENA a
+     esta ronda; el gate SÍ lo autorizaba
      (`check_facet_admission('jax_platform_chat','thot')` → `(True, 'OK')`
-     verificado directo, y el log muestra la credencial de openai resuelta
-     después del gate): la falla es aguas abajo, en la llamada al proveedor.
+     verificado directo, con la credencial de openai resuelta DESPUÉS del
+     gate en el log): la falla era aguas abajo, en la llamada al proveedor,
+     y se cerró aparte.
 
   **Qué falta para que esté vigente (Task 9 del plan
   `docs/superpowers/plans/2026-08-27-http-facets-motor-registry-governance.md`),
@@ -122,8 +124,9 @@ su fecha de última verificación real, no una nueva.
   avisa. **Primer ítem de la próxima ronda, por decisión explícita de
   Fernando.**
 
-- **`thot` caído en la Mesa web — CERRADO 2026-08-27: `_call_openai_compat` mandaba `max_tokens`,
-  que `gpt-5.6-terra` rechaza (2026-08-27).** Encontrado durante la
+- **`thot` caído en la Mesa web — CERRADO 2026-08-27.** `_call_openai_compat`
+  mandaba `max_tokens` con un valor fijo; `gpt-5.6-terra` rechazaba primero
+  el NOMBRE del parámetro y después el VALOR. Encontrado durante la
   verificación en vivo del despliegue de gobernanza de `_HTTP_FACETS`, **no
   causado por ella** — probado, no supuesto:
   - Error real de la API: `HTTP 400 ... "Unsupported parameter: 'max_tokens'
