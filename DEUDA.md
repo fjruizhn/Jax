@@ -55,9 +55,27 @@ su fecha de última verificación real, no una nueva.
   real: cualquier subprocess `claude` futuro lanzado con `$HOME` real
   hereda los hooks/plugins personales de Fernando fuera de cualquier gate
   — Hyde específicamente ya se cerró (sandbox de bubblewrap, `$HOME`
-  virtual, PR jax#18, 2026-08-23), pero el problema general para
-  cualquier OTRO músculo/automatización que dispare `claude` sigue
-  abierto. Ver memoria `jax-hyde-personal-hooks-sin-gobernanza`.
+  virtual, PR jax#18, 2026-08-23). **El "problema general" (cualquier
+  OTRO músculo/automatización que dispare `claude` sin el mismo
+  aislamiento) CERRADO 2026-08-26, PRs jax#33-36.** Los 2 call sites
+  reales (`jacobs/executor.py::_invoke_hyde` y
+  `jax/muscles/subprocess_muscle.py::SubprocessMuscle._call`, antes cada
+  uno reimplementando el lanzamiento por separado — uno con
+  `asyncio.Semaphore`, el otro sin ningún lock) se centralizaron en
+  `hyde_sandbox.py::run_sandboxed_claude()`, único punto de entrada
+  aprobado, que hereda el mismo `$HOME` aislado de bwrap de Hyde. El
+  semáforo original no servía: `asyncio.Semaphore` no cruza proceso de
+  SO (Jacobs corre dentro de `jax-las-manos`, `SubprocessMuscle` en el
+  REPL, procesos de SO distintos) — reemplazado por `flock(2)` real
+  sobre `workspace_dir/.claude_subprocess.lock`, vía `asyncio.to_thread`,
+  fail-closed. Un scanner AST nuevo en CI (job `no-naked-claude-subprocess`,
+  `policy/tests/test_claude_subprocess_solo_via_sandbox.py`) falla el
+  build si aparece un futuro call site de `claude` fuera de
+  `hyde_sandbox.py` — es lo que convierte esto en un mecanismo genérico,
+  no solo el caso puntual de Hyde. Ver memoria
+  `jax-claude-subprocess-gobernanza-cerrado`; `jax-hyde-personal-hooks-sin-gobernanza`
+  queda como la observación de fondo original (histórica, ya resuelta
+  por este cierre).
 
 - **`workspace/` sin repo git propio, `file_write` sin commitear — CERRADO 2026-08-21.** Hallazgo original: byproducto de la verificación T4 de Bloque 3 (no buscado a propósito). Diagnóstico completo mostró que **se perdió DOS VECES en menos de 20h**, no una:
   1. **2026-08-20 14:28 CST** — el filter-repo de ronda 9 re-clonó `/home/fruiz/jax` fresco tras el `push --force --mirror`. Se restauraron a mano `.venv`/`node_modules` (gitignored, necesarios para que los servicios arranquen) pero nadie pensó en `workspace/` — no bloqueaba el arranque, así que no entró al checklist de restauración.
