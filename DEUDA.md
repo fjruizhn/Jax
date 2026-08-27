@@ -814,4 +814,50 @@ su fecha de última verificación real, no una nueva.
   certifica. No se toca -- anotado a pedido explícito, no forma parte del
   fix de `motor_resolved`.
 
+  **Ampliación 2026-08-27: el check SÍ lee `context_window` y SÍ maneja
+  NULL bien, pero está INERTE — verificado, no supuesto.** Se investigó a
+  raíz de que `glm-5.3` (el modelo de `ada`) tiene `context_window = NULL`
+  en producción. Hallazgos:
+  - **Hay lector**, uno solo: `_capability_check()` en
+    `backend/api/admin/facet_bindings.py` — no es columna sin lector.
+  - **Trata NULL con honestidad**, no asume: `if context_window is None and
+    min_context_tokens > 0: return "unknown"`. Devuelve "unknown", no "ok".
+  - **Pero esa rama es inalcanzable hoy:** las 7 facetas tienen
+    `min_context_tokens = 0` (verificado por SELECT), así que la condición
+    `> 0` nunca se cumple y el flujo cae a `"ok"`. El badge "✓ Meets" de
+    `ada` está pasando un check que **nunca miró nada sobre contexto**.
+  - Son 3 modelos con `context_window` NULL, no solo el de `ada`:
+    `glm-5.3` (ada), `claude-opus-5` (hyde), `qwen3.6:35b-a3b-q4_K_M`
+    (jax_local).
+
+  **No es el perfil de `thot`** (un campo consumido por un valor
+  hardcodeado que rompió). Es un tercer perfil, y vale distinguirlo: dato
+  faltante + guard correcto + umbral que desactiva el guard. Nada se rompe
+  hoy; lo que se pierde es la señal — nadie se va a enterar de que a 3
+  modelos les falta el dato, porque el único lugar que lo miraría dice
+  "ok". Si alguien pone `min_context_tokens > 0` en una faceta, esas 3
+  pasan a "unknown" de golpe y va a parecer una regresión nueva.
+
+- **`api/chat.py` acopla el backend a `~/jax` en import time —
+  QUÉ SE PIERDE cuando no está (2026-08-27).** `backend/api/chat.py` hace
+  `sys.path.insert(0, ~/jax)` e importa `MemoryDB` del OTRO repo. Si esa
+  ruta no existe, `MemoryDB` queda `None` y `_ensure_memory()` corta con
+  `return False`.
+
+  **"Degrada elegante" es precisamente cómo se ve un fail-open desde
+  afuera, así que queda escrito qué se pierde, no solo que no revienta:**
+  el chat sigue respondiendo, pero **sin memoria semántica** — no lee ni
+  escribe contra `jax_memory` (la misma DB que usa el REPL, ver
+  `jax-memoria-semantica-dos-niveles` en memoria), y `_get_conv_uuid()`
+  devuelve `None`, así que los turnos dejan de agruparse en conversaciones
+  identificables. Un usuario no ve un error: ve un asistente que no
+  recuerda nada de sesiones previas, indistinguible de uno que sí tiene
+  memoria pero no encontró contexto relevante.
+
+  Descubierto porque 2 tests pasaban en local y fallaban en el runner de CI
+  (parcheaban `_memory`/`_memory_ready` pero no `MemoryDB`, y el
+  cortocircuito ocurre antes de mirar los parches). Reproducido cambiando
+  SOLO `HOME`. Arreglo de fondo, no hecho: volverlo una variable
+  (`JAX_CORE_PATH`) en vez de una ruta implícita del home.
+
 En memoria de Jairo Urbina.
