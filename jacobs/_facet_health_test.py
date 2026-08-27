@@ -11,7 +11,7 @@ def test_cero_eventos_es_unknown_NUNCA_ok():
     `if total_eventos == 0: unknown`, nunca `if fallos == 0: ok` -- esa
     segunda forma es el bug escrito como codigo."""
     got = fh.evaluate_states({}, ["thot", "ada"], NOW)
-    assert got == {"thot": "unknown", "ada": "unknown"}
+    assert got == {"thot": "ROTO_A_PROPOSITO", "ada": "unknown"}
     assert "ok" not in got.values()
 
 
