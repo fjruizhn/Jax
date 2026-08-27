@@ -2024,6 +2024,56 @@ deploy pasa y nadie los mira, los dos ⚠️ quedan abiertos con apariencia de
 cerrados — que es exactamente el patrón que esta ronda entera existe para
 eliminar.
 
+- [ ] **Step 5d: `check_facet_health()` corriendo de verdad en el reaper — evidencia obligatoria**
+
+**Por qué este step existe:** la Task 6 cerró con alcance declarado —
+`evaluate_states()` y `transitions_to_notify()` tienen 11 tests puros, pero
+`check_facet_health()` (la parte de I/O: las tres consultas, el envío, el
+ledger, la poda) **no tiene test propio**. Es la única pieza del lector sin
+cobertura automática, y es la que conecta todo lo demás con los datos
+reales. Si falla ahí, la lógica pura corre impecablemente sobre datos que
+nunca llegaron. No se cubre "con el deploy" en general: se cubre con esta
+evidencia, o queda abierto.
+
+Agrava el caso que su `except` en el reaper es fail-soft (Task 7): si
+`check_facet_health()` revienta, el barrido sigue y sólo queda un
+`logger.error` cada 300 s en el journal. **Un fallo acá se ve exactamente
+igual que un sistema sano.**
+
+Después de reiniciar `jax-las-manos`, esperar un barrido completo (≤300 s) y
+verificar las tres cosas que la función hace, por separado:
+
+```bash
+journalctl -u jax-las-manos --since "10 min ago" | grep -iE "chequeo de salud de facets FALLO" \
+  && echo "PARAR: el lector esta fallando en cada barrido" || echo "sin fallos del lector"
+```
+
+```sql
+-- 1. LEE: el ledger existe y tiene filas (la funcion escribio ahi)
+SELECT facet, state, FROM_UNIXTIME(first_seen_ts), FROM_UNIXTIME(notified_ts)
+FROM facet_health_alert ORDER BY notified_ts DESC;
+
+-- 2. EVALUA: el estado guardado coincide con el ultimo evento de ese facet
+SELECT a.facet, a.state AS estado_ledger, e.outcome AS ultimo_evento,
+       FROM_UNIXTIME(e.ts) AS cuando
+FROM facet_health_alert a
+JOIN facet_health_event e ON e.facet = a.facet
+WHERE e.ts = (SELECT MAX(ts) FROM facet_health_event WHERE facet = a.facet);
+
+-- 3. PODA: ninguna fila mas vieja que la retencion
+SELECT COUNT(*) AS filas_fuera_de_retencion FROM facet_health_event
+WHERE ts < UNIX_TIMESTAMP() - 30*86400;
+```
+
+Expected, los tres: (1) al menos una fila en `facet_health_alert` —
+**vacía significa que la función nunca llegó a escribir**, aunque el journal
+esté limpio; (2) `estado_ledger` coherente con `ultimo_evento` (`ok` ↔ `ok`,
+cualquier otro outcome ↔ `down`); (3) `0`.
+
+**Pegar las tres salidas reales en el reporte.** Una tabla `facet_health_alert`
+vacía con journal limpio es el caso peligroso: significa que el lector corre
+y no decide nada — hay que averiguar por qué antes de seguir, no anotarlo.
+
 - [ ] **Step 6: Romper el gate a propósito — `gate_denied`**
 
 Guardar el valor original **antes** de tocarlo, para poder revertir con el
