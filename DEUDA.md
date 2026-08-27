@@ -93,11 +93,17 @@ su fecha de última verificación real, no una nueva.
   **Lección de método, vale más allá de este caso:** la limpieza del repo padre destruyó el mecanismo de reversibilidad (`git reset --hard`) que era la justificación para sacarle el gate humano a `write_file`. Una garantía de seguridad que depende de infraestructura frágil (un directorio gitignored dentro del árbol que protege) no es una garantía real — se cae exactamente cuando el sistema que la rodea cambia, sin que el propio mecanismo se entere.
 
 - **Hyde: red sin acotar por dominio/IP, escritura directa a los repos
-  reales fuera de alcance, concurrencia de `HYDE_SEMAPHORE` con el
-  sandbox no reverificada.** Declarado explícitamente como no resuelto al
+  reales fuera de alcance.** Declarado explícitamente como no resuelto al
   cerrar el sandbox de bubblewrap (2026-08-23) — el contenimiento
   principal (secretos, filesystem, hooks) sí está cerrado, estos son
-  refinamientos de defensa en profundidad pendientes.
+  refinamientos de defensa en profundidad pendientes. **La tercera parte
+  original de este bullet ("concurrencia de `HYDE_SEMAPHORE` con el
+  sandbox no reverificada") ya no aplica — CERRADO 2026-08-26 (PRs
+  jax#33-36).** `HYDE_SEMAPHORE` (`asyncio.Semaphore`) se eliminó del
+  código (confirmado por grep: solo queda en comentarios/docstrings como
+  referencia histórica), reemplazado por `flock(2)` cross-proceso en
+  `hyde_sandbox.py::run_sandboxed_claude()` — ver
+  `jax-claude-subprocess-gobernanza-cerrado` en memoria.
 
 ## Anotado, no bloquea
 
