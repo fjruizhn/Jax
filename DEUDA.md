@@ -147,9 +147,21 @@ su fecha de última verificación real, no una nueva.
   chica (30 s) pero determinística, y justo en el momento de mayor riesgo:
   inmediatamente después de un cambio de modelo.
 
+  **Es un punto ciego del detector, no solo un problema de frescura.** La
+  sonda por rebinding **no puede ver ese estado**: sondea por el camino de
+  Mesa web (`_invoke_facet`), que es el único de los tres procesos cuya
+  caché se invalida. Si Jacobs o el REPL despachan contra el binding viejo
+  durante esos 30 s, la sonda reporta `ok` — y reporta la verdad *de su
+  propio camino*. El instrumento que esta ronda construyó para que un facet
+  roto no pase 3 días sin avisar tiene, por construcción, un camino que no
+  observa. Anotar la ventana "donde el operador la vea" no alcanza para
+  esto: el operador miraría un tablero verde que es correcto y aun así
+  incompleto.
+
   **Qué haría falta (no diseñado):** una señal de invalidación entre
   procesos, o bajar el TTL a costa de más queries, o aceptar la ventana
-  explícitamente y documentarla donde el operador la vea. No se resuelve
+  explícitamente y documentarla donde el operador la vea — cualquiera de
+  las tres deja el punto ciego abierto salvo la primera. No se resuelve
   hoy — queda con el caso concreto. Descubierto por la revisión de la
   Task 5, no buscado.
 
