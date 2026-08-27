@@ -22,22 +22,39 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
-- **`_HTTP_FACETS` sin gobernanza del Motor Registry.** `hipatia`/`jekyll`/
-  `thot`/`ada` despachan por HTTP directo (`jacobs/executor.py`), sin pasar
-  por `MotorPolicy.check()` (los 8 checks que sí aplican a `jax_local`/`kimi`:
-  caller autorizado, human gate, recursion depth, claves prohibidas, motor
-  habilitado, sandbox_only, techo de timeout). **Bloque 3 (2026-08-21) TOCÓ
-  esto, no lo cerró — precisión pedida explícitamente, no dar por resuelto
-  lo que no está:** el camino HTTP-directo ahora SÍ pasa por NIVEL A de
-  `validate_capability()` (existencia real en la tabla `capability`, DB en
-  vez de un frozenset estático) antes de despachar. Pero eso es solo
-  "¿el nombre de la capability existe?" — NINGUNO de los otros 7 checks de
-  `MotorPolicy.check()` aplica al camino HTTP-directo, sigue siendo
-  exactamente el mismo gap que antes (`allowed_callers`, `requires_human_gate`,
-  `sandbox_only`, techo de `max_execution_minutes` -- cero enforcement para
-  hipatia/jekyll/thot/ada). Migración real (pasar estos 4 facets por el
-  Motor Registry, o replicar los 8 checks en el camino HTTP-directo) sigue
-  sin decisión ni ejecución.
+- **`_CAPABILITY_TIMEOUT_SECONDS` (jacobs/plan.py) duplica
+  `capability.max_execution_minutes` (DB) sin lectura en vivo.** Verificado
+  2026-08-27 durante el cierre de gobernanza de `_HTTP_FACETS`: el default
+  de `step.timeout_seconds` sale de un dict hardcodeado
+  (`jacobs/plan.py:106-110`); un `timeout_seconds` explícito en un spec de
+  step lo pisa SIN validar contra el techo de la DB
+  (`_validate_plan_capabilities` no lo chequea, y ni siquiera aplica a
+  `_HTTP_FACETS`). `scripts/check_timeout_consistency.py` verifica que
+  coincidan, pero es manual, no una garantía en runtime. El check 8 real de
+  `MotorPolicy.check()` solo corre server-side, solo para `kimi`/`jax_local`,
+  después de crear el job -- nunca en Jacobs antes de despachar. Decisión
+  explícita: NO se activa un admission-check contra esto en la ronda de
+  `_HTTP_FACETS` (validaría contra un valor que puede ya estar desincronizado
+  del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
+  en una ronda aparte.
+
+- **`jax-platform`: suite de tests del backend con 10 failures + 1 error
+  preexistentes en este entorno de desarrollo.** Verificado 2026-08-27
+  durante el cierre de gobernanza de `_HTTP_FACETS` (Task 7, integración de
+  `_invoke_facet` en `chat.py`): diff contra un stash-baseline muestra
+  EXACTAMENTE el mismo conjunto de 10 failures + 1 error, por nombre, con y
+  sin el cambio de esta ronda -- no es una regresión de este trabajo. Causa
+  raíz identificada: un pool de conexiones `aiomysql` reusado entre
+  distintos event loops de `asyncio` -- defecto de aislamiento de tests, no
+  defecto de producto. No existe hoy, para `jax-platform`, un equivalente
+  al cierre que `jax`/`las_manos` logró 2026-08-24 (95 passed / 0 failed,
+  ver la entrada "14 (en verdad 18) tests" más abajo) -- ninguna auditoría
+  llevó esa suite a verde de referencia. Se deja abierto a propósito, no
+  como "ruido conocido, ignorar": una suite permanentemente un poco roja
+  entrena a ignorarla, que es exactamente cómo una regresión real termina
+  escondida en el ruido. Sin fix esta ronda (fuera de alcance de la
+  gobernanza de `_HTTP_FACETS`) -- candidato a sesión de pago de deuda
+  propia.
 
 - **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
   excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
@@ -106,6 +123,107 @@ su fecha de última verificación real, no una nueva.
   `jax-claude-subprocess-gobernanza-cerrado` en memoria.
 
 ## Anotado, no bloquea
+
+- **`_HTTP_FACETS` sin gobernanza del Motor Registry — CERRADO 2026-08-27,
+  rama `worktree-sdd-http-facets-governance` (ambos repos, `jax` +
+  `jax-platform`).** Jacobs y Mesa web quedan gobernados DE FORMA DISTINTA
+  — no es el mismo check aplicado dos veces, son dos mecanismos separados:
+
+  **Jacobs (`jax`, commits `dbc5585`/`4f4eb6b`/`ab7d241`/`ba8234d`):**
+  `MotorPolicy.check()` (`las_manos/motor_registry/policy.py`) se partió en
+  `check_capability_admission()` (checks 1-5: capability existe, caller
+  autorizado, human gate, recursion depth, claves prohibidas) más un
+  wrapper que preserva `check()` exactamente igual para `kimi`/`jax_local`
+  — cero cambio de comportamiento, suite existente sin modificar y sin
+  fallar. `jacobs/executor.py::validate_capability()` gana un bloque NIVEL C
+  que llama a `check_capability_admission()` para los 4 facets de
+  `_HTTP_FACETS` únicamente. Fail-closed real, no solo de nombre: una
+  falla de DB propaga en vez de tragarse silenciosamente (probado con un
+  mock de fallo de DB contra el par `ada`/`architecture_review`, que sí
+  existe en `jax_memory_test`). Checks 6-7 (resolver motor,
+  `motor.sandbox_only`) son N/A para un facet HTTP — no hay motor que
+  resolver. Check 8 (techo de timeout) sigue SIN activar para este camino
+  — ver la entrada nueva de `_CAPABILITY_TIMEOUT_SECONDS` en "Bloquea
+  trabajo", con la razón estructural.
+
+  **Mesa web (`jax-platform`, misma rama, mismo cierre):** NO usa
+  `MotorPolicy` ni la tabla `capability` en absoluto. Un turno de chat es
+  texto libre enrutado a un facet por keyword-matching, sin ningún mapeo
+  facet→capability real (verificado leyendo `chat.py` completo antes de
+  diseñar esto — una versión anterior del diseño asumía ese mapeo y era
+  falsa, corregida antes de implementar). Se construyó un check nuevo y
+  más chico, `check_facet_admission()`
+  (`las_manos/motor_registry/facet_policy.py`, repo `jax`, corre
+  server-side dentro de `las_manos`), sobre una columna nueva
+  `facet.allowed_callers` (NULLABLE; migración idempotente en
+  `jax-platform`, commit `20f395b`, guardada con `WHERE ... IS NULL` para
+  no pisar un valor manual futuro), expuesto como `POST
+  /motor/authorize-facet` (`jax`) y llamado desde `_invoke_facet` en
+  `backend/api/chat.py` (`jax-platform`, esta ronda) antes de despachar a
+  `hipatia`/`jekyll`/`thot`/`ada`. Fail-closed confirmado con un caso real,
+  no solo un mock prolijo: `las_manos` caído de verdad (conexión
+  rechazada, no un mock con error prolijo) deniega igual que una respuesta
+  explícita `allowed=False`, con logging que distingue "no se pudo
+  verificar" de "denegado de verdad" (antes de la corrección de review de
+  esta misma ronda, el `except` de fail-closed no logueaba nada —
+  indistinguible en los logs de un rechazo real). Los checks 2-8 de
+  `MotorPolicy` son N/A para este camino POR DISEÑO — están atados a la
+  tabla `capability`, que Mesa web no consulta para este check — no es que
+  "quedaron pendientes".
+
+  **Migración de datos, aplicada antes de activar el enforcement:**
+  `jax-platform` commit `20f395b` agrega y siembra `facet.allowed_callers`
+  para los 4 facets (`["jacobs", "jax_platform_chat"]` — mismo acceso que
+  ya existía de hecho, sin restringir ni ampliar nada). Verificado en vivo
+  post-deploy: los 4 facets siguen respondiendo en el chat real de Mesa
+  web.
+
+  **Lo que sigue explícitamente SIN gobernar, para no leerse como
+  cobertura total:** el techo de `max_execution_minutes`/timeout (check 8)
+  no se activó para ningún camino — ver `_CAPABILITY_TIMEOUT_SECONDS` en
+  "Bloquea trabajo". `capability.sandbox_only` sigue vestigial — ver la
+  entrada nueva abajo. `human_gate_token` para Jacobs pasa trivialmente
+  porque ninguna de las 5 capabilities relevantes lo requiere hoy
+  (`requires_human_gate=0`) — si eso cambia, Jacobs-HTTP empezará a
+  rechazar TODO por fail-closed, sin mecanismo hoy de pasar un token real
+  (anotado para que no sorprenda, no una falla).
+
+- **`capability.sandbox_only` — columna sin lector, vestigial.** Verificado
+  2026-08-27: `grep -rn "cap.sandbox_only\|capability.sandbox_only\|entry\[.sandbox_only.\]\|entry.get(.sandbox_only"` → 0 resultados en todo el repo. Las 5 filas
+  con valor `1` (research/analysis/design/reconcile/validate_consistency)
+  nunca se comparan contra nada. El único `sandbox_only` real es
+  `motor.sandbox_only` (`policy.py` check 7), una columna DISTINTA, de la
+  tabla `motor`. No se le inventa semántica esta ronda (el candidato obvio,
+  egress de red, es el ítem "Hyde: red sin acotar por dominio/IP" ya
+  diferido a propósito). Pendiente: darle lector real o dropearla.
+
+- **`research`/`analysis`/`review` (capabilities HTTP-directo) existían en
+  PROD pero en NINGUNA migración — CERRADO 2026-08-27 (jax-platform,
+  commit `27cb73c`).** Segunda instancia confirmada del mismo patrón que
+  `depends_on` (ver la entrada "14 (en verdad 18) tests" más abajo: fila o
+  columna agregada a mano en producción, nunca registrada en el camino de
+  migración idempotente) — ya no es un caso aislado, es un patrón.
+  Verificado durante el cierre de gobernanza de `_HTTP_FACETS` (Task 6):
+  `_CAPABILITY_SEED` en `jax-platform/backend/db/migrations.py` tenía 12
+  entradas, ninguna de las tres; `jax_memory` (prod) tenía las tres,
+  sembradas a mano en algún momento (`allowed_callers=["jacobs"]`);
+  `jax_memory_test` tenía cero. Consecuencia real, no solo teórica:
+  ninguna DB recién creada (test, dev, restore de desastre) las recibía
+  jamás, y eso bloqueaba en silencio a los tests de gobernanza de poder
+  ejercitar el par canónico `hipatia`/`research`. Arreglado agregando las
+  tres a `_CAPABILITY_SEED` con los valores exactos de prod
+  (`sandbox_only=1`, `requires_human_gate=0`, `max_execution_minutes=5`,
+  `allowed_callers=["jacobs"]`, cero filas `capability_motor` — HTTP-directo
+  puro; `risk_level=low` para research/analysis, `medium` para review),
+  verificado en vivo contra `jax_memory_test` post-fix (las tres presentes,
+  prod sin cambios — `INSERT IGNORE` no-opea donde la fila ya existe).
+  **Nota de patrón, vale más que cualquiera de las dos instancias por
+  separado:** dos bugs de la misma clase exacta (ALTER/INSERT manual a
+  producción, nunca incorporado a la migración idempotente) encontrados en
+  un mes. Si aparece una tercera instancia, es momento de escribir un
+  chequeo automatizado que compare el vocabulario real de prod contra lo
+  que la migración sembraría en una DB fresca, en vez de seguir
+  encontrándolas una por una durante trabajo no relacionado.
 
 - **P10 (fail-open prohibido) en `output_validator.py` — CERRADO
   2026-08-25 (PRs jax#26/#27/#28/#29/#30).** `validate()` distingue ahora
