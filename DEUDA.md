@@ -22,44 +22,43 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
-- **`_HTTP_FACETS` sin gobernanza del Motor Registry — CÓDIGO COMPLETO,
-  ENFORCEMENT NO DESPLEGADO (2026-08-27).** Rama
-  `worktree-sdd-http-facets-governance` en ambos repos (`jax` +
-  `jax-platform`), sin mergear y sin desplegar.
+- **`_HTTP_FACETS` sin gobernanza del Motor Registry — CERRADO Y DESPLEGADO
+  (2026-08-27).** Mergeado (`jax` PR#39 → merge `abe1931`; `jax-platform`
+  PR#16 → merge `766e03b`) y desplegado el mismo día.
 
-  **LEER ESTO PRIMERO: hoy, en producción, el gap sigue ABIERTO.** No es
-  un matiz de redacción: los 4 facets HTTP (`hipatia`/`jekyll`/`thot`/`ada`)
-  se despachan ahora mismo sin pasar por ningún check, exactamente igual
-  que antes de esta ronda. Verificado 2026-08-27 contra los checkouts que
-  corren los servicios (`/home/fruiz/jax` y `/home/fruiz/jax-platform`, NO
-  los worktrees): `las_manos/motor_registry/facet_policy.py` no existe,
-  cero ocurrencias de `authorize-facet` en `/home/fruiz/jax/las_manos/`,
-  cero de `check_capability_admission` en `las_manos/` + `jacobs/`, y
-  `backend/db/migrations.py` de `jax-platform` no tiene
-  `facet.allowed_callers` en el DDL de `facet`. Esta entrada vive en
-  "Bloquea trabajo" a propósito y se queda acá hasta que el despliegue
-  ocurra — una entrada en "Anotado, no bloquea" se lee como "no requiere
-  acción", y acá sí la requiere.
-
-  **Lo único que YA está en producción es el dato, no el enforcement:** la
-  migración de `facet.allowed_callers` corrió contra `jax_memory` real.
-  Verificado por SELECT directo 2026-08-27: `ada`/`hipatia`/`jekyll`/`thot`
-  tienen `["jacobs", "jax_platform_chat"]`; `hyde`/`jax_local`/`kimi`
-  quedan NULL. Es un hecho de esquema, no evidencia de que nada del chat
-  haya sido probado end-to-end con el enforcement encendido — ese chequeo
-  NO se corrió, porque el despliegue (Task 9 del plan) no se ejecutó.
-  Queda pendiente como parte del despliegue.
+  **Verificado corriendo, no solo mergeado** — la distinción importa, ver la
+  lección de método en CONTEXT.md ("el código mergeado no es código
+  corriendo"). Evidencia, toda del 2026-08-27 post-reinicio:
+  1. `las_manos/motor_registry/facet_policy.py` existe en el checkout que
+     sirve el servicio (`/home/fruiz/jax`, NO el worktree); el
+     `migrations.py` desplegado de `jax-platform` ya contiene el ALTER y el
+     seed de `facet.allowed_callers` (6 ocurrencias) — el drift de esquema
+     quedó cerrado en la máquina, no en el papel.
+  2. `jax-las-manos` reiniciado PRIMERO, `jax-platform` DESPUÉS (ese orden,
+     por el riesgo descrito abajo). Ambos `active`, arranque sin excepciones.
+  3. Endpoint probado en vivo, incluidos los casos negativos:
+     `{"caller":"jax_platform_chat","facet":"hipatia"}` → `allowed:true`;
+     `caller_fantasma` → `allowed:false` ("no autorizado");
+     `facet:"jax_local"` (allowed_callers NULL) → `allowed:false`
+     ("no configurado -- fail-closed"). **El gate gatea de verdad**, no solo
+     deja pasar al legítimo.
+  4. Chat real end-to-end con el enforcement encendido: `hipatia`, `jekyll`
+     y `ada` responden normal. **`thot` devuelve 502 — POR UNA CAUSA AJENA
+     A ESTA RONDA**, ver la entrada propia más abajo (`max_tokens` vs
+     `max_completion_tokens`). El gate SÍ autorizó a `thot`
+     (`check_facet_admission('jax_platform_chat','thot')` → `(True, 'OK')`
+     verificado directo, y el log muestra la credencial de openai resuelta
+     después del gate): la falla es aguas abajo, en la llamada al proveedor.
 
   **Qué falta para que esté vigente (Task 9 del plan
   `docs/superpowers/plans/2026-08-27-http-facets-motor-registry-governance.md`),
-  en ESTE orden:**
+  ya ejecutado — se deja registrado porque es el mismo orden que aplica a
+  cualquier redeploy o rollback futuro de estos dos servicios:**
   1. Mergear ambas ramas (`jax` y `jax-platform`).
-  2. Confirmar que `facet.allowed_callers` está poblado en `jax_memory`
-     (ya lo está hoy; reconfirmar antes de reiniciar nada).
+  2. Confirmar que `facet.allowed_callers` está poblado en `jax_memory`.
   3. Reiniciar **`jax-las-manos` PRIMERO**.
   4. Reiniciar **`jax-platform` DESPUÉS**.
-  5. Verificar en el chat real de Mesa web que los 4 facets responden
-     (el chequeo que esta entrada NO puede afirmar todavía).
+  5. Verificar en el chat real de Mesa web que los 4 facets responden.
 
   **Por qué ese orden y no el inverso — riesgo operativo real:** si se
   reinicia `jax-platform` primero, `chat.py` empieza a llamar a
@@ -76,6 +75,34 @@ su fecha de última verificación real, no una nueva.
   `jax-las-manos`) por la misma razón — rollbackear `las_manos` antes deja
   a `jax-platform` llamando un endpoint que ya no existe, y recrea la
   misma caída de los 4 facets.
+
+- **`thot` caído en la Mesa web: `_call_openai_compat` manda `max_tokens`,
+  que `gpt-5.6-terra` rechaza (2026-08-27).** Encontrado durante la
+  verificación en vivo del despliegue de gobernanza de `_HTTP_FACETS`, **no
+  causado por ella** — probado, no supuesto:
+  - Error real de la API: `HTTP 400 ... "Unsupported parameter: 'max_tokens'
+    is not supported with this model. Use 'max_completion_tokens' instead."`
+    (el backend lo propaga como 502 al cliente).
+  - `backend/api/chat.py:559` manda `"max_tokens": 131072` fijo. Esa línea
+    entró el **2026-08-18** (commit `f8bd8c9`, "manda max_tokens explícito"),
+    nueve días antes de la ronda de gobernanza, y **ninguno** de los 3
+    commits de esa rama la tocó (verificado: `git show <sha> -- chat.py |
+    grep -c max_tokens` → 0 en `b017fbf`, `5a3f6c4` y `bd62db6`).
+  - El gate nuevo NO es la causa: `check_facet_admission('jax_platform_chat',
+    'thot')` devuelve `(True, "OK")`, y el log muestra
+    `credential_resolution provider=openai` DESPUÉS del gate — o sea que
+    autorizó y falló aguas abajo, en la llamada al proveedor.
+  - Fecha probable de rotura: **2026-08-24 11:08**, cuando `thot` se rebindeó
+    a `gpt-5.6-terra` (`facet_binding.approved_at`). El modelo anterior
+    aceptaba `max_tokens`; el nuevo exige `max_completion_tokens`. Es decir,
+    `thot` llevaba 3 días roto en la Mesa web sin que nadie lo notara —
+    dato que vale por sí solo: **no hay alerta que avise cuando un facet deja
+    de responder.**
+  - Sin arreglar: el fix (mandar `max_completion_tokens` según el modelo, o
+    condicionarlo) es un cambio con diseño propio — qué modelos requieren
+    cuál parámetro no está resuelto, y meterlo al final de un despliegue de
+    otra cosa es exactamente cómo se cuelan regresiones. `hipatia`, `jekyll`
+    y `ada` no están afectados (otros proveedores).
 
   ---
 
