@@ -124,6 +124,34 @@ su fecha de última verificación real, no una nueva.
   avisa. **Primer ítem de la próxima ronda, por decisión explícita de
   Fernando.**
 
+- **Bypass de admin en el ruleset de `master`: la única barrera contra un
+  merge en rojo es que alguien se acuerde de mirar (2026-08-27).** Los dos
+  repos tienen protección de `master` con bypass para admin (ver
+  `jax-block1-apertura-repos-cierre`). Eso era higiene aceptada hasta que
+  mostró su costo con un caso concreto.
+
+  **Incidente, 2026-08-27:** el PR de la Task 4 de la ronda de alertas
+  (`jax-platform` #25) se mergeó **con `no-fail-open-except` en FAILURE**.
+  El comando de merge imprimió los checks —el rojo estaba en pantalla— y
+  corrió `gh pr merge` en la misma cadena, sin condicionar nada. El bypass
+  hizo que no encontrara ninguna resistencia. `master` quedó en rojo hasta
+  el fix-forward (#26, `cab6f80`).
+
+  **Por qué bloquea, y no es higiene:** hoy la única barrera entre un merge
+  en rojo y `master` es la disciplina de quien mergea. Es **exactamente el
+  modo de falla que la ronda de alertas de facets existe para eliminar** —
+  "la regla se cumple cuando alguien se acuerda de mirar" — reproducido en
+  la infraestructura que gobierna esa misma ronda. Un guard que depende de
+  memoria humana no es un guard.
+
+  **Qué haría falta (no diseñado):** una identidad de bot separada, sin
+  bypass, que sea la que abre y mergea PRs, dejando el bypass de admin
+  como escape manual y explícito de Fernando. No se resuelve hoy; queda
+  con el caso concreto para que la próxima ronda no tenga que reconstruir
+  el argumento. Ver la séptima lección de método en CONTEXT.md ("verificar
+  y actuar en el mismo comando no es un gate") — el corolario operativo
+  mitiga el lado del agente, pero no cierra el agujero de infraestructura.
+
 - **`thot` caído en la Mesa web — CERRADO 2026-08-27.** `_call_openai_compat`
   mandaba `max_tokens` con un valor fijo; `gpt-5.6-terra` rechazaba primero
   el NOMBRE del parámetro y después el VALOR. Encontrado durante la
