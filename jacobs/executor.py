@@ -643,6 +643,32 @@ async def validate_capability(step: Step) -> CapabilityUnbound | str | None:
     if entry is None:
         return f"capability desconocida: '{cap}' no está en la tabla `capability`"
 
+    # ---- NIVEL C (2026-08-27): admisión para _HTTP_FACETS ----
+    # Antes de esta ronda, hipatia/jekyll/thot/ada nunca pasaban por
+    # ninguno de los checks de MotorPolicy (DEUDA.md, bullet _HTTP_FACETS
+    # sin gobernanza). check_capability_admission() cubre allowed_callers/
+    # requires_human_gate/recursion_depth/claves prohibidas -- import
+    # directo, Jacobs corre en el mismo proceso que las_manos (docs/
+    # superpowers/specs/2026-08-27-http-facets-motor-policy-governance-
+    # design.md). NO incluye techo de timeout (decisión explícita, punto 2
+    # del spec) ni resolución de motor (N/A -- facets HTTP no son motores).
+    # Fail-closed: si MotorCatalog.from_db() no puede leer la DB, la
+    # excepción se propaga sin capturarla acá (mismo criterio P10 que el
+    # resto de esta función) -- _run_one_step falla el step limpio, nunca
+    # despacha sin haber podido verificar.
+    if step.facet in _HTTP_FACETS:
+        from motor_registry.catalog import MotorCatalog
+        from motor_registry.policy import MotorPolicy
+        catalog = await MotorCatalog.from_db()
+        policy = MotorPolicy(catalog)
+        admission = policy.check_capability_admission(
+            caller="jacobs", capability=cap,
+            context_keys=list(step.input.keys()),
+            recursion_depth=0, human_gate_token=None,
+        )
+        if not admission.allowed:
+            return admission.reason
+
     # ---- NIVEL B: contrato de motor (SOLO facets-motor, hoy kimi/jax_local) ----
     if step.facet in _MOTOR_FACETS:
         if (step.motor or step.facet) not in entry["allowed_motors"]:
