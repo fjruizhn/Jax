@@ -784,7 +784,7 @@ async def _invoke_facet(
 - [ ] **Step 6: Correr los tests nuevos**
 
 Run: `cd /home/fruiz/jax-platform/backend && python -m pytest tests/test_facet_health_outcomes.py -v`
-Expected: 7 passed.
+Expected: 8 passed.
 
 - [ ] **Step 7: Verificar el criterio de cierre — los dos tests intocables**
 
@@ -1060,6 +1060,44 @@ def test_probe_facet_NUNCA_devuelve_ok(monkeypatch):
     assert out is None
 
 
+def test_la_sonda_distingue_config_error_de_provider_error(monkeypatch):
+    """La sonda es donde esta distincion se materializa mas seguido: la
+    sonda por rebinding existe justamente para el escenario de un binding
+    recien aprobado, que es cuando aparece un max_tokens_param sin sembrar.
+
+    DOS casos reales, uno por cada outcome. NO uno solo asumiendo que el
+    otro sale por simetria: si la clasificacion se rompiera en una sola
+    direccion -- por ejemplo un `except Exception` puesto antes del
+    especifico, que se lo come -- un test que solo cubra un lado pasa
+    verde con el bug vivo."""
+    from api.chat import ModelDispatchConfigError
+    import facet_health as fh
+
+    recorded = []
+    async def fake_record(facet, outcome, source, detail=None):
+        recorded.append(outcome); return True
+
+    # Caso 1: falla NUESTRA -- fila del catalogo mal sembrada.
+    monkeypatch.setattr(chat_mod, "record_facet_health", fake_record)
+    async def config_roto(*a, **k):
+        raise ModelDispatchConfigError("max_tokens_param es NULL")
+    monkeypatch.setattr(chat_mod, "_invoke_facet_dispatch", config_roto)
+    with pytest.raises(ModelDispatchConfigError):
+        asyncio.run(chat_mod._invoke_facet("thot", _config(), "u", "h",
+                                           source="canary_rebind"))
+    assert recorded == [fh.OUTCOME_CONFIG_ERROR]
+
+    # Caso 2: falla DEL PROVEEDOR -- misma forma, outcome distinto.
+    recorded.clear()
+    async def proveedor_caido(*a, **k):
+        raise RuntimeError("502 Bad Gateway")
+    monkeypatch.setattr(chat_mod, "_invoke_facet_dispatch", proveedor_caido)
+    with pytest.raises(RuntimeError):
+        asyncio.run(chat_mod._invoke_facet("thot", _config(), "u", "h",
+                                           source="canary_rebind"))
+    assert recorded == [fh.OUTCOME_PROVIDER_ERROR]
+
+
 def test_probe_facet_registra_probe_error_si_falla_antes_de_invocar(monkeypatch):
     async def boom(*a, **k): raise RuntimeError("no pude leer config")
     monkeypatch.setattr(facet_canary, "_invoke_facet", boom)
@@ -1213,7 +1251,7 @@ async def start_facet_canary() -> None:
 - [ ] **Step 4: Correr los tests**
 
 Run: `cd /home/fruiz/jax-platform/backend && python -m pytest tests/test_facet_canary.py -v`
-Expected: 7 passed.
+Expected: 8 passed.
 
 - [ ] **Step 5: Arrancar el loop en `main.py`**
 
