@@ -1,14 +1,34 @@
 """
 LAS MANOS — Motor Registry: gate de autoridad para tool_calls (GAP 2, Fase 2).
 
-Por qué acá y no en el transporte: executor.py:731-733 documenta que
-_HTTP_FACETS (ada/thot) no pasan por la gobernanza del Motor Registry
-(allowed_callers/requires_human_gate/sandbox_only) -- "riesgo real pero hoy
-dormido". El transporte no garantiza el gate para todos los facets, así que
-el gate vive en el BUCLE de tool-calling (acá), no en el transporte. GAP2
-Fase1 ya reduce la superficie real a jax_local (gate literal de nombre de
-motor en worker.py) -- pero este módulo no depende de eso: resuelve
-allowed_callers real contra la capability, no confía en el gate de arriba.
+Por qué acá y no en el transporte: no existe UN punto de entrada por el que
+pase todo dispatch. `ada`/`thot` son a la vez facets (dispatch HTTP directo)
+y motores del Motor Registry (verificado contra la DB real: filas en `motor`
+con transport='http_openai_compat', has_tool_access=0), y hay TRES caminos
+de dispatch distintos con gobernanza distinta:
+
+  - Jacobs -> facet HTTP: desde 2026-08-27 sí pasa admisión de capability
+    (checks 1-5) en jacobs/executor.py::validate_capability(), bloque
+    NIVEL C. Antes de esa fecha no pasaba nada, y este módulo se escribió
+    bajo esa premisa -- que ya no es cierta.
+  - Mesa web -> facet HTTP: pasa check_facet_admission() (facet_policy.py),
+    que responde "¿puede este caller hablar con este facet?" y NADA sobre
+    capabilities: no consulta la tabla `capability` en absoluto.
+  - REPL interactivo `jax` -> facet HTTP: no pasa por ninguno de los dos
+    (jax/core/main.py, muscles[faceta].invoke). Fuera de alcance por
+    decisión, ver DEUDA.md.
+
+La conclusión NO cambia con la premisa corregida, y es importante que no
+cambie: aunque el camino de Jacobs ahora resuelva admisión de capability
+antes de despachar, "admisión" y "autoridad de tool_call" son preguntas
+distintas -- la primera es "¿puede este caller correr esta capability?",
+la segunda es "¿puede ESTE tool_call, en ESTA iteración del bucle, tocar
+esta ruta?". Ninguna respuesta a la primera autoriza la segunda. Por eso
+el gate vive en el BUCLE de tool-calling (acá), se re-resuelve entero cada
+iteración, y no confía en ningún chequeo de aguas arriba. GAP2 Fase1
+reduce la superficie real a jax_local (motor_entry.has_tool_access) --
+pero este módulo no depende de eso: resuelve allowed_callers real contra
+la capability por su cuenta.
 
 Invariante P10 aplicado al lugar nuevo: cualquier ambigüedad en la
 resolución de autoridad es RECHAZO, nunca aprobación implícita. Un tool_name

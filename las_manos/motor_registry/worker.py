@@ -479,10 +479,22 @@ async def run(
     prompt_with_identity = identity + "\n---\n" + prompt
 
     # GAP2 Fase1 (2026-08-19): originalmente `motor == "jax_local"` literal,
-    # a propósito -- executor.py:731-733 documenta que _HTTP_FACETS
-    # (ada/thot/kimi-via-http) no pasa por la gobernanza del Motor Registry
-    # (allowed_callers/requires_human_gate/sandbox_only), y darles tool_calls
-    # antes de resolver eso despertaría ese riesgo hoy dormido.
+    # a propósito -- en ese momento _HTTP_FACETS (ada/thot/kimi-via-http) no
+    # pasaba por NINGÚN check del Motor Registry, y darles tool_calls habría
+    # despertado ese riesgo dormido.
+    #
+    # 2026-08-27: esa premisa ya no es exacta. El camino Jacobs -> facet HTTP
+    # sí resuelve admisión de capability (checks 1-5: existe, allowed_callers,
+    # requires_human_gate, recursion_depth, claves prohibidas) en
+    # jacobs/executor.py::validate_capability(), bloque NIVEL C; los checks
+    # 6-7 son N/A (no hay motor que resolver para un facet HTTP) y el 8
+    # (techo de timeout) sigue diferido. Lo que NO cambió: el camino de Mesa
+    # web solo pasa check_facet_admission() (nivel facet, sin capability) y
+    # el REPL `jax` no pasa por nada. Así que la decisión de mantener
+    # has_tool_access=0 para los motores HTTP sigue en pie -- no por el
+    # agujero viejo, sino porque la autoridad de tool_calls se resuelve en
+    # tool_authority.py contra la capability, y ningún check de admisión de
+    # aguas arriba la sustituye.
     #
     # T1 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): el string
     # hardcodeado era una segunda fuente de verdad que nada podía consultar
@@ -520,9 +532,14 @@ async def run(
     #
     # Requisito no negociable: el gate de autoridad vive EN EL BUCLE, cada
     # iteración pasa por tool_authority.py de cero -- nunca se cachea una
-    # autorización de un turno anterior (executor.py:731-733: _HTTP_FACETS
-    # no pasa por Motor Registry, no asumir que "ya pasó por acá" cubre el
-    # turno siguiente).
+    # autorización de un turno anterior. La razón no es (ya no) que
+    # _HTTP_FACETS esté sin gobernar: desde 2026-08-27 el camino de Jacobs
+    # resuelve admisión de capability antes de despachar. La razón es que
+    # admisión y autoridad de tool_call son preguntas distintas -- haber
+    # sido admitido a correr una capability no autoriza ningún tool_call
+    # concreto, y menos el de la iteración siguiente. Ver el docstring de
+    # tool_authority.py para los tres caminos de dispatch y qué gobierna
+    # cada uno.
     messages: list[dict] = [{"role": "user", "content": prompt_with_identity}]
     # timeout_seconds=0 es un presupuesto real (agotado de inmediato), no
     # "sin presupuesto" -- `is not None`, nunca la verdad de Python (0 es

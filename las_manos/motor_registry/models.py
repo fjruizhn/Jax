@@ -81,3 +81,13 @@ class MotorJobView(BaseModel):
     finished_at: float | None = None
     error: str | None = None
     result_summary: str | None = None     # hint; el resultado real va al log
+
+
+class FacetAuthorizeRequest(BaseModel):
+    caller: str
+    facet: str
+
+
+class FacetAuthorizeResponse(BaseModel):
+    allowed: bool
+    reason: str

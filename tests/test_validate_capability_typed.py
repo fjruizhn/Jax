@@ -127,3 +127,31 @@ def test_capability_map_resuelve_alias_antes_de_buscar_en_catalogo():
         "candidates": ["kimi"],
         "task_id": "task-6",
     }
+
+
+def test_http_facet_caller_no_autorizado_es_rechazado():
+    """NIVEL C nuevo (esta ronda): un facet HTTP-directo (hipatia/jekyll/
+    thot/ada) con un caller fuera de allowed_callers debe rechazarse --
+    antes de esta ronda este chequeo no corria en absoluto para estos 4
+    facets (ver DEUDA.md, bullet _HTTP_FACETS sin gobernanza)."""
+    from motor_registry.catalog import MotorCatalog
+    from motor_registry.policy import MotorPolicy
+
+    catalog = MotorCatalog({
+        "motors": {},
+        "capabilities": {
+            "research": {
+                "allowed_motors": [], "allowed_callers": ["jacobs"],
+                "risk_level": "low", "sandbox_only": True,
+                "requires_human_gate": False, "max_execution_minutes": 5,
+                "max_recursion_depth": 0, "output_schema": "",
+            },
+        },
+    })
+    policy = MotorPolicy(catalog)
+    result = policy.check_capability_admission(
+        caller="caller_no_autorizado", capability="research",
+        context_keys=[], recursion_depth=0, human_gate_token=None,
+    )
+    assert not result.allowed
+    assert "no autorizado" in result.reason
