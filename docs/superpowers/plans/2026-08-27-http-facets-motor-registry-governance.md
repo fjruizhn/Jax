@@ -1239,6 +1239,10 @@ Esta task NO se dispatchea a un subagente fresco — requiere reiniciar servicio
 Run: `mysql -h "$JAX_DB_HOST" -P "$JAX_DB_PORT" -u"$JAX_DB_USER" -p"$JAX_DB_PASSWORD" jax_memory -e "SELECT \`key\`, allowed_callers FROM facet WHERE \`key\` IN ('hipatia','jekyll','thot','ada');"`
 Expected: las 4 filas muestran `["jacobs", "jax_platform_chat"]`.
 
+> **ORDEN DE REINICIO: `jax-las-manos` PRIMERO, `jax-platform` DESPUÉS. No es preferencia, es la diferencia entre un despliegue limpio y una caída.**
+> Al revés (`jax-platform` primero), `chat.py` empieza a llamar a `POST /motor/authorize-facet` contra un `las_manos` que todavía no expone ese endpoint → 404 → el `except` fail-closed deniega → **los 4 facets HTTP quedan caídos en Mesa web durante toda la ventana**, y el usuario ve un mensaje de "acceso no autorizado" para lo que en realidad es una caída de servicio.
+> En el orden correcto no hay ventana mala: `las_manos` nuevo + `jax-platform` viejo simplemente no llama al endpoint — el estado es el de hoy (sin gobernar), nunca peor. Ningún orden deja los facets MÁS desgobernados que hoy; el inverso solo agrega la caída.
+
 - [ ] **Step 2: Reiniciar `jax-las-manos` (carga el `policy.py`/`routes.py`/`facet_policy.py` nuevos)**
 
 Run: `sudo systemctl restart jax-las-manos.service && sleep 3 && systemctl is-active jax-las-manos.service`
@@ -1261,6 +1265,10 @@ Usar `claude-in-chrome` (o el cliente HTTP autenticado que ya use la sesión) pa
 - [ ] **Step 6: Si algo falla — rollback**
 
 Si cualquier facet devuelve "no autorizado" inesperadamente: confirmar primero que la migración de la Task 3 corrió contra la DB CORRECTA (`JAX_DB_HOST`/`JAX_DB_PORT` del entorno real, no `jax_memory_test`) antes de tocar código — el error más probable es la migración corrida contra la DB equivocada, no un bug de lógica (ya cubierto por los tests de las Tasks 1-7).
+
+**Si hay que revertir código, el rollback va en el ORDEN INVERSO al deploy: `jax-platform` PRIMERO, `jax-las-manos` DESPUÉS.** Es la imagen espejo del hazard del Step 2, por la misma razón exacta: revertir `las_manos` primero deja a un `jax-platform` nuevo llamando un endpoint que ya no existe → 404 → fail-closed → **la misma caída de los 4 facets** que el orden de deploy invertido causaría, esta vez durante la ventana de rollback. Revertir `jax-platform` primero lo devuelve a no llamar el endpoint en absoluto, así que `las_manos` puede revertirse después sin ventana mala.
+
+Rollback de datos: NO hace falta revertir `facet.allowed_callers`. La columna es NULLABLE, nadie la lee salvo `check_facet_admission()`, y con el código revertido nada la consulta — dejarla poblada es inerte y ahorra tener que re-sembrarla en el siguiente intento.
 
 ---
 
