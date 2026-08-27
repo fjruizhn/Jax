@@ -80,6 +80,30 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest _hyde_sandbox_test.py -v
 
+  # Task 6 del plan de alertas nacio con 11 tests y CERO jobs que los
+  # corrieran -- tercera instancia del mismo hueco en el mes (ver la octava
+  # leccion de metodo en CONTEXT.md). Este job es la correccion, y se
+  # verifico rompiendo un test a proposito y confirmando que se pone ROJO:
+  # que aparezca aca y salga verde no alcanza.
+  #
+  # Instala aiomysql y pydantic, a diferencia de los otros jobs que solo
+  # necesitan pytest: los tests son de logica PURA, pero importan
+  # `jacobs.facet_health`, que hace `from jacobs import store` a nivel de
+  # modulo -> aiomysql, y `store` importa `jacobs.models` -> pydantic. Con
+  # solo pytest el job falla en la COLECCION (ModuleNotFoundError), no en
+  # un assert -- verificado en un venv limpio antes de escribir esto, no
+  # supuesto. Se instalan las deps en vez de diferir el import para que el
+  # job ejercite la MISMA cadena de imports que carga produccion.
+  facet-health-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest aiomysql pydantic
+      - run: python -m pytest jacobs/_facet_health_test.py -v
+
   output-validator-regression:
     runs-on: ubuntu-latest
     steps:

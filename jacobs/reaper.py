@@ -58,6 +58,7 @@ from pathlib import Path
 import httpx
 
 from jacobs import store
+from jacobs.facet_health import check_facet_health
 from jacobs.models import HTTP_FACETS, PipelineStatus
 
 logger = logging.getLogger("jacobs.reaper")
@@ -453,6 +454,14 @@ async def start_reaper_loop() -> None:
             await reap_orphaned_pipelines()
         except Exception:  # fail-soft: loop de limpieza en background, mismo patron que jax-platform/jax_engine/owner_cleanup.py -- nunca debe tumbar el proceso, el proximo ciclo reintenta
             logger.warning("Reaper: barrido periódico falló", exc_info=True)
+        try:
+            await check_facet_health()
+        except Exception:  # fail-soft: loop de fondo, mismo patron que el barrido de arriba -- nunca debe tumbar el proceso, el proximo ciclo (300s) reintenta
+            logger.error(
+                "Reaper: chequeo de salud de facets FALLO -- el detector no "
+                "corrio en este barrido; no hay salud calculada, no 'todo ok'",
+                exc_info=True,
+            )
         sweep_count += 1
         if sweep_count % RECONCILIATION_CHECK_EVERY_N_SWEEPS == 0:
             await check_usage_reconciliation()
