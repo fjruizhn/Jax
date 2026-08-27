@@ -122,7 +122,7 @@ su fecha de última verificación real, no una nueva.
   avisa. **Primer ítem de la próxima ronda, por decisión explícita de
   Fernando.**
 
-- **`thot` caído en la Mesa web: `_call_openai_compat` manda `max_tokens`,
+- **`thot` caído en la Mesa web — CERRADO 2026-08-27: `_call_openai_compat` mandaba `max_tokens`,
   que `gpt-5.6-terra` rechaza (2026-08-27).** Encontrado durante la
   verificación en vivo del despliegue de gobernanza de `_HTTP_FACETS`, **no
   causado por ella** — probado, no supuesto:
@@ -154,17 +154,27 @@ su fecha de última verificación real, no una nueva.
     camino openai-compat (`gpt-5.6-terra` → nuevo; `deepseek-v4-flash`,
     `glm-5.3`, `kimi-k3` → viejo); sembrar solo el de `thot` habría tumbado
     `jekyll` y `ada`. Verificado en prod post-deploy por SELECT.
-  - **PERO `thot` SIGUE CAÍDO — segundo bug, misma clase, campo contiguo.**
-    Verificado en el chat real post-deploy: el error del nombre desapareció
-    y apareció `HTTP 400: "max_tokens is too large: 131072. This model
-    supports at most 128000 completion tokens"`. El VALOR `131072` también
-    está hardcodeado en `chat.py` y también es propiedad por modelo.
-    **`context_window` NO sirve para derivarlo:** `gpt-5.6-terra` tiene
-    `context_window=1050000` (ventana total) contra un tope de *completion*
-    de 128000 — son hechos distintos, y el segundo no está en el catálogo.
-    Pendiente de decisión de Fernando: columna hermana (`max_output_tokens`)
-    con el mismo contrato que la primera. `hipatia`, `jekyll` y `ada` siguen
-    sin afectar (otros proveedores, valores dentro de sus topes).
+  - **VALOR del tope: ARREGLADO y desplegado (2026-08-27, PR
+    jax-platform#18, merge `35105ae`).** Arreglado el nombre, apareció el
+    valor: `HTTP 400: "max_tokens is too large: 131072. This model supports
+    at most 128000 completion tokens"`. El `131072` también estaba
+    hardcodeado y también es propiedad por modelo. **`context_window` NO
+    servía para derivarlo:** `gpt-5.6-terra` tiene `context_window=1050000`
+    (ventana total) contra un tope de *completion* de 128000 — hechos
+    distintos, y el segundo no estaba en el catálogo. Columna hermana
+    `model.max_output_tokens` (INT), mismo contrato. Se ELIMINÓ la constante
+    `_MAX_OUTPUT_TOKENS` en vez de dejarla como fallback: dejarla era el
+    default silencioso que convertiría al próximo modelo nuevo en otro
+    `thot`, pero mudo. Validación de tipo además de NULL (rechaza `0`,
+    negativos, no-int, `bool`) — el ENUM protege a `max_tokens_param`, un
+    `INT` no protege contra un `0` de un backfill.
+  - **CERRADO — verificado con `thot` RESPONDIENDO, no con el código
+    mergeado (2026-08-27).** Los 4 facets en el chat real de la Mesa web
+    post-deploy: `hipatia` OK, `jekyll` OK, **`thot` OK**, `ada` OK.
+    El ítem no se dio por cerrado hasta ese output, a propósito: el primer
+    despliegue (PR #17) había MOVIDO el error sin arreglar el facet, y solo
+    la verificación en el chat lo dijo. Es la regla de CONTEXT.md ("el
+    código mergeado no es código corriendo") aplicada a un fix.
   - **Lección: el primer despliegue MOVIÓ el error, no arregló el facet.**
     Se dio por "arreglado" hasta que la verificación en el chat real dijo lo
     contrario — la misma regla de CONTEXT.md ("el código mergeado no es
@@ -329,23 +339,26 @@ su fecha de última verificación real, no una nueva.
   del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
   en una ronda aparte.
 
-- **`jax-platform`: suite de tests del backend con 12 failures + 1 error
+- **`jax-platform`: suite de tests del backend con 10 failures + 1 error
   preexistentes en este entorno de desarrollo.** Verificado 2026-08-27
   durante el cierre de gobernanza de `_HTTP_FACETS` (Task 7, integración de
   `_invoke_facet` en `chat.py`): diff contra un stash-baseline muestra
   EXACTAMENTE el mismo conjunto de failures, por nombre, con y sin los
   cambios de esta ronda -- no es una regresión de este trabajo.
-  **Corrección de número (revisión final del branch, mismo día): son 12,
-  no 10.** La cifra de 10 se midió antes de que la rama sumara
-  `tests/test_facet_allowed_callers_migration.py` (3 tests que tocan la DB
-  y caen en el mismo defecto de aislamiento); el conteo quedó viejo, no
-  aparecieron fallas nuevas. Re-verificado con `git stash` sobre el tip de
-  la rama: 12 failed + 1 error ANTES y DESPUÉS de los cambios de la
-  revisión final, conjunto de nombres idéntico (`diff` exacto), 175 → 177
-  passed (los 2 tests nuevos de la revisión). Causa raíz identificada: un
+  **Corrección del número (2026-08-27, medido a mano por el controlador,
+  no heredado de ningún reporte): son 10 + 1, no 12 + 1.** Una revisión
+  intermedia de ese mismo día había escrito 12, argumentando que la cifra
+  de 10 era anterior a los 3 tests de
+  `tests/test_facet_allowed_callers_migration.py`. **Ese 12 no se
+  reproduce.** Contado directamente sobre `master` ya con todo mergeado
+  (incluidos esos 3 tests y los 13 de `max_tokens_param`), dos corridas
+  seguidas: `10 failed, 192 passed, 1 error`, idéntico ambas veces. Se deja
+  registrado el desacuerdo en vez de borrarlo: dos agentes midieron distinto
+  el mismo día, y el número que vale es el que se contó a mano contra el
+  estado actual. Causa raíz identificada: un
   pool de conexiones `aiomysql` reusado entre distintos event loops de
   `asyncio` -- defecto de aislamiento de tests, no defecto de producto.
-  Evidencia directa de eso, no solo inferencia: **los 12 failures y el
+  Evidencia directa de eso, no solo inferencia: **los failures y el
   error pasan TODOS en verde cuando se corren sus archivos por separado**
   (verificado 2026-08-27, archivo por archivo) -- solo fallan cuando
   comparten proceso con el resto de la suite. No existe hoy, para
