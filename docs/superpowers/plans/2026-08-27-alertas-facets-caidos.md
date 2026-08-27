@@ -1726,6 +1726,51 @@ Expected: filas con `source='canary_periodic'` para los 6 facets.
 Es el criterio de aceptación del §5 del spec: si `kimi` **no** aparece
 caído, la v1 tiene un hueco. **PARAR y reportar.**
 
+- [ ] **Step 5b: Cerrar el ⚠️ de `aiomysql` con `%s` sobre `DOUBLE`**
+
+Quedó explícitamente **sin verificar** en la Task 2: no hay MariaDB en el
+entorno de CI, así que nadie comprobó nunca que el `float` de `time.time()`
+llegue bien a una columna `DOUBLE` por el placeholder `%s`. El patrón
+replica el de `model_catalog.py`, que sí corre en producción, pero eso es
+una analogía, no una comprobación.
+
+```sql
+SELECT facet, outcome, ts, FROM_UNIXTIME(ts) AS legible,
+       ts = ROUND(ts) AS parece_entero
+FROM facet_health_event ORDER BY id DESC LIMIT 5;
+```
+
+Expected: `ts` con parte decimal (`parece_entero` = 0), y `FROM_UNIXTIME(ts)`
+dando una fecha de hoy, no 1970 ni NULL. **Pegar la salida real en el
+reporte.** Si `ts` llega truncado a entero o como 0, el epoch se está
+perdiendo en la conversión y las ventanas del lector van a fallar de forma
+sutil — **PARAR y reportar**.
+
+- [ ] **Step 5c: Cerrar el ⚠️ del log en `journalctl`**
+
+También quedó sin verificar en la Task 2: que `logger.warning` con el
+prefijo `facet_health_write_failed` **efectivamente llegue al journal**
+depende de la configuración de logging de uvicorn, que no está en ningún
+diff de esta ronda. Un rastro observable que no se puede leer no es
+observable.
+
+Forzar un fallo del escritor y confirmar que aparece:
+```bash
+journalctl -u jax-platform --since "10 min ago" | grep -c facet_health_write_failed
+curl -s localhost:8080/api/health | python3 -m json.tool | grep -A3 facet_health_writer
+```
+
+Expected: el `grep -c` devuelve un número **mayor que 0**, y el endpoint
+muestra `write_failures` con ese mismo valor. **Pegar las dos salidas
+reales en el reporte.** Si el contador del endpoint sube pero el journal no
+muestra nada, el log no está llegando: el rastro depende entonces de un
+solo canal, y eso hay que decirlo, no descubrirlo el día que falle.
+
+**Estos dos steps no son opcionales ni "se cubren con el deploy".** Si el
+deploy pasa y nadie los mira, los dos ⚠️ quedan abiertos con apariencia de
+cerrados — que es exactamente el patrón que esta ronda entera existe para
+eliminar.
+
 - [ ] **Step 6: Romper el gate a propósito — `gate_denied`**
 
 Guardar el valor original **antes** de tocarlo, para poder revertir con el
@@ -1770,6 +1815,23 @@ Expected: mensaje recibido. `send_telegram_alert` devuelve
 `{ok, message_id, error}`; verificar `ok=True` en el log, no asumirlo.
 
 ---
+
+## Minors diferidos — triaje obligatorio en la revisión final de rama
+
+No entran al fix loop de su task, pero **no se pierden**: la revisión final
+los triajea y decide cuáles se arreglan antes de mergear.
+
+- **Task 2 — `_DETAIL_MAX` significa dos cosas.** Se usa para truncar el
+  campo `detail` de la fila (límite del ENUM/columna, 255) **y** para
+  truncar `_last_write_error` en memoria (límite de higiene, arbitrario).
+  Son dos límites conceptualmente distintos con el mismo nombre. Hoy es
+  cosmético y no afecta corrección.
+
+  **Por qué se anota y no se descarta:** un nombre que significa dos cosas
+  es cómo empezó `facet_binding.model_id` — el día que uno de los dos
+  límites tenga que cambiar, cambiarlo mueve el otro sin que nadie lo pida.
+  Si se arregla: dos constantes con nombres distintos, no un comentario
+  aclarando cuál es cuál.
 
 ## Self-Review
 
