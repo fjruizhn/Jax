@@ -124,6 +124,35 @@ su fecha de última verificación real, no una nueva.
   avisa. **Primer ítem de la próxima ronda, por decisión explícita de
   Fernando.**
 
+- **`facet_resolver._cache` replicado en TRES procesos; solo uno se invalida
+  al rebindear (2026-08-27).** `facet_resolver.py` está espejado a propósito
+  en `jax-platform/backend`, `jax/core` y `jax/las_manos` — el patrón
+  declarado de "sin paquete compartido", cada repo con su conector mínimo.
+  Cada espejo tiene **su propio `_cache` en su propio proceso**, con
+  `FACET_CACHE_TTL_SECONDS` (default 30 s).
+
+  La Task 5 de la ronda de alertas agregó `invalidate_facet_cache()` y la
+  llama desde `probe_after_rebind`, así que tras aprobar un binding el
+  proceso de `jax-platform` ve el modelo nuevo de inmediato. **Los otros dos
+  no.** Jacobs (`las_manos`) y el REPL (`jax/core`) pueden seguir
+  despachando contra el binding **viejo** hasta 30 s después del rebind, y
+  la sonda no lo puede ver: sondea por el camino de Mesa web, que es el
+  único invalidado.
+
+  **Por qué importa y no es teórico:** es el mismo estado replicado en tres
+  lugares con un solo escritor de invalidación — la forma exacta que ya
+  produjo el incidente de `motor.model_ref` (2026-08-19 y de nuevo el
+  08-24, documentado en el docstring de `approve_proposal`) y las 4 fuentes
+  de verdad de capabilities que el Bloque 3 tuvo que colapsar. Ventana
+  chica (30 s) pero determinística, y justo en el momento de mayor riesgo:
+  inmediatamente después de un cambio de modelo.
+
+  **Qué haría falta (no diseñado):** una señal de invalidación entre
+  procesos, o bajar el TTL a costa de más queries, o aceptar la ventana
+  explícitamente y documentarla donde el operador la vea. No se resuelve
+  hoy — queda con el caso concreto. Descubierto por la revisión de la
+  Task 5, no buscado.
+
 - **Bypass de admin en el ruleset de `master`: la única barrera contra un
   merge en rojo es que alguien se acuerde de mirar (2026-08-27).** Los dos
   repos tienen protección de `master` con bypass para admin (ver
