@@ -24,6 +24,32 @@ caminos de salida. Hacia afuera son casi indistinguibles:
 | 5 | Sin binding activo | `("⚠️ … sin binding activo configurado.", None)` | ninguno |
 | 6 | Transporte no soportado | `("⚠️ … transporte 'X' no soportado…", None)` | ninguno |
 
+### 1.1.b El estado 2 son en realidad DOS, con dueños y acciones distintas
+
+Enmienda del 2026-08-27, salida de la revisión de la Task 3. Lo que la fila
+2 llama "error del proveedor" mezcla dos causas opuestas:
+
+- **Falla real del proveedor.** OpenAI/Gemini/DeepSeek devuelven 5xx, la red
+  se cae, el modelo desaparece. **No es nuestro.** La acción es esperar,
+  reintentar o cambiar de proveedor.
+- **Falla de configuración nuestra.** `ModelDispatchConfigError`
+  (`api/chat.py:544`) se lanza cuando el catálogo `model` no declara un dato
+  que el dispatch necesita: `max_tokens_param` o `max_output_tokens` en NULL
+  para el modelo rebindeado. **Es nuestro.** La acción es sembrar la fila.
+
+Conflacionarlos produce **una alerta que afirma algo que no verificó**:
+diría "el proveedor está caído" cuando la causa es que sembramos mal una
+fila. Y no es el caso raro — la sonda por rebinding (§2.4) existe justamente
+para el escenario de un binding recién aprobado, que es cuando aparece un
+`max_tokens_param` sin sembrar.
+
+Por eso el `outcome` los separa: **`provider_error`** y **`config_error`**.
+
+Alcance verificado, no supuesto: `CredentialUnavailableError` **ya** se
+envuelve en `FacetUnavailableError` (`facet_resolver.py:137`), así que una
+credencial faltante cae en `unbound` y nunca llegó a `provider_error`.
+`ModelDispatchConfigError` es la única clase nuestra que se colaba.
+
 **Conclusión central: ninguna señal estructurada distingue 2 a 6.** Los
 estados 3 y 4 sí están separados, pero **únicamente en el texto libre de
 dos `logger.warning`** (`chat.py:819-836`; el comentario del código
@@ -156,7 +182,8 @@ CREATE TABLE facet_health_event (
   id      BIGINT AUTO_INCREMENT PRIMARY KEY,
   facet   VARCHAR(50) NOT NULL,
   outcome ENUM('ok','provider_error','gate_denied','gate_unreachable',
-               'unbound','unsupported_transport','probe_error') NOT NULL,
+               'unbound','unsupported_transport','probe_error',
+               'config_error') NOT NULL,
   source  ENUM('chat','canary_periodic','canary_rebind') NOT NULL,
   detail  VARCHAR(255) NULL,
   ts      DOUBLE NOT NULL,

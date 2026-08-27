@@ -818,6 +818,143 @@ git commit -m "feat(health): instrumentar _invoke_facet con outcome tipado por c
 
 ---
 
+## Task 3.5 — Separar `config_error` y colapsar la duplicación de outcomes
+
+Agregada 2026-08-27 tras la revisión de la Task 3. **Va antes de la Task 4**
+porque la sonda es donde esta distinción se materializa más seguido.
+
+**Files:**
+- Modify: `jax-platform/backend/db/migrations.py` (`_ENUM_EXTENSIONS`)
+- Modify: `jax-platform/backend/facet_health.py` (constantes con nombre)
+- Modify: `jax-platform/backend/api/chat.py` (clasificación + sin literales)
+- Modify: `jax-platform/backend/tests/test_facet_health_outcomes.py`
+- Test: `jax-platform/backend/tests/test_facet_health_writer.py`
+
+### Parte A — `config_error`
+
+`provider_error` conflaciona dos causas con **dueños y acciones opuestas**:
+una caída real del proveedor (no es nuestra, se espera o se reintenta) y
+`ModelDispatchConfigError` (es nuestra, se siembra la fila). La alerta
+diría "el proveedor está caído" cuando sembramos mal una fila: **una alerta
+que afirma algo que no verificó** — el patrón que esta ronda cierra.
+
+Verificado, para acotar el alcance: `CredentialUnavailableError` **ya** se
+envuelve en `FacetUnavailableError` (`facet_resolver.py:137`) y cae en
+`unbound`. `ModelDispatchConfigError` es la única clase nuestra que se
+colaba.
+
+- [ ] **Step A1: Extender el ENUM por el camino que ya existe**
+
+`_ENUM_EXTENSIONS` (`migrations.py:1223`) tiene el formato
+`(tabla, columna, valor, ddl)` y su guarda `_enum_has_value`, así que es
+idempotente igual que `_TABLES`. Agregar:
+
+```python
+    (
+        "facet_health_event", "outcome", "config_error",
+        "ALTER TABLE facet_health_event MODIFY COLUMN outcome "
+        "ENUM('ok','provider_error','gate_denied','gate_unreachable',"
+        "'unbound','unsupported_transport','probe_error','config_error') NOT NULL",
+    ),
+```
+
+**No editar el `CREATE TABLE` original**: una instalación existente ya tiene
+la tabla creada y `_table_exists` la saltea, así que el `CREATE` nunca
+volvería a correr. El `ALTER` es el único camino que alcanza a las dos.
+Igual hay que agregar `config_error` **también** al `CREATE` para que una
+DB nueva nazca con el valor — el `ALTER` la deja igual, por idempotencia.
+
+- [ ] **Step A2: Clasificar en el envoltorio**
+
+En `_invoke_facet`, antes del `except Exception` genérico:
+
+```python
+    except ModelDispatchConfigError as e:
+        await record_facet_health(
+            facet, OUTCOME_CONFIG_ERROR, source, f"{type(e).__name__}: {e}")
+        raise            # re-lanza igual: sigue siendo fail-closed
+```
+
+El orden importa: `ModelDispatchConfigError` hereda de `RuntimeError`, así
+que un `except Exception` puesto antes se lo comería.
+
+### Parte B — colapsar la duplicación
+
+El conjunto de outcomes vive hoy en cuatro lugares: el ENUM de la DB, el
+`frozenset` de `facet_health.py`, literales sueltos en `chat.py` y literales
+sueltos en los tests. **No abrimos una quinta fuente de verdad el mismo mes
+en que el Bloque 3 colapsó cuatro a una.**
+
+- [ ] **Step B1: Constantes con nombre en `facet_health.py`**
+
+```python
+OUTCOME_OK = "ok"
+OUTCOME_PROVIDER_ERROR = "provider_error"
+OUTCOME_CONFIG_ERROR = "config_error"
+OUTCOME_GATE_DENIED = "gate_denied"
+OUTCOME_GATE_UNREACHABLE = "gate_unreachable"
+OUTCOME_UNBOUND = "unbound"
+OUTCOME_UNSUPPORTED_TRANSPORT = "unsupported_transport"
+OUTCOME_PROBE_ERROR = "probe_error"
+
+OUTCOMES = frozenset({
+    OUTCOME_OK, OUTCOME_PROVIDER_ERROR, OUTCOME_CONFIG_ERROR,
+    OUTCOME_GATE_DENIED, OUTCOME_GATE_UNREACHABLE, OUTCOME_UNBOUND,
+    OUTCOME_UNSUPPORTED_TRANSPORT, OUTCOME_PROBE_ERROR,
+})
+```
+
+`chat.py` y los tests importan estas constantes. **Cero literales de outcome
+fuera de este archivo.**
+
+- [ ] **Step B2: Guarda mecánica contra la DB**
+
+El ENUM de la DB no se puede derivar en import time (el CI no tiene DB), así
+que la coincidencia se verifica leyendo el DDL como texto:
+
+```python
+def test_el_ENUM_de_la_DB_coincide_exacto_con_OUTCOMES():
+    """Cuarta fuente de verdad cerrada mecánicamente. El ENUM y el frozenset
+    no se pueden derivar uno del otro sin una DB, así que se comparan."""
+    import re, db.migrations as m
+    valores = set(re.findall(r"'([a-z_]+)'",
+        re.search(r"outcome ENUM\(([^)]+)\)", m.CREATE_FACET_HEALTH_EVENT).group(1)))
+    for _t, _c, valor, _ddl in m._ENUM_EXTENSIONS:
+        if _t == "facet_health_event" and _c == "outcome":
+            valores.add(valor)
+    assert valores == facet_health.OUTCOMES
+```
+
+Expected: pasa. **Si falla, el ENUM y el frozenset divergieron — PARAR.**
+
+- [ ] **Step B3: Comentario en el test del gate**
+
+`test_los_dos_estados_del_gate_NO_colapsan_entre_si` assertea
+`texto_a == texto_b`. Eso congela una **decisión de producto** como
+invariante de test. Agregar arriba de esa línea:
+
+```python
+    # Esta asercion protege que el gate sea INVISIBLE al usuario: hoy los dos
+    # estados muestran el mismo mensaje a proposito. Si manana se decide
+    # diferenciarlos -- una mejora legitima -- este test cambia POR DECISION,
+    # no por regresion. No lo "arregles" si lo ves rojo: primero averigua si
+    # alguien cambio el mensaje a proposito. La asercion que NO se toca es la
+    # de la linea siguiente: los outcome tienen que seguir difiriendo.
+```
+
+- [ ] **Step B4: Verificar y commitear**
+
+```bash
+cd /home/fruiz/jax-platform/backend
+JAX_CI_NO_DB=1 .venv/bin/python -m pytest -q
+grep -rn "'provider_error'\|\"provider_error\"" api/chat.py
+```
+Expected: la suite no baja de 84 passed, y el `grep` sobre `chat.py` **no
+devuelve nada** (los literales se fueron a constantes). Si el piso del CI
+queda por debajo del nuevo total, subirlo en `policy.yml`.
+
+---
+
 ## Task 4 — La sonda
 
 **Files:**
