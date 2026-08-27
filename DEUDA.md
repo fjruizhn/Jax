@@ -339,13 +339,20 @@ su fecha de última verificación real, no una nueva.
   formulario no rompe nada si lo hicieran -- pero es una superficie que no
   existía antes de esta sesión. Sin urgencia.
 
-- **Require PR pendiente de activar sobre `master`** — bloqueado por el
-  plan de GitHub (Require PR nativo no disponible sin upgrade a Pro); el
-  ruleset con "Allow specified actors to bypass required pull requests"
-  sí está disponible en público gratis, pero no verificado en vivo
-  todavía (declarado como inferencia de documentación, no hecho probado).
-  Parte del procedimiento de apertura pública (B1.5, `jax-block1-apertura-repos-cierre`
-  en memoria), pendiente del clic de Fernando.
+- **Require PR sobre `master` — CERRADO 2026-08-27.** Ambos repos
+  (`Jax`, `jax-platform`) hechos públicos por Fernando, después ruleset
+  `master-protection` creado en los dos (`Settings → Rules → Rulesets`):
+  target `~DEFAULT_BRANCH`, reglas `deletion` + `non_fast_forward` +
+  `pull_request` (0 approvals requeridos), bypass actor
+  `RepositoryRole` id 5 (admin) en modo `always` — Fernando conserva push
+  directo, todo lo demás pasa por PR. Verificado en vivo por API
+  (`gh api repos/fjruizhn/{Jax,jax-platform}/rulesets`) en ambos repos,
+  `enforcement: active`. La duda sobre el plan gratis quedó resuelta:
+  confirmado por 403 real de la API que `branch protection`/`rulesets`
+  requieren Pro O repo público — al hacerlos públicos, ambas features se
+  habilitaron gratis. Nota de UI: en repo personal (no de organización)
+  el bypass list no ofrece buscar por username, solo roles — hay que
+  elegir "Repository admin", no buscar "fjruizhn".
 
 - **14 (en verdad 18) tests de `las_manos` fallaban por `host='localhost'`
   en vez de `127.0.0.1:3308` — CERRADO 2026-08-24.** Mismo patrón que el
