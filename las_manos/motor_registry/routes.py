@@ -22,8 +22,11 @@ import tomllib
 from fastapi import APIRouter, HTTPException
 
 from motor_registry.catalog import MotorCatalog
+from motor_registry.facet_policy import check_facet_admission
 from motor_registry.job_store import JobStore
 from motor_registry.models import (
+    FacetAuthorizeRequest,
+    FacetAuthorizeResponse,
     JobStatus,
     MotorDispatchRequest,
     MotorDispatchResponse,
@@ -157,6 +160,16 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
         capability=req.capability,
         trace_id=req.trace_id,
     )
+
+
+@router.post("/authorize-facet", response_model=FacetAuthorizeResponse)
+async def authorize_facet(req: FacetAuthorizeRequest) -> FacetAuthorizeResponse:
+    """Sincrono, sin job ni polling -- solo corre check_facet_admission()
+    y devuelve el veredicto. Usado por jax-platform (Mesa web) antes de
+    despachar a un facet HTTP-directo -- ver docs/superpowers/specs/
+    2026-08-27-http-facets-motor-policy-governance-design.md."""
+    allowed, reason = await check_facet_admission(req.caller, req.facet)
+    return FacetAuthorizeResponse(allowed=allowed, reason=reason)
 
 
 @router.get("/job/{job_id}", response_model=MotorJobView)
