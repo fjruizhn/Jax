@@ -165,6 +165,42 @@ su fecha de última verificación real, no una nueva.
   hoy — queda con el caso concreto. Descubierto por la revisión de la
   Task 5, no buscado.
 
+- **Una BackgroundTask que lanza aborta en silencio las encoladas DESPUÉS
+  en la misma request (2026-08-27).** Latente hoy, no roto: ningún endpoint
+  encola dos tareas todavía. Se documenta porque el día que alguien encole
+  una segunda, desaparece sin dejar rastro y nada lo va a avisar.
+
+  **Verificado empíricamente**, no leído en la documentación de Starlette:
+  con el FastAPI de `jax-platform/backend/.venv` y un `TestClient` real, un
+  endpoint que encola `explota()` y después `segunda()` corre `explota()`,
+  la excepción propaga, y `segunda()` **nunca corre**. No es una propiedad
+  de nuestro código: es cómo `BackgroundTasks` de Starlette ejecuta la
+  cadena — secuencial, sin aislamiento entre tareas.
+
+  **Qué lo activa, concretamente:** hoy hay dos sitios que usan el
+  mecanismo, cada uno con UNA sola tarea —
+  `probe_after_rebind` desde los dos escritores de `facet_binding`
+  (`api/admin/models.py`, `api/admin/facet_bindings.py`, Task 5) y
+  `run_shadow_validation` desde `api/chat.py:1042`. El bug aparece en
+  cuanto uno de esos endpoints encole una segunda tarea y la primera pueda
+  lanzar. `probe_after_rebind` hoy no lanza — todo su cuerpo está en un
+  `try` que registra `probe_error` — pero esa es una propiedad de esa
+  función, no una garantía del mecanismo: no hay nada que impida encolar
+  mañana una tarea sin ese `try` delante de otra.
+
+  **Por qué no se ve cuando pasa:** bajo uvicorn la respuesta ya se emitió
+  cuando corren las tareas. El cliente ve 200. El traceback de la que lanzó
+  queda solo en `journalctl`; de la que nunca corrió no queda **nada** —
+  ni log, ni fila, ni error. Es el mismo modo de falla que la ronda de
+  alertas vino a eliminar, en otro mecanismo.
+
+  **Qué haría falta (no diseñado):** envolver cada tarea en su propio
+  `try/except` antes de encolarla (un helper `safe_task()` en vez de
+  `add_task` crudo), o un test de política que falle si un endpoint encola
+  más de una sin ese envoltorio. Descubierto al responder una pregunta de
+  revisión de Task 5 sobre qué pasa si `probe_after_rebind` lanza dentro de
+  una BackgroundTask, no buscado.
+
 - **Bypass de admin en el ruleset de `master`: la única barrera contra un
   merge en rojo es que alguien se acuerde de mirar (2026-08-27).** Los dos
   repos tienen protección de `master` con bypass para admin (ver
