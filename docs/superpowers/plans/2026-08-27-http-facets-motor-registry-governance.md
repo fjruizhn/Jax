@@ -989,7 +989,7 @@ Este archivo confirma el camino feliz contra datos reales (jax_memory_test debe 
 - [ ] **Step 5: Correr ambos**
 
 Run: `cd /home/fruiz/jax && .venv/bin/python -m pytest tests/test_validate_capability_typed.py -v && PYTHONPATH=/home/fruiz/jax .venv/bin/python -m unittest jacobs._http_facet_admission_test -v`
-Expected: todo `OK`/passed, incluidos los 2 tests de `HttpFacetAdmissionFailClosedTest`... espera, es 1 test de esa clase — `OK` con 2 tests totales en el archivo (`HttpFacetAdmissionTest` + `HttpFacetAdmissionFailClosedTest`).
+Expected: todo `OK`/passed — 2 tests totales en el archivo (1 de `HttpFacetAdmissionTest` + 1 de `HttpFacetAdmissionFailClosedTest`).
 
 - [ ] **Step 6: Commit**
 
