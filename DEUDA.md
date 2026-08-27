@@ -76,6 +76,52 @@ su fecha de última verificación real, no una nueva.
   a `jax-platform` llamando un endpoint que ya no existe, y recrea la
   misma caída de los 4 facets.
 
+- **No existe ninguna señal que avise cuando un facet deja de responder
+  (2026-08-27).** El ítem operativo más importante que dejó esta ronda, y el
+  complemento de la lección de método de CONTEXT.md ("verificar el estado
+  desplegado antes de declarar cerrado").
+
+  **Qué señal existe hoy: NINGUNA.** No es "existe pero es débil". Verificado
+  al diagnosticar la caída de `thot`:
+  - `/health` de `jax-platform` reporta `las_manos: alive|down` — la
+    salud del *servicio*, no la de cada facet. Con `las_manos` arriba y los
+    4 facets caídos, `/health` dice que todo está bien.
+  - `facet.status` (`active`/`degraded`/`disabled`) es un campo de
+    configuración: lo escribe un humano o un admin, nadie lo deriva de que
+    las llamadas estén fallando. Hoy `thot` figura `active` estando roto.
+  - `model.status` (`available`/`degraded`/...) lo mueve el sync del
+    catálogo contra `/v1/models` del proveedor — dice si el proveedor
+    todavía OFRECE el modelo, no si nuestras llamadas a él funcionan. El
+    modelo de `thot` existe y responde: lo que falla es el contrato de
+    parámetros de NUESTRA llamada. Ese sync jamás lo vería.
+  - Los errores por turno de chat se propagan al usuario y quedan en
+    `journalctl`. Nada los cuenta, los agrega ni los alerta.
+
+  **Consecuencia medida, no hipotética:** `thot` estuvo **3 días** caído en
+  la Mesa web (roto el 2026-08-24 al rebindearse a `gpt-5.6-terra`,
+  descubierto el 2026-08-27) y solo se detectó porque el despliegue de otra
+  cosa incluyó un paso de verificación manual en el chat real. Sin ese paso
+  seguiría caído.
+
+  **Por qué BLOQUEA:** "verificar el estado desplegado antes de declarar
+  cerrado" es una regla que hoy solo se cumple cuando alguien se acuerda de
+  mirar. Todo lo que se cerró esta semana — la gobernanza de `_HTTP_FACETS`,
+  el gate fail-closed de Mesa web, el sandbox de Hyde — puede romperse en
+  silencio exactamente igual que `thot`, y el modo de falla de un gate
+  fail-closed es *denegar todo*: se vería idéntico a "el facet no responde".
+  Sin detección, un fail-closed que se dispara por error es indistinguible
+  de uno que funciona.
+
+  **Qué haría falta (no diseñado todavía, es la próxima ronda):** una señal
+  derivada del tráfico real, no de configuración — algo que cuente
+  éxito/fallo por facet en la ventana reciente y alerte cuando un facet que
+  venía respondiendo deja de hacerlo. Los dos chokepoints de salida ya
+  existen y son únicos (`_invoke_facet` en Mesa web, `_dispatch_step` en
+  Jacobs), así que el lugar donde instrumentar no es la incógnita; la
+  incógnita es dónde vive el estado, cuál es el umbral y por qué canal
+  avisa. **Primer ítem de la próxima ronda, por decisión explícita de
+  Fernando.**
+
 - **`thot` caído en la Mesa web: `_call_openai_compat` manda `max_tokens`,
   que `gpt-5.6-terra` rechaza (2026-08-27).** Encontrado durante la
   verificación en vivo del despliegue de gobernanza de `_HTTP_FACETS`, **no
