@@ -25,7 +25,7 @@ caminos protegidos y el tercero sin guard.
   server-side, dentro de `las_manos`, solo cuando `_invoke_motor` llama a
   `POST /motor/dispatch`. Jacobs solo pre-valida NIVEL A/B (existencia +
   `allowed_motors`/`allowed_callers` parcial) antes de ese HTTP.
-- `Jacobs corre DENTRO del proceso de `las_manos`**: `jax-las-manos.service`
+- **Jacobs corre DENTRO del proceso de `las_manos`**: `jax-las-manos.service`
   arranca `uvicorn server:app` con `WorkingDirectory=/home/fruiz/jax/las_manos`,
   y `las_manos/jacobs` es un symlink real a `/home/fruiz/jax/jacobs` — mismo
   intérprete, mismo proceso. Jacobs puede importar `motor_registry.policy`/
@@ -108,23 +108,66 @@ NIVEL A (mensaje `str`, no reenrutable — mismo criterio que el resto de
 que ya usa `/motor/dispatch` para `kimi`/`jax_local` — Step.input es el
 dict equivalente de contexto para un step de Jacobs.
 
-### 3. Nuevo endpoint `POST /motor/authorize` en `las_manos`
+### 3. CORREGIDO — Mesa web NO tiene concepto de `capability`, y `check_capability_admission()` no aplica ahí
 
-Síncrono, sin job ni polling — corre `check_capability_admission()` y
-devuelve `{"allowed": bool, "reason": str}`. Mismo patrón de request/response
-que ya conoce este servicio, pero sin crear ningún job.
+**Esta sección del spec original afirmaba algo falso, sin verificarlo.**
+Decía "`capability`: la que resuelva el facet" — no existe tal resolución.
+Verificado leyendo `chat.py` completo: un turno de chat es texto libre
+(`req.message`) enrutado a un facet por keyword-matching (`_WEB_TIEBREAK`,
+`_HIPATIA_KW`/`_JEKYLL_KW`/`_THOT_KW`/`_ADA_KW`, líneas 302-307). No hay
+NINGÚN mapeo facet→capability en `jax-platform` (`grep -n
+"\"hipatia\"\|\"jekyll\"\|\"thot\"\|\"ada\"" backend/*.py backend/api/*.py`
+→ solo keyword-routing y strings de UI, cero relación con `capability`).
+`research`/`analysis`/`design`/`reconcile`/`validate_consistency` son
+capabilities de **step de pipeline** (un objetivo concreto con output
+esperado) — no de "tener una conversación". Inventar cuál correspondería a
+cada facet habría sido autorizar contra una capability ficticia — la
+instancia número diez del patrón "código que afirma algo que no hace",
+fabricada dentro del PR que viene a cerrar gobernanza. Descartado.
 
-### 4. Mesa web (`jax-platform/backend/api/chat.py::_invoke_facet`)
+**La pregunta correcta para Mesa web no es "¿está autorizada la capability
+X?" — es "¿puede `jax_platform_chat` hablar con el facet `ada`?".** Es un
+check de nivel FACET, no de nivel CAPABILITY, y **no reusa
+`check_capability_admission()`** — es una función nueva y más chica,
+`check_facet_admission(caller, facet)`, que no toca la tabla `capability`
+en absoluto.
 
-Antes de despachar a `hipatia`/`jekyll`/`thot`/`ada`: `POST` a
-`http://127.0.0.1:7777/motor/authorize` con
-`{"caller": "jax_platform_chat", "capability": <la que resuelva el facet>,
-"context_keys": [], "recursion_depth": 0, "human_gate_token": null}`.
+**Dónde vive el dato (Requisito 2 — fuente única, no un dict hardcodeado):**
+columna nueva `facet.allowed_callers`, mismo estilo que `capability.allowed_callers`
+pero NULLABLE (mirror exacto del patrón ya existente de
+`capability.forbidden_paths`: `LONGTEXT ... NULL CHECK (allowed_callers IS
+NULL OR json_valid(allowed_callers))`). La tabla `facet` ya existe
+(`jax-platform/backend/db/migrations.py:222-238`, `CREATE_FACET`, una fila
+por facet — confirmado en vivo: 7 filas hoy, `ada`/`hipatia`/`hyde`/
+`jax_local`/`jekyll`/`kimi`/`thot`) — es la fuente única y correcta para un
+dato por-facet, mismo lugar donde ya viven `max_latency_ms`/
+`max_cost_per_1k_usd` (otro ítem abierto de `DEUDA.md`, sin relación con
+este). NULL en vez de `[]` a propósito: para los 3 facets fuera de alcance
+(`hyde`, `jax_local`, `kimi`) no se fabrica un valor — se declara "sin
+configurar" explícitamente, y el check fail-closed trata NULL como
+denegación, no como "lista vacía = nadie" ambiguo con "no configurado
+todavía".
 
-`context_keys=[]`: el payload de un turno de chat es texto libre
-(`req.message`), no un dict con claves nombradas — no hay equivalente real
-de "contexto con posibles secretos" que mapear ahí, a diferencia de
-`step.input` en Jacobs. Documentado, no fabricado.
+`check_facet_admission()` vive en `las_manos/motor_registry/facet_policy.py`
+(archivo nuevo, responsabilidad propia — no entra en `policy.py`, que es
+"puro, sin I/O", y esta función SÍ hace una query): consulta
+`facet.allowed_callers`, `NULL` o caller ausente → `(False, razón)`.
+
+### 4. Nuevo endpoint `POST /motor/authorize-facet` en `las_manos`
+
+Síncrono, sin job ni polling — corre `check_facet_admission()` y devuelve
+`{"allowed": bool, "reason": str}`. Nombre explícito (`-facet`, no
+`/motor/authorize` genérico) para no confundirlo con una futura variante a
+nivel capability que hoy nadie necesita (Jacobs usa el import directo,
+sección 2 — no hace falta exponer `check_capability_admission()` por HTTP
+para nada en esta ronda).
+
+### 5. Mesa web (`jax-platform/backend/api/chat.py::_invoke_facet`)
+
+Antes de despachar, **solo si `facet in {"hipatia","jekyll","thot","ada"}`**
+(kimi/jax_local/hyde no se tocan — mismo alcance de siempre): `POST` a
+`http://127.0.0.1:7777/motor/authorize-facet` con
+`{"caller": "jax_platform_chat", "facet": facet}`.
 
 **Fail-closed (Requisito 3):** timeout, error HTTP, o respuesta
 inesperada de `las_manos` → Mesa web deniega, no despacha. Nunca "no pude
@@ -136,14 +179,25 @@ verificar, sigo igual" — P10 lo prohíbe explícitamente.
 que llama). Consistente con `"jacobs"` como caller (nombre del módulo que
 despacha, no "pipelines" ni "Jacobs Director").
 
-### 5. Migración de datos — ANTES de activar el enforcement
+### 6. Migración de datos — ANTES de activar el enforcement
 
-`UPDATE capability SET allowed_callers = JSON_ARRAY_APPEND(allowed_callers, '$', 'jax_platform_chat')`
-sobre las 5 filas relevantes (`research`, `analysis`, `design`, `reconcile`,
-`validate_consistency`) — mismo acceso que Mesa web ya tiene hoy a los 4
-facets, sin restringir ni ampliar nada (Requisito 4). El enforcement se
-activa DESPUÉS de esta migración, nunca antes — si se invierte el orden,
-Mesa web se rompe el día del deploy.
+Una sola migración, en `jax-platform` (`facet.allowed_callers` es la única
+columna nueva que este diseño necesita — `jax_platform_chat` NUNCA se
+agrega a `capability.allowed_callers`, porque nada en este diseño llama
+`check_capability_admission()` con ese caller; Mesa web no toca `capability`
+en absoluto desde la corrección de la sección 3). Mismo patrón idempotente
+que `_fix_file_write_gate_and_auditor` (guarda `WHERE`, no pisa un valor
+manual futuro):
+
+```sql
+UPDATE facet SET allowed_callers = JSON_ARRAY('jacobs', 'jax_platform_chat')
+WHERE `key` IN ('hipatia', 'jekyll', 'thot', 'ada') AND allowed_callers IS NULL;
+```
+
+Mismo acceso que existe hoy (nadie estaba bloqueado, ahora queda explícito),
+sin restringir ni ampliar nada (Requisito 4/5). El enforcement se activa
+DESPUÉS de esta migración, nunca antes — si se invierte el orden, Mesa web
+se rompe el día del deploy.
 
 ## Testing (Requisitos 1 y 2, no negociables)
 
@@ -157,12 +211,19 @@ Mesa web se rompe el día del deploy.
    - `kimi`/`jax_local` vía `check()` completo (ya debería existir cobertura
      parecida; confirmar que sigue pasando post-split).
    - Jacobs-HTTP: un caller ficticio sin `"jacobs"` en `allowed_callers`
-     de una capability HTTP → `validate_capability()` rechaza el step.
-   - Mesa-web-HTTP: mismo caso contra `check_capability_admission()`
-     llamada por `/motor/authorize`, Y un test de integración liviano que
-     confirme que `_invoke_facet` deniega cuando `/motor/authorize`
-     responde `allowed=False` O cuando la llamada falla/hace timeout
-     (fail-closed, Requisito 3 — ambos casos, no solo el explícito).
+     de una capability HTTP → `validate_capability()` rechaza el step
+     (vía `check_capability_admission()`).
+   - Mesa-web-HTTP: **dos tests separados**, porque son dos capas
+     distintas:
+     - `check_facet_admission()` en aislamiento: un facet con
+       `allowed_callers` que no incluye `jax_platform_chat` (o `NULL`) →
+       `(False, razón)`.
+     - Integración en `chat.py`: `_invoke_facet` deniega cuando
+       `/motor/authorize-facet` responde `allowed=False` **Y** cuando la
+       llamada falla/hace timeout — este segundo caso simula `las_manos`
+       caído de verdad (conexión rechazada, no un mock que devuelve un
+       error prolijo), fail-closed (Requisito 3), es el test que prueba
+       que el gate gatea cuando más importa.
 3. **Verificación en vivo post-cambio (Requisito 4):** con el enforcement
    activo y la migración de `allowed_callers` aplicada, confirmar en el chat
    real de la Mesa web que los 4 facets (hipatia/jekyll/thot/ada) siguen
@@ -178,21 +239,42 @@ Mesa web se rompe el día del deploy.
   que el techo se está imponiendo cuando no es cierto.
 - **`capability.sandbox_only`:** columna sin lector, marcada vestigial en
   schema/`DEUDA.md`, no borrada, sin semántica nueva inventada.
-- **`human_gate_token` para HTTP-directo:** ninguna de las 5 capabilities
-  requiere human gate hoy (`requires_human_gate=0` en las 5 filas), así que
-  el check pasa trivialmente. Si algún día se pone `requires_human_gate=1`
-  en alguna de ellas, el dispatch HTTP-directo (Jacobs o Mesa web) empezará
-  a rechazar TODO — correcto por fail-closed (no hay mecanismo de pasar un
-  token real por ninguno de los dos caminos hoy), pero vale dejarlo anotado
-  para que no sorprenda el día que pase.
+- **`human_gate_token` para el camino de Jacobs:** ninguna de las 5
+  capabilities requiere human gate hoy (`requires_human_gate=0` en las 5
+  filas), así que el check pasa trivialmente. Si algún día se pone
+  `requires_human_gate=1` en alguna de ellas, Jacobs-HTTP empezará a
+  rechazar TODO — correcto por fail-closed (no hay mecanismo de pasar un
+  token real hoy), pero vale dejarlo anotado para que no sorprenda.
+- **Mesa web: `requires_human_gate`, `recursion_depth`, claves prohibidas,
+  y techo de timeout — los cuatro son N/A por diseño, no "se saltearon".**
+  Después de la corrección de la sección 3, Mesa web valida por FACET
+  (`check_facet_admission`), no por CAPABILITY — y esos cuatro checks viven
+  exclusivamente en `check_capability_admission()`/`check()`, atados a la
+  tabla `capability`, que Mesa web ya no consulta para este camino. No es
+  que este PR decida no aplicarlos — es que la pregunta que responden
+  ("¿esta capability de pipeline permite este presupuesto/profundidad/
+  claves?") no tiene sentido para un turno de chat libre. Si algún día Mesa
+  web necesita gobernanza más fina que "¿puede este caller hablar con este
+  facet?", es una capability real para chat (approach (b) que se descartó
+  esta ronda) — diseño nuevo, no una extensión de este PR.
 
 ## `DEUDA.md` — actualización al cerrar
 
 El bullet `_HTTP_FACETS sin gobernanza del Motor Registry` se marca CERRADO
-con referencia a esta ronda, listando explícitamente los 5 checks que ahora
-sí aplican (1-5, no 8) y el porqué del 6-7 (N/A, no hay motor que resolver)
-y el 8 (diferido, con la razón estructural). Se agregan dos entradas nuevas
-si no existían ya con este detalle: `capability.sandbox_only` vestigial, y
-el techo de timeout como deuda separada y explícita (probablemente ya
-cubierta por el ítem existente de `_CAPABILITY_TIMEOUT_SECONDS`/dedup, a
-verificar contra el texto real al momento de cerrar).
+con referencia a esta ronda, distinguiendo los dos caminos por separado (son
+gobernanza de forma distinta, no lo mismo aplicado dos veces):
+- **Jacobs:** checks 1-5 de `MotorPolicy` ahora aplican vía
+  `check_capability_admission()`. 6-7 N/A (no hay motor que resolver para
+  un facet HTTP). 8 diferido, con la razón estructural (dict hardcodeado en
+  `plan.py` sin dedup con la DB).
+- **Mesa web:** NO usa `MotorPolicy` ni la tabla `capability` — usa
+  `check_facet_admission()`, un check nuevo y más chico sobre
+  `facet.allowed_callers`. Los checks 2-8 de `MotorPolicy` son N/A acá por
+  diseño (atados a `capability`, que Mesa web no consulta), no "quedaron
+  pendientes".
+
+Se agregan dos entradas nuevas si no existían ya con este detalle:
+`capability.sandbox_only` vestigial, y el techo de timeout como deuda
+separada y explícita (probablemente ya cubierta por el ítem existente de
+`_CAPABILITY_TIMEOUT_SECONDS`/dedup, a verificar contra el texto real al
+momento de cerrar).
