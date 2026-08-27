@@ -144,11 +144,31 @@ su fecha de última verificación real, no una nueva.
     `thot` llevaba 3 días roto en la Mesa web sin que nadie lo notara —
     dato que vale por sí solo: **no hay alerta que avise cuando un facet deja
     de responder.**
-  - Sin arreglar: el fix (mandar `max_completion_tokens` según el modelo, o
-    condicionarlo) es un cambio con diseño propio — qué modelos requieren
-    cuál parámetro no está resuelto, y meterlo al final de un despliegue de
-    otra cosa es exactamente cómo se cuelan regresiones. `hipatia`, `jekyll`
-    y `ada` no están afectados (otros proveedores).
+  - **NOMBRE del parámetro: ARREGLADO y desplegado (2026-08-27, PR
+    jax-platform#17, merge `6800a32`).** Columna nueva `model.max_tokens_param`
+    (ENUM): el catálogo declara qué parámetro exige cada modelo y
+    `_call_openai_compat` lo lee vía el JOIN que `facet_resolver` ya hacía.
+    NULL falla RUIDOSO (log `ERROR` con el `UPDATE` exacto a correr), no
+    asume — si el default fuera el parámetro viejo, el próximo modelo nuevo
+    se rompería igual pero en silencio. Sembrados los 4 modelos que usan el
+    camino openai-compat (`gpt-5.6-terra` → nuevo; `deepseek-v4-flash`,
+    `glm-5.3`, `kimi-k3` → viejo); sembrar solo el de `thot` habría tumbado
+    `jekyll` y `ada`. Verificado en prod post-deploy por SELECT.
+  - **PERO `thot` SIGUE CAÍDO — segundo bug, misma clase, campo contiguo.**
+    Verificado en el chat real post-deploy: el error del nombre desapareció
+    y apareció `HTTP 400: "max_tokens is too large: 131072. This model
+    supports at most 128000 completion tokens"`. El VALOR `131072` también
+    está hardcodeado en `chat.py` y también es propiedad por modelo.
+    **`context_window` NO sirve para derivarlo:** `gpt-5.6-terra` tiene
+    `context_window=1050000` (ventana total) contra un tope de *completion*
+    de 128000 — son hechos distintos, y el segundo no está en el catálogo.
+    Pendiente de decisión de Fernando: columna hermana (`max_output_tokens`)
+    con el mismo contrato que la primera. `hipatia`, `jekyll` y `ada` siguen
+    sin afectar (otros proveedores, valores dentro de sus topes).
+  - **Lección: el primer despliegue MOVIÓ el error, no arregló el facet.**
+    Se dio por "arreglado" hasta que la verificación en el chat real dijo lo
+    contrario — la misma regla de CONTEXT.md ("el código mergeado no es
+    código corriendo") aplicada a un fix, no a un cierre.
 
   ---
 
