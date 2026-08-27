@@ -124,5 +124,59 @@ class MotorPolicyCheckTest(unittest.TestCase):
         self.assertIn("sandbox_only", result.reason)
 
 
+class CheckCapabilityAdmissionTest(unittest.TestCase):
+    """check_capability_admission() -- subconjunto de check() (checks 1-5,
+    SIN motor resuelto ni techo de timeout). No requiere que exista un
+    motor para la capability -- a diferencia de check(), que fallaria en
+    el check 6 (resolver motor) para una capability sin allowed_motors."""
+
+    def setUp(self):
+        self.catalog = MotorCatalog({
+            "motors": {},
+            "capabilities": {
+                "research": {
+                    "allowed_motors": [],  # HTTP-directo: sin motor, a proposito
+                    "allowed_callers": ["jacobs"],
+                    "risk_level": "low", "sandbox_only": True,
+                    "requires_human_gate": False, "max_execution_minutes": 5,
+                    "max_recursion_depth": 0, "output_schema": "",
+                },
+            },
+        })
+        self.policy = MotorPolicy(self.catalog)
+
+    def test_caller_autorizado_pasa_sin_necesitar_motor(self):
+        result = self.policy.check_capability_admission(
+            caller="jacobs", capability="research",
+            context_keys=[], recursion_depth=0, human_gate_token=None,
+        )
+        self.assertTrue(result.allowed)
+
+    def test_caller_no_autorizado_rechaza(self):
+        result = self.policy.check_capability_admission(
+            caller="jax_platform_chat", capability="research",
+            context_keys=[], recursion_depth=0, human_gate_token=None,
+        )
+        self.assertFalse(result.allowed)
+        self.assertIn("no autorizado", result.reason)
+
+    def test_capability_desconocida_rechaza(self):
+        result = self.policy.check_capability_admission(
+            caller="jacobs", capability="no_existe",
+            context_keys=[], recursion_depth=0, human_gate_token=None,
+        )
+        self.assertFalse(result.allowed)
+        self.assertIn("desconocida", result.reason)
+
+    def test_no_tiene_parametro_timeout_seconds(self):
+        # El check 8 (techo) queda fuera de esta función a propósito
+        # (decisión del spec, punto 2) -- confirmamos que la firma no lo
+        # acepta, para que nadie lo reintroduzca sin querer.
+        import inspect
+        sig = inspect.signature(MotorPolicy.check_capability_admission)
+        self.assertNotIn("timeout_seconds", sig.parameters)
+        self.assertNotIn("motor", sig.parameters)
+
+
 if __name__ == "__main__":
     unittest.main()
