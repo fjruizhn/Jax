@@ -31,8 +31,11 @@ su fecha de última verificación real, no una nueva.
   (`_validate_plan_capabilities` no lo chequea, y ni siquiera aplica a
   `_HTTP_FACETS`). `scripts/check_timeout_consistency.py` verifica que
   coincidan, pero es manual, no una garantía en runtime. El check 8 real de
-  `MotorPolicy.check()` solo corre server-side, solo para `kimi`/`jax_local`,
-  después de crear el job -- nunca en Jacobs antes de despachar. Decisión
+  `MotorPolicy.check()` solo corre server-side, dentro de `las_manos`
+  (`las_manos/motor_registry/routes.py:95`, antes de crear el `MotorJob`
+  pero después de que Jacobs ya hizo la llamada HTTP a `/motor/dispatch`),
+  y solo para `kimi`/`jax_local` -- nunca corre en Jacobs, ni antes de que
+  Jacobs decida despachar. Decisión
   explícita: NO se activa un admission-check contra esto en la ronda de
   `_HTTP_FACETS` (validaría contra un valor que puede ya estar desincronizado
   del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
@@ -139,8 +142,9 @@ su fecha de última verificación real, no una nueva.
   que llama a `check_capability_admission()` para los 4 facets de
   `_HTTP_FACETS` únicamente. Fail-closed real, no solo de nombre: una
   falla de DB propaga en vez de tragarse silenciosamente (probado con un
-  mock de fallo de DB contra el par `ada`/`architecture_review`, que sí
-  existe en `jax_memory_test`). Checks 6-7 (resolver motor,
+  mock de fallo de DB contra `hipatia`/`research`,
+  `jacobs/_http_facet_admission_test.py::HttpFacetAdmissionFailClosedTest::test_db_caida_al_leer_catalogo_no_deja_pasar_el_step`).
+  Checks 6-7 (resolver motor,
   `motor.sandbox_only`) son N/A para un facet HTTP — no hay motor que
   resolver. Check 8 (techo de timeout) sigue SIN activar para este camino
   — ver la entrada nueva de `_CAPABILITY_TIMEOUT_SECONDS` en "Bloquea
@@ -156,7 +160,7 @@ su fecha de última verificación real, no una nueva.
   (`las_manos/motor_registry/facet_policy.py`, repo `jax`, corre
   server-side dentro de `las_manos`), sobre una columna nueva
   `facet.allowed_callers` (NULLABLE; migración idempotente en
-  `jax-platform`, commit `20f395b`, guardada con `WHERE ... IS NULL` para
+  `jax-platform`, commit `849956b`, guardada con `WHERE ... IS NULL` para
   no pisar un valor manual futuro), expuesto como `POST
   /motor/authorize-facet` (`jax`) y llamado desde `_invoke_facet` en
   `backend/api/chat.py` (`jax-platform`, esta ronda) antes de despachar a
@@ -172,7 +176,7 @@ su fecha de última verificación real, no una nueva.
   "quedaron pendientes".
 
   **Migración de datos, aplicada antes de activar el enforcement:**
-  `jax-platform` commit `20f395b` agrega y siembra `facet.allowed_callers`
+  `jax-platform` commit `849956b` agrega y siembra `facet.allowed_callers`
   para los 4 facets (`["jacobs", "jax_platform_chat"]` — mismo acceso que
   ya existía de hecho, sin restringir ni ampliar nada). Verificado en vivo
   post-deploy: los 4 facets siguen respondiendo en el chat real de Mesa
