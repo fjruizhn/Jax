@@ -1348,6 +1348,84 @@ Run: `cd /home/fruiz/jax-platform/backend && python -m pytest tests/test_facet_c
 Expected: FAIL — `probe_after_rebind` no existe; los escritores no reciben
 `BackgroundTasks`.
 
+### La caché del resolver hace que esta sonda mienta en verde — hay que romperla primero
+
+**Hallazgo de la revisión de la Task 4, verificado.** `resolve_facet()` cachea
+por `FACET_CACHE_TTL_SECONDS` (default **30 s**, `facet_resolver.py:18`), y
+**nada fuera de `facet_resolver.py` invalida `_cache`** — verificado con un
+grep repo-wide: los únicos otros hits son nombres de columna `price_cache_*`
+y la caché aparte de `credential_resolver`. Ni `approve_proposal` ni
+`update_facet_binding` la tocan.
+
+Para la sonda horaria da igual. **Para la sonda por rebinding es fatal**, y
+por su propio diseño: dispara *inmediatamente después* de aprobar, así que
+cae de lleno dentro de la ventana de 30 s, resuelve el modelo **viejo**, lo
+llama, recibe 200 y registra `ok`.
+
+**Verde sobre el rebinding recién hecho: exactamente el escenario del
+2026-08-24 que esta ronda existe para cerrar**, reproducido por la
+herramienta que viene a cerrarlo.
+
+- [ ] **Step 2b: `invalidate_facet_cache()` en el resolver**
+
+En `facet_resolver.py`, junto a `_cache`:
+
+```python
+def invalidate_facet_cache(facet_key: str) -> bool:
+    """Borra la entrada cacheada de un facet. Devuelve True si habia algo.
+
+    Existe porque `_cache` tiene TTL de 30s y NINGUN escritor de
+    facet_binding la invalidaba: durante esos 30s post-aprobacion,
+    resolve_facet() sigue devolviendo el modelo VIEJO. Para un turno de
+    chat es un retardo tolerable; para la sonda por rebinding -- que
+    dispara dentro de esa misma ventana -- significa validar el binding
+    anterior y reportar `ok` sobre el nuevo sin haberlo tocado."""
+    return _cache.pop(facet_key, None) is not None
+```
+
+- [ ] **Step 2c: `probe_after_rebind` invalida ANTES de sondear**
+
+Se invalida en el helper compartido y no en cada escritor: los dos
+escritores ya desembocan acá, así que un solo punto cubre a los dos — y
+como `_cache` es global, el turno de chat siguiente también ve el valor
+fresco. Un `invalidate` por escritor serían dos lugares que pueden
+divergir, que es el patrón que esta ronda viene evitando.
+
+```python
+async def probe_after_rebind(facet_key: str) -> str | None:
+    # ANTES de sondear, no despues: sin esto la sonda valida el binding
+    # VIEJO durante 30s y reporta ok sobre el nuevo.
+    invalidate_facet_cache(facet_key)
+    config = _load_config()
+    return await probe_facet(facet_key, config, SOURCE_CANARY_REBIND)
+```
+
+- [ ] **Step 2d: Test — la sonda de rebind invalida la caché**
+
+```python
+def test_probe_after_rebind_invalida_la_cache_ANTES_de_sondear(monkeypatch):
+    """Sin esto, la sonda por rebinding valida el binding viejo durante la
+    ventana de 30s del TTL y reporta `ok` sobre el nuevo -- verde sobre el
+    rebinding recien hecho, el escenario del 2026-08-24."""
+    orden = []
+    monkeypatch.setattr(facet_canary, "invalidate_facet_cache",
+                        lambda k: orden.append(("invalidate", k)) or True)
+    async def fake_probe(facet, config, source):
+        orden.append(("probe", facet, source)); return None
+    monkeypatch.setattr(facet_canary, "probe_facet", fake_probe)
+    monkeypatch.setattr(facet_canary, "_load_config",
+                        lambda: {"personalities": {"thot": {}}})
+
+    asyncio.run(facet_canary.probe_after_rebind("thot"))
+
+    # El ORDEN es la aserción, no la mera presencia de los dos.
+    assert orden == [("invalidate", "thot"),
+                     ("probe", "thot", "canary_rebind")]
+```
+
+Expected: pasa. **Si el orden sale invertido, el test tiene que fallar** —
+invalidar después de sondear no sirve de nada.
+
 - [ ] **Step 3: Agregar `probe_after_rebind` a `facet_canary.py`**
 
 ```python
@@ -1990,6 +2068,28 @@ Expected: mensaje recibido. `send_telegram_alert` devuelve
 `{ok, message_id, error}`; verificar `ok=True` en el log, no asumirlo.
 
 ---
+
+## `kimi` va a alertar 4 veces por día, para siempre — y está bien
+
+Anotado en la Task 4 por la revisión, aplica al consumidor de alertas
+(Tasks 6-7). `kimi` se sondea cada hora y registra `unsupported_transport`
+por diseño correcto: es un facet del picker que `_invoke_facet` no despacha.
+Con `ALERT_REPEAT_SECONDS = 6h`, eso son **4 alertas diarias, indefinidas**.
+
+**No se silencia.** Hay una tentación obvia —tratar `unsupported_transport`
+como "estado estable conocido" y no alertarlo— y es exactamente el error que
+esta ronda existe para no cometer: un facet roto que la herramienta decide
+no reportar porque lleva mucho roto. La v1 no tiene mecanismo de
+reconocimiento (*acknowledge*), y agregarlo sería una alerta que se cree más
+completa de lo que es.
+
+El ruido es **presión intencional** hacia la decisión de producto pendiente
+sobre `kimi` (§5 del spec: rutearlo por Motor Registry desde Mesa web, o
+sacarlo del picker). Cuando se tome esa decisión, el ruido se termina solo.
+Si la decisión se demora y las 4 diarias molestan, la salida correcta es
+decidir sobre `kimi`, **no** enseñarle a la herramienta a callarse.
+
+Queda declarado acá para que nadie lo lea como defecto de la Task 6.
 
 ## Minors diferidos — triaje obligatorio en la revisión final de rama
 
