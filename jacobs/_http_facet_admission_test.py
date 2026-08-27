@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""validate_capability() rechaza un facet HTTP-directo cuando el caller
-'jacobs' no está en allowed_callers -- contra la DB real de test, sin
-mockear -- y falla cerrado (nunca dispatcha) si MotorCatalog.from_db()
-no puede leer la DB. Ver Task 6 del plan de gobernanza de _HTTP_FACETS.
+"""NIVEL C de validate_capability(): admisión para facets HTTP-directos.
+Contra la DB real de test, sin mockear (salvo el fallo de DB, que se
+simula). Ver Task 6 del plan de gobernanza de _HTTP_FACETS.
+
+Lo que ESTE archivo cubre, y nada más:
+  - camino feliz: hipatia/research con caller 'jacobs' pasa
+  - requires_human_gate=1 sin token -> denegado
+  - MotorCatalog.from_db() que explota -> la excepción PROPAGA (fail-closed:
+    _run_one_step la captura y falla el step; nunca despacha sin verificar)
+
+NO cubre el rechazo por allowed_callers (check 2). Se escribió y se
+descartó a propósito: hoy TODA capability sembrada lista "jacobs" en
+allowed_callers, así que el caso solo es alcanzable mockeando el catálogo
+-- y entonces el test prueba el mock, no el sistema. La cobertura real de
+ese check vive en las_manos/motor_registry/_policy_test.py
+(CheckCapabilityAdmissionTest::test_caller_no_autorizado_rechaza), que lo
+ejercita directo sobre check_capability_admission() con un catálogo
+armado a mano. Si algún día una capability excluye a 'jacobs', este
+archivo es el lugar para el test de integración.
 
 Corre desde /home/fruiz/jax con:
   PYTHONPATH=/home/fruiz/jax .venv/bin/python -m unittest jacobs._http_facet_admission_test
