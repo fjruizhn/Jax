@@ -231,9 +231,35 @@ git commit -m "feat(health): tablas facet_health_event y facet_health_alert"
   async def record_facet_health(
       facet: str, outcome: str, source: str, detail: str | None = None
   ) -> bool
+  def write_failure_stats() -> dict   # {"write_failures": int, "last_error": str | None}
   ```
   Devuelve `True` si escribió, `False` si falló (fail-soft). Task 3 y
-  Task 4 la consumen.
+  Task 4 la consumen. `write_failure_stats()` la consume `api/health.py`.
+
+**Un escritor que pierde filas en silencio hace que todo lo demás mienta.**
+Si `record_facet_health` falla, la salud se calcula sobre datos
+incompletos — y eso se ve **idéntico** a "no pasó nada". Es la misma forma
+del agujero de `unknown` vs `ok`, un nivel más abajo: ausencia de fila
+interpretada como ausencia de problema.
+
+Por eso el fallo del escritor **tiene que dejar rastro observable**, no
+solo un `logger.warning` suelto:
+
+- Un contador de proceso `_write_failures` y el último error, expuestos
+  por `write_failure_stats()`.
+- `api/health.py` los publica en el `GET /api/health` que ya existe. Es el
+  lugar correcto: ese endpoint informa la salud del **servicio**, y un
+  escritor que no escribe es exactamente eso — no es salud de facet.
+- Un log con prefijo estable `facet_health_write_failed` para poder
+  contarlo desde `journalctl` sin depender del endpoint.
+
+**El rastro NO puede vivir en la DB**: la DB es precisamente lo que puede
+estar caído. Por eso es un contador en memoria más un log, no una tabla.
+
+**Limitación declarada:** el contador es por proceso y se reinicia con el
+servicio, así que mide "fallos desde el último arranque", no un histórico.
+En v1 **no alerta** — solo tiene que ser observable. Alertar sobre él es
+trabajo de una ronda posterior.
 
 - [ ] **Step 1: Escribir el test que falla**
 
@@ -308,6 +334,39 @@ def test_record_es_fail_soft_ante_error_de_db(monkeypatch, caplog):
 
     assert ok is False              # no revienta el turno de chat
     assert caplog.records           # pero NO es silencioso
+
+
+def test_el_fallo_del_escritor_queda_OBSERVABLE(monkeypatch, caplog):
+    """Un escritor que pierde filas en silencio hace que todo lo demas
+    mienta: la salud se calcula sobre datos incompletos y eso se ve igual
+    que "no paso nada". El rastro NO puede vivir en la DB -- la DB es lo
+    que esta caido."""
+    facet_health.reset_write_failures()
+    async def fake_pool(): raise RuntimeError("db caida")
+    monkeypatch.setattr(facet_health, "get_pool", fake_pool)
+
+    import asyncio
+    asyncio.run(facet_health.record_facet_health("thot", "ok", "chat"))
+    asyncio.run(facet_health.record_facet_health("ada", "ok", "chat"))
+
+    stats = facet_health.write_failure_stats()
+    assert stats["write_failures"] == 2
+    assert "db caida" in stats["last_error"]
+    # prefijo estable, para poder contarlo desde journalctl sin el endpoint
+    assert any("facet_health_write_failed" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_escritura_exitosa_no_incrementa_el_contador(monkeypatch):
+    facet_health.reset_write_failures()
+    sink = []
+    async def fake_pool(): return _FakePool(sink)
+    monkeypatch.setattr(facet_health, "get_pool", fake_pool)
+
+    import asyncio
+    asyncio.run(facet_health.record_facet_health("thot", "ok", "chat"))
+
+    assert facet_health.write_failure_stats()["write_failures"] == 0
 ```
 
 - [ ] **Step 2: Correr el test y verificar que falla**
@@ -338,6 +397,29 @@ OUTCOMES = frozenset({
 SOURCES = frozenset({"chat", "canary_periodic", "canary_rebind"})
 
 _DETAIL_MAX = 255
+
+# Rastro observable del fallo del ESCRITOR. En memoria y no en la DB a
+# proposito: la DB es precisamente lo que puede estar caido. Un escritor
+# que pierde filas en silencio hace que la salud se calcule sobre datos
+# incompletos, y eso se ve identico a "no paso nada" -- la misma forma del
+# agujero `unknown` vs `ok`, un nivel mas abajo.
+# Por proceso: se reinicia con el servicio. Mide fallos desde el ultimo
+# arranque, no un historico. En v1 no alerta, solo es observable.
+_write_failures = 0
+_last_write_error: str | None = None
+
+
+def write_failure_stats() -> dict:
+    """Lo publica GET /api/health. Ese endpoint informa la salud del
+    SERVICIO, y un escritor que no escribe es exactamente eso."""
+    return {"write_failures": _write_failures, "last_error": _last_write_error}
+
+
+def reset_write_failures() -> None:
+    """Solo para tests -- que cada test parta de cero sin depender del orden."""
+    global _write_failures, _last_write_error
+    _write_failures = 0
+    _last_write_error = None
 
 
 async def record_facet_health(
@@ -372,10 +454,14 @@ async def record_facet_health(
                 )
             await conn.commit()
         return True
-    except Exception:  # fail-soft: registrar salud no puede tumbar un turno de chat ya respondido; la ausencia de fila se lee como `unknown` rio abajo, nunca como `ok`
+    except Exception as e:  # fail-soft: registrar salud no puede tumbar un turno de chat ya respondido; la ausencia de fila se lee como `unknown` rio abajo, nunca como `ok`
+        global _write_failures, _last_write_error
+        _write_failures += 1
+        _last_write_error = f"{type(e).__name__}: {e}"[:_DETAIL_MAX]
+        # Prefijo estable: se cuenta desde journalctl sin depender del endpoint.
         logger.warning(
-            "facet_health: no se pudo registrar facet=%s outcome=%s source=%s",
-            facet, outcome, source, exc_info=True,
+            "facet_health_write_failed facet=%s outcome=%s source=%s total=%d",
+            facet, outcome, source, _write_failures, exc_info=True,
         )
         return False
 ```
@@ -383,7 +469,36 @@ async def record_facet_health(
 - [ ] **Step 4: Correr los tests y verificar que pasan**
 
 Run: `cd /home/fruiz/jax-platform/backend && python -m pytest tests/test_facet_health_writer.py -v`
-Expected: 3 passed.
+Expected: 5 passed.
+
+- [ ] **Step 4b: Publicar el contador en `/api/health`**
+
+Backup primero:
+```bash
+cd /home/fruiz/jax-platform && cp backend/api/health.py backend/api/health.py.backup-pre-facethealth-$(date +%Y%m%d-%H%M%S)
+```
+
+`api/health.py` hoy devuelve `service`, `status`, `las_manos`,
+`connected_users`, `ws_connected_users`, `active_pipelines`. Agregar una
+clave más, sin tocar las existentes (hay consumidores):
+
+```python
+from facet_health import write_failure_stats
+...
+        "facet_health_writer": write_failure_stats(),
+```
+
+**No confundir con salud de facets.** Este endpoint informa la salud del
+servicio; `facet_health_writer` dice si el escritor está perdiendo filas.
+La salud de los facets se calcula en el reaper, desde la tabla, y no se
+publica acá — mezclarlas recrearía la confusión que `DEUDA.md` ya le
+reprocha a `/health` ("mide el servicio, no el facet").
+
+- [ ] **Step 4c: Verificar que el endpoint no se rompió**
+
+Run: `cd /home/fruiz/jax-platform/backend && JAX_CI_NO_DB=1 python -m pytest tests/ -k health -v`
+Expected: los tests de health que ya existan siguen pasando. Si no existe
+ninguno, decilo en el reporte en vez de asumir que está cubierto.
 
 - [ ] **Step 5: Verificar que el scanner P10 acepta el `except`**
 
@@ -395,8 +510,8 @@ PARAR y reportar, no relajar el scanner.**
 
 ```bash
 cd /home/fruiz/jax-platform
-git add backend/facet_health.py backend/tests/test_facet_health_writer.py
-git commit -m "feat(health): record_facet_health, escritor unico de eventos de salud"
+git add backend/facet_health.py backend/api/health.py backend/tests/test_facet_health_writer.py
+git commit -m "feat(health): record_facet_health, escritor unico con fallo observable"
 ```
 
 ---
@@ -1191,6 +1306,30 @@ def test_ningun_facet_con_eventos_produce_una_sola_alerta_de_sistema():
     assert keys == [fh.SYSTEM_KEY]      # una sola, no cuatro
 
 
+def test_TABLA_VACIA_alerta_system_y_NO_devuelve_lista_vacia():
+    """EL test que impide que el agujero vuelva en un refactor.
+
+    known_facets sale de facet_health_event (ruling 2), asi que con la
+    tabla vacia `current` queda {} -- y {} es falsy. Un guard escrito como
+    `if current and all(...)` SALTA el bloque de __system__, el bucle no
+    itera nada, y la funcion devuelve []: SILENCIO TOTAL.
+
+    Cuando pasa: la sonda nunca se cableo, murio al arrancar, el escritor
+    esta roto y no escribe nunca, o jax-platform lleva caido mas que la
+    retencion. O sea, los casos en que el detector esta MUERTO son
+    exactamente los que no alertarian. Es el bug del punto A dentro del
+    codigo que implementa el punto A.
+
+    Por eso transitions_to_notify() arranca con
+    `if not current: return _maybe(SYSTEM_KEY, "unknown", ledger, now)`."""
+    assert fh.transitions_to_notify({}, ledger={}, now=NOW) == [(fh.SYSTEM_KEY, "unknown")]
+
+
+def test_tabla_vacia_tambien_respeta_la_supresion_de_6h():
+    ledger = {fh.SYSTEM_KEY: ("unknown", NOW - 60)}
+    assert fh.transitions_to_notify({}, ledger, NOW) == []
+
+
 def test_la_alerta_de_sistema_respeta_la_repeticion_de_6h():
     """Si la sonda muere un viernes, no queremos 288 mensajes el sabado."""
     states = fh.evaluate_states({}, ["thot", "ada"], NOW)
@@ -1284,8 +1423,19 @@ def transitions_to_notify(current, ledger, now):
     SYSTEM_KEY ("la sonda no esta corriendo") en vez de una por facet: el
     diagnostico es distinto y el mensaje debe decirlo. Esa alerta agregada
     pasa por el MISMO ledger y la MISMA supresion -- sin eso, una sonda
-    muerta el viernes produce 288 mensajes el sabado."""
-    if current and all(s == "unknown" for s in current.values()):
+    muerta el viernes produce 288 mensajes el sabado.
+
+    EL `not current` VA PRIMERO Y NO SE PUEDE FUSIONAR con la linea de
+    abajo. known_facets sale de facet_health_event, asi que con la tabla
+    vacia `current` es {} -- y {} es falsy: un guard escrito como
+    `if current and all(...)` saltaria el bloque, el bucle no iteraria
+    nada, y esto devolveria [] = SILENCIO. Justo cuando el detector esta
+    muerto (sonda sin cablear, escritor roto, servicio caido mas que la
+    retencion). Ausencia TOTAL de datos es la senal mas fuerte que hay,
+    no la mas debil."""
+    if not current:
+        return _maybe(SYSTEM_KEY, "unknown", ledger, now)
+    if all(s == "unknown" for s in current.values()):
         return _maybe(SYSTEM_KEY, "unknown", ledger, now)
 
     notify = []
@@ -1325,7 +1475,22 @@ async def check_facet_health() -> dict:
             )
             latest = {r[0]: (r[1], r[2]) for r in await cur.fetchall()}
 
-            await cur.execute("SELECT `key` FROM facet")
+            # known_facets sale de la propia tabla de eventos, NO de
+            # `SELECT key FROM facet`. Razon: `facet` incluye a hyde, que la
+            # sonda no sondea (chat() lo cortocircuitea antes del dispatch),
+            # asi que hyde quedaria en `unknown` permanente y alertaria cada
+            # 6h para siempre sobre un facet que funciona. Ruido perpetuo es
+            # una forma de no avisar. Derivarlo de los eventos evita ademas
+            # una segunda lista de exclusion que pueda divergir de la de la
+            # sonda.
+            # kimi SI aparece: la sonda lo sondea (no se filtra por
+            # transporte) y su invocacion escribe 'unsupported_transport'.
+            # El caso "tabla vacia" lo cubre el `if not current` de
+            # transitions_to_notify, no esta consulta.
+            await cur.execute(
+                "SELECT DISTINCT facet FROM facet_health_event WHERE ts >= %s",
+                (now - HEALTH_EVENT_RETENTION_DAYS * 86400,),
+            )
             known = [r[0] for r in await cur.fetchall()]
 
             await cur.execute(
@@ -1366,7 +1531,7 @@ async def check_facet_health() -> dict:
 - [ ] **Step 4: Correr los tests**
 
 Run: `cd /home/fruiz/jax && python -m pytest jacobs/_facet_health_test.py -v`
-Expected: 9 passed.
+Expected: 11 passed.
 
 - [ ] **Step 5: Scanner P10**
 
