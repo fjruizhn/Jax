@@ -342,23 +342,25 @@ su fecha de última verificación real, no una nueva.
   del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
   en una ronda aparte.
 
-- **`jax-platform`: suite de tests del backend con 10 failures + 1 error
-  preexistentes en este entorno de desarrollo.** Verificado 2026-08-27
+- **`jax-platform`: suite de tests del backend con fallos preexistentes en
+  este entorno de desarrollo.** Verificado 2026-08-27
   durante el cierre de gobernanza de `_HTTP_FACETS` (Task 7, integración de
   `_invoke_facet` en `chat.py`): diff contra un stash-baseline muestra
   EXACTAMENTE el mismo conjunto de failures, por nombre, con y sin los
   cambios de esta ronda -- no es una regresión de este trabajo.
-  **Corrección del número (2026-08-27, medido a mano por el controlador,
-  no heredado de ningún reporte): son 10 + 1, no 12 + 1.** Una revisión
-  intermedia de ese mismo día había escrito 12, argumentando que la cifra
-  de 10 era anterior a los 3 tests de
-  `tests/test_facet_allowed_callers_migration.py`. **Ese 12 no se
-  reproduce.** Contado directamente sobre `master` ya con todo mergeado
-  (incluidos esos 3 tests y los 13 de `max_tokens_param`), dos corridas
-  seguidas: `10 failed, 192 passed, 1 error`, idéntico ambas veces. Se deja
-  registrado el desacuerdo en vez de borrarlo: dos agentes midieron distinto
-  el mismo día, y el número que vale es el que se contó a mano contra el
-  estado actual. Causa raíz identificada: un
+  **EL NÚMERO NO ES ESTABLE — corregido dos veces el mismo día antes de
+  entender por qué (2026-08-27).** Historia completa, porque la lección
+  está en la secuencia y no en la cifra: una medición dio 10, otra 12, una
+  tercera (a mano, dos corridas seguidas) volvió a dar 10 y se escribió acá
+  como "el número correcto". **Las tres estaban midiendo algo inestable.**
+  Al portar el CI se corrió el experimento que faltaba: el MISMO árbol
+  limpio da 10 y después 12 (3 corridas de cada resultado). La causa es la
+  misma que la de los fallos: `jax_memory_test` es una DB COMPARTIDA, y el
+  conteo depende del estado en que la dejó la corrida anterior.
+  **Consecuencia práctica:** cualquier criterio de "el conjunto de fallos
+  no cambió" basado en el NÚMERO es inservible acá — hay que comparar
+  NOMBRES. Y descarta por construcción la opción de versionar un baseline,
+  que era el diseño más obvio para meter esta suite en CI. Causa raíz identificada: un
   pool de conexiones `aiomysql` reusado entre distintos event loops de
   `asyncio` -- defecto de aislamiento de tests, no defecto de producto.
   Evidencia directa de eso, no solo inferencia: **los failures y el
