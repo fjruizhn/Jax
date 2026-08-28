@@ -104,6 +104,55 @@ jobs:
       - run: pip install pytest aiomysql pydantic
       - run: python -m pytest jacobs/_facet_health_test.py -v
 
+  # `check_facet_health()` es la unica pieza del lector sin cobertura
+  # automatica: `evaluate_states`/`transitions_to_notify` tienen 11 tests
+  # puros, pero las tres consultas, el envio, el ledger y la poda no tenian
+  # ninguno -- y su `except` en el reaper es fail-soft, asi que un fallo ahi
+  # se ve IGUAL que un sistema sano. Este job cierra eso.
+  #
+  # Necesita una MariaDB de verdad (service container), no un doble: lo que
+  # se prueba ES el I/O. La base se llama jax_memory_test porque el test se
+  # niega a correr contra una base cuyo nombre no termina en `_test` -- la
+  # funcion bajo prueba BORRA sin filtrar por facet.
+  #
+  # Se verifico rompiendo el job REAL, no localmente (octava leccion).
+  facet-health-io:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # httpx ademas de aiomysql/pydantic: el test parchea
+      # `reaper.send_telegram_alert`, y para eso importa `jacobs.reaper`,
+      # que importa httpx a nivel de modulo. Sin el, el job falla en la
+      # COLECCION y no en un assert -- el mismo modo de falla que rompio
+      # PR#25 en la ronda anterior.
+      - run: pip install pytest aiomysql pydantic httpx
+      # El guard de "no correr sin DB" es un skipif: un skip masivo se ve
+      # como verde. Se exige que los 6 tests CORRAN de verdad.
+      - run: python -m pytest jacobs/_facet_health_io_test.py -v
+      - run: |
+          python -m pytest jacobs/_facet_health_io_test.py -q 2>&1 | tee /tmp/out
+          grep -qE "^6 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 6 tests CORRIDOS (no skipeados)."; exit 1; }
+
   output-validator-regression:
     runs-on: ubuntu-latest
     steps:
