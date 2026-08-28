@@ -201,6 +201,41 @@ su fecha de última verificación real, no una nueva.
   revisión de Task 5 sobre qué pasa si `probe_after_rebind` lanza dentro de
   una BackgroundTask, no buscado.
 
+- **`probe_error` tapa a `config_error`: una sola causa escribe DOS eventos
+  y el lector se queda con el menos informativo (2026-08-27).** Descubierto
+  al materializar los estados en el deploy de la Task 8, no buscado.
+
+  **Evidencia real, no razonada.** Al poner `model.max_tokens_param` en NULL
+  para `ada` (el mismo defecto que rompió `thot` el 2026-08-24) y disparar
+  una sonda por rebinding, quedaron dos filas con **el mismo milisegundo**:
+
+  ```
+  ada  probe_error   canary_rebind  ModelDispatchConfigError: ...  18:02:45.443634
+  ada  config_error  canary_rebind  ModelDispatchConfigError: ...  18:02:45.442861
+  ```
+
+  Es correcto por capas y no es un bug de ninguna de las dos: `_invoke_facet`
+  clasifica el fallo como `config_error` y **re-lanza** (no puede volverse
+  fail-open); `probe_after_rebind` lo captura en su `except` y registra
+  `probe_error`, que es la verdad de *su* capa — la sonda sí falló.
+
+  **Por qué importa:** el lector (`check_facet_health`) toma el evento con
+  `MAX(ts)` de cada facet. `probe_error` gana por ~800 µs, así que el estado
+  y la alerta salen como "la sonda falló" cuando la causa real era "la fila
+  del catálogo está mal sembrada" — que es *accionable* y dice exactamente
+  qué reparar. La distinción que la Task 3.5 construyó a propósito
+  (`config_error` separado de `provider_error`, porque el problema es
+  nuestro y no del proveedor) se pierde en el último paso, justo donde
+  alguien la va a leer.
+
+  **No se resuelve hoy** porque el arreglo no es obvio: podría ser
+  precedencia por outcome en vez de por `ts`, o que la sonda no registre su
+  propio `probe_error` cuando la capa de abajo ya escribió un evento
+  clasificado para el mismo facet en la misma operación, o incluir en la
+  alerta el `detail` (que sí trae el mensaje completo con el `UPDATE model
+  SET ...` a ejecutar). Elegir requiere decidir qué significa el ledger
+  cuando dos capas describen el mismo fallo — no es un typo.
+
 - **Bypass de admin en el ruleset de `master`: la única barrera contra un
   merge en rojo es que alguien se acuerde de mirar (2026-08-27).** Los dos
   repos tienen protección de `master` con bypass para admin (ver
