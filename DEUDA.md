@@ -78,51 +78,126 @@ su fecha de última verificación real, no una nueva.
   a `jax-platform` llamando un endpoint que ya no existe, y recrea la
   misma caída de los 4 facets.
 
-- **No existe ninguna señal que avise cuando un facet deja de responder
-  (2026-08-27).** El ítem operativo más importante que dejó esta ronda, y el
-  complemento de la lección de método de CONTEXT.md ("verificar el estado
-  desplegado antes de declarar cerrado").
+- **Señal de facets caídos — CERRADA Y CORRIENDO (2026-08-27), con lo que
+  NO cubre declarado abajo.** Era el ítem operativo más importante de la
+  ronda anterior: `thot` estuvo **3 días** caído en la Mesa web y sólo se
+  descubrió porque un deploy de otra cosa incluía un paso manual de
+  verificación en el chat real.
 
-  **Qué señal existe hoy: NINGUNA.** No es "existe pero es débil". Verificado
-  al diagnosticar la caída de `thot`:
-  - `/health` de `jax-platform` reporta `las_manos: alive|down` — la
-    salud del *servicio*, no la de cada facet. Con `las_manos` arriba y los
-    4 facets caídos, `/health` dice que todo está bien.
-  - `facet.status` (`active`/`degraded`/`disabled`) es un campo de
-    configuración: lo escribe un humano o un admin, nadie lo deriva de que
-    las llamadas estén fallando. Hoy `thot` figura `active` estando roto.
-  - `model.status` (`available`/`degraded`/...) lo mueve el sync del
-    catálogo contra `/v1/models` del proveedor — dice si el proveedor
-    todavía OFRECE el modelo, no si nuestras llamadas a él funcionan. El
-    modelo de `thot` existe y responde: lo que falla es el contrato de
-    parámetros de NUESTRA llamada. Ese sync jamás lo vería.
-  - Los errores por turno de chat se propagan al usuario y quedan en
-    `journalctl`. Nada los cuenta, los agrega ni los alerta.
+  **Qué quedó corriendo**, verificado contra producción (no contra el
+  plan): escritor instrumentado en `_invoke_facet` (el chokepoint único de
+  salida de Mesa web); sonda horaria con guard anti-pytest y kill switch;
+  sonda por rebinding colgada de los **dos** escritores de `facet_binding`,
+  que baja la detección de días a minutos; lector y máquina de estados en
+  `jacobs/facet_health.py`, evaluado en **cada** barrido del reaper (≤300 s);
+  alerta por Telegram con supresión de 6 h. Tablas `facet_health_event`
+  (fuente de verdad) y `facet_health_alert` (ledger de acuses, no una
+  segunda fuente de verdad).
 
-  **Consecuencia medida, no hipotética:** `thot` estuvo **3 días** caído en
-  la Mesa web (roto el 2026-08-24 al rebindearse a `gpt-5.6-terra`,
-  descubierto el 2026-08-27) y solo se detectó porque el despliegue de otra
-  cosa incluyó un paso de verificación manual en el chat real. Sin ese paso
-  seguiría caído.
+  **Los seis estados, materializados con datos reales el 2026-08-27** —
+  ninguno razonado, todos producidos rompiendo algo a propósito y revertido
+  con el valor anotado en disco y confirmado por `SELECT` posterior:
 
-  **Por qué BLOQUEA:** "verificar el estado desplegado antes de declarar
-  cerrado" es una regla que hoy solo se cumple cuando alguien se acuerda de
-  mirar. Todo lo que se cerró esta semana — la gobernanza de `_HTTP_FACETS`,
-  el gate fail-closed de Mesa web, el sandbox de Hyde — puede romperse en
-  silencio exactamente igual que `thot`, y el modo de falla de un gate
-  fail-closed es *denegar todo*: se vería idéntico a "el facet no responde".
-  Sin detección, un fail-closed que se dispara por error es indistinguible
-  de uno que funciona.
+  | outcome | facet | cómo se produjo |
+  |---|---|---|
+  | `ok` | ada, hipatia, jax_local, jekyll, thot | tráfico real |
+  | `unsupported_transport` | **kimi** | por diseño (ver abajo) |
+  | `gate_denied` | ada | `allowed_callers` vaciado |
+  | `gate_unreachable` | ada | `jax-las-manos` parado |
+  | `config_error` | ada | `max_tokens_param` en NULL |
+  | `probe_error` | ada | misma causa, otra capa |
 
-  **Qué haría falta (no diseñado todavía, es la próxima ronda):** una señal
-  derivada del tráfico real, no de configuración — algo que cuente
-  éxito/fallo por facet en la ventana reciente y alerte cuando un facet que
-  venía respondiendo deja de hacerlo. Los dos chokepoints de salida ya
-  existen y son únicos (`_invoke_facet` en Mesa web, `_dispatch_step` en
-  Jacobs), así que el lugar donde instrumentar no es la incógnita; la
-  incógnita es dónde vive el estado, cuál es el umbral y por qué canal
-  avisa. **Primer ítem de la próxima ronda, por decisión explícita de
-  Fernando.**
+  `gate_denied` y `gate_unreachable` salieron **distintos** — era el
+  objetivo central del ítem (los estados 3 y 4 tenían dueños y acciones
+  distintas y estaban colapsados).
+
+  **El ciclo completo, no sólo la detección:** `ada` cayó, el detector la
+  marcó `down`, se reparó, y el reaper registró la **recuperación
+  automáticamente** a las `18:06:28` sin intervención. Un detector que
+  avisa cuando algo se rompe pero no cuando se arregla obliga a mirar a
+  mano para saber si sigue roto — eso quedó cubierto.
+
+  **Criterio de aceptación del §5 del spec, cumplido:** `kimi` aparece
+  caído (`unsupported_transport` en la tabla, `down` en el ledger). Era la
+  prueba de que la v1 no tiene el hueco, no una observación de color.
+
+  **QUÉ NO CUBRE ESTA v1** — declarado, porque una alerta que se cree más
+  completa de lo que es sería una instancia del patrón dentro del ítem que
+  existe para detectar el patrón:
+  1. **Jacobs no queda cubierto.** `_dispatch_step` no se instrumentó. Un
+     facet puede estar sano para Mesa web y fallar en un pipeline por su
+     propio camino de admisión (`check_capability_admission`).
+  2. **`kimi` y `hyde` no son sondeables de verdad** (transportes
+     `motor_registry` y `subprocess`, que `_invoke_facet` no despacha).
+     `kimi` sí se sondea y reporta `unsupported_transport`; `hyde` queda
+     fuera del conjunto.
+  3. **La sonda no prueba lo que prueba un usuario real:** prompt corto,
+     sin historial, sin contexto semántico, sin tool use. Un facet que
+     falla sólo con contexto largo pasa verde.
+  4. **No detecta degradación de calidad**, sólo disponibilidad. Un facet
+     que responde basura cuenta `ok`.
+  5. **La salud se calcula sobre datos que pueden estar incompletos.** Si
+     el escritor pierde filas en silencio, la salud miente. Mitigado
+     parcialmente por `unknown` (la pérdida TOTAL se ve), no por pérdida
+     parcial.
+  6. **Un facet nuevo en el picker sin sondear** sólo queda cubierto por
+     `unknown` si aparece en `config["personalities"]`. Agregado al
+     frontend y no ahí, es invisible — la misma duplicación `FACET_ORDER`
+     vs `personalities` que ya existe.
+
+  Además, **la caída total del propio detector sólo se ve en el journal**:
+  el `except` del reaper es fail-soft y sólo deja un `logger.error` cada
+  300 s. Mitigado por el gate de esquema completo del deploy, no eliminado.
+
+  **`kimi` va a alertar 4 veces por día, indefinidamente, y se deja así
+  (decisión del 2026-08-27).** Es presión intencional hacia la decisión de
+  producto pendiente (rutearlo por Motor Registry desde Mesa web, o sacarlo
+  del picker). Silenciarlo sería el error exacto que esta ronda existe para
+  no cometer: un facet roto que la herramienta decide no reportar porque
+  lleva mucho roto. **Fecha de control: si al 2026-09-10 `kimi` sigue
+  alertando, la presión no funcionó** y hay que decidir de otra forma —
+  no bajarle el volumen a la alerta.
+
+- **La alerta afirma la capa equivocada: `probe_error` tapa a
+  `config_error` (2026-08-27).** Primer ítem de la próxima ronda.
+
+  **El costo, con precisión:** el mensaje que le llega a Fernando dice
+  **"la sonda falló"** cuando la causa accionable es otra — por ejemplo
+  "la fila de `model` no declara `max_tokens_param`", que trae hasta el
+  `UPDATE` a ejecutar. Es una alerta que **afirma la capa equivocada en el
+  punto exacto donde alguien la lee para decidir qué hacer**. No es un
+  detalle cosmético del registro: es el único texto que un humano ve, y
+  manda a investigar la sonda en vez de la fila del catálogo.
+
+  **Evidencia real, del deploy de la Task 8** (no razonada): al poner
+  `model.max_tokens_param` en NULL para `ada` — el mismo defecto que rompió
+  `thot` el 2026-08-24 — quedaron dos filas separadas por ~800 µs:
+
+  ```
+  ada  probe_error   canary_rebind  ModelDispatchConfigError: ...  18:02:45.443634
+  ada  config_error  canary_rebind  ModelDispatchConfigError: ...  18:02:45.442861
+  ```
+
+  Correcto por capas, y no es bug de ninguna de las dos: `_invoke_facet`
+  clasifica `config_error` y **re-lanza** (no puede volverse fail-open);
+  `probe_after_rebind` lo captura y registra `probe_error`, que es la
+  verdad de *su* capa. El defecto está en el **lector**: toma `MAX(ts)` por
+  facet, y `probe_error` gana por microsegundos. La distinción que la Task
+  3.5 construyó a propósito (`config_error` separado de `provider_error`,
+  porque el problema es NUESTRO y no del proveedor) se pierde en el último
+  paso.
+
+  **Por qué BLOQUEA y no queda anotado:** el ítem entero existe para que
+  una alerta diga qué se rompió. Una que nombra la capa equivocada
+  reintroduce, en el consumidor, el problema que el detector vino a
+  resolver — igual que `thot`, alguien va a mirar el lugar equivocado.
+
+  **Qué haría falta (no diseñado — es diseño, no un typo):** precedencia
+  por outcome en vez de por `ts`; o que la sonda no registre su
+  `probe_error` cuando la capa de abajo ya escribió un evento clasificado
+  para el mismo facet en la misma operación; o incluir el `detail` en el
+  texto de la alerta. Elegir exige decidir qué significa el ledger cuando
+  dos capas describen el mismo fallo.
 
 - **`facet_resolver._cache` replicado en TRES procesos; solo uno se invalida
   al rebindear (2026-08-27).** `facet_resolver.py` está espejado a propósito
@@ -200,41 +275,6 @@ su fecha de última verificación real, no una nueva.
   más de una sin ese envoltorio. Descubierto al responder una pregunta de
   revisión de Task 5 sobre qué pasa si `probe_after_rebind` lanza dentro de
   una BackgroundTask, no buscado.
-
-- **`probe_error` tapa a `config_error`: una sola causa escribe DOS eventos
-  y el lector se queda con el menos informativo (2026-08-27).** Descubierto
-  al materializar los estados en el deploy de la Task 8, no buscado.
-
-  **Evidencia real, no razonada.** Al poner `model.max_tokens_param` en NULL
-  para `ada` (el mismo defecto que rompió `thot` el 2026-08-24) y disparar
-  una sonda por rebinding, quedaron dos filas con **el mismo milisegundo**:
-
-  ```
-  ada  probe_error   canary_rebind  ModelDispatchConfigError: ...  18:02:45.443634
-  ada  config_error  canary_rebind  ModelDispatchConfigError: ...  18:02:45.442861
-  ```
-
-  Es correcto por capas y no es un bug de ninguna de las dos: `_invoke_facet`
-  clasifica el fallo como `config_error` y **re-lanza** (no puede volverse
-  fail-open); `probe_after_rebind` lo captura en su `except` y registra
-  `probe_error`, que es la verdad de *su* capa — la sonda sí falló.
-
-  **Por qué importa:** el lector (`check_facet_health`) toma el evento con
-  `MAX(ts)` de cada facet. `probe_error` gana por ~800 µs, así que el estado
-  y la alerta salen como "la sonda falló" cuando la causa real era "la fila
-  del catálogo está mal sembrada" — que es *accionable* y dice exactamente
-  qué reparar. La distinción que la Task 3.5 construyó a propósito
-  (`config_error` separado de `provider_error`, porque el problema es
-  nuestro y no del proveedor) se pierde en el último paso, justo donde
-  alguien la va a leer.
-
-  **No se resuelve hoy** porque el arreglo no es obvio: podría ser
-  precedencia por outcome en vez de por `ts`, o que la sonda no registre su
-  propio `probe_error` cuando la capa de abajo ya escribió un evento
-  clasificado para el mismo facet en la misma operación, o incluir en la
-  alerta el `detail` (que sí trae el mensaje completo con el `UPDATE model
-  SET ...` a ejecutar). Elegir requiere decidir qué significa el ledger
-  cuando dos capas describen el mismo fallo — no es un typo.
 
 - **Bypass de admin en el ruleset de `master`: la única barrera contra un
   merge en rojo es que alguien se acuerde de mirar (2026-08-27).** Los dos
