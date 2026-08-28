@@ -61,7 +61,7 @@ def transitions_to_notify(current, ledger, now):
     retencion). Ausencia TOTAL de datos es la senal mas fuerte que hay,
     no la mas debil."""
     if not current:
-        return []          # ROTURA DELIBERADA (se revierte): el agujero del silencio
+        return _maybe(SYSTEM_KEY, "unknown", ledger, now)
     if all(s == "unknown" for s in current.values()):
         return _maybe(SYSTEM_KEY, "unknown", ledger, now)
 
