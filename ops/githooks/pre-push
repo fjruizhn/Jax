@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Rechaza cualquier push cuyo ref DESTINO sea la rama por defecto.
+#
+# POR QUE EXISTE, con el caso que lo motivo (2026-08-28): un
+# `cd <worktree> && git revert ...` fallo por sintaxis; la llamada siguiente
+# arranco en el checkout principal, sobre `master`, y el `git revert HEAD`
+# se llevo puesto un PR ya mergeado. El push paso porque el bypass de admin
+# del ruleset lo permitia. Ninguna cantidad de cuidado previene eso: fue un
+# fallo MECANICO, no de disciplina.
+#
+# POR QUE MIRA EL REF DESTINO Y NO EL CWD: el cwd es exactamente lo que
+# estaba mal ese dia. git le pasa a este hook, por stdin, una linea por ref
+# a actualizar con la forma `<local ref> <local sha> <remote ref> <remote
+# sha>`. `<remote ref>` es la VERDAD sobre donde va a aterrizar el push, sin
+# importar desde que directorio, worktree o rama se ejecuto.
+#
+# Los hooks viven en el directorio comun del repo, asi que este cubre TODOS
+# los worktrees a la vez (verificado: desde un worktree,
+# `git rev-parse --git-path hooks` resuelve al .git del checkout principal).
+#
+# Es defensa en profundidad, no el control principal: el control real es el
+# ruleset con `bypass_mode: pull_request`, que rechaza server-side. Este
+# hook agrega la barrera LOCAL -- falla antes de tocar la red, dice por que,
+# y sigue puesto si algun dia alguien afloja el ruleset.
+#
+# QUE NO CUBRE, declarado: `--no-verify` lo saltea (es un acto explicito, no
+# un resbalon); no ve escrituras por otra via (gh api, la Git Data API); y
+# solo existe donde `core.hooksPath` apunte aca -- por eso vive versionado
+# en el repo y no en .git/hooks, pero un clon nuevo igual necesita
+# `git config core.hooksPath ops/githooks` (ver ops/githooks/README.md).
+set -uo pipefail
+
+RAMA_PROTEGIDA="${GIT_PROTECTED_BRANCH:-master}"
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  [ -z "${remote_ref:-}" ] && continue
+  case "$remote_ref" in
+    "refs/heads/$RAMA_PROTEGIDA")
+      echo "pre-push: RECHAZADO -- este push aterriza en '$RAMA_PROTEGIDA'." >&2
+      echo "  ref destino: $remote_ref" >&2
+      echo "  Los cambios a '$RAMA_PROTEGIDA' van por pull request." >&2
+      echo "  Si de verdad querias esto, es un acto explicito: --no-verify." >&2
+      exit 1
+      ;;
+  esac
+done
+
+exit 0
