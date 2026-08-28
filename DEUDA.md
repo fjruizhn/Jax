@@ -149,6 +149,33 @@ su fecha de última verificación real, no una nueva.
   el `except` del reaper es fail-soft y sólo deja un `logger.error` cada
   300 s. Mitigado por el gate de esquema completo del deploy, no eliminado.
 
+  **El riesgo residual cambió de forma el 2026-08-28 (`jax` PR#63), no
+  desapareció.** La rama que sí avisa cuando el detector deja de producir
+  datos — estado `unknown` → alerta agregada bajo `__system__` — pasó a
+  tener cobertura automática: `jacobs/_facet_health_io_test.py`, 6 tests
+  contra una MariaDB real (`jax_memory_test`) en el job de CI
+  `facet-health-io`. Era la única rama del detector **nunca ejercitada**:
+  `facet_health_alert` jamás tuvo una fila `__system__`, porque producirla
+  en producción exige apagar la sonda dos horas. Y `check_facet_health()`
+  era la única pieza del lector sin ningún test — la lógica pura podía
+  correr impecablemente sobre datos que nunca llegaron.
+  Las tres propiedades se fijan por separado (vencidos → `unknown` y nunca
+  `ok`; la alerta va bajo `__system__` y **no** es lista vacía; la
+  supresión de 6 h se respeta **y se levanta**), más la tabla vacía — el
+  agujero del `if current and all(...)`, donde `{}` es falsy y el detector
+  muerto produce silencio — y un contrapositivo, sin el cual un
+  `check_facet_health()` que devolviera siempre `__system__` pasaría todo
+  lo demás. Verificado rompiendo el job REAL: rojo con
+  `assert [] == ['__system__']`, revertido, verde de nuevo.
+
+  **QUÉ SIGUE SIN CUBRIR, y es lo que queda del riesgo original:** si
+  `jax-platform` entero está caído, nadie escribe eventos; el lector vive
+  en `jax-las-manos` y sí alertaría `__system__` — pero si el que se cae es
+  `jax-las-manos`, **no queda nadie que alerte**. El detector no se vigila
+  a sí mismo desde afuera, y eso no lo arregla ningún test: necesita un
+  observador externo al par de servicios. Sigue abierto, ahora con el
+  límite dicho con precisión en vez de como una frase general.
+
   **`kimi` va a alertar 4 veces por día, indefinidamente, y se deja así
   (decisión del 2026-08-27).** Es presión intencional hacia la decisión de
   producto pendiente (rutearlo por Motor Registry desde Mesa web, o sacarlo
