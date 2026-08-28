@@ -100,12 +100,11 @@ async def _muestrear_vram(parar: asyncio.Event) -> int:
     while not parar.is_set():
         try:
             pico = max(pico, await asyncio.to_thread(_vram_used_bytes))
-        except Exception:                          # noqa: BLE001
-            pass                                   # fail-soft: es telemetría,
-                                                   # no el resultado
+        except Exception:  # fail-soft: perder una muestra de rocm-smi degrada solo la telemetría de VRAM, no el resultado que decide (tok/s y wall-clock); nadie aguas abajo cree que este muestreo salió bien -- el pico se reporta como el máximo de las muestras que SÍ se tomaron, y reventar acá abortaría una medición de minutos por un muestreo.
+            pass
         try:
             await asyncio.wait_for(parar.wait(), timeout=VRAM_SAMPLE_SECONDS)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError:  # fail-soft: el timeout ES el pulso del muestreo -- que salte significa "la ronda sigue, tomá otra muestra". No es un fallo de nada: es la condición normal del bucle, y el `parar.wait()` es lo que lo corta.
             pass
     return pico
 
