@@ -303,8 +303,8 @@ su fecha de última verificación real, no una nueva.
   revisión de Task 5 sobre qué pasa si `probe_after_rebind` lanza dentro de
   una BackgroundTask, no buscado.
 
-- **Bypass de admin en el ruleset de `master`: la única barrera contra un
-  merge en rojo es que alguien se acuerde de mirar (2026-08-27).** Los dos
+- **Bypass de admin en el ruleset de `master` — PUSH DIRECTO CERRADO
+  2026-08-28; el merge sin revisión NO, y abajo está medido por qué.** Los dos
   repos tienen protección de `master` con bypass para admin (ver
   `jax-block1-apertura-repos-cierre`). Eso era higiene aceptada hasta que
   mostró su costo con un caso concreto.
@@ -323,13 +323,67 @@ su fecha de última verificación real, no una nueva.
   la infraestructura que gobierna esa misma ronda. Un guard que depende de
   memoria humana no es un guard.
 
-  **Qué haría falta (no diseñado):** una identidad de bot separada, sin
-  bypass, que sea la que abre y mergea PRs, dejando el bypass de admin
-  como escape manual y explícito de Fernando. No se resuelve hoy; queda
-  con el caso concreto para que la próxima ronda no tenga que reconstruir
-  el argumento. Ver la séptima lección de método en CONTEXT.md ("verificar
-  y actuar en el mismo comando no es un gate") — el corolario operativo
-  mitiga el lado del agente, pero no cierra el agujero de infraestructura.
+  **Segundo incidente, 2026-08-28, y es el que lo cerró:** un
+  `cd <worktree> && git revert ...` falló por sintaxis; la llamada siguiente
+  arrancó en el checkout principal, sobre `master`, y el `git revert HEAD`
+  revirtió un PR ya mergeado (la décima lección de `CONTEXT.md`). El push
+  salió con `Bypassed rule violations for refs/heads/master`. Se restauró en
+  el acto (`b85e317` revert, `8dfc91f` reapply — **deliberadamente no
+  reescritos, que quede el registro**), pero nada lo frenó. La diferencia con
+  el primer incidente importa: aquél fue disciplina, éste fue **mecánico** —
+  ninguna cantidad de cuidado previene un `cd` que no se ejecutó.
+
+  **CERRADO 2026-08-28 — el push directo a `master`.** `bypass_mode` del
+  ruleset pasó de `always` a `pull_request` en los DOS repos: el bypass
+  sigue existiendo para el merge de un PR, pero **el push directo se rechaza
+  server-side, también para admin**. No es una lectura de la documentación:
+  se verificó con un push real (`GH013: Repository rule violations found for
+  refs/heads/master`) con las mismas credenciales que 40 minutos antes
+  bypasseaban. Defensa en profundidad: hook `pre-push` versionado en
+  `ops/githooks` (`jax` #66, `jax-platform` #31) que decide por el **ref
+  destino** que git pasa por stdin — no por el cwd, que es exactamente lo
+  que estaba mal ese día. Se verificó reproduciendo el incidente completo
+  (comando compuesto que falla, cwd equivocado, push a master): rechazado
+  por el hook, y con `--no-verify` rechazado igual por el ruleset. Los hooks
+  son compartidos entre worktrees (verificado), así que un `git config
+  core.hooksPath ops/githooks` por clon cubre todos los árboles.
+
+  **NO CERRADO, y ahora se sabe por qué: el merge sin revisión.**
+  `required_approving_review_count` es 0. Subirlo a 1 **no sirve con una
+  sola identidad**, y esto se midió, no se supuso (experimento en
+  `jax-platform`, ruleset restaurado después):
+
+  | Intento | Resultado |
+  |---|---|
+  | `gh pr review --approve` sobre un PR propio | `Can not approve your own pull request` |
+  | `gh pr merge` con approvals=1 | `the base branch policy prohibits the merge` (BLOCKED) |
+  | `gh pr merge --admin` | **mergeó igual** (`3acd8f3`) |
+
+  O sea: con approvals=1 y una sola cuenta, el camino normal queda cerrado
+  para todos —incluido Fernando, que no puede aprobar sus propios PRs— y el
+  único camino es `--admin`, que el agente puede tipear igual de fácil. **No
+  crea un gate humano: crea un flag.** El agujero del merge sin revisión
+  sólo se cierra con identidad separada.
+
+  **Identidad separada (bot/GitHub App): ANOTADA, no hecha, y con la
+  distinción que importa.** Después de este cierre sabemos **QUÉ** se hizo
+  (el push directo está bloqueado y todo pasa por PR) pero no **QUIÉN** lo
+  hizo: las dos identidades siguen siendo la misma cuenta admin. Eso es un
+  problema **distinto y menor** que el que se cerró hoy — es separación para
+  **auditoría**, no para protección — con una excepción que sí es de
+  protección y hay que decir: es la única vía por la que
+  `required_approving_review_count = 1` pasaría a significar algo, porque
+  entonces los PRs del bot los tendría que aprobar Fernando y el bot no
+  tendría `--admin`. Alcance concreto medido: cuenta nueva con 2FA (paso
+  interactivo de Fernando), invitación como colaborador con rol **write**
+  —no admin, que es lo que lo deja fuera del bypass—, llave SSH propia y
+  `GH_CONFIG_DIR`/token aparte en hall9000. Efecto colateral a decidir: si
+  el `gh` de la sesión apunta al bot, los comandos manuales de Fernando en
+  esa misma terminal también salen como bot.
+
+  Ver la séptima lección de método en CONTEXT.md ("verificar y actuar en el
+  mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
+  compuesto que falla.
 
 - **`thot` caído en la Mesa web — CERRADO 2026-08-27.** `_call_openai_compat`
   mandaba `max_tokens` con un valor fijo; `gpt-5.6-terra` rechazaba primero
