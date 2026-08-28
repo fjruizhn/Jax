@@ -365,21 +365,39 @@ su fecha de última verificación real, no una nueva.
   crea un gate humano: crea un flag.** El agujero del merge sin revisión
   sólo se cierra con identidad separada.
 
-  **Identidad separada (bot/GitHub App): ANOTADA, no hecha, y con la
-  distinción que importa.** Después de este cierre sabemos **QUÉ** se hizo
-  (el push directo está bloqueado y todo pasa por PR) pero no **QUIÉN** lo
-  hizo: las dos identidades siguen siendo la misma cuenta admin. Eso es un
-  problema **distinto y menor** que el que se cerró hoy — es separación para
-  **auditoría**, no para protección — con una excepción que sí es de
-  protección y hay que decir: es la única vía por la que
-  `required_approving_review_count = 1` pasaría a significar algo, porque
-  entonces los PRs del bot los tendría que aprobar Fernando y el bot no
-  tendría `--admin`. Alcance concreto medido: cuenta nueva con 2FA (paso
-  interactivo de Fernando), invitación como colaborador con rol **write**
-  —no admin, que es lo que lo deja fuera del bypass—, llave SSH propia y
-  `GH_CONFIG_DIR`/token aparte en hall9000. Efecto colateral a decidir: si
-  el `gh` de la sesión apunta al bot, los comandos manuales de Fernando en
-  esa misma terminal también salen como bot.
+  **Identidad separada (bot/GitHub App): ANOTADA, no hecha — y es la ÚNICA
+  opción que cierra el merge sin revisión. Es PROTECCIÓN, no auditoría.**
+  Esta entrada decía antes que era separación para auditoría con una
+  excepción de protección al margen; está al revés y la corrección importa,
+  porque de eso depende con qué urgencia se lea: la separación de identidad
+  es **el único mecanismo que convierte
+  `required_approving_review_count = 1` en un gate real**. Con una sola
+  cuenta, approvals=1 sólo bloquea el camino normal y deja `--admin` (ver la
+  tabla de arriba). Con un bot de rol `write`: sus PRs los tiene que aprobar
+  Fernando, y el bot **no tiene `--admin` que tipear**. La ganancia de
+  auditoría —saber QUIÉN además de QUÉ— es un efecto secundario, no la
+  razón.
+
+  **Decisión de Fernando, 2026-08-28: no se hace hoy**, con las razones
+  escritas para que la próxima ronda no las reconstruya:
+  1. el agujero que queda (merge sin revisión) es el que **en la práctica sí
+     tiene revisión** — cada PR de esta semana pasó por Fernando antes de
+     mergearse. No es garantía mecánica, pero tampoco está desatendido;
+  2. el que **sí estaba desatendido** —push directo por error mecánico, sin
+     oportunidad de que nadie mirara— quedó cerrado hoy, por dos capas
+     independientes y verificado con el escenario exacto del incidente;
+  3. el costo **no está bien medido**: los comandos manuales de Fernando en
+     la misma terminal saldrían como bot, y falta ver cómo interactúa con
+     `require_extra_approval_for_unattributed_changes` (hoy en `true`). Es
+     la clase de cambio que abre tres preguntas nuevas, y no hay un
+     incidente que lo justifique.
+
+  **Qué lo reabre:** un merge sin revisión que llegue a `master` y cause
+  daño — es decir, el incidente que hoy no existe. Alcance concreto ya
+  medido, para no rehacerlo: cuenta nueva con 2FA (paso interactivo de
+  Fernando), invitación como colaborador con rol **write** —no admin, que es
+  lo que la deja fuera del bypass—, llave SSH propia y `GH_CONFIG_DIR`/token
+  aparte en hall9000.
 
   Ver la séptima lección de método en CONTEXT.md ("verificar y actuar en el
   mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
