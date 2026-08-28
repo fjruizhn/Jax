@@ -24,7 +24,14 @@ porque la version anterior medía otra cosa:
 2. LA VRAM SE MUESTREA DURANTE, NO ANTES Y DESPUES. El pico ocurre mientras
    corren las inferencias; medir `after` cuando ya terminaron puede dar
    delta ~0 y no dice nada del pico real.
-3. SE REGISTRA EL ENTORNO QUE DECIDE EL RESULTADO (modelo, num_parallel,
+3. TOK/S SE CALCULA CON `eval_duration`, EL RELOJ DE GENERACION DE OLLAMA,
+   y no con el `elapsed` de la llamada HTTP. Con requests encoladas
+   `elapsed` incluye LA ESPERA EN COLA, asi que `eval_count/elapsed` cae
+   aunque la GPU genere exactamente igual de rapido -- y el criterio de
+   "degradacion > 25%" del umbral se disparia por encolamiento, que es justo
+   lo que ese umbral separa. Se reportan las DOS: `gen` (generacion pura, la
+   que decide) y `e2e` (extremo a extremo, lo que siente el llamador).
+4. SE REGISTRA EL ENTORNO QUE DECIDE EL RESULTADO (modelo, num_parallel,
    modelos residentes). Un numero sin el entorno en que se produjo no es
    evidencia reutilizable: el veredicto depende de `num_parallel` tanto como
    de la GPU.
@@ -120,8 +127,13 @@ async def _one_inference(model: str) -> dict:
                 "elapsed": elapsed, "tok_s": 0.0}
     data = resp.json()
     tokens_out = data.get("eval_count", 0)
+    # `eval_duration` (ns) es el reloj de GENERACION de Ollama: excluye la
+    # espera en cola y la carga del modelo. Es el unico que responde "genera
+    # mas lento cuando hay concurrencia?" -- ver correccion 3.
+    eval_ns = data.get("eval_duration", 0) or 0
     return {"ok": True, "elapsed": elapsed, "tokens_out": tokens_out,
-            "tok_s": tokens_out / elapsed if elapsed > 0 else 0.0}
+            "tok_s_e2e": tokens_out / elapsed if elapsed > 0 else 0.0,
+            "tok_s_gen": tokens_out / (eval_ns / 1e9) if eval_ns else 0.0}
 
 
 async def _run_round(model: str, concurrency: int) -> dict:
@@ -143,7 +155,8 @@ async def _run_round(model: str, concurrency: int) -> dict:
         "errors": [r["error"] for r in results if not r["ok"]],
         "pico_vram_bytes": max(pico_vram, vram_antes),
         "vram_delta_bytes": max(pico_vram, vram_antes) - vram_antes,
-        "tok_s_per_request": [r["tok_s"] for r in oks],
+        "tok_s_gen_per_request": [r["tok_s_gen"] for r in oks],
+        "tok_s_e2e_per_request": [r["tok_s_e2e"] for r in oks],
         "elapsed_per_request": [r["elapsed"] for r in oks],
     }
 
@@ -157,24 +170,32 @@ async def main_async(model: str, concurrencies: list[int], repeats: int) -> list
     summaries: list[dict] = []
     baseline_tok_s = None
     baseline_wall = None
+    baseline_e2e = None
     for c in concurrencies:
         rounds = [await _run_round(model, c) for _ in range(repeats)]
-        all_tok_s = [t for r in rounds for t in r["tok_s_per_request"]]
+        gen = [t for r in rounds for t in r["tok_s_gen_per_request"]]
+        e2e = [t for r in rounds for t in r["tok_s_e2e_per_request"]]
         total_errors = sum(len(r["errors"]) for r in rounds)
-        median_tok_s = statistics.median(all_tok_s) if all_tok_s else 0.0
+        median_tok_s = statistics.median(gen) if gen else 0.0
+        median_e2e = statistics.median(e2e) if e2e else 0.0
         median_wall = statistics.median([r["wall_clock"] for r in rounds])
         if c == 1:
             baseline_tok_s, baseline_wall = median_tok_s, median_wall
+            baseline_e2e = median_e2e
         degradation_pct = (round(100 * (1 - median_tok_s / baseline_tok_s), 1)
                            if baseline_tok_s else 0.0)
+        degradation_e2e_pct = (round(100 * (1 - median_e2e / baseline_e2e), 1)
+                               if baseline_e2e else 0.0)
         # El discriminante de la corrección 1: ~1.0 = de verdad en paralelo;
         # ~N = encolado (Ollama serializó y no medimos contención de GPU).
         factor_wall = (round(median_wall / baseline_wall, 2)
                        if baseline_wall else 0.0)
         summary = {
             "concurrency": c,
-            "tok_s_median": round(median_tok_s, 1),
+            "tok_s_gen_median": round(median_tok_s, 1),
             "degradation_pct": degradation_pct,
+            "tok_s_e2e_median": round(median_e2e, 1),
+            "degradation_e2e_pct": degradation_e2e_pct,
             "wall_clock_median_s": round(median_wall, 1),
             "factor_wall_vs_baseline": factor_wall,
             "errors": total_errors,
@@ -184,8 +205,10 @@ async def main_async(model: str, concurrencies: list[int], repeats: int) -> list
                                        / (1024 * 1024), 1),
         }
         summaries.append(summary)
-        print(f"concurrency={c}: tok/s mediana={summary['tok_s_median']} "
-              f"degradacion={summary['degradation_pct']}% "
+        print(f"concurrency={c}: tok/s GEN={summary['tok_s_gen_median']} "
+              f"(degrad={summary['degradation_pct']}%) "
+              f"tok/s e2e={summary['tok_s_e2e_median']} "
+              f"(degrad={summary['degradation_e2e_pct']}%) "
               f"wall={summary['wall_clock_median_s']}s "
               f"(x{summary['factor_wall_vs_baseline']} vs baseline) "
               f"errores={summary['errors']} "

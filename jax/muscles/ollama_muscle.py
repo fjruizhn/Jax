@@ -32,8 +32,20 @@ import httpx
 from jax.core.model_catalog import record_resolved_version_safe
 from jax.muscles.base import Muscle, MuscleInvocationError, MuscleTimeoutError
 
-# Semaforo global de GPU: UNA inferencia local a la vez en hall9000.
-# Compartido a nivel de modulo para que cualquier carga GPU futura lo respete.
+# Semaforo de GPU -- UNA inferencia local a la vez DENTRO DE ESTE PROCESO.
+#
+# Es un asyncio.Semaphore de proceso, NO cross-proceso. El comentario que
+# estaba aca antes decia "compartido a nivel de modulo para que cualquier
+# carga GPU futura lo respete", y era FALSO: Jacobs corre en el proceso
+# jax-las-manos y tiene 3 caminos propios a Ollama que no pasan por aca
+# (jacobs/plan.py::_llm_plan, jacobs/executor.py::_invoke_ollama,
+# las_manos/motor_registry/worker.py con transporte 'ollama').
+#
+# Medido el 2026-08-28 (scripts/gpu_concurrency_probe.py): no hace falta
+# exclusion mutua cross-proceso HOY, pero no porque la GPU aguante --
+# porque Ollama serializa (OLLAMA_NUM_PARALLEL=1) y la exclusion ya existe
+# afuera. Ese valor no lo fija nadie explicitamente. Veredicto completo y
+# que lo reabre: docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
 GPU_SEMAPHORE = asyncio.Semaphore(1)
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"

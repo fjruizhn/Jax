@@ -570,6 +570,13 @@ class PlanBuilder:
         # por httpx, sin pasar por ese semáforo. No hay exclusión mutua real
         # entre el REPL y Jacobs para el acceso a la GPU (verificado
         # 2026-08-19, sonda T0.a/T1 de latencia de _llm_plan).
+        #
+        # MEDIDO 2026-08-28: esa falta de exclusion mutua no produce
+        # contencion hoy porque Ollama serializa (OLLAMA_NUM_PARALLEL=1);
+        # la generacion se mantiene en ~76.7 tok/s con 1, 2 y 3 requests
+        # concurrentes y lo unico que crece es la espera en cola. Veredicto
+        # y que lo reabre:
+        # docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
         try:
             async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
                 resp = await client.post(OLLAMA_URL, json=payload)
