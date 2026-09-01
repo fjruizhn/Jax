@@ -204,6 +204,55 @@ su fecha de última verificación real, no una nueva.
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
 
+- **CERRADO (2026-09-01) — el default silencioso a `localhost:3306` sobrevivía
+  en CUATRO sitios de `jax-platform`, incluido el pool principal.**
+  PR `jax-platform#41`. **Nunca estuvo anotado acá**: se encontró barriendo el
+  repo, no leyendo esta lista.
+
+  **CORRIGE EL REGISTRO.** La entrada "14 (en verdad 18) tests de `las_manos`"
+  de más abajo dice que el fallback silencioso "vivía duplicado en 19 archivos"
+  y que "los 19 pasaron de default silencioso a `RuntimeError`". Los 19 eran
+  **todos del repo `jax`**. jax-platform es un repo separado y quedó afuera del
+  barrido. Q1 de esta misma ronda lo notó para **una** copia
+  (`facet_resolver._db_conn`, portada a mano desde `jax/core`) pero no siguió.
+  Quedaban cuatro:
+
+  | Sitio | Qué es |
+  |---|---|
+  | `db/connection.py::get_pool()` | **el pool principal del backend — 22 módulos** |
+  | `credential_resolver.py::_db_conn` | drift real: la copia de `jax` sí tenía el guard |
+  | `api/chat.py::_ensure_memory` | conecta la memoria del chat |
+  | `api/admin/dashboard.py` | no conecta: **muestra** el puerto en el panel de salud |
+
+  Es la **tercera vez** que el mismo defecto se cierra en un repo y sobrevive
+  en el otro. `localhost:3306` no es un default razonable: esa instancia **no
+  existe** (la real es `:3308`), así que el default convertía "falta
+  configuración" en "conecta a una instancia muerta".
+
+  **Dos detalles que no son mecánicos:**
+  - En `api/chat.py` el guard va **afuera del `try`**. Ese `except` deja
+    `_memory_ready` en `False`, así que un `raise` adentro se traduciría en
+    "memoria silenciosamente desactivada" — el mismo fallo mudo que el guard
+    viene a eliminar, con otra cara. Configuración ausente = ruidoso; DB caída
+    = sigue siendo fail-soft.
+  - El tablero no conecta, **muestra**. Un `3306` inventado ahí no rompe nada:
+    miente, y en un panel de estado eso es peor.
+
+  **No se cerraron cuatro sitios: se cerró la regla.** Además de un test de
+  comportamiento por sitio, hay un scanner AST sobre todo el árbol de
+  producción — un sitio nuevo escrito mañana queda cubierto sin que nadie lo
+  agregue a ninguna lista. Cerrar los cuatro sin eso sólo garantizaba que
+  hubiera un quinto. Probado contra 5 mutaciones y 3 casos legítimos que no
+  debe marcar, y sobre el código real: reintroduciendo el default en
+  `get_pool`, 5 tests en rojo con el `ConnectionRefusedError` a
+  `127.0.0.1:3306` en el log.
+
+  `credential_resolver._db_conn` quedó **byte a byte idéntico** al de
+  `jax/core` (verificado comparando el AST). **Sigue sin haber un checker de
+  drift para `credential_resolver`** —sólo existe para `facet_resolver`—, y es
+  el mismo patrón de espejo con el mismo historial de divergencias: candidato
+  claro a la próxima ronda.
+
 - **CERRADO (2026-09-01) — el contenimiento del sandbox de Hyde ahora está
   EJERCITADO, no descrito.** `_hyde_containment_test.py` (14 tests) + job
   `hyde-containment` en CI.
