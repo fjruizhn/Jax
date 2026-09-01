@@ -82,12 +82,72 @@ su fecha de última verificación real, no una nueva.
   Una limpieza que borra el historial antes de haberlo leído produce un
   repo que *parece* limpio y un alcance que ya no se puede establecer.
 
-  **Estado del barrido al 2026-09-01: DETENIDO antes de empezar.** El gate
-  T0 (validar la herramienta rompiéndola con secretos sintéticos) no llegó
-  a correr: `gitleaks` no está instalado en hall9000, ni tampoco
-  `trufflehog`, `ggshield`, `git-secrets` ni `detect-secrets`. La única vía
-  presente es `docker`. Falta autorización para instalar. Artefacto:
-  `/home/fruiz/security-audit-2026-09/T0-PARADA.md` (fuera de ambos repos).
+  **ALCANCE REAL, MEDIDO EL 2026-09-01 — la alerta describía una fracción.**
+  Barrido por valor sobre mirrors frescos con `refs/pull/*` traídas,
+  enumerando **todos** los objetos (`cat-file --batch-all-objects`): 857/857
+  blobs leídos en `jax`, 684/684 en `jax-platform`. Método calibrado contra
+  la aguja conocida y **verificado por un agente independiente**: 15 blobs
+  con match, conteo reproducido 1 a 1, **cero falsos positivos**. Reporte
+  completo: `/home/fruiz/security-audit-2026-09/REPORTE-BARRIDO.md` (chmod
+  600, fuera de ambos repos).
+
+  | Lo que decía la alerta | Lo que se midió |
+  |---|---|
+  | 1 archivo | **7 rutas fuente** |
+  | 1 repo (`jax`) | **2 repos** — `jax-platform` nunca fue denunciado |
+  | 1 credencial | **2 agujas distintas** (A y B) |
+  | (sin dato) | 15 blobs |
+
+  **Lo más grave, y no estaba en la alerta: hay una credencial VIVA en
+  `master` de `jax-platform`**, repo público, en
+  `backend/tests/test_seed_admin_password.py` (blob `2199fabd…`). Entró en
+  `da9fd5ec` (2026-08-20), nunca se volvió a tocar, y vive en **8 ramas**
+  incluida `master` — ~12 días en el árbol público. No es historial: es el
+  árbol de hoy. Es la contraseña del **superadmin que crea el seeder**, así
+  que la rotación real puede ser en N bases de datos, no en el repo.
+
+  **La remediación anterior reintrodujo el secreto.** El mismo commit
+  `da9fd5ec` que sacó la contraseña de `backend/db/seed.py` creó el test de
+  regresión negativa que la contiene. Ver la duodécima lección de método en
+  `CONTEXT.md` §9.
+
+  **Otros cuatro hechos medidos que cambian el plan:**
+  1. **La aguja A está decorada como `***...***` y parece un placeholder de
+     redacción. Es un valor real.** Cualquier revisión por lectura —humana o
+     de un LLM— la descarta. Quien inspeccione archivos de este incidente
+     tiene que saberlo antes de empezar.
+  2. **La aguja B vive SOLO en `refs/pull/6` y `refs/pull/7`** (variante
+     `1ea3f2e4` del mismo commit). Confirmación empírica, no teórica, de que
+     reescribir ramas NO la borra.
+  3. **Un `.pyc` compilado contiene la aguja B**
+     (`backend/db/__pycache__/seed.cpython-312.pyc`). Un barrido que filtre
+     binarios la pierde.
+  4. **`forks = 0` en ambos repos** — verificado por API. Es la única clase
+     de exposición que quedó cerrada.
+
+  **`gitleaks` NO sirve como criterio de cierre acá, y se midió.** v8.30.1
+  devolvió `[]` en `jax-platform` (el repo con la credencial viva) y en `jax`
+  señaló 1 de 7 rutas — la que la alerta ya había nombrado. Con las 4
+  versiones del archivo extraídas a un directorio, `gitleaks dir` sobre texto
+  plano da `no leaks found`: **vio el contenido y sus reglas son ciegas a un
+  `curl` con usuario y contraseña**. Ver la decimocuarta lección en
+  `CONTEXT.md` §9.
+
+  **Ventana de exposición: desde 2026-06-19**, ~2 meses continuos en repos
+  públicos; la aguja A en `jax-platform` **sin fecha de fin**.
+
+  **Pendiente, en este orden:**
+  1. **Rotar la contraseña de superadmin de seed en las BASES DE DATOS**,
+     cubriendo A y B — no es un cambio de repo. Determinar primero en qué
+     entornos corrió el seeder.
+  2. Sacar el literal de `master:backend/tests/test_seed_admin_password.py`
+     (asertar contra hash o valor inyectado por fixture).
+  3. TA3 — barrido de los valores de `/etc/jax/.env` con el mismo método.
+  4. **162 rutas candidatas** de la clase "captura de salida de comandos"
+     (73 son `*_result.md`) sin inspeccionar.
+  5. Purga a GitHub Support.
+  6. Hook pre-commit — **no puede basarse en patrón ni entropía**, que es la
+     clase que acaba de fallar.
 
   **Por qué este ítem existe y es el primero de la lista:** el incidente
   estuvo abierto **sin estar registrado en ningún archivo de ninguno de los
