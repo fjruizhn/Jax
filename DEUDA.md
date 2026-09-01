@@ -22,6 +22,40 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **CIERRE FINAL (2026-09-01). Un solo ítem vivo.**
+
+  ### ABIERTO — decisión de negocio, no técnica
+
+  **NOTIFICACIÓN A 6 CLIENTES.** Inventario de infraestructura de terceros en
+  la historia pública de `jax`: **18 blobs, 8 rutas, 16 alcanzables con un
+  `git clone` normal**. Material listo en
+  `/home/fruiz/security-audit-2026-09/INVENTARIO-CLIENTES.md` (600), con el
+  aviso ya corregido al estado real de los certificados. **La decisión es de
+  Fernando.**
+
+  ### ESPERANDO — sin trabajo de este lado
+
+  - **GitHub Support:** ticket listo para pegar en `$AUDIT/TICKET-GITHUB.md`.
+  - **Purga de R2:** 2026-09-08 ~01:00, bloqueada por el Bucket Lock.
+
+  ### CERRADO esta noche — no son problemas
+
+  - **La segunda cuenta NO es vulnerable.** `bcrypt` válido (`$2b$12$`, largo
+    60) y `bcrypt.checkpw` de la aguja filtrada da **FALSO**, medido. El hash
+    no cambió con la rotación de plataforma, pero eso es **higiene, no
+    exposición**. **CERRADO.**
+  - **Los dos dominios de cliente NO tienen vulnerabilidad explotable.**
+    Certificados **válidos** hoy, **HTTPS 200**, vía Cloudflare. El
+    diagnóstico del repo era de agosto y describía el certificado del
+    **origen**, detrás del proxy, que los visitantes nunca vieron.
+    **CERRADO.**
+
+  ### Fuera de este cierre — higiene, sin fecha
+
+  Modo SSL de Cloudflare y certificado del origen: **infraestructura propia,
+  sin relación con el incidente**. Ítem separado, sin fecha. El diagnóstico
+  medido queda registrado más abajo por si sirve cuando se retome.
+
 - **MI ERROR: se trató un diagnóstico viejo como estado actual (2026-09-01).**
   Se le asignó urgencia a *"vulnerabilidad activa en dos dominios de
   clientes"* y **esa urgencia era falsa**. El diagnóstico del repo es de
