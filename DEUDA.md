@@ -24,14 +24,27 @@ su fecha de última verificación real, no una nueva.
 
 - **CIERRE FINAL (2026-09-01). Un solo ítem vivo.**
 
-  ### ABIERTO — decisión de negocio, no técnica
+  ### CERRADO — no hay terceros, no hay notificacion
 
-  **NOTIFICACIÓN A 6 CLIENTES.** Inventario de infraestructura de terceros en
-  la historia pública de `jax`: **18 blobs, 8 rutas, 16 alcanzables con un
-  `git clone` normal**. Material listo en
-  `/home/fruiz/security-audit-2026-09/INVENTARIO-CLIENTES.md` (600), con el
-  aviso ya corregido al estado real de los certificados. **La decisión es de
-  Fernando.**
+  **Los 6 dominios del inventario son cuentas PROPIAS de Fernando en su propio
+  servidor** (decisión y aclaración de Fernando, 2026-09-01). **No son clientes
+  externos, no hay terceros involucrados y no hay obligación de notificar.**
+
+  La clasificación como "información de terceros" fue **una inferencia
+  razonable desde la base de datos** —aparecían como cuentas de panel
+  distintas, con dominios distintos— **pero incorrecta**. Es el mismo modo de
+  fallo que esta ronda ya registró: derivar el alcance de lo que el sistema
+  muestra, sin confirmarlo con quien sabe.
+
+  **Riesgo aceptado, misma categoría que las 3 listas de IPs propias.** Lo que
+  quedó en la historia pública es información de infraestructura **propia**:
+  18 blobs, 8 rutas, 16 alcanzables con un `git clone` normal. El inventario
+  técnico se conserva en `$AUDIT/INVENTARIO-CLIENTES.md`; **el borrador de
+  aviso que contiene no se usa.**
+
+  **Único dato de tercero real de toda la ronda:** el correo de la persona
+  física, **sacado de HEAD en el PR #80** e incluido en el ticket de purga.
+  Sigue cubierto.
 
   ### ESPERANDO — sin trabajo de este lado
 
