@@ -71,8 +71,23 @@ su fecha de última verificación real, no una nueva.
   de que ningún valor real sigue en `refs/heads/*` y todos sobreviven por
   `refs/pull/N/head`.
 
-- **No existe barrera de contenido en el camino rama → master — SEVERIDAD
-  ALTA (2026-09-01).** Hallazgo del juez que atacó el hook `pre-commit`, más
+- **No existe barrera de contenido en el camino rama → master — CERRADO
+  2026-09-01** (era SEVERIDAD ALTA). Cerrado por el check de CI
+  `secret-scan` (`ops/ci/scan-pr-secrets.py`), server-side, sobre el diff
+  `base...head` completo del PR. **Probado rompiéndolo, con el caso crítico
+  incluido:** PR limpio → verde; con la aguja → rojo; **la aguja introducida
+  por MERGE de otra rama commiteada con `--no-verify` → ROJO**, que es
+  precisamente lo que el hook local no puede ver; binario con la aguja →
+  rojo; lista borrada → rojo (fail-closed).
+
+  **El pepper NO va al runner** (decisión de Fernando, 2026-09-01): meterlo
+  como secret de Actions crearía superficie nueva y un secret más que rotar.
+  El check usa una lista paralela con **salt público por entrada y `scrypt`
+  n=2^14** (~26 ms por comparación). Medido: ~2.500 tokens únicos en un diff
+  real × 2 entradas ≈ **130 s de CI**. Crece **lineal** con las entradas —
+  10 entradas serían ~11 min, y ahí hay que revisar el número.
+
+  Diagnóstico original, que se conserva: Hallazgo del juez que atacó el hook `pre-commit`, más
   grande que lo que ese hook cierra.
 
   **Medido, no razonado** (con un hook sonda, `jax`, 2026-09-01):
