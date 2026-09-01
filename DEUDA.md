@@ -22,6 +22,63 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **HIGIENE DE BACKUP — CERRADO 2026-09-01, verificado corriendo.** El dump
+  nocturno con los `password_hash` quedaba `rw-rw-r--`, legible por cualquier
+  usuario del host. Aplicado: **drop-in `UMask=0077`** en
+  `backup-hall9000.service` (`UMask=0022` → `0077`, verificado con
+  `systemctl show`), `/srv/backup-adata` y `staging` de `755`/`775` a **750**,
+  y los dumps existentes a **600**.
+
+  **Probado forzando una corrida real, no asumido:** `ExecMainStatus=0`, dump
+  nuevo en `600`, y **restic hizo trabajo real** — 6 pasos en ✓, snapshots
+  `0a148238` (local) y `d387d0bc` (R2) guardados, retención aplicada. *Un
+  cambio de permisos que rompe el backup es peor que el problema.*
+
+  Va como drop-in y no como `chmod` en el script: no necesita regla de
+  sudoers y **aplica a todo lo que el servicio cree**, no solo al archivo que
+  alguien se acuerde de corregir.
+
+- **`jax_users.updated_at` — CERRADO 2026-09-01.** `ALTER TABLE` aplicado en
+  `jax_memory` y `jax_memory_test`:
+  `updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP`.
+
+  **`DEFAULT NULL` a propósito:** estampar `CURRENT_TIMESTAMP` en las filas
+  existentes habría afirmado una fecha de cambio que nadie conoce. `NULL`
+  dice la verdad — "no sabemos cuándo cambió esta fila".
+
+  **Verificado funcionalmente en `jax_memory_test`, no en producción**, y la
+  fila de prueba quedó revertida a su valor original. **La primera prueba dio
+  NEGATIVO y no se aceptó:** el `UPDATE` escribía el mismo valor que ya tenía
+  la fila, así que MariaDB no la modificaba y `ON UPDATE` no disparaba —
+  arnés roto, no columna rota. Con un valor distinto, la columna se actualiza
+  sola. Producción quedó con ambas filas en `NULL` y los datos sin tocar.
+
+- **`omar@monhagro.com` — la aguja filtrada NO abre esa cuenta.** Medido con
+  `bcrypt.checkpw` contra su `password_hash` vivo, mismo método que L1.
+  **Baja de P0 potencial a higiene.** Lo que NO cierra: su contraseña **nunca
+  fue verificada contra nada más**, y la rotación de esa cuenta **requiere
+  coordinar con la persona** — rotarla sin avisarle la deja afuera del
+  sistema. Procedimiento: idéntico al de `user_id=1` del checklist, cambiando
+  el `user_id`. **Listo para ejecutar cuando Fernando coordine.**
+
+- **DUMPS EN R2 — fecha exacta, no "7 días".** El último objeto de R2 que
+  contiene el hash viejo es el del backup de **2026-09-01 01:00:36** (el de
+  las 05:33 ya lleva el hash rotado, verificado en el log). Con Bucket Lock de
+  7 días, **retain-until ≈ 2026-09-08 01:00**.
+
+  **No se pudo consultar el `retain-until` por API:** no hay `aws`, `rclone`,
+  `s5cmd`, `mc` ni `boto3` en el host, e instalarlos no estaba autorizado. La
+  fecha es **derivada de una medición** (hora del upload + política del lock),
+  no leída del objeto. **Verificar el purgado el 2026-09-08.**
+
+  **Propuesta que cierra la clase entera, no solo este ciclo:** el dump no
+  necesita los `password_hash` para cumplir su función de backup de datos de
+  aplicación. **Excluir `jax_users` del volcado, o volcarla con el hash
+  anonimizado**, elimina de raíz que cada noche se cree un objeto inmutable
+  con credenciales adentro. Hoy cada backup nocturno **crea** el problema que
+  después hay que esperar 7 días para que caduque. No implementado — es un
+  cambio al script de backup y merece su propia ronda.
+
 - **ROTACIÓN EJECUTADA Y VERIFICADA — el incidente está cerrado (2026-09-01).**
 
   `jax_users.user_id=1` en `jax_memory` (`127.0.0.1:3308`).
