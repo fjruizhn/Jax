@@ -197,41 +197,6 @@ su fecha de última verificación real, no una nueva.
   del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
   en una ronda aparte.
 
-- **`jax-platform`: suite de tests del backend con fallos preexistentes en
-  este entorno de desarrollo.** Verificado 2026-08-27
-  durante el cierre de gobernanza de `_HTTP_FACETS` (Task 7, integración de
-  `_invoke_facet` en `chat.py`): diff contra un stash-baseline muestra
-  EXACTAMENTE el mismo conjunto de failures, por nombre, con y sin los
-  cambios de esta ronda -- no es una regresión de este trabajo.
-  **EL NÚMERO NO ES ESTABLE — corregido dos veces el mismo día antes de
-  entender por qué (2026-08-27).** Historia completa, porque la lección
-  está en la secuencia y no en la cifra: una medición dio 10, otra 12, una
-  tercera (a mano, dos corridas seguidas) volvió a dar 10 y se escribió acá
-  como "el número correcto". **Las tres estaban midiendo algo inestable.**
-  Al portar el CI se corrió el experimento que faltaba: el MISMO árbol
-  limpio da 10 y después 12 (3 corridas de cada resultado). La causa es la
-  misma que la de los fallos: `jax_memory_test` es una DB COMPARTIDA, y el
-  conteo depende del estado en que la dejó la corrida anterior.
-  **Consecuencia práctica:** cualquier criterio de "el conjunto de fallos
-  no cambió" basado en el NÚMERO es inservible acá — hay que comparar
-  NOMBRES. Y descarta por construcción la opción de versionar un baseline,
-  que era el diseño más obvio para meter esta suite en CI. Causa raíz identificada: un
-  pool de conexiones `aiomysql` reusado entre distintos event loops de
-  `asyncio` -- defecto de aislamiento de tests, no defecto de producto.
-  Evidencia directa de eso, no solo inferencia: **los failures y el
-  error pasan TODOS en verde cuando se corren sus archivos por separado**
-  (verificado 2026-08-27, archivo por archivo) -- solo fallan cuando
-  comparten proceso con el resto de la suite. No existe hoy, para
-  `jax-platform`, un equivalente
-  al cierre que `jax`/`las_manos` logró 2026-08-24 (95 passed / 0 failed,
-  ver la entrada "14 (en verdad 18) tests" más abajo) -- ninguna auditoría
-  llevó esa suite a verde de referencia. Se deja abierto a propósito, no
-  como "ruido conocido, ignorar": una suite permanentemente un poco roja
-  entrena a ignorarla, que es exactamente cómo una regresión real termina
-  escondida en el ruido. Sin fix esta ronda (fuera de alcance de la
-  gobernanza de `_HTTP_FACETS`) -- candidato a sesión de pago de deuda
-  propia.
-
 - **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
   excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
   comentarios cruzados en `jacobs/plan.py:374`/`jacobs/executor.py:117,381`
@@ -289,6 +254,59 @@ su fecha de última verificación real, no una nueva.
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
+
+- **CERRADO (2026-09-01) — `jax-platform`: la suite del backend está en verde
+  y CI la corre entera.** De **158 tests en CI a 308**. PR `jax-platform#39`.
+
+  **La premisa de este ítem estaba vencida, y esa es la lección.** Decía que la
+  suite era *inestable* ("10 o 12 failures sobre el mismo árbol limpio") y de
+  ahí concluía que "cualquier criterio basado en el número es inservible" y que
+  versionar un baseline quedaba "descartado por construcción". Medido contra
+  `461a089`: **5 failures + 1 error, los mismos por nombre en 3 corridas
+  seguidas.** Determinístico. La deuda se había descrito una vez y nadie volvió
+  a medirla; el diagnóstico envejeció y la conclusión que colgaba de él —"esto
+  no se puede meter en CI"— era falsa desde hacía tiempo.
+
+  **Causa raíz, una sola para las 6:** `db/connection.py` guardaba **un pool
+  global para todos los event loops**. Un pool de aiomysql queda atado al loop
+  que lo creó (sus futuros internos, `Pool._wakeup`, viven ahí) y en la suite
+  hay dos: el del portal de `TestClient` y el de pytest-asyncio. Ahora se
+  indexa por loop. En producción no cambia nada —uvicorn corre un solo loop—.
+
+  **Tres acoplamientos al `$HOME` que hacían imposible correr la suite fuera de
+  hall9000**, encontrados sólo al reproducir el runner de verdad:
+  `api/chat.py::CONFIG_PATH` y `shadow_validation.py::JAX_REPO` apuntaban a
+  `~/jax` hardcodeado (30 y 9 tests), y `_query_facet` exige una credencial de
+  proveedor que en un runner no existe (12 tests, con un mensaje que además
+  miente: dice "sin binding activo" cuando el binding está y lo que falta es la
+  credencial). Los dos primeros son ahora `JAX_CONFIG_PATH` y `JAX_REPO_PATH`,
+  con el mismo default.
+
+  **Bug de producto que la DB de desarrollo escondía:** `provider.base_url` de
+  ollama quedaba **sin `/v1` en toda instalación nueva**. El seed insertaba sin
+  `/v1` y la migración correctiva sólo actuaba `WHERE base_url IS NULL OR
+  base_url = ''`, condición que ese mismo INSERT vuelve falsa. En `jax_memory`
+  está bien por accidente histórico. Arreglado en las dos puntas. **No era
+  detectable sin una base limpia en CI** — es el argumento entero de este
+  trabajo, en un caso concreto.
+
+  **`jacobs_pipelines` la crea el repo `jax`** (`jacobs/store.py::init_tables()`)
+  y jax-platform sólo la lee. El job clona `jax` y ejecuta **su** `init_tables()`
+  en vez de copiar el DDL: una copia sería una segunda fuente de verdad que se
+  desincroniza sola. Sin esa tabla caen los 14 tests de propiedad de pipeline,
+  que son los que cubren el IDOR cerrado en agosto.
+
+  **Método, la parte que más costó:** las tres primeras tandas de arreglos se
+  hicieron **a ciegas**, porque la corrida "local" usaba el `$HOME` de hall9000
+  —con `~/jax` y con `/etc/jax/.env`, que es legible por el grupo `fruiz`— y por
+  lo tanto **no reproducía el runner en absoluto**. Recién al correr todo en un
+  contenedor sin ninguna de las dos cosas, contra un `mariadb:11.8` virgen, los
+  números locales y los de CI coincidieron. Verde local sobre un entorno
+  privilegiado no dice nada sobre un runner limpio.
+
+  **El gate exige dos cosas, no una:** piso exacto de 308 passed **y máximo 1
+  skip**. Sin lo segundo, una DB que no arranca convertiría los 150 tests en
+  skips y el job seguiría verde sin haber probado nada.
 
 - **CERRADO (2026-09-01) — `facet_resolver._cache` replicado en TRES
   procesos; ahora la invalidación cruza los tres.** Era el único ítem abierto
