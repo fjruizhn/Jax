@@ -132,3 +132,12 @@ el segundo `git push` corrió en el checkout equivocado. **Ni este hook ni el CI
 atajan esa clase de error** — el hook mira contenido, el CI mira el resultado, y
 un push al repo equivocado es correcto en ambos. La única defensa es no depender
 del cwd. Ver la lección correspondiente en `CONTEXT.md` §7.
+
+**`git reset --hard` no se usa para limpiar durante una tarea con cambios sin
+commitear.** Se lleva lo recién aplicado junto con lo que querías descartar. El
+2026-09-01, probando este mismo hook, un `--hard` para deshacer un commit de
+prueba borró el cambio al hook que se acababa de escribir. **Se detectó porque
+se verificó el archivo después, no porque se notara al hacerlo** — un
+`reset --hard` no avisa de lo que se llevó puesto. Para limpiar una prueba:
+`git reset HEAD <archivo>` y borrar el archivo, sin tocar el árbol. Cubierto
+por la lección de verificar el estado real en vez de suponerlo.
