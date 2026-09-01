@@ -46,7 +46,7 @@ PROVIDER_ENV_KEYS = [
 ]
 
 
-def _get_fernet() -> "Fernet | None":
+def _get_fernet() -> Fernet | None:
     key = _key_provider.get_master_key()
     if not key:
         return None
@@ -54,8 +54,9 @@ def _get_fernet() -> "Fernet | None":
 
 
 def decrypt_secret(value: str) -> str:
-    """Descifra un valor Fernet. Si no es un token valido (key legacy en
-    texto plano) o falta FERNET_KEY, devuelve el valor tal cual."""
+    """Descifra un valor Fernet. Si no es un token válido (key legacy en
+    texto plano, aún no migrada) o falta FERNET_KEY, devuelve el valor tal
+    cual — permite convivir con .env parcialmente migrados."""
     fernet = _get_fernet()
     if not fernet or not value:
         return value
@@ -67,10 +68,11 @@ def decrypt_secret(value: str) -> str:
 
 def decrypt_provider_keys_in_env() -> None:
     """Descifra en memoria (os.environ) las API keys de proveedor que
-    systemd cargo desde /etc/jax/.env via EnvironmentFile. Debe llamarse
-    antes de que cualquier modulo lea os.getenv()/os.environ para estas
-    variables. No modifica el archivo en disco."""
-    for k in PROVIDER_ENV_KEYS:
-        v = os.environ.get(k)
-        if v:
-            os.environ[k] = decrypt_secret(v)
+    systemd cargó desde /etc/jax/.env vía EnvironmentFile. Debe llamarse
+    antes de que cualquier módulo lea os.getenv()/os.environ para estas
+    variables — en cada proceso, lo más temprano posible en su arranque.
+    No modifica el archivo en disco."""
+    for env_key in PROVIDER_ENV_KEYS:
+        raw = os.environ.get(env_key, "")
+        if raw:
+            os.environ[env_key] = decrypt_secret(raw)

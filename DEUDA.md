@@ -184,6 +184,76 @@ su fecha de última verificación real, no una nueva.
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
 
+- **HALLAZGO (2026-09-01) — `PROVIDER_ENV_KEYS` divergía entre espejos:
+  `jax-platform` no tenía `ZHIPU_API_KEY`. Severidad: baja hoy, media
+  latente.** Arreglado en `jax-platform#42`. Se registra **como ítem propio y
+  no como nota** dentro del cierre del checker, porque es un defecto de
+  manejo de secretos y no un detalle del comparador.
+
+  `PROVIDER_ENV_KEYS` es la lista de variables que
+  `decrypt_provider_keys_in_env()` descifra en memoria. Las dos copias de `jax`
+  tenían 6 claves; la de `jax-platform`, 5. Comparadas las **tres listas
+  completas**: esa era la única divergencia, el orden coincidía y no sobraba
+  nada en ningún lado.
+
+  **Por qué baja hoy (medido, no supuesto):** `ZHIPU_API_KEY` no está en
+  `/etc/jax/.env` —la de Z.ai es `ZAI_API_KEY`, presente en las dos listas—, no
+  aparece en ningún otro archivo, y no estaba seteada en ninguno de los dos
+  procesos vivos. El bucle hace `if raw:`, así que una clave ausente se saltea
+  sin crear ni tocar nada.
+
+  **Por qué media latente:** el día que alguien agregue `ZHIPU_API_KEY` al
+  `.env` —un rename, un proveedor nuevo—, `jax-platform` **no la descifraría** y
+  Mesa web mandaría el **ciphertext Fernet como API key** de Ada. El síntoma
+  sería **"Ada anda en Jacobs y no en Mesa web"**: un fallo de proveedor
+  externo, no de configuración local, y nadie miraría la lista de descifrado.
+
+  **Precedente de la misma forma:** `_PROVIDER_ENV_KEY_MAP` en
+  `credential_resolver` —el otro mapa proveedor→variable de entorno—, señalado
+  el mismo día como el símbolo cuyo drift produciría exactamente ese síntoma. Es
+  la segunda instancia de la clase: **un mapa de secretos replicado, donde la
+  copia incompleta no falla, sólo deja de hacer algo.**
+
+- **CERRADO (2026-09-01) — `crypto_secrets.py`, cuarta familia del comparador
+  de espejos.** `jax#PENDIENTE` + `jax-platform#42`.
+
+  **Se midió antes de agregarla, y por eso no nació rota.** El primer intento
+  de sumarla tal cual habría puesto **los 4 símbolos compartidos en rojo el día
+  uno**, con **3 de las 4 diferencias siendo cosméticas** (estilo de anotación,
+  redacción de docstrings, nombres de variable local). Eso es el estado del que
+  esta ronda sacó a `facet_resolver`: un detector que grita por lo esperado
+  entrena a ignorarlo. Y marcar tres diferencias de redacción como
+  `DIVERGENCIA DELIBERADA` habría sido usar el marcador para mentir — no son
+  decisiones de diseño, son copias que se despeinaron.
+
+  **Forma real, verificada y no asumida:** tres archivos **reales**, ninguno
+  symlink, ninguno generado por script. Dos dentro de `jax` (byte a byte
+  idénticos) y uno en `jax-platform`. Misma forma que `credential_resolver` —y
+  distinta de `facet_resolver`, donde `las_manos/` sí es symlink—.
+
+  **Exclusiones declaradas**, mismo criterio que `load_facet_registry`:
+  `encrypt_secret` y `decrypt_db_secret` existen **sólo** en `jax-platform` y no
+  son drift. La razón ya estaba escrita en el docstring de la copia de `jax`:
+  jax-platform es el lado que **cifra** (sync bidireccional BD→.env) y además
+  lee `user_api_keys`, tabla suya; los procesos de JAX sólo **descifran**.
+
+  **Alineación con cero cambio de comportamiento**, canónico elegido **por
+  elemento y no por copia** (las tres cambiaron): la anotación directa y el
+  docstring más informativo de jax-platform, el `-> None` explícito de jax, los
+  nombres `env_key`/`raw`, y un docstring **nuevo** para
+  `decrypt_provider_keys_in_env` —el de jax-platform nombraba `main.py`, falso
+  en las copias de jax—. Verificado por esqueleto AST contra `HEAD` y por prueba
+  directa de que `.get(k)` y `.get(k, "")` son equivalentes bajo `if raw:`.
+  Suites idénticas antes y después: 336/186 en jax-platform, 55 en jax.
+
+  **Probado rompiéndolo, en las tres copias:** quitar una key en jax-platform
+  (el drift original) → rojo; cambiar `decrypt_secret` en `las_manos` —el tercer
+  archivo, el que nadie comparaba— → rojo; cambiar `_get_fernet` en el canónico
+  → rojo en los dos espejos. Restaurado → verde.
+
+  **Fue configuración, no código:** agregar la familia es una entrada en
+  `FAMILIAS`. La generalización de la ronda anterior aguantó.
+
 - **RIESGO ACEPTADO (2026-09-01) — Hyde con red sin acotar. No es un
   pendiente: es una decisión tomada con la medición en la mano.** Decisión de
   Fernando tras el diagnóstico completo. **No se implementa el confinamiento de
@@ -351,10 +421,9 @@ retractaciones, que no se borran. Ninguno requiere acción.
   un comentario sin marcador → **sigue rojo** (el arreglo no aflojó el
   detector); un espejo ilegible → **exit 2**, nunca verde en silencio.
 
-  **Hallazgo lateral, no resuelto:** `crypto_secrets.py` es una **cuarta
-  familia de espejos** (3 copias; la de `jax-platform` difiere en 478 bytes) y
-  no está en el comparador. Agregarla es agregar una entrada a `FAMILIAS`, pero
-  requiere medir antes qué diverge y por qué — no se hace a ciegas.
+  **La cuarta familia (`crypto_secrets.py`) ya está incorporada** — ver su
+  entrada propia más arriba. Se midió antes de agregarla, y esa medición
+  encontró drift real.
 
 - **CERRADO (2026-09-01) — el default silencioso a `localhost:3306` sobrevivía
   en CUATRO sitios de `jax-platform`, incluido el pool principal.**
