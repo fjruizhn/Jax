@@ -42,42 +42,6 @@ su fecha de última verificación real, no una nueva.
   **Deuda técnica abierta:** los ítems que siguen en esta sección.
   **Fecha de control más próxima:** `kimi`, **2026-09-10**.
 
-- **Una BackgroundTask que lanza aborta en silencio las encoladas DESPUÉS
-  en la misma request (2026-08-27).** Latente hoy, no roto: ningún endpoint
-  encola dos tareas todavía. Se documenta porque el día que alguien encole
-  una segunda, desaparece sin dejar rastro y nada lo va a avisar.
-
-  **Verificado empíricamente**, no leído en la documentación de Starlette:
-  con el FastAPI de `jax-platform/backend/.venv` y un `TestClient` real, un
-  endpoint que encola `explota()` y después `segunda()` corre `explota()`,
-  la excepción propaga, y `segunda()` **nunca corre**. No es una propiedad
-  de nuestro código: es cómo `BackgroundTasks` de Starlette ejecuta la
-  cadena — secuencial, sin aislamiento entre tareas.
-
-  **Qué lo activa, concretamente:** hoy hay dos sitios que usan el
-  mecanismo, cada uno con UNA sola tarea —
-  `probe_after_rebind` desde los dos escritores de `facet_binding`
-  (`api/admin/models.py`, `api/admin/facet_bindings.py`, Task 5) y
-  `run_shadow_validation` desde `api/chat.py:1042`. El bug aparece en
-  cuanto uno de esos endpoints encole una segunda tarea y la primera pueda
-  lanzar. `probe_after_rebind` hoy no lanza — todo su cuerpo está en un
-  `try` que registra `probe_error` — pero esa es una propiedad de esa
-  función, no una garantía del mecanismo: no hay nada que impida encolar
-  mañana una tarea sin ese `try` delante de otra.
-
-  **Por qué no se ve cuando pasa:** bajo uvicorn la respuesta ya se emitió
-  cuando corren las tareas. El cliente ve 200. El traceback de la que lanzó
-  queda solo en `journalctl`; de la que nunca corrió no queda **nada** —
-  ni log, ni fila, ni error. Es el mismo modo de falla que la ronda de
-  alertas vino a eliminar, en otro mecanismo.
-
-  **Qué haría falta (no diseñado):** envolver cada tarea en su propio
-  `try/except` antes de encolarla (un helper `safe_task()` en vez de
-  `add_task` crudo), o un test de política que falle si un endpoint encola
-  más de una sin ese envoltorio. Descubierto al responder una pregunta de
-  revisión de Task 5 sobre qué pasa si `probe_after_rebind` lanza dentro de
-  una BackgroundTask, no buscado.
-
 - **Bypass de admin en el ruleset de `master` — PUSH DIRECTO CERRADO
   2026-08-28; el merge sin revisión NO, y abajo está medido por qué.** Los dos
   repos tienen protección de `master` con bypass para admin (ver
@@ -254,6 +218,43 @@ su fecha de última verificación real, no una nueva.
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
+
+- **CERRADO (2026-09-01) — una BackgroundTask que lanza ya no se lleva puestas
+  a las encoladas después.** PR `jax-platform#40`.
+
+  **La premisa se re-verificó antes de tocar nada** —el ítem era del 08-27, y
+  ese mismo día ya había aparecido otro ítem de esta lista cuyo diagnóstico
+  estaba vencido—. Contra `fastapi 0.139.2 / starlette 1.3.1`: confirmada. La
+  segunda tarea no corre y la excepción propaga.
+
+  **El arreglo:** `jax_engine/background.py::add_safe_task()` envuelve cada
+  tarea en su propio `try/except`. Fail-soft a propósito y **ruidoso** a
+  propósito —la excepción se detiene ahí porque propagarla cancela las
+  siguientes, y se registra con traceback porque tragarla en silencio cambiaría
+  un modo de falla silencioso por otro—. El docstring dice además lo que **no**
+  hace, para que nadie lo suponga: no reintenta, no persiste el fallo y no
+  alerta. Una tarea cuyo resultado alguien necesite confirmar no es una
+  BackgroundTask.
+
+  **La regla quedó en "ninguna", no en "no más de una".** El ítem proponía "un
+  test de política que falle si un endpoint encola más de una sin envoltorio".
+  Se implementó más fuerte: **ningún** archivo de producción puede llamar
+  `.add_task()` crudo. "Una sola tarea" es una propiedad de los llamadores de
+  hoy, no una garantía del mecanismo, y un umbral de dos deja al primero
+  desprotegido sin motivo.
+
+  **El scanner está probado contra violaciones reales, no sólo escrito:** 5
+  mutaciones parametrizadas (llamada directa, dentro de un `if`, en función
+  anidada, dentro de un `try`, con otro nombre de variable), el caso negativo
+  (`add_safe_task` no cuenta), y verificación sobre el código real
+  —reintroduciendo a mano el `add_task` crudo, el test se pone en rojo—.
+  Exige además haber escaneado >20 archivos: el scanner P10 de `jax` estuvo
+  meses en verde sobre **cero**, y ese error no se repite por accidente.
+
+  **Sin debilitar lo que ya se afirmaba:** los dos tests que decían "este
+  endpoint encola `probe_after_rebind`" lo hacían por identidad, y se
+  conservan así (el envoltorio expone `tarea_original`/`tarea_args`) en vez de
+  relajarlos a "encola algo".
 
 - **CERRADO (2026-09-01) — `jax-platform`: la suite del backend está en verde
   y CI la corre entera.** De **158 tests en CI a 308**. PR `jax-platform#39`.
