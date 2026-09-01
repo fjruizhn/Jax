@@ -13,6 +13,7 @@ import getpass
 import hashlib
 import hmac
 import os
+import re
 import sys
 
 PEPPER = os.environ.get("JAX_PRECOMMIT_PEPPER", "/etc/jax/precommit-pepper")
@@ -31,9 +32,29 @@ except OSError as exc:
 if not pepper:
     sys.exit(f"El pepper esta vacio ({PEPPER}).")
 
+if not sys.stdin.isatty():
+    sys.exit("stdin no es un tty: getpass haria ECO del valor. Correlo interactivo.")
 valor = getpass.getpass("Valor del secreto (no se muestra ni se guarda): ")
 if not valor:
     sys.exit("Valor vacio, no se agrego nada.")
+
+# El hook tokeniza por separadores y descarta tokens cortos. Un valor que el
+# tokenizador nunca produciria entra a la lista, PARECE proteccion y no lo es
+# -- un falso sentido de cobertura, versionado. Se rechaza acá, que es el
+# unico lugar del sistema donde el plaintext esta disponible para chequearlo.
+MIN_TOKEN = 6
+SEPARADORES = re.compile(r"""[\s"'`,;()\[\]{}<>=:]""")
+if len(valor) < MIN_TOKEN:
+    del valor
+    sys.exit(f"Valor de menos de {MIN_TOKEN} caracteres: el hook nunca lo "
+             "tokenizaria. No se agrego -- una entrada muerta es peor que "
+             "ninguna, porque parece cobertura.")
+if SEPARADORES.search(valor):
+    del valor
+    sys.exit("El valor contiene un caracter separador (espacio, comilla, "
+             "= : ; , parentesis, corchete...). El tokenizador lo partiria y "
+             "la entrada nunca matchearia. No se agrego. Ojo con el padding "
+             "'=' de base64: es el caso mas comun de esta trampa.")
 
 h = hmac.new(pepper, valor.encode(), hashlib.sha256).hexdigest()
 del valor

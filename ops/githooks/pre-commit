@@ -41,8 +41,15 @@ import re
 import subprocess
 import sys
 
+_AQUI = os.path.dirname(os.path.abspath(__file__))
 PEPPER_PATH = os.environ.get("JAX_PRECOMMIT_PEPPER", "/etc/jax/precommit-pepper")
-LIST_PATH = os.environ.get("JAX_PRECOMMIT_SECRETS", "ops/githooks/known-secrets.txt")
+# Anclada al directorio del hook, no al cwd: un commit sobre una rama que no
+# contiene la lista en su arbol daria rechazo espurio, y eso entrena a la
+# gente a usar --no-verify de rutina, que es la unica evasion que este diseno
+# acepta como acto explicito.
+LIST_PATH = os.environ.get("JAX_PRECOMMIT_SECRETS", os.path.join(_AQUI, "known-secrets.txt"))
+CANARIO = "JAX-PRECOMMIT-CANARY"
+ETIQUETA_CANARIO = "canario-no-borrar"
 
 # Rutas que exigen una marca deliberada (JAX_PRECOMMIT_ALLOW_PATH=1).
 RUTAS_MARCADAS = [
@@ -57,6 +64,8 @@ RUTAS_DURAS = [re.compile(r"_result\.md$", re.I)]
 
 MIN_TOKEN = 6
 SEPARADORES = re.compile(r"""[\s"'`,;()\[\]{}<>=:]+""")
+# Corridas imprimibles, estilo `strings`: asi se lee un binario staged.
+RUNS_IMPRIMIBLES = re.compile(rb"[\x20-\x7e]{%d,}" % MIN_TOKEN)
 
 
 def rechazar(motivo, detalle=""):
@@ -82,7 +91,7 @@ def cargar_pepper():
     return pepper
 
 
-def cargar_hashes():
+def cargar_hashes(pepper):
     try:
         with open(LIST_PATH, "r", encoding="utf-8") as fh:
             crudo = fh.read()
@@ -110,28 +119,72 @@ def cargar_hashes():
             f"  ruta: {LIST_PATH}\n"
             "  Un comparador sin nada con que comparar no encontro cero: no comparo.",
         )
+    # CANARIO: ata este pepper a ESTA lista. Sin el, rotar o regenerar el
+    # pepper cambia todos los HMAC y el hook sigue arrancando "sano",
+    # comparando contra nada y aprobando todo -- el modo de falla invisible
+    # exacto que este archivo dice combatir.
+    esperado = hmac.new(pepper, CANARIO.encode(), hashlib.sha256).hexdigest()
+    if hashes.get(esperado) != ETIQUETA_CANARIO:
+        rechazar(
+            "el pepper no corresponde a esta lista (FAIL-CLOSED, P10).",
+            f"  El canario '{ETIQUETA_CANARIO}' no verifica.\n"
+            f"  pepper: {PEPPER_PATH}\n  lista : {LIST_PATH}\n"
+            "  Sin esto el hook compararia contra hashes de otro pepper y no\n"
+            "  encontraria NADA nunca, con toda la apariencia de estar sano.",
+        )
+    del hashes[esperado]
     return hashes
 
 
-def archivos_staged():
+def git(args, binario=False):
+    """Corre git y RECHAZA si falla. Un git que revienta y devuelve stdout
+    vacio es indistinguible de 'no hay nada que revisar' -- y aprobar ahi
+    seria el fail-open exacto que este hook dice combatir."""
     out = subprocess.run(
-        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
-        capture_output=True, text=True, check=False,
+        ["git"] + args, capture_output=True, check=False,
+        **({} if binario else {"text": True, "errors": "replace"}),
     )
-    return [x for x in out.stdout.splitlines() if x]
+    if out.returncode != 0:
+        err = (out.stderr if binario else out.stderr) or b""
+        if binario:
+            err = err.decode("utf-8", "replace")
+        rechazar(
+            "git fallo durante la revision (FAIL-CLOSED, P10).",
+            f"  comando: git {' '.join(args)}\n  codigo: {out.returncode}\n"
+            f"  {err.strip()[:300]}\n"
+            "  No se aprueba un commit que no se pudo revisar.",
+        )
+    return out.stdout
+
+
+def archivos_staged():
+    return [x for x in git(
+        ["diff", "--cached", "--name-only", "--diff-filter=ACMRT"]).splitlines() if x]
 
 
 def lineas_aniadidas():
-    out = subprocess.run(
-        ["git", "diff", "--cached", "--unified=0", "--no-color", "--diff-filter=ACMR"],
-        capture_output=True, text=True, errors="replace", check=False,
-    )
-    archivo = None
-    for linea in out.stdout.splitlines():
-        if linea.startswith("+++ b/"):
-            archivo = linea[6:]
-        elif linea.startswith("+") and not linea.startswith("+++"):
+    """Parsea por HUNKS. Adivinar por prefijo se come las lineas de contenido
+    que empiezan con '++': en el diff aparecen como '+++' y se descartaban
+    como si fueran cabecera -- un falso negativo silencioso con un fragmento
+    de patch pegado en un .md."""
+    # SIN -a a proposito: que los binarios NO produzcan lineas de texto es lo
+    # que los manda al escaneo de blob completo de main(), que es el camino
+    # correcto para ellos (corridas imprimibles, estilo `strings`).
+    out = git(["diff", "--cached", "--unified=0", "--no-color",
+               "--diff-filter=ACMRT"])
+    archivo, en_hunk, con_texto = None, False, set()
+    for linea in out.splitlines():
+        if linea.startswith("diff --git "):
+            archivo, en_hunk = None, False
+        elif linea.startswith("+++ ") and not en_hunk:
+            archivo = linea[6:] if linea.startswith("+++ b/") else linea[4:]
+        elif linea.startswith("@@"):
+            en_hunk = True
+        elif en_hunk and linea.startswith("+"):
+            if archivo:
+                con_texto.add(archivo)
             yield archivo, linea[1:]
+    lineas_aniadidas.con_texto = con_texto
 
 
 def tokens(linea):
@@ -145,7 +198,7 @@ def tokens(linea):
 
 def main():
     pepper = cargar_pepper()
-    hashes = cargar_hashes()
+    hashes = cargar_hashes(pepper)
 
     duras = [f for f in archivos_staged() if any(r.search(f) for r in RUTAS_DURAS)]
     if duras:
@@ -171,6 +224,27 @@ def main():
             h = hmac.new(pepper, tok.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
             if h in hashes:
                 encontrados.append((archivo, hashes[h]))
+
+    # Todo archivo staged del que el diff NO produjo ni una linea de texto se
+    # escanea entero desde el INDICE. Cubre tres agujeros que el diff deja y
+    # que son falsos negativos silenciosos:
+    #   - binarios: git emite "Binary files ... differ" y cero lineas '+'.
+    #     Es la clase del .pyc que conservo la contrasenia real cuando
+    #     filter-repo limpio el .py.
+    #   - `.gitattributes` con `-diff` sobre una ruta: apaga el diff de texto
+    #     de toda una clase con una linea de aspecto inocente, y era la
+    #     evasion mas barata que existia -- mas barata que --no-verify.
+    #   - typechange y cualquier caso raro que el parser no cubra.
+    con_texto = getattr(lineas_aniadidas, "con_texto", set())
+    for archivo in archivos_staged():
+        if archivo in con_texto:
+            continue
+        crudo = git(["show", f":{archivo}"], binario=True)
+        for run in RUNS_IMPRIMIBLES.findall(crudo):
+            for tok in tokens(run.decode("ascii", "replace")):
+                h = hmac.new(pepper, tok.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+                if h in hashes:
+                    encontrados.append((archivo, hashes[h]))
     if encontrados:
         detalle = "\n".join(f"  {a}: secreto conocido '{e}'" for a, e in sorted(set(encontrados)))
         rechazar(

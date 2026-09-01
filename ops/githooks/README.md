@@ -71,6 +71,30 @@ de un escáner en verde.
 
 Pide el valor por stdin sin eco; solo se escribe el HMAC.
 
+### Canario
+
+La primera entrada de `known-secrets.txt` es `HMAC(pepper, "JAX-PRECOMMIT-CANARY")`.
+Si el pepper se rota, regenera o copia con un byte distinto, **todos los HMAC
+cambian**: sin canario el hook seguiría arrancando en verde, comparando contra
+nada y aprobando todo, con toda la apariencia de estar sano — el modo de falla
+invisible exacto que este diseño existe para evitar. El canario lo convierte en
+un rechazo ruidoso. **No borrar esa línea.**
+
+### Contenido que el diff no muestra
+
+Todo archivo staged del que el diff **no** produjo ni una línea de texto se
+escanea **entero desde el índice**, por corridas imprimibles estilo `strings`.
+Cubre tres huecos que eran falsos negativos silenciosos:
+
+- **Binarios.** `git diff` emite `Binary files … differ` y cero líneas `+`.
+  Es la clase del `.pyc` que conservó la contraseña real cuando `filter-repo`
+  limpió el `.py` — el hallazgo que originó todo esto.
+- **`.gitattributes` con `-diff`.** Una línea de aspecto inocente (`*.md -diff`,
+  "los diffs de docs son ruidosos") apagaba la revisión de contenido de toda una
+  clase de rutas, de forma permanente y sin dejar rastro en el commit ofensivo.
+  Era **más barata que `--no-verify`**.
+- **Typechange** (`T`) y cualquier caso que el parser de hunks no cubra.
+
 ### Lo que NO cubre — declarado, no disimulado
 
 - **Un secreto NUEVO pasa.** Este hook previene la **reintroducción**, que es
@@ -80,4 +104,22 @@ Pide el valor por stdin sin eco; solo se escribe el HMAC.
   en tests, o revisión obligatoria de rutas de alto riesgo.
 - **`--no-verify` lo saltea.** Es evadible por diseño: un acto explícito, no
   un resbalón. No es un control duro y no se pretende que lo sea.
+- **Un secreto embebido sin separadores alrededor no matchea.** La comparación
+  es por token exacto: `pw = "<secreto>"` dispara, `pw = "prefijo<secreto>"` no.
+  Es inherente al match por valor y no se arregla bajando el umbral.
+- **Un secreto conocido de menos de 6 caracteres, o que contenga un separador
+  (espacio, comilla, `= : ; ,` paréntesis, corchetes…), nunca se tokenizaría.**
+  `anadir-secreto.py` **rechaza** esos valores en vez de escribir una entrada
+  muerta que parecería cobertura y no lo sería. Ojo con el padding `=` de
+  base64: es el caso más común de esta trampa.
+- **Tres evasiones, no una.** Además de `--no-verify`: apuntar
+  `JAX_PRECOMMIT_SECRETS` o `JAX_PRECOMMIT_PEPPER` a archivos propios, y borrar
+  una entrada de la lista **en el working tree** sin commitear (la lista se lee
+  del árbol, no del índice ni de HEAD). Las tres son actos explícitos.
+- **`merge`, `rebase`, `cherry-pick`, `revert` y `stash` NO ejecutan este hook.**
+  Solo `commit` y `commit --amend`. Consecuencia concreta: un commit hecho antes
+  de activar `core.hooksPath`, o hecho con `--no-verify`, **entra a `master` por
+  merge o rebase sin pasar jamás por acá**. El `pre-push` tampoco mira contenido
+  —solo el ref destino—, así que **hoy no existe barrera de contenido en el
+  camino rama → master**. Queda anotado como deuda, no disimulado.
 - Solo existe donde `core.hooksPath` apunte acá.

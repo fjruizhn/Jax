@@ -43,7 +43,7 @@ su fecha de última verificación real, no una nueva.
   | Barrido de credenciales en el historial completo | **PENDIENTE** |
   | Rotación de todo lo que aparezca en el barrido | **PENDIENTE** |
   | Solicitud de purga a GitHub Support | **PENDIENTE** |
-  | Hook pre-commit anti-credenciales | **PENDIENTE** |
+  | Hook pre-commit anti-credenciales | **CERRADO** (ver abajo) |
 
   **El historial sigue VIVO, y esa es la distinción que importa.** HEAD está
   limpio desde el 2026-08-21; el contenido no. En el historial hay
@@ -268,8 +268,72 @@ su fecha de última verificación real, no una nueva.
      (73 son `*_result.md`) sin inspeccionar.
   3. Purga a GitHub Support — única vía que alcanza `refs/pull/*` y objetos
      server-side.
-  4. Hook pre-commit — **no puede basarse en patrón ni entropía**, que es la
-     clase que acaba de fallar.
+  4. ~~Hook pre-commit~~ — **CERRADO 2026-09-01**, ver la entrada dedicada
+     más abajo.
+
+  ### Hook pre-commit anti-credenciales — CERRADO 2026-09-01
+
+  Instalado en **ambos repos** (`ops/githooks/pre-commit`, copias idénticas
+  verificadas con `diff`), activo vía `core.hooksPath` ya configurado en los
+  dos checkouts. **Verificado corriendo, no solo escrito**: un `*_result.md`
+  staged es rechazado con exit 1 en `jax` y en `jax-platform`.
+
+  **Compara por VALOR contra secretos ya conocidos, no por patrón ni
+  entropía** — porque esa es la clase que falló: `gitleaks` 8.30.1 dio cero
+  hallazgos sobre el repo con la contraseña en texto plano, y `no leaks
+  found` sobre el archivo denunciado servido como texto plano a
+  `gitleaks dir`. La contraseña real tiene 8 caracteres: no hay formato ni
+  entropía que disparar.
+
+  **HMAC-SHA256 con pepper fuera del repo** (`/etc/jax/precommit-pepper`,
+  0600). La lista viaja en un repo **público**: un `sha256` pelado de una
+  contraseña de 8 caracteres se crackea con wordlist en minutos, y publicarlo
+  sería publicarla de nuevo; `bcrypt`/`argon2` serían seguros de publicar
+  pero cuestan ~250 ms por comparación, inusable por commit.
+
+  **Casos probados rompiéndolo** (ejecutados por un agente, juzgados por
+  otro): commit limpio pasa · la aguja en un `.py` bloquea · **un
+  `curl -u user:password` en un `.md` bloquea** (el escenario exacto que
+  `gitleaks` no ve) · la aguja en un test de regresión bloquea **por el
+  secreto, no por la ruta** (el caso de `da9fd5ec`) · `*_result.md` bloquea
+  duro incluso con la marca de escape · lista borrada o corrupta rechaza
+  (fail-closed) · un secreto **nuevo** pasa, demostrado, no asumido.
+
+  **Siete defectos que la primera batería NO probó, encontrados por el juez
+  y corregidos antes de publicar** — cuatro hacían que el hook aprobara sin
+  haber comparado nada, que es justo lo que dice combatir:
+  1. **`git` que falla aprobaba en silencio** (`check=False`, `returncode`
+     ignorado). Ahora rechaza.
+  2. **Sin canario**, rotar el pepper dejaba el hook comparando contra nada
+     con apariencia de sano. Ahora la lista trae `HMAC(pepper, CANARY)` y se
+     verifica al cargar.
+  3. **`.gitattributes` con `-diff`** apagaba la revisión de una clase entera
+     con una línea inocente — más barato que `--no-verify` y sin rastro.
+  4. **Binarios** no producían líneas `+`: la clase del `.pyc` que originó
+     todo esto. Ahora se escanean enteros desde el índice.
+  5. Líneas de contenido que empiezan con `++` se descartaban como cabecera.
+  6. `typechange` (`T`) quedaba fuera del `--diff-filter`.
+  7. `anadir-secreto.py` aceptaba valores que el tokenizador nunca produciría
+     (cortos, o con separadores — todo base64 con padding `=`), escribiendo
+     **entradas muertas que parecían cobertura**. Ahora las rechaza.
+
+  **EL LÍMITE, escrito para que nadie lo confunda con una defensa completa:
+  este hook NO habría prevenido el incidente original.** La contraseña era
+  nueva y ninguna lista la contenía. Previene la **REINTRODUCCIÓN**, que es
+  exactamente lo que pasó en `da9fd5ec`: el commit que sacó la contraseña de
+  `seed.py` la reescribió en el test de regresión que probaba que ya no se
+  usaba. Una defensa contra secretos **nuevos** necesita otra cosa —
+  inyección por env var sin literales en tests, o revisión obligatoria de
+  rutas de alto riesgo.
+
+  **Deuda que deja abierta, medida y no disimulada:** `merge`, `rebase`,
+  `cherry-pick` y `revert` **no ejecutan hooks de pre-commit**, y el
+  `pre-push` solo mira el ref destino, no el contenido. **Hoy no existe
+  barrera de contenido en el camino rama → master.** Un commit hecho con
+  `--no-verify` o anterior a la activación entra por merge sin pasar por acá.
+
+  El diseño completo vive en `ops/githooks/README.md` — **no en este
+  documento y no en un mensaje de chat**, que fue donde estuvo hasta hoy.
 
   **Por qué este ítem existe y es el primero de la lista:** el incidente
   estuvo abierto **sin estar registrado en ningún archivo de ninguno de los
