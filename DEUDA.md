@@ -76,8 +76,41 @@ su fecha de última verificación real, no una nueva.
   2026-06-19 16:09:12. **Su contraseña no fue verificada contra nada**, y
   ningún barrido de la auditoría buscó el dominio `monhagro.com` — el barrido
   por identidad cubrió `rich-hn.com` porque era el único dominio conocido.
-  Barrido en curso; hasta que cierre, el alcance de la cuenta es **desconocido,
-  no limpio**. Fecha de control: **2026-09-08**.
+  **Barrido CERRADO (2026-09-01): cero credenciales.** Enumeración completa de
+  1.593 blobs en ambos repos con `refs/pull/*` traídas. `omar@monhagro.com`:
+  **0 apariciones**. Búsqueda ampliada por regex (`omar@` cualquier dominio,
+  `monhagro`): los mismos resultados. `monhagro.com` aparece en **7 blobs de
+  `jax`**, todos como **dato de inventario**, y el escaneo de campos de
+  credencial sobre los blobs completos —no solo las ventanas— dio **0
+  coincidencias**. No hubo ningún valor que clasificar, así que el gate de
+  palabras autodescriptivas no llegó a aplicarse.
+
+  **Confirmado de paso:** la única variante de correo `@rich-hn.com` en la
+  historia de ambos repos es `fernando@rich-hn.com` (54 apariciones).
+  `fernando.ruiz@rich-hn.com` —el de producción— **no existe en ningún blob**.
+
+  **Queda: la contraseña de esta cuenta nunca fue verificada contra nada.** No
+  estaba filtrada en los repos, que es distinto de estar sana. Fecha de
+  control: **2026-09-08**.
+
+- **Inventario operativo de infraestructura de CLIENTES en historia pública —
+  hallazgo lateral de L4 (2026-09-01). Decisión pendiente.** No es una
+  credencial, y por eso ningún barrido de secretos lo iba a marcar. En
+  `missions/` de `jax`, fuera de HEAD desde `f6c8e7d` pero **vivo en la
+  historia**: nombres de usuario del panel Hestia (`richhn`, `monhagro`,
+  `melipaola`, `fynamicshn`, `bdihn`, `gescorphn`), sus dominios, cantidad de
+  cuentas de correo y tamaños de buzón, nombres de bases de datos
+  (`richhn_nextcloud`, `gescorph_website`, `gescorph_wp393`), rutas de
+  Maildir, y —en las versiones anteriores a `99ad51a`— **IPs internas y el
+  puerto SSH 58291**. Incluye además la declaración de que `sol-lex.com` y
+  `bdihn.com` **tienen certificados vencidos y el origen no responde a ACME**.
+
+  **Por qué esto no entra en el mismo cajón que las 3 listas de IPs propias:**
+  aquello era topología de Fernando y la decisión de aceptar el riesgo era
+  suya. **Esto es información de terceros** — clientes que no participaron de
+  la decisión. Es reconocimiento útil para un atacante, con una debilidad
+  concreta nombrada. **Decisión pendiente, y no es solo técnica.** Fecha de
+  control: **2026-09-15**.
 
 - **Dump nocturno con hashes legible por todo el host — severidad media.**
   `/srv/backup-adata/staging/mariadb-local/jax_memory.sql` (11.5 MB) queda
