@@ -22,6 +22,65 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **La rotación de la segunda cuenta NO ocurrió — NO CERRADO (2026-09-01).**
+  Se informó que se había rotado desde la plataforma. **Medido: el
+  `password_hash` de `user_id=2` es idéntico al que se registró en el
+  inventario pre-rotación** (misma huella MD5), y `updated_at` está en `NULL`
+  pese a que la columna existe desde hoy ~05:34 — cualquier `UPDATE` posterior
+  la habría estampado.
+
+  El hash **sí** es un bcrypt válido (`$2b$12$`, largo 60), así que **no** es
+  el modo de fallo del marcador de 48 caracteres. Y `bcrypt.checkpw` de la
+  aguja filtrada da **FALSO**, así que la cuenta no es vulnerable por esa vía.
+  **Pero la fila no se tocó.** O la plataforma escribió en otro lado, o falló
+  en silencio, o se rotó otra cuenta.
+
+  Es **la misma clase que `user_id=1`**: creer que una rotación ocurrió cuando
+  la fila no cambió. Ahí el testigo lo detectó; acá también.
+
+- **Certificados de dos dominios de cliente — la vulnerabilidad documentada NO
+  está vigente (medido 2026-09-01).** El repo publicó el diagnóstico de dos
+  dominios con certificado vencido hace más de un año. **Medición de hoy:
+  ambos sirven certificados válidos** (Google Trust Services, vencen
+  2026-11-24 y 2026-11-19), responden **HTTP 200**, y tienen **Cloudflare
+  delante**.
+
+  **El certificado vencido era el del ORIGEN, detrás del proxy.** Los
+  visitantes nunca lo vieron. **La incidencia no es explotable desde internet
+  hoy.** Lo que queda por revisar —certificado del origen y modo SSL de
+  Cloudflare, `Full` contra `Full (strict)`— **está dentro de la
+  infraestructura propia**, no del lado del cliente. **Requiere autorización
+  para tocar; no se cambió nada.**
+
+  El borrador de aviso quedó **reescrito** con este estado: la versión
+  anterior daba por vigente la vulnerabilidad y era incorrecta. Un aviso que
+  reporta una exposición sin decir si lo expuesto sigue vigente deja al
+  cliente sin saber qué hacer.
+
+- **Dump nocturno sin hashes — CERRADO 2026-09-01, verificado corriendo.** El
+  backup **fabricaba cada noche** un objeto inmutable en R2 con los
+  `password_hash` adentro: creaba el problema que después había que esperar
+  siete días a que caducara.
+
+  **Se redacta el hash, no se excluye la tabla**, y la razón importa: excluir
+  `jax_users` haría que una restauración **perdiera las cuentas** —emails,
+  roles, tenants—, que son datos de negocio. Redactando solo el hash, la
+  restauración conserva los usuarios y lo único que exige es un reset de
+  contraseñas. Se redacta **cualquier** bcrypt del dump, no solo los de
+  `jax_users`.
+
+  **Verificado con una corrida real:** **34 tablas antes y 34 después** (sin
+  pérdida), **0 hashes**, 2 marcadores de redacción, `jax_users` presente con
+  sus cuentas, permisos 600, restic con dos snapshots nuevos. El script
+  **falla el paso** si queda algún hash sin redactar — no lo deja pasar.
+
+- **ESPERANDO A TERCERO — no son pendientes, no hay trabajo de este lado.**
+
+  | Ítem | Estado | Bloqueado por |
+  |---|---|---|
+  | **GitHub Support** | Ticket redactado y ampliado con los 18 blobs de datos de clientes | **Respuesta de GitHub** |
+  | **Purga de dumps en R2** | Procedimiento y fecha listos: **2026-09-08 ~01:00** | **El Bucket Lock — inmutabilidad por diseño.** Desde hoy los dumps nuevos ya no llevan hashes |
+
 - **CIERRE TOTAL DE LA RONDA DE SEGURIDAD (2026-09-01).** Estado único.
   Nada figura como "pendiente": cada ítem lleva **CERRADO**, **LISTO PARA
   EJECUTAR** (con qué falta) o **NO DETERMINABLE** (con qué se buscó).
