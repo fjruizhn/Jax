@@ -291,6 +291,30 @@ def _build_capability_hint(governance: dict) -> str:
     return regla_archivos + mapa_dinamico
 
 
+def _techo_segundos(caps: dict, capability: str) -> tuple[int, str]:
+    """Techo de ejecucion para una capability, en segundos, y de donde sale.
+
+    QUE PASA CUANDO NO HAY TECHO DECLARADO (decidido con datos, 2026-09-01):
+    una capability sin fila en `capability` NO recibe un techo infinito --
+    recibe `_DEFAULT_TIMEOUT_SECONDS` (300 s), que es el mismo valor que el
+    codigo ya le asigna por defecto. Aceptar cualquier cosa seria fail-open, y
+    rechazar de plano rompería `assemble`, que esta exenta A PROPOSITO en el
+    planner (plan.py: `if capability != "assemble" and ...`) y no tiene fila.
+    Medido en `jacobs_steps`: 6 steps `assemble` reales, TODOS con
+    timeout_seconds=300 -- este techo no rechaza ninguno.
+
+    `max_execution_minutes` es `int NOT NULL` en el esquema, asi que hoy la
+    rama del valor vacio es inalcanzable. Se deja igual, fail-closed hacia 300
+    y no hacia "sin limite", como red para un cambio de esquema futuro."""
+    entry = caps.get(capability)
+    if entry is None:
+        return _DEFAULT_TIMEOUT_SECONDS, "sin fila en `capability` (techo conservador por defecto)"
+    minutos = entry.get("max_execution_minutes")
+    if not minutos:
+        return _DEFAULT_TIMEOUT_SECONDS, "max_execution_minutes vacío (techo conservador por defecto)"
+    return int(minutos) * 60, "capability.max_execution_minutes"
+
+
 async def _validate_plan_capabilities(steps: list) -> None:
     """T2: valida cada step contra la DB real (capability_motor +
     motor.has_tool_access, jacobs/store.py::get_motor_governance) ANTES de
@@ -306,12 +330,45 @@ async def _validate_plan_capabilities(steps: list) -> None:
     from jacobs import store as _store  # import diferido: evita ciclo store<->plan al import time
 
     relevant = [s for s in steps if (s.motor or s.facet) in MOTOR_FACETS]
-    if not relevant:
-        return
+    # La gobernanza se consulta SIEMPRE, no solo si hay steps de motor: el techo
+    # de ejecucion (mas abajo) aplica a TODOS los steps. Costo medido en
+    # get_motor_governance(): 3 SELECTs, 0.00024s en el servidor.
     governance = await _store.get_motor_governance()
     motors = governance["motors"]
     caps = governance["capabilities"]
     violations: list[PlanViolation] = []
+
+    # ---- Techo de ejecucion, sobre TODOS los steps ------------------------
+    # NO solo sobre `relevant`. El techo es propiedad de la CAPABILITY, no del
+    # motor, y `timeout_seconds` gobierna a todos por igual: executor.py
+    # envuelve CADA step en `asyncio.wait_for(..., timeout=step.timeout_seconds)`,
+    # sea motor o facet HTTP (verificado 2026-09-01, executor.py:880).
+    #
+    # POR QUE RECHAZA Y NO RECORTA: recortar en silencio convierte un error de
+    # configuracion en comportamiento sordo -- el plan corre con un timeout que
+    # nadie pidio y nadie ve. Un umbral que no puede fallar no es un umbral.
+    for step in steps:
+        techo, fuente = _techo_segundos(caps, step.capability)
+        if step.timeout_seconds is None or step.timeout_seconds <= techo:
+            continue
+        por_defecto = _CAPABILITY_TIMEOUT_SECONDS.get(
+            step.capability, _DEFAULT_TIMEOUT_SECONDS
+        )
+        if step.timeout_seconds == por_defecto:
+            pista = (
+                "Ese valor es el default por-capability del CODIGO "
+                "(_CAPABILITY_TIMEOUT_SECONDS): codigo y DB divergieron -- ver "
+                "scripts/check_timeout_consistency.py"
+            )
+        else:
+            pista = "Ese valor viene del spec del step: bajalo, o subí el techo en la DB"
+        violations.append(PlanViolation(
+            step.step_index, step.facet, step.motor, step.capability,
+            f"timeout_seconds={step.timeout_seconds}s excede el techo de {techo}s "
+            f"({techo // 60} min) declarado para la capability '{step.capability}' "
+            f"({fuente}). {pista}",
+        ))
+
     for step in relevant:
         motor_key = step.motor or step.facet
         if motor_key not in motors:

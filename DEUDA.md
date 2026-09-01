@@ -143,23 +143,28 @@ su fecha de última verificación real, no una nueva.
   compuesto que falla.
 
 - **`_CAPABILITY_TIMEOUT_SECONDS` (jacobs/plan.py) duplica
-  `capability.max_execution_minutes` (DB) sin lectura en vivo.** Verificado
-  2026-08-27 durante el cierre de gobernanza de `_HTTP_FACETS`: el default
-  de `step.timeout_seconds` sale de un dict hardcodeado
-  (`jacobs/plan.py:106-110`); un `timeout_seconds` explícito en un spec de
-  step lo pisa SIN validar contra el techo de la DB
-  (`_validate_plan_capabilities` no lo chequea, y ni siquiera aplica a
-  `_HTTP_FACETS`). `scripts/check_timeout_consistency.py` verifica que
-  coincidan, pero es manual, no una garantía en runtime. El check 8 real de
-  `MotorPolicy.check()` solo corre server-side, dentro de `las_manos`
-  (`las_manos/motor_registry/routes.py:95`, antes de crear el `MotorJob`
-  pero después de que Jacobs ya hizo la llamada HTTP a `/motor/dispatch`),
-  y solo para `kimi`/`jax_local` -- nunca corre en Jacobs, ni antes de que
-  Jacobs decida despachar. Decisión
-  explícita: NO se activa un admission-check contra esto en la ronda de
-  `_HTTP_FACETS` (validaría contra un valor que puede ya estar desincronizado
-  del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
-  en una ronda aparte.
+  `capability.max_execution_minutes` (DB).** Queda **sólo la deduplicación**:
+  el default de `step.timeout_seconds` sigue saliendo de un dict hardcodeado en
+  el código, en vez de leerse de la DB que ya declara el mismo número. Hoy
+  coinciden (verificado: 5 min para casi todas, 15 para design/reason/reconcile,
+  idéntico al dict).
+
+  **Dos cosas que este ítem decía y ya no son ciertas, corregidas al medirlo de
+  nuevo el 2026-09-01:**
+
+  1. Decía que `scripts/check_timeout_consistency.py` "es manual, no una
+     garantía en runtime". **Corre al arrancar Jacobs** (`las_manos/server.py`),
+     comparando código contra DB. Sigue siendo un `WARNING` que no bloquea el
+     arranque —y nadie mira los warnings—, pero no es manual.
+  2. Decía que un `timeout_seconds` explícito "pisa el default SIN validar
+     contra el techo de la DB". **Eso ya está cerrado** — ver la entrada del
+     techo de ejecución en la sección de cerrados.
+
+  **Por qué la deduplicación no se hace acá:** borrar el dict y leer el techo
+  de la DB cambia el DEFAULT de todos los steps, no sólo el límite. Es un
+  cambio de comportamiento con su propia superficie de prueba, y el ítem
+  original ya lo había separado a propósito. Sigue separado, pero ahora el
+  riesgo real —que el techo no se cumpla— está cubierto mientras tanto.
 
 - **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
   excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
@@ -203,6 +208,48 @@ su fecha de última verificación real, no una nueva.
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
+
+- **CERRADO (2026-09-01) — el techo de ejecución declarado en la DB es un
+  techo de verdad.** `_validate_plan_capabilities` lo hace cumplir.
+
+  **Qué era.** `capability.max_execution_minutes` decía ser el límite de
+  ejecución de una capability y nada lo hacía cumplir en plan-time: un
+  `timeout_seconds` explícito en el spec de un step pisaba el default y llegaba
+  intacto a `asyncio.wait_for`. El techo declarado no era un techo — era una
+  columna que alguien podía editar en un panel admin creyendo que cambiaba algo.
+
+  **Rechaza, no recorta.** Recortar en silencio convierte un error de
+  configuración en comportamiento sordo: el plan corre con un timeout que nadie
+  pidió y nadie ve. El mensaje nombra el valor pedido, el techo, la capability
+  y **de dónde vino el valor** — distingue "lo pidió el spec" de "código y DB
+  divergieron", que necesitan arreglos distintos.
+
+  **Dos decisiones tomadas con datos, no por gusto:**
+
+  1. **Aplica a TODOS los steps, no sólo a los de `MOTOR_FACETS`** —que es lo
+     único que el validador miraba—. El techo es propiedad de la *capability*,
+     no del motor, y `executor.py` envuelve **cada** step en
+     `asyncio.wait_for(..., timeout=step.timeout_seconds)`, sea motor o facet
+     HTTP. Un techo que no cubre a la mitad de los steps no es un techo. Se
+     eliminó el `if not relevant: return` que dejaba pasar de largo cualquier
+     plan sin steps de motor.
+  2. **Capability sin techo declarado → 300 s, no "cualquier cosa".** Es el
+     único caso ambiguo y se decidió midiendo: `assemble` está exenta **a
+     propósito** en el planner y no tiene fila en `capability`. Aceptar
+     cualquier timeout ahí sería fail-open; rechazar de plano rompería
+     `assemble`. Recibe `_DEFAULT_TIMEOUT_SECONDS`, el mismo valor que el
+     código ya le asigna. Medido en `jacobs_steps`: **6 steps `assemble`
+     reales, todos con `timeout_seconds=300`** — la regla no rechaza ninguno.
+
+  **Consecuencia declarada:** el validador ahora consulta la gobernanza
+  **siempre**, no sólo cuando hay steps de motor. Si la DB no responde, un plan
+  que antes se construía ahora falla — el techo no se puede verificar y se falla
+  cerrado. Costo medido de la consulta: 3 SELECTs, 0.00024 s en el servidor.
+
+  14 tests (job `plan-timeout-ceiling`), auto-verificados por mutación: quitando
+  el chequeo caen 9. Medido además que **no rompe nada existente**: 24 passed en
+  master y 24 con el cambio, sobre los 6 archivos de tests que tocan el
+  validador.
 
 - **CERRADO (2026-09-01) — el comparador de espejos cubre ahora
   `credential_resolver`, y se generalizó a FAMILIAS.**

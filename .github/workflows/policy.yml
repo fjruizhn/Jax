@@ -259,6 +259,36 @@ jobs:
   # copia propia y NO es un symlink (a diferencia de facet_resolver). Medido el
   # 2026-09-01. Esa tercera copia puede driftear DENTRO del propio repo jax, y
   # hasta hoy nadie la comparaba con nada.
+  # El techo declarado en capability.max_execution_minutes es un techo de
+  # verdad (2026-09-01). Antes no lo era: un timeout_seconds explicito en el
+  # spec de un step pisaba el default y llegaba intacto a asyncio.wait_for --
+  # la columna se podia editar en un panel admin creyendo que cambiaba algo.
+  #
+  # Los tests parchean get_motor_governance: prueban la POLITICA, no el I/O, y
+  # no necesitan DB. Se auto-verifican por mutacion -- quitando el chequeo del
+  # techo caen 9 de 14 (verificado, no supuesto).
+  #
+  # Deps medidas en un venv limpio, no supuestas: jacobs.plan arrastra
+  # store -> aiomysql, models -> pydantic, reaper -> httpx y
+  # credential_resolver -> crypto_secrets -> cryptography. Con solo pytest el
+  # job falla en la COLECCION y no en un assert.
+  #
+  # PYTHONPATH=las_manos: es el camino de import de Jacobs (plan.py importa
+  # `credential_resolver` pelado, que vive en las_manos/).
+  plan-timeout-ceiling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest aiomysql pydantic httpx cryptography
+      - run: PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -v
+      - run: |
+          PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -q 2>&1 | tee /tmp/ptc
+          grep -qE "^14 passed" /tmp/ptc || {
+            echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }
+
   mirror-sync:
     runs-on: ubuntu-latest
     steps:
