@@ -41,7 +41,28 @@ su fecha de última verificación real, no una nueva.
 
   ### Por qué la rotación anterior no había cubierto esta fila
 
-  **El seeder NUNCA creó `user_id=1`.** Medido:
+  **CORRECCIÓN (2026-09-01, posterior): el seeder SÍ creó `user_id=1`.** Lo
+  que sigue afirmaba lo contrario y era falso. Se deja registrado, no borrado.
+
+  **Evidencia convergente, verificada:** `jax_tenants.tenant_id=1` es
+  `'Inversiones Diamante Negro'`, `plan='superadmin'`, creado **2026-06-18
+  17:11:51** — **41 segundos antes** que la fila de usuario. Ese literal
+  exacto existe en **un solo archivo de todo `jax-platform`: `seed.py`**
+  (verificado por `grep -rl`), y `run_seed()` inserta el tenant y el usuario
+  en la misma función. El código estaba en disco y todavía sin commitear: se
+  commiteó ~11 h después en `ed7719a`.
+
+  **El email con punto no viene de ningún código:** son dos `UPDATE` hechos
+  desde la propia Mesa el 2026-06-19, y por eso el gate `COUNT(*)` nunca los
+  revirtió.
+
+  **Qué NO cambia con esta corrección, y es lo que importaba:** la conclusión
+  operativa se sostiene entera. El gate `COUNT(*)` significa que **el seeder
+  no reescribe una fila existente**, así que la rotación tenía que ser un
+  `UPDATE` directo — como se hizo. Lo que era falso era el relato del origen,
+  no el procedimiento.
+
+  Lo que se afirmaba antes, incorrecto:
   - Email en producción: `fernando.ruiz@rich-hn.com` (**con** punto). El
     seeder inserta `fernando@rich-hn.com` (**sin** punto).
   - Fila creada el **2026-06-18 17:12:32**, *anterior* al primer commit del
@@ -71,15 +92,15 @@ su fecha de última verificación real, no una nueva.
   Es la **misma clase que `da9fd5ec`**: la remediación introduce el defecto que
   venía a arreglar. Ver la duodécima lección en `CONTEXT.md` §9.
 
-- **`omar@monhagro.com` — cuenta con acceso, fuera de todo lo auditado
+- **la **segunda cuenta** (`user_id=2`, rol `operator`) — cuenta con acceso, fuera de todo lo auditado
   (2026-09-01).** `user_id=2`, rol `operator`, `status=active`, creada
   2026-06-19 16:09:12. **Su contraseña no fue verificada contra nada**, y
-  ningún barrido de la auditoría buscó el dominio `monhagro.com` — el barrido
+  ningún barrido de la auditoría buscó el dominio de esa cuenta — el barrido
   por identidad cubrió `rich-hn.com` porque era el único dominio conocido.
   **Barrido CERRADO (2026-09-01): cero credenciales.** Enumeración completa de
-  1.593 blobs en ambos repos con `refs/pull/*` traídas. `omar@monhagro.com`:
-  **0 apariciones**. Búsqueda ampliada por regex (`omar@` cualquier dominio,
-  `monhagro`): los mismos resultados. `monhagro.com` aparece en **7 blobs de
+  1.593 blobs en ambos repos con `refs/pull/*` traídas. la **segunda cuenta** (`user_id=2`, rol `operator`):
+  **0 apariciones**. Búsqueda ampliada por regex (el usuario local contra cualquier dominio,
+  el dominio): los mismos resultados. Ese dominio aparece en **7 blobs de
   `jax`**, todos como **dato de inventario**, y el escaneo de campos de
   credencial sobre los blobs completos —no solo las ventanas— dio **0
   coincidencias**. No hubo ningún valor que clasificar, así que el gate de
@@ -97,13 +118,20 @@ su fecha de última verificación real, no una nueva.
   hallazgo lateral de L4 (2026-09-01). Decisión pendiente.** No es una
   credencial, y por eso ningún barrido de secretos lo iba a marcar. En
   `missions/` de `jax`, fuera de HEAD desde `f6c8e7d` pero **vivo en la
-  historia**: nombres de usuario del panel Hestia (`richhn`, `monhagro`,
-  `melipaola`, `fynamicshn`, `bdihn`, `gescorphn`), sus dominios, cantidad de
-  cuentas de correo y tamaños de buzón, nombres de bases de datos
-  (`richhn_nextcloud`, `gescorph_website`, `gescorph_wp393`), rutas de
-  Maildir, y —en las versiones anteriores a `99ad51a`— **IPs internas y el
-  puerto SSH 58291**. Incluye además la declaración de que `sol-lex.com` y
-  `bdihn.com` **tienen certificados vencidos y el origen no responde a ACME**.
+  historia**: los nombres de usuario de panel de **6 clientes**, sus dominios, la cantidad
+  de cuentas de correo y el tamaño de buzón de cada uno, los nombres de sus
+  bases de datos con el gestor de contenidos que revelan, rutas de Maildir, y —en las versiones anteriores a `99ad51a`— **IPs internas y el
+  puerto SSH 58291**. Incluye además el diagnóstico de que **dos de esos dominios tienen
+  certificados vencidos hace más de un año y su origen no responde a ACME** —
+  una debilidad activa, documentada y no corregida.
+
+  **El detalle por cliente NO va en este documento.** Vive en
+  `/home/fruiz/security-audit-2026-09/INVENTARIO-CLIENTES.md` (chmod 600,
+  fuera de ambos repos). Nombrar acá a los clientes sería devolver a HEAD
+  exactamente lo que `f6c8e7d` sacó en agosto — y este documento es público.
+  Es el mismo criterio que se aplicó desde el principio a la credencial
+  ("referencia por ruta y por hallazgo, nunca por contenido"), que en la
+  primera redacción **no se aplicó a los datos de clientes**.
 
   **Por qué esto no entra en el mismo cajón que las 3 listas de IPs propias:**
   aquello era topología de Fernando y la decisión de aceptar el riesgo era
