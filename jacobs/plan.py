@@ -416,11 +416,12 @@ class PlanBuilder:
         # un cambio de `capability` en el medio podia hacer que el default y el
         # techo de un step salieran de filas distintas.
         from jacobs import store as _store
-        caps = (await _store.get_motor_governance())["capabilities"]
+        governance = await _store.get_motor_governance()
+        caps = governance["capabilities"]
         if steps_spec:
             steps = self._from_spec(pipeline_id, steps_spec, caps)
         else:
-            steps = await self._from_objective(pipeline_id, objective, max_steps, caps)
+            steps = await self._from_objective(pipeline_id, objective, max_steps, governance)
         # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
         # dentro de _from_spec ni _from_objective, para que ningún origen de
         # plan pueda saltárselo. cleanroom antes solo corría dentro de
@@ -483,14 +484,18 @@ class PlanBuilder:
         pipeline_id: str,
         objective: str,
         max_steps: int,
-        caps: dict,
+        governance: dict,
     ) -> list[Step]:
         # T4 (2026-08-22): gobernanza real ANTES de gastar en el LLM (Ada es
         # paga) -- si la DB no responde, build() iba a fallar igual más abajo
         # en _validate_plan_capabilities, así que fallar acá primero no abre
         # un modo de fallo nuevo y evita el gasto en un plan que después se
         # rechazaría sin evidencia de gobernanza real.
-        capability_hint = _build_capability_hint({"capabilities": caps})
+        # La gobernanza COMPLETA, no solo `capabilities`: _build_capability_hint
+        # tambien lee `motors` (has_tool_access). Pasarle un dict parcial le
+        # revienta con KeyError -- paso en produccion el 2026-09-01 y ningun
+        # test lo vio porque ninguno ejercita build() por el camino del LLM.
+        capability_hint = _build_capability_hint(governance)
         dificultad = self._classify_difficulty(objective)
         try:
             _ada_disponible = bool(await resolve_credential_instrumented("zhipu"))
@@ -507,7 +512,7 @@ class PlanBuilder:
             specs = await self._llm_plan(objective, max_steps, capability_hint)
         if not specs:
             specs = self._fallback_plan(objective)
-        return self._from_spec(pipeline_id, specs, caps)
+        return self._from_spec(pipeline_id, specs, governance["capabilities"])
 
     @staticmethod
     def _classify_difficulty(objective: str) -> str:
