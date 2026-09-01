@@ -22,6 +22,88 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **CIERRE DE LA RONDA DE SEGURIDAD — estado único (2026-09-01).** Reemplaza
+  cualquier reconstrucción de estado a partir de mensajes sueltos.
+
+  ### Hallazgo real, total
+
+  **UN secreto en toda la historia de ambos repos.** Contraseña del superadmin
+  de seed, **8 caracteres**, en **7 rutas fuente** de **2 repos**, ventana
+  desde **2026-06-19**, **`forks = 0`** en ambos (medido por API).
+
+  ### Tres falsos positivos, los tres retractados antes de llegar a master
+
+  | Afirmación | Qué era | Cómo se cayó |
+  |---|---|---|
+  | "credencial viva en el árbol de `master`" | marcador de `filter-repo` | `grep -c REMOVED` |
+  | "segunda contraseña de la cuenta" | `tu_password`, placeholder en español | palabras autodescriptivas |
+  | "`access_token` desconocido" | cabecera JWT canónica HS256 + `...` | decodificación de segmentos |
+
+  **Los tres por la misma causa: clasificar por apariencia en vez de por
+  comparación.** Ninguno llegó a `master`; los tres quedaron registrados, no
+  borrados.
+
+  ### Cerrado en git
+
+  - **Hook `pre-commit`** en ambos repos, probado rompiéndolo, con 7 defectos
+    corregidos que la primera batería no había probado.
+  - **Barrera de CI server-side** (`secret-scan`), que cubre lo que el hook no
+    puede ver — merge, rebase, cherry-pick, revert. **Required check activo en
+    el ruleset de ambos repos.**
+  - **Inventario de los 162 candidatos**, reducido a 27 con señal y resuelto.
+  - **Familia de lecciones de método 1-24**, completa y sin huecos.
+  - **`DEUDA.md` reconciliada** con el estado real.
+
+  ### ABIERTO fuera de git — con fecha de control, porque un ítem sin fecha se evapora
+
+  **(a) ROTACIÓN EN BASES — SEVERIDAD ALTA. Fecha de control: 2026-09-08.**
+  Una sola cuenta: el superadmin de seed. Checklist de 7 pasos más abajo en
+  este documento. **ORDEN CRÍTICO, y es contraintuitivo:**
+  1. **PRIMERO** cambiar el hash de `user_id=1` en **cada base**.
+  2. **DESPUÉS** declarar `JAX_SEED_ADMIN_PASSWORD` en el entorno.
+
+  **Al revés no funciona y además engaña:** el gate del seeder es `COUNT(*)`,
+  así que con la fila ya existente el seeder no vuelve a escribir nada — te
+  quedás con el valor viejo en la base **creyendo que rotaste**.
+
+  Bases, en orden: **prod 11.8 → 12.3 Docker → `jax_memory_test`** (que de paso
+  convierte el "probable, no confirmado" en confirmado) **→ dev local**.
+
+  **(b) DUMPS EN R2 con Bucket Lock (7 días).** Retienen el hash viejo hasta
+  caducar y **no se pueden borrar antes**. **Fecha de control: 7 días después
+  de que se ejecute (a)** — no antes, porque hasta que la rotación ocurra cada
+  noche se crea un dump nuevo con el hash viejo. Es una dependencia, no una
+  fecha fija.
+
+  **(c) 3 LISTAS DE IPs PRIVADAS en historia pública.** `JAX_ENV_STAGING_HOSTS`,
+  `JAX_ENV_PROD_HOSTS`, `JAX_ENV_BRIDGE_HOSTS`. **No rotables** — una IP no se
+  rota. Decisión pendiente: riesgo aceptado por escrito, o cambio de
+  direccionamiento. **Fecha de control: 2026-09-15.**
+  *Nota de reconciliación:* el PR #72 (abierto, sin mergear) ya la registra
+  como **riesgo aceptado**. Mergearlo cierra este ítem; no mergearlo lo deja
+  como decisión pendiente. Las dos cosas no pueden ser ciertas a la vez.
+
+  **(d) TICKET A GITHUB SUPPORT — redactado, SIN ENVIAR.**
+  `/home/fruiz/security-audit-2026-09/TICKET-GITHUB.md` (chmod 600). Es la
+  única vía a `refs/pull/*` y a objetos server-side. **Dato que importa para
+  el ticket:** de los 8 blobs con el valor, siete viven **solo** en refs de PR,
+  pero el `.pyc` sigue alcanzable desde **8 ramas vivas** — si Support solo
+  purga refs de PR, ese queda.
+
+  ### CLASES NO CUBIERTAS — sin suavizar
+
+  1. **Secretos nunca conocidos en las 142 rutas sin señal estructural.** No
+     dispararon ninguna de las 6 categorías; eso significa que **no contienen
+     los patrones buscados, no que estén limpias**.
+  2. **Objetos colgados del lado del servidor.** No hay método desde el
+     cliente. Solo GitHub Support.
+  3. **Secretos codificados** — base64, URL-encode, UTF-16. El comparador es
+     **literal sobre bytes**: no ve una transformación del valor.
+  4. **Secretos embebidos sin separadores alrededor** (`pw = "prefijo<valor>"`).
+     Inherente al match por token.
+  5. **Clones de terceros.** `forks = 0`, pero un `git clone` no deja rastro y
+     los repos fueron públicos ~2 meses.
+
 - **RETRACTACIÓN — el "segundo secreto" NO existe (2026-09-01).** Se reportó
   una segunda contraseña de producción de `fernando@rich-hn.com` en
   `missions/axioma-admin-y-login-fixes.md` y se escaló. **Era falso.** Queda
