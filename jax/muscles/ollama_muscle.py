@@ -44,8 +44,18 @@ from jax.muscles.base import Muscle, MuscleInvocationError, MuscleTimeoutError
 # Medido el 2026-08-28 (scripts/gpu_concurrency_probe.py): no hace falta
 # exclusion mutua cross-proceso HOY, pero no porque la GPU aguante --
 # porque Ollama serializa (OLLAMA_NUM_PARALLEL=1) y la exclusion ya existe
-# afuera. Ese valor no lo fija nadie explicitamente. Veredicto completo y
-# que lo reabre: docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
+# afuera.
+#
+# Ese valor SI lo fija alguien: Environment=OLLAMA_NUM_PARALLEL=1 en la
+# unidad de ollama (el comentario anterior decia lo contrario y ya no es
+# cierto). Pero la unidad declara, no garantiza -- el proceso puede correr
+# con otra cosa por un drop-in, un set-environment o un arranque a mano. El
+# invariante se verifica contra el ENTORNO DEL PROCESO VIVO:
+# scripts/check_ollama_num_parallel.py, job `ollama-num-parallel` en CI.
+# Si ese tripwire se pone rojo, esta decision no se degrada: se INVIERTE.
+#
+# Veredicto completo y que lo reabre:
+# docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
 GPU_SEMAPHORE = asyncio.Semaphore(1)
 
 DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"

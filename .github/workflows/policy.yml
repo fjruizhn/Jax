@@ -314,3 +314,43 @@ jobs:
           python -m pytest scripts/_check_mirror_sync_test.py -q 2>&1 | tee /tmp/ms
           grep -qE "^14 passed" /tmp/ms || {
             echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }
+
+  ollama-num-parallel:
+    # Tripwire del invariante del que cuelga ENTERA la decision de
+    # "GPU_SEMAPHORE no cubre a Jacobs": Ollama serializa porque
+    # OLLAMA_NUM_PARALLEL=1. Si ese valor deja de ser 1 la decision no se
+    # degrada, se INVIERTE.
+    #
+    # LO QUE ESTE JOB NO HACE, dicho explicitamente para que nadie lo lea de
+    # mas: NO verifica el invariante en produccion. En ubuntu-latest no hay
+    # ningun Ollama, y el de hall9000 corre como usuario 'ollama' con
+    # /proc/<pid>/environ en 0400 -- leerlo exige root. Lo que este job
+    # verifica es que EL TRIPWIRE FUNCIONA, apuntandolo a procesos vivos de
+    # verdad lanzados con el valor puesto a mano. El chequeo contra el Ollama
+    # real es de hall9000: `sudo python3 scripts/check_ollama_num_parallel.py`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: El tripwire se pone rojo cuando debe
+        run: python -m pytest scripts/_check_ollama_num_parallel_test.py -v
+      - name: Piso exacto de tests CORRIDOS
+        # Exacto y no "al menos": un piso con holgura deja perder tests en
+        # silencio, que es como el scanner P10 estuvo meses verde sobre cero.
+        run: |
+          python -m pytest scripts/_check_ollama_num_parallel_test.py -q 2>&1 | tee /tmp/onp
+          grep -qE "^33 passed" /tmp/onp || {
+            echo "PISO ROTO: se esperaban 33 tests CORRIDOS."; exit 1; }
+      - name: El tripwire es rojo cuando NO puede medir (fail-closed)
+        # Sin proceso `ollama serve` no hay nada que medir, y eso es rojo --
+        # no "no aplica". En este runner no hay Ollama, asi que el caso se
+        # ejercita solo: si esto saliera verde, el tripwire seria fail-open.
+        run: |
+          set +e
+          python3 scripts/check_ollama_num_parallel.py; rc=$?
+          set -e
+          test "$rc" -eq 1 || {
+            echo "FAIL-OPEN: sin Ollama vivo el tripwire devolvio $rc, se esperaba 1."; exit 1; }
