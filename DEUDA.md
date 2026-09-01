@@ -177,63 +177,93 @@ su fecha de última verificación real, no una nueva.
   identificada como la deuda con más antigüedad, sin ejecutar. Última
   verificación: ronda 6.
 
-- **Hyde: red sin acotar por dominio/IP.** Es lo ÚNICO que queda abierto de
-  este ítem. Las otras dos partes ya no aplican y se movieron a cerrados: la
-  concurrencia de `HYDE_SEMAPHORE` (cerrada 2026-08-26, PRs jax#33-36) y la
-  **escritura directa a los repos reales**, que estaba declarada como "fuera de
-  alcance" y en realidad ya estaba cerrada — verificado el 2026-09-01
-  ejecutando los ataques dentro del sandbox: crear, modificar y borrar en
-  `~/jax` y `~/jax-platform` están los tres bloqueados (`--ro-bind`), y el
-  control positivo (escribir en el workspace) pasa, así que el bloqueo es real
-  y no un sandbox que no arranca.
-
-  **Lo que sí queda:** el sandbox corre con `--share-net`, o sea red del host
-  completa. bwrap no puede acotar por dominio/IP —es namespace de red
-  compartido o nada, y `--unshare-net` dejaría a `claude` sin poder llegar a la
-  API—. Acotar de verdad necesita configuración de red **con privilegios**:
-  reglas `nftables` por UID (correr el `claude` de Hyde bajo un usuario
-  dedicado y permitirle egress sólo a la API) o un netns con veth. Las dos
-  cosas son **decisiones de infraestructura** —usuario de sistema nuevo, reglas
-  de firewall persistentes— y no un cambio dentro de este repo. **Esperando
-  decisión de Fernando**, no trabajo pendiente de este lado.
-
-  **El límite quedó pineado, no sólo anotado:**
-  `_hyde_containment_test.py::test_la_red_compartida_esta_declarada_como_limite_conocido`
-  falla si alguien cambia `--share-net`, y lo obliga a venir a actualizar esta
-  entrada en vez de dejarla mintiendo.
-
-  **Costo de las pruebas, declarado (2026-09-01).** Diagnosticar esto consumió
-  **dos llamadas reales a la API de Anthropic con las credenciales de
-  Fernando** — una tarea de prueba ejecutada de punta a punta, con el destino
-  de telemetría bloqueado y sin bloquear, para medir si `claude` funciona sin
-  él. Autorizado y declarado en el momento. Se anota porque **el costo de
-  verificar tiene que ser visible**: medir "¿funciona sin este destino?" no se
-  puede hacer leyendo código, y una ronda futura que repita el experimento va a
-  pagar lo mismo.
-
-  **Lo ya medido, para no volver a pagarlo:**
-  - El destino de IP rotante es **`us5.datadoghq.com`** (telemetría),
-    identificado por el SNI del handshake real. **`claude` funciona sin él**:
-    tarea completada, RC=0, 10.8 s con bloqueo contra 9.7 s sin bloqueo.
-  - El allowlist necesario es **una sola IP**: `160.79.104.10:443`
-    (api.anthropic.com). El DNS sale por `127.0.0.53` (loopback) y `ufw` ya
-    acepta `oifname lo` antes de cualquier cadena custom.
-  - **Rebindear `hyde` no cambia el destino de red.** `facet.transport`
-    (`subprocess`) vive en la tabla `facet`, no en `facet_binding`, y **ningún
-    endpoint lo escribe**: los dos escritores de binding cambian
-    `provider_id`/`model_ref`. Un rebind cambia el modelo que recibe el CLI, no
-    el transporte — así que el allowlist de una IP no se rompe al rebindear.
-  - **El diseño por UID está descartado, con medición:** `bwrap --uid` NO
-    cambia el UID que ve el kernel. Dentro del sandbox `id -u`=12345 y el
-    socket sigue siendo `uid:1000`. `-m owner --uid-owner` no puede distinguir
-    a Hyde de Fernando mientras lo lance un proceso de éste.
-
 
 
 ## Cerrado — ronda de seguridad 2026-09-01
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
+
+- **RIESGO ACEPTADO (2026-09-01) — Hyde con red sin acotar. No es un
+  pendiente: es una decisión tomada con la medición en la mano.** Decisión de
+  Fernando tras el diagnóstico completo. **No se implementa el confinamiento de
+  red**, y las razones están abajo para que nadie lo reabra por intuición.
+
+  **Qué alcanza Hyde hoy** (medido desde adentro del sandbox, no inferido):
+
+  | Destino | Resultado |
+  |---|---|
+  | `127.0.0.1:3308` (MariaDB) | **ALCANZA** |
+  | `127.0.0.1:11434` (ollama) | **ALCANZA** |
+  | `127.0.0.1:8080` (jax-platform) | **ALCANZA** |
+  | `127.0.0.1:7777` (las_manos) | **ALCANZA** |
+  | `1.1.1.1:443` (internet abierto) | **ALCANZA** |
+
+  **El diseño por UID está MUERTO, con medición.** `bwrap --uid` **no cambia el
+  UID que ve el kernel**: dentro del sandbox `id -u`=12345 y el socket, visto
+  desde el host contra un listener local, sigue siendo `uid:1000`.
+  `iptables -m owner --uid-owner` matchea ese valor, así que **no puede
+  distinguir a Hyde de Fernando** mientras lo lance un proceso de éste. Llegar
+  a un UID real distinto exigiría `sudoers` (rechazado) y leer los repos
+  exigiría aflojar `/home/fruiz` (rechazado).
+
+  **El match por cgroup SÍ funciona** — verificado, no supuesto. Kernel
+  `7.0.0-30-generic`, `nftables v1.1.6`, `cgroup2fs`. Un proceso dentro del
+  cgroup quedó **BLOQUEADO** y uno normal de fruiz **CONECTÓ**, con la misma
+  regla activa. `iptables -m cgroup --path` existe (módulo `xt_cgroup`), y
+  `jax-las-manos` puede administrar su propio subárbol con `Delegate=yes`
+  (medido con una unidad desechable: systemd hace `chown` del cgroup al User).
+
+  **La regla exacta, lista para usar si algún día se retoma** —
+  `/etc/ufw/after.rules`, cadena `ufw-after-output`:
+
+  ```
+  -A ufw-after-output -m cgroup --path system.slice/jax-las-manos.service/hyde.scope \
+     ! -d 160.79.104.10 -j DROP
+  ```
+
+  Persiste sola (ufw `enabled` la aplica al bootear), Docker no la reescribe
+  (vive en las cadenas de ufw), y no toca las 6 reglas de entrada (están en
+  `user.rules`). DNS no necesita entrada: sale por `127.0.0.53`, loopback.
+
+  **POR QUÉ NO SE IMPLEMENTA — las dos razones:**
+
+  1. **El loopback queda abierto, y eso deja la DB de producción alcanzable.**
+     `ufw-before-output` acepta `oifname lo` **antes** de cualquier cadena
+     custom, así que una regla en `ufw-after-output` nunca ve ese tráfico.
+     Cerrarlo exigiría meter la regla en `before.rules` **por delante de ese
+     accept**, que es load-bearing para todo el sistema.
+  2. **La API de Anthropic es un canal de datos, y el control de red no lo
+     toca.** Hyde arma los prompts: todo lo que puede leer —los dos repos
+     completos— puede irse por el destino permitido. El control cerraría
+     "destino arbitrario", no "contenido arbitrario al destino permitido", que
+     es lo que en realidad se teme.
+
+  **CONDICIÓN DE REVISIÓN — se retoma si pasa cualquiera de estas tres:**
+  - **Hyde cambia de transporte** (hoy `facet.transport='subprocess'`, y
+    ningún endpoint lo escribe: un rebind cambia el modelo, no el transporte).
+  - **Hyde gana acceso a otras máquinas** (hoy sólo alcanza este host y la red
+    pública desde él).
+  - **Hyde deja de ser el único proceso en ese sandbox.**
+
+  **COSTO DE LAS PRUEBAS, DECLARADO.** Diagnosticar esto consumió **dos
+  llamadas reales a la API de Anthropic con las credenciales de Fernando** —
+  una tarea de prueba ejecutada de punta a punta, con el destino de telemetría
+  bloqueado y sin bloquear, para medir si `claude` funciona sin él. Autorizado
+  y declarado en el momento. Se anota porque **el costo de verificar tiene que
+  ser visible**: "¿funciona sin este destino?" no se responde leyendo código, y
+  una ronda futura que repita el experimento va a pagar lo mismo.
+
+  **Lo ya medido, para no volver a pagarlo:** el destino de IP rotante es
+  **`us5.datadoghq.com`** (telemetría), identificado por el SNI del handshake
+  real, y **`claude` funciona sin él** (tarea completada, RC=0, 10.8 s con
+  bloqueo contra 9.7 s sin). El allowlist necesario sería **una sola IP**:
+  `160.79.104.10:443`.
+
+  **Lección de método** (vigesimoséptima de la familia, CONTEXT.md §9): un
+  control puede estar correctamente diseñado, ser implementable, y aun así no
+  valer la pena. Medirlo **antes** de construirlo es lo que evitó gastar la
+  ronda.
 
 - **CERRADO (2026-09-01) — el techo de ejecución declarado en la DB es un
   techo de verdad.** `_validate_plan_capabilities` lo hace cumplir.
