@@ -34,14 +34,44 @@ su fecha de última verificación real, no una nueva.
   publicar en el mismo repo público. Quien necesite el detalle va a la
   alerta de GitGuardian, no a este archivo.
 
-  **Estado de las cuatro piezas (una sola cerrada):**
+  **Estado de las piezas:**
 
   | Pieza | Estado |
   |---|---|
   | Rotación de la contraseña | **HECHA** |
+  | Limpieza de HEAD (`missions/`, `CLAUDE.md`, `prompts/`, `policy/rules/OP02-05`) | **HECHA** en `f6c8e7d` (2026-08-21, B1.4) — `missions/` tiene 0 archivos trackeados en HEAD |
   | Barrido de credenciales en el historial completo | **PENDIENTE** |
-  | Limpieza de HEAD (`missions/`, `CLAUDE.md`, `prompts/`, `policy/rules/OP02-05`) | **PENDIENTE** |
+  | Rotación de todo lo que aparezca en el barrido | **PENDIENTE** |
+  | Solicitud de purga a GitHub Support | **PENDIENTE** |
   | Hook pre-commit anti-credenciales | **PENDIENTE** |
+
+  **El historial sigue VIVO, y esa es la distinción que importa.** HEAD está
+  limpio desde el 2026-08-21; el contenido no. En el historial hay
+  **4 versiones de blob** de `missions/axioma-login-prod-fix.md` y
+  **6 versiones** de un segundo archivo que la alerta de GitGuardian no
+  nombró, `missions/axioma-login-prod-fix_result.md`. Cualquier trabajo
+  sobre este ítem cubre los dos, no solo el que salió en la alerta.
+
+  **Alcanzabilidad medida (2026-09-01):** los blobs son alcanzables desde
+  `master` **y desde 70 `refs/pull/*`**.
+
+  **CONSECUENCIA — la reescritura de historial NO es remediación.** Las
+  `refs/pull/*` las mantiene GitHub del lado del servidor y **no se borran
+  con un push**: `filter-repo` + force-push reescribe las ramas y deja los
+  blobs igual de fetcheables por sus refs de PR. Los forks, además,
+  comparten object store con el repo de origen. Un repo que "se ve limpio"
+  después de reescribir sigue sirviendo el secreto a quien pida el objeto
+  por SHA.
+
+  Por lo tanto la remediación real es, en este orden:
+  1. **Rotar todo lo que aparezca en el barrido.**
+  2. **Solicitar la purga a GitHub Support** — es la única vía que alcanza
+     objetos server-side y refs de PR.
+
+  La reescritura de historial queda como **higiene posterior, no como
+  cierre**. Tratarla como cierre es exactamente el error que este ítem
+  existe para prevenir: produce la apariencia de resolución sin la
+  resolución.
 
   **RESTRICCIÓN VIGENTE — no reescribir historial hasta ver el barrido
   completo.** Nada de `filter-repo`, `rebase`, `gc`, `prune` ni force-push
