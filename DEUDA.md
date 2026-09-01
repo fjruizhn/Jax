@@ -137,7 +137,55 @@ su fecha de última verificación real, no una nueva.
   plano en `seed.py` en refs que gitleaks demostradamente escanea. Ver la
   decimoséptima lección en `CONTEXT.md` §9.
 
-  ### PENDIENTE — rotación en BASES, obligatoria
+  ### PENDIENTE — rotación en BASES, obligatoria — SEVERIDAD ALTA
+
+  **La credencial se asume CONOCIDA por terceros. No es precaución.**
+  Propiedades medidas, sin especular sobre si alguien la obtuvo:
+  - **8 caracteres**, elegida por un humano (extraída del par de blobs A/B
+    del mismo archivo, 92 líneas alineadas, una sola aguja).
+  - Expuesta en repositorio **público** desde **2026-06-19**, ~2 meses, en
+    `refs/pull/*` como texto plano y en un `.pyc` alcanzable desde 8 ramas.
+  - A ese largo, **crackeable offline en tiempo trivial** aunque solo se
+    tuviera el hash bcrypt; y acá no hacía falta el hash, estaba el texto.
+
+  La consecuencia operativa es que la rotación no cierra un riesgo
+  hipotético: cierra uno que hay que tratar como materializado.
+
+  **Cuál es la contraseña vigente hoy — determinado por cronología de código
+  contra cronología de entornos, sin tocar ninguna base:**
+
+  El fallback aleatorio (`_resolve_seed_admin_password`) se introdujo en
+  `da9fd5ec`, **2026-08-20**. Antes de eso la contraseña estaba hardcodeada.
+  `run_seed()` se llama desde `main.py` desde el **primer commit del repo**
+  (`5e28e9e`, 2026-06-19). Todo entorno sembrado antes del 2026-08-20 tiene
+  la aguja.
+
+  | Entorno | Vigente | Sostén |
+  |---|---|---|
+  | `jax_memory` prod 11.8 | **(a) la aguja** | journald de `jax-platform.service` arranca **2026-07-08**, seis semanas antes del fallback |
+  | `jax_memory` 12.3 Docker | **(a) la aguja** | copiada por `mariadb-dump` de la 11.8; hereda la fila `user_id=1` |
+  | Dumps en R2 | **(a) la aguja** | son dumps de las anteriores |
+  | `jax_memory_test` (ambas) | **(a) probable**, no confirmado | los tests corrían desde antes del 2026-08-20 y el gate `COUNT(*)` hace que gane la primera siembra; no verificable sin tocar la base |
+  | Dev local | **INDETERMINADO** | depende de cuándo levantó cada máquina; no determinable desde el código |
+
+  **Si algún entorno resultara (b)** —sembrado después del 2026-08-20, con un
+  `token_urlsafe(18)` generado y logueado una sola vez— ese superadmin tiene
+  **una contraseña que nadie conoce**. Es un problema operativo distinto de
+  la fuga y se resuelve aparte (resetear, no rotar). Hoy no hay evidencia de
+  que ningún entorno esté en (b).
+
+  ### POLÍTICA del reemplazo — no solo el valor
+
+  1. **El reemplazo NO lo elige un humano.** Se genera
+     (`secrets.token_urlsafe` o equivalente) y se inyecta por variable de
+     entorno. **El camino ya existe en el código y no se usa.**
+  2. **Declarar `JAX_SEED_ADMIN_PASSWORD` explícitamente en el entorno de
+     cada despliegue** — hoy no está en `/etc/jax/.env`, así que la ruta
+     real es el fallback, que es la ruta que loguea en claro.
+  3. **Sin literales de contraseña en tests.** El test de regresión negativa
+     debe comparar contra un valor inyectado, nunca hardcodeado: ese fue
+     exactamente el mecanismo por el que `da9fd5ec` reintrodujo el secreto.
+
 
   **No es un cambio de repo.** El seeder corre en el lifespan de FastAPI
   (`backend/main.py:86`), en **cada arranque del backend**, y escribe
