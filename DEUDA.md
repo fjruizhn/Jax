@@ -22,6 +22,261 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **P0 — Credencial de producción expuesta en repo público (GitGuardian,
+  2026-09-01).** Hallazgo externo: GitGuardian alertó sobre una credencial
+  de producción en claro en el repositorio **público** `fjruizhn/Jax`,
+  archivo **`missions/axioma-login-prod-fix.md`** — un `curl` que llevaba
+  usuario y contraseña embebidos.
+
+  **Referencia por ruta y por hallazgo, nunca por contenido.** Este ítem no
+  transcribe el valor, ni el usuario completo, ni el comando: registrar el
+  secreto en la lista de deuda para "documentarlo bien" lo volvería a
+  publicar en el mismo repo público. Quien necesite el detalle va a la
+  alerta de GitGuardian, no a este archivo.
+
+  **Estado de las piezas:**
+
+  | Pieza | Estado |
+  |---|---|
+  | Rotación de la contraseña | **HECHA** |
+  | Limpieza de HEAD (`missions/`, `CLAUDE.md`, `prompts/`, `policy/rules/OP02-05`) | **HECHA** en `f6c8e7d` (2026-08-21, B1.4) — `missions/` tiene 0 archivos trackeados en HEAD |
+  | Barrido de credenciales en el historial completo | **PENDIENTE** |
+  | Rotación de todo lo que aparezca en el barrido | **PENDIENTE** |
+  | Solicitud de purga a GitHub Support | **PENDIENTE** |
+  | Hook pre-commit anti-credenciales | **PENDIENTE** |
+
+  **El historial sigue VIVO, y esa es la distinción que importa.** HEAD está
+  limpio desde el 2026-08-21; el contenido no. En el historial hay
+  **4 versiones de blob** de `missions/axioma-login-prod-fix.md` y
+  **6 versiones** de un segundo archivo que la alerta de GitGuardian no
+  nombró, `missions/axioma-login-prod-fix_result.md`. Cualquier trabajo
+  sobre este ítem cubre los dos, no solo el que salió en la alerta.
+
+  **Alcanzabilidad medida (2026-09-01):** los blobs son alcanzables desde
+  `master` **y desde 70 `refs/pull/*`**.
+
+  **CONSECUENCIA — la reescritura de historial NO es remediación.** Las
+  `refs/pull/*` las mantiene GitHub del lado del servidor y **no se borran
+  con un push**: `filter-repo` + force-push reescribe las ramas y deja los
+  blobs igual de fetcheables por sus refs de PR. Los forks, además,
+  comparten object store con el repo de origen. Un repo que "se ve limpio"
+  después de reescribir sigue sirviendo el secreto a quien pida el objeto
+  por SHA.
+
+  Por lo tanto la remediación real es, en este orden:
+  1. **Rotar todo lo que aparezca en el barrido.**
+  2. **Solicitar la purga a GitHub Support** — es la única vía que alcanza
+     objetos server-side y refs de PR.
+
+  La reescritura de historial queda como **higiene posterior, no como
+  cierre**. Tratarla como cierre es exactamente el error que este ítem
+  existe para prevenir: produce la apariencia de resolución sin la
+  resolución.
+
+  **RESTRICCIÓN VIGENTE — no reescribir historial hasta ver el barrido
+  completo.** Nada de `filter-repo`, `rebase`, `gc`, `prune` ni force-push
+  sobre ninguno de los dos repos mientras el barrido no esté hecho y leído.
+  El motivo no es cautela genérica: reescribir ahora **destruye la
+  evidencia** con la que se determina el alcance real, y deja sin responder
+  la única pregunta que importa — qué OTROS secretos estuvieron expuestos.
+  Una limpieza que borra el historial antes de haberlo leído produce un
+  repo que *parece* limpio y un alcance que ya no se puede establecer.
+
+  **ALCANCE REAL, MEDIDO EL 2026-09-01 — y una corrección de este mismo
+  documento, ver más abajo.** Barrido por valor sobre mirrors frescos con
+  `refs/pull/*` traídas, enumerando **todos** los objetos: 857/857 blobs
+  leídos en `jax`, 684/684 en `jax-platform`. Reporte completo en
+  `/home/fruiz/security-audit-2026-09/REPORTE-BARRIDO.md` (chmod 600, fuera
+  de ambos repos).
+
+  **HAY UNA SOLA CREDENCIAL, de 8 caracteres**: la del superadmin
+  `fernando@rich-hn.com` (`user_id=1`, `tenant_id=1`, tenant "Inversiones
+  Diamante Negro") en el backend de **jax-platform / Axioma**. No hay una
+  segunda cuenta ni un segundo sistema — verificado leyendo el contexto de
+  los blobs, no inferido.
+
+  ### CORRECCIÓN — el "P0: credencial viva en master" fue FALSO
+
+  Se reportó que `master:backend/tests/test_seed_admin_password.py` contenía
+  una credencial viva. **Es falso y queda registrado, no borrado.** Lo que
+  hay en ese archivo es el marcador que insertó `filter-repo` en la ronda 9:
+  `***REMOVED-SEE-JAX-RONDA9-2026-08-20***`.
+
+  | Blob | Contenido | Dónde vive |
+  |---|---|---|
+  | `2199fabd…` | **el marcador** (4× `REMOVED`, 4× `***`) | `master` + 8 ramas |
+  | `f71bd511…` | **el valor real** (0 marcadores) | **solo `refs/pull`** |
+
+  **Procedencia del error, porque el mecanismo importa más que el error:**
+  ejecutor del barrido → juez "independiente" de TA2 → Hipatia → Fernando.
+  **Cuatro capas, severidad creciente, ninguna corrió `grep -c REMOVED`** —
+  un comando de dos segundos. El juez confirmó la conclusión equivocada
+  porque corrió *el mismo método* que el ejecutor. Ver las lecciones
+  decimotercera, decimocuarta y decimoquinta en `CONTEXT.md` §9.
+
+  ### Dónde SÍ sobrevive el valor real (medido, no inferido)
+
+  El `filter-repo` de la ronda 9 quedó **incompleto en dos frentes**:
+
+  1. **`backend/db/__pycache__/seed.cpython-312.pyc`** contiene la
+     contraseña real. Confirmado **por presencia** (comparación literal de
+     la aguja contra los bytes del blob) más tres controles: el marcador NO
+     está en el `.pyc`; la aguja SÍ está en el `seed.py` del linaje viejo; y
+     NO está en `master:backend/db/seed.py`. Alcanzable desde **8 ramas
+     vivas y 31 `refs/pull/*`**; ausente del árbol de hoy. `filter-repo`
+     reescribió el `.py` y no tocó el bytecode que lo había compilado.
+  2. **Los `refs/pull/*` conservan el linaje pre-scrub** — `seed.py` con la
+     contraseña en texto plano en `refs/pull/1-7`. Confirmación empírica de
+     lo que dice la CONSECUENCIA de arriba: reescribir ramas no las alcanza.
+
+  **Ventana: desde 2026-06-19** en repos públicos. **`forks = 0`** en ambos
+  (verificado por API) — única clase de exposición cerrada.
+
+  **`gitleaks` no sirve como criterio de cierre acá, y se midió**: v8.30.1
+  devolvió `[]` en `jax-platform` pese a que la contraseña está en texto
+  plano en `seed.py` en refs que gitleaks demostradamente escanea. Ver la
+  decimoséptima lección en `CONTEXT.md` §9.
+
+  ### PENDIENTE — rotación en BASES, obligatoria — SEVERIDAD ALTA
+
+  **La credencial se asume CONOCIDA por terceros. No es precaución.**
+  Propiedades medidas, sin especular sobre si alguien la obtuvo:
+  - **8 caracteres**, elegida por un humano (extraída del par de blobs A/B
+    del mismo archivo, 92 líneas alineadas, una sola aguja).
+  - Expuesta en repositorio **público** desde **2026-06-19**, ~2 meses, en
+    `refs/pull/*` como texto plano y en un `.pyc` alcanzable desde 8 ramas.
+  - A ese largo, **crackeable offline en tiempo trivial** aunque solo se
+    tuviera el hash bcrypt; y acá no hacía falta el hash, estaba el texto.
+
+  La consecuencia operativa es que la rotación no cierra un riesgo
+  hipotético: cierra uno que hay que tratar como materializado.
+
+  **Cuál es la contraseña vigente hoy — determinado por cronología de código
+  contra cronología de entornos, sin tocar ninguna base:**
+
+  El fallback aleatorio (`_resolve_seed_admin_password`) se introdujo en
+  `da9fd5ec`, **2026-08-20**. Antes de eso la contraseña estaba hardcodeada.
+  `run_seed()` se llama desde `main.py` desde el **primer commit del repo**
+  (`5e28e9e`, 2026-06-19). Todo entorno sembrado antes del 2026-08-20 tiene
+  la aguja.
+
+  | Entorno | Vigente | Sostén |
+  |---|---|---|
+  | `jax_memory` prod 11.8 | **(a) la aguja** | journald de `jax-platform.service` arranca **2026-07-08**, seis semanas antes del fallback |
+  | `jax_memory` 12.3 Docker | **(a) la aguja** | copiada por `mariadb-dump` de la 11.8; hereda la fila `user_id=1` |
+  | Dumps en R2 | **(a) la aguja** | son dumps de las anteriores |
+  | `jax_memory_test` (ambas) | **(a) probable**, no confirmado | los tests corrían desde antes del 2026-08-20 y el gate `COUNT(*)` hace que gane la primera siembra; no verificable sin tocar la base |
+  | Dev local | **INDETERMINADO** | depende de cuándo levantó cada máquina; no determinable desde el código |
+
+  **Si algún entorno resultara (b)** —sembrado después del 2026-08-20, con un
+  `token_urlsafe(18)` generado y logueado una sola vez— ese superadmin tiene
+  **una contraseña que nadie conoce**. Es un problema operativo distinto de
+  la fuga y se resuelve aparte (resetear, no rotar). Hoy no hay evidencia de
+  que ningún entorno esté en (b).
+
+  ### PROCEDIMIENTO DE ROTACIÓN — checklist, ACCIÓN PENDIENTE DE FERNANDO
+
+  **No ejecutado. Ninguna base fue consultada ni modificada durante la
+  auditoría.**
+
+  1. **Generar el nuevo valor** con `secrets.token_urlsafe` o equivalente.
+     **NO elegido por un humano** — el largo de 8 caracteres fue precisamente
+     lo que volvió crítico este caso.
+  2. **Declarar `JAX_SEED_ADMIN_PASSWORD`** explícitamente en el entorno de
+     cada despliegue, para que el fallback deje de ser la ruta real (hoy lo
+     es, y es la ruta que loguea en claro).
+  3. **Cambiar el hash de `user_id=1` en cada base, una por una.** El gate
+     del seeder es `COUNT(*)`: cambiar la contraseña por la app **no**
+     re-dispara al seeder, así que no hay atajo — la rotación es por base.
+  4. **`jax_memory_test` se verifica y rota en el mismo pase.** Ya no aplica
+     el "no tocar la base" de la auditoría: es parte de la rotación.
+  5. **Dev local: inventariar y rotar o destruir.** Es el entorno
+     indeterminado; cada máquina que levantó el backend antes del 2026-08-20
+     tiene la fila.
+  6. **R2:** registrar la fecha de caducidad del Bucket Lock (7 días) y
+     **verificar el purgado entonces** — los dumps no se pueden borrar antes.
+     Poner fecha de control.
+  7. **Cerrar `da9fd5ec` bien:** el test de regresión negativa compara contra
+     un valor **inyectado**, no hardcodeado. Sin literales de contraseña en
+     tests. Sin esto, la próxima remediación vuelve a reintroducir el
+     secreto.
+
+  ### POLÍTICA del reemplazo — no solo el valor
+
+  1. **El reemplazo NO lo elige un humano.** Se genera
+     (`secrets.token_urlsafe` o equivalente) y se inyecta por variable de
+     entorno. **El camino ya existe en el código y no se usa.**
+  2. **Declarar `JAX_SEED_ADMIN_PASSWORD` explícitamente en el entorno de
+     cada despliegue** — hoy no está en `/etc/jax/.env`, así que la ruta
+     real es el fallback, que es la ruta que loguea en claro.
+  3. **Sin literales de contraseña en tests.** El test de regresión negativa
+     debe comparar contra un valor inyectado, nunca hardcodeado: ese fue
+     exactamente el mecanismo por el que `da9fd5ec` reintrodujo el secreto.
+
+
+  **No es un cambio de repo.** El seeder corre en el lifespan de FastAPI
+  (`backend/main.py:86`), en **cada arranque del backend**, y escribe
+  `user_id=1` cuando no existe. El gate es `COUNT(*)`, así que **cambiar la
+  contraseña por la app no re-dispara al seeder ni lo revierte**. Entornos
+  donde escribió esa fila:
+
+  | Entorno | Evidencia |
+  |---|---|
+  | `jax_memory` prod, MariaDB 11.8 :3306 | Directa |
+  | `jax_memory`, MariaDB 12.3 Docker :3308 — copiada por `mariadb-dump`, **el hash viejo viajó tal cual** | Directa |
+  | `jax_memory_test` en ambas instancias | Directa |
+  | Máquinas de desarrollo local | Inferida fuerte |
+  | **Dumps en R2** (`hall9000-critical-backup`, Bucket Lock 7 días) — retienen el hash hasta caducar | Inferida fuerte |
+  | CI de GitHub Actions | **Descartada** — `JAX_CI_NO_DB=1` |
+
+  ### Defecto latente detectado de paso (no disparado)
+
+  `_resolve_seed_admin_password()` (`backend/db/seed.py:30-34`) **loguea la
+  contraseña generada en claro** en nivel WARNING, y el docstring dice
+  "nunca a un archivo" — inexacto, porque `jax-platform.service` corre bajo
+  systemd y journald persiste en disco. **Medido: nunca se disparó.** La
+  llamada está dentro del `if count == 0`, y el conteo en journald es **0**
+  sobre la ventana `2026-07-08 → 2026-09-01`. `JAX_SEED_ADMIN_PASSWORD` no
+  está declarada en `/etc/jax/.env`, así que la rama de fallback es la que
+  correría en una base nueva. **No se propagó a backups**: `restic` respalda
+  solo el staging con `--exclude='*.log'`; `/var/log` y el journal no están
+  en el set.
+
+  ### TA3 — barrido de `/etc/jax/.env`: LIMPIO
+
+  **Ninguna de las 9 credenciales reales aparece en ningún blob**
+  (`DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `ZAI_API_KEY`, `JAX_DB_PASSWORD`,
+  `OPENAI_API_KEY`, `TELEGRAM_BOT_TOKEN`, `KIMI_API_KEY`, `JAX_JWT_SECRET`,
+  `FERNET_KEY`). Ninguna entra a la lista de rotación.
+
+  **13 claves NO verificables por longitud o trivialidad — quedan a juicio
+  manual, TA3 no las cubrió:** `LAS_MANOS_URL`, `JACOBS_URL`,
+  `FRONTEND_ORIGIN`, `JAX_DB_USER`, `JAX_DB_NAME`, `JAX_SSH_USER`,
+  `TELEGRAM_CHAT_ID`, `JAX_REPL_USER_ID`, `JAX_REPL_TENANT_ID`,
+  `JAX_DB_PORT`, `JAX_SSH_PORT`, `JAX_WORKSPACE_DIR`, `JAX_DB_HOST`.
+
+  **Topología interna en historia pública (no rotable):**
+  `JAX_ENV_STAGING_HOSTS`, `JAX_ENV_PROD_HOSTS`, `JAX_ENV_BRIDGE_HOSTS` —
+  listas de IPs privadas, presentes en 80 blobs de ambos repos, ninguna en
+  el árbol de hoy. No hay nada que rotar: o se acepta como riesgo, o exige
+  reescritura de historial adicional. **Decisión de Fernando, sin tomar.**
+
+  ### Resto del pendiente
+  1. Sacar el literal del test y del `.pyc` en cualquier scrub futuro
+     (incluir `*.pyc` en los patrones).
+  2. **162 rutas candidatas** de la clase "captura de salida de comandos"
+     (73 son `*_result.md`) sin inspeccionar.
+  3. Purga a GitHub Support — única vía que alcanza `refs/pull/*` y objetos
+     server-side.
+  4. Hook pre-commit — **no puede basarse en patrón ni entropía**, que es la
+     clase que acaba de fallar.
+
+  **Por qué este ítem existe y es el primero de la lista:** el incidente
+  estuvo abierto **sin estar registrado en ningún archivo de ninguno de los
+  dos repos**. Una sesión nueva que reconstruyera el estado leyendo
+  `DEUDA.md` — que es exactamente para lo que `DEUDA.md` existe — no se
+  enteraba de que había un P0 de seguridad abierto.
+
 - **`_HTTP_FACETS` sin gobernanza del Motor Registry — CERRADO Y DESPLEGADO
   (2026-08-27).** Mergeado (`jax` PR#39 → merge `abe1931`; `jax-platform`
   PR#16 → merge `766e03b`) y desplegado el mismo día.
@@ -186,7 +441,23 @@ su fecha de última verificación real, no una nueva.
   no bajarle el volumen a la alerta.
 
 - **La alerta afirma la capa equivocada: `probe_error` tapa a
-  `config_error` (2026-08-27).** Primer ítem de la próxima ronda.
+  `config_error` (2026-08-27) — CERRADO Y DESPLEGADO (2026-08-28).**
+  Se deja el diagnóstico completo abajo, sin borrar: describe una clase de
+  defecto (dos capas escriben el mismo fallo y el lector elige la
+  equivocada) que puede reaparecer en otro lector del ledger.
+
+  **Cerrado por** `jax-platform` `74ce495` (guard de `_invoke_facet`,
+  Task 1/2 — la alerta nombra la causa, no la capa) + `48da8e8`
+  (`probe_facet` deja de escribir `probe_error`, elimina la doble
+  escritura en origen). Ambos en `master`.
+
+  **Verificado corriendo, no solo mergeado:** tras el deploy, un rebinding
+  real produce **UNA sola fila clasificada, no dos** — desaparece la carrera
+  de ~800 µs por la que `probe_error` le ganaba a `config_error` en el
+  `MAX(ts)`. La solución tomada fue la segunda de las tres opciones que
+  este ítem dejaba planteadas (que la sonda no registre su `probe_error`
+  cuando la capa de abajo ya clasificó el mismo fallo), no la de
+  precedencia por outcome.
 
   **El costo, con precisión:** el mensaje que le llega a Fernando dice
   **"la sonda falló"** cuando la causa accionable es otra — por ejemplo
