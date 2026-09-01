@@ -22,6 +22,69 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **MI ERROR: se trató un diagnóstico viejo como estado actual (2026-09-01).**
+  Se le asignó urgencia a *"vulnerabilidad activa en dos dominios de
+  clientes"* y **esa urgencia era falsa**. El diagnóstico del repo es de
+  agosto y describía el certificado del **ORIGEN**; el borde sirve
+  certificados válidos vía Cloudflare y **los visitantes nunca vieron el
+  vencido**. Se dio por vigente sin medir el estado actual, y estuvo a punto
+  de irse así en un aviso a terceros.
+
+  Ver la vigésimo sexta lección en `CONTEXT.md` §9.
+
+- **Certificados del origen — diagnóstico MEDIDO 2026-09-01.**
+
+  | | Borde (lo que ve el visitante) | Origen (`172.16.20.20`) |
+  |---|---|---|
+  | Certificado | **válido**, Google Trust Services | **VENCIDO** — Let's Encrypt R11 |
+  | Dominio A | vence 2026-11-24 | venció **2025-05-03** |
+  | Dominio B | vence 2026-11-19 | venció **2025-05-22** |
+  | HTTP | 200 | 200 en `:80` y en `:443` |
+
+  **Por qué falla ACME, y no es lo que decía el diagnóstico viejo:** el
+  challenge `http-01` lo resuelve Let's Encrypt **desde internet**, y el
+  origen está en una **IP privada** (`172.16.20.20`) que no es enrutable desde
+  afuera. La petición llega al borde de Cloudflare, no al origen. **No es un
+  puerto cerrado ni un firewall: es que el origen no es alcanzable por
+  diseño.** Medido: desde la red interna el origen sí responde en `:80`.
+
+  **Modo SSL de Cloudflare: NO DETERMINABLE desde afuera.** No hay token de
+  Cloudflare en el host. `Full (strict)` **queda descartado por medición** —
+  con un certificado vencido el borde devolvería `526` y devuelve `200`.
+  Quedan `Full` y `Flexible`, y el origen responde 200 en ambos puertos, así
+  que lo observable no los distingue. **Hay que mirarlo en el panel.**
+
+  **Y la distinción importa:** si el modo fuera **`Flexible`**, el tramo
+  Cloudflare→origen viaja **sin cifrar**, aunque el visitante vea el candado.
+  Eso sí sería un problema real, y no lo cubre ningún certificado del borde.
+
+  **Corrección propuesta, una sola para los dos dominios: certificado Origin
+  CA de Cloudflare + modo `Full (strict)`.** Es gratuito, dura 15 años, está
+  diseñado exactamente para orígenes detrás del proxy, y **elimina el problema
+  de renovación de raíz** — no necesita ACME, así que la IP privada deja de
+  importar. `Full (strict)` además obliga a que el tramo interno sea cifrado y
+  validado. La alternativa —cambiar Hestia a challenge `DNS-01`— también
+  funciona pero conserva la renovación periódica y su modo de fallo.
+
+  **No se cambió nada.** Requiere tu autorización: son dominios de clientes.
+
+- **La plataforma NO escribió nada al "rotar" la segunda cuenta — NO hay un
+  segundo almacén de credenciales.** Medido: única columna de credenciales en
+  toda la instancia es `jax_users.password_hash` (en los dos esquemas); una
+  sola fila para esa cuenta; `jax_users` sin escrituras posteriores al `ALTER`
+  de las 05:34:16; `password_reset_tokens` **vacía y con `UPDATE_TIME` NULL**
+  (tampoco fue un flujo de reset); el backend registró **5 líneas** en la
+  ventana, todas de `credential_resolver`; y no corre ningún LDAP ni Keycloak.
+
+  **El gate no dispara: no apareció un segundo almacén.** Lo que no se puede
+  descartar desde acá es un servicio externo, pero nada en la máquina lo
+  sugiere.
+
+  **Procedimiento de rotación listo para ejecutar** en
+  `/home/fruiz/security-audit-2026-09/ROTACION-user_id-2.md` (chmod 600), con
+  el testigo previo, el `UPDATE` directo, y `updated_at` como verificación
+  nueva. **No ejecutado.**
+
 - **La rotación de la segunda cuenta NO ocurrió — NO CERRADO (2026-09-01).**
   Se informó que se había rotado desde la plataforma. **Medido: el
   `password_hash` de `user_id=2` es idéntico al que se registró en el
