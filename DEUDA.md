@@ -255,11 +255,30 @@ su fecha de última verificación real, no una nueva.
   `TELEGRAM_CHAT_ID`, `JAX_REPL_USER_ID`, `JAX_REPL_TENANT_ID`,
   `JAX_DB_PORT`, `JAX_SSH_PORT`, `JAX_WORKSPACE_DIR`, `JAX_DB_HOST`.
 
-  **Topología interna en historia pública (no rotable):**
-  `JAX_ENV_STAGING_HOSTS`, `JAX_ENV_PROD_HOSTS`, `JAX_ENV_BRIDGE_HOSTS` —
-  listas de IPs privadas, presentes en 80 blobs de ambos repos, ninguna en
-  el árbol de hoy. No hay nada que rotar: o se acepta como riesgo, o exige
-  reescritura de historial adicional. **Decisión de Fernando, sin tomar.**
+  **Topología interna en historia pública — RIESGO ACEPTADO (decisión de
+  Fernando, 2026-09-01).** `JAX_ENV_STAGING_HOSTS`, `JAX_ENV_PROD_HOSTS`,
+  `JAX_ENV_BRIDGE_HOSTS` — listas de IPs privadas, presentes en 80 blobs de
+  ambos repos, **ninguna en el árbol de hoy**. No hay nada que rotar: una IP
+  no se rota, y sacarlas exigiría una reescritura de historial adicional.
+
+  **La decisión es no hacer esa reescritura.** Queda registrada acá para que
+  no se relitigue en cada auditoría: si una ronda futura vuelve a encontrar
+  estas tres claves en el historial, **eso no es un hallazgo nuevo — es este
+  ítem**, y la respuesta ya está dada.
+
+  Hechos medidos que acompañan la decisión (no son sus motivos, que no se
+  registraron): son direcciones **RFC1918**, no enrutables desde Internet;
+  `forks = 0` en ambos repos; y la reescritura que las sacaría **no
+  alcanzaría los `refs/pull/*`** de todos modos — el mismo límite que este
+  documento ya establece para el secreto real, así que ni siquiera compraría
+  la limpieza completa que su costo sugiere.
+
+  **Qué reabriría la decisión** (no predicciones, condiciones):
+  - Que alguna de las tres pase a contener una IP **pública**.
+  - Que se ejecute una purga con GitHub Support por el secreto real — ahí el
+    costo marginal de incluir estas rutas es casi cero y conviene sumarlas.
+  - Un incidente donde el vector de entrada sea reconocimiento de red
+    interna.
 
   ### Resto del pendiente
   1. Sacar el literal del test y del `.pyc` en cualquier scrub futuro
