@@ -21,6 +21,315 @@ Los items sin fecha de "verificado hoy" vienen de CONTEXT.md §9 — heredan
 su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
+- **ESTADO — 2026-09-01.** Bloque único. Reemplaza los cinco bloques de
+  cierre que la ronda de seguridad fue apilando en este mismo lugar; cada uno
+  se declaraba "estado único" y convivía con los anteriores, que es
+  exactamente el problema que este documento existe para evitar. Los ítems
+  cerrados esa noche se movieron íntegros a la sección **"Cerrado — ronda de
+  seguridad 2026-09-01"**, más abajo. Nada se borró.
+
+  **Incidente de credenciales: CERRADO.** Un secreto real en toda la historia
+  de ambos repos, rotado y verificado por tres vías. Cinco falsos positivos
+  retractados antes de llegar a `master`. Detalle en la sección de cerrados.
+
+  **Esperando a tercero — sin trabajo de este lado:**
+
+  | Ítem | Bloqueado por |
+  |---|---|
+  | Ticket a GitHub Support (`$AUDIT/TICKET-GITHUB.md`) | su respuesta |
+  | Purga de dumps en R2 — **2026-09-08 ~01:00** | Bucket Lock, inmutabilidad por diseño |
+
+  **Deuda técnica abierta:** los ítems que siguen en esta sección.
+  **Fecha de control más próxima:** `kimi`, **2026-09-10**.
+
+- **`facet_resolver._cache` replicado en TRES procesos; solo uno se invalida
+  al rebindear (2026-08-27).** `facet_resolver.py` está espejado a propósito
+  en `jax-platform/backend`, `jax/core` y `jax/las_manos` — el patrón
+  declarado de "sin paquete compartido", cada repo con su conector mínimo.
+  Cada espejo tiene **su propio `_cache` en su propio proceso**, con
+  `FACET_CACHE_TTL_SECONDS` (default 30 s).
+
+  La Task 5 de la ronda de alertas agregó `invalidate_facet_cache()` y la
+  llama desde `probe_after_rebind`, así que tras aprobar un binding el
+  proceso de `jax-platform` ve el modelo nuevo de inmediato. **Los otros dos
+  no.** Jacobs (`las_manos`) y el REPL (`jax/core`) pueden seguir
+  despachando contra el binding **viejo** hasta 30 s después del rebind, y
+  la sonda no lo puede ver: sondea por el camino de Mesa web, que es el
+  único invalidado.
+
+  **Por qué importa y no es teórico:** es el mismo estado replicado en tres
+  lugares con un solo escritor de invalidación — la forma exacta que ya
+  produjo el incidente de `motor.model_ref` (2026-08-19 y de nuevo el
+  08-24, documentado en el docstring de `approve_proposal`) y las 4 fuentes
+  de verdad de capabilities que el Bloque 3 tuvo que colapsar. Ventana
+  chica (30 s) pero determinística, y justo en el momento de mayor riesgo:
+  inmediatamente después de un cambio de modelo.
+
+  **Es un punto ciego del detector, no solo un problema de frescura.** La
+  sonda por rebinding **no puede ver ese estado**: sondea por el camino de
+  Mesa web (`_invoke_facet`), que es el único de los tres procesos cuya
+  caché se invalida. Si Jacobs o el REPL despachan contra el binding viejo
+  durante esos 30 s, la sonda reporta `ok` — y reporta la verdad *de su
+  propio camino*. El instrumento que esta ronda construyó para que un facet
+  roto no pase 3 días sin avisar tiene, por construcción, un camino que no
+  observa. Anotar la ventana "donde el operador la vea" no alcanza para
+  esto: el operador miraría un tablero verde que es correcto y aun así
+  incompleto.
+
+  **Qué haría falta (no diseñado):** una señal de invalidación entre
+  procesos, o bajar el TTL a costa de más queries, o aceptar la ventana
+  explícitamente y documentarla donde el operador la vea — cualquiera de
+  las tres deja el punto ciego abierto salvo la primera. No se resuelve
+  hoy — queda con el caso concreto. Descubierto por la revisión de la
+  Task 5, no buscado.
+
+- **Una BackgroundTask que lanza aborta en silencio las encoladas DESPUÉS
+  en la misma request (2026-08-27).** Latente hoy, no roto: ningún endpoint
+  encola dos tareas todavía. Se documenta porque el día que alguien encole
+  una segunda, desaparece sin dejar rastro y nada lo va a avisar.
+
+  **Verificado empíricamente**, no leído en la documentación de Starlette:
+  con el FastAPI de `jax-platform/backend/.venv` y un `TestClient` real, un
+  endpoint que encola `explota()` y después `segunda()` corre `explota()`,
+  la excepción propaga, y `segunda()` **nunca corre**. No es una propiedad
+  de nuestro código: es cómo `BackgroundTasks` de Starlette ejecuta la
+  cadena — secuencial, sin aislamiento entre tareas.
+
+  **Qué lo activa, concretamente:** hoy hay dos sitios que usan el
+  mecanismo, cada uno con UNA sola tarea —
+  `probe_after_rebind` desde los dos escritores de `facet_binding`
+  (`api/admin/models.py`, `api/admin/facet_bindings.py`, Task 5) y
+  `run_shadow_validation` desde `api/chat.py:1042`. El bug aparece en
+  cuanto uno de esos endpoints encole una segunda tarea y la primera pueda
+  lanzar. `probe_after_rebind` hoy no lanza — todo su cuerpo está en un
+  `try` que registra `probe_error` — pero esa es una propiedad de esa
+  función, no una garantía del mecanismo: no hay nada que impida encolar
+  mañana una tarea sin ese `try` delante de otra.
+
+  **Por qué no se ve cuando pasa:** bajo uvicorn la respuesta ya se emitió
+  cuando corren las tareas. El cliente ve 200. El traceback de la que lanzó
+  queda solo en `journalctl`; de la que nunca corrió no queda **nada** —
+  ni log, ni fila, ni error. Es el mismo modo de falla que la ronda de
+  alertas vino a eliminar, en otro mecanismo.
+
+  **Qué haría falta (no diseñado):** envolver cada tarea en su propio
+  `try/except` antes de encolarla (un helper `safe_task()` en vez de
+  `add_task` crudo), o un test de política que falle si un endpoint encola
+  más de una sin ese envoltorio. Descubierto al responder una pregunta de
+  revisión de Task 5 sobre qué pasa si `probe_after_rebind` lanza dentro de
+  una BackgroundTask, no buscado.
+
+- **Bypass de admin en el ruleset de `master` — PUSH DIRECTO CERRADO
+  2026-08-28; el merge sin revisión NO, y abajo está medido por qué.** Los dos
+  repos tienen protección de `master` con bypass para admin (ver
+  `jax-block1-apertura-repos-cierre`). Eso era higiene aceptada hasta que
+  mostró su costo con un caso concreto.
+
+  **Incidente, 2026-08-27:** el PR de la Task 4 de la ronda de alertas
+  (`jax-platform` #25) se mergeó **con `no-fail-open-except` en FAILURE**.
+  El comando de merge imprimió los checks —el rojo estaba en pantalla— y
+  corrió `gh pr merge` en la misma cadena, sin condicionar nada. El bypass
+  hizo que no encontrara ninguna resistencia. `master` quedó en rojo hasta
+  el fix-forward (#26, `cab6f80`).
+
+  **Por qué bloquea, y no es higiene:** hoy la única barrera entre un merge
+  en rojo y `master` es la disciplina de quien mergea. Es **exactamente el
+  modo de falla que la ronda de alertas de facets existe para eliminar** —
+  "la regla se cumple cuando alguien se acuerda de mirar" — reproducido en
+  la infraestructura que gobierna esa misma ronda. Un guard que depende de
+  memoria humana no es un guard.
+
+  **Segundo incidente, 2026-08-28, y es el que lo cerró:** un
+  `cd <worktree> && git revert ...` falló por sintaxis; la llamada siguiente
+  arrancó en el checkout principal, sobre `master`, y el `git revert HEAD`
+  revirtió un PR ya mergeado (la décima lección de `CONTEXT.md`). El push
+  salió con `Bypassed rule violations for refs/heads/master`. Se restauró en
+  el acto (`b85e317` revert, `8dfc91f` reapply — **deliberadamente no
+  reescritos, que quede el registro**), pero nada lo frenó. La diferencia con
+  el primer incidente importa: aquél fue disciplina, éste fue **mecánico** —
+  ninguna cantidad de cuidado previene un `cd` que no se ejecutó.
+
+  **CERRADO 2026-08-28 — el push directo a `master`.** `bypass_mode` del
+  ruleset pasó de `always` a `pull_request` en los DOS repos: el bypass
+  sigue existiendo para el merge de un PR, pero **el push directo se rechaza
+  server-side, también para admin**. No es una lectura de la documentación:
+  se verificó con un push real (`GH013: Repository rule violations found for
+  refs/heads/master`) con las mismas credenciales que 40 minutos antes
+  bypasseaban. Defensa en profundidad: hook `pre-push` versionado en
+  `ops/githooks` (`jax` #66, `jax-platform` #31) que decide por el **ref
+  destino** que git pasa por stdin — no por el cwd, que es exactamente lo
+  que estaba mal ese día. Se verificó reproduciendo el incidente completo
+  (comando compuesto que falla, cwd equivocado, push a master): rechazado
+  por el hook, y con `--no-verify` rechazado igual por el ruleset. Los hooks
+  son compartidos entre worktrees (verificado), así que un `git config
+  core.hooksPath ops/githooks` por clon cubre todos los árboles.
+
+  **NO CERRADO, y ahora se sabe por qué: el merge sin revisión.**
+  `required_approving_review_count` es 0. Subirlo a 1 **no sirve con una
+  sola identidad**, y esto se midió, no se supuso (experimento en
+  `jax-platform`, ruleset restaurado después):
+
+  | Intento | Resultado |
+  |---|---|
+  | `gh pr review --approve` sobre un PR propio | `Can not approve your own pull request` |
+  | `gh pr merge` con approvals=1 | `the base branch policy prohibits the merge` (BLOCKED) |
+  | `gh pr merge --admin` | **mergeó igual** (`3acd8f3`) |
+
+  O sea: con approvals=1 y una sola cuenta, el camino normal queda cerrado
+  para todos —incluido Fernando, que no puede aprobar sus propios PRs— y el
+  único camino es `--admin`, que el agente puede tipear igual de fácil. **No
+  crea un gate humano: crea un flag.** El agujero del merge sin revisión
+  sólo se cierra con identidad separada.
+
+  **Identidad separada (bot/GitHub App): ANOTADA, no hecha — y es la ÚNICA
+  opción que cierra el merge sin revisión. Es PROTECCIÓN, no auditoría.**
+  Esta entrada decía antes que era separación para auditoría con una
+  excepción de protección al margen; está al revés y la corrección importa,
+  porque de eso depende con qué urgencia se lea: la separación de identidad
+  es **el único mecanismo que convierte
+  `required_approving_review_count = 1` en un gate real**. Con una sola
+  cuenta, approvals=1 sólo bloquea el camino normal y deja `--admin` (ver la
+  tabla de arriba). Con un bot de rol `write`: sus PRs los tiene que aprobar
+  Fernando, y el bot **no tiene `--admin` que tipear**. La ganancia de
+  auditoría —saber QUIÉN además de QUÉ— es un efecto secundario, no la
+  razón.
+
+  **Decisión de Fernando, 2026-08-28: no se hace hoy**, con las razones
+  escritas para que la próxima ronda no las reconstruya:
+  1. el agujero que queda (merge sin revisión) es el que **en la práctica sí
+     tiene revisión** — cada PR de esta semana pasó por Fernando antes de
+     mergearse. No es garantía mecánica, pero tampoco está desatendido;
+  2. el que **sí estaba desatendido** —push directo por error mecánico, sin
+     oportunidad de que nadie mirara— quedó cerrado hoy, por dos capas
+     independientes y verificado con el escenario exacto del incidente;
+  3. el costo **no está bien medido**: los comandos manuales de Fernando en
+     la misma terminal saldrían como bot, y falta ver cómo interactúa con
+     `require_extra_approval_for_unattributed_changes` (hoy en `true`). Es
+     la clase de cambio que abre tres preguntas nuevas, y no hay un
+     incidente que lo justifique.
+
+  **Qué lo reabre:** un merge sin revisión que llegue a `master` y cause
+  daño — es decir, el incidente que hoy no existe. Alcance concreto ya
+  medido, para no rehacerlo: cuenta nueva con 2FA (paso interactivo de
+  Fernando), invitación como colaborador con rol **write** —no admin, que es
+  lo que la deja fuera del bypass—, llave SSH propia y `GH_CONFIG_DIR`/token
+  aparte en hall9000.
+
+  Ver la séptima lección de método en CONTEXT.md ("verificar y actuar en el
+  mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
+  compuesto que falla.
+
+- **`_CAPABILITY_TIMEOUT_SECONDS` (jacobs/plan.py) duplica
+  `capability.max_execution_minutes` (DB) sin lectura en vivo.** Verificado
+  2026-08-27 durante el cierre de gobernanza de `_HTTP_FACETS`: el default
+  de `step.timeout_seconds` sale de un dict hardcodeado
+  (`jacobs/plan.py:106-110`); un `timeout_seconds` explícito en un spec de
+  step lo pisa SIN validar contra el techo de la DB
+  (`_validate_plan_capabilities` no lo chequea, y ni siquiera aplica a
+  `_HTTP_FACETS`). `scripts/check_timeout_consistency.py` verifica que
+  coincidan, pero es manual, no una garantía en runtime. El check 8 real de
+  `MotorPolicy.check()` solo corre server-side, dentro de `las_manos`
+  (`las_manos/motor_registry/routes.py:95`, antes de crear el `MotorJob`
+  pero después de que Jacobs ya hizo la llamada HTTP a `/motor/dispatch`),
+  y solo para `kimi`/`jax_local` -- nunca corre en Jacobs, ni antes de que
+  Jacobs decida despachar. Decisión
+  explícita: NO se activa un admission-check contra esto en la ronda de
+  `_HTTP_FACETS` (validaría contra un valor que puede ya estar desincronizado
+  del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
+  en una ronda aparte.
+
+- **`jax-platform`: suite de tests del backend con fallos preexistentes en
+  este entorno de desarrollo.** Verificado 2026-08-27
+  durante el cierre de gobernanza de `_HTTP_FACETS` (Task 7, integración de
+  `_invoke_facet` en `chat.py`): diff contra un stash-baseline muestra
+  EXACTAMENTE el mismo conjunto de failures, por nombre, con y sin los
+  cambios de esta ronda -- no es una regresión de este trabajo.
+  **EL NÚMERO NO ES ESTABLE — corregido dos veces el mismo día antes de
+  entender por qué (2026-08-27).** Historia completa, porque la lección
+  está en la secuencia y no en la cifra: una medición dio 10, otra 12, una
+  tercera (a mano, dos corridas seguidas) volvió a dar 10 y se escribió acá
+  como "el número correcto". **Las tres estaban midiendo algo inestable.**
+  Al portar el CI se corrió el experimento que faltaba: el MISMO árbol
+  limpio da 10 y después 12 (3 corridas de cada resultado). La causa es la
+  misma que la de los fallos: `jax_memory_test` es una DB COMPARTIDA, y el
+  conteo depende del estado en que la dejó la corrida anterior.
+  **Consecuencia práctica:** cualquier criterio de "el conjunto de fallos
+  no cambió" basado en el NÚMERO es inservible acá — hay que comparar
+  NOMBRES. Y descarta por construcción la opción de versionar un baseline,
+  que era el diseño más obvio para meter esta suite en CI. Causa raíz identificada: un
+  pool de conexiones `aiomysql` reusado entre distintos event loops de
+  `asyncio` -- defecto de aislamiento de tests, no defecto de producto.
+  Evidencia directa de eso, no solo inferencia: **los failures y el
+  error pasan TODOS en verde cuando se corren sus archivos por separado**
+  (verificado 2026-08-27, archivo por archivo) -- solo fallan cuando
+  comparten proceso con el resto de la suite. No existe hoy, para
+  `jax-platform`, un equivalente
+  al cierre que `jax`/`las_manos` logró 2026-08-24 (95 passed / 0 failed,
+  ver la entrada "14 (en verdad 18) tests" más abajo) -- ninguna auditoría
+  llevó esa suite a verde de referencia. Se deja abierto a propósito, no
+  como "ruido conocido, ignorar": una suite permanentemente un poco roja
+  entrena a ignorarla, que es exactamente cómo una regresión real termina
+  escondida en el ruido. Sin fix esta ronda (fuera de alcance de la
+  gobernanza de `_HTTP_FACETS`) -- candidato a sesión de pago de deuda
+  propia.
+
+- **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
+  excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
+  comentarios cruzados en `jacobs/plan.py:374`/`jacobs/executor.py:117,381`
+  lo siguen marcando, sin fix. Confirmado abierto en Bloque 2
+  (2026-08-21), no se cierra por decisión.
+
+- **Owner de pipeline: filesystem vs DB.** El reaper (`jacobs/reaper.py`)
+  sigue el criterio de filesystem para decidir ownership, migración a DB
+  identificada como la deuda con más antigüedad, sin ejecutar. Última
+  verificación: ronda 6.
+
+- **Sub-agentes de Claude Code sin gobernanza real** (más allá del hook
+  que bloqueó un push de prueba en ronda 7). Conectado a un hallazgo P0
+  real: cualquier subprocess `claude` futuro lanzado con `$HOME` real
+  hereda los hooks/plugins personales de Fernando fuera de cualquier gate
+  — Hyde específicamente ya se cerró (sandbox de bubblewrap, `$HOME`
+  virtual, PR jax#18, 2026-08-23). **El "problema general" (cualquier
+  OTRO músculo/automatización que dispare `claude` sin el mismo
+  aislamiento) CERRADO 2026-08-26, PRs jax#33-36.** Los 2 call sites
+  reales (`jacobs/executor.py::_invoke_hyde` y
+  `jax/muscles/subprocess_muscle.py::SubprocessMuscle._call`, antes cada
+  uno reimplementando el lanzamiento por separado — uno con
+  `asyncio.Semaphore`, el otro sin ningún lock) se centralizaron en
+  `hyde_sandbox.py::run_sandboxed_claude()`, único punto de entrada
+  aprobado, que hereda el mismo `$HOME` aislado de bwrap de Hyde. El
+  semáforo original no servía: `asyncio.Semaphore` no cruza proceso de
+  SO (Jacobs corre dentro de `jax-las-manos`, `SubprocessMuscle` en el
+  REPL, procesos de SO distintos) — reemplazado por `flock(2)` real
+  sobre `workspace_dir/.claude_subprocess.lock`, vía `asyncio.to_thread`,
+  fail-closed. Un scanner AST nuevo en CI (job `no-naked-claude-subprocess`,
+  `policy/tests/test_claude_subprocess_solo_via_sandbox.py`) falla el
+  build si aparece un futuro call site de `claude` fuera de
+  `hyde_sandbox.py` — es lo que convierte esto en un mecanismo genérico,
+  no solo el caso puntual de Hyde. Ver memoria
+  `jax-claude-subprocess-gobernanza-cerrado`; `jax-hyde-personal-hooks-sin-gobernanza`
+  queda como la observación de fondo original (histórica, ya resuelta
+  por este cierre).
+
+- **Hyde: red sin acotar por dominio/IP, escritura directa a los repos
+  reales fuera de alcance.** Declarado explícitamente como no resuelto al
+  cerrar el sandbox de bubblewrap (2026-08-23) — el contenimiento
+  principal (secretos, filesystem, hooks) sí está cerrado, estos son
+  refinamientos de defensa en profundidad pendientes. **La tercera parte
+  original de este bullet ("concurrencia de `HYDE_SEMAPHORE` con el
+  sandbox no reverificada") ya no aplica — CERRADO 2026-08-26 (PRs
+  jax#33-36).** `HYDE_SEMAPHORE` (`asyncio.Semaphore`) se eliminó del
+  código (confirmado por grep: solo queda en comentarios/docstrings como
+  referencia histórica), reemplazado por `flock(2)` cross-proceso en
+  `hyde_sandbox.py::run_sandboxed_claude()` — ver
+  `jax-claude-subprocess-gobernanza-cerrado` en memoria.
+
+
+
+## Cerrado — ronda de seguridad 2026-09-01
+
+Se conservan íntegros: describen clases de defecto reutilizables y las
+retractaciones, que no se borran. Ninguno requiere acción.
 
 - **CIERRE FINAL (2026-09-01). Un solo ítem vivo.**
 
@@ -78,42 +387,6 @@ su fecha de última verificación real, no una nueva.
   de irse así en un aviso a terceros.
 
   Ver la vigésimo sexta lección en `CONTEXT.md` §9.
-
-- **Certificados del origen — diagnóstico MEDIDO 2026-09-01.**
-
-  | | Borde (lo que ve el visitante) | Origen (`172.16.20.20`) |
-  |---|---|---|
-  | Certificado | **válido**, Google Trust Services | **VENCIDO** — Let's Encrypt R11 |
-  | Dominio A | vence 2026-11-24 | venció **2025-05-03** |
-  | Dominio B | vence 2026-11-19 | venció **2025-05-22** |
-  | HTTP | 200 | 200 en `:80` y en `:443` |
-
-  **Por qué falla ACME, y no es lo que decía el diagnóstico viejo:** el
-  challenge `http-01` lo resuelve Let's Encrypt **desde internet**, y el
-  origen está en una **IP privada** (`172.16.20.20`) que no es enrutable desde
-  afuera. La petición llega al borde de Cloudflare, no al origen. **No es un
-  puerto cerrado ni un firewall: es que el origen no es alcanzable por
-  diseño.** Medido: desde la red interna el origen sí responde en `:80`.
-
-  **Modo SSL de Cloudflare: NO DETERMINABLE desde afuera.** No hay token de
-  Cloudflare en el host. `Full (strict)` **queda descartado por medición** —
-  con un certificado vencido el borde devolvería `526` y devuelve `200`.
-  Quedan `Full` y `Flexible`, y el origen responde 200 en ambos puertos, así
-  que lo observable no los distingue. **Hay que mirarlo en el panel.**
-
-  **Y la distinción importa:** si el modo fuera **`Flexible`**, el tramo
-  Cloudflare→origen viaja **sin cifrar**, aunque el visitante vea el candado.
-  Eso sí sería un problema real, y no lo cubre ningún certificado del borde.
-
-  **Corrección propuesta, una sola para los dos dominios: certificado Origin
-  CA de Cloudflare + modo `Full (strict)`.** Es gratuito, dura 15 años, está
-  diseñado exactamente para orígenes detrás del proxy, y **elimina el problema
-  de renovación de raíz** — no necesita ACME, así que la IP privada deja de
-  importar. `Full (strict)` además obliga a que el tramo interno sea cifrado y
-  validado. La alternativa —cambiar Hestia a challenge `DNS-01`— también
-  funciona pero conserva la renovación periódica y su modo de fallo.
-
-  **No se cambió nada.** Requiere tu autorización: son dominios de clientes.
 
 - **La plataforma NO escribió nada al "rotar" la segunda cuenta — NO hay un
   segundo almacén de credenciales.** Medido: única columna de credenciales en
@@ -1126,183 +1399,6 @@ su fecha de última verificación real, no una nueva.
   texto de la alerta. Elegir exige decidir qué significa el ledger cuando
   dos capas describen el mismo fallo.
 
-- **`facet_resolver._cache` replicado en TRES procesos; solo uno se invalida
-  al rebindear (2026-08-27).** `facet_resolver.py` está espejado a propósito
-  en `jax-platform/backend`, `jax/core` y `jax/las_manos` — el patrón
-  declarado de "sin paquete compartido", cada repo con su conector mínimo.
-  Cada espejo tiene **su propio `_cache` en su propio proceso**, con
-  `FACET_CACHE_TTL_SECONDS` (default 30 s).
-
-  La Task 5 de la ronda de alertas agregó `invalidate_facet_cache()` y la
-  llama desde `probe_after_rebind`, así que tras aprobar un binding el
-  proceso de `jax-platform` ve el modelo nuevo de inmediato. **Los otros dos
-  no.** Jacobs (`las_manos`) y el REPL (`jax/core`) pueden seguir
-  despachando contra el binding **viejo** hasta 30 s después del rebind, y
-  la sonda no lo puede ver: sondea por el camino de Mesa web, que es el
-  único invalidado.
-
-  **Por qué importa y no es teórico:** es el mismo estado replicado en tres
-  lugares con un solo escritor de invalidación — la forma exacta que ya
-  produjo el incidente de `motor.model_ref` (2026-08-19 y de nuevo el
-  08-24, documentado en el docstring de `approve_proposal`) y las 4 fuentes
-  de verdad de capabilities que el Bloque 3 tuvo que colapsar. Ventana
-  chica (30 s) pero determinística, y justo en el momento de mayor riesgo:
-  inmediatamente después de un cambio de modelo.
-
-  **Es un punto ciego del detector, no solo un problema de frescura.** La
-  sonda por rebinding **no puede ver ese estado**: sondea por el camino de
-  Mesa web (`_invoke_facet`), que es el único de los tres procesos cuya
-  caché se invalida. Si Jacobs o el REPL despachan contra el binding viejo
-  durante esos 30 s, la sonda reporta `ok` — y reporta la verdad *de su
-  propio camino*. El instrumento que esta ronda construyó para que un facet
-  roto no pase 3 días sin avisar tiene, por construcción, un camino que no
-  observa. Anotar la ventana "donde el operador la vea" no alcanza para
-  esto: el operador miraría un tablero verde que es correcto y aun así
-  incompleto.
-
-  **Qué haría falta (no diseñado):** una señal de invalidación entre
-  procesos, o bajar el TTL a costa de más queries, o aceptar la ventana
-  explícitamente y documentarla donde el operador la vea — cualquiera de
-  las tres deja el punto ciego abierto salvo la primera. No se resuelve
-  hoy — queda con el caso concreto. Descubierto por la revisión de la
-  Task 5, no buscado.
-
-- **Una BackgroundTask que lanza aborta en silencio las encoladas DESPUÉS
-  en la misma request (2026-08-27).** Latente hoy, no roto: ningún endpoint
-  encola dos tareas todavía. Se documenta porque el día que alguien encole
-  una segunda, desaparece sin dejar rastro y nada lo va a avisar.
-
-  **Verificado empíricamente**, no leído en la documentación de Starlette:
-  con el FastAPI de `jax-platform/backend/.venv` y un `TestClient` real, un
-  endpoint que encola `explota()` y después `segunda()` corre `explota()`,
-  la excepción propaga, y `segunda()` **nunca corre**. No es una propiedad
-  de nuestro código: es cómo `BackgroundTasks` de Starlette ejecuta la
-  cadena — secuencial, sin aislamiento entre tareas.
-
-  **Qué lo activa, concretamente:** hoy hay dos sitios que usan el
-  mecanismo, cada uno con UNA sola tarea —
-  `probe_after_rebind` desde los dos escritores de `facet_binding`
-  (`api/admin/models.py`, `api/admin/facet_bindings.py`, Task 5) y
-  `run_shadow_validation` desde `api/chat.py:1042`. El bug aparece en
-  cuanto uno de esos endpoints encole una segunda tarea y la primera pueda
-  lanzar. `probe_after_rebind` hoy no lanza — todo su cuerpo está en un
-  `try` que registra `probe_error` — pero esa es una propiedad de esa
-  función, no una garantía del mecanismo: no hay nada que impida encolar
-  mañana una tarea sin ese `try` delante de otra.
-
-  **Por qué no se ve cuando pasa:** bajo uvicorn la respuesta ya se emitió
-  cuando corren las tareas. El cliente ve 200. El traceback de la que lanzó
-  queda solo en `journalctl`; de la que nunca corrió no queda **nada** —
-  ni log, ni fila, ni error. Es el mismo modo de falla que la ronda de
-  alertas vino a eliminar, en otro mecanismo.
-
-  **Qué haría falta (no diseñado):** envolver cada tarea en su propio
-  `try/except` antes de encolarla (un helper `safe_task()` en vez de
-  `add_task` crudo), o un test de política que falle si un endpoint encola
-  más de una sin ese envoltorio. Descubierto al responder una pregunta de
-  revisión de Task 5 sobre qué pasa si `probe_after_rebind` lanza dentro de
-  una BackgroundTask, no buscado.
-
-- **Bypass de admin en el ruleset de `master` — PUSH DIRECTO CERRADO
-  2026-08-28; el merge sin revisión NO, y abajo está medido por qué.** Los dos
-  repos tienen protección de `master` con bypass para admin (ver
-  `jax-block1-apertura-repos-cierre`). Eso era higiene aceptada hasta que
-  mostró su costo con un caso concreto.
-
-  **Incidente, 2026-08-27:** el PR de la Task 4 de la ronda de alertas
-  (`jax-platform` #25) se mergeó **con `no-fail-open-except` en FAILURE**.
-  El comando de merge imprimió los checks —el rojo estaba en pantalla— y
-  corrió `gh pr merge` en la misma cadena, sin condicionar nada. El bypass
-  hizo que no encontrara ninguna resistencia. `master` quedó en rojo hasta
-  el fix-forward (#26, `cab6f80`).
-
-  **Por qué bloquea, y no es higiene:** hoy la única barrera entre un merge
-  en rojo y `master` es la disciplina de quien mergea. Es **exactamente el
-  modo de falla que la ronda de alertas de facets existe para eliminar** —
-  "la regla se cumple cuando alguien se acuerda de mirar" — reproducido en
-  la infraestructura que gobierna esa misma ronda. Un guard que depende de
-  memoria humana no es un guard.
-
-  **Segundo incidente, 2026-08-28, y es el que lo cerró:** un
-  `cd <worktree> && git revert ...` falló por sintaxis; la llamada siguiente
-  arrancó en el checkout principal, sobre `master`, y el `git revert HEAD`
-  revirtió un PR ya mergeado (la décima lección de `CONTEXT.md`). El push
-  salió con `Bypassed rule violations for refs/heads/master`. Se restauró en
-  el acto (`b85e317` revert, `8dfc91f` reapply — **deliberadamente no
-  reescritos, que quede el registro**), pero nada lo frenó. La diferencia con
-  el primer incidente importa: aquél fue disciplina, éste fue **mecánico** —
-  ninguna cantidad de cuidado previene un `cd` que no se ejecutó.
-
-  **CERRADO 2026-08-28 — el push directo a `master`.** `bypass_mode` del
-  ruleset pasó de `always` a `pull_request` en los DOS repos: el bypass
-  sigue existiendo para el merge de un PR, pero **el push directo se rechaza
-  server-side, también para admin**. No es una lectura de la documentación:
-  se verificó con un push real (`GH013: Repository rule violations found for
-  refs/heads/master`) con las mismas credenciales que 40 minutos antes
-  bypasseaban. Defensa en profundidad: hook `pre-push` versionado en
-  `ops/githooks` (`jax` #66, `jax-platform` #31) que decide por el **ref
-  destino** que git pasa por stdin — no por el cwd, que es exactamente lo
-  que estaba mal ese día. Se verificó reproduciendo el incidente completo
-  (comando compuesto que falla, cwd equivocado, push a master): rechazado
-  por el hook, y con `--no-verify` rechazado igual por el ruleset. Los hooks
-  son compartidos entre worktrees (verificado), así que un `git config
-  core.hooksPath ops/githooks` por clon cubre todos los árboles.
-
-  **NO CERRADO, y ahora se sabe por qué: el merge sin revisión.**
-  `required_approving_review_count` es 0. Subirlo a 1 **no sirve con una
-  sola identidad**, y esto se midió, no se supuso (experimento en
-  `jax-platform`, ruleset restaurado después):
-
-  | Intento | Resultado |
-  |---|---|
-  | `gh pr review --approve` sobre un PR propio | `Can not approve your own pull request` |
-  | `gh pr merge` con approvals=1 | `the base branch policy prohibits the merge` (BLOCKED) |
-  | `gh pr merge --admin` | **mergeó igual** (`3acd8f3`) |
-
-  O sea: con approvals=1 y una sola cuenta, el camino normal queda cerrado
-  para todos —incluido Fernando, que no puede aprobar sus propios PRs— y el
-  único camino es `--admin`, que el agente puede tipear igual de fácil. **No
-  crea un gate humano: crea un flag.** El agujero del merge sin revisión
-  sólo se cierra con identidad separada.
-
-  **Identidad separada (bot/GitHub App): ANOTADA, no hecha — y es la ÚNICA
-  opción que cierra el merge sin revisión. Es PROTECCIÓN, no auditoría.**
-  Esta entrada decía antes que era separación para auditoría con una
-  excepción de protección al margen; está al revés y la corrección importa,
-  porque de eso depende con qué urgencia se lea: la separación de identidad
-  es **el único mecanismo que convierte
-  `required_approving_review_count = 1` en un gate real**. Con una sola
-  cuenta, approvals=1 sólo bloquea el camino normal y deja `--admin` (ver la
-  tabla de arriba). Con un bot de rol `write`: sus PRs los tiene que aprobar
-  Fernando, y el bot **no tiene `--admin` que tipear**. La ganancia de
-  auditoría —saber QUIÉN además de QUÉ— es un efecto secundario, no la
-  razón.
-
-  **Decisión de Fernando, 2026-08-28: no se hace hoy**, con las razones
-  escritas para que la próxima ronda no las reconstruya:
-  1. el agujero que queda (merge sin revisión) es el que **en la práctica sí
-     tiene revisión** — cada PR de esta semana pasó por Fernando antes de
-     mergearse. No es garantía mecánica, pero tampoco está desatendido;
-  2. el que **sí estaba desatendido** —push directo por error mecánico, sin
-     oportunidad de que nadie mirara— quedó cerrado hoy, por dos capas
-     independientes y verificado con el escenario exacto del incidente;
-  3. el costo **no está bien medido**: los comandos manuales de Fernando en
-     la misma terminal saldrían como bot, y falta ver cómo interactúa con
-     `require_extra_approval_for_unattributed_changes` (hoy en `true`). Es
-     la clase de cambio que abre tres preguntas nuevas, y no hay un
-     incidente que lo justifique.
-
-  **Qué lo reabre:** un merge sin revisión que llegue a `master` y cause
-  daño — es decir, el incidente que hoy no existe. Alcance concreto ya
-  medido, para no rehacerlo: cuenta nueva con 2FA (paso interactivo de
-  Fernando), invitación como colaborador con rol **write** —no admin, que es
-  lo que la deja fuera del bypass—, llave SSH propia y `GH_CONFIG_DIR`/token
-  aparte en hall9000.
-
-  Ver la séptima lección de método en CONTEXT.md ("verificar y actuar en el
-  mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
-  compuesto que falla.
-
 - **`thot` caído en la Mesa web — CERRADO 2026-08-27.** `_call_openai_compat`
   mandaba `max_tokens` con un valor fijo; `gpt-5.6-terra` rechazaba primero
   el NOMBRE del parámetro y después el VALOR. Encontrado durante la
@@ -1502,98 +1598,6 @@ su fecha de última verificación real, no una nueva.
     test:
     `jacobs/_http_facet_admission_test.py::HttpFacetAdmissionTest::test_capability_con_human_gate_es_denegada`.
 
-- **`_CAPABILITY_TIMEOUT_SECONDS` (jacobs/plan.py) duplica
-  `capability.max_execution_minutes` (DB) sin lectura en vivo.** Verificado
-  2026-08-27 durante el cierre de gobernanza de `_HTTP_FACETS`: el default
-  de `step.timeout_seconds` sale de un dict hardcodeado
-  (`jacobs/plan.py:106-110`); un `timeout_seconds` explícito en un spec de
-  step lo pisa SIN validar contra el techo de la DB
-  (`_validate_plan_capabilities` no lo chequea, y ni siquiera aplica a
-  `_HTTP_FACETS`). `scripts/check_timeout_consistency.py` verifica que
-  coincidan, pero es manual, no una garantía en runtime. El check 8 real de
-  `MotorPolicy.check()` solo corre server-side, dentro de `las_manos`
-  (`las_manos/motor_registry/routes.py:95`, antes de crear el `MotorJob`
-  pero después de que Jacobs ya hizo la llamada HTTP a `/motor/dispatch`),
-  y solo para `kimi`/`jax_local` -- nunca corre en Jacobs, ni antes de que
-  Jacobs decida despachar. Decisión
-  explícita: NO se activa un admission-check contra esto en la ronda de
-  `_HTTP_FACETS` (validaría contra un valor que puede ya estar desincronizado
-  del que el ejecutor real usa) -- se resuelve junto con la deduplicación,
-  en una ronda aparte.
-
-- **`jax-platform`: suite de tests del backend con fallos preexistentes en
-  este entorno de desarrollo.** Verificado 2026-08-27
-  durante el cierre de gobernanza de `_HTTP_FACETS` (Task 7, integración de
-  `_invoke_facet` en `chat.py`): diff contra un stash-baseline muestra
-  EXACTAMENTE el mismo conjunto de failures, por nombre, con y sin los
-  cambios de esta ronda -- no es una regresión de este trabajo.
-  **EL NÚMERO NO ES ESTABLE — corregido dos veces el mismo día antes de
-  entender por qué (2026-08-27).** Historia completa, porque la lección
-  está en la secuencia y no en la cifra: una medición dio 10, otra 12, una
-  tercera (a mano, dos corridas seguidas) volvió a dar 10 y se escribió acá
-  como "el número correcto". **Las tres estaban midiendo algo inestable.**
-  Al portar el CI se corrió el experimento que faltaba: el MISMO árbol
-  limpio da 10 y después 12 (3 corridas de cada resultado). La causa es la
-  misma que la de los fallos: `jax_memory_test` es una DB COMPARTIDA, y el
-  conteo depende del estado en que la dejó la corrida anterior.
-  **Consecuencia práctica:** cualquier criterio de "el conjunto de fallos
-  no cambió" basado en el NÚMERO es inservible acá — hay que comparar
-  NOMBRES. Y descarta por construcción la opción de versionar un baseline,
-  que era el diseño más obvio para meter esta suite en CI. Causa raíz identificada: un
-  pool de conexiones `aiomysql` reusado entre distintos event loops de
-  `asyncio` -- defecto de aislamiento de tests, no defecto de producto.
-  Evidencia directa de eso, no solo inferencia: **los failures y el
-  error pasan TODOS en verde cuando se corren sus archivos por separado**
-  (verificado 2026-08-27, archivo por archivo) -- solo fallan cuando
-  comparten proceso con el resto de la suite. No existe hoy, para
-  `jax-platform`, un equivalente
-  al cierre que `jax`/`las_manos` logró 2026-08-24 (95 passed / 0 failed,
-  ver la entrada "14 (en verdad 18) tests" más abajo) -- ninguna auditoría
-  llevó esa suite a verde de referencia. Se deja abierto a propósito, no
-  como "ruido conocido, ignorar": una suite permanentemente un poco roja
-  entrena a ignorarla, que es exactamente cómo una regresión real termina
-  escondida en el ruido. Sin fix esta ronda (fuera de alcance de la
-  gobernanza de `_HTTP_FACETS`) -- candidato a sesión de pago de deuda
-  propia.
-
-- **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
-  excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
-  comentarios cruzados en `jacobs/plan.py:374`/`jacobs/executor.py:117,381`
-  lo siguen marcando, sin fix. Confirmado abierto en Bloque 2
-  (2026-08-21), no se cierra por decisión.
-
-- **Owner de pipeline: filesystem vs DB.** El reaper (`jacobs/reaper.py`)
-  sigue el criterio de filesystem para decidir ownership, migración a DB
-  identificada como la deuda con más antigüedad, sin ejecutar. Última
-  verificación: ronda 6.
-
-- **Sub-agentes de Claude Code sin gobernanza real** (más allá del hook
-  que bloqueó un push de prueba en ronda 7). Conectado a un hallazgo P0
-  real: cualquier subprocess `claude` futuro lanzado con `$HOME` real
-  hereda los hooks/plugins personales de Fernando fuera de cualquier gate
-  — Hyde específicamente ya se cerró (sandbox de bubblewrap, `$HOME`
-  virtual, PR jax#18, 2026-08-23). **El "problema general" (cualquier
-  OTRO músculo/automatización que dispare `claude` sin el mismo
-  aislamiento) CERRADO 2026-08-26, PRs jax#33-36.** Los 2 call sites
-  reales (`jacobs/executor.py::_invoke_hyde` y
-  `jax/muscles/subprocess_muscle.py::SubprocessMuscle._call`, antes cada
-  uno reimplementando el lanzamiento por separado — uno con
-  `asyncio.Semaphore`, el otro sin ningún lock) se centralizaron en
-  `hyde_sandbox.py::run_sandboxed_claude()`, único punto de entrada
-  aprobado, que hereda el mismo `$HOME` aislado de bwrap de Hyde. El
-  semáforo original no servía: `asyncio.Semaphore` no cruza proceso de
-  SO (Jacobs corre dentro de `jax-las-manos`, `SubprocessMuscle` en el
-  REPL, procesos de SO distintos) — reemplazado por `flock(2)` real
-  sobre `workspace_dir/.claude_subprocess.lock`, vía `asyncio.to_thread`,
-  fail-closed. Un scanner AST nuevo en CI (job `no-naked-claude-subprocess`,
-  `policy/tests/test_claude_subprocess_solo_via_sandbox.py`) falla el
-  build si aparece un futuro call site de `claude` fuera de
-  `hyde_sandbox.py` — es lo que convierte esto en un mecanismo genérico,
-  no solo el caso puntual de Hyde. Ver memoria
-  `jax-claude-subprocess-gobernanza-cerrado`; `jax-hyde-personal-hooks-sin-gobernanza`
-  queda como la observación de fondo original (histórica, ya resuelta
-  por este cierre).
-
 - **`workspace/` sin repo git propio, `file_write` sin commitear — CERRADO 2026-08-21.** Hallazgo original: byproducto de la verificación T4 de Bloque 3 (no buscado a propósito). Diagnóstico completo mostró que **se perdió DOS VECES en menos de 20h**, no una:
   1. **2026-08-20 14:28 CST** — el filter-repo de ronda 9 re-clonó `/home/fruiz/jax` fresco tras el `push --force --mirror`. Se restauraron a mano `.venv`/`node_modules` (gitignored, necesarios para que los servicios arranquen) pero nadie pensó en `workspace/` — no bloqueaba el arranque, así que no entró al checklist de restauración.
   2. Alguien reinicializó `workspace/.git` a mano después de eso (evidencia: 4 `TOOL_WRITE_REVERTED` con SHA real entre las 02:50 y las 04:59 CST del 21-ago, del trabajo adversarial de Hyde/bubblewrap).
@@ -1609,18 +1613,6 @@ su fecha de última verificación real, no una nueva.
 
   **Lección de método, vale más allá de este caso:** la limpieza del repo padre destruyó el mecanismo de reversibilidad (`git reset --hard`) que era la justificación para sacarle el gate humano a `write_file`. Una garantía de seguridad que depende de infraestructura frágil (un directorio gitignored dentro del árbol que protege) no es una garantía real — se cae exactamente cuando el sistema que la rodea cambia, sin que el propio mecanismo se entere.
 
-- **Hyde: red sin acotar por dominio/IP, escritura directa a los repos
-  reales fuera de alcance.** Declarado explícitamente como no resuelto al
-  cerrar el sandbox de bubblewrap (2026-08-23) — el contenimiento
-  principal (secretos, filesystem, hooks) sí está cerrado, estos son
-  refinamientos de defensa en profundidad pendientes. **La tercera parte
-  original de este bullet ("concurrencia de `HYDE_SEMAPHORE` con el
-  sandbox no reverificada") ya no aplica — CERRADO 2026-08-26 (PRs
-  jax#33-36).** `HYDE_SEMAPHORE` (`asyncio.Semaphore`) se eliminó del
-  código (confirmado por grep: solo queda en comentarios/docstrings como
-  referencia histórica), reemplazado por `flock(2)` cross-proceso en
-  `hyde_sandbox.py::run_sandboxed_claude()` — ver
-  `jax-claude-subprocess-gobernanza-cerrado` en memoria.
 
 ## Anotado, no bloquea
 
@@ -2040,3 +2032,40 @@ su fecha de última verificación real, no una nueva.
   (`JAX_CORE_PATH`) en vez de una ruta implícita del home.
 
 En memoria de Jairo Urbina.
+
+- **Certificados del origen — diagnóstico MEDIDO 2026-09-01.**
+
+  | | Borde (lo que ve el visitante) | Origen (`172.16.20.20`) |
+  |---|---|---|
+  | Certificado | **válido**, Google Trust Services | **VENCIDO** — Let's Encrypt R11 |
+  | Dominio A | vence 2026-11-24 | venció **2025-05-03** |
+  | Dominio B | vence 2026-11-19 | venció **2025-05-22** |
+  | HTTP | 200 | 200 en `:80` y en `:443` |
+
+  **Por qué falla ACME, y no es lo que decía el diagnóstico viejo:** el
+  challenge `http-01` lo resuelve Let's Encrypt **desde internet**, y el
+  origen está en una **IP privada** (`172.16.20.20`) que no es enrutable desde
+  afuera. La petición llega al borde de Cloudflare, no al origen. **No es un
+  puerto cerrado ni un firewall: es que el origen no es alcanzable por
+  diseño.** Medido: desde la red interna el origen sí responde en `:80`.
+
+  **Modo SSL de Cloudflare: NO DETERMINABLE desde afuera.** No hay token de
+  Cloudflare en el host. `Full (strict)` **queda descartado por medición** —
+  con un certificado vencido el borde devolvería `526` y devuelve `200`.
+  Quedan `Full` y `Flexible`, y el origen responde 200 en ambos puertos, así
+  que lo observable no los distingue. **Hay que mirarlo en el panel.**
+
+  **Y la distinción importa:** si el modo fuera **`Flexible`**, el tramo
+  Cloudflare→origen viaja **sin cifrar**, aunque el visitante vea el candado.
+  Eso sí sería un problema real, y no lo cubre ningún certificado del borde.
+
+  **Corrección propuesta, una sola para los dos dominios: certificado Origin
+  CA de Cloudflare + modo `Full (strict)`.** Es gratuito, dura 15 años, está
+  diseñado exactamente para orígenes detrás del proxy, y **elimina el problema
+  de renovación de raíz** — no necesita ACME, así que la IP privada deja de
+  importar. `Full (strict)` además obliga a que el tramo interno sea cifrado y
+  validado. La alternativa —cambiar Hestia a challenge `DNS-01`— también
+  funciona pero conserva la renovación periódica y su modo de fallo.
+
+  **No se cambió nada.** Requiere tu autorización: son dominios de clientes.
+
