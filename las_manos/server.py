@@ -254,36 +254,13 @@ async def _jacobs_init() -> None:
     await reap_orphaned_pipelines()
     asyncio.create_task(start_reaper_loop())
 
-    # T1 (ronda 6, 2026-08-20): chequeo de consistencia código-vs-DB de
-    # timeouts (ver scripts/check_timeout_consistency.py -- misma pregunta
-    # que gobiernan _CAPABILITY_TIMEOUT_SECONDS y capability.
-    # max_execution_minutes, dos caminos que deberían decir lo mismo).
-    # fail-soft: divergencia es un problema de confianza/mantenimiento, no
-    # de correccion -- el codigo ya es la fuente real (ronda 5), asi que
-    # nunca deja un job sin timeout. WARNING logueado, no bloquea el
-    # arranque. Corre acá (no en CI de GitHub) porque necesita la DB real,
-    # que el runner no alcanza -- mismo motivo que el CI de P10 solo
-    # escanea código fuente.
-    try:
-        import importlib.util
-        _spec = importlib.util.spec_from_file_location(
-            "check_timeout_consistency",
-            Path(__file__).resolve().parent.parent / "scripts" / "check_timeout_consistency.py",
-        )
-        _mod = importlib.util.module_from_spec(_spec)
-        _spec.loader.exec_module(_mod)
-        _divergences = await _mod.find_timeout_divergences()
-        if _divergences:
-            _jlog.warning(
-                "Timeout consistency: %d divergencia(s) código-vs-DB: %s",
-                len(_divergences), "; ".join(_divergences),
-            )
-        else:
-            _jlog.info("Timeout consistency: código y DB coinciden.")
-    except Exception:  # fail-soft: chequeo de metadata, nunca debe tumbar el arranque del servicio
-        _jlog.warning("Timeout consistency: chequeo falló, no bloquea el arranque", exc_info=True)
+    # El chequeo de consistencia codigo-vs-DB de timeouts se ELIMINO el
+    # 2026-09-01 al deduplicar: existia para comparar `_CAPABILITY_TIMEOUT_SECONDS`
+    # (jacobs/plan.py) contra `capability.max_execution_minutes` (DB). El dict
+    # ya no existe -- el default sale de la DB, misma fila que el techo -- asi
+    # que no hay dos fuentes que puedan divergir y no hay nada que chequear.
+    # Junto con el chequeo se borro scripts/check_timeout_consistency.py.
 
-    # Defensa en profundidad (2026-08-21, hallazgo de Bloque 3): workspace/
     # se perdió DOS veces en 20h porque vivía dentro del árbol de jax/ y
     # cualquier limpieza del repo padre (filter-repo, git clean -x) se lo
     # llevaba puesto sin avisar. El fix real es la ubicación
