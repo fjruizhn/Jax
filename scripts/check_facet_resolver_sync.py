@@ -57,15 +57,36 @@ SHARED_NAMES = [
     "_db_conn",
     "_query_facet",
     "resolve_facet",
+    # Sello de invalidacion cross-proceso (Q3, 2026-09-01). El mecanismo solo
+    # funciona si los tres procesos miran EL MISMO archivo y lo interpretan
+    # igual, asi que las cuatro funciones y la constante de la ruta entran a la
+    # comparacion. FACET_SEAL_PATH en particular: si los dos espejos apuntaran
+    # a sellos distintos, todo lo demas coincidiria byte a byte y la
+    # invalidacion no cruzaria -- drift invisible dentro del propio mecanismo
+    # construido para cerrar un punto ciego.
+    "FACET_SEAL_PATH",
+    "_seal_mtime",
+    "_tocar_sello",
+    "_entrada_sellada",
+    "invalidate_facet_cache",
 ]
 
 
 def _extract(path: Path) -> dict[str, str]:
-    tree = ast.parse(path.read_text(), filename=str(path))
     source = path.read_text()
+    tree = ast.parse(source, filename=str(path))
     out = {}
     for node in tree.body:
         name = getattr(node, "name", None)
+        # Constantes de modulo (`NOMBRE = ...`): no tienen `.name`, asi que
+        # hasta 2026-09-01 este checker no las miraba nunca. Se agregan por
+        # FACET_SEAL_PATH -- ver el comentario en SHARED_NAMES. Solo asignacion
+        # simple a UN nombre: un desempaquetado no es lo que se quiere comparar
+        # y no vale la pena adivinarlo.
+        if name is None and isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                name = target.id
         if name in SHARED_NAMES:
             out[name] = ast.get_source_segment(source, node)
     return out

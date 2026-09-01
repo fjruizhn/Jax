@@ -42,47 +42,6 @@ su fecha de última verificación real, no una nueva.
   **Deuda técnica abierta:** los ítems que siguen en esta sección.
   **Fecha de control más próxima:** `kimi`, **2026-09-10**.
 
-- **`facet_resolver._cache` replicado en TRES procesos; solo uno se invalida
-  al rebindear (2026-08-27).** `facet_resolver.py` está espejado a propósito
-  en `jax-platform/backend`, `jax/core` y `jax/las_manos` — el patrón
-  declarado de "sin paquete compartido", cada repo con su conector mínimo.
-  Cada espejo tiene **su propio `_cache` en su propio proceso**, con
-  `FACET_CACHE_TTL_SECONDS` (default 30 s).
-
-  La Task 5 de la ronda de alertas agregó `invalidate_facet_cache()` y la
-  llama desde `probe_after_rebind`, así que tras aprobar un binding el
-  proceso de `jax-platform` ve el modelo nuevo de inmediato. **Los otros dos
-  no.** Jacobs (`las_manos`) y el REPL (`jax/core`) pueden seguir
-  despachando contra el binding **viejo** hasta 30 s después del rebind, y
-  la sonda no lo puede ver: sondea por el camino de Mesa web, que es el
-  único invalidado.
-
-  **Por qué importa y no es teórico:** es el mismo estado replicado en tres
-  lugares con un solo escritor de invalidación — la forma exacta que ya
-  produjo el incidente de `motor.model_ref` (2026-08-19 y de nuevo el
-  08-24, documentado en el docstring de `approve_proposal`) y las 4 fuentes
-  de verdad de capabilities que el Bloque 3 tuvo que colapsar. Ventana
-  chica (30 s) pero determinística, y justo en el momento de mayor riesgo:
-  inmediatamente después de un cambio de modelo.
-
-  **Es un punto ciego del detector, no solo un problema de frescura.** La
-  sonda por rebinding **no puede ver ese estado**: sondea por el camino de
-  Mesa web (`_invoke_facet`), que es el único de los tres procesos cuya
-  caché se invalida. Si Jacobs o el REPL despachan contra el binding viejo
-  durante esos 30 s, la sonda reporta `ok` — y reporta la verdad *de su
-  propio camino*. El instrumento que esta ronda construyó para que un facet
-  roto no pase 3 días sin avisar tiene, por construcción, un camino que no
-  observa. Anotar la ventana "donde el operador la vea" no alcanza para
-  esto: el operador miraría un tablero verde que es correcto y aun así
-  incompleto.
-
-  **Qué haría falta (no diseñado):** una señal de invalidación entre
-  procesos, o bajar el TTL a costa de más queries, o aceptar la ventana
-  explícitamente y documentarla donde el operador la vea — cualquiera de
-  las tres deja el punto ciego abierto salvo la primera. No se resuelve
-  hoy — queda con el caso concreto. Descubierto por la revisión de la
-  Task 5, no buscado.
-
 - **Una BackgroundTask que lanza aborta en silencio las encoladas DESPUÉS
   en la misma request (2026-08-27).** Latente hoy, no roto: ningún endpoint
   encola dos tareas todavía. Se documenta porque el día que alguien encole
@@ -330,6 +289,59 @@ su fecha de última verificación real, no una nueva.
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
+
+- **CERRADO (2026-09-01) — `facet_resolver._cache` replicado en TRES
+  procesos; ahora la invalidación cruza los tres.** Era el único ítem abierto
+  de la ronda (Q3). Decisión de Fernando entre las dos opciones diseñadas:
+  **sello en filesystem**.
+
+  **Qué era.** `facet_resolver.py` está espejado a propósito en
+  `jax-platform/backend`, `jax/core` y `jax/las_manos` —dos archivos reales,
+  porque `las_manos/facet_resolver.py` es symlink de `jax/core`, y tres
+  procesos—. Cada uno tenía **su propio `_cache`** con TTL de 30 s, y solo
+  `jax-platform` lo invalidaba al rebindear. Jacobs y el REPL despachaban
+  contra el binding **viejo** hasta 30 s después de aprobar un modelo nuevo, y
+  la sonda por rebinding no lo podía ver: sondea el único camino invalidado.
+  Punto ciego del detector, no solo un problema de frescura.
+
+  **Cómo se cerró.** El escritor toca un archivo; cada `resolve_facet` compara
+  su `mtime` contra el instante en que cacheó y, si el sello es más nuevo,
+  **descarta** la entrada —también del camino de `serving_stale`, porque servir
+  un valor que un escritor declaró superado es el binding viejo que esto vino a
+  matar—. ~1 µs por `os.stat`, sin red y sin dependencia nueva: los tres
+  procesos corren en hall9000, mismo filesystem.
+
+  **El detalle que lo arruinaba en silencio, y por qué queda clavado.**
+  `_CacheEntry.fetched_at` es `time.monotonic()`, que no es comparable con un
+  `mtime`. Compararlos no da error: da un veredicto **constante** —"invalidar
+  siempre" o "no invalidar nunca", según el origen de monotonic— y el bug queda
+  igual, con código nuevo que aparenta resolverlo. La entrada guarda ahora los
+  dos relojes y la comparación usa el de pared. Hay un test por cada dirección,
+  con el origen de `monotonic` forzado, y se verificó por **mutación** que los
+  dos se ponen en rojo si alguien vuelve a comparar contra monotonic.
+
+  **Modo de falla, declarado en el código** (docstring de `_seal_mtime`): si el
+  sello falta o es ilegible se vuelve al TTL de 30 s, el techo que ya existía.
+  No es un fail-open nuevo —el sello solo puede **adelantar** una invalidación
+  que el TTL iba a hacer igual—. Invalidar ante un sello ilegible convertiría un
+  archivo faltante en "sin caché", que es una regresión de rendimiento
+  silenciosa y un modo de falla nuevo introducido por el propio arreglo.
+
+  **Verificado sobre los TRES procesos, no solo sobre Mesa web** —probar solo
+  ahí reproduciría el mismo punto ciego que tenía la sonda—: rebind real, y
+  jax-platform, jax-las-manos y el REPL sirviendo el modelo nuevo **sin
+  reiniciar**, medidos por separado.
+
+  **CI.** `facet-resolver-seal` (jax) corre los 11 tests por el camino de import
+  de Jacobs y exige que corran, no que se salten; `backend-tests-no-db`
+  (jax-platform) corre los otros 11 dentro de la suite, con el piso subido de
+  143 a 158. `facet-resolver-sync` gatea que los dos espejos no diverjan, y se
+  extendió para cubrir el sello: ahora compara también las constantes de módulo,
+  porque dos espejos apuntando a **sellos distintos** dejarían todo lo demás
+  idéntico y la invalidación no cruzaría —drift invisible dentro del mecanismo
+  construido para cerrar un punto ciego—.
+
+  PRs: `jax-platform#38`, `jax#88`.
 
 - **CIERRE FINAL (2026-09-01). Un solo ítem vivo.**
 

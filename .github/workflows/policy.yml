@@ -163,6 +163,47 @@ jobs:
       - run: pip install pytest
       - run: PYTHONPATH=las_manos python -m pytest las_manos/_output_validator_test.py -v
 
+  # Sello de invalidacion cross-proceso del cache de facet_resolver (Q3,
+  # 2026-09-01). El job de al lado (facet-resolver-sync) verifica que los dos
+  # espejos NO diverjan; este verifica que lo que hacen sea lo correcto -- son
+  # dos preguntas distintas y hacen falta las dos: dos copias identicas del
+  # mismo bug pasan el checker de drift en verde.
+  #
+  # PYTHONPATH=las_manos a proposito: `las_manos/facet_resolver.py` es un
+  # symlink a `jax/core/facet_resolver.py`, asi que este job ejercita el
+  # archivo real por el camino de import de Jacobs -- uno de los dos procesos
+  # que hasta hoy no se enteraban de un rebind.
+  #
+  # aiomysql y cryptography ademas de pytest: los tests son de logica PURA
+  # (parchean `_query_facet`, no tocan MariaDB), pero el modulo importa
+  # aiomysql a nivel de modulo y arrastra credential_resolver -> crypto_secrets
+  # -> cryptography.fernet. Con solo pytest el job falla en la COLECCION y no
+  # en un assert -- verificado en un venv limpio antes de escribir esto, mismo
+  # modo de falla que rompio PR#25.
+  #
+  # El test se auto-verifica por MUTACION: cambiando `fetched_at_wall` por
+  # `fetched_at` en `_entrada_sellada` (que es el modo de falla silencioso de
+  # este arreglo: comparar un mtime contra time.monotonic()) se ponen en rojo
+  # los dos tests de monotonic. Verificado, no supuesto.
+  facet-resolver-seal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest aiomysql cryptography
+      - run: PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -v
+      # Los 11 tests tienen que CORRER, no saltarse: dos de ellos se saltan
+      # solos si el runner corriera como root (ningun permiso bloquea a root,
+      # asi que los casos de sello ilegible / no escribible no son
+      # reproducibles). Un skip masivo se ve igual que verde -- este paso
+      # exige el numero.
+      - run: |
+          PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -q 2>&1 | tee /tmp/seal
+          grep -qE "^11 passed" /tmp/seal || {
+            echo "PISO ROTO: se esperaban 11 tests CORRIDOS (no skipeados)."; exit 1; }
+
   facet-resolver-sync:
     # POR QUE EXISTE: facet_resolver.py esta espejado en dos repos (jax/core, y
     # jax-platform/backend con copia propia). Hasta 2026-09-01 este checker
