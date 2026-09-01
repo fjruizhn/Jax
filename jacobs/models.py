@@ -136,7 +136,8 @@ class StepSpec(BaseModel):
     # caller. routes.py convierte StepSpec a dict via model_dump(), que
     # SIEMPRE incluye los defaults; PlanBuilder._from_spec() interpretaba
     # esa presencia como "el caller pidio 300s", pisando el default por-
-    # capability (_CAPABILITY_TIMEOUT_SECONDS) incluso cuando el caller
+    # capability (hoy `capability.max_execution_minutes` en la DB; hasta
+    # 2026-09-01 era un dict en plan.py) incluso cuando el caller
     # nunca toco el campo. Confirmado en produccion real: jacobs_steps
     # muestra 'reconcile' con timeout_seconds=300 en 1 de 3 corridas reales
     # pese a estar en el dict con valor 900. None deja que _from_spec()

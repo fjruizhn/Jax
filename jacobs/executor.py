@@ -733,8 +733,10 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
         # allowed_callers, requires_human_gate, recursion_depth, claves
         # prohibidas) al facet NUEVO, no al original. Checks 6-7 (resolver
         # motor, motor.sandbox_only) son N/A — un facet HTTP no es un
-        # motor. Check 8 (techo de timeout) sigue diferido a propósito
-        # (DEUDA.md, `_CAPABILITY_TIMEOUT_SECONDS`).
+        # motor. El techo de timeout YA NO esta diferido: se exige en
+        # plan-time desde 2026-09-01 (_validate_plan_capabilities lo valida
+        # contra `capability.max_execution_minutes` para TODOS los steps,
+        # HTTP incluidos).
         #
         # Residuo real que queda, distinto del viejo: NIVEL C pasa
         # human_gate_token=None fijo, y una denegación de admisión devuelve

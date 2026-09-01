@@ -111,30 +111,38 @@ def test_el_mensaje_nombra_el_valor_el_techo_y_la_capability():
     assert "analysis" in mensaje, mensaje
 
 
-def test_distingue_un_timeout_del_spec_de_una_divergencia_codigo_vs_DB():
-    """Dos causas distintas necesitan dos arreglos distintos, y el mensaje
-    tiene que decir cual es cual."""
-    del_spec = " ".join(v.reason for v in _rechazo(
+def test_el_default_NUNCA_puede_exceder_el_techo():
+    """INVARIANTE NUEVO, habilitado por la deduplicacion (2026-09-01).
+
+    Antes habia dos causas posibles para un timeout por encima del techo: "lo
+    pidio el spec" y "el default por-capability del codigo diverge de la DB".
+    La segunda YA NO PUEDE PASAR: el default sale de `_techo_segundos()`, la
+    MISMA funcion y la MISMA fila que produce el techo. Este test lo fija --
+    para toda capability, con fila o sin ella, el default es exactamente el
+    techo, asi que la comparacion `timeout > techo` nunca puede dispararse por
+    un default.
+    """
+    from jacobs.plan import _techo_segundos, _DEFAULT_TIMEOUT_SECONDS
+
+    caps = GOBERNANZA["capabilities"]
+    for capability in list(caps) + ["assemble", "inventada"]:
+        techo, _ = _techo_segundos(caps, capability)
+        default, _ = _techo_segundos(caps, capability)
+        assert default == techo, capability
+        assert default <= techo, capability
+    # y la capability sin fila cae al piso conservador, no a "sin limite"
+    assert _techo_segundos(caps, "assemble")[0] == _DEFAULT_TIMEOUT_SECONDS
+
+
+def test_el_mensaje_ya_no_ofrece_dos_causas():
+    """Corolario: el mensaje de rechazo dice UNA sola causa, porque solo queda
+    una. Ofrecer dos cuando una es imposible manda a investigar un camino que
+    no existe."""
+    mensaje = " ".join(v.reason for v in _rechazo(
         [_step(capability="analysis", timeout=1800)]).violations)
-    assert "spec" in del_spec, del_spec
-
-    # 'design' tiene default 900 en el codigo; con un techo de 5 min en la DB
-    # la culpa NO es del spec sino de la divergencia.
-    gob = {"capabilities": {"design": {"allowed_motors": [], "max_execution_minutes": 5}},
-           "motors": {}}
-    import jacobs.store as _store
-    original = _store.get_motor_governance
-
-    async def _fake():
-        return gob
-
-    _store.get_motor_governance = _fake
-    try:
-        por_default = " ".join(v.reason for v in _rechazo(
-            [_step(capability="design", timeout=900)]).violations)
-    finally:
-        _store.get_motor_governance = original
-    assert "check_timeout_consistency" in por_default, por_default
+    assert "spec" in mensaje, mensaje
+    assert "check_timeout_consistency" not in mensaje, (
+        "el script ya no existe: se borro al quedar una sola fuente")
 
 
 # ---------------------------------------------------------------------------

@@ -22,8 +22,8 @@ build() tardaba 17-37s -- los umbrales de abajo asumen el piso nuevo.
 - RUNNING_STALE_SECONDS = 1800 (30min), medido contra updated_at (no
   created_at) -- un running sano actualiza updated_at en cada
   transición de step. 2x margen sobre el timeout de step más largo
-  configurado hoy (jacobs/plan.py: _CAPABILITY_TIMEOUT_SECONDS,
-  "reconcile"=900s).
+  configurado hoy (`capability.max_execution_minutes` en la DB, fuente
+  unica desde 2026-09-01; "reconcile"=15min=900s).
 - INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS = 600 (10min): margen generoso
   sobre una escritura de owner file que en el camino sano es casi
   instantánea (<1ms) -- guarda contra el caso raro de disco lento, no

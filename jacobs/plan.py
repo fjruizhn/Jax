@@ -102,12 +102,20 @@ class CapabilityUnbound:
 # la mayoria de corridas, pero FALSO como garantia: jacobs_steps muestra
 # 1 step 'design' (de 36) y 1 'reason' (de 6) fallando de verdad, exacto en
 # el techo de 300s, dur=300.0s=timeout_seconds, status=failed).
+# Piso de ULTIMO RECURSO, no una tabla de timeouts. El default por capability
+# sale de la DB (`capability.max_execution_minutes`), fuente unica desde
+# 2026-09-01 -- ver `_techo_segundos()`. Este valor solo se usa cuando una
+# capability NO tiene fila (hoy solo `assemble`, exenta a proposito en el
+# planner), y es el mismo numero que el codigo ya le asignaba.
+#
+# ANTES habia aca un dict `_CAPABILITY_TIMEOUT_SECONDS = {"reconcile": 900,
+# "design": 900, "reason": 900}` que DUPLICABA la columna de la DB. Se elimino:
+# medido contra las 17 capabilities reales, dict y DB coincidian en TODAS, asi
+# que reemplazar uno por otra es identico en comportamiento y deja una sola
+# fuente. Con el dict se fue tambien `scripts/check_timeout_consistency.py`,
+# que existia unicamente para comparar las dos fuentes -- con una sola, no hay
+# nada que comparar.
 _DEFAULT_TIMEOUT_SECONDS = 300
-_CAPABILITY_TIMEOUT_SECONDS = {
-    "reconcile": 900,
-    "design": 900,
-    "reason": 900,
-}
 
 _PLAN_SYSTEM = (
     "Eres Jacobs, el Director. Tu único trabajo es generar planes de ejecución "
@@ -351,22 +359,17 @@ async def _validate_plan_capabilities(steps: list) -> None:
         techo, fuente = _techo_segundos(caps, step.capability)
         if step.timeout_seconds is None or step.timeout_seconds <= techo:
             continue
-        por_defecto = _CAPABILITY_TIMEOUT_SECONDS.get(
-            step.capability, _DEFAULT_TIMEOUT_SECONDS
-        )
-        if step.timeout_seconds == por_defecto:
-            pista = (
-                "Ese valor es el default por-capability del CODIGO "
-                "(_CAPABILITY_TIMEOUT_SECONDS): codigo y DB divergieron -- ver "
-                "scripts/check_timeout_consistency.py"
-            )
-        else:
-            pista = "Ese valor viene del spec del step: bajalo, o subí el techo en la DB"
+        # SIMPLIFICADO al deduplicar (2026-09-01). Antes habia que distinguir
+        # dos causas: "lo pidio el spec" y "el default del codigo diverge de la
+        # DB". La segunda YA NO PUEDE PASAR -- el default sale de la misma fila
+        # que el techo, asi que es imposible que lo exceda. Si un timeout
+        # supera el techo, viene del spec y de ningun otro lado.
         violations.append(PlanViolation(
             step.step_index, step.facet, step.motor, step.capability,
             f"timeout_seconds={step.timeout_seconds}s excede el techo de {techo}s "
             f"({techo // 60} min) declarado para la capability '{step.capability}' "
-            f"({fuente}). {pista}",
+            f"({fuente}). Ese valor viene del spec del step: bajalo, o subí el "
+            f"techo en la DB.",
         ))
 
     for step in relevant:
@@ -405,10 +408,19 @@ class PlanBuilder:
         max_steps: int = 20,
         steps_spec: list[dict] | None = None,
     ) -> list[Step]:
+        # UNA sola consulta de gobernanza por build, propagada a todo lo que la
+        # necesita. Antes se consultaba hasta TRES veces en el camino del LLM
+        # (el hint de capabilities, la validacion del plan del LLM, y
+        # _validate_plan_capabilities). Ademas de ahorrar viajes, garantiza que
+        # las tres decisiones se tomen sobre la MISMA foto: con tres consultas,
+        # un cambio de `capability` en el medio podia hacer que el default y el
+        # techo de un step salieran de filas distintas.
+        from jacobs import store as _store
+        caps = (await _store.get_motor_governance())["capabilities"]
         if steps_spec:
-            steps = self._from_spec(pipeline_id, steps_spec)
+            steps = self._from_spec(pipeline_id, steps_spec, caps)
         else:
-            steps = await self._from_objective(pipeline_id, objective, max_steps)
+            steps = await self._from_objective(pipeline_id, objective, max_steps, caps)
         # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
         # dentro de _from_spec ni _from_objective, para que ningún origen de
         # plan pueda saltárselo. cleanroom antes solo corría dentro de
@@ -420,7 +432,7 @@ class PlanBuilder:
         await _validate_plan_capabilities(steps)
         return steps
 
-    def _from_spec(self, pipeline_id: str, specs: list[dict]) -> list[Step]:
+    def _from_spec(self, pipeline_id: str, specs: list[dict], caps: dict) -> list[Step]:
         steps = []
         for i, spec in enumerate(specs):
             input_data = dict(spec.get("input", {}))
@@ -441,9 +453,13 @@ class PlanBuilder:
             # con timeout_seconds=300 en 1 de 3 corridas reales pese a estar en el
             # dict con valor 900. `is not None` distingue "ausente/None" de
             # "0 explicito" (0 es un timeout real, agotado de inmediato).
-            default_timeout = _CAPABILITY_TIMEOUT_SECONDS.get(
-                capability, _DEFAULT_TIMEOUT_SECONDS
-            )
+            # FUENTE UNICA: el default sale de la DB, igual que el techo --
+            # de hecho es el MISMO numero, porque siempre lo fue (medido: dict
+            # y `capability.max_execution_minutes` coincidian en las 17
+            # capabilities). Un step sin timeout explicito recibe todo el
+            # tiempo que su capability declara permitido, que es exactamente lo
+            # que hacia el dict.
+            default_timeout, _ = _techo_segundos(caps, capability)
             explicit_timeout = spec.get("timeout_seconds")
             steps.append(Step(
                 step_id=str(uuid.uuid4()),
@@ -467,14 +483,14 @@ class PlanBuilder:
         pipeline_id: str,
         objective: str,
         max_steps: int,
+        caps: dict,
     ) -> list[Step]:
         # T4 (2026-08-22): gobernanza real ANTES de gastar en el LLM (Ada es
         # paga) -- si la DB no responde, build() iba a fallar igual más abajo
         # en _validate_plan_capabilities, así que fallar acá primero no abre
         # un modo de fallo nuevo y evita el gasto en un plan que después se
         # rechazaría sin evidencia de gobernanza real.
-        from jacobs import store as _store
-        capability_hint = _build_capability_hint(await _store.get_motor_governance())
+        capability_hint = _build_capability_hint({"capabilities": caps})
         dificultad = self._classify_difficulty(objective)
         try:
             _ada_disponible = bool(await resolve_credential_instrumented("zhipu"))
@@ -491,7 +507,7 @@ class PlanBuilder:
             specs = await self._llm_plan(objective, max_steps, capability_hint)
         if not specs:
             specs = self._fallback_plan(objective)
-        return self._from_spec(pipeline_id, specs)
+        return self._from_spec(pipeline_id, specs, caps)
 
     @staticmethod
     def _classify_difficulty(objective: str) -> str:

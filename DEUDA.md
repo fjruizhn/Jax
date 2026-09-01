@@ -142,30 +142,6 @@ su fecha de última verificación real, no una nueva.
   mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
   compuesto que falla.
 
-- **`_CAPABILITY_TIMEOUT_SECONDS` (jacobs/plan.py) duplica
-  `capability.max_execution_minutes` (DB).** Queda **sólo la deduplicación**:
-  el default de `step.timeout_seconds` sigue saliendo de un dict hardcodeado en
-  el código, en vez de leerse de la DB que ya declara el mismo número. Hoy
-  coinciden (verificado: 5 min para casi todas, 15 para design/reason/reconcile,
-  idéntico al dict).
-
-  **Dos cosas que este ítem decía y ya no son ciertas, corregidas al medirlo de
-  nuevo el 2026-09-01:**
-
-  1. Decía que `scripts/check_timeout_consistency.py` "es manual, no una
-     garantía en runtime". **Corre al arrancar Jacobs** (`las_manos/server.py`),
-     comparando código contra DB. Sigue siendo un `WARNING` que no bloquea el
-     arranque —y nadie mira los warnings—, pero no es manual.
-  2. Decía que un `timeout_seconds` explícito "pisa el default SIN validar
-     contra el techo de la DB". **Eso ya está cerrado** — ver la entrada del
-     techo de ejecución en la sección de cerrados.
-
-  **Por qué la deduplicación no se hace acá:** borrar el dict y leer el techo
-  de la DB cambia el DEFAULT de todos los steps, no sólo el límite. Es un
-  cambio de comportamiento con su propia superficie de prueba, y el ítem
-  original ya lo había separado a propósito. Sigue separado, pero ahora el
-  riesgo real —que el techo no se cumpla— está cubierto mientras tanto.
-
 - **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
   excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
   comentarios cruzados en `jacobs/plan.py:374`/`jacobs/executor.py:117,381`
@@ -183,6 +159,48 @@ su fecha de última verificación real, no una nueva.
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
+
+- **CERRADO (2026-09-01) — `_CAPABILITY_TIMEOUT_SECONDS` eliminado: el timeout
+  por capability tiene UNA sola fuente.** El default sale ahora de
+  `capability.max_execution_minutes`, la misma fila que ya daba el techo.
+
+  **La equivalencia se probó antes de tocar nada:** medido contra las **17
+  capabilities reales**, el dict y la columna coincidían en **todas**, y ninguna
+  clave del dict faltaba en la DB. Reemplazar uno por otra es idéntico en
+  comportamiento — no es una migración con riesgo, es borrar una copia.
+
+  **El default ES el techo, y siempre lo fue.** Un step sin `timeout_seconds`
+  explícito recibe todo el tiempo que su capability declara permitido, que es
+  exactamente lo que hacía el dict. Lo único que cambia es de dónde sale.
+
+  **Lo que la deduplicación habilitó, y es lo mejor del cambio:**
+  - **Un invariante nuevo:** el default **no puede exceder el techo**, porque
+    salen de la misma función y la misma fila. La rama del validador que
+    distinguía "lo pidió el spec" de "código y DB divergieron" se borró: la
+    segunda causa es ahora imposible, y ofrecer dos causas cuando una no puede
+    pasar manda a investigar un camino que no existe.
+  - **`scripts/check_timeout_consistency.py` se borró**, junto con su
+    invocación al arrancar `las_manos`. Existía únicamente para comparar las dos
+    fuentes; con una sola no hay nada que comparar. Es la forma correcta de
+    retirar un detector: eliminando la clase de defecto que vigilaba, no el
+    detector.
+  - **Una sola consulta de gobernanza por build**, en vez de hasta **tres** en
+    el camino del LLM (el hint de capabilities, la validación del plan del LLM,
+    y `_validate_plan_capabilities`). Además de ahorrar viajes, garantiza que
+    las tres decisiones se tomen sobre la **misma foto**: con tres consultas, un
+    cambio de `capability` en el medio podía hacer que el default y el techo de
+    un mismo step salieran de filas distintas.
+
+  **Consumidores portados, no rotos:** `tools/jacobs_relaunch.py` lee ahora la
+  DB con la misma función, y tres comentarios en `models.py`, `reaper.py` y
+  `executor.py` que nombraban el símbolo eliminado quedaron actualizados — uno
+  de ellos decía que el techo de timeout "sigue diferido a propósito", cosa que
+  dejó de ser cierta el mismo día.
+
+  **Este ítem lo había separado su propia entrada** ("se resuelve junto con la
+  deduplicación, en una ronda aparte"), y la separación era correcta: el techo
+  se podía exigir sin tocar el default, y hacerlo primero dejó este cambio
+  reducido a borrar una copia con la equivalencia ya probada.
 
 - **HALLAZGO (2026-09-01) — `PROVIDER_ENV_KEYS` divergía entre espejos:
   `jax-platform` no tenía `ZHIPU_API_KEY`. Severidad: baja hoy, media

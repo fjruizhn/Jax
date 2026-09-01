@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.expanduser("~/jax"))
 from jacobs import store  # noqa: E402
 from jacobs.executor import run_pipeline  # noqa: E402
 from jacobs.models import PipelineStatus, StepStatus  # noqa: E402
-from jacobs.plan import _CAPABILITY_TIMEOUT_SECONDS  # noqa: E402
+from jacobs.plan import _techo_segundos  # noqa: E402
 from jacobs.policy import check_kill_switch  # noqa: E402
 
 
@@ -65,10 +65,13 @@ async def relaunch(pipeline_id: str, from_step: int) -> int:
 
     # Re-aplicar timeout por capability (corrige planes viejos) y resetear estado
     # de los steps a re-ejecutar (from_step en adelante).
+    # El timeout por capability sale de la DB (fuente unica desde 2026-09-01);
+    # antes salia de un dict en jacobs/plan.py que duplicaba esa misma columna.
+    caps = (await store.get_motor_governance())["capabilities"]
     for step in pipeline.plan:
         if step.step_index < from_step:
             continue
-        new_timeout = _CAPABILITY_TIMEOUT_SECONDS.get(step.capability)
+        new_timeout, _ = _techo_segundos(caps, step.capability)
         if new_timeout and step.timeout_seconds != new_timeout:
             print(f"  step {step.step_index} ({step.capability}): timeout {step.timeout_seconds} -> {new_timeout}")
             step.timeout_seconds = new_timeout
