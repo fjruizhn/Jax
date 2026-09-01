@@ -183,13 +183,32 @@ su fecha de última verificación real, no una nueva.
   noche se crea un dump nuevo con el hash viejo. Es una dependencia, no una
   fecha fija.
 
-  **(c) 3 LISTAS DE IPs PRIVADAS en historia pública.** `JAX_ENV_STAGING_HOSTS`,
-  `JAX_ENV_PROD_HOSTS`, `JAX_ENV_BRIDGE_HOSTS`. **No rotables** — una IP no se
-  rota. Decisión pendiente: riesgo aceptado por escrito, o cambio de
-  direccionamiento. **Fecha de control: 2026-09-15.**
-  *Nota de reconciliación:* el PR #72 (abierto, sin mergear) ya la registra
-  como **riesgo aceptado**. Mergearlo cierra este ítem; no mergearlo lo deja
-  como decisión pendiente. Las dos cosas no pueden ser ciertas a la vez.
+  **(c) 3 LISTAS DE IPs PRIVADAS — RIESGO ACEPTADO, FIRME (decisión de
+  Fernando, 2026-09-01). CERRADO.** `JAX_ENV_STAGING_HOSTS`,
+  `JAX_ENV_PROD_HOSTS`, `JAX_ENV_BRIDGE_HOSTS`, en 80 blobs de ambos repos,
+  ninguna en el árbol de hoy. **No se hace la reescritura de historial que las
+  sacaría.**
+
+  Se registra para que **no se relitigue**: si una auditoría futura vuelve a
+  encontrarlas, **no es un hallazgo nuevo — es este ítem**, y la respuesta ya
+  está dada. Este documento tenía la decisión escrita en dos estados
+  contradictorios a la vez; queda en uno solo.
+
+  Hechos medidos que la acompañan —**hechos, no los motivos de Fernando**, que
+  no se registraron—: son direcciones **RFC1918**, no enrutables desde
+  Internet; `forks = 0` en ambos repos; y la reescritura **no alcanzaría los
+  `refs/pull/*`** de todos modos, el mismo límite que este documento establece
+  para el secreto real.
+
+  **Qué la reabre** — condiciones, no predicciones:
+  - Que alguna pase a contener una IP **pública**.
+  - Que se ejecute la purga con GitHub Support: ahí el costo marginal de
+    incluir estas rutas es casi cero y conviene sumarlas.
+  - Un incidente cuyo vector de entrada sea reconocimiento de red interna.
+
+  **Ojo, y es distinto:** esta decisión cubre **la topología propia**. El
+  inventario operativo de **clientes** que apareció después es de terceros que
+  no participaron de ella, y va como ítem aparte.
 
   **(d) TICKET A GITHUB SUPPORT — redactado, SIN ENVIAR.**
   `/home/fruiz/security-audit-2026-09/TICKET-GITHUB.md` (chmod 600). Es la
