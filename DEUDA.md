@@ -172,45 +172,30 @@ su fecha de última verificación real, no una nueva.
   identificada como la deuda con más antigüedad, sin ejecutar. Última
   verificación: ronda 6.
 
-- **Sub-agentes de Claude Code sin gobernanza real** (más allá del hook
-  que bloqueó un push de prueba en ronda 7). Conectado a un hallazgo P0
-  real: cualquier subprocess `claude` futuro lanzado con `$HOME` real
-  hereda los hooks/plugins personales de Fernando fuera de cualquier gate
-  — Hyde específicamente ya se cerró (sandbox de bubblewrap, `$HOME`
-  virtual, PR jax#18, 2026-08-23). **El "problema general" (cualquier
-  OTRO músculo/automatización que dispare `claude` sin el mismo
-  aislamiento) CERRADO 2026-08-26, PRs jax#33-36.** Los 2 call sites
-  reales (`jacobs/executor.py::_invoke_hyde` y
-  `jax/muscles/subprocess_muscle.py::SubprocessMuscle._call`, antes cada
-  uno reimplementando el lanzamiento por separado — uno con
-  `asyncio.Semaphore`, el otro sin ningún lock) se centralizaron en
-  `hyde_sandbox.py::run_sandboxed_claude()`, único punto de entrada
-  aprobado, que hereda el mismo `$HOME` aislado de bwrap de Hyde. El
-  semáforo original no servía: `asyncio.Semaphore` no cruza proceso de
-  SO (Jacobs corre dentro de `jax-las-manos`, `SubprocessMuscle` en el
-  REPL, procesos de SO distintos) — reemplazado por `flock(2)` real
-  sobre `workspace_dir/.claude_subprocess.lock`, vía `asyncio.to_thread`,
-  fail-closed. Un scanner AST nuevo en CI (job `no-naked-claude-subprocess`,
-  `policy/tests/test_claude_subprocess_solo_via_sandbox.py`) falla el
-  build si aparece un futuro call site de `claude` fuera de
-  `hyde_sandbox.py` — es lo que convierte esto en un mecanismo genérico,
-  no solo el caso puntual de Hyde. Ver memoria
-  `jax-claude-subprocess-gobernanza-cerrado`; `jax-hyde-personal-hooks-sin-gobernanza`
-  queda como la observación de fondo original (histórica, ya resuelta
-  por este cierre).
+- **Hyde: red sin acotar por dominio/IP.** Es lo ÚNICO que queda abierto de
+  este ítem. Las otras dos partes ya no aplican y se movieron a cerrados: la
+  concurrencia de `HYDE_SEMAPHORE` (cerrada 2026-08-26, PRs jax#33-36) y la
+  **escritura directa a los repos reales**, que estaba declarada como "fuera de
+  alcance" y en realidad ya estaba cerrada — verificado el 2026-09-01
+  ejecutando los ataques dentro del sandbox: crear, modificar y borrar en
+  `~/jax` y `~/jax-platform` están los tres bloqueados (`--ro-bind`), y el
+  control positivo (escribir en el workspace) pasa, así que el bloqueo es real
+  y no un sandbox que no arranca.
 
-- **Hyde: red sin acotar por dominio/IP, escritura directa a los repos
-  reales fuera de alcance.** Declarado explícitamente como no resuelto al
-  cerrar el sandbox de bubblewrap (2026-08-23) — el contenimiento
-  principal (secretos, filesystem, hooks) sí está cerrado, estos son
-  refinamientos de defensa en profundidad pendientes. **La tercera parte
-  original de este bullet ("concurrencia de `HYDE_SEMAPHORE` con el
-  sandbox no reverificada") ya no aplica — CERRADO 2026-08-26 (PRs
-  jax#33-36).** `HYDE_SEMAPHORE` (`asyncio.Semaphore`) se eliminó del
-  código (confirmado por grep: solo queda en comentarios/docstrings como
-  referencia histórica), reemplazado por `flock(2)` cross-proceso en
-  `hyde_sandbox.py::run_sandboxed_claude()` — ver
-  `jax-claude-subprocess-gobernanza-cerrado` en memoria.
+  **Lo que sí queda:** el sandbox corre con `--share-net`, o sea red del host
+  completa. bwrap no puede acotar por dominio/IP —es namespace de red
+  compartido o nada, y `--unshare-net` dejaría a `claude` sin poder llegar a la
+  API—. Acotar de verdad necesita configuración de red **con privilegios**:
+  reglas `nftables` por UID (correr el `claude` de Hyde bajo un usuario
+  dedicado y permitirle egress sólo a la API) o un netns con veth. Las dos
+  cosas son **decisiones de infraestructura** —usuario de sistema nuevo, reglas
+  de firewall persistentes— y no un cambio dentro de este repo. **Esperando
+  decisión de Fernando**, no trabajo pendiente de este lado.
+
+  **El límite quedó pineado, no sólo anotado:**
+  `_hyde_containment_test.py::test_la_red_compartida_esta_declarada_como_limite_conocido`
+  falla si alguien cambia `--share-net`, y lo obliga a venir a actualizar esta
+  entrada en vez de dejarla mintiendo.
 
 
 
@@ -218,6 +203,46 @@ su fecha de última verificación real, no una nueva.
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
+
+- **CERRADO (2026-09-01) — el contenimiento del sandbox de Hyde ahora está
+  EJERCITADO, no descrito.** `_hyde_containment_test.py` (14 tests) + job
+  `hyde-containment` en CI.
+
+  **El hueco no era el sandbox: era que nadie lo probaba.** `hyde_sandbox.py`
+  afirmaba propiedades de seguridad en su docstring y acá —repos en
+  solo-lectura, `$HOME` real no expuesto, entorno del padre no heredado— y esas
+  propiedades se habían verificado **una sola vez a mano** al escribirlo
+  (2026-08-23). El único test que existía, `_hyde_sandbox_test.py`, cubre el
+  `flock` y los timeouts: la **serialización**, no el **confinamiento**.
+  Cambiar un `--ro-bind` por un `--bind` no rompía ningún test — el sandbox
+  seguía arrancando, Hyde seguía funcionando, y el confinamiento se perdía en
+  silencio. Una propiedad de seguridad verificada una vez y nunca más es una
+  propiedad supuesta.
+
+  **Los tests ejecutan ataques reales** dentro del sandbox y, cuando el ataque
+  es una escritura, afirman **sobre el host**: un `touch` puede "fallar" y aun
+  así haber dejado el archivo, y ese caso es peor que el que se estaba
+  probando. Se auto-verifican por mutación: `--ro-bind` → `--bind` pone 3 en
+  rojo, quitar `--clearenv` pone 2.
+
+  **El control positivo no es decorativo.** `test_el_workspace_si_es_escribible`
+  existe porque sin él todos los tests de bloqueo pasarían igual si bwrap no
+  arrancara — verde por la razón equivocada.
+
+  **No usan las rutas de hall9000:** monkeypatchean las constantes del módulo a
+  directorios temporales. Un test que sólo corre en la máquina de Fernando no
+  corre en CI — y ese mismo día esa confusión costó tres tandas de arreglos a
+  ciegas en la suite de jax-platform.
+
+- **CERRADO (2026-09-01, sólo documentación) — sub-agentes de Claude Code sin
+  gobernanza.** El ítem estaba en "Bloquea trabajo" pero **su propio texto ya
+  decía que estaba cerrado**: `hyde_sandbox.py::run_sandboxed_claude()` como
+  único punto de entrada, `flock(2)` cross-proceso, y el job
+  `no-naked-claude-subprocess` fallando el build si aparece un call site de
+  `claude` fuera de ahí (PRs jax#33-36, 2026-08-26). No había trabajo
+  pendiente: había una entrada que nadie movió. Segundo caso el mismo día —ver
+  la suite de jax-platform— de deuda que sigue listada como abierta porque el
+  cierre se escribió adentro del ítem en vez de moverlo.
 
 - **CERRADO (2026-09-01) — una BackgroundTask que lanza ya no se lleva puestas
   a las encoladas después.** PR `jax-platform#40`.

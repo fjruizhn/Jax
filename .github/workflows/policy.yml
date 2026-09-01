@@ -185,6 +185,47 @@ jobs:
   # `fetched_at` en `_entrada_sellada` (que es el modo de falla silencioso de
   # este arreglo: comparar un mtime contra time.monotonic()) se ponen en rojo
   # los dos tests de monotonic. Verificado, no supuesto.
+  # Contenimiento del sandbox de Hyde, EJERCITADO.
+  #
+  # POR QUE EXISTE. hyde_sandbox.py afirma propiedades de seguridad (repos en
+  # solo-lectura, $HOME real no expuesto, entorno del padre no heredado) que se
+  # verificaron UNA VEZ a mano al escribirlo (2026-08-23) y nunca mas.
+  # `_hyde_sandbox_test.py`, el unico test que existia, cubre el flock y los
+  # timeouts -- la SERIALIZACION, no el CONFINAMIENTO. Cambiar un --ro-bind por
+  # un --bind no rompia ningun test: el sandbox seguia arrancando, Hyde seguia
+  # funcionando, y el confinamiento se perdia en silencio.
+  #
+  # Los tests EJECUTAN ataques reales adentro del sandbox y, cuando el ataque es
+  # una escritura, afirman SOBRE EL HOST -- un `touch` puede "fallar" y aun asi
+  # haber dejado el archivo. Se auto-verifican por mutacion: cambiando
+  # --ro-bind por --bind caen 3, quitando --clearenv caen 2 (verificado, no
+  # supuesto).
+  #
+  # bubblewrap no viene en el runner. Y en Ubuntu 23.10+ AppArmor bloquea los
+  # user namespaces sin privilegios, que es justamente lo que bwrap necesita:
+  # se baja el sysctl, tolerando que no exista en kernels donde no aplica.
+  hyde-containment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: Instalar bubblewrap y habilitar user namespaces
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "(sysctl ausente en este kernel -- no aplica)"
+          bwrap --version
+      - run: python -m pytest _hyde_containment_test.py -v
+      # El archivo entero se auto-saltea si falta bwrap (skipif de modulo), y un
+      # skip masivo se ve igual que verde. Se exige el numero real.
+      - run: |
+          python -m pytest _hyde_containment_test.py -q 2>&1 | tee /tmp/hyde
+          grep -qE "^14 passed" /tmp/hyde || {
+            echo "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados)."; exit 1; }
+
   facet-resolver-seal:
     runs-on: ubuntu-latest
     steps:
