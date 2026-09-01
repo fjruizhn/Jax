@@ -26,11 +26,27 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import ast
+import os
 import sys
 from pathlib import Path
 
 JAX_CANONICAL = Path(__file__).resolve().parent.parent / "jax" / "core" / "facet_resolver.py"
-JAX_PLATFORM_COPY = Path.home() / "jax-platform" / "backend" / "facet_resolver.py"
+JAX_PLATFORM_COPY = Path(
+    os.environ.get("JAX_PLATFORM_FACET_RESOLVER",
+                   Path.home() / "jax-platform" / "backend" / "facet_resolver.py")
+)
+
+# Marcador que DECLARA una divergencia como deliberada. Vive en el codigo,
+# junto a la divergencia, y no en una lista dentro de este script: una lista
+# aparte se desincroniza igual que el codigo que pretende vigilar.
+#
+# POR QUE EXISTE: hasta 2026-09-01 este checker gritaba TRES veces y dos eran
+# falsas (ResolvedFacet y _query_facet divergen a proposito por
+# max_tokens_param). El drift REAL -- _db_conn sin el guard fail-closed contra
+# el default a la instancia muerta 3306 -- quedaba escondido entre el ruido, y
+# el script ademas no corria en ningun workflow. Un detector que no distingue
+# lo esperado de lo anomalo entrena a ignorarlo.
+MARCADOR = "DIVERGENCIA DELIBERADA"
 
 # Nombres que DEBEN coincidir byte-a-byte (fuente) entre ambos archivos.
 # load_facet_registry queda afuera a proposito: exclusivo de jax (REPL).
@@ -56,35 +72,43 @@ def _extract(path: Path) -> dict[str, str]:
 
 
 def main() -> int:
-    if not JAX_CANONICAL.exists():
-        print(f"FALTA: {JAX_CANONICAL}")
-        return 1
     if not JAX_PLATFORM_COPY.exists():
-        print(f"FALTA: {JAX_PLATFORM_COPY} (jax-platform no clonado en ~/jax-platform?)")
-        return 1
+        print(f"ERROR: no existe {JAX_PLATFORM_COPY}", file=sys.stderr)
+        print("Seteá JAX_PLATFORM_FACET_RESOLVER si la copia vive en otra ruta.", file=sys.stderr)
+        return 2
+    a = _extract(JAX_CANONICAL)
+    b = _extract(JAX_PLATFORM_COPY)
 
-    jax_funcs = _extract(JAX_CANONICAL)
-    platform_funcs = _extract(JAX_PLATFORM_COPY)
-
-    drift = False
+    drift, declaradas, faltantes = [], [], []
     for name in SHARED_NAMES:
-        a = jax_funcs.get(name)
-        b = platform_funcs.get(name)
-        if a is None or b is None:
-            print(f"DRIFT: '{name}' falta en {'jax' if a is None else 'jax-platform'}")
-            drift = True
-        elif a != b:
-            print(f"DRIFT: '{name}' difiere entre jax y jax-platform")
-            drift = True
+        if name not in a or name not in b:
+            faltantes.append(name)
+            continue
+        if a[name] == b[name]:
+            continue
+        # Divergencia declarada EN EL CODIGO, en cualquiera de las dos copias.
+        if MARCADOR in a[name] or MARCADOR in b[name]:
+            declaradas.append(name)
+        else:
+            drift.append(name)
 
-    if drift:
-        print("\nfacet_resolver.py DIVERGIO entre jax y jax-platform -- revisar "
-              "cual lado tiene el fix real y portarlo al otro a mano "
-              "(no hay symlink cruzado entre repos posible).")
+    for name in declaradas:
+        print(f"DECLARADA: '{name}' diverge a proposito (marcador '{MARCADOR}' en el codigo)")
+    for name in faltantes:
+        print(f"DRIFT: '{name}' falta en una de las dos copias")
+    for name in drift:
+        print(f"DRIFT: '{name}' difiere entre jax y jax-platform SIN declararlo")
+
+    if drift or faltantes:
+        print()
+        print("facet_resolver.py DIVERGIO sin declararlo -- revisar cual lado tiene")
+        print("el fix real y portarlo al otro a mano (no hay symlink cruzado entre")
+        print("repos posible). Si la divergencia es DELIBERADA, declarala poniendo")
+        print(f"'{MARCADOR}' en el docstring o comentario de ese simbolo, con la razon.")
         return 1
 
-    print("OK -- facet_resolver.py sincronizado entre jax y jax-platform "
-          f"({len(SHARED_NAMES)} funciones/clases comparadas).")
+    print()
+    print(f"facet_resolver.py sincronizado ({len(declaradas)} divergencia(s) declarada(s)).")
     return 0
 
 

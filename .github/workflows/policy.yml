@@ -162,3 +162,21 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: PYTHONPATH=las_manos python -m pytest las_manos/_output_validator_test.py -v
+
+  facet-resolver-sync:
+    # POR QUE EXISTE: facet_resolver.py esta espejado en dos repos (jax/core, y
+    # jax-platform/backend con copia propia). Hasta 2026-09-01 este checker
+    # existia pero NO CORRIA EN NINGUN WORKFLOW, y ademas gritaba tres veces
+    # con dos falsas -- el drift real (_db_conn sin el guard fail-closed contra
+    # el default a la instancia muerta 3306) quedaba escondido entre el ruido.
+    # Ahora el checker distingue lo declarado de lo anomalo, asi que su rojo
+    # significa algo y puede gatear.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Traer la copia de jax-platform
+        run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
+      - name: Comparar los dos espejos
+        env:
+          JAX_PLATFORM_FACET_RESOLVER: /tmp/jax-platform/backend/facet_resolver.py
+        run: python3 scripts/check_facet_resolver_sync.py
