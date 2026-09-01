@@ -41,7 +41,28 @@ su fecha de última verificación real, no una nueva.
 
   ### Por qué la rotación anterior no había cubierto esta fila
 
-  **El seeder NUNCA creó `user_id=1`.** Medido:
+  **CORRECCIÓN (2026-09-01, posterior): el seeder SÍ creó `user_id=1`.** Lo
+  que sigue afirmaba lo contrario y era falso. Se deja registrado, no borrado.
+
+  **Evidencia convergente, verificada:** `jax_tenants.tenant_id=1` es
+  `'Inversiones Diamante Negro'`, `plan='superadmin'`, creado **2026-06-18
+  17:11:51** — **41 segundos antes** que la fila de usuario. Ese literal
+  exacto existe en **un solo archivo de todo `jax-platform`: `seed.py`**
+  (verificado por `grep -rl`), y `run_seed()` inserta el tenant y el usuario
+  en la misma función. El código estaba en disco y todavía sin commitear: se
+  commiteó ~11 h después en `ed7719a`.
+
+  **El email con punto no viene de ningún código:** son dos `UPDATE` hechos
+  desde la propia Mesa el 2026-06-19, y por eso el gate `COUNT(*)` nunca los
+  revirtió.
+
+  **Qué NO cambia con esta corrección, y es lo que importaba:** la conclusión
+  operativa se sostiene entera. El gate `COUNT(*)` significa que **el seeder
+  no reescribe una fila existente**, así que la rotación tenía que ser un
+  `UPDATE` directo — como se hizo. Lo que era falso era el relato del origen,
+  no el procedimiento.
+
+  Lo que se afirmaba antes, incorrecto:
   - Email en producción: `fernando.ruiz@rich-hn.com` (**con** punto). El
     seeder inserta `fernando@rich-hn.com` (**sin** punto).
   - Fila creada el **2026-06-18 17:12:32**, *anterior* al primer commit del
@@ -71,13 +92,13 @@ su fecha de última verificación real, no una nueva.
   Es la **misma clase que `da9fd5ec`**: la remediación introduce el defecto que
   venía a arreglar. Ver la duodécima lección en `CONTEXT.md` §9.
 
-- **`omar@monhagro.com` — cuenta con acceso, fuera de todo lo auditado
+- **la **segunda cuenta** (`user_id=2`, rol `operator`) — cuenta con acceso, fuera de todo lo auditado
   (2026-09-01).** `user_id=2`, rol `operator`, `status=active`, creada
   2026-06-19 16:09:12. **Su contraseña no fue verificada contra nada**, y
   ningún barrido de la auditoría buscó el dominio `monhagro.com` — el barrido
   por identidad cubrió `rich-hn.com` porque era el único dominio conocido.
   **Barrido CERRADO (2026-09-01): cero credenciales.** Enumeración completa de
-  1.593 blobs en ambos repos con `refs/pull/*` traídas. `omar@monhagro.com`:
+  1.593 blobs en ambos repos con `refs/pull/*` traídas. la **segunda cuenta** (`user_id=2`, rol `operator`):
   **0 apariciones**. Búsqueda ampliada por regex (`omar@` cualquier dominio,
   `monhagro`): los mismos resultados. `monhagro.com` aparece en **7 blobs de
   `jax`**, todos como **dato de inventario**, y el escaneo de campos de
