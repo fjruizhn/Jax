@@ -22,6 +22,49 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **P0 — Credencial de producción expuesta en repo público (GitGuardian,
+  2026-09-01).** Hallazgo externo: GitGuardian alertó sobre una credencial
+  de producción en claro en el repositorio **público** `fjruizhn/Jax`,
+  archivo **`missions/axioma-login-prod-fix.md`** — un `curl` que llevaba
+  usuario y contraseña embebidos.
+
+  **Referencia por ruta y por hallazgo, nunca por contenido.** Este ítem no
+  transcribe el valor, ni el usuario completo, ni el comando: registrar el
+  secreto en la lista de deuda para "documentarlo bien" lo volvería a
+  publicar en el mismo repo público. Quien necesite el detalle va a la
+  alerta de GitGuardian, no a este archivo.
+
+  **Estado de las cuatro piezas (una sola cerrada):**
+
+  | Pieza | Estado |
+  |---|---|
+  | Rotación de la contraseña | **HECHA** |
+  | Barrido de credenciales en el historial completo | **PENDIENTE** |
+  | Limpieza de HEAD (`missions/`, `CLAUDE.md`, `prompts/`, `policy/rules/OP02-05`) | **PENDIENTE** |
+  | Hook pre-commit anti-credenciales | **PENDIENTE** |
+
+  **RESTRICCIÓN VIGENTE — no reescribir historial hasta ver el barrido
+  completo.** Nada de `filter-repo`, `rebase`, `gc`, `prune` ni force-push
+  sobre ninguno de los dos repos mientras el barrido no esté hecho y leído.
+  El motivo no es cautela genérica: reescribir ahora **destruye la
+  evidencia** con la que se determina el alcance real, y deja sin responder
+  la única pregunta que importa — qué OTROS secretos estuvieron expuestos.
+  Una limpieza que borra el historial antes de haberlo leído produce un
+  repo que *parece* limpio y un alcance que ya no se puede establecer.
+
+  **Estado del barrido al 2026-09-01: DETENIDO antes de empezar.** El gate
+  T0 (validar la herramienta rompiéndola con secretos sintéticos) no llegó
+  a correr: `gitleaks` no está instalado en hall9000, ni tampoco
+  `trufflehog`, `ggshield`, `git-secrets` ni `detect-secrets`. La única vía
+  presente es `docker`. Falta autorización para instalar. Artefacto:
+  `/home/fruiz/security-audit-2026-09/T0-PARADA.md` (fuera de ambos repos).
+
+  **Por qué este ítem existe y es el primero de la lista:** el incidente
+  estuvo abierto **sin estar registrado en ningún archivo de ninguno de los
+  dos repos**. Una sesión nueva que reconstruyera el estado leyendo
+  `DEUDA.md` — que es exactamente para lo que `DEUDA.md` existe — no se
+  enteraba de que había un P0 de seguridad abierto.
+
 - **`_HTTP_FACETS` sin gobernanza del Motor Registry — CERRADO Y DESPLEGADO
   (2026-08-27).** Mergeado (`jax` PR#39 → merge `abe1931`; `jax-platform`
   PR#16 → merge `766e03b`) y desplegado el mismo día.
@@ -186,7 +229,23 @@ su fecha de última verificación real, no una nueva.
   no bajarle el volumen a la alerta.
 
 - **La alerta afirma la capa equivocada: `probe_error` tapa a
-  `config_error` (2026-08-27).** Primer ítem de la próxima ronda.
+  `config_error` (2026-08-27) — CERRADO Y DESPLEGADO (2026-08-28).**
+  Se deja el diagnóstico completo abajo, sin borrar: describe una clase de
+  defecto (dos capas escriben el mismo fallo y el lector elige la
+  equivocada) que puede reaparecer en otro lector del ledger.
+
+  **Cerrado por** `jax-platform` `74ce495` (guard de `_invoke_facet`,
+  Task 1/2 — la alerta nombra la causa, no la capa) + `48da8e8`
+  (`probe_facet` deja de escribir `probe_error`, elimina la doble
+  escritura en origen). Ambos en `master`.
+
+  **Verificado corriendo, no solo mergeado:** tras el deploy, un rebinding
+  real produce **UNA sola fila clasificada, no dos** — desaparece la carrera
+  de ~800 µs por la que `probe_error` le ganaba a `config_error` en el
+  `MAX(ts)`. La solución tomada fue la segunda de las tres opciones que
+  este ítem dejaba planteadas (que la sonda no registre su `probe_error`
+  cuando la capa de abajo ya clasificó el mismo fallo), no la de
+  precedencia por outcome.
 
   **El costo, con precisión:** el mensaje que le llega a Fernando dice
   **"la sonda falló"** cuando la causa accionable es otra — por ejemplo
