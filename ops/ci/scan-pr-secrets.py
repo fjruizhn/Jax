@@ -33,6 +33,9 @@ import sys
 AQUI = os.path.dirname(os.path.abspath(__file__))
 LISTA = os.environ.get("JAX_CI_SECRETS", os.path.join(AQUI, "known-secrets-ci.txt"))
 MIN_TOKEN = 6
+# La propia lista se excluye del escaneo: es la REFERENCIA contra la que se
+# compara, no contenido a revisar. Solo lleva hashes y salts.
+EXCLUIDOS = {"ops/ci/known-secrets-ci.txt"}
 MAX_TOKENS = 40000  # techo de runtime; si se supera, falla en vez de truncar
 SEPARADORES = re.compile(r"""[\s"'`,;()\[\]{}<>=:]+""")
 RUNS = re.compile(rb"[\x20-\x7e]{%d,}" % MIN_TOKEN)
@@ -94,7 +97,8 @@ def main():
     # Diff COMPLETO del PR (base...head), no el ultimo commit: asi cubre lo que
     # entro por merge, rebase o cherry-pick dentro de la rama.
     archivos = [x for x in git(["diff", "--name-only", "--diff-filter=ACMRT",
-                                f"{base}...{head}"]).splitlines() if x]
+                                f"{base}...{head}"]).splitlines()
+                if x and x not in EXCLUIDOS]
     diff = git(["diff", "--unified=0", "--no-color", "--diff-filter=ACMRT",
                 f"{base}...{head}"])
 
@@ -107,6 +111,8 @@ def main():
         elif linea.startswith("@@"):
             en_hunk = True
         elif en_hunk and linea.startswith("+"):
+            if archivo in EXCLUIDOS:
+                continue
             if archivo:
                 con_texto.add(archivo)
             for t in tokens_de(linea[1:]):
