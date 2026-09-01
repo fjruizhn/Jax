@@ -246,3 +246,40 @@ def test_un_plan_valido_no_lanza():
         _step(facet="hipatia", capability="research", timeout=200, indice=0),
         _step(facet="kimi", capability="analysis", timeout=300, indice=1),
     ])
+
+
+# ---------------------------------------------------------------------------
+# build() por el camino del LLM -- el hueco que dejo pasar un 500 a produccion
+# ---------------------------------------------------------------------------
+
+def test_build_por_el_camino_del_LLM_no_revienta():
+    """EL TEST QUE FALTABA, escrito despues de romper produccion (2026-09-01).
+
+    Al deduplicar el timeout se paso a `_build_capability_hint` un dict parcial
+    (`{"capabilities": ...}`) en vez de la gobernanza COMPLETA, que tambien
+    tiene `motors`. Resultado: `KeyError: 'motors'` y HTTP 500 en
+    `POST /jacobs/plan`. CI estaba verde porque NINGUN test ejercitaba `build()`
+    con `steps_spec=None` -- todos entraban por el camino del spec.
+
+    Este test recorre el camino del LLM entero con `_llm_plan` parcheado: no
+    gasta en el modelo, pero pasa por el hint, por `_from_spec` y por la
+    validacion, que es donde estaba el agujero.
+    """
+    import asyncio
+    from jacobs.plan import PlanBuilder
+
+    async def _correr():
+        b = PlanBuilder()
+
+        async def _fake_llm(objective, max_steps, capability_hint):
+            assert isinstance(capability_hint, str)
+            return [{"facet": "hipatia", "capability": "research", "prompt": "x"}]
+
+        b._llm_plan = _fake_llm
+        b._ada_plan = _fake_llm
+        return await b.build(pipeline_id="p-llm", objective="algo trivial", max_steps=2)
+
+    steps = asyncio.run(_correr())
+    assert len(steps) == 1
+    # y el timeout salio de la DB (research: 5 min), no de un dict
+    assert steps[0].timeout_seconds == 300, steps[0].timeout_seconds

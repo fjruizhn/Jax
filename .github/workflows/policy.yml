@@ -286,8 +286,8 @@ jobs:
       - run: PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -v
       - run: |
           PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -q 2>&1 | tee /tmp/ptc
-          grep -qE "^15 passed" /tmp/ptc || {
-            echo "PISO ROTO: se esperaban 15 tests CORRIDOS."; exit 1; }
+          grep -qE "^16 passed" /tmp/ptc || {
+            echo "PISO ROTO: se esperaban 16 tests CORRIDOS."; exit 1; }
 
   mirror-sync:
     runs-on: ubuntu-latest
