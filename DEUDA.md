@@ -22,6 +22,55 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **RETRACTACIÓN — el "segundo secreto" NO existe (2026-09-01).** Se reportó
+  una segunda contraseña de producción de `fernando@rich-hn.com` en
+  `missions/axioma-admin-y-login-fixes.md` y se escaló. **Era falso.** Queda
+  registrado, no borrado, como el primer P0 falso de esta misma ronda.
+
+  **La evidencia que lo cierra:**
+
+  | Blob | Largo | Qué es en realidad |
+  |---|---|---|
+  | `9febaa5d…`, `abe82a30…` | 11 | **`tu_password`** — placeholder en español (palabras autodescriptivas `tu_`, `pass`; todo minúsculas; solo `[A-Za-z0-9_]`) |
+  | `6d7c7ed6…` | 39 | **el marcador de `filter-repo`** — 39 es su largo exacto |
+
+  **El cuadro de recall de los cuatro métodos queda INVÁLIDO.** Se construyó
+  sobre 2 secretos reales y hay **uno**. El único dato que sobrevive es que
+  `gitleaks` 8.30.1 no encontró el que sí existía.
+
+  **Procedencia del error, cuatro capas otra vez:**
+  1. El agente de lectura dirigida lo clasificó `DESCONOCIDO` — mecánicamente
+     correcto: no coincidía con ninguna aguja.
+  2. **Hipatia lo verificó con el chequeo equivocado y publicó la
+     comprobación como concluyente.** Corrió el test de plantillas (`{`, `<`,
+     `$`) y **no** el de palabras autodescriptivas.
+  3. Se amplificó a "patrón de trabajo" y motivó un barrido por identidad.
+  4. Llegó a los PRs #75 y #34.
+
+  **Lo que vuelve este error distinto de los anteriores: el instrumento
+  correcto existía y se había usado diez minutos antes.** El chequeo de
+  palabras autodescriptivas se aplicó con éxito a los candidatos #4, #5 y #6
+  de la categoría (b) —y descartó los tres correctamente— y no se aplicó a la
+  única afirmación que se iba a escalar a P0. Ver la vigésimo cuarta lección
+  en `CONTEXT.md` §9.
+
+  **Estado real tras la retractación: UN secreto en toda la historia de ambos
+  repos** — la contraseña del superadmin de seed. `fernando@rich-hn.com` no
+  tiene nada que rotar por este lado.
+
+  **Otros dos candidatos verificados y descartados en la misma ronda:** el
+  `access_token` de `missions/axioma-login-prod-fix_result.md` es la
+  **cabecera JWT canónica HS256 seguida de `...`** (36+3 caracteres, segmentos
+  `[36,0,0,0]`, payload y firma vacíos) — idéntica en todos los tokens HS256
+  que existen, cero material secreto; y `token_type` es literalmente `bearer`.
+
+  **Lo que el barrido por identidad SÍ dejó, y es sólido:** una sola cuenta en
+  todo el dominio; **ninguna** de las 9 claves de `/etc/jax/.env` en ningún
+  blob de ninguno de los dos repos (control válido: sí encontró los valores
+  *no* secretos del mismo archivo); y la confirmación —tercera, independiente—
+  de que ningún valor real sigue en `refs/heads/*` y todos sobreviven por
+  `refs/pull/N/head`.
+
 - **No existe barrera de contenido en el camino rama → master — SEVERIDAD
   ALTA (2026-09-01).** Hallazgo del juez que atacó el hook `pre-commit`, más
   grande que lo que ese hook cierra.
