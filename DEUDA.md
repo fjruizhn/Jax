@@ -22,6 +22,67 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **CIERRE TOTAL DE LA RONDA DE SEGURIDAD (2026-09-01).** Estado único.
+  Nada figura como "pendiente": cada ítem lleva **CERRADO**, **LISTO PARA
+  EJECUTAR** (con qué falta) o **NO DETERMINABLE** (con qué se buscó).
+
+  ### CERRADO
+
+  | Ítem | Evidencia |
+  |---|---|
+  | **Rotación de la credencial** | Huella cambiada + `bcrypt.checkpw` de la aguja en **falso** + login real |
+  | **La aguja no abre la segunda cuenta** | `bcrypt.checkpw` contra su hash vivo |
+  | Hook `pre-commit`, ambos repos | Probado rompiéndolo; 7 defectos corregidos antes de publicar |
+  | Barrera de CI server-side | `required check` activo; caso crítico (merge con `--no-verify`) en rojo |
+  | Inventario de los 162 candidatos | 27 con señal, resueltos |
+  | Higiene de backup | `UMask=0077`, dirs 750, dumps 600; **corrida real verificada** |
+  | `jax_users.updated_at` | `ALTER` aplicado; verificado en test, producción sin tocar |
+  | 3 listas de IPs propias | **Riesgo aceptado, firme** |
+  | Origen de `user_id=1` | Lo creó `run_seed()`; tenant 41 s antes, literal en un solo archivo |
+  | Barrido del dominio de la segunda cuenta | 1.593 blobs, **cero credenciales** |
+  | Familia de lecciones | **1-25**, sin huecos |
+  | Datos de terceros fuera de HEAD | PR #80; `master` verificado limpio |
+
+  ### LISTO PARA EJECUTAR — falta una decisión o un tercero, no trabajo
+
+  | Ítem | Qué falta | Material |
+  |---|---|---|
+  | **Notificar a 6 clientes** | **Decisión de Fernando.** Es lo único con obligación posible hacia terceros | `INVENTARIO-CLIENTES.md` + borrador de aviso parametrizable |
+  | **Ticket a GitHub Support** | Que Fernando lo pegue y lo envíe | `TICKET-GITHUB.md`, ampliado con los 18 blobs de datos de clientes |
+  | **Rotar la segunda cuenta** | **Coordinar con la persona** — rotarla sin avisarle la deja afuera | Procedimiento idéntico al de `user_id=1` |
+  | **Purga de dumps en R2** | Esperar al **2026-09-08 ~01:00** y verificar | Fecha derivada del upload + política del lock |
+  | **Excluir/anonimizar `jax_users` del dump** | Ronda propia | Hoy cada backup **crea** el problema que luego caduca |
+
+  ### NO DETERMINABLE, con lo que se buscó
+
+  | Pregunta | Se buscó en |
+  |---|---|
+  | Los 41 s entre el `INSERT` del tenant y el del usuario | Binlog (`log_bin=OFF`), `general_log` (OFF), `log_error` vacío, logs del contenedor (empiezan 2026-08-09), dumps anteriores (el más viejo es de 2026-07-08), `.bash_history` (sin timestamps) |
+  | Si el hash viajó por `mariadb-dump` de la 11.8 a la 12.3 | Inverificable por comparación de huellas: **la 11.8 no existe** y su datadir está vacío. Resultó irrelevante: la fila de producción siempre tuvo ese valor |
+  | `retain-until` exacto de los objetos de R2 | Sin `aws`/`rclone`/`s5cmd`/`mc`/`boto3` en el host. La fecha es **derivada**, no leída |
+
+  ### CLASES NO CUBIERTAS — sin suavizar
+
+  1. **142 rutas sin señal estructural**: no dispararon patrones, **que no es
+     lo mismo que estar limpias**.
+  2. **Objetos colgados server-side**: no hay método cliente. Solo Support.
+  3. **Secretos codificados** (base64, URL-encode): el comparador es literal
+     sobre bytes.
+  4. **Secretos embebidos sin separadores**: inherente al match por token.
+  5. **Clones de terceros**: `forks = 0` **no cubre un `git clone`**, que no
+     deja rastro, y los repos fueron públicos ~2 meses y medio.
+  6. **La contraseña de la segunda cuenta** nunca fue verificada contra nada
+     más que la aguja conocida.
+
+  ### Los cuatro falsos positivos de la ronda, y su causa única
+
+  "Credencial viva en `master`" (era el marcador de `filter-repo`), "segunda
+  contraseña" (era `tu_password`), "`access_token` desconocido" (era la
+  cabecera JWT canónica), y "el seeder nunca creó `user_id=1`" (sí lo creó).
+  **Los cuatro por clasificar por apariencia o por inferencia en vez de por
+  comparación con el estado real.** Ninguno sobrevivió a `master`; los cuatro
+  quedaron registrados, no borrados.
+
 - **ROTACIÓN EJECUTADA Y VERIFICADA — el incidente está cerrado (2026-09-01).**
 
   `jax_users.user_id=1` en `jax_memory` (`127.0.0.1:3308`).
