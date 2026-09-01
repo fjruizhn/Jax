@@ -22,6 +22,114 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **ROTACIÓN EJECUTADA Y VERIFICADA — el incidente está cerrado (2026-09-01).**
+
+  `jax_users.user_id=1` en `jax_memory` (`127.0.0.1:3308`).
+
+  | | Huella MD5 del hash |
+  |---|---|
+  | Original | `155c47c3263a6771cf8b854a698f443d` |
+  | Intermedia (incidente, ver abajo) | marcador de 48 caracteres, no bcrypt |
+  | **Nueva** | `7243bc8cdc39c63a3d91cf4ac8a9cf7b` |
+
+  **Verificada por TRES vías independientes**, ninguna heredada:
+  1. La huella cambió respecto de la del testigo pre-rotación.
+  2. **`bcrypt.checkpw(aguja_filtrada, hash_nuevo)` → FALSO.** La contraseña
+     que estuvo pública ~2 meses ya no abre producción.
+  3. Login real en `axioma-ia.io` con el valor nuevo: OK.
+  Prefijo `$2b$12$`, largo 60 — bcrypt cost 12, algoritmo sin cambios.
+
+  ### Por qué la rotación anterior no había cubierto esta fila
+
+  **El seeder NUNCA creó `user_id=1`.** Medido:
+  - Email en producción: `fernando.ruiz@rich-hn.com` (**con** punto). El
+    seeder inserta `fernando@rich-hn.com` (**sin** punto).
+  - Fila creada el **2026-06-18 17:12:32**, *anterior* al primer commit del
+    repo (2026-06-19 04:42).
+  - El gate del seeder es `COUNT(*)` sobre `user_id=1` ⇒ con la fila ya
+    presente, **nunca la sobrescribió**.
+
+  **Rotar por la vía del seeder no podía funcionar**, y por eso la rotación
+  previa no tocó esta fila. La contraseña filtrada siguió siendo la de
+  producción hasta hoy — **primer dato MEDIDO** sobre si el secreto llegó a
+  producción; todo lo anterior era inferencia encadenada.
+
+  **La tabla de entornos de Q2** ("el seeder escribió `user_id=1` con la aguja
+  en cada entorno") queda marcada como **HEREDADA Y CONTRADICHA POR MEDICIÓN**.
+  Llegó a producción, sí — pero por una razón distinta de la que suponíamos.
+
+  ### Incidente durante la rotación, registrado
+
+  El primer `UPDATE` guardó **el texto del marcador del comando de ejemplo**
+  (48 caracteres, no un bcrypt) en el `password_hash` de producción. **Nadie
+  pudo autenticarse como superadmin durante ~3 minutos.**
+
+  Se detectó **por el `LENGTH`** en la verificación del testigo: 48 en vez de
+  60. **Sin esa columna en el testigo, un hash inválido habría pasado por
+  bueno** y el fallo se habría descubierto por un usuario sin poder entrar.
+
+  Es la **misma clase que `da9fd5ec`**: la remediación introduce el defecto que
+  venía a arreglar. Ver la duodécima lección en `CONTEXT.md` §9.
+
+- **`omar@monhagro.com` — cuenta con acceso, fuera de todo lo auditado
+  (2026-09-01).** `user_id=2`, rol `operator`, `status=active`, creada
+  2026-06-19 16:09:12. **Su contraseña no fue verificada contra nada**, y
+  ningún barrido de la auditoría buscó el dominio `monhagro.com` — el barrido
+  por identidad cubrió `rich-hn.com` porque era el único dominio conocido.
+  **Barrido CERRADO (2026-09-01): cero credenciales.** Enumeración completa de
+  1.593 blobs en ambos repos con `refs/pull/*` traídas. `omar@monhagro.com`:
+  **0 apariciones**. Búsqueda ampliada por regex (`omar@` cualquier dominio,
+  `monhagro`): los mismos resultados. `monhagro.com` aparece en **7 blobs de
+  `jax`**, todos como **dato de inventario**, y el escaneo de campos de
+  credencial sobre los blobs completos —no solo las ventanas— dio **0
+  coincidencias**. No hubo ningún valor que clasificar, así que el gate de
+  palabras autodescriptivas no llegó a aplicarse.
+
+  **Confirmado de paso:** la única variante de correo `@rich-hn.com` en la
+  historia de ambos repos es `fernando@rich-hn.com` (54 apariciones).
+  `fernando.ruiz@rich-hn.com` —el de producción— **no existe en ningún blob**.
+
+  **Queda: la contraseña de esta cuenta nunca fue verificada contra nada.** No
+  estaba filtrada en los repos, que es distinto de estar sana. Fecha de
+  control: **2026-09-08**.
+
+- **Inventario operativo de infraestructura de CLIENTES en historia pública —
+  hallazgo lateral de L4 (2026-09-01). Decisión pendiente.** No es una
+  credencial, y por eso ningún barrido de secretos lo iba a marcar. En
+  `missions/` de `jax`, fuera de HEAD desde `f6c8e7d` pero **vivo en la
+  historia**: nombres de usuario del panel Hestia (`richhn`, `monhagro`,
+  `melipaola`, `fynamicshn`, `bdihn`, `gescorphn`), sus dominios, cantidad de
+  cuentas de correo y tamaños de buzón, nombres de bases de datos
+  (`richhn_nextcloud`, `gescorph_website`, `gescorph_wp393`), rutas de
+  Maildir, y —en las versiones anteriores a `99ad51a`— **IPs internas y el
+  puerto SSH 58291**. Incluye además la declaración de que `sol-lex.com` y
+  `bdihn.com` **tienen certificados vencidos y el origen no responde a ACME**.
+
+  **Por qué esto no entra en el mismo cajón que las 3 listas de IPs propias:**
+  aquello era topología de Fernando y la decisión de aceptar el riesgo era
+  suya. **Esto es información de terceros** — clientes que no participaron de
+  la decisión. Es reconocimiento útil para un atacante, con una debilidad
+  concreta nombrada. **Decisión pendiente, y no es solo técnica.** Fecha de
+  control: **2026-09-15**.
+
+- **Dump nocturno con hashes legible por todo el host — severidad media.**
+  `/srv/backup-adata/staging/mariadb-local/jax_memory.sql` (11.5 MB) queda
+  `rw-rw-r--`. Lo escribe `backup-hall9000.service` como `User=fruiz`, **sin
+  `UMask`** declarado, así que hereda el default. **Corrección propuesta, no
+  aplicada: `UMask=0077` en la unidad systemd** — no toca el script, no
+  requiere `chmod` ni regla de sudoers, y no rompe restic porque corre en el
+  mismo servicio y con el mismo usuario. Los directorios `/srv/backup-adata`
+  y `staging` son `755`/`775` y también convendría cerrarlos.
+
+- **`jax_users` sin columna `updated_at` — deuda de esquema.** Solo hay
+  `created_at`, `last_login`, `failed_attempts`, `locked_until`. **No se puede
+  fechar cuándo cambió un `password_hash`**, que es exactamente lo que hizo
+  falta en esta ronda y obligó a construir un testigo a mano.
+
+- **PREGUNTA ABIERTA: ¿quién creó `user_id=1` el 2026-06-18, y por qué su
+  email lleva punto y el del seeder no?** No hay respuesta; queda como
+  pregunta, **no como respuesta inventada**. Fecha de control: **2026-09-08**.
+
 - **CIERRE DE LA RONDA DE SEGURIDAD — estado único (2026-09-01).** Reemplaza
   cualquier reconstrucción de estado a partir de mensajes sueltos.
 
@@ -355,32 +463,31 @@ su fecha de última verificación real, no una nueva.
   la fuga y se resuelve aparte (resetear, no rotar). Hoy no hay evidencia de
   que ningún entorno esté en (b).
 
-  ### PROCEDIMIENTO DE ROTACIÓN — checklist, ACCIÓN PENDIENTE DE FERNANDO
+  ### PROCEDIMIENTO DE ROTACIÓN — REESCRITO 2026-09-01 con la topología REAL
 
-  **No ejecutado. Ninguna base fue consultada ni modificada durante la
-  auditoría.**
+  **El checklist anterior asumía 4 bases sobre 2 instancias y una vía de
+  rotación por el seeder. Las dos cosas eran falsas.** Topología medida:
+  **una sola instancia** (12.3 Docker, `127.0.0.1:3308`) con **dos esquemas**
+  (`jax_memory`, `jax_memory_test`). La instancia 11.8 en `:3306` **no existe
+  hoy** y su datadir `/var/lib/mysql` está vacío (20K, solo `lost+found`).
 
-  1. **Generar el nuevo valor** con `secrets.token_urlsafe` o equivalente.
-     **NO elegido por un humano** — el largo de 8 caracteres fue precisamente
-     lo que volvió crítico este caso.
-  2. **Declarar `JAX_SEED_ADMIN_PASSWORD`** explícitamente en el entorno de
-     cada despliegue, para que el fallback deje de ser la ruta real (hoy lo
-     es, y es la ruta que loguea en claro).
-  3. **Cambiar el hash de `user_id=1` en cada base, una por una.** El gate
-     del seeder es `COUNT(*)`: cambiar la contraseña por la app **no**
-     re-dispara al seeder, así que no hay atajo — la rotación es por base.
-  4. **`jax_memory_test` se verifica y rota en el mismo pase.** Ya no aplica
-     el "no tocar la base" de la auditoría: es parte de la rotación.
-  5. **Dev local: inventariar y rotar o destruir.** Es el entorno
-     indeterminado; cada máquina que levantó el backend antes del 2026-08-20
-     tiene la fila.
-  6. **R2:** registrar la fecha de caducidad del Bucket Lock (7 días) y
-     **verificar el purgado entonces** — los dumps no se pueden borrar antes.
-     Poner fecha de control.
-  7. **Cerrar `da9fd5ec` bien:** el test de regresión negativa compara contra
-     un valor **inyectado**, no hardcodeado. Sin literales de contraseña en
-     tests. Sin esto, la próxima remediación vuelve a reintroducir el
-     secreto.
+  1. **Sacar el testigo ANTES** de tocar nada:
+     `SELECT LEFT(password_hash,12), LENGTH(password_hash), MD5(password_hash) FROM jax_users WHERE user_id=<id>;`
+     **`LENGTH` no es opcional** — es lo que atrapó el marcador de 48
+     caracteres guardado como hash en esta misma ronda.
+  2. **Generar el valor con `secrets.token_urlsafe`**, nunca elegido por un
+     humano: el largo de 8 caracteres fue lo que volvió crítico este caso.
+  3. **`UPDATE` directo sobre la fila.** **NO por la vía del seeder:** su gate
+     es `COUNT(*)`, así que con la fila presente no escribe nada — y en
+     producción la fila ni siquiera la creó él.
+  4. **Verificar por tres vías:** huella distinta, `bcrypt.checkpw` del valor
+     viejo en **falso**, y login real.
+  5. **`jax_memory_test`** se rota o se resiembra en el mismo pase.
+  6. **R2:** los dumps con el hash viejo sobreviven hasta que caduque el
+     Bucket Lock (7 días). Registrar la fecha y verificar el purgado.
+  7. **Declarar `JAX_SEED_ADMIN_PASSWORD`** en el entorno para que el fallback
+     deje de ser la ruta real en una base nueva. Es higiene futura, **no parte
+     de la rotación** — no afecta filas existentes.
 
   ### POLÍTICA del reemplazo — no solo el valor
 
