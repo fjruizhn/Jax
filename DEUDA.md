@@ -174,6 +174,33 @@ su fecha de última verificación real, no una nueva.
   la fuga y se resuelve aparte (resetear, no rotar). Hoy no hay evidencia de
   que ningún entorno esté en (b).
 
+  ### PROCEDIMIENTO DE ROTACIÓN — checklist, ACCIÓN PENDIENTE DE FERNANDO
+
+  **No ejecutado. Ninguna base fue consultada ni modificada durante la
+  auditoría.**
+
+  1. **Generar el nuevo valor** con `secrets.token_urlsafe` o equivalente.
+     **NO elegido por un humano** — el largo de 8 caracteres fue precisamente
+     lo que volvió crítico este caso.
+  2. **Declarar `JAX_SEED_ADMIN_PASSWORD`** explícitamente en el entorno de
+     cada despliegue, para que el fallback deje de ser la ruta real (hoy lo
+     es, y es la ruta que loguea en claro).
+  3. **Cambiar el hash de `user_id=1` en cada base, una por una.** El gate
+     del seeder es `COUNT(*)`: cambiar la contraseña por la app **no**
+     re-dispara al seeder, así que no hay atajo — la rotación es por base.
+  4. **`jax_memory_test` se verifica y rota en el mismo pase.** Ya no aplica
+     el "no tocar la base" de la auditoría: es parte de la rotación.
+  5. **Dev local: inventariar y rotar o destruir.** Es el entorno
+     indeterminado; cada máquina que levantó el backend antes del 2026-08-20
+     tiene la fila.
+  6. **R2:** registrar la fecha de caducidad del Bucket Lock (7 días) y
+     **verificar el purgado entonces** — los dumps no se pueden borrar antes.
+     Poner fecha de control.
+  7. **Cerrar `da9fd5ec` bien:** el test de regresión negativa compara contra
+     un valor **inyectado**, no hardcodeado. Sin literales de contraseña en
+     tests. Sin esto, la próxima remediación vuelve a reintroducir el
+     secreto.
+
   ### POLÍTICA del reemplazo — no solo el valor
 
   1. **El reemplazo NO lo elige un humano.** Se genera
