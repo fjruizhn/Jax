@@ -190,6 +190,37 @@ FAMILIAS = (
              "symlinkear entre repos y sobrevivir un clone fresco).",
     ),
     Familia(
+        nombre="crypto_secrets",
+        canonico=JAX_ROOT / "jax" / "core" / "crypto_secrets.py",
+        espejos=(
+            # Tres archivos reales otra vez -- ninguno es symlink, medido el
+            # 2026-09-01. Misma forma que credential_resolver: dos copias
+            # dentro de jax y una en jax-platform.
+            ("las_manos", JAX_ROOT / "las_manos" / "crypto_secrets.py"),
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "crypto_secrets.py"),
+        ),
+        # EXCLUIDOS A PROPOSITO, mismo criterio que load_facet_registry:
+        # `encrypt_secret` y `decrypt_db_secret` existen SOLO en jax-platform y
+        # no son drift. La razon ya estaba escrita en el docstring de la copia
+        # de jax: jax-platform es el lado que CIFRA (sync bidireccional
+        # BD->.env) y ademas lee `user_api_keys`, tabla suya; los procesos de
+        # JAX (worker, las_manos, REPL) solo necesitan DESCIFRAR. Meterlos en
+        # la comparacion pondria la familia en rojo permanente por una
+        # asimetria de diseno, que es justo lo que el marcador vino a evitar.
+        #
+        # PROVIDER_ENV_KEYS entra a proposito: es la lista de secretos que se
+        # descifran en memoria, y su drift no se ve hasta que una key nueva
+        # llega cifrada al proceso que no la tiene en la lista.
+        compartidos=(
+            "PROVIDER_ENV_KEYS",
+            "_get_fernet",
+            "decrypt_secret",
+            "decrypt_provider_keys_in_env",
+        ),
+        nota="TRES archivos reales. jax-platform tiene ademas encrypt_secret y "
+             "decrypt_db_secret, excluidos por diseno (es el lado que cifra).",
+    ),
+    Familia(
         nombre="credential_resolver",
         canonico=JAX_ROOT / "jax" / "core" / "credential_resolver.py",
         espejos=(
