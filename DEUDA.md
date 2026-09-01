@@ -202,6 +202,32 @@ su fecha de última verificación real, no una nueva.
   falla si alguien cambia `--share-net`, y lo obliga a venir a actualizar esta
   entrada en vez de dejarla mintiendo.
 
+  **Costo de las pruebas, declarado (2026-09-01).** Diagnosticar esto consumió
+  **dos llamadas reales a la API de Anthropic con las credenciales de
+  Fernando** — una tarea de prueba ejecutada de punta a punta, con el destino
+  de telemetría bloqueado y sin bloquear, para medir si `claude` funciona sin
+  él. Autorizado y declarado en el momento. Se anota porque **el costo de
+  verificar tiene que ser visible**: medir "¿funciona sin este destino?" no se
+  puede hacer leyendo código, y una ronda futura que repita el experimento va a
+  pagar lo mismo.
+
+  **Lo ya medido, para no volver a pagarlo:**
+  - El destino de IP rotante es **`us5.datadoghq.com`** (telemetría),
+    identificado por el SNI del handshake real. **`claude` funciona sin él**:
+    tarea completada, RC=0, 10.8 s con bloqueo contra 9.7 s sin bloqueo.
+  - El allowlist necesario es **una sola IP**: `160.79.104.10:443`
+    (api.anthropic.com). El DNS sale por `127.0.0.53` (loopback) y `ufw` ya
+    acepta `oifname lo` antes de cualquier cadena custom.
+  - **Rebindear `hyde` no cambia el destino de red.** `facet.transport`
+    (`subprocess`) vive en la tabla `facet`, no en `facet_binding`, y **ningún
+    endpoint lo escribe**: los dos escritores de binding cambian
+    `provider_id`/`model_ref`. Un rebind cambia el modelo que recibe el CLI, no
+    el transporte — así que el allowlist de una IP no se rompe al rebindear.
+  - **El diseño por UID está descartado, con medición:** `bwrap --uid` NO
+    cambia el UID que ve el kernel. Dentro del sandbox `id -u`=12345 y el
+    socket sigue siendo `uid:1000`. `-m owner --uid-owner` no puede distinguir
+    a Hyde de Fernando mientras lo lance un proceso de éste.
+
 
 
 ## Cerrado — ronda de seguridad 2026-09-01
