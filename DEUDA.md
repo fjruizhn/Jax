@@ -99,7 +99,7 @@ su fecha de última verificación real, no una nueva.
   por identidad cubrió `rich-hn.com` porque era el único dominio conocido.
   **Barrido CERRADO (2026-09-01): cero credenciales.** Enumeración completa de
   1.593 blobs en ambos repos con `refs/pull/*` traídas. la **segunda cuenta** (`user_id=2`, rol `operator`):
-  **0 apariciones**. Búsqueda ampliada por regex (`omar@` cualquier dominio,
+  **0 apariciones**. Búsqueda ampliada por regex (el usuario local contra cualquier dominio,
   el dominio): los mismos resultados. Ese dominio aparece en **7 blobs de
   `jax`**, todos como **dato de inventario**, y el escaneo de campos de
   credencial sobre los blobs completos —no solo las ventanas— dio **0
