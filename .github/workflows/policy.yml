@@ -245,20 +245,42 @@ jobs:
           grep -qE "^11 passed" /tmp/seal || {
             echo "PISO ROTO: se esperaban 11 tests CORRIDOS (no skipeados)."; exit 1; }
 
-  facet-resolver-sync:
-    # POR QUE EXISTE: facet_resolver.py esta espejado en dos repos (jax/core, y
-    # jax-platform/backend con copia propia). Hasta 2026-09-01 este checker
-    # existia pero NO CORRIA EN NINGUN WORKFLOW, y ademas gritaba tres veces
-    # con dos falsas -- el drift real (_db_conn sin el guard fail-closed contra
-    # el default a la instancia muerta 3306) quedaba escondido entre el ruido.
-    # Ahora el checker distingue lo declarado de lo anomalo, asi que su rojo
-    # significa algo y puede gatear.
+  # Renombrado de `facet-resolver-sync` el 2026-09-01: el checker se generalizo
+  # a FAMILIAS de espejos y ahora cubre tambien credential_resolver.
+  #
+  # POR QUE EXISTE: el patron declarado "sin paquete compartido" replica modulos
+  # a proposito entre repos, y su costo conocido es que un arreglo hecho en una
+  # copia y no en la otra queda invisible. Ese costo ya se cobro TRES veces en
+  # 2026 -- facet_resolver._db_conn, los cuatro sitios del default a la
+  # instancia muerta 3306, y credential_resolver._db_conn -- siempre con la
+  # misma forma: se cierra en un repo y sobrevive en el otro.
+  #
+  # credential_resolver tiene TRES archivos reales, no dos: las_manos/ tiene
+  # copia propia y NO es un symlink (a diferencia de facet_resolver). Medido el
+  # 2026-09-01. Esa tercera copia puede driftear DENTRO del propio repo jax, y
+  # hasta hoy nadie la comparaba con nada.
+  mirror-sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Traer la copia de jax-platform
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - name: Traer el checkout de jax-platform
         run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
-      - name: Comparar los dos espejos
+      - name: Comparar las familias de espejos
         env:
-          JAX_PLATFORM_FACET_RESOLVER: /tmp/jax-platform/backend/facet_resolver.py
-        run: python3 scripts/check_facet_resolver_sync.py
+          JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
+        run: python3 scripts/check_mirror_sync.py
+      # La LOGICA del comparador tiene sus propios tests, sobre fuentes
+      # sinteticas. Existen porque probar el checker rompiendolo encontro un
+      # defecto real: el marcador de "divergencia deliberada" no funcionaba para
+      # constantes de modulo (no tienen docstring, y los comentarios no estan en
+      # el AST). Una verificacion a mano que encuentra un defecto y no queda
+      # escrita hay que volver a hacerla.
+      - run: python -m pytest scripts/_check_mirror_sync_test.py -v
+      - run: |
+          python -m pytest scripts/_check_mirror_sync_test.py -q 2>&1 | tee /tmp/ms
+          grep -qE "^14 passed" /tmp/ms || {
+            echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }

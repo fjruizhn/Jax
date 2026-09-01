@@ -5,8 +5,8 @@ las_manos/facet_resolver.py es symlink a este -- jacobs lo importa via
 PYTHONPATH apuntando a las_manos, el REPL via el paquete jax.core. jax-platform
 sigue con copia propia aparte (repo distinto, con su propio
 credential_resolver.py local -- un symlink cruzado de repos no sobrevive un
-clone fresco); ver scripts/check_facet_resolver_sync.py para detectar drift
-entre ambas. Consume resolve_credential_instrumented, no reimplementa Fase 1.
+clone fresco); ver scripts/check_mirror_sync.py para detectar drift entre
+ambas (renombrado el 2026-09-01 al generalizarse a familias de espejos). Consume resolve_credential_instrumented, no reimplementa Fase 1.
 Ver jax-platform/docs/fase2-facetas-diseno.md.
 """
 import logging

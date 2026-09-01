@@ -204,6 +204,55 @@ su fecha de última verificación real, no una nueva.
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
 
+- **CERRADO (2026-09-01) — el comparador de espejos cubre ahora
+  `credential_resolver`, y se generalizó a FAMILIAS.**
+  `scripts/check_facet_resolver_sync.py` → `scripts/check_mirror_sync.py`
+  (renombrado con `git mv`, historia preservada). Job `facet-resolver-sync` →
+  `mirror-sync`.
+
+  **Cierra la CLASE, no la instancia.** El patrón declarado "sin paquete
+  compartido" replica módulos a propósito, y su costo conocido es que un
+  arreglo hecho en una copia y no en la otra queda invisible. Ese costo se
+  cobró **tres veces en 2026**, siempre con la misma forma: `facet_resolver._db_conn`,
+  los cuatro sitios del default a la instancia muerta `3306`, y
+  `credential_resolver._db_conn`. Se generalizó en vez de copiarse: **un
+  segundo comparador sería un espejo más, con el mismo defecto que viene a
+  detectar.** Las familias se declaran como datos; agregar una es agregar una
+  entrada.
+
+  **LA MEDICIÓN CAMBIÓ EL DISEÑO.** El ítem asumía la forma de
+  `facet_resolver` (dos archivos, porque `las_manos/` es un symlink). Medido
+  antes de escribir nada: **`las_manos/credential_resolver.py` NO es un
+  symlink, es un tercer archivo real.** O sea que esa familia puede driftear
+  **dentro del propio repo `jax`**, sin cruzar repos — una copia más suelta que
+  la de `facet_resolver`, y hasta hoy nadie la comparaba con nada. El
+  comparador recorre todos los espejos, no el primero, y el reporte dice **cuál**
+  diverge.
+
+  Estado medido al cerrar: los tres archivos con el mismo conjunto de 10
+  símbolos de nivel superior, todos idénticos. La única diferencia real es el
+  import de `crypto_secrets`, que es un `ImportFrom` y no entra a la
+  comparación — no necesita marcador.
+
+  **PROBADO ROMPIÉNDOLO, Y LA PRUEBA ENCONTRÓ UN DEFECTO REAL.** El mecanismo
+  de "divergencia deliberada" **no funcionaba para constantes de módulo**: el
+  marcador se declara en el docstring y una constante no tiene, así que
+  `ast.get_source_segment` devolvía la sentencia pelada sin los comentarios de
+  alrededor. `FACET_SEAL_PATH`, agregado a la comparación ese mismo día, no se
+  podía declarar de ninguna forma. Arreglado (`_bloque_declarativo`) y fijado
+  con tests que se verificaron **revirtiendo el arreglo**: 3 en rojo.
+
+  Casos verificados, los dos sentidos: divergencia sin declarar en cada una de
+  las dos familias y en cada uno de los tres archivos → **rojo**; declarada con
+  marcador (en el comentario de arriba y en el de la misma línea) → **verde**;
+  un comentario sin marcador → **sigue rojo** (el arreglo no aflojó el
+  detector); un espejo ilegible → **exit 2**, nunca verde en silencio.
+
+  **Hallazgo lateral, no resuelto:** `crypto_secrets.py` es una **cuarta
+  familia de espejos** (3 copias; la de `jax-platform` difiere en 478 bytes) y
+  no está en el comparador. Agregarla es agregar una entrada a `FAMILIAS`, pero
+  requiere medir antes qué diverge y por qué — no se hace a ciegas.
+
 - **CERRADO (2026-09-01) — el default silencioso a `localhost:3306` sobrevivía
   en CUATRO sitios de `jax-platform`, incluido el pool principal.**
   PR `jax-platform#41`. **Nunca estuvo anotado acá**: se encontró barriendo el
@@ -248,10 +297,8 @@ retractaciones, que no se borran. Ninguno requiere acción.
   `127.0.0.1:3306` en el log.
 
   `credential_resolver._db_conn` quedó **byte a byte idéntico** al de
-  `jax/core` (verificado comparando el AST). **Sigue sin haber un checker de
-  drift para `credential_resolver`** —sólo existe para `facet_resolver`—, y es
-  el mismo patrón de espejo con el mismo historial de divergencias: candidato
-  claro a la próxima ronda.
+  `jax/core` (verificado comparando el AST). El checker de drift que le faltaba
+  **ya existe** — ver la entrada de `check_mirror_sync.py` más arriba.
 
 - **CERRADO (2026-09-01) — el contenimiento del sandbox de Hyde ahora está
   EJERCITADO, no descrito.** `_hyde_containment_test.py` (14 tests) + job
@@ -1916,7 +1963,8 @@ retractaciones, que no se borran. Ninguno requiere acción.
   `las_manos/facet_resolver.py` es symlink. `jax-platform` conserva copia
   propia real (repo distinto, su propio `credential_resolver.py` local —
   un symlink cruzado de repos no sobrevive un clone fresco). Drift entre
-  ambas copias se detecta con `scripts/check_facet_resolver_sync.py`
+  ambas copias se detecta con `scripts/check_mirror_sync.py` (era
+  `check_facet_resolver_sync.py`; renombrado el 2026-09-01 al generalizarse)
   (verificado que detecta drift real; hoy no hay ninguno).
 
 - **4 fuentes de verdad para el vocabulario de capabilities** (`VALID_CAPABILITIES`
