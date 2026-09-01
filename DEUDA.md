@@ -341,7 +341,7 @@ retractaciones, que no se borran. Ninguno requiere acción.
   idéntico y la invalidación no cruzaría —drift invisible dentro del mecanismo
   construido para cerrar un punto ciego—.
 
-  PRs: `jax-platform#38`, `jax#PENDIENTE`.
+  PRs: `jax-platform#38`, `jax#88`.
 
 - **CIERRE FINAL (2026-09-01). Un solo ítem vivo.**
 
