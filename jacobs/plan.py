@@ -642,7 +642,7 @@ class PlanBuilder:
         # generico (_call_openai_compat) — el endpoint nativo /api/chat que este
         # payload espera (respuesta en data["message"]["content"]) es siempre
         # local y fijo. Solo el modelo viene del facet, nunca la URL.
-        # OJO: GPU_SEMAPHORE (jax/muscles/ollama_muscle.py:37) es un
+        # OJO: GPU_SEMAPHORE (jax/muscles/ollama_muscle.py::GPU_SEMAPHORE -- por simbolo, no por linea: la referencia decia :37 y el simbolo ya se habia movido) es un
         # asyncio.Semaphore de PROCESO del REPL de JAX -- esta llamada corre
         # en el proceso de jax-las-manos (Jacobs) y le pega a Ollama directo
         # por httpx, sin pasar por ese semáforo. No hay exclusión mutua real

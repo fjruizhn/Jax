@@ -39,7 +39,15 @@ su fecha de última verificación real, no una nueva.
   | Ticket a GitHub Support (`$AUDIT/TICKET-GITHUB.md`) | su respuesta |
   | Purga de dumps en R2 — **2026-09-08 ~01:00** | Bucket Lock, inmutabilidad por diseño |
 
-  **Deuda técnica abierta:** los ítems que siguen en esta sección.
+  **Deuda técnica abierta:** los ítems que siguen en esta sección — al cierre
+  del 2026-09-01 queda **uno**: el merge sin revisión en `master`, y su
+  resolución ya está decidida (no se hace hoy, razones escritas abajo). Los
+  otros dos que figuraban acá salieron el mismo día y ninguno por trabajo
+  nuevo: `GPU_SEMAPHORE` era una **decisión tomada** mal etiquetada —se movió
+  a "Anotado, no bloquea" y se le agregó el tripwire que le faltaba— y el
+  owner de pipeline **ya estaba arreglado desde el 2026-08-20**. Cuarta y
+  quinta instancia del patrón del día: el ítem describía un estado que ya no
+  existía. De ahí la regla nueva de §7 de `CONTEXT.md`.
   **Fecha de control más próxima:** `kimi`, **2026-09-10**.
 
 - **Bypass de admin en el ruleset de `master` — PUSH DIRECTO CERRADO
@@ -142,20 +150,36 @@ su fecha de última verificación real, no una nueva.
   mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
   compuesto que falla.
 
-- **`GPU_SEMAPHORE` no cubre a Jacobs.** `jax/muscles/ollama_muscle.py:37`
-  excluye a Jacobs del semáforo de exclusión cross-proceso de GPU —
-  comentarios cruzados en `jacobs/plan.py:374`/`jacobs/executor.py:117,381`
-  lo siguen marcando, sin fix. Confirmado abierto en Bloque 2
-  (2026-08-21), no se cierra por decisión.
-
-- **Owner de pipeline: filesystem vs DB.** El reaper (`jacobs/reaper.py`)
-  sigue el criterio de filesystem para decidir ownership, migración a DB
-  identificada como la deuda con más antigüedad, sin ejecutar. Última
-  verificación: ronda 6.
-
-
-
 ## Cerrado — ronda de seguridad 2026-09-01
+
+- **Owner de pipeline: filesystem vs DB — CERRADO. Ya estaba arreglado hace
+  doce días y el ítem lo ignoraba.** Figuraba en "Bloquea trabajo" como *la
+  deuda con más antigüedad*, "migración a DB identificada, sin ejecutar",
+  "última verificación: ronda 6". **Medido contra el árbol el 2026-09-01: no
+  hay nada que hacer.** La migración se ejecutó en la **ronda 5, T1
+  (2026-08-20)**.
+
+  Evidencia, toda verificada hoy y no heredada:
+
+  | Afirmación del ítem | Lo que dice el árbol |
+  |---|---|
+  | El reaper decide por filesystem | `jacobs/reaper.py:146` decide por `p.owner_ack_at is None` — columna de `jacobs_pipelines` |
+  | Migración "sin ejecutar" | El docstring del propio `reaper.py:32` dice **RESUELTO (ronda 5, 2026-08-20, T1)** |
+  | jax-platform escribe un owner file | `backend/api/pipelines.py:45` hace `UPDATE jacobs_pipelines SET owner_ack_at=%s`; `:64` hace el `SELECT` |
+  | Cruce de repo por `~/jax/pipelines/` | **El directorio no existe** |
+  | Quedan lectores del owner file | **Ninguno.** Los `_owner.json` que sobreviven son de **comandos** (`web-task-*_owner.json`, `api/command.py`, `jax_engine/owner_cleanup.py`) — feature distinta, se dejó intacta a propósito |
+
+  **Por qué se registra en vez de sólo borrarse.** El ítem decía "última
+  verificación: ronda 6" — es decir, **alguien lo revisó DESPUÉS del arreglo y
+  siguió describiendo el estado previo**. No es una entrada vieja que nadie
+  miró: es una entrada mirada y no medida. Cuarta instancia del mismo patrón
+  en un solo día —la suite de jax-platform con "10 o 12 failures", los
+  sub-agentes que su propio texto declaraba "CERRADO 2026-08-26", Hyde
+  "fuera de alcance" que ya estaba cerrada con `--ro-bind`, y ésta— y la más
+  extrema de las cuatro por distancia entre el texto y el hecho. De acá sale
+  la regla operativa de §7 de `CONTEXT.md` sobre medir todo ítem contra el
+  árbol antes de trabajarlo.
+
 
 Se conservan íntegros: describen clases de defecto reutilizables y las
 retractaciones, que no se borran. Ninguno requiere acción.
@@ -1957,6 +1981,77 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 
 ## Anotado, no bloquea
+
+- **`GPU_SEMAPHORE` no cubre a Jacobs — DECISIÓN TOMADA (2026-09-01), no
+  pendiente.** Estuvo listado como deuda abierta desde el Bloque 2
+  (2026-08-21) diciendo "no se cierra por decisión", que es una frase que se
+  lee como pendiente. No lo es: es una decisión con la medición en la mano, y
+  desde hoy con un tripwire que la protege.
+
+  **El hecho.** `jax/muscles/ollama_muscle.py::GPU_SEMAPHORE` es un
+  `asyncio.Semaphore` **de proceso**, no cross-proceso. Jacobs corre en el
+  proceso `jax-las-manos` y tiene tres caminos propios a Ollama que no pasan
+  por él: `jacobs/plan.py::_llm_plan`, `jacobs/executor.py::_invoke_ollama`,
+  y `las_manos/motor_registry/worker.py` con transporte `ollama`. Eso es
+  cierto y sigue siendo cierto. **No es un bug: es la consecuencia esperada de
+  un semáforo de proceso.**
+
+  **El invariante que hace que no importe, medido** (2026-08-28,
+  `scripts/gpu_concurrency_probe.py`): no hace falta exclusión mutua
+  cross-proceso **porque Ollama serializa**, y serializa porque
+  `OLLAMA_NUM_PARALLEL=1`. La exclusión ya existe afuera del código de JAX.
+
+  **Lo que faltaba, y es lo que se agregó hoy: el invariante no tenía
+  tripwire.** Toda la decisión cuelga de un valor que vive en la unidad de
+  systemd de un servicio de terceros. Si ese valor deja de ser 1 la decisión
+  no se degrada — **se invierte**: los tres caminos pasan a correr en paralelo
+  real contra la misma GPU, y nadie se entera. Una decisión que depende de un
+  invariante sin tripwire es una suposición con fecha de vencimiento
+  desconocida.
+
+  **Tripwire: `scripts/check_ollama_num_parallel.py`, job `ollama-num-parallel`.**
+  Lee `/proc/<pid>/environ` del `ollama serve` **vivo**, no el archivo de
+  unidad — la unidad declara, el proceso ejecuta, y pueden diferir (drop-in
+  posterior, `systemctl set-environment`, arranque a mano, unidad editada sin
+  recargar). Fail-closed en todos los caminos: variable ausente, valor
+  distinto de 1, environ ilegible, environ vacío o proceso inexistente son
+  **rojo**, nunca "no aplica".
+
+  **Probado rompiéndolo, en vivo, los dos sentidos** (2026-09-01):
+
+  | Fuente | Resultado |
+  |---|---|
+  | Ollama real de hall9000 (pid 3376, descubrimiento automático, `sudo`) | **VERDE**, exit 0 — `OLLAMA_NUM_PARALLEL=1` |
+  | Proceso vivo real con el valor en **2** | **ROJO**, exit 1 |
+  | Proceso vivo real con el valor en **1** | **VERDE**, exit 0 |
+
+  **Lo que el job de CI NO hace, dicho para que nadie lo lea de más.** No
+  verifica el invariante en producción, y no puede: los once workflows corren
+  en `ubuntu-latest`, ahí no hay ningún Ollama, y el de hall9000 corre como
+  usuario `ollama` con `/proc/<pid>/environ` en 0400 — leerlo **exige root**.
+  Lo que CI verifica es que **el tripwire funciona**, apuntándolo a procesos
+  vivos de verdad lanzados con el valor puesto a mano: mismo camino de lectura
+  de `/proc`, mismo parser, mismo veredicto; lo único distinto es cuál es el
+  proceso. 33 tests con piso exacto, más un paso que exige que el tripwire dé
+  **rojo** en un runner sin Ollama — si ahí diera verde, sería fail-open.
+  **El chequeo contra el Ollama real es de hall9000 y es manual:**
+  `sudo python3 scripts/check_ollama_num_parallel.py`.
+
+  **Referencias de línea corregidas de paso, y la causa de fondo anotada.**
+  Las tres estaban mal: el semáforo se citaba como
+  `jax/muscles/ollama_muscle.py:37` cuando estaba en la 49 (y tras el cambio
+  de hoy quedó en la 59), y los comentarios cruzados como `jacobs/plan.py:374`
+  y `jacobs/executor.py:117,381` cuando están en la 645 y la 351. **No se
+  arreglaron poniendo los números nuevos: se cambiaron a referencia por
+  símbolo** (`ollama_muscle.py::GPU_SEMAPHORE`), porque el número de línea se
+  pudre solo y volver a escribirlo sólo posterga el mismo defecto. También se
+  corrigió el comentario del propio `ollama_muscle.py`, que decía "ese valor
+  no lo fija nadie explícitamente" — falso: la unidad lo declara.
+
+  **Qué lo reabre:** el tripwire en rojo. Ahí la decisión hay que rehacerla
+  entera, no ajustarla. Condiciones de validez completas en
+  `docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md`.
+
 
 - **`capability.sandbox_only` — columna sin lector, vestigial.** Verificado
   2026-08-27: `grep -rn "cap.sandbox_only\|capability.sandbox_only\|entry\[.sandbox_only.\]\|entry.get(.sandbox_only"` → 0 resultados en todo el repo. Las 5 filas
