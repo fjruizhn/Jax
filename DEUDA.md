@@ -22,6 +22,41 @@ su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
 
+- **No existe barrera de contenido en el camino rama → master — SEVERIDAD
+  ALTA (2026-09-01).** Hallazgo del juez que atacó el hook `pre-commit`, más
+  grande que lo que ese hook cierra.
+
+  **Medido, no razonado** (con un hook sonda, `jax`, 2026-09-01):
+
+  | Operación | ¿Ejecuta hooks de pre-commit? |
+  |---|---|
+  | `git commit`, `git commit --amend` | **SÍ** |
+  | `merge`, `rebase`, `cherry-pick`, `revert`, `stash` | **NO** |
+
+  Y el `pre-push` **solo mira el ref destino, no el contenido** — por diseño:
+  se escribió para frenar un push que aterrizara en `master`, no para
+  revisar qué lleva adentro.
+
+  **La consecuencia es concreta y hoy está activa:** un commit hecho **antes**
+  de activar `core.hooksPath`, o hecho con `--no-verify`, **entra a `master`
+  por merge o rebase sin pasar jamás por ninguna revisión de contenido**. El
+  hook cubre el commit directo y nada más. Todo el pasado de ambos repos está
+  en esa condición, porque el hook es de hoy.
+
+  **El hook local es defensa en profundidad, NO la barrera.** Escrito acá
+  explícitamente para que nadie lo lea como cobertura: es evadible con
+  `--no-verify`, con dos variables de entorno, y borrando una entrada de la
+  lista en el working tree sin commitear. Las cuatro son actos explícitos, y
+  ninguna deja rastro en el commit que llega a `master`.
+
+  **Dirección de solución — NO implementada, y a propósito:** un job de CI que
+  escanee el diff del PR contra la lista de hashes. Server-side, así que no lo
+  evade `--no-verify` ni un `.gitattributes` local, y **gateado por la
+  condición de merge**, que es lo único que convierte una revisión en una
+  barrera. Es lo único que cierra la clase entera; el hook local solo cierra
+  el commit directo. Requiere resolver dónde vive el pepper para el runner —
+  un secret del repo— y esa decisión no está tomada.
+
 - **P0 — Credencial de producción expuesta en repo público (GitGuardian,
   2026-09-01).** Hallazgo externo: GitGuardian alertó sobre una credencial
   de producción en claro en el repositorio **público** `fjruizhn/Jax`,

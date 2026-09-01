@@ -58,6 +58,15 @@ RUTAS_MARCADAS = [
     re.compile(r"seed", re.I),
     re.compile(r"test.*credential", re.I),
     re.compile(r"\.pyc$"),
+    # .gitattributes y .gitignore: no son "alto riesgo" por su contenido sino
+    # porque CAMBIAN LAS REGLAS con las que se revisa todo lo demas. Una linea
+    # `*.md -diff` apaga la revision de contenido de una clase entera de rutas,
+    # de forma permanente y SIN dejar rastro en el commit ofensivo -- era la
+    # evasion mas barata que existia, mas barata que --no-verify. El hook ya no
+    # se deja apagar (los archivos sin lineas de texto se escanean enteros),
+    # pero el vector merece verse en la revision igual.
+    re.compile(r"(^|/)\.gitattributes$"),
+    re.compile(r"(^|/)\.gitignore$"),
 ]
 # Bloqueo duro: la clase donde aparecio el unico hallazgo real.
 RUTAS_DURAS = [re.compile(r"_result\.md$", re.I)]

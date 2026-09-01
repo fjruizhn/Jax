@@ -123,3 +123,12 @@ Cubre tres huecos que eran falsos negativos silenciosos:
   —solo el ref destino—, así que **hoy no existe barrera de contenido en el
   camino rama → master**. Queda anotado como deuda, no disimulado.
 - Solo existe donde `core.hooksPath` apunte acá.
+
+### Recordatorio operativo (no es una lección nueva, ya está escrita)
+
+**Usar `git -C <ruta>` siempre.** El 2026-09-01, publicando este mismo hook, se
+empujó la misma rama dos veces por asumir que un `cd` anterior seguía vigente:
+el segundo `git push` corrió en el checkout equivocado. **Ni este hook ni el CI
+atajan esa clase de error** — el hook mira contenido, el CI mira el resultado, y
+un push al repo equivocado es correcto en ambos. La única defensa es no depender
+del cwd. Ver la lección correspondiente en `CONTEXT.md` §7.
