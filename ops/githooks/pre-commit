@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Rechaza un commit que reintroduzca un secreto ya conocido, o que toque
+rutas de la clase donde los secretos aparecieron.
+
+POR QUE NO ES UN DETECTOR DE PATRONES, con la medicion que lo motivo
+(2026-09-01): gitleaks 8.30.1 devolvio CERO hallazgos sobre un repo cuya
+historia contiene una contrasenia de superadmin en texto plano, y sobre el
+archivo denunciado por GitGuardian dio "no leaks found" incluso servido como
+texto plano a `gitleaks dir`. La causa es estructural: las reglas buscan
+formato y entropia, y la contrasenia real de ese incidente tiene OCHO
+caracteres. Un hook basado en patron o entropia habria sido ciego al unico
+caso que este repo ya sufrio.
+
+QUE HACE ENTONCES: compara cada linea ANIADIDA contra una lista de secretos
+YA CONOCIDOS, por valor. Recall 100% sobre lo conocido, cero sobre lo nuevo.
+
+POR QUE HMAC Y NO UN HASH PELADO: la lista viaja versionada en un repo
+PUBLICO. Un sha256 de una contrasenia de 8 caracteres se crackea con wordlist
+en minutos -- publicar ese hash seria publicar la contrasenia otra vez. El
+pepper vive FUERA del repo (/etc/jax/precommit-pepper, 0600), asi que la
+lista publicada no dice nada sin el. Y bcrypt/argon2, que serian seguros de
+publicar, cuestan ~250ms por comparacion: un commit de 200 lineas contra 5
+hashes tardaria minutos. HMAC-SHA256 conserva las dos propiedades.
+
+FAIL-CLOSED (P10): si el pepper o la lista no se pueden leer, no parsean, o
+la lista esta vacia, el hook RECHAZA. Un comparador sin con que comparar no
+"no encontro nada": no comparo. La distincion es la que separa este hook de
+un `gitleaks` en verde.
+
+QUE NO CUBRE, declarado y no disimulado:
+  - Un secreto NUEVO pasa. Este hook previene la REINTRODUCCION, que es lo
+    que de verdad ocurrio (el commit que saco la contrasenia de seed.py la
+    escribio en el test de regresion que probaba que ya no se usaba).
+  - `--no-verify` lo saltea. Es un acto explicito, no un resbalon.
+  - Solo existe donde core.hooksPath apunte aca (ver README.md).
+"""
+import hashlib
+import hmac
+import os
+import re
+import subprocess
+import sys
+
+_AQUI = os.path.dirname(os.path.abspath(__file__))
+PEPPER_PATH = os.environ.get("JAX_PRECOMMIT_PEPPER", "/etc/jax/precommit-pepper")
+# Anclada al directorio del hook, no al cwd: un commit sobre una rama que no
+# contiene la lista en su arbol daria rechazo espurio, y eso entrena a la
+# gente a usar --no-verify de rutina, que es la unica evasion que este diseno
+# acepta como acto explicito.
+LIST_PATH = os.environ.get("JAX_PRECOMMIT_SECRETS", os.path.join(_AQUI, "known-secrets.txt"))
+CANARIO = "JAX-PRECOMMIT-CANARY"
+ETIQUETA_CANARIO = "canario-no-borrar"
+
+# Rutas que exigen una marca deliberada (JAX_PRECOMMIT_ALLOW_PATH=1).
+RUTAS_MARCADAS = [
+    re.compile(r"(^|/)missions/"),
+    re.compile(r"(^|/)prompts/"),
+    re.compile(r"seed", re.I),
+    re.compile(r"test.*credential", re.I),
+    re.compile(r"\.pyc$"),
+    # .gitattributes y .gitignore: no son "alto riesgo" por su contenido sino
+    # porque CAMBIAN LAS REGLAS con las que se revisa todo lo demas. Una linea
+    # `*.md -diff` apaga la revision de contenido de una clase entera de rutas,
+    # de forma permanente y SIN dejar rastro en el commit ofensivo -- era la
+    # evasion mas barata que existia, mas barata que --no-verify. El hook ya no
+    # se deja apagar (los archivos sin lineas de texto se escanean enteros),
+    # pero el vector merece verse en la revision igual.
+    re.compile(r"(^|/)\.gitattributes$"),
+    re.compile(r"(^|/)\.gitignore$"),
+]
+# Bloqueo duro: la clase donde aparecio el unico hallazgo real.
+RUTAS_DURAS = [re.compile(r"_result\.md$", re.I)]
+
+MIN_TOKEN = 6
+SEPARADORES = re.compile(r"""[\s"'`,;()\[\]{}<>=:]+""")
+# Corridas imprimibles, estilo `strings`: asi se lee un binario staged.
+RUNS_IMPRIMIBLES = re.compile(rb"[\x20-\x7e]{%d,}" % MIN_TOKEN)
+
+
+def rechazar(motivo, detalle=""):
+    print(f"pre-commit: RECHAZADO -- {motivo}", file=sys.stderr)
+    if detalle:
+        print(detalle, file=sys.stderr)
+    print("  (--no-verify lo saltea; es un acto explicito, no un resbalon)", file=sys.stderr)
+    sys.exit(1)
+
+
+def cargar_pepper():
+    try:
+        with open(PEPPER_PATH, "rb") as fh:
+            pepper = fh.read().strip()
+    except OSError as exc:
+        rechazar(
+            "no se pudo leer el pepper (FAIL-CLOSED, P10).",
+            f"  ruta: {PEPPER_PATH}\n  causa: {exc.strerror}\n"
+            "  Sin pepper no hay comparacion posible, y 'no encontre nada' seria mentira.",
+        )
+    if not pepper:
+        rechazar("el pepper esta vacio (FAIL-CLOSED, P10).", f"  ruta: {PEPPER_PATH}")
+    return pepper
+
+
+def cargar_hashes(pepper):
+    try:
+        with open(LIST_PATH, "r", encoding="utf-8") as fh:
+            crudo = fh.read()
+    except OSError as exc:
+        rechazar(
+            "no se pudo leer la lista de secretos conocidos (FAIL-CLOSED, P10).",
+            f"  ruta: {LIST_PATH}\n  causa: {exc.strerror}",
+        )
+    hashes = {}
+    for num, linea in enumerate(crudo.splitlines(), 1):
+        linea = linea.strip()
+        if not linea or linea.startswith("#"):
+            continue
+        partes = linea.split(None, 1)
+        if len(partes) != 2 or not re.fullmatch(r"[0-9a-f]{64}", partes[0]):
+            rechazar(
+                "la lista de secretos conocidos no parsea (FAIL-CLOSED, P10).",
+                f"  {LIST_PATH}:{num} no tiene la forma '<sha256-hex> <etiqueta>'.\n"
+                "  Una lista corrupta no se ignora: se rechaza.",
+            )
+        hashes[partes[0]] = partes[1]
+    if not hashes:
+        rechazar(
+            "la lista de secretos conocidos esta vacia (FAIL-CLOSED, P10).",
+            f"  ruta: {LIST_PATH}\n"
+            "  Un comparador sin nada con que comparar no encontro cero: no comparo.",
+        )
+    # CANARIO: ata este pepper a ESTA lista. Sin el, rotar o regenerar el
+    # pepper cambia todos los HMAC y el hook sigue arrancando "sano",
+    # comparando contra nada y aprobando todo -- el modo de falla invisible
+    # exacto que este archivo dice combatir.
+    esperado = hmac.new(pepper, CANARIO.encode(), hashlib.sha256).hexdigest()
+    if hashes.get(esperado) != ETIQUETA_CANARIO:
+        rechazar(
+            "el pepper no corresponde a esta lista (FAIL-CLOSED, P10).",
+            f"  El canario '{ETIQUETA_CANARIO}' no verifica.\n"
+            f"  pepper: {PEPPER_PATH}\n  lista : {LIST_PATH}\n"
+            "  Sin esto el hook compararia contra hashes de otro pepper y no\n"
+            "  encontraria NADA nunca, con toda la apariencia de estar sano.",
+        )
+    del hashes[esperado]
+    return hashes
+
+
+def git(args, binario=False):
+    """Corre git y RECHAZA si falla. Un git que revienta y devuelve stdout
+    vacio es indistinguible de 'no hay nada que revisar' -- y aprobar ahi
+    seria el fail-open exacto que este hook dice combatir."""
+    out = subprocess.run(
+        ["git"] + args, capture_output=True, check=False,
+        **({} if binario else {"text": True, "errors": "replace"}),
+    )
+    if out.returncode != 0:
+        err = (out.stderr if binario else out.stderr) or b""
+        if binario:
+            err = err.decode("utf-8", "replace")
+        rechazar(
+            "git fallo durante la revision (FAIL-CLOSED, P10).",
+            f"  comando: git {' '.join(args)}\n  codigo: {out.returncode}\n"
+            f"  {err.strip()[:300]}\n"
+            "  No se aprueba un commit que no se pudo revisar.",
+        )
+    return out.stdout
+
+
+def archivos_staged():
+    return [x for x in git(
+        ["diff", "--cached", "--name-only", "--diff-filter=ACMRT"]).splitlines() if x]
+
+
+def lineas_aniadidas():
+    """Parsea por HUNKS. Adivinar por prefijo se come las lineas de contenido
+    que empiezan con '++': en el diff aparecen como '+++' y se descartaban
+    como si fueran cabecera -- un falso negativo silencioso con un fragmento
+    de patch pegado en un .md."""
+    # SIN -a a proposito: que los binarios NO produzcan lineas de texto es lo
+    # que los manda al escaneo de blob completo de main(), que es el camino
+    # correcto para ellos (corridas imprimibles, estilo `strings`).
+    out = git(["diff", "--cached", "--unified=0", "--no-color",
+               "--diff-filter=ACMRT"])
+    archivo, en_hunk, con_texto = None, False, set()
+    for linea in out.splitlines():
+        if linea.startswith("diff --git "):
+            archivo, en_hunk = None, False
+        elif linea.startswith("+++ ") and not en_hunk:
+            archivo = linea[6:] if linea.startswith("+++ b/") else linea[4:]
+        elif linea.startswith("@@"):
+            en_hunk = True
+        elif en_hunk and linea.startswith("+"):
+            if archivo:
+                con_texto.add(archivo)
+            yield archivo, linea[1:]
+    lineas_aniadidas.con_texto = con_texto
+
+
+def tokens(linea):
+    vistos = {linea.strip()}
+    for tok in SEPARADORES.split(linea):
+        if tok:
+            vistos.add(tok)
+            vistos.add(tok.strip("-_./\\"))
+    return {t for t in vistos if len(t) >= MIN_TOKEN}
+
+
+def main():
+    pepper = cargar_pepper()
+    hashes = cargar_hashes(pepper)
+
+    duras = [f for f in archivos_staged() if any(r.search(f) for r in RUTAS_DURAS)]
+    if duras:
+        rechazar(
+            "archivo de la clase '*_result.md' (bloqueo duro).",
+            "  " + "\n  ".join(duras) + "\n"
+            "  Es la clase que captura salida de comandos, donde aparecio el unico\n"
+            "  hallazgo real de la auditoria. No se commitea desde este repo.",
+        )
+
+    if os.environ.get("JAX_PRECOMMIT_ALLOW_PATH") != "1":
+        marcadas = [f for f in archivos_staged() if any(r.search(f) for r in RUTAS_MARCADAS)]
+        if marcadas:
+            rechazar(
+                "rutas de alto riesgo sin marca deliberada.",
+                "  " + "\n  ".join(marcadas) + "\n"
+                "  Si es intencional: JAX_PRECOMMIT_ALLOW_PATH=1 git commit ...",
+            )
+
+    encontrados = []
+    for archivo, linea in lineas_aniadidas():
+        for tok in tokens(linea):
+            h = hmac.new(pepper, tok.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+            if h in hashes:
+                encontrados.append((archivo, hashes[h]))
+
+    # Todo archivo staged del que el diff NO produjo ni una linea de texto se
+    # escanea entero desde el INDICE. Cubre tres agujeros que el diff deja y
+    # que son falsos negativos silenciosos:
+    #   - binarios: git emite "Binary files ... differ" y cero lineas '+'.
+    #     Es la clase del .pyc que conservo la contrasenia real cuando
+    #     filter-repo limpio el .py.
+    #   - `.gitattributes` con `-diff` sobre una ruta: apaga el diff de texto
+    #     de toda una clase con una linea de aspecto inocente, y era la
+    #     evasion mas barata que existia -- mas barata que --no-verify.
+    #   - typechange y cualquier caso raro que el parser no cubra.
+    con_texto = getattr(lineas_aniadidas, "con_texto", set())
+    for archivo in archivos_staged():
+        if archivo in con_texto:
+            continue
+        crudo = git(["show", f":{archivo}"], binario=True)
+        for run in RUNS_IMPRIMIBLES.findall(crudo):
+            for tok in tokens(run.decode("ascii", "replace")):
+                h = hmac.new(pepper, tok.encode("utf-8", "replace"), hashlib.sha256).hexdigest()
+                if h in hashes:
+                    encontrados.append((archivo, hashes[h]))
+    if encontrados:
+        detalle = "\n".join(f"  {a}: secreto conocido '{e}'" for a, e in sorted(set(encontrados)))
+        rechazar(
+            "una linea aniadida contiene un secreto YA CONOCIDO.",
+            detalle + "\n"
+            "  Esto es exactamente lo que paso en la remediacion de 2026-08-20:\n"
+            "  el commit que saco la contrasenia la reescribio en el test.\n"
+            "  El test compara contra un valor INYECTADO, no contra el literal.",
+        )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
