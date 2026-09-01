@@ -95,12 +95,12 @@ su fecha de última verificación real, no una nueva.
 - **la **segunda cuenta** (`user_id=2`, rol `operator`) — cuenta con acceso, fuera de todo lo auditado
   (2026-09-01).** `user_id=2`, rol `operator`, `status=active`, creada
   2026-06-19 16:09:12. **Su contraseña no fue verificada contra nada**, y
-  ningún barrido de la auditoría buscó el dominio `monhagro.com` — el barrido
+  ningún barrido de la auditoría buscó el dominio de esa cuenta — el barrido
   por identidad cubrió `rich-hn.com` porque era el único dominio conocido.
   **Barrido CERRADO (2026-09-01): cero credenciales.** Enumeración completa de
   1.593 blobs en ambos repos con `refs/pull/*` traídas. la **segunda cuenta** (`user_id=2`, rol `operator`):
   **0 apariciones**. Búsqueda ampliada por regex (`omar@` cualquier dominio,
-  `monhagro`): los mismos resultados. `monhagro.com` aparece en **7 blobs de
+  el dominio): los mismos resultados. Ese dominio aparece en **7 blobs de
   `jax`**, todos como **dato de inventario**, y el escaneo de campos de
   credencial sobre los blobs completos —no solo las ventanas— dio **0
   coincidencias**. No hubo ningún valor que clasificar, así que el gate de
@@ -118,13 +118,20 @@ su fecha de última verificación real, no una nueva.
   hallazgo lateral de L4 (2026-09-01). Decisión pendiente.** No es una
   credencial, y por eso ningún barrido de secretos lo iba a marcar. En
   `missions/` de `jax`, fuera de HEAD desde `f6c8e7d` pero **vivo en la
-  historia**: nombres de usuario del panel Hestia (`richhn`, `monhagro`,
-  `melipaola`, `fynamicshn`, `bdihn`, `gescorphn`), sus dominios, cantidad de
-  cuentas de correo y tamaños de buzón, nombres de bases de datos
-  (`richhn_nextcloud`, `gescorph_website`, `gescorph_wp393`), rutas de
-  Maildir, y —en las versiones anteriores a `99ad51a`— **IPs internas y el
-  puerto SSH 58291**. Incluye además la declaración de que `sol-lex.com` y
-  `bdihn.com` **tienen certificados vencidos y el origen no responde a ACME**.
+  historia**: los nombres de usuario de panel de **6 clientes**, sus dominios, la cantidad
+  de cuentas de correo y el tamaño de buzón de cada uno, los nombres de sus
+  bases de datos con el gestor de contenidos que revelan, rutas de Maildir, y —en las versiones anteriores a `99ad51a`— **IPs internas y el
+  puerto SSH 58291**. Incluye además el diagnóstico de que **dos de esos dominios tienen
+  certificados vencidos hace más de un año y su origen no responde a ACME** —
+  una debilidad activa, documentada y no corregida.
+
+  **El detalle por cliente NO va en este documento.** Vive en
+  `/home/fruiz/security-audit-2026-09/INVENTARIO-CLIENTES.md` (chmod 600,
+  fuera de ambos repos). Nombrar acá a los clientes sería devolver a HEAD
+  exactamente lo que `f6c8e7d` sacó en agosto — y este documento es público.
+  Es el mismo criterio que se aplicó desde el principio a la credencial
+  ("referencia por ruta y por hallazgo, nunca por contenido"), que en la
+  primera redacción **no se aplicó a los datos de clientes**.
 
   **Por qué esto no entra en el mismo cajón que las 3 listas de IPs propias:**
   aquello era topología de Fernando y la decisión de aceptar el riesgo era
