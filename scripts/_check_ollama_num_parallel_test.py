@@ -71,7 +71,7 @@ def _spawn_with(value: str | None) -> subprocess.Popen:
         try:
             if Path(f"/proc/{proc.pid}/environ").read_bytes():
                 return proc
-        except OSError:
+        except OSError:  # fail-soft: bucle de espera con deadline -- un proceso recien forkeado todavia no expone environ; si nunca lo expone, el AssertionError de abajo lo convierte en rojo
             pass
         time.sleep(0.02)
     proc.kill()

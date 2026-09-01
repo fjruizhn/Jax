@@ -72,10 +72,9 @@ def parse_environ(blob: bytes) -> dict[str, str]:
     for chunk in blob.split(b"\0"):
         if not chunk:
             continue
-        try:
-            text = chunk.decode("utf-8", errors="replace")
-        except Exception:  # pragma: no cover - decode con errors= no lanza
-            continue
+        # errors="replace" no lanza: no hace falta un except aca, y uno de mas
+        # seria un fail-open silencioso sobre bytes que no se supieron leer.
+        text = chunk.decode("utf-8", errors="replace")
         if "=" not in text:
             continue
         key, _, value = text.partition("=")
