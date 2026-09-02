@@ -50,6 +50,25 @@ su fecha de última verificación real, no una nueva.
   existía. De ahí la regla nueva de §7 de `CONTEXT.md`.
   **Fecha de control más próxima:** `kimi`, **2026-09-10**.
 
+- **El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3
+  vació — verificado 2026-09-02.** **Causa:** el Bloque 3 movió las
+  capabilities a la DB (`MotorCatalog.from_db()`), pero
+  `policy/governance/validator.py::load_validation_context()` sigue
+  construyendo `MotorCatalog(config)` desde `las_manos/config.toml`, cuyo
+  `[capabilities.*]` tiene 0 entradas. La rama `in_catalog` de
+  `_resolve_capability_available` es código muerto en producción: un claim
+  sobre una capability que existe solo en la DB da `FACT_MISMATCH`.
+  **Evidencia:** `tests/test_governance_validator.py::test_capability_available_found_only_in_catalog_mode_unverified_but_accepted`
+  estaba ROJO en `master` (`assert 'FACT_MISMATCH' == 'VALID'`) y nadie lo
+  veía porque `tests/test_governance_*.py` no corría en ningún job de CI
+  (arreglado el mismo día: job `governance`, PR jax#<N>). **Tripwire:**
+  `tests/test_governance_validator.py::test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production`
+  fija el estado actual y se pone rojo cuando alguien arregle el validador —
+  ese rojo es la señal de cerrar este ítem. **Qué falta:** que el validador
+  lea el catálogo de la DB por el mismo camino que `jacobs`. **Por qué SP3
+  puede diferirlo:** `grounding.build_snapshot()` lee solo `ctx.ops`, nunca
+  la rama muerta (spec SP3 §3.3).
+
 - **Bypass de admin en el ruleset de `master` — PUSH DIRECTO CERRADO
   2026-08-28; el merge sin revisión NO, y abajo está medido por qué.** Los dos
   repos tienen protección de `master` con bypass para admin (ver

@@ -354,3 +354,37 @@ jobs:
           set -e
           test "$rc" -eq 1 || {
             echo "FAIL-OPEN: sin Ollama vivo el tripwire devolvio $rc, se esperaba 1."; exit 1; }
+
+  governance:
+    # policy/governance/ (SP1 de REFORMAS Fase 2, 2026-08-18) tenia 38 tests
+    # que NO corrian en ningun job hasta el 2026-09-02. Uno estaba rojo en
+    # master (catalogo TOML vacio desde el Bloque 3) y nadie lo veia. Este
+    # job existe para que eso no vuelva a pasar; SP3 agrega
+    # tests/test_governance_grounding.py aca mismo.
+    #
+    # Validado ROMPIENDOLO el 2026-09-02: un test rojo a proposito en la
+    # rama, CI rojo sobre el headSha real, quitado, CI verde. Ver PR.
+    #
+    # aiomysql: Step 5 (reproducir el runner, no el local) lo encontro --
+    # validator.py importa las_manos.motor_registry.catalog, que importa
+    # aiomysql a nivel de modulo. En .venv local ya estaba instalado por
+    # otra razon y lo tapaba; en un venv limpio con solo pytest/pyyaml/
+    # pydantic la coleccion de tests fallaba con ModuleNotFoundError antes
+    # de correr un solo test.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pyyaml pydantic aiomysql==0.3.2
+      - name: Suite de gobernanza
+        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -v
+      - name: Piso exacto de tests CORRIDOS
+        # Exacto y no "al menos": un piso con holgura deja perder tests en
+        # silencio. Medido 2026-09-02 con .venv local: 37 pasaban + 1 rojo;
+        # tras reemplazar el rojo por dos tests, 39.
+        run: |
+          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -q 2>&1 | tee /tmp/gov
+          grep -qE "^39 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 39 tests CORRIDOS."; exit 1; }
