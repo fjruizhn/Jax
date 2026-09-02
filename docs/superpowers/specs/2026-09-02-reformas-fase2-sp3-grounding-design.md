@@ -487,9 +487,30 @@ promete: **reordenar las entradas del TOML sin cambiar su contenido no cambia
 ni el hash ni ningún puntero.** La promesa de §5.2 queda reescrita en esos
 términos.
 
-Además, para cada uno de 1–6 y 8: la fila persistida lleva `authority` y
-`evidence_pointer` **tal como se recibieron** (o `NULL` si ausente), no
-normalizados — para que un análisis posterior pueda ver qué mandó el modelo.
+Además, para cada uno de 1–6 y 8, la fila persistida cumple:
+
+- **`authority` es SIEMPRE el valor derivado por el servidor.** Nunca lo que
+  mandó el modelo. Si el modelo incluye un campo `authority` en el claim, no
+  entra en esa columna: queda en el raw del claim, en `detail`. (Corrige una
+  redacción anterior de esta nota que contradecía §5.)
+- **`evidence_pointer` se persiste tal como se recibió** (`NULL` si ausente),
+  sin normalizar — para poder ver después qué mandó el modelo.
+
+### 9.1b Punteros malformados — cada caso por separado
+
+Un puntero que mata la background task es fail-open (P10): el turno queda sin
+validar y nadie lo ve. Cada uno de estos es un test propio, sobre snapshot S y
+`CAPABILITY_AVAILABLE` con args válidos:
+
+| puntero | → `status` | además |
+|---|---|---|
+| `""` | `PROVENANCE_MISMATCH` | la task completa |
+| `"capabilities/10"` (sin `/` inicial) | `PROVENANCE_MISMATCH` | la task completa |
+| `"/capabilities/abc"` | `PROVENANCE_MISMATCH` | la task completa |
+| `"/capabilities/-1"` | `PROVENANCE_MISMATCH` | la task completa; **no** indexa desde el final |
+| 300 caracteres | `PROVENANCE_MISMATCH` | `evidence_pointer` persistido **truncado a 100** (el `varchar`), el original completo en `detail`, el `INSERT` no falla |
+
+En todos: sin excepción, la background task completa y la fila existe.
 
 ### 9.2 Integración en `jax-platform`
 
@@ -498,17 +519,56 @@ Contra el service container `mariadb:11.8` del job `backend-tests-con-db`:
 - Cada estado de §4.1 produce su fila en `shadow_claim_verdicts` con
   `authority` y `evidence_pointer` correctos.
 - `shadow_messages` guarda snapshot y sha256.
-- Turno sin grounding → `NULL` en ambas columnas, nada se rompe.
 - Turno con snapshot fallido → `'ERROR'`, distinguible de `NULL` y de un hash.
+- **Toda fila que escribe `run_shadow_validation` tiene `grounding_snapshot_sha256`
+  distinto de `NULL`** — hash o `'ERROR'`, nunca vacío. Ver la nota siguiente.
+
+**`NULL` después de SP3 es solo filas legadas. Medido, no supuesto:**
+
+- `run_shadow_validation` tiene **un único sitio de encolado** (`chat.py:1106`).
+- `contract` es `None` cuando `is_canned` (`chat.py:1072`), que son las
+  salidas tempranas de `_invoke_facet_dispatch` (sin binding, gate denegado,
+  respuesta de identidad, transporte no soportado). Con `contract=None`,
+  `run_shadow_validation` **retorna antes del primer `INSERT`**
+  (`shadow_validation.py:160`): esos turnos no producen fila `NULL` —
+  **no producen fila**.
+- Si `_invoke_facet` lanza, la línea 1106 no se alcanza: tampoco hay fila.
+
+Por lo tanto, todo turno que llega a insertar pasó por el camino que construye
+el snapshot, y lleva hash o `'ERROR'`. **La única forma de que una fila nueva
+quede `NULL` sería que alguien llamara a `run_shadow_validation` sin
+snapshot.** Se cierra por firma: **el quinto argumento es obligatorio, sin
+default.** Un caller nuevo que lo omita falla al llamar, no produce una fila
+ambigua. Los claims de una fila `NULL` no se acreditan porque no existen: son
+filas anteriores a esta migración y no tienen veredictos que revisar.
 
 ### 9.3 El camino de producción, no solo el sintético
 
-`chat.py` arma el prompt y el snapshot, y **el que viaja al background task es
-el mismo que se renderizó**.
+**Aserción concreta.** Con el proveedor parcheado para capturar el payload
+saliente y `add_safe_task` parcheado para capturar sus argumentos, un
+`POST /api/chat` real produce **un solo objeto snapshot** que se verifica en
+sus dos consumidores:
+
+1. `render(snapshot_capturado) in system_prompt_que_salió` — lo que vio el
+   modelo es la representación de ese objeto, y no otra.
+2. `snapshot_sha256(snapshot_capturado) == grounding_snapshot_sha256`
+   persistido para ese turno — lo que se guardó es el hash de ese mismo
+   objeto.
+
+**Por qué no es "sha256 del bloque renderizado == columna":** el hash
+persistido es del **JSON canónico** (§5.2), no del texto renderizado, y el
+texto renderizado **deliberadamente no contiene el hash** (§5.1). Hashear el
+texto haría que un cambio de redacción de la instrucción cambiara el hash sin
+que cambie ningún hecho. La aserción de arriba verifica la misma propiedad —
+un objeto, dos consumidores, ninguno divergente— sin atar el hash al texto.
 
 Es la juntura donde un cambio de firma se escapa con CI entero en verde —
 lección 22 (`#98`→`#99`): `build()` tenía dos caminos de entrada y todos los
 tests entraban por el que no usa producción.
+
+**Regresión del contrato (§6.3):** un test que falla si el sufijo vuelve a
+decir *"SOLO esos dos campos"* o *"No incluyas ningún otro campo"* sin admitir
+`evidence_pointer`. Restaurar la línea 576 pone rojo.
 
 ### 9.4 Propiedad diferida: el detector de drift nace inerte
 
