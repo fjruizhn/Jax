@@ -53,31 +53,70 @@
 
 ---
 
-## Task 0: Gobernanza en CI de `jax`, y el test rojo que nadie veía
+## Task 0: Gobernanza en CI de `jax`, y el test rojo que nadie veía — PR PREVIO, SEPARADO
 
-**Por qué es tarea 0 y no un extra:** los tests de `grounding.py` (Tasks 1–3) van a `tests/test_governance_grounding.py`. Ningún job de `.github/workflows/policy.yml` de `jax` corre `tests/test_governance_*.py` hoy (medido 2026-09-02: `grep pytest .github/workflows/*.yml` no los menciona). Sin este job, todo lo que este plan escribe en `jax` quedaría verde por ausencia. Y al correrlos localmente hay **1 rojo en `master`**: `test_capability_available_found_only_in_catalog_mode_unverified_but_accepted` da `FACT_MISMATCH` en vez de `VALID`, porque `MotorCatalog(config)` construido desde `las_manos/config.toml` está **vacío** desde que el Bloque 3 movió las capabilities a la DB (`[capabilities.*]` del TOML tiene 0 entradas; `MotorCatalog.from_db()` es el camino real). La rama `in_catalog` de `_resolve_capability_available` es código muerto en producción. Arreglar el validador para leer la DB está FUERA de este plan; lo que se hace acá es dejar de tener un test que bendice un estado que no existe, registrar la deuda, y poner los tests en CI.
+**Decisión de Fernando (2026-09-02):** Task 0 va en su **propia rama y su propio
+PR**, mergeado a `master` **antes** de empezar Task 1. La rama de SP3
+(`reformas-fase2-sp3-grounding`) se rebasea sobre `master` después.
+
+**Por qué existe:** los tests de `grounding.py` (Tasks 1–3) van a
+`tests/test_governance_grounding.py`. Ningún job de `.github/workflows/policy.yml`
+de `jax` corre `tests/test_governance_*.py` hoy (medido 2026-09-02:
+`grep pytest .github/workflows/*.yml` no los menciona). Sin este job, todo lo
+que este plan escribe en `jax` quedaría verde por ausencia. Y al correrlos
+localmente hay **1 rojo en `master`**:
+`test_capability_available_found_only_in_catalog_mode_unverified_but_accepted`
+da `FACT_MISMATCH` en vez de `VALID`, porque `MotorCatalog(config)` construido
+desde `las_manos/config.toml` está **vacío** desde que el Bloque 3 movió las
+capabilities a la DB. La rama `in_catalog` de `_resolve_capability_available`
+es código muerto en producción. Arreglar el validador para leer la DB está
+FUERA de este plan.
+
+**Requisitos explícitos de Fernando para esta tarea:**
+1. **El job se valida ROMPIÉNDOLO.** Un test que falla a propósito, CI rojo
+   verificado sobre el headSha real, se quita, CI verde. Sin eso el job es
+   hipótesis (regla ya escrita en CONTEXT.md §9, ronda de alertas: *"un job que
+   nunca se vio fallar no es un job"*).
+2. **Piso medido:** correr los 38 ahora, reportar pass/fail exactos; piso = los
+   que pasan tras reemplazar el rojo.
+3. **El test que fija "el TOML está vacío" es un tripwire:** cuando alguien
+   arregle el validador para leer la DB, se pone rojo y obliga a actualizar.
+   **Nombre del test e ítem de DEUDA se referencian mutuamente.**
+4. **Ítem de DEUDA** con fecha de verificación 2026-09-02, causa, y evidencia
+   (nombre del test rojo).
+5. **CONTEXT.md §9:** nueva instancia (vigesimoctava lección de la familia) de
+   "código que afirma algo que no hace" — test verde por job inexistente
+   tapando rama muerta en producción.
 
 **Files:**
 - Modify: `tests/test_governance_validator.py:254-261`
 - Modify: `.github/workflows/policy.yml` (job nuevo al final)
 - Modify: `DEUDA.md` (sección "Bloquea trabajo", ítem nuevo)
+- Modify: `CONTEXT.md` (§9, entrada 2026-09-02 con lección vigesimoctava)
 
 **Interfaces:**
-- Produces: job `governance` en CI con piso exacto; `tests/test_governance_*.py` corriendo en CI.
+- Produces: job `governance` en CI con piso exacto; `tests/test_governance_*.py` corriendo en CI; tripwire `test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production`.
 
-- [ ] **Step 1: Ver el rojo con tus propios ojos**
+- [ ] **Step 0: Rama propia desde `master`**
 
-Run: `cd /home/fruiz/jax && git rev-parse --abbrev-ref HEAD && .venv/bin/python -m pytest tests/test_governance_validator.py -q 2>&1 | tail -3`
-Expected: rama `reformas-fase2-sp3-grounding`; `1 failed, N passed`; el failed es `test_capability_available_found_only_in_catalog_mode_unverified_but_accepted` con `assert 'FACT_MISMATCH' == 'VALID'`.
+```bash
+git fetch origin && git checkout -b ci/governance-en-ci origin/master && git rev-parse --abbrev-ref HEAD
+```
+Expected: `ci/governance-en-ci`. (La rama de SP3 NO se toca en esta tarea.)
 
-- [ ] **Step 2: Reemplazar el test rojo por dos que digan la verdad**
+- [ ] **Step 1: Medir los 38 — pass/fail exactos, con nombres**
 
-Reemplazar la función `test_capability_available_found_only_in_catalog_mode_unverified_but_accepted` (líneas 254–261) por:
+Run: `cd /home/fruiz/jax && .venv/bin/python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -q 2>&1 | tail -4`
+Expected: `1 failed, 37 passed`; el failed es `test_capability_available_found_only_in_catalog_mode_unverified_but_accepted` con `assert 'FACT_MISMATCH' == 'VALID'`. **Reportar los números exactos y el nombre.** Si el resultado difiere, PARAR y reportar antes de seguir.
+
+- [ ] **Step 2: Reemplazar el test rojo por dos que digan la verdad (uno es el tripwire)**
+
+Reemplazar la función `test_capability_available_found_only_in_catalog_mode_unverified_but_accepted` (líneas 254–261 de `tests/test_governance_validator.py`) por:
 
 ```python
 def test_capability_available_catalog_branch_with_synthetic_catalog_is_valid():
     """La rama `in_catalog` del resolver, ejercitada con un catálogo
-    ARMADO A MANO. No usa _real_ctx(): ver el test siguiente."""
+    ARMADO A MANO. No usa _real_ctx(): ver el tripwire siguiente."""
     ctx = validator.ValidationContext(
         ops=frozenset(),
         mutating_capabilities=frozenset(),
@@ -94,17 +133,29 @@ def test_capability_available_catalog_branch_with_synthetic_catalog_is_valid():
 
 
 def test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production():
-    """Hasta el 2026-09-02 este archivo tenía un test que afirmaba que
+    """TRIPWIRE. Referenciado por nombre desde DEUDA.md (ítem "El resolver de
+    CAPABILITY_AVAILABLE consulta un catálogo que el Bloque 3 vació",
+    verificado 2026-09-02).
+
+    Hasta el 2026-09-02 este archivo tenía un test que afirmaba que
     `code_swarm` se encontraba en el catálogo REAL (_real_ctx) y daba VALID.
     Estaba rojo en master y nadie lo veía porque tests/test_governance_*.py
-    no corría en CI. La causa: el Bloque 3 (2026-08-2x) movió las
+    no corría en ningún job de CI. La causa: el Bloque 3 movió las
     capabilities a la DB (`MotorCatalog.from_db()`); `[capabilities.*]` del
-    TOML quedó vacío, y `load_validation_context()` sigue construyendo
-    `MotorCatalog(config)` desde el TOML. Resultado: en producción la rama
-    `in_catalog` del resolver NUNCA se toma. Este test fija ese hecho para
-    que deje de ser invisible; la deuda está en DEUDA.md."""
+    TOML quedó vacío, y `validator.load_validation_context()` sigue
+    construyendo `MotorCatalog(config)` desde el TOML. Resultado: en
+    producción la rama `in_catalog` de `_resolve_capability_available` NUNCA
+    se toma.
+
+    Cuando alguien arregle el validador para leer la DB, este test se pone
+    ROJO. Eso es lo que debe pasar: obliga a (1) cerrar el ítem de DEUDA.md,
+    (2) revisar §3.3 del spec de SP3 y `grounding.SECTION_PREDICATE`, y
+    (3) reemplazar este test por el que describa el estado nuevo."""
     ctx = _real_ctx()
-    assert ctx.catalog.get_capability("code_swarm") is None
+    assert ctx.catalog.get_capability("code_swarm") is None, (
+        "el catálogo real ya NO está vacío: alguien arregló el validador. "
+        "Cerrar el ítem de DEUDA.md y actualizar este test -- ver docstring."
+    )
     claim = _claim(
         predicate="CAPABILITY_AVAILABLE",
         args={"name": "code_swarm", "mode": "read_only"},
@@ -113,14 +164,14 @@ def test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_pr
     assert verdict.status == "FACT_MISMATCH"
 ```
 
-- [ ] **Step 3: Correr la suite de gobernanza entera y anotar el número**
+- [ ] **Step 3: Medir el piso**
 
-Run: `cd /home/fruiz/jax && .venv/bin/python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -q 2>&1 | tail -1`
-Expected: `39 passed` (38 anteriores − 1 reemplazado + 2 nuevos). **Anotar el número real**: es el piso del job.
+Run: el mismo comando del Step 1.
+Expected: `39 passed` (37 + 2). **Anotar el número real: es el piso.**
 
 - [ ] **Step 4: Job `governance` en CI**
 
-Agregar al final de `.github/workflows/policy.yml` de `jax` (misma indentación que `ollama-num-parallel`):
+Agregar al final de `.github/workflows/policy.yml` (misma indentación que `ollama-num-parallel`):
 
 ```yaml
   governance:
@@ -129,6 +180,9 @@ Agregar al final de `.github/workflows/policy.yml` de `jax` (misma indentación 
     # master (catálogo TOML vacío desde el Bloque 3) y nadie lo veía. Este
     # job existe para que eso no vuelva a pasar; SP3 agrega
     # tests/test_governance_grounding.py acá mismo.
+    #
+    # Validado ROMPIÉNDOLO el 2026-09-02: un test rojo a propósito en la
+    # rama, CI rojo sobre el headSha real, quitado, CI verde. Ver PR.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,56 +194,120 @@ Agregar al final de `.github/workflows/policy.yml` de `jax` (misma indentación 
         run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -v
       - name: Piso exacto de tests CORRIDOS
         # Exacto y no "al menos": un piso con holgura deja perder tests en
-        # silencio. Medido 2026-09-02 con .venv local antes de este job: 39.
+        # silencio. Medido 2026-09-02 con .venv local: 37 pasaban + 1 rojo;
+        # tras reemplazar el rojo por dos tests, 39.
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -q 2>&1 | tee /tmp/gov
           grep -qE "^39 passed" /tmp/gov || {
             echo "PISO ROTO: se esperaban 39 tests CORRIDOS."; exit 1; }
 ```
 
-Si el número del Step 3 no fue 39, usar el medido en las dos ocurrencias.
+Si el número del Step 3 no fue 39, usar el medido en las dos ocurrencias y en el comentario.
 
-- [ ] **Step 5: Verificar que el job corre en un entorno limpio (sin `.venv`, sin `/etc/jax`)**
+- [ ] **Step 5: Reproducir el runner, no el local**
 
-Run: `cd /home/fruiz/jax && python3 -m venv /tmp/claude-1000/-home-fruiz/5af0a683-1b2f-4ae0-8a06-226199ac76b7/scratchpad/venv-gov && /tmp/claude-1000/-home-fruiz/5af0a683-1b2f-4ae0-8a06-226199ac76b7/scratchpad/venv-gov/bin/pip install -q pytest pyyaml pydantic && /tmp/claude-1000/-home-fruiz/5af0a683-1b2f-4ae0-8a06-226199ac76b7/scratchpad/venv-gov/bin/python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -q 2>&1 | tail -1`
-Expected: el mismo número que el Step 3. Si difiere, el job va a fallar en CI — averiguar qué dependencia falta ANTES de commitear (lección: reproducir el runner, no el local).
+Run: `cd /home/fruiz/jax && python3 -m venv /tmp/claude-1000/-home-fruiz/5af0a683-1b2f-4ae0-8a06-226199ac76b7/scratchpad/venv-gov && /tmp/claude-1000/-home-fruiz/5af0a683-1b2f-4ae0-8a06-226199ac76b7/scratchpad/venv-gov/bin/pip install -q pytest pyyaml pydantic && env -i PATH=/usr/bin:/bin HOME=/tmp/claude-1000/-home-fruiz/5af0a683-1b2f-4ae0-8a06-226199ac76b7/scratchpad /tmp/claude-1000/-home-fruiz/5af0a683-1b2f-4ae0-8a06-226199ac76b7/scratchpad/venv-gov/bin/python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -q 2>&1 | tail -1`
+Expected: el mismo número que el Step 3. `env -i` simula que no hay `/etc/jax/.env` ni `$HOME` real. Si difiere, averiguar qué dependencia o ruta falta ANTES de commitear.
 
-- [ ] **Step 6: Registrar la deuda**
+- [ ] **Step 6: Registrar la deuda (referencia mutua con el tripwire)**
 
 En `DEUDA.md`, sección `## Bloquea trabajo`, agregar después del bloque ESTADO:
 
 ```markdown
 - **El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3
-  vació — encontrado 2026-09-02.** `validator.load_validation_context()`
-  construye `MotorCatalog(config)` desde `las_manos/config.toml`, pero desde el
-  Bloque 3 las capabilities viven en la DB (`MotorCatalog.from_db()`) y
-  `[capabilities.*]` del TOML tiene 0 entradas. La rama `in_catalog` de
+  vació — verificado 2026-09-02.** **Causa:** el Bloque 3 movió las
+  capabilities a la DB (`MotorCatalog.from_db()`), pero
+  `policy/governance/validator.py::load_validation_context()` sigue
+  construyendo `MotorCatalog(config)` desde `las_manos/config.toml`, cuyo
+  `[capabilities.*]` tiene 0 entradas. La rama `in_catalog` de
   `_resolve_capability_available` es código muerto en producción: un claim
-  sobre una capability de la DB da `FACT_MISMATCH` aunque exista. Lo tapaba un
-  test que afirmaba lo contrario y que estaba rojo en `master` sin que nadie
-  lo viera, porque `tests/test_governance_*.py` no corría en CI (arreglado el
-  mismo día: job `governance`). **Qué falta:** que el validador lea el catálogo
-  de la DB por el mismo camino que `jacobs`, o que el snapshot de SP3 y el
-  resolver declaren explícitamente que solo cubren `ops`. Verificado contra el
-  árbol el 2026-09-02, con `tests/test_governance_validator.py::test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production`
-  como testigo.
+  sobre una capability que existe solo en la DB da `FACT_MISMATCH`.
+  **Evidencia:** `tests/test_governance_validator.py::test_capability_available_found_only_in_catalog_mode_unverified_but_accepted`
+  estaba ROJO en `master` (`assert 'FACT_MISMATCH' == 'VALID'`) y nadie lo
+  veía porque `tests/test_governance_*.py` no corría en ningún job de CI
+  (arreglado el mismo día: job `governance`, PR jax#<N>). **Tripwire:**
+  `tests/test_governance_validator.py::test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production`
+  fija el estado actual y se pone rojo cuando alguien arregle el validador —
+  ese rojo es la señal de cerrar este ítem. **Qué falta:** que el validador
+  lea el catálogo de la DB por el mismo camino que `jacobs`. **Por qué SP3
+  puede diferirlo:** `grounding.build_snapshot()` lee solo `ctx.ops`, nunca
+  la rama muerta (spec SP3 §3.3).
 ```
 
-- [ ] **Step 7: Commit**
+Reemplazar `jax#<N>` por el número real del PR una vez creado (Step 9).
+
+- [ ] **Step 7: CONTEXT.md §9 — la instancia nueva**
+
+En `CONTEXT.md`, en la sección `## 9. Historial de hitos`, agregar una entrada nueva ANTES de la última entrada existente de 2026-09-01 (las entradas van de más reciente a más antigua — verificar leyendo las cabeceras `- **2026-` cercanas y respetar el orden que tengan), con este formato exacto:
+
+```markdown
+- **2026-09-02: gobernanza en CI -- los 38 tests de policy/governance no corrían en ningún job, y uno estaba rojo en master tapando una rama muerta en producción (PR jax#<N>, mergeado). DISCLOSURE: ejecutado con `subagent-driven-development` (superpowers), un implementador y un revisor independientes vía Agent; el controller verificó el CI rojo y el CI verde sobre el headSha real por API, no por el reporte del subagente.**
+  - Medido: `tests/test_governance_*.py` (SP1, 2026-08-18) no aparecía en ningún `pytest` de `.github/workflows/policy.yml`. Corridos a mano: 37 passed, 1 failed (`test_capability_available_found_only_in_catalog_mode_unverified_but_accepted`, `assert 'FACT_MISMATCH' == 'VALID'`). Causa: el Bloque 3 movió capabilities a la DB y `load_validation_context()` sigue construyendo `MotorCatalog(config)` desde el TOML vacío -- la rama `in_catalog` del resolver es código muerto en producción. Ítem en DEUDA.md; tripwire `test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production`.
+  - El job `governance` se validó ROMPIÉNDOLO (un test rojo a propósito → CI rojo sobre el sha real → quitado → CI verde), aplicando la regla de la ronda de alertas ("un job que nunca se vio fallar no es un job").
+  - **Lección de método PERMANENTE (agregada por instrucción explícita de Fernando, 2026-09-02):** **Vigesimoctava de la familia. Un test verde no dice nada si ningún job lo corre, y un test rojo que nadie corre es peor que no tener test: afirma un estado que no existe y nadie lo contradice.** Caso: un test que afirmaba que la rama `in_catalog` del resolver encontraba `code_swarm` en el catálogo real llevaba semanas rojo en `master` sin que nadie lo viera, mientras esa rama era código muerto en producción. Es la misma familia que "el registro describe el estado previsto, no el medido", pero con un agravante: acá el instrumento de medición EXISTÍA y no estaba conectado. **Regla accionable: al agregar o revisar una suite, la pregunta no es "¿pasa?" sino "¿quién la corre, y cuándo fue la última vez que se la vio fallar?"**. Corolario: el reemplazo de un test así no es borrarlo, es dejar un tripwire que se ponga rojo cuando el estado real cambie.
+```
+
+- [ ] **Step 8: Commit**
 
 ```bash
-cd /home/fruiz/jax && git add tests/test_governance_validator.py .github/workflows/policy.yml DEUDA.md && git commit -F - <<'EOF'
+cd /home/fruiz/jax && git add tests/test_governance_validator.py .github/workflows/policy.yml DEUDA.md CONTEXT.md && git commit -F - <<'EOF'
 ci(governance): los 38 tests de policy/governance entran a CI -- uno estaba rojo en master y nadie lo veia
 
 El catalogo que construye load_validation_context() desde el TOML esta vacio
 desde el Bloque 3 (capabilities en DB). El test que afirmaba lo contrario se
-reemplaza por uno que ejercita la rama con catalogo sintetico y otro que fija
-el hecho medido. Deuda registrada en DEUDA.md.
+reemplaza por uno que ejercita la rama con catalogo sintetico y un TRIPWIRE
+que fija el hecho medido y se pone rojo cuando alguien arregle el validador.
+Deuda en DEUDA.md, leccion vigesimoctava en CONTEXT.md.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_011AVPMngV4W1np18dUPa542
 EOF
+git push -u origin ci/governance-en-ci
 ```
+
+- [ ] **Step 9: PR, y anotar el número en DEUDA.md y CONTEXT.md**
+
+`gh pr create --title "ci(governance): los 38 tests de policy/governance entran a CI -- uno estaba rojo en master y nadie lo veia" --body-file <archivo>` con cuerpo que diga: qué se midió (37/1 y el nombre), la causa, el tripwire, y que **el job se va a validar rompiéndolo en el commit siguiente**. Tomar el número `N` del PR y reemplazar `jax#<N>` en `DEUDA.md` y `CONTEXT.md`; commit `docs: numero del PR` y push.
+
+- [ ] **Step 10: ROMPER el job a propósito**
+
+Agregar al final de `tests/test_governance_validator.py`:
+
+```python
+def test_ROMPER_EL_JOB_A_PROPOSITO_se_quita_en_el_commit_siguiente():
+    assert False, "canario: si esto no pone rojo al job governance, el job no existe"
+```
+
+```bash
+cd /home/fruiz/jax && git add tests/test_governance_validator.py && git commit -m "test: canario que DEBE poner rojo al job governance (se revierte en el commit siguiente)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_011AVPMngV4W1np18dUPa542" && git push && git rev-parse HEAD
+```
+
+- [ ] **Step 11: Verificar el ROJO sobre el sha real (por API, no por la página del PR)**
+
+Run: `cd /home/fruiz/jax && SHA=$(git rev-parse HEAD) && until [ "$(gh api repos/fjruizhn/Jax/commits/$SHA/check-runs --jq '[.check_runs[] | select(.name=="governance")] | .[0].status')" = "completed" ]; do sleep 20; done; gh api repos/fjruizhn/Jax/commits/$SHA/check-runs --jq '.check_runs[] | select(.name=="governance") | "\(.status)\t\(.conclusion)\t\(.name)"'`
+Expected: `completed	failure	governance`. **Guardar el sha y la salida: van al cuerpo del PR.** Si sale `success`, el job NO corre lo que dice — PARAR.
+
+- [ ] **Step 12: Quitar el canario y verificar el VERDE sobre el sha real**
+
+```bash
+cd /home/fruiz/jax && git revert --no-edit HEAD && git push && git rev-parse HEAD
+```
+Run: el mismo comando del Step 11.
+Expected: `completed	success	governance`. Además, TODOS los checks del sha en `success` (los otros jobs no deben haberse roto): `gh api repos/fjruizhn/Jax/commits/$SHA/check-runs --jq '.check_runs[] | "\(.conclusion)\t\(.name)"' | sort -u`.
+
+- [ ] **Step 13: Cuerpo del PR con la evidencia, y merge**
+
+Editar el cuerpo del PR (`gh pr edit N --body-file ...`) agregando una sección `## Validado rompiéndolo` con los dos shas y las dos salidas del Step 11 y 12, literales. Luego `gh pr merge N --squash --delete-branch`. Verificar: `git -C /home/fruiz/jax log -1 --format='%h %s' origin/master` muestra el squash de Task 0.
+
+- [ ] **Step 14: Rebasear la rama de SP3 sobre el master nuevo**
+
+```bash
+cd /home/fruiz/jax && git checkout reformas-fase2-sp3-grounding && git rebase origin/master && git log --oneline -6 && git rev-parse --abbrev-ref HEAD
+```
+Expected: los 4 commits del spec/plan encima del squash de Task 0; rama `reformas-fase2-sp3-grounding`. Recién ahora empieza Task 1.
 
 ---
 
@@ -944,7 +1062,7 @@ Expected: `79 passed` (39 + 29 + 11). **Anotar el número real.**
 
 - [ ] **Step 5: Agregar `tests/test_governance_grounding.py` al job `governance` y subir el piso**
 
-En `.github/workflows/policy.yml` (job `governance`, Task 0): agregar `tests/test_governance_grounding.py` al final de las DOS líneas `python -m pytest ...`, y cambiar `"^39 passed"` y el mensaje `39` por el número del Step 4, con este comentario reemplazando el anterior:
+En `.github/workflows/policy.yml` (job `governance`, ya en `master` por el PR de Task 0): agregar `tests/test_governance_grounding.py` al final de las DOS líneas `python -m pytest ...`, y cambiar `"^39 passed"` y el mensaje `39` por el número del Step 4, con este comentario reemplazando el anterior:
 
 ```yaml
         # Medido 2026-09-02: 39 (SP1 + arreglo del test rojo) + N

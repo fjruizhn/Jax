@@ -148,6 +148,33 @@ propósitos distintos que se solapan, no dos copias de uno.
 
 **La instancia sospechada no existe. No se registra como hallazgo.**
 
+### 3.3 `build_snapshot` lee SOLO la fuente que el resolver resuelve de verdad
+
+Confirmado contra el código (2026-09-02), y es condición de que este spec sea
+diferible respecto de la deuda del catálogo:
+
+`_resolve_capability_available` tiene dos ramas: `in_ops` (lee `ctx.ops`, que
+`load_validation_context()` toma de `[ops.*]` en `las_manos/config.toml`) e
+`in_catalog` (lee `ctx.catalog`, un `MotorCatalog(config)` construido **desde el
+mismo TOML**). Desde el Bloque 3 las capabilities viven en la DB
+(`MotorCatalog.from_db()`), `[capabilities.*]` del TOML tiene 0 entradas, y
+**la rama `in_catalog` es código muerto en producción**. Lo tapaba un test que
+afirmaba lo contrario, rojo en `master` sin que nadie lo viera porque
+`tests/test_governance_*.py` no corría en CI. Ver DEUDA.md (ítem del
+2026-09-02) y el tripwire
+`test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production`.
+
+**`build_snapshot(ctx)` lee `ctx.ops` y `ctx.mutating_capabilities`, y nada
+más.** No toca `ctx.catalog`. Por lo tanto el snapshot cubre exactamente lo que
+la rama viva del resolver puede confirmar, y el invariante de §3 ("todo hecho
+inyectado tiene quién lo re-resuelva") se cumple hoy. **Si `build_snapshot`
+tocara la rama muerta, esta deuda no sería diferible**: se estaría inyectando
+como observado algo que ningún resolver puede verificar.
+
+Consecuencia declarada: una capability que exista solo en la DB no aparece en
+el snapshot **ni** puede dar `VALID` hoy. Cuando el validador pase a leer la DB,
+el tripwire se pone rojo y obliga a revisar esta sección y `SECTION_PREDICATE`.
+
 ---
 
 ## 4. Semántica de veredictos
