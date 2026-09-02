@@ -188,18 +188,26 @@ etiqueta:
 
 ### 4.2 Estados nuevos
 
-**`PROVENANCE_MISMATCH`** — aprobado.
+Dos, los dos aprobados. Ninguno amplía la columna: `PROVENANCE_MISMATCH` 19,
+`GROUNDING_UNAVAILABLE` 21, contra `status VARCHAR(30)` y el más largo
+existente `RESOLVER_NOT_IMPLEMENTED` 24.
 
-**`GROUNDING_UNAVAILABLE`** — propuesto, **y contradice la decisión de "un solo
-estado nuevo"**. Se propone igual porque la alternativa es peor: reusar
-`AUTHORITY_INVALID` y distinguir por join a
-`shadow_messages.grounding_snapshot_sha256 = 'ERROR'` obliga a que **cada
-análisis futuro se acuerde de hacer el join**. Eso convierte "mirar no es
-medir" en una propiedad del esquema, y contaría una falla del sistema como
-conducta del modelo en cualquier consulta que omita el join.
+**`PROVENANCE_MISMATCH`** — el claim trae puntero y el puntero no resuelve a
+una entrada del snapshot, **o** resuelve y los args no coinciden con ella.
+Conducta del modelo.
 
-**Punto abierto para la revisión: si se rechaza, el spec vuelve a
-`AUTHORITY_INVALID` + join, con la consecuencia escrita.**
+**`GROUNDING_UNAVAILABLE`** — el snapshot del turno falló al construirse
+(`grounding_snapshot_sha256 = 'ERROR'`). Condición cerrada:
+
+```
+sha256 = 'ERROR'  →  paso 0  →  authority = INFERIDO, status = GROUNDING_UNAVAILABLE
+```
+
+Se aplica a **todo** claim del turno, traiga puntero o no, tenga resolver o no.
+Falla del sistema. Se le da estado propio porque la alternativa —reusar
+`AUTHORITY_INVALID` y desambiguar por join a `shadow_messages`— imputaría al
+modelo un fallo del servidor y obligaría a desambiguar a mano en cada
+análisis: la misma razón por la que "sin resolver" no se mezcla con "no citó".
 
 **No se agrega `UNGROUNDED`.** Con la definición acordada —ausencia de resolver
 para el predicado— es la misma condición que `RESOLVER_NOT_IMPLEMENTED`, que ya
@@ -207,10 +215,6 @@ existe en el `Literal` de `Verdict` y hoy es inalcanzable solo porque
 `authority` corta antes. Bajo el orden nuevo pasa a ser alcanzable y su nombre
 ya lo describe. Agregar un sinónimo sería la deriva de nombres que este
 proyecto viene pagando.
-
-Longitudes contra `status VARCHAR(30)`: `PROVENANCE_MISMATCH` 19,
-`GROUNDING_UNAVAILABLE` 21, el más largo existente `RESOLVER_NOT_IMPLEMENTED`
-24. **Entran sin ampliar la columna.**
 
 ### 4.3 Autoridad y veredicto son dimensiones distintas
 
@@ -268,10 +272,13 @@ json.dumps(snapshot, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 y la lista de capabilities **ordenada por `name`**, no por orden de aparición
 en el TOML.
 
-**Razón:** si el orden dependiera del archivo, agregar una op en el medio
-correría todos los `evidence_pointer` de las siguientes y rompería las citas
-**sin que cambie ningún hecho**. La clave de orden es parte del contrato, no
-un detalle de implementación.
+**Razón:** si el orden dependiera del archivo, **reordenar** el TOML sin
+cambiar ningún hecho correría los `evidence_pointer` y rompería las citas. Con
+orden por `name`, la promesa es exacta: **mismo contenido ⇒ mismo hash y mismos
+punteros, en cualquier orden de archivo.** Agregar o quitar una op sí puede
+mover punteros — y debe: el snapshot cambió, y un claim del turno anterior no
+debe acreditarse contra el nuevo (§5.5). La clave de orden es parte del
+contrato, no un detalle de implementación.
 
 ### 5.3 Normalización de args — una sola función para los dos lados
 
@@ -452,32 +459,37 @@ TDD. La parte pura primero, porque ahí está la lógica de gobernanza.
 
 ### 9.1 Unitarias en `jax` (sin I/O, sin DB)
 
-Los cuatro estados **provocados a propósito**, más las propiedades del
-snapshot:
+Cada fila es un test con su entrada completa y su salida esperada. Snapshot
+base **S** = construido desde `ctx` A, que tiene `write_file` en
+`/capabilities/10` con `mode=mutating` (orden por `name`, §5.2).
 
-1. `JOB_STATUS` **con puntero inventado** → `RESOLVER_NOT_IMPLEMENTED`, **no**
-   `PROVENANCE_MISMATCH`. Fija el orden 3-antes-de-5.
-2. `CAPABILITY_AVAILABLE` **con puntero inventado** → `PROVENANCE_MISMATCH`,
-   **no** `RESOLVER_NOT_IMPLEMENTED`.
-3. `CAPABILITY_AVAILABLE` sin puntero → `AUTHORITY_INVALID`, `authority=INFERIDO`.
-4. **Puntero válido, args que no coinciden** → `PROVENANCE_MISMATCH`.
-   *Es el test que sostiene el diseño entero:* sin él, citar lava priors como
-   observación (§2.2).
-5. Puntero válido con args exactos → `authority=OBSERVADO`, `provenance_ref`
-   escrito por el servidor, el resolver corre.
-6. Snapshot en `ERROR` + claim **con puntero** → `GROUNDING_UNAVAILABLE`,
-   `authority=INFERIDO`, **no** `PROVENANCE_MISMATCH`.
-7. Propiedades del snapshot: hash determinista sobre el mismo estado, distinto
-   ante cambio; `render()` **no** contiene el hash; **agregar una op no mueve
-   el `evidence_pointer` de las demás** (test del orden canónico de §5.2);
-   `build_snapshot` que falla **lanza** (P10), no devuelve vacío.
-8. **`FACT_MISMATCH` ejercitado rompiendo la rama a mano:** `build_snapshot`
-   desde `ctx` A; el claim cita bien una entrada de ese snapshot y se acredita
-   contra **él** (→ `OBSERVADO`); después `validate` corre el resolver contra
-   `ctx` B, que tiene esa op de menos → `FACT_MISMATCH`. Las dos capas de §4.3
-   ejercitadas en el mismo test, con datos distintos a propósito.
-   *Necesario porque en producción hoy no puede dispararse (§9.4). Una rama sin
-   test es una hipótesis.*
+| # | snapshot | predicado | `evidence_pointer` | args | → `authority` | → `status` | fija |
+|---|---|---|---|---|---|---|---|
+| 1 | S | `JOB_STATUS` | `/capabilities/10` (inventado: el predicado no tiene entradas) | `{job_id, status}` válidos | `INFERIDO` | `RESOLVER_NOT_IMPLEMENTED` | paso 3 antes del 5: sin resolver no hay citación falsa posible |
+| 2 | S | `CAPABILITY_AVAILABLE` | `/capabilities/99` (índice inexistente) | `{name=write_file, mode=mutating}` | `INFERIDO` | `PROVENANCE_MISMATCH` | puntero que no resuelve |
+| 3 | S | `CAPABILITY_AVAILABLE` | *(ausente)* | `{name=write_file, mode=mutating}` | `INFERIDO` | `AUTHORITY_INVALID` | se ofreció grounding y no citó |
+| 4 | S | `CAPABILITY_AVAILABLE` | `/capabilities/10` | `{name=write_file, mode=read_only}` | `INFERIDO` | `PROVENANCE_MISMATCH` | **la citación falsa (§2.2): puntero real, args que no coinciden** |
+| 5 | S | `CAPABILITY_AVAILABLE` | `/capabilities/10` | `{name=write_file, mode=mutating}` | `OBSERVADO` | `VALID` | camino feliz; `provenance_ref = tool_result:sha256:<sha de S>` escrito por el servidor |
+| 6 | `ERROR` | `CAPABILITY_AVAILABLE` | `/capabilities/10` | `{name=write_file, mode=mutating}` | `INFERIDO` | `GROUNDING_UNAVAILABLE` | paso 0 antes que todo; **no** `PROVENANCE_MISMATCH` aunque el puntero "parezca" válido |
+| 7a | S vs S' | — | — | — | — | `sha256(S) == sha256(S')` si `ctx` es igual; `!=` si difiere en una op | hash determinista |
+| 7b | S | — | — | — | — | `sha256(S) not in render(S)` | el hash no viaja al prompt |
+| 7c | S vs S+`aaa_op` | — | — | — | — | `/capabilities/N` de `write_file` **no cambia** al agregar una op que ordena antes... | — ver nota |
+| 7d | `ctx` roto | — | — | — | — | `build_snapshot` **lanza**; nunca devuelve `[]` ni `None` | P10 |
+| 8 | S (de `ctx` A) | `CAPABILITY_AVAILABLE` | `/capabilities/10` | `{name=write_file, mode=mutating}` | `OBSERVADO` | `FACT_MISMATCH` | acreditación contra S; `validate` con `ctx` B = A sin `write_file`. Las dos capas de §4.3 con datos distintos a propósito |
+
+**Nota sobre 7c, corregida al escribir la tabla.** Ordenar por `name` hace
+que los punteros sean estables ante **cambios del archivo** (reordenar el TOML
+no mueve nada), pero **no** ante inserciones que ordenen antes: agregar
+`aaa_op` sí corre el índice de todas las demás. Eso es correcto y deseable —
+el snapshot cambió, su hash cambió, y un claim del turno anterior no debe
+acreditarse contra el nuevo (§5.5). Lo que 7c prueba entonces es lo que sí se
+promete: **reordenar las entradas del TOML sin cambiar su contenido no cambia
+ni el hash ni ningún puntero.** La promesa de §5.2 queda reescrita en esos
+términos.
+
+Además, para cada uno de 1–6 y 8: la fila persistida lleva `authority` y
+`evidence_pointer` **tal como se recibieron** (o `NULL` si ausente), no
+normalizados — para que un análisis posterior pueda ver qué mandó el modelo.
 
 ### 9.2 Integración en `jax-platform`
 
@@ -532,12 +544,11 @@ El método que salvó el diagnóstico de SP2:
 
 ---
 
-## 10. Puntos abiertos para la revisión
+## 10. Decisiones de la revisión
 
-1. **`GROUNDING_UNAVAILABLE`** (§4.2) es un segundo estado nuevo y contradice
-   la decisión de "un solo estado nuevo". La alternativa —`AUTHORITY_INVALID` +
-   join a `grounding_snapshot_sha256='ERROR'`— está escrita con su
-   consecuencia. Decisión pendiente.
-2. **`hyde` paga 23.3% de su prompt** en grounding y es la faceta con la
-   persona más corta. No se propone excluirla (rompería la uniformidad del
-   canal), pero el número queda anotado por si el costo pesa más que el dato.
+1. **`GROUNDING_UNAVAILABLE`: aprobado** como segundo estado nuevo (§4.2). La
+   alternativa `AUTHORITY_INVALID` + join se descartó por imputar al modelo un
+   fallo del servidor y desambiguarse a mano.
+2. **`hyde` paga 23.3% de su prompt: anotado, no se excluye.** Excluir una
+   faceta del canal por costo sería fail-open selectivo — la regla se
+   cumpliría en todas menos en la que más cuesta.
