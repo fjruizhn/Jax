@@ -219,3 +219,89 @@ def test_non_string_pointer_is_mismatch_not_exception():
     for bad in (7, None, ["/capabilities/1"], {"p": 1}):
         acc = grounding.accredit(_raw(pointer=bad), SNAP_A)
         assert acc.outcome == ("NO_POINTER" if bad is None else "MISMATCH")
+
+
+# --- validate() con acreditación: el orden 0-6 del spec §4.1 ----------------
+
+import claims  # noqa: E402
+import loaders  # noqa: E402
+
+PREDICATES = {
+    "CAPABILITY_AVAILABLE": loaders.PredicateSpec("CAPABILITY_AVAILABLE", ("name", "mode"), "Registro de capabilities"),
+    "JOB_STATUS": loaders.PredicateSpec("JOB_STATUS", ("job_id", "status"), "Scheduler"),
+}
+
+
+def _validate(raw, grounding_result, ctx=CTX_A):
+    acc = grounding.accredit(raw, grounding_result)
+    claim = claims.Claim(
+        predicate=raw["predicate"],
+        args=grounding.normalize_args(raw["args"]),
+        authority=acc.authority,
+        provenance_ref=acc.provenance_ref,
+        evidence_pointer=acc.evidence_pointer_raw if isinstance(acc.evidence_pointer_raw, str) else "",
+        scope="test",
+    )
+    return validator.validate(claim, PREDICATES, ctx, accreditation=acc)
+
+
+def test_1_job_status_with_invented_pointer_is_resolver_not_implemented_not_mismatch():
+    v = _validate(_raw(predicate="JOB_STATUS", args={"job_id": "1", "status": "ok"},
+                       pointer="/capabilities/1"), SNAP_A)
+    assert v.status == "RESOLVER_NOT_IMPLEMENTED"
+
+
+def test_2_capability_with_invented_pointer_is_provenance_mismatch_not_resolver():
+    v = _validate(_raw(pointer="/capabilities/99"), SNAP_A)
+    assert v.status == "PROVENANCE_MISMATCH"
+
+
+def test_3_capability_without_pointer_is_authority_invalid():
+    v = _validate(_raw(), SNAP_A)
+    assert v.status == "AUTHORITY_INVALID"
+
+
+def test_4_forged_citation_is_provenance_mismatch():
+    v = _validate(_raw(args={"name": "write_file", "mode": "read_only"}, pointer="/capabilities/1"), SNAP_A)
+    assert v.status == "PROVENANCE_MISMATCH"
+
+
+def test_5_accredited_claim_reaches_the_resolver_and_is_valid():
+    v = _validate(_raw(pointer="/capabilities/1"), SNAP_A)
+    assert v.status == "VALID"
+
+
+def test_6_snapshot_error_is_grounding_unavailable_before_anything_else():
+    v = _validate(_raw(pointer="/capabilities/1"), grounding.SnapshotError("boom"))
+    assert v.status == "GROUNDING_UNAVAILABLE"
+    # También para un predicado sin resolver y para uno desconocido: paso 0 va primero.
+    v2 = _validate(_raw(predicate="JOB_STATUS", args={"job_id": "1", "status": "ok"}), grounding.SnapshotError("boom"))
+    assert v2.status == "GROUNDING_UNAVAILABLE"
+
+
+def test_8_fact_mismatch_exercised_by_breaking_the_branch_by_hand():
+    # Acredita contra SNAP_A (de CTX_A) -> OBSERVADO. Resuelve contra ctx B
+    # = A sin write_file -> FACT_MISMATCH. Las dos capas (spec §4.3) con
+    # datos distintos a propósito, porque en producción hoy no puede
+    # dispararse (spec §9.4).
+    ctx_b = _ctx({"read_file"})
+    raw = _raw(pointer="/capabilities/1")
+    acc = grounding.accredit(raw, SNAP_A)
+    assert acc.authority == "OBSERVADO"
+    v = _validate(raw, SNAP_A, ctx=ctx_b)
+    assert v.status == "FACT_MISMATCH"
+
+
+def test_validate_without_accreditation_keeps_legacy_behaviour():
+    # Los 39 tests existentes llaman validate() con 3 args: INFERIDO corta,
+    # OBSERVADO llega al resolver. Nada de eso cambia.
+    c = claims.Claim(predicate="CAPABILITY_AVAILABLE", args={"name": "write_file", "mode": "mutating"},
+                     authority="INFERIDO", provenance_ref="x", evidence_pointer="x", scope="t")
+    assert validator.validate(c, PREDICATES, CTX_A).status == "AUTHORITY_INVALID"
+    c2 = c.model_copy(update={"authority": "OBSERVADO"})
+    assert validator.validate(c2, PREDICATES, CTX_A).status == "VALID"
+
+
+def test_new_statuses_fit_in_varchar_30():
+    for s in ("PROVENANCE_MISMATCH", "GROUNDING_UNAVAILABLE"):
+        assert len(s) <= 30
