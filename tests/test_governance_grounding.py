@@ -71,10 +71,11 @@ def test_sha256_is_over_the_canonical_json():
 
 # --- 7c: orden por name, no por orden de llegada -----------------------------
 
-def test_7c_entries_ordered_by_name_regardless_of_input_order():
+def test_7c_entries_and_pointers_ordered_by_name():
+    # La garantía real es sorted() en build_snapshot: los punteros y los
+    # nombres salen en orden alfabético, sin importar en qué orden vive el
+    # set de ops en memoria.
     a = grounding.build_snapshot(_ctx({"write_file", "read_file", "list_dir"}))
-    b = grounding.build_snapshot(_ctx({"list_dir", "write_file", "read_file"}))
-    assert a.sha256 == b.sha256
     assert [e.pointer for e in a.entries] == ["/capabilities/0", "/capabilities/1", "/capabilities/2"]
     assert [e.args["name"] for e in a.entries] == ["list_dir", "read_file", "write_file"]
 
@@ -122,6 +123,18 @@ def test_7d_build_snapshot_raises_on_broken_ctx_never_returns_empty():
         mutating_capabilities = frozenset()
     with pytest.raises(grounding.GroundingBuildError):
         grounding.build_snapshot(Broken())
+
+
+def test_7d_mutating_capabilities_not_a_container_raises_governed_error():
+    # Finding Minor #4: el try original solo cubria ctx.ops / ctx.mutating_
+    # capabilities como atributos; "name in mutating" corria AFUERA del try,
+    # asi que un mutating_capabilities no iterable (p.ej. None) tiraba
+    # TypeError pelado en vez de GroundingBuildError (P10).
+    class BrokenMutating:
+        ops = frozenset({"write_file"})
+        mutating_capabilities = None
+    with pytest.raises(grounding.GroundingBuildError):
+        grounding.build_snapshot(BrokenMutating())
 
 
 def test_empty_ops_is_a_valid_snapshot_not_an_error():
@@ -192,6 +205,14 @@ def test_args_are_compared_with_the_same_normalization_that_built_the_snapshot()
     assert acc.outcome == "ACCREDITED"
 
 
+def test_args_not_a_mapping_is_mismatch():
+    # Deferred minor de Task 2: la rama "args no es un objeto" de accredit()
+    # no tenia test propio.
+    acc = grounding.accredit(_raw(args="write_file", pointer="/capabilities/1"), SNAP_A)
+    assert acc.outcome == "MISMATCH"
+    assert "args" in acc.detail
+
+
 def test_6_snapshot_error_is_unavailable_even_with_a_pointer():
     acc = grounding.accredit(_raw(pointer="/capabilities/1"), grounding.SnapshotError("config ilegible"))
     assert acc.outcome == "UNAVAILABLE"
@@ -199,12 +220,19 @@ def test_6_snapshot_error_is_unavailable_even_with_a_pointer():
     assert "config ilegible" in acc.detail
 
 
-@pytest.mark.parametrize("bad", ["", "capabilities/1", "/capabilities/abc", "/capabilities/-1", "/x" * 150])
+@pytest.mark.parametrize(
+    "bad",
+    ["", "capabilities/1", "/capabilities/abc", "/capabilities/-1", "/x" * 150, "/capabilities/1\n"],
+)
 def test_9_1b_malformed_pointer_is_mismatch_without_exception(bad):
+    # "/capabilities/1\n" es el caso del finding Minor #2: con re.match, "$"
+    # matchea antes de un "\n" final y el puntero "pasa" el regex; debe
+    # tratarse como malformado (fullmatch), no llegar a lookup().
     acc = grounding.accredit(_raw(pointer=bad), SNAP_A)
     assert acc.outcome == "MISMATCH"
     assert acc.authority == "INFERIDO"
     assert acc.evidence_pointer_raw == bad
+    assert "malformado" in acc.detail
 
 
 def test_9_1b_minus_one_never_indexes_from_the_end():
@@ -300,6 +328,20 @@ def test_validate_without_accreditation_keeps_legacy_behaviour():
     assert validator.validate(c, PREDICATES, CTX_A).status == "AUTHORITY_INVALID"
     c2 = c.model_copy(update={"authority": "OBSERVADO"})
     assert validator.validate(c2, PREDICATES, CTX_A).status == "VALID"
+
+
+def test_validate_without_accreditation_inferido_on_predicate_without_resolver_is_now_resolver_not_implemented():
+    # ÚNICO cambio observable del camino legado (finding Important #1 de la
+    # revisión final): antes de SP3 esto daba AUTHORITY_INVALID (INFERIDO
+    # cortaba en el paso 4 sin mirar si había resolver). Ahora el paso 3
+    # (sin resolver) corre ANTES que el paso 4 (sin puntero), así que un
+    # predicado sin resolver da RESOLVER_NOT_IMPLEMENTED aunque el llamador
+    # ni siquiera sepa que existe `accreditation`.
+    c = claims.Claim(
+        predicate="JOB_STATUS", args={"job_id": "1", "status": "ok"},
+        authority="INFERIDO", provenance_ref="x", evidence_pointer="x", scope="t",
+    )
+    assert validator.validate(c, PREDICATES, CTX_A).status == "RESOLVER_NOT_IMPLEMENTED"
 
 
 def test_new_statuses_fit_in_varchar_30():

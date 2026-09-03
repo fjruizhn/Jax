@@ -250,8 +250,11 @@ def validate(
     3 antes de 5: no se acusa de falsear una cita a quien nunca tuvo dónde
     citarla. 0 antes que todo: la falla del sistema no se imputa al modelo.
 
-    Sin `accreditation` (llamadores anteriores a SP3) el comportamiento es
-    el de siempre: authority=INFERIDO corta en 4, cualquier otra llega a 6.
+    Sin `accreditation`: pasos 1-3 iguales; luego authority=INFERIDO corta
+    en 4 SOLO si el predicado tiene resolver -- un predicado sin resolver
+    devuelve RESOLVER_NOT_IMPLEMENTED también en el camino legado (spec
+    §4.2). Es el ÚNICO cambio observable para los llamadores anteriores a
+    SP3.
     """
     if accreditation is not None and accreditation.outcome == "UNAVAILABLE":
         return Verdict(

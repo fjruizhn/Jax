@@ -44,7 +44,7 @@ class GroundingBuildError(RuntimeError):
 class SnapshotEntry:
     pointer: str
     predicate: str
-    args: dict[str, str]
+    args: dict[str, str]  # no mutar: el sha256 del Snapshot no lo sigue (dict por interfaz del spec)
 
 
 @dataclass(frozen=True)
@@ -106,13 +106,13 @@ def build_snapshot(ctx) -> Snapshot:
     try:
         ops = sorted(ctx.ops)
         mutating = ctx.mutating_capabilities
+        caps = [
+            normalize_args({"name": name, "mode": "mutating" if name in mutating else "read_only"})
+            for name in ops
+        ]
     except Exception as e:
         raise GroundingBuildError(f"ValidationContext inutilizable: {type(e).__name__}: {e}") from e
 
-    caps = [
-        normalize_args({"name": name, "mode": "mutating" if name in mutating else "read_only"})
-        for name in ops
-    ]
     data = {"capabilities": caps}
     canonical = _canonical(data)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -162,7 +162,7 @@ def accredit(raw_claim: Mapping[str, object], grounding: Snapshot | SnapshotErro
 
     if not isinstance(raw_ptr, str):
         return mismatch(f"evidence_pointer no es string (es {type(raw_ptr).__name__}).")
-    m = _POINTER_RE.match(raw_ptr)
+    m = _POINTER_RE.fullmatch(raw_ptr)
     if m is None:
         shown = raw_ptr if len(raw_ptr) <= 120 else raw_ptr[:120] + "…"
         return mismatch(f"evidence_pointer malformado: {shown!r}.")
