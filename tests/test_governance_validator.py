@@ -251,14 +251,54 @@ def test_capability_available_found_only_in_ops_mode_mismatch():
     assert verdict.status == "FACT_MISMATCH"
 
 
-def test_capability_available_found_only_in_catalog_mode_unverified_but_accepted():
-    ctx = _real_ctx()
+def test_capability_available_catalog_branch_with_synthetic_catalog_is_valid():
+    """La rama `in_catalog` del resolver, ejercitada con un catálogo
+    ARMADO A MANO. No usa _real_ctx(): ver el tripwire siguiente."""
+    ctx = validator.ValidationContext(
+        ops=frozenset(),
+        mutating_capabilities=frozenset(),
+        catalog=MotorCatalog({"capabilities": {"code_swarm": {"allowed_motors": ["kimi"]}}}),
+        config_paths_allowlist=frozenset(),
+        repo_root=REPO_ROOT,
+    )
     claim = _claim(
         predicate="CAPABILITY_AVAILABLE",
         args={"name": "code_swarm", "mode": "read_only"},
     )
     verdict = validator.validate(claim, PREDICATES, ctx)
     assert verdict.status == "VALID"
+
+
+def test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production():
+    """TRIPWIRE. Referenciado por nombre desde DEUDA.md (ítem "El resolver de
+    CAPABILITY_AVAILABLE consulta un catálogo que el Bloque 3 vació",
+    verificado 2026-09-02).
+
+    Hasta el 2026-09-02 este archivo tenía un test que afirmaba que
+    `code_swarm` se encontraba en el catálogo REAL (_real_ctx) y daba VALID.
+    Estaba rojo en master y nadie lo veía porque tests/test_governance_*.py
+    no corría en ningún job de CI. La causa: el Bloque 3 movió las
+    capabilities a la DB (`MotorCatalog.from_db()`); `[capabilities.*]` del
+    TOML quedó vacío, y `validator.load_validation_context()` sigue
+    construyendo `MotorCatalog(config)` desde el TOML. Resultado: en
+    producción la rama `in_catalog` de `_resolve_capability_available` NUNCA
+    se toma.
+
+    Cuando alguien arregle el validador para leer la DB, este test se pone
+    ROJO. Eso es lo que debe pasar: obliga a (1) cerrar el ítem de DEUDA.md,
+    (2) revisar §3.3 del spec de SP3 y `grounding.SECTION_PREDICATE`, y
+    (3) reemplazar este test por el que describa el estado nuevo."""
+    ctx = _real_ctx()
+    assert ctx.catalog.get_capability("code_swarm") is None, (
+        "el catálogo real ya NO está vacío: alguien arregló el validador. "
+        "Cerrar el ítem de DEUDA.md y actualizar este test -- ver docstring."
+    )
+    claim = _claim(
+        predicate="CAPABILITY_AVAILABLE",
+        args={"name": "code_swarm", "mode": "read_only"},
+    )
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "FACT_MISMATCH"
 
 
 def test_capability_available_not_found_anywhere():
