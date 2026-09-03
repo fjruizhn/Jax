@@ -2001,23 +2001,38 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
-- **`GROUNDING_UNAVAILABLE` es inalcanzable para su causa realista — hallazgo
-  de la revisión final de SP3, 2026-09-03.** El spec §4.2 dice que el paso 0
-  "se aplica a todo claim del turno". En `jax-platform/backend/shadow_validation.py`,
-  `run_shadow_validation()` llama a `_validation_context()` ANTES del loop de
-  claims; la única causa realista de un `SnapshotError` en producción es que esa
-  misma carga (config.toml / vocabulario) falle, así que falla de nuevo ahí: la
-  fila de `shadow_messages` queda con `grounding_snapshot_sha256='ERROR'` y
-  `validated_at NULL`, la excepción se loguea y se relanza, y NO se escribe
-  ninguna fila `GROUNDING_UNAVAILABLE` en `shadow_claim_verdicts`. Es
-  fail-closed y visible (no P10), pero SP4 verá menos filas de ese estado de las
-  que el spec promete. El test `test_snapshot_error_marks_turn_ERROR_and_claims_grounding_unavailable`
-  es válido solo para un `SnapshotError` inyectado. **Causa:** orden del plan de
-  SP3 (Task 5), no del código. **Qué falta:** cortocircuitar el paso 0 antes de
-  `_validation_context()` — `accredit()` y el paso 0 de `validate()` no
-  necesitan ni `ctx` ni `predicates`; con `SnapshotError` se pueden escribir los
-  veredictos `GROUNDING_UNAVAILABLE` de todos los claims y saltar el vocab
-  sweep. **Fecha de control:** al abrir SP4 (análisis de datos de grounding).
+- **`GROUNDING_UNAVAILABLE` no puede aparecer en producción por su causa
+  realista, y la marca `'ERROR'` solo en la ventana del primer turno tras un
+  reinicio — MEDIDO el 2026-09-03 provocándolo, no razonado.** El spec §4.2 dice
+  que el paso 0 "se aplica a todo claim del turno". Provocado con
+  `las_manos/config.toml` ilegible, en el endpoint real, en proceso, contra
+  `jax_memory_test`:
+
+  | régimen | qué ve el usuario | fila en `shadow_messages` | veredictos |
+  |---|---|---|---|
+  | **A** — caché fría (primer turno tras reiniciar), config rota | HTTP **200**, respuesta normal, `contract_degraded: false`; prompt SIN bloque de hechos | `grounding_snapshot={"error": "TOMLDecodeError: ..."}`, `sha256='ERROR'`, **`validated_at NULL`**, `has_claim=1` | **CERO** |
+  | **B** — caché caliente, la config se rompe después | HTTP 200, y el prompt SÍ trae el bloque de hechos | snapshot **válido**, `sha256` de siempre (`6d007427…`) | los normales |
+  | (control) snapshot roto + contexto sano | HTTP 200 | `sha256='ERROR'`, `validated_at` NO NULL | **1 fila `GROUNDING_UNAVAILABLE/INFERIDO`** |
+
+  **Régimen A** confirma el hallazgo de la revisión final: `run_shadow_validation`
+  llama a `_validation_context()` ANTES del loop de claims, así que la misma
+  config ilegible que produjo el `SnapshotError` lo hace lanzar de nuevo; la task
+  muere fail-closed (visible: `validated_at NULL`) sin escribir un solo veredicto.
+  **Régimen B** es el hallazgo nuevo y el más incómodo: `lru_cache(maxsize=1)`
+  sirve el contexto cacheado, así que una config que se rompe con el proceso ya
+  caliente **no produce ni `ERROR` ni degradación** — el snapshot sale igual, con
+  datos que ya no están en el disco. La fila de control muestra que el estado
+  funciona como el spec pide cuando el contexto está sano y el snapshot no, que es
+  el caso que ejercitan los tests con `SnapshotError` inyectado.
+
+  **Qué falta:** (1) cortocircuitar el paso 0 antes de `_validation_context()`
+  — `accredit()` y el paso 0 de `validate()` no necesitan ni `ctx` ni
+  `predicates`, así que con un `SnapshotError` se pueden escribir los veredictos
+  `GROUNDING_UNAVAILABLE` de todos los claims y saltar el vocab sweep;
+  (2) decidir si `validation_context()` debe revalidar (mtime o hash del config)
+  para que el régimen B deje de ser invisible. **Causa:** orden del plan de SP3
+  (Task 5) más la caché de proceso, no un slip de implementación.
+  **Fecha de control:** al abrir SP4 (análisis de datos de grounding).
 
 - **`GPU_SEMAPHORE` no cubre a Jacobs — DECISIÓN TOMADA (2026-09-01), no
   pendiente.** Estuvo listado como deuda abierta desde el Bloque 2
