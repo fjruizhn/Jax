@@ -61,7 +61,7 @@ su fecha de última verificación real, no una nueva.
   **Evidencia:** `tests/test_governance_validator.py::test_capability_available_found_only_in_catalog_mode_unverified_but_accepted`
   estaba ROJO en `master` (`assert 'FACT_MISMATCH' == 'VALID'`) y nadie lo
   veía porque `tests/test_governance_*.py` no corría en ningún job de CI
-  (arreglado el mismo día: job `governance`, PR jax#<N>). **Tripwire:**
+  (arreglado el mismo día: job `governance`, PR jax#101). **Tripwire:**
   `tests/test_governance_validator.py::test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production`
   fija el estado actual y se pone rojo cuando alguien arregle el validador —
   ese rojo es la señal de cerrar este ítem. **Qué falta:** que el validador

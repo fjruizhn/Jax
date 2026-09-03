@@ -363,7 +363,8 @@ jobs:
     # tests/test_governance_grounding.py aca mismo.
     #
     # Validado ROMPIENDOLO el 2026-09-02: un test rojo a proposito en la
-    # rama, CI rojo sobre el headSha real, quitado, CI verde. Ver PR.
+    # rama, CI rojo sobre el headSha real, quitado, CI verde. Ver PR #102
+    # (el #101 que creo el job se mergeo sin ese paso; #102 lo hizo).
     #
     # aiomysql: Step 5 (reproducir el runner, no el local) lo encontro --
     # validator.py importa las_manos.motor_registry.catalog, que importa
