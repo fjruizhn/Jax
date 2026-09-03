@@ -130,3 +130,92 @@ def test_empty_ops_is_a_valid_snapshot_not_an_error():
     snap = grounding.build_snapshot(_ctx(set()))
     assert snap.entries == ()
     assert len(snap.sha256) == 64
+
+
+# --- accredit: la citación se verifica, no se cree (spec §2.2, §4.1) --------
+
+SNAP_A = grounding.build_snapshot(CTX_A)   # write_file en /capabilities/1
+
+
+def _raw(predicate="CAPABILITY_AVAILABLE", args=None, pointer="__absent__"):
+    claim = {"predicate": predicate, "args": args or {"name": "write_file", "mode": "mutating"}}
+    if pointer != "__absent__":
+        claim["evidence_pointer"] = pointer
+    return claim
+
+
+def test_5_valid_pointer_exact_args_is_observado_with_server_written_provenance():
+    acc = grounding.accredit(_raw(pointer="/capabilities/1"), SNAP_A)
+    assert acc.outcome == "ACCREDITED"
+    assert acc.authority == "OBSERVADO"
+    assert acc.provenance_ref == f"tool_result:sha256:{SNAP_A.sha256}"
+    assert acc.evidence_pointer_raw == "/capabilities/1"
+
+
+def test_3_no_pointer_is_inferido_no_pointer():
+    acc = grounding.accredit(_raw(), SNAP_A)
+    assert acc.outcome == "NO_POINTER"
+    assert acc.authority == "INFERIDO"
+    assert acc.evidence_pointer_raw is None
+
+
+def test_2_pointer_out_of_range_is_mismatch():
+    acc = grounding.accredit(_raw(pointer="/capabilities/99"), SNAP_A)
+    assert acc.outcome == "MISMATCH"
+    assert acc.authority == "INFERIDO"
+    assert "99" in acc.detail
+
+
+def test_4_valid_pointer_but_args_differ_is_mismatch_the_forged_citation():
+    # El test que sostiene el diseño (spec §2.2): puntero real, args falsos.
+    acc = grounding.accredit(
+        _raw(args={"name": "write_file", "mode": "read_only"}, pointer="/capabilities/1"), SNAP_A
+    )
+    assert acc.outcome == "MISMATCH"
+    assert acc.authority == "INFERIDO"
+    assert "read_only" in acc.detail and "mutating" in acc.detail
+
+
+def test_pointer_to_entry_of_another_predicate_is_mismatch():
+    # JOB_STATUS citando una línea de capabilities. En validate() esto nunca
+    # llega acá (paso 3 antes del 5) -- pero accredit debe ser correcto solo.
+    acc = grounding.accredit(_raw(predicate="JOB_STATUS", args={"job_id": "1", "status": "ok"},
+                                  pointer="/capabilities/1"), SNAP_A)
+    assert acc.outcome == "MISMATCH"
+
+
+def test_args_are_compared_with_the_same_normalization_that_built_the_snapshot():
+    # Espacios y tipos no producen un PROVENANCE_MISMATCH por formato (spec §5.3).
+    acc = grounding.accredit(
+        _raw(args={"name": " write_file ", "mode": "mutating"}, pointer="/capabilities/1"), SNAP_A
+    )
+    assert acc.outcome == "ACCREDITED"
+
+
+def test_6_snapshot_error_is_unavailable_even_with_a_pointer():
+    acc = grounding.accredit(_raw(pointer="/capabilities/1"), grounding.SnapshotError("config ilegible"))
+    assert acc.outcome == "UNAVAILABLE"
+    assert acc.authority == "INFERIDO"
+    assert "config ilegible" in acc.detail
+
+
+@pytest.mark.parametrize("bad", ["", "capabilities/1", "/capabilities/abc", "/capabilities/-1", "/x" * 150])
+def test_9_1b_malformed_pointer_is_mismatch_without_exception(bad):
+    acc = grounding.accredit(_raw(pointer=bad), SNAP_A)
+    assert acc.outcome == "MISMATCH"
+    assert acc.authority == "INFERIDO"
+    assert acc.evidence_pointer_raw == bad
+
+
+def test_9_1b_minus_one_never_indexes_from_the_end():
+    # Si "-1" se convirtiera a int y se indexara, apuntaría a la ÚLTIMA
+    # entrada (write_file) y los args coincidirían -> ACCREDITED. Eso sería
+    # fail-open por Python. Debe ser MISMATCH.
+    acc = grounding.accredit(_raw(pointer="/capabilities/-1"), SNAP_A)
+    assert acc.outcome == "MISMATCH"
+
+
+def test_non_string_pointer_is_mismatch_not_exception():
+    for bad in (7, None, ["/capabilities/1"], {"p": 1}):
+        acc = grounding.accredit(_raw(pointer=bad), SNAP_A)
+        assert acc.outcome == ("NO_POINTER" if bad is None else "MISMATCH")

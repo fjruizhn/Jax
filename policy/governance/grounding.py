@@ -22,7 +22,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Mapping
+from typing import Literal, Mapping
 
 # Sección del snapshot -> predicado que acredita. Crece SOLO cuando un
 # predicado gana resolver (spec §3): no agregar entradas acá sin resolver
@@ -65,6 +65,27 @@ class SnapshotError:
     """Marca de 'el snapshot falló al construirse' que viaja al validador
     en lugar de un Snapshot. Persistida como sha256='ERROR' (spec §5.4)."""
     reason: str
+
+
+@dataclass(frozen=True)
+class Accreditation:
+    """Resultado de acreditar un claim contra el snapshot. La AUTORIDAD la
+    deriva el servidor acá (spec §2.1, P08): el modelo solo señaló una línea.
+
+    outcome:
+      ACCREDITED  -> puntero resuelve y args coinciden: authority=OBSERVADO
+      NO_POINTER  -> el claim no trae evidence_pointer: authority=INFERIDO
+      MISMATCH    -> puntero malformado / fuera de rango / de otro predicado /
+                     args que no coinciden: authority=INFERIDO
+      UNAVAILABLE -> el snapshot del turno no existe (SnapshotError)
+    Qué veredicto sale de cada uno lo decide validator.validate() en el orden
+    normativo del spec §4.1 -- acá no se conoce si el predicado tiene resolver.
+    """
+    authority: Literal["OBSERVADO", "INFERIDO"]
+    provenance_ref: str
+    evidence_pointer_raw: object | None
+    outcome: Literal["ACCREDITED", "NO_POINTER", "MISMATCH", "UNAVAILABLE"]
+    detail: str
 
 
 def normalize_args(args: Mapping[str, object]) -> dict[str, str]:
@@ -113,3 +134,55 @@ def render(snapshot: Snapshot) -> str:
     for e in snapshot.entries:
         lines.append(f"    {e.pointer}: " + ", ".join(f"{k}={v}" for k, v in e.args.items()))
     return "\n".join(lines)
+
+
+def accredit(raw_claim: Mapping[str, object], grounding: Snapshot | SnapshotError) -> Accreditation:
+    """Nunca lanza por contenido del claim: un puntero que mata la
+    background task es fail-open (spec §9.1b). Todo lo raro es MISMATCH."""
+    raw_ptr = raw_claim.get("evidence_pointer")
+
+    if isinstance(grounding, SnapshotError):
+        return Accreditation(
+            authority="INFERIDO", provenance_ref="none", evidence_pointer_raw=raw_ptr,
+            outcome="UNAVAILABLE",
+            detail=f"el snapshot de este turno no se construyó: {grounding.reason}",
+        )
+
+    if raw_ptr is None:
+        return Accreditation(
+            authority="INFERIDO", provenance_ref="none", evidence_pointer_raw=None,
+            outcome="NO_POINTER", detail="el claim no trae evidence_pointer.",
+        )
+
+    def mismatch(why: str) -> Accreditation:
+        return Accreditation(
+            authority="INFERIDO", provenance_ref="none", evidence_pointer_raw=raw_ptr,
+            outcome="MISMATCH", detail=why,
+        )
+
+    if not isinstance(raw_ptr, str):
+        return mismatch(f"evidence_pointer no es string (es {type(raw_ptr).__name__}).")
+    m = _POINTER_RE.match(raw_ptr)
+    if m is None:
+        shown = raw_ptr if len(raw_ptr) <= 120 else raw_ptr[:120] + "…"
+        return mismatch(f"evidence_pointer malformado: {shown!r}.")
+    entry = grounding.lookup(raw_ptr)
+    if entry is None:
+        return mismatch(f"evidence_pointer {raw_ptr!r} no existe en el snapshot del turno.")
+    if entry.predicate != raw_claim.get("predicate"):
+        return mismatch(
+            f"{raw_ptr} es una entrada de {entry.predicate}, el claim es de {raw_claim.get('predicate')!r}."
+        )
+    args = raw_claim.get("args")
+    if not isinstance(args, Mapping):
+        return mismatch("args no es un objeto.")
+    given = normalize_args(args)
+    if given != entry.args:
+        return mismatch(f"los args no coinciden con {raw_ptr}: snapshot={entry.args}, claim={given}.")
+    return Accreditation(
+        authority="OBSERVADO",
+        provenance_ref=f"tool_result:sha256:{grounding.sha256}",
+        evidence_pointer_raw=raw_ptr,
+        outcome="ACCREDITED",
+        detail=f"acreditado contra {raw_ptr}.",
+    )
