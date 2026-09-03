@@ -2001,6 +2001,36 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **500 en `/api/chat` por distancias NULL en `_semantic_context` --
+  2026-09-03, NO REPRODUCIDO.** Observado una sola vez, en un montaje de dev
+  levantado a mano (uvicorn aparte en :8099, `JAX_DB_NAME=jax_memory_test`,
+  `JAX_REPO_PATH` apuntando a una copia con el `config.toml` roto a propósito).
+  Cada turno terminaba en `TypeError: '<' not supported between instances of
+  'NoneType' and 'float'` en `api/chat.py::_semantic_context`, en la línea
+  `[r for r in similares if r["distancia"] < 0.8]`: `search_similar_messages()`
+  devolvía filas con `distancia = NULL`. `VEC_DISTANCE_COSINE` devuelve NULL con
+  un vector cero de cualquiera de los dos lados, así que la sospecha es un
+  vector de consulta degenerado, pero **no está probada**.
+
+  **Por qué queda anotado y no cerrado:** no se reprodujo. Contra la misma DB,
+  en proceso limpio, `search_similar_messages()` devolvió 0 filas y ningún
+  error; y en producción no aparece: los 7 turnos de la verificación en vivo
+  del 2026-09-03 respondieron 200, y `messages`/`facts` de `jax_memory` no
+  tienen ni un embedding NULL ni uno de vector cero (medido). Puede ser un
+  artefacto del montaje (DB de test con `messages` vacía, historial en memoria
+  del proceso) y no un defecto del código.
+
+  **Lo que importa si es real:** el filtro está en el camino de TODO turno de
+  chat y **no es fail-soft** -- el `try/except` de más arriba cubre la consulta,
+  no la comparación, así que una sola fila con `distancia` NULL tumba el turno
+  entero con 500. Eso es más grave que el ranking que se pierde.
+
+  **Qué haría falta para cerrarlo:** reproducirlo con intención (forzar un
+  embedding de consulta cero o una fila con vector cero y correr el endpoint), o
+  descartar la clase entera acotando el filtro
+  (`r.get("distancia") is not None and r["distancia"] < 0.8`), que es una línea y
+  convierte el 500 en un candidato menos. **Fecha de control: 2026-09-17.**
+
 - **`GROUNDING_UNAVAILABLE` no puede aparecer en producción por su causa
   realista, y la marca `'ERROR'` solo en la ventana del primer turno tras un
   reinicio — MEDIDO el 2026-09-03 provocándolo, no razonado.** El spec §4.2 dice
