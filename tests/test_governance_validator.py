@@ -330,7 +330,3 @@ def test_capability_available_source_conflict_when_present_in_both():
     verdict = validator.validate(claim, PREDICATES, ctx)
     assert verdict.status == "SOURCE_CONFLICT"
     assert "code_swarm" in verdict.detail
-
-
-def test_ROMPER_EL_JOB_A_PROPOSITO_se_quita_en_el_commit_siguiente():
-    assert False, "canario: si esto no pone rojo al job governance, el job no existe"
