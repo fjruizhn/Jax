@@ -380,12 +380,12 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest pyyaml pydantic aiomysql==0.3.2
       - name: Suite de gobernanza
-        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -v
+        run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -v
       - name: Piso exacto de tests CORRIDOS
-        # Exacto y no "al menos": un piso con holgura deja perder tests en
-        # silencio. Medido 2026-09-02 con .venv local: 37 pasaban + 1 rojo;
-        # tras reemplazar el rojo por dos tests, 39.
+        # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
+        # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
+        # revision final: 4 tests nuevos sobre el piso anterior de 35) = 78.
         run: |
-          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py -q 2>&1 | tee /tmp/gov
-          grep -qE "^39 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 39 tests CORRIDOS."; exit 1; }
+          python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tee /tmp/gov
+          grep -qE "^78 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 78 tests CORRIDOS."; exit 1; }

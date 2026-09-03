@@ -37,6 +37,7 @@ from las_manos.envelope import MUTATING_CAPABILITIES  # noqa: E402
 from las_manos.motor_registry.catalog import MotorCatalog  # noqa: E402
 
 import claims  # noqa: E402
+import grounding  # noqa: E402
 
 
 class Verdict(BaseModel):
@@ -49,6 +50,11 @@ class Verdict(BaseModel):
         "AUTHORITY_INVALID",
         "SOURCE_CONFLICT",
         "PATH_NOT_ALLOWED",
+        # SP3 (2026-09-02). Ver spec §4.2. NO se agrega UNGROUNDED: con la
+        # definición acordada es RESOLVER_NOT_IMPLEMENTED, que ya existía y
+        # solo era inalcanzable porque authority cortaba antes.
+        "PROVENANCE_MISMATCH",     # citó una línea que no dice eso
+        "GROUNDING_UNAVAILABLE",   # el snapshot del turno no se construyó
     ]
     predicate: str
     detail: str
@@ -226,8 +232,35 @@ _UNIMPLEMENTED_REASONS: dict[str, str] = {
 
 
 def validate(
-    claim: "claims.Claim", predicates: dict, ctx: ValidationContext
+    claim: "claims.Claim",
+    predicates: dict,
+    ctx: ValidationContext,
+    accreditation: "grounding.Accreditation | None" = None,
 ) -> Verdict:
+    """Orden NORMATIVO (spec §4.1): define qué falla se le imputa a quién.
+
+      0. snapshot del turno en ERROR      -> GROUNDING_UNAVAILABLE   (sistema)
+      1. predicado desconocido            -> UNKNOWN_PREDICATE
+      2. claves de args mal               -> ARGS_MISMATCH
+      3. SIN resolver para el predicado   -> RESOLVER_NOT_IMPLEMENTED (sistema)
+      4. con resolver, sin puntero        -> AUTHORITY_INVALID        (modelo)
+      5. puntero que no resuelve / args   -> PROVENANCE_MISMATCH      (modelo)
+      6. acreditado                       -> resolver
+
+    3 antes de 5: no se acusa de falsear una cita a quien nunca tuvo dónde
+    citarla. 0 antes que todo: la falla del sistema no se imputa al modelo.
+
+    Sin `accreditation`: pasos 1-3 iguales; luego authority=INFERIDO corta
+    en 4 SOLO si el predicado tiene resolver -- un predicado sin resolver
+    devuelve RESOLVER_NOT_IMPLEMENTED también en el camino legado (spec
+    §4.2). Es el ÚNICO cambio observable para los llamadores anteriores a
+    SP3.
+    """
+    if accreditation is not None and accreditation.outcome == "UNAVAILABLE":
+        return Verdict(
+            status="GROUNDING_UNAVAILABLE", predicate=claim.predicate, detail=accreditation.detail
+        )
+
     spec = predicates.get(claim.predicate)
     if spec is None:
         return Verdict(
@@ -246,20 +279,32 @@ def validate(
             ),
         )
 
-    if claim.authority == "INFERIDO":
+    resolver = _RESOLVERS.get(claim.predicate)
+    if resolver is None:
+        reason = _UNIMPLEMENTED_REASONS.get(
+            claim.predicate, f"{claim.predicate}: resolver no implementado."
+        )
+        return Verdict(
+            status="RESOLVER_NOT_IMPLEMENTED", predicate=claim.predicate, detail=reason
+        )
+
+    if accreditation is None:
+        if claim.authority == "INFERIDO":
+            return Verdict(
+                status="AUTHORITY_INVALID",
+                predicate=claim.predicate,
+                detail="authority=INFERIDO prohibido en canal claim (§3.1.4).",
+            )
+        return resolver(claim, ctx)
+
+    if accreditation.outcome == "NO_POINTER":
         return Verdict(
             status="AUTHORITY_INVALID",
             predicate=claim.predicate,
-            detail="authority=INFERIDO prohibido en canal claim (§3.1.4).",
+            detail="authority=INFERIDO prohibido en canal claim (§3.1.4): se ofreció grounding y el claim no cita evidence_pointer.",
         )
-
-    resolver = _RESOLVERS.get(claim.predicate)
-    if resolver is not None:
-        return resolver(claim, ctx)
-
-    reason = _UNIMPLEMENTED_REASONS.get(
-        claim.predicate, f"{claim.predicate}: resolver no implementado."
-    )
-    return Verdict(
-        status="RESOLVER_NOT_IMPLEMENTED", predicate=claim.predicate, detail=reason
-    )
+    if accreditation.outcome == "MISMATCH":
+        return Verdict(
+            status="PROVENANCE_MISMATCH", predicate=claim.predicate, detail=accreditation.detail
+        )
+    return resolver(claim, ctx)
