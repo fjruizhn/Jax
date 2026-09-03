@@ -53,7 +53,13 @@ class Verdict(BaseModel):
         # SP3 (2026-09-02). Ver spec §4.2. NO se agrega UNGROUNDED: con la
         # definición acordada es RESOLVER_NOT_IMPLEMENTED, que ya existía y
         # solo era inalcanzable porque authority cortaba antes.
-        "PROVENANCE_MISMATCH",     # citó una línea que no dice eso
+        #
+        # 2026-09-03: PROVENANCE_MISMATCH se partió en dos (ver
+        # grounding.Accreditation.outcome y validate() más abajo) tras
+        # encontrar en producción una fila con hecho verdadero y puntero
+        # equivocado, en el mismo estado que un hecho inventado.
+        "POINTER_MISMATCH",        # citó una línea que no dice eso, pero el hecho SÍ existe en otra
+        "FACT_NOT_IN_SNAPSHOT",    # el hecho afirmado no existe en ninguna entrada del snapshot
         "GROUNDING_UNAVAILABLE",   # el snapshot del turno no se construyó
     ]
     predicate: str
@@ -244,11 +250,20 @@ def validate(
       2. claves de args mal               -> ARGS_MISMATCH
       3. SIN resolver para el predicado   -> RESOLVER_NOT_IMPLEMENTED (sistema)
       4. con resolver, sin puntero        -> AUTHORITY_INVALID        (modelo)
-      5. puntero que no resuelve / args   -> PROVENANCE_MISMATCH      (modelo)
+      5. puntero que no resuelve / args   -> POINTER_MISMATCH o
+                                              FACT_NOT_IN_SNAPSHOT     (modelo)
       6. acreditado                       -> resolver
 
     3 antes de 5: no se acusa de falsear una cita a quien nunca tuvo dónde
     citarla. 0 antes que todo: la falla del sistema no se imputa al modelo.
+
+    El paso 5 ahora produce DOS veredictos posibles en vez de uno
+    (PROVENANCE_MISMATCH, hasta 2026-09-02): FACT_NOT_IN_SNAPSHOT es el más
+    grave de los dos -- el claim afirma un hecho que ninguna entrada del
+    snapshot respalda -- mientras que POINTER_MISMATCH es citar mal un
+    hecho que sí es verdadero. El nombre viejo los mezclaba en un solo
+    balde con el orden de gravedad invertido: sonaba peor "MISMATCH de
+    procedencia" que "hecho inexistente", cuando es al revés.
 
     Sin `accreditation`: pasos 1-3 iguales; luego authority=INFERIDO corta
     en 4 SOLO si el predicado tiene resolver -- un predicado sin resolver
@@ -303,8 +318,12 @@ def validate(
             predicate=claim.predicate,
             detail="authority=INFERIDO prohibido en canal claim (§3.1.4): se ofreció grounding y el claim no cita evidence_pointer.",
         )
-    if accreditation.outcome == "MISMATCH":
+    if accreditation.outcome == "POINTER_MISMATCH":
         return Verdict(
-            status="PROVENANCE_MISMATCH", predicate=claim.predicate, detail=accreditation.detail
+            status="POINTER_MISMATCH", predicate=claim.predicate, detail=accreditation.detail
+        )
+    if accreditation.outcome == "FACT_NOT_IN_SNAPSHOT":
+        return Verdict(
+            status="FACT_NOT_IN_SNAPSHOT", predicate=claim.predicate, detail=accreditation.detail
         )
     return resolver(claim, ctx)

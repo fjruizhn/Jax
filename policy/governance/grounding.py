@@ -31,8 +31,9 @@ SECTION_PREDICATE: dict[str, str] = {"capabilities": "CAPABILITY_AVAILABLE"}
 
 # Formato de evidence_pointer que el modelo puede citar. Estricto a
 # propósito: "/capabilities/-1", "capabilities/10", "/capabilities/abc" y
-# "" NO matchean -> PROVENANCE_MISMATCH, nunca indexación negativa ni
-# excepción (spec §9.1b).
+# "" NO matchean -> POINTER_MISMATCH o FACT_NOT_IN_SNAPSHOT (el split de lo
+# que antes era PROVENANCE_MISMATCH, ver Accreditation.outcome), nunca
+# indexación negativa ni excepción (spec §9.1b).
 _POINTER_RE = re.compile(r"^/([a-z_]+)/(0|[1-9][0-9]*)$")
 
 
@@ -73,18 +74,29 @@ class Accreditation:
     deriva el servidor acá (spec §2.1, P08): el modelo solo señaló una línea.
 
     outcome:
-      ACCREDITED  -> puntero resuelve y args coinciden: authority=OBSERVADO
-      NO_POINTER  -> el claim no trae evidence_pointer: authority=INFERIDO
-      MISMATCH    -> puntero malformado / fuera de rango / de otro predicado /
-                     args que no coinciden: authority=INFERIDO
-      UNAVAILABLE -> el snapshot del turno no existe (SnapshotError)
+      ACCREDITED           -> puntero resuelve y args coinciden: authority=OBSERVADO
+      NO_POINTER           -> el claim no trae evidence_pointer: authority=INFERIDO
+      POINTER_MISMATCH     -> puntero malformado / fuera de rango / de otro
+                               predicado / args que no coinciden CON el
+                               puntero citado, pero el hecho afirmado SÍ
+                               existe en alguna otra entrada del snapshot:
+                               authority=INFERIDO. Erró la puntería, no
+                               inventó el hecho.
+      FACT_NOT_IN_SNAPSHOT -> lo mismo que arriba, pero ninguna entrada del
+                               snapshot respalda el hecho afirmado (incluye
+                               el caso de args no normalizables, que no se
+                               puede ni buscar): authority=INFERIDO. Esto SÍ
+                               es más grave que POINTER_MISMATCH: el claim
+                               afirma algo que el snapshot no dice, no solo
+                               citó mal algo verdadero.
+      UNAVAILABLE          -> el snapshot del turno no existe (SnapshotError)
     Qué veredicto sale de cada uno lo decide validator.validate() en el orden
     normativo del spec §4.1 -- acá no se conoce si el predicado tiene resolver.
     """
     authority: Literal["OBSERVADO", "INFERIDO"]
     provenance_ref: str
     evidence_pointer_raw: object | None
-    outcome: Literal["ACCREDITED", "NO_POINTER", "MISMATCH", "UNAVAILABLE"]
+    outcome: Literal["ACCREDITED", "NO_POINTER", "POINTER_MISMATCH", "FACT_NOT_IN_SNAPSHOT", "UNAVAILABLE"]
     detail: str
 
 
@@ -138,7 +150,9 @@ def render(snapshot: Snapshot) -> str:
 
 def accredit(raw_claim: Mapping[str, object], grounding: Snapshot | SnapshotError) -> Accreditation:
     """Nunca lanza por contenido del claim: un puntero que mata la
-    background task es fail-open (spec §9.1b). Todo lo raro es MISMATCH."""
+    background task es fail-open (spec §9.1b). Todo lo raro cae en
+    POINTER_MISMATCH o FACT_NOT_IN_SNAPSHOT según la condición mecánica de
+    mismatch() de acá abajo."""
     raw_ptr = raw_claim.get("evidence_pointer")
 
     if isinstance(grounding, SnapshotError):
@@ -155,9 +169,45 @@ def accredit(raw_claim: Mapping[str, object], grounding: Snapshot | SnapshotErro
         )
 
     def mismatch(why: str) -> Accreditation:
+        # Condición mecánica, sin juicio: ¿existe en el snapshot ALGUNA
+        # entrada cuyo predicate sea el del claim Y cuyos args (ya
+        # normalizados) coincidan con los del claim? Si sí, el hecho
+        # afirmado es verdadero y lo único que falló fue el puntero ->
+        # POINTER_MISMATCH. Si no hay ninguna, el claim afirma algo que el
+        # snapshot no dice -> FACT_NOT_IN_SNAPSHOT (más grave: no hay hecho
+        # que respalde ni siquiera citando bien).
+        #
+        # Si args no es un Mapping no se puede normalizar ni comparar -> no
+        # hay forma de verificar el hecho, así que cae directo en
+        # FACT_NOT_IN_SNAPSHOT (no se le puede dar el beneficio de la duda).
+        #
+        # La búsqueda es determinista: primera coincidencia en el orden de
+        # grounding.entries. Hoy build_snapshot() no puede producir dos
+        # entradas con args idénticos -- itera sorted(ctx.ops), ops es un
+        # frozenset (nombres únicos), y el nombre es parte de los args de
+        # cada entrada -- así que el orden es irrelevante en producción.
+        # Se deja fijo igual para que un Snapshot armado a mano con
+        # duplicados (p.ej. en un test) no dependa del azar de iteración.
+        fact_entry: SnapshotEntry | None = None
+        claim_args = raw_claim.get("args")
+        if isinstance(claim_args, Mapping):
+            given = normalize_args(claim_args)
+            claim_predicate = raw_claim.get("predicate")
+            for candidate in grounding.entries:
+                if candidate.predicate == claim_predicate and candidate.args == given:
+                    fact_entry = candidate
+                    break
+
+        if fact_entry is not None:
+            return Accreditation(
+                authority="INFERIDO", provenance_ref="none", evidence_pointer_raw=raw_ptr,
+                outcome="POINTER_MISMATCH",
+                detail=f"el hecho está en {fact_entry.pointer}; {why}",
+            )
         return Accreditation(
             authority="INFERIDO", provenance_ref="none", evidence_pointer_raw=raw_ptr,
-            outcome="MISMATCH", detail=why,
+            outcome="FACT_NOT_IN_SNAPSHOT",
+            detail=f"{why} Ninguna entrada del snapshot respalda el hecho afirmado.",
         )
 
     if not isinstance(raw_ptr, str):
