@@ -240,13 +240,13 @@ def test_new_pointer_mismatch_names_correct_pointer_reproducing_the_prod_inciden
 
 
 def test_new_hand_built_snapshot_with_duplicate_args_matches_first_entry_deterministically():
-    # build_snapshot() NO puede producir esto: itera sorted(ctx.ops), y ops
-    # es un frozenset de NOMBRES únicos, y el nombre es parte de los args de
-    # cada entrada -- dos entradas con args idénticos son imposibles por
-    # construcción. Este test arma un Snapshot A MANO para cubrir el caso
-    # límite igual: si alguna vez existe, la búsqueda de POINTER_MISMATCH
-    # tiene que ser determinista (primera coincidencia en snapshot.entries),
-    # no depender del orden de iteración de un dict/set.
+    """build_snapshot() NO puede producir dos entradas con args idénticos:
+    itera sorted(ctx.ops), ops es un frozenset de NOMBRES únicos, y el nombre
+    es parte de los args de cada entrada. Este test arma un Snapshot A MANO
+    para cubrir el caso límite igual: si alguna vez existe, la búsqueda de
+    POINTER_MISMATCH tiene que ser determinista (primera coincidencia en
+    snapshot.entries), no depender del orden de iteración de un dict/set.
+    """
     dup_args = {"name": "write_file", "mode": "mutating"}
     entries = (
         grounding.SnapshotEntry(pointer="/capabilities/0", predicate="CAPABILITY_AVAILABLE", args=dup_args),
