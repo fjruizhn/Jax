@@ -385,7 +385,16 @@ jobs:
         # Medido 2026-09-03: 39 (SP1 + arreglo del test rojo) + 39
         # (tests/test_governance_grounding.py, SP3 + ola de fixes de la
         # revision final: 4 tests nuevos sobre el piso anterior de 35) = 78.
+        #
+        # Medido de nuevo 2026-09-03 (ronda "partir PROVENANCE_MISMATCH"):
+        # 78 + 2 tests nuevos en tests/test_governance_grounding.py (el
+        # puntero inventado con hecho verdadero que reproduce el hallazgo
+        # de produccion, y el Snapshot armado a mano con args duplicados
+        # para el caso limite deterministico) = 80. Los demas tests que
+        # antes esperaban MISMATCH/PROVENANCE_MISMATCH se actualizaron in
+        # place a POINTER_MISMATCH o FACT_NOT_IN_SNAPSHOT, sin cambiar el
+        # conteo.
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tee /tmp/gov
-          grep -qE "^78 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 78 tests CORRIDOS."; exit 1; }
+          grep -qE "^80 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 80 tests CORRIDOS."; exit 1; }

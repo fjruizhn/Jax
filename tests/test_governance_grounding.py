@@ -172,45 +172,91 @@ def test_3_no_pointer_is_inferido_no_pointer():
     assert acc.evidence_pointer_raw is None
 
 
-def test_2_pointer_out_of_range_is_mismatch():
+def test_2_pointer_out_of_range_but_fact_true_is_pointer_mismatch():
+    # El puntero /capabilities/99 no existe, pero los args por defecto de
+    # _raw() (write_file/mutating) SÍ son un hecho real de SNAP_A, en
+    # /capabilities/1. Puntero inventado + hecho verdadero -> POINTER_MISMATCH,
+    # no FACT_NOT_IN_SNAPSHOT: el hecho existe, solo se citó mal.
     acc = grounding.accredit(_raw(pointer="/capabilities/99"), SNAP_A)
-    assert acc.outcome == "MISMATCH"
+    assert acc.outcome == "POINTER_MISMATCH"
     assert acc.authority == "INFERIDO"
     assert "99" in acc.detail
+    assert "/capabilities/1" in acc.detail  # nombra el puntero que sí respalda el claim
 
 
-def test_4_valid_pointer_but_args_differ_is_mismatch_the_forged_citation():
+def test_4_valid_pointer_but_args_differ_and_fact_absent_is_fact_not_in_snapshot():
     # El test que sostiene el diseño (spec §2.2): puntero real, args falsos.
+    # write_file/read_only no es un hecho que exista en ningún lado de
+    # SNAP_A (write_file es mutating, read_only es read_file) -> el claim
+    # afirma algo que el snapshot no dice: FACT_NOT_IN_SNAPSHOT.
     acc = grounding.accredit(
         _raw(args={"name": "write_file", "mode": "read_only"}, pointer="/capabilities/1"), SNAP_A
     )
-    assert acc.outcome == "MISMATCH"
+    assert acc.outcome == "FACT_NOT_IN_SNAPSHOT"
     assert acc.authority == "INFERIDO"
     assert "read_only" in acc.detail and "mutating" in acc.detail
 
 
-def test_pointer_to_entry_of_another_predicate_is_mismatch():
+def test_pointer_to_entry_of_another_predicate_is_fact_not_in_snapshot():
     # JOB_STATUS citando una línea de capabilities. En validate() esto nunca
     # llega acá (paso 3 antes del 5) -- pero accredit debe ser correcto solo.
+    # Ninguna entrada del snapshot tiene predicate=JOB_STATUS -> no hay
+    # hecho que respalde el claim, sea cual sea el puntero citado.
     acc = grounding.accredit(_raw(predicate="JOB_STATUS", args={"job_id": "1", "status": "ok"},
                                   pointer="/capabilities/1"), SNAP_A)
-    assert acc.outcome == "MISMATCH"
+    assert acc.outcome == "FACT_NOT_IN_SNAPSHOT"
 
 
 def test_args_are_compared_with_the_same_normalization_that_built_the_snapshot():
-    # Espacios y tipos no producen un PROVENANCE_MISMATCH por formato (spec §5.3).
+    # Espacios y tipos no producen un POINTER_MISMATCH/FACT_NOT_IN_SNAPSHOT
+    # por formato (spec §5.3).
     acc = grounding.accredit(
         _raw(args={"name": " write_file ", "mode": "mutating"}, pointer="/capabilities/1"), SNAP_A
     )
     assert acc.outcome == "ACCREDITED"
 
 
-def test_args_not_a_mapping_is_mismatch():
+def test_args_not_a_mapping_is_fact_not_in_snapshot():
     # Deferred minor de Task 2: la rama "args no es un objeto" de accredit()
-    # no tenia test propio.
+    # no tenia test propio. Sin poder normalizar args no hay forma de buscar
+    # si el hecho existe -> FACT_NOT_IN_SNAPSHOT (no se puede verificar).
     acc = grounding.accredit(_raw(args="write_file", pointer="/capabilities/1"), SNAP_A)
-    assert acc.outcome == "MISMATCH"
+    assert acc.outcome == "FACT_NOT_IN_SNAPSHOT"
     assert "args" in acc.detail
+
+
+def test_new_pointer_mismatch_names_correct_pointer_reproducing_the_prod_incident():
+    # Reproduce el hallazgo que motiva esta ronda (CONTEXT.md 2026-09-03):
+    # el claim afirma write_file/mutating (verdadero, en /capabilities/1)
+    # pero cita /capabilities/0, que es read_file/read_only. El hecho es
+    # real, el puntero apunta a otro lado -> POINTER_MISMATCH, y el detail
+    # tiene que nombrar /capabilities/1 (donde sí vive el hecho).
+    acc = grounding.accredit(
+        _raw(args={"name": "write_file", "mode": "mutating"}, pointer="/capabilities/0"), SNAP_A
+    )
+    assert acc.outcome == "POINTER_MISMATCH"
+    assert "/capabilities/1" in acc.detail
+    assert "/capabilities/0" in acc.detail
+
+
+def test_new_hand_built_snapshot_with_duplicate_args_matches_first_entry_deterministically():
+    """build_snapshot() NO puede producir dos entradas con args idénticos:
+    itera sorted(ctx.ops), ops es un frozenset de NOMBRES únicos, y el nombre
+    es parte de los args de cada entrada. Este test arma un Snapshot A MANO
+    para cubrir el caso límite igual: si alguna vez existe, la búsqueda de
+    POINTER_MISMATCH tiene que ser determinista (primera coincidencia en
+    snapshot.entries), no depender del orden de iteración de un dict/set.
+    """
+    dup_args = {"name": "write_file", "mode": "mutating"}
+    entries = (
+        grounding.SnapshotEntry(pointer="/capabilities/0", predicate="CAPABILITY_AVAILABLE", args=dup_args),
+        grounding.SnapshotEntry(pointer="/capabilities/1", predicate="CAPABILITY_AVAILABLE", args=dup_args),
+    )
+    snap = grounding.Snapshot(entries=entries, canonical_json="{}", sha256="0" * 64)
+    acc = grounding.accredit(_raw(args=dup_args, pointer="/capabilities/99"), snap)
+    assert acc.outcome == "POINTER_MISMATCH"
+    assert "/capabilities/0" in acc.detail  # la primera coincidencia en snapshot.entries
+    assert "/capabilities/1" not in acc.detail  # NUNCA la segunda, aunque args sean idénticos
 
 
 def test_6_snapshot_error_is_unavailable_even_with_a_pointer():
@@ -224,29 +270,38 @@ def test_6_snapshot_error_is_unavailable_even_with_a_pointer():
     "bad",
     ["", "capabilities/1", "/capabilities/abc", "/capabilities/-1", "/x" * 150, "/capabilities/1\n"],
 )
-def test_9_1b_malformed_pointer_is_mismatch_without_exception(bad):
+def test_9_1b_malformed_pointer_with_true_fact_is_pointer_mismatch_without_exception(bad):
     # "/capabilities/1\n" es el caso del finding Minor #2: con re.match, "$"
     # matchea antes de un "\n" final y el puntero "pasa" el regex; debe
-    # tratarse como malformado (fullmatch), no llegar a lookup().
+    # tratarse como malformado (fullmatch), no llegar a lookup(). Los args
+    # por defecto de _raw() (write_file/mutating) son un hecho verdadero de
+    # SNAP_A -- la FORMA del puntero no cambia esa condición mecánica:
+    # sigue siendo POINTER_MISMATCH, no FACT_NOT_IN_SNAPSHOT.
     acc = grounding.accredit(_raw(pointer=bad), SNAP_A)
-    assert acc.outcome == "MISMATCH"
+    assert acc.outcome == "POINTER_MISMATCH"
     assert acc.authority == "INFERIDO"
     assert acc.evidence_pointer_raw == bad
     assert "malformado" in acc.detail
+    assert "/capabilities/1" in acc.detail
 
 
 def test_9_1b_minus_one_never_indexes_from_the_end():
     # Si "-1" se convirtiera a int y se indexara, apuntaría a la ÚLTIMA
     # entrada (write_file) y los args coincidirían -> ACCREDITED. Eso sería
-    # fail-open por Python. Debe ser MISMATCH.
+    # fail-open por Python. Debe ser malformado -> POINTER_MISMATCH (el
+    # hecho write_file/mutating de los args por defecto SÍ existe en
+    # SNAP_A), nunca ACCREDITED.
     acc = grounding.accredit(_raw(pointer="/capabilities/-1"), SNAP_A)
-    assert acc.outcome == "MISMATCH"
+    assert acc.outcome == "POINTER_MISMATCH"
 
 
-def test_non_string_pointer_is_mismatch_not_exception():
+def test_non_string_pointer_is_pointer_mismatch_or_no_pointer_not_exception():
     for bad in (7, None, ["/capabilities/1"], {"p": 1}):
         acc = grounding.accredit(_raw(pointer=bad), SNAP_A)
-        assert acc.outcome == ("NO_POINTER" if bad is None else "MISMATCH")
+        # bad=None -> nunca hubo puntero: NO_POINTER. El resto son punteros
+        # no-string; los args por defecto (write_file/mutating) son un
+        # hecho verdadero de SNAP_A -> POINTER_MISMATCH.
+        assert acc.outcome == ("NO_POINTER" if bad is None else "POINTER_MISMATCH")
 
 
 # --- validate() con acreditación: el orden 0-6 del spec §4.1 ----------------
@@ -279,9 +334,12 @@ def test_1_job_status_with_invented_pointer_is_resolver_not_implemented_not_mism
     assert v.status == "RESOLVER_NOT_IMPLEMENTED"
 
 
-def test_2_capability_with_invented_pointer_is_provenance_mismatch_not_resolver():
+def test_2_capability_with_invented_pointer_true_fact_is_pointer_mismatch_not_resolver():
+    # Puntero inventado, hecho verdadero (write_file/mutating por defecto,
+    # real en /capabilities/1) -> POINTER_MISMATCH, un caso del par nuevo
+    # en la capa de veredicto (spec: la citación es el problema, no el hecho).
     v = _validate(_raw(pointer="/capabilities/99"), SNAP_A)
-    assert v.status == "PROVENANCE_MISMATCH"
+    assert v.status == "POINTER_MISMATCH"
 
 
 def test_3_capability_without_pointer_is_authority_invalid():
@@ -289,9 +347,12 @@ def test_3_capability_without_pointer_is_authority_invalid():
     assert v.status == "AUTHORITY_INVALID"
 
 
-def test_4_forged_citation_is_provenance_mismatch():
+def test_4_forged_citation_of_nonexistent_fact_is_fact_not_in_snapshot():
+    # write_file/read_only no es un hecho que exista en SNAP_A -> el claim
+    # afirma algo que el snapshot no dice: FACT_NOT_IN_SNAPSHOT, el otro
+    # caso del par nuevo en la capa de veredicto.
     v = _validate(_raw(args={"name": "write_file", "mode": "read_only"}, pointer="/capabilities/1"), SNAP_A)
-    assert v.status == "PROVENANCE_MISMATCH"
+    assert v.status == "FACT_NOT_IN_SNAPSHOT"
 
 
 def test_5_accredited_claim_reaches_the_resolver_and_is_valid():
@@ -345,5 +406,9 @@ def test_validate_without_accreditation_inferido_on_predicate_without_resolver_i
 
 
 def test_new_statuses_fit_in_varchar_30():
-    for s in ("PROVENANCE_MISMATCH", "GROUNDING_UNAVAILABLE"):
+    # PROVENANCE_MISMATCH (19) se partió en POINTER_MISMATCH (16) y
+    # FACT_NOT_IN_SNAPSHOT (20): ninguno amplía la columna existente.
+    for s in ("POINTER_MISMATCH", "FACT_NOT_IN_SNAPSHOT", "GROUNDING_UNAVAILABLE"):
         assert len(s) <= 30
+    assert len("POINTER_MISMATCH") == 16
+    assert len("FACT_NOT_IN_SNAPSHOT") == 20

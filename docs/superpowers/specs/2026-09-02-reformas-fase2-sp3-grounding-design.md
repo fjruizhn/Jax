@@ -213,6 +213,18 @@ etiqueta:
 | `AUTHORITY_INVALID` | conducta del modelo: se ofreció grounding y no citó |
 | `PROVENANCE_MISMATCH` | conducta del modelo: citó algo que no dice eso |
 
+> **Actualización 2026-09-03 — `PROVENANCE_MISMATCH` ya no existe.** Se partió en
+> `POINTER_MISMATCH` (existe una entrada del snapshot que respalda el claim, pero
+> no es la citada: erró la puntería) y `FACT_NOT_IN_SNAPSHOT` (ninguna entrada lo
+> respalda: afirmó algo que el snapshot no dice). Motivo, medido en producción: la
+> única fila de ese estado era un hecho VERDADERO citado con el índice equivocado,
+> y un hecho inventado caía en el mismo lugar -- un detector que no distingue lo
+> esperado de lo anómalo, con el orden de gravedad invertido respecto de lo que
+> sugería el nombre. La condición que los separa es mecánica: con los args
+> normalizados, ¿existe alguna entrada del snapshot con el mismo predicado y los
+> mismos args? Todo lo que este documento dice de `PROVENANCE_MISMATCH` se lee
+> sobre los dos estados nuevos.
+
 ### 4.2 Estados nuevos
 
 Dos, los dos aprobados. Ninguno amplía la columna: `PROVENANCE_MISMATCH` 19,
