@@ -2001,6 +2001,24 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **`GROUNDING_UNAVAILABLE` es inalcanzable para su causa realista — hallazgo
+  de la revisión final de SP3, 2026-09-03.** El spec §4.2 dice que el paso 0
+  "se aplica a todo claim del turno". En `jax-platform/backend/shadow_validation.py`,
+  `run_shadow_validation()` llama a `_validation_context()` ANTES del loop de
+  claims; la única causa realista de un `SnapshotError` en producción es que esa
+  misma carga (config.toml / vocabulario) falle, así que falla de nuevo ahí: la
+  fila de `shadow_messages` queda con `grounding_snapshot_sha256='ERROR'` y
+  `validated_at NULL`, la excepción se loguea y se relanza, y NO se escribe
+  ninguna fila `GROUNDING_UNAVAILABLE` en `shadow_claim_verdicts`. Es
+  fail-closed y visible (no P10), pero SP4 verá menos filas de ese estado de las
+  que el spec promete. El test `test_snapshot_error_marks_turn_ERROR_and_claims_grounding_unavailable`
+  es válido solo para un `SnapshotError` inyectado. **Causa:** orden del plan de
+  SP3 (Task 5), no del código. **Qué falta:** cortocircuitar el paso 0 antes de
+  `_validation_context()` — `accredit()` y el paso 0 de `validate()` no
+  necesitan ni `ctx` ni `predicates`; con `SnapshotError` se pueden escribir los
+  veredictos `GROUNDING_UNAVAILABLE` de todos los claims y saltar el vocab
+  sweep. **Fecha de control:** al abrir SP4 (análisis de datos de grounding).
+
 - **`GPU_SEMAPHORE` no cubre a Jacobs — DECISIÓN TOMADA (2026-09-01), no
   pendiente.** Estuvo listado como deuda abierta desde el Bloque 2
   (2026-08-21) diciendo "no se cierra por decisión", que es una frase que se
