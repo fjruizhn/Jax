@@ -278,6 +278,29 @@ def test_invalidate_facet_cache_toca_el_sello(sello, monkeypatch):
     assert abs(os.stat(sello).st_mtime - time.time()) < 60
 
 
+def test_sello_con_mtime_empatado_invalida_igual(sello, monkeypatch):
+    """El empate de reloj no puede dejar viva una entrada rancia.
+
+    La resolucion de timestamps del filesystem trunca el mtime, asi que un
+    sello escrito DESPUES de cachear puede quedar con un mtime IGUAL al
+    `fetched_at_wall` de la entrada. Con la comparacion estricta (`>`) ese
+    empate se leia como "sello viejo" y la entrada sobrevivia hasta el TTL de
+    30 s. Este test fuerza el empate en vez de esperar a que el azar lo
+    produzca: en CI lo produjo una vez de dos con el MISMO sha (2026-09-03).
+    """
+    _stub_query(monkeypatch, ["modelo-viejo"])
+    _resolver()
+    entrada = fr._cache["primary"]
+
+    fr.invalidate_facet_cache("primary")
+    os.utime(sello, (entrada.fetched_at_wall, entrada.fetched_at_wall))
+
+    assert fr._seal_mtime() == entrada.fetched_at_wall, "el empate tiene que ser exacto"
+    assert fr._entrada_sellada(entrada), (
+        "con mtime empatado hay que invalidar: ante la duda, fail-closed"
+    )
+
+
 def test_invalidate_facet_cache_lo_ven_los_otros_procesos(sello, monkeypatch):
     """La prueba de que el sello cruza procesos, simulada dentro de uno: una
     entrada cacheada ANTES del invalidate --como la que tienen Jacobs y el

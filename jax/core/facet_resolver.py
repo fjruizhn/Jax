@@ -152,7 +152,18 @@ def _entrada_sellada(entry: _CacheEntry) -> bool:
     mtime = _seal_mtime()
     if mtime is None:
         return False
-    return mtime > entry.fetched_at_wall
+    # `>=` y no `>`, y no es cosmetico: el mtime lo trunca la resolucion de
+    # timestamps del filesystem, asi que un sello escrito DESPUES de cachear
+    # puede quedar registrado con un mtime IGUAL (o redondeado por debajo) al
+    # `time.time()` con el que se cacheo. Con `>` esa coincidencia se lee como
+    # "el sello es viejo" y la entrada rancia sobrevive hasta que expire el TTL
+    # de 30 s -- exactamente el bug que el sello existe para cerrar, reaparecido
+    # por un empate de reloj. Ante la duda se invalida: re-resolver de mas
+    # cuesta una query, servir el modelo viejo despues de un rebinding cuesta
+    # una sonda que valida el binding anterior y reporta ok sobre el nuevo.
+    # Medido 2026-09-03: el mismo sha corrio dos veces en CI, una paso y otra
+    # fallo en test_invalidate_facet_cache_lo_ven_los_otros_procesos.
+    return mtime >= entry.fetched_at_wall
 
 
 def invalidate_facet_cache(facet_key: str) -> bool:
