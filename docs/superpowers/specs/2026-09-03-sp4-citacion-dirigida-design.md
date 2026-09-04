@@ -211,10 +211,21 @@ agregó una capability y los índices se movieron— **se para, se declara y se 
 lo corrido**. No se completa la grilla con dos snapshots. No se "ajusta" después. Se
 vuelve a correr entero con el snapshot nuevo.
 
+**Delimitación de la muestra — necesaria para que el pre-registro sea auditable.**
+La muestra son las filas con `origin = 'probe'` y `queued_at >= T0`, donde **T0 se
+fija al arrancar el corrido y es posterior al commit de este pre-registro**
+(`42f91c1`, 2026-09-03 19:16:12 -0600). T0 se anota en el informe de cierre.
+
+Existe **una fila anterior** con `origin = 'probe'`: `shadow_messages.id = 40`,
+faceta `jekyll`, `2026-09-03 14:20:17`. Es la verificación en vivo del despliegue
+de la propia columna de origen y **NO es muestra**. Queda nombrada acá para que
+quien audite no tenga que adivinar cuál es cuál: cualquier fila `probe` anterior a
+T0 está excluida por construcción.
+
 **Verificación mecánica al cerrar:**
 ```sql
 SELECT COUNT(DISTINCT grounding_snapshot_sha256) FROM shadow_messages
- WHERE origin = 'probe' AND queued_at >= '<inicio del corrido>';
+ WHERE origin = 'probe' AND queued_at >= '<T0>';
 ```
 Tiene que devolver 1. Si devuelve más, la muestra está partida y se descarta.
 
