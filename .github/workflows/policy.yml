@@ -242,8 +242,8 @@ jobs:
       # exige el numero.
       - run: |
           PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -q 2>&1 | tee /tmp/seal
-          grep -qE "^11 passed" /tmp/seal || {
-            echo "PISO ROTO: se esperaban 11 tests CORRIDOS (no skipeados)."; exit 1; }
+          grep -qE "^12 passed" /tmp/seal || {
+            echo "PISO ROTO: se esperaban 12 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Renombrado de `facet-resolver-sync` el 2026-09-01: el checker se generalizo
   # a FAMILIAS de espejos y ahora cubre tambien credential_resolver.
