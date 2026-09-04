@@ -2001,6 +2001,19 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **El brazo negativo de la sonda de SP4 no mide fabricación: hay que cerrar
+  la puerta de `ssh_exec` — 2026-09-04, causa medida.** En el corrido dirigido
+  del 2026-09-03, **82 de los 120 turnos negativos (68%)** terminaron con la
+  faceta afirmando `ssh_exec` o `ssh_exec_readonly`, capabilities que SÍ están
+  en el snapshot. Eso no es fabricación y por eso el pre-registro los clasifica
+  como no responsivos, pero deja el resultado sin fuerza: **el 0% de fabricación
+  es sobre 38 turnos efectivos, no sobre 120**, y no distingue "no fabrica" de
+  "no necesitó fabricar". **Qué falta:** ítems negativos que no tengan salida
+  por una capability real — o excluir `ssh_exec`/`ssh_exec_readonly` del
+  snapshot inyectado para ese brazo, que es un cambio del mecanismo y por lo
+  tanto exige su propio pre-registro y su propio corrido. **No se trabaja
+  ahora**, por decisión explícita. **Fecha de control:** al retomar SP4.
+
 - **500 en `/api/chat` por distancias NULL en `_semantic_context` --
   2026-09-03, NO REPRODUCIDO.** Observado una sola vez, en un montaje de dev
   levantado a mano (uvicorn aparte en :8099, `JAX_DB_NAME=jax_memory_test`,
