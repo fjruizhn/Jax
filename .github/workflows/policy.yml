@@ -190,12 +190,22 @@ jobs:
         with:
           python-version: "3.12"
       # httpx: jax/memory/db.py lo importa a nivel de modulo (get_embedding).
-      - run: pip install pytest aiomysql httpx
-      - run: PYTHONPATH=. python -m pytest tests/test_memory_vector_zero_io.py -v
+      # cryptography: tests/test_worker_backfill.py importa jax.memory.worker,
+      # que trae jax.muscles.base -> jax.core.crypto_secrets. Sin el, ese
+      # archivo NO COLECTA. Medido 2026-09-11 en un venv limpio con solo este
+      # pip install (no en hall9000, donde todo esta instalado): con los 4
+      # paquetes, 10 tests colectados; sin cryptography, error de coleccion.
+      - run: pip install pytest aiomysql httpx cryptography
+      - run: PYTHONPATH=. python -m pytest tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py -v
+      # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
+      # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
+      # embeddings en el worker): cada test nuevo se vio en rojo antes del
+      # arreglo y, por mutacion, cada pieza del arreglo tiene un test que cae
+      # sin ella.
       - run: |
-          PYTHONPATH=. python -m pytest tests/test_memory_vector_zero_io.py -q 2>&1 | tee /tmp/out
-          grep -qE "^4 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 4 tests CORRIDOS (no skipeados)."; exit 1; }
+          PYTHONPATH=. python -m pytest tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py -q 2>&1 | tee /tmp/out
+          grep -qE "^10 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 10 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest

@@ -330,3 +330,114 @@ async def test_nearest_fact_elige_el_real_aunque_haya_ceros(tablas, monkeypatch)
 
     assert cand is not None and cand["fact_text"] == "fact real", cand
     assert _finita(cand["distancia"]), cand
+
+
+# ---------------------------------------------------------------------------
+# backfill_zero_embeddings: el reintento que save_message()/add_fact() no
+# hacen. Sin el, una fila que nace en ceros (Ollama caido al guardar) queda
+# excluida de toda busqueda para siempre, en silencio.
+#
+# Los contadores asumen que en estas tablas solo hay filas de este archivo:
+# en CI la base nace vacia, y en hall9000 las tablas las crea y las borra el
+# fixture (jax_memory_test no las tiene).
+# ---------------------------------------------------------------------------
+
+async def _es_cero(tabla: str, texto_col: str, texto: str) -> bool:
+    filas = await _sql(
+        f"SELECT VEC_DISTANCE_EUCLIDEAN(embedding, VEC_FromText(%s)) = 0 "
+        f"FROM {tabla} WHERE {texto_col} = %s", (_CERO, texto), fetch=True)
+    assert len(filas) == 1, (tabla, texto, filas)
+    return bool(filas[0][0])
+
+
+async def _embedding_texto(tabla: str, texto_col: str, texto: str) -> str:
+    filas = await _sql(
+        f"SELECT VEC_ToText(embedding) FROM {tabla} WHERE {texto_col} = %s",
+        (texto,), fetch=True)
+    return filas[0][0]
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_backfill_repara_mensajes_y_facts_en_cero_sin_tocar_los_reales(
+        tablas, monkeypatch):
+    conv = await _conversacion()
+    await _mensaje(conv, 1, "mensaje en cero", None)
+    await _mensaje(conv, 2, "mensaje real", _vec((0, 1.0)))
+    await _fact("fact en cero", _vec())
+    await _fact("fact real", _vec((1, 1.0)))
+    antes_msg = await _embedding_texto("messages", "content", "mensaje real")
+    antes_fact = await _embedding_texto("facts", "fact_text", "fact real")
+
+    m = await _memoria(monkeypatch, _vec((7, 1.0)))
+    try:
+        r_msg = await m.backfill_zero_embeddings("messages", limit=50)
+        r_fact = await m.backfill_zero_embeddings("facts", limit=50)
+    finally:
+        await _cerrar(m)
+
+    assert r_msg == {"pendientes": 1, "reparadas": 1, "fallidas": 0}, r_msg
+    assert r_fact == {"pendientes": 1, "reparadas": 1, "fallidas": 0}, r_fact
+    assert not await _es_cero("messages", "content", "mensaje en cero")
+    assert not await _es_cero("facts", "fact_text", "fact en cero")
+    # Las filas sanas no se tocan: el UPDATE esta guardado por "sigue en ceros".
+    assert await _embedding_texto("messages", "content", "mensaje real") == antes_msg
+    assert await _embedding_texto("facts", "fact_text", "fact real") == antes_fact
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_backfill_con_ollama_caido_deja_la_fila_y_la_repara_en_la_proxima(
+        tablas, monkeypatch):
+    """Ollama caido: la fila se queda en ceros (no se inventa un vector) y se
+    cuenta como fallida; la corrida siguiente, con Ollama de vuelta, la
+    repara. Es exactamente el ciclo que el worker cada 20 min va a repetir."""
+    conv = await _conversacion()
+    await _mensaje(conv, 1, "mensaje en cero", None)
+
+    m = await _memoria(monkeypatch, _vec((7, 1.0)))
+    try:
+        async def _caido(_texto):
+            return None
+
+        monkeypatch.setattr(m, "get_embedding", _caido)
+        r1 = await m.backfill_zero_embeddings("messages", limit=50)
+        assert r1 == {"pendientes": 1, "reparadas": 0, "fallidas": 1}, r1
+        assert await _es_cero("messages", "content", "mensaje en cero")
+
+        async def _vuelve(_texto):
+            return _vec((7, 1.0))
+
+        monkeypatch.setattr(m, "get_embedding", _vuelve)
+        r2 = await m.backfill_zero_embeddings("messages", limit=50)
+    finally:
+        await _cerrar(m)
+
+    assert r2 == {"pendientes": 1, "reparadas": 1, "fallidas": 0}, r2
+    assert not await _es_cero("messages", "content", "mensaje en cero")
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_backfill_respeta_el_limite_por_corrida(tablas, monkeypatch):
+    conv = await _conversacion()
+    for i in range(3):
+        await _mensaje(conv, i + 1, f"mensaje en cero {i}", None)
+
+    m = await _memoria(monkeypatch, _vec((7, 1.0)))
+    try:
+        r1 = await m.backfill_zero_embeddings("messages", limit=2)
+        r2 = await m.backfill_zero_embeddings("messages", limit=2)
+    finally:
+        await _cerrar(m)
+
+    assert r1 == {"pendientes": 2, "reparadas": 2, "fallidas": 0}, r1
+    assert r2 == {"pendientes": 1, "reparadas": 1, "fallidas": 0}, r2
+
+
+def test_backfill_rechaza_una_tabla_no_permitida():
+    """La tabla se interpola en el SQL: solo las dos con embedding real, por
+    lista cerrada. Sin DB -- se rechaza antes de tocar el pool."""
+    m = dbmod.MemoryDB()
+    with pytest.raises(ValueError):
+        asyncio.run(m.backfill_zero_embeddings("messages; DROP TABLE facts", limit=1))

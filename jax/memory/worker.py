@@ -298,8 +298,32 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
     return True
 
 
+# Tope de filas por tabla y por corrida para el recalculo de embeddings en
+# ceros. Acota el tiempo contra Ollama; lo que no entra, entra en la corrida
+# siguiente (el timer corre cada 20 min).
+BACKFILL_LIMIT = 50
+
+
+async def _recalcular_embeddings_en_ceros(db: MemoryDB) -> None:
+    """Reintenta los embeddings que quedaron en vector cero (ver
+    MemoryDB.backfill_zero_embeddings). Va ANTES de la extraccion porque
+    `run_once` vuelve temprano cuando no hay conversaciones pendientes -- el
+    caso de casi todas las corridas --, y despues de ese return no correria
+    nunca. Cada tabla por separado: el fallo de una no se lleva a la otra."""
+    for tabla in ("messages", "facts"):
+        try:
+            r = await db.backfill_zero_embeddings(tabla, limit=BACKFILL_LIMIT)
+        except Exception as e:  # fail-soft: el recalculo es independiente de la extraccion (otro proveedor); el error queda en el journal y la corrida siguiente, a los 20 min, reintenta la misma fila
+            logger.error(f"recalculo de embeddings en ceros ({tabla}) fallo: "
+                         f"{type(e).__name__}: {e}")
+            continue
+        if r["pendientes"]:
+            logger.info(f"embeddings en ceros ({tabla}): {r}")
+
+
 async def run_once(limit: int = 10) -> None:
-    """Una corrida del worker: procesa hasta `limit` conversaciones."""
+    """Una corrida del worker: recalcula embeddings en ceros y procesa hasta
+    `limit` conversaciones."""
     jax_db_host = os.environ.get("JAX_DB_HOST")
     if not jax_db_host:
         raise RuntimeError(
@@ -319,6 +343,8 @@ async def run_once(limit: int = 10) -> None:
         return
 
     try:
+        await _recalcular_embeddings_en_ceros(db)
+
         pendientes = await db.get_unprocessed_conversations(limit=limit)
         if not pendientes:
             logger.info("No hay conversaciones pendientes de procesar.")

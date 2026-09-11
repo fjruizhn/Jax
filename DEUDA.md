@@ -37,7 +37,9 @@ su fecha de última verificación real, no una nueva.
   | Ítem | Bloqueado por |
   |---|---|
   | Ticket a GitHub Support (`$AUDIT/TICKET-GITHUB.md`) | su respuesta |
-  | Purga de dumps en R2 — **2026-09-08 ~01:00** | Bucket Lock, inmutabilidad por diseño |
+
+  La fila "Purga de dumps en R2 — 2026-09-08" **salió de esta tabla el
+  2026-09-11: su premisa era falsa** (ver el párrafo de fechas vencidas).
 
   **Deuda técnica abierta:** los ítems que siguen en esta sección — al cierre
   del 2026-09-01 queda **uno**: el merge sin revisión en `master`, y su
@@ -50,9 +52,27 @@ su fecha de última verificación real, no una nueva.
   existía. De ahí la regla nueva de §7 de `CONTEXT.md`.
   **Fecha de control más próxima:** la de `kimi` (**2026-09-10**) se cerró el
   2026-09-11 — ver "Cerrado — kimi y la memoria vector cero" más abajo.
-  **Vencidas y sin verificar al 2026-09-11:** la purga de dumps en R2 y la
-  contraseña de `user_id=2` (las dos del 2026-09-08). La purga no se puede
-  verificar desde el host (sin `aws`/`rclone`/`mc`): hay que mirarla en el panel.
+  **La "purga de dumps en R2" del 2026-09-08 nunca iba a ocurrir — medido
+  2026-09-11.** La fecha salió de sumar solo el Bucket Lock de 7 días, sin
+  mirar la retención ni el prune:
+
+  | Hecho medido | Evidencia |
+  |---|---|
+  | Los dos repos (R2 y local) conservan **5 snapshots anteriores a la redacción** del 09-01: 07-13, 07-31, 08-23, 08-30, 08-31 | `restic snapshots` en ambos |
+  | Cada uno lleva **2 líneas con hash bcrypt** en `jax_memory.sql`; el de 09-11 lleva **0** (la redacción funciona) | `restic dump` + conteo, sin imprimir un solo hash |
+  | La retención (`--keep-daily 7 --keep-weekly 4 --keep-monthly 6`) los guarda **a propósito, hasta 6 meses** | `backup-hall9000.sh`, paso 6 |
+  | En R2 **nunca se borra nada físicamente**: el paso 6 hace `forget` sin `--prune`, y sin prune restic no borra packs jamás | mismo paso; el comentario decía que "el espacio se libera cuando expira la inmutabilidad" — **falso**, corregido en el script el 2026-09-11 (y decía 10 días de lock: son 7) |
+
+  Uno de los dos hashes es casi seguro el de **`user_id=2`, que sigue
+  vigente** (su contraseña nunca se rotó). El repo está cifrado por restic:
+  leerlo exige las credenciales de R2 **y** la contraseña del repo.
+
+  **Decisión de Fernando, 2026-09-11: rotar la contraseña de `user_id=2`**
+  (coordinada con la persona; mismo procedimiento que `user_id=1`), en vez de
+  olvidar los snapshots — conserva los puntos de restauración de julio y
+  agosto y deja sin valor los hashes viejos. **Pendiente de la coordinación.**
+
+  **Queda anotado aparte:** R2 no tiene prune diferido y el bucket solo crece.
 
 - **El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3
   vació — verificado 2026-09-02.** **Causa:** el Bloque 3 movió las
