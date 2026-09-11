@@ -48,7 +48,11 @@ su fecha de última verificación real, no una nueva.
   owner de pipeline **ya estaba arreglado desde el 2026-08-20**. Cuarta y
   quinta instancia del patrón del día: el ítem describía un estado que ya no
   existía. De ahí la regla nueva de §7 de `CONTEXT.md`.
-  **Fecha de control más próxima:** `kimi`, **2026-09-10**.
+  **Fecha de control más próxima:** la de `kimi` (**2026-09-10**) se cerró el
+  2026-09-11 — ver "Cerrado — kimi y la memoria vector cero" más abajo.
+  **Vencidas y sin verificar al 2026-09-11:** la purga de dumps en R2 y la
+  contraseña de `user_id=2` (las dos del 2026-09-08). La purga no se puede
+  verificar desde el host (sin `aws`/`rclone`/`mc`): hay que mirarla en el panel.
 
 - **El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3
   vació — verificado 2026-09-02.** **Causa:** el Bloque 3 movió las
@@ -168,6 +172,67 @@ su fecha de última verificación real, no una nueva.
   Ver la séptima lección de método en CONTEXT.md ("verificar y actuar en el
   mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
   compuesto que falla.
+
+## Cerrado — kimi y la memoria vector cero (2026-09-11)
+
+Dos defectos distintos, encontrados en cadena: el segundo apareció al
+verificar el primero con un turno real, y **sin ese turno se habría declarado
+cerrado `kimi` con el chat caído para todo el scope individual**. Todo lo que
+sigue se verificó en la máquina (checkout servido, DB en vivo, proceso
+corriendo), no en el diff.
+
+- **`kimi` en el chat de la Mesa web — CERRADO Y DESPLEGADO.** `jax-platform#49`
+  (`1b47717`). `facet.transport='motor_registry'` era **una etiqueta sin
+  lector**: Jacobs despacha a kimi por `_MOTOR_FACETS` **antes** de mirar
+  `facet.transport`, y el worker de Motor Registry usa `motor.transport` (que ya
+  era `http_openai_compat`). El único lector era el chat, que no despacha ese
+  valor → `unsupported_transport` en cada barrido desde el 2026-08-20. La API
+  estaba sana (llamada real con el payload exacto: HTTP 200, `stop`, 4.7 s).
+
+  Se alineó con `ada`: `http_openai_compat` + gate `authorize-facet` +
+  `allowed_callers`, por migración idempotente guardada. **Test de clase:**
+  todo facet sembrado (salvo hyde) tiene que ser despachable por el chat —
+  dio rojo exactamente en `kimi-motor_registry`. `CANARY_SWEEP_TIMEOUT_SECONDS`
+  900 → 1080: el 900 contaba a kimi como retorno sin red, y el margen caía de
+  ~32% a ~11% sin que nadie lo decidiera.
+
+  **En vivo:** fila migrada en `jax_memory`; sonda `ok` a las 02:37:07 y de
+  nuevo tras el segundo deploy (02:56:59, las 6 facetas `ok`); la alerta pasó
+  de `down` a `ok` sola a las 02:41:34. Costo nuevo declarado: ~$0.08/día de
+  sonda.
+
+- **500 en `/api/chat` por embeddings "vector cero" — CERRADO Y DESPLEGADO.**
+  `jax#116` (`9904a25`) + `jax-platform#50` (`0784d5f`). Al probar kimi,
+  **todo turno del scope individual caía en cualquier faceta**: medido por el
+  camino real, `search_similar_messages("hola", user_id=1)` devolvía 5 filas,
+  las 5 con `distancia=None`, y `_semantic_context` hacía `None < 0.8` fuera de
+  su `try`.
+
+  **Causa:** `messages.embedding`/`facts.embedding` son `VECTOR(768) NOT NULL
+  DEFAULT` vector cero (el `VECTOR KEY` exige NOT NULL). `VEC_DISTANCE_COSINE`
+  contra norma cero da **NaN**, y el NaN engaña a toda medición ingenua —
+  medido cada punto: `IS NULL` no lo atrapa; el `ORDER BY ... ASC` lo ubica en
+  cualquier lado (acá primero: por eso funcionó el 09-03 y falló el 09-11 sin
+  cambio de código); aiomysql lo entrega como `None` en un camino y como
+  **`0.0`** en otro. El `0.0` era un defecto dormido de `add_fact`: un fact de
+  vector cero parecería un duplicado exacto de cualquier fact nuevo.
+
+  **Arreglo en la fuente, dos capas:** exclusión en SQL
+  (`_nonzero_embedding_sql`, la única que ve el NaN entregado como `0.0`) +
+  filtro de distancias finitas con WARNING; y el consumidor del chat pasa a ser
+  fail-soft al consumir. Tests contra MariaDB real con rojo determinístico,
+  mutación por capa, job nuevo `memory-vector-zero-io` con piso de 4 corridos.
+
+  **En vivo:** tras el deploy, la misma búsqueda devuelve 5 filas **todas
+  finitas**; 0 `TypeError` en el journal desde el reinicio.
+
+- **Backfill de las 24 filas del 2026-06-09 — HECHO, y es un arreglo MANUAL.**
+  Backup por id (`~/backups/messages_vector_cero_pre_backfill_20260911-025453.sql`,
+  600), **restauración probada** en una tabla temporal (24 filas, md5 idéntico
+  a producción), dry-run (24/24 con embedding), `UPDATE` guardado por "sigue en
+  ceros": 24/24 reparadas, **0 filas en ceros**. **La causa que las produjo
+  sigue viva** — ver el ítem abierto de `save_message()` en "Anotado, no
+  bloquea". No se escribe "FIJO".
 
 ## Cerrado — ronda de seguridad 2026-09-01
 
@@ -1727,6 +1792,12 @@ retractaciones, que no se borran. Ninguno requiere acción.
   alertando, la presión no funcionó** y hay que decidir de otra forma —
   no bajarle el volumen a la alerta.
 
+  **CERRADO 2026-09-11** — ni rutearla por Motor Registry ni sacarla del
+  picker: la decisión de producto fue que kimi funcione en el chat, y la causa
+  resultó ser una etiqueta sin lector. Ver "Cerrado — kimi y la memoria vector
+  cero". La alerta hizo exactamente su trabajo: la mantuvo visible un mes y
+  registró sola la recuperación.
+
 - **La alerta afirma la capa equivocada: `probe_error` tapa a
   `config_error` (2026-08-27) — CERRADO Y DESPLEGADO (2026-08-28).**
   Se deja el diagnóstico completo abajo, sin borrar: describe una clase de
@@ -2014,7 +2085,52 @@ retractaciones, que no se borran. Ninguno requiere acción.
   tanto exige su propio pre-registro y su propio corrido. **No se trabaja
   ahora**, por decisión explícita. **Fecha de control:** al retomar SP4.
 
+- **`save_message()` no reintenta el embedding: una fila que nace en vector
+  cero queda así para siempre — ABIERTO, 2026-09-11.** Es la causa viva detrás
+  del 500 del 2026-09-11 (ver "Cerrado — kimi y la memoria vector cero"). La
+  búsqueda ya excluye esas filas, así que **no rompen nada**; lo que queda es
+  que **se pierden de la memoria en silencio**: un mensaje guardado durante una
+  caída de Ollama no vuelve a aparecer en ninguna búsqueda, y nada lo avisa.
+  Las 24 del 2026-06-09 se repararon **a mano** (un backfill, no un arreglo:
+  ver la lección "un arreglo manual no es un arreglo"). **Qué falta:** que algo
+  recalcule los embeddings en ceros — candidato natural, el worker de memoria
+  (`jax-memory-worker.timer`, cada 20 min), con el mismo `UPDATE` guardado por
+  "sigue en ceros" del backfill. **Cómo medirlo:** `SELECT COUNT(*) FROM
+  messages WHERE VEC_DISTANCE_EUCLIDEAN(embedding, <cero>) = 0` — **no** con
+  `IS NULL` ni con la distancia coseno, que dan NaN y engañan (así se midió mal
+  el 2026-09-03). **Fecha de control: 2026-09-25.**
+
+- **`jax_memory_schema.sql` desactualizado respecto de producción — ABIERTO,
+  2026-09-11.** Medido con `SHOW CREATE TABLE` contra `jax_memory`: al archivo
+  le faltan `conversations.tenant_id/user_id/project_id` (el scope de la
+  búsqueda depende de ellos), declara `embedding VECTOR(768) NULL` donde
+  producción tiene `NOT NULL DEFAULT` vector cero más `VECTOR KEY`, y el ENUM de
+  `messages.role` tiene 5 de los 8 valores. **Ningún `ALTER` del código explica
+  la diferencia.** Tercera instancia del patrón "ALTER a mano en producción que
+  nunca entró al camino de creación" (después de `depends_on` y de las 3
+  capabilities HTTP-directo): una instalación nueva desde este archivo no
+  corre la búsqueda semántica. Por eso `tests/test_memory_vector_zero_io.py`
+  declara el DDL de producción en vez de leer el archivo. La nota de patrón de
+  más abajo decía "si aparece una tercera instancia, es momento de escribir un
+  chequeo automatizado": apareció. **Fecha de control: 2026-09-25.**
+
+- **`tests/test_memory_helpers.py` no lo corre ningún job de CI — 2026-09-11,
+  medido con `grep` sobre `.github/workflows/`.** 15 tests puros de
+  `jax/memory/db.py` que solo corren a mano (octava lección: un test que ningún
+  job nombra no produce ni verde falso). El job nuevo `memory-vector-zero-io`
+  corre solo su propio archivo. **Qué falta:** nombrarlo en un job, con piso.
+
 - **500 en `/api/chat` por distancias NULL en `_semantic_context` --
+  CERRADO 2026-09-11, ver "Cerrado — kimi y la memoria vector cero".** Lo que
+  sigue es el texto del 2026-09-03, **conservado y corregido, no borrado**: su
+  medición de "cero vectores cero en producción" era **falsa** — había 24 filas
+  así desde el 2026-06-09. La consulta con la que se midió no está registrada;
+  lo más probable es que la engañara el mismo NaN (una distancia NaN no es
+  NULL para el servidor). La sospecha del final ("vector de consulta
+  degenerado") también era parcial: la causa real eran filas guardadas de
+  norma cero. Texto original:
+
+  **500 en `/api/chat` por distancias NULL en `_semantic_context` --
   2026-09-03, NO REPRODUCIDO.** Observado una sola vez, en un montaje de dev
   levantado a mano (uvicorn aparte en :8099, `JAX_DB_NAME=jax_memory_test`,
   `JAX_REPO_PATH` apuntando a una copia con el `config.toml` roto a propósito).
