@@ -75,7 +75,25 @@ su fecha de última verificación real, no una nueva.
   detalle y evidencia en el ítem de la segunda cuenta, más abajo. Desde ahí,
   los 2 hashes de los snapshots viejos son de valores que ya no abren nada.
 
-  **Queda anotado aparte:** R2 no tiene prune diferido y el bucket solo crece.
+  **R2 sin prune — CERRADO 2026-09-11.** `backup-hall9000.sh`, paso 6, hace
+  ahora un **prune diferido** en R2 después del `forget`:
+  `prune --max-unused unlimited --max-repack-size 0`, con `timeout 900`.
+  Borra solo packs que ningún snapshot usa y **no reempaqueta** (reempaquetar
+  borra packs en uso recientes, que el lock rechaza: el origen de los 20 min de
+  reintentos de agosto). Un pack sin uso sale de un snapshot olvidado, y todo
+  snapshot olvidado es anterior a los 7 diarios que se conservan: por
+  construcción queda fuera del lock. Si falla, `RETENTION_OK=0` — registrado,
+  no escondido.
+
+  | Verificación | Resultado |
+  |---|---|
+  | dry-run, edades de los packs en R2 (`HeadObject`) | los 8 packs sin índice que se borrarían: 26 a 33 días; los 14 objetos recientes son de los snapshots en uso |
+  | prune real | **52,5 MiB** borrados (39 packs viejos + 8 sin índice), 0 reempaquetados, 0 rechazos, 4 s |
+  | `restic check` + restauración | sin errores; `jax_memory.sql` del último snapshot = staging, md5 idéntico |
+  | **corrida real del script modificado** (05:16) | `✓ Forget en r2`, **`✓ Prune diferido en r2`**, servicio `success`, exit 0; `restic check` posterior sin errores |
+
+  El script no está en git (`/opt/backup-scripts/`): respaldos
+  `backup-hall9000.sh.bak-20260911-comentario-lock` y `-prune-r2`.
 
 - **El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3
   vació — verificado 2026-09-02.** **Causa:** el Bloque 3 movió las
@@ -2172,7 +2190,25 @@ retractaciones, que no se borran. Ninguno requiere acción.
   `IS NULL` ni con la distancia coseno, que dan NaN y engañan (así se midió mal
   el 2026-09-03). **Fecha de control: 2026-09-25.**
 
-- **`jax_memory_schema.sql` desactualizado respecto de producción — ABIERTO,
+- **`jax_memory_schema.sql` desactualizado — CERRADO 2026-09-11, con el
+  chequeo automatizado que la nota de patrón pedía a la tercera instancia.**
+  Tres piezas, cada una verificada:
+
+  | Pieza | Evidencia |
+  |---|---|
+  | Archivo **regenerado** desde `SHOW CREATE TABLE` de producción (9 tablas, sin `AUTO_INCREMENT=N`, cabecera y semillas conservadas) | las diferencias reales eran 6 columnas faltantes (`conversations.tenant_id/user_id/project_id`, `decisions.user_id`, `action_items.user_id/project_id`), el ENUM de `role` y `embedding`; el resto era cosmético (`int` vs `int(11)`, `boolean` vs `tinyint(1)`) |
+  | **El archivo se ejecuta en CI**: `test_memory_vector_zero_io.py` crea sus tablas desde él (ya no lleva copia del DDL) | 10 passed contra MariaDB con las tablas creadas desde el archivo |
+  | **`scripts/check_memory_schema_drift.py`**: compara el `SHOW CREATE TABLE` vivo contra el archivo; exit 0/1/2, fail-closed | contra `jax_memory`: **OK, 9 de 9**. Mutación contra la base real (archivo sin `project_id`): **DRIFT, exit 1**. 6 tests puros del comparador, en `tests-puros` |
+
+  **Límite declarado:** el chequeo corre en hall9000 contra producción (manual,
+  como el tripwire de `OLLAMA_NUM_PARALLEL`), no en CI: la salida de
+  `SHOW CREATE TABLE` depende de la versión y CI usa MariaDB 11.8 contra la
+  12.3 de producción. **Cuándo correrlo:** después de cualquier `ALTER` sobre
+  estas 9 tablas, y antes de dar por cerrada una ronda que las toque.
+
+  Texto original, conservado:
+
+  **`jax_memory_schema.sql` desactualizado respecto de producción — ABIERTO,
   2026-09-11.** Medido con `SHOW CREATE TABLE` contra `jax_memory`: al archivo
   le faltan `conversations.tenant_id/user_id/project_id` (el scope de la
   búsqueda depende de ellos), declara `embedding VECTOR(768) NULL` donde
@@ -2185,6 +2221,36 @@ retractaciones, que no se borran. Ninguno requiere acción.
   declara el DDL de producción en vez de leer el archivo. La nota de patrón de
   más abajo decía "si aparece una tercera instancia, es momento de escribir un
   chequeo automatizado": apareció. **Fecha de control: 2026-09-25.**
+
+- **Tests de `tests/` sin job de CI — CERRADO 2026-09-11, y era mucho más que
+  un archivo.** Al medir el ítem de abajo: **18 de 26 archivos de `tests/` no
+  los nombraba ningún job.** Clasificados uno por uno en un venv limpio (no en
+  hall9000), con el mismo `pip install` que usa el job:
+
+  | Grupo | Archivos | Destino |
+  |---|---|---|
+  | Puros, pasan limpios | 11 (`memory_helpers`, `chunking`, `memory_correction`, `jacobs_director`, `validate_capability_typed`, ...) | job nuevo **`tests-puros`** |
+  | Script sin `test_`, **ROTO** | `test_jacobs_timeout_by_capability.py`: pytest le colectaba 0 tests; hecho test, **falló** — el refactor del 2026-09-01 cambió la firma de `_from_spec` (ahora recibe `caps`) y el archivo nunca se actualizó. Hardcodeaba además `~/jax` en `sys.path` | arreglado con `caps` fabricado = valores reales de producción (medidos: 15/15/15/5 min, `assemble` sin fila); los 7 checks pasan sin cambiar una sola expectativa → `tests-puros` |
+  | Contra la gobernanza real | `plan_validation`, `valid_capabilities_includes_file_tools`, `plan_capability_hint` (1 de sus 6 va contra DB a propósito) | job nuevo **`jacobs-gobernanza-db`**: clona `jax-platform` y corre **sus** migraciones, sin copiar DDL |
+  | LAS MANOS en proceso | `audit_traffic_class`, `envelope_brutal`, `thot_connection` | **ABIERTO**, ítem propio abajo |
+
+  Pisos medidos: `tests-puros` **62 corridos** (incluye los 6 del chequeo de
+  esquema), `jacobs-gobernanza-db` **14 corridos**. El segundo no se pudo
+  reproducir contra una base **vacía** (sin Docker en hall9000): eso lo prueba
+  el CI, dicho así.
+
+- **Los 3 tests de LAS MANOS en proceso no pueden correr en CI — ABIERTO,
+  2026-09-11, causa medida.** `test_audit_traffic_class.py`,
+  `test_envelope_brutal.py` y `test_thot_connection.py` levantan
+  `las_manos/server.py` con `TestClient`, y el servidor toma el audit log de
+  `las_manos/config.toml`: `audit_log = "/home/fruiz/jax/las_manos/logs/audit.jsonl"`
+  — **ruta absoluta de hall9000**. En un runner esa ruta no existe; y en
+  hall9000, desde el checkout que sea, **escriben en el audit log REAL** (dos
+  de ellos lo dicen en su docstring). No se corrieron por eso. **Qué falta:** que
+  el servidor reciba la ruta del audit log por entorno (con el valor actual como
+  default de producción), y recién ahí meterlos a un job con el log apuntando a
+  un temporal. Es un cambio de cómo arranca LAS MANOS, no de los tests.
+  **Fecha de control: 2026-09-25.**
 
 - **`tests/test_memory_helpers.py` no lo corre ningún job de CI — 2026-09-11,
   medido con `grep` sobre `.github/workflows/`.** 15 tests puros de

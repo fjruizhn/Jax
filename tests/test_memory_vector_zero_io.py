@@ -37,16 +37,21 @@ solo si no existen y al final borra unicamente lo que creo: sus filas (por un
 user_id reservado) y las tablas que no estaban. En hall9000 `jax_memory_test`
 la comparte la suite de jax-platform.
 
-El DDL es el de PRODUCCION (`SHOW CREATE TABLE`, 2026-09-11), no el de
-`jax_memory_schema.sql`: ese archivo esta desactualizado (sin
-`conversations.user_id/project_id`, que el scope de la busqueda necesita, y
-con `embedding NULL` sin default) -- anotado en DEUDA.md.
+El DDL sale de `jax_memory_schema.sql`, no de una copia en este archivo.
+Hasta el 2026-09-11 aca vivia una copia del DDL de produccion porque ese
+archivo estaba desactualizado; se regenero desde `SHOW CREATE TABLE` y ahora
+es la fuente. Leerlo desde aca hace que el archivo se EJECUTE en CI: un
+esquema que no carga en MariaDB, o al que le falta una columna que la
+busqueda usa, pone este job en rojo. (Que el archivo coincida con
+produccion lo vigila scripts/check_memory_schema_drift.py.)
 """
 import asyncio
 import functools
 import math
 import os
+import re
 import uuid
+from pathlib import Path
 
 import aiomysql
 import pytest
@@ -78,73 +83,19 @@ def _txt(v: list[float]) -> str:
     return "[" + ",".join(repr(float(x)) for x in v) + "]"
 
 
-# Orden de creacion (facts depende de messages, messages de conversations).
-_DDL = {
-    "conversations": """
-        CREATE TABLE conversations (
-          id int(11) NOT NULL AUTO_INCREMENT,
-          conversation_uuid char(36) NOT NULL,
-          started_at timestamp NULL DEFAULT current_timestamp(),
-          ended_at timestamp NULL DEFAULT NULL,
-          total_turns int(11) DEFAULT 0,
-          source varchar(20) DEFAULT 'terminal',
-          tenant_id int(11) DEFAULT NULL,
-          user_id int(11) DEFAULT NULL,
-          project_id int(11) DEFAULT NULL,
-          memory_processed tinyint(1) DEFAULT 0,
-          memory_processed_at timestamp NULL DEFAULT NULL,
-          PRIMARY KEY (id),
-          UNIQUE KEY conversation_uuid (conversation_uuid),
-          KEY idx_conv_user (user_id),
-          KEY idx_conv_project (project_id)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
-    "messages": f"""
-        CREATE TABLE messages (
-          id int(11) NOT NULL AUTO_INCREMENT,
-          conversation_id int(11) NOT NULL,
-          turn_number int(11) NOT NULL,
-          role enum('user','jax_local','jekyll','hyde','hipatia','thot','kimi','ada') NOT NULL,
-          content text NOT NULL,
-          facet_used varchar(20) DEFAULT NULL,
-          model varchar(50) DEFAULT NULL,
-          latency_ms int(11) DEFAULT NULL,
-          embedding vector({_DIM}) NOT NULL DEFAULT VEC_FromText('{_CERO}'),
-          created_at timestamp NULL DEFAULT current_timestamp(),
-          PRIMARY KEY (id),
-          KEY idx_conversation (conversation_id),
-          VECTOR KEY idx_embedding (embedding) DISTANCE=cosine,
-          CONSTRAINT messages_ibfk_1 FOREIGN KEY (conversation_id)
-            REFERENCES conversations (id) ON DELETE CASCADE
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
-    "facts": f"""
-        CREATE TABLE facts (
-          id int(11) NOT NULL AUTO_INCREMENT,
-          fact_uuid char(36) NOT NULL,
-          fact_text text NOT NULL,
-          fact_type enum('user','technical','social','preference','project','financial') NOT NULL,
-          confidence float DEFAULT 1,
-          source_message_id int(11) DEFAULT NULL,
-          source_facet varchar(20) DEFAULT NULL,
-          is_verified tinyint(1) DEFAULT 0,
-          verified_at timestamp NULL DEFAULT NULL,
-          expires_at timestamp NULL DEFAULT NULL,
-          embedding vector({_DIM}) NOT NULL DEFAULT VEC_FromText('{_CERO}'),
-          created_at timestamp NULL DEFAULT current_timestamp(),
-          updated_at timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
-          user_id int(11) DEFAULT NULL,
-          project_id int(11) DEFAULT NULL,
-          superseded_by int(11) DEFAULT NULL,
-          superseded_at timestamp NULL DEFAULT NULL,
-          source_fact_ids longtext DEFAULT NULL,
-          importance tinyint(4) DEFAULT NULL,
-          PRIMARY KEY (id),
-          UNIQUE KEY fact_uuid (fact_uuid),
-          KEY idx_facts_user (user_id),
-          VECTOR KEY idx_embedding (embedding) DISTANCE=cosine,
-          CONSTRAINT facts_ibfk_1 FOREIGN KEY (source_message_id)
-            REFERENCES messages (id) ON DELETE SET NULL
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
-}
+# DDL desde el archivo de esquema del repo, en orden de creacion (facts
+# depende de messages, messages de conversations).
+_SCHEMA = Path(__file__).resolve().parents[1] / "jax_memory_schema.sql"
+
+
+def _ddl_del_archivo(tabla: str) -> str:
+    m = re.search(rf"CREATE TABLE `{tabla}` \(.*?\n\)[^;\n]*",
+                  _SCHEMA.read_text(encoding="utf-8"), re.S)
+    assert m, f"{tabla} no esta en {_SCHEMA.name}: el test no podria crearla"
+    return m.group(0)
+
+
+_DDL = {t: _ddl_del_archivo(t) for t in ("conversations", "messages", "facts")}
 
 
 def asincrono(fn):
