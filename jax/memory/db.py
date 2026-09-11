@@ -222,6 +222,18 @@ def _nonzero_embedding_sql(column: str) -> str:
     return f"VEC_DISTANCE_EUCLIDEAN({column}, VEC_FromText('{_ZERO_VECTOR_TEXT}')) > 0"
 
 
+def _zero_embedding_sql(column: str) -> str:
+    """Predicado SQL inverso: `column` sigue en vector cero. Es el guard del
+    backfill -- nunca pisa un embedding real, ni el que un save_message()
+    tardio acabe de escribir."""
+    return f"VEC_DISTANCE_EUCLIDEAN({column}, VEC_FromText('{_ZERO_VECTOR_TEXT}')) = 0"
+
+
+# Tablas con embedding y la columna de texto que se vectoriza. Lista cerrada:
+# el nombre de tabla se interpola en el SQL de backfill_zero_embeddings().
+_BACKFILL_TABLES = {"messages": "content", "facts": "fact_text"}
+
+
 def _is_degenerate_embedding(embedding: Optional[list]) -> bool:
     """Un embedding de CONSULTA de norma cero da NaN contra todas las filas,
     incluidas las sanas: no hay busqueda posible con el."""
@@ -367,6 +379,59 @@ class MemoryDB:
         except Exception as e:
             logger.error(f"get_embedding fallo: {e}")
             return None
+
+    async def backfill_zero_embeddings(self, table: str, limit: int = 50) -> dict:
+        """Reintenta el embedding de hasta `limit` filas de `table` que siguen
+        en vector cero. Es el reintento que save_message() y add_fact() no
+        hacen: insertan primero y vectorizan despues, y si Ollama falla la
+        fila queda en ceros -- excluida de toda busqueda (ver
+        _nonzero_embedding_sql), o sea perdida en silencio. Lo corre el worker
+        de memoria en cada pasada.
+
+        Una fila cuyo embedding vuelve a fallar se deja como esta (no se
+        inventa un vector) y se reintenta en la pasada siguiente. El UPDATE
+        esta guardado por "sigue en ceros": correrlo dos veces, o en paralelo
+        con un save_message() tardio, no pisa un embedding real.
+
+        Devuelve {"pendientes", "reparadas", "fallidas"} de ESTA pasada."""
+        texto_col = _BACKFILL_TABLES.get(table)
+        if texto_col is None:
+            raise ValueError(f"backfill_zero_embeddings: tabla no permitida {table!r}")
+        resultado = {"pendientes": 0, "reparadas": 0, "fallidas": 0}
+        if not self.pool:
+            return resultado
+
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"SELECT id, {texto_col} FROM {table} "
+                    f"WHERE {_zero_embedding_sql('embedding')} ORDER BY id LIMIT %s",
+                    (limit,),
+                )
+                filas = await cur.fetchall()
+        resultado["pendientes"] = len(filas)
+
+        for fila_id, texto in filas:
+            embedding = await self.get_embedding(texto)
+            if _is_degenerate_embedding(embedding):
+                resultado["fallidas"] += 1
+                continue
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        f"UPDATE {table} SET embedding = VEC_FromText(%s) "
+                        f"WHERE id = %s AND {_zero_embedding_sql('embedding')}",
+                        (json.dumps(embedding), fila_id),
+                    )
+                    resultado["reparadas"] += cur.rowcount
+
+        if resultado["fallidas"]:
+            logger.warning(
+                f"backfill_zero_embeddings({table}): {resultado['fallidas']} fila(s) "
+                f"siguen en ceros (get_embedding sin resultado); se reintentan en la "
+                f"proxima pasada"
+            )
+        return resultado
 
     # --------------------------------------------------------
     # Conversaciones
