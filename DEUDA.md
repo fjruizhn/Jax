@@ -70,7 +70,10 @@ su fecha de última verificación real, no una nueva.
   **Decisión de Fernando, 2026-09-11: rotar la contraseña de `user_id=2`**
   (coordinada con la persona; mismo procedimiento que `user_id=1`), en vez de
   olvidar los snapshots — conserva los puntos de restauración de julio y
-  agosto y deja sin valor los hashes viejos. **Pendiente de la coordinación.**
+  agosto y deja sin valor los hashes viejos. **ROTADA el 2026-09-11 04:50:10**
+  por orden de Fernando (la coordinación con la persona queda de su lado) —
+  detalle y evidencia en el ítem de la segunda cuenta, más abajo. Desde ahí,
+  los 2 hashes de los snapshots viejos son de valores que ya no abren nada.
 
   **Queda anotado aparte:** R2 no tiene prune diferido y el bucket solo crece.
 
@@ -961,8 +964,8 @@ retractaciones, que no se borran. Ninguno requiere acción.
   |---|---|---|
   | **Notificar a 6 clientes** | **Decisión de Fernando.** Es lo único con obligación posible hacia terceros | `INVENTARIO-CLIENTES.md` + borrador de aviso parametrizable |
   | **Ticket a GitHub Support** | Que Fernando lo pegue y lo envíe | `TICKET-GITHUB.md`, ampliado con los 18 blobs de datos de clientes |
-  | **Rotar la segunda cuenta** | **Coordinar con la persona** — rotarla sin avisarle la deja afuera | Procedimiento idéntico al de `user_id=1` |
-  | **Purga de dumps en R2** | Esperar al **2026-09-08 ~01:00** y verificar | Fecha derivada del upload + política del lock |
+  | **Rotar la segunda cuenta** | **HECHO 2026-09-11** — ver el ítem de la segunda cuenta | Procedimiento idéntico al de `user_id=1`, con testigo antes/después |
+  | **Purga de dumps en R2** | **PREMISA FALSA (medido 2026-09-11)**: la retención guarda esos snapshots hasta 6 meses y R2 nunca hace prune — ver el bloque de estado. Resuelto por otra vía: rotación de `user_id=2` | Fecha derivada **solo** del lock, sin mirar retención ni prune |
   | **Excluir/anonimizar `jax_users` del dump** | Ronda propia | Hoy cada backup **crea** el problema que luego caduca |
 
   ### NO DETERMINABLE, con lo que se buscó
@@ -1086,6 +1089,36 @@ retractaciones, que no se borran. Ninguno requiere acción.
   **Queda: la contraseña de esta cuenta nunca fue verificada contra nada.** No
   estaba filtrada en los repos, que es distinto de estar sana. Fecha de
   control: **2026-09-08**.
+
+  **ROTADA 2026-09-11 04:50:10 — orden de Fernando.** Motivo que la volvió
+  necesaria: su hash **vigente** estaba en 5 snapshots de restic (R2 y local)
+  que la retención guarda hasta 6 meses (ver el bloque de estado, arriba).
+  Procedimiento de `ROTACION-user_id-2.md`, con dos ajustes medidos:
+
+  | Paso | Resultado |
+  |---|---|
+  | Testigo ANTES | `$2b$12$`, largo 60, huella `f6b33083…`, `updated_at` NULL — **idéntico al del 2026-09-01**: la fila no se tocó en 10 días |
+  | Respaldo del hash previo, para revertir | `$AUDIT/user_id-2-hash-previo-20260911-045010.txt` (600) |
+  | Valor nuevo | `secrets.token_urlsafe(18)`, hash con `bcrypt.hashpw(..., gensalt())` — la misma llamada del backend (`api/admin/users.py`) |
+  | `UPDATE` | guardado por la huella del testigo (`WHERE MD5(password_hash)=…`): si la fila hubiera cambiado, no escribía nada. `rowcount=1` |
+  | Testigo DESPUÉS | `$2b$12$`, largo 60, huella `520d73bf…` (distinta), **`updated_at` 2026-09-11 04:50:10** — la columna agregada el 09-01 para esto funcionó |
+  | Verificación | `db.seed.verify_password` (la función del login) → **True** con el valor nuevo y **False** con uno alterado; `status=active`, sin `locked_until` |
+
+  **Ajuste 1 — no hay "checkpw del valor viejo en falso":** el valor viejo de
+  esta cuenta no lo conoce nadie. Se reemplazó por el contrapositivo de arriba.
+  **Ajuste 2 — no se hizo login real por la API:** `/api/auth/login` escribe
+  `last_login`, y habría registrado como entrada de la persona una que fue de
+  Claude — ensuciando el mismo campo que mostró que la cuenta **no se usa desde
+  el 2026-06-19** (`last_login` sigue ahí, sin tocar). El login real de la
+  persona es la verificación final, de su lado.
+
+  **Pendiente de Fernando:** entregar el valor por un canal **fuera de banda**
+  (no por el correo de esa cuenta) — está en
+  `$AUDIT/user_id-2-contrasena-nueva-20260911-045010.txt` (600) — y **borrar
+  ese archivo** después. `jax_memory_test` no tiene `user_id=2` (medido): el
+  paso 5 del procedimiento no aplica. **Observación, no decisión:** la cuenta
+  no se usa hace casi 3 meses y tiene `failed_attempts=1` de antes de la
+  rotación; si no hace falta, desactivarla cierra más que rotarla.
 
 - **Inventario operativo de infraestructura de CLIENTES en historia pública —
   hallazgo lateral de L4 (2026-09-01). Decisión pendiente.** No es una
@@ -2105,7 +2138,26 @@ retractaciones, que no se borran. Ninguno requiere acción.
   tanto exige su propio pre-registro y su propio corrido. **No se trabaja
   ahora**, por decisión explícita. **Fecha de control:** al retomar SP4.
 
-- **`save_message()` no reintenta el embedding: una fila que nace en vector
+- **`save_message()` no reintenta el embedding — CERRADO Y DESPLEGADO
+  2026-09-11 (jax#118, `47589ae`).** `MemoryDB.backfill_zero_embeddings()`
+  reintenta hasta 50 filas en ceros por tabla (`messages` y `facts`) en **cada**
+  pasada del worker, **antes** del `return` temprano de "no hay conversaciones"
+  — que es el caso de casi todas las pasadas. `UPDATE` guardado por "sigue en
+  ceros"; si Ollama sigue caído la fila queda y se reintenta a los 20 min; un
+  fallo del recálculo no frena la extracción. 6 tests (4 contra MariaDB real),
+  todos en rojo antes, y por mutación cada pieza tiene uno que cae sin ella.
+
+  **En vivo, dicho con su alcance real:** la pasada de las 04:51:20 corrió con
+  el código nuevo (checkout en `47589ae`), terminó `Deactivated successfully`
+  sin un solo `ERROR`, y dejó `messages`/`facts` con **0 filas en ceros**
+  (medido con `VEC_DISTANCE_EUCLIDEAN`). Con 0 pendientes el paso no loguea, así
+  que lo que el journal prueba es que su `SELECT` corre en producción sin
+  fallar; el camino con filas reales lo prueban los tests contra MariaDB. No se
+  fabricó una fila en ceros en producción para verlo loguear.
+
+  Texto original del ítem, conservado:
+
+  **`save_message()` no reintenta el embedding: una fila que nace en vector
   cero queda así para siempre — ABIERTO, 2026-09-11.** Es la causa viva detrás
   del 500 del 2026-09-11 (ver "Cerrado — kimi y la memoria vector cero"). La
   búsqueda ya excluye esas filas, así que **no rompen nada**; lo que queda es
