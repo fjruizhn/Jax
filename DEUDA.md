@@ -2239,6 +2239,38 @@ retractaciones, que no se borran. Ninguno requiere acción.
   reproducir contra una base **vacía** (sin Docker en hall9000): eso lo prueba
   el CI, dicho así.
 
+- **El sello de `facet_resolver` puede perder una invalidación: `os.utime(p,
+  None)` escribe un `mtime` que va detrás de `time.time()` — ABIERTO,
+  2026-09-11, mecanismo MEDIDO.** Apareció como rojo intermitente de
+  `facet-resolver-seal` en jax#120 (un PR que no toca nada de ese job):
+  `test_invalidate_facet_cache_lo_ven_los_otros_procesos` falló en la corrida
+  `push` y pasó en la `pull_request` del **mismo commit**; el reintento pasó.
+  En las 24 corridas anteriores del job, cero fallos.
+
+  **Mecanismo:** `_entrada_sellada` compara `st_mtime >= entry.fetched_at_wall`.
+  `fetched_at_wall` es `time.time()`; el sello se escribe con
+  `os.utime(FACET_SEAL_PATH, None)`, que le pone al archivo la hora **gruesa** del
+  kernel. Si un `invalidate` cae a menos de un milisegundo de un cacheo, el
+  sello queda **anterior** a la entrada y la invalidación se pierde hasta el TTL
+  (30 s). jax#114 cerró el empate exacto (`>` → `>=`); esto es otra cosa.
+
+  | Medición (20.000 iteraciones: `time.time()`, tocar, leer `st_mtime`) | `mtime` anterior al `time.time()` previo |
+  |---|---|
+  | `/srv/jax-data` (xfs, **donde vive el sello real**), `os.utime(p, None)` — como hoy | **1 / 20.000**, −0,693 ms |
+  | mismo filesystem, `os.utime(p, (t, t))` con `t = time.time()` | **0 / 20.000** |
+
+  **Corrección registrada:** la primera medición se hizo en `/tmp` (tmpfs), dio
+  0/20.000 con los dos métodos y se leyó como "hipótesis refutada" — **era el
+  filesystem equivocado**. El sello no vive ahí.
+
+  **Alcance:** en producción es raro (hace falta invalidar a menos de 1 ms de
+  un cacheo en otro proceso); en CI hace inestable un test. **Arreglo propuesto,
+  no aplicado:** escribir el sello con hora explícita del mismo reloj que
+  compara, `os.utime(FACET_SEAL_PATH, (t, t))`. Es de una línea, pero
+  `facet_resolver` está espejado en `jax` y `jax-platform` (`mirror-sync` exige
+  que coincidan) y desplegarlo reinicia `jax-platform` y `jax-las-manos`:
+  **espera GO de Fernando.** **Fecha de control: 2026-09-18.**
+
 - **Los 3 tests de LAS MANOS en proceso no pueden correr en CI — ABIERTO,
   2026-09-11, causa medida.** `test_audit_traffic_class.py`,
   `test_envelope_brutal.py` y `test_thot_connection.py` levantan
