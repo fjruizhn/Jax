@@ -452,3 +452,117 @@ jobs:
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tee /tmp/gov
           grep -qE "^80 passed" /tmp/gov || {
             echo "PISO ROTO: se esperaban 80 tests CORRIDOS."; exit 1; }
+
+  # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
+  # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
+  # un venv limpio (no en hall9000) con exactamente el pip install de abajo:
+  # estos 13 son puros y pasan sin DB ni red. Uno de ellos
+  # (test_jacobs_timeout_by_capability.py) estaba ROTO sin que nadie lo viera:
+  # pytest le colectaba cero tests y, al hacerlo test, fallo -- el refactor
+  # del 2026-09-01 cambio la firma de _from_spec y el archivo nunca se
+  # actualizo. Los 3 de gobernanza van en el job de abajo (necesitan DB); los
+  # 3 que levantan LAS MANOS en proceso quedan anotados en DEUDA.md.
+  #
+  # PYTHONPATH incluye las_manos/: jacobs.plan importa credential_resolver de
+  # ahi (sin eso, error de coleccion -- medido).
+  tests-puros:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .:las_manos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pytest-asyncio aiomysql httpx cryptography pydantic pyyaml
+      - run: >-
+          python -m pytest -v
+          tests/test_capability_unbound_schema.py tests/test_chunking.py
+          tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
+          tests/test_identity_context.py tests/test_jacobs_director.py
+          tests/test_memory_correction.py tests/test_memory_helpers.py
+          tests/test_read_audit_log_unbound.py tests/test_template_hash.py
+          tests/test_validate_capability_typed.py
+          tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py
+      - name: Piso exacto de tests CORRIDOS
+        # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
+        run: |
+          python -m pytest -q \
+            tests/test_capability_unbound_schema.py tests/test_chunking.py \
+            tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py \
+            tests/test_identity_context.py tests/test_jacobs_director.py \
+            tests/test_memory_correction.py tests/test_memory_helpers.py \
+            tests/test_read_audit_log_unbound.py tests/test_template_hash.py \
+            tests/test_validate_capability_typed.py \
+            tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py \
+            2>&1 | tee /tmp/out
+          grep -qE "^62 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 62 tests CORRIDOS."; exit 1; }
+
+  # Los 3 tests de tests/ que validan contra la gobernanza REAL
+  # (capability / capability_motor / motor), no un mock. Esas tablas las crea
+  # jax-platform con SUS migraciones (db/migrations.py), asi que el job clona
+  # jax-platform y ejecuta run_migrations() en vez de copiar el DDL: una copia
+  # seria una segunda fuente de verdad que se desincroniza sola. Es el espejo
+  # exacto de lo que el CI de jax-platform hace con jacobs/store.py::init_tables().
+  #
+  # Reproducido antes de publicar en un venv limpio con
+  # jax-platform/backend/requirements.txt: run_migrations() exit 0 y los 3
+  # archivos -> 14 passed. close_pool() al final: sin el, el proceso termina
+  # con "Event loop is closed" (medido; exit 0 igual, pero ensucia el log).
+  # Lo que NO se pudo reproducir aca: correr las migraciones contra una base
+  # VACIA (sin Docker en hall9000) -- eso lo prueba este job.
+  jacobs-gobernanza-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+      PYTHONPATH: .:las_manos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # 3.14: la del backend de jax-platform, con la que se reprodujo.
+          python-version: "3.14"
+      - name: Clonar jax-platform (sus migraciones crean la gobernanza)
+        run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
+      - run: pip install -r /tmp/jax-platform/backend/requirements.txt pytest
+      - name: Esquema de gobernanza con SUS migraciones
+        working-directory: /tmp/jax-platform/backend
+        run: |
+          python - <<'PY'
+          import asyncio
+          from db.connection import close_pool
+          from db.migrations import run_migrations
+
+          async def main():
+              await run_migrations()
+              await close_pool()
+
+          asyncio.run(main())
+          print("run_migrations OK")
+          PY
+      - run: >-
+          python -m pytest -v tests/test_plan_validation.py
+          tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
+      - name: Piso exacto de tests CORRIDOS
+        # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
+        run: |
+          python -m pytest -q tests/test_plan_validation.py \
+            tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
+            2>&1 | tee /tmp/out
+          grep -qE "^14 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }

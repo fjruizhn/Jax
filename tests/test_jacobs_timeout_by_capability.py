@@ -25,17 +25,39 @@ Ronda 4 (2026-08-20, T2.a) -- dos cambios mas, con evidencia real
      valor None) para que no vuelva a pasar sin que este test lo agarre.
 
 Standalone (no requiere pytest):  python tests/test_jacobs_timeout_by_capability.py
+Bajo pytest (y en CI, job tests-puros): test_timeout_por_capability, abajo.
+
+2026-09-11: pytest colectaba CERO tests de este archivo -- solo tenia
+`main()` -- y el sys.path apuntaba a `~/jax`, que en un runner no existe.
+Una regresion que nadie ejecutaba. Ahora el path es relativo al archivo y
+hay una funcion test_ que exige lo mismo que el modo standalone.
 """
 import sys
-import os
+from pathlib import Path
 
-sys.path.insert(0, os.path.expanduser("~/jax"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from jacobs.plan import PlanBuilder
+
+
+# Gobernanza FABRICADA con la forma de get_motor_governance()["capabilities"]
+# (solo el campo que _from_spec lee). Desde el 2026-09-01 el default de timeout
+# sale de capability.max_execution_minutes (fuente unica, DB) y _from_spec
+# recibe `caps`; este archivo seguia llamando la firma vieja y nadie lo vio
+# porque NINGUN job lo corria. Valores = jax_memory de produccion, medidos el
+# 2026-09-11: design/reason/reconcile 15 min, validate_consistency 5 min.
+# `assemble` NO tiene fila a proposito (exenta en el planner): cubre el camino
+# del techo conservador por defecto (_DEFAULT_TIMEOUT_SECONDS = 300).
+_CAPS = {
+    "design":               {"max_execution_minutes": 15},
+    "reason":               {"max_execution_minutes": 15},
+    "reconcile":            {"max_execution_minutes": 15},
+    "validate_consistency": {"max_execution_minutes": 5},
+}
 
 
 def main() -> int:
     pb = PlanBuilder()
-    steps = pb._from_spec("pid-test", [
+    steps = pb._from_spec("pid-test", caps=_CAPS, specs=[
         {"facet": "ada",  "capability": "design",               "depends_on": []},
         {"facet": "ada",  "capability": "reason",                "depends_on": []},
         {"facet": "ada",  "capability": "reconcile",            "depends_on": [0]},
@@ -63,6 +85,10 @@ def main() -> int:
         print(f"  [{status}] {name}: got={got} want={want}")
     print("ALL PASS" if ok else "TESTS FAILED")
     return 0 if ok else 1
+
+
+def test_timeout_por_capability():
+    assert main() == 0
 
 
 if __name__ == "__main__":
