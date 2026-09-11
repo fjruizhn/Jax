@@ -153,6 +153,50 @@ jobs:
           grep -qE "^6 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 6 tests CORRIDOS (no skipeados)."; exit 1; }
 
+  # Busqueda vectorial de la memoria contra embeddings "vector cero"
+  # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
+  # contra filas de norma cero: da NaN, que `IS NULL` no atrapa, que el
+  # ORDER BY ubica en cualquier lado y que aiomysql entrega como None en un
+  # camino y como 0.0 en otro. Nada de eso lo reproduce un doble -- no
+  # calcula distancias --, asi que el test corre contra una MariaDB real.
+  # Mismo patron que facet-health-io: la base termina en _test y se exige que
+  # los tests CORRAN (el guard es un skipif, y un skip masivo se ve verde).
+  #
+  # Verificado por mutacion antes de publicar: sin la exclusion en SQL cae
+  # el test de facts (el NaN que llega como 0.0, que el filtro en Python no
+  # puede ver); sin el chequeo de consulta degenerada ni el filtro de
+  # distancias finitas cae el de consulta degenerada.
+  memory-vector-zero-io:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # httpx: jax/memory/db.py lo importa a nivel de modulo (get_embedding).
+      - run: pip install pytest aiomysql httpx
+      - run: PYTHONPATH=. python -m pytest tests/test_memory_vector_zero_io.py -v
+      - run: |
+          PYTHONPATH=. python -m pytest tests/test_memory_vector_zero_io.py -q 2>&1 | tee /tmp/out
+          grep -qE "^4 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 4 tests CORRIDOS (no skipeados)."; exit 1; }
+
   output-validator-regression:
     runs-on: ubuntu-latest
     steps:

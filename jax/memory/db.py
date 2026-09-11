@@ -20,6 +20,7 @@ import os
 import uuid
 import logging
 import json
+import math
 from datetime import datetime
 from typing import Awaitable, Callable, Optional
 
@@ -27,6 +28,11 @@ import aiomysql
 import httpx
 
 logger = logging.getLogger("jax.memory")
+
+# Dimension de nomic-embed-text = la de las columnas `VECTOR(768)` de
+# messages/facts. Fuente unica: get_embedding() valida contra ella y la
+# busqueda arma con ella el vector cero que excluye (ver _nonzero_embedding_sql).
+EMBEDDING_DIM = 768
 
 
 # ------------------------------------------------------------
@@ -191,6 +197,55 @@ def _merge_search_results(rows_a: list, rows_b: list, limit: int) -> list:
     return sorted(merged.values(), key=lambda r: r["distancia"])[:limit]
 
 
+# --- Embeddings "vector cero" -----------------------------------------------
+# messages.embedding y facts.embedding son VECTOR(EMBEDDING_DIM) NOT NULL con
+# DEFAULT vector cero en produccion (el VECTOR KEY exige NOT NULL). Una fila
+# queda en ceros mientras save_message() espera el embedding -- o para
+# siempre, si Ollama falla: 24 filas asi en jax_memory, todas del 2026-06-09.
+#
+# VEC_DISTANCE_COSINE contra un vector de norma cero da NaN, y el NaN rompe
+# todo lo que viene despues. Medido 2026-09-11:
+#   - `IS NULL` no lo atrapa: para el servidor no es NULL;
+#   - el ORDER BY ... ASC lo ubica en cualquier lado -- en produccion, primero:
+#     search_similar_messages("hola", user_id=1) devolvia 5 filas, las 5 asi,
+#     y api/chat.py tumbaba el turno con `None < 0.8`;
+#   - aiomysql lo entrega como None en un camino y como 0.0 en otro.
+# El 0.0 es el caso grave: una distancia 0.0 falsa es indistinguible de un
+# duplicado exacto (add_fact la leeria como tal). Por eso la exclusion va EN
+# SQL, sobre el embedding guardado, y no filtrando distancias en Python.
+_ZERO_VECTOR_TEXT = "[" + ",".join(["0"] * EMBEDDING_DIM) + "]"
+
+
+def _nonzero_embedding_sql(column: str) -> str:
+    """Predicado SQL: `column` tiene norma distinta de cero. El literal es una
+    constante del modulo, no entrada de usuario."""
+    return f"VEC_DISTANCE_EUCLIDEAN({column}, VEC_FromText('{_ZERO_VECTOR_TEXT}')) > 0"
+
+
+def _is_degenerate_embedding(embedding: Optional[list]) -> bool:
+    """Un embedding de CONSULTA de norma cero da NaN contra todas las filas,
+    incluidas las sanas: no hay busqueda posible con el."""
+    return not embedding or not any(embedding)
+
+
+def _finite_distance_rows(rows: list, origen: str) -> list:
+    """Segunda capa: descarta filas cuya distancia no es un numero finito, y lo
+    registra. Con _nonzero_embedding_sql() en el WHERE no deberia descartar
+    nada; si lo hace, aparecio otra causa de NaN y hay que investigarla -- por
+    eso WARNING y no silencio. NO detecta un NaN entregado como 0.0: esa es la
+    razon de que la primera capa sea obligatoria."""
+    buenas = [
+        r for r in rows
+        if isinstance(r.get("distancia"), (int, float)) and math.isfinite(r["distancia"])
+    ]
+    if len(buenas) != len(rows):
+        logger.warning(
+            f"{origen}: {len(rows) - len(buenas)} fila(s) con distancia no finita "
+            f"descartada(s) pese al filtro de vector cero"
+        )
+    return buenas
+
+
 def db_error_handler(func):
     """Decorador: cualquier error de DB se loguea y se traga.
     La conversacion NUNCA se interrumpe por un fallo de memoria."""
@@ -291,7 +346,7 @@ class MemoryDB:
     # --------------------------------------------------------
     async def get_embedding(self, text: str) -> Optional[list]:
         """Vectoriza texto con nomic-embed-text via Ollama local.
-        Devuelve lista de 768 floats, o None si falla (JAX sigue sin embeddings)."""
+        Devuelve lista de EMBEDDING_DIM floats, o None si falla (JAX sigue sin embeddings)."""
         try:
             # nomic-embed-text tiene limite de contexto; truncamos para evitar 500.
             texto = text[:4000] if len(text) > 4000 else text
@@ -302,7 +357,7 @@ class MemoryDB:
                 )
                 resp.raise_for_status()
                 embedding = resp.json().get("embedding")
-                if isinstance(embedding, list) and len(embedding) == 768:
+                if isinstance(embedding, list) and len(embedding) == EMBEDDING_DIM:
                     return embedding
                 logger.warning(
                     f"Embedding con dimension incorrecta: "
@@ -517,11 +572,14 @@ class MemoryDB:
         """Busca el fact ACTIVO (superseded_by IS NULL) mas cercano al
         embedding dado, scoped por user_id/project_id igual que
         search_similar_messages. None si no hay pool, no hay embedding, o
-        no hay ningun fact en ese scope (fail-safe: el caller inserta)."""
-        if not self.pool or not embedding:
+        no hay ningun fact con embedding real en ese scope (fail-safe: el
+        caller inserta). Los facts con vector cero no son candidatos: su
+        distancia es NaN y puede llegar como 0.0, que add_fact leeria como un
+        duplicado exacto (ver _nonzero_embedding_sql)."""
+        if not self.pool or _is_degenerate_embedding(embedding):
             return None
         vec_str = json.dumps(embedding)
-        clauses = ["superseded_by IS NULL"]
+        clauses = ["superseded_by IS NULL", _nonzero_embedding_sql("embedding")]
         params: list = []
         scope = []
         if project_id is not None:
@@ -545,7 +603,10 @@ class MemoryDB:
                         ([vec_str] + params + [vec_str]),
                     )
                     row = await cur.fetchone()
-                    return dict(row) if row else None
+                    if not row:
+                        return None
+                    filas = _finite_distance_rows([dict(row)], "_find_nearest_fact")
+                    return filas[0] if filas else None
         except Exception as e:
             logger.error(f"_find_nearest_fact fallo: {e}")
             return None
@@ -892,6 +953,9 @@ class MemoryDB:
         embedding = await self.get_embedding(blended_query)
         if embedding is None:
             return []
+        if _is_degenerate_embedding(embedding):
+            logger.warning("search_similar_messages: embedding de consulta de norma cero, sin busqueda")
+            return []
 
         vec_str = json.dumps(embedding)
 
@@ -906,7 +970,7 @@ class MemoryDB:
         raw_vec_str: Optional[str] = None
         if recent_history and blended_query != query:
             raw_embedding = await self.get_embedding(query)
-            if raw_embedding is not None:
+            if raw_embedding is not None and not _is_degenerate_embedding(raw_embedding):
                 raw_vec_str = json.dumps(raw_embedding)
 
         # --- WHERE de scope (dos dimensiones) -----------------------------
@@ -920,8 +984,12 @@ class MemoryDB:
         if user_id is not None:
             clauses.append("(c.project_id IS NULL AND c.user_id = %s)")
             scope_params.append(user_id)
+        # Las filas con vector cero nunca son candidatas, haya scope o no
+        # (ver _nonzero_embedding_sql).
+        where = [_nonzero_embedding_sql("m.embedding")]
         if clauses:
-            scope_sql = "WHERE (" + " OR ".join(clauses) + ") "
+            where.append("(" + " OR ".join(clauses) + ")")
+        scope_sql = "WHERE " + " AND ".join(where) + " "
         # ------------------------------------------------------------------
 
         # --- Decay temporal (item #6, OPCIONAL) ----------------------------
@@ -960,7 +1028,8 @@ class MemoryDB:
                         "LIMIT %s",
                         ([v] + scope_params + [v, fetch_limit]),
                     )
-                    return [dict(r) for r in await cur.fetchall()]
+                    return _finite_distance_rows(
+                        [dict(r) for r in await cur.fetchall()], "search_similar_messages")
 
         try:
             rows = await _run(vec_str)
