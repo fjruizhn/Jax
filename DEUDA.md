@@ -2206,6 +2206,25 @@ retractaciones, que no se borran. Ninguno requiere acción.
   queda para medir en cualquier maquina sin instalar nada — sabiendo que su
   numero es un piso, no el techo.
 
+  **CAMINOS AUTENTICADOS, 2026-09-12.** Faltaba la línea base de lo que no es un
+  health check. `loadtest/api-autenticada.js` mide tres endpoints de SOLO LECTURA
+  que pasan por el JWT y tocan la base (`/api/pipelines`,
+  `/api/motors/capabilities`, `/api/facets`), 20 concurrentes: **2.055 rps, p95
+  13,5 ms, cero errores**, thresholds en verde. Diez veces más caro que
+  `/api/health` (20.399 rps, p95 3 ms), que es lo esperable: ahí se ve el costo
+  del JWT y de la base.
+
+  **Lo que sigue sin medirse, y por qué:** el turno de chat con búsqueda semántica
+  y el despacho de pipelines. Medirlos bajo carga contra producción invoca a
+  Ollama —GPU real— y **escribe turnos en la memoria**: la prueba ensuciaría justo
+  los datos que el sistema usa para recordar. Necesitan un entorno con su propia
+  base y su propio Ollama; es una ronda aparte, no un número que se saque de paso.
+
+  *(Al medirlo, el generador de tokens falló en silencio por `JAX_JWT_SECRET` sin
+  cargar y k6 reportó 100 % de fallos. Cuarta vez en dos días que el instrumento
+  miente antes que el servicio: verificar con un `curl` suelto antes de creerle a
+  una corrida entera.)*
+
   **Leccion, y vale mas que el numero:** una prueba de carga mide el sistema
   MAS el instrumento. Antes de reportar degradacion hay que descartar que el
   cuello sea el que mide — con un cliente distinto, o mirando si el servidor
@@ -2456,8 +2475,25 @@ retractaciones, que no se borran. Ninguno requiere acción.
   convierte el 500 en un candidato menos. **Fecha de control: 2026-09-17.**
 
 - **`GROUNDING_UNAVAILABLE` no puede aparecer en producción por su causa
-  realista, y la marca `'ERROR'` solo en la ventana del primer turno tras un
-  reinicio — MEDIDO el 2026-09-03 provocándolo, no razonado.** El spec §4.2 dice
+  realista — CERRADO 2026-09-12 (jax#131 + jax-platform#52), desplegado.** Las dos
+  mitades que pedía el "qué falta":
+
+  1. **Cortocircuitar el paso 0 antes de `_validation_context()`** — hecho. Ahora,
+     con un `SnapshotError`, se emite un veredicto `GROUNDING_UNAVAILABLE` por
+     claim y la fila se marca validada, en vez de morir releyendo la misma config
+     rota. El veredicto lo produce `governance_validator.verdict_sin_grounding()`,
+     extraída del paso 0 de `validate()`: **una sola definición**, no una copia en
+     el caller. **Lo que sí se pierde, declarado:** el barrido de vocabulario, que
+     sin `term_categories` no se puede hacer.
+  2. **Revalidar el contexto (régimen B)** — ya estaba hecho desde el 2026-09-03
+     (`governance_context` con `stat()` por construcción, y
+     `backend/tests/test_grounding_config_revalidation.py`). El ítem lo pedía como
+     pendiente y llevaba nueve días cerrado: se comprobó contra el código antes de
+     tocar nada.
+
+  El test que fijaba el defecto se **reescribió** para exigir el comportamiento
+  correcto —mismo escenario provocado, ahora esperando los veredictos— y se vio en
+  rojo antes del arreglo. Texto original del diagnóstico, conservado: El spec §4.2 dice
   que el paso 0 "se aplica a todo claim del turno". Provocado con
   `las_manos/config.toml` ilegible, en el endpoint real, en proceso, contra
   `jax_memory_test`:
