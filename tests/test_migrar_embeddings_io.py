@@ -40,8 +40,12 @@ import _esquema_memoria  # noqa: E402
 import migrar_embeddings as mig  # noqa: E402
 
 _USER = 990_411  # reservado para este archivo
-_COL = "embedding_bge_m3"
-_VIEJA = "embedding"
+# Desde el corte (2026-09-12) la columna "vieja" de estas pruebas es la ACTIVA
+# del esquema (embedding_bge_m3) y la "nueva" una de prueba: asi no dependen de
+# `embedding` (nomic), que se retira. El mecanismo es el mismo en cualquier
+# direccion; lo que se prueba es migrar/activar/revertir/retirar, no un modelo.
+_COL = "embedding_prueba"
+_VIEJA = "embedding_bge_m3"
 _DIM = 4
 
 
@@ -182,4 +186,41 @@ async def test_activar_mueve_el_indice_y_revertir_lo_devuelve(base):
     for tabla in ("messages", "facts"):
         assert not await _columna_existe(pool, tabla, _COL)
         assert await _columna_indexada(pool, tabla, _VIEJA), "revertir debe devolver el índice viejo"
+    pool.close(); await pool.wait_closed()
+
+
+@asincrono
+async def test_retirar_se_niega_con_la_columna_activa(base):
+    # La columna que usa la configuracion no se borra, aunque no tenga indice.
+    pool = await _pool()
+    with pytest.raises(ValueError):
+        await mig.retirar(pool, columna=_VIEJA, activa=_VIEJA)
+    for tabla in ("messages", "facts"):
+        assert await _columna_existe(pool, tabla, _VIEJA)
+    pool.close(); await pool.wait_closed()
+
+
+@asincrono
+async def test_retirar_se_niega_si_la_columna_tiene_el_indice(base):
+    # Una columna indexada es la que se busca: aunque la config diga otra cosa
+    # (proceso con config vieja, variable mal escrita), no se borra.
+    pool = await _pool()
+    with pytest.raises(ValueError):
+        await mig.retirar(pool, columna=_VIEJA, activa="otra_columna")
+    for tabla in ("messages", "facts"):
+        assert await _columna_existe(pool, tabla, _VIEJA)
+        assert await _columna_indexada(pool, tabla, _VIEJA)
+    pool.close(); await pool.wait_closed()
+
+
+@asincrono
+async def test_retirar_borra_una_columna_sin_indice_ni_uso(base):
+    pool = await _pool()
+    await mig.migrar(pool, columna=_COL, dim=_DIM, embed_lote=_embebedor([]), lote=2)
+    r = await mig.retirar(pool, columna=_COL, activa=_VIEJA)
+    for tabla in ("messages", "facts"):
+        assert not await _columna_existe(pool, tabla, _COL), r
+        assert await _columna_indexada(pool, tabla, _VIEJA), "retirar no toca la columna activa"
+    # idempotente: una segunda vez no falla
+    await mig.retirar(pool, columna=_COL, activa=_VIEJA)
     pool.close(); await pool.wait_closed()

@@ -224,8 +224,11 @@ jobs:
           # 16 -> 20 el 2026-09-12: test_migrar_embeddings_io.py (+4) -- migrar sin mover
           #   el indice, idempotencia, activar que se niega con filas en ceros, y
           #   activar/revertir (MariaDB no admite dos indices vectoriales por tabla).
-          grep -qE "^20 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 20 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 20 -> 23 el mismo dia, al retirar la columna vieja `embedding`:
+          #   test_migrar_embeddings_io.py (+3) -- `retirar` se niega con la columna
+          #   activa, se niega con la columna indexada, y borra una sin indice ni uso.
+          grep -qE "^23 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
