@@ -1032,6 +1032,23 @@ class MemoryDB:
     # --------------------------------------------------------
     # Busqueda semantica
     # --------------------------------------------------------
+    @db_error_handler
+    async def contar_filas(self, tabla: str) -> Optional[int]:
+        """Cuenta las filas de una tabla del esquema de memoria.
+
+        Lista blanca y no interpolacion libre: el nombre de tabla no se puede
+        parametrizar en SQL, asi que la unica forma segura es que solo existan
+        los nombres que este modulo conoce.
+        """
+        if tabla not in ("messages", "facts", "conversations"):
+            raise ValueError(f"tabla no permitida: {tabla!r}")
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(f"SELECT COUNT(*) FROM {tabla}")
+                return (await cur.fetchone())[0]
+
     async def search_similar_messages(self, query: str, limit: int = 5,
                                       user_id: Optional[int] = None,
                                       project_id: Optional[int] = None,
