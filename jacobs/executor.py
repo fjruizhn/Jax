@@ -25,6 +25,7 @@ import httpx
 
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
+from jacobs.grounding_sources import build_sources, render_sources_block, resolve_redirects
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -150,6 +151,13 @@ def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
             data = _load_ref(ref)
             result_text = data.get("result") or data.get("text") or json.dumps(data)
             text = str(result_text)
+            # Las fuentes viajan con el texto (2026-09-12): antes solo pasaba
+            # `result` y el paso que audita no veía ninguna fuente.
+            if data.get("sources"):
+                text += (
+                    "\n\nFuentes verificables (URL final + fragmento de la respuesta que respaldan):\n"
+                    + render_sources_block(data["sources"])
+                )
             if full:
                 content = text[:MAX_DEP_CONTEXT_CHARS]
                 truncated = len(text) > MAX_DEP_CONTEXT_CHARS
@@ -232,6 +240,7 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     texto = "".join(p.get("text", "") for p in parts_raw)
     meta  = candidate.get("groundingMetadata", {}) or {}
     chunks = meta.get("groundingChunks") or []
+    supports = meta.get("groundingSupports") or []
     queries = meta.get("webSearchQueries") or []
 
     # Retry si no hubo grounding
@@ -253,6 +262,7 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
             texto  = texto2
             chunks = chunks2
             queries = meta2.get("webSearchQueries") or []
+            supports = meta2.get("groundingSupports") or []
             final_data = data2
 
     # Usage (scope expansion 2026-08-10, mismo campo que jax-platform/backend/
@@ -264,14 +274,12 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     tokens_in  = gemini_usage.get("promptTokenCount", 0)
     tokens_out = gemini_usage.get("candidatesTokenCount", 0)
 
-    sources = []
-    seen: set = set()
-    for ch in chunks:
-        web = ch.get("web") or {}
-        uri = web.get("uri")
-        if uri and uri not in seen:
-            seen.add(uri)
-            sources.append({"title": web.get("title", uri), "url": uri})
+    # Fuentes verificables (2026-09-12): URL final (siguiendo la redirección
+    # opaca de Google) + los fragmentos que cada una respalda. Antes eran
+    # solo redirecciones con una etiqueta de dominio: la auditoría no podía
+    # contrastar ninguna (E2E b2d87971). Ver jacobs/grounding_sources.py.
+    sources = build_sources(chunks, supports)
+    await resolve_redirects(sources)
 
     # D1.2 — 'modelVersion' es el campo real de Gemini (distinto de 'model'
     # que usan las APIs OpenAI-compatible abajo). Nota de incertidumbre:
@@ -1153,11 +1161,7 @@ async def _persist_step_to_repo(
     ]
 
     if sources:
-        lines += ["", "## Fuentes", ""]
-        for s in sources:
-            title = s.get("title") or s.get("url", "")
-            url   = s.get("url", "")
-            lines.append(f"- [{title}]({url})")
+        lines += ["", "## Fuentes", "", render_sources_block(sources)]
 
     content = "\n".join(lines)
 
