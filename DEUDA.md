@@ -311,8 +311,8 @@ docroot. La cadena `&&` cortó antes de tocar producción. Se repitió con
 `--exclude .user.ini` en los dos saltos. **Para el próximo deploy:** siempre
 con ese `--exclude`.
 
-**La cadena en línea — IMPLEMENTADA, en PR** (`jax-platform`,
-`feat/pipeline-cadena`, `21cc288`). Pedido de Fernando: investigar →
+**La cadena en línea — DESPLEGADA** (`jax-platform#55` → `696c6e6`; ver la
+tercera E2E, abajo). Pedido de Fernando: investigar →
 maquetar/planificar → criticar → unificar → producir → auditar, en línea. El
 ejecutor ya encadenaba por `depends_on` (y los facets HTTP reciben la salida de
 sus dependencias igual que los de motor, `executor.py:809`); faltaba armar el
@@ -335,8 +335,9 @@ API en cada pausa: `supervised` corre una ola y espera).
   "No se entregó un producto" y no tomó el plan como evidencia (§7.3 del
   blueprint, funcionando).
 
-**Tres defectos del camino de motores — ARREGLADOS en
-`fix/motor-contexto-salida-completa`, sin desplegar.** Anteriores a la
+**Tres defectos del camino de motores — CERRADOS Y DESPLEGADOS** (jax#136 →
+`4a013de`, `jax-las-manos` reiniciado 14:07:49; jax#135 cerrado, su commit va
+dentro de #136). Anteriores a la
 cadena: los 21 pasos de motor completados desde junio pasaron por el 1 y
 el 3. La cadena solo los hizo visibles (primer plan donde un paso de motor
 dependía de verdad del anterior):
@@ -357,8 +358,35 @@ Verificación: 6 tests nuevos (tests-puros 87 → 93) + 7 subtests del
 validador; cuatro mutaciones, cada una rompe al menos un test. **Residuo sin
 explicar:** el control final de la copia de mutación dio 1/6; no se
 reprodujo en 20 corridas sobre el árbol real, y la copia se borró antes de
-ver qué test fue. **La cadena (jax-platform#55) espera este arreglo**: sin
-él, "Producir" con kimi no sirve.
+ver qué test fue.
+
+**Tercera E2E, ya con los arreglos y en `autonomous` — la cadena funciona de
+punta a punta (HISTORIA, 2026-09-12 14:08).** Pipeline `b2d87971`: 6/6 en
+221 s, sin una sola pausa, ~$0.14. Kimi recibió **5.326 caracteres** con la
+dependencia del paso 4 (antes 721), no hubo reintento de schema, su salida
+completa quedó en `motor_results/5afdd6c9….md` y la auditoría recibió 10.402
+caracteres. **El producto es real:** un esquema de una página que declara
+seguir el plan unificado y conserva las reglas que la crítica endureció.
+
+**Desplegada:** jax-platform#55 → `696c6e6`; `axioma-ia.io` sirve
+`index-DvCsO6rG.js` (HTTP 200, `index.html` con `no-cache`). Backup previo:
+`/www/wwwroot/axioma-ia.io.backup-pre-cadena-20260912-141044`.
+**DECISIÓN de Fernando (2026-09-12): la cadena corre en `autonomous` por
+defecto; paralelo conserva `supervised`.** El modo sigue a la forma hasta que
+el usuario elige uno.
+
+**Dos observaciones de la tercera E2E, para decidir:**
+- **La auditoría mide contra lo que el plan DECLARA, no contra la crítica.**
+  Por diseño (contexto mínimo) recibe los pasos `[0, 3, 4]`, no el 2: midió
+  "llegaron los 9 hallazgos" usando la tabla de adjudicación del plan
+  unificado, y lo dijo ella misma ("no se proporcionó el texto de la crítica
+  original"). Para medir de verdad (§12 del blueprint) necesita el paso 2:
+  `[0, 2, 3, 4]`, ~+8.000 caracteres por corrida.
+- **Las fuentes de hipatia no son verificables por otro modelo.** Cita 6, pero
+  todas son redirecciones opacas de Google grounding
+  (`vertexaisearch…/grounding-api-redirect/…`) con solo una etiqueta de
+  dominio; sin cita textual. La auditoría las marcó con razón como no
+  verificables.
 
 **Prueba de carga — VERDAD OPERACIONAL, 2026-09-12 13:21 CST.**
 `POST /jacobs/plan` con el plan real de 6 pasos (arma y valida sin persistir;
@@ -2324,7 +2352,9 @@ retractaciones, que no se borran. Ninguno requiere acción.
   - **Una cadena en modo `supervised` pide una aprobación por paso.**
     `supervised` corre UNA ola y pausa (`executor.py:966`); en paralelo eso era
     una sola pausa, en cadena son cinco. El botón "Aprobar" de `RightPanel`
-    reanuda. Qué modo va por defecto en la cadena es decisión de Fernando.
+    reanuda. **Decidido el mismo día por Fernando: la cadena va en
+    `autonomous` por defecto** (jax-platform#55). `supervised` sigue
+    disponible a mano, con su pausa por paso.
   - **Aprobar en `RightPanel` traga el error.** `handleResume` solo hace
     `console.error`: si `/resume` falla, en la interfaz no pasa nada.
   - **Cancelar kimi corta nuestro lado, no necesariamente la facturación.**
