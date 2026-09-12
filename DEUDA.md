@@ -2177,6 +2177,22 @@ retractaciones, que no se borran. Ninguno requiere acción.
   servidor es el mismo: **lo que se estaba midiendo era el cliente**. El p95 de
   100 ms a c=50 que parecia degradacion del servicio era overhead del arnes.
 
+  **TERCERA MEDICION, con k6 (2026-09-11, mismo dia): el arnes de stdlib
+  tambien subestimaba.** Mismo endpoint, 50 concurrentes:
+
+  | Instrumento | rps | p95 |
+  |---|---|---|
+  | arnes con httpx | 1.275 | 100,5 ms |
+  | arnes con stdlib | 5.638 | 6,53 ms |
+  | **k6 v2.2.0** | **20.399** | **3,01 ms** |
+
+  El arnes de Python esta limitado por el GIL: sus hilos no corren en paralelo
+  de verdad. **El servicio aguanta 16x mas de lo que decia la primera
+  medicion.** Para saber cuanto aguanta de verdad, la referencia es k6
+  (`loadtest/health.js`, con thresholds que dan exit != 0); el arnes de stdlib
+  queda para medir en cualquier maquina sin instalar nada — sabiendo que su
+  numero es un piso, no el techo.
+
   **Leccion, y vale mas que el numero:** una prueba de carga mide el sistema
   MAS el instrumento. Antes de reportar degradacion hay que descartar que el
   cuello sea el que mide — con un cliente distinto, o mirando si el servidor
