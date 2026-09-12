@@ -214,6 +214,168 @@ su fecha de última verificación real, no una nueva.
   mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
   compuesto que falla.
 
+- **El catálogo del Motor Registry no se entera de cambios en la DB — ABIERTO,
+  2026-09-12, causó una regresión en producción.** `routes.py` carga
+  `MotorCatalog.from_db()` **una sola vez**, al arrancar LAS MANOS (su propio
+  docstring lo declara como limitación). Nada lo invalida: ni una migración de
+  jax-platform ni un cambio desde el panel de admin.
+
+  **Lo que pasó (HISTORIA):** el deploy de la ronda b8f80733 reinició
+  `jax-las-manos` y `jax-platform` a la vez (13:03:15). La migración
+  `generate` 5 → 15 corre al arrancar jax-platform, así que LAS MANOS ya había
+  cargado el 5. Jacobs lee el techo de la DB (900 s) y el Motor Registry lo
+  rechazaba contra su copia vieja (300 s): **de 13:03 a 13:29, todo paso de
+  `generate` por kimi o jax_local fue rechazado.** Lo destapó la E2E de la
+  cadena (pipeline `93fcd81f`), no un monitor. El motivo real además quedaba
+  tapado por un `NameError` en la línea que loguea el rechazo (desde
+  2026-06-29; arreglado en `fix/jacobs-rechazo-nameerror`).
+
+  **Mitigado:** `jax-las-manos` reiniciado 13:29:52, verificado con un dispatch
+  que se rechaza sin llamar al modelo:
+  `excede el techo de 'generate' (15 min = 900s)`.
+
+  **Regla operativa hasta que se arregle:** en un deploy que migra `capability`
+  o `motor`, reiniciar **primero `jax-platform`** (migra) y **después
+  `jax-las-manos`** (carga). Verificar con un dispatch con `timeout_seconds`
+  = techo + 1: el rechazo muestra el techo que el proceso tiene en memoria.
+
+  **Qué falta:** invalidación entre procesos, igual que el sello de
+  `facet_resolver` (cerrado el 2026-09-11) para los facets. Es la misma clase
+  de defecto: una copia en memoria de algo que vive en la DB.
+  **Fecha de control: 2026-09-19.**
+
+- **El login de jax-platform deja saber qué cuentas existen — ABIERTO,
+  2026-09-12, espera GO de Fernando.** Encontrado al contrastar el blueprint de
+  Ricardo (§10, "timing uniforme") con `backend/api/auth.py:39-55`, leído, no
+  medido en vivo:
+  - email inexistente → `401` **antes** de verificar contraseña; email real →
+    pasa por bcrypt. La diferencia de tiempo delata la cuenta;
+  - peor y sin necesidad de medir tiempos: `403 Usuario inactivo` y
+    `423 Cuenta bloqueada` salen **antes** de `verify_password`, así que con
+    cualquier contraseña se sabe si la cuenta existe y en qué estado está.
+
+  **Qué falta:** un camino único que verifique contra un hash de relleno cuando
+  el email no existe, y que no revele estado sin contraseña correcta. Arreglo
+  aparte, con su propio GO: no se mezcló con la ronda del pipeline.
+  **Fecha de control: 2026-09-19.**
+
+## Cerrado — pipeline b8f80733 y la cadena en línea (2026-09-12)
+
+El pipeline `b8f80733` ("esquematizar el ERP") abortó a las 10:00:25. Cinco
+pasos terminaron; el 04 (kimi/`generate`) venció a los 300 s. Tres defectos
+encadenados, más uno de fondo:
+
+1. **kimi se quedó sin tokens pensando**: 7232 de 8000 tokens de salida en
+   razonamiento, respuesta cortada (`finish_reason=length`) como texto libre.
+2. **El worker lo trató como error de schema y reintentó** — otra llamada
+   destinada a cortarse igual. Entre las dos se pasó de los 300 s.
+3. **El job siguió vivo tras el aborto**: terminó 10:02:59 y se cobró
+   ($0.216, el paso más caro) sin que nadie leyera la salida.
+   `POST /motor/job/{id}/cancel` solo reescribía una etiqueta que `worker.run`
+   nunca leía.
+4. De fondo, **dos presupuestos para lo mismo**: el modal mandaba
+   `timeout_seconds: 300` fijo en cada step (pisando el techo de la DB, la
+   fuente única decidida el 2026-09-01), y cada llamada del worker usaba 600 s
+   de `motor.default_timeout_seconds` aunque al job le quedara menos.
+
+**Arreglos — CERRADOS Y DESPLEGADOS** (`jax#134` → `1bccf56`,
+`jax-platform#54` → `75a7404`):
+- `motor_registry/job_tasks.py` registra la tarea de cada job; `cancel` la
+  corta (el `CancelledError` de `worker.run` ya marcaba `cancelled` y
+  registraba costo). Jacobs cancela el job en los dos caminos de vencimiento y
+  conserva el `TimeoutError` original si el aviso falla. Un `COMPLETED` tardío
+  no pisa un `CANCELLED`.
+- `finish_reason=length` + schema inválido → `failed` explícito, sin
+  reintento, con el error que dice qué subir (`motor.max_tokens`).
+- Cada llamada recibe `min(motor.default_timeout_seconds, lo que queda)`.
+- El modal ya no manda `timeout_seconds`. `generate`: techo 5 → 15 min (GO de
+  Fernando), por migración con guard `WHERE =5` que no pisa un ajuste manual.
+
+**Verificación:** 14 tests nuevos (tests-puros 75 → 86; jax-platform backend
+391 → 393; vitest +1). Seis mutaciones sobre copias del árbol — quitar cada
+arreglo rompe su test; control verde antes y después. CI verde en ambos PRs.
+**En vivo:** servicios reiniciados sin pipelines ni jobs en curso; `generate`
+= 15 en `jax_memory`; `axioma-ia.io` sirve `index-CrXyp69-.js` (HTTP 200).
+Backup previo del sitio: `/www/wwwroot/axioma-ia.io.backup-pre-b8f80733-20260912-130250`.
+
+**Lección de método — un test que sale a la red.** El primer borrador de
+`test_motor_job_cancel_and_length.py` llamó a la API real de Moonshot: el
+`with patch.dict(...)` devolvía la corrutina sin esperarla y se cerraba antes
+de que `worker.run` leyera el transporte. Falló con 404 (URL mal armada, clave
+falsa), sin costo — por suerte, no por diseño. Corregido (el `await` va dentro
+del `with`) y con una guarda que hace fallar fuerte cualquier `post` real.
+
+**Deploy del frontend:** el primer `rsync --delete` falló (código 23) al no
+poder borrar `.user.ini`, que aaPanel deja inmutable (`lsattr`: `i`) en el
+docroot. La cadena `&&` cortó antes de tocar producción. Se repitió con
+`--exclude .user.ini` en los dos saltos. **Para el próximo deploy:** siempre
+con ese `--exclude`.
+
+**La cadena en línea — IMPLEMENTADA, en PR** (`jax-platform`,
+`feat/pipeline-cadena`, `21cc288`). Pedido de Fernando: investigar →
+maquetar/planificar → criticar → unificar → producir → auditar, en línea. El
+ejecutor ya encadenaba por `depends_on` (y los facets HTTP reciben la salida de
+sus dependencias igual que los de motor, `executor.py:809`); faltaba armar el
+plan. `pipelineChain.js`: dependencias mínimas
+(`[] [0] [0,1] [1,2] [3] [0,3,4]`), facetas por rol según `capability_motor`,
+aviso de auditoría independiente antes de enviar. Tomado del blueprint de
+Ricardo (`repo/comparacion/`, sin commitear): la auditoría verifica solo contra
+la investigación (§7.3) y mide qué hallazgos de la crítica llegaron al
+producto (§12). vitest 45 → 57.
+
+**E2E real de la cadena — dos corridas (HISTORIA, 2026-09-12).** Payload
+generado por el módulo real, objetivo chico, mode `supervised` (reanudado por
+API en cada pausa: `supervised` corre una ola y espera).
+- `93fcd81f`: 4/6, cayó en kimi. No era la cadena: el catálogo en memoria de
+  LAS MANOS era anterior a la migración de `generate` (ver ítem abierto del
+  catálogo, arriba), y el motivo lo tapaba un `NameError` (jax#135).
+- `1bb0da78`: **6/6 completados en 370 s, ~$0.18.** Contexto recibido por
+  paso, del log de Jacobs: 0 / 3.652 / 6.284 / 7.635 / 4.600 / 8.452
+  caracteres. **Pero kimi no produjo**, y la auditoría lo detectó bien: marcó
+  "No se entregó un producto" y no tomó el plan como evidencia (§7.3 del
+  blueprint, funcionando).
+
+**Tres defectos del camino de motores — ARREGLADOS en
+`fix/motor-contexto-salida-completa`, sin desplegar.** Anteriores a la
+cadena: los 21 pasos de motor completados desde junio pasaron por el 1 y
+el 3. La cadena solo los hizo visibles (primer plan donde un paso de motor
+dependía de verdad del anterior):
+1. **El contexto no llegaba al motor.** `_dispatch_step` armaba el prompt
+   con las dependencias y `_invoke_motor` lo reconstruía desde `step.input`:
+   kimi recibió 721 caracteres, "produce con el plan unificado", sin el plan.
+2. **El reintento pedía JSON de un schema sin campos.** `validate()` exigía
+   JSON antes de mirar `_KNOWN_UNIMPLEMENTED_SCHEMAS`; la primera respuesta
+   se descartaba y el reintento pedía "el JSON del schema 'generate.v1'".
+   Kimi razonó (`_reasoning_content`) que no podía inventarlo y devolvió
+   `SCHEMA_NOT_PROVIDED`, marcado `completed`.
+3. **La salida se recortaba a 200 caracteres** y no se guardaba completa en
+   ningún lado — ni en el JSONL ni en el journal. Lo perdido no se recupera.
+   Ahora va a `motor_results/<job_id>.md`. **Sin retención:** ese directorio
+   crece como el JSONL; se decide junto con la rotación de logs.
+
+Verificación: 6 tests nuevos (tests-puros 87 → 93) + 7 subtests del
+validador; cuatro mutaciones, cada una rompe al menos un test. **Residuo sin
+explicar:** el control final de la copia de mutación dio 1/6; no se
+reprodujo en 20 corridas sobre el árbol real, y la copia se borró antes de
+ver qué test fue. **La cadena (jax-platform#55) espera este arreglo**: sin
+él, "Producir" con kimi no sirve.
+
+**Prueba de carga — VERDAD OPERACIONAL, 2026-09-12 13:21 CST.**
+`POST /jacobs/plan` con el plan real de 6 pasos (arma y valida sin persistir;
+se eligió para no llenar `jacobs_pipelines` de filas `dry_run`):
+
+| concurrencia | peticiones | errores | rps | p50 | p95 | p99 |
+|---|---|---|---|---|---|---|
+| 1 | 50 | 0 | — | 1,8 ms | 2,0 ms | 8,7 ms |
+| 10 | 200 | 0 | 961 | 9,6 ms | 13,0 ms | 20,4 ms |
+| 30 | 300 | 0 | 1007 | 28,1 ms | 40,5 ms | 46,2 ms |
+
+El throughput se aplana en ~1000 rps desde c=10 y lo que crece es la
+latencia: el camino se procesa de a uno. Sin errores. **No medido:** el
+wrapper `POST /api/pipelines` de jax-platform (pide JWT) ni la ejecución
+concurrente de pipelines reales (cuestan dinero). Vuelve a medirse si cambia
+la gobernanza (`get_motor_governance`) o el volumen de `capability`.
+
 ## Cerrado — kimi y la memoria vector cero (2026-09-11)
 
 Dos defectos distintos, encontrados en cadena: el segundo apareció al
@@ -2142,6 +2304,41 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 
 ## Anotado, no bloquea
+
+- **Anotados en la ronda del pipeline b8f80733 (2026-09-12).** Ninguno
+  bloquea; cada uno dice qué lo reabre.
+  - **Embeddings en español: `bge-m3` candidato, sin medir en JAX.** El
+    blueprint de Ricardo (§3) midió `nomic-embed-text` —el que usa
+    `jax/memory/db.py:34`, `VECTOR(768)`— fallando en consultas en español
+    (resultado correcto apelotonado a 0,40/0,48/0,50 con material
+    irrelevante) y `bge-m3` acertando 5 de 5. **Antes de migrar** (a
+    `VECTOR(1024)`, recalculando todo): la misma prueba de 5 casos sobre
+    datos reales de `jax_memory`. Espera GO de Fernando.
+  - **El frontend no tiene tema claro/oscuro en ninguna pantalla.** Medido: ni
+    variables CSS en `src/index.css`, ni una clase `dark:`, ni `darkMode` en
+    Tailwind; todo es `slate-*` y hex fijos. Incumple la política "Dark/Light
+    mode — SIEMPRE" en toda la app, no en un componente. La cadena siguió las
+    clases del modal; arreglarlo es una ronda propia de tokens de diseño.
+  - **vitest no corre en el CI de jax-platform.** 57 tests del frontend solo se
+    verifican a mano. Qué lo cierra: un job con piso exacto, como el backend.
+  - **Una cadena en modo `supervised` pide una aprobación por paso.**
+    `supervised` corre UNA ola y pausa (`executor.py:966`); en paralelo eso era
+    una sola pausa, en cadena son cinco. El botón "Aprobar" de `RightPanel`
+    reanuda. Qué modo va por defecto en la cadena es decisión de Fernando.
+  - **Aprobar en `RightPanel` traga el error.** `handleResume` solo hace
+    `console.error`: si `/resume` falla, en la interfaz no pasa nada.
+  - **Cancelar kimi corta nuestro lado, no necesariamente la facturación.**
+    Kimi es cloud: cerrar la conexión no está verificado que detenga lo que
+    Moonshot ya estaba generando (blueprint de Ricardo §11, mismo límite). Lo
+    garantizado es que no hay segunda llamada.
+  - **`finish_reason=length` sin schema sigue marcando `completed`.** Decisión
+    del 2026-08-10 (`_worker_max_tokens_test.py`: "el dato queda para
+    diagnóstico, no bloquea"), no tocada en esta ronda: el arreglo solo cubre
+    el camino con schema. Se reabre si una salida cortada sin schema llega a
+    un consumidor como si estuviera completa.
+  - **El nombre del pipeline lleva `Pipeline: ` fijo en `PipelineModal.jsx`**
+    (dato guardado, no texto de interfaz). Menor; se va con la próxima pasada
+    de i18n del modal.
 
 - **El `JOIN` a `conversations` anula el indice vectorial HNSW de `messages` —
   CERRADO 2026-09-11 (jax#128), desplegado y verificado.** El arreglo candidato que
