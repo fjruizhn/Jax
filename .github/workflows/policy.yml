@@ -508,6 +508,7 @@ jobs:
           tests/test_no_blocking_in_async.py tests/test_load_test_harness.py
           tests/test_hnsw_recall_tripwire.py
           tests/test_motor_job_cancel_and_length.py tests/test_invoke_motor_cancel_on_timeout.py
+          tests/test_invoke_motor_rechazo.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -522,6 +523,7 @@ jobs:
             tests/test_no_blocking_in_async.py tests/test_load_test_harness.py \
             tests/test_hnsw_recall_tripwire.py \
             tests/test_motor_job_cancel_and_length.py tests/test_invoke_motor_cancel_on_timeout.py \
+            tests/test_invoke_motor_rechazo.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -540,8 +542,10 @@ jobs:
           #   (corte por max_tokens sin reintento, presupuesto por llamada, cancelacion
           #   real de la tarea, completed tardio que no pisa cancelled) y +4
           #   test_invoke_motor_cancel_on_timeout.py (Jacobs cancela el job al vencer).
-          grep -qE "^86 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 86 tests CORRIDOS."; exit 1; }
+          # 86 -> 87 el mismo dia: test_invoke_motor_rechazo.py -- un rechazo del
+          #   Motor Registry llega con su motivo, no como NameError (E2E 93fcd81f).
+          grep -qE "^87 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 87 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

@@ -500,7 +500,7 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
         reason = dispatch.get("rejected_reason", "sin razón")
         logger.error(
             "Motor Registry RECHAZÓ job (caller=jacobs, capability=%s, motor=%s): %s",
-            capability, step.facet, reason,
+            step.capability, step.motor or step.facet, reason,
         )
         raise RuntimeError(f"Motor Registry rechazó el job: {reason}")
     if not job_id:
