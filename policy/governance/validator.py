@@ -237,6 +237,32 @@ _UNIMPLEMENTED_REASONS: dict[str, str] = {
 }
 
 
+def verdict_sin_grounding(
+    claim: "claims.Claim",
+    accreditation: "grounding.Accreditation | None",
+) -> "Verdict | None":
+    """Paso 0 del spec §4.2: si el snapshot del turno no se construyó, TODO claim
+    es GROUNDING_UNAVAILABLE. Devuelve None si no aplica.
+
+    Es publica y esta separada de `validate()` por una razon concreta: este
+    veredicto **no necesita ni `predicates` ni `ctx`**. El caller de jax-platform
+    (`shadow_validation.run_shadow_validation`) lo usa para cortocircuitar ANTES
+    de cargar la config estatica de gobernanza — porque la MISMA config ilegible
+    que produjo el SnapshotError hace explotar a `validation_context()`, y el
+    turno se quedaba sin un solo veredicto (medido el 2026-09-03: `validated_at
+    NULL`, cero filas). La medicion existia y se perdia por el ORDEN del codigo.
+
+    `validate()` la sigue llamando primero, asi que hay UNA sola definicion de
+    cuando se emite este veredicto: duplicarla en el caller seria una segunda
+    fuente de verdad sobre el paso mas normativo del spec.
+    """
+    if accreditation is not None and accreditation.outcome == "UNAVAILABLE":
+        return Verdict(
+            status="GROUNDING_UNAVAILABLE", predicate=claim.predicate, detail=accreditation.detail
+        )
+    return None
+
+
 def validate(
     claim: "claims.Claim",
     predicates: dict,
@@ -271,10 +297,9 @@ def validate(
     §4.2). Es el ÚNICO cambio observable para los llamadores anteriores a
     SP3.
     """
-    if accreditation is not None and accreditation.outcome == "UNAVAILABLE":
-        return Verdict(
-            status="GROUNDING_UNAVAILABLE", predicate=claim.predicate, detail=accreditation.detail
-        )
+    sin_grounding = verdict_sin_grounding(claim, accreditation)
+    if sin_grounding is not None:
+        return sin_grounding
 
     spec = predicates.get(claim.predicate)
     if spec is None:
