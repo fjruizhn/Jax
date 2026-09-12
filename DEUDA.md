@@ -2240,8 +2240,10 @@ retractaciones, que no se borran. Ninguno requiere acción.
   el CI, dicho así.
 
 - **El sello de `facet_resolver` puede perder una invalidación: `os.utime(p,
-  None)` escribe un `mtime` que va detrás de `time.time()` — ABIERTO,
-  2026-09-11, mecanismo MEDIDO.** Apareció como rojo intermitente de
+  None)` escribe un `mtime` que va detrás de `time.time()` — CERRADO 2026-09-11
+  (jax#123 + jax-platform#51), desplegado y verificado en vivo.** Lo que sigue
+  es el texto del diagnóstico, conservado; el cierre y **el límite de su
+  evidencia** están al final del ítem. Apareció como rojo intermitente de
   `facet-resolver-seal` en jax#120 (un PR que no toca nada de ese job):
   `test_invalidate_facet_cache_lo_ven_los_otros_procesos` falló en la corrida
   `push` y pasó en la `pull_request` del **mismo commit**; el reintento pasó.
@@ -2270,6 +2272,52 @@ retractaciones, que no se borran. Ninguno requiere acción.
   `facet_resolver` está espejado en `jax` y `jax-platform` (`mirror-sync` exige
   que coincidan) y desplegarlo reinicia `jax-platform` y `jax-las-manos`:
   **espera GO de Fernando.** **Fecha de control: 2026-09-18.**
+
+  **CIERRE — 2026-09-11, GO de Fernando.** `_tocar_sello` muestrea
+  `time.time()` y escribe `os.utime(p, (ahora, ahora))`: el sello deja de
+  depender de un reloj que el código no controla y pasa a llevar el mismo con
+  el que se compara `entry.fetched_at_wall`. Espejado en los dos repos
+  (`check_mirror_sync.py` en verde — atrapó una línea duplicada al portarlo,
+  antes de que llegara a ningún test). Pisos de CI: `facet-resolver-seal`
+  12 → 13; en `jax-platform`, con DB 390 → 391 y sin DB 205 → 206, los dos
+  medidos en el árbol antes de escribirlos. Desplegado con reinicio de
+  `jax-platform` y `jax-las-manos` (18:39 CST): los dos `active`, `/api/health`
+  200, las 6 facetas sondeables en `ok`, sin alertas nuevas, sin warnings en
+  journal.
+
+  **Test:** la carrera real es de sub-milisegundo, así que esperarla en un test
+  sería un flake y no una prueba. El test **amplifica la misma diferencia**
+  adelantando `time.time()` una hora: con `None` la invalidación se pierde de
+  forma determinística, con hora explícita no. Verificado ROJO antes del
+  arreglo en los dos repos.
+
+  **LO QUE LA MEDICIÓN DE HOY NO PRUEBA — y queda escrito para que nadie lo lea
+  al revés.** Se repitió el experimento sobre el filesystem real con el código
+  nuevo (0/20.000 atrasados, xfs `/srv/jax-data`), pero **el control con el
+  código viejo tampoco reprodujo el defecto**:
+
+  | Corrida de control (`os.utime(p, None)`) | Resultado |
+  |---|---|
+  | xfs `/srv/jax-data`, 3 × 20.000 | 0 atrasados |
+  | xfs `/srv/jax-data`, 200.000 | 0 atrasados |
+  | ext4 (`/`) y tmpfs (`/tmp`), 200.000 cada uno | 0 atrasados |
+  | inodo nuevo por iteración (hipótesis de timestamps multigrano de xfs) | 0/20.000 |
+
+  O sea: **el 1/20.000 registrado esta misma mañana no se pudo re-confirmar**
+  en esta máquina y con este kernel (7.0.0-31-generic), y por lo tanto el
+  0/20.000 del código nuevo **no es evidencia de nada por sí solo** — un
+  control que no falla no valida al tratamiento. Lo que sostiene el cambio es
+  el argumento estructural (el sello ya no depende del reloj del kernel) y el
+  test determinístico. **Queda abierta la pregunta de qué condición produjo
+  el 1/20.000 y el flake de CI de jax#120**; si el flake reaparece con este
+  arreglo puesto, la hipótesis del mecanismo estaba equivocada y hay que
+  volver a diagnosticar, no a parchear. Quinta lección del día: una medición
+  sin control es una suposición con decimales.
+
+  **Verificación en vivo del camino de escritura real** (sello de producción,
+  un `_tocar_sello()` cuesta que los tres procesos re-consulten una vez):
+  `mtime` del sello **+0,046 ms por delante** del `time.time()` muestreado
+  justo antes.
 
 - **Los 3 tests de LAS MANOS en proceso no pueden correr en CI — ABIERTO,
   2026-09-11, causa medida.** `test_audit_traffic_class.py`,

@@ -63,6 +63,12 @@ si `DEUDA.md` difiere del servidor, gana el servidor (§7 de `CONTEXT.md`).
 
 ## 3. Espera GO de Fernando
 
+**Vaciada el 2026-09-11 por la tarde: Fernando dio GO y el ítem se cerró.**
+Ver el cierre en `DEUDA.md` (jax#123 + jax-platform#51, desplegado 18:39 CST) —
+y en particular **el límite de su evidencia**: el control con el código viejo
+no reprodujo hoy el 1/20.000, así que el mecanismo del flake de CI queda como
+hipótesis plausible, no re-confirmada. Texto original del pedido de GO:
+
 - **Sello de `facet_resolver` puede perder una invalidación** (`DEUDA.md`,
   control 2026-09-18). `os.utime(p, None)` deja un `mtime` detrás de
   `time.time()`: 1/20.000 en el filesystem real del sello, 0/20.000 con
@@ -83,7 +89,7 @@ si `DEUDA.md` difiere del servidor, gana el servidor (§7 de `CONTEXT.md`).
 
 | Ítem | Control |
 |---|---|
-| Sello de `facet_resolver` (arriba) | 2026-09-18 |
+| ~~Sello de `facet_resolver`~~ **CERRADO 2026-09-11** (jax#123 + jax-platform#51) | — |
 | 3 tests de LAS MANOS en proceso sin CI: `config.toml` fija el audit log en una ruta absoluta de hall9000 — **correrlos a mano escribe en el audit log real** | 2026-09-25 |
 | Validador de gobernanza lee un catálogo que el Bloque 3 vació (Bloquea trabajo) | — |
 | Merge sin revisión en `master` (decidido: no hasta que haya incidente) | — |
