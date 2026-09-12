@@ -514,6 +514,7 @@ jobs:
           tests/test_motor_job_cancel_and_length.py tests/test_invoke_motor_cancel_on_timeout.py
           tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py
           tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py
+          tests/test_repl_fuentes.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -530,6 +531,7 @@ jobs:
             tests/test_motor_job_cancel_and_length.py tests/test_invoke_motor_cancel_on_timeout.py \
             tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py \
             tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py \
+            tests/test_repl_fuentes.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -561,8 +563,11 @@ jobs:
           #   del Motor Registry se recarga al ver el sello de facet_resolver mas
           #   nuevo que su carga (regresion 13:03-13:29). Las dos ramas partian de 93
           #   (106 y 99); se juntaron al rebasar la del sello.
-          grep -qE "^112 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 112 tests CORRIDOS."; exit 1; }
+          # 112 -> 116 el mismo dia: test_repl_fuentes.py (+4) -- el HttpMuscle del
+          #   REPL arma fuentes verificables con el mismo modulo que Jacobs, que pasa
+          #   a vivir en jax/core (symlink en las_manos/, como facet_resolver).
+          grep -qE "^116 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 116 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
