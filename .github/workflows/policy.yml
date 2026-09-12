@@ -147,11 +147,17 @@ jobs:
       - run: pip install pytest aiomysql pydantic httpx
       # El guard de "no correr sin DB" es un skipif: un skip masivo se ve
       # como verde. Se exige que los 6 tests CORRAN de verdad.
-      - run: python -m pytest jacobs/_facet_health_io_test.py -v
+      - run: python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py -v
       - run: |
-          python -m pytest jacobs/_facet_health_io_test.py -q 2>&1 | tee /tmp/out
-          grep -qE "^6 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 6 tests CORRIDOS (no skipeados)."; exit 1; }
+          python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py \
+            -q 2>&1 | tee /tmp/out
+          # 6 -> 8 el 2026-09-11: _store_indexes_test.py aporta 2 (los indices
+          # de las columnas por las que se filtra, y que init_tables() los cree
+          # de forma idempotente). Corre aca y no en tests-puros porque necesita
+          # una base VACIA: comprueba que las migraciones crean los indices en
+          # un entorno nuevo, que es justo donde un ALTER a mano no llega.
+          grep -qE "^8 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -488,6 +494,7 @@ jobs:
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
           tests/test_validate_capability_typed.py
           tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py
+          tests/test_no_blocking_in_async.py tests/test_load_test_harness.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -499,9 +506,16 @@ jobs:
             tests/test_read_audit_log_unbound.py tests/test_template_hash.py \
             tests/test_validate_capability_typed.py \
             tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py \
+            tests/test_no_blocking_in_async.py tests/test_load_test_harness.py \
             2>&1 | tee /tmp/out
-          grep -qE "^62 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 62 tests CORRIDOS."; exit 1; }
+          # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
+          #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
+          #      control que ejercita al detector (un detector que no atrapa
+          #      nada da un verde que no significa nada);
+          #   +7 test_load_test_harness.py     -- la aritmetica del arnes de
+          #      carga, que es donde una prueba de carga miente sin avisar.
+          grep -qE "^71 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 71 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

@@ -262,7 +262,12 @@ async def _audit_and_notify(
                 for f in files_written:
                     if not f.get("sha"):
                         continue
-                    r = subprocess.run(
+                    # to_thread y no subprocess.run directo: esto corre
+                    # dentro de una corrutina, y un `git show` bloqueante
+                    # congela el event loop ENTERO -- no solo este job --
+                    # hasta 10 s, una vez por archivo escrito.
+                    r = await asyncio.to_thread(
+                        subprocess.run,
                         ["git", "-C", str(WORKSPACE_ROOT), "show", f["sha"]],
                         capture_output=True, text=True, timeout=10,
                     )
@@ -309,7 +314,9 @@ async def _audit_and_notify(
 
     reverted = False
     if verdict == "revert" and job_start_sha:
-        r = subprocess.run(
+        # Mismo motivo que el `git show` de arriba: fuera del event loop.
+        r = await asyncio.to_thread(
+            subprocess.run,
             ["git", "-C", str(WORKSPACE_ROOT), "reset", "--hard", job_start_sha],
             capture_output=True, text=True, timeout=15,
         )

@@ -124,6 +124,40 @@ async def init_tables() -> None:
                     ts          DOUBLE NOT NULL
                 )
             """)
+            # --- Indices de las columnas por las que se FILTRA ---------------
+            # Las tres tablas nacieron con la PK y nada mas, y el codigo las
+            # consulta por pipeline_id y por status. Con 611 filas el scan no
+            # se nota; el plan es un scan igual y crece lineal (politica 1 de
+            # LAS CUATRO DEL RENDIMIENTO: se juzga el plan, no el reloj de hoy).
+            #
+            # Van aca y no en un `ALTER TABLE` a mano por la misma razon que la
+            # columna `depends_on`, que existia en produccion y en ninguna base
+            # nueva: lo que no pasa por init_tables() no llega a un dev nuevo,
+            # ni a CI, ni a un restore de desastre.
+            #
+            # `CREATE INDEX` no acepta IF NOT EXISTS en MariaDB, asi que se
+            # chequea information_schema primero -- mismo patron idempotente
+            # que las columnas de arriba. init_tables() corre en CADA arranque
+            # de los tres procesos: si esto no fuera idempotente, el segundo
+            # arranque romperia en produccion.
+            for tabla, indice, ddl in [
+                ("jacobs_events", "idx_events_pipeline",
+                 "CREATE INDEX idx_events_pipeline ON jacobs_events (pipeline_id)"),
+                ("jacobs_steps", "idx_steps_pipeline",
+                 "CREATE INDEX idx_steps_pipeline ON jacobs_steps (pipeline_id)"),
+                ("jacobs_steps", "idx_steps_status",
+                 "CREATE INDEX idx_steps_status ON jacobs_steps (status)"),
+                ("jacobs_pipelines", "idx_pipelines_status",
+                 "CREATE INDEX idx_pipelines_status ON jacobs_pipelines (status)"),
+            ]:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM information_schema.STATISTICS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
+                    (tabla, indice),
+                )
+                (existe,) = await cur.fetchone()
+                if not existe:
+                    await cur.execute(ddl)
     finally:
         conn.close()
 
