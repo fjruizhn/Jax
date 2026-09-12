@@ -573,8 +573,12 @@ jobs:
           #   dimension y columna de embeddings salen de configuracion (migracion a
           #   bge-m3); get_embedding usa /api/embed con el modelo configurado. Las dos
           #   ramas partian de 112 (116 y 120); se juntaron al rebasar la de bge-m3.
-          grep -qE "^124 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 124 tests CORRIDOS."; exit 1; }
+          # 124 -> 125 el mismo dia, tras el corte: test_memory_embedding_config.py
+          #   (+1) -- `migrar_embeddings.py revertir` resuelve la columna activa con
+          #   embedding_config y no con el literal "embedding" (con los defaults en
+          #   bge-m3 habria borrado la columna en uso). Visto en rojo antes del arreglo.
+          grep -qE "^125 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 125 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

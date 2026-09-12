@@ -66,6 +66,10 @@ requiere_db_de_prueba = pytest.mark.skipif(
 )
 
 _DIM = dbmod.EMBEDDING_DIM
+# La columna tambien sale de la configuracion, como la dimension: con el
+# nombre escrito a mano, el corte a bge-m3 (2026-09-12) metia vectores de
+# 1024 en la columna vieja de 768 y el test no probaba la busqueda real.
+_COL = dbmod.EMBED.column
 _CERO = "[" + ",".join(["0.0"] * _DIM) + "]"
 # Usuario reservado para este archivo: todo lo que inserta cuelga de el y es
 # lo unico que borra al terminar.
@@ -165,13 +169,13 @@ async def _mensaje(conv: int, turno: int, contenido: str, vec: list[float] | Non
             "VALUES (%s, %s, 'user', %s)", (conv, turno, contenido))
     else:
         await _sql(
-            "INSERT INTO messages (conversation_id, turn_number, role, content, embedding) "
+            f"INSERT INTO messages (conversation_id, turn_number, role, content, {_COL}) "
             "VALUES (%s, %s, 'user', %s, VEC_FromText(%s))", (conv, turno, contenido, _txt(vec)))
 
 
 async def _fact(texto: str, vec: list[float]):
     await _sql(
-        "INSERT INTO facts (fact_uuid, fact_text, fact_type, user_id, embedding) "
+        f"INSERT INTO facts (fact_uuid, fact_text, fact_type, user_id, {_COL}) "
         "VALUES (%s, %s, 'user', %s, VEC_FromText(%s))",
         (str(uuid.uuid4()), texto, _USER, _txt(vec)))
 
@@ -288,7 +292,7 @@ async def test_nearest_fact_elige_el_real_aunque_haya_ceros(tablas, monkeypatch)
 
 async def _es_cero(tabla: str, texto_col: str, texto: str) -> bool:
     filas = await _sql(
-        f"SELECT VEC_DISTANCE_EUCLIDEAN(embedding, VEC_FromText(%s)) = 0 "
+        f"SELECT VEC_DISTANCE_EUCLIDEAN({_COL}, VEC_FromText(%s)) = 0 "
         f"FROM {tabla} WHERE {texto_col} = %s", (_CERO, texto), fetch=True)
     assert len(filas) == 1, (tabla, texto, filas)
     return bool(filas[0][0])
@@ -296,7 +300,7 @@ async def _es_cero(tabla: str, texto_col: str, texto: str) -> bool:
 
 async def _embedding_texto(tabla: str, texto_col: str, texto: str) -> str:
     filas = await _sql(
-        f"SELECT VEC_ToText(embedding) FROM {tabla} WHERE {texto_col} = %s",
+        f"SELECT VEC_ToText({_COL}) FROM {tabla} WHERE {texto_col} = %s",
         (texto,), fetch=True)
     return filas[0][0]
 

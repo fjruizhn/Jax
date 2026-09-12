@@ -2410,6 +2410,36 @@ retractaciones, que no se borran. Ninguno requiere acción.
     probada, turno de chat con memoria obligatorio: `api/chat.py` traga las
     excepciones de `MemoryDB`). Límites: consultas escritas por el subagente,
     sin el filtro por usuario/proyecto del chat.
+    **CORTE EJECUTADO 2026-09-12 ~15:50-15:56 CST, verificado en vivo.** Backup
+    de conversations/messages/facts (11,9 MB, `~/backups/jax_memory_pre_bge_2026-09-12-1551.sql`,
+    umask 077) restaurado en `jax_memory_test` con los tres conteos iguales a
+    producción (1607/113/352) y borrado después; `.env` respaldado
+    (`/etc/jax/.env.pre-bge-2026-09-12-1551`, idéntico por `cmp`). `migrar`:
+    1607 + 113 re-embebidas, 0 fallidas, 43 s. `activar`: 0,8 s. Reinicio
+    jax-platform (15:52:45) → jax-las-manos (15:52:52) → worker. Evidencia:
+    las 3 variables en `/proc/<pid>/environ` de los dos servicios; `migrar`
+    otra vez → 0/0; `EXPLAIN` de las consultas REALES de messages (scope
+    individual, sin JOIN) y de facts → `key=idx_embedding_bge_m3`; turno de
+    chat real (`origin=probe`) 200 y sus dos filas con embedding bge-m3;
+    journal de los tres servicios (con sudo: fruiz sola no lo lee y da
+    "No entries", que NO es evidencia) 173 líneas, ninguna de embeddings ni
+    error. Segundo método para "con memoria": la búsqueda de `_semantic_context`
+    reproducida en proceso con la config viva — una fila migrada (1007) y la
+    del turno de hoy (1623) se encuentran a sí mismas con d=0,0000. El primer
+    control falló por elegirlo mal (la fila 1616 es de la sonda SP4, con
+    `project_id` propio, fuera del scope individual) y se declara así.
+    **Seguimiento (este PR):** defaults a bge-m3, esquema regenerado (drift
+    9/9 OK), y dos interacciones que el runbook no preveía: (1) con defaults
+    bge-m3, "quitar las 3 variables" ya NO revierte — el paso de volver atrás
+    pasa a FIJARLAS a nomic; (2) `migrar_embeddings.py revertir` resolvía la
+    columna activa con el literal `"embedding"`: con defaults nuevos y la
+    variable ausente habría borrado la columna que usan los servicios. Ahora
+    sale de `embedding_config`, con test que se vio rojo antes del arreglo.
+    **Pendientes con fecha:** 2026-09-26 — si no hubo que volver atrás,
+    migración que borra la columna vieja `embedding` (768) y borrar el backup
+    del paso 1 (tiene datos personales). Las filas nuevas de este período
+    tienen `embedding` en ceros: volver atrás después de hoy requiere que el
+    worker las re-embeba con nomic (lo hace solo, ver runbook).
   - **El `HttpMuscle` del REPL armaba fuentes opacas de Gemini — CERRADO
     2026-09-12** (jax#142 → `92676b4`). `grounding_sources.py` pasó a
     `jax/core/` (sin copia) y llega a LAS MANOS por el symlink relativo

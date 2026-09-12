@@ -7,9 +7,12 @@ estaban escritos en `db.py` (el modelo en get_embedding, EMBEDDING_DIM = 768 y
 la columna `embedding` en once sentencias): cambiar de modelo era editar código
 y desplegar, y volver atrás, lo mismo.
 
-Los valores por defecto son los de HOY: desplegar este código no cambia nada.
-El corte es de configuración (/etc/jax/.env, que leen los cuatro servicios) y
-volver atrás también. Ver scripts/migrar_embeddings.py.
+El corte en producción se hizo el 2026-09-12 por configuración (/etc/jax/.env,
+que leen los cuatro servicios; ver docs/runbooks/migracion-embeddings-bge-m3.md).
+Desde entonces los valores por defecto son los de producción: un proceso sin
+las variables usa lo mismo que los servicios. Volver atrás es FIJAR las tres
+variables a nomic-embed-text / 768 / embedding -- quitarlas ya no revierte
+nada. Ver scripts/migrar_embeddings.py.
 
 La columna se interpola en SQL: se valida como identificador simple al leerla.
 Una configuración inválida falla al importar -- ruidoso a propósito: escribir
@@ -24,9 +27,9 @@ import re
 from dataclasses import dataclass
 from typing import Mapping
 
-DEFAULT_MODEL = "nomic-embed-text"
-DEFAULT_DIM = 768
-DEFAULT_COLUMN = "embedding"
+DEFAULT_MODEL = "bge-m3"
+DEFAULT_DIM = 1024
+DEFAULT_COLUMN = "embedding_bge_m3"
 
 _IDENTIFICADOR = re.compile(r"^[a-z_][a-z0-9_]{0,63}$")
 

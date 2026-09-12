@@ -67,21 +67,41 @@ Las filas guardadas entre el paso 2 y este quedaron con la columna nueva en cero
   memoria en silencio.
 
 ## Volver atrás (sin pérdida: la columna vieja nunca se toca)
-1. Quitar las 3 variables de `/etc/jax/.env` (o restaurar `.env.pre-bge-*`).
-2. Reiniciar jax-platform y jax-las-manos (y el worker).
+**Desde el PR de seguimiento los defaults del código SON bge-m3.** Quitar las 3 variables, o
+restaurar `.env.pre-bge-*` (que no las tiene), deja a los servicios en bge-m3: NO revierte nada.
+1. FIJAR en `/etc/jax/.env` los valores de nomic (reemplazando los de bge-m3):
+   ```
+   JAX_MEMORY_EMBED_MODEL=nomic-embed-text
+   JAX_MEMORY_EMBED_DIM=768
+   JAX_MEMORY_EMBED_COLUMN=embedding
+   ```
+2. Reiniciar jax-platform y jax-las-manos (y el worker). Verificar el env en `/proc` como en el paso 6.
 3. `.venv/bin/python scripts/migrar_embeddings.py revertir --columna embedding_bge_m3`
-   (devuelve el índice a `embedding` y borra la columna nueva; se NIEGA si la config activa sigue
-   usando `embedding_bge_m3` — por eso 1 y 2 van antes).
+   con el `.env` cargado (devuelve el índice a `embedding` y borra la columna nueva; se NIEGA si la
+   config activa sigue usando `embedding_bge_m3` — por eso 1 y 2 van antes). La columna activa la
+   resuelve `embedding_config`, no un literal: sin la variable, cuenta el default.
 
 Las filas creadas durante el período bge tienen la columna vieja en ceros: el worker de memoria las
 re-embebe con nomic en su pasada.
 
-## Después de ejecutar (PR de seguimiento)
-- Regenerar `jax_memory_schema.sql` desde `SHOW CREATE TABLE` de producción
-  (`scripts/check_memory_schema_drift.py` da drift hasta entonces — esperado).
-- Pasar los defaults de `jax/memory/embedding_config.py` a bge-m3 / 1024 / `embedding_bge_m3`.
-- Tras un período de observación, borrar la columna vieja `embedding` en otra migración.
-- Registrar el resultado en DEUDA.md y borrar el backup del paso 1 cuando ya no haga falta.
+## Después de ejecutar (PR de seguimiento) — hecho el 2026-09-12, salvo lo que tiene fecha
+- [x] Regenerar `jax_memory_schema.sql` desde `SHOW CREATE TABLE` de producción (drift 9/9 OK).
+- [x] Pasar los defaults de `jax/memory/embedding_config.py` a bge-m3 / 1024 / `embedding_bge_m3`,
+  junto con el esquema: los tests de I/O de memoria crean las tablas desde el archivo y buscan sobre
+  la columna configurada, así que uno sin el otro deja CI en rojo.
+- [ ] **2026-09-26:** si no hubo que volver atrás, borrar la columna vieja `embedding` en otra
+  migración, y borrar el backup del paso 1 (tiene datos personales).
+- [x] Registrado en DEUDA.md.
+
+## Ejecución en producción — 2026-09-12, ~15:50-15:56 CST
+Paso 1: backup 11,9 MB restaurado en `_test` (1607/113/352 = producción) y borrado; `.env` respaldado
+e idéntico por `cmp`. Paso 2: 1607 + 113, 0 fallidas, 43 s. Paso 4: 0,8 s. Paso 5: jax-platform
+15:52:45, jax-las-manos 15:52:52, worker. Paso 6: variables en `/proc` de los dos servicios; `migrar`
+→ 0/0; `EXPLAIN` de las consultas reales de messages y facts → `idx_embedding_bge_m3`; turno de chat
+200 con sus dos filas embebidas; journal (con `sudo`: sin él `journalctl -u` da "No entries", que no
+prueba nada) sin errores; y la búsqueda de `_semantic_context` en proceso encuentra una fila migrada
+y una nueva a d=0,0000. Un control dentro del scope tiene que estar DENTRO del scope: la primera
+fila elegida era de la sonda SP4 (`project_id` propio) y no podía volver.
 
 Tiempo total estimado: ~5 min. La memoria nunca queda caída (a lo sumo búsqueda exacta unos segundos
 entre 4 y 5).
