@@ -88,6 +88,20 @@ class JobStore:
         event = {**self._index[job_id], **kwargs, "job_id": job_id}
         self._append(event)
 
+    def write_result(self, job_id: str, content: str) -> str:
+        """Guarda la salida completa del motor en un archivo propio, junto al
+        JSONL (`motor_results/<job_id>.md`), y devuelve su ruta.
+
+        En un archivo y no en el JSONL: cada update() re-appendea el estado
+        ENTERO del job, así que un campo de decenas de KB se duplicaría en
+        cada línea. Síncrono (escribe disco): el worker lo llama con
+        asyncio.to_thread."""
+        results_dir = self._path.parent / "motor_results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        path = results_dir / f"{job_id}.md"
+        path.write_text(content, encoding="utf-8")
+        return str(path)
+
     def get(self, job_id: str) -> MotorJobView | None:
         state = self._index.get(job_id)
         if state is None:

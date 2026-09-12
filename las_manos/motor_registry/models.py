@@ -80,7 +80,10 @@ class MotorJobView(BaseModel):
     started_at: float | None = None
     finished_at: float | None = None
     error: str | None = None
-    result_summary: str | None = None     # hint; el resultado real va al log
+    result_summary: str | None = None     # primeros 200 caracteres
+    # Salida completa (2026-09-12): antes no se guardaba en ningún lado y los
+    # pasos siguientes de Jacobs recibían solo result_summary.
+    result_path: str | None = None
 
 
 class FacetAuthorizeRequest(BaseModel):

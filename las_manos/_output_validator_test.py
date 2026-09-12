@@ -70,6 +70,20 @@ class OutputValidatorSchemaPendienteTest(unittest.TestCase):
                 self.assertTrue(result["validated"], f"{schema_name} debe seguir fail-open")
                 self.assertIn("declarado", result["warning"].lower())
 
+    def test_schema_declarado_pendiente_acepta_texto_libre(self):
+        """2026-09-12, E2E de la cadena (pipeline 1bb0da78): un schema sin
+        campos no tiene nada que exigir -- tampoco el formato JSON. Exigirlo
+        descartaba la respuesta real y el reintento le pedía al motor 'el
+        JSON del schema', que no existe: kimi devolvió SCHEMA_NOT_PROVIDED."""
+        for schema_name in (
+            "critique.v1", "design.v1", "generate.v1", "analysis.v1",
+            "reason.v1", "reconcile.v1", "validation.v1",
+        ):
+            with self.subTest(schema=schema_name):
+                result = validate("## Entregable\ntexto libre, no JSON", schema_name)
+                self.assertTrue(result["validated"], f"{schema_name} debe aceptar texto libre")
+                self.assertIn("declarado", result["warning"].lower())
+
 
 class OutputValidatorSchemaDesconocidoTest(unittest.TestCase):
     """Comportamiento NUEVO -- schema que no es ni implementado ni

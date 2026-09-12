@@ -463,7 +463,7 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     }
 
 
-async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
+async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: str | None = None) -> dict:
     """Kimi/jax_local via Motor Registry de LAS MANOS. Polling hasta completar.
 
     Bloque 3 (2026-08-21): _CAPABILITY_MAP eliminado -- resolvía alias
@@ -481,7 +481,14 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
         "capability": step.capability,
         "motor":      step.motor,  # None = MotorPolicy resuelve por competencia (R4)
         "trace_id":   step.trace_id,
-        "prompt":     _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
+        # El prompt ARMADO por _dispatch_step (regla de evidencia + objetivo +
+        # salidas de las dependencias + tarea). Antes se reconstruía acá desde
+        # step.input y el contexto de las dependencias se perdía: en la E2E de
+        # la cadena (1bb0da78, 2026-09-12) kimi tenía que "producir con el
+        # plan unificado" sin recibir el plan. El respaldo queda solo para
+        # callers directos que no pasan prompt.
+        "prompt":     prompt if prompt is not None
+                      else _EVIDENCE_RULE + "\n\n" + step.input.get("prompt", json.dumps(step.input)),
         "user_id":    pipeline.user_id,
         "tenant_id":  pipeline.tenant_id,
         # GAP2 Fase3 (2026-08-19): mismo presupuesto que ya gobierna el
@@ -522,7 +529,7 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
                     "success":        True,
                     "facet":          step.facet,
                     "job_id":         job_id,
-                    "result":         job.get("result_summary", ""),
+                    "result":         await _read_motor_result(job),
                     "result_full":    job,
                 }
             if status in ("failed", "cancelled", "rejected"):
@@ -541,6 +548,26 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
         # (CancelledError) y el deadline de este polling (TimeoutError).
         await _cancel_motor_job(job_id)
         raise
+
+
+async def _read_motor_result(job: dict) -> str:
+    """Salida COMPLETA de un motor job. `result_summary` son 200 caracteres
+    (worker.py); era lo único que llegaba a los pasos siguientes y al repo.
+    Desde 2026-09-12 el worker guarda el texto entero en `result_path`.
+
+    Job sin result_path (anterior al arreglo): el resumen es todo lo que
+    existe. Job CON result_path ilegible: falla el paso -- pasar 200
+    caracteres en silencio como si fueran el producto es exactamente el
+    defecto que esto cierra."""
+    path = job.get("result_path")
+    if not path:
+        return job.get("result_summary", "") or ""
+    try:
+        return await asyncio.to_thread(Path(path).read_text, encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            f"Motor job {job.get('job_id')}: no se pudo leer su salida completa en {path}: {exc}"
+        ) from exc
 
 
 async def _cancel_motor_job(job_id: str) -> None:
@@ -816,7 +843,7 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # _run_one_step la captura igual que cualquier otra excepcion — el step
     # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
-        return await _invoke_motor(step, pipeline, timeout)
+        return await _invoke_motor(step, pipeline, timeout, prompt)
 
     f = await resolve_facet(step.facet)
 
