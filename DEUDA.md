@@ -2143,6 +2143,38 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **El `JOIN` a `conversations` anula el indice vectorial HNSW de `messages` —
+  ABIERTO 2026-09-11, medido, con arreglo candidato y SIN decision.**
+  `messages` tiene `idx_embedding` VECTOR (HNSW, MariaDB 12.3), pero
+  `search_similar_messages` no lo usa: su `EXPLAIN` da
+  `Using temporary; Using filesort` y elige `idx_conv_project`.
+
+  | Consulta | ms |
+  |---|---|
+  | La real (JOIN + scope + filtro anti-NaN) | **58,5** |
+  | Sin el filtro anti-NaN | 46,5 |
+  | **Con el filtro, sin el JOIN** | **0,4** (usa el indice) |
+  | Canonica `ORDER BY VEC_DISTANCE … LIMIT` | 0,2 |
+
+  **El JOIN es la causa, no el filtro de vector cero de jax#116** — el filtro
+  cuesta 12 ms de los 58, el JOIN cuesta el resto y ademas mata el indice.
+  **Raiz:** el scope (`user_id`/`project_id`) vive en `conversations`, asi que
+  hay que unir para filtrar. **Arreglo candidato:** desnormalizar esas dos
+  columnas a `messages` (con el costo de mantenerlas sincronizadas, que es la
+  decision real). **Por que no se hizo hoy:** es cambio de esquema en la tabla
+  mas grande y toca el camino de cada turno de chat — no se cuela en un PR de
+  otra cosa. **Hoy no duele** (1.149 filas, 12 MB); duele lineal.
+
+- **Linea base de carga — 2026-09-11, `/api/health` de jax-platform.**
+  Primera medicion de carga del ecosistema (antes no habia herramienta). Con
+  `scripts/load_test.py`, 400 peticiones por nivel: c=1 2.605 rps / p95 0,48 ms;
+  c=10 1.649 / 12,1 ms; c=50 1.275 / 100,5 ms; c=100 2.109 / 48,2 ms. **Cero
+  errores en los cuatro niveles.** Es un endpoint trivial: mide el event loop,
+  no la app. **Falta la linea base de los caminos caros** (chat con busqueda
+  semantica, pipelines), que necesitan auth y escriben — hacerlas contra la base
+  de test, no contra produccion. Es VERDAD OPERACIONAL: caduca si cambia el
+  esquema, el volumen o la infraestructura.
+
 - **El brazo negativo de la sonda de SP4 no mide fabricación: hay que cerrar
   la puerta de `ssh_exec` — 2026-09-04, causa medida.** En el corrido dirigido
   del 2026-09-03, **82 de los 120 turnos negativos (68%)** terminaron con la
