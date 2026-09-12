@@ -98,6 +98,20 @@ def validate(content: str, schema_name: str, has_tool_calls: bool = False) -> di
         "skipped": False,
     }
 
+    # Declarado sin campos: no hay nada que exigir -- tampoco el formato JSON.
+    # Va ANTES del parseo (2026-09-12): exigir JSON primero descartaba la
+    # respuesta real y el reintento de worker.py le pedía al motor "el JSON
+    # del schema", que no existe. En la E2E de la cadena (1bb0da78) kimi
+    # razonó que no podía inventarlo y devolvió SCHEMA_NOT_PROVIDED.
+    if schema_name in _KNOWN_UNIMPLEMENTED_SCHEMAS:
+        result["validated"] = True
+        result["warning"] = (
+            f"Schema '{schema_name}' declarado pero sin schema de campos "
+            "implementado — validación omitida, se acepta texto libre (deuda conocida)"
+        )
+        logger.warning("Schema declarado-pendiente sin validar: '%s'", schema_name)
+        return result
+
     # Intentar parsear como JSON
     try:
         parsed = json.loads(content)
@@ -119,16 +133,7 @@ def validate(content: str, schema_name: str, has_tool_calls: bool = False) -> di
 
     required = SCHEMAS.get(schema_name)
     if required is None:
-        if schema_name in _KNOWN_UNIMPLEMENTED_SCHEMAS:
-            # Fail-open EXPLICITO: declarado en produccion, sin schema de
-            # campos implementado todavia. Ver _KNOWN_UNIMPLEMENTED_SCHEMAS.
-            result["validated"] = True
-            result["warning"] = (
-                f"Schema '{schema_name}' declarado pero sin schema de campos "
-                "implementado — validación omitida (deuda conocida)"
-            )
-            logger.warning("Schema declarado-pendiente sin validar: '%s'", schema_name)
-            return result
+        # (Los declarados-pendientes ya salieron arriba, antes del parseo.)
         # Schema realmente desconocido: ni implementado ni declarado como
         # pendiente -- typo o capability mal configurada. Fail-closed (P10):
         # el caller (worker.py) reintenta una vez y despues marca FAILED,

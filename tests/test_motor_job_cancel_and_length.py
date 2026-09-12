@@ -68,6 +68,10 @@ _CFG = {
         "generate": {**_CAP_COMMON, "output_schema": "generate.v1"},
         # Sin schema: aísla el presupuesto de tiempo de la validación.
         "implementation": {**_CAP_COMMON, "output_schema": ""},
+        # Schema CON campos: desde 2026-09-12 los declarados-pendientes
+        # (generate.v1, ...) aceptan texto libre, así que "schema inválido"
+        # se prueba con uno que sí exige algo.
+        "refactor": {**_CAP_COMMON, "output_schema": "code_patch.v1"},
     },
 }
 
@@ -138,8 +142,8 @@ class CorteDeTokensTest(_Base):
                        "completion_tokens_details": {"reasoning_tokens": 7232}},
             )
 
-        job_id = self._new_job("generate")
-        await self._run(job_id, "generate", fake_call)
+        job_id = self._new_job("refactor")
+        await self._run(job_id, "refactor", fake_call)
 
         state = self._state(job_id)
         assert len(calls) == 1, f"reintentó una salida cortada por tokens: {len(calls)} llamadas"
@@ -156,8 +160,8 @@ class CorteDeTokensTest(_Base):
             calls.append(kwargs)
             return _response("texto libre completo, no JSON", finish_reason="stop")
 
-        job_id = self._new_job("generate")
-        await self._run(job_id, "generate", fake_call)
+        job_id = self._new_job("refactor")
+        await self._run(job_id, "refactor", fake_call)
 
         assert len(calls) == 2, f"se esperaba 1 reintento, hubo {len(calls) - 1}"
         assert self._state(job_id)["status"] == JobStatus.FAILED.value

@@ -969,11 +969,16 @@ async def run(
         await _report_usage("cancelled")
         return
 
+    # La salida completa, en su archivo: result_summary son 200 caracteres y
+    # era todo lo que quedaba (E2E de la cadena, 1bb0da78, 2026-09-12).
+    result_path = await asyncio.to_thread(store.write_result, job_id, content or "")
+
     store.update(
         job_id,
         status=JobStatus.COMPLETED.value,
         finished_at=time.time(),
         result_summary=result_summary,
+        result_path=result_path,
         # Campos internos — guardados en JSONL, no expuestos en MotorJobView
         _reasoning_content=reasoning_content[:2000] if reasoning_content else None,
         _finish_reason=finish_reason,
