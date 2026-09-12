@@ -212,6 +212,20 @@ async def _pool_desde_env():
                                       autocommit=True, minsize=1, maxsize=2)
 
 
+def columna_activa(env) -> str:
+    """Columna de embeddings que usan los servicios con el entorno `env`.
+
+    La resuelve embedding_config -- lo mismo que leen los servicios -- y no un
+    literal. Con los defaults en bge-m3 (2026-09-12), el literal "embedding"
+    que había acá hacía que, sin la variable en el entorno, `revertir` no
+    reconociera como activa la columna que los servicios usan, y la borrara."""
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if raiz not in sys.path:  # el runbook corre este script sin PYTHONPATH
+        sys.path.insert(0, raiz)
+    from jax.memory.embedding_config import cargar
+    return cargar(env).column
+
+
 async def _main(args) -> int:
     pool = await _pool_desde_env()
     try:
@@ -220,8 +234,7 @@ async def _main(args) -> int:
         elif args.op == "activar":
             r = await activar(pool, args.columna, args.columna_vieja, args.dim, args.forzar)
         else:
-            activa = os.environ.get("JAX_MEMORY_EMBED_COLUMN", "embedding")
-            r = await revertir(pool, args.columna, activa, args.columna_vieja)
+            r = await revertir(pool, args.columna, columna_activa(os.environ), args.columna_vieja)
         print(json.dumps(r, ensure_ascii=False, indent=1))
         return 0
     except ValueError as e:
