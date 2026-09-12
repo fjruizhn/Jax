@@ -214,8 +214,26 @@ su fecha de última verificación real, no una nueva.
   mismo comando no es un gate") y la nota de §7 sobre el `cd` de un comando
   compuesto que falla.
 
-- **El catálogo del Motor Registry no se entera de cambios en la DB — ABIERTO,
-  2026-09-12, causó una regresión en producción.** `routes.py` carga
+- **El catálogo del Motor Registry no se enteraba de cambios en la DB — CERRADO
+  Y DESPLEGADO 2026-09-12** (jax#140 → `e2e0a77`, `jax-las-manos` 14:41:15;
+  jax-platform#58 → `668e79f`, `jax-platform` 14:45:26). Reusa el sello de
+  `facet_resolver` (mismo archivo, mismo contrato): LAS MANOS hace un `stat`
+  al entrar a `dispatch` (p50 0,70 µs) y recarga bajo lock si el sello es más
+  nuevo que su carga (`from_db` p50 0,95 ms); recarga fallida → 503, nunca el
+  catálogo viejo. Escritores que estampan después de commitear:
+  `run_migrations`, `create_motor`, `update_motor` (los rebinds de facets ya lo
+  hacían). **En vivo:** el sello pasó de 14:37:46 a 14:45:26.58 al arrancar
+  jax-platform (reinicio pedido 14:45:25.95) y el dispatch siguiente respondió
+  sin error con el techo de 900 s. **La regla operativa de abajo ya no hace
+  falta**: con los dos desplegados, el orden de arranque deja de importar.
+  **Hallazgo al desplegar, arreglado en el mismo PR:** la suite de
+  jax-platform estampó el sello REAL en hall9000 (14:37:46): el fixture de
+  sesión `client` corre `run_migrations` antes del aislamiento por función.
+  `conftest` fija ahora `JAX_FACET_SEAL_PATH` a un temporal antes de cualquier
+  import; control: mtime del sello real idéntico antes y después de la suite.
+
+  Texto original del ítem, conservado:
+  **ABIERTO, 2026-09-12, causó una regresión en producción.** `routes.py` carga
   `MotorCatalog.from_db()` **una sola vez**, al arrancar LAS MANOS (su propio
   docstring lo declara como limitación). Nada lo invalida: ni una migración de
   jax-platform ni un cambio desde el panel de admin.
@@ -244,20 +262,29 @@ su fecha de última verificación real, no una nueva.
   de defecto: una copia en memoria de algo que vive en la DB.
   **Fecha de control: 2026-09-19.**
 
-- **El login de jax-platform deja saber qué cuentas existen — ABIERTO,
-  2026-09-12, espera GO de Fernando.** Encontrado al contrastar el blueprint de
-  Ricardo (§10, "timing uniforme") con `backend/api/auth.py:39-55`, leído, no
-  medido en vivo:
-  - email inexistente → `401` **antes** de verificar contraseña; email real →
-    pasa por bcrypt. La diferencia de tiempo delata la cuenta;
-  - peor y sin necesidad de medir tiempos: `403 Usuario inactivo` y
-    `423 Cuenta bloqueada` salen **antes** de `verify_password`, así que con
-    cualquier contraseña se sabe si la cuenta existe y en qué estado está.
+- **El login no tiene límite de intentos por IP — ABIERTO, 2026-09-12.** No hay
+  ningún limitador en el backend (buscado: ni `slowapi` ni equivalente). Desde
+  que el login ya no deja enumerar cuentas (cerrado abajo, jax-platform#57),
+  **cualquier email —exista o no— cuesta un bcrypt de ~155 ms de CPU**: medido
+  en vivo 14:35 CST, c=5 → 32 rps, p95 159 ms. Antes solo lo pagaban las
+  cuentas reales. Es superficie de agotamiento de CPU abierta a cualquiera que
+  alcance `/api/auth/login`. **Qué falta:** límite por IP (y por email) antes
+  del bcrypt, con su prueba de carga. **Fecha de control: 2026-09-26.**
 
-  **Qué falta:** un camino único que verifique contra un hash de relleno cuando
-  el email no existe, y que no revele estado sin contraseña correcta. Arreglo
-  aparte, con su propio GO: no se mezcló con la ronda del pipeline.
-  **Fecha de control: 2026-09-19.**
+- **El login de jax-platform dejaba saber qué cuentas existen — CERRADO Y
+  DESPLEGADO 2026-09-12** (jax-platform#57 → `892ab45`, `jax-platform`
+  reiniciado 14:35:02). Encontrado al contrastar el blueprint de Ricardo (§10)
+  con `api/auth.py:39-55`: un email inexistente respondía 401 sin bcrypt
+  (0,25 ms contra ~150 ms), y `403 inactivo` / `423 bloqueada` salían antes de
+  verificar la contraseña. Ahora, sin la contraseña correcta, siempre el mismo
+  401 genérico; un email inexistente verifica contra un hash de relleno de
+  costo 12; el estado solo se revela con la contraseña correcta. Además
+  `verify_password` pasó a `asyncio.to_thread` (bcrypt congelaba el event
+  loop). **En vivo:** tres emails inexistentes → `401 "Usuario o contraseña
+  incorrectos"` en 0,154-0,157 s. 5 tests, 3 mutaciones. **Residuo declarado:**
+  con cuenta real y contraseña incorrecta hay un `UPDATE` extra del contador
+  (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
+  el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
 ## Cerrado — pipeline b8f80733 y la cadena en línea (2026-09-12)
 
@@ -375,18 +402,27 @@ seguir el plan unificado y conserva las reglas que la crítica endureció.
 defecto; paralelo conserva `supervised`.** El modo sigue a la forma hasta que
 el usuario elige uno.
 
-**Dos observaciones de la tercera E2E, para decidir:**
-- **La auditoría mide contra lo que el plan DECLARA, no contra la crítica.**
-  Por diseño (contexto mínimo) recibe los pasos `[0, 3, 4]`, no el 2: midió
-  "llegaron los 9 hallazgos" usando la tabla de adjudicación del plan
-  unificado, y lo dijo ella misma ("no se proporcionó el texto de la crítica
-  original"). Para medir de verdad (§12 del blueprint) necesita el paso 2:
-  `[0, 2, 3, 4]`, ~+8.000 caracteres por corrida.
-- **Las fuentes de hipatia no son verificables por otro modelo.** Cita 6, pero
-  todas son redirecciones opacas de Google grounding
-  (`vertexaisearch…/grounding-api-redirect/…`) con solo una etiqueta de
-  dominio; sin cita textual. La auditoría las marcó con razón como no
-  verificables.
+**Dos observaciones de la tercera E2E — las dos RESUELTAS Y DESPLEGADAS el
+mismo día** (GO de Fernando, "dale con todo"):
+- **La auditoría medía contra lo que el plan DECLARABA, no contra la crítica**
+  (recibía `[0, 3, 4]`). jax-platform#56 → `a9f6fe2`: la auditoría recibe
+  `[0, 2, 3, 4]`; como crítica y auditoría ya no pueden ser la misma faceta,
+  **critica jekyll y audita thot** por defecto; la instrucción mide contra la
+  crítica original, hallazgo por hallazgo. **Cuarta E2E** (`3b43722c`): 6/6
+  en 390 s, ~$0.20, la auditoría recibió 18.373 caracteres y midió **11
+  llegaron / 0 rechazados / 0 perdidos**, marcando además qué cambios no
+  respalda la investigación. Bundle `index-D2w6lbti.js`, backup
+  `axioma-ia.io.backup-pre-auditoria-critica-20260912-143629`.
+- **Las fuentes de hipatia no eran verificables** (redirecciones opacas de
+  Google, sin cita) **y además no le llegaban al paso siguiente**:
+  `_build_context_input` pasaba solo `result`. jax#139 → `629157b`
+  (`jacobs/grounding_sources.py`): URL final siguiendo la redirección (solo el
+  header `Location`, en paralelo, 4 s de tope; nunca inventa una URL) + los
+  fragmentos que respalda cada fuente. **En vivo** (pipeline `23e4c504`,
+  `jax-las-manos` reiniciado 14:41:15): fuente resuelta a
+  `cheatsheetseries.owasp.org/…/Password_Storage_Cheat_Sheet.html` con 2 citas
+  textuales; 0 sin resolver. Latencia medida: 0,43 s por paso (6 fuentes).
+  El subagente hizo 2 llamadas reales a Gemini en vez de 1 (~$0.004).
 
 **Prueba de carga — VERDAD OPERACIONAL, 2026-09-12 13:21 CST.**
 `POST /jacobs/plan` con el plan real de 6 pasos (arma y valida sin persistir;
@@ -2335,13 +2371,26 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 - **Anotados en la ronda del pipeline b8f80733 (2026-09-12).** Ninguno
   bloquea; cada uno dice qué lo reabre.
-  - **Embeddings en español: `bge-m3` candidato, sin medir en JAX.** El
-    blueprint de Ricardo (§3) midió `nomic-embed-text` —el que usa
-    `jax/memory/db.py:34`, `VECTOR(768)`— fallando en consultas en español
-    (resultado correcto apelotonado a 0,40/0,48/0,50 con material
-    irrelevante) y `bge-m3` acertando 5 de 5. **Antes de migrar** (a
-    `VECTOR(1024)`, recalculando todo): la misma prueba de 5 casos sobre
-    datos reales de `jax_memory`. Espera GO de Fernando.
+  - **Embeddings en español: `bge-m3` MEDIDO en JAX (2026-09-12 ~14:30), gana
+    con claridad; migración pendiente de ronda propia.** Spike de solo lectura
+    sobre los 113 `facts` vigentes, 12 consultas con verdad verificada
+    (paráfrasis, inglés→español, dos "difíciles" de preferencia, un control),
+    distancia coseno exacta en Python:
+    | Brazo | Dim | Recall@1 | Recall@5 | Margen medio |
+    |---|---|---|---|---|
+    | nomic (como hoy) | 768 | 5/12 | 7/12 | −0,024 |
+    | nomic + prefijos | 768 | 6/12 | 7/12 | −0,020 |
+    | **bge-m3** | 1024 | **10/12** | **12/12** | **+0,073** |
+    Confirma el blueprint de Ricardo (§3): nomic hunde la respuesta correcta
+    (rango 36 y 68-73 en dos casos); los prefijos no lo arreglan. bge-m3 no
+    desalojó a jax_local (664 MB VRAM); el modelo quedó descargado (1,16 GB).
+    **Antes de migrar:** repetir sobre `messages` (1.607 filas, donde busca el
+    chat) con consultas reales, y medir el recall del HNSW con `VECTOR(1024)`
+    (hoy `mhnsw_ef_search=400`, con tripwire). Límites: muestra chica,
+    consultas escritas por el subagente, solo `facts`.
+  - **El `HttpMuscle` del REPL sigue armando fuentes opacas de Gemini**
+    (`jax/muscles/base.py`, ~319-321). jax#139 arregló el camino de Jacobs, no
+    este. Se reabre si el REPL vuelve a usarse para investigación con fuentes.
   - **El frontend no tiene tema claro/oscuro en ninguna pantalla.** Medido: ni
     variables CSS en `src/index.css`, ni una clase `dark:`, ni `darkMode` en
     Tailwind; todo es `slate-*` y hex fijos. Incumple la política "Dark/Light
