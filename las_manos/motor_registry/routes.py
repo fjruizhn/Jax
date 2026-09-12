@@ -33,6 +33,7 @@ from motor_registry.models import (
     MotorJobView,
 )
 from motor_registry.policy import MotorPolicy
+import facet_resolver  # su sello (mtime de un archivo) invalida también el catálogo
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
 
@@ -55,20 +56,75 @@ _KILL_SWITCH_PATH: str = _CONFIG.get("server", {}).get("kill_switch_path", "/etc
 logger = logging.getLogger(__name__)
 
 
-async def init_motor_catalog() -> None:
-    """Llamado desde el startup hook de server.py. Falla cerrado: si la DB
-    no responde al arrancar, _CATALOG queda None y cada dispatch rechaza
-    explícito (ver check en dispatch abajo) en vez de arrancar con un
-    catálogo vacío en silencio.
+# Instante de RELOJ DE PARED (time.time()) en que se cargó el catálogo --
+# el mismo reloj que estampa facet_resolver._tocar_sello(). Nunca monotonic:
+# compararlo con un mtime da un veredicto constante (ver _entrada_sellada).
+_CATALOG_LOADED_AT_WALL: float | None = None
+# Una sola recarga a la vez: N dispatches que ven el sello nuevo a la par no
+# disparan N consultas, y ninguno ve _CATALOG/_POLICY a medias.
+_CATALOG_LOCK = asyncio.Lock()
 
-    LIMITACIÓN CONOCIDA (no es bug, fuera de alcance de este fix wave): este
-    catálogo se carga UNA sola vez, acá, al arrancar el proceso. Un motor
-    nuevo dado de alta vía el form de admin (Task 9) queda en la DB pero NO
-    lo ve este proceso hasta reiniciar jax-las-manos.service — no hay
-    endpoint de reload todavía."""
-    global _CATALOG, _POLICY
-    _CATALOG = await MotorCatalog.from_db()
-    _POLICY = MotorPolicy(_CATALOG)
+
+async def _load_catalog() -> None:
+    """Carga el catálogo y reemplaza _CATALOG y _POLICY JUNTOS, solo si la
+    consulta terminó bien. El instante se toma ANTES de consultar: si el
+    sello se estampa mientras la consulta está en vuelo, la próxima
+    comparación lo ve más nuevo y recarga (mismo criterio que resolve_facet)."""
+    global _CATALOG, _POLICY, _CATALOG_LOADED_AT_WALL
+    started_at_wall = time.time()
+    catalog = await MotorCatalog.from_db()
+    policy = MotorPolicy(catalog)
+    _CATALOG, _POLICY, _CATALOG_LOADED_AT_WALL = catalog, policy, started_at_wall
+
+
+async def init_motor_catalog() -> None:
+    """Llamado desde el startup hook de server.py. Si la DB no responde al
+    arrancar, _CATALOG queda None; el primer dispatch vuelve a intentar
+    (_ensure_catalog_fresh) y, si tampoco puede, rechaza explícito."""
+    await _load_catalog()
+
+
+def _catalog_is_stale() -> bool:
+    if _CATALOG is None:
+        return True
+    mtime = facet_resolver._seal_mtime()
+    # None = sin señal, nunca "invalidar" (contrato de facet_resolver). `>=`
+    # y no `>`: un empate de resolución del filesystem se lee como "cambió".
+    return mtime is not None and mtime >= _CATALOG_LOADED_AT_WALL
+
+
+async def _ensure_catalog_fresh() -> None:
+    """Recarga el catálogo si el sello quedó más nuevo que su carga.
+
+    Existe por la regresión del 2026-09-12 (13:03-13:29): el catálogo se
+    cargaba UNA vez al arrancar, la migración `generate` 5 -> 15 corrió al
+    arrancar jax-platform, y este proceso siguió rechazando 900 s contra su
+    copia de 300 s hasta que alguien lo reinició. Los escritores de
+    `motor`/`capability`/`capability_motor` (migraciones y admin de
+    jax-platform) estampan el sello de facet_resolver tras commitear; los
+    rebinds de facets también, y el catálogo depende de `model` vía
+    model_ref, así que les sirve igual.
+
+    Costo medido en hall9000 (2026-09-12): el chequeo es un os.stat, p50
+    0,70 us; una recarga es from_db(), p50 0,95 ms (p95 1,41 ms).
+
+    RECARGA FALLIDA -> FALLA CERRADO (503) y se reintenta en el próximo
+    dispatch. Mantener el catálogo viejo sería un gate fail-open: puede
+    seguir autorizando un motor o capability que se acaba de revocar. No
+    cuesta disponibilidad real: el dispatch ya depende de la DB (credenciales)."""
+    if not _catalog_is_stale():
+        return
+    async with _CATALOG_LOCK:
+        if not _catalog_is_stale():  # otro dispatch ya recargó mientras esperábamos
+            return
+        try:
+            await _load_catalog()
+        except Exception as exc:  # noqa: BLE001 -- se re-lanza como 503, no se traga
+            logger.error("Motor Registry: el catálogo cambió y no se pudo recargar: %r", exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Motor Registry: el catálogo cambió y no se pudo recargar desde la DB",
+            ) from exc
 
 router = APIRouter(prefix="/motor", tags=["motor_registry"])
 
@@ -90,6 +146,7 @@ def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
 
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
+    await _ensure_catalog_fresh()
     if _POLICY is None or _CATALOG is None:
         raise HTTPException(status_code=503, detail="Motor Registry: catálogo no inicializado todavía")
 
