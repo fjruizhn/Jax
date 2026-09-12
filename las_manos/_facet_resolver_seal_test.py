@@ -332,3 +332,38 @@ def test_invalidate_no_revienta_si_el_sello_no_se_puede_escribir(sello, monkeypa
         assert fr._tocar_sello() is False, "tiene que reportar que no escribio"
     finally:
         os.chmod(jaula, 0o700)
+
+
+def test_el_sello_se_estampa_con_el_mismo_reloj_que_fetched_at_wall(sello, monkeypatch):
+    """El sello tiene que llevar la hora de `time.time()`, no la del kernel.
+
+    `os.utime(p, None)` no le pone al archivo el `time.time()` de nadie: le
+    pone la hora GRUESA que el kernel tiene cacheada, que puede ir DETRAS del
+    `time.time()` con el que se cacheo la entrada un instante antes. Medido el
+    2026-09-11 sobre xfs --el filesystem donde vive el sello real, no /tmp--:
+    1 de cada 20.000 sellos queda 0,693 ms atras. Cuando cae ahi, la
+    invalidacion se PIERDE hasta que expire el TTL de 30 s: el bug que el
+    sello existe para cerrar, reaparecido por el otro lado. Fue el rojo
+    intermitente de `facet-resolver-seal` en jax#120 (mismo sha: fallo en
+    `push`, paso en `pull_request`).
+
+    En vez de esperar a esa carrera de sub-milisegundo --que en 20.000
+    intentos aparece una vez y en un test seria un flake, no una prueba-- el
+    test AMPLIFICA la misma diferencia: adelanta `time.time()` una hora. Si el
+    sello se estampa con el reloj del kernel, queda una hora detras de la
+    entrada y la invalidacion se pierde de forma deterministica. La produccion
+    que lo hace fallar es una sola: volver a `os.utime(p, None)`.
+    """
+    adelantado = time.time() + 3600.0
+    monkeypatch.setattr(time, "time", lambda: adelantado)
+
+    _stub_query(monkeypatch, ["modelo-viejo"])
+    _resolver()
+    entrada_de_otro_proceso = fr._cache["primary"]
+
+    fr.invalidate_facet_cache("primary")
+
+    assert fr._entrada_sellada(entrada_de_otro_proceso), (
+        "el sello quedo detras de la entrada: se estampo con un reloj distinto "
+        "al que lee fetched_at_wall, y la invalidacion se perdio hasta el TTL"
+    )
