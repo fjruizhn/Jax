@@ -262,14 +262,23 @@ su fecha de última verificación real, no una nueva.
   de defecto: una copia en memoria de algo que vive en la DB.
   **Fecha de control: 2026-09-19.**
 
-- **El login no tiene límite de intentos por IP — ABIERTO, 2026-09-12.** No hay
-  ningún limitador en el backend (buscado: ni `slowapi` ni equivalente). Desde
-  que el login ya no deja enumerar cuentas (cerrado abajo, jax-platform#57),
-  **cualquier email —exista o no— cuesta un bcrypt de ~155 ms de CPU**: medido
-  en vivo 14:35 CST, c=5 → 32 rps, p95 159 ms. Antes solo lo pagaban las
-  cuentas reales. Es superficie de agotamiento de CPU abierta a cualquiera que
-  alcance `/api/auth/login`. **Qué falta:** límite por IP (y por email) antes
-  del bcrypt, con su prueba de carga. **Fecha de control: 2026-09-26.**
+- **El login no tenía límite de intentos por IP — CERRADO Y DESPLEGADO
+  2026-09-12** (jax-platform#59 → `3955f2a`, `jax-platform` 15:39:49; frontend
+  `index-Cl-PZNlu.js`, backup `axioma-ia.io.backup-pre-ratelimit-20260912-154001`).
+  Ventana deslizante en memoria (un solo proceso uvicorn, medido), por IP
+  (`JAX_LOGIN_RATE_IP=20/60`) y por email (`10/300`), ANTES de la DB y del
+  bcrypt; excedido → 429 con `Retry-After`, mismo cuerpo para todos. La IP sale
+  de `X-Real-IP` solo si el peer está en `JAX_TRUSTED_PROXIES` (agregado a
+  `/etc/jax/.env` = `172.16.20.11`, backup
+  `/etc/jax/.env.backup-pre-trusted-proxies-20260912-152810`); sin Cloudflare en
+  el camino (DNS directo, sin `cf-ray`, medido). **En vivo por la URL pública:**
+  20 × 401 y después `429 retry-after: 56`; un control directo a `:8080` (otro
+  peer) siguió en 401. Chequeo 1,75 µs/request. **No verificado:** varios
+  workers de uvicorn (hoy uno); un atacante con >20.000 IPs expulsa claves del
+  LRU (tampoco lo frena el límite por IP).
+
+  Texto original: **ABIERTO, 2026-09-12.** Desde jax-platform#57 cualquier email
+  costaba un bcrypt de ~155 ms (c=5 → 32 rps) sin ningún limitador.
 
 - **El login de jax-platform dejaba saber qué cuentas existen — CERRADO Y
   DESPLEGADO 2026-09-12** (jax-platform#57 → `892ab45`, `jax-platform`
@@ -2384,13 +2393,34 @@ retractaciones, que no se borran. Ninguno requiere acción.
     Confirma el blueprint de Ricardo (§3): nomic hunde la respuesta correcta
     (rango 36 y 68-73 en dos casos); los prefijos no lo arreglan. bge-m3 no
     desalojó a jax_local (664 MB VRAM); el modelo quedó descargado (1,16 GB).
-    **Antes de migrar:** repetir sobre `messages` (1.607 filas, donde busca el
-    chat) con consultas reales, y medir el recall del HNSW con `VECTOR(1024)`
-    (hoy `mhnsw_ef_search=400`, con tripwire). Límites: muestra chica,
-    consultas escritas por el subagente, solo `facts`.
-  - **El `HttpMuscle` del REPL sigue armando fuentes opacas de Gemini**
-    (`jax/muscles/base.py`, ~319-321). jax#139 arregló el camino de Jacobs, no
-    este. Se reabre si el REPL vuelve a usarse para investigación con fuentes.
+    **PREPARADO el mismo día (jax#143), corte en producción PENDIENTE.** Las
+    dos condiciones previas se cumplieron: sobre `messages` (1.607, 14
+    consultas) recall@1 5/14 → **11/14**, recall@5 10/14 → 13/14; y el HNSW
+    con `VECTOR(1024)` da 100 % con `ef=400` medido por distancia (una
+    comparación por conjuntos falla por los duplicados exactos de `messages`;
+    el 93,3 % documentado probablemente arrastra ese sesgo, sin verificar).
+    Modelo/dimensión/columna por env (`JAX_MEMORY_EMBED_*`, defaults = hoy:
+    desplegar el código no cambia nada). Migración en tres pasos
+    (`scripts/migrar_embeddings.py` migrar/activar/revertir) porque MariaDB
+    12.3.3 no admite dos índices vectoriales por tabla; la columna vieja nunca
+    se toca. Ensayo sobre copia de producción: migrar 43 s, activar 0,8 s,
+    revertir 0,8 s. Además: `embedding_worker.py` buscaba `embedding IS NULL`,
+    imposible con `VECTOR NOT NULL` — nunca encontraba nada. **Cómo ejecutar:**
+    `docs/runbooks/migracion-embeddings-bge-m3.md` (backup + restauración
+    probada, turno de chat con memoria obligatorio: `api/chat.py` traga las
+    excepciones de `MemoryDB`). Límites: consultas escritas por el subagente,
+    sin el filtro por usuario/proyecto del chat.
+  - **El `HttpMuscle` del REPL armaba fuentes opacas de Gemini — CERRADO
+    2026-09-12** (jax#142 → `92676b4`). `grounding_sources.py` pasó a
+    `jax/core/` (sin copia) y llega a LAS MANOS por el symlink relativo
+    `las_manos/grounding_sources.py`, igual que `facet_resolver`: el REPL no
+    puede depender de `jacobs/` y LAS MANOS no importa `jax.*`. En vivo tras
+    reiniciar `jax-las-manos` (15:29:13): 2 fuentes resueltas, 3 citas.
+  - **Las fuentes se deduplican por la redirección de Google, no por la URL
+    final.** Dos redirecciones distintas que resuelven al mismo documento salen
+    como dos fuentes (visto en vivo, pipeline `04e02b09`: `[1]` y `[2]` con la
+    misma URL). Menor: no esconde nada, repite. Se arregla deduplicando después
+    de `resolve_redirects` y fusionando las citas.
   - **El frontend no tiene tema claro/oscuro en ninguna pantalla.** Medido: ni
     variables CSS en `src/index.css`, ni una clase `dark:`, ni `darkMode` en
     Tailwind; todo es `slate-*` y hex fijos. Incumple la política "Dark/Light
