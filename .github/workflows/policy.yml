@@ -506,6 +506,7 @@ jobs:
           tests/test_validate_capability_typed.py
           tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py
           tests/test_no_blocking_in_async.py tests/test_load_test_harness.py
+          tests/test_hnsw_recall_tripwire.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -518,6 +519,7 @@ jobs:
             tests/test_validate_capability_typed.py \
             tests/test_jacobs_timeout_by_capability.py tests/test_memory_schema_drift.py \
             tests/test_no_blocking_in_async.py tests/test_load_test_harness.py \
+            tests/test_hnsw_recall_tripwire.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -528,8 +530,12 @@ jobs:
           # 71 -> 72 el mismo dia: +1 en test_load_test_harness.py, el test que
           # exige que el arnes importe SOLO stdlib (en atem-ai no hay httpx, y
           # una herramienta de politica que corre en una sola maquina no sirve).
-          grep -qE "^72 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 72 tests CORRIDOS."; exit 1; }
+          # 72 -> 75 el 2026-09-12: test_hnsw_recall_tripwire.py aporta 3 -- el aviso
+          # cuando `messages` crece un orden de magnitud desde que se midio el recall
+          # del indice HNSW, el silencio mientras no crecio, y que un fallo al contar
+          # no tumbe la corrida del worker que el tripwire vigila.
+          grep -qE "^75 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 75 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
