@@ -66,31 +66,26 @@ Las filas guardadas entre el paso 2 y este quedaron con la columna nueva en cero
   importar `MemoryDB` y sigue sin memoria — una config inválida no tumba el chat, lo deja sin
   memoria en silencio.
 
-## Volver atrás (sin pérdida: la columna vieja nunca se toca)
-**Desde el PR de seguimiento los defaults del código SON bge-m3.** Quitar las 3 variables, o
-restaurar `.env.pre-bge-*` (que no las tiene), deja a los servicios en bge-m3: NO revierte nada.
-1. FIJAR en `/etc/jax/.env` los valores de nomic (reemplazando los de bge-m3):
-   ```
-   JAX_MEMORY_EMBED_MODEL=nomic-embed-text
-   JAX_MEMORY_EMBED_DIM=768
-   JAX_MEMORY_EMBED_COLUMN=embedding
-   ```
-2. Reiniciar jax-platform y jax-las-manos (y el worker). Verificar el env en `/proc` como en el paso 6.
-3. `.venv/bin/python scripts/migrar_embeddings.py revertir --columna embedding_bge_m3`
-   con el `.env` cargado (devuelve el índice a `embedding` y borra la columna nueva; se NIEGA si la
-   config activa sigue usando `embedding_bge_m3` — por eso 1 y 2 van antes). La columna activa la
-   resuelve `embedding_config`, no un literal: sin la variable, cuenta el default.
-
-Las filas creadas durante el período bge tienen la columna vieja en ceros: el worker de memoria las
-re-embebe con nomic en su pasada.
+## Volver atrás
+**La columna vieja `embedding` se retiró el 2026-09-12** (`retirar`, a pedido de Fernando), así que
+`revertir` ya no aplica. Volver a nomic es la misma migración en sentido contrario — el texto de
+cada fila está intacto, solo se re-embebe (~45 s):
+1. `migrar --modelo nomic-embed-text --dim 768 --columna embedding_nomic` (con el `.env` cargado).
+2. FIJAR en `/etc/jax/.env` `JAX_MEMORY_EMBED_MODEL=nomic-embed-text`, `_DIM=768`,
+   `_COLUMN=embedding_nomic`. Los defaults del código son bge-m3: quitar las variables NO revierte.
+3. `activar --dim 768 --columna embedding_nomic` (la vieja por defecto es la activa), reiniciar
+   jax-platform → jax-las-manos → worker, verificar como en el paso 6.
+4. Cuando ya no haga falta: `retirar --columna embedding_bge_m3` (se niega mientras sea la activa
+   o tenga el índice).
 
 ## Después de ejecutar (PR de seguimiento) — hecho el 2026-09-12, salvo lo que tiene fecha
 - [x] Regenerar `jax_memory_schema.sql` desde `SHOW CREATE TABLE` de producción (drift 9/9 OK).
 - [x] Pasar los defaults de `jax/memory/embedding_config.py` a bge-m3 / 1024 / `embedding_bge_m3`,
   junto con el esquema: los tests de I/O de memoria crean las tablas desde el archivo y buscan sobre
   la columna configurada, así que uno sin el otro deja CI en rojo.
-- [ ] **2026-09-26:** si no hubo que volver atrás, borrar la columna vieja `embedding` en otra
-  migración, y borrar el backup del paso 1 (tiene datos personales).
+- [x] Columna vieja `embedding` retirada (`retirar`) y backup del paso 1 borrado — previsto para
+  el 2026-09-26, adelantado al 2026-09-12 a pedido de Fernando, con la restauración de restic
+  (`75e6d3e2`) probada antes de borrar.
 - [x] Registrado en DEUDA.md.
 
 ## Ejecución en producción — 2026-09-12, ~15:50-15:56 CST

@@ -2435,11 +2435,18 @@ retractaciones, que no se borran. Ninguno requiere acción.
     columna activa con el literal `"embedding"`: con defaults nuevos y la
     variable ausente habría borrado la columna que usan los servicios. Ahora
     sale de `embedding_config`, con test que se vio rojo antes del arreglo.
-    **Pendientes con fecha:** 2026-09-26 — si no hubo que volver atrás,
-    migración que borra la columna vieja `embedding` (768) y borrar el backup
-    del paso 1 (tiene datos personales). Las filas nuevas de este período
-    tienen `embedding` en ceros: volver atrás después de hoy requiere que el
-    worker las re-embeba con nomic (lo hace solo, ver runbook).
+    **Pendiente del 2026-09-26 — ADELANTADO y HECHO el 2026-09-12 a pedido
+    de Fernando.** Columna `embedding` (768) retirada de messages y facts con
+    `migrar_embeddings.py retirar` (nuevo: se niega con la columna activa o
+    con la indexada; 3 tests de I/O). Antes, sin REPL abierto, y con la
+    restauración probada del snapshot restic `75e6d3e2` (local + R2) en un
+    MariaDB 12.3.3 descartable: 1607/113/352, 35 tablas. Después: solo
+    `embedding_bge_m3` con su índice, conteos intactos, turno de chat real
+    200 con sus filas embebidas. Borrado el backup local del paso 1. Volver a
+    nomic ya no es `revertir`: es `migrar` hacia `embedding_nomic` + `activar`
+    (runbook). Visto de paso: el backup-hall9000 de las 07:34 dio `Failed`
+    solo por el prune diferido de R2 (rc=124, timeout); el snapshot sí se
+    subió a local y a R2.
   - **El `HttpMuscle` del REPL armaba fuentes opacas de Gemini — CERRADO
     2026-09-12** (jax#142 → `92676b4`). `grounding_sources.py` pasó a
     `jax/core/` (sin copia) y llega a LAS MANOS por el symlink relativo

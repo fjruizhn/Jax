@@ -190,6 +190,33 @@ async def revertir(pool, columna: str, activa: str, columna_vieja: str,
     return hecho
 
 
+async def retirar(pool, columna: str, activa: str, tablas: tuple = tuple(TABLAS)) -> dict:
+    """Borra `columna` de las tablas cuando ya no es necesaria para volver
+    atrás (2026-09-12: `embedding`, nomic). Se niega si es la columna que usa
+    la configuración, o si tiene el índice vectorial -- una columna indexada
+    es la que se busca, diga lo que diga la config. Idempotente.
+
+    Después de retirar la columna vieja, volver al modelo anterior ya no es
+    `revertir`: es `migrar` hacia una columna nueva con ese modelo y `activar`."""
+    _ident(columna); _ident(activa)
+    if columna == activa:
+        raise ValueError(f"{columna} es la columna que usa la configuración activa "
+                         f"(JAX_MEMORY_EMBED_COLUMN): no se retira")
+    for tabla in tablas:
+        indice = await _indice_vectorial(pool, tabla)
+        if indice and indice[1] == columna:
+            raise ValueError(f"{tabla}.{columna} tiene el índice vectorial {indice[0]}: es la "
+                             f"columna que se busca, no se retira")
+    hecho = {}
+    for tabla in tablas:
+        if await _columna_existe(pool, tabla, columna):
+            await _ejecutar(pool, f"ALTER TABLE {tabla} DROP COLUMN {columna}")
+            hecho[tabla] = "retirada"
+        else:
+            hecho[tabla] = "no existía"
+    return hecho
+
+
 def _embebedor_ollama(modelo: str, url: str = "http://localhost:11434/api/embed") -> EmbedLote:
     import httpx
 
@@ -233,8 +260,10 @@ async def _main(args) -> int:
             r = await migrar(pool, args.columna, args.dim, _embebedor_ollama(args.modelo), args.lote)
         elif args.op == "activar":
             r = await activar(pool, args.columna, args.columna_vieja, args.dim, args.forzar)
-        else:
+        elif args.op == "revertir":
             r = await revertir(pool, args.columna, columna_activa(os.environ), args.columna_vieja)
+        else:
+            r = await retirar(pool, args.columna, columna_activa(os.environ))
         print(json.dumps(r, ensure_ascii=False, indent=1))
         return 0
     except ValueError as e:
@@ -247,11 +276,15 @@ async def _main(args) -> int:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    p.add_argument("op", choices=["migrar", "activar", "revertir"])
+    p.add_argument("op", choices=["migrar", "activar", "revertir", "retirar"])
     p.add_argument("--columna", required=True)
-    p.add_argument("--columna-vieja", default="embedding")
+    # Sin literal: la vieja por defecto es la que usan hoy los servicios.
+    p.add_argument("--columna-vieja", default=None)
     p.add_argument("--modelo", default="bge-m3")
     p.add_argument("--dim", type=int, default=1024)
     p.add_argument("--lote", type=int, default=32)
     p.add_argument("--forzar", action="store_true")
-    sys.exit(asyncio.run(_main(p.parse_args())))
+    args = p.parse_args()
+    if args.columna_vieja is None:
+        args.columna_vieja = columna_activa(os.environ)
+    sys.exit(asyncio.run(_main(args)))
