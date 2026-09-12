@@ -1,8 +1,14 @@
 """
 JAX 2.0 — Worker de embeddings.
 
-Vectoriza todos los mensajes y facts que tienen embedding IS NULL.
+Vectoriza todos los mensajes y facts cuyo embedding sigue en vector cero, en
+la columna y con el modelo configurados (jax/memory/embedding_config.py).
 Corre una vez (o cuando se necesite poner al dia la base).
+
+2026-09-12: buscaba `embedding IS NULL`, que no puede darse -- la columna es
+VECTOR NOT NULL con default vector cero (el VECTOR KEY lo exige) --, asi que no
+encontraba nunca nada. Ahora usa el mismo predicado de vector cero que
+MemoryDB.backfill_zero_embeddings, y el UPDATE esta guardado por el.
 
 Uso:
     set -a; source /etc/jax/.env; set +a
@@ -16,7 +22,7 @@ import json
 import logging
 import os
 
-from jax.memory.db import MemoryDB
+from jax.memory.db import MemoryDB, _col, _zero_embedding_sql
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,7 +39,7 @@ async def procesar_mensajes(db: MemoryDB) -> tuple[int, int]:
     async with db.pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT COUNT(*) FROM messages WHERE embedding IS NULL"
+                f"SELECT COUNT(*) FROM messages WHERE {_zero_embedding_sql(_col())}"
             )
             (total,) = await cur.fetchone()
 
@@ -51,7 +57,7 @@ async def procesar_mensajes(db: MemoryDB) -> tuple[int, int]:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT id, content FROM messages "
-                    "WHERE embedding IS NULL AND id > %s "
+                    f"WHERE {_zero_embedding_sql(_col())} AND id > %s "
                     "ORDER BY id ASC LIMIT %s",
                     (last_id, BATCH_SIZE),
                 )
@@ -75,7 +81,8 @@ async def procesar_mensajes(db: MemoryDB) -> tuple[int, int]:
                 async with db.pool.acquire() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(
-                            "UPDATE messages SET embedding = VEC_FromText(%s) WHERE id = %s",
+                            f"UPDATE messages SET {_col()} = VEC_FromText(%s) "
+                            f"WHERE id = %s AND {_zero_embedding_sql(_col())}",
                             (vec_str, msg_id),
                         )
                 procesados += 1
@@ -95,7 +102,7 @@ async def procesar_facts(db: MemoryDB) -> tuple[int, int]:
     async with db.pool.acquire() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT COUNT(*) FROM facts WHERE embedding IS NULL"
+                f"SELECT COUNT(*) FROM facts WHERE {_zero_embedding_sql(_col())}"
             )
             (total,) = await cur.fetchone()
 
@@ -113,7 +120,7 @@ async def procesar_facts(db: MemoryDB) -> tuple[int, int]:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT id, fact_text FROM facts "
-                    "WHERE embedding IS NULL AND id > %s "
+                    f"WHERE {_zero_embedding_sql(_col())} AND id > %s "
                     "ORDER BY id ASC LIMIT %s",
                     (last_id, BATCH_SIZE),
                 )
@@ -137,7 +144,8 @@ async def procesar_facts(db: MemoryDB) -> tuple[int, int]:
                 async with db.pool.acquire() as conn:
                     async with conn.cursor() as cur:
                         await cur.execute(
-                            "UPDATE facts SET embedding = VEC_FromText(%s) WHERE id = %s",
+                            f"UPDATE facts SET {_col()} = VEC_FromText(%s) "
+                            f"WHERE id = %s AND {_zero_embedding_sql(_col())}",
                             (vec_str, fact_id),
                         )
                 procesados += 1

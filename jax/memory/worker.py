@@ -32,7 +32,7 @@ import json
 import os
 import logging
 
-from jax.memory.db import MemoryDB
+from jax.memory.db import EMBED, MemoryDB
 from jax.muscles.base import HttpMuscle
 
 logging.basicConfig(
@@ -334,8 +334,10 @@ async def _avisar_si_hay_que_remedir_recall(db: MemoryDB) -> None:
         f"messages tiene {filas} filas y el recall del indice HNSW se midio con "
         f"{FILAS_AL_MEDIR_RECALL} (93,3 % con ef_search=400). Un grafo HNSW pierde "
         f"recall al crecer, y lo hace sin error: hay que VOLVER A MEDIRLO contra la "
-        f"busqueda exacta (IGNORE INDEX idx_embedding) y, si bajo, subir "
-        f"JAX_MEMORY_HNSW_EF_SEARCH. Ver DEUDA.md, el item del JOIN/HNSW."
+        f"busqueda exacta (IGNORE INDEX idx_{EMBED.column}) y, si bajo, subir "
+        f"JAX_MEMORY_HNSW_EF_SEARCH. Medir por DISTANCIA, no por ids: messages "
+        f"tiene duplicados exactos y los empates hacen fallar una comparacion "
+        f"de conjuntos sin que el indice pierda nada. Ver DEUDA.md."
     )
 
 
