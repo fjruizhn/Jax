@@ -3,9 +3,12 @@
 
 POR QUE EXISTE. La politica dice que nada se lanza sin medir bajo carga, y el
 2026-09-11 no habia NINGUNA herramienta instalada en hall9000 (ni k6, ni wrk,
-ni ab, ni locust). Una politica sin herramienta es una intencion. Esto usa solo
-httpx + asyncio, que ya estan, asi que corre hoy y en cualquier maquina del
-ecosistema sin instalar nada ni agregar un repo de apt.
+ni ab, ni locust). Una politica sin herramienta es una intencion. Esto usa SOLO la
+biblioteca estandar: corre hoy en cualquier maquina del ecosistema sin instalar
+nada ni agregar un repo de apt. La primera version usaba httpx y en atem-ai
+(.11) no existe --ni en el sistema ni en un venv, porque esa maquina es
+PHP/Laravel--, o sea que la politica era inejecutable justo donde vive
+AteneaERP. `tests/test_load_test_harness.py` lo fija con un test.
 
 QUE MIDE, Y POR QUE ESAS TRES COSAS:
   - **rps**: cuanto aguanta. Cuenta TODAS las peticiones, fallidas incluidas:
@@ -29,9 +32,11 @@ endpoint que escribe, escribe de verdad.
 from __future__ import annotations
 
 import argparse
-import asyncio
+import concurrent.futures
 import json
 import time
+import urllib.error
+import urllib.request
 from typing import Optional
 
 
@@ -74,35 +79,52 @@ def _ms(v: Optional[float]) -> Optional[float]:
     return None if v is None else round(v, 2)
 
 
-async def _correr(url: str, metodo: str, concurrencia: int, peticiones: int,
-                  cuerpo: Optional[str], cabeceras: dict, timeout: float) -> dict:
-    import httpx
+def _una_peticion(url: str, metodo: str, cuerpo: Optional[bytes],
+                  cabeceras: dict, timeout: float) -> tuple[Optional[float], bool]:
+    """Devuelve (latencia_ms, hubo_error). Un 5xx es ERROR, no respuesta:
+    contarlo como exito es la forma mas facil de publicar un p95 bonito de una
+    app que se esta cayendo bajo carga."""
+    req = urllib.request.Request(url, data=cuerpo, method=metodo, headers=cabeceras)
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+            return (time.perf_counter() - t0) * 1000, False
+    except urllib.error.HTTPError as e:
+        e.read()
+        # 4xx es una respuesta legitima del servidor (auth, validacion): mide.
+        # 5xx es el servidor cayendose: no mide, cuenta como error.
+        if e.code >= 500:
+            return None, True
+        return (time.perf_counter() - t0) * 1000, False
+    except Exception:
+        return None, True
 
+
+def _correr(url: str, metodo: str, concurrencia: int, peticiones: int,
+            cuerpo: Optional[str], cabeceras: dict, timeout: float) -> dict:
+    """Hilos y no asyncio: con stdlib, `urllib` es bloqueante igual, asi que un
+    ThreadPoolExecutor da la misma concurrencia real sin dependencias. Para las
+    escalas de este ecosistema (cientos de conexiones) alcanza de sobra; si
+    alguna vez hicieran falta miles, ahi si conviene k6 -- y eso pide GO porque
+    agrega un repo de apt."""
+    datos = cuerpo.encode() if cuerpo else None
     latencias: list[float] = []
     errores = 0
-    sem = asyncio.Semaphore(concurrencia)
 
-    async with httpx.AsyncClient(timeout=timeout) as cliente:
-        async def una():
-            nonlocal errores
-            async with sem:
-                t0 = time.perf_counter()
-                try:
-                    r = await cliente.request(metodo, url, content=cuerpo, headers=cabeceras)
-                    ms = (time.perf_counter() - t0) * 1000
-                    # 5xx es un error del servidor bajo carga, no una respuesta:
-                    # contarlo como exito es el modo mas facil de publicar un
-                    # p95 bonito de una app que se esta cayendo.
-                    if r.status_code >= 500:
-                        errores += 1
-                    else:
-                        latencias.append(ms)
-                except Exception:
-                    errores += 1
-
-        inicio = time.perf_counter()
-        await asyncio.gather(*[una() for _ in range(peticiones)])
-        transcurrido = time.perf_counter() - inicio
+    inicio = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrencia) as pool:
+        futuros = [
+            pool.submit(_una_peticion, url, metodo, datos, cabeceras, timeout)
+            for _ in range(peticiones)
+        ]
+        for f in concurrent.futures.as_completed(futuros):
+            ms, fallo = f.result()
+            if fallo:
+                errores += 1
+            else:
+                latencias.append(ms)
+    transcurrido = time.perf_counter() - inicio
 
     return resumen(latencias, errores, transcurrido)
 
@@ -124,8 +146,8 @@ def main() -> int:
         k, _, v = h.partition(":")
         cabeceras[k.strip()] = v.strip()
 
-    r = asyncio.run(_correr(a.url, a.metodo, a.concurrencia, a.peticiones,
-                            a.cuerpo, cabeceras, a.timeout))
+    r = _correr(a.url, a.metodo, a.concurrencia, a.peticiones,
+                a.cuerpo, cabeceras, a.timeout)
     r["url"] = a.url
     r["concurrencia"] = a.concurrencia
     r["fecha"] = time.strftime("%Y-%m-%d %H:%M:%S %Z")
