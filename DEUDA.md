@@ -2166,10 +2166,23 @@ retractaciones, que no se borran. Ninguno requiere acción.
   otra cosa. **Hoy no duele** (1.149 filas, 12 MB); duele lineal.
 
 - **Linea base de carga — 2026-09-11, `/api/health` de jax-platform.**
-  Primera medicion de carga del ecosistema (antes no habia herramienta). Con
-  `scripts/load_test.py`, 400 peticiones por nivel: c=1 2.605 rps / p95 0,48 ms;
-  c=10 1.649 / 12,1 ms; c=50 1.275 / 100,5 ms; c=100 2.109 / 48,2 ms. **Cero
-  errores en los cuatro niveles.** Es un endpoint trivial: mide el event loop,
+  Primera medicion de carga del ecosistema (antes no habia herramienta).
+
+  **CORREGIDA el mismo dia, y la correccion es la parte interesante.** La
+  primera version del arnes usaba `httpx` y midio c=1 2.605 rps / p95 0,48 ms;
+  c=10 1.649 / 12,1 ms; c=50 1.275 / 100,5 ms; c=100 2.109 / 48,2 ms. Al
+  reescribirlo sobre stdlib (porque en atem-ai no hay httpx), los mismos
+  niveles dieron **c=1 5.815 rps / p95 0,22 ms; c=10 7.522 / 1,9 ms; c=50
+  5.638 / 6,53 ms** — hasta 4,5x mas rps y un p95 quince veces menor. El
+  servidor es el mismo: **lo que se estaba midiendo era el cliente**. El p95 de
+  100 ms a c=50 que parecia degradacion del servicio era overhead del arnes.
+
+  **Leccion, y vale mas que el numero:** una prueba de carga mide el sistema
+  MAS el instrumento. Antes de reportar degradacion hay que descartar que el
+  cuello sea el que mide — con un cliente distinto, o mirando si el servidor
+  esta ocioso mientras el arnes sufre. Un arnes lento no da un error: da un
+  numero pesimista y creible. **Cero errores en todos los niveles, en las dos
+  versiones.** Es un endpoint trivial: mide el event loop,
   no la app. **Falta la linea base de los caminos caros** (chat con busqueda
   semantica, pipelines), que necesitan auth y escriben — hacerlas contra la base
   de test, no contra produccion. Es VERDAD OPERACIONAL: caduca si cambia el

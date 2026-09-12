@@ -514,8 +514,11 @@ jobs:
           #      nada da un verde que no significa nada);
           #   +7 test_load_test_harness.py     -- la aritmetica del arnes de
           #      carga, que es donde una prueba de carga miente sin avisar.
-          grep -qE "^71 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 71 tests CORRIDOS."; exit 1; }
+          # 71 -> 72 el mismo dia: +1 en test_load_test_harness.py, el test que
+          # exige que el arnes importe SOLO stdlib (en atem-ai no hay httpx, y
+          # una herramienta de politica que corre en una sola maquina no sirve).
+          grep -qE "^72 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 72 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

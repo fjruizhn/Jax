@@ -37,6 +37,41 @@ class PercentilTest(unittest.TestCase):
         self.assertEqual(percentil([100, 1, 50], 50), 50)
 
 
+class SoloStdlibTest(unittest.TestCase):
+    """El arnes no puede depender de nada que haya que instalar.
+
+    Medido el 2026-09-11: la primera version importaba `httpx` y en atem-ai
+    (.11) no existe -- ni en el python del sistema ni en ningun venv, porque esa
+    maquina es PHP/Laravel. O sea que la politica "nada se lanza sin medir bajo
+    carga" era inejecutable justo en la maquina donde vive AteneaERP, que es el
+    proyecto con mas deuda de rendimiento del ecosistema.
+
+    Una herramienta de politica que solo corre en una maquina no es una
+    herramienta de politica. Este test lo fija: si alguien agrega una
+    dependencia de terceros --arriba o dentro de una funcion-- se pone rojo.
+    """
+
+    def test_load_test_solo_importa_stdlib(self):
+        import ast
+        import sys
+
+        ruta = Path(__file__).resolve().parents[1] / "scripts" / "load_test.py"
+        arbol = ast.parse(ruta.read_text(encoding="utf-8"))
+        modulos = set()
+        for nodo in ast.walk(arbol):  # ast.walk: tambien los imports locales
+            if isinstance(nodo, ast.Import):
+                modulos.update(a.name.split(".")[0] for a in nodo.names)
+            elif isinstance(nodo, ast.ImportFrom) and nodo.level == 0 and nodo.module:
+                modulos.add(nodo.module.split(".")[0])
+        ajenos = sorted(m for m in modulos if m not in sys.stdlib_module_names)
+        self.assertEqual(
+            ajenos, [],
+            f"el arnes importa dependencias de terceros: {ajenos}. Tiene que correr "
+            "en cualquier maquina del ecosistema sin instalar nada -- en atem-ai no "
+            "hay httpx ni venv de python.",
+        )
+
+
 class ResumenTest(unittest.TestCase):
     def test_los_errores_no_entran_en_las_latencias_pero_si_en_la_tasa(self):
         # Una peticion que fallo rapido NO puede bajar el p95: es el modo en que
