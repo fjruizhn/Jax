@@ -124,7 +124,16 @@ def _tocar_sello() -> bool:
             os.makedirs(directorio, exist_ok=True)
         with open(FACET_SEAL_PATH, "a"):
             pass
-        os.utime(FACET_SEAL_PATH, None)
+        # Hora EXPLICITA de `time.time()`, no `None`. Con `None` el kernel le
+        # pone al archivo su hora gruesa cacheada, que puede quedar DETRAS del
+        # `time.time()` con el que otro proceso cacheo un instante antes -- y
+        # ahi la invalidacion se pierde hasta el TTL de 30 s. Medido el
+        # 2026-09-11 sobre xfs (donde vive el sello real, no /tmp): 1/20.000
+        # sellos, -0,693 ms; con hora explicita, 0/20.000. Es el mismo reloj
+        # que lee `entry.fetched_at_wall`, que es la unica forma de que la
+        # comparacion de `_entrada_sellada` signifique algo.
+        ahora = time.time()
+        os.utime(FACET_SEAL_PATH, (ahora, ahora))
         return True
     except OSError as e:
         logger.error(

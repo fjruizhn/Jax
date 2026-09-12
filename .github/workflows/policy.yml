@@ -289,15 +289,19 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest aiomysql cryptography
       - run: PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -v
-      # Los 11 tests tienen que CORRER, no saltarse: dos de ellos se saltan
+      # Los 13 tests tienen que CORRER, no saltarse: dos de ellos se saltan
       # solos si el runner corriera como root (ningun permiso bloquea a root,
       # asi que los casos de sello ilegible / no escribible no son
       # reproducibles). Un skip masivo se ve igual que verde -- este paso
       # exige el numero.
       - run: |
           PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -q 2>&1 | tee /tmp/seal
-          grep -qE "^12 passed" /tmp/seal || {
-            echo "PISO ROTO: se esperaban 12 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 12 -> 13 el 2026-09-11: el sello se estampa con `time.time()` y
+          # no con `None`, y el test nuevo lo fija adelantando el reloj una
+          # hora (la carrera real es de sub-milisegundo, 1/20.000 sobre xfs:
+          # esperarla en un test seria un flake, no una prueba).
+          grep -qE "^13 passed" /tmp/seal || {
+            echo "PISO ROTO: se esperaban 13 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Renombrado de `facet-resolver-sync` el 2026-09-01: el checker se generalizo
   # a FAMILIAS de espejos y ahora cubre tambien credential_resolver.
