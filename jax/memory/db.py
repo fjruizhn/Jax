@@ -27,14 +27,16 @@ from typing import Awaitable, Callable, Optional
 import aiomysql
 import httpx
 
+from .embedding_config import CONFIG as EMBED, zero_vector_text
 from .migrations import ensure_schema
 
 logger = logging.getLogger("jax.memory")
 
-# Dimension de nomic-embed-text = la de las columnas `VECTOR(768)` de
-# messages/facts. Fuente unica: get_embedding() valida contra ella y la
-# busqueda arma con ella el vector cero que excluye (ver _nonzero_embedding_sql).
-EMBEDDING_DIM = 768
+# Modelo, dimension y columna de los embeddings: configuracion, no codigo
+# (2026-09-12, migracion a bge-m3). Ver jax/memory/embedding_config.py y
+# scripts/migrar_embeddings.py. Todo lo de abajo lee EMBED en cada uso, no al
+# importar. EMBEDDING_DIM queda como alias de lectura para quien lo importaba.
+EMBEDDING_DIM = EMBED.dim
 
 
 # ------------------------------------------------------------
@@ -215,20 +217,23 @@ def _merge_search_results(rows_a: list, rows_b: list, limit: int) -> list:
 # El 0.0 es el caso grave: una distancia 0.0 falsa es indistinguible de un
 # duplicado exacto (add_fact la leeria como tal). Por eso la exclusion va EN
 # SQL, sobre el embedding guardado, y no filtrando distancias en Python.
-_ZERO_VECTOR_TEXT = "[" + ",".join(["0"] * EMBEDDING_DIM) + "]"
+def _col(prefijo: str = "") -> str:
+    """Columna de embeddings configurada (validada como identificador en
+    embedding_config), con prefijo de alias opcional ("m.")."""
+    return f"{prefijo}{EMBED.column}"
 
 
 def _nonzero_embedding_sql(column: str) -> str:
-    """Predicado SQL: `column` tiene norma distinta de cero. El literal es una
-    constante del modulo, no entrada de usuario."""
-    return f"VEC_DISTANCE_EUCLIDEAN({column}, VEC_FromText('{_ZERO_VECTOR_TEXT}')) > 0"
+    """Predicado SQL: `column` tiene norma distinta de cero. El literal sale de
+    la dimension configurada, no de entrada de usuario."""
+    return f"VEC_DISTANCE_EUCLIDEAN({column}, VEC_FromText('{zero_vector_text(EMBED.dim)}')) > 0"
 
 
 def _zero_embedding_sql(column: str) -> str:
     """Predicado SQL inverso: `column` sigue en vector cero. Es el guard del
     backfill -- nunca pisa un embedding real, ni el que un save_message()
     tardio acabe de escribir."""
-    return f"VEC_DISTANCE_EUCLIDEAN({column}, VEC_FromText('{_ZERO_VECTOR_TEXT}')) = 0"
+    return f"VEC_DISTANCE_EUCLIDEAN({column}, VEC_FromText('{zero_vector_text(EMBED.dim)}')) = 0"
 
 
 # Tablas con embedding y la columna de texto que se vectoriza. Lista cerrada:
@@ -316,6 +321,15 @@ class MemoryDB:
         # La exacta cuesta 49 ms. O sea 400 da 54x mas rapido perdiendo ~1 de
         # cada 14 vecinos del top-5, y el que entra en su lugar esta a una
         # distancia casi identica (+0,0005 medido).
+        # Re-medido el 2026-09-12 sobre una copia de produccion (1.607 filas,
+        # 30 consultas), por DISTANCIA: un resultado cuenta si esta a <= la
+        # distancia del 5o vecino exacto. messages tiene duplicados exactos
+        # (16 de 30 consultas con empates en el top-5), y comparar CONJUNTOS
+        # de ids castiga empates que el indice no pierde -- el 93,3 % de arriba
+        # probablemente arrastra ese sesgo. Por distancia, ef=400:
+        #     768 dims (nomic) ....... 100 %   0,89 ms  (exacta 79 ms)
+        #     1024 dims (bge-m3) ..... 100 %   1,02 ms  (exacta 107 ms)
+        # ef=400 alcanza para las dos dimensiones.
         #
         # Se fija en la CONEXION y no por consulta: una sentencia mas por turno
         # de chat seria un round-trip regalado. Configurable porque el punto
@@ -384,19 +398,22 @@ class MemoryDB:
     # Embeddings (vectorizacion via Ollama local)
     # --------------------------------------------------------
     async def get_embedding(self, text: str) -> Optional[list]:
-        """Vectoriza texto con nomic-embed-text via Ollama local.
-        Devuelve lista de EMBEDDING_DIM floats, o None si falla (JAX sigue sin embeddings)."""
+        """Vectoriza texto con el modelo configurado (EMBED.model) via Ollama local.
+        Devuelve lista de EMBED.dim floats, o None si falla (JAX sigue sin embeddings).
+        Una dimension distinta de la configurada se descarta: escribirla en la
+        columna fallaria, o peor, compararia vectores de modelos distintos."""
         try:
-            # nomic-embed-text tiene limite de contexto; truncamos para evitar 500.
+            # Tope de contexto de los modelos; truncamos para evitar 500.
             texto = text[:4000] if len(text) > 4000 else text
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    "http://localhost:11434/api/embeddings",
-                    json={"model": "nomic-embed-text", "prompt": texto},
+                    "http://localhost:11434/api/embed",
+                    json={"model": EMBED.model, "input": texto},
                 )
                 resp.raise_for_status()
-                embedding = resp.json().get("embedding")
-                if isinstance(embedding, list) and len(embedding) == EMBEDDING_DIM:
+                embeddings = resp.json().get("embeddings") or []
+                embedding = embeddings[0] if embeddings else None
+                if isinstance(embedding, list) and len(embedding) == EMBED.dim:
                     return embedding
                 logger.warning(
                     f"Embedding con dimension incorrecta: "
@@ -432,7 +449,7 @@ class MemoryDB:
             async with conn.cursor() as cur:
                 await cur.execute(
                     f"SELECT id, {texto_col} FROM {table} "
-                    f"WHERE {_zero_embedding_sql('embedding')} ORDER BY id LIMIT %s",
+                    f"WHERE {_zero_embedding_sql(_col())} ORDER BY id LIMIT %s",
                     (limit,),
                 )
                 filas = await cur.fetchall()
@@ -446,8 +463,8 @@ class MemoryDB:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        f"UPDATE {table} SET embedding = VEC_FromText(%s) "
-                        f"WHERE id = %s AND {_zero_embedding_sql('embedding')}",
+                        f"UPDATE {table} SET {_col()} = VEC_FromText(%s) "
+                        f"WHERE id = %s AND {_zero_embedding_sql(_col())}",
                         (json.dumps(embedding), fila_id),
                     )
                     resultado["reparadas"] += cur.rowcount
@@ -599,7 +616,7 @@ class MemoryDB:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "UPDATE messages SET embedding = VEC_FromText(%s) "
+                        f"UPDATE messages SET {_col()} = VEC_FromText(%s) "
                         "WHERE conversation_id = %s AND turn_number = %s",
                         (vec_str, conv_id, turn),
                     )
@@ -681,7 +698,7 @@ class MemoryDB:
         if not self.pool or _is_degenerate_embedding(embedding):
             return None
         vec_str = json.dumps(embedding)
-        clauses = ["superseded_by IS NULL", _nonzero_embedding_sql("embedding")]
+        clauses = ["superseded_by IS NULL", _nonzero_embedding_sql(_col())]
         params: list = []
         scope = []
         if project_id is not None:
@@ -698,9 +715,9 @@ class MemoryDB:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
                         "SELECT id, fact_text, "
-                        "VEC_DISTANCE_COSINE(embedding, VEC_FromText(%s)) AS distancia "
+                        f"VEC_DISTANCE_COSINE({_col()}, VEC_FromText(%s)) AS distancia "
                         f"FROM facts WHERE {where} "
-                        "ORDER BY VEC_DISTANCE_COSINE(embedding, VEC_FromText(%s)) ASC "
+                        f"ORDER BY VEC_DISTANCE_COSINE({_col()}, VEC_FromText(%s)) ASC "
                         "LIMIT 1",
                         ([vec_str] + params + [vec_str]),
                     )
@@ -814,7 +831,7 @@ class MemoryDB:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
-                        "UPDATE facts SET embedding = VEC_FromText(%s) WHERE id = %s",
+                        f"UPDATE facts SET {_col()} = VEC_FromText(%s) WHERE id = %s",
                         (vec_str, fact_id),
                     )
 
@@ -1108,7 +1125,7 @@ class MemoryDB:
             scope_params.append(user_id)
         # Las filas con vector cero nunca son candidatas, haya scope o no
         # (ver _nonzero_embedding_sql).
-        where = [_nonzero_embedding_sql("m.embedding")]
+        where = [_nonzero_embedding_sql(_col("m."))]
         if clauses:
             where.append("(" + " OR ".join(clauses) + ")")
         scope_sql = "WHERE " + " AND ".join(where) + " "
@@ -1143,10 +1160,10 @@ class MemoryDB:
                     await cur.execute(
                         "SELECT m.content, m.role, m.created_at, "
                         "m.created_at AS started_at, "
-                        "VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) AS distancia "
+                        f"VEC_DISTANCE_COSINE({_col('m.')}, VEC_FromText(%s)) AS distancia "
                         "FROM messages m "
                         + scope_sql +
-                        "ORDER BY VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) ASC "
+                        f"ORDER BY VEC_DISTANCE_COSINE({_col('m.')}, VEC_FromText(%s)) ASC "
                         "LIMIT %s",
                         ([v] + scope_params + [v, fetch_limit]),
                     )

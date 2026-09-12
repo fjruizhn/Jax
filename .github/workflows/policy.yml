@@ -205,7 +205,7 @@ jobs:
       - run: >-
           PYTHONPATH=. python -m pytest -v
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
-          tests/test_memory_scope_denormalized.py
+          tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -214,15 +214,18 @@ jobs:
       - run: |
           PYTHONPATH=. python -m pytest -q \
             tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py \
-            tests/test_memory_scope_denormalized.py 2>&1 | tee /tmp/out
+            tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
           # (el scope copiado al mensaje, el centinela de que el scope de una
           # conversacion sigue siendo inmutable, el plan sin JOIN que si usa el
           # indice vectorial, las dos direcciones del aislamiento, y el guard
           # de mhnsw_ef_search -- con el default de MariaDB el recall@5 medido
           # fue 50,7 %, o sea media memoria perdida sin un solo error).
-          grep -qE "^16 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 16 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 16 -> 20 el 2026-09-12: test_migrar_embeddings_io.py (+4) -- migrar sin mover
+          #   el indice, idempotencia, activar que se niega con filas en ceros, y
+          #   activar/revertir (MariaDB no admite dos indices vectoriales por tabla).
+          grep -qE "^20 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 20 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
@@ -514,7 +517,7 @@ jobs:
           tests/test_motor_job_cancel_and_length.py tests/test_invoke_motor_cancel_on_timeout.py
           tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py
           tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py
-          tests/test_repl_fuentes.py
+          tests/test_repl_fuentes.py tests/test_memory_embedding_config.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -531,7 +534,7 @@ jobs:
             tests/test_motor_job_cancel_and_length.py tests/test_invoke_motor_cancel_on_timeout.py \
             tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py \
             tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py \
-            tests/test_repl_fuentes.py \
+            tests/test_repl_fuentes.py tests/test_memory_embedding_config.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -566,8 +569,12 @@ jobs:
           # 112 -> 116 el mismo dia: test_repl_fuentes.py (+4) -- el HttpMuscle del
           #   REPL arma fuentes verificables con el mismo modulo que Jacobs, que pasa
           #   a vivir en jax/core (symlink en las_manos/, como facet_resolver).
-          grep -qE "^116 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 116 tests CORRIDOS."; exit 1; }
+          # 116 -> 124 el mismo dia: test_memory_embedding_config.py (+8) -- modelo,
+          #   dimension y columna de embeddings salen de configuracion (migracion a
+          #   bge-m3); get_embedding usa /api/embed con el modelo configurado. Las dos
+          #   ramas partian de 112 (116 y 120); se juntaron al rebasar la de bge-m3.
+          grep -qE "^124 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 124 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
