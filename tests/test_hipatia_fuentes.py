@@ -42,7 +42,7 @@ os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
 
 from facet_resolver import ResolvedFacet  # noqa: E402
 from jacobs import executor  # noqa: E402
-from jacobs import grounding_sources as gs  # noqa: E402
+from jax.core import grounding_sources as gs  # noqa: E402
 from jacobs.models import Pipeline, Step  # noqa: E402
 
 _FIX = json.loads((Path(__file__).parent / "fixtures" / "gemini_grounding_postgresql.json").read_text(encoding="utf-8"))

@@ -16,6 +16,12 @@ Acá cada fuente gana dos cosas:
 Sin caché: los tokens de redirección son únicos por respuesta; cachearlos no
 ahorraría nada medible.
 
+Dónde vive (2026-09-12): en jax/core, la capa base, porque lo usan Jacobs
+(jacobs/executor.py) y el HttpMuscle del REPL (jax/muscles/base.py). El REPL no
+puede depender de jacobs/ (capas invertidas), y el proceso de LAS MANOS no
+importa `jax.*`: le llega por el symlink las_manos/grounding_sources.py, igual
+que facet_resolver. Un solo archivo, dos rutas de import.
+
 En memoria de Jairo Urbina.
 """
 from __future__ import annotations

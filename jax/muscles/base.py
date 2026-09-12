@@ -29,6 +29,7 @@ import json
 from jax.core.crypto_secrets import decrypt_secret
 from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from jax.core.model_catalog import record_resolved_version_safe
+from jax.core.grounding_sources import build_sources, render_sources_block, resolve_redirects
 
 # provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
 # "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
@@ -323,26 +324,21 @@ class HttpMuscle(Muscle):
         return texto, chunks, supports, queries
 
     @staticmethod
-    def _format_sources(chunks: list, queries: list) -> tuple[str, int]:
-        """Bloque de fuentes (sin duplicar) + conteo de fuentes unicas.
-        Sin esto, Hipatia 'busca' pero las fuentes se pierden y parece que
-        respondio de memoria. Las fuentes son la prueba del research."""
-        vistos: set = set()
-        unicas: list = []
-        for ch in chunks:
-            web = ch.get("web") or {}
-            uri = web.get("uri")
-            if uri and uri not in vistos:
-                vistos.add(uri)
-                unicas.append((web.get("title", uri), uri))
+    async def _format_sources(chunks: list, supports: list, queries: list) -> tuple[str, int]:
+        """Bloque de fuentes verificables + conteo de fuentes únicas.
+        Las fuentes son la prueba del research. Desde 2026-09-12 cada una lleva
+        la URL FINAL (se sigue la redirección opaca de Google grounding) y los
+        fragmentos de la respuesta que respalda -- el mismo módulo que Jacobs
+        (jax/core/grounding_sources.py). Antes eran redirecciones con una
+        etiqueta de dominio: nadie podía contrastarlas."""
+        sources = build_sources(chunks, supports)
+        await resolve_redirects(sources)
         bloque = ""
-        if unicas:
-            bloque += "\n\n— Fuentes consultadas —"
-            for i, (t, u) in enumerate(unicas, 1):
-                bloque += f"\n  [{i}] {t}: {u}"
+        if sources:
+            bloque += "\n\n— Fuentes consultadas —\n" + render_sources_block(sources)
         if queries:
             bloque += "\n\n(Búsquedas: " + "; ".join(queries) + ")"
-        return bloque, len(unicas)
+        return bloque, len(sources)
 
     async def _call_gemini(
         self, prompt: str, model: str, history: list[dict] | None = None
@@ -423,7 +419,7 @@ class HttpMuscle(Muscle):
             return texto + "\n\n" + verificacion_label("local")
 
         if chunks:  # hubo busqueda real (auto o required_web)
-            bloque, n = self._format_sources(chunks, queries)
+            bloque, n = await self._format_sources(chunks, supports, queries)
             etiqueta = verificacion_label("web", n_fuentes=n)
             if not supports:
                 etiqueta += "\n⚠ *Advertencia: sin groundingSupports — citas sin anclaje posicional.*"

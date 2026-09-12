@@ -25,7 +25,9 @@ import httpx
 
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
-from jacobs.grounding_sources import build_sources, render_sources_block, resolve_redirects
+# Vive en jax/core (capa base, compartido con el HttpMuscle del REPL); llega a
+# este proceso por el symlink las_manos/grounding_sources.py, como facet_resolver.
+from grounding_sources import build_sources, render_sources_block, resolve_redirects
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -277,7 +279,7 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     # Fuentes verificables (2026-09-12): URL final (siguiendo la redirección
     # opaca de Google) + los fragmentos que cada una respalda. Antes eran
     # solo redirecciones con una etiqueta de dominio: la auditoría no podía
-    # contrastar ninguna (E2E b2d87971). Ver jacobs/grounding_sources.py.
+    # contrastar ninguna (E2E b2d87971). Ver jax/core/grounding_sources.py.
     sources = build_sources(chunks, supports)
     await resolve_redirects(sources)
 
