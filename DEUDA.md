@@ -2144,7 +2144,20 @@ retractaciones, que no se borran. Ninguno requiere acción.
 ## Anotado, no bloquea
 
 - **El `JOIN` a `conversations` anula el indice vectorial HNSW de `messages` —
-  ABIERTO 2026-09-11, medido, con arreglo candidato y SIN decision.**
+  CERRADO 2026-09-11 (jax#128), desplegado y verificado.** El arreglo candidato que
+  esta entrada proponía —desnormalizar `user_id`/`project_id` a `messages`— se hizo
+  esa misma noche, con su migrador (`jax/memory/migrations.py`, el primero que
+  tienen esas tablas) y backfill de las 1.607 filas.
+
+  **Y trajo consigo un cambio que hay que saber: usar el índice HNSW vuelve la
+  búsqueda APROXIMADA.** Con el default de MariaDB (`mhnsw_ef_search=20`) el
+  recall@5 medido fue **50,7 %** —media memoria perdida, sin un solo error ni una
+  línea de log—; se fijó en **400** (93,3 %, 0,92 ms contra 49 ms de la búsqueda
+  exacta) en el `init_command` de la conexión, con un test que falla si vuelve a
+  20. Configurable por `JAX_MEMORY_HNSW_EF_SEARCH`, y **hay que volver a medirlo
+  cuando `messages` crezca un orden de magnitud**.
+
+  Texto original del diagnóstico, conservado:
   `messages` tiene `idx_embedding` VECTOR (HNSW, MariaDB 12.3), pero
   `search_similar_messages` no lo usa: su `EXPLAIN` da
   `Using temporary; Using filesort` y elige `idx_conv_project`.
@@ -2393,11 +2406,14 @@ retractaciones, que no se borran. Ninguno requiere acción.
   un temporal. Es un cambio de cómo arranca LAS MANOS, no de los tests.
   **Fecha de control: 2026-09-25.**
 
-- **`tests/test_memory_helpers.py` no lo corre ningún job de CI — 2026-09-11,
-  medido con `grep` sobre `.github/workflows/`.** 15 tests puros de
-  `jax/memory/db.py` que solo corren a mano (octava lección: un test que ningún
-  job nombra no produce ni verde falso). El job nuevo `memory-vector-zero-io`
-  corre solo su propio archivo. **Qué falta:** nombrarlo en un job, con piso.
+- **`tests/test_memory_helpers.py` no lo corre ningún job de CI — CERRADO, y ya lo
+  estaba cuando se escribió esta entrada (revisado 2026-09-12).** El texto pedía
+  "nombrarlo en un job, con piso"; `grep` sobre `.github/workflows/policy.yml` lo
+  encuentra **dos veces**, en el job `tests-puros` y en su piso exacto. Entró ahí
+  en jax#120, **el mismo día** en que se redactó este ítem, y nadie volvió a
+  mirar. Otra instancia del patrón que persigue §7 de `CONTEXT.md`: un ítem que
+  describe un estado que ya no existe. Lo destapó el inventario del 2026-09-12,
+  midiendo cada entrada contra el árbol en vez de leerla.
 
 - **500 en `/api/chat` por distancias NULL en `_semantic_context` --
   CERRADO 2026-09-11, ver "Cerrado — kimi y la memoria vector cero".** Lo que
