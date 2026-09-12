@@ -27,6 +27,8 @@ from typing import Awaitable, Callable, Optional
 import aiomysql
 import httpx
 
+from .migrations import ensure_schema
+
 logger = logging.getLogger("jax.memory")
 
 # Dimension de nomic-embed-text = la de las columnas `VECTOR(768)` de
@@ -299,12 +301,34 @@ class MemoryDB:
                     "pasá port= explícito."
                 )
             port = int(env_port)
+        # --- Calidad de la busqueda vectorial (HNSW) -----------------------
+        # `idx_embedding` es un indice APROXIMADO: desde que la busqueda dejo
+        # de unir con `conversations` el optimizador si lo usa, y eso cambia el
+        # resultado -- ya no es el vecino exacto sino uno muy cercano.
+        # `mhnsw_ef_search` es cuantos candidatos explora el grafo: mas alto,
+        # mas exacto y mas lento. Medido el 2026-09-11 sobre jax_memory (1.607
+        # filas, 768 dims, indice reconstruido con M=16), recall@5 contra la
+        # busqueda exacta:
+        #     ef=20 (DEFAULT DE MARIADB) ... 50,7 %  <- inaceptable
+        #     ef=100 ...................... 86,7 %
+        #     ef=400 ...................... 93,3 %   0,92 ms
+        #     ef=1000 ..................... 90,7 %   (satura: no compensa)
+        # La exacta cuesta 49 ms. O sea 400 da 54x mas rapido perdiendo ~1 de
+        # cada 14 vecinos del top-5, y el que entra en su lugar esta a una
+        # distancia casi identica (+0,0005 medido).
+        #
+        # Se fija en la CONEXION y no por consulta: una sentencia mas por turno
+        # de chat seria un round-trip regalado. Configurable porque el punto
+        # optimo depende del volumen y de las dimensiones -- hay que volver a
+        # medirlo cuando la tabla crezca un orden de magnitud.
+        ef_search = int(os.getenv("JAX_MEMORY_HNSW_EF_SEARCH", "400"))
         self.config = {
             "host": host,
             "port": port,
             "user": user,
             "password": password,
             "db": database,
+            "init_command": f"SET SESSION mhnsw_ef_search = {ef_search}",
         }
         try:
             self.pool = await aiomysql.create_pool(
@@ -315,6 +339,9 @@ class MemoryDB:
                 **self.config,
             )
             logger.info(f"MemoryDB conectada a {database}@{host} (pool 1-5)")
+            # Esquema al dia antes de servir: barato (cuatro SELECT sobre
+            # catalogo) y fail-soft. Ver jax/memory/migrations.py.
+            await ensure_schema(self.pool)
             return True
         except Exception as e:
             logger.error(f"MemoryDB no pudo conectar: {e}")
@@ -523,15 +550,23 @@ class MemoryDB:
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 # 1. conversation_id desde el uuid
+                # El scope viaja con el id: se copia al mensaje para que la
+                # busqueda semantica pueda filtrar SIN unir con conversations
+                # (ese JOIN saca al optimizador del indice vectorial HNSW --
+                # 58,5 ms contra 0,4 ms medidos el 2026-09-11). Es seguro
+                # copiarlo porque el scope de una conversacion es inmutable:
+                # ningun UPDATE del arbol lo toca, y hay un test centinela que
+                # se pone rojo si alguien lo hace mutable.
                 await cur.execute(
-                    "SELECT id FROM conversations WHERE conversation_uuid = %s",
+                    "SELECT id, user_id, project_id FROM conversations "
+                    "WHERE conversation_uuid = %s",
                     (conversation_uuid,),
                 )
                 row = await cur.fetchone()
                 if not row:
                     logger.error(f"Conversacion no encontrada: {conversation_uuid[:8]}")
                     return
-                conv_id = row[0]
+                conv_id, conv_user_id, conv_project_id = row[0], row[1], row[2]
 
                 # 2. turn_number = ultimo + 1
                 await cur.execute(
@@ -544,9 +579,11 @@ class MemoryDB:
                 # 3. insertar el mensaje (role ya normalizado al ENUM)
                 await cur.execute(
                     "INSERT INTO messages "
-                    "(conversation_id, turn_number, role, content, facet_used, model, latency_ms) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    (conv_id, turn, role_enum, content, facet_enum, model, latency_ms),
+                    "(conversation_id, turn_number, role, content, facet_used, model, "
+                    "latency_ms, user_id, project_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (conv_id, turn, role_enum, content, facet_enum, model, latency_ms,
+                     conv_user_id, conv_project_id),
                 )
 
                 # 4. actualizar contador de turnos
@@ -1040,14 +1077,17 @@ class MemoryDB:
 
         # --- WHERE de scope (dos dimensiones) -----------------------------
         # (project_id = P)  OR  (project_id IS NULL AND user_id = U)
+        # El scope se filtra sobre `messages` (columnas desnormalizadas desde
+        # conversations), NO uniendo con conversations: el JOIN dejaba fuera al
+        # indice vectorial HNSW y convertia cada busqueda en un scan.
         scope_sql = ""
         scope_params: list = []
         clauses = []
         if project_id is not None:
-            clauses.append("c.project_id = %s")
+            clauses.append("m.project_id = %s")
             scope_params.append(project_id)
         if user_id is not None:
-            clauses.append("(c.project_id IS NULL AND c.user_id = %s)")
+            clauses.append("(m.project_id IS NULL AND m.user_id = %s)")
             scope_params.append(user_id)
         # Las filas con vector cero nunca son candidatas, haya scope o no
         # (ver _nonzero_embedding_sql).
@@ -1084,10 +1124,10 @@ class MemoryDB:
             async with self.pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute(
-                        "SELECT m.content, m.role, m.created_at, c.started_at, "
+                        "SELECT m.content, m.role, m.created_at, "
+                        "m.created_at AS started_at, "
                         "VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) AS distancia "
                         "FROM messages m "
-                        "JOIN conversations c ON m.conversation_id = c.id "
                         + scope_sql +
                         "ORDER BY VEC_DISTANCE_COSINE(m.embedding, VEC_FromText(%s)) ASC "
                         "LIMIT %s",
