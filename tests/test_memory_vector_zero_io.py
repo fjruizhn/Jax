@@ -57,6 +57,7 @@ import aiomysql
 import pytest
 
 from jax.memory import db as dbmod
+import _esquema_memoria
 
 _DB = os.getenv("JAX_DB_NAME", "")
 requiere_db_de_prueba = pytest.mark.skipif(
@@ -84,18 +85,10 @@ def _txt(v: list[float]) -> str:
 
 
 # DDL desde el archivo de esquema del repo, en orden de creacion (facts
-# depende de messages, messages de conversations).
-_SCHEMA = Path(__file__).resolve().parents[1] / "jax_memory_schema.sql"
-
-
-def _ddl_del_archivo(tabla: str) -> str:
-    m = re.search(rf"CREATE TABLE `{tabla}` \(.*?\n\)[^;\n]*",
-                  _SCHEMA.read_text(encoding="utf-8"), re.S)
-    assert m, f"{tabla} no esta en {_SCHEMA.name}: el test no podria crearla"
-    return m.group(0)
-
-
-_DDL = {t: _ddl_del_archivo(t) for t in ("conversations", "messages", "facts")}
+# depende de messages, messages de conversations). El parser vive en
+# tests/_esquema_memoria.py: lo comparte el test de scope desnormalizado, y una
+# segunda copia seria un segundo lugar donde el esquema se desactualiza solo.
+_DDL = _esquema_memoria.ddl()
 
 
 def asincrono(fn):
