@@ -33,6 +33,7 @@ from motor_registry.models import (
     MotorJobView,
 )
 from motor_registry.policy import MotorPolicy
+from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -152,6 +153,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
         )
     )
     task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
+    job_tasks.register(job_id, task)
 
     return MotorDispatchResponse(
         job_id=job_id,
@@ -194,4 +196,7 @@ async def cancel_job(job_id: str) -> MotorJobView:
             detail=f"Job '{job_id}' ya está en estado terminal: {view.status.value}",
         )
     _STORE.update(job_id, status=JobStatus.CANCELLED.value, finished_at=time.time())
+    # La etiqueta sola no paraba nada: worker.run nunca la leía y el job
+    # seguía llamando al modelo. Cortar la tarea es lo que corta el gasto.
+    job_tasks.cancel(job_id)
     return _STORE.get(job_id)

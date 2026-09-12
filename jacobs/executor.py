@@ -507,32 +507,61 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int) -> dict:
         raise RuntimeError(f"Motor Registry no devolvió job_id: {dispatch}")
 
     # Polling hasta timeout
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        await asyncio.sleep(MOTOR_POLL_INTERVAL)
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(f"{LAS_MANOS_BASE}/motor/job/{job_id}")
-            resp.raise_for_status()
-            job = resp.json()
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            await asyncio.sleep(MOTOR_POLL_INTERVAL)
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(f"{LAS_MANOS_BASE}/motor/job/{job_id}")
+                resp.raise_for_status()
+                job = resp.json()
 
-        status = job.get("status", "")
-        if status == "completed":
-            return {
-                "success":        True,
-                "facet":          step.facet,
-                "job_id":         job_id,
-                "result":         job.get("result_summary", ""),
-                "result_full":    job,
-            }
-        if status in ("failed", "cancelled", "rejected"):
-            raise RuntimeError(
-                f"Motor job {job_id} terminó en estado '{status}': "
-                f"{job.get('error', '')}"
+            status = job.get("status", "")
+            if status == "completed":
+                return {
+                    "success":        True,
+                    "facet":          step.facet,
+                    "job_id":         job_id,
+                    "result":         job.get("result_summary", ""),
+                    "result_full":    job,
+                }
+            if status in ("failed", "cancelled", "rejected"):
+                raise RuntimeError(
+                    f"Motor job {job_id} terminó en estado '{status}': "
+                    f"{job.get('error', '')}"
+                )
+
+        raise asyncio.TimeoutError(
+            f"Motor job {job_id} no completó en {timeout}s"
+        )
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        # Vencer el paso sin avisarle a LAS MANOS deja el job corriendo y
+        # cobrando (pipeline b8f80733, 2026-09-12: kimi siguió 3 min después
+        # del aborto). Dos caminos llegan acá: el wait_for de _run_step
+        # (CancelledError) y el deadline de este polling (TimeoutError).
+        await _cancel_motor_job(job_id)
+        raise
+
+
+async def _cancel_motor_job(job_id: str) -> None:
+    """Pide a LAS MANOS que corte el job. Lo mejor que se puede hacer, no
+    una condición: el paso ya venció y eso es lo que se reporta. Si el aviso
+    falla, queda en el log con el job_id -- nunca reemplaza la causa real.
+    409 = el job ya había terminado solo, no hay nada que cortar."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel")
+        if resp.status_code not in (200, 409):
+            logger.error(
+                "No se pudo cancelar el motor job %s tras vencer su paso: HTTP %s",
+                job_id, resp.status_code,
             )
-
-    raise asyncio.TimeoutError(
-        f"Motor job {job_id} no completó en {timeout}s"
-    )
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "No se pudo cancelar el motor job %s tras vencer su paso: %s -- "
+            "puede seguir corriendo y cobrando en LAS MANOS",
+            job_id, exc,
+        )
 
 
 # ----------------------------------------------------------------

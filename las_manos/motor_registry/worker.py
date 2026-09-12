@@ -618,6 +618,14 @@ async def run(
             await _report_usage("failed")
             return
 
+        # Una llamada nunca puede pasarse del presupuesto del job: con 600 s
+        # fijos de motor.default_timeout_seconds, una sola llamada de kimi
+        # podía durar más que el paso entero de Jacobs (pipeline b8f80733,
+        # 2026-09-12). El chequeo de arriba garantiza que queda algo (> 0).
+        call_timeout = float(motor_entry.default_timeout_seconds)
+        if loop_deadline is not None:
+            call_timeout = min(call_timeout, loop_deadline - time.time())
+
         # --- un turno: dispatch HTTP + watcher de kill switch en paralelo ---
         api_task = asyncio.create_task(
             call_fn(
@@ -625,7 +633,7 @@ async def run(
                 model=motor_entry.model,
                 api_key=api_key,
                 messages=messages,
-                timeout=float(motor_entry.default_timeout_seconds),
+                timeout=call_timeout,
                 max_tokens=motor_entry.max_tokens,
                 tools=tools_for_call,
                 reasoning_effort=reasoning_effort,
@@ -736,6 +744,27 @@ async def run(
             validation = validate(content, output_schema)
             if not output_schema or validation["validated"] or validation["skipped"]:
                 break
+            if finish_reason == "length":
+                # Cortada por tokens, no mal formateada: el reintento repite
+                # la misma llamada con el mismo techo y se corta igual, al
+                # doble de costo (b8f80733: 7232 de 8000 tokens razonando).
+                # Lo que lo arregla es subir motor.max_tokens -- decirlo.
+                reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+                store.update(
+                    job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                    error=(
+                        f"Salida cortada por max_tokens ({motor_entry.max_tokens}): "
+                        f"{usage.get('completion_tokens', '?')} tokens de salida, "
+                        f"{reasoning_tokens if reasoning_tokens is not None else '?'} en razonamiento. "
+                        f"No se reintenta: se cortaría igual. Subir motor.max_tokens de '{motor}'."
+                    ),
+                    _finish_reason=finish_reason, _usage=usage,
+                    _tool_loop_iterations=iteration, _tool_loop_history=tool_loop_history,
+                    _files_written=files_written, _validation_warning=validation.get("warning"),
+                )
+                await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="salida cortada por max_tokens")
+                await _report_usage("failed")
+                return
             if validation_retried:
                 store.update(
                     job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
@@ -929,6 +958,16 @@ async def run(
         logger.warning("Validación output job %s: %s", job_id, validation["warning"])
 
     result_summary = content[:200] if content else "(sin contenido)"
+
+    # Si el caller canceló mientras la respuesta venía en camino, lo que ya
+    # nadie espera no reaparece como `completed` -- fue lo que pasó con la
+    # salida de kimi en b8f80733: terminó después del aborto y quedó como
+    # un resultado que nadie leyó. El costo sí se registra: se gastó.
+    current = store.get(job_id)
+    if current is not None and getattr(current.status, "value", current.status) == JobStatus.CANCELLED.value:
+        logger.warning("job %s: respuesta llegó después de la cancelación -- se descarta", job_id)
+        await _report_usage("cancelled")
+        return
 
     store.update(
         job_id,
