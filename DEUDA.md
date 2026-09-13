@@ -273,9 +273,43 @@ su fecha de última verificación real, no una nueva.
   `/etc/jax/.env.backup-pre-trusted-proxies-20260912-152810`); sin Cloudflare en
   el camino (DNS directo, sin `cf-ray`, medido). **En vivo por la URL pública:**
   20 × 401 y después `429 retry-after: 56`; un control directo a `:8080` (otro
-  peer) siguió en 401. Chequeo 1,75 µs/request. **No verificado:** varios
-  workers de uvicorn (hoy uno); un atacante con >20.000 IPs expulsa claves del
-  LRU (tampoco lo frena el límite por IP).
+  peer) siguió en 401. Chequeo 1,75 µs/request.
+  **Residuos CERRADOS el mismo día ("termina el login", jax-platform#60).**
+  Medidos antes de tocar código, varios más graves que lo que decía este ítem:
+  (1) bcrypt 5.0.0 LANZA `ValueError` con > 72 bytes (antes truncaba): login y
+  reset daban 500, y una cuenta con contraseña larga fijada con el bcrypt viejo
+  no podía entrar → `verify_password` trunca a 72 (semántica vieja exacta),
+  reset rechaza > 72 con código; (2) **forgot-password enumeraba cuentas por
+  tiempo** (real: DELETE + INSERT + SMTP síncrono hasta 10 s en el event loop;
+  inexistente: instantáneo) — la misma propiedad que cerró #57, por otra
+  puerta → el request no consulta nada, todo va en segundo plano
+  (`add_safe_task`, SMTP en hilo, al email guardado); (3) forgot-password sin
+  límite → comparte el del login y guarda la IP real, no la del proxy; (4)
+  `email` sin tope con nginx a 50 MB → claves del LRU del tamaño que elija el
+  atacante → `max_length=254`; (5) uvicorn 0.51 toma `--workers` de
+  `WEB_CONCURRENCY` → `exigir_un_solo_proceso` al importar, probado levantando
+  uvicorn con `WEB_CONCURRENCY=2`: los workers mueren con `RuntimeError`, el
+  puerto nunca responde (el padre queda relanzándolos: systemd lo vería
+  "active" — el aviso es el journal y el health check); (6) reset mostraba el
+  `detail` crudo → códigos + i18n; (7) **ningún job de CI corría vitest** →
+  job `frontend-tests`. **Declarado sin arreglo en la app:** un DDoS de >
+  20.000 IPs se frena en el borde; el LRU por email no se vacía con IPs (son
+  instancias separadas) y una clave atacada no se expulsa (cada intento la
+  refresca). **DESPLEGADO y verificado en vivo** (jax-platform#60 → `ebf70cc`,
+  canario de `frontend-tests` visto en rojo por el motivo inyectado sobre
+  `99854c9` y revertido; `jax-platform` reiniciado 19:20:54, un proceso, sin
+  hijos): login con contraseña de 100 bytes → 401 genérico en 0,155 s (antes
+  500); forgot-password inexistente → 200 en 1 ms; email de 300 caracteres →
+  422; journal 0 errores. Frontend `index-Bv42891O.js` servido por
+  `axioma-ia.io` (backup `axioma-ia.io.backup-pre-login-residuos-20260912-192129`,
+  idéntico por `diff -rq`). **Carga** (`jax/scripts/load_test.py`, que cuenta
+  4xx como respuesta y solo 5xx como error): 2.400 peticiones a login y
+  forgot-password con c=10 y c=50, **0 5xx**, p95 ≤ 18 ms a c=50 — son casi
+  todas 429 del limitador desde una IP. El costo de bcrypt, medido aparte con
+  25 logins secuenciales de emails distintos (el balde por email es de 300 s:
+  repetir la carga con el mismo email mide solo el 429): **20 × 401 de 0,160 s
+  de media (máx. 0,196 s) y después 5 × 429 en < 1 ms**, health 200. Es el
+  diseño: una IP paga como mucho 20 bcrypt por minuto.
 
   Texto original: **ABIERTO, 2026-09-12.** Desde jax-platform#57 cualquier email
   costaba un bcrypt de ~155 ms (c=5 → 32 rps) sin ningún limitador.
