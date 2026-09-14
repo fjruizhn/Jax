@@ -99,9 +99,15 @@ su fecha de última verificación real, no una nueva.
   (2026-09-14, decisión de Fernando: la lista permitida sale del catálogo `model`),
   PENDIENTE de desplegar y verificar.** Verificado con el código de la rama contra la DB
   real: las 7 facetas con su modelo dentro de la lista, hipatia respondió, jekyll acepta
-  el modo pesado, y la consulta nueva usa `uk_provider_model`. Texto original:
-  medido 2026-09-14. `main()`
-  (`jax/core/main.py:482-484`) pisa `model_default` con el modelo de
+  el modo pesado, y la consulta nueva usa `uk_provider_model`. La revisión de
+  jax#153 pidió tomar el proveedor del MODELO ASIGNADO (JOIN por `model_ref`) y no de
+  `facet_binding.provider_id`, que el endpoint de aprobación puede dejar desalineado.
+  **Anotado aparte:** los workers de memoria (`jax/memory/worker.py`,
+  `synthesis_worker.py`) arman sus músculos con `deepseek-v4-flash` y una lista fija;
+  hoy coinciden, pero sufren el mismo bug el día que cambie el modelo.
+
+  Texto original (medido 2026-09-14): `main()` (en `jax/core/main.py`, antes del
+  arreglo) pisa `model_default` con el modelo de
   `facet_binding`, pero `models_allowed` sigue siendo el de `config.toml`, y
   ninguno de los modelos vigentes está en su lista: invocar cualquier faceta
   desde el REPL da `ModelNotAllowedError` antes de llamar al proveedor.

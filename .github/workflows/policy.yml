@@ -599,8 +599,11 @@ jobs:
           # 135 -> 141 el 2026-09-14: test_repl_modelos_permitidos.py (+6) -- el REPL
           #   toma modelo Y lista permitida del catalogo de la DB (estaba roto en las
           #   7 facetas: la lista del TOML rechazaba el modelo vigente). Visto en rojo.
-          grep -qE "^141 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 141 tests CORRIDOS."; exit 1; }
+          # 141 -> 143 el mismo dia, por la revision de jax#153: cargar_registro toma
+          #   el proveedor del modelo asignado (JOIN por model_ref) y una faceta sin
+          #   filas en el catalogo queda con su asignado. Visto en rojo antes.
+          grep -qE "^143 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 143 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

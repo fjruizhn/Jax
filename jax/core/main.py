@@ -480,7 +480,10 @@ async def main() -> None:
     try:
         registry = await cargar_registro()
     except Exception as exc:
-        logging.warning(f"No se pudo cargar el registro de facetas desde DB, usando config.toml: {exc}")
+        logging.warning(
+            "No se pudo cargar el registro de facetas desde la DB: se usan el modelo Y la "
+            f"lista de config.toml, posiblemente desactualizados. Causa: {exc}"
+        )
         registry = {}
     aplicar_registro(cfg, registry)
 
