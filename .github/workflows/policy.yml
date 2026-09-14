@@ -586,8 +586,11 @@ jobs:
           #   de Google grounding que llevan al MISMO documento quedan como una sola
           #   fuente con las citas de las dos (pipeline 04e02b09); las no resueltas
           #   no se fusionan. Visto en rojo antes del arreglo.
-          grep -qE "^129 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 129 tests CORRIDOS."; exit 1; }
+          # 129 -> 131 el mismo dia, por la revision del PR: una redireccion que
+          #   llega al documento de una fuente directa se fusiona con ella, y una
+          #   no resuelta conserva su lugar entre resueltas. Validados por mutacion.
+          grep -qE "^131 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 131 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

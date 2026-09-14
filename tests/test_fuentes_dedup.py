@@ -88,6 +88,31 @@ class FuentesDuplicadasTest(unittest.TestCase):
         self.assertEqual(len(sources), 2)
         self.assertEqual([s["resolved"] for s in sources], [False, False])
 
+    def test_una_redireccion_al_documento_de_una_fuente_directa_se_fusiona_con_ella(self):
+        # Una fuente que no es redirección queda con final_url = su propia URL
+        # (_resolve_one); una redirección que llega ahí es el mismo documento.
+        sources = [
+            {"title": "directa", "url": F1, "quotes": ["q1"]},
+            {"title": "redireccion", "url": R1, "quotes": ["q2"]},
+        ]
+        _resolver(sources, {R1: F1})
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["title"], "directa")
+        self.assertEqual(sources[0]["quotes"], ["q1", "q2"])
+
+    def test_una_no_resuelta_conserva_su_lugar_entre_resueltas(self):
+        # La no resuelta va PRIMERA a propósito: si la fusión la mandara al
+        # final (detrás de las resueltas), este orden lo delata.
+        sources = [
+            {"title": "sin_resolver", "url": R2, "quotes": ["q2"]},
+            {"title": "a", "url": R1, "quotes": ["q1"]},
+            {"title": "c", "url": R3, "quotes": ["q3"]},
+        ]
+        _resolver(sources, {R1: F1, R3: F1})
+        self.assertEqual([s["title"] for s in sources], ["sin_resolver", "a"])
+        self.assertFalse(sources[0]["resolved"])
+        self.assertEqual(sources[1]["quotes"], ["q1", "q3"])
+
     def test_el_bloque_renderizado_numera_sin_repetir_el_documento(self):
         sources = [
             {"title": "a", "url": R1, "quotes": ["q1"]},
