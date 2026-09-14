@@ -66,6 +66,12 @@ Visión: JAX es base y laboratorio de un producto comercial globalmente escalabl
 - `~/.claude/CLAUDE.md` — global para Hyde en cualquier proyecto
 - `~/jax-platform/CLAUDE.md` — específico de Axioma Platform
 - `~/jax/CLAUDE.md` — específico de JAX
+- **CORREGIDO 2026-09-14:** los dos de arriba ya NO están en disco. Salieron de HEAD
+  el 2026-08-21 (B1.4, `cb1ca3a` en jax-platform y `f6c8e7d` en jax) antes de abrir
+  los repos; se leen con `git -C ~/jax-platform show cb1ca3a^:CLAUDE.md` (y
+  `f6c8e7d^` en jax). Lo vigente del deploy del frontend: build → rsync a
+  `/tmp/axioma-deploy/` en la VM dev → `sudo rsync -a --delete --chown=www:www` a
+  `/www/wwwroot/axioma-ia.io/`, **con `--exclude .user.ini` en los dos saltos**.
 - System prompts de Jekyll, Thot y Kimi en `config/config.toml`
 
 Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/Light mode SIEMPRE** (CSS variables, nunca colores hardcodeados), **sin hardcoding de ningún tipo**, backup antes de modificar, verificar con evidencia antes de declarar éxito.

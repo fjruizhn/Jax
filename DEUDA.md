@@ -95,6 +95,39 @@ su fecha de última verificación real, no una nueva.
   El script no está en git (`/opt/backup-scripts/`): respaldos
   `backup-hall9000.sh.bak-20260911-comentario-lock` y `-prune-r2`.
 
+- **El REPL está roto para las 7 facetas — ABIERTO, medido 2026-09-14.** `main()`
+  (`jax/core/main.py:482-484`) pisa `model_default` con el modelo de
+  `facet_binding`, pero `models_allowed` sigue siendo el de `config.toml`, y
+  ninguno de los modelos vigentes está en su lista: invocar cualquier faceta
+  desde el REPL da `ModelNotAllowedError` antes de llamar al proveedor.
+
+  | Faceta | facet_binding | models_allowed del TOML |
+  |---|---|---|
+  | jax_local | qwen3.6:35b-a3b-q4_K_M | qwen3-coder:30b, qwen3:14b, qwen2.5:7b, llama3.2:3b |
+  | hyde | claude-opus-5 | sonnet, opus, haiku |
+  | jekyll | deepseek-flash | deepseek-v4-flash, deepseek-v4-pro |
+  | hipatia | gemini-3.8-flash | gemini-2.5-flash, gemini-2.5-pro |
+  | thot | gpt-5.6-terra | gpt-5.5, gpt-5.5-pro, gpt-5.4, gpt-5.4-mini, gpt-5.1-codex, gpt-4o |
+  | ada | glm-5.3 | glm-5.2 |
+  | kimi | kimi-k3 | kimi-k2.7-code, kimi-k2.6 |
+
+  **Evidencia:** la misma secuencia de `main()` en proceso (registry → build_muscles →
+  `hipatia.invoke`) lanzó `ModelNotAllowedError: [hipatia] modelo 'gemini-3.8-flash'
+  no permitido`. La Mesa web y Jacobs NO están afectados: resuelven por
+  `resolve_facet()` y no consultan `models_allowed`. Nadie lo vio porque el REPL no
+  tiene uso (0 turnos en 14 días, medido el 2026-09-03). Es el patrón de siempre:
+  una segunda fuente de verdad (`models_allowed` del TOML) que nadie mantiene.
+  **Qué falta:** decidir de dónde sale la lista permitida (¿el catálogo `model` de la
+  DB?) — no copiar el modelo vigente al TOML, que es el parche que lo reproduce.
+
+- **`invoked_by` es un campo de AUTORIZACIÓN en Jacobs, con un nombre de persona como
+  rol — ABIERTO, medido 2026-09-14.** `jacobs/routes.py:100` acepta solo
+  `{"Fernando", "jax_local", "ada"}` y `policy.validate_resume` exige `"Fernando"`;
+  jax-platform lo manda fijo (`PipelineModal.jsx` y `api/pipelines.py:161`). Cambiarlo
+  por el usuario autenticado rompería crear y reanudar pipelines, así que NO se tocó en
+  el lote 1 de la deuda sin fecha. Es contrato de autoridad (Principio IX): va con la
+  tanda del validador de gobernanza.
+
 - **El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3
   vació — verificado 2026-09-02.** **Causa:** el Bloque 3 movió las
   capabilities a la DB (`MotorCatalog.from_db()`), pero
@@ -2517,18 +2550,24 @@ retractaciones, que no se borran. Ninguno requiere acción.
     etapa 4 no puede reusarlo para devolver 503 si falta SMTP (spec §3.4). La
     etapa 4 tiene que llamar `smtp_config.cargar_settings()` y
     `_send_reset_email` (que SÍ lanza) por su cuenta.
-  - **`DeprecationWarning` de `datetime.utcnow()`** en `jax_engine/schemas.py` y
-    `state.py`: ruido preexistente en toda corrida de pytest. Lo reabre Python
-    3.15 o una limpieza de warnings.
+  - **`DeprecationWarning` de `datetime.utcnow()` — CERRADO Y DESPLEGADO 2026-09-14**
+    (jax#150 → `a996c07`; jax-platform#69 → `bfab4de`; `jax-platform` 12:38:07 y `jax-las-manos` 12:38:09, cwd = checkout con el commit, NRestarts=0, journal limpio; frontend `index-BK3OWw2W.js`, md5 local = servido). Eran 18 llamadas (16 de código, 2 de tests), no solo las de `jax_engine`.
+    `tiempo.utc_ahora()` devuelve UTC SIN zona: una hora con zona compararía contra
+    `expires_at`/`locked_until` (DATETIME sin zona) y lanzaría TypeError. Guard por AST
+    contra `utcnow`/`utcfromtimestamp`. Suite con DB: 417 → 159 avisos, 0 de utcnow.
+    En vivo: login 401 en 0,197 s, forgot-password 200, reset con token inventado 400.
+    Carga del login (2.400 peticiones, `scripts/load_test.py`): 0 errores, p95 2,69 ms
+    a c=10 y 13,86 ms a c=50. Texto original: ruido preexistente en `jax_engine`.
   - **test-connection devuelve el banner del servidor** remoto al superadmin:
     sirve como sondeo de puertos internos. Se acepta porque es solo superadmin y
     está limitado (`JAX_SMTP_CONN_RATE`). Lo reabre que el endpoint deje de ser
     exclusivo de superadmin.
-  - **La pantalla de Configuración traga los errores del PUT `/api/admin/config`**:
-    no hay texto para `config_clave_reservada` ni para
-    `config_collation_desconocida`, y quien intenta guardar una clave reservada
-    no ve por qué no se guardó. Es preexistente. Lo reabre el próximo cambio en
-    AdminSettings.
+  - **La pantalla de Configuración traga los errores del PUT `/api/admin/config` —
+    CERRADO Y DESPLEGADO 2026-09-14** (jax#150 → `a996c07`; jax-platform#69 → `bfab4de`; `jax-platform` 12:38:07 y `jax-las-manos` 12:38:09, cwd = checkout con el commit, NRestarts=0, journal limpio; frontend `index-BK3OWw2W.js`, md5 local = servido). Cada código con su texto (es/en), uno
+    desconocido cae en el genérico, la carga fallida se dice y deja Guardar
+    deshabilitado (antes mandaba `[]` y mostraba "Guardado"). `codigoDe()` compartido
+    en `src/api/errores.js`; `AlertaError.jsx` como único lugar del estilo del aviso.
+    Texto original: no había texto para esos códigos y quien guardaba no veía por qué.
   - **Contraste de textos secundarios en modo oscuro:** `text-slate-500` sobre el
     fondo oscuro mide 3,75:1, por debajo del AA de 4,5 (medido en AdminSmtp el
     2026-09-13). Es la convención de todas las pantallas. Arreglarlo es una
@@ -2622,26 +2661,34 @@ retractaciones, que no se borran. Ninguno requiere acción.
     `las_manos/grounding_sources.py`, igual que `facet_resolver`: el REPL no
     puede depender de `jacobs/` y LAS MANOS no importa `jax.*`. En vivo tras
     reiniciar `jax-las-manos` (15:29:13): 2 fuentes resueltas, 3 citas.
-  - **Las fuentes se deduplican por la redirección de Google, no por la URL
-    final.** Dos redirecciones distintas que resuelven al mismo documento salen
-    como dos fuentes (visto en vivo, pipeline `04e02b09`: `[1]` y `[2]` con la
-    misma URL). Menor: no esconde nada, repite. Se arregla deduplicando después
-    de `resolve_redirects` y fusionando las citas.
+  - **Las fuentes se deduplicaban por la redirección de Google, no por la URL
+    final — CERRADO Y DESPLEGADO 2026-09-14** (jax#150 → `a996c07`; jax-platform#69 → `bfab4de`; `jax-platform` 12:38:07 y `jax-las-manos` 12:38:09, cwd = checkout con el commit, NRestarts=0, journal limpio; frontend `index-BK3OWw2W.js`, md5 local = servido). `resolve_redirects` fusiona
+    las que llegan a la misma URL final (queda la primera, citas unidas en orden);
+    las no resueltas no se fusionan. 6 tests, cada uno validado por mutación. **En
+    vivo, por el camino de Jacobs** (`resolve_facet` + `_invoke_http_gemini`,
+    gemini-3.8-flash): 2 fuentes armadas, 2 en el resultado, 2 URLs finales únicas.
+    **Límite de esa evidencia:** esa respuesta no traía duplicados, así que prueba que
+    no hay regresión con datos reales, no la fusión en acción — eso lo prueban los
+    tests. Texto original: pipeline `04e02b09`, `[1]` y `[2]` con la misma URL.
   - **El frontend no tiene tema claro/oscuro en ninguna pantalla.** Medido: ni
     variables CSS en `src/index.css`, ni una clase `dark:`, ni `darkMode` en
     Tailwind; todo es `slate-*` y hex fijos. Incumple la política "Dark/Light
     mode — SIEMPRE" en toda la app, no en un componente. La cadena siguió las
     clases del modal; arreglarlo es una ronda propia de tokens de diseño.
-  - **vitest no corre en el CI de jax-platform.** 57 tests del frontend solo se
-    verifican a mano. Qué lo cierra: un job con piso exacto, como el backend.
+  - **vitest no corre en el CI de jax-platform — ya estaba CERRADO, el ítem estaba
+    vencido (medido 2026-09-14).** El job `frontend-tests` existe desde el 2026-09-12
+    (jax-platform#60, con canario visto en rojo) y hoy exige 125 tests exactos. Otra
+    instancia de §7: un ítem que describe un estado que ya no existe.
   - **Una cadena en modo `supervised` pide una aprobación por paso.**
     `supervised` corre UNA ola y pausa (`executor.py:966`); en paralelo eso era
     una sola pausa, en cadena son cinco. El botón "Aprobar" de `RightPanel`
     reanuda. **Decidido el mismo día por Fernando: la cadena va en
     `autonomous` por defecto** (jax-platform#55). `supervised` sigue
     disponible a mano, con su pausa por paso.
-  - **Aprobar en `RightPanel` traga el error.** `handleResume` solo hace
-    `console.error`: si `/resume` falla, en la interfaz no pasa nada.
+  - **Aprobar en `RightPanel` tragaba el error — CERRADO Y DESPLEGADO 2026-09-14** (jax#150 → `a996c07`; jax-platform#69 → `bfab4de`; `jax-platform` 12:38:07 y `jax-las-manos` 12:38:09, cwd = checkout con el commit, NRestarts=0, journal limpio; frontend `index-BK3OWw2W.js`, md5 local = servido).
+    Aprobar y Cancelar (mismo defecto) muestran su fallo, atado a su pipeline: no queda
+    sobre otro ni cuando el pipeline ya no espera aprobación. Texto original:
+    `handleResume` solo hacía `console.error`.
   - **Cancelar kimi corta nuestro lado, no necesariamente la facturación.**
     Kimi es cloud: cerrar la conexión no está verificado que detenga lo que
     Moonshot ya estaba generando (blueprint de Ricardo §11, mismo límite). Lo
@@ -2651,9 +2698,10 @@ retractaciones, que no se borran. Ninguno requiere acción.
     diagnóstico, no bloquea"), no tocada en esta ronda: el arreglo solo cubre
     el camino con schema. Se reabre si una salida cortada sin schema llega a
     un consumidor como si estuviera completa.
-  - **El nombre del pipeline lleva `Pipeline: ` fijo en `PipelineModal.jsx`**
-    (dato guardado, no texto de interfaz). Menor; se va con la próxima pasada
-    de i18n del modal.
+  - **El nombre del pipeline llevaba `Pipeline: ` fijo — CERRADO Y DESPLEGADO
+    2026-09-14** (jax#150 → `a996c07`; jax-platform#69 → `bfab4de`; `jax-platform` 12:38:07 y `jax-las-manos` 12:38:09, cwd = checkout con el commit, NRestarts=0, journal limpio; frontend `index-BK3OWw2W.js`, md5 local = servido). Sale de `t.pipelineName()`; el test usa un spy porque el texto
+    de es.js coincide con el prefijo viejo (verificado por mutación). `invoked_by`,
+    que está al lado, NO se tocó: es autorización (ver "Bloquea trabajo").
 
 - **El `JOIN` a `conversations` anula el indice vectorial HNSW de `messages` —
   CERRADO 2026-09-11 (jax#128), desplegado y verificado.** El arreglo candidato que
