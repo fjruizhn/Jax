@@ -103,6 +103,53 @@ Cada tarea las incluye implícitamente.
 
 ### Tarea 1: columna `capability.mode` (jax-platform, PR-A)
 
+> **ENMIENDA v3 (2026-09-14, spec v3 §0 y §3.1) — manda sobre el texto de esta tarea que la contradiga.**
+>
+> 1. **Tipo:** `mode VARCHAR(16) NOT NULL` + `CONSTRAINT chk_capability_mode CHECK (mode IN ('read_only','mutating'))`,
+>    sin default, en `CREATE_CAPABILITY`. En `_COLUMNS`: `ALTER TABLE capability ADD COLUMN mode VARCHAR(16) NULL`.
+>    Donde abajo dice `ENUM('read_only','mutating')`, va este tipo.
+> 2. **`_enforce_capability_mode_not_null` pasa a asegurar la forma completa**, idempotente, en este orden:
+>    (a) filas con `mode IS NULL` → `RuntimeError` con sus nombres (sin cambios); (b) si `COLUMN_TYPE` no es
+>    `varchar(16)` o `IS_NULLABLE = 'YES'` → `ALTER TABLE capability MODIFY COLUMN mode VARCHAR(16) NOT NULL`
+>    (convierte también el `ENUM` que ya está en producción, conservando los valores); (c) si en
+>    `information_schema.CHECK_CONSTRAINTS` no hay `chk_capability_mode` para `capability` →
+>    `ALTER TABLE capability ADD CONSTRAINT chk_capability_mode CHECK (mode IN ('read_only','mutating'))`
+>    (repetirlo da 1826, por eso se consulta antes). El nombre de la función puede cambiar a
+>    `_asegurar_forma_de_capability_mode`; se declara.
+> 3. **Tests** (`test_capability_mode.py`), además de adaptar la forma esperada a
+>    `("NO", None, "varchar(16)")` + el CHECK presente con su cláusula:
+>    - **Nunca `pytest.raises` dentro de `client.portal.call`:** la corrutina captura y DEVUELVE el error
+>      (código o excepción) y la aserción va afuera. `Failed` es `BaseException` y, dentro del portal de
+>      sesión, lo mata para el resto de la corrida (medido: 635 → 352 passed / 184 failed / 108 errors).
+>    - CONTROL del sin-default: `INSERT` sin `mode` → **1364**.
+>    - Test nuevo, CONTROL del CHECK: `INSERT` con `mode='escritura'` → **4025**.
+>    - Test nuevo, **el estado de producción de hoy:** la columna como `ENUM('read_only','mutating') NOT NULL`
+>      (sin CHECK) → `run_migrations()` la deja `varchar(16)`/`NO`, con el CHECK y los 17 valores intactos.
+>    - La base vieja (sin columna) y la fila huérfana siguen, con la aserción fuera del portal. Si
+>      `DROP COLUMN mode` choca con el CHECK, se quita el CHECK primero y se declara.
+>    - Los rojos esperados cambian donde corresponda (p. ej. la forma da `enum(...)` contra `varchar(16)` con
+>      el código a medio hacer): se anota el rojo VISTO con su razón.
+> 4. **Endurecer el arnés** (hallazgo de esta tarea; regla de Fernando: sin hallazgos diferidos). En
+>    `backend/tests/conftest.py`, el fixture `client` envuelve `c.portal.call` para que una excepción de
+>    `pytest.outcomes.OutcomeException` (o cualquier `BaseException` que no sea `KeyboardInterrupt`/
+>    `SystemExit`/`GeneratorExit`/cancelación) lanzada DENTRO de la función se capture adentro y se
+>    relance AFUERA del portal: el test falla como corresponde y el portal sigue vivo para el resto de la
+>    sesión. Test nuevo (`backend/tests/test_arnes_portal.py`, con `client`): un `pytest.fail` dentro de
+>    `client.portal.call` sale como `Failed` afuera, y la llamada siguiente al portal sigue funcionando.
+>    Rojo visto: sin el envoltorio, la segunda llamada da `RuntimeError: This portal is not running`.
+>    Mutación: sacar el envoltorio pone rojo ese test.
+> 5. **Mutaciones** además de las de abajo: (d) quitar el paso (c) del CHECK → cae el CONTROL 4025 y la
+>    forma; (e) quitar el paso (b) → cae el test del estado ENUM de producción.
+> 6. **Pisos:** los deltas cambian (+2 tests de migración y el del arnés): se sube el MEDIDO.
+> 7. Commit: `backend/db/migrations.py backend/tests/test_capability_mode.py backend/tests/test_arnes_portal.py
+>    backend/tests/conftest.py .github/workflows/policy.yml`; en el mensaje, una línea sobre el tipo v3 y otra
+>    sobre el arnés.
+> 8. **Efecto en otras tareas:** Tarea 2, el comentario de `CAPABILITY_MODES` dice "mismo conjunto que el
+>    CHECK de la columna" en vez de "mismo ENUM". Tarea 11, Paso 3: producción YA tiene la columna
+>    (`enum`, incidente del 2026-09-14): el respaldo se llama `capability-pre-v3` y la precondición es
+>    "17 filas, solo `file_write` mutating, 0 NULL"; Paso 4: la columna esperada es `NO`, `NULL`,
+>    `varchar(16)` y `chk_capability_mode` presente en `information_schema.CHECK_CONSTRAINTS`.
+
 **Archivos:**
 - Modificar: `backend/db/migrations.py`, en estos puntos: `CREATE_CAPABILITY` (~402-440); después de `_CAPABILITY_SEED` (~589-630); `_seed_motors_and_capabilities` (~653-712); `_seed_file_tools_capabilities` (~761-840); `_COLUMNS` (~1098-1266); `run_migrations` (~1625-1679).
 - Crear: `backend/tests/test_capability_mode.py`

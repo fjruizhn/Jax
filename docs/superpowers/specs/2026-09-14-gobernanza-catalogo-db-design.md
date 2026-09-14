@@ -10,7 +10,8 @@ gobernanza, API de pipelines).
 | Versión | Commit | Qué cambió |
 |---|---|---|
 | v1 | `0e44acd` | Diseño original: "solo el resolver", snapshot sin cambios. |
-| v2 | este commit | Enmienda. La planificación (plan `0c33478`, "Tarea 0") midió que con v1 el arreglo **no tenía efecto visible**: en la Mesa un claim sobre una capability de la DB nunca llega al resolver, porque la acreditación lo corta antes. Fernando (2026-09-14): *"Arréglalo completo, nada para más adelante"*. Se revierte la decisión "snapshot sin cambios", se agrega la columna `capability.mode` y el resolver pasa a verificar el modo también en el catálogo. Lo corregido se marca **CORREGIDO** o **REVERTIDA**; el texto de v1 queda a la vista donde importa. |
+| v3 | (commit de esta enmienda) | **CORREGIDO 2026-09-14 (tarde, Hyde, medido): el tipo de `capability.mode`.** §3.1 afirmaba que un `ENUM ... NOT NULL` sin default hace fallar un `INSERT` que omite el modo. Es FALSO en MariaDB 12.3.3: con `STRICT_TRANS_TABLES`, omitir una columna `ENUM NOT NULL` guarda en silencio el primer valor (`read_only`), justo el fail-open que el diseño quería evitar; lo medido en v2 fue el `sql_mode`, no el comportamiento del ENUM. Decisión de Fernando (2026-09-14): `VARCHAR(16) NOT NULL` + `CHECK (mode IN ('read_only','mutating'))`. Además, **incidente:** la columna ENUM ya quedó en producción por un script de verificación de la Tarea 1 que corrió contra `jax_memory`; Fernando decidió dejarla y registrarlo, y la migración la convierte. Ver §3.1. |
+| v2 | `b2bfa43` (rebasado: `a3bc03e`) | Enmienda. La planificación (plan `0c33478`, "Tarea 0") midió que con v1 el arreglo **no tenía efecto visible**: en la Mesa un claim sobre una capability de la DB nunca llega al resolver, porque la acreditación lo corta antes. Fernando (2026-09-14): *"Arréglalo completo, nada para más adelante"*. Se revierte la decisión "snapshot sin cambios", se agrega la columna `capability.mode` y el resolver pasa a verificar el modo también en el catálogo. Lo corregido se marca **CORREGIDO** o **REVERTIDA**; el texto de v1 queda a la vista donde importa. |
 
 ## 1. Por qué
 
@@ -79,6 +80,24 @@ Dos defectos de `DEUDA.md` ("Bloquea trabajo"):
 ## 3. Diseño
 
 ### 3.1 La columna `capability.mode` (jax-platform)
+
+> **v3 (2026-09-14, decisión de Fernando) — manda sobre el texto v2 de esta sección:**
+> - **Tipo:** `mode VARCHAR(16) NOT NULL` + `CONSTRAINT chk_capability_mode CHECK (mode IN ('read_only','mutating'))`,
+>   sin `DEFAULT`. Medido en MariaDB 12.3.3 con el `sql_mode` de producción (`jax_memory_test`, tabla
+>   descartable): omitir `mode` → **1364**; valor fuera del conjunto → **4025** (`CONSTRAINT
+>   chk_capability_mode failed`); `NULL` → **1048**. Con `ENUM ... NOT NULL` sin default, en cambio, omitirlo
+>   guardaba `read_only` sin error: la garantía "sin default, la base obliga a declararlo" era falsa con ENUM.
+> - **Tres estados de base que `run_migrations()` deja iguales**, idempotente:
+>   1. base nueva → `CREATE_CAPABILITY` ya trae la columna y el CHECK;
+>   2. base sin columna (CI, bases viejas) → `ADD COLUMN mode VARCHAR(16) NULL` (el CHECK admite NULL mientras
+>      se rellena), relleno desde `_CAPABILITY_MODE`, fila huérfana → `RuntimeError`, `MODIFY ... NOT NULL`;
+>   3. **base con la columna `ENUM` NOT NULL** (producción desde el incidente del 2026-09-14, ver §0) →
+>      `MODIFY COLUMN mode VARCHAR(16) NOT NULL`, que conserva los valores.
+>   En los tres, si no existe un CHECK llamado `chk_capability_mode` (se consulta
+>   `information_schema.CHECK_CONSTRAINTS`: repetirlo da 1826), se agrega.
+> - Los tests de CI fijan: forma `varchar(16)`/`NO`/sin default y el CHECK presente; omitir → 1364 (CONTROL
+>   del sin-default); valor inválido → 4025 (CONTROL del CHECK); los tres estados de base convergen.
+> - Donde el texto v2 de abajo dice `ENUM('read_only','mutating')`, léase el tipo v3.
 
 - **DDL.** `CREATE_CAPABILITY` gana `mode ENUM('read_only','mutating') NOT NULL`, **sin `DEFAULT`**.
 - **Semilla, una sola fuente.** Un dict `_CAPABILITY_MODE` en `migrations.py` con las 17 capabilities que
