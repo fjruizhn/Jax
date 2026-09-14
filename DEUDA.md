@@ -393,6 +393,19 @@ contraseña cifrada con Fernet, y se carga desde Admin → "Correo (SMTP)".
   - **SPF:** IP de salida de atemai medida = `38.7.24.147`; el SPF de axioma-ia.io
     (`v=spf1 a mx ip4:38.7.24.147 include:sendinblue.com ~all`) la lista → pass.
   - DMARC en `p=none`: los fallos no se rechazarían; subirlo es decisión aparte.
+- **Cabeceras del receptor — VERDAD OPERACIONAL, 2026-09-13 20:22 y 20:46 CST.** Dos
+  correos de prueba desde la ventanita de #68 a una bandeja de Gmail, con las cabeceras
+  crudas leídas con el conector de Gmail. En los dos:
+  `Authentication-Results: mx.google.com; dkim=pass header.i=@axioma-ia.io
+  header.s=default; spf=pass (google.com: domain of no-reply@axioma-ia.io designates
+  38.7.24.147 as permitted sender); dmarc=pass (p=NONE sp=NONE dis=NONE)
+  header.from=axioma-ia.io`. **Criterio de cierre del spec §3.1 cumplido**: con esto,
+  la verificación independiente de arriba queda confirmada por el receptor.
+  El de las 20:22 cayó en **spam** y el de las 20:46 llegó a la bandeja como importante,
+  con la misma autenticación: fue reputación inicial de un dominio remitente nuevo, no
+  la firma. **Lo reabre** que algún receptor de clientes lo mande a spam de forma
+  sostenida. Palancas conocidas, sin tomar: subir DMARC de `p=none` y un nombre de
+  remitente propio (hoy "System Administrator").
 - **Pedido de Fernando tras probarla en producción — jax-platform#68 (`48adfb7`,
   desplegado 2026-09-13 19:54 CST, `index-B4G6iYq-.js`):**
   - Al elegir cifrado, el puerto salta a su valor estándar (sin cifrado 25,
