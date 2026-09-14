@@ -481,10 +481,15 @@ jobs:
         # test_load_validation_context_usa_el_catalogo_que_recibe + su CONTROL
         # (+2) y la rama in_catalog verifica el modo (+2). El tripwire se vio en
         # rojo con el arreglo, como estaba previsto; los nuevos, antes.
+        #
+        # 83 -> 90 el 2026-09-14 (tanda A v2): sección catalog_capabilities en el
+        # snapshot (+7: sección, punteros de ops estables, canonical con dos
+        # secciones, citación VALID + su CONTROL, render, P10). Rojos vistos; los
+        # 2 que pasan antes son declarados y validados por mutación.
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tee /tmp/gov
-          grep -qE "^83 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 83 tests CORRIDOS."; exit 1; }
+          grep -qE "^90 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 90 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en

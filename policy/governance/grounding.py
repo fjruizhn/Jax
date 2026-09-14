@@ -9,8 +9,10 @@ el conjunto de hechos que el servidor inyecta en el prompt de la Mesa web
 (accredit) derivando authority y provenance_ref del lado del servidor.
 
 Invariante (spec §3): todo hecho inyectado tiene quién lo re-resuelva. Por
-eso el snapshot se genera desde ctx.ops (lo que resuelve
-_resolve_capability_available) y no desde una lista curada.
+eso el snapshot se genera desde las MISMAS fuentes que consulta
+_resolve_capability_available: ctx.ops (rama in_ops) y, desde la tanda A v2
+(2026-09-14), ctx.catalog con su modo (rama in_catalog). No desde una
+lista curada.
 
 Este módulo es PURO: sin I/O, sin red, testeable en aislamiento. La única
 fuente de datos es el ValidationContext que recibe. Si construir el
@@ -25,9 +27,17 @@ from dataclasses import dataclass
 from typing import Literal, Mapping
 
 # Sección del snapshot -> predicado que acredita. Crece SOLO cuando un
-# predicado gana resolver (spec §3): no agregar entradas acá sin resolver
-# en validator._RESOLVERS.
-SECTION_PREDICATE: dict[str, str] = {"capabilities": "CAPABILITY_AVAILABLE"}
+# predicado gana resolver (spec SP3 §3): no agregar entradas acá sin
+# resolver en validator._RESOLVERS.
+#   capabilities          -> `ops` de las_manos/config.toml (rama in_ops)
+#   catalog_capabilities  -> capability de la DB (rama in_catalog, que desde
+#                            la tanda A v2, 2026-09-14, verifica nombre Y modo)
+# Dos secciones y no una lista mezclada: los punteros /capabilities/N de las
+# ops no se mueven cuando la DB gana una capability (spec tanda A v2 §3.4).
+SECTION_PREDICATE: dict[str, str] = {
+    "capabilities": "CAPABILITY_AVAILABLE",
+    "catalog_capabilities": "CAPABILITY_AVAILABLE",
+}
 
 # Formato de evidence_pointer que el modelo puede citar. Estricto a
 # propósito: "/capabilities/-1", "capabilities/10", "/capabilities/abc" y
@@ -112,39 +122,51 @@ def _canonical(obj: object) -> str:
 
 
 def build_snapshot(ctx) -> Snapshot:
-    """Snapshot desde ctx.ops + ctx.mutating_capabilities. Orden por name
-    (spec §5.2): mismo contenido => mismo hash y mismos punteros, en
-    cualquier orden de archivo."""
+    """Snapshot desde ctx.ops + ctx.mutating_capabilities (sección
+    `capabilities`) y ctx.catalog (sección `catalog_capabilities`, con el
+    modo de capability.mode). Cada sección ordenada por name (spec SP3
+    §5.2): mismo contenido => mismo hash y mismos punteros, en cualquier
+    orden de archivo o de filas."""
     try:
-        ops = sorted(ctx.ops)
         mutating = ctx.mutating_capabilities
-        caps = [
-            normalize_args({"name": name, "mode": "mutating" if name in mutating else "read_only"})
-            for name in ops
-        ]
+        data = {
+            "capabilities": [
+                normalize_args({"name": name, "mode": "mutating" if name in mutating else "read_only"})
+                for name in sorted(ctx.ops)
+            ],
+            "catalog_capabilities": [
+                normalize_args({"name": e.name, "mode": e.mode})
+                for e in sorted(ctx.catalog.capabilities(), key=lambda e: e.name)
+            ],
+        }
     except Exception as e:
         raise GroundingBuildError(f"ValidationContext inutilizable: {type(e).__name__}: {e}") from e
 
-    data = {"capabilities": caps}
     canonical = _canonical(data)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
     entries = tuple(
-        SnapshotEntry(pointer=f"/capabilities/{i}", predicate=SECTION_PREDICATE["capabilities"], args=c)
-        for i, c in enumerate(caps)
+        SnapshotEntry(pointer=f"/{section}/{i}", predicate=SECTION_PREDICATE[section], args=c)
+        for section, lista in data.items()
+        for i, c in enumerate(lista)
     )
     return Snapshot(entries=entries, canonical_json=canonical, sha256=digest)
 
 
 def render(snapshot: Snapshot) -> str:
     """Bloque para el system prompt. NO incluye el hash (spec §5.1): el
-    modelo solo cita la línea; provenance_ref lo escribe el servidor."""
+    modelo solo cita la línea; provenance_ref lo escribe el servidor. Una
+    cabecera por sección, en el orden de SECTION_PREDICATE, aunque esté
+    vacía: cero entradas es una observación."""
     lines = [
         "HECHOS VERIFICADOS — leídos del sistema por el servidor. "
         "Para afirmar uno, poné su evidence_pointer en el claim.",
-        "  capabilities:",
     ]
-    for e in snapshot.entries:
-        lines.append(f"    {e.pointer}: " + ", ".join(f"{k}={v}" for k, v in e.args.items()))
+    for section in SECTION_PREDICATE:
+        lines.append(f"  {section}:")
+        prefix = f"/{section}/"
+        for e in snapshot.entries:
+            if e.pointer.startswith(prefix):
+                lines.append(f"    {e.pointer}: " + ", ".join(f"{k}={v}" for k, v in e.args.items()))
     return "\n".join(lines)
 
 
@@ -182,10 +204,11 @@ def accredit(raw_claim: Mapping[str, object], grounding: Snapshot | SnapshotErro
         # FACT_NOT_IN_SNAPSHOT (no se le puede dar el beneficio de la duda).
         #
         # La búsqueda es determinista: primera coincidencia en el orden de
-        # grounding.entries. Hoy build_snapshot() no puede producir dos
-        # entradas con args idénticos -- itera sorted(ctx.ops), ops es un
-        # frozenset (nombres únicos), y el nombre es parte de los args de
-        # cada entrada -- así que el orden es irrelevante en producción.
+        # grounding.entries.
+        # Hoy build_snapshot() no puede producir dos entradas con args idénticos:
+        # cada sección tiene nombres únicos (ops es un frozenset, capability.key es
+        # PK), y entre secciones un mismo nombre es SOURCE_CONFLICT, vigilado por el
+        # tripwire ops∩DB de jax-platform (test_catalogo_db_en_la_mesa.py).
         # Se deja fijo igual para que un Snapshot armado a mano con
         # duplicados (p.ej. en un test) no dependa del azar de iteración.
         fact_entry: SnapshotEntry | None = None
