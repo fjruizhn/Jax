@@ -473,15 +473,19 @@ async def main() -> None:
     # servicio 24/7 — no justifica resolucion por-request como Jacobs/Mesa
     # web). Si la DB no responde al boot, cfg["personalities"] ya trae el
     # model_default de config.toml como fallback — no se rompe el arranque.
-    from jax.core.facet_resolver import load_facet_registry
+    # 2026-09-14: el modelo Y su lista permitida salen de la DB (antes solo el
+    # modelo, y la lista vieja del TOML lo rechazaba: REPL roto en las 7
+    # facetas). Ver jax/core/registro_facetas.py.
+    from jax.core.registro_facetas import aplicar_registro, cargar_registro
     try:
-        registry = await load_facet_registry()
+        registry = await cargar_registro()
     except Exception as exc:
-        logging.warning(f"No se pudo cargar facet_registry desde DB, usando config.toml: {exc}")
+        logging.warning(
+            "No se pudo cargar el registro de facetas desde la DB: se usan el modelo Y la "
+            f"lista de config.toml, posiblemente desactualizados. Causa: {exc}"
+        )
         registry = {}
-    for key, info in registry.items():
-        if key in cfg["personalities"]:
-            cfg["personalities"][key]["model_default"] = info["model"]
+    aplicar_registro(cfg, registry)
 
     if registry:
         import jax.core.router as router_module

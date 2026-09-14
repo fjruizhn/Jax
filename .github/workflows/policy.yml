@@ -521,7 +521,7 @@ jobs:
           tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py
           tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py
           tests/test_repl_fuentes.py tests/test_memory_embedding_config.py
-          tests/test_fuentes_dedup.py
+          tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -539,7 +539,7 @@ jobs:
             tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py \
             tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py \
             tests/test_repl_fuentes.py tests/test_memory_embedding_config.py \
-            tests/test_fuentes_dedup.py \
+            tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -596,8 +596,14 @@ jobs:
           # 133 -> 135 el mismo dia, por la revision de jax#152: una respuesta con
           #   tool_calls cortada falla sin ejecutar herramientas, y con max_tokens=0
           #   el error no dice "subir max_tokens (0)". Vistos en rojo antes.
-          grep -qE "^135 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 135 tests CORRIDOS."; exit 1; }
+          # 135 -> 141 el 2026-09-14: test_repl_modelos_permitidos.py (+6) -- el REPL
+          #   toma modelo Y lista permitida del catalogo de la DB (estaba roto en las
+          #   7 facetas: la lista del TOML rechazaba el modelo vigente). Visto en rojo.
+          # 141 -> 143 el mismo dia, por la revision de jax#153: cargar_registro toma
+          #   el proveedor del modelo asignado (JOIN por model_ref) y una faceta sin
+          #   filas en el catalogo queda con su asignado. Visto en rojo antes.
+          grep -qE "^143 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 143 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
