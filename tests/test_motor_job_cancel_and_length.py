@@ -151,6 +151,92 @@ class CorteDeTokensTest(_Base):
         assert "max_tokens" in (state["error"] or ""), state["error"]
         assert "7232" in state["error"], "el error debe decir cuánto se fue en razonamiento"
 
+    async def test_corte_por_length_sin_schema_falla_no_sale_como_completo(self):
+        """Decisión de Fernando, 2026-09-14 (DEUDA.md, anotados b8f80733):
+        una salida cortada por tokens SIN schema quedaba `completed` desde el
+        2026-08-10 ("el dato queda para diagnóstico"), y el paso siguiente la
+        usaba sin saber que le faltaba el final -- fail-open (P10). Ahora falla
+        igual que el caso con schema: sin reintento, diciendo qué subir."""
+        calls = []
+
+        async def fake_call(**kwargs):
+            calls.append(kwargs)
+            return _response(
+                "El módulo de ventas registra cada factura y luego",
+                finish_reason="length",
+                usage={"prompt_tokens": 400, "completion_tokens": 8000,
+                       "completion_tokens_details": {"reasoning_tokens": 6100}},
+            )
+
+        job_id = self._new_job("implementation")
+        await self._run(job_id, "implementation", fake_call)
+
+        state = self._state(job_id)
+        assert len(calls) == 1, f"reintentó una salida cortada por tokens: {len(calls)} llamadas"
+        assert state["status"] == JobStatus.FAILED.value, state
+        assert "max_tokens" in (state["error"] or ""), state["error"]
+        assert "6100" in state["error"], "el error debe decir cuánto se fue en razonamiento"
+
+    async def test_corte_por_length_con_tool_calls_falla_sin_ejecutar_herramientas(self):
+        """Hueco hermano, encontrado por la revisión de jax#152: si la respuesta
+        cortada trae tool_calls, el chequeo de corte no corría y se ejecutaban
+        herramientas con argumentos posiblemente truncados -- un write_file
+        completo podía escribir antes de que llegara el siguiente, roto. Misma
+        propiedad (P10), así que entra en el mismo arreglo."""
+        calls = []
+
+        async def fake_call(**kwargs):
+            calls.append(kwargs)
+            return {
+                "choices": [{
+                    "message": {"content": "", "tool_calls": [{
+                        "id": "t1", "type": "function",
+                        "function": {"name": "write_file", "arguments": '{"path": "a.txt", "content": "hola mu'},
+                    }]},
+                    "finish_reason": "length",
+                }],
+                "usage": {"prompt_tokens": 300, "completion_tokens": 8000},
+            }
+
+        ejecutar = AsyncMock()
+        job_id = self._new_job("implementation")
+        with patch.object(worker, "authorize_and_execute_tool_call", ejecutar):
+            await self._run(job_id, "implementation", fake_call)
+
+        state = self._state(job_id)
+        assert len(calls) == 1, f"volvió a llamar al modelo: {len(calls)} llamadas"
+        assert ejecutar.await_count == 0, "ejecutó una herramienta con argumentos de una salida cortada"
+        assert state["status"] == JobStatus.FAILED.value, state
+        assert "max_tokens" in (state["error"] or ""), state["error"]
+
+    async def test_corte_con_motor_sin_max_tokens_no_dice_subir_cero(self):
+        """Con max_tokens=0 el payload no lleva el campo y el corte viene del
+        límite del proveedor o del contexto: "Subir motor.max_tokens (0)" no
+        orienta a nadie. Revisión de jax#152."""
+        cfg = {**_CFG, "motors": {"kimi": {**_CFG["motors"]["kimi"], "max_tokens": 0}}}
+        self.catalog = MotorCatalog(cfg)
+
+        async def fake_call(**kwargs):
+            return _response("texto que se corta a mit", finish_reason="length")
+
+        job_id = self._new_job("implementation")
+        await self._run(job_id, "implementation", fake_call)
+
+        state = self._state(job_id)
+        assert state["status"] == JobStatus.FAILED.value, state
+        assert "no declara max_tokens" in (state["error"] or ""), state["error"]
+        assert "max_tokens (0)" not in state["error"], state["error"]
+
+    async def test_sin_schema_y_sin_corte_sigue_completando(self):
+        """Control: sin schema y con finish_reason=stop, el job se completa
+        como siempre. El arreglo no puede tocar el caso normal."""
+        async def fake_call(**kwargs):
+            return _response("respuesta completa", finish_reason="stop")
+
+        job_id = self._new_job("implementation")
+        await self._run(job_id, "implementation", fake_call)
+        assert self._state(job_id)["status"] == JobStatus.COMPLETED.value
+
     async def test_schema_invalido_sin_corte_sigue_reintentando_una_vez(self):
         """Control: el reintento de schema sigue existiendo para lo que sí
         arregla -- una respuesta completa que no respetó el formato."""

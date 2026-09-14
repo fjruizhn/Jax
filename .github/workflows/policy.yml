@@ -589,8 +589,15 @@ jobs:
           # 129 -> 131 el mismo dia, por la revision del PR: una redireccion que
           #   llega al documento de una fuente directa se fusiona con ella, y una
           #   no resuelta conserva su lugar entre resueltas. Validados por mutacion.
-          grep -qE "^131 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 131 tests CORRIDOS."; exit 1; }
+          # 131 -> 133 el 2026-09-14: test_motor_job_cancel_and_length.py (+2) --
+          #   una salida cortada por max_tokens falla tambien SIN schema (decision de
+          #   Fernando: pasarla por completa es fail-open), y el control sin corte
+          #   sigue completando. Visto en rojo antes del arreglo.
+          # 133 -> 135 el mismo dia, por la revision de jax#152: una respuesta con
+          #   tool_calls cortada falla sin ejecutar herramientas, y con max_tokens=0
+          #   el error no dice "subir max_tokens (0)". Vistos en rojo antes.
+          grep -qE "^135 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 135 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

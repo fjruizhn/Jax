@@ -728,6 +728,36 @@ async def run(
                 "content=%d chars, usage=%s",
                 job_id, iteration, len(content), usage,
             )
+            # Salida cortada por tokens: falla SIEMPRE, antes de mirar
+            # tool_calls o schema (2026-09-14, decisión de Fernando + revisión
+            # de jax#152). Sin schema, con uno que acepta texto libre, o con
+            # tool_calls, una salida cortada se daba por buena o se ejecutaban
+            # herramientas con argumentos truncados (P10). No se reintenta: con
+            # el mismo techo se corta igual (b8f80733: 7232 de 8000 razonando).
+            reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
+            if motor_entry.max_tokens:
+                causa = f"Salida cortada por max_tokens ({motor_entry.max_tokens}): "
+                remedio = f"Subir motor.max_tokens de '{motor}'."
+            else:
+                # max_tokens=0: el payload no lleva el campo; el corte vino del
+                # límite del proveedor o del contexto.
+                causa = "Salida cortada por el límite del proveedor o del contexto (el motor no declara max_tokens): "
+                remedio = f"Declarar motor.max_tokens de '{motor}'."
+            store.update(
+                job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
+                error=(
+                    causa
+                    + f"{usage.get('completion_tokens', '?')} tokens de salida, "
+                    + f"{reasoning_tokens if reasoning_tokens is not None else '?'} en razonamiento. "
+                    + "No se reintenta: se cortaría igual. " + remedio
+                ),
+                _finish_reason=finish_reason, _usage=usage,
+                _tool_loop_iterations=iteration, _tool_loop_history=tool_loop_history,
+                _files_written=files_written,
+            )
+            await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="salida cortada por max_tokens")
+            await _report_usage("failed")
+            return
 
         if not tool_calls:
             # T2 (2026-08-19): antes, un content que no parseaba como JSON
@@ -744,27 +774,6 @@ async def run(
             validation = validate(content, output_schema)
             if not output_schema or validation["validated"] or validation["skipped"]:
                 break
-            if finish_reason == "length":
-                # Cortada por tokens, no mal formateada: el reintento repite
-                # la misma llamada con el mismo techo y se corta igual, al
-                # doble de costo (b8f80733: 7232 de 8000 tokens razonando).
-                # Lo que lo arregla es subir motor.max_tokens -- decirlo.
-                reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
-                store.update(
-                    job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
-                    error=(
-                        f"Salida cortada por max_tokens ({motor_entry.max_tokens}): "
-                        f"{usage.get('completion_tokens', '?')} tokens de salida, "
-                        f"{reasoning_tokens if reasoning_tokens is not None else '?'} en razonamiento. "
-                        f"No se reintenta: se cortaría igual. Subir motor.max_tokens de '{motor}'."
-                    ),
-                    _finish_reason=finish_reason, _usage=usage,
-                    _tool_loop_iterations=iteration, _tool_loop_history=tool_loop_history,
-                    _files_written=files_written, _validation_warning=validation.get("warning"),
-                )
-                await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="salida cortada por max_tokens")
-                await _report_usage("failed")
-                return
             if validation_retried:
                 store.update(
                     job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
