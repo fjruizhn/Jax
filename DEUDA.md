@@ -374,6 +374,57 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado — admin usuarios etapa 2: sesiones con token_version en jax-platform (2026-09-14)
+
+**VERDAD OPERACIONAL 2026-09-14 15:00 CST.** jax-platform#70 (`3d90f58`), plan
+`docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-2-sesiones.md`, spec §3.2. Antes, un
+token seguía valiendo hasta vencer aunque el usuario fuera degradado, desactivado o borrado: el
+rol salía del token. Ahora `jax_users.token_version` (NOT NULL DEFAULT 0) viaja como `tv` en
+access y refresh (sin `tv` cuenta como 0), y **cada request autenticado, `/api/auth/refresh` y el
+handshake del WebSocket** leen por PRIMARY KEY estado, rol, versión y email: si el usuario no
+existe, no está activo o la versión cambió → el mismo 401; el rol vale el de la base. Fail-closed:
+si la base falla, se niega (y en el WS queda en el log). El frontend dice por qué se cerró la
+sesión (`sesion_invalida` / `sesion_expirada`, es/en). Sin caché de entrada (spec §3.2: sin
+medición no hay caché; la medición no lo pide).
+
+- **Hallazgos de la revisión final (arreglados antes del merge):** el interceptor del frontend
+  también actuaba sobre los 401 de `/auth/login` y `/auth/refresh`, así que a cualquier visitante
+  sin sesión le decía "tu sesión venció", cada contraseña equivocada mostraba dos cajas rojas y
+  cada carga pedía `/auth/refresh` dos veces. Los tests no lo veían porque probaban el interceptor
+  aislado y el Login con el store simulado → test de integración real del interceptor con el
+  store. También: un `TimeoutError` fuera del mensaje de auth del WS se cerraba 4001 sin log, y
+  `/api/auth/me` hacía dos consultas por PK (ahora una). **Lección:** un interceptor global de 401
+  tiene que excluir los endpoints cuyo 401 es la respuesta normal (login, refresh, logout).
+- **Carga antes del merge** (el plan la dejaba solo para producción): la app real con lifespan
+  mínimo (solo el pool, sin canario de facetas ni workers) contra `jax_memory_test`, base
+  `bfab4de` contra la rama, `/api/auth/me`, 0 errores: p95 0,45 → 0,41 ms (c=1), 2,65 → 2,23 ms
+  (c=10), 18,13 → 17,61 ms (c=50).
+- **Despliegue:** respaldo `/home/fruiz/backups/jax_users-pre-admin-usuarios-2-20260914-145504.sql`
+  con **restauración probada** (`jax_user` no puede crear bases → restaurado en `jax_memory_test`
+  con tabla y constraint renombradas: 2 filas y MD5 de contenido idénticos a producción, tabla de
+  prueba borrada). `jax-platform` reiniciado 14:58:53 (migración aplicada, los 2 usuarios en 0,
+  health 200, sin tracebacks). Frontend `index-DQg7ifzD.js` en `axioma-ia.io` (respaldo
+  `axioma-ia.io.backup-pre-admin-usuarios-2-20260914-145912`, idéntico por `diff -rq`).
+- **EXPLAIN en producción** de `SELECT status, role, token_version, email FROM jax_users WHERE
+  user_id = %s`: `type=const`, `key=PRIMARY`, `rows=1`, sin filesort ni temporary.
+- **En vivo (§5):** usuario de prueba superadmin → `/api/admin/users` 200; degradado a operator →
+  403 con el mismo token; desactivado → `/api/auth/me` 401; baja 200 y 0 filas después.
+- **Carga en producción** (`jax/scripts/load_test.py`, `/api/auth/me`, 0 errores en todas):
+
+  | c | peticiones | rps antes → después | p50 ms | p95 ms antes → después | p99 ms antes → después |
+  |---|---|---|---|---|---|
+  | 1 | 200 | 2.563 → 2.263 | 0,33 → 0,37 | 0,53 → 0,57 | 0,76 → 0,78 |
+  | 10 | 500 | 3.930 → 4.135 | 2,39 → 2,18 | 2,73 → 2,73 | 8,27 → 8,41 |
+  | 50 | 1.000 | 4.368 → 5.141 | 10,64 → 9,18 | 15,81 → 11,37 | 18,00 → 13,65 |
+
+  Línea base 13:28 CST (`bfab4de`), después 14:59 CST (`3d90f58`). Sin degradación: la consulta
+  por PK no se ve dentro de la varianza.
+- **Pasa a la etapa 3 (plan enmendado en #70):** los WebSocket ya abiertos no se cortan al
+  degradar o desactivar (se verifica en el handshake); el corte va donde nace el incremento de
+  `token_version` (`update_user`, `revoke_sessions`, `delete_user`), después del commit. En la
+  etapa 2 nadie incrementa la versión todavía. `tenant_id` sigue saliendo del token (un solo
+  tenant; aceptado por el spec).
+
 ## Cerrado — admin usuarios etapa 1: correo saliente (SMTP) desde Admin (2026-09-13)
 
 jax-platform#67 (`ddd2bc8`), plan `docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-1-smtp.md`,
