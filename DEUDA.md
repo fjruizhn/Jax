@@ -381,8 +381,18 @@ contraseña cifrada con Fernet, y se carga desde Admin → "Correo (SMTP)".
   `index-DE6FPDVA.js` servido en axioma-ia.io; "Probar conexión" contra
   `mail.axioma-ia.io:587` STARTTLS: VERDE (Fernando, en la pantalla, 2026-09-13 ~18:30); `smtp.password` en la
   base empieza con `gAAAAA`.
-- **Correo real (con permiso de Fernando):** `Authentication-Results`:
-  **PENDIENTE** — el correo llegó (Fernando, 2026-09-13), falta la línea para cerrar. Cierre exige `dkim=pass` y `spf=pass`.
+- **Correo real (con permiso de Fernando) — VERDAD OPERACIONAL, 2026-09-13:** cinco
+  envíos del sistema (`no-reply@axioma-ia.io` → `fernando.ruiz@rich-hn.com`, colas
+  `B44755630D1` 18:50, `47D05562F46`/`9EE5F562F46` 19:21, `8AA20560572` 19:46,
+  `44BBB562F46` 19:47), todos `status=sent` a `mail.rich-hn.com`. **No hay línea
+  `Authentication-Results` del receptor** (no tengo acceso a ese buzón); el cierre se
+  hizo con verificación independiente, dicho así y no disfrazado de esa línea:
+  - **DKIM:** rspamd registra `DKIM_SIGNED{axioma-ia.io:s=default}` en las cinco colas;
+    una firma del mismo camino (rspamd, `d=axioma-ia.io`, `s=default`) verificada contra
+    la llave pública en DNS con dkimpy → **PASS**.
+  - **SPF:** IP de salida de atemai medida = `38.7.24.147`; el SPF de axioma-ia.io
+    (`v=spf1 a mx ip4:38.7.24.147 include:sendinblue.com ~all`) la lista → pass.
+  - DMARC en `p=none`: los fallos no se rechazarían; subirlo es decisión aparte.
 - **Pedido de Fernando tras probarla en producción — jax-platform#68 (`48adfb7`,
   desplegado 2026-09-13 19:54 CST, `index-B4G6iYq-.js`):**
   - Al elegir cifrado, el puerto salta a su valor estándar (sin cifrado 25,
