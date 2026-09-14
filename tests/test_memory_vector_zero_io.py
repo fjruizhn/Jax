@@ -56,6 +56,7 @@ from pathlib import Path
 import aiomysql
 import pytest
 
+from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.memory import db as dbmod
 import _esquema_memoria
 
@@ -108,7 +109,8 @@ async def _conn():
     return await aiomysql.connect(
         host=os.environ["JAX_DB_HOST"], port=int(os.environ["JAX_DB_PORT"]),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
-        db=os.environ["JAX_DB_NAME"], autocommit=True)
+        db=os.environ["JAX_DB_NAME"], autocommit=True,
+        connect_timeout=db_connect_timeout_seconds())
 
 
 async def _sql(query, args=(), fetch=False):

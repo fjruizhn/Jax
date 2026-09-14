@@ -25,6 +25,15 @@ except ImportError:
     # las_manos/ no esta en sys.path, solo el paquete jax.core.
     from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 
+try:
+    # Mismo doble camino que credential_resolver arriba -- este archivo
+    # corre como las_manos.facet_resolver (bare, symlink) EN PRODUCCION
+    # (uvicorn, WorkingDirectory=las_manos: jax.core NO es importable desde
+    # ahi, medido 2026-09-14) y como jax.core.facet_resolver via el REPL.
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
 logger = logging.getLogger("facet_resolver")
 
 FACET_CACHE_TTL_SECONDS = int(os.getenv("FACET_CACHE_TTL_SECONDS", "30"))
@@ -212,6 +221,10 @@ async def _db_conn() -> aiomysql.Connection:
         db=os.getenv("JAX_DB_NAME", "jax_memory"),
         charset="utf8mb4",
         autocommit=True,
+        # Hallazgo de revisión, Tarea 2b (tanda A, ronda de arreglo 1,
+        # 2026-09-14): sin esto, aiomysql espera sin límite si la DB se
+        # cuelga (ver jax/core/db_connect_config.py).
+        connect_timeout=db_connect_timeout_seconds(),
     )
 
 

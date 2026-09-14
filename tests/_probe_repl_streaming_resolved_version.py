@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import aiomysql
 import httpx
 
+from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.muscles.base import HttpMuscle
 
 FACET = "thot"
@@ -74,6 +75,7 @@ async def _db_conn():
         db=os.getenv("JAX_DB_NAME", "jax_memory"),
         charset="utf8mb4",
         autocommit=True,
+        connect_timeout=db_connect_timeout_seconds(),
     )
 
 

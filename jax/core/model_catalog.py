@@ -19,6 +19,8 @@ import os
 
 import aiomysql
 
+from jax.core.db_connect_config import db_connect_timeout_seconds
+
 logger = logging.getLogger("model_catalog")
 
 
@@ -40,6 +42,10 @@ async def _db_conn() -> aiomysql.Connection:
         db=os.getenv("JAX_DB_NAME", "jax_memory"),
         charset="utf8mb4",
         autocommit=True,
+        # Hallazgo de revisión, Tarea 2b (tanda A, ronda de arreglo 1,
+        # 2026-09-14): sin esto, aiomysql espera sin límite si la DB se
+        # cuelga (ver jax/core/db_connect_config.py).
+        connect_timeout=db_connect_timeout_seconds(),
     )
 
 

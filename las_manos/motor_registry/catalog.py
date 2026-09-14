@@ -19,6 +19,14 @@ from dataclasses import dataclass, field
 
 import aiomysql
 
+try:
+    # Producción (uvicorn, WorkingDirectory=las_manos): jax.core no es
+    # importable desde ahi, medido 2026-09-14 -- db_connect_config.py vive
+    # symlinkeado directo en las_manos/ (mismo patron que facet_resolver.py).
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
 # capability.mode (jax-platform, db/migrations.py): ¿la capability cambia el
 # estado del sistema? mismo conjunto que el CHECK chk_capability_mode de la
 # columna. Tanda A v2, 2026-09-14.
@@ -184,6 +192,21 @@ class MotorCatalog:
                 "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
                 "exportalos a mano antes de conectar."
             )
+        # Hallazgo de revisión, Tarea 2b (tanda A, 2026-09-14; ronda de
+        # arreglo 1: la validación se movió a jax/core/db_connect_config.py,
+        # importado desde acá -- hay otros 19 sitios en el repo que abren
+        # aiomysql.connect(), no solo este; vigilados por
+        # tests/test_aiomysql_connect_timeout_tripwire.py). aiomysql (0.3.2,
+        # medido en el venv de jax-platform) tiene connect_timeout=None por
+        # default y lo pasa tal cual a asyncio.wait_for(timeout=…) al abrir
+        # el socket (aiomysql/connection.py) -- None ahí significa "sin
+        # límite". Si la DB está arriba pero no responde (colgada, no
+        # rechazando), from_db() se queda esperando para siempre y LAS
+        # MANOS, que recarga el catálogo por acá vía
+        # routes.py/jacobs/executor.py, cuelga con ella (jax-platform no
+        # llama from_db() directo hoy -- solo por HTTP a LAS MANOS; su
+        # propia exposición y cota, GOVERNANCE_RELOAD_TIMEOUT_SECONDS, llega
+        # con Tarea 6/PR-C, backend/governance_context.py).
         conn = await aiomysql.connect(
             host=host,
             port=int(port),
@@ -192,6 +215,7 @@ class MotorCatalog:
             db=os.getenv("JAX_DB_NAME", "jax_memory"),
             charset="utf8mb4",
             autocommit=True,
+            connect_timeout=db_connect_timeout_seconds(),
         )
         try:
             instance = cls.__new__(cls)
