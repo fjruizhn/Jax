@@ -95,9 +95,10 @@ su fecha de última verificación real, no una nueva.
   El script no está en git (`/opt/backup-scripts/`): respaldos
   `backup-hall9000.sh.bak-20260911-comentario-lock` y `-prune-r2`.
 
-- **El REPL está roto para las 7 facetas — ARREGLADO en `fix/repl-modelos-desde-catalogo`
-  (2026-09-14, decisión de Fernando: la lista permitida sale del catálogo `model`),
-  PENDIENTE de desplegar y verificar.** Verificado con el código de la rama contra la DB
+- **El REPL estaba roto para las 7 facetas — CERRADO Y EN MASTER 2026-09-14** (jax#153 →
+  `fbab074`; decisión de Fernando: la lista permitida sale del catálogo `model`). Verificado
+  desde `~/jax` (el checkout que corre el REPL): 7 facetas, ninguna rota. Sin servicio que
+  reiniciar: el REPL lo toma al arrancar.** Verificado con el código de la rama contra la DB
   real: las 7 facetas con su modelo dentro de la lista, hipatia respondió, jekyll acepta
   el modo pesado, y la consulta nueva usa `uk_provider_model`. La revisión de
   jax#153 pidió tomar el proveedor del MODELO ASIGNADO (JOIN por `model_ref`) y no de
@@ -2571,7 +2572,8 @@ retractaciones, que no se borran. Ninguno requiere acción.
     En vivo: login 401 en 0,197 s, forgot-password 200, reset con token inventado 400.
     Carga del login (2.400 peticiones, `scripts/load_test.py`): 0 errores, p95 2,69 ms
     a c=10 y 13,86 ms a c=50. Texto original: ruido preexistente en `jax_engine`.
-  - **test-connection devuelve el banner del servidor** remoto al superadmin:
+  - **test-connection devuelve el banner del servidor — ACEPTADO, reconfirmado por
+    Fernando 2026-09-14** remoto al superadmin:
     sirve como sondeo de puertos internos. Se acepta porque es solo superadmin y
     está limitado (`JAX_SMTP_CONN_RATE`). Lo reabre que el endpoint deje de ser
     exclusivo de superadmin.
@@ -2585,7 +2587,8 @@ retractaciones, que no se borran. Ninguno requiere acción.
     fondo oscuro mide 3,75:1, por debajo del AA de 4,5 (medido en AdminSmtp el
     2026-09-13). Es la convención de todas las pantallas. Arreglarlo es una
     decisión del sistema de diseño, no de una pantalla.
-  - **Cancelación durante el rollback de `smtp_config.guardar_filas`:** si la tarea
+  - **Cancelación durante el rollback de `smtp_config.guardar_filas` — ACEPTADO,
+    reconfirmado por Fernando 2026-09-14:** si la tarea
     se cancela justo en el rollback, se loguea el `CancelledError` en vez del error
     original de la base. La conexión no vuelve sucia al pool: `Pool.release` de
     aiomysql cierra las que quedan a mitad de transacción. No se cambió porque
@@ -2597,7 +2600,8 @@ retractaciones, que no se borran. Ninguno requiere acción.
     pantalla combina `text-red-400` con `hover:bg-red-900` o pone texto verde
     sobre `bg-slate-700`.
   - **Fuente Inter** marcada como "sobreusada" por el hook de impeccable en
-    `frontend/src/index.css:8`: preexistente, pendiente de decisión de Fernando.
+    `frontend/src/index.css:8`: preexistente. DECISIÓN de Fernando 2026-09-14: se
+    decide en el Lote 3, junto con los tokens de diseño del tema claro/oscuro.
 
 - **Anotados en la ronda del pipeline b8f80733 (2026-09-12).** Ninguno
   bloquea; cada uno dice qué lo reabre.
@@ -2702,13 +2706,19 @@ retractaciones, que no se borran. Ninguno requiere acción.
     Aprobar y Cancelar (mismo defecto) muestran su fallo, atado a su pipeline: no queda
     sobre otro ni cuando el pipeline ya no espera aprobación. Texto original:
     `handleResume` solo hacía `console.error`.
-  - **Cancelar kimi corta nuestro lado, no necesariamente la facturación.**
-    Kimi es cloud: cerrar la conexión no está verificado que detenga lo que
-    Moonshot ya estaba generando (blueprint de Ricardo §11, mismo límite). Lo
-    garantizado es que no hay segunda llamada.
+  - **Cancelar kimi: MEDIDO 2026-09-14, no se cobró el pedido cortado (una muestra).**
+    La documentación oficial de Moonshot no dice si el servidor para ni qué cobra al cortar
+    (guía de streaming: "the request's token consumption cannot be determined"; solo documenta
+    que un 429 no se cobra). Medido con `GET /v1/users/me/balance` (USD, 5 decimales): un stream
+    de `kimi-k3` cortado a los 150 fragmentos (7 s) dejó el saldo en 0,00000 de gasto durante
+    ~15 min; el CONTROL (un pedido completo, 104+400 tokens) sí se descontó, 0,00919 USD, visible
+    entre 90 y 180 s. **Hallazgo aparte, abierto:** 0,00919 cobrado contra 0,00631 a precio de
+    lista (3/15 USD por 1M) — si `model` guarda el de lista, `axioma_usage` subregistra kimi.
   - **`finish_reason=length` sin schema marcaba `completed` — DECISIÓN de Fernando,
-    2026-09-14: revierte la del 2026-08-10; arreglo en jax#152, PENDIENTE de verificar
-    en vivo.** Una salida cortada que pasa por completa es fail-open (P10). En
+    2026-09-14: revierte la del 2026-08-10; DESPLEGADO (jax#152 → `d5ccbfa`; `jax-las-manos`
+    reiniciado 13:18:17, proceso en el commit, 0 errores). Límite de la evidencia: en vivo no se
+    forzó un corte real (exigiría bajar `max_tokens` de un motor en producción); lo prueban los
+    tests y el despliegue.** Una salida cortada que pasa por completa es fail-open (P10). En
     `worker.py` la rama de corte va ahora ANTES de mirar tool_calls o schema: falla
     siempre, sin reintento, también con schema que acepta texto libre y con
     tool_calls (hueco hermano que encontró la revisión: se ejecutaban herramientas
@@ -2815,7 +2825,8 @@ retractaciones, que no se borran. Ninguno requiere acción.
   esquema, el volumen o la infraestructura.
 
 - **El brazo negativo de la sonda de SP4 no mide fabricación: hay que cerrar
-  la puerta de `ssh_exec` — 2026-09-04, causa medida.** En el corrido dirigido
+  la puerta de `ssh_exec` — 2026-09-04, causa medida. DECISIÓN de Fernando 2026-09-14: se
+  espera a retomar SP4.** En el corrido dirigido
   del 2026-09-03, **82 de los 120 turnos negativos (68%)** terminaron con la
   faceta afirmando `ssh_exec` o `ssh_exec_readonly`, capabilities que SÍ están
   en el snapshot. Eso no es fabricación y por eso el pre-registro los clasifica
