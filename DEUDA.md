@@ -95,7 +95,12 @@ su fecha de última verificación real, no una nueva.
   El script no está en git (`/opt/backup-scripts/`): respaldos
   `backup-hall9000.sh.bak-20260911-comentario-lock` y `-prune-r2`.
 
-- **El REPL está roto para las 7 facetas — ABIERTO, medido 2026-09-14.** `main()`
+- **El REPL está roto para las 7 facetas — ARREGLADO en `fix/repl-modelos-desde-catalogo`
+  (2026-09-14, decisión de Fernando: la lista permitida sale del catálogo `model`),
+  PENDIENTE de desplegar y verificar.** Verificado con el código de la rama contra la DB
+  real: las 7 facetas con su modelo dentro de la lista, hipatia respondió, jekyll acepta
+  el modo pesado, y la consulta nueva usa `uk_provider_model`. Texto original:
+  medido 2026-09-14. `main()`
   (`jax/core/main.py:482-484`) pisa `model_default` con el modelo de
   `facet_binding`, pero `models_allowed` sigue siendo el de `config.toml`, y
   ninguno de los modelos vigentes está en su lista: invocar cualquier faceta
