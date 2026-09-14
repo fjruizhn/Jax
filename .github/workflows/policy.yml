@@ -522,6 +522,7 @@ jobs:
           tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py
           tests/test_repl_fuentes.py tests/test_memory_embedding_config.py
           tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py
+          tests/test_motor_catalog_mode.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -540,6 +541,7 @@ jobs:
             tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py \
             tests/test_repl_fuentes.py tests/test_memory_embedding_config.py \
             tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py \
+            tests/test_motor_catalog_mode.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -602,8 +604,9 @@ jobs:
           # 141 -> 143 el mismo dia, por la revision de jax#153: cargar_registro toma
           #   el proveedor del modelo asignado (JOIN por model_ref) y una faceta sin
           #   filas en el catalogo queda con su asignado. Visto en rojo antes.
-          grep -qE "^143 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 143 tests CORRIDOS."; exit 1; }
+          # 143 -> 148 el 2026-09-14 (tanda A v2): test_motor_catalog_mode.py (+5) -- CapabilityEntry.mode, fail-closed por dict, modo inválido lanza, capabilities() ordenado. Vistos en rojo.
+          grep -qE "^148 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 148 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -664,11 +667,14 @@ jobs:
       - run: >-
           python -m pytest -v tests/test_plan_validation.py
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
+          tests/test_catalog_mode_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
+        # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
         run: |
           python -m pytest -q tests/test_plan_validation.py \
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
+            tests/test_catalog_mode_db.py \
             2>&1 | tee /tmp/out
-          grep -qE "^14 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }
+          grep -qE "^15 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 15 tests CORRIDOS."; exit 1; }

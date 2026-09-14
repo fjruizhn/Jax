@@ -19,6 +19,21 @@ from dataclasses import dataclass, field
 
 import aiomysql
 
+# capability.mode (jax-platform, db/migrations.py): ¿la capability cambia el
+# estado del sistema? mismo conjunto que el CHECK chk_capability_mode de la
+# columna. Tanda A v2, 2026-09-14.
+CAPABILITY_MODES = frozenset({"read_only", "mutating"})
+
+
+def _modo_valido(capability: str, mode: object) -> str:
+    """La DB garantiza NOT NULL y el CHECK chk_capability_mode; si eso se rompe, se ve (P10)."""
+    if mode not in CAPABILITY_MODES:
+        raise RuntimeError(
+            f"capability '{capability}': mode {mode!r} fuera de {sorted(CAPABILITY_MODES)} "
+            "(ver capability.mode en jax-platform/backend/db/migrations.py)."
+        )
+    return mode  # type: ignore[return-value]
+
 
 @dataclass
 class MotorEntry:
@@ -81,6 +96,10 @@ class CapabilityEntry:
     # auditoria desactivada por default para esa capability -- explicito,
     # no implicito (ver worker.py, resolucion + override por request).
     auditor_motor: str | None = None
+    # Tanda A v2 (2026-09-14): 'read_only' | 'mutating', de capability.mode
+    # (from_db lo pasa SIEMPRE explícito). El default solo lo usa el
+    # constructor por dict (tests) y es fail-closed, como risk_level='high'.
+    mode: str = "mutating"
 
 
 class MotorCatalog:
@@ -131,6 +150,7 @@ class MotorCatalog:
                 fallback_mode=cfg.get("fallback_mode", "manual_only"),
                 forbidden_paths=cfg.get("forbidden_paths", []),
                 auditor_motor=cfg.get("auditor_motor"),
+                mode=_modo_valido(name, cfg.get("mode", "mutating")),
             )
 
     def get_motor(self, name: str) -> MotorEntry | None:
@@ -139,15 +159,22 @@ class MotorCatalog:
     def get_capability(self, name: str) -> CapabilityEntry | None:
         return self._capabilities.get(name)
 
+    def capabilities(self) -> tuple[CapabilityEntry, ...]:
+        """Todas las capabilities, ordenadas por nombre. Lo usa
+        policy/governance/grounding.build_snapshot: el orden fijo es lo que
+        hace deterministas los punteros y el hash del snapshot."""
+        return tuple(self._capabilities[n] for n in sorted(self._capabilities))
+
     def enabled_motors(self) -> list[str]:
         return [n for n, m in self._motors.items() if m.enabled]
 
     @classmethod
     async def from_db(cls) -> "MotorCatalog":
-        """Carga motor/capability/capability_motor desde la DB compartida
-        jax_memory -- mismo pool/patron de conexion que credential_resolver.py.
-        Reemplaza la lectura de config.toml (TOML queda solo para
-        [server]/kill_switch_path y lo que routes.py todavia usa aparte)."""
+        """Carga motor/capability (con `mode`, tanda A v2)/capability_motor
+        desde la DB compartida jax_memory -- mismo pool/patron de conexion
+        que credential_resolver.py. Reemplaza la lectura de config.toml
+        (TOML queda solo para [server]/kill_switch_path y lo que routes.py
+        todavia usa aparte)."""
         host = os.environ.get("JAX_DB_HOST")
         port = os.environ.get("JAX_DB_PORT")
         if not host or not port:
@@ -218,7 +245,7 @@ class MotorCatalog:
                     "SELECT `key`, risk_level, sandbox_only, requires_human_gate, "
                     "       max_execution_minutes, max_recursion_depth, output_schema, "
                     "       fallback_motor, fallback_mode, allowed_callers, forbidden_paths, "
-                    "       auditor_motor "
+                    "       auditor_motor, mode "
                     "FROM capability"
                 )
                 cap_rows = await cur.fetchall()
@@ -234,7 +261,8 @@ class MotorCatalog:
                 allowed_by_cap.setdefault(capability_key, []).append(motor_key)
 
             for (key, risk_level, sandbox_only, gate, max_exec, max_rec, schema,
-                 fallback_motor, fallback_mode, callers, forbidden, auditor_motor) in cap_rows:
+                 fallback_motor, fallback_mode, callers, forbidden, auditor_motor,
+                 mode) in cap_rows:
                 instance._capabilities[key] = CapabilityEntry(
                     name=key,
                     allowed_motors=allowed_by_cap.get(key, []),
@@ -249,6 +277,7 @@ class MotorCatalog:
                     fallback_mode=fallback_mode or "manual_only",
                     forbidden_paths=_json.loads(forbidden) if forbidden else [],
                     auditor_motor=auditor_motor,
+                    mode=_modo_valido(key, mode),
                 )
             return instance
         finally:
