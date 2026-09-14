@@ -1,30 +1,47 @@
-# Gobernanza con el catálogo de la DB e `invoked_by` como rol (tanda A) — Plan de implementación
+# Gobernanza con el catálogo de la DB, `capability.mode` e `invoked_by` como rol (tanda A, v2) — Plan de implementación
 
 > **Para agentes ejecutores:** SUB-SKILL OBLIGATORIA: usar superpowers:subagent-driven-development (recomendado) o superpowers:executing-plans para implementar este plan tarea por tarea. Los pasos usan casillas (`- [ ]`) para el seguimiento.
 
-**Objetivo:** que el resolver de `CAPABILITY_AVAILABLE` consulte el catálogo real de la DB (no el `[capabilities.*]` vacío del TOML) y que `invoked_by` deje de ser un nombre de persona usado como rol (`"Fernando"` → `"plataforma"`).
+**Objetivo:** que las facetas de la Mesa puedan citar las capabilities de la DB como `OBSERVADO`, que el resolver de `CAPABILITY_AVAILABLE` las verifique con nombre **y modo** contra el catálogo real, y que `invoked_by` deje de ser un nombre de persona usado como rol (`"Fernando"` → `"plataforma"`).
 
-**Arquitectura:** el validador de `jax` sigue puro: `load_validation_context()` **recibe** el `MotorCatalog`. En `jax-platform`, `governance_context.validation_context()` pasa a ser `async`, carga el catálogo con `await MotorCatalog.from_db()` y lo cachea con una clave que suma el mtime del sello de `facet_resolver` a los mtimes de los tres archivos de config. Una recarga a la vez (`asyncio.Lock`). Si la DB falla, la excepción sube: nunca se sirve un catálogo vacío. Jacobs acepta el rol `plataforma` y exige ese rol para reanudar y aprobar. jax-platform lo pone en el backend y el modal deja de mandarlo.
+**Arquitectura:** jax-platform agrega la columna `capability.mode` (NOT NULL, sin default) con una migración idempotente. En jax, `MotorCatalog`/`CapabilityEntry` cargan el modo. El validador sigue puro: recibe el catálogo, y su rama `in_catalog` verifica el modo. El snapshot suma la sección `catalog_capabilities`, sin mover los punteros `/capabilities/N` de las `ops`. En jax-platform, `governance_context.validation_context()` pasa a async: carga `await MotorCatalog.from_db()`, cachea con los mtimes de config más el sello de `facet_resolver`, recarga una sola vez bajo `asyncio.Lock` y falla visible. Jacobs acepta el rol `plataforma`, que jax-platform pone en el backend.
 
-**Stack:** Python 3.14 (venvs de hall9000) / 3.12 y 3.14 (runners de CI), FastAPI, aiomysql, pydantic, pytest + pytest-asyncio, React 19 + vitest.
+**Stack:** Python 3.14 (venvs de hall9000) / 3.12 y 3.14 (runners de CI), FastAPI, aiomysql, pydantic, pytest + pytest-asyncio, MariaDB (12.3 en hall9000, 11.8 en CI), React 19 + vitest.
 
-**Spec:** `docs/superpowers/specs/2026-09-14-gobernanza-catalogo-db-design.md` (repo `jax`, commit `0e44acd`). El spec es la autoridad; este plan argumenta desde él. Quien ejecuta lee los dos.
+**Spec:** `docs/superpowers/specs/2026-09-14-gobernanza-catalogo-db-design.md`, **v2** (repo `jax`, commit `b2bfa43`, enmienda de `0e44acd`). El spec es la autoridad; este plan argumenta desde él. Quien ejecuta lee los dos. Este plan reemplaza al de `0c33478`, que paraba en una "Tarea 0" y quedó resuelta por la decisión de Fernando del 2026-09-14 (spec §0).
 
 ## Restricciones globales
 
 Cada tarea las incluye implícitamente.
 
-- **Checkouts de producción intocables.** Ningún comando de las Tareas 1–7 edita, prueba en el lugar ni commitea en `/home/fruiz/jax` ni en `/home/fruiz/jax-platform`: los servicios corren desde ahí. Solo la Tarea 8, después del merge, hace `git pull --ff-only` allí. Importar módulos de esos árboles para medir se hace con `PYTHONDONTWRITEBYTECODE=1`, que no escribe `__pycache__`.
-- **Worktrees:** jax → `/home/fruiz/worktrees/jax-gobernanza-catalogo` (rama `feat/gobernanza-catalogo-db`). jax-platform → `/home/fruiz/worktrees/jax-platform-gobernanza` (rama `feat/gobernanza-catalogo-db`, creada desde `origin/master`). Usar siempre `git -C <ruta>` y rutas absolutas; si un comando necesita `cd`, `pwd` va en el MISMO comando.
-- **Intérpretes:** jax-platform → `/home/fruiz/jax-platform/backend/.venv/bin/python` (solo se USA el intérprete: no se edita ese árbol). `frontend/node_modules` del worktree es un symlink a `/home/fruiz/jax-platform/frontend/node_modules`. jax → venv limpio en el scratchpad con EXACTAMENTE el `pip install` del job de CI que corre esos tests (lección "reproducir el runner, no el local"). `/home/fruiz/jax/.venv` no tiene `fastapi` ni `pytest-asyncio`: medido el 2026-09-14.
-- **`JAX_REPO_PATH`:** toda corrida de tests o mediciones de jax-platform en el worktree exporta `JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo`. Sin eso, `governance_context` importa el validador del checkout de producción.
-- **Trabajo concurrente:** en `/home/fruiz/worktrees/jax-platform-etapa2` (rama `feat/admin-usuarios-etapa2-sesiones`) se ejecuta otro plan que toca auth del backend y sus tests. Este plan no depende de él. **El que mergee segundo rebasa**, y en los pisos de CI suma los dos deltas: nunca pisa el número del otro.
-- **TDD:** cada test nuevo se ve en ROJO **por la razón declarada** antes del arreglo. Si falla por otra razón (import, fixture, colección), primero se corrige eso y se vuelve a ver el rojo correcto.
-- **Controles declarados como controles:** un test que existe para que otro signifique algo lleva en el docstring la palabra `CONTROL` y dice qué controla. Un tripwire lleva `TRIPWIRE`. "Un control que no falla no valida": cada tripwire se ve en rojo por mutación, no solo en verde.
-- **P10, sin fail-open:** ningún `except` amplio nuevo. Si hiciera falta uno, lleva `# fail-soft: <razón>` en la MISMA línea. Una recarga fallida sube la excepción: no se traga ni se sirve el catálogo viejo o vacío.
-- **LAS CUATRO:** (1) índices: `from_db()` lee tres tablas chicas completas, sin `WHERE` ni `ORDER BY` sobre tablas que crezcan, y solo al recargar. Se declara, no hay `EXPLAIN` que hacer. (2) Caché con invalidación declarada en el mismo commit: el sello de `facet_resolver`. (3) Solo async: aiomysql, y la lectura de YAML/TOML va en `asyncio.to_thread`. (4) Latencia en proceso antes y después, escrita en `DEUDA.md` de jax con fecha (Tarea 6 → Tarea 8). No se hace carga sobre `/api/chat`, porque llama al modelo, y así se declara.
-- **i18n es/en:** este plan no agrega texto visible al usuario. Si una tarea terminara agregando alguno, va en `frontend/src/i18n/es.js` y `en.js`.
-- **Pisos de CI exactos:** nunca se copia un número de este plan sin medir. Se lee el valor ACTUAL del workflow (el plan concurrente puede haberlo subido), se sube en el delta MEDIDO en la rama y se agrega un comentario con fecha, qué tests y "visto en rojo". Hoy (2026-09-14): jax `tests-puros` 143 y `governance` 80; jax-platform `PISO_PASSED` 611, `JAX_CI_MIN_PASSED` 301 y vitest 125.
+- **Checkouts de producción intocables.** Ningún comando de las Tareas 1–10 edita, prueba en el lugar ni commitea en `/home/fruiz/jax` ni en `/home/fruiz/jax-platform`: los servicios corren desde ahí. Solo la Tarea 11, después del merge, hace `git pull --ff-only` allí. Importar módulos de esos árboles para medir se hace con `PYTHONDONTWRITEBYTECODE=1`, que no escribe `__pycache__`.
+- **Worktrees:**
+  - jax → `/home/fruiz/worktrees/jax-gobernanza-catalogo` (rama `feat/gobernanza-catalogo-db`, ya existe; contiene el spec).
+  - jax-platform → `/home/fruiz/worktrees/jax-platform-gobernanza`, con **dos ramas**: `feat/capability-mode` (PR-A, Tarea 1, desde `origin/master`) y `feat/gobernanza-catalogo-db` (PR-C, Tareas 6–8, apilada sobre `feat/capability-mode` y rebasada sobre `master` cuando PR-A se mergee).
+  - Usar siempre `git -C <ruta>` y rutas absolutas. Si un comando necesita `cd`, `pwd` va en el MISMO comando.
+- **Intérpretes:**
+  - jax-platform → `/home/fruiz/jax-platform/backend/.venv/bin/python`. Solo se USA el intérprete: no se edita ese árbol. `frontend/node_modules` del worktree es un symlink a `/home/fruiz/jax-platform/frontend/node_modules`.
+  - jax → venvs limpios en el scratchpad de quien ejecuta, con EXACTAMENTE el `pip install` del job de CI que corre esos tests (lección "reproducir el runner, no el local"). `/home/fruiz/jax/.venv` no tiene `fastapi` ni `pytest-asyncio`: medido el 2026-09-14. Tres venvs:
+    - `venv-jax-gov`: job `governance`, `pip install pytest pyyaml pydantic aiomysql==0.3.2`.
+    - `venv-jax-puros`: job `tests-puros`, `pip install pytest pytest-asyncio aiomysql httpx cryptography pydantic pyyaml aiofiles fastapi==0.139.0`.
+    - `venv-jax-db`: job `jacobs-gobernanza-db`, `pip install -r <requirements.txt de jax-platform> pytest`.
+  - Antes de crearlos, se relee el workflow ACTUAL: si las líneas cambiaron, mandan las del workflow.
+- **`JAX_REPO_PATH`:** toda corrida de tests o mediciones de jax-platform en el worktree exporta `JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo`, salvo donde el paso diga otra cosa. Sin eso, `governance_context` importa el validador del checkout de producción.
+- **Trabajo concurrente:** en `/home/fruiz/worktrees/jax-platform-etapa2` (rama `feat/admin-usuarios-etapa2-sesiones`) corre otro plan que toca auth del backend y sus tests. Este plan no depende de él. **El que mergee segundo rebasa** y en los pisos de CI suma los dos deltas: nunca pisa el número del otro. Ese plan agregó `token_version`/`tv` a los tokens: la firma de `create_access_token` se lee del código desplegado antes de usarla (Tarea 11).
+- **TDD:** cada test nuevo se ve en ROJO **por la razón declarada** antes del arreglo. Si falla por otra razón (import, fixture, colección), primero se corrige eso y se vuelve a ver el rojo correcto. Hay tests que pasan antes del cambio a propósito, porque existen para que otro signifique algo o para fijar lo que el cambio no debe mover. Esos se declaran como tales en el paso y se validan por mutación.
+- **Controles declarados como controles:** un test que existe para que otro signifique algo lleva en el docstring la palabra `CONTROL` y dice qué controla. Un tripwire lleva `TRIPWIRE`. "Un control que no falla no valida": cada tripwire y cada control se ve en rojo por mutación, no solo en verde.
+- **Mutaciones:** se restauran desde un backup real (`cp <archivo> $SCRATCH/<archivo>.bak` antes; `cp` de vuelta después), nunca con `git checkout`, porque sobre un archivo untracked no restaura nada (CONTEXT.md de jax §7). Cada mutación se anota en el cuerpo del PR con el test que la cazó.
+- **P10, sin fail-open:** ningún `except` amplio nuevo. Si hiciera falta uno, lleva `# fail-soft: <razón>` en la MISMA línea. Una recarga fallida sube la excepción: no se traga ni se sirve el catálogo viejo o vacío. Una capability sin modo declarado frena la migración.
+- **LAS CUATRO:**
+  1. Índices: `from_db()` lee tres tablas chicas completas (17 capabilities), sin `WHERE` ni `ORDER BY` sobre tablas que crezcan, y solo al recargar. `mode` no se filtra. Se declara, no hay `EXPLAIN` que hacer.
+  2. Caché con invalidación declarada en el mismo commit: el sello de `facet_resolver`, que `run_migrations()` ya estampa.
+  3. Solo async: aiomysql, y la lectura de YAML/TOML va en `asyncio.to_thread`.
+  4. Latencia en proceso antes y después, y tamaño del snapshot (caracteres, entradas y `axioma_usage.tokens_in` de un turno de sonda) antes y después, escritos en `DEUDA.md` de jax con fecha (Tareas 9 y 11). No se hace carga sobre `/api/chat`, porque llama al modelo, y así se declara.
+- **i18n es/en:** este plan no agrega texto visible al usuario. El snapshot es texto de prompt, no de UI. Si una tarea terminara agregando texto de UI, va en `frontend/src/i18n/es.js` y `en.js`.
+- **Pisos de CI exactos:** nunca se copia un número de este plan sin medir. Se lee el valor ACTUAL del workflow, porque el plan concurrente puede haberlo subido. Se sube en el delta MEDIDO en la rama y se agrega un comentario con fecha, qué tests y "visto en rojo". Valores leídos el 2026-09-14, solo como referencia:
+  - jax: `governance` 80, `tests-puros` 143, `jacobs-gobernanza-db` 14.
+  - jax-platform (`origin/master` `bfab4de`): `PISO_PASSED` 611 y `MAX_SKIPS` 1 (job `backend-tests-con-db`), `JAX_CI_MIN_PASSED` 301 (job `backend-tests-no-db`) y vitest 125 (job `frontend-tests`).
+  - Los deltas "esperados" de cada tarea son estimaciones para detectar sorpresas. Manda el medido.
 - **Commits:** cada mensaje termina con
 
   ```
@@ -33,90 +50,575 @@ Cada tarea las incluye implícitamente.
   ```
 
   El cuerpo de cada PR termina con `🤖 Generated with [Claude Code](https://claude.com/claude-code)` y la línea `https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB`.
-- **PRs:** el gate se mide sobre el `headSha` exacto del PR (`gh run list --commit <sha>`), no sobre "el último run". No se mergea con un check en rojo ni pendiente. El merge y el despliegue van con GO de Fernando.
-- **Despliegue:** primero `jax-platform` y después `jax-las-manos`, anunciando antes la ventana de segundos en la que crear o reanudar un pipeline puede fallar.
-
-## Hallazgo de la planificación: parar antes de ejecutar (Tarea 0)
-
-Medido el 2026-09-14 contra el código y la DB de producción (solo lectura):
-
-1. **En la Mesa, un claim sobre una capability que existe solo en la DB no llega nunca al resolver.** `shadow_validation.run_shadow_validation` siempre valida con `accreditation`. `grounding.accredit()` solo da `ACCREDITED` si el `evidence_pointer` apunta a una entrada del snapshot, y el snapshot se arma solo con `ctx.ops` (`grounding.build_snapshot`). La decisión §2 del spec deja el snapshot así. Un claim sobre `generate` da entonces `AUTHORITY_INVALID` (sin puntero), `POINTER_MISMATCH` o `FACT_NOT_IN_SNAPSHOT` (con puntero), en el paso 4 o 5 de `validator.validate()`, **antes** del resolver. En producción, `shadow_claim_verdicts` para `CAPABILITY_AVAILABLE` tiene hoy: `OBSERVADO/VALID` 427, `INFERIDO/POINTER_MISMATCH` 3, `INFERIDO/ARGS_MISMATCH` 1, `NULL/AUTHORITY_INVALID` 2 (los 2 sobre `code_swarm`). **Cero `FACT_MISMATCH`.** El §1 del spec ("sale `FACT_MISMATCH`, un falso negativo") y dos puntos no se cumplen tal como están escritos: la verificación en vivo del §6 ("un claim de la Mesa sobre una capability de la DB sale `VALID`") y el test del §5 ("la validación en sombra da `VALID` para una capability que solo está en la DB").
-2. **La tabla `capability` de producción tiene 17 filas, no 18.** No está `validate`. La intersección con los 11 `ops` sigue vacía (medido).
-
-**Qué hace este plan con eso.** Implementa el diseño del spec tal cual (el catálogo real llega al resolver) y verifica solo lo que es alcanzable: el resolver, alimentado con el contexto REAL que arma jax-platform, da `VALID` para una capability de la DB. Además deja un TRIPWIRE que fija que en la Mesa ese claim sigue sin llegar al resolver mientras el snapshot no incluya el catálogo. El cambio es, por ahora, latente en la Mesa. Lo que sí cambia en producción es que un nombre repetido entre `ops` y la DB pasa a dar `SOURCE_CONFLICT` (hoy es imposible: intersección vacía y tripwire en la Tarea 5).
-
-- [ ] **Paso 0.1: presentar el hallazgo a Fernando y esperar su decisión antes de la Tarea 1.** Opciones:
-  - (a) Seguir con este plan: el fix queda latente en la Mesa hasta el sub-proyecto del snapshot, y la verificación en vivo es la de la Tarea 8.
-  - (b) Ampliar el alcance para sumar las capabilities de la DB al snapshot. Eso revierte la decisión §2 y requiere un spec nuevo.
-
-  Anotar la decisión, con fecha, en el PR de jax. Si elige (b), este plan se detiene aquí.
+- **PRs:** tres, en este orden de merge (spec §6): **PR-A** jax-platform `feat/capability-mode` → **PR-B** jax `feat/gobernanza-catalogo-db` → **PR-C** jax-platform `feat/gobernanza-catalogo-db`. El gate se mide sobre el `headSha` exacto del PR (`gh run list --commit <sha>`), no sobre "el último run". No se mergea con un check en rojo ni pendiente. El merge y el despliegue van con GO de Fernando.
+- **No se pushea nada** hasta la Tarea 10.
+- **Despliegue:** primero `jax-platform` (sus migraciones crean la columna) y después `jax-las-manos`, anunciando antes la ventana de segundos en la que crear o reanudar un pipeline puede fallar.
 
 ---
 
 ## Mapa de archivos
 
-**jax** (`/home/fruiz/worktrees/jax-gobernanza-catalogo`):
+**jax-platform, PR-A** (`/home/fruiz/worktrees/jax-platform-gobernanza`, rama `feat/capability-mode`):
 
 | Archivo | Responsabilidad | Tarea |
 |---|---|---|
-| `policy/governance/validator.py` | `load_validation_context(repo_root, allowlist, catalog)`: recibe el catálogo | 1 |
-| `tests/test_governance_validator.py` | `_real_ctx` con catálogo explícito; el tripwire viejo se reemplaza | 1 |
-| `jacobs/models.py` | `VALID_INVOKERS = {"plataforma","jax_local","ada"}`, `INVOKER_PLATAFORMA` | 2 |
-| `jacobs/policy.py` | `validate_resume` exige `"plataforma"` | 2 |
-| `jacobs/routes.py` | `plan_only` usa `VALID_INVOKERS` (fuera el literal duplicado); docstrings | 2 |
-| `tests/test_jacobs_invoked_by_rol.py` (nuevo) | rol al crear, planificar, reanudar y aprobar | 2 |
-| `.github/workflows/policy.yml` | pisos de `governance` y `tests-puros`; archivo nuevo en `tests-puros` | 1, 2 |
-| `DEUDA.md` | cierre de los dos ítems y números de latencia (PR de docs, post-deploy) | 8 |
+| `backend/db/migrations.py` | `mode` en `CREATE_CAPABILITY`; `_CAPABILITY_MODE`; `_FILE_CAPABILITY_SEED` a nivel de módulo; semillas con `mode`; `_COLUMNS`; `_backfill_capability_mode`; `_enforce_capability_mode_not_null` | 1 |
+| `backend/tests/test_capability_mode.py` (nuevo) | tripwires puros de la semilla; forma de la columna, valores, `INSERT` sin modo, base vieja, fila huérfana | 1 |
+| `.github/workflows/policy.yml` | `PISO_PASSED`, `JAX_CI_MIN_PASSED` | 1 |
 
-**jax-platform** (`/home/fruiz/worktrees/jax-platform-gobernanza`):
+**jax, PR-B** (`/home/fruiz/worktrees/jax-gobernanza-catalogo`):
 
 | Archivo | Responsabilidad | Tarea |
 |---|---|---|
-| `backend/governance_context.py` | `async validation_context()`, clave con el sello, lock, falla visible | 3 |
-| `backend/api/chat.py` | `_build_snapshot_or_raise` / `_build_grounding` async; `await` en `chat()` | 3 |
-| `backend/shadow_validation.py` | `await _validation_context()` | 3 |
-| `backend/tests/test_governance_context_catalogo.py` (nuevo) | catálogo de la DB, sello, lock, DB caída | 3 |
-| `backend/tests/test_grounding_config_revalidation.py` | fixture parchea `from_db`; llamadas async | 3 |
-| `backend/tests/test_shadow_origin.py`, `test_shadow_validation.py`, `test_shadow_validation_grounding.py` | llamadas a `validation_context()` con `await` | 3 |
-| `backend/api/pipelines.py` | `invoked_by = "plataforma"` al crear y reanudar | 4 |
-| `backend/tests/test_pipelines_identity_injection.py` | afirma `"plataforma"` aunque el cliente mande otra cosa | 4 |
-| `frontend/src/components/BottomBar/PipelineModal.jsx` (+ `.test.jsx`) | deja de mandar `invoked_by` | 4 |
-| `backend/tests/test_tripwires_catalogo_db.py` (nuevo) | tripwire ops∩DB vacío + control + tripwire Mesa | 5 |
-| `.github/workflows/policy.yml` | `PISO_PASSED`, `JAX_CI_MIN_PASSED`, vitest | 3, 4, 5 |
+| `las_manos/motor_registry/catalog.py` | `CAPABILITY_MODES`, `CapabilityEntry.mode`, `from_db()` lee `mode`, `MotorCatalog.capabilities()` | 2 |
+| `tests/test_motor_catalog_mode.py` (nuevo, `tests-puros`) | constructor por dict, modo inválido, orden | 2 |
+| `tests/test_catalog_mode_db.py` (nuevo, `jacobs-gobernanza-db`) | `from_db()` trae el modo sembrado | 2 |
+| `policy/governance/validator.py` | `load_validation_context(..., catalog)`; la rama `in_catalog` verifica el modo | 3 |
+| `tests/test_governance_validator.py` | `_real_ctx(catalog)`; el tripwire viejo se reemplaza; tests del modo | 3 |
+| `policy/governance/grounding.py` | sección `catalog_capabilities`, `SECTION_PREDICATE`, `render()` por sección | 4 |
+| `tests/test_governance_grounding.py` | sección nueva, estabilidad de punteros, acreditación, `render`, P10 | 4 |
+| `docs/superpowers/specs/2026-09-02-reformas-fase2-sp3-grounding-design.md` | nota fechada en §3.3 | 4 |
+| `jacobs/models.py`, `jacobs/policy.py`, `jacobs/routes.py` | rol `plataforma` | 5 |
+| `tests/test_jacobs_invoked_by_rol.py` (nuevo, `tests-puros`) | rol al crear, planificar, reanudar y aprobar | 5 |
+| `.github/workflows/policy.yml` | pisos de `governance`, `tests-puros`, `jacobs-gobernanza-db`; archivos nuevos en sus listas | 2–5 |
+| `DEUDA.md` | cierres, números medidos, nota de SP4 (PR de docs, post-deploy) | 11 |
 
-**Por qué el tripwire ops∩DB va en jax-platform y no en el job `jacobs-gobernanza-db` de jax (Tarea 5):** jax-platform es el único proceso donde las dos fuentes se juntan en el mismo objeto. El test puede afirmar sobre el `ValidationContext` que produce `await governance_context.validation_context()`, que es exactamente lo que ve el resolver en producción: `ctx.ops` del TOML clonado de jax (`JAX_REPO_PATH=/tmp/jax`) y `ctx.catalog` de la DB migrada por las migraciones de jax-platform. En jax habría que recomponer esa unión a mano, y eso sería una segunda definición del contexto. El job `backend-tests-con-db` ya tiene las dos cosas (clon de jax + MariaDB migrada) y un piso exacto.
+**jax-platform, PR-C** (mismo worktree, rama `feat/gobernanza-catalogo-db`):
+
+| Archivo | Responsabilidad | Tarea |
+|---|---|---|
+| `backend/governance_context.py` | `async validation_context()`, clave con el sello, lock, falla visible | 6 |
+| `backend/api/chat.py` | `_build_snapshot_or_raise` / `_build_grounding` async; `await` en `chat()` | 6 |
+| `backend/shadow_validation.py` | `await _validation_context()` | 6 |
+| `backend/tests/test_governance_context_catalogo.py` (nuevo) | catálogo de la DB, sello, lock, DB caída, acreditación real, catálogo cambiado | 6 |
+| `backend/tests/test_grounding_config_revalidation.py`, `test_shadow_origin.py`, `test_shadow_validation.py`, `test_shadow_validation_grounding.py` | llamadas async; `from_db` parcheado donde el test es puro | 6 |
+| `backend/tests/test_catalogo_db_en_la_mesa.py` (nuevo) | de punta a punta por `run_shadow_validation`; tripwire ops∩DB y su control | 7 |
+| `backend/api/pipelines.py`, `backend/tests/test_pipelines_identity_injection.py` | `invoked_by = "plataforma"` al crear y reanudar | 8 |
+| `frontend/src/components/BottomBar/PipelineModal.jsx` (+ `.test.jsx`) | deja de mandar `invoked_by` | 8 |
+| `.github/workflows/policy.yml` | `PISO_PASSED`, `MAX_SKIPS` si aplica, `JAX_CI_MIN_PASSED`, vitest | 6–8 |
+
+**Por qué el tripwire ops∩DB va en jax-platform (Tarea 7):** jax-platform es el único proceso donde las dos fuentes se juntan en el mismo objeto, el `ValidationContext` de `await governance_context.validation_context()`. Eso es exactamente lo que ven el resolver y el snapshot en producción: `ctx.ops` del TOML clonado de jax y `ctx.catalog` de la DB migrada. En jax habría que recomponer esa unión a mano, y eso sería una segunda definición del contexto.
 
 ---
 
-### Tarea 1: el validador de jax recibe el catálogo
+### Tarea 1: columna `capability.mode` (jax-platform, PR-A)
 
 **Archivos:**
-- Modificar: `policy/governance/validator.py:78-90` (`load_validation_context`)
-- Modificar: `tests/test_governance_validator.py:229-231` (`_real_ctx`) y `:272-301` (se reemplaza el tripwire)
-- Modificar: `.github/workflows/policy.yml`, job `governance`, paso "Piso exacto de tests CORRIDOS"
+- Modificar: `backend/db/migrations.py`, en estos puntos: `CREATE_CAPABILITY` (~402-440); después de `_CAPABILITY_SEED` (~589-630); `_seed_motors_and_capabilities` (~653-712); `_seed_file_tools_capabilities` (~761-840); `_COLUMNS` (~1098-1266); `run_migrations` (~1625-1679).
+- Crear: `backend/tests/test_capability_mode.py`
+- Modificar: `.github/workflows/policy.yml` (`PISO_PASSED`, `JAX_CI_MIN_PASSED`)
 
 **Interfaces:**
-- Consume: `las_manos.motor_registry.catalog.MotorCatalog` (sin cambios).
-- Produce: `validator.load_validation_context(repo_root: Path, config_paths_allowlist: frozenset[str], catalog: MotorCatalog) -> ValidationContext`. `ctx.catalog` es el objeto recibido (identidad, no copia). La Tarea 3 lo llama con el catálogo de `await MotorCatalog.from_db()`.
+- Produce:
+  - `migrations._CAPABILITY_MODE: dict[str, str]`, con las 17 capabilities sembradas.
+  - `migrations._FILE_CAPABILITY_SEED: list[tuple]`, la lista que hoy es local en `_seed_file_tools_capabilities`.
+  - La columna `capability.mode ENUM('read_only','mutating') NOT NULL`, sin default.
+- La Tarea 2 (jax) la lee con `SELECT ... mode FROM capability`.
 
-- [ ] **Paso 1: preparar el venv limpio del job `governance`**
+- [ ] **Paso 1: crear el worktree y medir la base**
 
 ```bash
-SCRATCH=<scratchpad de la sesión que ejecuta>
-python3.14 -m venv "$SCRATCH/venv-jax-gov"
-"$SCRATCH/venv-jax-gov/bin/pip" install -q pytest pyyaml pydantic aiomysql==0.3.2
-git -C /home/fruiz/worktrees/jax-gobernanza-catalogo status --short   # esperado: vacío
+git -C /home/fruiz/jax-platform fetch origin
+git -C /home/fruiz/jax-platform worktree add -b feat/capability-mode /home/fruiz/worktrees/jax-platform-gobernanza origin/master
+ln -s /home/fruiz/jax-platform/frontend/node_modules /home/fruiz/worktrees/jax-platform-gobernanza/frontend/node_modules
+git -C /home/fruiz/worktrees/jax-platform-gobernanza log --oneline -1   # anotar el sha base
+grep -rn "INTO capability" /home/fruiz/worktrees/jax-platform-gobernanza/backend/tests /home/fruiz/worktrees/jax-gobernanza-catalogo/tests /home/fruiz/worktrees/jax-gobernanza-catalogo/jacobs /home/fruiz/worktrees/jax-gobernanza-catalogo/las_manos --include=*.py
 ```
+
+Esperado del `grep`: nada (medido el 2026-09-14). Si aparece un test que inserta en `capability`, ese `INSERT` pasa a declarar `mode`, en este commit si es de jax-platform y en la Tarea 2 si es de jax. Con la columna sin default, ese test fallaría; en jax, además, fallaría en CI apenas se mergee PR-A.
+
+Base de las dos modalidades de CI, sobre el worktree sin cambios (el código de jax del worktree de jax todavía es igual a `master`):
+
+```bash
+cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && export JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo && \
+  /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest -q -rs 2>&1 | tail -3 | tee "$SCRATCH/base-con-db.txt" && \
+  JAX_CI_NO_DB=1 /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest -q -rs 2>&1 | tail -3 | tee "$SCRATCH/base-no-db.txt"
+```
+
+Anotar passed/skipped de cada una: son la base de los deltas de las Tareas 1, 6 y 7.
 
 - [ ] **Paso 2: escribir los tests (rojos)**
 
-En `tests/test_governance_validator.py`, reemplazar `_real_ctx` (líneas 229-231) por:
+Crear `backend/tests/test_capability_mode.py`:
+
+```python
+"""
+capability.mode (tanda A v2, spec 2026-09-14 §3.1).
+
+`mode` dice si una capability cambia el estado del sistema ('mutating') o
+solo produce texto/parches sin aplicarlos ('read_only'). Decisión de
+Fernando (2026-09-14): 'mutating' SOLO file_write. Lo lee
+MotorCatalog.from_db() (jax) y lo verifica el resolver de
+CAPABILITY_AVAILABLE contra lo que afirma una faceta.
+
+NOT NULL y SIN DEFAULT a propósito: un default 'read_only' haría nacer de
+solo lectura a la próxima capability que mute (fail-open), y uno 'mutating'
+mentiría igual de invisible. Sin default, un INSERT sin modo falla
+(STRICT_TRANS_TABLES, medido en producción el 2026-09-14): el modo se
+declara o la fila no entra.
+
+Los dos primeros son PUROS. El resto usa `client` (base migrada) y, cuando
+rompe el esquema a propósito, lo deja como estaba con run_migrations().
+"""
+from __future__ import annotations
+
+import pymysql
+import pytest
+
+from db import migrations
+
+_INFO_MODE = (
+    "SELECT IS_NULLABLE, COLUMN_DEFAULT, COLUMN_TYPE FROM information_schema.COLUMNS "
+    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'capability' AND COLUMN_NAME = 'mode'"
+)
+
+
+def _sembradas() -> set[str]:
+    return ({fila[0] for fila in migrations._CAPABILITY_SEED}
+            | {fila[0] for fila in migrations._FILE_CAPABILITY_SEED})
+
+
+def test_tripwire_cada_capability_sembrada_declara_su_modo():
+    """TRIPWIRE. Una capability nueva en la semilla sin su modo en
+    _CAPABILITY_MODE rompe acá, antes de que su INSERT falle en producción."""
+    assert set(migrations._CAPABILITY_MODE) == _sembradas()
+    assert set(migrations._CAPABILITY_MODE.values()) <= {"read_only", "mutating"}
+
+
+def test_solo_file_write_es_mutating():
+    """Decisión de Fernando, 2026-09-14. Cambiarla es cambiar este test a
+    propósito, con fecha y quién decidió."""
+    assert {k for k, v in migrations._CAPABILITY_MODE.items() if v == "mutating"} == {"file_write"}
+
+
+async def _sql(sentencia, args=None):
+    from db.connection import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sentencia, args)
+            return await cur.fetchall()
+
+
+def test_la_columna_mode_es_not_null_y_sin_default(client):
+    assert client.portal.call(_sql, _INFO_MODE) == (("NO", None, "enum('read_only','mutating')"),)
+
+
+def test_los_valores_sembrados_son_los_de_capability_mode(client):
+    filas = dict(client.portal.call(_sql, "SELECT `key`, mode FROM capability"))
+    assert {k: filas.get(k) for k in migrations._CAPABILITY_MODE} == migrations._CAPABILITY_MODE
+    assert {k for k, v in filas.items() if v == "mutating"} == {"file_write"}
+
+
+def test_control_un_insert_sin_mode_falla(client):
+    """CONTROL de la decisión "sin default": si alguien le pone DEFAULT a
+    la columna, este INSERT entra y el test se pone rojo."""
+    async def correr():
+        try:
+            with pytest.raises(pymysql.err.MySQLError) as error:
+                await _sql("INSERT INTO capability (`key`, risk_level, max_execution_minutes, allowed_callers) "
+                           "VALUES ('zz_sin_modo', 'low', 5, '[]')")
+            return error.value.args[0]
+        finally:
+            await _sql("DELETE FROM capability WHERE `key` = 'zz_sin_modo'")
+
+    assert client.portal.call(correr) == 1364  # ER_NO_DEFAULT_FOR_FIELD
+
+
+def test_una_base_vieja_queda_rellenada_y_not_null(client):
+    """Producción hoy: la tabla existe sin la columna. run_migrations() la
+    agrega NULL, rellena desde _CAPABILITY_MODE y la pasa a NOT NULL."""
+    async def correr():
+        await _sql("ALTER TABLE capability DROP COLUMN mode")
+        await migrations.run_migrations()
+        return await _sql(_INFO_MODE), dict(await _sql("SELECT `key`, mode FROM capability"))
+
+    info, filas = client.portal.call(correr)
+    assert info == (("NO", None, "enum('read_only','mutating')"),)
+    assert {k: filas.get(k) for k in migrations._CAPABILITY_MODE} == migrations._CAPABILITY_MODE
+
+
+def test_una_capability_no_sembrada_sin_modo_frena_la_migracion(client):
+    """Una fila que ninguna migración sembró (SQL a mano) no recibe un modo
+    inventado: la migración falla con su nombre y jax-platform no arranca."""
+    async def correr():
+        await _sql("ALTER TABLE capability MODIFY COLUMN mode ENUM('read_only','mutating') NULL")
+        await _sql("INSERT INTO capability (`key`, risk_level, max_execution_minutes, allowed_callers) "
+                   "VALUES ('zz_huerfana', 'low', 5, '[]')")
+        try:
+            with pytest.raises(RuntimeError, match="zz_huerfana"):
+                await migrations.run_migrations()
+        finally:
+            await _sql("DELETE FROM capability WHERE `key` = 'zz_huerfana'")
+            await migrations.run_migrations()
+        return await _sql(_INFO_MODE)
+
+    assert client.portal.call(correr) == (("NO", None, "enum('read_only','mutating')"),)
+```
+
+- [ ] **Paso 3: correr y ver el rojo**
+
+```bash
+cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo \
+  /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest tests/test_capability_mode.py -v 2>&1 | tail -15
+```
+
+Esperado: los 7 en ROJO, todos porque la columna y la semilla todavía no existen:
+- Los 2 puros dan `AttributeError: module 'db.migrations' has no attribute '_CAPABILITY_MODE'`.
+- La forma de la columna da `assert () == (('NO', None, ...),)`.
+- Los valores dan un error 1054 `Unknown column 'mode'`.
+- El control da `DID NOT RAISE`: sin la columna, el `INSERT` entra.
+- La base vieja da 1091 `Can't DROP COLUMN 'mode'`.
+- La huérfana da 1054 en el `MODIFY`.
+
+- [ ] **Paso 4: implementar en `migrations.py`**
+
+En `CREATE_CAPABILITY`, después de `requires_human_gate BOOLEAN NOT NULL DEFAULT FALSE,`:
+
+```sql
+  -- Tanda A v2 (2026-09-14, decisión de Fernando): ¿la capability cambia el
+  -- estado del sistema? 'mutating' solo file_write; el resto produce texto o
+  -- parches sin aplicarlos. NOT NULL y SIN DEFAULT a propósito: un INSERT
+  -- sin modo falla (STRICT_TRANS_TABLES). Lo lee MotorCatalog.from_db() (jax)
+  -- y lo verifica el resolver de CAPABILITY_AVAILABLE. Spec jax
+  -- 2026-09-14-gobernanza-catalogo-db-design.md §3.1.
+  mode ENUM('read_only','mutating') NOT NULL,
+```
+
+Sacar la lista `file_capabilities` de `_seed_file_tools_capabilities` a nivel de módulo, justo después de `_CAPABILITY_SEED`, sin cambiar su contenido ni sus comentarios, con el nombre `_FILE_CAPABILITY_SEED`. Debajo:
+
+```python
+# Modo de cada capability sembrada (tanda A v2, 2026-09-14, decisión de
+# Fernando): 'mutating' SOLO file_write, la única que cambia el estado del
+# sistema. Las demás producen texto o parches sin aplicarlos. UNA fuente:
+# la usan los INSERT de las semillas y _backfill_capability_mode. Sin
+# default a propósito (ver CREATE_CAPABILITY). tests/test_capability_mode.py
+# es el tripwire de que cubre exactamente lo sembrado.
+_CAPABILITY_MODE: dict[str, str] = {
+    **{fila[0]: "read_only" for fila in _CAPABILITY_SEED},
+    "file_read": "read_only",
+    "file_write": "mutating",
+}
+```
+
+En los DOS `INSERT IGNORE INTO capability` (`_seed_motors_and_capabilities` y `_seed_file_tools_capabilities`), agregar `mode` a la lista de columnas, un `%s` más, y `_CAPABILITY_MODE[key]` como último valor. El `for` de `_seed_file_tools_capabilities` pasa a iterar `_FILE_CAPABILITY_SEED`. `_CAPABILITY_MODE[key]` es `KeyError` si falta el modo: ruidoso, y el tripwire puro lo ve antes.
+
+Al final de `_COLUMNS`:
+
+```python
+    # Tanda A v2 (2026-09-14): en bases que ya tienen `capability` nace NULL
+    # A PROPÓSITO. Un ADD COLUMN ... NOT NULL sin default le pondría a las
+    # filas existentes el primer valor del ENUM ('read_only') -- file_write
+    # quedaría de solo lectura en silencio hasta el UPDATE, y el DDL hace
+    # commit implícito. _backfill_capability_mode la rellena desde
+    # _CAPABILITY_MODE y _enforce_capability_mode_not_null la pasa a NOT NULL.
+    ("capability", "mode",
+     "ALTER TABLE capability ADD COLUMN mode ENUM('read_only','mutating') NULL"),
+```
+
+Funciones nuevas, antes de `run_migrations`:
+
+```python
+async def _backfill_capability_mode(cur) -> None:
+    """Rellena `mode` en las filas que ya existían sin columna. Solo toca
+    NULL: nunca pisa un modo ya declarado."""
+    for key, mode in _CAPABILITY_MODE.items():
+        await cur.execute(
+            "UPDATE capability SET mode=%s WHERE `key`=%s AND mode IS NULL", (mode, key)
+        )
+
+
+async def _enforce_capability_mode_not_null(cur) -> None:
+    """Si queda una capability sin modo (una fila que ninguna migración
+    sembró), la migración FALLA con su nombre: no se le inventa un modo
+    (P10). Si no queda ninguna y la columna todavía admite NULL, pasa a
+    NOT NULL, sin default."""
+    await cur.execute("SELECT `key` FROM capability WHERE mode IS NULL ORDER BY `key`")
+    sin_modo = [fila[0] for fila in await cur.fetchall()]
+    if sin_modo:
+        raise RuntimeError(
+            f"capability sin mode declarado: {sin_modo}. Ninguna migración las sembró: "
+            "declarar su modo en _CAPABILITY_MODE (db/migrations.py) o borrarlas. "
+            "Sin default a propósito, ver spec jax 2026-09-14-gobernanza-catalogo-db-design.md §3.1."
+        )
+    await cur.execute(
+        "SELECT IS_NULLABLE FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'capability' AND COLUMN_NAME = 'mode'"
+    )
+    fila = await cur.fetchone()
+    if fila is not None and fila[0] == "YES":
+        await cur.execute(
+            "ALTER TABLE capability MODIFY COLUMN mode ENUM('read_only','mutating') NOT NULL"
+        )
+```
+
+En `run_migrations`, después de `await _raise_generate_execution_ceiling(cur)`:
+
+```python
+            # Después de TODAS las semillas de capability: las filas nuevas ya
+            # entraron con su modo; las viejas se rellenan y la columna queda
+            # NOT NULL. Una fila huérfana frena acá (ver la función).
+            await _backfill_capability_mode(cur)
+            await _enforce_capability_mode_not_null(cur)
+```
+
+- [ ] **Paso 5: ver el verde, en las dos modalidades**
+
+```bash
+cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && export JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo && \
+  /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest tests/test_capability_mode.py -v 2>&1 | tail -10 && \
+  /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest -q -rs 2>&1 | tail -3 && \
+  JAX_CI_NO_DB=1 /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest -q -rs 2>&1 | tail -3
+```
+
+Esperado: `7 passed`. Suite completa sin fallos ni errores. Contra la base: con DB +7 passed y los mismos skips; sin DB +2 passed y +5 skipped.
+
+**Mutaciones** (backup con `cp`, restauración con `cp`):
+- (a) `DEFAULT 'read_only'` en el `MODIFY` y en el `CREATE`: caen `test_control_un_insert_sin_mode_falla` y la forma de la columna.
+- (b) Sacar el `raise` de `_enforce_capability_mode_not_null`: cae `test_una_capability_no_sembrada_sin_modo_frena_la_migracion`. El `MODIFY ... NOT NULL` con filas NULL da otro error, no `RuntimeError` con el nombre.
+- (c) `"file_write": "read_only"` en `_CAPABILITY_MODE`: cae `test_solo_file_write_es_mutating`.
+
+Después de las mutaciones, correr una vez `tests/test_capability_mode.py` para dejar la base de tests migrada con el código bueno.
+
+- [ ] **Paso 6: pisos**
+
+En `.github/workflows/policy.yml`, leer `PISO_PASSED` y `JAX_CI_MIN_PASSED` ACTUALES y subirlos por el delta medido en el Paso 5 (esperado +7 y +2). Comentario en el estilo del archivo:
+
+```text
+# Subido de <actual> a <actual+7> (2026-09-14, tanda A v2, capability.mode):
+# tests/test_capability_mode.py -- 2 puros (la semilla declara el modo de
+# todo lo sembrado; solo file_write es mutating) y 5 con `client` (columna
+# NOT NULL sin default, valores sembrados, CONTROL: INSERT sin mode falla
+# 1364, base vieja rellenada, fila huérfana frena la migración). Vistos en
+# rojo antes del arreglo; mutaciones en el PR. Medido: <passed> / <skips>.
+```
+
+Para `JAX_CI_MIN_PASSED`, el mismo comentario con "+2 puros; los 5 con `client` se saltean". `MAX_SKIPS` (job con DB) no cambia: los 5 corren con DB.
+
+- [ ] **Paso 7: commit**
+
+```bash
+git -C /home/fruiz/worktrees/jax-platform-gobernanza add backend/db/migrations.py backend/tests/test_capability_mode.py .github/workflows/policy.yml
+git -C /home/fruiz/worktrees/jax-platform-gobernanza commit -m "$(cat <<'EOF'
+feat(migraciones): capability.mode, NOT NULL y sin default
+
+Columna nueva ENUM('read_only','mutating'). Sembrada desde
+_CAPABILITY_MODE: mutating solo file_write (decisión de Fernando,
+2026-09-14). En bases existentes nace NULL, se rellena y pasa a NOT NULL;
+una capability no sembrada frena la migración con su nombre. Sin default:
+un INSERT sin modo falla. Tripwire de la semilla y CONTROL del sin-default.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
+EOF
+)"
+```
+
+---
+
+### Tarea 2: `MotorCatalog` lleva el modo (jax, PR-B)
+
+**Archivos:**
+- Modificar: `las_manos/motor_registry/catalog.py` (dataclass `CapabilityEntry` ~66-83, `_load` ~119-134, `from_db` ~217-252, método nuevo)
+- Crear: `tests/test_motor_catalog_mode.py`, `tests/test_catalog_mode_db.py`
+- Modificar: `.github/workflows/policy.yml`, jobs `tests-puros` y `jacobs-gobernanza-db`
+
+**Interfaces:**
+- Consume: la columna `capability.mode` (Tarea 1).
+- Produce, todo lo que usan las Tareas 3 y 4:
+  - `catalog.CAPABILITY_MODES = frozenset({"read_only", "mutating"})`.
+  - `CapabilityEntry.mode: str`, con default `"mutating"` solo en el constructor por dict.
+  - `MotorCatalog.capabilities() -> tuple[CapabilityEntry, ...]`, ordenado por `name`.
+
+- [ ] **Paso 1: venvs limpios** (líneas leídas del workflow actual; ver Restricciones)
+
+```bash
+python3.14 -m venv "$SCRATCH/venv-jax-puros" && "$SCRATCH/venv-jax-puros/bin/pip" install -q pytest pytest-asyncio aiomysql httpx cryptography pydantic pyyaml aiofiles fastapi==0.139.0
+python3.14 -m venv "$SCRATCH/venv-jax-db" && "$SCRATCH/venv-jax-db/bin/pip" install -q -r /home/fruiz/worktrees/jax-platform-gobernanza/backend/requirements.txt pytest
+git -C /home/fruiz/worktrees/jax-gobernanza-catalogo status --short   # esperado: vacío
+```
+
+- [ ] **Paso 2: tests (rojos)**
+
+`tests/test_motor_catalog_mode.py`:
+
+```python
+"""
+MotorCatalog lleva el modo de cada capability (tanda A v2, spec 2026-09-14 §3.2).
+
+`mode` sale de la columna capability.mode (jax-platform, NOT NULL sin
+default). El constructor por dict (solo tests) usa 'mutating' si no se
+declara: fail-closed, en la línea de risk_level='high' y
+requires_human_gate=True. Un claim de solo lectura sobre una capability sin
+modo declarado da FACT_MISMATCH, nunca VALID.
+"""
+from __future__ import annotations
+
+import pytest
+
+from las_manos.motor_registry.catalog import CAPABILITY_MODES, MotorCatalog
+
+
+def test_los_modos_son_los_del_enum_de_la_columna():
+    assert CAPABILITY_MODES == frozenset({"read_only", "mutating"})
+
+
+def test_sin_mode_declarado_el_constructor_por_dict_es_fail_closed():
+    assert MotorCatalog({"capabilities": {"x": {}}}).get_capability("x").mode == "mutating"
+
+
+def test_el_mode_declarado_se_respeta():
+    assert MotorCatalog({"capabilities": {"x": {"mode": "read_only"}}}).get_capability("x").mode == "read_only"
+
+
+def test_un_mode_invalido_lanza_con_el_nombre_de_la_capability():
+    with pytest.raises(RuntimeError, match="'x'"):
+        MotorCatalog({"capabilities": {"x": {"mode": "escritura"}}})
+
+
+def test_capabilities_sale_ordenado_por_nombre():
+    cat = MotorCatalog({"capabilities": {"b": {}, "a": {}, "c": {}}})
+    assert [c.name for c in cat.capabilities()] == ["a", "b", "c"]
+```
+
+`tests/test_catalog_mode_db.py`:
+
+```python
+"""
+MotorCatalog.from_db() trae capability.mode (tanda A v2). Corre en el job
+jacobs-gobernanza-db, cuya base la crean las migraciones de jax-platform
+(clonado de master): requiere PR-A (capability.mode) mergeado. Solo lee.
+"""
+from __future__ import annotations
+
+import asyncio
+
+from las_manos.motor_registry.catalog import MotorCatalog
+
+
+def test_from_db_trae_el_modo_sembrado_de_cada_capability():
+    modos = {c.name: c.mode for c in asyncio.run(MotorCatalog.from_db()).capabilities()}
+    assert modos["file_write"] == "mutating"
+    assert modos["generate"] == "read_only"
+    assert {n for n, m in modos.items() if m == "mutating"} == {"file_write"}
+```
+
+- [ ] **Paso 3: ver el rojo**
+
+```bash
+cd /home/fruiz/worktrees/jax-gobernanza-catalogo && pwd && PYTHONPATH=.:las_manos "$SCRATCH/venv-jax-puros/bin/python" -m pytest tests/test_motor_catalog_mode.py -v 2>&1 | tail -8
+cd /home/fruiz/worktrees/jax-gobernanza-catalogo && pwd && set -a && . /etc/jax/.env && set +a && JAX_DB_NAME=jax_memory_test \
+  PYTHONPATH=.:las_manos "$SCRATCH/venv-jax-db/bin/python" -m pytest tests/test_catalog_mode_db.py -v 2>&1 | tail -6
+```
+
+Esperado:
+- En el primero, error de colección con `ImportError: cannot import name 'CAPABILITY_MODES'`. Es la razón declarada: el catálogo todavía no conoce el modo.
+- En el segundo, `AttributeError: 'MotorCatalog' object has no attribute 'capabilities'`, contra `jax_memory_test`, que la Tarea 1 dejó migrada con la columna (el `client` de jax-platform la migra). Si da `Unknown column 'mode'`, esa base no pasó por la Tarea 1: correr antes `tests/test_capability_mode.py` de jax-platform.
+
+- [ ] **Paso 4: implementar en `catalog.py`**
+
+Debajo de los imports:
+
+```python
+# capability.mode (jax-platform, db/migrations.py): ¿la capability cambia el
+# estado del sistema? Mismo ENUM que la columna. Tanda A v2, 2026-09-14.
+CAPABILITY_MODES = frozenset({"read_only", "mutating"})
+
+
+def _modo_valido(capability: str, mode: object) -> str:
+    """La DB garantiza ENUM y NOT NULL; si eso se rompe, se ve (P10)."""
+    if mode not in CAPABILITY_MODES:
+        raise RuntimeError(
+            f"capability '{capability}': mode {mode!r} fuera de {sorted(CAPABILITY_MODES)} "
+            "(ver capability.mode en jax-platform/backend/db/migrations.py)."
+        )
+    return mode  # type: ignore[return-value]
+```
+
+Al final de `CapabilityEntry`:
+
+```python
+    # Tanda A v2 (2026-09-14): 'read_only' | 'mutating', de capability.mode
+    # (from_db lo pasa SIEMPRE explícito). El default solo lo usa el
+    # constructor por dict (tests) y es fail-closed, como risk_level='high'.
+    mode: str = "mutating"
+```
+
+En `_load`, dentro del `CapabilityEntry(...)` de capabilities: `mode=_modo_valido(name, cfg.get("mode", "mutating")),`.
+
+En `from_db`, el `SELECT` de `capability` termina en `"       auditor_motor, mode "`. El `for` desempaqueta `(..., fallback_mode, callers, forbidden, auditor_motor, mode)` y el `CapabilityEntry(...)` suma `mode=_modo_valido(key, mode),`. Actualizar el docstring de `from_db`: "motor/capability (con `mode`, tanda A v2)/capability_motor".
+
+Método nuevo, después de `get_capability`:
+
+```python
+    def capabilities(self) -> tuple[CapabilityEntry, ...]:
+        """Todas las capabilities, ordenadas por nombre. Lo usa
+        policy/governance/grounding.build_snapshot: el orden fijo es lo que
+        hace deterministas los punteros y el hash del snapshot."""
+        return tuple(self._capabilities[n] for n in sorted(self._capabilities))
+```
+
+- [ ] **Paso 5: ver el verde, con las listas completas de los dos jobs**
+
+Correr el paso "Piso exacto" del job `tests-puros`, copiado del workflow ACTUAL, con `tests/test_motor_catalog_mode.py` agregado al final. Correr también el de `jacobs-gobernanza-db` con `tests/test_catalog_mode_db.py` agregado, con `venv-jax-db`, `/etc/jax/.env` y `JAX_DB_NAME=jax_memory_test`.
+
+Esperado: `tests-puros` = piso actual + 5 (hoy 148) y `jacobs-gobernanza-db` = piso actual + 1 (hoy 15). Los tests existentes que arman `MotorCatalog(dict)` siguen verdes: el campo nuevo tiene default.
+
+**Mutación:** hacer que `_modo_valido` devuelva `mode` sin chequear: cae `test_un_mode_invalido_lanza_con_el_nombre_de_la_capability`.
+
+- [ ] **Paso 6: workflow**
+
+- Job `tests-puros`: `tests/test_motor_catalog_mode.py` en las DOS listas (el `run: >-` y el "Piso exacto"). Piso de `143` al medido, con este comentario:
+  `# <actual> -> <medido> el 2026-09-14 (tanda A v2): test_motor_catalog_mode.py (+5) -- CapabilityEntry.mode, fail-closed por dict, modo inválido lanza, capabilities() ordenado. Vistos en rojo.`
+- Job `jacobs-gobernanza-db`: `tests/test_catalog_mode_db.py` en sus DOS listas. Piso `14` → medido, con este comentario:
+  `# <actual> -> <medido> el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.`
+
+- [ ] **Paso 7: commit**
+
+```bash
+git -C /home/fruiz/worktrees/jax-gobernanza-catalogo add las_manos/motor_registry/catalog.py tests/test_motor_catalog_mode.py tests/test_catalog_mode_db.py .github/workflows/policy.yml
+git -C /home/fruiz/worktrees/jax-gobernanza-catalogo commit -m "$(cat <<'EOF'
+feat(motor_registry): CapabilityEntry.mode desde capability.mode
+
+from_db() lee la columna nueva de jax-platform y valida el ENUM; el
+constructor por dict usa 'mutating' si no se declara (fail-closed).
+MotorCatalog.capabilities() ordenado por nombre, para el snapshot.
+tests-puros +5, jacobs-gobernanza-db +1.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
+EOF
+)"
+```
+
+---
+
+### Tarea 3: el validador recibe el catálogo y verifica su modo (jax, PR-B)
+
+**Archivos:**
+- Modificar: `policy/governance/validator.py:78-90` (`load_validation_context`) y `:185-193` (rama `in_catalog`)
+- Modificar: `tests/test_governance_validator.py`: `_real_ctx` (`:229-231`), `test_capability_available_catalog_branch_with_synthetic_catalog_is_valid` (`:254-269`), el tripwire `:272-301`, y tests nuevos
+- Modificar: `.github/workflows/policy.yml`, job `governance`
+
+**Interfaces:**
+- Consume: `CapabilityEntry.mode` (Tarea 2).
+- Produce: `validator.load_validation_context(repo_root: Path, config_paths_allowlist: frozenset[str], catalog: MotorCatalog) -> ValidationContext`. `ctx.catalog` es el objeto recibido (identidad, no copia). La Tarea 6 lo llama con `await MotorCatalog.from_db()`.
+
+- [ ] **Paso 1: venv limpio del job `governance`**
+
+```bash
+python3.14 -m venv "$SCRATCH/venv-jax-gov" && "$SCRATCH/venv-jax-gov/bin/pip" install -q pytest pyyaml pydantic aiomysql==0.3.2
+```
+
+- [ ] **Paso 2: tests (rojos)**
+
+Reemplazar `_real_ctx`:
 
 ```python
 def _real_ctx(catalog: MotorCatalog | None = None) -> "validator.ValidationContext":
     """ops y allowlist REALES (config.toml y closed_vocabulary.yaml del repo).
     El catálogo lo pasa el test: desde 2026-09-14 el validador ya no lo arma
-    del TOML (spec tanda A, §3.1). Sin catálogo explícito va uno vacío, que es
+    del TOML (spec tanda A, §3.3). Sin catálogo explícito va uno vacío, que es
     lo que necesitan los tests de la rama `ops`."""
     vocab = loaders.load_vocabulary()
     return validator.load_validation_context(
@@ -124,30 +626,29 @@ def _real_ctx(catalog: MotorCatalog | None = None) -> "validator.ValidationConte
     )
 ```
 
-Borrar entero `test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production` (líneas 272-301). En su lugar:
+En `test_capability_available_catalog_branch_with_synthetic_catalog_is_valid`:
+- El catálogo pasa a `MotorCatalog({"capabilities": {"code_swarm": {"allowed_motors": ["kimi"], "mode": "read_only"}}})`.
+- El docstring suma: "Desde la tanda A v2 (2026-09-14) la rama verifica el modo: el catálogo lo declara explícito, y sin declararlo el constructor por dict da 'mutating' (fail-closed)."
+- Es una adaptación: el test no es nuevo y no se espera verlo en rojo.
+
+Borrar entero `test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production` y agregar en su lugar:
 
 ```python
 def test_load_validation_context_usa_el_catalogo_que_recibe():
     """Reemplaza al tripwire `test_real_toml_catalog_is_empty_since_block3_so_
     catalog_branch_is_dead_in_production` (2026-09-02 -> 2026-09-14). Ese test
     fijaba que el validador armaba el catálogo desde el TOML vacío; el arreglo
-    de la tanda A (spec 2026-09-14, §3.1) lo pone rojo, como estaba previsto,
-    y este describe el estado nuevo: el catálogo es el que pasa el llamador
-    (en producción, jax-platform con `await MotorCatalog.from_db()`), y una
-    capability que existe solo ahí resuelve VALID por la rama `in_catalog`.
+    de la tanda A (spec 2026-09-14 v2, §3.3) lo pone rojo, como estaba
+    previsto, y este describe el estado nuevo: el catálogo es el que pasa el
+    llamador (en producción, jax-platform con `await MotorCatalog.from_db()`).
 
-    §3.3 del spec de SP3 y `grounding.SECTION_PREDICATE`, revisados como pedía
-    el tripwire: el snapshot sigue listando solo `ctx.ops` (decisión §2 de la
-    tanda A), así que en la Mesa un claim sobre `generate` todavía no llega al
-    resolver -- lo fija el tripwire de jax-platform
-    `test_tripwires_catalogo_db.py::test_tripwire_en_la_mesa_un_claim_sobre_capability_de_la_db_no_llega_al_resolver`."""
-    catalogo = MotorCatalog({"capabilities": {"generate": {"allowed_motors": ["kimi"]}}})
+    Lo que pedía el tripwire, hecho: DEUDA.md se cierra en el despliegue; SP3
+    §3.3 lleva una nota fechada; `grounding.SECTION_PREDICATE` suma
+    `catalog_capabilities` (tests/test_governance_grounding.py)."""
+    catalogo = MotorCatalog({"capabilities": {"generate": {"allowed_motors": ["kimi"], "mode": "read_only"}}})
     ctx = _real_ctx(catalogo)
     assert ctx.catalog is catalogo
-    claim = _claim(
-        predicate="CAPABILITY_AVAILABLE",
-        args={"name": "generate", "mode": "read_only"},
-    )
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "generate", "mode": "read_only"})
     verdict = validator.validate(claim, PREDICATES, ctx)
     assert verdict.status == "VALID", verdict.detail
     assert "catálogo" in verdict.detail
@@ -155,29 +656,43 @@ def test_load_validation_context_usa_el_catalogo_que_recibe():
 
 def test_control_sin_la_capability_en_el_catalogo_el_mismo_claim_es_fact_mismatch():
     """CONTROL de `test_load_validation_context_usa_el_catalogo_que_recibe`:
-    mismo claim, mismo repo, catálogo vacío -> FACT_MISMATCH. Prueba que el
-    VALID de arriba sale del catálogo recibido y no de `ops` ni de otra
-    fuente."""
+    mismo claim, mismo repo, catálogo vacío -> FACT_MISMATCH. El VALID de
+    arriba sale del catálogo recibido y no de `ops` ni de otra fuente."""
     ctx = _real_ctx(MotorCatalog({}))
-    claim = _claim(
-        predicate="CAPABILITY_AVAILABLE",
-        args={"name": "generate", "mode": "read_only"},
-    )
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "generate", "mode": "read_only"})
+    assert validator.validate(claim, PREDICATES, ctx).status == "FACT_MISMATCH"
+
+
+def test_rama_catalogo_con_el_modo_equivocado_es_fact_mismatch():
+    """Tanda A v2: el catálogo tiene el modo (capability.mode). Afirmar que
+    file_write es de solo lectura es falso."""
+    ctx = _real_ctx(MotorCatalog({"capabilities": {"file_write": {"mode": "mutating"}}}))
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "file_write", "mode": "read_only"})
     verdict = validator.validate(claim, PREDICATES, ctx)
     assert verdict.status == "FACT_MISMATCH"
+    assert "mutating" in verdict.detail
+
+
+def test_rama_catalogo_con_el_modo_real_mutating_es_valid():
+    ctx = _real_ctx(MotorCatalog({"capabilities": {"file_write": {"mode": "mutating"}}}))
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "file_write", "mode": "mutating"})
+    assert validator.validate(claim, PREDICATES, ctx).status == "VALID"
 ```
 
-- [ ] **Paso 3: correr y ver el rojo**
+- [ ] **Paso 3: ver el rojo**
 
 ```bash
 cd /home/fruiz/worktrees/jax-gobernanza-catalogo && pwd && "$SCRATCH/venv-jax-gov/bin/python" -m pytest tests/test_governance_validator.py -q 2>&1 | tail -15
 ```
 
-Esperado: ROJO en todo test que use `_real_ctx`, con `TypeError: load_validation_context() takes 2 positional arguments but 3 were given`. Es la razón declarada: el validador todavía no recibe el catálogo.
+Esperado:
+- ROJO en todo test que use `_real_ctx`, con `TypeError: load_validation_context() takes 2 positional arguments but 3 were given`.
+- Una vez corregida la firma (Paso 4, primera mitad), sigue ROJO `test_rama_catalogo_con_el_modo_equivocado_es_fact_mismatch`: da `VALID` por "mode no verificable ahí".
+- Así se ven los dos rojos por su razón: primero la firma, después el resolver.
 
 - [ ] **Paso 4: implementar**
 
-En `policy/governance/validator.py`, reemplazar `load_validation_context` (líneas 78-90) por:
+`load_validation_context`:
 
 ```python
 def load_validation_context(
@@ -190,10 +705,10 @@ def load_validation_context(
     `governance_context`, con `await MotorCatalog.from_db()`).
 
     Hasta el 2026-09-14 se armaba acá con `MotorCatalog(config)` desde el
-    TOML, cuyo `[capabilities.*]` quedó vacío con el Bloque 3 (capabilities a
-    la DB): la rama `in_catalog` de `_resolve_capability_available` era código
-    muerto en producción. Spec: docs/superpowers/specs/
-    2026-09-14-gobernanza-catalogo-db-design.md §3.1."""
+    TOML, cuyo `[capabilities.*]` quedó vacío con el Bloque 3: la rama
+    `in_catalog` de `_resolve_capability_available` era código muerto en
+    producción. Spec: docs/superpowers/specs/
+    2026-09-14-gobernanza-catalogo-db-design.md (v2) §3.3."""
     config_path = repo_root / "las_manos" / "config.toml"
     with config_path.open("rb") as f:
         config = tomllib.load(f)
@@ -206,7 +721,33 @@ def load_validation_context(
     )
 ```
 
-Confirmar que no queda ningún otro llamador en jax:
+Ver el rojo del resolver (Paso 3). Después, reemplazar el bloque `if in_catalog:` de `_resolve_capability_available`:
+
+```python
+    if in_catalog:
+        # Tanda A v2 (2026-09-14): el catálogo tiene el modo (capability.mode,
+        # jax-platform). Hasta hoy esta rama aceptaba cualquier modo "sin
+        # contradicción". `ops` usa MUTATING_CAPABILITIES; el catálogo, su
+        # columna. Dos fuentes para dos conjuntos de nombres DISJUNTOS
+        # (tripwire en jax-platform: test_catalogo_db_en_la_mesa.py).
+        real_mode = ctx.catalog.get_capability(name).mode
+        if mode != real_mode:
+            return Verdict(
+                status="FACT_MISMATCH",
+                predicate="CAPABILITY_AVAILABLE",
+                detail=(
+                    f"'{name}' tiene mode real '{real_mode}' en el catálogo de "
+                    f"capabilities, el claim afirma '{mode}'."
+                ),
+            )
+        return Verdict(
+            status="VALID",
+            predicate="CAPABILITY_AVAILABLE",
+            detail=f"'{name}' verificado en catálogo de capabilities, mode='{real_mode}'.",
+        )
+```
+
+Actualizar el docstring del módulo: "Recibe el catálogo de capabilities del llamador (no toca la DB)".
 
 ```bash
 git -C /home/fruiz/worktrees/jax-gobernanza-catalogo grep -n "load_validation_context(" -- '*.py'
@@ -214,24 +755,26 @@ git -C /home/fruiz/worktrees/jax-gobernanza-catalogo grep -n "load_validation_co
 
 Esperado: solo `validator.py` y `tests/test_governance_validator.py`.
 
-- [ ] **Paso 5: ver el verde, con la suite del job completa**
+- [ ] **Paso 5: verde con la suite del job**
 
 ```bash
 cd /home/fruiz/worktrees/jax-gobernanza-catalogo && pwd && "$SCRATCH/venv-jax-gov/bin/python" -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tail -3
 ```
 
-Esperado: `81 passed` (80 − 1 tripwire + 2 nuevos). Si el número difiere, se usa el MEDIDO y se explica en el comentario del piso.
+Esperado: piso actual − 1 + 4 (hoy `83 passed`).
 
-- [ ] **Paso 6: subir el piso del job `governance`**
+**Mutación:** volver la rama `in_catalog` al `VALID` incondicional: cae `test_rama_catalogo_con_el_modo_equivocado_es_fact_mismatch`.
 
-En `.github/workflows/policy.yml`, en el paso "Piso exacto de tests CORRIDOS" del job `governance`, leer el valor actual (hoy `80`) y reemplazarlo por el medido en los dos lugares (`grep -qE "^81 passed"` y el mensaje `se esperaban 81`). Agregar al final del comentario del paso:
+- [ ] **Paso 6: piso del job `governance`** (se sube de nuevo en la Tarea 4; cada commit deja su número)
+
+Reemplazar el valor en los dos lugares (`grep -qE "^N passed"` y el mensaje) y agregar al comentario del paso:
 
 ```yaml
-        # 80 -> 81 el 2026-09-14 (tanda A, catálogo de la DB): se reemplaza el
-        # tripwire del catálogo TOML vacío (-1) por
-        # test_load_validation_context_usa_el_catalogo_que_recibe y su CONTROL
-        # (+2). El tripwire se vio en rojo con el arreglo, como estaba previsto;
-        # los nuevos, en rojo antes del arreglo (TypeError de la firma vieja).
+        # <actual> -> <medido> el 2026-09-14 (tanda A v2): el tripwire del
+        # catálogo TOML vacío se reemplaza (-1) por
+        # test_load_validation_context_usa_el_catalogo_que_recibe + su CONTROL
+        # (+2) y la rama in_catalog verifica el modo (+2). El tripwire se vio en
+        # rojo con el arreglo, como estaba previsto; los nuevos, antes.
 ```
 
 - [ ] **Paso 7: commit**
@@ -239,12 +782,12 @@ En `.github/workflows/policy.yml`, en el paso "Piso exacto de tests CORRIDOS" de
 ```bash
 git -C /home/fruiz/worktrees/jax-gobernanza-catalogo add policy/governance/validator.py tests/test_governance_validator.py .github/workflows/policy.yml
 git -C /home/fruiz/worktrees/jax-gobernanza-catalogo commit -m "$(cat <<'EOF'
-fix(gobernanza): el validador recibe el catálogo de capabilities
+fix(gobernanza): el validador recibe el catálogo y verifica su modo
 
 load_validation_context() deja de armar MotorCatalog desde el TOML (vacío
-desde el Bloque 3) y recibe el catálogo del llamador. El tripwire del
-catálogo vacío se reemplaza por el test del estado nuevo y su control.
-Piso de governance 80 -> 81.
+desde el Bloque 3) y recibe el del llamador. La rama in_catalog compara el
+modo del claim con capability.mode: FACT_MISMATCH si no coincide. El
+tripwire del catálogo vacío se reemplaza por el estado nuevo y su control.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
@@ -254,27 +797,288 @@ EOF
 
 ---
 
-### Tarea 2: Jacobs acepta el rol `plataforma`
+### Tarea 4: el snapshot lista las capabilities de la DB (jax, PR-B)
+
+**Archivos:**
+- Modificar: `policy/governance/grounding.py`: docstring del módulo (1-18), `SECTION_PREDICATE` (27-30), `build_snapshot` (114-135), `render` (138-148) y el comentario de `accredit.mismatch` (184-190)
+- Modificar: `tests/test_governance_grounding.py` (tests nuevos después de `test_render_lists_every_entry_with_its_pointer_and_args` y de `test_empty_ops_is_a_valid_snapshot_not_an_error`)
+- Modificar: `docs/superpowers/specs/2026-09-02-reformas-fase2-sp3-grounding-design.md` §3.3 (nota fechada al final de la sección)
+- Modificar: `.github/workflows/policy.yml`, job `governance`
+
+**Interfaces:**
+- Consume: `MotorCatalog.capabilities()` y `CapabilityEntry.mode` (Tarea 2).
+- Produce:
+  - `SECTION_PREDICATE = {"capabilities": "CAPABILITY_AVAILABLE", "catalog_capabilities": "CAPABILITY_AVAILABLE"}`.
+  - Punteros `/catalog_capabilities/N`, por nombre. `/capabilities/N` no se mueve.
+  - `canonical_json = {"capabilities": [...], "catalog_capabilities": [...]}`.
+  - La Tarea 7 cita `/catalog_capabilities/N`.
+
+- [ ] **Paso 1: buscar tests que dependan del `canonical_json` literal**
+
+```bash
+git -C /home/fruiz/worktrees/jax-gobernanza-catalogo grep -n 'canonical_json ==\|"capabilities": \[' -- tests/
+git -C /home/fruiz/worktrees/jax-platform-gobernanza grep -n 'canonical_json ==\|"capabilities": \[' -- backend/tests/
+```
+
+Esperado (medido el 2026-09-14):
+- En jax, solo `test_sha256_is_over_the_canonical_json`, que compara el JSON consigo mismo.
+- En jax-platform, `test_reclassify_provenance_mismatch.py`, que arma su propio JSON de filas viejas: no depende de `build_snapshot`.
+- Cualquier otro que compare un literal se actualiza en esta tarea y se declara en el PR.
+
+- [ ] **Paso 2: tests**
+
+En `tests/test_governance_grounding.py`, después de `CTX_A`:
+
+```python
+def _ctx_con_catalogo(ops: set[str], catalogo: dict) -> validator.ValidationContext:
+    return validator.ValidationContext(
+        ops=frozenset(ops),
+        mutating_capabilities=frozenset({"write_file"}),
+        catalog=MotorCatalog({"capabilities": catalogo}),
+        config_paths_allowlist=frozenset(),
+        repo_root=REPO_ROOT,
+    )
+
+
+# Contexto C (tanda A v2): las ops de CTX_A + dos capabilities de la DB.
+# Por nombre: file_write en /catalog_capabilities/0, generate en /1.
+CTX_C = _ctx_con_catalogo(
+    {"write_file", "read_file"},
+    {"generate": {"mode": "read_only"}, "file_write": {"mode": "mutating"}},
+)
+```
+
+Después de `test_render_lists_every_entry_with_its_pointer_and_args`:
+
+```python
+# --- tanda A v2 (2026-09-14): sección catalog_capabilities --------------------
+
+def test_seccion_catalog_capabilities_ordenada_y_con_el_modo_del_catalogo():
+    snap = grounding.build_snapshot(CTX_C)
+    e0, e1 = snap.lookup("/catalog_capabilities/0"), snap.lookup("/catalog_capabilities/1")
+    assert e0.args == {"name": "file_write", "mode": "mutating"}
+    assert e1.args == {"name": "generate", "mode": "read_only"}
+    assert e0.predicate == e1.predicate == "CAPABILITY_AVAILABLE"
+
+
+def test_los_punteros_de_ops_no_se_mueven_al_sumar_el_catalogo():
+    """Pasa también ANTES del cambio, a propósito: fija lo que el cambio no
+    debe mover (spec v2 §3.4). Se valida por mutación: mezclar las dos
+    listas en un solo orden lo pone rojo."""
+    def ops(snap):
+        return [(e.pointer, e.args) for e in snap.entries if e.pointer.startswith("/capabilities/")]
+    assert ops(grounding.build_snapshot(CTX_C)) == ops(grounding.build_snapshot(CTX_A))
+
+
+def test_canonical_json_trae_las_dos_secciones_aunque_el_catalogo_este_vacio():
+    assert json.loads(grounding.build_snapshot(CTX_A).canonical_json) == {
+        "capabilities": [{"mode": "read_only", "name": "read_file"},
+                         {"mode": "mutating", "name": "write_file"}],
+        "catalog_capabilities": [],
+    }
+
+
+def test_una_capability_del_catalogo_citada_bien_es_observado_y_valid():
+    snap = grounding.build_snapshot(CTX_C)
+    raw = _raw(args={"name": "generate", "mode": "read_only"}, pointer="/catalog_capabilities/1")
+    assert grounding.accredit(raw, snap).outcome == "ACCREDITED"
+    v = _validate(raw, snap, ctx=CTX_C)
+    assert v.status == "VALID", v.detail
+
+
+def test_control_el_modo_equivocado_contra_el_catalogo_es_fact_not_in_snapshot():
+    """CONTROL del anterior: mismo puntero, modo falso -> ninguna entrada
+    del snapshot lo respalda. Pasa también antes del cambio (ahí no había
+    sección); con la sección, prueba que acreditar mira el modo y no solo el
+    nombre."""
+    snap = grounding.build_snapshot(CTX_C)
+    raw = _raw(args={"name": "generate", "mode": "mutating"}, pointer="/catalog_capabilities/1")
+    assert _validate(raw, snap, ctx=CTX_C).status == "FACT_NOT_IN_SNAPSHOT"
+
+
+def test_render_muestra_las_dos_secciones():
+    text = grounding.render(grounding.build_snapshot(CTX_C))
+    assert "  capabilities:\n" in text
+    assert "  catalog_capabilities:\n" in text
+    assert "/catalog_capabilities/1: name=generate, mode=read_only" in text
+    assert text.index("  capabilities:") < text.index("  catalog_capabilities:")
+```
+
+Después de `test_empty_ops_is_a_valid_snapshot_not_an_error`:
+
+```python
+def test_7d_un_catalogo_que_explota_da_GroundingBuildError():
+    """P10: leer el catálogo entra en el mismo try que ctx.ops."""
+    class CatalogoRoto:
+        def capabilities(self):
+            raise OSError("catálogo ilegible")
+
+    class Ctx:
+        ops = frozenset({"read_file"})
+        mutating_capabilities = frozenset()
+        catalog = CatalogoRoto()
+
+    with pytest.raises(grounding.GroundingBuildError):
+        grounding.build_snapshot(Ctx())
+```
+
+- [ ] **Paso 3: ver el rojo**
+
+```bash
+cd /home/fruiz/worktrees/jax-gobernanza-catalogo && pwd && "$SCRATCH/venv-jax-gov/bin/python" -m pytest tests/test_governance_grounding.py -q 2>&1 | tail -12
+```
+
+Esperado: 5 ROJOS, porque el snapshot todavía no lee el catálogo:
+- La sección da `AttributeError: 'NoneType' object has no attribute 'args'`.
+- El `canonical_json` da `assert {...} == {..., 'catalog_capabilities': []}`.
+- La citación bien hecha da `'FACT_NOT_IN_SNAPSHOT' == 'ACCREDITED'`.
+- `render` da `assert '  catalog_capabilities:\n' in ...`.
+- El catálogo roto da `DID NOT RAISE`.
+
+Los otros 2 (punteros de ops y el CONTROL del modo) pasan ya, como declaran.
+
+- [ ] **Paso 4: implementar en `grounding.py`**
+
+```python
+# Sección del snapshot -> predicado que acredita. Crece SOLO cuando un
+# predicado gana resolver (spec SP3 §3): no agregar entradas acá sin
+# resolver en validator._RESOLVERS.
+#   capabilities          -> `ops` de las_manos/config.toml (rama in_ops)
+#   catalog_capabilities  -> capability de la DB (rama in_catalog, que desde
+#                            la tanda A v2, 2026-09-14, verifica nombre Y modo)
+# Dos secciones y no una lista mezclada: los punteros /capabilities/N de las
+# ops no se mueven cuando la DB gana una capability (spec tanda A v2 §3.4).
+SECTION_PREDICATE: dict[str, str] = {
+    "capabilities": "CAPABILITY_AVAILABLE",
+    "catalog_capabilities": "CAPABILITY_AVAILABLE",
+}
+```
+
+```python
+def build_snapshot(ctx) -> Snapshot:
+    """Snapshot desde ctx.ops + ctx.mutating_capabilities (sección
+    `capabilities`) y ctx.catalog (sección `catalog_capabilities`, con el
+    modo de capability.mode). Cada sección ordenada por name (spec SP3
+    §5.2): mismo contenido => mismo hash y mismos punteros, en cualquier
+    orden de archivo o de filas."""
+    try:
+        mutating = ctx.mutating_capabilities
+        data = {
+            "capabilities": [
+                normalize_args({"name": name, "mode": "mutating" if name in mutating else "read_only"})
+                for name in sorted(ctx.ops)
+            ],
+            "catalog_capabilities": [
+                normalize_args({"name": e.name, "mode": e.mode})
+                for e in sorted(ctx.catalog.capabilities(), key=lambda e: e.name)
+            ],
+        }
+    except Exception as e:
+        raise GroundingBuildError(f"ValidationContext inutilizable: {type(e).__name__}: {e}") from e
+
+    canonical = _canonical(data)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    entries = tuple(
+        SnapshotEntry(pointer=f"/{section}/{i}", predicate=SECTION_PREDICATE[section], args=c)
+        for section, lista in data.items()
+        for i, c in enumerate(lista)
+    )
+    return Snapshot(entries=entries, canonical_json=canonical, sha256=digest)
+
+
+def render(snapshot: Snapshot) -> str:
+    """Bloque para el system prompt. NO incluye el hash (spec §5.1): el
+    modelo solo cita la línea; provenance_ref lo escribe el servidor. Una
+    cabecera por sección, en el orden de SECTION_PREDICATE, aunque esté
+    vacía: cero entradas es una observación."""
+    lines = [
+        "HECHOS VERIFICADOS — leídos del sistema por el servidor. "
+        "Para afirmar uno, poné su evidence_pointer en el claim.",
+    ]
+    for section in SECTION_PREDICATE:
+        lines.append(f"  {section}:")
+        prefix = f"/{section}/"
+        for e in snapshot.entries:
+            if e.pointer.startswith(prefix):
+                lines.append(f"    {e.pointer}: " + ", ".join(f"{k}={v}" for k, v in e.args.items()))
+    return "\n".join(lines)
+```
+
+En el docstring del módulo, reemplazar el párrafo del invariante por:
+
+```text
+Invariante (spec §3): todo hecho inyectado tiene quién lo re-resuelva. Por
+eso el snapshot se genera desde las MISMAS fuentes que consulta
+_resolve_capability_available: ctx.ops (rama in_ops) y, desde la tanda A v2
+(2026-09-14), ctx.catalog con su modo (rama in_catalog). No desde una
+lista curada.
+```
+
+En el comentario de `mismatch()` de `accredit`, reemplazar "Hoy build_snapshot() no puede producir dos entradas con args idénticos -- itera sorted(ctx.ops), ops es un frozenset (nombres únicos), y el nombre es parte de los args de cada entrada" por:
+
+```text
+Hoy build_snapshot() no puede producir dos entradas con args idénticos:
+cada sección tiene nombres únicos (ops es un frozenset, capability.key es
+PK), y entre secciones un mismo nombre es SOURCE_CONFLICT, vigilado por el
+tripwire ops∩DB de jax-platform (test_catalogo_db_en_la_mesa.py).
+```
+
+En el spec de SP3, al final de §3.3:
+
+```markdown
+> **Nota 2026-09-14 (tanda A v2, `docs/superpowers/specs/2026-09-14-gobernanza-catalogo-db-design.md`):**
+> la rama `in_catalog` dejó de ser código muerto. El validador recibe el catálogo de la DB y verifica
+> nombre **y** modo (`capability.mode`), así que `build_snapshot` ahora sí lee `ctx.catalog`: sección
+> `catalog_capabilities` (`/catalog_capabilities/N`), sin mover los punteros `/capabilities/N`. El
+> invariante de §3 se sigue cumpliendo: cada línea inyectada la re-resuelve una rama viva. El tripwire
+> citado arriba se reemplazó por `test_load_validation_context_usa_el_catalogo_que_recibe`.
+```
+
+- [ ] **Paso 5: verde**
+
+Correr el mismo comando de la suite del job `governance` que en la Tarea 3, Paso 5. Esperado: el piso de la Tarea 3 + 7 (hoy `90 passed`).
+
+**Mutaciones:**
+- (a) Mezclar las secciones: sumar el catálogo a la lista `capabilities` y dejar `catalog_capabilities` vacía. Caen `test_los_punteros_de_ops_no_se_mueven_al_sumar_el_catalogo` y la sección.
+- (b) Sacar `"catalog_capabilities"` de `SECTION_PREDICATE`. Cae con `KeyError` todo lo que construye el snapshot, que es ruidoso y es lo buscado.
+- (c) Construir la sección nueva fuera del `try`. Cae `test_7d_un_catalogo_que_explota_da_GroundingBuildError`.
+
+- [ ] **Paso 6: piso de `governance`**: del valor que dejó la Tarea 3 al medido. Comentario: `# <antes> -> <medido> el 2026-09-14 (tanda A v2): sección catalog_capabilities en el snapshot (+7: sección, punteros de ops estables, canonical con dos secciones, citación VALID + su CONTROL, render, P10). Rojos vistos; los 2 que pasan antes son declarados y validados por mutación.`
+
+- [ ] **Paso 7: commit**
+
+```bash
+git -C /home/fruiz/worktrees/jax-gobernanza-catalogo add policy/governance/grounding.py tests/test_governance_grounding.py docs/superpowers/specs/2026-09-02-reformas-fase2-sp3-grounding-design.md .github/workflows/policy.yml
+git -C /home/fruiz/worktrees/jax-gobernanza-catalogo commit -m "$(cat <<'EOF'
+feat(grounding): el snapshot lista las capabilities de la DB
+
+Sección nueva catalog_capabilities (/catalog_capabilities/N, por nombre,
+con capability.mode); los punteros /capabilities/N de las ops no se
+mueven. SECTION_PREDICATE la mapea a CAPABILITY_AVAILABLE, que la
+re-resuelve la rama in_catalog. render() por sección. Nota en SP3 §3.3.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
+EOF
+)"
+```
+
+---
+
+### Tarea 5: Jacobs acepta el rol `plataforma` (jax, PR-B)
 
 **Archivos:**
 - Modificar: `jacobs/models.py:51` (`VALID_INVOKERS`)
 - Modificar: `jacobs/policy.py:12` (import) y `:81-88` (`validate_resume`)
 - Modificar: `jacobs/routes.py:20-27` (import), `:100-104` (`plan_only`) y los docstrings de `resume_pipeline` (`:252`) y `approve_step` (`:302-306`)
 - Crear: `tests/test_jacobs_invoked_by_rol.py`
-- Modificar: `.github/workflows/policy.yml`, job `tests-puros` (las dos listas de archivos y el piso)
+- Modificar: `.github/workflows/policy.yml`, job `tests-puros`
 
 **Interfaces:**
-- Produce: `jacobs.models.INVOKER_PLATAFORMA = "plataforma"` y `jacobs.models.VALID_INVOKERS = frozenset({"plataforma", "jax_local", "ada"})`. El literal `"plataforma"` es el contrato con jax-platform (Tarea 4).
+- Produce: `jacobs.models.INVOKER_PLATAFORMA = "plataforma"` y `jacobs.models.VALID_INVOKERS = frozenset({"plataforma", "jax_local", "ada"})`. El literal `"plataforma"` es el contrato con jax-platform (Tarea 8). `create` lo valida `PipelineCreateRequest` contra `VALID_INVOKERS`.
 - `policy.validate_resume(invoked_by: str) -> PolicyResult` da `ok=True` solo con `"plataforma"`.
 
-- [ ] **Paso 1: venv limpio del job `tests-puros`**
-
-```bash
-python3.14 -m venv "$SCRATCH/venv-jax-puros"
-"$SCRATCH/venv-jax-puros/bin/pip" install -q pytest pytest-asyncio aiomysql httpx cryptography pydantic pyyaml aiofiles fastapi==0.139.0
-```
-
-- [ ] **Paso 2: escribir el test (rojo)**
+- [ ] **Paso 1: escribir el test (rojo)**
 
 Crear `tests/test_jacobs_invoked_by_rol.py`:
 
@@ -390,15 +1194,24 @@ def test_aprobar_paso_rechaza_fernando_y_deja_pasar_plataforma():
         assert no_existe.value.status_code == 404
 ```
 
-- [ ] **Paso 3: correr y ver el rojo**
+Antes de correrlo, confirmar contra el código las firmas que el test supone: `validate_create(invoked_by, mode, ...)` en `policy.py`, `PlanRequest`/`ResumeRequest`/`ApproveStepRequest` en `routes.py`, y `check_kill_switch` importado en `routes`. Esto se hace con `grep -n "def validate_create\|class PlanRequest\|class ResumeRequest\|class ApproveStepRequest\|check_kill_switch" jacobs/policy.py jacobs/routes.py jacobs/models.py`. Si una firma difiere, se ajusta el test a la firma real antes de ver el rojo.
+
+- [ ] **Paso 2: ver el rojo**
 
 ```bash
 cd /home/fruiz/worktrees/jax-gobernanza-catalogo && pwd && PYTHONPATH=.:las_manos "$SCRATCH/venv-jax-puros/bin/python" -m pytest tests/test_jacobs_invoked_by_rol.py -v 2>&1 | tail -15
 ```
 
-Esperado: los 8 en ROJO por la razón declarada. El set de invocadores no coincide. `validate_create("Fernando")` da `ok=True`. `"plataforma"` es rechazado, y en `plan_only` da 403 donde se esperaba 423. `DID NOT RAISE ValidationError`. Reanudar y aprobar con `"Fernando"` dan 404 donde se esperaba 403. **Si alguno falla en la colección** (`ModuleNotFoundError`), es una dependencia que falta en el `pip install` del job: se agrega en el workflow con un comentario "medido en venv limpio" y se vuelve a ver el rojo correcto. No se sigue sin entenderlo.
+Esperado: los 8 en ROJO por la razón declarada:
+- El set de invocadores no coincide.
+- `validate_create("Fernando")` da `ok=True`.
+- `"plataforma"` es rechazado, y en `plan_only` da 403 donde se esperaba 423.
+- El request da `DID NOT RAISE ValidationError`.
+- Reanudar y aprobar con `"Fernando"` dan 404 donde se esperaba 403.
 
-- [ ] **Paso 4: implementar**
+**Si alguno falla en la colección** (`ModuleNotFoundError`), es una dependencia que falta en el `pip install` del job: se agrega en el workflow con un comentario "medido en venv limpio" y se vuelve a ver el rojo correcto.
+
+- [ ] **Paso 3: implementar**
 
 `jacobs/models.py`, línea 51:
 
@@ -411,7 +1224,7 @@ INVOKER_PLATAFORMA = "plataforma"
 VALID_INVOKERS = frozenset({INVOKER_PLATAFORMA, "jax_local", "ada"})
 ```
 
-`jacobs/policy.py`: import `from jacobs.models import INVOKER_PLATAFORMA, VALID_INVOKERS` y reemplazar `validate_resume`:
+`jacobs/policy.py`: import `from jacobs.models import INVOKER_PLATAFORMA, VALID_INVOKERS` y:
 
 ```python
 def validate_resume(invoked_by: str) -> PolicyResult:
@@ -429,43 +1242,25 @@ def validate_resume(invoked_by: str) -> PolicyResult:
     return PolicyResult(ok=True, reason="OK")
 ```
 
-`jacobs/routes.py`: agregar `VALID_INVOKERS` al import de `jacobs.models` y reemplazar el literal de `plan_only` (línea 100):
-
-```python
-    if req.invoked_by not in VALID_INVOKERS:
-```
-
-Cambiar los docstrings: en `resume_pipeline`, `"""Reanuda un pipeline interrumpido. Solo el rol 'plataforma' puede hacerlo."""`. En `approve_step`, reemplazar la línea `Solo Fernando puede aprobar.` por `Solo el rol 'plataforma' puede aprobar.`
-
-Buscar restos:
+`jacobs/routes.py`:
+- Agregar `VALID_INVOKERS` al import de `jacobs.models`.
+- En `plan_only`, `if req.invoked_by not in VALID_INVOKERS:` en lugar del literal.
+- Docstrings: en `resume_pipeline`, `"""Reanuda un pipeline interrumpido. Solo el rol 'plataforma' puede hacerlo."""`. En `approve_step`, la línea `Solo Fernando puede aprobar.` pasa a `Solo el rol 'plataforma' puede aprobar.`
 
 ```bash
 git -C /home/fruiz/worktrees/jax-gobernanza-catalogo grep -n '"Fernando"' -- jacobs/ las_manos/ tests/
 ```
 
-Esperado: solo fixtures que fabrican `Pipeline(invoked_by="Fernando")` sin pasar por la validación (`jacobs/_pipeline_identity_test.py`, `jacobs/_direct_usage_test.py`). El spec §3.3 dice que esas no cambian. Cualquier otro sitio que valide contra `"Fernando"` se corrige y se agrega a este commit.
+Esperado: solo fixtures que fabrican `Pipeline(invoked_by="Fernando")` sin pasar por la validación (`jacobs/_pipeline_identity_test.py`, `jacobs/_direct_usage_test.py`). El spec §3.6 dice que esas no cambian. Cualquier otro sitio que valide contra `"Fernando"` se corrige en este commit.
 
-- [ ] **Paso 5: ver el verde, con la lista completa del job**
+- [ ] **Paso 4: verde con la lista completa del job**: el "Piso exacto" de `tests-puros` del workflow ACTUAL (que ya incluye `test_motor_catalog_mode.py`), con `tests/test_jacobs_invoked_by_rol.py` al final. Esperado: el piso de la Tarea 2 + 8 (hoy `156 passed`).
 
-Correr el comando del paso "Piso exacto" del job `tests-puros`, copiado del workflow ACTUAL con `tests/test_jacobs_invoked_by_rol.py` agregado al final:
+**Mutación:** volver `validate_resume` a exigir `"Fernando"`. Caen `test_validate_resume_solo_acepta_plataforma`, reanudar y aprobar.
 
-```bash
-cd /home/fruiz/worktrees/jax-gobernanza-catalogo && pwd && PYTHONPATH=.:las_manos "$SCRATCH/venv-jax-puros/bin/python" -m pytest -q <lista del workflow> tests/test_jacobs_invoked_by_rol.py 2>&1 | tail -3
-```
+- [ ] **Paso 5: workflow** — `tests/test_jacobs_invoked_by_rol.py` en las DOS listas de `tests-puros`. Piso al medido, con este comentario:
+  `# <antes> -> <medido> el 2026-09-14 (tanda A): test_jacobs_invoked_by_rol.py (+8) -- invoked_by es el rol "plataforma" y no "Fernando": al crear (policy y request), planificar, reanudar y aprobar. Vistos en rojo antes del arreglo.`
 
-Esperado: `151 passed` (143 + 8), o el piso actual + 8 si otro PR lo subió.
-
-- [ ] **Paso 6: workflow**
-
-En el job `tests-puros`, agregar `tests/test_jacobs_invoked_by_rol.py` a las DOS listas (el `run: >-` y el paso "Piso exacto"). Subir el `grep -qE "^143 passed"` y su mensaje al valor medido, con este comentario:
-
-```yaml
-          # 143 -> 151 el 2026-09-14 (tanda A): test_jacobs_invoked_by_rol.py (+8) --
-          #   invoked_by es el rol "plataforma" y no "Fernando": al crear (policy y
-          #   request), planificar, reanudar y aprobar. Vistos en rojo antes del arreglo.
-```
-
-- [ ] **Paso 7: commit**
+- [ ] **Paso 6: commit**
 
 ```bash
 git -C /home/fruiz/worktrees/jax-gobernanza-catalogo add jacobs/models.py jacobs/policy.py jacobs/routes.py tests/test_jacobs_invoked_by_rol.py .github/workflows/policy.yml
@@ -474,7 +1269,7 @@ fix(jacobs): invoked_by es el rol "plataforma", no un nombre de persona
 
 VALID_INVOKERS = {plataforma, jax_local, ada}; validate_resume exige
 "plataforma"; plan_only usa VALID_INVOKERS en vez de un literal duplicado.
-tests-puros 143 -> 151.
+tests-puros +8.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
@@ -484,10 +1279,10 @@ EOF
 
 ---
 
-### Tarea 3: `governance_context` async, con el catálogo de la DB y el sello en la clave
+### Tarea 6: `governance_context` async, con el catálogo de la DB (jax-platform, PR-C)
 
 **Archivos:**
-- Modificar: `backend/governance_context.py` (entero, abajo)
+- Modificar: `backend/governance_context.py` (desde `from __future__` hasta el final; el docstring se conserva y se amplía)
 - Modificar: `backend/api/chat.py:629-647` y `:1115`
 - Modificar: `backend/shadow_validation.py:315`
 - Crear: `backend/tests/test_governance_context_catalogo.py`
@@ -495,26 +1290,32 @@ EOF
 - Modificar: `.github/workflows/policy.yml` (`PISO_PASSED`, `JAX_CI_MIN_PASSED`)
 
 **Interfaces:**
-- Consume: `validator.load_validation_context(repo_root, allowlist, catalog)` (Tarea 1); `MotorCatalog.from_db()` (jax, `las_manos/motor_registry/catalog.py:146`, async, lee `JAX_DB_*`); `facet_resolver._seal_mtime() -> float | None` (jax-platform, sin cambios: es un espejo verificado por `mirror-sync`).
-- Produce: `async def governance_context.validation_context() -> tuple[ValidationContext, dict, dict]` y `governance_context.validation_context.cache_clear() -> None` (vacía la caché y crea un lock nuevo). `async def api.chat._build_snapshot_or_raise()` y `async def api.chat._build_grounding()`.
+- Consume:
+  - `validator.load_validation_context(repo_root, allowlist, catalog)` (Tarea 3).
+  - `MotorCatalog.from_db()` con `mode` (Tarea 2).
+  - `grounding.build_snapshot` con la sección nueva (Tarea 4).
+  - `facet_resolver._seal_mtime() -> float | None` y `facet_resolver._tocar_sello()` (jax-platform, sin cambios).
+- Produce:
+  - `async def governance_context.validation_context() -> tuple[ValidationContext, dict, dict]`.
+  - `governance_context.validation_context.cache_clear() -> None`, que vacía la caché y crea un lock nuevo.
+  - `async def api.chat._build_snapshot_or_raise()` y `async def api.chat._build_grounding()`.
 
-- [ ] **Paso 1: crear el worktree de jax-platform**
+- [ ] **Paso 1: rama de PR-C**
 
 ```bash
-git -C /home/fruiz/jax-platform fetch origin
-git -C /home/fruiz/jax-platform worktree add -b feat/gobernanza-catalogo-db /home/fruiz/worktrees/jax-platform-gobernanza origin/master
-ln -s /home/fruiz/jax-platform/frontend/node_modules /home/fruiz/worktrees/jax-platform-gobernanza/frontend/node_modules
-git -C /home/fruiz/worktrees/jax-platform-gobernanza log --oneline -1   # anotar el sha base
+git -C /home/fruiz/worktrees/jax-platform-gobernanza switch -c feat/gobernanza-catalogo-db
+git -C /home/fruiz/worktrees/jax-platform-gobernanza log --oneline -2   # arriba: el commit de la Tarea 1
 ```
 
-- [ ] **Paso 2: medir el "antes" (lo usa la Tarea 6)**
+- [ ] **Paso 2: medir el "antes"** (lo usa la Tarea 9)
 
-Crear `$SCRATCH/medir_validation_context.py`. No se commitea: es una herramienta de medición y su resultado va a `DEUDA.md`.
+Crear `$SCRATCH/medir_validation_context.py`. No se commitea: es una herramienta de medición.
 
 ```python
-"""Latencia en proceso de governance_context.validation_context(): caché fría
-(recarga completa) y caliente (hit). Sirve para la versión sync (master) y la
-async (rama). Solo lectura: from_db() hace SELECT; el sello solo se statea."""
+"""Latencia en proceso de governance_context.validation_context(), caché fría
+(recarga completa) y caliente (hit), y tamaño del snapshot que produce.
+Sirve para la versión sync (master) y la async (rama). Solo lectura: from_db()
+hace SELECT; el sello solo se statea."""
 import asyncio
 import inspect
 import os
@@ -523,6 +1324,7 @@ import time
 
 sys.path.insert(0, os.getcwd())
 import governance_context as gc  # noqa: E402
+import grounding as g  # noqa: E402
 
 N = int(os.environ.get("N", "200"))
 
@@ -550,14 +1352,19 @@ async def main():
         t = time.perf_counter()
         await llamar()
         caliente.append((time.perf_counter() - t) * 1e6)
+    ctx, _, _ = await llamar()
+    snap = g.build_snapshot(ctx)
+    texto = g.render(snap)
     print(f"N={N} frio_ms p50={pct(frio, 50):.3f} p95={pct(frio, 95):.3f} max={max(frio):.3f}")
     print(f"N={N} caliente_us p50={pct(caliente, 50):.2f} p95={pct(caliente, 95):.2f} max={max(caliente):.2f}")
+    print(f"snapshot entradas={len(snap.entries)} render_chars={len(texto)} "
+          f"canonical_chars={len(snap.canonical_json)} tokens_estimados(chars/4)={len(texto) // 4}")
 
 
 asyncio.run(main())
 ```
 
-Correrlo contra el worktree todavía sin cambios. El validador viejo (dos argumentos) está en `/home/fruiz/jax`, que solo se importa, sin escribir bytecode:
+Correrlo con el `governance_context` todavía sin cambios y el validador de producción (`/home/fruiz/jax`, dos argumentos), que solo se importa y no escribe bytecode:
 
 ```bash
 cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && set -a && . /etc/jax/.env && set +a && \
@@ -565,21 +1372,21 @@ cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && set -a && . /
   /home/fruiz/jax-platform/backend/.venv/bin/python "$SCRATCH/medir_validation_context.py" | tee "$SCRATCH/latencia-antes.txt"
 ```
 
+Esperado en la línea del snapshot: 11 entradas y 715 caracteres de `render` (medido el 2026-09-14). Si da otro número, se anota el medido.
+
 - [ ] **Paso 3: escribir el test nuevo (rojo)**
 
 Crear `backend/tests/test_governance_context_catalogo.py`:
 
 ```python
 """
-governance_context con el catálogo de la DB (tanda A, spec 2026-09-14 §3.2).
+governance_context con el catálogo de la DB (tanda A v2, spec 2026-09-14 §3.5).
 
 Hasta hoy el contexto de gobernanza armaba el catálogo de capabilities desde
-`las_manos/config.toml`, vacío desde el Bloque 3: el resolver de
-CAPABILITY_AVAILABLE nunca veía una capability de la DB. Ahora
-`validation_context()` es async, carga `await MotorCatalog.from_db()` y cachea
-con una clave que suma el mtime del sello de facet_resolver (lo estampan las
-migraciones y el admin de motores y capabilities) a los mtimes de los tres
-archivos de config.
+`las_manos/config.toml`, vacío desde el Bloque 3. Ahora `validation_context()`
+es async, carga `await MotorCatalog.from_db()` y cachea con una clave que suma
+el mtime del sello de facet_resolver (lo estampan las migraciones y el admin de
+motores y capabilities) a los mtimes de los tres archivos de config.
 
 Salvo el último, estos tests son PUROS: `MotorCatalog.from_db` se parchea, así
 que corren también en el job sin DB. El sello es el archivo aislado por
@@ -601,24 +1408,42 @@ import validator as governance_validator
 MotorCatalog = governance_validator.MotorCatalog
 
 
-def _catalogo(*nombres):
-    return MotorCatalog({"capabilities": {n: {"allowed_motors": ["kimi"]} for n in nombres}})
+def _catalogo(**modos):
+    return MotorCatalog({"capabilities": {n: {"allowed_motors": ["kimi"], "mode": m} for n, m in modos.items()}})
 
 
 @pytest.fixture
 def from_db(monkeypatch):
     """from_db falso que devuelve un catálogo NUEVO en cada llamada (así una
     recarga se distingue de un hit por identidad) y cuenta las llamadas."""
-    fake = AsyncMock(side_effect=lambda: _catalogo("generate"))
+    fake = AsyncMock(side_effect=lambda: _catalogo(generate="read_only", file_write="mutating"))
     monkeypatch.setattr(MotorCatalog, "from_db", fake)
     governance_context.validation_context.cache_clear()
     yield fake
     governance_context.validation_context.cache_clear()
 
 
+def _raw(nombre, modo, ptr):
+    return {"predicate": "CAPABILITY_AVAILABLE", "args": {"name": nombre, "mode": modo}, "evidence_pointer": ptr}
+
+
+def _validar(raw, snap, ctx, predicates):
+    acc = governance_grounding.accredit(raw, snap)
+    claim = governance_claims.Claim(
+        predicate=raw["predicate"], args=governance_grounding.normalize_args(raw["args"]),
+        authority=acc.authority, provenance_ref=acc.provenance_ref,
+        evidence_pointer=raw["evidence_pointer"], scope="mesa_web")
+    return acc, governance_validator.validate(claim, predicates, ctx, accreditation=acc)
+
+
+def _puntero(snap, nombre):
+    return next(e.pointer for e in snap.entries
+                if e.pointer.startswith("/catalog_capabilities/") and e.args["name"] == nombre)
+
+
 def test_el_contexto_trae_el_catalogo_de_la_db(from_db):
     ctx, _, _ = asyncio.run(governance_context.validation_context())
-    assert ctx.catalog.get_capability("generate") is not None
+    assert ctx.catalog.get_capability("generate").mode == "read_only"
     assert from_db.await_count == 1
 
 
@@ -670,7 +1495,7 @@ def test_db_caida_en_caliente_no_sirve_el_catalogo_viejo(from_db):
 def test_n_turnos_a_la_vez_disparan_una_sola_recarga(monkeypatch):
     async def lento():
         await asyncio.sleep(0.05)
-        return _catalogo("generate")
+        return _catalogo(generate="read_only")
 
     fake = AsyncMock(side_effect=lento)
     monkeypatch.setattr(MotorCatalog, "from_db", fake)
@@ -687,40 +1512,50 @@ def test_n_turnos_a_la_vez_disparan_una_sola_recarga(monkeypatch):
     assert all(r is resultados[0] for r in resultados)
 
 
-def _acreditado_a_mano():
-    return governance_grounding.Accreditation(
-        authority="OBSERVADO", provenance_ref="tool_result:sha256:" + "0" * 64,
-        evidence_pointer_raw="/capabilities/0", outcome="ACCREDITED",
-        detail="acreditado a mano: ejercita el resolver, no el snapshot",
-    )
-
-
-def _claim(nombre):
-    return governance_claims.Claim(
-        predicate="CAPABILITY_AVAILABLE", args={"name": nombre, "mode": "read_only"},
-        authority="OBSERVADO", provenance_ref="tool_result:sha256:" + "0" * 64,
-        evidence_pointer="/capabilities/0", scope="mesa_web",
-    )
-
-
-def test_el_resolver_con_el_contexto_de_produccion_da_valid_para_una_capability_de_la_db(from_db):
-    """El contexto que arma jax-platform, pasado al validador real: una
-    capability que solo existe en la DB resuelve VALID por la rama in_catalog.
-    La acreditación va armada a mano porque el snapshot lista solo `ops`
-    (decisión §2 del spec); ver el TRIPWIRE de la Mesa en
-    test_tripwires_catalogo_db.py."""
+def test_la_mesa_acredita_y_valida_una_capability_de_la_db(from_db):
+    """El camino de la Mesa, sin nada armado a mano: el snapshot del
+    contexto real lista `generate`, la citación se acredita OBSERVADO y el
+    resolver la confirma con nombre y modo."""
     ctx, predicates, _ = asyncio.run(governance_context.validation_context())
-    v = governance_validator.validate(_claim("generate"), predicates, ctx, accreditation=_acreditado_a_mano())
+    snap = governance_grounding.build_snapshot(ctx)
+    acc, v = _validar(_raw("generate", "read_only", _puntero(snap, "generate")), snap, ctx, predicates)
+    assert (acc.outcome, acc.authority) == ("ACCREDITED", "OBSERVADO")
     assert v.status == "VALID", v.detail
 
 
-def test_control_una_capability_que_no_esta_en_la_db_sigue_siendo_fact_mismatch(from_db):
-    """CONTROL del test de arriba: mismo camino, nombre ausente del catálogo
-    falso y de `ops` -> FACT_MISMATCH. El VALID de arriba sale del catálogo."""
+def test_control_una_capability_que_no_esta_en_la_db_no_tiene_linea_que_citar(from_db):
+    """CONTROL del anterior: mismo camino, nombre ausente de la DB y de
+    `ops` -> FACT_NOT_IN_SNAPSHOT. El VALID de arriba sale del catálogo."""
     ctx, predicates, _ = asyncio.run(governance_context.validation_context())
-    v = governance_validator.validate(
-        _claim("totalmente_inventado_xyz"), predicates, ctx, accreditation=_acreditado_a_mano())
+    snap = governance_grounding.build_snapshot(ctx)
+    _, v = _validar(_raw("totalmente_inventado_xyz", "read_only", "/catalog_capabilities/0"), snap, ctx, predicates)
+    assert v.status == "FACT_NOT_IN_SNAPSHOT"
+
+
+def test_si_el_catalogo_cambia_entre_el_snapshot_y_la_validacion_el_resolver_da_fact_mismatch(monkeypatch):
+    """El FACT_MISMATCH del resolver en la Mesa: la faceta citó bien el
+    snapshot de SU turno, pero antes de la validación en sombra alguien
+    cambió el modo en la DB y estampó el sello. El resolver ve el catálogo
+    nuevo y lo dice (spec v2 §3.4, último punto)."""
+    modos = iter(["read_only", "mutating"])
+    monkeypatch.setattr(MotorCatalog, "from_db", AsyncMock(side_effect=lambda: _catalogo(generate=next(modos))))
+    governance_context.validation_context.cache_clear()
+
+    async def correr():
+        ctx_turno, _, _ = await governance_context.validation_context()
+        snap = governance_grounding.build_snapshot(ctx_turno)
+        assert facet_resolver._tocar_sello()
+        ctx_validacion, predicates, _ = await governance_context.validation_context()
+        return snap, ctx_validacion, predicates
+
+    try:
+        snap, ctx, predicates = asyncio.run(correr())
+    finally:
+        governance_context.validation_context.cache_clear()
+    acc, v = _validar(_raw("generate", "read_only", _puntero(snap, "generate")), snap, ctx, predicates)
+    assert acc.outcome == "ACCREDITED"
     assert v.status == "FACT_MISMATCH"
+    assert "mutating" in v.detail
 
 
 def test_build_grounding_con_la_db_caida_da_SnapshotError(monkeypatch):
@@ -737,38 +1572,42 @@ def test_build_grounding_con_la_db_caida_da_SnapshotError(monkeypatch):
     assert "ConnectionRefusedError" in resultado.reason
 
 
-def test_con_la_db_real_el_contexto_trae_las_capabilities_sembradas(client):
+def test_con_la_db_real_el_contexto_trae_las_capabilities_sembradas_con_su_modo(client):
     """Sin parches: from_db contra jax_memory_test migrada por el fixture
-    `client`. `generate` la siembra db/migrations.py."""
+    `client` (capability.mode incluida)."""
     governance_context.validation_context.cache_clear()
     try:
         ctx, _, _ = client.portal.call(governance_context.validation_context)
     finally:
         governance_context.validation_context.cache_clear()
-    assert ctx.catalog.get_capability("generate") is not None
+    assert ctx.catalog.get_capability("generate").mode == "read_only"
+    assert ctx.catalog.get_capability("file_write").mode == "mutating"
 ```
 
-- [ ] **Paso 4: correr y ver el rojo**
+- [ ] **Paso 4: ver el rojo**
 
 ```bash
 cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo \
   /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest tests/test_governance_context_catalogo.py -v 2>&1 | tail -20
 ```
 
-Esperado: los 11 en ROJO. Con el validador de la Tarea 1 y el `governance_context` viejo, la reconstrucción falla con `TypeError: load_validation_context() missing 1 required positional argument: 'catalog'`: el contexto todavía no carga el catálogo. En los tests de la DB caída, `pytest.raises(ConnectionRefusedError)` ve un `TypeError`, y `asyncio.run(...)` sobre una tupla da `ValueError: a coroutine was expected`. Un rojo por otra razón (fixture, import) se corrige primero.
+Esperado: los 11 en ROJO. Con el validador de la Tarea 3 y el `governance_context` viejo, la reconstrucción falla con `TypeError: load_validation_context() missing 1 required positional argument: 'catalog'`: el contexto todavía no carga el catálogo. En los tests de la DB caída, `pytest.raises(ConnectionRefusedError)` ve un `TypeError`, y `asyncio.run(...)` sobre una tupla da `ValueError: a coroutine was expected`. Un rojo por otra razón (fixture, import) se corrige primero.
 
 - [ ] **Paso 5: implementar `governance_context.py`**
 
-Reemplazar, desde `from __future__ import annotations` hasta el final del archivo, conservando el docstring actual y agregándole esta sección al final (antes del `"""` de cierre):
+Conservar el docstring actual y agregarle esta sección antes del `"""` de cierre:
 
 ```text
-Catálogo de la DB (tanda A, 2026-09-14). Desde el Bloque 3 las capabilities
-viven en la DB; hasta hoy este contexto las armaba del TOML vacío y el
-resolver de CAPABILITY_AVAILABLE nunca las veía. Ahora:
+Catálogo de la DB (tanda A v2, 2026-09-14). Desde el Bloque 3 las
+capabilities viven en la DB; hasta hoy este contexto las armaba del TOML
+vacío. Ahora:
 
   * `validation_context()` es ASYNC: el catálogo sale de
-    `await MotorCatalog.from_db()` (aiomysql). Los YAML/TOML se leen en
-    `asyncio.to_thread`: nada bloqueante en el camino del turno.
+    `await MotorCatalog.from_db()` (aiomysql), con capability.mode. Los
+    YAML/TOML se leen en `asyncio.to_thread`: nada bloqueante en el turno.
+  * El MISMO contexto alimenta el snapshot del prompt (api/chat.py) y la
+    validación en sombra (shadow_validation.py): lo que se inyecta es lo que
+    se verifica.
   * CLAVE DE CACHÉ = mtimes de los tres archivos + mtime del sello de
     facet_resolver (`_seal_mtime()`). INVALIDACIÓN DECLARADA: el sello, que
     estampan tras commitear las migraciones y el admin de motores/
@@ -779,26 +1618,24 @@ resolver de CAPABILITY_AVAILABLE nunca las veía. Ahora:
     motor_registry/routes.py::_load_catalog).
   * Sello ausente o ilegible: `_seal_mtime()` da None = "sin señal", nunca
     "invalidar" (contrato de facet_resolver). La clave queda estable y los
-    cambios del catálogo entran al reiniciar. Declarado, no supuesto: en
-    hall9000 el sello existe (/srv/jax-data/facet-cache-seal, verificado
-    2026-09-14) y la Tarea 8 del plan lo vuelve a verificar al desplegar.
-  * UNA recarga a la vez (`asyncio.Lock` con doble chequeo): N turnos que ven
-    el sello nuevo a la par no disparan N consultas.
+    cambios del catálogo entran al reiniciar. En hall9000 el sello existe
+    (/srv/jax-data/facet-cache-seal, verificado 2026-09-14); el despliegue lo
+    vuelve a verificar.
+  * UNA recarga a la vez (`asyncio.Lock` con doble chequeo).
   * FALLA VISIBLE: si from_db() lanza, la excepción sube y la caché queda
     como estaba (no se sirve: la clave ya no coincide). En el chat,
     `_build_grounding` la convierte en SnapshotError
     (grounding_snapshot_sha256='ERROR'); la validación en sombra no escribe
     veredictos. Servir un catálogo vacío o viejo repetiría el falso negativo
     en silencio, o daría VALID a una capability revocada (P10).
-  * Costo: un stat más por turno (~1 us); la recarga (from_db ~1 ms, medido
-    en LAS MANOS el 2026-09-12, más la reconstrucción de config) solo cuando
-    cambió algo. Latencia medida antes/después: DEUDA.md de jax.
+  * Costo: un stat más por turno; la recarga solo cuando cambió algo.
+    Latencia medida antes/después: DEUDA.md de jax.
   * Si la DB cuelga en vez de rechazar, la recarga espera lo que espere
     aiomysql.connect -- igual que el resto del turno, que ya depende de la
     misma DB por el pool.
 ```
 
-Código:
+Código (reemplaza desde `from __future__ import annotations` hasta el final):
 
 ```python
 from __future__ import annotations
@@ -895,6 +1732,8 @@ def _cache_clear() -> None:
 validation_context.cache_clear = _cache_clear
 ```
 
+Antes de dar por buena la clave, verificar que `governance_loaders.PREDICATES_FILE` y `VOCABULARY_FILE` existen con esos nombres en `policy/governance/loaders.py` del worktree de jax. El `_source_stamp` actual de master ya los usa: se copia de ahí, no de este plan, si difieren.
+
 - [ ] **Paso 6: llamadores con `await`**
 
 `backend/api/chat.py`, líneas 629-647:
@@ -909,28 +1748,28 @@ async def _build_snapshot_or_raise() -> "governance_grounding.Snapshot":
 async def _build_grounding() -> "governance_grounding.Snapshot | governance_grounding.SnapshotError":
 ```
 
-(el docstring y el cuerpo quedan igual, salvo `return await _build_snapshot_or_raise()` dentro del `try`). Línea 1115: `grounding = await _build_grounding()`.
+El docstring y el cuerpo quedan igual, salvo `return await _build_snapshot_or_raise()` dentro del `try`. Línea ~1115: `grounding = await _build_grounding()`.
 
 `backend/shadow_validation.py:315`: `ctx, predicates, term_categories = await _validation_context()`.
-
-Buscar otros llamadores sync:
 
 ```bash
 git -C /home/fruiz/worktrees/jax-platform-gobernanza grep -n "validation_context()\|_build_grounding()\|_build_snapshot_or_raise()" -- backend
 ```
 
+Todo llamador que no esté en esta lista ni en la del Paso 7 se adapta y se declara en el PR.
+
 - [ ] **Paso 7: adaptar los tests existentes**
 
 - `test_grounding_config_revalidation.py`:
-  - En el fixture `repo_copia`, agregar `monkeypatch` a la firma y, antes del `cache_clear()`, esta línea: `monkeypatch.setattr(governance_context.governance_validator.MotorCatalog, "from_db", AsyncMock(side_effect=lambda: governance_context.governance_validator.MotorCatalog({})))`. Importar `AsyncMock` de `unittest.mock` y `asyncio`. Así los tests que hoy son puros siguen puros: sin eso, en el job sin DB `from_db` intenta `aiomysql.connect` y la Regla 2 de conftest solo cubre `create_pool`.
+  - En el fixture `repo_copia`, agregar `monkeypatch` a la firma y, antes del `cache_clear()`: `monkeypatch.setattr(governance_context.governance_validator.MotorCatalog, "from_db", AsyncMock(side_effect=lambda: governance_context.governance_validator.MotorCatalog({})))`. Importar `AsyncMock` de `unittest.mock` y `asyncio`. Sin eso, en el job sin DB `from_db` intenta `aiomysql.connect`, y la Regla 2 de conftest solo cubre `create_pool`.
   - Cada `governance_context.validation_context()` pasa a `asyncio.run(governance_context.validation_context())`, y `chat._build_grounding()` a `asyncio.run(chat._build_grounding())`.
-  - En `test_sin_cambios_en_disco_el_contexto_no_se_reconstruye`, las dos llamadas van en la MISMA corrida: `primero, segundo = asyncio.run(_dos())`, con `async def _dos(): return (await governance_context.validation_context(), await governance_context.validation_context())`. Se afirma `segundo is primero`.
+  - En `test_sin_cambios_en_disco_el_contexto_no_se_reconstruye`, las dos llamadas van en la MISMA corrida: `primero, segundo = asyncio.run(_dos())`, con `async def _dos(): return (await governance_context.validation_context(), await governance_context.validation_context())`.
+  - `CLAIM` cita `/capabilities/10` (`write_file`): no cambia, porque los punteros de `ops` son estables (Tarea 4).
 - `test_shadow_origin.py:128` y `:177`: `ctx, _, _ = client.portal.call(validation_context)`.
-- `test_shadow_validation.py:50` (`_grounding()`) y `test_shadow_validation_grounding.py:89` (`_snapshot()`): `ctx, _, _ = asyncio.run(governance_context.validation_context())`, con `import asyncio`.
-- `test_chat_grounding_wiring.py`: sin cambios. `patch.object` sobre un `async def` crea un `AsyncMock`, y el `side_effect` que lanza se dispara al hacer `await`. Se confirma en el Paso 8.
-- `test_shadow_validation.py::..._context_load_fails_before_the_insert`: sin cambios, por la misma razón (`patch.object(shadow_validation, "_validation_context", side_effect=RuntimeError)`).
+- `test_shadow_validation.py:50` (`_grounding()`) y `test_shadow_validation_grounding.py:89` (`_snapshot()`): `ctx, _, _ = asyncio.run(governance_context.validation_context())`, con `import asyncio`. Si el test ya corre dentro de `client` (loop del portal), usar `client.portal.call(governance_context.validation_context)`, como en `test_shadow_origin.py`: `asyncio.run` dentro de otro loop falla con `RuntimeError: asyncio.run() cannot be called from a running event loop`.
+- `test_chat_grounding_wiring.py` y `test_shadow_validation.py::..._context_load_fails_before_the_insert`: sin cambios. `patch.object` sobre un `async def` crea un `AsyncMock`, y el `side_effect` que lanza se dispara al hacer `await`. Se confirma en el Paso 8.
 
-- [ ] **Paso 8: ver el verde, en las dos modalidades de CI**
+- [ ] **Paso 8: verde, en las dos modalidades de CI**
 
 ```bash
 cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && export JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo && \
@@ -938,26 +1777,24 @@ cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && export JAX_RE
   JAX_CI_NO_DB=1 /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest -q -rs 2>&1 | tail -5
 ```
 
-Esperado: 0 failed y 0 errors en las dos. Con DB, passed = base + 11. Sin DB, passed = base + 10: el último test pide `client` y se saltea. La base es lo que dan los mismos comandos sobre `origin/master`, que se mide ANTES (en otro worktree temporal o anotado del run de CI de master). Así el delta queda medido y no supuesto.
+Esperado: 0 failed y 0 errors en las dos. Con DB, passed = (base + Tarea 1) + 11 y los mismos skips (`MAX_SKIPS` no cambia). Sin DB, passed = (base + Tarea 1) + 10 y skipped + 1, porque el último test pide `client`.
 
-**Mutación obligatoria** (se revierte después; se anota en el PR):
+**Mutaciones** (backup y restauración con `cp`):
 - (a) Sacar el doble chequeo dentro del lock: `test_n_turnos_a_la_vez_disparan_una_sola_recarga` cae con `await_count == 20`.
-- (b) Sacar `facet_resolver._seal_mtime()` de `_stamp()`: cae `test_tocar_el_sello_fuerza_la_recarga`.
+- (b) Sacar `facet_resolver._seal_mtime()` de `_stamp()`: caen `test_tocar_el_sello_fuerza_la_recarga` y el del catálogo cambiado.
 - (c) Envolver `_build()` en un `try/except` que devuelva el `_cache` viejo: cae `test_db_caida_en_caliente_no_sirve_el_catalogo_viejo`.
 
-- [ ] **Paso 9: pisos de jax-platform**
-
-En `.github/workflows/policy.yml`, leer el `PISO_PASSED` y el `JAX_CI_MIN_PASSED` ACTUALES y subirlos por el delta medido en el Paso 8 (esperado +11 y +10), con comentario en el estilo del archivo:
+- [ ] **Paso 9: pisos**: `PISO_PASSED` y `JAX_CI_MIN_PASSED` ACTUALES (que ya tienen la Tarea 1) + delta medido (esperado +11 y +10). Comentario:
 
 ```text
-# Subido de <actual> a <actual+11> (2026-09-14, tanda A, catálogo de la DB):
+# Subido de <actual> a <actual+11> (2026-09-14, tanda A v2, catálogo de la DB):
 # test_governance_context_catalogo.py -- 10 puros (catálogo de la DB, hit sin
 # recarga, recarga por sello, DB caída en frío y en caliente, una recarga con
-# 20 turnos, resolver VALID + CONTROL, SnapshotError) y 1 con `client` (from_db
-# real contra la base migrada). Vistos en rojo antes del arreglo. Medido: <n> / <skips>.
+# 20 turnos, la Mesa acredita y valida una capability de la DB + CONTROL,
+# catálogo cambiado entre snapshot y validación -> FACT_MISMATCH,
+# SnapshotError) y 1 con `client` (from_db real con capability.mode). Vistos
+# en rojo antes del arreglo; mutaciones en el PR. Medido: <n> / <skips>.
 ```
-
-Para `JAX_CI_MIN_PASSED`, el mismo comentario con "+10 puros; el de `client` se saltea".
 
 - [ ] **Paso 10: commit**
 
@@ -966,11 +1803,12 @@ git -C /home/fruiz/worktrees/jax-platform-gobernanza add backend/governance_cont
 git -C /home/fruiz/worktrees/jax-platform-gobernanza commit -m "$(cat <<'EOF'
 fix(gobernanza): el contexto de validación usa el catálogo de la DB
 
-validation_context() pasa a async: carga MotorCatalog.from_db(), cachea
-con los mtimes de config + el sello de facet_resolver, recarga una sola
-vez bajo asyncio.Lock y, si la DB falla, la excepción sube (SnapshotError
-en el chat) en vez de servir un catálogo vacío o viejo. chat y shadow
-validation hacen await. Requiere el validador de jax con catálogo recibido.
+validation_context() pasa a async: carga MotorCatalog.from_db() (con
+capability.mode), cachea con los mtimes de config + el sello de
+facet_resolver, recarga una sola vez bajo asyncio.Lock y, si la DB falla,
+la excepción sube (SnapshotError en el chat) en vez de servir un catálogo
+vacío o viejo. El mismo contexto arma el snapshot y valida. Requiere el
+jax de la tanda A v2.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
@@ -980,17 +1818,189 @@ EOF
 
 ---
 
-### Tarea 4: jax-platform manda `invoked_by = "plataforma"`
+### Tarea 7: la Mesa de punta a punta y el tripwire ops∩DB (jax-platform, PR-C)
 
 **Archivos:**
-- Modificar: `backend/api/pipelines.py` (constante nueva; `create_pipeline` `:95-96`; `resume_pipeline` `:161`)
+- Crear: `backend/tests/test_catalogo_db_en_la_mesa.py`
+- Modificar: `.github/workflows/policy.yml` (`PISO_PASSED`; `MAX_SKIPS` no cambia; `JAX_CI_MIN_PASSED` no cambia)
+
+**Interfaces:**
+- Consume:
+  - `await governance_context.validation_context()` (Tarea 6).
+  - `shadow_validation.run_shadow_validation(conv_uuid, shadow_message_id, facet, contract, grounding, origin)`, que inserta la fila de `shadow_messages` y los veredictos.
+  - `api.chat.ContractResult`.
+
+- [ ] **Paso 1: escribir los tests**
+
+```python
+"""
+La Mesa con las capabilities de la DB, de punta a punta, y el TRIPWIRE ops∩DB
+(tanda A v2, 2026-09-14).
+
+1. Un claim sobre `generate` que cita su línea de catalog_capabilities queda
+   VALID/OBSERVADO en shadow_claim_verdicts, por el MISMO camino que un turno
+   real (run_shadow_validation). Con el modo equivocado, FACT_NOT_IN_SNAPSHOT:
+   la acreditación lo corta antes del resolver (spec v2 §3.4). Hasta la v2 las
+   capabilities de la DB no se podían citar: en producción, 2 AUTHORITY_INVALID
+   sobre code_swarm (medido 2026-09-14).
+2. TRIPWIRE: `ops` del TOML y `capability` de la DB no comparten nombres. Un
+   nombre repetido da SOURCE_CONFLICT y dos líneas del snapshot con el mismo
+   hecho. Medido el 2026-09-14: 11 ops, 17 capabilities, intersección vacía.
+   Mira el MISMO objeto que ven resolver y snapshot. Alcance declarado: ve lo
+   que SIEMBRAN las migraciones; el despliegue lo mide contra producción.
+"""
+from __future__ import annotations
+
+import shutil
+import uuid
+
+import claims as governance_claims
+import governance_context
+import grounding as governance_grounding
+import validator as governance_validator
+from api.chat import ContractResult
+
+
+def _contract(claims):
+    return ContractResult(contract_parsed=True, claims=claims, analysis="a", judgment=None,
+                          degradation_reason=None, raw_text="...")
+
+
+async def _veredictos(shadow_message_id):
+    from db.connection import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT predicate, status, authority, evidence_pointer FROM shadow_claim_verdicts "
+                "WHERE shadow_message_id = %s ORDER BY id", (shadow_message_id,))
+            return await cur.fetchall()
+
+
+def _snapshot_real(client):
+    governance_context.validation_context.cache_clear()
+    ctx, _, _ = client.portal.call(governance_context.validation_context)
+    return ctx, governance_grounding.build_snapshot(ctx)
+
+
+def _correr_la_mesa(client, snap, modo):
+    from shadow_validation import run_shadow_validation
+    ptr = next(e.pointer for e in snap.entries
+               if e.pointer.startswith("/catalog_capabilities/") and e.args["name"] == "generate")
+    smid = str(uuid.uuid4())
+    client.portal.call(run_shadow_validation, "conv-tanda-a", smid, "jekyll", _contract([
+        {"predicate": "CAPABILITY_AVAILABLE", "args": {"name": "generate", "mode": modo}, "evidence_pointer": ptr},
+    ]), snap, "test")
+    return ptr, client.portal.call(_veredictos, smid)
+
+
+def test_en_la_mesa_un_claim_sobre_generate_queda_valid_observado(client):
+    try:
+        _, snap = _snapshot_real(client)
+        ptr, filas = _correr_la_mesa(client, snap, "read_only")
+    finally:
+        governance_context.validation_context.cache_clear()
+    assert filas == (("CAPABILITY_AVAILABLE", "VALID", "OBSERVADO", ptr),)
+
+
+def test_en_la_mesa_el_modo_equivocado_queda_fact_not_in_snapshot(client):
+    try:
+        _, snap = _snapshot_real(client)
+        ptr, filas = _correr_la_mesa(client, snap, "mutating")
+    finally:
+        governance_context.validation_context.cache_clear()
+    assert filas == (("CAPABILITY_AVAILABLE", "FACT_NOT_IN_SNAPSHOT", "INFERIDO", ptr),)
+
+
+def _en_ambos(ctx):
+    return sorted(n for n in ctx.ops if ctx.catalog.get_capability(n) is not None)
+
+
+def test_tripwire_ops_del_toml_y_capabilities_de_la_db_no_comparten_nombres(client):
+    """TRIPWIRE. Ver docstring del módulo, punto 2."""
+    try:
+        ctx, _ = _snapshot_real(client)
+    finally:
+        governance_context.validation_context.cache_clear()
+    assert ctx.ops, "ops vacío: el tripwire no estaría mirando nada"
+    assert ctx.catalog.get_capability("generate") is not None, (
+        "catálogo sin la capability sembrada: el tripwire no estaría mirando la DB")
+    assert _en_ambos(ctx) == [], (
+        f"{_en_ambos(ctx)} está en ops del TOML Y en capability de la DB: el resolver "
+        "de CAPABILITY_AVAILABLE va a dar SOURCE_CONFLICT. Renombrar uno de los dos.")
+
+
+def test_control_el_tripwire_ve_un_nombre_repetido(client, tmp_path):
+    """CONTROL del TRIPWIRE: con un config.toml que agrega `[ops.generate]`, la
+    intersección da ['generate'] y el resolver da SOURCE_CONFLICT."""
+    destino = tmp_path / "jax"
+    (destino / "las_manos").mkdir(parents=True)
+    shutil.copy(governance_context.JAX_REPO / "las_manos" / "config.toml", destino / "las_manos" / "config.toml")
+    with open(destino / "las_manos" / "config.toml", "a", encoding="utf-8") as f:
+        f.write("\n[ops.generate]\n")
+    anterior = governance_context.JAX_REPO
+    governance_context.JAX_REPO = destino
+    governance_context.validation_context.cache_clear()
+    try:
+        ctx, predicates, _ = client.portal.call(governance_context.validation_context)
+    finally:
+        governance_context.JAX_REPO = anterior
+        governance_context.validation_context.cache_clear()
+    assert _en_ambos(ctx) == ["generate"]
+    claim = governance_claims.Claim(
+        predicate="CAPABILITY_AVAILABLE", args={"name": "generate", "mode": "read_only"},
+        authority="OBSERVADO", provenance_ref="test", evidence_pointer="test", scope="mesa_web")
+    assert governance_validator.validate(claim, predicates, ctx).status == "SOURCE_CONFLICT"
+```
+
+Antes de correrlo, confirmar en `shadow_validation._insert_claim_verdict` que `authority` y `evidence_pointer` se guardan como el test espera (`authority` derivada por el servidor, `evidence_pointer` tal cual). Si la tupla leída difiere en forma (por ejemplo, `evidence_pointer` truncado), se ajusta la aserción a lo que guarda el código y se declara.
+
+- [ ] **Paso 2: verde, y ROJO por mutación**
+
+```bash
+cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo \
+  /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest tests/test_catalogo_db_en_la_mesa.py -v 2>&1 | tail -8
+```
+
+Esperado: `4 passed`. Estos tests nacen verdes porque las Tareas 2–6 ya están. Su rojo se ve de dos maneras, y las dos se anotan en el PR:
+- **(a) Contra el jax de producción.** Correr los 2 de la Mesa con `JAX_REPO_PATH=/home/fruiz/jax` y `PYTHONDONTWRITEBYTECODE=1`. Caen, porque ese jax no tiene la sección `catalog_capabilities` (`StopIteration` en `next(...)`) y el `governance_context` nuevo lo llama con 3 argumentos (`TypeError`). Es la prueba de que no pasan por casualidad.
+- **(b) Mutaciones en el worktree de jax**, con backup y `cp`:
+  - Agregar `[ops.generate]` a `las_manos/config.toml`: el TRIPWIRE cae con `['generate'] está en ops del TOML Y en capability de la DB`.
+  - Sacar la sección `catalog_capabilities` de `build_snapshot`: caen los 2 de la Mesa.
+
+- [ ] **Paso 3: pisos**: `PISO_PASSED` + medido (esperado +4). En `JAX_CI_MIN_PASSED` no cambia el número (los 4 piden `client` y se saltean sin DB). Se anota en su comentario: `skipped +4 (test_catalogo_db_en_la_mesa.py, los 4 con client)`. Medir con los dos comandos del Paso 8 de la Tarea 6. Comentario de `PISO_PASSED`: `# +4 (2026-09-14, tanda A v2): test_catalogo_db_en_la_mesa.py -- la Mesa de punta a punta (VALID/OBSERVADO; modo equivocado FACT_NOT_IN_SNAPSHOT), TRIPWIRE ops∩DB vacío y su CONTROL. Rojos por mutación y contra el jax de producción.`
+
+- [ ] **Paso 4: commit**
+
+```bash
+git -C /home/fruiz/worktrees/jax-platform-gobernanza add backend/tests/test_catalogo_db_en_la_mesa.py .github/workflows/policy.yml
+git -C /home/fruiz/worktrees/jax-platform-gobernanza commit -m "$(cat <<'EOF'
+test(gobernanza): la Mesa cita capabilities de la DB; tripwire ops∩DB
+
+De punta a punta por run_shadow_validation: generate citada con su línea
+de catalog_capabilities queda VALID/OBSERVADO; con el modo equivocado,
+FACT_NOT_IN_SNAPSHOT. Tripwire: ops del TOML y capability de la DB no
+comparten nombres, con su control. Validados por mutación.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
+EOF
+)"
+```
+
+---
+
+### Tarea 8: jax-platform manda `invoked_by = "plataforma"` (PR-C)
+
+**Archivos:**
+- Modificar: `backend/api/pipelines.py`: constante nueva, `create_pipeline` (`:95-96`) y `resume_pipeline` (`:161`)
 - Modificar: `backend/tests/test_pipelines_identity_injection.py`
 - Modificar: `frontend/src/components/BottomBar/PipelineModal.jsx:172` y `:187`
 - Modificar: `frontend/src/components/BottomBar/PipelineModal.test.jsx` (test nuevo)
 - Modificar: `.github/workflows/policy.yml` (piso de vitest)
 
 **Interfaces:**
-- Consume: el contrato de la Tarea 2, `invoked_by == "plataforma"`.
+- Consume: el contrato de la Tarea 5, `invoked_by == "plataforma"`. `create` lo valida `PipelineCreateRequest` en Jacobs.
 - Produce: `api.pipelines.INVOKED_BY_PLATAFORMA = "plataforma"`.
 
 - [ ] **Paso 1: tests (rojos)**
@@ -1003,7 +2013,7 @@ En `test_pipelines_identity_injection.py`, al final de `test_create_pipeline_iny
     assert captured["json"]["invoked_by"] == "plataforma"
 ```
 
-En `test_resume_pipeline_inyecta_identidad_real`, reemplazar el comentario viejo ("`"invoked_by": "Fernando"` is kept as the human-readable label...") y agregar:
+En `test_resume_pipeline_inyecta_identidad_real`, reemplazar el comentario viejo ("`"invoked_by": "Fernando"` is kept as the human-readable label...") por:
 
 ```python
     # tanda A (2026-09-14): el backend declara el rol "plataforma" (Jacobs
@@ -1011,7 +2021,9 @@ En `test_resume_pipeline_inyecta_identidad_real`, reemplazar el comentario viejo
     assert captured["json"]["invoked_by"] == "plataforma"
 ```
 
-Actualizar el docstring del módulo: `(hoy "Fernando" fijo)` pasa a `(hasta 2026-09-14, "Fernando" fijo; ahora el rol "plataforma", puesto por el backend)`.
+Docstring del módulo: `(hoy "Fernando" fijo)` pasa a `(hasta 2026-09-14, "Fernando" fijo; ahora el rol "plataforma", puesto por el backend)`.
+
+Antes, confirmar cómo esos tests mandan el cuerpo del cliente (`grep -n "invoked_by\|captured" backend/tests/test_pipelines_identity_injection.py`). Si el create no manda un `invoked_by` distinto de `"plataforma"`, se hace que mande `"cliente-mintiendo"`: sin eso la aserción no probaría que el backend pisa el valor.
 
 En `PipelineModal.test.jsx`, dentro de `describe('PipelineModal -- cadena en línea', ...)`:
 
@@ -1035,7 +2047,7 @@ En `PipelineModal.test.jsx`, dentro de `describe('PipelineModal -- cadena en lí
   })
 ```
 
-Antes de correrlo, confirmar en el `.test.jsx` cómo seleccionan una faceta los tests existentes del layout paralelo (`grep -n "checkbox\|fireEvent.click" PipelineModal.test.jsx`) y usar ese mismo selector. Si no es un checkbox, se reemplaza la línea por el que usan ellos.
+Antes de correrlo, confirmar en el `.test.jsx` cómo seleccionan una faceta los tests existentes del layout paralelo (`grep -n "checkbox\|fireEvent.click\|renderModal" PipelineModal.test.jsx`) y usar ese mismo selector y la misma firma de `renderModal`.
 
 - [ ] **Paso 2: ver el rojo**
 
@@ -1045,7 +2057,10 @@ cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && JAX_REPO_PATH
 cd /home/fruiz/worktrees/jax-platform-gobernanza/frontend && pwd && PATH=/home/fruiz/.nvm/versions/node/v24.16.0/bin:$PATH npx vitest run src/components/BottomBar/PipelineModal.test.jsx 2>&1 | tail -12
 ```
 
-Esperado: `AssertionError: assert 'cliente-mintiendo' == 'plataforma'` (create), `assert 'Fernando' == 'plataforma'` (resume) y, en vitest, `expected { … } to not have property "invoked_by"`.
+Esperado:
+- En create, `AssertionError: assert 'cliente-mintiendo' == 'plataforma'`.
+- En resume, `assert 'Fernando' == 'plataforma'`.
+- En vitest, `expected { … } to not have property "invoked_by"`.
 
 - [ ] **Paso 3: implementar**
 
@@ -1059,29 +2074,22 @@ Esperado: `AssertionError: assert 'cliente-mintiendo' == 'plataforma'` (create),
 INVOKED_BY_PLATAFORMA = "plataforma"
 ```
 
-En `create_pipeline`, junto a `user_id`/`tenant_id`: `body["invoked_by"] = INVOKED_BY_PLATAFORMA`. En `resume_pipeline`: `json={"invoked_by": INVOKED_BY_PLATAFORMA, "user_id": user.user_id, "tenant_id": user.tenant_id}`.
-
-`PipelineModal.jsx`: borrar las dos líneas `invoked_by: 'Fernando',`.
+- En `create_pipeline`, junto a `user_id`/`tenant_id`: `body["invoked_by"] = INVOKED_BY_PLATAFORMA`.
+- En `resume_pipeline`: `json={"invoked_by": INVOKED_BY_PLATAFORMA, "user_id": user.user_id, "tenant_id": user.tenant_id}`.
+- `PipelineModal.jsx`: borrar las dos líneas `invoked_by: 'Fernando',`.
 
 - [ ] **Paso 4: verde**
 
-Los mismos dos comandos del Paso 2, más la suite completa de vitest:
+Correr los dos comandos del Paso 2, más la suite completa de vitest:
 
 ```bash
 cd /home/fruiz/worktrees/jax-platform-gobernanza/frontend && pwd && PATH=/home/fruiz/.nvm/versions/node/v24.16.0/bin:$PATH npx vitest run --reporter=default --reporter=json --outputFile="$SCRATCH/vitest.json" >/dev/null; node -e 'const r=require(process.argv[1]);console.log(r.numPassedTests,r.numFailedTests)' "$SCRATCH/vitest.json"
 ```
 
-Esperado: `126 0` (125 + 1, o el piso actual + 1). Los tests de backend de este archivo no cambian de cantidad: se agregaron aserciones a tests que ya existían, y se declara así en el PR.
+Esperado: piso actual + 1 y `0` fallidos (hoy `126 0`). Los tests de backend de este archivo no cambian de cantidad: se agregaron aserciones a tests que ya existían, y se declara así en el PR.
 
-- [ ] **Paso 5: piso de vitest**
-
-En el job `frontend-tests`, subir `r.numPassedTests !== 125` y su mensaje al valor medido, con este comentario:
-
-```js
-            // 125 -> 126 el 2026-09-14 (tanda A): PipelineModal.test.jsx (+1) --
-            // el modal no manda invoked_by en ninguna de las dos formas (lo pone
-            // el backend como el rol "plataforma"). Visto en rojo antes.
-```
+- [ ] **Paso 5: piso de vitest** — en el job `frontend-tests`, `r.numPassedTests !== <actual>` y su mensaje al medido, con este comentario:
+  `// <actual> -> <medido> el 2026-09-14 (tanda A): PipelineModal.test.jsx (+1) -- el modal no manda invoked_by en ninguna de las dos formas (lo pone el backend como el rol "plataforma"). Visto en rojo antes.`
 
 - [ ] **Paso 6: commit**
 
@@ -1092,7 +2100,7 @@ fix(pipelines): invoked_by es el rol "plataforma" y lo pone el backend
 
 create y resume mandan invoked_by="plataforma" pisando lo que mande el
 cliente, como ya se hacía con user_id/tenant_id; el modal deja de mandarlo.
-vitest 125 -> 126.
+vitest +1.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
@@ -1102,174 +2110,44 @@ EOF
 
 ---
 
-### Tarea 5: tripwires del catálogo en jax-platform
+### Tarea 9: latencia y tamaño del snapshot, antes y después
 
-**Archivos:**
-- Crear: `backend/tests/test_tripwires_catalogo_db.py`
-- Modificar: `.github/workflows/policy.yml` (`PISO_PASSED`, `JAX_CI_MIN_PASSED`)
+**Archivos:** ninguno en los repos. Los números van a los PRs y a `DEUDA.md` (Tarea 11).
 
-**Interfaces:**
-- Consume: `await governance_context.validation_context()` (Tarea 3) y `grounding.build_snapshot` / `accredit` (jax, sin cambios).
-
-- [ ] **Paso 1: escribir los tests**
-
-```python
-"""
-TRIPWIRES del catálogo de capabilities (tanda A, 2026-09-14).
-
-1. `ops` del TOML y `capability` de la DB no comparten nombres. Con el catálogo
-   real en el resolver, un nombre repetido da SOURCE_CONFLICT en producción
-   (dos fuentes de verdad para el mismo nombre). Medido el 2026-09-14: 11 ops,
-   17 capabilities en producción, intersección vacía. Este test lo mira sobre
-   el MISMO objeto que ve el resolver: el ValidationContext de
-   governance_context, con el TOML del clon de jax y la DB migrada.
-   Alcance declarado: ve las capabilities que SIEMBRAN las migraciones; una
-   fila agregada a mano por el admin en producción no pasa por acá (la
-   Tarea 8 del plan la mide contra producción al desplegar).
-2. En la Mesa, un claim sobre una capability que solo existe en la DB NO llega
-   al resolver: el snapshot lista solo `ops` (decisión §2 del spec) y la
-   acreditación lo corta antes. Si alguien suma el catálogo al snapshot, este
-   test se pone ROJO: es la señal de revisar SP3 §3.3, SECTION_PREDICATE y la
-   línea base de SP4.
-"""
-from __future__ import annotations
-
-import asyncio
-import shutil
-from unittest.mock import AsyncMock
-
-import claims as governance_claims
-import governance_context
-import grounding as governance_grounding
-import validator as governance_validator
-
-
-def _en_ambos(ctx):
-    return sorted(n for n in ctx.ops if ctx.catalog.get_capability(n) is not None)
-
-
-def test_tripwire_ops_del_toml_y_capabilities_de_la_db_no_comparten_nombres(client):
-    """TRIPWIRE 1. Ver docstring del módulo."""
-    governance_context.validation_context.cache_clear()
-    try:
-        ctx, _, _ = client.portal.call(governance_context.validation_context)
-    finally:
-        governance_context.validation_context.cache_clear()
-    assert ctx.ops, "ops vacío: el tripwire no estaría mirando nada"
-    assert ctx.catalog.get_capability("generate") is not None, (
-        "catálogo sin la capability sembrada: el tripwire no estaría mirando la DB")
-    assert _en_ambos(ctx) == [], (
-        f"{_en_ambos(ctx)} está en ops del TOML Y en capability de la DB: el resolver "
-        "de CAPABILITY_AVAILABLE va a dar SOURCE_CONFLICT. Renombrar uno de los dos.")
-
-
-def test_control_el_tripwire_ve_un_nombre_repetido(client, tmp_path):
-    """CONTROL del TRIPWIRE 1: con un config.toml que agrega `[ops.generate]`, la
-    intersección da ['generate'] y el resolver da SOURCE_CONFLICT. Sin este
-    control el tripwire podría estar verde por no ver nada."""
-    destino = tmp_path / "jax"
-    (destino / "las_manos").mkdir(parents=True)
-    original = governance_context.JAX_REPO / "las_manos" / "config.toml"
-    shutil.copy(original, destino / "las_manos" / "config.toml")
-    with open(destino / "las_manos" / "config.toml", "a", encoding="utf-8") as f:
-        f.write("\n[ops.generate]\n")
-    anterior = governance_context.JAX_REPO
-    governance_context.JAX_REPO = destino
-    governance_context.validation_context.cache_clear()
-    try:
-        ctx, predicates, _ = client.portal.call(governance_context.validation_context)
-    finally:
-        governance_context.JAX_REPO = anterior
-        governance_context.validation_context.cache_clear()
-    assert _en_ambos(ctx) == ["generate"]
-    claim = governance_claims.Claim(
-        predicate="CAPABILITY_AVAILABLE", args={"name": "generate", "mode": "read_only"},
-        authority="OBSERVADO", provenance_ref="test", evidence_pointer="test", scope="mesa_web")
-    assert governance_validator.validate(claim, predicates, ctx).status == "SOURCE_CONFLICT"
-
-
-def test_tripwire_en_la_mesa_un_claim_sobre_capability_de_la_db_no_llega_al_resolver(monkeypatch):
-    """TRIPWIRE 2. Puro: from_db parcheado con un catálogo que tiene `generate`."""
-    MotorCatalog = governance_validator.MotorCatalog
-    monkeypatch.setattr(MotorCatalog, "from_db", AsyncMock(
-        side_effect=lambda: MotorCatalog({"capabilities": {"generate": {}}})))
-    governance_context.validation_context.cache_clear()
-    try:
-        ctx, predicates, _ = asyncio.run(governance_context.validation_context())
-    finally:
-        governance_context.validation_context.cache_clear()
-    snapshot = governance_grounding.build_snapshot(ctx)
-    raw = {"predicate": "CAPABILITY_AVAILABLE", "args": {"name": "generate", "mode": "read_only"},
-           "evidence_pointer": "/capabilities/0"}
-    acc = governance_grounding.accredit(raw, snapshot)
-    claim = governance_claims.Claim(
-        predicate=raw["predicate"], args=governance_grounding.normalize_args(raw["args"]),
-        authority=acc.authority, provenance_ref=acc.provenance_ref,
-        evidence_pointer=raw["evidence_pointer"], scope="mesa_web")
-    verdict = governance_validator.validate(claim, predicates, ctx, accreditation=acc)
-    assert verdict.status == "FACT_NOT_IN_SNAPSHOT", (
-        f"dio {verdict.status}: el snapshot ya incluye capabilities de la DB. Revisar "
-        "SP3 §3.3, grounding.SECTION_PREDICATE y la línea base de SP4, y reemplazar este test.")
-```
-
-- [ ] **Paso 2: verde, y ROJO por mutación (un tripwire se valida rompiéndolo)**
-
-```bash
-cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo \
-  /home/fruiz/jax-platform/backend/.venv/bin/python -m pytest tests/test_tripwires_catalogo_db.py -v 2>&1 | tail -6
-```
-
-Esperado: `3 passed`. Mutaciones, cada una revertida después y anotada en el PR:
-- (a) En la copia de jax del worktree, agregar `[ops.generate]` a `las_manos/config.toml` sin commitear: el TRIPWIRE 1 cae con `['generate'] está en ops del TOML Y en capability de la DB`. Revertir con `git -C /home/fruiz/worktrees/jax-gobernanza-catalogo checkout las_manos/config.toml`.
-- (b) En `grounding.build_snapshot` del worktree de jax, sumar temporalmente los nombres de `ctx.catalog._capabilities` a `ops`: el TRIPWIRE 2 cae con `dio VALID`. Revertir.
-
-- [ ] **Paso 3: pisos**
-
-Leer los valores actuales. `PISO_PASSED` +3 (2 con `client` + 1 puro) y `JAX_CI_MIN_PASSED` +1, con comentario ("tripwires del catálogo: intersección ops∩DB vacía y su CONTROL con `client`; la Mesa no llega al resolver, puro. Validados por mutación."). Medir con los dos comandos del Paso 8 de la Tarea 3.
-
-- [ ] **Paso 4: commit**
-
-```bash
-git -C /home/fruiz/worktrees/jax-platform-gobernanza add backend/tests/test_tripwires_catalogo_db.py .github/workflows/policy.yml
-git -C /home/fruiz/worktrees/jax-platform-gobernanza commit -m "$(cat <<'EOF'
-test(gobernanza): tripwires del catálogo de capabilities
-
-ops del TOML y capability de la DB no comparten nombres (con su control),
-y en la Mesa un claim sobre una capability de la DB sigue sin llegar al
-resolver mientras el snapshot liste solo ops. Validados por mutación.
-
-Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
-Claude-Session: https://claude.ai/code/session_01LNXrHCwsZAVfrQj56maFHB
-EOF
-)"
-```
-
----
-
-### Tarea 6: latencia de `validation_context()`, antes y después
-
-**Archivos:** ninguno en los repos. Los números van a `DEUDA.md` en la Tarea 8.
-
-- [ ] **Paso 1: medir el "después"** con el mismo script del Paso 2 de la Tarea 3, contra la rama:
+- [ ] **Paso 1: medir el "después"** con el script de la Tarea 6, Paso 2, contra las ramas. La DB es la de producción, solo lectura, que todavía NO tiene `capability.mode`. Por eso el "después" se mide contra `jax_memory_test`, que sí la tiene, y se declara:
 
 ```bash
 cd /home/fruiz/worktrees/jax-platform-gobernanza/backend && pwd && set -a && . /etc/jax/.env && set +a && \
-  PYTHONDONTWRITEBYTECODE=1 JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo \
+  PYTHONDONTWRITEBYTECODE=1 JAX_DB_NAME=jax_memory_test JAX_REPO_PATH=/home/fruiz/worktrees/jax-gobernanza-catalogo \
   /home/fruiz/jax-platform/backend/.venv/bin/python "$SCRATCH/medir_validation_context.py" | tee "$SCRATCH/latencia-despues.txt"
 ```
 
-La recarga "fría" del después incluye `from_db()` contra `jax_memory` (solo SELECT) y `asyncio.to_thread`. El "caliente" suma un `stat` del sello. El sello real solo se statea; el script no lo escribe.
+Qué incluye cada número:
+- La recarga "fría" del después incluye `from_db()` (3 SELECT) y `asyncio.to_thread`.
+- El "caliente" suma un `stat` del sello. El sello real solo se statea; el script no lo escribe.
+- El "después" definitivo, contra `jax_memory` de producción, se repite en la Tarea 11, Paso 5, ya desplegado.
 
-- [ ] **Paso 2: juzgar el resultado.** Caliente: p95 del después menor a 50 µs. Frío: p95 menor a 20 ms. Si se pasa, no hay GO. Se busca la causa (¿el hilo? ¿el connect?) y se mide de nuevo. No se sube el umbral para que pase.
-- [ ] **Paso 3: anotar** en el PR de jax-platform: antes y después, `N`, fecha, máquina (hall9000), y lo que se declaró no medido: sin carga sobre `/api/chat` (llama al modelo); crear y reanudar pipelines no cambian de forma (un literal distinto).
+- [ ] **Paso 2: juzgar.**
+  - Caliente: p95 del después menor a 50 µs.
+  - Frío: p95 menor a 20 ms.
+  - Snapshot: 28 entradas (11 ops + 17 capabilities) y un `render` de ~1.800 caracteres (estimado del spec: 1.786).
+  - **Umbral de parada:** si el `render` pasa de 2.500 caracteres, o la diferencia de `tokens_in` de la Tarea 11 pasa de 600 tokens, la estimación del spec estaba mal. Se busca la causa y se consulta a Fernando antes del GO. No se sube el umbral para que pase. Si la latencia se pasa, no hay GO: se busca la causa (¿el hilo? ¿el connect?) y se mide de nuevo.
+- [ ] **Paso 3: anotar** en el PR-C:
+  - Antes y después, `N`, fecha y máquina (hall9000).
+  - Qué base se usó en cada medición.
+  - Lo declarado como no medido: sin carga sobre `/api/chat` (llama al modelo); crear y reanudar pipelines no cambian de forma (un literal distinto).
 
 ---
 
-### Tarea 7: PRs, gate por `headSha` y orden de merge
+### Tarea 10: PRs, gate por `headSha` y orden de merge
 
-**Acoplamiento declarado.** El CI de jax-platform clona `jax` master (`git clone --depth=1 .../Jax.git /tmp/jax`). Hasta que el PR de jax esté mergeado, los tests de gobernanza del PR de jax-platform llaman al validador viejo y fallan. En la otra dirección: desde que el PR de jax se mergea hasta que se mergea el de jax-platform, **cualquier** run de CI de jax-platform (el de la etapa 2 incluido) falla en esos tests, porque `master` todavía llama con dos argumentos. Por eso se mergean uno detrás del otro, y la etapa 2 rebasa después.
+**Acoplamiento declarado (spec §6):**
+- El job `jacobs-gobernanza-db` de jax clona `jax-platform` master: PR-B necesita PR-A mergeado para su `test_catalog_mode_db.py`.
+- El CI de jax-platform clona `jax` master: PR-C necesita PR-B mergeado.
+- Entre el merge de PR-B y el de PR-C, **cualquier** run de CI de jax-platform sin PR-C (master, la etapa 2) falla en los tests de gobernanza. Por eso PR-B y PR-C van uno detrás del otro.
+- PR-A sola es inofensiva: el `from_db()` viejo no lee la columna, y si alguien reinicia jax-platform en el medio, la migración corre y no rompe nada.
 
-- [ ] **Paso 1: verificar el estado remoto antes de abrir** (lección "verificar estado remoto antes de un PR")
+- [ ] **Paso 1: estado remoto antes de abrir** (lección "verificar estado remoto antes de un PR")
 
 ```bash
 git -C /home/fruiz/worktrees/jax-gobernanza-catalogo fetch origin && git -C /home/fruiz/worktrees/jax-gobernanza-catalogo log --oneline origin/master -3
@@ -1277,53 +2155,78 @@ git -C /home/fruiz/worktrees/jax-platform-gobernanza fetch origin && git -C /hom
 gh pr list --repo fjruizhn/Jax --state open; gh pr list --repo fjruizhn/jax-platform --state open
 ```
 
-Si `master` avanzó, se rebasa y, si hay conflicto en un piso, se suman los dos deltas. Antes de pushear se vuelven a correr los comandos de verde de las Tareas 1–5.
+Si `master` avanzó, se rebasa y, si hay conflicto en un piso, se suman los dos deltas. Antes de pushear se vuelven a correr los comandos de verde de las Tareas 1–8.
 
-- [ ] **Paso 2: PR de jax.** `git -C … push -u origin feat/gobernanza-catalogo-db`, y `gh pr create --repo fjruizhn/Jax`. El cuerpo lleva: resumen, la decisión de Fernando del Paso 0.1 (con fecha), los hallazgos de la Tarea 0, los pisos (80→81, 143→151), lo que se vio en rojo, y que **acompaña a jax-platform#<n>** (se despliegan juntos). Termina con las líneas de atribución de las Restricciones globales.
-- [ ] **Paso 3: gate de jax sobre el `headSha`**
+- [ ] **Paso 2: GO de Fernando** para la secuencia completa: los tres merges y el despliegue (Tarea 11). Se le presentan el acoplamiento de arriba, la ventana de segundos del despliegue, la medición de la Tarea 9 y la consecuencia sobre SP4 (spec §2, decisión 4).
+- [ ] **Paso 3: PR-A.**
+  - `git -C /home/fruiz/worktrees/jax-platform-gobernanza push -u origin feat/capability-mode` y `gh pr create --repo fjruizhn/jax-platform --base master --head feat/capability-mode`.
+  - Cuerpo: resumen; la decisión del default (spec §3.1); pisos; mutaciones; "primero de tres: PR-B (Jax) y PR-C dependen de este"; atribución.
+  - Gate:
 
 ```bash
-SHA=$(git -C /home/fruiz/worktrees/jax-gobernanza-catalogo rev-parse HEAD)
-gh pr view <n> --repo fjruizhn/Jax --json headRefOid -q .headRefOid   # tiene que ser == $SHA
-gh run list --repo fjruizhn/Jax --commit "$SHA" --json name,status,conclusion
+SHA=$(git -C /home/fruiz/worktrees/jax-platform-gobernanza rev-parse feat/capability-mode)
+gh pr view <n> --repo fjruizhn/jax-platform --json headRefOid -q .headRefOid   # tiene que ser == $SHA
+gh run list --repo fjruizhn/jax-platform --commit "$SHA" --json name,status,conclusion
 ```
 
-Se espera que todos los workflows del sha estén `completed/success`, en particular `governance`, `tests-puros`, `mirror-sync` y `no-fail-open-except`. Si alguno está en rojo, no se sigue.
-
-- [ ] **Paso 4: PR de jax-platform** (push y `gh pr create --repo fjruizhn/jax-platform`), con la latencia de la Tarea 6, las mutaciones de las Tareas 3 y 5 y "requiere Jax#<n> mergeado primero". Su CI va a estar rojo en gobernanza hasta el merge de jax, y así se declara en el cuerpo.
-- [ ] **Paso 5: GO de Fernando** para mergear los dos y desplegar (Tarea 8). Se le anuncian el acoplamiento de arriba y la ventana de segundos del despliegue.
-- [ ] **Paso 6: merge de jax** (`gh pr merge <n> --repo fjruizhn/Jax --merge`, solo si el gate del Paso 3 sigue verde sobre el mismo sha). Enseguida, `gh run rerun <run-id> --repo fjruizhn/jax-platform` sobre el run del `headSha` del PR de jax-platform, para que clone el jax nuevo.
-- [ ] **Paso 7: gate de jax-platform sobre su `headSha`** (mismo comando del Paso 3 contra `fjruizhn/jax-platform`: `frontend-tests`, `backend-tests-con-db`, `backend-tests-no-db`, `no-fail-open-except`, todo en success). Después, merge.
-- [ ] **Paso 8: avisar al ejecutor de la etapa 2** (`/home/fruiz/worktrees/jax-platform-etapa2`) que `master` cambió los pisos y `governance_context`: rebasa él y suma deltas.
+  Se esperan todos los checks `completed/success` (`frontend-tests`, `backend-tests-con-db`, `backend-tests-no-db`, `no-fail-open-except` y los que haya). Merge: `gh pr merge <n> --repo fjruizhn/jax-platform --merge`.
+- [ ] **Paso 4: PR-B.**
+  - `git -C /home/fruiz/worktrees/jax-gobernanza-catalogo push -u origin feat/gobernanza-catalogo-db` y `gh pr create --repo fjruizhn/Jax`.
+  - Cuerpo: resumen; spec v2 y la decisión de Fernando (2026-09-14, con la cita); pisos (`governance`, `tests-puros`, `jacobs-gobernanza-db`); rojos vistos; mutaciones; "requiere jax-platform#<PR-A> (mergeado); acompaña a jax-platform#<PR-C>"; atribución.
+  - Gate por `headSha` (mismo comando contra `fjruizhn/Jax`, en particular `governance`, `tests-puros`, `jacobs-gobernanza-db`, `mirror-sync` y `no-fail-open-except`). Si `jacobs-gobernanza-db` corrió antes del merge de PR-A, se hace `gh run rerun` sobre el run del sha.
+- [ ] **Paso 5: PR-C.**
+  - `git -C /home/fruiz/worktrees/jax-platform-gobernanza rebase origin/master feat/gobernanza-catalogo-db`. Los commits de PR-A ya están en master y se descartan solos. Verificarlo: `git log --oneline origin/master..feat/gobernanza-catalogo-db` muestra solo los commits de las Tareas 6–8.
+  - Volver a correr los verdes de las Tareas 6–8. Push y `gh pr create --repo fjruizhn/jax-platform`.
+  - Cuerpo: resumen; latencia y tamaño del snapshot (Tarea 9); mutaciones de las Tareas 6 y 7; "requiere Jax#<PR-B> mergeado primero; su CI queda rojo en gobernanza hasta ese merge" (así se declara); atribución.
+- [ ] **Paso 6: merge de PR-B** (`gh pr merge <n> --repo fjruizhn/Jax --merge`, solo si el gate del Paso 4 sigue verde sobre el mismo sha). Enseguida, `gh run rerun <run-id> --repo fjruizhn/jax-platform` sobre el run del `headSha` de PR-C, para que clone el jax nuevo.
+- [ ] **Paso 7: gate de PR-C sobre su `headSha`**, todo en success. Después, merge.
+- [ ] **Paso 8: avisar al ejecutor de la etapa 2** (`/home/fruiz/worktrees/jax-platform-etapa2`): `master` cambió los pisos, la tabla `capability` (columna `mode`) y `governance_context` (async). Rebasa él y suma deltas.
 
 ---
 
-### Tarea 8: despliegue, verificación en vivo y cierre en DEUDA
+### Tarea 11: despliegue, verificación en vivo y cierre en DEUDA
 
-- [ ] **Paso 1: anunciar la ventana a Fernando.** "Reinicio jax-platform y después jax-las-manos. Durante unos segundos, crear o reanudar un pipeline puede fallar (uno manda `plataforma` y el otro todavía espera `Fernando`)."
-- [ ] **Paso 2: traer el código a los checkouts de producción** (lo único que se hace en ellos)
+- [ ] **Paso 1: línea base del tamaño del prompt, ANTES de desplegar.**
+  - Leer la firma actual de `create_access_token` en `/home/fruiz/jax-platform/backend/auth/jwt.py`: la etapa 2 agregó `tv`/`token_version`. Leer también los `user_id`, `tenant_id`, rol y, si corresponde, `token_version` de la cuenta de Fernando, con una consulta de solo lectura a `jax_users`, verificando antes los nombres de columna con `SHOW COLUMNS FROM jax_users`.
+  - Generar el token con el venv de producción y `/etc/jax/.env`.
+  - `POST http://127.0.0.1:8080/api/chat` con `{"message": "¿Qué capabilities tiene hoy este sistema, de lectura y de escritura, incluidas generate y file_write? Citá cada una.", "facet": "jekyll", "origin": "probe"}`, en una conversación nueva.
+  - Anotar `tokens_in` de la fila de `axioma_usage` de ese turno (`SELECT tokens_in, created_at FROM axioma_usage WHERE facet='jekyll' AND user_id=<id> ORDER BY id DESC LIMIT 1`).
+- [ ] **Paso 2: anunciar la ventana a Fernando.** "Reinicio jax-platform y después jax-las-manos. Durante unos segundos, crear o reanudar un pipeline puede fallar (uno manda `plataforma` y el otro todavía espera `Fernando`)."
+- [ ] **Paso 3: backup con restauración probada y precondición de la migración**
+
+```bash
+set -a && . /etc/jax/.env && set +a
+M="mariadb -h $JAX_DB_HOST -P $JAX_DB_PORT -u $JAX_DB_USER -p$JAX_DB_PASSWORD"
+$M -N jax_memory -e 'SELECT `key` FROM capability ORDER BY `key`' | tee "$SCRATCH/capabilities-pre.txt"   # esperado: las 17 de _CAPABILITY_MODE
+mariadb-dump -h "$JAX_DB_HOST" -P "$JAX_DB_PORT" -u "$JAX_DB_USER" -p"$JAX_DB_PASSWORD" jax_memory capability capability_motor > "$SCRATCH/capability-pre-mode.sql"
+$M jax_memory_test < "$SCRATCH/capability-pre-mode.sql" && $M -N jax_memory_test -e 'SELECT COUNT(*) FROM capability'   # restauración probada: 17
+git -C /home/fruiz/jax log --oneline -1 | tee "$SCRATCH/sha-jax-antes.txt"; git -C /home/fruiz/jax-platform log --oneline -1 | tee "$SCRATCH/sha-jax-platform-antes.txt"
+```
+
+Detalles del paso:
+- Si la lista de capabilities no es exactamente la de `_CAPABILITY_MODE`, **se para**: la migración fallaría a propósito con la fila huérfana y jax-platform no arrancaría. Se consulta a Fernando.
+- La restauración va a `jax_memory_test`, la base de tests: queda con el esquema viejo y la próxima corrida de tests la migra, que es el camino "base vieja" de la Tarea 1.
+- Rollback, si hiciera falta: `git -C <checkout> checkout <sha anterior>` en los dos checkouts y reiniciar los dos servicios. La columna puede quedar: el código viejo no la lee.
+
+- [ ] **Paso 4: traer el código y reiniciar, en orden**
 
 ```bash
 git -C /home/fruiz/jax status --short && git -C /home/fruiz/jax pull --ff-only && git -C /home/fruiz/jax log --oneline -1
 git -C /home/fruiz/jax-platform status --short && git -C /home/fruiz/jax-platform pull --ff-only && git -C /home/fruiz/jax-platform log --oneline -1
-```
-
-Si `status --short` no está vacío, se para y se pregunta: no se pisa trabajo ajeno. Traer el código de jax no cambia a ningún proceso vivo: el validador ya está importado en memoria.
-
-- [ ] **Paso 3: reiniciar, en orden, y medir**
-
-```bash
 ls -la /srv/jax-data/facet-cache-seal          # el sello existe (si no, parar: el caché no se invalidaría)
 date -Is | tee "$SCRATCH/deploy-inicio.txt"
-sudo systemctl restart jax-platform && sleep 3 && systemctl is-active jax-platform
-sudo systemctl restart jax-las-manos && sleep 3 && systemctl is-active jax-las-manos
+sudo systemctl restart jax-platform && sleep 5 && systemctl is-active jax-platform && curl -fsS http://127.0.0.1:8080/api/health; echo
+$M -N jax_memory -e "SELECT IS_NULLABLE, COLUMN_DEFAULT, COLUMN_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='jax_memory' AND TABLE_NAME='capability' AND COLUMN_NAME='mode'; SELECT \`key\`, mode FROM capability WHERE mode='mutating';"
+sudo systemctl restart jax-las-manos && sleep 3 && systemctl is-active jax-las-manos && curl -fsS http://127.0.0.1:7777/health; echo
 for u in jax-platform jax-las-manos; do p=$(systemctl show -p MainPID --value $u); echo "$u pid=$p cwd=$(readlink /proc/$p/cwd)"; done
-curl -fsS http://127.0.0.1:8080/health; echo; curl -fsS http://127.0.0.1:7777/health; echo
 ```
 
-Si alguno de los dos `/health` no existe con esa ruta, se usa el endpoint de salud del CONTEXT.md del repo, verificado antes de correr esto.
+Qué se espera y cuándo parar:
+- Si `status --short` no está vacío, se para y se pregunta: no se pisa trabajo ajeno.
+- La columna tiene que dar `NO	NULL	enum('read_only','mutating')`, y la única fila `mutating` tiene que ser `file_write`.
+- **Si jax-platform no queda `active`, o la columna no está, no se reinicia LAS MANOS**, porque su `from_db()` nuevo necesita la columna. Se mira `journalctl -u jax-platform -n 80` y se aplica el rollback.
 
-- [ ] **Paso 4: verificación en vivo 1, el resolver con el contexto de producción** (proceso aparte, solo lectura, con el código ya desplegado)
+- [ ] **Paso 5: verificación en vivo 1, el resolver y el snapshot con el contexto de producción** (proceso aparte, solo lectura)
 
 ```bash
 cd /home/fruiz/jax-platform/backend && pwd && set -a && . /etc/jax/.env && set +a && PYTHONDONTWRITEBYTECODE=1 \
@@ -1332,67 +2235,139 @@ import asyncio, os, sys
 sys.path.insert(0, os.getcwd())
 import governance_context as gc, grounding as g, validator as v, claims as c
 
-acc = g.Accreditation(authority="OBSERVADO", provenance_ref="tool_result:sha256:" + "0"*64,
-                      evidence_pointer_raw="/capabilities/0", outcome="ACCREDITED", detail="verificación en vivo")
-def claim(n): return c.Claim(predicate="CAPABILITY_AVAILABLE", args={"name": n, "mode": "read_only"},
-                             authority="OBSERVADO", provenance_ref="x", evidence_pointer="/capabilities/0", scope="mesa_web")
+def claim(n, m): return c.Claim(predicate="CAPABILITY_AVAILABLE", args={"name": n, "mode": m},
+                                authority="OBSERVADO", provenance_ref="x", evidence_pointer="x", scope="mesa_web")
 async def main():
     ctx, preds, _ = await gc.validation_context()
-    caps = sorted(ctx.catalog._capabilities)
-    print("capabilities de la DB:", len(caps), caps)
-    print("ops∩DB:", sorted(set(ctx.ops) & set(caps)))                              # esperado: []
-    print("generate ->", v.validate(claim("generate"), preds, ctx, accreditation=acc).status)   # VALID
-    print("inventada ->", v.validate(claim("totalmente_inventado_xyz"), preds, ctx, accreditation=acc).status)  # FACT_MISMATCH (control)
+    caps = {e.name: e.mode for e in ctx.catalog.capabilities()}
+    print("capabilities de la DB:", len(caps), caps)                                     # 17, solo file_write mutating
+    print("ops∩DB:", sorted(set(ctx.ops) & set(caps)))                                   # []
+    snap = g.build_snapshot(ctx); texto = g.render(snap)
+    print("snapshot entradas:", len(snap.entries), "render_chars:", len(texto))           # 28 / ~1800
+    # Resolver directo, sin acreditación (camino legado, OBSERVADO):
+    print("generate/read_only ->", v.validate(claim("generate", "read_only"), preds, ctx).status)      # VALID
+    print("generate/mutating  ->", v.validate(claim("generate", "mutating"), preds, ctx).status)       # FACT_MISMATCH
+    print("file_write/read_only ->", v.validate(claim("file_write", "read_only"), preds, ctx).status)  # FACT_MISMATCH
 asyncio.run(main())
 PY
 ```
 
-- [ ] **Paso 5: verificación en vivo 2, un turno de sonda (`origin='probe'`)** que haga que la Mesa declare claims `CAPABILITY_AVAILABLE`. Token: `auth.jwt.create_access_token(user_id, tenant_id, role)` en el venv de producción, con el `user_id`, `tenant_id` y rol de la cuenta de Fernando. Esos datos salen de una consulta de solo lectura a la tabla de usuarios; los nombres de columna se verifican con `SHOW COLUMNS` antes. POST a `http://127.0.0.1:8080/api/chat` con `{"message": "¿Qué capabilities tiene hoy este sistema, de lectura y de escritura, incluidas generate y file_write?", "facet": "jekyll", "origin": "probe"}`. Después:
+Además, repetir `medir_validation_context.py` (Tarea 6, Paso 2) con `JAX_REPO_PATH=/home/fruiz/jax` contra `jax_memory`, y guardarlo en `$SCRATCH/latencia-despues-produccion.txt`.
 
-```sql
-SELECT shadow_message_id, grounding_snapshot_sha256, validated_at FROM shadow_messages
- WHERE origin='probe' AND created_at >= '<deploy-inicio>' ORDER BY created_at DESC LIMIT 1;
-SELECT predicate, status, authority, JSON_UNQUOTE(JSON_EXTRACT(args,'$.name')) FROM shadow_claim_verdicts
- WHERE shadow_message_id = '<id>' ORDER BY id;
+- [ ] **Paso 6: verificación en vivo 2, claim de sonda por el camino real de la Mesa** (`run_shadow_validation`, `origin='probe'`; escribe filas de sonda en producción, como las sondas de SP4)
+
+```bash
+cd /home/fruiz/jax-platform/backend && pwd && set -a && . /etc/jax/.env && set +a && PYTHONDONTWRITEBYTECODE=1 \
+/home/fruiz/jax-platform/backend/.venv/bin/python - <<'PY'
+import asyncio, os, sys, uuid
+sys.path.insert(0, os.getcwd())
+import governance_context as gc, grounding as g
+from api.chat import ContractResult
+from shadow_validation import run_shadow_validation
+from db.connection import get_pool, close_pool
+
+async def main():
+    ctx, _, _ = await gc.validation_context()
+    snap = g.build_snapshot(ctx)
+    ptr = next(e.pointer for e in snap.entries if e.pointer.startswith("/catalog_capabilities/") and e.args["name"] == "generate")
+    for modo in ("read_only", "mutating"):
+        smid = str(uuid.uuid4())
+        contrato = ContractResult(contract_parsed=True, analysis="sonda tanda A v2", judgment=None,
+                                  degradation_reason=None, raw_text="sonda tanda A v2",
+                                  claims=[{"predicate": "CAPABILITY_AVAILABLE",
+                                           "args": {"name": "generate", "mode": modo}, "evidence_pointer": ptr}])
+        await run_shadow_validation("sonda-tanda-a-v2", smid, "jekyll", contrato, snap, "probe")
+        pool = await get_pool()
+        async with pool.acquire() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT status, authority, evidence_pointer FROM shadow_claim_verdicts WHERE shadow_message_id=%s", (smid,))
+            print(modo, smid, await cur.fetchall())
+    await close_pool()
+asyncio.run(main())
+PY
 ```
 
-Antes de correrla, verificar con `SHOW COLUMNS FROM shadow_messages` que las columnas `origin` y `created_at` existen con esos nombres. Esperado: `sha256` distinto de `'ERROR'` (el contexto async con el catálogo de la DB se construyó), `validated_at` no NULL, claims sobre `ops` con `OBSERVADO/VALID`, ninguno `SOURCE_CONFLICT`. Los claims sobre capabilities de la DB dan lo que fija el TRIPWIRE 2 (no llegan al resolver), salvo que el Paso 0.1 haya decidido otra cosa. Si el modelo no declaró ningún claim, se repite una vez con otra formulación y se anota.
+Esperado:
+- `read_only` → `(('VALID', 'OBSERVADO', '/catalog_capabilities/N'),)`.
+- `mutating` → `(('FACT_NOT_IN_SNAPSHOT', 'INFERIDO', ...),)`. En la Mesa, el modo equivocado lo corta la acreditación, antes del resolver (spec v2 §3.4). El `FACT_MISMATCH` del resolver quedó verificado en el Paso 5 y, por el camino de la Mesa con el catálogo cambiado, en `test_si_el_catalogo_cambia_entre_el_snapshot_y_la_validacion_el_resolver_da_fact_mismatch`.
+- Si `async with pool.acquire() as conn, conn.cursor() as cur` no es válido en esta versión, se anidan los dos `async with`.
 
-- [ ] **Paso 6: verificación en vivo 3, crear y reanudar un pipeline con el rol nuevo.** Desde la UI, o con `POST /api/pipelines` y el token del Paso 5, se crea un pipeline `supervised` de objetivo mínimo. Se espera `interrupted` y se reanuda (`POST /api/pipelines/<id>/resume`). Luego se cancela, para no gastar de más. Verificar:
+- [ ] **Paso 7: verificación en vivo 3, un turno real de la Mesa.** Repetir el turno de sonda del Paso 1: mismo mensaje, faceta, `origin='probe'` y conversación nueva. Después:
+
+```sql
+SELECT shadow_message_id, grounding_snapshot_sha256, validated_at,
+       JSON_LENGTH(grounding_snapshot, '$.catalog_capabilities') AS n_catalogo
+  FROM shadow_messages WHERE origin='probe' AND conv_uuid <> 'sonda-tanda-a-v2'
+ ORDER BY id DESC LIMIT 1;
+SELECT predicate, status, authority, evidence_pointer, JSON_UNQUOTE(JSON_EXTRACT(args,'$.name'))
+  FROM shadow_claim_verdicts WHERE shadow_message_id = '<id>' ORDER BY id;
+SELECT tokens_in FROM axioma_usage WHERE facet='jekyll' AND user_id=<id> ORDER BY id DESC LIMIT 1;
+```
+
+Esperado:
+- `sha256` distinto de `'ERROR'`, `validated_at` no NULL y `n_catalogo = 17`.
+- Ningún `SOURCE_CONFLICT`.
+- Si la faceta citó una capability de la DB, `OBSERVADO/VALID`.
+- La diferencia de `tokens_in` con el Paso 1 es el costo del snapshot (umbral de la Tarea 9).
+- Si el modelo no declaró ningún claim sobre capabilities de la DB, se repite una vez con otra formulación y se anota. No es un fallo del sistema, porque lo mecánico ya lo verificó el Paso 6.
+
+- [ ] **Paso 8: verificación en vivo 4, crear y reanudar un pipeline con el rol nuevo.**
+  - Desde la UI, o con `POST /api/pipelines` y el token del Paso 1, crear un pipeline `supervised` de objetivo mínimo.
+  - Esperar `interrupted` y reanudar (`POST /api/pipelines/<id>/resume`). Luego cancelar, para no gastar de más.
+  - Verificar:
 
 ```sql
 SELECT pipeline_id, invoked_by, user_id, tenant_id, status FROM jacobs_pipelines WHERE pipeline_id='<id>';   -- invoked_by='plataforma'
 ```
 
-y en los eventos de Jacobs del pipeline, `PIPELINE_RESUMED` con `{"by": "plataforma"}`. Si la tabla de eventos no se llama como se espera, se busca con `SHOW TABLES LIKE 'jacobs%'`.
-
-- [ ] **Paso 7: journal limpio**
+  En los eventos de Jacobs del pipeline se espera `PIPELINE_RESUMED` con `{"by": "plataforma"}`. Si la tabla de eventos no se llama como se espera, se busca con `SHOW TABLES LIKE 'jacobs%'`.
+- [ ] **Paso 9: journal limpio**
 
 ```bash
 journalctl -u jax-platform -u jax-las-manos --since "$(cat "$SCRATCH/deploy-inicio.txt")" -p warning --no-pager | tail -40
 ```
 
-Se espera no ver trazas de `validation_context`, `from_db`, `SnapshotError` ni `invoked_by`. Cualquier aviso nuevo se explica o se trata como fallo.
+No se espera ver trazas de `validation_context`, `from_db`, `SnapshotError`, `capability sin mode` ni `invoked_by`. Cualquier aviso nuevo se explica o se trata como fallo.
+- [ ] **Paso 10: frontend**, con el procedimiento de `/home/fruiz/jax/CONTEXT.md` §7 ("CORREGIDO 2026-09-14": build → rsync a `/tmp/axioma-deploy/` en la VM dev → `sudo rsync -a --delete --chown=www:www` a `/www/wwwroot/axioma-ia.io/`, con `--exclude .user.ini` en los DOS saltos; backup antes). El backend ya pisa `invoked_by`, así que el bundle viejo sigue funcionando: esto solo publica el modal nuevo.
+  - El build se hace en el worktree, llevado al `master` desplegado, para no escribir en el checkout de producción. Las variables `JAX_SSH_PORT`/`JAX_SSH_USER` y el host `172.16.20.11` son las del despliegue de la etapa 4 (`jax-platform/docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-4-contrasenas.md`, ~1131). Se verifican con `ssh -p "$JAX_SSH_PORT" "$JAX_SSH_USER@172.16.20.11" hostname` antes.
 
-- [ ] **Paso 8: frontend.** El backend ya pisa `invoked_by`, así que el bundle viejo, que manda `'Fernando'`, sigue funcionando. Aun así, el modal nuevo se publica con el procedimiento de despliegue del frontend registrado en la Biblioteca de jax-platform (su `CONTEXT.md`). Si no está documentado, **se pregunta a Fernando**, no se improvisa. Se verifica que `axioma-ia.io` sirva el `index-*.js` nuevo.
-- [ ] **Paso 9: DEUDA.md (PR de docs en jax).** En el worktree de jax, rama nueva desde el `origin/master` actualizado, `docs/deuda-gobernanza-catalogo`:
-  - Cerrar **"El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3 vació"**: CERRADO 2026-09-14, con los PRs, lo medido en vivo (Paso 4) y el alcance real, que es latente en la Mesa hasta que el snapshot incluya el catálogo (TRIPWIRE 2 en jax-platform; decisión del Paso 0.1).
-  - Cerrar **"`invoked_by` es un campo de AUTORIZACIÓN en Jacobs..."**: CERRADO 2026-09-14, rol `plataforma`, verificación del Paso 6, y que las filas viejas con "Fernando" quedan como historia.
-  - Agregar la entrada de rendimiento (LAS CUATRO, punto 4), con fecha: latencia de `validation_context()`, fría y caliente, p50/p95/max antes y después (Tareas 3 y 6), `N`, máquina, "sin carga sobre /api/chat (llama al modelo), declarado".
-  - Anotar el hallazgo de la Tarea 0 como HECHO con procedencia: 17 capabilities en producción (no 18: falta `validate`) y cero `FACT_MISMATCH` históricos en `CAPABILITY_AVAILABLE`.
+```bash
+git -C /home/fruiz/worktrees/jax-platform-gobernanza checkout --detach origin/master && git -C /home/fruiz/worktrees/jax-platform-gobernanza log --oneline -1
+cd /home/fruiz/worktrees/jax-platform-gobernanza/frontend && pwd && PATH=/home/fruiz/.nvm/versions/node/v24.16.0/bin:$PATH npm run build
+ssh -p "$JAX_SSH_PORT" "$JAX_SSH_USER@172.16.20.11" "sudo cp -a /www/wwwroot/axioma-ia.io /www/wwwroot/axioma-ia.io.backup-pre-tanda-a-$(date +%Y%m%d-%H%M%S)"
+rsync -a --delete --exclude .user.ini -e "ssh -p $JAX_SSH_PORT" /home/fruiz/worktrees/jax-platform-gobernanza/frontend/dist/ "$JAX_SSH_USER@172.16.20.11:/tmp/axioma-deploy/"
+ssh -p "$JAX_SSH_PORT" "$JAX_SSH_USER@172.16.20.11" "sudo rsync -a --delete --exclude .user.ini --chown=www:www /tmp/axioma-deploy/ /www/wwwroot/axioma-ia.io/"
+curl -fsS https://axioma-ia.io/ | grep -o 'index-[A-Za-z0-9_-]*\.js'   # == el index-*.js de frontend/dist/index.html
+```
 
-  Commit con las líneas de atribución, PR, gate por `headSha`, merge y `git -C /home/fruiz/jax pull --ff-only` (solo docs, sin reinicio).
-- [ ] **Paso 10: limpiar.** Cuando los PRs estén mergeados y lo medido esté en `DEUDA.md`: `git -C /home/fruiz/jax-platform worktree remove /home/fruiz/worktrees/jax-platform-gobernanza`, `git -C /home/fruiz/jax worktree remove /home/fruiz/worktrees/jax-gobernanza-catalogo`, y borrar los venvs y archivos del scratchpad.
+- [ ] **Paso 11: DEUDA.md (PR de docs en jax).** En el worktree de jax, rama nueva `docs/deuda-gobernanza-catalogo` desde el `origin/master` actualizado:
+  - Cerrar **"El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3 vació"**. Va como CERRADO 2026-09-14, con los tres PRs y lo medido en vivo (Pasos 5–7: 17 capabilities, ops∩DB vacío, sonda `VALID/OBSERVADO` y `FACT_NOT_IN_SNAPSHOT`, snapshot con 28 entradas). También el hallazgo de la planificación como HECHO con procedencia: cero `FACT_MISMATCH` históricos en `CAPABILITY_AVAILABLE` (427 VALID, 3 POINTER_MISMATCH, 1 ARGS_MISMATCH, 2 AUTHORITY_INVALID sobre `code_swarm`) y 17 capabilities, no 18.
+  - Cerrar **"`invoked_by` es un campo de AUTORIZACIÓN en Jacobs..."**: CERRADO 2026-09-14, rol `plataforma`, verificación del Paso 8, y las filas viejas con "Fernando" quedan como historia.
+  - Entrada de rendimiento (LAS CUATRO, punto 4), con fecha y máquina:
+    - Latencia de `validation_context()`, fría y caliente, p50/p95/max, antes y después, en `jax_memory_test` y en producción, con `N`.
+    - Tamaño del snapshot: entradas y caracteres, antes y después, más la diferencia de `tokens_in` de los turnos de sonda.
+    - "sin carga sobre /api/chat (llama al modelo), declarado".
+  - En el ítem de SP4 (brazo negativo, ~línea 2827), agregar: "**2026-09-14 (tanda A v2):** el snapshot suma `catalog_capabilities` (28 entradas en vez de 11). La línea base del 2026-09-03 deja de ser directamente comparable; al retomar SP4 hace falta una nueva, con su pre-registro (spec tanda A v2 §2, decisión 4)."
+  - Commit con las líneas de atribución, PR, gate por `headSha`, merge y `git -C /home/fruiz/jax pull --ff-only` (solo docs, sin reinicio).
+- [ ] **Paso 12: limpiar.** Cuando los PRs estén mergeados y lo medido esté en `DEUDA.md`:
+  - `git -C /home/fruiz/jax-platform worktree remove /home/fruiz/worktrees/jax-platform-gobernanza`
+  - `git -C /home/fruiz/jax worktree remove /home/fruiz/worktrees/jax-gobernanza-catalogo`
+  - Borrar las ramas locales mergeadas, los venvs y los archivos del scratchpad (lección "limpiar scratchpad tras publicar"). El dump de `capability` se guarda hasta confirmar 24 h sin incidentes y después se borra.
 
 ---
 
-## Autorrevisión (contra el spec)
+## Autorrevisión (contra el spec v2)
 
-- §3.1 (validador recibe el catálogo, resolver sin cambios) → Tarea 1.
-- §3.2 (async, clave con el sello, lock, falla visible, `cache_clear`) → Tarea 3.
-- §3.3 (Jacobs `plataforma`, jax-platform lo pone, el modal no lo manda, filas viejas intactas, fixtures sin cambio) → Tareas 2 y 4.
-- §4 (LAS CUATRO) → Restricciones globales, Tarea 3 (docstring) y Tarea 6.
-- §5 (tests; tripwire nuevo ops∩DB) → Tareas 1–5.
-- §6 (despliegue en orden, ventana, verificación en vivo) → Tareas 7 y 8. La verificación "claim de la Mesa → VALID" se ajustó por el hallazgo de la Tarea 0 y queda sujeta al Paso 0.1.
-- §7 (fuera de alcance) → respetado: el snapshot no cambia y no se verifica el "modo" de las capabilities de la DB.
-- Nombres consistentes entre tareas: `load_validation_context(repo_root, allowlist, catalog)`, `validation_context()` async + `.cache_clear()`, `_build_grounding()` async, `INVOKER_PLATAFORMA` (jax), `INVOKED_BY_PLATAFORMA` (jax-platform), el literal `"plataforma"`.
+- §1 (defecto real: no se puede citar; rama inalcanzable) → Tareas 4 y 7 lo arreglan. La Tarea 11, Pasos 6–7, lo verifica en producción.
+- §2 decisión 1 (snapshot con las capabilities de la DB) → Tarea 4; de punta a punta, Tarea 7.
+- §2 decisión 2 / §3.1 (`capability.mode`, semilla, NOT NULL sin default, tripwires) → Tarea 1.
+- §2 decisión 3 / §3.2–3.3 (`CapabilityEntry.mode`, `from_db`, resolver verifica el modo) → Tareas 2 y 3.
+- §2 decisión 4 (SP4 no comparable) → la medición está en las Tareas 6 (antes), 9 y 11 (después) y la nota en DEUDA.md en la Tarea 11, Paso 11.
+- §3.4 (esquema de punteros, `SECTION_PREDICATE`, `render`, invariante de SP3, efecto sobre tests existentes) → Tarea 4, que busca los tests que dependen del JSON literal en el Paso 1. La Tarea 6, Paso 7, confirma que `/capabilities/10` sigue válido.
+- §3.5 (async, clave con el sello, lock, falla visible, mismo contexto para snapshot y validación) → Tarea 6.
+- §3.6 (Jacobs `plataforma`; jax-platform lo pone; el modal no lo manda; filas viejas intactas) → Tareas 5 y 8.
+- §4 (LAS CUATRO) → Restricciones globales, Tarea 6 (docstring) y Tareas 9 y 11.
+- §5 (tests) → Tareas 1–8; cada uno con su rojo declarado, y los que pasan antes, declarados y validados por mutación.
+- §6 (tres PRs en orden, despliegue con `SHOW COLUMNS` entre reinicios, ventana anunciada, frontend por CONTEXT.md §7, verificación en vivo) → Tareas 10 y 11.
+- §7 (fuera de alcance) → respetado: `ops` sigue en el TOML, sin línea base nueva de SP4 y sin `mode` en `get_motor_governance()`.
+- **Nombres consistentes entre tareas:** `_CAPABILITY_MODE`, `_FILE_CAPABILITY_SEED`, `CAPABILITY_MODES`, `CapabilityEntry.mode`, `MotorCatalog.capabilities()`, `load_validation_context(repo_root, allowlist, catalog)`, `SECTION_PREDICATE["catalog_capabilities"]`, `/catalog_capabilities/N`, `validation_context()` async + `.cache_clear()`, `_build_grounding()` async, `INVOKER_PLATAFORMA` (jax), `INVOKED_BY_PLATAFORMA` (jax-platform) y el literal `"plataforma"`.
+- **Placeholders:** los `<actual>`, `<medido>`, `<n>` y `<id>` son valores que se leen o se miden al ejecutar, por regla de las Restricciones globales ("nunca se copia un número sin medir"). No son contenido por completar.
