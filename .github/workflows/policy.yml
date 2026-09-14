@@ -534,6 +534,7 @@ jobs:
           tests/test_repl_fuentes.py tests/test_memory_embedding_config.py
           tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py
           tests/test_motor_catalog_mode.py
+          tests/test_jacobs_invoked_by_rol.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -553,6 +554,7 @@ jobs:
             tests/test_repl_fuentes.py tests/test_memory_embedding_config.py \
             tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py \
             tests/test_motor_catalog_mode.py \
+            tests/test_jacobs_invoked_by_rol.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -616,8 +618,9 @@ jobs:
           #   el proveedor del modelo asignado (JOIN por model_ref) y una faceta sin
           #   filas en el catalogo queda con su asignado. Visto en rojo antes.
           # 143 -> 148 el 2026-09-14 (tanda A v2): test_motor_catalog_mode.py (+5) -- CapabilityEntry.mode, fail-closed por dict, modo inválido lanza, capabilities() ordenado. Vistos en rojo.
-          grep -qE "^148 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 148 tests CORRIDOS."; exit 1; }
+          # 148 -> 156 el 2026-09-14 (tanda A): test_jacobs_invoked_by_rol.py (+8) -- invoked_by es el rol "plataforma" y no "Fernando": al crear (policy y request), planificar, reanudar y aprobar. Vistos en rojo antes del arreglo.
+          grep -qE "^156 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 156 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
