@@ -521,6 +521,7 @@ jobs:
           tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py
           tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py
           tests/test_repl_fuentes.py tests/test_memory_embedding_config.py
+          tests/test_fuentes_dedup.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -538,6 +539,7 @@ jobs:
             tests/test_invoke_motor_rechazo.py tests/test_motor_contexto_y_salida.py \
             tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py \
             tests/test_repl_fuentes.py tests/test_memory_embedding_config.py \
+            tests/test_fuentes_dedup.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -580,8 +582,15 @@ jobs:
           #   (+1) -- `migrar_embeddings.py revertir` resuelve la columna activa con
           #   embedding_config y no con el literal "embedding" (con los defaults en
           #   bge-m3 habria borrado la columna en uso). Visto en rojo antes del arreglo.
-          grep -qE "^125 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 125 tests CORRIDOS."; exit 1; }
+          # 125 -> 129 el 2026-09-14: test_fuentes_dedup.py (+4) -- dos redirecciones
+          #   de Google grounding que llevan al MISMO documento quedan como una sola
+          #   fuente con las citas de las dos (pipeline 04e02b09); las no resueltas
+          #   no se fusionan. Visto en rojo antes del arreglo.
+          # 129 -> 131 el mismo dia, por la revision del PR: una redireccion que
+          #   llega al documento de una fuente directa se fusiona con ella, y una
+          #   no resuelta conserva su lugar entre resueltas. Validados por mutacion.
+          grep -qE "^131 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 131 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

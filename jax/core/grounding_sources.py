@@ -91,8 +91,36 @@ async def _resolve_one(client: httpx.AsyncClient, source: dict) -> None:
     source["resolved"] = bool(location)
 
 
+def _merge_by_final_url(sources: list[dict]) -> None:
+    """Fusiona las fuentes que resolvieron a la MISMA URL final (2026-09-14).
+
+    Gemini da un token de redirección distinto por chunk, así que dos chunks
+    del mismo documento llegan como URIs distintas y `build_sources` no las
+    puede ver iguales (pipeline 04e02b09: [1] y [2] con la misma URL). Recién
+    acá se sabe. Queda la primera, con las citas de las dos, sin repetir y en
+    orden. Una fuente NO resuelta no se fusiona con nada: sin URL final no se
+    sabe qué documento es. Muta la lista recibida porque los llamadores
+    (jacobs/executor.py, jax/muscles/base.py) ignoran el retorno."""
+    merged: list[dict] = []
+    by_final_url: dict[str, dict] = {}
+    for source in sources:
+        final_url = source.get("final_url") if source.get("resolved") else None
+        first = by_final_url.get(final_url) if final_url else None
+        if first is None:
+            if final_url:
+                by_final_url[final_url] = source
+            merged.append(source)
+            continue
+        quotes = first.setdefault("quotes", [])
+        for quote in source.get("quotes") or []:
+            if quote not in quotes:
+                quotes.append(quote)
+    sources[:] = merged
+
+
 async def resolve_redirects(sources: list[dict], client: httpx.AsyncClient | None = None) -> list[dict]:
-    """Agrega `final_url` y `resolved` a cada fuente, todas en paralelo.
+    """Agrega `final_url` y `resolved` a cada fuente, todas en paralelo, y
+    fusiona las que resultan ser el mismo documento (ver _merge_by_final_url).
     `client` es para tests (MockTransport); en producción se crea uno."""
     if not sources:
         return sources
@@ -101,6 +129,7 @@ async def resolve_redirects(sources: list[dict], client: httpx.AsyncClient | Non
             await asyncio.gather(*(_resolve_one(own, s) for s in sources))
     else:
         await asyncio.gather(*(_resolve_one(client, s) for s in sources))
+    _merge_by_final_url(sources)
     return sources
 
 
