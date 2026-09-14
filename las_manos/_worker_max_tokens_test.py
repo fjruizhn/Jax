@@ -185,7 +185,10 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
         ))
         state = self.store._index[job_id]
         assert state.get("_finish_reason") == "length", state
-        assert state["status"] == "completed"  # el job igual se marca completed -- el dato queda para diagnostico, no bloquea
+        # Hasta el 2026-09-14 esto afirmaba "completed" ("el dato queda para
+        # diagnostico, no bloquea"). Decision de Fernando ese dia: una salida
+        # cortada que pasa por completa es fail-open (P10) -- falla.
+        assert state["status"] == "failed", state
 
     async def test_transport_ollama_no_resuelve_credencial(self):
         """Guard igual a facet_resolver.py:81-82 -- transport='ollama' nunca

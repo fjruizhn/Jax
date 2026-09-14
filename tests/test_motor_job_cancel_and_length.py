@@ -151,6 +151,42 @@ class CorteDeTokensTest(_Base):
         assert "max_tokens" in (state["error"] or ""), state["error"]
         assert "7232" in state["error"], "el error debe decir cuánto se fue en razonamiento"
 
+    async def test_corte_por_length_sin_schema_falla_no_sale_como_completo(self):
+        """Decisión de Fernando, 2026-09-14 (DEUDA.md, anotados b8f80733):
+        una salida cortada por tokens SIN schema quedaba `completed` desde el
+        2026-08-10 ("el dato queda para diagnóstico"), y el paso siguiente la
+        usaba sin saber que le faltaba el final -- fail-open (P10). Ahora falla
+        igual que el caso con schema: sin reintento, diciendo qué subir."""
+        calls = []
+
+        async def fake_call(**kwargs):
+            calls.append(kwargs)
+            return _response(
+                "El módulo de ventas registra cada factura y luego",
+                finish_reason="length",
+                usage={"prompt_tokens": 400, "completion_tokens": 8000,
+                       "completion_tokens_details": {"reasoning_tokens": 6100}},
+            )
+
+        job_id = self._new_job("implementation")
+        await self._run(job_id, "implementation", fake_call)
+
+        state = self._state(job_id)
+        assert len(calls) == 1, f"reintentó una salida cortada por tokens: {len(calls)} llamadas"
+        assert state["status"] == JobStatus.FAILED.value, state
+        assert "max_tokens" in (state["error"] or ""), state["error"]
+        assert "6100" in state["error"], "el error debe decir cuánto se fue en razonamiento"
+
+    async def test_sin_schema_y_sin_corte_sigue_completando(self):
+        """Control: sin schema y con finish_reason=stop, el job se completa
+        como siempre. El arreglo no puede tocar el caso normal."""
+        async def fake_call(**kwargs):
+            return _response("respuesta completa", finish_reason="stop")
+
+        job_id = self._new_job("implementation")
+        await self._run(job_id, "implementation", fake_call)
+        assert self._state(job_id)["status"] == JobStatus.COMPLETED.value
+
     async def test_schema_invalido_sin_corte_sigue_reintentando_una_vez(self):
         """Control: el reintento de schema sigue existiendo para lo que sí
         arregla -- una respuesta completa que no respetó el formato."""

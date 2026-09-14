@@ -742,13 +742,15 @@ async def run(
             # Inválido tras el reintento: FAILED explícito, nunca completed
             # con una salida que no se puede usar.
             validation = validate(content, output_schema)
-            if not output_schema or validation["validated"] or validation["skipped"]:
-                break
             if finish_reason == "length":
                 # Cortada por tokens, no mal formateada: el reintento repite
                 # la misma llamada con el mismo techo y se corta igual, al
                 # doble de costo (b8f80733: 7232 de 8000 tokens razonando).
                 # Lo que lo arregla es subir motor.max_tokens -- decirlo.
+                # Va ANTES del chequeo de schema (2026-09-14, decisión de
+                # Fernando): sin schema, o con uno que acepta texto libre,
+                # una salida cortada salía `completed` y el paso siguiente la
+                # usaba sin saber que le faltaba el final (P10).
                 reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
                 store.update(
                     job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
@@ -765,6 +767,8 @@ async def run(
                 await _notify_failed_with_writes(job_id=job_id, files_written=files_written, reason="salida cortada por max_tokens")
                 await _report_usage("failed")
                 return
+            if not output_schema or validation["validated"] or validation["skipped"]:
+                break
             if validation_retried:
                 store.update(
                     job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
