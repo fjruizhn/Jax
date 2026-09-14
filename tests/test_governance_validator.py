@@ -226,9 +226,15 @@ def test_file_exists_directory_entry_returns_verdict_not_exception():
     assert "directorio" in verdict.detail.lower()
 
 
-def _real_ctx() -> "validator.ValidationContext":
+def _real_ctx(catalog: MotorCatalog | None = None) -> "validator.ValidationContext":
+    """ops y allowlist REALES (config.toml y closed_vocabulary.yaml del repo).
+    El catálogo lo pasa el test: desde 2026-09-14 el validador ya no lo arma
+    del TOML (spec tanda A, §3.3). Sin catálogo explícito va uno vacío, que es
+    lo que necesitan los tests de la rama `ops`."""
     vocab = loaders.load_vocabulary()
-    return validator.load_validation_context(REPO_ROOT, vocab.config_paths)
+    return validator.load_validation_context(
+        REPO_ROOT, vocab.config_paths, catalog if catalog is not None else MotorCatalog({})
+    )
 
 
 def test_capability_available_found_only_in_ops_read_only_mode_matches():
@@ -253,11 +259,17 @@ def test_capability_available_found_only_in_ops_mode_mismatch():
 
 def test_capability_available_catalog_branch_with_synthetic_catalog_is_valid():
     """La rama `in_catalog` del resolver, ejercitada con un catálogo
-    ARMADO A MANO. No usa _real_ctx(): ver el tripwire siguiente."""
+    ARMADO A MANO. No usa _real_ctx(): ver el tripwire siguiente.
+
+    Desde la tanda A v2 (2026-09-14) la rama verifica el modo: el catálogo
+    lo declara explícito, y sin declararlo el constructor por dict da
+    'mutating' (fail-closed)."""
     ctx = validator.ValidationContext(
         ops=frozenset(),
         mutating_capabilities=frozenset(),
-        catalog=MotorCatalog({"capabilities": {"code_swarm": {"allowed_motors": ["kimi"]}}}),
+        catalog=MotorCatalog(
+            {"capabilities": {"code_swarm": {"allowed_motors": ["kimi"], "mode": "read_only"}}}
+        ),
         config_paths_allowlist=frozenset(),
         repo_root=REPO_ROOT,
     )
@@ -269,36 +281,49 @@ def test_capability_available_catalog_branch_with_synthetic_catalog_is_valid():
     assert verdict.status == "VALID"
 
 
-def test_real_toml_catalog_is_empty_since_block3_so_catalog_branch_is_dead_in_production():
-    """TRIPWIRE. Referenciado por nombre desde DEUDA.md (ítem "El resolver de
-    CAPABILITY_AVAILABLE consulta un catálogo que el Bloque 3 vació",
-    verificado 2026-09-02).
+def test_load_validation_context_usa_el_catalogo_que_recibe():
+    """Reemplaza al tripwire `test_real_toml_catalog_is_empty_since_block3_so_
+    catalog_branch_is_dead_in_production` (2026-09-02 -> 2026-09-14). Ese test
+    fijaba que el validador armaba el catálogo desde el TOML vacío; el arreglo
+    de la tanda A (spec 2026-09-14 v2, §3.3) lo pone rojo, como estaba
+    previsto, y este describe el estado nuevo: el catálogo es el que pasa el
+    llamador (en producción, jax-platform con `await MotorCatalog.from_db()`).
 
-    Hasta el 2026-09-02 este archivo tenía un test que afirmaba que
-    `code_swarm` se encontraba en el catálogo REAL (_real_ctx) y daba VALID.
-    Estaba rojo en master y nadie lo veía porque tests/test_governance_*.py
-    no corría en ningún job de CI. La causa: el Bloque 3 movió las
-    capabilities a la DB (`MotorCatalog.from_db()`); `[capabilities.*]` del
-    TOML quedó vacío, y `validator.load_validation_context()` sigue
-    construyendo `MotorCatalog(config)` desde el TOML. Resultado: en
-    producción la rama `in_catalog` de `_resolve_capability_available` NUNCA
-    se toma.
+    Lo que pedía el tripwire, hecho: DEUDA.md se cierra en el despliegue; SP3
+    §3.3 lleva una nota fechada; `grounding.SECTION_PREDICATE` suma
+    `catalog_capabilities` (tests/test_governance_grounding.py)."""
+    catalogo = MotorCatalog({"capabilities": {"generate": {"allowed_motors": ["kimi"], "mode": "read_only"}}})
+    ctx = _real_ctx(catalogo)
+    assert ctx.catalog is catalogo
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "generate", "mode": "read_only"})
+    verdict = validator.validate(claim, PREDICATES, ctx)
+    assert verdict.status == "VALID", verdict.detail
+    assert "catálogo" in verdict.detail
 
-    Cuando alguien arregle el validador para leer la DB, este test se pone
-    ROJO. Eso es lo que debe pasar: obliga a (1) cerrar el ítem de DEUDA.md,
-    (2) revisar §3.3 del spec de SP3 y `grounding.SECTION_PREDICATE`, y
-    (3) reemplazar este test por el que describa el estado nuevo."""
-    ctx = _real_ctx()
-    assert ctx.catalog.get_capability("code_swarm") is None, (
-        "el catálogo real ya NO está vacío: alguien arregló el validador. "
-        "Cerrar el ítem de DEUDA.md y actualizar este test -- ver docstring."
-    )
-    claim = _claim(
-        predicate="CAPABILITY_AVAILABLE",
-        args={"name": "code_swarm", "mode": "read_only"},
-    )
+
+def test_control_sin_la_capability_en_el_catalogo_el_mismo_claim_es_fact_mismatch():
+    """CONTROL de `test_load_validation_context_usa_el_catalogo_que_recibe`:
+    mismo claim, mismo repo, catálogo vacío -> FACT_MISMATCH. El VALID de
+    arriba sale del catálogo recibido y no de `ops` ni de otra fuente."""
+    ctx = _real_ctx(MotorCatalog({}))
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "generate", "mode": "read_only"})
+    assert validator.validate(claim, PREDICATES, ctx).status == "FACT_MISMATCH"
+
+
+def test_rama_catalogo_con_el_modo_equivocado_es_fact_mismatch():
+    """Tanda A v2: el catálogo tiene el modo (capability.mode). Afirmar que
+    file_write es de solo lectura es falso."""
+    ctx = _real_ctx(MotorCatalog({"capabilities": {"file_write": {"mode": "mutating"}}}))
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "file_write", "mode": "read_only"})
     verdict = validator.validate(claim, PREDICATES, ctx)
     assert verdict.status == "FACT_MISMATCH"
+    assert "mutating" in verdict.detail
+
+
+def test_rama_catalogo_con_el_modo_real_mutating_es_valid():
+    ctx = _real_ctx(MotorCatalog({"capabilities": {"file_write": {"mode": "mutating"}}}))
+    claim = _claim(predicate="CAPABILITY_AVAILABLE", args={"name": "file_write", "mode": "mutating"})
+    assert validator.validate(claim, PREDICATES, ctx).status == "VALID"
 
 
 def test_capability_available_not_found_anywhere():

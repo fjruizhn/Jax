@@ -475,10 +475,16 @@ jobs:
         # antes esperaban MISMATCH/PROVENANCE_MISMATCH se actualizaron in
         # place a POINTER_MISMATCH o FACT_NOT_IN_SNAPSHOT, sin cambiar el
         # conteo.
+        #
+        # 80 -> 83 el 2026-09-14 (tanda A v2): el tripwire del
+        # catálogo TOML vacío se reemplaza (-1) por
+        # test_load_validation_context_usa_el_catalogo_que_recibe + su CONTROL
+        # (+2) y la rama in_catalog verifica el modo (+2). El tripwire se vio en
+        # rojo con el arreglo, como estaba previsto; los nuevos, antes.
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tee /tmp/gov
-          grep -qE "^80 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 80 tests CORRIDOS."; exit 1; }
+          grep -qE "^83 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 83 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
