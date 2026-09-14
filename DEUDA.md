@@ -329,6 +329,82 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado — admin usuarios etapa 1: correo saliente (SMTP) desde Admin (2026-09-13)
+
+jax-platform#67 (`ddd2bc8`), plan `docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-1-smtp.md`,
+spec §3.1. "¿Olvidaste tu contraseña?" nunca había enviado un correo: leía `SMTP_*`
+del entorno, que no existían. Ahora la configuración vive en `axioma_config`, con la
+contraseña cifrada con Fernet, y se carga desde Admin → "Correo (SMTP)".
+
+- **Hallazgo de la revisión final (Crítico, arreglado antes del merge):** "Probar
+  conexión" y "guardar con la máscara" reusaban la contraseña guardada contra
+  CUALQUIER host que mandara el cliente. Con cifrado `none` y un listener propio,
+  un token de superadmin (aunque fuera robado) sacaba la contraseña del buzón en
+  claro. El plan mismo lo exigía (un test cambiaba el host conservando la
+  contraseña). Ahora la contraseña guardada solo se reusa si host, puerto, cifrado
+  y usuario coinciden con lo guardado. **Lección:** "la contraseña nunca sale" no
+  es solo "no se devuelve en el GET"; también es "no se entrega a un tercero".
+- También arreglados en dos olas: la reserva de `smtp.*` en `/api/admin/config`
+  se saltaba primero con mayúsculas y, arreglado eso, con acentos, ancho completo
+  y caracteres de ancho cero. La collation `utf8mb4_uca1400_ai_ci` los iguala a
+  `smtp.password`, y `ON DUPLICATE KEY` pisaba la fila real en claro. Ahora lo
+  decide la base con la collation de la columna, en el PUT y en el GET. También:
+  el guardado pasa a una sola transacción (antes quedaban unos milisegundos el
+  host nuevo con la contraseña vieja), los 500 por contraseña o usuario no ASCII,
+  por saltos de línea en el remitente, por host IDNA inválido y por `FERNET_KEY`
+  malformada, el límite en test-connection y la contraseña fuera del `repr`.
+  **Lección:** una lista de exclusión en Python sobre una columna `_ai_ci` no
+  protege; la igualdad la define la base, así que el chequeo lo tiene que hacer
+  la base.
+- **Modo claro:** rojos y verdes no tenían override en ninguna pantalla. El aviso
+  de configuración corrupta medía 1,49:1 y se agregaron los overrides. El override
+  de `text-slate-100` (título de todas las pantallas de Admin) quedó en ≥7,2:1.
+  Medido con contraste WCAG en el navegador sobre un arnés sin login.
+  **Lección:** "la UI ya usa esa clase" no prueba que se lea en modo claro.
+- **Carga — VERDAD OPERACIONAL, 2026-09-13 18:04 CST.** Rama en su head final
+  `16b94df`, levantada en 127.0.0.1:8091 contra `jax_memory_test`. 0 errores y 0
+  tokens creados:
+  | endpoint | c=10 rps / p95 | c=30 rps / p95 / p99 |
+  |---|---|---|
+  | `GET /api/admin/smtp` | 2416 / 4,9 ms | 2196 / 15,3 / 17,2 ms |
+  | `GET /api/admin/config` (reserva por la base) | 1242 / 9,4 ms | 1183 / 28,6 / 40,6 ms |
+  | `POST /api/auth/forgot-password` (email real) | 3592 / 2,8 ms | 3187 / 10,6 / 13,5 ms |
+  **No medido:** test-connection y /smtp/test (salen a un servidor SMTP real;
+  /smtp/test está limitado a 5/300) ni el trabajo en segundo plano de
+  forgot-password. Se vuelve a medir si cambia `axioma_config` o el camino de
+  forgot-password.
+- **EXPLAIN:** `axioma_config IN (...)` hace range sobre PRIMARY (7 filas);
+  `jax_users WHERE email = ? AND status = 'active'` es const por el índice único
+  `email`.
+- **Despliegue — VERDAD OPERACIONAL, 2026-09-13 18:20 CST:** backend `ddd2bc8`
+  (cwd del proceso `/home/fruiz/jax-platform/backend`); frontend
+  `index-DE6FPDVA.js` servido en axioma-ia.io; "Probar conexión" contra
+  `mail.axioma-ia.io:587` STARTTLS: VERDE (Fernando, en la pantalla, 2026-09-13 ~18:30); `smtp.password` en la
+  base empieza con `gAAAAA`.
+- **Correo real (con permiso de Fernando):** `Authentication-Results`:
+  **PENDIENTE** — el correo llegó (Fernando, 2026-09-13), falta la línea para cerrar. Cierre exige `dkim=pass` y `spf=pass`.
+- **Pedido de Fernando tras probarla en producción — jax-platform#68 (`48adfb7`,
+  desplegado 2026-09-13 19:54 CST, `index-B4G6iYq-.js`):**
+  - Al elegir cifrado, el puerto salta a su valor estándar (sin cifrado 25,
+    STARTTLS 587, SSL/TLS 465) y sigue editable.
+  - "Enviar correo de prueba" abre una ventanita, copiada del ERP. El destinatario
+    viene prellenado con `smtp.test_to` (clave nueva y opcional, editable en la
+    pantalla) o, si no hay, con el email de la sesión.
+  - El destinatario y el remitente exigen **una sola dirección**
+    (`validacion.direccion_unica_valida`). La revisión encontró que
+    `postmaster,a@b.io` llegaba a dos destinatarios y que `x;y@b.io` iba a `x`
+    mientras el log registraba `x;y@b.io`.
+  - Inter queda registrada como fuente intencional en
+    `frontend/.impeccable/config.json`, por decisión de Fernando.
+  - Carga sobre `b3c043f`: c=30, `GET /api/admin/smtp` con p95 de 18,3 ms, 0
+    errores.
+  - **Lección:** un ruling mío decía que el login usa `email_valido`; era falso
+    (valida con Pydantic) y el docstring falso se corrigió antes del merge.
+    Verificar con grep quién llama algo antes de usarlo como motivo.
+- **Proceso:** ejecución con subagentes (4 tareas + revisión final con opus). La
+  Task 5 del plan no traía prueba de carga: se agregó por la política 4. Se
+  trabajó en un worktree porque los servicios sirven desde el checkout principal.
+
 ## Cerrado — pipeline b8f80733 y la cadena en línea (2026-09-12)
 
 El pipeline `b8f80733` ("esquematizar el ERP") abortó a las 10:00:25. Cinco
@@ -2411,6 +2487,42 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 
 ## Anotado, no bloquea
+
+- **Anotados en la etapa 1 de admin usuarios (2026-09-13).**
+  - **Dependencia de la etapa 4:** `_procesar_recuperacion` se traga todo y
+    devuelve `None`, así que el "enlace de restablecimiento" por admin de la
+    etapa 4 no puede reusarlo para devolver 503 si falta SMTP (spec §3.4). La
+    etapa 4 tiene que llamar `smtp_config.cargar_settings()` y
+    `_send_reset_email` (que SÍ lanza) por su cuenta.
+  - **`DeprecationWarning` de `datetime.utcnow()`** en `jax_engine/schemas.py` y
+    `state.py`: ruido preexistente en toda corrida de pytest. Lo reabre Python
+    3.15 o una limpieza de warnings.
+  - **test-connection devuelve el banner del servidor** remoto al superadmin:
+    sirve como sondeo de puertos internos. Se acepta porque es solo superadmin y
+    está limitado (`JAX_SMTP_CONN_RATE`). Lo reabre que el endpoint deje de ser
+    exclusivo de superadmin.
+  - **La pantalla de Configuración traga los errores del PUT `/api/admin/config`**:
+    no hay texto para `config_clave_reservada` ni para
+    `config_collation_desconocida`, y quien intenta guardar una clave reservada
+    no ve por qué no se guardó. Es preexistente. Lo reabre el próximo cambio en
+    AdminSettings.
+  - **Contraste de textos secundarios en modo oscuro:** `text-slate-500` sobre el
+    fondo oscuro mide 3,75:1, por debajo del AA de 4,5 (medido en AdminSmtp el
+    2026-09-13). Es la convención de todas las pantallas. Arreglarlo es una
+    decisión del sistema de diseño, no de una pantalla.
+  - **Cancelación durante el rollback de `smtp_config.guardar_filas`:** si la tarea
+    se cancela justo en el rollback, se loguea el `CancelledError` en vez del error
+    original de la base. La conexión no vuelve sucia al pool: `Pool.release` de
+    aiomysql cierra las que quedan a mitad de transacción. No se cambió porque
+    atrapar `BaseException` en la limpieza arriesga tragarse cancelaciones. Lo
+    reabre ver ese caso en un log real.
+  - **Pares de contraste por debajo de 4,5 que hoy no se usan:** `#b91c1c` sobre
+    `#fecaca` da 4,47 y el verde sobre `#e2e8f0` da 4,07. El test de modo claro
+    exige que exista un override, no que el contraste alcance. Se reabre si una
+    pantalla combina `text-red-400` con `hover:bg-red-900` o pone texto verde
+    sobre `bg-slate-700`.
+  - **Fuente Inter** marcada como "sobreusada" por el hook de impeccable en
+    `frontend/src/index.css:8`: preexistente, pendiente de decisión de Fernando.
 
 - **Anotados en la ronda del pipeline b8f80733 (2026-09-12).** Ninguno
   bloquea; cada uno dice qué lo reabre.
