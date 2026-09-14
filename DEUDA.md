@@ -489,6 +489,8 @@ encadenados, más uno de fondo:
   no pisa un `CANCELLED`.
 - `finish_reason=length` + schema inválido → `failed` explícito, sin
   reintento, con el error que dice qué subir (`motor.max_tokens`).
+  **Ampliado el 2026-09-14 (jax#152):** ahora falla todo corte por `length`, con o
+  sin schema y con tool_calls — ver la entrada de los anotados de b8f80733.
 - Cada llamada recibe `min(motor.default_timeout_seconds, lo que queda)`.
 - El modal ya no manda `timeout_seconds`. `generate`: techo 5 → 15 min (GO de
   Fernando), por migración con guard `WHERE =5` que no pisa un ajuste manual.
@@ -2693,11 +2695,16 @@ retractaciones, que no se borran. Ninguno requiere acción.
     Kimi es cloud: cerrar la conexión no está verificado que detenga lo que
     Moonshot ya estaba generando (blueprint de Ricardo §11, mismo límite). Lo
     garantizado es que no hay segunda llamada.
-  - **`finish_reason=length` sin schema sigue marcando `completed`.** Decisión
-    del 2026-08-10 (`_worker_max_tokens_test.py`: "el dato queda para
-    diagnóstico, no bloquea"), no tocada en esta ronda: el arreglo solo cubre
-    el camino con schema. Se reabre si una salida cortada sin schema llega a
-    un consumidor como si estuviera completa.
+  - **`finish_reason=length` sin schema marcaba `completed` — DECISIÓN de Fernando,
+    2026-09-14: revierte la del 2026-08-10; arreglo en jax#152, PENDIENTE de verificar
+    en vivo.** Una salida cortada que pasa por completa es fail-open (P10). En
+    `worker.py` la rama de corte va ahora ANTES de mirar tool_calls o schema: falla
+    siempre, sin reintento, también con schema que acepta texto libre y con
+    tool_calls (hueco hermano que encontró la revisión: se ejecutaban herramientas
+    con argumentos truncados). Con `max_tokens=0` el error dice que el motor no lo
+    declara. Impacto medido antes de desplegar: 0 de 57 jobs de `motor_jobs.jsonl`
+    estaban cortados. Texto original: decisión del 2026-08-10 ("el dato queda para
+    diagnóstico, no bloquea"), el arreglo solo cubría el camino con schema.
   - **El nombre del pipeline llevaba `Pipeline: ` fijo — CERRADO Y DESPLEGADO
     2026-09-14** (jax#150 → `a996c07`; jax-platform#69 → `bfab4de`; `jax-platform` 12:38:07 y `jax-las-manos` 12:38:09, cwd = checkout con el commit, NRestarts=0, journal limpio; frontend `index-BK3OWw2W.js`, md5 local = servido). Sale de `t.pipelineName()`; el test usa un spy porque el texto
     de es.js coincide con el prefijo viejo (verificado por mutación). `invoked_by`,
