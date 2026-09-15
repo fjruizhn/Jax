@@ -215,9 +215,13 @@ class DispatchStepUsageTest(unittest.IsolatedAsyncioTestCase):
                 tokens_in=tokens_in, tokens_out=tokens_out,
             )
 
+        # PR-K ronda 4: el contrato se inyecta -- no depender de que la semilla
+        # traiga deepseek-v4-flash con max_tokens/131072 (una semilla es de otro PR).
+        import contrato_dispatch
         with patch("jacobs.executor.resolve_facet", return_value=f), \
              patch("httpx.AsyncClient.post", fake_post), \
-             patch("jacobs.executor.record_direct_usage", fake_record_direct_usage):
+             patch("jacobs.executor.record_direct_usage", fake_record_direct_usage), \
+             patch.object(contrato_dispatch, "_leer_contrato", AsyncMock(return_value=("max_tokens", 1000))):
             result = await executor._dispatch_step(step, pipeline)
 
         self.assertEqual(result["result"], "hola")

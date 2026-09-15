@@ -144,29 +144,24 @@ jobs:
       # que importa httpx a nivel de modulo. Sin el, el job falla en la
       # COLECCION y no en un assert -- el mismo modo de falla que rompio
       # PR#25 en la ronda anterior.
-      # cryptography y PYTHONPATH=.:las_manos (PR-K ronda 2, 2026-09-14):
-      # jacobs/_direct_usage_test.py importa jacobs.executor -> credential_resolver
-      # (pelado, en las_manos/) -> crypto_secrets -> cryptography, y el
-      # contrato_dispatch pelado del symlink de las_manos/. Medido en venv
-      # limpio: sin PYTHONPATH no colecta.
-      - run: pip install pytest aiomysql pydantic httpx cryptography
+      - run: pip install pytest aiomysql pydantic httpx
       # El guard de "no correr sin DB" es un skipif: un skip masivo se ve
-      # como verde. Se exige que los tests CORRAN de verdad.
-      - run: PYTHONPATH=.:las_manos python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py jacobs/_direct_usage_test.py -v
+      # como verde. Se exige que los 6 tests CORRAN de verdad.
+      - run: python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py -v
       - run: |
-          PYTHONPATH=.:las_manos python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py \
-            jacobs/_direct_usage_test.py -q 2>&1 | tee /tmp/out
+          python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py \
+            -q 2>&1 | tee /tmp/out
           # 6 -> 8 el 2026-09-11: _store_indexes_test.py aporta 2 (los indices
           # de las columnas por las que se filtra, y que init_tables() los cree
           # de forma idempotente). Corre aca y no en tests-puros porque necesita
           # una base VACIA: comprueba que las migraciones crean los indices en
           # un entorno nuevo, que es justo donde un ALTER a mano no llega.
-          # 8 -> 15 el 2026-09-14 (PR-K ronda 2, I4): jacobs/_direct_usage_test.py
-          #   (+7) -- conteo de tokens de los caminos directos del executor
-          #   (gemini, openai-compat, ollama) y el registro de usage del step.
-          #   Ningun job lo corria: 2 de sus tests necesitan MariaDB (jacobs/store).
-          grep -qE "^15 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 15 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 15 -> 8 el 2026-09-14 (PR-K ronda 4): jacobs/_direct_usage_test.py se
+          #   mudo a jacobs-gobernanza-db -- en este job no existe el esquema de
+          #   jax-platform (tabla `motor`), que validate_capability necesita (CI de
+          #   Jax#158 rojo: 1146 "Table 'jax_memory_test.motor' doesn't exist").
+          grep -qE "^8 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -790,6 +785,7 @@ jobs:
           python -m pytest -v tests/test_plan_validation.py
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
+          jacobs/_direct_usage_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -797,6 +793,7 @@ jobs:
           python -m pytest -q tests/test_plan_validation.py \
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
+            jacobs/_direct_usage_test.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -806,5 +803,12 @@ jobs:
           # 19 -> 20 el 2026-09-14 (PR-K ronda 2): test_contrato_dispatch_db.py (+1) --
           #   cargar_registro trae transporte, proveedor y URL del MODELO del binding
           #   contra el esquema y la semilla reales.
-          grep -qE "^20 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 20 tests CORRIDOS."; exit 1; }
+          # 20 -> 27 el 2026-09-14 (PR-K ronda 4): jacobs/_direct_usage_test.py (+7),
+          #   mudado desde facet-health-io porque alla no existe el esquema de
+          #   jax-platform (sus DispatchStepUsageTest pasan por validate_capability,
+          #   que lee `motor`/`capability`). Aca las migraciones lo crean. Ademas,
+          #   test_contrato_dispatch_db.py deja de depender de filas sembradas: cada
+          #   test crea y borra SU fila de `model` (glm-5.2 no existe con la semilla
+          #   de PR-L y rompio este job en Jax#158).
+          grep -qE "^27 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 27 tests CORRIDOS."; exit 1; }
