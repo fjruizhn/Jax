@@ -7,10 +7,11 @@ pedido. Hoy la key va en la cabecera `x-goog-api-key`; esto cubre lo que queda:
 un proveedor que devuelve la key en el cuerpo del error, y cualquier texto de
 error que se guarde (jacobs_steps.error, jacobs_events), se loguee o se muestre.
 
-PARIDAD (fix wave final, ronda 2, portado 2026-09-15): las reglas son las de
-jax-platform/backend/redaccion.py VERBATIM (su fix wave final, ronda 2 --
-re-review de 0c72f4e), y tests/test_redaccion.py porta sus tablas de casos
-para que las dos copias queden clavadas. Ver _AUTH_CONTEXTO.
+PARIDAD (fix wave final, ronda 3, portado 2026-09-15): las reglas son las de
+jax-platform/backend/redaccion.py VERBATIM (su fix wave final hasta la ronda
+3 -- comillas escapadas y comilla sin cerrar), y tests/test_redaccion.py
+porta sus tablas de casos para que las dos copias queden clavadas. Ver
+_AUTH_CONTEXTO y _PARAM_SECRETO.
 
 Puro: sin I/O, sin estado. Vive en jax/core; las_manos/redaccion.py es un
 symlink (jacobs importa plano, como grounding_sources).
@@ -38,14 +39,21 @@ MARCA = "***"
 #     de un error de MariaDB (`key=` y `"key": "…"` si se tapan).
 #   - El valor entre comillas conserva las comillas; sin comillas termina en
 #     `&`, espacio, comilla, `,`, `;`, `<`, `>`, `}` o `]`.
+#   - Fix wave final, ronda 3 (paridad con jax-platform/backend/redaccion.py):
+#     la forma entre comillas acepta escapes con barra (`\"`, `\'` dentro del
+#     valor no lo cierran antes de tiempo) y, si la comilla no cierra, tapa
+#     hasta el final del texto (perdida aceptada, como con `sort_key`).
+#     `(?:\\.|[^"\\])*` parte el texto de una sola manera -- lineal, sin
+#     backtracking catastrofico (medido con 100 KB adversariales). Flag `s`
+#     para que `\\.` tome tambien un salto de linea escapado.
 _PARAM_SECRETO = re.compile(
-    r"""(?ix)
+    r"""(?isx)
     (?<![a-z0-9_\-])
     (["']?)
     ((?:[a-z0-9]+[_\-])*(?:api_?key|key|token|password|passwd|secret|credentials?)(?:[_\-]id)?)
     \1
     (\s*[=:]\s*)
-    (?:"([^"]*)"|'([^']*)'|([^&\s'",;<>}\]]+))
+    (?:"((?:\\.|[^"\\])*\\?)(?:"|\Z)|'((?:\\.|[^'\\])*\\?)(?:'|\Z)|([^&\s'",;<>}\]]+))
     """)
 
 # Esquemas de autenticacion (Bearer/Basic/Token/Digest):
@@ -68,16 +76,23 @@ _PARAM_SECRETO = re.compile(
 #      el valor sin comillas cortaba en el primer espacio: `"*** value"`. Ahora
 #      cada forma entre comillas es su propia alternativa y se tapa hasta la
 #      comilla de cierre.
+#   4. Ronda 3 (2026-09-15): toda forma entre comillas aca (igual que en
+#      _PARAM_SECRETO) acepta escapes con barra -- `\"` o `\'` dentro del valor
+#      ya no lo cierra antes de tiempo -- y una comilla SIN CERRAR tapa hasta
+#      el final del texto (antes no entraba en ninguna alternativa y el valor
+#      salia entero en claro). Lineal, sin backtracking catastrofico.
 _AUTH_CONTEXTO = re.compile(
-    r"""(?ix)
+    r"""(?isx)
     (?<![a-z0-9_\-])
     (["']?)(authorization)\1
     (\s*[=:]\s*)
     (?:
-        "(?:(bearer|basic|token|digest)\s+)?([^"]*)"
-      | '(?:(bearer|basic|token|digest)\s+)?([^']*)'
+        "(?:(bearer|basic|token|digest)\s+)?((?:\\.|[^"\\])*\\?)(?:"|\Z)
+      | '(?:(bearer|basic|token|digest)\s+)?((?:\\.|[^'\\])*\\?)(?:'|\Z)
       | (?:(bearer|basic|token|digest)\s+)?
-        (?:"([^"]*)"|'([^']*)'|([^\s"'&,;<>}\]]+))
+        (?:"((?:\\.|[^"\\])*\\?)(?:"|\Z)
+         | '((?:\\.|[^'\\])*\\?)(?:'|\Z)
+         | ([^\s"'&,;<>}\]]+))
     )
     """)
 _ESQUEMA_SUELTO = re.compile(
