@@ -662,9 +662,12 @@ class UrlRealPorCaminoTest(_Base):
                                            "transport": "http_gemini", "provider_modelo": "gemini",
                                            "base_url_modelo": _BASE_URL_PROD["gemini"]}})
         await build_muscles(cfg)["hipatia"].invoke("hola")
-        self.assertTrue(self.cap.urls[0].startswith(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent?key="),
-            self.cap.urls[0])
+        # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key,
+        # nunca en la URL (httpx loguea la URL entera en INFO).
+        self.assertEqual(
+            self.cap.urls[0],
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent")
+        self.assertIn("x-goog-api-key", self.cap.headers[0] or {})
         self.assertNotIn("max_tokens", self.cap.bodies[0])
 
     async def test_repl_ollama_usa_el_endpoint_nativo_del_toml_y_num_predict(self):

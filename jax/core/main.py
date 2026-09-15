@@ -149,7 +149,11 @@ def _lanzar_workers_background() -> None:
 
 def humanizar_error(label: str, err: Exception) -> str:
     """Traduce errores tecnicos comunes a un mensaje humano y breve."""
-    msg = str(err)
+    # Ruling T6-6: una excepcion de proveedor puede traer la key (en una URL o
+    # en el cuerpo del error): se redacta antes de mostrarla. Import diferido,
+    # mismo criterio que el de abajo.
+    from jax.core.redaccion import redactar_secretos
+    msg = redactar_secretos(str(err))
     # PR-K: un modelo sin contrato de dispatch en el catalogo se muestra
     # ENTERO -- el mensaje trae el UPDATE a ejecutar, y el recorte a 160
     # caracteres de abajo lo cortaba. Import diferido: main.py no depende

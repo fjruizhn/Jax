@@ -78,6 +78,45 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
             "-- no con un ALTER a mano, que no llega a una base nueva.",
         )
 
+    async def _columnas_del_indice(self, tabla: str, indice: str) -> list[str]:
+        conn = await store.get_conn()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s "
+                    "ORDER BY SEQ_IN_INDEX",
+                    (tabla, indice),
+                )
+                return [r[0] for r in await cur.fetchall()]
+        finally:
+            conn.close()
+
+    async def test_indice_de_duenio_de_jacobs_pipelines(self):
+        """Ruling T6-6 (2026-09-15): jax-platform lista los pipelines de un
+        dueño filtrando por (user_id, tenant_id) y ordenando por created_at.
+        Compuesto y en ESE orden: el filtro de igualdad primero y el ORDER BY
+        al final es lo que evita el filesort.
+
+        Se BORRA primero y se vuelve a correr init_tables(): medido el
+        2026-09-15, la jax_memory_test local ya lo tenia (lo creo otro camino,
+        no init_tables), y el test pasaba sin el cambio -- un control que no
+        falla no valida. Solo toca la base forzada arriba (jax_memory_test)."""
+        conn = await store.get_conn()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "DROP INDEX IF EXISTS idx_jacobs_pipelines_duenio ON jacobs_pipelines")
+        finally:
+            conn.close()
+        await store.init_tables()
+        self.assertEqual(
+            await self._columnas_del_indice("jacobs_pipelines", "idx_jacobs_pipelines_duenio"),
+            ["user_id", "tenant_id", "created_at"],
+            "falta idx_jacobs_pipelines_duenio (user_id, tenant_id, created_at) -- "
+            "agregarlo a la lista idempotente de init_tables()",
+        )
+
     async def test_init_tables_es_idempotente_para_los_indices(self):
         """Correrlo dos veces no duplica indices ni revienta.
 
