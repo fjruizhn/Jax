@@ -178,6 +178,24 @@ def test_valor_entre_comillas_despues_del_esquema(texto, esperado):
     assert out == esperado
 
 
+# --- Fix wave final, ronda 2 (2026-09-15, re-review de 0c72f4e) ----------------
+# El grupo 4 (comilla opcional antes del valor) se tragaba la comilla de
+# apertura: las alternativas entre comillas nunca aplicaban y un valor entre
+# comillas SIN esquema, o con espacios adentro, dejaba el resto en claro
+# (`authorization: "secret value"` -> `"*** value"`). Portado VERBATIM de
+# jax-platform/backend/tests/test_redaccion.py (fix wave final, ronda 2).
+@pytest.mark.parametrize("texto, esperado", [
+    ('authorization: "secret value"', 'authorization: "***"'),
+    ("authorization: 'secret value'", "authorization: '***'"),
+    ('"authorization": "Bearer abc def"', '"authorization": "Bearer ***"'),
+    ("'authorization': 'Bearer abc def'", "'authorization': 'Bearer ***'"),
+])
+def test_valor_entre_comillas_con_espacios_se_tapa_entero(texto, esperado):
+    out = redactar_secretos(texto)
+    assert "value" not in out and "def" not in out
+    assert out == esperado
+
+
 # --- Redactar primero, recortar despues ---------------------------------------
 
 def test_una_key_AIza_que_cruza_el_corte_no_deja_un_pedazo():
