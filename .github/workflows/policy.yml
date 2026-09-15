@@ -763,8 +763,23 @@ jobs:
           #   primer espacio (`"*** value"`), dejando el resto en claro. Los 4
           #   vistos en rojo contra el _AUTH_CONTEXTO viejo antes del port.
           #   Medido en venv limpio (3.14): 365.
-          grep -qE "^365 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 365 tests CORRIDOS."; exit 1; }
+          # 365 -> 386 el 2026-09-15 (paridad con jax-platform, fix wave final
+          #   ronda 3 -- comillas escapadas y comilla sin cerrar):
+          #   test_redaccion.py (+21) -- _PARAM_SECRETO y _AUTH_CONTEXTO
+          #   portados verbatim: toda forma entre comillas acepta escapes con
+          #   barra (`\"`/`\'` dentro del valor ya no lo cierran antes de
+          #   tiempo -- `'{"authorization": "Bearer abc\"123 X"}'` ya no
+          #   dejaba "123 X" en claro) y, si la comilla no cierra, tapa hasta
+          #   el final del texto (antes no entraba en ninguna alternativa y el
+          #   valor salia entero). `(?:\\.|[^"\\])*` con flag `s` parte el
+          #   texto de una sola manera -- lineal, sin backtracking
+          #   catastrofico: 8 de los 21 son controles de tiempo sobre 100 KB
+          #   adversariales. 11 vistos en rojo (8 de comilla escapada + 3 de
+          #   comilla sin cerrar) contra el _PARAM_SECRETO/_AUTH_CONTEXTO de
+          #   la ronda 2 antes del port; los de barra-al-final y los de 100 KB
+          #   ya pasaban (controles). Medido en venv limpio (3.14): 386.
+          grep -qE "^386 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 386 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
