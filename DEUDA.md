@@ -2747,10 +2747,19 @@ retractaciones, que no se borran. Ninguno requiere acción.
     deshabilitado (antes mandaba `[]` y mostraba "Guardado"). `codigoDe()` compartido
     en `src/api/errores.js`; `AlertaError.jsx` como único lugar del estilo del aviso.
     Texto original: no había texto para esos códigos y quien guardaba no veía por qué.
-  - **Contraste de textos secundarios en modo oscuro:** `text-slate-500` sobre el
-    fondo oscuro mide 3,75:1, por debajo del AA de 4,5 (medido en AdminSmtp el
+  - **Contraste de textos secundarios en modo oscuro — CERRADO Y DESPLEGADO
+    2026-09-14** (jax-platform#75 → `b08395f`; ver el ítem del tema). El texto
+    secundario es el token `texto-tenue` de `src/tema/tokens.css`: oscuro
+    `129 144 166` (`#8190a6`) = 4,51 sobre superficie y 5,50 sobre fondo y hundido;
+    claro `97 113 136` (`#617188`) = 4,54 / 4,75 / 4,97 sobre fondo / superficie /
+    hundido (calculados por Hyde 2026-09-15 con la fórmula WCAG). Lo exige
+    `src/tema/contraste.test.js`: los pares `texto-tenue`/{fondo, superficie,
+    hundido} a 4,5 en los dos temas, y un control que afirma que el viejo
+    `slate-500` (3,75) queda por debajo; el canario del PR 1 (bajarlo a 3,75) puso
+    `frontend-tests` en rojo. Texto original: "`text-slate-500` sobre el fondo
+    oscuro mide 3,75:1, por debajo del AA de 4,5 (medido en AdminSmtp el
     2026-09-13). Es la convención de todas las pantallas. Arreglarlo es una
-    decisión del sistema de diseño, no de una pantalla.
+    decisión del sistema de diseño, no de una pantalla."
   - **Cancelación durante el rollback de `smtp_config.guardar_filas` — ACEPTADO,
     reconfirmado por Fernando 2026-09-14:** si la tarea
     se cancela justo en el rollback, se loguea el `CancelledError` en vez del error
@@ -2758,14 +2767,29 @@ retractaciones, que no se borran. Ninguno requiere acción.
     aiomysql cierra las que quedan a mitad de transacción. No se cambió porque
     atrapar `BaseException` en la limpieza arriesga tragarse cancelaciones. Lo
     reabre ver ese caso en un log real.
-  - **Pares de contraste por debajo de 4,5 que hoy no se usan:** `#b91c1c` sobre
-    `#fecaca` da 4,47 y el verde sobre `#e2e8f0` da 4,07. El test de modo claro
-    exige que exista un override, no que el contraste alcance. Se reabre si una
-    pantalla combina `text-red-400` con `hover:bg-red-900` o pone texto verde
-    sobre `bg-slate-700`.
-  - **Fuente Inter** marcada como "sobreusada" por el hook de impeccable en
-    `frontend/src/index.css:8`: preexistente. DECISIÓN de Fernando 2026-09-14: se
-    decide en el Lote 3, junto con los tokens de diseño del tema claro/oscuro.
+  - **Pares de contraste por debajo de 4,5 que hoy no se usan — CERRADO Y
+    DESPLEGADO 2026-09-15** (jax-platform#79 → `65c02de` borró
+    `lightModeOverrides.test.js` y el bloque de rojos/verdes, 35 → 4 overrides;
+    #81 → `1d8b787` borró la capa `html.light-mode` entera). Ya no hay overrides:
+    `src/tema/contraste.test.js` MIDE el contraste de cada par declarado (91) en los
+    dos temas en lugar de exigir que exista un override. Texto original: "`#b91c1c`
+    sobre `#fecaca` da 4,47 y el verde sobre `#e2e8f0` da 4,07. El test de modo
+    claro exige que exista un override, no que el contraste alcance. Se reabre si
+    una pantalla combina `text-red-400` con `hover:bg-red-900` o pone texto verde
+    sobre `bg-slate-700`."
+  - **Fuente Inter — CERRADO 2026-09-14 — DECISIÓN de Fernando (2026-09-13,
+    reafirmada 2026-09-14 con el spec del tema).** Inter se queda y se carga en el
+    bundle con `@fontsource/inter` 5.3.0 (versión exacta en `package.json`; latin
+    400/500/600/700 importados en `src/main.jsx`, `font-display: swap`;
+    jax-platform#75 → `b08395f`). La advertencia del hook de impeccable queda
+    registrada en `frontend/.impeccable/config.json` (`overused-font` = `inter`) con
+    el motivo existente del 2026-09-13: "Fernando confirmed (2026-09-13, chat):
+    Inter es la fuente de la plataforma desde v0.2 (5e28e9e, 2026-06-19); se
+    mantiene por coherencia visual". Costo medido en el ítem "Bundle y primer
+    pintado del tema". Texto original: "marcada como "sobreusada" por el hook de
+    impeccable en `frontend/src/index.css:8`: preexistente. DECISIÓN de Fernando
+    2026-09-14: se decide en el Lote 3, junto con los tokens de diseño del tema
+    claro/oscuro."
 
 - **Anotados en la ronda del pipeline b8f80733 (2026-09-12).** Ninguno
   bloquea; cada uno dice qué lo reabre.
@@ -2851,11 +2875,106 @@ retractaciones, que no se borran. Ninguno requiere acción.
     **Límite de esa evidencia:** esa respuesta no traía duplicados, así que prueba que
     no hay regresión con datos reales, no la fusión en acción — eso lo prueban los
     tests. Texto original: pipeline `04e02b09`, `[1]` y `[2]` con la misma URL.
-  - **El frontend no tiene tema claro/oscuro en ninguna pantalla.** Medido: ni
-    variables CSS en `src/index.css`, ni una clase `dark:`, ni `darkMode` en
-    Tailwind; todo es `slate-*` y hex fijos. Incumple la política "Dark/Light
-    mode — SIEMPRE" en toda la app, no en un componente. La cadena siguió las
-    clases del modal; arreglarlo es una ronda propia de tokens de diseño.
+  - **El frontend no tiene tema claro/oscuro — CORREGIDO 2026-09-14 (el ítem era
+    falso tal como estaba escrito: existía un modo claro manual, la capa
+    `html.light-mode` de `index.css` y el interruptor de la barra; lo verdadero era
+    que no había tokens ni garantía de contraste) y CERRADO Y DESPLEGADO
+    2026-09-15 04:16 CST.** Cinco PRs de jax-platform, cada uno con gate por
+    headSha (11 checks), backup `BACKUP-IDENTICO` y md5 local = servido:
+    | PR | Qué | Merge | Deploy | Frontend | Backup en la VM dev |
+    |---|---|---|---|---|---|
+    | #75 | PR 1: tokens, Login/Reset, `/api/apariencia`, script en línea, Inter | `b08395f` | 2026-09-14 22:51-22:52 | `index--vE4OXEG.js` (md5 `1aa5f60bbee0a35130d29c4850ba1fb4`) | `axioma-ia.io.backup-pre-tema-pr1-20260914-225145` |
+    | #77 | Arreglos de la verificación en vivo de Fernando (HalEye animado en el Login, guardar el predeterminado fija la elección del admin, claro gris `slate-100`, ojo con tokens) | `89e9b71` | 2026-09-14 23:59 | `index-CPhAT0Nt.js` (md5 `367312870d2ff68e3a5059b7bd63766d`) | `…backup-pre-tema-fix-vivo-20260914-235854` |
+    | #78 | PR 2: administración (13 archivos) + token `obsoleto` | `04c7e3a` | 2026-09-15 02:39 | `index-BEf4mekM.js` | `…backup-pre-tema-pr2-20260915-023902` |
+    | #79 | PR 3: chat y pipelines (16 archivos, colores de faceta del store) | `65c02de` | 2026-09-15 03:52 | `index-CQ6VeUCD.js` | `…backup-pre-tema-pr3-20260915-035243` |
+    | #81 | PR 4: Dashboard, escaneo de todo `src` y hojas de estilo, fin de la capa `html.light-mode` | `1d8b787` | 2026-09-15 04:16 | `index-DLo6BH_z.js` | `…backup-pre-tema-pr4-20260915-041556` |
+    **Evidencia, re-medida por Hyde 2026-09-15 04:17 CST (sólo lectura):**
+    `/home/fruiz/jax-platform` en `1d8b787`; `https://axioma-ia.io/login` sirve
+    `index-DLo6BH_z.js` (md5 `9692df0145273fbd0ab2b87aec524204`) e
+    `index-74p7HosF.css` (md5 `06add6c770a190a77619c28d3dd64b7d`), los dos iguales
+    al `dist/` local; `light-mode` en `frontend/src` + `index.html` = 5 líneas, las 5
+    en `src/tema/contraste.test.js` y todas son aserciones que lo PROHÍBEN (fuera
+    de ese test: 0; en `dist/`: 0). `src/tema/tokens.js` importado con node:
+    **48 tokens** (`TOKENS`) y **91 pares AA** (`PARES`), verificados en los dos
+    temas por `src/tema/contraste.test.js` en CI (el job `frontend-tests`, visto en
+    rojo con el canario del PR 1: `texto-tenue` bajado a 3,75 → failure). Son 91 y
+    no los 97 del plan: la decisión de Fernando "superficie opaca + borde del color
+    de la faceta" quitó los 9 pares fondo/faceta-* y `obsoleto` sumó 3. El mismo
+    test escanea TODO `src` (ya no una lista de migrados) contra clases de paleta
+    cruda y hex, y las hojas de estilo fuera de `tokens.css` contra hex, `rgb`
+    literal y `light-mode`. `theme_default` funciona: `GET /api/apariencia` → 200,
+    `cache-control: no-cache`, `{"theme_default":"dark"}`, y el script en línea de
+    `index.html` lo aplica antes del primer pintado (desde `jax_theme_default`).
+    Revisión visual de Fernando: PR 1 (con #77) y PR 2 "se ve bien"; chat,
+    pipelines y Dashboard en los dos temas quedan para su vistazo de la mañana
+    del 2026-09-15 (sin sesión de Hyde). Texto original: "El frontend no tiene
+    tema claro/oscuro en ninguna pantalla. Medido: ni variables CSS en
+    `src/index.css`, ni una clase `dark:`, ni `darkMode` en Tailwind; todo es
+    `slate-*` y hex fijos. Incumple la política "Dark/Light mode — SIEMPRE" en
+    toda la app, no en un componente. La cadena siguió las clases del modal;
+    arreglarlo es una ronda propia de tokens de diseño."
+  - **Carga de GET /api/apariencia — VERDAD OPERACIONAL, 2026-09-14 (hora
+    estimada ~23:58, ver corrección) CST.** Rama `d9bcc8d` (PR 1), uvicorn en
+    `127.0.0.1:8091`, 1 worker, contra `jax_memory_test`; aislado (sello de
+    facetas y HOME temporales, `CANARY_INTERVAL_SECONDS=0`). Respuesta: 200,
+    `no-cache`, `{"theme_default":"dark"}`.
+    | endpoint | c | n | errores | rps | p50 | p95 | p99 |
+    |---|---|---|---|---|---|---|---|
+    | /api/apariencia | 1 | 100 | 0 | 1721 | 0,5 ms | 0,8 ms | 3,6 ms |
+    | /api/apariencia | 10 | 1000 | 0 | 1606 | 4,6 ms | 9,5 ms | 85,3 ms |
+    | /api/apariencia | 30 | 3000 | 0 | 997 | 20,3 ms | 82,6 ms | 119,3 ms |
+    | /api/apariencia | 100 | 5000 | 0 | 628 | 71,0 ms | 639,8 ms | 1301,5 ms |
+    | /api/health (sin base, referencia) | 30 | 3000 | 0 | 1004 | 19,6 ms | 81,6 ms | 130,4 ms |
+    A c=30 el endpoint con base empata con `/api/health` del mismo proceso: la
+    consulta por PK no suma latencia medible; degrada entre c=30 y c=100 como
+    cualquier endpoint del proceso de un worker. El criterio del plan (p95 28,6 ms
+    de `GET /api/admin/config` del 2026-09-13) se midió **en otras condiciones**;
+    la comparación honesta es contra `/api/health` de la misma corrida. Barrera:
+    sello real y `~/jax/missions` sin cambio, 0 tracebacks. Un primer intento se
+    descartó (el uvicorn no arrancó; todo fue conexión rechazada). **DECISIÓN de
+    Fernando (2026-09-14 22:51 CST): sin caché** para `/api/apariencia`.
+    Corrección: las horas ~23:35/23:45/~23:58 del registro de medidas fueron
+    estimadas, no leídas del reloj (a las 22:51 seguía siendo 2026-09-14); los
+    números no cambian.
+  - **Bundle y primer pintado del tema — VERDAD OPERACIONAL, 2026-09-14 21:38 →
+    2026-09-15 04:02 CST.** Lighthouse 12, desktop, `vite preview` de `dist`, 3
+    corridas, mediana; FCP/CLS del Login. Bytes gzip con `gzip -9`.
+    | Medida (HEAD) | JS crudo / gzip | CSS crudo / gzip | FCP simulado oscuro / claro | FCP observado | CLS |
+    |---|---|---|---|---|---|
+    | Base (`9138e36`) | 561780 / 171197 B | 29102 / 6170 B | 405 / 241 ms | 53-56 / 52-60 ms | 0 |
+    | PR 1 (`def18d8`) | 562514 / 171562 B | 34722 / 7337 B | 522 / 282 ms | 52 / 48-52 ms | 0 |
+    | #77 (`3a7c06c`) | 563176 / 171796 B | 34789 / 7341 B | 525 / 282 ms | 52-56 / 52-54 ms | 0 |
+    | PR 2 (`4ae3cc8`) | 564380 / 172170 B | 34824 / 7195 B | 522 / 282 ms | 52-56 / 49-53 ms | 0 |
+    | PR 3 (`bfe7e86`) | 565303 / 172021 B | 28009 / 6237 B | 522 / 282 ms | 53-57 / 51-55 ms | 0 |
+    | PR 4 (`091d660`) | 566126 / 172221 B | 27443 / 6121 B | 525 / 282 ms | 51-59 / 50-61 ms | 0 |
+    Inter: 4 woff2 (96744 B) con `font-display: swap`, + 4 woff de respaldo que
+    un navegador moderno no baja (fuentes en disco antes del PR 1: 82212 B).
+    Resumen: JS +4346 B (+0,8 %), CSS −1659 B (se fue la capa `html.light-mode`).
+    **El +117 ms de FCP simulado en oscuro no es del navegador:** Lighthouse corre
+    en `simulate` (modelo Lantern) y ahora cuenta en la cadena crítica los 3 woff2
+    de Inter que pide el Login; ningún recurso bloquea el render y el FCP
+    **observado** no cambia (≈50-60 ms). No se agregó `size-adjust`: CLS 0,000 en
+    todas las medidas. **Incertidumbre declarada:** claro corre con perfil
+    persistente (caché tibia) y oscuro en frío; no se comparan entre sí, sólo
+    antes↔después dentro de cada tema.
+  - **npm audit del frontend — CERRADO Y DESPLEGADO 2026-09-14 23:05 CST**
+    (jax-platform#76 → `0907f4b`, con GO de Fernando de las 23:04). `npm audit fix`
+    sin `--force`: 9 → 0 vulnerabilidades (6 high: browserslist, nanoid, postcss,
+    react-router, react-router-dom, undici; 3 moderate: @vitest/mocker,
+    baseline-browser-mapping, vitest), todo patch/minor, sólo `package-lock.json`;
+    al bundle sólo llegan react-router/react-router-dom 7.18.0 → 7.18.3. `npm audit`
+    en producción = 0; frontend `index-DkQdXnxb.js`, md5 local = servido
+    (`1ff0f985b370d0bbf46ba62410c88a3e`); backup
+    `axioma-ia.io.backup-pre-npm-audit-20260914-230516` `BACKUP-IDENTICO`.
+  - **Fechas sin zona horaria en el resto de la API — PENDIENTE, fecha
+    2026-09-22 (propuesta por Hyde; Fernando la confirma o la mueve).** Anotado 2026-09-15 (Ruling U7, etapa 3 de admin usuarios): la
+    sesión de MariaDB corre en CST (`SYSTEM`, `NOW()` = UTC−6, medido por pytest) y
+    los endpoints serializan `TIMESTAMP`/`DATETIME` sin zona con `isoformat()`: el
+    navegador los lee como hora local. La etapa 3 sólo arregló los suyos
+    (`last_login`/`created_at` por `UNIX_TIMESTAMP` y enviados ISO `+00:00`; `ts` de
+    `user_admin_audit` escrito en UTC por `registrar`, único escritor; su DEFAULT
+    sigue en CST). Falta revisar TODOS los demás endpoints que serializan fechas.
+    Costo mientras tanto: horas corridas en otras pantallas.
   - **vitest no corre en el CI de jax-platform — ya estaba CERRADO, el ítem estaba
     vencido (medido 2026-09-14).** El job `frontend-tests` existe desde el 2026-09-12
     (jax-platform#60, con canario visto en rojo) y hoy exige 125 tests exactos. Otra
