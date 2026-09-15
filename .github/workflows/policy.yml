@@ -751,8 +751,20 @@ jobs:
           #   test_gemini_key_en_cabecera.py (+2) -- una key que cruza el corte de
           #   200 en cada camino; rojos bajo las mutaciones M2b y M2c' (recortar
           #   antes de redactar). Medido en venv limpio (3.14): 361.
-          grep -qE "^361 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 361 tests CORRIDOS."; exit 1; }
+          # 361 -> 365 el 2026-09-15 (paridad con jax-platform, fix wave final
+          #   ronda 2 -- re-review de 0c72f4e): test_redaccion.py (+4) --
+          #   _AUTH_CONTEXTO/_tapar_auth portados verbatim: cada forma entre
+          #   comillas (con o sin esquema, con espacios adentro) es su propia
+          #   alternativa y se tapa entera hasta la comilla de cierre
+          #   (`authorization: "secret value"` -> `"***"`,
+          #   `"authorization": "Bearer abc def"` -> `"Bearer ***"`, y sus
+          #   formas con comillas simples). Antes el grupo de comilla opcional
+          #   se tragaba la apertura y el valor sin comillas cortaba en el
+          #   primer espacio (`"*** value"`), dejando el resto en claro. Los 4
+          #   vistos en rojo contra el _AUTH_CONTEXTO viejo antes del port.
+          #   Medido en venv limpio (3.14): 365.
+          grep -qE "^365 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 365 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
