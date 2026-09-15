@@ -23,6 +23,7 @@ from jacobs.models import MOTOR_FACETS, Step
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
+from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 
 logger = logging.getLogger("jacobs.plan")
 
@@ -570,11 +571,20 @@ class PlanBuilder:
             {"role": "system", "content": _PLAN_SYSTEM_MODULAR + capability_hint},
             {"role": "user", "content": prompt},
         ]
+        try:
+            # PR-K: nombre y tope del limite de salida de la fila de ADA_MODEL
+            # en `model` (antes "max_tokens": 131072 fijo). Sin contrato no se
+            # despacha a Ada: _from_objective cae a qwen, y el ERROR lleva el
+            # UPDATE a ejecutar.
+            limite = await limite_de_salida("zhipu", ADA_MODEL)
+        except ModelDispatchConfigError as exc:
+            logger.error("Ada: dispatch abortado, sin contrato en el catalogo: %s", exc)
+            return None
         payload = {
             "model": ADA_MODEL,
             "messages": messages,
             "stream": True,
-            "max_tokens": 131072,
+            **limite,
         }
         try:
             async with httpx.AsyncClient(timeout=ADA_TIMEOUT) as client:

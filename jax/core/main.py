@@ -120,6 +120,13 @@ def _lanzar_workers_background() -> None:
 def humanizar_error(label: str, err: Exception) -> str:
     """Traduce errores tecnicos comunes a un mensaje humano y breve."""
     msg = str(err)
+    # PR-K: un modelo sin contrato de dispatch en el catalogo se muestra
+    # ENTERO -- el mensaje trae el UPDATE a ejecutar, y el recorte a 160
+    # caracteres de abajo lo cortaba. Import diferido: main.py no depende
+    # del modulo para nada mas.
+    from jax.core.contrato_dispatch import ModelDispatchConfigError
+    if isinstance(err, ModelDispatchConfigError):
+        return f"{label}: {msg}"
     if "503" in msg or "UNAVAILABLE" in msg or "high demand" in msg:
         return f"{label}: El servicio esta saturado en este momento. Proba de nuevo en un rato."
     if "timeout" in msg.lower() or "sin respuesta" in msg:

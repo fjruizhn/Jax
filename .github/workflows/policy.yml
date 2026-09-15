@@ -537,6 +537,7 @@ jobs:
           tests/test_jacobs_invoked_by_rol.py
           tests/test_catalog_from_db_timeout.py
           tests/test_aiomysql_connect_timeout_tripwire.py
+          tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -559,6 +560,7 @@ jobs:
             tests/test_jacobs_invoked_by_rol.py \
             tests/test_catalog_from_db_timeout.py \
             tests/test_aiomysql_connect_timeout_tripwire.py \
+            tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -666,8 +668,19 @@ jobs:
           #   árbol, _director_patch/routes_block.py, se verifica declarado y sin
           #   romper la corrida). Las 9 formas nuevas, vistas en rojo contra el
           #   detector viejo antes del arreglo (verificado aparte, no en CI).
-          grep -qE "^176 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 176 tests CORRIDOS."; exit 1; }
+          # 176 -> 199 el 2026-09-14 (PR-K, contrato de dispatch en el REPL y en Ada):
+          #   test_contrato_dispatch_repl_ada.py (+19) -- el payload del HttpMuscle
+          #   (DeepSeek y OpenAI-compat, stream y no-stream) y el de Ada llevan el
+          #   NOMBRE y el TOPE de la fila de `model` del modelo despachado, no
+          #   "max_tokens": 131072; NULL/invalido/fila ausente no despachan y dicen el
+          #   UPDATE (entero en el REPL); gemini no lleva max_tokens. 16 vistos en rojo
+          #   antes del arreglo; los 3 que pasaban antes (gemini, proveedor no
+          #   OpenAI-compat, symlink) son controles.
+          #   test_payload_max_tokens_literal_tripwire.py (+4) -- ningun payload de
+          #   codigo con el limite de salida como numero literal (ast); rojo con los 3
+          #   sitios reales antes del arreglo y por mutacion despues; con sus controles.
+          grep -qE "^199 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 199 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -728,14 +741,19 @@ jobs:
       - run: >-
           python -m pytest -v tests/test_plan_validation.py
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
-          tests/test_catalog_mode_db.py
+          tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
         run: |
           python -m pytest -q tests/test_plan_validation.py \
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
-            tests/test_catalog_mode_db.py \
+            tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             2>&1 | tee /tmp/out
-          grep -qE "^15 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 15 tests CORRIDOS."; exit 1; }
+          # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
+          #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
+          #   ADA_MODEL sin contrato falla con los dos UPDATE, fila ausente falla, y el
+          #   EXPLAIN de la consulta usa uk_provider_model. Solo lee. Validado por
+          #   mutacion (sin provider_id en el WHERE cae el del EXPLAIN).
+          grep -qE "^19 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 19 tests CORRIDOS."; exit 1; }

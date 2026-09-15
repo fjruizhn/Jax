@@ -30,6 +30,7 @@ from jax.core.crypto_secrets import decrypt_secret
 from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from jax.core.model_catalog import record_resolved_version_safe
 from jax.core.grounding_sources import build_sources, render_sources_block, resolve_redirects
+from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 
 # provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
 # "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
@@ -80,6 +81,13 @@ class MuscleTimeoutError(MuscleError):
 
 class MuscleInvocationError(MuscleError):
     """El musculo respondio error (HTTP != 2xx, salida no parseable, etc.)."""
+
+
+class DispatchConfigMuscleError(MuscleInvocationError, ModelDispatchConfigError):
+    """El catalogo no declara el limite de salida del modelo a despachar
+    (PR-K): no sale ningun request. Es las dos cosas a proposito -- el REPL
+    lo atrapa como MuscleError, y humanizar_error lo reconoce como
+    ModelDispatchConfigError para mostrar el UPDATE entero."""
 
 
 class Muscle(ABC):
@@ -192,6 +200,16 @@ class HttpMuscle(Muscle):
                 f"[{self.name}] sin credencial válida configurada para {provider_id}"
             ) from e
 
+    async def _limite_de_salida(self, model: str) -> dict[str, int]:
+        """{nombre: tope} del limite de salida, de la fila de `model` del
+        modelo QUE SE DESPACHA (puede no ser el asignado: modo pesado). Antes
+        era "max_tokens": 131072 fijo -- el literal que tumbo a thot en la
+        Mesa web (2026-08-24). Ver jax/core/contrato_dispatch.py."""
+        try:
+            return await limite_de_salida(_PROVIDER_ID_MAP[self.provider], model)
+        except ModelDispatchConfigError as e:
+            raise DispatchConfigMuscleError(f"[{self.name}] dispatch abortado: {e}") from e
+
     def _append_authority(self, text: str) -> str:
         # Gemini ya inserta su etiqueta de verificacion (dinamica, segun la
         # politica de grounding) dentro de _call_gemini. No la duplicamos.
@@ -227,7 +245,7 @@ class HttpMuscle(Muscle):
             "model": model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 131072,
+            **await self._limite_de_salida(model),
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(url, headers=headers, json=payload)
@@ -266,7 +284,7 @@ class HttpMuscle(Muscle):
             "model": model,
             "messages": messages,
             "stream": True,
-            "max_tokens": 131072,
+            **await self._limite_de_salida(model),
         }
         texto = ""
         resolved_version = None
