@@ -54,6 +54,14 @@ _CUERPO_400 = (
 )
 
 
+# Fix round 1 (review de 05c028b, M2b / M2c'): _CUERPO_400 mide 185 caracteres
+# y nunca llega al corte de 200 -- invertir el orden (recortar y despues
+# redactar) no tiraba ningun test. Aca la key EMPIEZA en 192 y cruza el corte:
+# recortar primero deja "AIzaFAKE" (8 caracteres, la forma AIza exige 14 y el
+# secreto conocido ya no esta entero) en claro.
+_CUERPO_400_CRUZA_EL_CORTE = "p" * 192 + KEY + " fin"
+
+
 class _Transporte:
     """Reemplaza AsyncHTTPTransport.handle_async_request: guarda cada
     httpx.Request y responde como MockTransport."""
@@ -131,6 +139,15 @@ class JacobsGeminiCabeceraTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(KEY, msg)
         self.assertNotIn(KEY[:10], msg)
 
+    async def test_una_key_que_cruza_el_corte_no_deja_un_pedazo(self):
+        t = _Transporte(status=400, text=_CUERPO_400_CRUZA_EL_CORTE)
+        with self.assertRaises(RuntimeError) as ctx:
+            await self._invocar(t)
+        msg = str(ctx.exception)
+        self.assertNotIn("AIza", msg)
+        # Redactado entero y despues recortado: la marca queda pegada al relleno.
+        self.assertIn("p" * 192 + "***", msg)
+
 
 class JacobsFailStepRedactaTest(unittest.IsolatedAsyncioTestCase):
     """_fail_step es donde el error de un paso se ESCRIBE (jacobs_steps.error
@@ -200,6 +217,16 @@ class ReplGeminiCabeceraTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Gemini HTTP 400", msg)
         self.assertNotIn(KEY, msg)
         self.assertNotIn(KEY[:10], msg)
+
+    async def test_una_key_que_cruza_el_corte_no_deja_un_pedazo(self):
+        from jax.muscles import base
+        t = _Transporte(status=400, text=_CUERPO_400_CRUZA_EL_CORTE)
+        with self.assertRaises(base.MuscleInvocationError) as ctx:
+            await self._invocar(t)
+        msg = str(ctx.exception)
+        self.assertNotIn("AIza", msg)
+        # Redactado entero y despues recortado: la marca queda pegada al relleno.
+        self.assertIn("p" * 192 + "***", msg)
 
 
 class HumanizarErrorRedactaTest(unittest.TestCase):

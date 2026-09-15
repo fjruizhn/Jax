@@ -114,6 +114,70 @@ def test_texto_de_error_de_un_HTTPStatusError_real_no_trae_la_key():
     assert "key=***" in out
 
 
+# --- Fix round 1 jax (2026-09-15): paridad con jax-platform ----------------------
+# Tablas portadas VERBATIM de jax-platform/backend/tests/test_redaccion.py (fix
+# round 2 de la plataforma): las dos copias de redaccion.py quedan clavadas por
+# los mismos casos. Si se cambia una regla, se cambia en los dos repos.
+@pytest.mark.parametrize("texto, esperado", [
+    ("Authorization: Token abc", "Authorization: Token ***"),
+    ("Authorization: Basic dXNlcjpwYXNz fin", "Authorization: Basic *** fin"),
+    ('{"authorization": "Bearer abc"}', '{"authorization": "Bearer ***"}'),
+    ("GET /x?authorization=abc&n=1", "GET /x?authorization=***&n=1"),
+    ("credential=abc fin", "credential=*** fin"),
+    ("private_key_id: abc", "private_key_id: ***"),
+    ("reintento con Bearer eyJhbGciOiJIUzI1NiJ9.payload", "reintento con Bearer ***"),
+])
+def test_plataforma_ronda2_formas_de_secreto_que_se_redactan(texto, esperado):
+    assert redactar_secretos(texto) == esperado
+
+
+@pytest.mark.parametrize("texto", [
+    "basic idea of it",
+    "the bearer of bad news",
+    "Duplicate entry 'x' for key 'PRIMARY'",
+    "for key: PRIMARY",
+])
+def test_plataforma_ronda2_prosa_que_no_se_toca(texto):
+    assert redactar_secretos(texto) == texto
+
+
+def test_plataforma_sort_key_y_cache_key_se_redactan_perdida_aceptada():
+    assert redactar_secretos("sort_key=nombre&cache_key=abc") == "sort_key=***&cache_key=***"
+
+
+# Los casos que la version de 05c028b dejaba pasar en claro (review de 05c028b).
+@pytest.mark.parametrize("texto, esperado", [
+    # Esquema suelto con forma de credencial (>= 16 de token y un digito).
+    ("reintento con Bearer eyJhbGciOiJIUzI1NiJ9.payload", "reintento con Bearer ***"),
+    ("fallo con Token tok0123456789abcdef fin", "fallo con Token *** fin"),
+    ("cabecera Basic dXNlcjpwYXNzMTIzNDU2Nzg= fin", "cabecera Basic *** fin"),
+    # Sufijo _id en todos los nombres.
+    ("token_id=tok-FAKE-1", "token_id=***"),
+    ("secret_id: sec-FAKE-2", "secret_id: ***"),
+    ('{"credential_id": "cred-FAKE-3"}', '{"credential_id": "***"}'),
+    ("client_secret_id=cs-FAKE-4&x=1", "client_secret_id=***&x=1"),
+    # Digest y la clase de valor amplia.
+    ("Authorization: Digest username-FAKE fin", "Authorization: Digest *** fin"),
+    ("Authorization: Bearer abc!def fin", "Authorization: Bearer *** fin"),
+    ("Authorization=Bearer%20abc123&n=1", "Authorization=***&n=1"),
+])
+def test_casos_que_se_filtraban_en_jax(texto, esperado):
+    assert redactar_secretos(texto) == esperado
+
+
+# Hueco compartido con la plataforma (review de 05c028b, punto 2): un valor
+# ENTRE COMILLAS despues del esquema quedaba entero en claro.
+@pytest.mark.parametrize("texto, esperado", [
+    ("Authorization: Bearer 'quoted-FAKE-123' fin", "Authorization: Bearer '***' fin"),
+    ('Authorization: Bearer "quoted-FAKE-123" fin', 'Authorization: Bearer "***" fin'),
+    ("Authorization: Token 'con espacios FAKE 9'", "Authorization: Token '***'"),
+])
+def test_valor_entre_comillas_despues_del_esquema(texto, esperado):
+    out = redactar_secretos(texto)
+    assert "quoted-FAKE" not in out and "FAKE 9" not in out
+    assert out == esperado
+
+
 # --- Redactar primero, recortar despues ---------------------------------------
 
 def test_una_key_AIza_que_cruza_el_corte_no_deja_un_pedazo():

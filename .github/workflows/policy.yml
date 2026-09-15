@@ -743,8 +743,16 @@ jobs:
           #   a 30 s con restauracion. Medido en venv limpio (3.14, sin 3.12 en
           #   hall9000): 285 sin los tres archivos, 334 con ellos. 45 vistos en
           #   rojo; los 4 de "payload y parseo iguales" son controles.
-          grep -qE "^334 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 334 tests CORRIDOS."; exit 1; }
+          # 334 -> 361 el 2026-09-15 (T6-6 fix round 1, review de 05c028b):
+          #   test_redaccion.py (+25) -- tablas portadas verbatim de jax-platform
+          #   (paridad de reglas: esquema suelto con forma de credencial, sufijo
+          #   _id, Digest, clase de valor amplia, `for key: PRIMARY` intacto) y
+          #   el valor entre comillas tras el esquema; 15 vistos en rojo.
+          #   test_gemini_key_en_cabecera.py (+2) -- una key que cruza el corte de
+          #   200 en cada camino; rojos bajo las mutaciones M2b y M2c' (recortar
+          #   antes de redactar). Medido en venv limpio (3.14): 361.
+          grep -qE "^361 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 361 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

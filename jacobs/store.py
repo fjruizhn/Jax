@@ -88,6 +88,14 @@ _INDICES: list[tuple[str, str, str, bool]] = [
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
 # (lock_wait_timeout) es 86400 s: una transaccion larga sobre la tabla dejaria
 # el arranque colgado un dia entero, sin error.
+#
+# Costo de la espera (review de 05c028b): mientras el DDL espera su metadata
+# lock EXCLUSIVO (hasta estos 30 s), ese pedido queda en la cola del MDL y las
+# lecturas y escrituras NUEVAS sobre jacobs_pipelines se encolan detras de el.
+# Por eso la espera es corta: 30 s de Jacobs detenido como peor caso, no un dia.
+# Si vence, el indice no se crea (ERROR en el log); la red de seguridad es el
+# test de EXPLAIN de la plataforma en CI, que falla si la consulta de dueño no
+# usa este indice.
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
 
@@ -112,7 +120,7 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
     try:
         await cur.execute(ddl)
         return True
-    except aiomysql.OperationalError as e:
+    except aiomysql.OperationalError as e:  # fail-soft: el indice solo acelera; la consulta de dueño sigue correcta como scan; se reintenta en el proximo arranque
         if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
             raise
         logger.error(
