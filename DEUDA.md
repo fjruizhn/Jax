@@ -133,7 +133,7 @@ su fecha de última verificación real, no una nueva.
   DB?) — no copiar el modelo vigente al TOML, que es el parche que lo reproduce.
 
 - **`invoked_by` es un campo de AUTORIZACIÓN en Jacobs, con un nombre de persona como
-  rol — ABIERTO, medido 2026-09-14.** `jacobs/routes.py:100` acepta solo
+  rol — CERRADO 2026-09-14 (tanda A, ver su sección). Texto original:** ABIERTO, medido 2026-09-14. `jacobs/routes.py:100` acepta solo
   `{"Fernando", "jax_local", "ada"}` y `policy.validate_resume` exige `"Fernando"`;
   jax-platform lo manda fijo (`PipelineModal.jsx` y `api/pipelines.py:161`). Cambiarlo
   por el usuario autenticado rompería crear y reanudar pipelines, así que NO se tocó en
@@ -141,7 +141,7 @@ su fecha de última verificación real, no una nueva.
   tanda del validador de gobernanza.
 
 - **El resolver de `CAPABILITY_AVAILABLE` consulta un catálogo que el Bloque 3
-  vació — verificado 2026-09-02.** **Causa:** el Bloque 3 movió las
+  vació — CERRADO 2026-09-14 (tanda A, ver su sección). Texto original:** verificado 2026-09-02. **Causa:** el Bloque 3 movió las
   capabilities a la DB (`MotorCatalog.from_db()`), pero
   `policy/governance/validator.py::load_validation_context()` sigue
   construyendo `MotorCatalog(config)` desde `las_manos/config.toml`, cuyo
@@ -373,6 +373,69 @@ su fecha de última verificación real, no una nueva.
   con cuenta real y contraseña incorrecta hay un `UPDATE` extra del contador
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
+
+## Cerrado — tanda A: gobernanza con el catálogo de la DB, `capability.mode`, rol `plataforma` (2026-09-14)
+
+**VERDAD OPERACIONAL 2026-09-14 19:50 CST** (despliegue verificado en vivo). jax-platform#71 (PR-A) → Jax#156
+(PR-B) → jax-platform#72 (PR-C), mergeados en ese orden con gate por `headSha`; desplegados junto con
+jax-platform#73 (PR-J, jekyll). Checkouts: jax `f36ef3f`, jax-platform `e05c5cc`; frontend
+`index-CckN9i1-.js` (respaldo `axioma-ia.io.backup-pre-tanda-a-20260914-195227`, idéntico por `diff -rq`).
+Spec `docs/superpowers/specs/2026-09-14-gobernanza-catalogo-db-design.md` v3.1; plan con enmiendas v3/v4.
+
+- **Cerrados de "Bloquea trabajo":** (1) *el resolver de `CAPABILITY_AVAILABLE` consultaba un catálogo que
+  el Bloque 3 vació* — el validador recibe `await MotorCatalog.from_db()` y la rama `in_catalog` verifica
+  nombre **y modo**; el snapshot suma la sección `catalog_capabilities` (`/catalog_capabilities/N`, sin mover
+  `/capabilities/N`). HECHO corregido en la planificación: nunca hubo `FACT_MISMATCH` históricos (427 VALID,
+  3 POINTER_MISMATCH, 1 ARGS_MISMATCH, 2 AUTHORITY_INVALID sobre `code_swarm`): el defecto real era que las
+  capabilities de la DB no se podían **citar**. (2) *`invoked_by` era un nombre de persona usado como
+  autorización* — ahora es el rol `plataforma`, lo pone el backend (pisa lo que mande el cliente); las filas
+  viejas con "Fernando" quedan como historia.
+- **`capability.mode` = `VARCHAR(16) NOT NULL` + `CHECK chk_capability_mode`** (spec v3). HECHO medido: con
+  `ENUM ... NOT NULL` sin default, MariaDB 12.3 guarda el primer valor en silencio si se omite (fail-open);
+  con VARCHAR+CHECK: omitir → 1364, inválido → 4025, NULL → 1048. Solo `file_write` es `mutating`.
+- **Incidente 2026-09-14 ~15:11 CST (HISTORIA):** un script de verificación de la Tarea 1 cargó
+  `/etc/jax/.env` fuera de pytest y corrió `run_migrations()` (versión ENUM), una mutación `ALTER ... DEFAULT`
+  y su reversión, y filas `zz_test_probe*` borradas, contra `jax_memory` de producción. Verificado: 17 filas
+  correctas, sin restos, servicios sanos. Decisión de Fernando: se dejó y se registra; el despliegue la
+  convirtió a v3. **Causa:** el brief no advertía que `/etc/jax/.env` apunta a producción fuera de pytest.
+  **Barrera:** todo brief con DB lleva la advertencia textual y el controller verifica prod de forma
+  independiente (memoria `feedback-brief-barrera-db-produccion`).
+- **Gobernanza async:** `governance_context.validation_context()` con recarga **compartida** por stamp
+  (`asyncio.shield`) y acotada por `GOVERNANCE_RELOAD_TIMEOUT_SECONDS` (5.0); invalidación por el sello de
+  facet_resolver; falla visible (SnapshotError en el chat, sin veredictos en sombra).
+- **`connect_timeout` en todo aiomysql** de jax y jax-platform (`JAX_DB_CONNECT_TIMEOUT_SECONDS`, 10;
+  aiomysql 0.3.2 no tenía límite): helper espejo `db_connect_config` + tripwires AST en los dos repos. Acota
+  el socket TCP; la recarga completa la acota el timeout de arriba.
+- **Hallazgos arreglados en el camino:** arnés `client` de tests (una falla dentro de `portal.call` mataba el
+  portal de sesión: 635 → 352 passed / 184 failed); symlink `las_manos/jacobs` absoluto a
+  `/home/fruiz/jax/jacobs` → relativo `../jacobs`.
+- **Verificación en vivo:** columna `varchar(16)`/NO/sin default + `chk_capability_mode`; resolver con el
+  contexto de prod (17 capabilities, ops∩DB vacío, 28 entradas, VALID/FACT_MISMATCH según modo); sonda de la
+  Mesa por `run_shadow_validation` (read_only → VALID/OBSERVADO, mutating → FACT_NOT_IN_SNAPSHOT/INFERIDO);
+  pipeline supervised creado con `invoked_by` falso → `plataforma`, `PIPELINE_RESUMED {"by": "plataforma"}`;
+  journal limpio.
+- **Rendimiento (LAS CUATRO #4), hall9000:** `validation_context()` en producción — frío p95 2,70 → 4,53 ms,
+  caliente p95 4,42 → 5,31 µs; concurrente con la DB real: 50 turnos fríos simultáneos → **1** `from_db`,
+  p95 4,03 ms. Snapshot 11 → 28 entradas, render 715 → 1.786 chars (~+270 tokens por chars/4). `tokens_in`
+  de una sonda de kimi: 1720 → 3448, pero la sonda "después" arrastró el historial en memoria del turno
+  anterior de jekyll (ChatRequest no permite conversación nueva): la comparación no aísla el snapshot.
+- **Pisos:** jax-platform 709 / 349 / vitest 146; jax governance 90, tests-puros 176, jacobs-gobernanza-db 15.
+- **SP4:** la línea base del 2026-09-03 deja de ser comparable (ver el ítem de SP4).
+
+## Cerrado — jekyll caída en producción (2026-09-12 19:40 → 2026-09-14 19:50 CST)
+
+**HISTORIA + VERDAD OPERACIONAL.** El catálogo detectó que DeepSeek renombró `deepseek-v4-flash` →
+`deepseek-flash` (propuesta de drift #11) y al aprobarla el binding de jekyll pasó a la fila 2111, sin
+`max_tokens_param` ni `max_output_tokens`, que el dispatch `http_openai_compat` exige (fail-closed). **Causa
+raíz:** aprobar / PUT de facet-bindings no verificaba ese contrato. El canario lo detectó al instante y la
+alerta llegó por Telegram (09-14 13:48, message_id 666), pero la faceta quedó caída ~48 h. **Arreglo**
+(jax-platform#73): migración siembra `deepseek-flash` y `deepseek-v4-pro` con `max_tokens` / 393216 (doc
+oficial de DeepSeek, leída el 2026-09-14; decisión de Fernando: el máximo documentado) y los dos escritores de
+`facet_binding` responden 409 si el modelo destino no cumple el contrato de su transporte
+(`modelo_sin_contrato_de_dispatch`) o es de otro proveedor (`modelo_de_otro_proveedor`). **Verificado en vivo:**
+jekyll 200 a las 19:50:32, `facet_health_event` ok. **Siguen en esta sesión:** PR-L (camino admin auditado para
+declarar el contrato de un modelo sin SQL a mano, y rastro del rechazo) y PR-K (el REPL `jax/muscles/base.py`
+y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálogo).
 
 ## Cerrado — admin usuarios etapa 2: sesiones con token_version en jax-platform (2026-09-14)
 
@@ -2888,6 +2951,9 @@ retractaciones, que no se borran. Ninguno requiere acción.
   snapshot inyectado para ese brazo, que es un cambio del mecanismo y por lo
   tanto exige su propio pre-registro y su propio corrido. **No se trabaja
   ahora**, por decisión explícita. **Fecha de control:** al retomar SP4.
+  **2026-09-14 (tanda A v2):** el snapshot suma `catalog_capabilities` (28 entradas en vez de 11). La
+  línea base del 2026-09-03 deja de ser directamente comparable; al retomar SP4 hace falta una nueva, con su
+  pre-registro (spec tanda A v2 §2, decisión 4).
 
 - **`save_message()` no reintenta el embedding — CERRADO Y DESPLEGADO
   2026-09-11 (jax#118, `47589ae`).** `MemoryDB.backfill_zero_embeddings()`
