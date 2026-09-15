@@ -528,7 +528,37 @@ Pruebas: con DB 786 → 815/1; sin DB 366 → 369/447; vitest 257 → 315. Cada 
 tiene un test que se vio en rojo por mutación. Las decisiones y sus costos están en el ledger
 (Rulings U8, U9 y U15-U27).
 
-- **Carga: PENDIENTE DE MEDIR** _(se completa en este mismo PR; ver el ítem de carga de la etapa 4)_.
+- **Carga, medida DESPUÉS del despliegue (2026-09-15 ~06:30 CST).** Esto fue un error: la etapa salió
+  sin número, contra la regla 4 de LAS CUATRO. Se detectó al escribir esta entrada (Ruling U29), y desde
+  ahí la carga es parte del gate de merge.
+  - **Método.** Arnés pytest en un worktree de scratch en `453b128`, contra `jax_memory_test`, con el
+    sello de facet_resolver aislado por conftest. Mide la app en proceso (ASGI), no la red. SMTP
+    simulado con 150 ms. Cada usuario de prueba tiene su propia IP, porque el límite mira primero la IP
+    (20/60) y después el email (10/300).
+  - **Mi cuenta:**
+    - plana hasta c=20 (p50 301 → 318 ms, 52 rps);
+    - con c=10, p95 317 ms y 0 errores;
+    - tope de ~77 rps y p95 de ~635 ms con c=50/100.
+  - **Abuso:** 10 respuestas 400 y después 429. Primero corta el límite por email. El 429 cuesta p50
+    2,9 ms, ~2.800 rps.
+  - **reset-link:** p95 156-178 ms hasta c=20.
+  - **reset-password:** p95 ~159 ms con c=10.
+  - **Corrección:**
+    - 0 respuestas 5xx;
+    - filas de auditoría = éxitos;
+    - `token_version` +1 exacto por cada éxito;
+    - con K=10/20/50 pedidos sobre el mismo token, en 5 rondas cada uno, gana siempre exactamente uno;
+      los demás reciben 400 `reset_token_usado`.
+  - **Saturación entre c=20 y c=50.** La marca el ejecutor por defecto de 32 hilos, que comparten
+    bcrypt y SMTP, junto con la CPU. Ni el pool de DB (10) ni el `FOR UPDATE` fueron el cuello.
+  - **EXPLAIN en producción (solo lectura):**
+    - por `token`: const por el índice UNIQUE `token`;
+    - pendientes por `user_id`: `ref` en el índice `user_id`;
+    - reclamo por `id`: const en PRIMARY.
+  - **Veredicto:** aceptable para 2-10 admins.
+  - **Límite anotado, sin fecha porque no bloquea:** con un SMTP real y lento, cada envío ocupa un hilo
+    del mismo ejecutor que bcrypt usa en el login. Si algún día hay decenas de admins o envíos masivos,
+    el SMTP pasa a un ejecutor propio.
 - **Pendiente con fecha, verificación en vivo de Fernando (2026-09-15):**
   - Mi cuenta en dos ventanas, en claro y en oscuro.
   - Los labels visibles del alta.
