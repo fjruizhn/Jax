@@ -160,8 +160,12 @@ jobs:
           #   mudo a jacobs-gobernanza-db -- en este job no existe el esquema de
           #   jax-platform (tabla `motor`), que validate_capability necesita (CI de
           #   Jax#158 rojo: 1146 "Table 'jax_memory_test.motor' doesn't exist").
-          grep -qE "^8 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 8 -> 9 el 2026-09-15 (Ruling T6-6): _store_indexes_test.py (+1) --
+          #   idx_jacobs_pipelines_duenio (user_id, tenant_id, created_at) lo crea
+          #   init_tables(); el test lo BORRA antes y lo exige de vuelta, porque la
+          #   jax_memory_test local ya lo tenia y pasaba sin el cambio. Visto en rojo.
+          grep -qE "^9 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -544,6 +548,8 @@ jobs:
           tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
           tests/test_motor_contrato_dispatch.py
           las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py
+          tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py
+          tests/test_store_indice_duenio.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -569,6 +575,8 @@ jobs:
             tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
             tests/test_motor_contrato_dispatch.py \
             las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
+            tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py \
+            tests/test_store_indice_duenio.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -722,8 +730,21 @@ jobs:
           #   por /v1/chat/completions con max_tokens) -- nunca /v1/api/chat. 2 vistos
           #   en rojo contra la ronda 2; los de URL fijan el comportamiento correcto
           #   de hoy y se validaron por mutacion (armar el nativo desde base_url).
-          grep -qE "^285 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 285 tests CORRIDOS."; exit 1; }
+          # 285 -> 334 el 2026-09-15 (Ruling T6-6, key de Gemini en la cabecera):
+          #   test_redaccion.py (+36) -- redactar_secretos (jax/core/redaccion.py,
+          #   mismas reglas que jax-platform + la re-revision: Authorization
+          #   Bearer/Basic/Token, authorization=, credential=, private_key_id; la
+          #   prosa "basic idea" intacta) y redactar ANTES de recortar (una key que
+          #   cruza el corte no deja un pedazo); test_gemini_key_en_cabecera.py
+          #   (+8) -- los dos caminos de hipatia mandan x-goog-api-key y ninguna
+          #   key en la URL, parseo igual, error del proveedor redactado,
+          #   _fail_step y humanizar_error redactan; test_store_indice_duenio.py
+          #   (+5) -- forma del DDL (ALGORITHM=INPLACE LOCK=NONE) y espera acotada
+          #   a 30 s con restauracion. Medido en venv limpio (3.14, sin 3.12 en
+          #   hall9000): 285 sin los tres archivos, 334 con ellos. 45 vistos en
+          #   rojo; los 4 de "payload y parseo iguales" son controles.
+          grep -qE "^334 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 334 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

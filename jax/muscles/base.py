@@ -31,6 +31,7 @@ from jax.core.credential_resolver import resolve_credential_instrumented, Creden
 from jax.core.model_catalog import record_resolved_version_safe
 from jax.core.grounding_sources import build_sources, render_sources_block, resolve_redirects
 from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
+from jax.core.redaccion import recortar_redactado
 
 # provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
 # "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
@@ -375,7 +376,11 @@ class HttpMuscle(Muscle):
         # catálogo (registro_facetas.aplicar_registro la pone en api_url). El
         # default solo queda para el arranque sin DB (config.toml completo).
         base = self.api_url or "https://generativelanguage.googleapis.com/v1beta"
-        url = f"{base.rstrip('/')}/models/{model}:generateContent?key={api_key}"
+        # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key,
+        # NO en `?key=` (httpx loguea la URL entera en INFO y la mete en
+        # str(HTTPStatusError)).
+        url = f"{base.rstrip('/')}/models/{model}:generateContent"
+        headers = {"x-goog-api-key": api_key}
 
         # Gemini usa "contents" con role "user"/"model" (no "assistant") y
         # cada texto envuelto en parts. Convertimos el historial neutro.
@@ -405,10 +410,13 @@ class HttpMuscle(Muscle):
                 # mecanismo real para forzar la busqueda.
                 payload["tools"] = [{"google_search": {}}]
             async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(url, json=payload)
+                resp = await client.post(url, headers=headers, json=payload)
                 if resp.status_code != 200:
+                    # Google devuelve la key rechazada DENTRO del cuerpo del
+                    # error: redactar antes de recortar.
+                    cuerpo = recortar_redactado(resp.text, 200, [api_key])
                     raise MuscleInvocationError(
-                        f"[{self.name}] Gemini HTTP {resp.status_code}: {resp.text[:200]}"
+                        f"[{self.name}] Gemini HTTP {resp.status_code}: {cuerpo}"
                     )
                 return resp.json()
 
