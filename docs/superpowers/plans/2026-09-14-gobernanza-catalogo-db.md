@@ -2188,6 +2188,22 @@ Qué incluye cada número:
 
 ### Tarea 10: PRs, gate por `headSha` y orden de merge
 
+> **ENMIENDA v4 (2026-09-14 noche, revisión final de las tres ramas) — manda sobre el texto de esta tarea.**
+> - **Dos rojos de `mirror-sync` que el texto no preveía (reproducidos):** (a) el CI de PR-B corrido ANTES
+>   del merge de PR-A falla (`backend/db_connect_config.py` todavía no existe en jax-platform master); (b)
+>   entre el merge de PR-A y el de PR-B, cualquier corrida sobre jax **master** da drift en
+>   `credential_resolver._db_conn`. Por eso: se abre y se gatea PR-A primero; PR-B se pushea/abre **después**
+>   del merge de PR-A (o, si ya corrió, `gh run rerun` de su run sobre el mismo `headSha`, y se exige que
+>   `mirror-sync` esté en success); PR-A → PR-B → PR-C seguidos y **sin ningún push a jax master entre el merge
+>   de PR-A y el de PR-B**. Se avisa a Fernando que ese intervalo existe.
+> - PR-A vive en el worktree `/home/fruiz/worktrees/jax-platform-capability-mode` (rama `feat/capability-mode`,
+>   5 commits: T1 + T1b); el push se hace desde ahí (las refs se comparten, pero es la rama de ese worktree).
+> - PR-C ya está rebasado sobre PR-A: `git log origin/master..feat/gobernanza-catalogo-db` muestra PR-A + los
+>   commits de las Tareas 6–8 **y** `c8640d0` (pisos tras el rebase). El rebase del Paso 5 se rehace solo si
+>   PR-A cambia antes del merge.
+> - El Paso 8 (avisar al ejecutor de la etapa 2) queda sin objeto: la etapa 2 se mergeó antes (Ruling 1).
+> - Cuerpos de los PRs: borradores en el scratchpad de la sesión (`tanda-a/pr-{a,b,c}-body.md`).
+
 **Acoplamiento declarado (spec §6):**
 - El job `jacobs-gobernanza-db` de jax clona `jax-platform` master: PR-B necesita PR-A mergeado para su `test_catalog_mode_db.py`.
 - El CI de jax-platform clona `jax` master: PR-C necesita PR-B mergeado.
@@ -2232,6 +2248,35 @@ gh run list --repo fjruizhn/jax-platform --commit "$SHA" --json name,status,conc
 ---
 
 ### Tarea 11: despliegue, verificación en vivo y cierre en DEUDA
+
+> **ENMIENDA v4 (2026-09-14 noche, revisión final) — manda sobre el texto de esta tarea.**
+> - **Paso 3:** producción YA tiene `capability.mode` como `enum('read_only','mutating') NOT NULL` desde el
+>   incidente de la Tarea 1 (Fernando: se deja y se registra). Precondición: 17 filas, solo `file_write`
+>   mutating, 0 NULL, 0 filas `zz%`. El respaldo se llama `capability-pre-v3`.
+> - **Paso 4 — condición de parada corregida:** después de reiniciar jax-platform, la columna tiene que dar
+>   `varchar(16)` / `NO` / sin default **y** `chk_capability_mode` presente en `information_schema.CHECK_CONSTRAINTS`
+>   (junto a los 2 CHECK json que ya existían). `enum(...)` después del reinicio = la migración no corrió → PARAR.
+> - **Paso 5:** además de la medición en proceso, repetir `medir_concurrente.py` (N=1/20/50 turnos fríos y
+>   calientes a la vez, recarga compartida real) contra `jax_memory` de producción en solo lectura.
+> - **Paso 11 (DEUDA.md), agregar:**
+>   1. **Incidente 2026-09-14 ~15:11 CST** (HISTORIA + VERDAD OPERACIONAL): un script de verificación de la
+>      Tarea 1 cargó `/etc/jax/.env` fuera de pytest y corrió `run_migrations()` (versión ENUM), una mutación
+>      `ALTER ... DEFAULT` y su reversión, y filas `zz_test_probe*` borradas, contra `jax_memory` de producción.
+>      Verificado por el controller: 17 filas correctas, sin restos, servicios sanos. Decisión de Fernando:
+>      se deja y se registra; el despliegue la convierte a v3. **Causa:** el brief no advertía que
+>      `/etc/jax/.env` apunta a producción fuera de pytest. **Barrera** (Ruling 8, memoria
+>      `feedback-brief-barrera-db-produccion`): todo brief con DB lleva la advertencia textual y el controller
+>      verifica prod de forma independiente.
+>   2. **El ENUM no obligaba a declarar el modo** (HECHO medido, spec v3): omitir una columna ENUM NOT NULL
+>      guarda el primer valor sin error; por eso VARCHAR(16)+CHECK.
+>   3. **Variables nuevas** también en `jax/CONTEXT.md` (junto a `CREDENTIAL_CACHE_TTL_SECONDS`):
+>      `GOVERNANCE_RELOAD_TIMEOUT_SECONDS` (jax-platform, default 5.0: acota la recarga completa del catálogo) y
+>      `JAX_DB_CONNECT_TIMEOUT_SECONDS` (jax y jax-platform, default 10: acota el socket TCP de todo aiomysql);
+>      las dos se validan en cada lectura (P10). Hoy no están en `/etc/jax/.env` y aplican los defaults.
+>   4. Los números de carga concurrente (M4) y el symlink `las_manos/jacobs` pasado a relativo.
+> - **Paso 12:** borrar también los auxiliares del scratchpad (`prod_readonly.py`, `prc-db.txt`, `chain.txt`,
+>   `catalog.py.backup-task2`, `jax-congelado-168ce00` con `git worktree remove`) y la rama local
+>   `respaldo/pr-c-pre-rebase`.
 
 - [ ] **Paso 1: línea base del tamaño del prompt, ANTES de desplegar.**
   - Leer la firma actual de `create_access_token` en `/home/fruiz/jax-platform/backend/auth/jwt.py`: la etapa 2 agregó `tv`/`token_version`. Leer también los `user_id`, `tenant_id`, rol y, si corresponde, `token_version` de la cuenta de Fernando, con una consulta de solo lectura a `jax_users`, verificando antes los nombres de columna con `SHOW COLUMNS FROM jax_users`.
