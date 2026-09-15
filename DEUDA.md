@@ -467,7 +467,18 @@ tabla de auditoría creada, qwen NULL/262144, jekyll 200, admin 200, frontend `i
   servicios recargaron sus cachés una vez (sin cambio de datos; health 200, journal limpio). Arnés
   arreglado y verificado; la barrera de los briefs ahora incluye el sello (memoria
   `feedback-brief-barrera-db-produccion`).
-- **Pendiente con fecha — etapa 5 de admin usuarios (baja lógica):** `credential_audit.performed_by`,
+- **CERRADO 2026-09-15 por la etapa 5 (jax-platform#83 → `a703c67`).**
+  - La baja lógica (`POST /users/{id}/baja`) reemplaza al `DELETE` en duro, que ahora responde 405.
+  - Es un UPDATE de columnas que no son clave y no cambia `user_id`. Por eso ninguna FK interviene.
+    Verificado con un SELECT de solo lectura en `information_schema` de producción:
+    - `credential.created_by`, `credential_audit.performed_by`, `facet_binding.approved_by` y
+      `model_binding_proposal.decided_by` tienen `ON UPDATE RESTRICT` y `ON DELETE RESTRICT`.
+    - `password_reset_tokens` y `user_api_keys` tienen `ON DELETE CASCADE`.
+  - Ninguna auditoría queda bloqueada, y el historial de un actor dado de baja se sigue resolviendo
+    (`user_audit` hace LEFT JOIN por `user_id`).
+
+  Texto original:
+  **Pendiente con fecha — etapa 5 de admin usuarios (baja lógica):** `credential_audit.performed_by`,
   `facet_binding.approved_by` y `model_binding_proposal.decided_by` tienen FK a `jax_users`: el
   `DELETE /api/admin/users/{id}` en duro de hoy da 500 para un usuario con historia. La etapa 5 reemplaza
   el borrado por una baja; al ejecutarla, verificar que ninguna auditoría quede bloqueada.
@@ -487,7 +498,189 @@ jekyll 200 a las 19:50:32, `facet_health_event` ok. **Siguen en esta sesión:** 
 declarar el contrato de un modelo sin SQL a mano, y rastro del rechazo) y PR-K (el REPL `jax/muscles/base.py`
 y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálogo).
 
-## Cerrado — admin usuarios etapa 2: sesiones con token_version en jax-platform (2026-09-14)
+## Cerrado — admin usuarios etapa 5: editar el correo y dar de baja con ConfirmacionSuma (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 12:14 CST.** jax-platform#83 → `a703c67`. Plan:
+`docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-5-editar-baja.md`. Spec: §2, §3.2 y §3.5.
+Frontend servido `index-d04xNGjp.js`, con md5 igual al build (`3916bf45…`). Backup
+`axioma-ia.io.backup-pre-usuarios-etapa5-20260915-121449`, verificado idéntico antes del rsync.
+Esquema verificado después con un SELECT: `email varchar(320)` con índice UNIQUE, `deleted_at
+datetime`, `deleted_by int(11)`; `jax_users` sigue con 2 filas. Health 200, journal sin errores, cwd
+= checkout con el commit. Sondas sin token: `POST /baja` pasó de 405 a 401 y `DELETE` de 401 a 405.
+
+- **Incidente del backup previo (HISTORIA).** Antes del reinicio que aplica la migración se hizo el
+  dump `~/backups/usuarios-pre-etapa5-20260915-121445.sql` (`jax_users`, `password_reset_tokens` y
+  `user_admin_audit`).
+  - El chequeo de filas del script informó `dump=0 DISTINTO` y el deploy **siguió igual**: imprimía,
+    no cortaba. El regex esperaba `VALUES (` en la misma línea y mariadb-dump escribe una fila por
+    línea.
+  - Verificado después: el dump estaba completo y cuadra fila por fila con la DB (2 = 2, 1 = 1,
+    4 = 4). La restauración no se probó.
+  - La migración solo agrega y ensancha columnas, así que no se perdió nada.
+  - Arreglo: el script cuenta bien las filas y **aborta** si no cuadran. Un chequeo que no corta no
+    es un gate.
+
+Qué entra:
+- **"Eliminar" pasa a ser "Dar de baja"**, detrás de **ConfirmacionSuma** ("Resolvé a + b = ?"). El
+  botón solo se habilita con la respuesta correcta. El componente está construido sobre `Dialogo` y
+  sirve para cualquier borrado futuro.
+- **La baja no borra la fila.** Deja `status='deleted'`, `deleted_at`/`deleted_by` y
+  `token_version + 1`. Además:
+  - Se cortan WS/SSE después del commit y se borran los enlaces de recuperación pendientes.
+  - El correo se renombra (`<correo>#baja-<id>-<fecha>`), así que la dirección queda libre. El
+    original queda en la auditoría.
+  - El historial se conserva.
+- **Transacción de la baja.** Corre en `transaccion(AISLAMIENTO_ADMIN)`, con el orden fijo de la
+  etapa 3. Nadie se da de baja a sí mismo, y no se puede dar de baja al último superadmin activo.
+- **`DELETE /users/{id}` responde 405.** `GET /users` excluye las bajas, y el enlace de recuperación
+  a una baja responde 404.
+- **Editar el correo** (PUT), con validación y códigos estables. El alta también devuelve códigos
+  estables: `email_invalido`, `rol_invalido` y `email_ya_existe`. Un correo repetido nunca da 500,
+  ni siquiera cuando la carrera pasa la comprobación previa.
+- **Carreras cerradas en esta etapa:**
+  - **"Enviar enlace" contra la baja (U31).** Bloquea al usuario por PK y crea el token en la misma
+    transacción. El SMTP se envía después del commit.
+  - **El forgot-password público (U31, U33).** Vuelve a bloquear por PK, nunca por el índice de
+    email. Corre en READ COMMITTED: en REPEATABLE READ, el DELETE de tokens por el índice no único
+    `user_id` tomaba gap locks, y dos pedidos de usuarios distintos terminaban en 1213.
+  - **El dominio del correo solo admite `[A-Za-z0-9-]` (U32).** Antes aceptaba `#`, y alguien podía
+    ocupar de antemano el nombre de baja de otro usuario.
+- **Frontend:**
+  - un modal a la vez;
+  - después de la baja, el foco va a "+ Nuevo usuario" (U35);
+  - la barra muestra al instante el correo propio editado;
+  - i18n es/en completo, y se borraron las claves muertas.
+
+**Antes de la baja se verificó, solo con lecturas contra producción:**
+- Todas las FK a `jax_users.user_id` son `ON UPDATE RESTRICT`, y la baja no cambia `user_id`, así
+  que ninguna auditoría queda bloqueada.
+- `user_api_keys` guarda credenciales de proveedores, no sirve para autenticar.
+- Login, sesión, refresh y forgot-password rechazan cualquier cuenta que no esté activa.
+
+**Carga medida ANTES del merge** (gate U29; arnés pytest aislado sobre `8c34800`, ASGI en proceso):
+- Con c=10: baja p95 12 ms (~1000 rps), PUT con email p95 11 ms, y la lista (131 usuarios, 100 de
+  ellos dados de baja) p95 23 ms.
+- Dos superadmins que se dan de baja mutuamente: 20 de 20 terminan con un 200 y un 409
+  `ultimo_superadmin`.
+- Toda carrera tuvo un solo ganador. 0 errores 5xx y 0 deadlocks.
+- Saturación en ~1000 rps desde c≈10, por diseño: toda escritura de admin bloquea primero el conjunto
+  de superadmins.
+
+Pruebas: con DB 815 → 845/1; sin DB 369 → 371/475; vitest 315 → 336. Decisiones: Rulings U10-U12,
+U20 y U28-U35 en el ledger.
+
+- **Pendiente con fecha 2026-09-22 (propuesta):** `AdminRepository.jsx` sigue borrando con
+  `window.confirm` + `api.delete`. Pasarlo a ConfirmacionSuma.
+- **Pendiente con fecha 2026-09-22 (propuesta), Ruling U36:** el historial de un usuario dado de
+  baja no se puede abrir desde la UI.
+  - La lista oculta las bajas y es la única entrada al modal de Historial. `GET /users/{id}/audit`
+    sí devuelve esas filas.
+  - No es una regresión: antes, un `DELETE` exitoso también sacaba al usuario de la lista.
+  - Hace falta una vista de "bajas" o un filtro en la lista que permita abrir su historial.
+- **Pendiente con fecha, verificación en vivo de Fernando:** la etapa 5 en claro y en oscuro
+  (ConfirmacionSuma, correo en "Editar", toasts y la barra con el correo propio). Nadie la miró en un
+  navegador todavía.
+
+## Cerrado — admin usuarios etapa 4: Mi cuenta y enlace de recuperación por admin (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 06:03 CST.** jax-platform#82 → `453b128`. El plan es
+`docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-4-contrasenas.md` y cubre la spec §3.2 y §3.4.
+El frontend servido es `index-BvtjkH_S.js`, con md5 idéntico al build local. Antes del rsync se hizo
+el backup `axioma-ia.io.backup-pre-usuarios-etapa4-20260915-060236` y se comprobó idéntico al sitio.
+
+Verificación después del despliegue: health 200 y journal sin errores. El cwd es el checkout con el
+commit. `POST /api/auth/me/password` y `POST /api/admin/users/{id}/reset-link` responden 401 sin
+token; antes del despliegue daban 405, así que las rutas quedaron vivas.
+
+Qué entra:
+- **Regla única de contraseña.** Mínimo 8 caracteres, contados como puntos de código, y máximo 72
+  bytes. Está en backend (`auth/password_rules.py`) y frontend (`lib/reglasPassword.js`). La usan el
+  alta, `/reset-password` y Mi cuenta. Antes el alta daba 500 con más de 72 bytes.
+- **Mi cuenta** (`POST /api/auth/me/password`).
+  - Exige la contraseña actual y tiene el límite del login.
+  - Sube `token_version`: las otras sesiones mueren y esta recibe tokens nuevos.
+  - Corta WS/SSE después del commit.
+  - Una revocación o desactivación concurrente da 401 `sesion_invalida`: la re-lectura
+    `FOR UPDATE` fija hash, `token_version` y `status`.
+- **Enlace de recuperación por admin** (`POST /users/{id}/reset-link`, solo superadmin).
+  - Si SMTP no está configurado o está dañado, 503. Si el envío falla, 502 con la respuesta del
+    servidor. Si el usuario no existe, 404; si no está activo, 409.
+  - Ante cualquier salida sin envío, incluida la cancelación, se borra el token exacto (U17).
+  - Si falla la auditoría después de un envío exitoso, es fail-soft (U22).
+- **Reset completado.**
+  - Bloquea el usuario y después reclama el token de forma atómica; el orden tiene test.
+  - Si el usuario no está activo, 400 `reset_token_invalido`, sin consumir el token (U21).
+  - Sube `token_version` y corta las sesiones.
+- **`_cortar_conexiones` pasa a `auth/conexiones.py`**, lo que rompe el ciclo auth↔admin.
+- **Un único `components/Dialogo.jsx` para los cuatro modales de usuarios** (U27). Pone el portal,
+  deja `#root` inert con un contador, lleva el foco adentro y lo devuelve, y cierra con Escape. En
+  Admin → Usuarios hay un solo modal a la vez (U25).
+- **Carrera cerrada.** Un 401 durante el cambio de la propia contraseña espera el token nuevo en vez
+  de refrescar con la cookie vieja.
+
+Pruebas: con DB 786 → 815/1; sin DB 366 → 369/447; vitest 257 → 315. Cada arreglo de concurrencia
+tiene un test que se vio en rojo por mutación. Las decisiones y sus costos están en el ledger
+(Rulings U8, U9 y U15-U27).
+
+- **Carga, medida DESPUÉS del despliegue (2026-09-15 ~06:30 CST).** Esto fue un error: la etapa salió
+  sin número, contra la regla 4 de LAS CUATRO. Se detectó al escribir esta entrada (Ruling U29), y desde
+  ahí la carga es parte del gate de merge.
+  - **Método.** Arnés pytest en un worktree de scratch en `453b128`, contra `jax_memory_test`, con el
+    sello de facet_resolver aislado por conftest. Mide la app en proceso (ASGI), no la red. SMTP
+    simulado con 150 ms. Cada usuario de prueba tiene su propia IP, porque el límite mira primero la IP
+    (20/60) y después el email (10/300).
+  - **Mi cuenta:**
+    - plana hasta c=20 (p50 301 → 318 ms, 52 rps);
+    - con c=10, p95 317 ms y 0 errores;
+    - tope de ~77 rps y p95 de ~635 ms con c=50/100.
+  - **Abuso:** 10 respuestas 400 y después 429. Primero corta el límite por email. El 429 cuesta p50
+    2,9 ms, ~2.800 rps.
+  - **reset-link:** p95 156-178 ms hasta c=20.
+  - **reset-password:** p95 ~159 ms con c=10.
+  - **Corrección:**
+    - 0 respuestas 5xx;
+    - filas de auditoría = éxitos;
+    - `token_version` +1 exacto por cada éxito;
+    - con K=10/20/50 pedidos sobre el mismo token, en 5 rondas cada uno, gana siempre exactamente uno;
+      los demás reciben 400 `reset_token_usado`.
+  - **Saturación entre c=20 y c=50.** La marca el ejecutor por defecto de 32 hilos, que comparten
+    bcrypt y SMTP, junto con la CPU. Ni el pool de DB (10) ni el `FOR UPDATE` fueron el cuello.
+  - **EXPLAIN en producción (solo lectura):**
+    - por `token`: const por el índice UNIQUE `token`;
+    - pendientes por `user_id`: `ref` en el índice `user_id`;
+    - reclamo por `id`: const en PRIMARY.
+  - **Veredicto:** aceptable para 2-10 admins.
+  - **Límite anotado, sin fecha porque no bloquea:** con un SMTP real y lento, cada envío ocupa un hilo
+    del mismo ejecutor que bcrypt usa en el login. Si algún día hay decenas de admins o envíos masivos,
+    el SMTP pasa a un ejecutor propio.
+- **Pendiente con fecha, verificación en vivo de Fernando (2026-09-15):**
+  - Mi cuenta en dos ventanas, en claro y en oscuro.
+  - Los labels visibles del alta.
+  - "Enviar enlace" con un correo real a un buzón suyo (U19; el plan lo condiciona a su permiso).
+  Yo no pude hacerla: no tengo credenciales de admin, y crear el usuario por SQL viola la barrera
+  de la DB (U23).
+- **Pregunta abierta a Fernando:** ¿el admin también fija una contraseña a mano? La decisión del
+  2026-09-12 fue "por enlace" (U2).
+
+## Cerrado — admin usuarios etapa 3: invariantes, auditoría, cerrar sesiones e historial (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 04:10 CST.** jax-platform#80 → `55fed34`. El frontend servido es
+`index-DOh1EUQp.js` y el backup es `…pre-usuarios-etapa3-20260915-040951`. La migración se verificó
+en producción: tabla `user_admin_audit`, índices `idx_jax_users_role_status` e
+`idx_user_admin_audit_target_ts`, y el EXPLAIN usa el índice.
+
+Qué entra:
+- **Invariante de superadmin sin deadlock.** Siempre queda al menos un superadmin activo. Se usa
+  `transaccion(AISLAMIENTO_ADMIN)`, que es READ COMMITTED, con orden fijo de bloqueos: el conjunto de
+  superadmins y después el objetivo.
+- **Sin auto-acciones.**
+- **"Cerrar sesiones"** sube `token_version` y corta WS 4001 y SSE después del commit.
+- **Historial por usuario:** `user_audit.registrar`, con 10 acciones.
+- **PUT sin contraseña.**
+- **Errores:** el backend devuelve códigos estables y el frontend los traduce.
+
+**Riesgo aceptado (U14):** no se pudo revisar `innodb_trx` en producción porque el usuario de la app
+no tiene PROCESS.
 
 **VERDAD OPERACIONAL 2026-09-14 15:00 CST.** jax-platform#70 (`3d90f58`), plan
 `docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-2-sesiones.md`, spec §3.2. Antes, un
@@ -532,7 +725,11 @@ medición no hay caché; la medición no lo pide).
 
   Línea base 13:28 CST (`bfab4de`), después 14:59 CST (`3d90f58`). Sin degradación: la consulta
   por PK no se ve dentro de la varianza.
-- **Pasa a la etapa 3 (plan enmendado en #70):** los WebSocket ya abiertos no se cortan al
+- **CERRADO 2026-09-15 por la etapa 3 (jax-platform#80 → `55fed34`) y la etapa 4 (#82 → `453b128`):**
+  `_cortar_conexiones` (fail-soft; desde #82 en `auth/conexiones.py`) corta WS 4001 y SSE después
+  del commit, en cada lugar que sube `token_version`: `update_user`, `revoke_sessions`, Mi cuenta y el
+  reset completado. Texto original:
+  **Pasa a la etapa 3 (plan enmendado en #70):** los WebSocket ya abiertos no se cortan al
   degradar o desactivar (se verifica en el handshake); el corte va donde nace el incremento de
   `token_version` (`update_user`, `revoke_sessions`, `delete_user`), después del commit. En la
   etapa 2 nadie incrementa la versión todavía. `tenant_id` sigue saliendo del token (un solo
@@ -2723,7 +2920,11 @@ retractaciones, que no se borran. Ninguno requiere acción.
 ## Anotado, no bloquea
 
 - **Anotados en la etapa 1 de admin usuarios (2026-09-13).**
-  - **Dependencia de la etapa 4:** `_procesar_recuperacion` se traga todo y
+  - **Dependencia de la etapa 4 — CERRADO 2026-09-15 (jax-platform#82 → `453b128`):**
+    `POST /users/{id}/reset-link` reusa el núcleo (`_crear_enlace_de_recuperacion` +
+    `_send_reset_email`) sin el envoltorio fail-soft. Da 503 si SMTP no está configurado o está
+    dañado, 502 con la respuesta del servidor si el envío falla, y no deja vivo ningún token no
+    entregado. Texto original: `_procesar_recuperacion` se traga todo y
     devuelve `None`, así que el "enlace de restablecimiento" por admin de la
     etapa 4 no puede reusarlo para devolver 503 si falta SMTP (spec §3.4). La
     etapa 4 tiene que llamar `smtp_config.cargar_settings()` y
@@ -2747,10 +2948,19 @@ retractaciones, que no se borran. Ninguno requiere acción.
     deshabilitado (antes mandaba `[]` y mostraba "Guardado"). `codigoDe()` compartido
     en `src/api/errores.js`; `AlertaError.jsx` como único lugar del estilo del aviso.
     Texto original: no había texto para esos códigos y quien guardaba no veía por qué.
-  - **Contraste de textos secundarios en modo oscuro:** `text-slate-500` sobre el
-    fondo oscuro mide 3,75:1, por debajo del AA de 4,5 (medido en AdminSmtp el
+  - **Contraste de textos secundarios en modo oscuro — CERRADO Y DESPLEGADO
+    2026-09-14** (jax-platform#75 → `b08395f`; ver el ítem del tema). El texto
+    secundario es el token `texto-tenue` de `src/tema/tokens.css`: oscuro
+    `129 144 166` (`#8190a6`) = 4,51 sobre superficie y 5,50 sobre fondo y hundido;
+    claro `97 113 136` (`#617188`) = 4,54 / 4,75 / 4,97 sobre fondo / superficie /
+    hundido (calculados por Hyde 2026-09-15 con la fórmula WCAG). Lo exige
+    `src/tema/contraste.test.js`: los pares `texto-tenue`/{fondo, superficie,
+    hundido} a 4,5 en los dos temas, y un control que afirma que el viejo
+    `slate-500` (3,75) queda por debajo; el canario del PR 1 (bajarlo a 3,75) puso
+    `frontend-tests` en rojo. Texto original: "`text-slate-500` sobre el fondo
+    oscuro mide 3,75:1, por debajo del AA de 4,5 (medido en AdminSmtp el
     2026-09-13). Es la convención de todas las pantallas. Arreglarlo es una
-    decisión del sistema de diseño, no de una pantalla.
+    decisión del sistema de diseño, no de una pantalla."
   - **Cancelación durante el rollback de `smtp_config.guardar_filas` — ACEPTADO,
     reconfirmado por Fernando 2026-09-14:** si la tarea
     se cancela justo en el rollback, se loguea el `CancelledError` en vez del error
@@ -2758,14 +2968,29 @@ retractaciones, que no se borran. Ninguno requiere acción.
     aiomysql cierra las que quedan a mitad de transacción. No se cambió porque
     atrapar `BaseException` en la limpieza arriesga tragarse cancelaciones. Lo
     reabre ver ese caso en un log real.
-  - **Pares de contraste por debajo de 4,5 que hoy no se usan:** `#b91c1c` sobre
-    `#fecaca` da 4,47 y el verde sobre `#e2e8f0` da 4,07. El test de modo claro
-    exige que exista un override, no que el contraste alcance. Se reabre si una
-    pantalla combina `text-red-400` con `hover:bg-red-900` o pone texto verde
-    sobre `bg-slate-700`.
-  - **Fuente Inter** marcada como "sobreusada" por el hook de impeccable en
-    `frontend/src/index.css:8`: preexistente. DECISIÓN de Fernando 2026-09-14: se
-    decide en el Lote 3, junto con los tokens de diseño del tema claro/oscuro.
+  - **Pares de contraste por debajo de 4,5 que hoy no se usan — CERRADO Y
+    DESPLEGADO 2026-09-15** (jax-platform#79 → `65c02de` borró
+    `lightModeOverrides.test.js` y el bloque de rojos/verdes, 35 → 4 overrides;
+    #81 → `1d8b787` borró la capa `html.light-mode` entera). Ya no hay overrides:
+    `src/tema/contraste.test.js` MIDE el contraste de cada par declarado (91) en los
+    dos temas en lugar de exigir que exista un override. Texto original: "`#b91c1c`
+    sobre `#fecaca` da 4,47 y el verde sobre `#e2e8f0` da 4,07. El test de modo
+    claro exige que exista un override, no que el contraste alcance. Se reabre si
+    una pantalla combina `text-red-400` con `hover:bg-red-900` o pone texto verde
+    sobre `bg-slate-700`."
+  - **Fuente Inter — CERRADO 2026-09-14 — DECISIÓN de Fernando (2026-09-13,
+    reafirmada 2026-09-14 con el spec del tema).** Inter se queda y se carga en el
+    bundle con `@fontsource/inter` 5.3.0 (versión exacta en `package.json`; latin
+    400/500/600/700 importados en `src/main.jsx`, `font-display: swap`;
+    jax-platform#75 → `b08395f`). La advertencia del hook de impeccable queda
+    registrada en `frontend/.impeccable/config.json` (`overused-font` = `inter`) con
+    el motivo existente del 2026-09-13: "Fernando confirmed (2026-09-13, chat):
+    Inter es la fuente de la plataforma desde v0.2 (5e28e9e, 2026-06-19); se
+    mantiene por coherencia visual". Costo medido en el ítem "Bundle y primer
+    pintado del tema". Texto original: "marcada como "sobreusada" por el hook de
+    impeccable en `frontend/src/index.css:8`: preexistente. DECISIÓN de Fernando
+    2026-09-14: se decide en el Lote 3, junto con los tokens de diseño del tema
+    claro/oscuro."
 
 - **Anotados en la ronda del pipeline b8f80733 (2026-09-12).** Ninguno
   bloquea; cada uno dice qué lo reabre.
@@ -2851,11 +3076,106 @@ retractaciones, que no se borran. Ninguno requiere acción.
     **Límite de esa evidencia:** esa respuesta no traía duplicados, así que prueba que
     no hay regresión con datos reales, no la fusión en acción — eso lo prueban los
     tests. Texto original: pipeline `04e02b09`, `[1]` y `[2]` con la misma URL.
-  - **El frontend no tiene tema claro/oscuro en ninguna pantalla.** Medido: ni
-    variables CSS en `src/index.css`, ni una clase `dark:`, ni `darkMode` en
-    Tailwind; todo es `slate-*` y hex fijos. Incumple la política "Dark/Light
-    mode — SIEMPRE" en toda la app, no en un componente. La cadena siguió las
-    clases del modal; arreglarlo es una ronda propia de tokens de diseño.
+  - **El frontend no tiene tema claro/oscuro — CORREGIDO 2026-09-14 (el ítem era
+    falso tal como estaba escrito: existía un modo claro manual, la capa
+    `html.light-mode` de `index.css` y el interruptor de la barra; lo verdadero era
+    que no había tokens ni garantía de contraste) y CERRADO Y DESPLEGADO
+    2026-09-15 04:16 CST.** Cinco PRs de jax-platform, cada uno con gate por
+    headSha (11 checks), backup `BACKUP-IDENTICO` y md5 local = servido:
+    | PR | Qué | Merge | Deploy | Frontend | Backup en la VM dev |
+    |---|---|---|---|---|---|
+    | #75 | PR 1: tokens, Login/Reset, `/api/apariencia`, script en línea, Inter | `b08395f` | 2026-09-14 22:51-22:52 | `index--vE4OXEG.js` (md5 `1aa5f60bbee0a35130d29c4850ba1fb4`) | `axioma-ia.io.backup-pre-tema-pr1-20260914-225145` |
+    | #77 | Arreglos de la verificación en vivo de Fernando (HalEye animado en el Login, guardar el predeterminado fija la elección del admin, claro gris `slate-100`, ojo con tokens) | `89e9b71` | 2026-09-14 23:59 | `index-CPhAT0Nt.js` (md5 `367312870d2ff68e3a5059b7bd63766d`) | `…backup-pre-tema-fix-vivo-20260914-235854` |
+    | #78 | PR 2: administración (13 archivos) + token `obsoleto` | `04c7e3a` | 2026-09-15 02:39 | `index-BEf4mekM.js` | `…backup-pre-tema-pr2-20260915-023902` |
+    | #79 | PR 3: chat y pipelines (16 archivos, colores de faceta del store) | `65c02de` | 2026-09-15 03:52 | `index-CQ6VeUCD.js` | `…backup-pre-tema-pr3-20260915-035243` |
+    | #81 | PR 4: Dashboard, escaneo de todo `src` y hojas de estilo, fin de la capa `html.light-mode` | `1d8b787` | 2026-09-15 04:16 | `index-DLo6BH_z.js` | `…backup-pre-tema-pr4-20260915-041556` |
+    **Evidencia, re-medida por Hyde 2026-09-15 04:17 CST (sólo lectura):**
+    `/home/fruiz/jax-platform` en `1d8b787`; `https://axioma-ia.io/login` sirve
+    `index-DLo6BH_z.js` (md5 `9692df0145273fbd0ab2b87aec524204`) e
+    `index-74p7HosF.css` (md5 `06add6c770a190a77619c28d3dd64b7d`), los dos iguales
+    al `dist/` local; `light-mode` en `frontend/src` + `index.html` = 5 líneas, las 5
+    en `src/tema/contraste.test.js` y todas son aserciones que lo PROHÍBEN (fuera
+    de ese test: 0; en `dist/`: 0). `src/tema/tokens.js` importado con node:
+    **48 tokens** (`TOKENS`) y **91 pares AA** (`PARES`), verificados en los dos
+    temas por `src/tema/contraste.test.js` en CI (el job `frontend-tests`, visto en
+    rojo con el canario del PR 1: `texto-tenue` bajado a 3,75 → failure). Son 91 y
+    no los 97 del plan: la decisión de Fernando "superficie opaca + borde del color
+    de la faceta" quitó los 9 pares fondo/faceta-* y `obsoleto` sumó 3. El mismo
+    test escanea TODO `src` (ya no una lista de migrados) contra clases de paleta
+    cruda y hex, y las hojas de estilo fuera de `tokens.css` contra hex, `rgb`
+    literal y `light-mode`. `theme_default` funciona: `GET /api/apariencia` → 200,
+    `cache-control: no-cache`, `{"theme_default":"dark"}`, y el script en línea de
+    `index.html` lo aplica antes del primer pintado (desde `jax_theme_default`).
+    Revisión visual de Fernando: PR 1 (con #77) y PR 2 "se ve bien"; chat,
+    pipelines y Dashboard en los dos temas quedan para su vistazo de la mañana
+    del 2026-09-15 (sin sesión de Hyde). Texto original: "El frontend no tiene
+    tema claro/oscuro en ninguna pantalla. Medido: ni variables CSS en
+    `src/index.css`, ni una clase `dark:`, ni `darkMode` en Tailwind; todo es
+    `slate-*` y hex fijos. Incumple la política "Dark/Light mode — SIEMPRE" en
+    toda la app, no en un componente. La cadena siguió las clases del modal;
+    arreglarlo es una ronda propia de tokens de diseño."
+  - **Carga de GET /api/apariencia — VERDAD OPERACIONAL, 2026-09-14 (hora
+    estimada ~23:58, ver corrección) CST.** Rama `d9bcc8d` (PR 1), uvicorn en
+    `127.0.0.1:8091`, 1 worker, contra `jax_memory_test`; aislado (sello de
+    facetas y HOME temporales, `CANARY_INTERVAL_SECONDS=0`). Respuesta: 200,
+    `no-cache`, `{"theme_default":"dark"}`.
+    | endpoint | c | n | errores | rps | p50 | p95 | p99 |
+    |---|---|---|---|---|---|---|---|
+    | /api/apariencia | 1 | 100 | 0 | 1721 | 0,5 ms | 0,8 ms | 3,6 ms |
+    | /api/apariencia | 10 | 1000 | 0 | 1606 | 4,6 ms | 9,5 ms | 85,3 ms |
+    | /api/apariencia | 30 | 3000 | 0 | 997 | 20,3 ms | 82,6 ms | 119,3 ms |
+    | /api/apariencia | 100 | 5000 | 0 | 628 | 71,0 ms | 639,8 ms | 1301,5 ms |
+    | /api/health (sin base, referencia) | 30 | 3000 | 0 | 1004 | 19,6 ms | 81,6 ms | 130,4 ms |
+    A c=30 el endpoint con base empata con `/api/health` del mismo proceso: la
+    consulta por PK no suma latencia medible; degrada entre c=30 y c=100 como
+    cualquier endpoint del proceso de un worker. El criterio del plan (p95 28,6 ms
+    de `GET /api/admin/config` del 2026-09-13) se midió **en otras condiciones**;
+    la comparación honesta es contra `/api/health` de la misma corrida. Barrera:
+    sello real y `~/jax/missions` sin cambio, 0 tracebacks. Un primer intento se
+    descartó (el uvicorn no arrancó; todo fue conexión rechazada). **DECISIÓN de
+    Fernando (2026-09-14 22:51 CST): sin caché** para `/api/apariencia`.
+    Corrección: las horas ~23:35/23:45/~23:58 del registro de medidas fueron
+    estimadas, no leídas del reloj (a las 22:51 seguía siendo 2026-09-14); los
+    números no cambian.
+  - **Bundle y primer pintado del tema — VERDAD OPERACIONAL, 2026-09-14 21:38 →
+    2026-09-15 04:02 CST.** Lighthouse 12, desktop, `vite preview` de `dist`, 3
+    corridas, mediana; FCP/CLS del Login. Bytes gzip con `gzip -9`.
+    | Medida (HEAD) | JS crudo / gzip | CSS crudo / gzip | FCP simulado oscuro / claro | FCP observado | CLS |
+    |---|---|---|---|---|---|
+    | Base (`9138e36`) | 561780 / 171197 B | 29102 / 6170 B | 405 / 241 ms | 53-56 / 52-60 ms | 0 |
+    | PR 1 (`def18d8`) | 562514 / 171562 B | 34722 / 7337 B | 522 / 282 ms | 52 / 48-52 ms | 0 |
+    | #77 (`3a7c06c`) | 563176 / 171796 B | 34789 / 7341 B | 525 / 282 ms | 52-56 / 52-54 ms | 0 |
+    | PR 2 (`4ae3cc8`) | 564380 / 172170 B | 34824 / 7195 B | 522 / 282 ms | 52-56 / 49-53 ms | 0 |
+    | PR 3 (`bfe7e86`) | 565303 / 172021 B | 28009 / 6237 B | 522 / 282 ms | 53-57 / 51-55 ms | 0 |
+    | PR 4 (`091d660`) | 566126 / 172221 B | 27443 / 6121 B | 525 / 282 ms | 51-59 / 50-61 ms | 0 |
+    Inter: 4 woff2 (96744 B) con `font-display: swap`, + 4 woff de respaldo que
+    un navegador moderno no baja (fuentes en disco antes del PR 1: 82212 B).
+    Resumen: JS +4346 B (+0,8 %), CSS −1659 B (se fue la capa `html.light-mode`).
+    **El +117 ms de FCP simulado en oscuro no es del navegador:** Lighthouse corre
+    en `simulate` (modelo Lantern) y ahora cuenta en la cadena crítica los 3 woff2
+    de Inter que pide el Login; ningún recurso bloquea el render y el FCP
+    **observado** no cambia (≈50-60 ms). No se agregó `size-adjust`: CLS 0,000 en
+    todas las medidas. **Incertidumbre declarada:** claro corre con perfil
+    persistente (caché tibia) y oscuro en frío; no se comparan entre sí, sólo
+    antes↔después dentro de cada tema.
+  - **npm audit del frontend — CERRADO Y DESPLEGADO 2026-09-14 23:05 CST**
+    (jax-platform#76 → `0907f4b`, con GO de Fernando de las 23:04). `npm audit fix`
+    sin `--force`: 9 → 0 vulnerabilidades (6 high: browserslist, nanoid, postcss,
+    react-router, react-router-dom, undici; 3 moderate: @vitest/mocker,
+    baseline-browser-mapping, vitest), todo patch/minor, sólo `package-lock.json`;
+    al bundle sólo llegan react-router/react-router-dom 7.18.0 → 7.18.3. `npm audit`
+    en producción = 0; frontend `index-DkQdXnxb.js`, md5 local = servido
+    (`1ff0f985b370d0bbf46ba62410c88a3e`); backup
+    `axioma-ia.io.backup-pre-npm-audit-20260914-230516` `BACKUP-IDENTICO`.
+  - **Fechas sin zona horaria en el resto de la API — PENDIENTE, fecha
+    2026-09-22 (propuesta por Hyde; Fernando la confirma o la mueve).** Anotado 2026-09-15 (Ruling U7, etapa 3 de admin usuarios): la
+    sesión de MariaDB corre en CST (`SYSTEM`, `NOW()` = UTC−6, medido por pytest) y
+    los endpoints serializan `TIMESTAMP`/`DATETIME` sin zona con `isoformat()`: el
+    navegador los lee como hora local. La etapa 3 sólo arregló los suyos
+    (`last_login`/`created_at` por `UNIX_TIMESTAMP` y enviados ISO `+00:00`; `ts` de
+    `user_admin_audit` escrito en UTC por `registrar`, único escritor; su DEFAULT
+    sigue en CST). Falta revisar TODOS los demás endpoints que serializan fechas.
+    Costo mientras tanto: horas corridas en otras pantallas.
   - **vitest no corre en el CI de jax-platform — ya estaba CERRADO, el ítem estaba
     vencido (medido 2026-09-14).** El job `frontend-tests` existe desde el 2026-09-12
     (jax-platform#60, con canario visto en rojo) y hoy exige 125 tests exactos. Otra
