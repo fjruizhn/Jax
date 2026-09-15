@@ -16,6 +16,8 @@ hay forma de expresar "falló pero seguí" porque Verdict no lo permite.
 
 Este módulo SÍ hace I/O (config.toml, filesystem) — a diferencia de
 claims.py, vocab_sweep.py y renderer.py, que son puros.
+
+Recibe el catálogo de capabilities del llamador (no toca la DB).
 """
 from __future__ import annotations
 
@@ -76,15 +78,26 @@ class ValidationContext:
 
 
 def load_validation_context(
-    repo_root: Path, config_paths_allowlist: frozenset[str]
+    repo_root: Path,
+    config_paths_allowlist: frozenset[str],
+    catalog: MotorCatalog,
 ) -> ValidationContext:
+    """`ops` sale de `las_manos/config.toml`; el catálogo de capabilities lo
+    RECIBE. El validador no toca la DB: el llamador lo carga (jax-platform,
+    `governance_context`, con `await MotorCatalog.from_db()`).
+
+    Hasta el 2026-09-14 se armaba acá con `MotorCatalog(config)` desde el
+    TOML, cuyo `[capabilities.*]` quedó vacío con el Bloque 3: la rama
+    `in_catalog` de `_resolve_capability_available` era código muerto en
+    producción. Spec: docs/superpowers/specs/
+    2026-09-14-gobernanza-catalogo-db-design.md (v2) §3.3."""
     config_path = repo_root / "las_manos" / "config.toml"
     with config_path.open("rb") as f:
         config = tomllib.load(f)
     return ValidationContext(
         ops=frozenset(config.get("ops", {}).keys()),
         mutating_capabilities=frozenset(MUTATING_CAPABILITIES),
-        catalog=MotorCatalog(config),
+        catalog=catalog,
         config_paths_allowlist=config_paths_allowlist,
         repo_root=repo_root,
     )
@@ -183,13 +196,25 @@ def _resolve_capability_available(
             detail=f"'{name}' verificado en ops, mode='{derived_mode}'.",
         )
     if in_catalog:
+        # Tanda A v2 (2026-09-14): el catálogo tiene el modo (capability.mode,
+        # jax-platform). Hasta hoy esta rama aceptaba cualquier modo "sin
+        # contradicción". `ops` usa MUTATING_CAPABILITIES; el catálogo, su
+        # columna. Dos fuentes para dos conjuntos de nombres DISJUNTOS
+        # (tripwire en jax-platform: test_catalogo_db_en_la_mesa.py).
+        real_mode = ctx.catalog.get_capability(name).mode
+        if mode != real_mode:
+            return Verdict(
+                status="FACT_MISMATCH",
+                predicate="CAPABILITY_AVAILABLE",
+                detail=(
+                    f"'{name}' tiene mode real '{real_mode}' en el catálogo de "
+                    f"capabilities, el claim afirma '{mode}'."
+                ),
+            )
         return Verdict(
             status="VALID",
             predicate="CAPABILITY_AVAILABLE",
-            detail=(
-                f"'{name}' verificado en catálogo de capabilities (mode "
-                "no verificable ahí, aceptado sin contradicción)."
-            ),
+            detail=f"'{name}' verificado en catálogo de capabilities, mode='{real_mode}'.",
         )
     return Verdict(
         status="FACT_MISMATCH",

@@ -28,6 +28,7 @@ import aiomysql
 import httpx
 
 from .embedding_config import CONFIG as EMBED, zero_vector_text
+from jax.core.db_connect_config import db_connect_timeout_seconds
 from .migrations import ensure_schema
 
 logger = logging.getLogger("jax.memory")
@@ -350,6 +351,12 @@ class MemoryDB:
                 maxsize=5,
                 autocommit=True,
                 charset="utf8mb4",
+                # Hallazgo de revisión, Tarea 2b (tanda A, ronda de arreglo 2,
+                # 2026-09-14): mismo bug que aiomysql.connect() sin
+                # connect_timeout -- create_pool() también espera sin límite
+                # si la DB se cuelga al abrir cada conexión del pool (ver
+                # jax/core/db_connect_config.py).
+                connect_timeout=db_connect_timeout_seconds(),
                 **self.config,
             )
             logger.info(f"MemoryDB conectada a {database}@{host} (pool 1-5)")

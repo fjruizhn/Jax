@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from jacobs.models import VALID_INVOKERS
+from jacobs.models import INVOKER_PLATAFORMA, VALID_INVOKERS
 
 KILL_SWITCH_PATH = Path("/etc/jax/PAUSE")
 
@@ -79,11 +79,16 @@ def validate_create(
 
 
 def validate_resume(invoked_by: str) -> PolicyResult:
-    """Solo Fernando puede reanudar un pipeline interrumpido."""
-    if invoked_by != "Fernando":
+    """Solo la plataforma (jax-platform, en nombre de un usuario autenticado y
+    dueño del pipeline -- eso lo verifica jax-platform antes de reenviar)
+    puede reanudar un pipeline interrumpido o aprobar un paso."""
+    if invoked_by != INVOKER_PLATAFORMA:
         return PolicyResult(
             ok=False,
-            reason="Solo Fernando puede reanudar un pipeline interrumpido",
+            reason=(
+                f"invoked_by '{invoked_by}' no puede reanudar ni aprobar: "
+                f"solo '{INVOKER_PLATAFORMA}'"
+            ),
         )
     return PolicyResult(ok=True, reason="OK")
 

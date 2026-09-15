@@ -230,13 +230,27 @@ def _embebedor_ollama(modelo: str, url: str = "http://localhost:11434/api/embed"
 
 async def _pool_desde_env():
     import aiomysql
+    # Mismo truco que columna_activa() (abajo): el runbook corre este script
+    # sin PYTHONPATH, y este import corre ANTES que columna_activa() en
+    # _main() -- no alcanza con que ella inserte la raíz al sys.path.
+    raiz = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if raiz not in sys.path:
+        sys.path.insert(0, raiz)
+    from jax.core.db_connect_config import db_connect_timeout_seconds
     host, port = os.environ.get("JAX_DB_HOST"), os.environ.get("JAX_DB_PORT")
     if not host or not port:
         raise SystemExit("JAX_DB_HOST/JAX_DB_PORT sin setear: sourceá /etc/jax/.env")
     return await aiomysql.create_pool(host=host, port=int(port), user=os.getenv("JAX_DB_USER", ""),
                                       password=os.getenv("JAX_DB_PASSWORD", ""),
                                       db=os.getenv("JAX_DB_NAME", "jax_memory"),
-                                      autocommit=True, minsize=1, maxsize=2)
+                                      autocommit=True, minsize=1, maxsize=2,
+                                      # Hallazgo de revisión, Tarea 2b (tanda A,
+                                      # ronda de arreglo 2, 2026-09-14): mismo
+                                      # bug que aiomysql.connect() sin
+                                      # connect_timeout -- create_pool()
+                                      # también espera sin límite si la DB se
+                                      # cuelga (ver jax/core/db_connect_config.py).
+                                      connect_timeout=db_connect_timeout_seconds())
 
 
 def columna_activa(env) -> str:

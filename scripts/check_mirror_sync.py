@@ -258,6 +258,29 @@ FAMILIAS = (
         nota="TRES archivos reales, no dos: las_manos/ tiene copia propia, no "
              "symlink. Verificado 2026-09-01.",
     ),
+    Familia(
+        nombre="db_connect_config",
+        canonico=JAX_ROOT / "jax" / "core" / "db_connect_config.py",
+        espejos=(
+            # Misma forma que facet_resolver: las_manos/db_connect_config.py
+            # es un SYMLINK a jax/core (Tarea 2b, ronda de arreglo 2,
+            # 2026-09-14), asi que compararlo hoy es un no-op -- se incluye
+            # igual, a proposito, por la misma razon que facet_resolver: si
+            # algun dia deja de ser symlink, la copia real entra a la
+            # comparacion sola.
+            ("las_manos", JAX_ROOT / "las_manos" / "db_connect_config.py"),
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "db_connect_config.py"),
+        ),
+        # Un solo simbolo compartido: el helper entero es esa funcion (mas el
+        # docstring de modulo, que no entra a la comparacion -- ast.parse no
+        # lo trata como un nodo con `.name` ni como un Assign de un nombre).
+        compartidos=(
+            "db_connect_timeout_seconds",
+        ),
+        nota="jax-platform recibe la copia verbatim de jax/core/db_connect_config.py "
+             "(Tarea 2b, ronda de arreglo 2, 2026-09-14) -- sin symlink cruzado entre "
+             "repos posible, mismo criterio que las demas familias.",
+    ),
 )
 
 

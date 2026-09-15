@@ -13,6 +13,14 @@ import os
 
 import aiomysql
 
+try:
+    # Producción (uvicorn, WorkingDirectory=las_manos): jax.core no es
+    # importable desde ahi, medido 2026-09-14 -- db_connect_config.py vive
+    # symlinkeado directo en las_manos/ (mismo patron que facet_resolver.py).
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
 logger = logging.getLogger("motor_registry.usage_writer")
 
 # T1.d (2026-08-22, auditoria usage_writer): 2 intentos totales (1 reintento),
@@ -105,7 +113,10 @@ async def record_motor_usage(
     last_exc: Exception | None = None
     for attempt in range(1, _WRITE_MAX_ATTEMPTS + 1):
         try:
-            conn = await aiomysql.connect(**_db_cfg())
+            # connect_timeout explícito (no en _db_cfg()): hallazgo de
+            # revisión, Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) --
+            # sin esto, aiomysql espera sin límite si la DB se cuelga.
+            conn = await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
             try:
                 price_in, price_out = await _lookup_model_price(conn, provider_id, model)
                 cost = None

@@ -18,6 +18,7 @@ from jacobs import store
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
 from jacobs.models import (
+    VALID_INVOKERS,
     Pipeline,
     PipelineCreateRequest,
     PipelineStatus,
@@ -97,7 +98,7 @@ async def plan_only(req: PlanRequest) -> dict:
             status_code=422,
             detail=f"max_steps={req.max_steps} excede límite duro (20)",
         )
-    if req.invoked_by not in {"Fernando", "jax_local", "ada"}:
+    if req.invoked_by not in VALID_INVOKERS:
         raise HTTPException(
             status_code=403,
             detail=f"invoked_by '{req.invoked_by}' no autorizado",
@@ -250,7 +251,7 @@ class ResumeRequest(BaseModel):
 async def resume_pipeline(
     pipeline_id: str, req: ResumeRequest, background: BackgroundTasks
 ) -> dict:
-    """Reanuda un pipeline interrumpido. Solo Fernando puede hacerlo."""
+    """Reanuda un pipeline interrumpido. Solo el rol 'plataforma' puede hacerlo."""
     policy = validate_resume(req.invoked_by)
     if not policy.ok:
         raise HTTPException(status_code=403, detail=policy.reason)
@@ -303,7 +304,7 @@ async def approve_step(
     Aprueba el step bloqueado en hyde y lo ejecuta.
     Válido si: pipeline.mode == "supervised" O step.facet == "hyde".
     Requiere que el step esté en status blocked_human_gate.
-    Solo Fernando puede aprobar.
+    Solo el rol 'plataforma' puede aprobar.
     """
     policy = validate_resume(req.invoked_by)
     if not policy.ok:

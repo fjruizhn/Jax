@@ -475,10 +475,21 @@ jobs:
         # antes esperaban MISMATCH/PROVENANCE_MISMATCH se actualizaron in
         # place a POINTER_MISMATCH o FACT_NOT_IN_SNAPSHOT, sin cambiar el
         # conteo.
+        #
+        # 80 -> 83 el 2026-09-14 (tanda A v2): el tripwire del
+        # catálogo TOML vacío se reemplaza (-1) por
+        # test_load_validation_context_usa_el_catalogo_que_recibe + su CONTROL
+        # (+2) y la rama in_catalog verifica el modo (+2). El tripwire se vio en
+        # rojo con el arreglo, como estaba previsto; los nuevos, antes.
+        #
+        # 83 -> 90 el 2026-09-14 (tanda A v2): sección catalog_capabilities en el
+        # snapshot (+7: sección, punteros de ops estables, canonical con dos
+        # secciones, citación VALID + su CONTROL, render, P10). Rojos vistos; los
+        # 2 que pasan antes son declarados y validados por mutación.
         run: |
           python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -q 2>&1 | tee /tmp/gov
-          grep -qE "^80 passed" /tmp/gov || {
-            echo "PISO ROTO: se esperaban 80 tests CORRIDOS."; exit 1; }
+          grep -qE "^90 passed" /tmp/gov || {
+            echo "PISO ROTO: se esperaban 90 tests CORRIDOS."; exit 1; }
 
   # Tests de tests/ que NINGUN job corria. Medido 2026-09-11 con grep sobre
   # .github/workflows/: 18 de 26 archivos sin job. Clasificados uno por uno en
@@ -522,6 +533,10 @@ jobs:
           tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py
           tests/test_repl_fuentes.py tests/test_memory_embedding_config.py
           tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py
+          tests/test_motor_catalog_mode.py
+          tests/test_jacobs_invoked_by_rol.py
+          tests/test_catalog_from_db_timeout.py
+          tests/test_aiomysql_connect_timeout_tripwire.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -540,6 +555,10 @@ jobs:
             tests/test_hipatia_fuentes.py tests/test_motor_catalog_sello.py \
             tests/test_repl_fuentes.py tests/test_memory_embedding_config.py \
             tests/test_fuentes_dedup.py tests/test_repl_modelos_permitidos.py \
+            tests/test_motor_catalog_mode.py \
+            tests/test_jacobs_invoked_by_rol.py \
+            tests/test_catalog_from_db_timeout.py \
+            tests/test_aiomysql_connect_timeout_tripwire.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -602,8 +621,53 @@ jobs:
           # 141 -> 143 el mismo dia, por la revision de jax#153: cargar_registro toma
           #   el proveedor del modelo asignado (JOIN por model_ref) y una faceta sin
           #   filas en el catalogo queda con su asignado. Visto en rojo antes.
-          grep -qE "^143 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 143 tests CORRIDOS."; exit 1; }
+          # 143 -> 148 el 2026-09-14 (tanda A v2): test_motor_catalog_mode.py (+5) -- CapabilityEntry.mode, fail-closed por dict, modo inválido lanza, capabilities() ordenado. Vistos en rojo.
+          # 148 -> 156 el 2026-09-14 (tanda A): test_jacobs_invoked_by_rol.py (+8) -- invoked_by es el rol "plataforma" y no "Fernando": al crear (policy y request), planificar, reanudar y aprobar. Vistos en rojo antes del arreglo.
+          # 156 -> 162 el 2026-09-14 (tanda A, Tarea 2b -- hallazgo de la revisión
+          #   de la Tarea 6):
+          #   test_catalog_from_db_timeout.py (+6) -- MotorCatalog.from_db() abría
+          #   aiomysql.connect() sin connect_timeout (default de aiomysql 0.3.2 es
+          #   None, que asyncio.wait_for() interpreta como "sin límite": si la DB se
+          #   cuelga en vez de rechazar, LAS MANOS, que recarga el catálogo por acá,
+          #   espera para siempre). JAX_DB_CONNECT_TIMEOUT_SECONDS (default 10, mismo
+          #   patrón que JAX_DB_NAME: se lee en cada llamada) se pasa siempre; un
+          #   valor no positivo o no numérico falla visible (P10). Vistos en rojo
+          #   antes del arreglo.
+          # 162 -> 166 el 2026-09-14 (tanda A, Tarea 2b, ronda de arreglo 1):
+          #   test_aiomysql_connect_timeout_tripwire.py (+4) -- la revisión encontró
+          #   19 sitios MÁS con el mismo patrón (aiomysql.connect() sin
+          #   connect_timeout) en todo el árbol; la validación se movió a un helper
+          #   único (jax/core/db_connect_config.py, importado desde jax/core/,
+          #   las_manos/ y jacobs/) y los 20 sitios totales ahora pasan
+          #   connect_timeout. El tripwire recorre el árbol con ast (no grep: no
+          #   confunde un comentario/docstring que MENCIONA "aiomysql.connect(" con
+          #   una llamada real) y falla ante cualquier sitio nuevo sin el kwarg, con
+          #   archivo:línea; validado por mutación (sacar el kwarg de un sitio real
+          #   lo tira rojo) y con sus propios controles positivo/negativo.
+          # 166 -> 167 el 2026-09-14 (tanda A, Tarea 2b, ronda de arreglo 2): el
+          #   tripwire pasa a vigilar TAMBIÉN aiomysql.create_pool() (mismo default
+          #   None, mismo hallazgo -- no se difiere aunque el brief dijera
+          #   ".connect(" al pie de la letra) y suma su propio control (+1): que
+          #   detecta un create_pool() sin connect_timeout. Los 3 sitios reales
+          #   (jax/memory/db.py, scripts/migrar_embeddings.py,
+          #   tests/test_migrar_embeddings_io.py) reciben connect_timeout=
+          #   db_connect_timeout_seconds(). Visto en rojo por mutación real sobre
+          #   jax/memory/db.py antes del arreglo.
+          # 167 -> 176 el 2026-09-14 (tanda A, Tarea 2b, ronda de arreglo 3,
+          #   re-revisión): el tripwire resolvía SOLO "aiomysql.connect"/
+          #   "aiomysql.create_pool" literal -- no veía `from aiomysql import
+          #   connect`, `import aiomysql as X` -> `X.connect(`, ni
+          #   `aiomysql.pool.create_pool(`. Ahora resuelve alias de import por
+          #   archivo antes de buscar llamadas (+8: cada forma alternativa
+          #   detectada, con su control positivo). Además, un archivo que no
+          #   parsea (SyntaxError) se saltaba en silencio -- ahora hace fallar el
+          #   tripwire con su ruta salvo excepción explícita en _NO_PARSEA (+1:
+          #   un archivo roto no declarado se reporta; el único caso real del
+          #   árbol, _director_patch/routes_block.py, se verifica declarado y sin
+          #   romper la corrida). Las 9 formas nuevas, vistas en rojo contra el
+          #   detector viejo antes del arreglo (verificado aparte, no en CI).
+          grep -qE "^176 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 176 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -664,11 +728,14 @@ jobs:
       - run: >-
           python -m pytest -v tests/test_plan_validation.py
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
+          tests/test_catalog_mode_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
+        # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
         run: |
           python -m pytest -q tests/test_plan_validation.py \
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
+            tests/test_catalog_mode_db.py \
             2>&1 | tee /tmp/out
-          grep -qE "^14 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }
+          grep -qE "^15 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 15 tests CORRIDOS."; exit 1; }

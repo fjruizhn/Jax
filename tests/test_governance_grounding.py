@@ -37,6 +37,24 @@ def _ctx(ops: set[str], mutating: set[str] = frozenset({"write_file"})) -> valid
 CTX_A = _ctx({"write_file", "read_file"})
 
 
+def _ctx_con_catalogo(ops: set[str], catalogo: dict) -> validator.ValidationContext:
+    return validator.ValidationContext(
+        ops=frozenset(ops),
+        mutating_capabilities=frozenset({"write_file"}),
+        catalog=MotorCatalog({"capabilities": catalogo}),
+        config_paths_allowlist=frozenset(),
+        repo_root=REPO_ROOT,
+    )
+
+
+# Contexto C (tanda A v2): las ops de CTX_A + dos capabilities de la DB.
+# Por nombre: file_write en /catalog_capabilities/0, generate en /1.
+CTX_C = _ctx_con_catalogo(
+    {"write_file", "read_file"},
+    {"generate": {"mode": "read_only"}, "file_write": {"mode": "mutating"}},
+)
+
+
 # --- normalize_args ---------------------------------------------------------
 
 def test_normalize_args_str_and_strip_every_value():
@@ -113,6 +131,59 @@ def test_render_lists_every_entry_with_its_pointer_and_args():
     assert "evidence_pointer" in text  # la instrucción de cómo citar
 
 
+# --- tanda A v2 (2026-09-14): sección catalog_capabilities --------------------
+
+def test_seccion_catalog_capabilities_ordenada_y_con_el_modo_del_catalogo():
+    snap = grounding.build_snapshot(CTX_C)
+    e0, e1 = snap.lookup("/catalog_capabilities/0"), snap.lookup("/catalog_capabilities/1")
+    assert e0.args == {"name": "file_write", "mode": "mutating"}
+    assert e1.args == {"name": "generate", "mode": "read_only"}
+    assert e0.predicate == e1.predicate == "CAPABILITY_AVAILABLE"
+
+
+def test_los_punteros_de_ops_no_se_mueven_al_sumar_el_catalogo():
+    """Pasa también ANTES del cambio, a propósito: fija lo que el cambio no
+    debe mover (spec v2 §3.4). Se valida por mutación: mezclar las dos
+    listas en un solo orden lo pone rojo."""
+    def ops(snap):
+        return [(e.pointer, e.args) for e in snap.entries if e.pointer.startswith("/capabilities/")]
+    assert ops(grounding.build_snapshot(CTX_C)) == ops(grounding.build_snapshot(CTX_A))
+
+
+def test_canonical_json_trae_las_dos_secciones_aunque_el_catalogo_este_vacio():
+    assert json.loads(grounding.build_snapshot(CTX_A).canonical_json) == {
+        "capabilities": [{"mode": "read_only", "name": "read_file"},
+                         {"mode": "mutating", "name": "write_file"}],
+        "catalog_capabilities": [],
+    }
+
+
+def test_una_capability_del_catalogo_citada_bien_es_observado_y_valid():
+    snap = grounding.build_snapshot(CTX_C)
+    raw = _raw(args={"name": "generate", "mode": "read_only"}, pointer="/catalog_capabilities/1")
+    assert grounding.accredit(raw, snap).outcome == "ACCREDITED"
+    v = _validate(raw, snap, ctx=CTX_C)
+    assert v.status == "VALID", v.detail
+
+
+def test_control_el_modo_equivocado_contra_el_catalogo_es_fact_not_in_snapshot():
+    """CONTROL del anterior: mismo puntero, modo falso -> ninguna entrada
+    del snapshot lo respalda. Pasa también antes del cambio (ahí no había
+    sección); con la sección, prueba que acreditar mira el modo y no solo el
+    nombre."""
+    snap = grounding.build_snapshot(CTX_C)
+    raw = _raw(args={"name": "generate", "mode": "mutating"}, pointer="/catalog_capabilities/1")
+    assert _validate(raw, snap, ctx=CTX_C).status == "FACT_NOT_IN_SNAPSHOT"
+
+
+def test_render_muestra_las_dos_secciones():
+    text = grounding.render(grounding.build_snapshot(CTX_C))
+    assert "  capabilities:\n" in text
+    assert "  catalog_capabilities:\n" in text
+    assert "/catalog_capabilities/1: name=generate, mode=read_only" in text
+    assert text.index("  capabilities:") < text.index("  catalog_capabilities:")
+
+
 # --- 7d: fallo ruidoso (P10) ---------------------------------------------------
 
 def test_7d_build_snapshot_raises_on_broken_ctx_never_returns_empty():
@@ -143,6 +214,21 @@ def test_empty_ops_is_a_valid_snapshot_not_an_error():
     snap = grounding.build_snapshot(_ctx(set()))
     assert snap.entries == ()
     assert len(snap.sha256) == 64
+
+
+def test_7d_un_catalogo_que_explota_da_GroundingBuildError():
+    """P10: leer el catálogo entra en el mismo try que ctx.ops."""
+    class CatalogoRoto:
+        def capabilities(self):
+            raise OSError("catálogo ilegible")
+
+    class Ctx:
+        ops = frozenset({"read_file"})
+        mutating_capabilities = frozenset()
+        catalog = CatalogoRoto()
+
+    with pytest.raises(grounding.GroundingBuildError):
+        grounding.build_snapshot(Ctx())
 
 
 # --- accredit: la citación se verifica, no se cree (spec §2.2, §4.1) --------

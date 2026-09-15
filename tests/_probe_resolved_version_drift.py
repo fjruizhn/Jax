@@ -29,6 +29,11 @@ import httpx
 from facet_resolver import resolve_facet
 from jacobs.executor import _invoke_http_openai_compat
 
+try:
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
 FACET = "jekyll"
 
 
@@ -62,6 +67,7 @@ async def _db_conn():
         db=os.getenv("JAX_DB_NAME", "jax_memory"),
         charset="utf8mb4",
         autocommit=True,
+        connect_timeout=db_connect_timeout_seconds(),
     )
 
 

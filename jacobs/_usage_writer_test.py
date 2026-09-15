@@ -30,6 +30,11 @@ os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
 
 from jacobs import usage_writer
 
+try:
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
 
 async def _seed_priced_model(provider_id, model_id, price_in, price_out):
     import aiomysql
@@ -46,6 +51,7 @@ async def _seed_priced_model(provider_id, model_id, price_in, price_out):
         host=_host, port=int(_port),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
         db=os.getenv("JAX_DB_NAME", "jax_memory_test"), autocommit=True,
+        connect_timeout=db_connect_timeout_seconds(),
     )
     try:
         async with conn.cursor() as cur:
@@ -75,6 +81,7 @@ async def _fetch_last_usage_row():
         host=_host, port=int(_port),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
         db=os.getenv("JAX_DB_NAME", "jax_memory_test"), autocommit=True,
+        connect_timeout=db_connect_timeout_seconds(),
     )
     try:
         async with conn.cursor() as cur:

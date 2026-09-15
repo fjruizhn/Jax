@@ -39,6 +39,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _esquema_memoria  # noqa: E402
 import migrar_embeddings as mig  # noqa: E402
 
+from jax.core.db_connect_config import db_connect_timeout_seconds
+
 _USER = 990_411  # reservado para este archivo
 # Desde el corte (2026-09-12) la columna "vieja" de estas pruebas es la ACTIVA
 # del esquema (embedding_bge_m3) y la "nueva" una de prueba: asi no dependen de
@@ -60,7 +62,8 @@ async def _pool():
     return await aiomysql.create_pool(
         host=os.environ["JAX_DB_HOST"], port=int(os.environ["JAX_DB_PORT"]),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
-        db=os.environ["JAX_DB_NAME"], autocommit=True, minsize=1, maxsize=2)
+        db=os.environ["JAX_DB_NAME"], autocommit=True, minsize=1, maxsize=2,
+        connect_timeout=db_connect_timeout_seconds())
 
 
 async def _sql(pool, q, args=(), fetch=False):

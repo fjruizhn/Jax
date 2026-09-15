@@ -24,6 +24,16 @@ import os
 
 import aiomysql
 
+try:
+    # LAS MANOS produccion (cwd=las_manos, uvicorn) y jobs con PYTHONPATH
+    # incluyendo las_manos/: bare, resuelve a las_manos/db_connect_config.py
+    # (symlink) o directo si jacobs corre con las_manos en su propio path.
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    # CI sin PYTHONPATH propio (p.ej. facet-health-io) y REPL: cwd=raiz del
+    # repo, solo el paquete jax.core es importable.
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
 logger = logging.getLogger("jacobs.usage_writer")
 
 
@@ -98,7 +108,10 @@ async def record_direct_usage(
             f"tenant_id/user_id NULL, no se descarta"
         )
     try:
-        conn = await aiomysql.connect(**_db_cfg())
+        # connect_timeout explícito (no en _db_cfg()): hallazgo de revisión,
+        # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
+        # aiomysql espera sin límite si la DB se cuelga.
+        conn = await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
         try:
             price_in, price_out = await _lookup_model_price(conn, provider_id, model)
             cost = None

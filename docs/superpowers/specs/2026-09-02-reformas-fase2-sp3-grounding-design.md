@@ -175,6 +175,13 @@ Consecuencia declarada: una capability que exista solo en la DB no aparece en
 el snapshot **ni** puede dar `VALID` hoy. Cuando el validador pase a leer la DB,
 el tripwire se pone rojo y obliga a revisar esta sección y `SECTION_PREDICATE`.
 
+> **Nota 2026-09-14 (tanda A v2, `docs/superpowers/specs/2026-09-14-gobernanza-catalogo-db-design.md`):**
+> la rama `in_catalog` dejó de ser código muerto. El validador recibe el catálogo de la DB y verifica
+> nombre **y** modo (`capability.mode`), así que `build_snapshot` ahora sí lee `ctx.catalog`: sección
+> `catalog_capabilities` (`/catalog_capabilities/N`), sin mover los punteros `/capabilities/N`. El
+> invariante de §3 se sigue cumpliendo: cada línea inyectada la re-resuelve una rama viva. El tripwire
+> citado arriba se reemplazó por `test_load_validation_context_usa_el_catalogo_que_recibe`.
+
 ---
 
 ## 4. Semántica de veredictos
