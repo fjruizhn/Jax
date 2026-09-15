@@ -751,8 +751,35 @@ jobs:
           #   test_gemini_key_en_cabecera.py (+2) -- una key que cruza el corte de
           #   200 en cada camino; rojos bajo las mutaciones M2b y M2c' (recortar
           #   antes de redactar). Medido en venv limpio (3.14): 361.
-          grep -qE "^361 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 361 tests CORRIDOS."; exit 1; }
+          # 361 -> 365 el 2026-09-15 (paridad con jax-platform, fix wave final
+          #   ronda 2 -- re-review de 0c72f4e): test_redaccion.py (+4) --
+          #   _AUTH_CONTEXTO/_tapar_auth portados verbatim: cada forma entre
+          #   comillas (con o sin esquema, con espacios adentro) es su propia
+          #   alternativa y se tapa entera hasta la comilla de cierre
+          #   (`authorization: "secret value"` -> `"***"`,
+          #   `"authorization": "Bearer abc def"` -> `"Bearer ***"`, y sus
+          #   formas con comillas simples). Antes el grupo de comilla opcional
+          #   se tragaba la apertura y el valor sin comillas cortaba en el
+          #   primer espacio (`"*** value"`), dejando el resto en claro. Los 4
+          #   vistos en rojo contra el _AUTH_CONTEXTO viejo antes del port.
+          #   Medido en venv limpio (3.14): 365.
+          # 365 -> 386 el 2026-09-15 (paridad con jax-platform, fix wave final
+          #   ronda 3 -- comillas escapadas y comilla sin cerrar):
+          #   test_redaccion.py (+21) -- _PARAM_SECRETO y _AUTH_CONTEXTO
+          #   portados verbatim: toda forma entre comillas acepta escapes con
+          #   barra (`\"`/`\'` dentro del valor ya no lo cierran antes de
+          #   tiempo -- `'{"authorization": "Bearer abc\"123 X"}'` ya no
+          #   dejaba "123 X" en claro) y, si la comilla no cierra, tapa hasta
+          #   el final del texto (antes no entraba en ninguna alternativa y el
+          #   valor salia entero). `(?:\\.|[^"\\])*` con flag `s` parte el
+          #   texto de una sola manera -- lineal, sin backtracking
+          #   catastrofico: 8 de los 21 son controles de tiempo sobre 100 KB
+          #   adversariales. 11 vistos en rojo (8 de comilla escapada + 3 de
+          #   comilla sin cerrar) contra el _PARAM_SECRETO/_AUTH_CONTEXTO de
+          #   la ronda 2 antes del port; los de barra-al-final y los de 100 KB
+          #   ya pasaban (controles). Medido en venv limpio (3.14): 386.
+          grep -qE "^386 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 386 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

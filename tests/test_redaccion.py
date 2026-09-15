@@ -178,6 +178,93 @@ def test_valor_entre_comillas_despues_del_esquema(texto, esperado):
     assert out == esperado
 
 
+# --- Fix wave final, ronda 2 (2026-09-15, re-review de 0c72f4e) ----------------
+# El grupo 4 (comilla opcional antes del valor) se tragaba la comilla de
+# apertura: las alternativas entre comillas nunca aplicaban y un valor entre
+# comillas SIN esquema, o con espacios adentro, dejaba el resto en claro
+# (`authorization: "secret value"` -> `"*** value"`). Portado VERBATIM de
+# jax-platform/backend/tests/test_redaccion.py (fix wave final, ronda 2).
+@pytest.mark.parametrize("texto, esperado", [
+    ('authorization: "secret value"', 'authorization: "***"'),
+    ("authorization: 'secret value'", "authorization: '***'"),
+    ('"authorization": "Bearer abc def"', '"authorization": "Bearer ***"'),
+    ("'authorization': 'Bearer abc def'", "'authorization': 'Bearer ***'"),
+])
+def test_valor_entre_comillas_con_espacios_se_tapa_entero(texto, esperado):
+    out = redactar_secretos(texto)
+    assert "value" not in out and "def" not in out
+    assert out == esperado
+
+
+# --- Fix wave final, ronda 3 (2026-09-15, comillas escapadas) ------------------
+# Una comilla ESCAPADA dentro del valor (`\"`, `\'`) cerraba el valor antes de
+# tiempo y lo que seguia salia en claro:
+#   '{"authorization": "Bearer abc\"123 SECRETTAIL"}' -> '"Bearer ***"123 SECRETTAIL"'.
+# Y una comilla SIN CERRAR no entraba en ninguna alternativa: el valor entero
+# salia en claro. Ahora las formas entre comillas aceptan escapes y, si no
+# cierran, tapan hasta el final del texto. Portado VERBATIM de
+# jax-platform/backend/tests/test_redaccion.py (fix wave final, ronda 3).
+@pytest.mark.parametrize("texto, esperado", [
+    ('{"authorization": "Bearer abc\\"123 SECRETTAIL"}', '{"authorization": "Bearer ***"}'),
+    ("{'authorization': 'Bearer abc\\'123 SECRETTAIL'}", "{'authorization': 'Bearer ***'}"),
+    ('authorization: "abc\\"123 SECRETTAIL" fin', 'authorization: "***" fin'),
+    ("authorization: 'abc\\'123 SECRETTAIL' fin", "authorization: '***' fin"),
+    ('Authorization: Bearer "abc\\"123 SECRETTAIL" fin', 'Authorization: Bearer "***" fin'),
+    ("Authorization: Bearer 'abc\\'123 SECRETTAIL' fin", "Authorization: Bearer '***' fin"),
+    ('api_key="abc\\"123 SECRETTAIL" x', 'api_key="***" x'),
+    ("api_key='abc\\'123 SECRETTAIL' x", "api_key='***' x"),
+])
+def test_comilla_escapada_dentro_del_valor_no_corta_la_redaccion(texto, esperado):
+    out = redactar_secretos(texto)
+    assert "SECRETTAIL" not in out and "123" not in out
+    assert out == esperado
+
+
+@pytest.mark.parametrize("texto, esperado", [
+    # Valor que TERMINA en una barra escapada: `\\` es la barra, la comilla
+    # que sigue cierra. Control de la forma del escape (una regex que tomara
+    # `\"` sin mirar la barra anterior se comeria el resto del texto).
+    ('authorization: "abc\\\\" y "visible"', 'authorization: "***" y "visible"'),
+    ("api_key='abc\\\\' y 'visible'", "api_key='***' y 'visible'"),
+])
+def test_valor_que_termina_en_barra_escapada(texto, esperado):
+    assert redactar_secretos(texto) == esperado
+
+
+@pytest.mark.parametrize("texto, esperado", [
+    ('authorization: "abc123 SECRETTAIL', 'authorization: "***"'),
+    ('"authorization": "Bearer abc SECRETTAIL', '"authorization": "Bearer ***"'),
+    ("api_key='abc SECRETTAIL", "api_key='***'"),
+])
+def test_comilla_sin_cerrar_tapa_hasta_el_final(texto, esperado):
+    out = redactar_secretos(texto)
+    assert "SECRETTAIL" not in out
+    assert out == esperado
+
+
+_CIEN_KB = 100_000
+
+
+@pytest.mark.parametrize("texto", [
+    'authorization: "' + "a" * _CIEN_KB,                       # sin cerrar
+    'authorization: "' + "\\" * _CIEN_KB,                      # barras sin par
+    'authorization: "' + '\\"' * (_CIEN_KB // 2),              # solo escapes
+    "api_key='" + "\\'" * (_CIEN_KB // 2),
+    'authorization: "x ' * (_CIEN_KB // 17),                   # muchas aperturas
+    'api_key="' * (_CIEN_KB // 9),
+    "a_" * (_CIEN_KB // 2),                                    # prefijos de nombre
+    "Bearer " + "a1" * (_CIEN_KB // 2),
+], ids=["sin-cerrar", "barras", "escapes", "escapes-simples", "aperturas",
+        "aperturas-param", "prefijos", "esquema-suelto"])
+def test_100_kb_adversarial_en_menos_de_50_ms(texto):
+    import time
+    redactar_secretos(texto)                                   # calienta la cache de re
+    t0 = time.perf_counter()
+    redactar_secretos(texto)
+    ms = (time.perf_counter() - t0) * 1000
+    assert ms < 50, f"{ms:.1f} ms sobre {len(texto)} caracteres"
+
+
 # --- Redactar primero, recortar despues ---------------------------------------
 
 def test_una_key_AIza_que_cruza_el_corte_no_deja_un_pedazo():
