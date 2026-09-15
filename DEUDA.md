@@ -422,6 +422,56 @@ Spec `docs/superpowers/specs/2026-09-14-gobernanza-catalogo-db-design.md` v3.1; 
 - **Pisos:** jax-platform 709 / 349 / vitest 146; jax governance 90, tests-puros 176, jacobs-gobernanza-db 15.
 - **SP4:** la línea base del 2026-09-03 deja de ser comparable (ver el ítem de SP4).
 
+## Cerrado — el REPL, Ada y el executor toman modelo y tope del catálogo (PR-K, 2026-09-14)
+
+**VERDAD OPERACIONAL 2026-09-14 ~21:29 CST.** jax#158 (`524edb7`), desplegado y verificado. Antes, jax
+tenía modelo y `max_tokens` fijos en código en tres caminos: el REPL (`jax/muscles/base.py`), Ada
+planificando (`ADA_MODEL`/`ADA_URL`) y el Motor Registry. Ahora:
+
+- `jax/core/contrato_dispatch.py`: los validadores del contrato, copia textual de los de jax-platform
+  (familia nueva en `scripts/check_mirror_sync.py`, así que el CI rompe si divergen).
+- Ada planifica con `resolve_facet("ada")` (hoy glm-5.3); `ADA_MODEL` y `ADA_URL` eliminados.
+- Si un cerebro falla (Ada → qwen → plan fijo), el pipeline deja un evento `PLAN_CEREBRO_FALLBACK` en
+  `jacobs_events` con el motivo, además del log.
+- El Motor Registry manda min(contrato, `motor.max_tokens`) con el parámetro del contrato; thot manda
+  `max_completion_tokens` 128000.
+- CI: `_direct_usage_test.py` pasó al job `jacobs-gobernanza-db` (necesita el esquema de jax-platform);
+  los tests con DB crean sus propias filas. Pisos: tests-puros 285, jacobs-gobernanza-db 27,
+  facet-health-io 8.
+
+**Verificado en vivo:**
+- Contrato con el código desplegado: ada, jekyll, kimi y thot OK; hipatia y hyde no exigen; jax_local 262144.
+- jekyll 200 en 2,46 s; journal sin warnings desde el deploy.
+- Pipeline `5d64a7c4`: objetivo trivial → cerebro qwen; paso thot con gpt-5.6-terra completo.
+- Pipeline `ecacbc72`: objetivo formal → `Jacobs cerebro=Ada (formal)`, sin `PLAN_CEREBRO_FALLBACK`; paso
+  ada con glm-5.3 completo.
+
+## Cerrado — declarar el contrato de dispatch sin SQL a mano (PR-L, 2026-09-14)
+
+**VERDAD OPERACIONAL 2026-09-14 ~21:07 CST.** jax-platform#74 (`99671eb`), desplegado y verificado: el
+guard de #73 (409 al aprobar un modelo sin contrato) dejaba como único remedio SQL a mano, contra la regla
+"cambiar el modelo NUNCA es un UPDATE a mano". Ahora `PUT /api/admin/models/{ref}/contrato-dispatch`
+(superadmin, mismos validadores que el dispatch, tope ≤ INT de la columna, transacción, auditoría en
+`model_catalog_audit` sin FK duras y con snapshot legible, invalida el sello). Los 409 de approve y de PUT
+quedan registrados y se ven en Propuestas y Bindings con "Declarar contrato" (i18n es/en). Semillas de base
+vacía coherentes (thot → gpt-5.6-terra, ada → glm-5.3; antes nacían sin contrato) con tripwire;
+`/api/admin/keys` sin nombres de modelo literales. **Siembra de `ollama/qwen3.6:35b-a3b-q4_K_M` (jax_local):
+`max_output_tokens = 262144`** — decisión de Fernando: su contexto (`ollama show`; la doc de Ollama dice que
+`num_predict` por defecto es -1 = generación infinita, o sea que hoy no tenía tope). **Verificado en vivo:**
+tabla de auditoría creada, qwen NULL/262144, jekyll 200, admin 200, frontend `index-LN3fcXbx.js`.
+**Carga** (arnés local, `jax_memory_test`): 0 errores; p95 1,54 / 6,36 / 63 ms con c=1/10/50 (degrada entre
+10 y 50; aceptado para un endpoint de superadmin esporádico).
+
+- **Incidente menor (HISTORIA, 20:26:05 CST):** esa prueba de carga corrió con un arnés que aislaba la DB
+  pero NO el sello de facet_resolver: cada PUT estampó `/srv/jax-data/facet-cache-seal` real y los
+  servicios recargaron sus cachés una vez (sin cambio de datos; health 200, journal limpio). Arnés
+  arreglado y verificado; la barrera de los briefs ahora incluye el sello (memoria
+  `feedback-brief-barrera-db-produccion`).
+- **Pendiente con fecha — etapa 5 de admin usuarios (baja lógica):** `credential_audit.performed_by`,
+  `facet_binding.approved_by` y `model_binding_proposal.decided_by` tienen FK a `jax_users`: el
+  `DELETE /api/admin/users/{id}` en duro de hoy da 500 para un usuario con historia. La etapa 5 reemplaza
+  el borrado por una baja; al ejecutarla, verificar que ninguna auditoría quede bloqueada.
+
 ## Cerrado — jekyll caída en producción (2026-09-12 19:40 → 2026-09-14 19:50 CST)
 
 **HISTORIA + VERDAD OPERACIONAL.** El catálogo detectó que DeepSeek renombró `deepseek-v4-flash` →
