@@ -6,7 +6,7 @@ SOLO LEE: no inserta ni borra filas.
 Filas usadas, las dos las crea la migración en una base vacía
 (_seed_models_and_backfill deriva el catálogo de los bindings sembrados):
   - deepseek / deepseek-v4-flash: sembrada con ('max_tokens', 131072).
-  - zhipu / glm-5.2 (ADA_MODEL): sin contrato (NULL/NULL) -- la semilla solo
+  - zhipu / glm-5.2: sin contrato (NULL/NULL) -- la semilla solo
     cubre glm-5.3. Es justamente el caso de fallo cerrado.
 
 En memoria de Jairo Urbina.
@@ -30,10 +30,11 @@ def test_lee_nombre_y_tope_de_la_fila_real():
     assert asyncio.run(cd.limite_de_salida("deepseek", "deepseek-v4-flash")) == {"max_tokens": 131072}
 
 
-def test_la_fila_de_ADA_MODEL_sin_contrato_falla_con_los_dos_updates():
-    from jacobs.plan import ADA_MODEL
+def test_una_fila_sin_contrato_falla_con_los_dos_updates():
+    # glm-5.2: la crea la migración desde el binding sembrado, sin contrato
+    # (en producción, id 7, también NULL/NULL -- medido por el controller).
     with pytest.raises(cd.ModelDispatchConfigError) as exc:
-        asyncio.run(cd.limite_de_salida("zhipu", ADA_MODEL))
+        asyncio.run(cd.limite_de_salida("zhipu", "glm-5.2"))
     assert "UPDATE model SET max_tokens_param" in str(exc.value)
     assert "UPDATE model SET max_output_tokens" in str(exc.value)
 

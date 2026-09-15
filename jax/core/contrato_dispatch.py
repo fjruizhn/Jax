@@ -16,7 +16,7 @@ espejado en jax-platform (scripts/check_mirror_sync.py) y la copia de acá NO
 selecciona estas columnas: es una divergencia DECLARADA. Además, ninguno de los
 dos caminos que se arreglan pasa por `resolve_facet()`: el REPL arma sus
 músculos al arrancar con `load_facet_registry()` y puede despachar un modelo
-distinto del asignado (MODELO_PESADO); Ada planifica con `ADA_MODEL`. Lo que
+distinto del asignado (MODELO_PESADO). Lo que
 hay que leer es la fila del modelo QUE SE DESPACHA, por (provider_id,
 model_id). Una sola fuente dentro de jax: el REPL lo importa como
 `jax.core.contrato_dispatch` y Jacobs como `contrato_dispatch` pelado, por el
@@ -51,21 +51,24 @@ class ModelDispatchConfigError(RuntimeError):
 # OpenAI-compatible y por eso lee el contrato de la fila. Medido 2026-09-14:
 #   - deepseek: HttpMuscle._call_deepseek -> https://api.deepseek.com/chat/completions
 #   - openai, moonshot (alias "kimi"), zhipu (alias "zai"): HttpMuscle._call_openai
-#   - zhipu: además jacobs/plan.py::_ada_plan -> ADA_URL (Z.ai, chat/completions)
+#   - jacobs/plan.py::_ada_plan y jacobs/executor.py::_invoke_http_openai_compat
+#     -> f.base_url + /chat/completions del binding (resolve_facet)
 PROVEEDORES_OPENAI_COMPAT = frozenset({"deepseek", "openai", "moonshot", "zhipu"})
 
 # Proveedores que NO son OpenAI-compatibles: tienen su PROPIO parámetro de
 # límite de salida, con otro nombre y en otro lugar del body. Declarado para
 # que nadie les mande `max_tokens`/`max_completion_tokens` creyendo que es
-# universal. Fuentes (documentación oficial de cada API):
+# universal. Fuentes: documentación oficial, leída por el controller el
+# 2026-09-14:
 #   - gemini: `generationConfig.maxOutputTokens` en generateContent
-#     (https://ai.google.dev/api/generate-content#generationconfig). Hoy
+#     (https://ai.google.dev/api/generate-content). Hoy
 #     HttpMuscle._call_gemini NO manda límite, igual que la Mesa web
 #     (jax-platform contrato_dispatch.TRANSPORTS_CON_CONTRATO_DE_DISPATCH).
-#   - anthropic: `max_tokens`, OBLIGATORIO en la Messages API
-#     (https://docs.anthropic.com/en/api/messages). En jax no hay camino HTTP
-#     a Anthropic: hyde despacha por el CLI `claude` (subprocess_muscle.py).
-#   - ollama: `options.num_predict` en /api/chat
+#   - anthropic: `max_tokens`, OBLIGATORIO en la Messages API ("The maximum
+#     number of tokens to generate before stopping"; cada modelo tiene su
+#     máximo) (https://platform.claude.com/docs/en/api/messages). En jax no
+#     hay camino HTTP a Anthropic: hyde despacha por el CLI `claude`.
+#   - ollama nativo: `options.num_predict` en /api/chat
 #     (https://github.com/ollama/ollama/blob/main/docs/api.md), el que ya usa
 #     jacobs/plan.py::_llm_plan.
 PARAMETRO_PROPIO = {

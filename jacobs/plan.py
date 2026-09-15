@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 import httpx
 
 from jacobs.models import MOTOR_FACETS, Step
-from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
@@ -39,8 +38,11 @@ OLLAMA_TIMEOUT = 120  # segundos — el modelo local puede tardar
 # thinking solo midio 14780-19846 caracteres, ~3700-5000 tokens).
 _LLM_PLAN_NUM_PREDICT = 3000
 
-ADA_URL = "https://api.z.ai/api/paas/v4/chat/completions"
-ADA_MODEL = "glm-5.2"
+# Sin ADA_URL ni ADA_MODEL (PR-K ronda 1, 2026-09-14): Ada planificaba con
+# glm-5.2 fijo mientras su binding era glm-5.3 (medido en producción por el
+# controller: model id 7 glm-5.2 sin contrato, id 1453 glm-5.3 con
+# max_tokens/131072). Modelo, URL base y credencial salen de
+# resolve_facet("ada"); el límite de salida, de la fila de ESE modelo.
 ADA_TIMEOUT = 180  # Ada puede tardar más con razonamiento encendido
 
 # Heurística v1 para clasificar objetivos — Fase D la refina con ejemplos de oro.
@@ -498,11 +500,11 @@ class PlanBuilder:
         # test lo vio porque ninguno ejercita build() por el camino del LLM.
         capability_hint = _build_capability_hint(governance)
         dificultad = self._classify_difficulty(objective)
-        try:
-            _ada_disponible = bool(await resolve_credential_instrumented("zhipu"))
-        except CredentialUnavailableError:
-            _ada_disponible = False
-        if dificultad == "formal" and _ada_disponible:
+        # PR-K ronda 1: sin sondear la credencial de un proveedor fijo. Si ada
+        # no se puede resolver (binding, credencial) o no tiene contrato de
+        # dispatch, _ada_plan lo registra en ERROR y devuelve None: el
+        # fallback a qwen de abajo sigue igual, pero ya no en silencio.
+        if dificultad == "formal":
             logger.info("Jacobs cerebro=Ada (formal) objective=%r", objective[:80])
             specs = await self._ada_plan(objective, max_steps, capability_hint)
             if not specs:
@@ -527,12 +529,31 @@ class PlanBuilder:
     async def _ada_plan(
         self, objective: str, max_steps: int, capability_hint: str = ""
     ) -> list[dict] | None:
+        # Modelo, URL y credencial del binding de ada (credencial por
+        # credential_resolver, dentro de resolve_facet), y el límite de salida
+        # de la fila de ESE modelo. Cualquier falla: ERROR con el motivo y
+        # None -> _from_objective cae a qwen. Nunca se despacha a un modelo o
+        # URL fijos ni con un límite asumido.
         try:
-            api_key = await resolve_credential_instrumented("zhipu")
-        except CredentialUnavailableError:
+            f = await resolve_facet("ada")
+        except FacetUnavailableError as exc:
+            logger.error("Ada: dispatch abortado, faceta no resoluble: %s", exc)
             return None
+        if f.transport != "http_openai_compat" or not f.base_url:
+            logger.error(
+                "Ada: dispatch abortado, el binding no es http_openai_compat con "
+                "base_url (transport=%r base_url=%r) y este camino arma chat/completions.",
+                f.transport, f.base_url,
+            )
+            return None
+        try:
+            limite = await limite_de_salida(f.provider_id, f.model)
+        except ModelDispatchConfigError as exc:
+            logger.error("Ada: dispatch abortado, sin contrato en el catalogo: %s", exc)
+            return None
+        url = f"{f.base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {f.credential}",
             "Content-Type": "application/json",
         }
         prompt = (
@@ -571,24 +592,15 @@ class PlanBuilder:
             {"role": "system", "content": _PLAN_SYSTEM_MODULAR + capability_hint},
             {"role": "user", "content": prompt},
         ]
-        try:
-            # PR-K: nombre y tope del limite de salida de la fila de ADA_MODEL
-            # en `model` (antes "max_tokens": 131072 fijo). Sin contrato no se
-            # despacha a Ada: _from_objective cae a qwen, y el ERROR lleva el
-            # UPDATE a ejecutar.
-            limite = await limite_de_salida("zhipu", ADA_MODEL)
-        except ModelDispatchConfigError as exc:
-            logger.error("Ada: dispatch abortado, sin contrato en el catalogo: %s", exc)
-            return None
         payload = {
-            "model": ADA_MODEL,
+            "model": f.model,
             "messages": messages,
             "stream": True,
             **limite,
         }
         try:
             async with httpx.AsyncClient(timeout=ADA_TIMEOUT) as client:
-                async with client.stream("POST", ADA_URL, headers=headers, json=payload) as resp:
+                async with client.stream("POST", url, headers=headers, json=payload) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
                         logger.warning("Ada HTTP %s: %r", resp.status_code, body[:200])

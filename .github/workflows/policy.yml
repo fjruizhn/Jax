@@ -679,8 +679,17 @@ jobs:
           #   test_payload_max_tokens_literal_tripwire.py (+4) -- ningun payload de
           #   codigo con el limite de salida como numero literal (ast); rojo con los 3
           #   sitios reales antes del arreglo y por mutacion despues; con sus controles.
-          grep -qE "^199 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 199 tests CORRIDOS."; exit 1; }
+          # 199 -> 206 el 2026-09-14 (PR-K ronda 1): test_contrato_dispatch_repl_ada.py
+          #   (+7) -- Ada planifica con SU binding (resolve_facet("ada"): modelo, URL
+          #   base y credencial; ya no ADA_MODEL/ADA_URL fijos) y el tope de la fila de
+          #   ese modelo; faceta no resoluble, otro transporte o sin contrato -> ERROR y
+          #   None, y el fallback a qwen sigue pero con el ERROR del UPDATE (-1 test
+          #   reemplazado, +4); jacobs/executor.py::_invoke_http_openai_compat manda el
+          #   limite de la fila (+2); tripwire: ningun nombre de modelo literal en
+          #   jacobs/plan.py, con su control (+2). 9 vistos en rojo contra el codigo de
+          #   la ronda 0; validados por mutacion.
+          grep -qE "^206 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 206 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

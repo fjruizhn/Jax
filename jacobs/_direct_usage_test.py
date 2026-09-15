@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 # T4 (2026-08-22, auditoria usage_writer): mismo guard que
 # las_manos/_motor_usage_writer_test.py -- fail loud si JAX_DB_NAME ya
@@ -122,7 +122,11 @@ class InvokeOpenAICompatTokensTest(unittest.IsolatedAsyncioTestCase):
 
         f = _fake_resolved_facet()
 
-        with patch("httpx.AsyncClient.post", fake_post):
+        # PR-K: el limite de salida sale de la fila de `model`; se parchea la
+        # lectura (este test mide tokens, no el contrato).
+        import contrato_dispatch
+        with patch("httpx.AsyncClient.post", fake_post), \
+                patch.object(contrato_dispatch, "_leer_contrato", AsyncMock(return_value=("max_tokens", 1000))):
             result = await executor._invoke_http_openai_compat(f, "prompt", timeout=30)
 
         self.assertEqual(result["tokens_in"], 200)
@@ -138,7 +142,11 @@ class InvokeOpenAICompatTokensTest(unittest.IsolatedAsyncioTestCase):
 
         f = _fake_resolved_facet()
 
-        with patch("httpx.AsyncClient.post", fake_post):
+        # PR-K: el limite de salida sale de la fila de `model`; se parchea la
+        # lectura (este test mide tokens, no el contrato).
+        import contrato_dispatch
+        with patch("httpx.AsyncClient.post", fake_post), \
+                patch.object(contrato_dispatch, "_leer_contrato", AsyncMock(return_value=("max_tokens", 1000))):
             result = await executor._invoke_http_openai_compat(f, "prompt", timeout=30)
 
         self.assertEqual(result["tokens_in"], 0)

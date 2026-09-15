@@ -62,12 +62,16 @@ class _Captura:
 
     def __init__(self):
         self.bodies = []
+        self.urls = []
+        self.headers = []
 
     def patches(self):
         cap = self
 
         async def fake_post(client_self, url, json=None, **kw):
             cap.bodies.append(json)
+            cap.urls.append(url)
+            cap.headers.append(kw.get("headers"))
             if "generativelanguage" in url:
                 return _Resp({"candidates": [{"content": {"parts": [{"text": "hola"}]}}]})
             return _Resp({"model": "m", "choices": [{"message": {"content": "hola"}}]})
@@ -75,6 +79,8 @@ class _Captura:
         @asynccontextmanager
         async def fake_stream(client_self, method, url, json=None, **kw):
             cap.bodies.append(json)
+            cap.urls.append(url)
+            cap.headers.append(kw.get("headers"))
             yield _StreamResp()
 
         return [
@@ -191,31 +197,46 @@ class NoOpenAICompatTest(_Base):
         self.leer.assert_not_awaited()
 
 
-class AdaPlanDelCatalogoTest(unittest.IsolatedAsyncioTestCase):
-    """jacobs/plan.py importa `contrato_dispatch` pelado (symlink de
-    las_manos/): se parchea ESE módulo, que es el que usa en producción."""
+def _facet_ada(**kw):
+    from facet_resolver import ResolvedFacet
+    datos = dict(key="ada", provider_id="zhipu", base_url="https://z.example/api/paas/v4",
+                 model="glm-5.3", credential="cred-del-resolver", transport="http_openai_compat",
+                 persona=None, params=None)
+    datos.update(kw)
+    return ResolvedFacet(**datos)
 
-    def arrancar(self, fila):
+
+class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
+    """PR-K ronda 1: Ada planifica con SU binding (resolve_facet("ada")) y el
+    contrato de la fila de ese modelo. jacobs/plan.py importa
+    `contrato_dispatch` y `facet_resolver` pelados (las_manos/): se parchean
+    ESOS módulos, los de producción."""
+
+    def arrancar(self, fila, facet=None, facet_error=None):
         import contrato_dispatch as cd_jacobs
         from jacobs import plan
         self.plan = plan
         self.cap = _Captura()
         self.leer = AsyncMock(return_value=fila)
+        self.resolver = AsyncMock(return_value=facet or _facet_ada(), side_effect=facet_error)
         for p in [
             patch.object(httpx.AsyncClient, "stream", self.cap.patches()[1].new),
-            patch.object(plan, "resolve_credential_instrumented", AsyncMock(return_value="k")),
+            patch.object(plan, "resolve_facet", self.resolver),
             patch.object(cd_jacobs, "_leer_contrato", self.leer),
         ]:
             p.start()
             self.addCleanup(p.stop)
 
-    async def test_ada_manda_el_nombre_y_el_tope_de_la_fila_de_ADA_MODEL(self):
+    async def test_ada_manda_modelo_url_y_credencial_del_binding_y_el_tope_de_su_fila(self):
         self.arrancar(("max_tokens", 131072))
         await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
         body = self.cap.bodies[0]
+        self.assertEqual(body["model"], "glm-5.3")
         self.assertEqual(body["max_tokens"], 131072)
-        self.assertEqual(body["model"], self.plan.ADA_MODEL)
-        self.leer.assert_awaited_once_with("zhipu", self.plan.ADA_MODEL)
+        self.assertEqual(self.cap.urls[0], "https://z.example/api/paas/v4/chat/completions")
+        self.assertEqual(self.cap.headers[0]["Authorization"], "Bearer cred-del-resolver")
+        self.resolver.assert_awaited_once_with("ada")
+        self.leer.assert_awaited_once_with("zhipu", "glm-5.3")
 
     async def test_ada_con_otro_nombre_de_parametro_lo_respeta(self):
         self.arrancar(("max_completion_tokens", 5000))
@@ -224,13 +245,109 @@ class AdaPlanDelCatalogoTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["max_completion_tokens"], 5000)
         self.assertNotIn("max_tokens", body)
 
-    async def test_ada_sin_contrato_no_despacha_y_lo_dice_en_error(self):
+    async def test_binding_sin_contrato_no_despacha_y_da_error_con_el_update(self):
         self.arrancar((None, None))
         with self.assertLogs("jacobs.plan", level="ERROR") as logs:
             resultado = await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
         self.assertIsNone(resultado)
         self.assertEqual(self.cap.bodies, [], "Ada no puede despachar sin contrato")
-        self.assertIn("UPDATE model SET max_tokens_param", "\n".join(logs.output))
+        salida = "\n".join(logs.output)
+        self.assertIn("UPDATE model SET max_tokens_param", salida)
+        self.assertIn("WHERE model_id='glm-5.3'", salida)
+
+    async def test_faceta_no_resoluble_no_despacha_y_da_error(self):
+        from facet_resolver import FacetUnavailableError
+        self.arrancar(("max_tokens", 1), facet_error=FacetUnavailableError("ada"))
+        with self.assertLogs("jacobs.plan", level="ERROR") as logs:
+            resultado = await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
+        self.assertIsNone(resultado)
+        self.assertEqual(self.cap.bodies, [])
+        self.assertIn("faceta no resoluble", "\n".join(logs.output))
+        self.leer.assert_not_awaited()
+
+    async def test_binding_con_otro_transporte_no_despacha_y_da_error(self):
+        self.arrancar(("max_tokens", 1), facet=_facet_ada(transport="http_gemini"))
+        with self.assertLogs("jacobs.plan", level="ERROR") as logs:
+            resultado = await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
+        self.assertIsNone(resultado)
+        self.assertEqual(self.cap.bodies, [])
+        self.assertIn("http_gemini", "\n".join(logs.output))
+
+    async def test_el_fallback_a_qwen_sigue_pero_el_contrato_roto_queda_en_error(self):
+        """El fallback que ya existía (Ada falla -> qwen) no puede enmascarar un
+        contrato roto: el plan sale de qwen Y hay un ERROR con el UPDATE."""
+        self.arrancar((None, None))
+        b = self.plan.PlanBuilder()
+        qwen = AsyncMock(return_value=[{"facet": "jekyll", "capability": "analysis", "prompt": "x"}])
+        b._llm_plan = qwen
+        b._from_spec = lambda pipeline_id, specs, caps: specs
+        with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
+                self.assertLogs("jacobs.plan", level="INFO") as logs:
+            specs = await b._from_objective("p", "x" * 250, 3, {"capabilities": {}})
+        self.assertEqual(specs[0]["facet"], "jekyll")
+        qwen.assert_awaited_once()
+        errores = [l for l in logs.output if l.startswith("ERROR")]
+        self.assertTrue(any("UPDATE model SET max_tokens_param" in l for l in errores), logs.output)
+
+
+class ExecutorOpenAICompatTest(unittest.IsolatedAsyncioTestCase):
+    """jacobs/executor.py::_invoke_http_openai_compat (jekyll/thot/ada en
+    pipelines) no mandaba límite de salida: ahora el de la fila del modelo."""
+
+    def arrancar(self, fila):
+        import contrato_dispatch as cd_jacobs
+        from jacobs import executor
+        self.executor = executor
+        self.cap = _Captura()
+        self.leer = AsyncMock(return_value=fila)
+        for p in [
+            patch.object(httpx.AsyncClient, "post", self.cap.patches()[0].new),
+            patch.object(executor, "record_resolved_version_safe", AsyncMock()),
+            patch.object(cd_jacobs, "_leer_contrato", self.leer),
+        ]:
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def test_manda_nombre_y_tope_de_la_fila_del_modelo(self):
+        self.arrancar(("max_completion_tokens", 128000))
+        f = _facet_ada(key="thot", provider_id="openai", model="gpt-5.6-terra",
+                       base_url="https://api.openai.com/v1")
+        await self.executor._invoke_http_openai_compat(f, "hola", 10)
+        body = self.cap.bodies[0]
+        self.assertEqual(body["max_completion_tokens"], 128000)
+        self.assertNotIn("max_tokens", body)
+        self.leer.assert_awaited_once_with("openai", "gpt-5.6-terra")
+
+    async def test_sin_contrato_no_despacha_y_sube_el_error_con_el_update(self):
+        import contrato_dispatch as cd_jacobs
+        self.arrancar(("max_tokens", None))
+        with self.assertRaises(cd_jacobs.ModelDispatchConfigError) as ctx:
+            await self.executor._invoke_http_openai_compat(_facet_ada(), "hola", 10)
+        self.assertEqual(self.cap.bodies, [])
+        self.assertIn("UPDATE model SET max_output_tokens", str(ctx.exception))
+
+
+class PlanSinModeloLiteralTest(unittest.TestCase):
+    """Tripwire: jacobs/plan.py no nombra ningún modelo en un string (el
+    modelo sale del binding). AST: los comentarios no cuentan."""
+
+    import re as _re
+    PATRON = _re.compile(r"\b(glm|gpt|deepseek|kimi|gemini|claude|qwen|llama|sonnet|opus|haiku)[-:.]?[a-z]*[-:.]?\d")
+
+    def _literales(self, fuente: str) -> list[str]:
+        import ast
+        return [n.value for n in ast.walk(ast.parse(fuente))
+                if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                and self.PATRON.search(n.value.lower())]
+
+    def test_plan_py_no_tiene_nombres_de_modelo_literales(self):
+        from pathlib import Path
+        fuente = (Path(__file__).resolve().parents[1] / "jacobs" / "plan.py").read_text(encoding="utf-8")
+        self.assertEqual(self._literales(fuente), [])
+
+    def test_el_detector_ve_un_modelo_literal(self):
+        self.assertEqual(len(self._literales('A = "glm-5.2"\nB = "gpt-5.6-terra"\nC = "qwen3:14b"\n')), 3)
+        self.assertEqual(self._literales('A = "kimi (coding)"\n# "glm-5.2" en comentario\n'), [])
 
 
 class ModuloUnicoTest(unittest.TestCase):
