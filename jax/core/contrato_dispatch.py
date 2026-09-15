@@ -9,8 +9,9 @@ de `model` del modelo QUE SE DESPACHA, con la MISMA semántica que la Mesa web.
 
 ESPEJO (ronda 2 de PR-K). El bloque entre las marcas "INICIO/FIN DEL BLOQUE
 VERBATIM" es copia EXACTA de jax-platform `backend/contrato_dispatch.py`
-(master e05c5cc): `ModelDispatchConfigError`, `_MAX_TOKENS_PARAM_NAMES`,
-`_max_tokens_field`, `_max_output_tokens_value`, `faltantes_del_contrato` y
+(la de PR-L, ed538b5, que se mergea antes que PR-K): `ModelDispatchConfigError`,
+`_MAX_TOKENS_PARAM_NAMES`, `_MAX_OUTPUT_TOKENS_TOPE_COLUMNA`, `_max_tokens_field`,
+`_max_output_tokens_value`, `faltantes_del_contrato`, `errores_del_contrato` y
 `TRANSPORTS_CON_CONTRATO_DE_DISPATCH`. Lo compara `scripts/check_mirror_sync.py`
 (familia `contrato_dispatch`). Se decide por TRANSPORTE, como allá. Lo de
 abajo del bloque es propio de jax: la lectura de la fila y el fragmento del
@@ -44,7 +45,7 @@ except ImportError:
     # REPL (PYTHONPATH=. desde la raíz del repo).
     from jax.core.facet_resolver import _db_conn
 
-# ---- INICIO DEL BLOQUE VERBATIM de jax-platform backend/contrato_dispatch.py (e05c5cc) ----
+# ---- INICIO DEL BLOQUE VERBATIM de jax-platform backend/contrato_dispatch.py (PR-L ed538b5; antes e05c5cc) ----
 import logging
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,12 @@ class ModelDispatchConfigError(RuntimeError):
 # que un valor imposible en la DB (ej. una migración a mano que se saltó el
 # ENUM) no termine armando una clave arbitraria en el JSON que va a la API.
 _MAX_TOKENS_PARAM_NAMES = ("max_tokens", "max_completion_tokens")
+
+# Tope superior de max_output_tokens: model.max_output_tokens es INT con signo
+# (db/migrations.py). Un valor mayor pasaba el validador y reventaba el UPDATE
+# con DataError 1264 (un 500) al declararlo desde el admin (PR-L ronda 2). Mismo
+# criterio que el ENUM de arriba: el validador conoce el límite de la columna.
+_MAX_OUTPUT_TOKENS_TOPE_COLUMNA = 2**31 - 1
 
 # El límite de salida se manda SIEMPRE explícito: sin él, un modelo de
 # razonamiento (reasoning_content compitiendo por el mismo budget que content)
@@ -170,6 +177,12 @@ def _max_output_tokens_value(model: str, max_output_tokens: int | None) -> int:
             f"entero positivo. Corregí la fila de `model` — no se manda un límite "
             f"inválido a la API."
         )
+    if max_output_tokens > _MAX_OUTPUT_TOKENS_TOPE_COLUMNA:
+        raise ModelDispatchConfigError(
+            f"modelo '{model}': max_output_tokens={max_output_tokens!r} no cabe en "
+            f"model.max_output_tokens (INT, máximo {_MAX_OUTPUT_TOKENS_TOPE_COLUMNA}). "
+            f"Ningún proveedor documenta un tope así: revisá el valor."
+        )
     return max_output_tokens
 
 
@@ -188,6 +201,18 @@ def faltantes_del_contrato(
     una vez todo lo que falta sembrar."""
     if transport not in TRANSPORTS_CON_CONTRATO_DE_DISPATCH:
         return []
+    return errores_del_contrato(model, max_tokens_param, max_output_tokens)
+
+
+def errores_del_contrato(
+    model: str, max_tokens_param, max_output_tokens,
+) -> list[tuple[str, ModelDispatchConfigError]]:
+    """Los dos validadores del dispatch sobre un par (param, tope), SIN mirar
+    el transporte: `(columna, error)` por cada uno que levantaría. Lo usan
+    faltantes_del_contrato (el guard, que primero decide si el transporte lo
+    lee) y PUT /api/admin/models/{id}/contrato-dispatch (PR-L), que declara
+    el contrato de una fila y tiene que aceptar exactamente lo que el
+    dispatch acepta."""
     errores = []
     try:
         _max_tokens_field(model, max_tokens_param)

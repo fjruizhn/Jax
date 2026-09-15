@@ -584,6 +584,150 @@ class ModoPesadoTest(unittest.TestCase):
         self.assertTrue(modo["modelo"])
 
 
+# ---------------------------------------------------------------------------
+# Ronda 3
+# ---------------------------------------------------------------------------
+
+# provider.base_url REAL de producción (leído por el controller el 2026-09-14,
+# solo lectura). Ollama trae '/v1' (camino OpenAI-compatible): un camino que
+# armara el endpoint NATIVO pegándole /api/chat daría /v1/api/chat, que no existe.
+_BASE_URL_PROD = {
+    "deepseek": "https://api.deepseek.com/v1",
+    "moonshot": "https://api.moonshot.ai/v1",
+    "openai": "https://api.openai.com/v1",
+    "zhipu": "https://api.z.ai/api/paas/v4",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta",
+    "ollama": "http://localhost:11434/v1",
+}
+
+
+class TopeDeColumnaDePRLTest(_Base):
+    """N1: el bloque verbatim es el de PR-L (tope de la columna INT)."""
+
+    async def test_un_tope_mayor_que_la_columna_int_falla(self):
+        self.arrancar(("max_tokens", 2 ** 31))
+        with self.assertRaises(cd.ModelDispatchConfigError):
+            await cd.limite_de_salida("http_openai_compat", "deepseek", "m")
+        self.assertEqual(cd._MAX_OUTPUT_TOKENS_TOPE_COLUMNA, 2 ** 31 - 1)
+
+
+class ClasificadorDelRouterTest(unittest.IsolatedAsyncioTestCase):
+    """N2b: el clasificador del REPL nunca lanza, pero un contrato roto ya no
+    se traga en silencio: WARNING con el motivo."""
+
+    def _router(self, error):
+        from jax.core.router import Router
+        clasificador = AsyncMock()
+        clasificador.invoke = AsyncMock(side_effect=error)
+        return Router(classifier=clasificador)
+
+    async def test_contrato_roto_deja_warning_con_el_update(self):
+        err = base.DispatchConfigMuscleError(
+            "[jax_local] dispatch abortado: modelo 'q': UPDATE model SET max_output_tokens=<tope>")
+        with self.assertLogs("jax.router", level="WARNING") as logs:
+            self.assertIsNone(await self._router(err)._classify("hola"))
+        self.assertIn("UPDATE model SET max_output_tokens", "\n".join(logs.output))
+
+    async def test_otra_falla_sigue_cayendo_al_default_sin_ruido(self):
+        with self.assertNoLogs("jax.router", level="WARNING"):
+            self.assertIsNone(await self._router(RuntimeError("red caida"))._classify("hola"))
+
+
+class UrlRealPorCaminoTest(_Base):
+    """N4: con la provider.base_url de producción, cada camino llama al
+    endpoint que corresponde y el parámetro del límite sigue a ESE endpoint."""
+
+    def test_repl_http_arma_chat_completions_desde_la_base_url_real(self):
+        from jax.core.registro_facetas import aplicar_registro
+        for provider_id, clave in (("deepseek", "deepseek"), ("moonshot", "kimi"),
+                                   ("openai", "openai"), ("zhipu", "zhipu")):
+            with self.subTest(provider_id):
+                cfg = {"personalities": {"f": {"type": "http", "provider": "x", "model_default": "m",
+                                               "models_allowed": ["m"]}}}
+                aplicar_registro(cfg, {"f": {"model": "m", "models_allowed": ["m"],
+                                             "transport": "http_openai_compat",
+                                             "provider_modelo": provider_id,
+                                             "base_url_modelo": _BASE_URL_PROD[provider_id]}})
+                self.assertEqual(cfg["personalities"]["f"]["api_url"],
+                                 _BASE_URL_PROD[provider_id] + "/chat/completions")
+                self.assertEqual(cfg["personalities"]["f"]["provider"], clave)
+
+    async def test_repl_gemini_arma_generate_content_desde_la_base_url_real(self):
+        from jax.core.main import build_muscles
+        from jax.core.registro_facetas import aplicar_registro
+        self.arrancar(("max_tokens", 1))
+        cfg = _cfg_repl({"hipatia": {"type": "http", "provider": "gemini", "model_default": "g",
+                                     "models_allowed": ["g"], "system_prompt": "s"}})
+        aplicar_registro(cfg, {"hipatia": {"model": "gemini-x", "models_allowed": ["gemini-x"],
+                                           "transport": "http_gemini", "provider_modelo": "gemini",
+                                           "base_url_modelo": _BASE_URL_PROD["gemini"]}})
+        await build_muscles(cfg)["hipatia"].invoke("hola")
+        self.assertTrue(self.cap.urls[0].startswith(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent?key="),
+            self.cap.urls[0])
+        self.assertNotIn("max_tokens", self.cap.bodies[0])
+
+    async def test_repl_ollama_usa_el_endpoint_nativo_del_toml_y_num_predict(self):
+        from jax.core.main import build_muscles
+        from jax.core.registro_facetas import aplicar_registro
+        self.arrancar((None, 262144))
+        nativo = "http://localhost:11434/api/chat"
+        cfg = _cfg_repl({"jax_local": {"type": "ollama", "provider": "ollama", "model_default": "q",
+                                       "models_allowed": ["q"], "system_prompt": "s", "api_url": nativo}})
+        aplicar_registro(cfg, {"jax_local": {"model": "qwen-x", "models_allowed": ["qwen-x"],
+                                             "transport": "ollama", "provider_modelo": "ollama",
+                                             "base_url_modelo": _BASE_URL_PROD["ollama"]}})
+        await build_muscles(cfg)["jax_local"].invoke("hola")
+        self.assertEqual(self.cap.urls, [nativo])
+        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 262144})
+        self.assertNotIn("max_tokens", self.cap.bodies[0])
+
+
+class UrlRealJacobsYMotorTest(unittest.IsolatedAsyncioTestCase):
+    """N4 en los caminos de Jacobs y del Motor Registry. Reusa el arranque de
+    JacobsOllamaNumPredictTest sin heredar (y re-correr) sus tests."""
+
+    arrancar = JacobsOllamaNumPredictTest.arrancar
+
+    def _local_prod(self):
+        return _facet_ada(key="jax_local", provider_id="ollama", model="qwen-x", transport="ollama",
+                          base_url=_BASE_URL_PROD["ollama"], credential="")
+
+    async def test_invoke_ollama_no_arma_el_nativo_desde_la_base_url(self):
+        self.arrancar((None, 262144))
+        await self.executor._invoke_ollama(self._local_prod(), "hola", 10)
+        self.assertEqual(self.cap.urls, [self.executor.OLLAMA_URL])
+        self.assertTrue(self.cap.urls[0].endswith("/api/chat") and "/v1/" not in self.cap.urls[0])
+        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 262144})
+
+    async def test_llm_plan_no_arma_el_nativo_desde_la_base_url(self):
+        from jacobs import plan
+        with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local_prod())):
+            self.arrancar((None, 262144))
+            await plan.PlanBuilder()._llm_plan("o", 3)
+        self.assertEqual(self.cap.urls, [plan.OLLAMA_URL])
+        self.assertNotIn("/v1/", self.cap.urls[0])
+        self.assertIn("num_predict", self.cap.bodies[0]["options"])
+
+    async def test_motor_ollama_va_por_v1_chat_completions_con_max_tokens(self):
+        from motor_registry import worker
+        from motor_registry.catalog import MotorCatalog
+        self.arrancar((None, 262144))
+        entry = MotorCatalog({"motors": {"jax_local": {
+            "enabled": True, "provider": "ollama", "transport": "ollama", "provider_id": "ollama",
+            "api_key_env": "", "api_url": _BASE_URL_PROD["ollama"], "model": "qwen-x",
+            "max_context_tokens": 0, "sandbox_only": True, "default_timeout_seconds": 60,
+            "supports_reasoning": False, "reasoning_default_visibility": "none", "max_tokens": 0,
+        }}, "capabilities": {}}).get_motor("jax_local")
+        limite, _ = await worker._limite_del_motor(entry)
+        await worker._call_http_openai_compat(
+            api_url=entry.api_url, model=entry.model, api_key="",
+            messages=[{"role": "user", "content": "x"}], timeout=5, limite=limite)
+        self.assertEqual(self.cap.urls, ["http://localhost:11434/v1/chat/completions"])
+        self.assertEqual(self.cap.bodies[0]["max_tokens"], 262144)
+        self.assertNotIn("options", self.cap.bodies[0])
+
+
 class ModuloUnicoTest(unittest.TestCase):
     def test_las_manos_lo_ve_por_symlink_al_mismo_archivo(self):
         from pathlib import Path

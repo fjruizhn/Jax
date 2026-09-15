@@ -59,8 +59,13 @@ class MotorEntry:
     # Bug real 2026-08-10: sin este limite explicito, un motor de
     # razonamiento puede gastar todo el completion budget en
     # reasoning_content y dejar `content` cortado a mitad de palabra —
-    # reproducido en vivo contra la API real de Moonshot. 0 = no mandar
-    # max_tokens (compat con motores sin este campo en config.toml).
+    # reproducido en vivo contra la API real de Moonshot.
+    # PR-K ronda 2/3 (2026-09-14): ya NO es "el límite que se manda". El
+    # nombre y el tope salen del contrato de la fila de `model`
+    # (worker._limite_del_motor, jax/core/contrato_dispatch.py); este campo
+    # es un PRESUPUESTO por llamada y se manda el menor de los dos. 0 = sin
+    # presupuesto propio: se manda el tope del catálogo, no "nada" (thot, por
+    # ejemplo, pasa a mandar max_completion_tokens=128000).
     max_tokens: int = 0
     transport: str = "http_openai_compat"
     model_ref: int = 0

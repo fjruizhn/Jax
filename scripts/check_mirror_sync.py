@@ -298,12 +298,16 @@ FAMILIAS = (
             "TRANSPORTS_CON_CONTRATO_DE_DISPATCH",
             "ModelDispatchConfigError",
             "_MAX_TOKENS_PARAM_NAMES",
+            "_MAX_OUTPUT_TOKENS_TOPE_COLUMNA",
             "_max_tokens_field",
             "_max_output_tokens_value",
             "faltantes_del_contrato",
+            "errores_del_contrato",
         ),
-        nota="Canonico de hecho: jax-platform backend/contrato_dispatch.py (PR-J); "
-             "jax copia el bloque verbatim (PR-K ronda 2, 2026-09-14). Mismo "
+        nota="Canonico de hecho: jax-platform backend/contrato_dispatch.py (PR-J, "
+             "tope de columna y errores_del_contrato de PR-L); jax copia el bloque "
+             "verbatim (PR-K rondas 2 y 3, 2026-09-14). ORDEN DE MERGE: PR-L antes "
+             "que PR-K -- contra un jax-platform sin PR-L esta familia da drift. Mismo "
              "costo que las demas familias: un arreglo en una copia y no en la "
              "otra aparece aca como drift.",
     ),

@@ -718,8 +718,17 @@ jobs:
           #   las_manos/_worker_max_tokens_test.py + _worker_tool_loop_test.py (+36:
           #   ningun job los corria; se les inyecta el contrato como al resto).
           #   39 vistos en rojo contra el codigo de la ronda 1; 5 mutaciones rojas.
-          grep -qE "^276 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 276 tests CORRIDOS."; exit 1; }
+          # 276 -> 285 el 2026-09-14 (PR-K ronda 3): test_contrato_dispatch_repl_ada.py
+          #   (+9) -- el bloque verbatim es el de PR-L (tope de la columna INT); el
+          #   clasificador del router deja WARNING con el motivo de un contrato roto
+          #   (y una falla de red sigue sin ruido); con la provider.base_url REAL de
+          #   produccion cada camino llama a su endpoint (REPL http y gemini, Ollama
+          #   nativo /api/chat con num_predict en REPL/executor/plan, Motor Registry
+          #   por /v1/chat/completions con max_tokens) -- nunca /v1/api/chat. 2 vistos
+          #   en rojo contra la ronda 2; los de URL fijan el comportamiento correcto
+          #   de hoy y se validaron por mutacion (armar el nativo desde base_url).
+          grep -qE "^285 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 285 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
