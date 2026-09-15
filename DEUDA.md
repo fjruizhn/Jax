@@ -467,7 +467,18 @@ tabla de auditoría creada, qwen NULL/262144, jekyll 200, admin 200, frontend `i
   servicios recargaron sus cachés una vez (sin cambio de datos; health 200, journal limpio). Arnés
   arreglado y verificado; la barrera de los briefs ahora incluye el sello (memoria
   `feedback-brief-barrera-db-produccion`).
-- **Pendiente con fecha — etapa 5 de admin usuarios (baja lógica):** `credential_audit.performed_by`,
+- **CERRADO 2026-09-15 por la etapa 5 (jax-platform#83 → `a703c67`).**
+  - La baja lógica (`POST /users/{id}/baja`) reemplaza al `DELETE` en duro, que ahora responde 405.
+  - Es un UPDATE de columnas que no son clave y no cambia `user_id`. Por eso ninguna FK interviene.
+    Verificado con un SELECT de solo lectura en `information_schema` de producción:
+    - `credential.created_by`, `credential_audit.performed_by`, `facet_binding.approved_by` y
+      `model_binding_proposal.decided_by` tienen `ON UPDATE RESTRICT` y `ON DELETE RESTRICT`.
+    - `password_reset_tokens` y `user_api_keys` tienen `ON DELETE CASCADE`.
+  - Ninguna auditoría queda bloqueada, y el historial de un actor dado de baja se sigue resolviendo
+    (`user_audit` hace LEFT JOIN por `user_id`).
+
+  Texto original:
+  **Pendiente con fecha — etapa 5 de admin usuarios (baja lógica):** `credential_audit.performed_by`,
   `facet_binding.approved_by` y `model_binding_proposal.decided_by` tienen FK a `jax_users`: el
   `DELETE /api/admin/users/{id}` en duro de hoy da 500 para un usuario con historia. La etapa 5 reemplaza
   el borrado por una baja; al ejecutarla, verificar que ninguna auditoría quede bloqueada.
@@ -486,6 +497,89 @@ oficial de DeepSeek, leída el 2026-09-14; decisión de Fernando: el máximo doc
 jekyll 200 a las 19:50:32, `facet_health_event` ok. **Siguen en esta sesión:** PR-L (camino admin auditado para
 declarar el contrato de un modelo sin SQL a mano, y rastro del rechazo) y PR-K (el REPL `jax/muscles/base.py`
 y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálogo).
+
+## Cerrado — admin usuarios etapa 5: editar el correo y dar de baja con ConfirmacionSuma (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 12:14 CST.** jax-platform#83 → `a703c67`. Plan:
+`docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-5-editar-baja.md`. Spec: §2, §3.2 y §3.5.
+Frontend servido `index-d04xNGjp.js`, con md5 igual al build (`3916bf45…`). Backup
+`axioma-ia.io.backup-pre-usuarios-etapa5-20260915-121449`, verificado idéntico antes del rsync.
+Esquema verificado después con un SELECT: `email varchar(320)` con índice UNIQUE, `deleted_at
+datetime`, `deleted_by int(11)`; `jax_users` sigue con 2 filas. Health 200, journal sin errores, cwd
+= checkout con el commit. Sondas sin token: `POST /baja` pasó de 405 a 401 y `DELETE` de 401 a 405.
+
+- **Incidente del backup previo (HISTORIA).** Antes del reinicio que aplica la migración se hizo el
+  dump `~/backups/usuarios-pre-etapa5-20260915-121445.sql` (`jax_users`, `password_reset_tokens` y
+  `user_admin_audit`).
+  - El chequeo de filas del script informó `dump=0 DISTINTO` y el deploy **siguió igual**: imprimía,
+    no cortaba. El regex esperaba `VALUES (` en la misma línea y mariadb-dump escribe una fila por
+    línea.
+  - Verificado después: el dump estaba completo y cuadra fila por fila con la DB (2 = 2, 1 = 1,
+    4 = 4). La restauración no se probó.
+  - La migración solo agrega y ensancha columnas, así que no se perdió nada.
+  - Arreglo: el script cuenta bien las filas y **aborta** si no cuadran. Un chequeo que no corta no
+    es un gate.
+
+Qué entra:
+- **"Eliminar" pasa a ser "Dar de baja"**, detrás de **ConfirmacionSuma** ("Resolvé a + b = ?"). El
+  botón solo se habilita con la respuesta correcta. El componente está construido sobre `Dialogo` y
+  sirve para cualquier borrado futuro.
+- **La baja no borra la fila.** Deja `status='deleted'`, `deleted_at`/`deleted_by` y
+  `token_version + 1`. Además:
+  - Se cortan WS/SSE después del commit y se borran los enlaces de recuperación pendientes.
+  - El correo se renombra (`<correo>#baja-<id>-<fecha>`), así que la dirección queda libre. El
+    original queda en la auditoría.
+  - El historial se conserva.
+- **Transacción de la baja.** Corre en `transaccion(AISLAMIENTO_ADMIN)`, con el orden fijo de la
+  etapa 3. Nadie se da de baja a sí mismo, y no se puede dar de baja al último superadmin activo.
+- **`DELETE /users/{id}` responde 405.** `GET /users` excluye las bajas, y el enlace de recuperación
+  a una baja responde 404.
+- **Editar el correo** (PUT), con validación y códigos estables. El alta también devuelve códigos
+  estables: `email_invalido`, `rol_invalido` y `email_ya_existe`. Un correo repetido nunca da 500,
+  ni siquiera cuando la carrera pasa la comprobación previa.
+- **Carreras cerradas en esta etapa:**
+  - **"Enviar enlace" contra la baja (U31).** Bloquea al usuario por PK y crea el token en la misma
+    transacción. El SMTP se envía después del commit.
+  - **El forgot-password público (U31, U33).** Vuelve a bloquear por PK, nunca por el índice de
+    email. Corre en READ COMMITTED: en REPEATABLE READ, el DELETE de tokens por el índice no único
+    `user_id` tomaba gap locks, y dos pedidos de usuarios distintos terminaban en 1213.
+  - **El dominio del correo solo admite `[A-Za-z0-9-]` (U32).** Antes aceptaba `#`, y alguien podía
+    ocupar de antemano el nombre de baja de otro usuario.
+- **Frontend:**
+  - un modal a la vez;
+  - después de la baja, el foco va a "+ Nuevo usuario" (U35);
+  - la barra muestra al instante el correo propio editado;
+  - i18n es/en completo, y se borraron las claves muertas.
+
+**Antes de la baja se verificó, solo con lecturas contra producción:**
+- Todas las FK a `jax_users.user_id` son `ON UPDATE RESTRICT`, y la baja no cambia `user_id`, así
+  que ninguna auditoría queda bloqueada.
+- `user_api_keys` guarda credenciales de proveedores, no sirve para autenticar.
+- Login, sesión, refresh y forgot-password rechazan cualquier cuenta que no esté activa.
+
+**Carga medida ANTES del merge** (gate U29; arnés pytest aislado sobre `8c34800`, ASGI en proceso):
+- Con c=10: baja p95 12 ms (~1000 rps), PUT con email p95 11 ms, y la lista (131 usuarios, 100 de
+  ellos dados de baja) p95 23 ms.
+- Dos superadmins que se dan de baja mutuamente: 20 de 20 terminan con un 200 y un 409
+  `ultimo_superadmin`.
+- Toda carrera tuvo un solo ganador. 0 errores 5xx y 0 deadlocks.
+- Saturación en ~1000 rps desde c≈10, por diseño: toda escritura de admin bloquea primero el conjunto
+  de superadmins.
+
+Pruebas: con DB 815 → 845/1; sin DB 369 → 371/475; vitest 315 → 336. Decisiones: Rulings U10-U12,
+U20 y U28-U35 en el ledger.
+
+- **Pendiente con fecha 2026-09-22 (propuesta):** `AdminRepository.jsx` sigue borrando con
+  `window.confirm` + `api.delete`. Pasarlo a ConfirmacionSuma.
+- **Pendiente con fecha 2026-09-22 (propuesta), Ruling U36:** el historial de un usuario dado de
+  baja no se puede abrir desde la UI.
+  - La lista oculta las bajas y es la única entrada al modal de Historial. `GET /users/{id}/audit`
+    sí devuelve esas filas.
+  - No es una regresión: antes, un `DELETE` exitoso también sacaba al usuario de la lista.
+  - Hace falta una vista de "bajas" o un filtro en la lista que permita abrir su historial.
+- **Pendiente con fecha, verificación en vivo de Fernando:** la etapa 5 en claro y en oscuro
+  (ConfirmacionSuma, correo en "Editar", toasts y la barra con el correo propio). Nadie la miró en un
+  navegador todavía.
 
 ## Cerrado — admin usuarios etapa 4: Mi cuenta y enlace de recuperación por admin (2026-09-15)
 
