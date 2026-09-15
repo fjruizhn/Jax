@@ -498,6 +498,62 @@ jekyll 200 a las 19:50:32, `facet_health_event` ok. **Siguen en esta sesión:** 
 declarar el contrato de un modelo sin SQL a mano, y rastro del rechazo) y PR-K (el REPL `jax/muscles/base.py`
 y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálogo).
 
+## Cerrado — pendientes del 2026-09-22 y la fila propia sin auto-acciones (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 17:21 CST.** jax-platform#85 → `a7780a5`, con jax#162 → `e2c4e2d` y jax#163 → `3e1f4f2` desplegados antes. Plan: `docs/superpowers/plans/2026-09-15-pendientes-2026-09-22.md`.
+
+**Despliegue:**
+- Frontend servido: `index-DepcGKgk.js` / `index-CFy-nEeS.css`. El md5 coincide con el del build.
+- Backup `…backup-pre-pendientes-20260915-172147`, verificado idéntico antes del rsync.
+- Dump previo `~/backups/usuarios-pre-pendientes-20260915-172133.sql`, verificado fila por fila (incluye `provider` y `axioma_usage`).
+- **Sí hubo migración:** el ENUM `provider.api_key_transport` suma `header_goog_api_key`, la fila `gemini` pasa a usarlo y se crea el índice `idx_axioma_usage_periodo`. Verificado después del restart.
+- **La sonda de hipatia respondió `ok` después del restart:** Google acepta la cabecera con la key de producción.
+
+Pedido de Fernando (2026-09-15): "escóndelos los dos, y termina los pendientes del 2026-09-22".
+
+- **Fila propia:** Admin → Usuarios ya no muestra "Fijar contraseña" ni "Dar de baja" en la fila del admin logueado. Esto revierte el Ruling F7. El backend los sigue rechazando con 403. El admin cambia su propia contraseña desde Mi cuenta.
+- **CERRADO — AdminRepository con `window.confirm`:**
+  - Borrar un archivo ahora pasa por ConfirmacionSuma.
+  - La vista previa es un `Dialogo`, con #root inert, foco y Escape, y hay un solo modal a la vez.
+  - Si una respuesta tardía llega, no cierra el diálogo de otro archivo.
+  - Queda cero `window.confirm` en `src`.
+- **CERRADO — historial de las bajas (U36):**
+  - `GET /api/admin/users?bajas=true` (solo superadmin) devuelve `email_original`, que es lo que está antes del último `#baja-`, y `deleted_by_email`, que sale de un LEFT JOIN por PK.
+  - El interruptor "Mostrar bajas" muestra esas filas en solo lectura, con la acción Historial.
+  - La lista por defecto no cambió.
+  - Carga a c=10: p95 20,8 ms. Satura entre c=10 y c=25 con 1000 usuarios, por CPU de Python.
+- **CERRADO — endurecer `test_no_fail_open_except`:** _(Task 3; se completa)_. Estado actual:
+  - Regla nueva: todo `except` amplio que no relanza lleva `# fail-soft: <razón>` en la línea del `except`. Loguear no exime.
+  - Se auditaron 29 sitios:
+    - 22 fail-soft legítimos, que ahora llevan la marca;
+    - 2 eran ruido y se estrecharon o se quitaron;
+    - 5 eran fail-open reales y se arreglaron con test: `chat.py` import y puerto, `audit.py` ilegible → 503, `models.py` sync ya no responde ok cuando falla.
+  - El escaneo AST quedó en 0 sitios sin marca.
+
+**Pruebas:**
+- Con DB: 923 → 1076/1.
+- Sin DB: 399 → 527.
+- vitest: 404 → 421.
+- Carga (U29) a c=25: `/api/state` p95 127 ms (antes 3288 ms), `/api/pipelines` 28,6 ms, chat con ids inválidos 14,4 ms, `/api/admin/usage` 334 ms el día y 452 ms el mes (antes ~2,7 s).
+
+**Hallazgo:** el test estaba ciego en los worktrees. Salteaba cualquier ruta que contuviera `worktrees`, así que ahí no revisaba nada; CI no se veía afectado. Se arregló en jax-platform y quedó un test guardián.
+
+- **PENDIENTE con fecha 2026-09-22 (propuesta):** la copia del test en `jax/policy/tests` probablemente tiene el mismo punto ciego y no tiene la regla nueva. Hay que llevarle la regla y el guardián con el mismo proceso.
+- **CERRADO — hallazgos de seguridad de la auditoría** (decisión de Fernando del 2026-09-15: se arreglan en la misma rama):
+  - **S1:** la key de Gemini ahora viaja en `x-goog-api-key`, tanto en la plataforma como en jax (jax#162 → `e2c4e2d`, desplegado).
+    - `redactar_secretos` tiene reglas idénticas en los dos repos y aplica "redactar antes de recortar".
+    - Hay un filtro de logs para httpx.
+    - No hubo fuga guardada: 0 de 3061 filas y 0 líneas de journal tenían la key, así que no hubo que rotarla.
+  - **S2:** `/api/state` y `/api/pipelines` devuelven solo lo del dueño.
+    - El índice `idx_jacobs_pipelines_duenio` lo crea jax, que es el dueño de la tabla. Se construye con INPLACE/LOCK=NONE y con la espera de bloqueo acotada.
+  - **S3:** `/api/audit` y `PUT /api/facets/{facet}/status` quedan solo para superadmin.
+- **CERRADO — registro de uso (parcial, por decisión):**
+  - Existe el contador `registros_perdidos`, visible en Admin → Costos.
+  - Los ids se validan antes del LLM.
+  - `/api/admin/usage` ahora es sargable, tiene índice sobre `created_at` y ordena por `SUM(cost_usd)`. Antes, con 102k filas, daba p95 de 2,7 s.
+- **PENDIENTE con fecha 2026-09-29:** cola durable con reintento para `record_usage`, para que no se pierda ninguna fila. Hoy el contador solo muestra la pérdida y se reinicia con cada arranque.
+- **PENDIENTE con fecha 2026-09-22:** llevar a `jax/policy/tests/test_no_fail_open_except.py` la regla nueva ("todo `except` amplio que no relanza lleva marca") y el guardián de cobertura. Hoy solo marca los `except: pass`.
+
 ## Cerrado — admin fija la contraseña, cambio obligatorio y sesión única (2026-09-15)
 
 **VERDAD OPERACIONAL 2026-09-15 14:24 CST.** jax-platform#84 → `0b81ad7`. Plan:
@@ -553,9 +609,10 @@ y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálo
 - Cada arreglo de concurrencia tiene su test y se vio en rojo por mutación.
 
 **Decisión de UI (Ruling F7):**
-- En la fila del propio admin, los botones de auto-acción ("Fijar contraseña", "Dar de baja") siguen visibles.
-- El backend los rechaza con 403 `auto_accion_prohibida` y un toast traducido.
-- Ocultar solo uno haría la fila incoherente. Si se decide ocultarlos, se ocultan todos juntos.
+- ~~En la fila del propio admin, los botones de auto-acción ("Fijar contraseña", "Dar de baja") siguen visibles.~~
+  **CERRADO 2026-09-15** (jax-platform#85 → `a7780a5`): Fernando decidió esconderlos ("escóndelos los dos"), y se
+  esconden los dos juntos. El backend los sigue rechazando con 403 `auto_accion_prohibida`, como defensa en
+  profundidad. El admin cambia su propia contraseña desde Mi cuenta.
 
 **Límite aceptado:**
 - Si el `POST /auth/logout` vence (a los 5 s) o falla la red, el cliente limpia su estado igual, pero la sesión sigue viva en el servidor.
@@ -563,7 +620,11 @@ y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálo
 - Esa sesión muere en el próximo login, porque ahora cada login invalida las sesiones anteriores.
 
 **Pendientes con fecha:**
-- **2026-09-22 (propuesta):** endurecer `test_no_fail_open_except`. Hoy solo marca `except: pass`; un `except` que asigna un valor por defecto se le escapa.
+- ~~**2026-09-22 (propuesta):** endurecer `test_no_fail_open_except`.~~ **CERRADO 2026-09-15** (jax-platform#85 → `a7780a5`):
+  todo `except` amplio que no relanza lleva `# fail-soft: <razón>`; loguear no exime; las funciones anidadas cuentan;
+  un archivo que no se puede leer es violación. Se auditaron 29 sitios: 22 con marca, 2 eran ruido, 5 eran fail-open
+  reales y se arreglaron. El test estaba ciego en los worktrees (se salteaba toda ruta con `worktrees`): arreglado,
+  con un test guardián de cobertura.
 - **Verificación en vivo de Fernando:**
   - fijar la contraseña a un usuario de prueba;
   - login con la marca: el diálogo no se cierra y se rechaza la misma contraseña;
@@ -642,10 +703,14 @@ Qué entra:
 Pruebas: con DB 815 → 845/1; sin DB 369 → 371/475; vitest 315 → 336. Decisiones: Rulings U10-U12,
 U20 y U28-U35 en el ledger.
 
-- **Pendiente con fecha 2026-09-22 (propuesta):** `AdminRepository.jsx` sigue borrando con
-  `window.confirm` + `api.delete`. Pasarlo a ConfirmacionSuma.
-- **Pendiente con fecha 2026-09-22 (propuesta), Ruling U36:** el historial de un usuario dado de
-  baja no se puede abrir desde la UI.
+- ~~**Pendiente con fecha 2026-09-22 (propuesta):** `AdminRepository.jsx` sigue borrando con
+  `window.confirm` + `api.delete`.~~ **CERRADO 2026-09-15** (jax-platform#85 → `a7780a5`): borra con
+  ConfirmacionSuma, la vista previa es un `Dialogo` con un solo modal a la vez, y no queda ningún
+  `window.confirm` en `src`.
+- ~~**Pendiente con fecha 2026-09-22 (propuesta), Ruling U36:** el historial de un usuario dado de
+  baja no se puede abrir desde la UI.~~ **CERRADO 2026-09-15** (jax-platform#85 → `a7780a5`): el interruptor
+  "Mostrar bajas" lista las bajas en solo lectura, con Historial como única acción, sobre
+  `GET /api/admin/users?bajas=true` (solo superadmin).
   - La lista oculta las bajas y es la única entrada al modal de Historial. `GET /users/{id}/audit`
     sí devuelve esas filas.
   - No es una regresión: antes, un `DELETE` exitoso también sacaba al usuario de la lista.
