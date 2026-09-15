@@ -175,6 +175,8 @@ class SalidaCompletaEnWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.catalog = MotorCatalog(_CFG)
         self._patches = [
             patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")),
+            # PR-K ronda 2: contrato de la fila de `model` (el worker ya no manda motor.max_tokens a secas).
+            patch("contrato_dispatch._leer_contrato", AsyncMock(return_value=("max_tokens", 131072))),
             patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()),
             patch("httpx.AsyncClient.post", AsyncMock(side_effect=AssertionError("llamada de red real en un test"))),
         ]

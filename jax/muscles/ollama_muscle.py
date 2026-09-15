@@ -29,8 +29,9 @@ import asyncio
 
 import httpx
 
+from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from jax.core.model_catalog import record_resolved_version_safe
-from jax.muscles.base import Muscle, MuscleInvocationError, MuscleTimeoutError
+from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocationError, MuscleTimeoutError
 
 # Semaforo de GPU -- UNA inferencia local a la vez DENTRO DE ESTE PROCESO.
 #
@@ -62,6 +63,10 @@ DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
 
 
 class OllamaMuscle(Muscle):
+    # provider_id del catálogo del modelo (lo pone build_muscles desde el
+    # registro); con él se lee el contrato de la fila. PR-K ronda 2 (M3).
+    provider_id: str = ""
+
     def __init__(
         self,
         name: str,
@@ -89,11 +94,19 @@ class OllamaMuscle(Muscle):
             messages.extend(history)
         messages.append({"role": "user", "content": prompt})
 
+        # PR-K ronda 2 (M3): límite de salida de la fila de `model`, como
+        # options.num_predict de /api/chat (doc: github.com/ollama/ollama
+        # docs/api.md). Antes no mandaba ninguno.
+        try:
+            limite = await limite_de_salida("ollama", self.provider_id, model)
+        except ModelDispatchConfigError as e:
+            raise DispatchConfigMuscleError(f"[{self.name}] dispatch abortado: {e}") from e
         payload = {
             "model": model,
             "messages": messages,
             "stream": False,
             "think": False,
+            **limite,
         }
 
         # Una sola inferencia local a la vez. Si la GPU esta ocupada, espera turno.

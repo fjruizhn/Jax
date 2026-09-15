@@ -73,8 +73,11 @@ def test_una_faceta_del_registro_que_no_esta_en_el_toml_no_se_inventa():
 
 
 class _Cursor:
-    def __init__(self, filas, registro):
-        self._filas, self._registro = filas, registro
+    """Devuelve `filas` para la consulta de la lista permitida y `camino` para
+    la del proveedor/URL del modelo (PR-K ronda 2), según el SQL ejecutado."""
+
+    def __init__(self, filas, registro, camino=()):
+        self._filas, self._registro, self._camino = filas, registro, list(camino)
 
     async def __aenter__(self):
         return self
@@ -86,15 +89,17 @@ class _Cursor:
         self._registro.append((sql, params))
 
     async def fetchall(self):
+        if "f.transport" in self._registro[-1][0]:
+            return self._camino
         return self._filas
 
 
 class _Conexion:
-    def __init__(self, filas, registro):
-        self._filas, self._registro, self.cerrada = filas, registro, False
+    def __init__(self, filas, registro, camino=()):
+        self._filas, self._registro, self._camino, self.cerrada = filas, registro, camino, False
 
     def cursor(self):
-        return _Cursor(self._filas, self._registro)
+        return _Cursor(self._filas, self._registro, self._camino)
 
     def close(self):
         self.cerrada = True
@@ -129,7 +134,8 @@ def test_cargar_registro_toma_el_proveedor_del_modelo_asignado_y_filtra_por_esta
     assert registro["hipatia"]["models_allowed"] == ["gemini-2.5-pro", "gemini-3.8-flash"]
     assert registro["jekyll"]["models_allowed"] == ["deepseek-v4-pro"]
     assert registro["hipatia"]["display_name"] == "Hipatia", "los campos del router se conservan"
-    assert len(consultas) == 1
+    # PR-K ronda 2: una 2da consulta trae transporte, proveedor y URL del modelo.
+    assert len(consultas) == 2
     sql, params = consultas[0]
     assert "model_ref" in sql, "el proveedor tiene que salir del modelo asignado"
     assert "provider_id IN" not in sql, "no se filtra por el provider_id del binding"
@@ -164,3 +170,96 @@ def test_si_el_catalogo_no_lista_el_asignado_igual_queda_permitido():
     cfg = copy.deepcopy(_CFG)
     aplicar_registro(cfg, {"hipatia": {"model": "gemini-3.8-flash", "models_allowed": ["gemini-2.5-pro"]}})
     assert "gemini-3.8-flash" in cfg["personalities"]["hipatia"]["models_allowed"]
+
+
+# ---------------------------------------------------------------------------
+# PR-K ronda 2 (I1): el proveedor, la URL y el camino salen del MODELO del
+# binding, no de config.toml.
+# ---------------------------------------------------------------------------
+
+_HTTP = {"type": "http", "provider": "deepseek", "model_default": "deepseek-flash",
+         "models_allowed": ["deepseek-flash"]}
+
+
+def _registro(**kw):
+    base = {"model": "m-x", "models_allowed": ["m-x"], "transport": "http_openai_compat",
+            "provider_modelo": "openai", "base_url_modelo": "https://api.openai.example/v1"}
+    base.update(kw)
+    return {"jekyll": base}
+
+
+def test_el_proveedor_y_la_url_salen_del_modelo_del_binding():
+    cfg = {"personalities": {"jekyll": dict(_HTTP)}}
+    aplicar_registro(cfg, _registro())
+    p = cfg["personalities"]["jekyll"]
+    assert p["provider"] == "openai", "el proveedor del TOML no puede ganarle al del modelo"
+    assert p["api_url"] == "https://api.openai.example/v1/chat/completions"
+    assert "dispatch_bloqueado" not in p
+
+
+def test_moonshot_se_mapea_a_la_clave_http_kimi():
+    cfg = {"personalities": {"jekyll": dict(_HTTP)}}
+    aplicar_registro(cfg, _registro(provider_modelo="moonshot", base_url_modelo="https://m.example/v1"))
+    assert cfg["personalities"]["jekyll"]["provider"] == "kimi"
+
+
+def test_gemini_recibe_la_url_base_del_catalogo():
+    cfg = {"personalities": {"jekyll": dict(_HTTP)}}
+    aplicar_registro(cfg, _registro(transport="http_gemini", provider_modelo="gemini",
+                                    base_url_modelo="https://g.example/v1beta"))
+    assert cfg["personalities"]["jekyll"]["provider"] == "gemini"
+    assert cfg["personalities"]["jekyll"]["api_url"] == "https://g.example/v1beta"
+
+
+def test_transporte_distinto_del_type_del_toml_bloquea():
+    cfg = {"personalities": {"jekyll": dict(_HTTP)}}
+    aplicar_registro(cfg, _registro(transport="subprocess", provider_modelo="anthropic", base_url_modelo=None))
+    p = cfg["personalities"]["jekyll"]
+    assert "subprocess" in p["dispatch_bloqueado"]
+    assert p["provider"] == "deepseek", "bloqueada: no se toca el proveedor"
+
+
+def test_proveedor_sin_camino_http_o_gemini_por_openai_compat_bloquea():
+    cfg = {"personalities": {"jekyll": dict(_HTTP)}}
+    aplicar_registro(cfg, _registro(provider_modelo="gemini", base_url_modelo="https://g.example"))
+    assert "no sabe despachar" in cfg["personalities"]["jekyll"]["dispatch_bloqueado"]
+
+
+def test_proveedor_sin_base_url_bloquea():
+    cfg = {"personalities": {"jekyll": dict(_HTTP)}}
+    aplicar_registro(cfg, _registro(base_url_modelo=None))
+    assert "sin URL" in cfg["personalities"]["jekyll"]["dispatch_bloqueado"]
+
+
+def test_ollama_recibe_el_provider_id_del_modelo():
+    cfg = {"personalities": {"jax_local": {"type": "ollama", "provider": "ollama",
+                                           "model_default": "q", "models_allowed": ["q"]}}}
+    aplicar_registro(cfg, {"jax_local": {"model": "q2", "models_allowed": ["q2"], "transport": "ollama",
+                                         "provider_modelo": "ollama", "base_url_modelo": "http://l/v1"}})
+    assert cfg["personalities"]["jax_local"]["provider_id"] == "ollama"
+    assert "dispatch_bloqueado" not in cfg["personalities"]["jax_local"]
+
+
+def test_cargar_registro_trae_transporte_proveedor_y_url_del_modelo(monkeypatch):
+    import asyncio
+    from jax.core import registro_facetas
+
+    async def registro_falso():
+        return {"jekyll": {"model": "deepseek-flash", "provider_id": "otro",
+                           "display_name": "J", "icon": "", "auto_selectable": True}}
+
+    consultas = []
+    conexion = _Conexion([("jekyll", "deepseek-flash")], consultas,
+                         camino=[("jekyll", "http_openai_compat", "deepseek", "https://api.deepseek.com/v1")])
+
+    async def conexion_falsa():
+        return conexion
+
+    monkeypatch.setattr(registro_facetas, "load_facet_registry", registro_falso)
+    monkeypatch.setattr(registro_facetas, "_db_conn", conexion_falsa)
+    registro = asyncio.run(registro_facetas.cargar_registro())
+    assert registro["jekyll"]["transport"] == "http_openai_compat"
+    assert registro["jekyll"]["provider_modelo"] == "deepseek"
+    assert registro["jekyll"]["base_url_modelo"] == "https://api.deepseek.com/v1"
+    sql = consultas[1][0]
+    assert "asignado.provider_id" in sql and "b.provider_id" not in sql, "el proveedor sale del MODELO"

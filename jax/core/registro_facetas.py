@@ -32,9 +32,26 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 from jax.core.facet_resolver import _db_conn, load_facet_registry
+from jax.muscles.base import _PROVIDER_ID_MAP
 
 # Estados del catálogo que se pueden invocar; deprecated/gone no.
 ESTADOS_INVOCABLES = ("available", "degraded")
+
+# PR-K ronda 2 (I1): qué `type` de config.toml sirve a cada transporte del
+# catálogo (facet.transport). Un binding cuyo transporte no es el camino que
+# arma el TOML no se despacha: se bloquea con el motivo.
+TIPO_POR_TRANSPORTE = {
+    "http_openai_compat": "http",
+    "http_gemini": "http",
+    "ollama": "ollama",
+    "subprocess": "subprocess",
+}
+
+# provider_id del catálogo -> clave de proveedor del HttpMuscle. Derivado de
+# base._PROVIDER_ID_MAP (una sola tabla), primera clave de cada proveedor.
+CLAVE_HTTP_POR_PROVIDER: dict[str, str] = {}
+for _clave, _provider_id in _PROVIDER_ID_MAP.items():
+    CLAVE_HTTP_POR_PROVIDER.setdefault(_provider_id, _clave)
 
 
 async def cargar_registro() -> dict:
@@ -61,6 +78,22 @@ async def cargar_registro() -> dict:
                 )
                 for clave, modelo in await cur.fetchall():
                     permitidos.setdefault(clave, []).append(modelo)
+                # PR-K ronda 2 (I1): transporte de la faceta y proveedor + URL
+                # base del MODELO asignado (no de facet_binding.provider_id, que
+                # approve puede dejar desalineado). Todo por claves primarias.
+                await cur.execute(
+                    "SELECT b.facet_key, f.transport, asignado.provider_id, p.base_url "
+                    "FROM facet_binding b "
+                    "JOIN facet f ON f.`key` = b.facet_key "
+                    "JOIN model asignado ON asignado.id = b.model_ref "
+                    "JOIN provider p ON p.id = asignado.provider_id "
+                    f"WHERE b.role = 'primary' AND b.facet_key IN ({claves})",
+                    tuple(registro.keys()),
+                )
+                for clave, transporte, provider_id, base_url in await cur.fetchall():
+                    registro[clave].update(
+                        transport=transporte, provider_modelo=provider_id, base_url_modelo=base_url,
+                    )
         finally:
             conn.close()
     # Orden en Python y no en SQL: un ORDER BY acá daba Using temporary +
@@ -84,3 +117,51 @@ def aplicar_registro(cfg: dict, registro: dict) -> None:
             permitidos.insert(0, info["model"])
         personalidad["model_default"] = info["model"]
         personalidad["models_allowed"] = permitidos
+        motivo = _camino_del_modelo(clave, personalidad, info)
+        if motivo:
+            personalidad["dispatch_bloqueado"] = motivo
+
+
+def _camino_del_modelo(clave: str, personalidad: dict, info: dict) -> str:
+    """PR-K ronda 2 (I1): el proveedor, la URL y el camino salen del MODELO
+    del binding, no de config.toml. Pone en `personalidad` el proveedor y la
+    URL de ese modelo, o devuelve el motivo por el que la faceta NO puede
+    despachar (quedará bloqueada con ese error visible). Sin datos de
+    transporte en el registro (tests viejos, registro sin la 2da consulta) no
+    toca nada."""
+    transporte = info.get("transport")
+    if transporte is None:
+        return ""
+    provider_id = info.get("provider_modelo")
+    base_url = info.get("base_url_modelo")
+    tipo = personalidad.get("type")
+    if TIPO_POR_TRANSPORTE.get(transporte) != tipo:
+        return (
+            f"el binding de '{clave}' usa el transporte '{transporte}' (modelo "
+            f"'{info['model']}' de '{provider_id}') y config.toml la arma como "
+            f"type='{tipo}': no se despacha por un camino que no es el del modelo. "
+            f"Corregí el binding o el type de la faceta en config.toml."
+        )
+    if tipo == "ollama":
+        personalidad["provider_id"] = provider_id
+        return ""
+    if tipo != "http":
+        return ""
+    clave_http = CLAVE_HTTP_POR_PROVIDER.get(provider_id)
+    if clave_http is None or (transporte == "http_gemini") != (provider_id == "gemini"):
+        return (
+            f"el modelo '{info['model']}' de '{clave}' es del proveedor "
+            f"'{provider_id}' (transporte '{transporte}'), que el REPL no sabe "
+            f"despachar por HTTP: no se lo manda a la URL de otro proveedor."
+        )
+    if not base_url:
+        return (
+            f"el proveedor '{provider_id}' del modelo de '{clave}' no tiene "
+            f"base_url en el catálogo (tabla provider): sin URL no se despacha."
+        )
+    personalidad["provider"] = clave_http
+    if transporte == "http_gemini":
+        personalidad["api_url"] = base_url
+    else:
+        personalidad["api_url"] = base_url.rstrip("/") + "/chat/completions"
+    return ""

@@ -19,6 +19,7 @@ from typing import Any
 
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from facet_resolver import resolve_facet, ResolvedFacet, FacetUnavailableError
+from contrato_dispatch import limite_de_salida
 from model_catalog import record_resolved_version_safe
 
 import httpx
@@ -315,7 +316,11 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     if f.persona:
         messages.append({"role": "system", "content": f.persona})
     messages.append({"role": "user", "content": prompt})
-    payload = {"model": f.model, "messages": messages, "stream": False}
+    # PR-K ronda 1: límite de salida con nombre y tope de la fila de `model`
+    # de f.model (jax/core/contrato_dispatch.py). Antes no mandaba ninguno. Sin
+    # contrato, ModelDispatchConfigError sube y el step falla con el UPDATE.
+    payload = {"model": f.model, "messages": messages, "stream": False,
+               **await limite_de_salida(f.transport, f.provider_id, f.model)}
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
@@ -370,10 +375,14 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     mantiene en ~76.7 tok/s con 1, 2 y 3 requests concurrentes y lo unico
     que crece es la espera en cola. Veredicto y que lo reabre:
     docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md"""
+    # PR-K ronda 2 (M3): límite de salida de la fila de `model`, como
+    # options.num_predict de /api/chat (github.com/ollama/ollama docs/api.md).
+    # Antes no mandaba ninguno. Sin contrato, el step falla con el UPDATE.
     payload = {
         "model":    f.model,
         "messages": [{"role": "user", "content": prompt}],
         "stream":   False,
+        **await limite_de_salida(f.transport, f.provider_id, f.model),
     }
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(OLLAMA_URL, json=payload)

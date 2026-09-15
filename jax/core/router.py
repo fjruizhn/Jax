@@ -40,6 +40,10 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+import logging
+from jax.core.contrato_dispatch import ModelDispatchConfigError
+
+logger = logging.getLogger("jax.router")
 
 def _sin_tildes(s: str) -> str:
     """Quita tildes para matching robusto (trae=traé, adios=adiós).
@@ -348,6 +352,13 @@ class Router:
                 if faceta in cleaned:
                     return faceta
             return None  # devolvio algo que no es faceta valida
+        except ModelDispatchConfigError as exc:
+            # PR-K ronda 3 (N2b): un contrato de dispatch roto en la fila del
+            # modelo del clasificador NO es ruido de red: se sigue cayendo al
+            # default (el router nunca lanza), pero con el motivo y el UPDATE
+            # a la vista, no tragado en silencio.
+            logger.warning("clasificador del router sin contrato de dispatch: %s", exc)
+            return None
         except Exception:
             return None  # red caida, timeout, lo que sea -> fallback
 

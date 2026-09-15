@@ -30,6 +30,7 @@ from jax.core.crypto_secrets import decrypt_secret
 from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from jax.core.model_catalog import record_resolved_version_safe
 from jax.core.grounding_sources import build_sources, render_sources_block, resolve_redirects
+from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 
 # provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
 # "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
@@ -82,7 +83,19 @@ class MuscleInvocationError(MuscleError):
     """El musculo respondio error (HTTP != 2xx, salida no parseable, etc.)."""
 
 
+class DispatchConfigMuscleError(MuscleInvocationError, ModelDispatchConfigError):
+    """El catalogo no declara el limite de salida del modelo a despachar
+    (PR-K): no sale ningun request. Es las dos cosas a proposito -- el REPL
+    lo atrapa como MuscleError, y humanizar_error lo reconoce como
+    ModelDispatchConfigError para mostrar el UPDATE entero."""
+
+
 class Muscle(ABC):
+    # PR-K ronda 2 (I1): motivo por el que esta faceta NO puede despachar
+    # (su binding no coincide con el camino que arma config.toml). Lo pone
+    # build_muscles desde registro_facetas.aplicar_registro. Vacío = despacha.
+    dispatch_bloqueado: str = ""
+
     def __init__(
         self,
         name: str,
@@ -128,6 +141,8 @@ class Muscle(ABC):
         """decorate=True: respuesta para Fernando -> lleva su etiqueta de origen.
         decorate=False: uso interno (p.ej. el clasificador del router) -> salida
         cruda, sin sello, para no contaminar el parseo."""
+        if self.dispatch_bloqueado:
+            raise DispatchConfigMuscleError(f"[{self.name}] dispatch abortado: {self.dispatch_bloqueado}")
         chosen = self._resolve_model(model)
         try:
             resultado = await asyncio.wait_for(
@@ -192,6 +207,16 @@ class HttpMuscle(Muscle):
                 f"[{self.name}] sin credencial válida configurada para {provider_id}"
             ) from e
 
+    async def _limite_de_salida(self, model: str) -> dict[str, int]:
+        """{nombre: tope} del limite de salida, de la fila de `model` del
+        modelo QUE SE DESPACHA (puede no ser el asignado: modo pesado). Antes
+        era "max_tokens": 131072 fijo -- el literal que tumbo a thot en la
+        Mesa web (2026-08-24). Ver jax/core/contrato_dispatch.py."""
+        try:
+            return await limite_de_salida("http_openai_compat", _PROVIDER_ID_MAP[self.provider], model)
+        except ModelDispatchConfigError as e:
+            raise DispatchConfigMuscleError(f"[{self.name}] dispatch abortado: {e}") from e
+
     def _append_authority(self, text: str) -> str:
         # Gemini ya inserta su etiqueta de verificacion (dinamica, segun la
         # politica de grounding) dentro de _call_gemini. No la duplicamos.
@@ -212,7 +237,9 @@ class HttpMuscle(Muscle):
     async def _call_deepseek(
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
-        url = "https://api.deepseek.com/chat/completions"
+        # PR-K ronda 2 (I1): URL del proveedor del modelo en el catálogo; el
+        # default solo para el arranque sin DB.
+        url = self.api_url or "https://api.deepseek.com/chat/completions"
         headers = {"Authorization": f"Bearer {await self._resolve_api_key()}"}
 
         # messages = system + historial previo + mensaje actual.
@@ -227,7 +254,7 @@ class HttpMuscle(Muscle):
             "model": model,
             "messages": messages,
             "stream": False,
-            "max_tokens": 131072,
+            **await self._limite_de_salida(model),
         }
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             resp = await client.post(url, headers=headers, json=payload)
@@ -266,7 +293,7 @@ class HttpMuscle(Muscle):
             "model": model,
             "messages": messages,
             "stream": True,
-            "max_tokens": 131072,
+            **await self._limite_de_salida(model),
         }
         texto = ""
         resolved_version = None
@@ -344,10 +371,11 @@ class HttpMuscle(Muscle):
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
         api_key = await self._resolve_api_key()
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{model}:generateContent?key={api_key}"
-        )
+        # PR-K ronda 2 (I1): la URL base sale del proveedor del modelo en el
+        # catálogo (registro_facetas.aplicar_registro la pone en api_url). El
+        # default solo queda para el arranque sin DB (config.toml completo).
+        base = self.api_url or "https://generativelanguage.googleapis.com/v1beta"
+        url = f"{base.rstrip('/')}/models/{model}:generateContent?key={api_key}"
 
         # Gemini usa "contents" con role "user"/"model" (no "assistant") y
         # cada texto envuelto en parts. Convertimos el historial neutro.

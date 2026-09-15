@@ -92,6 +92,8 @@ class _Base(unittest.IsolatedAsyncioTestCase):
         self.usage = AsyncMock()
         self._patches = [
             patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")),
+            # PR-K ronda 2: contrato de la fila de `model` (el worker ya no manda motor.max_tokens a secas).
+            patch("contrato_dispatch._leer_contrato", AsyncMock(return_value=("max_tokens", 131072))),
             patch("motor_registry.usage_writer.record_motor_usage", self.usage),
             # Red de seguridad: si el transporte falso no quedara puesto, el
             # worker saldría a la API real. Pasó en el primer borrador de este
@@ -210,9 +212,9 @@ class CorteDeTokensTest(_Base):
         assert "max_tokens" in (state["error"] or ""), state["error"]
 
     async def test_corte_con_motor_sin_max_tokens_no_dice_subir_cero(self):
-        """Con max_tokens=0 el payload no lleva el campo y el corte viene del
-        límite del proveedor o del contexto: "Subir motor.max_tokens (0)" no
-        orienta a nadie. Revisión de jax#152."""
+        """Con motor.max_tokens=0 el límite es el tope del catálogo (PR-K ronda
+        2: antes no se mandaba ninguno) y el error lo dice: "Subir
+        motor.max_tokens (0)" no orienta a nadie. Revisión de jax#152."""
         cfg = {**_CFG, "motors": {"kimi": {**_CFG["motors"]["kimi"], "max_tokens": 0}}}
         self.catalog = MotorCatalog(cfg)
 
@@ -224,7 +226,7 @@ class CorteDeTokensTest(_Base):
 
         state = self._state(job_id)
         assert state["status"] == JobStatus.FAILED.value, state
-        assert "no declara max_tokens" in (state["error"] or ""), state["error"]
+        assert "tope del catálogo (max_tokens=131072" in (state["error"] or ""), state["error"]
         assert "max_tokens (0)" not in state["error"], state["error"]
 
     async def test_sin_schema_y_sin_corte_sigue_completando(self):

@@ -91,8 +91,38 @@ def build_muscles(cfg: dict, timeout_override: float | None = None) -> dict:
             )
         else:
             raise ValueError(f"Tipo de faceta desconocido: {ptype} ({name})")
+        # PR-K ronda 2: el motivo de bloqueo (binding que no coincide con el
+        # camino del TOML) y, para Ollama, el provider_id del catálogo con el
+        # que se lee el contrato. Ver registro_facetas.aplicar_registro.
+        muscles[name].dispatch_bloqueado = p.get("dispatch_bloqueado", "")
+        if ptype == "ollama":
+            muscles[name].provider_id = p.get("provider_id") or p.get("provider", "")
 
     return muscles
+
+
+def resolver_modo_pesado(cfg: dict) -> tuple[str | None, str | None, str]:
+    """(faceta, modelo, "") del modo pesado del REPL, o (None, None, motivo).
+
+    PR-K ronda 2 (M4): antes el modelo pesado era un nombre de modelo literal
+    en main(). Ahora es configuración ([jax].modo_pesado en config.toml) y el
+    modelo tiene que estar entre los permitidos de la faceta, que salen del
+    catálogo (registro_facetas): un modelo que el catálogo no ofrece no se
+    activa."""
+    conf = cfg.get("jax", {}).get("modo_pesado") or {}
+    faceta, modelo = conf.get("faceta"), conf.get("modelo")
+    if not faceta or not modelo:
+        return None, None, "modo pesado no configurado: falta [jax].modo_pesado = {faceta, modelo} en config.toml."
+    personalidad = cfg.get("personalities", {}).get(faceta)
+    if personalidad is None:
+        return None, None, f"modo pesado: la faceta '{faceta}' no existe en config.toml."
+    permitidos = personalidad.get("models_allowed") or []
+    if modelo not in permitidos:
+        return None, None, (
+            f"modo pesado: '{modelo}' no está entre los modelos permitidos de "
+            f"'{faceta}' (catálogo): {permitidos}."
+        )
+    return faceta, modelo, ""
 
 
 def kill_switch_active(path: str) -> bool:
@@ -120,6 +150,13 @@ def _lanzar_workers_background() -> None:
 def humanizar_error(label: str, err: Exception) -> str:
     """Traduce errores tecnicos comunes a un mensaje humano y breve."""
     msg = str(err)
+    # PR-K: un modelo sin contrato de dispatch en el catalogo se muestra
+    # ENTERO -- el mensaje trae el UPDATE a ejecutar, y el recorte a 160
+    # caracteres de abajo lo cortaba. Import diferido: main.py no depende
+    # del modulo para nada mas.
+    from jax.core.contrato_dispatch import ModelDispatchConfigError
+    if isinstance(err, ModelDispatchConfigError):
+        return f"{label}: {msg}"
     if "503" in msg or "UNAVAILABLE" in msg or "high demand" in msg:
         return f"{label}: El servicio esta saturado en este momento. Proba de nuevo en un rato."
     if "timeout" in msg.lower() or "sin respuesta" in msg:
@@ -561,10 +598,10 @@ async def main() -> None:
     # Estado para confirmar borrados de facts (comando /fact delete).
     pending_delete: dict = {}
 
-    # Modo pesado: /pesado activa deepseek-v4-pro en Jekyll; /normal lo apaga.
+    # Modo pesado: /pesado activa el modelo pesado de config.toml en su
+    # faceta; /normal lo apaga. PR-K ronda 2 (M4): de configuración, no literal.
     modo_pesado: bool = False
-    MODELO_PESADO = "deepseek-v4-pro"
-    FACETA_PESADO = "jekyll"
+    FACETA_PESADO, MODELO_PESADO, aviso_pesado = resolver_modo_pesado(cfg)
 
     loop = asyncio.get_running_loop()
 
@@ -572,7 +609,7 @@ async def main() -> None:
     print("  JAX 2.0 — En memoria de Jairo Urbina.")
     print("  Escribi para hablar. 'salir' para terminar.")
     print("  Voz: /voz on | /voz off | /callate    Oido: /escucha")
-    print("  Modo: /pesado (Jekyll -> v4-pro) | /normal")
+    print("  Modo: /pesado (modelo pesado de config.toml) | /normal")
     if not db_ok:
         print("  [memoria offline — converso, pero no guardo esta sesion]")
     print("=" * 56)
@@ -633,9 +670,12 @@ async def main() -> None:
             # --------------------------------------------------------------
 
             if lt == "/pesado":
+                if FACETA_PESADO is None:
+                    print(f"\n[{aviso_pesado}]")
+                    continue
                 modo_pesado = True
                 modelo_default = cfg["personalities"][FACETA_PESADO].get("model_default", "")
-                print(f"\n[modo pesado: Jekyll usara {MODELO_PESADO} "
+                print(f"\n[modo pesado: {FACETA_PESADO} usara {MODELO_PESADO} "
                       f"(por defecto: {modelo_default}). /normal para volver.]")
                 continue
             if lt == "/normal":

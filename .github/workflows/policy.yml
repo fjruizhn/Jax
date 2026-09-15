@@ -156,6 +156,10 @@ jobs:
           # de forma idempotente). Corre aca y no en tests-puros porque necesita
           # una base VACIA: comprueba que las migraciones crean los indices en
           # un entorno nuevo, que es justo donde un ALTER a mano no llega.
+          # 15 -> 8 el 2026-09-14 (PR-K ronda 4): jacobs/_direct_usage_test.py se
+          #   mudo a jacobs-gobernanza-db -- en este job no existe el esquema de
+          #   jax-platform (tabla `motor`), que validate_capability necesita (CI de
+          #   Jax#158 rojo: 1146 "Table 'jax_memory_test.motor' doesn't exist").
           grep -qE "^8 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados)."; exit 1; }
 
@@ -537,6 +541,9 @@ jobs:
           tests/test_jacobs_invoked_by_rol.py
           tests/test_catalog_from_db_timeout.py
           tests/test_aiomysql_connect_timeout_tripwire.py
+          tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
+          tests/test_motor_contrato_dispatch.py
+          las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -559,6 +566,9 @@ jobs:
             tests/test_jacobs_invoked_by_rol.py \
             tests/test_catalog_from_db_timeout.py \
             tests/test_aiomysql_connect_timeout_tripwire.py \
+            tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
+            tests/test_motor_contrato_dispatch.py \
+            las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -666,8 +676,54 @@ jobs:
           #   árbol, _director_patch/routes_block.py, se verifica declarado y sin
           #   romper la corrida). Las 9 formas nuevas, vistas en rojo contra el
           #   detector viejo antes del arreglo (verificado aparte, no en CI).
-          grep -qE "^176 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 176 tests CORRIDOS."; exit 1; }
+          # 176 -> 199 el 2026-09-14 (PR-K, contrato de dispatch en el REPL y en Ada):
+          #   test_contrato_dispatch_repl_ada.py (+19) -- el payload del HttpMuscle
+          #   (DeepSeek y OpenAI-compat, stream y no-stream) y el de Ada llevan el
+          #   NOMBRE y el TOPE de la fila de `model` del modelo despachado, no
+          #   "max_tokens": 131072; NULL/invalido/fila ausente no despachan y dicen el
+          #   UPDATE (entero en el REPL); gemini no lleva max_tokens. 16 vistos en rojo
+          #   antes del arreglo; los 3 que pasaban antes (gemini, proveedor no
+          #   OpenAI-compat, symlink) son controles.
+          #   test_payload_max_tokens_literal_tripwire.py (+4) -- ningun payload de
+          #   codigo con el limite de salida como numero literal (ast); rojo con los 3
+          #   sitios reales antes del arreglo y por mutacion despues; con sus controles.
+          # 199 -> 206 el 2026-09-14 (PR-K ronda 1): test_contrato_dispatch_repl_ada.py
+          #   (+7) -- Ada planifica con SU binding (resolve_facet("ada"): modelo, URL
+          #   base y credencial; ya no ADA_MODEL/ADA_URL fijos) y el tope de la fila de
+          #   ese modelo; faceta no resoluble, otro transporte o sin contrato -> ERROR y
+          #   None, y el fallback a qwen sigue pero con el ERROR del UPDATE (-1 test
+          #   reemplazado, +4); jacobs/executor.py::_invoke_http_openai_compat manda el
+          #   limite de la fila (+2); tripwire: ningun nombre de modelo literal en
+          #   jacobs/plan.py, con su control (+2). 9 vistos en rojo contra el codigo de
+          #   la ronda 0; validados por mutacion.
+          # 206 -> 276 el 2026-09-14 (PR-K ronda 2, revisión con cambios pedidos):
+          #   test_contrato_dispatch_repl_ada.py (+17: el REPL despacha al proveedor
+          #   y la URL del MODELO del binding o se bloquea visible; transporte y no
+          #   proveedor decide el contrato; Ollama nativo manda options.num_predict y
+          #   _llm_plan el menor con su presupuesto; fallback de cerebros registrado
+          #   en jacobs_events y HTTP != 200 de Ada en ERROR; modo pesado de config;
+          #   sin nombres de modelo literales en plan.py ni main.py),
+          #   test_payload_max_tokens_literal_tripwire.py (+2: .update, .setdefault,
+          #   constante de modulo y num_predict, con su control),
+          #   test_repl_modelos_permitidos.py (+8: aplicar_registro toma proveedor,
+          #   URL y camino del modelo; bloquea si no coinciden),
+          #   test_motor_contrato_dispatch.py (+7, nuevo: Motor Registry con el
+          #   contrato de la fila, thot -> max_completion_tokens/128000, el menor con
+          #   motor.max_tokens, Ollama /v1 -> max_tokens, sin contrato el job falla),
+          #   las_manos/_worker_max_tokens_test.py + _worker_tool_loop_test.py (+36:
+          #   ningun job los corria; se les inyecta el contrato como al resto).
+          #   39 vistos en rojo contra el codigo de la ronda 1; 5 mutaciones rojas.
+          # 276 -> 285 el 2026-09-14 (PR-K ronda 3): test_contrato_dispatch_repl_ada.py
+          #   (+9) -- el bloque verbatim es el de PR-L (tope de la columna INT); el
+          #   clasificador del router deja WARNING con el motivo de un contrato roto
+          #   (y una falla de red sigue sin ruido); con la provider.base_url REAL de
+          #   produccion cada camino llama a su endpoint (REPL http y gemini, Ollama
+          #   nativo /api/chat con num_predict en REPL/executor/plan, Motor Registry
+          #   por /v1/chat/completions con max_tokens) -- nunca /v1/api/chat. 2 vistos
+          #   en rojo contra la ronda 2; los de URL fijan el comportamiento correcto
+          #   de hoy y se validaron por mutacion (armar el nativo desde base_url).
+          grep -qE "^285 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 285 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -728,14 +784,31 @@ jobs:
       - run: >-
           python -m pytest -v tests/test_plan_validation.py
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
-          tests/test_catalog_mode_db.py
+          tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
+          jacobs/_direct_usage_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
         run: |
           python -m pytest -q tests/test_plan_validation.py \
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
-            tests/test_catalog_mode_db.py \
+            tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
+            jacobs/_direct_usage_test.py \
             2>&1 | tee /tmp/out
-          grep -qE "^15 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 15 tests CORRIDOS."; exit 1; }
+          # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
+          #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
+          #   ADA_MODEL sin contrato falla con los dos UPDATE, fila ausente falla, y el
+          #   EXPLAIN de la consulta usa uk_provider_model. Solo lee. Validado por
+          #   mutacion (sin provider_id en el WHERE cae el del EXPLAIN).
+          # 19 -> 20 el 2026-09-14 (PR-K ronda 2): test_contrato_dispatch_db.py (+1) --
+          #   cargar_registro trae transporte, proveedor y URL del MODELO del binding
+          #   contra el esquema y la semilla reales.
+          # 20 -> 27 el 2026-09-14 (PR-K ronda 4): jacobs/_direct_usage_test.py (+7),
+          #   mudado desde facet-health-io porque alla no existe el esquema de
+          #   jax-platform (sus DispatchStepUsageTest pasan por validate_capability,
+          #   que lee `motor`/`capability`). Aca las migraciones lo crean. Ademas,
+          #   test_contrato_dispatch_db.py deja de depender de filas sembradas: cada
+          #   test crea y borra SU fila de `model` (glm-5.2 no existe con la semilla
+          #   de PR-L y rompio este job en Jax#158).
+          grep -qE "^27 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 27 tests CORRIDOS."; exit 1; }

@@ -16,6 +16,11 @@ default_mode = "auto"
 timeout_seconds = 600
 task_timeout_seconds = 3600
 default_personality = "jax_local"
+# Modo pesado del REPL (/pesado): qué faceta y con qué modelo. Configuración,
+# no código (PR-K ronda 2, M4; antes literal en main.py). El modelo tiene que
+# estar entre los permitidos de la faceta, que salen del catálogo `model`
+# (jax/core/registro_facetas.py); si no, /pesado lo dice y no se activa.
+modo_pesado = { faceta = "jekyll", modelo = "deepseek-v4-pro" }
 
 # ------------------------------------------------------------
 #  JAX LOCAL — el ser mismo, en modo confianza. Ollama local.

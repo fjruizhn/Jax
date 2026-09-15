@@ -20,11 +20,28 @@ from dataclasses import dataclass, field
 import httpx
 
 from jacobs.models import MOTOR_FACETS, Step
-from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
+from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 
 logger = logging.getLogger("jacobs.plan")
+
+
+class CerebroNoDisponible(Exception):
+    """Un cerebro de planificación (Ada, qwen) no pudo planificar. Lleva el
+    motivo, que _from_objective registra en jacobs_events antes de caer al
+    siguiente (PR-K ronda 2, M2). Quien la lanza ya dejó su logger.error."""
+
+
+async def _registrar_fallback_de_cerebro(pipeline_id: str, de: str, a: str, motivo: str) -> None:
+    """Evento PLAN_CEREBRO_FALLBACK en jacobs_events: el plan NO salió del
+    cerebro previsto, y por qué. Sin FK a jacobs_pipelines (mismo criterio que
+    PLAN_REJECTED en routes.py). Si la DB no responde, el error sube: build()
+    tampoco podría seguir (lee la gobernanza de la misma DB)."""
+    from jacobs import store as _store  # import diferido: evita ciclo store<->plan
+    await _store.event_append(
+        pipeline_id, "PLAN_CEREBRO_FALLBACK", {"de": de, "a": a, "motivo": motivo[:2000]},
+    )
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_TIMEOUT = 120  # segundos — el modelo local puede tardar
@@ -36,10 +53,22 @@ OLLAMA_TIMEOUT = 120  # segundos — el modelo local puede tardar
 # observado. NO es el limite para un eventual fallback con thinking
 # habilitado -- ese path necesitaria su propio budget, mucho mayor (el
 # thinking solo midio 14780-19846 caracteres, ~3700-5000 tokens).
-_LLM_PLAN_NUM_PREDICT = 3000
+#
+# PR-K ronda 2: es un PRESUPUESTO del plan (propósito distinto del máximo de
+# la API del modelo), configurable con el patrón de la casa (como
+# FACET_CACHE_TTL_SECONDS). Se manda el MENOR entre este y el tope del
+# catálogo del modelo de jax_local (contrato_dispatch).
+_LLM_PLAN_NUM_PREDICT = int(os.getenv("JACOBS_PLAN_NUM_PREDICT", "3000"))
+if _LLM_PLAN_NUM_PREDICT <= 0:
+    raise RuntimeError(
+        f"JACOBS_PLAN_NUM_PREDICT={_LLM_PLAN_NUM_PREDICT}: tiene que ser un entero positivo."
+    )
 
-ADA_URL = "https://api.z.ai/api/paas/v4/chat/completions"
-ADA_MODEL = "glm-5.2"
+# Sin ADA_URL ni ADA_MODEL (PR-K ronda 1, 2026-09-14): Ada planificaba con
+# glm-5.2 fijo mientras su binding era glm-5.3 (medido en producción por el
+# controller: model id 7 glm-5.2 sin contrato, id 1453 glm-5.3 con
+# max_tokens/131072). Modelo, URL base y credencial salen de
+# resolve_facet("ada"); el límite de salida, de la fila de ESE modelo.
 ADA_TIMEOUT = 180  # Ada puede tardar más con razonamiento encendido
 
 # Heurística v1 para clasificar objetivos — Fase D la refina con ejemplos de oro.
@@ -497,22 +526,40 @@ class PlanBuilder:
         # test lo vio porque ninguno ejercita build() por el camino del LLM.
         capability_hint = _build_capability_hint(governance)
         dificultad = self._classify_difficulty(objective)
-        try:
-            _ada_disponible = bool(await resolve_credential_instrumented("zhipu"))
-        except CredentialUnavailableError:
-            _ada_disponible = False
-        if dificultad == "formal" and _ada_disponible:
+        # PR-K rondas 1 y 2: sin sondear la credencial de un proveedor fijo.
+        # Cada cerebro que falla deja su logger.error y, al caer al siguiente
+        # (Ada -> qwen -> plan fijo), queda un evento PLAN_CEREBRO_FALLBACK en
+        # jacobs_events con el motivo: el pipeline registra de dónde salió el
+        # plan, no solo el log.
+        specs = None
+        if dificultad == "formal":
             logger.info("Jacobs cerebro=Ada (formal) objective=%r", objective[:80])
-            specs = await self._ada_plan(objective, max_steps, capability_hint)
+            specs, motivo = await self._intentar_cerebro(
+                self._ada_plan, "Ada", objective, max_steps, capability_hint)
             if not specs:
-                logger.warning("Ada falló planificando, cayendo a qwen local")
-                specs = await self._llm_plan(objective, max_steps, capability_hint)
+                logger.warning("Ada falló planificando (%s), cayendo a qwen local", motivo)
+                await _registrar_fallback_de_cerebro(pipeline_id, "ada", "qwen", motivo)
         else:
             logger.info("Jacobs cerebro=qwen (trivial) objective=%r", objective[:80])
-            specs = await self._llm_plan(objective, max_steps, capability_hint)
         if not specs:
-            specs = self._fallback_plan(objective)
+            specs, motivo = await self._intentar_cerebro(
+                self._llm_plan, "qwen", objective, max_steps, capability_hint)
+            if not specs:
+                logger.warning("qwen falló planificando (%s), usando el plan de respaldo fijo", motivo)
+                await _registrar_fallback_de_cerebro(pipeline_id, "qwen", "fallback_plan", motivo)
+                specs = self._fallback_plan(objective)
         return self._from_spec(pipeline_id, specs, governance["capabilities"])
+
+    @staticmethod
+    async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint):
+        """(specs, "") o (None, motivo)."""
+        try:
+            specs = await fn(objective, max_steps, capability_hint)
+        except CerebroNoDisponible as exc:
+            return None, str(exc)
+        if not specs:
+            return None, f"{nombre} devolvió un plan vacío o no parseable"
+        return specs, ""
 
     @staticmethod
     def _classify_difficulty(objective: str) -> str:
@@ -526,12 +573,34 @@ class PlanBuilder:
     async def _ada_plan(
         self, objective: str, max_steps: int, capability_hint: str = ""
     ) -> list[dict] | None:
+        # Modelo, URL y credencial del binding de ada (credencial por
+        # credential_resolver, dentro de resolve_facet), y el límite de salida
+        # de la fila de ESE modelo. Cualquier falla: ERROR con el motivo y
+        # None -> _from_objective cae a qwen. Nunca se despacha a un modelo o
+        # URL fijos ni con un límite asumido.
         try:
-            api_key = await resolve_credential_instrumented("zhipu")
-        except CredentialUnavailableError:
-            return None
+            f = await resolve_facet("ada")
+        except FacetUnavailableError as exc:
+            motivo = f"Ada: dispatch abortado, faceta no resoluble: {exc}"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo) from exc
+        if f.transport != "http_openai_compat" or not f.base_url:
+            motivo = (
+                f"Ada: dispatch abortado, el binding no es http_openai_compat con "
+                f"base_url (transport={f.transport!r} base_url={f.base_url!r}) y este "
+                f"camino arma chat/completions."
+            )
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo)
+        try:
+            limite = await limite_de_salida(f.transport, f.provider_id, f.model)
+        except ModelDispatchConfigError as exc:
+            motivo = f"Ada: dispatch abortado, sin contrato en el catalogo: {exc}"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo) from exc
+        url = f"{f.base_url}/chat/completions"
         headers = {
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {f.credential}",
             "Content-Type": "application/json",
         }
         prompt = (
@@ -571,18 +640,21 @@ class PlanBuilder:
             {"role": "user", "content": prompt},
         ]
         payload = {
-            "model": ADA_MODEL,
+            "model": f.model,
             "messages": messages,
             "stream": True,
-            "max_tokens": 131072,
+            **limite,
         }
         try:
             async with httpx.AsyncClient(timeout=ADA_TIMEOUT) as client:
-                async with client.stream("POST", ADA_URL, headers=headers, json=payload) as resp:
+                async with client.stream("POST", url, headers=headers, json=payload) as resp:
                     if resp.status_code != 200:
+                        # PR-K ronda 2 (M2): ERROR, no warning -- un 400 "max_tokens
+                        # too large" del proveedor es un contrato roto, no ruido.
                         body = await resp.aread()
-                        logger.warning("Ada HTTP %s: %r", resp.status_code, body[:200])
-                        return None
+                        motivo = f"Ada HTTP {resp.status_code}: {body[:200]!r}"
+                        logger.error(motivo)
+                        raise CerebroNoDisponible(motivo)
                     partes = []
                     async for linea in resp.aiter_lines():
                         if not linea or not linea.startswith("data:"):
@@ -604,9 +676,12 @@ class PlanBuilder:
                     content = "".join(partes)
             # Fase D: aquí se capturará el plan de Ada como ejemplo de oro
             return await self._parse_plan_json(content, max_steps)
+        except CerebroNoDisponible:
+            raise
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Ada no disponible para planificación: %s", exc)
-            return None
+            motivo = f"Ada no disponible para planificación: {type(exc).__name__}: {exc}"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo) from exc
 
     async def _llm_plan(
         self, objective: str, max_steps: int, capability_hint: str = ""
@@ -625,13 +700,28 @@ class PlanBuilder:
         try:
             f = await resolve_facet("jax_local")
         except FacetUnavailableError as exc:
-            logger.warning("JAX Local no disponible para planificación: %s", exc)
-            return None
+            motivo = f"qwen (jax_local) no resoluble: {exc}"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo) from exc
+        if f.transport != "ollama":
+            motivo = (f"qwen (jax_local): el binding es transport={f.transport!r} y este "
+                      f"camino es /api/chat nativo de Ollama.")
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo)
+        # PR-K ronda 2: el menor entre el presupuesto del plan y el tope del
+        # catálogo del modelo (options.num_predict, docs/api.md de Ollama).
+        try:
+            limite = await limite_de_salida(f.transport, f.provider_id, f.model)
+        except ModelDispatchConfigError as exc:
+            motivo = f"qwen (jax_local): planificación abortada, sin contrato en el catalogo: {exc}"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo) from exc
+        num_predict = min(_LLM_PLAN_NUM_PREDICT, limite["options"]["num_predict"])
 
         payload = {
             "model": f.model,
             "think": False,
-            "options": {"num_predict": _LLM_PLAN_NUM_PREDICT},
+            "options": {"num_predict": num_predict},
             "messages": [
                 {"role": "system", "content": _PLAN_SYSTEM + capability_hint},
                 {"role": "user", "content": prompt},
@@ -664,8 +754,9 @@ class PlanBuilder:
                 content = data.get("message", {}).get("content", "")
                 return await self._parse_plan_json(content, max_steps)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("JAX Local no disponible para planificación: %s", exc)
-            return None
+            motivo = f"qwen (jax_local) no disponible para planificación: {type(exc).__name__}: {exc}"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo) from exc
 
     @staticmethod
     async def _parse_plan_json(text: str, max_steps: int) -> list[dict] | None:
