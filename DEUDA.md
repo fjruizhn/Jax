@@ -487,7 +487,76 @@ jekyll 200 a las 19:50:32, `facet_health_event` ok. **Siguen en esta sesión:** 
 declarar el contrato de un modelo sin SQL a mano, y rastro del rechazo) y PR-K (el REPL `jax/muscles/base.py`
 y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálogo).
 
-## Cerrado — admin usuarios etapa 2: sesiones con token_version en jax-platform (2026-09-14)
+## Cerrado — admin usuarios etapa 4: Mi cuenta y enlace de recuperación por admin (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 06:03 CST.** jax-platform#82 → `453b128`. El plan es
+`docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-4-contrasenas.md` y cubre la spec §3.2 y §3.4.
+El frontend servido es `index-BvtjkH_S.js`, con md5 idéntico al build local. Antes del rsync se hizo
+el backup `axioma-ia.io.backup-pre-usuarios-etapa4-20260915-060236` y se comprobó idéntico al sitio.
+
+Verificación después del despliegue: health 200 y journal sin errores. El cwd es el checkout con el
+commit. `POST /api/auth/me/password` y `POST /api/admin/users/{id}/reset-link` responden 401 sin
+token; antes del despliegue daban 405, así que las rutas quedaron vivas.
+
+Qué entra:
+- **Regla única de contraseña.** Mínimo 8 caracteres, contados como puntos de código, y máximo 72
+  bytes. Está en backend (`auth/password_rules.py`) y frontend (`lib/reglasPassword.js`). La usan el
+  alta, `/reset-password` y Mi cuenta. Antes el alta daba 500 con más de 72 bytes.
+- **Mi cuenta** (`POST /api/auth/me/password`).
+  - Exige la contraseña actual y tiene el límite del login.
+  - Sube `token_version`: las otras sesiones mueren y esta recibe tokens nuevos.
+  - Corta WS/SSE después del commit.
+  - Una revocación o desactivación concurrente da 401 `sesion_invalida`: la re-lectura
+    `FOR UPDATE` fija hash, `token_version` y `status`.
+- **Enlace de recuperación por admin** (`POST /users/{id}/reset-link`, solo superadmin).
+  - Si SMTP no está configurado o está dañado, 503. Si el envío falla, 502 con la respuesta del
+    servidor. Si el usuario no existe, 404; si no está activo, 409.
+  - Ante cualquier salida sin envío, incluida la cancelación, se borra el token exacto (U17).
+  - Si falla la auditoría después de un envío exitoso, es fail-soft (U22).
+- **Reset completado.**
+  - Bloquea el usuario y después reclama el token de forma atómica; el orden tiene test.
+  - Si el usuario no está activo, 400 `reset_token_invalido`, sin consumir el token (U21).
+  - Sube `token_version` y corta las sesiones.
+- **`_cortar_conexiones` pasa a `auth/conexiones.py`**, lo que rompe el ciclo auth↔admin.
+- **Un único `components/Dialogo.jsx` para los cuatro modales de usuarios** (U27). Pone el portal,
+  deja `#root` inert con un contador, lleva el foco adentro y lo devuelve, y cierra con Escape. En
+  Admin → Usuarios hay un solo modal a la vez (U25).
+- **Carrera cerrada.** Un 401 durante el cambio de la propia contraseña espera el token nuevo en vez
+  de refrescar con la cookie vieja.
+
+Pruebas: con DB 786 → 815/1; sin DB 366 → 369/447; vitest 257 → 315. Cada arreglo de concurrencia
+tiene un test que se vio en rojo por mutación. Las decisiones y sus costos están en el ledger
+(Rulings U8, U9 y U15-U27).
+
+- **Carga: PENDIENTE DE MEDIR** _(se completa en este mismo PR; ver el ítem de carga de la etapa 4)_.
+- **Pendiente con fecha, verificación en vivo de Fernando (2026-09-15):**
+  - Mi cuenta en dos ventanas, en claro y en oscuro.
+  - Los labels visibles del alta.
+  - "Enviar enlace" con un correo real a un buzón suyo (U19; el plan lo condiciona a su permiso).
+  Yo no pude hacerla: no tengo credenciales de admin, y crear el usuario por SQL viola la barrera
+  de la DB (U23).
+- **Pregunta abierta a Fernando:** ¿el admin también fija una contraseña a mano? La decisión del
+  2026-09-12 fue "por enlace" (U2).
+
+## Cerrado — admin usuarios etapa 3: invariantes, auditoría, cerrar sesiones e historial (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 04:10 CST.** jax-platform#80 → `55fed34`. El frontend servido es
+`index-DOh1EUQp.js` y el backup es `…pre-usuarios-etapa3-20260915-040951`. La migración se verificó
+en producción: tabla `user_admin_audit`, índices `idx_jax_users_role_status` e
+`idx_user_admin_audit_target_ts`, y el EXPLAIN usa el índice.
+
+Qué entra:
+- **Invariante de superadmin sin deadlock.** Siempre queda al menos un superadmin activo. Se usa
+  `transaccion(AISLAMIENTO_ADMIN)`, que es READ COMMITTED, con orden fijo de bloqueos: el conjunto de
+  superadmins y después el objetivo.
+- **Sin auto-acciones.**
+- **"Cerrar sesiones"** sube `token_version` y corta WS 4001 y SSE después del commit.
+- **Historial por usuario:** `user_audit.registrar`, con 10 acciones.
+- **PUT sin contraseña.**
+- **Errores:** el backend devuelve códigos estables y el frontend los traduce.
+
+**Riesgo aceptado (U14):** no se pudo revisar `innodb_trx` en producción porque el usuario de la app
+no tiene PROCESS.
 
 **VERDAD OPERACIONAL 2026-09-14 15:00 CST.** jax-platform#70 (`3d90f58`), plan
 `docs/superpowers/plans/2026-09-12-admin-usuarios-etapa-2-sesiones.md`, spec §3.2. Antes, un
@@ -532,7 +601,11 @@ medición no hay caché; la medición no lo pide).
 
   Línea base 13:28 CST (`bfab4de`), después 14:59 CST (`3d90f58`). Sin degradación: la consulta
   por PK no se ve dentro de la varianza.
-- **Pasa a la etapa 3 (plan enmendado en #70):** los WebSocket ya abiertos no se cortan al
+- **CERRADO 2026-09-15 por la etapa 3 (jax-platform#80 → `55fed34`) y la etapa 4 (#82 → `453b128`):**
+  `_cortar_conexiones` (fail-soft; desde #82 en `auth/conexiones.py`) corta WS 4001 y SSE después
+  del commit, en cada lugar que sube `token_version`: `update_user`, `revoke_sessions`, Mi cuenta y el
+  reset completado. Texto original:
+  **Pasa a la etapa 3 (plan enmendado en #70):** los WebSocket ya abiertos no se cortan al
   degradar o desactivar (se verifica en el handshake); el corte va donde nace el incremento de
   `token_version` (`update_user`, `revoke_sessions`, `delete_user`), después del commit. En la
   etapa 2 nadie incrementa la versión todavía. `tenant_id` sigue saliendo del token (un solo
@@ -2723,7 +2796,11 @@ retractaciones, que no se borran. Ninguno requiere acción.
 ## Anotado, no bloquea
 
 - **Anotados en la etapa 1 de admin usuarios (2026-09-13).**
-  - **Dependencia de la etapa 4:** `_procesar_recuperacion` se traga todo y
+  - **Dependencia de la etapa 4 — CERRADO 2026-09-15 (jax-platform#82 → `453b128`):**
+    `POST /users/{id}/reset-link` reusa el núcleo (`_crear_enlace_de_recuperacion` +
+    `_send_reset_email`) sin el envoltorio fail-soft. Da 503 si SMTP no está configurado o está
+    dañado, 502 con la respuesta del servidor si el envío falla, y no deja vivo ningún token no
+    entregado. Texto original: `_procesar_recuperacion` se traga todo y
     devuelve `None`, así que el "enlace de restablecimiento" por admin de la
     etapa 4 no puede reusarlo para devolver 503 si falta SMTP (spec §3.4). La
     etapa 4 tiene que llamar `smtp_config.cargar_settings()` y
