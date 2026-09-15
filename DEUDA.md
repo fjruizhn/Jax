@@ -498,6 +498,79 @@ jekyll 200 a las 19:50:32, `facet_health_event` ok. **Siguen en esta sesión:** 
 declarar el contrato de un modelo sin SQL a mano, y rastro del rechazo) y PR-K (el REPL `jax/muscles/base.py`
 y Ada `jacobs/plan.py` mandan `max_tokens: 131072` fijo; pasan a leer el catálogo).
 
+## Cerrado — admin fija la contraseña, cambio obligatorio y sesión única (2026-09-15)
+
+**VERDAD OPERACIONAL 2026-09-15 14:24 CST.** jax-platform#84 → `0b81ad7`. Plan:
+`docs/superpowers/plans/2026-09-15-admin-fijar-password.md`, con la enmienda de la Task 3b.
+
+**Deploy:**
+- Frontend servido `index-BlCQtW_s.js`, con md5 igual al build (`f6ba6acc…`).
+- Backup `axioma-ia.io.backup-pre-fijar-password-20260915-142422`, verificado idéntico antes del rsync.
+- Dump previo `~/backups/usuarios-pre-fijar-password-20260915-142417.sql` (2 = 2, 1 = 1, 4 = 4), verificado fila por fila. El script aborta si no cuadra.
+- Tras la migración, `must_change_password` con 0 filas marcadas (el script aborta si hay alguna).
+- Sonda sin token: `POST /api/admin/users/{id}/password` responde 401. Antes daba 405.
+
+**Decisiones de Fernando (2026-09-15):**
+- El superadmin fija a mano la contraseña de otro usuario. Revierte U2; el enlace de recuperación se queda.
+- El usuario tiene que cambiarla en su próximo login:
+  - la nueva tiene que ser distinta de la que puso el admin (P1);
+  - se le sigue pidiendo la actual (P2).
+- **Sesión única:** una persona no puede tener dos sesiones abiertas. Salir mata la sesión en el servidor, y un login nuevo mata la vieja.
+
+**Qué entra:**
+- **Migración:** `jax_users.must_change_password`. La marca viaja en la única consulta de sesión (SELECT por PK), sin consultas extra.
+- **Cumplimiento en el backend, negado por defecto (U34).** Con la marca puesta, solo pasan `/me`, `/me/password`, `/refresh` y `/logout`, que son los tres sitios de opt-in deliberados. Todo lo demás responde 403 `cambio_de_password_requerido`, incluidos WS y SSE.
+  - Un test recorre las rutas servidas con `iter_route_contexts`, porque en FastAPI 0.139.2 `app.routes` no aplana los routers.
+  - Un guard por AST impide otros opt-in e incluye los alias de import (F3). La indirección dinámica queda fuera de alcance (F4).
+- **`POST /api/admin/users/{id}/password`:**
+  - solo superadmin; nunca sobre sí mismo; 404 para una baja; inactivos permitidos;
+  - bcrypt fuera de la transacción, que corre en READ COMMITTED con orden fijo;
+  - un UPDATE que cambia hash, `token_version + 1`, la marca y el bloqueo;
+  - borra los enlaces pendientes y audita `password_set_by_admin` sin la contraseña;
+  - corta las sesiones después del commit.
+- **F5:** completar un enlace de recuperación limpia la marca. Mientras la marca esté puesta, no acepta la contraseña del admin (400, token sin consumir), con bcrypt sin lock y re-chequeo bajo el bloqueo.
+- **Sesión única (F2):**
+  - el login exitoso sube la versión con UPDATE más relectura bajo el bloqueo de la fila, y solo si el hash verificado sigue siendo el actual (arreglo F1 del review);
+  - el logout mata solo su propia sesión (arreglo F2 del review);
+  - un login fallido nunca expulsa a nadie.
+- **Frontend:**
+  - modal "Fijar contraseña";
+  - Mi cuenta obligatoria y no cerrable, con `Dialogo cerrable={false}`;
+  - el interceptor convierte el 403 en la marca, sin bucles;
+  - el logout avisa al servidor;
+  - el aviso "se inició sesión en otro lugar";
+  - F5 en ResetPassword.
+
+**Carga medida antes del merge (U29), arnés pytest aislado:**
+- p95 de `verificar_sesion` contra la base `a703c67`: `/me` 1,007 y 1,029; `/facets` 0,992 y 1,006, este último re-medido con 11 pares alternados porque el primer 1,103 era ruido (F6).
+- El 403 cuesta lo mismo que un 401.
+- Fijar a c=10: p95 162 ms. Logout: 13,6 ms. Reset con la marca: 316 ms, por un bcrypt de más.
+- Carrera de K logins del mismo usuario: siempre exactamente un token válido.
+- 0 respuestas 5xx y 0 deadlocks.
+
+**Pruebas:**
+- Con DB: 846 → 890/1. Sin DB: 371 → 374/517. vitest: 339 → 379.
+- Cada arreglo de concurrencia tiene su test y se vio en rojo por mutación.
+
+**Decisión de UI (Ruling F7):**
+- En la fila del propio admin, los botones de auto-acción ("Fijar contraseña", "Dar de baja") siguen visibles.
+- El backend los rechaza con 403 `auto_accion_prohibida` y un toast traducido.
+- Ocultar solo uno haría la fila incoherente. Si se decide ocultarlos, se ocultan todos juntos.
+
+**Límite aceptado:**
+- Si el `POST /auth/logout` vence (a los 5 s) o falla la red, el cliente limpia su estado igual, pero la sesión sigue viva en el servidor.
+- Es lo mismo que pasaba antes con el logout solo local.
+- Esa sesión muere en el próximo login, porque ahora cada login invalida las sesiones anteriores.
+
+**Pendientes con fecha:**
+- **2026-09-22 (propuesta):** endurecer `test_no_fail_open_except`. Hoy solo marca `except: pass`; un `except` que asigna un valor por defecto se le escapa.
+- **Verificación en vivo de Fernando:**
+  - fijar la contraseña a un usuario de prueba;
+  - login con la marca: el diálogo no se cierra y se rechaza la misma contraseña;
+  - una segunda sesión expulsa a la primera con el aviso;
+  - salir mata la sesión;
+  - todo en claro y en oscuro.
+
 ## Cerrado — admin usuarios etapa 5: editar el correo y dar de baja con ConfirmacionSuma (2026-09-15)
 
 **VERDAD OPERACIONAL 2026-09-15 12:14 CST.** jax-platform#83 → `a703c67`. Plan:
