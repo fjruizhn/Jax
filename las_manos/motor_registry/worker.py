@@ -34,6 +34,7 @@ import httpx
 from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+from contrato_dispatch import OLLAMA_API_V1, ModelDispatchConfigError, limite_de_salida
 from motor_registry.job_store import JobStore
 from motor_registry.tool_authority import authorize_and_execute_tool_call, get_workspace_head
 from motor_registry.models import JobStatus
@@ -106,7 +107,7 @@ async def _call_http_openai_compat(
     api_key: str,
     messages: list[dict],
     timeout: float,
-    max_tokens: int = 0,
+    limite: dict | None = None,
     tools: list[dict] | None = None,
     reasoning_effort: str | None = None,
 ) -> dict:
@@ -116,10 +117,12 @@ async def _call_http_openai_compat(
     formato de request/response en /v1/chat/completions, verificado en vivo
     (2026-08-18): mismo choices[0].message.content/finish_reason/usage.
 
-    max_tokens (2026-08-10): sin esto, un motor de razonamiento puede gastar
-    todo el completion budget en reasoning_content y devolver `content`
-    cortado a mitad de palabra — bug real reproducido en vivo contra la API
-    de Moonshot. 0/falsy = no mandar el campo.
+    limite (PR-K ronda 2, 2026-09-14; antes `max_tokens: int`): el fragmento
+    del body con el límite de salida, `{nombre: tope}` de la fila de `model`
+    (ver _limite_del_motor). Antes el nombre era "max_tokens" fijo -- el que
+    gpt-5.6-terra rechaza con HTTP 400 -- y el valor, motor.max_tokens. El
+    límite explícito sigue siendo necesario (2026-08-10): sin él, un motor de
+    razonamiento gasta el budget en reasoning_content y corta `content`.
 
     tools (GAP2 Fase1, 2026-08-19): OPCIONAL -- si no se pasa, el payload
     sale idéntico a antes de este cambio, cero comportamiento nuevo para
@@ -149,8 +152,8 @@ async def _call_http_openai_compat(
         "model": model,
         "messages": messages,
     }
-    if max_tokens:
-        payload["max_tokens"] = max_tokens
+    if limite:
+        payload.update(limite)
     if tools:
         payload["tools"] = tools
     if reasoning_effort:
@@ -168,6 +171,28 @@ async def _call_http_openai_compat(
 # EXISTENTE por nombre (dato en DB, Task 1/2) -- agregar un transporte
 # nuevo (ej. http_gemini, subprocess) sí requiere código acá, a propósito
 # (R4: los transportes son lógica, los motores son dato).
+async def _limite_del_motor(entry) -> tuple[dict, str]:
+    """(fragmento del body, origen) del límite de salida de un motor.
+
+    El NOMBRE y el TOPE salen del contrato de la fila de `model` del motor
+    (jax/core/contrato_dispatch.py, el mismo helper que el REPL, Ada y el
+    executor). transport='ollama' va por /v1/chat/completions de Ollama, cuyo
+    parámetro es `max_tokens` (docs.ollama.com/api/openai-compatibility).
+
+    motor.max_tokens tiene un propósito DISTINTO y se respeta: es el
+    presupuesto por llamada que se le da a un motor de razonamiento (8000 para
+    kimi y ada, CONTEXT.md 2026-08-10, "ajustar si se repite un corte"), no
+    el máximo de la API (131072). Se manda el MENOR de los dos; origen dice
+    cuál fue, para que el error de corte diga qué subir."""
+    limite = await limite_de_salida(
+        entry.transport, entry.provider_id, entry.model, ollama_api=OLLAMA_API_V1,
+    )
+    ((campo, tope),) = limite.items()
+    if entry.max_tokens and entry.max_tokens < tope:
+        return {campo: entry.max_tokens}, "motor"
+    return limite, "catalogo"
+
+
 _TRANSPORT_DISPATCH = {
     "http_openai_compat": _call_http_openai_compat,
     "ollama": _call_http_openai_compat,
@@ -287,11 +312,14 @@ async def _audit_and_notify(
                 if auditor_entry.transport not in ("ollama", "subprocess"):
                     auditor_api_key = await resolve_credential_instrumented(auditor_entry.provider_id or auditor_motor)
                 auditor_reasoning_effort = "none" if (auditor_entry.transport == "ollama" and auditor_entry.disable_reasoning) else None
+                # Contrato del modelo del AUDITOR. Si falta, cae en el except de
+                # abajo como cualquier falla del auditor (log con el motivo).
+                auditor_limite, _ = await _limite_del_motor(auditor_entry)
                 resp = await asyncio.wait_for(
                     _call_http_openai_compat(
                         api_url=auditor_entry.api_url, model=auditor_entry.model, api_key=auditor_api_key,
                         messages=[{"role": "user", "content": audit_prompt}],
-                        timeout=float(AUDIT_TIMEOUT_SECONDS), max_tokens=auditor_entry.max_tokens,
+                        timeout=float(AUDIT_TIMEOUT_SECONDS), limite=auditor_limite,
                         reasoning_effort=auditor_reasoning_effort,
                     ),
                     timeout=AUDIT_TIMEOUT_SECONDS,
@@ -455,6 +483,19 @@ async def run(
                 error=f"Sin credencial válida configurada para '{provider_id}'",
             )
             return
+
+    # PR-K ronda 2: el límite de salida sale del contrato de la fila de `model`
+    # del motor. Sin contrato no se despacha: el job falla con el UPDATE.
+    try:
+        limite_salida, origen_limite = await _limite_del_motor(motor_entry)
+    except ModelDispatchConfigError as exc:
+        store.update(
+            job_id,
+            status=JobStatus.FAILED.value,
+            finished_at=time.time(),
+            error=f"Motor '{motor}': sin contrato de dispatch en el catálogo -- {exc}",
+        )
+        return
 
     # Output schema de la capability
     cap_entry = catalog.get_capability(capability)
@@ -634,7 +675,7 @@ async def run(
                 api_key=api_key,
                 messages=messages,
                 timeout=call_timeout,
-                max_tokens=motor_entry.max_tokens,
+                limite=limite_salida,
                 tools=tools_for_call,
                 reasoning_effort=reasoning_effort,
             )
@@ -735,14 +776,16 @@ async def run(
             # herramientas con argumentos truncados (P10). No se reintenta: con
             # el mismo techo se corta igual (b8f80733: 7232 de 8000 razonando).
             reasoning_tokens = (usage.get("completion_tokens_details") or {}).get("reasoning_tokens")
-            if motor_entry.max_tokens:
+            ((campo_limite, tope_limite),) = limite_salida.items()
+            if origen_limite == "motor":
                 causa = f"Salida cortada por max_tokens ({motor_entry.max_tokens}): "
                 remedio = f"Subir motor.max_tokens de '{motor}'."
             else:
-                # max_tokens=0: el payload no lleva el campo; el corte vino del
-                # límite del proveedor o del contexto.
-                causa = "Salida cortada por el límite del proveedor o del contexto (el motor no declara max_tokens): "
-                remedio = f"Declarar motor.max_tokens de '{motor}'."
+                # PR-K ronda 2: ya no hay "sin límite": si el motor no declara
+                # uno menor, manda el tope del catálogo, que es el máximo de la API.
+                causa = (f"Salida cortada por el tope del catálogo ({campo_limite}={tope_limite}, "
+                         f"model.max_output_tokens de '{motor_entry.model}'): ")
+                remedio = "Es el máximo que acepta la API del modelo: partir la tarea o bajar el razonamiento."
             store.update(
                 job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
                 error=(

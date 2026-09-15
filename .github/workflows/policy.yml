@@ -144,20 +144,29 @@ jobs:
       # que importa httpx a nivel de modulo. Sin el, el job falla en la
       # COLECCION y no en un assert -- el mismo modo de falla que rompio
       # PR#25 en la ronda anterior.
-      - run: pip install pytest aiomysql pydantic httpx
+      # cryptography y PYTHONPATH=.:las_manos (PR-K ronda 2, 2026-09-14):
+      # jacobs/_direct_usage_test.py importa jacobs.executor -> credential_resolver
+      # (pelado, en las_manos/) -> crypto_secrets -> cryptography, y el
+      # contrato_dispatch pelado del symlink de las_manos/. Medido en venv
+      # limpio: sin PYTHONPATH no colecta.
+      - run: pip install pytest aiomysql pydantic httpx cryptography
       # El guard de "no correr sin DB" es un skipif: un skip masivo se ve
-      # como verde. Se exige que los 6 tests CORRAN de verdad.
-      - run: python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py -v
+      # como verde. Se exige que los tests CORRAN de verdad.
+      - run: PYTHONPATH=.:las_manos python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py jacobs/_direct_usage_test.py -v
       - run: |
-          python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py \
-            -q 2>&1 | tee /tmp/out
+          PYTHONPATH=.:las_manos python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py \
+            jacobs/_direct_usage_test.py -q 2>&1 | tee /tmp/out
           # 6 -> 8 el 2026-09-11: _store_indexes_test.py aporta 2 (los indices
           # de las columnas por las que se filtra, y que init_tables() los cree
           # de forma idempotente). Corre aca y no en tests-puros porque necesita
           # una base VACIA: comprueba que las migraciones crean los indices en
           # un entorno nuevo, que es justo donde un ALTER a mano no llega.
-          grep -qE "^8 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 8 -> 15 el 2026-09-14 (PR-K ronda 2, I4): jacobs/_direct_usage_test.py
+          #   (+7) -- conteo de tokens de los caminos directos del executor
+          #   (gemini, openai-compat, ollama) y el registro de usage del step.
+          #   Ningun job lo corria: 2 de sus tests necesitan MariaDB (jacobs/store).
+          grep -qE "^15 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 15 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -538,6 +547,8 @@ jobs:
           tests/test_catalog_from_db_timeout.py
           tests/test_aiomysql_connect_timeout_tripwire.py
           tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
+          tests/test_motor_contrato_dispatch.py
+          las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -561,6 +572,8 @@ jobs:
             tests/test_catalog_from_db_timeout.py \
             tests/test_aiomysql_connect_timeout_tripwire.py \
             tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
+            tests/test_motor_contrato_dispatch.py \
+            las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -688,8 +701,25 @@ jobs:
           #   limite de la fila (+2); tripwire: ningun nombre de modelo literal en
           #   jacobs/plan.py, con su control (+2). 9 vistos en rojo contra el codigo de
           #   la ronda 0; validados por mutacion.
-          grep -qE "^206 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 206 tests CORRIDOS."; exit 1; }
+          # 206 -> 276 el 2026-09-14 (PR-K ronda 2, revisión con cambios pedidos):
+          #   test_contrato_dispatch_repl_ada.py (+17: el REPL despacha al proveedor
+          #   y la URL del MODELO del binding o se bloquea visible; transporte y no
+          #   proveedor decide el contrato; Ollama nativo manda options.num_predict y
+          #   _llm_plan el menor con su presupuesto; fallback de cerebros registrado
+          #   en jacobs_events y HTTP != 200 de Ada en ERROR; modo pesado de config;
+          #   sin nombres de modelo literales en plan.py ni main.py),
+          #   test_payload_max_tokens_literal_tripwire.py (+2: .update, .setdefault,
+          #   constante de modulo y num_predict, con su control),
+          #   test_repl_modelos_permitidos.py (+8: aplicar_registro toma proveedor,
+          #   URL y camino del modelo; bloquea si no coinciden),
+          #   test_motor_contrato_dispatch.py (+7, nuevo: Motor Registry con el
+          #   contrato de la fila, thot -> max_completion_tokens/128000, el menor con
+          #   motor.max_tokens, Ollama /v1 -> max_tokens, sin contrato el job falla),
+          #   las_manos/_worker_max_tokens_test.py + _worker_tool_loop_test.py (+36:
+          #   ningun job los corria; se les inyecta el contrato como al resto).
+          #   39 vistos en rojo contra el codigo de la ronda 1; 5 mutaciones rojas.
+          grep -qE "^276 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 276 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -764,5 +794,8 @@ jobs:
           #   ADA_MODEL sin contrato falla con los dos UPDATE, fila ausente falla, y el
           #   EXPLAIN de la consulta usa uk_provider_model. Solo lee. Validado por
           #   mutacion (sin provider_id en el WHERE cae el del EXPLAIN).
-          grep -qE "^19 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 19 tests CORRIDOS."; exit 1; }
+          # 19 -> 20 el 2026-09-14 (PR-K ronda 2): test_contrato_dispatch_db.py (+1) --
+          #   cargar_registro trae transporte, proveedor y URL del MODELO del binding
+          #   contra el esquema y la semilla reales.
+          grep -qE "^20 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 20 tests CORRIDOS."; exit 1; }

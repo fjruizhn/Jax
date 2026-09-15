@@ -38,6 +38,9 @@ class _Resp:
     def json(self):
         return self._payload
 
+    def raise_for_status(self):
+        return None
+
 
 class _StreamResp:
     status_code = 200
@@ -72,8 +75,10 @@ class _Captura:
             cap.bodies.append(json)
             cap.urls.append(url)
             cap.headers.append(kw.get("headers"))
-            if "generativelanguage" in url:
+            if "generativelanguage" in url or ":generateContent" in url:
                 return _Resp({"candidates": [{"content": {"parts": [{"text": "hola"}]}}]})
+            if url.endswith("/api/chat"):
+                return _Resp({"model": "m", "message": {"content": "hola"}})
             return _Resp({"model": "m", "choices": [{"message": {"content": "hola"}}]})
 
         @asynccontextmanager
@@ -186,15 +191,38 @@ class NoOpenAICompatTest(_Base):
         self.assertNotIn("max_completion_tokens", body)
         self.leer.assert_not_awaited()
 
-    async def test_el_helper_rechaza_un_proveedor_no_openai_compat_con_su_parametro(self):
+    async def test_el_helper_rechaza_un_transporte_sin_limite_con_su_parametro(self):
+        # Ronda 2 (I3): se decide por TRANSPORTE, como la Mesa web.
         self.arrancar(("max_tokens", 1))
-        for proveedor, propio in (("gemini", "generationConfig.maxOutputTokens"),
-                                  ("ollama", "options.num_predict"),
-                                  ("anthropic", "max_tokens (obligatorio")):
+        for transporte, propio in (("http_gemini", "generationConfig.maxOutputTokens"),
+                                   ("subprocess", "max_tokens (obligatorio")):
             with self.assertRaises(cd.ModelDispatchConfigError) as ctx:
-                await cd.limite_de_salida(proveedor, "x")
-            self.assertIn(propio, str(ctx.exception), proveedor)
+                await cd.limite_de_salida(transporte, "p", "x")
+            self.assertIn(propio, str(ctx.exception), transporte)
         self.leer.assert_not_awaited()
+
+    async def test_ollama_nativo_manda_num_predict_y_v1_max_tokens_solo_con_el_tope(self):
+        # Ollama no usa max_tokens_param (NULL): el nombre lo fija el endpoint.
+        self.arrancar((None, 4096))
+        self.assertEqual(await cd.limite_de_salida("ollama", "ollama", "qwen"),
+                         {"options": {"num_predict": 4096}})
+        self.assertEqual(await cd.limite_de_salida("ollama", "ollama", "qwen", ollama_api=cd.OLLAMA_API_V1),
+                         {"max_tokens": 4096})
+
+    async def test_ollama_sin_tope_falla_con_el_update(self):
+        self.arrancar(("max_tokens", None))
+        with self.assertRaises(cd.ModelDispatchConfigError) as ctx:
+            await cd.limite_de_salida("ollama", "ollama", "qwen")
+        self.assertIn("UPDATE model SET max_output_tokens", str(ctx.exception))
+
+    async def test_fila_ausente_no_sugiere_agregarla_bajo_otro_proveedor(self):
+        # Ronda 2 (I1): "agregalo al catálogo" a secas habilitaba un dispatch cruzado.
+        self.arrancar(None)
+        with self.assertRaises(cd.ModelDispatchConfigError) as ctx:
+            await cd.limite_de_salida("http_openai_compat", "deepseek", "gpt-x")
+        texto = str(ctx.exception)
+        self.assertIn("NO lo agregues bajo 'deepseek'", texto)
+        self.assertNotIn("Agregalo al catálogo", texto)
 
 
 def _facet_ada(**kw):
@@ -247,9 +275,9 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_binding_sin_contrato_no_despacha_y_da_error_con_el_update(self):
         self.arrancar((None, None))
-        with self.assertLogs("jacobs.plan", level="ERROR") as logs:
-            resultado = await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
-        self.assertIsNone(resultado)
+        with self.assertLogs("jacobs.plan", level="ERROR") as logs, \
+                self.assertRaises(self.plan.CerebroNoDisponible):
+            await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
         self.assertEqual(self.cap.bodies, [], "Ada no puede despachar sin contrato")
         salida = "\n".join(logs.output)
         self.assertIn("UPDATE model SET max_tokens_param", salida)
@@ -258,18 +286,18 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
     async def test_faceta_no_resoluble_no_despacha_y_da_error(self):
         from facet_resolver import FacetUnavailableError
         self.arrancar(("max_tokens", 1), facet_error=FacetUnavailableError("ada"))
-        with self.assertLogs("jacobs.plan", level="ERROR") as logs:
-            resultado = await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
-        self.assertIsNone(resultado)
+        with self.assertLogs("jacobs.plan", level="ERROR") as logs, \
+                self.assertRaises(self.plan.CerebroNoDisponible):
+            await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
         self.assertEqual(self.cap.bodies, [])
         self.assertIn("faceta no resoluble", "\n".join(logs.output))
         self.leer.assert_not_awaited()
 
     async def test_binding_con_otro_transporte_no_despacha_y_da_error(self):
         self.arrancar(("max_tokens", 1), facet=_facet_ada(transport="http_gemini"))
-        with self.assertLogs("jacobs.plan", level="ERROR") as logs:
-            resultado = await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
-        self.assertIsNone(resultado)
+        with self.assertLogs("jacobs.plan", level="ERROR") as logs, \
+                self.assertRaises(self.plan.CerebroNoDisponible):
+            await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
         self.assertEqual(self.cap.bodies, [])
         self.assertIn("http_gemini", "\n".join(logs.output))
 
@@ -281,13 +309,66 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         qwen = AsyncMock(return_value=[{"facet": "jekyll", "capability": "analysis", "prompt": "x"}])
         b._llm_plan = qwen
         b._from_spec = lambda pipeline_id, specs, caps: specs
+        from jacobs import store
+        evento = AsyncMock()
         with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
+                patch.object(store, "event_append", evento), \
                 self.assertLogs("jacobs.plan", level="INFO") as logs:
             specs = await b._from_objective("p", "x" * 250, 3, {"capabilities": {}})
         self.assertEqual(specs[0]["facet"], "jekyll")
         qwen.assert_awaited_once()
         errores = [l for l in logs.output if l.startswith("ERROR")]
         self.assertTrue(any("UPDATE model SET max_tokens_param" in l for l in errores), logs.output)
+        # Ronda 2 (M2): el pipeline registra que el plan salió de qwen, y por qué.
+        evento.assert_awaited_once()
+        pipeline_id, tipo, payload = evento.await_args.args
+        self.assertEqual((pipeline_id, tipo), ("p", "PLAN_CEREBRO_FALLBACK"))
+        self.assertEqual((payload["de"], payload["a"]), ("ada", "qwen"))
+        self.assertIn("UPDATE model SET max_tokens_param", payload["motivo"])
+
+    async def test_ada_http_no_200_es_error_y_queda_como_motivo_del_evento(self):
+        """Ronda 2 (M2): un 400 del proveedor (p. ej. "max_tokens is too
+        large") era un WARNING; ahora ERROR, y el motivo llega al evento."""
+        self.arrancar(("max_tokens", 131072))
+
+        class _Resp400:
+            status_code = 400
+
+            async def aread(self):
+                return b"max_tokens is too large"
+
+        @asynccontextmanager
+        async def stream_400(client_self, method, url, json=None, **kw):
+            yield _Resp400()
+
+        b = self.plan.PlanBuilder()
+        b._llm_plan = AsyncMock(return_value=[{"facet": "jekyll", "capability": "analysis", "prompt": "x"}])
+        b._from_spec = lambda pipeline_id, specs, caps: specs
+        from jacobs import store
+        evento = AsyncMock()
+        with patch.object(httpx.AsyncClient, "stream", stream_400), \
+                patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
+                patch.object(store, "event_append", evento), \
+                self.assertLogs("jacobs.plan", level="ERROR") as logs:
+            await b._from_objective("p", "x" * 250, 3, {"capabilities": {}})
+        self.assertTrue(any(l.startswith("ERROR") and "Ada HTTP 400" in l for l in logs.output), logs.output)
+        self.assertIn("Ada HTTP 400", evento.await_args.args[2]["motivo"])
+
+    async def test_qwen_tambien_falla_cae_al_plan_fijo_y_lo_registra(self):
+        self.arrancar(("max_tokens", 1))
+        b = self.plan.PlanBuilder()
+        b._llm_plan = AsyncMock(side_effect=self.plan.CerebroNoDisponible("qwen: sin contrato"))
+        b._fallback_plan = lambda objective: [{"facet": "jekyll", "capability": "analysis", "prompt": "fijo"}]
+        b._from_spec = lambda pipeline_id, specs, caps: specs
+        from jacobs import store
+        evento = AsyncMock()
+        with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
+                patch.object(store, "event_append", evento):
+            specs = await b._from_objective("p", "corto", 3, {"capabilities": {}})
+        self.assertEqual(specs[0]["prompt"], "fijo")
+        _, tipo, payload = evento.await_args.args
+        self.assertEqual((tipo, payload["de"], payload["a"]), ("PLAN_CEREBRO_FALLBACK", "qwen", "fallback_plan"))
+        self.assertIn("sin contrato", payload["motivo"])
 
 
 class ExecutorOpenAICompatTest(unittest.IsolatedAsyncioTestCase):
@@ -340,14 +421,167 @@ class PlanSinModeloLiteralTest(unittest.TestCase):
                 if isinstance(n, ast.Constant) and isinstance(n.value, str)
                 and self.PATRON.search(n.value.lower())]
 
-    def test_plan_py_no_tiene_nombres_de_modelo_literales(self):
+    def test_plan_py_y_main_py_no_tienen_nombres_de_modelo_literales(self):
+        # Ronda 2 (M4): también jax/core/main.py (el modelo pesado era literal).
         from pathlib import Path
-        fuente = (Path(__file__).resolve().parents[1] / "jacobs" / "plan.py").read_text(encoding="utf-8")
-        self.assertEqual(self._literales(fuente), [])
+        raiz = Path(__file__).resolve().parents[1]
+        for rel in ("jacobs/plan.py", "jax/core/main.py"):
+            fuente = (raiz / rel).read_text(encoding="utf-8")
+            self.assertEqual(self._literales(fuente), [], rel)
 
     def test_el_detector_ve_un_modelo_literal(self):
         self.assertEqual(len(self._literales('A = "glm-5.2"\nB = "gpt-5.6-terra"\nC = "qwen3:14b"\n')), 3)
         self.assertEqual(self._literales('A = "kimi (coding)"\n# "glm-5.2" en comentario\n'), [])
+
+
+# ---------------------------------------------------------------------------
+# Ronda 2
+# ---------------------------------------------------------------------------
+
+def _cfg_repl(personalidades):
+    return {"jax": {"timeout_seconds": 10}, "personalities": personalidades}
+
+
+class ReplProveedorDelModeloTest(_Base):
+    """I1: el REPL despacha al proveedor y la URL del MODELO del binding, nunca
+    a la URL del proveedor que dice config.toml."""
+
+    def _muscle(self, registro, personalidad):
+        from jax.core.main import build_muscles
+        from jax.core.registro_facetas import aplicar_registro
+        cfg = _cfg_repl({"jekyll": {"system_prompt": "s", **personalidad}})
+        aplicar_registro(cfg, registro)
+        return build_muscles(cfg)["jekyll"]
+
+    async def test_binding_de_otro_proveedor_despacha_a_la_url_del_modelo(self):
+        self.arrancar(("max_completion_tokens", 128000))
+        m = self._muscle(
+            {"jekyll": {"model": "gpt-x", "models_allowed": ["gpt-x"], "transport": "http_openai_compat",
+                        "provider_modelo": "openai", "base_url_modelo": "https://api.openai.example/v1"}},
+            {"type": "http", "provider": "deepseek", "model_default": "deepseek-flash",
+             "models_allowed": ["deepseek-flash"]},
+        )
+        await m.invoke("hola")
+        self.assertEqual(self.cap.urls, ["https://api.openai.example/v1/chat/completions"])
+        self.leer.assert_awaited_once_with("openai", "gpt-x")
+        self.assertEqual(self.cap.bodies[0]["max_completion_tokens"], 128000)
+
+    async def test_proveedor_no_configurado_da_error_visible_y_no_despacha(self):
+        self.arrancar(("max_tokens", 1))
+        m = self._muscle(
+            {"jekyll": {"model": "claude-x", "models_allowed": ["claude-x"], "transport": "subprocess",
+                        "provider_modelo": "anthropic", "base_url_modelo": None}},
+            {"type": "http", "provider": "deepseek", "model_default": "deepseek-flash",
+             "models_allowed": ["deepseek-flash"]},
+        )
+        with self.assertRaises(base.DispatchConfigMuscleError) as ctx:
+            await m.invoke("hola")
+        self.assertIn("subprocess", str(ctx.exception))
+        self.assertEqual(self.cap.bodies, [], "nunca a la URL del TOML")
+        self.leer.assert_not_awaited()
+
+
+class OllamaNumPredictTest(_Base):
+    """M3: los caminos Ollama nativos mandan options.num_predict del contrato."""
+
+    async def test_ollama_muscle_manda_num_predict_de_la_fila(self):
+        from jax.muscles.ollama_muscle import OllamaMuscle
+        self.arrancar((None, 4096))
+        m = OllamaMuscle("jax_local", "qwen-x", ["qwen-x"], "s", 10, api_url="http://ollama.example/api/chat")
+        m.provider_id = "ollama"
+        await m.invoke("hola")
+        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 4096})
+        self.leer.assert_awaited_once_with("ollama", "qwen-x")
+
+    async def test_ollama_muscle_sin_tope_no_despacha(self):
+        from jax.muscles.ollama_muscle import OllamaMuscle
+        self.arrancar((None, None))
+        m = OllamaMuscle("jax_local", "qwen-x", ["qwen-x"], "s", 10, api_url="http://ollama.example/api/chat")
+        m.provider_id = "ollama"
+        with self.assertRaises(base.DispatchConfigMuscleError) as ctx:
+            await m.invoke("hola")
+        self.assertIn("UPDATE model SET max_output_tokens", str(ctx.exception))
+        self.assertEqual(self.cap.bodies, [])
+
+
+class JacobsOllamaNumPredictTest(unittest.IsolatedAsyncioTestCase):
+    def arrancar(self, fila):
+        import contrato_dispatch as cd_jacobs
+        from jacobs import executor, plan
+        self.executor, self.plan = executor, plan
+        self.cap = _Captura()
+        self.leer = AsyncMock(return_value=fila)
+        for p in [
+            patch.object(httpx.AsyncClient, "post", self.cap.patches()[0].new),
+            patch.object(executor, "record_resolved_version_safe", AsyncMock()),
+            patch.object(plan, "record_resolved_version_safe", AsyncMock()),
+            patch.object(cd_jacobs, "_leer_contrato", self.leer),
+        ]:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _local(self):
+        return _facet_ada(key="jax_local", provider_id="ollama", model="qwen-x", transport="ollama",
+                          base_url="http://ollama.example/v1", credential="")
+
+    async def test_invoke_ollama_manda_num_predict_de_la_fila(self):
+        self.arrancar((None, 4096))
+        await self.executor._invoke_ollama(self._local(), "hola", 10)
+        self.assertEqual(self.cap.bodies[0]["options"], {"num_predict": 4096})
+        self.leer.assert_awaited_once_with("ollama", "qwen-x")
+
+    async def test_llm_plan_manda_el_menor_entre_su_presupuesto_y_el_tope(self):
+        from jacobs import plan
+        with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local())):
+            self.arrancar((None, 1000))
+            await plan.PlanBuilder()._llm_plan("o", 3)
+            self.assertEqual(self.cap.bodies[0]["options"]["num_predict"], 1000)
+
+    async def test_llm_plan_con_tope_mayor_manda_su_presupuesto(self):
+        from jacobs import plan
+        with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local())):
+            self.arrancar((None, 10 ** 6))
+            await plan.PlanBuilder()._llm_plan("o", 3)
+            self.assertEqual(self.cap.bodies[0]["options"]["num_predict"], plan._LLM_PLAN_NUM_PREDICT)
+
+    async def test_llm_plan_sin_contrato_no_despacha_y_da_error(self):
+        from jacobs import plan
+        with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local())):
+            self.arrancar((None, None))
+            with self.assertLogs("jacobs.plan", level="ERROR"), self.assertRaises(plan.CerebroNoDisponible):
+                await plan.PlanBuilder()._llm_plan("o", 3)
+            self.assertEqual(self.cap.bodies, [])
+
+
+class ModoPesadoTest(unittest.TestCase):
+    """M4: el modelo pesado es configuración y tiene que estar en el catálogo."""
+
+    def _cfg(self, **modo):
+        return {"jax": {"modo_pesado": modo},
+                "personalities": {"jekyll": {"models_allowed": ["base-1", "pesado-1"]}}}
+
+    def test_sale_de_la_configuracion(self):
+        from jax.core.main import resolver_modo_pesado
+        self.assertEqual(resolver_modo_pesado(self._cfg(faceta="jekyll", modelo="pesado-1")),
+                         ("jekyll", "pesado-1", ""))
+
+    def test_modelo_fuera_del_catalogo_no_se_activa(self):
+        from jax.core.main import resolver_modo_pesado
+        faceta, modelo, motivo = resolver_modo_pesado(self._cfg(faceta="jekyll", modelo="otro"))
+        self.assertIsNone(faceta)
+        self.assertIn("no está entre los modelos permitidos", motivo)
+
+    def test_sin_configuracion_lo_dice(self):
+        from jax.core.main import resolver_modo_pesado
+        self.assertIn("no configurado", resolver_modo_pesado({"jax": {}, "personalities": {}})[2])
+
+    def test_config_toml_lo_declara(self):
+        import tomllib
+        from pathlib import Path
+        cfg = tomllib.loads((Path(__file__).resolve().parents[1] / "config" / "config.toml").read_text(encoding="utf-8"))
+        modo = cfg["jax"]["modo_pesado"]
+        self.assertIn(modo["faceta"], cfg["personalities"])
+        self.assertTrue(modo["modelo"])
 
 
 class ModuloUnicoTest(unittest.TestCase):

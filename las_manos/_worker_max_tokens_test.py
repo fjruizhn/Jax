@@ -100,6 +100,10 @@ def _fake_response(*, content, reasoning_content=None, reasoning=None, finish_re
 
 class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        import contrato_dispatch  # PR-K ronda 2: el worker lee el contrato de la fila de `model`
+        _pc = patch.object(contrato_dispatch, "_leer_contrato", AsyncMock(return_value=("max_tokens", 131072)))
+        _pc.start()
+        self.addCleanup(_pc.stop)
         self._tmpdir = tempfile.TemporaryDirectory()
         self.store = JobStore(str(Path(self._tmpdir.name) / "jobs.jsonl"))
         self.catalog = MotorCatalog(_MOTOR_CFG)

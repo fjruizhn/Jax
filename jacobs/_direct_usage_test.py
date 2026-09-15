@@ -171,7 +171,10 @@ class InvokeOllamaTokensTest(unittest.IsolatedAsyncioTestCase):
             model="qwen3-coder:30b", transport="ollama", credential="",
         )
 
-        with patch("httpx.AsyncClient.post", fake_post):
+        # PR-K ronda 2: options.num_predict sale de la fila de `model`.
+        import contrato_dispatch
+        with patch("httpx.AsyncClient.post", fake_post), \
+                patch.object(contrato_dispatch, "_leer_contrato", AsyncMock(return_value=(None, 4096))):
             result = await executor._invoke_ollama(f, "prompt", timeout=30)
 
         self.assertEqual(result["tokens_in"], 55)
