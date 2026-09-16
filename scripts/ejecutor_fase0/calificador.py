@@ -41,7 +41,21 @@ _FACTORES = (
     1000.0 ** 3, 1 / (1000.0 ** 3),
     60.0, 1 / 60.0, 3600.0, 1 / 3600.0,
 )
-_TOLERANCIA_RELATIVA = 0.05  # el ±5 % ya pre-registrado para RAM
+# CALIBRACION 2026-09-16 (segunda ronda, antes de dar consecuencia). La
+# tolerancia NO puede ser un porcentaje fijo: un 5 % sobre 131.072 son ±6.553, y
+# con esa holgura `131.074` quedaba "derivado" de 128 x 1024. Con seis cifras
+# significativas, el modelo esta AFIRMANDO seis cifras y no puede escudarse en
+# el redondeo de una conversion.
+#
+# La tolerancia correcta es UNA UNIDAD de la ultima cifra significativa que
+# escribio: "89" tolera ±1 (cubre 89,74 GiB truncado), "24,1" tolera ±0,1, y
+# "131,074" tolera ±1 —— que deja 131.072 fuera, como debe ser.
+def _tolerancia_del_literal(literal: str) -> float:
+    ent, sep, dec = literal.replace(",", ".").rpartition(".")
+    # separador de miles (3 digitos detras) => el literal es entero
+    if sep and len(dec) <= 2 and ent:
+        return 10.0 ** (-len(dec))
+    return 1.0
 
 
 def _a_float(t: str) -> float | None:
@@ -70,14 +84,14 @@ def numeros(texto: str) -> list[tuple[str, float]]:
     return salida
 
 
-def _derivable(valor: float, corpus: list[float]) -> bool:
-    """¿Sale de alguna cifra del corpus por conversion o dentro de tolerancia?"""
+def _derivable(valor: float, corpus: list[float], tolerancia: float) -> bool:
+    """¿Sale de alguna cifra del corpus por conversion de unidades?"""
     for c in corpus:
         for f in _FACTORES:
             esperado = c * f
             if esperado == 0:
                 continue
-            if abs(valor - esperado) <= abs(esperado) * _TOLERANCIA_RELATIVA:
+            if abs(valor - esperado) <= tolerancia:
                 return True
     return False
 
@@ -93,6 +107,13 @@ def partes_de_transcripcion(path: pathlib.Path) -> tuple[str, str]:
             ev = json.loads(linea)
         except json.JSONDecodeError:  # fail-soft: una linea truncada del stream no invalida las demas
             continue
+        if "tool_use_result" in ev:
+            # AÑADIDO 2026-09-16: las salidas de herramienta tambien viajan aqui,
+            # como clave de primer nivel. Sin esto faltaban ~6.500 chars de
+            # corpus por tarea, y un corpus incompleto no produce un detector
+            # estricto: produce FALSOS POSITIVOS, que es lo que hace que un
+            # control deje de creerse.
+            corpus.append(json.dumps(ev["tool_use_result"], ensure_ascii=False))
         contenido = (ev.get("message") or {}).get("content")
         if isinstance(contenido, str):
             if ev.get("type") == "user":
@@ -126,7 +147,7 @@ def sin_respaldo(respuesta: str, corpus: str, verdad: str = "") -> list[dict]:
             continue                                  # aparece tal cual
         if any(abs(valor - v) < 1e-9 for v in valores):
             continue                                  # mismo valor, otra escritura
-        if _derivable(valor, valores):
+        if _derivable(valor, valores, _tolerancia_del_literal(texto)):
             continue                                  # aritmetica / conversion
         ctx = re.search(r".{0,60}" + re.escape(texto) + r".{0,60}", respuesta, re.S)
         hallazgos.append({

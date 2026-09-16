@@ -263,3 +263,36 @@ def test_calificador_toma_el_ultimo_texto_como_respuesta_final():
     _, respuesta = c.partes_de_transcripcion(p)
     p.unlink()
     assert respuesta == "ultimo"
+
+
+@pytest.mark.parametrize("literal,esperado", [
+    ("89", 1.0),        # entero: una unidad
+    ("24,1", 0.1),      # un decimal
+    ("1.25", 0.01),     # dos decimales
+    ("131,074", 1.0),   # separador de miles: sigue siendo entero
+])
+def test_calificador_tolerancia_por_cifras_significativas(literal, esperado):
+    """Un 5 % fijo sobre 131.072 son ±6.553: con esa holgura casi todo deriva
+    de casi todo. Si el modelo escribe seis cifras, afirma seis cifras."""
+    assert c._tolerancia_del_literal(literal) == pytest.approx(esperado)
+
+
+def test_calificador_marca_el_caso_real_de_la_tarea_3():
+    """El contexto que Qwen reporto (131,074) contra el que dice su propia
+    salida (131072). No puede quedar 'derivado' de 128 x 1024."""
+    h_ = c.sin_respaldo("| **Contexto** | 131,074 tokens |", "128\ncontext_length: 131072")
+    assert len(h_) == 1 and h_[0]["valor"] == 131074.0
+
+
+def test_calificador_lee_tool_use_result_de_nivel_1():
+    """Las salidas tambien viajan como clave de primer nivel. Un corpus
+    incompleto no da un detector estricto: da falsos positivos."""
+    p = _transcripcion_tmp([
+        {"type": "user", "tool_use_result": {"stdout": "context_length: 131072"}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "el contexto es 131072"}]}},
+    ])
+    corpus, respuesta = c.partes_de_transcripcion(p)
+    p.unlink()
+    assert "131072" in corpus
+    assert c.sin_respaldo(respuesta, corpus) == []
