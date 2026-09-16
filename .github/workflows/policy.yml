@@ -617,6 +617,11 @@ jobs:
             tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
             tests/test_motor_contrato_dispatch.py \
             tests/test_ejecutor_fase0.py \
+            tests/test_jacobs_ref_ilegible_no_es_exito.py \
+            tests/test_memoria_no_traga_fallos_de_escritura.py \
+            tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
+            tests/test_health_de_las_manos_puede_fallar.py \
+            tests/test_degradaciones_declaradas.py \
             las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
             tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py \
             tests/test_store_indice_duenio.py \
