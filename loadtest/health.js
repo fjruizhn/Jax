@@ -30,6 +30,26 @@
 // USO:  k6 run loadtest/health.js
 //       k6 run -e URL=http://127.0.0.1:8080/api/health -e VUS=100 loadtest/health.js
 //
+// QUE SIGNIFICA EL VERDE, desde el 2026-09-16. Hasta esa fecha /health
+// devolvia {"status": "alive"} FIJO: respondia "vivo" por el mero hecho de
+// poder responder. Estos numeros median FastAPI devolviendo un literal, no el
+// servicio -- con la base caida, el endpoint seguia en 200 y este guion seguia
+// en verde. Ahora /health comprueba lo que LAS MANOS necesita para trabajar
+// (que la base responda y que el log forense sea escribible) y devuelve 503 si
+// algo falta, asi que:
+//
+//   - un rojo aqui puede significar DOS cosas distintas: que el servicio se
+//     degrada bajo carga, o que una dependencia esta caida desde antes de
+//     empezar. El cuerpo de la respuesta dice cual, en "problemas".
+//   - las comprobaciones van cacheadas 5 s (_SALUD_TTL_SEGUNDOS en server.py),
+//     asi que 20.000 req/s NO son 20.000 consultas: son una cada 5 s. Si ese
+//     TTL sube mucho, este guion deja de ver una caida que ocurra durante la
+//     meseta de 20 s.
+//
+// Los limites de abajo se midieron contra el endpoint VIEJO (2026-09-11). El
+// camino nuevo agrega un dict y, una vez cada 5 s, una consulta -- pendiente
+// volver a medir para confirmar que p95 < 50 ms sigue holgado.
+//
 // ADVERTENCIA: contra produccion, esto ES trafico de produccion.
 
 import http from 'k6/http';
