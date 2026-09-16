@@ -102,6 +102,28 @@ El transporte valida antes de entregar. Lo que no cita, **no sale**.
 
 ### 2.2 Por qué esto es barato, y no un detector de verdad
 
+> **⚠️ REFUTADO POR MEDICIÓN — 2026-09-16 (Mr. Hyde, al medir V1 y V2 contra el corpus de U3).**
+> Esta sección afirma que verificar una cita «es una búsqueda de subcadena» y que por eso «no hay
+> nada que calibrar». **Las dos cosas resultaron falsas.** Se deja el texto original debajo, sin
+> borrar, porque es el registro de lo que se creyó (protocolo de la Memoria Viva).
+>
+> 1. **El diseño nunca ligó la afirmación a su cita.** `verificar` comprueba que la línea citada
+>    exista, no que respalde lo afirmado. Reproducido: `texto="el servidor está en Marte"`
+>    citando una línea real de `free -h` → **`respaldada`**. En la práctica, **V1 = 0 de 11**.
+> 2. **Aun ligándolas, el literal produce falsos positivos masivos sobre trabajo correcto:**
+>    **16 de 42** datos correctos de las tareas limpias no tienen línea literal — unidades
+>    (`1863 GB` contra `1863G`), traducciones (`1 ago 2026` contra `Aug  1`), conteos
+>    (`14 servicios con SSL`: ninguna línea imprime un conteo), dos líneas juntadas en una.
+>    Eso es exactamente el «freno que molesta y se termina apagando» que esta sección decía
+>    eliminar. **Los falsos positivos no venían de un umbral: vienen de la regla literal.**
+> 3. **Tres de las 11 invenciones citan una línea real y concluyen algo falso** (#8: el `3001`
+>    marcado público porque `0.0.0.0` aparece en la columna del par; #9 y #11: `noble` y
+>    `24.04.5 LTS` están en `os-release`). Ningún esquema de citas atrapa eso: es el riesgo 2,
+>    ahora **medido** en vez de firmado a ciegas.
+>
+> Detalle y cifras: `scripts/ejecutor_fase2/reproducir_u3.py` y la decisión de rediseño que se
+> tome a partir de esto.
+
 Verificar una cita es una **búsqueda de subcadena** contra el stdout capturado: o la línea está
 literal en la salida o no está. No hay juicio, no hay umbral, no hay calibración.
 
