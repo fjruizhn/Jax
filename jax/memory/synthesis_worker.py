@@ -123,7 +123,7 @@ async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
         raw = await synthesizer.invoke(
             SYNTHESIS_PROMPT.format(facts=facts_text), decorate=False
         )
-    except Exception as e:
+    except Exception as e:  # fail-soft: no se pierde nada — los insights son derivados de facts que siguen en la base y el scope no se marca procesado, asi que la proxima corrida vuelve a sintetizarlo
         logger.error(f"scope user={user_id} project={project_id}: synthesizer fallo: {e}")
         return 0
 

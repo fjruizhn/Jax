@@ -184,7 +184,7 @@ def _get_reranker():
             os.environ.setdefault("HF_HOME", "/opt/jax/hf-cache")
             from sentence_transformers import CrossEncoder
             _reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-        except Exception as e:
+        except Exception as e:  # fail-soft: el reranker es opcional (item #7); sin el paquete o sin el modelo se devuelve None y el caller conserva el orden por distancia cosine, que ya es un orden valido
             logger.warning(f"reranker no disponible ({e}), se sigue sin reranking")
             _reranker = False
     return _reranker or None
@@ -364,7 +364,7 @@ class MemoryDB:
             # catalogo) y fail-soft. Ver jax/memory/migrations.py.
             await ensure_schema(self.pool)
             return True
-        except Exception as e:
+        except Exception as e:  # fail-soft: no se traga el fallo, se reporta como return False y self.pool=None; el caller decide si arranca sin memoria (JAX debe arrancar aunque la DB no responda)
             logger.error(f"MemoryDB no pudo conectar: {e}")
             self.pool = None
             return False
@@ -375,7 +375,7 @@ class MemoryDB:
         if self._pending_tasks:
             try:
                 await asyncio.wait(self._pending_tasks, timeout=3.0)
-            except Exception as e:
+            except Exception as e:  # fail-soft: es el shutdown; las tareas en vuelo se perderian igual al cerrar el pool tres lineas mas abajo, y no cerrar el pool por esto dejaria conexiones colgadas
                 logger.error(f"Error esperando tareas pendientes: {e}")
         if self.pool:
             self.pool.close()
@@ -427,7 +427,7 @@ class MemoryDB:
                     f"{len(embedding) if embedding else None}"
                 )
                 return None
-        except Exception as e:
+        except Exception as e:  # fail-soft: el fallo se reporta como return None, los callers lo chequean antes de usarlo, y la fila que queda en vector cero la reintenta backfill_zero_embeddings() en la pasada siguiente del worker
             logger.error(f"get_embedding fallo: {e}")
             return None
 
@@ -847,7 +847,7 @@ class MemoryDB:
             if verify_correction_fn is not None:
                 try:
                     confirmado = await verify_correction_fn(candidate["fact_text"], fact_text)
-                except Exception as e:
+                except Exception as e:  # fail-soft: falla CERRADO hacia la accion destructiva -- si el verificador no confirma no se hace supersede, o sea el fact viejo sigue activo en vez de desaparecer por un error del verificador
                     # Fail-safe: si el chequeo extra falla, NO se aplica la
                     # correccion (el candidato podria ser el equivocado) pero
                     # el fact nuevo ya quedo insertado igual.
@@ -1193,7 +1193,7 @@ class MemoryDB:
                 try:
                     edad_dias = (datetime.now() - r["created_at"]).days
                     return r["distancia"] + decay_lambda * edad_dias
-                except Exception:
+                except Exception:  # fail-soft: el decay solo reordena candidatos y esta apagado por defecto (JAX_MEMORY_DECAY_LAMBDA=0.0); sin fecha usable ese candidato conserva su distancia cosine real
                     return r["distancia"]  # fail-safe: sin fecha usable, no decae
             rows.sort(key=_decayed)
 
@@ -1212,7 +1212,7 @@ class MemoryDB:
                     rows.sort(key=lambda r: r["_rerank_score"], reverse=True)
                     for r in rows:
                         del r["_rerank_score"]
-                except Exception as e:
+                except Exception as e:  # fail-soft: el reranking es opcional (item #7) y solo reordena; si falla, rows queda en el orden por distancia cosine que ya traia de SQL
                     logger.error(f"reranking fallo, se usa el orden previo: {e}")
 
         return rows[:limit]

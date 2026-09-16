@@ -247,7 +247,7 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
             raw = await extractor.invoke(
                 EXTRACTION_PROMPT.format(conversation=chunk), decorate=False
             )
-        except Exception as e:
+        except Exception as e:  # fail-soft: no se pierde el recuerdo — la conversacion NO se marca procesada (return False) y se reextrae entera en la corrida siguiente
             logger.error(f"conv {conv_id}: extractor fallo (chunk {i+1}/{len(chunks)}): {e}")
             return False  # NO marcar procesada: se reintenta ENTERA en la proxima corrida
 
@@ -325,7 +325,7 @@ async def _avisar_si_hay_que_remedir_recall(db: MemoryDB) -> None:
     """
     try:
         filas = await db.contar_filas("messages")
-    except Exception as e:
+    except Exception as e:  # fail-soft: es el tripwire que VIGILA el recall del HNSW, no escribe nada; si no puede contar filas solo se pierde el aviso de esta corrida (se reintenta a los 20 min) y tumbar al vigilante seria peor que no avisar
         logger.error(f"tripwire de recall: no se pudo contar messages: {type(e).__name__}: {e}")
         return
     if filas is None or filas < FILAS_AL_MEDIR_RECALL * 10:

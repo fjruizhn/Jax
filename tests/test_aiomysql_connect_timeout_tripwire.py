@@ -212,7 +212,7 @@ def _hallazgos_en(path: Path) -> list[str]:
             continue
         try:
             nombre = ast.unparse(nodo.func)
-        except Exception:
+        except Exception:  # fail-soft: solo afecta al NOMBRE que se imprime en el hallazgo; el hallazgo se reporta igual con `forma`
             nombre = forma
         tiene_timeout = any(kw.arg == "connect_timeout" for kw in nodo.keywords)
         if not tiene_timeout:

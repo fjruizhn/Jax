@@ -809,7 +809,7 @@ async def main() -> None:
                 )
             except MuscleError as e:
                 print(f"\n{humanizar_error(label, e)}")
-            except Exception as e:  # red de seguridad: nunca tumbar el latido
+            except Exception as e:  # fail-soft: red de seguridad del bucle del REPL — el fallo se le muestra a Fernando con humanizar_error y el turno NO entra al historial ni a la memoria; tumbar el latido por un error de un musculo seria peor
                 print(f"\n{humanizar_error(label, e)}")
     finally:
         # Cierre limpio en CUALQUIER salida: oido, voz, luego memoria.

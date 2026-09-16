@@ -716,7 +716,7 @@ async def run(
 
         try:
             response_json = api_task.result()
-        except Exception as exc:
+        except Exception as exc:  # fail-soft: marca el job FAILED con el error humanizado, avisa de los archivos escritos y reporta uso; ningun turno del motor se da por bueno ante un fallo de API
             # Observabilidad: traceback completo en el log (sin filtrar la API key —
             # format_exc no vuelca variables locales ni headers).
             logger.error(

@@ -103,14 +103,14 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
                 capability=step.capability,
                 raw_output=raw_output,
             )
-        except Exception as _persist_err:  # noqa: BLE001
+        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia de cortesia al repo; el output canonico ya quedo persistido antes de este try
             logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
         return True
 
     except asyncio.TimeoutError:
         await _fail_step(pipeline, step, i, f"Timeout ({step.timeout_seconds}s)")
         return False
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # fail-closed: no traga nada -- _fail_step marca el paso FALLIDO con el error y devuelve False, que corta la ola
         await _fail_step(pipeline, step, i, str(exc))
         return False
 

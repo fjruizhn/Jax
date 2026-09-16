@@ -148,7 +148,7 @@ class FacetClient:
         resp = self.transport.post(path, json=envelope)
         try:
             body = resp.json()
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001  # fail-soft: la respuesta no era JSON; se conserva el texto crudo en body['raw'] y el status_code intacto, que es la autoridad que miran los llamadores — no hay valor por defecto inventado
             body = {"raw": resp.text}
         return FacetResponse(status_code=resp.status_code, body=body)
 

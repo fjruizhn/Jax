@@ -98,7 +98,7 @@ class EarEngine:
         except asyncio.TimeoutError:
             self.last_reason = "el oido tardo demasiado (timeout)"
             return None
-        except Exception as e:
+        except Exception as e:  # fail-soft: devuelve None con el motivo en self.last_reason; nadie toma la ausencia de texto por texto entendido y el oido sigue vivo para el siguiente turno
             self.last_reason = f"error del oido: {e}"
             return None
 

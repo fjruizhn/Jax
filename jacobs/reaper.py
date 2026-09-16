@@ -396,7 +396,7 @@ async def check_usage_reconciliation() -> dict:
         http_expected = await _fetch_http_direct_expected(since)
         http_actual = await _fetch_http_direct_actual(since)
         http_result = _compute_http_direct_gap(http_expected, http_actual)
-    except Exception:
+    except Exception:  # fail-soft: mismo criterio que el bloque Motor Registry de arriba -- un fallo del chequeo HTTP-directo no debe tumbar el reaper ni impedir la alerta del otro camino; el próximo ciclo reintenta
         logger.warning("Reaper: chequeo de reconciliación de usage (HTTP-directo) falló", exc_info=True)
         http_result = {"expected": 0, "reconciled": 0, "missing_by_facet": {}, "gap_pct": 0.0, "error": True}
 

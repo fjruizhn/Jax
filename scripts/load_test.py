@@ -97,7 +97,7 @@ def _una_peticion(url: str, metodo: str, cuerpo: Optional[bytes],
         if e.code >= 500:
             return None, True
         return (time.perf_counter() - t0) * 1000, False
-    except Exception:
+    except Exception:  # fail-soft: no falsea la medicion -- devuelve (None, True), o sea la peticion cuenta como ERROR en tasa_error y su latencia queda FUERA de p50/p95/p99; tragarse un timeout o un reset como exito seria lo que bajaria el p95
         return None, True
 
 

@@ -75,7 +75,7 @@ def _num_parallel_del_log() -> str:
             ["journalctl", "-u", "ollama", "--no-pager", "-n", "5000"],
             capture_output=True, text=True, timeout=20,
         ).stdout
-    except Exception as exc:                       # noqa: BLE001
+    except Exception as exc:                       # noqa: BLE001  # fail-soft: el journal solo aporta contexto (que NUM_PARALLEL eligio Ollama), no entra en ningun numero medido; el fallo se REPORTA como 'indeterminado (<error>)' en vez de inventar un valor, y quedarse sin este dato no justifica abortar la ronda de inferencias
         return f"indeterminado ({type(exc).__name__})"
     for linea in reversed(out.splitlines()):
         if "OLLAMA_NUM_PARALLEL" in linea:
@@ -90,7 +90,7 @@ async def _residentes() -> list[str]:
             r = await client.get(f"{OLLAMA_HOST}/api/ps")
         return [f"{m['name']} ({round(m['size'] / 1e9, 1)}GB)"
                 for m in r.json().get("models", [])]
-    except Exception as exc:                       # noqa: BLE001
+    except Exception as exc:                       # noqa: BLE001  # fail-soft: /api/ps es telemetria de que modelos estan residentes, ajena a tok/s y wall-clock; el fallo se devuelve explicito como 'indeterminado (<error>)' -- nadie aguas abajo lo lee como 'no habia modelos cargados'
         return [f"indeterminado ({type(exc).__name__})"]
 
 

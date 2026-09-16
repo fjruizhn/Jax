@@ -70,7 +70,7 @@ try:
     _HYDE_SYSTEM_PROMPT = (_HYDE_CFG.get("system_prompt") or "").strip()
     if not _HYDE_SYSTEM_PROMPT:
         raise ValueError("system_prompt vacío o ausente en [personalities.hyde]")
-except Exception as _hyde_cfg_err:  # noqa: BLE001
+except Exception as _hyde_cfg_err:  # noqa: BLE001  # fail-soft: es la persona de Hyde (--append-system-prompt), no un control de autoridad -- el sandbox y la aprobación de steps siguen aplicando, el fallback conserva "nada destructivo sin confirmación" y _EVIDENCE_RULE se inyecta aparte en cada step
     logger.warning(
         "Jacobs no pudo leer [personalities.hyde] de %s: %s — Hyde arranca con "
         "prompt mínimo", _PERSONALITIES_PATH, _hyde_cfg_err,
@@ -612,7 +612,7 @@ async def _cancel_motor_job(job_id: str) -> None:
                 "No se pudo cancelar el motor job %s tras vencer su paso: HTTP %s",
                 job_id, resp.status_code,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # fail-soft: el paso ya venció y se reporta fallido por timeout -- cancelar es un aviso best-effort a LAS MANOS, no una condición; el job_id queda en el log de error para cortarlo a mano
         logger.error(
             "No se pudo cancelar el motor job %s tras vencer su paso: %s -- "
             "puede seguir corriendo y cobrando en LAS MANOS",
@@ -996,14 +996,14 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
                 capability=step.capability,
                 raw_output=raw_output,
             )
-        except Exception as _persist_err:  # noqa: BLE001
+        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia .md de cortesía en ~/jax/repo/documents -- el output canónico ya quedó en output_ref y en store.step_upsert antes de este try, nadie lee ese .md
             logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
         return True
 
     except asyncio.TimeoutError:
         await _fail_step(pipeline, step, i, f"Timeout ({step.timeout_seconds}s)")
         return False
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001  # fail-soft: no traga nada -- convierte cualquier error del step en fallo EXPLÍCITO vía _fail_step (status=failed + STEP_FAILED + error) y devuelve False, que es lo que la ola usa para cortar el pipeline
         await _fail_step(pipeline, step, i, str(exc))
         return False
 

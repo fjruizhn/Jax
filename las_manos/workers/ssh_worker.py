@@ -139,7 +139,7 @@ async def ssh_exec(
             "error": f"Timeout tras {timeout}s",
             "host": host,
         }
-    except Exception as e:
+    except Exception as e:  # fail-soft: traduce el fallo a success=False con el error; jamas reporta un comando como ejecutado con exito (server.py y file_worker.py deciden por 'success'), la direccion del error es cerrada
         return {
             "dry_run": False,
             "success": False,
