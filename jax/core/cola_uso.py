@@ -35,6 +35,14 @@ La atomicidad ENTRE procesos la da `os.replace`, no el `asyncio.Lock` de
 modulo: ese lock solo serializa las corrutinas de ESTE proceso. Todo el I/O de
 disco sale del event loop por `asyncio.to_thread`, porque `encolar` se llama en
 el camino del usuario.
+
+Y por eso mismo `encolar` NO escribe bajo `_lock` (Task 11, 2026-09-16): como
+la exclusion entre escrituras ya la da el nombre unico (`<uuid4>.json`) mas el
+`os.replace`, el lock alrededor de los dos `fsync` no protegia nada y si
+serializaba cada turno detras de los demas -- 111 ms a c=25 con la cola VACIA,
+espera pura. `_lock` queda para lo unico que necesita exclusion: el tope
+(contar y descartar la mas vieja, atomicos entre si), que es el camino raro.
+Lo que se paga a cambio esta escrito en el docstring de `encolar`.
 """
 import asyncio
 import json
@@ -78,6 +86,16 @@ CAMPOS_OBLIGATORIOS = tuple(
 ORIGENES = frozenset({"platform", "jacobs", "motor_registry"})
 
 _lock = asyncio.Lock()
+#: Reloj lógico de las mediciones de la profundidad (Task 11). `encolar` mide
+#: el disco y publica DESPUÉS de escribir el archivo, y esa escritura -- con
+#: sus dos `fsync`, ~4,4 ms -- ya no corre bajo `_lock`: dos llamadas
+#: concurrentes pueden TERMINAR en orden distinto al que MIDIERON. Sin el
+#: reloj, la que midió primero y terminó última publicaría un número viejo y
+#: `en_cola` retrocedería -- y eso se mira en Admin -> Costos justo durante una
+#: caída, donde ver la cola bajar cuando en realidad sube es peor que no verla.
+#: `asignada` la reserva el que acaba de mirar el disco; `publicada` es la de
+#: la medición que hoy está en `_estado["en_cola"]`.
+_medicion = {"asignada": 0, "publicada": 0}
 _estado = {
     "en_cola": 0,
     "perdidas_por_desborde": 0,
@@ -103,11 +121,35 @@ def reset_estado() -> None:
         "corruptos": 0,
         "ultimo_error_de_respaldo": None,
     })
+    # El cero se publica como la medición MÁS NUEVA: si no, un `encolar` que
+    # quedó en vuelo desde antes del reset resucitaría su profundidad vieja.
+    _publicar_profundidad(0, _nueva_medicion())
 
 
 def _anotar_error(mensaje: str) -> None:
     _estado["ultimo_error_de_respaldo"] = mensaje
     logger.warning("respaldo de uso: %s", mensaje)
+
+
+def _nueva_medicion() -> int:
+    """Reserva el número de orden de una medición de la profundidad.
+
+    Se pide APENAS TERMINA de mirarse el disco, no antes: lo que ordena las
+    mediciones es cuándo se miró, no cuándo se decidió mirar. Entre medir y
+    reservar no hay ningún `await`, así que el par es atómico para el bucle de
+    eventos.
+    """
+    _medicion["asignada"] += 1
+    return _medicion["asignada"]
+
+
+def _publicar_profundidad(cantidad: int, secuencia: int) -> None:
+    """Deja `cantidad` en `_estado["en_cola"]`, salvo que ya se haya publicado
+    una medición más nueva. Ver `_medicion`."""
+    if secuencia < _medicion["publicada"]:
+        return
+    _medicion["publicada"] = secuencia
+    _estado["en_cola"] = cantidad
 
 
 # --- configuración ----------------------------------------------------------
@@ -409,6 +451,18 @@ async def encolar(fila: dict) -> str | None:
     NUNCA propaga: se llama desde el `except` de `record_usage`, en el camino
     del usuario, con el turno ya cobrado al proveedor y ya respondido. Un 500
     acá no recupera nada y sí le quita la respuesta.
+
+    EL TOPE ES EXACTO EN EL USO SECUENCIAL. Bajo concurrencia se tolera un
+    sobrepaso TRANSITORIO de a lo sumo `(llamadas en vuelo en este proceso) - 1`
+    filas: mientras una cuenta y descarta, las otras escriben sin contar, así
+    que el desborde lo ve una sola. Cuánto: con c=25 son 24 filas sobre 50.000
+    (0,048%, ~7 KB). Por qué se acepta: `_hacer_lugar` deja SIEMPRE el
+    directorio en `tope - 1` porque re-lista el disco real, así que la próxima
+    medición devuelve la cola al tope -- el estado de régimen queda acotado a
+    `[tope - 1, tope + c - 1]` y no deriva. El error es sólo hacia arriba:
+    nunca se descarta de más. La alternativa era serializar la escritura o el
+    conteo, y las dos cuestan cientos de milisegundos por turno del usuario
+    para ahorrar 7 KB durante unos milisegundos.
     """
     try:
         normalizada = _normalizar(fila)
@@ -416,41 +470,74 @@ async def encolar(fila: dict) -> str | None:
         _anotar_error(f"fila de uso inválida, no se encola: {error}")
         return None
 
-    async with _lock:
-        try:
-            directorio = await asyncio.to_thread(directorio_del_respaldo)
-            # UN solo recorrido del directorio, y barato. Antes eran dos
-            # enteros con `stat()` por archivo y `sort` (uno para el tope y
-            # otro para la profundidad), los dos bajo `_lock`, que es de todo
-            # el proceso: el turno k de la caída pagaba O(k) -- costo
-            # cuadrático sobre la caída, y realimentado (cola más profunda,
-            # turnos más lentos). Medido a c=25 el 2026-09-15: 122 ms vacío,
-            # 1.250 ms con 10.000 filas, 6.834 ms en el tope.
-            try:
-                cantidad = await asyncio.to_thread(_contar_barato, directorio)
-            except OSError as error:  # fail-soft: si no se puede recorrer el directorio, igual se intenta escribir la fila -- perderla sería peor
-                # La profundidad queda en el último valor conocido, que no
-                # miente más que un cero inventado, y queda el aviso.
-                _anotar_error(f"no se pudo revisar el tope del respaldo: {error}")
-                cantidad = None
-            # El `_listar` caro (fechas + orden) sólo acá: para elegir la MÁS
-            # VIEJA hay que saber las fechas, y eso pasa cuando se llegó al
-            # tope. El tope sigue siendo exacto: `_hacer_lugar` recuenta.
-            if cantidad is not None and cantidad + 1 > max_filas():
-                cantidad -= await asyncio.to_thread(_hacer_lugar, directorio)
-            await asyncio.to_thread(
-                _escribir_atomico, directorio, normalizada["spool_id"], normalizada
-            )
-            if cantidad is not None:
-                # Sale del DISCO igual que antes -- es el conteo que se acaba
-                # de hacer, más la fila que se acaba de escribir -- y no de un
-                # contador recordado entre llamadas: `jacobs` y
-                # `motor_registry` depositan sin pasar por este proceso.
-                _estado["en_cola"] = cantidad + 1
-            return normalizada["spool_id"]
-        except Exception as error:  # fail-soft: un fallo de disco no puede tirar el turno del usuario
-            _anotar_error(f"no se pudo encolar la fila de uso: {error}")
-            return None
+    try:
+        directorio = await asyncio.to_thread(directorio_del_respaldo)
+        # UN solo recorrido del directorio, y barato. Antes eran dos enteros
+        # con `stat()` por archivo y `sort` (uno para el tope y otro para la
+        # profundidad), los dos bajo `_lock`, que es de todo el proceso: el
+        # turno k de la caída pagaba O(k) -- costo cuadrático sobre la caída, y
+        # realimentado (cola más profunda, turnos más lentos). Medido a c=25 el
+        # 2026-09-15: 122 ms vacío, 1.250 ms con 10.000 filas, 6.834 ms en el
+        # tope.
+        #
+        # UNA medición a la vez, y el que llega con otra en curso NO la repite
+        # (Task 11). El impulso es sacar también este recorrido del lock, y
+        # medido es PEOR: `_contar_barato` es un bucle de Python sobre todas las
+        # entradas, con el GIL tomado casi todo el tiempo, y 25 a la vez sobre
+        # el mismo directorio no cuestan 25 veces uno -- cuestan 230 veces uno.
+        # Medido el 2026-09-16 sobre XFS/NVMe con el cache caliente: 49.000
+        # entradas, 7,98 ms un hilo solo contra 1.833 ms 25 hilos a la vez
+        # (10.000 entradas: 1,26 ms contra 372 ms). A c=25 eso dio 2.039 ms por
+        # turno con 49.000 filas, contra los 291 ms de la versión con el lock
+        # grande: un 7x PEOR. El trabajo no hay que paralelizarlo, hay que no
+        # repetirlo.
+        #
+        # El que se saltea el conteo no publica profundidad ni revisa el tope:
+        # los hace el que sí está contando, milisegundos después. `en_cola`
+        # sigue saliendo SIEMPRE de un recorrido real del disco -- nunca de un
+        # contador en memoria -- porque `jacobs` y `motor_registry` depositan sin
+        # pasar por este proceso.
+        cantidad = None
+        secuencia = None
+        if not _lock.locked():  # entre el chequeo y el `acquire` no hay `await`
+            # ACÁ el lock, y sólo acá: contar y descartar la más vieja tienen
+            # que ser atómicos ENTRE SÍ o dos llamadas concurrentes descartan de
+            # más. `_hacer_lugar` re-lista adentro (fechas + orden), así que el
+            # descarte se decide sobre el disco real y NUNCA descarta de más; el
+            # conteo barato es sólo el disparador. El descarte es el camino
+            # raro: en una caída normal no se llega al tope.
+            async with _lock:
+                try:
+                    cantidad = await asyncio.to_thread(_contar_barato, directorio)
+                except OSError as error:  # fail-soft: si no se puede recorrer el directorio, igual se intenta escribir la fila -- perderla sería peor
+                    # La profundidad queda en el último valor conocido, que no
+                    # miente más que un cero inventado, y queda el aviso.
+                    _anotar_error(f"no se pudo revisar el tope del respaldo: {error}")
+                if cantidad is not None and cantidad + 1 > max_filas():
+                    cantidad -= await asyncio.to_thread(_hacer_lugar, directorio)
+                secuencia = _nueva_medicion()
+        # FUERA de toda sección serializada: acá están los dos `fsync` (~4,4 ms),
+        # que con el lock de todo el proceso alrededor eran el piso ENTERO de
+        # 111 ms medido a c=25 con la cola VACÍA -- espera pura, no trabajo: con
+        # la cola vacía no hay nada que contar. El lock no las protegía de nada:
+        # cada fila va a su propio `<spool_id>.json` con `spool_id` uuid4, por
+        # temporal OCULTO + `os.replace`, y dos escrituras concurrentes no
+        # comparten ni el nombre definitivo ni el temporal.
+        await asyncio.to_thread(
+            _escribir_atomico, directorio, normalizada["spool_id"], normalizada
+        )
+        if cantidad is not None:
+            # Sale del DISCO igual que antes -- es el conteo que se acaba de
+            # hacer, más la fila que se acaba de escribir -- y no de un contador
+            # recordado entre llamadas: `jacobs` y `motor_registry` depositan sin
+            # pasar por este proceso. Va por `_publicar_profundidad` para que una
+            # llamada que midió antes y terminó después no haga retroceder el
+            # número (ver `_medicion`).
+            _publicar_profundidad(cantidad + 1, secuencia)
+        return normalizada["spool_id"]
+    except Exception as error:  # fail-soft: un fallo de disco no puede tirar el turno del usuario
+        _anotar_error(f"no se pudo encolar la fila de uso: {error}")
+        return None
 
 
 async def leer_pendientes(limite: int) -> list:
@@ -466,13 +553,14 @@ async def leer_pendientes(limite: int) -> list:
         try:
             entradas = await asyncio.to_thread(_listar, directorio)
         except FileNotFoundError:
-            _estado["en_cola"] = 0
+            _publicar_profundidad(0, _nueva_medicion())
             return []
         except OSError as error:
             _anotar_error(f"no se pudo leer el respaldo: {error}")
             raise
         filas = await asyncio.to_thread(_leer_lote, directorio, entradas, limite)
-        _estado["en_cola"] = await asyncio.to_thread(_contar, directorio)
+        _publicar_profundidad(
+            await asyncio.to_thread(_contar, directorio), _nueva_medicion())
         return filas
 
 
@@ -491,7 +579,8 @@ async def quitar(spool_ids) -> int:
     async with _lock:
         directorio = _ruta_configurada()
         quitadas = await asyncio.to_thread(_borrar, directorio, seguros)
-        _estado["en_cola"] = await asyncio.to_thread(_contar, directorio)
+        _publicar_profundidad(
+            await asyncio.to_thread(_contar, directorio), _nueva_medicion())
         return quitadas
 
 
@@ -508,5 +597,5 @@ async def contar_pendientes() -> int:
         except OSError as error:
             _anotar_error(f"no se pudo contar el respaldo: {error}")
             raise
-        _estado["en_cola"] = cantidad
+        _publicar_profundidad(cantidad, _nueva_medicion())
         return cantidad
