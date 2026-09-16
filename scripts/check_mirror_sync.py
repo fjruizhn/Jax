@@ -359,6 +359,7 @@ FAMILIAS = (
             "_normalizar",
             "_motivo_de_corrupcion",
             "_listar",
+            "_contar_barato",
             "_contar",
             "_escribir_atomico",
             "_hacer_lugar",

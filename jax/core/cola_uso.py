@@ -229,9 +229,39 @@ def _listar(directorio: Path) -> list:
     return salida
 
 
+def _contar_barato(directorio: Path) -> int:
+    """Cuántas filas pendientes hay, en UN recorrido y sin `stat()` por archivo.
+
+    `_listar` cuesta un `stat()` por entrada más un `sort`: eso se paga sólo
+    cuando hay que elegir la MÁS VIEJA para descartar (`_hacer_lugar`), que es
+    el 0,01% de las llamadas. Para saber la profundidad alcanza con contar, y
+    `entrada.is_file()` sale del `d_type` que ya vino en el `getdents` del
+    `scandir`: no es un syscall más. Propaga OSError, como `_listar`.
+
+    Cuenta lo mismo que `_listar`: primer nivel, con `SUFIJO` y sin ocultos --
+    lo que está en `corruptos/` ya no es pendiente y el temporal de
+    `_escribir_atomico` empieza con punto y no termina en `SUFIJO`.
+    """
+    cantidad = 0
+    with os.scandir(directorio) as entradas:
+        for entrada in entradas:
+            nombre = entrada.name
+            if nombre.startswith(".") or not nombre.endswith(SUFIJO):
+                continue
+            try:
+                if not entrada.is_file():
+                    continue
+            except OSError:
+                # fail-soft: la fila desapareció entre el `getdents` y el
+                # `is_file` (otro proceso la drenó); es la carrera normal.
+                continue
+            cantidad += 1
+    return cantidad
+
+
 def _contar(directorio: Path) -> int:
     try:
-        return len(_listar(directorio))
+        return _contar_barato(directorio)
     except OSError as error:
         # fail-soft: la profundidad es un dato de tablero; si el directorio no
         # se puede leer queda el aviso y el último valor conocido no miente
@@ -276,17 +306,25 @@ def _escribir_atomico(directorio: Path, spool_id: str, fila: dict) -> None:
         os.close(descriptor)
 
 
-def _hacer_lugar(directorio: Path) -> None:
+def _hacer_lugar(directorio: Path) -> int:
     """Deja lugar para una fila más: pasado el tope se descarta la MÁS VIEJA y
-    se cuenta aparte. La pérdida sigue siendo visible."""
+    se cuenta aparte. La pérdida sigue siendo visible. Devuelve cuántas
+    descartó, para que el llamador ajuste la profundidad que ya midió sin
+    recorrer el directorio otra vez.
+
+    Acá SÍ se paga el `stat()` por archivo y el `sort` de `_listar`: elegir la
+    más vieja necesita las fechas. Por eso `encolar` sólo llama a esta función
+    cuando el conteo barato dice que se llegó al tope.
+    """
+    descartadas = 0
     try:
         entradas = _listar(directorio)
     except OSError as error:
         _anotar_error(f"no se pudo revisar el tope del respaldo: {error}")
-        return
+        return descartadas
     sobrantes = len(entradas) - max_filas() + 1
     if sobrantes <= 0:
-        return
+        return descartadas
     for _mtime, ruta in entradas[:sobrantes]:
         try:
             ruta.unlink()
@@ -295,11 +333,13 @@ def _hacer_lugar(directorio: Path) -> None:
         except OSError as error:
             _anotar_error(f"no se pudo descartar {ruta.name} por desborde: {error}")
             continue
+        descartadas += 1
         _estado["perdidas_por_desborde"] += 1
         logger.warning(
             "respaldo de uso lleno (tope %d): se descarta la fila más vieja %s",
             max_filas(), ruta.name,
         )
+    return descartadas
 
 
 def _cuarentena(directorio: Path, ruta: Path, motivo: str) -> None:
@@ -379,11 +419,34 @@ async def encolar(fila: dict) -> str | None:
     async with _lock:
         try:
             directorio = await asyncio.to_thread(directorio_del_respaldo)
-            await asyncio.to_thread(_hacer_lugar, directorio)
+            # UN solo recorrido del directorio, y barato. Antes eran dos
+            # enteros con `stat()` por archivo y `sort` (uno para el tope y
+            # otro para la profundidad), los dos bajo `_lock`, que es de todo
+            # el proceso: el turno k de la caída pagaba O(k) -- costo
+            # cuadrático sobre la caída, y realimentado (cola más profunda,
+            # turnos más lentos). Medido a c=25 el 2026-09-15: 122 ms vacío,
+            # 1.250 ms con 10.000 filas, 6.834 ms en el tope.
+            try:
+                cantidad = await asyncio.to_thread(_contar_barato, directorio)
+            except OSError as error:  # fail-soft: si no se puede recorrer el directorio, igual se intenta escribir la fila -- perderla sería peor
+                # La profundidad queda en el último valor conocido, que no
+                # miente más que un cero inventado, y queda el aviso.
+                _anotar_error(f"no se pudo revisar el tope del respaldo: {error}")
+                cantidad = None
+            # El `_listar` caro (fechas + orden) sólo acá: para elegir la MÁS
+            # VIEJA hay que saber las fechas, y eso pasa cuando se llegó al
+            # tope. El tope sigue siendo exacto: `_hacer_lugar` recuenta.
+            if cantidad is not None and cantidad + 1 > max_filas():
+                cantidad -= await asyncio.to_thread(_hacer_lugar, directorio)
             await asyncio.to_thread(
                 _escribir_atomico, directorio, normalizada["spool_id"], normalizada
             )
-            _estado["en_cola"] = await asyncio.to_thread(_contar, directorio)
+            if cantidad is not None:
+                # Sale del DISCO igual que antes -- es el conteo que se acaba
+                # de hacer, más la fila que se acaba de escribir -- y no de un
+                # contador recordado entre llamadas: `jacobs` y
+                # `motor_registry` depositan sin pasar por este proceso.
+                _estado["en_cola"] = cantidad + 1
             return normalizada["spool_id"]
         except Exception as error:  # fail-soft: un fallo de disco no puede tirar el turno del usuario
             _anotar_error(f"no se pudo encolar la fila de uso: {error}")
@@ -439,7 +502,7 @@ async def contar_pendientes() -> int:
     async with _lock:
         directorio = _ruta_configurada()
         try:
-            cantidad = len(await asyncio.to_thread(_listar, directorio))
+            cantidad = await asyncio.to_thread(_contar_barato, directorio)
         except FileNotFoundError:
             cantidad = 0
         except OSError as error:
