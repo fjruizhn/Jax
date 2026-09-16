@@ -858,7 +858,13 @@ jobs:
           # CAMPOS_DEL_CONTRATO" contra el escritor de once campos, y el
           # reescrito por mutacion (sacarle status/job_id al encolar de
           # motor_registry lo tira rojo). Medido dos veces: 406 / 1.
-          # 406 -> 434 el 2026-09-16, +28: la capa 1 del calificador de tres capas
+          # 406 -> 450 el 2026-09-16. MEDIDO EN EL RUNNER, no calculado: la suma
+          #   aritmetica (406 anotado + 28 propios) daba 434 y el runner conto
+          #   450. O sea que el numero anotado arriba ya no describia el arbol
+          #   —— alguien sumo tests sin tocar este comentario. Es exactamente
+          #   para lo que existe este piso, y la leccion es que el contador se
+          #   fija con lo que dice el job, nunca con una resta hecha a mano.
+          #   Lo propio de este cambio son 28: la capa 1 del calificador de tres capas
           #   de la Fase 0 del Ejecutor. 26 casos en tests/test_ejecutor_fase0.py,
           #   que calibran sus fronteras ANTES de darle consecuencia -- y dos de
           #   ellos encontraron sendos defectos del propio detector antes de que
@@ -870,8 +876,8 @@ jobs:
           #   declararse: si un modulo de jax/, jacobs/ o las_manos/ llegara a
           #   importar una de esas sondas, su limite literal SI seria el defecto
           #   que ese tripwire persigue, y se pone rojo.
-          grep -qE "^434 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 434 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          grep -qE "^450 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 450 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
