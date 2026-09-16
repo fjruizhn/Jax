@@ -886,8 +886,19 @@ jobs:
           #   declararse: si un modulo de jax/, jacobs/ o las_manos/ llegara a
           #   importar una de esas sondas, su limite literal SI seria el defecto
           #   que ese tripwire persigue, y se pone rojo.
-          grep -qE "^450 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 450 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 450 -> 494 el 2026-09-16, +44, MEDIDO por el runner. La auditoria P10
+          #   (regla amplia de fail-open) y los ocho fallos reales que destapo:
+          #   el artifact ilegible que salia como paso exitoso (jacobs), la
+          #   memoria que daba por buena una escritura fallida, el reaper que
+          #   reportaba verde estando ciego y el /health que devolvia "alive"
+          #   fijo. Los cinco archivos nuevos entran en las DOS listas de este
+          #   job —— estaban solo en la de `pytest -v`, asi que el contador no los
+          #   vigilaba y borrarlos no habria roto nada.
+          #   Ojo con el "1 skipped": volvio a ser 1. Cuando los tests del
+          #   /health importaban server.py se saltaban los cinco en CI (6 en
+          #   total) y el piso lo delato —— para eso esta pineado.
+          grep -qE "^494 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 494 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
