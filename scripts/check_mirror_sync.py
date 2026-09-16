@@ -311,6 +311,72 @@ FAMILIAS = (
              "costo que las demas familias: un arreglo en una copia y no en la "
              "otra aparece aca como drift.",
     ),
+    Familia(
+        nombre="cola_uso",
+        canonico=JAX_ROOT / "jax" / "core" / "cola_uso.py",
+        espejos=(
+            # Symlink a jax/core (Task 7, 2026-09-15), como facet_resolver y
+            # db_connect_config: comparar hoy es un no-op y se incluye igual,
+            # por la misma razon que las demas familias.
+            ("las_manos", JAX_ROOT / "las_manos" / "cola_uso.py"),
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "uso" / "cola.py"),
+        ),
+        # TODOS los simbolos de nivel superior del archivo, sin excepciones: el
+        # modulo ES el contrato (el formato del archivo del respaldo), no una
+        # pieza con partes propias de cada repo. Lo unico que diverge es el
+        # docstring de MODULO, que no es un nodo con `.name` ni un Assign y por
+        # eso no entra a la comparacion. `tests/test_cola_uso_escritores.py`
+        # exige que esta tupla cubra el archivo entero: una familia declarada a
+        # medias deja simbolos sin vigilar y el checker da verde sin mirarlos.
+        #
+        # Importan especialmente CAMPOS, CAMPOS_OBLIGATORIOS, ORIGENES, SUFIJO
+        # y DIRECTORIO_POR_DEFECTO: son el formato en disco. Un drift ahi no se
+        # ve como un error -- se ve como una cola que crece y nunca drena,
+        # porque el que deposita y el que inserta dejaron de hablar el mismo
+        # idioma.
+        compartidos=(
+            "logger",
+            "VARIABLE_DIRECTORIO",
+            "DIRECTORIO_POR_DEFECTO",
+            "VARIABLE_MAX_FILAS",
+            "MAX_FILAS_POR_DEFECTO",
+            "SUFIJO",
+            "SUFIJO_TEMPORAL",
+            "SUBDIRECTORIO_CORRUPTOS",
+            "CAMPOS",
+            "CAMPOS_OBLIGATORIOS",
+            "ORIGENES",
+            "_lock",
+            "_estado",
+            "estadisticas",
+            "reset_estado",
+            "_anotar_error",
+            "_ruta_configurada",
+            "directorio_del_respaldo",
+            "max_filas",
+            "_id_seguro",
+            "_ahora_iso",
+            "_normalizar",
+            "_motivo_de_corrupcion",
+            "_listar",
+            "_contar",
+            "_escribir_atomico",
+            "_hacer_lugar",
+            "_cuarentena",
+            "_leer_lote",
+            "_borrar",
+            "encolar",
+            "leer_pendientes",
+            "quitar",
+            "contar_pendientes",
+        ),
+        nota="Canonico de hecho: jax-platform backend/uso/cola.py (Task 1). jax "
+             "lleva copia verbatim (Task 7, 2026-09-15). ORDEN DE MERGE: la "
+             "plataforma primero -- contra un jax-platform sin backend/uso/cola.py "
+             "este checker sale con exit 2 (archivo declarado que falta). jax SOLO "
+             "deposita (encolar); leer_pendientes/quitar son de la plataforma, que "
+             "es la duena de la tabla y la unica con migraciones.",
+    ),
 )
 
 

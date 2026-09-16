@@ -16,7 +16,15 @@ request_type='pipeline' (no 'chat'): distingue en /api/admin/usage estos
 mismos transportes invocados DESDE un pipeline de Jacobs (posiblemente sin
 supervision humana en el momento, corriendo en cadena con otros steps) de la
 misma faceta invocada directo desde la Mesa web -- util para filtrar/atribuir
-costo mas adelante sin tener que inferirlo de otra tabla."""
+costo mas adelante sin tener que inferirlo de otra tabla.
+
+COLA DURABLE (Task 7, 2026-09-15): si la base no esta, la fila ya no se pierde
+-- se deposita en el respaldo de `cola_uso` con `origen='jacobs'`. **Este
+proceso NO DRENA**: solo `jax-platform` lee el respaldo e inserta, porque es la
+duena de `axioma_usage` y la unica con migraciones (la columna `spool_id` y su
+UNIQUE, que es lo que hace idempotente al reintento). Si este modulo tambien
+insertara, dos procesos borrarian el mismo archivo sin coordinacion y el cobro
+se duplicaria en la ventana entre el INSERT y el borrado."""
 from __future__ import annotations
 
 import logging
@@ -34,7 +42,30 @@ except ImportError:
     # repo, solo el paquete jax.core es importable.
     from jax.core.db_connect_config import db_connect_timeout_seconds
 
+try:
+    # Mismo doble import que db_connect_config, por la misma razon: en
+    # produccion `jax.core` no es importable con cwd=las_manos, y
+    # las_manos/cola_uso.py es un symlink a jax/core/cola_uso.py.
+    from cola_uso import _ahora_iso, encolar as encolar_uso
+except ImportError:
+    from jax.core.cola_uso import _ahora_iso, encolar as encolar_uso
+
 logger = logging.getLogger("jacobs.usage_writer")
+
+
+def _entero_o_none(valor) -> int | None:
+    """tenant_id/user_id son INT(11) en la tabla y llegan como string. El cast
+    NO puede propagar: esto corre en el camino de recuperacion de una fila que
+    ya se perdio una vez. Un valor no numerico entra como NULL -- exactamente
+    lo mismo que hace hoy la columna cuando el INSERT lo rechaza, pero con la
+    fila guardada en vez de tirada."""
+    if valor is None:
+        return None
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        logger.warning("tenant_id/user_id no numerico (%r) -- se encola como NULL", valor)
+        return None
 
 
 def _db_cfg() -> dict:
@@ -107,6 +138,10 @@ async def record_direct_usage(
             f"(user_id={user_id!r} tenant_id={tenant_id!r}) -- escribe con "
             f"tenant_id/user_id NULL, no se descarta"
         )
+    # La hora del TURNO, leída ANTES del primer intento: si se tomara al
+    # encolar, una caída de dos horas movería el costo al día siguiente.
+    creado_en = _ahora_iso()
+    cost = None
     try:
         # connect_timeout explícito (no en _db_cfg()): hallazgo de revisión,
         # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
@@ -114,7 +149,6 @@ async def record_direct_usage(
         conn = await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
         try:
             price_in, price_out = await _lookup_model_price(conn, provider_id, model)
-            cost = None
             if price_in is not None and price_out is not None:
                 cost = (tokens_in * float(price_in) + tokens_out * float(price_out)) / 1_000_000
             async with conn.cursor() as cur:
@@ -129,5 +163,41 @@ async def record_direct_usage(
                 )
         finally:
             conn.close()
-    except Exception as e:
-        logger.error(f"record_direct_usage failed facet={facet} reason={type(e).__name__}: {e}")
+        return
+    except Exception as e:  # fail-soft: la contabilidad no puede tumbar un step ya completado; la fila va al respaldo, no a la basura
+        motivo = f"{type(e).__name__}: {e}"
+
+    # T7 (2026-09-15): hasta hoy acá terminaba todo con un logger.error y la
+    # fila se perdía para siempre. El turno ya se le cobró al proveedor: eso es
+    # dinero real que el total de Admin -> Costos nunca volvía a ver. Ahora se
+    # deposita en el respaldo. NO se drena desde acá (ver docstring del módulo).
+    #
+    # cost_usd va None cuando la caída fue antes del lookup de precios: sin base
+    # no hay tabla `model` que consultar. La plataforma lo resuelve al insertar.
+    spool_id = await encolar_uso({
+        "created_at": creado_en,
+        "tenant_id": _entero_o_none(tenant_id),
+        "user_id": _entero_o_none(user_id),
+        "facet": facet,
+        "model": model,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": cost,
+        "request_type": "pipeline",
+        "origen": "jacobs",
+    })
+    if spool_id:
+        # INFO, no ERROR: encolada NO es perdida. Un ERROR acá entrena a
+        # ignorar el log, y entonces el ERROR de abajo -- que sí es una pérdida
+        # real -- no se distingue de nada.
+        logger.info(
+            f"record_direct_usage facet={facet} no pudo escribir en la base "
+            f"({motivo}) -- fila encolada en el respaldo spool_id={spool_id}, "
+            f"la inserta jax-platform"
+        )
+        return
+    logger.error(
+        f"record_direct_usage failed facet={facet} reason={motivo} -- TAMPOCO "
+        f"se pudo encolar: fila PERDIDA (tokens_in={tokens_in} "
+        f"tokens_out={tokens_out})"
+    )

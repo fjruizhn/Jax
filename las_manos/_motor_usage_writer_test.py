@@ -34,6 +34,16 @@ if _existing_db_name and _existing_db_name != "jax_memory_test":
     )
 os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
 
+# Respaldo de uso aislado (Task 7, 2026-09-15). El conftest.py de la raiz ya lo
+# hace para toda la suite, pero este archivo esta escrito para correrse SOLO
+# (`python <archivo>`, ver el docstring de arriba) y ahi pytest no carga ningun
+# conftest. Sin esto, un fallo de la DB encola en /srv/jax-data/usage-spool --
+# el directorio REAL del que jax-platform drena e inserta en axioma_usage.
+# setdefault, no asignacion: bajo pytest el conftest ya gano y no se lo pisa.
+import tempfile  # noqa: E402
+os.environ.setdefault(
+    "JAX_USAGE_SPOOL_DIR", tempfile.mkdtemp(prefix="jax-test-respaldo-uso-"))
+
 from motor_registry import usage_writer
 
 try:
