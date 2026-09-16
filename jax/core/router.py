@@ -45,6 +45,11 @@ from jax.core.contrato_dispatch import ModelDispatchConfigError
 
 logger = logging.getLogger("jax.router")
 
+# Cada cuantos fallos del clasificador se repite el aviso. Uno por turno
+# inundaria el log, y un log inundado se deja de leer; callar del todo fue el
+# defecto que esto arregla.
+_CLASIFICADOR_CADA_N = 20
+
 def _sin_tildes(s: str) -> str:
     """Quita tildes para matching robusto (trae=traé, adios=adiós).
     Solo afecta la comparacion interna; el mensaje viaja intacto."""
@@ -255,6 +260,9 @@ class Router:
         # Si es None, el router se comporta como el clasico (solo keywords).
         self.classifier = classifier
         self.debug = debug
+        # Cuantas veces fallo el clasificador desde el arranque. Es el dato que
+        # convierte "algo raro pasa con el ruteo" en un numero.
+        self._fallos_clasificador = 0
 
     def set_classifier(self, muscle) -> None:
         """Inyecta el muscle clasificador. El dia de manana, pasar aqui un
@@ -359,8 +367,29 @@ class Router:
             # a la vista, no tragado en silencio.
             logger.warning("clasificador del router sin contrato de dispatch: %s", exc)
             return None
-        except Exception:
-            return None  # red caida, timeout, lo que sea -> fallback
+        except Exception as exc:  # fail-soft: el router NUNCA lanza -- pero ya no calla: se cuenta y se reporta
+            # ARREGLADO 2026-09-16. Antes: `return None` sin una linea de log.
+            # Con Ollama caido o el clasificador roto, el 100 % del ruteo
+            # automatico degradaba a la faceta por defecto indefinidamente y no
+            # quedaba ni un rastro. El handler hermano de arriba
+            # (ModelDispatchConfigError) SI logueaba, justamente porque se
+            # decidio que "no tragado en silencio" valia; este se habia quedado
+            # fuera de esa decision.
+            #
+            # Se cuenta y se reporta con freno: la primera vez y despues cada
+            # _CLASIFICADOR_CADA_N, para que un clasificador en bucle no inunde
+            # el log —— un log inundado se deja de leer, que es otra forma de
+            # callar.
+            self._fallos_clasificador += 1
+            n = self._fallos_clasificador
+            if n == 1 or n % _CLASIFICADOR_CADA_N == 0:
+                logger.warning(
+                    "clasificador del router caido (%s: %s) -- se rutea a la faceta por "
+                    "defecto. Fallo %d vez(ces) desde el arranque; mientras dure, el "
+                    "ruteo automatico NO esta clasificando.",
+                    type(exc).__name__, exc, n,
+                )
+            return None
 
     async def route(self, user_text: str) -> RouteDecision:
         text = _sin_tildes(user_text.lower().strip())

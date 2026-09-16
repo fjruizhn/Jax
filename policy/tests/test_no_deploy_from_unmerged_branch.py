@@ -98,7 +98,7 @@ def _rebuild_master_bundle_hash() -> str:
 def main() -> int:
     try:
         deployed = _deployed_bundle_hash()
-    except Exception as e:  # noqa: BLE001 -- reportar la causa real, no fail-open
+    except Exception as e:  # noqa: BLE001 -- reportar la causa real, no fail-open  # fail-closed: imprime la causa real y devuelve 1 -- sin lectura del bundle no hay veredicto verde
         print(f"FAIL — no se pudo leer el bundle desplegado en {AXIOMA_URL}: {e}")
         return 1
 

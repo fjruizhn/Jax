@@ -628,9 +628,47 @@ class ClasificadorDelRouterTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(await self._router(err)._classify("hola"))
         self.assertIn("UPDATE model SET max_output_tokens", "\n".join(logs.output))
 
-    async def test_otra_falla_sigue_cayendo_al_default_sin_ruido(self):
-        with self.assertNoLogs("jax.router", level="WARNING"):
+    async def test_otra_falla_tambien_deja_rastro_pero_con_freno(self):
+        """DECISION REVERTIDA el 2026-09-16 por Fernando, tras la auditoria P10.
+
+        Este test afirmaba lo contrario —— se llamaba
+        `test_otra_falla_sigue_cayendo_al_default_sin_ruido` y exigia
+        `assertNoLogs`—— y la intencion era buena: separar la senal accionable
+        (un contrato de dispatch roto, que trae el UPDATE que hay que correr)
+        del ruido de un fallo de red transitorio.
+
+        Lo que esa distincion no cubria: un fallo de red TRANSITORIO es ruido,
+        pero uno PERMANENTE —— Ollama caido, el clasificador roto—— degrada el
+        100 % del ruteo automatico a la faceta por defecto, indefinidamente y
+        sin una sola linea que lo diga. Nadie se entera de que el router dejo
+        de clasificar.
+
+        El freno resuelve las dos cosas a la vez: se avisa la primera vez y
+        despues cada _CLASIFICADOR_CADA_N, asi que un clasificador en bucle no
+        inunda el log —— un log inundado se deja de leer, que es otra forma de
+        callar—— pero la degradacion permanente si deja rastro, con el contador
+        de cuantas veces fallo. Lo fija test_no_inunda_el_log en
+        tests/test_degradaciones_declaradas.py.
+
+        El test no se borro: se reescribio en su contrario, que es como esta
+        casa cambia una decision fijada."""
+        with self.assertLogs("jax.router", level="WARNING") as logs:
             self.assertIsNone(await self._router(RuntimeError("red caida"))._classify("hola"))
+        salida = "\n".join(logs.output)
+        self.assertIn("clasificador del router caido", salida)
+        self.assertIn("NO esta clasificando", salida)
+
+    async def test_el_contrato_roto_sigue_distinguiendose_de_una_falla_cualquiera(self):
+        """La distincion original NO se perdio: el contrato roto sigue trayendo
+        el UPDATE accionable, y una falla cualquiera no lo inventa."""
+        err = base.DispatchConfigMuscleError(
+            "[jax_local] dispatch abortado: modelo 'q': UPDATE model SET max_output_tokens=<tope>")
+        with self.assertLogs("jax.router", level="WARNING") as contrato:
+            await self._router(err)._classify("hola")
+        with self.assertLogs("jax.router", level="WARNING") as cualquiera:
+            await self._router(RuntimeError("red caida"))._classify("hola")
+        self.assertIn("UPDATE model SET", "\n".join(contrato.output))
+        self.assertNotIn("UPDATE model SET", "\n".join(cualquiera.output))
 
 
 class UrlRealPorCaminoTest(_Base):

@@ -396,7 +396,7 @@ async def check_usage_reconciliation() -> dict:
         http_expected = await _fetch_http_direct_expected(since)
         http_actual = await _fetch_http_direct_actual(since)
         http_result = _compute_http_direct_gap(http_expected, http_actual)
-    except Exception:
+    except Exception:  # fail-soft: mismo criterio que el bloque Motor Registry de arriba -- un fallo del chequeo HTTP-directo no debe tumbar el reaper ni impedir la alerta del otro camino; el próximo ciclo reintenta
         logger.warning("Reaper: chequeo de reconciliación de usage (HTTP-directo) falló", exc_info=True)
         http_result = {"expected": 0, "reconciled": 0, "missing_by_facet": {}, "gap_pct": 0.0, "error": True}
 
@@ -413,6 +413,18 @@ async def check_usage_reconciliation() -> dict:
             f"{RECONCILIATION_WINDOW_SECONDS // 3600}h no tienen fila de costo en "
             f"axioma_usage -- gastaron tokens reales sin contabilizar. Ver "
             f"jacobs.reaper.check_usage_reconciliation / motor_jobs.jsonl."
+        )
+    elif motor_result.get("error"):
+        # ARREGLADO 2026-09-16: este `elif` no existía y el caso caía en el
+        # `else`, que escribía «reconciliación OK -- 0/0 dispatches (0.0%% gap)»
+        # con el chequeo CAÍDO. `error: True` se escribía y no lo leía nadie:
+        # la condición de alerta es `expected > 0`, y al fallar expected vale 0.
+        # Un monitor que no pudo medir reportaba verde —— el peor estado posible
+        # para un vigilante, porque apaga la sospecha en vez de encenderla.
+        logger.error(
+            "Reaper: reconciliación de usage (Motor Registry) SIN VEREDICTO -- el chequeo "
+            "falló y no se pudo medir el gap; NO significa que no haya dispatches "
+            "sin contabilizar. Ver el warning anterior con exc_info."
         )
     else:
         logger.info(
@@ -435,6 +447,18 @@ async def check_usage_reconciliation() -> dict:
             f"axioma_usage -- por facet: {http_result['missing_by_facet']}. Chequeo "
             f"aproximado (conteo por facet, sin job_id/step_id) -- ver "
             f"jacobs.reaper.check_usage_reconciliation / jacobs_events."
+        )
+    elif http_result.get("error"):
+        # ARREGLADO 2026-09-16: este `elif` no existía y el caso caía en el
+        # `else`, que escribía «reconciliación OK -- 0/0 dispatches (0.0%% gap)»
+        # con el chequeo CAÍDO. `error: True` se escribía y no lo leía nadie:
+        # la condición de alerta es `expected > 0`, y al fallar expected vale 0.
+        # Un monitor que no pudo medir reportaba verde —— el peor estado posible
+        # para un vigilante, porque apaga la sospecha en vez de encenderla.
+        logger.error(
+            "Reaper: reconciliación de usage (HTTP-directo) SIN VEREDICTO -- el chequeo "
+            "falló y no se pudo medir el gap; NO significa que no haya dispatches "
+            "sin contabilizar. Ver el warning anterior con exc_info."
         )
     else:
         logger.info(

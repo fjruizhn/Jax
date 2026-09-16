@@ -86,7 +86,7 @@ async def procesar_mensajes(db: MemoryDB) -> tuple[int, int]:
                             (vec_str, msg_id),
                         )
                 procesados += 1
-            except Exception as e:
+            except Exception as e:  # fail-soft: el UPDATE fallido deja la fila con su embedding en ceros, asi que el propio WHERE la vuelve a seleccionar en la corrida siguiente; ademas se cuenta en `fallidos`, que se devuelve y se imprime
                 logger.error(f"Mensaje id={msg_id}: error al guardar embedding: {e}")
                 fallidos += 1
 
@@ -149,7 +149,7 @@ async def procesar_facts(db: MemoryDB) -> tuple[int, int]:
                             (vec_str, fact_id),
                         )
                 procesados += 1
-            except Exception as e:
+            except Exception as e:  # fail-soft: el UPDATE fallido deja el fact con su embedding en ceros, asi que el propio WHERE lo vuelve a seleccionar en la corrida siguiente; ademas se cuenta en `fallidos`, que se devuelve y se imprime
                 logger.error(f"Fact id={fact_id}: error al guardar embedding: {e}")
                 fallidos += 1
 

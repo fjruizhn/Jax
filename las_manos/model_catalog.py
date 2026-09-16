@@ -125,5 +125,5 @@ async def record_resolved_version_safe(facet_key: str, resolved_version: str | N
         return
     try:
         await record_resolved_version(facet_key, resolved_version)
-    except Exception as e:
+    except Exception as e:  # fail-soft: captura de observabilidad de drift (fire-and-forget declarado); su fallo se logea y no altera el modelo resuelto ni la respuesta al usuario
         logger.warning(f"resolved_version capture failed facet={facet_key} reason={type(e).__name__}")

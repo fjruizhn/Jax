@@ -119,5 +119,5 @@ async def record_resolved_version_safe(facet_key: str, resolved_version: str | N
         return
     try:
         await record_resolved_version(facet_key, resolved_version)
-    except Exception as e:
+    except Exception as e:  # fail-soft: capturar resolved_version es solo observabilidad de drift, no cambia la respuesta al usuario; el fallo queda logueado y la proxima invocacion de la faceta vuelve a intentarlo
         logger.warning(f"resolved_version capture failed facet={facet_key} reason={type(e).__name__}")

@@ -103,7 +103,7 @@ def main() -> None:
                 resp = {"text": "", "lang_prob": 0.0, "reason": "wav inexistente"}
             else:
                 resp = procesar(wav_path)
-        except Exception as e:  # el worker nunca muere por una peticion mala
+        except Exception as e:  # fail-soft: el worker es un bucle stdin/stdout de un pedido por linea; responde SIEMPRE con text="" y reason=error, asi el que pidio la transcripcion sabe que no hay texto y no se cuelga esperando la linea de respuesta
             print(f"[whisper_worker] error: {e}", file=sys.stderr, flush=True)
             resp = {"text": "", "lang_prob": 0.0, "reason": f"error: {e}"}
         finally:

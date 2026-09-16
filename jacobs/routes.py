@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 
@@ -34,6 +35,10 @@ from jacobs.policy import (
 )
 
 router = APIRouter(prefix="/jacobs", tags=["jacobs"])
+
+# Añadido 2026-09-16: `_resolve_ref` tragaba el fallo de lectura sin dejar
+# rastro. Un error que no se registra en ningún lado no existe para nadie.
+logger = logging.getLogger(__name__)
 
 _plan_builder = PlanBuilder()
 
@@ -375,21 +380,32 @@ async def approve_step(
 # ----------------------------------------------------------------
 
 def _resolve_ref(ref: str) -> tuple[str, list]:
-    """Extrae texto y fuentes de un output_ref (inline o artifact). Retorna (result, sources)."""
+    """Extrae texto y fuentes de un output_ref. Retorna (result, sources, error).
+
+    `error` es None cuando todo fue bien —— incluido el caso legítimo de «no hay
+    ref». Cuando NO es None, el resultado vacío es un fallo de lectura y NO
+    debe presentarse como el contenido del paso.
+    """
     if not ref:
-        return "", []
+        return "", [], None
     try:
         if ref.startswith("inline:"):
             data = json.loads(ref[7:])
         elif ref.startswith("artifact://"):
             data = read_artifact(ref)
         else:
-            return ref, []
+            return ref, [], None
         result = str(data.get("result") or data.get("text") or json.dumps(data))
         sources = data.get("sources") or []
-        return result, sources
-    except Exception:
-        return "", []
+        return result, sources, None
+    except Exception as exc:  # noqa: BLE001  # fail-closed: se devuelve el motivo, nunca un vacío que parezca un resultado
+        # ARREGLADO 2026-09-16: antes `return "", []` sin una sola línea de log.
+        # El endpoint construía el step con status='completed' y result='', y el
+        # usuario veía un paso completado con resultado vacío —— indistinguible
+        # de uno que legítimamente no produjo texto. Además se perdían las
+        # `sources` (el grounding del Principio VIII) sin ninguna señal.
+        logger.error("No se pudo resolver output_ref %r: %s", ref, exc, exc_info=True)
+        return "", [], f"el resultado de este paso no se pudo leer: {exc}"
 
 
 @router.get("/pipeline/{pipeline_id}/results")
@@ -403,7 +419,7 @@ async def get_pipeline_results(pipeline_id: str) -> dict:
 
     steps_data = []
     for step in steps:
-        result_text, sources = _resolve_ref(step.output_ref or "")
+        result_text, sources, ref_error = _resolve_ref(step.output_ref or "")
         duration = None
         if step.started_at and step.finished_at:
             duration = round(step.finished_at - step.started_at, 2)
@@ -416,7 +432,8 @@ async def get_pipeline_results(pipeline_id: str) -> dict:
             "result":            result_text,
             "sources":           sources,
             "duration_seconds":  duration,
-            "error":             step.error,
+            "error":             step.error or ref_error,
+            "result_unavailable": ref_error is not None,
         })
 
     total_duration = None

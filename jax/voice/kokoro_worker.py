@@ -72,7 +72,7 @@ def main() -> None:
             if pcm:
                 sys.stdout.buffer.write(pcm)
             sys.stdout.buffer.flush()
-        except Exception as e:  # el worker nunca muere por una peticion mala
+        except Exception as e:  # fail-soft: protocolo binario con prefijo de longitud; ante fallo escribe len=0 para no desincronizar el flujo, y el que pidio la voz ve cero bytes de audio en vez de audio equivocado
             print(f"[kokoro_worker] error: {e}", file=sys.stderr, flush=True)
             sys.stdout.buffer.write((0).to_bytes(4, "little"))
             sys.stdout.buffer.flush()

@@ -60,6 +60,11 @@ MAX_TURNS = 10
 # Segundos que graba /escucha (v1: duracion fija, simple y predecible).
 ESCUCHA_SEGUNDOS = 8
 
+# Marca que acompana al prompt del REPL mientras la sesion corra degradada.
+# Vacia en operacion normal. Se enciende si no se pudo leer facet_binding: un
+# aviso al arranque se pierde en una sesion de horas, y la degradacion sigue.
+_MARCA_DEGRADADO = ""
+
 
 def build_muscles(cfg: dict, timeout_override: float | None = None) -> dict:
     """Arma las facetas desde el config. El 'type' decide la clase.
@@ -368,7 +373,7 @@ async def handle_person_command(db, line: str) -> str:
     )
 
 
-async def run_task(task_file: Path, facet_cli: str | None = None) -> None:
+async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
     """Ejecuta una tarea autónoma desde un archivo .md sin REPL interactivo.
     Escribe el resultado en <nombre>_result.md junto al archivo de entrada."""
     with open(CONFIG_PATH, "rb") as f:
@@ -476,8 +481,9 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> None:
             voz=pconf.get("voice_id", "em_alex"),
             velocidad=float(pconf.get("voice_speed", 1.0)),
         )
+        return True
 
-    except (MuscleError, Exception) as e:
+    except (MuscleError, Exception) as e:  # fail-closed: el contenido dice el error Y el proceso sale con 1
         error_msg = str(e) or repr(e) or "error sin detalle"
 
         result_file.write_text(
@@ -495,6 +501,16 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> None:
             voz=pconf.get("voice_id", "em_alex"),
             velocidad=float(pconf.get("voice_speed", 1.0)),
         )
+
+        # ARREGLADO 2026-09-16: run_task escribia "# Error en tarea:" en el
+        # archivo de resultado y lo decia por voz —— el contenido nunca mintio ——
+        # pero el proceso terminaba con codigo 0. Cualquier cron, script u
+        # orquestador que mirara $? trataba la tarea fallida como exitosa: un
+        # fail-open justo en la frontera con todo lo que invoque a JAX. Hoy nada
+        # lo invoca asi (verificado en el repo y en los guiones de hall9000), o
+        # sea que cerrarlo ahora no rompe nada y evita que el proximo que lo
+        # automatice herede el defecto.
+        return False
 
     finally:
         await voice.shutdown()
@@ -518,15 +534,39 @@ async def main() -> None:
     # modelo, y la lista vieja del TOML lo rechazaba: REPL roto en las 7
     # facetas). Ver jax/core/registro_facetas.py.
     from jax.core.registro_facetas import aplicar_registro, cargar_registro
+    # ENDURECIDO 2026-09-16. El aviso existia, pero era UNA linea al arranque
+    # de una sesion que dura horas: a los diez minutos ya no lo lee nadie, y la
+    # sesion sigue corriendo con el modelo y la lista de `config.toml`. Eso
+    # importa por dos razones medidas, no teoricas:
+    #   - el TOML es la fuente STALE conocida: su `models_allowed` viejo ya
+    #     dejo el REPL roto en las siete facetas (2026-09-14);
+    #   - `facet_binding` es ademas la puerta de la gobernanza del modelo
+    #     (superadmin + probe_after_rebind). Caerse al TOML la rodea sin que
+    #     nadie lo apruebe —— eso toca el Principio IX.
+    # No se aborta: dejar a JAX inutilizable justo cuando la base esta caida
+    # seria peor. Lo que cambia es que el aviso deja de ser efimero y viaja
+    # pegado al prompt, todo el tiempo que dure la degradacion.
+    registro_degradado: str | None = None
     try:
         registry = await cargar_registro()
-    except Exception as exc:
-        logging.warning(
+    except Exception as exc:  # fail-soft: no se aborta (dejar a JAX inutilizable justo cuando la DB esta caida seria peor), pero la degradacion se declara con marca permanente en el prompt, no con un aviso que se pierde
+        registro_degradado = str(exc)
+        logging.error(
             "No se pudo cargar el registro de facetas desde la DB: se usan el modelo Y la "
-            f"lista de config.toml, posiblemente desactualizados. Causa: {exc}"
+            f"lista de config.toml, posiblemente desactualizados, y SIN pasar por la "
+            f"gobernanza de facet_binding. Causa: {exc}"
         )
         registry = {}
     aplicar_registro(cfg, registry)
+    if registro_degradado:
+        global _MARCA_DEGRADADO
+        _MARCA_DEGRADADO = "[sin gobernanza] "
+        print(
+            "\n⚠  MODELO SIN GOBERNANZA: no se pudo leer facet_binding de la base, "
+            "\n   asi que el modelo y la lista permitida salen de config.toml, que es "
+            "\n   la fuente desactualizada conocida. Este aviso acompana al prompt "
+            "\n   mientras dure la sesion.\n"
+        )
 
     if registry:
         import jax.core.router as router_module
@@ -573,6 +613,23 @@ async def main() -> None:
         database=os.getenv("JAX_DB_NAME", "jax_memory"),
     )
     if db_ok:
+        # CONECTADO 2026-09-16: `MemoryDB.health_check()` existia y NO lo
+        # llamaba NADIE, en ninguno de los dos repos —— un control sin
+        # consumidor, la misma familia que el `error: True` que el reaper
+        # escribia y nadie leia. Ahora dice algo que importa: desde esta misma
+        # ronda devuelve False si la migracion del esquema quedo a medias, y
+        # eso NO se nota de otra forma —— la base responde, las consultas no
+        # dan error, y la busqueda por scope simplemente devuelve MENOS de lo
+        # que hay. Que es como se ve "JAX se olvido de todo".
+        sano = await db.health_check()
+        if sano is False:
+            print(
+                "\n⚠  MEMORIA DEGRADADA: la base responde, pero el esquema no esta "
+                "\n   al dia o VECTOR no contesta. La busqueda por usuario/proyecto "
+                "\n   puede devolver MENOS de lo que hay, sin dar error. Revisa el "
+                "\n   log de la migracion.\n"
+            )
+
         conv_uuid = await db.start_conversation(
             source="terminal", user_id=repl_uid, tenant_id=repl_tid, project_id=None)
 
@@ -624,7 +681,8 @@ async def main() -> None:
                 # input() en un thread del executor: el event loop queda
                 # libre y la voz suena de fondo mientras esperamos teclas.
                 user_text = (
-                    await loop.run_in_executor(None, lambda: input("\n> "))
+                    await loop.run_in_executor(
+                        None, lambda: input(f"\n{_MARCA_DEGRADADO}> "))
                 ).strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nHasta luego.")
@@ -764,6 +822,23 @@ async def main() -> None:
                     similares = await db.search_similar_messages(
                         user_text, limit=5, user_id=repl_uid, project_id=None,
                         recent_history=historial)
+                    # None != [] (2026-09-16). None significa que la busqueda NO
+                    # se pudo hacer; [] que se hizo y no habia nada parecido.
+                    # Antes las dos cosas eran [] y el turno respondia sin
+                    # memoria creyendo que no habia memoria. La conversacion
+                    # sigue —— esa politica no cambia —— pero se DICE, en el
+                    # prompt y en pantalla: una respuesta sin biblioteca que no
+                    # se declara es certeza fabricada (Principios V y VIII).
+                    if similares is None:
+                        print("\n⚠  memoria no disponible: respondo sin consultar "
+                              "sesiones anteriores.")
+                        bloques_memoria.append(
+                            "AVISO: la busqueda en la memoria de sesiones anteriores "
+                            "FALLO en este turno. No asumas que no hay antecedentes: "
+                            "no se pudieron consultar. Si la respuesta depende de algo "
+                            "que podria estar en la memoria, dilo explicitamente."
+                        )
+                        similares = []
                     relevantes = [r for r in similares if r["distancia"] < 0.8]
                     if relevantes:
                         lineas = []
@@ -809,7 +884,7 @@ async def main() -> None:
                 )
             except MuscleError as e:
                 print(f"\n{humanizar_error(label, e)}")
-            except Exception as e:  # red de seguridad: nunca tumbar el latido
+            except Exception as e:  # fail-soft: red de seguridad del bucle del REPL — el fallo se le muestra a Fernando con humanizar_error y el turno NO entra al historial ni a la memoria; tumbar el latido por un error de un musculo seria peor
                 print(f"\n{humanizar_error(label, e)}")
     finally:
         # Cierre limpio en CUALQUIER salida: oido, voz, luego memoria.
@@ -853,6 +928,7 @@ if __name__ == "__main__":
             )
 
     if cli_args.task:
-        asyncio.run(run_task(cli_args.task, facet_cli=cli_args.facet))
+        if not asyncio.run(run_task(cli_args.task, facet_cli=cli_args.facet)):
+            sys.exit(1)
     else:
         asyncio.run(main())

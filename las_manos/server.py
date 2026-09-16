@@ -34,7 +34,7 @@ import hashlib
 import tomllib
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -300,13 +300,47 @@ async def envelope_structural_rejection(request: Request, exc: RequestValidation
     )
 
 
+# ------------------------------------------------------------
+#  Salud real (2026-09-16)
+# ------------------------------------------------------------
+# ANTES: /health devolvia {"status": "alive"} FIJO. Respondia «vivo» por el
+# mero hecho de poder responder: un control que NO PUEDE FALLAR. Y no es un
+# endpoint cualquiera —— lo miran loadtest/health.js (las pruebas de carga de
+# LAS CUATRO DEL RENDIMIENTO), la Mesa para saber si LAS MANOS vive, y el
+# dashboard. Con la base caida seguia diciendo alive y k6 seguia en verde: el
+# p95 medido no era del servicio, era de FastAPI devolviendo un literal.
+#
+# La LOGICA vive en las_manos/salud.py, no aca: metida en este archivo, su test
+# tenia que importar el servidor entero (FastAPI, planner, policy, workers,
+# motor registry, jacobs) y en CI ese import fallaba —— los cinco tests se
+# SALTABAN en silencio. El test que demuestra que /health puede ponerse rojo no
+# corria justo donde importa.
+from salud import Salud, comprobar_audit, comprobar_base  # noqa: E402
+
+_salud = Salud({
+    "base de datos": lambda: comprobar_base(jacobs_store.get_conn),
+    "log de auditoria": lambda: comprobar_audit(audit.log_path),
+})
+
+
 @app.get("/health")
-async def health() -> dict:
-    """Latido del servicio. Reporta también el estado del kill switch."""
+async def health(response: Response) -> dict:
+    """Latido del servicio. Comprueba las dependencias que LAS MANOS necesita
+    para trabajar y devuelve 503 si alguna no responde.
+
+    El kill switch se REPORTA pero no degrada: estar frenado a proposito es un
+    estado deliberado, no una averia.
+    """
+    estado = await _salud.estado()
+    if not estado["ok"]:
+        response.status_code = 503
     return {
         "service": "LAS MANOS",
-        "status": "alive",
+        "status": "alive" if estado["ok"] else "degraded",
         "kill_switch_active": _kill_switch_active(),
+        "problemas": estado["fallos"],
+        "comprobado_hace_s": _salud.comprobado_hace(),
+        "cache_ttl_s": _salud._ttl,
     }
 
 

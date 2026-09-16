@@ -56,7 +56,7 @@ def load_env(path: str) -> dict[str, str]:
                 if "=" in line and not line.startswith("#"):
                     k, _, v = line.partition("=")
                     env[k.strip()] = v.strip()
-    except Exception as e:
+    except Exception as e:  # fail-soft: leer el .env es best-effort y el aviso se imprime; si la lectura falla, `kimi_key` queda vacia y el chequeo de la linea 87 corta el script con exit 1 antes de tocar produccion -- ningun resultado de prueba se calcula con el env a medias
         print(f"Warning: no se pudo leer {path}: {e}")
     return env
 
@@ -98,7 +98,7 @@ try:
     h = http_get("/health", timeout=3)
     if h.get("status") == "alive":
         print(f"Servidor ya corriendo. kill_switch_active={h.get('kill_switch_active')}")
-except Exception:
+except Exception:  # fail-soft: este GET /health NO mide nada, solo detecta si ya hay servidor; que falle ES la senal de 'no hay servidor' y el cuerpo arranca uno. Si tampoco levanta, el else del for imprime FAIL y sale con exit 1
     print("Servidor no responde — arrancando...")
     proc_env = {**os.environ, **env_vars}
     log_fh = open(LOG_FILE, "a")
@@ -187,7 +187,7 @@ for i in range(1, 25):
         if st not in ("pending", "running"):
             final_view = view
             break
-    except Exception as e:
+    except Exception as e:  # fail-soft: un poll fallido se imprime con su error y el bucle reintenta; no puede fabricar un PASS -- si nunca llega una vista final, `final_view` sigue None, se reporta FAIL y p2_ok queda False
         print(f"  Poll {i}: error — {e}")
     time.sleep(5)
 
@@ -259,7 +259,7 @@ try:
     print(f"\nGET job:\n{json.dumps(view3, indent=2, ensure_ascii=False)}")
     ks_status = view3.get("status")
     ks_error = view3.get("error") or ""
-except Exception as e:
+except Exception as e:  # fail-soft: no puede pintar de verde el freno -- con el GET fallido `ks_status` sigue None y `ks_error` vacio, asi que los dos checks3 dan FAIL y ks_ok=False; el error se imprime en la misma linea para que no se confunda con 'el kill switch no mato el job'
     print(f"{FAIL} GET job con PAUSE falló: {e}")
 
 checks3 = [
