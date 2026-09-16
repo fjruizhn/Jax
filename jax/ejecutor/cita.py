@@ -22,13 +22,16 @@ FUENTE_INEXISTENTE = "fuente_inexistente"
 
 @dataclass(frozen=True)
 class Captura:
+    maquina: str
     comando: str
     salida: str
+    stderr: str
     truncada: bool
 
 
 @dataclass(frozen=True)
 class Afirmacion:
+    maquina: str
     texto: str
     comando: str
     linea: str
@@ -51,7 +54,11 @@ def normalizar(linea: str) -> str:
 
 
 def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
-    """¿La línea citada está literal en la salida de ese comando?
+    """¿La línea citada está literal en la salida de ese comando, en esa máquina?
+
+    Una captura respalda sólo si coinciden MÁQUINA y COMANDO: un `free -h` de
+    otra máquina no dice nada de ésta. La línea puede estar en stdout o en
+    stderr, cada flujo por separado.
 
     Si el comando se corrió más de una vez, respalda cualquier captura
     COMPLETA que tenga la línea. Una captura truncada no respalda nada.
@@ -61,10 +68,14 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
     # de la salida y dejaría pasar cualquier afirmación inventada.
     if not aguja:
         return Veredicto(SIN_RESPALDO, "la afirmación no cita ninguna línea")
+    # Lo mismo con la máquina: vacía no identifica nada, y `"" == ""` dejaría
+    # que una captura sin procedencia respalde una afirmación sin procedencia.
+    if not afirmacion.maquina.strip():
+        return Veredicto(SIN_RESPALDO, "la afirmación no dice de qué máquina viene")
     se_corrio = False
     alguna_truncada = False
     for captura in capturas:
-        if captura.comando != afirmacion.comando:
+        if (captura.maquina, captura.comando) != (afirmacion.maquina, afirmacion.comando):
             continue
         se_corrio = True
         # El truncado se mira ANTES que el contenido: si la salida vino
@@ -73,14 +84,21 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
         if captura.truncada:
             alguna_truncada = True
             continue
-        for linea in captura.salida.splitlines():
-            if normalizar(linea) == aguja:
-                return Veredicto(RESPALDADA, "")
+        # stdout y stderr se recorren POR SEPARADO. Pegarlos en un solo texto
+        # fabrica, si stdout no termina en salto de línea, una línea que la
+        # máquina nunca imprimió en ningún flujo.
+        for flujo in (captura.salida, captura.stderr):
+            for linea in flujo.splitlines():
+                if normalizar(linea) == aguja:
+                    return Veredicto(RESPALDADA, "")
     if alguna_truncada:
         return Veredicto(FUENTE_TRUNCADA,
-                         f"la salida de {afirmacion.comando!r} vino truncada")
+                         f"la salida de {afirmacion.comando!r} en "
+                         f"{afirmacion.maquina!r} vino truncada")
     if se_corrio:
         return Veredicto(SIN_RESPALDO,
-                         f"la línea citada no está en la salida de {afirmacion.comando!r}")
+                         f"la línea citada no está en la salida de "
+                         f"{afirmacion.comando!r} en {afirmacion.maquina!r}")
     return Veredicto(FUENTE_INEXISTENTE,
-                     f"no se corrió el comando {afirmacion.comando!r}")
+                     f"no se corrió el comando {afirmacion.comando!r} "
+                     f"en {afirmacion.maquina!r}")

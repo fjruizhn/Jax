@@ -149,5 +149,6 @@ def correr(comando: str, maquina: str, tope_bytes: int = TOPE_BYTES_POR_DEFECTO,
 
 
 def a_captura(completa: CapturaCompleta) -> Captura:
-    return Captura(comando=completa.comando, salida=completa.salida,
+    return Captura(maquina=completa.maquina, comando=completa.comando,
+                   salida=completa.salida, stderr=completa.stderr,
                    truncada=completa.truncada)

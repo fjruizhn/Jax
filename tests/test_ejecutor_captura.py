@@ -74,7 +74,7 @@ def test_un_comando_colgado_vuelve_al_vencer_el_plazo_marcado_como_truncado():
     # Lo que salió antes de vencer se entrega (piso de §2.3)...
     assert c.salida.splitlines() == ["antes"]
     # ...pero no respalda nada, porque la salida no está completa.
-    a = Afirmacion(texto="dijo antes", comando=c.comando, linea="antes")
+    a = Afirmacion(maquina=c.maquina, texto="dijo antes", comando=c.comando, linea="antes")
     assert verificar(a, [a_captura(c)]).estado == FUENTE_TRUNCADA
 
 
@@ -110,3 +110,29 @@ def test_un_stderr_que_pasa_el_tope_tambien_trunca_la_captura():
     assert c.motivos_truncado == (TRUNCADO_POR_TOPE,)
     assert c.bytes_totales_stderr > 1024
     assert len(c.stderr.encode()) <= 1024
+
+
+# --- Contrato 2026-09-16: stderr citable y máquina en la procedencia ---
+
+from jax.ejecutor.cita import FUENTE_INEXISTENTE, RESPALDADA
+
+
+def test_a_captura_conserva_la_maquina_y_el_stderr():
+    c = correr("echo afuera; echo 'sudo: a password is required' 1>&2", maquina="hall9000")
+    corta = a_captura(c)
+    assert corta.maquina == "hall9000"
+    assert corta.stderr == "sudo: a password is required\n"
+    a = Afirmacion(maquina="hall9000", texto="sudo pidió contraseña", comando=c.comando,
+                   linea="sudo: a password is required")
+    assert verificar(a, [corta]).estado == RESPALDADA
+    otra = Afirmacion(maquina="atemai", texto="sudo pidió contraseña", comando=c.comando,
+                      linea="sudo: a password is required")
+    assert verificar(otra, [corta]).estado == FUENTE_INEXISTENTE
+
+
+def test_un_stderr_truncado_no_deja_citar_ni_lo_que_llegó_entero_por_stdout():
+    """La captura está incompleta si CUALQUIERA de los dos flujos se cortó:
+    se rechaza antes de mirar el contenido, aunque la línea esté en stdout."""
+    c = correr("seq 1 100000 1>&2; echo ok", maquina="local", tope_bytes=1024)
+    a = Afirmacion(maquina="local", texto="dijo ok", comando=c.comando, linea="ok")
+    assert verificar(a, [a_captura(c)]).estado == FUENTE_TRUNCADA

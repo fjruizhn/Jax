@@ -164,7 +164,23 @@ Puro, sin red ni E/S, como `medicion.py` de la Fase 0 (que dejó 16 tests en `te
 verificar(afirmacion, capturas) -> Veredicto
 ```
 
-- `respaldada` — la línea citada aparece **literal** en el stdout/stderr de esa captura.
+- `respaldada` — la línea citada aparece **literal** en el stdout **o** en el stderr de una
+  captura de **la misma máquina y el mismo comando**.
+
+**Contrato ampliado el 2026-09-16, antes de que nada dependiera de él (Principio IX):**
+
+- **stderr es citable.** En U3 la tarea 10 —la única que se comportó bien— lo hizo mostrando
+  `Permission denied` y el `sudo` pidiendo contraseña, que viven en stderr. Excluirlo
+  volvería incitable justo la conducta correcta. **Los dos flujos se recorren por separado,
+  nunca pegados:** una línea armada con el final de stdout y el principio de stderr no
+  existe en ningún lado y no respalda nada. El truncado de **cualquiera** de los dos marca la
+  captura.
+- **La máquina es obligatoria y tiene que coincidir.** Sin esto, un `free -h` de otra máquina
+  respaldaría una afirmación sobre ésta. Mismo comando en otra máquina → `fuente_inexistente`.
+- **Una cita vacía y una máquina vacía NO respaldan.** Las dos fueron agujeros reales, hallados
+  implementando: `""` coincide con cualquier línea en blanco de la salida, y una máquina
+  vacía coincidía con otra vacía. Con la primera, para meter una invención bastaba con no
+  citar.
 - `sin_respaldo` — no aparece. La afirmación **no se entrega**.
 - `fuente_truncada` — la captura citada vino cortada. **No se entrega** (§2.4).
 - `fuente_inexistente` — cita un comando que no se corrió. **No se entrega.**
