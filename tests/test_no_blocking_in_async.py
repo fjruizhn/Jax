@@ -32,6 +32,17 @@ RAIZ = Path(__file__).resolve().parents[1]
 # Directorios que no son codigo de servicio (no corren dentro de un loop vivo).
 EXCLUIDOS = {".git", ".venv", "node_modules", "__pycache__", "docs", "workspace"}
 
+# Archivos que NO son modulos Python aunque terminen en .py. Se declaran con
+# motivo, igual que en test_aiomysql_connect_timeout_tripwire.py. Uno que no
+# parsee y NO este aqui ES un hallazgo: ver
+# test_un_archivo_ilegible_no_declarado_es_hallazgo.
+_NO_PARSEA = {
+    "_director_patch/routes_block.py": (
+        "fragmento de patch para pegar a mano en routes.py -- lineas sueltas "
+        "indentadas como un diff, no un modulo."
+    ),
+}
+
 # Nombre COMPLETO de la llamada tal como aparece escrita. Se compara por texto
 # del atributo y no resolviendo el import: un `from time import sleep` seguido
 # de `sleep(5)` no se atrapa aca, y esta bien -- este test cierra la forma
@@ -69,7 +80,14 @@ def _hallazgos_en(path: Path):
     try:
         arbol = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
     except SyntaxError:
-        return []
+        # ARREGLADO 2026-09-16: antes `return []` -- un archivo que el analizador
+        # no puede leer quedaba SIN REVISAR y el test pasaba igual, que es
+        # exactamente el fail-open que esta familia de controles persigue. Un
+        # `.py` ilegible o es un no-modulo declarado, o es un hallazgo.
+        rel = path.relative_to(RAIZ).as_posix()
+        if rel in _NO_PARSEA:
+            return []
+        return [f"{rel}: no se pudo analizar (SyntaxError) -- sin revisar"]
     encontrados = []
 
     class V(ast.NodeVisitor):
@@ -82,7 +100,16 @@ def _hallazgos_en(path: Path):
                 if isinstance(hijo, ast.Call):
                     try:
                         nombre = ast.unparse(hijo.func)
-                    except Exception:
+                    except Exception as exc:  # fail-closed: se reporta como no analizable, nunca se salta
+                        # ARREGLADO 2026-09-16: antes `continue` -- si el nombre
+                        # de la llamada no se podia reconstruir, esa llamada
+                        # quedaba SIN REVISAR y una bloqueante podia colarse sin
+                        # que nadie lo supiera. Ahora se reporta.
+                        encontrados.append(
+                            f"{path.relative_to(RAIZ)}:{hijo.lineno}: llamada no "
+                            f"analizable dentro de `async def {nodo.name}` ({exc}) "
+                            f"-- revisar a mano"
+                        )
                         continue
                     if nombre in BLOQUEANTES:
                         encontrados.append(
@@ -122,6 +149,47 @@ class NoBlockingInAsyncTest(unittest.TestCase):
             fh.flush()
             hallazgos = _hallazgos_en(Path(fh.name))
         self.assertEqual(len(hallazgos), 1, f"el detector no vio el bloqueo: {hallazgos}")
+
+
+    def test_un_archivo_ilegible_no_declarado_es_hallazgo(self):
+        """Antes se devolvia [] y el archivo no se revisaba nunca. El control
+        que se salta lo que no entiende no es un control."""
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+            fh.write("def f(:\n    pass\n")
+            fh.flush()
+            hallazgos = _hallazgos_en(Path(fh.name))
+        self.assertEqual(len(hallazgos), 1, "un archivo ilegible se saltó en silencio")
+        self.assertIn("no se pudo analizar", hallazgos[0])
+
+    def test_una_llamada_no_analizable_es_hallazgo(self):
+        """Si no se puede reconstruir el nombre de la llamada, se reporta para
+        revisar a mano; NUNCA se salta, porque podria ser la bloqueante."""
+        import tempfile
+        codigo = "async def f():\n    subprocess.run(['ls'])\n"
+        original = ast.unparse
+
+        def unparse_roto(nodo):
+            raise ValueError("no se puede reconstruir")
+
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+            fh.write(codigo)
+            fh.flush()
+            ast.unparse = unparse_roto
+            try:
+                hallazgos = _hallazgos_en(Path(fh.name))
+            finally:
+                ast.unparse = original
+        self.assertEqual(len(hallazgos), 1, f"la llamada se saltó en silencio: {hallazgos}")
+        self.assertIn("no analizable", hallazgos[0])
+
+    def test_un_no_modulo_declarado_no_ensucia(self):
+        """Control de la excepcion: lo declarado no cuenta, y si algun dia
+        parsea, la entrada sobra."""
+        for rel in _NO_PARSEA:
+            ruta = RAIZ / rel
+            self.assertTrue(ruta.exists(), f"{rel} ya no existe: retirar de _NO_PARSEA")
+            self.assertEqual(_hallazgos_en(ruta), [], f"{rel} esta declarado y no deberia dar hallazgo")
 
 
 if __name__ == "__main__":

@@ -414,6 +414,18 @@ async def check_usage_reconciliation() -> dict:
             f"axioma_usage -- gastaron tokens reales sin contabilizar. Ver "
             f"jacobs.reaper.check_usage_reconciliation / motor_jobs.jsonl."
         )
+    elif motor_result.get("error"):
+        # ARREGLADO 2026-09-16: este `elif` no existía y el caso caía en el
+        # `else`, que escribía «reconciliación OK -- 0/0 dispatches (0.0%% gap)»
+        # con el chequeo CAÍDO. `error: True` se escribía y no lo leía nadie:
+        # la condición de alerta es `expected > 0`, y al fallar expected vale 0.
+        # Un monitor que no pudo medir reportaba verde —— el peor estado posible
+        # para un vigilante, porque apaga la sospecha en vez de encenderla.
+        logger.error(
+            "Reaper: reconciliación de usage (Motor Registry) SIN VEREDICTO -- el chequeo "
+            "falló y no se pudo medir el gap; NO significa que no haya dispatches "
+            "sin contabilizar. Ver el warning anterior con exc_info."
+        )
     else:
         logger.info(
             "Reaper: reconciliación de usage (Motor Registry) OK -- %d/%d dispatches con fila (%.1f%% gap)",
@@ -435,6 +447,18 @@ async def check_usage_reconciliation() -> dict:
             f"axioma_usage -- por facet: {http_result['missing_by_facet']}. Chequeo "
             f"aproximado (conteo por facet, sin job_id/step_id) -- ver "
             f"jacobs.reaper.check_usage_reconciliation / jacobs_events."
+        )
+    elif http_result.get("error"):
+        # ARREGLADO 2026-09-16: este `elif` no existía y el caso caía en el
+        # `else`, que escribía «reconciliación OK -- 0/0 dispatches (0.0%% gap)»
+        # con el chequeo CAÍDO. `error: True` se escribía y no lo leía nadie:
+        # la condición de alerta es `expected > 0`, y al fallar expected vale 0.
+        # Un monitor que no pudo medir reportaba verde —— el peor estado posible
+        # para un vigilante, porque apaga la sospecha en vez de encenderla.
+        logger.error(
+            "Reaper: reconciliación de usage (HTTP-directo) SIN VEREDICTO -- el chequeo "
+            "falló y no se pudo medir el gap; NO significa que no haya dispatches "
+            "sin contabilizar. Ver el warning anterior con exc_info."
         )
     else:
         logger.info(
