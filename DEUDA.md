@@ -572,10 +572,34 @@ Pedido de Fernando (2026-09-15): "escóndelos los dos, y termina los pendientes 
     proceso, así que durante una caída el throughput topa en ~220 turnos/s sin importar la
     profundidad, y la latencia crece lineal con la concurrencia. Es acotado y no se
     realimenta. No se ataca hoy.
-- **PENDIENTE con fecha 2026-09-29 — la fila venenosa.** Una fila que el `INSERT` rechace
-  SIEMPRE (p. ej. un `facet` de más de 30 chars) se reintenta en cada ciclo para siempre: hay
-  cuarentena para archivos corruptos en `cola.py`, pero no para filas que la base rechaza.
-  Sale de la Task 3 de la ronda del 2026-09-15.
+- **CERRADO 2026-09-16 — la fila venenosa** (era el PENDIENTE del 2026-09-29; Fernando:
+  *"hacela ahora, no esperes al 29"*). Desplegado: jax-platform#88 → `9d05df2`. Tras 3
+  intentos, la fila que la base rechaza siempre se mueve a `rechazadas/` con el motivo al
+  lado, se cuenta y se ve en el monitor de costos.
+  - Lo difícil no era la cuarentena, era **no aplicarla de más**: si se confunde "falló el
+    ciclo porque la base está caída" con "falló esta fila porque la base la rechaza", una
+    caída larga manda TODA la cola a cuarentena. Tres barandas, ejercitadas por mutación.
+  - Se clasifica por **código** de error, no por clase de excepción: `pymysql` deja sin
+    mapear el 1292 (fecha imposible) y lo manda a `OperationalError`, la misma clase que el
+    1213 (deadlock) y el 1040 (demasiadas conexiones). Mirar la clase confundiría justo los
+    dos casos que hay que separar.
+- **CERRADO 2026-09-16 — el lock global de `encolar`** (era el límite declarado el 09-15;
+  Fernando: *"arregla el lock global"*). Desplegado: jax-platform#89 → `26c9cd5` y
+  jax#169 → `a42e396`. Los dos `fsync` salieron de la sección serializada.
+  - Medido a c=25 con la base caída: **290 → 21 ms** en el tope, throughput **85 → 1.181
+    turnos/s**, y **la profundidad de la cola dejó de importar** (17→21 ms de 0 a 49.000,
+    contra 113→290 ms antes).
+  - **La versión obvia era 7× PEOR y se midió antes de shipearla:** sacando el conteo del
+    lock, 25 hilos contando el mismo directorio cuestan 230 veces uno, no 25 (bucle de
+    Python con el GIL + `getdents` concurrentes). El trabajo no había que paralelizarlo,
+    había que **no repetirlo**: una sola medición en vuelo.
+  - **Lo que se paga, acotado:** el tope se puede sobrepasar en *(llamadas en vuelo − 1)* —
+    24 filas sobre 50.000 a c=25. No deriva: el régimen queda en `[tope−1, tope+c−1]` y el
+    error es sólo hacia arriba. `en_cola` se atrasa hasta ~c filas; `contar_pendientes()`
+    sigue siendo exacto.
+  - **Recuperación revisada:** con el lote en 500 y el intervalo de 60 s siguen siendo 500
+    filas/minuto (20 min para 10.000, 1 h 40 para el tope). El lock no cambia eso: cambia lo
+    que cuesta ENCOLAR durante la caída, no lo que tarda en drenar después.
 - **PENDIENTE con fecha 2026-09-22:** llevar a `jax/policy/tests/test_no_fail_open_except.py` la regla nueva ("todo `except` amplio que no relanza lleva marca") y el guardián de cobertura. Hoy solo marca los `except: pass`.
 
 ## Cerrado — admin fija la contraseña, cambio obligatorio y sesión única (2026-09-15)
