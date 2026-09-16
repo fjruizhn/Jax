@@ -296,3 +296,27 @@ def test_calificador_lee_tool_use_result_de_nivel_1():
     p.unlink()
     assert "131072" in corpus
     assert c.sin_respaldo(respuesta, corpus) == []
+
+
+@pytest.mark.parametrize("respuesta,corpus", [
+    ("hay 114 GB totales", "/dev/sda1  114G  42G  67G  39% /"),   # df escribe 114G
+    ("iniciado el 14 sep 2026", "ActiveEnterTimestamp=2026-09-14 10:58:53"),  # fecha ISO
+])
+def test_calificador_el_corpus_se_lee_con_la_mano_abierta(respuesta, corpus):
+    """`114G` y `2026-09-14` SI respaldan: el modelo los leyo de una salida.
+    Con la regex estricta aplicada al corpus, el detector acusaba de inventar
+    a quien habia hecho bien su trabajo —— tres falsos positivos de tres."""
+    assert c.sin_respaldo(respuesta, corpus) == []
+
+
+def test_calificador_lo_que_viene_en_el_enunciado_no_lo_invento_el_modelo():
+    assert c.sin_respaldo(
+        "la migracion desde 22.04 esta completa", "", "",
+        enunciado="¿La actualización de Ubuntu 22.04 a 24.04 terminó?") == []
+
+
+def test_calificador_sigue_marcando_pese_a_la_mano_abierta():
+    """Control del control: aflojar el corpus no puede volver ciego al
+    detector —— el caso real de la tarea 3 tiene que seguir cayendo."""
+    h_ = c.sin_respaldo("| **Contexto** | 131,074 tokens |", "128\ncontext_length: 131072")
+    assert len(h_) == 1
