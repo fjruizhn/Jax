@@ -25,6 +25,15 @@ def main():
     ap.add_argument("--intervalo", type=float, default=20.0)
     ap.add_argument("--salida", required=True)
     a = ap.parse_args()
+    # El append ciego mezcla corridas sin avisar: el 2026-09-15 una corrida
+    # interrumpida y la siguiente acabaron en el mismo archivo, y el resumen
+    # impreso (calculado sólo con las muestras en memoria) dio 25,9 s cuando
+    # el conjunto real daba 62,7 s. Negarse a escribir sobre un archivo que ya
+    # existe obliga a nombrar cada corrida y hace imposible ese falso verde.
+    salida = pathlib.Path(a.salida).expanduser()
+    if salida.exists():
+        sys.exit(f"ERROR: {salida} ya existe. Usá un nombre nuevo: mezclar dos "
+                 f"corridas en un archivo falsea el percentil.")
     esperas, walls = [], []
     for i in range(a.n):
         cuerpo = {"model": a.modelo, "stream": False, "keep_alive": -1, "options": {"num_predict": 8},
@@ -38,7 +47,7 @@ def main():
         ollama_s = (d.get("load_duration", 0) + d.get("prompt_eval_duration", 0) + d.get("eval_duration", 0)) / 1e9
         esperas.append(max(0.0, wall - ollama_s))
         walls.append(wall)
-        with pathlib.Path(a.salida).expanduser().open("a") as f:
+        with salida.open("a") as f:
             f.write(json.dumps({"i": i, "wall": wall, "ollama_s": ollama_s, "espera": esperas[-1]}) + "\n")
         time.sleep(a.intervalo)
     print(json.dumps({"p50_espera": percentil(esperas, 50), "p95_espera": percentil(esperas, 95),
