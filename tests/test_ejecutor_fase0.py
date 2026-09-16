@@ -161,3 +161,105 @@ def test_extraer_secciones_constitucion():
     assert "Jairo Urbina." in out
     assert "Eres Mr. Hyde" not in out
     assert "instalar cosas" not in out
+
+
+# ----------------------------------------------------------------------------
+# Capa 1 del calificador de tres capas (2026-09-16).
+#
+# CALIBRACION ANTES DE DAR CONSECUENCIA. Cada caso fija una frontera del
+# pre-registro (docs/.../2026-09-16-calificador-tres-capas-preregistro.md §2).
+# Sin esto el detector se estrenaria sobre datos reales sin que nadie sepa que
+# marca de mas —— el fallo que el blueprint de agent-dashboard-v3 midio: sin
+# corregir falsos positivos, su detector marcaba al agente que MAS aportaba,
+# 18 de 20 posts, frente a 12 de 22 del que si fabricaba.
+# ----------------------------------------------------------------------------
+import json as _json
+import tempfile as _tempfile
+
+c = _cargar("calificador")
+
+
+@pytest.mark.parametrize("texto,esperado", [
+    ("131.072", 131072.0),   # separador de miles
+    ("24,1", 24.1),          # decimal con coma
+    ("1,234.5", 1234.5),     # miles y decimal
+])
+def test_calificador_normaliza_numeros(texto, esperado):
+    assert c._a_float(texto) == esperado
+
+
+@pytest.mark.parametrize("texto", [
+    "la maquina hall9000 responde",   # no es el numero 9000
+    "modelo qwen3.6-ejecutor-f0",     # no es el 3 ni el 6
+    "el bundle index-DkQdXnxb.js",
+])
+def test_calificador_no_extrae_numeros_de_identificadores(texto):
+    assert c.numeros(texto) == []
+
+
+def test_calificador_si_extrae_un_numero_suelto():
+    assert [t for t, _ in c.numeros("hay 131072 tokens")] == ["131072"]
+
+
+def test_calificador_marca_un_numero_que_no_esta_en_el_corpus():
+    h_ = c.sin_respaldo("el contexto es 131074 tokens", "context_length: 131072")
+    assert len(h_) == 1 and h_[0]["literal"] == "131074"
+
+
+@pytest.mark.parametrize("respuesta,corpus,verdad", [
+    ("el contexto es 131072", "context_length: 131072", ""),   # literal exacto
+    ("son 131.072 tokens", "131072", ""),                      # otra escritura
+    ("hay 89 GiB de RAM", "MemTotal: 96361971712", ""),        # conversion de unidades
+    ("son 42 cosas", "nada que ver", ""),                      # menos de 3 digitos
+    ("quedan 1771 GB", "", "Avail 1771"),                      # lo respalda la verdad de campo
+])
+def test_calificador_no_marca_lo_excluido_en_el_preregistro(respuesta, corpus, verdad):
+    assert c.sin_respaldo(respuesta, corpus, verdad) == []
+
+
+def _transcripcion_tmp(eventos):
+    f = _tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+    for e in eventos:
+        f.write(_json.dumps(e) + "\n")
+    f.close()
+    return pathlib.Path(f.name)
+
+
+def test_calificador_el_razonamiento_del_modelo_NO_entra_al_corpus():
+    """La frontera mas importante: si el razonamiento entrara, una cifra
+    inventada en un turno quedaria respaldada para el siguiente —— por si
+    misma. Es lo mismo que excluir los posts de otros agentes del corpus de
+    citas en el blueprint de Ricardo."""
+    p = _transcripcion_tmp([
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "creo que el contexto es 131074"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "confirmo: el contexto es 131074"}]}},
+    ])
+    corpus, respuesta = c.partes_de_transcripcion(p)
+    p.unlink()
+    assert "131074" not in corpus
+    assert len(c.sin_respaldo(respuesta, corpus)) == 1
+
+
+def test_calificador_la_salida_de_herramienta_SI_entra_al_corpus():
+    p = _transcripcion_tmp([
+        {"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "context_length: 131072"}]}},
+        {"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "el contexto es 131072"}]}},
+    ])
+    corpus, respuesta = c.partes_de_transcripcion(p)
+    p.unlink()
+    assert "131072" in corpus
+    assert c.sin_respaldo(respuesta, corpus) == []
+
+
+def test_calificador_toma_el_ultimo_texto_como_respuesta_final():
+    p = _transcripcion_tmp([
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "primero"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "ultimo"}]}},
+    ])
+    _, respuesta = c.partes_de_transcripcion(p)
+    p.unlink()
+    assert respuesta == "ultimo"
