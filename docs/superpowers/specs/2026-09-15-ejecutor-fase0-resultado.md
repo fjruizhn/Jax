@@ -46,7 +46,23 @@ Medido el 2026-09-15 entre las 17:14 y las 21:40. Datos crudos fuera del repo
 | U7 · Kimi y GLM por API Anthropic | **PASA** | ambos `stop_reason=tool_use` con el bloque de la herramienta | `endpoints.jsonl` |
 | U8 · compactar antes de truncar | **PASA** | **0** líneas `truncating input prompt` en la ventana | `u8_stream.jsonl`, journal de ollama |
 
-### 4.2 El examen (U3), agregado
+### 4.2 El examen (U3), agregado — **SUPERADA por §4.2 bis**
+
+> **CORREGIDO 2026-09-16 (Mr. Hyde, al escribir el diseño de Fase 2).** Esta tabla y el
+> párrafo que le sigue son de la calificación **anterior** a la recalificación de tres
+> capas, y **contradicen a la fila de resumen de este mismo documento**, que dice 11
+> hechos inventados. No se borran —son el registro de lo que se creyó primero— pero
+> **no son la calificación vigente**. Vale `calificacion_tres_capas.json` (§4.2 bis).
+>
+> Lo que cambia no es sólo el total (6 → 11): cambia **qué tareas fallaron**. La
+> recalificación da la tarea 2 como NO completada y con 1 invención («~91 GB» por
+> 89 GiB), y la 3 como completada. Por lo tanto **la frase «recolección directa: 5 de 5,
+> cero invenciones» ya no es cierta y no debe citarse**: la tarea 2 es recolección
+> directa y aun así inventó.
+>
+> El patrón correcto, con los números vigentes, está en
+> `2026-09-16-ejecutor-fase2-design.md` §1: **el corte no es «recolectar vs sintetizar»
+> sino «repetir vs derivar»**. Las cinco tareas con cero invenciones son 1, 6, 7, 8 y 10.
 
 Sin datos de clientes, como exige §3.
 
@@ -69,7 +85,8 @@ Sin datos de clientes, como exige §3.
   comandos correctos, obtiene las salidas correctas y las reporta bien. Incluida
   la tarea 8, donde enumeró los 14 dominios uno a uno sin faltantes ni sobrantes.
 - **Síntesis a partir de datos parciales (3, 4, 5, 9): 0 de 4, y las SEIS
-  invenciones están todas aquí.** Dijo «contexto 131.074» cuando su propia salida
+  invenciones están todas aquí.** *(Cifra de la calificación anterior; la
+  recalificación cuenta **11** y reparte distinto — ver el aviso de §4.2.)* Dijo «contexto 131.074» cuando su propia salida
   decía 131.072; «llevan casi un día encendidos» cuando su propio timestamp decía
   38 minutos; atribuyó dos puertos a Docker sin ninguna salida de procesos; y en
   la trampa afirmó que *todos* los paquetes eran de `noble` habiendo visto **2 KB
