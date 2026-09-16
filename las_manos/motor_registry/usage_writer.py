@@ -4,6 +4,15 @@ Mismo patron de conexion que credential_resolver.py/jacobs/store.py: cada
 repo se conecta a la misma DB jax_memory con su propio conector minimo,
 sin paquete compartido (repos/venvs independientes, mismo trade-off
 documentado desde Fase 1).
+
+COLA DURABLE (Task 7, 2026-09-15): agotados los reintentos en línea, la fila ya
+no se pierde -- se deposita en el respaldo de `cola_uso` con
+`origen='motor_registry'`. **Este proceso NO DRENA**: sólo `jax-platform` lee el
+respaldo e inserta, porque es la dueña de `axioma_usage` y la única con
+migraciones (la columna `spool_id` y su UNIQUE, que es lo que hace idempotente
+al reintento). Si este módulo también insertara, dos procesos borrarían el mismo
+archivo sin coordinación y el cobro se duplicaría en la ventana entre el INSERT
+y el borrado.
 """
 from __future__ import annotations
 
@@ -21,6 +30,14 @@ try:
 except ImportError:
     from jax.core.db_connect_config import db_connect_timeout_seconds
 
+try:
+    # Mismo doble import que db_connect_config, por la misma razón:
+    # las_manos/cola_uso.py es un symlink a jax/core/cola_uso.py, y con
+    # cwd=las_manos el paquete `jax.core` no es importable.
+    from cola_uso import _ahora_iso, encolar as encolar_uso
+except ImportError:
+    from jax.core.cola_uso import _ahora_iso, encolar as encolar_uso
+
 logger = logging.getLogger("motor_registry.usage_writer")
 
 # T1.d (2026-08-22, auditoria usage_writer): 2 intentos totales (1 reintento),
@@ -31,6 +48,21 @@ logger = logging.getLogger("motor_registry.usage_writer")
 # el chequeo de reconciliación, es la red que atrapa esto después).
 _WRITE_MAX_ATTEMPTS = 2
 _WRITE_RETRY_DELAY_SECONDS = 0.5
+
+
+def _entero_o_none(valor) -> int | None:
+    """tenant_id/user_id son INT(11) en la tabla y llegan como string. El cast
+    NO puede propagar: esto corre en el camino de recuperación de una fila que
+    ya se perdió una vez. Un valor no numérico entra como NULL -- exactamente
+    lo mismo que hace hoy la columna cuando el INSERT lo rechaza, pero con la
+    fila guardada en vez de tirada."""
+    if valor is None:
+        return None
+    try:
+        return int(valor)
+    except (TypeError, ValueError):
+        logger.warning("tenant_id/user_id no numérico (%r) -- se encola como NULL", valor)
+        return None
 
 
 def _db_cfg() -> dict:
@@ -110,6 +142,10 @@ async def record_motor_usage(
             f"(user_id={user_id!r} tenant_id={tenant_id!r}) -- escribe con "
             f"tenant_id/user_id NULL, no se descarta"
         )
+    # La hora del TURNO, leída ANTES del primer intento: con los reintentos y
+    # una caída larga de por medio, tomarla al encolar movería el costo de día.
+    creado_en = _ahora_iso()
+    cost = None
     last_exc: Exception | None = None
     for attempt in range(1, _WRITE_MAX_ATTEMPTS + 1):
         try:
@@ -119,7 +155,6 @@ async def record_motor_usage(
             conn = await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
             try:
                 price_in, price_out = await _lookup_model_price(conn, provider_id, model)
-                cost = None
                 if price_in is not None and price_out is not None:
                     cost = (tokens_in * float(price_in) + tokens_out * float(price_out)) / 1_000_000
                 async with conn.cursor() as cur:
@@ -140,15 +175,56 @@ async def record_motor_usage(
             last_exc = e
             if attempt < _WRITE_MAX_ATTEMPTS:
                 await asyncio.sleep(_WRITE_RETRY_DELAY_SECONDS)
-    # T1.d: agotados los reintentos -- error (no warning), máxima visibilidad
-    # desde este módulo. No escribe a jacobs_events: motor_registry no tiene
-    # pipeline_id en este scope (LAS MANOS no conoce el pipeline de Jacobs
-    # que lo llamó, es una frontera de arquitectura real, no un descuido) y
-    # jacobs_events.pipeline_id es NOT NULL -- forzar un valor inventado ahí
-    # sería peor que no escribir. T3 (chequeo de reconciliación) es la red
-    # que atrapa esto después, comparando motor_jobs.jsonl contra esta tabla.
+    # T7 (2026-09-15): agotados los reintentos, la fila va al respaldo en vez
+    # de perderse. Los reintentos en línea se mantienen -- son baratos y
+    # resuelven el caso transitorio sin tocar el disco; la cola es para cuando
+    # la base está genuinamente caída, que es el caso que T1.d no cubría.
+    #
+    # `status` y `job_id` VIAJAN en el archivo (Task 8, 2026-09-15: el contrato
+    # compartido pasó a TRECE campos). Sin ellos, la fila recuperada entraba a
+    # `axioma_usage` con esas dos columnas en NULL y la reconciliación contra
+    # motor_jobs.jsonl por igualdad exacta (T3) no la podía emparejar: se
+    # recuperaba el cobro y se perdía la trazabilidad.
+    #
+    # cost_usd va None cuando la caída fue antes del lookup de precios: sin base
+    # no hay tabla `model` que consultar. La plataforma lo resuelve al insertar.
+    spool_id = await encolar_uso({
+        "created_at": creado_en,
+        "tenant_id": _entero_o_none(tenant_id),
+        "user_id": _entero_o_none(user_id),
+        "facet": facet,
+        "model": model,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "cost_usd": cost,
+        "request_type": "motor",
+        "origen": "motor_registry",
+        "status": status,
+        "job_id": job_id,
+    })
+    if spool_id:
+        # INFO, no ERROR: encolada NO es pérdida. Un ERROR acá entrena a
+        # ignorar el log, y entonces el ERROR de abajo -- que sí es una pérdida
+        # real -- deja de distinguirse.
+        logger.info(
+            f"record_motor_usage AGOTÓ {_WRITE_MAX_ATTEMPTS} intentos, job={job_id} "
+            f"facet={facet} status={status} tokens_in={tokens_in} "
+            f"tokens_out={tokens_out} -- fila ENCOLADA en el respaldo "
+            f"spool_id={spool_id} (la inserta jax-platform), "
+            f"reason={type(last_exc).__name__}: {last_exc}"
+        )
+        return
+    # T1.d: agotados los reintentos Y el respaldo -- error (no warning), máxima
+    # visibilidad desde este módulo. No escribe a jacobs_events: motor_registry
+    # no tiene pipeline_id en este scope (LAS MANOS no conoce el pipeline de
+    # Jacobs que lo llamó, es una frontera de arquitectura real, no un
+    # descuido) y jacobs_events.pipeline_id es NOT NULL -- forzar un valor
+    # inventado ahí sería peor que no escribir. T3 (chequeo de reconciliación)
+    # es la red que atrapa esto después, comparando motor_jobs.jsonl contra
+    # esta tabla.
     logger.error(
         f"record_motor_usage AGOTÓ {_WRITE_MAX_ATTEMPTS} intentos, job={job_id} "
         f"facet={facet} tokens_in={tokens_in} tokens_out={tokens_out} status={status} "
-        f"-- fila NO escrita, reason={type(last_exc).__name__}: {last_exc}"
+        f"-- TAMPOCO se pudo encolar: fila PERDIDA, "
+        f"reason={type(last_exc).__name__}: {last_exc}"
     )

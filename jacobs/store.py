@@ -7,6 +7,7 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from typing import Any
@@ -52,6 +53,85 @@ async def get_conn() -> aiomysql.Connection:
     # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
     # aiomysql espera sin límite si la DB se cuelga.
     return await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
+
+
+# Hijo de "jacobs": LAS MANOS le pone handler INFO a ese logger al arrancar
+# (server.py::_jacobs_init), asi un ERROR de aca llega al journal.
+logger = logging.getLogger("jacobs.store")
+
+# --- Indices de las columnas por las que se FILTRA ---------------------------
+# (tabla, indice, DDL, acotado). Ver el comentario del loop en init_tables().
+#
+# `acotado`: el DDL corre con lock_wait_timeout corto (_crear_indice_acotado).
+# Los cuatro primeros ya existen en produccion y no se tocan (el chequeo de
+# information_schema los salta); el de dueño es nuevo y va acotado.
+#
+# idx_jacobs_pipelines_duenio (Ruling T6-6, 2026-09-15): jax-platform lista
+# los pipelines de un dueño con WHERE user_id AND tenant_id ORDER BY
+# created_at. ALGORITHM=INPLACE LOCK=NONE explicitos (re-revision de la
+# plataforma): si MariaDB no puede crearlo en linea, FALLA con error en vez de
+# caer en silencio a COPY, que bloquea las escrituras de Jacobs mientras copia.
+_INDICES: list[tuple[str, str, str, bool]] = [
+    ("jacobs_events", "idx_events_pipeline",
+     "CREATE INDEX idx_events_pipeline ON jacobs_events (pipeline_id)", False),
+    ("jacobs_steps", "idx_steps_pipeline",
+     "CREATE INDEX idx_steps_pipeline ON jacobs_steps (pipeline_id)", False),
+    ("jacobs_steps", "idx_steps_status",
+     "CREATE INDEX idx_steps_status ON jacobs_steps (status)", False),
+    ("jacobs_pipelines", "idx_pipelines_status",
+     "CREATE INDEX idx_pipelines_status ON jacobs_pipelines (status)", False),
+    ("jacobs_pipelines", "idx_jacobs_pipelines_duenio",
+     "CREATE INDEX idx_jacobs_pipelines_duenio ON jacobs_pipelines "
+     "(user_id, tenant_id, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
+]
+
+# Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
+# (lock_wait_timeout) es 86400 s: una transaccion larga sobre la tabla dejaria
+# el arranque colgado un dia entero, sin error.
+#
+# Costo de la espera (review de 05c028b): mientras el DDL espera su metadata
+# lock EXCLUSIVO (hasta estos 30 s), ese pedido queda en la cola del MDL y las
+# lecturas y escrituras NUEVAS sobre jacobs_pipelines se encolan detras de el.
+# Por eso la espera es corta: 30 s de Jacobs detenido como peor caso, no un dia.
+# Si vence, el indice no se crea (ERROR en el log); la red de seguridad es el
+# test de EXPLAIN de la plataforma en CI, que falla si la consulta de dueño no
+# usa este indice.
+_LOCK_WAIT_DDL_SEGUNDOS = 30
+_ER_LOCK_WAIT_TIMEOUT = 1205
+
+
+async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
+    """Corre `ddl` con lock_wait_timeout de 30 s en ESTA sesion y restaura el
+    valor previo pase lo que pase. True si lo creo.
+
+    Decision (re-revision de la plataforma, 2026-09-15): si la espera vence
+    (1205), ERROR en el log con el indice y el motivo, y el arranque SIGUE: el
+    proximo arranque lo reintenta, porque el chequeo de information_schema ve
+    que falta. No es un salto silencioso. Por que no fallar el arranque: el
+    indice es de rendimiento, no un contrato (sin el, la consulta de dueño es
+    un scan -- 60 filas hoy); init_tables() corre en el arranque de LAS MANOS,
+    y tumbar LAS MANOS entero porque otra transaccion tiene la tabla cambiaria
+    una consulta lenta por el sistema caido. Cualquier OTRO error (INPLACE o
+    LOCK=NONE no soportados, sintaxis) SUBE: no es una espera, es un DDL que
+    no puede correr como se declaro."""
+    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
+    (previo,) = await cur.fetchone()
+    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
+    try:
+        await cur.execute(ddl)
+        return True
+    except aiomysql.OperationalError as e:  # fail-soft: el indice solo acelera; la consulta de dueño sigue correcta como scan; se reintenta en el proximo arranque
+        if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
+            raise
+        logger.error(
+            "init_tables: no se creo %s en %s -- otra transaccion tiene la tabla y "
+            "vencio la espera de %d s (%s). El arranque sigue SIN el indice (la "
+            "consulta de dueño hace scan); se reintenta en el proximo arranque.",
+            indice, tabla, _LOCK_WAIT_DDL_SEGUNDOS, e,
+        )
+        return False
+    finally:
+        await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
 
 
 async def init_tables() -> None:
@@ -153,23 +233,21 @@ async def init_tables() -> None:
             # que las columnas de arriba. init_tables() corre en CADA arranque
             # de los tres procesos: si esto no fuera idempotente, el segundo
             # arranque romperia en produccion.
-            for tabla, indice, ddl in [
-                ("jacobs_events", "idx_events_pipeline",
-                 "CREATE INDEX idx_events_pipeline ON jacobs_events (pipeline_id)"),
-                ("jacobs_steps", "idx_steps_pipeline",
-                 "CREATE INDEX idx_steps_pipeline ON jacobs_steps (pipeline_id)"),
-                ("jacobs_steps", "idx_steps_status",
-                 "CREATE INDEX idx_steps_status ON jacobs_steps (status)"),
-                ("jacobs_pipelines", "idx_pipelines_status",
-                 "CREATE INDEX idx_pipelines_status ON jacobs_pipelines (status)"),
-            ]:
+            #
+            # La lista vive en _INDICES (arriba) para que su forma se pruebe
+            # sin DB (tests/test_store_indice_duenio.py).
+            for tabla, indice, ddl, acotado in _INDICES:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.STATISTICS "
                     "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
                     (tabla, indice),
                 )
                 (existe,) = await cur.fetchone()
-                if not existe:
+                if existe:
+                    continue
+                if acotado:
+                    await _crear_indice_acotado(cur, tabla, indice, ddl)
+                else:
                     await cur.execute(ddl)
     finally:
         conn.close()

@@ -29,6 +29,8 @@ from jacobs.artifacts import read_artifact, save_if_large
 # Vive en jax/core (capa base, compartido con el HttpMuscle del REPL); llega a
 # este proceso por el symlink las_manos/grounding_sources.py, como facet_resolver.
 from grounding_sources import build_sources, render_sources_block, resolve_redirects
+# Ruling T6-6: jax/core/redaccion.py por symlink en las_manos/, como arriba.
+from redaccion import recortar_redactado, redactar_secretos
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -222,7 +224,11 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     hoy solo hipatia lo usa, pero cualquier facet con transport=http_gemini
     entra aca sin codigo nuevo."""
     model = f.model
-    url = f"{f.base_url}/models/{model}:generateContent?key={f.credential}"
+    # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key, NO en
+    # `?key=`. httpx loguea la URL entera en INFO en cada pedido y la mete en
+    # str(HTTPStatusError): con la key en la query quedaba en claro.
+    url = f"{f.base_url}/models/{model}:generateContent"
+    headers = {"x-goog-api-key": f.credential}
     contents = [{"role": "user", "parts": [{"text": prompt}]}]
     payload  = {
         "contents": contents,
@@ -231,9 +237,13 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
 
     async def _call() -> dict:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code != 200:
-                raise RuntimeError(f"Gemini HTTP {resp.status_code}: {resp.text[:200]}")
+                # Google devuelve la key rechazada DENTRO del cuerpo del error:
+                # redactar antes de recortar (y este texto termina en
+                # jacobs_steps.error via _fail_step).
+                cuerpo = recortar_redactado(resp.text, 200, [f.credential])
+                raise RuntimeError(f"Gemini HTTP {resp.status_code}: {cuerpo}")
             return resp.json()
 
     data = await _call()
@@ -1185,6 +1195,11 @@ async def _persist_step_to_repo(
 async def _fail_step(
     pipeline: Pipeline, step: Step, step_index: int, error: str
 ) -> None:
+    # Ruling T6-6: aca se ESCRIBE el error de un paso (jacobs_steps.error y los
+    # eventos STEP_FAILED / PIPELINE_ABORTED, que jax-platform muestra). Se
+    # redacta en el punto de escritura para que ningun llamador -- ni el
+    # str(exc) generico de _run_one_step -- pueda guardar un secreto en claro.
+    error = redactar_secretos(error)
     step.status      = StepStatus.failed
     step.error       = error
     step.finished_at = time.time()
