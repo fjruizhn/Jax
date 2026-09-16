@@ -180,12 +180,11 @@ async def record_motor_usage(
     # resuelven el caso transitorio sin tocar el disco; la cola es para cuando
     # la base está genuinamente caída, que es el caso que T1.d no cubría.
     #
-    # `status` y `job_id` NO están en los once campos del contrato compartido
-    # (son columnas que sólo escribe este escritor, y el formato del archivo es
-    # el contrato entre los dos repos: cambiarlo obliga a reordenar el
-    # despliegue). Por eso la fila recuperada entra sin ellos, y por eso van
-    # explícitos en el log de abajo: sin `job_id` la reconciliación contra
-    # motor_jobs.jsonl se queda sin el único identificador exacto que tenía.
+    # `status` y `job_id` VIAJAN en el archivo (Task 8, 2026-09-15: el contrato
+    # compartido pasó a TRECE campos). Sin ellos, la fila recuperada entraba a
+    # `axioma_usage` con esas dos columnas en NULL y la reconciliación contra
+    # motor_jobs.jsonl por igualdad exacta (T3) no la podía emparejar: se
+    # recuperaba el cobro y se perdía la trazabilidad.
     #
     # cost_usd va None cuando la caída fue antes del lookup de precios: sin base
     # no hay tabla `model` que consultar. La plataforma lo resuelve al insertar.
@@ -200,6 +199,8 @@ async def record_motor_usage(
         "cost_usd": cost,
         "request_type": "motor",
         "origen": "motor_registry",
+        "status": status,
+        "job_id": job_id,
     })
     if spool_id:
         # INFO, no ERROR: encolada NO es pérdida. Un ERROR acá entrena a
@@ -209,8 +210,7 @@ async def record_motor_usage(
             f"record_motor_usage AGOTÓ {_WRITE_MAX_ATTEMPTS} intentos, job={job_id} "
             f"facet={facet} status={status} tokens_in={tokens_in} "
             f"tokens_out={tokens_out} -- fila ENCOLADA en el respaldo "
-            f"spool_id={spool_id} (la inserta jax-platform; status/job_id no "
-            f"viajan en el archivo, quedan acá), "
+            f"spool_id={spool_id} (la inserta jax-platform), "
             f"reason={type(last_exc).__name__}: {last_exc}"
         )
         return

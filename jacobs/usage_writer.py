@@ -185,6 +185,11 @@ async def record_direct_usage(
         "cost_usd": cost,
         "request_type": "pipeline",
         "origen": "jacobs",
+        # explicitos aunque el contrato los admita ausentes: jacobs no invoca
+        # trabajos del motor, y que se vean en None dice que es una decision y
+        # no un campo que se olvido de mandar.
+        "status": None,
+        "job_id": None,
     })
     if spool_id:
         # INFO, no ERROR: encolada NO es perdida. Un ERROR acá entrena a

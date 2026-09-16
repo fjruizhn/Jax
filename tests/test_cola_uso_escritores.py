@@ -29,9 +29,14 @@ RAIZ = Path(__file__).resolve().parent.parent
 CANONICO_EN_JAX = RAIZ / "jax" / "core" / "cola_uso.py"
 ESPEJO_EN_LAS_MANOS = RAIZ / "las_manos" / "cola_uso.py"
 
+#: Los TRECE del contrato (Task 8, 2026-09-15: `status` y `job_id` pasaron a
+#: viajar en el archivo). Se escriben aca a mano, no se importan de `cola_uso`:
+#: importarlos haria que el test dijera "el archivo tiene los campos que el
+#: modulo dice tener" -- verde aunque el contrato cambiara solo de un lado.
 CAMPOS_DEL_CONTRATO = {
     "spool_id", "created_at", "tenant_id", "user_id", "facet", "model",
     "tokens_in", "tokens_out", "cost_usd", "request_type", "origen",
+    "status", "job_id",
 }
 
 # La API que SOLO puede usar la plataforma: es la duena de `axioma_usage` y la
@@ -238,6 +243,9 @@ def test_jacobs_encola_la_fila_cuando_la_base_falla(respaldo, monkeypatch):
     # sin base no hay tabla `model` que consultar: el precio lo pone el que
     # drena, del lado de la plataforma.
     assert fila["cost_usd"] is None
+    # jacobs no invoca trabajos del motor: los dos campos viajan explicitos en
+    # null, no ausentes -- el que drena exige los TRECE.
+    assert fila["status"] is None and fila["job_id"] is None
 
 
 def test_jacobs_camino_feliz_no_deja_nada_en_el_respaldo(respaldo, monkeypatch):
@@ -314,6 +322,7 @@ def test_motor_encola_tras_agotar_los_reintentos(respaldo, monkeypatch):
     assert fila["request_type"] == "motor"
     assert fila["facet"] == "ada" and fila["model"] == "gpt-x"
     assert fila["tokens_in"] == 10 and fila["tokens_out"] == 20
+    assert fila["status"] == "failed" and fila["job_id"] == "j1"
 
 
 def test_motor_camino_feliz_no_deja_nada_en_el_respaldo(respaldo, monkeypatch):
@@ -349,11 +358,18 @@ def test_motor_loguea_ERROR_si_tampoco_puede_encolar(respaldo, monkeypatch, capl
     assert "j9" in errores[0].getMessage()
 
 
-def test_motor_no_pierde_status_ni_job_id_del_log(respaldo, monkeypatch, caplog):
-    """`status` y `job_id` NO estan en los once campos del contrato -- son
-    columnas que solo escribe este escritor. Al encolar se van del archivo, asi
-    que tienen que quedar en el log o la reconciliacion contra motor_jobs.jsonl
-    se queda sin el unico identificador exacto que tenia."""
+def test_motor_manda_status_y_job_id_EN_EL_ARCHIVO(respaldo, monkeypatch, caplog):
+    """CAMBIO DE SENTIDO (Task 8, 2026-09-15). Este test fijaba lo contrario:
+    que `status` y `job_id` NO viajaban en el archivo y por eso tenian que
+    quedar en el log. Con el contrato en TRECE campos viajan, y es lo que
+    importa: sin ellos la fila recuperada entra a `axioma_usage` con esas dos
+    columnas en NULL y la reconciliacion contra motor_jobs.jsonl por igualdad
+    exacta (T3) no la puede emparejar -- se recupera el cobro y se pierde la
+    trazabilidad.
+
+    El log los sigue nombrando y se sigue exigiendo aca: el operador que ve el
+    INFO no tiene que ir a abrir el archivo para saber de que trabajo era.
+    """
     from motor_registry import usage_writer as motor
 
     async def _sin_espera(_s):
@@ -366,6 +382,11 @@ def test_motor_no_pierde_status_ni_job_id_del_log(respaldo, monkeypatch, caplog)
             user_id="7", tenant_id="77", facet="ada", provider_id="p",
             model="m", tokens_in=1, tokens_out=2, job_id="j42", status="killed",
         ))
+
+    filas = _filas_del_respaldo(respaldo)
+    assert len(filas) == 1, filas
+    assert filas[0]["status"] == "killed"
+    assert filas[0]["job_id"] == "j42"
     texto = " ".join(r.getMessage() for r in caplog.records)
     assert "j42" in texto and "killed" in texto, texto
 

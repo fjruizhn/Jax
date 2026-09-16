@@ -60,11 +60,21 @@ SUBDIRECTORIO_CORRUPTOS = "corruptos"
 CAMPOS = (
     "spool_id", "created_at", "tenant_id", "user_id", "facet", "model",
     "tokens_in", "tokens_out", "cost_usd", "request_type", "origen",
+    "status", "job_id",
 )
 #: `spool_id` y `created_at` los completa el módulo si el llamador no los trae;
-#: el resto son obligatorios. `created_at` es la hora del TURNO, no la del
-#: reintento: si no, una caída de dos horas movería el costo al día siguiente.
-CAMPOS_OBLIGATORIOS = tuple(c for c in CAMPOS if c not in ("spool_id", "created_at"))
+#: `status` y `job_id` son opcionales PARA EL LLAMADOR (sólo `motor_registry`
+#: los tiene) y `_normalizar` los deja en `None`. El resto son obligatorios.
+#: `created_at` es la hora del TURNO, no la del reintento: si no, una caída de
+#: dos horas movería el costo al día siguiente.
+#: `status`/`job_id` están en el archivo (DECISIÓN de Fernando 2026-09-15,
+#: opción (b)) porque sin ellos la fila recuperada entra a `axioma_usage` con
+#: esas dos columnas en NULL y la reconciliación contra `motor_jobs.jsonl` no
+#: la puede emparejar: se recupera el cobro y se pierde la trazabilidad.
+CAMPOS_OBLIGATORIOS = tuple(
+    c for c in CAMPOS
+    if c not in ("spool_id", "created_at", "status", "job_id")
+)
 ORIGENES = frozenset({"platform", "jacobs", "motor_registry"})
 
 _lock = asyncio.Lock()
@@ -155,7 +165,12 @@ def _ahora_iso() -> str:
 
 
 def _normalizar(fila) -> dict:
-    """Devuelve la fila con los once campos del contrato, o lanza ValueError."""
+    """Devuelve la fila con los trece campos del contrato, o lanza ValueError.
+
+    Los que el llamador no trae quedan en `None` por la comprensión sobre
+    `CAMPOS` de más abajo: hoy eso alcanza para `status` y `job_id`, que sólo
+    tiene `motor_registry`.
+    """
     if not isinstance(fila, dict):
         raise ValueError(f"la fila no es un diccionario: {type(fila).__name__}")
     faltantes = [c for c in CAMPOS_OBLIGATORIOS if c not in fila]
@@ -177,6 +192,12 @@ def _normalizar(fila) -> dict:
 def _motivo_de_corrupcion(datos) -> str | None:
     if not isinstance(datos, dict):
         return f"el contenido no es un objeto JSON ({type(datos).__name__})"
+    # Se exigen los TRECE, no sólo los obligatorios del llamador, y es a
+    # propósito: fail-closed. Un archivo escrito por una copia VIEJA del módulo
+    # (once campos, sin `status`/`job_id`) cae en `corruptos/` en vez de entrar
+    # a medias -- entraría con esas dos columnas en NULL y sin manera de saber,
+    # después, que faltaban. El que encola completa el archivo; el que drena
+    # exige el archivo completo.
     faltantes = [c for c in CAMPOS if c not in datos]
     if faltantes:
         return f"faltan campos del contrato: {', '.join(faltantes)}"

@@ -427,6 +427,12 @@ jobs:
         # test se salteara igual, esto seria "14 passed, 1 skipped" y el grep
         # falla. Un control que no falla cuando la comparacion no ocurre no
         # valida la comparacion.
+        #
+        # Sigue en 15 el 2026-09-15 (Task 8b, el contrato pasa a TRECE campos):
+        # el cambio endurece tests que ya existian y reescribe uno en su
+        # contrario; no agrega ni quita archivos de test. Medido dos veces:
+        # 15 passed, 0 skipped, con JAX_PLATFORM_REPO_ROOT apuntando a un
+        # checkout real de jax-platform.
         run: |
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
           grep -qE "^15 passed" /tmp/cu || {
@@ -838,6 +844,18 @@ jobs:
           # detector se ejercita contra una escritura de mentira, y
           # pytest_sessionfinish repite el chequeo cuando ya corrieron TODOS los
           # tests -- ahi la corrida sale con exit 1 aunque pytest diga "passed".
+          # 406 SIGUE SIENDO 406 el 2026-09-15 (Task 8b: el contrato del archivo
+          # pasa a TRECE campos, con status y job_id). No suma tests: los dos
+          # campos nuevos se exigen DENTRO de tests que ya existian
+          # (CAMPOS_DEL_CONTRATO en test_cola_uso_escritores.py y los valores en
+          # la fila de motor y en la de jacobs), y el test que fijaba el
+          # comportamiento viejo -- "status/job_id NO viajan en el archivo, por
+          # eso tienen que quedar en el log" -- se REESCRIBIO en su contrario
+          # (test_motor_manda_status_y_job_id_EN_EL_ARCHIVO), no se borro ni se
+          # duplico. Vistos en rojo antes de verde: los dos de "set(fila) ==
+          # CAMPOS_DEL_CONTRATO" contra el escritor de once campos, y el
+          # reescrito por mutacion (sacarle status/job_id al encolar de
+          # motor_registry lo tira rojo). Medido dos veces: 406 / 1.
           grep -qE "^406 passed, 1 skipped" /tmp/out || {
             echo "PISO ROTO: se esperaban 406 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
