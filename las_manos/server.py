@@ -305,64 +305,22 @@ async def envelope_structural_rejection(request: Request, exc: RequestValidation
 # ------------------------------------------------------------
 # ANTES: /health devolvia {"status": "alive"} FIJO. Respondia «vivo» por el
 # mero hecho de poder responder: un control que NO PUEDE FALLAR. Y no es un
-# endpoint cualquiera -- es el que miran loadtest/health.js (las pruebas de
-# carga de LAS CUATRO DEL RENDIMIENTO), la Mesa para saber si LAS MANOS vive, y
-# el dashboard. Con la base caida seguia diciendo alive y k6 seguia en verde:
-# el p95 medido no era del servicio, era de FastAPI devolviendo un literal.
+# endpoint cualquiera —— lo miran loadtest/health.js (las pruebas de carga de
+# LAS CUATRO DEL RENDIMIENTO), la Mesa para saber si LAS MANOS vive, y el
+# dashboard. Con la base caida seguia diciendo alive y k6 seguia en verde: el
+# p95 medido no era del servicio, era de FastAPI devolviendo un literal.
 #
-# AHORA comprueba lo que LAS MANOS necesita PARA TRABAJAR: que la base
-# responda (de ahi salen los pipelines, el catalogo de motores y el reaper) y
-# que el log forense sea escribible (sin audit no se puede ejecutar nada:
-# quedaria una accion sin rastro).
-#
-# Con CACHE de TTL corto, porque el endpoint recibe 20.000 req/s en las pruebas
-# de carga y una consulta por peticion tumbaria la base -- el remedio seria
-# peor. Un lock evita la estampida cuando el TTL vence con muchas peticiones en
-# vuelo. El TTL se reporta en la respuesta: quien la lee sabe de cuando es.
-_SALUD_TTL_SEGUNDOS = 5.0
-_salud_cache: dict = {"t": 0.0, "valor": None}
-_salud_lock = asyncio.Lock()
+# La LOGICA vive en las_manos/salud.py, no aca: metida en este archivo, su test
+# tenia que importar el servidor entero (FastAPI, planner, policy, workers,
+# motor registry, jacobs) y en CI ese import fallaba —— los cinco tests se
+# SALTABAN en silencio. El test que demuestra que /health puede ponerse rojo no
+# corria justo donde importa.
+from salud import Salud, comprobar_audit, comprobar_base  # noqa: E402
 
-
-async def _comprobar_dependencias() -> dict:
-    """Las comprobaciones de verdad. Cada una puede fallar y decir por que."""
-    fallos: list[str] = []
-
-    try:
-        conn = await jacobs_store.get_conn()
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute("SELECT 1")
-                await cur.fetchone()
-        finally:
-            conn.close()
-    except Exception as exc:  # fail-closed: si la base no responde, el servicio NO esta sano y lo dice
-        fallos.append(f"base de datos: {type(exc).__name__}: {exc}")
-
-    try:
-        audit.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with audit.log_path.open("a"):
-            pass
-    except Exception as exc:  # fail-closed: sin log forense no se puede ejecutar nada sin dejar de auditarlo
-        fallos.append(f"log de auditoria no escribible: {type(exc).__name__}: {exc}")
-
-    return {"ok": not fallos, "fallos": fallos}
-
-
-async def _salud() -> dict:
-    ahora = time.monotonic()
-    cacheado = _salud_cache["valor"]
-    if cacheado is not None and (ahora - _salud_cache["t"]) < _SALUD_TTL_SEGUNDOS:
-        return cacheado
-    async with _salud_lock:
-        ahora = time.monotonic()
-        cacheado = _salud_cache["valor"]
-        if cacheado is not None and (ahora - _salud_cache["t"]) < _SALUD_TTL_SEGUNDOS:
-            return cacheado
-        valor = await _comprobar_dependencias()
-        _salud_cache["t"] = ahora
-        _salud_cache["valor"] = valor
-        return valor
+_salud = Salud({
+    "base de datos": lambda: comprobar_base(jacobs_store.get_conn),
+    "log de auditoria": lambda: comprobar_audit(audit.log_path),
+})
 
 
 @app.get("/health")
@@ -373,7 +331,7 @@ async def health(response: Response) -> dict:
     El kill switch se REPORTA pero no degrada: estar frenado a proposito es un
     estado deliberado, no una averia.
     """
-    estado = await _salud()
+    estado = await _salud.estado()
     if not estado["ok"]:
         response.status_code = 503
     return {
@@ -381,8 +339,8 @@ async def health(response: Response) -> dict:
         "status": "alive" if estado["ok"] else "degraded",
         "kill_switch_active": _kill_switch_active(),
         "problemas": estado["fallos"],
-        "comprobado_hace_s": round(time.monotonic() - _salud_cache["t"], 2),
-        "cache_ttl_s": _SALUD_TTL_SEGUNDOS,
+        "comprobado_hace_s": _salud.comprobado_hace(),
+        "cache_ttl_s": _salud._ttl,
     }
 
 
