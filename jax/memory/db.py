@@ -1200,7 +1200,7 @@ class MemoryDB:
     async def search_similar_messages(self, query: str, limit: int = 5,
                                       user_id: Optional[int] = None,
                                       project_id: Optional[int] = None,
-                                      recent_history: Optional[list] = None) -> list:
+                                      recent_history: Optional[list] = None) -> Optional[list]:
         """Busca mensajes similares a query usando distancia vectorial.
 
         Scope de dos niveles (opcional):
@@ -1306,9 +1306,19 @@ class MemoryDB:
             if raw_vec_str:
                 rows_raw = await _run(raw_vec_str)
                 rows = _merge_search_results(rows, rows_raw, fetch_limit)
-        except Exception as e:
+        except Exception as e:  # fail-soft: la conversacion sigue, pero se devuelve None (no []) para que el turno sepa que respondio SIN memoria
+            # ARREGLADO 2026-09-16. Antes devolvia [] ante cualquier fallo, y
+            # eso es indistinguible de "no hay mensajes parecidos": la Mesa
+            # respondia sin contexto de memoria CREYENDO que no habia contexto,
+            # y nadie se enteraba. No inventaba datos —— inventaba que no habia
+            # nada que recordar, que es la misma familia (Principio VIII).
+            #
+            # La politica del modulo sigue en pie: la conversacion NUNCA se
+            # interrumpe por un fallo de memoria. Lo que cambia es que la
+            # incertidumbre se DECLARA (Principio V): None = no se pudo buscar;
+            # [] = se busco y no habia nada.
             logger.error(f"search_similar_messages fallo: {e}")
-            return []
+            return None
 
         if decay_lambda:
             def _decayed(r: dict) -> float:
