@@ -581,6 +581,7 @@ jobs:
           tests/test_aiomysql_connect_timeout_tripwire.py
           tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
           tests/test_motor_contrato_dispatch.py
+          tests/test_ejecutor_fase0.py
           las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py
           tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py
           tests/test_store_indice_duenio.py
@@ -610,6 +611,7 @@ jobs:
             tests/test_aiomysql_connect_timeout_tripwire.py \
             tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
             tests/test_motor_contrato_dispatch.py \
+            tests/test_ejecutor_fase0.py \
             las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
             tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py \
             tests/test_store_indice_duenio.py \
@@ -856,8 +858,26 @@ jobs:
           # CAMPOS_DEL_CONTRATO" contra el escritor de once campos, y el
           # reescrito por mutacion (sacarle status/job_id al encolar de
           # motor_registry lo tira rojo). Medido dos veces: 406 / 1.
-          grep -qE "^406 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 406 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 406 -> 450 el 2026-09-16. MEDIDO EN EL RUNNER, no calculado: la suma
+          #   aritmetica (406 anotado + 28 propios) daba 434 y el runner conto
+          #   450. O sea que el numero anotado arriba ya no describia el arbol
+          #   —— alguien sumo tests sin tocar este comentario. Es exactamente
+          #   para lo que existe este piso, y la leccion es que el contador se
+          #   fija con lo que dice el job, nunca con una resta hecha a mano.
+          #   Lo propio de este cambio son 28: la capa 1 del calificador de tres capas
+          #   de la Fase 0 del Ejecutor. 26 casos en tests/test_ejecutor_fase0.py,
+          #   que calibran sus fronteras ANTES de darle consecuencia -- y dos de
+          #   ellos encontraron sendos defectos del propio detector antes de que
+          #   tocara un dato real: la tolerancia del 5 % que dejaba "131.074"
+          #   derivarse de "131.072" (el detector no marcaba el caso exacto que
+          #   existe para marcar) y la extraccion que no leia tool_use_result.
+          #   Los otros 2, en tests/test_payload_max_tokens_literal_tripwire.py,
+          #   hacen que la exclusion de las sondas de medicion se GANE en vez de
+          #   declararse: si un modulo de jax/, jacobs/ o las_manos/ llegara a
+          #   importar una de esas sondas, su limite literal SI seria el defecto
+          #   que ese tripwire persigue, y se pone rojo.
+          grep -qE "^450 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 450 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

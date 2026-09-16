@@ -114,6 +114,39 @@ EXCLUDE_DIR_NAMES = {
 # un *_test.py generico que lance `claude` sigue siendo violacion.
 ALLOWED_FILENAMES = frozenset({"hyde_sandbox.py", "_hyde_sandbox_test.py"})
 
+# AISLAMIENTO POR CUENTA DE USUARIO (2026-09-16). El sandbox de bwrap no es el
+# unico aislamiento valido: lo que la politica persigue es que ningun `claude`
+# corra con el $HOME y los secretos de Fernando. El arnes de la Fase 0 del
+# Ejecutor lo consigue por otra via —— lanza `ssh` a `axioma@127.0.0.1`, una
+# cuenta SIN sudo y con su propio HOME (decision de Fernando, verificada en las
+# cuatro maquinas del parque) —— y ahi el kernel acota las dos puntas.
+#
+# NO es una allowlist: cada archivo declarado tiene que DEMOSTRARLO. El
+# detector comprueba que su subproceso arranca con `ssh` y lleva un destino
+# `usuario@host`; si alguien quita el ssh y deja el `claude` desnudo, el
+# archivo vuelve a ser violacion aunque siga declarado aqui. Lo comprueba
+# test_un_archivo_declarado_que_pierde_el_ssh_vuelve_a_ser_violacion.
+_AISLADO_POR_CUENTA = {
+    "scripts/ejecutor_fase0/harness.py":
+        "corre el claude del Ejecutor por ssh como el usuario axioma, sin sudo "
+        "y con HOME propio (Fase 0, decision de Fernando 2026-09-15)",
+}
+
+
+def _lanza_via_otra_cuenta(tree: ast.AST) -> bool:
+    """¿El subproceso sale por `ssh` hacia un `usuario@host`?"""
+    literales = [n.value for n in ast.walk(tree)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    return any(l == "ssh" for l in literales) and any("@" in l for l in literales)
+
+
+def _declarado_aislado_por_cuenta(root: Path, path: Path, tree: ast.AST) -> bool:
+    try:
+        rel = path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return False
+    return rel in _AISLADO_POR_CUENTA and _lanza_via_otra_cuenta(tree)
+
 # Todas las formas de lanzar un subproceso que este repo podria usar. Las
 # dos async eran las unicas cubiertas hasta la review final de rama
 # (2026-08-25) -- un subprocess.run(["claude", ...]) pasaba limpio.
@@ -236,6 +269,8 @@ def find_naked_claude_subprocess_files() -> list[str]:
         except SyntaxError:
             continue
         if _references_claude_literal(tree) and _calls_create_subprocess(tree):
+            if _declarado_aislado_por_cuenta(root, path, tree):
+                continue
             violations.append(str(path))
     return violations
 
@@ -335,6 +370,38 @@ def test_symlink_del_modulo_aprobado_sigue_exento() -> None:
     symlink = _THIS_REPO_ROOT / "las_manos" / "hyde_sandbox.py"
     assert symlink.is_symlink(), "symlink las_manos/hyde_sandbox.py debe existir"
     assert _is_approved_sandbox_file(_THIS_REPO_ROOT, symlink)
+
+
+def test_un_archivo_declarado_que_pierde_el_ssh_vuelve_a_ser_violacion(tmp_path) -> None:
+    """La declaracion NO es un salvoconducto: si el archivo deja de lanzar por
+    ssh hacia otra cuenta, el aislamiento que declaraba ya no existe y vuelve a
+    contar como violacion. Sin esto, _AISLADO_POR_CUENTA seria una allowlist."""
+    arbol_con_ssh = ast.parse(
+        'import subprocess\n'
+        'CLAUDE = "/opt/ejecutor/bin/claude"\n'
+        'subprocess.run(["ssh", "axioma@127.0.0.1", CLAUDE])\n')
+    arbol_sin_ssh = ast.parse(
+        'import subprocess\n'
+        'CLAUDE = "/opt/ejecutor/bin/claude"\n'
+        'subprocess.run([CLAUDE, "-p", "hola"])\n')
+    assert _lanza_via_otra_cuenta(arbol_con_ssh)
+    assert not _lanza_via_otra_cuenta(arbol_sin_ssh)
+
+
+def test_el_harness_declarado_sigue_lanzando_por_ssh() -> None:
+    """Control del control sobre el archivo REAL: si el harness de la Fase 0
+    deja de usar ssh, esto se pone rojo antes que nadie lo note."""
+    for rel in _AISLADO_POR_CUENTA:
+        for root, path in _iter_python_files():
+            try:
+                if path.resolve().relative_to(root.resolve()).as_posix() != rel:
+                    continue
+            except ValueError:
+                continue
+            arbol = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            assert _lanza_via_otra_cuenta(arbol), (
+                f"{rel} esta declarado como aislado por cuenta pero ya no lanza "
+                f"por ssh: o se le devuelve el ssh, o se quita de _AISLADO_POR_CUENTA")
 
 
 def test_no_naked_claude_subprocess() -> None:

@@ -42,6 +42,29 @@ CLAVES = {"max_tokens", "max_completion_tokens", "maxOutputTokens", "num_predict
 
 # Mismo criterio que el tripwire de connect_timeout: un archivo que no parsea
 # se declara con motivo o hace fallar la corrida.
+# SONDAS DE MEDICION (2026-09-16). En un instrumento de medida, el limite de
+# salida literal NO es el defecto que este tripwire persigue: ES EL
+# INSTRUMENTO. `num_predict: 8` en la sonda de cola existe para medir la ESPERA
+# y no el tiempo de generacion; si ese numero saliera del catalogo, la sonda
+# mediria otra cosa cada vez que alguien cambiara la fila del modelo, y las
+# corridas dejarian de ser comparables entre si.
+#
+# Es el mismo motivo por el que este tripwire ya excluye `tests/`: sus fixtures
+# tampoco son payloads. La diferencia con una allowlist es que la exclusion se
+# gana: `test_las_sondas_declaradas_no_son_codigo_de_servicio` comprueba que
+# ningun modulo de jax/, jacobs/ o las_manos/ las importe. El dia que una de
+# estas sondas entre al camino de produccion, este test se pone rojo.
+_SONDAS_DE_MEDICION = {
+    "scripts/ejecutor_fase0/contexto.py":
+        "mide tok/s por contexto: num_predict fijo para que las tres corridas sean comparables",
+    "scripts/ejecutor_fase0/endpoints.py":
+        "prueba de contrato de /v1/messages: max_tokens minimo, no genera texto util",
+    "scripts/ejecutor_fase0/sonda_cola.py":
+        "mide la ESPERA en cola: num_predict=8 para que el tiempo de generacion no la tape",
+    "scripts/ejecutor_fase0/auditor_costo.py":
+        "mide el costo del auditor: el tope acota el gasto de la medicion, no una respuesta",
+}
+
 _NO_PARSEA = {
     "_director_patch/routes_block.py": "fragmento de patch, no un módulo (ver "
     "test_aiomysql_connect_timeout_tripwire.py); no menciona max_tokens (grep).",
@@ -97,6 +120,8 @@ def _clave(nodo: ast.AST) -> str | None:
 
 def _hallazgos_en(path: Path) -> list[str]:
     rel = path.relative_to(RAIZ)
+    if rel.as_posix() in _SONDAS_DE_MEDICION:
+        return []
     try:
         arbol = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
     except SyntaxError:
@@ -207,3 +232,35 @@ class PayloadMaxTokensLiteralTripwireTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SondasDeMedicionTest(unittest.TestCase):
+    """La exclusion de las sondas se GANA, no se declara y ya."""
+
+    def test_las_sondas_declaradas_existen(self):
+        for rel in _SONDAS_DE_MEDICION:
+            self.assertTrue((RAIZ / rel).exists(),
+                            f"{rel} ya no existe: retirar de _SONDAS_DE_MEDICION")
+
+    def test_las_sondas_declaradas_no_son_codigo_de_servicio(self):
+        """Ningun modulo de servicio puede importarlas. El dia que una sonda
+        entre al camino de produccion, su limite literal SI es el defecto que
+        este tripwire persigue, y esto se pone rojo."""
+        modulos = {Path(rel).stem for rel in _SONDAS_DE_MEDICION}
+        ofensores = []
+        for arbol_dir in ("jax", "jacobs", "las_manos"):
+            base = RAIZ / arbol_dir
+            if not base.is_dir():
+                continue
+            for py in base.rglob("*.py"):
+                if "__pycache__" in py.parts:
+                    continue
+                try:
+                    texto = py.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for m in modulos:
+                    if f"import {m}" in texto or f"from {m} " in texto or "ejecutor_fase0" in texto:
+                        ofensores.append(f"{py.relative_to(RAIZ)} importa {m}")
+        self.assertEqual(ofensores, [], "una sonda de medicion entro al codigo de servicio:\n"
+                                        + "\n".join(ofensores))
