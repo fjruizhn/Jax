@@ -725,8 +725,15 @@ jobs:
           #   en rojo contra la ronda 2; los de URL fijan el comportamiento correcto
           #   de hoy y se validaron por mutacion (armar el nativo desde base_url).
           # 285 -> 301 el 2026-09-15: tests/test_ejecutor_fase0.py (Fase 0 del Ejecutor).
-          grep -qE "^301 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 301 tests CORRIDOS."; exit 1; }
+          # 301 -> 329 el 2026-09-16, +28: la capa 1 del calificador de tres capas
+          #   (26 casos en tests/test_ejecutor_fase0.py, que calibran sus fronteras
+          #   ANTES de darle consecuencia —— dos de ellos encontraron sendos defectos
+          #   del detector antes de tocar datos reales) y 2 en
+          #   tests/test_payload_max_tokens_literal_tripwire.py, que hacen que la
+          #   exclusion de las sondas de medicion se GANE: comprueban que ningun
+          #   modulo de servicio las importa.
+          grep -qE "^329 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 329 tests CORRIDOS."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
