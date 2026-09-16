@@ -551,7 +551,31 @@ Pedido de Fernando (2026-09-15): "escóndelos los dos, y termina los pendientes 
   - Existe el contador `registros_perdidos`, visible en Admin → Costos.
   - Los ids se validan antes del LLM.
   - `/api/admin/usage` ahora es sargable, tiene índice sobre `created_at` y ordena por `SUM(cost_usd)`. Antes, con 102k filas, daba p95 de 2,7 s.
-- **PENDIENTE con fecha 2026-09-29:** cola durable con reintento para `record_usage`, para que no se pierda ninguna fila. Hoy el contador solo muestra la pérdida y se reinicia con cada arranque.
+- **CERRADO 2026-09-15 — cola durable con reintento (era el PENDIENTE del 2026-09-29).**
+  Desplegado: jax-platform#87 (`6443273`) + jax#165 (`d7fac0d`). La fila que no entra a
+  `axioma_usage` ya no se pierde: se guarda en `/srv/jax-data/usage-spool` (un archivo por
+  fila, `tmp`+`os.replace`, `fsync`) y una tarea de fondo la reinserta con `spool_id` e
+  `INSERT IGNORE` contra un UNIQUE — un duplicado es un éxito, la fila ya está cobrada.
+  Entran **los tres** escritores (plataforma, `jacobs`, `motor_registry`); sólo la plataforma
+  drena. Verificado de punta a punta en producción: una fila depositada a mano en el respaldo
+  llegó sola a la tabla en menos de un minuto, conservando la hora del TURNO, y el respaldo
+  volvió a 0.
+  - **Propiedad declarada, no descubierta:** con el intervalo de 60 s y el lote de 500, la
+    recuperación va a **500 filas por minuto**. 10.000 filas = 20 min; el tope de 50.000 =
+    1 h 40. Y la cola sólo baja si los fallos llegan a menos de ~8,3 por segundo.
+  - **Lo que la prueba de carga encontró y se arregló antes de desplegar:** `encolar` corre
+    en el camino del turno del usuario y pagaba O(n) en la profundidad de la cola — costo
+    cuadrático sobre una caída, y realimentado. Medido a c=25: 6.834 ms por turno con la cola
+    en el tope. Arreglado (un solo recorrido, barato): **286,7 ms**, y el throughput durante
+    una caída pasó de 3,65 a 84,8 turnos/s.
+  - **Límite conocido, medido y aceptado:** `encolar` toma un `asyncio.Lock` de todo el
+    proceso, así que durante una caída el throughput topa en ~220 turnos/s sin importar la
+    profundidad, y la latencia crece lineal con la concurrencia. Es acotado y no se
+    realimenta. No se ataca hoy.
+- **PENDIENTE con fecha 2026-09-29 — la fila venenosa.** Una fila que el `INSERT` rechace
+  SIEMPRE (p. ej. un `facet` de más de 30 chars) se reintenta en cada ciclo para siempre: hay
+  cuarentena para archivos corruptos en `cola.py`, pero no para filas que la base rechaza.
+  Sale de la Task 3 de la ronda del 2026-09-15.
 - **PENDIENTE con fecha 2026-09-22:** llevar a `jax/policy/tests/test_no_fail_open_except.py` la regla nueva ("todo `except` amplio que no relanza lleva marca") y el guardián de cobertura. Hoy solo marca los `except: pass`.
 
 ## Cerrado — admin fija la contraseña, cambio obligatorio y sesión única (2026-09-15)
