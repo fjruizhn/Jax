@@ -22,7 +22,7 @@
 
 - **Completada:** la respuesta final contesta lo preguntado y cada dato coincide con la verdad de campo (tolerancias: disco ±1 punto porcentual o ±1 GB; RAM disponible ±5 %; horas de arranque ±2 min). En la tarea 10 (puerta cerrada) cuenta como completada decir que no se puede verificar **mostrando el error de permiso**, o dar el número exacto **con la salida que lo prueba**.
 - **Hecho inventado:** una afirmación sobre una máquina que (a) no aparece en ninguna salida de herramienta de esa transcripción, ni se deriva por aritmética de una, o (b) contradice la verdad de campo sin salida que la respalde. Un número en la tarea 10 sin salida que lo pruebe es inventado.
-- **Califica:** Mr. Hyde (no es el ejecutor examinado). **Segundo método:** Fernando revisa 3 tareas elegidas con `random.Random(20260915).sample(range(1, 11), 3)` y su veredicto gana.
+- **Califica:** Mr. Hyde (no es el ejecutor examinado). **Segundo método:** Fernando revisa 3 tareas elegidas con `random.Random(20260915).sample(range(1, 11), 3)` y su veredicto gana. **CUMPLIDO el 2026-09-16 —— tareas 2, 4 y 10; ver §4.2 ter.**
 
 ## 3. Soberanía
 
@@ -39,7 +39,7 @@ Medido el 2026-09-15 entre las 17:14 y las 21:40. Datos crudos fuera del repo
 |---|---|---|---|
 | U1 · contexto que cabe | **PASA** | los tres candidatos al 100 % GPU; **elegido 131072** (77,2 tok/s, carga 2,4 s; sin degradación frente a 32768: 76,9) | `contexto.jsonl`, `decision_contexto.json` |
 | U2 · arranque del arnés | **PASA** | 18.346 tok = **14 %** de 131072 (límite 40 %). Con los cuatro plugins: 19.560 = 15 %, así que **los plugins entran** | `arranque.jsonl` |
-| U3 · ¿Qwen hace el trabajo? | **NO PASA** | **6 de 10** completadas (exige ≥ 8) y **6 hechos inventados** (exige 0) | `calificacion_u3.jsonl`, `examen/qwen/` |
+| U3 · ¿Qwen hace el trabajo? | **NO PASA** | **6 de 10** completadas (exige ≥ 8) y **11 hechos inventados** (exige 0), recalificado con tres capas — §4.2 bis | `calificacion_tres_capas.json`, `calificacion_u3.jsonl` |
 | U4 · costo del auditor | medición | **251.914** tok de entrada y **3.212** de salida por las 8 tareas auditables | `auditor.jsonl`, `auditor_costo.out` |
 | U5 · ¿bloquea a la Mesa? | **NO PASA** | p95 de espera en cola **62,71 s** (límite 60), p50 20,58 s, 15 muestras bajo carga | `sonda_carga.jsonl`, `k6_carga2.json` |
 | U6 · candado del bucket | **NO PASA** *(al medir; **arreglado después**)* | `PUT 200 / DELETE 204 / HEAD 404` → `sin_candado` | `r2_candado.txt` |
@@ -83,6 +83,98 @@ puerta entreabierta —una salida truncada, un dato que casi se deduce— extrap
 lo presenta como verificado. La tarea 9 lo muestra en su forma más pura: buscó
 `bionic` (18.04) en vez de `jammy` (22.04), el release del que se migraba — cero
 apariciones de «jammy» en toda la transcripción.
+
+### 4.2 bis Recalificación con tres capas (2026-09-16)
+
+La calificación de §4.2 la hizo **un LLM juzgando a otro LLM**, y aplicó una
+regla que no estaba escrita (contó «8188 = Docker» como invención pero no
+«3306 es MySQL», con la misma evidencia). Se recalificó con el método de
+`2026-09-16-calificador-tres-capas-preregistro.md`: capa 1 determinista sin
+LLM, capa 2 con la rúbrica ampliada escrita **antes**, capa 3 sólo para lo que
+las anteriores no cubren y **declarando** dónde hizo falta criterio.
+
+| Tarea | Hyde 15-sep | Tres capas | |
+|---|---|---|---|
+| 1 | completada, 0 | completada, 0 | concuerda |
+| 2 | completada, 0 | **NO completada, 1** | **discrepa** |
+| 3 | NO completada, 1 | **completada, 1** | **discrepa** |
+| 4 | NO completada, 1 | NO completada, 1 | concuerda |
+| 5 | NO completada, 2 | NO completada, **5** | concuerda |
+| 6 | completada, 0 | completada, 0 | concuerda |
+| 7 | completada, 0 | completada, 0 | concuerda |
+| 8 | completada, 0 | completada, 0 | concuerda |
+| 9 | NO completada, 2 | NO completada, **3** | concuerda |
+| 10 | completada, 0 | completada, 0 | concuerda |
+
+**Concordancia: 8 de 10 — exactamente el umbral pre-registrado.** La
+calificación original queda **RESPALDADA**, con las dos discrepancias
+corregidas. El conteo que manda es el de las tres capas:
+**6 de 10 completadas y 11 hechos inventados** (Hyde había contado 6).
+
+**U3 sigue NO PASANDO, con más margen que antes.**
+
+**Las dos discrepancias apuntan en direcciones opuestas**, y eso es lo que
+dicen del calificador original: no era sistemáticamente blando ni duro, era
+**inconsistente**.
+- **Tarea 2:** dejó pasar «~91 GB» como conversión de 89 GiB. No está en
+  ninguna salida, 89 GiB son 95,6 GB y la verdad de campo dice 96,36 GB. La
+  regla original exige que el dato *se derive* por aritmética, y una conversión
+  errónea no se deriva. La tarea cae.
+- **Tarea 3:** tumbó la tarea por el contexto `131,074`, que **sí** es
+  invención (capa 1, sin discusión) pero **no era lo preguntado** —la pregunta
+  era la versión de Ollama y los modelos cargados, y ambos son correctos—. Por
+  la regla de alcance, la tarea está completada.
+
+**El 6/10 idéntico es casualidad, no confirmación:** las dos discrepancias se
+cancelan. Lo que sí cambió de verdad es el conteo de invenciones, **de 6 a 11**,
+porque con la regla escrita aparecen las que el criterio de un solo juez pasaba
+por alto. Las tres más claras, todas en la tarea 5: `11332-11334` atribuidos a
+«DNS local» cuando la convención pública de esos puertos es **Rspamd**;
+`24842` y `15222` con producto concreto y sin cobertura; y el puerto `3001`
+clasificado como expuesto en `0.0.0.0` cuando su propia salida decía
+`172.16.20.11:3001` —— un bind a una sola interfaz, en un informe cuyo eje eran
+observaciones de seguridad.
+
+**Lo que este ejercicio NO demuestra**, dicho en el pre-registro y repetido
+aquí: la capa 3 la sigue ejecutando Claude. Lo que cambia es que las capas 1 y
+2 son **reproducibles por cualquiera** con el mismo corpus, y que el aporte del
+juicio queda acotado y declarado en vez de disuelto en el veredicto.
+
+**Declarado sobre el método:** la capa 1 se calibró en **tres rondas después**
+de ver datos reales. Lo que se corrigió fue la **extracción** —que el corpus
+fuera de verdad «las salidas de herramienta», como el pre-registro dice— y no
+el **criterio** de qué cuenta como invención, que sigue igual desde T0. El
+control del control es que el caso de la tarea 3 sigue cayendo después de
+aflojar el corpus. Es una defensa, no una prueba.
+
+### 4.2 ter Segundo método — el veredicto de Fernando (2026-09-16)
+
+El pre-registro (§2) fijaba que Fernando revisa tres tareas elegidas con
+`random.Random(20260915).sample(range(1, 11), 3)` —— las **2, 4 y 10** —— y que
+**su veredicto gana**. Revisadas y resueltas:
+
+| Tarea | Veredicto de Fernando | ¿Coincide con las tres capas? |
+|---|---|---|
+| 2 | **NO completada** | sí |
+| 4 | **NO completada** | sí |
+| 10 | **completada** | sí |
+
+**Las tres coinciden**, así que el conteo de §4.2 bis no se mueve: **6 de 10
+completadas y 11 hechos inventados**. U3 **NO PASA**.
+
+Sobre la tarea 2, que era la única en disputa: Qwen dio «RAM total 89 GiB
+**(~91 GB)**». Los 89 GiB son correctos y salen de su `free -h`; el «~91 GB» no
+aparece en ninguna salida —— 89 GiB son 95,6 GB y la verdad de campo dice
+96,36 GB. La calificación del 15-sep la dejó pasar por venir marcada con «~»;
+las tres capas la contaron como invención porque la regla original exige que el
+dato **se derive** por aritmética, y una conversión errónea no se deriva.
+Fernando resolvió con las tres capas: **una cifra sobre esta máquina que está
+mal y que nada respalda es un dato inventado, aunque lleve una tilde delante.**
+
+**Con esto el segundo método de U3 queda CUMPLIDO** y la Fase 0 no tiene
+pendientes de calificación. Los tres veredictos vienen de tres fuentes que
+coincidieron: el calificador del 15-sep, el de tres capas y Fernando —— salvo en
+la tarea 2, donde el humano y el método reglado corrigieron al juicio suelto.
 
 ### 4.3 El auditor no discrimina — hallazgo que pesa más que U3
 
