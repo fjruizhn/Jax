@@ -99,21 +99,44 @@ HYDE_MAX_PROMPT_CHARS = 32000
 #  Helpers de referencia de artifacts
 # ----------------------------------------------------------------
 
+class RefIlegible(RuntimeError):
+    """La ref EXISTE pero su contenido no se pudo leer.
+
+    ARREGLADO 2026-09-16. Antes `_load_ref` devolvía `{}` en los tres casos:
+    «no hay ref», «el JSON inline está roto» y «el artifact no se puede leer».
+    Ese `{}` viajaba río abajo como si fuera la salida real de la dependencia:
+    `_build_context_input` lo convertía en la cadena `'{}'` y se la daba al
+    step siguiente como el output de aquello de lo que depende, y
+    `_assemble_mechanical` concatenaba un módulo VACÍO al documento final,
+    que igual se devolvía con `success: True`. Error tragado -> paso completado
+    con producto incorrecto, que es exactamente lo que P10 prohíbe.
+
+    Ahora la ausencia y el fallo son distinguibles, y cada consumidor decide:
+    una dependencia declarada que no se puede leer TUMBA el step; un módulo
+    que falta hace que el paquete NO sea exitoso.
+    """
+
+
 def _load_ref(ref: str) -> dict:
-    """Carga un output desde su ref (inline o artifact)."""
+    """Carga un output desde su ref (inline o artifact).
+
+    Devuelve `{}` SOLO cuando no hay ref. Si hay ref y no se puede leer,
+    lanza `RefIlegible`: quien llama tiene que decidir, no heredar un vacío
+    indistinguible de «no había nada».
+    """
     if not ref:
         return {}
     if ref.startswith("inline:"):
         try:
             return json.loads(ref[7:])
-        except (json.JSONDecodeError, ValueError):
-            return {}
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise RefIlegible(f"inline ilegible: {exc}") from exc
     if ref.startswith("artifact://"):
         try:
             return read_artifact(ref)
-        except Exception:  # noqa: BLE001
-            return {}
-    return {}
+        except Exception as exc:  # noqa: BLE001
+            raise RefIlegible(f"artifact ilegible ({ref}): {exc}") from exc
+    raise RefIlegible(f"ref con formato desconocido: {ref!r}")
 
 
 # Regla anti-simulación compartida — fuente única de verdad. Se inyecta en el
@@ -152,6 +175,7 @@ def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
         if not ref:
             continue
         facet_name = pipeline.plan[j].facet if j < len(pipeline.plan) else "unknown"
+        perdido = False
         try:
             data = _load_ref(ref)
             result_text = data.get("result") or data.get("text") or json.dumps(data)
@@ -169,21 +193,45 @@ def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
             else:
                 content = text[:500]
                 truncated = len(text) > 500
-        except Exception:  # noqa: BLE001
-            content = f"[ref: {ref}]"
+        except RefIlegible as exc:
+            # Una dependencia DECLARADA (`depends_on`) que no se puede leer no
+            # es contexto de cortesía: el step no puede hacer su trabajo sin
+            # ella. Antes se sustituía por el literal "[ref: ...]" con
+            # truncated=False —— una mentira doble: ni está truncado, ni está.
+            if full:
+                logger.error(
+                    "Jacobs step %s: dependencia declarada step_%d ilegible (%s) —— se corta el step",
+                    step.step_index, j, exc,
+                )
+                raise
+            logger.warning(
+                "Jacobs step %s: contexto opcional del step_%d ilegible (%s) —— se sigue sin él",
+                step.step_index, j, exc,
+            )
+            content = f"[contexto no disponible: {exc}]"
             truncated = False
+            perdido = True
+        except Exception:  # noqa: BLE001  # fail-soft: armar el resumen no debe tumbar un step que no declaró esta dep
+            if full:
+                raise
+            logger.warning("Jacobs step %s: no se pudo resumir el step_%d", step.step_index, j, exc_info=True)
+            content = f"[contexto no disponible]"
+            truncated = False
+            perdido = True
         previous_outputs.append({
             "step_index": j,
             "facet": facet_name,
             "summary": content,
             "truncated": truncated,
+            "perdido": perdido,
         })
 
     total_chars = sum(len(p["summary"]) for p in previous_outputs)
     logger.info(
         "Jacobs step %s deps=%s contexto=%d chars%s",
         step.step_index, deps, total_chars,
-        " [ALGUNA DEP TRUNCADA]" if any(p.get("truncated") for p in previous_outputs) else "",
+        (" [ALGUNA DEP TRUNCADA]" if any(p.get("truncated") for p in previous_outputs) else "")
+        + (" [ALGUNA DEP PERDIDA]" if any(p.get("perdido") for p in previous_outputs) else ""),
     )
 
     return {
@@ -636,12 +684,22 @@ def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
 
     skip_caps = {"validate_consistency", "critique", "reconcile", "assemble"}
     patches_text = ""
+    modulos_perdidos: list[str] = []
     for j in range(step.step_index):
         prev = pipeline.plan[j]
         ref = pipeline.context.get(f"step_{j}_ref", "")
         if not ref:
             continue
-        data = _load_ref(ref)
+        try:
+            data = _load_ref(ref)
+        except RefIlegible as exc:
+            # Antes el modulo entraba VACIO y el paquete salia con success:True.
+            # Un documento al que le falta un modulo no es un documento exitoso.
+            logger.error("Jacobs ensamble: modulo del step %d ilegible (%s)", j, exc)
+            modulos_perdidos.append(f"step {j} ({prev.capability}): {exc}")
+            partes.append(f"\n{'='*70}\n## MÓDULO (step {j}): {prev.capability} —— NO DISPONIBLE\n{'='*70}\n")
+            partes.append(f"[este módulo no se pudo leer: {exc}]")
+            continue
         result = data.get("result") or data.get("text") or ""
         if prev.capability == "reconcile":
             patches_text = str(result)
@@ -656,13 +714,23 @@ def _assemble_mechanical(step: Step, pipeline: Pipeline) -> dict:
         partes.append(patches_text)
 
     documento = "\n".join(partes)
-    logger.info("Jacobs ensamble mecánico: %d chars de %d módulos", len(documento), step.step_index)
-    return {
-        "success": True,
+    logger.info(
+        "Jacobs ensamble mecánico: %d chars de %d módulos%s",
+        len(documento), step.step_index,
+        f" —— {len(modulos_perdidos)} NO DISPONIBLES" if modulos_perdidos else "",
+    )
+    salida = {
+        "success": not modulos_perdidos,
         "facet": "ada",
         "model": "mechanical_assembler",
         "result": documento,
     }
+    if modulos_perdidos:
+        salida["error"] = (
+            f"{len(modulos_perdidos)} módulo(s) no se pudieron leer y faltan del "
+            f"paquete: " + "; ".join(modulos_perdidos)
+        )
+    return salida
 
 
 # ----------------------------------------------------------------
