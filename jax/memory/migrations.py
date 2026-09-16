@@ -93,7 +93,7 @@ async def ensure_schema(pool) -> bool:
                         await cur.execute(ddl)
                         logger.info("migracion: indice %s creado", indice)
         return True
-    except Exception as e:
+    except Exception as e:  # fail-soft: el False que devuelve SI se consume desde connect() (self.schema_ok) y health_check() lo reporta como base NO sana; migrar es best-effort, servir mintiendo sobre el esquema no
         logger.error("migracion del esquema de memoria fallo: %s -- se sigue con "
                      "el esquema que haya", e)
         return False

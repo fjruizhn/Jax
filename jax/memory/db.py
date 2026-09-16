@@ -19,6 +19,7 @@ import asyncio
 import os
 import uuid
 import logging
+import functools
 import json
 import math
 from datetime import datetime
@@ -268,20 +269,62 @@ def _finite_distance_rows(rows: list, origen: str) -> list:
 
 def db_error_handler(func):
     """Decorador: cualquier error de DB se loguea y se traga.
-    La conversacion NUNCA se interrumpe por un fallo de memoria."""
+    La conversacion NUNCA se interrumpe por un fallo de memoria.
+
+    CONTRATO, explicitado el 2026-09-16 tras la auditoria P10. `None` significa
+    SIEMPRE "no se pudo completar". En una LECTURA es ambiguo a proposito
+    (None = fallo; una lectura vacia devuelve [] o False segun el metodo), pero
+    en una ESCRITURA no hay ambiguedad posible: no existe el caso "no habia
+    nada que escribir", asi que **None de un metodo de escritura es un fallo y
+    quien llama TIENE que mirarlo**.
+
+    Eso era exactamente el defecto: `save_fact` llamaba a `supersede_fact` sin
+    comprobar el retorno y despues logueaba "fact N corrige a fact M", dejando
+    dos hechos contradictorios activos mientras el registro afirmaba lo
+    contrario. El decorador no estaba de mas; faltaba que el llamador leyera lo
+    que devuelve. Misma familia que `connect()` descartando el booleano de
+    `ensure_schema()`, arreglado en la misma ronda.
+
+    Metodos de ESCRITURA decorados, cuyo None hay que comprobar siempre:
+    delete_fact, end_conversation, mark_action_item_done, mark_processed,
+    save_action_item, save_decision, save_fact, _save_message_impl,
+    save_person, start_conversation, supersede_fact, touch_person_mentions,
+    verify_fact.
+    """
+    @functools.wraps(func)  # conserva nombre, docstring y __wrapped__ (2026-09-16)
     async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
-        except Exception as e:
+        except Exception as e:  # fail-soft: contrato declarado arriba -- None SIEMPRE significa 'no se pudo'; en escrituras no hay ambiguedad y el llamador TIENE que mirarlo (save_fact/supersede_fact y connect/ensure_schema, arreglados 2026-09-16)
             logger.error(f"DB error en {func.__name__}: {e}", exc_info=True)
             return None
     return wrapper
+
+
+class BusquedaDeFactFallida(RuntimeError):
+    """La busqueda del fact mas cercano no se pudo completar.
+
+    ARREGLADO 2026-09-16. `_find_nearest_fact` devolvia None tanto cuando NO
+    HAY candidato como cuando la consulta FALLABA, y `save_fact` traduce ese
+    None a band="unrelated". Con is_correction=True eso significa que NUNCA se
+    entra al bloque de correccion: el fact ERRONEO que se queria corregir sigue
+    activo y el nuevo entra como independiente. La memoria queda con DOS hechos
+    contradictorios vivos y ni una linea que lo diga.
+
+    El docstring vendia ese None como "fail-safe: el caller inserta", y eso solo
+    es cierto para el caso "no hay candidato". Cuando la consulta se cae, nadie
+    dijo que no hubiera nada que corregir: es que no se pudo mirar.
+    """
 
 
 class MemoryDB:
     """Memoria persistente de JAX sobre MariaDB."""
 
     def __init__(self):
+        # None = todavia no se intento conectar. True/False = resultado de la
+        # ultima migracion. Lo lee health_check(): un esquema a medias NO es
+        # una base sana, aunque responda al SELECT.
+        self.schema_ok: Optional[bool] = None
         self.pool: Optional[aiomysql.Pool] = None
         self.config: dict = {}
         # CORRECCION (vs diseno de Deep): guardamos referencia fuerte a las
@@ -361,8 +404,25 @@ class MemoryDB:
             )
             logger.info(f"MemoryDB conectada a {database}@{host} (pool 1-5)")
             # Esquema al dia antes de servir: barato (cuatro SELECT sobre
-            # catalogo) y fail-soft. Ver jax/memory/migrations.py.
-            await ensure_schema(self.pool)
+            # catalogo). Ver jax/memory/migrations.py.
+            #
+            # ARREGLADO 2026-09-16: el valor de retorno se DESCARTABA. Como
+            # ensure_schema() aplica DDL + backfill sin transaccion (autocommit,
+            # y en MariaDB el DDL no se revierte), un fallo a mitad deja la base
+            # en un estado parcial -- por ejemplo la columna agregada y el
+            # backfill sin correr, que es justo el caso que el propio archivo
+            # describe como "una migracion a medias que se ve como JAX se olvido
+            # de todo". Y todo JAX seguia arrancando como si el esquema
+            # estuviera al dia, con una unica linea de log que nadie mira.
+            self.schema_ok = await ensure_schema(self.pool)
+            if not self.schema_ok:
+                logger.error(
+                    "MemoryDB: el esquema NO esta al dia y no se pudo completar la "
+                    "migracion. La base responde, pero puede faltar una columna o un "
+                    "backfill: la busqueda por scope (user_id/project_id) puede devolver "
+                    "MENOS de lo que hay, sin error. health_check() devuelve False "
+                    "mientras dure. Revisar el error de la migracion, arriba."
+                )
             return True
         except Exception as e:  # fail-soft: no se traga el fallo, se reporta como return False y self.pool=None; el caller decide si arranca sin memoria (JAX debe arrancar aunque la DB no responda)
             logger.error(f"MemoryDB no pudo conectar: {e}")
@@ -392,9 +452,19 @@ class MemoryDB:
     # --------------------------------------------------------
     @db_error_handler
     async def health_check(self) -> Optional[bool]:
-        """Verifica que la base responde y que VECTOR funciona."""
+        """Verifica que la base responde, que VECTOR funciona y que el esquema
+        esta al dia.
+
+        El esquema entra aca a proposito (2026-09-16): una base que responde
+        pero a la que le falta una columna o un backfill NO esta sana -- sirve
+        menos datos de los que tiene y no da error. Un flag que nadie consulta
+        es el mismo defecto que se acaba de arreglar en jacobs/reaper.py
+        (`error: True` escrito y jamas leido), asi que este se lee aqui.
+        """
         if not self.pool:
             return None
+        if self.schema_ok is False:
+            return False
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute("SELECT VEC_ToText(VEC_FromText('[1,2,3]'))")
@@ -735,7 +805,7 @@ class MemoryDB:
                     return filas[0] if filas else None
         except Exception as e:
             logger.error(f"_find_nearest_fact fallo: {e}")
-            return None
+            raise BusquedaDeFactFallida(str(e)) from e
 
     @db_error_handler
     async def supersede_fact(self, old_fact_id: int, new_fact_id: int) -> Optional[bool]:
@@ -807,8 +877,32 @@ class MemoryDB:
 
         # Embedding ANTES del insert: lo necesitamos para decidir dedup/correccion.
         embedding = await self.get_embedding(fact_text)
-        candidate = await self._find_nearest_fact(embedding, user_id, project_id) \
-            if embedding else None
+        try:
+            candidate = await self._find_nearest_fact(embedding, user_id, project_id) \
+                if embedding else None
+        except BusquedaDeFactFallida as e:
+            # FAIL-CLOSED hacia la insercion (2026-09-16). Si no se pudo mirar
+            # que habia, no se puede afirmar que no habia nada.
+            #   - En una CORRECCION, insertar es lo peor que se puede hacer: el
+            #     fact erroneo se queda activo porque nadie lo supersede, y el
+            #     nuevo entra al lado. Dos hechos contradictorios vivos. Mejor
+            #     no guardar y que el extractor reintente.
+            #   - En un fact normal, el unico riesgo de no mirar es duplicar, asi
+            #     que se sigue, pero DICIENDOLO en el log: un duplicado callado
+            #     es como empieza una memoria sucia.
+            if is_correction:
+                logger.error(
+                    "save_fact: no se pudo buscar el fact a corregir (%s) -- NO se "
+                    "inserta. Insertar dejaria el hecho erroneo activo y el nuevo al "
+                    "lado, contradiciendose. Texto: %r",
+                    e, fact_text[:80],
+                )
+                return None
+            logger.warning(
+                "save_fact: no se pudo buscar duplicados (%s) -- se inserta igual; "
+                "puede quedar un duplicado. Texto: %r", e, fact_text[:80],
+            )
+            candidate = None
         band = classify_fact_distance(candidate["distancia"]) if candidate else "unrelated"
 
         if _should_skip_as_duplicate(band, is_correction):
@@ -854,9 +948,39 @@ class MemoryDB:
                     logger.error(f"verify_correction_fn fallo: {e}, no se aplica la correccion")
                     confirmado = False
             if _should_supersede(True, band, is_correction, confirmado):
-                await self.supersede_fact(candidate["id"], fact_id)
-                logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
-                            f"(banda={band})")
+                # ARREGLADO 2026-09-16: antes se llamaba a supersede_fact y se
+                # escribia "fact N corrige a fact M" SIN MIRAR el resultado.
+                # supersede_fact esta decorado con db_error_handler, o sea que
+                # ante cualquier error devuelve None en silencio -- y el log
+                # afirmaba una correccion que no habia ocurrido, con el hecho
+                # viejo todavia activo al lado del nuevo. Dos hechos
+                # contradictorios vivos, y el registro diciendo lo contrario.
+                #
+                # Insertar y supersedar son UNA operacion en intencion: si la
+                # segunda mitad no se puede completar, la primera se deshace.
+                # Mejor no guardar la correccion y que el extractor reintente,
+                # que dejar la memoria contradiciendose.
+                if await self.supersede_fact(candidate["id"], fact_id):
+                    logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
+                                f"(banda={band})")
+                else:
+                    revertido = await self.delete_fact(fact_id)
+                    if revertido:
+                        logger.error(
+                            "save_fact: no se pudo marcar el fact %d como reemplazado por "
+                            "el %d; se revirtio la insercion para no dejar dos hechos "
+                            "contradictorios activos. La correccion NO quedo guardada: %r",
+                            candidate["id"], fact_id, fact_text[:80],
+                        )
+                    else:
+                        logger.critical(
+                            "save_fact: no se pudo marcar el fact %d como reemplazado por "
+                            "el %d, y TAMPOCO se pudo revertir la insercion del %d. La "
+                            "memoria tiene AHORA MISMO dos hechos contradictorios activos "
+                            "y hay que resolverlo a mano: %r",
+                            candidate["id"], fact_id, fact_id, fact_text[:80],
+                        )
+                    return None
             else:
                 logger.info(f"save_fact: fact {fact_id} NO confirmo correccion sobre "
                             f"candidato {candidate['id']} (banda={band}), queda como fact nuevo")
