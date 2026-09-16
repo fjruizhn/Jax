@@ -403,6 +403,40 @@ jobs:
           python -m pytest scripts/_check_mirror_sync_test.py -q 2>&1 | tee /tmp/ms
           grep -qE "^14 passed" /tmp/ms || {
             echo "PISO ROTO: se esperaban 14 tests CORRIDOS."; exit 1; }
+      # La comparacion por AST de la familia `cola_uso` contra la copia REAL de
+      # jax-platform (Task 7, 2026-09-15). Corre ACA y no en tests-puros porque
+      # este es el unico job con el checkout de jax-platform: alla el mismo test
+      # se saltea, y un skip no compara nada. `check_mirror_sync.py` de arriba
+      # ya sale con exit 2 si backend/uso/cola.py no esta -- ORDEN DE MERGE: la
+      # plataforma primero.
+      #
+      # aiomysql: tests/test_cola_uso_escritores.py importa los dos escritores
+      # reales, y los dos importan aiomysql. Con solo pytest el job fallaria en
+      # la COLECCION, que es un rojo por otra razon.
+      - run: pip install aiomysql
+      - name: La copia de cola_uso.py es identica a la de jax-platform
+        env:
+          JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
+          PYTHONPATH: .:las_manos
+        run: python -m pytest tests/test_cola_uso_escritores.py -v
+      - name: Piso exacto de tests CORRIDOS (0 skipped, con el checkout presente)
+        env:
+          JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
+          PYTHONPATH: .:las_manos
+        # 15 y no "14 + el de la comparacion": si el checkout estuviera y el
+        # test se salteara igual, esto seria "14 passed, 1 skipped" y el grep
+        # falla. Un control que no falla cuando la comparacion no ocurre no
+        # valida la comparacion.
+        #
+        # Sigue en 15 el 2026-09-15 (Task 8b, el contrato pasa a TRECE campos):
+        # el cambio endurece tests que ya existian y reescribe uno en su
+        # contrario; no agrega ni quita archivos de test. Medido dos veces:
+        # 15 passed, 0 skipped, con JAX_PLATFORM_REPO_ROOT apuntando a un
+        # checkout real de jax-platform.
+        run: |
+          python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
+          grep -qE "^15 passed" /tmp/cu || {
+            echo "PISO ROTO: se esperaban 15 tests CORRIDOS y 0 skipped."; exit 1; }
 
   ollama-num-parallel:
     # Tripwire del invariante del que cuelga ENTERA la decision de
@@ -550,6 +584,8 @@ jobs:
           las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py
           tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py
           tests/test_store_indice_duenio.py
+          tests/test_cola_uso_escritores.py
+          tests/test_respaldo_de_uso_aislado.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -577,6 +613,8 @@ jobs:
             las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
             tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py \
             tests/test_store_indice_duenio.py \
+            tests/test_cola_uso_escritores.py \
+            tests/test_respaldo_de_uso_aislado.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -778,8 +816,48 @@ jobs:
           #   comilla sin cerrar) contra el _PARAM_SECRETO/_AUTH_CONTEXTO de
           #   la ronda 2 antes del port; los de barra-al-final y los de 100 KB
           #   ya pasaban (controles). Medido en venv limpio (3.14): 386.
-          grep -qE "^386 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 386 tests CORRIDOS."; exit 1; }
+          # 386 -> 400 passed + 1 skipped el 2026-09-15 (Task 7, cola durable
+          # para el registro de uso): tests/test_cola_uso_escritores.py aporta
+          # 15 -- la copia de cola_uso.py (existe, symlink en las_manos, SOLO
+          # stdlib, familia de espejos declarada y COMPLETA), que ninguno de
+          # los dos escritores usa la API de drenaje, y los dos escritores
+          # contra una base caida (encolan con el formato compartido, camino
+          # feliz que no deja nada, ERROR sólo si tampoco se pudo encolar,
+          # status/job_id de motor en el log porque no viajan en el archivo, y
+          # created_at que es la hora del TURNO y no la del reintento).
+          #
+          # El "1 skipped" es EXACTO a proposito, no holgura: es
+          # test_la_copia_es_identica_al_canonico_de_jax_platform, que necesita
+          # un checkout de jax-platform y este runner no lo tiene. Esa
+          # comparacion por AST SI corre, fail-closed, en el job `mirror-sync`
+          # (que clona jax-platform y ademas corre este mismo archivo con su
+          # propio piso de 15). Pinearlo en "1 skipped" es lo que impide que
+          # manana aparezca un segundo skip silencioso y el piso siga verde.
+          # 400 -> 406 el mismo dia: tests/test_respaldo_de_uso_aislado.py aporta
+          # 6. Existe porque este cambio ensucio el directorio REAL: al encolar
+          # en vez de perder la fila, los tests que YA existian y ejercitan
+          # record_motor_usage contra una base inalcanzable empezaron a
+          # depositar en /srv/jax-data/usage-spool -- 116 archivos de mentira
+          # medidos el 2026-09-15, que la Task 3 habria insertado en axioma_usage
+          # como gasto de tenants reales. El aislamiento vive en el conftest.py
+          # de la raiz (primer conftest del repo) y el freno se prueba: el
+          # detector se ejercita contra una escritura de mentira, y
+          # pytest_sessionfinish repite el chequeo cuando ya corrieron TODOS los
+          # tests -- ahi la corrida sale con exit 1 aunque pytest diga "passed".
+          # 406 SIGUE SIENDO 406 el 2026-09-15 (Task 8b: el contrato del archivo
+          # pasa a TRECE campos, con status y job_id). No suma tests: los dos
+          # campos nuevos se exigen DENTRO de tests que ya existian
+          # (CAMPOS_DEL_CONTRATO en test_cola_uso_escritores.py y los valores en
+          # la fila de motor y en la de jacobs), y el test que fijaba el
+          # comportamiento viejo -- "status/job_id NO viajan en el archivo, por
+          # eso tienen que quedar en el log" -- se REESCRIBIO en su contrario
+          # (test_motor_manda_status_y_job_id_EN_EL_ARCHIVO), no se borro ni se
+          # duplico. Vistos en rojo antes de verde: los dos de "set(fila) ==
+          # CAMPOS_DEL_CONTRATO" contra el escritor de once campos, y el
+          # reescrito por mutacion (sacarle status/job_id al encolar de
+          # motor_registry lo tira rojo). Medido dos veces: 406 / 1.
+          grep -qE "^406 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 406 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
