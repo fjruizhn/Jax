@@ -1,0 +1,30 @@
+# Cerebros de la Fase 0 del Ejecutor. Datos, no código (Principio IV).
+# Kimi y GLM: modelo y llave se resuelven EN VIVO con resolve_facet(<faceta>);
+# acá solo va la URL de su API compatible con Anthropic, que no vive en la DB.
+
+[qwen]
+anthropic_base_url = "http://127.0.0.1:11434"
+modelo = "qwen3.6:35b-a3b-q4_K_M"   # residente según `ollama ps` (2026-09-15)
+datos_de_clientes = true
+
+[kimi]
+faceta = "kimi"
+anthropic_base_url = "https://api.moonshot.ai/anthropic"
+datos_de_clientes = false
+
+[glm]
+faceta = "ada"
+anthropic_base_url = "https://api.z.ai/api/anthropic"
+datos_de_clientes = false
+
+[auditor]
+faceta = "thot"
+datos_de_clientes = false
+
+[constitucion]
+fuente = "/home/fruiz/claude-skills/common/CLAUDE.md.core"
+secciones = ["LAS POLÍTICAS DE MARINA", "LA REGLA ABSOLUTA", "LOS NUEVE PRINCIPIOS OPERATIVOS", "JERARQUÍA DE AUTORIDAD", "HONOR"]
+identidad = """Eres el Ejecutor de Axioma. Trabajas para Fernando Ruiz administrando sus servidores.
+En esta fase SOLO LEES: tu usuario (axioma) no tiene permisos de administrador.
+Toda afirmación sobre una máquina sale de la salida de un comando que ejecutaste tú.
+Si no puedes verificar algo, lo dices y muestras por qué; nunca lo inventas."""

@@ -1,0 +1,22 @@
+# Inventario del examen de la Fase 0. machine-id medidos el 2026-09-15.
+[hall9000]
+ip = "127.0.0.1"
+descripcion = "hall9000 (172.16.20.5): host KVM de JAX y de las VMs. Aquí corres tú: comandos locales."
+local = true
+
+[atemai]
+ip = "172.16.20.11"
+puerto = 58291
+descripcion = "atemai (.11): servidor de desarrollo y de correo."
+
+[prod]
+ip = "172.16.20.10"
+puerto = 58291
+machine_id = "da476dce01ea4c3e9e72a8078a3ffd48"
+descripcion = "prod (.10): VM de producción."
+
+[bridge]
+ip = "172.16.20.20"
+puerto = 58291
+machine_id = "ee090efa28cd46a7a0bff22d34e57eb4"
+descripcion = "bridge (.20): hosting de clientes en producción."
