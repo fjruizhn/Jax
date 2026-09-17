@@ -8,8 +8,12 @@ WHERE filtra por un marcador que el test creó (uuid, marca, pid propio).
 
 LA REGLA (estática, por AST, sobre los archivos de test):
 - Se mira cada llamada cuyo PRIMER argumento es SQL literal (str o f-string)
-  con `DELETE FROM <tabla>`. Si la tabla es una de TABLAS_COMPARTIDAS, o no se
-  puede saber (`DELETE FROM {nombre}`), el DELETE:
+  con un DELETE, en sus tres formas de MariaDB (m3 de la re-review):
+  `DELETE FROM t ...`, `DELETE LOW_PRIORITY/QUICK/IGNORE FROM t ...` y la
+  multi-tabla con alias `DELETE u FROM t u JOIN ...` / `DELETE a, b FROM ...`.
+  Se miran TODAS las tablas del FROM (comas y JOIN), no sólo la primera. Si
+  alguna es de TABLAS_COMPARTIDAS, o no se puede saber (`DELETE FROM {nombre}`),
+  el DELETE:
   1. tiene que tener WHERE, y
   2. los parámetros de la llamada (segundo argumento posicional, o `args=` /
      `params=`) tienen que nombrar un marcador propio: un nombre o atributo que
@@ -20,14 +24,18 @@ LA REGLA (estática, por AST, sobre los archivos de test):
   de los tres tests de Ruling R50 (sólo corren con base exclusiva). Si una
   entrada de PERMITIDOS deja de existir, el test falla: la lista no envejece.
 
-LÍMITES (lo que esta regla NO ve):
-- SQL armado en una variable y ejecutado después (`sql = "DELETE ..."`;
-  `cur.execute(sql)`), por concatenación entre sentencias o fuera de la
-  llamada: sólo se mira el literal que es primer argumento.
+LÍMITES (lo que esta regla NO ve), declarados a propósito:
+- SQL armado en una variable y ejecutado después (`sql = "DELETE ..."`),
+  por concatenación entre sentencias o fuera de la llamada: sólo se mira el
+  literal que es primer argumento.
+- Un WHERE que filtra por una SUBCONSULTA (`WHERE id IN (SELECT ...)`): se
+  exige el marcador en los parámetros, no se analiza la subconsulta.
+- Borrados que no son un DELETE de SQL: TRUNCATE, DROP, `REPLACE INTO`,
+  `INSERT ... ON DUPLICATE KEY UPDATE` que pisa una fila ajena (el caso de
+  R46 con los precios), o un borrado por ORM/ayudante sin SQL literal.
 - Confía en los NOMBRES: no prueba que `pid` contenga un uuid ni que la marca
   sea única. Un `pid = "jekyll"` pasaría.
-- No mira UPDATE, TRUNCATE, DROP ni INSERT ... ON DUPLICATE KEY UPDATE que
-  pisen filas ajenas (p. ej. el precio compartido que corrigió R46).
+- No mira UPDATE.
 - Sólo archivos de test del repo (tests/, jacobs/_*_test.py,
   las_manos/**/_*_test.py, las_manos/**/test_*.py, scripts/_*_test.py): los
   scripts sueltos de una sesión (scratchpad) no pasan por acá -- el incidente
@@ -57,7 +65,29 @@ PERMITIDOS = {
     # JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA=1 (base exclusiva, job facet-health-io).
     ("jacobs/_facet_health_io_test.py", "_tabla_limpia"),
 }
-_DELETE = re.compile(r"\bDELETE\s+FROM\s+`?(\{[^}]*\}|\w+)`?(.*)", re.IGNORECASE | re.DOTALL)
+_MODIFICADORES = r"(?:LOW_PRIORITY|QUICK|IGNORE)"
+# `DELETE [modificadores] [alias, ...] FROM <tablas> [WHERE ...]`. Lo que va
+# entre DELETE y FROM son modificadores y/o alias de la forma multi-tabla.
+_DELETE = re.compile(
+    rf"\bDELETE\b(?P<entre>(?:\s+{_MODIFICADORES}|\s+[`\w.,{{}}]+)*)\s+FROM\s+(?P<resto>.*)",
+    re.IGNORECASE | re.DOTALL,
+)
+_SEPARADOR_DE_TABLAS = re.compile(r",|\bJOIN\b|\bUSING\b", re.IGNORECASE)
+
+
+def _tablas_del_from(resto: str) -> list[str]:
+    """Nombres de tabla del FROM (multi-tabla con comas o JOIN), hasta el
+    WHERE. Un `{placeholder}` entra como desconocido."""
+    cuerpo = re.split(r"\bWHERE\b", resto, maxsplit=1, flags=re.IGNORECASE)[0]
+    nombres = []
+    for parte in _SEPARADOR_DE_TABLAS.split(cuerpo):
+        parte = parte.strip()
+        if not parte:
+            continue
+        primero = parte.split()[0].strip("`;")
+        if primero:
+            nombres.append(primero)
+    return nombres
 
 
 def archivos_de_test(raiz: Path = RAIZ) -> list[Path]:
@@ -118,9 +148,12 @@ def violaciones(archivos: list[Path], raiz: Path = RAIZ) -> tuple[list[str], set
             coincide = _DELETE.search(sql) if sql else None
             if not coincide:
                 continue
-            tabla, resto = coincide.group(1), coincide.group(2)
-            if not tabla.startswith("{") and tabla.lower() not in TABLAS_COMPARTIDAS:
+            resto = coincide.group("resto")
+            tablas = _tablas_del_from(resto)
+            comprometidas = [t for t in tablas if t.startswith("{") or t.lower() in TABLAS_COMPARTIDAS]
+            if not comprometidas:
                 continue
+            tabla = ", ".join(comprometidas)
             funcion = funcion_de.get(id(llamada), "<módulo>")
             if (relativa, funcion) in PERMITIDOS:
                 permitidos_vistos.add((relativa, funcion))
@@ -163,6 +196,22 @@ def test_control_detecta_where_por_columna_compartida(tmp_path):
     """El incidente: un WHERE que filtra por un valor que también usan otros."""
     assert len(_escribir(tmp_path, 'async def f(cur):\n'
                                    '    await cur.execute("DELETE FROM axioma_usage WHERE facet=%s", ("jekyll",))\n')) == 1
+
+
+def test_control_detecta_las_formas_multi_tabla_y_con_modificadores(tmp_path):
+    """m3 de la re-review: `DELETE u FROM t u ...` y
+    `DELETE LOW_PRIORITY QUICK IGNORE FROM t ...` también borran."""
+    codigo = ('async def f(cur, facet):\n'
+              '    await cur.execute("DELETE u FROM axioma_usage u WHERE u.facet=%s", ("jekyll",))\n'
+              '    await cur.execute("DELETE LOW_PRIORITY QUICK IGNORE FROM facet_health_event WHERE facet=%s", (facet,))\n'
+              '    await cur.execute("DELETE e, a FROM facet_health_event e JOIN facet_health_alert a ON a.facet=e.facet")\n')
+    assert len(_escribir(tmp_path, codigo)) == 3
+
+
+def test_control_la_forma_multi_tabla_con_marcador_propio_no_se_marca(tmp_path):
+    codigo = ('async def f(cur, pid):\n'
+              '    await cur.execute("DELETE s FROM jacobs_steps s WHERE s.pipeline_id=%s", (pid,))\n')
+    assert _escribir(tmp_path, codigo) == []
 
 
 def test_control_detecta_delete_sin_where_y_tabla_desconocida(tmp_path):

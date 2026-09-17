@@ -1519,8 +1519,14 @@ jobs:
           #   permitidos tienen que seguir existiendo; tres controles del detector. Rojo con
           #   un borrador en una copia del repo: `DELETE FROM axioma_usage WHERE facet=%s` y
           #   un DELETE sin WHERE, los dos marcados. Incidente de origen: r38-report.md.
-          grep -qE "^1123 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1123 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1123 -> 1125 el 2026-09-17 (re-review ronda 3, m3): +2 en
+          #   test_delete_de_tablas_compartidas.py -- el detector cubre las otras dos formas
+          #   de DELETE de MariaDB (multi-tabla con alias `DELETE u FROM t u ...` y
+          #   `DELETE LOW_PRIORITY/QUICK/IGNORE FROM ...`) y mira TODAS las tablas del FROM;
+          #   control de que la forma multi-tabla con marcador propio no se marca. Rojo con
+          #   un archivo de las tres formas: el detector de f744e8a marcaba 0 y éste 3.
+          grep -qE "^1125 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1125 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
