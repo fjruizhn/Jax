@@ -90,6 +90,34 @@ construye las capas; la elección de cerebro se vuelve a medir después, con ell
 Las tres verifican lo mismo. La diferencia es **dónde se corta**, y sólo A no deja ningún camino
 por el que un dato sin respaldo llegue a la persona.
 
+### 2.0 DECISIÓN tras dos mediciones: el Ejecutor no escribe prosa
+
+**DECISIÓN de Fernando, 2026-09-16**, después de que dos mediciones contra el corpus de U3
+refutaran la tesis de que «una búsqueda de texto alcanza» (ver avisos en §2.2).
+
+**Lo medido:** una regla literal ata **números**, no **palabras**. «El 8188 es Docker multi-hilo»,
+citando la línea real del puerto, sale respaldada — y es una invención real de U3. Ninguna regla de
+texto distingue la etiqueta inventada de la prosa correcta en español frente a salidas en inglés sin
+rechazar también el trabajo bueno.
+
+**La decisión:** se elimina la superficie de ataque en vez de vigilarla.
+
+- **El Ejecutor sólo emite pares `(dato, cita)`.** No hay campo de texto libre escrito por el modelo.
+- **Lo que ve la persona lo genera el sistema**, no el modelo: el dato y **la línea citada completa,
+  literal**. Si alguien lee mal una línea verdadera, el error es de lectura; el Ejecutor no afirmó
+  nada que no esté impreso.
+- **Una interpretación es una afirmación propia con su propia evidencia.** «El 8188 lo usa
+  `docker-proxy`» sólo existe si hay una línea —p. ej. de `ss -tlnp`— que contenga los dos.
+  Sin línea, no se puede escribir.
+- **Conteos y conversiones** pasan por `contar` / `convertir`, cuya salida se captura.
+- **La síntesis en prosa la hace otra faceta**, con estas afirmaciones como entrada y **vigilada por
+  C5** (de otro proveedor que el cerebro). Queda fuera de este alcance.
+
+**Consecuencia:** las reglas que existían sólo para vigilar prosa («el dato está en el texto», «todo
+número del texto está en la línea») desaparecen con la prosa. Es la **opción 1 de la primera
+pregunta de esta fase** («sólo recolecta; sintetiza otro»), que se había descartado por poco útil.
+La medición mostró que era la que el dato respaldaba.
+
 ### 2.1 Qué significa exactamente
 
 El Ejecutor **no devuelve prosa libre**. Devuelve una estructura con dos partes:
