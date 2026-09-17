@@ -35,7 +35,9 @@ from jacobs.policy import (
     validate_create,
     validate_resume,
 )
-from jacobs.subpipelines import ConsumoRechazado, Motivo, consumir_token_subpipeline
+from jacobs.subpipelines import (
+    ConsumoRechazado, Motivo, consumir_token_subpipeline, hash_token, token_ref,
+)
 
 router = APIRouter(prefix="/jacobs", tags=["jacobs"])
 
@@ -151,6 +153,7 @@ async def _auditar_token_quemado(
     fase: str,
     motivo: Motivo,
     excepcion: str | None = None,
+    ref_token: str | None = None,
 ) -> None:
     """Deja SUBPIPELINE_RECHAZADO para un token que ya se consumió y cuyo hijo
     no llegó a crearse. Best-effort: si el evento no se puede escribir se loguea
@@ -159,6 +162,8 @@ async def _auditar_token_quemado(
     payload = {"fase": fase, "motivo": motivo.value, "parent_pipeline_id": parent_pipeline_id}
     if excepcion is not None:
         payload["excepcion"] = excepcion
+    if ref_token is not None:
+        payload["token_ref"] = ref_token
     try:
         await store.event_append(hijo_pipeline_id, "SUBPIPELINE_RECHAZADO", payload)
     except Exception as exc_evento:  # fail-soft: el error original lo relanza create_pipeline; tragar este evita que un fallo de auditoría reemplace la causa real
@@ -201,10 +206,25 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         depth = 0
         user_id, tenant_id = req.user_id, req.tenant_id
         if req.invoked_by == INVOKER_ADA:
-            consumo = await consumir_token_subpipeline(
-                req.subpipeline_token, req.parent_pipeline_id, pipeline_id,
-                user_id=req.user_id, tenant_id=req.tenant_id,
-            )
+            # Residual de I-2 (R13): el UPDATE del consumo se confirma solo; si
+            # DESPUÉS falla la relectura (error de base, invariante roto) o llega
+            # una cancelación, el token puede estar quemado sin hijo. BaseException
+            # a propósito: CancelledError no es Exception. Se audita best-effort
+            # (hash parcial, nunca el token) y se relanza el error ORIGINAL: la
+            # creación no sigue. El padre del payload es el declarado; si el token
+            # se quemó, coincide con el de la fila (el UPDATE lo exige).
+            try:
+                consumo = await consumir_token_subpipeline(
+                    req.subpipeline_token, req.parent_pipeline_id, pipeline_id,
+                    user_id=req.user_id, tenant_id=req.tenant_id,
+                )
+            except BaseException as exc:  # fail-closed: audita y relanza siempre
+                await _auditar_token_quemado(
+                    pipeline_id, req.parent_pipeline_id, "consumo", Motivo.CREACION_FALLIDA,
+                    excepcion=type(exc).__name__,
+                    ref_token=token_ref(hash_token(req.subpipeline_token)),
+                )
+                raise
             if isinstance(consumo, ConsumoRechazado):
                 raise HTTPException(
                     status_code=403,
@@ -255,7 +275,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                 await _auditar_token_quemado(
                     pipeline_id, parent_pipeline_id, "plan", Motivo.PLAN_RECHAZADO)
             raise
-        except Exception as exc:
+        except BaseException as exc:  # CancelledError incluida: audita y relanza
             if parent_pipeline_id is not None:
                 await _auditar_token_quemado(
                     pipeline_id, parent_pipeline_id, "creacion", Motivo.CREACION_FALLIDA,

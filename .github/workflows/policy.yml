@@ -227,8 +227,14 @@ jobs:
           #   error tras consumir deja SUBPIPELINE_RECHAZADO fase=creacion y relanza el
           #   original (I-2), el hijo hereda la identidad del padre y un cuerpo con otra
           #   identidad es 403 sin quemar el token (I-3). Los tres vistos en rojo.
-          grep -qE "^34 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 34 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 34 -> 36 el 2026-09-17 (residual de I-2, R13): +2 por la ruta -- la
+          #   relectura tras el UPDATE confirmado falla con un error REAL de la base
+          #   y una cancelacion llega tras quemar el token (en el consumo y en la
+          #   creacion); en los dos: SUBPIPELINE_RECHAZADO sin el token, hijo no
+          #   creado, error relanzado. Vistos en rojo; mutacion de cada except a
+          #   `except Exception` vuelve a romper el de la cancelacion.
+          grep -qE "^36 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 36 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

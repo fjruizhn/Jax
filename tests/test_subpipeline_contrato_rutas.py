@@ -349,3 +349,98 @@ def test_cuerpo_con_otra_identidad_se_rechaza_sin_quemar_el_token():
     assert fila["usado_at"] is None
     assert evento is not None, "rechazo por identidad sin evento en el padre"
     assert token not in evento["payload"]
+
+
+async def _evento_quemado(padre: str, fase: str) -> dict | None:
+    return await ada.una_fila(
+        "SELECT pipeline_id, payload FROM jacobs_events "
+        "WHERE event_type = 'SUBPIPELINE_RECHAZADO' "
+        "AND JSON_VALUE(payload, '$.parent_pipeline_id') = %s "
+        "AND JSON_VALUE(payload, '$.fase') = %s",
+        (padre, fase),
+    )
+
+
+async def _hijos_de(padre: str) -> int:
+    fila = await ada.una_fila(
+        "SELECT COUNT(*) AS n FROM jacobs_pipelines WHERE parent_pipeline_id = %s", (padre,))
+    return int(fila["n"])
+
+
+def test_fallo_de_la_relectura_tras_el_update_deja_evento_y_no_crea_el_hijo():
+    """Residual de I-2 (R13): el UPDATE del consumo ya se confirmó (token
+    quemado) y la relectura SQL_TOKEN_CONSUMIDO falla con un error REAL de la
+    base. Tiene que quedar SUBPIPELINE_RECHAZADO fase=consumo sin el token, el
+    hijo no se crea y el error original sube al llamador."""
+    import pymysql
+    from unittest.mock import patch
+
+    async def escenario():
+        padre, paso = await ada.padre_en_ejecucion()
+        try:
+            token = await ada.emitir(padre, paso)
+            relectura_rota = "SELECT * FROM tabla_inexistente_arnes_i2 WHERE token_hash = %s"
+            with patch.object(store, "SQL_TOKEN_CONSUMIDO", relectura_rota), \
+                 pytest.raises(pymysql.err.ProgrammingError):
+                await ada.pedir_hijo(token, padre)
+            fila = await ada.fila_token(sp.hash_token(token))
+            evento = await _evento_quemado(padre, "consumo")
+            return token, fila, evento, await _hijos_de(padre)
+        finally:
+            await ada.cerrar(padre)
+
+    token, fila, evento, hijos = _correr(escenario)
+    assert fila["usado_at"] is not None, "el arnés no quemó el token: el caso no se ejercitó"
+    assert evento is not None, "token quemado en la relectura sin SUBPIPELINE_RECHAZADO"
+    payload = json.loads(evento["payload"])
+    assert payload["motivo"] == sp.Motivo.CREACION_FALLIDA.value
+    assert payload["excepcion"] == "ProgrammingError"
+    assert payload["token_ref"] == sp.token_ref(sp.hash_token(token))
+    assert token not in evento["payload"]
+    assert "tabla_inexistente" not in evento["payload"]
+    assert evento["pipeline_id"] == fila["hijo_pipeline_id"]
+    assert hijos == 0
+
+
+def test_cancelacion_tras_quemar_el_token_deja_evento_y_se_relanza():
+    """CancelledError es BaseException: un `except Exception` no la ve. Llega
+    (a) entre el UPDATE confirmado y la relectura y (b) durante la creación.
+    En los dos casos: evento best-effort, hijo no creado, cancelación relanzada."""
+    from unittest.mock import AsyncMock, patch
+
+    consumir_real = store.subpipeline_token_consumir
+
+    async def consumir_y_cancelar(*args, **kwargs):
+        await consumir_real(*args, **kwargs)  # UPDATE confirmado: token quemado
+        raise asyncio.CancelledError()
+
+    async def escenario():
+        padre_a, paso_a = await ada.padre_en_ejecucion()
+        padre_b, paso_b = await ada.padre_en_ejecucion()
+        try:
+            token_a = await ada.emitir(padre_a, paso_a)
+            with patch.object(store, "subpipeline_token_consumir", consumir_y_cancelar), \
+                 pytest.raises(asyncio.CancelledError):
+                await ada.pedir_hijo(token_a, padre_a)
+            token_b = await ada.emitir(padre_b, paso_b)
+            with patch.object(store, "pipeline_create",
+                              AsyncMock(side_effect=asyncio.CancelledError())), \
+                 pytest.raises(asyncio.CancelledError):
+                await ada.pedir_hijo(token_b, padre_b)
+            return [
+                (token_a, await ada.fila_token(sp.hash_token(token_a)),
+                 await _evento_quemado(padre_a, "consumo"), await _hijos_de(padre_a)),
+                (token_b, await ada.fila_token(sp.hash_token(token_b)),
+                 await _evento_quemado(padre_b, "creacion"), await _hijos_de(padre_b)),
+            ]
+        finally:
+            await ada.cerrar(padre_a)
+            await ada.cerrar(padre_b)
+
+    for token, fila, evento, hijos in _correr(escenario):
+        assert fila["usado_at"] is not None
+        assert evento is not None, "cancelación tras quemar el token sin SUBPIPELINE_RECHAZADO"
+        payload = json.loads(evento["payload"])
+        assert payload["excepcion"] == "CancelledError"
+        assert token not in evento["payload"]
+        assert hijos == 0
