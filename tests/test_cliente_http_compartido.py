@@ -81,20 +81,68 @@ def test_cerrar_lo_cierra_y_el_siguiente_pedido_trae_uno_nuevo():
     assert a.is_closed and a is not b
 
 
-def test_cada_llamada_lleva_su_timeout():
-    from jacobs import executor
-    vistos = []
+def _timeouts_vistos(respuestas: dict):
+    """Parchea el transporte (debajo del cliente compartido) y anota, por
+    (método, ruta), el timeout que llegó al request. Un timeout de 5 no prueba
+    nada: es el default de httpx del cliente compartido."""
+    vistos: dict[tuple[str, str], dict] = {}
 
     async def handle(transport_self, request):
-        vistos.append(request.extensions["timeout"])
-        return httpx.Response(200, json={})
+        clave = (request.method, request.url.path)
+        vistos[clave] = request.extensions["timeout"]
+        return httpx.Response(200, json=respuestas[clave])
+
+    return vistos, patch("httpx.AsyncHTTPTransport.handle_async_request", handle)
+
+
+def _t(segundos):
+    return {"connect": segundos, "read": segundos, "write": segundos, "pool": segundos}
+
+
+def test_el_motor_manda_sus_timeouts_de_dispatch_y_de_poll():
+    """E-24: el timeout pasó del cliente a CADA llamada. dispatch=30 y poll=15;
+    si una llamada lo pierde cae al default de 5 s y este test lo ve."""
+    from jacobs import executor
+    from jacobs.models import Pipeline, Step
+    vistos, parche = _timeouts_vistos({
+        ("POST", "/motor/dispatch"): {"job_id": "j1", "status": "pending"},
+        ("GET", "/motor/job/j1"): {"status": "completed", "result_summary": "ok"},
+    })
 
     async def correr():
-        with patch("httpx.AsyncHTTPTransport.handle_async_request", handle):
-            await executor._cancel_motor_job("job-x")
+        with parche, patch.object(executor, "MOTOR_POLL_INTERVAL", 0):
+            await executor._invoke_motor(
+                Step(facet="kimi", capability="generate", motor="kimi"),
+                Pipeline(name="t", invoked_by="t", user_id="1", tenant_id="1", mode="dry_run"),
+                timeout=60,
+            )
+        await chc.cerrar_cliente_http()
 
     asyncio.run(correr())
-    assert vistos == [{"connect": 5, "read": 5, "write": 5, "pool": 5}]
+    assert vistos[("POST", "/motor/dispatch")] == _t(30)
+    assert vistos[("GET", "/motor/job/j1")] == _t(15)
+
+
+def test_el_plan_local_manda_ollama_timeout():
+    """Una llamada larga de LLM: sin su timeout= el plan de qwen se cortaría a los 5 s."""
+    from unittest.mock import AsyncMock
+
+    from facet_resolver import ResolvedFacet
+    from jacobs import plan
+    local = ResolvedFacet(key="jax_local", provider_id="ollama", base_url="http://ollama.test/v1", model="qwen-x",
+                          credential="", transport="ollama", persona=None, params=None)
+    vistos, parche = _timeouts_vistos({("POST", "/api/chat"): {"model": "qwen-x", "message": {"content": "sin plan"}}})  # no-JSON: _parse_plan_json devuelve None sin ir a la DB
+
+    async def correr():
+        with parche, patch.object(plan, "resolve_facet", AsyncMock(return_value=local)), \
+                patch.object(plan, "limite_de_salida", AsyncMock(return_value={"options": {"num_predict": 1000}})), \
+                patch.object(plan, "record_resolved_version_safe", AsyncMock()):
+            await plan.PlanBuilder()._llm_plan("objetivo", 3)
+        await chc.cerrar_cliente_http()
+
+    asyncio.run(correr())
+    assert plan.OLLAMA_TIMEOUT != 5
+    assert vistos[("POST", "/api/chat")] == _t(plan.OLLAMA_TIMEOUT)
 
 
 def test_jacobs_reusa_el_cliente_entre_llamadas():

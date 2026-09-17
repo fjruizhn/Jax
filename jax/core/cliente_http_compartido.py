@@ -15,6 +15,10 @@ shutdown; REPL y workers en su finally). El timeout lo pone CADA llamada; el del
 cliente queda en el default de httpx (5 s), así que una llamada que lo olvide cae
 en 5 s y no en "sin límite".
 
+Compartido también quiere decir: UN cookie jar por proceso, y los límites de pool
+default de httpx (100 conexiones, 20 keep-alive), así que la espera por una
+conexión libre cuenta contra el timeout de pool de cada llamada.
+
 Un solo archivo real: las_manos/cliente_http_compartido.py es symlink.
 
 En memoria de Jairo Urbina.
