@@ -81,6 +81,12 @@ os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
 os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="jax-test-facet-seal-"), "facet-cache-seal"
 )
+# El kill switch, aislado por la misma razón (2026-09-16, frente B). Desde
+# ese día la ruta del freno sale de JAX_KILL_SWITCH_PATH y /etc/jax/.env la
+# define: un test que pusiera el freno sin esto detendría a JAX en producción.
+# Asignación y no setdefault, a propósito.
+os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
+    tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
 
 
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
