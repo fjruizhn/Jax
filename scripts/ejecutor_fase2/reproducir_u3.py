@@ -64,7 +64,9 @@ if str(RAIZ) not in sys.path:
 
 from jax.ejecutor.captura import CapturaCompleta  # noqa: E402
 from jax.ejecutor.cita import RESPALDADA, Afirmacion, Captura, normalizar, verificar  # noqa: E402
-from jax.ejecutor.herramientas import HerramientaRechazada, contar, convertir  # noqa: E402
+from jax.ejecutor.herramientas import (  # noqa: E402
+    SUBCADENA, TERMINA_EN, HerramientaRechazada, contar, convertir,
+)
 
 
 FASE0 = RAIZ / "scripts" / "ejecutor_fase0"
@@ -221,9 +223,12 @@ def _hash(s: str) -> str:
 @dataclass(frozen=True)
 class Contar:
     """`contar` sobre LA captura cuyo comando contiene `comando_contiene`, con
-    el patrón que declaró el propio modelo -- nunca uno elegido para que dé."""
+    el patrón que declaró el propio modelo -- nunca uno elegido para que dé.
+    `modo` es el de `herramientas.contar` y se declara siempre: no hay uno por
+    defecto."""
     comando_contiene: str
     patron: str
+    modo: str
 
 
 @dataclass(frozen=True)
@@ -256,7 +261,7 @@ def _correr_herramientas(capturas: list[CapturaU3], maquina: str, pedidas,
                           if cu.captura.maquina == maquina and h.comando_contiene in cu.captura.comando]
                 if len(origen) != 1:
                     raise ValueError(f"{h}: {len(origen)} capturas de origen, se esperaba 1")
-                r = contar(_completa(origen[0]), h.patron)
+                r = contar(_completa(origen[0]), h.patron, modo=h.modo)
             else:
                 r = convertir(h.valor, h.desde, h.hacia, maquina=maquina, decimales=h.decimales)
         except HerramientaRechazada as rechazo:
@@ -349,10 +354,10 @@ INVENCIONES: list[Invencion] = [
               nota="CONCLUSIÓN: 3001 como público; la línea real es 172.16.20.11:3001 con "
                    "0.0.0.0:* en la columna del PAR"),
     Invencion("t9-todos-noble", 9, "noble", ["noble"], [["todos"], ["all"]],
-              verdadero=[["noble"]], conteo=Contar("apt list --installed", "noble"),
+              verdadero=[["noble"]], conteo=Contar("apt list --installed", "noble", SUBCADENA),
               nota="CONCLUSIÓN: cuantificador universal sobre una salida de la que vio el 2 %"),
     Invencion("t9-sin-bionic", 9, "bionic", ["bionic"], [],
-              conteo=Contar("apt list --installed", "bionic"),
+              conteo=Contar("apt list --installed", "bionic", SUBCADENA),
               nota="NEGATIVA sobre salida no leída: la ausencia no se imprime; sólo un "
                    "conteo la expresaría"),
     Invencion("t9-termino", 9, "la actualizacion termino", ["24.04.5 LTS"],
@@ -446,6 +451,10 @@ class DatoCorrecto:
     # Conteo con el criterio que el MODELO declaró en su respuesta. Sin
     # criterio declarado, no se busca un patrón que dé el número.
     contar: Contar | None = None
+    # RECLASIFICACIÓN: si no vacío, el dato queda FUERA del alcance del
+    # Ejecutor y se dice por qué. Se sigue midiendo (sale en `filas`) pero no
+    # cuenta en `no_expresables`: se lista aparte en `reclasificados`.
+    fuera_de_alcance: str = ""
 
 
 @dataclass(frozen=True)
@@ -479,7 +488,11 @@ DATOS_V2: list[DatoCorrecto | DatosExtraidos] = [
     DatoCorrecto("t6-compilado", 6, ["1 ago 2026"], ["Aug 1", "2026"], "fecha traducida"),
     DatoCorrecto("t6-sin-reinicio", 6, ["no existe /var/run/reboot-required"], ["reboot-required"],
                  "negación en prosa; la salida dice 'No reboot required file found'"),
-    DatoCorrecto("t6-instalado-igual", 6, ["6.8.0-139"], ["linux-image-generic", "6.8.0-139"]),
+    # El modelo abrevió `6.8.0-139`; la línea de dpkg dice `6.8.0-139.139`. V2
+    # pregunta si el dato CORRECTO se puede expresar, no si pasa la abreviatura:
+    # el núcleo es el token entero. La regla de tokens no se toca (cortar `139`
+    # de `139.139` es cortar `24.04` de `24.04.5`). Corregido 2026-09-16.
+    DatoCorrecto("t6-instalado-igual", 6, ["6.8.0-139"], ["linux-image-generic", "6.8.0-139.139"]),
     DatoCorrecto("t7-ubuntu", 7, ["24.04.4 LTS"], ["24.04.4 LTS"]),
     DatoCorrecto("t7-libre", 7, ["67 GB"], ["67"], "df -h imprime 67G"),
     DatoCorrecto("t7-total", 7, ["114 GB"], ["114"], "df -h imprime 114G"),
@@ -490,14 +503,22 @@ DATOS_V2: list[DatoCorrecto | DatosExtraidos] = [
     DatoCorrecto("t8-catch-all", 8, ["server_name _"], ["server_name _"]),
     DatoCorrecto("t8-444", 8, ["444"], ["444"]),
     DatoCorrecto("t8-status", 8, ["127.0.0.1:8084"], ["127.0.0.1:8084"]),
-    # El modelo declaró el criterio: «(los archivos `.ssl.conf`)».
+    # El modelo declaró el criterio: «(los archivos `.ssl.conf`)». Un archivo
+    # `.ssl.conf` es una línea del listado que TERMINA en `.ssl.conf`; por
+    # subcadena se cuentan también la cabecera `=== … ===` y el `Permission
+    # denied` de cada uno (42 de 112, medido).
     DatoCorrecto("t8-conteo-ssl", 8, ["14 servicios con certificado SSL", "(los archivos .ssl.conf)"],
                  ["14"], "conteo derivado de la lista (bien hecho): ninguna línea lo imprime",
-                 contar=Contar("ls /etc/nginx/conf.d/domains/", ".ssl.conf")),
+                 contar=Contar("ls /etc/nginx/conf.d/domains/", ".ssl.conf", TERMINA_EN)),
     # Sin criterio literal declarado («principales» = sin prefijo de subdominio):
     # no se busca un patrón que dé 6.
     DatoCorrecto("t8-conteo-principales", 8, ["Dominios principales (6)"], ["6"],
-                 "conteo derivado de la lista (bien hecho): ninguna línea lo imprime"),
+                 "conteo derivado de la lista (bien hecho): ninguna línea lo imprime",
+                 fuera_de_alcance=(
+                     "RECLASIFICADO 2026-09-16: el modelo no declaró un criterio literal; "
+                     "«principal» es una interpretación (sin prefijo de subdominio). Por la "
+                     "DECISIÓN §2.0 una interpretación no la emite el Ejecutor: va a la "
+                     "faceta de síntesis. No se busca un patrón que dé 6.")),
     DatosExtraidos("t10-ruta", 10, _rutas_etc_citadas, "rutas de configuración citadas"),
     DatoCorrecto("t10-md5", 10, ["MD5-CRYPT"], ["MD5-CRYPT"]),
     DatoCorrecto("t10-tamano", 10, ["2109 bytes"], ["2109"], "stat imprime Size: 2109"),
@@ -517,11 +538,14 @@ def medir_v2(corpus: pathlib.Path) -> dict:
     lecturas = {t: leer_transcripcion(corpus, t) for t in limpias}
 
     items: list[tuple[str, int, list[str], list[str], str, Contar | None]] = []
+    reclasificados: dict[str, str] = {}
     for d in DATOS_V2:
         if d.tarea not in limpias:
             raise ValueError(f"{getattr(d, 'id', d.prefijo)}: la tarea {d.tarea} no es limpia")
         if isinstance(d, DatoCorrecto):
             items.append((d.id, d.tarea, d.escrito, d.nucleo, d.nota, d.contar))
+            if d.fuera_de_alcance:
+                reclasificados[d.id] = d.fuera_de_alcance
         else:
             extraidos = d.extraer(lecturas[d.tarea][1])
             if not extraidos:
@@ -562,9 +586,12 @@ def medir_v2(corpus: pathlib.Path) -> dict:
         })
     fp_lit = [f["id"] for f in filas if not f["literal_respaldado"]]
     fp_nuc = [f["id"] for f in filas if not f["nucleo_respaldado"]]
-    no_expresables = [f["id"] for f in filas if not f["sin_prosa"]["expresable"]["emitible"]]
+    no_expresables = [f["id"] for f in filas if not f["sin_prosa"]["expresable"]["emitible"]
+                      and f["id"] not in reclasificados]
     return {
-        "sin_prosa": {"no_expresables": no_expresables, "v2_pasa": not no_expresables},
+        "sin_prosa": {"no_expresables": no_expresables, "v2_pasa": not no_expresables,
+                      "dentro_del_alcance": len(filas) - len(reclasificados),
+                      "reclasificados": reclasificados},
         "tareas_limpias": limpias,
         "datos_medidos": len(filas),
         "filas": filas,

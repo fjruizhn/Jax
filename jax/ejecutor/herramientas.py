@@ -50,11 +50,31 @@ def _captura(maquina: str, comando: str, salida: str, momento: str) -> CapturaCo
 
 # --- contar -----------------------------------------------------------------
 
-def contar(captura_origen: CapturaCompleta, patron: str) -> CapturaCompleta:
-    """Cuántas líneas del stdout de `captura_origen` contienen `patron`.
+# Modos de coincidencia de `contar`. Sólo los que el corpus justifica:
+# - `subcadena`: el patrón aparece en cualquier lugar de la línea.
+# - `termina_en`: la línea TERMINA en el patrón. Medido contra U3, tarea 8: el
+#   criterio del modelo fue «los archivos `.ssl.conf`», y por subcadena da 42
+#   de 112 y no 14, porque el nombre sale también en la cabecera `=== … ===` y
+#   en el `cat: …: Permission denied`.
+SUBCADENA = "subcadena"
+TERMINA_EN = "termina_en"
+_COINCIDE = {
+    SUBCADENA: lambda linea, patron: patron in linea,
+    TERMINA_EN: lambda linea, patron: linea.endswith(patron),
+}
 
-    Subcadena literal (no regex), distingue mayúsculas. Las líneas se parten
+
+def contar(captura_origen: CapturaCompleta, patron: str, *, modo: str) -> CapturaCompleta:
+    """Cuántas líneas del stdout de `captura_origen` coinciden con `patron`
+    según `modo` (`SUBCADENA` o `TERMINA_EN`).
+
+    Literal (no regex), distingue mayúsculas, sin recortar espacios: una línea
+    con un espacio al final no «termina en» el patrón. Las líneas se parten
     con `str.splitlines`, igual que el verificador de citas.
+
+    `modo` es obligatorio y queda ESCRITO en el comando y en la salida: la
+    cita dice exactamente qué se contó. No hay modo por defecto que se elija
+    en silencio; un modo desconocido se rechaza.
 
     Se niega si la captura de origen está truncada (tarea 9 de U3: un conteo
     sobre 2 KB de 85,9 KB) o si el comando no terminó con código 0 (un ssh
@@ -63,6 +83,10 @@ def contar(captura_origen: CapturaCompleta, patron: str) -> CapturaCompleta:
     `momento` es el de la captura de origen: el dato tiene la edad de la
     salida que se contó, no la del conteo.
     """
+    if not isinstance(modo, str) or modo not in _COINCIDE:
+        raise HerramientaRechazada(
+            f"modo de coincidencia desconocido {modo!r}; se aceptan exactamente: "
+            f"{', '.join(_COINCIDE)}")
     if captura_origen.truncada:
         motivos = ", ".join(captura_origen.motivos_truncado) or "sin motivo registrado"
         raise HerramientaRechazada(
@@ -79,16 +103,16 @@ def contar(captura_origen: CapturaCompleta, patron: str) -> CapturaCompleta:
         raise HerramientaRechazada(
             f"el patrón {patron!r} tiene un salto de línea: ninguna línea puede contenerlo")
 
+    coincide = _COINCIDE[modo]
     lineas = captura_origen.salida.splitlines()
-    coinciden = sum(1 for linea in lineas if patron in linea)
+    coinciden = sum(1 for linea in lineas if coincide(linea, patron))
     # `!r` escapa saltos de línea y separadores Unicode del patrón y del
     # comando de origen: la línea citable no se puede partir.
     origen = (f"la salida de {captura_origen.comando!r} en "
               f"{captura_origen.maquina!r}")
-    comando = (f"contar lineas que contienen {patron!r} (subcadena literal, "
-               f"distingue mayusculas) en {origen} capturada {captura_origen.momento}")
-    salida = (f"{coinciden} lineas de {len(lineas)} contienen {patron!r} "
-              f"(subcadena literal, distingue mayusculas) en {origen}")
+    criterio = f"{patron!r} (modo={modo}, literal, distingue mayusculas)"
+    comando = f"contar lineas que coinciden con {criterio} en {origen} capturada {captura_origen.momento}"
+    salida = f"{coinciden} lineas de {len(lineas)} coinciden con {criterio} en {origen}"
     return _captura(captura_origen.maquina, comando, salida, captura_origen.momento)
 
 

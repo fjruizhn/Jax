@@ -7,13 +7,14 @@ DECISIÓN de Fernando (2026-09-16, §2.0): el Ejecutor no escribe prosa. La
 afirmación es `(maquina, comando, linea, dato)` y lo que ve la persona lo arma
 `presentar`, no el modelo.
 """
-from dataclasses import fields
+import ast
+from dataclasses import asdict, fields
 
 import pytest
 
 from jax.ejecutor.cita import (
     DATO_FUERA_DE_LINEA, FUENTE_INEXISTENTE, FUENTE_TRUNCADA, RESPALDADA, SIN_RESPALDO,
-    Afirmacion, Captura, normalizar, presentar, verificar,
+    CAMPOS_PRESENTACION, Afirmacion, Captura, Presentacion, normalizar, presentar, verificar,
 )
 
 MAQUINA = "hall9000"
@@ -315,32 +316,46 @@ def test_un_veredicto_no_respaldado_no_trae_linea():
     assert verificar(a, CAPTURAS).linea_capturada == ""
 
 
-def test_presentar_muestra_dato_maquina_comando_y_la_linea_completa_literal():
+def test_presentar_devuelve_estructura_con_claves_estables_y_sin_rotulos():
+    """Política del ecosistema: ningún string visible hardcodeado. El backend
+    de jax no tiene i18n; los rótulos («dato», «máquina»…) los pone el
+    frontend con sus traducciones. `presentar` devuelve los cuatro VALORES."""
     a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="89Gi")
     p = presentar(a)
-    assert p.splitlines() == [
-        "dato: '89Gi'",
-        "máquina: 'hall9000'",
-        "comando: 'free -h'",
-        f"línea: {LINEA_MEM!r}",
-    ]
+    assert isinstance(p, Presentacion)
+    assert CAMPOS_PRESENTACION == ("dato", "maquina", "comando", "linea")
+    assert asdict(p) == {
+        "dato": "'89Gi'",
+        "maquina": "'hall9000'",
+        "comando": "'free -h'",
+        "linea": repr(LINEA_MEM),
+    }
+    for valor in asdict(p).values():
+        for rotulo in ("dato:", "máquina:", "comando:", "línea:"):
+            assert rotulo not in valor
 
 
 def test_presentar_no_recorta_una_linea_larga():
     """Nunca resume: la línea sale entera, por larga que sea."""
     larga = "x " * 5000 + "fin"
     a = Afirmacion(maquina=MAQUINA, comando="c", linea=larga, dato="fin")
-    assert repr(larga) in presentar(a)
+    assert presentar(a).linea == repr(larga)
 
 
 @pytest.mark.parametrize("campo", ["maquina", "comando", "linea", "dato"])
-@pytest.mark.parametrize("colado", ["\n", "\r", " ", "\x1b[2K", "\x85"])
-def test_presentar_no_deja_que_un_campo_fabrique_otra_linea_ni_borre_la_pantalla(campo, colado):
-    """Un salto de línea o un escape de terminal dentro de un campo podría
-    dibujar un `dato:` falso o borrar el `No` de la línea. Cada campo sale
-    escapado: siempre cuatro líneas, sin caracteres de control."""
+@pytest.mark.parametrize("colado", ["\n", "\r", " ", "\x1b[2K", "\x85",
+                                    "\u202e", "\u2066", "\u200b"])
+def test_presentar_no_deja_que_un_campo_esconda_ni_reordene_lo_que_se_ve(campo, colado):
+    """Con estructura, un `dato:` colado ya no puede fabricar OTRO campo: cada
+    valor va en su clave y el rótulo lo pone el frontend. Lo que sigue abierto
+    es lo VISUAL dentro de un campo: un escape de terminal o un override
+    bidireccional (U+202E) puede borrar o dar vuelta el `No` de la línea en
+    una terminal o en un navegador. Cada valor sale escapado: ningún carácter
+    de control, de formato ni separador llega crudo."""
     valores = dict(maquina=MAQUINA, comando="c", linea="a b", dato="a")
     valores[campo] = valores[campo] + colado + "dato: 'falso'"
     p = presentar(Afirmacion(**valores))
-    assert len(p.splitlines()) == 4
-    assert "\x1b" not in p
+    for clave, valor in asdict(p).items():
+        assert valor.isprintable(), (clave, valor)
+        assert len(valor.splitlines()) == 1
+    assert ast.literal_eval(getattr(p, campo)) == valores[campo]  # literal: se recupera exacto

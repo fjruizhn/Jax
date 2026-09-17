@@ -9,7 +9,9 @@ import pytest
 
 from jax.ejecutor.captura import CapturaCompleta, a_captura
 from jax.ejecutor.cita import RESPALDADA, Afirmacion, verificar
-from jax.ejecutor.herramientas import HerramientaRechazada, contar, convertir
+from jax.ejecutor.herramientas import (
+    SUBCADENA, TERMINA_EN, HerramientaRechazada, contar, convertir,
+)
 
 
 def _origen(salida, truncada=False, codigo=0, maquina="atemai",
@@ -36,9 +38,11 @@ _CATORCE_SSL = "\n".join(
     [f"  Certificate Name: sitio{i}.axioma-ia.io SSL" for i in range(14)]
     + ["  Expiry Date: 2026-12-01", "Found the following certs:"]) + "\n"
 
+MODOS = [SUBCADENA, TERMINA_EN]
+
 
 def test_contar_14_lineas_da_14_y_es_citable():
-    c = contar(_origen(_CATORCE_SSL), "SSL")
+    c = contar(_origen(_CATORCE_SSL), "SSL", modo=TERMINA_EN)
     assert isinstance(c, CapturaCompleta)
     assert c.truncada is False
     assert c.codigo == 0
@@ -47,17 +51,20 @@ def test_contar_14_lineas_da_14_y_es_citable():
     assert _citable(c, "14") == RESPALDADA
 
 
-def test_la_linea_de_contar_nombra_sus_entradas():
-    c = contar(_origen(_CATORCE_SSL), "SSL")
+def test_la_linea_de_contar_nombra_sus_entradas_y_su_modo():
+    c = contar(_origen(_CATORCE_SSL), "SSL", modo=TERMINA_EN)
     linea = [l for l in c.salida.splitlines() if "14" in l][0]
     assert "'SSL'" in linea
     assert "certbot certificates" in linea
     assert "16" in linea  # total de líneas examinadas
+    assert "modo=termina_en" in linea
 
 
-def test_el_comando_de_contar_describe_la_operacion_y_su_origen():
-    c = contar(_origen(_CATORCE_SSL), "SSL")
+@pytest.mark.parametrize("modo", MODOS)
+def test_el_comando_de_contar_describe_la_operacion_su_modo_y_su_origen(modo):
+    c = contar(_origen(_CATORCE_SSL), "SSL", modo=modo)
     assert "contar" in c.comando
+    assert f"modo={modo}" in c.comando
     assert "'SSL'" in c.comando
     assert "certbot certificates" in c.comando
     assert "atemai" in c.comando
@@ -66,36 +73,81 @@ def test_el_comando_de_contar_describe_la_operacion_y_su_origen():
 
 def test_contar_es_subcadena_literal_y_distingue_mayusculas():
     origen = _origen("a.b\naxb\nA.B\n")
-    assert "1 lineas" in contar(origen, "a.b").salida
+    assert "1 lineas" in contar(origen, "a.b", modo=SUBCADENA).salida
 
 
-def test_contar_sobre_captura_TRUNCADA_no_cuenta():
+# Forma REAL de la tarea 8 de U3 (nombres de relleno, no del corpus): el nombre
+# del archivo sale en el listado, en la cabecera `=== … ===` y en el error de
+# `cat`. El criterio del modelo fue «los archivos `.ssl.conf`».
+_LISTADO_Y_CATS = "\n".join(
+    [f"sitio{i}.conf" for i in range(3)] + [f"sitio{i}.ssl.conf" for i in range(2)]
+    + ["---"]
+    + [l for i in range(2) for l in (
+        f"=== sitio{i}.ssl.conf ===",
+        f"cat: /etc/nginx/conf.d/domains/sitio{i}.ssl.conf: Permission denied", "")]
+) + "\n"
+
+
+def test_termina_en_no_cuenta_la_cabecera_ni_el_error_de_cat():
+    """Medido contra U3, tarea 8: por subcadena `.ssl.conf` da 42 de 112 y no
+    14, porque el nombre aparece tres veces por archivo. Terminar en el sufijo
+    separa el listado de la cabecera (`… ===`) y del error (`…: Permission
+    denied`)."""
+    origen = _origen(_LISTADO_Y_CATS, comando="ls domains/")
+    assert contar(origen, ".ssl.conf", modo=SUBCADENA).salida.startswith("6 lineas de 12 ")
+    assert contar(origen, ".ssl.conf", modo=TERMINA_EN).salida.startswith("2 lineas de 12 ")
+
+
+def test_termina_en_es_literal_y_no_recorta_espacios():
+    """Sin normalizar: la cita dice «terminan en», y una línea con un espacio
+    al final no termina en el patrón."""
+    origen = _origen("a.ssl.conf \nA.SSL.CONF\nb.ssl.conf\n")
+    assert contar(origen, ".ssl.conf", modo=TERMINA_EN).salida.startswith("1 lineas de 3 ")
+
+
+def test_contar_sin_modo_no_elige_uno_en_silencio():
+    with pytest.raises(TypeError):
+        contar(_origen(_CATORCE_SSL), "SSL")
+
+
+@pytest.mark.parametrize("modo", ["", "regex", "TERMINA_EN", None, "empieza_en"])
+def test_contar_con_modo_desconocido_no_cuenta(modo):
+    with pytest.raises(HerramientaRechazada, match="modo"):
+        contar(_origen(_CATORCE_SSL), "SSL", modo=modo)
+
+
+@pytest.mark.parametrize("modo", MODOS)
+def test_contar_sobre_captura_TRUNCADA_no_cuenta(modo):
     """Tarea 9 de U3: 2 KB leídos de 85,9 KB. Un conteo sobre una salida
     cortada es un número que nadie imprimió y que además es falso."""
     origen = _origen(_CATORCE_SSL, truncada=True, motivos=("tope_bytes",))
     with pytest.raises(HerramientaRechazada, match="truncada"):
-        contar(origen, "SSL")
+        contar(origen, "SSL", modo=modo)
 
 
-def test_contar_sobre_comando_fallido_no_cuenta():
+@pytest.mark.parametrize("modo", MODOS)
+def test_contar_sobre_comando_fallido_no_cuenta(modo):
     """Un ssh caído deja stdout vacío: contar daría «0 servicios»."""
     with pytest.raises(HerramientaRechazada, match="código"):
-        contar(_origen("", codigo=255), "SSL")
+        contar(_origen("", codigo=255), "SSL", modo=modo)
 
 
-def test_contar_con_patron_vacio_no_cuenta():
+@pytest.mark.parametrize("modo", MODOS)
+def test_contar_con_patron_vacio_no_cuenta(modo):
     with pytest.raises(HerramientaRechazada, match="vacío"):
-        contar(_origen(_CATORCE_SSL), "")
+        contar(_origen(_CATORCE_SSL), "", modo=modo)
 
 
-def test_contar_con_patron_multilinea_no_cuenta():
+@pytest.mark.parametrize("modo", MODOS)
+def test_contar_con_patron_multilinea_no_cuenta(modo):
     with pytest.raises(HerramientaRechazada, match="salto de línea"):
-        contar(_origen(_CATORCE_SSL), "SSL\nExpiry")
+        contar(_origen(_CATORCE_SSL), "SSL\nExpiry", modo=modo)
 
 
-def test_el_patron_no_puede_partir_la_linea_citable():
-    origen = _origen("x y\n", comando="echo 'raro\nde verdad'")
-    c = contar(origen, "x")
+@pytest.mark.parametrize("modo", MODOS)
+def test_el_patron_no_puede_partir_la_linea_citable(modo):
+    origen = _origen("x y\n", comando="echo 'raro\nde verdad'")
+    c = contar(origen, "x", modo=modo)
     assert len(c.salida.splitlines()) == 1
 
 

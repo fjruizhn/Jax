@@ -23,6 +23,13 @@ Desviaciones del plan (2026-09-16), cada una con su test:
 - `no_derivados` son `NoDerivado(nombre, comando, motivo)`, no nombres
   sueltos: un nombre sin motivo es «desconocido sin decir por qué».
 - Un hecho vencido que llega a `bloque` también se omite y se dice.
+
+SIN TEXTOS VISIBLES (política del ecosistema, 2026-09-16): ningún string que
+vea la persona se escribe aquí. El backend de jax no tiene i18n; lo muestra el
+frontend de jax-platform con `react-i18next`. Por eso `bloque` devuelve un
+`Bloque` (estructura) y cada omisión lleva un `Motivo`: un CÓDIGO estable y
+sus datos, que el frontend traduce. Los valores de los hechos y los comandos
+son datos de las capturas, no rótulos.
 """
 from __future__ import annotations
 
@@ -36,6 +43,28 @@ TTL_S_POR_DEFECTO = 60
 # Los hechos se derivan antes de CADA turno: comandos cortos, salida corta.
 TOPE_BYTES_POR_DEFECTO = 65_536
 TIMEOUT_S_POR_DEFECTO = 10.0
+
+
+# Códigos de `Motivo`: claves estables del contrato con el frontend, que pone
+# el texto traducido. Cambiar uno rompe esa traducción.
+MOMENTO_ILEGIBLE = "momento_ilegible"
+MOMENTO_SIN_ZONA = "momento_sin_zona"
+MOMENTO_FUTURO = "momento_futuro"
+VENCIDO = "vencido"
+TRUNCADA = "truncada"
+SIN_CODIGO = "sin_codigo"
+CODIGO_DISTINTO_DE_CERO = "codigo_distinto_de_cero"
+SALIDA_VACIA = "salida_vacia"
+NO_SE_PUDO_CORRER = "no_se_pudo_correr"
+
+
+@dataclass(frozen=True)
+class Motivo:
+    """Por qué algo no es un hecho: un código de arriba y sus datos, como
+    pares `(clave, valor)` (inmutables; `dict(motivo.datos)` para serializar).
+    Sin prosa: la frase la pone el frontend."""
+    codigo: str
+    datos: tuple[tuple[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,12 +86,32 @@ class Hecho:
 class NoDerivado:
     nombre: str
     comando: str
-    motivo: str
+    motivo: Motivo
 
 
 @dataclass(frozen=True)
 class Derivacion:
     hechos: tuple[Hecho, ...]
+    no_derivados: tuple[NoDerivado, ...]
+
+
+@dataclass(frozen=True)
+class Invalido:
+    """Un hecho que se derivó pero ya no vale (vencido, del futuro, momento
+    sin zona o ilegible). Va con su momento a la vista, dentro de `hecho`."""
+    hecho: Hecho
+    motivo: Motivo
+
+
+@dataclass(frozen=True)
+class Bloque:
+    """Lo que se inyecta en el turno, como estructura. `vigentes` son los
+    únicos que se pueden usar como hechos; `invalidos` y `no_derivados` se
+    muestran como omitidos, cada uno con su motivo."""
+    ahora: str
+    ttl_s: float
+    vigentes: tuple[Hecho, ...]
+    invalidos: tuple[Invalido, ...]
     no_derivados: tuple[NoDerivado, ...]
 
 
@@ -96,18 +145,18 @@ def _instante(iso: str) -> datetime | None:
     return momento if momento.tzinfo is not None else None
 
 
-def _motivo_de_invalidez(hecho: Hecho, ahora: datetime, ttl_s: float) -> str | None:
+def _motivo_de_invalidez(hecho: Hecho, ahora: datetime, ttl_s: float) -> Motivo | None:
     try:
         momento = _instante(hecho.momento)
     except ValueError:  # fail-soft: un momento ilegible deja el hecho fuera del bloque y se dice por qué; nunca entra como vigente
-        return f"momento ilegible {hecho.momento!r}"
+        return Motivo(MOMENTO_ILEGIBLE, (("momento", hecho.momento),))
     if momento is None:
-        return f"momento sin zona horaria {hecho.momento!r}"
+        return Motivo(MOMENTO_SIN_ZONA, (("momento", hecho.momento),))
     edad = (ahora - momento).total_seconds()
     if edad < 0:
-        return f"momento en el futuro ({-edad:.0f} s después de ahora)"
+        return Motivo(MOMENTO_FUTURO, (("segundos", -edad),))
     if edad > ttl_s:
-        return f"vencido: tiene {edad:.0f} s y el TTL es {ttl_s:g} s"
+        return Motivo(VENCIDO, (("edad_s", edad), ("ttl_s", ttl_s)))
     return None
 
 
@@ -122,18 +171,19 @@ def vigente(hecho: Hecho, ahora: str, ttl_s: float = TTL_S_POR_DEFECTO) -> bool:
     return _motivo_de_invalidez(hecho, _ahora(ahora), ttl_s) is None
 
 
-def _motivo_de_rechazo(completa: captura.CapturaCompleta) -> str | None:
+def _motivo_de_rechazo(completa: captura.CapturaCompleta) -> Motivo | None:
     # El truncado se mira ANTES que el código y el contenido: lo que llegó
     # cortado no se lee (tarea 9 de U3).
     if completa.truncada:
-        motivos = ", ".join(completa.motivos_truncado) or "sin motivo registrado"
-        return f"la salida vino truncada ({motivos})"
+        # `motivos_truncado` ya son códigos de captura.py; vacío = sin motivo
+        # registrado, y lo dice la tupla vacía.
+        return Motivo(TRUNCADA, (("motivos", tuple(completa.motivos_truncado)),))
     if completa.codigo is None:
-        return "sin código de salida: el proceso no terminó dentro del plazo"
+        return Motivo(SIN_CODIGO)
     if completa.codigo != 0:
-        return f"código de salida {completa.codigo}"
+        return Motivo(CODIGO_DISTINTO_DE_CERO, (("codigo", completa.codigo),))
     if not completa.salida.strip():
-        return "la salida vino vacía"
+        return Motivo(SALIDA_VACIA)
     return None
 
 
@@ -148,7 +198,7 @@ def derivar(inventario, maquina: str, *, correr=captura.correr,
                               tope_bytes=tope_bytes, timeout_s=timeout_s)
         except Exception as error:  # fail-soft: un comando que no se pudo lanzar deja ESE hecho omitido y dicho; los demás hechos del turno siguen
             omitidos.append(NoDerivado(fuente.nombre, fuente.comando,
-                                       f"no se pudo correr: {error!r}"))
+                                       Motivo(NO_SE_PUDO_CORRER, (("error", repr(error)),))))
             continue
         motivo = _motivo_de_rechazo(completa)
         if motivo is not None:
@@ -159,27 +209,22 @@ def derivar(inventario, maquina: str, *, correr=captura.correr,
     return Derivacion(tuple(hechos), tuple(omitidos))
 
 
-def bloque(hechos, ahora: str, no_derivados=(), ttl_s: float = TTL_S_POR_DEFECTO) -> str:
-    """El texto que se inyecta en el turno. Una línea `- nombre = valor` por
-    hecho, con su comando y su momento; las líneas extra de un valor van
-    sangradas para que no parezcan otro hecho."""
+def bloque(hechos, ahora: str, no_derivados=(), ttl_s: float = TTL_S_POR_DEFECTO) -> Bloque:
+    """Lo que se inyecta en el turno, como ESTRUCTURA: cada hecho con su
+    comando y su momento; los que no valen, aparte y con su `Motivo`.
+
+    No rotula (ningún «Hechos del sistema», «omitido», «comando:»): los textos
+    visibles los pone el frontend con sus traducciones. Un valor de varias
+    líneas es UN campo de UN hecho: con estructura no hay líneas de texto que
+    un valor pueda imitar."""
     instante = _ahora(ahora)
-    lineas = [f"Hechos del sistema (derivados de comandos; ahora {ahora}; TTL {ttl_s:g} s):"]
-    omitidos: list[str] = []
+    vigentes: list[Hecho] = []
+    invalidos: list[Invalido] = []
     for hecho in hechos:
         motivo = _motivo_de_invalidez(hecho, instante, ttl_s)
-        if motivo is not None:
-            omitidos.append(f"- {hecho.nombre}: omitido, {motivo} "
-                            f"(comando: `{hecho.comando}`, momento: {hecho.momento})")
-            continue
-        primera, *resto = hecho.valor.splitlines() or [""]
-        lineas.append(f"- {hecho.nombre} = {primera}")
-        lineas.extend(f"    {linea}" for linea in resto)
-        lineas.append(f"    (comando: `{hecho.comando}`, momento: {hecho.momento})")
-    for omitido in no_derivados:
-        omitidos.append(f"- {omitido.nombre}: no se pudo derivar, {omitido.motivo} "
-                        f"(comando: `{omitido.comando}`)")
-    if omitidos:
-        lineas.append("Omitidos (no usar como hechos):")
-        lineas.extend(omitidos)
-    return "\n".join(lineas)
+        if motivo is None:
+            vigentes.append(hecho)
+        else:
+            invalidos.append(Invalido(hecho, motivo))
+    return Bloque(ahora=ahora, ttl_s=ttl_s, vigentes=tuple(vigentes),
+                  invalidos=tuple(invalidos), no_derivados=tuple(no_derivados))

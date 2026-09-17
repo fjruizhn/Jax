@@ -13,7 +13,8 @@ Dos mediciones contra el corpus de U3 mostraron que una regla literal ata
 NÚMEROS y no PALABRAS: «el 8188 es Docker multi-hilo», citando la línea real
 del puerto, salía respaldada. Se quitó la superficie de ataque en vez de
 vigilarla: la `Afirmacion` ya no tiene `texto`. Es `(maquina, comando, linea,
-dato)`, y lo que ve la persona lo arma `presentar`, no el modelo.
+dato)`, y lo que ve la persona lo arma `presentar`, no el modelo: estructura
+sin rótulos, que el frontend rotula con i18n.
 
 Con la prosa se fueron las dos reglas que sólo la vigilaban («el dato está en
 el texto» y «todo número del texto está en la línea») y sus veredictos
@@ -169,23 +170,54 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
                      f"en {afirmacion.maquina!r}")
 
 
-def presentar(afirmacion: Afirmacion) -> str:
+# Claves estables del contrato con el frontend: los rótulos visibles («dato»,
+# «máquina», «comando», «línea») viven en las traducciones de jax-platform.
+CAMPOS_PRESENTACION = ("dato", "maquina", "comando", "linea")
+
+
+@dataclass(frozen=True)
+class Presentacion:
+    """Lo que ve la persona de una afirmación respaldada: SÓLO VALORES.
+
+    Cada valor es el `repr` del campo: la cadena literal entre comillas, con
+    todo carácter no imprimible escrito como escape. Se recupera exacta con
+    `ast.literal_eval`.
+    """
+    dato: str
+    maquina: str
+    comando: str
+    linea: str
+
+
+def presentar(afirmacion: Afirmacion) -> Presentacion:
     """Lo que ve la persona. Lo arma el sistema; el modelo no escribe nada aquí.
 
-    Cuatro líneas: dato, máquina, comando y la línea citada COMPLETA. Nunca
-    resume, nunca traduce, nunca interpreta.
+    Devuelve ESTRUCTURA, no texto rotulado (política del ecosistema: ningún
+    string visible hardcodeado; el backend de jax no tiene i18n). Las claves
+    son `CAMPOS_PRESENTACION` y los rótulos los pone el frontend con sus
+    traducciones. Nunca resume, nunca traduce, nunca interpreta: la línea
+    citada va COMPLETA.
 
-    Cada valor sale con `repr`: literal y sin ambigüedad. Un salto de línea,
-    un separador Unicode o un escape de terminal dentro de un campo queda
-    escrito como `\\n`, `\\u2028`, `\\x1b` -- no puede dibujar un `dato:` falso
-    ni borrar el `No` de la línea que se muestra.
+    Por qué la inyección sigue cerrada, con estructura en vez de texto:
+    - Fabricar OTRO campo (un `dato: 'falso'` colado en la línea) ya no tiene
+      forma: no hay separador que parsear. Cada valor está en su clave, y lo
+      que haya adentro es contenido de ESE campo, nunca un campo nuevo.
+    - Lo que queda es lo VISUAL dentro de un campo: un escape de terminal
+      (`\x1b[2K`) o un override bidireccional (U+202E, U+2066) puede borrar o
+      dar vuelta el `No` de la línea al dibujarse, en una terminal o en un
+      navegador. Por eso cada valor sigue saliendo con `repr`: todo carácter
+      de control, de formato (categoría Cf, que incluye los bidi y el espacio
+      de ancho cero) o separador (Zl, Zp, Zs salvo el espacio) queda escrito
+      como `\n`, `\u202e`, `\x1b`. El valor es imprimible entero
+      (`str.isprintable`) y cabe en una línea, sin depender de cómo lo pinte
+      cada consumidor. Las comillas delimitan: un espacio al final se ve.
 
     Sólo para afirmaciones ya `respaldadas`: `transporte.entregar` le pasa la
     línea tal como la imprimió la máquina (`Veredicto.linea_capturada`).
     """
-    return "\n".join((
-        f"dato: {afirmacion.dato!r}",
-        f"máquina: {afirmacion.maquina!r}",
-        f"comando: {afirmacion.comando!r}",
-        f"línea: {afirmacion.linea!r}",
-    ))
+    return Presentacion(
+        dato=repr(afirmacion.dato),
+        maquina=repr(afirmacion.maquina),
+        comando=repr(afirmacion.comando),
+        linea=repr(afirmacion.linea),
+    )

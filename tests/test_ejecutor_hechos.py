@@ -14,8 +14,10 @@ import pathlib
 import pytest
 
 from jax.ejecutor.captura import CapturaCompleta
+from jax.ejecutor import hechos as H
 from jax.ejecutor.hechos import (
-    TTL_S_POR_DEFECTO, Fuente, Hecho, NoDerivado, bloque, derivar, vigente,
+    TTL_S_POR_DEFECTO, Bloque, Fuente, Hecho, Invalido, Motivo, NoDerivado, bloque, derivar,
+    vigente,
 )
 
 MOMENTO = "2026-09-16T10:00:00+00:00"
@@ -42,24 +44,26 @@ def test_un_hecho_vencido_no_entra_al_bloque():
     h = Hecho(nombre="uptime", valor="38 min", comando="uptime -p", momento=MOMENTO)
     assert vigente(h, ahora="2026-09-16T10:00:30+00:00", ttl_s=60) is True
     assert vigente(h, ahora="2026-09-16T11:00:00+00:00", ttl_s=60) is False
-    texto = bloque([h], ahora="2026-09-16T11:00:00+00:00", ttl_s=60)
-    assert "38 min" not in texto
-    assert "uptime" in texto and "vencido" in texto
+    b = bloque([h], ahora="2026-09-16T11:00:00+00:00", ttl_s=60)
+    assert b.vigentes == ()
+    assert b.invalidos == (Invalido(h, Motivo(H.VENCIDO, (("edad_s", 3600), ("ttl_s", 60)))),)
 
 
 def test_el_bloque_muestra_el_comando_y_la_hora_de_cada_hecho():
     h = Hecho(nombre="uptime", valor="38 min", comando="uptime -p", momento=MOMENTO)
-    texto = bloque([h], ahora="2026-09-16T10:00:10+00:00")
-    assert "uptime -p" in texto and MOMENTO in texto and "38 min" in texto
+    b = bloque([h], ahora="2026-09-16T10:00:10+00:00")
+    assert b == Bloque(ahora="2026-09-16T10:00:10+00:00", ttl_s=TTL_S_POR_DEFECTO,
+                       vigentes=(h,), invalidos=(), no_derivados=())
 
 
 def test_un_hecho_que_no_se_pudo_derivar_se_omite_y_se_dice():
     """Desviación del plan: `no_derivados` lleva el MOTIVO, no sólo el nombre.
     Un nombre suelto es «desconocido sin decir por qué», que §3.1 prohíbe."""
-    omitido = NoDerivado(nombre="disco", comando="df -h /", motivo="código de salida 1")
-    texto = bloque([], ahora=MOMENTO, no_derivados=[omitido])
-    assert "disco" in texto and "no se pudo derivar" in texto
-    assert "código de salida 1" in texto and "df -h /" in texto
+    omitido = NoDerivado(nombre="disco", comando="df -h /",
+                         motivo=Motivo(H.CODIGO_DISTINTO_DE_CERO, (("codigo", 1),)))
+    b = bloque([], ahora=MOMENTO, no_derivados=[omitido])
+    assert b.no_derivados == (omitido,)
+    assert b.vigentes == () and b.invalidos == ()
 
 
 # --- el TTL compara instantes, no cadenas ----------------------------------
@@ -112,15 +116,16 @@ def test_una_captura_truncada_no_produce_hecho_y_se_dice_cual():
                 maquina="local", tope_bytes=1024)
     assert r.hechos == ()
     [omitido] = r.no_derivados
-    assert omitido.nombre == "numeros" and "truncada" in omitido.motivo
-    assert "tope_bytes" in omitido.motivo
+    assert omitido.nombre == "numeros"
+    assert omitido.motivo == Motivo(H.TRUNCADA, (("motivos", ("tope_bytes",)),))
 
 
 def test_un_codigo_distinto_de_cero_no_produce_hecho_y_se_dice_cual():
     r = derivar([Fuente(nombre="roto", comando="echo parcial; exit 3")], maquina="local")
     assert r.hechos == ()
     [omitido] = r.no_derivados
-    assert omitido.nombre == "roto" and "3" in omitido.motivo
+    assert omitido.nombre == "roto"
+    assert omitido.motivo == Motivo(H.CODIGO_DISTINTO_DE_CERO, (("codigo", 3),))
 
 
 def test_sin_codigo_no_produce_hecho_y_se_dice_cual():
@@ -129,20 +134,22 @@ def test_sin_codigo_no_produce_hecho_y_se_dice_cual():
                 correr=_correr_fijo(codigo=None))
     assert r.hechos == ()
     [omitido] = r.no_derivados
-    assert omitido.nombre == "colgado" and "sin código" in omitido.motivo
+    assert omitido.nombre == "colgado"
+    assert omitido.motivo == Motivo(H.SIN_CODIGO)
 
 
 def test_la_marca_de_truncado_manda_aunque_el_codigo_sea_cero():
     r = derivar([Fuente(nombre="uptime", comando="uptime -p")], maquina="local",
                 correr=_correr_fijo(truncada=True, motivos=("timeout",)))
     assert r.hechos == ()
-    assert "timeout" in r.no_derivados[0].motivo
+    assert r.no_derivados[0].motivo == Motivo(H.TRUNCADA, (("motivos", ("timeout",)),))
 
 
 def test_una_salida_vacia_no_es_un_hecho():
     r = derivar([Fuente(nombre="nada", comando="true")], maquina="local")
     assert r.hechos == ()
     assert r.no_derivados[0].nombre == "nada"
+    assert r.no_derivados[0].motivo == Motivo(H.SALIDA_VACIA)
 
 
 def test_si_correr_lanza_se_omite_y_los_demas_siguen():
@@ -153,7 +160,9 @@ def test_si_correr_lanza_se_omite_y_los_demas_siguen():
     r = derivar([Fuente("a", "roto"), Fuente("b", "uptime -p")], maquina="local",
                 correr=explota)
     assert [h.nombre for h in r.hechos] == ["b"]
-    assert r.no_derivados[0].nombre == "a" and "sin shell" in r.no_derivados[0].motivo
+    assert r.no_derivados[0].nombre == "a"
+    assert r.no_derivados[0].motivo == Motivo(H.NO_SE_PUDO_CORRER,
+                                              (("error", repr(OSError("sin shell"))),))
 
 
 def test_el_momento_del_hecho_es_el_de_la_captura():
@@ -191,10 +200,32 @@ def test_fuente_servicio_no_acepta_un_nombre_que_rompa_el_comando():
 
 
 def test_un_valor_de_varias_lineas_no_se_confunde_con_otro_hecho():
-    h = Hecho(nombre="disco", valor="Filesystem Size\n/dev/sda 100G",
+    """Con estructura no hay líneas que confundir: el valor entero, con sus
+    saltos, es UN campo de UN hecho."""
+    h = Hecho(nombre="disco", valor="Filesystem Size\n- /dev/sda = 100G",
               comando="df -h /", momento=MOMENTO)
-    texto = bloque([h], ahora="2026-09-16T10:00:10+00:00")
-    lineas = texto.splitlines()
-    assert any(l.startswith("- disco = ") for l in lineas)
-    assert not any(l.startswith("- /dev/sda") for l in lineas)
-    assert "/dev/sda 100G" in texto
+    b = bloque([h], ahora="2026-09-16T10:00:10+00:00")
+    assert b.vigentes == (h,)
+
+
+# --- el bloque no rotula: los textos visibles los pone el frontend (i18n) ---
+
+@pytest.mark.parametrize("momento,motivo", [
+    ("ayer", Motivo(H.MOMENTO_ILEGIBLE, (("momento", "ayer"),))),
+    ("2026-09-16T10:00:00", Motivo(H.MOMENTO_SIN_ZONA, (("momento", "2026-09-16T10:00:00"),))),
+    ("2026-09-16T10:05:10+00:00", Motivo(H.MOMENTO_FUTURO, (("segundos", 300),))),
+])
+def test_cada_invalidez_es_un_codigo_con_sus_datos(momento, motivo):
+    h = Hecho(nombre="uptime", valor="38 min", comando="uptime -p", momento=momento)
+    assert bloque([h], ahora="2026-09-16T10:00:10+00:00").invalidos == (Invalido(h, motivo),)
+
+
+def test_el_bloque_no_trae_ningun_texto_en_castellano_escrito_por_el_backend():
+    """Política absoluta: ningún string visible hardcodeado. El bloque lleva
+    VALORES (de las capturas) y CÓDIGOS estables; nada que haya que traducir."""
+    codigos = {H.MOMENTO_ILEGIBLE, H.MOMENTO_SIN_ZONA, H.MOMENTO_FUTURO, H.VENCIDO,
+               H.TRUNCADA, H.SIN_CODIGO, H.CODIGO_DISTINTO_DE_CERO, H.SALIDA_VACIA,
+               H.NO_SE_PUDO_CORRER}
+    assert len(codigos) == 9
+    for codigo in codigos:
+        assert codigo.isascii() and codigo == codigo.lower() and " " not in codigo

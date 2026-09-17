@@ -29,12 +29,17 @@ _RUTA = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "ejecutor_fase
 
 
 @pytest.fixture(scope="module")
-def r():
+def mod():
     spec = importlib.util.spec_from_file_location("fase2_reproducir_u3", _RUTA)
-    mod = importlib.util.module_from_spec(spec)
+    modulo = importlib.util.module_from_spec(spec)
     # dataclasses resuelve las anotaciones por sys.modules[__module__].
-    sys.modules[spec.name] = mod
-    spec.loader.exec_module(mod)
+    sys.modules[spec.name] = modulo
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+@pytest.fixture(scope="module")
+def r(mod):
     return mod.reproducir(CORPUS)
 
 
@@ -152,27 +157,59 @@ def test_v1_all_es_un_homonimo_que_sólo_frena_el_truncado(r):
 
 
 def test_v2_sin_prosa_medido(r):
-    """42 datos correctos; 3 no se pueden emitir como `dato` literal:
+    """42 datos correctos. Medido 2026-09-16 tras `contar(modo=termina_en)`:
 
-    · t8-conteo-ssl: el criterio que declaró el modelo («los archivos
-      `.ssl.conf`»), contado con `contar` sobre la captura real, da 42 y no
-      14: el mismo nombre aparece en el listado, en la cabecera `=== … ===` y
-      en el `Permission denied`. Una subcadena no separa las tres.
-    · t8-conteo-principales: el modelo no declaró un criterio literal
-      («principales» = sin prefijo); no se busca un patrón que dé 6.
-    · t6-instalado-igual: lo causa la regla de bordes. El núcleo fijado es
-      `6.8.0-139` y la línea dice `6.8.0-139.139`: cortar `139` de `139.139`
-      es la misma operación que `24.04` de `24.04.5`. El token entero
-      (`6.8.0-139.139`) sí sale.
+    · t8-conteo-ssl: SALE. Con el criterio que declaró el modelo («los
+      archivos `.ssl.conf`») y `termina_en`, `contar` da 14 de 112 sobre la
+      captura real (ver `test_v2_t8_conteo_ssl_*`).
+    · t6-instalado-igual: SALE con el dato correcto, `6.8.0-139.139` entero
+      junto a `linux-image-generic`. La abreviatura del modelo (`6.8.0-139`)
+      sigue sin salir de esa línea: la regla de tokens no se tocó.
+    · t8-conteo-principales: RECLASIFICADO, no expresable y fuera del alcance
+      (ver `test_v2_reclasificado_*`).
     """
     assert r["v2"]["datos_medidos"] == 42
-    assert r["v2"]["sin_prosa"]["no_expresables"] == [
-        "t6-instalado-igual", "t8-conteo-ssl", "t8-conteo-principales"]
+    assert r["v2"]["sin_prosa"]["no_expresables"] == []
+    assert list(r["v2"]["sin_prosa"]["reclasificados"]) == ["t8-conteo-principales"]
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "V2 NO PASA sin prosa (medido 2026-09-16): 3 de 42. Dos conteos de la tarea 8 "
-    "que `contar` (subcadena por línea) no puede reproducir, y t6-instalado-igual "
-    "por la regla de bordes (6.8.0-139 dentro de 6.8.0-139.139)."))
-def test_v2_sin_prosa_cero_falsos_positivos(r):
+def test_v2_t8_conteo_ssl_con_termina_en_da_14_y_por_subcadena_42(mod):
+    """La herramienta real sobre la captura real. Sólo números en el test: la
+    captura tiene datos de clientes."""
+    from jax.ejecutor.herramientas import SUBCADENA, TERMINA_EN, contar
+    capturas, final = mod.leer_transcripcion(CORPUS, 8)
+    assert "(los archivos .ssl.conf)" in mod._sin_markdown(final)  # criterio del modelo
+    [origen] = [cu for cu in capturas if "ls /etc/nginx/conf.d/domains/" in cu.captura.comando]
+    completa = mod._completa(origen)
+    assert contar(completa, ".ssl.conf", modo=SUBCADENA).salida.startswith("42 lineas de 112 ")
+    assert contar(completa, ".ssl.conf", modo=TERMINA_EN).salida.startswith("14 lineas de 112 ")
+
+
+def test_v2_t6_sale_el_token_entero_y_no_la_abreviatura(r, mod):
+    fila = {f["id"]: f for f in r["v2"]["filas"]}["t6-instalado-igual"]
+    assert fila["escrito"] == ["6.8.0-139"]                      # lo que escribió el modelo
+    assert fila["nucleo"] == ["linux-image-generic", "6.8.0-139.139"]  # el dato correcto
+    testigo = fila["sin_prosa"]["expresable"]["testigo"]
+    assert "linux-image-generic" in testigo["linea"] and "6.8.0-139.139" in testigo["linea"]
+    capturas, _ = mod.leer_transcripcion(CORPUS, 6)
+    maquina = mod.tareas_del_examen()[6]["maquina"]
+    abreviada = mod.emitible(capturas, maquina, ["linux-image-generic", "6.8.0-139"], publicar=True)
+    assert abreviada["emitible"] is False
+
+
+def test_v2_reclasificado_t8_conteo_principales_fuera_del_alcance(r):
+    """RECLASIFICACIÓN (2026-09-16), no un pase: el modelo no declaró un
+    criterio literal para «principales» (es una interpretación: sin prefijo de
+    subdominio), y no se busca un patrón que dé 6. Por la DECISIÓN §2.0, una
+    interpretación no la emite el Ejecutor: va a la faceta de síntesis."""
+    motivo = r["v2"]["sin_prosa"]["reclasificados"]["t8-conteo-principales"]
+    assert "§2.0" in motivo and "síntesis" in motivo
+    fila = {f["id"]: f for f in r["v2"]["filas"]}["t8-conteo-principales"]
+    assert fila["sin_prosa"]["expresable"]["emitible"] is False
+    assert fila["sin_prosa"]["herramientas"] == []
+
+
+def test_v2_sin_prosa_cero_falsos_positivos_dentro_del_alcance(r):
+    """Umbral pre-registrado de V2, sobre los 41 datos dentro del alcance del
+    Ejecutor. El reclasificado se fija aparte y con su porqué."""
     assert r["v2"]["sin_prosa"]["no_expresables"] == []

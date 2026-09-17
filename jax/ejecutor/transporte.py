@@ -59,6 +59,7 @@ def entregar(afirmaciones, capturas) -> Entrega:
     return Entrega(crudas, tuple(respaldadas), tuple(descartadas))
 
 
-def presentar(entrega: Entrega) -> list[str]:
-    """Lo que ve la persona de cada afirmación respaldada, armado por el sistema."""
+def presentar(entrega: Entrega) -> list[cita.Presentacion]:
+    """Lo que ve la persona de cada afirmación respaldada, armado por el sistema.
+    Estructura sin rótulos: los pone el frontend (ver `cita.presentar`)."""
     return [cita.presentar(a) for a in entrega.respaldadas]

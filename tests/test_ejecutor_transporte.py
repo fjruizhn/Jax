@@ -6,7 +6,7 @@ Puro: sin red ni E/S.
 """
 import pytest
 
-from jax.ejecutor import transporte
+from jax.ejecutor import cita, transporte
 from jax.ejecutor.cita import (
     DATO_FUERA_DE_LINEA, FUENTE_TRUNCADA, RESPALDADA, SIN_RESPALDO, Afirmacion, Captura,
 )
@@ -62,8 +62,9 @@ def test_la_respaldada_lleva_la_linea_tal_como_la_imprimio_la_maquina():
 
 def test_presentar_la_entrega_usa_la_linea_de_la_maquina():
     e = transporte.entregar([BUENA], CAPTURAS)
-    assert transporte.presentar(e) == ["dato: '38 minutes'\nmáquina: 'hall9000'\n"
-                                       "comando: 'uptime -p'\nlínea: 'up   38 minutes'"]
+    assert transporte.presentar(e) == [cita.Presentacion(
+        dato="'38 minutes'", maquina="'hall9000'",
+        comando="'uptime -p'", linea="'up   38 minutes'")]
 
 
 def test_un_generador_de_afirmaciones_se_recorre_una_vez_y_bien():
