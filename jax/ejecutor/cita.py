@@ -41,6 +41,7 @@ verdadera. Hallado 2026-09-16 al quitar la prosa.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 
 RESPALDADA = "respaldada"
@@ -148,6 +149,23 @@ def _esta_entero(dato: str, linea: str) -> bool:
     return False
 
 
+def comando_canonico(comando: str) -> str:
+    """Los mismos tokens, separados por un espacio. `ssh h "df -h /"` y `ssh h df -h /` corren lo
+    mismo (ssh pega sus argumentos con espacios) y el modelo escribe una u otra al citar: la real
+    de prod, 2026-09-17, salió `comando_no_corrido` con el dato correcto. Si no se puede partir
+    (comilla sin cerrar), no se adivina: se devuelve tal cual y se compara carácter por carácter."""
+    try:
+        return " ".join(shlex.split(comando))
+    except ValueError:
+        return comando
+
+
+def mismo_comando(corrido: str, citado: str) -> bool:
+    """El comando sólo ELIGE la captura; la máquina la decidió el gancho sobre el comando CORRIDO
+    y la línea se busca literal en esa salida. Por eso alcanza con que sean el mismo comando."""
+    return corrido == citado or comando_canonico(corrido) == comando_canonico(citado)
+
+
 def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
     """¿El dato está entero en la línea citada, y la línea está literal en la
     salida de ese comando, en esa máquina?
@@ -181,7 +199,8 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
     se_corrio = False
     alguna_truncada = False
     for captura in capturas:
-        if (captura.maquina, captura.comando) != (afirmacion.maquina, afirmacion.comando):
+        if (captura.maquina != afirmacion.maquina
+                or not mismo_comando(captura.comando, afirmacion.comando)):
             continue
         se_corrio = True
         # El truncado se mira ANTES que el contenido: si la salida vino
