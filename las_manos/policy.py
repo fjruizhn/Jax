@@ -12,7 +12,6 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 
 

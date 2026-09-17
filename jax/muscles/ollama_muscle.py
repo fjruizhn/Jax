@@ -31,7 +31,7 @@ import httpx
 
 from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from jax.core.model_catalog import record_resolved_version_safe
-from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocationError, MuscleTimeoutError
+from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocationError
 
 # Semaforo de GPU -- UNA inferencia local a la vez DENTRO DE ESTE PROCESO.
 #

@@ -94,8 +94,3 @@ def validate_resume(invoked_by: str) -> PolicyResult:
             ),
         )
     return PolicyResult(ok=True, reason="OK")
-
-
-def hyde_requires_human_gate() -> bool:
-    """Hyde siempre requiere human_gate. Candado duro."""
-    return True

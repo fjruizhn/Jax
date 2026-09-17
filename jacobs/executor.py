@@ -15,10 +15,7 @@ import shutil
 import time
 import tomllib
 from pathlib import Path
-from typing import Any
-
-from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
-from facet_resolver import resolve_facet, ResolvedFacet, FacetUnavailableError
+from facet_resolver import resolve_facet, ResolvedFacet
 from contrato_dispatch import limite_de_salida
 from model_catalog import record_resolved_version_safe
 

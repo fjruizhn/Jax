@@ -178,9 +178,6 @@ class MotorCatalog:
         hace deterministas los punteros y el hash del snapshot."""
         return tuple(self._capabilities[n] for n in sorted(self._capabilities))
 
-    def enabled_motors(self) -> list[str]:
-        return [n for n, m in self._motors.items() if m.enabled]
-
     @classmethod
     async def from_db(cls) -> "MotorCatalog":
         """Carga motor/capability (con `mode`, tanda A v2)/capability_motor

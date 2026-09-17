@@ -152,13 +152,5 @@ class StepSpec(BaseModel):
     depends_on:      list[int] = Field(default_factory=list)
 
 
-class StepResult(BaseModel):
-    step_id:    str
-    status:     StepStatus
-    output_ref: str | None = None
-    error:      str | None = None
-    duration_s: float | None = None
-
-
 # Evitar forward-reference con StepSpec antes de Step
 PipelineCreateRequest.model_rebuild()
