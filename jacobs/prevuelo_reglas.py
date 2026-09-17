@@ -58,11 +58,14 @@ class CostoPaso:
     (subprocess -- hyde y cualquier otra faceta subprocess, R11), "mecanico"
     (assemble), "sin_contrato_de_salida" (bloqueado, incluye transporte
     desconocido -- R10) y "faceta_inexistente". "herramientas_sin_tope"
-    (Ruling R9a, 2026-09-17): un motor con herramientas no recorta el
-    historial creciente ni los resultados de tools (worker.py:970) -- no hay
-    tope de tokens de salida que acotar, así que NO se acota el costo (cuenta
-    como no acotado, `hay_no_acotados`, aunque llamadas_max siga siendo el
-    cálculo normal)."""
+    (Ruling R9a, 2026-09-17): un motor con herramientas EN UN TRANSPORTE QUE
+    COBRA (TRANSPORTES_QUE_COBRAN) no recorta el historial creciente ni los
+    resultados de tools (worker.py:970) -- no hay tope de tokens de salida
+    que acotar, así que NO se acota el costo (cuenta como no acotado,
+    `hay_no_acotados`, aunque llamadas_max siga siendo el cálculo normal). Un
+    motor con herramientas en ollama sigue siendo "local" ($0 siempre) y en
+    subprocess "suscripcion" (Ruling R9a ronda 2, 2026-09-17): "sin tope" solo
+    tiene sentido cuando hay un precio real que podría dispararse."""
     paso: int
     faceta: str
     modelo: str | None
@@ -269,8 +272,14 @@ def evaluar_paso(
 
     if errores:
         costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, 0, None, "sin_contrato_de_salida")
-    elif d.via_motor and d.tiene_herramientas:
-        # R9a: sin tope de costo conocido (ver docstring de CostoPaso).
+    elif d.via_motor and d.tiene_herramientas and d.transporte in TRANSPORTES_QUE_COBRAN:
+        # R9a (ronda de arreglo 2): sin tope de costo conocido, pero SOLO en
+        # un transporte que cobra por token (ver docstring de CostoPaso).
+        # ollama es gratis pase lo que pase en el bucle de herramientas --
+        # "sin tope" no significa nada cuando el costo real es siempre $0
+        # (motivo "local", más abajo); subprocess ya salió antes de acá
+        # (motivo "suscripcion", ver el corte temprano al inicio de esta
+        # función) y nunca llega a esta rama.
         costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, tokens_out, None, "herramientas_sin_tope")
     elif d.transporte == "ollama":
         costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, tokens_out, Decimal(0), "local")

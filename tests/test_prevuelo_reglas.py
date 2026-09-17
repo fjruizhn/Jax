@@ -293,3 +293,30 @@ def test_dos_errores_de_contrato_se_unen_con_pipe():
     assert " | " in v[0].detalle
     assert "max_tokens_param" in v[0].detalle
     assert "max_output_tokens" in v[0].detalle
+
+
+# ---- Ronda de arreglo 2 (revisión, Ruling R9a acotada a TRANSPORTES_QUE_COBRAN) ----
+
+
+def test_motor_ollama_con_herramientas_sigue_siendo_local():
+    """R9a solo aplica a transportes que cobran por token
+    (TRANSPORTES_QUE_COBRAN): ollama es gratis pase lo que pase en el bucle
+    de herramientas -- "sin tope" no tiene sentido cuando el costo real es
+    siempre $0. Tiene que seguir siendo motivo "local", NO
+    "herramientas_sin_tope"."""
+    d = _despacho(transporte="ollama", via_motor=True, max_tokens_param=None,
+                  precio_in=None, precio_out=None, tiene_herramientas=True)
+    v, c = _evaluar(d)
+    assert v == []
+    assert c.usd_max == Decimal(0) and c.motivo == "local"
+
+
+def test_motor_con_herramientas_en_transporte_que_cobra_no_esta_acotado():
+    """El otro lado de la misma regla: un transporte que SÍ cobra
+    (http_openai_compat, en TRANSPORTES_QUE_COBRAN) con herramientas activas
+    queda sin tope de costo conocido -- acá "sin tope" sí importa porque hay
+    un precio real que podría dispararse."""
+    d = _despacho(transporte="http_openai_compat", via_motor=True, tiene_herramientas=True)
+    v, c = _evaluar(d)
+    assert v == []
+    assert c.usd_max is None and c.motivo == "herramientas_sin_tope"

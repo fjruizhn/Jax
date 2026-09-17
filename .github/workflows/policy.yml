@@ -975,8 +975,18 @@ jobs:
           #   correctos, solo no tenían test); confirmados en rojo por
           #   mutación (revertida) en vez de por el código viejo. R9a, R9b,
           #   R11 y R10 sí se vieron en rojo contra el código viejo.
-          grep -qE "^800 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 800 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 800 -> 802 el 2026-09-17 (Task 5, ronda de arreglo 2, R9a acotada
+          #   a TRANSPORTES_QUE_COBRAN): +2 en el mismo archivo -- R9a se
+          #   había puesto SIN mirar el transporte, así que un motor con
+          #   herramientas en ollama (gratis) quedaba "herramientas_sin_tope"
+          #   en vez de "local" $0. test_motor_ollama_con_herramientas_sigue_siendo_local
+          #   se vio en rojo contra c827902 (AssertionError: usd_max None,
+          #   se esperaba Decimal(0)); test_motor_con_herramientas_en_transporte_que_cobra_no_esta_acotado
+          #   es control (http_openai_compat+herramientas ya daba
+          #   "herramientas_sin_tope", ahora con la condición explícita del
+          #   transporte que cobra).
+          grep -qE "^802 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 802 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
