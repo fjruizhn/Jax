@@ -3,7 +3,7 @@
 Origen medido (task-15-report.md y task-15b-report.md): cada pre-vuelo abría
 dos conexiones aiomysql nuevas -- `MotorCatalog.from_db()` y
 `prevuelo_catalogo.leer_catalogo()` -- sin pool. Ahora las dos sacan su
-conexión de UN pool por proceso (`jacobs.store.conexion_de_lectura`), creado
+conexión de UN pool por proceso (`jacobs.store.conexion_del_pool`), creado
 perezosamente y cerrado en el shutdown de LAS MANOS y al salir del CLI.
 
 Los dobles reemplazan `aiomysql.connect` (lo que llamaba el código viejo) y
@@ -123,7 +123,7 @@ def base(monkeypatch):
     monkeypatch.setenv("JAX_DB_HOST", "127.0.0.1")
     monkeypatch.setenv("JAX_DB_PORT", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
-    monkeypatch.delenv("JAX_PREVUELO_DB_POOL_MAX", raising=False)
+    monkeypatch.delenv("JAX_DB_POOL_MAX", raising=False)
     monkeypatch.setattr(aiomysql, "connect", b.conectar)
     monkeypatch.setattr(aiomysql.pool, "connect", b.conectar)
     monkeypatch.setattr(pv.sonda, "sondear", AsyncMock(side_effect=AssertionError("sin sondas en este test")))
@@ -200,9 +200,9 @@ def test_los_dos_lectores_reciben_la_misma_conexion(base, monkeypatch):
 
 
 def test_prevuelos_concurrentes_no_superan_el_tamano_del_pool(base, monkeypatch):
-    """25 pre-vuelos a la vez con JAX_PREVUELO_DB_POOL_MAX=3: a lo sumo 3
+    """25 pre-vuelos a la vez con JAX_DB_POOL_MAX=3: a lo sumo 3
     conexiones abiertas en todo el proceso, no 2 por pedido."""
-    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "3")
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "3")
 
     async def cuerpo():
         await asyncio.gather(*[pv.prevuelo(_plan(), {}) for _ in range(25)])
@@ -262,9 +262,9 @@ def test_base_caida_al_conectar_da_503_prevuelo_no_disponible(base):
 
 
 def test_tamano_de_pool_invalido_da_503_sin_abrir_nada(base, monkeypatch):
-    """Un typo en JAX_PREVUELO_DB_POOL_MAX no cae a un default: el pre-vuelo no
+    """Un typo en JAX_DB_POOL_MAX no cae a un default: el pre-vuelo no
     está disponible (503) y no se abre ninguna conexión."""
-    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "0")
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "0")
 
     async def cuerpo():
         with pytest.raises(HTTPException) as exc:
@@ -273,7 +273,7 @@ def test_tamano_de_pool_invalido_da_503_sin_abrir_nada(base, monkeypatch):
 
     error = _correr(cuerpo)
     assert error.status_code == 503
-    assert "JAX_PREVUELO_DB_POOL_MAX" in error.detail["motivo"]
+    assert "JAX_DB_POOL_MAX" in error.detail["motivo"]
     assert base.abiertas == []
 
 
@@ -281,14 +281,14 @@ def test_pool_agotado_espera_acotada_y_da_503(base, monkeypatch):
     """Con el pool lleno de conexiones ocupadas, pedir otra no espera para
     siempre: la espera se acota con JAX_DB_CONNECT_TIMEOUT_SECONDS y termina
     en 503 prevuelo_no_disponible, no en un pedido colgado."""
-    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "1")
 
     async def cuerpo():
         ocupada = asyncio.Event()
         liberar = asyncio.Event()
 
         async def acaparar():
-            async with store.conexion_de_lectura():
+            async with store.conexion_del_pool():
                 ocupada.set()
                 await liberar.wait()
 
@@ -356,10 +356,10 @@ def test_un_error_de_python_a_mitad_de_lectura_tampoco_devuelve_la_conexion(base
     filas sin leer en el socket. Esa conexión no se reusa."""
     async def cuerpo():
         with pytest.raises(RuntimeError):
-            async with store.conexion_de_lectura() as conn:
+            async with store.conexion_del_pool() as conn:
                 usada = conn
                 raise RuntimeError("capability 'x': mode None fuera de ...")
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             siguiente = conn
         return usada, siguiente
 
@@ -372,10 +372,10 @@ def test_una_conexion_que_la_base_corto_en_reposo_no_se_reusa(base):
     """wait_timeout de MariaDB: el servidor cierra una conexión ociosa. El pool
     la descarta al pedirla (EOF en el socket) en vez de entregarla."""
     async def cuerpo():
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             primera = conn
         primera._reader.eof = True
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             segunda = conn
         return primera, segunda
 
@@ -390,21 +390,21 @@ def test_el_pool_de_otro_event_loop_no_se_usa_en_silencio(base):
     (R38: antes el loop dueño del test ya estaba cerrado; ese caso ahora
     reemplaza el pool -- test siguiente.)"""
     async def crear():
-        async with store.conexion_de_lectura():
+        async with store.conexion_del_pool():
             pass
 
     duenio = asyncio.new_event_loop()
     try:
         duenio.run_until_complete(crear())  # sin cerrar_pool y con el loop VIVO
         async def usar():
-            async with store.conexion_de_lectura():
+            async with store.conexion_del_pool():
                 pass
         with pytest.raises(RuntimeError, match="otro event loop"):
             asyncio.run(usar())
     finally:
         duenio.run_until_complete(store.cerrar_pool())
         duenio.close()
-    assert store._pool_de_lectura_estado is None
+    assert store._pool_estado is None
 
 
 def test_al_apagarse_el_loop_el_pool_se_cierra_y_el_siguiente_crea_otro(base):
@@ -415,15 +415,15 @@ def test_al_apagarse_el_loop_el_pool_se_cierra_y_el_siguiente_crea_otro(base):
     Expected contra 2fd3778: el segundo asyncio.run choca con el pool viejo,
     que sigue abierto -> RuntimeError 'otro event loop'."""
     async def usar():
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             return conn
 
     try:
         primera = asyncio.run(usar())  # sin cerrar_pool
-        estado_tras_el_primer_loop = store._pool_de_lectura_estado
+        estado_tras_el_primer_loop = store._pool_estado
         segunda = asyncio.run(usar())
     finally:
-        store._pool_de_lectura_estado = None
+        store._pool_estado = None
     assert estado_tras_el_primer_loop is None
     assert primera.closed, "la conexión del loop apagado quedó abierta"
     assert segunda is not primera and segunda.closed
@@ -436,19 +436,19 @@ def test_un_pool_de_un_loop_cerrado_sin_apagado_se_reemplaza(base):
     crea otro en vez de fallar con 'otro event loop'.
     Expected contra 2fd3778: RuntimeError 'otro event loop'."""
     async def usar():
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             return conn
 
     viejo_loop = asyncio.new_event_loop()
     try:
         primera = viejo_loop.run_until_complete(usar())
-        viejo = store._pool_de_lectura_estado
+        viejo = store._pool_estado
     finally:
         viejo_loop.close()
     try:
         segunda = asyncio.run(usar())
     finally:
-        store._pool_de_lectura_estado = None
+        store._pool_estado = None
     assert viejo is not None
     assert segunda is not primera
     assert len(base.abiertas) == 2
@@ -544,7 +544,7 @@ def test_una_conexion_que_se_rompe_despierta_al_que_espera_turno(base, monkeypat
     única conexión y revienta a los 0,2 s; B, que esperaba, tiene que recibir
     una conexión enseguida, no a los 3 s del timeout con un 503.
     Expected contra 607f84c: B tarda ~3 s -> TimeoutError."""
-    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "3")
 
     async def cuerpo():
@@ -552,7 +552,7 @@ def test_una_conexion_que_se_rompe_despierta_al_que_espera_turno(base, monkeypat
 
         async def a():
             with pytest.raises(RuntimeError):
-                async with store.conexion_de_lectura():
+                async with store.conexion_del_pool():
                     tomada.set()
                     await asyncio.sleep(0.2)
                     raise RuntimeError("se rompió a mitad de lectura")
@@ -560,7 +560,7 @@ def test_una_conexion_que_se_rompe_despierta_al_que_espera_turno(base, monkeypat
         async def b():
             await tomada.wait()
             inicio = time.monotonic()
-            async with store.conexion_de_lectura() as conn:
+            async with store.conexion_del_pool() as conn:
                 return time.monotonic() - inicio, conn.closed
 
         _, (espera, cerrada) = await asyncio.gather(a(), b())
@@ -588,7 +588,7 @@ def test_dos_primeros_pedidos_a_la_vez_crean_un_solo_pool(base, monkeypatch):
 
     async def cuerpo():
         async def pedir():
-            async with store.conexion_de_lectura():
+            async with store.conexion_del_pool():
                 await asyncio.sleep(0)
         await asyncio.gather(*[pedir() for _ in range(5)])
 
@@ -606,7 +606,7 @@ def test_un_connect_fallido_no_se_queda_con_el_turno(base, monkeypatch, falla):
     se perdiera, después de POOL_MAX connects fallidos todo pre-vuelo sería
     503 para siempre. Rojo por mutación: sin `turno.release()` en el except
     alrededor de `pool.acquire()` -> TimeoutError en el segundo pedido."""
-    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
 
     async def cuerpo():
@@ -617,11 +617,11 @@ def test_un_connect_fallido_no_se_queda_con_el_turno(base, monkeypatch, falla):
             base.cuelga_al_conectar = True
             esperado = TimeoutError
         with pytest.raises(esperado):
-            async with store.conexion_de_lectura():
+            async with store.conexion_del_pool():
                 pass
         base.falla_al_conectar = None
         base.cuelga_al_conectar = False
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             return conn.closed
 
     assert _correr(cuerpo) is False
@@ -631,7 +631,7 @@ def test_si_devolver_la_conexion_falla_el_turno_vuelve_igual(base, monkeypatch):
     """Si `pool.release()` lanza, el turno se suelta igual (finally): el pedido
     siguiente no se queda sin turno. Rojo por mutación: soltar el turno sólo si
     release no lanzó -> TimeoutError en el segundo pedido."""
-    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
     release_real = aiomysql.pool.Pool.release
     llamadas = []
@@ -647,9 +647,9 @@ def test_si_devolver_la_conexion_falla_el_turno_vuelve_igual(base, monkeypatch):
 
     async def cuerpo():
         with pytest.raises(RuntimeError, match="release falló"):
-            async with store.conexion_de_lectura():
+            async with store.conexion_del_pool():
                 pass
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             return conn.closed
 
     assert _correr(cuerpo) is False

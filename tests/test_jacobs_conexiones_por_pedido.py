@@ -54,7 +54,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 PID = "p-conexiones"
 REF = 'inline:{"result": "hecho"}'
 # Marcos que no son "el sitio" sino la cañería de la conexión.
-_CANERIA = {"get_conn", "_ejecutar_condicional", "conexion_de_lectura", "_pool_de_lectura",
+_CANERIA = {"get_conn", "_ejecutar_condicional", "conexion_del_pool", "_pool_del_store",
             "__aenter__", "__aexit__", "_correr_endpoint"}
 
 
@@ -210,7 +210,7 @@ def _veredicto_ok():
 async def _prevuelo_que_lee_del_pool(*_a, **_k):
     """El pre-vuelo real toma UNA conexión del pool para el catálogo (Task
     15b, cubierto en test_prevuelo_pool.py); acá se modela esa lectura."""
-    async with store.conexion_de_lectura():
+    async with store.conexion_del_pool():
         pass
     return _veredicto_ok()
 
@@ -220,7 +220,7 @@ def entorno(monkeypatch):
     monkeypatch.setenv("JAX_DB_HOST", "127.0.0.1")
     monkeypatch.setenv("JAX_DB_PORT", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
-    monkeypatch.delenv("JAX_PREVUELO_DB_POOL_MAX", raising=False)
+    monkeypatch.delenv("JAX_DB_POOL_MAX", raising=False)
     for modulo in (policy, routes, continuar):
         monkeypatch.setattr(modulo, "check_kill_switch", lambda: False)
     monkeypatch.setattr(pv.sonda, "sondear", AsyncMock(side_effect=AssertionError("sin sondas")))
@@ -335,9 +335,9 @@ def test_approve_step_solo_abre_la_escritura_condicional_de_la_epoca(entorno, mo
 
 def test_cincuenta_preflight_concurrentes_no_superan_el_tamano_del_pool(entorno, monkeypatch):
     """El defecto medido era de concurrencia: 50 pedidos a la vez abrían 100
-    conexiones de gobernanza. Con el pool, a lo sumo JAX_PREVUELO_DB_POOL_MAX
+    conexiones de gobernanza. Con el pool, a lo sumo JAX_DB_POOL_MAX
     en todo el proceso. Expected contra 2fd3778: 100 directas + 3 del pool."""
-    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "3")
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "3")
     base = entorno()
     _catalogo_vacio(monkeypatch)
 

@@ -1,7 +1,7 @@
 """Jacobs — lectura del catálogo para el pre-vuelo (spec 2026-09-17 §4.2-§4.5).
 
 Una conexión por pre-vuelo, no por paso ni por lector: jacobs/prevuelo.py toma
-UNA del pool de lectura (store.conexion_de_lectura, Task 15b) y la pasa a
+UNA del pool del store (store.conexion_del_pool, Task 15b) y la pasa a
 `resolver_motores` y a `leer_catalogo`, que no abren ni cierran conexiones.
 Se lee: facetas HTTP con su binding, filas de `model` (contrato y precio),
 capability.min_output_tokens, credenciales ACTIVAS y el último evento de

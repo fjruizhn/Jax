@@ -58,7 +58,7 @@ async def _conexion_de_prueba():
 
 
 def _instalar(monkeypatch, catalogo, motores=None, sondear=None):
-    monkeypatch.setattr(pv.store, "conexion_de_lectura", _conexion_de_prueba)
+    monkeypatch.setattr(pv.store, "conexion_del_pool", _conexion_de_prueba)
     leer = AsyncMock(return_value=catalogo)
     monkeypatch.setattr(pv.prevuelo_catalogo, "leer_catalogo", leer)
     monkeypatch.setattr(pv.prevuelo_catalogo, "resolver_motores", AsyncMock(return_value=motores or {}))

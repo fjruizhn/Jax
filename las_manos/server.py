@@ -282,8 +282,8 @@ async def _jacobs_init() -> None:
 
 @app.on_event("shutdown")
 async def _jacobs_cerrar() -> None:
-    # Task 15b (2026-09-17): el pool de lectura del pre-vuelo
-    # (jacobs/store.py::conexion_de_lectura) se crea perezosamente en el
+    # Task 15b (2026-09-17): el pool del store de Jacobs
+    # (jacobs/store.py::conexion_del_pool) se crea perezosamente en el
     # primer pedido; al apagar se cierra acá, en el mismo event loop, y no
     # quedan conexiones abiertas contra MariaDB esperando su wait_timeout.
     await jacobs_store.cerrar_pool()

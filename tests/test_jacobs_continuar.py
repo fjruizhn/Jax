@@ -325,7 +325,7 @@ def test_el_prevuelo_real_mide_el_peor_caso_del_dependiente_de_un_paso_a_rehacer
     async def conexion_de_prueba():  # Task 15b: sin conexión real, los lectores están mockeados
         yield object()
 
-    monkeypatch.setattr(pv.store, "conexion_de_lectura", conexion_de_prueba)
+    monkeypatch.setattr(pv.store, "conexion_del_pool", conexion_de_prueba)
     monkeypatch.setattr(pv.prevuelo_catalogo, "leer_catalogo", AsyncMock(return_value=catalogo))
     monkeypatch.setattr(pv.prevuelo_catalogo, "resolver_motores", AsyncMock(return_value={}))
     monkeypatch.setattr(pv.sonda, "sondear", AsyncMock(return_value=ResultadoSonda(True, None)))

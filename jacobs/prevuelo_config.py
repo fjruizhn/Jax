@@ -15,14 +15,11 @@ Defaults declarados, no medidos:
   subestima (spec §4.6).
 - JAX_PREVUELO_SONDA_MAX_TOKENS=16: la sonda mide disponibilidad, no calidad;
   se manda el menor entre esto y model.max_output_tokens.
-- JAX_PREVUELO_DB_POOL_MAX=5 (Task 15b, 2026-09-17): conexiones del pool de
-  lectura del pre-vuelo (jacobs/store.py::conexion_de_lectura). Medido en
-  proceso contra jax_memory_test (task-15b-report.md), p95 a c=25 / c=50:
-  maxsize 5 = 30,3 / 54,8 ms; 10 = 31,1 / 60,1 ms; 25 = 38,4 / 56,2 ms. Un
-  pool más grande no mejora: el límite es la CPU del único event loop, no la
-  base. 5 es el menor medido y deja margen en una MariaDB compartida con
-  max_connections=151. Se lee al CREAR el pool: un cambio vale después de
-  reiniciar el proceso (o de store.cerrar_pool()).
+- El tamaño del pool de conexiones YA NO es de este módulo (Ruling R38,
+  2026-09-17): el pool pasó a ser de todo el store de Jacobs y su variable es
+  JAX_DB_POOL_MAX, leída en jacobs/store.py::db_pool_max (ahí está la
+  derivación del default). JAX_PREVUELO_DB_POOL_MAX no la lee nadie (ni
+  /etc/jax/.env la define: verificado al renombrar).
 - JAX_PREVUELO_CANDADO_TIMEOUT_S=10 (ola final F3, 2026-09-17): segundos que
   crear o continuar esperan el candado con nombre de MariaDB que serializa el
   cupo de MAX_PARALLEL_PIPELINES entre procesos (LAS MANOS y el CLI). La
@@ -39,7 +36,6 @@ import os
 SONDA_TIMEOUT_S = "JAX_PREVUELO_SONDA_TIMEOUT_S"
 CHARS_POR_TOKEN = "JAX_PREVUELO_CHARS_POR_TOKEN"
 SONDA_MAX_TOKENS = "JAX_PREVUELO_SONDA_MAX_TOKENS"
-DB_POOL_MAX = "JAX_PREVUELO_DB_POOL_MAX"
 CANDADO_TIMEOUT_S = "JAX_PREVUELO_CANDADO_TIMEOUT_S"
 
 
@@ -69,11 +65,6 @@ def chars_por_token() -> int:
 def sonda_max_tokens() -> int:
     """Techo de tokens de salida que pide la sonda."""
     return _entero_positivo(SONDA_MAX_TOKENS, os.getenv(SONDA_MAX_TOKENS, "16"))
-
-
-def db_pool_max() -> int:
-    """Conexiones máximas del pool de lectura del pre-vuelo."""
-    return _entero_positivo(DB_POOL_MAX, os.getenv(DB_POOL_MAX, "5"))
 
 
 def candado_timeout_s() -> int:

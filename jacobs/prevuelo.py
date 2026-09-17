@@ -220,9 +220,9 @@ async def prevuelo(
         return armar_veredicto([], costos, [])
 
     ahora = _ahora()
-    # UNA conexión del pool de lectura para todo el catálogo (Task 15b): se
+    # UNA conexión del pool del store para todo el catálogo (Task 15b): se
     # devuelve antes de armar prompts y sondear, que no tocan la base.
-    async with store.conexion_de_lectura() as conexion:
+    async with store.conexion_del_pool() as conexion:
         motores = await prevuelo_catalogo.resolver_motores(
             [s for s in evaluables if s.facet in MOTOR_FACETS], conexion=conexion)
         catalogo = await prevuelo_catalogo.leer_catalogo(

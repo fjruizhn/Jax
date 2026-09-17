@@ -98,8 +98,8 @@ def _costo(valor: str) -> Decimal:
 
 
 async def relanzar(pipeline_id: str, reasignar: dict[str, str], costo_max_aceptado: Decimal | None) -> int:
-    """Corre _relanzar y, pase lo que pase, cierra el pool de lectura del
-    pre-vuelo (jacobs/store.py, Task 15b) en ESTE event loop antes de que
+    """Corre _relanzar y, pase lo que pase, cierra el pool del store de
+    Jacobs (jacobs/store.py, Task 15b y R38) en ESTE event loop antes de que
     asyncio.run lo cierre. El código de salida es el de la corrida."""
     from jacobs import store
 

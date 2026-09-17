@@ -53,16 +53,22 @@ def test_negativo_lanza(monkeypatch):
         pc.chars_por_token()
 
 
-# Task 15b (2026-09-17): tamaño del pool de lectura del pre-vuelo.
-def test_pool_max_por_defecto_es_5(monkeypatch):
-    monkeypatch.delenv(pc.DB_POOL_MAX, raising=False)
-    assert pc.db_pool_max() == 5
+# Task 15b (2026-09-17): tamaño del pool; R38 lo pasa al store entero
+# (JAX_DB_POOL_MAX, default derivado en jacobs/store.py::db_pool_max).
+def test_pool_max_por_defecto_es_10(monkeypatch):
+    from jacobs import store
+
+    monkeypatch.delenv(store.DB_POOL_MAX, raising=False)
+    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "3")  # el nombre viejo no lo lee nadie
+    assert store.db_pool_max() == 10
 
 
 def test_pool_max_invalido_lanza_con_el_nombre(monkeypatch):
-    monkeypatch.setenv(pc.DB_POOL_MAX, "cinco")
-    with pytest.raises(RuntimeError, match="JAX_PREVUELO_DB_POOL_MAX"):
-        pc.db_pool_max()
+    from jacobs import store
+
+    monkeypatch.setenv(store.DB_POOL_MAX, "cinco")
+    with pytest.raises(RuntimeError, match="JAX_DB_POOL_MAX"):
+        store.db_pool_max()
 
 
 def test_timeout_del_candado_de_activos_por_defecto_es_10(monkeypatch):

@@ -125,7 +125,37 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 #   puede tener filas sin leer o el socket roto. Las que la base cortó en
 #   reposo (wait_timeout) las descarta el propio Pool de aiomysql al pedirlas
 #   (EOF en el lector).
-_pool_de_lectura_estado: tuple[
+DB_POOL_MAX = "JAX_DB_POOL_MAX"
+
+
+def db_pool_max() -> int:
+    """Conexiones máximas del pool del store (JAX_DB_POOL_MAX, default 10).
+
+    Ruling R38 (2026-09-17). Se lee al CREAR el pool: un cambio vale después
+    de reiniciar el proceso (o de cerrar_pool()). Un valor inválido lanza con
+    el nombre de la variable (mismo patrón que jacobs/prevuelo_config.py), no
+    cae a un default.
+
+    Derivación del default. Demanda PICO de conexiones a la vez en LAS MANOS:
+    al arrancar una ola, cada paso escribe su STEP_STARTED a la vez --
+    MAX_PARALLEL_PIPELINES (3) x MAX_STEPS_PER_PIPELINE (20, una ola puede
+    tenerlos todos) = 60 -- más los pedidos HTTP en curso (a c=50, 50 más) y
+    el reaper (1): ~111. NO se dimensiona al pico: la MariaDB es compartida
+    con producción, max_connections=151 y Max_used_connections=96 medido el
+    2026-09-17 (SHOW GLOBAL STATUS), así que un pool de 111 la agotaría. Cada
+    uso del pool es una consulta (~1 ms en esta base; perfil de la Task 15b:
+    execute p95 1,2 ms a 50 trabajadores); con 10 conexiones, el pico de 60
+    escrituras de una ola se drena en ~6 ms de cola. El perfil de la 15b
+    midió que más conexiones no bajan el p95 del pre-vuelo (5 -> 30,3 ms,
+    10 -> 31,1, 25 -> 38,4 a c=25): el límite es la CPU del event loop. 10
+    (el doble de lo que alcanzaba al pre-vuelo solo) ocupa 10 de las 55
+    libres."""
+    from jacobs.prevuelo_config import _entero_positivo
+
+    return _entero_positivo(DB_POOL_MAX, os.getenv(DB_POOL_MAX, "10"))
+
+
+_pool_estado: tuple[
     asyncio.AbstractEventLoop, aiomysql.Pool, asyncio.Semaphore, AsyncIterator[None]
 ] | None = None
 # El candado sólo serializa la CREACIÓN (dos primeros pedidos a la vez no
@@ -141,12 +171,12 @@ async def _guardian_del_pool(pool: aiomysql.Pool) -> AsyncIterator[None]:
     abierto (shutdown_asyncgens), lo cierra en ese loop. terminate() y no
     close(): a esa altura asyncio.run ya canceló las tareas y nadie puede
     devolver una conexión; esperar la devolución colgaría el apagado."""
-    global _pool_de_lectura_estado
+    global _pool_estado
     try:
         yield
     finally:
-        if _pool_de_lectura_estado is not None and _pool_de_lectura_estado[1] is pool:
-            _pool_de_lectura_estado = None
+        if _pool_estado is not None and _pool_estado[1] is pool:
+            _pool_estado = None
         if not pool.closed:
             pool.terminate()
             await pool.wait_closed()
@@ -155,26 +185,26 @@ async def _guardian_del_pool(pool: aiomysql.Pool) -> AsyncIterator[None]:
 def _pool_del_loop(
     loop: asyncio.AbstractEventLoop,
 ) -> tuple[aiomysql.Pool, asyncio.Semaphore, AsyncIterator[None]] | None:
-    global _pool_de_lectura_estado
-    if _pool_de_lectura_estado is None:
+    global _pool_estado
+    if _pool_estado is None:
         return None
-    duenio, pool, turno, guardian = _pool_de_lectura_estado
+    duenio, pool, turno, guardian = _pool_estado
     if duenio is not loop and duenio.is_closed():
         # Loop cerrado sin shutdown_asyncgens (ver el bloque de arriba): no
         # hay loop donde cerrar el pool; se suelta.
-        _pool_de_lectura_estado = None
+        _pool_estado = None
         return None
     if duenio is not loop:
         raise RuntimeError(
-            "el pool de lectura de Jacobs se creó en otro event loop: hay que "
+            "el pool del store de Jacobs se creó en otro event loop: hay que "
             "cerrarlo con store.cerrar_pool() en el loop que lo creó antes de "
             "pedir conexiones desde este"
         )
     return pool, turno, guardian
 
 
-async def _pool_de_lectura() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
-    global _pool_de_lectura_estado, _candado_de_creacion
+async def _pool_del_store() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
+    global _pool_estado, _candado_de_creacion
     loop = asyncio.get_running_loop()
     actual = _pool_del_loop(loop)
     if actual is not None:
@@ -184,8 +214,6 @@ async def _pool_de_lectura() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
     async with _candado_de_creacion[1]:
         actual = _pool_del_loop(loop)
         if actual is None:
-            from jacobs.prevuelo_config import db_pool_max
-
             tamanio = db_pool_max()
             pool = await aiomysql.create_pool(
                 minsize=0, maxsize=tamanio,
@@ -194,16 +222,16 @@ async def _pool_de_lectura() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
             guardian = _guardian_del_pool(pool)
             await anext(guardian)  # queda registrado en ESTE loop
             actual = (pool, asyncio.Semaphore(tamanio), guardian)
-            _pool_de_lectura_estado = (loop, *actual)
+            _pool_estado = (loop, *actual)
     return actual[0], actual[1]
 
 
 @asynccontextmanager
-async def conexion_de_lectura() -> AsyncIterator[aiomysql.Connection]:
-    """Una conexión del pool de lectura, devuelta al salir. Cualquier error de
+async def conexion_del_pool() -> AsyncIterator[aiomysql.Connection]:
+    """Una conexión del pool del store, devuelta al salir. Cualquier error de
     la base (al conectar, al esperar turno o a mitad de consulta) se propaga:
     quien llama responde 503, nunca un veredicto por defecto."""
-    pool, turno = await _pool_de_lectura()
+    pool, turno = await _pool_del_store()
     async with asyncio.timeout(db_connect_timeout_seconds()):
         await turno.acquire()
         try:
@@ -224,14 +252,14 @@ async def conexion_de_lectura() -> AsyncIterator[aiomysql.Connection]:
 
 
 async def cerrar_pool() -> None:
-    """Cierra el pool de lectura (shutdown de LAS MANOS, salida del CLI).
+    """Cierra el pool del store (shutdown de LAS MANOS, salida del CLI).
     Sin pool, no hace nada. Después se puede volver a pedir: se crea otro."""
-    global _pool_de_lectura_estado
+    global _pool_estado
     actual = _pool_del_loop(asyncio.get_running_loop())
     if actual is None:
         return
     pool, _, guardian = actual
-    _pool_de_lectura_estado = None
+    _pool_estado = None
     pool.close()
     await pool.wait_closed()
     await guardian.aclose()  # ya cerrado: su finally no hace nada más
@@ -455,7 +483,7 @@ async def init_tables() -> None:
 # ----------------------------------------------------------------
 
 async def pipeline_create(p: Pipeline) -> None:
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -477,7 +505,7 @@ async def pipeline_create(p: Pipeline) -> None:
 
 
 async def pipeline_get(pipeline_id: str) -> Pipeline | None:
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s", (pipeline_id,)
@@ -495,7 +523,7 @@ async def pipeline_update_status(
     context: dict | None = None,
 ) -> None:
     now = time.time()
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             if current_step_index is not None and context is not None:
                 await cur.execute(
@@ -565,7 +593,7 @@ async def pipeline_count_active(conexion: aiomysql.Connection | None = None) -> 
     ella y no la cierra; sin ella lee por una del pool (R38)."""
     if conexion is not None:
         return await _contar_activos(conexion)
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         return await _contar_activos(conn)
 
 
@@ -900,7 +928,7 @@ def _row_to_pipeline(row: dict) -> Pipeline:
 # ----------------------------------------------------------------
 
 async def step_upsert(s: Step) -> None:
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -933,7 +961,7 @@ async def step_upsert(s: Step) -> None:
 
 
 async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_steps WHERE pipeline_id=%s ORDER BY step_index",
@@ -1013,7 +1041,7 @@ async def get_motor_governance() -> dict[str, dict]:
     -- era la conexión por pedido que tiraba /jacobs/preflight a c=50. Sin
     caché: cada llamada sigue leyendo las tres tablas (misma foto que antes);
     un error de la base se propaga igual (fail-closed)."""
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             await cur.execute("SELECT `key`, has_tool_access FROM motor")
             motors: dict[str, bool] = {key: bool(has_tools) for key, has_tools in await cur.fetchall()}
@@ -1073,7 +1101,7 @@ async def event_append(
     payload: dict | None = None,
     step_id: str | None = None,
 ) -> None:
-    async with conexion_de_lectura() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """INSERT INTO jacobs_events (pipeline_id, step_id, event_type, payload, ts)

@@ -212,15 +212,15 @@ def _instrumentar(inline_prompt: bool):
             _sumar("execute", _RELOJ() - t)
     aiomysql.cursors.Cursor.execute = execute
 
-    conexion_real = store.conexion_de_lectura
+    conexion_real = store.conexion_del_pool
 
     @asynccontextmanager
-    async def conexion_de_lectura():
+    async def conexion_del_pool():
         t = _RELOJ()
         async with conexion_real() as conn:
             _sumar("acquire", _RELOJ() - t)
             yield conn
-    store.conexion_de_lectura = conexion_de_lectura
+    store.conexion_del_pool = conexion_del_pool
 
     from_db_real = MotorCatalog.from_db.__func__
 

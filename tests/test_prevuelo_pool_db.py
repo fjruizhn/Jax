@@ -40,9 +40,9 @@ def _correr(cuerpo):
 
 def test_dos_pedidos_seguidos_usan_la_misma_conexion_del_servidor():
     async def cuerpo():
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             primero = await _id(conn)
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             segundo = await _id(conn)
         return primero, segundo
 
@@ -52,7 +52,7 @@ def test_dos_pedidos_seguidos_usan_la_misma_conexion_del_servidor():
 
 def test_una_conexion_que_el_servidor_mato_no_envenena_el_pedido_siguiente():
     async def cuerpo():
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             muerta = await _id(conn)
         verdugo = await store.get_conn()
         try:
@@ -64,7 +64,7 @@ def test_una_conexion_que_el_servidor_mato_no_envenena_el_pedido_siguiente():
         # la descarta al pedirla en vez de entregarla muerta.
         for _ in range(50):
             await asyncio.sleep(0.02)
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             nueva = await _id(conn)
             async with conn.cursor() as cur:
                 await cur.execute("SELECT 1")
@@ -80,7 +80,7 @@ def test_los_dos_lectores_del_catalogo_leen_por_una_sola_conexion():
     """resolver_motores (MotorCatalog.from_db) y leer_catalogo contra el
     esquema real, por la conexión prestada: ninguno la cierra ni abre otra."""
     async def cuerpo():
-        async with store.conexion_de_lectura() as conn:
+        async with store.conexion_del_pool() as conn:
             antes = await _id(conn)
             motores = await pc.resolver_motores(
                 [Step(pipeline_id="p", step_index=0, facet="kimi", capability="generate", input={})],
