@@ -1479,8 +1479,13 @@ jobs:
           #   de 1 ocupado 1,5 s y JAX_DB_CONNECT_TIMEOUT_SECONDS=1, escribe su
           #   TOOL_CALL_REJECTED (rojo contra bd977a4: assert [] == ['TOOL_CALL_REJECTED']);
           #   con la base caída el job termina en segundos sin escribir (control fail-closed).
-          grep -qE "^1108 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1108 -> 1110 el 2026-09-17 (R38 fix round 3, m1): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- ningún archivo del pool describe al
+          #   pool del store como "de lectura" o "del pre-vuelo" (rojo contra bd977a4: 7
+          #   sitios, store.py:70/110 entre ellos) y el comentario de R38 en store.py nombra
+          #   también a registrar_evento_de_sonda y record_direct_usage (rojo: faltaban).
+          grep -qE "^1110 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1110 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

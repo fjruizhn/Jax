@@ -102,7 +102,8 @@ async def _ensure_catalog_fresh(conexion=None) -> None:
     También lo usa el pre-vuelo de Jacobs (jacobs/prevuelo_catalogo.py::
     resolver_motores, ola final F8): evalúa el MISMO catálogo que el despacho
     va a usar, con esta misma invalidación, en vez de un from_db() por
-    pedido. `conexion` es la del pool del pre-vuelo, sólo para la recarga.
+    pedido. `conexion` es la que el pre-vuelo tomó del pool del store de
+    Jacobs (jacobs/store.py::conexion_del_pool), sólo para la recarga.
 
     Existe por la regresión del 2026-09-12 (13:03-13:29): el catálogo se
     cargaba UNA vez al arrancar, la migración `generate` 5 -> 15 corrió al

@@ -223,8 +223,9 @@ def test_el_pool_lleva_connect_timeout_y_la_base_de_la_configuracion(base, monke
         assert kw["connect_timeout"] == 7
         assert kw["db"] == "jax_memory_test"
         assert kw["autocommit"] is True
-        # El pool del pre-vuelo es de LECTURA: sin CLIENT.FOUND_ROWS (las
-        # escrituras condicionales siguen por get_conn(found_rows=True)).
+        # El pool del store va sin CLIENT.FOUND_ROWS: las escrituras
+        # CONDICIONALES por época necesitan el flag y siguen por
+        # get_conn(found_rows=True), dedicadas (jacobs/store.py).
         assert "client_flag" not in kw
 
 

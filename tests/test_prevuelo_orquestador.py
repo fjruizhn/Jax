@@ -52,7 +52,7 @@ def _paso(i, facet, capability="research", deps=None, prompt="investigá"):
 
 @asynccontextmanager
 async def _conexion_de_prueba():
-    # Task 15b: prevuelo() toma UNA conexión del pool de lectura y la pasa a
+    # Task 15b: prevuelo() toma UNA conexión del pool del store y la pasa a
     # los dos lectores, que acá están mockeados: no se abre nada real.
     yield object()
 

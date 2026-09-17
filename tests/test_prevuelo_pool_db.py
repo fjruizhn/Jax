@@ -1,4 +1,4 @@
-"""Pool de lectura del pre-vuelo contra una MariaDB REAL (Task 15b, job
+"""Pool del store de Jacobs contra una MariaDB REAL (Task 15b, job
 jacobs-gobernanza-db). Los tests puros (test_prevuelo_pool.py) prueban el
 Pool de aiomysql con conexiones dobles; acá se ve lo que un doble no puede:
 que el servidor ve la MISMA conexión entre pedidos, y que una conexión que el

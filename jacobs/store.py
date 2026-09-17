@@ -67,7 +67,7 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
     return await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds(), **extra)
 
 
-# --- Pool de lectura del pre-vuelo (Task 15b, 2026-09-17, LAS CUATRO #2) -----
+# --- Pool de conexiones del store de Jacobs (Task 15b y R38, 2026-09-17, LAS CUATRO #2) ---
 # Medido (task-15b-report.md): cada pre-vuelo abría 2 conexiones nuevas
 # (MotorCatalog.from_db y prevuelo_catalogo.leer_catalogo), ~0,15 ms de CPU
 # del event loop cada una más el handshake en la base. Ahora el pre-vuelo
@@ -80,7 +80,10 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 # crear, continue, resume y approve-step. Ahora van por este pool las lecturas
 # y las escrituras SIN condición de esos caminos (pipeline_get,
 # steps_by_pipeline, pipeline_count_active, get_motor_governance,
-# pipeline_create, step_upsert, pipeline_update_status, event_append): son
+# pipeline_create, step_upsert, pipeline_update_status, event_append, y --
+# desde el fix round 1 -- los dos escritores de la sonda del pre-vuelo,
+# facet_health.registrar_evento_de_sonda y usage_writer.record_direct_usage):
+# son
 # autocommit, no miran el conteo de filas y no dejan estado de sesión, así que
 # la conexión que vuelve al pool vuelve igual a como salió. Quedan DEDICADAS
 # a propósito: GET_LOCK (candado_de_activos, el candado vive en la sesión) y
@@ -107,11 +110,14 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 # - minsize=0: crear el pool no toca la base; la primera conexión se abre al
 #   pedirla, así una base caída falla en el pedido (503), no en un pool roto
 #   guardado.
-# - SIN CLIENT.FOUND_ROWS: es de lectura. Las escrituras condicionales por
-#   época (pipeline_update_status_si_epoca, step_upsert_si_epoca) siguen con
-#   get_conn(found_rows=True): meterlas en este pool cambiaría en silencio el
-#   conteo de filas de los UPDATE que no tienen el flag, y ningún camino
-#   medido las pone en la ruta caliente.
+# - SIN CLIENT.FOUND_ROWS, por la semántica de las escrituras CONDICIONALES:
+#   pipeline_tomar_epoca, pipeline_update_status_si_epoca, step_upsert_si_epoca
+#   y continuar_transaccion necesitan contar filas ENCONTRADAS (un UPDATE que
+#   escribe los mismos valores cuenta 0 sin el flag y la época se daría por
+#   perdida), así que siguen con get_conn(found_rows=True), dedicadas. Lo que
+#   va por el pool (lecturas y escrituras sin condición) no mira el conteo, y
+#   meterle el flag al pool cambiaría en silencio el conteo de cualquier UPDATE
+#   que se agregue después.
 # - Pedir una conexión espera a lo sumo JAX_DB_CONNECT_TIMEOUT_SECONDS: con el
 #   pool lleno de conexiones colgadas, un pedido no espera para siempre.
 # - El TURNO lo da un asyncio.Semaphore propio del tamaño del pool, no la
@@ -151,8 +157,9 @@ def db_pool_max() -> int:
     midió que más conexiones no bajan el p95 del pre-vuelo (5 -> 30,3 ms,
     10 -> 31,1, 25 -> 38,4 a c=25): el límite es la CPU del event loop. 10
     (el doble de lo que alcanzaba al pre-vuelo solo) ocupa 10 de las 55
-    libres. La cola no mata a los trabajos de fondo: el ejecutor y el reaper
-    esperan turno sin plazo (espera_de_turno_sin_plazo); los pedidos HTTP
+    libres. La cola no mata a los trabajos de fondo: el ejecutor, el reaper y
+    los jobs del Motor Registry (R38 fix round 3, N1) esperan turno sin plazo
+    (espera_de_turno_sin_plazo); los pedidos HTTP
     esperan a lo sumo JAX_DB_CONNECT_TIMEOUT_SECONDS y dan 503."""
     from jacobs.prevuelo_config import _entero_positivo
 
@@ -235,7 +242,8 @@ async def _pool_del_store() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
 # esperaba turno más de JAX_DB_CONNECT_TIMEOUT_SECONDS con la base SANA
 # lanzaba TimeoutError. `event_append(STEP_STARTED)` está fuera del try del
 # paso: salía del gather, mataba run_pipeline y el paso quedaba en running.
-# Decisión: el ejecutor y el reaper (trabajos de fondo, sin nadie esperando la
+# Decisión: el ejecutor, el reaper y (fix round 3, N1) los jobs del Motor
+# Registry (trabajos de fondo, sin nadie esperando la
 # respuesta) esperan turno SIN plazo; abrir la conexión sigue acotado por
 # connect_timeout, así que una base caída falla igual (fail-closed). Los
 # pedidos HTTP mantienen la espera acotada y responden 503. Se descartaron:

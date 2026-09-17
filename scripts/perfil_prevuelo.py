@@ -8,7 +8,7 @@ prevuelo()` REAL contra `jax_memory_test` en un solo event loop, sin HTTP, y
 separa CPU por pedido de espera por fase.
 
 QUÉ ES REAL Y QUÉ NO:
-  - real: MariaDB, aiomysql, el pool de lectura, MotorCatalog, las consultas
+  - real: MariaDB, aiomysql, el pool del store, MotorCatalog, las consultas
     del catálogo, el armado del prompt y las reglas;
   - doble: `jacobs.sonda.sondear` responde ok al instante -- NUNCA llama a un
     proveedor pago. Sin eventos de salud sembrados, las claves "se sondean"

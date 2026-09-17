@@ -32,6 +32,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import time
 from decimal import Decimal
 from pathlib import Path
@@ -1108,3 +1109,44 @@ def test_un_job_del_motor_registry_con_la_base_caida_no_se_cuelga(entorno, monke
 
     assert asyncio.run(cuerpo()) < 5
     assert base.escrituras == []
+
+
+# ---------------------------------------------------------------------------
+# Texto viejo del pool (R38 fix round 3, m1)
+# ---------------------------------------------------------------------------
+
+_FRASES_VIEJAS_DEL_POOL = re.compile(r"\bpool de lectura\b|\bpool del pre-vuelo\b|\bes de lectura\b", re.IGNORECASE)
+_ARCHIVOS_DEL_POOL = ("jacobs/store.py", "jacobs/prevuelo.py", "jacobs/prevuelo_catalogo.py",
+                      "las_manos/motor_registry/routes.py", "las_manos/server.py",
+                      "scripts/perfil_prevuelo.py", "tools/jacobs_relaunch.py",
+                      "tests/test_prevuelo_pool.py", "tests/test_prevuelo_pool_db.py",
+                      "tests/test_prevuelo_orquestador.py")
+
+
+def test_el_pool_del_store_no_se_describe_como_de_lectura_ni_del_prevuelo():
+    """Re-review m1: desde R38 el pool es del store entero y lleva escrituras
+    sin condición; la razón de no llevar CLIENT.FOUND_ROWS es la semántica de
+    las escrituras condicionales, no "es de lectura". El texto viejo engaña a
+    quien decida qué meter en el pool.
+    Expected contra bd977a4: store.py:70/110, motor_registry/routes.py:105,
+    perfil_prevuelo.py:11, test_prevuelo_pool.py:226,
+    test_prevuelo_orquestador.py:55, test_prevuelo_pool_db.py:1."""
+    hallazgos = []
+    for ruta in _ARCHIVOS_DEL_POOL:
+        for n, linea in enumerate((RAIZ / ruta).read_text(encoding="utf-8").splitlines(), 1):
+            if linea.lstrip().startswith("_FRASES_VIEJAS_DEL_POOL"):
+                continue
+            if _FRASES_VIEJAS_DEL_POOL.search(linea):
+                hallazgos.append(f"{ruta}:{n}: {linea.strip()[:90]}")
+    assert hallazgos == []
+
+
+def test_store_lista_todas_las_funciones_que_usan_el_pool():
+    """m1: el comentario de R38 en store.py enumera quién va por el pool; tiene
+    que nombrar también a los dos escritores de la sonda (fix round 1, 1).
+    Expected contra bd977a4: faltan registrar_evento_de_sonda y
+    record_direct_usage."""
+    texto = (RAIZ / "jacobs/store.py").read_text(encoding="utf-8")
+    bloque = texto[texto.index("# Ruling R38 (2026-09-17): el pool es del STORE"):texto.index("_pool_estado: tuple[")]
+    for nombre in ("registrar_evento_de_sonda", "record_direct_usage", "event_append", "get_motor_governance"):
+        assert nombre in bloque, nombre
