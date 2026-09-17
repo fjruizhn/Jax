@@ -4,30 +4,51 @@
 SOLO LEE. Máximo de tokens de salida de corridas COMPLETADAS por capability,
 redondeado hacia arriba a múltiplo de 1024, de dos fuentes:
   1. Motor Registry: las_manos/logs/motor_jobs.jsonl, `_usage.completion_tokens`
-     de los jobs `completed` (incluye razonamiento: es lo que el tope tiene que
-     dejar pasar).
+     del ÚLTIMO registro por job_id (estado final) cuando ese estado final es
+     `completed` -- una línea `completed` de un job cuyo estado final es OTRO
+     no cuenta (mismo criterio que jacobs/reaper.py::_load_terminal_motor_jobs
+     y el script de plan P). Incluye razonamiento: es lo que el tope tiene
+     que dejar pasar.
   2. Transportes HTTP directos de Jacobs: axioma_usage.tokens_out
      (request_type='pipeline') unido a jacobs_steps completados por faceta y
-     ventana de tiempo. Si dos pasos de la misma faceta se solapan, gana el
-     mayor: cota superior, que es la dirección segura para un mínimo.
+     ventana de tiempo. Una fila de axioma_usage cuya ventana calza con pasos
+     de MÁS de una capability es AMBIGUA (no se sabe cuál la generó) y se
+     excluye, no se le atribuye a ninguna -- mismo criterio que P.
+
 Una capability sin corridas medibles queda en 0 y se declara.
 
 Consulta de UNA vez, fuera del camino caliente: su EXPLAIN se registra al
 correrla (Task 13, Step 6 del plan) y un scan se acepta por ser un script
 puntual.
 
-NOTA (Ruling del plan P, jax-platform Task 2, commit d79b0f9 -- Task 13 del
-plan J la copia sin repetir la medición, ver Ruling R2 del ledger): el JOIN
-por facet entre axioma_usage y jacobs_steps falla contra producción con
-1267 "Illegal mix of collations" porque axioma_usage.facet quedó en
-utf8mb4_uca1400_ai_ci y jacobs_steps.facet en utf8mb4_unicode_ci (esquemas
-creados en momentos distintos). Se agrega `COLLATE utf8mb4_uca1400_ai_ci` al
-JOIN -- las claves de faceta son ASCII en minúscula, así que la igualdad da
-lo mismo con cualquiera de las dos collations. Verificado por
-test_medir_min_output_tokens.py::test_el_join_http_directo_lleva_la_collate_del_esquema_real.
-La unión por faceta + ventana de tiempo puede inflar un máximo si dos pasos
-de la misma faceta se solapan: se acepta porque el lado seguro de un MÍNIMO
-es sobreestimar, nunca subestimar (mismo criterio de P).
+REFERENCIA: plan P (jax-platform), Task 2, commit d79b0f9 -- Task 13 del
+plan J copia su medición sin repetirla (Ruling R2 del ledger de este plan).
+Este script sigue el MISMO método de P, no una aproximación propia:
+
+  - COLLATE: axioma_usage.facet quedó en utf8mb4_uca1400_ai_ci y
+    jacobs_steps.facet en utf8mb4_unicode_ci (esquemas creados en momentos
+    distintos) -- el JOIN por facet falla contra producción con 1267
+    "Illegal mix of collations" sin `COLLATE utf8mb4_uca1400_ai_ci`. Las
+    claves de faceta son ASCII en minúscula, así que la igualdad da lo mismo
+    con cualquiera de las dos collations.
+  - Ventana: `FLOOR(s.started_at) AND CEIL(s.finished_at) + HOLGURA_S`,
+    holgura SÓLO del lado derecho (created_at es TIMESTAMP, segundos
+    enteros; started_at/finished_at son DOUBLE). Ninguna resta del lado
+    izquierdo: eso ensancharía la ventana más allá de lo que P midió y
+    subiría la probabilidad de fila ambigua sin necesidad.
+  - Exclusión de filas ambiguas: `maximos_http()` (abajo) NO agrupa con
+    `MAX()+GROUP BY` en SQL -- trae `(id, capability, tokens_out)` fila por
+    fila y excluye en Python las filas cuyo `id` de axioma_usage cae en la
+    ventana de pasos de MÁS de una capability. Sin esta exclusión, dos pasos
+    de la misma faceta que se solapan (p.ej. un `reconcile` que termina justo
+    antes de que arranque un `file_write`) pueden compartir la MISMA fila de
+    uso, y un `MAX()+GROUP BY` se la atribuye a las dos -- inflando la
+    capability equivocada, no la que la generó.
+  - Sesión de sólo lectura real: `SET SESSION TRANSACTION READ ONLY` +
+    `START TRANSACTION READ ONLY` antes de consultar, `ROLLBACK` al final
+    (nunca commit) -- el propio MariaDB rechaza cualquier escritura dentro
+    de esa sesión, no sólo la ausencia de sentencias de escritura en el
+    código.
 
 Uso (con GO, contra producción, solo lectura):
   set -a; source /etc/jax/.env; set +a
@@ -44,16 +65,16 @@ import math
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 MULTIPLO = 1024
 HOLGURA_S = 5  # axioma_usage.created_at es TIMESTAMP (segundos enteros)
 
 _SQL_HTTP_DIRECTO = (
-    "SELECT s.capability, MAX(u.tokens_out) FROM jacobs_steps s "
+    "SELECT u.id, s.capability, u.tokens_out FROM jacobs_steps s "
     "JOIN axioma_usage u ON u.facet = s.facet COLLATE utf8mb4_uca1400_ai_ci AND u.request_type = 'pipeline' "
-    " AND UNIX_TIMESTAMP(u.created_at) BETWEEN s.started_at - %s AND s.finished_at + %s "
-    "WHERE s.status = 'completed' AND s.started_at IS NOT NULL AND s.finished_at IS NOT NULL "
-    "GROUP BY s.capability"
+    " AND UNIX_TIMESTAMP(u.created_at) BETWEEN FLOOR(s.started_at) AND CEIL(s.finished_at) + %s "
+    "WHERE s.status = 'completed' AND s.started_at IS NOT NULL AND s.finished_at IS NOT NULL"
 )
 
 
@@ -64,7 +85,13 @@ def redondear(n: int) -> int:
 
 
 def maximos_de_jobs(lineas: Iterable[str]) -> tuple[dict[str, int], int]:
-    maximos: dict[str, int] = {}
+    """Máximo por capability de jobs COMPLETADOS. Antes de medir, se queda
+    con el ÚLTIMO registro por job_id (estado final): una línea `completed`
+    de un job cuyo estado final es OTRO no cuenta (mismo criterio que
+    jacobs/reaper.py::_load_terminal_motor_jobs y el `corridas_de_motor` del
+    script de plan P, jax-platform Task 2, commit d79b0f9). Una línea sin
+    `job_id` no se puede deduplicar contra nada: cuenta por sí misma."""
+    ultimo: dict[object, dict] = {}
     rotas = 0
     for linea in lineas:
         linea = linea.strip()
@@ -75,6 +102,13 @@ def maximos_de_jobs(lineas: Iterable[str]) -> tuple[dict[str, int], int]:
         except json.JSONDecodeError:
             rotas += 1
             continue
+        clave = job.get("job_id")
+        if clave is None:
+            clave = object()  # sin job_id: no deduplica, cuenta por sí misma
+        ultimo[clave] = job
+
+    maximos: dict[str, int] = {}
+    for job in ultimo.values():
         if job.get("status") != "completed":
             continue
         tokens = (job.get("_usage") or {}).get("completion_tokens")
@@ -85,6 +119,29 @@ def maximos_de_jobs(lineas: Iterable[str]) -> tuple[dict[str, int], int]:
     return maximos, rotas
 
 
+def maximos_http(filas: Iterable[tuple[Any, str, int]]) -> tuple[dict[str, int], list[Any]]:
+    """De las filas `(id, capability, tokens_out)` de `_SQL_HTTP_DIRECTO`:
+    excluye las filas cuyo `id` de axioma_usage cae en la ventana de pasos de
+    MÁS de una capability (ambiguas -- no se sabe cuál las generó) y las de
+    `tokens_out` en 0 (nada que medir). El máximo por capability es el mayor
+    de las filas que quedan. Mismo criterio que el script de plan P
+    (jax-platform Task 2, commit d79b0f9, post-procesamiento de
+    `SQL_PASOS_HTTP`)."""
+    caps_por_fila: dict[Any, set[str]] = {}
+    tokens_por_fila: dict[Any, int] = {}
+    for fila_id, capability, tokens_out in filas:
+        caps_por_fila.setdefault(fila_id, set()).add(capability)
+        tokens_por_fila[fila_id] = tokens_out
+
+    ambiguas = sorted(i for i, caps in caps_por_fila.items() if len(caps) > 1)
+    maximos: dict[str, int] = {}
+    for fila_id, caps in caps_por_fila.items():
+        if len(caps) == 1 and tokens_por_fila[fila_id]:
+            capability = next(iter(caps))
+            maximos[capability] = max(maximos.get(capability, 0), tokens_por_fila[fila_id])
+    return maximos, ambiguas
+
+
 def combinar(*fuentes: dict[str, int]) -> dict[str, int]:
     salida: dict[str, int] = {}
     for fuente in fuentes:
@@ -93,18 +150,22 @@ def combinar(*fuentes: dict[str, int]) -> dict[str, int]:
     return salida
 
 
-async def _maximos_http_directo() -> tuple[dict[str, int], list[str]]:
+async def _maximos_http_directo() -> tuple[dict[str, int], list[Any], list[str]]:
     from jacobs import store
     conn = await store.get_conn()
     try:
         async with conn.cursor() as cur:
-            await cur.execute(_SQL_HTTP_DIRECTO, (HOLGURA_S, HOLGURA_S))
-            maximos = {cap: int(valor or 0) for cap, valor in await cur.fetchall()}
+            await cur.execute("SET SESSION TRANSACTION READ ONLY")
+            await cur.execute("START TRANSACTION READ ONLY")
+            await cur.execute(_SQL_HTTP_DIRECTO, (HOLGURA_S,))
+            filas = await cur.fetchall()
             await cur.execute("SELECT `key` FROM capability ORDER BY `key`")
             capabilities = [r[0] for r in await cur.fetchall()]
+            await cur.execute("ROLLBACK")
     finally:
         conn.close()
-    return maximos, capabilities
+    maximos, ambiguas = maximos_http(filas)
+    return maximos, ambiguas, capabilities
 
 
 def main() -> int:
@@ -114,11 +175,12 @@ def main() -> int:
 
     with args.jobs.open(encoding="utf-8") as fh:
         de_jobs, rotas = maximos_de_jobs(fh)
-    de_http, capabilities = asyncio.run(_maximos_http_directo())
+    de_http, ambiguas, capabilities = asyncio.run(_maximos_http_directo())
     medidos = combinar(de_jobs, de_http)
 
     print(f"motor_jobs.jsonl: {len(de_jobs)} capabilities medidas, {rotas} líneas ilegibles")
     print(f"axioma_usage + jacobs_steps: {len(de_http)} capabilities medidas")
+    print(f"filas de uso ambiguas excluidas: {ambiguas}")
     print("| capability | max tokens medidos | min_output_tokens | fuente |")
     print("|---|---|---|---|")
     for cap in capabilities:

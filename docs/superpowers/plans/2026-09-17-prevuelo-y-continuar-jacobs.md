@@ -5874,7 +5874,12 @@ Sin corridas medibles, quedan en 0 (sin mínimo, no bloquean): `architecture_rev
 último es el binding primario de `hipatia` en producción; su fila en
 `model` tenía `max_output_tokens` NULL antes de esta medición).
 
-### Las dos adaptaciones de P que se llevan a `scripts/medir_min_output_tokens.py`
+### Método de P que `scripts/medir_min_output_tokens.py` sigue (fix round 1: alineado, no aproximado)
+
+La primera versión de este script (commit `a215959`) se apartó del método real
+de P en dos puntos, encontrados en la revisión (`git -C
+jax-platform-prevuelo show d79b0f9`, brief y salida de Task 2 de P) y
+corregidos en el commit siguiente:
 
 1. **COLLATE del JOIN (error 1267).** `axioma_usage.facet` quedó en
    `utf8mb4_uca1400_ai_ci` y `jacobs_steps.facet` en `utf8mb4_unicode_ci`
@@ -5884,29 +5889,41 @@ Sin corridas medibles, quedan en 0 (sin mínimo, no bloquean): `architecture_rev
    `ON u.facet = s.facet COLLATE utf8mb4_uca1400_ai_ci`; las claves de faceta
    son ASCII en minúscula, así que la igualdad da lo mismo con cualquiera de
    las dos collations. Verificado con un test puro
-   (`tests/test_medir_min_output_tokens.py::test_el_join_http_directo_lleva_la_collate_del_esquema_real`)
-   que el JOIN del script lo lleva, sin necesidad de conectar a producción
-   para descubrirlo de nuevo.
-2. **La unión por faceta + ventana de tiempo puede inflar un máximo.** Si dos
-   pasos de la misma faceta se solapan en el tiempo, el `MAX(u.tokens_out)`
-   agrupado por capability puede tomar tokens de un paso distinto que cayó
-   dentro de la misma ventana. Se acepta como el lado seguro: un `min_output_tokens`
-   sobreestimado no bloquea nada (el admin lo puede bajar si lo ve corto);
-   uno subestimado sí rechazaría pasos legítimos con `tope_insuficiente`.
+   (`tests/test_medir_min_output_tokens.py::test_el_join_http_directo_lleva_la_collate_del_esquema_real`).
+2. **Ventana del JOIN, IDÉNTICA a la de P.** P usa
+   `UNIX_TIMESTAMP(u.created_at) BETWEEN FLOOR(s.started_at) AND
+   CEIL(s.finished_at) + 5` — holgura SÓLO del lado derecho (`created_at` es
+   `TIMESTAMP`, segundos enteros; `started_at`/`finished_at` son `DOUBLE`;
+   FLOOR/CEIL evitan perder una fila por el truncamiento). La primera
+   versión de este script restaba holgura TAMBIÉN del lado izquierdo
+   (`s.started_at - %s`), una ventana más ancha que la de P — no era una
+   adaptación de esquema, era una divergencia de comportamiento que subía la
+   probabilidad de fila ambigua sin necesidad. Corregido a `FLOOR(s.started_at)
+   AND CEIL(s.finished_at) + %s`, con un test puro que lo fija.
+3. **Exclusión de filas ambiguas (P la hace; la primera versión NO la
+   hacía).** P no arma el máximo con `MAX()+GROUP BY` en SQL: trae
+   `(u.id, s.capability, u.tokens_out)` fila por fila y excluye en Python las
+   filas cuyo `id` de `axioma_usage` cae en la ventana de pasos de MÁS de una
+   capability a la vez ("filas ambiguas", 0 encontradas en la medición real
+   de P). Sin esa exclusión, un `MAX()+GROUP BY` le atribuye una fila
+   compartida a TODAS las capabilities cuya ventana la toca — no sólo la
+   infla hacia arriba (lado "seguro" de un mínimo), se la puede atribuir
+   ENTERA a una capability que no la generó. Ejemplo real de la revisión: un
+   paso `reconcile` de la faceta `thot` termina en t=100 con una fila de
+   20664 tokens; un paso `file_write` de la MISMA faceta arranca en t=103 —
+   sin exclusión, `file_write` mide 20664/21504; P (y ahora este script)
+   miden `file_write` en 1301/2048 (su valor real) porque la fila del
+   `reconcile` queda excluida por ambigua. `maximos_http()` reproduce el
+   post-procesamiento de P: agrupa por `id`, excluye `len(capabilities) > 1`,
+   descarta `tokens_out == 0`, toma el máximo de lo que queda. Cuatro tests
+   puros lo cubren (fila ambigua excluida con el ejemplo de arriba, máximo
+   sin ambiguas con cero descartado, filas vacías, y el JOIN reescrito sin
+   `GROUP BY`).
 
-### Diferencia de P que NO se llevó (documentada, no es una falla de esquema)
-
-El script de medición de P (`scratchpad/medir_prevuelo.py`, no comiteado)
-además excluía en Python las filas de `axioma_usage` cuya ventana [started_at
-− 5s, finished_at + 5s] calzaba con pasos de MÁS de una capability a la vez
-("filas ambiguas", 0 encontradas en la medición real). `scripts/medir_min_output_tokens.py`
-de este plan no reproduce esa exclusión: agrupa y toma el máximo directamente
-en SQL (`GROUP BY s.capability`), lo que corresponde exactamente a la
-adaptación de la Task 13 (aceptar la inflación del máximo como lado seguro,
-arriba). No es una diferencia de esquema — el SQL de este script no fallaría
-contra producción sin ella — así que no se replicó la lógica de exclusión de
-P; queda documentado acá si alguien mide de nuevo y quiere comparar ambos
-caminos.
+Los tres puntos se vieron en ROJO contra el commit `a215959` antes de
+corregirse (evidencia completa: `task-13-report.md`, sección "Fix round 1").
+Ninguno queda como "adaptación aceptada" — el script sigue el método de P
+tal cual, no una aproximación propia.
 
 ### Consumo
 

@@ -1194,8 +1194,41 @@ jobs:
           #   la migración del plan P sólo se IMPRIMEN, nunca se ejecutan. La
           #   medición NO se repitió (Ruling R2 del ledger de este plan): los
           #   números ya los midió P una sola vez.
-          grep -qE "^928 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 928 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 928 -> 936 el 2026-09-17 (Task 13, fix round 1 de la revisión):
+          #   +8 en el mismo archivo -- tres hallazgos de la revisión contra el
+          #   método REAL de P (`git show d79b0f9` en jax-platform-prevuelo):
+          #   (1) la ventana del JOIN restaba holgura también del lado
+          #   izquierdo (P sólo la suma del lado derecho, `FLOOR(started_at)
+          #   AND CEIL(finished_at) + holgura`) -- un test la fija; y el JOIN
+          #   sin la exclusión de filas ambiguas de P le atribuía a CUALQUIER
+          #   capability cuya ventana tocara la fila (visto en rojo:
+          #   `maximos_http` no existía -- ImportError); ahora agrupa fila por
+          #   fila y excluye las que caen en más de una capability (ejemplo de
+          #   la revisión: reconcile+file_write de la misma faceta compartiendo
+          #   una fila de 20664 tokens, +4 tests: ambigua excluida, máximo sin
+          #   ambiguas y con cero descartado, filas vacías, control). (2) la
+          #   prueba de sólo lectura era fail-open (sólo miraba `.execute`, y
+          #   sólo lo que podía resolver): reescrita fail-closed -- cualquier
+          #   `execute`/`executemany`/`callproc` con SQL no resoluble
+          #   estáticamente es hallazgo, y cualquier `.commit()` también.
+          #   Verificado por inyección en una copia descartable (no
+          #   committeada, borrada después): un `execute(f"UPDATE ...")` y un
+          #   `executemany("DELETE ...", ...)` que el test VIEJO dejaba pasar
+          #   (0 ofensoras) el test NUEVO los marca (3 hallazgos). Más un test
+          #   con conexión mockeada que confirma que el código abre `SET
+          #   SESSION TRANSACTION READ ONLY` + `START TRANSACTION READ ONLY`
+          #   antes de consultar y cierra con `ROLLBACK`, nunca `commit()`
+          #   (visto en rojo contra a215959: no las abría). (3) el parseo de
+          #   motor_jobs.jsonl contaba CADA línea `completed` sin mirar el
+          #   estado FINAL del job_id (2 tests: una línea `completed` de un
+          #   job que terminó `failed` no cuenta; el último registro
+          #   `completed` gana aunque su valor sea MENOR que uno anterior del
+          #   mismo job_id) -- mismo criterio que jacobs/reaper.py:228 y
+          #   `corridas_de_motor` de P. Los 7 tests de comportamiento se
+          #   vieron en rojo contra a215959; el octavo (fail-closed) ya pasaba
+          #   ahí (nada que marcar todavía) y se verificó por inyección.
+          grep -qE "^936 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 936 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
