@@ -778,6 +778,7 @@ jobs:
           tests/test_ejecutor_fase0_retirada.py
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
           tests/test_loadtest_apps_protegidas.py
+          tests/test_ejecutor_probar_c4_conteo_remoto.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -876,6 +877,7 @@ jobs:
             tests/test_ejecutor_fase0_retirada.py \
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
             tests/test_loadtest_apps_protegidas.py \
+            tests/test_ejecutor_probar_c4_conteo_remoto.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1405,8 +1407,16 @@ jobs:
           #   limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS
           #   listas: "1579 passed, 1 skipped, 1 xfailed, 16 subtests passed" las
           #   dos veces. Si el runner da otro numero, manda el runner.
-          grep -qE "^1579 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1579 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1579 -> 1584 el 2026-09-17 (C4 remoto: el conteo mide, no la ceguera): las DOS listas suman
+          #   tests/test_ejecutor_probar_c4_conteo_remoto.py (3: el conteo remoto corre como root, cita cuenta y
+          #   administrador, y el gestor de sesión no cuenta como trabajo pero sí al cerrar) y
+          #   test_ejecutor_freno_remoto.py +2 (el barrido le pide salir a su propio gestor de sesión; sin
+          #   systemctl igual reporta). Vistos en rojo; mutaciones con cmp previo: sin `sudo -n` en el conteo -> 1
+          #   rojo; sin el `systemctl --user exit` -> 1 rojo. MEDIDO en local (3.14), env -i, sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1584 passed, 1 skipped, 1 xfailed, 16 subtests
+          #   passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1584 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1584 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

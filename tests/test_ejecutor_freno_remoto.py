@@ -87,3 +87,30 @@ def test_no_mata_al_sshd_que_sostiene_la_sesion(tmp_path):
 def test_el_guion_es_ejecutable_y_sh():
     assert os.access(GUION, os.X_OK)
     assert GUION.read_text().startswith("#!/bin/sh\n")
+
+
+def test_le_pide_al_gestor_de_sesion_de_la_cuenta_que_salga(tmp_path):
+    """En bridge (2026-09-17, al habilitar las máquinas de clientes) logind levanta para la cuenta un
+    `systemd --user` que REPONE sus servicios (pipewire, portales) apenas el freno los mata: la máquina
+    no quedaba vacía hasta que el gestor se iba solo (13-20 s medidos). El barrido le pide salir a su
+    PROPIO gestor —no toca los de nadie más— y la remota queda vacía en el acto."""
+    env, _ = _entorno(tmp_path, [])
+    bin_ = tmp_path / "bin"
+    registro = tmp_path / "systemctl.txt"
+    (bin_ / "systemctl").write_text(f'#!/bin/sh\necho "$@ xdg=$XDG_RUNTIME_DIR" >> {registro}\n')
+    (bin_ / "systemctl").chmod(0o755)
+    r = subprocess.run(["sh", str(GUION)], env={**os.environ, **env}, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and "freno_remoto=ok" in r.stdout
+    assert registro.exists(), "el barrido no llamó a systemctl"
+    linea = registro.read_text().strip()
+    assert linea.startswith("--user exit") and "xdg=/run/user/" in linea
+
+
+def test_si_no_hay_gestor_de_sesion_el_barrido_igual_reporta(tmp_path):
+    """`systemctl` puede no existir o fallar (máquina sin systemd, gestor ya muerto): el barrido no
+    se cae por eso, que sería quedarse sin freno remoto por un accesorio."""
+    env, _ = _entorno(tmp_path, [])
+    (tmp_path / "bin" / "systemctl").write_text("#!/bin/sh\nexit 1\n")
+    (tmp_path / "bin" / "systemctl").chmod(0o755)
+    r = subprocess.run(["sh", str(GUION)], env={**os.environ, **env}, capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and "freno_remoto=ok" in r.stdout

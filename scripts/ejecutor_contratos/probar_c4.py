@@ -45,10 +45,29 @@ ESPERA_CONTROL_S = 11
 VIDA_S = 8
 ARRANQUE_MAX_S = 5  # el escenario remoto pasa por dos ssh: el freno se pone recién cuando se lo ve corriendo
 ENTRE_RONDAS_S = 10
+LIMPIEZA_S = 45  # lo que se le da a la remota para quedar SIN ningún proceso de la cuenta
 
 
 # Vivos = no zombis: un proceso muerto que su padre todavía no cosechó ya no corre nada.
 _VIVOS = "ps -u {cuenta} -o stat=,pid= | awk '$1 !~ /^Z/ {{print $2}}'"
+# Con cmd: el gestor de sesión de systemd no ejecuta el trabajo del Ejecutor y logind lo repone
+# apenas se lo mata; se distingue del trabajo, pero se exige que también se haya ido al cerrar.
+_VIVOS_CMD = "ps -u {cuenta} -o stat=,pid=,cmd= | awk '$1 !~ /^Z/ {{$1=\"\"; print substr($0,2)}}'"
+GESTOR_DE_SESION = ("/usr/lib/systemd/systemd --user", "/lib/systemd/systemd --user", "(sd-pam)")
+
+
+def clasificar_procesos(salida: str) -> tuple[list[str], int]:
+    """(pids que ejecutan trabajo, total de procesos vivos de la cuenta)."""
+    trabajo, total = [], 0
+    for linea in salida.splitlines():
+        partes = linea.strip().split(None, 1)
+        if not partes:
+            continue
+        total += 1
+        pid, cmd = partes[0], (partes[1] if len(partes) > 1 else "")
+        if cmd.strip() not in GESTOR_DE_SESION:
+            trabajo.append(pid)
+    return trabajo, total
 
 
 def _procesos(cuenta: str) -> list[str]:
@@ -66,12 +85,27 @@ def _en_la_remota(remoto, orden: str, *, tty: bool = False) -> str:
             f"{shlex.quote(os.environ['JAX_EJECUTOR_CUENTA'])}@{shlex.quote(remoto.ip)} {shlex.quote(orden)}")
 
 
+def argv_conteo_remoto(remoto, cuenta: str, admin: str, *, contar: bool = True) -> list[str]:
+    """El conteo va como ROOT: con `/proc` montado `hidepid` (bridge, 2026-09-17) el administrador
+    ve CERO procesos de la cuenta aunque estén vivos, y la prueba mediría su propia ceguera.
+    Con `contar=False` devuelve la lista (pid y comando), que es lo que se clasifica."""
+    ps = _VIVOS_CMD.format(cuenta=shlex.quote(cuenta))
+    orden = "sudo -n sh -c " + shlex.quote(ps + " | wc -l" if contar else ps)
+    return ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes",
+            "-p", str(remoto.puerto), f"{admin}@{remoto.ip}", orden]
+
+
+def _remotos_detalle(remoto, cuenta: str) -> tuple[list[str], int]:
+    """(pids de trabajo, total) en la remota. Ante cualquier error: (["?"], -1), que falla cerrado."""
+    argv = argv_conteo_remoto(remoto, cuenta, os.environ["JAX_EJECUTOR_ADMIN_USUARIO"], contar=False)
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        return ["?"], -1
+    return clasificar_procesos(r.stdout)
+
+
 def _procesos_remotos(remoto, cuenta: str) -> int:
-    admin = os.environ["JAX_EJECUTOR_ADMIN_USUARIO"]
-    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=yes",
-                        "-p", str(remoto.puerto), f"{admin}@{remoto.ip}", _VIVOS.format(cuenta=shlex.quote(cuenta)) + " | wc -l"],
-                       capture_output=True, text=True, timeout=20)
-    return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else -1
+    return _remotos_detalle(remoto, cuenta)[1]
 
 
 async def _lanzar(c, nonce: str, remoto=None) -> list[asyncio.subprocess.Process]:
@@ -167,19 +201,35 @@ async def ronda(c, freno: Freno, fallos: list, lecturas, *, con_freno: bool, n: 
             await asyncio.sleep(lectura - transcurrido)
             transcurrido = lectura
             vivos = await asyncio.to_thread(_procesos, c.nombre)
-            remotos = await asyncio.to_thread(_procesos_remotos, remoto, c.nombre) if remoto is not None else None
+            trabajo, remotos = ([], None) if remoto is None else await asyncio.to_thread(
+                _remotos_detalle, remoto, c.nombre)
             print(formato.campos((("contrato", "c4"), etiqueta, ("freno", freno.tipo), ("a_los_s", lectura),
                                   ("medido_s", round(time.monotonic() - puesto_en, 3)), ("procesos", len(vivos)),
-                                  ("procesos_remotos", remotos))))
+                                  ("procesos_remotos", remotos), ("trabajo_remoto", len(trabajo)))))
             if vivos:
                 fallos.append(("procesos_vivos", (etiqueta, ("a_los_s", lectura), ("pids", ",".join(vivos)))))
-            if remotos not in (None, 0):
-                fallos.append(("procesos_remotos_vivos", (etiqueta, ("a_los_s", lectura), ("cuantos", remotos))))
+            if trabajo:
+                fallos.append(("procesos_remotos_vivos", (etiqueta, ("a_los_s", lectura),
+                                                          ("pids", ",".join(trabajo)))))
         await asyncio.sleep(max(0.0, VIDA_S + 1 - (time.monotonic() - inicio)))
     finally:
         freno.soltar()
     await _cerrar(procs, 10)
     await asyncio.sleep(1)
+    if remoto is not None:
+        # El gestor de sesión (systemd --user) no ejecuta el trabajo, pero puede lanzar unidades:
+        # se le da LIMPIEZA_S para irse; si sigue ahí, la remota NO quedó vacía y es un fallo.
+        limite = time.monotonic() + LIMPIEZA_S
+        while True:
+            _, total = await asyncio.to_thread(_remotos_detalle, remoto, c.nombre)
+            if total == 0 or time.monotonic() > limite:
+                break
+            await asyncio.sleep(2)
+        print(formato.campos((("contrato", "c4"), etiqueta, ("remota_vacia_en_s", round(LIMPIEZA_S if total else
+                                                                                       time.monotonic() - puesto_en, 1)),
+                              ("procesos_remotos", total))))
+        if total != 0:
+            fallos.append(("remota_no_quedo_vacia", (etiqueta, ("cuantos", total))))
     marcas = await _marcas(c, nonce, remoto)
     if marcas is None:
         fallos.append(("sin_acceso_despues", (etiqueta,)))
