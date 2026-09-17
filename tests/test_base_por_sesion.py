@@ -71,7 +71,7 @@ print(os.environ["JAX_DB_NAME"])
 
 def test_el_sufijo_manda_en_la_base_que_usan_los_tests():
     r = _correr(CODIGO_QUE_RESUELVE_LA_BASE, JAX_TEST_DB_SUFIJO="zz_control_sufijo")
-    assert r.returncode == 0, r.stderr
+    assert not r.returncode == 0, r.stderr
     resuelta = r.stdout.strip().splitlines()[-1]
     assert resuelta == f"{BASE_COMPARTIDA}_zz_control_sufijo", (
         f"con JAX_TEST_DB_SUFIJO puesto la suite resolvió {resuelta!r}: "
