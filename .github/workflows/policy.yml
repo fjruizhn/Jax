@@ -614,6 +614,7 @@ jobs:
           tests/test_perfil_prevuelo.py
           tests/test_medir_min_output_tokens.py
           tests/test_jacobs_cancel_reaper_epoca.py
+          tests/test_prevuelo_catalogo_de_motores_compartido.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -671,6 +672,7 @@ jobs:
             tests/test_perfil_prevuelo.py \
             tests/test_medir_min_output_tokens.py \
             tests/test_jacobs_cancel_reaper_epoca.py \
+            tests/test_prevuelo_catalogo_de_motores_compartido.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1352,8 +1354,17 @@ jobs:
           #   da 409 de texto sin evento y el reaper no cosecha ni emite REAPED (lo
           #   registra en INFO). Rojo contra f22562e: 4 failed (escritura sin
           #   condición).
-          grep -qE "^1040 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1040 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1040 -> 1044 el 2026-09-17 (ola final de arreglos, F8, Ruling R33):
+          #   test_prevuelo_catalogo_de_motores_compartido.py (+4) -- el pre-vuelo lee
+          #   el catálogo de motores del proceso del Motor Registry con SU sello
+          #   (_ensure_catalog_fresh): sin cambio de sello no llama from_db() (rojo
+          #   contra a34a969: assert 4 == 1) y la carga usa la conexión del pre-vuelo;
+          #   con el sello nuevo recarga y ve el cambio (control contra a34a969; rojo
+          #   por mutación con un catálogo que ignora el sello: assert 1 == 2); pre-vuelo
+          #   y despacho comparten el mismo catálogo (rojo: 2 == 1); recarga fallida
+          #   falla cerrado con el 503 del Motor Registry, sin el catálogo viejo.
+          grep -qE "^1044 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1044 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

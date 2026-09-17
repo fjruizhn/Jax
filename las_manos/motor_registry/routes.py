@@ -65,14 +65,17 @@ _CATALOG_LOADED_AT_WALL: float | None = None
 _CATALOG_LOCK = asyncio.Lock()
 
 
-async def _load_catalog() -> None:
+async def _load_catalog(conexion=None) -> None:
     """Carga el catálogo y reemplaza _CATALOG y _POLICY JUNTOS, solo si la
     consulta terminó bien. El instante se toma ANTES de consultar: si el
     sello se estampa mientras la consulta está en vuelo, la próxima
-    comparación lo ve más nuevo y recarga (mismo criterio que resolve_facet)."""
+    comparación lo ve más nuevo y recarga (mismo criterio que resolve_facet).
+
+    `conexion` (ola final F8 de Jacobs, 2026-09-17): el pre-vuelo recarga por
+    la conexión de su pool; sin ella, from_db() abre y cierra la suya."""
     global _CATALOG, _POLICY, _CATALOG_LOADED_AT_WALL
     started_at_wall = time.time()
-    catalog = await MotorCatalog.from_db()
+    catalog = await (MotorCatalog.from_db() if conexion is None else MotorCatalog.from_db(conexion=conexion))
     policy = MotorPolicy(catalog)
     _CATALOG, _POLICY, _CATALOG_LOADED_AT_WALL = catalog, policy, started_at_wall
 
@@ -93,8 +96,13 @@ def _catalog_is_stale() -> bool:
     return mtime is not None and mtime >= _CATALOG_LOADED_AT_WALL
 
 
-async def _ensure_catalog_fresh() -> None:
+async def _ensure_catalog_fresh(conexion=None) -> None:
     """Recarga el catálogo si el sello quedó más nuevo que su carga.
+
+    También lo usa el pre-vuelo de Jacobs (jacobs/prevuelo_catalogo.py::
+    resolver_motores, ola final F8): evalúa el MISMO catálogo que el despacho
+    va a usar, con esta misma invalidación, en vez de un from_db() por
+    pedido. `conexion` es la del pool del pre-vuelo, sólo para la recarga.
 
     Existe por la regresión del 2026-09-12 (13:03-13:29): el catálogo se
     cargaba UNA vez al arrancar, la migración `generate` 5 -> 15 corrió al
@@ -118,7 +126,7 @@ async def _ensure_catalog_fresh() -> None:
         if not _catalog_is_stale():  # otro dispatch ya recargó mientras esperábamos
             return
         try:
-            await _load_catalog()
+            await _load_catalog(conexion)
         except Exception as exc:  # noqa: BLE001 -- se re-lanza como 503, no se traga
             logger.error("Motor Registry: el catálogo cambió y no se pudo recargar: %r", exc)
             raise HTTPException(

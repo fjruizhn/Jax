@@ -109,14 +109,24 @@ def _decimal(valor) -> Decimal | None:
 
 async def resolver_motores(pasos: list[Step], *, conexion) -> dict[int, MotorResuelto | None]:
     """Por step_index, el motor que el Motor Registry usaría (None si ninguno).
-    Lee el catálogo de motores por `conexion` (la del pre-vuelo) y no la cierra."""
+
+    Ola final F8 (Ruling R33, 2026-09-17): el catálogo de motores es el del
+    PROCESO, el mismo que usa el despacho (motor_registry/routes.py), con SU
+    invalidación: `_ensure_catalog_fresh` lo recarga sólo si el sello de
+    facet_resolver quedó más nuevo que la carga, y si la recarga falla lanza
+    503 (falla cerrado, nunca el catálogo viejo). Medido antes del cambio
+    (scripts/perfil_prevuelo.py cpu, 1.000 pedidos): `MotorCatalog.from_db()`
+    por pedido era 0,32 ms de 0,96 ms de CPU (52 % en cProfile), la pieza más
+    grande. No es una caché nueva: sin sello no hay señal de cambio, igual que
+    para el despacho -- y el pre-vuelo tiene que evaluar lo que el despacho va
+    a usar. Si recarga, lo hace por `conexion` (la del pre-vuelo), sin cerrarla."""
     if not pasos:
         return {}
-    from motor_registry.catalog import MotorCatalog
-    from motor_registry.policy import MotorPolicy
+    from motor_registry import routes as motor_registry_routes
 
-    catalogo = await MotorCatalog.from_db(conexion=conexion)
-    politica = MotorPolicy(catalogo)
+    await motor_registry_routes._ensure_catalog_fresh(conexion)
+    # Leídos juntos y sin await de por medio: _load_catalog los reemplaza juntos.
+    catalogo, politica = motor_registry_routes._CATALOG, motor_registry_routes._POLICY
     salida: dict[int, MotorResuelto | None] = {}
     for paso in pasos:
         clave = politica.motor_que_despacharia(paso.motor, paso.capability)
