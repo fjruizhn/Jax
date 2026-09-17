@@ -6,7 +6,7 @@ AI PRO R9700 32GB via ROCm), sin nube, privada. Es JAX en su modo de confianza.
 
 Decisiones firmes (Fernando + DeepSeek + Claude), formato verificado en hall9000
 contra Ollama 0.24.0:
-  - API HTTP local en localhost:11434/api/chat. SIN api key (es local).
+  - API HTTP local en $JAX_OLLAMA_URL/api/chat (E-21). SIN api key (es local).
   - La respuesta viene en message.content (verificado con curl).
   - Semaforo GPU de 1: UNA sola inferencia local a la vez, para no saturar la
     VRAM de 32GB ni degradar tok/s. Protege la regla de concurrencia=1 en GPU.
@@ -59,8 +59,6 @@ from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocation
 # docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
 GPU_SEMAPHORE = asyncio.Semaphore(1)
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
-
 
 class OllamaMuscle(Muscle):
     # provider_id del catálogo del modelo (lo pone build_muscles desde el
@@ -74,7 +72,8 @@ class OllamaMuscle(Muscle):
         models_allowed: list[str],
         system_prompt: str,
         timeout: float,
-        api_url: str = DEFAULT_OLLAMA_URL,
+        *,
+        api_url: str,
         authority_origin: str = "",
     ) -> None:
         super().__init__(

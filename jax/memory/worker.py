@@ -33,6 +33,7 @@ import os
 import logging
 
 from jax.memory.db import EMBED, MemoryDB
+from jax.core.registro_facetas import url_del_proveedor
 from jax.muscles.base import HttpMuscle
 
 logging.basicConfig(
@@ -143,11 +144,14 @@ Responde UNICAMENTE con JSON, sin texto antes ni despues, sin markdown:
 
 # Extractor: por defecto DeepSeek (faceta confiable). El system_prompt es
 # minimo porque el prompt de extraccion ya trae toda la instruccion.
-def build_extractor() -> HttpMuscle:
-    """Crea el muscle extractor. Hoy DeepSeek; manana, un local."""
+async def build_extractor() -> HttpMuscle:
+    """Crea el muscle extractor. Hoy DeepSeek; manana, un local.
+    E-21 (2026-09-16): la URL sale del catálogo (provider.base_url); sin ella
+    levanta MuscleInvocationError y la corrida del timer falla visible."""
     return HttpMuscle(
         name="extractor",
         provider="deepseek",
+        api_url=await url_del_proveedor("deepseek"),
         model_default="deepseek-v4-flash",
         models_allowed=["deepseek-v4-flash", "deepseek-v4-pro"],
         system_prompt="Sos un extractor de informacion. Respondes solo con JSON valido.",
@@ -392,7 +396,7 @@ async def run_once(limit: int = 10) -> None:
             return
 
         logger.info(f"Procesando {len(pendientes)} conversacion(es)...")
-        extractor = build_extractor()
+        extractor = await build_extractor()
         for conv in pendientes:
             await process_one(db, extractor, conv)
     finally:

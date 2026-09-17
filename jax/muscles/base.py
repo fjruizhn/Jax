@@ -216,6 +216,18 @@ class HttpMuscle(Muscle):
         except ModelDispatchConfigError as e:
             raise DispatchConfigMuscleError(f"[{self.name}] dispatch abortado: {e}") from e
 
+    def _url_del_catalogo(self) -> str:
+        """E-21 (2026-09-16): la URL del proveedor sale SOLO del catálogo
+        (provider.base_url, puesta en api_url por registro_facetas al arrancar).
+        Antes había URLs de OpenAI/DeepSeek/Gemini como default: con la DB
+        caída se despachaba a una URL que nadie eligió."""
+        if not self.api_url:
+            raise MuscleInvocationError(
+                f"[{self.name}] sin URL del proveedor: sale del catálogo (provider.base_url) "
+                f"al arrancar y el catálogo no la dio; no se despacha a una URL fija."
+            )
+        return self.api_url
+
     def _append_authority(self, text: str) -> str:
         # Gemini ya inserta su etiqueta de verificacion (dinamica, segun la
         # politica de grounding) dentro de _call_gemini. No la duplicamos.
@@ -236,9 +248,7 @@ class HttpMuscle(Muscle):
     async def _call_deepseek(
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
-        # PR-K ronda 2 (I1): URL del proveedor del modelo en el catálogo; el
-        # default solo para el arranque sin DB.
-        url = self.api_url or "https://api.deepseek.com/chat/completions"
+        url = self._url_del_catalogo()
         headers = {"Authorization": f"Bearer {await self._resolve_api_key()}"}
 
         # messages = system + historial previo + mensaje actual.
@@ -279,7 +289,7 @@ class HttpMuscle(Muscle):
     async def _call_openai(
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
-        url = self.api_url if self.api_url else "https://api.openai.com/v1/chat/completions"
+        url = self._url_del_catalogo()
         headers = {
             "Authorization": f"Bearer {await self._resolve_api_key()}",
             "Content-Type": "application/json",
@@ -371,9 +381,8 @@ class HttpMuscle(Muscle):
     ) -> str:
         api_key = await self._resolve_api_key()
         # PR-K ronda 2 (I1): la URL base sale del proveedor del modelo en el
-        # catálogo (registro_facetas.aplicar_registro la pone en api_url). El
-        # default solo queda para el arranque sin DB (config.toml completo).
-        base = self.api_url or "https://generativelanguage.googleapis.com/v1beta"
+        # catálogo (registro_facetas.aplicar_registro la pone en api_url).
+        base = self._url_del_catalogo()
         # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key,
         # NO en `?key=` (httpx loguea la URL entera en INFO y la mete en
         # str(HTTPStatusError)).

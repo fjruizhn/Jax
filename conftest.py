@@ -51,6 +51,14 @@ INICIO_DE_SESION = time.time()
 
 os.environ["JAX_USAGE_SPOOL_DIR"] = tempfile.mkdtemp(prefix="jax-test-respaldo-uso-")
 
+#: E-21 (2026-09-16): jacobs/executor.py y plan.py leen LAS_MANOS_URL y
+#: JAX_OLLAMA_URL al importarse y NO arrancan sin ellas (fail-closed). Se fijan
+#: acá, antes de cualquier import, con los mismos valores que producción: los
+#: tests no salen a la red (cada uno parchea el transporte), así que el valor
+#: solo tiene que ser una URL válida y estable para las aserciones de ruta.
+os.environ["LAS_MANOS_URL"] = "http://127.0.0.1:7777"
+os.environ["JAX_OLLAMA_URL"] = "http://localhost:11434"
+
 
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
     """Los archivos de `directorio` (y sus subdirectorios, que es donde

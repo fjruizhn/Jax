@@ -602,6 +602,7 @@ jobs:
           tests/test_max_steps_una_sola_constante.py
           tests/test_plan_facetas_de_la_tabla.py
           tests/test_espejos_symlink_frente_e.py
+          tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -648,6 +649,7 @@ jobs:
             tests/test_max_steps_una_sola_constante.py \
             tests/test_plan_facetas_de_la_tabla.py \
             tests/test_espejos_symlink_frente_e.py \
+            tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el

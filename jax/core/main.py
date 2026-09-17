@@ -43,6 +43,7 @@ import sys
 import tomllib
 from pathlib import Path
 
+from jax.core.config_entorno import url_requerida
 from jax.core.router import Router
 from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
@@ -91,7 +92,7 @@ def build_muscles(cfg: dict, timeout_override: float | None = None) -> dict:
         elif ptype == "ollama":
             muscles[name] = OllamaMuscle(
                 name, p["model_default"], p["models_allowed"],
-                p["system_prompt"], timeout, api_url=p["api_url"],
+                p["system_prompt"], timeout, api_url=url_requerida("JAX_OLLAMA_URL") + "/api/chat",
                 authority_origin=p.get("authority_origin", ""),
             )
         else:
@@ -517,6 +518,12 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
 
 
 async def main() -> None:
+    # E-21: sin estas variables el REPL no arranca; fallar acá y no en el
+    # primer turno o la primera frase hablada.
+    url_requerida("JAX_OLLAMA_URL")
+    from jax.voice.tts import _python_de_kokoro
+    _python_de_kokoro()
+
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
 

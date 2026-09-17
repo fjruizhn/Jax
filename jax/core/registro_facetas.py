@@ -27,12 +27,16 @@ lugares (mirror-sync) y esto no le sirve a nadie más. Por eso importa
 nombre cambia en el espejo, el import falla al arrancar y el REPL cae al
 fallback del TOML con el aviso de main().
 
+E-21 (2026-09-16): también da url_del_proveedor() a los workers de memoria
+(extractor y sintetizador), que no son facetas pero despachan por HttpMuscle
+y ya no tienen URL de proveedor por defecto.
+
 En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
 from jax.core.facet_resolver import _db_conn, load_facet_registry
-from jax.muscles.base import _PROVIDER_ID_MAP
+from jax.muscles.base import MuscleInvocationError, _PROVIDER_ID_MAP
 
 # Estados del catálogo que se pueden invocar; deprecated/gone no.
 ESTADOS_INVOCABLES = ("available", "degraded")
@@ -160,8 +164,42 @@ def _camino_del_modelo(clave: str, personalidad: dict, info: dict) -> str:
             f"base_url en el catálogo (tabla provider): sin URL no se despacha."
         )
     personalidad["provider"] = clave_http
-    if transporte == "http_gemini":
-        personalidad["api_url"] = base_url
-    else:
-        personalidad["api_url"] = base_url.rstrip("/") + "/chat/completions"
+    personalidad["api_url"] = _url_de_despacho(provider_id, base_url)
     return ""
+
+
+def _url_de_despacho(provider_id: str, base_url: str) -> str:
+    """La URL que HttpMuscle usa de api_url, desde provider.base_url: Gemini
+    arma la ruta del modelo sobre la base; los OpenAI-compatibles van a
+    /chat/completions. Una sola regla para el REPL y los workers de memoria."""
+    if provider_id == "gemini":
+        return base_url
+    return base_url.rstrip("/") + "/chat/completions"
+
+
+async def url_del_proveedor(clave_http: str) -> str:
+    """E-21 (2026-09-16): api_url de un HttpMuscle que NO es una faceta (el
+    extractor y el sintetizador de la memoria), desde provider.base_url del
+    catálogo, la misma columna que usa aplicar_registro. Antes esos workers no
+    pasaban api_url y despachaban a la URL fija de DeepSeek en base.py.
+    Consulta por clave primaria (provider.id). Sin fila o sin base_url:
+    MuscleInvocationError y la corrida falla visible; no hay URL de respaldo.
+    Si la DB no responde, el error de conexión sube tal cual."""
+    provider_id = _PROVIDER_ID_MAP.get(clave_http)
+    if provider_id is None:
+        raise MuscleInvocationError(
+            f"sin URL del proveedor: '{clave_http}' no es un proveedor HTTP conocido."
+        )
+    conn = await _db_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT base_url FROM provider WHERE id = %s", (provider_id,))
+            fila = await cur.fetchone()
+    finally:
+        conn.close()
+    if not fila or not fila[0]:
+        raise MuscleInvocationError(
+            f"sin URL del proveedor: '{provider_id}' no tiene base_url en el catálogo "
+            f"(tabla provider); no se despacha a una URL fija."
+        )
+    return _url_de_despacho(provider_id, fila[0])

@@ -32,7 +32,15 @@ import json
 import re
 from pathlib import Path
 
-KOKORO_PYTHON = Path.home() / "kokoro-test" / ".venv" / "bin" / "python"
+from jax.core.config_entorno import ruta_absoluta_requerida
+
+
+def _python_de_kokoro() -> Path:
+    """E-21 (2026-09-16): el python del venv de Kokoro sale de
+    JAX_KOKORO_PYTHON (/etc/jax/.env). Antes era ~/kokoro-test/.venv fijo."""
+    return ruta_absoluta_requerida("JAX_KOKORO_PYTHON")
+
+
 WORKER_SCRIPT = Path(__file__).parent / "kokoro_worker.py"
 AUDIO_DEVICE = "plughw:2,0"  # ALC897 Analog (conector verde de hall9000)
 SAMPLE_RATE = "24000"
@@ -121,7 +129,7 @@ class VoiceEngine:
         if self.worker is not None and self.worker.returncode is None:
             return
         self.worker = await asyncio.create_subprocess_exec(
-            str(KOKORO_PYTHON), str(WORKER_SCRIPT),
+            str(_python_de_kokoro()), str(WORKER_SCRIPT),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,

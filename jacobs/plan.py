@@ -23,6 +23,7 @@ from jacobs.models import MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
+from config_entorno import url_requerida
 
 logger = logging.getLogger("jacobs.plan")
 
@@ -43,7 +44,7 @@ async def _registrar_fallback_de_cerebro(pipeline_id: str, de: str, a: str, moti
         pipeline_id, "PLAN_CEREBRO_FALLBACK", {"de": de, "a": a, "motivo": motivo[:2000]},
     )
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = url_requerida("JAX_OLLAMA_URL") + "/api/chat"  # E-21: del entorno, validada al importar
 OLLAMA_TIMEOUT = 120  # segundos — el modelo local puede tardar
 # T1 (2026-08-19): con think:false medido en 6 corridas reales (3 objetivos
 # x think true/false), eval_count del path think:false fue 181-1159 (el mas

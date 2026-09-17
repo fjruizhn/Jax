@@ -57,6 +57,7 @@ def _muscle(provider, model, name="faceta"):
     return base.HttpMuscle(
         name=name, provider=provider, model_default=model,
         models_allowed=[model, "pesado"], system_prompt="s", timeout=10,
+        api_url="https://api.proveedor.example/v1/chat/completions",
     )
 
 
@@ -708,13 +709,13 @@ class UrlRealPorCaminoTest(_Base):
         self.assertIn("x-goog-api-key", self.cap.headers[0] or {})
         self.assertNotIn("max_tokens", self.cap.bodies[0])
 
-    async def test_repl_ollama_usa_el_endpoint_nativo_del_toml_y_num_predict(self):
+    async def test_repl_ollama_usa_el_endpoint_nativo_del_entorno_y_num_predict(self):
         from jax.core.main import build_muscles
         from jax.core.registro_facetas import aplicar_registro
         self.arrancar((None, 262144))
-        nativo = "http://localhost:11434/api/chat"
+        nativo = "http://localhost:11434/api/chat"  # JAX_OLLAMA_URL del conftest + /api/chat
         cfg = _cfg_repl({"jax_local": {"type": "ollama", "provider": "ollama", "model_default": "q",
-                                       "models_allowed": ["q"], "system_prompt": "s", "api_url": nativo}})
+                                       "models_allowed": ["q"], "system_prompt": "s"}})
         aplicar_registro(cfg, {"jax_local": {"model": "qwen-x", "models_allowed": ["qwen-x"],
                                              "transport": "ollama", "provider_modelo": "ollama",
                                              "base_url_modelo": _BASE_URL_PROD["ollama"]}})

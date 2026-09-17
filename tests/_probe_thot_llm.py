@@ -26,11 +26,13 @@ sys.path.insert(0, str(ROOT / "las_manos"))         # para 'import server/facet_
 from fastapi.testclient import TestClient  # noqa: E402
 import server  # noqa: E402
 from facet_client import FacetClient  # noqa: E402
+from jax.core.registro_facetas import url_del_proveedor  # noqa: E402
 from jax.muscles.base import HttpMuscle, MuscleError  # noqa: E402
 
 
-def construir_thot() -> HttpMuscle:
-    """Instancia a Thot tal como lo haría build_muscles() de main.py."""
+async def construir_thot() -> HttpMuscle:
+    """Instancia a Thot tal como lo haría build_muscles() de main.py.
+    E-21: la URL sale del catálogo (provider.base_url), como en el REPL."""
     cfg = tomllib.loads((ROOT / "config" / "config.toml").read_text(encoding="utf-8"))
     p = cfg["personalities"]["thot"]
     return HttpMuscle(
@@ -38,6 +40,7 @@ def construir_thot() -> HttpMuscle:
         p["system_prompt"], timeout=90.0,
         grounding_policy=p.get("grounding_policy", "off"),
         authority_origin=p.get("authority_origin", ""),
+        api_url=await url_del_proveedor(p["provider"]),
     )
 
 
@@ -66,7 +69,7 @@ async def main() -> int:
         conteo[e.get("event", "?")] = conteo.get(e.get("event", "?"), 0) + 1
     print(f"✓ Thot leyó {len(eventos)} eventos por el cable. Resumen: {conteo}")
 
-    thot = construir_thot()
+    thot = await construir_thot()
     print(f"✓ Thot instanciado: provider={thot.provider}, modelo={thot.model_default}")
 
     prompt = (

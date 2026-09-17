@@ -28,6 +28,8 @@ from jacobs.artifacts import read_artifact, save_if_large
 from grounding_sources import build_sources, render_sources_block, resolve_redirects
 # Ruling T6-6: jax/core/redaccion.py por symlink en las_manos/, como arriba.
 from redaccion import recortar_redactado, redactar_secretos
+# E-21: jax/core/config_entorno.py por symlink en las_manos/, como arriba.
+from config_entorno import url_requerida
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -38,8 +40,10 @@ from hyde_sandbox import run_sandboxed_claude
 
 logger = logging.getLogger("jacobs.executor")
 
-LAS_MANOS_BASE = "http://127.0.0.1:7777"
-OLLAMA_URL     = "http://localhost:11434/api/chat"
+# E-21 (2026-09-16): del entorno, validadas al importar. Sin ellas LAS MANOS no
+# arranca (EntornoInvalido en el journal) en vez de apuntar a un host fijo.
+LAS_MANOS_BASE = url_requerida("LAS_MANOS_URL")
+OLLAMA_URL     = url_requerida("JAX_OLLAMA_URL") + "/api/chat"
 MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 
 # Tope de seguridad para el output COMPLETO de cada dependencia declarada (~15K tokens).

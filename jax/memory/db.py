@@ -30,6 +30,7 @@ import httpx
 
 from .embedding_config import CONFIG as EMBED, zero_vector_text
 from jax.core.db_connect_config import db_connect_timeout_seconds
+from jax.core.config_entorno import url_requerida
 from .migrations import ensure_schema
 
 logger = logging.getLogger("jax.memory")
@@ -479,12 +480,16 @@ class MemoryDB:
         Devuelve lista de EMBED.dim floats, o None si falla (JAX sigue sin embeddings).
         Una dimension distinta de la configurada se descarta: escribirla en la
         columna fallaria, o peor, compararia vectores de modelos distintos."""
+        # E-21: la URL sale del entorno y se lee FUERA del try. Una variable que
+        # falta es un error de configuración visible, no un embedding que
+        # "falló" y deja la fila en ceros sin que nadie lo sepa.
+        url = url_requerida("JAX_OLLAMA_URL") + "/api/embed"
         try:
             # Tope de contexto de los modelos; truncamos para evitar 500.
             texto = text[:4000] if len(text) > 4000 else text
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    "http://localhost:11434/api/embed",
+                    url,
                     json={"model": EMBED.model, "input": texto},
                 )
                 resp.raise_for_status()
