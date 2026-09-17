@@ -1255,8 +1255,8 @@ jobs:
           #   invirtiendo el orden). MEDIDO dos veces en local (3.14), env limpio,
           #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1302 passed, 1 skipped, 1 xfailed,
           #   16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1302 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1302 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          grep -qE "^1303 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1303 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

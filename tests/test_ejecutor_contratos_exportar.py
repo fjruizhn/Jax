@@ -53,3 +53,12 @@ def test_escritura_atomica_con_permisos(tmp_path):
     assert json.loads(ruta.read_text()) == doc
     assert stat.S_IMODE(os.stat(ruta).st_mode) == 0o640
     assert [p.name for p in tmp_path.iterdir()] == ["politica.json"]
+
+
+def test_principal_importa_una_funcion_de_store_que_existe(monkeypatch):
+    """Regresión: frente F retiró jacobs.store.get_conn y principal() lo seguía
+    importando, así que el exportador de producción reventaba con ImportError antes
+    de validar nada. Sin la variable de ruta, lo correcto es salir con 2."""
+    from jax.ejecutor.contratos import exportar
+    monkeypatch.delenv("JAX_EJECUTOR_POLITICA", raising=False)
+    assert exportar.principal() == 2
