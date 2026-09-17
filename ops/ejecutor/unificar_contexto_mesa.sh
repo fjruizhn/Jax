@@ -196,18 +196,28 @@ aplicar() {
   # 2. Catálogo: el sync de Ollama escribe la fila (sólo `model`, nunca bindings).
   codigo="$(api POST /api/admin/models/sync)"
   [ "$codigo" = 200 ] || { cat "$TMP/respuesta.json" >&2; morir "sync_fallo=$codigo"; }
-  nuevo_ref="$(sql "SELECT id FROM model WHERE provider_id='ollama' AND model_id='$derivado' AND status='available'")"
-  [[ "$nuevo_ref" =~ ^[0-9]+$ ]] || morir "derivado_no_esta_en_el_catalogo"
+  #    El sync guarda el nombre como lo lista Ollama, CON tag (`<derivado>:latest`; visto en la
+  #    corrida real del 2026-09-17). Se aceptan las dos formas, pero UNA sola fila: dos filas del
+  #    mismo modelo son un catálogo ambiguo y no se elige a ciegas.
+  nuevo_ref="$(sql "SELECT id FROM model WHERE provider_id='ollama' AND model_id IN ('$derivado', '$derivado:latest') AND status='available'")"
+  [[ "$nuevo_ref" =~ ^[0-9]+$ ]] || morir "derivado_no_esta_en_el_catalogo filas=$(printf '%s' "$nuevo_ref" | grep -c . || true)"
 
   # 3. Contrato de dispatch: el mismo que el modelo base (leído del respaldo, no escrito acá).
-  contrato="$(python3 -c '
+  #    Transporte `ollama`: el base no declara contrato (NULL, NULL) y el PUT rechaza uno vacío
+  #    con 422 (visto en la corrida real del 2026-09-17). Sin contrato en el base, no se copia:
+  #    el derivado queda igual que el base, que es lo que se busca.
+  if [ "$param" = NULL ] && [ "$tope" = NULL ]; then
+    log "catalogo model_ref=$nuevo_ref contrato=sin_contrato_en_el_base"
+  else
+    contrato="$(python3 -c '
 import json, sys
 p, t = sys.argv[1], sys.argv[2]
 print(json.dumps({"max_tokens_param": None if p == "NULL" else p, "max_output_tokens": None if t == "NULL" else int(t)}))
 ' "$param" "$tope")"
-  codigo="$(api PUT "/api/admin/models/$nuevo_ref/contrato-dispatch" "$contrato")"
-  [ "$codigo" = 200 ] || { cat "$TMP/respuesta.json" >&2; morir "contrato_fallo=$codigo"; }
-  log "catalogo model_ref=$nuevo_ref contrato=$contrato"
+    codigo="$(api PUT "/api/admin/models/$nuevo_ref/contrato-dispatch" "$contrato")"
+    [ "$codigo" = 200 ] || { cat "$TMP/respuesta.json" >&2; morir "contrato_fallo=$codigo"; }
+    log "catalogo model_ref=$nuevo_ref contrato=$contrato"
+  fi
 
   # 4. Rebind por el endpoint aprobado. Desde acá, cualquier fallo revierte al base.
   desde="$(date +%s)"
