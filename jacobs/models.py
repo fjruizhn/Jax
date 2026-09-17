@@ -49,7 +49,10 @@ class StepStatus(str, Enum):
 # nombre de un usuario autenticado; QUIÉN es viaja en user_id/tenant_id. Las
 # filas viejas de jacobs_pipelines con "Fernando" quedan como están: historia.
 INVOKER_PLATAFORMA = "plataforma"
-VALID_INVOKERS = frozenset({INVOKER_PLATAFORMA, "jax_local", "ada"})
+# Ada solo crea sub-pipelines: presenta un subpipeline_token emitido por Jacobs
+# para un padre y un paso de Ada en ejecución (jacobs/subpipelines.py).
+INVOKER_ADA = "ada"
+VALID_INVOKERS = frozenset({INVOKER_PLATAFORMA, "jax_local", INVOKER_ADA})
 
 VALID_MODES = frozenset({"dry_run", "supervised", "autonomous"})
 
@@ -94,6 +97,10 @@ class Pipeline(BaseModel):
     # mismo significado que "owner file ausente" antes, pero sin cruzar de
     # repo ni depender de que ambos servicios corran en el mismo host.
     owner_ack_at:       float | None = None
+    # Frente F (2026-09-16): un hijo de Ada guarda de quién es hijo y a qué
+    # profundidad. Los dos salen de la fila del token, nunca del pedido.
+    parent_pipeline_id: str | None = None
+    depth:              int = 0
     mode:               str
     status:             PipelineStatus = PipelineStatus.pending
     plan:               list[Step] = Field(default_factory=list)
@@ -107,15 +114,18 @@ class Pipeline(BaseModel):
 
 
 class PipelineCreateRequest(BaseModel):
-    name:             str
-    objective:        str
-    invoked_by:       str
-    user_id:          str | None = None
-    tenant_id:        str | None = None
-    mode:             str
-    max_steps:        int = MAX_STEPS_PER_PIPELINE
-    steps:            list[StepSpec] | None = None
-    subpipeline_token: str | None = None
+    name:               str
+    objective:          str
+    invoked_by:         str
+    user_id:            str | None = None
+    tenant_id:          str | None = None
+    mode:               str
+    max_steps:          int = MAX_STEPS_PER_PIPELINE
+    steps:              list[StepSpec] | None = None
+    # Frente F: solo para invoked_by="ada". La profundidad NO es un campo: un
+    # `depth` o `subpipeline_depth` en el JSON se ignora (nadie lo lee).
+    subpipeline_token:  str | None = Field(default=None, min_length=1, max_length=128)
+    parent_pipeline_id: str | None = Field(default=None, min_length=1, max_length=36)
 
     @model_validator(mode="after")
     def validate_fields(self) -> "PipelineCreateRequest":
@@ -131,6 +141,15 @@ class PipelineCreateRequest(BaseModel):
             raise ValueError(
                 f"max_steps debe estar entre 1 y {MAX_STEPS_PER_PIPELINE} (límite duro v0.1)"
             )
+        trae_contrato = self.subpipeline_token is not None or self.parent_pipeline_id is not None
+        if self.invoked_by != INVOKER_ADA and trae_contrato:
+            raise ValueError(
+                "subpipeline_token y parent_pipeline_id solo los acepta invoked_by='ada'"
+            )
+        if self.invoked_by == INVOKER_ADA and (
+            self.subpipeline_token is None or self.parent_pipeline_id is None
+        ):
+            raise ValueError("invoked_by='ada' exige subpipeline_token y parent_pipeline_id")
         return self
 
 

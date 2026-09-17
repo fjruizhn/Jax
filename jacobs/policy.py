@@ -9,14 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from interruptor import interruptor_activo
-from jacobs.models import INVOKER_PLATAFORMA, MAX_STEPS_PER_PIPELINE, VALID_INVOKERS
+from jacobs.models import INVOKER_ADA, INVOKER_PLATAFORMA, MAX_STEPS_PER_PIPELINE, VALID_INVOKERS
 
 # MAX_PARALLEL_PIPELINES se espeja en jax-platform backend/ajustes.py (familia
 # `tope_pipelines` de scripts/check_mirror_sync.py, frente C 2026-09-16): es el
 # máximo del ajuste max_pipelines de Admin. Cambiarlo acá exige cambiar la copia
 # en el mismo paso. MAX_STEPS_PER_PIPELINE vive en jacobs/models.py (E-13).
 MAX_PARALLEL_PIPELINES  = 3
-MAX_SUBPIPELINE_DEPTH   = 1
+# MAX_SUBPIPELINE_DEPTH se borró (frente F, 2026-09-16): era un literal que
+# ningún llamador alimentaba. La profundidad vive en la fila del token y el
+# límite en JAX_MAX_SUBPIPELINE_DEPTH (jacobs/subpipelines.py).
 
 
 @dataclass
@@ -39,10 +41,15 @@ def validate_create(
     mode: str,
     max_steps: int,
     active_count: int,
-    subpipeline_depth: int = 0,
     subpipeline_token: str | None = None,
+    parent_pipeline_id: str | None = None,
 ) -> PolicyResult:
-    """Valida si se puede crear un pipeline nuevo."""
+    """Valida si se puede crear un pipeline nuevo.
+
+    Para ada controla la FORMA (token y padre presentes; nadie más puede
+    traerlos). La VALIDEZ del token no se decide acá: es un consumo atómico en
+    la base (subpipelines.consumir_token_subpipeline), que routes.create_pipeline
+    corre justo después de esta función, dentro del mismo candado."""
 
     if invoked_by not in VALID_INVOKERS:
         return PolicyResult(
@@ -50,10 +57,19 @@ def validate_create(
             reason=f"invoked_by '{invoked_by}' no autorizado. Aceptados: {sorted(VALID_INVOKERS)}",
         )
 
-    if invoked_by == "ada" and not subpipeline_token:
+    if invoked_by == INVOKER_ADA and (not subpipeline_token or not parent_pipeline_id):
         return PolicyResult(
             ok=False,
-            reason="ada requiere subpipeline_token para invocar Jacobs",
+            reason="ada requiere subpipeline_token y parent_pipeline_id para invocar Jacobs",
+        )
+
+    if invoked_by != INVOKER_ADA and (subpipeline_token or parent_pipeline_id):
+        return PolicyResult(
+            ok=False,
+            reason=(
+                f"invoked_by '{invoked_by}' no puede presentar subpipeline_token "
+                "ni parent_pipeline_id"
+            ),
         )
 
     if max_steps > MAX_STEPS_PER_PIPELINE:
@@ -69,12 +85,6 @@ def validate_create(
                 f"Ya hay {active_count} pipelines activos. "
                 f"Límite duro: {MAX_PARALLEL_PIPELINES}"
             ),
-        )
-
-    if subpipeline_depth > MAX_SUBPIPELINE_DEPTH:
-        return PolicyResult(
-            ok=False,
-            reason=f"Profundidad de sub-pipeline ({subpipeline_depth}) excede límite ({MAX_SUBPIPELINE_DEPTH})",
         )
 
     if check_kill_switch():

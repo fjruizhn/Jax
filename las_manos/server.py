@@ -241,6 +241,13 @@ async def _jacobs_init() -> None:
         _ch = logging.StreamHandler()
         _ch.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
         _credlog.addHandler(_ch)
+
+    # Frente F (2026-09-16): la config del contrato de sub-pipelines se valida
+    # al arrancar. Un valor inválido en /etc/jax/.env tumba LAS MANOS acá
+    # (fail-closed) en vez de descubrirse en el primer hijo de Ada.
+    from jacobs.subpipelines import config_subpipelines
+    config_subpipelines()
+
     await jacobs_store.init_tables()
 
     from motor_registry.routes import init_motor_catalog

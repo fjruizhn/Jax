@@ -19,6 +19,7 @@ from jacobs import store
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
 from jacobs.models import (
+    INVOKER_ADA,
     MAX_STEPS_PER_PIPELINE,
     VALID_INVOKERS,
     Pipeline,
@@ -108,6 +109,14 @@ async def plan_only(req: PlanRequest) -> dict:
         raise HTTPException(
             status_code=403,
             detail=f"invoked_by '{req.invoked_by}' no autorizado",
+        )
+    # Frente F: Ada no planifica por acá. Un sub-pipeline entra solo por
+    # POST /pipeline con un subpipeline_token; /plan no consume tokens y
+    # planificar llama a un LLM.
+    if req.invoked_by == INVOKER_ADA:
+        raise HTTPException(
+            status_code=403,
+            detail="ada no planifica por /plan: un sub-pipeline se crea por /pipeline con subpipeline_token",
         )
     if check_kill_switch():
         raise HTTPException(
