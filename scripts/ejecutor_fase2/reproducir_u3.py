@@ -19,8 +19,24 @@ elegir la cita:
        contenga? Si no la tiene, el verificador rechazaría trabajo bueno: un
        falso positivo real.
 
-Además se mide el hueco texto↔línea: `cita.verificar` no mira `texto`, así que
-se prueba cada invención citando una línea REAL que contiene su ancla.
+Hasta 8f16300 se medía además el hueco texto↔línea (`cita.verificar` no leía
+`texto`: las 11 invenciones salían `respaldada` citando una línea real con su
+ancla). Esa medición se reemplazó por la de la regla ligada, que sigue.
+
+REGLA LIGADA (2026-09-16, decisión de Fernando): `Afirmacion.dato` + las reglas
+1-4 de `jax/ejecutor/cita.py`. Se re-mide sin inventar la cita del modelo:
+
+  · El TEXTO de la afirmación es el dato como lo escribió el modelo, solo
+    (`" ".join(escrito)`): la afirmación mínima. Como variante se usa además la
+    línea de su respuesta que contiene todo el `escrito`, cuando existe.
+  · La CITA recorre TODAS las líneas reales (stdout y stderr, captura completa)
+    de esa máquina, de cualquier comando: «sea cual sea la cita».
+  · El DATO se prueba de dos maneras:
+      - «dato literal»: cada token de `escrito` y de `nucleo`/`ancla`.
+      - «cualquier dato»: una letra común a texto y línea. Es EXHAUSTIVO: las
+        reglas 2 y 3 se conservan al achicar el dato a un carácter y la regla 4
+        no depende del dato, así que si algún dato pasa, pasa un carácter común.
+  · Cada combinación la juzga `cita.verificar`, la función real.
 
 Cada dato `escrito` se comprueba contra la respuesta final del modelo: si no es
 una subcadena de lo que el modelo dijo, el script falla. Así no puedo inventar
@@ -47,6 +63,7 @@ if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
 from jax.ejecutor.cita import RESPALDADA, Afirmacion, Captura, normalizar, verificar  # noqa: E402
+
 
 FASE0 = RAIZ / "scripts" / "ejecutor_fase0"
 MODELO = "qwen"
@@ -188,6 +205,78 @@ def _hash(s: str) -> str:
 
 
 # --------------------------------------------------------------------------
+# Regla ligada: ¿alguna cita real deja pasar esta afirmación?
+# --------------------------------------------------------------------------
+
+def _caracter_comun(texto: str, linea: str) -> str | None:
+    """Un carácter no blanco presente en los dos, o None. Testigo exhaustivo
+    de «existe algún dato que cumpla las reglas 2 y 3»."""
+    en_linea = set(normalizar(linea))
+    for ch in normalizar(texto):
+        if not ch.isspace() and ch in en_linea:
+            return ch
+    return None
+
+
+def _alguna_cita_pasa(capturas: list[CapturaU3], maquina: str, texto: str,
+                      datos: list[str] | None) -> dict:
+    """Recorre toda línea de toda captura de `maquina` como cita posible.
+
+    `datos=None` → «cualquier dato» (testigo exhaustivo). Devuelve si pasó, un
+    testigo y el conteo de veredictos (sólo el estado: el motivo lleva el dato).
+    """
+    estados: dict[str, int] = {}
+    for cu in capturas:
+        cap = cu.captura
+        if cap.maquina != maquina:
+            continue
+        for flujo in (cap.salida, cap.stderr):
+            for linea in flujo.splitlines():
+                if not normalizar(linea):
+                    continue
+                if datos is None:
+                    ch = _caracter_comun(texto, linea)
+                    candidatos = [ch] if ch is not None else [""]
+                else:
+                    candidatos = datos
+                for dato in candidatos:
+                    v = verificar(Afirmacion(maquina, texto, cap.comando, linea, dato), [cap])
+                    estados[v.estado] = estados.get(v.estado, 0) + 1
+                    if v.estado == RESPALDADA:
+                        return {"pasa": True, "estados": estados,
+                                "testigo": {"comando": cap.comando, "linea": linea, "dato": dato}}
+    return {"pasa": False, "estados": estados, "testigo": None}
+
+
+def _juzgar_con_regla_ligada(capturas, maquina, final, escrito, datos_literales,
+                             publicar: bool) -> dict:
+    minimo = " ".join(escrito)
+    lineas_resp = [l for l in (_sin_markdown(x) for x in final.splitlines())
+                   if all(e in l for e in escrito)]
+    datos = list(dict.fromkeys(datos_literales))
+    r = {
+        "texto_minimo_dato_literal": _alguna_cita_pasa(capturas, maquina, minimo, datos),
+        "texto_minimo_cualquier_dato": _alguna_cita_pasa(capturas, maquina, minimo, None),
+    }
+    if lineas_resp:
+        pl = [_alguna_cita_pasa(capturas, maquina, t, datos) for t in lineas_resp]
+        pc = [_alguna_cita_pasa(capturas, maquina, t, None) for t in lineas_resp]
+        r["linea_respuesta_dato_literal"] = next((x for x in pl if x["pasa"]), pl[0])
+        r["linea_respuesta_cualquier_dato"] = next((x for x in pc if x["pasa"]), pc[0])
+    else:
+        # El modelo repartió el dato en varias líneas: no hay línea de respuesta
+        # que lo contenga entero. Se registra así, sin fabricar una.
+        vacio = {"pasa": False, "estados": {}, "testigo": None, "sin_linea_en_respuesta": True}
+        r["linea_respuesta_dato_literal"] = vacio
+        r["linea_respuesta_cualquier_dato"] = vacio
+    if not publicar:
+        for v in r.values():
+            if v.get("testigo"):
+                v["testigo"] = {"comando_hash": _hash(v["testigo"]["comando"])}
+    return r
+
+
+# --------------------------------------------------------------------------
 # V1 — las 11 invenciones
 # --------------------------------------------------------------------------
 
@@ -201,8 +290,8 @@ class Invencion:
     # El dato inventado TAL COMO LO ESCRIBIÓ el modelo. Si son varios, tienen
     # que aparecer en la MISMA línea (p. ej. puerto + etiqueta).
     escrito: list[str]
-    # El dato real del que cuelga la invención: con él se busca una línea real
-    # citable para probar el hueco texto↔línea.
+    # El dato real del que cuelga la invención: se prueba también como `dato`
+    # literal de la afirmación (lo que un modelo citaría para colar la invención).
     ancla: list[str]
     nota: str = ""
 
@@ -264,14 +353,9 @@ def medir_v1(corpus: pathlib.Path) -> dict:
                 raise ValueError(f"{inv.id}: {e!r} no está en la respuesta del modelo")
         maquina = examen[inv.tarea]["maquina"]
         hallazgos = lineas_con(capturas, maquina, inv.escrito)
-        # Hueco texto↔línea: citar una línea REAL con el ancla, con el texto
-        # de la invención. `verificar` recibe la captura de ese comando.
-        caps = [cu.captura for cu in capturas]
-        veredictos = sorted({
-            verificar(Afirmacion(maquina, f"[{inv.id}] {inv.nota}", h["comando"], h["linea"]),
-                      caps).estado
-            for h in lineas_con(capturas, maquina, inv.ancla)
-        })
+        ligada = _juzgar_con_regla_ligada(capturas, maquina, final, inv.escrito,
+                                          inv.escrito + inv.ancla,
+                                          publicar=not examen[inv.tarea]["clientes"])
         filas.append({
             "id": inv.id, "tarea": inv.tarea, "maquina": maquina,
             "escrito": inv.escrito, "nota": inv.nota,
@@ -279,18 +363,24 @@ def medir_v1(corpus: pathlib.Path) -> dict:
                                          if cu.captura.maquina == maquina}),
             "atrapable_por_construccion": not hallazgos,
             "lineas_que_lo_contienen": hallazgos,
-            "veredictos_citando_linea_real_con_ancla": veredictos,
-            "pasa_el_verificador_con_una_cita_real": RESPALDADA in veredictos,
+            "regla_ligada": ligada,
         })
     no_atrapables = [f["id"] for f in filas if not f["atrapable_por_construccion"]]
+
+    def _pasan(clave):
+        return [f["id"] for f in filas if f["regla_ligada"][clave]["pasa"]]
     return {
+        "regla_ligada": {
+            "pasan_texto_minimo_dato_literal": _pasan("texto_minimo_dato_literal"),
+            "pasan_texto_minimo_cualquier_dato": _pasan("texto_minimo_cualquier_dato"),
+            "pasan_linea_respuesta_dato_literal": _pasan("linea_respuesta_dato_literal"),
+            "pasan_linea_respuesta_cualquier_dato": _pasan("linea_respuesta_cualquier_dato"),
+        },
         "invenciones_totales": total,
         "filas": filas,
         "atrapables_por_construccion": total - len(no_atrapables),
         "no_atrapables": no_atrapables,
         "v1_pasa": not no_atrapables,
-        "pasan_con_cita_real_hoy": [f["id"] for f in filas
-                                    if f["pasa_el_verificador_con_una_cita_real"]],
     }
 
 
@@ -403,8 +493,11 @@ def medir_v2(corpus: pathlib.Path) -> dict:
             if clientes:
                 return [{"comando_hash": _hash(h["comando"]), "flujo": h["flujo"]} for h in hs]
             return hs
+        ligada = _juzgar_con_regla_ligada(capturas, maquina, final, escrito,
+                                          escrito + nucleo, publicar=not clientes)
         filas.append({
             "id": id_, "tarea": tarea, "maquina": maquina, "nota": nota,
+            "regla_ligada": ligada,
             "escrito": [f"<cliente:{_hash(e)}>" for e in escrito] if clientes else escrito,
             "nucleo": [f"<cliente:{_hash(e)}>" for e in nucleo] if clientes else nucleo,
             "literal_respaldado": bool(lit), "lineas_literal": _ver(lit),
@@ -412,7 +505,16 @@ def medir_v2(corpus: pathlib.Path) -> dict:
         })
     fp_lit = [f["id"] for f in filas if not f["literal_respaldado"]]
     fp_nuc = [f["id"] for f in filas if not f["nucleo_respaldado"]]
+
+    def _sin(clave):
+        return [f["id"] for f in filas if not f["regla_ligada"][clave]["pasa"]]
     return {
+        "regla_ligada": {
+            "sin_respaldo_texto_minimo_dato_literal": _sin("texto_minimo_dato_literal"),
+            "sin_respaldo_texto_minimo_cualquier_dato": _sin("texto_minimo_cualquier_dato"),
+            "sin_respaldo_linea_respuesta_dato_literal": _sin("linea_respuesta_dato_literal"),
+            "sin_respaldo_linea_respuesta_cualquier_dato": _sin("linea_respuesta_cualquier_dato"),
+        },
         "tareas_limpias": limpias,
         "datos_medidos": len(filas),
         "filas": filas,

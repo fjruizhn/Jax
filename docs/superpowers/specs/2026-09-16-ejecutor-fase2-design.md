@@ -123,6 +123,15 @@ El transporte valida antes de entregar. Lo que no cita, **no sale**.
 >
 > Detalle y cifras: `scripts/ejecutor_fase2/reproducir_u3.py` y la decisión de rediseño que se
 > tome a partir de esto.
+>
+> **SEGUNDA MEDICIÓN, tras agregar el campo `dato` y ligar afirmación y cita (mismo día):**
+> tampoco confirma lo esperado. Se esperaba V1a 8 de 8 y V2 en 2. Dio **V1a 2 de 8** con cualquier
+> cita y **V2 entre 3 y 5**. **El verificador ata NÚMEROS, no PALABRAS**: las reglas «el dato está
+> en la línea» y «el dato está en el texto» las cumple cualquier subcadena común, hasta una letra
+> (`dato="M"` respalda «el servidor está en Marte»). Atrapa números inventados o alterados
+> (`131,074`, `91 GB`, `512 TB` colado junto a un dato verdadero) pero **no etiquetas**: «el 8188
+> es Docker multi-hilo», citando la línea real del puerto, sale `respaldada`. Es la invención real
+> de la tarea 5 de U3. **Techo medido de la cita literal: 2 de las 11 invenciones de U3.**
 
 Verificar una cita es una **búsqueda de subcadena** contra el stdout capturado: o la línea está
 literal en la salida o no está. No hay juicio, no hay umbral, no hay calibración.
