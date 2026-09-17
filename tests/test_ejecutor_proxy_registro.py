@@ -132,7 +132,8 @@ def test_pide_identidad_y_rechaza_respuesta_comprimida(tmp_path):
 def test_registro_corrupto_no_arranca(tmp_path):
     (tmp_path / "registro.jsonl").write_bytes(b'{"n":1,"prev":"0"}\n{"n":2')
     cfg = proxy_carril.Config(upstream="http://127.0.0.1:9", raiz=tmp_path, tope_s=1, host="127.0.0.1", puerto=0,
-                              registro=tmp_path / "registro.jsonl")
+                              registro=tmp_path / "registro.jsonl", pausa=tmp_path / "PAUSA",
+                              latido=tmp_path / "latido", latido_max_s=60)
     with pytest.raises(R.RegistroCorrupto):
         _correr(proxy_carril.arrancar(cfg))
 

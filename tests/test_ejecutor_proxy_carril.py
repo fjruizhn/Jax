@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from jax.ejecutor.cita import Motivo
+from jax.ejecutor.contratos.pausa import latir
 from jax.ejecutor.prioridad import carril_mesa
 from jax.ejecutor.proxy_carril import (
     CONFIG_FALTA, CONFIG_INVALIDA, ESPERA_AGOTADA, UPSTREAM_INALCANZABLE, Config,
@@ -128,8 +129,12 @@ class Upstream:
 
 class Proxy:
     def __init__(self, upstream_url, raiz, tope_s):
+        # C5: sin pausa del Ejecutor y con un vigía que acaba de latir (lo prueban
+        # test_ejecutor_proxy_pausa.py); estos tests miran el carril y el registro.
         self.cfg = Config(upstream=upstream_url, raiz=raiz, tope_s=tope_s,
-                          host="127.0.0.1", puerto=0, registro=raiz / "registro.jsonl")
+                          host="127.0.0.1", puerto=0, registro=raiz / "registro.jsonl",
+                          pausa=raiz / "PAUSA", latido=raiz / "latido", latido_max_s=3600)
+        latir(self.cfg.latido)
 
     async def __aenter__(self):
         self.server = await arrancar(self.cfg)
@@ -388,6 +393,9 @@ _ENTORNO = {
     "JAX_PROXY_CARRIL_TOPE_S": "120",
     "JAX_PROXY_CARRIL_PUERTO": "8199",
     "JAX_EJECUTOR_REGISTRO": "/var/log/jax-ejecutor/registro.jsonl",
+    "JAX_EJECUTOR_PAUSA": "/etc/jax/interruptor/EJECUTOR_PAUSA",
+    "JAX_EJECUTOR_VIGIA_LATIDO": "/var/lib/jax-ejecutor/vigia.latido",
+    "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30",
 }
 
 
@@ -397,6 +405,8 @@ def test_config_sale_del_entorno_sin_upstream_hardcodeado():
     assert (str(cfg.raiz), cfg.tope_s, cfg.puerto) == ("/srv/ejemplo/locks", 120.0, 8199)
     assert cfg.host == "127.0.0.1", "sin HOST, sólo loopback: el proxy no autentica"
     assert str(cfg.registro) == "/var/log/jax-ejecutor/registro.jsonl"
+    assert (str(cfg.pausa), str(cfg.latido), cfg.latido_max_s) == (
+        "/etc/jax/interruptor/EJECUTOR_PAUSA", "/var/lib/jax-ejecutor/vigia.latido", 30.0)
 
 
 @pytest.mark.parametrize("variable", sorted(_ENTORNO))
@@ -411,6 +421,9 @@ def test_config_sin_una_obligatoria_falla_cerrado(variable):
     ("JAX_PROXY_CARRIL_TOPE_S", "mucho"), ("JAX_PROXY_CARRIL_TOPE_S", "-1"),
     ("JAX_PROXY_CARRIL_PUERTO", "8199.5"), ("JAX_PROXY_CARRIL_UPSTREAM", "ollama:11434"),
     ("JAX_EJECUTOR_REGISTRO", "relativa/registro.jsonl"),
+    ("JAX_EJECUTOR_PAUSA", "relativa/PAUSA"), ("JAX_EJECUTOR_VIGIA_LATIDO", "relativa/latido"),
+    ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "0"), ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "nan"),
+    ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "inf"),
 ])
 def test_config_invalida_falla_cerrado(variable, valor):
     with pytest.raises(ConfigInvalida) as err:
