@@ -120,9 +120,11 @@ def tabla_exclusiva() -> bool:
 requiere_tabla_exclusiva = pytest.mark.skipif(
     not tabla_exclusiva(),
     reason=(
-        f"Ruling R50: aserción global sobre facet_health_event/alert y DELETE sin "
-        f"filtro; corre sólo con {VARIABLE_TABLA_EXCLUSIVA}=1 (base exclusiva, job "
-        f"facet-health-io). En una base compartida borraría filas ajenas."
+        f"Ruling R50: test global -- check_facet_health() lee y reescribe TODA la tabla "
+        f"(facet_health_event y facet_health_alert: facets conocidos, ledger y poda) y el "
+        f"test la vacía sin filtro. Se habilita con {VARIABLE_TABLA_EXCLUSIVA}=1 sólo con "
+        f"base exclusiva (job facet-health-io de policy.yml). En una base compartida "
+        f"borraría filas ajenas."
     ),
 )
 

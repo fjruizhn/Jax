@@ -1504,8 +1504,13 @@ jobs:
           #   colecta; el motivo nombra la regla; la variable vive sólo en el job
           #   facet-health-io (MariaDB propia). Rojo contra 49f4faa: 7 failed (sin compuerta).
           #   Este job no corre _facet_health_io_test.py: su "N passed" no cambia por los skips.
-          grep -qE "^1117 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1117 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1117 -> 1118 el 2026-09-17 (R50, condición 1): +1 en
+          #   test_facet_health_tabla_exclusiva.py -- el motivo del skip sale en `pytest -rs`
+          #   y dice por qué es global (check_facet_health() lee y reescribe TODA la tabla) y
+          #   qué variable lo habilita; el test del motivo exige esas partes. Rojo contra
+          #   6f8bbd5: 2 failed (el motivo no nombraba check_facet_health).
+          grep -qE "^1118 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1118 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

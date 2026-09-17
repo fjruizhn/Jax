@@ -69,7 +69,32 @@ def test_el_skip_nombra_la_regla_y_el_por_que(monkeypatch):
     razones = [mk.kwargs["reason"] for mk in m.test_tabla_VACIA_alerta_igual_bajo___system__.pytestmark
                if mk.name == "skipif" and "R50" in mk.kwargs.get("reason", "")]
     assert len(razones) == 1
-    assert VARIABLE in razones[0] and "borraría filas ajenas" in razones[0]
+    # Condición 1 de la sesión principal sobre R50: el motivo dice POR QUÉ es
+    # global y QUÉ variable lo habilita. Expected contra 6f8bbd5: no nombraba
+    # check_facet_health ni que lee y reescribe la tabla entera.
+    for parte in ("check_facet_health()", "lee y reescribe", "TODA la tabla",
+                  f"{VARIABLE}=1", "base exclusiva", "borraría filas ajenas"):
+        assert parte in razones[0], (parte, razones[0])
+
+
+def test_el_motivo_aparece_en_el_resumen_rs_de_pytest(tmp_path):
+    """El skip se ve en `pytest -rs` con el motivo completo (sin base: el
+    archivo se colecta y los tres globales se saltan antes de tocar la DB).
+    Sin JAX_DB_HOST los cinco quedan por el skip de "necesita MariaDB"; con uno
+    de mentira que termina en _test, sólo los tres de R50 se saltan por R50 y
+    los demás no se ejecutan (se deseleccionan con -k)."""
+    entorno = {k: v for k, v in os.environ.items() if k != VARIABLE}
+    entorno.update({"PYTHONPATH": ".:las_manos", "JAX_DB_HOST": "127.0.0.1", "JAX_DB_PORT": "1",
+                    "JAX_DB_NAME": "jax_memory_test", "COLUMNS": "400"})
+    seleccion = " or ".join(GLOBALES)
+    salida = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-k", seleccion, str(ARCHIVO)],
+        cwd=RAIZ, env=entorno, capture_output=True, text=True, timeout=60,
+    ).stdout
+    lineas = [l for l in salida.splitlines() if l.startswith("SKIPPED")]
+    assert len(lineas) == 3, salida[-800:]
+    for linea in lineas:
+        assert "check_facet_health()" in linea and f"{VARIABLE}=1" in linea, linea
 
 
 def test_solo_el_job_con_mariadb_propia_define_la_variable():
