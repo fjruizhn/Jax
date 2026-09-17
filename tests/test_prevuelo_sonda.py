@@ -692,3 +692,29 @@ def test_motor_decide_el_cobro_por_el_status(monkeypatch, status, cobrable):
         r = asyncio.run(sonda.sondear("kimi", d))
     assert not r.ok
     assert uso.await_count == (1 if cobrable else 0)
+
+
+# ---------------------------------------------------------------------------
+# Pasada R37, 1: wait_for y httpx usaban el MISMO timeout y el reloj de
+# wait_for arranca antes, así que un connect colgado salía como TimeoutError
+# (cobrado) y la clasificación ConnectTimeout (no cobrado) era código muerto.
+# wait_for lleva ahora un margen declarado por encima del timeout de httpx.
+# ---------------------------------------------------------------------------
+
+def test_connect_colgado_sale_como_connecttimeout_y_no_se_cobra(monkeypatch):
+    async def post(self, url, headers=None, json=None, **kw):
+        # Lo que hace httpx con timeout=1: espera su timeout de connect (un
+        # poco más, por el trabajo alrededor) y levanta ConnectTimeout.
+        await asyncio.sleep(1.2)
+        raise httpx.ConnectTimeout("connect colgado")
+
+    uso = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_TIMEOUT_S", "1")
+    with patch("httpx.AsyncClient.post", post), \
+         patch.object(sonda, "resolve_facet", AsyncMock(return_value=_faceta())), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", uso):
+        r = asyncio.run(sonda.sondear("jekyll", _despacho()))
+    assert not r.ok and r.detalle == "timeout de sonda (1s)"
+    uso.assert_not_awaited()

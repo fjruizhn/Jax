@@ -81,6 +81,15 @@ MENSAJE_DE_SONDA = "Respondé solamente: ok"
 REQUEST_TYPE_SONDA = "preflight_probe"
 REQUEST_TYPE_SONDA_ESTIMADA = "preflight_probe_est"
 _LARGO_DETALLE = 200
+# Pasada R37: segundos que wait_for espera POR ENCIMA del timeout de httpx.
+# Con el mismo valor, el reloj de wait_for (que arranca antes que el de
+# httpx) ganaba siempre: un connect colgado salía como TimeoutError genérico
+# -- cobrado -- en vez de httpx.ConnectTimeout -- no cobrado. El margen deja
+# que la excepción CLASIFICADA de httpx llegue primero cuando aplica; wait_for
+# queda como techo total (httpx acota cada fase, no la suma). Es estructural,
+# no de configuración: sólo tiene que cubrir el trabajo alrededor del
+# timeout de httpx dentro de la misma llamada.
+MARGEN_DE_WAIT_FOR_S = 1
 
 
 @dataclass(frozen=True)
@@ -311,7 +320,7 @@ async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
     # (_pudo_cobrarse); ver el docstring del módulo.
     cobrable = True
     try:
-        resultado = await asyncio.wait_for(llamada(timeout), timeout=timeout)
+        resultado = await asyncio.wait_for(llamada(timeout), timeout=timeout + MARGEN_DE_WAIT_FOR_S)
     except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
         resultado = ResultadoSonda(False, f"timeout de sonda ({timeout}s)", uso_medido=False)
         cobrable = _pudo_cobrarse(exc)

@@ -1393,8 +1393,12 @@ jobs:
           # 1068 -> 1069 el 2026-09-17 (Ruling R36): +1 en test_jacobs_cancel_reaper_epoca.py
           #   -- con un paso en curso de 1800 s el umbral del running es 3600 s y el
           #   corte del CAS usa ese umbral (3700 s sin avance se cosecha, 1900 s no).
-          grep -qE "^1069 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1069 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1069 -> 1070 el 2026-09-17 (pasada R37, 1): +1 en test_prevuelo_sonda.py --
+          #   un connect colgado más que el timeout de httpx sale como ConnectTimeout y
+          #   no se cobra: wait_for lleva MARGEN_DE_WAIT_FOR_S=1 sobre el timeout de
+          #   httpx. Rojo contra e50a6e2: wait_for ganaba y se cobraba (Awaited 1 times).
+          grep -qE "^1070 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1070 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
