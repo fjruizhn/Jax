@@ -230,6 +230,15 @@ async def preflight(req: PreflightRequest) -> dict:
             "code": "plan_rechazado",
             "detalle": str(exc),
         }) from exc
+    except Exception as exc:  # fail-closed: build() con pasos explícitos sólo lee la gobernanza de la base; si no puede, no hay pre-vuelo (spec §8: 503, nunca 500 genérico ni veredicto)
+        # Ruling R38 (2026-09-17): el OperationalError 2013 de
+        # get_motor_governance() bajo carga salía de acá sin atrapar y el
+        # cliente recibía un 500.
+        motivo = _motivo_redactado(exc)
+        logger.error("pre-vuelo no disponible (gobernanza del plan): %s", motivo, exc_info=True)
+        raise HTTPException(
+            status_code=503, detail={"code": "prevuelo_no_disponible", "motivo": motivo},
+        ) from exc
     veredicto = await _prevuelo_o_503(
         steps, {"objective": req.objective}, user_id=req.user_id, tenant_id=req.tenant_id,
     )

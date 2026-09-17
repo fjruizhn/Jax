@@ -71,11 +71,37 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 # del event loop cada una más el handshake en la base. Ahora el pre-vuelo
 # toma UNA conexión de este pool y la pasa a los dos lectores.
 #
+# Ruling R38 (2026-09-17): el pool es del STORE, no sólo del pre-vuelo. Medido
+# a c=50 sostenido contra /jacobs/preflight: 0 %, 13 %, 49 % y 61 % de errores
+# (OperationalError 2013) por get_motor_governance() abriendo una conexión por
+# pedido fuera del pool; el inventario (r38-report.md) encontró lo mismo en
+# crear, continue, resume y approve-step. Ahora van por este pool las lecturas
+# y las escrituras SIN condición de esos caminos (pipeline_get,
+# steps_by_pipeline, pipeline_count_active, get_motor_governance,
+# pipeline_create, step_upsert, pipeline_update_status, event_append): son
+# autocommit, no miran el conteo de filas y no dejan estado de sesión, así que
+# la conexión que vuelve al pool vuelve igual a como salió. Quedan DEDICADAS
+# a propósito: GET_LOCK (candado_de_activos, el candado vive en la sesión) y
+# las escrituras condicionales con CLIENT.FOUND_ROWS (ver abajo), además de
+# init_tables (cambia lock_wait_timeout de la sesión). Ninguna de estas
+# funciones pide una segunda conexión del pool mientras tiene una: con el pool
+# lleno, eso sería esperar a sí misma.
+#
 # - Un pool por proceso y por event loop: se crea perezosamente en el primer
 #   pedido y queda atado al loop que lo creó (aiomysql.Pool guarda el loop).
-#   Usarlo desde otro loop se niega con RuntimeError -- fallaría más tarde con
-#   un error críptico. LAS MANOS lo cierra en su shutdown y el CLI
+#   Usarlo desde otro loop VIVO se niega con RuntimeError -- fallaría más tarde
+#   con un error críptico. LAS MANOS lo cierra en su shutdown y el CLI
 #   (tools/jacobs_relaunch.py) antes de salir.
+# - R38: el pool se cierra también CUANDO SE APAGA SU LOOP. Los tests y los
+#   scripts corren un asyncio.run por llamada al store; sin esto el loop
+#   siguiente chocaba con el RuntimeError de arriba, y soltar el pool viejo sin
+#   cerrarlo deja que el recolector intente cerrar sus sockets sobre un loop
+#   muerto (PytestUnraisableExceptionWarning, medido: +31 en gobernanza-db). Un
+#   generador asíncrono guardián, arrancado en el loop del pool, lo cierra en
+#   su `finally`: asyncio.run (y uvicorn, que corre sobre asyncio.Runner)
+#   llaman loop.shutdown_asyncgens() antes de cerrar el loop. Un loop que se
+#   cerró SIN ese paso (loop.close() a mano) deja un pool que no puede volver
+#   a usarse nunca: se suelta y se crea otro.
 # - minsize=0: crear el pool no toca la base; la primera conexión se abre al
 #   pedirla, así una base caída falla en el pedido (503), no en un pool roto
 #   guardado.
@@ -99,7 +125,9 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 #   puede tener filas sin leer o el socket roto. Las que la base cortó en
 #   reposo (wait_timeout) las descarta el propio Pool de aiomysql al pedirlas
 #   (EOF en el lector).
-_pool_de_lectura_estado: tuple[asyncio.AbstractEventLoop, aiomysql.Pool, asyncio.Semaphore] | None = None
+_pool_de_lectura_estado: tuple[
+    asyncio.AbstractEventLoop, aiomysql.Pool, asyncio.Semaphore, AsyncIterator[None]
+] | None = None
 # El candado sólo serializa la CREACIÓN (dos primeros pedidos a la vez no
 # crean dos pools; hoy create_pool con minsize=0 no cede el loop antes de
 # volver, pero con minsize>0 conectaría al crear y la carrera sería real --
@@ -108,19 +136,41 @@ _pool_de_lectura_estado: tuple[asyncio.AbstractEventLoop, aiomysql.Pool, asyncio
 _candado_de_creacion: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
 
 
+async def _guardian_del_pool(pool: aiomysql.Pool) -> AsyncIterator[None]:
+    """Vive suspendido mientras vive el pool. Si el loop se apaga con el pool
+    abierto (shutdown_asyncgens), lo cierra en ese loop. terminate() y no
+    close(): a esa altura asyncio.run ya canceló las tareas y nadie puede
+    devolver una conexión; esperar la devolución colgaría el apagado."""
+    global _pool_de_lectura_estado
+    try:
+        yield
+    finally:
+        if _pool_de_lectura_estado is not None and _pool_de_lectura_estado[1] is pool:
+            _pool_de_lectura_estado = None
+        if not pool.closed:
+            pool.terminate()
+            await pool.wait_closed()
+
+
 def _pool_del_loop(
     loop: asyncio.AbstractEventLoop,
-) -> tuple[aiomysql.Pool, asyncio.Semaphore] | None:
+) -> tuple[aiomysql.Pool, asyncio.Semaphore, AsyncIterator[None]] | None:
+    global _pool_de_lectura_estado
     if _pool_de_lectura_estado is None:
         return None
-    duenio, pool, turno = _pool_de_lectura_estado
+    duenio, pool, turno, guardian = _pool_de_lectura_estado
+    if duenio is not loop and duenio.is_closed():
+        # Loop cerrado sin shutdown_asyncgens (ver el bloque de arriba): no
+        # hay loop donde cerrar el pool; se suelta.
+        _pool_de_lectura_estado = None
+        return None
     if duenio is not loop:
         raise RuntimeError(
             "el pool de lectura de Jacobs se creó en otro event loop: hay que "
             "cerrarlo con store.cerrar_pool() en el loop que lo creó antes de "
             "pedir conexiones desde este"
         )
-    return pool, turno
+    return pool, turno, guardian
 
 
 async def _pool_de_lectura() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
@@ -128,7 +178,7 @@ async def _pool_de_lectura() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
     loop = asyncio.get_running_loop()
     actual = _pool_del_loop(loop)
     if actual is not None:
-        return actual
+        return actual[0], actual[1]
     if _candado_de_creacion is None or _candado_de_creacion[0] is not loop:
         _candado_de_creacion = (loop, asyncio.Lock())
     async with _candado_de_creacion[1]:
@@ -141,9 +191,11 @@ async def _pool_de_lectura() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
                 minsize=0, maxsize=tamanio,
                 **_db_cfg(), connect_timeout=db_connect_timeout_seconds(),
             )
-            actual = (pool, asyncio.Semaphore(tamanio))
+            guardian = _guardian_del_pool(pool)
+            await anext(guardian)  # queda registrado en ESTE loop
+            actual = (pool, asyncio.Semaphore(tamanio), guardian)
             _pool_de_lectura_estado = (loop, *actual)
-    return actual
+    return actual[0], actual[1]
 
 
 @asynccontextmanager
@@ -178,10 +230,11 @@ async def cerrar_pool() -> None:
     actual = _pool_del_loop(asyncio.get_running_loop())
     if actual is None:
         return
-    pool, _ = actual
+    pool, _, guardian = actual
     _pool_de_lectura_estado = None
     pool.close()
     await pool.wait_closed()
+    await guardian.aclose()  # ya cerrado: su finally no hace nada más
 
 
 # Hijo de "jacobs": LAS MANOS le pone handler INFO a ese logger al arrancar
@@ -402,8 +455,7 @@ async def init_tables() -> None:
 # ----------------------------------------------------------------
 
 async def pipeline_create(p: Pipeline) -> None:
-    conn = await get_conn()
-    try:
+    async with conexion_de_lectura() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -422,20 +474,15 @@ async def pipeline_create(p: Pipeline) -> None:
                     p.user_id, p.tenant_id, p.run_epoch,
                 ),
             )
-    finally:
-        conn.close()
 
 
 async def pipeline_get(pipeline_id: str) -> Pipeline | None:
-    conn = await get_conn()
-    try:
+    async with conexion_de_lectura() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s", (pipeline_id,)
             )
             row = await cur.fetchone()
-    finally:
-        conn.close()
     if not row:
         return None
     return _row_to_pipeline(row)
@@ -448,8 +495,7 @@ async def pipeline_update_status(
     context: dict | None = None,
 ) -> None:
     now = time.time()
-    conn = await get_conn()
-    try:
+    async with conexion_de_lectura() as conn:
         async with conn.cursor() as cur:
             if current_step_index is not None and context is not None:
                 await cur.execute(
@@ -474,8 +520,6 @@ async def pipeline_update_status(
                     "UPDATE jacobs_pipelines SET status=%s, updated_at=%s WHERE pipeline_id=%s",
                     (status.value, now, pipeline_id),
                 )
-    finally:
-        conn.close()
 
 
 def _sql_candidatos_del_reaper(n_estados: int) -> str:
@@ -518,16 +562,18 @@ _SQL_CONTAR_ACTIVOS = "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('p
 
 async def pipeline_count_active(conexion: aiomysql.Connection | None = None) -> int:
     """Pipelines activos. Con `conexion` (la del candado de activos, F3) lee por
-    ella y no la cierra; sin ella abre y cierra una propia."""
-    conn = conexion if conexion is not None else await get_conn()
-    try:
-        async with conn.cursor() as cur:
-            await cur.execute(_SQL_CONTAR_ACTIVOS)
-            row = await cur.fetchone()
-            return int(row[0]) if row else 0
-    finally:
-        if conexion is None:
-            conn.close()
+    ella y no la cierra; sin ella lee por una del pool (R38)."""
+    if conexion is not None:
+        return await _contar_activos(conexion)
+    async with conexion_de_lectura() as conn:
+        return await _contar_activos(conn)
+
+
+async def _contar_activos(conn: aiomysql.Connection) -> int:
+    async with conn.cursor() as cur:
+        await cur.execute(_SQL_CONTAR_ACTIVOS)
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
 
 # ----------------------------------------------------------------
@@ -854,8 +900,7 @@ def _row_to_pipeline(row: dict) -> Pipeline:
 # ----------------------------------------------------------------
 
 async def step_upsert(s: Step) -> None:
-    conn = await get_conn()
-    try:
+    async with conexion_de_lectura() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -885,21 +930,16 @@ async def step_upsert(s: Step) -> None:
                     json.dumps(s.depends_on, ensure_ascii=False),
                 ),
             )
-    finally:
-        conn.close()
 
 
 async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
-    conn = await get_conn()
-    try:
+    async with conexion_de_lectura() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_steps WHERE pipeline_id=%s ORDER BY step_index",
                 (pipeline_id,),
             )
             rows = await cur.fetchall()
-    finally:
-        conn.close()
     result = []
     for row in rows:
         input_raw = row.get("input_ref") or "{}"
@@ -967,9 +1007,13 @@ async def get_motor_governance() -> dict[str, dict]:
     Costo medido en vivo (2026-08-21, DB real): 3 SELECTs, 0.00024s de
     ejecución total en el servidor (motor: 4 filas, capability: ~17,
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
-    no solo en plan-build."""
-    conn = await get_conn()
-    try:
+    no solo en plan-build.
+
+    Ruling R38 (2026-09-17): por el pool del store, no por una conexión propia
+    -- era la conexión por pedido que tiraba /jacobs/preflight a c=50. Sin
+    caché: cada llamada sigue leyendo las tres tablas (misma foto que antes);
+    un error de la base se propaga igual (fail-closed)."""
+    async with conexion_de_lectura() as conn:
         async with conn.cursor() as cur:
             await cur.execute("SELECT `key`, has_tool_access FROM motor")
             motors: dict[str, bool] = {key: bool(has_tools) for key, has_tools in await cur.fetchall()}
@@ -1016,8 +1060,6 @@ async def get_motor_governance() -> dict[str, dict]:
                     "auditor_motor": None,
                 })
                 capabilities[capability_key]["allowed_motors"].append(motor_key)
-    finally:
-        conn.close()
     return {"capabilities": capabilities, "motors": motors}
 
 
@@ -1031,8 +1073,7 @@ async def event_append(
     payload: dict | None = None,
     step_id: str | None = None,
 ) -> None:
-    conn = await get_conn()
-    try:
+    async with conexion_de_lectura() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """INSERT INTO jacobs_events (pipeline_id, step_id, event_type, payload, ts)
@@ -1043,8 +1084,6 @@ async def event_append(
                     time.time(),
                 ),
             )
-    finally:
-        conn.close()
 
 
 async def events_by_pipeline(pipeline_id: str) -> list[dict[str, Any]]:

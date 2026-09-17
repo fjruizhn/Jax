@@ -615,6 +615,7 @@ jobs:
           tests/test_medir_min_output_tokens.py
           tests/test_jacobs_cancel_reaper_epoca.py
           tests/test_prevuelo_catalogo_de_motores_compartido.py
+          tests/test_jacobs_conexiones_por_pedido.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -673,6 +674,7 @@ jobs:
             tests/test_medir_min_output_tokens.py \
             tests/test_jacobs_cancel_reaper_epoca.py \
             tests/test_prevuelo_catalogo_de_motores_compartido.py \
+            tests/test_jacobs_conexiones_por_pedido.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1407,8 +1409,24 @@ jobs:
           #   hyde_approved_<step_id> en el contexto guardado y en el del ejecutor
           #   (desvío 10, como continue); approve-step conserva la aprobación que da en
           #   el mismo pedido. Rojo contra e50a6e2: 2 failed (la marca vieja seguía).
-          grep -qE "^1074 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1074 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1074 -> 1085 el 2026-09-17 (Ruling R38): +9 test_jacobs_conexiones_por_pedido.py
+          #   -- con un doble que cuenta cada conexión abierta y de dónde, el segundo
+          #   pedido de /jacobs/preflight no abre ninguna; crear sólo abre la dedicada
+          #   del candado (GET_LOCK); continue la del candado y la transacción con
+          #   FOUND_ROWS; resume y approve-step sólo la escritura condicional de la
+          #   época; 50 preflight concurrentes no superan JAX_PREVUELO_DB_POOL_MAX;
+          #   /preflight con la base caída da 503 prevuelo_no_disponible (antes 500);
+          #   controles: rechazo del plan sigue 422 y crear con la base caída conserva
+          #   su error sin escribir. Rojo contra 2fd3778: 7 failed (get_motor_governance,
+          #   pipeline_get, steps_by_pipeline, pipeline_count_active, pipeline_create,
+          #   step_upsert y event_append abrían conexión propia por pedido; /preflight
+          #   daba OperationalError sin atrapar). +2 en test_prevuelo_pool.py -- al
+          #   apagarse el loop (shutdown_asyncgens) el pool se cierra y el loop siguiente
+          #   crea otro; un pool de un loop cerrado sin apagado se reemplaza. Rojo contra
+          #   2fd3778: 2 failed (RuntimeError 'otro event loop'). El test del pool de otro
+          #   loop pasa a usar un loop VIVO (el caso que sigue negándose).
+          grep -qE "^1085 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1085 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

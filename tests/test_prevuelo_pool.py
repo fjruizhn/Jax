@@ -385,23 +385,73 @@ def test_una_conexion_que_la_base_corto_en_reposo_no_se_reusa(base):
 
 
 def test_el_pool_de_otro_event_loop_no_se_usa_en_silencio(base):
-    """Un pool queda atado al loop que lo creó: usarlo desde otro loop fallaría
-    más tarde con un error críptico. Se niega de entrada, fail-closed."""
+    """Un pool queda atado al loop que lo creó: usarlo desde otro loop VIVO
+    fallaría más tarde con un error críptico. Se niega de entrada, fail-closed.
+    (R38: antes el loop dueño del test ya estaba cerrado; ese caso ahora
+    reemplaza el pool -- test siguiente.)"""
     async def crear():
         async with store.conexion_de_lectura():
             pass
 
-    asyncio.run(crear())  # sin cerrar_pool: el pool queda del loop viejo
+    duenio = asyncio.new_event_loop()
     try:
+        duenio.run_until_complete(crear())  # sin cerrar_pool y con el loop VIVO
         async def usar():
             async with store.conexion_de_lectura():
                 pass
         with pytest.raises(RuntimeError, match="otro event loop"):
             asyncio.run(usar())
     finally:
-        # El loop que lo creó ya cerró: no hay loop donde cerrarlo. Se suelta
-        # la referencia a mano (sólo el test; en un proceso real hay un loop).
+        duenio.run_until_complete(store.cerrar_pool())
+        duenio.close()
+    assert store._pool_de_lectura_estado is None
+
+
+def test_al_apagarse_el_loop_el_pool_se_cierra_y_el_siguiente_crea_otro(base):
+    """Ruling R38: el store entero pasa por el pool y los tests/scripts corren
+    un asyncio.run por llamada. Al apagarse el loop (shutdown_asyncgens) el
+    pool se cierra en ESE loop -- sin RuntimeError en el loop siguiente y sin
+    sockets que el recolector tenga que cerrar sobre un loop muerto.
+    Expected contra 2fd3778: el segundo asyncio.run choca con el pool viejo,
+    que sigue abierto -> RuntimeError 'otro event loop'."""
+    async def usar():
+        async with store.conexion_de_lectura() as conn:
+            return conn
+
+    try:
+        primera = asyncio.run(usar())  # sin cerrar_pool
+        estado_tras_el_primer_loop = store._pool_de_lectura_estado
+        segunda = asyncio.run(usar())
+    finally:
         store._pool_de_lectura_estado = None
+    assert estado_tras_el_primer_loop is None
+    assert primera.closed, "la conexión del loop apagado quedó abierta"
+    assert segunda is not primera and segunda.closed
+    assert len(base.abiertas) == 2
+
+
+def test_un_pool_de_un_loop_cerrado_sin_apagado_se_reemplaza(base):
+    """Un loop cerrado a mano (loop.close() sin shutdown_asyncgens) no corre
+    el guardián: su pool no puede volver a usarse nunca. El loop siguiente
+    crea otro en vez de fallar con 'otro event loop'.
+    Expected contra 2fd3778: RuntimeError 'otro event loop'."""
+    async def usar():
+        async with store.conexion_de_lectura() as conn:
+            return conn
+
+    viejo_loop = asyncio.new_event_loop()
+    try:
+        primera = viejo_loop.run_until_complete(usar())
+        viejo = store._pool_de_lectura_estado
+    finally:
+        viejo_loop.close()
+    try:
+        segunda = asyncio.run(usar())
+    finally:
+        store._pool_de_lectura_estado = None
+    assert viejo is not None
+    assert segunda is not primera
+    assert len(base.abiertas) == 2
 
 
 def test_from_db_sin_conexion_inyectada_sigue_abriendo_y_cerrando_la_suya(base):
