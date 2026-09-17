@@ -301,6 +301,18 @@ def _codigo_del_servidor_sano(e: BaseException) -> bool:
     return type(e) in _CLASES_DE_ERROR_DEL_SERVIDOR and _pymysql_err.error_map.get(codigo) is type(e)
 
 
+class ConexionInvalidada(RuntimeError):
+    """Uso de un envoltorio despues de salir de `conexion()`. Para entonces la
+    conexion real ya volvio al pool (y puede ser de otro pedido) o se cerro: se
+    falla sin tocarla."""
+
+
+_MENSAJE_INVALIDADA = (
+    "jacobs.store: esta conexion ya salio de `async with conexion()`; el socket "
+    "puede ser de otro pedido. Pedi otra con conexion()."
+)
+
+
 class CursorVigilado:
     """El cursor de `ConexionVigilada.cursor()`. Sus llamadas de uso normal
     (`execute`, `executemany`, `fetchone`, `fetchmany`, `fetchall`) cuentan como
@@ -310,10 +322,15 @@ class CursorVigilado:
 
     def __init__(self, conexion: "ConexionVigilada", crudo: aiomysql.Cursor):
         self._conexion = conexion
-        self._crudo = crudo
+        self.__crudo = crudo
         self._sin_buffer = isinstance(crudo, aiomysql.SSCursor)
         if self._sin_buffer:
             conexion._sin_buffer_abiertos += 1
+
+    @property
+    def _crudo(self) -> aiomysql.Cursor:
+        self._conexion._exigir_vigente()
+        return self.__crudo
 
     async def _vigilar(self, metodo, *args, **kwargs):
         c = self._conexion
@@ -382,15 +399,35 @@ class _CursorPendiente:
 
 class ConexionVigilada:
     """Lo que entrega `conexion()`. Delega en la conexion de aiomysql (`crudo`)
-    salvo `cursor()`, que devuelve un CursorVigilado."""
+    salvo `cursor()`, que devuelve un CursorVigilado.
+
+    Vale SOLO dentro del `async with`: al salir, `conexion()` la invalida antes
+    de devolver o cerrar el socket, y todo acceso posterior -- `crudo`,
+    `cursor()`, lo que pasa por `__getattr__` y los cursores que abrio -- lanza
+    ConexionInvalidada. Una tarea hermana que se quedo con el envoltorio no
+    puede mandar SQL por un socket que ya es de otro pedido."""
 
     def __init__(self, crudo: aiomysql.Connection):
-        self.crudo = crudo
+        self.__crudo = crudo
+        self.__vigente = True
         self.ultimo_error_sano: BaseException | None = None
         self._en_vuelo = 0
         self._sin_buffer_abiertos = 0
 
+    def _exigir_vigente(self) -> None:
+        if not self.__vigente:
+            raise ConexionInvalidada(_MENSAJE_INVALIDADA)
+
+    def _invalidar(self) -> None:
+        self.__vigente = False
+
+    @property
+    def crudo(self) -> aiomysql.Connection:
+        self._exigir_vigente()
+        return self.__crudo
+
     def cursor(self, *args, **kwargs) -> _CursorPendiente:
+        self._exigir_vigente()
         return _CursorPendiente(self, args, kwargs)
 
     def __getattr__(self, nombre):
@@ -448,11 +485,15 @@ async def conexion(desechable: bool = False):
     limpia = False
     try:
         yield vigilada
-        limpia = vigilada._sin_buffer_abiertos == 0
+        # Una llamada propia todavia en vuelo (tarea hermana): socket a mitad.
+        limpia = vigilada._sin_buffer_abiertos == 0 and vigilada._en_vuelo == 0
     except BaseException as e:
         limpia = vigilada.reutilizable_tras(e)
         raise
     finally:
+        # Antes de devolver o cerrar: quien se quedo con el envoltorio (una
+        # tarea hermana) ya no llega al socket.
+        vigilada._invalidar()
         try:
             if desechable or not limpia or not _sesion_reutilizable(conn):
                 conn.close()

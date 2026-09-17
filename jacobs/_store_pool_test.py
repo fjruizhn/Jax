@@ -75,6 +75,13 @@ class _ContadorDeConexiones:
         self._patch.stop()
 
 
+def _crudo(vigilada):
+    """La conexion real detras de un envoltorio, AUN invalidado: solo para que
+    los tests miren si el socket se cerro o volvio al pool despues del bloque.
+    Codigo de servicio nunca: ahi el acceso posterior lanza ConexionInvalidada."""
+    return vigilada._ConexionVigilada__crudo
+
+
 async def _a_lo_sumo(esperable, segundos: float = 15):
     """Toda espera de un test con tareas va acotada: un defecto (o una mutacion)
     tiene que dar un FAILED, no colgar la suite -- visto al mutar el semaforo."""
@@ -161,8 +168,8 @@ class SinFugasTest(_ConBase):
         with self.assertRaises(ZeroDivisionError):
             async with store.conexion() as conn:
                 1 / 0
-        self.assertTrue(conn.closed, "una conexion con estado desconocido volvio al pool")
-        self.assertNotIn(conn.crudo, pool._free)
+        self.assertTrue(_crudo(conn).closed, "una conexion con estado desconocido volvio al pool")
+        self.assertNotIn(_crudo(conn), pool._free)
         self.assertEqual(len(pool._used), 0, "conexion filtrada: sigue marcada en uso")
 
     async def test_error_de_sql_en_una_funcion_del_store_no_filtra(self):
@@ -189,7 +196,7 @@ class SinFugasTest(_ConBase):
         tarea.cancel()
         with self.assertRaises(asyncio.CancelledError):
             await _a_lo_sumo(tarea)
-        self.assertTrue(capturada[0].closed, "el socket a mitad de respuesta volvio al pool")
+        self.assertTrue(_crudo(capturada[0]).closed, "el socket a mitad de respuesta volvio al pool")
         self.assertEqual(len(pool._used), 0)
         self.assertEqual((await ada.una_fila("SELECT 1 AS uno"))["uno"], 1)
 
@@ -197,7 +204,7 @@ class SinFugasTest(_ConBase):
         pool, _ = await self._estado()
         async with store.conexion() as conn:
             await conn.autocommit(False)
-        self.assertTrue(conn.closed)
+        self.assertTrue(_crudo(conn).closed)
         async with store.conexion() as otra:
             async with otra.cursor() as cur:
                 await cur.execute("SELECT @@SESSION.autocommit")
@@ -208,7 +215,7 @@ class SinFugasTest(_ConBase):
             await conn.begin()
             async with conn.cursor() as cur:
                 await cur.execute("SELECT 1")
-        self.assertTrue(conn.closed)
+        self.assertTrue(_crudo(conn).closed)
 
     async def test_transaccion_abierta_se_descarta_aunque_aiomysql_no_lo_haga(self):
         """aiomysql 0.3.2 cierra en release() una conexion con transaccion
@@ -226,8 +233,8 @@ class SinFugasTest(_ConBase):
                 async with conn.cursor() as cur:
                     await cur.execute("SELECT 1")
         pool = await store.obtener_pool()
-        self.assertTrue(conn.closed, "una sesion con transaccion abierta volvio al pool")
-        self.assertNotIn(conn.crudo, pool._free)
+        self.assertTrue(_crudo(conn).closed, "una sesion con transaccion abierta volvio al pool")
+        self.assertNotIn(_crudo(conn), pool._free)
 
     async def test_si_aiomysql_falla_al_entregar_el_permiso_vuelve(self):
         """Sin devolver el permiso cuando `pool.acquire()` explota, cada falla
@@ -246,8 +253,8 @@ class SinFugasTest(_ConBase):
         pool, _ = await self._estado()
         async with store.conexion(desechable=True) as conn:
             pass
-        self.assertTrue(conn.closed)
-        self.assertNotIn(conn.crudo, pool._free)
+        self.assertTrue(_crudo(conn).closed)
+        self.assertNotIn(_crudo(conn), pool._free)
         self.assertEqual(len(pool._used), 0)
 
     async def test_conexion_limpia_vuelve_al_pool(self):
@@ -255,8 +262,8 @@ class SinFugasTest(_ConBase):
         async with store.conexion() as conn:
             pass
         pool = await store.obtener_pool()
-        self.assertFalse(conn.closed)
-        self.assertIn(conn.crudo, pool._free)
+        self.assertFalse(_crudo(conn).closed)
+        self.assertIn(_crudo(conn), pool._free)
 
 
 _TABLA_INEXISTENTE = "tabla_que_no_existe_pool_test"
@@ -296,11 +303,11 @@ class ErrorDelServidorTest(_ConBase):
     async def test_error_del_servidor_devuelve_la_conexion_sana(self):
         conn = await self._falla_en_el_servidor()
         pool = await store.obtener_pool()
-        self.assertFalse(conn.closed, "un error del servidor descarto una conexion sana")
-        self.assertIn(conn.crudo, pool._free)
+        self.assertFalse(_crudo(conn).closed, "un error del servidor descarto una conexion sana")
+        self.assertIn(_crudo(conn), pool._free)
         self.assertEqual(len(pool._used), 0)
         async with store.conexion() as otra:
-            self.assertIs(otra.crudo, conn.crudo)
+            self.assertIs(_crudo(otra), _crudo(conn))
             async with otra.cursor() as cur:
                 await cur.execute("SELECT 1, @@SESSION.autocommit")
                 self.assertEqual(await cur.fetchone(), (1, 1))
@@ -312,7 +319,7 @@ class ErrorDelServidorTest(_ConBase):
                 async with conn.cursor() as cur:
                     await cur.execute("SELECT 1")
                     await cur.execute(f"SELECT * FROM {_TABLA_INEXISTENTE}")
-        self.assertTrue(conn.closed, "una transaccion abierta volvio al pool tras un error")
+        self.assertTrue(_crudo(conn).closed, "una transaccion abierta volvio al pool tras un error")
 
     async def test_error_del_cliente_descarta_aunque_parezca_de_sql(self):
         """Perdida de conexion (2013), un error sin codigo del servidor o uno
@@ -330,7 +337,7 @@ class ErrorDelServidorTest(_ConBase):
                 with self.assertRaises(type(exc)):
                     async with store.conexion() as conn:
                         raise exc
-                self.assertTrue(conn.closed, f"{exc!r} devolvio la conexion al pool")
+                self.assertTrue(_crudo(conn).closed, f"{exc!r} devolvio la conexion al pool")
 
 
 async def _consulta(conn, sql: str):
@@ -368,7 +375,7 @@ class ErrorAtribuidoTest(_ConBase):
         with self.assertRaises(aiomysql.ProgrammingError):
             async with store.conexion() as conn:
                 raise ajeno
-        self.assertTrue(conn.closed, "un error de OTRA conexion devolvio esta al pool")
+        self.assertTrue(_crudo(conn).closed, "un error de OTRA conexion devolvio esta al pool")
 
     async def test_error_de_otra_conexion_del_pool_descarta(self):
         """Dos bloques del pool: el error marcado en uno no vale en el otro."""
@@ -377,8 +384,8 @@ class ErrorAtribuidoTest(_ConBase):
                 async with store.conexion() as vecina:
                     ajeno = await self._error_de(vecina)
                 raise ajeno
-        self.assertTrue(conn.closed)
-        self.assertFalse(vecina.closed)
+        self.assertTrue(_crudo(conn).closed)
+        self.assertFalse(_crudo(vecina).closed)
 
     async def test_error_relanzado_como_otro_descarta(self):
         with self.assertRaises(aiomysql.ProgrammingError):
@@ -387,7 +394,7 @@ class ErrorAtribuidoTest(_ConBase):
                     await self._error_de_y_relanza(conn)
                 except aiomysql.ProgrammingError as e:
                     raise aiomysql.ProgrammingError(*e.args) from None
-        self.assertTrue(conn.closed)
+        self.assertTrue(_crudo(conn).closed)
 
     async def test_error_ajeno_tras_uno_marcado_descarta(self):
         """El marcado se atrapo; lo que sale del bloque es otra cosa."""
@@ -395,14 +402,14 @@ class ErrorAtribuidoTest(_ConBase):
             async with store.conexion() as conn:
                 await self._error_de(conn)
                 raise RuntimeError("otra cosa")
-        self.assertTrue(conn.closed)
+        self.assertTrue(_crudo(conn).closed)
 
     async def test_gather_sin_hermana_viva_la_devuelve(self):
         with self.assertRaises(aiomysql.ProgrammingError):
             async with store.conexion() as conn:
                 await asyncio.gather(asyncio.sleep(0), self._error_de_y_relanza(conn))
-        self.assertFalse(conn.closed)
-        self.assertIn(conn.crudo, (await store.obtener_pool())._free)
+        self.assertFalse(_crudo(conn).closed)
+        self.assertIn(_crudo(conn), (await store.obtener_pool())._free)
 
     async def test_cursor_sin_buffer_abierto_descarta(self):
         """Resultados sin leer que el envoltorio SI conoce: un SSCursor abierto."""
@@ -413,7 +420,7 @@ class ErrorAtribuidoTest(_ConBase):
                 await cur.execute("SELECT seq FROM seq_1_to_10000")
                 await cur.fetchone()
                 raise e
-        self.assertTrue(conn.closed, "volvio al pool con un cursor sin buffer a medio leer")
+        self.assertTrue(_crudo(conn).closed, "volvio al pool con un cursor sin buffer a medio leer")
 
     async def test_cursor_sin_buffer_cerrado_la_devuelve(self):
         """Control del de arriba."""
@@ -423,7 +430,7 @@ class ErrorAtribuidoTest(_ConBase):
                     await cur.execute("SELECT seq FROM seq_1_to_10")
                     await cur.fetchall()
                 await self._error_de_y_relanza(conn)
-        self.assertFalse(conn.closed)
+        self.assertFalse(_crudo(conn).closed)
 
     async def test_error_real_del_servidor_fuera_de_la_lista_descarta(self):
         """El servidor responde 1927 (conexion matada) por el cursor vigilado.
@@ -434,7 +441,86 @@ class ErrorAtribuidoTest(_ConBase):
                                       "SET MYSQL_ERRNO = 1927, MESSAGE_TEXT = 'simulado'; END")
         self.assertEqual(ctx.exception.args[0], 1927)
         self.assertIsNone(conn.ultimo_error_sano)
-        self.assertTrue(conn.closed, "un 1927 del servidor devolvio la conexion al pool")
+        self.assertTrue(_crudo(conn).closed, "un 1927 del servidor devolvio la conexion al pool")
+
+
+class EnvoltorioInvalidadoTest(_ConBase):
+    """Revision de eca432b: una tarea hermana que conserva el envoltorio y lo
+    usa DESPUES de que la conexion volvio al pool la estaria usando para otro
+    pedido. Al salir de `conexion()` el envoltorio queda invalidado."""
+
+    TAMANIO = "1"  # un solo socket: el siguiente pedido recibe el mismo
+
+    async def _com_select(self, conn) -> int:
+        filas = await _consulta(conn, "SHOW SESSION STATUS LIKE 'Com_select'")
+        return int(filas[0][1])
+
+    async def test_hermana_que_despierta_despues_no_usa_la_conexion_de_otro(self):
+        evento = asyncio.Event()
+
+        async def hermana(c):
+            await evento.wait()
+            return await _consulta(c, "SELECT 'sql de la hermana'")
+
+        async with store.conexion() as conn:
+            crudo = conn.crudo
+            tarea = asyncio.create_task(hermana(conn))
+            await asyncio.sleep(0)
+
+        async with store.conexion() as otra:
+            self.assertIs(_crudo(otra), crudo, "el pool de tamano 1 no reentrego el mismo socket")
+            antes = await self._com_select(otra)
+            evento.set()
+            resultado = (await _a_lo_sumo(asyncio.gather(tarea, return_exceptions=True)))[0]
+            despues = await self._com_select(otra)
+        # SHOW STATUS no cuenta en Com_select: solo un SELECT de la hermana lo mueve.
+        self.assertEqual(despues - antes, 0, "el SQL de la hermana llego a la sesion del otro pedido")
+        self.assertIsInstance(resultado, store.ConexionInvalidada,
+                              f"la hermana uso la conexion de otro pedido: {resultado!r}")
+
+    async def test_todo_acceso_posterior_falla_sin_tocar_la_conexion(self):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur_abierto:
+                await cur_abierto.execute("SELECT 1")
+            cur_vivo = await conn.cursor()
+        accesos = (
+            lambda: conn.crudo,
+            lambda: conn.closed,
+            lambda: conn.cursor(),
+            lambda: conn.commit,
+            lambda: cur_vivo.rowcount,
+            lambda: cur_vivo.nextset,
+        )
+        for acceso in accesos:
+            with self.subTest(acceso=acceso):
+                with self.assertRaises(store.ConexionInvalidada):
+                    acceso()
+        for llamada in (lambda: cur_vivo.execute("SELECT 1"), lambda: cur_vivo.fetchall(),
+                        lambda: cur_vivo.close()):
+            with self.subTest(llamada=llamada):
+                with self.assertRaises(store.ConexionInvalidada):
+                    await llamada()
+        async with store.conexion() as otra:
+            self.assertEqual(await _consulta(otra, "SELECT 1"), ((1,),))
+
+    async def test_salida_normal_con_llamada_hermana_en_vuelo_cierra(self):
+        """La hermana ya esta leyendo cuando el bloque termina sin error: el
+        socket esta a mitad de una respuesta y no puede volver al pool."""
+        async with store.conexion() as conn:
+            tarea = asyncio.create_task(_consulta(conn, "SELECT SLEEP(0.5)"))
+            await asyncio.sleep(0.1)
+        cerrada = _crudo(conn).closed
+        await _a_lo_sumo(asyncio.gather(tarea, return_exceptions=True))
+        self.assertTrue(cerrada, "volvio al pool con una llamada propia en vuelo")
+        async with store.conexion() as otra:
+            self.assertEqual(await _consulta(otra, "SELECT 1"), ((1,),))
+
+    async def test_se_invalida_tambien_al_salir_con_error(self):
+        with self.assertRaises(RuntimeError):
+            async with store.conexion() as conn:
+                raise RuntimeError("x")
+        with self.assertRaises(store.ConexionInvalidada):
+            conn.cursor()
 
 
 class EnvoltorioPuroTest(unittest.IsolatedAsyncioTestCase):
@@ -553,7 +639,7 @@ class ErroresDeLockRealesTest(_ConBase):
                 await _consulta(conn, f"UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 2")
                 await _consulta(conn, self._ESPERA_CORTA)
         self.assertEqual(ctx.exception.args[0], 1205)
-        self.assertTrue(conn.closed, "volvio al pool con la transaccion abierta tras un 1205")
+        self.assertTrue(_crudo(conn).closed, "volvio al pool con la transaccion abierta tras un 1205")
 
     async def test_1205_real_en_autocommit_la_devuelve(self):
         """El 1205 de la lista blanca, de punta a punta: sin transaccion la
@@ -563,9 +649,9 @@ class ErroresDeLockRealesTest(_ConBase):
             async with store.conexion() as conn:
                 await _consulta(conn, self._ESPERA_CORTA)
         self.assertEqual(ctx.exception.args[0], 1205)
-        self.assertFalse(conn.closed, "un 1205 sin transaccion descarto una conexion sana")
+        self.assertFalse(_crudo(conn).closed, "un 1205 sin transaccion descarto una conexion sana")
         async with store.conexion() as otra:
-            self.assertIs(otra.crudo, conn.crudo)
+            self.assertIs(_crudo(otra), _crudo(conn))
             self.assertEqual(await _consulta(otra, "SELECT 1"), ((1,),))
 
     async def test_1213_real_con_transaccion_descarta(self):
@@ -586,7 +672,7 @@ class ErroresDeLockRealesTest(_ConBase):
                 await asyncio.sleep(0.3)
                 await _a_lo_sumo(_consulta(conn, f"UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 1"))
         self.assertEqual(ctx.exception.args[0], 1213)
-        self.assertTrue(conn.closed, "volvio al pool tras un deadlock con transaccion")
+        self.assertTrue(_crudo(conn).closed, "volvio al pool tras un deadlock con transaccion")
         await _a_lo_sumo(espera)
 
 
@@ -867,7 +953,7 @@ class CierreAcotadoTest(_ConBase):
                 await store.cerrar_pool()
             self.assertLess(time.monotonic() - t0, 3.0)
             self.assertTrue(pool.closed)
-            self.assertTrue(capturada[0].closed)
+            self.assertTrue(_crudo(capturada[0]).closed)
             tarea.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await _a_lo_sumo(tarea)
@@ -909,8 +995,8 @@ class VersionDeAiomysqlTest(unittest.TestCase):
         self.assertEqual(pins, [f"aiomysql=={store.AIOMYSQL_REVISADO}"])
 
     def test_pymysql_instalado_y_fijado_es_el_revisado(self):
-        """La atribucion de un error a la conexion lee nombres de frame y la
-        tabla error_map de PyMySQL: otra version puede moverlos."""
+        """La lista blanca de errores reutilizables lee la tabla `error_map` de
+        PyMySQL (que clase elige para cada codigo): otra version puede moverla."""
         from importlib.metadata import version
 
         # `pymysql.__version__` es la compatibilidad con mysqlclient (2.2.x), no

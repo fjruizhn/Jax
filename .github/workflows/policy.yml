@@ -281,8 +281,15 @@ jobs:
           #   en vuelo, cada metodo vigilado); 4 puros de la clasificacion;
           #   PyMySQL fijado. Cada clase, codigo y guarda validados por mutacion.
           #   Medido: "97 passed" dos corridas seguidas.
-          grep -qE "^97 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 97 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 97 -> 101 el 2026-09-17 (revision de eca432b): al salir de conexion()
+          #   el envoltorio se invalida. +4 de jacobs/_store_pool_test.py: una
+          #   hermana que despierta despues no manda SQL a la sesion del pedido
+          #   siguiente (rojo contra eca432b: Com_select +1), todo acceso posterior
+          #   lanza ConexionInvalidada, tambien tras salir con error, y una
+          #   salida normal con una llamada propia en vuelo cierra la conexion.
+          #   Validados por mutacion. Medido: "101 passed" dos corridas seguidas.
+          grep -qE "^101 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 101 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
