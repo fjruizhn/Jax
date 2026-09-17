@@ -45,3 +45,17 @@ def test_motivo_que_usa_la_copia_tambien_es_familia():
     assert familia.canonico == RAIZ / "jax" / "ejecutor" / "cita.py"
     assert familia.compartidos == ("Motivo",)
     assert [(e, r.parts[-3:]) for e, r in familia.espejos] == [("jax-platform", ("backend", "ejecutor", "motivo.py"))]
+
+
+def test_la_pausa_del_ejecutor_que_escribe_la_plataforma_es_familia():
+    # SP2 (2026-09-17): el modo Ejecutor de jax-platform PONE la pausa del Ejecutor (el kill switch
+    # del modo) con una copia de pausa.py: la plataforma no importa jax (mismo motivo que prioridad).
+    # El proxy de C3 y el arranque la LEEN con este archivo. Un `pausa_puesta` o un `poner_pausa`
+    # distintos serían un botón que dice «pausado» mientras el proxy sigue sirviendo.
+    familia = _familias().get("pausa_ejecutor")
+    assert familia is not None
+    assert familia.canonico == RAIZ / "jax" / "ejecutor" / "contratos" / "pausa.py"
+    assert [(e, r.parts[-3:]) for e, r in familia.espejos] == [("jax-platform", ("backend", "ejecutor", "pausa.py"))]
+    assert set(familia.compartidos) == {"VARIABLE_RUTA", "PausaSinConfigurar", "pausa_puesta",
+                                        "_sincronizar_directorio", "poner_pausa"}
+    assert set(familia.compartidos) <= _simbolos(familia.canonico)

@@ -533,6 +533,21 @@ FAMILIAS = (
         nota="SP3 del Ejecutor (2026-09-17): lo importa la copia de prioridad.py "
              "en jax-platform. ORDEN DE MERGE: jax-platform primero.",
     ),
+    Familia(
+        nombre="pausa_ejecutor",
+        canonico=JAX_ROOT / "jax" / "ejecutor" / "contratos" / "pausa.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ejecutor" / "pausa.py"),
+        ),
+        # Lo que ESCRIBE y LEE la pausa del Ejecutor. El latido del vigía (`latir`,
+        # `latido_fresco`, `ruta_del_latido`) queda afuera: la plataforma no late ni mira el
+        # latido. `_ruta`/`ruta_de_la_pausa` tampoco: la plataforma resuelve la ruta con su
+        # propio entorno (config_entorno) y sus propios códigos.
+        compartidos=("VARIABLE_RUTA", "PausaSinConfigurar", "pausa_puesta", "_sincronizar_directorio",
+                     "poner_pausa"),
+        nota="SP2 del Ejecutor (2026-09-17): el modo Ejecutor de la plataforma pone y quita la "
+             "pausa del Ejecutor. ORDEN DE MERGE: jax-platform primero.",
+    ),
 )
 
 

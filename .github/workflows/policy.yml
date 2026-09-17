@@ -776,6 +776,7 @@ jobs:
           tests/test_ejecutor_contratos_arranque.py
           tests/test_ejecutor_vigia_servicio.py
           tests/test_ejecutor_fase0_retirada.py
+          tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -872,6 +873,7 @@ jobs:
             tests/test_ejecutor_contratos_arranque.py \
             tests/test_ejecutor_vigia_servicio.py \
             tests/test_ejecutor_fase0_retirada.py \
+            tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1353,8 +1355,21 @@ jobs:
           #   /etc/ssh/ssh_config.d: dentro de bwrap los archivos de root se ven de 65534 y ssh no entraba a
           #   ninguna maquina). Los dos vistos en rojo antes del arreglo. MEDIDO en local, env -i, las DOS
           #   listas: "1510 passed, 1 skipped, 1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1510 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1510 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1510 -> 1564 el 2026-09-17 (Ejecutor SP2, vía de producto desde la plataforma): las DOS listas suman
+          #   tests/test_ejecutor_mision.py (33, dos de ellos por lo visto en la misión real: el vigía juzga el
+          #   turno con su instrucción y el pedido retomado exige correr de nuevo; turno por el camino gobernado con dependencias falsas -- rechazo del
+          #   arranque con sus códigos sin abrir nada, vigía que no late, pausa/auditor/registro/cadena/cierre del
+          #   vigía como fallos con código, auditor ilegible fail-closed, sesión creada y retomada por id, tope del
+          #   cerebro) y tests/test_ejecutor_mision_servicio.py (14: stdin -> eventos JSON y SIEMPRE un `resultado`,
+          #   sin_configurar sin defaults, runner_error sin el mensaje, pausa leída fail-closed, vigía con SIGTERM);
+          #   test_ejecutor_contratos_cuenta_axioma.py +6 (--session-id/--resume, UUID canónico) y
+          #   test_ejecutor_prioridad_espejo.py +1 (familia pausa_ejecutor). Vistos en rojo antes. Mutaciones (cmp previo):
+          #   registro no exigido -> 2 rojos; auditor caído no retiene -> 1; pausa ignorada -> 1; banderas de sesión
+          #   invertidas -> 1; tope inválido aceptado -> 4. MEDIDO en local (3.14), env -i, sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1564 passed, 1 skipped, 1 xfailed, 16 subtests
+          #   passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1564 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1564 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

@@ -30,6 +30,7 @@ import asyncio
 import os
 import re
 import shlex
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,10 +94,25 @@ def _jaula(c: Cuenta) -> str:
     ])
 
 
+def _sesion_valida(sesion: str) -> bool:
+    try:
+        return str(uuid.UUID(sesion)) == sesion
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herramientas: str = "Bash,Read",
-                  max_salida_tokens: int | None = None) -> str:
+                  max_salida_tokens: int | None = None, sesion: str | None = None, reanudar: bool = False) -> str:
     """`max_salida_tokens`: el tope que el proxy exige (JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS) cuando
-    `base_url` es un proxy con carril; sin él el arnés pide su propio `max_tokens` y el proxy da 403."""
+    `base_url` es un proxy con carril; sin él el arnés pide su propio `max_tokens` y el proxy da 403.
+
+    `sesion` (SP2, spec 2026-09-15 §5): el id que genera Axioma. `reanudar=False` crea la sesión
+    con ese id (`--session-id`); `reanudar=True` la retoma (`--resume`). Sólo un UUID canónico en
+    minúsculas: el id termina en una ruta del HOME de la cuenta y en argv."""
+    if sesion is not None and not _sesion_valida(sesion):
+        raise ValueError("sesion_invalida")
+    if reanudar and sesion is None:
+        raise ValueError("reanudar_sin_sesion")
     q = shlex.quote
     variables = [
         f"ANTHROPIC_BASE_URL={q(base_url)}", 'ANTHROPIC_AUTH_TOKEN="$K"', f"PATH={q(str(c.node_bin))}:/usr/bin:/bin",
@@ -107,7 +123,8 @@ def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herrami
         variables.append(f"CLAUDE_CODE_MAX_OUTPUT_TOKENS={int(max_salida_tokens)}")
     entorno = " ".join(variables)
     claude = " ".join(q(a) for a in [str(c.node_bin / "claude"), "-p", prompt, "--output-format", "stream-json",
-                                      "--verbose", "--model", modelo, "--allowedTools", herramientas])
+                                      "--verbose", "--model", modelo, "--allowedTools", herramientas]
+                      + ([] if sesion is None else ["--resume" if reanudar else "--session-id", sesion]))
     return f"read -r K; cd ~ && env {entorno} {_jaula(c)} {claude}"
 
 

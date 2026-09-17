@@ -26,10 +26,8 @@ Salida `clave=valor`; sale 0 sólo con `humo_ok=true`.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import os
-import re
 import secrets
 import signal
 import sys
@@ -40,14 +38,15 @@ from pathlib import Path
 import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from jax.ejecutor import cita, transporte  # noqa: E402
-from jax.ejecutor.contratos import arranque, cuenta_axioma, destinos, formato, pausa, politica  # noqa: E402
+from jax.ejecutor import transporte  # noqa: E402
+from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, pausa, politica  # noqa: E402
 from jax.ejecutor.contratos import auditor as A  # noqa: E402
 from jax.ejecutor.contratos.registro import verificar_cadena  # noqa: E402
+# Las partes puras viven en la vía de producto (SP2): el humo y la plataforma leen la jaula igual.
+from jax.ejecutor.mision import afirmaciones_del_texto, capturas, pasos_del_stream, sha_de_resultado  # noqa: E402,F401
 
 TOPE_CEREBRO_S = 900
 ESPERA_LATIDO_S = 120
-_TRUNCADO = re.compile(r"truncat", re.I)
 
 
 def comandos_de_la_mision(ip: str, puerto: int) -> tuple:
@@ -71,92 +70,10 @@ def prompt_de_la_mision(maquina: str, comandos) -> str:
     )
 
 
-def _texto_de_resultado(contenido) -> str:
-    if isinstance(contenido, str):
-        return contenido
-    if isinstance(contenido, list):
-        return "".join(b.get("text", "") for b in contenido if isinstance(b, dict) and b.get("type") == "text")
-    return ""
-
-
-def pasos_del_stream(salida: bytes) -> tuple:
-    """(pedidas {id: comando}, resultados {id: (contenido crudo, es_error)}, texto final)."""
-    pedidas, resultados, final = {}, {}, None
-    for linea in salida.decode(errors="replace").splitlines():
-        try:
-            ev = json.loads(linea)
-        except ValueError:
-            continue
-        if not isinstance(ev, dict):
-            continue
-        mensaje = ev.get("message") if isinstance(ev.get("message"), dict) else {}
-        for b in mensaje.get("content") or []:
-            if not isinstance(b, dict):
-                continue
-            if ev.get("type") == "assistant" and b.get("type") == "tool_use" and b.get("name") == "Bash":
-                pedidas[b.get("id")] = (b.get("input") or {}).get("command")
-            elif ev.get("type") == "user" and b.get("type") == "tool_result":
-                resultados[b.get("tool_use_id")] = (b.get("content"), bool(b.get("is_error", False)))
-        if ev.get("type") == "result":
-            final = ev.get("result")
-    return pedidas, resultados, final
-
-
-def capturas(pedidas: dict, resultados: dict, hosts) -> tuple:
-    """Una captura por comando con resultado. La máquina la decide `destinos` (lo que el gancho
-    ve), no el modelo; un comando que toca más de una máquina, o ninguna legible, no respalda."""
-    salida = []
-    for tid, comando in pedidas.items():
-        if tid not in resultados or not isinstance(comando, str):
-            continue
-        try:
-            tocadas = destinos.destinos(comando, hosts)
-        except (destinos.HostDesconocido, destinos.ComandoIlegible):
-            continue
-        if len(tocadas) != 1:
-            continue
-        contenido, es_error = resultados[tid]
-        texto = _texto_de_resultado(contenido)
-        salida.append(cita.Captura(maquina=next(iter(tocadas)), comando=comando, salida=texto, stderr="",
-                                   truncada=es_error or bool(_TRUNCADO.search(texto))))
-    return tuple(salida)
-
-
-def afirmaciones_del_texto(texto) -> tuple:
-    """Fail-closed: un arreglo JSON de objetos, o JSON Lines donde TODA línea no vacía es un
-    objeto (el cerebro local respondió así, 2026-09-17). Lo demás no afirma nada, y cada objeto
-    sin los cinco campos de texto se cae. Ninguna forma afloja la cita: `transporte.entregar`
-    y el auditor deciden qué sale."""
-    if not isinstance(texto, str):
-        return ()
-    m = re.search(r"\[.*\]", texto, re.S)
-    try:
-        doc = json.loads(m.group(0) if m else texto)
-    except ValueError:
-        try:
-            doc = [json.loads(l) for l in texto.splitlines() if l.strip()]
-        except ValueError:
-            return ()
-        if not doc or not all(isinstance(d, dict) for d in doc):
-            return ()
-    if isinstance(doc, dict):  # JSON Lines de una sola línea
-        doc = [doc]
-    if not isinstance(doc, list):
-        return ()
-    campos = ("maquina", "comando", "linea", "dato", "proposito")
-    return tuple(cita.Afirmacion(**{c: d[c] for c in campos}) for d in doc
-                 if isinstance(d, dict) and all(isinstance(d.get(c), str) for c in campos))
-
-
 def eventos_desde(registro: Path, desde: int) -> list:
     with open(registro, "rb") as f:
         f.seek(desde)
         return [json.loads(l) for l in f.read().splitlines() if l.strip()]
-
-
-def sha_de_resultado(contenido) -> str:
-    return hashlib.sha256(json.dumps(contenido, ensure_ascii=False, sort_keys=True,
-                                     separators=(",", ":")).encode()).hexdigest()
 
 
 async def _estado_proxy(puerto: int) -> int:

@@ -81,3 +81,33 @@ def test_remoto_claude_con_tope_de_salida_lo_pasa_al_arnes():
     assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS=1024" in palabras
     sin = CA.remoto_claude(c, base_url="http://127.0.0.1:18436", modelo="canario", prompt="x")
     assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in sin
+
+
+def test_remoto_claude_crea_la_sesion_con_su_id_y_la_retoma_por_id():
+    """SP2 (spec 2026-09-15 §5): el primer turno crea la sesión con el id que genera Axioma y los
+    siguientes la retoman con ese mismo id. Sin sesión, ninguna de las dos banderas."""
+    c = CA.cuenta_desde_entorno(ENV)
+    sesion = "0b4e7a52-3c1d-4f7e-9a51-6f2d8e4c1a90"
+
+    def palabras(**kw):
+        return shlex.split(CA.remoto_claude(c, base_url="http://127.0.0.1:18436", modelo="m", prompt="x",
+                                            **kw).replace('"$K"', "K"))
+    nueva = palabras(sesion=sesion)
+    assert nueva[nueva.index("--session-id") + 1] == sesion and "--resume" not in nueva
+    retomada = palabras(sesion=sesion, reanudar=True)
+    assert retomada[retomada.index("--resume") + 1] == sesion and "--session-id" not in retomada
+    sin = palabras()
+    assert "--session-id" not in sin and "--resume" not in sin
+
+
+@pytest.mark.parametrize("sesion", ["x; rm -rf ~", "../../etc/passwd", "0B4E7A52-3C1D-4F7E-9A51-6F2D8E4C1A90", ""])
+def test_remoto_claude_rechaza_una_sesion_que_no_es_un_uuid_canonico(sesion):
+    with pytest.raises(ValueError):
+        CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="m", prompt="x",
+                         sesion=sesion)
+
+
+def test_reanudar_sin_sesion_no_vale():
+    with pytest.raises(ValueError):
+        CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="m", prompt="x",
+                         reanudar=True)
