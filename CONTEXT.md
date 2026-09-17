@@ -698,37 +698,83 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
   - **Deploy (2026-09-17 00:28):** 9 variables nuevas a `/etc/jax/.env` (backup `.env.backup-pre-frente-a-20260917-002811`, y el de las comillas, `.env.backup-pre-comillas-tenant-20260917-002841`); `jax-platform.service` reiniciado sin restarts ni errores de journal; frontend `index-ChCOZGPN.js`. Canario por API sobre el sha real: rojo en `e418c82`, verde en `e6e67f8` tras el revert. Pisos de CI medidos dos veces: vitest 448→504, con DB 1175→1334, sin DB 614→764. Carga en producción post-deploy (k6, `health.js`, 10 VUs): p95 0,52 ms, 0 fallas de 698.696 peticiones, 19.963 rps.
   - **Pendiente sin fecha fija:** verificación en vivo con Fernando (claro/oscuro, es/en) del tablero, los labels de facetas, el chat traducido y Admin Modelos/SMTP/Pipeline con Escape; y la decisión sobre `ws_notifications` en `axioma_config` (Discrepancia 10, recomendada al frente C). Deuda residual del triage del review final (17 ítems, ninguno bloqueante) registrada en `DEUDA.md` § Anotado, no bloquea.
 
-- **2026-09-17 · Pre-vuelo y continuar (Jacobs) — carga medida (VERDAD OPERACIONAL; caduca
-  si cambia el esquema del catálogo, el volumen de `facet_health_event` o la máquina).**
-  Instancia aislada `:17790` sobre `jax_memory_test` (rama `feat/prevuelo-y-continuar`,
-  HEAD `cfa717c`), catálogo y salud frescos (sin sondas — `sondeadas: []` verificado 3
-  veces), plan de 4 pasos con **dos sustituciones de datos de catálogo, ninguna edición de
-  fila ajena** (Ruling R29 + una nueva encontrada en esta corrida): `thot/critique` →
-  `jekyll/design` (thot sigue vinculado a `gpt-5.5` sin `max_tokens_param`/
-  `max_output_tokens` en `jax_memory_test`) y `kimi/generate` → `kimi/pipeline_analysis`
-  (con la semilla medida de `min_output_tokens` ya aplicada, `generate`=14336 excede el
-  `motor.max_tokens`=8000 de kimi; `pipeline_analysis` tiene piso 0 y prioridad 0 para
-  kimi en `capability_motor`, así que el auto-select de motor cae en kimi de verdad).
-  **Carga HTTP (gate, 0 errores en las cuatro concurrencias):** c=1 → 291,39 rps, p95 3,85
-  ms; c=10 → 486,40 rps, p95 22,67 ms; c=25 → 506,91 rps, p95 52,00 ms, p99 72,13 ms;
-  c=50 → 502,80 rps, p95 113,64 ms, p99 131,42 ms. **Ratio p95 c25/c1 = 13,51× — UMBRAL
-  10× NO CUMPLIDO** (c50/c1 = 29,52×, también reportado). **Veredicto: NOT MET.** Carga
-  sostenida (no por rondas cerradas — `ThreadPoolExecutor` encola todos los pedidos de una
-  vez, cada hilo libre toma el siguiente sin esperar ronda): c=25/n=10000 (18,9 s) sin
-  deriva frente al gate (p95 52,6 ms, 0 errores); c=50/n=8000 en CUATRO corridas idénticas
-  dio una tasa de error muy variable (0%, 13%, 49%, 61%) — rastreado con traceback
-  completo a una conexión de MariaDB SIN POOL que `jacobs/store.py::get_motor_governance()`
-  abre en CADA pedido a `/jacobs/preflight` (llamada desde `PlanBuilder.build()`,
-  `jacobs/plan.py:448`, ANTES de que corra el camino pooleado de Task 15b/F8 dentro de
-  `prevuelo()`) — **hallazgo nuevo, no cubierto por R33-R37 ni por la ola final**, escalado
-  a la sesión principal sin tocar código. 25 `continue` concurrentes sobre el mismo
-  pipeline: **1 ganó, 24 recibieron 409** (verdad de DB: época final 1, status
-  `interrupted`, eventos `PIPELINE_CONTINUED` ×1 + `PIPELINE_STARTED` +
-  `STEP_BLOCKED_HUMAN_GATE` + `PIPELINE_INTERRUPTED`, sin `STEP_STARTED` — la corrida
-  ganadora paró en el gate de hyde sin despachar); p95 de los 25 `continue` = 73,59 ms.
-  (El `Expected` del brief original de "errores: 24" quedó desactualizado: el harness
-  actual cuenta 4xx como respuesta medida, no como error — verificado contra el código de
-  `scripts/load_test.py`.) Medido por Mr. Hyde (subagente de la Task 15, re-medición) con
-  la Task 15 de `docs/superpowers/plans/2026-09-17-prevuelo-y-continuar-jacobs.md`.
-  Detalle completo, tracebacks y tabla de ratios en `task-15-report.md` (sección
-  "Re-medición HTTP").
+- **2026-09-17 · Pre-vuelo y continuar (Jacobs) — carga medida, FINAL sobre HEAD `cec13ac`
+  (VERDAD OPERACIONAL; caduca si cambia el esquema del catálogo, el volumen de
+  `facet_health_event` o la máquina; reemplaza la medición previa sobre HEAD `cfa717c` de
+  más abajo en este mismo párrafo histórico — R38/R43/R44 ya están mergeados en este HEAD).**
+  Instancia aislada `:17790` sobre `jax_memory_test` (rama `feat/prevuelo-y-continuar`),
+  catálogo y salud frescos (sin sondas — `sondeadas: []` verificado 3 veces), plan de 4
+  pasos con **dos sustituciones de datos de catálogo, ninguna edición de fila ajena**
+  (Ruling R29 + una nueva encontrada en la corrida anterior, sin cambios en ésta):
+  `thot/critique` → `jekyll/design` (thot sigue vinculado a `gpt-5.5` sin
+  `max_tokens_param`/`max_output_tokens` en `jax_memory_test`) y `kimi/generate` →
+  `kimi/pipeline_analysis` (con la semilla medida de `min_output_tokens` ya aplicada,
+  `generate`=14336 excede el `motor.max_tokens`=8000 de kimi; `pipeline_analysis` tiene
+  piso 0 y prioridad 0 para kimi en `capability_motor`, así que el auto-select de motor cae
+  en kimi de verdad). **Carga HTTP (gate, 0 errores en las cuatro concurrencias):** c=1 →
+  454,99 rps, p95 2,74 ms; c=10 → 670,04 rps, p95 17,15 ms; c=25 → 635,20 rps, p95 46,97
+  ms, p99 62,02 ms; c=50 → 647,60 rps, p95 83,26 ms, p99 90,62 ms. **Ratio p95 c25/c1 =
+  17,14× — UMBRAL 10× NO CUMPLIDO** (c50/c1 = 30,39×, también reportado). **Veredicto:
+  NOT MET** (no se reinterpreta, R33). Carga sostenida (no por rondas cerradas —
+  `ThreadPoolExecutor` encola todos los pedidos de una vez): c=25/n=10000 (14,4 s) sin
+  deriva frente al gate (p95 38,77 ms, 0 errores); **c=50/n=8000 en CUATRO corridas
+  idénticas dio 0% de errores en las CUATRO** (p95 75,80/80,56/85,33/81,76 ms) — el
+  hallazgo de conexión sin pool en `get_motor_governance()` (que en la medición anterior
+  sobre `cfa717c` daba 0%/13%/49%/61% de errores intermitentes) quedó **arreglado por
+  Ruling R38** (`get_motor_governance`, `pipeline_create`, `step_upsert`,
+  `event_append` y el resto de los caminos de `/preflight`, `create` y `continue` pasan
+  por `store.conexion_del_pool()`, `JAX_DB_POOL_MAX=10` por defecto) — verificado en esta
+  corrida, no en teoría. **R44 — máximo de conexiones del pool en uso durante c=50
+  sostenido:** medido correlacionando `ss -tnp` (conexiones TCP del proceso uvicorn de la
+  instancia aislada hacia `127.0.0.1:3308`) con el PID de la instancia, muestreado cada
+  0,1 s durante cada una de las cuatro corridas — no por `SHOW PROCESSLIST` puro, porque
+  `jax_memory_test` es compartida por otras sesiones en paralelo y esa vista no distingue
+  conexiones ajenas de las propias. Máximos por corrida: 11, 10, 11, 10 — **máximo global
+  observado: 11**, contra el techo configurado `JAX_DB_POOL_MAX=10` (2 de 4 muestras
+  puntuales por encima del techo por 1, compatible con una superposición de un ciclo de
+  reemplazo de conexión durante el muestreo de 0,1 s, no con una fuga sostenida: las otras
+  2 corridas midieron exactamente 10). 25 `continue` concurrentes sobre el mismo pipeline:
+  **1 ganó, 24 recibieron 409** (verdad de DB: época final 1, status `interrupted`,
+  eventos `PIPELINE_CONTINUED` ×1 + `PIPELINE_STARTED` + `STEP_BLOCKED_HUMAN_GATE` +
+  `PIPELINE_INTERRUPTED`, sin `STEP_STARTED` — la corrida ganadora paró en el gate de hyde
+  sin despachar); p95 de los 25 `continue` = 22,39 ms. Perfil de apoyo EN PROCESO
+  (`scripts/perfil_prevuelo.py trabajadores -c 1,25,50 --duracion 6`, mismo plan
+  sustituido, `conexiones_nuevas_por_pedido` ≈0 en las tres concurrencias — confirma que
+  R38 cerró la apertura sin pool también vista desde adentro): c=1 → total p95 1,39 ms
+  (acquire p95 0,019 ms, `leer_catalogo` p95 0,83 ms); c=25 → total p95 23,17 ms (acquire
+  p95 10,07 ms, `leer_catalogo` p95 7,80 ms); c=50 → total p95 46,79 ms (acquire p95 32,86
+  ms, `leer_catalogo` p95 8,21 ms) — ratio en proceso p95 c25/c1 = 16,67×, c50/c1 = 33,66×,
+  del mismo orden que el HTTP. A diferencia de la medición anterior (donde el perfil en
+  proceso NO pasaba por `PlanBuilder.build()` y daba 4,37×/6,94×, muy por debajo del HTTP),
+  ahora `acquire` (espera por una conexión libre del pool) es la fase dominante y crece con
+  la concurrencia: con `JAX_DB_POOL_MAX=10` y 25-50 tareas concurrentes pidiendo conexión
+  al mismo pool, la cola por el pool explica el ratio que queda por encima de 10× — ya no
+  es una conexión sin poolear (eso lo cerró R38), es contención sobre un pool de tamaño 10
+  bajo una concurrencia mayor a 10. Lo que el perfil dobla: `jacobs.sonda.sondear`
+  responde `ok` al instante y nunca llama a un proveedor pago; con salud sembrada, esta
+  corrida no llegó a sondear ninguna clave. Lo que NO cubre: uvicorn/FastAPI/pydantic (eso
+  lo mide el gate HTTP de arriba, contra la instancia aislada real). Medido por Mr. Hyde
+  (subagente de la Task 15, re-medición final) con la Task 15 de
+  `docs/superpowers/plans/2026-09-17-prevuelo-y-continuar-jacobs.md`. Detalle completo,
+  comandos y verificación de limpieza en `task-15-report.md` (sección "Re-medición HTTP
+  final (cec13ac)").
+  - **Medición previa (histórico, HEAD `cfa717c`, ya superada por la de arriba):**
+    Instancia aislada `:17790` sobre `jax_memory_test`, catálogo y salud frescos (sin
+    sondas — `sondeadas: []` verificado 3 veces), mismo plan de 4 pasos con las mismas dos
+    sustituciones de datos de catálogo. Carga HTTP (gate, 0 errores en las cuatro
+    concurrencias): c=1 → 291,39 rps, p95 3,85 ms; c=10 → 486,40 rps, p95 22,67 ms; c=25 →
+    506,91 rps, p95 52,00 ms, p99 72,13 ms; c=50 → 502,80 rps, p95 113,64 ms, p99 131,42
+    ms. Ratio p95 c25/c1 = 13,51× — UMBRAL 10× NO CUMPLIDO (c50/c1 = 29,52×). Carga
+    sostenida: c=25/n=10000 (18,9 s) sin deriva frente al gate (p95 52,6 ms, 0 errores);
+    c=50/n=8000 en CUATRO corridas idénticas dio una tasa de error muy variable (0%, 13%,
+    49%, 61%) — rastreado con traceback completo a una conexión de MariaDB SIN POOL que
+    `jacobs/store.py::get_motor_governance()` abría en CADA pedido a `/jacobs/preflight`
+    (llamada desde `PlanBuilder.build()`, `jacobs/plan.py:448`, ANTES de que corriera el
+    camino pooleado de Task 15b/F8 dentro de `prevuelo()`) — hallazgo escalado a la sesión
+    principal sin tocar código, resuelto después por Ruling R38 (ver medición final
+    arriba). 25 `continue` concurrentes: 1 ganó, 24 recibieron 409, época final 1, un solo
+    `PIPELINE_CONTINUED`, sin `STEP_STARTED`; p95 de los 25 `continue` = 73,59 ms. (El
+    `Expected` del brief original de "errores: 24" quedó desactualizado: el harness actual
+    cuenta 4xx como respuesta medida, no como error.) Medido por Mr. Hyde (subagente de la
+    Task 15, re-medición) con la misma Task 15. Detalle en `task-15-report.md` (sección
+    "Re-medición HTTP").
