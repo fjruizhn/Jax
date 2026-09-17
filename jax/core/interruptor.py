@@ -14,8 +14,15 @@ Reglas:
 - La ruta sale de JAX_KILL_SWITCH_PATH y se lee en CADA llamada. Sin la
   variable, vacía o relativa: `InterruptorSinConfigurar`. Sin saber dónde
   está el freno no se ejecuta nada.
-- `interruptor_activo` usa os.stat: sólo "no existe" es SUELTO; cualquier
-  otro error (permiso, ENOTDIR, E/S) es PUESTO.
+- `pausa_presente` usa os.stat sobre UN archivo: sólo "no existe" es
+  SUELTO; cualquier otro error (permiso, ENOTDIR, E/S) es PUESTO.
+- `interruptor_activo` es el freno de JAX: el archivo de JAX_KILL_SWITCH_PATH
+  O la ruta heredada `RUTA_HEREDADA`. Requisito del controlador principal del
+  frente B (2026-09-17): gente y scripts pausan creando la ruta vieja; si
+  dejara de leerse, quien pause así creería que frenó, y no. La regla vive
+  acá y no en cada lector. Con la heredada presente (o ilegible) se avisa
+  con un WARNING que nombra la ruta nueva, una vez por episodio. Retirarla
+  lo decide Fernando (DEUDA.md).
 - `escribir_pausa` publica el archivo completo de una vez (temporal +
   os.link, que falla si ya existe) y `borrar_pausa` lo quita; los dos
   sincronizan el directorio.
@@ -28,11 +35,25 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import tempfile
 from pathlib import Path
 
 VARIABLE_RUTA = "JAX_KILL_SWITCH_PATH"
+
+logger = logging.getLogger(__name__)
+
+# Compatibilidad, NO configuración: es la ruta que la gente y los scripts ya
+# usan para pausar a JAX (requisito del controlador principal del frente B,
+# 2026-09-17). Por eso es una constante y no una variable de entorno: una
+# variable que la pisara en producción apagaría la compatibilidad en silencio
+# (ruling R15). Los tests la desvían con monkeypatch desde el conftest.
+RUTA_HEREDADA = Path("/etc/jax/PAUSE")
+
+# Anti-spam del WARNING, por proceso (ruling R12): True desde que se avisó de
+# la heredada hasta que una lectura la encuentra ausente.
+_heredada_avisada = False
 
 
 class InterruptorSinConfigurar(RuntimeError):
@@ -54,15 +75,40 @@ def ruta_del_interruptor() -> Path:
     return ruta
 
 
-def interruptor_activo(ruta: Path | str | None = None) -> bool:
-    objetivo = Path(ruta) if ruta is not None else ruta_del_interruptor()
+def pausa_presente(ruta: Path | str) -> bool:
+    """¿Está puesto ESTE archivo? Sólo "no existe" es False."""
     try:
-        os.stat(objetivo)
+        os.stat(ruta)
     except FileNotFoundError:
         return False
     except OSError:  # fail-closed: sin poder mirar el freno (permiso, ENOTDIR, E/S) se lo da por PUESTO
         return True
     return True
+
+
+def _heredada_activa() -> bool:
+    """La ruta heredada, con el WARNING una vez por episodio. El aviso nunca
+    decide la lectura: lo que devuelve es siempre `pausa_presente`."""
+    global _heredada_avisada
+    presente = pausa_presente(RUTA_HEREDADA)
+    if not presente:
+        _heredada_avisada = False
+        return False
+    if not _heredada_avisada:
+        _heredada_avisada = True
+        nueva = os.environ.get(VARIABLE_RUTA, "").strip() or f"({VARIABLE_RUTA} sin definir)"
+        logger.warning(
+            "kill switch: la ruta VIEJA %s está puesta (o no se puede mirar) y JAX "
+            "queda FRENADO por compatibilidad. La ruta del freno es %s: quitá %s "
+            "en el servidor para soltarlo.",
+            RUTA_HEREDADA, nueva, RUTA_HEREDADA,
+        )
+    return True
+
+
+def interruptor_activo(ruta: Path | str | None = None) -> bool:
+    objetivo = Path(ruta) if ruta is not None else ruta_del_interruptor()
+    return pausa_presente(objetivo) or _heredada_activa()
 
 
 def _sincronizar_directorio(directorio: Path) -> None:

@@ -21,6 +21,24 @@ Los items sin fecha de "verificado hoy" vienen de CONTEXT.md §9 — heredan
 su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
+- **La ruta vieja del freno `/etc/jax/PAUSE` sigue frenando — frente B, Task H (2026-09-17).**
+  - **DECISIÓN** (controlador principal del frente B, 2026-09-17; rulings R11-R15 del ledger
+    `jax-platform/.superpowers/sdd/2026-09-16-frente-b-kill-switch/progress.md`): mientras exista
+    `/etc/jax/PAUSE`, todo lector del interruptor (LAS MANOS server, ssh_worker, motor_registry,
+    Jacobs policy/executor, el REPL, `jax --task` y jax-platform) lo trata como freno PUESTO, además
+    del archivo de `JAX_KILL_SWITCH_PATH` (`/etc/jax/interruptor/PAUSE`, que no cambia). Si no se
+    puede mirar (cualquier OSError que no sea ENOENT) cuenta como puesto. Un WARNING por episodio
+    nombra la ruta vieja y la nueva. La regla vive una sola vez en `interruptor_activo` del módulo
+    compartido (`jax/core/interruptor.py` + copia `jax-platform/backend/interruptor.py`, familia
+    `interruptor` de `scripts/check_mirror_sync.py`). La plataforma decide sus escrituras con
+    `pausa_presente` (sólo su archivo), informa con el freno completo más el campo `heredada`, y
+    **nunca borra `/etc/jax/PAUSE`**: reanudar con la heredada puesta responde `activo: true,
+    heredada: true` y la Mesa avisa (`killSwitchHeredada`).
+  - **Por qué:** gente y scripts pausan creando esa ruta; si dejara de leerse, quien pause así
+    creería que frenó, y no.
+  - **PENDIENTE:** retirar la ruta heredada (constante `RUTA_HEREDADA`, la excepción del test de
+    clase `tests/test_interruptor_sin_rutas_fijas.py`, el aviso de la Mesa) — la fecha la decide
+    Fernando.
 - **ESTADO — 2026-09-01.** Bloque único. Reemplaza los cinco bloques de
   cierre que la ronda de seguridad fue apilando en este mismo lugar; cada uno
   se declaraba "estado único" y convivía con los anteriores, que es

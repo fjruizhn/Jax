@@ -31,11 +31,14 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import importlib
 import os
 import sys
 import tempfile
 import time
 from pathlib import Path
+
+import pytest
 
 #: El default de `jax/core/cola_uso.py`. Se escribe acá, literal y a propósito:
 #: si alguien cambiara el default del módulo sin tocar esto, el chequeo miraría
@@ -87,6 +90,33 @@ os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
 # Asignación y no setdefault, a propósito.
 os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
+
+
+#: Los objetos módulo del interruptor. Son DOS distintos para el mismo archivo:
+#: `jax.core.interruptor` (REPL, `jax --task`) e `interruptor` pelado vía el
+#: symlink de las_manos (LAS MANOS, Jacobs). Cada uno tiene su RUTA_HEREDADA.
+MODULOS_DEL_INTERRUPTOR = ("jax.core.interruptor", "interruptor")
+
+
+@pytest.fixture(autouse=True)
+def _ruta_heredada_del_freno_aislada(monkeypatch, tmp_path_factory):
+    """La ruta vieja del freno (Task H del frente B, 2026-09-17) es una
+    constante del módulo, no una variable (ruling R15): se desvía acá, en
+    CADA test y en CADA objeto módulo, a un temporal que no existe. Sin esto,
+    un host con la ruta vieja puesta daría vuelta todos los tests de "freno
+    suelto". Importar los módulos antes de desviar evita que uno importado
+    más tarde en el test quede sin aislar. También se reinicia el anti-spam
+    del WARNING para que un test no herede el aviso de otro."""
+    inexistente = tmp_path_factory.mktemp("jax-test-heredada") / "PAUSE"
+    for nombre in MODULOS_DEL_INTERRUPTOR:
+        try:
+            modulo = importlib.import_module(nombre)
+        except ImportError:
+            # sin las_manos en sys.path el módulo pelado no se puede importar
+            # tampoco desde el test: no hay nada que desviar
+            continue
+        monkeypatch.setattr(modulo, "RUTA_HEREDADA", inexistente)
+        monkeypatch.setattr(modulo, "_heredada_avisada", False)
 
 
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:

@@ -397,10 +397,18 @@ FAMILIAS = (
         # ve como un boton que dice "detenido" mientras las manos siguen.
         # `InterruptorActivado`, `INTERVALO_DE_SONDEO` y `correr_con_interruptor`
         # quedan afuera: son solo de jax (asyncio del REPL y de Jacobs).
+        # La ruta heredada (Task H, 2026-09-17, requisito del controlador
+        # principal): la constante, el estado del aviso, `pausa_presente` y
+        # `_heredada_activa` tambien son compartidos. Si la plataforma dejara de
+        # mirarla, reportaria "suelto" con LAS MANOS frenadas por la ruta vieja.
         compartidos=(
             "VARIABLE_RUTA",
             "InterruptorSinConfigurar",
             "ruta_del_interruptor",
+            "RUTA_HEREDADA",
+            "_heredada_avisada",
+            "pausa_presente",
+            "_heredada_activa",
             "interruptor_activo",
             "_sincronizar_directorio",
             "escribir_pausa",
