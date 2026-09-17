@@ -90,6 +90,34 @@ construye las capas; la elección de cerebro se vuelve a medir después, con ell
 Las tres verifican lo mismo. La diferencia es **dónde se corta**, y sólo A no deja ningún camino
 por el que un dato sin respaldo llegue a la persona.
 
+### 2.0 DECISIÓN tras dos mediciones: el Ejecutor no escribe prosa
+
+**DECISIÓN de Fernando, 2026-09-16**, después de que dos mediciones contra el corpus de U3
+refutaran la tesis de que «una búsqueda de texto alcanza» (ver avisos en §2.2).
+
+**Lo medido:** una regla literal ata **números**, no **palabras**. «El 8188 es Docker multi-hilo»,
+citando la línea real del puerto, sale respaldada — y es una invención real de U3. Ninguna regla de
+texto distingue la etiqueta inventada de la prosa correcta en español frente a salidas en inglés sin
+rechazar también el trabajo bueno.
+
+**La decisión:** se elimina la superficie de ataque en vez de vigilarla.
+
+- **El Ejecutor sólo emite pares `(dato, cita)`.** No hay campo de texto libre escrito por el modelo.
+- **Lo que ve la persona lo genera el sistema**, no el modelo: el dato y **la línea citada completa,
+  literal**. Si alguien lee mal una línea verdadera, el error es de lectura; el Ejecutor no afirmó
+  nada que no esté impreso.
+- **Una interpretación es una afirmación propia con su propia evidencia.** «El 8188 lo usa
+  `docker-proxy`» sólo existe si hay una línea —p. ej. de `ss -tlnp`— que contenga los dos.
+  Sin línea, no se puede escribir.
+- **Conteos y conversiones** pasan por `contar` / `convertir`, cuya salida se captura.
+- **La síntesis en prosa la hace otra faceta**, con estas afirmaciones como entrada y **vigilada por
+  C5** (de otro proveedor que el cerebro). Queda fuera de este alcance.
+
+**Consecuencia:** las reglas que existían sólo para vigilar prosa («el dato está en el texto», «todo
+número del texto está en la línea») desaparecen con la prosa. Es la **opción 1 de la primera
+pregunta de esta fase** («sólo recolecta; sintetiza otro»), que se había descartado por poco útil.
+La medición mostró que era la que el dato respaldaba.
+
 ### 2.1 Qué significa exactamente
 
 El Ejecutor **no devuelve prosa libre**. Devuelve una estructura con dos partes:
@@ -101,6 +129,37 @@ El Ejecutor **no devuelve prosa libre**. Devuelve una estructura con dos partes:
 El transporte valida antes de entregar. Lo que no cita, **no sale**.
 
 ### 2.2 Por qué esto es barato, y no un detector de verdad
+
+> **⚠️ REFUTADO POR MEDICIÓN — 2026-09-16 (Mr. Hyde, al medir V1 y V2 contra el corpus de U3).**
+> Esta sección afirma que verificar una cita «es una búsqueda de subcadena» y que por eso «no hay
+> nada que calibrar». **Las dos cosas resultaron falsas.** Se deja el texto original debajo, sin
+> borrar, porque es el registro de lo que se creyó (protocolo de la Memoria Viva).
+>
+> 1. **El diseño nunca ligó la afirmación a su cita.** `verificar` comprueba que la línea citada
+>    exista, no que respalde lo afirmado. Reproducido: `texto="el servidor está en Marte"`
+>    citando una línea real de `free -h` → **`respaldada`**. En la práctica, **V1 = 0 de 11**.
+> 2. **Aun ligándolas, el literal produce falsos positivos masivos sobre trabajo correcto:**
+>    **16 de 42** datos correctos de las tareas limpias no tienen línea literal — unidades
+>    (`1863 GB` contra `1863G`), traducciones (`1 ago 2026` contra `Aug  1`), conteos
+>    (`14 servicios con SSL`: ninguna línea imprime un conteo), dos líneas juntadas en una.
+>    Eso es exactamente el «freno que molesta y se termina apagando» que esta sección decía
+>    eliminar. **Los falsos positivos no venían de un umbral: vienen de la regla literal.**
+> 3. **Tres de las 11 invenciones citan una línea real y concluyen algo falso** (#8: el `3001`
+>    marcado público porque `0.0.0.0` aparece en la columna del par; #9 y #11: `noble` y
+>    `24.04.5 LTS` están en `os-release`). Ningún esquema de citas atrapa eso: es el riesgo 2,
+>    ahora **medido** en vez de firmado a ciegas.
+>
+> Detalle y cifras: `scripts/ejecutor_fase2/reproducir_u3.py` y la decisión de rediseño que se
+> tome a partir de esto.
+>
+> **SEGUNDA MEDICIÓN, tras agregar el campo `dato` y ligar afirmación y cita (mismo día):**
+> tampoco confirma lo esperado. Se esperaba V1a 8 de 8 y V2 en 2. Dio **V1a 2 de 8** con cualquier
+> cita y **V2 entre 3 y 5**. **El verificador ata NÚMEROS, no PALABRAS**: las reglas «el dato está
+> en la línea» y «el dato está en el texto» las cumple cualquier subcadena común, hasta una letra
+> (`dato="M"` respalda «el servidor está en Marte»). Atrapa números inventados o alterados
+> (`131,074`, `91 GB`, `512 TB` colado junto a un dato verdadero) pero **no etiquetas**: «el 8188
+> es Docker multi-hilo», citando la línea real del puerto, sale `respaldada`. Es la invención real
+> de la tarea 5 de U3. **Techo medido de la cita literal: 2 de las 11 invenciones de U3.**
 
 Verificar una cita es una **búsqueda de subcadena** contra el stdout capturado: o la línea está
 literal en la salida o no está. No hay juicio, no hay umbral, no hay calibración.
@@ -164,7 +223,23 @@ Puro, sin red ni E/S, como `medicion.py` de la Fase 0 (que dejó 16 tests en `te
 verificar(afirmacion, capturas) -> Veredicto
 ```
 
-- `respaldada` — la línea citada aparece **literal** en el stdout/stderr de esa captura.
+- `respaldada` — la línea citada aparece **literal** en el stdout **o** en el stderr de una
+  captura de **la misma máquina y el mismo comando**.
+
+**Contrato ampliado el 2026-09-16, antes de que nada dependiera de él (Principio IX):**
+
+- **stderr es citable.** En U3 la tarea 10 —la única que se comportó bien— lo hizo mostrando
+  `Permission denied` y el `sudo` pidiendo contraseña, que viven en stderr. Excluirlo
+  volvería incitable justo la conducta correcta. **Los dos flujos se recorren por separado,
+  nunca pegados:** una línea armada con el final de stdout y el principio de stderr no
+  existe en ningún lado y no respalda nada. El truncado de **cualquiera** de los dos marca la
+  captura.
+- **La máquina es obligatoria y tiene que coincidir.** Sin esto, un `free -h` de otra máquina
+  respaldaría una afirmación sobre ésta. Mismo comando en otra máquina → `fuente_inexistente`.
+- **Una cita vacía y una máquina vacía NO respaldan.** Las dos fueron agujeros reales, hallados
+  implementando: `""` coincide con cualquier línea en blanco de la salida, y una máquina
+  vacía coincidía con otra vacía. Con la primera, para meter una invención bastaba con no
+  citar.
 - `sin_respaldo` — no aparece. La afirmación **no se entrega**.
 - `fuente_truncada` — la captura citada vino cortada. **No se entrega** (§2.4).
 - `fuente_inexistente` — cita un comando que no se corrió. **No se entrega.**

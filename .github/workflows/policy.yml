@@ -582,6 +582,12 @@ jobs:
           tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
           tests/test_motor_contrato_dispatch.py
           tests/test_ejecutor_fase0.py
+          tests/test_ejecutor_cita.py
+          tests/test_ejecutor_captura.py
+          tests/test_ejecutor_hechos.py
+          tests/test_ejecutor_herramientas.py
+          tests/test_ejecutor_prioridad.py
+          tests/test_ejecutor_transporte.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -617,6 +623,12 @@ jobs:
             tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
             tests/test_motor_contrato_dispatch.py \
             tests/test_ejecutor_fase0.py \
+            tests/test_ejecutor_cita.py \
+            tests/test_ejecutor_captura.py \
+            tests/test_ejecutor_hechos.py \
+            tests/test_ejecutor_herramientas.py \
+            tests/test_ejecutor_prioridad.py \
+            tests/test_ejecutor_transporte.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -897,8 +909,17 @@ jobs:
           #   Ojo con el "1 skipped": volvio a ser 1. Cuando los tests del
           #   /health importaban server.py se saltaban los cinco en CI (6 en
           #   total) y el piso lo delato —— para eso esta pineado.
-          grep -qE "^494 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 494 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 494 -> 712 el 2026-09-16 (Ejecutor Fase 2, la tuberia de citas): +218 en seis
+          #   archivos -- cita 95 (+1 xfail), captura 12, hechos 25, herramientas 62,
+          #   prioridad 10, transporte 14. Entran a las DOS listas: uno que entre solo a
+          #   la primera no queda vigilado por este piso.
+          #   test_ejecutor_reproduccion_u3.py NO entra: mide contra el corpus de U3, que
+          #   tiene datos de clientes y vive fuera del repo; en CI solo sumaria skips.
+          #   CONFIRMADO POR EL RUNNER (Python 3.12, run de PR #172): "712 passed, 1 skipped,
+          #   1 xfailed". Coincide con lo medido en local (3.14). Confirma ademas que el test
+          #   de systemd de hechos CORRE en el runner -- si se salteara, esto daria 711/2.
+          grep -qE "^712 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 712 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

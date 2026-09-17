@@ -51,7 +51,10 @@ subsistema independiente y tiene plan propio:
 
 **Interfaces:**
 - Consume: nada. Es el primero.
-- Produce: `Captura(comando, salida, truncada)`, `Afirmacion(texto, comando, linea)`,
+- Produce: `Captura(maquina, comando, salida, stderr, truncada)`,
+  `Afirmacion(maquina, texto, comando, linea)`,
+  *(firmas corregidas el 2026-09-16 tras el cambio de contrato: stderr citable y máquina
+  obligatoria — ver `2026-09-16-ejecutor-fase2-design.md` §3.3)*
   `Veredicto(estado, motivo)`, `verificar(afirmacion, capturas) -> Veredicto`,
   `normalizar(linea) -> str`, y las constantes `RESPALDADA`, `SIN_RESPALDO`,
   `FUENTE_TRUNCADA`, `FUENTE_INEXISTENTE`.
