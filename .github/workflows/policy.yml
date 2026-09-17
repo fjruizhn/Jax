@@ -605,6 +605,7 @@ jobs:
           tests/test_prevuelo_reglas.py
           tests/test_prevuelo_salud_pura.py
           tests/test_prevuelo_sonda.py
+          tests/test_prevuelo_orquestador.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -653,6 +654,7 @@ jobs:
             tests/test_prevuelo_reglas.py \
             tests/test_prevuelo_salud_pura.py \
             tests/test_prevuelo_sonda.py \
+            tests/test_prevuelo_orquestador.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1041,8 +1043,17 @@ jobs:
           #   atrapaba CUALQUIER CredentialUnavailableError sin mirar la
           #   causa); una causa de CredentialUnavailableError (fila
           #   genuinamente ausente) sigue dando config_error.
-          grep -qE "^834 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 834 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 834 -> 848 el 2026-09-17 (Task 8, el orquestador): test_prevuelo_
+          #   orquestador.py (+14) -- pendientes vs. crear completo, sonda
+          #   solo sin ok fresco, una por clave y en paralelo, peor caso de
+          #   dependencias con el armado real del ejecutor (worst-case) vs.
+          #   ref ya existente medida de verdad, hyde sin catálogo
+          #   (suscripción), error de base propagado (503 aguas arriba),
+          #   motor resuelto (via_motor, tope de motor.max_tokens), paso con
+          #   violación no se sondea, y una sonda que revienta en el
+          #   asyncio.gather no deja la otra tarea huérfana.
+          grep -qE "^848 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 848 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
