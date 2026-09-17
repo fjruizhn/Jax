@@ -354,6 +354,44 @@ Esta fase se mide contra el examen que ya está corrido: **no hace falta volver 
 
 ---
 
+### 6.1 V3 medido — 2026-09-17, con G1 de Fernando
+
+Corte de `jax_local` de 01:44 a 01:55 (12 min), sin uso real de la Mesa antes de cada paso.
+Crudos y scripts en `~/ejecutor-fase2/resultados/g1_20260917/`. Restaurado y verificado por un tercero
+contra la foto previa: `qwen3.6:35b-a3b-q4_K_M` a 32768, Forever; ningún modelo derivado sobrante.
+
+**Hallazgo previo a medir:** la Mesa usa Qwen a **32768** y el Ejecutor lo necesita a **131072** (la Fase 0
+mostró que su arranque, 17k tokens, no entra en 32768). Mismos pesos, distinto contexto, una GPU: cada
+alternancia **recarga el modelo**. U5 lo había excluido a propósito («para medir cola y no recargas»).
+
+| Medición | Resultado |
+|---|---|
+| Recarga 32768 ↔ 131072 (`load_duration`, 3 reps por sentido) | **~3 s** (3,02–3,27), con los pesos ya en memoria del sistema |
+| Pedir el modelo base con `num_ctx 131072` con el derivado ya cargado | **sin recarga** (0,168 s): comparten proceso |
+| Mesa a 131072 vs 32768 (6 reps, `eval_duration`) | generación **igual** (76 tok/s); lectura del prompt **−17 %**; primer token **+58 ms** con prompts de ~700 tokens |
+| **V3**: p95 de espera de la Mesa con el Ejecutor trabajando, contexto unificado | **22,68 s** (15 muestras, p50 6,79 s) — **PASA** (umbral 60, U5 = 62,71) |
+| ¿Claude Code manda peticiones en paralelo? | **Sí, 2** al empezar cada misión; la segunda esperó 13–29 s en el proxy |
+| ¿Claude Code reintenta un 503? | **No**, porque respeta `x-should-retry: false`. Control con upstream falso: sin la cabecera, 10 reintentos en 140 s; con ella, 1 |
+
+**El verde de V3 es frágil, y queda dicho:** la cola evita quedar detrás de *varias* peticiones del Ejecutor,
+pero **no interrumpe la que está en curso** (mediana 24,3 s, máx 43,6 s). Con misiones largas o contexto casi
+lleno —leer 100k tokens a ~2000 tok/s son más de 50 s— la espera volvería a acercarse a 60. La carga no es la
+misma que la de U5, así que la mejora no es atribuible entera a la cola.
+
+### 6.2 Condiciones para poner el Ejecutor en producción (derivadas de 6.1)
+
+No se cumplen hoy, y ninguna se cambió en producción: **sin Ejecutor en producción, pagarlas no compra nada**.
+
+1. **Contexto unificado en 131072 para TODO consumidor de `jax_local`**, o las recargas vuelven. Incluye un
+   **tercer consumidor** hallado al medir: `jax-memory-worker.timer` (cada 20 min, destila con `jax_local` y
+   embebe con `bge-m3`). No está en ningún carril.
+2. **Tope del proxy ≥ 60 s.** Con menos de ~45 s, las dos peticiones paralelas de Claude Code hacen fallar
+   misiones sanas.
+3. **Medir antes lo que no se midió:** recarga con los pesos fríos (tras reinicio); lectura de prompts **largos**
+   a 131072; V3 con una misión **larga** o contexto casi lleno; y si `bge-m3` entra en la GPU junto al modelo a
+   131072 (+2 GB).
+4. **Cablear `carril_mesa_async`** en `motor_registry` y Jacobs, y decidir qué carril toma el memory worker.
+
 ## 7. Lo que esta fase NO hace (YAGNI, explícito)
 
 - **No elige cerebro.** Se vuelve a medir con las capas puestas, después.
