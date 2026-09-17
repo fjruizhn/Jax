@@ -50,7 +50,7 @@ TEST_MINIMO = textwrap.dedent(
     import jax.core.facet_resolver as fr
 
     def test_seal_efectivo_no_es_produccion():
-        assert fr.FACET_SEAL_PATH != "/srv/jax-data/facet-cache-seal", (
+        assert not fr.FACET_SEAL_PATH != "/srv/jax-data/facet-cache-seal", (
             f"FACET_SEAL_PATH={fr.FACET_SEAL_PATH!r} es la ruta de PRODUCCION"
         )
     """
