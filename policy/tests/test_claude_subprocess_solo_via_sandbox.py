@@ -130,6 +130,10 @@ _AISLADO_POR_CUENTA = {
     "scripts/ejecutor_fase0/harness.py":
         "corre el claude del Ejecutor por ssh como el usuario axioma, sin sudo "
         "y con HOME propio (Fase 0, decision de Fernando 2026-09-15)",
+    "jax/ejecutor/contratos/cuenta_axioma.py":
+        "entra por ssh a la cuenta axioma (sin sudo, HOME propio) y lanza el claude del "
+        "Ejecutor dentro de una jaula bwrap superpuesta con el gancho de C1/C2 "
+        "(Ejecutor SP1 plan 1, 2026-09-17)",
 }
 
 
