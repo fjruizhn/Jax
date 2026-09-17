@@ -202,14 +202,15 @@ class IntegracionExecutorTest(unittest.IsolatedAsyncioTestCase):
         assert "https://www.postgresql.org/about/news/" in summary and _Q2 in summary, summary
 
     async def test_el_md_del_repo_muestra_url_final_y_cita(self):
-        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+        with tempfile.TemporaryDirectory() as base, \
+                patch.object(executor, "REPO_DOCUMENTS_DIR", Path(base) / "documents"):
             await executor._persist_step_to_repo(
                 pipeline_id="abcdef12-x", pipeline_name="t", step_index=0, facet="hipatia",
                 capability="research",
                 raw_output={"success": True, "result": "texto", "model": "m", "sources": [
                     {**_src(quotes=[_Q2]), "final_url": "https://www.postgresql.org/about/news/", "resolved": True}]},
             )
-            md = (Path(home) / "jax" / "repo" / "documents" / "abcdef12_00_hipatia.md").read_text(encoding="utf-8")
+            md = (Path(base) / "documents" / "abcdef12_00_hipatia.md").read_text(encoding="utf-8")
         assert "https://www.postgresql.org/about/news/" in md and _Q2 in md, md
 
 

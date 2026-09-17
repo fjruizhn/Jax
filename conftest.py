@@ -59,6 +59,12 @@ os.environ["JAX_USAGE_SPOOL_DIR"] = tempfile.mkdtemp(prefix="jax-test-respaldo-u
 os.environ["LAS_MANOS_URL"] = "http://127.0.0.1:7777"
 os.environ["JAX_OLLAMA_URL"] = "http://localhost:11434"
 
+#: E-22 (2026-09-16): el .md de cortesía de cada step se escribe en
+#: $JAX_REPO_BASE/documents. En producción es /home/fruiz/jax/repo, que el
+#: admin de jax-platform lista. Un test que ejercite _persist_step_to_repo no
+#: puede dejar ahí un documento de mentira: mismo criterio que el respaldo de uso.
+os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
+
 
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
     """Los archivos de `directorio` (y sus subdirectorios, que es donde

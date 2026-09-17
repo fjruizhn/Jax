@@ -29,7 +29,7 @@ from grounding_sources import build_sources, render_sources_block, resolve_redir
 # Ruling T6-6: jax/core/redaccion.py por symlink en las_manos/, como arriba.
 from redaccion import recortar_redactado, redactar_secretos
 # E-21: jax/core/config_entorno.py por symlink en las_manos/, como arriba.
-from config_entorno import url_requerida
+from config_entorno import ruta_absoluta_requerida, url_requerida
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -44,6 +44,12 @@ logger = logging.getLogger("jacobs.executor")
 # arranca (EntornoInvalido en el journal) en vez de apuntar a un host fijo.
 LAS_MANOS_BASE = url_requerida("LAS_MANOS_URL")
 OLLAMA_URL     = url_requerida("JAX_OLLAMA_URL") + "/api/chat"
+
+# E-22 (2026-09-16): `documents/` dentro de JAX_REPO_BASE, la MISMA variable
+# con la que jax-platform (api/admin/repository.py, REPO_BASE) lista y sirve
+# estos .md. Validada al importar: sin ella LAS MANOS no arranca.
+REPO_DOCUMENTS_DIR = ruta_absoluta_requerida("JAX_REPO_BASE") / "documents"
+
 MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 
 # Tope de seguridad para el output COMPLETO de cada dependencia declarada (~15K tokens).
@@ -1065,7 +1071,7 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
                 capability=step.capability,
                 raw_output=raw_output,
             )
-        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia .md de cortesía en ~/jax/repo/documents -- el output canónico ya quedó en output_ref y en store.step_upsert antes de este try, nadie lee ese .md
+        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia .md de cortesía en REPO_DOCUMENTS_DIR que el admin de jax-platform lista (/api/admin/repo) -- el output canónico ya quedó en output_ref y en store.step_upsert antes de este try; si la copia falla queda el warning y el step sigue completado
             logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
         return True
 
@@ -1218,15 +1224,12 @@ async def _persist_step_to_repo(
     capability: str,
     raw_output: dict,
 ) -> None:
-    """Guarda el output de un step como .md en ~/jax/repo/documents/"""
-    import aiofiles
-    from pathlib import Path
-
-    repo_dir = Path(os.path.expanduser("~/jax/repo/documents"))
-    repo_dir.mkdir(parents=True, exist_ok=True)
-
+    """Guarda el output de un step como .md en REPO_DOCUMENTS_DIR: copia de
+    cortesía que el admin de jax-platform lista en /api/admin/repo. La escritura
+    (mkdir incluido) corre en un hilo: nada de disco dentro del event loop (E-12)."""
     filename = f"{pipeline_id[:8]}_{step_index:02d}_{facet}.md"
-    filepath = repo_dir / filename
+    directorio = REPO_DOCUMENTS_DIR
+    filepath = directorio / filename
 
     result_text = raw_output.get("result", "")
     sources     = raw_output.get("sources", [])
@@ -1255,8 +1258,11 @@ async def _persist_step_to_repo(
 
     content = "\n".join(lines)
 
-    async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
-        await f.write(content)
+    def _escribir() -> None:
+        directorio.mkdir(parents=True, exist_ok=True)
+        filepath.write_text(content, encoding="utf-8")
+
+    await asyncio.to_thread(_escribir)
 
     logger.info("Step output persistido: %s", filename)
 
