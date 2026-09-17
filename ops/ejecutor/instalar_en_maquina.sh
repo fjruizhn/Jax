@@ -73,6 +73,7 @@ corre "sshd -T -C user=$C,host=x,addr=127.0.0.1" > "$ETAPA/sshd-$C-despues.txt"
 grep -qx "authorizedkeysfile $DIR_LLAVES/%u" "$ETAPA/sshd-$C-despues.txt" \
   || { corre "rm -f $DROPIN"; echo "codigo=sshd_no_aplica_a_la_cuenta" >&2; exit 1; }
 corre "systemctl reload $UNIDAD"
+esperar_sshd
 
 # 4. Registro de sudo de la cuenta (C3), validado ANTES de instalar.
 # sudo-rs (hall9000: Ubuntu lo trae por defecto) NO tiene log_output/iolog: visudo lo rechaza.
@@ -96,8 +97,13 @@ corre "for f in /etc/cron.deny /etc/at.deny; do touch \$f; grep -qx $C \$f || ec
 
 # 6. known_hosts del freno (en hall9000), desde el known_hosts de fruiz ya confiado.
 if [ "$LOCAL" = no ] && [ "$SIN_FRENO" != --sin-freno ]; then
-  ENTRADA="$(ssh-keygen -F "[$IP]:$PUERTO" -f ~/.ssh/known_hosts | grep -v '^#')"
-  test -n "$ENTRADA"
-  sudo -n grep -qxF "$ENTRADA" "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS" || echo "$ENTRADA" | sudo -n tee -a "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS" >/dev/null
+  # Una máquina tiene varias líneas (una por tipo de llave, a veces hasheadas): se copian de a una,
+  # y sin expresiones regulares (una línea hasheada trae `|`, y varias juntas rompían el `grep -x`).
+  ssh-keygen -F "[$IP]:$PUERTO" -f ~/.ssh/known_hosts | grep -v '^#' > "$ETAPA/kh-entradas"
+  test -s "$ETAPA/kh-entradas"
+  while IFS= read -r LINEA; do
+    sudo -n grep -qxF -- "$LINEA" "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS" \
+      || printf '%s\n' "$LINEA" | sudo -n tee -a "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS" >/dev/null
+  done < "$ETAPA/kh-entradas"
 fi
 echo "maquina_instalada=\"$NOMBRE\" llaves_sha256=\"$(corre "sha256sum $JAX_EJECUTOR_LLAVES_ROOT" | cut -d' ' -f1)\" freno=$([ "$SIN_FRENO" = --sin-freno ] && echo false || echo true) registro_sudo=$REGISTRO_SUDO"

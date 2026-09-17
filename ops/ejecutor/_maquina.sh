@@ -12,10 +12,23 @@ if [ "$LOCAL" = si ]; then
   ADMIN_LOCAL="$(id -un)"
   corre() { sudo -n sh -c "$1"; }
   sube() { sudo -n install -o root -g root -m "$3" "$1" "$2"; }
+  esperar_sshd() { :; }
 else
   ADMIN_LOCAL="$JAX_EJECUTOR_ADMIN_USUARIO"
   SSH_OPC=(-o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=yes)
   corre() { ssh "${SSH_OPC[@]}" -p "$PUERTO" "$JAX_EJECUTOR_ADMIN_USUARIO@$IP" "sudo -n sh -c $(printf %q "$1")"; }
+  # Después de `systemctl reload` sshd se re-ejecuta (SIGHUP) y durante un instante rechaza conexiones:
+  # la siguiente orden caía con «Connection refused» y dejaba la instalación a medias (visto en el
+  # contenedor de prueba del freno, 2026-09-17). Se espera a que vuelva a atender, con tope.
+  esperar_sshd() {
+    local i
+    for i in $(seq 20); do
+      ssh "${SSH_OPC[@]}" -p "$PUERTO" "$JAX_EJECUTOR_ADMIN_USUARIO@$IP" true 2>/dev/null && return 0
+      python3 -c 'import time; time.sleep(0.5)'
+    done
+    echo "codigo=sshd_no_vuelve" >&2
+    return 1
+  }
   sube() {
     local tmp="/tmp/ejecutor-subida-$$"
     scp -q "${SSH_OPC[@]}" -P "$PUERTO" "$1" "$JAX_EJECUTOR_ADMIN_USUARIO@$IP:$tmp" \

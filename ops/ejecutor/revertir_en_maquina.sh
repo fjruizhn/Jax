@@ -13,8 +13,16 @@ test -n "$UNIDAD"
 
 # 6. known_hosts del freno.
 if [ "$LOCAL" = no ] && [ -n "${JAX_EJECUTOR_FRENO_KNOWN_HOSTS:-}" ] && sudo -n test -f "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS"; then
-  ENTRADA="$(ssh-keygen -F "[$IP]:$PUERTO" -f ~/.ssh/known_hosts | grep -v '^#' || true)"
-  [ -z "$ENTRADA" ] || sudo -n sed -i "\|^$(printf '%s' "$ENTRADA" | sed 's/[][\.*^$|/]/\\&/g')\$|d" "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS"
+  # Varias líneas por máquina (tipos de llave, hasheadas con `|`): se quitan por igualdad exacta
+  # (grep -vxF), no con una regex armada a mano, que se rompía con más de una línea.
+  ENTRADAS="$(mktemp)"
+  ssh-keygen -F "[$IP]:$PUERTO" -f ~/.ssh/known_hosts | grep -v '^#' > "$ENTRADAS" || true
+  if [ -s "$ENTRADAS" ]; then
+    RC=0; sudo -n grep -vxFf "$ENTRADAS" "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS" > "$ENTRADAS.quedan" || RC=$?
+    [ "$RC" -le 1 ] || { rm -f "$ENTRADAS" "$ENTRADAS.quedan"; echo "codigo=known_hosts_ilegible" >&2; exit 1; }
+    sudo -n sh -c "cat '$ENTRADAS.quedan' > '$JAX_EJECUTOR_FRENO_KNOWN_HOSTS'"
+  fi
+  rm -f "$ENTRADAS" "$ENTRADAS.quedan"
 fi
 # 5. cron, at (linger queda deshabilitado: era el estado previo verificado en la instalación).
 corre "for f in /etc/cron.deny /etc/at.deny; do [ ! -f \$f ] || sed -i '/^$C\$/d' \$f; done"
@@ -22,6 +30,7 @@ corre "for f in /etc/cron.deny /etc/at.deny; do [ ! -f \$f ] || sed -i '/^$C\$/d
 corre "rm -f /etc/sudoers.d/50-ejecutor-axioma-registro && visudo -c >/dev/null"
 # 3. sshd: quitar el drop-in, validar, recargar.
 corre "rm -f /etc/ssh/sshd_config.d/50-ejecutor-axioma.conf && sshd -t && systemctl reload $UNIDAD"
+esperar_sshd
 # Sin la cuenta en un Match propio vuelve a leer su home (a archivo: con pipefail, grep -q + SIGPIPE da falso fallo).
 SSHD_T="$(mktemp)"; corre "sshd -T -C user=$C,host=x,addr=127.0.0.1" > "$SSHD_T"
 if grep -qi "^authorizedkeysfile .*authorized_keys.d" "$SSHD_T"; then rm -f "$SSHD_T"; echo "codigo=sshd_sigue_con_llaves_root" >&2; exit 1; fi
