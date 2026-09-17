@@ -19,24 +19,24 @@ elegir la cita:
        contenga? Si no la tiene, el verificador rechazaría trabajo bueno: un
        falso positivo real.
 
-Hasta 8f16300 se medía además el hueco texto↔línea (`cita.verificar` no leía
-`texto`: las 11 invenciones salían `respaldada` citando una línea real con su
-ancla). Esa medición se reemplazó por la de la regla ligada, que sigue.
+Hasta 8f16300 se medía además el hueco texto↔línea, y hasta f5a183c la «regla
+ligada» (texto + dato + reglas 1-4). Las dos quedaron sin objeto con la DECISIÓN
+de §2.0: el Ejecutor no escribe prosa (`Afirmacion` = maquina, comando, linea,
+dato). Se re-mide sin inventar la cita del modelo:
 
-REGLA LIGADA (2026-09-16, decisión de Fernando): `Afirmacion.dato` + las reglas
-1-4 de `jax/ejecutor/cita.py`. Se re-mide sin inventar la cita del modelo:
-
-  · El TEXTO de la afirmación es el dato como lo escribió el modelo, solo
-    (`" ".join(escrito)`): la afirmación mínima. Como variante se usa además la
-    línea de su respuesta que contiene todo el `escrito`, cuando existe.
-  · La CITA recorre TODAS las líneas reales (stdout y stderr, captura completa)
-    de esa máquina, de cualquier comando: «sea cual sea la cita».
-  · El DATO se prueba de dos maneras:
-      - «dato literal»: cada token de `escrito` y de `nucleo`/`ancla`.
-      - «cualquier dato»: una letra común a texto y línea. Es EXHAUSTIVO: las
-        reglas 2 y 3 se conservan al achicar el dato a un carácter y la regla 4
-        no depende del dato, así que si algún dato pasa, pasa un carácter común.
-  · Cada combinación la juzga `cita.verificar`, la función real.
+  V1 sin prosa — ¿el contenido FALSO de cada invención se puede emitir como un
+       `dato` que `cita.verificar` (la función real) dé por respaldado, con
+       ALGUNA línea real de esa máquina como cita (todas se prueban: «sea cual
+       sea la cita»)? Si el contenido falso son varios tokens (puerto +
+       etiqueta), tienen que salir de la MISMA línea: es la línea que la
+       persona ve junto al dato. Las tres de conclusión separan el token
+       verdadero (se espera emitible) de la interpretación falsa.
+       Las capturas incluyen las que producirían `contar`/`convertir` sobre
+       las capturas del corpus, con la herramienta real; si la herramienta se
+       niega, se registra por qué.
+  V2 sin prosa — ¿cada dato CORRECTO de las tareas limpias se puede emitir
+       como `dato` (su núcleo) desde alguna línea real, o desde la salida de
+       `contar` con el criterio que el propio modelo declaró?
 
 Cada dato `escrito` se comprueba contra la respuesta final del modelo: si no es
 una subcadena de lo que el modelo dijo, el script falla. Así no puedo inventar
@@ -62,7 +62,9 @@ RAIZ = pathlib.Path(__file__).resolve().parents[2]
 if str(RAIZ) not in sys.path:
     sys.path.insert(0, str(RAIZ))
 
+from jax.ejecutor.captura import CapturaCompleta  # noqa: E402
 from jax.ejecutor.cita import RESPALDADA, Afirmacion, Captura, normalizar, verificar  # noqa: E402
+from jax.ejecutor.herramientas import HerramientaRechazada, contar, convertir  # noqa: E402
 
 
 FASE0 = RAIZ / "scripts" / "ejecutor_fase0"
@@ -81,6 +83,12 @@ class CapturaU3:
     # se pueden separar. Se guarda todo en `salida`; para buscar da lo mismo,
     # pero no se finge una separación que el corpus no tiene.
     flujos_mezclados: bool
+    # Código de salida, para `contar` (que se niega con código != 0). El corpus
+    # no lo guarda en el resultado estructurado: Claude Code sólo devuelve el
+    # string «Error: Exit code N» cuando el comando falla, así que estructurado
+    # = 0 y string = N. Un string sin ese prefijo queda en None (desconocido,
+    # y `contar` lo rechaza).
+    codigo: int | None = None
 
 
 def _maquinas() -> tuple[dict[str, str], str]:
@@ -142,11 +150,13 @@ def leer_transcripcion(corpus: pathlib.Path, tarea: int) -> tuple[list[CapturaU3
                     # le pasa sólo un fragmento (tarea 9: vio 2 KB de 85,9 KB).
                     truncada = bool(tr.get("persistedOutputPath")) or bool(tr.get("interrupted"))
                     cap = Captura(maquina, comando, tr["stdout"], tr["stderr"], truncada)
-                    capturas.append(CapturaU3(cap, flujos_mezclados=False))
+                    capturas.append(CapturaU3(cap, flujos_mezclados=False, codigo=0))
                 elif isinstance(tr, str):
+                    codigo = re.match(r"\AError: Exit code (\d+)", tr)
                     cuerpo = re.sub(r"\AError: Exit code \d+\n?", "", tr)
                     capturas.append(CapturaU3(Captura(maquina, comando, cuerpo, "", False),
-                                              flujos_mezclados=True))
+                                              flujos_mezclados=True,
+                                              codigo=int(codigo.group(1)) if codigo else None))
                 else:
                     raise ValueError(f"tarea {tarea}: tool_use_result inesperado {type(tr)}")
     if final is None:
@@ -205,26 +215,65 @@ def _hash(s: str) -> str:
 
 
 # --------------------------------------------------------------------------
-# Regla ligada: ¿alguna cita real deja pasar esta afirmación?
+# Sin prosa: ¿se puede EMITIR como `dato` respaldado?
 # --------------------------------------------------------------------------
 
-def _caracter_comun(texto: str, linea: str) -> str | None:
-    """Un carácter no blanco presente en los dos, o None. Testigo exhaustivo
-    de «existe algún dato que cumpla las reglas 2 y 3»."""
-    en_linea = set(normalizar(linea))
-    for ch in normalizar(texto):
-        if not ch.isspace() and ch in en_linea:
-            return ch
-    return None
+@dataclass(frozen=True)
+class Contar:
+    """`contar` sobre LA captura cuyo comando contiene `comando_contiene`, con
+    el patrón que declaró el propio modelo -- nunca uno elegido para que dé."""
+    comando_contiene: str
+    patron: str
 
 
-def _alguna_cita_pasa(capturas: list[CapturaU3], maquina: str, texto: str,
-                      datos: list[str] | None) -> dict:
-    """Recorre toda línea de toda captura de `maquina` como cita posible.
+@dataclass(frozen=True)
+class Convertir:
+    valor: str
+    desde: str
+    hacia: str
+    decimales: int
 
-    `datos=None` → «cualquier dato» (testigo exhaustivo). Devuelve si pasó, un
-    testigo y el conteo de veredictos (sólo el estado: el motivo lleva el dato).
-    """
+
+def _completa(cu: CapturaU3) -> CapturaCompleta:
+    c = cu.captura
+    return CapturaCompleta(
+        maquina=c.maquina, comando=c.comando, codigo=cu.codigo, salida=c.salida,
+        stderr=c.stderr, truncada=c.truncada, bytes_totales=len(c.salida.encode()),
+        momento="",
+        motivos_truncado=("salida persistida a disco: el modelo vio un fragmento",)
+        if c.truncada else ())
+
+
+def _correr_herramientas(capturas: list[CapturaU3], maquina: str, pedidas,
+                         publicar: bool) -> tuple[list[CapturaU3], list[dict]]:
+    """Corre las herramientas REALES sobre las capturas del corpus. Devuelve las
+    capturas que producen y un registro (salida o motivo del rechazo)."""
+    nuevas, registro = [], []
+    for h in pedidas:
+        try:
+            if isinstance(h, Contar):
+                origen = [cu for cu in capturas
+                          if cu.captura.maquina == maquina and h.comando_contiene in cu.captura.comando]
+                if len(origen) != 1:
+                    raise ValueError(f"{h}: {len(origen)} capturas de origen, se esperaba 1")
+                r = contar(_completa(origen[0]), h.patron)
+            else:
+                r = convertir(h.valor, h.desde, h.hacia, maquina=maquina, decimales=h.decimales)
+        except HerramientaRechazada as rechazo:
+            registro.append({"herramienta": type(h).__name__, "rechazada": True,
+                             "motivo": str(rechazo) if publicar else _hash(str(rechazo))})
+            continue
+        nuevas.append(CapturaU3(Captura(r.maquina, r.comando, r.salida, r.stderr, r.truncada),
+                                flujos_mezclados=False, codigo=r.codigo))
+        registro.append({"herramienta": type(h).__name__, "rechazada": False,
+                         "salida": r.salida.strip() if publicar else _hash(r.salida)})
+    return nuevas, registro
+
+
+def emitible(capturas: list[CapturaU3], maquina: str, datos: list[str], publicar: bool) -> dict:
+    """¿Hay UNA línea real de `maquina` desde la que TODOS los `datos` salen
+    `respaldada` por `cita.verificar`? Se prueba toda línea de toda captura
+    (stdout y stderr por separado) como cita: «sea cual sea la cita»."""
     estados: dict[str, int] = {}
     for cu in capturas:
         cap = cu.captura
@@ -234,46 +283,16 @@ def _alguna_cita_pasa(capturas: list[CapturaU3], maquina: str, texto: str,
             for linea in flujo.splitlines():
                 if not normalizar(linea):
                     continue
-                if datos is None:
-                    ch = _caracter_comun(texto, linea)
-                    candidatos = [ch] if ch is not None else [""]
-                else:
-                    candidatos = datos
-                for dato in candidatos:
-                    v = verificar(Afirmacion(maquina, texto, cap.comando, linea, dato), [cap])
+                vs = [verificar(Afirmacion(maquina, cap.comando, linea, d), [cap]) for d in datos]
+                for v in vs:
                     estados[v.estado] = estados.get(v.estado, 0) + 1
-                    if v.estado == RESPALDADA:
-                        return {"pasa": True, "estados": estados,
-                                "testigo": {"comando": cap.comando, "linea": linea, "dato": dato}}
-    return {"pasa": False, "estados": estados, "testigo": None}
-
-
-def _juzgar_con_regla_ligada(capturas, maquina, final, escrito, datos_literales,
-                             publicar: bool) -> dict:
-    minimo = " ".join(escrito)
-    lineas_resp = [l for l in (_sin_markdown(x) for x in final.splitlines())
-                   if all(e in l for e in escrito)]
-    datos = list(dict.fromkeys(datos_literales))
-    r = {
-        "texto_minimo_dato_literal": _alguna_cita_pasa(capturas, maquina, minimo, datos),
-        "texto_minimo_cualquier_dato": _alguna_cita_pasa(capturas, maquina, minimo, None),
-    }
-    if lineas_resp:
-        pl = [_alguna_cita_pasa(capturas, maquina, t, datos) for t in lineas_resp]
-        pc = [_alguna_cita_pasa(capturas, maquina, t, None) for t in lineas_resp]
-        r["linea_respuesta_dato_literal"] = next((x for x in pl if x["pasa"]), pl[0])
-        r["linea_respuesta_cualquier_dato"] = next((x for x in pc if x["pasa"]), pc[0])
-    else:
-        # El modelo repartió el dato en varias líneas: no hay línea de respuesta
-        # que lo contenga entero. Se registra así, sin fabricar una.
-        vacio = {"pasa": False, "estados": {}, "testigo": None, "sin_linea_en_respuesta": True}
-        r["linea_respuesta_dato_literal"] = vacio
-        r["linea_respuesta_cualquier_dato"] = vacio
-    if not publicar:
-        for v in r.values():
-            if v.get("testigo"):
-                v["testigo"] = {"comando_hash": _hash(v["testigo"]["comando"])}
-    return r
+                if all(v.estado == RESPALDADA for v in vs):
+                    testigo = ({"comando": cap.comando, "linea": linea} if publicar
+                               else {"comando_hash": _hash(cap.comando)})
+                    return {"datos": datos if publicar else [_hash(d) for d in datos],
+                            "emitible": True, "estados": estados, "testigo": testigo}
+    return {"datos": datos if publicar else [_hash(d) for d in datos],
+            "emitible": False, "estados": estados, "testigo": None}
 
 
 # --------------------------------------------------------------------------
@@ -287,41 +306,59 @@ class Invencion:
     # Subcadena de `que` en calificacion_tres_capas.json, para atar esta fila a
     # la invención calificada y no a otra.
     que_contiene: str
-    # El dato inventado TAL COMO LO ESCRIBIÓ el modelo. Si son varios, tienen
-    # que aparecer en la MISMA línea (p. ej. puerto + etiqueta).
+    # Lo que escribió el modelo como prueba (subcadena de su respuesta).
     escrito: list[str]
-    # El dato real del que cuelga la invención: se prueba también como `dato`
-    # literal de la afirmación (lo que un modelo citaría para colar la invención).
-    ancla: list[str]
+    # El contenido FALSO, como grupos de tokens: cada grupo tiene que salir de
+    # UNA línea (la que la persona ve junto al dato). Si algún grupo es
+    # emitible, la invención se puede entregar.
+    falso: list[list[str]]
+    # Sólo las de conclusión: el token verdadero, que se espera emitible.
+    verdadero: list[list[str]] = ()
+    # Herramientas que sólo agregan capturas (p. ej. la conversión correcta).
+    herramientas: tuple = ()
+    # Herramienta cuya salida, si la produce, EXPRESARÍA la afirmación (un
+    # conteo «todos» / «ninguno»). Si la produce, no se puede decir que la
+    # invención quede fuera, y se cuenta como emitible.
+    conteo: Contar | None = None
     nota: str = ""
 
 
 INVENCIONES: list[Invencion] = [
-    Invencion("t2-91GB", 2, "~91 GB", ["91 GB"], ["89Gi"],
-              "conversión: 89 GiB escrito como ~91 GB"),
-    Invencion("t3-131074", 3, "131,074", ["131,074"], ["131072"],
-              "número alterado: las salidas dicen 131072"),
-    Invencion("t4-casi-un-dia", 4, "casi un dia", ["casi un día"], ["ActiveEnterTimestamp"],
-              "duración calculada mal a partir de timestamps reales"),
-    Invencion("t5-8188-docker", 5, "8188", ["8188", "Docker multi-hilo"], ["8188"],
-              "etiqueta inventada sobre un puerto real"),
-    Invencion("t5-11332-dns", 5, "11332", ["11332", "DNS local"], ["11332"],
-              "etiqueta inventada sobre un puerto real"),
-    Invencion("t5-24842-socket", 5, "24842", ["24842", "Socket efímero"], ["24842"],
-              "etiqueta inventada sobre un puerto real"),
-    Invencion("t5-15222-ssh", 5, "15222", ["15222", "Puente SSH"], ["15222"],
-              "etiqueta inventada sobre un puerto real"),
-    Invencion("t5-3001-publico", 5, "3001", ["3001", "0.0.0.0"], ["3001"],
-              "clasificó 3001 como público (0.0.0.0); la línea real es "
-              "172.16.20.11:3001 con 0.0.0.0:* en la columna del PAR"),
-    Invencion("t9-todos-noble", 9, "noble", ["noble"], ["noble"],
-              "cuantificador universal sobre una salida de la que vio el 2 %"),
-    Invencion("t9-sin-bionic", 9, "bionic", ["bionic"], ["noble"],
-              "afirmación NEGATIVA sobre salida no leída: no hay línea que la contenga "
-              "porque la ausencia no se imprime"),
-    Invencion("t9-termino", 9, "la actualizacion termino", ["24.04.5 LTS"], ["24.04.5 LTS"],
-              "conclusión sin literal propio: el dato que escribió como prueba es "
-              "24.04.5 LTS (os-release), que es real"),
+    Invencion("t2-91GB", 2, "~91 GB", ["91 GB"], [["91 GB"]],
+              herramientas=(Convertir("89", "GiB", "GB", 0), Convertir("89", "GiB", "GB", 1)),
+              nota="conversión: 89 GiB escrito como ~91 GB"),
+    Invencion("t3-131074", 3, "131,074", ["131,074"], [["131,074"]],
+              nota="número alterado: las salidas dicen 131072"),
+    Invencion("t4-casi-un-dia", 4, "casi un dia", ["casi un día"], [["casi un día"]],
+              nota="duración calculada mal a partir de timestamps reales"),
+    Invencion("t5-8188-docker", 5, "8188", ["8188", "Docker multi-hilo"],
+              [["8188", "Docker multi-hilo"], ["Docker multi-hilo"], ["Docker"]],
+              nota="etiqueta inventada sobre un puerto real"),
+    Invencion("t5-11332-dns", 5, "11332", ["11332", "DNS local"],
+              [["11332", "DNS local"], ["DNS local"], ["DNS"]],
+              nota="etiqueta inventada sobre un puerto real"),
+    Invencion("t5-24842-socket", 5, "24842", ["24842", "Socket efímero"],
+              [["24842", "Socket efímero"], ["Socket efímero"], ["Socket"]],
+              nota="etiqueta inventada sobre un puerto real"),
+    Invencion("t5-15222-ssh", 5, "15222", ["15222", "Puente SSH"],
+              [["15222", "Puente SSH"], ["Puente SSH"], ["SSH"]],
+              nota="etiqueta inventada sobre un puerto real"),
+    Invencion("t5-3001-publico", 5, "3001", ["3001", "0.0.0.0"],
+              [["3001", "público"], ["3001", "public"], ["público"], ["public"]],
+              verdadero=[["3001", "0.0.0.0"]],
+              nota="CONCLUSIÓN: 3001 como público; la línea real es 172.16.20.11:3001 con "
+                   "0.0.0.0:* en la columna del PAR"),
+    Invencion("t9-todos-noble", 9, "noble", ["noble"], [["todos"], ["all"]],
+              verdadero=[["noble"]], conteo=Contar("apt list --installed", "noble"),
+              nota="CONCLUSIÓN: cuantificador universal sobre una salida de la que vio el 2 %"),
+    Invencion("t9-sin-bionic", 9, "bionic", ["bionic"], [],
+              conteo=Contar("apt list --installed", "bionic"),
+              nota="NEGATIVA sobre salida no leída: la ausencia no se imprime; sólo un "
+                   "conteo la expresaría"),
+    Invencion("t9-termino", 9, "la actualizacion termino", ["24.04.5 LTS"],
+              [["terminó"], ["completada"], ["finished"], ["complete"], ["completed"], ["done"]],
+              verdadero=[["24.04.5 LTS"]],
+              nota="CONCLUSIÓN: el dato que escribió como prueba (os-release) es real"),
 ]
 
 
@@ -352,10 +389,15 @@ def medir_v1(corpus: pathlib.Path) -> dict:
             if e not in plano:
                 raise ValueError(f"{inv.id}: {e!r} no está en la respuesta del modelo")
         maquina = examen[inv.tarea]["maquina"]
+        publicar = not examen[inv.tarea]["clientes"]
         hallazgos = lineas_con(capturas, maquina, inv.escrito)
-        ligada = _juzgar_con_regla_ligada(capturas, maquina, final, inv.escrito,
-                                          inv.escrito + inv.ancla,
-                                          publicar=not examen[inv.tarea]["clientes"])
+        extra, registro = _correr_herramientas(capturas, maquina, inv.herramientas, publicar)
+        todas = capturas + extra
+        conteo = None
+        if inv.conteo is not None:
+            _, (conteo,) = _correr_herramientas(capturas, maquina, [inv.conteo], publicar)
+        falso = [emitible(todas, maquina, g, publicar) for g in inv.falso]
+        verdadero = [emitible(todas, maquina, g, publicar) for g in inv.verdadero]
         filas.append({
             "id": inv.id, "tarea": inv.tarea, "maquina": maquina,
             "escrito": inv.escrito, "nota": inv.nota,
@@ -363,18 +405,24 @@ def medir_v1(corpus: pathlib.Path) -> dict:
                                          if cu.captura.maquina == maquina}),
             "atrapable_por_construccion": not hallazgos,
             "lineas_que_lo_contienen": hallazgos,
-            "regla_ligada": ligada,
+            "sin_prosa": {
+                "falso": falso,
+                "verdadero": verdadero,
+                "herramientas": registro,
+                "conteo": conteo,
+                "se_puede_entregar": (any(f["emitible"] for f in falso)
+                                      or (conteo is not None and not conteo["rechazada"])),
+            },
         })
     no_atrapables = [f["id"] for f in filas if not f["atrapable_por_construccion"]]
-
-    def _pasan(clave):
-        return [f["id"] for f in filas if f["regla_ligada"][clave]["pasa"]]
+    entregables = [f["id"] for f in filas if f["sin_prosa"]["se_puede_entregar"]]
     return {
-        "regla_ligada": {
-            "pasan_texto_minimo_dato_literal": _pasan("texto_minimo_dato_literal"),
-            "pasan_texto_minimo_cualquier_dato": _pasan("texto_minimo_cualquier_dato"),
-            "pasan_linea_respuesta_dato_literal": _pasan("linea_respuesta_dato_literal"),
-            "pasan_linea_respuesta_cualquier_dato": _pasan("linea_respuesta_cualquier_dato"),
+        "sin_prosa": {
+            "entregables": entregables,
+            "no_entregables": total - len(entregables),
+            "verdadero_emitible": {f["id"]: all(v["emitible"] for v in f["sin_prosa"]["verdadero"])
+                                   for f in filas if f["sin_prosa"]["verdadero"]},
+            "v1_pasa": not entregables,
         },
         "invenciones_totales": total,
         "filas": filas,
@@ -393,8 +441,11 @@ class DatoCorrecto:
     id: str
     tarea: int
     escrito: list[str]      # como lo escribió el modelo (subcadena de su respuesta)
-    nucleo: list[str]       # el valor sin unidad ni formato
+    nucleo: list[str]       # el valor sin unidad ni formato: lo que se emite como `dato`
     nota: str = ""
+    # Conteo con el criterio que el MODELO declaró en su respuesta. Sin
+    # criterio declarado, no se busca un patrón que dé el número.
+    contar: Contar | None = None
 
 
 @dataclass(frozen=True)
@@ -439,8 +490,12 @@ DATOS_V2: list[DatoCorrecto | DatosExtraidos] = [
     DatoCorrecto("t8-catch-all", 8, ["server_name _"], ["server_name _"]),
     DatoCorrecto("t8-444", 8, ["444"], ["444"]),
     DatoCorrecto("t8-status", 8, ["127.0.0.1:8084"], ["127.0.0.1:8084"]),
-    DatoCorrecto("t8-conteo-ssl", 8, ["14 servicios con certificado SSL"], ["14"],
-                 "conteo derivado de la lista (bien hecho): ninguna línea lo imprime"),
+    # El modelo declaró el criterio: «(los archivos `.ssl.conf`)».
+    DatoCorrecto("t8-conteo-ssl", 8, ["14 servicios con certificado SSL", "(los archivos .ssl.conf)"],
+                 ["14"], "conteo derivado de la lista (bien hecho): ninguna línea lo imprime",
+                 contar=Contar("ls /etc/nginx/conf.d/domains/", ".ssl.conf")),
+    # Sin criterio literal declarado («principales» = sin prefijo de subdominio):
+    # no se busca un patrón que dé 6.
     DatoCorrecto("t8-conteo-principales", 8, ["Dominios principales (6)"], ["6"],
                  "conteo derivado de la lista (bien hecho): ninguna línea lo imprime"),
     DatosExtraidos("t10-ruta", 10, _rutas_etc_citadas, "rutas de configuración citadas"),
@@ -461,24 +516,24 @@ def medir_v2(corpus: pathlib.Path) -> dict:
     examen = tareas_del_examen()
     lecturas = {t: leer_transcripcion(corpus, t) for t in limpias}
 
-    items: list[tuple[str, int, list[str], list[str], str]] = []
+    items: list[tuple[str, int, list[str], list[str], str, Contar | None]] = []
     for d in DATOS_V2:
         if d.tarea not in limpias:
             raise ValueError(f"{getattr(d, 'id', d.prefijo)}: la tarea {d.tarea} no es limpia")
         if isinstance(d, DatoCorrecto):
-            items.append((d.id, d.tarea, d.escrito, d.nucleo, d.nota))
+            items.append((d.id, d.tarea, d.escrito, d.nucleo, d.nota, d.contar))
         else:
             extraidos = d.extraer(lecturas[d.tarea][1])
             if not extraidos:
                 raise ValueError(f"{d.prefijo}: no se extrajo ningún dato")
             for s in extraidos:
-                items.append((f"{d.prefijo}-{_hash(s)}", d.tarea, [s], [s], d.nota))
+                items.append((f"{d.prefijo}-{_hash(s)}", d.tarea, [s], [s], d.nota, None))
     for t in limpias:
         if not any(i[1] == t for i in items):
             raise ValueError(f"la tarea limpia {t} no tiene ningún dato medido")
 
     filas = []
-    for id_, tarea, escrito, nucleo, nota in items:
+    for id_, tarea, escrito, nucleo, nota, cuenta in items:
         capturas, final = lecturas[tarea]
         plano = _sin_markdown(final)
         for e in escrito:
@@ -493,11 +548,13 @@ def medir_v2(corpus: pathlib.Path) -> dict:
             if clientes:
                 return [{"comando_hash": _hash(h["comando"]), "flujo": h["flujo"]} for h in hs]
             return hs
-        ligada = _juzgar_con_regla_ligada(capturas, maquina, final, escrito,
-                                          escrito + nucleo, publicar=not clientes)
+        extra, registro = _correr_herramientas(capturas, maquina, [cuenta] if cuenta else [],
+                                               publicar=not clientes)
         filas.append({
             "id": id_, "tarea": tarea, "maquina": maquina, "nota": nota,
-            "regla_ligada": ligada,
+            "sin_prosa": {"expresable": emitible(capturas + extra, maquina, nucleo,
+                                                 publicar=not clientes),
+                          "herramientas": registro},
             "escrito": [f"<cliente:{_hash(e)}>" for e in escrito] if clientes else escrito,
             "nucleo": [f"<cliente:{_hash(e)}>" for e in nucleo] if clientes else nucleo,
             "literal_respaldado": bool(lit), "lineas_literal": _ver(lit),
@@ -505,16 +562,9 @@ def medir_v2(corpus: pathlib.Path) -> dict:
         })
     fp_lit = [f["id"] for f in filas if not f["literal_respaldado"]]
     fp_nuc = [f["id"] for f in filas if not f["nucleo_respaldado"]]
-
-    def _sin(clave):
-        return [f["id"] for f in filas if not f["regla_ligada"][clave]["pasa"]]
+    no_expresables = [f["id"] for f in filas if not f["sin_prosa"]["expresable"]["emitible"]]
     return {
-        "regla_ligada": {
-            "sin_respaldo_texto_minimo_dato_literal": _sin("texto_minimo_dato_literal"),
-            "sin_respaldo_texto_minimo_cualquier_dato": _sin("texto_minimo_cualquier_dato"),
-            "sin_respaldo_linea_respuesta_dato_literal": _sin("linea_respuesta_dato_literal"),
-            "sin_respaldo_linea_respuesta_cualquier_dato": _sin("linea_respuesta_cualquier_dato"),
-        },
+        "sin_prosa": {"no_expresables": no_expresables, "v2_pasa": not no_expresables},
         "tareas_limpias": limpias,
         "datos_medidos": len(filas),
         "filas": filas,

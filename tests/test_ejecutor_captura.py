@@ -74,7 +74,7 @@ def test_un_comando_colgado_vuelve_al_vencer_el_plazo_marcado_como_truncado():
     # Lo que salió antes de vencer se entrega (piso de §2.3)...
     assert c.salida.splitlines() == ["antes"]
     # ...pero no respalda nada, porque la salida no está completa.
-    a = Afirmacion(maquina=c.maquina, texto="dijo antes", comando=c.comando, linea="antes", dato="antes")
+    a = Afirmacion(maquina=c.maquina, comando=c.comando, linea="antes", dato="antes")
     assert verificar(a, [a_captura(c)]).estado == FUENTE_TRUNCADA
 
 
@@ -122,10 +122,10 @@ def test_a_captura_conserva_la_maquina_y_el_stderr():
     corta = a_captura(c)
     assert corta.maquina == "hall9000"
     assert corta.stderr == "sudo: a password is required\n"
-    a = Afirmacion(maquina="hall9000", texto="sudo pidió contraseña: a password is required", comando=c.comando,
+    a = Afirmacion(maquina="hall9000", comando=c.comando,
                    linea="sudo: a password is required", dato="a password is required")
     assert verificar(a, [corta]).estado == RESPALDADA
-    otra = Afirmacion(maquina="atemai", texto="sudo pidió contraseña: a password is required", comando=c.comando,
+    otra = Afirmacion(maquina="atemai", comando=c.comando,
                       linea="sudo: a password is required", dato="a password is required")
     assert verificar(otra, [corta]).estado == FUENTE_INEXISTENTE
 
@@ -134,5 +134,5 @@ def test_un_stderr_truncado_no_deja_citar_ni_lo_que_llegó_entero_por_stdout():
     """La captura está incompleta si CUALQUIERA de los dos flujos se cortó:
     se rechaza antes de mirar el contenido, aunque la línea esté en stdout."""
     c = correr("seq 1 100000 1>&2; echo ok", maquina="local", tope_bytes=1024)
-    a = Afirmacion(maquina="local", texto="dijo ok", comando=c.comando, linea="ok", dato="ok")
+    a = Afirmacion(maquina="local", comando=c.comando, linea="ok", dato="ok")
     assert verificar(a, [a_captura(c)]).estado == FUENTE_TRUNCADA

@@ -89,10 +89,11 @@ def test_v2_cero_falsos_positivos_en_las_tareas_limpias(r):
     assert r["v2"]["falsos_positivos_literal"] == []
 
 
-# --- Regla ligada (dato + reglas 1-4 de cita.py), medida 2026-09-16 ---
-# Método en el docstring del script: texto = el dato como lo escribió el modelo;
-# cita = cualquier línea real completa de esa máquina; dato = literal (escrito,
-# ancla o núcleo) o «cualquier dato» (testigo exhaustivo: un carácter común).
+# --- Sin prosa (DECISIÓN §2.0), medido 2026-09-16 ---
+# Método en el docstring del script: por cada invención, ¿el contenido FALSO
+# sale `respaldada` como `dato` con ALGUNA línea real de esa máquina como cita
+# (incluidas las salidas reales de contar/convertir)? Por cada dato correcto,
+# ¿su núcleo sale `respaldada`?
 
 DE_DATO = ["t2-91GB", "t3-131074", "t4-casi-un-dia", "t5-8188-docker", "t5-11332-dns",
            "t5-24842-socket", "t5-15222-ssh", "t9-sin-bionic"]
@@ -103,62 +104,75 @@ def test_las_invenciones_se_reparten_ocho_de_dato_y_tres_de_conclusion(r):
     assert sorted(f["id"] for f in r["v1"]["filas"]) == sorted(DE_DATO + DE_CONCLUSION)
 
 
-def test_v1a_medido_con_la_regla_ligada(r):
-    """Sólo los NÚMEROS inventados quedan rechazados sea cual sea la cita.
+def test_v1_sin_prosa_ninguna_invencion_se_puede_entregar(r):
+    """Umbral pre-registrado de V1 bajo el contrato nuevo: 11 de 11 fuera."""
+    assert r["v1"]["sin_prosa"]["entregables"] == []
+    assert r["v1"]["sin_prosa"]["no_entregables"] == 11
 
-    · t2 (91 GB) y t3 (131,074): ninguna línea tiene esos números → regla 4.
-    · t4 (casi un día) y t9-sin-bionic: prosa sin números. Caen si el dato es
-      el literal inventado; pasan con un dato trivial (límite de reglas 2-3).
-    · t5 ×4: la invención es la ETIQUETA; el puerto es real. Citando
-      `0.0.0.0:8188` con dato `8188`, el texto «8188 Docker multi-hilo» pasa.
+
+def test_v1_sin_prosa_en_las_de_conclusion_el_token_verdadero_SI_sale(r):
+    """Lo que queda fuera es la interpretación, no el dato: `0.0.0.0` (con
+    3001 en la misma línea), `noble` y `24.04.5 LTS` salen respaldados. Si
+    esto fallara, V1 pasaría por rechazar también lo verdadero."""
+    assert r["v1"]["sin_prosa"]["verdadero_emitible"] == {
+        "t5-3001-publico": True, "t9-todos-noble": True, "t9-termino": True}
+
+
+def test_v1_las_etiquetas_de_t5_no_estan_en_ninguna_linea_pero_el_puerto_si(r):
+    """El puerto sale solo; la etiqueta no sale ni sola ni junto al puerto."""
+    filas = {f["id"]: f for f in r["v1"]["filas"]}
+    for id_ in ["t5-8188-docker", "t5-11332-dns", "t5-24842-socket", "t5-15222-ssh"]:
+        falso = filas[id_]["sin_prosa"]["falso"]
+        assert not any(g["emitible"] for g in falso), id_
+        assert falso[0]["estados"].get("respaldada", 0) >= 1, id_  # el puerto, sí
+
+
+def test_v1_los_conteos_de_t9_los_niega_contar_por_el_truncado(r):
+    """`todos` y `ningún bionic` sólo los expresaría un conteo, y `contar` (la
+    herramienta real) se niega: la captura de `apt list` vino truncada.
+
+    OJO: el truncado del corpus lo hizo Claude Code al mostrarle la salida al
+    modelo (85,9 KB). `captura.py` guarda hasta 1 MB: con el Ejecutor de la
+    Fase 2 esa captura vendría COMPLETA y el conteo saldría. Ver el aviso de
+    `test_v1_all_es_un_homonimo_que_sólo_frena_el_truncado`."""
+    filas = {f["id"]: f for f in r["v1"]["filas"]}
+    for id_ in ["t9-todos-noble", "t9-sin-bionic"]:
+        conteo = filas[id_]["sin_prosa"]["conteo"]
+        assert conteo["rechazada"] is True, id_
+        assert "truncada" in conteo["motivo"], id_
+
+
+def test_v1_all_es_un_homonimo_que_sólo_frena_el_truncado(r):
+    """`all` (arquitectura en `apt list`) está en 199 líneas; hoy lo frena
+    `fuente_truncada`, no el contenido. Con una captura completa, `dato="all"`
+    saldría respaldado mostrando la línea donde `all` es la arquitectura."""
+    fila = {f["id"]: f for f in r["v1"]["filas"]}["t9-todos-noble"]
+    all_ = [g for g in fila["sin_prosa"]["falso"] if g["datos"] == ["all"]][0]
+    assert all_["estados"].get("fuente_truncada") == 199
+
+
+def test_v2_sin_prosa_medido(r):
+    """42 datos correctos; 3 no se pueden emitir como `dato` literal:
+
+    · t8-conteo-ssl: el criterio que declaró el modelo («los archivos
+      `.ssl.conf`»), contado con `contar` sobre la captura real, da 42 y no
+      14: el mismo nombre aparece en el listado, en la cabecera `=== … ===` y
+      en el `Permission denied`. Una subcadena no separa las tres.
+    · t8-conteo-principales: el modelo no declaró un criterio literal
+      («principales» = sin prefijo); no se busca un patrón que dé 6.
+    · t6-instalado-igual: lo causa la regla de bordes. El núcleo fijado es
+      `6.8.0-139` y la línea dice `6.8.0-139.139`: cortar `139` de `139.139`
+      es la misma operación que `24.04` de `24.04.5`. El token entero
+      (`6.8.0-139.139`) sí sale.
     """
-    rl = r["v1"]["regla_ligada"]
-    pasan_literal = set(rl["pasan_texto_minimo_dato_literal"])
-    pasan_cualquiera = set(rl["pasan_texto_minimo_cualquier_dato"])
-    assert [i for i in DE_DATO if i not in pasan_cualquiera] == ["t2-91GB", "t3-131074"]
-    assert [i for i in DE_DATO if i not in pasan_literal] == [
-        "t2-91GB", "t3-131074", "t4-casi-un-dia", "t9-sin-bionic"]
-
-
-def test_v1b_las_tres_de_conclusion_SIGUEN_pasando(r):
-    """Límite inherente de las citas (riesgo 2): van a C5, no al verificador."""
-    rl = r["v1"]["regla_ligada"]
-    for clave in ("pasan_texto_minimo_dato_literal", "pasan_texto_minimo_cualquier_dato"):
-        assert set(DE_CONCLUSION) <= set(rl[clave]), clave
-
-
-def test_v2_medido_con_la_regla_ligada(r):
-    """42 datos correctos. El «2» anterior (sólo el valor) se corrige:
-
-    · dato literal, texto mínimo: 5. Además de los dos conteos, t7-uptime (el
-      texto dice «2 minutos», la línea `7:02`: regla 4), t10-sin-grupo y
-      t10-sudo (el modelo escribió prosa sin el literal: regla 3).
-    · cualquier dato, texto mínimo: 3 (el piso: conteos + t7-uptime).
-    · con la línea entera de la respuesta como texto: 9 (números vecinos
-      en la misma fila de tabla o párrafo).
-    """
-    rl = r["v2"]["regla_ligada"]
     assert r["v2"]["datos_medidos"] == 42
-    assert rl["sin_respaldo_texto_minimo_dato_literal"] == [
-        "t7-uptime", "t8-conteo-ssl", "t8-conteo-principales", "t10-sin-grupo", "t10-sudo"]
-    assert rl["sin_respaldo_texto_minimo_cualquier_dato"] == [
-        "t7-uptime", "t8-conteo-ssl", "t8-conteo-principales"]
-    assert rl["sin_respaldo_linea_respuesta_dato_literal"] == [
-        "t7-uptime", "t8-catch-all", "t8-444", "t8-conteo-ssl", "t8-conteo-principales",
-        "t10-permisos", "t10-dueno", "t10-sin-grupo", "t10-sudo"]
+    assert r["v2"]["sin_prosa"]["no_expresables"] == [
+        "t6-instalado-igual", "t8-conteo-ssl", "t8-conteo-principales"]
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "V1a NO PASA con la regla ligada (medido 2026-09-16): sólo 2 de 8 invenciones "
-    "de dato quedan rechazadas con cualquier cita (t2, t3: números). 4 de 8 si el "
-    "dato es el literal inventado. Las etiquetas de t5 y la prosa de t4/t9 no "
-    "tienen número que la regla 4 ate."))
-def test_v1a_las_ocho_invenciones_de_dato_rechazadas_sea_cual_sea_la_cita(r):
-    assert not set(DE_DATO) & set(r["v1"]["regla_ligada"]["pasan_texto_minimo_cualquier_dato"])
-
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "V2 NO PASA con la regla ligada (medido 2026-09-16): 3 falsos positivos en el "
-    "mejor caso (t7-uptime y los dos conteos de la tarea 8), 5 con el dato literal."))
-def test_v2_cero_falsos_positivos_con_la_regla_ligada(r):
-    assert r["v2"]["regla_ligada"]["sin_respaldo_texto_minimo_cualquier_dato"] == []
+    "V2 NO PASA sin prosa (medido 2026-09-16): 3 de 42. Dos conteos de la tarea 8 "
+    "que `contar` (subcadena por línea) no puede reproducir, y t6-instalado-igual "
+    "por la regla de bordes (6.8.0-139 dentro de 6.8.0-139.139)."))
+def test_v2_sin_prosa_cero_falsos_positivos(r):
+    assert r["v2"]["sin_prosa"]["no_expresables"] == []

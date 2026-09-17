@@ -5,8 +5,6 @@ conteos (tarea 8 de U3, «14 servicios con certificado SSL») y las conversiones
 (tarea 2, «89 GiB» escrito de cabeza como «~91 GB»). La herramienta hace la
 operación y deja su resultado en una captura, donde sí es citable.
 """
-from dataclasses import fields
-
 import pytest
 
 from jax.ejecutor.captura import CapturaCompleta, a_captura
@@ -27,13 +25,8 @@ def _citable(completa, literal):
     tiene que quedar RESPALDADA por el verificador real."""
     lineas = [l for l in completa.salida.splitlines() if literal in l]
     assert lineas, f"{literal!r} no está literal en ninguna línea de {completa.salida!r}"
-    campos = dict(maquina=completa.maquina, texto=literal,
-                  comando=completa.comando, linea=lineas[0])
-    # `cita.py` está sumando el campo `dato` en paralelo (liga la afirmación a
-    # su cita). Cuando entre, quitar este condicional y pasar `dato` siempre.
-    if "dato" in {f.name for f in fields(Afirmacion)}:
-        campos["dato"] = literal
-    afirmacion = Afirmacion(**campos)
+    afirmacion = Afirmacion(maquina=completa.maquina, comando=completa.comando,
+                            linea=lineas[0], dato=literal)
     return verificar(afirmacion, [a_captura(completa)]).estado
 
 

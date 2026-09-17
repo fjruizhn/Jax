@@ -1,35 +1,60 @@
 """Verificador de citas del Ejecutor (Fase 2).
 
-Spec: docs/superpowers/specs/2026-09-16-ejecutor-fase2-design.md §3.3.
+Spec: docs/superpowers/specs/2026-09-16-ejecutor-fase2-design.md §2.0 y §3.3.
 Puro: sin red, sin E/S, sin reloj. Lo corre tests-puros en CI.
+
+DECISIÓN de Fernando (2026-09-16, §2.0): el Ejecutor no escribe prosa. La
+afirmación es `(maquina, comando, linea, dato)` y lo que ve la persona lo arma
+`presentar`, no el modelo.
 """
+from dataclasses import fields
+
 import pytest
 
 from jax.ejecutor.cita import (
-    DATO_FUERA_DE_LINEA, DATO_FUERA_DE_TEXTO, FUENTE_INEXISTENTE, FUENTE_TRUNCADA,
-    NUMERO_SIN_RESPALDO, RESPALDADA, SIN_RESPALDO,
-    Afirmacion, Captura, normalizar, numeros, verificar,
+    DATO_FUERA_DE_LINEA, FUENTE_INEXISTENTE, FUENTE_TRUNCADA, RESPALDADA, SIN_RESPALDO,
+    Afirmacion, Captura, normalizar, presentar, verificar,
 )
 
 MAQUINA = "hall9000"
 SALIDA_FREE = "               total        used        free\nMem:            89Gi        12Gi        70Gi"
 CAPTURAS = [Captura(maquina=MAQUINA, comando="free -h", salida=SALIDA_FREE, stderr="", truncada=False)]
+LINEA_MEM = "Mem:            89Gi        12Gi        70Gi"
 
+
+def _una(linea_salida, linea, dato, comando="c", truncada=False):
+    capturas = [Captura(maquina=MAQUINA, comando=comando, salida=linea_salida, stderr="", truncada=truncada)]
+    return verificar(Afirmacion(maquina=MAQUINA, comando=comando, linea=linea, dato=dato), capturas)
+
+
+# --- El contrato: no hay campo de prosa ---
+
+def test_la_afirmacion_no_tiene_campo_de_prosa():
+    """§2.0: «No hay campo de texto libre escrito por el modelo»."""
+    assert [f.name for f in fields(Afirmacion)] == ["maquina", "comando", "linea", "dato"]
+
+
+def test_no_se_puede_construir_una_afirmacion_con_texto():
+    with pytest.raises(TypeError):
+        Afirmacion(maquina=MAQUINA, texto="el servidor está en Marte", comando="free -h",
+                   linea=LINEA_MEM, dato="89Gi")
+
+
+# --- La fuente ---
 
 def test_una_linea_literal_esta_respaldada():
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi de RAM", comando="free -h",
-                   linea="Mem:            89Gi        12Gi        70Gi", dato="89Gi")
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="89Gi")
     assert verificar(a, CAPTURAS).estado == RESPALDADA
 
 
 def test_una_linea_que_no_esta_en_la_salida_no_tiene_respaldo():
-    a = Afirmacion(maquina=MAQUINA, texto="hay 128Gi de RAM", comando="free -h",
+    a = Afirmacion(maquina=MAQUINA, comando="free -h",
                    linea="Mem:           128Gi        12Gi        70Gi", dato="128Gi")
     assert verificar(a, CAPTURAS).estado == SIN_RESPALDO
 
 
 def test_citar_un_comando_que_no_se_corrio_es_fuente_inexistente():
-    a = Afirmacion(maquina=MAQUINA, texto="hay un disco sda", comando="lsblk", linea="sda", dato="sda")
+    a = Afirmacion(maquina=MAQUINA, comando="lsblk", linea="sda", dato="sda")
     assert verificar(a, CAPTURAS).estado == FUENTE_INEXISTENTE
 
 
@@ -38,12 +63,12 @@ def test_una_captura_truncada_no_respalda_NADA_aunque_la_linea_este():
     habiendo visto 2 KB de una salida de 85,9 KB que nunca abrió. Si la
     salida vino cortada, no se mira el contenido: se rechaza antes."""
     capturas = [Captura(maquina=MAQUINA, comando="apt list", salida="paquete/noble 1.0", stderr="", truncada=True)]
-    a = Afirmacion(maquina=MAQUINA, texto="es de noble", comando="apt list", linea="paquete/noble 1.0", dato="noble")
+    a = Afirmacion(maquina=MAQUINA, comando="apt list", linea="paquete/noble 1.0", dato="noble")
     assert verificar(a, capturas).estado == FUENTE_TRUNCADA
 
 
 def test_los_espacios_no_deciden():
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi", comando="free -h", linea="Mem: 89Gi 12Gi 70Gi", dato="89Gi")
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea="Mem: 89Gi 12Gi 70Gi", dato="89Gi")
     assert verificar(a, CAPTURAS).estado == RESPALDADA
 
 
@@ -51,8 +76,7 @@ def test_un_numero_parecido_NO_cuenta_como_respaldo():
     """Invención real de U3 (tarea 3): dijo «contexto 131.074» cuando su
     propia salida decía 131072. Si esto pasara, el verificador no sirve."""
     capturas = [Captura(maquina=MAQUINA, comando="ollama show", salida="context length 131072", stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="el contexto es 131074", comando="ollama show",
-                   linea="context length 131074", dato="131074")
+    a = Afirmacion(maquina=MAQUINA, comando="ollama show", linea="context length 131074", dato="131074")
     assert verificar(a, capturas).estado == SIN_RESPALDO
 
 
@@ -64,7 +88,7 @@ def test_las_mayusculas_SI_deciden():
     comparaba `"node"` contra `"Docker"`, palabras distintas, y seguía verde
     con el verificador ignorando mayúsculas -- no probaba lo que dice."""
     capturas = [Captura(maquina=MAQUINA, comando="ss -ltnp", salida="LISTEN 0 4096 *:8188 users:((\"docker\"))", stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="8188 es Docker", comando="ss -ltnp",
+    a = Afirmacion(maquina=MAQUINA, comando="ss -ltnp",
                    linea="LISTEN 0 4096 *:8188 users:((\"Docker\"))", dato="Docker")
     assert verificar(a, capturas).estado == SIN_RESPALDO
 
@@ -84,7 +108,7 @@ def test_una_cita_vacia_NO_se_respalda_con_una_linea_en_blanco(vacia):
     inventada con la línea vacía salía `respaldada` contra casi cualquier
     comando real (systemctl, apt, df con cabecera partida...)."""
     capturas = [Captura(maquina=MAQUINA, comando="apt list", salida="Listing...\n\npaquete/noble 1.0", stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="todos los paquetes son de noble", comando="apt list", linea=vacia, dato="noble")
+    a = Afirmacion(maquina=MAQUINA, comando="apt list", linea=vacia, dato="noble")
     assert verificar(a, capturas).estado == SIN_RESPALDO
 
 
@@ -96,7 +120,7 @@ def test_si_el_comando_se_corrio_dos_veces_cuenta_cualquiera_de_las_capturas():
         Captura(maquina=MAQUINA, comando="systemctl is-active ollama", salida="activating", stderr="", truncada=False),
         Captura(maquina=MAQUINA, comando="systemctl is-active ollama", salida="active", stderr="", truncada=False),
     ]
-    a = Afirmacion(maquina=MAQUINA, texto="ollama: active", comando="systemctl is-active ollama", linea="active", dato="active")
+    a = Afirmacion(maquina=MAQUINA, comando="systemctl is-active ollama", linea="active", dato="active")
     assert verificar(a, capturas).estado == RESPALDADA
 
 
@@ -109,7 +133,7 @@ def test_con_varias_capturas_una_truncada_sigue_sin_respaldar_NADA():
         Captura(maquina=MAQUINA, comando="apt list", salida="Listing...", stderr="", truncada=False),
         Captura(maquina=MAQUINA, comando="apt list", salida="paquete/noble 1.0", stderr="", truncada=True),
     ]
-    a = Afirmacion(maquina=MAQUINA, texto="es de noble", comando="apt list", linea="paquete/noble 1.0", dato="noble")
+    a = Afirmacion(maquina=MAQUINA, comando="apt list", linea="paquete/noble 1.0", dato="noble")
     assert verificar(a, capturas).estado == FUENTE_TRUNCADA
 
 
@@ -118,7 +142,7 @@ def test_una_captura_completa_respalda_aunque_otra_corrida_haya_venido_truncada(
         Captura(maquina=MAQUINA, comando="apt list", salida="paquete/noble 1.0", stderr="", truncada=True),
         Captura(maquina=MAQUINA, comando="apt list", salida="Listing...\npaquete/noble 1.0", stderr="", truncada=False),
     ]
-    a = Afirmacion(maquina=MAQUINA, texto="es de noble", comando="apt list", linea="paquete/noble 1.0", dato="noble")
+    a = Afirmacion(maquina=MAQUINA, comando="apt list", linea="paquete/noble 1.0", dato="noble")
     assert verificar(a, capturas).estado == RESPALDADA
 
 
@@ -134,7 +158,7 @@ def test_una_linea_que_solo_esta_en_stderr_queda_respaldada():
     conducta correcta quedaría sin respaldo."""
     capturas = [Captura(maquina=MAQUINA, comando="cat /etc/shadow", salida="",
                         stderr="cat: /etc/shadow: Permission denied\n", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="no tengo permiso: Permission denied", comando="cat /etc/shadow",
+    a = Afirmacion(maquina=MAQUINA, comando="cat /etc/shadow",
                    linea="cat: /etc/shadow: Permission denied", dato="Permission denied")
     assert verificar(a, capturas).estado == RESPALDADA
 
@@ -146,7 +170,7 @@ def test_una_linea_armada_pegando_el_final_de_stdout_con_el_principio_de_stderr_
     capturas = [Captura(maquina=MAQUINA, comando="df -h / ; sudo -n true",
                         salida="uso: 97%", stderr="sudo: a password is required\n",
                         truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="inventada: uso: 97%sudo: a password is required", comando="df -h / ; sudo -n true",
+    a = Afirmacion(maquina=MAQUINA, comando="df -h / ; sudo -n true",
                    linea="uso: 97%sudo: a password is required", dato="a password is required")
     assert verificar(a, capturas).estado == SIN_RESPALDO
 
@@ -155,7 +179,7 @@ def test_una_captura_truncada_no_respalda_ni_con_la_linea_en_stderr():
     """El truncado se mira ANTES que el contenido, también para stderr."""
     capturas = [Captura(maquina=MAQUINA, comando="apt update", salida="",
                         stderr="E: Could not get lock", truncada=True)]
-    a = Afirmacion(maquina=MAQUINA, texto="el lock está tomado: Could not get lock", comando="apt update",
+    a = Afirmacion(maquina=MAQUINA, comando="apt update",
                    linea="E: Could not get lock", dato="Could not get lock")
     assert verificar(a, capturas).estado == FUENTE_TRUNCADA
 
@@ -165,8 +189,7 @@ def test_el_mismo_comando_corrido_en_OTRA_maquina_es_fuente_inexistente():
     ésta. No se corrió ESE comando EN ESA máquina."""
     capturas = [Captura(maquina="atemai", comando="free -h", salida=SALIDA_FREE,
                         stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi de RAM", comando="free -h",
-                   linea="Mem:            89Gi        12Gi        70Gi", dato="89Gi")
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="89Gi")
     assert verificar(a, capturas).estado == FUENTE_INEXISTENTE
 
 
@@ -175,8 +198,7 @@ def test_una_captura_truncada_de_OTRA_maquina_no_convierte_el_veredicto_en_trunc
     para decir que la fuente vino cortada."""
     capturas = [Captura(maquina="atemai", comando="free -h", salida=SALIDA_FREE,
                         stderr="", truncada=True)]
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi de RAM", comando="free -h",
-                   linea="Mem:            89Gi        12Gi        70Gi", dato="89Gi")
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="89Gi")
     assert verificar(a, capturas).estado == FUENTE_INEXISTENTE
 
 
@@ -186,95 +208,36 @@ def test_una_afirmacion_que_no_dice_de_que_maquina_viene_no_se_respalda(vacia):
     sin máquina, `"" == ""` respaldaría una afirmación sin procedencia."""
     capturas = [Captura(maquina=vacia, comando="free -h", salida=SALIDA_FREE,
                         stderr="", truncada=False)]
-    a = Afirmacion(maquina=vacia, texto="hay 89Gi de RAM", comando="free -h",
-                   linea="Mem:            89Gi        12Gi        70Gi", dato="89Gi")
+    a = Afirmacion(maquina=vacia, comando="free -h", linea=LINEA_MEM, dato="89Gi")
     assert verificar(a, capturas).estado == SIN_RESPALDO
 
 
-# --- Ligadura afirmación ↔ cita (decisión de Fernando, 2026-09-16, con GO) ---
-# El verificador anterior nunca leía `texto`: comprobaba que la línea citada
-# existiera, no que respaldara lo afirmado («el servidor está en Marte» citando
-# `free -h` salía respaldada; V1 medido = 0 de 11). Ahora la afirmación lleva
-# `dato` y se exige: dato no vacío, dato literal en la línea, dato literal en el
-# texto, y CADA número del texto presente en la línea citada.
-
-LINEA_MEM = "Mem:            89Gi        12Gi        70Gi"
-LINEA_CABECERA = "               total        used        free"
-
-
-@pytest.mark.parametrize("linea", [LINEA_MEM, LINEA_CABECERA])
-@pytest.mark.parametrize("dato", ["Marte", "89Gi", "total", "el servidor"])
-def test_el_servidor_esta_en_Marte_no_se_respalda_con_ninguna_cita_real(linea, dato):
-    a = Afirmacion(maquina=MAQUINA, texto="el servidor está en Marte", comando="free -h",
-                   linea=linea, dato=dato)
-    assert verificar(a, CAPTURAS).estado != RESPALDADA
+# --- El dato, ligado a la línea ---
 
 
 def test_un_dato_que_no_esta_en_la_linea_citada_es_dato_fuera_de_linea():
-    a = Afirmacion(maquina=MAQUINA, texto="el servidor está en Marte", comando="free -h",
-                   linea=LINEA_MEM, dato="Marte")
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="Marte")
     v = verificar(a, CAPTURAS)
     assert v.estado == DATO_FUERA_DE_LINEA
     assert "Marte" in v.motivo
 
 
-def test_un_dato_verificado_no_blanquea_otro_numero_del_texto():
-    """El defecto de la opción B que Fernando descartó: el dato está en la
-    línea, pero la persona lee el TEXTO, y el texto dice 512 TB."""
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi de RAM, o sea 512 TB", comando="free -h",
-                   linea=LINEA_MEM, dato="89Gi")
-    v = verificar(a, CAPTURAS)
-    assert v.estado == NUMERO_SIN_RESPALDO
-    assert "512" in v.motivo
-
-
 def test_la_invencion_real_de_U3_131074_contra_la_linea_real_131072():
-    capturas = [Captura(maquina=MAQUINA, comando="ollama show", salida="context length 131072",
-                        stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="el contexto es 131074", comando="ollama show",
-                   linea="context length 131072", dato="131074")
-    assert verificar(a, capturas).estado == DATO_FUERA_DE_LINEA
-
-
-def test_131074_tampoco_entra_escondido_en_el_texto_junto_al_dato_real():
-    capturas = [Captura(maquina=MAQUINA, comando="ollama show", salida="context length 131072",
-                        stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="contexto 131072 (unos 131,074 tokens)",
-                   comando="ollama show", linea="context length 131072", dato="131072")
-    assert verificar(a, capturas).estado == NUMERO_SIN_RESPALDO
-
-
-def test_prosa_en_espanol_con_el_dato_literal_de_stderr_SI_se_respalda():
-    """Lo que resuelve los falsos positivos de V2: la prosa puede estar en
-    otro idioma mientras el dato sea literal y no haya números sueltos."""
-    capturas = [Captura(maquina=MAQUINA, comando="sudo -n true", salida="",
-                        stderr="sudo: a password is required\n", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto="sudo pide contraseña: a password is required",
-                   comando="sudo -n true", linea="sudo: a password is required",
-                   dato="a password is required")
-    assert verificar(a, capturas).estado == RESPALDADA
+    assert _una("context length 131072", "context length 131072", "131074").estado == DATO_FUERA_DE_LINEA
 
 
 @pytest.mark.parametrize("vacio", ["", "   ", "\t\n"])
 def test_un_dato_vacio_no_se_respalda(vacio):
     """Tercer bypass por vacío (después de la cita y la máquina): `""` está
-    dentro de cualquier línea y de cualquier texto."""
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi de RAM", comando="free -h",
-                   linea=LINEA_MEM, dato=vacio)
+    dentro de cualquier línea."""
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato=vacio)
     assert verificar(a, CAPTURAS).estado == SIN_RESPALDO
 
 
-def test_un_dato_que_esta_en_la_linea_pero_no_en_el_texto_es_dato_fuera_de_texto():
-    a = Afirmacion(maquina=MAQUINA, texto="la máquina tiene poca memoria libre", comando="free -h",
-                   linea=LINEA_MEM, dato="70Gi")
-    assert verificar(a, CAPTURAS).estado == DATO_FUERA_DE_TEXTO
-
-
 def test_el_dato_se_compara_con_la_misma_normalizacion_de_espacios_y_nada_mas():
-    a = Afirmacion(maquina=MAQUINA, texto="free dice Mem: 89Gi  12Gi", comando="free -h",
-                   linea=LINEA_MEM, dato="Mem:   89Gi 12Gi")
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="Mem:   89Gi 12Gi")
     assert verificar(a, CAPTURAS).estado == RESPALDADA
-    b = Afirmacion(maquina=MAQUINA, texto="hay 89gi", comando="free -h", linea=LINEA_MEM, dato="89gi")
+    b = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="89gi")
     assert verificar(b, CAPTURAS).estado == DATO_FUERA_DE_LINEA
 
 
@@ -282,97 +245,102 @@ def test_la_ligadura_se_exige_aunque_la_fuente_haya_venido_truncada():
     """Una afirmación incoherente consigo misma se rechaza por eso, antes de
     mirar las capturas: su veredicto no depende de qué se corrió."""
     capturas = [Captura(maquina=MAQUINA, comando="free -h", salida=SALIDA_FREE, stderr="", truncada=True)]
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi de RAM, o sea 512 TB", comando="free -h",
-                   linea=LINEA_MEM, dato="89Gi")
-    assert verificar(a, capturas).estado == NUMERO_SIN_RESPALDO
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="512 TB")
+    assert verificar(a, capturas).estado == DATO_FUERA_DE_LINEA
 
 
-# --- Qué es un «número» (regla 4) ---
-# Número = secuencia maximal de dígitos, que puede llevar separadores internos
-# `.` `,` `:` `-` `/` SIEMPRE entre dos dígitos. Se compara como token entero,
-# con igualdad de cadena: ni subcadena ni valor numérico.
+# --- Hallado 2026-09-16 al quitar la prosa: el dato no puede cortar un token ---
+# Sin prosa, el `dato` es lo único que el modelo escribe. Con subcadena pura,
+# `active` sale de `inactive` y `3107` de `131072`: un dato falso con una línea
+# verdadera. Token = corrida de letras, o número con `.`/`,` internos (miles,
+# decimales, versión, IP son UNA cantidad). `:` `-` `/` `_`, espacios y el paso
+# letra↔dígito separan.
 
-@pytest.mark.parametrize("texto,esperado", [
-    ("3001", ("3001",)),
-    ("131.074", ("131.074",)),
-    ("131,074", ("131,074",)),
-    ("Ubuntu 24.04.5 LTS", ("24.04.5",)),
-    ("puerto 3001.", ("3001",)),              # el punto final no es separador
-    ("1, 2 y 3", ("1", "2", "3")),            # coma seguida de espacio: separa
-    ("hay 89Gi", ("89",)),                    # la unidad pegada no protege al número
-    ("512TB", ("512",)),
-    ("uso 5%", ("5",)),
-    ("127.0.0.1:8084", ("127.0.0.1:8084",)),  # IP y puerto van juntos
-    ("6.8.0-139-generic", ("6.8.0-139",)),
-    ("2026-09-16", ("2026-09-16",)),
-    ("12/24 núcleos", ("12/24",)),
-    ("up 7:02", ("7:02",)),
-    ("sin números", ()),
+
+@pytest.mark.parametrize("linea,dato", [
+    ("inactive (dead)", "active"),
+    ("context length 131072", "3107"),
+    ("context length 131072", "131"),
+    ("context length 131.072", "131"),
+    ("context length 131.072", "072"),
+    ("Ubuntu 24.04.5 LTS", "24.04"),
+    ("Ubuntu 24.04.5 LTS", "4.04.5"),
+    ("Mem: 89Gi", "M"),
+    ("Mem: 89Gi", "9Gi"),
+    ("unavailable", "available"),
 ])
-def test_numeros_tokeniza(texto, esperado):
-    assert numeros(texto) == esperado
+def test_un_dato_que_corta_un_token_de_la_linea_no_se_respalda(linea, dato):
+    assert _una(linea, linea, dato).estado == DATO_FUERA_DE_LINEA
 
 
-@pytest.mark.parametrize("texto,linea,dato", [
-    # prefijo de otro número
-    ("context length 131", "context length 131072", "context length"),
-    # otro formato es otro literal
-    ("context length 131.072", "context length 131072", "context length"),
-    # IP de una columna, puerto de otra: `:` los ata
-    ("LISTEN en 172.16.20.11:3001", "tcp LISTEN 0 511 172.16.20.11:8080 0.0.0.0:3001", "LISTEN"),
-    # el 16 suelto de la hora no respalda la fecha: `-` la ata
-    ("backup del 2026-09-16", "backup 2026-09-17 16:00", "backup"),
+@pytest.mark.parametrize("linea,dato", [
+    ("LISTEN 0 4096 0.0.0.0:8188 0.0.0.0:*", "8188"),       # ss imprime ip:puerto
+    ("LISTEN 0 4096 0.0.0.0:8188 0.0.0.0:*", "0.0.0.0"),
+    ("Linux 6.8.0-139-generic x86_64", "6.8.0"),
+    ("backup 2026-09-17 16:00:05", "16:00"),
+    ("acl/noble-updates,now 2.3.2 amd64", "noble"),
+    ("Mem: 89Gi 12Gi", "89"),                                # letra↔dígito separa
+    ("Mem: 89Gi 12Gi", "89Gi"),
+    ("inactive active", "active"),                           # vale otra aparición
+    ("/dev/nvme0n1p2 1863G 92G 1771G 5% /", "1863G"),
 ])
-def test_un_numero_del_texto_tiene_que_estar_ENTERO_en_la_linea(texto, linea, dato):
-    capturas = [Captura(maquina=MAQUINA, comando="c", salida=linea, stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto=texto, comando="c", linea=linea, dato=dato)
-    assert verificar(a, capturas).estado == NUMERO_SIN_RESPALDO
-
-
-@pytest.mark.parametrize("texto,linea,dato", [
-    # Hallado al re-medir U3 (2026-09-16): `ss` imprime `0.0.0.0:8188`. Si `:`
-    # sólo atara, «el puerto 8188» nunca tendría respaldo en la línea que lo
-    # prueba, y 3 de las 4 etiquetas inventadas de la tarea 5 salían
-    # «rechazadas» por este artefacto, no por la etiqueta.
-    ("puerto 8188 en uso", "LISTEN 0 4096 0.0.0.0:8188 0.0.0.0:*", "8188"),
-    ("escucha en 0.0.0.0", "LISTEN 0 4096 0.0.0.0:8188 0.0.0.0:*", "0.0.0.0"),
-    ("kernel 6.8.0", "Linux 6.8.0-139-generic x86_64", "6.8.0"),
-    ("empezó a las 16:00", "backup 2026-09-17 16:00:05", "16:00"),
-])
-def test_un_tramo_de_la_linea_separado_por_dos_puntos_guion_o_barra_respalda(texto, linea, dato):
-    capturas = [Captura(maquina=MAQUINA, comando="c", salida=linea, stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto=texto, comando="c", linea=linea, dato=dato)
-    assert verificar(a, capturas).estado == RESPALDADA
-
-
-@pytest.mark.parametrize("texto,linea,dato", [
-    # `.` y `,` NO parten: son una sola cantidad (miles, decimales, versión, IP).
-    ("context length 131", "context length 131.072", "context length"),
-    ("Ubuntu 24.04", "Ubuntu 24.04.5 LTS", "Ubuntu"),
-    ("Linux 139", "Linux 6.8.0-139.139-generic", "Linux"),
-])
-def test_un_tramo_separado_por_punto_o_coma_NO_respalda(texto, linea, dato):
-    capturas = [Captura(maquina=MAQUINA, comando="c", salida=linea, stderr="", truncada=False)]
-    a = Afirmacion(maquina=MAQUINA, texto=texto, comando="c", linea=linea, dato=dato)
-    assert verificar(a, capturas).estado == NUMERO_SIN_RESPALDO
-
-
-# --- Límites conocidos, registrados y SIN arreglar (strict: si pasan, avisa) ---
-
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "LÍMITE de la regla elegida (hallado 2026-09-16 al implementarla): las reglas "
-    "2 y 3 las cumple CUALQUIER subcadena común a texto y línea, hasta una letra. "
-    "Si el texto no tiene números, sólo la regla 4 no lo ata a nada. Contra un "
-    "modelo que elige mal `dato` el verificador ata números, no prosa."))
-def test_LIMITE_un_dato_trivial_no_deberia_respaldar_Marte():
-    a = Afirmacion(maquina=MAQUINA, texto="el servidor está en Marte", comando="free -h",
-                   linea=LINEA_MEM, dato="M")
-    assert verificar(a, CAPTURAS).estado != RESPALDADA
+def test_un_dato_que_respeta_los_bordes_de_token_se_respalda(linea, dato):
+    assert _una(linea, linea, dato).estado == RESPALDADA
 
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "LÍMITE: un número escrito con palabras no es un número para la regla 4."))
-def test_LIMITE_un_numero_escrito_con_palabras_no_se_detecta():
-    a = Afirmacion(maquina=MAQUINA, texto="hay 89Gi de RAM, o sea quinientos TB",
-                   comando="free -h", linea=LINEA_MEM, dato="89Gi")
-    assert verificar(a, CAPTURAS).estado != RESPALDADA
+    "LÍMITE (2026-09-16): el dato puede ser palabras enteras que, fuera de la línea, "
+    "dicen lo contrario. `presentar` muestra la línea completa con el `No`; si la "
+    "persona lee sólo el dato, el error es de lectura (§2.0). No lo cierra el "
+    "verificador: lo mitiga la presentación."))
+def test_LIMITE_un_dato_de_palabras_enteras_puede_soltar_la_negacion():
+    linea = "No reboot required file found"
+    assert _una(linea, linea, "reboot required").estado != RESPALDADA
+
+
+# --- Lo que ve la persona lo arma el sistema ---
+
+
+def test_el_veredicto_respaldado_trae_la_linea_tal_como_la_imprimio_la_maquina():
+    """La cita se compara con espacios colapsados; lo que se muestra es la
+    línea de la captura, no la versión que escribió el modelo."""
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea="Mem: 89Gi 12Gi 70Gi", dato="89Gi")
+    v = verificar(a, CAPTURAS)
+    assert v.estado == RESPALDADA
+    assert v.linea_capturada == LINEA_MEM
+
+
+def test_un_veredicto_no_respaldado_no_trae_linea():
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="Marte")
+    assert verificar(a, CAPTURAS).linea_capturada == ""
+
+
+def test_presentar_muestra_dato_maquina_comando_y_la_linea_completa_literal():
+    a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="89Gi")
+    p = presentar(a)
+    assert p.splitlines() == [
+        "dato: '89Gi'",
+        "máquina: 'hall9000'",
+        "comando: 'free -h'",
+        f"línea: {LINEA_MEM!r}",
+    ]
+
+
+def test_presentar_no_recorta_una_linea_larga():
+    """Nunca resume: la línea sale entera, por larga que sea."""
+    larga = "x " * 5000 + "fin"
+    a = Afirmacion(maquina=MAQUINA, comando="c", linea=larga, dato="fin")
+    assert repr(larga) in presentar(a)
+
+
+@pytest.mark.parametrize("campo", ["maquina", "comando", "linea", "dato"])
+@pytest.mark.parametrize("colado", ["\n", "\r", " ", "\x1b[2K", "\x85"])
+def test_presentar_no_deja_que_un_campo_fabrique_otra_linea_ni_borre_la_pantalla(campo, colado):
+    """Un salto de línea o un escape de terminal dentro de un campo podría
+    dibujar un `dato:` falso o borrar el `No` de la línea. Cada campo sale
+    escapado: siempre cuatro líneas, sin caracteres de control."""
+    valores = dict(maquina=MAQUINA, comando="c", linea="a b", dato="a")
+    valores[campo] = valores[campo] + colado + "dato: 'falso'"
+    p = presentar(Afirmacion(**valores))
+    assert len(p.splitlines()) == 4
+    assert "\x1b" not in p
