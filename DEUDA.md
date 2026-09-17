@@ -449,8 +449,8 @@ arranque no exige la variable, ningún módulo de servicio importa la voz). Los 
 fallan contra `351ec95`.
 ## Cerrado en código, merge y despliegue pendientes — el cupo de pipelines lo hace cumplir la base (2026-09-17)
 
-Rama `perf/candado-creacion-a-la-base` (desde `origin/master` `351ec95`). **NO mergeada, NO
-desplegada.** Decisión de Fernando (2026-09-17): se arregla de raíz ANTES de desplegar el frente G.
+Rama `perf/candado-creacion-a-la-base`, con merge-forward a `origin/master` `b4543ec`. **NO
+mergeada, NO desplegada.** Decisión de Fernando (2026-09-17): se arregla de raíz ANTES de desplegar el frente G.
 
 **El hallazgo (frente G, Task 13, 2026-09-17).** `routes._pipeline_create_lock` era un
 `asyncio.Lock()` GLOBAL del proceso que envolvía el conteo de activos, el consumo del token de Ada,
@@ -494,24 +494,78 @@ Ahora manda la credencial de la identidad que corresponde, consume tokens con `O
 quema una sola vez; la segunda corrida medía "token ya usado") y `JAX_CARGA_PLAN_MS` representa lo
 que tarda planificar (con el plan instantáneo el cuello quedaba subestimado).
 
-**Pisos de CI (MEDICIONES LOCALES; manda el runner):** `tests-puros` 1598 → **1606** (+8,
-`tests/test_creacion_sin_candado_global.py`); `subpipeline-contrato-db` 109 → **119** (+10,
-`jacobs/_cupo_io_test.py`). Detector P10 en cero violaciones.
+**Pisos de CI (MEDICIONES LOCALES; manda el runner):** tras el merge-forward y **sumando deltas**,
+`tests-puros` 1603 → **1614** (+11, `tests/test_creacion_sin_candado_global.py`);
+`subpipeline-contrato-db` 109 → **120** (+11, `jacobs/_cupo_io_test.py`). Detector P10 en cero
+violaciones.
+
+**Carga (2026-09-17, hall9000, k6 v2.2.0, instancias AISLADAS sobre `jax_memory_test` — nunca :7777
+ni :8080).** Antes = `origin/master` `b4543ec`; después = la rama sobre ese mismo merge-forward.
+Mismo arnés, misma máquina, mismos offsets de token, 5 s de rampa + 20 s sostenidos + 5 s de bajada,
+pool 10. **Cupo efectivo 2 de 3** en las dos columnas: el padre `running` que el arnés necesita para
+que Ada pueda pedir un hijo ocupa un lugar (el pre-vuelo del arnés lo exige y aborta si hay más).
+
+`JAX_CARGA_PLAN_MS=0` (plan instantáneo, comparable al arnés de los frentes F/G):
+
+| escenario | VUs | rps antes | p95 antes | rps después | p95 después |
+|---|---|---|---|---|---|
+| Mesa (`invoked_by=plataforma`) | 10 | 309,0 | 33,83 ms | **3.070,4** | **7,86 ms** |
+| Mesa | 25 | 185,8 | 160,57 ms | **3.161,3** | **18,64 ms** |
+| Ada (hijo con token real) | 10 | 199,3 | 51,69 ms | **3.153,6** | **9,36 ms** |
+| Ada | 25 | 206,8 | 126,88 ms | **3.668,0** | **8,27 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 90,4 | 67,90 ms | **1.134,5** | **11,11 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | 37,2 | 245,22 ms | **1.159,4** | **7,68 ms** |
+
+`JAX_CARGA_PLAN_MS=300` (planificador representado; el real tarda 1,3-8,7 s en el camino sano, así
+que 300 ms es conservador). **Con el plan instantáneo la sección crítica del candado duraba
+microsegundos y el cuello quedaba SUBESTIMADO: lo que ponía a la Mesa a esperar era planificar
+adentro del candado.** Esta es la tabla que prueba la tesis:
+
+| escenario | VUs | rps antes | p95 antes | rps después | p95 después |
+|---|---|---|---|---|---|
+| Mesa | 10 | 3,3 | 3.047,91 ms | **3.998,1** | **1,98 ms** |
+| Mesa | 25 | 3,3 | 7.634,00 ms | **4.299,4** | **5,66 ms** |
+| Ada | 10 | 3,2 | 3.177,88 ms | **3.932,5** | **2,00 ms** |
+| Ada | 25 | 3,3 | 7.686,32 ms | **4.248,9** | **5,97 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 1,1 | 4.599,36 ms | **1.403,0** | **3,33 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | **0,5** | **9.202,47 ms** | **1.441,8** | **6,66 ms** |
+
+**El techo del candado se ve desnudo: 3,3 rps = exactamente 1/0,300 s.** Toda la creación, la de
+la Mesa y la de Ada, pasaba por un solo planificador a la vez.
+
+**¿La Mesa dejó de esperar detrás de Ada? SÍ.** Con el planificador representado y Ada delegando a
+25 VUs, la Mesa pasa de **0,5 rps y p95 9,20 s** a **1.441,8 rps y p95 6,66 ms**.
+
+**Degradación.** Antes, con el planificador representado, la Mesa **no aguanta ni c=5** (p95 4,6 s
+detrás de Ada) y a c=25 va a 7,6 s. Después no se degrada dentro del rango medido: p95 1,98 → 5,66 ms
+de c=10 a c=25, muy por debajo del umbral de 500 ms del arnés.
+
+**Lo que NO mejora, dicho de frente.** Con el plan instantáneo el "antes" **admite más pipelines
+por segundo** (mesa c=25: 5.575 admitidos en la corrida contra 2.863). El candado hacía de COLA y,
+cuando crear cuesta 3 ms, una cola aprovecha mejor el cupo que rechazar rápido. Es un artefacto del
+arnés, no del sistema: con el planificador representado —el régimen real— el "después" admite **más**
+(193 contra 114 a c=25) y además contesta el resto con un 422 explícito en 6 ms en vez de hacerlo
+esperar 7,6 s. El cambio de comportamiento es deliberado: **el cupo lleno ahora se rechaza rápido en
+vez de encolarse**, que es justo lo que se pidió.
+
+**Errores.** Cero en todas las corridas salvo **un (1) 500 en ~530.000 pedidos** (0,0002 %) en la
+corrida de plan instantáneo: un deadlock que agotó los doce reintentos. Fail-closed (no creó nada) y
+a ~100× la carga de producción. Cero en las corridas con el planificador representado.
+
+**Caduca** si cambia el esquema, el volumen de datos, `MAX_PARALLEL_PIPELINES` o la infraestructura.
 
 - **PENDIENTE con fecha:**
-  - [ ] **2026-09-17** Rehacer la prueba de carga completa (antes y después, plan instantáneo y
-        planificador representado). La primera tanda se tomó y quedó **detenida a pedido del
-        coordinador**: otra sesión medía conexiones del pool contra la misma MariaDB `:3308` y las
-        dos mediciones se contaminaban. Los números provisionales están en el informe del
-        scratchpad de la sesión; **no se escriben acá hasta rehacerlos**, porque una prueba de
-        carga es VERDAD OPERACIONAL y una contaminada no es ninguna.
   - [ ] **2026-09-17** Orden de merge contra el frente G: esa rama renombró el candado a
-        `routes.candado_de_creacion()` y agrega estados (`queued`, `awaiting_approval`,
-        `waiting_children`). **Si alguno de esos estados ocupa cupo, la lista `('pending','running')`
-        de `SQL_RESERVAR` tiene que crecer con ellos** o el cupo se cuenta mal. Decisión de Fernando.
-  - [ ] **2026-09-17** Merge-forward: la rama sale de `351ec95` y `origin/master` ya está en
-        `7957a99` (#204). Volver a medir los pisos después del merge-forward.
-
+        `routes.candado_de_creacion()` y agrega los estados `queued`, `awaiting_approval` y
+        `waiting_children`. **Decidir cuáles ocupan cupo** y agregarlos a
+        `cupo.ESTADOS_QUE_OCUPAN_CUPO` o a `cupo.ESTADOS_SIN_CUPO`. Ya no se puede olvidar en
+        silencio: la partición de `PipelineStatus` es exhaustiva y hay tres controles que se ponen
+        rojos solos (validado por mutación con `queued`), más uno contra la tabla real. Decisión de
+        Fernando.
+  - [ ] **2026-09-17** Si se quiere, convertir el 500 del deadlock agotado en un 503 explícito
+        ("no pude decidir el cupo, no creé nada"). Hoy es un 500 con traza; es fail-closed y pasa 1
+        de cada 530.000 a 100× la carga de producción, así que no se cambió el contrato HTTP dentro
+        de este PR sin pedirlo.
 
 ## Cerrado en código, merge y despliegue pendientes — human gate de LAS MANOS sin emisión HTTP (2026-09-17)
 
