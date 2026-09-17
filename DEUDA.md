@@ -658,7 +658,28 @@ los commits propios de C4 se reaplican encima.
   `tests/test_ejecutor_proxy_modelo_y_rutas.py` (otro modelo, cuerpo ilegible, tope y GET arbitrario no llegan a
   Ollama). En vivo sin vigía el proxy responde 423 antes de mirar el modelo (la pausa va primero).
 
-## Cerrado en código, deploy de jax URGENTE — frente B: kill switch real (2026-09-17)
+## Cerrado en código y DESPLEGADO — faltan la prueba del freno y su carga — frente B: kill switch real (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 ~15:40 CST (Mr. Hyde · sesión `fruiz-e5`; verificado con `git reflog`,
+`journalctl`, `ps`, `sudo cat /proc/<pid>/environ`, `curl` y SQL).** El código del frente B **está vivo en
+producción**. No lo desplegó esta sesión: el pull y el reinicio salieron de la migración a `jaxsvc` de
+`fruiz-a1` (él lo confirmó; `fruiz-47` descartó ser el autor con el reloj de sus propios pulls).
+
+- `git reflog` del checkout `/home/fruiz/jax`: `1490683 master@{15:22:50}: pull --ff-only`, después
+  `046682f master@{15:30:30}`. `jax-las-manos` reiniciado 15:23:02 (journal), proceso 2272008,
+  `cwd=/home/fruiz/jax/las_manos`, usuario `jaxsvc`.
+- **El proceso corre `1490683` y el checkout está en `046682f`: los 2 commits de diferencia son de
+  documentación** (`520f686` + el merge de #206). El código ejecutable es el actual. La comparación
+  proceso-contra-checkout es la lección del incidente de las 04:46, y acá se hizo.
+- `JAX_KILL_SWITCH_PATH=/etc/jax/interruptor/PAUSE` presente en `/proc/2272008/environ`.
+- `/health` de LAS MANOS 200 con la forma de la auditoría fail-open:
+  `{"status":"alive","kill_switch_active":false,"problemas":[],"comprobado_hace_s":0.0,"cache_ttl_s":5.0}`.
+- `GET /api/admin/kill-switch` → `{"activo":false,"heredada":false,...}`: la ruta heredada `/etc/jax/PAUSE`
+  no existe hoy.
+- 0 líneas de `ERROR`/`PermissionError` en el journal desde el reinicio, corriendo como `jaxsvc`.
+- El reinicio cumplió «0 pipelines en vuelo»: `jacobs_pipelines` sin ninguno activo (24 aborted,
+  31 completed, 6 expired) y 0 turnos del Ejecutor `en_curso`.
+- Sin `JAX_KOKORO_PYTHON` ni Whisper en el entorno: el retiro de la voz está adentro.
 
 **VERDAD OPERACIONAL 2026-09-17 (Mr. Hyde, verificado con `stat`, `systemctl show` y `git log`).** Lado plataforma
 MERGEADO Y EN PRODUCCIÓN: jax-platform#95 → `e715c28` (mergeado 04:23:49), `jax-platform.service` activo desde
@@ -706,11 +727,20 @@ escritor real contra un worktree temporal de jax-platform `origin/master` `97e4b
 `jacobs-gobernanza-db` **31** y `facet-health-io` **9** sin cambio contra `jax_memory_test`;
 `policy/tests/test_no_fail_open_except.py` 21 passed.
 
-- [ ] **2026-09-17** Publicar la rama, PR, confirmar pisos en el runner (si difiere, manda el runner), canario rojo por API y merge.
-- [ ] **2026-09-17** Deploy de jax con 0 pipelines en vuelo: verificar `JAX_KILL_SWITCH_PATH` en `/proc/<pid>/environ` de
-  `jax-las-manos` tras el reinicio; poner y quitar el freno desde la Mesa y ver a LAS MANOS responder (el peor caso:
-  un pipeline en vuelo se detiene).
-- [ ] **2026-09-17** Carga del lado jax sobre el HEAD rebasado (k6 `kill-switch.js`, regla TIME-WAIT < 10k).
+- [x] **2026-09-17** Publicar la rama, PR, confirmar pisos en el runner, canario rojo por API y merge.
+  `feat/kill-switch-real` es ancestro de `origin/master` (verificado con `git merge-base --is-ancestor`).
+- [x] **2026-09-17** Deploy de jax con 0 pipelines en vuelo y `JAX_KILL_SWITCH_PATH` verificada en
+  `/proc/2272008/environ` de `jax-las-manos` tras el reinicio. Evidencia completa en la VERDAD OPERACIONAL
+  de arriba (incluye el journal sin errores y los 0 pipelines al momento del reinicio).
+- [ ] **2026-09-17 · ventana coordinada** Poner y quitar el freno desde la Mesa y ver a LAS MANOS responder,
+  con el peor caso: un pipeline EN VUELO se detiene. Guion listo (activar → verificar → quitar) y el peor caso
+  se hace con un paso en `jekyll` (el proveedor más barato de los que `jacobs` puede llamar: `jax_local` NO es
+  elegible, su `facet.allowed_callers` es NULL y la regla es fail-closed). Se coordina con las sesiones
+  `fruiz-cc` (mide conexiones del pool) y `fruiz-47` (CI y merges): mientras el freno está puesto la Mesa
+  responde 423 a todo. **Si algo queda trabado, la prioridad es sacar el freno, no terminar la medición.**
+- [ ] **2026-09-17 · ventana coordinada** Carga del lado jax (k6 `kill-switch.js`, regla TIME-WAIT < 10k).
+  Línea base de TIME-WAIT medida hoy: 6.976 → 8.173 con carga ajena → 3.437 en reposo. El escenario exige el
+  freno PUESTO (su `setup()` aborta si no lo está), así que va dentro de la misma ventana.
 
 ## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 1: C1 prohibiciones y C2 respaldo (2026-09-17)
 
@@ -728,7 +758,7 @@ Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~04:40). Ram
   idénticos); `exportar` → `reglas=14 hosts=4`; `instalar_contratos.sh`; `probar_c1.py` → `c1_vivo=true`, y repetir
   sobre la instalación real los tres «verlo fallar» (Steps 5–6).
 
-## Cerrado en código, deploy de jax pendiente — frente F: contrato de sub-pipelines, I-2 y pool de conexiones de Jacobs (2026-09-17)
+## Cerrado en código y DESPLEGADO, falta la carga de authorize-facet — frente F: contrato de sub-pipelines, I-2 y pool de conexiones de Jacobs (2026-09-17)
 
 **VERDAD OPERACIONAL 2026-09-17 ~04:30 CST (Mr. Hyde, verificado en el worktree).** Rama jax `feat/contrato-subpipelines` rebasada sobre `origin/master` `de6964e` (frente E #177, frentes A #174 y C #175 ya adentro): 19 commits, sin publicar en GitHub, SIN mergear, SIN desplegar. jax-platform no se toca (master `c414eba`). Plan `docs/superpowers/plans/2026-09-16-frente-f-contrato-subpipelines.md`; ledger `jax-frente-f/.superpowers/sdd/2026-09-16-frente-f-contrato-subpipelines/progress.md` (+ `pr-body.md`, `enmienda.md`, `i2-report.md`, `pool-report.md`, `pool-carga.md`, `pool-ronda2-carga.md`).
 
@@ -781,10 +811,10 @@ Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango 
 
 **Pendientes (fechas propuestas por Hyde; Fernando las confirma o cambia):**
 - **Publicar la rama, CI, canario y merge — control 2026-09-18.**
-- **Deploy de jax F — control 2026-09-18, con 0 pipelines en vuelo** (el shutdown cierra el pool). `/etc/jax/.env` (hoy ninguna de las tres está): `JAX_SUBPIPELINE_TOKEN_TTL_SECONDS=300`, `JAX_MAX_SUBPIPELINE_DEPTH=3`, `JAX_JACOBS_DB_POOL_SIZE=10` (los tres son los defaults del código; escribirlos deja la decisión visible). Verificar en `/proc/<pid>/environ` de `jax-las-manos` tras el reinicio; `init_tables()` crea `jacobs_subpipeline_tokens` y agrega `parent_pipeline_id`/`depth` al arrancar (backup de `jacobs_pipelines` antes). Carga post-deploy de `/motor/authorize-facet` sin número no hay GO.
+- ~~**Deploy de jax F — control 2026-09-18, con 0 pipelines en vuelo.** `/etc/jax/.env` (hoy ninguna de las tres está)~~ — **CORREGIDO Y DESPLEGADO 2026-09-17 ~15:40 (Mr. Hyde · `fruiz-e5`).** La frase «hoy ninguna de las tres está» era una VERDAD OPERACIONAL caducada. **Medido en el proceso vivo** (`sudo cat /proc/2272008/environ` de `jax-las-manos`, reiniciado 15:23:02 con 0 pipelines en vuelo): `JAX_SUBPIPELINE_TOKEN_TTL_SECONDS=300`, `JAX_MAX_SUBPIPELINE_DEPTH=3`, `JAX_JACOBS_DB_POOL_SIZE=10`, las tres presentes; las tres también escritas en `/etc/jax/.env`. Lo único que queda del deploy de F es la carga: **carga post-deuda de `POST /motor/authorize-facet` (`loadtest/authorize_facet.js`, contra la app aislada `authorize_facet_app.py` en :7798 sobre `jax_memory_test`) — sin número no hay GO.** Va en ventana coordinada con `fruiz-cc`, que está midiendo conexiones contra esa MISMA base.
 - **Ningún camino vivo emite tokens todavía:** `emitir_token_subpipeline` solo lo llaman el arnés y los tests, y ningún código de jax ni de jax-platform manda `invoked_by="ada"` a `/jacobs/pipeline` (grep 2026-09-17, Hyde). El emisor de Ada (modo "plan de delegación") es otro trabajo; hasta que exista, `ada` sin token es 422 visible.
 
-## Cerrado en código, deploy de jax pendiente — frente E de la auditoría: limpieza, defectos y reglas en jax (2026-09-17)
+## Cerrado en código y DESPLEGADO (gate cumplido), faltan E-24 y los controles fechados — frente E de la auditoría: limpieza, defectos y reglas en jax (2026-09-17)
 
 **VERDAD OPERACIONAL 2026-09-17 ~02:20 CST (Mr. Hyde, verificado en el worktree).** Rama jax `fix/hallazgos-frente-e` rebasada sobre `origin/master` `0da32af` (frentes A #174, C #175, Ejecutor #172/#173/#176 ya adentro): 17 commits, sin publicar en GitHub, SIN mergear, SIN desplegar. Lado plataforma MERGEADO: jax-platform#92 → `c53ef30` (2026-09-17: `config_entorno` única que absorbe `config_de_entorno` de A, `JAX_OLLAMA_URL` obligatoria al arrancar, docstring de `owner_cleanup`), canario rojo `d234215` (`backend-tests` con y sin DB) leído por API. Spec `docs/superpowers/specs/2026-09-16-hallazgos-auditoria-jax-design.md` §E, plan `docs/superpowers/plans/2026-09-16-frente-e-jax-limpieza-defectos-reglas.md` (worktree `jax-hallazgos-docs`); ledger `jax-frente-e/.superpowers/sdd/2026-09-16-frente-e-jax-limpieza-defectos-reglas/progress.md` (+ `rebase-e-platform.md`, `unificar-config-entorno-report.md`).
 
@@ -818,6 +848,12 @@ Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango 
 **Pendientes (fechas propuestas por Hyde; Fernando las confirma o cambia):**
 - **Publicar la rama jax, CI, canario y merge — control 2026-09-18.** jax-platform ya tiene `c53ef30`, así que `mirror-sync` puede correr en verde.
 - **Deploy de jax E — control 2026-09-18, con 0 pipelines en vuelo** (al apagar LAS MANOS se cierra el cliente compartido): `/etc/jax/.env` necesita `JAX_OLLAMA_URL` (el journal de sudo registra su escritura a las 02:06:58 para el deploy de jax-platform; verificar en `/proc/<pid>/environ` de `jax-las-manos` tras el reinicio) ~~y `JAX_KOKORO_PYTHON` (sin ella el REPL no arranca)~~ — **CORREGIDO 2026-09-17: `JAX_KOKORO_PYTHON` ya NO se necesita, la voz se retiró** (ver § "Retiro de la voz"); `JAX_REPO_BASE` existe desde el frente A. Gate previo: facetas `hipatia, jekyll, thot, ada, kimi, hyde, jax_local` en `active` y `provider.base_url` de deepseek presente (E-17 y los workers de memoria dependen de eso).
+  - **DESPLEGADO Y GATE CUMPLIDO 2026-09-17 ~15:40 (Mr. Hyde · `fruiz-e5`), verificado en vivo:** en
+    `/proc/2272008/environ` del `jax-las-manos` vivo están `JAX_OLLAMA_URL=http://localhost:11434`,
+    `LAS_MANOS_URL=http://127.0.0.1:7777` y `JAX_REPO_BASE=/home/fruiz/jax/repo`. Gate previo medido con SQL:
+    las 7 facetas en `active` (`ada, hipatia, hyde, jax_local, jekyll, kimi, thot`) y
+    `provider.deepseek.base_url=https://api.deepseek.com/v1`, `status=active`. `JAX_KOKORO_PYTHON` confirmado
+    como NO necesario: no está en el entorno del proceso y el servicio arrancó sin errores.
 - **Medición de E-24 contra el Ollama de producción (modo `embedding`, antes/después) — en el deploy.** Sin ese número no hay GO del deploy de E-24.
 - **E-25: decisión de Fernando sobre el retiro del fallback — control 2026-09-24.**
 - **E-26: borrado de los 25 backups — control 2026-09-18.**
