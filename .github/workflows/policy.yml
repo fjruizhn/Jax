@@ -609,6 +609,12 @@ jobs:
           tests/test_ejecutor_contratos_cuenta_axioma.py
           tests/test_ejecutor_contratos_canario_upstream.py
           tests/test_ejecutor_contratos_canario_c1.py
+          tests/test_ejecutor_contratos_registro.py
+          tests/test_ejecutor_contratos_lectura.py
+          tests/test_ejecutor_contratos_cerco.py
+          tests/test_ejecutor_contratos_canario_c3.py
+          tests/test_ejecutor_proxy_registro.py
+          tests/test_ejecutor_carril_solo_en_el_proxy.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -670,6 +676,12 @@ jobs:
             tests/test_ejecutor_contratos_cuenta_axioma.py \
             tests/test_ejecutor_contratos_canario_upstream.py \
             tests/test_ejecutor_contratos_canario_c1.py \
+            tests/test_ejecutor_contratos_registro.py \
+            tests/test_ejecutor_contratos_lectura.py \
+            tests/test_ejecutor_contratos_cerco.py \
+            tests/test_ejecutor_contratos_canario_c3.py \
+            tests/test_ejecutor_proxy_registro.py \
+            tests/test_ejecutor_carril_solo_en_el_proxy.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
