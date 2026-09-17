@@ -7,6 +7,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import time
 import os
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from decimal import Decimal
@@ -517,3 +518,32 @@ def test_continuar_sin_candado_no_escribe_y_propaga():
             with pytest.raises(store.CandadoNoDisponible):
                 _continuar()
         m["tx"].assert_not_awaited()
+
+
+def test_la_transaccion_de_continuar_tiene_plazo_y_no_retiene_el_candado(monkeypatch):
+    """m1 de la re-revisión final: la transacción de continuar corría bajo el
+    candado entre procesos SIN techo de tiempo, mientras que la de crear sí lo
+    tiene. Un `SELECT ... FOR UPDATE` esperando un lock de fila (hasta
+    innodb_lock_wait_timeout, 50 s por defecto) dejaba el candado
+    `jacobs_crear_o_continuar:<base>` tomado y cualquier create o continue de
+    cualquier proceso respondía 503. Ahora vence con el mismo plazo que crear
+    (JAX_DB_CONNECT_TIMEOUT_SECONDS) y suelta el candado.
+    Expected contra 1b124fe: el test se cuelga y lo corta su propio
+    asyncio.wait_for (TimeoutError a los 5 s, con el candado retenido)."""
+    monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
+
+    async def transaccion_colgada(*a, **kw):
+        await asyncio.sleep(3600)
+
+    async def cuerpo():
+        with _entorno() as m:
+            m["tx"].side_effect = transaccion_colgada
+            inicio = time.monotonic()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(
+                    continuar.continuar("p1", "plataforma"), 5)
+            return time.monotonic() - inicio, m["candado"]
+
+    espera, candado = asyncio.run(cuerpo())
+    assert espera < 3, espera
+    assert candado.entradas == candado.salidas == 1, "el candado quedó tomado"

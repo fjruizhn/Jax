@@ -229,11 +229,21 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
             activos = await store.pipeline_count_active(conexion=conexion_del_candado)
             if activos >= MAX_PARALLEL_PIPELINES:
                 raise ContinuarRechazado(429, "limite_de_activos", _texto_limite(activos))
-            nueva = await store.continuar_transaccion(
-                pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
-                [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
-                evento_payload=evento_payload,
-            )
+            # m1 de la re-revisión final (2026-09-17): con plazo, como la
+            # transacción de crear (routes.py). El SELECT ... FOR UPDATE de
+            # continuar_transaccion puede quedarse esperando un lock de fila
+            # hasta innodb_lock_wait_timeout (50 s por defecto) y, mientras,
+            # este bloque retiene el candado con nombre: cualquier create o
+            # continue de cualquier proceso respondería 503 al vencer su
+            # GET_LOCK. Al vencer, la conexión de la transacción se cierra en
+            # su propio finally (nada queda a medias) y el candado se suelta;
+            # el endpoint responde 503 prevuelo_no_disponible.
+            async with asyncio.timeout(store.db_connect_timeout_seconds()):
+                nueva = await store.continuar_transaccion(
+                    pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
+                    [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
+                    evento_payload=evento_payload,
+                )
         if nueva is None:
             raise ContinuarRechazado(409, "estado_no_continuable", {
                 "status": None,
