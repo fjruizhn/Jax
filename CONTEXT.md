@@ -697,3 +697,38 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
   - **Lección del deploy, va en la familia de "un instrumento reportó algo correcto sobre una muestra/lectura incorrecta":** `JAX_SEED_TENANT_NAME=Inversiones Diamante Negro` se agregó al `.env` sin comillas. `systemd` (`EnvironmentFile=`) lo parsea bien, pero cualquier script que sourcea el `.env` en un shell (`set -a; . /etc/jax/.env`) rompe con `Diamante: command not found` — el archivo queda roto para ese segundo lector sin ningún aviso, porque el primer lector (systemd) nunca se quejó. Corregido con comillas y verificado que bash y `systemd-run -p EnvironmentFile` leen exactamente el mismo valor. **Regla nueva: un archivo de configuración compartido tiene más de un lector, y un valor con espacios se verifica parseándolo con los dos, no solo con el que se usó para escribirlo.**
   - **Deploy (2026-09-17 00:28):** 9 variables nuevas a `/etc/jax/.env` (backup `.env.backup-pre-frente-a-20260917-002811`, y el de las comillas, `.env.backup-pre-comillas-tenant-20260917-002841`); `jax-platform.service` reiniciado sin restarts ni errores de journal; frontend `index-ChCOZGPN.js`. Canario por API sobre el sha real: rojo en `e418c82`, verde en `e6e67f8` tras el revert. Pisos de CI medidos dos veces: vitest 448→504, con DB 1175→1334, sin DB 614→764. Carga en producción post-deploy (k6, `health.js`, 10 VUs): p95 0,52 ms, 0 fallas de 698.696 peticiones, 19.963 rps.
   - **Pendiente sin fecha fija:** verificación en vivo con Fernando (claro/oscuro, es/en) del tablero, los labels de facetas, el chat traducido y Admin Modelos/SMTP/Pipeline con Escape; y la decisión sobre `ws_notifications` en `axioma_config` (Discrepancia 10, recomendada al frente C). Deuda residual del triage del review final (17 ítems, ninguno bloqueante) registrada en `DEUDA.md` § Anotado, no bloquea.
+
+- **2026-09-17 · Pre-vuelo y continuar (Jacobs) — carga medida (VERDAD OPERACIONAL; caduca
+  si cambia el esquema del catálogo, el volumen de `facet_health_event` o la máquina).**
+  Instancia aislada `:17790` sobre `jax_memory_test` (rama `feat/prevuelo-y-continuar`,
+  HEAD `cfa717c`), catálogo y salud frescos (sin sondas — `sondeadas: []` verificado 3
+  veces), plan de 4 pasos con **dos sustituciones de datos de catálogo, ninguna edición de
+  fila ajena** (Ruling R29 + una nueva encontrada en esta corrida): `thot/critique` →
+  `jekyll/design` (thot sigue vinculado a `gpt-5.5` sin `max_tokens_param`/
+  `max_output_tokens` en `jax_memory_test`) y `kimi/generate` → `kimi/pipeline_analysis`
+  (con la semilla medida de `min_output_tokens` ya aplicada, `generate`=14336 excede el
+  `motor.max_tokens`=8000 de kimi; `pipeline_analysis` tiene piso 0 y prioridad 0 para
+  kimi en `capability_motor`, así que el auto-select de motor cae en kimi de verdad).
+  **Carga HTTP (gate, 0 errores en las cuatro concurrencias):** c=1 → 291,39 rps, p95 3,85
+  ms; c=10 → 486,40 rps, p95 22,67 ms; c=25 → 506,91 rps, p95 52,00 ms, p99 72,13 ms;
+  c=50 → 502,80 rps, p95 113,64 ms, p99 131,42 ms. **Ratio p95 c25/c1 = 13,51× — UMBRAL
+  10× NO CUMPLIDO** (c50/c1 = 29,52×, también reportado). **Veredicto: NOT MET.** Carga
+  sostenida (no por rondas cerradas — `ThreadPoolExecutor` encola todos los pedidos de una
+  vez, cada hilo libre toma el siguiente sin esperar ronda): c=25/n=10000 (18,9 s) sin
+  deriva frente al gate (p95 52,6 ms, 0 errores); c=50/n=8000 en CUATRO corridas idénticas
+  dio una tasa de error muy variable (0%, 13%, 49%, 61%) — rastreado con traceback
+  completo a una conexión de MariaDB SIN POOL que `jacobs/store.py::get_motor_governance()`
+  abre en CADA pedido a `/jacobs/preflight` (llamada desde `PlanBuilder.build()`,
+  `jacobs/plan.py:448`, ANTES de que corra el camino pooleado de Task 15b/F8 dentro de
+  `prevuelo()`) — **hallazgo nuevo, no cubierto por R33-R37 ni por la ola final**, escalado
+  a la sesión principal sin tocar código. 25 `continue` concurrentes sobre el mismo
+  pipeline: **1 ganó, 24 recibieron 409** (verdad de DB: época final 1, status
+  `interrupted`, eventos `PIPELINE_CONTINUED` ×1 + `PIPELINE_STARTED` +
+  `STEP_BLOCKED_HUMAN_GATE` + `PIPELINE_INTERRUPTED`, sin `STEP_STARTED` — la corrida
+  ganadora paró en el gate de hyde sin despachar); p95 de los 25 `continue` = 73,59 ms.
+  (El `Expected` del brief original de "errores: 24" quedó desactualizado: el harness
+  actual cuenta 4xx como respuesta medida, no como error — verificado contra el código de
+  `scripts/load_test.py`.) Medido por Mr. Hyde (subagente de la Task 15, re-medición) con
+  la Task 15 de `docs/superpowers/plans/2026-09-17-prevuelo-y-continuar-jacobs.md`.
+  Detalle completo, tracebacks y tabla de ratios en `task-15-report.md` (sección
+  "Re-medición HTTP").
