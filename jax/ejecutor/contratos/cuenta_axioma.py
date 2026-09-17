@@ -13,6 +13,12 @@ que la cuenta no puede quitar:
   en hall9000 no lo ven).
 - ~/.claude/settings.json y settings.local.json → `{}`: la cuenta no puede apagar
   los ganchos con `disableAllHooks` (documentación oficial: en cualquier nivel).
+- /etc/ssh/ssh_config.d → vacío. En el espacio de usuarios de bwrap los archivos de root
+  se ven de 65534 y ssh rechaza un Include del sistema que no es de root («Bad owner or
+  permissions»): sin esto el Ejecutor no entra por ssh a ninguna máquina (visto 2026-09-17,
+  misión de humo contra la VM desechable). Lo que se tapa (en hall9000,
+  20-systemd-ssh-proxy.conf: `.host`, `unix/*`, `vsock/*`, `machine/*`) no es ninguna
+  máquina del inventario; `destinos` las rechazaría igual.
 SP2 reemplaza esta jaula por el perfil `ejecutor` de hyde_sandbox y conserva estos
 montajes.
 
@@ -79,6 +85,7 @@ def _jaula(c: Cuenta) -> str:
     return " ".join([
         "bwrap", "--dev-bind", "/", "/", "--die-with-parent",
         "--tmpfs", "/etc/claude-code",
+        "--tmpfs", "/etc/ssh/ssh_config.d",
         "--ro-bind", q(str(c.lib / "managed-settings.json")), "/etc/claude-code/managed-settings.json",
         "--ro-bind", q(str(c.lib / "settings-usuario.json")), '"$HOME/.claude/settings.json"',
         "--ro-bind", q(str(c.lib / "settings-usuario.json")), '"$HOME/.claude/settings.local.json"',
