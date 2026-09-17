@@ -194,14 +194,16 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
 
         # Frente F (2026-09-16): un hijo de Ada consume su token ACÁ, después de
         # validate_create (un 423 del kill switch no lo quema) y ANTES de
-        # planificar (no se sostiene una transacción los 20-40 s del LLM). Padre
-        # y profundidad salen de la fila del token, nunca del cuerpo.
+        # planificar (no se sostiene una transacción los 20-40 s del LLM). Padre,
+        # profundidad e identidad salen de la fila del token, nunca del cuerpo.
         parent_pipeline_id: str | None = None
         parent_step: str | None = None
         depth = 0
+        user_id, tenant_id = req.user_id, req.tenant_id
         if req.invoked_by == INVOKER_ADA:
             consumo = await consumir_token_subpipeline(
                 req.subpipeline_token, req.parent_pipeline_id, pipeline_id,
+                user_id=req.user_id, tenant_id=req.tenant_id,
             )
             if isinstance(consumo, ConsumoRechazado):
                 raise HTTPException(
@@ -211,6 +213,9 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             parent_pipeline_id = consumo.parent_pipeline_id
             parent_step = consumo.parent_step
             depth = consumo.depth
+            # Identidad del hijo = la del padre (fila), nunca la del cuerpo
+            # (revisión final, I-3): el executor le carga el uso a ella.
+            user_id, tenant_id = consumo.user_id, consumo.tenant_id
 
         # Revisión final (I-2): desde acá el token ya está quemado. CUALQUIER
         # error antes de que el hijo exista (plan, builder, pipeline_create,
@@ -230,8 +235,8 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                 pipeline_id=pipeline_id,
                 name=req.name,
                 invoked_by=req.invoked_by,
-                user_id=req.user_id,
-                tenant_id=req.tenant_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
                 parent_pipeline_id=parent_pipeline_id,
                 depth=depth,
                 mode=req.mode,

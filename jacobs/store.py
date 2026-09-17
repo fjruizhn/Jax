@@ -701,10 +701,23 @@ SQL_CONSUMIR_TOKEN = """
        AND p.status = 'running'
 """
 
+# La identidad (user_id, tenant_id) del hijo es la del PADRE (revisión final,
+# I-3): sale de acá, nunca del cuerpo. t por PK, p por PK.
 SQL_TOKEN_CONSUMIDO = """
-    SELECT parent_pipeline_id, parent_step, depth_hijo, hijo_pipeline_id
-      FROM jacobs_subpipeline_tokens
-     WHERE token_hash = %s
+    SELECT t.parent_pipeline_id, t.parent_step, t.depth_hijo, t.hijo_pipeline_id,
+           p.user_id, p.tenant_id
+      FROM jacobs_subpipeline_tokens t
+      JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+     WHERE t.token_hash = %s
+"""
+
+# Identidad del padre para el que se EMITIÓ el token (no el que declara el
+# cuerpo), leída antes de consumir cuando el cuerpo trae identidad. t y p por PK.
+SQL_IDENTIDAD_PADRE_DEL_TOKEN = """
+    SELECT t.parent_pipeline_id, p.user_id, p.tenant_id
+      FROM jacobs_subpipeline_tokens t
+      JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+     WHERE t.token_hash = %s
 """
 
 SQL_DIAGNOSTICO_TOKEN = """
@@ -726,7 +739,8 @@ async def subpipeline_token_consumir(
     max_profundidad: int,
 ) -> dict | None:
     """Consume el token para `hijo_pipeline_id`. Devuelve la fila consumida
-    (parent_pipeline_id, parent_step, depth_hijo) o None si no afectó una fila.
+    (parent_pipeline_id, parent_step, depth_hijo, hijo_pipeline_id y la
+    identidad del padre: user_id, tenant_id) o None si no afectó una fila.
 
     La confirmación lee por PK (token_hash), no por hijo_pipeline_id: si el
     UPDATE reportó una fila afectada pero la relectura no existe o su
@@ -751,6 +765,18 @@ async def subpipeline_token_consumir(
                     f"la relectura por PK no es del hijo esperado (hijo_pipeline_id={hijo_pipeline_id!r})"
                 )
             return fila
+    finally:
+        conn.close()
+
+
+async def subpipeline_token_identidad_padre(token_hash: str) -> dict | None:
+    """(parent_pipeline_id, user_id, tenant_id) del padre del token, o None si
+    el hash no existe o el padre ya no está. Solo lectura: no consume."""
+    conn = await get_conn()
+    try:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(SQL_IDENTIDAD_PADRE_DEL_TOKEN, (token_hash,))
+            return await cur.fetchone()
     finally:
         conn.close()
 

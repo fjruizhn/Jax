@@ -45,7 +45,12 @@ async def plan_de_un_paso(pipeline_id, objective, max_steps, steps_spec):
     return [Step(facet="jekyll", capability="summarize", pipeline_id=pipeline_id)]
 
 
-async def padre_en_ejecucion(depth: int = 0, facet_del_paso: str = "ada") -> tuple[str, str]:
+async def padre_en_ejecucion(
+    depth: int = 0,
+    facet_del_paso: str = "ada",
+    user_id: str | None = None,
+    tenant_id: str | None = None,
+) -> tuple[str, str]:
     """Un pipeline `running` con un paso de Ada (`running` al crearse). Lo que habilita a Ada
     a pedir un hijo es que el PIPELINE padre esté `running`; el paso que delegó puede estar
     en cualquier estado (enmienda de Fernando 2026-09-16: en el modo "plan de delegación"
@@ -59,7 +64,8 @@ async def padre_en_ejecucion(depth: int = 0, facet_del_paso: str = "ada") -> tup
     await store.pipeline_create(Pipeline(
         pipeline_id=pid, name="arnes-ada-padre", invoked_by="plataforma",
         mode="autonomous", status=PipelineStatus.running, plan=[paso],
-        depth=depth, created_at=ahora, updated_at=ahora,
+        depth=depth, user_id=user_id, tenant_id=tenant_id,
+        created_at=ahora, updated_at=ahora,
     ))
     await store.step_upsert(paso)
     return pid, paso.step_id

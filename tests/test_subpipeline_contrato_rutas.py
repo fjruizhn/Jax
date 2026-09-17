@@ -302,3 +302,50 @@ def test_fallo_de_creacion_tras_el_consumo_deja_evento_y_propaga_el_error():
     assert payload["excepcion"] == "RuntimeError"
     assert "fallo de escritura" not in evento["payload"]
     assert token not in evento["payload"]
+
+
+def test_el_hijo_hereda_la_identidad_del_padre():
+    """Revisión final, I-3: el executor carga el uso a user_id/tenant_id del
+    pipeline. La identidad del hijo sale del PADRE, no del cuerpo."""
+    async def escenario():
+        padre, paso = await ada.padre_en_ejecucion(user_id="u-padre", tenant_id="t-padre")
+        try:
+            sin_identidad = await ada.pedir_hijo(await ada.emitir(padre, paso), padre)
+            misma_identidad = await ada.pedir_hijo(
+                await ada.emitir(padre, paso), padre,
+                cuerpo_extra={"user_id": "u-padre", "tenant_id": "t-padre"})
+            return [await store.pipeline_get(r["pipeline_id"])
+                    for r in (sin_identidad, misma_identidad)]
+        finally:
+            await ada.cerrar(padre)
+
+    for hijo in _correr(escenario):
+        assert (hijo.user_id, hijo.tenant_id) == ("u-padre", "t-padre")
+
+
+def test_cuerpo_con_otra_identidad_se_rechaza_sin_quemar_el_token():
+    async def escenario():
+        padre, paso = await ada.padre_en_ejecucion(user_id="u-padre", tenant_id="t-padre")
+        try:
+            token = await ada.emitir(padre, paso)
+            rechazos = []
+            for extra in ({"user_id": "u-otro"}, {"tenant_id": "t-otro"}):
+                with pytest.raises(HTTPException) as rechazo:
+                    await ada.pedir_hijo(token, padre, cuerpo_extra=extra)
+                rechazos.append(rechazo.value)
+            fila = await ada.fila_token(sp.hash_token(token))
+            evento = await ada.una_fila(
+                "SELECT payload FROM jacobs_events WHERE event_type = 'SUBPIPELINE_RECHAZADO' "
+                "AND pipeline_id = %s AND JSON_VALUE(payload, '$.motivo') = %s",
+                (padre, sp.Motivo.IDENTIDAD_NO_COINCIDE.value),
+            )
+            return token, rechazos, fila, evento
+        finally:
+            await ada.cerrar(padre)
+
+    token, rechazos, fila, evento = _correr(escenario)
+    for rechazo in rechazos:
+        _rechazo_403(rechazo, sp.Motivo.IDENTIDAD_NO_COINCIDE, token)
+    assert fila["usado_at"] is None
+    assert evento is not None, "rechazo por identidad sin evento en el padre"
+    assert token not in evento["payload"]

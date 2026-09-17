@@ -95,6 +95,9 @@ class Motivo(str, Enum):
     PADRE_NO_COINCIDE    = "padre_no_coincide"
     PADRE_DESCONOCIDO    = "padre_desconocido"
     PADRE_INACTIVO       = "padre_inactivo"
+    # El cuerpo del pedido trae user_id/tenant_id distintos de los del padre
+    # del token. Se rechaza ANTES de consumir: el token no se quema.
+    IDENTIDAD_NO_COINCIDE = "identidad_no_coincide"
     PASO_DESCONOCIDO     = "paso_desconocido"
     PASO_NO_ES_ADA       = "paso_no_es_ada"
     PROFUNDIDAD_EXCEDIDA = "profundidad_excedida"
@@ -114,6 +117,9 @@ class TokenConsumido:
     parent_pipeline_id: str
     parent_step: str
     depth: int
+    # Identidad del PADRE (fila): el hijo corre y carga uso a nombre de ella.
+    user_id: str | None
+    tenant_id: str | None
 
 
 @dataclass(frozen=True)
@@ -161,6 +167,9 @@ def motivo_consumo(
     store.subpipeline_token_diagnostico() (None = el hash no existe). El
     estado del paso que delegó no cuenta: solo que exista y sea del padre
     (enmienda 2026-09-16)."""
+    # El motivo es el PRIMER chequeo que falla, en este orden: un token usado y
+    # además presentado con otro padre se rotula TOKEN_USADO, no
+    # PADRE_NO_COINCIDE. El rótulo cambia; la decisión (rechazo) no.
     if diagnostico is None:
         return Motivo.TOKEN_DESCONOCIDO
     if diagnostico["usado_at"] is not None:
@@ -220,19 +229,62 @@ async def emitir_token_subpipeline(parent_pipeline_id: str, parent_step: str) ->
     return token
 
 
+def _identidad_distinta(declarado: str | None, del_padre: str | None) -> bool:
+    """El cuerpo puede omitir la identidad (se hereda); si la trae, tiene que
+    ser exactamente la del padre (un padre sin identidad no admite una)."""
+    return declarado is not None and declarado != del_padre
+
+
+async def _registrar_rechazo_consumo(
+    hijo_pipeline_id: str, payload: dict, diagnostico: dict | None,
+) -> None:
+    """Bajo el hijo (UUID que nunca se persiste) y, si la fila del token existe,
+    también bajo su padre REAL (de la fila, confiable), para que el rechazo se
+    vea desde el pipeline que emitió el token (revisión final, M-1)."""
+    await store.event_append(hijo_pipeline_id, "SUBPIPELINE_RECHAZADO", payload)
+    if diagnostico is not None:
+        await store.event_append(
+            diagnostico["parent_pipeline_id"], "SUBPIPELINE_RECHAZADO", payload)
+
+
 async def consumir_token_subpipeline(
-    token: str, parent_pipeline_id: str, hijo_pipeline_id: str,
+    token: str,
+    parent_pipeline_id: str,
+    hijo_pipeline_id: str,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> TokenConsumido | ConsumoRechazado:
     """Consume el token de forma atómica para crear `hijo_pipeline_id`.
 
     Aceptado solo si el hash existe, no venció, no se usó, fue emitido para
     `parent_pipeline_id`, su profundidad cabe en el límite vigente y el padre
     sigue `running` y el paso que delegó existe y es de ese padre (en
-    cualquier estado: enmienda 2026-09-16). La profundidad y el padre que se
-    devuelven salen de la FILA. Todo rechazo deja SUBPIPELINE_RECHAZADO con el
-    motivo y sin el token."""
+    cualquier estado: enmienda 2026-09-16). La profundidad, el padre y la
+    IDENTIDAD (user_id, tenant_id) que se devuelven salen de la FILA. Todo
+    rechazo deja SUBPIPELINE_RECHAZADO con el motivo y sin el token.
+
+    Identidad (revisión final, I-3): el hijo hereda SIEMPRE la del padre. Si el
+    cuerpo trae `user_id`/`tenant_id` no nulos y distintos de los del padre
+    del token, se rechaza con IDENTIDAD_NO_COINCIDE ANTES del UPDATE: el token
+    no se quema (fue un pedido mal formado, no un intento consumido). La
+    identidad de un pipeline no cambia después de creado, así que leerla antes
+    del UPDATE no abre una carrera. Sin identidad en el cuerpo no hay lectura
+    extra."""
     cfg = config_subpipelines()
     token_hash = hash_token(token)
+    if user_id is not None or tenant_id is not None:
+        identidad = await store.subpipeline_token_identidad_padre(token_hash)
+        if identidad is not None and (
+            _identidad_distinta(user_id, identidad["user_id"])
+            or _identidad_distinta(tenant_id, identidad["tenant_id"])
+        ):
+            await _registrar_rechazo_consumo(hijo_pipeline_id, {
+                "fase": "consumo",
+                "motivo": Motivo.IDENTIDAD_NO_COINCIDE.value,
+                "parent_pipeline_id_declarado": parent_pipeline_id,
+                "token_ref": token_ref(token_hash),
+            }, identidad)
+            return ConsumoRechazado(Motivo.IDENTIDAD_NO_COINCIDE)
     fila = await store.subpipeline_token_consumir(
         token_hash, parent_pipeline_id, hijo_pipeline_id, time.time(), cfg.max_profundidad,
     )
@@ -241,13 +293,15 @@ async def consumir_token_subpipeline(
             parent_pipeline_id=fila["parent_pipeline_id"],
             parent_step=fila["parent_step"],
             depth=int(fila["depth_hijo"]),
+            user_id=fila["user_id"],
+            tenant_id=fila["tenant_id"],
         )
     diagnostico = await store.subpipeline_token_diagnostico(token_hash)
     motivo = motivo_consumo(diagnostico, parent_pipeline_id, time.time(), cfg.max_profundidad)
-    await store.event_append(hijo_pipeline_id, "SUBPIPELINE_RECHAZADO", {
+    await _registrar_rechazo_consumo(hijo_pipeline_id, {
         "fase": "consumo",
         "motivo": motivo.value,
         "parent_pipeline_id_declarado": parent_pipeline_id,
         "token_ref": token_ref(token_hash) if diagnostico is not None else None,
-    })
+    }, diagnostico)
     return ConsumoRechazado(motivo)

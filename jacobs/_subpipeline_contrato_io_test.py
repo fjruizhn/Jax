@@ -201,7 +201,8 @@ class ConsumoTest(_ConBase):
         hijo = str(uuid.uuid4())
         resultado = await sp.consumir_token_subpipeline(token, padre, hijo)
         self.assertEqual(
-            resultado, sp.TokenConsumido(parent_pipeline_id=padre, parent_step=paso, depth=1))
+            resultado, sp.TokenConsumido(
+                parent_pipeline_id=padre, parent_step=paso, depth=1, user_id=None, tenant_id=None))
         fila = await ada.fila_token(sp.hash_token(token))
         self.assertEqual(fila["hijo_pipeline_id"], hijo)
         self.assertIsNotNone(fila["usado_at"])
@@ -222,6 +223,16 @@ class ConsumoTest(_ConBase):
             await sp.consumir_token_subpipeline(token, str(uuid.uuid4()), str(uuid.uuid4())),
             sp.ConsumoRechazado(sp.Motivo.PADRE_NO_COINCIDE),
         )
+        # M-1: el rechazo también se ve desde el padre REAL del token (fila).
+        rechazos_en_padre = [
+            e for e in await store.events_by_pipeline(padre)
+            if e["event_type"] == "SUBPIPELINE_RECHAZADO"
+        ]
+        self.assertEqual(
+            [(e["payload"]["fase"], e["payload"]["motivo"]) for e in rechazos_en_padre],
+            [("consumo", sp.Motivo.PADRE_NO_COINCIDE.value)],
+        )
+        self.assertNotIn(token, json.dumps(rechazos_en_padre[0]["payload"]))
         self.assertIsInstance(
             await sp.consumir_token_subpipeline(token, padre, str(uuid.uuid4())),
             sp.TokenConsumido,
@@ -293,9 +304,12 @@ class ConsumoTest(_ConBase):
                 "B no esperó el candado de fila de A: el consumo no es atómico",
             )
             await conn_a.commit()
+            resultado_b = await asyncio.wait_for(tarea_b, timeout=15)
         finally:
             conn_a.close()
-        resultado_b = await asyncio.wait_for(tarea_b, timeout=15)
+            # Si una aserción cortó antes de esperar a B, no queda colgada.
+            if "tarea_b" in locals() and not tarea_b.done():
+                tarea_b.cancel()
         self.assertEqual(resultado_b, sp.ConsumoRechazado(sp.Motivo.TOKEN_USADO))
         self.assertEqual((await ada.fila_token(sp.hash_token(token)))["hijo_pipeline_id"], "hijo-a")
 
@@ -330,6 +344,20 @@ class ConsumoTest(_ConBase):
         for alias, fila in por_tabla.items():
             self.assertIn(fila["type"], {"const", "eq_ref"}, f"{alias}: {fila}")
             self.assertEqual(fila["key"], "PRIMARY", f"{alias}: {fila}")
+        # Las dos lecturas de identidad del padre (revisión final, I-3): t y p por PK.
+        for sql in (store.SQL_TOKEN_CONSUMIDO, store.SQL_IDENTIDAD_PADRE_DEL_TOKEN):
+            conn = await store.get_conn()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("EXPLAIN " + sql, (sp.hash_token(token),))
+                    plan = await cur.fetchall()
+            finally:
+                conn.close()
+            por_tabla = {f["table"]: f for f in plan}
+            self.assertEqual(set(por_tabla), {"t", "p"}, plan)
+            for alias, fila in por_tabla.items():
+                self.assertIn(fila["type"], {"const", "eq_ref"}, f"{alias}: {fila}")
+                self.assertEqual(fila["key"], "PRIMARY", f"{alias}: {fila}")
 
 
 if __name__ == "__main__":
