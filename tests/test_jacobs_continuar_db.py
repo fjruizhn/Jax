@@ -12,6 +12,8 @@ import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
+import aiomysql
+
 _db = os.environ.get("JAX_DB_NAME")
 if _db and _db != "jax_memory_test":
     raise RuntimeError(f"JAX_DB_NAME={_db!r}: este archivo escribe filas y solo corre contra jax_memory_test.")
@@ -77,7 +79,8 @@ def test_la_transaccion_aplica_pasos_plan_contexto_y_epoca():
             pasos[2].facet = "thot"
             contexto = {"objective": "o", "step_0_ref": _REF, "step_1_ref": _REF}
             nueva = await store.continuar_transaccion(
-                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, contexto, 2)
+                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, contexto, 2,
+                evento_payload=None)
             p = await store.pipeline_get(pid)
             s2 = (await store.steps_by_pipeline(pid))[2]
             explains = [
@@ -109,7 +112,11 @@ def test_si_falla_a_mitad_no_cambia_nada(monkeypatch):
             evento = {"by": "plataforma", "from_status": "aborted", "run_epoch": 1,
                       "pasos_a_correr": [2], "pasos_reusados": [0, 1], "reasignados": {},
                       "costo_max_usd": "0.000000"}
-            with pytest.raises(Exception):
+            # ProgrammingError específico (1146, tabla inexistente), no
+            # Exception genérico -- fix round 2: un catch-all también
+            # atraparía un TypeError ajeno (p. ej. un argumento mal armado
+            # en esta misma llamada) y el test daría un falso verde.
+            with pytest.raises(aiomysql.ProgrammingError):
                 await store.continuar_transaccion(
                     pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
                     evento_payload=evento)
@@ -169,7 +176,10 @@ def test_si_el_evento_falla_no_queda_el_pipeline_a_medias(monkeypatch):
             evento = {"by": "plataforma", "from_status": "aborted", "run_epoch": 1,
                       "pasos_a_correr": [2], "pasos_reusados": [0, 1], "reasignados": {},
                       "costo_max_usd": "0.000000"}
-            with pytest.raises(Exception):
+            # ProgrammingError específico (1146, tabla inexistente) -- misma
+            # razón que arriba (fix round 2): un Exception genérico no
+            # discrimina.
+            with pytest.raises(aiomysql.ProgrammingError):
                 await store.continuar_transaccion(
                     pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
                     evento_payload=evento)
@@ -193,7 +203,8 @@ def test_status_distinto_con_la_misma_epoca_no_gana():
         try:
             pasos[2].facet = "thot"
             nueva = await store.continuar_transaccion(
-                pid, 0, PipelineStatus.expired, [pasos[2]], pasos, pipeline.context, 2)
+                pid, 0, PipelineStatus.expired, [pasos[2]], pasos, pipeline.context, 2,
+                evento_payload=None)
             return nueva, await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2]
         finally:
             await _borrar(pid)
@@ -216,7 +227,8 @@ def test_si_el_update_final_no_toca_la_fila_no_queda_nada(monkeypatch):
         try:
             pasos[2].facet = "thot"
             nueva = await store.continuar_transaccion(
-                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2)
+                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
+                evento_payload=None)
             return nueva, await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2]
         finally:
             await _borrar(pid)
@@ -227,6 +239,18 @@ def test_si_el_update_final_no_toca_la_fila_no_queda_nada(monkeypatch):
     assert (s2.status, s2.facet, s2.error) == (StepStatus.failed, "jekyll", "cortado")
 
 
+def test_evento_payload_es_obligatorio():
+    # Principio IX / fix round 2: el evento de auditoría no es opcional por
+    # descuido. `evento_payload` no tiene default -- omitirlo es un TypeError
+    # en el sitio de la llamada, no un pipeline continuado sin rastro. El
+    # binding de argumentos de Python ocurre al invocar la corrutina, antes
+    # de que corra una sola línea del cuerpo (y antes de tocar la DB), así
+    # que ni hace falta awaitear ni armar un pipeline real para verlo.
+    with pytest.raises(TypeError):
+        store.continuar_transaccion(
+            "cualquier-id", 0, PipelineStatus.aborted, [], [], {}, 0)
+
+
 def test_dos_transacciones_con_la_misma_epoca_solo_una_gana():
     async def cuerpo():
         pipeline, pasos = await _abortado()
@@ -234,7 +258,7 @@ def test_dos_transacciones_con_la_misma_epoca_solo_una_gana():
         try:
             return await asyncio.gather(*(
                 store.continuar_transaccion(pid, 0, PipelineStatus.aborted, [pasos[2]], pasos,
-                                            pipeline.context, 2)
+                                            pipeline.context, 2, evento_payload=None)
                 for _ in range(2)
             ))
         finally:

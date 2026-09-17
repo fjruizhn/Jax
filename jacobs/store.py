@@ -522,16 +522,21 @@ async def continuar_transaccion(
     plan: list[Step],
     context: dict,
     current_step_index: int,
-    evento_payload: dict | None = None,
+    evento_payload: dict | None,
 ) -> int | None:
     """Escrituras de continue en UNA transacción (spec 2026-09-17 §5.2 regla
     10): bloquea la fila del pipeline, confirma que nadie la cambió desde el
     análisis (misma época y mismo status), resetea los pasos a correr, reescribe
-    plan y contexto, pone running e incrementa la época, y -- si se pasa
-    `evento_payload` -- inserta el evento PIPELINE_CONTINUED con el MISMO
-    cursor, antes del commit (Ruling R22: regla 10 lo exige dentro de la
-    transacción, no después). Devuelve la época nueva, o None si otro pedido
-    ganó (época/status ya no coinciden, o -- cinturón, Ruling R23 -- el UPDATE
+    plan y contexto, pone running e incrementa la época, y -- si `evento_payload`
+    no es None -- inserta el evento PIPELINE_CONTINUED con el MISMO cursor,
+    antes del commit (Ruling R22: regla 10 lo exige dentro de la transacción,
+    no después). `evento_payload` es OBLIGATORIO (Principio IX / revisión
+    fix round 2): un default silencioso dejaría que un llamador se saltara el
+    evento de auditoría sin que se note en el sitio de la llamada -- el
+    llamador tiene que decidir explícitamente None si de verdad no quiere
+    evento (ningún camino de producción lo hace: continuar.py siempre arma un
+    payload real). Devuelve la época nueva, o None si otro pedido ganó
+    (época/status ya no coinciden, o -- cinturón, Ruling R23 -- el UPDATE
     final no tocó la fila que el SELECT...FOR UPDATE acababa de ver). Un error
     a mitad hace ROLLBACK: nada cambia, ni los pasos, ni el pipeline, ni el
     evento."""

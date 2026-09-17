@@ -1283,5 +1283,17 @@ jobs:
           #   Extendido el test de fallo a mitad para confirmar que tampoco deja
           #   evento. Vistos en rojo contra el código final mutado (evidencia en
           #   task-10-report.md, sección "Fix round 1 (reanudada)").
-          grep -qE "^61 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 61 tests CORRIDOS."; exit 1; }
+          # 61 -> 62 el 2026-09-17 (Task 10, fix round 2, Principio IX): +1 en
+          #   test_jacobs_continuar_db.py -- test_evento_payload_es_obligatorio:
+          #   store.continuar_transaccion ya no acepta un default silencioso
+          #   para evento_payload (era `= None`); omitirlo da TypeError en el
+          #   sitio de la llamada. Rojo visto restaurando el default y
+          #   corriendo el test solo (DID NOT RAISE TypeError; coroutine never
+          #   awaited). Los dos tests que usaban `pytest.raises(Exception)`
+          #   (fallo a mitad, evento que falla) se angostaron a
+          #   aiomysql.ProgrammingError -- rojo visto inyectando un
+          #   RuntimeError en su lugar (store.time.time mutado) en cada uno:
+          #   el pytest.raises angosto no lo atrapa y el test falla de
+          #   verdad, a diferencia del Exception genérico de antes.
+          grep -qE "^62 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 62 tests CORRIDOS."; exit 1; }
