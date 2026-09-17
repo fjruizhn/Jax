@@ -138,7 +138,7 @@ async def ronda(c, freno: Freno, fallos: list, lecturas, *, con_freno: bool, n: 
     vivos, remotos = [], None
     while time.monotonic() - inicio < ARRANQUE_MAX_S:
         await asyncio.sleep(0.5)
-        vivos = _procesos(c.nombre)
+        vivos = await asyncio.to_thread(_procesos, c.nombre)
         remotos = await asyncio.to_thread(_procesos_remotos, remoto, c.nombre) if remoto is not None else None
         if vivos and (remoto is None or (remotos or 0) >= 2):
             break
@@ -166,7 +166,7 @@ async def ronda(c, freno: Freno, fallos: list, lecturas, *, con_freno: bool, n: 
         for lectura in lecturas:
             await asyncio.sleep(lectura - transcurrido)
             transcurrido = lectura
-            vivos = _procesos(c.nombre)
+            vivos = await asyncio.to_thread(_procesos, c.nombre)
             remotos = await asyncio.to_thread(_procesos_remotos, remoto, c.nombre) if remoto is not None else None
             print(formato.campos((("contrato", "c4"), etiqueta, ("freno", freno.tipo), ("a_los_s", lectura),
                                   ("medido_s", round(time.monotonic() - puesto_en, 3)), ("procesos", len(vivos)),
@@ -199,11 +199,13 @@ async def principal(args) -> int:
         habilitados = [n.strip() for n in os.environ.get("JAX_EJECUTOR_FRENO_REMOTOS", "").split(",")]
         if args.remoto not in habilitados:
             fallos.append(("remoto_sin_freno_habilitado", (("remoto", args.remoto),)))
-    activo = subprocess.run(["systemctl", "is-active", "ejecutor-freno.service"], capture_output=True, text=True)
+    activo = await asyncio.to_thread(subprocess.run, ["systemctl", "is-active", "ejecutor-freno.service"],
+                                     capture_output=True, text=True)
     if activo.stdout.strip() != "active":
         fallos.append(("freno_inactivo", ()))
-    if (interruptor.interruptor_activo() or pausa.pausa_puesta(pausa.ruta_de_la_pausa()) or _procesos(c.nombre)
-            or (remoto is not None and _procesos_remotos(remoto, c.nombre) != 0)):
+    if (interruptor.interruptor_activo() or pausa.pausa_puesta(pausa.ruta_de_la_pausa())
+            or await asyncio.to_thread(_procesos, c.nombre)
+            or (remoto is not None and await asyncio.to_thread(_procesos_remotos, remoto, c.nombre) != 0)):
         print(formato.campos((("c4_vivo", False), ("codigo", "estado_inicial_no_limpio"))))
         return 2
     try:
