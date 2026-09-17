@@ -50,8 +50,8 @@ export function setup() {
   if (r.status !== 200 || r.json('activo') !== true) {
     exec.test.abort(`el freno NO está puesto (status ${r.status}): esta carga sólo corre con el kill switch activo`);
   }
-  // Informativo (Task H, 2026-09-17): si el freno viene de la ruta vieja
-  // /etc/jax/PAUSE, se dice. No aborta ni cuenta como fallo: el check sólo
+  // Informativo (Task H, 2026-09-17): si el freno viene de la ruta heredada
+  // (la vieja, que el módulo interruptor sigue leyendo), se dice. No aborta ni cuenta como fallo: el check sólo
   // exige que el campo exista.
   const heredada = r.json('heredada');
   check(r, { 'admin informa heredada': () => typeof heredada === 'boolean' });

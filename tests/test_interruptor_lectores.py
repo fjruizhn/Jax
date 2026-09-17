@@ -110,7 +110,16 @@ def test_motor_en_vuelo_queda_killed_by_switch(tmp_path, monkeypatch):
     assert cancelado == [True]
 
 
-def test_motor_cancelado_con_el_freno_puesto_queda_killed_by_switch(tmp_path, monkeypatch):
+def _estados_de_uso(caplog):
+    """Con qué status reportó el uso el job. `_report_usage` sólo llama a
+    record_motor_usage con tokens > 0; con 0 tokens (el caso de estos tests,
+    que cortan en el primer turno) deja un WARNING con el MISMO status, y esa
+    es la salida observable de la etiqueta."""
+    return [r.args[2] for r in caplog.records
+            if r.name == worker.logger.name and "sin tokens acumulados" in r.getMessage()]
+
+
+def test_motor_cancelado_con_el_freno_puesto_queda_killed_by_switch(tmp_path, monkeypatch, caplog):
     """Jacobs corta el step a los 250 ms y cancela el job ANTES del watcher de
     5 s: sin esto el job quedaba 'cancelado externamente' y el freno no
     aparecía como la causa."""
@@ -128,12 +137,16 @@ def test_motor_cancelado_con_el_freno_puesto_queda_killed_by_switch(tmp_path, mo
 
         return await _job(tmp_path, ruta, _transporte_lento(en_vuelo, cancelado), durante)
 
+    caplog.set_level("WARNING", logger=worker.logger.name)
     estado = asyncio.run(escenario())
     assert estado["status"] == JobStatus.FAILED.value
     assert "killed_by_switch" in estado["error"]
+    # Revisión final del frente B (hallazgo 6): el uso se reporta "failed",
+    # igual que el resto de los killed_by_switch.
+    assert _estados_de_uso(caplog) == ["failed"]
 
 
-def test_motor_cancelado_sin_freno_sigue_siendo_cancelado(tmp_path, monkeypatch):
+def test_motor_cancelado_sin_freno_sigue_siendo_cancelado(tmp_path, monkeypatch, caplog):
     ruta = tmp_path / "PAUSE"
     monkeypatch.setattr(worker, "_KILL_SWITCH_INTERVAL", 30.0)
 
@@ -146,9 +159,11 @@ def test_motor_cancelado_sin_freno_sigue_siendo_cancelado(tmp_path, monkeypatch)
 
         return await _job(tmp_path, ruta, _transporte_lento(en_vuelo, []), durante)
 
+    caplog.set_level("WARNING", logger=worker.logger.name)
     estado = asyncio.run(escenario())
     assert estado["status"] == JobStatus.CANCELLED.value
     assert estado["error"] == "Job cancelado externamente"
+    assert _estados_de_uso(caplog) == ["cancelled"]
 
 
 @pytest.mark.skipif(ES_ROOT, reason="root atraviesa cualquier permiso")
@@ -226,12 +241,58 @@ def test_server_resuelve_la_ruta_al_importarse_antes_de_leer_config():
     assert "ssh_worker.KILL_SWITCH_PATH" not in fuente
 
 
+def _es_llamada_a_la_ruta(nodo):
+    return (isinstance(nodo, ast.Call) and isinstance(nodo.func, ast.Name)
+            and nodo.func.id == "ruta_del_interruptor")
+
+
 def test_routes_resuelve_la_ruta_en_cada_dispatch():
+    """La ruta se resuelve DENTRO de `dispatch` (en cada pedido, no al
+    importar) y lo que recibe el worker es esa resolución. Revisión final del
+    frente B (hallazgo 5): se resuelve en una variable ANTES de crear el job,
+    así que el keyword ya no es la llamada literal."""
     fuente = _fuente("las_manos/motor_registry/routes.py")
     assert "_KILL_SWITCH_PATH" not in fuente
-    valores = [ast.unparse(k.value) for k in ast.walk(ast.parse(fuente))
+    arbol = ast.parse(fuente)
+    dispatch = next(n for n in arbol.body
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "dispatch")
+    fuera = [n for n in arbol.body if n is not dispatch
+             for m in ast.walk(n) if _es_llamada_a_la_ruta(m)]
+    assert fuera == []
+    asignaciones = [n for n in ast.walk(dispatch)
+                    if isinstance(n, ast.Assign) and any(_es_llamada_a_la_ruta(m) for m in ast.walk(n.value))]
+    assert len(asignaciones) == 1 and isinstance(asignaciones[0].targets[0], ast.Name)
+    variable = asignaciones[0].targets[0].id
+    valores = [k.value for k in ast.walk(dispatch)
                if isinstance(k, ast.keyword) and k.arg == "kill_switch_path"]
-    assert valores == ["str(ruta_del_interruptor())"]
+    assert len(valores) == 1
+    assert {n.id for n in ast.walk(valores[0]) if isinstance(n, ast.Name)} & {variable}
+
+
+def test_dispatch_sin_variable_no_deja_un_job_huerfano(tmp_path, monkeypatch):
+    """Revisión final del frente B (hallazgo 5): la ruta se resolvía DESPUÉS
+    de `_STORE.create`; sin JAX_KILL_SWITCH_PATH el pedido fallaba cerrado
+    pero dejaba un job `pending` que ningún worker iba a terminar."""
+    from motor_registry import routes
+    from motor_registry.models import MotorDispatchRequest
+    from motor_registry.policy import MotorPolicy
+
+    catalogo = MotorCatalog(_CFG)
+    store = JobStore(str(tmp_path / "jobs.jsonl"))
+    lanzado = AsyncMock()
+    monkeypatch.setattr(routes, "_STORE", store)
+    monkeypatch.setattr(routes, "_CATALOG", catalogo)
+    monkeypatch.setattr(routes, "_POLICY", MotorPolicy(catalogo))
+    monkeypatch.setattr(routes, "_ensure_catalog_fresh", AsyncMock())
+    monkeypatch.setattr(routes.motor_worker, "run", lanzado)
+    monkeypatch.delenv("JAX_KILL_SWITCH_PATH", raising=False)
+    pedido = MotorDispatchRequest(caller="jacobs", capability="implementation", motor="kimi",
+                                  prompt="p", timeout_seconds=60)
+
+    with pytest.raises(interruptor.InterruptorSinConfigurar):
+        asyncio.run(routes.dispatch(pedido))
+    assert store._index == {}
+    lanzado.assert_not_called()
 
 
 def test_config_toml_de_las_manos_sin_ruta():

@@ -157,7 +157,13 @@ INTERVALO_DE_SONDEO = 0.25  # segundos: el mismo del ssh_worker (CONTEXT.md §9,
 
 
 async def correr_con_interruptor(corrutina, *, intervalo: float = INTERVALO_DE_SONDEO):
-    ruta = ruta_del_interruptor()
+    try:
+        ruta = ruta_del_interruptor()
+    except InterruptorSinConfigurar:
+        # Revisión final del frente B (2026-09-17): la corrutina ya existe y no
+        # va a correr; sin cerrarla, Python avisa "never awaited" al recolectarla.
+        corrutina.close()
+        raise
     if interruptor_activo(ruta):
         corrutina.close()
         raise InterruptorActivado(f"killed_by_switch — {ruta} estaba puesto antes de empezar")

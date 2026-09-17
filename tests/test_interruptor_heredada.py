@@ -203,3 +203,71 @@ def test_las_manos_mata_el_motor_en_vuelo_cuando_aparece_la_heredada(tmp_path, m
     assert estado["status"] == JobStatus.FAILED.value
     assert "killed_by_switch" in estado["error"]
     assert cancelado == [True]
+
+
+# --- Barrera de sesión sobre el freno de producción (revisión final del
+# frente B, 2026-09-17). Hasta ese día el conftest de la raíz no vigilaba el
+# freno: un test que creara o borrara el directorio del interruptor o la ruta
+# heredada de producción pasaba en verde. Sólo tmp_path: la barrera real nunca
+# se ejercita contra /etc.
+
+def test_la_barrera_vigila_el_freno_real():
+    import conftest
+    assert conftest.HEREDADA_DE_PRODUCCION == Path(LITERAL_VIEJO)
+    assert conftest.FRENO_DE_PRODUCCION == Path("/etc/jax/interruptor")
+
+
+def _al_pasado(*rutas):
+    import time
+    viejo = time.time() - 100
+    for r in rutas:
+        os.utime(r, (viejo, viejo))
+
+
+def test_barrera_sin_nada_en_disco_son_cero_cambios(tmp_path):
+    import conftest
+    import time
+    assert conftest.cambios_del_freno_de_produccion(
+        tmp_path / "no-dir", tmp_path / "no-PAUSE", time.time() - 1, False) == []
+
+
+def test_barrera_detecta_la_heredada_que_aparece(tmp_path):
+    import conftest
+    import time
+    inicio = time.time() - 1
+    archivo = tmp_path / "PAUSE"
+    archivo.write_text("")
+    _al_pasado(archivo)  # aunque el mtime mienta: no existía al empezar
+    assert conftest.cambios_del_freno_de_produccion(
+        tmp_path / "no-dir", archivo, inicio, False) == [str(archivo)]
+
+
+def test_barrera_detecta_la_heredada_que_cambia_o_desaparece(tmp_path):
+    import conftest
+    import time
+    inicio = time.time() - 1
+    archivo = tmp_path / "PAUSE"
+    archivo.write_text("")
+    _al_pasado(archivo)
+    assert conftest.cambios_del_freno_de_produccion(tmp_path / "no-dir", archivo, inicio, True) == []
+    os.utime(archivo, (inicio + 10, inicio + 10))
+    assert conftest.cambios_del_freno_de_produccion(
+        tmp_path / "no-dir", archivo, inicio, True) == [str(archivo)]
+    archivo.unlink()
+    assert conftest.cambios_del_freno_de_produccion(
+        tmp_path / "no-dir", archivo, inicio, True) == [f"{archivo} (desapareció)"]
+
+
+def test_barrera_detecta_altas_en_el_directorio(tmp_path):
+    import conftest
+    import time
+    directorio = tmp_path / "interruptor"
+    directorio.mkdir()
+    viejo = directorio / "viejo"
+    viejo.write_text("")
+    _al_pasado(viejo, directorio)
+    inicio = time.time() - 1
+    assert conftest.cambios_del_freno_de_produccion(directorio, tmp_path / "no-PAUSE", inicio, False) == []
+    (directorio / "PAUSE").write_text("")
+    cambios = conftest.cambios_del_freno_de_produccion(directorio, tmp_path / "no-PAUSE", inicio, False)
+    assert str(directorio / "PAUSE") in cambios

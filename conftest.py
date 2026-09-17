@@ -91,6 +91,18 @@ os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
 os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
 
+#: El freno de PRODUCCIÓN que la barrera de sesión vigila (revisión final del
+#: frente B, 2026-09-17): el directorio del interruptor y la ruta heredada.
+#: La heredada se toma del módulo ANTES de que el fixture de abajo la desvíe,
+#: y no se escribe acá: su literal sólo vive en el módulo interruptor
+#: (tests/test_interruptor_sin_rutas_fijas.py). Es un ARCHIVO, no un
+#: directorio: se anota si existía al empezar para distinguir "apareció" de
+#: "ya estaba".
+from jax.core import interruptor as _interruptor  # noqa: E402
+
+FRENO_DE_PRODUCCION = Path("/etc/jax/interruptor")
+HEREDADA_DE_PRODUCCION = Path(_interruptor.RUTA_HEREDADA)
+HEREDADA_EXISTIA_AL_INICIO = os.path.lexists(HEREDADA_DE_PRODUCCION)
 
 #: Los objetos módulo del interruptor. Son DOS distintos para el mismo archivo:
 #: `jax.core.interruptor` (REPL, `jax --task`) e `interruptor` pelado vía el
@@ -141,6 +153,40 @@ def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
     return sorted(nuevos)
 
 
+def cambios_del_freno_de_produccion(directorio, archivo, inicio: float, archivo_existia: bool) -> list[str]:
+    """Qué tocó la sesión en el freno de producción. Sólo LEE (stat/scandir):
+    nunca crea nada.
+
+    - `directorio`: su propio mtime (altas y bajas de entradas) y el de cada
+      entrada. Que no exista son 0 cambios (el runner de CI).
+    - `archivo`: apareció (no existía al inicio), desapareció, o su mtime es
+      de esta sesión.
+    """
+    cambios = []
+    try:
+        propio = os.stat(directorio)
+    except FileNotFoundError:
+        propio = None
+    if propio is not None:
+        if propio.st_mtime >= inicio:
+            cambios.append(str(directorio))
+        try:
+            entradas = list(os.scandir(directorio))
+        except PermissionError:  # fail-soft: sin permiso de listar, el mtime del directorio (ya mirado) delata altas y bajas
+            entradas = []
+        cambios += [e.path for e in entradas
+                    if e.stat(follow_symlinks=False).st_mtime >= inicio]
+    try:
+        estado = os.lstat(archivo)
+    except FileNotFoundError:
+        if archivo_existia:
+            cambios.append(f"{archivo} (desapareció)")
+        return cambios
+    if not archivo_existia or estado.st_mtime >= inicio:
+        cambios.append(str(archivo))
+    return cambios
+
+
 def pytest_sessionfinish(session, exitstatus):
     """El chequeo que NO depende del orden de colección.
 
@@ -148,16 +194,24 @@ def pytest_sessionfinish(session, exitstatus):
     tests que corrieron ANTES que él. Acá ya corrieron todos.
     """
     nuevos = archivos_nuevos_en(RESPALDO_DE_PRODUCCION, INICIO_DE_SESION)
-    if not nuevos:
-        return
-    print(
-        f"\nBARRERA DEL RESPALDO DE USO: la suite escribió {len(nuevos)} "
-        f"archivo(s) en {RESPALDO_DE_PRODUCCION}, el directorio REAL del que "
-        f"jax-platform drena e inserta en axioma_usage. Esas filas se cobrarían "
-        f"a un tenant de verdad.\n"
-        f"  primeros: {[p.name for p in nuevos[:5]]}\n"
-        f"  el test que las escribió no respetó JAX_USAGE_SPOOL_DIR "
-        f"(¿un monkeypatch.delenv, o un subproceso sin el entorno?).",
-        file=sys.stderr,
-    )
-    session.exitstatus = 1
+    if nuevos:
+        print(
+            f"\nBARRERA DEL RESPALDO DE USO: la suite escribió {len(nuevos)} "
+            f"archivo(s) en {RESPALDO_DE_PRODUCCION}, el directorio REAL del que "
+            f"jax-platform drena e inserta en axioma_usage. Esas filas se cobrarían "
+            f"a un tenant de verdad.\n"
+            f"  primeros: {[p.name for p in nuevos[:5]]}\n"
+            f"  el test que las escribió no respetó JAX_USAGE_SPOOL_DIR "
+            f"(¿un monkeypatch.delenv, o un subproceso sin el entorno?).",
+            file=sys.stderr,
+        )
+        session.exitstatus = 1
+    freno = cambios_del_freno_de_produccion(
+        FRENO_DE_PRODUCCION, HEREDADA_DE_PRODUCCION, INICIO_DE_SESION, HEREDADA_EXISTIA_AL_INICIO)
+    if freno:
+        print(
+            f"\nBARRERA DEL KILL SWITCH: la suite tocó el freno de producción: {freno}. "
+            f"Un freno puesto ahí detiene a JAX de verdad; uno borrado lo suelta.",
+            file=sys.stderr,
+        )
+        session.exitstatus = 1

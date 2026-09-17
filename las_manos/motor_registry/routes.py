@@ -179,6 +179,10 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             rejected_reason=result.reason,
         )
 
+    # La ruta del freno se resuelve en CADA dispatch y ANTES de crear el job:
+    # sin la variable del freno el pedido falla cerrado sin dejar un job
+    # `pending` huérfano (revisión final del frente B, 2026-09-17).
+    ruta_del_freno = str(ruta_del_interruptor())
     job_id = _STORE.create(
         caller=req.caller,
         capability=req.capability,
@@ -197,7 +201,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             context=req.context,
             store=_STORE,
             catalog=_CATALOG,
-            kill_switch_path=str(ruta_del_interruptor()),
+            kill_switch_path=ruta_del_freno,
             user_id=req.user_id,
             tenant_id=req.tenant_id,
             caller=req.caller,

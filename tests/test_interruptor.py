@@ -227,5 +227,44 @@ def test_correr_espera_la_limpieza_interna_ante_una_cancelacion_externa(monkeypa
     assert limpieza_al_capturar == ["cancelada"]
 
 
+def test_correr_sin_variable_cierra_la_corrutina_y_no_deja_warning(monkeypatch):
+    """Revisión final del frente B (2026-09-17, hallazgo 3). Sin la variable,
+    `correr_con_interruptor` lanzaba `InterruptorSinConfigurar` sin cerrar la
+    corrutina que recibió: al recolectarla, Python avisa "coroutine ... was
+    never awaited". Falla cerrado igual, pero deja ruido que tapa avisos reales."""
+    import gc
+    import warnings
+
+    monkeypatch.delenv(VARIABLE, raising=False)
+
+    async def nunca():
+        return 1
+
+    with warnings.catch_warnings(record=True) as avisos:
+        warnings.simplefilter("always")
+        with pytest.raises(interruptor.InterruptorSinConfigurar):
+            asyncio.run(interruptor.correr_con_interruptor(nunca(), intervalo=0.01))
+        gc.collect()
+    no_esperadas = [a for a in avisos
+                    if issubclass(a.category, RuntimeWarning) and "never awaited" in str(a.message)]
+    assert no_esperadas == []
+
+
+def test_correr_propaga_una_excepcion_de_la_corrutina(monkeypatch, tmp_path):
+    """Una falla propia de la corrutina (no una cancelación) sale tal cual:
+    el interruptor no la convierte en freno ni se la traga."""
+    monkeypatch.setenv(VARIABLE, str(tmp_path / "PAUSE"))
+
+    class Propia(Exception):
+        pass
+
+    async def falla():
+        await asyncio.sleep(0.02)
+        raise Propia("de adentro")
+
+    with pytest.raises(Propia, match="de adentro"):
+        asyncio.run(interruptor.correr_con_interruptor(falla(), intervalo=0.01))
+
+
 def test_el_conftest_aisla_la_ruta_de_produccion():
     assert not str(interruptor.ruta_del_interruptor()).startswith("/etc/jax")
