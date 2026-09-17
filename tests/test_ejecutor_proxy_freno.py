@@ -93,7 +93,13 @@ def test_freno_puesto_mientras_espera_el_carril_da_423_legible(tmp_path, freno):
                 await asyncio.sleep(0.02)
             # La primera tiene el carril (su upstream espera `avanzar`); la segunda hace cola.
             segunda = asyncio.create_task(cli.post(px.url + "/v1/messages", content=_CUERPO))
-            await asyncio.sleep(0.3)
+            # Esperar el ESTADO, no un rato: con `sleep` el runner lento ponía el freno antes de
+            # que la segunda llegara a la cola y el corte salía como RemoteProtocolError (CI
+            # 2026-09-17). `esperando_carril()` dice cuántas hay esperando de verdad.
+            limite = time.monotonic() + 5
+            while proxy_carril.esperando_carril() < 1:
+                assert time.monotonic() < limite, "la segunda petición nunca llegó a la cola"
+                await asyncio.sleep(0.02)
             inicio = time.monotonic()
             freno.write_text("{}")
             r = await asyncio.wait_for(segunda, 3)

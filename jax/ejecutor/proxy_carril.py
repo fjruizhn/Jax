@@ -86,6 +86,16 @@ from jax.ejecutor.contratos import pausa as pausa_c5
 from jax.ejecutor.contratos.registro import Registro
 from jax.ejecutor.prioridad import ESPERA_AGOTADA, EsperaAgotada, carril_ejecutor_async
 
+# Cuántas peticiones esperan el carril AHORA. Estado del proceso: sirve para ver la cola y para
+# que una prueba espere ese estado en vez de dormir un rato fijo (carrera vista en CI el
+# 2026-09-17: con el runner lento la segunda petición no había llegado cuando el test frenaba).
+_ESPERANDO_CARRIL = 0
+
+
+def esperando_carril() -> int:
+    return _ESPERANDO_CARRIL
+
+
 log = logging.getLogger(__name__)
 
 UPSTREAM_INALCANZABLE = "upstream_inalcanzable"
@@ -406,8 +416,13 @@ class _Proxy:
             return
         if en_vuelo is not None:
             en_vuelo.set()
+        global _ESPERANDO_CARRIL
+        _ESPERANDO_CARRIL += 1
+        tomado = False
         try:
             async with carril_ejecutor_async(self.cfg.raiz, self.cfg.tope_s):
+                _ESPERANDO_CARRIL -= 1
+                tomado = True
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
                 cabeceras.append((b"accept-encoding", b"identity"))
                 solicitud = self.cliente.build_request(
@@ -435,6 +450,9 @@ class _Proxy:
             # Reintentar un 503 del carril sería colarse en cuotas.
             await _responder_error(conn, writer, 503, motivo,
                                    extra=((b"x-should-retry", b"false"),), metodo=metodo)
+        finally:
+            if not tomado:  # se fue por el tope, o lo cancelaron esperando: la cola baja igual
+                _ESPERANDO_CARRIL -= 1
 
     async def _devolver(self, conn, writer, respuesta, metodo: str, ruta: str, de_mensajes: bool) -> None:
         codificacion = respuesta.headers.get("content-encoding", "identity").strip().lower()
