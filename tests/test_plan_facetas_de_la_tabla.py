@@ -71,7 +71,7 @@ def test_build_rechaza_una_faceta_del_spec_que_no_esta_en_la_tabla():
 
 
 def test_build_rechaza_la_faceta_inventada_por_el_llm():
-    async def llm(objective, max_steps, capability_hint, *, facetas_activas):
+    async def llm(objective, max_steps, capability_hint, *, facetas_activas, governance=None):
         return await plan_mod.PlanBuilder._parse_plan_json(
             '[{"facet": "inventada", "capability": "research", "prompt": "x"}]', max_steps)
     with pytest.raises(plan_mod.PlanRejected) as e:

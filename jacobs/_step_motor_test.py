@@ -106,9 +106,34 @@ class StepMotorPersistenceTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         await store.init_tables()
+        self.pids = []
+
+    async def asyncTearDown(self):
+        """O5 (re-review de la ronda 3, 2026-09-17): antes cada corrida dejaba
+        una fila en jacobs_steps de jax_memory_test para siempre (medido: 116
+        pasos huérfanos con este patrón). Se borran los pids PROPIOS y se
+        verifica que no quede ninguno."""
+        conn = await store.conexion_dedicada()
+        try:
+            async with conn.cursor() as cur:
+                for pid in self.pids:
+                    await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
+                marcas = ",".join(["%s"] * len(self.pids))
+                await cur.execute(
+                    f"SELECT COUNT(*) FROM jacobs_steps WHERE pipeline_id IN ({marcas})", tuple(self.pids))
+                restantes = (await cur.fetchone())[0]
+        finally:
+            conn.close()
+        await store.cerrar_pool()
+        assert restantes == 0, f"el test dejó {restantes} pasos en jacobs_steps"
+
+    def _pid(self) -> str:
+        pid = str(uuid.uuid4())
+        self.pids.append(pid)
+        return pid
 
     async def test_motor_sobrevive_upsert_y_reload(self):
-        pid = str(uuid.uuid4())
+        pid = self._pid()
         step = Step(
             step_id=str(uuid.uuid4()), pipeline_id=pid, step_index=0,
             facet="kimi", motor="ada", capability="implementation",
@@ -120,7 +145,7 @@ class StepMotorPersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reloaded[0].motor, "ada")
 
     async def test_motor_none_sobrevive_upsert_y_reload(self):
-        pid = str(uuid.uuid4())
+        pid = self._pid()
         step = Step(
             step_id=str(uuid.uuid4()), pipeline_id=pid, step_index=0,
             facet="kimi", motor=None, capability="implementation",

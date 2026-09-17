@@ -258,7 +258,12 @@ async def _cerrar_cliente_http() -> None:
 async def _jacobs_shutdown() -> None:
     """Cierra el pool de conexiones de Jacobs: espera a que vuelvan las
     conexiones en uso y las cierra, en vez de dejar que el proceso corte los
-    sockets a mitad de una consulta."""
+    sockets a mitad de una consulta.
+
+    Task 15b (2026-09-17): el pool del store de Jacobs
+    (jacobs/store.py::conexion_del_pool) se crea perezosamente en el primer
+    pedido; al apagar se cierra acá, en el mismo event loop, y no quedan
+    conexiones abiertas contra MariaDB esperando su wait_timeout."""
     await jacobs_store.cerrar_pool()
 
 

@@ -103,6 +103,9 @@ def paso_de_hyde_en_gate():
          patch.object(jacobs_routes.store, "event_append", AsyncMock()), \
          patch.object(jacobs_routes.store, "step_upsert", step_upsert), \
          patch.object(jacobs_routes.store, "pipeline_update_status", AsyncMock()), \
+         patch.object(jacobs_routes.store, "pipeline_tomar_epoca", AsyncMock(return_value=1)), \
+         patch.object(jacobs_routes, "_prevuelo_de_reanudacion",
+                      AsyncMock(return_value=({}, {}, []))), \
          patch.object(jacobs_routes, "check_kill_switch", return_value=False), \
          patch.object(jacobs_routes, "run_pipeline", AsyncMock()):
         yield step_upsert

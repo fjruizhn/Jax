@@ -21,6 +21,28 @@ Los items sin fecha de "verificado hoy" vienen de CONTEXT.md §9 — heredan
 su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
+- **Una excepción dentro del `finally` de `conexion()` cuelga el apagado del servicio — hallado 2026-09-17 (ronda pre-vuelo y continuar), CÓDIGO Y ARREGLO DEL FRENTE F.**
+  - **Archivo y función:** `jacobs/store.py`, el context manager `conexion()`
+    (alias `conexion_del_pool()`), su bloque `finally`.
+  - **Condición exacta:** si una excepción INESPERADA (no una de las que el
+    bloque contempla) cae dentro de ese `finally` **antes** de que corra
+    `pool.release(conn)` — por ejemplo al invalidar el envoltorio vigilado, al
+    evaluar si la sesión es reutilizable o al cerrar la conexión — la conexión
+    nunca vuelve al pool y queda en `_used`.
+  - **Consecuencia:** `pool.wait_closed()` espera para siempre a que `_used`
+    quede vacío, así que **el apagado del servicio se cuelga** (el lifespan de
+    LAS MANOS no termina; `systemctl stop` va al timeout y mata el proceso).
+  - **Cómo se destapó:** un `AttributeError` de un doble de test dentro de ese
+    tramo, durante la ronda de pre-vuelo y continuar. No es un caso teórico.
+  - **De quién es:** el pool de `jacobs/store.py` es del **frente F** (sesión
+    `fruiz-47`); este código vino de master, **no** de la rama
+    `feat/prevuelo-y-continuar`, y **esa rama NO lo toca**. El dueño ya
+    respondió: el frente F toma el arreglo con la verificación propuesta.
+  - **Verificación propuesta (acordada con el dueño):** un test que fuerce una
+    excepción en ese tramo del `finally` y mida que `wait_closed()` **no**
+    cuelga — con **timeout duro** (`asyncio.wait_for` / `timeout` de pytest),
+    para que el control muera **en rojo** y no colgando la suite entera.
+  - **Cierre:** lo borra el frente F citando su PR cuando lo cierre.
 - **La ruta vieja del freno `/etc/jax/PAUSE` sigue frenando — frente B, Task H (2026-09-17).**
   - **DECISIÓN** (controlador principal del frente B, 2026-09-17; rulings R11-R15 del ledger
     `jax-platform/.superpowers/sdd/2026-09-16-frente-b-kill-switch/progress.md`): mientras exista
@@ -392,6 +414,13 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado — ola final de arreglos de prevuelo-y-continuar (2026-09-17)
+
+**HISTORIA 2026-09-17** (rama `feat/prevuelo-y-continuar`, sin mergear ni desplegar al escribir esto; revisión final de rama + Rulings R30-R33 del ledger `.superpowers/sdd/2026-09-17-prevuelo-y-continuar-jacobs/progress.md`). Regla de Fernando: ningún hallazgo se difiere, así que las dos entradas que la rama había anotado acá (Rulings R14 y R27) se cierran en la misma rama.
+
+- **Cerrado — límite de activos entre procesos en `MAX_PARALLEL_PIPELINES` (antes "Anotado", desvío 7 del plan; ola final F3, Ruling R31).** El conteo contra el cupo se hacía bajo un `asyncio.Lock` de proceso y el CLI `tools/jacobs_relaunch.py` corre en otro proceso: un continue desde el CLI y un create de LAS MANOS podían contar a la vez y superar el cupo. **Arreglo:** `store.candado_de_activos()` — candado con nombre del servidor MariaDB (`GET_LOCK('jacobs_crear_o_continuar:<base>', JAX_PREVUELO_CANDADO_TIMEOUT_S)`, default 10 s) en UNA conexión dedicada; create y continue recuentan por esa conexión y escriben dentro del bloque; `RELEASE_LOCK` en `finally` y la conexión se cierra siempre (cerrar la sesión suelta el candado aunque `RELEASE_LOCK` falle). Si vence o la base no lo concede → falla cerrado, **503 `prevuelo_no_disponible`** (no 429: `limite_de_activos` afirmaría un cupo lleno que nadie midió). El conteo temprano sigue, sólo para no planificar ni sondear en vano. **Evidencia:** `tests/test_jacobs_candado_activos_db.py` (dos sesiones no superan el cupo — por mutación con un nombre de candado por sesión: `assert 2 == 1`; GET_LOCK que vence a 1 s; se suelta aunque el bloque lance; nombre por base; EXPLAIN sin tablas y recuento por `idx_pipelines_status`), y wiring puro en `tests/test_jacobs_preflight_endpoint.py`/`tests/test_jacobs_continuar.py` (recuento bajo el candado con el cupo que otro proceso llenó → 422 al crear / 429 al continuar; escritura dentro del candado; candado no disponible → 503 / se propaga sin escribir).
+
+- **Cerrado — la sonda del pre-vuelo que vence sin registrar uso (antes "Anotado", Ruling R14; ola final F4, Ruling R30).** `jacobs/sonda.py::_registrar` sólo registraba uso con tokens medidos > 0: una sonda que VENCÍA o un 2xx SIN campo de uso no dejaba fila en `axioma_usage` aunque el proveedor la hubiera podido cobrar. **Arreglo:** esos dos casos se registran con tokens **estimados** — entrada ⌈`len(MENSAJE_DE_SONDA)` / `JAX_PREVUELO_CHARS_POR_TOKEN`⌉, salida el tope que pidió la sonda — y `request_type='preflight_probe_est'` (19 caracteres; `axioma_usage.request_type` es `VARCHAR(20)` y no tiene otra columna para marcar una estimación sin DDL). Con tokens medidos sigue `preflight_probe`. Se decide por si el pedido SALIÓ (pasada final R34): no registran `ConnectError`/`ConnectTimeout`/`PoolTimeout`/`UnsupportedProtocol`, un 4xx, la falla local (`config_error`) ni la base caída al resolver; registran estimado `ReadTimeout`/`WriteTimeout`, `ReadError`, `RemoteProtocolError`, cualquier 5xx (504/524 incluidos) y el timeout propio de la sonda. **Evidencia:** `tests/test_prevuelo_sonda.py` (+9: vence por `httpx` y por `wait_for`, 2xx sin usage en openai-compat, gemini y motor, controles con usage medido, falla local y base caída; rojo contra 4768484: 6 failed) y `tests/test_prevuelo_catalogo_db.py` (+1: los dos `request_type` entran en la columna real). **Aviso a la Mesa:** Admin → Costos agrupa por `request_type`, así que aparece la fila nueva `preflight_probe_est`.
 ## Retiro de la voz (2026-09-17) — Kokoro TTS y Whisper fuera del árbol
 
 **DECISIÓN de Fernando, 2026-09-17.** Se retira la voz. No se reinstala hasta que
@@ -3709,6 +3738,11 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 
 ## Anotado, no bloquea
+
+- **Anotado con fecha 2026-10-17 — revisar el tamaño del pool del store de Jacobs sólo si el uso real lo pide (Ruling R52, 2026-09-17).** `JAX_DB_POOL_MAX=10` (default derivado en `jacobs/store.py::db_pool_max`). La carga final del pre-vuelo dio el umbral 10× NO CUMPLIDO (p95 c25/c1 = 17,14×; c50/c1 = 30,39×) con 0 errores en todas las concurrencias y p95 absoluto 2,74/17,15/46,97/83,26 ms a c=1/10/25/50. La sesión principal lo aceptó por escrito: la relación mide encolamiento contra un pool de 10 con concurrencia de 25 y 50, muy por encima de la demanda real (`MAX_PARALLEL_PIPELINES=3`; el pre-vuelo lo dispara una persona desde la Mesa), y el pool se dimensionó contra una MariaDB compartida (151 conexiones, 96 en uso).
+  - **Qué lo dispara (observación, no calendario):** uso real por encima de **10 pre-vuelos concurrentes sostenidos**. Dónde se ve: (a) en el journal de `jax-las-manos`, 503 `prevuelo_no_disponible` cuyo motivo es un `TimeoutError` esperando turno del pool (un pedido HTTP espera a lo sumo `JAX_DB_CONNECT_TIMEOUT_SECONDS`), que es el síntoma de cola llena; (b) en `jacobs_events` / la Mesa, `/jacobs/preflight` y `POST /jacobs/pipeline` solapados en la misma ventana de segundos por más de 10 pedidos; (c) en el perfil (`scripts/perfil_prevuelo.py trabajadores`), la fase `acquire` dominando el total con la concurrencia real medida, no con una inventada.
+  - **Qué hacer si pasa:** volver a medir con la concurrencia real observada (lotes y sostenida, el procedimiento de la Task 15) y recién entonces evaluar subir el pool, contra el presupuesto de conexiones del servidor MariaDB compartido. Sin ese número medido, no se toca: subir el pool para que el ratio dé bien sería acomodar la medición al criterio.
+  - **Evidencia y decisión:** `CONTEXT.md` §9 (entrada del 2026-09-17 sobre HEAD `cec13ac`), `r38-report.md` y Rulings R44/R52/R53 del ledger `2026-09-17-prevuelo-y-continuar-jacobs`.
 
 - **Anotado — C3 del Ejecutor (2026-09-17, Mr. Hyde). Ninguno bloquea:**
   - **El carril del Ejecutor sondea cada 50 ms** (`prioridad._PASO_EJECUTOR_S`). Carga de C3 (200 peticiones con

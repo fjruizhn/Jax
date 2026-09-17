@@ -5,15 +5,21 @@ compat, jax_local/ollama) cuando se invocan via un pipeline de Jacobs -- no
 via la Mesa web (esa ruta ya escribe axioma_usage desde jax-platform/backend/
 api/chat.py, Tasks 1-4).
 
-CONEXION (2026-09-17): del pool compartido de Jacobs (`store.conexion`), no una
-conexion suelta por fila: esto corre tras cada step HTTP de un pipeline. Una
-falla del pool (base caida, pool agotado) sube como excepcion y toma el MISMO
-camino que antes tomaba un `aiomysql.connect` caido: la fila va a la cola
-durable. Antes: cada repo se conecta a la misma DB jax_memory con su propio
-conector minimo, sin paquete compartido. jacobs NO
-importa motor_registry (no esta en su sys.path standalone, ver comentario en
-jacobs/executor.py sobre el catalogo de capabilities) -- por eso este modulo
-es una copia adaptada, no un import cruzado.
+CONEXION (2026-09-17, Ruling R38 fix round 1): por el pool del store de Jacobs
+(jacobs/store.py::conexion / conexion_del_pool), no una conexion suelta por
+fila: esto corre tras cada step HTTP de un pipeline y tras cada sonda del
+pre-vuelo. Una falla del pool (base caida, pool agotado) sube como excepcion y
+toma el MISMO camino que antes tomaba un `aiomysql.connect` caido: la fila va a
+la cola durable. Antes: cada repo se conecta a la misma DB jax_memory con su
+propio conector minimo, sin paquete compartido. jacobs NO importa
+motor_registry (no esta en su sys.path standalone, ver comentario en
+jacobs/executor.py sobre el catalogo de capabilities) -- por eso este modulo es
+una copia adaptada de las_manos/motor_registry/usage_writer.py, no un import
+cruzado. OJO (m5 de la re-revision final, 2026-09-17):
+la direccion CONTRARIA si existe desde R38 fix round 3: `las_manos/motor_registry/worker.py importa jacobs.store`
+para correr el job bajo `espera_de_turno_sin_plazo`; esta declarada en el
+docstring de ese archivo. O sea: motor_registry -> jacobs, si;
+jacobs -> motor_registry, no.
 
 request_type='pipeline' (no 'chat'): distingue en /api/admin/usage estos
 mismos transportes invocados DESDE un pipeline de Jacobs (posiblemente sin
@@ -27,7 +33,12 @@ proceso NO DRENA**: solo `jax-platform` lee el respaldo e inserta, porque es la
 duena de `axioma_usage` y la unica con migraciones (la columna `spool_id` y su
 UNIQUE, que es lo que hace idempotente al reintento). Si este modulo tambien
 insertara, dos procesos borrarian el mismo archivo sin coordinacion y el cobro
-se duplicaria en la ventana entre el INSERT y el borrado."""
+se duplicaria en la ventana entre el INSERT y el borrado.
+
+request_type='preflight_probe' (2026-09-17): la sonda del pre-vuelo de Jacobs
+(jacobs/sonda.py) paga una llamada mínima; se registra aparte para que se vea.
+request_type='preflight_probe_est' (ola final F4, 2026-09-17): la misma sonda
+cuando venció o el proveedor respondió 2xx sin usage -- tokens ESTIMADOS."""
 from __future__ import annotations
 
 import logging
@@ -35,7 +46,7 @@ import logging
 from jacobs import store
 
 try:
-    # Mismo doble import que db_connect_config, por la misma razon: en
+    # Doble import (mismo patron que db_connect_config en store.py): en
     # produccion `jax.core` no es importable con cwd=las_manos, y
     # las_manos/cola_uso.py es un symlink a jax/core/cola_uso.py.
     from cola_uso import _ahora_iso, encolar as encolar_uso
@@ -81,6 +92,7 @@ async def record_direct_usage(
     model: str,
     tokens_in: int,
     tokens_out: int,
+    request_type: str = "pipeline",
 ) -> None:
     """Best-effort (usage tracking no debe romper un step ya completado),
     pero no silencioso.
@@ -114,8 +126,14 @@ async def record_direct_usage(
     creado_en = _ahora_iso()
     cost = None
     try:
-        # Pool compartido (2026-09-17): el guard de JAX_DB_HOST/PORT, el
-        # connect_timeout y el limite de espera por hueco viven en store.
+        # R38, fix round 1 (2026-09-17): por el pool del store de Jacobs y no
+        # por una conexión propia -- la sonda del pre-vuelo escribe acá en el
+        # camino de /jacobs/preflight, crear y continue, y el ejecutor en cada
+        # paso HTTP. El guard de JAX_DB_HOST/PORT, el connect_timeout y el
+        # límite de espera por hueco viven en store. Un error del pool (turno
+        # vencido en un pedido, base caída) cae al respaldo igual que antes
+        # caía un connect fallido; el ejecutor espera turno sin plazo
+        # (store.espera_de_turno_sin_plazo).
         async with store.conexion() as conn:
             price_in, price_out = await _lookup_model_price(conn, provider_id, model)
             if price_in is not None and price_out is not None:
@@ -123,11 +141,11 @@ async def record_direct_usage(
             async with conn.cursor() as cur:
                 await cur.execute(
                     "INSERT INTO axioma_usage (tenant_id, user_id, facet, model, tokens_in, tokens_out, cost_usd, request_type) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pipeline')",
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         int(tenant_id) if tenant_id is not None else None,
                         int(user_id) if user_id is not None else None,
-                        facet, model, tokens_in, tokens_out, cost,
+                        facet, model, tokens_in, tokens_out, cost, request_type,
                     ),
                 )
         return
@@ -150,7 +168,7 @@ async def record_direct_usage(
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "cost_usd": cost,
-        "request_type": "pipeline",
+        "request_type": request_type,
         "origen": "jacobs",
         # explicitos aunque el contrato los admita ausentes: jacobs no invoca
         # trabajos del motor, y que se vean en None dice que es una decision y

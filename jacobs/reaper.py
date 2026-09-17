@@ -21,9 +21,11 @@ build() tardaba 17-37s -- los umbrales de abajo asumen el piso nuevo.
   murió entre el INSERT y el arranque de esa tarea.
 - RUNNING_STALE_SECONDS = 1800 (30min), medido contra updated_at (no
   created_at) -- un running sano actualiza updated_at en cada
-  transición de step. 2x margen sobre el timeout de step más largo
-  configurado hoy (`capability.max_execution_minutes` en la DB, fuente
-  unica desde 2026-09-01; "reconcile"=15min=900s).
+  transición de step. Es el PISO: desde el Ruling R36 (2026-09-17) el
+  umbral de cada running es max(RUNNING_STALE_SECONDS, 2x el mayor
+  timeout_seconds de sus pasos en curso), leído de jacobs_steps en la
+  misma consulta del barrido -- un paso sano de timeout largo no escribe
+  mientras corre y no depende de lo que diga el catálogo.
 - INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS = 600 (10min): margen generoso
   sobre una escritura de owner file que en el camino sano es casi
   instantánea (<1ms) -- guarda contra el caso raro de disco lento, no
@@ -57,6 +59,7 @@ from pathlib import Path
 
 from cliente_http_compartido import obtener_cliente_http
 from jacobs import store
+from jacobs.store import espera_de_turno_sin_plazo  # R38: sobrevive a los tests que reemplazan `store`
 from jacobs.facet_health import check_facet_health
 from jacobs.models import HTTP_FACETS, PipelineStatus
 
@@ -127,18 +130,24 @@ async def reap_orphaned_pipelines() -> list[dict]:
     now = time.time()
     reaped: list[dict] = []
 
-    candidates = await store.pipelines_by_status(
+    candidates = await store.candidatos_del_reaper(
         [PipelineStatus.pending, PipelineStatus.running, PipelineStatus.interrupted]
     )
-    for p in candidates:
+    for p, max_timeout_en_curso in candidates:
         age = now - p.created_at
         stale_since = now - p.updated_at
         reason = None
+        # Ruling R36: el umbral de un running es POR PIPELINE. Un paso sano no
+        # escribe mientras corre, así que el piso global no alcanza si ese
+        # paso tiene un timeout largo: 2x el mayor timeout_seconds de sus
+        # pasos en curso (el que aplica el ejecutor), nunca menos que
+        # RUNNING_STALE_SECONDS. Sin constante que suponga el catálogo.
+        umbral_running = max(RUNNING_STALE_SECONDS, 2 * max_timeout_en_curso)
 
         if p.status == PipelineStatus.pending and age > PENDING_MAX_AGE_SECONDS:
             reason = f"pending sin avance {age:.0f}s (umbral {PENDING_MAX_AGE_SECONDS}s)"
-        elif p.status == PipelineStatus.running and stale_since > RUNNING_STALE_SECONDS:
-            reason = f"running sin avance {stale_since:.0f}s (umbral {RUNNING_STALE_SECONDS}s)"
+        elif p.status == PipelineStatus.running and stale_since > umbral_running:
+            reason = f"running sin avance {stale_since:.0f}s (umbral {umbral_running}s)"
         elif (
             p.status == PipelineStatus.interrupted
             and age > INTERRUPTED_NO_OWNER_MAX_AGE_SECONDS
@@ -153,7 +162,23 @@ async def reap_orphaned_pipelines() -> list[dict]:
             continue
 
         try:
-            await store.pipeline_update_status(p.pipeline_id, PipelineStatus.expired)
+            # F6 (ola final): compare-and-set con la época y el status LEÍDOS
+            # en este barrido. Un /continue, /resume o el propio ejecutor que
+            # cambió la fila después de la lectura gana: no se pisa, y el
+            # próximo barrido la vuelve a evaluar con datos frescos.
+            # Pasada final R34: para running, además, updated_at tiene que
+            # SEGUIR anterior al corte al escribir -- un ejecutor que avanzó
+            # entre la lectura y esta escritura no se cosecha. pending e
+            # interrupted se cosechan por antigüedad (created_at, que no
+            # cambia); lo que los saca de ahí cambia status o época.
+            corte = now - umbral_running if p.status == PipelineStatus.running else None
+            if not await store.pipeline_update_status_si_epoca(
+                p.pipeline_id, p.run_epoch, PipelineStatus.expired, desde=(p.status,),
+                sin_avance_desde=corte,
+            ):
+                logger.info("Reaper: %s no cosechado, cambió después de leerlo (época %s, status %s)",
+                            p.pipeline_id, p.run_epoch, p.status.value)
+                continue
             await store.event_append(p.pipeline_id, "REAPED", {
                 "prev_status": p.status.value, "reason": reason,
             })
@@ -465,7 +490,10 @@ async def start_reaper_loop() -> None:
     sweep_count = 0
     while True:
         try:
-            await reap_orphaned_pipelines()
+            # R38, fix round 1: trabajo de fondo -- espera turno del pool sin
+            # plazo (jacobs/store.py::espera_de_turno_sin_plazo).
+            with espera_de_turno_sin_plazo():
+                await reap_orphaned_pipelines()
         except Exception:  # fail-soft: loop de limpieza en background, mismo patron que jax-platform/jax_engine/owner_cleanup.py -- nunca debe tumbar el proceso, el proximo ciclo reintenta
             logger.warning("Reaper: barrido periódico falló", exc_info=True)
         try:

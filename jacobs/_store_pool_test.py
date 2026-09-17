@@ -1142,6 +1142,144 @@ class MigradosAlPoolTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
+class DedicadasVivasTest(unittest.IsolatedAsyncioTestCase):
+    """El tope del pool NO es el tope de conexiones del proceso (2026-09-17).
+
+    La carga del 2026-09-17 vio hasta 13 conexiones del proceso contra
+    `JAX_DB_POOL_MAX=10`. `conexion_dedicada()` abre FUERA del pool a
+    proposito, asi que el total es pool + dedicadas vivas. Este contador es lo
+    que permite medirlo en vez de razonarlo.
+    """
+
+    async def test_abrir_suma_y_cerrar_resta(self):
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada()
+        try:
+            self.assertEqual(store.dedicadas_vivas(), antes + 1)
+        finally:
+            conn.close()
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+    async def test_cerrar_dos_veces_resta_una_sola_vez(self):
+        """Sin idempotencia el contador se iria a negativo y taparia una fuga."""
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada()
+        conn.close()
+        conn.close()
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+    async def test_la_que_nadie_cierra_queda_contada(self):
+        """Una dedicada sin cerrar TIENE que verse: es el caso que interesa."""
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada()
+        self.assertEqual(store.dedicadas_vivas(), antes + 1)
+        conn.close()  # limpieza del test, ya medido
+
+    async def test_el_pool_no_cuenta_como_dedicada(self):
+        """Si el pool sumara acá, el número no distinguiría una cosa de la otra."""
+        await store.obtener_pool()
+        antes = store.dedicadas_vivas()
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+            self.assertEqual(store.dedicadas_vivas(), antes)
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+    async def test_found_rows_tambien_cuenta(self):
+        """Las escrituras condicionales son DOS de los tres llamadores: si su
+        rama no contara, el excedente medido quedaría sin explicar."""
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada(found_rows=True)
+        try:
+            self.assertEqual(store.dedicadas_vivas(), antes + 1)
+        finally:
+            conn.close()
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+
+class ExcepcionAlPoolTest(unittest.TestCase):
+    """Puro: la lista de llamadores de `conexion_dedicada()` EN CODIGO DE
+    SERVICIO no crece sola (2026-09-17).
+
+    `conexion_dedicada()` es la unica excepcion al pool: abre una conexion
+    fuera de el y quien la pide la cierra. Su docstring decia "tiene
+    exactamente DOS llamadores" y era falso -- tests y scripts de medicion
+    tambien la usan --, asi que la garantia no la sostenia nadie. Este guard
+    la sostiene: enumera por AST los llamadores en `jacobs/`, `las_manos/`,
+    `jax/` y `tools/` (sin tests ni `scripts/`, que son medicion, no camino
+    de pedidos) y falla si aparece uno nuevo.
+    """
+
+    # Cada entrada es un llamador VIVO en codigo de servicio, con su razon.
+    LLAMADORES = {
+        # El GET_LOCK del cupo: se ESPERA, y esperar con una conexion del pool
+        # deja sin conexiones al resto del servicio.
+        "jacobs/store.py::candado_de_activos",
+        # Escrituras CONDICIONALES por epoca: necesitan CLIENT.FOUND_ROWS, que
+        # se negocia en el handshake y no se enciende por sesion.
+        "jacobs/store.py::_ejecutar_condicional",
+        "jacobs/store.py::continuar_transaccion",
+    }
+
+    CARPETAS = ("jacobs", "las_manos", "jax", "tools")
+
+    @staticmethod
+    def _es_de_servicio(f: Path) -> bool:
+        if any(p in (".venv", "__pycache__", "tests", "scripts") for p in f.parts):
+            return False
+        return not (f.name.endswith("_test.py") or f.name.startswith("test_")
+                    or f.name == "conftest.py")
+
+    def _hallados(self) -> set[str]:
+        hallados = set()
+        for carpeta in self.CARPETAS:
+            raiz = RAIZ / carpeta
+            if not raiz.is_dir():
+                continue
+            for f in sorted(raiz.rglob("*.py")):
+                if not self._es_de_servicio(f):
+                    continue
+                arbol = ast.parse(f.read_text(errors="ignore"))
+                # Por AST, no por texto: un comentario puede nombrarla; el
+                # codigo no. Se atribuye cada uso a la funcion que lo contiene.
+                for nodo in ast.walk(arbol):
+                    if not isinstance(nodo, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    for hijo in ast.walk(nodo):
+                        nombre = getattr(hijo, "attr", None) or getattr(hijo, "id", None)
+                        if (isinstance(hijo, (ast.Name, ast.Attribute))
+                                and nombre == "conexion_dedicada"):
+                            hallados.add(f"{f.relative_to(RAIZ)}::{nodo.name}")
+        return hallados
+
+    def test_la_excepcion_al_pool_no_se_amplia_sola(self):
+        hallados = self._hallados()
+        nuevos = sorted(hallados - self.LLAMADORES)
+        self.assertEqual(
+            nuevos, [],
+            "La excepcion al pool NO se amplia sin una decision: "
+            f"llamador(es) nuevo(s) de conexion_dedicada() en codigo de servicio: {nuevos}. "
+            "Toda conexion del camino de pedidos va por store.conexion() / "
+            "conexion_del_pool(); conexion_dedicada() solo cubre CLIENT.FOUND_ROWS y el "
+            "GET_LOCK que se espera. Si hace falta uno mas, se decide, se justifica en el "
+            "docstring de conexion_dedicada() y se agrega a LLAMADORES con su razon.",
+        )
+
+    def test_la_lista_no_tiene_llamadores_muertos(self):
+        """Un guard con entradas que ya no existen deja de vigilar en silencio."""
+        muertos = sorted(self.LLAMADORES - self._hallados())
+        self.assertEqual(muertos, [], f"LLAMADORES nombra lo que ya no existe: {muertos}")
+
+    def test_el_docstring_no_promete_una_garantia_que_no_cumple(self):
+        """El docstring decia "exactamente DOS llamadores" contando solo el
+        codigo de servicio, y tests y scripts tambien la usan: un comentario
+        que afirma una garantia que el codigo no cumple es deuda."""
+        doc = store.conexion_dedicada.__doc__ or ""
+        self.assertNotIn("exactamente DOS llamadores", doc)
+        self.assertIn("CODIGO DE SERVICIO", doc)
+
+
+@unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
 class AdmisionDeFacetUsaElPoolTest(_ConBase):
     async def test_autorizaciones_concurrentes_no_abren_una_conexion_cada_una(self):
         from motor_registry.facet_policy import check_facet_admission

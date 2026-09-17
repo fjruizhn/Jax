@@ -49,8 +49,13 @@ class _ConBase(unittest.IsolatedAsyncioTestCase):
         self.hashes: list[str] = []
 
     async def asyncTearDown(self):
-        for h in self.hashes:
-            await _ejecutar(f"DELETE FROM {TABLA} WHERE token_hash = %s", (h,))
+        for token_hash in self.hashes:
+            await _ejecutar(
+                f"DELETE FROM {TABLA} WHERE token_hash = %s",
+                # marcador-propio: el hash de un token que emitió ESTE test
+                # (self.hashes); no toca filas de nadie más.
+                (token_hash,),
+            )
         await store.cerrar_pool()
 
     async def emitir(self, ttl: int = 300) -> str:

@@ -35,6 +35,30 @@ pytestmark = pytest.mark.skipif(
 TOKEN_INVENTADO = "token-inventado-por-el-atacante"
 
 
+@pytest.fixture(autouse=True)
+def _prevuelo_que_aprueba(monkeypatch):
+    """El pre-vuelo real (spec 2026-09-17) corre al crear un pipeline y rechaza
+    con 422 si la base no tiene credencial activa ni salud fresca de la faceta.
+    Este archivo prueba el CONTRATO de sub-pipelines -- token, padre,
+    profundidad, identidad, kill switch -- no el pre-vuelo, que tiene sus
+    propios tests (tests/test_prevuelo_*.py, y los de la ruta en
+    tests/test_jacobs_prevuelo_rutas.py). Sin este doble, el resultado del
+    archivo dependía de qué datos tuviera la base: pasaba en hall9000 (con
+    catálogo sembrado) y fallaba en el runner (esquema recién migrado, sin
+    credenciales). Se aprueba con un veredicto sin violaciones y costo cero.
+    """
+    from decimal import Decimal
+
+    from jacobs import routes
+    from jacobs.prevuelo_reglas import Veredicto
+
+    async def _aprobar(*_args, **_kwargs):
+        return Veredicto(ok=True, violaciones=(), costo_max_usd=Decimal("0"),
+                         pasos_costo=(), sondeadas=())
+
+    monkeypatch.setattr(routes, "prevuelo", _aprobar)
+
+
 def test_ada_con_token_inventado_no_crea_pipeline():
     async def escenario():
         padre, _paso = await ada.padre_en_ejecucion()
@@ -271,8 +295,23 @@ def test_fallo_de_creacion_tras_el_consumo_deja_evento_y_propaga_el_error():
     """Revisión final, I-2: después de consumir, CUALQUIER excepción (no solo el
     plan rechazado) quema el token; tiene que quedar SUBPIPELINE_RECHAZADO con
     fase=creacion y el error original tiene que llegar al llamador, aunque
-    escribir ese evento también falle (M-2)."""
+    escribir ese evento también falle (M-2).
+
+    ENMENDADO 2026-09-17 (rama `feat/prevuelo-y-continuar`): el error ya no sale
+    crudo. `create_pipeline` es fail-closed (spec §8): toda `Exception` después
+    del consumo se convierte en HTTP 503 `prevuelo_no_disponible` con el motivo
+    REDACTADO, y el error original queda como `__cause__` (`raise ... from exc`).
+    Lo que el test vigila no cambia -- token quemado, `SUBPIPELINE_RECHAZADO`
+    fase=creacion escrito, y la causa real llega al llamador sin que un fallo de
+    auditoría la tape --; cambia de dónde se lee la causa.
+    """
     from unittest.mock import AsyncMock, patch
+
+    def _causa(excinfo):
+        """La causa original debajo del 503 fail-closed de la rama."""
+        assert excinfo.value.status_code == 503, excinfo.value.status_code
+        assert excinfo.value.detail["code"] == "prevuelo_no_disponible", excinfo.value.detail
+        return excinfo.value.__cause__
 
     async def escenario():
         padre, paso = await ada.padre_en_ejecucion()
@@ -281,8 +320,11 @@ def test_fallo_de_creacion_tras_el_consumo_deja_evento_y_propaga_el_error():
             token_2 = await ada.emitir(padre, paso)
             with patch.object(store, "pipeline_create",
                               AsyncMock(side_effect=RuntimeError("fallo de escritura (arnés)"))), \
-                 pytest.raises(RuntimeError, match="fallo de escritura"):
+                 pytest.raises(HTTPException) as exc1:
                 await ada.pedir_hijo(token, padre)
+            causa = _causa(exc1)
+            assert isinstance(causa, RuntimeError), repr(causa)
+            assert "fallo de escritura" in str(causa)
             fila = await ada.fila_token(sp.hash_token(token))
             evento = await ada.una_fila(
                 "SELECT payload FROM jacobs_events WHERE event_type = 'SUBPIPELINE_RECHAZADO' "
@@ -295,8 +337,12 @@ def test_fallo_de_creacion_tras_el_consumo_deja_evento_y_propaga_el_error():
                               AsyncMock(side_effect=RuntimeError("fallo de escritura (arnés)"))), \
                  patch.object(store, "event_append",
                               AsyncMock(side_effect=ConnectionError("base caída (arnés)"))), \
-                 pytest.raises(RuntimeError, match="fallo de escritura"):
+                 pytest.raises(HTTPException) as exc2:
                 await ada.pedir_hijo(token_2, padre)
+            causa_2 = _causa(exc2)
+            # M-2: la causa es la ORIGINAL, no el ConnectionError de la auditoría.
+            assert isinstance(causa_2, RuntimeError), repr(causa_2)
+            assert "fallo de escritura" in str(causa_2)
             return token, fila, evento
         finally:
             await ada.cerrar(padre)

@@ -20,6 +20,7 @@ from contrato_dispatch import limite_de_salida
 from model_catalog import record_resolved_version_safe
 
 from jacobs import store
+from jacobs.store import espera_de_turno_sin_plazo  # R38: sobrevive a los tests que reemplazan `store`
 from jacobs.artifacts import read_artifact, save_if_large
 # Vive en jax/core (capa base, compartido con el HttpMuscle del REPL); llega a
 # este proceso por el symlink las_manos/grounding_sources.py, como facet_resolver.
@@ -1021,16 +1022,45 @@ def _compute_waves(plan: list[Step], done: set[int]) -> list[list[int]]:
 #  Ejecución de UN step (cuerpo del antiguo try/except, extraído)
 # ----------------------------------------------------------------
 
-async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
-    """Ejecuta un step individual. Devuelve True si completó, False si falló.
+class _SinEscritura:
+    """Resultado de un paso que NO se pudo escribir con su escritura
+    condicional (m2 de la re-revisión final, 2026-09-17). Antes era `False`,
+    el mismo valor que "el paso falló": `step_upsert_si_epoca` devuelve 0
+    filas tanto si la corrida perdió la época como si la FILA del paso cambió
+    (borrada, otro step_id) con la corrida vigente, y en ese segundo caso el
+    pipeline abortaba con `"errores": {"3": null}` -- un aborto sin motivo.
+    run_pipeline los distingue releyendo la época."""
 
-    Es el cuerpo del antiguo bloque try/except del loop secuencial, extraído sin
-    cambios de lógica para poder lanzarlo en paralelo vía asyncio.gather.
-    Artifacts, persistencia al repo y eventos: idénticos al original.
+    def __repr__(self) -> str:  # pragma: no cover - sólo para diagnósticos
+        return "<paso sin escribir>"
+
+
+PASO_SIN_ESCRITURA = _SinEscritura()
+
+_MOTIVO_SIN_ESCRITURA = (
+    "no se pudo escribir el paso: su fila cambió (otro step_id o borrada) "
+    "mientras la corrida seguía vigente"
+)
+
+
+async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool | _SinEscritura:
+    """Ejecuta un step individual. Devuelve True si completó, False si falló y
+    PASO_SIN_ESCRITURA si su escritura condicional no tocó ninguna fila
+    (época perdida o fila del paso cambiada).
+
+    Época (spec 2026-09-17 §5.3): cada escritura del paso es condicional a
+    `pipeline.run_epoch` y a status='running'. Si la primera falla, el paso NO
+    se despacha (no se gasta en una corrida superada). Si falla la de
+    `completed`, el resultado tardío se descarta y su ref no entra al contexto.
+    Lo despachado no se interrumpe: es el mismo límite que el kill switch
+    entre olas. run_pipeline descubre la pérdida en su escritura de fin de
+    ola y registra RUN_SUPERSEDED una sola vez.
     """
+    epoca = pipeline.run_epoch
     step.status     = StepStatus.running
     step.started_at = time.time()
-    await store.step_upsert(step)
+    if not await store.step_upsert_si_epoca(step, epoca):
+        return PASO_SIN_ESCRITURA
     await store.event_append(
         pipeline.pipeline_id, "STEP_STARTED",
         {"step_index": i, "facet": step.facet, "capability": step.capability},
@@ -1054,18 +1084,22 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
             timeout=step.timeout_seconds,
         )
 
-        ref, inline = save_if_large(pipeline.pipeline_id, step.step_id, raw_output)
+        # F1 (ola final): la época va en la ruta -- este archivo se escribe
+        # antes de la escritura condicional y una corrida superada no puede
+        # pisar el de la vigente. En un hilo: es escritura a disco.
+        ref, inline = await asyncio.to_thread(
+            save_if_large, pipeline.pipeline_id, step.step_id, raw_output, epoca=epoca,
+        )
         if ref:
             step.output_ref = ref
-            pipeline.context[f"step_{i}_ref"] = ref
         else:
-            inline_ref = f"inline:{json.dumps(inline, ensure_ascii=False)}"
-            step.output_ref = inline_ref
-            pipeline.context[f"step_{i}_ref"] = inline_ref
+            step.output_ref = f"inline:{json.dumps(inline, ensure_ascii=False)}"
 
         step.status      = StepStatus.completed
         step.finished_at = time.time()
-        await store.step_upsert(step)
+        if not await store.step_upsert_si_epoca(step, epoca):
+            return PASO_SIN_ESCRITURA
+        pipeline.context[f"step_{i}_ref"] = step.output_ref
         await store.event_append(
             pipeline.pipeline_id, "STEP_COMPLETED",
             {"step_index": i, "output_ref": step.output_ref},
@@ -1080,7 +1114,7 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
                 capability=step.capability,
                 raw_output=raw_output,
             )
-        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia .md de cortesía en REPO_DOCUMENTS_DIR que el admin de jax-platform lista (/api/admin/repo) -- el output canónico ya quedó en output_ref y en store.step_upsert antes de este try; si la copia falla queda el warning y el step sigue completado
+        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia .md de cortesía en REPO_DOCUMENTS_DIR que el admin de jax-platform lista (/api/admin/repo) -- el output canónico ya quedó en output_ref y en store.step_upsert_si_epoca antes de este try; si la copia falla queda el warning y el step sigue completado
             logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
         return True
 
@@ -1096,7 +1130,40 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
 #  Pipeline runner — DIRECTOR DE ORQUESTA (ejecución por olas)
 # ----------------------------------------------------------------
 
+# Estados desde los que arranca una corrida: pending (recién creado), running
+# (continue ya lo dejó así con la época nueva), interrupted (resume y
+# approve-step no cambian el status, sólo la época).
+_DESDE_ARRANQUE = (PipelineStatus.pending, PipelineStatus.running, PipelineStatus.interrupted)
+
+
+async def _perdio_la_epoca(pipeline: Pipeline) -> None:
+    """La corrida perdió su época o el pipeline dejó de estar `running`
+    (cancelado, vencido por el reaper, continuado o reanudado por otro
+    pedido). Se registra UNA vez y quien llama termina sin escribir nada más."""
+    actual = await store.pipeline_epoca_y_status(pipeline.pipeline_id)
+    epoca_actual = actual[0] if actual else None
+    status_actual = actual[1].value if actual else None
+    logger.warning(
+        "Jacobs %s: corrida de la época %s superada (época actual %s, status %s) -- termina sin escribir",
+        pipeline.pipeline_id, pipeline.run_epoch, epoca_actual, status_actual,
+    )
+    await store.event_append(pipeline.pipeline_id, "RUN_SUPERSEDED", {
+        "epoca": pipeline.run_epoch,
+        "epoca_actual": epoca_actual,
+        "status_actual": status_actual,
+    })
+
+
 async def run_pipeline(pipeline: Pipeline) -> None:
+    """Corre el pipeline (ver _correr_pipeline). Ruling R38, fix round 1: la
+    corrida es un trabajo de fondo -- sus escrituras esperan turno del pool
+    sin plazo (store.espera_de_turno_sin_plazo) en vez de morir por cola con
+    la base sana; una base caída sigue fallando al conectar."""
+    with espera_de_turno_sin_plazo():
+        await _correr_pipeline(pipeline)
+
+
+async def _correr_pipeline(pipeline: Pipeline) -> None:
     """
     Ejecuta el pipeline por OLAS topológicas. Dentro de cada ola, los steps
     corren EN PARALELO (asyncio.gather). El orden entre olas respeta depends_on.
@@ -1107,21 +1174,34 @@ async def run_pipeline(pipeline: Pipeline) -> None:
                    La granularidad de aprobación es la OLA, no el step.
     Hyde: si un step de la ola es hyde sin aprobar, la ola NO se ejecuta y el
     pipeline se interrumpe hasta /approve-step.
+
+    Época (spec 2026-09-17 §5.3): `pipeline.run_epoch` es la época de ESTA
+    corrida. Toda escritura de estado es condicional a ella y a
+    status='running'; antes de cada ola se relee (una consulta por PK). Si no
+    coincide, RUN_SUPERSEDED una vez y termina.
     """
     pipeline_id = pipeline.pipeline_id
+    epoca = pipeline.run_epoch
 
     if pipeline.mode == "dry_run":
-        await store.pipeline_update_status(pipeline_id, PipelineStatus.completed)
+        if not await store.pipeline_update_status_si_epoca(
+            pipeline_id, epoca, PipelineStatus.completed, desde=_DESDE_ARRANQUE,
+        ):
+            await _perdio_la_epoca(pipeline)
+            return
         await store.event_append(pipeline_id, "DRY_RUN_COMPLETE", {"steps": len(pipeline.plan)})
         return
 
-    await store.pipeline_update_status(
-        pipeline_id, PipelineStatus.running, pipeline.current_step_index, pipeline.context
-    )
-    await store.event_append(pipeline_id, "PIPELINE_STARTED")
+    if not await store.pipeline_update_status_si_epoca(
+        pipeline_id, epoca, PipelineStatus.running,
+        pipeline.current_step_index, pipeline.context, desde=_DESDE_ARRANQUE,
+    ):
+        await _perdio_la_epoca(pipeline)
+        return
+    await store.event_append(pipeline_id, "PIPELINE_STARTED", {"run_epoch": epoca})
 
     # Estado derivado del DAG, no de un cursor lineal: un step está "hecho" si
-    # tiene su ref en context (sobrevive a /resume y al relanzador).
+    # tiene su ref en context (sobrevive a /resume y a /continue).
     done = {
         i for i in range(len(pipeline.plan))
         if pipeline.context.get(f"step_{i}_ref")
@@ -1129,22 +1209,31 @@ async def run_pipeline(pipeline: Pipeline) -> None:
 
     waves = _compute_waves(pipeline.plan, done)
     logger.info(
-        "Jacobs director: %d olas, tamaños=%s (ya completos: %s)",
-        len(waves), [len(w) for w in waves], sorted(done),
+        "Jacobs director: %d olas, tamaños=%s (ya completos: %s, época %s)",
+        len(waves), [len(w) for w in waves], sorted(done), epoca,
     )
 
     for wave_num, wave in enumerate(waves):
+        # ---- ¿Sigue siendo mi corrida? ----
+        if await store.pipeline_epoca_y_status(pipeline_id) != (epoca, PipelineStatus.running):
+            await _perdio_la_epoca(pipeline)
+            return
+
         # ---- Kill switch: antes de cada ola ----
         if check_kill_switch():
             for i in wave:
                 step = pipeline.plan[i]
                 step.status = StepStatus.failed
                 step.error  = "Kill switch activo"
-                await store.step_upsert(step)
+                if not await store.step_upsert_si_epoca(step, epoca):
+                    await _perdio_la_epoca(pipeline)
+                    return
+            if not await store.pipeline_update_status_si_epoca(pipeline_id, epoca, PipelineStatus.aborted):
+                await _perdio_la_epoca(pipeline)
+                return
             await store.event_append(
                 pipeline_id, "KILL_SWITCH_ABORTED", {"wave": wave_num, "steps": wave}
             )
-            await store.pipeline_update_status(pipeline_id, PipelineStatus.aborted)
             return
 
         # ---- Hyde gate: si algún step de la ola es hyde sin aprobar, interrumpir ----
@@ -1157,14 +1246,18 @@ async def run_pipeline(pipeline: Pipeline) -> None:
             for i in hyde_pending:
                 step = pipeline.plan[i]
                 step.status = StepStatus.blocked_human_gate
-                await store.step_upsert(step)
+                if not await store.step_upsert_si_epoca(step, epoca):
+                    await _perdio_la_epoca(pipeline)
+                    return
                 await store.event_append(
                     pipeline_id, "STEP_BLOCKED_HUMAN_GATE",
                     {"step_index": i, "facet": "hyde"}, step.step_id,
                 )
-            await store.pipeline_update_status(
-                pipeline_id, PipelineStatus.interrupted, wave[0], pipeline.context
-            )
+            if not await store.pipeline_update_status_si_epoca(
+                pipeline_id, epoca, PipelineStatus.interrupted, wave[0], pipeline.context,
+            ):
+                await _perdio_la_epoca(pipeline)
+                return
             await store.event_append(
                 pipeline_id, "PIPELINE_INTERRUPTED",
                 {"at_wave": wave_num, "hyde_steps": hyde_pending,
@@ -1182,23 +1275,44 @@ async def run_pipeline(pipeline: Pipeline) -> None:
             for i in wave
         ])
 
-        # Persistir avance del context tras la ola completa.
-        # current_step_index = primer índice NO completado (informativo).
+        # Persistir avance del context tras la ola completa, SOLO si sigue
+        # siendo mi corrida: esta es la escritura que antes resucitaba un
+        # pipeline cancelado a `running`.
         next_idx = max(wave) + 1
-        await store.pipeline_update_status(
-            pipeline_id, PipelineStatus.running, next_idx, pipeline.context
-        )
+        if not await store.pipeline_update_status_si_epoca(
+            pipeline_id, epoca, PipelineStatus.running, next_idx, pipeline.context,
+        ):
+            await _perdio_la_epoca(pipeline)
+            return
 
-        # ---- ¿Algún step falló sin skip_on_fail? → abortar ----
+        # ---- Pasos que no se pudieron escribir (m2) ----
+        # `PASO_SIN_ESCRITURA` no distingue por sí solo entre "perdí la época"
+        # y "la fila del paso cambió": se relee la época para saber cuál fue.
+        # Si la corrida sigue siendo la vigente, es lo segundo y el paso lleva
+        # su motivo al evento en vez de un error nulo. skip_on_fail NO aplica
+        # acá: no se puede saltar un paso cuya fila no se pudo escribir.
+        sin_escritura = [i for i, r in zip(wave, results) if r is PASO_SIN_ESCRITURA]
+        if sin_escritura:
+            if await store.pipeline_epoca_y_status(pipeline_id) != (epoca, PipelineStatus.running):
+                await _perdio_la_epoca(pipeline)
+                return
+            for i in sin_escritura:
+                if pipeline.plan[i].error is None:
+                    pipeline.plan[i].error = _MOTIVO_SIN_ESCRITURA
+
+        # ---- ¿Algún step falló sin skip_on_fail? → abortar (UN evento) ----
         failed = [
             i for i, ok in zip(wave, results)
-            if not ok and not pipeline.plan[i].skip_on_fail
+            if ok is not True and (i in sin_escritura or not pipeline.plan[i].skip_on_fail)
         ]
         if failed:
-            await store.pipeline_update_status(pipeline_id, PipelineStatus.aborted)
+            if not await store.pipeline_update_status_si_epoca(pipeline_id, epoca, PipelineStatus.aborted):
+                await _perdio_la_epoca(pipeline)
+                return
             await store.event_append(
                 pipeline_id, "PIPELINE_ABORTED",
-                {"at_wave": wave_num, "failed_steps": failed},
+                {"at_wave": wave_num, "failed_steps": failed,
+                 "errores": {str(i): pipeline.plan[i].error for i in failed}},
             )
             return
 
@@ -1208,9 +1322,11 @@ async def run_pipeline(pipeline: Pipeline) -> None:
 
         # ---- Supervised: pausar después de cada ola ----
         if pipeline.mode == "supervised":
-            await store.pipeline_update_status(
-                pipeline_id, PipelineStatus.interrupted, next_idx, pipeline.context
-            )
+            if not await store.pipeline_update_status_si_epoca(
+                pipeline_id, epoca, PipelineStatus.interrupted, next_idx, pipeline.context,
+            ):
+                await _perdio_la_epoca(pipeline)
+                return
             await store.event_append(
                 pipeline_id, "PIPELINE_INTERRUPTED",
                 {"after_wave": wave_num, "next_index": next_idx,
@@ -1219,9 +1335,11 @@ async def run_pipeline(pipeline: Pipeline) -> None:
             return
 
     # ---- Todas las olas terminaron ----
-    await store.pipeline_update_status(
-        pipeline_id, PipelineStatus.completed, len(pipeline.plan), pipeline.context
-    )
+    if not await store.pipeline_update_status_si_epoca(
+        pipeline_id, epoca, PipelineStatus.completed, len(pipeline.plan), pipeline.context,
+    ):
+        await _perdio_la_epoca(pipeline)
+        return
     await store.event_append(pipeline_id, "PIPELINE_COMPLETED")
 
 
@@ -1279,23 +1397,23 @@ async def _persist_step_to_repo(
 async def _fail_step(
     pipeline: Pipeline, step: Step, step_index: int, error: str
 ) -> None:
-    # Ruling T6-6: aca se ESCRIBE el error de un paso (jacobs_steps.error y los
-    # eventos STEP_FAILED / PIPELINE_ABORTED, que jax-platform muestra). Se
-    # redacta en el punto de escritura para que ningun llamador -- ni el
-    # str(exc) generico de _run_one_step -- pueda guardar un secreto en claro.
+    # Ruling T6-6: aca se ESCRIBE el error de un paso (jacobs_steps.error y el
+    # evento STEP_FAILED, que jax-platform muestra). Se redacta en el punto de
+    # escritura para que ningun llamador -- ni el str(exc) generico de
+    # _run_one_step -- pueda guardar un secreto en claro.
+    #
+    # 2026-09-17 (spec §5.3): ya NO escribe `aborted` ni PIPELINE_ABORTED. Lo
+    # hace run_pipeline al cerrar la ola, una sola vez y con los errores de
+    # todos los pasos caídos: antes salían DOS PIPELINE_ABORTED con payloads
+    # distintos. Y la escritura del paso es condicional a la época.
     error = redactar_secretos(error)
     step.status      = StepStatus.failed
     step.error       = error
     step.finished_at = time.time()
-    await store.step_upsert(step)
+    if not await store.step_upsert_si_epoca(step, pipeline.run_epoch):
+        return
     await store.event_append(
         pipeline.pipeline_id, "STEP_FAILED",
         {"step_index": step_index, "error": error},
         step.step_id,
     )
-    if not step.skip_on_fail:
-        await store.pipeline_update_status(pipeline.pipeline_id, PipelineStatus.aborted)
-        await store.event_append(
-            pipeline.pipeline_id, "PIPELINE_ABORTED",
-            {"at_step": step_index, "reason": error},
-        )

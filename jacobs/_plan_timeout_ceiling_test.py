@@ -272,8 +272,12 @@ def test_build_por_el_camino_del_LLM_no_revienta():
     async def _correr():
         b = PlanBuilder()
 
-        async def _fake_llm(objective, max_steps, capability_hint, *, facetas_activas):
+        # Merge 2026-09-17: build() le pasa al cerebro las DOS formas de la
+        # misma foto -- `facetas_activas` (E-03) y `governance` entera (R43,
+        # para que el parseo del plan no la vuelva a leer).
+        async def _fake_llm(objective, max_steps, capability_hint, *, facetas_activas, governance=None):
             assert isinstance(capability_hint, str)
+            assert governance is not None and "capabilities" in governance
             return [{"facet": "hipatia", "capability": "research", "prompt": "x"}]
 
         b._llm_plan = _fake_llm

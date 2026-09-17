@@ -16,7 +16,24 @@ Ejecuta el job completo:
 Kill switch: si el archivo existe (o no se lo puede mirar) antes o durante → FAILED con error "killed_by_switch".
 
 En memoria de Jairo Urbina.
-"""
+
+
+DEPENDENCIA DECLARADA (m5 de la re-revisión final, 2026-09-17): este módulo
+importa `jacobs.store` (capa alta) desde el Motor Registry (capa baja), para
+correr el job bajo `espera_de_turno_sin_plazo` (R38 fix round 3, N1: si no,
+un turno del pool que vence con la base sana hace perder los eventos de
+auditoría de tool_authority). Resuelve porque existe el symlink
+`las_manos/jacobs -> ../jacobs` y porque todos los jobs de CI que tocan este
+archivo corren con `jacobs` importable (`PYTHONPATH=.:las_manos` o
+`PYTHONPATH=las_manos` con el symlink). Un job futuro que corra `worker.py`
+sin `jacobs` importable falla al importar, no en silencio.
+
+Por qué la marca NO se movió a `jax/core/` (la capa compartida): es una
+ContextVar con ESTADO. Importada 'a secas' desde `las_manos/` y como
+`jax.core...` desde `jacobs/` serían dos módulos distintos y dos ContextVar
+distintas -- la marca que pone el job no la vería el pool y el defecto de N1
+volvería sin ruido. Lo fija
+`tests/test_jacobs_conexiones_por_pedido.py::test_el_ejecutor_y_el_motor_registry_comparten_la_misma_marca_de_turno`."""
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +48,7 @@ from typing import Any
 import httpx
 
 from cliente_http_compartido import obtener_cliente_http
+from jacobs.store import espera_de_turno_sin_plazo  # R38 fix round 3 (N1): el job es trabajo de fondo
 from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
 from credential_resolver import resolve_credential, CredentialUnavailableError
@@ -420,6 +438,39 @@ def _humanize_error(exc: Exception) -> str:
 # ---------------------------------------------------------------------------
 
 async def run(
+    *,
+    job_id: str,
+    motor: str,
+    capability: str,
+    prompt: str,
+    context: dict[str, Any],
+    store: JobStore,
+    catalog: MotorCatalog,
+    kill_switch_path: str,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
+    caller: str | None = None,
+    timeout_seconds: int | None = None,
+) -> None:
+    """Corre un job del Motor Registry (ver _correr_trabajo).
+
+    Ruling R38, fix round 3 (N1, 2026-09-17): el job es trabajo de FONDO --
+    motor_registry/routes.py lo lanza con asyncio.create_task desde el handler
+    HTTP y hereda su contexto, con la espera de turno ACOTADA del pool del store
+    de Jacobs. Con el pool lleno y la base sana, sus event_append
+    (tool_authority TOOL_CALL_*, TOOL_WRITE_REVERTED) vencían y el fail-soft
+    perdía la auditoría. Acá espera turno sin plazo, como el ejecutor y el
+    reaper; abrir la conexión sigue acotado por connect_timeout, así que una
+    base caída falla igual."""
+    with espera_de_turno_sin_plazo():
+        await _correr_trabajo(
+            job_id=job_id, motor=motor, capability=capability, prompt=prompt,
+            context=context, store=store, catalog=catalog, kill_switch_path=kill_switch_path,
+            user_id=user_id, tenant_id=tenant_id, caller=caller, timeout_seconds=timeout_seconds,
+        )
+
+
+async def _correr_trabajo(
     *,
     job_id: str,
     motor: str,
