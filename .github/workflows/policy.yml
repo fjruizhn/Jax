@@ -752,6 +752,9 @@ jobs:
           tests/test_ejecutor_contratos_vigia.py
           tests/test_ejecutor_contratos_canario_c5.py
           tests/test_ejecutor_proxy_pausa.py
+          tests/test_ejecutor_proxy_modelo_y_rutas.py
+          tests/test_ejecutor_prioridad_espejo.py
+          tests/test_ejecutor_sp3_config.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -835,6 +838,9 @@ jobs:
             tests/test_ejecutor_contratos_vigia.py \
             tests/test_ejecutor_contratos_canario_c5.py \
             tests/test_ejecutor_proxy_pausa.py \
+            tests/test_ejecutor_proxy_modelo_y_rutas.py \
+            tests/test_ejecutor_prioridad_espejo.py \
+            tests/test_ejecutor_sp3_config.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1235,8 +1241,17 @@ jobs:
           #   existentes). MEDIDO dos veces en local (3.14), env limpio, JAX_PLATFORM_REPO_ROOT
           #   a una ruta que no existe: "1245 passed, 1 skipped, 1 xfailed, 16 subtests passed".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1245 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1245 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1038 -> 1094 el 2026-09-17 (Ejecutor SP3, GPU compartida): +56. Medido en hall9000 sobre la misma
+          #   lista: master 1039 passed + 1 xfailed, la rama 1095 + 1 xfailed (el runner cuenta ese uno como
+          #   skipped y uno menos passed). Nuevos: test_ejecutor_proxy_modelo_y_rutas.py (38: modelo fijado,
+          #   tope de salida, ningún GET/HEAD arbitrario, HEAD sin cuerpo en el error),
+          #   test_ejecutor_prioridad_espejo.py (2), test_ejecutor_sp3_config.py (8: la cuenta de §6.3 y los
+          #   frenos de los scripts de despliegue), test_ejecutor_prioridad.py (+3, locks de sólo lectura),
+          #   test_ejecutor_proxy_carril.py (+3 config), test_ejecutor_contratos_cuenta_axioma.py (+1);
+          #   test_ejecutor_proxy_registro.py (-1: GET /api/version ya no pasa). CONFIRMAR con el runner del PR.
+          # 1245 + 56 -> 1301 el 2026-09-17, rebase de SP3 sobre C5 (C6, master c13d066). PISO_SP3_PENDIENTE
+          grep -qE "^1301 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1301 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

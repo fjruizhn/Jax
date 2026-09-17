@@ -86,13 +86,19 @@ def _jaula(c: Cuenta) -> str:
     ])
 
 
-def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herramientas: str = "Bash,Read") -> str:
+def remoto_claude(c: Cuenta, *, base_url: str, modelo: str, prompt: str, herramientas: str = "Bash,Read",
+                  max_salida_tokens: int | None = None) -> str:
+    """`max_salida_tokens`: el tope que el proxy exige (JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS) cuando
+    `base_url` es un proxy con carril; sin él el arnés pide su propio `max_tokens` y el proxy da 403."""
     q = shlex.quote
-    entorno = " ".join([
+    variables = [
         f"ANTHROPIC_BASE_URL={q(base_url)}", 'ANTHROPIC_AUTH_TOKEN="$K"', f"PATH={q(str(c.node_bin))}:/usr/bin:/bin",
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "DISABLE_AUTOUPDATER=1", "DISABLE_TELEMETRY=1",
         "DISABLE_ERROR_REPORTING=1",
-    ])
+    ]
+    if max_salida_tokens is not None:
+        variables.append(f"CLAUDE_CODE_MAX_OUTPUT_TOKENS={int(max_salida_tokens)}")
+    entorno = " ".join(variables)
     claude = " ".join(q(a) for a in [str(c.node_bin / "claude"), "-p", prompt, "--output-format", "stream-json",
                                       "--verbose", "--model", modelo, "--allowedTools", herramientas])
     return f"read -r K; cd ~ && env {entorno} {_jaula(c)} {claude}"

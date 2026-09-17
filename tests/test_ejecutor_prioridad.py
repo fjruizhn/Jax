@@ -462,3 +462,46 @@ def test_async_el_carril_se_suelta_aunque_el_cuerpo_lance(tmp_path):
                 await asyncio.to_thread(_lock_libre, tmp_path / "ejecutor.lock"))
 
     assert asyncio.run(asyncio.wait_for(escenario(), 5)) == (True, True)
+
+
+# ---------------------------------------------------------------------------
+# SP3 (2026-09-17): locks compartidos entre cuentas. La Mesa (jax-platform) y el proxy corren
+# como fruiz; un arnés o una sonda pueden correr como axioma. Con el directorio de grupo común
+# (setgid, 2770) el fichero nace con el umask de quien llega primero (0644): el otro miembro
+# del grupo lo puede LEER pero no escribir. `flock` no necesita escritura, así que el carril se
+# abre de sólo lectura. Simulado con ficheros 0444 creados antes (el dueño tampoco escribe).
+# ---------------------------------------------------------------------------
+
+def _locks_de_solo_lectura(raiz):
+    for nombre in ("mesa.lock", "ejecutor.lock"):
+        (raiz / nombre).touch()
+        (raiz / nombre).chmod(0o444)
+
+
+def test_locks_sin_permiso_de_escritura_sirven_igual_sync(tmp_path):
+    _locks_de_solo_lectura(tmp_path)
+    assert hay_mesa_esperando(tmp_path) is False
+    with carril_mesa(tmp_path):
+        assert hay_mesa_esperando(tmp_path) is True
+    with carril_ejecutor(tmp_path, tope_s=1):
+        pass
+
+
+def test_locks_sin_permiso_de_escritura_sirven_igual_async(tmp_path):
+    _locks_de_solo_lectura(tmp_path)
+
+    async def escenario():
+        async with carril_mesa_async(tmp_path):
+            ocupado = hay_mesa_esperando(tmp_path)
+        async with carril_ejecutor_async(tmp_path, tope_s=1):
+            pass
+        return ocupado
+
+    assert asyncio.run(asyncio.wait_for(escenario(), 5)) is True
+
+
+def test_el_lock_que_crea_el_carril_no_es_escribible_por_otros(tmp_path):
+    # Abrir de sólo lectura no relaja nada: quien crea el fichero lo crea con su umask.
+    with carril_mesa(tmp_path):
+        pass
+    assert (tmp_path / "mesa.lock").stat().st_mode & 0o002 == 0

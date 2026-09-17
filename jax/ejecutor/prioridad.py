@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import os
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager
@@ -35,17 +36,22 @@ class EsperaAgotada(RuntimeError):
     colarse fuera una opción, la prioridad no existiría."""
 
 
-def _fichero(raiz, nombre: str) -> Path:
+def _abrir(raiz, nombre: str):
+    """El lock, abierto de SÓLO LECTURA (y creado si falta). `flock` no necesita escritura.
+
+    SP3 (2026-09-17): la Mesa, el proxy y un arnés de otra cuenta comparten el directorio
+    (grupo común, setgid). El fichero nace con el umask de quien llega primero (0644): con
+    `r+` el otro miembro del grupo no podía abrirlo y su carril reventaba con PermissionError.
+    Quien lo crea lo crea con su umask: esto no le da escritura a nadie."""
     p = Path(raiz) / nombre
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.touch(exist_ok=True)
-    return p
+    return os.fdopen(os.open(p, os.O_RDONLY | os.O_CREAT | os.O_CLOEXEC, 0o660), "rb")
 
 
 @contextmanager
 def carril_mesa(raiz):
     """La Mesa entra SIEMPRE. Bloquea sólo contra otra petición de Mesa."""
-    with open(_fichero(raiz, "mesa.lock"), "r+") as f:
+    with _abrir(raiz, "mesa.lock") as f:
         fcntl.flock(f, fcntl.LOCK_EX)
         try:
             yield
@@ -55,7 +61,7 @@ def carril_mesa(raiz):
 
 def hay_mesa_esperando(raiz) -> bool:
     """¿Hay una petición de Mesa usando la GPU ahora?"""
-    with open(_fichero(raiz, "mesa.lock"), "r+") as f:
+    with _abrir(raiz, "mesa.lock") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -146,7 +152,7 @@ class _Toma:
 
 def _esperar_mesa(raiz, toma: _Toma, paso_s: float) -> None:
     """Hilo: espera `mesa.lock` hasta tomarlo o hasta que abandonen."""
-    f = open(_fichero(raiz, "mesa.lock"), "r+")
+    f = _abrir(raiz, "mesa.lock")
     while True:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -165,7 +171,7 @@ def _intentar_ejecutor(raiz, toma: _Toma) -> None:
     (una Mesa que llegó en medio pasa primero)."""
     if hay_mesa_esperando(raiz):
         return
-    f = open(_fichero(raiz, "ejecutor.lock"), "r+")
+    f = _abrir(raiz, "ejecutor.lock")
     try:
         fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:

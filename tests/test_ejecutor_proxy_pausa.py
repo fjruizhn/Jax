@@ -11,16 +11,17 @@ from jax.ejecutor import proxy_carril
 from jax.ejecutor.contratos import pausa as P
 from jax.ejecutor.contratos import registro as R
 from jax.ejecutor.contratos.canario_upstream import UpstreamCanario, guion_bash
-from tests.test_ejecutor_proxy_carril import Proxy, Upstream, _correr
+from tests.test_ejecutor_proxy_carril import MODELO_PERMITIDO, Proxy, Upstream, _correr
 
-_BASE = {"model": "m", "stream": True, "max_tokens": 5, "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]}
+# El modelo fijado por el proxy (SP3): con otro, el 403 de modelo taparía lo que se mide acá.
+_BASE = {"model": MODELO_PERMITIDO, "stream": True, "max_tokens": 5, "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]}
 
 
 def _error(tipo):
     return {"type": "error", "error": {"type": tipo}}
 
 
-def test_con_la_pausa_puesta_423_sin_tocar_el_upstream(tmp_path):
+def test_con_la_pausa_puesta_423_sin_tocar_el_upstream(tmp_path, caplog):
     async def escenario():
         async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px, httpx.AsyncClient() as cli:
             P.poner_pausa(px.cfg.pausa, {"origen": "c5", "motivo": "fuera_de_mision", "paso": 3})
@@ -29,6 +30,8 @@ def test_con_la_pausa_puesta_423_sin_tocar_el_upstream(tmp_path):
             return r.status_code, r.headers.get("x-should-retry"), r.json(), h.status_code, len(up.recibidas)
 
     assert _correr(escenario()) == (423, "false", _error(proxy_carril.EJECUTOR_PAUSADO), 423, 0)
+    # El 423 a un HEAD sale sin cuerpo (RFC 9110 §9.3.2); con cuerpo, h11 lanza dentro del handler.
+    assert "Unhandled exception" not in caplog.text
 
 
 def test_sin_latido_del_vigia_423(tmp_path):
@@ -101,3 +104,20 @@ def test_si_c5_frena_en_vuelo_el_tool_use_no_llega_sin_stream(tmp_path, monkeypa
 
     estado, cuerpo = _correr(escenario())
     assert estado == 423 and b"toolu_c5b" not in cuerpo
+
+
+def test_el_freno_va_antes_que_la_politica_de_rutas_y_de_modelo(tmp_path):
+    """Orden de _reenviar tras juntar C5 y SP3: con el Ejecutor frenado, TODA petición
+    recibe 423 -- también una ruta cerrada o un modelo ajeno, que sin freno darían 403 --,
+    y nada llega al upstream. Un freno no depende de que la petición sea válida."""
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px, httpx.AsyncClient() as cli:
+            P.poner_pausa(px.cfg.pausa, {"origen": "c5", "motivo": "fuera_de_mision", "paso": 1})
+            ruta = await cli.get(px.url + "/api/tags")
+            modelo = await cli.post(px.url + "/v1/messages", json={**_BASE, "model": "otro", "messages": []})
+            salida = await cli.post(px.url + "/v1/messages", json={**_BASE, "max_tokens": 10 ** 6, "messages": []})
+            ilegible = await cli.post(px.url + "/v1/messages", content=b"{no es json")
+            return ([(r.status_code, r.json()) for r in (ruta, modelo, salida, ilegible)], len(up.recibidas))
+
+    esperado = (423, _error(proxy_carril.EJECUTOR_PAUSADO))
+    assert _correr(escenario()) == ([esperado] * 4, 0)
