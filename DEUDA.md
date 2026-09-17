@@ -374,6 +374,22 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 1: C1 prohibiciones y C2 respaldo (2026-09-17)
+
+Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~04:40). Ramas locales con commits, SIN PUBLICAR
+(un subagente no puede escribir en el remoto): jax-platform `feat/ejecutor-tablas-c1-c2`
+(`/home/fruiz/worktrees/jax-platform-sp1-c1`), jax `feat/ejecutor-c1-c2` (`/home/fruiz/worktrees/jax-sp1-c1`).
+
+- [ ] **2026-09-18** Publicar la rama y abrir el PR de jax-platform; mergear ANTES que el de jax (`jacobs-gobernanza-db` clona su master).
+- [ ] **2026-09-18** Publicar la rama y abrir el PR de jax; confirmar en el log del runner `979 passed, 1 skipped`
+  (tests-puros) y `31 passed` (jacobs-gobernanza-db); si difiere, manda el runner.
+- [ ] **2026-09-18** Canario rojo por API (plan, Task 8 Step 4): en `politica.py`, `return Decision(False, PROHIBIDO, …)`
+  → `return Decision(True, PERMITIDO, None, ())`; `tests-puros` = `failure` sobre ese sha, revert = `success`.
+- [ ] **2026-09-18** Despliegue (plan, Task 9 Step 2): dump de `axioma_config` restaurado en tabla temporal antes del
+  restart de jax-platform; `JAX_EJECUTOR_*` e `JAX_EJECUTOR_INVENTARIO` en `/etc/jax/.env` con sudoedit (dos lectores
+  idénticos); `exportar` → `reglas=14 hosts=4`; `instalar_contratos.sh`; `probar_c1.py` → `c1_vivo=true`, y repetir
+  sobre la instalación real los tres «verlo fallar» (Steps 5–6).
+
 ## Cerrado en código, deploy de jax pendiente — frente E de la auditoría: limpieza, defectos y reglas en jax (2026-09-17)
 
 **VERDAD OPERACIONAL 2026-09-17 ~02:20 CST (Mr. Hyde, verificado en el worktree).** Rama jax `fix/hallazgos-frente-e` rebasada sobre `origin/master` `0da32af` (frentes A #174, C #175, Ejecutor #172/#173/#176 ya adentro): 17 commits, sin publicar en GitHub, SIN mergear, SIN desplegar. Lado plataforma MERGEADO: jax-platform#92 → `c53ef30` (2026-09-17: `config_entorno` única que absorbe `config_de_entorno` de A, `JAX_OLLAMA_URL` obligatoria al arrancar, docstring de `owner_cleanup`), canario rojo `d234215` (`backend-tests` con y sin DB) leído por API. Spec `docs/superpowers/specs/2026-09-16-hallazgos-auditoria-jax-design.md` §E, plan `docs/superpowers/plans/2026-09-16-frente-e-jax-limpieza-defectos-reglas.md` (worktree `jax-hallazgos-docs`); ledger `jax-frente-e/.superpowers/sdd/2026-09-16-frente-e-jax-limpieza-defectos-reglas/progress.md` (+ `rebase-e-platform.md`, `unificar-config-entorno-report.md`).
