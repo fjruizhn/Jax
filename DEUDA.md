@@ -476,6 +476,38 @@ política que exporta el plan 1).
   roturas del Step 5; y verificar que siguen vivos Mesa, LAS MANOS :7777, Ollama :11434, MariaDB :3308, SSH :58291 de
   fruiz, la VM .11 y Sésamo .6. Rollback del cerco: `sudo nft delete table inet ejecutor_cerco`.
 
+### Ejecutor SP1 plan 6 · arranque condicionado — publicar, instalar el vigía y lo que SP2 debe cumplir (2026-09-17, Mr. Hyde)
+
+Rama `feat/ejecutor-arranque` (sobre master `6563cb4`), SIN PUBLICAR. `arranque.exigir_contratos`,
+`vigia_servicio` + `ops/ejecutor/ejecutor-vigia@.service`, guardia de CI, `harness.correr` retirado.
+
+- [ ] **2026-09-18** Publicar; confirmar pisos del runner: tests-puros `1486 passed, 1 skipped` (las dos listas),
+  `no-naked-claude-subprocess` con `5 passed` en la guardia nueva. Canario rojo por API: un
+  `jax/ejecutor/lanzador_de_prueba.py` con `remoto_claude` sin `exigir_contratos` ⇒ `no-naked-claude-subprocess` = failure; revert = success.
+- [ ] **2026-09-18** Tras el merge, en el checkout de producción: `ops/ejecutor/instalar_vigia.sh` (la unidad plantilla; no
+  arranca misiones). `/etc/jax/.env` YA tiene `JAX_EJECUTOR_VIGIA_LATIDO_CADA_S=5` y `JAX_EJECUTOR_MISIONES=/var/lib/jax-ejecutor-misiones`
+  (backup `.env.backup-pre-ejecutor-arranque-20260917-080717`); el directorio existe (fruiz 0750).
+- [ ] **RESERVADO A FERNANDO (ya estaba):** el arranque real hoy da `arrancaria=false` SÓLO por la parte remota de C4/C6
+  (`freno_sin_remotos`; `llaves_no_son_de_root`, `sin_llave_del_freno`, `sin_revocador` en atemai, prod y bridge). Se
+  cierra con `instalar_en_maquina.sh <m>` + `JAX_EJECUTOR_FRENO_REMOTOS` (DEUDA «plan 3»). Y toda misión: las cuatro
+  máquinas tienen `con_datos_de_clientes=1` y la compuerta sigue en `false` ⇒ `auditor_no_admite_datos_de_clientes`.
+- [ ] **2026-09-24 · Obligaciones del transporte `harness` (SP2) que dejan vivos los contratos de SP1:**
+  1. Lanzar sólo con `ejecutor-vigia@<mision>` activo y latiendo (`vigia_servicio` ya exige los contratos con los
+     `hosts` reales); la guardia `test_ejecutor_lanza_solo_con_contratos.py` impone `exigir_contratos` a quien use
+     `remoto_claude` o `vigilar`.
+  2. El perfil `ejecutor` de `hyde_sandbox` conserva los montajes de solo lectura de `cuenta_axioma._jaula` y agrega
+     `<workspace>/.claude` de solo lectura; NO monta credenciales de Anthropic.
+  3. `ANTHROPIC_BASE_URL` = el proxy con carril (C3); ninguna otra URL de cerebro.
+  4. Cada afirmación entregada lleva `proposito` y pasa por `auditor.aplicar_revision` antes de salir (C5).
+  5. Fin de misión = `systemctl stop ejecutor-vigia@<mision>` (SIGTERM: audita lo pendiente y borra el latido).
+  6. Informe final afirmación ↔ evidencia con las `Descartada` de citas y auditor.
+  7. Kimi/GLM como cerebro: el proxy hoy tiene UN upstream (Ollama); un cerebro de nube necesita su propio proxy anotado.
+  8. Crear la faceta `ejecutor` y devolver `ejecutor.cerebro_faceta` a `ejecutor` (hoy `jax_local`, ver abajo).
+- [x] **2026-09-17 08:02** `axioma_config.ejecutor.cerebro_faceta` `ejecutor` → `jax_local` (la faceta `ejecutor` no tiene
+  binding: C5 reventaba al resolverla). Dump `~/backups/axioma_config-pre-ejecutor-arranque-20260917-080235.sql`,
+  restauración probada (md5 de las 21 filas igual en `jax_memory_test`). Reversión: `UPDATE axioma_config SET
+  config_value='ejecutor' WHERE config_key='ejecutor.cerebro_faceta'`.
+
 ### Ejecutor SP1 plan 4 · C5 auditor en vivo — publicar, desplegar y DECIDIR (2026-09-17, Mr. Hyde)
 
 Ramas SIN PUBLICAR: jax `feat/ejecutor-c5` (apilada sobre `feat/ejecutor-c3`), jax-platform `feat/ejecutor-config-c5`.
@@ -494,7 +526,7 @@ Orden: el PR de jax-platform se mergea ANTES (el job `jacobs-gobernanza-db` clon
   `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S=30`. Sin ellas el proxy de C3 NO arranca (el instalador las exige). Tras
   desplegar jax-platform: `probar_c5.py --corridas 10 --cerebro jax_local` → `c5_vivo=true` con la config real.
 - [x] **2026-09-17** Plan 3 (C4): el freno root actúa también con la pausa del Ejecutor (hecho, rama `feat/ejecutor-c4`).
-- [ ] **2026-09-18** Plan 6: `verificar_eleccion` y vigía con latido antes de abrir el proxy (enmienda escrita en el plan).
+- [x] **2026-09-17** Plan 6: `verificar_eleccion` y vigía con latido antes de abrir el proxy (rama `feat/ejecutor-arranque`).
 
 ### Ejecutor SP1 plan 3 · C4 freno en vuelo — publicar, desplegar el proxy y la parte remota (2026-09-17, Mr. Hyde)
 
