@@ -1422,8 +1422,13 @@ jobs:
           #   (el prompt lo pide; y el control: `capturas` ignora el comando con tubería afuera, que toca dos
           #   máquinas, y sí captura el mismo con la tubería adentro). Vistos en rojo. Origen: misión real en
           #   atemai que corrió dos pasos y entregó cero afirmaciones.
-          grep -qE "^1587 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1587 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1587 -> 1590 el 2026-09-17 (el comando elige la captura por sus tokens): test_ejecutor_cita.py +3
+          #   (las mismas comillas de otra forma respaldan; un comando distinto sigue sin respaldar; una comilla
+          #   sin cerrar se compara carácter por carácter). Vistos en rojo; mutación (cmp previo): `mismo_comando`
+          #   devolviendo True -> 4 rojos. Origen: misión real en prod, datos correctos descartados como
+          #   comando_no_corrido porque el modelo citó el comando sin comillas.
+          grep -qE "^1590 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1590 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

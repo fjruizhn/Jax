@@ -423,3 +423,37 @@ def test_los_codigos_son_distintos_entre_si():
                FUENTE_TRUNCADA, COMANDO_NO_CORRIDO]
     assert len(set(codigos)) == len(codigos)
     assert all(c.isascii() and c.replace("_", "").isalpha() and c.islower() for c in codigos)
+
+
+def test_el_mismo_comando_con_otras_comillas_respalda_igual():
+    """Misión real en prod (2026-09-17 13:19): el Ejecutor corrió
+    `ssh -tt -p 58291 axioma@172.16.20.10 "uptime"` y al citarlo lo escribió sin comillas. Los datos
+    eran correctos y salieron como `comando_no_corrido`. El comando sirve para ELEGIR la captura:
+    dos escrituras con los mismos tokens son el mismo comando (ssh pega sus argumentos con espacios)."""
+    corrido = 'ssh -tt -p 58291 axioma@192.0.2.10 "df -h /"'
+    citado = 'ssh -tt -p 58291 axioma@192.0.2.10 df -h /'
+    linea = "/dev/sda2  457G  158G  277G  37% /"
+    captura = Captura(maquina="prod", comando=corrido, salida=linea + "\n", stderr="", truncada=False)
+    a = Afirmacion(maquina="prod", comando=citado, linea=linea, dato="277G", proposito="espacio libre")
+    assert verificar(a, (captura,)).estado == RESPALDADA
+
+
+def test_un_comando_distinto_sigue_sin_respaldar():
+    corrido = 'ssh -tt -p 58291 axioma@192.0.2.10 "df -h /"'
+    linea = "/dev/sda2  457G  158G  277G  37% /"
+    captura = Captura(maquina="prod", comando=corrido, salida=linea + "\n", stderr="", truncada=False)
+    a = Afirmacion(maquina="prod", comando='ssh -tt -p 58291 axioma@192.0.2.10 "free -h"',
+                   linea=linea, dato="277G", proposito="espacio libre")
+    v = verificar(a, (captura,))
+    assert (v.estado, v.motivo.codigo) == (FUENTE_INEXISTENTE, COMANDO_NO_CORRIDO)
+
+
+def test_un_comando_que_no_se_puede_partir_se_compara_tal_cual():
+    """Comilla sin cerrar: no se adivina. Se compara carácter por carácter, que es lo de antes."""
+    roto = 'ssh -tt axioma@192.0.2.10 "df -h /'
+    linea = "x 277G y"
+    captura = Captura(maquina="prod", comando=roto, salida=linea + "\n", stderr="", truncada=False)
+    igual = Afirmacion(maquina="prod", comando=roto, linea=linea, dato="277G", proposito="p")
+    distinto = Afirmacion(maquina="prod", comando=roto + " ", linea=linea, dato="277G", proposito="p")
+    assert verificar(igual, (captura,)).estado == RESPALDADA
+    assert verificar(distinto, (captura,)).motivo.codigo == COMANDO_NO_CORRIDO
