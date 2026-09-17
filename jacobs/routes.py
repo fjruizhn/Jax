@@ -272,7 +272,20 @@ async def resume_pipeline(
     if check_kill_switch():
         raise HTTPException(status_code=423, detail="Kill switch activo — no se puede reanudar")
 
-    await store.event_append(pipeline_id, "PIPELINE_RESUMED", {"by": req.invoked_by})
+    # Época (spec 2026-09-17 §5.3): se toma ANTES de tocar pasos. Si otro
+    # resume ganó, este no escribe ni lanza nada: dos ejecutores del mismo
+    # pipeline es exactamente lo que la época existe para impedir.
+    nueva_epoca = await store.pipeline_tomar_epoca(
+        pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,),
+    )
+    if nueva_epoca is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Otro pedido ya reanudó o cambió este pipeline mientras se procesaba este",
+        )
+    await store.event_append(
+        pipeline_id, "PIPELINE_RESUMED", {"by": req.invoked_by, "run_epoch": nueva_epoca},
+    )
 
     # Desbloquear TODOS los steps en estado blocked (una ola supervised pudo
     # dejar varios). El executor recalcula las olas desde los refs en context,
@@ -284,12 +297,14 @@ async def resume_pipeline(
             await store.step_upsert(s)
 
     pipeline.plan = steps
+    pipeline.run_epoch = nueva_epoca
     background.add_task(run_pipeline, pipeline)
 
     return {
         "pipeline_id": pipeline_id,
         "status": "resuming",
         "from_index": pipeline.current_step_index,
+        "run_epoch": nueva_epoca,
     }
 
 
@@ -345,33 +360,44 @@ async def approve_step(
                 detail="approve-step solo válido para hyde o pipelines en modo supervised",
             )
 
+    for current_step in gated:
+        if current_step.facet == "hyde":
+            pipeline.context[f"hyde_approved_{current_step.step_id}"] = True
+
+    # Época (desvío 9 del plan 2026-09-17): approve-step lanza run_pipeline
+    # igual que resume. Las marcas hyde_approved_* viajan en el MISMO UPDATE
+    # que toma la época (antes iban en un pipeline_update_status aparte).
+    nueva_epoca = await store.pipeline_tomar_epoca(
+        pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,), pipeline.context,
+    )
+    if nueva_epoca is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Otro pedido ya aprobó o cambió este pipeline mientras se procesaba este",
+        )
+
     approved_indices = []
     for current_step in gated:
         await store.event_append(
             pipeline_id, "STEP_APPROVED",
             {"step_index": current_step.step_index, "facet": current_step.facet,
-             "by": req.invoked_by},
+             "by": req.invoked_by, "run_epoch": nueva_epoca},
             current_step.step_id,
         )
         current_step.status = StepStatus.pending
         current_step.error  = None
         await store.step_upsert(current_step)
-        if current_step.facet == "hyde":
-            pipeline.context[f"hyde_approved_{current_step.step_id}"] = True
         approved_indices.append(current_step.step_index)
 
-    # Persistir las marcas hyde_approved_* en context antes de reanudar.
-    await store.pipeline_update_status(
-        pipeline_id, pipeline.status, pipeline.current_step_index, pipeline.context
-    )
-
     pipeline.plan = steps
+    pipeline.run_epoch = nueva_epoca
     background.add_task(run_pipeline, pipeline)
 
     return {
         "pipeline_id":     pipeline_id,
         "status":          "resuming",
         "approved_steps":  approved_indices,
+        "run_epoch":       nueva_epoca,
     }
 
 

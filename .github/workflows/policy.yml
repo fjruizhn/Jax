@@ -601,6 +601,7 @@ jobs:
           tests/test_respaldo_de_uso_aislado.py
           tests/test_prevuelo_config.py
           tests/test_jacobs_epoca_ejecutor.py
+          tests/test_jacobs_resume_epoca.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -645,6 +646,7 @@ jobs:
             tests/test_respaldo_de_uso_aislado.py \
             tests/test_prevuelo_config.py \
             tests/test_jacobs_epoca_ejecutor.py \
+            tests/test_jacobs_resume_epoca.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -944,8 +946,11 @@ jobs:
           #   dry_run, el `interrupted` de supervised, y _fail_step cuando su propia escritura
           #   se rechaza -- siete tests nuevos. Los 7 se vieron en rojo revirtiendo cada
           #   chequeo a una escritura plana, uno a la vez.
-          grep -qE "^762 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 762 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 762 -> 766 el 2026-09-17 (ronda de arreglo 1, Task 4): +4 en
+          #   test_jacobs_resume_epoca.py -- resume y approve-step toman la época;
+          #   el pedido doble recibe 409 sin tocar pasos. 4 vistos en rojo.
+          grep -qE "^766 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 766 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
