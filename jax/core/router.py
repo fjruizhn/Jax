@@ -128,6 +128,7 @@ EASTER_EGG_TEXT = (
 
 # Reglas de dominio para modo AUTO — scoring multi-faceta.
 # Hyde NO es destino del auto-routing: es ejecutor, no conversador.
+# ESPEJO en jax-platform backend/api/chat.py, familia router_keywords de scripts/check_mirror_sync.py: un cambio aca se hace alla en el mismo paso.
 
 KIMI_KW = frozenset((
     "codigo", "programar", "programa", "script", "funcion", "clase", "metodo",
