@@ -134,6 +134,13 @@ jobs:
       JAX_DB_USER: root
       JAX_DB_PASSWORD: ci
       JAX_DB_NAME: jax_memory_test
+      # Ruling R50 (2026-09-17): la MariaDB de ESTE job es un service container
+      # propio (base exclusiva, nadie más escribe facet_health_event/alert), así
+      # que acá corren los tres tests de aserción global de
+      # jacobs/_facet_health_io_test.py (__system__, tabla vacía, supresión 6h).
+      # En cualquier otro lado (jax_memory_test compartida) se saltan. Único
+      # lugar que define la variable (lo fija tests/test_facet_health_tabla_exclusiva.py).
+      JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -164,6 +171,10 @@ jobs:
           #   idx_jacobs_pipelines_duenio (user_id, tenant_id, created_at) lo crea
           #   init_tables(); el test lo BORRA antes y lo exige de vuelta, porque la
           #   jax_memory_test local ya lo tenia y pasaba sin el cambio. Visto en rojo.
+          # 9 sigue en 9 el 2026-09-17 (Ruling R50): los tres tests globales de
+          #   _facet_health_io_test.py quedan detrás de JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA,
+          #   que este job define (base propia): corren acá. Fuera de este job (hall9000,
+          #   base compartida) la misma lista da "6 passed, 3 skipped" -- no es este piso.
           grep -qE "^9 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
 
@@ -616,6 +627,7 @@ jobs:
           tests/test_jacobs_cancel_reaper_epoca.py
           tests/test_prevuelo_catalogo_de_motores_compartido.py
           tests/test_jacobs_conexiones_por_pedido.py
+          tests/test_facet_health_tabla_exclusiva.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -675,6 +687,7 @@ jobs:
             tests/test_jacobs_cancel_reaper_epoca.py \
             tests/test_prevuelo_catalogo_de_motores_compartido.py \
             tests/test_jacobs_conexiones_por_pedido.py \
+            tests/test_facet_health_tabla_exclusiva.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1484,8 +1497,15 @@ jobs:
           #   pool del store como "de lectura" o "del pre-vuelo" (rojo contra bd977a4: 7
           #   sitios, store.py:70/110 entre ellos) y el comentario de R38 en store.py nombra
           #   también a registrar_evento_de_sonda y record_direct_usage (rojo: faltaban).
-          grep -qE "^1110 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1110 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1110 -> 1117 el 2026-09-17 (Ruling R50): tests/test_facet_health_tabla_exclusiva.py
+          #   (+7, archivo nuevo en las dos listas) -- sin JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA=1
+          #   (ausente, "0", "true", "") los tres tests globales de _facet_health_io_test.py
+          #   llevan el skipif de R50 y los dos acotados no; con "1" no se saltan y pytest los
+          #   colecta; el motivo nombra la regla; la variable vive sólo en el job
+          #   facet-health-io (MariaDB propia). Rojo contra 49f4faa: 7 failed (sin compuerta).
+          #   Este job no corre _facet_health_io_test.py: su "N passed" no cambia por los skips.
+          grep -qE "^1117 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1117 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

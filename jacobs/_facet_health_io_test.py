@@ -102,6 +102,30 @@ _DDL = {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
 }
 
+# Ruling R50 (2026-09-17): los tres tests de `__system__` / tabla vacía tienen
+# aserciones GLOBALES -- `check_facet_health()` deriva los facets de TODA la
+# tabla y sólo alerta `__system__` si TODOS están unknown o la tabla está
+# vacía -- y empiezan con un DELETE sin filtro. En una base compartida
+# (jax_memory_test de hall9000) borran filas de otras sesiones y fallan por
+# filas ajenas. Corren sólo donde la tabla es EXCLUSIVA: el job facet-health-io
+# de .github/workflows/policy.yml, con su propio service container de MariaDB,
+# define la variable. Sin ella se saltan (no se debilitan sus aserciones).
+VARIABLE_TABLA_EXCLUSIVA = "JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA"
+
+
+def tabla_exclusiva() -> bool:
+    return os.getenv(VARIABLE_TABLA_EXCLUSIVA) == "1"
+
+
+requiere_tabla_exclusiva = pytest.mark.skipif(
+    not tabla_exclusiva(),
+    reason=(
+        f"Ruling R50: aserción global sobre facet_health_event/alert y DELETE sin "
+        f"filtro; corre sólo con {VARIABLE_TABLA_EXCLUSIVA}=1 (base exclusiva, job "
+        f"facet-health-io). En una base compartida borraría filas ajenas."
+    ),
+)
+
 VENCIDO = fh.HEALTH_WINDOW_SECONDS + 3600      # fuera de la ventana de 2h,
                                                # dentro de la retencion de 30d
 
@@ -216,6 +240,7 @@ async def test_eventos_vencidos_dan_unknown_y_NUNCA_ok(sin_telegram):
 
 
 @requiere_db_de_prueba
+@requiere_tabla_exclusiva
 @asincrono
 async def test_la_alerta_va_bajo___system___y_no_es_lista_vacia(sin_telegram):
     """Propiedad 2. Con TODO en unknown el diagnostico es 'la sonda no esta
@@ -243,6 +268,7 @@ async def test_la_alerta_va_bajo___system___y_no_es_lista_vacia(sin_telegram):
 
 
 @requiere_db_de_prueba
+@requiere_tabla_exclusiva
 @asincrono
 async def test_tabla_VACIA_alerta_igual_bajo___system__(sin_telegram):
     """Propiedad 2, en su forma mas fuerte y la que el codigo llama aparte:
@@ -264,6 +290,7 @@ async def test_tabla_VACIA_alerta_igual_bajo___system__(sin_telegram):
 
 
 @requiere_db_de_prueba
+@requiere_tabla_exclusiva
 @asincrono
 async def test_la_supresion_de_6h_se_respeta_en_la_alerta_agregada(sin_telegram):
     """Propiedad 3. Sin supresion, una sonda muerta el viernes produce 288
