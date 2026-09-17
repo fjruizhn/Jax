@@ -217,12 +217,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
           python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
-            tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py 2>&1 | tee /tmp/out
+            tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
+            las_manos/_human_gate_io_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -288,8 +289,14 @@ jobs:
           #   lanza ConexionInvalidada, tambien tras salir con error, y una
           #   salida normal con una llamada propia en vuelo cierra la conexion.
           #   Validados por mutacion. Medido: "101 passed" dos corridas seguidas.
-          grep -qE "^101 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 101 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 101 -> 109 el 2026-09-17 (human gate sin emision HTTP): +8 de
+          #   las_manos/_human_gate_io_test.py -- tabla creada por init_tables sin
+          #   columna para el token, idempotente, emision con solo el sha256, un solo
+          #   uso, inventado, vencido, 20 consumos a la vez -> 1 gana, EXPLAIN por PK.
+          #   Mutacion: quitar `usado_at IS NULL` del UPDATE -> 2 rojos (un solo uso y
+          #   la carrera).
+          grep -qE "^109 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 109 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -783,6 +790,7 @@ jobs:
           tests/test_interruptor_sin_rutas_fijas.py
           tests/test_interruptor_heredada.py
           tests/test_subpipeline_contrato_puro.py
+          tests/test_human_gate_sin_emision_http.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -869,6 +877,7 @@ jobs:
             tests/test_interruptor_sin_rutas_fijas.py \
             tests/test_interruptor_heredada.py \
             tests/test_subpipeline_contrato_puro.py \
+            tests/test_human_gate_sin_emision_http.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1255,8 +1264,22 @@ jobs:
           #   invirtiendo el orden). MEDIDO dos veces en local (3.14), env limpio,
           #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1302 passed, 1 skipped, 1 xfailed,
           #   16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1303 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1303 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1127 -> 1151 el 2026-09-17 (human gate sin emision HTTP): +24 de
+          #   tests/test_human_gate_sin_emision_http.py, en las DOS listas. Sin ruta que
+          #   emita tokens (rojo contra c13d066: /human_gate/token), /execute consume
+          #   contra la base, /motor/dispatch rechaza un token inventado (rojo: pending)
+          #   y no quema el token si la politica rechaza; contrato del token con el
+          #   store sustituido. Mutaciones: reabrir la ruta -> 3 rojos; quitar el
+          #   consumo del motor -> 2 rojos. MEDIDO en local (3.14), env limpio, sin
+          #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente: "1151 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 1303 + 24 -> 1327 el 2026-09-17, rebase del human gate sobre origin/master f3cf91a
+          #   (C6, C5, SP3): las dos listas suman tests/test_human_gate_sin_emision_http.py.
+          #   MEDIDO en local (3.14), env limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT a una
+          #   ruta que no existe: "1327 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^1327 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1327 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

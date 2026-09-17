@@ -392,6 +392,34 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado en código, merge y despliegue pendientes — human gate de LAS MANOS sin emisión HTTP (2026-09-17)
+
+- **HECHO (medido 2026-09-17, Mr. Hyde, rama `fix/human-gate-sin-auth` desde `c13d066`):** `POST /human_gate/token`
+  (sin autenticación) devolvía 200 con un token a cualquier proceso local (TestClient sobre `server.app` de master: 200
+  `token/ttl_seconds/expires_epoch`). Además `/motor/dispatch` aceptaba como `human_gate_token` cualquier string no vacío
+  (`policy.py` sólo miraba presencia): `code_swarm` y `bug_hunt` (`requires_human_gate=1`) se autoaprobaban con `"x"`.
+- **Quién la usaba:** nadie. Ningún código de jax ni de jax-platform (backend o frontend) llama la ruta; el log
+  `las_manos/logs/gate.jsonl` no existía (nunca se emitió un token en producción) y `audit.jsonl` no tiene ningún
+  evento `HUMAN_GATE`. El gate de pipelines de la UI (`approve-step`) es otro mecanismo y no se toca acá.
+- **DECISIÓN (autonomía de Fernando, 2026-09-17):** el patrón del frente F. Tabla `las_manos_human_gate_tokens`
+  (`init_tables()`): sólo sha256 (PK), `emitido_por`, `vence_at`, `usado_at`, `usado_en`; consumo atómico
+  `UPDATE … WHERE usado_at IS NULL AND vence_at > now` (`las_manos/human_gate.py`). **Sin ruta HTTP de emisión:** la
+  emite `las_manos/emitir_token_gate.py`, que necesita la credencial de la base (`/etc/jax/.env`, root:fruiz 0660).
+  La jaula de Hyde no monta `/etc/jax` y `axioma` no la lee (`Permission denied`, verificado). `/execute` y
+  `/motor/dispatch` consumen contra la base; el motor consume DESPUÉS de la política (un rechazo no quema el token).
+  `[human_gate]` queda sólo con `token_ttl_seconds` (rango [10, 3600], validado al importar `server.py`).
+- **Uso para el aprobador humano:** `set -a; . /etc/jax/.env; set +a; ~/jax/las_manos/.venv/bin/python ~/jax/las_manos/emitir_token_gate.py`
+  → imprime el token (una vez) y el vencimiento; va en `approval_token` o `human_gate_token`.
+- **Pruebas:** `tests/test_human_gate_sin_emision_http.py` (24, tests-puros, piso 1127→1151) y
+  `las_manos/_human_gate_io_test.py` (8, subpipeline-contrato-db, piso 101→109). Vistos en rojo contra master; mutaciones:
+  reabrir la ruta → 3 rojos, quitar el consumo del motor → 2 rojos, quitar `usado_at IS NULL` → 2 rojos (un uso, carrera).
+- **PENDIENTE 2026-09-18:** PR, CI, merge; deploy = reiniciar `jax-las-manos` (crea la tabla en el arranque, sin
+  migración manual; comprobar antes `ActiveEnterTimestamp` contra los commits del checkout). Sin cambios en jax-platform.
+- **Sigue abierto (no es este arreglo), fecha 2026-09-24:** LAS MANOS no autentica al llamador. `facet_id`/`caller`/
+  `invoked_by` son declarados por el cuerpo: `POST /jacobs/pipeline/{id}/approve-step` con `invoked_by="plataforma"`
+  aprueba steps de Hyde bloqueados en human gate desde cualquier proceso local; `/execute` con `facet_id="hyde"` ejecuta
+  en staging sin gate; `/motor/dispatch` elige `caller`. Ver la entrada de Hyde en la sección de C3.
+
 ## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 2: C3 registro intocable y cerco (2026-09-17)
 
 Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~11:45). Rama local `feat/ejecutor-c3`
@@ -440,6 +468,9 @@ Orden: el PR de jax-platform se mergea ANTES (el job `jacobs-gobernanza-db` clon
   otra faceta con otro dueño de proceso; el cerco por `meta skuid` no aplica. Opciones a decidir: token de
   servicio en LAS MANOS leído de `/etc/jax/.env` (que la jaula de Hyde no monta), o `--unshare-net` + proxy de
   salida para Hyde.
+- **CORREGIDO 2026-09-17 (Mr. Hyde):** la emisión de tokens del human gate ya no tiene ruta HTTP (ver la sección
+  "human gate de LAS MANOS sin emisión HTTP"). Lo que sigue abierto de esta entrada es la falta de autenticación del
+  llamador (`approve-step`, `facet_id`, `caller` declarados por el cuerpo).
 - **Verificación de cierre:** desde un `claude` sandboxeado de Hyde, `curl -X POST 127.0.0.1:7777/human_gate/token`
   falla; el mismo pedido desde LAS MANOS/Jacobs funciona.
 

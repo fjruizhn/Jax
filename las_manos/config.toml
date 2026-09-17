@@ -131,13 +131,12 @@ requires_dryrun = false
 
 # ------------------------------------------------------------
 #  HUMAN GATE — tokens de aprobación
-#  Fernando genera un token de un solo uso para aprobar
-#  operaciones que requieren human_gate=true
+#  Fernando emite un token de un solo uso con
+#  las_manos/emitir_token_gate.py (sin ruta HTTP, 2026-09-17).
+#  En la base (las_manos_human_gate_tokens) queda solo el sha256.
 # ------------------------------------------------------------
 [human_gate]
-token_ttl_seconds = 300       # 5 minutos para usar el token
-token_length      = 32
-gate_log          = "/home/fruiz/jax/las_manos/logs/gate.jsonl"
+token_ttl_seconds = 300       # 5 minutos para usar el token; rango [10, 3600]
 
 # ------------------------------------------------------------
 #  MOTORES -- viven en la DB (R4). Fuente única: tabla `motor` de

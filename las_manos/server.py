@@ -28,8 +28,6 @@ import json
 import logging
 import os
 import time
-import secrets
-import hashlib
 import tomllib
 from pathlib import Path
 
@@ -46,6 +44,7 @@ from planner import Planner
 from envelope import IntentEnvelope, validate as validate_envelope
 from workers import ssh_worker, file_worker, rsync_worker
 from interruptor import interruptor_activo, ruta_del_interruptor
+import human_gate
 
 # El freno ANTES de cualquier otra configuración (2026-09-16, frente B): sin
 # JAX_KILL_SWITCH_PATH, LAS MANOS no arrancan (InterruptorSinConfigurar).
@@ -84,61 +83,11 @@ planner = Planner(CONFIG)
 
 
 # ------------------------------------------------------------
-#  Human gate — tokens de aprobación de un solo uso
+#  Human gate — tokens de aprobación de un solo uso (las_manos/human_gate.py).
+#  Sin ruta HTTP de emisión: los emite las_manos/emitir_token_gate.py con la
+#  credencial de la base. El TTL se valida al importar (fail-closed).
 # ------------------------------------------------------------
-class HumanGate:
-    """Tokens efímeros que Fernando genera para aprobar operaciones."""
-
-    def __init__(self, ttl: int, length: int, gate_log: str) -> None:
-        self.ttl = ttl
-        self.length = length
-        self.gate_log = Path(gate_log)
-        self.gate_log.parent.mkdir(parents=True, exist_ok=True)
-        # token -> {"expires": epoch, "used": bool}
-        self._tokens: dict[str, dict] = {}
-
-    def _log(self, entry: dict) -> None:
-        entry["@timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with open(self.gate_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-    def issue(self) -> dict:
-        """Genera un token nuevo. TTL en segundos según config."""
-        token = secrets.token_hex(self.length // 2)
-        expires = time.time() + self.ttl
-        self._tokens[token] = {"expires": expires, "used": False}
-        self._log({
-            "event": "TOKEN_ISSUED",
-            "token_hash": hashlib.sha256(token.encode()).hexdigest()[:16],
-            "ttl_seconds": self.ttl,
-        })
-        return {"token": token, "ttl_seconds": self.ttl, "expires_epoch": expires}
-
-    def validate(self, token: str | None) -> tuple[bool, str]:
-        """Valida y consume un token. Un token solo sirve una vez."""
-        if not token:
-            return False, "Falta human_gate_token para una operación que lo requiere"
-        rec = self._tokens.get(token)
-        if rec is None:
-            return False, "Token desconocido o ya descartado"
-        if rec["used"]:
-            return False, "Token ya usado (un solo uso)"
-        if time.time() > rec["expires"]:
-            del self._tokens[token]
-            return False, "Token expirado"
-        rec["used"] = True  # consumido
-        self._log({
-            "event": "TOKEN_CONSUMED",
-            "token_hash": hashlib.sha256(token.encode()).hexdigest()[:16],
-        })
-        return True, "Token válido"
-
-
-gate = HumanGate(
-    ttl=GATE_CFG["token_ttl_seconds"],
-    length=GATE_CFG["token_length"],
-    gate_log=GATE_CFG["gate_log"],
-)
+human_gate.ttl_segundos(GATE_CFG)
 
 
 # ------------------------------------------------------------
@@ -371,12 +320,6 @@ async def health(response: Response) -> dict:
     }
 
 
-@app.post("/human_gate/token")
-async def human_gate_token() -> dict:
-    """Fernando genera un token de aprobación (un solo uso, TTL config)."""
-    return gate.issue()
-
-
 @app.get("/audit/tail")
 async def audit_tail(n: int = 50) -> dict:
     """Thot consulta los últimos N eventos del log forense."""
@@ -477,15 +420,17 @@ async def execute(req: IntentEnvelope) -> dict:
 
     # ---- 4) Human gate (si la política lo exige) ----
     if result.requires_human_gate:
-        ok, reason = gate.validate(req.approval_token)
+        veredicto = await human_gate.consumir_token_gate(
+            req.approval_token, uso=f"execute:{request_id}",
+        )
         audit.log_human_gate(
             request_id=request_id,
-            approved=ok,
+            approved=veredicto.aceptado,
             token_used=req.approval_token,
             **fx,
         )
-        if not ok:
-            raise HTTPException(status_code=401, detail=f"Human gate: {reason}")
+        if not veredicto.aceptado:
+            raise HTTPException(status_code=401, detail=f"Human gate: {veredicto.motivo.value}")
 
     # ---- 5) Dry-run (si la operación lo exige) ----
     dryrun_result = None

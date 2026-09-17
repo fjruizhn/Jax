@@ -773,3 +773,5 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
   - **Mutaciones (con `cmp`, `PYTHONDONTWRITEBYTECODE=1`):** todas en rojo tras corregir dos tests que no las veían (el caso limpio del canario, y `pytest.raises(OSError)` que aceptaba el `TimeoutError` de un vigía que no moría).
   - **Lección:** `TimeoutError` es subclase de `OSError`: un `pytest.raises(OSError)` alrededor de un `wait_for` da verde con el defecto presente.
   - **Pendientes con fecha:** ver `DEUDA.md`, «Ejecutor SP1 plan 4».
+
+- **2026-09-17 — human gate de LAS MANOS sin emisión HTTP (Mr. Hyde, rama `fix/human-gate-sin-auth`):** `POST /human_gate/token` sin auth daba tokens a cualquier proceso local y `/motor/dispatch` aceptaba cualquier string como token. Ahora: patrón del frente F (sólo sha256 en `las_manos_human_gate_tokens`, un uso, `UPDATE … WHERE usado_at IS NULL`), emisión sólo por `las_manos/emitir_token_gate.py` con la credencial de `/etc/jax/.env`. Nadie usaba la ruta (sin `gate.jsonl` ni eventos `HUMAN_GATE`). Detalle, pruebas y lo que sigue abierto (`approve-step` con `invoked_by` declarado): DEUDA.md.
