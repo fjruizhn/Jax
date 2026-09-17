@@ -123,6 +123,15 @@ async def resolve_credential(provider_id: str) -> str:
     try:
         value = await _query_active_credential(provider_id)
         _cache[provider_id] = _CacheEntry(value, now)
+        # Confirmacion POSITIVA del camino DB (ausencia de fallas no es
+        # evidencia de exito). Sobrevive al retiro del fallback de B1.4: se
+        # loguea al traer el valor de la DB, no en los aciertos de cache.
+        # DIVERGENCIA DELIBERADA con jax-platform: alla el comentario nombra
+        # main.py como el que le pone handler y nivel INFO a este logger; aca
+        # eso lo hace las_manos/server.py (lineas 193-198). Misma linea de log,
+        # mismo comportamiento: lo unico distinto es de que archivo se habla, y
+        # poner el nombre del otro repo seria escribir algo falso.
+        logger.info(f"credential_resolution provider={provider_id} source=db")
         return value
     except Exception as e:
         if cached and (now - cached.fetched_at) < CREDENTIAL_STALE_MAX_SECONDS:
