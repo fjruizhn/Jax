@@ -189,8 +189,9 @@ entre comillas, lección del frente A):
    dice responder** una afirmación. `cita.Afirmacion` no tiene ese campo. El plan 4 define
    `AfirmacionAuditable.proposito`; **SP2 tiene que emitirlo** en el transporte.
 5. **§4 C5 «escribe PAUSE»:** `/etc/jax/PAUSE` es el freno GLOBAL de JAX (la Mesa responde 423). Un falso
-   positivo del auditor frena toda la plataforma, no sólo al Ejecutor. Se implementa así porque es lo que el
-   spec pide y lo seguro; queda declarado. Además, la activación del auditor no pasa por
+   positivo del auditor frena toda la plataforma, no sólo al Ejecutor. **CORREGIDO al ejecutar el plan 4
+   (2026-09-17):** C5 escribe la pausa PROPIA del Ejecutor (`JAX_EJECUTOR_PAUSA`), que el proxy obedece; el freno
+   de C4 la suma a la del interruptor. Lo que sigue de este punto es la versión anterior, que ya no rige: Además, la activación del auditor no pasa por
    `kill_switch_audit` del frente B (esa tabla la escribe jax-platform con un superadmin): queda en el
    contenido del archivo PAUSE (`origen=c5`) y en el journal del vigía.
 6. **§8 Fase 1 «no toca servidores»** choca con C6 («revocar y comprobar que no entra a ninguna»): una

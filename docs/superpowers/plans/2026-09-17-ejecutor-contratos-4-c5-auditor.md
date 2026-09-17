@@ -18,6 +18,28 @@ compuerta de datos de clientes); `vigia.py` sigue el registro (C3), audita por l
 **Tech stack:** Python 3.12, `httpx` vía `jax/core/cliente_http_compartido.py` (E-24), `jax/core/facet_resolver.py`,
 `aiomysql`; MariaDB (migración de jax-platform).
 
+> **EJECUTADO 2026-09-17 (Mr. Hyde, subagente) — correcciones al plan, cada una con test visto en rojo.** Ramas
+> `feat/ejecutor-c5` (jax, apilada sobre `feat/ejecutor-c3`) y `feat/ejecutor-config-c5` (jax-platform). Lo que el
+> código de abajo dice distinto de lo que quedó en las ramas, manda la rama:
+> 1. **C5 NO escribe el interruptor global** (`interruptor.escribir_pausa`): escribe la pausa PROPIA del Ejecutor
+>    (`jax/ejecutor/contratos/pausa.py`, `JAX_EJECUTOR_PAUSA`) y el proxy la obedece (423; el trozo que completa un
+>    `tool_use` no sale). Razones: un falso positivo de un LLM no puede dejar sin servicio a la Mesa; una activación
+>    escrita por un proceso queda fuera de `kill_switch_audit`; y el frente B no está en `master` de jax. El freno root
+>    de C4 (plan 3) tiene que matar también con esta pausa puesta.
+> 2. **Latido del vigía** (`JAX_EJECUTOR_VIGIA_LATIDO`, `_MAX_S`): un vigía muerto con SIGKILL no escribe nada; sin
+>    latido fresco el proxy no sirve. El `except BaseException` del plan sólo cubría muertes con excepción.
+> 3. **`proposito` vive en `cita.Afirmacion`** (obligatorio, fuera de `CAMPOS_PRESENTACION`; vacío → `sin_respaldo`
+>    con `proposito_vacio`), no sólo en `AfirmacionAuditable`.
+> 4. **`aplicar_revision(entrega, revision)` identifica por POSICIÓN** (`a1`, `a2`…, `afirmaciones_auditables`), no
+>    por `id()` de objeto: `transporte.entregar` reemplaza los objetos, y dos afirmaciones iguales se aprobaban juntas.
+> 5. **El vigía verifica la cadena del registro** desde `desde_byte` (`registro_roto`): una línea editada frena.
+> 6. `eleccion_c5.verificar_eleccion(conn, …)` consulta sólo las máquinas de la misión por clave primaria; misión sin
+>    máquinas o proveedor vacío no arrancan; `intervalo_s` `nan`/`inf` inválidos.
+> 7. `interpretar` también rechaza un paso citado inexistente en hallazgos que no pausan; el cliente no encadena la
+>    excepción HTTP (puede traer la llave).
+> 8. Mutación del canario que sobrevivía: sin chequeo del caso limpio seguía verde; test propio agregado.
+> 9. Test del vigía con `pytest.raises(OSError)`: `TimeoutError` es `OSError` y tapaba un vigía que no moría.
+
 **Spec:** `docs/superpowers/specs/2026-09-15-ejecutor-design.md` §4 C5 y §6.3; `2026-09-16-ejecutor-fase2-design.md`
 §2.0 (sin prosa: la síntesis la hace otra faceta vigilada por C5), avisos de §2.2 (el límite medido de las citas), §7
 (C5 conserva «fuera de misión» y «prohibido»; «hecho sin salida» pasa a `cita.py`). Decisión D-SP1-4 y puntos 1, 4 y
