@@ -35,6 +35,7 @@ from jacobs.policy import (
     validate_create,
     validate_resume,
 )
+from jacobs.subpipelines import ConsumoRechazado, Motivo, consumir_token_subpipeline
 
 router = APIRouter(prefix="/jacobs", tags=["jacobs"])
 
@@ -160,14 +161,45 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             max_steps=req.max_steps,
             active_count=active_count,
             subpipeline_token=req.subpipeline_token,
+            parent_pipeline_id=req.parent_pipeline_id,
         )
         if not policy.ok:
             status_code = 423 if "kill switch" in policy.reason.lower() else 422
             raise HTTPException(status_code=status_code, detail=policy.reason)
 
         pipeline_id = str(uuid.uuid4())
+
+        # Frente F (2026-09-16): un hijo de Ada consume su token ACÁ, después de
+        # validate_create (un 423 del kill switch no lo quema) y ANTES de
+        # planificar (no se sostiene una transacción los 20-40 s del LLM). Padre
+        # y profundidad salen de la fila del token, nunca del cuerpo.
+        parent_pipeline_id: str | None = None
+        parent_step: str | None = None
+        depth = 0
+        if req.invoked_by == INVOKER_ADA:
+            consumo = await consumir_token_subpipeline(
+                req.subpipeline_token, req.parent_pipeline_id, pipeline_id,
+            )
+            if isinstance(consumo, ConsumoRechazado):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"subpipeline_token rechazado: {consumo.motivo.value}",
+                )
+            parent_pipeline_id = consumo.parent_pipeline_id
+            parent_step = consumo.parent_step
+            depth = consumo.depth
+
         steps_spec = [s.model_dump() for s in req.steps] if req.steps else None
-        steps = await _build_plan_or_reject(pipeline_id, req.objective, req.max_steps, steps_spec)
+        try:
+            steps = await _build_plan_or_reject(pipeline_id, req.objective, req.max_steps, steps_spec)
+        except HTTPException:
+            if parent_pipeline_id is not None:
+                await store.event_append(pipeline_id, "SUBPIPELINE_RECHAZADO", {
+                    "fase": "plan",
+                    "motivo": Motivo.PLAN_RECHAZADO.value,
+                    "parent_pipeline_id": parent_pipeline_id,
+                })
+            raise
 
         # Asignar pipeline_id a cada step
         for step in steps:
@@ -180,6 +212,8 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             invoked_by=req.invoked_by,
             user_id=req.user_id,
             tenant_id=req.tenant_id,
+            parent_pipeline_id=parent_pipeline_id,
+            depth=depth,
             mode=req.mode,
             plan=steps,
             max_steps=req.max_steps,
@@ -193,7 +227,14 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             await store.step_upsert(step)
         await store.event_append(pipeline_id, "PIPELINE_CREATED", {
             "name": req.name, "mode": req.mode, "steps": len(steps),
+            "parent_pipeline_id": parent_pipeline_id, "depth": depth,
         })
+        if parent_pipeline_id is not None:
+            await store.event_append(
+                parent_pipeline_id, "SUBPIPELINE_CREADO",
+                {"hijo_pipeline_id": pipeline_id, "depth": depth},
+                parent_step,
+            )
 
     # dry_run: no ejecuta en background, solo completa inmediatamente
     if req.mode == "dry_run":
