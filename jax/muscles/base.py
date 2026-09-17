@@ -43,6 +43,20 @@ _PROVIDER_ID_MAP = {
 }
 
 
+def _sin_autoetiqueta(texto: str, etiqueta: str) -> str:
+    """Quita las líneas en que el MODELO imita el origen de autoridad que el
+    SISTEMA agrega después (_append_authority, Decisión 3). La cabecera sale de
+    la etiqueta configurada (config.toml, `authority_origin`): lo que está
+    antes del primer ':' -- p. ej., para kimi, el prefijo con el emoji de
+    engranaje seguido de "Origen de autoridad". Antes era un literal de kimi
+    en dos copias y las demás facetas no se limpiaban (E-15)."""
+    cabecera = etiqueta.split(":", 1)[0].strip() if etiqueta else ""
+    if not cabecera:
+        return texto.strip()
+    lineas = [l for l in texto.splitlines() if not l.strip().startswith(cabecera)]
+    return "\n".join(lineas).strip()
+
+
 # --- Politica de grounding (Decision 1: por TAREA, no por faceta) ------------
 #   off                → no buscar. Tarea local o creativa.
 #   auto               → puede buscar; si NO buscó, el sistema declara "no verificado".
@@ -274,16 +288,14 @@ class HttpMuscle(Muscle):
             data = resp.json()
             msg = data["choices"][0]["message"]
             texto = msg.get("content") or ""
-            # Kimi K2.7 incluye reasoning_content separado — ignorarlo.
-            # Limpiar auto-etiquetas que el modelo genere dentro del content.
-            lineas = [l for l in texto.splitlines()
-                      if not l.strip().startswith("⚙️ *Origen")]
 
         # D1.2 — best-effort, fuera del try/response: nunca debe poder
         # romper la respuesta al usuario (record_resolved_version_safe ya
         # atrapa sus propias excepciones).
         await record_resolved_version_safe(self.name, data.get("model"))
-        return "\n".join(lineas).strip()
+        # Kimi K2.7 trae reasoning_content aparte: no se usa. La autoetiqueta
+        # que el modelo imite se quita con la cabecera configurada (E-15).
+        return _sin_autoetiqueta(texto, self.authority_origin)
 
 
     async def _call_openai(
@@ -340,11 +352,9 @@ class HttpMuscle(Muscle):
 
         await record_resolved_version_safe(self.name, resolved_version)
 
-        # Kimi K2.7 incluye reasoning_content separado — ignorarlo (no llega en delta).
-        # Limpiar auto-etiquetas que el modelo genere dentro del content.
-        lineas = [l for l in texto.splitlines()
-                  if not l.strip().startswith("⚙️ *Origen")]
-        return "\n".join(lineas).strip()
+        # Kimi K2.7 trae reasoning_content aparte: no se usa. La autoetiqueta
+        # que el modelo imite se quita con la cabecera configurada (E-15).
+        return _sin_autoetiqueta(texto, self.authority_origin)
 
     @staticmethod
     def _extract_gemini(data: dict) -> tuple[str, list, list, list]:

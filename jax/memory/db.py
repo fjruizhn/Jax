@@ -486,7 +486,7 @@ class MemoryDB:
         url = url_requerida("JAX_OLLAMA_URL") + "/api/embed"
         try:
             # Tope de contexto de los modelos; truncamos para evitar 500.
-            texto = text[:4000] if len(text) > 4000 else text
+            texto = text[:4000]
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
                     url,
