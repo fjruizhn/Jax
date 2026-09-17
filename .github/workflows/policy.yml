@@ -604,6 +604,7 @@ jobs:
           tests/test_jacobs_resume_epoca.py
           tests/test_prevuelo_reglas.py
           tests/test_prevuelo_salud_pura.py
+          tests/test_prevuelo_sonda.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -651,6 +652,7 @@ jobs:
             tests/test_jacobs_resume_epoca.py \
             tests/test_prevuelo_reglas.py \
             tests/test_prevuelo_salud_pura.py \
+            tests/test_prevuelo_sonda.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1006,8 +1008,15 @@ jobs:
           #   (gate_* no cuenta, provider_error se vuelve a medir, la ventana
           #   corta) y MotorPolicy.motor_que_despacharia (pedido/prioridad/
           #   capability inexistente).
-          grep -qE "^809 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 809 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 809 -> 821 el 2026-09-17 (Task 7, la sonda): test_prevuelo_sonda.py
+          #   (+12) -- 2xx cortado responde, límite mínimo (config vs catálogo),
+          #   gemini sin herramientas, 5xx redactado, timeout, motor con el
+          #   cliente del worker (con y sin credencial), evento preflight
+          #   registrado con el resultado, registro perdido contado sin tumbar
+          #   el veredicto, uso de la sonda como preflight_probe (encolado e
+          #   insertado con el request_type pedido).
+          grep -qE "^821 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 821 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

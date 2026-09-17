@@ -24,7 +24,10 @@ proceso NO DRENA**: solo `jax-platform` lee el respaldo e inserta, porque es la
 duena de `axioma_usage` y la unica con migraciones (la columna `spool_id` y su
 UNIQUE, que es lo que hace idempotente al reintento). Si este modulo tambien
 insertara, dos procesos borrarian el mismo archivo sin coordinacion y el cobro
-se duplicaria en la ventana entre el INSERT y el borrado."""
+se duplicaria en la ventana entre el INSERT y el borrado.
+
+request_type='preflight_probe' (2026-09-17): la sonda del pre-vuelo de Jacobs
+(jacobs/sonda.py) paga una llamada mínima; se registra aparte para que se vea."""
 from __future__ import annotations
 
 import logging
@@ -110,6 +113,7 @@ async def record_direct_usage(
     model: str,
     tokens_in: int,
     tokens_out: int,
+    request_type: str = "pipeline",
 ) -> None:
     """Best-effort (usage tracking no debe romper un step ya completado),
     pero no silencioso.
@@ -154,11 +158,11 @@ async def record_direct_usage(
             async with conn.cursor() as cur:
                 await cur.execute(
                     "INSERT INTO axioma_usage (tenant_id, user_id, facet, model, tokens_in, tokens_out, cost_usd, request_type) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, 'pipeline')",
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         int(tenant_id) if tenant_id is not None else None,
                         int(user_id) if user_id is not None else None,
-                        facet, model, tokens_in, tokens_out, cost,
+                        facet, model, tokens_in, tokens_out, cost, request_type,
                     ),
                 )
         finally:
@@ -183,7 +187,7 @@ async def record_direct_usage(
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
         "cost_usd": cost,
-        "request_type": "pipeline",
+        "request_type": request_type,
         "origen": "jacobs",
         # explicitos aunque el contrato los admita ausentes: jacobs no invoca
         # trabajos del motor, y que se vean en None dice que es una decision y
