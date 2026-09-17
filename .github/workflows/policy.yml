@@ -1450,8 +1450,14 @@ jobs:
           #   record_direct_usage); una caída real de la base al resolver sigue siendo
           #   503 (control de R13/R16). test_cola_uso_escritores.py y
           #   test_prevuelo_sonda.py simulan la base por el pool del store.
-          grep -qE "^1095 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1095 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1095 -> 1097 el 2026-09-17 (R38, fix round 1, 4): +2 controles en
+          #   test_jacobs_conexiones_por_pedido.py -- los event_append del Motor Registry
+          #   son await en async def, el trabajo nace con create_task en routes.py, y el
+          #   paquete no crea loops ni corre corrutinas en hilos (verde contra 1d84e82;
+          #   por mutación, un run_in_executor en worker.py da 1 failed); y en ejecución
+          #   un rechazo de tool_authority escribe por el pool del loop que lo corre.
+          grep -qE "^1097 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1097 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

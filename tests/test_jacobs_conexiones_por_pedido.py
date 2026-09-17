@@ -780,3 +780,70 @@ def test_sonda_con_la_base_caida_al_resolver_da_503(entorno, monkeypatch, tmp_pa
     assert real is not None
     assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
     llamada.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Motor Registry: sus event_append corren en el loop del servicio (R38, 4)
+# ---------------------------------------------------------------------------
+
+_MOTOR_REGISTRY = RAIZ / "las_manos" / "motor_registry"
+# Lo que ejecutaría código de pool en OTRO loop u otro hilo.
+_OTRO_LOOP_U_HILO = {"new_event_loop", "run_coroutine_threadsafe", "run_in_executor",
+                     "ThreadPoolExecutor", "Thread", "set_event_loop"}
+
+
+def test_los_event_append_del_motor_registry_son_await_en_corrutinas_del_loop():
+    """Control con evidencia (revisión de 1d84e82, 4): el pool es por loop y un
+    loop ajeno vivo se niega. Los que llaman event_append en el Motor Registry
+    (tool_authority.py y worker.py) lo hacen con `await` dentro de `async def`,
+    y el trabajo nace con asyncio.create_task en motor_registry/routes.py
+    (el loop de uvicorn). El único to_thread de worker.py envuelve
+    subprocess.run, no una corrutina. En el paquete no hay nada que cree otro
+    loop ni que corra corrutinas en un hilo."""
+    import ast
+
+    llamadas = 0
+    for archivo in ("tool_authority.py", "worker.py"):
+        arbol = ast.parse((_MOTOR_REGISTRY / archivo).read_text(encoding="utf-8"))
+        padres = {hijo: nodo for nodo in ast.walk(arbol) for hijo in ast.iter_child_nodes(nodo)}
+        for nodo in ast.walk(arbol):
+            if isinstance(nodo, ast.Call) and getattr(nodo.func, "id", None) == "event_append":
+                llamadas += 1
+                assert isinstance(padres[nodo], ast.Await), f"{archivo}:{nodo.lineno} sin await"
+                ancestro = padres[nodo]
+                while not isinstance(ancestro, (ast.AsyncFunctionDef, ast.FunctionDef, ast.Module)):
+                    ancestro = padres[ancestro]
+                assert isinstance(ancestro, ast.AsyncFunctionDef), f"{archivo}:{nodo.lineno} fuera de async def"
+            if isinstance(nodo, ast.Call) and getattr(nodo.func, "attr", None) == "to_thread":
+                objetivo = nodo.args[0]
+                assert getattr(objetivo, "attr", getattr(objetivo, "id", None)) in {
+                    "run", "write_result"}, f"{archivo}:{nodo.lineno} to_thread de {ast.dump(objetivo)}"
+    assert llamadas == 4  # tool_authority 3 + worker 1
+    for ruta in _MOTOR_REGISTRY.glob("*.py"):
+        if ruta.name.endswith("_test.py"):
+            continue
+        for nodo in ast.walk(ast.parse(ruta.read_text(encoding="utf-8"))):
+            nombre = getattr(nodo, "attr", None) or getattr(nodo, "id", None)
+            assert nombre not in _OTRO_LOOP_U_HILO, f"{ruta.name}:{nodo.lineno} usa {nombre}"
+    rutas = ast.parse((_MOTOR_REGISTRY / "routes.py").read_text(encoding="utf-8"))
+    assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "create_task"
+               for n in ast.walk(rutas))
+
+
+def test_un_event_append_del_motor_registry_usa_el_pool_del_loop_que_lo_corre(entorno):
+    """La misma evidencia en ejecución: un rechazo de tool_authority escribe su
+    evento por el pool creado en el loop que corre la corrutina."""
+    from motor_registry import tool_authority
+
+    base = entorno()
+
+    async def cuerpo():
+        try:
+            await tool_authority._reject(job_id="j1", tool_name="read_file", caller="kimi", reason="x")
+            return asyncio.get_running_loop(), store._pool_estado[0]
+        finally:
+            await store.cerrar_pool()
+
+    corriendo, duenio = asyncio.run(cuerpo())
+    assert duenio is corriendo
+    assert [s.split(" (")[0] for s, _p, _x in base.escrituras] == ["INSERT INTO jacobs_events"]
