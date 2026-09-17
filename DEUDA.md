@@ -374,6 +374,46 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 2: C3 registro intocable y cerco (2026-09-17)
+
+Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~11:45). Rama local `feat/ejecutor-c3`
+(`/home/fruiz/worktrees/jax-sp1-c3`), apilada sobre `feat/ejecutor-c1-c2` (PR #180), SIN PUBLICAR (un subagente
+no puede escribir en el remoto). Orden: después de #180 y de su despliegue (el cerco sale del inventario de la
+política que exporta el plan 1).
+
+- [ ] **2026-09-18** Publicar la rama y abrir el PR (base `feat/ejecutor-c1-c2` o `master` si #180 ya entró); confirmar
+  en el log del runner `1038 passed, 1 skipped` (tests-puros); si difiere, manda el runner y se corrige la línea de historia.
+- [ ] **2026-09-18** Canario rojo por API (plan 2, Task 6 Step 4): en `_devolver`, mover `await _enviar(conn, writer,
+  h11.Data(data=trozo))` antes del `try` que anota; `tests-puros` = `failure` sobre ese sha; revert = `success`.
+- [ ] **2026-09-18** Despliegue (plan 2, Task 7 Steps 2–5): `/etc/jax/.env` con backup y sudoedit (`JAX_EJECUTOR_REGISTRO`,
+  `JAX_EJECUTOR_CERCO_SONDAS`, `JAX_PROXY_CARRIL_{UPSTREAM,RAIZ,TOPE_S=90,PUERTO=18435,HOST}`), dos lectores idénticos;
+  `ops/ejecutor/instalar_registro_y_cerco.sh` (respalda iptables-save/ip6tables-save y prueba la restauración en un
+  netns ANTES de tocar la red); `probar_c3.py` → `c3_vivo=true`; `probar_c3_corte.py` → `c3_corta=true`; las cuatro
+  roturas del Step 5; y verificar que siguen vivos Mesa, LAS MANOS :7777, Ollama :11434, MariaDB :3308, SSH :58291 de
+  fruiz, la VM .11 y Sésamo .6. Rollback del cerco: `sudo nft delete table inet ejecutor_cerco`.
+
+### Hyde y cualquier proceso de `fruiz` alcanzan LAS MANOS sin autenticación — fecha: 2026-09-24
+
+- **Hecho (medido 2026-09-17, Mr. Hyde, al planificar C3):** `127.0.0.1:7777` no pide credencial;
+  `POST /human_gate/token` emite un token de aprobación a quien lo pida. `hyde_sandbox.py` usa `--share-net`:
+  el `claude` de Hyde puede pedir un token y llamar `/execute`. El cerco de C3 lo cierra para la cuenta
+  `axioma`, **no** para Hyde (corre como `fruiz`).
+- **Por qué no se cierra en SP1:** es la misma propiedad (una jaula no puede autoaprobarse acciones), pero de
+  otra faceta con otro dueño de proceso; el cerco por `meta skuid` no aplica. Opciones a decidir: token de
+  servicio en LAS MANOS leído de `/etc/jax/.env` (que la jaula de Hyde no monta), o `--unshare-net` + proxy de
+  salida para Hyde.
+- **Verificación de cierre:** desde un `claude` sandboxeado de Hyde, `curl -X POST 127.0.0.1:7777/human_gate/token`
+  falla; el mismo pedido desde LAS MANOS/Jacobs funciona.
+
+### El proxy del Ejecutor no fija el modelo: por `/v1/messages` la jaula puede pedir cualquiera — fecha: 2026-09-24 (SP2)
+
+- **Hecho (medido 2026-09-17 al implementar C3):** el proxy deja pasar `POST /v1/messages` con el `model` que mande el
+  arnés. Contra el Ollama de producción, un modelo distinto (o el mismo con otro contexto) desaloja al de la Mesa y a
+  bge-m3 (V3, LEDGER SP3). El cerco y la lista de rutas no lo cubren.
+- **Por qué no en C3:** el modelo permitido sale de `facet_binding` en vivo y el proxy no tiene DB; es el transporte
+  `harness` de SP2 / el tope del proxy de SP3 (§6.2), que ya tienen que resolver el modelo del cerebro.
+- **Verificación de cierre:** un `POST /v1/messages` con `model` distinto del del cerebro da 403 sin tocar el upstream.
+
 ## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 1: C1 prohibiciones y C2 respaldo (2026-09-17)
 
 Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~04:40). Ramas locales con commits, SIN PUBLICAR
@@ -3247,6 +3287,19 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 
 ## Anotado, no bloquea
+
+- **Anotado — C3 del Ejecutor (2026-09-17, Mr. Hyde). Ninguno bloquea:**
+  - **El carril del Ejecutor sondea cada 50 ms** (`prioridad._PASO_EJECUTOR_S`). Carga de C3 (200 peticiones con
+    `tool_use`, upstream falso): a concurrencia 1 el registro agrega +2,2/+2,5 ms de p95 (cumple ≤ 10 ms); a
+    concurrencia 2, en 1 de 5 rondas el p95 salta a +52,8 ms. Medido por fases: `anotar` p95 1,2 ms, `fsync` p95
+    1,03 ms, upstream 0,5 ms; el salto es la espera del carril (el registro alarga la retención ~2 ms y dos peticiones
+    chocan más). Frente a una inferencia de segundos no se nota; si alguna vez importa, el paso del carril es la palanca.
+  - **El cerco es de red (TCP/UDP):** los sockets unix del sistema (dbus, systemd, snapd, libvirt-ro) siguen con su
+    propia autorización, como para cualquier usuario sin privilegios. Ningún servicio de JAX escucha por socket unix
+    alcanzable por `axioma` (docker.sock es `root:docker 660`; verificado 2026-09-17).
+  - **Si alguien habilita `nftables.service`**, su `/etc/nftables.conf` hace `flush ruleset` y borra el cerco hasta el
+    próximo `systemctl restart ejecutor-cerco`. Hoy está `disabled` (verificado 2026-09-17); `probar_c3.py` lo detecta
+    (`cerco_abierto`).
 
 - **Anotado — deuda residual del frente E de la auditoría (jax, triage de la revisión final y del rebase, 2026-09-17). Dueño: próxima ronda de pago de deuda.** Ninguno bloquea:
   - **`facet` se lee por `status` sin índice** (`jacobs/store.py`, 4º SELECT de la validación de plan, E-17): catálogo de 7 filas, recorrido completo. El costo de 0,00024 s citado en `store.py` se midió con 3 SELECTs (2026-08-21); el 4º no está medido.

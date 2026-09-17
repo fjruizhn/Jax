@@ -1,0 +1,13 @@
+[Unit]
+Description=Ejecutor · cerco de red de la cuenta del Ejecutor (C3)
+After=nftables.service
+Before=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Sin ExecStop a propósito: detener la unidad NO abre el cerco. Se quita a mano, con GO.
+ExecStart=/usr/sbin/nft -f /etc/jax-ejecutor-cerco/cerco.nft
+
+[Install]
+WantedBy=multi-user.target
