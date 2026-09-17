@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from decimal import Decimal
 from unittest.mock import ANY, AsyncMock, patch
 
@@ -21,7 +22,7 @@ import aiomysql  # noqa: E402
 import httpx  # noqa: E402
 
 from credential_resolver import CredentialUnavailableError  # noqa: E402
-from facet_resolver import ResolvedFacet  # noqa: E402
+from facet_resolver import FacetUnavailableError, ResolvedFacet  # noqa: E402
 from jacobs import sonda, usage_writer  # noqa: E402
 from jacobs.prevuelo_reglas import Despacho  # noqa: E402
 
@@ -203,46 +204,121 @@ def test_el_uso_de_la_sonda_se_registra_como_preflight_probe(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_error_de_resolucion_se_propaga_sin_convertirse_en_veredicto(monkeypatch):
-    """R13a: una caída real de la DB al resolver la faceta (aiomysql/pymysql)
-    no se traga como si fuera el proveedor -- sale de sondear() tal cual,
-    para que el llamador responda 503 prevuelo_no_disponible (§8), no
-    faceta_caida. Ni el registro de salud ni el de uso se llaman: no hay
-    veredicto que guardar."""
+    """R13a/R16: el camino DIRECTO usa resolve_facet(), que levanta
+    FacetUnavailableError (facet_resolver.py:325) tanto si la DB está caída
+    como si la faceta no tiene binding -- sin distinción posible (R16), así
+    que SIEMPRE se propaga tal cual, para que el llamador responda 503
+    prevuelo_no_disponible (§8), no faceta_caida. Antes esta prueba usaba
+    aiomysql.OperationalError directo, que no es lo que resolve_facet() real
+    levanta -- ver fix round 2, item 2. Ni el registro de salud ni el de uso
+    se llaman: no hay veredicto que guardar."""
     registrar, uso = AsyncMock(), AsyncMock()
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     monkeypatch.setenv("JAX_PREVUELO_SONDA_TIMEOUT_S", "1")
-    falla_de_db = aiomysql.OperationalError(2003, "Can't connect to MySQL server")
-    with patch.object(sonda, "resolve_facet", AsyncMock(side_effect=falla_de_db)), \
+    falla_de_resolucion = FacetUnavailableError("jekyll")
+    with patch.object(sonda, "resolve_facet", AsyncMock(side_effect=falla_de_resolucion)), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
          patch.object(sonda, "record_direct_usage", uso):
         try:
             asyncio.run(sonda.sondear("jekyll", _despacho()))
-        except aiomysql.OperationalError as exc:
-            assert exc is falla_de_db
+        except FacetUnavailableError as exc:
+            assert exc is falla_de_resolucion
         else:
-            raise AssertionError("sondear() debía propagar el error de DB, no tragarlo")
+            raise AssertionError("sondear() debía propagar FacetUnavailableError, no tragarlo")
     registrar.assert_not_awaited()
     uso.assert_not_awaited()
 
 
 def test_credencial_ausente_en_motor_es_config_error_no_provider_error(monkeypatch):
-    """R13b: CredentialUnavailableError es una falla LOCAL de preparación
-    (ni siquiera se intentó llamar al proveedor) -- outcome 'config_error',
-    no 'provider_error'. El lector de salud (OUTCOMES_DE_PROVEEDOR) ignora
-    config_error, así que el próximo pre-vuelo vuelve a sondear."""
+    """R13b/R16: CredentialUnavailableError cuya CAUSA es OTRO
+    CredentialUnavailableError (fila genuinamente ausente, ver el
+    comentario en el sitio) es una falla LOCAL de preparación (ni siquiera
+    se intentó llamar al proveedor) -- outcome 'config_error', no
+    'provider_error'. El lector de salud (OUTCOMES_DE_PROVEEDOR) ignora
+    config_error, así que el próximo pre-vuelo vuelve a sondear. Mock a
+    nivel de sonda.resolve_credential_instrumented (la cadena REAL de
+    credential_resolver.py se ejercita en
+    test_credencial_sin_fila_via_cadena_real_es_config_error, abajo)."""
     d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
                   base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
     registrar = AsyncMock()
     llamar = AsyncMock()
+    sin_fila = CredentialUnavailableError("moonshot")
+    sin_fila.__cause__ = CredentialUnavailableError("no active credential for moonshot")
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
-         patch.object(sonda, "resolve_credential_instrumented",
-                      AsyncMock(side_effect=CredentialUnavailableError("moonshot"))), \
+         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(side_effect=sin_fila)), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
          patch.object(sonda, "record_direct_usage", AsyncMock()):
         r = asyncio.run(sonda.sondear("kimi", d))
     assert not r.ok
     assert "la sonda no pudo preparar la llamada" in r.detalle
+    llamar.assert_not_awaited()
+    registrar.assert_awaited_once_with("kimi", "config_error", r.detalle, ANY)
+
+
+def test_credencial_con_causa_de_db_se_propaga_en_el_motor(monkeypatch):
+    """Item 1 (fix round 2, Ruling R16): sobre la cadena REAL de
+    credential_resolver -- se mockea SOLO `_query_active_credential`, no
+    `resolve_credential_instrumented` -- para que resolve_credential()
+    (credential_resolver.py:108-128) envuelva un aiomysql.OperationalError
+    REAL en CredentialUnavailableError con esa causa
+    (credential_resolver.py:120,128). sondear() tiene que propagar esa
+    excepción tal cual, NO convertirla en config_error -- ver el rojo contra
+    3ba6f71 en el reporte de fix round 2: ese commit la atrapaba sin mirar
+    la causa."""
+    import credential_resolver as cr
+    provider_id = f"zz-test-db-{uuid.uuid4().hex[:8]}"
+    falla_db = aiomysql.OperationalError(2003, "Can't connect to MySQL server")
+
+    async def query_falla(pid):
+        raise falla_db
+
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id=provider_id, modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
+    registrar, uso = AsyncMock(), AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_TIMEOUT_S", "1")
+    with patch.object(cr, "_query_active_credential", query_falla), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
+         patch.object(sonda, "record_direct_usage", uso):
+        try:
+            asyncio.run(sonda.sondear("kimi", d))
+        except CredentialUnavailableError as exc:
+            assert exc.__cause__ is falla_db
+        else:
+            raise AssertionError("sondear() debía propagar la caída de DB, no tragarla")
+    registrar.assert_not_awaited()
+    uso.assert_not_awaited()
+
+
+def test_credencial_sin_fila_via_cadena_real_es_config_error(monkeypatch):
+    """Item 1 (fix round 2, Ruling R16), contraparte del test anterior sobre
+    la misma cadena real: `_query_active_credential` levanta
+    CredentialUnavailableError DIRECTO (fila ausente, sin `from`,
+    credential_resolver.py:104) -- la causa de lo que sale de
+    resolve_credential() es OTRO CredentialUnavailableError, la señal que
+    Ruling R16 usa para decidir 'config_error'."""
+    import credential_resolver as cr
+    provider_id = f"zz-test-sinfila-{uuid.uuid4().hex[:8]}"
+
+    async def query_sin_fila(pid):
+        raise cr.CredentialUnavailableError(f"no active credential for {pid}")
+
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id=provider_id, modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
+    registrar = AsyncMock()
+    llamar = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    with patch.object(cr, "_query_active_credential", query_sin_fila), \
+         patch("motor_registry.worker._call_http_openai_compat", llamar), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        r = asyncio.run(sonda.sondear("kimi", d))
+    assert not r.ok
+    assert "la sonda no pudo preparar la llamada" in r.detalle
+    llamar.assert_not_awaited()
+    registrar.assert_awaited_once_with("kimi", "config_error", r.detalle, ANY)
     llamar.assert_not_awaited()
     registrar.assert_awaited_once_with("kimi", "config_error", r.detalle, ANY)
 

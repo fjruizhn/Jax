@@ -18,11 +18,16 @@ Tres clases de resultado (Ruling R13, fix round 1 de la revisión de Task 7):
       pudo ni ver su propio catálogo, así que no tiene nada que decir sobre
       el proveedor -- el llamador responde 503 prevuelo_no_disponible (§8),
       nunca faceta_caida.
-  (b) una falla LOCAL de preparación (CredentialUnavailableError, transporte
-      desconocido, contrato sin tope de salida) -> ok=False, outcome
+  (b) una falla LOCAL de preparación (transporte desconocido, contrato sin
+      tope de salida, o CredentialUnavailableError del camino motor cuya
+      CAUSA muestra que la fila de credencial genuinamente no existe --
+      Ruling R16, ver el comentario en el sitio) -> ok=False, outcome
       'config_error': no dice nada del proveedor, así que el próximo
       pre-vuelo dentro de la ventana vuelve a sondear (el lector de salud,
-      OUTCOMES_DE_PROVEEDOR, lo ignora).
+      OUTCOMES_DE_PROVEEDOR, lo ignora). En el camino DIRECTO (resolve_facet)
+      no hay nada que distinguir: FacetUnavailableError envuelve tanto DB
+      caída como credencial ausente sin dejar señal aparte (R16), así que
+      SIEMPRE se propaga -- cae en (a).
   (c) sólo la llamada al proveedor en sí (2xx fallido, error HTTP, timeout)
       -> outcome 'provider_error'.
 
@@ -74,13 +79,17 @@ def registros_perdidos() -> int:
 
 
 class _FallaDePreparacion(Exception):
-    """Fallo LOCAL antes de tocar al proveedor (Ruling R13b): credencial
-    ausente (CredentialUnavailableError -- que ya envuelve una caída de DB,
-    resolve_credential() SIEMPRE reduce a esto), transporte desconocido, o
-    contrato sin tope de salida (max_output_tokens=None). Se registra con
-    outcome 'config_error'. Cualquier OTRA excepción durante la preparación
-    (p.ej. FacetUnavailableError, que resolve_facet() usa para envolver una
-    caída real de la DB) NO se atrapa acá: se propaga fuera de sondear()."""
+    """Fallo LOCAL antes de tocar al proveedor: transporte desconocido,
+    contrato sin tope de salida (max_output_tokens=None), o -- SOLO en el
+    camino motor -- CredentialUnavailableError cuya CAUSA es otro
+    CredentialUnavailableError (Ruling R16: _query_active_credential la
+    levanta directo cuando la fila no existe, credential_resolver.py:104;
+    ese es el único caso genuinamente local). Se registra con outcome
+    'config_error'. Cualquier OTRA excepción durante la preparación (p.ej.
+    FacetUnavailableError del camino directo, que envuelve TANTO una DB
+    caída como una credencial ausente sin dejar señal para distinguirlas, o
+    un CredentialUnavailableError del motor cuya causa es una caída real de
+    DB) NO se atrapa acá: se propaga fuera de sondear()."""
 
 
 def _tope(d: Despacho) -> int:
@@ -123,7 +132,23 @@ async def _preparar(clave: str, d: Despacho):
             try:
                 api_key = await resolve_credential_instrumented(d.provider_id)
             except CredentialUnavailableError as exc:
-                raise _FallaDePreparacion(f"sin credencial activa para '{d.provider_id}': {exc}") from exc
+                # Ruling R16: resolve_credential() (las_manos/credential_resolver.py:108-128)
+                # SIEMPRE envuelve en CredentialUnavailableError, tanto si la
+                # fila no existe (_query_active_credential la levanta directo,
+                # línea 104, SIN causa) como si la DB está caída (el `except
+                # Exception as e` de la línea 120 atrapa cualquier otra cosa
+                # -- un aiomysql.OperationalError real, por ejemplo -- y la
+                # re-envuelve con `from e` en la línea 128).
+                # resolve_credential_instrumented (líneas 131-146) reintenta
+                # por .env y, si tampoco hay valor, relanza la MISMA excepción
+                # con `raise` pelado -- la cadena de causa no se pierde.
+                # La única señal que distingue los dos casos es esa causa: si
+                # es OTRO CredentialUnavailableError, la fila genuinamente no
+                # existe -> config_error. Cualquier otra causa (una caída real
+                # de DB) tiene que propagarse -- 503, no faceta_caida.
+                if isinstance(exc.__cause__, CredentialUnavailableError):
+                    raise _FallaDePreparacion(f"sin credencial activa para '{d.provider_id}': {exc}") from exc
+                raise
             campo = d.max_tokens_param
 
         async def _llamada(timeout: int) -> ResultadoSonda:

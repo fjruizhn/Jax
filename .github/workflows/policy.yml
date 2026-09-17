@@ -1032,8 +1032,17 @@ jobs:
           #   perdido queda en el log; una sonda fallida no registra uso; y
           #   el tope también entra por motor_max_tokens (R15, visto en
           #   rojo: el código viejo mandaba 16 en vez de 10).
-          grep -qE "^832 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 832 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 832 -> 834 el 2026-09-17 (Task 7, fix round 2, Ruling R16): +2 en
+          #   test_prevuelo_sonda.py -- sobre la cadena REAL de
+          #   credential_resolver (sólo _query_active_credential mockeado,
+          #   no resolve_credential_instrumented): una causa de
+          #   aiomysql.OperationalError se propaga sin convertirse en
+          #   config_error (visto en rojo contra 3ba6f71: ese commit
+          #   atrapaba CUALQUIER CredentialUnavailableError sin mirar la
+          #   causa); una causa de CredentialUnavailableError (fila
+          #   genuinamente ausente) sigue dando config_error.
+          grep -qE "^834 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 834 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
