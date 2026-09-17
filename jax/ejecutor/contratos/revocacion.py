@@ -11,6 +11,7 @@ axioma en todas las máquinas del inventario; revocar y comprobar que no entra a
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
 from dataclasses import dataclass
 
@@ -68,3 +69,52 @@ async def revocar_todas(hosts, *, revocar_en, probar_entrada) -> tuple:
     primero = await asyncio.gather(*(_uno(h, revocar_en, probar_entrada) for h in remotas))
     despues = [await _uno(h, revocar_en, probar_entrada) for h in locales]
     return tuple(primero) + tuple(despues)
+
+
+# --- el archivo root de llaves (lo usa ops/ejecutor/instalar_en_maquina.sh) ------
+
+_TIPO_DE_LLAVE = re.compile(r"^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp\d+|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$")
+
+
+class LlavesInvalidas(ValueError):
+    """`args[0]` es un código estable."""
+
+
+def _partir(linea: str):
+    """(opciones, tipo, clave) de una línea de authorized_keys; None si es vacía o comentario."""
+    texto = linea.strip()
+    if not texto or texto.startswith("#"):
+        return None
+    try:
+        palabras = shlex.split(texto, posix=False)
+    except ValueError:
+        raise LlavesInvalidas("linea_ilegible") from None
+    for i, p in enumerate(palabras[:-1]):
+        if _TIPO_DE_LLAVE.match(p):
+            return " ".join(palabras[:i]), p, palabras[i + 1]
+    raise LlavesInvalidas("linea_sin_llave")
+
+
+def llaves_root(actuales: str, *, controlador_pub: str | None, freno_pub: str | None) -> str:
+    """Contenido de /etc/ssh/authorized_keys.d/<cuenta>.
+
+    Cada llave actual de la cuenta se conserva (con sus opciones) y se marca: la del
+    controlador (se reconoce por su clave pública, no por el comentario) con
+    `ejecutor-controlador`, las demás con `ejecutor-axioma`. El freno, si se da, va con
+    comando forzado y `restrict` y la marca `ejecutor-freno`, que `ejecutor-revocar` no quita.
+    """
+    clave_controlador = _partir(controlador_pub)[2] if controlador_pub else None
+    salida = []
+    for linea in actuales.splitlines():
+        partes = _partir(linea)
+        if partes is None:
+            continue
+        opciones, tipo, clave = partes
+        marca = MARCAS_DE_ACCESO[1] if clave == clave_controlador else MARCAS_DE_ACCESO[0]
+        salida.append(" ".join(x for x in (opciones, tipo, clave, marca) if x))
+    if not salida:
+        raise LlavesInvalidas("sin_llaves_actuales")
+    if freno_pub:
+        _, tipo, clave = _partir(freno_pub)
+        salida.append(f'command="/usr/local/sbin/ejecutor-freno-remoto",restrict {tipo} {clave} {MARCA_FRENO}')
+    return "\n".join(salida) + "\n"

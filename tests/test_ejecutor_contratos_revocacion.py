@@ -86,3 +86,37 @@ def test_comandos():
     assert R.argv_admin(h, "admin", "sudo -n true") == [
         "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=yes",
         "-p", "58291", "admin@192.0.2.20", "sudo -n true"]
+
+
+CTRL = "ssh-ed25519 AAAActrl fruiz-controlador-ejecutor"
+AXI = "ssh-ed25519 AAAAaxi axioma@hall9000"
+
+
+def test_llaves_root_marca_por_clave_no_por_comentario():
+    actuales = f"# comentario\n\n{CTRL}\n{AXI.replace('axioma@hall9000', 'controlador-falso')}\n"
+    assert R.llaves_root(actuales, controlador_pub=CTRL, freno_pub=None) == (
+        "ssh-ed25519 AAAActrl ejecutor-controlador\nssh-ed25519 AAAAaxi ejecutor-axioma\n")
+
+
+def test_llaves_root_conserva_opciones_y_agrega_el_freno():
+    actuales = f'from="172.16.20.5",no-pty {AXI}\n'
+    assert R.llaves_root(actuales, controlador_pub=None, freno_pub="ssh-ed25519 AAAAfreno root@hall9000") == (
+        'from="172.16.20.5",no-pty ssh-ed25519 AAAAaxi ejecutor-axioma\n'
+        'command="/usr/local/sbin/ejecutor-freno-remoto",restrict ssh-ed25519 AAAAfreno ejecutor-freno\n')
+
+
+def test_llaves_root_lo_que_revocar_quita_es_todo_menos_el_freno():
+    import re
+    contenido = R.llaves_root(f"{CTRL}\n{AXI}\n", controlador_pub=CTRL, freno_pub="ssh-ed25519 AAAAfreno x")
+    quedan = [l for l in contenido.splitlines() if not re.search(r" ejecutor-(axioma|controlador)$", l)]
+    assert quedan == ['command="/usr/local/sbin/ejecutor-freno-remoto",restrict ssh-ed25519 AAAAfreno ejecutor-freno']
+
+
+@pytest.mark.parametrize("actuales, codigo", [
+    ("# sólo comentarios\n\n", "sin_llaves_actuales"),
+    ("basura sin llave\n", "linea_sin_llave"),
+])
+def test_llaves_root_invalidas(actuales, codigo):
+    with pytest.raises(R.LlavesInvalidas) as e:
+        R.llaves_root(actuales, controlador_pub=None, freno_pub=None)
+    assert e.value.args[0] == codigo
