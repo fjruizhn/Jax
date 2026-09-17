@@ -11,27 +11,52 @@ import pytest
 from jax.ejecutor.contratos import instalacion
 
 RAIZ = Path(__file__).resolve().parents[1]
+_PAQUETES_PROPIOS = {"jax.ejecutor.contratos": "jax/ejecutor/contratos", "jax.core": "jax/core"}
 
 
 @pytest.mark.parametrize("rel", instalacion.INSTALABLES)
 def test_lo_instalable_es_solo_biblioteca_estandar(rel):
     arbol = ast.parse((RAIZ / rel).read_text(encoding="utf-8"))
     for nodo in ast.walk(arbol):
+        if isinstance(nodo, ast.ImportFrom) and nodo.module in _PAQUETES_PROPIOS:
+            for alias in nodo.names:
+                assert f"{_PAQUETES_PROPIOS[nodo.module]}/{alias.name}.py" in instalacion.INSTALABLES, (rel, alias.name)
+            continue
         if isinstance(nodo, ast.Import):
             modulos = [a.name for a in nodo.names]
-        elif isinstance(nodo, ast.ImportFrom) and nodo.module == "jax.ejecutor.contratos":
-            for alias in nodo.names:
-                assert f"jax/ejecutor/contratos/{alias.name}.py" in instalacion.INSTALABLES, (rel, alias.name)
-            continue
         elif isinstance(nodo, ast.ImportFrom):
             modulos = [nodo.module or ""]
         else:
             continue
         for m in modulos:
-            if m.startswith("jax.ejecutor.contratos."):
-                assert f"jax/ejecutor/contratos/{m.rsplit('.', 1)[1]}.py" in instalacion.INSTALABLES, (rel, m)
+            paquete, _, hoja = m.rpartition(".")
+            if paquete in _PAQUETES_PROPIOS:
+                assert f"{_PAQUETES_PROPIOS[paquete]}/{hoja}.py" in instalacion.INSTALABLES, (rel, m)
             else:
                 assert m == "__future__" or m.split(".")[0] in sys.stdlib_module_names, (rel, m)
+
+
+def test_el_freno_y_lo_que_consulta_se_instalan():
+    for rel in ("jax/core/__init__.py", "jax/core/interruptor.py", "jax/ejecutor/contratos/pausa.py",
+                "jax/ejecutor/contratos/freno.py"):
+        assert rel in instalacion.INSTALABLES
+
+
+def test_render_de_la_unidad_del_freno():
+    texto = instalacion.renderizar_unidad_freno("/opt/ejecutor/lib")
+    assert "User=root" in texto and "Restart=always" in texto and "EnvironmentFile=/etc/jax/.env" in texto
+    assert "sys.path.insert(0, '/opt/ejecutor/lib')" in texto and "/usr/bin/python3 -I" in texto
+    assert "RuntimeDirectory=ejecutor-freno" in texto and "@LIB@" not in texto
+    with pytest.raises(ValueError):
+        instalacion.renderizar_unidad_freno("/opt/x'; rm -rf /")
+
+
+def test_principal_escribe_la_unidad_del_freno_en_el_manifiesto(tmp_path):
+    env = {"JAX_EJECUTOR_LIB": "/opt/ejecutor/lib", "JAX_EJECUTOR_GANCHO_TOPE_S": "10",
+           "JAX_EJECUTOR_POLITICA": "/etc/jax-ejecutor/politica.json"}
+    assert instalacion.principal([str(tmp_path)], env) == 0
+    assert (tmp_path / "ejecutor-freno.service").read_text() == instalacion.renderizar_unidad_freno("/opt/ejecutor/lib")
+    assert "  ejecutor-freno.service\n" in (tmp_path / "manifiesto.sha256").read_text()
 
 
 def test_render_del_gancho():
