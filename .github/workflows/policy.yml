@@ -1249,9 +1249,14 @@ jobs:
           #   frenos de los scripts de despliegue), test_ejecutor_prioridad.py (+3, locks de sólo lectura),
           #   test_ejecutor_proxy_carril.py (+3 config), test_ejecutor_contratos_cuenta_axioma.py (+1);
           #   test_ejecutor_proxy_registro.py (-1: GET /api/version ya no pasa). CONFIRMAR con el runner del PR.
-          # 1245 + 56 -> 1301 el 2026-09-17, rebase de SP3 sobre C5 (C6, master c13d066). PISO_SP3_PENDIENTE
-          grep -qE "^1301 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1301 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1245 + 57 -> 1302 el 2026-09-17, rebase de SP3 sobre C5 (sobre C6 y master c13d066):
+          #   los +56 de SP3 y +1 del rebase en test_ejecutor_proxy_pausa.py (el freno de C5 va
+          #   ANTES que la politica de rutas y de modelo/salida de SP3 en _reenviar; visto en rojo
+          #   invirtiendo el orden). MEDIDO dos veces en local (3.14), env limpio,
+          #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1302 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1302 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1302 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
