@@ -201,6 +201,8 @@ class _Base:
         self.pasos = pasos
         self.aperturas: list[tuple[str, str, bool]] = []  # (via, sitio, found_rows)
         self.escrituras: list[tuple[str, object, str]] = []  # CONFIRMADAS: (sql, params, sitio de la conexión)
+        self.conexiones: list = []
+        self.vivas_max = 0
         self.falla_en: str | None = None
         self.commit_falla: BaseException | None = None
         self.commit_cuelga = False
@@ -212,7 +214,11 @@ class _Base:
             raise self.falla_al_conectar
         sitio = _sitio()
         self.aperturas.append((via, sitio, "client_flag" in kwargs))
-        return _Conexion(self, sitio)
+        conn = _Conexion(self, sitio)
+        self.conexiones.append(conn)
+        vivas = sum(1 for c in self.conexiones if not c.closed)
+        self.vivas_max = max(self.vivas_max, vivas)
+        return conn
 
     async def directa(self, *_a, **kwargs):
         return self._abrir("directa", kwargs)
@@ -375,6 +381,30 @@ def test_approve_step_solo_abre_la_escritura_condicional_de_la_epoca(entorno, mo
     base = entorno(status="interrupted", pasos="blocked_human_gate")
     monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
     assert _medir(base, _pedido_approve) == [("directa", "pipeline_tomar_epoca", True)]
+
+
+def test_el_pool_nunca_tiene_mas_conexiones_vivas_que_su_tamano(entorno, monkeypatch):
+    """Control de R53 (2026-09-17): en la instancia aislada se contaron 11
+    conexiones del proceso con JAX_DB_POOL_MAX=10. Medido: eran 10 a MariaDB
+    (:3308) + 1 socket HTTP entrante (:17790) del propio servicio; el pool
+    nunca pasó de 10 (1.000 muestras de `ss -tn "( dport = :3308 )"` durante
+    lotes c=1/10/25/50 y cuatro sostenidas c=50). Acá se fija la propiedad en
+    proceso: con N pedidos a la vez nunca hay más conexiones ABIERTAS Y SIN
+    CERRAR que el tamaño del pool. Control: verde también antes de R53; se
+    rompe con un pool que abra de más."""
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "4")
+    base = entorno()
+    _catalogo_vacio(monkeypatch)
+
+    async def cuerpo():
+        try:
+            await asyncio.gather(*[_pedido_preflight() for _ in range(60)])
+        finally:
+            await store.cerrar_pool()
+
+    asyncio.run(cuerpo())
+    assert base.vivas_max <= 4, base.vivas_max
+    assert len(base.aperturas) <= 4
 
 
 def test_cincuenta_preflight_concurrentes_no_superan_el_tamano_del_pool(entorno, monkeypatch):
