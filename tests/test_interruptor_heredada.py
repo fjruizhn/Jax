@@ -18,6 +18,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import errno
 import importlib
 import importlib.util
 import logging
@@ -107,6 +108,26 @@ def test_heredada_ilegible_cuenta_como_puesto(nueva, vieja, caplog):
         assert interruptor.interruptor_activo() is True
     finally:
         vieja.parent.chmod(0o700)
+    assert len(_avisos(caplog)) == 1
+
+
+@pytest.mark.parametrize("error", [
+    PermissionError(errno.EACCES, "sin permiso"),
+    OSError(errno.EIO, "error de E/S"),
+])
+def test_heredada_con_stat_roto_cuenta_como_puesto(nueva, vieja, monkeypatch, caplog, error):
+    """Sin depender de la versión de Python ni de ser root: sólo la heredada
+    no se puede mirar, la nueva está ausente."""
+    stat_real = os.stat
+
+    def stat_selectivo(ruta, *args, **kwargs):
+        if Path(ruta) == vieja:
+            raise error
+        return stat_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr(interruptor.os, "stat", stat_selectivo)
+    caplog.set_level(logging.WARNING)
+    assert interruptor.interruptor_activo() is True
     assert len(_avisos(caplog)) == 1
 
 

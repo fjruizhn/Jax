@@ -1056,8 +1056,17 @@ jobs:
           #   en hall9000 test_la_copia_es_identica_al_canonico_de_jax_platform corre
           #   (hay checkout de producción) y da un passed de más con 0 skipped. Si el
           #   runner da otro numero, manda el runner.
-          grep -qE "^1103 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1103 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1103 -> 1108 el 2026-09-17 (fix del interruptor en CI 3.12): el run de
+          #   tests-puros de 94295a6 (PR #183) cayó en test_directorio_ilegible_cuenta_
+          #   como_puesto porque el TEST afirmaba `Path.exists() is False`, que en 3.12
+          #   lanza PermissionError (en 3.14 devuelve False). El módulo ya usaba os.stat.
+          #   La precondición pasa a `os.stat` (igual en toda versión) y se suman +5 con
+          #   os.stat sustituido (EACCES/EIO/ELOOP en la ruta nueva, EACCES/EIO en la
+          #   heredada): no dependen de la versión ni de ser root. MEDIDO en local
+          #   (3.14), dos corridas, sin checkout de plataforma: "1108 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1108 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

@@ -13,6 +13,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import stat
 from pathlib import Path
@@ -75,11 +76,32 @@ def test_directorio_ilegible_cuenta_como_puesto(monkeypatch, tmp_path):
     monkeypatch.setenv(VARIABLE, str(carpeta / "PAUSE"))
     carpeta.chmod(0)
     try:
-        # El defecto que se cierra: pathlib lo lee SUELTO.
-        assert (carpeta / "PAUSE").exists() is False
+        # La precondición, igual en toda versión: nadie puede mirar el archivo.
+        # (Path.exists() NO sirve para afirmarla: en 3.14 devuelve False —el
+        # defecto que se cierra— y en 3.12 lanza PermissionError; así cayó el
+        # check tests-puros de CI, que corre 3.12, en 94295a6.)
+        with pytest.raises(PermissionError):
+            os.stat(carpeta / "PAUSE")
         assert interruptor.interruptor_activo() is True
     finally:
         carpeta.chmod(0o700)
+
+
+@pytest.mark.parametrize("error", [
+    PermissionError(errno.EACCES, "sin permiso"),
+    OSError(errno.EIO, "error de E/S"),
+    OSError(errno.ELOOP, "demasiados enlaces"),
+])
+def test_cualquier_error_de_stat_que_no_sea_no_existe_cuenta_como_puesto(monkeypatch, tmp_path, error):
+    """Sin depender de la versión de Python ni de ser root: os.stat falla."""
+    monkeypatch.setenv(VARIABLE, str(tmp_path / "PAUSE"))
+
+    def stat_roto(ruta, *args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(interruptor.os, "stat", stat_roto)
+    assert interruptor.pausa_presente(tmp_path / "PAUSE") is True
+    assert interruptor.interruptor_activo() is True
 
 
 def test_un_componente_que_no_es_directorio_cuenta_como_puesto(monkeypatch, tmp_path):
