@@ -601,6 +601,14 @@ jobs:
           tests/test_ejecutor_prioridad.py
           tests/test_ejecutor_transporte.py
           tests/test_ejecutor_proxy_carril.py
+          tests/test_ejecutor_contratos_destinos.py
+          tests/test_ejecutor_contratos_politica.py
+          tests/test_ejecutor_contratos_gancho.py
+          tests/test_ejecutor_contratos_instalacion.py
+          tests/test_ejecutor_contratos_exportar.py
+          tests/test_ejecutor_contratos_cuenta_axioma.py
+          tests/test_ejecutor_contratos_canario_upstream.py
+          tests/test_ejecutor_contratos_canario_c1.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -654,6 +662,14 @@ jobs:
             tests/test_ejecutor_prioridad.py \
             tests/test_ejecutor_transporte.py \
             tests/test_ejecutor_proxy_carril.py \
+            tests/test_ejecutor_contratos_destinos.py \
+            tests/test_ejecutor_contratos_politica.py \
+            tests/test_ejecutor_contratos_gancho.py \
+            tests/test_ejecutor_contratos_instalacion.py \
+            tests/test_ejecutor_contratos_exportar.py \
+            tests/test_ejecutor_contratos_cuenta_axioma.py \
+            tests/test_ejecutor_contratos_canario_upstream.py \
+            tests/test_ejecutor_contratos_canario_c1.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -981,8 +997,14 @@ jobs:
           #   documentaba el corte anterior es un drift preexistente de este
           #   entorno (3.14 vs el runner en 3.12), no algo que este cambio
           #   toque. Si el runner da otro numero, manda el runner.
-          grep -qE "^853 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 853 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 853 -> 979 el 2026-09-17 (Ejecutor SP1 plan 1): contratos C1/C2 -- destinos 27,
+          #   politica 32, gancho y envoltorio 19, instalacion 15, exportador 8, cuenta 12,
+          #   upstream 1, canario 12 (= +126). MEDIDO en local (3.14), dos corridas:
+          #   "980 passed, 1 xfailed" -- el mismo +1/-1 skipped de entorno del corte
+          #   anterior (854/0 local = 853/1 runner). PENDIENTE DE CONFIRMAR POR EL RUNNER
+          #   (3.12) en el run del PR: si da otro numero, manda el runner.
+          grep -qE "^979 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 979 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
