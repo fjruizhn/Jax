@@ -13,7 +13,7 @@ import uuid
 from decimal import Decimal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from redaccion import recortar_redactado
 
@@ -29,6 +29,7 @@ from jacobs.models import (
     Step,
     StepSpec,
     StepStatus,
+    validar_costo_max_aceptado,
 )
 from jacobs.plan import PlanBuilder, PlanRejected
 from jacobs.prevuelo import prevuelo
@@ -448,6 +449,14 @@ class ContinueRequest(BaseModel):
     user_id:                str | None = None
     tenant_id:              str | None = None
     costo_max_aceptado_usd: Decimal | None = None
+
+    @model_validator(mode="after")
+    def _validar_costo(self) -> "ContinueRequest":
+        # Fix round 1 (revisión de Task 11): mismo guardia que
+        # PipelineCreateRequest -- reusa jacobs.models.validar_costo_max_aceptado
+        # en vez de repetir el umbral y el mensaje acá.
+        validar_costo_max_aceptado(self.costo_max_aceptado_usd)
+        return self
 
 
 class ContinuePreflightRequest(BaseModel):

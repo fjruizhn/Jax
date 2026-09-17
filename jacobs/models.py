@@ -111,6 +111,17 @@ class Pipeline(BaseModel):
     # dedication: interno, no expuesto en API
 
 
+def validar_costo_max_aceptado(costo: Decimal | None) -> None:
+    """Spec 2026-09-17 §6.1: costo_max_aceptado_usd no puede ser negativo.
+    Compartido por PipelineCreateRequest (acá abajo) y ContinueRequest
+    (jacobs/routes.py, Task 11 fix round 1) para no duplicar el umbral ni el
+    mensaje en dos sitios -- una revisión encontró que ContinueRequest había
+    quedado sin este guardia y un valor negativo llegaba hasta el servicio,
+    donde salía como 409 costo_supera_lo_aceptado en vez de 422."""
+    if costo is not None and costo < 0:
+        raise ValueError("costo_max_aceptado_usd no puede ser negativo")
+
+
 class PipelineCreateRequest(BaseModel):
     name:             str
     objective:        str
@@ -138,8 +149,7 @@ class PipelineCreateRequest(BaseModel):
             )
         if self.max_steps < 1 or self.max_steps > 20:
             raise ValueError("max_steps debe estar entre 1 y 20 (límite duro v0.1)")
-        if self.costo_max_aceptado_usd is not None and self.costo_max_aceptado_usd < 0:
-            raise ValueError("costo_max_aceptado_usd no puede ser negativo")
+        validar_costo_max_aceptado(self.costo_max_aceptado_usd)
         return self
 
 

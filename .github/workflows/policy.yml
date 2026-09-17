@@ -1141,8 +1141,15 @@ jobs:
           #   se prueba acá es el mapeo HTTP. 4 mutaciones con test (quitar el
           #   background.add_task, status_code hardcodeado, quitar el except Exception de
           #   continue, quitar el except ContinuarRechazado de continue/preflight).
-          grep -qE "^911 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 911 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 911 -> 912 el 2026-09-17 (Task 11, fix round 1): +1 en
+          #   test_jacobs_continue_endpoint.py -- ContinueRequest.costo_max_aceptado_usd
+          #   negativo es inválido (422) y no llega a invocar al servicio; usaba
+          #   jacobs.models.validar_costo_max_aceptado, el mismo guardia extraído de
+          #   PipelineCreateRequest, para no duplicar el umbral ni el mensaje. Visto en
+          #   rojo (DID NOT RAISE ValidationError) contra 4a1aa33; confirmado por mutación
+          #   (quitar el @model_validator lo tira rojo otra vez).
+          grep -qE "^912 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 912 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

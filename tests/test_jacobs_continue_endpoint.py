@@ -14,6 +14,7 @@ os.environ["JAX_DB_NAME"] = "jax_memory_test"
 
 import pytest  # noqa: E402
 from fastapi import BackgroundTasks, HTTPException  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
 
 from jacobs import continuar, routes  # noqa: E402
 from jacobs.models import Pipeline  # noqa: E402
@@ -69,3 +70,15 @@ def test_continue_preflight_de_un_pipeline_inexistente_da_404():
         asyncio.run(routes.continue_preflight("p1", routes.ContinuePreflightRequest(invoked_by="plataforma")))
     assert e.value.status_code == 404
     assert e.value.detail == {"code": "no_existe", "detalle": "Pipeline 'p1' no encontrado"}
+
+
+def test_costo_max_aceptado_negativo_es_invalido_y_no_llama_al_servicio():
+    # Fix round 1 (revisión): mismo guardia que PipelineCreateRequest
+    # (models.py) -- un costo negativo es un pedido mal formado, FastAPI lo
+    # rechaza con 422 ANTES de invocar el endpoint. El servicio.continuar NO
+    # se llama porque la validación de pydantic corre al construir el
+    # request, antes de que exista una oportunidad de invocarlo.
+    servicio = AsyncMock()
+    with patch.object(continuar, "continuar", servicio), pytest.raises(ValidationError):
+        routes.ContinueRequest(invoked_by="plataforma", costo_max_aceptado_usd=Decimal("-1"))
+    servicio.assert_not_awaited()
