@@ -113,7 +113,7 @@ class RunConContratoTest(unittest.IsolatedAsyncioTestCase):
         self.store = JobStore(str(Path(self._tmp.name) / "jobs.jsonl"))
         self.kill = str(Path(self._tmp.name) / "PAUSE")
         for p in [
-            patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")),
+            patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")),
             patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()),
             patch("httpx.AsyncClient.post", AsyncMock(side_effect=AssertionError("red real en un test"))),
         ]:

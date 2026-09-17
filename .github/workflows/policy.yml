@@ -800,6 +800,8 @@ jobs:
           tests/test_cola_uso_escritores.py
           tests/test_respaldo_de_uso_aislado.py
           tests/test_frente_e_retiros.py
+          tests/test_credencial_sin_fallback_env.py
+          tests/test_retiro_de_la_voz.py
           tests/test_max_steps_una_sola_constante.py
           tests/test_plan_facetas_de_la_tabla.py
           tests/test_espejos_symlink_frente_e.py
@@ -901,6 +903,8 @@ jobs:
             tests/test_cola_uso_escritores.py \
             tests/test_respaldo_de_uso_aislado.py \
             tests/test_frente_e_retiros.py \
+            tests/test_credencial_sin_fallback_env.py \
+            tests/test_retiro_de_la_voz.py \
             tests/test_max_steps_una_sola_constante.py \
             tests/test_plan_facetas_de_la_tabla.py \
             tests/test_espejos_symlink_frente_e.py \
@@ -1450,14 +1454,24 @@ jobs:
           #   sube con la que espera y vuelve a cero al soltar). El test del freno mientras espera el carril
           #   dejó de dormir 0,3 s y espera ese estado: era rojo intermitente en CI (RemoteProtocolError) con
           #   el runner lento. Corrido 5 veces seguidas en verde. Si el runner da otro numero, manda el runner.
-          # 1598 -> 1606 el 2026-09-17 (el cupo lo hace cumplir la base): las DOS listas suman
+          # 1598 -> 1603 el 2026-09-17. Dos ramas del mismo dia, sumadas al
+          #   rebasear: +3 de B1.4 (tests/test_credencial_sin_fallback_env.py,
+          #   los tres vistos en ROJO contra 351ec95, el primero con la linea
+          #   `source=env_fallback` en el log capturado) y +2 netos del RETIRO de
+          #   la voz (-1 por test_config_entorno.py::test_la_voz_toma_el_python_de_
+          #   kokoro_del_entorno, que describia una variable que ya no existe, +3
+          #   por tests/test_retiro_de_la_voz.py). Bajar un piso solo se justifica
+          #   cuando se retira funcionalidad y se dice; aca ni siquiera baja.
+          #   Los dos archivos entran a las DOS listas. Si el runner da otro
+          #   numero, manda el runner.
+          # 1603 -> 1611 el 2026-09-17 (el cupo lo hace cumplir la base): las DOS listas suman
           #   tests/test_creacion_sin_candado_global.py (8: routes.py sin candado de modulo, el nombre
           #   viejo fuera del CODIGO —no del comentario que cuenta por que se fue—, create_pipeline sin
           #   acquire, la sentencia del cupo entera en una sola, validate_create sin active_count y el
           #   contrato de jacobs/cupo.py). Vistos en rojo contra master (ImportError de jacobs.cupo, y
           #   el barrido del Lock global con el candado puesto). Si el runner da otro numero, manda el runner.
-          grep -qE "^1606 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1606 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          grep -qE "^1611 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1611 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

@@ -117,7 +117,7 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
             caller="jacobs", capability="implementation", motor="kimi",
             trace_id="t1", prompt="prompt de prueba", recursion_depth=0,
         )
-        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")), \
+        with patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")), \
              patch("httpx.AsyncClient.post", AsyncMock(return_value=fake_resp)) as mock_post:
             await worker.run(
                 job_id=job_id, motor="kimi", capability="implementation",
@@ -196,7 +196,7 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_transport_ollama_no_resuelve_credencial(self):
         """Guard igual a facet_resolver.py:81-82 -- transport='ollama' nunca
-        llama a resolve_credential_instrumented. Si lo hiciera, este test
+        llama a resolve_credential. Si lo hiciera, este test
         lo detecta porque el mock de credential está seteado para explotar."""
         cfg = {
             "motors": {"jax_local": {
@@ -215,7 +215,7 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
             trace_id="t2", prompt="prompt de prueba", recursion_depth=0,
         )
         boom = AsyncMock(side_effect=AssertionError("no debería resolver credencial para ollama"))
-        with patch.object(worker, "resolve_credential_instrumented", boom), \
+        with patch.object(worker, "resolve_credential", boom), \
              patch("httpx.AsyncClient.post", AsyncMock(return_value=_fake_response(content="listo"))):
             await worker.run(
                 job_id=job_id, motor="jax_local", capability="implementation",

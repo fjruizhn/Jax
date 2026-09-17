@@ -10,7 +10,7 @@ Comportamiento modelado segun JAX 1.0 (descrito por Fernando):
     fija esa faceta (modo MANUAL): todo va ahi hasta despedirla.
   - DESPEDIR: "adios" vuelve a modo AUTO (JAX local retoma).
   - EASTER EGG: "IDE1990" se chequea ANTES que todo. Suelta la frase de
-    Jairo Urbina (texto; la voz general de JAX es Kokoro local).
+    Jairo Urbina (texto).
 
 Orden de prioridad (estricto, importa):
   1) IDE1990   2) adios   3) invocar faceta
