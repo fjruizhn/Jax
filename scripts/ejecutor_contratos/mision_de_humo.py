@@ -163,7 +163,7 @@ async def principal(maquina: str) -> int:
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
         auditor_f = await resolve_facet(cfg.auditor_faceta)
-        revision = await auditor_cliente.auditar(A.Lote(texto_mision, (), A.afirmaciones_auditables(entrega)),
+        revision = await auditor_cliente.auditar(A.Lote(texto_mision, (), A.afirmaciones_auditables(entrega), A.maquinas_de(p.hosts, frozenset({maquina}))),
                                                  faceta=auditor_f, max_tokens=cfg.max_tokens)
         final_entrega = A.aplicar_revision(entrega, revision)
         for a in final_entrega.respaldadas:

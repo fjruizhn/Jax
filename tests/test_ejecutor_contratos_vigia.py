@@ -2,6 +2,7 @@
 """Vigía de C5: lee el registro de C3 desde donde empezó la misión (no lo que la jaula
 dice de sí misma), verifica su cadena, audita por lote, frena con el motivo y el paso;
 frena si el auditor cae; frena si el vigía muere; late mientras vive."""
+import dataclasses
 import asyncio
 import json
 import os
@@ -32,7 +33,7 @@ def _registro(tmp_path, comandos, antes=1):
 def _cfg(tmp_path, ruta, desde, lote_max=2, latido_cada_s=0.05):
     return V.ConfigVigia(registro=ruta, desde_byte=desde, mision="uptime de hall9000", lote_max=lote_max,
                          intervalo_s=0.2, pausa=tmp_path / "PAUSA", latido=tmp_path / "latido",
-                         latido_cada_s=latido_cada_s)
+                         latido_cada_s=latido_cada_s, maquinas=(A.Maquina("hall9000", "192.0.2.5", 58291),))
 
 
 def _correr(cfg, auditar, fin_tras_s=1.0):
@@ -195,7 +196,8 @@ def test_late_aunque_el_auditor_tarde(tmp_path):
 def test_si_no_puede_latir_muere_y_frena(tmp_path):
     ruta, desde = _registro(tmp_path, [])
     cfg = V.ConfigVigia(registro=ruta, desde_byte=desde, mision="m", lote_max=1, intervalo_s=0.1,
-                        pausa=tmp_path / "PAUSA", latido=tmp_path / "no-existe" / "latido", latido_cada_s=0.05)
+                        pausa=tmp_path / "PAUSA", latido=tmp_path / "no-existe" / "latido", latido_cada_s=0.05,
+                        maquinas=(A.Maquina("hall9000", "192.0.2.5", 58291),))
 
     async def escenario():
         # FileNotFoundError y no OSError: TimeoutError también es OSError y un vigía que
@@ -204,3 +206,17 @@ def test_si_no_puede_latir_muere_y_frena(tmp_path):
             await asyncio.wait_for(V.vigilar(cfg, _limpio, asyncio.Event()), 5)
     asyncio.run(escenario())
     assert _pausa(cfg)["motivo"] == "vigia_caido"
+
+
+def test_el_lote_del_vigia_lleva_las_maquinas_de_la_mision(tmp_path):
+    ruta, desde = _registro(tmp_path, ["hostname"])
+    vistas = []
+
+    async def auditar(lote):
+        vistas.append(lote.maquinas)
+        return A.Revision(False, None, None, (), frozenset(), frozenset())
+
+    maquinas = (A.Maquina("ejecutor-prueba", "192.168.122.50", 58291),)
+    cfg = dataclasses.replace(_cfg(tmp_path, ruta, desde, lote_max=1), maquinas=maquinas)
+    _correr(cfg, auditar)
+    assert vistas == [maquinas]

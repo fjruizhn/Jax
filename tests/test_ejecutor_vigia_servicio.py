@@ -15,6 +15,7 @@ from jax.ejecutor.contratos.fallo import Fallo
 from jax.ejecutor.contratos.registro import Registro
 
 MISION = S.Mision("uptime de hall9000", frozenset({"hall9000"}))
+MAQUINAS = (A.Maquina("hall9000", "192.0.2.5", 58291),)
 
 
 def _ctx(tmp_path, hosts=frozenset({"hall9000"})):
@@ -38,7 +39,7 @@ def _correr(ctx, *, exigir, vigilar, fin_antes=False):
         if fin_antes:
             f.set()
         await S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
-                              fin=f, exigir=exigir, vigilar=vigilar)
+                              fin=f, exigir=exigir, vigilar=vigilar, maquinas=MAQUINAS)
     asyncio.run(escenario())
 
 
@@ -125,7 +126,7 @@ def test_con_el_vigia_real_el_latido_abre_y_el_fin_lo_cierra(tmp_path):
     async def escenario():
         fin = asyncio.Event()
         tarea = asyncio.create_task(S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0,
-                                                    auditar=_auditar, fin=fin, exigir=exigir))
+                                                    auditar=_auditar, fin=fin, exigir=exigir, maquinas=MAQUINAS))
         for _ in range(100):
             if P.latido_fresco(ctx.latido, ctx.latido_max_s):
                 break
@@ -171,3 +172,23 @@ def test_la_unidad_lanza_este_modulo_con_la_mision_de_su_instancia():
     unidad = (Path(__file__).resolve().parents[1] / "ops" / "ejecutor" / "ejecutor-vigia@.service").read_text()
     assert "-m jax.ejecutor.contratos.vigia_servicio ${JAX_EJECUTOR_MISIONES}/%i.json" in unidad
     assert "Restart=no" in unidad and "User=fruiz" in unidad and "KillSignal=SIGTERM" in unidad
+
+
+def test_el_vigia_audita_con_las_maquinas_de_la_mision(tmp_path):
+    """El vigía en vuelo también juzga «esta máquina»: sus lotes llevan las máquinas elegidas."""
+    ctx = _ctx(tmp_path)
+    vistas = []
+
+    async def exigir(c):
+        return None
+
+    async def vigilar(cfg, auditar, fin):
+        vistas.append(cfg.maquinas)
+
+    maquinas = (A.Maquina("hall9000", "172.16.20.5", 58291),)
+
+    async def escenario():
+        await S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
+                              fin=asyncio.Event(), exigir=exigir, vigilar=vigilar, maquinas=maquinas)
+    asyncio.run(escenario())
+    assert vistas == [maquinas]

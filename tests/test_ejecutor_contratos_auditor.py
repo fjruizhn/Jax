@@ -15,6 +15,7 @@ LOTE = A.Lote(
     pasos=(A.Paso(1, "Bash", {"command": "uptime"}, False), A.Paso(2, "Bash", {"command": "cat ~/.ssh/id_ed25519"}, False)),
     afirmaciones=(A.AfirmacionAuditable("a1", "tiempo encendido", "38 min", "hall9000", "uptime", LINEA, (LINEA,)),
                   A.AfirmacionAuditable("a2", "usuarios conectados", "2 users", "hall9000", "uptime", LINEA, ())),
+    maquinas=(A.Maquina("hall9000", "192.0.2.5", 58291),),
 )
 
 
@@ -119,6 +120,52 @@ def test_una_revision_de_otro_lote_no_aprueba_de_mas():
 def test_lote_desde_dict():
     d = {"mision": "m", "pasos": [{"n": 1, "herramienta": "Bash", "entrada": {"command": "ls"}, "es_error": None}],
          "afirmaciones": [{"id": "a1", "proposito": "p", "dato": "d", "maquina": "h", "comando": "c", "linea": "l",
-                           "contexto": ["l"]}]}
+                           "contexto": ["l"]}],
+         "maquinas": [{"nombre": "h", "ip": "192.0.2.5", "puerto": 58291}]}
     lote = A.lote_desde_dict(d)
     assert lote.pasos[0] == A.Paso(1, "Bash", {"command": "ls"}, None) and lote.afirmaciones[0].contexto == ("l",)
+
+
+def test_el_lote_lleva_las_maquinas_de_la_mision_con_su_direccion():
+    """Visto en real (2026-09-17 11:23, misión de Fernando «deime el hostname de esta maquina»): el auditor
+    recibía sólo el texto, vio `ssh … axioma@192.168.122.50 hostname` y lo juzgó «tocar otra máquina»:
+    pausa `fuera_de_mision` sobre el único paso legítimo. Sin saber qué máquinas eligió la misión, «esta
+    máquina» no se puede juzgar."""
+    maquinas = (A.Maquina("ejecutor-prueba", "192.168.122.50", 58291),)
+    lote = A.Lote(LOTE.mision, LOTE.pasos, LOTE.afirmaciones, maquinas)
+    cuerpo = json.loads(A.mensajes(lote, "I")[1]["content"])
+    assert cuerpo["maquinas_de_la_mision"] == [{"nombre": "ejecutor-prueba", "ip": "192.168.122.50", "puerto": 58291}]
+
+
+def test_maquinas_de_filtra_el_inventario_por_las_de_la_mision_en_orden_estable():
+    from jax.ejecutor.contratos.destinos import Host
+    inventario = (Host("hall9000", "172.16.20.5", 58291, "hypervisor", True),
+                  Host("ejecutor-prueba", "192.168.122.50", 58291, "desarrollo", False),
+                  Host("atemai", "172.16.20.11", 58291, "desarrollo", False))
+    assert A.maquinas_de(inventario, frozenset({"atemai", "ejecutor-prueba"})) == (
+        A.Maquina("atemai", "172.16.20.11", 58291), A.Maquina("ejecutor-prueba", "192.168.122.50", 58291))
+
+
+def test_una_maquina_de_la_mision_que_no_esta_en_el_inventario_no_se_inventa():
+    with pytest.raises(ValueError, match="maquina_fuera_del_inventario"):
+        A.maquinas_de((), frozenset({"ejecutor-prueba"}))
+
+
+def test_lote_desde_dict_lee_las_maquinas():
+    d = {"mision": "m", "pasos": [], "afirmaciones": [],
+         "maquinas": [{"nombre": "ejecutor-prueba", "ip": "192.168.122.50", "puerto": 58291}]}
+    assert A.lote_desde_dict(d).maquinas == (A.Maquina("ejecutor-prueba", "192.168.122.50", 58291),)
+
+
+def test_las_instrucciones_dicen_que_la_maquina_de_la_mision_es_la_elegida():
+    from pathlib import Path
+    texto = (Path(A.__file__).parent / "auditor_instrucciones.md").read_text()
+    assert "maquinas_de_la_mision" in texto
+
+
+@pytest.mark.parametrize("maquinas", [(), ("hall9000",)])
+def test_un_lote_sin_maquinas_no_se_construye(maquinas):
+    """Con la lista vacía, las instrucciones hacen que TODO paso parezca salirse (visto en los canarios
+    de C5 al agregar el campo: c5_vivo=false por falsos positivos). Fail-closed al construir."""
+    with pytest.raises(ValueError, match="lote_sin_maquinas"):
+        A.Lote("m", (), (), maquinas)
