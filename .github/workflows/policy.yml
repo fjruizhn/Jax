@@ -101,7 +101,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql pydantic
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: python -m pytest jacobs/_facet_health_test.py -v
 
   # `check_facet_health()` es la unica pieza del lector sin cobertura
@@ -144,7 +145,8 @@ jobs:
       # que importa httpx a nivel de modulo. Sin el, el job falla en la
       # COLECCION y no en un assert -- el mismo modo de falla que rompio
       # PR#25 en la ronda anterior.
-      - run: pip install pytest aiomysql pydantic httpx
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       # El guard de "no correr sin DB" es un skipif: un skip masivo se ve
       # como verde. Se exige que los 6 tests CORRAN de verdad.
       - run: python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py -v
@@ -209,7 +211,8 @@ jobs:
       # archivo NO COLECTA. Medido 2026-09-11 en un venv limpio con solo este
       # pip install (no en hall9000, donde todo esta instalado): con los 4
       # paquetes, 10 tests colectados; sin cryptography, error de coleccion.
-      - run: pip install pytest aiomysql httpx cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: >-
           PYTHONPATH=. python -m pytest -v
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
@@ -318,7 +321,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -v
       # Los 13 tests tienen que CORRER, no saltarse: dos de ellos se saltan
       # solos si el runner corriera como root (ningun permiso bloquea a root,
@@ -370,7 +374,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql pydantic httpx cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -v
       - run: |
           PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -q 2>&1 | tee /tmp/ptc
@@ -412,7 +417,8 @@ jobs:
       # aiomysql: tests/test_cola_uso_escritores.py importa los dos escritores
       # reales, y los dos importan aiomysql. Con solo pytest el job fallaria en
       # la COLECCION, que es un rojo por otra razon.
-      - run: pip install aiomysql
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt
       - name: La copia de cola_uso.py es identica a la de jax-platform
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -500,7 +506,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pyyaml pydantic aiomysql==0.3.2
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - name: Suite de gobernanza
         run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -v
       - name: Piso exacto de tests CORRIDOS
@@ -553,11 +560,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # aiofiles: tests/test_hipatia_fuentes.py ejercita _persist_step_to_repo,
-      # que escribe con aiofiles (dependencia real de jacobs en produccion).
-      # fastapi==0.139.0: tests/test_motor_catalog_sello.py importa
-      # motor_registry.routes (pin de requirements.txt).
-      - run: pip install pytest pytest-asyncio aiomysql httpx cryptography pydantic pyyaml aiofiles fastapi==0.139.0
+      # Dependencias de servicio desde requirements.txt (E-19, 2026-09-16): el
+      # archivo es la fuente única; tests/test_requirements_completos.py falla si
+      # un import de terceros no está fijado ahí o si este job deja de usarlo.
+      - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
@@ -604,6 +610,7 @@ jobs:
           tests/test_espejos_symlink_frente_e.py
           tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py
           tests/test_documentos_del_repo.py
+          tests/test_requirements_completos.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -652,6 +659,7 @@ jobs:
             tests/test_espejos_symlink_frente_e.py \
             tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py \
             tests/test_documentos_del_repo.py \
+            tests/test_requirements_completos.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
