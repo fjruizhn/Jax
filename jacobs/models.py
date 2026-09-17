@@ -9,7 +9,7 @@ import uuid
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # T2 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): single source de qué
@@ -127,30 +127,38 @@ class PipelineCreateRequest(BaseModel):
     subpipeline_token:  str | None = Field(default=None, min_length=1, max_length=128)
     parent_pipeline_id: str | None = Field(default=None, min_length=1, max_length=36)
 
-    @model_validator(mode="after")
-    def validate_fields(self) -> "PipelineCreateRequest":
-        if self.invoked_by not in VALID_INVOKERS:
-            raise ValueError(
-                f"invoked_by '{self.invoked_by}' inválido. Aceptados: {sorted(VALID_INVOKERS)}"
-            )
-        if self.mode not in VALID_MODES:
-            raise ValueError(
-                f"mode '{self.mode}' inválido. Aceptados: {sorted(VALID_MODES)}"
-            )
-        if self.max_steps < 1 or self.max_steps > MAX_STEPS_PER_PIPELINE:
+    # Validadores POR CAMPO, no de modelo (revisión final del frente F,
+    # 2026-09-16, hallazgo I-1): un error de un `model_validator` lleva en
+    # `input` el cuerpo ENTERO, y FastAPI lo devuelve en el 422 -- con el
+    # `subpipeline_token` en claro. Uno por campo solo eco-ea ese campo. La
+    # forma por rol (token/padre según invoked_by) NO vive acá: la decide
+    # policy.validate_create, que responde 422 con `policy.reason`, sin el
+    # token. Un campo requerido faltante sigue trayendo el cuerpo en `input`
+    # desde Pydantic: en LAS MANOS lo tapa el handler global de
+    # RequestValidationError (las_manos/server.py), que devuelve solo nombres
+    # de campos.
+    @field_validator("invoked_by")
+    @classmethod
+    def _invoked_by_valido(cls, valor: str) -> str:
+        if valor not in VALID_INVOKERS:
+            raise ValueError(f"invoked_by '{valor}' inválido. Aceptados: {sorted(VALID_INVOKERS)}")
+        return valor
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_valido(cls, valor: str) -> str:
+        if valor not in VALID_MODES:
+            raise ValueError(f"mode '{valor}' inválido. Aceptados: {sorted(VALID_MODES)}")
+        return valor
+
+    @field_validator("max_steps")
+    @classmethod
+    def _max_steps_valido(cls, valor: int) -> int:
+        if valor < 1 or valor > MAX_STEPS_PER_PIPELINE:
             raise ValueError(
                 f"max_steps debe estar entre 1 y {MAX_STEPS_PER_PIPELINE} (límite duro v0.1)"
             )
-        trae_contrato = self.subpipeline_token is not None or self.parent_pipeline_id is not None
-        if self.invoked_by != INVOKER_ADA and trae_contrato:
-            raise ValueError(
-                "subpipeline_token y parent_pipeline_id solo los acepta invoked_by='ada'"
-            )
-        if self.invoked_by == INVOKER_ADA and (
-            self.subpipeline_token is None or self.parent_pipeline_id is None
-        ):
-            raise ValueError("invoked_by='ada' exige subpipeline_token y parent_pipeline_id")
-        return self
+        return valor
 
 
 class StepSpec(BaseModel):

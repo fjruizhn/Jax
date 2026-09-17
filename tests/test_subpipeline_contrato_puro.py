@@ -21,7 +21,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
-from pydantic import ValidationError
 
 from jacobs import executor, policy, routes
 from jacobs import subpipelines as sp
@@ -77,22 +76,69 @@ def test_hash_token_es_sha256_hex():
     assert sp.token_ref(sp.hash_token("abc")) == hashlib.sha256(b"abc").hexdigest()[:12]
 
 
+SECRETO = "SECRETO-NO-ECO"
+
+
+def _forma_rechazada_sin_eco(req: PipelineCreateRequest, campo: str) -> None:
+    """La forma por rol la decide validate_create (422 con `policy.reason`), no
+    el validador de Pydantic: un 422 de Pydantic devuelve el cuerpo entero en
+    `input`, token incluido (hallazgo I-1 de la revisión final, 2026-09-16)."""
+    with patch.object(policy, "check_kill_switch", return_value=False):
+        r = policy.validate_create(
+            req.invoked_by, req.mode, req.max_steps, 0,
+            subpipeline_token=req.subpipeline_token,
+            parent_pipeline_id=req.parent_pipeline_id,
+        )
+    assert not r.ok
+    assert campo in r.reason
+    assert SECRETO not in r.reason
+
+
 def test_plataforma_no_puede_presentar_token_ni_padre():
-    for extra in ({"subpipeline_token": "x"}, {"parent_pipeline_id": "p"}):
-        with pytest.raises(ValidationError):
-            PipelineCreateRequest(
-                name="t", objective="o", invoked_by="plataforma", mode="dry_run", **extra)
+    for extra in ({"subpipeline_token": SECRETO}, {"parent_pipeline_id": "p"}):
+        req = PipelineCreateRequest(
+            name="t", objective="o", invoked_by="plataforma", mode="dry_run", **extra)
+        _forma_rechazada_sin_eco(req, "subpipeline_token")
 
 
 def test_ada_exige_token_y_padre():
-    for extra in ({}, {"subpipeline_token": "x"}, {"parent_pipeline_id": "p"}):
-        with pytest.raises(ValidationError):
-            PipelineCreateRequest(name="t", objective="o", invoked_by="ada", mode="dry_run", **extra)
+    for extra in ({}, {"subpipeline_token": SECRETO}, {"parent_pipeline_id": "p"}):
+        req = PipelineCreateRequest(name="t", objective="o", invoked_by="ada", mode="dry_run", **extra)
+        _forma_rechazada_sin_eco(req, "parent_pipeline_id")
     req = PipelineCreateRequest(
         name="t", objective="o", invoked_by="ada", mode="dry_run",
         subpipeline_token="x", parent_pipeline_id="p",
     )
     assert (req.subpipeline_token, req.parent_pipeline_id) == ("x", "p")
+
+
+def test_el_422_de_forma_no_devuelve_el_token_por_http():
+    """De punta a punta por HTTP: la validación ocurre antes de tocar la base
+    (el conteo de activos se sustituye; kill switch apagado)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    app.include_router(routes.router)
+    cuerpos = (
+        {"invoked_by": "ada", "subpipeline_token": SECRETO},
+        {"invoked_by": "plataforma", "subpipeline_token": SECRETO},
+        # Otro campo inválido con el token presente: el error de Pydantic no
+        # puede arrastrar el cuerpo entero.
+        {"invoked_by": "ada", "subpipeline_token": SECRETO, "parent_pipeline_id": "p",
+         "mode_invalido": True},
+    )
+    with patch.object(routes.store, "pipeline_count_active", AsyncMock(return_value=0)), \
+         patch.object(policy, "check_kill_switch", return_value=False), \
+         patch.object(routes, "_build_plan_or_reject", _NO_PLANIFICAR), \
+         TestClient(app) as cliente:
+        for extra in cuerpos:
+            cuerpo = {"name": "t", "objective": "o", "mode": "dry_run", **extra}
+            if cuerpo.pop("mode_invalido", False):
+                cuerpo["mode"] = "no-es-un-modo"
+            r = cliente.post("/jacobs/pipeline", json=cuerpo)
+            assert r.status_code == 422, (extra["invoked_by"], r.text)
+            assert SECRETO not in r.text, (extra["invoked_by"], r.text)
 
 
 def test_la_profundidad_nunca_la_pone_el_llamador():
