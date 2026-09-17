@@ -55,9 +55,11 @@ async def _corrida(c, dir_prueba: Path, puerto: int, marca: str, romper: bool) -
         # pausa del Ejecutor apunta a un archivo que no existe en su directorio temporal.
         latido = dir_prueba / "latido"
         pausa_c5.latir(latido)
+        max_salida = int(os.environ["JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"])
         cfg = proxy_carril.Config(upstream=f"http://127.0.0.1:{up.puerto}", raiz=dir_prueba / "locks", tope_s=60,
                                   host="127.0.0.1", puerto=puerto, registro=registro, pausa=dir_prueba / "PAUSA",
-                                  latido=latido, latido_max_s=_TOPE_S * 2)
+                                  latido=latido, latido_max_s=_TOPE_S * 2, modelo="canario",
+                                  max_salida_tokens=max_salida)
         servidor = await proxy_carril.arrancar(cfg)
         try:
             if romper and await _sudo("chattr", "+i", str(registro)) != 0:
@@ -66,7 +68,8 @@ async def _corrida(c, dir_prueba: Path, puerto: int, marca: str, romper: bool) -
             try:
                 rc, _, _ = await cuenta_axioma.correr_en_la_cuenta(
                     c, cuenta_axioma.remoto_claude(c, base_url=f"http://127.0.0.1:{puerto}", modelo="canario",
-                                                   prompt="Ejecuta el comando.", herramientas="Bash"),
+                                                   prompt="Ejecuta el comando.", herramientas="Bash",
+                                                   max_salida_tokens=max_salida),
                     entrada=b"clave-de-prueba\n", tope_s=_TOPE_S)
             finally:
                 if romper:

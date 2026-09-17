@@ -41,6 +41,11 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
                               ruta absoluta)
   JAX_EJECUTOR_VIGIA_LATIDO   latido del vigía de C5 (obligatoria, ruta absoluta)
   JAX_EJECUTOR_VIGIA_LATIDO_MAX_S  edad máxima del latido, en segundos (obligatoria, > 0)
+  JAX_PROXY_CARRIL_MODELO     el ÚNICO `model` que la jaula puede pedir (obligatoria).
+                              Otro → 403 sin tocar Ollama: cargaría otro modelo y
+                              desalojaría el de la Mesa (SP3, 2026-09-17)
+  JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS  tope de `max_tokens` por petición (obligatoria,
+                              entero > 0). Más → 403. La cuenta: §6.3 del spec de Fase 2
 
 C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
 el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
@@ -85,11 +90,13 @@ REGISTRO_ILEGIBLE = "registro_ilegible"
 RUTA_NO_PERMITIDA = "ruta_no_permitida"
 EJECUTOR_PAUSADO = "ejecutor_pausado"
 VIGIA_SIN_LATIDO = "vigia_sin_latido"
-#: Lo que el arnés manda de verdad (medido 2026-09-17, arnés 2.1.273 por este proxy:
-#: `HEAD /api/hello` y `POST /v1/messages`). El upstream es el Ollama de producción:
-#: cualquier otra escritura (`/api/pull`, `DELETE /api/delete`, `/api/create`, `/api/chat`)
-#: no llega. Lecturas (GET/HEAD) pasan: la API de Ollama no escribe por ellas.
-_METODOS_DE_LECTURA = frozenset({"GET", "HEAD"})
+MODELO_NO_PERMITIDO = "modelo_no_permitido"
+SALIDA_NO_PERMITIDA = "salida_no_permitida"
+#: Lo que el arnés manda de verdad (medido 2026-09-17, arnés 2.1.273 por este proxy, 43
+#: peticiones en g1_20260917/proxy_v3.jsonl: `HEAD /api/hello` y `POST /v1/messages`). El
+#: upstream es el Ollama de producción: nada más llega. SP3 (2026-09-17) cerró también las
+#: lecturas: `/api/ps`, `/api/tags` o `/api/show` le dicen a la jaula qué hay cargado y con qué.
+_RUTAS_PERMITIDAS = frozenset({("HEAD", "/api/hello"), ("POST", "/v1/messages")})
 _RUTAS_DE_MENSAJES = frozenset({"/v1/messages"})
 _RESULTADOS_RECORDADOS = 10000
 
@@ -124,6 +131,8 @@ class Config:
     pausa: Path
     latido: Path
     latido_max_s: float
+    modelo: str
+    max_salida_tokens: int
 
 
 def config_desde_entorno(env=None) -> Config:
@@ -142,6 +151,12 @@ def config_desde_entorno(env=None) -> Config:
         except ValueError as exc:
             raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", nombre),))) from exc
         if valor < 0:
+            raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", nombre),)))
+        return valor
+
+    def positivo(nombre):
+        valor = numero(nombre, int)
+        if valor <= 0:
             raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", nombre),)))
         return valor
 
@@ -170,6 +185,8 @@ def config_desde_entorno(env=None) -> Config:
         pausa=pausa,
         latido=latido,
         latido_max_s=latido_max_s,
+        modelo=obligatoria("JAX_PROXY_CARRIL_MODELO"),
+        max_salida_tokens=positivo("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"),
     )
 
 
@@ -186,7 +203,7 @@ async def _enviar(conn: h11.Connection, writer: asyncio.StreamWriter, evento) ->
     await writer.drain()
 
 
-async def _responder_error(conn, writer, estado: int, motivo: Motivo, extra=()) -> None:
+async def _responder_error(conn, writer, estado: int, motivo: Motivo, extra=(), metodo: str = "") -> None:
     cuerpo = _cuerpo_error(motivo.codigo, motivo.datos)
     cabeceras = [
         (b"content-type", b"application/json"),
@@ -195,7 +212,9 @@ async def _responder_error(conn, writer, estado: int, motivo: Motivo, extra=()) 
         *extra,
     ]
     await _enviar(conn, writer, h11.Response(status_code=estado, headers=cabeceras))
-    await _enviar(conn, writer, h11.Data(data=cuerpo))
+    if metodo != "HEAD":
+        # A un HEAD se le contesta sin cuerpo (RFC 9110 §9.3.2); h11 lanza si se lo manda.
+        await _enviar(conn, writer, h11.Data(data=cuerpo))
     await _enviar(conn, writer, h11.EndOfMessage())
 
 
@@ -214,6 +233,21 @@ async def _leer_peticion(conn: h11.Connection, reader: asyncio.StreamReader):
             return peticion, b"".join(trozos)
         elif isinstance(evento, h11.ConnectionClosed):
             return None, b""
+
+
+def _fuera_de_limites(cuerpo: bytes, cfg: Config) -> str | None:
+    """¿La petición de mensajes pide otro modelo o más salida que el tope? Devuelve el
+    código, o None si está dentro. Lo que no se puede leer, no está dentro (fail-closed)."""
+    try:
+        pedido = json.loads(cuerpo)
+    except (ValueError, UnicodeDecodeError):  # fail-soft: no se reenvía; un cuerpo ilegible se trata como modelo no permitido (403)
+        return MODELO_NO_PERMITIDO
+    if not isinstance(pedido, dict) or pedido.get("model") != cfg.modelo:
+        return MODELO_NO_PERMITIDO
+    salida = pedido.get("max_tokens")
+    if type(salida) is not int or not 0 < salida <= cfg.max_salida_tokens:
+        return SALIDA_NO_PERMITIDA
+    return None
 
 
 def _ruta_sin_query(destino: bytes) -> str:
@@ -298,14 +332,25 @@ class _Proxy:
         metodo = peticion.method.decode("latin-1")
         ruta = _ruta_sin_query(peticion.target)
         de_mensajes = metodo == "POST" and ruta in _RUTAS_DE_MENSAJES
+        # Orden: el freno de C5 ANTES que la política de rutas y de modelo/salida (SP3). Un
+        # freno no depende de que la petición sea válida: con la pausa puesta o el vigía sin
+        # latido, toda petición recibe 423, y el cuerpo (no confiable) ni se parsea. Ninguna de
+        # las dos comprobaciones toca el carril, el registro ni el upstream.
         frenado = await self._frenado()
         if frenado is not None:
             log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
-            await _responder_error(conn, writer, 423, Motivo(frenado), extra=((b"x-should-retry", b"false"),))
+            await _responder_error(conn, writer, 423, Motivo(frenado),
+                                   extra=((b"x-should-retry", b"false"),), metodo=metodo)
             return
-        if not de_mensajes and metodo not in _METODOS_DE_LECTURA:
+        if (metodo, ruta) not in _RUTAS_PERMITIDAS:
             log.warning("proxy_carril %s metodo=%s", RUTA_NO_PERMITIDA, metodo)
-            await _responder_error(conn, writer, 403, Motivo(RUTA_NO_PERMITIDA))
+            await _responder_error(conn, writer, 403, Motivo(RUTA_NO_PERMITIDA), metodo=metodo)
+            return
+        if de_mensajes and (codigo := _fuera_de_limites(cuerpo, self.cfg)) is not None:
+            # Antes del carril, del registro y del upstream: otro modelo desalojaría el de la
+            # Mesa, y una salida sin tope rompe la cuenta de su espera (§6.3 del spec de Fase 2).
+            log.warning("proxy_carril %s metodo=%s ruta=%s", codigo, metodo, ruta)
+            await _responder_error(conn, writer, 403, Motivo(codigo), metodo=metodo)
             return
         if de_mensajes:
             try:
@@ -313,7 +358,7 @@ class _Proxy:
             except OSError as exc:
                 # Un resultado sin anotar no sube al cerebro.
                 log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
-                await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO))
+                await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO), metodo=metodo)
                 return
         try:
             async with carril_ejecutor_async(self.cfg.raiz, self.cfg.tope_s):
@@ -331,7 +376,7 @@ class _Proxy:
                 except httpx.HTTPError as exc:
                     log.warning("proxy_carril %s metodo=%s ruta=%s tipo=%s",
                                 UPSTREAM_INALCANZABLE, metodo, ruta, type(exc).__name__)
-                    await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE))
+                    await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE), metodo=metodo)
                     return
                 try:
                     await self._devolver(conn, writer, respuesta, metodo, ruta, de_mensajes)
@@ -343,13 +388,13 @@ class _Proxy:
             # `x-should-retry: false`: el SDK de Anthropic respeta esta cabecera.
             # Reintentar un 503 del carril sería colarse en cuotas.
             await _responder_error(conn, writer, 503, motivo,
-                                   extra=((b"x-should-retry", b"false"),))
+                                   extra=((b"x-should-retry", b"false"),), metodo=metodo)
 
     async def _devolver(self, conn, writer, respuesta, metodo: str, ruta: str, de_mensajes: bool) -> None:
         codificacion = respuesta.headers.get("content-encoding", "identity").strip().lower()
         if codificacion not in ("", "identity"):
             log.error("proxy_carril %s metodo=%s ruta=%s codificacion=%s", REGISTRO_ILEGIBLE, metodo, ruta, codificacion)
-            await _responder_error(conn, writer, 502, Motivo(REGISTRO_ILEGIBLE))
+            await _responder_error(conn, writer, 502, Motivo(REGISTRO_ILEGIBLE), metodo=metodo)
             return
         devolver = [(k, v) for k, v in respuesta.headers.raw if k.lower() not in _NO_DEVOLVER]
         devolver.append((b"connection", b"close"))
@@ -362,7 +407,7 @@ class _Proxy:
                 crudo = b"".join([trozo async for trozo in respuesta.aiter_raw()])
             except httpx.HTTPError as exc:
                 log.warning("proxy_carril upstream_cortado metodo=%s ruta=%s tipo=%s", metodo, ruta, type(exc).__name__)
-                await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE))
+                await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE), metodo=metodo)
                 return
             if de_mensajes:
                 pedidas = lectura.herramientas_de_mensaje(crudo)
@@ -370,19 +415,20 @@ class _Proxy:
                     # El arnés decide si es stream por lo que pidió, no por el content-type:
                     # lo que el proxy no puede leer, no se entrega.
                     log.error("proxy_carril %s metodo=%s ruta=%s", REGISTRO_ILEGIBLE, metodo, ruta)
-                    await _responder_error(conn, writer, 502, Motivo(REGISTRO_ILEGIBLE))
+                    await _responder_error(conn, writer, 502, Motivo(REGISTRO_ILEGIBLE), metodo=metodo)
                     return
                 try:
                     for pedida in pedidas or []:
                         await self._anotar(lectura.evento_de_pedida(pedida, ruta))
                 except OSError as exc:
                     log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
-                    await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO))
+                    await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO), metodo=metodo)
                     return
                 if pedidas and (frenado := await self._frenado()) is not None:
                     # Anotado y NO entregado: con C5 frenando, la herramienta no llega al arnés.
                     log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
-                    await _responder_error(conn, writer, 423, Motivo(frenado), extra=((b"x-should-retry", b"false"),))
+                    await _responder_error(conn, writer, 423, Motivo(frenado),
+                                           extra=((b"x-should-retry", b"false"),), metodo=metodo)
                     return
             await _enviar(conn, writer, inicio)
             log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)

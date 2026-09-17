@@ -127,13 +127,19 @@ class Upstream:
             writer.close()
 
 
+#: El único modelo que la jaula puede pedir en estos tests, y su tope de salida.
+MODELO_PERMITIDO = "modelo-permitido"
+MAX_SALIDA_TOKENS = 1024
+
+
 class Proxy:
     def __init__(self, upstream_url, raiz, tope_s):
         # C5: sin pausa del Ejecutor y con un vigía que acaba de latir (lo prueban
         # test_ejecutor_proxy_pausa.py); estos tests miran el carril y el registro.
         self.cfg = Config(upstream=upstream_url, raiz=raiz, tope_s=tope_s,
                           host="127.0.0.1", puerto=0, registro=raiz / "registro.jsonl",
-                          pausa=raiz / "PAUSA", latido=raiz / "latido", latido_max_s=3600)
+                          pausa=raiz / "PAUSA", latido=raiz / "latido", latido_max_s=3600,
+                          modelo=MODELO_PERMITIDO, max_salida_tokens=MAX_SALIDA_TOKENS)
         latir(self.cfg.latido)
 
     async def __aenter__(self):
@@ -153,7 +159,8 @@ def _correr(coro, tope=20):
 
 
 _CABECERAS = {"authorization": "Bearer llave-secreta-XYZ", "x-api-key": "llave-secreta-XYZ"}
-_CUERPO = b'{"messages":[{"role":"user","content":"dato-de-cliente-ABC"}]}'
+_CUERPO = (b'{"model":"modelo-permitido","max_tokens":1024,'
+           b'"messages":[{"role":"user","content":"dato-de-cliente-ABC"}]}')
 
 
 # --------------------------------------------------------------------------
@@ -396,6 +403,8 @@ _ENTORNO = {
     "JAX_EJECUTOR_PAUSA": "/etc/jax/interruptor/EJECUTOR_PAUSA",
     "JAX_EJECUTOR_VIGIA_LATIDO": "/var/lib/jax-ejecutor/vigia.latido",
     "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30",
+    "JAX_PROXY_CARRIL_MODELO": "qwen3.6-mesa-131k",
+    "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
 }
 
 
@@ -407,6 +416,7 @@ def test_config_sale_del_entorno_sin_upstream_hardcodeado():
     assert str(cfg.registro) == "/var/log/jax-ejecutor/registro.jsonl"
     assert (str(cfg.pausa), str(cfg.latido), cfg.latido_max_s) == (
         "/etc/jax/interruptor/EJECUTOR_PAUSA", "/var/lib/jax-ejecutor/vigia.latido", 30.0)
+    assert (cfg.modelo, cfg.max_salida_tokens) == ("qwen3.6-mesa-131k", 1024)
 
 
 @pytest.mark.parametrize("variable", sorted(_ENTORNO))
@@ -424,6 +434,8 @@ def test_config_sin_una_obligatoria_falla_cerrado(variable):
     ("JAX_EJECUTOR_PAUSA", "relativa/PAUSA"), ("JAX_EJECUTOR_VIGIA_LATIDO", "relativa/latido"),
     ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "0"), ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "nan"),
     ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "inf"),
+    ("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS", "0"), ("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS", "1024.5"),
+    ("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS", "-5"),
 ])
 def test_config_invalida_falla_cerrado(variable, valor):
     with pytest.raises(ConfigInvalida) as err:

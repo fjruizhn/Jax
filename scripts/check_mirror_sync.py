@@ -483,6 +483,56 @@ FAMILIAS = (
              "un jax-platform sin backend/config_entorno.py este checker sale con "
              "exit 2.",
     ),
+    Familia(
+        nombre="prioridad",
+        canonico=JAX_ROOT / "jax" / "ejecutor" / "prioridad.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ejecutor" / "prioridad.py"),
+        ),
+        # TODOS los simbolos del archivo, constantes incluidas: el modulo ES el
+        # protocolo de locks entre la Mesa (jax-platform) y el proxy del Ejecutor
+        # (jax). Si una copia cambia un nombre de fichero, el paso del sondeo o la
+        # forma de abrir el lock, la prioridad se pierde EN SILENCIO: la Mesa no
+        # espera nada y el Ejecutor deja de verla. tests/test_ejecutor_prioridad_espejo.py
+        # exige que esta tupla cubra el archivo. Limite conocido del comparador: los
+        # decoradores no son parte del segmento (@contextmanager); una copia sin el
+        # decorador rompe sus propios tests en jax-platform, no pasa callada.
+        compartidos=(
+            "ESPERA_AGOTADA",
+            "_PASO_MESA_S",
+            "_PASO_EJECUTOR_S",
+            "EsperaAgotada",
+            "_abrir",
+            "carril_mesa",
+            "hay_mesa_esperando",
+            "carril_ejecutor",
+            "_soltar",
+            "_Toma",
+            "_esperar_mesa",
+            "_intentar_ejecutor",
+            "carril_mesa_async",
+            "carril_ejecutor_async",
+        ),
+        nota="SP3 del Ejecutor (2026-09-17): la Mesa toma carril_mesa_async desde "
+             "jax-platform backend/ejecutor/prioridad.py, copia verbatim (el unico "
+             "ImportFrom distinto es el de Motivo, ver familia `motivo`). ORDEN DE "
+             "MERGE: jax-platform primero -- contra un jax-platform sin el archivo "
+             "este checker sale con exit 2.",
+    ),
+    Familia(
+        nombre="motivo",
+        canonico=JAX_ROOT / "jax" / "ejecutor" / "cita.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ejecutor" / "motivo.py"),
+        ),
+        # Solo Motivo: cita.py es el verificador del Ejecutor entero, y la Mesa no
+        # necesita nada mas. motivo.py de jax-platform no tiene otro simbolo (lo
+        # exige su propio test). @dataclass(frozen=True) no entra al segmento: si
+        # la copia pierde el frozen, lo atrapa el test de jax-platform.
+        compartidos=("Motivo",),
+        nota="SP3 del Ejecutor (2026-09-17): lo importa la copia de prioridad.py "
+             "en jax-platform. ORDEN DE MERGE: jax-platform primero.",
+    ),
 )
 
 

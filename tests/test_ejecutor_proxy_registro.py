@@ -12,9 +12,9 @@ import pytest
 from jax.ejecutor import proxy_carril
 from jax.ejecutor.contratos import registro as R
 from jax.ejecutor.contratos.canario_upstream import UpstreamCanario, _stream_tool_use, guion_bash
-from tests.test_ejecutor_proxy_carril import Proxy, Upstream, _correr
+from tests.test_ejecutor_proxy_carril import MAX_SALIDA_TOKENS, MODELO_PERMITIDO, Proxy, Upstream, _correr
 
-_BASE = {"model": "m", "stream": True, "max_tokens": 5, "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]}
+_BASE = {"model": MODELO_PERMITIDO, "stream": True, "max_tokens": 5, "tools": [{"name": "Bash", "input_schema": {"type": "object"}}]}
 
 
 def _resultado(tool_use_id, contenido):
@@ -117,7 +117,8 @@ def test_pide_identidad_y_rechaza_respuesta_comprimida(tmp_path):
                 r = await cli.post(px.url + "/v1/messages", headers={"accept-encoding": "gzip"},
                                    json={**_BASE, "stream": False, "messages": []})
             async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px, httpx.AsyncClient() as cli:
-                await cli.post(px.url + "/v1/messages", headers={"accept-encoding": "gzip, br"}, content=b"{}")
+                await cli.post(px.url + "/v1/messages", headers={"accept-encoding": "gzip, br"},
+                               json={**_BASE, "messages": []})
                 pedida = up.recibidas[0][2]
             return r.status_code, r.json()["error"]["type"], pedida
         finally:
@@ -133,7 +134,8 @@ def test_registro_corrupto_no_arranca(tmp_path):
     (tmp_path / "registro.jsonl").write_bytes(b'{"n":1,"prev":"0"}\n{"n":2')
     cfg = proxy_carril.Config(upstream="http://127.0.0.1:9", raiz=tmp_path, tope_s=1, host="127.0.0.1", puerto=0,
                               registro=tmp_path / "registro.jsonl", pausa=tmp_path / "PAUSA",
-                              latido=tmp_path / "latido", latido_max_s=60)
+                              latido=tmp_path / "latido", latido_max_s=60, modelo=MODELO_PERMITIDO,
+                              max_salida_tokens=MAX_SALIDA_TOKENS)
     with pytest.raises(R.RegistroCorrupto):
         _correr(proxy_carril.arrancar(cfg))
 
@@ -217,11 +219,13 @@ def test_rutas_fuera_de_la_api_de_mensajes_no_llegan_al_upstream(tmp_path, metod
     assert _correr(escenario()) == (403, proxy_carril.RUTA_NO_PERMITIDA, 0)
 
 
-@pytest.mark.parametrize("metodo, ruta", [("HEAD", "/api/hello"), ("GET", "/api/version"), ("POST", "/v1/messages")])
+@pytest.mark.parametrize("metodo, ruta", [("HEAD", "/api/hello"), ("POST", "/v1/messages")])
 def test_las_rutas_del_arnes_si_llegan(tmp_path, metodo, ruta):
+    # SP3 (2026-09-17): ya no pasa cualquier GET/HEAD. Sólo lo que el arnés manda de verdad.
     async def escenario():
         async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px, httpx.AsyncClient() as cli:
-            await cli.request(metodo, px.url + ruta + "?beta=true", content=b"{}" if metodo == "POST" else None)
+            await cli.request(metodo, px.url + ruta + "?beta=true",
+                              content=json.dumps({**_BASE, "messages": []}).encode() if metodo == "POST" else None)
             return len(up.recibidas)
 
     assert _correr(escenario()) == 1

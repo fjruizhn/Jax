@@ -102,25 +102,25 @@ def escribir_atomico(ruta: Path, doc: dict) -> None:
         os.close(dir_fd)
 
 
-async def exportar(ruta: Path, conectar) -> dict:
-    conn = await conectar()
-    try:
+async def exportar(ruta: Path, conexion) -> dict:
+    # `conexion` es jacobs.store.conexion (context manager async del pool; frente F
+    # retiró get_conn). desechable=True: un script de una sola corrida no deja la
+    # conexión en un pool que muere con el loop.
+    async with conexion(desechable=True) as conn:
         filas = await leer(conn)
-    finally:
-        conn.close()
     doc = documento(*filas, datetime.now(timezone.utc).isoformat())
     await asyncio.to_thread(escribir_atomico, ruta, doc)
     return doc
 
 
 def principal() -> int:
-    from jacobs.store import get_conn
+    from jacobs.store import conexion
     ruta = os.environ.get("JAX_EJECUTOR_POLITICA", "").strip()
     if not ruta.startswith("/"):
         sys.stderr.write("codigo=\"config_falta\" variable=\"JAX_EJECUTOR_POLITICA\"\n")
         return 2
     try:
-        doc = asyncio.run(exportar(Path(ruta), get_conn))
+        doc = asyncio.run(exportar(Path(ruta), conexion))
     except ExportacionImposible as exc:
         sys.stderr.write(f"codigo=\"{exc.codigo}\"\n")
         return 2

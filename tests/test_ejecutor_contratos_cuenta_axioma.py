@@ -57,3 +57,14 @@ def test_remoto_claude_va_en_la_jaula_y_sin_la_llave_en_argv():
     assert "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1" in palabras
     assert palabras[palabras.index("--", i) + 1] == "/opt/ejecutor/node-v24.16.0/bin/claude"
     assert "hola 'mundo'" in palabras
+
+
+def test_remoto_claude_con_tope_de_salida_lo_pasa_al_arnes():
+    # SP3: el proxy rechaza `max_tokens` por encima de JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS; un
+    # arnés que pasa por el proxy tiene que pedir ese tope, o todas sus peticiones dan 403.
+    c = CA.cuenta_desde_entorno(ENV)
+    palabras = shlex.split(CA.remoto_claude(c, base_url="http://127.0.0.1:18436", modelo="canario", prompt="x",
+                                            max_salida_tokens=1024).replace('"$K"', "K"))
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS=1024" in palabras
+    sin = CA.remoto_claude(c, base_url="http://127.0.0.1:18436", modelo="canario", prompt="x")
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in sin

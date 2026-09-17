@@ -392,6 +392,61 @@ No se cumplen hoy, y ninguna se cambió en producción: **sin Ejecutor en produc
    131072 (+2 GB).
 4. **Cablear `carril_mesa_async`** en `motor_registry` y Jacobs, y decidir qué carril toma el memory worker.
 
+### 6.3 SP3 · compartir la GPU sin recargas ni esperas largas (2026-09-17, Mr. Hyde)
+
+Mediciones de SP3 (crudos en `~/ejecutor-producto/sp3-mediciones/`) y **correcciones a §6.2**: el memory
+worker NO usa `jax_local` (sólo embebe con `bge-m3`); la Mesa llama a Ollama directo desde
+`jax-platform/backend/api/chat.py` (no por LAS MANOS); hay un cuarto consumidor, `facet_canary`, que entra
+por el mismo `_call_ollama`. Unificar en 131072 le cuesta a la Mesa −2 % de lectura; `bge-m3` entra al lado.
+
+**Qué quedó en ramas (sin desplegar):**
+
+1. **Carril de la Mesa** (jax-platform): `_call_ollama` toma `carril_mesa_async` (espejo verbatim de
+   `jax/ejecutor/prioridad.py`, familias `prioridad` y `motivo` de `check_mirror_sync.py`). Cubre chat y
+   sonda. Sin `JAX_PROXY_CARRIL_RAIZ` no hay llamada ni arranque. Locks abiertos de sólo lectura.
+2. **Proxy** (jax): fija el modelo (`JAX_PROXY_CARRIL_MODELO`; otro → 403 sin tocar Ollama), fija el tope
+   de salida (`JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS`; más → 403) y sólo deja pasar `HEAD /api/hello` y
+   `POST /v1/messages` (medido: lo único que manda el arnés 2.1.273). Un error a un HEAD sale sin cuerpo.
+3. **Tope de contexto** en `ops/ejecutor/sp3_entorno.conf`, con la cuenta de abajo rehecha por
+   `tests/test_ejecutor_sp3_config.py`.
+4. **`ops/ejecutor/unificar_contexto_mesa.sh`**: respaldo de `facet_binding`/`model` con restauración
+   PROBADA en un MariaDB descartable (hecho 2026-09-17 05:29, checksums iguales; control negativo con un
+   dump alterado: detecta), derivado `num_ctx 131072`, sync, contrato, rebind por el PUT aprobado,
+   verificación (sonda por rebind `ok`, `api/ps` con el derivado a 131072 y sin el base a otro contexto) y
+   reversión automática al base si algo falla. `--revertir DIR` y `--restaurar-dump DIR` (último recurso).
+
+**La cuenta del tope.** Una petición en curso no se interrumpe: la Mesa espera, en el peor caso, la lectura
+entera de la entrada del Ejecutor (sin caché: el turno de la Mesa pisa el KV del único slot) más su salida.
+Umbral V3: 60 s; objetivo con margen: **≤ 48 s**.
+
+- Lectura (peor medido por tamaño, a 131072): 3.818 tok 1,92 s · 15.167 7,95 · 26.361 15,59 · 59.886 48,01
+  · 93.915 95,40. La velocidad por token cae con el tamaño → la curva es convexa → la cuerda entre dos
+  puntos medidos es cota SUPERIOR. Sin extrapolar.
+- Generación: la más lenta medida a 131072, **62,57 tok/s**.
+- Salida máxima **1024** tokens → 16,4 s. Quedan ~31,6 s para leer → **entrada máxima 41.000** tokens
+  (cuerda 26.361–59.886: 29,8 s). Total **46,1 s ≤ 48**.
+- Entrada = ventana de auto-compactación + un salto de herramienta. Salto = máx(30.000 caracteres de Bash /
+  3 caracteres por token, 8.000 tokens de Read) = 10.000 → **ventana 31.000**.
+
+**Lo que esta cuenta NO garantiza, dicho:**
+
+- La **entrada** la acota el arnés (auto-compact, límites de Bash y Read), no el proxy: el proxy no cuenta
+  tokens. Nombres de variables verificados en el binario de 2.1.273; su semántica exacta (umbral real de
+  compactación, varias herramientas en paralelo en un turno) NO verificada ejecutándola. El salto supone
+  ≥ 3 caracteres por token en salidas de Bash: **supuesto no medido**.
+- 31.000 de ventana con un arranque de ~17k tokens deja ~14k de trabajo. Es lo que da la física con esta GPU.
+- 1024 de salida puede cortar turnos largos (Fase 0: media por turno p95 729, máx 1748 tokens). El proxy
+  lo hace visible (403), no lo esconde.
+- **Alternativa mejor, sin medir:** que el proxy CORTE la petición del Ejecutor en curso cuando la Mesa
+  espera (preempción). Haría irrelevante la salida y relajaría la entrada, pero depende de que Ollama deje
+  de leer el prompt al cerrarse la conexión: se mide con G1, no se supone.
+
+**Orden de despliegue** (reservado a un GO; nada de esto se ejecutó salvo `--probar-respaldo`):
+jax-platform primero (el job `mirror-sync` de jax clona su master) → agregar `sp3_entorno.conf` a
+`/etc/jax/.env` con respaldo → reiniciar jax-platform (con `ActiveEnterTimestamp` vs commits) → jax →
+reiniciar `jax-ejecutor-proxy` (sin las dos variables nuevas NO arranca) → `instalar_carril_comun.sh` →
+`unificar_contexto_mesa.sh --aplicar` con cero uso real.
+
 ## 7. Lo que esta fase NO hace (YAGNI, explícito)
 
 - **No elige cerebro.** Se vuelve a medir con las capas puestas, después.
