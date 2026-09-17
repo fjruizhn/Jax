@@ -57,10 +57,37 @@ class AfirmacionAuditable:
 
 
 @dataclass(frozen=True)
+class Maquina:
+    nombre: str
+    ip: str
+    puerto: int
+
+
+@dataclass(frozen=True)
 class Lote:
     mision: str
     pasos: tuple
     afirmaciones: tuple
+    # Las máquinas que eligió la misión, con su dirección: sin ellas el auditor no puede saber a qué
+    # máquina se refiere «esta máquina» ni si un `ssh … axioma@<ip>` sale de la misión (visto en real,
+    # 2026-09-17 11:23: pausa fuera_de_mision sobre el único paso legítimo).
+    maquinas: tuple
+
+    def __post_init__(self):
+        # Sin máquinas no hay cómo juzgar `fuera_de_mision`: un lote vacío de máquinas hace que TODO paso
+        # parezca salirse (visto en los canarios de C5 al agregar el campo). Fail-closed en la construcción.
+        if not self.maquinas or not all(isinstance(m, Maquina) for m in self.maquinas):
+            raise ValueError("lote_sin_maquinas")
+
+
+def maquinas_de(inventario, nombres: frozenset) -> tuple:
+    """Las máquinas de la misión tal como están en la política, ordenadas por nombre. Una que no está
+    en el inventario no se inventa: el arranque ya la habría rechazado, así que es un error."""
+    por_nombre = {h.nombre: h for h in inventario}
+    faltan = sorted(set(nombres) - set(por_nombre))
+    if faltan:
+        raise ValueError("maquina_fuera_del_inventario", faltan)
+    return tuple(Maquina(n, por_nombre[n].ip, int(por_nombre[n].puerto)) for n in sorted(nombres))
 
 
 @dataclass(frozen=True)
@@ -96,6 +123,7 @@ def lote_desde_dict(d: dict) -> Lote:
         pasos=tuple(Paso(p["n"], p.get("herramienta"), p.get("entrada"), p.get("es_error")) for p in d["pasos"]),
         afirmaciones=tuple(AfirmacionAuditable(a["id"], a["proposito"], a["dato"], a["maquina"], a["comando"],
                                                a["linea"], tuple(a.get("contexto", ()))) for a in d["afirmaciones"]),
+        maquinas=tuple(Maquina(m["nombre"], m["ip"], int(m["puerto"])) for m in d["maquinas"]),
     )
 
 
@@ -123,6 +151,7 @@ def afirmaciones_auditables(entrega) -> tuple:
 def mensajes(lote: Lote, instrucciones: str) -> list[dict]:
     cuerpo = {
         "mision": lote.mision,
+        "maquinas_de_la_mision": [{"nombre": m.nombre, "ip": m.ip, "puerto": m.puerto} for m in lote.maquinas],
         "pasos": [{"n": p.n, "herramienta": p.herramienta, "entrada": p.entrada, "es_error": p.es_error}
                   for p in lote.pasos],
         "afirmaciones": [{"id": a.id, "proposito": a.proposito, "dato": a.dato, "maquina": a.maquina,

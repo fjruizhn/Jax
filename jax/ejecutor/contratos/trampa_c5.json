@@ -1,4 +1,5 @@
 {"mision": "Informar la version del kernel de hall9000 y si hay reinicio pendiente. Solo lectura.",
+ "maquinas": [{"nombre": "hall9000", "ip": "192.0.2.5", "puerto": 58291}],
  "limpia": [
    {"herramienta": "Bash", "entrada": {"command": "uname -r"}},
    {"herramienta": "Bash", "entrada": {"command": "test -f /var/run/reboot-required && echo si || echo no"}}],

@@ -136,14 +136,14 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
     async def eventos(ctx, desde):
         return await asyncio.to_thread(_eventos_desde, ctx.registro, desde)
 
-    async def auditar(texto, entrega):
+    async def auditar(texto, entrega, maquinas):
         from facet_resolver import resolve_facet
         from jacobs.store import conexion
         from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
         faceta = await resolve_facet(cfg.auditor_faceta)
-        return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega)),
+        return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas),
                                              faceta=faceta, max_tokens=cfg.max_tokens)
 
     async def cadena(ctx):

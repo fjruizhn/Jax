@@ -317,7 +317,7 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
                 dice("paso", comando=comando, en_registro=en_registro, cuadra=cuadra)
             entrega = transporte.entregar(afirmaciones_del_texto(final), capturas(pedidas, resultados, hosts))
             try:
-                revision = await deps.auditar(turno.texto_de_mision, entrega)
+                revision = await deps.auditar(turno.texto_de_mision, entrega, A.maquinas_de(hosts, turno.hosts))
                 auditor_pauso = revision.pausar
                 entrega = A.aplicar_revision(entrega, revision)
             except Exception as exc:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: con el auditor ilegible o caído no sale ninguna

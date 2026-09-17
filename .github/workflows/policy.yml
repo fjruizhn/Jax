@@ -1375,8 +1375,16 @@ jobs:
           #   loadtest/*_app.py que construye FastAPI llama proteger(app)). Visto en rojo antes del arreglo;
           #   mutación (cmp previo, PYTHONDONTWRITEBYTECODE=1): quitar proteger(app) de authorize_facet_app -> 1 rojo.
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1566 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1566 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1566 -> 1576 el 2026-09-17 (el auditor de C5 recibe las máquinas de la misión): las DOS listas suman
+          #   test_ejecutor_contratos_auditor.py +7 (el lote las lleva con su dirección; maquinas_de filtra el
+          #   inventario y no inventa una máquina que no está; lote_desde_dict las lee; las instrucciones las nombran;
+          #   un lote sin máquinas no se construye, dos casos), test_ejecutor_contratos_vigia.py +1 (el lote del vigía
+          #   las lleva), test_ejecutor_vigia_servicio.py +1 (correr_mision las pasa) y test_ejecutor_mision.py +1
+          #   (el auditor final las recibe). Vistos en rojo antes del arreglo. MEDIDO en local (3.14), env -i, sin
+          #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1576 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1576 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1576 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

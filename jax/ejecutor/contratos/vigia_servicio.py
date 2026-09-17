@@ -28,7 +28,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, pausa, vigia
+from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, pausa, politica, vigia
+from jax.ejecutor.contratos import auditor as A
 
 log = logging.getLogger("ejecutor.vigia_servicio")
 VARIABLE_LATIDO_CADA_S = "JAX_EJECUTOR_VIGIA_LATIDO_CADA_S"
@@ -79,7 +80,7 @@ def _borrar_latido(ruta: Path) -> None:
 
 async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s: float, lote_max: int,
                         intervalo_s: float, auditar, fin: asyncio.Event, exigir=arranque.exigir_contratos,
-                        vigilar=vigia.vigilar) -> None:
+                        vigilar=vigia.vigilar, maquinas: tuple) -> None:
     """Lanza ContratosNoVerificados sin haber latido nunca si un contrato no está vivo."""
     if ctx.hosts_mision != mision.hosts:
         raise ValueError("contexto_de_otra_mision")
@@ -89,7 +90,8 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
         return
     desde = (await asyncio.to_thread(os.stat, ctx.registro)).st_size
     cfg = vigia.ConfigVigia(registro=ctx.registro, desde_byte=desde, mision=mision.texto, lote_max=lote_max,
-                            intervalo_s=intervalo_s, pausa=ctx.pausa, latido=ctx.latido, latido_cada_s=latido_cada_s)
+                            intervalo_s=intervalo_s, pausa=ctx.pausa, latido=ctx.latido, latido_cada_s=latido_cada_s,
+                            maquinas=maquinas)
     log.info("vigia_servicio mision_abierta desde_byte=%s hosts=%s", desde, ",".join(sorted(mision.hosts)))
     await vigilar(cfg, auditar, fin)
     # Sólo en el fin normal: con una excepción el latido se deja envejecer y vigia.py ya puso la pausa.
@@ -108,6 +110,8 @@ async def _principal(ruta_mision: Path) -> int:
     async with conexion(desechable=True) as conn:
         cfg = await eleccion_c5.leer_config(conn)
     auditor_f = await resolve_facet(cfg.auditor_faceta)
+    doc = json.loads(await asyncio.to_thread(ctx.cuenta.politica.read_bytes))
+    maquinas = A.maquinas_de(politica.validar(doc).hosts, mision.hosts)
 
     async def auditar(lote):
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
@@ -118,7 +122,7 @@ async def _principal(ruta_mision: Path) -> int:
         loop.add_signal_handler(senal, fin.set)
     try:
         await correr_mision(ctx, mision, latido_cada_s=latido_cada_s, lote_max=cfg.lote_max,
-                            intervalo_s=cfg.intervalo_s, auditar=auditar, fin=fin)
+                            intervalo_s=cfg.intervalo_s, auditar=auditar, fin=fin, maquinas=maquinas)
     except arranque.ContratosNoVerificados as exc:
         for f in exc.fallos:
             print(formato.campos((("contrato", f.contrato), ("codigo", f.codigo)) + tuple(f.datos)), flush=True)

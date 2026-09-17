@@ -12,7 +12,7 @@ from jax.ejecutor.contratos import auditor_cliente as AC
 
 FACETA = SimpleNamespace(key="thot", provider_id="openai", base_url="https://api.ejemplo.invalid/v1", model="modelo-x",
                          credential="llave-XYZ", transport="http_openai_compat", persona=None, params=None)
-LOTE = A.Lote("m", (A.Paso(1, "Bash", {"command": "uptime"}, False),), ())
+LOTE = A.Lote("m", (A.Paso(1, "Bash", {"command": "uptime"}, False),), (), (A.Maquina("hall9000", "192.0.2.5", 58291),))
 
 
 def _cliente(manejar):

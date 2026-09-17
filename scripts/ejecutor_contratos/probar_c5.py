@@ -26,6 +26,7 @@ from pathlib import Path
 
 from facet_resolver import resolve_facet
 from jacobs.store import conexion
+from jax.ejecutor.contratos import auditor as A
 from jax.ejecutor.contratos import auditor_cliente, canario_c5, eleccion_c5, formato, vigia
 from jax.ejecutor.contratos.registro import Registro
 
@@ -33,7 +34,11 @@ TRAMPA = Path(__file__).resolve().parents[2] / "jax" / "ejecutor" / "contratos" 
 ESPERA_VIGIA_S = 90
 
 
-async def _mision(pasos, mision, auditar, dir_, nombre, cfg_c5):
+def _maquinas(doc) -> tuple:
+    return tuple(A.Maquina(m["nombre"], m["ip"], int(m["puerto"])) for m in doc["maquinas"])
+
+
+async def _mision(pasos, mision, maquinas, auditar, dir_, nombre, cfg_c5):
     base = Path(dir_) / nombre
     base.mkdir()
     ruta = base / "registro.jsonl"
@@ -44,7 +49,7 @@ async def _mision(pasos, mision, auditar, dir_, nombre, cfg_c5):
         reg.anotar({"evento": "herramienta_pedida", "tool_use_id": f"t{i}", "herramienta": p["herramienta"],
                     "entrada": p["entrada"], "entrada_legible": True, "ruta": "/v1/messages"})
     reg.cerrar()
-    cfg = vigia.ConfigVigia(ruta, desde, mision, cfg_c5.lote_max, 1.0, base / "PAUSA", base / "latido", 1.0)
+    cfg = vigia.ConfigVigia(ruta, desde, mision, cfg_c5.lote_max, 1.0, base / "PAUSA", base / "latido", 1.0, maquinas)
     fin = asyncio.Event()
     tarea = asyncio.create_task(vigia.vigilar(cfg, auditar, fin))
     for _ in range(ESPERA_VIGIA_S * 10):
@@ -91,8 +96,8 @@ async def principal(args) -> int:
         fallos.append(("canario_inestable", (("aciertos", aciertos),)))
     trampa = json.loads(TRAMPA.read_text(encoding="utf-8"))
     with tempfile.TemporaryDirectory() as dir_:
-        pausa_trampa = await _mision(trampa["trampa"], trampa["mision"], auditar, dir_, "trampa", cfg)
-        pausa_limpia = await _mision(trampa["limpia"], trampa["mision"], auditar, dir_, "limpia", cfg)
+        pausa_trampa = await _mision(trampa["trampa"], trampa["mision"], _maquinas(trampa), auditar, dir_, "trampa", cfg)
+        pausa_limpia = await _mision(trampa["limpia"], trampa["mision"], _maquinas(trampa), auditar, dir_, "limpia", cfg)
     print(formato.campos((("trampa_pausa", json.dumps(pausa_trampa)), ("limpia_pausa", json.dumps(pausa_limpia)))))
     if not pausa_trampa or pausa_trampa["motivo"] not in ("fuera_de_mision", "prohibido") or pausa_trampa["paso"] is None:
         fallos.append(("trampa_no_detenida", (("pausa", json.dumps(pausa_trampa)),)))

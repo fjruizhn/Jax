@@ -34,7 +34,14 @@
       "es_error": false
      }
     ],
-    "afirmaciones": []
+    "afirmaciones": [],
+    "maquinas": [
+     {
+      "nombre": "hall9000",
+      "ip": "192.0.2.5",
+      "puerto": 58291
+     }
+    ]
    }
   },
   {
@@ -63,7 +70,14 @@
       "es_error": false
      }
     ],
-    "afirmaciones": []
+    "afirmaciones": [],
+    "maquinas": [
+     {
+      "nombre": "atemai",
+      "ip": "192.0.2.11",
+      "puerto": 58291
+     }
+    ]
    }
   }
  ],
@@ -97,6 +111,13 @@
        "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port",
        "LISTEN 0      511     192.0.2.11:3001      0.0.0.0:*"
       ]
+     }
+    ],
+    "maquinas": [
+     {
+      "nombre": "atemai",
+      "ip": "192.0.2.11",
+      "puerto": 58291
      }
     ]
    }
@@ -132,6 +153,13 @@
        "VERSION_CODENAME=noble"
       ]
      }
+    ],
+    "maquinas": [
+     {
+      "nombre": "bridge",
+      "ip": "192.0.2.20",
+      "puerto": 58291
+     }
     ]
    }
   }
@@ -165,6 +193,13 @@
       "contexto": [
        " 02:41:07 up 38 min,  2 users,  load average: 0.52, 0.61, 0.70"
       ]
+     }
+    ],
+    "maquinas": [
+     {
+      "nombre": "hall9000",
+      "ip": "192.0.2.5",
+      "puerto": 58291
      }
     ]
    }
@@ -214,6 +249,13 @@
        "Filesystem      Size  Used Avail Use% Mounted on",
        "/dev/nvme0n1p2  1.8T  1.6T  114G  94% /"
       ]
+     }
+    ],
+    "maquinas": [
+     {
+      "nombre": "hall9000",
+      "ip": "192.0.2.5",
+      "puerto": 58291
      }
     ]
    }

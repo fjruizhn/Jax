@@ -50,6 +50,7 @@ class ConfigVigia:
     pausa: Path
     latido: Path
     latido_cada_s: float
+    maquinas: tuple  # auditor.Maquina de la misión: los lotes las llevan al auditor
 
 
 def _pausar(motivo: str, paso: int | None, cfg: ConfigVigia) -> None:
@@ -129,7 +130,7 @@ async def vigilar(cfg: ConfigVigia, auditar, fin: asyncio.Event, *, pausar=None,
                     pendientes[ev["tool_use_id"]] = A.Paso(p.n, p.herramienta, p.entrada, ev.get("es_error"))
             vencido = primero_pendiente is not None and reloj() - primero_pendiente >= cfg.intervalo_s
             if pendientes and (len(pendientes) >= cfg.lote_max or vencido or fin.is_set()):
-                lote = A.Lote(cfg.mision, tuple(pendientes.values()), ())
+                lote = A.Lote(cfg.mision, tuple(pendientes.values()), (), cfg.maquinas)
                 pendientes, primero_pendiente = {}, None
                 try:
                     revision = await auditar(lote)

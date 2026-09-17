@@ -161,7 +161,8 @@ class Falsas:
         return [{"evento": "herramienta_pedida", "tool_use_id": "t1"},
                 {"evento": "resultado_devuelto", "tool_use_id": "t1", "sha256": _sha(LINEA + "\n")}]
 
-    async def auditar(self, texto, entrega):
+    async def auditar(self, texto, entrega, maquinas):
+        self.maquinas_auditadas = maquinas
         if self.auditor_revienta:
             raise ValueError("json_invalido")
         if self.revision is not None:
@@ -223,9 +224,9 @@ def test_el_vigia_y_el_auditor_juzgan_el_turno_con_su_instruccion():
     textos = []
     auditar = f.auditar
 
-    async def anota(texto, entrega):
+    async def anota(texto, entrega, maquinas):
         textos.append(texto)
-        return await auditar(texto, entrega)
+        return await auditar(texto, entrega, maquinas)
     f.auditar = anota
     _correr(f, _turno(n=2, objetivo="memoria de la VM", instruccion="ahora el kernel"))
     (vigia,) = [x for x in f.llamadas if isinstance(x, tuple) and x[0] == "vigia"]
@@ -371,3 +372,11 @@ def test_una_excepcion_inesperada_cierra_el_vigia_y_se_propaga():
     with pytest.raises(RuntimeError):
         _correr(f)
     assert "cerrar_vigia" in f.llamadas
+
+
+def test_el_auditor_final_recibe_las_maquinas_de_la_mision_con_su_direccion():
+    """Misión real 2026-09-17 11:23: sin las máquinas, el auditor juzgó «otra máquina» el ssh a la VM elegida."""
+    f = Falsas()
+    _correr(f)
+    assert [(m.nombre, m.ip) for m in f.maquinas_auditadas] == [("ejecutor-prueba", "192.0.2.50")]
+
