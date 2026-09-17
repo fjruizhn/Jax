@@ -66,3 +66,12 @@ def test_mision_sin_hosts_no_arranca():
 @pytest.mark.parametrize("cambios", [{"auditor_es_local": True}, {"admite_datos_de_clientes": True}])
 def test_compuerta_abierta_o_auditor_local(cambios):
     assert _validar(hosts_mision=frozenset({"bridge"}), **cambios) == ()
+
+
+def test_validar_proveedores_sin_mision():
+    """El arranque sin misión (plan 6) sólo mira quién produce y quién aprueba."""
+    assert E.validar_proveedores(proveedor_cerebro="ollama", proveedor_auditor="openai") == ()
+    assert E.validar_proveedores(proveedor_cerebro="ollama", proveedor_auditor="ollama") == (
+        Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro"),)
+    assert E.validar_proveedores(proveedor_cerebro="", proveedor_auditor="openai") == (
+        Fallo("c5", "proveedor_desconocido"),)
