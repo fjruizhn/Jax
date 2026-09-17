@@ -11,50 +11,22 @@ SI tiene sentido para ese camino: "¿puede este caller hablar con este
 facet?" -- nada mas. No toca la tabla `capability`.
 
 Modulo con I/O real (a diferencia de policy.py, "puro, sin I/O") --
-consulta facet.allowed_callers directo, mismo patron de conexion que
-facet_resolver.py::_db_conn().
+consulta facet.allowed_callers directo.
+
+CONEXION (2026-09-17): del pool compartido de Jacobs (`jacobs.store.conexion`),
+no una conexion suelta. Este camino corre en CADA `POST /authorize-facet` (uno
+por turno de la Mesa web a un facet HTTP): abrir y cerrar un socket por pedido
+es exactamente lo que agoto los puertos del host en la carga del frente F. El
+guard fail-closed de JAX_DB_HOST/JAX_DB_PORT y el connect_timeout viven en el
+store.
 
 En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
 import json
-import os
 
-import aiomysql
-
-try:
-    # Producción (uvicorn, WorkingDirectory=las_manos): jax.core no es
-    # importable desde ahi, medido 2026-09-14 -- db_connect_config.py vive
-    # symlinkeado directo en las_manos/ (mismo patron que facet_resolver.py).
-    from db_connect_config import db_connect_timeout_seconds
-except ImportError:
-    from jax.core.db_connect_config import db_connect_timeout_seconds
-
-
-async def _db_conn() -> aiomysql.Connection:
-    host = os.environ.get("JAX_DB_HOST")
-    port = os.environ.get("JAX_DB_PORT")
-    if not host or not port:
-        raise RuntimeError(
-            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
-            "silencioso a localhost:3306 (esa instancia está muerta, ver "
-            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
-            "exportalos a mano antes de conectar."
-        )
-    return await aiomysql.connect(
-        host=host,
-        port=int(port),
-        user=os.getenv("JAX_DB_USER", ""),
-        password=os.getenv("JAX_DB_PASSWORD", ""),
-        db=os.getenv("JAX_DB_NAME", "jax_memory"),
-        charset="utf8mb4",
-        autocommit=True,
-        # Hallazgo de revisión, Tarea 2b (tanda A, ronda de arreglo 1,
-        # 2026-09-14): sin esto, aiomysql espera sin límite si la DB se
-        # cuelga (ver jax/core/db_connect_config.py).
-        connect_timeout=db_connect_timeout_seconds(),
-    )
+from jacobs import store as jacobs_store
 
 
 async def check_facet_admission(caller: str, facet: str) -> tuple[bool, str]:
@@ -78,16 +50,13 @@ async def check_facet_admission(caller: str, facet: str) -> tuple[bool, str]:
     Jacobs también consulte esta función, y que la columna pase a ser el
     gate real de nivel facet para ambos caminos).
     """
-    conn = await _db_conn()
-    try:
+    async with jacobs_store.conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT allowed_callers FROM facet WHERE `key`=%s",
                 (facet,),
             )
             row = await cur.fetchone()
-    finally:
-        conn.close()
 
     if row is None:
         return False, f"facet desconocido: '{facet}'"

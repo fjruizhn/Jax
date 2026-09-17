@@ -123,7 +123,7 @@ async def main():
         muscle = HttpMuscle(
             name=FACET, provider="openai", model_default="gpt-5.5",
             models_allowed=["gpt-5.5"], system_prompt="probe", timeout=30,
-            authority_origin="", api_url="",
+            authority_origin="", api_url="https://api.openai.example/v1/chat/completions",
         )
 
         with patch.object(httpx.AsyncClient, "stream", lambda self, method, url, **kw: _FakeStreamCtx("gpt-5.5", "hola")):

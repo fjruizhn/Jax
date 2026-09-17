@@ -20,18 +20,16 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
-import os
 from abc import ABC, abstractmethod
 
-import httpx
 import json
 
-from jax.core.crypto_secrets import decrypt_secret
 from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
 from jax.core.model_catalog import record_resolved_version_safe
 from jax.core.grounding_sources import build_sources, render_sources_block, resolve_redirects
 from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from jax.core.redaccion import recortar_redactado
+from jax.core.cliente_http_compartido import obtener_cliente_http
 
 # provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
 # "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
@@ -43,6 +41,20 @@ _PROVIDER_ID_MAP = {
     "zhipu": "zhipu",
     "zai": "zhipu",
 }
+
+
+def _sin_autoetiqueta(texto: str, etiqueta: str) -> str:
+    """Quita las líneas en que el MODELO imita el origen de autoridad que el
+    SISTEMA agrega después (_append_authority, Decisión 3). La cabecera sale de
+    la etiqueta configurada (config.toml, `authority_origin`): lo que está
+    antes del primer ':' -- p. ej., para kimi, el prefijo con el emoji de
+    engranaje seguido de "Origen de autoridad". Antes era un literal de kimi
+    en dos copias y las demás facetas no se limpiaban (E-15)."""
+    cabecera = etiqueta.split(":", 1)[0].strip() if etiqueta else ""
+    if not cabecera:
+        return texto.strip()
+    lineas = [l for l in texto.splitlines() if not l.strip().startswith(cabecera)]
+    return "\n".join(lineas).strip()
 
 
 # --- Politica de grounding (Decision 1: por TAREA, no por faceta) ------------
@@ -218,6 +230,18 @@ class HttpMuscle(Muscle):
         except ModelDispatchConfigError as e:
             raise DispatchConfigMuscleError(f"[{self.name}] dispatch abortado: {e}") from e
 
+    def _url_del_catalogo(self) -> str:
+        """E-21 (2026-09-16): la URL del proveedor sale SOLO del catálogo
+        (provider.base_url, puesta en api_url por registro_facetas al arrancar).
+        Antes había URLs de OpenAI/DeepSeek/Gemini como default: con la DB
+        caída se despachaba a una URL que nadie eligió."""
+        if not self.api_url:
+            raise MuscleInvocationError(
+                f"[{self.name}] sin URL del proveedor: sale del catálogo (provider.base_url) "
+                f"al arrancar y el catálogo no la dio; no se despacha a una URL fija."
+            )
+        return self.api_url
+
     def _append_authority(self, text: str) -> str:
         # Gemini ya inserta su etiqueta de verificacion (dinamica, segun la
         # politica de grounding) dentro de _call_gemini. No la duplicamos.
@@ -238,10 +262,9 @@ class HttpMuscle(Muscle):
     async def _call_deepseek(
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
-        # PR-K ronda 2 (I1): URL del proveedor del modelo en el catálogo; el
-        # default solo para el arranque sin DB.
-        url = self.api_url or "https://api.deepseek.com/chat/completions"
-        headers = {"Authorization": f"Bearer {await self._resolve_api_key()}"}
+        url = self._url_del_catalogo()
+        api_key = await self._resolve_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"}
 
         # messages = system + historial previo + mensaje actual.
         # El historial ya viene en formato {"role": "user"|"assistant", ...},
@@ -257,33 +280,31 @@ class HttpMuscle(Muscle):
             "stream": False,
             **await self._limite_de_salida(model),
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code != 200:
-                raise MuscleInvocationError(
-                    f"[{self.name}] DeepSeek HTTP {resp.status_code}: {resp.text[:200]}"
-                )
-            data = resp.json()
-            msg = data["choices"][0]["message"]
-            texto = msg.get("content") or ""
-            # Kimi K2.7 incluye reasoning_content separado — ignorarlo.
-            # Limpiar auto-etiquetas que el modelo genere dentro del content.
-            lineas = [l for l in texto.splitlines()
-                      if not l.strip().startswith("⚙️ *Origen")]
+        resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=self.timeout)
+        if resp.status_code != 200:
+            raise MuscleInvocationError(
+                f"[{self.name}] DeepSeek HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [api_key])}"
+            )
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+        texto = msg.get("content") or ""
 
         # D1.2 — best-effort, fuera del try/response: nunca debe poder
         # romper la respuesta al usuario (record_resolved_version_safe ya
         # atrapa sus propias excepciones).
         await record_resolved_version_safe(self.name, data.get("model"))
-        return "\n".join(lineas).strip()
+        # Kimi K2.7 trae reasoning_content aparte: no se usa. La autoetiqueta
+        # que el modelo imite se quita con la cabecera configurada (E-15).
+        return _sin_autoetiqueta(texto, self.authority_origin)
 
 
     async def _call_openai(
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
-        url = self.api_url if self.api_url else "https://api.openai.com/v1/chat/completions"
+        url = self._url_del_catalogo()
+        api_key = await self._resolve_api_key()
         headers = {
-            "Authorization": f"Bearer {await self._resolve_api_key()}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         messages = [{"role": "system", "content": self.system_prompt}]
@@ -298,45 +319,43 @@ class HttpMuscle(Muscle):
         }
         texto = ""
         resolved_version = None
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    raise MuscleInvocationError(
-                        f"[{self.name}] OpenAI HTTP {resp.status_code}: {body[:200]!r}"
-                    )
-                partes = []
-                async for linea in resp.aiter_lines():
-                    if not linea or not linea.startswith("data:"):
-                        continue
-                    payload_str = linea[5:].strip()      # quita "data:"
-                    if payload_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(payload_str)
-                    except json.JSONDecodeError:
-                        continue
-                    # D1.2 — cada chunk trae 'model' (el resuelto, no el
-                    # alias pedido); alcanza con el primero, es constante
-                    # durante todo el stream.
-                    if resolved_version is None:
-                        resolved_version = chunk.get("model")
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta") or {}
-                    pieza = delta.get("content")
-                    if pieza:
-                        partes.append(pieza)
-                texto = "".join(partes)
+        async with obtener_cliente_http().stream("POST", url, headers=headers, json=payload, timeout=self.timeout) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [api_key])
+                raise MuscleInvocationError(
+                    f"[{self.name}] OpenAI HTTP {resp.status_code}: {cuerpo}"
+                )
+            partes = []
+            async for linea in resp.aiter_lines():
+                if not linea or not linea.startswith("data:"):
+                    continue
+                payload_str = linea[5:].strip()      # quita "data:"
+                if payload_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload_str)
+                except json.JSONDecodeError:
+                    continue
+                # D1.2 — cada chunk trae 'model' (el resuelto, no el
+                # alias pedido); alcanza con el primero, es constante
+                # durante todo el stream.
+                if resolved_version is None:
+                    resolved_version = chunk.get("model")
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                pieza = delta.get("content")
+                if pieza:
+                    partes.append(pieza)
+            texto = "".join(partes)
 
         await record_resolved_version_safe(self.name, resolved_version)
 
-        # Kimi K2.7 incluye reasoning_content separado — ignorarlo (no llega en delta).
-        # Limpiar auto-etiquetas que el modelo genere dentro del content.
-        lineas = [l for l in texto.splitlines()
-                  if not l.strip().startswith("⚙️ *Origen")]
-        return "\n".join(lineas).strip()
+        # Kimi K2.7 trae reasoning_content aparte: no se usa. La autoetiqueta
+        # que el modelo imite se quita con la cabecera configurada (E-15).
+        return _sin_autoetiqueta(texto, self.authority_origin)
 
     @staticmethod
     def _extract_gemini(data: dict) -> tuple[str, list, list, list]:
@@ -373,9 +392,8 @@ class HttpMuscle(Muscle):
     ) -> str:
         api_key = await self._resolve_api_key()
         # PR-K ronda 2 (I1): la URL base sale del proveedor del modelo en el
-        # catálogo (registro_facetas.aplicar_registro la pone en api_url). El
-        # default solo queda para el arranque sin DB (config.toml completo).
-        base = self.api_url or "https://generativelanguage.googleapis.com/v1beta"
+        # catálogo (registro_facetas.aplicar_registro la pone en api_url).
+        base = self._url_del_catalogo()
         # Ruling T6-6 (2026-09-15): la key va en la cabecera x-goog-api-key,
         # NO en `?key=` (httpx loguea la URL entera en INFO y la mete en
         # str(HTTPStatusError)).
@@ -409,16 +427,15 @@ class HttpMuscle(Muscle):
                 # functionDeclarations). El retry estricto (Decision 6) es el
                 # mecanismo real para forzar la busqueda.
                 payload["tools"] = [{"google_search": {}}]
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code != 200:
-                    # Google devuelve la key rechazada DENTRO del cuerpo del
-                    # error: redactar antes de recortar.
-                    cuerpo = recortar_redactado(resp.text, 200, [api_key])
-                    raise MuscleInvocationError(
-                        f"[{self.name}] Gemini HTTP {resp.status_code}: {cuerpo}"
-                    )
-                return resp.json()
+            resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=self.timeout)
+            if resp.status_code != 200:
+                # Google devuelve la key rechazada DENTRO del cuerpo del
+                # error: redactar antes de recortar.
+                cuerpo = recortar_redactado(resp.text, 200, [api_key])
+                raise MuscleInvocationError(
+                    f"[{self.name}] Gemini HTTP {resp.status_code}: {cuerpo}"
+                )
+            return resp.json()
 
         # Intento 1.
         data = await _request()

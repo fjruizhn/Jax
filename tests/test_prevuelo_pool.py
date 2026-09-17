@@ -57,6 +57,18 @@ class _Cursor:
     def __init__(self, conn):
         self._conn = conn
 
+    # Merge 2026-09-17: en aiomysql `conn.cursor(...)` es AWAITABLE además de
+    # usarse con `async with`, y el envoltorio del pool (store.ConexionVigilada)
+    # lo await-ea. La base falsa lo imita para no probar contra una cañería que
+    # no existe.
+    def __await__(self):
+        async def _yo():
+            return self
+        return _yo().__await__()
+
+    async def close(self):
+        return None
+
     async def __aenter__(self):
         return self
 
@@ -95,6 +107,11 @@ class _Conexion:
 
     def get_transaction_status(self):
         return False
+
+    # Merge 2026-09-17: store._sesion_reutilizable mira las tres cosas que
+    # aiomysql expone de la sesión antes de devolver la conexión al pool.
+    def get_autocommit(self):
+        return True
 
 
 class _Base:
@@ -196,7 +213,11 @@ def test_los_dos_lectores_reciben_la_misma_conexion(base, monkeypatch):
         await pv.prevuelo(_plan(), {})
 
     _correr(cuerpo)
-    assert len(vistas) == 2 and vistas[0] is vistas[1] is base.abiertas[0]
+    # Merge 2026-09-17: los dos lectores reciben el MISMO envoltorio del pool;
+    # la conexión real detrás es la única abierta.
+    assert len(vistas) == 2 and vistas[0] is vistas[1]
+    # Y detrás del envoltorio hay UNA sola conexión abierta en el proceso.
+    assert len(base.abiertas) == 1
 
 
 def test_prevuelos_concurrentes_no_superan_el_tamano_del_pool(base, monkeypatch):
@@ -355,13 +376,17 @@ def test_un_error_de_python_a_mitad_de_lectura_tampoco_devuelve_la_conexion(base
     """No sólo los errores de red: un error cualquiera dentro del bloque (p. ej.
     `_modo_valido` que lanza por un `capability.mode` inválido) puede dejar
     filas sin leer en el socket. Esa conexión no se reusa."""
+    # Merge 2026-09-17: `conexion()` entrega una ConexionVigilada que se
+    # INVALIDA al salir del bloque (nadie manda SQL por un socket que ya es
+    # de otro pedido). Para mirar la conexión real después del bloque hay
+    # que quedarse con `.crudo` DENTRO.
     async def cuerpo():
         with pytest.raises(RuntimeError):
             async with store.conexion_del_pool() as conn:
-                usada = conn
+                usada = conn.crudo
                 raise RuntimeError("capability 'x': mode None fuera de ...")
         async with store.conexion_del_pool() as conn:
-            siguiente = conn
+            siguiente = conn.crudo
         return usada, siguiente
 
     usada, siguiente = _correr(cuerpo)
@@ -374,10 +399,10 @@ def test_una_conexion_que_la_base_corto_en_reposo_no_se_reusa(base):
     la descarta al pedirla (EOF en el socket) en vez de entregarla."""
     async def cuerpo():
         async with store.conexion_del_pool() as conn:
-            primera = conn
+            primera = conn.crudo
         primera._reader.eof = True
         async with store.conexion_del_pool() as conn:
-            segunda = conn
+            segunda = conn.crudo
         return primera, segunda
 
     primera, segunda = _correr(cuerpo)
@@ -385,47 +410,46 @@ def test_una_conexion_que_la_base_corto_en_reposo_no_se_reusa(base):
     assert primera.closed
 
 
-def test_el_pool_de_otro_event_loop_no_se_usa_en_silencio(base):
-    """Un pool queda atado al loop que lo creó: usarlo desde otro loop VIVO
-    fallaría más tarde con un error críptico. Se niega de entrada, fail-closed.
-    (R38: antes el loop dueño del test ya estaba cerrado; ese caso ahora
-    reemplaza el pool -- test siguiente.)"""
-    async def crear():
-        async with store.conexion_del_pool():
-            pass
+# Merge 2026-09-17: el pool que quedó es el del frente F, que lleva UN POOL POR
+# EVENT LOOP en un registro (`store._pools`) en vez de un único pool atado al
+# primer loop. La propiedad que estos tests cuidan es la misma y sigue valiendo:
+# una conexión NUNCA cruza de loop, y el pool de un loop que terminó no queda
+# vivo ni en el registro. Lo que cambia es el modo: antes se negaba con
+# RuntimeError, ahora cada loop tiene el suyo.
+
+def test_cada_event_loop_tiene_su_propio_pool(base):
+    """Dos loops VIVOS no comparten pool ni conexión: nada se usa en silencio
+    desde el loop equivocado (lo que antes fallaba más tarde con un error
+    críptico). Cada uno abre y cierra el suyo."""
+    async def usar():
+        async with store.conexion_del_pool() as conn:
+            return conn.crudo
 
     duenio = asyncio.new_event_loop()
     try:
-        duenio.run_until_complete(crear())  # sin cerrar_pool y con el loop VIVO
-        async def usar():
-            async with store.conexion_del_pool():
-                pass
-        with pytest.raises(RuntimeError, match="otro event loop"):
-            asyncio.run(usar())
+        primera = duenio.run_until_complete(usar())
+        assert len(store._pools) == 1
+        segunda = asyncio.run(usar())
     finally:
         duenio.run_until_complete(store.cerrar_pool())
         duenio.close()
-    assert store._pool_estado is None
+    assert segunda is not primera, "dos loops compartieron la misma conexión"
+    assert store._pools == {}, "quedaron pools de loops terminados en el registro"
 
 
 def test_al_apagarse_el_loop_el_pool_se_cierra_y_el_siguiente_crea_otro(base):
     """Ruling R38: el store entero pasa por el pool y los tests/scripts corren
     un asyncio.run por llamada. Al apagarse el loop (shutdown_asyncgens) el
-    pool se cierra en ESE loop -- sin RuntimeError en el loop siguiente y sin
-    sockets que el recolector tenga que cerrar sobre un loop muerto.
-    Expected contra 2fd3778: el segundo asyncio.run choca con el pool viejo,
-    que sigue abierto -> RuntimeError 'otro event loop'."""
+    pool se cierra en ESE loop -- sin sockets que el recolector tenga que
+    cerrar sobre un loop muerto, y sin entradas muertas en el registro."""
     async def usar():
         async with store.conexion_del_pool() as conn:
-            return conn
+            return conn.crudo
 
-    try:
-        primera = asyncio.run(usar())  # sin cerrar_pool
-        estado_tras_el_primer_loop = store._pool_estado
-        segunda = asyncio.run(usar())
-    finally:
-        store._pool_estado = None
-    assert estado_tras_el_primer_loop is None
+    primera = asyncio.run(usar())  # sin cerrar_pool
+    registro_tras_el_primer_loop = dict(store._pools)
+    segunda = asyncio.run(usar())
+    assert registro_tras_el_primer_loop == {}
     assert primera.closed, "la conexión del loop apagado quedó abierta"
     assert segunda is not primera and segunda.closed
     assert len(base.abiertas) == 2
@@ -433,26 +457,21 @@ def test_al_apagarse_el_loop_el_pool_se_cierra_y_el_siguiente_crea_otro(base):
 
 def test_un_pool_de_un_loop_cerrado_sin_apagado_se_reemplaza(base):
     """Un loop cerrado a mano (loop.close() sin shutdown_asyncgens) no corre
-    el guardián: su pool no puede volver a usarse nunca. El loop siguiente
-    crea otro en vez de fallar con 'otro event loop'.
-    Expected contra 2fd3778: RuntimeError 'otro event loop'."""
+    el guardián: su entrada queda en el registro. El loop siguiente la purga y
+    crea el suyo en vez de fallar."""
     async def usar():
         async with store.conexion_del_pool() as conn:
-            return conn
+            return conn.crudo
 
     viejo_loop = asyncio.new_event_loop()
     try:
         primera = viejo_loop.run_until_complete(usar())
-        viejo = store._pool_estado
     finally:
         viejo_loop.close()
-    try:
-        segunda = asyncio.run(usar())
-    finally:
-        store._pool_estado = None
-    assert viejo is not None
+    segunda = asyncio.run(usar())
     assert segunda is not primera
     assert len(base.abiertas) == 2
+    assert store._pools == {}, "el registro quedó con la entrada del loop muerto"
 
 
 def test_from_db_sin_conexion_inyectada_sigue_abriendo_y_cerrando_la_suya(base):

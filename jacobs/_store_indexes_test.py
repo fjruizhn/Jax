@@ -44,11 +44,12 @@ COLUMNAS_CONSULTADAS = [
 
 class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Pool por loop: cada test trae el suyo y lo cierra (jacobs/store.py).
+        self.addAsyncCleanup(store.cerrar_pool)
         await store.init_tables()
 
     async def _indice_de(self, tabla: str, columna: str) -> int:
-        conn = await store.get_conn()
-        try:
+        async with store.conexion() as conn:
             async with conn.cursor() as cur:
                 # SEQ_IN_INDEX=1: la columna tiene que ser la PRIMERA del
                 # indice. Ser la segunda de un compuesto no sirve para filtrar
@@ -63,8 +64,6 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
                 )
                 (n,) = await cur.fetchone()
                 return n
-        finally:
-            conn.close()
 
     async def test_toda_columna_consultada_tiene_indice_que_la_encabeza(self):
         faltantes = []
@@ -79,8 +78,7 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def _columnas_del_indice(self, tabla: str, indice: str) -> list[str]:
-        conn = await store.get_conn()
-        try:
+        async with store.conexion() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
@@ -89,8 +87,6 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
                     (tabla, indice),
                 )
                 return [r[0] for r in await cur.fetchall()]
-        finally:
-            conn.close()
 
     async def test_indice_de_duenio_de_jacobs_pipelines(self):
         """Ruling T6-6 (2026-09-15): jax-platform lista los pipelines de un
@@ -102,13 +98,10 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
         2026-09-15, la jax_memory_test local ya lo tenia (lo creo otro camino,
         no init_tables), y el test pasaba sin el cambio -- un control que no
         falla no valida. Solo toca la base forzada arriba (jax_memory_test)."""
-        conn = await store.get_conn()
-        try:
+        async with store.conexion() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "DROP INDEX IF EXISTS idx_jacobs_pipelines_duenio ON jacobs_pipelines")
-        finally:
-            conn.close()
         await store.init_tables()
         self.assertEqual(
             await self._columnas_del_indice("jacobs_pipelines", "idx_jacobs_pipelines_duenio"),

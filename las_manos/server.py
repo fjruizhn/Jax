@@ -5,7 +5,7 @@ El único punto por donde las facetas de JAX tocan el mundo real.
 FastAPI escuchando SOLO en 127.0.0.1:7777 (sin exposición de red en fase 1).
 
 Flujo de cada /execute:
-    1. Kill switch  — ¿existe /etc/jax/PAUSE? Si sí, nada se ejecuta.
+    1. Kill switch  — ¿existe el archivo de JAX_KILL_SWITCH_PATH? Si sí, nada se ejecuta.
     2. audit.log_request
     3. policy.check — faceta, ambiente, operación, comando.
     4. human gate   — si la operación lo exige, validar token de Fernando.
@@ -28,9 +28,6 @@ import json
 import logging
 import os
 import time
-import uuid
-import secrets
-import hashlib
 import tomllib
 from pathlib import Path
 
@@ -46,6 +43,12 @@ from policy import PolicyEngine
 from planner import Planner
 from envelope import IntentEnvelope, validate as validate_envelope
 from workers import ssh_worker, file_worker, rsync_worker
+from interruptor import interruptor_activo, ruta_del_interruptor
+import human_gate
+
+# El freno ANTES de cualquier otra configuración (2026-09-16, frente B): sin
+# JAX_KILL_SWITCH_PATH, LAS MANOS no arrancan (InterruptorSinConfigurar).
+KILL_SWITCH = ruta_del_interruptor()
 
 
 # ------------------------------------------------------------
@@ -73,73 +76,18 @@ CONFIG["environments"] = _load_environments()
 
 SERVER_CFG = CONFIG["server"]
 GATE_CFG = CONFIG["human_gate"]
-KILL_SWITCH = Path(SERVER_CFG["kill_switch_path"])
 
 audit = AuditLog(SERVER_CFG["audit_log"])
 policy = PolicyEngine(CONFIG)
 planner = Planner(CONFIG)
 
-# El freno en la carretera: el ssh_worker vigila este path durante CADA
-# ejecución y aborta en vuelo si aparece. Lo configuramos al arrancar.
-ssh_worker.KILL_SWITCH_PATH = str(KILL_SWITCH)
-
 
 # ------------------------------------------------------------
-#  Human gate — tokens de aprobación de un solo uso
+#  Human gate — tokens de aprobación de un solo uso (las_manos/human_gate.py).
+#  Sin ruta HTTP de emisión: los emite las_manos/emitir_token_gate.py con la
+#  credencial de la base. El TTL se valida al importar (fail-closed).
 # ------------------------------------------------------------
-class HumanGate:
-    """Tokens efímeros que Fernando genera para aprobar operaciones."""
-
-    def __init__(self, ttl: int, length: int, gate_log: str) -> None:
-        self.ttl = ttl
-        self.length = length
-        self.gate_log = Path(gate_log)
-        self.gate_log.parent.mkdir(parents=True, exist_ok=True)
-        # token -> {"expires": epoch, "used": bool}
-        self._tokens: dict[str, dict] = {}
-
-    def _log(self, entry: dict) -> None:
-        entry["@timestamp"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        with open(self.gate_log, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-    def issue(self) -> dict:
-        """Genera un token nuevo. TTL en segundos según config."""
-        token = secrets.token_hex(self.length // 2)
-        expires = time.time() + self.ttl
-        self._tokens[token] = {"expires": expires, "used": False}
-        self._log({
-            "event": "TOKEN_ISSUED",
-            "token_hash": hashlib.sha256(token.encode()).hexdigest()[:16],
-            "ttl_seconds": self.ttl,
-        })
-        return {"token": token, "ttl_seconds": self.ttl, "expires_epoch": expires}
-
-    def validate(self, token: str | None) -> tuple[bool, str]:
-        """Valida y consume un token. Un token solo sirve una vez."""
-        if not token:
-            return False, "Falta human_gate_token para una operación que lo requiere"
-        rec = self._tokens.get(token)
-        if rec is None:
-            return False, "Token desconocido o ya descartado"
-        if rec["used"]:
-            return False, "Token ya usado (un solo uso)"
-        if time.time() > rec["expires"]:
-            del self._tokens[token]
-            return False, "Token expirado"
-        rec["used"] = True  # consumido
-        self._log({
-            "event": "TOKEN_CONSUMED",
-            "token_hash": hashlib.sha256(token.encode()).hexdigest()[:16],
-        })
-        return True, "Token válido"
-
-
-gate = HumanGate(
-    ttl=GATE_CFG["token_ttl_seconds"],
-    length=GATE_CFG["token_length"],
-    gate_log=GATE_CFG["gate_log"],
-)
+human_gate.ttl_segundos(GATE_CFG)
 
 
 # ------------------------------------------------------------
@@ -206,7 +154,7 @@ def _extract_command(operation: str, params: dict) -> str | None:
 
 
 def _kill_switch_active() -> bool:
-    return KILL_SWITCH.exists()
+    return interruptor_activo(KILL_SWITCH)
 
 
 # ------------------------------------------------------------
@@ -221,6 +169,12 @@ app = FastAPI(
     description="Sistema de capacidades de JAX — en memoria de Jairo Urbina.",
     version="1.0.0",
 )
+
+# Autenticación de servicio (2026-09-17): deny by default, la identidad sale de
+# la credencial y no del cuerpo. Sin las credenciales en /etc/jax/.env, LAS
+# MANOS no arranca (EntornoInvalido). Ver las_manos/auth_servicio.py.
+from auth_servicio import proteger  # noqa: E402
+proteger(app)
 
 
 @app.on_event("startup")
@@ -242,6 +196,19 @@ async def _jacobs_init() -> None:
         _ch = logging.StreamHandler()
         _ch.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
         _credlog.addHandler(_ch)
+
+    # Frente F (2026-09-16): la config del contrato de sub-pipelines se valida
+    # al arrancar. Un valor inválido en /etc/jax/.env tumba LAS MANOS acá
+    # (fail-closed) en vez de descubrirse en el primer hijo de Ada.
+    from jacobs.subpipelines import config_subpipelines
+    config_subpipelines()
+
+    # Pool de conexiones de Jacobs (2026-09-17): el tamano se valida ACA, antes
+    # de conectar. JAX_JACOBS_DB_POOL_SIZE invalido tumba el arranque
+    # (fail-closed). init_tables() crea el pool de este loop; se cierra en
+    # _jacobs_shutdown.
+    jacobs_store.tamanio_pool()
+
     await jacobs_store.init_tables()
 
     from motor_registry.routes import init_motor_catalog
@@ -281,11 +248,22 @@ async def _jacobs_init() -> None:
 
 
 @app.on_event("shutdown")
-async def _jacobs_cerrar() -> None:
-    # Task 15b (2026-09-17): el pool del store de Jacobs
-    # (jacobs/store.py::conexion_del_pool) se crea perezosamente en el
-    # primer pedido; al apagar se cierra acá, en el mismo event loop, y no
-    # quedan conexiones abiertas contra MariaDB esperando su wait_timeout.
+async def _cerrar_cliente_http() -> None:
+    """E-24: el cliente HTTP compartido del proceso se cierra al apagar."""
+    from cliente_http_compartido import cerrar_cliente_http
+    await cerrar_cliente_http()
+
+
+@app.on_event("shutdown")
+async def _jacobs_shutdown() -> None:
+    """Cierra el pool de conexiones de Jacobs: espera a que vuelvan las
+    conexiones en uso y las cierra, en vez de dejar que el proceso corte los
+    sockets a mitad de una consulta.
+
+    Task 15b (2026-09-17): el pool del store de Jacobs
+    (jacobs/store.py::conexion_del_pool) se crea perezosamente en el primer
+    pedido; al apagar se cierra acá, en el mismo event loop, y no quedan
+    conexiones abiertas contra MariaDB esperando su wait_timeout."""
     await jacobs_store.cerrar_pool()
 
 
@@ -327,7 +305,7 @@ async def envelope_structural_rejection(request: Request, exc: RequestValidation
 from salud import Salud, comprobar_audit, comprobar_base  # noqa: E402
 
 _salud = Salud({
-    "base de datos": lambda: comprobar_base(jacobs_store.get_conn),
+    "base de datos": lambda: comprobar_base(jacobs_store.conexion),
     "log de auditoria": lambda: comprobar_audit(audit.log_path),
 })
 
@@ -351,12 +329,6 @@ async def health(response: Response) -> dict:
         "comprobado_hace_s": _salud.comprobado_hace(),
         "cache_ttl_s": _salud._ttl,
     }
-
-
-@app.post("/human_gate/token")
-async def human_gate_token() -> dict:
-    """Fernando genera un token de aprobación (un solo uso, TTL config)."""
-    return gate.issue()
 
 
 @app.get("/audit/tail")
@@ -405,7 +377,7 @@ async def execute(req: IntentEnvelope) -> dict:
         audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}", **fx)
         raise HTTPException(
             status_code=423,  # Locked
-            detail="KILL SWITCH ACTIVO (/etc/jax/PAUSE) — LAS MANOS están detenidas",
+            detail="KILL SWITCH ACTIVO — LAS MANOS están detenidas",
         )
 
     # ---- 2) Registrar la solicitud ----
@@ -459,15 +431,17 @@ async def execute(req: IntentEnvelope) -> dict:
 
     # ---- 4) Human gate (si la política lo exige) ----
     if result.requires_human_gate:
-        ok, reason = gate.validate(req.approval_token)
+        veredicto = await human_gate.consumir_token_gate(
+            req.approval_token, uso=f"execute:{request_id}",
+        )
         audit.log_human_gate(
             request_id=request_id,
-            approved=ok,
+            approved=veredicto.aceptado,
             token_used=req.approval_token,
             **fx,
         )
-        if not ok:
-            raise HTTPException(status_code=401, detail=f"Human gate: {reason}")
+        if not veredicto.aceptado:
+            raise HTTPException(status_code=401, detail=f"Human gate: {veredicto.motivo.value}")
 
     # ---- 5) Dry-run (si la operación lo exige) ----
     dryrun_result = None

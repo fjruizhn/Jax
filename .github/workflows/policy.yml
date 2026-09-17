@@ -61,7 +61,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py -v
+      - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py policy/tests/test_ejecutor_lanza_solo_con_contratos.py -v
+      - name: Piso exacto de la guardia del arranque del Ejecutor
+        # 5 tests (Ejecutor SP1 plan 6, 2026-09-17): nadie usa remoto_claude ni vigilar sin
+        # exigir_contratos. Exacto: uno que desaparezca deja pasar un lanzador sin contratos.
+        run: |
+          python -m pytest -q policy/tests/test_ejecutor_lanza_solo_con_contratos.py 2>&1 | tee /tmp/lanza
+          grep -qE "^5 passed" /tmp/lanza || { echo "PISO ROTO: se esperaban 5 tests CORRIDOS."; exit 1; }
 
   # El scanner de arriba (no-naked-claude-subprocess) protege que nadie
   # lance `claude` fuera de hyde_sandbox.py -- pero hasta 2026-08-25 la
@@ -101,7 +107,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql pydantic
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: python -m pytest jacobs/_facet_health_test.py -v
 
   # `check_facet_health()` es la unica pieza del lector sin cobertura
@@ -141,6 +148,13 @@ jobs:
       # En cualquier otro lado (jax_memory_test compartida) se saltan. Único
       # lugar que define la variable (lo fija tests/test_facet_health_tabla_exclusiva.py).
       JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA: "1"
+      # las_manos en el path desde E-24 (2026-09-16): jacobs/plan.py, executor.py
+      # y reaper.py importan `cliente_http_compartido` por su nombre corto, como
+      # corren en produccion (dentro de LAS MANOS, con las_manos/ en sys.path).
+      # Importarlo como jax.core.* daria OTRO modulo y otro cliente, que el
+      # shutdown de LAS MANOS no cierra. Sin esto el job no colecta (visto en
+      # rojo al rebasar el frente E: ModuleNotFoundError en la coleccion).
+      PYTHONPATH: las_manos
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -151,7 +165,8 @@ jobs:
       # que importa httpx a nivel de modulo. Sin el, el job falla en la
       # COLECCION y no en un assert -- el mismo modo de falla que rompio
       # PR#25 en la ronda anterior.
-      - run: pip install pytest aiomysql pydantic httpx
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       # El guard de "no correr sin DB" es un skipif: un skip masivo se ve
       # como verde. Se exige que los 6 tests CORRAN de verdad.
       - run: python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py -v
@@ -177,6 +192,128 @@ jobs:
           #   base compartida) la misma lista da "6 passed, 3 skipped" -- no es este piso.
           grep -qE "^9 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
+
+  # Frente F (2026-09-16): contrato de sub-pipelines contra una MariaDB REAL.
+  # Las tablas de Jacobs (jacobs_pipelines/steps/events y la nueva
+  # jacobs_subpipeline_tokens) las crea ESTE repo con store.init_tables(): no
+  # hace falta clonar jax-platform. PYTHONPATH incluye las_manos/ porque la
+  # ruta importa executor -> credential_resolver (sin eso, error de coleccion).
+  # Deps medidas en un venv limpio antes de escribir esta lista.
+  #
+  # Lo que prueba y por que necesita base: la carrera de consumos (20 a la vez
+  # y un intercalado forzado con dos sesiones) y el EXPLAIN de la SQL real no
+  # existen sin InnoDB de verdad. Un doble de la base daria verde sin probar
+  # la atomicidad.
+  #
+  # Todo sale de requirements.txt (E-19; rebase del frente F sobre de6964e,
+  # 2026-09-17): jacobs/store.py depende de comportamiento de aiomysql revisado
+  # a mano, y jacobs/_store_pool_test.py::VersionDeAiomysqlTest falla si la
+  # instalada no es la revisada. Sin aiofiles (E-18 lo retiro).
+  subpipeline-contrato-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+      PYTHONPATH: .:las_manos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py
+      - name: Piso exacto de tests CORRIDOS
+        # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
+        run: |
+          python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
+            tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
+            las_manos/_human_gate_io_test.py 2>&1 | tee /tmp/out
+          # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
+          #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
+          #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
+          #   hace de Ada. Vistos en rojo contra master; carrera, EXPLAIN, orden del
+          #   kill switch y enmienda del paso validados por mutacion.
+          # 31 -> 34 el 2026-09-16 (revision final del frente F): +3 por la ruta --
+          #   error tras consumir deja SUBPIPELINE_RECHAZADO fase=creacion y relanza el
+          #   original (I-2), el hijo hereda la identidad del padre y un cuerpo con otra
+          #   identidad es 403 sin quemar el token (I-3). Los tres vistos en rojo.
+          # 34 -> 36 el 2026-09-17 (residual de I-2, R13): +2 por la ruta -- la
+          #   relectura tras el UPDATE confirmado falla con un error REAL de la base
+          #   y una cancelacion llega tras quemar el token (en el consumo y en la
+          #   creacion); en los dos: SUBPIPELINE_RECHAZADO sin el token, hijo no
+          #   creado, error relanzado. Vistos en rojo; mutacion de cada except a
+          #   `except Exception` vuelve a romper el de la cancelacion.
+          # 36 -> 61 el 2026-09-17 (pool de conexiones de Jacobs): +25 de
+          #   jacobs/_store_pool_test.py -- 20 llamadas concurrentes no abren 20
+          #   conexiones (rojo contra eb72e78: 20 de 20; en serie 30 de 30), sesion
+          #   identica a la conexion directa, sin fugas en excepcion/cancelacion/
+          #   autocommit apagado/transaccion abierta/desechable, espera y cierre
+          #   acotados, el que espera se despierta, un pool por loop cerrado al fin
+          #   del loop, tamano validado y server.py lo valida y lo cierra. Cada
+          #   guarda validada por mutacion (pool-report.md del frente F).
+          # 61 -> 71 el 2026-09-17 (revision de concurrencia del pool): +10 de
+          #   jacobs/_store_pool_test.py -- cancelar a quien libera no pierde el aviso
+          #   (rojo contra d50c9cd: TimeoutError falso con una conexion libre) y
+          #   cancelar a quien espera no bloquea al siguiente; 20 pedidos en frio crean
+          #   UN pool (rojo: 20); N loops terminados dejan 0 entradas (rojo: 6); la
+          #   transaccion abierta se descarta aunque aiomysql no lo haga; el permiso
+          #   vuelve si aiomysql falla al entregar; version de aiomysql = la revisada
+          #   y requirements la fija (rojo: sin constante); facet_policy y los dos
+          #   escritores de uso sin aiomysql.connect (rojo); 20 autorizaciones de facet
+          #   no abren 20 conexiones (rojo: 20). Medido: "71 passed" 35 corridas
+          #   seguidas con los tres archivos.
+          # 71 sin cambio tras el rebase sobre de6964e (2026-09-17): medido dos
+          #   veces, e instala desde requirements.txt como el resto (E-19).
+          # 71 -> 76 el 2026-09-17 (CI rojo de 13b7759: "20 conexiones para 20
+          #   autorizaciones"): la base de este job no tiene la tabla `facet`, la
+          #   consulta da 1146 y conexion() cerraba la conexion ante CUALQUIER
+          #   excepcion. En local la tabla existe y pasaba. +5 de
+          #   jacobs/_store_pool_test.py -- 20 errores de SQL concurrentes y 20
+          #   autorizaciones sin `facet` no abren 20 conexiones (rojo: 20), el error
+          #   del servidor devuelve la conexion sana, con transaccion abierta se
+          #   descarta, y los errores del cliente o fuera de la lista blanca se
+          #   descartan (cada guarda validada por mutacion).
+          # 76 -> 97 el 2026-09-17 (revisiones de 1a478d5 y b97e0fb): la
+          #   atribucion por traceback/pilas de tareas se reemplazo por un
+          #   envoltorio propio (ConexionVigilada/CursorVigilado) que marca el
+          #   error de la lista blanca ANTES de relanzarlo; solo ese objeto
+          #   devuelve la conexion. +21 de jacobs/_store_pool_test.py: error de
+          #   otra conexion (directa o del pool), re-envuelto, ajeno tras uno
+          #   marcado, SSCursor abierto y 1927 real -> se cierra; control sin
+          #   hermana y SSCursor cerrado -> vuelve; 1205 real con transaccion y
+          #   1213 real -> se cierra, 1205 en autocommit -> vuelve; 5 puros del
+          #   envoltorio (identidad, sin marca, fuera de lista, llamada hermana
+          #   en vuelo, cada metodo vigilado); 4 puros de la clasificacion;
+          #   PyMySQL fijado. Cada clase, codigo y guarda validados por mutacion.
+          #   Medido: "97 passed" dos corridas seguidas.
+          # 97 -> 101 el 2026-09-17 (revision de eca432b): al salir de conexion()
+          #   el envoltorio se invalida. +4 de jacobs/_store_pool_test.py: una
+          #   hermana que despierta despues no manda SQL a la sesion del pedido
+          #   siguiente (rojo contra eca432b: Com_select +1), todo acceso posterior
+          #   lanza ConexionInvalidada, tambien tras salir con error, y una
+          #   salida normal con una llamada propia en vuelo cierra la conexion.
+          #   Validados por mutacion. Medido: "101 passed" dos corridas seguidas.
+          # 101 -> 109 el 2026-09-17 (human gate sin emision HTTP): +8 de
+          #   las_manos/_human_gate_io_test.py -- tabla creada por init_tables sin
+          #   columna para el token, idempotente, emision con solo el sha256, un solo
+          #   uso, inventado, vencido, 20 consumos a la vez -> 1 gana, EXPLAIN por PK.
+          #   Mutacion: quitar `usado_at IS NULL` del UPDATE -> 2 rojos (un solo uso y
+          #   la carrera).
+          grep -qE "^109 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 109 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -220,7 +357,8 @@ jobs:
       # archivo NO COLECTA. Medido 2026-09-11 en un venv limpio con solo este
       # pip install (no en hall9000, donde todo esta instalado): con los 4
       # paquetes, 10 tests colectados; sin cryptography, error de coleccion.
-      - run: pip install pytest aiomysql httpx cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: >-
           PYTHONPATH=. python -m pytest -v
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
@@ -329,7 +467,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -v
       # Los 13 tests tienen que CORRER, no saltarse: dos de ellos se saltan
       # solos si el runner corriera como root (ningun permiso bloquea a root,
@@ -355,10 +494,9 @@ jobs:
   # instancia muerta 3306, y credential_resolver._db_conn -- siempre con la
   # misma forma: se cierra en un repo y sobrevive en el otro.
   #
-  # credential_resolver tiene TRES archivos reales, no dos: las_manos/ tiene
-  # copia propia y NO es un symlink (a diferencia de facet_resolver). Medido el
-  # 2026-09-01. Esa tercera copia puede driftear DENTRO del propio repo jax, y
-  # hasta hoy nadie la comparaba con nada.
+  # credential_resolver tuvo TRES archivos reales hasta el 2026-09-16: la copia
+  # de las_manos/ no era symlink. Desde E-11 lo es (igual crypto_secrets, E-10,
+  # y model_catalog), asi que dentro de jax queda un solo archivo por modulo.
   # El techo declarado en capability.max_execution_minutes es un techo de
   # verdad (2026-09-01). Antes no lo era: un timeout_seconds explicito en el
   # spec de un step pisaba el default y llegaba intacto a asyncio.wait_for --
@@ -382,7 +520,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql pydantic httpx cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -v
       - run: |
           PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -q 2>&1 | tee /tmp/ptc
@@ -424,7 +563,8 @@ jobs:
       # aiomysql: tests/test_cola_uso_escritores.py importa los dos escritores
       # reales, y los dos importan aiomysql. Con solo pytest el job fallaria en
       # la COLECCION, que es un rojo por otra razon.
-      - run: pip install aiomysql
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt
       - name: La copia de cola_uso.py es identica a la de jax-platform
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -448,6 +588,19 @@ jobs:
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
           grep -qE "^15 passed" /tmp/cu || {
             echo "PISO ROTO: se esperaban 15 tests CORRIDOS y 0 skipped."; exit 1; }
+      - name: El freno que escribe la plataforma mata el motor en vuelo
+        env:
+          JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
+          PYTHONPATH: .:las_manos
+        run: |
+          pip install -r requirements.txt pytest-asyncio
+          python -m pytest tests/test_interruptor_escritor_de_la_plataforma.py -q -rs 2>&1 | tee /tmp/ks
+          # 2026-09-16 (frente B, Task 3): la copia identica + el peor caso con el
+          # escritor real de la plataforma. Sin el checkout se saltan: se exige 0 skipped.
+          # Rebase 2026-09-17: sin aiofiles (E-19), desde requirements.txt. Medido dos
+          # veces contra jax-platform origin/master 97e4b3e (incluye #95): 2 passed.
+          grep -qE "^2 passed in" /tmp/ks || {
+            echo "PISO ROTO: se esperaban 2 tests CORRIDOS y 0 skipped."; exit 1; }
 
   ollama-num-parallel:
     # Tripwire del invariante del que cuelga ENTERA la decision de
@@ -512,7 +665,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pyyaml pydantic aiomysql==0.3.2
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - name: Suite de gobernanza
         run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -v
       - name: Piso exacto de tests CORRIDOS
@@ -565,11 +719,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # aiofiles: tests/test_hipatia_fuentes.py ejercita _persist_step_to_repo,
-      # que escribe con aiofiles (dependencia real de jacobs en produccion).
-      # fastapi==0.139.0: tests/test_motor_catalog_sello.py importa
-      # motor_registry.routes (pin de requirements.txt).
-      - run: pip install pytest pytest-asyncio aiomysql httpx cryptography pydantic pyyaml aiofiles fastapi==0.139.0
+      # Dependencias de servicio desde requirements.txt (E-19, 2026-09-16): el
+      # archivo es la fuente única; tests/test_requirements_completos.py falla si
+      # un import de terceros no está fijado ahí o si este job deja de usarlo.
+      - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
@@ -600,6 +753,43 @@ jobs:
           tests/test_ejecutor_prioridad.py
           tests/test_ejecutor_transporte.py
           tests/test_ejecutor_proxy_carril.py
+          tests/test_ejecutor_contratos_destinos.py
+          tests/test_ejecutor_contratos_politica.py
+          tests/test_ejecutor_contratos_gancho.py
+          tests/test_ejecutor_contratos_instalacion.py
+          tests/test_ejecutor_contratos_exportar.py
+          tests/test_ejecutor_contratos_cuenta_axioma.py
+          tests/test_ejecutor_contratos_canario_upstream.py
+          tests/test_ejecutor_contratos_canario_c1.py
+          tests/test_ejecutor_contratos_registro.py
+          tests/test_ejecutor_contratos_lectura.py
+          tests/test_ejecutor_contratos_cerco.py
+          tests/test_ejecutor_mision_de_humo.py
+          tests/test_ejecutor_contratos_canario_c3.py
+          tests/test_ejecutor_proxy_registro.py
+          tests/test_ejecutor_carril_solo_en_el_proxy.py
+          tests/test_ejecutor_revocar_sh.py
+          tests/test_ejecutor_contratos_revocacion.py
+          tests/test_ejecutor_contratos_pausa.py
+          tests/test_ejecutor_contratos_auditor.py
+          tests/test_ejecutor_contratos_auditor_cliente.py
+          tests/test_ejecutor_contratos_eleccion_c5.py
+          tests/test_ejecutor_contratos_vigia.py
+          tests/test_ejecutor_contratos_canario_c5.py
+          tests/test_ejecutor_proxy_pausa.py
+          tests/test_ejecutor_proxy_modelo_y_rutas.py
+          tests/test_ejecutor_prioridad_espejo.py
+          tests/test_ejecutor_sp3_config.py
+          tests/test_ejecutor_proxy_freno.py
+          tests/test_ejecutor_contratos_freno.py
+          tests/test_ejecutor_freno_remoto.py
+          tests/test_ejecutor_probar_c5_importa.py
+          tests/test_ejecutor_contratos_arranque.py
+          tests/test_ejecutor_vigia_servicio.py
+          tests/test_ejecutor_fase0_retirada.py
+          tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
+          tests/test_loadtest_apps_protegidas.py
+          tests/test_ejecutor_probar_c4_conteo_remoto.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -629,6 +819,26 @@ jobs:
           tests/test_jacobs_conexiones_por_pedido.py
           tests/test_facet_health_tabla_exclusiva.py
           tests/test_delete_de_tablas_compartidas.py
+          tests/test_frente_e_retiros.py
+          tests/test_max_steps_una_sola_constante.py
+          tests/test_plan_facetas_de_la_tabla.py
+          tests/test_espejos_symlink_frente_e.py
+          tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py
+          tests/test_documentos_del_repo.py
+          tests/test_requirements_completos.py
+          tests/test_sin_autoetiqueta.py
+          tests/test_errores_de_proveedor_redactados.py
+          tests/test_cliente_http_compartido.py
+          tests/test_conftest_aisla_facet_seal.py
+          tests/test_interruptor.py
+          tests/test_interruptor_lectores.py
+          tests/test_jacobs_interruptor.py
+          tests/test_repl_interruptor.py
+          tests/test_interruptor_sin_rutas_fijas.py
+          tests/test_interruptor_heredada.py
+          tests/test_subpipeline_contrato_puro.py
+          tests/test_human_gate_sin_emision_http.py
+          tests/test_las_manos_auth_servicio.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -661,6 +871,43 @@ jobs:
             tests/test_ejecutor_prioridad.py \
             tests/test_ejecutor_transporte.py \
             tests/test_ejecutor_proxy_carril.py \
+            tests/test_ejecutor_contratos_destinos.py \
+            tests/test_ejecutor_contratos_politica.py \
+            tests/test_ejecutor_contratos_gancho.py \
+            tests/test_ejecutor_contratos_instalacion.py \
+            tests/test_ejecutor_contratos_exportar.py \
+            tests/test_ejecutor_contratos_cuenta_axioma.py \
+            tests/test_ejecutor_contratos_canario_upstream.py \
+            tests/test_ejecutor_contratos_canario_c1.py \
+            tests/test_ejecutor_contratos_registro.py \
+            tests/test_ejecutor_contratos_lectura.py \
+            tests/test_ejecutor_contratos_cerco.py \
+            tests/test_ejecutor_mision_de_humo.py \
+            tests/test_ejecutor_contratos_canario_c3.py \
+            tests/test_ejecutor_proxy_registro.py \
+            tests/test_ejecutor_carril_solo_en_el_proxy.py \
+            tests/test_ejecutor_revocar_sh.py \
+            tests/test_ejecutor_contratos_revocacion.py \
+            tests/test_ejecutor_contratos_pausa.py \
+            tests/test_ejecutor_contratos_auditor.py \
+            tests/test_ejecutor_contratos_auditor_cliente.py \
+            tests/test_ejecutor_contratos_eleccion_c5.py \
+            tests/test_ejecutor_contratos_vigia.py \
+            tests/test_ejecutor_contratos_canario_c5.py \
+            tests/test_ejecutor_proxy_pausa.py \
+            tests/test_ejecutor_proxy_modelo_y_rutas.py \
+            tests/test_ejecutor_prioridad_espejo.py \
+            tests/test_ejecutor_sp3_config.py \
+            tests/test_ejecutor_proxy_freno.py \
+            tests/test_ejecutor_contratos_freno.py \
+            tests/test_ejecutor_freno_remoto.py \
+            tests/test_ejecutor_probar_c5_importa.py \
+            tests/test_ejecutor_contratos_arranque.py \
+            tests/test_ejecutor_vigia_servicio.py \
+            tests/test_ejecutor_fase0_retirada.py \
+            tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
+            tests/test_loadtest_apps_protegidas.py \
+            tests/test_ejecutor_probar_c4_conteo_remoto.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -690,6 +937,26 @@ jobs:
             tests/test_jacobs_conexiones_por_pedido.py \
             tests/test_facet_health_tabla_exclusiva.py \
             tests/test_delete_de_tablas_compartidas.py \
+            tests/test_frente_e_retiros.py \
+            tests/test_max_steps_una_sola_constante.py \
+            tests/test_plan_facetas_de_la_tabla.py \
+            tests/test_espejos_symlink_frente_e.py \
+            tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py \
+            tests/test_documentos_del_repo.py \
+            tests/test_requirements_completos.py \
+            tests/test_sin_autoetiqueta.py \
+            tests/test_errores_de_proveedor_redactados.py \
+            tests/test_cliente_http_compartido.py \
+            tests/test_conftest_aisla_facet_seal.py \
+            tests/test_interruptor.py \
+            tests/test_interruptor_lectores.py \
+            tests/test_jacobs_interruptor.py \
+            tests/test_repl_interruptor.py \
+            tests/test_interruptor_sin_rutas_fijas.py \
+            tests/test_interruptor_heredada.py \
+            tests/test_subpipeline_contrato_puro.py \
+            tests/test_human_gate_sin_emision_http.py \
+            tests/test_las_manos_auth_servicio.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -794,8 +1061,9 @@ jobs:
           #   parsea (SyntaxError) se saltaba en silencio -- ahora hace fallar el
           #   tripwire con su ruta salvo excepción explícita en _NO_PARSEA (+1:
           #   un archivo roto no declarado se reporta; el único caso real del
-          #   árbol, _director_patch/routes_block.py, se verifica declarado y sin
-          #   romper la corrida). Las 9 formas nuevas, vistas en rojo contra el
+          #   árbol entonces, _director_patch/routes_block.py, se verificaba
+          #   declarado -- retirado el 2026-09-16 (E-01): el control se ejercita
+          #   con un .py roto de mentira). Las 9 formas nuevas, vistas en rojo contra el
           #   detector viejo antes del arreglo (verificado aparte, no en CI).
           # 176 -> 199 el 2026-09-14 (PR-K, contrato de dispatch en el REPL y en Ada):
           #   test_contrato_dispatch_repl_ada.py (+19) -- el payload del HttpMuscle
@@ -1565,8 +1833,250 @@ jobs:
           #   el 503 lleva `detalle` diciendo que el continue puede haber empezado (mismo
           #   mecanismo de R41 que ya tenía crear: EstadoDeTransaccion); un fallo ANTES del
           #   COMMIT no lo dice (control). Rojo contra c0d4466: TimeoutError pelado.
-          grep -qE "^1137 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1137 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 742 -> 850 el 2026-09-17 (frente E de la auditoria, rebasado sobre 70e4303):
+          #   +108. Once archivos nuevos: config_entorno 19, plan_facetas_de_la_tabla 12,
+          #   errores_de_proveedor_redactados 12, cliente_http_compartido 11,
+          #   url_proveedor_workers_memoria 11, frente_e_retiros 9,
+          #   espejos_symlink_frente_e 8, requirements_completos 5, sin_autoetiqueta 5,
+          #   max_steps_una_sola_constante 4, documentos_del_repo 3 (= 99); y en
+          #   archivos que ya estaban: payload_max_tokens +4, aiomysql_connect_timeout +2,
+          #   no_blocking_in_async +2 (controles fuera del checkout) y
+          #   ejecutor_proxy_carril +1 (el reenvio sin tope de lectura, tras pasar el
+          #   proxy a crear_cliente_http()). Contado por archivo con --collect-only
+          #   contra master. MEDIDO en local (3.14) simulando el runner (sin
+          #   checkout de jax-platform): "850 passed, 1 skipped, 1 xfailed", dos
+          #   corridas; master en el mismo entorno da 742/1, igual que su runner.
+          #   Si el runner da otro numero, manda el runner.
+          # 850 -> 853 el 2026-09-17 (aislamiento de JAX_FACET_SEAL_PATH en el
+          #   conftest): +3 en tests/test_conftest_aisla_facet_seal.py (nuevo
+          #   -- ver DEUDA.md/CONTEXT.md). Delta medido local (3.14): 851/1
+          #   xfailed/0 skipped sin el archivo, 854/1 xfailed/0 skipped con
+          #   el archivo -- el +3 es lo que importa acá; el 1 skipped que
+          #   documentaba el corte anterior es un drift preexistente de este
+          #   entorno (3.14 vs el runner en 3.12), no algo que este cambio
+          #   toque. Si el runner da otro numero, manda el runner.
+          # 853 -> 979 el 2026-09-17 (Ejecutor SP1 plan 1): contratos C1/C2 -- destinos 27,
+          #   politica 32, gancho y envoltorio 19, instalacion 15, exportador 8, cuenta 12,
+          #   upstream 1, canario 12 (= +126). MEDIDO en local (3.14), dos corridas:
+          #   "980 passed, 1 xfailed" -- el mismo +1/-1 skipped de entorno del corte
+          #   anterior (854/0 local = 853/1 runner). PENDIENTE DE CONFIRMAR POR EL RUNNER
+          #   (3.12) en el run del PR: si da otro numero, manda el runner.
+          # 979 -> 1038 el 2026-09-17 (C3), CONFIRMADO por el runner del PR #181: "1038 passed, 1 skipped".
+          # 979 -> 1044 el 2026-09-17 (frente B, kill switch real, medido en paralelo sobre
+          #   56d8c24, antes de este rebase final): +65 sobre el mismo 979 base. Seis
+          #   archivos nuevos: interruptor, interruptor_lectores, jacobs_interruptor,
+          #   repl_interruptor, interruptor_sin_rutas_fijas e interruptor_heredada (la
+          #   ruta vieja del freno sigue frenando). Antes del rebase el frente medía
+          #   742 -> 807 sobre 044cb99: el mismo +65.
+          # 1038 + 65 -> 1103 el 2026-09-17, rebase final de frente B sobre origin/master
+          #   (1216c97, que ya trae C3): las dos listas de tests-puros (run y "Piso
+          #   exacto") quedan idénticas entre sí, 85 archivos = C3 (1038) + frente B (65).
+          #   MEDIDO en local (3.14) con JAX_PLATFORM_REPO_ROOT a una ruta que no
+          #   existe (como el runner, sin checkout de jax-platform), dos corridas:
+          #   "1103 passed, 1 skipped, 1 xfailed, 16 subtests passed". Sin esa variable,
+          #   en hall9000 test_la_copia_es_identica_al_canonico_de_jax_platform corre
+          #   (hay checkout de producción) y da un passed de más con 0 skipped. Si el
+          #   runner da otro numero, manda el runner.
+          # 1103 -> 1108 el 2026-09-17 (fix del interruptor en CI 3.12): el run de
+          #   tests-puros de 94295a6 (PR #183) cayó en test_directorio_ilegible_cuenta_
+          #   como_puesto porque el TEST afirmaba `Path.exists() is False`, que en 3.12
+          #   lanza PermissionError (en 3.14 devuelve False). El módulo ya usaba os.stat.
+          #   La precondición pasa a `os.stat` (igual en toda versión) y se suman +5 con
+          #   os.stat sustituido (EACCES/EIO/ELOOP en la ruta nueva, EACCES/EIO en la
+          #   heredada): no dependen de la versión ni de ser root. MEDIDO en local
+          #   (3.14), dos corridas, sin checkout de plataforma: "1108 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 742 -> 760 el 2026-09-16 (frente F): test_subpipeline_contrato_puro.py (+18) -- forma del pedido por rol, validate_create sin profundidad del llamador, /plan sin ada, config con rango validada al arrancar, motivos de emision/consumo, hijo frenado por el kill switch, sin ruta HTTP de emision. 8 vistos en rojo contra master; 2 guardas validadas por mutacion. Medido en local (3.14): 761 passed, 1 xfailed; FALTA confirmarlo en el runner.
+          # 760 -> 761 el 2026-09-16 (revision final del frente F, I-1): +1 en
+          #   test_subpipeline_contrato_puro.py -- POST /jacobs/pipeline por TestClient con
+          #   token y forma invalida -> 422 sin el token en el cuerpo (Pydantic lo eco-eaba
+          #   en `input`). Visto en rojo. Medido en local (3.14): 762 passed, 1 xfailed;
+          #   FALTA confirmarlo en el runner.
+          # 853 -> 872 el 2026-09-17 (rebase del frente F sobre de6964e, con E mergeado):
+          #   +19 del frente F (18 + 1 de arriba) sobre los 853 de E. MEDIDO dos veces
+          #   en local (3.14) simulando el runner (env limpio, sin JAX_DB_HOST, sin
+          #   checkout de jax-platform): "872 passed, 1 skipped, 1 xfailed".
+          #   Si el runner da otro numero, manda el runner.
+          # 1108 + 19 -> 1127 el 2026-09-17, rebase del frente F sobre origin/master
+          #   f9c7073 (frente B y C3): las dos listas de tests-puros suman
+          #   test_subpipeline_contrato_puro.py (+19 del frente F) a los 1108 de master.
+          #   MEDIDO dos veces en local (3.14), env limpio, sin JAX_DB_HOST y con
+          #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1127 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 979 -> 1000 el 2026-09-17 (Ejecutor SP1 plan 5 parte A): C6 revocacion --
+          #   ejecutor-revocar 6, revocacion (clasificar, orquestar, llaves_root) 15 (= +21).
+          #   MEDIDO en local, ver el commit. Si el runner da otro numero, manda el runner.
+          # 1127 + 21 -> 1148 el 2026-09-17, rebase de C6 sobre origin/master c13d066
+          #   (C3, frente B y frente F): las dos listas suman los 2 archivos de C6.
+          #   MEDIDO dos veces en local (3.14), env limpio, JAX_PLATFORM_REPO_ROOT a una
+          #   ruta que no existe: "1148 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          #   Si el runner da otro numero, manda el runner.
+          # 1038 -> 1135 el 2026-09-17 (Ejecutor SP1 plan 4, C5): pausa 5, auditor 23, cliente 9,
+          #   eleccion 18, vigia 12, canario 12, proxy_pausa 5, y +13 en archivos existentes
+          #   (cita +5 por `proposito`, proxy_carril +8 config de C5). MEDIDO en local
+          #   (3.14): 1039 -> 1136 passed, 1 xfailed (delta +97; el +1/-1 skipped de entorno de
+          #   siempre). PENDIENTE DE CONFIRMAR POR EL RUNNER: si da otro numero, manda el runner.
+          # 1148 + 97 -> 1245 el 2026-09-17, rebase de C5 sobre C6 (sobre origin/master c13d066):
+          #   las dos listas suman los 7 archivos de C5 (+84 en ellos y +13 en archivos
+          #   existentes). MEDIDO dos veces en local (3.14), env limpio, JAX_PLATFORM_REPO_ROOT
+          #   a una ruta que no existe: "1245 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          #   Si el runner da otro numero, manda el runner.
+          # 1038 -> 1094 el 2026-09-17 (Ejecutor SP3, GPU compartida): +56. Medido en hall9000 sobre la misma
+          #   lista: master 1039 passed + 1 xfailed, la rama 1095 + 1 xfailed (el runner cuenta ese uno como
+          #   skipped y uno menos passed). Nuevos: test_ejecutor_proxy_modelo_y_rutas.py (38: modelo fijado,
+          #   tope de salida, ningún GET/HEAD arbitrario, HEAD sin cuerpo en el error),
+          #   test_ejecutor_prioridad_espejo.py (2), test_ejecutor_sp3_config.py (8: la cuenta de §6.3 y los
+          #   frenos de los scripts de despliegue), test_ejecutor_prioridad.py (+3, locks de sólo lectura),
+          #   test_ejecutor_proxy_carril.py (+3 config), test_ejecutor_contratos_cuenta_axioma.py (+1);
+          #   test_ejecutor_proxy_registro.py (-1: GET /api/version ya no pasa). CONFIRMAR con el runner del PR.
+          # 1245 + 57 -> 1302 el 2026-09-17, rebase de SP3 sobre C5 (sobre C6 y master c13d066):
+          #   los +56 de SP3 y +1 del rebase en test_ejecutor_proxy_pausa.py (el freno de C5 va
+          #   ANTES que la politica de rutas y de modelo/salida de SP3 en _reenviar; visto en rojo
+          #   invirtiendo el orden). MEDIDO dos veces en local (3.14), env limpio,
+          #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1302 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 1127 -> 1151 el 2026-09-17 (human gate sin emision HTTP): +24 de
+          #   tests/test_human_gate_sin_emision_http.py, en las DOS listas. Sin ruta que
+          #   emita tokens (rojo contra c13d066: /human_gate/token), /execute consume
+          #   contra la base, /motor/dispatch rechaza un token inventado (rojo: pending)
+          #   y no quema el token si la politica rechaza; contrato del token con el
+          #   store sustituido. Mutaciones: reabrir la ruta -> 3 rojos; quitar el
+          #   consumo del motor -> 2 rojos. MEDIDO en local (3.14), env limpio, sin
+          #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente: "1151 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 1303 + 24 -> 1327 el 2026-09-17, rebase del human gate sobre origin/master f3cf91a
+          #   (C6, C5, SP3): las dos listas suman tests/test_human_gate_sin_emision_http.py.
+          #   MEDIDO en local (3.14), env limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT a una
+          #   ruta que no existe: "1327 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          #   Si el runner da otro numero, manda el runner.
+          # 1151 -> 1188 el 2026-09-17 (LAS MANOS autentica a sus llamadores): +37 de
+          #   tests/test_las_manos_auth_servicio.py, en las DOS listas. Deny by default con
+          #   credencial de servicio; la identidad sale de la credencial. Visto en rojo
+          #   contra c7d59cc con server.app real: approve-step SIN credencial -> 200 y el
+          #   paso de Hyde aprobado; con el arreglo 401, con la credencial `jacobs` 403,
+          #   con `plataforma` 200. Mutaciones (cmp previo, PYTHONDONTWRITEBYTECODE=1):
+          #   saltar la verificacion -> 18 rojos; todo publico -> 25; sin permisos por
+          #   ruta -> 6; sin chequeo de identidad declarada -> 7; duplicadas aceptadas
+          #   -> 1; server.py sin proteger(app) -> 1; dispatch de Jacobs sin credencial
+          #   -> 1; jacobs declarando plataforma -> 1. MEDIDO en local (3.14), env limpio,
+          #   JAX_PLATFORM_REPO_ROOT inexistente: "1188 passed, 1 skipped, 1 xfailed, 16
+          #   subtests passed". Si el runner da otro numero, manda el runner.
+          # 1327 + 37 -> 1364 el 2026-09-17, restack de la autenticacion de servicio sobre el
+          #   human gate rebaseado (origin/master f3cf91a): las dos listas suman
+          #   tests/test_las_manos_auth_servicio.py. MEDIDO en local (3.14), env limpio, sin
+          #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1364 passed,
+          #   1 skipped, 1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 1327 + 54 -> 1381 el 2026-09-17, C4 (freno en vuelo) rebaseado sobre origin/master
+          #   d951490 (C6, C5, SP3, human gate) + cuatro arreglos: las dos listas suman
+          #   test_ejecutor_proxy_freno.py (6), test_ejecutor_contratos_freno.py (30),
+          #   test_ejecutor_freno_remoto.py (4), test_ejecutor_probar_c5_importa.py (2);
+          #   test_ejecutor_contratos_instalacion.py +8 (unidad del freno y su manifiesto),
+          #   test_ejecutor_sp3_config.py +4 (--aplicar contra falsos). MEDIDO en local (3.14),
+          #   env limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas:
+          #   "1381 passed, 1 skipped, 1 xfailed, 16 subtests passed"; master d951490 en las
+          #   mismas condiciones da 1327 (igual que su runner). Si el runner da otro numero, manda el runner.
+          # 1364 -> 1418 el 2026-09-17: C4 (+54) rebaseado sobre master con auth de LAS MANOS (#187). Lo confirma el runner.
+          # 1418 -> 1486 el 2026-09-17 (Ejecutor SP1 plan 6, arranque condicionado): las DOS listas suman
+          #   test_ejecutor_contratos_arranque.py (44), test_ejecutor_vigia_servicio.py (21),
+          #   test_ejecutor_fase0_retirada.py (2) y test_ejecutor_contratos_eleccion_c5.py +1
+          #   (validar_proveedores). MEDIDO en local (3.14), env limpio (env -i), sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1486 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed"; master 6563cb4 en las mismas condiciones da 1418 (= su runner).
+          #   Si el runner da otro numero, manda el runner.
+          # 1486 -> 1503 el 2026-09-17 (Ejecutor: arranque acotado a la misión): las DOS listas ya tenian
+          #   test_ejecutor_contratos_arranque.py (+14: alcance, remotas del freno, mision solo a la VM
+          #   arranca, mision con atemai rechazada nombrandola, cerco abierto a una maquina sin contratos;
+          #   -1 caso freno_sin_remotos) y test_ejecutor_contratos_cerco.py (+3: solo local + remotas con
+          #   freno). Mutaciones (cmp previo, PYTHONDONTWRITEBYTECODE=1): C6 en todo el inventario -> 4
+          #   rojos (incluido el de la VM); sin rechazar la maquina de la mision -> 2; sin sonda de
+          #   alcance -> 2; cerco con todo el inventario -> 3. MEDIDO en local, env -i, sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1503 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed"; origin/master 9bb2887 da 53 en esos dos archivos, la rama 70.
+          #   Si el runner da otro numero, manda el runner.
+          # 1503 -> 1510 el 2026-09-17 (misión de humo real contra la VM desechable): las DOS listas suman
+          #   tests/test_ejecutor_mision_de_humo.py (6: stream de la jaula -> capturas con la maquina que ve
+          #   el gancho, afirmaciones fail-closed en arreglo o JSON Lines, sha256 igual al del registro de C3,
+          #   comandos con -tt) y test_ejecutor_contratos_cuenta_axioma.py +1 (la jaula tapa
+          #   /etc/ssh/ssh_config.d: dentro de bwrap los archivos de root se ven de 65534 y ssh no entraba a
+          #   ninguna maquina). Los dos vistos en rojo antes del arreglo. MEDIDO en local, env -i, las DOS
+          #   listas: "1510 passed, 1 skipped, 1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 1510 -> 1564 el 2026-09-17 (Ejecutor SP2, vía de producto desde la plataforma): las DOS listas suman
+          #   tests/test_ejecutor_mision.py (33, dos de ellos por lo visto en la misión real: el vigía juzga el
+          #   turno con su instrucción y el pedido retomado exige correr de nuevo; turno por el camino gobernado con dependencias falsas -- rechazo del
+          #   arranque con sus códigos sin abrir nada, vigía que no late, pausa/auditor/registro/cadena/cierre del
+          #   vigía como fallos con código, auditor ilegible fail-closed, sesión creada y retomada por id, tope del
+          #   cerebro) y tests/test_ejecutor_mision_servicio.py (14: stdin -> eventos JSON y SIEMPRE un `resultado`,
+          #   sin_configurar sin defaults, runner_error sin el mensaje, pausa leída fail-closed, vigía con SIGTERM);
+          #   test_ejecutor_contratos_cuenta_axioma.py +6 (--session-id/--resume, UUID canónico) y
+          #   test_ejecutor_prioridad_espejo.py +1 (familia pausa_ejecutor). Vistos en rojo antes. Mutaciones (cmp previo):
+          #   registro no exigido -> 2 rojos; auditor caído no retiene -> 1; pausa ignorada -> 1; banderas de sesión
+          #   invertidas -> 1; tope inválido aceptado -> 4. MEDIDO en local (3.14), env -i, sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1564 passed, 1 skipped, 1 xfailed, 16 subtests
+          #   passed". Si el runner da otro numero, manda el runner.
+          # 1564 -> 1566 el 2026-09-17 (cierre de deuda: apps de carga con credencial de servicio): las DOS
+          #   listas suman tests/test_loadtest_apps_protegidas.py (2: el glob encuentra apps; toda
+          #   loadtest/*_app.py que construye FastAPI llama proteger(app)). Visto en rojo antes del arreglo;
+          #   mutación (cmp previo, PYTHONDONTWRITEBYTECODE=1): quitar proteger(app) de authorize_facet_app -> 1 rojo.
+          #   Si el runner da otro numero, manda el runner.
+          # 1566 -> 1576 el 2026-09-17 (el auditor de C5 recibe las máquinas de la misión): las DOS listas suman
+          #   test_ejecutor_contratos_auditor.py +7 (el lote las lleva con su dirección; maquinas_de filtra el
+          #   inventario y no inventa una máquina que no está; lote_desde_dict las lee; las instrucciones las nombran;
+          #   un lote sin máquinas no se construye, dos casos), test_ejecutor_contratos_vigia.py +1 (el lote del vigía
+          #   las lleva), test_ejecutor_vigia_servicio.py +1 (correr_mision las pasa) y test_ejecutor_mision.py +1
+          #   (el auditor final las recibe). Vistos en rojo antes del arreglo. MEDIDO en local (3.14), env -i, sin
+          #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1576 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 1576 -> 1579 el 2026-09-17 (barrera del freno por archivo, falso
+          #   positivo del frente B): tests/test_interruptor_heredada.py, dentro de
+          #   las DOS listas. La barrera de sesion miraba el DIRECTORIO
+          #   /etc/jax/interruptor entero -- compartido con `EJECUTOR_PAUSA` (la
+          #   pausa del Ejecutor, que NO es el kill switch), que otra sesion pone y
+          #   suelta ahi en una prueba de contrato legitima: falso positivo contra
+          #   corridas ajenas. Ahora solo mira los DOS ARCHIVOS del freno (la ruta
+          #   de JAX_KILL_SWITCH_PATH, literal /etc/jax/interruptor/PAUSE, y la
+          #   heredada), nunca el directorio ni otras entradas.
+          #   test_barrera_detecta_altas_en_el_directorio (el caso que documentaba
+          #   el falso positivo) se retira y se suman
+          #   test_barrera_no_dispara_por_un_hermano_en_el_directorio (+1, crear y
+          #   borrar un hermano en el directorio NO dispara),
+          #   test_barrera_detecta_el_freno_que_aparece (+1, crear el archivo del
+          #   freno SI dispara) y test_barrera_stat_roto_en_el_freno_cuenta_como_puesto
+          #   (+2, parametrizado: permiso y E/S al stat del freno cuentan como
+          #   PUESTO, mismo criterio fail-closed que interruptor.pausa_presente).
+          #   Neto +4-1 = +3. Vistos en rojo contra el codigo viejo (TypeError:
+          #   firma vieja de 4 argumentos). MEDIDO dos veces en local (3.14), env
+          #   limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS
+          #   listas: "1579 passed, 1 skipped, 1 xfailed, 16 subtests passed" las
+          #   dos veces. Si el runner da otro numero, manda el runner.
+          # 1579 -> 1584 el 2026-09-17 (C4 remoto: el conteo mide, no la ceguera): las DOS listas suman
+          #   tests/test_ejecutor_probar_c4_conteo_remoto.py (3: el conteo remoto corre como root, cita cuenta y
+          #   administrador, y el gestor de sesión no cuenta como trabajo pero sí al cerrar) y
+          #   test_ejecutor_freno_remoto.py +2 (el barrido le pide salir a su propio gestor de sesión; sin
+          #   systemctl igual reporta). Vistos en rojo; mutaciones con cmp previo: sin `sudo -n` en el conteo -> 1
+          #   rojo; sin el `systemctl --user exit` -> 1 rojo. MEDIDO en local (3.14), env -i, sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1584 passed, 1 skipped, 1 xfailed, 16 subtests
+          #   passed". Si el runner da otro numero, manda el runner.
+          # 1584 -> 1585 el 2026-09-17 (el dato se copia, no se redacta): test_ejecutor_mision.py +1 (el prompt
+          #   exige el dato literal y una afirmación por valor). Visto en rojo. Origen: primera misión con la
+          #   compuerta abierta, el modelo mandó "51G disponible de 94G total (44% usado)" y la cita lo tiró.
+          # 1585 -> 1587 el 2026-09-17 (la tubería va dentro del comando remoto): test_ejecutor_mision.py +2
+          #   (el prompt lo pide; y el control: `capturas` ignora el comando con tubería afuera, que toca dos
+          #   máquinas, y sí captura el mismo con la tubería adentro). Vistos en rojo. Origen: misión real en
+          #   atemai que corrió dos pasos y entregó cero afirmaciones.
+          # 1587 -> 1590 el 2026-09-17 (el comando elige la captura por sus tokens): test_ejecutor_cita.py +3
+          #   (las mismas comillas de otra forma respaldan; un comando distinto sigue sin respaldar; una comilla
+          #   sin cerrar se compara carácter por carácter). Vistos en rojo; mutación (cmp previo): `mismo_comando`
+          #   devolviendo True -> 4 rojos. Origen: misión real en prod, datos correctos descartados como
+          #   comando_no_corrido porque el modelo citó el comando sin comillas.
+          # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). Cada rama traía el
+          # suyo (HEAD 1137 passed/1 skipped; origin/master 1590 passed/1 skipped) y la
+          # unión de las dos listas no da ninguno de los dos. Medido en hall9000 con la
+          # lista unificada de este job: 1986 passed, 1 xfailed, 16 subtests passed.
+          # El runner cuenta UNO MENOS que el local y reporta como `skipped` el caso que
+          # acá sale `xfailed` (mismo desfase que el piso anterior: runner 920 con local
+          # 921 passed/1 xfailed), así que el piso del job queda en 1985.
+          grep -qE "^1985 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1985 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1606,6 +2116,17 @@ jobs:
         with:
           # 3.14: la del backend de jax-platform, con la que se reprodujo.
           python-version: "3.14"
+      # El sello de facet_resolver a un directorio temporal del runner, ANTES de
+      # las migraciones y de los tests (los dos importan facet_resolver, que lee
+      # la ruta al importarse). Sin la variable, la ruta por omision es la de
+      # produccion, /srv/jax-data/facet-cache-seal: el 2026-09-17 un agente que
+      # reprodujo este job en hall9000 sin fijarla le cambio el mtime al sello
+      # real (01:51:21, sin cambio de datos) -- y un toque del sello invalida
+      # la cache de facetas de TODOS los procesos. Declararlo aca hace que copiar
+      # los pasos del job lleve la barrera con ellos. `runner.temp` no existe en
+      # el `env` del job: se exporta por GITHUB_ENV.
+      - name: Sello de facet_resolver fuera de /srv
+        run: echo "JAX_FACET_SEAL_PATH=$RUNNER_TEMP/facet-cache-seal" >> "$GITHUB_ENV"
       - name: Clonar jax-platform (sus migraciones crean la gobernanza)
         run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
       - run: pip install -r /tmp/jax-platform/backend/requirements.txt pytest
@@ -1637,6 +2158,9 @@ jobs:
           tests/test_jacobs_candado_activos_db.py
           tests/test_jacobs_reaper_cas_db.py
           las_manos/_motor_usage_writer_test.py
+          tests/test_facetas_de_gobernanza_db.py
+          tests/test_ejecutor_politica_db.py
+          tests/test_ejecutor_c5_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1653,6 +2177,9 @@ jobs:
             tests/test_jacobs_candado_activos_db.py \
             tests/test_jacobs_reaper_cas_db.py \
             las_manos/_motor_usage_writer_test.py \
+            tests/test_facetas_de_gobernanza_db.py \
+            tests/test_ejecutor_politica_db.py \
+            tests/test_ejecutor_c5_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1806,5 +2333,38 @@ jobs:
           #   (+4) entra a este job -- lo reescribió R49 (marcador propio r46-<uuid>, consulta
           #   filtrada y limpieza propia, tras el incidente de la fila ajena borrada) y no lo
           #   corría NINGÚN job. Necesita MariaDB: este job la tiene. Medido local: 86 passed.
-          grep -qE "^86 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 86 tests CORRIDOS."; exit 1; }
+          # 27 -> 29 el 2026-09-17 (frente E, E-17): tests/test_facetas_de_gobernanza_db.py
+          #   (+2) -- las facetas del planner salen de la tabla `facet` real sembrada
+          #   por las migraciones. Medido en local (3.14, jax_memory_test con las
+          #   migraciones de jax-platform c53ef30), dos corridas: 29 passed; master
+          #   70e4303 en el mismo entorno: 27.
+          # 29 -> 31 el 2026-09-17 (Ejecutor SP1 plan 1): tests/test_ejecutor_politica_db.py
+          #   (+2) -- la semilla de reglas de jax-platform exporta legible y pasa su
+          #   autoprueba con el evaluador de jax; EXPLAIN de respaldos con su índice.
+          #   Requiere jax-platform con las tablas del Ejecutor en master. Medido en
+          #   local (3.14, jax_memory_test con las migraciones de la rama de tablas): 2 passed.
+          # 29 sin cambio tras el rebase del frente F (2026-09-17): el test de E
+          #   pasa por store.conexion() (get_conn ya no existe). Medido dos veces
+          #   con las migraciones de jax-platform c414eba y el sello en un tmp.
+          # 31 sin cambio tras el rebase del frente F sobre f9c7073 (2026-09-17): los
+          #   29 de E/F + los 2 del Ejecutor; test_ejecutor_politica_db.py migra de
+          #   get_conn() a store.conexion(). Medido dos veces con las migraciones de
+          #   jax-platform 0c6eb67 y el sello en un tmp: 31 passed.
+          # 31 -> 34 el 2026-09-17 (Ejecutor SP1 plan 4, C5): tests/test_ejecutor_c5_db.py (+3) --
+          #   config sembrada y compuerta cerrada, una misión sobre máquinas con datos de clientes NO
+          #   arranca, EXPLAIN por PRIMARY. Requiere jax-platform feat/ejecutor-config-c5 en master.
+          #   Local (3.14, jax_memory_test con las migraciones de esa rama): 3 passed.
+          # 31 + 3 -> 34 tras el rebase de C5 sobre master c13d066 (frente F):
+          #   test_ejecutor_c5_db.py migra de get_conn() a store.conexion(). Medido en local
+          #   contra jax_memory_test con el sello en un tmp: 34 passed.
+          # 34 -> 35 el 2026-09-17 (C1 contra envoltorios): tests/test_ejecutor_politica_db.py (+1) --
+          #   la política exportada de la DB real bloquea la evasión con tmux vista en la misión,
+          #   setsid y dangerouslyDisableSandbox, y deja pasar la misión de humo y `ssh -tt … 'tmux ls'`.
+          #   Requiere jax-platform feat/ejecutor-c1-envoltorios en master (ejecutor_reglas_envoltorios_v1).
+          #   Visto en rojo con la regla desactivada (2 failed). Local dos veces contra jax_memory_test
+          #   con las migraciones de esa rama y el sello en un tmp: 35 passed.
+          # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). HEAD esperaba 86 passed y
+          # origin/master 35; la unión de los dos conjuntos no da ninguno de los dos.
+          # Medido en hall9000 contra jax_memory_test con la lista unificada: 94 passed.
+          grep -qE "^94 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 94 tests CORRIDOS."; exit 1; }

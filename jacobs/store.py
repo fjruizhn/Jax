@@ -7,6 +7,7 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Iterator
 
 import aiomysql
+from pymysql import err as _pymysql_err
 from pymysql.constants import CLIENT
 
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -53,19 +55,93 @@ def _db_cfg() -> dict:
     }
 
 
-async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
-    # connect_timeout explícito (no en _db_cfg()): hallazgo de revisión,
-    # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
-    # aiomysql espera sin límite si la DB se cuelga.
-    #
-    # found_rows (2026-09-17, época de corrida): por defecto MariaDB devuelve
-    # las filas CAMBIADAS de un UPDATE, no las que cumplen el WHERE. Un UPDATE
-    # condicional que escribe los mismos valores devolvería 0 y el ejecutor
-    # creería haber perdido la época. Con CLIENT.FOUND_ROWS el conteo es de
-    # filas encontradas.
-    extra = {"client_flag": CLIENT.FOUND_ROWS} if found_rows else {}
-    return await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds(), **extra)
+# --- Pool de conexiones ------------------------------------------------------
+# POR QUE (2026-09-17). Hasta eb72e78 cada consulta abria una conexion
+# `aiomysql` NUEVA, cerrada al terminar. Una creacion en dry_run hace
+# 5-6 llamadas; la Task 8 del frente F midio bajo carga entre 22 y 38 % de fallas
+# a 10 VUs en los tres escenarios (incluido el que no toca el contrato): cada
+# conexion deja un socket en TIME_WAIT, el rango de puertos efimeros del host se
+# agota y MariaDB ni se entera (`Lost connection ... system error 11`). Politica
+# 2 de LAS CUATRO DEL RENDIMIENTO: el pool se comparte, no se rehace por request.
+#
+# UN POOL POR EVENT LOOP, no un global unico -- misma trampa que resolvio
+# jax-platform (backend/db/connection.py): el pool de aiomysql queda atado al
+# loop que lo creo. En LAS MANOS hay un solo loop y una sola entrada; en los
+# tests cada IsolatedAsyncioTestCase trae su loop.
+#
+# REGISTRO: dict comun, NO WeakKeyDictionary. El Pool guarda una referencia
+# fuerte a su loop, asi que una entrada debil nunca se soltaba (revision
+# 2026-09-17: 5 `asyncio.run` dejaban 5 entradas vivas). La entrada la quita el
+# fin del loop (_guardian) o `cerrar_pool()`; como red, un pedido nuevo purga las
+# de loops ya cerrados.
+#
+# SEMAFORO PROPIO. Cada `conexion()` toma un permiso (hay `maxsize`) ANTES de
+# pedirle la conexion a aiomysql, y lo devuelve despues del release. Con eso el
+# `_acquire` de aiomysql nunca llega a `cond.wait()`: la espera por hueco es del
+# semaforo, que se libera sincronico y no pierde avisos. Antes se dependia de
+# `pool._wakeup()` (API privada) para despertar tras un descarte, y cancelar a
+# quien liberaba mientras esperaba ese aviso dejaba a los demas colgados hasta
+# el limite con una conexion libre (TimeoutError falso, probado).
+#
+# CICLO DE VIDA. Se crea perezosamente en el primer `conexion()` (en LAS MANOS,
+# init_tables() del startup) y se cierra en el shutdown de las_manos/server.py
+# con `cerrar_pool()`. Quien cree un loop propio (scripts, tests) lo cierra el;
+# si no, lo cierra el fin del loop (ver _guardian_del_pool).
+ENV_TAMANIO_POOL = "JAX_JACOBS_DB_POOL_SIZE"
 
+# Version de aiomysql cuyo pool se reviso a mano para este modulo
+# (aiomysql/pool.py: release() saca de _used antes de devolver y cierra una
+# conexion con transaccion abierta; _acquire solo espera en cond.wait si
+# size >= maxsize; connection.py: connect_timeout acota solo el socket). La fija
+# requirements.txt y la vigila jacobs/_store_pool_test.py::VersionDeAiomysqlTest.
+AIOMYSQL_REVISADO = "0.3.2"
+# _codigo_del_servidor_sano lee la tabla error_map de PyMySQL: se fija junto
+# con aiomysql y lo vigila VersionDeAiomysqlTest.
+PYMYSQL_REVISADO = "1.2.0"
+
+# Medido 2026-09-17 (loadtest/jacobs_subpipelines.js, app aislada sobre
+# jax_memory_test, pool-report.md del frente F): ver la tabla de tamanos en el
+# reporte. Un solo proceso de LAS MANOS con un solo loop.
+TAMANIO_POOL_POR_DEFECTO = 10
+
+# max_connections de la MariaDB de hall9000 = 151 (SHOW GLOBAL VARIABLES,
+# 2026-09-17; Max_used_connections=95 historico). jax-platform abre hasta 10 por
+# proceso y hay mas clientes (workers de memoria, jobs, la consola de
+# emergencia): mas de un tercio del servidor para Jacobs solo seria quitarselo a
+# los demas.
+TAMANIO_POOL_MAXIMO = 50
+
+# Una conexion ociosa mas vieja que esto se recicla al pedirla. wait_timeout del
+# servidor = 28800 s (medido el mismo dia): una hora queda muy por debajo, asi
+# que el pool nunca entrega una conexion que MariaDB ya corto por inactividad.
+_RECICLAR_SEGUNDOS = 3600
+
+
+class _PoolDelLoop:
+    """Lo que un loop tiene: el candado de creacion, y una vez creado, el pool,
+    su semaforo y el guardian que lo cierra al terminar el loop."""
+
+    def __init__(self) -> None:
+        self.candado = asyncio.Lock()
+        self.pool: aiomysql.Pool | None = None
+        self.permisos: asyncio.Semaphore | None = None
+        self.guardian: Any = None
+
+
+# ------------------------------------------------------------------
+#  MERGE 2026-09-17 (master <- feat/prevuelo-y-continuar)
+#  Las dos ramas escribieron un pool para este módulo el mismo día. Queda el
+#  de master (frente F): tiene la higiene de sesión que la otra no tenía
+#  (ConexionVigilada, _sesion_reutilizable, _codigo_del_servidor_sano,
+#  pool_recycle) y su medición de carga. De la rama de pre-vuelo se conservan,
+#  portadas sobre él: la espera de turno SIN PLAZO de los trabajos de fondo
+#  (R38 fix round 1), `conexion_del_pool` como nombre alterno de `conexion()`,
+#  `_conexion_o_pool` (conexión prestada o del pool), `transaccion` +
+#  `EstadoDeTransaccion` (R41: commit incierto) y las conexiones DEDICADAS con
+#  CLIENT.FOUND_ROWS de las escrituras condicionales por época
+#  (`conexion_dedicada`, ver su docstring). `JAX_DB_POOL_MAX` sigue
+#  dimensionando el pool, igual que `JAX_JACOBS_DB_POOL_SIZE`.
+# ------------------------------------------------------------------
 
 # --- Pool de conexiones del store de Jacobs (Task 15b y R38, 2026-09-17, LAS CUATRO #2) ---
 # Medido (task-15b-report.md): cada pre-vuelo abría 2 conexiones nuevas
@@ -114,7 +190,7 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 #   pipeline_tomar_epoca, pipeline_update_status_si_epoca, step_upsert_si_epoca
 #   y continuar_transaccion necesitan contar filas ENCONTRADAS (un UPDATE que
 #   escribe los mismos valores cuenta 0 sin el flag y la época se daría por
-#   perdida), así que siguen con get_conn(found_rows=True), dedicadas. Lo que
+#   perdida), así que siguen con conexion_dedicada(found_rows=True). Lo que
 #   va por el pool (lecturas y escrituras sin condición) no mira el conteo, y
 #   meterle el flag al pool cambiaría en silencio el conteo de cualquier UPDATE
 #   que se agregue después.
@@ -133,6 +209,11 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 #   puede tener filas sin leer o el socket roto. Las que la base cortó en
 #   reposo (wait_timeout) las descarta el propio Pool de aiomysql al pedirlas
 #   (EOF en el lector).
+
+
+_pools: dict[asyncio.AbstractEventLoop, _PoolDelLoop] = {}
+
+
 DB_POOL_MAX = "JAX_DB_POOL_MAX"
 
 
@@ -161,80 +242,348 @@ def db_pool_max() -> int:
     los jobs del Motor Registry (R38 fix round 3, N1) esperan turno sin plazo
     (espera_de_turno_sin_plazo); los pedidos HTTP
     esperan a lo sumo JAX_DB_CONNECT_TIMEOUT_SECONDS y dan 503."""
-    from jacobs.prevuelo_config import _entero_positivo
-
-    return _entero_positivo(DB_POOL_MAX, os.getenv(DB_POOL_MAX, "10"))
-
-
-_pool_estado: tuple[
-    asyncio.AbstractEventLoop, aiomysql.Pool, asyncio.Semaphore, AsyncIterator[None]
-] | None = None
-# El candado sólo serializa la CREACIÓN (dos primeros pedidos a la vez no
-# crean dos pools; hoy create_pool con minsize=0 no cede el loop antes de
-# volver, pero con minsize>0 conectaría al crear y la carrera sería real --
-# test_dos_primeros_pedidos_a_la_vez_crean_un_solo_pool la fuerza con una pausa). Es de un loop; si todavía no hay pool, uno de otro loop
-# (el anterior ya cerrado, p. ej. tras un intento fallido) se reemplaza.
-_candado_de_creacion: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
+    crudo = os.environ.get(DB_POOL_MAX)
+    if crudo is None:
+        return TAMANIO_POOL_POR_DEFECTO
+    return _tamanio_valido(DB_POOL_MAX, crudo)
 
 
-async def _guardian_del_pool(pool: aiomysql.Pool) -> AsyncIterator[None]:
-    """Vive suspendido mientras vive el pool. Si el loop se apaga con el pool
-    abierto (shutdown_asyncgens), lo cierra en ese loop. terminate() y no
-    close(): a esa altura asyncio.run ya canceló las tareas y nadie puede
-    devolver una conexión; esperar la devolución colgaría el apagado."""
-    global _pool_estado
+def _tamanio_valido(nombre: str, crudo: str) -> int:
+    """Valida el valor de una de las dos variables que dimensionan el pool.
+    Fail-closed: un typo no se convierte en un pool de 0 o de 5000, y el error
+    NOMBRA la variable que estaba mal puesta."""
+    try:
+        valor = int(crudo)
+    except ValueError:
+        valor = None
+    if valor is None or not 1 <= valor <= TAMANIO_POOL_MAXIMO:
+        raise RuntimeError(
+            f"{nombre}={crudo!r} invalido -- tiene que ser un entero entre 1 "
+            f"y {TAMANIO_POOL_MAXIMO} (max_connections de la MariaDB es 151 y la "
+            "comparten todos los servicios)."
+        )
+    return valor
+
+
+def tamanio_pool() -> int:
+    """Tamano del pool. Lee `JAX_JACOBS_DB_POOL_SIZE` (frente F) o, si no esta,
+    `JAX_DB_POOL_MAX` (Task 15b / R38): las dos ramas nombraron la misma
+    perilla distinto el mismo dia y el merge conserva los dos nombres en vez de
+    romper en silencio el despliegue de cualquiera de las dos. Ninguna de las
+    dos -> TAMANIO_POOL_POR_DEFECTO. Presente pero vacia, no entera o fuera de
+    [1, TAMANIO_POOL_MAXIMO] -> RuntimeError nombrandola."""
+    for nombre in (ENV_TAMANIO_POOL, DB_POOL_MAX):
+        crudo = os.environ.get(nombre)
+        if crudo is not None:
+            return _tamanio_valido(nombre, crudo)
+    return TAMANIO_POOL_POR_DEFECTO
+
+
+async def _estado_del_loop() -> _PoolDelLoop:
+    """El estado de ESTE loop con el pool ya creado. Doble chequeo bajo un
+    candado por loop: 20 pedidos concurrentes en frio crean UN pool, no 20
+    (revision 2026-09-17, visto en rojo)."""
+    loop = asyncio.get_running_loop()
+    estado = _pools.get(loop)
+    if estado is None:
+        for viejo in [l for l in _pools if l.is_closed()]:
+            del _pools[viejo]
+        estado = _pools[loop] = _PoolDelLoop()
+    if estado.pool is not None and not estado.pool.closed:
+        return estado
+    async with estado.candado:
+        if estado.pool is not None and not estado.pool.closed:
+            return estado
+        cfg = _db_cfg()
+        maximo = tamanio_pool()
+        # Merge 2026-09-17: CREAR el pool tambien esta acotado. minsize=1 abre
+        # una conexion al crear, y `connect_timeout` solo acota el socket: una
+        # base que ACEPTA y no responde el handshake colgaba la creacion sin
+        # limite (visto en rojo con la base falsa de
+        # tests/test_prevuelo_pool.py::test_conexion_colgada_al_abrir_da_503_
+        # acotado). Con el timeout, una base colgada es un 503, no un pedido
+        # que no vuelve nunca: fail-closed.
+        async with asyncio.timeout(db_connect_timeout_seconds()):
+            pool = await aiomysql.create_pool(
+                minsize=1,
+                maxsize=maximo,
+                pool_recycle=_RECICLAR_SEGUNDOS,
+                # connect_timeout explicito: sin esto aiomysql espera sin limite si
+                # la DB se cuelga (Tarea 2b, tanda A, 2026-09-14).
+                connect_timeout=db_connect_timeout_seconds(),
+                **cfg,
+            )
+        guardian = _guardian_del_pool(loop, estado, pool)
+        await guardian.__anext__()
+        estado.pool, estado.permisos, estado.guardian = pool, asyncio.Semaphore(maximo), guardian
+        return estado
+
+
+async def obtener_pool() -> aiomysql.Pool:
+    """El pool de ESTE loop; lo crea si no hay o si el que habia se cerro."""
+    return (await _estado_del_loop()).pool
+
+
+async def _guardian_del_pool(loop, estado: _PoolDelLoop, pool: aiomysql.Pool):
+    """Ata el cierre del pool al fin de SU loop.
+
+    Un generador asincrono vivo queda registrado en el loop, y
+    `asyncio.run()`/`asyncio.Runner` (y por lo tanto uvicorn y cada
+    IsolatedAsyncioTestCase) llaman `loop.shutdown_asyncgens()` antes de cerrar
+    el loop: eso corre este `finally`. Sin esto, quien crea un loop y no llama a
+    `cerrar_pool()` deja sockets abiertos que el recolector cierra con el loop ya
+    muerto (medido en la suite: 29 `Exception ignored ... Event loop is closed`).
+    `cerrar_pool()` explicito sigue siendo el camino declarado; este es la red."""
     try:
         yield
     finally:
-        if _pool_estado is not None and _pool_estado[1] is pool:
-            _pool_estado = None
-        if not pool.closed:
-            pool.terminate()
-            await pool.wait_closed()
+        if _pools.get(loop) is estado:
+            del _pools[loop]
+        await _cerrar(pool, estado.permisos)
 
 
-def _pool_del_loop(
-    loop: asyncio.AbstractEventLoop,
-) -> tuple[aiomysql.Pool, asyncio.Semaphore, AsyncIterator[None]] | None:
-    global _pool_estado
-    if _pool_estado is None:
-        return None
-    duenio, pool, turno, guardian = _pool_estado
-    if duenio is not loop and duenio.is_closed():
-        # Loop cerrado sin shutdown_asyncgens (ver el bloque de arriba): no
-        # hay loop donde cerrar el pool; se suelta.
-        _pool_estado = None
-        return None
-    if duenio is not loop:
-        raise RuntimeError(
-            "el pool del store de Jacobs se creó en otro event loop: hay que "
-            "cerrarlo con store.cerrar_pool() en el loop que lo creó antes de "
-            "pedir conexiones desde este"
-        )
-    return pool, turno, guardian
-
-
-async def _pool_del_store() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
-    global _pool_estado, _candado_de_creacion
-    loop = asyncio.get_running_loop()
-    actual = _pool_del_loop(loop)
-    if actual is not None:
-        return actual[0], actual[1]
-    if _candado_de_creacion is None or _candado_de_creacion[0] is not loop:
-        _candado_de_creacion = (loop, asyncio.Lock())
-    async with _candado_de_creacion[1]:
-        actual = _pool_del_loop(loop)
-        if actual is None:
-            tamanio = db_pool_max()
-            pool = await aiomysql.create_pool(
-                minsize=0, maxsize=tamanio,
-                **_db_cfg(), connect_timeout=db_connect_timeout_seconds(),
+async def _cerrar(pool: aiomysql.Pool, permisos: asyncio.Semaphore | None) -> None:
+    """Toma los `maxsize` permisos con limite -- cuando los tiene, nadie esta
+    usando una conexion ni puede empezar a pedirla -- y cierra. Si vence el
+    limite (una consulta colgada no puede colgar el apagado), corta a la fuerza
+    (terminate) y deja ERROR en el log."""
+    if pool.closed:
+        return
+    limite = db_connect_timeout_seconds()
+    tomados = 0
+    forzar = False
+    if permisos is not None:
+        try:
+            async with asyncio.timeout(limite):
+                while tomados < pool.maxsize:
+                    await permisos.acquire()
+                    tomados += 1
+        except TimeoutError:
+            forzar = True
+            logger.error(
+                "jacobs.store: %d conexion(es) seguian en uso %d s despues de pedir el "
+                "cierre del pool; se cortan a la fuerza.", pool.maxsize - tomados, limite,
             )
-            guardian = _guardian_del_pool(pool)
-            await anext(guardian)  # queda registrado en ESTE loop
-            actual = (pool, asyncio.Semaphore(tamanio), guardian)
-            _pool_estado = (loop, *actual)
-    return actual[0], actual[1]
+    pool.close()
+    if forzar:
+        pool.terminate()
+    await pool.wait_closed()
+
+
+async def cerrar_pool() -> None:
+    """Cierra el pool DE ESTE loop (esperar el de otro loop volveria a cruzar
+    loops). Idempotente."""
+    estado = _pools.pop(asyncio.get_running_loop(), None)
+    if estado is None or estado.pool is None:
+        return
+    await estado.guardian.aclose()               # corre el finally: _cerrar(...)
+    await _cerrar(estado.pool, estado.permisos)  # por si el guardian ya habia terminado
+
+
+def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
+    """Solo vuelve al pool una sesion igual a la que el pool entrego: abierta,
+    autocommit encendido y sin transaccion en curso. No se delega en aiomysql
+    (0.3.2 solo mira la transaccion; un `autocommit(False)` sin consulta pasaria).
+
+    CONTRATO DE `conexion()`: esto NO ve el resto del estado de sesion. Quien lo
+    cambia -- `SET SESSION ...`, `GET_LOCK()`, `LOCK TABLES`, tablas `TEMPORARY`,
+    `USE otra_base`, variables de usuario `@x` de las que otro dependa -- pide
+    `conexion(desechable=True)`, y la conexion se cierra al salir en vez de
+    volver al pool con ese estado.
+
+    CASO CIEGO: un procedimiento almacenado (`CALL`) con autocommit=1 puede
+    dejar cualquiera de esos estados (SET SESSION, GET_LOCK, LOCK TABLES, una
+    TEMPORARY, @variables) sin que el cliente lo vea: el OK final trae
+    autocommit y sin transaccion, y esto da verde. Quien llama un procedimiento
+    que toca estado de sesion pide `desechable=True`."""
+    return (not conn.closed) and conn.get_autocommit() and not conn.get_transaction_status()
+
+
+# Una conexion cuyo cuerpo termino con excepcion vuelve al pool SOLO si esa
+# excepcion es, por IDENTIDAD, un error del servidor que el propio envoltorio
+# vio salir de una llamada suya: atribucion por construccion (ruling del
+# 2026-09-17). Sin tracebacks, pilas de tareas ni internals de asyncio/aiomysql.
+#
+# POR QUE. Cerrar ante cualquier error abre un handshake por pedido fallido.
+# Medido el 2026-09-17 (k6, 25 VUs, 60 s, /motor/authorize-facet con la
+# consulta forzada a 1146, cerrando siempre): 1040 rps, 12 548 TIME-WAIT hacia
+# la base y 3072 conexiones perdidas (2013) en la app: el agotamiento de
+# puertos que el pool vino a cerrar, disparado por una rafaga de errores (tabla
+# faltante, clave duplicada, lock). Tabla en pool-report.md del frente F.
+#
+# LISTA BLANCA (_codigo_del_servidor_sano): pymysql mapea un codigo desconocido
+# a OperationalError, y ahi caen tambien los que SI cortan la sesion (1927
+# conexion matada, 1053 apagado). Ante la duda se cierra.
+_CLASES_DE_ERROR_DEL_SERVIDOR = (
+    aiomysql.ProgrammingError,
+    aiomysql.IntegrityError,
+    aiomysql.DataError,
+    aiomysql.NotSupportedError,
+)
+# 1205 (lock wait timeout) no esta en la tabla de pymysql: le llega como
+# OperationalError por defecto. 1213 (deadlock) si esta, como OperationalError.
+_OPERACIONALES_SANOS = frozenset({1205, 1213})
+
+
+def _codigo_del_servidor_sano(e: BaseException) -> bool:
+    """Puro. Programming/Integrity/Data/NotSupported solo si pymysql eligio esa
+    clase POR el codigo del servidor (`error_map[codigo] is type(e)`): un
+    ProgrammingError sin codigo ("Cursor closed") o con uno inventado no entra.
+    OperationalError solo 1205 y 1213. La tabla de pymysql no tiene codigos del
+    CLIENTE (2000-2999), asi que 2013 o 2014 nunca entran."""
+    if not isinstance(e, aiomysql.MySQLError) or not e.args:
+        return False
+    codigo = e.args[0]
+    if type(codigo) is not int:  # 1205.0 == 1205 en un frozenset
+        return False
+    if type(e) is aiomysql.OperationalError:
+        return codigo in _OPERACIONALES_SANOS
+    return type(e) in _CLASES_DE_ERROR_DEL_SERVIDOR and _pymysql_err.error_map.get(codigo) is type(e)
+
+
+class ConexionInvalidada(RuntimeError):
+    """Uso de un envoltorio despues de salir de `conexion()`. Para entonces la
+    conexion real ya volvio al pool (y puede ser de otro pedido) o se cerro: se
+    falla sin tocarla."""
+
+
+_MENSAJE_INVALIDADA = (
+    "jacobs.store: esta conexion ya salio de `async with conexion()`; el socket "
+    "puede ser de otro pedido. Pedi otra con conexion()."
+)
+
+
+class CursorVigilado:
+    """El cursor de `ConexionVigilada.cursor()`. Sus llamadas de uso normal
+    (`execute`, `executemany`, `fetchone`, `fetchmany`, `fetchall`) cuentan como
+    en vuelo mientras corren y, si lanzan un error de la lista blanca, lo marcan
+    en la conexion ANTES de relanzarlo. Lo demas se delega al cursor de aiomysql
+    sin marcar: un error por ahi cierra la conexion."""
+
+    def __init__(self, conexion: "ConexionVigilada", crudo: aiomysql.Cursor):
+        self._conexion = conexion
+        self.__crudo = crudo
+        self._sin_buffer = isinstance(crudo, aiomysql.SSCursor)
+        if self._sin_buffer:
+            conexion._sin_buffer_abiertos += 1
+
+    @property
+    def _crudo(self) -> aiomysql.Cursor:
+        self._conexion._exigir_vigente()
+        return self.__crudo
+
+    async def _vigilar(self, metodo, *args, **kwargs):
+        c = self._conexion
+        c._en_vuelo += 1
+        try:
+            return await metodo(*args, **kwargs)
+        except aiomysql.MySQLError as e:
+            if _codigo_del_servidor_sano(e):
+                c.ultimo_error_sano = e
+            raise
+        finally:
+            c._en_vuelo -= 1
+
+    async def execute(self, *args, **kwargs):
+        return await self._vigilar(self._crudo.execute, *args, **kwargs)
+
+    async def executemany(self, *args, **kwargs):
+        return await self._vigilar(self._crudo.executemany, *args, **kwargs)
+
+    async def fetchone(self):
+        return await self._vigilar(self._crudo.fetchone)
+
+    async def fetchmany(self, *args, **kwargs):
+        return await self._vigilar(self._crudo.fetchmany, *args, **kwargs)
+
+    async def fetchall(self):
+        return await self._vigilar(self._crudo.fetchall)
+
+    async def close(self):
+        if self._sin_buffer:
+            self._sin_buffer = False
+            self._conexion._sin_buffer_abiertos -= 1
+        await self._crudo.close()
+
+    def __getattr__(self, nombre):
+        return getattr(self._crudo, nombre)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
+
+
+class _CursorPendiente:
+    """`conn.cursor(...)` se usa con `async with` o con `await`, como en aiomysql."""
+
+    def __init__(self, conexion: "ConexionVigilada", args, kwargs):
+        self._conexion, self._args, self._kwargs = conexion, args, kwargs
+        self._cursor: CursorVigilado | None = None
+
+    async def _abrir(self) -> CursorVigilado:
+        crudo = await self._conexion.crudo.cursor(*self._args, **self._kwargs)
+        return CursorVigilado(self._conexion, crudo)
+
+    def __await__(self):
+        return self._abrir().__await__()
+
+    async def __aenter__(self) -> CursorVigilado:
+        self._cursor = await self._abrir()
+        return self._cursor
+
+    async def __aexit__(self, *exc):
+        await self._cursor.close()
+
+
+class ConexionVigilada:
+    """Lo que entrega `conexion()`. Delega en la conexion de aiomysql (`crudo`)
+    salvo `cursor()`, que devuelve un CursorVigilado.
+
+    Vale SOLO dentro del `async with`: al salir, `conexion()` la invalida antes
+    de devolver o cerrar el socket, y todo acceso posterior -- `crudo`,
+    `cursor()`, lo que pasa por `__getattr__` y los cursores que abrio -- lanza
+    ConexionInvalidada. Una tarea hermana que se quedo con el envoltorio no
+    puede mandar SQL por un socket que ya es de otro pedido."""
+
+    def __init__(self, crudo: aiomysql.Connection):
+        self.__crudo = crudo
+        self.__vigente = True
+        self.ultimo_error_sano: BaseException | None = None
+        self._en_vuelo = 0
+        self._sin_buffer_abiertos = 0
+
+    def _exigir_vigente(self) -> None:
+        if not self.__vigente:
+            raise ConexionInvalidada(_MENSAJE_INVALIDADA)
+
+    def _invalidar(self) -> None:
+        self.__vigente = False
+
+    @property
+    def crudo(self) -> aiomysql.Connection:
+        self._exigir_vigente()
+        return self.__crudo
+
+    def cursor(self, *args, **kwargs) -> _CursorPendiente:
+        self._exigir_vigente()
+        return _CursorPendiente(self, args, kwargs)
+
+    def __getattr__(self, nombre):
+        return getattr(self.crudo, nombre)
+
+    def reutilizable_tras(self, e: BaseException) -> bool:
+        """Tras `e`, vuelve al pool solo si `e` ES el error que marco una llamada
+        propia, no queda ninguna llamada propia en vuelo y no hay un cursor sin
+        buffer abierto (resultados sin leer). La sesion la mira despues
+        _sesion_reutilizable."""
+        return (
+            self.ultimo_error_sano is not None
+            and e is self.ultimo_error_sano
+            and self._en_vuelo == 0
+            and self._sin_buffer_abiertos == 0
+        )
 
 
 # --- Espera de turno de los trabajos de fondo (R38, fix round 1, 2a) ---------
@@ -275,34 +624,108 @@ def espera_de_turno_sin_plazo() -> Iterator[None]:
         _turno_sin_plazo.reset(marca)
 
 
-@asynccontextmanager
-async def conexion_del_pool() -> AsyncIterator[aiomysql.Connection]:
-    """Una conexión del pool del store, devuelta al salir. Cualquier error de
-    la base (al conectar, al esperar turno o a mitad de consulta) se propaga:
-    quien llama responde 503, nunca un veredicto por defecto."""
-    pool, turno = await _pool_del_store()
+@contextlib.asynccontextmanager
+async def conexion(desechable: bool = False):
+    """Una conexion del pool, devuelta al salir.
+
+    Se DESCARTA (se cierra, el pool abre otra cuando haga falta) si el cuerpo
+    termino con excepcion o cancelacion -- el socket puede haber quedado a mitad
+    de una respuesta --, si la sesion quedo sucia, o si `desechable=True` (ver el
+    contrato en _sesion_reutilizable). La excepcion a esa regla es un error del
+    servidor de la lista blanca que el propio envoltorio marco al salir de una
+    llamada suya (ConexionVigilada.reutilizable_tras): vuelve al pool si la
+    sesion sigue limpia.
+
+    Entrega una ConexionVigilada, no la conexion de aiomysql: `cursor()` vigila
+    las llamadas, el resto se delega (`crudo` es la conexion real).
+
+    Esperar un hueco tiene limite: `JAX_DB_CONNECT_TIMEOUT_SECONDS`, el mismo
+    que acota abrir el socket. Con el pool lleno mas alla de eso, TimeoutError:
+    fail-closed, no una espera infinita (aiomysql espera sin limite)."""
+    estado = await _estado_del_loop()
+    pool, permisos = estado.pool, estado.permisos
+    limite = db_connect_timeout_seconds()
     if _turno_sin_plazo.get():
-        await turno.acquire()  # trabajo de fondo: espera la cola (ver arriba)
+        # Trabajo de fondo (ejecutor, reaper, jobs del Motor Registry): espera
+        # la cola sin plazo -- ver el bloque de arriba. Abrir la conexion sigue
+        # acotado, asi que una base caida falla igual (fail-closed).
+        await permisos.acquire()
     else:
-        async with asyncio.timeout(db_connect_timeout_seconds()):
-            await turno.acquire()
+        try:
+            await asyncio.wait_for(permisos.acquire(), timeout=limite)
+        except TimeoutError as e:
+            raise TimeoutError(
+                f"jacobs.store: sin conexion libre en el pool tras {limite} s "
+                f"(tamano {pool.maxsize}, en uso {pool.size - pool.freesize})"
+            ) from e
     try:
-        # Abrir o reusar: acotado siempre. Una base caída falla cerrado.
-        async with asyncio.timeout(db_connect_timeout_seconds()):
-            conn = await pool.acquire()
+        # Con el permiso tomado hay hueco: esto no espera en cond.wait. El
+        # limite acota lo unico que puede tardar, abrir una conexion nueva.
+        conn = await asyncio.wait_for(pool.acquire(), timeout=limite)
     except BaseException:
-        turno.release()
+        permisos.release()
         raise
+    vigilada = ConexionVigilada(conn)
+    limpia = False
     try:
-        yield conn
-    except BaseException:
-        conn.close()  # puede tener filas sin leer o el socket roto: no vuelve al pool
+        yield vigilada
+        # Una llamada propia todavia en vuelo (tarea hermana): socket a mitad.
+        limpia = vigilada._sin_buffer_abiertos == 0 and vigilada._en_vuelo == 0
+    except BaseException as e:
+        limpia = vigilada.reutilizable_tras(e)
         raise
     finally:
+        # Antes de devolver o cerrar: quien se quedo con el envoltorio (una
+        # tarea hermana) ya no llega al socket.
+        vigilada._invalidar()
         try:
-            await pool.release(conn)
+            if desechable or not limpia or not _sesion_reutilizable(conn):
+                conn.close()
+            # release() saca la conexion de `_used` antes de devolver. El aviso
+            # que agenda es para el cond.wait de aiomysql, al que con el
+            # semaforo nadie llega: no se espera.
+            pool.release(conn)
         finally:
-            turno.release()
+            permisos.release()
+
+
+# `conexion_del_pool()` es el MISMO objeto que `conexion()`: las dos ramas le
+# pusieron nombre distinto a lo mismo y los dos nombres quedan en uso en el
+# arbol. Tambien evita el sombreado en las funciones del store que reciben un
+# parametro llamado `conexion` (pipeline_create, pipeline_update_status, ...):
+# ahi se usa `_conexion_o_pool(conexion)`.
+conexion_del_pool = conexion
+
+
+async def conexion_dedicada(found_rows: bool = False) -> aiomysql.Connection:
+    """Una conexion DEDICADA (fuera del pool), que quien la pide cierra.
+
+    Es la UNICA excepcion al pool y tiene exactamente DOS llamadores, los dos
+    con una razon que el pool no puede cubrir:
+
+    1. `found_rows=True` -- las escrituras CONDICIONALES por epoca
+       (`_ejecutar_condicional`, `pipeline_tomar_epoca`,
+       `continuar_transaccion`). Por defecto MariaDB devuelve de un UPDATE las
+       filas CAMBIADAS, no las que cumplen el WHERE: una escritura condicional
+       que reescribe los mismos valores devolveria 0 y el ejecutor creeria
+       haber PERDIDO la epoca -- y dejaria de escribir. CLIENT.FOUND_ROWS se
+       negocia en el handshake, no se enciende por sesion, y ponerselo al pool
+       cambiaria en silencio el conteo de filas de cualquier UPDATE que se
+       agregue despues.
+    2. `candado_de_activos()` -- el GET_LOCK del cupo. Podria pedir
+       `conexion(desechable=True)`, pero el candado se ESPERA (hasta
+       JAX_PREVUELO_CANDADO_TIMEOUT_S): varios `crear`/`continue` a la vez se
+       quedarian con las conexiones del pool mientras esperan el candado y
+       dejarian sin conexiones al resto del servicio.
+
+    Cualquier otro uso va por `conexion()` / `conexion_del_pool()`; una sesion
+    con estado propio que NO espera (SET SESSION, temporales) pide
+    `conexion(desechable=True)`. Reemplaza a `get_conn()`, que era de uso
+    general: ese nombre no vuelve (jacobs/_store_pool_test.py lo vigila)."""
+    extra = {"client_flag": CLIENT.FOUND_ROWS} if found_rows else {}
+    return await aiomysql.connect(
+        **_db_cfg(), connect_timeout=db_connect_timeout_seconds(), **extra,
+    )
 
 
 @asynccontextmanager
@@ -358,20 +781,6 @@ async def transaccion(
     except BaseException:
         conn.close()
         raise
-
-
-async def cerrar_pool() -> None:
-    """Cierra el pool del store (shutdown de LAS MANOS, salida del CLI).
-    Sin pool, no hace nada. Después se puede volver a pedir: se crea otro."""
-    global _pool_estado
-    actual = _pool_del_loop(asyncio.get_running_loop())
-    if actual is None:
-        return
-    pool, _, guardian = actual
-    _pool_estado = None
-    pool.close()
-    await pool.wait_closed()
-    await guardian.aclose()  # ya cerrado: su finally no hace nada más
 
 
 # Hijo de "jacobs": LAS MANOS le pone handler INFO a ese logger al arrancar
@@ -468,8 +877,9 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
 
 async def init_tables() -> None:
     """Crea las tablas si no existen. Llamar al arrancar."""
-    conn = await get_conn()
-    try:
+    # desechable: _crear_indice_acotado cambia lock_wait_timeout de la SESION.
+    # Lo restaura en su finally, pero una sesion tocada no vuelve al pool.
+    async with conexion(desechable=True) as conn:
         async with conn.cursor() as cur:
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS jacobs_pipelines (
@@ -494,6 +904,14 @@ async def init_tables() -> None:
                 ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL"),
                 # 2026-09-17 (spec prevuelo-y-continuar §5.3): época de corrida.
                 ("run_epoch", "ALTER TABLE jacobs_pipelines ADD COLUMN run_epoch INT NOT NULL DEFAULT 0"),
+                # Frente F (2026-09-16): de quién es hijo un pipeline de Ada y a
+                # qué profundidad. ALGORITHM=INSTANT explícito: si MariaDB no
+                # puede agregarla sin copiar la tabla, FALLA en vez de bloquear
+                # las escrituras de Jacobs mientras copia.
+                ("parent_pipeline_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "parent_pipeline_id VARCHAR(36) NULL, ALGORITHM=INSTANT"),
+                ("depth", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "depth INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -551,6 +969,38 @@ async def init_tables() -> None:
                     ts          DOUBLE NOT NULL
                 )
             """)
+            # Frente F (2026-09-16): contrato de sub-pipelines. Se guarda SOLO
+            # el sha256 del token. Tabla nueva -> el índice va en el CREATE (no
+            # hay filas que migrar). Tiempos en DOUBLE epoch como el resto de
+            # Jacobs: inmunes a la zona horaria de la sesión.
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS jacobs_subpipeline_tokens (
+                    token_hash         CHAR(64)    NOT NULL PRIMARY KEY,
+                    parent_pipeline_id VARCHAR(36) NOT NULL,
+                    parent_step        VARCHAR(36) NOT NULL,
+                    depth_hijo         INT         NOT NULL,
+                    emitido_at         DOUBLE      NOT NULL,
+                    vence_at           DOUBLE      NOT NULL,
+                    usado_at           DOUBLE      NULL,
+                    hijo_pipeline_id   VARCHAR(36) NULL,
+                    INDEX idx_subpipeline_tokens_padre (parent_pipeline_id)
+                ) ENGINE=InnoDB
+            """)
+            # Human gate de LAS MANOS (2026-09-17): mismo contrato que los tokens
+            # de sub-pipelines. SOLO el sha256; un solo uso; sin ruta HTTP de
+            # emisión (la emite las_manos/emitir_token_gate.py con la credencial
+            # de la base). Tabla nueva -> la PK es el único índice que usa el
+            # camino caliente (consumo por token_hash).
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS las_manos_human_gate_tokens (
+                    token_hash   CHAR(64)     NOT NULL PRIMARY KEY,
+                    emitido_por  VARCHAR(64)  NOT NULL,
+                    emitido_at   DOUBLE       NOT NULL,
+                    vence_at     DOUBLE       NOT NULL,
+                    usado_at     DOUBLE       NULL,
+                    usado_en     VARCHAR(128) NULL
+                ) ENGINE=InnoDB
+            """)
             # --- Indices de las columnas por las que se FILTRA ---------------
             # Las tres tablas nacieron con la PK y nada mas, y el codigo las
             # consulta por pipeline_id y por status. Con 611 filas el scan no
@@ -583,8 +1033,6 @@ async def init_tables() -> None:
                     await _crear_indice_acotado(cur, tabla, indice, ddl)
                 else:
                     await cur.execute(ddl)
-    finally:
-        conn.close()
 
 
 # ----------------------------------------------------------------
@@ -599,8 +1047,9 @@ async def pipeline_create(p: Pipeline, conexion: aiomysql.Connection | None = No
                 INSERT INTO jacobs_pipelines
                     (pipeline_id, name, invoked_by, mode, status,
                      plan, current_step_index, max_steps, context_refs,
-                     created_at, updated_at, user_id, tenant_id, run_epoch)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s)
+                     created_at, updated_at, user_id, tenant_id, run_epoch,
+                     parent_pipeline_id, depth)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s, %s,%s)
                 """,
                 (
                     p.pipeline_id, p.name, p.invoked_by, p.mode, p.status.value,
@@ -609,6 +1058,7 @@ async def pipeline_create(p: Pipeline, conexion: aiomysql.Connection | None = No
                     json.dumps(p.context, ensure_ascii=False),
                     p.created_at, p.updated_at,
                     p.user_id, p.tenant_id, p.run_epoch,
+                    p.parent_pipeline_id, p.depth,
                 ),
             )
 
@@ -681,13 +1131,10 @@ async def candidatos_del_reaper(statuses: list[PipelineStatus]) -> list[tuple[Pi
     filtra por antigüedad: eso es criterio del reaper."""
     if not statuses:
         return []
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(_sql_candidatos_del_reaper(len(statuses)), tuple(s.value for s in statuses))
             rows = await cur.fetchall()
-    finally:
-        conn.close()
     salida = []
     for row in rows:
         maximo = row.pop("max_timeout_en_curso", None)
@@ -757,7 +1204,7 @@ async def candado_de_activos() -> AsyncIterator[aiomysql.Connection]:
     timeout = candado_timeout_s()
     nombre = nombre_del_candado_de_activos()
     try:
-        conn = await get_conn()
+        conn = await conexion_dedicada()
     except Exception as exc:  # fail-closed: se relanza como CandadoNoDisponible; sin conexión no hay candado y sin candado no se cuenta
         raise CandadoNoDisponible(
             f"no se pudo abrir la conexión del candado '{nombre}': {type(exc).__name__}: {exc}"
@@ -837,7 +1284,7 @@ def _sql_tomar_epoca(con_contexto: bool, n_desde: int) -> str:
 
 
 async def _ejecutar_condicional(sql: str, params: tuple | list) -> int:
-    conn = await get_conn(found_rows=True)
+    conn = await conexion_dedicada(found_rows=True)
     try:
         async with conn.cursor() as cur:
             return await cur.execute(sql, params)
@@ -846,13 +1293,13 @@ async def _ejecutar_condicional(sql: str, params: tuple | list) -> int:
 
 
 async def pipeline_epoca_y_status(pipeline_id: str) -> tuple[int, PipelineStatus] | None:
-    conn = await get_conn()
-    try:
+    # Merge 2026-09-17: es un SELECT sin condición de filas afectadas -- va por
+    # el pool, no por una conexión dedicada (la dedicada queda para
+    # CLIENT.FOUND_ROWS y para el GET_LOCK; ver conexion_dedicada).
+    async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             await cur.execute(_SQL_EPOCA_Y_STATUS, (pipeline_id,))
             fila = await cur.fetchone()
-    finally:
-        conn.close()
     if not fila:
         return None
     return int(fila[0]), PipelineStatus(fila[1])
@@ -971,7 +1418,7 @@ async def continuar_transaccion(
     desde acá no se puede saber si el servidor confirmó; queda
     `estado.incierta` para que quien llama lo diga en su 503."""
     estado = estado if estado is not None else EstadoDeTransaccion()
-    conn = await get_conn(found_rows=True)
+    conn = await conexion_dedicada(found_rows=True)
     try:
         await conn.begin()
         try:
@@ -1031,6 +1478,8 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         tenant_id=row.get("tenant_id"),
         owner_ack_at=row.get("owner_ack_at"),
         run_epoch=int(row.get("run_epoch") or 0),
+        parent_pipeline_id=row.get("parent_pipeline_id"),
+        depth=int(row.get("depth") or 0),
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,
@@ -1149,16 +1598,18 @@ async def get_motor_governance() -> dict[str, dict]:
        risk_level, sandbox_only, requires_human_gate, max_execution_minutes,
        max_recursion_depth, output_schema, fallback_motor, fallback_mode,
        forbidden_paths, auditor_motor}},
-       "motors": {motor_key: has_tool_access (bool)}}
+       "motors": {motor_key: has_tool_access (bool)},
+       "facets": frozenset de facet.key con status='active'}
 
-    Costo medido en vivo (2026-08-21, DB real): 3 SELECTs, 0.00024s de
+    Costo medido en vivo (2026-08-21, DB real) con 3 SELECTs: 0.00024s de
     ejecución total en el servidor (motor: 4 filas, capability: ~17,
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
-    no solo en plan-build.
+    no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) se agregó
+    después y NO está medido.
 
     Ruling R38 (2026-09-17): por el pool del store, no por una conexión propia
     -- era la conexión por pedido que tiraba /jacobs/preflight a c=50. Sin
-    caché: cada llamada sigue leyendo las tres tablas (misma foto que antes);
+    caché: cada llamada sigue leyendo las tablas (misma foto que antes);
     un error de la base se propaga igual (fail-closed)."""
     async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
@@ -1207,7 +1658,237 @@ async def get_motor_governance() -> dict[str, dict]:
                     "auditor_motor": None,
                 })
                 capabilities[capability_key]["allowed_motors"].append(motor_key)
-    return {"capabilities": capabilities, "motors": motors}
+
+            # E-03 (2026-09-16): el vocabulario de facetas del planner es la
+            # tabla `facet`, no una lista fija. Mismas reglas que resolve_facet
+            # (status='active'): lo que el planner acepta es lo que se puede
+            # despachar. Catálogo de 7 filas: sin índice, declarado en DEUDA.md.
+            await cur.execute("SELECT `key` FROM facet WHERE status = 'active'")
+            facets = frozenset(key for (key,) in await cur.fetchall())
+    return {"capabilities": capabilities, "motors": motors, "facets": facets}
+
+
+# ----------------------------------------------------------------
+#  Contrato de sub-pipelines (frente F, 2026-09-16)
+# ----------------------------------------------------------------
+# Las dos sentencias que deciden son UNA sola cada una, autocommit: nada de
+# SELECT-y-después-escribir, que es exactamente la ventana de carrera que este
+# contrato cierra. Si no afectan una fila, un diagnóstico APARTE nombra el
+# motivo; el diagnóstico solo etiqueta el rechazo, no lo decide.
+
+SQL_EMITIR_TOKEN = """
+    INSERT INTO jacobs_subpipeline_tokens
+        (token_hash, parent_pipeline_id, parent_step, depth_hijo, emitido_at, vence_at)
+    SELECT %s, p.pipeline_id, s.step_id, p.depth + 1, %s, %s
+      FROM jacobs_pipelines p
+      JOIN jacobs_steps s ON s.step_id = %s AND s.pipeline_id = p.pipeline_id
+     WHERE p.pipeline_id = %s
+       AND p.status = 'running'
+       AND s.facet = 'ada'
+       AND p.depth + 1 <= %s
+"""
+
+
+async def subpipeline_token_emitir(
+    token_hash: str,
+    parent_pipeline_id: str,
+    parent_step: str,
+    emitido_at: float,
+    vence_at: float,
+    max_profundidad: int,
+) -> int | None:
+    """Inserta el hash solo si el padre está `running`, el paso existe, es de
+    ese padre y es de Ada (en cualquier estado: enmienda 2026-09-16), y el
+    hijo no excede la profundidad. Devuelve depth_hijo, o None si no insertó."""
+    async with conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                SQL_EMITIR_TOKEN,
+                (token_hash, emitido_at, vence_at, parent_step, parent_pipeline_id, max_profundidad),
+            )
+            if cur.rowcount != 1:
+                return None
+            await cur.execute(
+                "SELECT depth_hijo FROM jacobs_subpipeline_tokens WHERE token_hash = %s",
+                (token_hash,),
+            )
+            (depth_hijo,) = await cur.fetchone()
+            return int(depth_hijo)
+
+
+async def subpipeline_emision_diagnostico(parent_pipeline_id: str, parent_step: str) -> dict:
+    async with conexion() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT status, depth FROM jacobs_pipelines WHERE pipeline_id = %s",
+                (parent_pipeline_id,),
+            )
+            padre = await cur.fetchone()
+            await cur.execute(
+                "SELECT status, facet, pipeline_id FROM jacobs_steps WHERE step_id = %s",
+                (parent_step,),
+            )
+            paso = await cur.fetchone()
+    return {
+        "padre_status": padre["status"] if padre else None,
+        "padre_depth": int(padre["depth"]) if padre else None,
+        "paso_status": paso["status"] if paso else None,
+        "paso_facet": paso["facet"] if paso else None,
+        "paso_pipeline_id": paso["pipeline_id"] if paso else None,
+    }
+
+
+# El consumo. Un UPDATE multi-tabla autocommit: toma el candado de fila de la PK
+# del token; un segundo consumo concurrente espera ese candado y, al liberarse,
+# RELEE la versión confirmada (REPEATABLE-READ y READ-COMMITTED), ve usado_at
+# puesto y afecta 0 filas. Probado con intercalado forzado en
+# jacobs/_subpipeline_contrato_io_test.py. Plan: t por PK (const), p y s por PK.
+SQL_CONSUMIR_TOKEN = """
+    UPDATE jacobs_subpipeline_tokens t
+      JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+      JOIN jacobs_steps s     ON s.step_id = t.parent_step
+                             AND s.pipeline_id = t.parent_pipeline_id
+       SET t.usado_at = %s, t.hijo_pipeline_id = %s
+     WHERE t.token_hash = %s
+       AND t.usado_at IS NULL
+       AND t.vence_at > %s
+       AND t.parent_pipeline_id = %s
+       AND t.depth_hijo <= %s
+       AND p.status = 'running'
+"""
+
+# La identidad (user_id, tenant_id) del hijo es la del PADRE (revisión final,
+# I-3): sale de acá, nunca del cuerpo. t por PK, p por PK.
+SQL_TOKEN_CONSUMIDO = """
+    SELECT t.parent_pipeline_id, t.parent_step, t.depth_hijo, t.hijo_pipeline_id,
+           p.user_id, p.tenant_id
+      FROM jacobs_subpipeline_tokens t
+      JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+     WHERE t.token_hash = %s
+"""
+
+# Identidad del padre para el que se EMITIÓ el token (no el que declara el
+# cuerpo), leída antes de consumir cuando el cuerpo trae identidad. t y p por PK.
+SQL_IDENTIDAD_PADRE_DEL_TOKEN = """
+    SELECT t.parent_pipeline_id, p.user_id, p.tenant_id
+      FROM jacobs_subpipeline_tokens t
+      JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+     WHERE t.token_hash = %s
+"""
+
+SQL_DIAGNOSTICO_TOKEN = """
+    SELECT t.usado_at, t.vence_at, t.parent_pipeline_id, t.depth_hijo,
+           p.status AS padre_status, s.step_id AS paso_step_id
+      FROM jacobs_subpipeline_tokens t
+      LEFT JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+      LEFT JOIN jacobs_steps s     ON s.step_id = t.parent_step
+                                  AND s.pipeline_id = t.parent_pipeline_id
+     WHERE t.token_hash = %s
+"""
+
+
+async def subpipeline_token_consumir(
+    token_hash: str,
+    parent_pipeline_id: str,
+    hijo_pipeline_id: str,
+    ahora: float,
+    max_profundidad: int,
+) -> dict | None:
+    """Consume el token para `hijo_pipeline_id`. Devuelve la fila consumida
+    (parent_pipeline_id, parent_step, depth_hijo, hijo_pipeline_id y la
+    identidad del padre: user_id, tenant_id) o None si no afectó una fila.
+
+    La confirmación lee por PK (token_hash), no por hijo_pipeline_id: si el
+    UPDATE reportó una fila afectada pero la relectura no existe o su
+    hijo_pipeline_id no es el nuestro, el candado de fila y el UPDATE
+    condicionado no están haciendo lo que dicen (invariante roto), y eso NO
+    es un rechazo -- se revienta fuerte en vez de devolver un TOKEN_USADO
+    engañoso que quemaría el token contra el hijo equivocado en silencio."""
+    async with conexion() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                SQL_CONSUMIR_TOKEN,
+                (ahora, hijo_pipeline_id, token_hash, ahora, parent_pipeline_id, max_profundidad),
+            )
+            if cur.rowcount != 1:
+                return None
+            await cur.execute(SQL_TOKEN_CONSUMIDO, (token_hash,))
+            fila = await cur.fetchone()
+            if fila is None or fila["hijo_pipeline_id"] != hijo_pipeline_id:
+                raise RuntimeError(
+                    "invariante del consumo roto: el UPDATE reportó una fila afectada pero "
+                    f"la relectura por PK no es del hijo esperado (hijo_pipeline_id={hijo_pipeline_id!r})"
+                )
+            return fila
+
+
+async def subpipeline_token_identidad_padre(token_hash: str) -> dict | None:
+    """(parent_pipeline_id, user_id, tenant_id) del padre del token, o None si
+    el hash no existe o el padre ya no está. Solo lectura: no consume."""
+    async with conexion() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(SQL_IDENTIDAD_PADRE_DEL_TOKEN, (token_hash,))
+            return await cur.fetchone()
+
+
+async def subpipeline_token_diagnostico(token_hash: str) -> dict | None:
+    async with conexion() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(SQL_DIAGNOSTICO_TOKEN, (token_hash,))
+            return await cur.fetchone()
+
+
+# ----------------------------------------------------------------
+#  Human gate de LAS MANOS (2026-09-17)
+# ----------------------------------------------------------------
+# Mismo patrón que el contrato de sub-pipelines: la decisión es UNA sentencia
+# autocommit (nada de SELECT-y-después-escribir); el diagnóstico solo rotula.
+
+SQL_EMITIR_TOKEN_GATE = """
+    INSERT INTO las_manos_human_gate_tokens
+        (token_hash, emitido_por, emitido_at, vence_at)
+    VALUES (%s, %s, %s, %s)
+"""
+
+# Candado de fila por PK: un segundo consumo concurrente espera, relee la
+# versión confirmada, ve usado_at puesto y afecta 0 filas. Probado con 20
+# consumos a la vez en las_manos/_human_gate_io_test.py.
+SQL_CONSUMIR_TOKEN_GATE = """
+    UPDATE las_manos_human_gate_tokens
+       SET usado_at = %s, usado_en = %s
+     WHERE token_hash = %s
+       AND usado_at IS NULL
+       AND vence_at > %s
+"""
+
+SQL_DIAGNOSTICO_TOKEN_GATE = """
+    SELECT usado_at, vence_at
+      FROM las_manos_human_gate_tokens
+     WHERE token_hash = %s
+"""
+
+
+async def human_gate_token_emitir(
+    token_hash: str, emitido_por: str, emitido_at: float, vence_at: float,
+) -> None:
+    async with conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(SQL_EMITIR_TOKEN_GATE, (token_hash, emitido_por, emitido_at, vence_at))
+
+
+async def human_gate_token_consumir(token_hash: str, usado_en: str, ahora: float) -> bool:
+    """True si ESTE llamador consumió el token (una fila afectada)."""
+    async with conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(SQL_CONSUMIR_TOKEN_GATE, (ahora, usado_en, token_hash, ahora))
+            return cur.rowcount == 1
+
+
+async def human_gate_token_diagnostico(token_hash: str) -> dict | None:
+    async with conexion() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(SQL_DIAGNOSTICO_TOKEN_GATE, (token_hash,))
+            return await cur.fetchone()
 
 
 # ----------------------------------------------------------------

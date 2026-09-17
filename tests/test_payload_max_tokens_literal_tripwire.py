@@ -34,6 +34,7 @@ from __future__ import annotations
 import ast
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -65,10 +66,10 @@ _SONDAS_DE_MEDICION = {
         "mide el costo del auditor: el tope acota el gasto de la medicion, no una respuesta",
 }
 
-_NO_PARSEA = {
-    "_director_patch/routes_block.py": "fragmento de patch, no un módulo (ver "
-    "test_aiomysql_connect_timeout_tripwire.py); no menciona max_tokens (grep).",
-}
+# Vacía desde el 2026-09-16 (E-01): el único no-módulo real del árbol,
+# _director_patch/routes_block.py, se retiró. El mecanismo se conserva y se
+# ejercita con un .py roto declarado a propósito dentro del test.
+_NO_PARSEA: dict[str, str] = {}
 
 
 def _es_test(path: Path) -> bool:
@@ -76,8 +77,8 @@ def _es_test(path: Path) -> bool:
     return nombre.startswith("test_") or nombre.endswith("_test.py")
 
 
-def _excluido(path: Path) -> bool:
-    for parte in path.relative_to(RAIZ).parts:
+def _excluido(path: Path, raiz: Path = RAIZ) -> bool:
+    for parte in path.relative_to(raiz).parts:
         if parte in EXCLUIDOS:
             return True
         minuscula = parte.lower()
@@ -118,8 +119,8 @@ def _clave(nodo: ast.AST) -> str | None:
     return None
 
 
-def _hallazgos_en(path: Path) -> list[str]:
-    rel = path.relative_to(RAIZ)
+def _hallazgos_en(path: Path, raiz: Path = RAIZ) -> list[str]:
+    rel = path.relative_to(raiz)
     if rel.as_posix() in _SONDAS_DE_MEDICION:
         return []
     try:
@@ -155,11 +156,22 @@ def _hallazgos_en(path: Path) -> list[str]:
     return encontrados
 
 
+@contextmanager
+def _temporal_fuera_del_checkout():
+    """Un .py sintético para los controles, dentro de un directorio temporal
+    FUERA del checkout: una corrida matada o dos en paralelo no dejan un
+    archivo roto a la vista del escaneo del árbol completo. Se escanea con
+    `_hallazgos_en(ruta, ruta.parent)`."""
+    with tempfile.TemporaryDirectory(prefix="jax-tripwire-") as directorio:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=directorio, delete=True) as fh:
+            yield fh
+
+
 def _con_codigo(codigo: str) -> list[str]:
-    with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+    with _temporal_fuera_del_checkout() as fh:
         fh.write(codigo)
         fh.flush()
-        return _hallazgos_en(Path(fh.name))
+        return _hallazgos_en(Path(fh.name), Path(fh.name).parent)
 
 
 class PayloadMaxTokensLiteralTripwireTest(unittest.TestCase):
@@ -264,3 +276,48 @@ class SondasDeMedicionTest(unittest.TestCase):
                         ofensores.append(f"{py.relative_to(RAIZ)} importa {m}")
         self.assertEqual(ofensores, [], "una sonda de medicion entro al codigo de servicio:\n"
                                         + "\n".join(ofensores))
+
+
+class NoParseaTest(unittest.TestCase):
+    """E-01 (2026-09-16): con la tabla vacía, las dos ramas del SyntaxError
+    quedaban sin ejercitar. Se prueban con archivos de mentira."""
+
+    def test_un_archivo_roto_no_declarado_se_reporta(self):
+        hallazgos = _con_codigo("def f(:\n    pass\n")
+        self.assertEqual(len(hallazgos), 1, hallazgos)
+        self.assertIn("no parsea", hallazgos[0])
+
+    def test_un_archivo_roto_declarado_no_se_reporta(self):
+        from unittest.mock import patch
+        with _temporal_fuera_del_checkout() as fh:
+            fh.write("def f(:\n    pass\n")
+            fh.flush()
+            ruta = Path(fh.name)
+            with patch.dict(_NO_PARSEA, {str(ruta.relative_to(ruta.parent)): "roto a propósito"}):
+                self.assertEqual(_hallazgos_en(ruta, ruta.parent), [])
+
+
+class ControlesFueraDelCheckoutTest(unittest.TestCase):
+    """Revisión final del frente E: los controles escribían su .py sintético
+    (a veces roto a propósito) en la raíz del checkout. Una corrida matada a
+    mitad de camino, o dos corridas en paralelo, dejaban ese archivo a la vista
+    del escaneo del árbol completo y todos los tripwires se ponían rojos. El
+    escaneo recibe la raíz inyectada y los controles escriben en un directorio
+    temporal fuera del checkout."""
+
+    def test_los_controles_no_escriben_en_el_checkout(self):
+        arbol = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        ofensores = [
+            n.value.lineno for n in ast.walk(arbol)
+            if isinstance(n, ast.keyword) and n.arg == "dir"
+            and isinstance(n.value, ast.Name) and n.value.id == "RAIZ"
+        ]
+        self.assertEqual(ofensores, [], f"un control escribe dentro del checkout (dir=RAIZ) en las líneas {ofensores}")
+
+    def test_la_raiz_del_escaneo_se_inyecta(self):
+        with tempfile.TemporaryDirectory(prefix="jax-tripwire-") as d:
+            ruta = Path(d) / "roto.py"
+            ruta.write_text("def f(:\n    pass\n", encoding="utf-8")
+            hallazgos = _hallazgos_en(ruta, Path(d))
+        self.assertEqual(len(hallazgos), 1, hallazgos)
+        self.assertTrue(hallazgos[0].startswith("roto.py"), hallazgos)

@@ -436,7 +436,7 @@ def test_la_conexion_abre_sesion_de_solo_lectura_y_hace_rollback_no_commit(monke
     async def _get_conn_falso(*a, **kw):
         return conexion
 
-    monkeypatch.setattr(store, "get_conn", _get_conn_falso)
+    monkeypatch.setattr(store, "conexion_dedicada", _get_conn_falso)
 
     asyncio.run(_maximos_http_directo())
 
@@ -479,7 +479,7 @@ def test_rollback_corre_aunque_la_select_falle_y_cierra_despues(monkeypatch):
     async def _get_conn_falso(*a, **kw):
         return conexion
 
-    monkeypatch.setattr(store, "get_conn", _get_conn_falso)
+    monkeypatch.setattr(store, "conexion_dedicada", _get_conn_falso)
 
     with pytest.raises(RuntimeError, match="boom"):
         asyncio.run(_maximos_http_directo())

@@ -37,6 +37,8 @@ from jax.memory.worker import (
     FORBIDDEN_CATEGORIES_BLOCK,
     _parse_json,
 )
+from jax.core.registro_facetas import url_del_proveedor
+from jax.core.cliente_http_compartido import cerrar_cliente_http
 from jax.muscles.base import HttpMuscle
 
 logging.basicConfig(
@@ -93,12 +95,15 @@ hechos, devolve la lista vacia. Es perfectamente valido devolver una lista vacia
 hecho, es lo mas comun."""
 
 
-def build_synthesizer() -> HttpMuscle:
+async def build_synthesizer() -> HttpMuscle:
     """Crea el muscle sintetizador. Mismo extractor confiable (DeepSeek) que
-    worker.py — sintetizar mal es tan costoso como extraer mal."""
+    worker.py — sintetizar mal es tan costoso como extraer mal.
+    E-21 (2026-09-16): la URL sale del catálogo (provider.base_url); sin ella
+    levanta MuscleInvocationError y la corrida del timer falla visible."""
     return HttpMuscle(
         name="synthesizer",
         provider="deepseek",
+        api_url=await url_del_proveedor("deepseek"),
         model_default="deepseek-v4-flash",
         models_allowed=["deepseek-v4-flash", "deepseek-v4-pro"],
         system_prompt="Sos un analista que busca patrones. Respondes solo con JSON valido.",
@@ -183,13 +188,14 @@ async def run_once() -> None:
 
         logger.info(f"Analizando {len(scopes)} scope(s) con >= {MIN_VERIFIED_FACTS} "
                     f"facts verificados...")
-        synthesizer = build_synthesizer()
+        synthesizer = await build_synthesizer()
         total = 0
         for scope in scopes:
             total += await process_scope(db, synthesizer, scope["user_id"], scope["project_id"])
         logger.info(f"Corrida terminada: {total} insight(s) nuevo(s) en total.")
     finally:
         await db.close()
+        await cerrar_cliente_http()
 
 
 if __name__ == "__main__":

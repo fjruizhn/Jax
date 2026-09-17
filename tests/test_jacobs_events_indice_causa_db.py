@@ -63,7 +63,7 @@ EVENTOS_CAUSA_POR_PIPELINE = 2
 
 async def _sembrar() -> list[str]:
     ids = [str(uuid.uuid4()) for _ in range(N_PIPELINES)]
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             ahora = time.time()
@@ -84,7 +84,7 @@ async def _sembrar() -> list[str]:
 
 
 async def _borrar(ids: list[str]) -> None:
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             marcador = ", ".join(["%s"] * len(ids))
@@ -97,7 +97,7 @@ async def _borrar(ids: list[str]) -> None:
 
 
 async def _explain_json(sql: str, params: tuple) -> dict:
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute("EXPLAIN FORMAT=JSON " + sql, params)
@@ -110,7 +110,7 @@ async def _explain_json(sql: str, params: tuple) -> dict:
 def test_init_tables_crea_idx_events_pipeline_tipo():
     async def cuerpo():
         await store.init_tables()
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 await cur.execute(

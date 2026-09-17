@@ -21,6 +21,24 @@ Los items sin fecha de "verificado hoy" vienen de CONTEXT.md §9 — heredan
 su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
+- **La ruta vieja del freno `/etc/jax/PAUSE` sigue frenando — frente B, Task H (2026-09-17).**
+  - **DECISIÓN** (controlador principal del frente B, 2026-09-17; rulings R11-R15 del ledger
+    `jax-platform/.superpowers/sdd/2026-09-16-frente-b-kill-switch/progress.md`): mientras exista
+    `/etc/jax/PAUSE`, todo lector del interruptor (LAS MANOS server, ssh_worker, motor_registry,
+    Jacobs policy/executor, el REPL, `jax --task` y jax-platform) lo trata como freno PUESTO, además
+    del archivo de `JAX_KILL_SWITCH_PATH` (`/etc/jax/interruptor/PAUSE`, que no cambia). Si no se
+    puede mirar (cualquier OSError que no sea ENOENT) cuenta como puesto. Un WARNING por episodio
+    nombra la ruta vieja y la nueva. La regla vive una sola vez en `interruptor_activo` del módulo
+    compartido (`jax/core/interruptor.py` + copia `jax-platform/backend/interruptor.py`, familia
+    `interruptor` de `scripts/check_mirror_sync.py`). La plataforma decide sus escrituras con
+    `pausa_presente` (sólo su archivo), informa con el freno completo más el campo `heredada`, y
+    **nunca borra `/etc/jax/PAUSE`**: reanudar con la heredada puesta responde `activo: true,
+    heredada: true` y la Mesa avisa (`killSwitchHeredada`).
+  - **Por qué:** gente y scripts pausan creando esa ruta; si dejara de leerse, quien pause así
+    creería que frenó, y no.
+  - **PENDIENTE:** retirar la ruta heredada (constante `RUTA_HEREDADA`, la excepción del test de
+    clase `tests/test_interruptor_sin_rutas_fijas.py`, el aviso de la Mesa) — la fecha la decide
+    Fernando.
 - **ESTADO — 2026-09-01.** Bloque único. Reemplaza los cinco bloques de
   cierre que la ronda de seguridad fue apilando en este mismo lugar; cada uno
   se declaraba "estado único" y convivía con los anteriores, que es
@@ -381,6 +399,423 @@ su fecha de última verificación real, no una nueva.
 - **Cerrado — límite de activos entre procesos en `MAX_PARALLEL_PIPELINES` (antes "Anotado", desvío 7 del plan; ola final F3, Ruling R31).** El conteo contra el cupo se hacía bajo un `asyncio.Lock` de proceso y el CLI `tools/jacobs_relaunch.py` corre en otro proceso: un continue desde el CLI y un create de LAS MANOS podían contar a la vez y superar el cupo. **Arreglo:** `store.candado_de_activos()` — candado con nombre del servidor MariaDB (`GET_LOCK('jacobs_crear_o_continuar:<base>', JAX_PREVUELO_CANDADO_TIMEOUT_S)`, default 10 s) en UNA conexión dedicada; create y continue recuentan por esa conexión y escriben dentro del bloque; `RELEASE_LOCK` en `finally` y la conexión se cierra siempre (cerrar la sesión suelta el candado aunque `RELEASE_LOCK` falle). Si vence o la base no lo concede → falla cerrado, **503 `prevuelo_no_disponible`** (no 429: `limite_de_activos` afirmaría un cupo lleno que nadie midió). El conteo temprano sigue, sólo para no planificar ni sondear en vano. **Evidencia:** `tests/test_jacobs_candado_activos_db.py` (dos sesiones no superan el cupo — por mutación con un nombre de candado por sesión: `assert 2 == 1`; GET_LOCK que vence a 1 s; se suelta aunque el bloque lance; nombre por base; EXPLAIN sin tablas y recuento por `idx_pipelines_status`), y wiring puro en `tests/test_jacobs_preflight_endpoint.py`/`tests/test_jacobs_continuar.py` (recuento bajo el candado con el cupo que otro proceso llenó → 422 al crear / 429 al continuar; escritura dentro del candado; candado no disponible → 503 / se propaga sin escribir).
 
 - **Cerrado — la sonda del pre-vuelo que vence sin registrar uso (antes "Anotado", Ruling R14; ola final F4, Ruling R30).** `jacobs/sonda.py::_registrar` sólo registraba uso con tokens medidos > 0: una sonda que VENCÍA o un 2xx SIN campo de uso no dejaba fila en `axioma_usage` aunque el proveedor la hubiera podido cobrar. **Arreglo:** esos dos casos se registran con tokens **estimados** — entrada ⌈`len(MENSAJE_DE_SONDA)` / `JAX_PREVUELO_CHARS_POR_TOKEN`⌉, salida el tope que pidió la sonda — y `request_type='preflight_probe_est'` (19 caracteres; `axioma_usage.request_type` es `VARCHAR(20)` y no tiene otra columna para marcar una estimación sin DDL). Con tokens medidos sigue `preflight_probe`. Se decide por si el pedido SALIÓ (pasada final R34): no registran `ConnectError`/`ConnectTimeout`/`PoolTimeout`/`UnsupportedProtocol`, un 4xx, la falla local (`config_error`) ni la base caída al resolver; registran estimado `ReadTimeout`/`WriteTimeout`, `ReadError`, `RemoteProtocolError`, cualquier 5xx (504/524 incluidos) y el timeout propio de la sonda. **Evidencia:** `tests/test_prevuelo_sonda.py` (+9: vence por `httpx` y por `wait_for`, 2xx sin usage en openai-compat, gemini y motor, controles con usage medido, falla local y base caída; rojo contra 4768484: 6 failed) y `tests/test_prevuelo_catalogo_db.py` (+1: los dos `request_type` entran en la columna real). **Aviso a la Mesa:** Admin → Costos agrupa por `request_type`, así que aparece la fila nueva `preflight_probe_est`.
+
+## Cerrado en código, merge y despliegue pendientes — human gate de LAS MANOS sin emisión HTTP (2026-09-17)
+
+- **HECHO (medido 2026-09-17, Mr. Hyde, rama `fix/human-gate-sin-auth` desde `c13d066`):** `POST /human_gate/token`
+  (sin autenticación) devolvía 200 con un token a cualquier proceso local (TestClient sobre `server.app` de master: 200
+  `token/ttl_seconds/expires_epoch`). Además `/motor/dispatch` aceptaba como `human_gate_token` cualquier string no vacío
+  (`policy.py` sólo miraba presencia): `code_swarm` y `bug_hunt` (`requires_human_gate=1`) se autoaprobaban con `"x"`.
+- **Quién la usaba:** nadie. Ningún código de jax ni de jax-platform (backend o frontend) llama la ruta; el log
+  `las_manos/logs/gate.jsonl` no existía (nunca se emitió un token en producción) y `audit.jsonl` no tiene ningún
+  evento `HUMAN_GATE`. El gate de pipelines de la UI (`approve-step`) es otro mecanismo y no se toca acá.
+- **DECISIÓN (autonomía de Fernando, 2026-09-17):** el patrón del frente F. Tabla `las_manos_human_gate_tokens`
+  (`init_tables()`): sólo sha256 (PK), `emitido_por`, `vence_at`, `usado_at`, `usado_en`; consumo atómico
+  `UPDATE … WHERE usado_at IS NULL AND vence_at > now` (`las_manos/human_gate.py`). **Sin ruta HTTP de emisión:** la
+  emite `las_manos/emitir_token_gate.py`, que necesita la credencial de la base (`/etc/jax/.env`, root:fruiz 0660).
+  La jaula de Hyde no monta `/etc/jax` y `axioma` no la lee (`Permission denied`, verificado). `/execute` y
+  `/motor/dispatch` consumen contra la base; el motor consume DESPUÉS de la política (un rechazo no quema el token).
+  `[human_gate]` queda sólo con `token_ttl_seconds` (rango [10, 3600], validado al importar `server.py`).
+- **Uso para el aprobador humano:** `set -a; . /etc/jax/.env; set +a; ~/jax/las_manos/.venv/bin/python ~/jax/las_manos/emitir_token_gate.py`
+  → imprime el token (una vez) y el vencimiento; va en `approval_token` o `human_gate_token`.
+- **Pruebas:** `tests/test_human_gate_sin_emision_http.py` (24, tests-puros, piso 1127→1151) y
+  `las_manos/_human_gate_io_test.py` (8, subpipeline-contrato-db, piso 101→109). Vistos en rojo contra master; mutaciones:
+  reabrir la ruta → 3 rojos, quitar el consumo del motor → 2 rojos, quitar `usado_at IS NULL` → 2 rojos (un uso, carrera).
+- **PENDIENTE 2026-09-18:** PR, CI, merge; deploy = reiniciar `jax-las-manos` (crea la tabla en el arranque, sin
+  migración manual; comprobar antes `ActiveEnterTimestamp` contra los commits del checkout). Sin cambios en jax-platform.
+- **CORREGIDO 2026-09-17 (Mr. Hyde, ver "LAS MANOS autentica a sus llamadores"):** ~~Sigue abierto (no es este arreglo), fecha 2026-09-24:~~ LAS MANOS no autenticaba al llamador. `facet_id`/`caller`/
+  `invoked_by` son declarados por el cuerpo: `POST /jacobs/pipeline/{id}/approve-step` con `invoked_by="plataforma"`
+  aprueba steps de Hyde bloqueados en human gate desde cualquier proceso local; `/execute` con `facet_id="hyde"` ejecuta
+  en staging sin gate; `/motor/dispatch` elige `caller`. Ver la entrada de Hyde en la sección de C3.
+
+## Cerrado en código, merge y despliegue pendientes — LAS MANOS autentica a sus llamadores (2026-09-17)
+
+- **HECHO (medido 2026-09-17, Mr. Hyde, rama `fix/las-manos-auth-servicio` sobre `fix/human-gate-sin-auth`):** con
+  `server.app` real de `c7d59cc` y la base sustituida, `POST /jacobs/pipeline/{id}/approve-step` SIN credencial y
+  `{"invoked_by": "plataforma"}` → 200 y el paso de Hyde en `blocked_human_gate` pasaba a `pending`. La jaula de Hyde
+  tiene red local (`--share-net`): Hyde se podía autoaprobar.
+- **Llamadores reales (grep en jax y jax-platform + journal de 7 días de `jax-las-manos`):** jax-platform
+  (`api/pipelines.py`: crear, leer, results, resume, cancel; `jax_engine/state.py`: sondeo de pipelines y `/health`;
+  `api/chat.py`: `/motor/authorize-facet`; tablero: `/health`) y Jacobs dentro del propio proceso
+  (`jacobs/executor.py`: `/motor/dispatch`, `/motor/job/{id}`, `/cancel`). **Nadie** llama `/execute`, `/plan` de LAS
+  MANOS, `/audit/tail` ni `approve-step` (la UI de hoy no aprueba pasos en gate: sólo `resume`). El REPL no llama a
+  LAS MANOS. El proxy del Ejecutor tampoco.
+- **DECISIÓN (autonomía de Fernando, 2026-09-17): credencial de servicio, no SO_PEERCRED.** Hyde, jax-platform y LAS
+  MANOS corren como `fruiz`: el uid del par no distingue a Hyde. Lo que los distingue es qué pueden leer: la jaula no
+  monta `/etc/jax`, corre con `--clearenv` y `--unshare-all` (PID propio: no ve `/proc/<pid>/environ` de los
+  servicios). `las_manos/auth_servicio.py`: middleware ASGI **deny by default** (público sólo `GET /health`), cabecera
+  `X-Jax-Credencial-Servicio`, `hmac.compare_digest` contra todas, identidades `plataforma`
+  (`JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA`: `/jacobs/*` + `POST /motor/authorize-facet`; declara `invoked_by=plataforma`,
+  `caller=jax_platform_chat`) y `jacobs` (`JAX_LAS_MANOS_CREDENCIAL_JACOBS`: `/motor/dispatch`, `/motor/job/*`,
+  `POST /jacobs/pipeline`; declara `caller=jacobs`, `invoked_by=ada`). Un `invoked_by`/`caller` del cuerpo que no es de
+  la credencial → 403 antes de la ruta; claves duplicadas → 400. **Sólo `plataforma` aprueba o reanuda.** Sin las
+  variables (o cortas, o iguales) LAS MANOS no arranca. `/execute`, `/plan` y `/audit/tail` no los alcanza ninguna
+  identidad. Rechazos con `code`, sin prosa. Una ruta nueva bajo `/jacobs/` queda sólo para `plataforma` sin tocar nada.
+- **jax-platform:** `backend/credencial_las_manos.py::encabezados_las_manos()` en cada pedido a LAS MANOS salvo
+  `/health` (rama `fix/las-manos-credencial-servicio`); guard AST en `tests/test_credencial_las_manos.py`.
+- **Pruebas:** `tests/test_las_manos_auth_servicio.py` (37, tests-puros 1151 → 1188). Mutaciones en policy.yml.
+  Carga (middleware aislado, 25 VUs, 15 s, hall9000): cuerpo de 1 KB p95 3,19 → 3,16 ms (10054 → 8650 req/s); cuerpo
+  de 200 KB (peor caso: prompt armado de `/motor/dispatch`) p95 7,91 → 9,47 ms (4133 → 2647 req/s). Tráfico real:
+  ~13 dispatch/semana.
+- **Despliegue (PENDIENTE 2026-09-18):** agregar las dos variables a `/etc/jax/.env` (`secrets.token_urlsafe(32)`,
+  distintas) → mergear y reiniciar **jax-platform primero** (manda la cabecera; LAS MANOS viejo la ignora) →
+  mergear y reiniciar `jax-las-manos` con 0 pipelines en vuelo. Comprobar `ActiveEnterTimestamp` contra los commits.
+- **Sigue abierto, fecha 2026-09-24:** (1) un proceso de `fruiz` FUERA de la jaula lee `/etc/jax/.env` (root:fruiz
+  660) y cualquier `/proc/<pid>/environ` de `fruiz`: contra eso no hay credencial que alcance; el cierre es otra
+  cuenta de servicio para LAS MANOS/jax-platform. (2) frente G (emisor de sub-pipelines de Ada) tiene que mandar
+  `headers=encabezado_propio(IDENTIDAD_JACOBS)`. (3) los apps de carga de `loadtest/` montan los routers sin
+  `proteger()`.
+- **CORREGIDO 2026-09-17 (Mr. Hyde, verificado):**
+  - **(3) CERRADO.** `loadtest/authorize_facet_app.py` y `loadtest/jacobs_subpipelines_app.py` llaman `proteger(app)`;
+    los k6 mandan `X-Jax-Credencial-Servicio` desde `__ENV.CREDENCIAL` y abortan sin ella. Guardia
+    `tests/test_loadtest_apps_protegidas.py` (AST; vista en rojo, mutación → 1 rojo). Medido contra `jax_memory_test`:
+    sin credencial 401, identidad ajena 403, propia pasa; `authorize_facet.js` a 25 VUs con los tres caminos
+    (permitido / fail-closed / caller ajeno) p95 5,81 ms, 6140 req/s, 100 % checks, 0 fallas.
+  - **(2) CERRADO como propiedad.** No hay en el árbol un emisor de sub-pipelines de Ada que llame
+    `POST /jacobs/pipeline` (`grep` sin coincidencias fuera de tests/loadtest). Los tres llamados de `jacobs/executor.py`
+    ya mandan `encabezado_propio(IDENTIDAD_JACOBS)`. Un emisor futuro sin cabecera recibe 401 (el middleware es
+    deny-by-default), así que no puede quedar abierto en silencio.
+  - **(1) DECISIÓN DE FERNANDO, no deuda técnica.** Medido: `fruiz` tiene `(ALL : ALL) ALL` en sudo (con contraseña y
+    caché de sesión). Una cuenta de servicio para LAS MANOS/jax-platform con `.env` `root:jaxsvc 640` sólo cierra el
+    caso "proceso de `fruiz` sin sudo en caché"; cambia cómo operan y despliegan TODAS las sesiones de Mr. Hyde
+    (checkouts, venvs, `/etc/jax/.env`, unidades). La jaula de Hyde no monta `.env` y el Ejecutor corre como `axioma`
+    (sin acceso), que son los procesos no-operador. Queda como decisión del operador, con este análisis.
+
+## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 2: C3 registro intocable y cerco (2026-09-17)
+
+Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~11:45). Rama local `feat/ejecutor-c3`
+(`/home/fruiz/worktrees/jax-sp1-c3`), apilada sobre `feat/ejecutor-c1-c2` (PR #180), SIN PUBLICAR (un subagente
+no puede escribir en el remoto). Orden: después de #180 y de su despliegue (el cerco sale del inventario de la
+política que exporta el plan 1).
+
+- [ ] **2026-09-18** Publicar la rama y abrir el PR (base `feat/ejecutor-c1-c2` o `master` si #180 ya entró); confirmar
+  en el log del runner `1038 passed, 1 skipped` (tests-puros); si difiere, manda el runner y se corrige la línea de historia.
+- [ ] **2026-09-18** Canario rojo por API (plan 2, Task 6 Step 4): en `_devolver`, mover `await _enviar(conn, writer,
+  h11.Data(data=trozo))` antes del `try` que anota; `tests-puros` = `failure` sobre ese sha; revert = `success`.
+- [ ] **2026-09-18** Despliegue (plan 2, Task 7 Steps 2–5): `/etc/jax/.env` con backup y sudoedit (`JAX_EJECUTOR_REGISTRO`,
+  `JAX_EJECUTOR_CERCO_SONDAS`, `JAX_PROXY_CARRIL_{UPSTREAM,RAIZ,TOPE_S=90,PUERTO=18435,HOST}`), dos lectores idénticos;
+  `ops/ejecutor/instalar_registro_y_cerco.sh` (respalda iptables-save/ip6tables-save y prueba la restauración en un
+  netns ANTES de tocar la red); `probar_c3.py` → `c3_vivo=true`; `probar_c3_corte.py` → `c3_corta=true`; las cuatro
+  roturas del Step 5; y verificar que siguen vivos Mesa, LAS MANOS :7777, Ollama :11434, MariaDB :3308, SSH :58291 de
+  fruiz, la VM .11 y Sésamo .6. Rollback del cerco: `sudo nft delete table inet ejecutor_cerco`.
+
+### Ejecutor SP1 plan 6 · arranque condicionado — publicar, instalar el vigía y lo que SP2 debe cumplir (2026-09-17, Mr. Hyde)
+
+Rama `feat/ejecutor-arranque` (sobre master `6563cb4`), SIN PUBLICAR. `arranque.exigir_contratos`,
+`vigia_servicio` + `ops/ejecutor/ejecutor-vigia@.service`, guardia de CI, `harness.correr` retirado.
+
+- [ ] **2026-09-18** Publicar; confirmar pisos del runner: tests-puros `1486 passed, 1 skipped` (las dos listas),
+  `no-naked-claude-subprocess` con `5 passed` en la guardia nueva. Canario rojo por API: un
+  `jax/ejecutor/lanzador_de_prueba.py` con `remoto_claude` sin `exigir_contratos` ⇒ `no-naked-claude-subprocess` = failure; revert = success.
+- [ ] **2026-09-18** Tras el merge, en el checkout de producción: `ops/ejecutor/instalar_vigia.sh` (la unidad plantilla; no
+  arranca misiones). `/etc/jax/.env` YA tiene `JAX_EJECUTOR_VIGIA_LATIDO_CADA_S=5` y `JAX_EJECUTOR_MISIONES=/var/lib/jax-ejecutor-misiones`
+  (backup `.env.backup-pre-ejecutor-arranque-20260917-080717`); el directorio existe (fruiz 0750).
+- [ ] **RESERVADO A FERNANDO (ya estaba):** el arranque real hoy da `arrancaria=false` SÓLO por la parte remota de C4/C6
+  (`freno_sin_remotos`; `llaves_no_son_de_root`, `sin_llave_del_freno`, `sin_revocador` en atemai, prod y bridge). Se
+  cierra con `instalar_en_maquina.sh <m>` + `JAX_EJECUTOR_FRENO_REMOTOS` (DEUDA «plan 3»). Y toda misión: las cuatro
+  máquinas tienen `con_datos_de_clientes=1` y la compuerta sigue en `false` ⇒ `auditor_no_admite_datos_de_clientes`.
+- [x] **2026-09-24 · Obligaciones del transporte `harness` (SP2) que dejan vivos los contratos de SP1:**
+  **CORREGIDO 2026-09-17 (Mr. Hyde):** 1–6 hechos y ejercitados en producción por SP2 (misión 9c2a9d8d desde
+  `/api/ejecutor`: arranque verificado, vigía latiendo, afirmaciones con `proposito` citadas, `registro_cuadra`,
+  `cadena_ok`, auditor legible, cierre del vigía). 7 no aplica hoy (el único cerebro es local; un cerebro de nube es
+  una capacidad nueva con su propio proxy, no una obligación de SP2). 8 queda como está a propósito: `jax_local` es
+  el cerebro medido en U3/V1–V4 y la faceta `ejecutor` sin binding hacía reventar C5; crearla sería una faceta
+  duplicada del mismo modelo sin nada que la distinga.
+  1. Lanzar sólo con `ejecutor-vigia@<mision>` activo y latiendo (`vigia_servicio` ya exige los contratos con los
+     `hosts` reales); la guardia `test_ejecutor_lanza_solo_con_contratos.py` impone `exigir_contratos` a quien use
+     `remoto_claude` o `vigilar`.
+  2. El perfil `ejecutor` de `hyde_sandbox` conserva los montajes de solo lectura de `cuenta_axioma._jaula` y agrega
+     `<workspace>/.claude` de solo lectura; NO monta credenciales de Anthropic.
+  3. `ANTHROPIC_BASE_URL` = el proxy con carril (C3); ninguna otra URL de cerebro.
+  4. Cada afirmación entregada lleva `proposito` y pasa por `auditor.aplicar_revision` antes de salir (C5).
+  5. Fin de misión = `systemctl stop ejecutor-vigia@<mision>` (SIGTERM: audita lo pendiente y borra el latido).
+  6. Informe final afirmación ↔ evidencia con las `Descartada` de citas y auditor.
+  7. Kimi/GLM como cerebro: el proxy hoy tiene UN upstream (Ollama); un cerebro de nube necesita su propio proxy anotado.
+  8. Crear la faceta `ejecutor` y devolver `ejecutor.cerebro_faceta` a `ejecutor` (hoy `jax_local`, ver abajo).
+- [x] **2026-09-17 08:02** `axioma_config.ejecutor.cerebro_faceta` `ejecutor` → `jax_local` (la faceta `ejecutor` no tiene
+  binding: C5 reventaba al resolverla). Dump `~/backups/axioma_config-pre-ejecutor-arranque-20260917-080235.sql`,
+  restauración probada (md5 de las 21 filas igual en `jax_memory_test`). Reversión: `UPDATE axioma_config SET
+  config_value='ejecutor' WHERE config_key='ejecutor.cerebro_faceta'`.
+
+### Ejecutor SP1 plan 4 · C5 auditor en vivo — publicar, desplegar y DECIDIR (2026-09-17, Mr. Hyde)
+
+Ramas SIN PUBLICAR: jax `feat/ejecutor-c5` (apilada sobre `feat/ejecutor-c3`), jax-platform `feat/ejecutor-config-c5`.
+Orden: el PR de jax-platform se mergea ANTES (el job `jacobs-gobernanza-db` clona su master).
+
+- [ ] **2026-09-18 · DECISIÓN RESERVADA A FERNANDO:** `ejecutor.c5_auditor_admite_datos_de_clientes` nace en `false`.
+  Con cerebro local todo auditor de otro proveedor es nube; la Fase 0 prohibió que la nube vea datos de clientes.
+  Opciones: (a) aceptar que el auditor de nube lea datos de clientes; (b) esperar un proveedor local distinto (Red
+  Queen, Q3 2026); (c) auditar sólo misiones sin datos de clientes. Hasta decidir, una misión sobre .10/.11/.20 NO arranca.
+- [ ] **2026-09-18** Publicar ambas ramas; confirmar pisos del runner: jax tests-puros `1135 passed, 1 skipped`,
+  gobernanza-db `34 passed`; jax-platform con DB `1501`, sin DB `886`. Si difieren, manda el runner.
+- [ ] **2026-09-18** Canario rojo por API: en `vigia.py`, `if not (isinstance(exc, asyncio.CancelledError) and fin.is_set()):`
+  → `if False:` ⇒ `tests-puros` = failure; revert = success.
+- [ ] **2026-09-18** Despliegue: `/etc/jax/.env` con backup y sudoedit: `JAX_EJECUTOR_PAUSA=/etc/jax/interruptor/EJECUTOR_PAUSA`
+  (directorio del frente B), `JAX_EJECUTOR_VIGIA_LATIDO=/var/lib/jax-ejecutor/vigia.latido`,
+  `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S=30`. Sin ellas el proxy de C3 NO arranca (el instalador las exige). Tras
+  desplegar jax-platform: `probar_c5.py --corridas 10 --cerebro jax_local` → `c5_vivo=true` con la config real.
+- [x] **2026-09-17** Plan 3 (C4): el freno root actúa también con la pausa del Ejecutor (hecho, rama `feat/ejecutor-c4`).
+- [x] **2026-09-17** Plan 6: `verificar_eleccion` y vigía con latido antes de abrir el proxy (rama `feat/ejecutor-arranque`).
+
+### Ejecutor SP1 plan 3 · C4 freno en vuelo — publicar, desplegar el proxy y la parte remota (2026-09-17, Mr. Hyde)
+
+Rama jax `feat/ejecutor-c4` (SIN PUBLICAR: la publica la sesión principal), desde `origin/master` (`f9c7073`,
+frente B) con merge de `feat/ejecutor-c5` y `feat/ejecutor-c6` (sus PRs sin mergear). Si C5/C6 se rebasan antes,
+los commits propios de C4 se reaplican encima.
+
+- [ ] **2026-09-18** Publicar; piso del runner tests-puros `1273 passed, 1 skipped` (medido local 3.14); comprobar en
+  el log que `test_ejecutor_freno_remoto.py` CORRE. Canario rojo por API: en `freno.py`,
+  `salida["muertos"] = matar_pids(...)` → `salida["muertos"] = 0` ⇒ `tests-puros` = failure; revert = success.
+- [ ] **2026-09-18** Tras mergear: reinstalar desde master `ops/ejecutor/instalar_freno.sh` (hoy corre desde la rama
+  con `--rama-aprobada`, commit `f53b51b`; los archivos instalados son idénticos a la rama).
+- [ ] **2026-09-18** Proxy (C4 en `proxy_carril.py`) sin desplegar: el proxy en vivo es el de C3 y el de la rama exige
+  las variables de C5 (`JAX_EJECUTOR_VIGIA_LATIDO`, `_MAX_S`). Se despliega con C5.
+- [ ] **2026-09-18 · RESERVADO A FERNANDO (servidores de clientes):** parte remota, máquina por máquina, en orden
+  atemai → prod → bridge: `cd /home/fruiz/jax && set -a && . /etc/jax/.env && set +a &&
+  ops/ejecutor/instalar_en_maquina.sh <m>` (SIN `--sin-freno`) `&& PYTHONPATH=.:las_manos python3
+  scripts/ejecutor_contratos/probar_c6.py <m>`; luego agregar `<m>` a `JAX_EJECUTOR_FRENO_REMOTOS` (backup de `.env`),
+  `sudo systemctl restart ejecutor-freno` y `PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c4.py
+  --remoto <m>` → `c4_vivo=true`. Rollback: `ops/ejecutor/revertir_en_maquina.sh <m>` y quitar `<m>` de la variable.
+  Ensayado entero en contenedor (`scripts/ejecutor_contratos/probar_freno_remoto_en_contenedor.sh`, verde 3 veces).
+  Hasta completarla, el latido dice `remotos_cargados=false` y el arranque (plan 6) no debe dejar ir a remotas.
+
+### Hyde y cualquier proceso de `fruiz` alcanzan LAS MANOS sin autenticación — fecha: 2026-09-24
+
+- **Hecho (medido 2026-09-17, Mr. Hyde, al planificar C3):** `127.0.0.1:7777` no pide credencial;
+  `POST /human_gate/token` emite un token de aprobación a quien lo pida. `hyde_sandbox.py` usa `--share-net`:
+  el `claude` de Hyde puede pedir un token y llamar `/execute`. El cerco de C3 lo cierra para la cuenta
+  `axioma`, **no** para Hyde (corre como `fruiz`).
+- **Por qué no se cierra en SP1:** es la misma propiedad (una jaula no puede autoaprobarse acciones), pero de
+  otra faceta con otro dueño de proceso; el cerco por `meta skuid` no aplica. Opciones a decidir: token de
+  servicio en LAS MANOS leído de `/etc/jax/.env` (que la jaula de Hyde no monta), o `--unshare-net` + proxy de
+  salida para Hyde.
+- **CORREGIDO 2026-09-17 (Mr. Hyde):** la emisión de tokens del human gate ya no tiene ruta HTTP (ver la sección
+  "human gate de LAS MANOS sin emisión HTTP"). Lo que sigue abierto de esta entrada es la falta de autenticación del
+  llamador (`approve-step`, `facet_id`, `caller` declarados por el cuerpo).
+- **CORREGIDO 2026-09-17 (Mr. Hyde):** LAS MANOS exige credencial de servicio (sección "LAS MANOS autentica a sus
+  llamadores"); lo que queda es un proceso de `fruiz` fuera de la jaula (ver allí).
+- **Verificación de cierre:** desde un `claude` sandboxeado de Hyde, `curl -X POST 127.0.0.1:7777/human_gate/token`
+  falla; el mismo pedido desde LAS MANOS/Jacobs funciona.
+
+### El proxy del Ejecutor no fija el modelo: por `/v1/messages` la jaula puede pedir cualquiera — fecha: 2026-09-24 (SP2)
+
+- **Hecho (medido 2026-09-17 al implementar C3):** el proxy deja pasar `POST /v1/messages` con el `model` que mande el
+  arnés. Contra el Ollama de producción, un modelo distinto (o el mismo con otro contexto) desaloja al de la Mesa y a
+  bge-m3 (V3, LEDGER SP3). El cerco y la lista de rutas no lo cubren.
+- **Por qué no en C3:** el modelo permitido sale de `facet_binding` en vivo y el proxy no tiene DB; es el transporte
+  `harness` de SP2 / el tope del proxy de SP3 (§6.2), que ya tienen que resolver el modelo del cerebro.
+- **Verificación de cierre:** un `POST /v1/messages` con `model` distinto del del cerebro da 403 sin tocar el upstream.
+- **CERRADO 2026-09-17 (SP3, desplegado):** `jax/ejecutor/proxy_carril.py` fija `JAX_PROXY_CARRIL_MODELO`
+  (producción: `qwen3.6-mesa-131k`), tope de salida y rutas (`HEAD /api/hello`, `POST /v1/messages`). Tests
+  `tests/test_ejecutor_proxy_modelo_y_rutas.py` (otro modelo, cuerpo ilegible, tope y GET arbitrario no llegan a
+  Ollama). En vivo sin vigía el proxy responde 423 antes de mirar el modelo (la pausa va primero).
+
+## Cerrado en código, deploy de jax URGENTE — frente B: kill switch real (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 (Mr. Hyde, verificado con `stat`, `systemctl show` y `git log`).** Lado plataforma
+MERGEADO Y EN PRODUCCIÓN: jax-platform#95 → `e715c28` (mergeado 04:23:49), `jax-platform.service` activo desde
+04:46:16 y escribe el freno en `/etc/jax/interruptor/PAUSE`. Lado jax: rama `feat/kill-switch-real`
+(`/home/fruiz/worktrees/jax-frente-b`), rebasada sobre `origin/master` `56d8c24` (frente E y Ejecutor C1/C2 adentro,
+frente F NO), SIN publicar, SIN mergear, SIN desplegar: `jax-las-manos` sigue corriendo desde 03:23:03 con el código
+que lee `/etc/jax/PAUSE`. Ledger: `jax-platform-frente-b/.superpowers/sdd/2026-09-16-frente-b-kill-switch/progress.md`.
+
+**Qué hace el frente (lado jax):**
+- **Módulo `interruptor` compartido** (`jax/core/interruptor.py`, symlink `las_manos/interruptor.py`, copia en
+  `jax-platform/backend/interruptor.py`, familia `interruptor` de `scripts/check_mirror_sync.py`): la ruta del freno sale
+  de `JAX_KILL_SWITCH_PATH` — OBLIGATORIA y absoluta (`InterruptorSinConfigurar` si falta); lectura fail-closed
+  (cualquier `OSError` que no sea ENOENT = freno PUESTO); escritura atómica.
+- **Lectores:** LAS MANOS (`server.py`, `ssh_worker`, `motor_registry` routes/worker — el job cancelado con el freno
+  queda `killed_by_switch`), Jacobs (`policy.check_kill_switch` y cada step de `executor` corre bajo
+  `correr_con_interruptor`, que frena en vuelo), REPL y `jax --task`. Ninguna ruta fija en el repo
+  (`tests/test_interruptor_sin_rutas_fijas.py`).
+- **La ruta heredada `/etc/jax/PAUSE` sigue frenando** mientras exista (fail-closed, WARNING por episodio): pedido de la
+  sesión del Ejecutor `fruiz-a1`, cuyo contrato C4 (freno en vuelo) se construye encima. DECISIÓN completa en
+  «Bloquea trabajo», arriba.
+- **Canary de facetas y `probe_after_rebind` frenados** (lado plataforma, en #95): con el freno puesto devuelven
+  `SALTADA_POR_FRENO`, sin llamar a proveedores ni escribir fila.
+- **k6** `loadtest/kill-switch.js` (423 y admin, sólo con el freno puesto).
+
+**Infraestructura (hecha 2026-09-17 ~04:05 por el controlador principal):** `/etc/jax/interruptor` `root:fruiz` `2770`;
+`JAX_KILL_SWITCH_PATH` en `/etc/jax/.env` (backup `/etc/jax/.env.backup-pre-kill-switch-20260917-040558`).
+
+**Incidente (HISTORIA, 2026-09-17 04:46):** otra sesión reinició `jax-platform` y desplegó #95 ANTES que el lado jax. Su
+chequeo comparó el checkout contra master, pero no el proceso en marcha contra el checkout. **Exposición:** freno a
+medias — el botón KILL de la Mesa escribe `/etc/jax/interruptor/PAUSE` y la Mesa responde 423, pero LAS MANOS y Jacobs
+de producción siguen mirando `/etc/jax/PAUSE`: los pipelines en vuelo NO se frenan hasta desplegar esta rama.
+**Lección: antes de reiniciar un servicio, comparar el proceso en marcha contra el checkout (`/proc/<pid>/cwd`,
+`ActiveEnterTimestamp` contra la fecha del commit), no sólo el checkout contra master.**
+
+**Rebase del 2026-09-17 sobre `56d8c24`:** conflictos en `.github/workflows/policy.yml` (listas de tests-puros: se
+conservan las de E, Ejecutor y B; pisos re-medidos), `conftest.py` (aislamientos de E — URLs, `JAX_REPO_BASE`,
+`JAX_FACET_SEAL_PATH` — más el del freno), `jacobs/policy.py` (E-13 `MAX_STEPS_PER_PIPELINE` desde `models.py` + el
+freno desde `interruptor`) y `jax/core/main.py` (imports de E y del interruptor). El commit que sólo re-redactaba un
+comentario de piso quedó vacío. **El tripwire de E-19 vio en rojo** el paso nuevo de `mirror-sync` que instalaba
+`aiofiles`: ahora instala desde `requirements.txt`.
+
+**Pisos (medidos dos veces, local 3.14):** tests-puros 979 → **1044 passed, 1 skipped** con `JAX_PLATFORM_REPO_ROOT`
+inexistente (como el runner); `mirror-sync`: `check_mirror_sync.py` exit 0 (diez familias) y 15 + **2 passed** del
+escritor real contra un worktree temporal de jax-platform `origin/master` `97e4b3e` (incluye #95);
+`jacobs-gobernanza-db` **31** y `facet-health-io` **9** sin cambio contra `jax_memory_test`;
+`policy/tests/test_no_fail_open_except.py` 21 passed.
+
+- [ ] **2026-09-17** Publicar la rama, PR, confirmar pisos en el runner (si difiere, manda el runner), canario rojo por API y merge.
+- [ ] **2026-09-17** Deploy de jax con 0 pipelines en vuelo: verificar `JAX_KILL_SWITCH_PATH` en `/proc/<pid>/environ` de
+  `jax-las-manos` tras el reinicio; poner y quitar el freno desde la Mesa y ver a LAS MANOS responder (el peor caso:
+  un pipeline en vuelo se detiene).
+- [ ] **2026-09-17** Carga del lado jax sobre el HEAD rebasado (k6 `kill-switch.js`, regla TIME-WAIT < 10k).
+
+## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 1: C1 prohibiciones y C2 respaldo (2026-09-17)
+
+Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~04:40). Ramas locales con commits, SIN PUBLICAR
+(un subagente no puede escribir en el remoto): jax-platform `feat/ejecutor-tablas-c1-c2`
+(`/home/fruiz/worktrees/jax-platform-sp1-c1`), jax `feat/ejecutor-c1-c2` (`/home/fruiz/worktrees/jax-sp1-c1`).
+
+- [ ] **2026-09-18** Publicar la rama y abrir el PR de jax-platform; mergear ANTES que el de jax (`jacobs-gobernanza-db` clona su master).
+- [ ] **2026-09-18** Publicar la rama y abrir el PR de jax; confirmar en el log del runner `979 passed, 1 skipped`
+  (tests-puros) y `31 passed` (jacobs-gobernanza-db); si difiere, manda el runner.
+- [ ] **2026-09-18** Canario rojo por API (plan, Task 8 Step 4): en `politica.py`, `return Decision(False, PROHIBIDO, …)`
+  → `return Decision(True, PERMITIDO, None, ())`; `tests-puros` = `failure` sobre ese sha, revert = `success`.
+- [ ] **2026-09-18** Despliegue (plan, Task 9 Step 2): dump de `axioma_config` restaurado en tabla temporal antes del
+  restart de jax-platform; `JAX_EJECUTOR_*` e `JAX_EJECUTOR_INVENTARIO` en `/etc/jax/.env` con sudoedit (dos lectores
+  idénticos); `exportar` → `reglas=14 hosts=4`; `instalar_contratos.sh`; `probar_c1.py` → `c1_vivo=true`, y repetir
+  sobre la instalación real los tres «verlo fallar» (Steps 5–6).
+
+## Cerrado en código, deploy de jax pendiente — frente F: contrato de sub-pipelines, I-2 y pool de conexiones de Jacobs (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 ~04:30 CST (Mr. Hyde, verificado en el worktree).** Rama jax `feat/contrato-subpipelines` rebasada sobre `origin/master` `de6964e` (frente E #177, frentes A #174 y C #175 ya adentro): 19 commits, sin publicar en GitHub, SIN mergear, SIN desplegar. jax-platform no se toca (master `c414eba`). Plan `docs/superpowers/plans/2026-09-16-frente-f-contrato-subpipelines.md`; ledger `jax-frente-f/.superpowers/sdd/2026-09-16-frente-f-contrato-subpipelines/progress.md` (+ `pr-body.md`, `enmienda.md`, `i2-report.md`, `pool-report.md`, `pool-carga.md`, `pool-ronda2-carga.md`).
+
+**El hallazgo (verificado contra el código en `984ce46`):** el candado contra sub-pipelines de Ada era nominal. `jacobs/policy.py` aceptaba cualquier string no vacío como `subpipeline_token` (sin validez, dueño ni vigencia); `routes.py` nunca le pasaba `subpipeline_depth` a `validate_create`, así que el límite de profundidad era código muerto; `MAX_SUBPIPELINE_DEPTH = 1` era un literal. Cualquier cliente creaba un hijo de Ada con un token inventado.
+
+**Contrato de sub-pipelines (qué quedó):**
+- **Token emitido solo por el servidor** (`subpipelines.emitir_token_subpipeline`, sin ruta HTTP): 32 bytes, en la tabla `jacobs_subpipeline_tokens` se guarda SOLO el sha256 (`token_hash` PK, índice por `parent_pipeline_id`), atado a `parent_pipeline_id` + `parent_step` (paso de faceta `ada`) + `depth_hijo` + `vence_at`.
+- **Consumo atómico en un solo `UPDATE`** dentro del `_pipeline_create_lock` de `create_pipeline`: token no usado, no vencido, del padre declarado, padre `running`, profundidad ≤ máximo. Carrera de 20 consumos → un ganador; carrera forzada con dos sesiones → la segunda pierde; `EXPLAIN` solo `PRIMARY`. Un rechazo por padre equivocado NO quema el token.
+- **`jacobs_pipelines` gana `parent_pipeline_id` y `depth`** (`init_tables()`); el hijo hereda la identidad (`user_id`/`tenant_id`) del padre, y un cuerpo con otra identidad es 403 sin quemar el token (I-3). El cuerpo no fija la profundidad (`depth` en el JSON se ignora).
+- **Forma por rol:** `invoked_by="ada"` exige token + padre; cualquier otro rol que los traiga → 422 visible. `POST /jacobs/plan` con `ada` → 403. Los validadores de `PipelineCreateRequest` son por campo: el 422 de forma ya no devuelve el token en `input` (I-1).
+- **Todo rechazo deja `SUBPIPELINE_RECHAZADO`** con motivo, sin el token en claro (solo `token_ref`, 12 chars del sha256), visible desde el padre.
+- **Enmienda de Fernando (GO 2026-09-16, prevalece sobre el plan):** `JAX_MAX_SUBPIPELINE_DEPTH` por defecto **3**, rango [1, 5]; **"padre activo" = `jacobs_pipelines.status='running'` del padre, solamente** — el paso de Ada que delega puede estar en cualquier estado (en "plan de delegación" Jacobs emite después de que `delegate` terminó); se conserva que `parent_step` exista, sea del padre y sea de `ada`.
+- **Config validada al arrancar** (`config_subpipelines()`): `JAX_SUBPIPELINE_TOKEN_TTL_SECONDS` default 300, rango [10, 3600]; ausente → default, presente e inválida → error (fail-closed).
+
+**I-2 (residual R13):** el consumo corría fuera del `try` que audita: si la relectura tras el `UPDATE` confirmado fallaba (error de base o invariante) o llegaba un `CancelledError`, el token quedaba quemado sin evento. Arreglo (`535cf0b`): consumo en `try/except BaseException` que audita best-effort (`fase="consumo"`, clase de la excepción, `token_ref`) y relanza SIEMPRE el original; el `except Exception` de la creación pasa a `BaseException`. Dos tests con error REAL de la base y con cancelación, vistos en rojo; mutación de cada `except` a `Exception` vuelve a romper el de la cancelación.
+
+**Pool de conexiones de Jacobs:** `get_conn()` (una conexión `aiomysql` nueva por consulta) eliminado; `store.conexion()` sobre un pool por event loop con semáforo propio (sin `pool._wakeup()` privado), creación con candado y doble chequeo, descarte ante excepción/cancelación/transacción abierta/autocommit apagado, espera y cierre acotados por `JAX_DB_CONNECT_TIMEOUT_SECONDS`, cierre en el shutdown de LAS MANOS y red al terminar el loop. `JAX_JACOBS_DB_POOL_SIZE` default 10, rango [1, 50] (`max_connections`=151, `Max_used_connections`=95). Migrados además `motor_registry/facet_policy.py` (`POST /motor/authorize-facet`) y los dos escritores de `axioma_usage` (la falla del pool toma el mismo camino a la cola durable). `aiomysql==0.3.2` vigilado por `store.AIOMYSQL_REVISADO`. Detalle y mutaciones en `pool-report.md`.
+
+**Carga (app aislada, `jax_memory_test`, k6 5s+20s+5s, "fallas" = `http_req_failed`; 200/403/422 esperados, el 422 de límite paralelo se cuenta aparte):**
+
+| endpoint / escenario | VUs | antes (sin pool) fallas · p95 | después fallas · p95 | tras el rebase sobre `de6964e` fallas · p95 · rps |
+|---|---|---|---|---|
+| `/jacobs/pipeline` base | 25 | 40,28 % · 147,49 ms | 0,00 % · 76,82 ms | **0,00 %** · 119,87 ms · 285 |
+| `/jacobs/pipeline` legítimo | 25 | 22,85 % · 178,77 ms | 0,00 % · 96,39 ms | **0,00 %** · 148,85 ms · 251 |
+| `/jacobs/pipeline` inventado | 25 | 25,38 % · 121,80 ms | 0,00 % · 31,90 ms | **0,00 %** · 35,74 ms · 780 |
+| `/motor/authorize-facet` | 25 | 50,07 % · 35,07 ms | 0,00 % · 4,47 ms | **0,00 %** · 4,88 ms · 5.846 |
+
+Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango efímero entero), 14.762 / 79.886 tracebacks. Después: 0 %, TIME_WAIT 41-229, 0 tracebacks, 0 `TimeoutError` de pool. Tras el rebase: checks 100 %, 0 tracebacks; el p95 de base/legítimo subió (host con load average 8,8 por otros frentes, y la fila `test`/`Fernando` ajena activa dio 2.120 422 de límite en base): se lee como ruido del host compartido, no como regresión — el umbral (<1 % a 25 VUs) se cumple.
+
+**Defecto del propio frente — `Row size too large` en `jacobs_pipelines` (HISTORIA, con lección):** `test_jacobs_pipelines_gana_parent_y_depth...` hacía `DROP COLUMN depth` y `init_tables()` lo volvía a agregar con `ALGORITHM=INSTANT`. Cada DROP+ADD instantáneo deja rastro en el formato de fila: tras muchas corridas `jax_memory_test` quedó sin `depth` y con `1118 Row size too large` en todo ADD (57 de 71 tests en rojo). Medido en bucle (MariaDB 12.3.3): DROP por defecto rompe en la corrida 27, `INPLACE` también en la 27, `ALGORITHM=COPY` llega a 60 sin error. Arreglo (`8b1c60e`): el DROP del test lleva `ALGORITHM=COPY`; la base de prueba se reparó con `ALTER TABLE ... FORCE, ALGORITHM=COPY`; 35 corridas seguidas "71 passed". En producción el ADD corre una sola vez. **Lección: un test que muta el esquema de una base persistente acumula; se mide en bucle, no en una corrida.**
+
+**Regla de carga nacida hoy (DECISIÓN operativa del frente F, 2026-09-17):** la MariaDB de pruebas (`jax_memory_test`) vive en el MISMO servidor que producción (127.0.0.1:3308). En la Task 8, sin pool, la carga llevó el host a 25.969 sockets TIME_WAIT de 28.232 puertos efímeros (92 %) y el sembrado de tokens falló por agotamiento de puertos: eso le quita puertos a producción. **Toda carga contra esa MariaDB: pool acotado (nunca conexión por pedido), esperar TIME_WAIT < 5.000 antes de cada corrida y abortar si pasa de 10.000, app aislada en puerto propio levantada y bajada por el arnés, y limpiar las filas propias al terminar.**
+
+**Rebase del 2026-09-17 sobre `de6964e` (Mr. Hyde) — conflictos:**
+1. `jacobs/models.py`, `policy.py`, `routes.py`: E-13 (`MAX_STEPS_PER_PIPELINE` en `models.py`) + los campos, validadores por campo e `INVOKER_ADA` de F; el validador de `max_steps` usa la constante.
+2. `jacobs/store.py`: el 4º SELECT de E-17 (facetas activas) dentro de `async with conexion()`.
+3. `las_manos/server.py`: conviven los dos shutdown — cierre del cliente HTTP compartido (E-24) y del pool de Jacobs.
+4. `.github/workflows/policy.yml`: listas de tests-puros unidas; el `pip install` del job `subpipeline-contrato-db` pasa a `-r requirements.txt` (el de F instalaba `aiofiles`, que `test_requirements_completos.py` prohíbe desde E-18) y los de los demás jobs quedan como los dejó E-19.
+5. **Sin conflicto textual:** `tests/test_facetas_de_gobernanza_db.py` (E) usaba `store.get_conn()`, que F borró — migrado a `store.conexion()`; el escaneo AST de `_store_pool_test.py` lo habría marcado.
+
+**Pisos (medidos dos veces tras el rebase, local 3.14):** tests-puros 853 → **872 passed, 1 skipped** (entorno limpio, sin `JAX_DB_HOST` ni checkout de jax-platform); `subpipeline-contrato-db` **71**; `jacobs-gobernanza-db` **29** (migraciones de jax-platform `c414eba`, sello en un temporal); `facet-health-io` 9; `jacobs/_store_pool_test.py` 35; `tests/test_cola_uso_escritores.py` 15 (con `PYTHONPATH=.:las_manos`, como el job); `policy/tests/test_no_fail_open_except.py` 21; `check_mirror_sync.py` contra un worktree temporal de jax-platform `origin/master` `c414eba`: exit 0, familias sincronizadas, y sus tests 14. **Ningún runner los confirmó todavía: si el runner da otro número, manda el runner.**
+
+**Segundo rebase, 2026-09-17, sobre `origin/master` `f9c7073` (frente B #183 kill switch real + Ejecutor C3 #181) (Mr. Hyde) — REEMPLAZA la base y los pisos de arriba.** 24 commits (23 rebasados + 1 de ajuste), sin publicar. Conflictos:
+1. `jacobs/policy.py`: import — conviven `from interruptor import interruptor_activo` (B, sin `KILL_SWITCH_PATH`) e `INVOKER_ADA` (F). El freno de los sub-pipelines sigue pasando por `policy.check_kill_switch()`, que ahora lee el interruptor.
+2. `.github/workflows/policy.yml` (tres commits de pisos de F): listas de tests-puros unidas (archivos del interruptor + `test_subpipeline_contrato_puro.py`); comentarios de ambos conservados; piso final re-medido.
+3. `CONTEXT.md` / `DEUDA.md`: secciones de C3 y de F, las dos.
+4. **Sin conflicto textual pero roto:** `tests/test_ejecutor_politica_db.py` (Ejecutor C1/C2) importaba `jacobs.store.get_conn`, que F borró — migrado a `store.conexion()` (la limpieza en su propia conexión). No quedó ningún otro `get_conn` en el árbol.
+
+**Pisos tras el segundo rebase (dos corridas cada uno, local 3.14):** tests-puros **1127 passed, 1 skipped** (1108 de master + 19 de F; env limpio, sin `JAX_DB_HOST`, `JAX_PLATFORM_REPO_ROOT=/tmp/no-existe`); `subpipeline-contrato-db` **101**; `jacobs-gobernanza-db` **31** (migraciones de jax-platform `0c6eb67` sobre `jax_memory_test`, sello en un temporal); `facet-health-io` 9; `policy/tests` 35 (`test_no_fail_open_except.py` 21); `check_mirror_sync.py` contra un worktree temporal de jax-platform `origin/master` `0c6eb67`: familias sincronizadas, sus tests 14, `test_cola_uso_escritores.py` 15, `test_interruptor_escritor_de_la_plataforma.py` 2. **Si el runner da otro número, manda el runner.**
+
+**Pendientes (fechas propuestas por Hyde; Fernando las confirma o cambia):**
+- **Publicar la rama, CI, canario y merge — control 2026-09-18.**
+- **Deploy de jax F — control 2026-09-18, con 0 pipelines en vuelo** (el shutdown cierra el pool). `/etc/jax/.env` (hoy ninguna de las tres está): `JAX_SUBPIPELINE_TOKEN_TTL_SECONDS=300`, `JAX_MAX_SUBPIPELINE_DEPTH=3`, `JAX_JACOBS_DB_POOL_SIZE=10` (los tres son los defaults del código; escribirlos deja la decisión visible). Verificar en `/proc/<pid>/environ` de `jax-las-manos` tras el reinicio; `init_tables()` crea `jacobs_subpipeline_tokens` y agrega `parent_pipeline_id`/`depth` al arrancar (backup de `jacobs_pipelines` antes). Carga post-deploy de `/motor/authorize-facet` sin número no hay GO.
+- **Ningún camino vivo emite tokens todavía:** `emitir_token_subpipeline` solo lo llaman el arnés y los tests, y ningún código de jax ni de jax-platform manda `invoked_by="ada"` a `/jacobs/pipeline` (grep 2026-09-17, Hyde). El emisor de Ada (modo "plan de delegación") es otro trabajo; hasta que exista, `ada` sin token es 422 visible.
+
+## Cerrado en código, deploy de jax pendiente — frente E de la auditoría: limpieza, defectos y reglas en jax (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 ~02:20 CST (Mr. Hyde, verificado en el worktree).** Rama jax `fix/hallazgos-frente-e` rebasada sobre `origin/master` `0da32af` (frentes A #174, C #175, Ejecutor #172/#173/#176 ya adentro): 17 commits, sin publicar en GitHub, SIN mergear, SIN desplegar. Lado plataforma MERGEADO: jax-platform#92 → `c53ef30` (2026-09-17: `config_entorno` única que absorbe `config_de_entorno` de A, `JAX_OLLAMA_URL` obligatoria al arrancar, docstring de `owner_cleanup`), canario rojo `d234215` (`backend-tests` con y sin DB) leído por API. Spec `docs/superpowers/specs/2026-09-16-hallazgos-auditoria-jax-design.md` §E, plan `docs/superpowers/plans/2026-09-16-frente-e-jax-limpieza-defectos-reglas.md` (worktree `jax-hallazgos-docs`); ledger `jax-frente-e/.superpowers/sdd/2026-09-16-frente-e-jax-limpieza-defectos-reglas/progress.md` (+ `rebase-e-platform.md`, `unificar-config-entorno-report.md`).
+
+**Qué se retiró y qué se arregló (E-01..E-24):**
+- **Código muerto (E-01/02/04/05/06/07/08/09/20):** `_director_patch/*.py` (el control `_NO_PARSEA` se ejercita ahora con un `.py` roto de mentira), `StepResult`, `TRAFFIC_CLASSES`, `enabled_motors`, voces Piper (dos `.onnx` de ~63 MB), imports sin uso, `hyde_requires_human_gate`, `scripts/cleanup.sh` (nunca tuvo scheduler), `[motors.*]` de `config.toml` (la verdad es la tabla `motor`).
+- **Una sola constante (E-13):** `MAX_STEPS_PER_PIPELINE` vive en `jacobs/models.py`; `policy.py`, `routes.py`, `plan.py` y el validador la importan (antes, literales `20` repartidos).
+- **Facetas del planner desde la tabla `facet` (E-03/17/23):** una faceta desconocida o inactiva rechaza el plan (422 + `PLAN_REJECTED`) en vez de caer a `jax_local`; el menú de facetas de los prompts de Ada y qwen sale de las activas.
+- **Un archivo real por módulo (E-10/11):** `crypto_secrets`, `credential_resolver`, `model_catalog` y `cliente_http_compartido` de `las_manos/` son symlinks a `jax/core`.
+- **URLs de servicio desde el entorno, fail-closed (E-21):** `LAS_MANOS_URL`, `JAX_OLLAMA_URL`, `JAX_KOKORO_PYTHON` sin default; `config_entorno.url_requerida` exige URL base (sin path, query ni fragmento). Los workers de memoria leen la URL de DeepSeek de `provider.base_url`; un proveedor `deprecated` no da URL. Familia de espejos `config_entorno` en `scripts/check_mirror_sync.py` (copia verbatim en jax-platform).
+- **Documentos en `JAX_REPO_BASE`, escritura en `asyncio.to_thread`, sin `aiofiles` (E-12/18/22); `requirements.txt` fuente única del CI con `cryptography`/`pyyaml` fijados (E-19).**
+- **`_sin_autoetiqueta` con la cabecera de `authority_origin` y recorte simple del embedding (E-14/15).**
+- **Errores de proveedor redactados con la credencial conocida ANTES de recortar (E-16)** en executor, Ada y REPL; el error de tarea se redacta antes de ir a disco.
+- **Cliente HTTP compartido por proceso (E-24):** `jax/core/cliente_http_compartido.py`, cierre al apagar, timeout por llamada, tripwire que prohíbe construir `AsyncClient` fuera de ese archivo. Medido en modo aislado (0 errores): c=1 p95 3,55 → 0,47 ms (rps 291 → 2.562); c=10 p95 43,22 → 10,68 ms (rps 316 → 1.536).
+
+**Rebase del 2026-09-17 (Mr. Hyde) — conflictos y lo que destapó:**
+1. `jacobs/policy.py`: C había puesto sobre `MAX_STEPS_PER_PIPELINE` el comentario de la familia `tope_pipelines`, que habla de `MAX_PARALLEL_PIPELINES`. Se conservó E-13 (la constante vive en `models.py`) y el comentario quedó sobre la constante que de verdad se espeja.
+2. `scripts/check_mirror_sync.py`: se conservan las NUEVE familias (`facet_resolver`, `crypto_secrets`, `credential_resolver`, `db_connect_config`, `contrato_dispatch`, `cola_uso`, `router_keywords`, `tope_pipelines`, `config_entorno`). `policy.yml` se mezcló solo; las dos listas de tests-puros verificadas idénticas entre sí (64 archivos, sin duplicados).
+3. **Dos tripwires de E vieron en rojo código que entró por #173:** `jax/ejecutor/proxy_carril.py` construía su propio `httpx.AsyncClient` y `h11` no estaba en el mapa de `test_requirements_completos.py` (sí en `requirements.txt`). Arreglado en `4bb8053`: el proxy usa `crear_cliente_http()` y el timeout (connect 10 s, sin tope de lectura) viaja en cada petición — test nuevo visto en rojo con el cliente sin timeout por petición (read/pool 5,0).
+4. **`facet-health-io` no habría colectado en CI:** desde E-24 `jacobs/` importa `cliente_http_compartido` por nombre corto (como corre dentro de LAS MANOS) y ese job no tenía `las_manos` en el path. Visto en rojo (`ModuleNotFoundError`) y en verde (9) con `PYTHONPATH: las_manos` (`20a7fb9`).
+
+**Pisos (medidos dos veces, local 3.14):** tests-puros 742 → **850 passed, 1 skipped** simulando el runner sin checkout de jax-platform (master en el mismo entorno: 742/1, igual que su runner); +108 contados por archivo con `--collect-only`. `jacobs-gobernanza-db` 27 → **29** (master: 27) contra `jax_memory_test` con las migraciones de jax-platform `c53ef30`. Sin cambio y verdes: facet-health-io 9, facet-resolver-seal 13, plan-timeout-ceiling 16, mirror-sync 14 + cola_uso 15, governance 90, ollama-num-parallel 33, hyde-containment 14; `policy/tests/test_no_fail_open_except.py` 21. `check_mirror_sync.py` contra jax-platform `c53ef30`: exit 0, las nueve familias sincronizadas. **Los pisos no los confirmó todavía ningún runner: si el runner da otro número, manda el runner.**
+
+**E-25 (B1.4, retiro del fallback a `.env` de credenciales) — MEDIDO, retiro PENDIENTE DE DECISIÓN DE FERNANDO (propuesto: retiro completo).** Controlador principal: `env_fallback` 0 en 7 días en `jax-platform`, `jax-las-manos`, `jax-memory-worker` y `jax-memory-synthesis`, con 922 lecturas `source=db`; 5 proveedores con credencial activa; 0 rotaciones en toda la historia (`credential_audit` vacío). Consumidores fuera del resolver que el retiro tiene que resolver: `/api/admin/keys` escribe llaves a `/etc/jax/.env` y a `os.environ`; `scripts/manual_motor_v02_integration.py` lee `KIMI_API_KEY` del archivo.
+
+**E-26:** 25 backups sin trackear en `/home/fruiz/jax`, los 25 idénticos byte a byte a blobs de git (`git hash-object`). Borrado pendiente del controlador principal, con re-verificación antes de borrar.
+
+**Incidentes del 2026-09-17 (HISTORIA, con lección):**
+- **jax#175 se mergeó con `jacobs-gobernanza-db` en rojo.** El gate usaba `set -euo pipefail` dentro del Bash tool en segundo plano y NO cortó. Causa del rojo: acoplamiento de import del frente C en jax-platform (`db/migrations` → `ajustes` → `auth.jwt`, que exigía `JAX_JWT_SECRET` al importarse) — arreglado de raíz en jax-platform#93 → `2bb90b2` (`auth/constantes.py`); rerun del job verde (intento 2, 07:56:28Z). **Lección: `set -e` no es un gate. Desde entonces todo merge pasa por un gate con `exit` explícito en cada paso, probado contra un canario rojo antes de confiar en su verde.**
+- **Un agente que reprodujo ese job en hall9000 sin `JAX_FACET_SEAL_PATH` tocó el mtime de `/srv/jax-data/facet-cache-seal`** (01:51:21, sin cambio de datos): un toque del sello invalida la caché de facetas de todos los procesos. **Lección: una barrera que vive solo en la cabeza del que corre el job no viaja cuando otro copia los pasos.** Arreglo en esta rama (`20a7fb9`): el job exporta `JAX_FACET_SEAL_PATH=$RUNNER_TEMP/facet-cache-seal` por `GITHUB_ENV` antes de migraciones y tests. Verificado en local: con la variable, el sello se escribe en el temporal y el de `/srv` no cambia; la lista de tests-puros NO escribe el sello (corrida con la variable a un directorio vacío: sigue vacío). El mtime actual del sello real (02:07:11) coincide con el reinicio de `jax-platform.service` de las 02:07:10 del deploy de E-platform (journal): escritura del arranque, no de un test.
+
+**Pendientes (fechas propuestas por Hyde; Fernando las confirma o cambia):**
+- **Publicar la rama jax, CI, canario y merge — control 2026-09-18.** jax-platform ya tiene `c53ef30`, así que `mirror-sync` puede correr en verde.
+- **Deploy de jax E — control 2026-09-18, con 0 pipelines en vuelo** (al apagar LAS MANOS se cierra el cliente compartido): `/etc/jax/.env` necesita `JAX_OLLAMA_URL` (el journal de sudo registra su escritura a las 02:06:58 para el deploy de jax-platform; verificar en `/proc/<pid>/environ` de `jax-las-manos` tras el reinicio) y `JAX_KOKORO_PYTHON` (sin ella el REPL no arranca); `JAX_REPO_BASE` existe desde el frente A. Gate previo: facetas `hipatia, jekyll, thot, ada, kimi, hyde, jax_local` en `active` y `provider.base_url` de deepseek presente (E-17 y los workers de memoria dependen de eso).
+- **Medición de E-24 contra el Ollama de producción (modo `embedding`, antes/después) — en el deploy.** Sin ese número no hay GO del deploy de E-24.
+- **E-25: decisión de Fernando sobre el retiro del fallback — control 2026-09-24.**
+- **E-26: borrado de los 25 backups — control 2026-09-18.**
+
+**Deuda nueva que este cierre destapa:** ver "Anotado — deuda residual del frente E" en `## Anotado, no bloquea`.
+
+## Cerrado — frente C: los ajustes de Admin mandan de verdad (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 01:32 CST** (desplegado y verificado por el controlador principal). PR jax-platform#91 → `accc641` (mergeado 2026-09-17); familia de espejos `tope_pipelines` + guiones k6 en jax, commit `807cf06` (jax `984ce46..807cf06`, rama `feat/ajustes-que-mandan`). Plan `docs/superpowers/plans/2026-09-16-frente-c-ajustes.md` (worktree `jax-platform-hallazgos-docs`); ledger `jax-platform-frente-c/.superpowers/sdd/2026-09-16-frente-c-ajustes/progress.md` + `carga.md` (18 tasks, subagent-driven-development).
+
+**Qué manda ahora de verdad:** los cinco ajustes de Admin → Configuración (`session_timeout_min`, `max_pipelines`, `web_task_retention_days`, `lang_default`, `system_name`) dejan de ser cosméticos. `backend/ajustes.py` es la única lectura tipada de esas cinco claves de `axioma_config` (consulta por PRIMARY, caché con TTL invalidado en el PUT); un valor ausente o inválido lanza `AjusteIlegible` → 503 `ajuste_ilegible`, nunca un default silencioso. Consumidores: emisión/vida del refresh (`api/auth.py`+`auth/jwt.py`), cupo de pipelines (`api/pipelines.py`+`jax_engine/resource_manager.py`), el reaper de owner files (`jax_engine/owner_cleanup.py`) y `GET /api/apariencia` (idioma inicial y nombre del sistema en el frontend).
+
+**Discrepancias con el spec, resueltas con evidencia (no cambian la intención del ítem):**
+1. **El refresh no rota — la sesión es de vida ABSOLUTA, no deslizante** (`api/auth.py` no rota la cookie; documentado como decisión previa). `session_timeout_min` fija el `exp` del JWT, el `max_age` de la cookie y, además, `/refresh` valida contra un `iat` propio — sin esto último, acortar el ajuste no alcanzaría a las sesiones ya abiertas hasta 7 días después. **Consecuencia (GATE, decidida por Fernando): cada sesión abierta antes del deploy vuelve a iniciar sesión una vez** (un refresh viejo no trae `iat` y da 401 `sesion_expirada`).
+2. **`max_pipelines` no puede superar el candado global de Jacobs** (`jax/jacobs/policy.py`: `MAX_PARALLEL_PIPELINES = 3`, cuenta todos los pending/running de todos los tenants). El valor NO viaja a jax: es una cuota por tenant en la plataforma, acotada por arriba por ese candado. `backend/ajustes.py` lleva una copia textual de `MAX_PARALLEL_PIPELINES` y la familia `tope_pipelines` en `scripts/check_mirror_sync.py` (jax, commit `807cf06`) la vigila — verificado sincronizado contra `jax-platform` master (`accc641`) con `scripts/check_mirror_sync.py` y sus 14 tests, los dos en verde.
+3. **`ws_notifications` sale de `DEFAULT_CONFIG`** (decisión de Fernando, coordinada con la Discrepancia 10 del frente A) y la migración la borra de la fila real una sola vez, con test.
+4. **Retención de tareas web:** al vencer `web_task_retention_days`, `owner_cleanup.py` borra misión, resultado y dueño JUNTOS (misión+resultado primero, dueño al final, para que una caída a mitad deje un dueño huérfano que el ciclo siguiente termina de limpiar) — decisión de Fernando, reemplaza el GATE original del plan.
+
+**Migración `ajustes_que_mandan_v1` (aplicada una sola vez, 01:32:52 CST) — antes / después, medido:**
+
+| Ajuste | Antes | Después |
+|---|---|---|
+| `session_timeout_min` | 60 | 10080 |
+| `max_pipelines` | 1 | 3 |
+| `web_task_retention_days` | 7 | 30 |
+| `lang_default` | es | es |
+| `system_name` | Axioma | Axioma |
+| `ws_notifications` | true | (fila borrada) |
+
+EXPLAIN de la consulta de `ajustes.py`: `key=PRIMARY`. `GET /api/apariencia` en vivo → `theme_default: "dark"` (el plan esperaba `light`: dato anotado, no tocado — no es parte del alcance de este frente).
+
+**Backup y prueba de restauración (Principio VI — un backup sin restauración probada no es backup):** dump `/home/fruiz/backups/axioma_config-pre-frente-c-20260917-013226.sql` (15 filas). La restauración prevista por el plan (`CREATE DATABASE` + reload) **falló**: `jax_user` no tiene permiso para crear bases. Probado en su lugar cargando el dump con la tabla renombrada `axioma_config_restore_check` dentro de `jax_memory_test` → **idéntica fila por fila** (MD5 de valor + `updated_at` comparado por fila), tabla de prueba borrada después. **Lección para la próxima vez: el usuario de servicio no puede crear bases nuevas — la restauración de un dump de una tabla existente se prueba con un nombre de tabla temporal en la base de test, nunca asumiendo `CREATE DATABASE` disponible.**
+
+**Deploy:** `jax-platform.service` reiniciado, `NRestarts=0`, journal limpio. Frontend `index-DO0TEv_Q.js` (antes `index-ChCOZGPN.js`), backup `/www/wwwroot/axioma-ia.io.backup-pre-frente-c-20260917-013311`. Canario por API sobre el sha real: rojo en `d212f4b` (`backend-tests-con-db` y `backend-tests-no-db`), revert verde en `ef25862`. k6 `health.js`, 10 VUs, post-deploy: p95 0,52 ms, 0 fallas de 681.254 peticiones.
+
+**Carga previa al deploy (instancia aislada, puertos propios — Ruling R6 del ledger; usuarios de prueba borrados al cerrar):** login p95 6,81→4,45 ms; refresh p95 5,02→5,63 ms (sin caché, TTL forzado a 0,001 s: 6,01 ms — sobrecosto del caché frío 0,38 ms, no es gate); crear pipeline p95 5,39→5,40 ms. GO en los tres criterios (±10%/+5ms de la base). **Advertencia sobre la medida de login (R17 del ledger): los usuarios de carga usan `bcrypt rounds=4` (fixture de test), no los 12 de producción — el número mide la sobrecarga de `ajustes.py`, no el costo real de bcrypt; no se repitió con rounds=12.**
+
+**Efecto de usuario post-deploy (decisión de Fernando):** re-login único de todas las sesiones activas (consecuencia de la Discrepancia 1, `iat` nuevo en el refresh).
+
+**Revisión final — encontró y arregló ANTES del push (regla "sin hallazgos diferidos"):** `Login.jsx` mostraba "usuario o contraseña incorrectos" ante un 503 `ajuste_ilegible` (en vez de un error genérico de servicio) y `client.js` convertía cualquier 5xx de `/refresh` en `sesion_expirada`; tests de 503 agregados en `/refresh` y `/me/password` (antes solo en login); `?.clave` defensivo en `AdminSettings.jsx` (`errorDeGuardado`); `policy.yml:562` corregido (el mensaje del piso decía 504, el piso real ya era 528).
+
+**Pisos de CI (medidos dos veces cada uno):** con DB 1334→1386, sin DB 764→787, vitest 504→535 (base 6e50959, ya con el frente A mergeado). `scripts/_check_mirror_sync_test.py`: 14/14 verde contra jax-platform `accc641` (ambos frentes A y C mergeados).
+
+**Pendiente sin fecha fija:** verificación en vivo con Fernando (Task 17 del plan) — cambiar cada uno de los cinco ajustes desde Admin, ver el efecto real, restaurar el valor.
+
+**Deuda nueva que este cierre destapa:** ver "Anotado — deuda residual del frente C" en `## Anotado, no bloquea`, más abajo.
 
 ## Cerrado — hallazgos de la auditoría de sobre-ingeniería, frente A (2026-09-17)
 
@@ -3163,6 +3598,42 @@ retractaciones, que no se borran. Ninguno requiere acción.
   - **Qué lo dispara (observación, no calendario):** uso real por encima de **10 pre-vuelos concurrentes sostenidos**. Dónde se ve: (a) en el journal de `jax-las-manos`, 503 `prevuelo_no_disponible` cuyo motivo es un `TimeoutError` esperando turno del pool (un pedido HTTP espera a lo sumo `JAX_DB_CONNECT_TIMEOUT_SECONDS`), que es el síntoma de cola llena; (b) en `jacobs_events` / la Mesa, `/jacobs/preflight` y `POST /jacobs/pipeline` solapados en la misma ventana de segundos por más de 10 pedidos; (c) en el perfil (`scripts/perfil_prevuelo.py trabajadores`), la fase `acquire` dominando el total con la concurrencia real medida, no con una inventada.
   - **Qué hacer si pasa:** volver a medir con la concurrencia real observada (lotes y sostenida, el procedimiento de la Task 15) y recién entonces evaluar subir el pool, contra el presupuesto de conexiones del servidor MariaDB compartido. Sin ese número medido, no se toca: subir el pool para que el ratio dé bien sería acomodar la medición al criterio.
   - **Evidencia y decisión:** `CONTEXT.md` §9 (entrada del 2026-09-17 sobre HEAD `cec13ac`), `r38-report.md` y Rulings R44/R52/R53 del ledger `2026-09-17-prevuelo-y-continuar-jacobs`.
+
+- **Anotado — C3 del Ejecutor (2026-09-17, Mr. Hyde). Ninguno bloquea:**
+  - **El carril del Ejecutor sondea cada 50 ms** (`prioridad._PASO_EJECUTOR_S`). Carga de C3 (200 peticiones con
+    `tool_use`, upstream falso): a concurrencia 1 el registro agrega +2,2/+2,5 ms de p95 (cumple ≤ 10 ms); a
+    concurrencia 2, en 1 de 5 rondas el p95 salta a +52,8 ms. Medido por fases: `anotar` p95 1,2 ms, `fsync` p95
+    1,03 ms, upstream 0,5 ms; el salto es la espera del carril (el registro alarga la retención ~2 ms y dos peticiones
+    chocan más). Frente a una inferencia de segundos no se nota; si alguna vez importa, el paso del carril es la palanca.
+  - **El cerco es de red (TCP/UDP):** los sockets unix del sistema (dbus, systemd, snapd, libvirt-ro) siguen con su
+    propia autorización, como para cualquier usuario sin privilegios. Ningún servicio de JAX escucha por socket unix
+    alcanzable por `axioma` (docker.sock es `root:docker 660`; verificado 2026-09-17).
+  - **Si alguien habilita `nftables.service`**, su `/etc/nftables.conf` hace `flush ruleset` y borra el cerco hasta el
+    próximo `systemctl restart ejecutor-cerco`. Hoy está `disabled` (verificado 2026-09-17); `probar_c3.py` lo detecta
+    (`cerco_abierto`).
+
+- **Anotado — deuda residual del frente F: contrato de sub-pipelines y pool de Jacobs (2026-09-17). Dueño: próxima ronda de pago de deuda.** Ninguno bloquea; en CI cada job levanta su propia MariaDB vacía:
+  - **`jax_memory_test` compartida entre frentes da flakes de tests que leen "la última fila" o limpian una tabla entera:** tras el rebase, en 16 corridas locales (13 de la suite completa, 3 de `jacobs` + `las_manos`) fallaron una sola vez cada uno `las_manos/_motor_usage_writer_test.py::test_record_motor_usage_sin_identidad_escribe_con_null_y_loguea` (lee la última fila de `axioma_usage`) y `jacobs/_facet_health_io_test.py::test_la_supresion_de_6h_se_respeta_en_la_alerta_agregada` (vacía `facet_health_event`); no se reprodujeron en las demás corridas. Misma causa que el flake de `test_tablero.py` del frente C: base de test compartida con otros frentes corriendo en paralelo. Arreglo de raíz: base de test propia por frente, o tests que filtren por su propia fila.
+  - **Dos fallas locales preexistentes en master `de6964e`, idénticas en la rama** (estado de la `jax_memory_test` local, en CI la base es nueva): `las_manos/_catalog_from_db_test.py::test_from_db_carga_kimi_y_ada` (`max_tokens` 0 de la fila de kimi) y `tests/test_memory_scope_denormalized.py::test_la_busqueda_usa_el_indice_vectorial_y_no_une_con_conversations` (el plan usa `idx_msg_scope` con filesort, no `idx_embedding`, con 1-2 filas en la base).
+  - **`jacobs/_pipeline_identity_test.py` en master deja una fila `test`/`Fernando` `pending` por corrida** que cuenta contra `MAX_PARALLEL_PIPELINES=3` y tapa las cargas de Jacobs con 422; la rama F la expira en `addAsyncCleanup`. Hasta el merge, correr la suite de master contra `jax_memory_test` ensucia la base (visto 2026-09-17: tres filas de corridas de master, expiradas a mano por id).
+
+- **Anotado — deuda residual del frente E de la auditoría (jax, triage de la revisión final y del rebase, 2026-09-17). Dueño: próxima ronda de pago de deuda.** Ninguno bloquea:
+  - **`facet` se lee por `status` sin índice** (`jacobs/store.py`, 4º SELECT de la validación de plan, E-17): catálogo de 7 filas, recorrido completo. El costo de 0,00024 s citado en `store.py` se midió con 3 SELECTs (2026-08-21); el 4º no está medido.
+  - **El `lifespan` de jax-platform no valida `LAS_MANOS_URL`** al arrancar (sí `JAX_OLLAMA_URL`).
+  - **Docstring de `jacobs/executor.py:424-426`** describe la lista fija vieja de facetas; `_CLEANROOM_RULE` nombra a kimi.
+  - **`cargar_registro` y `facet_resolver` ignoran `provider.status`** (a diferencia de `url_del_proveedor`, que ya no da URL a un `deprecated`). Es espejo de dos repos: se cambia en los dos a la vez.
+  - **El `conftest.py` raíz de jax no fija `JAX_FACET_SEAL_PATH`** (jax-platform sí). Hoy la lista de tests-puros no escribe el sello (verificado 2026-09-17) y `jacobs-gobernanza-db` lo fija en el workflow; una corrida local de los tests de DB sin la variable SÍ lo toca.
+  - **`tests/test_memory_scope_denormalized.py::test_encuentra_el_mensaje_del_proyecto_compartido` falla en la `jax_memory_test` local**, igual en master `0da32af` y en la rama (estado de la base compartida, no regresión); en CI la base es nueva.
+  - **Tripwires con límites declarados:** el de errores de proveedor redactados solo ve `X.text[:N]` y `aread()`; el de cliente HTTP compartido no ve alias de `AsyncClient`; el cierre en REPL/workers se verifica por substring.
+  - **`embedding_worker` cierra el cliente fuera de `finally`; `MemoryDB.close` no cierra el pool si `_http.aclose()` lanza.**
+  - **`ControlesFueraDelCheckoutTest` queda después de `if __name__ == "__main__"`** en dos archivos de tripwire (pytest los colecta; cosmético al correrlos con `python` directo).
+
+- **Anotado — deuda residual del frente C: los ajustes de Admin mandan de verdad (2026-09-17). jax-platform; dueño: próxima ronda de pago de deuda.** Ninguno bloquea; quedan acá para no perderse (regla "sin hallazgos diferidos" no aplica a los que la revisión final marcó explícitamente como aceptados, no como pendientes de arreglo):
+  - **Medida de login de la carga (R17 del ledger) no representa el costo real de bcrypt en producción:** los usuarios de la carga se crean con `bcrypt rounds=4` (fixture de test, `tests/identidades.py`), no los 12 de producción. El GO del gate de carga es válido para lo que `ajustes.py` agrega, no para el costo de login end-to-end. Repetir con `rounds=12` si alguna vez se necesita ese número (≈15 min, según el ledger).
+  - **`CacheDeAjustes` indexa por la grafía guardada de la clave** — un valor de `axioma_config` con una collation distinta a la canónica (caso borde, solo alcanzable borrando a mano la fila canónica) podría no invalidar igual que la fila esperada. Parqueado por la revisión final; la mitigación real sería un test + un `lower()` explícito por collation.
+  - **`test_grounding_config_revalidation` es flake por pérdida de conexión de MariaDB**, reproducido igual CON y SIN el cambio de este frente (visto en Task 2 y de nuevo tras el rebase de Task 12) — no es una regresión de este cierre, preexiste en `master`. Sin arreglar.
+  - **`test_tablero.py` (frente A) tiene un flake reportado por compartir la base `jax_memory_test` con la carga de otros frentes corriendo en simultáneo** (mismo síntoma que el "ruido de contención" documentado en `carga.md` para los tests de carga de este frente) — anotado por instrucción del ledger sin una reproducción aislada propia en esta sesión; si vuelve a aparecer, aislar con una base de test propia por frente en vez de compartir `jax_memory_test`.
+  - **Carrera check-then-admit en `api/pipelines.py:117-142`** (mencionada ya en la deuda residual del frente A): sigue sin lock porque el área es de `resource_manager.py`, que este frente sí tocó — no se resolvió, queda con el mismo dueño.
 
 - **Anotado — deuda residual del frente A de la auditoría de sobre-ingeniería (triage del review final, 2026-09-17). jax-platform; dueño: próxima ronda de pago de deuda.** Ninguno bloquea; el review final de la rama los marcó como minor y la regla "sin hallazgos diferidos" exige que queden acá, con archivo y motivo, en vez de perderse:
   - **`api/pipelines.py:117-142`, carrera check-then-admit** entre `can_start_pipeline` y `admit_pipeline` (awaits en el medio; el lock que se quitó en A-24 tampoco la cubría). Es del área del frente C (`resource_manager.py`).

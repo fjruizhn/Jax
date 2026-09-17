@@ -178,16 +178,12 @@ class MotorCatalog:
         hace deterministas los punteros y el hash del snapshot."""
         return tuple(self._capabilities[n] for n in sorted(self._capabilities))
 
-    def enabled_motors(self) -> list[str]:
-        return [n for n, m in self._motors.items() if m.enabled]
-
     @classmethod
     async def from_db(cls, conexion: aiomysql.Connection | None = None) -> "MotorCatalog":
         """Carga motor/capability (con `mode`, tanda A v2)/capability_motor
         desde la DB compartida jax_memory -- mismo pool/patron de conexion
         que credential_resolver.py. Reemplaza la lectura de config.toml
-        (TOML queda solo para [server]/kill_switch_path y lo que routes.py
-        todavia usa aparte).
+        (TOML queda solo para [server]).
 
         `conexion` (Task 15b, 2026-09-17): el pre-vuelo de Jacobs pasa la
         conexión que ya tomó de su pool, para leer todo su catálogo por UNA

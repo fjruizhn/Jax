@@ -213,6 +213,9 @@ git commit -m "feat(ejecutor): dos carriles para la GPU, la Mesa primero"
 
 ### Task 2: V3 — medir que la Mesa deja de esperar
 
+> **HECHA 2026-09-17** — resultado en `2026-09-16-ejecutor-fase2-design.md` §6.1. Pasa (p95 22,68 s),
+> con verde frágil; el costo real a vigilar resultó ser la recarga por contexto distinto, no la cola (§6.2).
+
 **Archivos:**
 - Modificar: `scripts/ejecutor_fase0/sonda_cola.py` (sólo si hace falta parametrizar la raíz)
 - Crear: `docs/superpowers/specs/2026-09-16-ejecutor-fase2-v3-medicion.md` (el resultado)

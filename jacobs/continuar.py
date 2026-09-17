@@ -28,7 +28,7 @@ from redaccion import recortar_redactado
 from jacobs import store
 from jacobs.candado import candado_de_creacion
 from jacobs.executor import RefIlegible, _load_ref
-from jacobs.models import MOTOR_FACETS, VALID_FACETS, Pipeline, PipelineStatus, Step, StepStatus
+from jacobs.models import MOTOR_FACETS, Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import PlanRejected, _check_cleanroom, _validate_plan_capabilities
 from jacobs.policy import MAX_PARALLEL_PIPELINES, check_kill_switch, validate_resume
 from jacobs.prevuelo import prevuelo
@@ -129,6 +129,12 @@ async def analizar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str] 
         paso.finished_at = None
         paso.output_ref = None
 
+    # Merge 2026-09-17 (E-03): las facetas válidas salen de la tabla `facet`
+    # (status='active'), no de una lista fija -- `VALID_FACETS` dejó de existir
+    # en el frente E. Se lee PEREZOSAMENTE y una sola vez: un continue sin
+    # `--reasignar` (el caso normal) no agrega una lectura de gobernanza.
+    facetas_activas: frozenset | None = None
+
     reasignados: dict[str, dict] = {}
     invalidas: list[dict] = []
     for clave, faceta in (reasignar or {}).items():
@@ -140,7 +146,9 @@ async def analizar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str] 
         if indice not in a_correr:
             invalidas.append({"paso": indice, "motivo": "solo se reasignan pasos a correr, no los reusados"})
             continue
-        if faceta not in VALID_FACETS:
+        if facetas_activas is None:
+            facetas_activas = (await store.get_motor_governance())["facets"]
+        if faceta not in facetas_activas:
             invalidas.append({"paso": indice, "motivo": f"faceta desconocida: '{faceta}'"})
             continue
         paso = plan[indice]

@@ -51,7 +51,7 @@ async def _abortado():
 
 
 async def _borrar(pid):
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
@@ -62,7 +62,7 @@ async def _borrar(pid):
 
 
 async def _explain(sql, params):
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute("EXPLAIN " + sql, params)

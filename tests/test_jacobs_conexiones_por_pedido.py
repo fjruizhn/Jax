@@ -56,7 +56,8 @@ _SONDEAR_REAL = pv.sonda.sondear  # el fixture la apaga; el caso de sonda la vue
 PID = "p-conexiones"
 REF = 'inline:{"result": "hecho"}'
 # Marcos que no son "el sitio" sino la cañería de la conexión.
-_CANERIA = {"get_conn", "_db_conn", "_ejecutar_condicional", "conexion_del_pool", "_pool_del_store", "_conexion_o_pool",
+_CANERIA = {"conexion_dedicada", "_db_conn", "_ejecutar_condicional", "conexion", "conexion_del_pool",
+            "_estado_del_loop", "_pool_del_store", "_conexion_o_pool",
             "__aenter__", "__aexit__", "_correr_endpoint"}
 
 
@@ -81,6 +82,17 @@ class _Cursor:
         self._fila = None
         self._filas = ()
 
+    # Merge 2026-09-17: en aiomysql `conn.cursor(...)` es AWAITABLE además de
+    # usarse con `async with`, y el envoltorio del pool (store.ConexionVigilada)
+    # lo await-ea. La base falsa lo imita.
+    def __await__(self):
+        async def _yo():
+            return self
+        return _yo().__await__()
+
+    async def close(self):
+        return None
+
     async def __aenter__(self):
         return self
 
@@ -96,6 +108,11 @@ class _Cursor:
         elif s.startswith("SELECT `key`, risk_level"):
             self._filas = (("research", "low", 0, 0, 15, 0, "", None, "manual_only",
                             json.dumps(["plataforma"]), None, None),)
+        elif s.startswith("SELECT `key` FROM facet WHERE status"):
+            # E-03 (frente E, 2026-09-16): el 4º SELECT de get_motor_governance
+            # -- el vocabulario de facetas del planner sale de la tabla `facet`.
+            self._filas = (("hipatia",), ("jekyll",), ("thot",), ("ada",),
+                           ("kimi",), ("hyde",), ("jax_local",))
         elif s.startswith("SELECT capability_key, motor_key FROM capability_motor"):
             self._filas = ()
         elif s == store._SQL_CONTAR_ACTIVOS:
@@ -161,7 +178,12 @@ class _Conexion:
         self.closed = True
 
     def get_transaction_status(self):
-        return False
+        return self.en_transaccion
+
+    # store._sesion_reutilizable mira las tres cosas de la sesión antes de
+    # devolver la conexión al pool.
+    def get_autocommit(self):
+        return True
 
     async def begin(self):
         self.en_transaccion = True
@@ -903,7 +925,7 @@ def test_un_event_append_del_motor_registry_usa_el_pool_del_loop_que_lo_corre(en
     async def cuerpo():
         try:
             await tool_authority._reject(job_id="j1", tool_name="read_file", caller="kimi", reason="x")
-            return asyncio.get_running_loop(), store._pool_estado[0]
+            return asyncio.get_running_loop(), next(iter(store._pools))
         finally:
             await store.cerrar_pool()
 
@@ -1199,7 +1221,7 @@ def test_store_lista_todas_las_funciones_que_usan_el_pool():
     Expected contra bd977a4: faltan registrar_evento_de_sonda y
     record_direct_usage."""
     texto = (RAIZ / "jacobs/store.py").read_text(encoding="utf-8")
-    bloque = texto[texto.index("# Ruling R38 (2026-09-17): el pool es del STORE"):texto.index("_pool_estado: tuple[")]
+    bloque = texto[texto.index("# Ruling R38 (2026-09-17): el pool es del STORE"):texto.index("_pools: dict[")]
     for nombre in ("registrar_evento_de_sonda", "record_direct_usage", "event_append", "get_motor_governance"):
         assert nombre in bloque, nombre
 

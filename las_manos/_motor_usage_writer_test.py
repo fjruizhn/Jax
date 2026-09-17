@@ -184,32 +184,46 @@ class MotorUsageWriterTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(filas[0][7])  # tenant_id
         self.assertIsNone(filas[0][8])  # user_id
 
-    async def test_record_motor_usage_reintenta_y_si_agota_encola_sin_perder_la_fila(self):
-        """T1.d + T7: reintenta (_WRITE_MAX_ATTEMPTS intentos) y, si agota, la
-        fila va al respaldo con un INFO que nombra el job -- no ERROR: encolada
-        no es pérdida (usage_writer.py, T7 2026-09-15).
-
-        R46 (R38 fix round 3): este test esperaba el ERROR anterior a la cola
-        durable y fallaba desde a38b7ce (medido: 1 failed contra bd977a4); no
-        está en ningún job de CI. El ERROR de pérdida real (tampoco se puede
-        encolar) lo cubre tests/test_cola_uso_escritores.py."""
+    async def test_record_motor_usage_reintenta_y_escala_a_error_si_agota_intentos(self):
+        """T1.d: el except que traga pasa a reintentar (2 intentos) y, si
+        agota, escala a logger.error (no solo warning) -- máxima visibilidad
+        posible desde este módulo, ver justificación en el código sobre por
+        qué no jacobs_events (sin pipeline_id en este scope)."""
+        # Desde la cola durable (T7, 2026-09-15) agotar los intentos ENCOLA y
+        # loguea INFO; el ERROR es solo cuando tampoco se puede encolar. Este
+        # test quedo afirmando lo de antes y fallaba ya en eb72e78 (visto en la
+        # ronda del pool, 2026-09-17): se simula tambien la cola sin lugar. Y la
+        # base caida se simula en el POOL, que es por donde conecta el escritor.
+        import contextlib
         import unittest.mock as mock
-        await self.modelo.sembrar()
-        conectar = mock.AsyncMock(side_effect=RuntimeError("DB caída"))
-        with mock.patch("motor_registry.usage_writer.aiomysql.connect", conectar), \
-                mock.patch("motor_registry.usage_writer._WRITE_RETRY_DELAY_SECONDS", 0):
-            with self.assertLogs("motor_registry.usage_writer", level="INFO") as cm:
+
+        pedidos = []
+
+        def pool_caido(desechable=False):
+            pedidos.append(1)
+
+            @contextlib.asynccontextmanager
+            async def _ctx():
+                raise RuntimeError("DB caída")
+                yield  # pragma: no cover
+
+            return _ctx()
+
+        async def cola_sin_lugar(_fila):
+            return None
+
+        with mock.patch("jacobs.store.conexion", pool_caido), \
+                mock.patch("motor_registry.usage_writer.encolar_uso", cola_sin_lugar), \
+                mock.patch("motor_registry.usage_writer.asyncio.sleep", mock.AsyncMock()):
+            with self.assertLogs("motor_registry.usage_writer", level="ERROR") as cm:
                 await usage_writer.record_motor_usage(
                     "1", "77", "kimi", "moonshot", self.modelo.model_id, 100, 50,
                     job_id=self.job_id, status="completed",
                 )
-        self.assertEqual(conectar.await_count, usage_writer._WRITE_MAX_ATTEMPTS)
-        encolada = [r for r in cm.records if self.job_id in r.getMessage() and "ENCOLADA" in r.getMessage()]
-        self.assertEqual(len(encolada), 1, cm.output)
-        self.assertEqual(encolada[0].levelname, "INFO")
-        self.assertIn("RuntimeError", encolada[0].getMessage())
-        self.assertEqual([r for r in cm.records if r.levelname == "ERROR"], [])
-        self.assertEqual(await self.modelo.filas_de_uso("id"), ())  # no escribió en la base
+        self.assertEqual(len(pedidos), usage_writer._WRITE_MAX_ATTEMPTS)
+        # Merge 2026-09-17: el job_id del test es un uuid propio (no el literal
+        # "job-4" de antes), para no pisar filas de otra corrida.
+        assert any(self.job_id in m and "RuntimeError" in m for m in cm.output), cm.output
 
 
 if __name__ == "__main__":

@@ -179,6 +179,7 @@ class ReplGeminiCabeceraTest(unittest.IsolatedAsyncioTestCase):
             name="hipatia", provider="gemini", model_default="gemini-x",
             models_allowed=["gemini-x"], system_prompt="s", timeout=10,
             grounding_policy="auto",
+            api_url="https://generativelanguage.googleapis.com/v1beta",
         )
 
     async def _invocar(self, transporte: _Transporte):

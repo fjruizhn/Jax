@@ -474,7 +474,7 @@ def test_record_direct_usage_encola_con_el_request_type_pedido(monkeypatch):
     monkeypatch.setenv("JAX_DB_HOST", "127.0.0.1")
     monkeypatch.setenv("JAX_DB_PORT", "1")
     encolar = AsyncMock(return_value="spool-1")
-    with patch.object(usage_writer.store, "conexion_del_pool", _pool_que_explota), \
+    with patch.object(usage_writer.store, "conexion", _pool_que_explota), \
          patch.object(usage_writer, "encolar_uso", encolar):
         asyncio.run(usage_writer.record_direct_usage(
             "1", "1", "jekyll", "deepseek", "m", 1, 2, request_type="preflight_probe"))
@@ -510,7 +510,7 @@ def test_record_direct_usage_inserta_con_el_request_type_pedido(monkeypatch):
     async def pool_ok():
         yield _Conn()
 
-    with patch.object(usage_writer.store, "conexion_del_pool", pool_ok):
+    with patch.object(usage_writer.store, "conexion", pool_ok):
         asyncio.run(usage_writer.record_direct_usage(
             "1", "1", "jekyll", "deepseek", "m", 1, 2, request_type="preflight_probe"))
         asyncio.run(usage_writer.record_direct_usage("1", "1", "jekyll", "deepseek", "m", 1, 2))

@@ -3,12 +3,13 @@
 El kernel acota las dos puntas: local (hall9000) y remota (.10/.11/.20).
 La llave del cerebro viaja por stdin, nunca por argv: `ps` la vería.
 Spec: 2026-09-15-ejecutor-design.md §8, Fase 0.
+RETIRADO para lanzar (2026-09-17): ver Fase0Retirada. `preparar` queda (documenta que la
+llave viaja por stdin) y no lanza nada.
 """
 from __future__ import annotations
 
 import pathlib
 import shlex
-import subprocess
 
 NODE_BIN = "/opt/ejecutor/node-v24.16.0/bin"
 CLAUDE = f"{NODE_BIN}/claude"
@@ -38,6 +39,11 @@ def preparar(base_url, modelo, prompt, llave, auto_compact=None, plugin_dirs=(),
     return CONTROLADOR + [remoto], llave + "\n"
 
 
+class Fase0Retirada(RuntimeError):
+    """Retirado el 2026-09-17 (Ejecutor SP1, plan 6): lanzaba el arnés como la cuenta sin
+    jaula ni gancho (C1) y directo a Ollama (C3). El lanzamiento vive en el transporte de SP2,
+    detrás de jax/ejecutor/contratos/arranque.py::exigir_contratos."""
+
+
 def correr(base_url, modelo, prompt, llave="ollama", **kw):
-    argv, stdin = preparar(base_url, modelo, prompt, llave, **kw)
-    return subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=1000)
+    raise Fase0Retirada("fase0_retirada")

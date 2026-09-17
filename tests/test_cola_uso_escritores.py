@@ -7,8 +7,11 @@ Hasta hoy, cuando la base no estaba, la fila se perdia para siempre:
 El turno ya se le cobro al proveedor, asi que esa fila es dinero real que el
 total de Admin -> Costos nunca vuelve a ver.
 
-Estos tests NO tocan la base: la simulan caida (`aiomysql.connect` que explota)
-y miran el directorio del respaldo. `JAX_USAGE_SPOOL_DIR` apunta a un `tmp_path`
+Estos tests NO tocan la base: la simulan caida (el pool compartido,
+`jacobs.store.conexion`, que explota al pedir la conexion -- desde el
+2026-09-17 los dos escritores ya no abren `aiomysql.connect` propio) y miran el
+directorio del respaldo. `aiomysql.connect` queda armado para fallar el test si
+alguien vuelve a abrir una conexion suelta. `JAX_USAGE_SPOOL_DIR` apunta a un `tmp_path`
 en cada test -- nunca al default de produccion.
 
 Corre con:
@@ -18,6 +21,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 import json
 import os
@@ -192,8 +196,18 @@ class _ConexionFalsa:
 @pytest.fixture
 def respaldo(tmp_path, monkeypatch):
     """Directorio del respaldo aislado + la config de DB que hace falta para
-    llegar al connect (y explotar ahi, no antes)."""
+    llegar al pool (y explotar ahi, no antes). Una conexion suelta queda
+    registrada en `sueltas` y el test la rechaza al final."""
+    import aiomysql
     import cola_uso
+
+    sueltas = []
+
+    async def _connect_suelto(*_a, **_k):
+        sueltas.append(1)
+        raise OSError("conexion suelta: el escritor tiene que usar el pool")
+
+    monkeypatch.setattr(aiomysql, "connect", _connect_suelto)
 
     directorio = tmp_path / "usage-spool"
     monkeypatch.setenv("JAX_USAGE_SPOOL_DIR", str(directorio))
@@ -201,7 +215,8 @@ def respaldo(tmp_path, monkeypatch):
     monkeypatch.setenv("JAX_DB_PORT", "1")
     monkeypatch.setenv("JAX_DB_NAME", "jax_memory_test")
     cola_uso.reset_estado()
-    return directorio
+    yield directorio
+    assert sueltas == [], "un escritor abrio aiomysql.connect propio en vez del pool"
 
 
 def _filas_del_respaldo(directorio: Path) -> list[dict]:
@@ -213,26 +228,48 @@ def _filas_del_respaldo(directorio: Path) -> list[dict]:
     ]
 
 
-def _connect_que_explota(*_a, **_k):
-    raise OSError("la base no está")
+class _Pool:
+    """Doble de `jacobs.store.conexion`: cuenta los pedidos y entrega una
+    conexion sana o explota al pedirla (base caida o pool agotado)."""
+
+    def __init__(self, error: Exception | None = None, al_pedir=None):
+        self.error = error
+        self.al_pedir = al_pedir
+        self.pedidos = 0
+
+    def __call__(self, desechable: bool = False):
+        self.pedidos += 1
+        if self.al_pedir:
+            self.al_pedir()
+
+        @contextlib.asynccontextmanager
+        async def _ctx():
+            if self.error is not None:
+                raise self.error
+            yield _ConexionFalsa()
+
+        return _ctx()
 
 
-async def _connect_ok(*_a, **_k):
-    return _ConexionFalsa()
+def _pool_que_explota():
+    return _Pool(OSError("la base no está"))
 
 
-# R38 (fix round 1, 2026-09-17): jacobs/usage_writer.py escribe por el pool
-# del store de Jacobs, no por aiomysql.connect. Mismos dos casos: la base (o el
-# pool) no está, y una conexión que responde.
-@asynccontextmanager
-async def _pool_que_explota():
-    raise OSError("la base no está")
-    yield
+def _pool_ok():
+    return _Pool()
 
 
-@asynccontextmanager
-async def _pool_ok():
-    yield _ConexionFalsa()
+def _usar_pool(monkeypatch, pool: _Pool) -> _Pool:
+    from jacobs import store
+    monkeypatch.setattr(store, "conexion", pool)
+    return pool
+
+
+# R38 (fix round 1, 2026-09-17): jacobs/usage_writer.py escribe por el pool del
+# store de Jacobs, no por aiomysql.connect. Mismos dos casos: la base (o el
+# pool) no está, y una conexión que responde. Merge 2026-09-17: el doble es el
+# `_Pool` de arriba (cuenta pedidos y acepta `desechable=`, como `conexion()`);
+# las dos ramas escribieron su propio doble y el que queda es ese.
 
 
 # --- jacobs -----------------------------------------------------------------
@@ -240,7 +277,7 @@ async def _pool_ok():
 def test_jacobs_encola_la_fila_cuando_la_base_falla(respaldo, monkeypatch):
     from jacobs import usage_writer
 
-    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_que_explota)
+    _usar_pool(monkeypatch, _pool_que_explota())
     asyncio.run(usage_writer.record_direct_usage(
         user_id="7", tenant_id="77", facet="jekyll", provider_id="deepseek",
         model="deepseek-v4-flash", tokens_in=123, tokens_out=45,
@@ -266,7 +303,7 @@ def test_jacobs_encola_la_fila_cuando_la_base_falla(respaldo, monkeypatch):
 def test_jacobs_camino_feliz_no_deja_nada_en_el_respaldo(respaldo, monkeypatch):
     from jacobs import usage_writer
 
-    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_ok)
+    _usar_pool(monkeypatch, _pool_ok())
     asyncio.run(usage_writer.record_direct_usage(
         user_id="7", tenant_id="77", facet="jekyll", provider_id="deepseek",
         model="m", tokens_in=1, tokens_out=2,
@@ -282,7 +319,7 @@ def test_jacobs_loguea_ERROR_si_tampoco_puede_encolar(respaldo, monkeypatch, cap
     async def _encolar_que_no_puede(_fila):
         return None
 
-    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_que_explota)
+    _usar_pool(monkeypatch, _pool_que_explota())
     monkeypatch.setattr(usage_writer, "encolar_uso", _encolar_que_no_puede)
     with caplog.at_level("ERROR", logger="jacobs.usage_writer"):
         asyncio.run(usage_writer.record_direct_usage(
@@ -298,7 +335,7 @@ def test_jacobs_no_loguea_ERROR_cuando_pudo_encolar(respaldo, monkeypatch, caplo
     """Encolada NO es perdida: un ERROR ahi entrena a ignorar el log."""
     from jacobs import usage_writer
 
-    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_que_explota)
+    _usar_pool(monkeypatch, _pool_que_explota())
     with caplog.at_level("DEBUG", logger="jacobs.usage_writer"):
         asyncio.run(usage_writer.record_direct_usage(
             user_id="7", tenant_id="77", facet="jekyll", provider_id="p",
@@ -312,23 +349,18 @@ def test_jacobs_no_loguea_ERROR_cuando_pudo_encolar(respaldo, monkeypatch, caplo
 def test_motor_encola_tras_agotar_los_reintentos(respaldo, monkeypatch):
     from motor_registry import usage_writer as motor
 
-    intentos = []
-
-    def _connect(*_a, **_k):
-        intentos.append(1)
-        raise OSError("la base no está")
+    pool = _usar_pool(monkeypatch, _pool_que_explota())
 
     async def _sin_espera(_s):
         return None
 
-    monkeypatch.setattr(motor.aiomysql, "connect", _connect)
     monkeypatch.setattr(motor.asyncio, "sleep", _sin_espera)
     asyncio.run(motor.record_motor_usage(
         user_id="7", tenant_id="77", facet="ada", provider_id="openai",
         model="gpt-x", tokens_in=10, tokens_out=20, job_id="j1", status="failed",
     ))
 
-    assert len(intentos) == motor._WRITE_MAX_ATTEMPTS, intentos
+    assert pool.pedidos == motor._WRITE_MAX_ATTEMPTS, pool.pedidos
     filas = _filas_del_respaldo(respaldo)
     assert len(filas) == 1, filas
     fila = filas[0]
@@ -343,7 +375,7 @@ def test_motor_encola_tras_agotar_los_reintentos(respaldo, monkeypatch):
 def test_motor_camino_feliz_no_deja_nada_en_el_respaldo(respaldo, monkeypatch):
     from motor_registry import usage_writer as motor
 
-    monkeypatch.setattr(motor.aiomysql, "connect", _connect_ok)
+    _usar_pool(monkeypatch, _pool_ok())
     asyncio.run(motor.record_motor_usage(
         user_id="7", tenant_id="77", facet="ada", provider_id="openai",
         model="gpt-x", tokens_in=1, tokens_out=2, job_id="j1", status="completed",
@@ -360,7 +392,7 @@ def test_motor_loguea_ERROR_si_tampoco_puede_encolar(respaldo, monkeypatch, capl
     async def _sin_espera(_s):
         return None
 
-    monkeypatch.setattr(motor.aiomysql, "connect", _connect_que_explota)
+    _usar_pool(monkeypatch, _pool_que_explota())
     monkeypatch.setattr(motor.asyncio, "sleep", _sin_espera)
     monkeypatch.setattr(motor, "encolar_uso", _encolar_que_no_puede)
     with caplog.at_level("ERROR", logger="motor_registry.usage_writer"):
@@ -390,7 +422,7 @@ def test_motor_manda_status_y_job_id_EN_EL_ARCHIVO(respaldo, monkeypatch, caplog
     async def _sin_espera(_s):
         return None
 
-    monkeypatch.setattr(motor.aiomysql, "connect", _connect_que_explota)
+    _usar_pool(monkeypatch, _pool_que_explota())
     monkeypatch.setattr(motor.asyncio, "sleep", _sin_espera)
     with caplog.at_level("INFO", logger="motor_registry.usage_writer"):
         asyncio.run(motor.record_motor_usage(
@@ -415,16 +447,15 @@ def test_created_at_es_la_hora_del_TURNO_no_la_del_reintento(respaldo, monkeypat
 
     reloj = ["2026-09-15T00:00:00+00:00"]
 
-    def _connect(*_a, **_k):
+    def _avanza_el_reloj():
         reloj[0] = "2026-09-16T02:00:00+00:00"
-        raise OSError("la base no está")
 
     async def _sin_espera(_s):
         return None
 
     monkeypatch.setattr(cola_uso, "_ahora_iso", lambda: reloj[0])
     monkeypatch.setattr(motor, "_ahora_iso", lambda: reloj[0])
-    monkeypatch.setattr(motor.aiomysql, "connect", _connect)
+    _usar_pool(monkeypatch, _Pool(OSError("la base no está"), al_pedir=_avanza_el_reloj))
     monkeypatch.setattr(motor.asyncio, "sleep", _sin_espera)
     asyncio.run(motor.record_motor_usage(
         user_id="7", tenant_id="77", facet="ada", provider_id="p",

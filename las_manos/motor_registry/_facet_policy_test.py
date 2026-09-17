@@ -17,6 +17,7 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import unittest
@@ -92,10 +93,13 @@ class AllowedCallersTipoInesperadoTest(unittest.IsolatedAsyncioTestCase):
     """
 
     async def _check(self, raw: str):
-        with patch(
-            "motor_registry.facet_policy._db_conn",
-            new=AsyncMock(return_value=_conn_returning(raw)),
-        ):
+        # Desde 2026-09-17 la admision pide la conexion al pool compartido de
+        # Jacobs (jacobs.store.conexion), no a una conexion suelta.
+        @contextlib.asynccontextmanager
+        async def _conexion(desechable=False):
+            yield _conn_returning(raw)
+
+        with patch("jacobs.store.conexion", _conexion):
             return await check_facet_admission("jax_platform_chat", "hipatia")
 
     async def test_string_json_que_contiene_al_caller_como_substring_rechaza(self):

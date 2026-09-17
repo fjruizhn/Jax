@@ -69,7 +69,7 @@ async def _limpiar(cur, s):
 def _con_semilla(cuerpo, **kw):
     async def correr():
         s = _Semilla()
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 await _sembrar(cur, s, **kw)
@@ -87,7 +87,7 @@ def _con_semillas(n, cuerpo):
     de pares, sql_ultimo_evento_de_proveedor lleva N claves)."""
     async def correr():
         s_list = [_Semilla() for _ in range(n)]
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 for s in s_list:
@@ -299,7 +299,7 @@ def test_explain_min_output_tokens_evita_full_scan():
     """Item 2: sql_min_output_tokens(n) contra capability.key (PRIMARY),
     con n=2 claves reales de la semilla de producción."""
     async def correr():
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             return await _explain(conn, pc.sql_min_output_tokens(2), ("research", "analysis"))
         finally:
@@ -420,7 +420,7 @@ def test_los_request_type_de_la_sonda_entran_en_axioma_usage():
     from jacobs import sonda
 
     async def cuerpo():
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 await cur.execute(

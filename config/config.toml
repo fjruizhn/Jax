@@ -11,7 +11,6 @@
 # ============================================================
 
 [jax]
-kill_switch_path = "/etc/jax/PAUSE"
 default_mode = "auto"
 timeout_seconds = 600
 task_timeout_seconds = 3600
@@ -32,7 +31,6 @@ model_default = "qwen3-coder:30b"
 voice_id = "em_alex"
 voice_speed = 1.0
 models_allowed = ["qwen3-coder:30b", "qwen3:14b", "qwen2.5:7b", "llama3.2:3b"]
-api_url = "http://localhost:11434/api/chat"
 authority_origin = "🏠 *Origen de autoridad: conversación local de JAX, fundada en su memoria verificada. Los datos externos se derivan a investigación.*"
 system_prompt = """
 Tu nombre es JAX (se pronuncia "Yax"). Estás en tu modo de confianza, local y privado.
@@ -281,7 +279,6 @@ model_default = "glm-5.2"
 voice_id = "em_alex"
 voice_speed = 0.9
 models_allowed = ["glm-5.2"]
-api_url = "https://api.z.ai/api/paas/v4/chat/completions"
 authority_origin = "⚛️ *Origen de autoridad: GLM-5.2 (Z.ai). Razonamiento analítico y formalización. Sin verificación externa por defecto.*"
 system_prompt = """
 Eres Ada, séptima faceta del concilio JAX/Axioma, nombrada por Ada Lovelace,
@@ -331,7 +328,6 @@ model_default = "kimi-k2.7-code"
 voice_id = "em_alex"
 voice_speed = 1.0
 models_allowed = ["kimi-k2.7-code", "kimi-k2.6"]
-api_url = "https://api.moonshot.ai/v1/chat/completions"
 authority_origin = "⚙️ *Origen de autoridad: Kimi K2.7 Code (Moonshot AI). Motor de enjambre — coding agéntico de largo horizonte. Sin verificación externa.*"
 system_prompt = """
 Tu nombre es Kimi — no JAX, no otro nombre. Sos la especialista de enjambre de JAX (se pronuncia "Yax"), el asistente de Fernando.

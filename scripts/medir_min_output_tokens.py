@@ -152,7 +152,7 @@ def combinar(*fuentes: dict[str, int]) -> dict[str, int]:
 
 async def _maximos_http_directo() -> tuple[dict[str, int], list[Any], list[str]]:
     from jacobs import store
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute("SET SESSION TRANSACTION READ ONLY")

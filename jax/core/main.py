@@ -5,7 +5,7 @@ Bucle de terminal (REPL) que cose todo: lee lo que escribis (o lo que
 DECIS por el microfono), lo pasa por el Router, e invoca la faceta correcta.
 
 Seguridad: antes de CADA invocacion de musculo se chequea el Kill Switch
-(/etc/jax/PAUSE).
+(archivo de JAX_KILL_SWITCH_PATH).
 
 MEMORIA: hilo de sesion compartido en RAM (MAX_TURNS) + MariaDB persistente
 (tolerante a fallos).
@@ -43,6 +43,14 @@ import sys
 import tomllib
 from pathlib import Path
 
+from jax.core.config_entorno import url_requerida
+from jax.core.cliente_http_compartido import cerrar_cliente_http
+from jax.core.interruptor import (
+    InterruptorSinConfigurar,
+    correr_con_interruptor,
+    interruptor_activo,
+    ruta_del_interruptor,
+)
 from jax.core.router import Router
 from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
@@ -91,7 +99,7 @@ def build_muscles(cfg: dict, timeout_override: float | None = None) -> dict:
         elif ptype == "ollama":
             muscles[name] = OllamaMuscle(
                 name, p["model_default"], p["models_allowed"],
-                p["system_prompt"], timeout, api_url=p["api_url"],
+                p["system_prompt"], timeout, api_url=url_requerida("JAX_OLLAMA_URL") + "/api/chat",
                 authority_origin=p.get("authority_origin", ""),
             )
         else:
@@ -128,11 +136,6 @@ def resolver_modo_pesado(cfg: dict) -> tuple[str | None, str | None, str]:
             f"'{faceta}' (catálogo): {permitidos}."
         )
     return faceta, modelo, ""
-
-
-def kill_switch_active(path: str) -> bool:
-    """True si el Kill Switch esta puesto."""
-    return Path(path).exists()
 
 
 def _lanzar_workers_background() -> None:
@@ -179,6 +182,22 @@ def humanizar_error(label: str, err: Exception) -> str:
     # Si no reconocemos el error, mostramos algo corto (no el JSON crudo).
     corto = msg.split("\n")[0][:160]
     return f"[{label} fallo] {corto}"
+
+
+def _texto_de_error_de_tarea(e: BaseException) -> str:
+    """El error de run_task se ESCRIBE en <tarea>_result.md: se redacta antes de
+    tocar disco (E-16, 2026-09-16). Entero, sin recortar: es el diagnóstico de
+    la tarea. humanizar_error ya redactaba lo que se imprime; el archivo no.
+
+    Redacta SOLO POR PATRÓN (redactar_secretos sin `secretos`): acá no se
+    conoce la credencial del proveedor, así que una key sin forma reconocible
+    (sin `key=`, sin contexto Authorization, sin prefijo `AIza`) pasaría tal
+    cual. Es aceptable porque el texto de proveedor no llega crudo: los
+    músculos (jax/muscles/base.py) ya arman sus excepciones con
+    recortar_redactado(..., [api_key]), redactadas con la credencial conocida
+    antes de subir hasta run_task; este paso es la segunda capa."""
+    from jax.core.redaccion import redactar_secretos
+    return redactar_secretos(str(e) or repr(e) or "error sin detalle")
 
 
 async def handle_fact_command(db, line: str, pending_delete: dict) -> str:
@@ -379,7 +398,11 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
 
-    kill_path = cfg["jax"]["kill_switch_path"]
+    try:
+        kill_path = ruta_del_interruptor()
+    except InterruptorSinConfigurar as exc:
+        print(f"[tarea] {exc}")
+        sys.exit(1)
     task_timeout = float(cfg["jax"].get("task_timeout_seconds", 600))
     default_faceta = cfg["jax"].get("default_personality", "jax_local")
 
@@ -422,7 +445,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
 
     voice = VoiceEngine()
 
-    if kill_switch_active(kill_path):
+    if interruptor_activo(kill_path):
         print(f"[tarea] PAUSE activo — JAX no puede ejecutar. "
               f"Borrá {kill_path} para reactivar.")
         sys.exit(1)
@@ -465,7 +488,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
     print(f"[tarea] {label} procesando '{task_file.name}'...", flush=True)
 
     try:
-        respuesta = await muscle.invoke(contenido, history=None)
+        respuesta = await correr_con_interruptor(muscle.invoke(contenido, history=None))
 
         result_file.write_text(
             f"# Resultado de: {task_file.name}\n\n{respuesta}\n",
@@ -484,7 +507,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
         return True
 
     except (MuscleError, Exception) as e:  # fail-closed: el contenido dice el error Y el proceso sale con 1
-        error_msg = str(e) or repr(e) or "error sin detalle"
+        error_msg = _texto_de_error_de_tarea(e)
 
         result_file.write_text(
             f"# Error en tarea: {task_file.name}\n\n{error_msg}\n",
@@ -514,13 +537,24 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
 
     finally:
         await voice.shutdown()
+        await cerrar_cliente_http()
 
 
 async def main() -> None:
+    # E-21: sin estas variables el REPL no arranca; fallar acá y no en el
+    # primer turno o la primera frase hablada.
+    url_requerida("JAX_OLLAMA_URL")
+    from jax.voice.tts import _python_de_kokoro
+    _python_de_kokoro()
+
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
 
-    kill_path = cfg["jax"]["kill_switch_path"]
+    try:
+        kill_path = ruta_del_interruptor()
+    except InterruptorSinConfigurar as exc:
+        print(f"[JAX] {exc}")
+        sys.exit(1)
     default_faceta = cfg["jax"].get("default_personality", "jax_local")
 
     # Bloque C: modelo real desde facet_binding, no config.toml. Se
@@ -791,7 +825,7 @@ async def main() -> None:
                 print(f"\n[router -> {faceta} via clasificador local]")
 
             # Kill Switch: chequeo atomico JUSTO antes de invocar.
-            if kill_switch_active(kill_path):
+            if interruptor_activo(kill_path):
                 print(f"\n[PAUSE activo — JAX no invoca musculos. "
                       f"Borra {kill_path} para reactivar.]")
                 continue
@@ -858,7 +892,9 @@ async def main() -> None:
                         ] + history_for_invocation
 
                 model_override = MODELO_PESADO if (modo_pesado and faceta == FACETA_PESADO) else None
-                respuesta = await muscle.invoke(user_text, history=history_for_invocation, model=model_override)
+                respuesta = await correr_con_interruptor(
+                    muscle.invoke(user_text, history=history_for_invocation, model=model_override)
+                )
                 print(f"\n{label}: {respuesta}")
 
                 # Voz en streaming, de fondo, con la voz/velocidad de la
@@ -896,6 +932,7 @@ async def main() -> None:
                 print("\n[Procesando memoria de esta sesion en background...]")
                 _lanzar_workers_background()
         await db.close()
+        await cerrar_cliente_http()
 
 
 if __name__ == "__main__":

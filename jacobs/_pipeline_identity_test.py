@@ -27,6 +27,8 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 
 class PipelineIdentityTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Pool por loop: cada test trae el suyo y lo cierra (jacobs/store.py).
+        self.addAsyncCleanup(store.cerrar_pool)
         await store.init_tables()
 
     async def test_pipeline_create_y_lectura_conservan_user_id_tenant_id(self):
@@ -36,17 +38,22 @@ class PipelineIdentityTest(unittest.IsolatedAsyncioTestCase):
             status=PipelineStatus.pending, user_id="1", tenant_id="test-tenant",
             created_at=time.time(), updated_at=time.time(),
         )
-        # R40 (2026-09-17): la fila se borra al terminar. Antes quedaba en
-        # pending para siempre: cada corrida sumaba un pipeline ACTIVO a
-        # jax_memory_test (76 filas 'test'/'Fernando' vencidas por un reaper
-        # ajeno), y eso movía la cuenta global que usan otros tests.
+        # R40 (2026-09-17): la fila se BORRA al terminar, pase lo que pase.
+        # Antes quedaba en `pending` para siempre en jax_memory_test: cada
+        # corrida sumaba un pipeline ACTIVO (76 filas 'test'/'Fernando'
+        # vencidas por un reaper ajeno) que movía la cuenta global que usan
+        # otros tests y contaba contra MAX_PARALLEL_PIPELINES=3 — medido
+        # 2026-09-17, dos filas `test`/`Fernando` tapaban los tres escenarios
+        # de la prueba de carga de Jacobs con 422. Borrar la fila (y no sólo
+        # marcarla `expired`) cierra las dos cosas; el finally corre también
+        # si fallan las aserciones.
         try:
             await store.pipeline_create(p)
             loaded = await store.pipeline_get(pid)  # confirmado: nombre real, ver store.py:116
             self.assertEqual(loaded.user_id, "1")
             self.assertEqual(loaded.tenant_id, "test-tenant")
         finally:
-            conn = await store.get_conn()
+            conn = await store.conexion_dedicada()
             try:
                 async with conn.cursor() as cur:
                     await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))

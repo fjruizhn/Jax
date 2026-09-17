@@ -76,6 +76,16 @@ def _entorno(pipeline=_NADA, pasos=None, activos=0, veredicto=None, transaccion=
             continuar, "prevuelo", AsyncMock(return_value=veredicto or _veredicto())))
         m["capacidades"] = pila.enter_context(patch.object(
             continuar, "_validate_plan_capabilities", AsyncMock()))
+        # Merge 2026-09-17 (E-03): las facetas válidas de `--reasignar` salen de
+        # la tabla `facet` (get_motor_governance), no de una lista fija. Acá se
+        # dan las activas sin tocar la base.
+        m["gobernanza"] = pila.enter_context(patch.object(
+            continuar.store, "get_motor_governance",
+            AsyncMock(return_value={
+                "capabilities": {}, "motors": {},
+                "facets": frozenset({"hipatia", "jekyll", "thot", "ada",
+                                     "kimi", "hyde", "jax_local"}),
+            })))
         pila.enter_context(patch.object(continuar, "check_kill_switch", return_value=kill))
         m["candado"] = _CandadoFalso()
         pila.enter_context(patch.object(continuar.store, "candado_de_activos", m["candado"], create=True))

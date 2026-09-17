@@ -282,6 +282,11 @@ Fase 0 corre **Claude Code** como el usuario `axioma`, con `ANTHROPIC_BASE_URL` 
 a Ollama. Un `flock` en Python no frena tráfico que sale de un proceso Node hacia un puerto HTTP.
 Y la Mesa tampoco llama a Ollama desde jax-platform: pasa por LAS MANOS (`motor_registry`) y Jacobs.
 
+> **CORREGIDO 2026-09-17 (Mr. Hyde, medido en SP3 contra el código):** la frase de arriba es falsa. La Mesa
+> llama a Ollama **directo** desde `jax-platform/backend/api/chat.py` (`_call_ollama`), y la sonda de
+> `facet_canary` entra por el mismo camino. El carril de la Mesa se tomó ahí (§6.3.1), no en LAS MANOS; el
+> «lado Mesa» de abajo vale con ese lugar cambiado.
+
 **Lado Ejecutor — un proxy con carril.** `ANTHROPIC_BASE_URL` apunta a un proxy local. Por **cada
 petición** toma `carril_ejecutor`, reenvía a Ollama **con streaming** y suelta el carril cuando termina
 la respuesta (o se corta). Tope vencido → **HTTP 503**: la misión falla, no se cuela. Suelta entre
@@ -354,6 +359,106 @@ Esta fase se mide contra el examen que ya está corrido: **no hace falta volver 
 
 ---
 
+### 6.1 V3 medido — 2026-09-17, con G1 de Fernando
+
+Corte de `jax_local` de 01:44 a 01:55 (12 min), sin uso real de la Mesa antes de cada paso.
+Crudos y scripts en `~/ejecutor-fase2/resultados/g1_20260917/`. Restaurado y verificado por un tercero
+contra la foto previa: `qwen3.6:35b-a3b-q4_K_M` a 32768, Forever; ningún modelo derivado sobrante.
+
+**Hallazgo previo a medir:** la Mesa usa Qwen a **32768** y el Ejecutor lo necesita a **131072** (la Fase 0
+mostró que su arranque, 17k tokens, no entra en 32768). Mismos pesos, distinto contexto, una GPU: cada
+alternancia **recarga el modelo**. U5 lo había excluido a propósito («para medir cola y no recargas»).
+
+| Medición | Resultado |
+|---|---|
+| Recarga 32768 ↔ 131072 (`load_duration`, 3 reps por sentido) | **~3 s** (3,02–3,27), con los pesos ya en memoria del sistema |
+| Pedir el modelo base con `num_ctx 131072` con el derivado ya cargado | **sin recarga** (0,168 s): comparten proceso |
+| Mesa a 131072 vs 32768 (6 reps, `eval_duration`) | generación **igual** (76 tok/s); lectura del prompt **−17 %**; primer token **+58 ms** con prompts de ~700 tokens |
+| **V3**: p95 de espera de la Mesa con el Ejecutor trabajando, contexto unificado | **22,68 s** (15 muestras, p50 6,79 s) — **PASA** (umbral 60, U5 = 62,71) |
+| ¿Claude Code manda peticiones en paralelo? | **Sí, 2** al empezar cada misión; la segunda esperó 13–29 s en el proxy |
+| ¿Claude Code reintenta un 503? | **No**, porque respeta `x-should-retry: false`. Control con upstream falso: sin la cabecera, 10 reintentos en 140 s; con ella, 1 |
+
+**El verde de V3 es frágil, y queda dicho:** la cola evita quedar detrás de *varias* peticiones del Ejecutor,
+pero **no interrumpe la que está en curso** (mediana 24,3 s, máx 43,6 s). Con misiones largas o contexto casi
+lleno —leer 100k tokens a ~2000 tok/s son más de 50 s— la espera volvería a acercarse a 60. La carga no es la
+misma que la de U5, así que la mejora no es atribuible entera a la cola.
+
+### 6.2 Condiciones para poner el Ejecutor en producción (derivadas de 6.1)
+
+No se cumplen hoy, y ninguna se cambió en producción: **sin Ejecutor en producción, pagarlas no compra nada**.
+
+> **CORREGIDO 2026-09-17 (Mr. Hyde):** el punto 1 nombra mal al tercer consumidor — el memory worker NO usa
+> `jax_local`, sólo `bge-m3`; el tercer consumidor real de `jax_local` es `facet_canary` (junto a la Mesa y el
+> Ejecutor). El punto 4 cablea en el lugar equivocado: el carril va en `api/chat.py` de jax-platform. Ver §6.3.
+> **Estado en producción 2026-09-17:** 1 hecho (`unificar_contexto_mesa.sh`, Mesa en 131072); 2 hecho (proxy
+> `jax-ejecutor-proxy` con tope y modelo fijo); 4 hecho (carriles en `/var/lib/jax-carril`, grupo `jax-carril`, sin
+> `axioma`). Ver §6.4.
+
+1. **Contexto unificado en 131072 para TODO consumidor de `jax_local`**, o las recargas vuelven. Incluye un
+   **tercer consumidor** hallado al medir: `jax-memory-worker.timer` (cada 20 min, destila con `jax_local` y
+   embebe con `bge-m3`). No está en ningún carril.
+2. **Tope del proxy ≥ 60 s.** Con menos de ~45 s, las dos peticiones paralelas de Claude Code hacen fallar
+   misiones sanas.
+3. **Medir antes lo que no se midió:** recarga con los pesos fríos (tras reinicio); lectura de prompts **largos**
+   a 131072; V3 con una misión **larga** o contexto casi lleno; y si `bge-m3` entra en la GPU junto al modelo a
+   131072 (+2 GB).
+4. **Cablear `carril_mesa_async`** en `motor_registry` y Jacobs, y decidir qué carril toma el memory worker.
+
+### 6.3 SP3 · compartir la GPU sin recargas ni esperas largas (2026-09-17, Mr. Hyde)
+
+Mediciones de SP3 (crudos en `~/ejecutor-producto/sp3-mediciones/`) y **correcciones a §6.2**: el memory
+worker NO usa `jax_local` (sólo embebe con `bge-m3`); la Mesa llama a Ollama directo desde
+`jax-platform/backend/api/chat.py` (no por LAS MANOS); hay un cuarto consumidor, `facet_canary`, que entra
+por el mismo `_call_ollama`. Unificar en 131072 le cuesta a la Mesa −2 % de lectura; `bge-m3` entra al lado.
+
+**Qué quedó en ramas (sin desplegar):**
+
+1. **Carril de la Mesa** (jax-platform): `_call_ollama` toma `carril_mesa_async` (espejo verbatim de
+   `jax/ejecutor/prioridad.py`, familias `prioridad` y `motivo` de `check_mirror_sync.py`). Cubre chat y
+   sonda. Sin `JAX_PROXY_CARRIL_RAIZ` no hay llamada ni arranque. Locks abiertos de sólo lectura.
+2. **Proxy** (jax): fija el modelo (`JAX_PROXY_CARRIL_MODELO`; otro → 403 sin tocar Ollama), fija el tope
+   de salida (`JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS`; más → 403) y sólo deja pasar `HEAD /api/hello` y
+   `POST /v1/messages` (medido: lo único que manda el arnés 2.1.273). Un error a un HEAD sale sin cuerpo.
+3. **Tope de contexto** en `ops/ejecutor/sp3_entorno.conf`, con la cuenta de abajo rehecha por
+   `tests/test_ejecutor_sp3_config.py`.
+4. **`ops/ejecutor/unificar_contexto_mesa.sh`**: respaldo de `facet_binding`/`model` con restauración
+   PROBADA en un MariaDB descartable (hecho 2026-09-17 05:29, checksums iguales; control negativo con un
+   dump alterado: detecta), derivado `num_ctx 131072`, sync, contrato, rebind por el PUT aprobado,
+   verificación (sonda por rebind `ok`, `api/ps` con el derivado a 131072 y sin el base a otro contexto) y
+   reversión automática al base si algo falla. `--revertir DIR` y `--restaurar-dump DIR` (último recurso).
+
+**La cuenta del tope.** Una petición en curso no se interrumpe: la Mesa espera, en el peor caso, la lectura
+entera de la entrada del Ejecutor (sin caché: el turno de la Mesa pisa el KV del único slot) más su salida.
+Umbral V3: 60 s; objetivo con margen: **≤ 48 s**.
+
+- Lectura (peor medido por tamaño, a 131072): 3.818 tok 1,92 s · 15.167 7,95 · 26.361 15,59 · 59.886 48,01
+  · 93.915 95,40. La velocidad por token cae con el tamaño → la curva es convexa → la cuerda entre dos
+  puntos medidos es cota SUPERIOR. Sin extrapolar.
+- Generación: la más lenta medida a 131072, **62,57 tok/s**.
+- Salida máxima **1024** tokens → 16,4 s. Quedan ~31,6 s para leer → **entrada máxima 41.000** tokens
+  (cuerda 26.361–59.886: 29,8 s). Total **46,1 s ≤ 48**.
+- Entrada = ventana de auto-compactación + un salto de herramienta. Salto = máx(30.000 caracteres de Bash /
+  3 caracteres por token, 8.000 tokens de Read) = 10.000 → **ventana 31.000**.
+
+**Lo que esta cuenta NO garantiza, dicho:**
+
+- La **entrada** la acota el arnés (auto-compact, límites de Bash y Read), no el proxy: el proxy no cuenta
+  tokens. Nombres de variables verificados en el binario de 2.1.273; su semántica exacta (umbral real de
+  compactación, varias herramientas en paralelo en un turno) NO verificada ejecutándola. El salto supone
+  ≥ 3 caracteres por token en salidas de Bash: **supuesto no medido**.
+- 31.000 de ventana con un arranque de ~17k tokens deja ~14k de trabajo. Es lo que da la física con esta GPU.
+- 1024 de salida puede cortar turnos largos (Fase 0: media por turno p95 729, máx 1748 tokens). El proxy
+  lo hace visible (403), no lo esconde.
+- **Alternativa mejor, sin medir:** que el proxy CORTE la petición del Ejecutor en curso cuando la Mesa
+  espera (preempción). Haría irrelevante la salida y relajaría la entrada, pero depende de que Ollama deje
+  de leer el prompt al cerrarse la conexión: se mide con G1, no se supone.
+
+**Orden de despliegue** (reservado a un GO; nada de esto se ejecutó salvo `--probar-respaldo`):
+jax-platform primero (el job `mirror-sync` de jax clona su master) → agregar `sp3_entorno.conf` a
+`/etc/jax/.env` con respaldo → reiniciar jax-platform (con `ActiveEnterTimestamp` vs commits) → jax →
+reiniciar `jax-ejecutor-proxy` (sin las dos variables nuevas NO arranca) → `instalar_carril_comun.sh` →
+`unificar_contexto_mesa.sh --aplicar` con cero uso real.
+
 ## 7. Lo que esta fase NO hace (YAGNI, explícito)
 
 - **No elige cerebro.** Se vuelve a medir con las capas puestas, después.
@@ -389,3 +494,17 @@ después. C5 conserva el resto de su alcance (salirse de misión, prohibidos) y 
    el valor convertido sí es citable—, **no** aflojar el verificador.
 4. **Los hechos inyectados caducan.** Un hecho de hace una hora presentado como actual es una
    mentira nueva. Por eso el TTL, y por eso cada hecho lleva su hora a la vista.
+
+### 6.4 Estado en producción — 2026-09-17 (Mr. Hyde, verificado en vivo)
+
+- **Contratos C1–C6 y arranque condicionado desplegados en hall9000.** C1: 21 reglas (incluye 7 contra
+  envoltorios: 15/15 bloqueados, 10/10 legítimos pasan). Arranque acotado a las máquinas de la misión.
+- **Blanco:** VM desechable `ejecutor-prueba` (192.168.122.50:58291, sin datos de clientes, C4/C6 remotos
+  instalados). atemai, prod y bridge siguen **no elegibles** (datos de clientes, compuerta de C5 cerrada, sin
+  C4/C6 remotos): habilitarlos es decisión de Fernando.
+- **SP2 (vía de producto):** jax-platform `/api/ejecutor/*` (superadmin) + modo «Ejecutor» en la UI, desplegado
+  09:53 (`5a0832d`, frontend `index-W1A2HA8K.js`). Misión real desde la API de producción: con atemai → 403
+  `ejecutor_maquina_no_elegible`; contra la VM, turno 1 respaldó el kernel y **descartó** la memoria (citó un
+  token, la línea real era la fila de `free`); turno 2 retomado respaldó las dos con línea literal;
+  `registro_cuadra`, `cadena_ok`, auditor legible, sin pausa. Carga de la API: 25 VUs p95 25 ms.
+

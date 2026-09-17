@@ -10,7 +10,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # T2 (2026-08-21, diagnóstico pipeline 19ad2c42-cdf): single source de qué
@@ -45,18 +45,22 @@ class StepStatus(str, Enum):
     blocked_human_gate  = "blocked_human_gate"
 
 
-VALID_FACETS = frozenset({
-    "hipatia", "jekyll", "thot", "ada", "kimi", "hyde", "jax_local",
-})
-
 # `invoked_by` es un ROL de quien pide, no el nombre de una persona (tanda A,
 # 2026-09-14, decisión de Fernando). "plataforma" = pedido de jax-platform en
 # nombre de un usuario autenticado; QUIÉN es viaja en user_id/tenant_id. Las
 # filas viejas de jacobs_pipelines con "Fernando" quedan como están: historia.
 INVOKER_PLATAFORMA = "plataforma"
-VALID_INVOKERS = frozenset({INVOKER_PLATAFORMA, "jax_local", "ada"})
+# Ada solo crea sub-pipelines: presenta un subpipeline_token emitido por Jacobs
+# para un padre y un paso de Ada en ejecución (jacobs/subpipelines.py).
+INVOKER_ADA = "ada"
+VALID_INVOKERS = frozenset({INVOKER_PLATAFORMA, "jax_local", INVOKER_ADA})
 
 VALID_MODES = frozenset({"dry_run", "supervised", "autonomous"})
+
+# Tope duro de steps por pipeline (E-13, 2026-09-16). Vive acá y no en
+# policy.py porque policy importa models: al revés sería un import circular.
+# policy.py, routes.py, plan.py y el validador de abajo lo importan de acá.
+MAX_STEPS_PER_PIPELINE = 20
 
 
 class Step(BaseModel):
@@ -94,6 +98,10 @@ class Pipeline(BaseModel):
     # mismo significado que "owner file ausente" antes, pero sin cruzar de
     # repo ni depender de que ambos servicios corran en el mismo host.
     owner_ack_at:       float | None = None
+    # Frente F (2026-09-16): un hijo de Ada guarda de quién es hijo y a qué
+    # profundidad. Los dos salen de la fila del token, nunca del pedido.
+    parent_pipeline_id: str | None = None
+    depth:              int = 0
     mode:               str
     status:             PipelineStatus = PipelineStatus.pending
     plan:               list[Step] = Field(default_factory=list)
@@ -104,7 +112,7 @@ class Pipeline(BaseModel):
     # del ejecutor es condicional a su época y a status='running': una corrida
     # superada (cancelada, vencida, continuada por otro) no escribe nada.
     run_epoch:          int = 0
-    max_steps:          int = 20
+    max_steps:          int = MAX_STEPS_PER_PIPELINE
     context:            dict[str, Any] = Field(default_factory=dict)
     created_at:         float = 0.0
     updated_at:         float = 0.0
@@ -123,34 +131,65 @@ def validar_costo_max_aceptado(costo: Decimal | None) -> None:
 
 
 class PipelineCreateRequest(BaseModel):
-    name:             str
-    objective:        str
-    invoked_by:       str
-    user_id:          str | None = None
-    tenant_id:        str | None = None
-    mode:             str
-    max_steps:        int = 20
-    steps:            list[StepSpec] | None = None
-    subpipeline_token: str | None = None
+    name:               str
+    objective:          str
+    invoked_by:         str
+    user_id:            str | None = None
+    tenant_id:          str | None = None
+    mode:               str
+    max_steps:          int = MAX_STEPS_PER_PIPELINE
+    steps:              list[StepSpec] | None = None
+    # Frente F: solo para invoked_by="ada". La profundidad NO es un campo: un
+    # `depth` o `subpipeline_depth` en el JSON se ignora (nadie lo lee).
+    subpipeline_token:  str | None = Field(default=None, min_length=1, max_length=128)
+    parent_pipeline_id: str | None = Field(default=None, min_length=1, max_length=36)
     # Spec 2026-09-17 §6.1: el costo que el humano confirmó en la Mesa. Si el
     # pre-vuelo interno da MÁS, Jacobs responde 409 costo_supera_lo_aceptado
     # sin crear: la condición la hace cumplir quien gasta.
     costo_max_aceptado_usd: Decimal | None = None
 
-    @model_validator(mode="after")
-    def validate_fields(self) -> "PipelineCreateRequest":
-        if self.invoked_by not in VALID_INVOKERS:
+    # Validadores POR CAMPO, no de modelo (revisión final del frente F,
+    # 2026-09-16, hallazgo I-1): un error de un `model_validator` lleva en
+    # `input` el cuerpo ENTERO, y FastAPI lo devuelve en el 422 -- con el
+    # `subpipeline_token` en claro. Uno por campo solo eco-ea ese campo. La
+    # forma por rol (token/padre según invoked_by) NO vive acá: la decide
+    # policy.validate_create, que responde 422 con `policy.reason`, sin el
+    # token. Un campo requerido faltante sigue trayendo el cuerpo en `input`
+    # desde Pydantic: en LAS MANOS lo tapa el handler global de
+    # RequestValidationError (las_manos/server.py), que devuelve solo nombres
+    # de campos.
+    @field_validator("invoked_by")
+    @classmethod
+    def _invoked_by_valido(cls, valor: str) -> str:
+        if valor not in VALID_INVOKERS:
+            raise ValueError(f"invoked_by '{valor}' inválido. Aceptados: {sorted(VALID_INVOKERS)}")
+        return valor
+
+    @field_validator("mode")
+    @classmethod
+    def _mode_valido(cls, valor: str) -> str:
+        if valor not in VALID_MODES:
+            raise ValueError(f"mode '{valor}' inválido. Aceptados: {sorted(VALID_MODES)}")
+        return valor
+
+    @field_validator("max_steps")
+    @classmethod
+    def _max_steps_valido(cls, valor: int) -> int:
+        if valor < 1 or valor > MAX_STEPS_PER_PIPELINE:
             raise ValueError(
-                f"invoked_by '{self.invoked_by}' inválido. Aceptados: {sorted(VALID_INVOKERS)}"
+                f"max_steps debe estar entre 1 y {MAX_STEPS_PER_PIPELINE} (límite duro v0.1)"
             )
-        if self.mode not in VALID_MODES:
-            raise ValueError(
-                f"mode '{self.mode}' inválido. Aceptados: {sorted(VALID_MODES)}"
-            )
-        if self.max_steps < 1 or self.max_steps > 20:
-            raise ValueError("max_steps debe estar entre 1 y 20 (límite duro v0.1)")
-        validar_costo_max_aceptado(self.costo_max_aceptado_usd)
-        return self
+        return valor
+
+    # Spec 2026-09-17 §6.1. Por campo y no en un model_validator, por la misma
+    # razón del bloque de arriba (hallazgo I-1 del frente F): un error de
+    # model_validator devuelve el cuerpo entero en el 422, con el
+    # subpipeline_token en claro.
+    @field_validator("costo_max_aceptado_usd")
+    @classmethod
+    def _costo_max_aceptado_valido(cls, valor: Decimal | None) -> Decimal | None:
+        validar_costo_max_aceptado(valor)
+        return valor
 
 
 class StepSpec(BaseModel):
@@ -172,14 +211,6 @@ class StepSpec(BaseModel):
     timeout_seconds: int | None = None
     skip_on_fail:    bool = False
     depends_on:      list[int] = Field(default_factory=list)
-
-
-class StepResult(BaseModel):
-    step_id:    str
-    status:     StepStatus
-    output_ref: str | None = None
-    error:      str | None = None
-    duration_s: float | None = None
 
 
 # Evitar forward-reference con StepSpec antes de Step

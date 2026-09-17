@@ -12,9 +12,10 @@ from jax.ejecutor.cita import (
 )
 
 MAQUINA = "hall9000"
+PROPOSITO = "tiempo encendido de hall9000"
 CAPTURAS = [Captura(maquina=MAQUINA, comando="uptime -p", salida="up   38 minutes\n", stderr="", truncada=False)]
-BUENA = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 38 minutes", dato="38 minutes")
-MALA = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 23 hours", dato="23 hours")
+BUENA = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 38 minutes", dato="38 minutes", proposito=PROPOSITO)
+MALA = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 23 hours", dato="23 hours", proposito=PROPOSITO)
 
 
 def test_solo_salen_las_afirmaciones_respaldadas():
@@ -24,7 +25,7 @@ def test_solo_salen_las_afirmaciones_respaldadas():
 
 
 def test_cada_descartada_dice_por_que():
-    fuera = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 38 minutes", dato="un día")
+    fuera = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 38 minutes", dato="un día", proposito=PROPOSITO)
     e = transporte.entregar([MALA, fuera], CAPTURAS)
     assert [(d.estado, d.motivo) for d in e.descartadas] == [
         (SIN_RESPALDO, cita.Motivo(cita.LINEA_NO_ESTA, (("comando", "uptime -p"), ("maquina", MAQUINA)))),
@@ -93,7 +94,7 @@ def test_v4_si_el_verificador_falla_NO_sale_ninguna_afirmacion(monkeypatch):
         return real(afirmacion, capturas)
 
     monkeypatch.setattr(transporte.cita, "verificar", explota_en_la_segunda)
-    otra_buena = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 38 minutes", dato="38")
+    otra_buena = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 38 minutes", dato="38", proposito=PROPOSITO)
     e = transporte.entregar([BUENA, otra_buena], CAPTURAS)
     assert real(BUENA, CAPTURAS).estado == RESPALDADA  # la primera SÍ estaba respaldada
     assert e.respaldadas == ()

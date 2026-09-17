@@ -40,7 +40,7 @@ def candado_propio(monkeypatch):
 
 
 async def _uno(sql, params=()):
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
@@ -50,7 +50,7 @@ async def _uno(sql, params=()):
 
 
 async def _borrar(pids):
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             for pid in pids:
@@ -167,7 +167,7 @@ def test_explain_de_las_consultas_del_candado():
     idx_pipelines_status (LAS CUATRO #1)."""
     async def cuerpo():
         await store.init_tables()
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 salida = {}

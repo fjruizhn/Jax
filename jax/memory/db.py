@@ -30,6 +30,8 @@ import httpx
 
 from .embedding_config import CONFIG as EMBED, zero_vector_text
 from jax.core.db_connect_config import db_connect_timeout_seconds
+from jax.core.config_entorno import url_requerida
+from jax.core.cliente_http_compartido import crear_cliente_http
 from .migrations import ensure_schema
 
 logger = logging.getLogger("jax.memory")
@@ -332,6 +334,7 @@ class MemoryDB:
         # con el garbage collector ANTES de que termine, perdiendo el mensaje
         # en silencio. Es un gotcha conocido de asyncio.create_task().
         self._pending_tasks: set[asyncio.Task] = set()
+        self._http: Optional[httpx.AsyncClient] = None  # E-24: cliente propio, cerrado en close()
 
     # --------------------------------------------------------
     # Ciclo de vida del pool
@@ -437,6 +440,9 @@ class MemoryDB:
                 await asyncio.wait(self._pending_tasks, timeout=3.0)
             except Exception as e:  # fail-soft: es el shutdown; las tareas en vuelo se perderian igual al cerrar el pool tres lineas mas abajo, y no cerrar el pool por esto dejaria conexiones colgadas
                 logger.error(f"Error esperando tareas pendientes: {e}")
+        if self._http is not None:
+            await self._http.aclose()
+            self._http = None
         if self.pool:
             self.pool.close()
             await self.pool.wait_closed()
@@ -479,24 +485,30 @@ class MemoryDB:
         Devuelve lista de EMBED.dim floats, o None si falla (JAX sigue sin embeddings).
         Una dimension distinta de la configurada se descarta: escribirla en la
         columna fallaria, o peor, compararia vectores de modelos distintos."""
+        # E-21: la URL sale del entorno y se lee FUERA del try. Una variable que
+        # falta es un error de configuración visible, no un embedding que
+        # "falló" y deja la fila en ceros sin que nadie lo sepa.
+        url = url_requerida("JAX_OLLAMA_URL") + "/api/embed"
         try:
             # Tope de contexto de los modelos; truncamos para evitar 500.
-            texto = text[:4000] if len(text) > 4000 else text
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(
-                    "http://localhost:11434/api/embed",
-                    json={"model": EMBED.model, "input": texto},
-                )
-                resp.raise_for_status()
-                embeddings = resp.json().get("embeddings") or []
-                embedding = embeddings[0] if embeddings else None
-                if isinstance(embedding, list) and len(embedding) == EMBED.dim:
-                    return embedding
-                logger.warning(
-                    f"Embedding con dimension incorrecta: "
-                    f"{len(embedding) if embedding else None}"
-                )
-                return None
+            texto = text[:4000]
+            if self._http is None or self._http.is_closed:
+                self._http = crear_cliente_http()
+            resp = await self._http.post(
+                url,
+                json={"model": EMBED.model, "input": texto},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            embeddings = resp.json().get("embeddings") or []
+            embedding = embeddings[0] if embeddings else None
+            if isinstance(embedding, list) and len(embedding) == EMBED.dim:
+                return embedding
+            logger.warning(
+                f"Embedding con dimension incorrecta: "
+                f"{len(embedding) if embedding else None}"
+            )
+            return None
         except Exception as e:  # fail-soft: el fallo se reporta como return None, los callers lo chequean antes de usarlo, y la fila que queda en vector cero la reintenta backfill_zero_embeddings() en la pasada siguiente del worker
             logger.error(f"get_embedding fallo: {e}")
             return None

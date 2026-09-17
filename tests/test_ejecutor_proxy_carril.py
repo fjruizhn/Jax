@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from jax.ejecutor.cita import Motivo
+from jax.ejecutor.contratos.pausa import latir
 from jax.ejecutor.prioridad import carril_mesa
 from jax.ejecutor.proxy_carril import (
     CONFIG_FALTA, CONFIG_INVALIDA, ESPERA_AGOTADA, UPSTREAM_INALCANZABLE, Config,
@@ -126,10 +127,20 @@ class Upstream:
             writer.close()
 
 
+#: El único modelo que la jaula puede pedir en estos tests, y su tope de salida.
+MODELO_PERMITIDO = "modelo-permitido"
+MAX_SALIDA_TOKENS = 1024
+
+
 class Proxy:
     def __init__(self, upstream_url, raiz, tope_s):
+        # C5: sin pausa del Ejecutor y con un vigía que acaba de latir (lo prueban
+        # test_ejecutor_proxy_pausa.py); estos tests miran el carril y el registro.
         self.cfg = Config(upstream=upstream_url, raiz=raiz, tope_s=tope_s,
-                          host="127.0.0.1", puerto=0)
+                          host="127.0.0.1", puerto=0, registro=raiz / "registro.jsonl",
+                          pausa=raiz / "PAUSA", latido=raiz / "latido", latido_max_s=3600,
+                          modelo=MODELO_PERMITIDO, max_salida_tokens=MAX_SALIDA_TOKENS)
+        latir(self.cfg.latido)
 
     async def __aenter__(self):
         self.server = await arrancar(self.cfg)
@@ -148,7 +159,8 @@ def _correr(coro, tope=20):
 
 
 _CABECERAS = {"authorization": "Bearer llave-secreta-XYZ", "x-api-key": "llave-secreta-XYZ"}
-_CUERPO = b'{"messages":[{"role":"user","content":"dato-de-cliente-ABC"}]}'
+_CUERPO = (b'{"model":"modelo-permitido","max_tokens":1024,'
+           b'"messages":[{"role":"user","content":"dato-de-cliente-ABC"}]}')
 
 
 # --------------------------------------------------------------------------
@@ -180,6 +192,32 @@ def test_una_peticion_pasa_y_el_stream_llega_por_partes(tmp_path):
     assert n == 1
     assert (metodo, destino, cuerpo) == (b"POST", b"/v1/messages?beta=true", _CUERPO)
     assert cabeceras[b"authorization"] == b"Bearer llave-secreta-XYZ"
+
+
+def test_el_reenvio_no_tiene_tope_de_lectura(tmp_path, monkeypatch):
+    """El primer byte de Ollama puede tardar lo que tarde su cola: el reenvío
+    va sin tope de lectura (connect 10 s). Desde E-24 el proxy usa el cliente de
+    jax/core/cliente_http_compartido.py, cuyo default es 5 s: el timeout lo pone
+    CADA petición. Sin eso, un primer byte de más de 5 s sería un 502."""
+    vistos = []
+    send_real = httpx.AsyncClient.send
+
+    async def send_espia(self, request, **kw):
+        vistos.append((request.url.port, request.extensions.get("timeout")))
+        return await send_real(self, request, **kw)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send_espia)
+
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px:
+            async with httpx.AsyncClient(timeout=10) as cli:
+                r = await cli.post(px.url + "/v1/messages", content=_CUERPO)
+            return r.status_code, int(up.url.rsplit(":", 1)[1])
+
+    estado, puerto_up = _correr(escenario())
+    assert estado == 200
+    al_upstream = [t for puerto, t in vistos if puerto == puerto_up]
+    assert al_upstream == [{"connect": 10.0, "read": None, "write": None, "pool": None}]
 
 
 def test_con_la_mesa_en_el_carril_la_peticion_espera_y_entra_cuando_suelta(tmp_path):
@@ -361,6 +399,12 @@ _ENTORNO = {
     "JAX_PROXY_CARRIL_RAIZ": "/srv/ejemplo/locks",
     "JAX_PROXY_CARRIL_TOPE_S": "120",
     "JAX_PROXY_CARRIL_PUERTO": "8199",
+    "JAX_EJECUTOR_REGISTRO": "/var/log/jax-ejecutor/registro.jsonl",
+    "JAX_EJECUTOR_PAUSA": "/etc/jax/interruptor/EJECUTOR_PAUSA",
+    "JAX_EJECUTOR_VIGIA_LATIDO": "/var/lib/jax-ejecutor/vigia.latido",
+    "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30",
+    "JAX_PROXY_CARRIL_MODELO": "qwen3.6-mesa-131k",
+    "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
 }
 
 
@@ -369,6 +413,10 @@ def test_config_sale_del_entorno_sin_upstream_hardcodeado():
     assert cfg.upstream == "http://ollama.invalid:9"
     assert (str(cfg.raiz), cfg.tope_s, cfg.puerto) == ("/srv/ejemplo/locks", 120.0, 8199)
     assert cfg.host == "127.0.0.1", "sin HOST, sólo loopback: el proxy no autentica"
+    assert str(cfg.registro) == "/var/log/jax-ejecutor/registro.jsonl"
+    assert (str(cfg.pausa), str(cfg.latido), cfg.latido_max_s) == (
+        "/etc/jax/interruptor/EJECUTOR_PAUSA", "/var/lib/jax-ejecutor/vigia.latido", 30.0)
+    assert (cfg.modelo, cfg.max_salida_tokens) == ("qwen3.6-mesa-131k", 1024)
 
 
 @pytest.mark.parametrize("variable", sorted(_ENTORNO))
@@ -382,6 +430,12 @@ def test_config_sin_una_obligatoria_falla_cerrado(variable):
 @pytest.mark.parametrize("variable,valor", [
     ("JAX_PROXY_CARRIL_TOPE_S", "mucho"), ("JAX_PROXY_CARRIL_TOPE_S", "-1"),
     ("JAX_PROXY_CARRIL_PUERTO", "8199.5"), ("JAX_PROXY_CARRIL_UPSTREAM", "ollama:11434"),
+    ("JAX_EJECUTOR_REGISTRO", "relativa/registro.jsonl"),
+    ("JAX_EJECUTOR_PAUSA", "relativa/PAUSA"), ("JAX_EJECUTOR_VIGIA_LATIDO", "relativa/latido"),
+    ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "0"), ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "nan"),
+    ("JAX_EJECUTOR_VIGIA_LATIDO_MAX_S", "inf"),
+    ("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS", "0"), ("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS", "1024.5"),
+    ("JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS", "-5"),
 ])
 def test_config_invalida_falla_cerrado(variable, valor):
     with pytest.raises(ConfigInvalida) as err:

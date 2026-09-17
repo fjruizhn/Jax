@@ -54,7 +54,7 @@ def test_una_conexion_que_el_servidor_mato_no_envenena_el_pedido_siguiente():
     async def cuerpo():
         async with store.conexion_del_pool() as conn:
             muerta = await _id(conn)
-        verdugo = await store.get_conn()
+        verdugo = await store.conexion_dedicada()
         try:
             async with verdugo.cursor() as cur:
                 await cur.execute("KILL CONNECTION %s", (muerta,))

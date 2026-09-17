@@ -70,13 +70,10 @@ REPO_ROOTS = _repo_roots()
 # motivo, igual que en tests/test_aiomysql_connect_timeout_tripwire.py: un
 # archivo ilegible que no esté aquí ES una violación, y hay un test que lo
 # comprueba en los dos sentidos.
-_NO_PARSEA = {
-    "_director_patch/routes_block.py": (
-        "fragmento de patch para pegar a mano en routes.py — líneas de código "
-        "sueltas e indentadas como un diff, no un módulo (ver "
-        "test_aiomysql_connect_timeout_tripwire.py, que lo declara igual)."
-    ),
-}
+# Vacía desde el 2026-09-16 (E-01): el único no-módulo real del árbol,
+# _director_patch/routes_block.py, se retiró. El mecanismo se conserva y se
+# ejercita con un .py roto declarado a propósito dentro del test.
+_NO_PARSEA: dict[str, str] = {}
 
 
 def _declarado_no_parsea(path: Path) -> bool:
@@ -333,18 +330,45 @@ def test_los_roots_ausentes_se_declaran_en_vez_de_desaparecer():
               f"(definir JAX_PLATFORM_REPO_ROOT para incluirlo)")
 
 
-def test_un_archivo_declarado_en_NO_PARSEA_sigue_sin_parsear():
-    """Control de la excepcion: si el archivo ya parsea o desaparecio, la
-    entrada sobra y hay que retirarla —— si no, la excepcion tapa un archivo
-    que si deberia revisarse."""
-    for rel in _NO_PARSEA:
-        ruta = _THIS_REPO_ROOT / rel
-        assert ruta.exists(), f"{rel} ya no existe: retirar la entrada de _NO_PARSEA"
+def _entradas_que_sobran(no_parsea: dict[str, str], raiz: Path) -> list[str]:
+    """Entradas de _NO_PARSEA que ya no se justifican: el archivo no existe o
+    ya parsea. Separado del test para ejercitarlo con archivos de mentira: con
+    la tabla vacía (E-01, 2026-09-16) un bucle sobre la tabla real pasa sin
+    comprobar nada."""
+    sobran = []
+    for rel in no_parsea:
+        ruta = raiz / rel
+        if not ruta.exists():
+            sobran.append(f"{rel} ya no existe: retirar la entrada de _NO_PARSEA")
+            continue
         try:
             ast.parse(ruta.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError):
             continue
-        raise AssertionError(f"{rel} ya parsea: retirar la entrada de _NO_PARSEA")
+        sobran.append(f"{rel} ya parsea: retirar la entrada de _NO_PARSEA")
+    return sobran
+
+
+def test_ninguna_entrada_de_NO_PARSEA_sobra():
+    assert _entradas_que_sobran(_NO_PARSEA, _THIS_REPO_ROOT) == []
+
+
+def test_el_control_de_entradas_sobrantes_se_pone_rojo(tmp_path):
+    (tmp_path / "roto.py").write_text("def f(:\n    pass\n")
+    (tmp_path / "sano.py").write_text("x = 1\n")
+    tabla = {"roto.py": "roto", "sano.py": "ya parsea", "fantasma.py": "no existe"}
+    assert _entradas_que_sobran(tabla, tmp_path) == [
+        "sano.py ya parsea: retirar la entrada de _NO_PARSEA",
+        "fantasma.py ya no existe: retirar la entrada de _NO_PARSEA",
+    ]
+
+
+def test_un_archivo_roto_declarado_no_es_violacion(tmp_path, monkeypatch):
+    roto = tmp_path / "roto.py"
+    roto.write_text("def f(:\n    pass\n")
+    monkeypatch.setattr(sys.modules[__name__], "REPO_ROOTS", [tmp_path])
+    monkeypatch.setitem(_NO_PARSEA, "roto.py", "roto a propósito para este test")
+    assert find_fail_open_excepts(files=[roto]) == []
 
 
 def test_un_archivo_roto_no_declarado_si_es_violacion(tmp_path):

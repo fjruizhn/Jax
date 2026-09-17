@@ -22,7 +22,8 @@ el texto» y «todo número del texto está en la línea») y sus veredictos
 
 Qué se exige, en orden:
 1. cita no vacía; 2. máquina no vacía; 3. dato no vacío (los tres bypass por
-   vacío hallados al implementar).
+   vacío hallados al implementar); 3 bis. propósito no vacío (C5, plan 4 de SP1:
+   el auditor juzga si la línea contesta la pregunta que dice contestar).
 4. `dato` literal dentro de la `linea` citada, SIN CORTAR UN TOKEN
    → si no: `dato_fuera_de_linea`. Ver `_esta_entero`.
 5. máquina y comando coinciden con una captura; el truncado se mira ANTES que
@@ -40,6 +41,7 @@ verdadera. Hallado 2026-09-16 al quitar la prosa.
 from __future__ import annotations
 
 import re
+import shlex
 from dataclasses import dataclass
 
 RESPALDADA = "respaldada"
@@ -54,6 +56,7 @@ DATO_FUERA_DE_LINEA = "dato_fuera_de_linea"
 LINEA_VACIA = "linea_vacia"
 MAQUINA_VACIA = "maquina_vacia"
 DATO_VACIO = "dato_vacio"
+PROPOSITO_VACIO = "proposito_vacio"
 DATO_NO_ENTERO = "dato_no_entero"
 LINEA_NO_ESTA = "linea_no_esta"
 COMANDO_NO_CORRIDO = "comando_no_corrido"
@@ -88,6 +91,13 @@ class Afirmacion:
     comando: str
     linea: str
     dato: str
+    # Qué pregunta de la misión dice responder `dato` (plan 4 de SP1, C5). Lo
+    # escribe el modelo y NUNCA se presenta a la persona (no está en
+    # `CAMPOS_PRESENTACION`): es lo que el auditor de C5 juzga. Una cita
+    # verdadera no prueba que la línea conteste la pregunta («el 8188 es Docker
+    # multi-hilo» citando la línea real del puerto); sin el propósito, nadie
+    # puede decir que no la contesta. Obligatorio: sin él, no sale.
+    proposito: str
 
 
 @dataclass(frozen=True)
@@ -139,6 +149,23 @@ def _esta_entero(dato: str, linea: str) -> bool:
     return False
 
 
+def comando_canonico(comando: str) -> str:
+    """Los mismos tokens, separados por un espacio. `ssh h "df -h /"` y `ssh h df -h /` corren lo
+    mismo (ssh pega sus argumentos con espacios) y el modelo escribe una u otra al citar: la real
+    de prod, 2026-09-17, salió `comando_no_corrido` con el dato correcto. Si no se puede partir
+    (comilla sin cerrar), no se adivina: se devuelve tal cual y se compara carácter por carácter."""
+    try:
+        return " ".join(shlex.split(comando))
+    except ValueError:
+        return comando
+
+
+def mismo_comando(corrido: str, citado: str) -> bool:
+    """El comando sólo ELIGE la captura; la máquina la decidió el gancho sobre el comando CORRIDO
+    y la línea se busca literal en esa salida. Por eso alcanza con que sean el mismo comando."""
+    return corrido == citado or comando_canonico(corrido) == comando_canonico(citado)
+
+
 def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
     """¿El dato está entero en la línea citada, y la línea está literal en la
     salida de ese comando, en esa máquina?
@@ -164,12 +191,16 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
     dato = normalizar(afirmacion.dato)
     if not dato:
         return Veredicto(SIN_RESPALDO, Motivo(DATO_VACIO))
+    # Sin la pregunta que dice responder, C5 no la puede juzgar: no sale.
+    if not afirmacion.proposito.strip():
+        return Veredicto(SIN_RESPALDO, Motivo(PROPOSITO_VACIO))
     if not _esta_entero(dato, aguja):
         return Veredicto(DATO_FUERA_DE_LINEA, Motivo(DATO_NO_ENTERO, (("dato", dato),)))
     se_corrio = False
     alguna_truncada = False
     for captura in capturas:
-        if (captura.maquina, captura.comando) != (afirmacion.maquina, afirmacion.comando):
+        if (captura.maquina != afirmacion.maquina
+                or not mismo_comando(captura.comando, afirmacion.comando)):
             continue
         se_corrio = True
         # El truncado se mira ANTES que el contenido: si la salida vino

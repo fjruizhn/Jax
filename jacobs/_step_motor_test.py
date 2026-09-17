@@ -118,7 +118,7 @@ class StepMotorPersistenceTest(unittest.IsolatedAsyncioTestCase):
         una fila en jacobs_steps de jax_memory_test para siempre (medido: 116
         pasos huérfanos con este patrón). Se borran los pids PROPIOS y se
         verifica que no quede ninguno."""
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 for pid in self.pids:

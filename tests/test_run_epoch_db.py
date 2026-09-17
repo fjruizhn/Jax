@@ -39,7 +39,7 @@ async def _crear(status=PipelineStatus.running, epoca=0):
 
 
 async def _borrar(pid):
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
@@ -50,7 +50,7 @@ async def _borrar(pid):
 
 
 async def _explain(sql, params):
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute("EXPLAIN " + sql, params)
@@ -63,7 +63,7 @@ async def _explain(sql, params):
 def test_init_tables_crea_run_epoch_con_default_cero():
     async def cuerpo():
         await store.init_tables()
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 await cur.execute(

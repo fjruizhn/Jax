@@ -1,0 +1,18 @@
+[Unit]
+Description=JAX · proxy con carril del Ejecutor (C3: registro intocable)
+After=network.target ollama.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=fruiz
+WorkingDirectory=/home/fruiz/jax
+EnvironmentFile=/etc/jax/.env
+Environment=PYTHONPATH=/home/fruiz/jax:/home/fruiz/jax/las_manos
+ExecStart=/home/fruiz/jax/.venv/bin/python -m jax.ejecutor.proxy_carril
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

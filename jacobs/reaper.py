@@ -57,8 +57,7 @@ import os
 import time
 from pathlib import Path
 
-import httpx
-
+from cliente_http_compartido import obtener_cliente_http
 from jacobs import store
 from jacobs.store import espera_de_turno_sin_plazo  # R38: sobrevive a los tests que reemplazan `store`
 from jacobs.facet_health import check_facet_health
@@ -100,11 +99,11 @@ async def send_telegram_alert(message: str) -> dict:
         logger.warning("Reaper: alerta suprimida, TELEGRAM_BOT_TOKEN/CHAT_ID no configurados")
         return {"ok": False, "message_id": None, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID no configurados"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data={"chat_id": chat_id, "text": message},
-            )
+        resp = await obtener_cliente_http().post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": message},
+            timeout=10.0,
+        )
         body = resp.json()
     except Exception as exc:  # fail-soft: red caída/timeout -- no debe tumbar el reaper
         logger.error("Reaper: fallo de red enviando alerta a Telegram", exc_info=True)
@@ -299,8 +298,7 @@ def _compute_reconciliation_gap(motor_jobs: list[dict], usage_job_ids: set) -> d
 async def _fetch_reconciled_job_ids(job_ids: list[str]) -> set:
     if not job_ids:
         return set()
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         placeholders = ",".join(["%s"] * len(job_ids))
         async with conn.cursor() as cur:
             await cur.execute(
@@ -309,8 +307,6 @@ async def _fetch_reconciled_job_ids(job_ids: list[str]) -> set:
                 tuple(job_ids),
             )
             return {row[0] for row in await cur.fetchall()}
-    finally:
-        conn.close()
 
 
 async def _fetch_http_direct_expected(since: float) -> dict[str, int]:
@@ -322,8 +318,7 @@ async def _fetch_http_direct_expected(since: float) -> dict[str, int]:
     Motor Registry esto NO puede confirmar qué dispatch puntual falta --
     solo cuántos se esperaban por facet. `ts` es epoch (DOUBLE), inmune
     a timezone -- comparar directo contra `since` (también epoch)."""
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         placeholders = ",".join(["%s"] * len(HTTP_FACETS))
         async with conn.cursor() as cur:
             await cur.execute(
@@ -338,8 +333,6 @@ async def _fetch_http_direct_expected(since: float) -> dict[str, int]:
                 (*HTTP_FACETS, since),
             )
             return {row[0]: row[1] for row in await cur.fetchall()}
-    finally:
-        conn.close()
 
 
 async def _fetch_http_direct_actual(since: float) -> dict[str, int]:
@@ -352,8 +345,7 @@ async def _fetch_http_direct_actual(since: float) -> dict[str, int]:
     (limpieza de axioma_usage, 2026-08-21) perdió 90/106 filas de un
     WHERE por string de fecha exactamente por este motivo, detectado
     solo porque se verificó el conteo real del resultado."""
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         placeholders = ",".join(["%s"] * len(HTTP_FACETS))
         async with conn.cursor() as cur:
             await cur.execute(
@@ -364,8 +356,6 @@ async def _fetch_http_direct_actual(since: float) -> dict[str, int]:
                 (*HTTP_FACETS, since),
             )
             return {row[0]: row[1] for row in await cur.fetchall()}
-    finally:
-        conn.close()
 
 
 def _compute_http_direct_gap(expected_by_facet: dict[str, int], actual_by_facet: dict[str, int]) -> dict:

@@ -193,9 +193,9 @@ FAMILIAS = (
         nombre="crypto_secrets",
         canonico=JAX_ROOT / "jax" / "core" / "crypto_secrets.py",
         espejos=(
-            # Tres archivos reales otra vez -- ninguno es symlink, medido el
-            # 2026-09-01. Misma forma que credential_resolver: dos copias
-            # dentro de jax y una en jax-platform.
+            # las_manos/crypto_secrets.py es SYMLINK a jax/core desde el
+            # 2026-09-16 (E-10): comparar ahí es un no-op, a propósito, como
+            # facet_resolver. Hasta ese día eran tres archivos reales.
             ("las_manos", JAX_ROOT / "las_manos" / "crypto_secrets.py"),
             ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "crypto_secrets.py"),
         ),
@@ -217,19 +217,19 @@ FAMILIAS = (
             "decrypt_secret",
             "decrypt_provider_keys_in_env",
         ),
-        nota="TRES archivos reales. jax-platform tiene ademas encrypt_secret y "
+        nota="Dos archivos reales (jax/core y jax-platform) + symlink en las_manos/ "
+             "desde 2026-09-16 (E-10). jax-platform tiene ademas encrypt_secret y "
              "decrypt_db_secret, excluidos por diseno (es el lado que cifra).",
     ),
     Familia(
         nombre="credential_resolver",
         canonico=JAX_ROOT / "jax" / "core" / "credential_resolver.py",
         espejos=(
-            # OJO -- aca la forma NO es la de facet_resolver, y esto se midio
-            # antes de escribirlo (2026-09-01): `las_manos/credential_resolver.py`
-            # NO es un symlink, es un TERCER ARCHIVO REAL. O sea que esta
-            # familia puede driftear DENTRO del propio repo jax, sin cruzar
-            # repos -- una copia mas suelta que la de facet_resolver, y hasta
-            # hoy nadie la comparaba con nada.
+            # las_manos/credential_resolver.py es SYMLINK a jax/core desde el
+            # 2026-09-16 (E-11). Hasta ese día era un TERCER archivo real que
+            # podía driftear dentro de jax. El test de no-fail-open escanea el
+            # symlink por las dos rutas (no deduplica por resolve()): inocuo,
+            # las dos muestran la misma marca.
             ("las_manos", JAX_ROOT / "las_manos" / "credential_resolver.py"),
             ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "credential_resolver.py"),
         ),
@@ -255,8 +255,9 @@ FAMILIAS = (
             "resolve_credential",
             "resolve_credential_instrumented",
         ),
-        nota="TRES archivos reales, no dos: las_manos/ tiene copia propia, no "
-             "symlink. Verificado 2026-09-01.",
+        nota="Dos archivos reales (jax/core y jax-platform) + symlink en las_manos/ "
+             "desde 2026-09-16 (E-11). El canónico de jax importa bare primero y cae "
+             "a jax.core; los ImportFrom no se comparan.",
     ),
     Familia(
         nombre="db_connect_config",
@@ -382,6 +383,39 @@ FAMILIAS = (
              "es la duena de la tabla y la unica con migraciones.",
     ),
     Familia(
+        nombre="interruptor",
+        canonico=JAX_ROOT / "jax" / "core" / "interruptor.py",
+        espejos=(
+            # Symlink a jax/core (frente B, 2026-09-16), como cola_uso: comparar
+            # hoy es un no-op y se incluye igual.
+            ("las_manos", JAX_ROOT / "las_manos" / "interruptor.py"),
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "interruptor.py"),
+        ),
+        # El que ESCRIBE el freno (la plataforma) y los que lo LEEN (LAS MANOS,
+        # Jacobs, el REPL) tienen que hablar del mismo archivo con la misma
+        # semantica: solo ENOENT es suelto. Un drift aca no se ve como error: se
+        # ve como un boton que dice "detenido" mientras las manos siguen.
+        # `InterruptorActivado`, `INTERVALO_DE_SONDEO` y `correr_con_interruptor`
+        # quedan afuera: son solo de jax (asyncio del REPL y de Jacobs).
+        # La ruta heredada (Task H, 2026-09-17, requisito del controlador
+        # principal): la constante, el estado del aviso, `pausa_presente` y
+        # `_heredada_activa` tambien son compartidos. Si la plataforma dejara de
+        # mirarla, reportaria "suelto" con LAS MANOS frenadas por la ruta vieja.
+        compartidos=(
+            "VARIABLE_RUTA",
+            "InterruptorSinConfigurar",
+            "ruta_del_interruptor",
+            "RUTA_HEREDADA",
+            "_heredada_avisada",
+            "pausa_presente",
+            "_heredada_activa",
+            "interruptor_activo",
+            "_sincronizar_directorio",
+            "escribir_pausa",
+            "borrar_pausa",
+        ),
+    ),
+    Familia(
         nombre="router_keywords",
         canonico=JAX_ROOT / "jax" / "core" / "router.py",
         espejos=(
@@ -409,6 +443,110 @@ FAMILIAS = (
         nota="Copia en jax-platform backend/api/chat.py (nombres alineados 2026-09-16). "
              "ORDEN DE MERGE: la plataforma primero -- contra un jax-platform con los "
              "nombres viejos (_KIMI_KW...) esta familia da 'falta' en los 12 simbolos.",
+    ),
+    Familia(
+        nombre="tope_pipelines",
+        canonico=JAX_ROOT / "jacobs" / "policy.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ajustes.py"),
+        ),
+        compartidos=("MAX_PARALLEL_PIPELINES",),
+        nota="Frente C (2026-09-16): el ajuste max_pipelines de la plataforma es "
+             "una cuota POR TENANT acotada por el candado GLOBAL de Jacobs (cuenta "
+             "todos los pending/running). Si este tope cambia en Jacobs y no en la "
+             "plataforma, Admin ofrece un valor que Jacobs rechaza con 422. Canonico: "
+             "jacobs/policy.py. ORDEN DE MERGE: la plataforma primero (este job "
+             "clona jax-platform master).",
+    ),
+    Familia(
+        nombre="config_entorno",
+        canonico=JAX_ROOT / "jax" / "core" / "config_entorno.py",
+        espejos=(
+            # Symlink a jax/core (E-21), como facet_resolver: no-op hoy, a
+            # proposito.
+            ("las_manos", JAX_ROOT / "las_manos" / "config_entorno.py"),
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "config_entorno.py"),
+        ),
+        # TODOS los simbolos del archivo: el modulo entero es la regla de que
+        # vale como configuracion de servicio. tests/test_config_entorno.py
+        # exige que esta tupla cubra el archivo.
+        compartidos=(
+            "EntornoInvalido",
+            "_valor",
+            "url_requerida",
+            "ruta_absoluta_requerida",
+        ),
+        nota="Revision final del frente E (2026-09-16): jax-platform valida "
+             "JAX_OLLAMA_URL al arrancar con una copia verbatim, no importando "
+             "jax (api/chat.py pone en sys.path el checkout de produccion de jax, "
+             "que puede ir detras). ORDEN DE MERGE: jax-platform primero -- contra "
+             "un jax-platform sin backend/config_entorno.py este checker sale con "
+             "exit 2.",
+    ),
+    Familia(
+        nombre="prioridad",
+        canonico=JAX_ROOT / "jax" / "ejecutor" / "prioridad.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ejecutor" / "prioridad.py"),
+        ),
+        # TODOS los simbolos del archivo, constantes incluidas: el modulo ES el
+        # protocolo de locks entre la Mesa (jax-platform) y el proxy del Ejecutor
+        # (jax). Si una copia cambia un nombre de fichero, el paso del sondeo o la
+        # forma de abrir el lock, la prioridad se pierde EN SILENCIO: la Mesa no
+        # espera nada y el Ejecutor deja de verla. tests/test_ejecutor_prioridad_espejo.py
+        # exige que esta tupla cubra el archivo. Limite conocido del comparador: los
+        # decoradores no son parte del segmento (@contextmanager); una copia sin el
+        # decorador rompe sus propios tests en jax-platform, no pasa callada.
+        compartidos=(
+            "ESPERA_AGOTADA",
+            "_PASO_MESA_S",
+            "_PASO_EJECUTOR_S",
+            "EsperaAgotada",
+            "_abrir",
+            "carril_mesa",
+            "hay_mesa_esperando",
+            "carril_ejecutor",
+            "_soltar",
+            "_Toma",
+            "_esperar_mesa",
+            "_intentar_ejecutor",
+            "carril_mesa_async",
+            "carril_ejecutor_async",
+        ),
+        nota="SP3 del Ejecutor (2026-09-17): la Mesa toma carril_mesa_async desde "
+             "jax-platform backend/ejecutor/prioridad.py, copia verbatim (el unico "
+             "ImportFrom distinto es el de Motivo, ver familia `motivo`). ORDEN DE "
+             "MERGE: jax-platform primero -- contra un jax-platform sin el archivo "
+             "este checker sale con exit 2.",
+    ),
+    Familia(
+        nombre="motivo",
+        canonico=JAX_ROOT / "jax" / "ejecutor" / "cita.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ejecutor" / "motivo.py"),
+        ),
+        # Solo Motivo: cita.py es el verificador del Ejecutor entero, y la Mesa no
+        # necesita nada mas. motivo.py de jax-platform no tiene otro simbolo (lo
+        # exige su propio test). @dataclass(frozen=True) no entra al segmento: si
+        # la copia pierde el frozen, lo atrapa el test de jax-platform.
+        compartidos=("Motivo",),
+        nota="SP3 del Ejecutor (2026-09-17): lo importa la copia de prioridad.py "
+             "en jax-platform. ORDEN DE MERGE: jax-platform primero.",
+    ),
+    Familia(
+        nombre="pausa_ejecutor",
+        canonico=JAX_ROOT / "jax" / "ejecutor" / "contratos" / "pausa.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ejecutor" / "pausa.py"),
+        ),
+        # Lo que ESCRIBE y LEE la pausa del Ejecutor. El latido del vigía (`latir`,
+        # `latido_fresco`, `ruta_del_latido`) queda afuera: la plataforma no late ni mira el
+        # latido. `_ruta`/`ruta_de_la_pausa` tampoco: la plataforma resuelve la ruta con su
+        # propio entorno (config_entorno) y sus propios códigos.
+        compartidos=("VARIABLE_RUTA", "PausaSinConfigurar", "pausa_puesta", "_sincronizar_directorio",
+                     "poner_pausa"),
+        nota="SP2 del Ejecutor (2026-09-17): el modo Ejecutor de la plataforma pone y quita la "
+             "pausa del Ejecutor. ORDEN DE MERGE: jax-platform primero.",
     ),
 )
 

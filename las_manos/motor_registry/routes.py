@@ -18,7 +18,6 @@ import time
 import traceback
 from pathlib import Path
 
-import tomllib
 from fastapi import APIRouter, HTTPException
 
 from motor_registry.catalog import MotorCatalog
@@ -36,12 +35,10 @@ from motor_registry.policy import MotorPolicy
 import facet_resolver  # su sello (mtime de un archivo) invalida también el catálogo
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
+from interruptor import ruta_del_interruptor
+import human_gate
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-CONFIG_PATH = BASE_DIR / "config.toml"
-
-with open(CONFIG_PATH, "rb") as _f:
-    _CONFIG = tomllib.load(_f)
 
 _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
 # _CATALOG/_POLICY arrancan None -- se pueblan en el startup hook de
@@ -51,7 +48,6 @@ _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
 # solo los usa este archivo), asi que reasignarlos acá es seguro.
 _CATALOG: MotorCatalog | None = None
 _POLICY: MotorPolicy | None = None
-_KILL_SWITCH_PATH: str = _CONFIG.get("server", {}).get("kill_switch_path", "/etc/jax/PAUSE")
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +149,32 @@ def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
         )
 
 
+def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> MotorDispatchResponse:
+    """Un pedido rechazado deja su job REJECTED con la razón (testigo)."""
+    job_id = _STORE.create(
+        caller=req.caller,
+        capability=req.capability,
+        motor=motor or "none",
+        trace_id=req.trace_id,
+        prompt=req.prompt,
+        recursion_depth=req.recursion_depth,
+    )
+    _STORE.update(
+        job_id,
+        status=JobStatus.REJECTED.value,
+        finished_at=time.time(),
+        error=razon,
+    )
+    return MotorDispatchResponse(
+        job_id=job_id,
+        status=JobStatus.REJECTED,
+        motor="none",
+        capability=req.capability,
+        trace_id=req.trace_id,
+        rejected_reason=razon,
+    )
+
+
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     await _ensure_catalog_fresh()
@@ -170,29 +192,23 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     )
 
     if not result.allowed:
-        job_id = _STORE.create(
-            caller=req.caller,
-            capability=req.capability,
-            motor=result.resolved_motor or "none",
-            trace_id=req.trace_id,
-            prompt=req.prompt,
-            recursion_depth=req.recursion_depth,
-        )
-        _STORE.update(
-            job_id,
-            status=JobStatus.REJECTED.value,
-            finished_at=time.time(),
-            error=result.reason,
-        )
-        return MotorDispatchResponse(
-            job_id=job_id,
-            status=JobStatus.REJECTED,
-            motor="none",
-            capability=req.capability,
-            trace_id=req.trace_id,
-            rejected_reason=result.reason,
-        )
+        return _rechazado(req, result.resolved_motor, result.reason)
 
+    # Human gate (2026-09-17): la política sólo mira que el token ESTÉ; acá se
+    # consume contra la base (un string inventado ya no aprueba). Va DESPUÉS
+    # de la política: un pedido que la política rechaza no quema el token.
+    cap = _CATALOG.get_capability(req.capability)
+    if cap is not None and cap.requires_human_gate:
+        veredicto = await human_gate.consumir_token_gate(
+            req.human_gate_token, uso=f"motor:{req.trace_id}"[:128],
+        )
+        if not veredicto.aceptado:
+            return _rechazado(req, result.resolved_motor, f"Human gate: {veredicto.motivo.value}")
+
+    # La ruta del freno se resuelve en CADA dispatch y ANTES de crear el job:
+    # sin la variable del freno el pedido falla cerrado sin dejar un job
+    # `pending` huérfano (revisión final del frente B, 2026-09-17).
+    ruta_del_freno = str(ruta_del_interruptor())
     job_id = _STORE.create(
         caller=req.caller,
         capability=req.capability,
@@ -211,7 +227,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             context=req.context,
             store=_STORE,
             catalog=_CATALOG,
-            kill_switch_path=_KILL_SWITCH_PATH,
+            kill_switch_path=ruta_del_freno,
             user_id=req.user_id,
             tenant_id=req.tenant_id,
             caller=req.caller,

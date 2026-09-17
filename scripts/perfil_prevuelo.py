@@ -283,7 +283,7 @@ async def _pedido(pv, pasos, latencias, llegada: float | None = None) -> None:
 
 
 async def _conexiones_del_servidor(store) -> int:
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute("SHOW GLOBAL STATUS LIKE 'Connections'")

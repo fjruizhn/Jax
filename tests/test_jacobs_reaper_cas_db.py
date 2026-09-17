@@ -50,7 +50,7 @@ async def _running(hace_s: float, timeouts_en_curso=(), timeouts_otros=()):
 
 
 async def _ejecutar(sql, params=()):
-    conn = await store.get_conn()
+    conn = await store.conexion_dedicada()
     try:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
@@ -135,7 +135,7 @@ def test_explain_del_update_con_corte_de_avance_usa_la_clave_primaria():
         pid = await _running(3700)
         try:
             sql = store._sql_update_si_epoca(False, False, 1, con_corte=True)
-            conn = await store.get_conn()
+            conn = await store.conexion_dedicada()
             try:
                 async with conn.cursor() as cur:
                     await cur.execute("EXPLAIN " + sql, (
@@ -161,7 +161,7 @@ def test_explain_de_la_consulta_del_barrido():
     status corre sobre a lo sumo 20 pasos, el tope duro de un plan)."""
     async def todo():
         sql = store._sql_candidatos_del_reaper(3)
-        conn = await store.get_conn()
+        conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 await cur.execute("EXPLAIN " + sql, ("pending", "running", "interrupted"))

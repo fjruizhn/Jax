@@ -67,6 +67,8 @@ import time
 from dataclasses import dataclass
 
 import httpx
+
+from cliente_http_compartido import obtener_cliente_http
 from credential_resolver import CredentialUnavailableError, resolve_credential_instrumented
 from facet_resolver import resolve_facet
 from redaccion import recortar_redactado
@@ -159,8 +161,10 @@ def _tope(d: Despacho) -> int:
 
 
 async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: list[str]) -> dict:
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+    # E-24 (merge 2026-09-17): el cliente HTTP COMPARTIDO del proceso, no uno
+    # por sonda -- un AsyncClient por llamada deja un socket en TIME_WAIT cada
+    # vez y es lo que el frente E cerró en todos los caminos de salida.
+    resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=timeout)
     if not 200 <= resp.status_code < 300:
         raise _RespuestaNoExitosa(
             resp.status_code,
