@@ -9,6 +9,8 @@ set -euo pipefail
 : "${JAX_PROXY_CARRIL_PUERTO:?}" "${JAX_EJECUTOR_CANARIO_PUERTO:?}" "${JAX_PROXY_CARRIL_RAIZ:?}"
 # C5 (plan 4): el proxy no arranca sin la pausa del Ejecutor y el latido del vigía configurados.
 : "${JAX_EJECUTOR_PAUSA:?}" "${JAX_EJECUTOR_VIGIA_LATIDO:?}" "${JAX_EJECUTOR_VIGIA_LATIDO_MAX_S:?}"
+# El cerco sólo deja alcanzar la local y las remotas con freno (cerco.py): la variable tiene que existir, aunque vacía.
+: "${JAX_EJECUTOR_FRENO_REMOTOS?}"
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 test "$(git -C "$REPO" branch --show-current)" = master
 PY="$REPO/.venv/bin/python"

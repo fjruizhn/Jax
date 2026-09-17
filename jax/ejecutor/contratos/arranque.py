@@ -19,10 +19,22 @@ Dos formas (plan 6 con la enmienda del plan 4):
 En las dos, la pausa del Ejecutor tiene que estar ausente y no puede haber otro vigía
 latiendo (una misión por vez: el registro y la pausa son uno solo).
 
-Lo que el arranque NO acota a la misión, a propósito: C6 y los remotos del freno se
-exigen en TODAS las máquinas de la política. El cerco de C3 deja a la cuenta entrar por
-SSH a todas; una máquina sin llaves de root o sin freno remoto es alcanzable igual,
-aunque la misión no la nombre.
+Los contratos POR MÁQUINA (C6 y el freno remoto de C4) se acotan a lo que la cuenta
+puede alcanzar, no a todo el inventario (enmienda 2026-09-17: exigirlos en todo el
+inventario impedía cualquier misión, incluso contra una VM desechable, hasta tocar los
+servidores de clientes, que están reservados a Fernando):
+- «habilitadas» = la local + las remotas que el freno tiene CARGADAS (`remotos` de su
+  latido: la llave del freno está instalada ahí). Ésas son las ÚNICAS que el cerco de C3
+  deja alcanzar a la cuenta (cerco.py las toma de la misma lista, JAX_EJECUTOR_FRENO_REMOTOS);
+- C6 se verifica en TODAS las habilitadas (las alcanzables, estén o no en la misión);
+- una máquina de la misión que no está habilitada se rechaza NOMBRÁNDOLA
+  (`maquina_sin_contratos_remotos`), igual que una fuera del inventario;
+- el resto del inventario tiene que ser INALCANZABLE para la cuenta, y se prueba en vivo
+  desde la cuenta (`cerco_alcanza_maquina_sin_contratos`): el argumento viejo para exigir
+  todo el inventario era que el cerco dejaba entrar a todas; ahora el cerco no las deja y
+  el arranque lo comprueba en cada misión.
+`remotos_cargados` del latido (todas las remotas del inventario con freno) queda como dato;
+el arranque ya no lo exige.
 """
 from __future__ import annotations
 
@@ -131,8 +143,6 @@ def verificar_c4_estatico(ctx: Contexto, *, ahora=time.time) -> tuple:
     else:
         if latido.get("activo") is not False:
             fallos.append(Fallo("c4", "interruptor_puesto"))
-        if latido.get("remotos_cargados") is not True:
-            fallos.append(Fallo("c4", "freno_sin_remotos"))
         if latido.get("uid_resuelto") is not True:
             fallos.append(Fallo("c4", "freno_sin_cuenta"))
     if not ctx.unidad_freno_habilitada.exists():
@@ -156,6 +166,63 @@ def verificar_c5_estatico(ctx: Contexto, *, ahora: float | None = None) -> tuple
     if pausa.latido_fresco(ctx.latido, ctx.latido_max_s, ahora=ahora):
         fallos.append(Fallo("c5", "vigia_ya_activo"))
     return tuple(fallos)
+
+
+def remotos_del_freno(ctx: Contexto, *, ahora=time.time) -> frozenset:
+    """Las remotas con el freno cargado, según su latido. Sin latido fresco, ninguna
+    (verificar_c4_estatico ya dice `freno_sin_latido`)."""
+    try:
+        latido = json.loads(ctx.estado_freno.read_text(encoding="utf-8"))
+        fresco = ahora() - float(latido["momento"]) <= LATIDO_MAX_S
+        remotos = latido["remotos"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return frozenset()
+    if not fresco or not isinstance(remotos, list) or not all(isinstance(r, str) for r in remotos):
+        return frozenset()
+    return frozenset(remotos)
+
+
+@dataclass(frozen=True)
+class Alcance:
+    con_c6: tuple    # habilitadas: la local y las remotas con freno cargado
+    a_cerrar: tuple  # el resto del inventario: la cuenta no tiene que alcanzarlas
+    fallos: tuple    # máquinas de la misión que no pueden entrar
+
+
+def alcance(hosts, habilitadas, hosts_mision) -> Alcance:
+    def habilitada(h):
+        return h.es_local or h.nombre in habilitadas
+
+    por_nombre = {h.nombre: h for h in hosts}
+    fallos = []
+    for nombre in sorted(hosts_mision or ()):
+        h = por_nombre.get(nombre)
+        if h is None:
+            fallos.append(Fallo("arranque", "maquina_fuera_del_inventario", (("host", nombre),)))
+        elif not habilitada(h):
+            fallos.append(Fallo("arranque", "maquina_sin_contratos_remotos", (("host", nombre),)))
+    return Alcance(tuple(h for h in hosts if habilitada(h)), tuple(h for h in hosts if not habilitada(h)),
+                   tuple(fallos))
+
+
+def remoto_alcance(hosts) -> str:
+    return "; ".join(
+        f'if timeout 3 bash -c "exec 3<>/dev/tcp/{shlex.quote(h.ip)}/{int(h.puerto)}" 2>/dev/null; '
+        f'then echo "alcance={h.ip}:{int(h.puerto)} abierta"; else echo "alcance={h.ip}:{int(h.puerto)} cerrada"; fi'
+        for h in hosts)
+
+
+async def verificar_alcance(ctx: Contexto, a_cerrar, *, correr=cuenta_axioma.correr_en_la_cuenta) -> tuple:
+    """Desde la cuenta: ninguna máquina sin contratos remotos es alcanzable (el cerco las corta)."""
+    a_cerrar = tuple(a_cerrar)
+    if not a_cerrar:
+        return ()
+    rc, salida, _ = await correr(ctx.cuenta, remoto_alcance(a_cerrar), tope_s=_TOPE_C6_S)
+    if rc == 255:
+        return (Fallo("c3", "cuenta_inalcanzable", (("rc", rc),)),)
+    cerradas = set(salida.decode(errors="replace").splitlines())
+    return tuple(Fallo("c3", "cerco_alcanza_maquina_sin_contratos", (("host", h.nombre),))
+                 for h in a_cerrar if f"alcance={h.ip}:{int(h.puerto)} cerrada" not in cerradas)
 
 
 def remoto_c6(llaves_root: str) -> str:
@@ -192,6 +259,15 @@ async def verificar_c6_estatico(ctx: Contexto, hosts, *, correr=cuenta_axioma.co
 
     resultados = await asyncio.gather(*(una(h) for h in hosts))
     return tuple(f for r in resultados for f in r)
+
+
+async def verificar_maquinas(ctx: Contexto, hosts, *, correr=cuenta_axioma.correr_en_la_cuenta) -> tuple:
+    """Los contratos por máquina de la misión: las de la misión, habilitadas; el resto del
+    inventario, inalcanzable desde la cuenta; C6 en todas las habilitadas. Las que no están
+    habilitadas NO se tocan (ni por ssh de administrador ni por la cuenta)."""
+    a = alcance(hosts, await asyncio.to_thread(remotos_del_freno, ctx), ctx.hosts_mision)
+    return (a.fallos + await verificar_alcance(ctx, a.a_cerrar, correr=correr)
+            + await verificar_c6_estatico(ctx, a.con_c6, correr=correr))
 
 
 def pruebas_reales(ctx: Contexto) -> dict:
@@ -243,7 +319,7 @@ def pruebas_reales(ctx: Contexto) -> dict:
         return tuple(estaticos) + tuple(eleccion) + await canario_c5.verificar_c5(auditar)
 
     async def p_c6():
-        return await verificar_c6_estatico(ctx, (await asyncio.to_thread(_politica)).hosts)
+        return await verificar_maquinas(ctx, (await asyncio.to_thread(_politica)).hosts)
 
     return {"instalacion": p_instalacion, "exportar": p_exportar, "c1": p_c1, "c3": p_c3, "c4": p_c4,
             "c5": p_c5, "c6": p_c6}

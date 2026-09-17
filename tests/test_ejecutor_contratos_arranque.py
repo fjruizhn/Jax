@@ -4,6 +4,7 @@ archivos reales en tmp_path."""
 import asyncio
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -147,8 +148,6 @@ def test_c4_estatico_sano(tmp_path):
     (lambda c: c.estado_freno.write_text(json.dumps({"momento": time.time(), "activo": True,
                                                      "remotos_cargados": True, "uid_resuelto": True})), "interruptor_puesto"),
     (lambda c: c.estado_freno.write_text(json.dumps({"momento": time.time(), "activo": False,
-                                                     "remotos_cargados": False, "uid_resuelto": True})), "freno_sin_remotos"),
-    (lambda c: c.estado_freno.write_text(json.dumps({"momento": time.time(), "activo": False,
                                                      "remotos_cargados": True, "uid_resuelto": False})), "freno_sin_cuenta"),
     (lambda c: c.unidad_freno_habilitada.unlink(), "freno_no_habilitado"),
     (lambda c: c.cron_deny.write_text("axiomas\n"), "cron_abierto_para_la_cuenta"),
@@ -160,6 +159,15 @@ def test_c4_estatico_roto(tmp_path, romper, codigo):
     _c4_sano(ctx)
     romper(ctx)
     assert codigo in [f.codigo for f in AR.verificar_c4_estatico(ctx)]
+
+
+def test_c4_estatico_no_exige_remotas_de_todo_el_inventario(tmp_path):
+    """Las remotas se exigen por misión (verificar_maquinas), no en todo el inventario."""
+    ctx = _ctx(tmp_path)
+    _c4_sano(ctx)
+    ctx.estado_freno.write_text(json.dumps({"momento": time.time(), "activo": False, "remotos_cargados": False,
+                                            "remotos": [], "uid_resuelto": True}))
+    assert AR.verificar_c4_estatico(ctx) == ()
 
 
 # --- C5 estático -------------------------------------------------------------
@@ -264,3 +272,137 @@ def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path):
 
 def test_pruebas_reales_cubren_el_orden(tmp_path):
     assert set(AR.pruebas_reales(_ctx(tmp_path))) == set(AR._ORDEN)
+
+
+# --- alcance: los contratos por máquina, acotados a la misión ---------------------
+
+HOSTS = (Host("hall9000", "192.0.2.5", 58291, "hypervisor", True),
+         Host("ejecutor-prueba", "192.0.2.50", 58291, "desarrollo", False),
+         Host("atemai", "192.0.2.11", 58291, "desarrollo", False),
+         Host("bridge", "192.0.2.20", 58291, "clientes", False))
+
+
+def _latido_con_remotos(ctx, remotos, momento=None):
+    ctx.estado_freno.write_text(json.dumps({"momento": time.time() if momento is None else momento,
+                                            "activo": False, "remotos_cargados": False, "remotos": remotos,
+                                            "uid_resuelto": True}))
+
+
+def test_remotos_del_freno_solo_con_latido_fresco(tmp_path):
+    ctx = _ctx(tmp_path)
+    assert AR.remotos_del_freno(ctx) == frozenset()
+    _latido_con_remotos(ctx, ["ejecutor-prueba"])
+    assert AR.remotos_del_freno(ctx) == frozenset({"ejecutor-prueba"})
+    _latido_con_remotos(ctx, ["ejecutor-prueba"], momento=time.time() - 10)
+    assert AR.remotos_del_freno(ctx) == frozenset()
+    ctx.estado_freno.write_text(json.dumps({"momento": time.time(), "remotos": "ejecutor-prueba"}))
+    assert AR.remotos_del_freno(ctx) == frozenset()
+
+
+def test_alcance_mision_solo_a_la_vm():
+    a = AR.alcance(HOSTS, frozenset({"ejecutor-prueba"}), frozenset({"ejecutor-prueba"}))
+    assert [h.nombre for h in a.con_c6] == ["hall9000", "ejecutor-prueba"]
+    assert [h.nombre for h in a.a_cerrar] == ["atemai", "bridge"]
+    assert a.fallos == ()
+
+
+def test_alcance_mision_con_atemai_se_rechaza_nombrandola():
+    a = AR.alcance(HOSTS, frozenset({"ejecutor-prueba"}), frozenset({"ejecutor-prueba", "atemai"}))
+    assert a.fallos == (Fallo("arranque", "maquina_sin_contratos_remotos", (("host", "atemai"),)),)
+
+
+def test_alcance_maquina_fuera_del_inventario_y_sin_mision():
+    a = AR.alcance(HOSTS, frozenset(), frozenset({"otra"}))
+    assert a.fallos == (Fallo("arranque", "maquina_fuera_del_inventario", (("host", "otra"),)),)
+    assert AR.alcance(HOSTS, frozenset(), None).fallos == ()
+    assert [h.nombre for h in AR.alcance(HOSTS, frozenset(), None).con_c6] == ["hall9000"]
+
+
+def _correr_solo_vm_y_local(vistos):
+    """hall9000 y la VM tienen C6; atemai y bridge NO (y la cuenta no las alcanza)."""
+    async def correr(c, remoto, *, entrada=b"", tope_s):
+        vistos.append(remoto)
+        if "/dev/tcp/" in remoto:  # el cerco corta todo lo que se sondea
+            ips = re.findall(r"/dev/tcp/([0-9.]+)/(\d+)", remoto)
+            return 0, "".join(f"alcance={ip}:{pt} cerrada\n" for ip, pt in ips).encode(), b""
+        if "192.0.2.11" in remoto or "192.0.2.20" in remoto:
+            return 255, b"", b"Connection refused"
+        if remoto.startswith("ssh "):
+            return 0, b"llaves=root 644\nfreno=1\nrevocador=root 755\n", b""
+        return 0, b"llaves=root 644\nfreno=0\nrevocador=root 755\n", b""
+    return correr
+
+
+def test_mision_solo_a_la_vm_arranca_sin_tocar_atemai(tmp_path):
+    ctx = _ctx(tmp_path, hosts_mision=frozenset({"ejecutor-prueba"}))
+    _latido_con_remotos(ctx, ["ejecutor-prueba"])
+    vistos = []
+    assert asyncio.run(AR.verificar_maquinas(ctx, HOSTS, correr=_correr_solo_vm_y_local(vistos))) == ()
+    assert not any(v.startswith("ssh ") and ("192.0.2.11" in v or "192.0.2.20" in v) for v in vistos)
+    assert any("/dev/tcp/192.0.2.11/58291" in v and "/dev/tcp/192.0.2.20/58291" in v for v in vistos)
+
+
+def test_mision_a_la_vm_con_el_cerco_abierto_a_atemai_no_arranca(tmp_path):
+    ctx = _ctx(tmp_path, hosts_mision=frozenset({"ejecutor-prueba"}))
+    _latido_con_remotos(ctx, ["ejecutor-prueba"])
+    normal = _correr_solo_vm_y_local([])
+
+    async def correr(c, remoto, *, entrada=b"", tope_s):
+        if "/dev/tcp/" in remoto:
+            return 0, b"alcance=192.0.2.11:58291 abierta\nalcance=192.0.2.20:58291 cerrada\n", b""
+        return await normal(c, remoto, tope_s=tope_s)
+
+    assert asyncio.run(AR.verificar_maquinas(ctx, HOSTS, correr=correr)) == (
+        Fallo("c3", "cerco_alcanza_maquina_sin_contratos", (("host", "atemai"),)),)
+
+
+def test_mision_con_atemai_se_rechaza_con_el_motivo(tmp_path):
+    ctx = _ctx(tmp_path, hosts_mision=frozenset({"ejecutor-prueba", "atemai"}))
+    _latido_con_remotos(ctx, ["ejecutor-prueba"])
+    fallos = asyncio.run(AR.verificar_maquinas(ctx, HOSTS, correr=_correr_solo_vm_y_local([])))
+    assert fallos == (Fallo("arranque", "maquina_sin_contratos_remotos", (("host", "atemai"),)),)
+
+
+def test_vm_sin_freno_cargado_no_arranca(tmp_path):
+    ctx = _ctx(tmp_path, hosts_mision=frozenset({"ejecutor-prueba"}))
+    _latido_con_remotos(ctx, [])
+    fallos = asyncio.run(AR.verificar_maquinas(ctx, HOSTS, correr=_correr_solo_vm_y_local([])))
+    assert fallos == (Fallo("arranque", "maquina_sin_contratos_remotos", (("host", "ejecutor-prueba"),)),)
+
+
+def test_vm_con_c6_roto_no_arranca(tmp_path):
+    ctx = _ctx(tmp_path, hosts_mision=frozenset({"ejecutor-prueba"}))
+    _latido_con_remotos(ctx, ["ejecutor-prueba"])
+
+    async def correr(c, remoto, *, entrada=b"", tope_s):
+        return 0, b"llaves=axioma 600\nfreno=1\nrevocador=root 755\n", b""
+
+    fallos = asyncio.run(AR.verificar_maquinas(ctx, HOSTS, correr=correr))
+    assert Fallo("c6", "llaves_no_son_de_root", (("host", "ejecutor-prueba"),)) in fallos
+
+
+@pytest.mark.parametrize("salida, rc, esperado", [
+    (b"alcance=192.0.2.11:58291 cerrada\nalcance=192.0.2.20:58291 cerrada\n", 0, ()),
+    (b"alcance=192.0.2.11:58291 abierta\nalcance=192.0.2.20:58291 cerrada\n", 0,
+     (Fallo("c3", "cerco_alcanza_maquina_sin_contratos", (("host", "atemai"),)),)),
+    (b"alcance=192.0.2.11:58291 cerrada\n", 0,
+     (Fallo("c3", "cerco_alcanza_maquina_sin_contratos", (("host", "bridge"),)),)),
+    (b"", 255, (Fallo("c3", "cuenta_inalcanzable", (("rc", 255),)),)),
+])
+def test_alcance_del_cerco(tmp_path, salida, rc, esperado):
+    vistos = []
+
+    async def correr(c, remoto, *, entrada=b"", tope_s):
+        vistos.append(remoto)
+        return rc, salida, b""
+
+    a_cerrar = HOSTS[2:]
+    assert asyncio.run(AR.verificar_alcance(_ctx(tmp_path), a_cerrar, correr=correr)) == esperado
+    assert "/dev/tcp/192.0.2.11/58291" in vistos[0] and "/dev/tcp/192.0.2.20/58291" in vistos[0]
+
+
+def test_alcance_sin_maquinas_que_cerrar_no_entra_a_la_cuenta(tmp_path):
+    async def correr(c, remoto, *, entrada=b"", tope_s):
+        raise AssertionError("no tenía que entrar")
+
+    assert asyncio.run(AR.verificar_alcance(_ctx(tmp_path), (), correr=correr)) == ()

@@ -5,7 +5,10 @@ Medido 2026-09-17 como `axioma`, sin cerco: alcanza LAS MANOS (7777, sin
 autenticación, emite tokens de human gate), Ollama (11434), MariaDB (3308) y
 jax-platform (8080). Con el cerco, la cuenta sólo abre conexiones a:
 - 127.0.0.1 en los puertos locales dados (proxy con carril, upstream del canario);
-- cada ip:puerto SSH del inventario.
+- el ip:puerto SSH de la máquina local y de cada remota HABILITADA: las que tienen el freno
+  remoto (JAX_EJECUTOR_FRENO_REMOTOS, la misma lista que carga ejecutor-freno.service).
+  Una máquina del inventario sin contratos remotos (C4 remoto, C6) queda FUERA: la cuenta no
+  la alcanza, y el arranque de cada misión lo prueba desde la cuenta (arranque.verificar_alcance).
 Todo lo demás se rechaza (TCP con reset, el resto con icmp): falla rápido, no cuelga.
 
 Por qué `meta skuid N jump cuenta` y no `meta skuid != N accept`: un paquete sin socket
@@ -18,7 +21,8 @@ con el salto, sólo entra al cerco lo que seguro es de la cuenta.
 Sólo IPv4: una IP v6 en el inventario es un error, no un hueco silencioso.
 
 Uso: python -m jax.ejecutor.contratos.cerco <politica.json> <salida.nft>
-     (lee JAX_EJECUTOR_CUENTA, JAX_PROXY_CARRIL_PUERTO, JAX_EJECUTOR_CANARIO_PUERTO)
+     (lee JAX_EJECUTOR_CUENTA, JAX_PROXY_CARRIL_PUERTO, JAX_EJECUTOR_CANARIO_PUERTO y
+     JAX_EJECUTOR_FRENO_REMOTOS, que tiene que existir aunque esté vacía)
 """
 from __future__ import annotations
 
@@ -78,8 +82,16 @@ def renderizar(uid: int, puertos_locales, destinos_ssh) -> str:
     )
 
 
-def desde_politica(p: politica.Politica, uid: int, puertos_locales) -> str:
-    return renderizar(uid, puertos_locales, tuple((h.ip, h.puerto) for h in p.hosts))
+def habilitadas_desde_texto(texto: str) -> frozenset:
+    return frozenset(n.strip() for n in texto.split(",") if n.strip())
+
+
+def desde_politica(p: politica.Politica, uid: int, puertos_locales, habilitadas) -> str:
+    remotas = {h.nombre for h in p.hosts if not h.es_local}
+    if not set(habilitadas) <= remotas:
+        raise ValueError("habilitada_fuera_de_la_politica", tuple(sorted(set(habilitadas) - remotas)))
+    return renderizar(uid, puertos_locales,
+                      tuple((h.ip, h.puerto) for h in p.hosts if h.es_local or h.nombre in habilitadas))
 
 
 def principal(argv, env=None) -> int:
@@ -88,7 +100,8 @@ def principal(argv, env=None) -> int:
     p = politica.validar(doc)
     uid = pwd.getpwnam(env["JAX_EJECUTOR_CUENTA"]).pw_uid
     puertos = (int(env["JAX_PROXY_CARRIL_PUERTO"]), int(env["JAX_EJECUTOR_CANARIO_PUERTO"]))
-    Path(argv[1]).write_text(desde_politica(p, uid, puertos), encoding="utf-8")
+    habilitadas = habilitadas_desde_texto(env["JAX_EJECUTOR_FRENO_REMOTOS"])
+    Path(argv[1]).write_text(desde_politica(p, uid, puertos, habilitadas), encoding="utf-8")
     return 0
 
 
