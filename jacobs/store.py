@@ -498,15 +498,96 @@ async def pipelines_by_status(statuses: list[PipelineStatus]) -> list[Pipeline]:
     return [_row_to_pipeline(row) for row in rows]
 
 
-async def pipeline_count_active() -> int:
-    conn = await get_conn()
+_SQL_CONTAR_ACTIVOS = "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')"
+
+
+async def pipeline_count_active(conexion: aiomysql.Connection | None = None) -> int:
+    """Pipelines activos. Con `conexion` (la del candado de activos, F3) lee por
+    ella y no la cierra; sin ella abre y cierra una propia."""
+    conn = conexion if conexion is not None else await get_conn()
     try:
         async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')"
-            )
+            await cur.execute(_SQL_CONTAR_ACTIVOS)
             row = await cur.fetchone()
             return int(row[0]) if row else 0
+    finally:
+        if conexion is None:
+            conn.close()
+
+
+# ----------------------------------------------------------------
+#  Candado del cupo de activos entre procesos (ola final F3, Ruling R31)
+# ----------------------------------------------------------------
+# MAX_PARALLEL_PIPELINES se contaba bajo un asyncio.Lock de PROCESO
+# (jacobs/candado.py): el CLI de continuar (tools/jacobs_relaunch.py) corre en
+# otro proceso y cada uno contaba y escribía sin ver la reserva del otro. Ahora
+# crear y continuar recuentan y escriben dentro de un candado con nombre del
+# SERVIDOR MariaDB (GET_LOCK), tomado en UNA conexión dedicada que vive todo el
+# bloque. El asyncio.Lock sigue por fuera: dentro del proceso evita pedir
+# conexiones de más.
+#
+# - El nombre lleva la base: los candados con nombre son del servidor, no de la
+#   base, y jax_memory_test comparte servidor con producción.
+# - GET_LOCK devuelve 1 (tomado), 0 (venció) o NULL (error): lo que no sea 1,
+#   o una conexión que no abre, es CandadoNoDisponible -> quien llama falla
+#   cerrado (503 prevuelo_no_disponible). Nunca se cuenta sin candado.
+# - Se suelta SIEMPRE: RELEASE_LOCK en finally y, pase lo que pase, la conexión
+#   se cierra -- cerrar la sesión libera el candado en el servidor aunque
+#   RELEASE_LOCK haya fallado.
+# EXPLAIN en tests/test_jacobs_candado_activos_db.py.
+NOMBRE_CANDADO_DE_ACTIVOS = "jacobs_crear_o_continuar"
+_SQL_TOMAR_CANDADO = "SELECT GET_LOCK(%s, %s)"
+_SQL_SOLTAR_CANDADO = "SELECT RELEASE_LOCK(%s)"
+
+
+class CandadoNoDisponible(RuntimeError):
+    """No se obtuvo el candado del cupo de activos: venció, la base lo negó o
+    no hubo conexión. Falla cerrado: sin candado no se crea ni se continúa."""
+
+
+def nombre_del_candado_de_activos() -> str:
+    return f"{NOMBRE_CANDADO_DE_ACTIVOS}:{_db_cfg()['db']}"
+
+
+@asynccontextmanager
+async def candado_de_activos() -> AsyncIterator[aiomysql.Connection]:
+    """Toma el candado del cupo de activos y entrega su conexión (para
+    recontar por ella). Ver el bloque de comentarios de arriba."""
+    from jacobs.prevuelo_config import candado_timeout_s
+
+    timeout = candado_timeout_s()
+    nombre = nombre_del_candado_de_activos()
+    try:
+        conn = await get_conn()
+    except Exception as exc:  # fail-closed: se relanza como CandadoNoDisponible; sin conexión no hay candado y sin candado no se cuenta
+        raise CandadoNoDisponible(
+            f"no se pudo abrir la conexión del candado '{nombre}': {type(exc).__name__}: {exc}"
+        ) from exc
+    try:
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(_SQL_TOMAR_CANDADO, (nombre, timeout))
+                fila = await cur.fetchone()
+        except Exception as exc:  # fail-closed: se relanza como CandadoNoDisponible
+            raise CandadoNoDisponible(
+                f"GET_LOCK('{nombre}') falló: {type(exc).__name__}: {exc}"
+            ) from exc
+        resultado = fila[0] if fila else None
+        if resultado != 1:
+            motivo = "venció" if resultado == 0 else "devolvió NULL"
+            raise CandadoNoDisponible(
+                f"GET_LOCK('{nombre}', {timeout}) {motivo}: otro proceso tiene el cupo de "
+                f"pipelines activos tomado o la base no lo concedió"
+            )
+        try:
+            yield conn
+        finally:
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute(_SQL_SOLTAR_CANDADO, (nombre,))
+            except Exception as exc:  # fail-soft: cerrar la conexión (finally de abajo) termina la sesión y el servidor suelta el candado igual; se deja WARNING
+                logger.warning("RELEASE_LOCK('%s') falló (%s); se cierra la conexión, que lo suelta",
+                               nombre, type(exc).__name__)
     finally:
         conn.close()
 

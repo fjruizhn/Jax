@@ -53,7 +53,33 @@ def _parches(pila, veredicto=None, prevuelo=None, build=None):
     m["prevuelo"] = pila.enter_context(patch.object(
         routes, "prevuelo", prevuelo or AsyncMock(return_value=veredicto or _veredicto()), create=True))
     pila.enter_context(patch.object(policy, "check_kill_switch", return_value=False))
+    m["candado"] = CandadoFalso()
+    pila.enter_context(patch.object(routes.store, "candado_de_activos", m["candado"], create=True))
     return m
+
+
+class CandadoFalso:
+    """Doble del candado entre procesos (F3): registra entradas y salidas y,
+    con `falla`, se niega como un GET_LOCK que vence."""
+
+    def __init__(self, falla: Exception | None = None, orden: list | None = None):
+        self.falla, self.orden = falla, orden if orden is not None else []
+        self.entradas = self.salidas = 0
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        if self.falla is not None:
+            raise self.falla
+        self.entradas += 1
+        self.orden.append("candado")
+        return "conexion-del-candado"
+
+    async def __aexit__(self, *exc):
+        self.salidas += 1
+        self.orden.append("soltar")
+        return False
 
 
 def _crear(**cambios):
@@ -280,3 +306,50 @@ def test_crear_con_la_base_caida_da_503_sin_crear():
 def test_costo_max_aceptado_negativo_es_invalido():
     with pytest.raises(ValidationError):
         _crear(costo_max_aceptado_usd=Decimal("-1"))
+
+
+# ---------------------------------------------------------------------------
+# F3 (ola final, Ruling R31): el cupo de MAX_PARALLEL_PIPELINES se vuelve a
+# contar y se escribe dentro del candado con nombre de MariaDB, que cruza
+# procesos (el CLI de continuar corre en otro). El asyncio.Lock no alcanza.
+# ---------------------------------------------------------------------------
+
+def test_crear_recuenta_bajo_el_candado_y_respeta_el_cupo_que_otro_proceso_lleno():
+    with ExitStack() as pila:
+        m = _parches(pila)
+        # 0 al validar temprano; al recontar bajo el candado otro proceso ya llenó el cupo.
+        m["pipeline_count_active"].side_effect = [0, policy.MAX_PARALLEL_PIPELINES]
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
+        m["pipeline_create"].assert_not_awaited()
+        assert m["pipeline_count_active"].await_args.kwargs == {"conexion": "conexion-del-candado"}
+        assert (m["candado"].entradas, m["candado"].salidas) == (1, 1)
+    assert e.value.status_code == 422
+    assert "Límite duro" in e.value.detail
+
+
+def test_crear_escribe_dentro_del_candado():
+    orden = []
+    with ExitStack() as pila:
+        m = _parches(pila)
+        m["candado"].orden = orden
+        m["pipeline_count_active"].side_effect = lambda **kw: orden.append("contar") or 0
+        m["pipeline_create"].side_effect = lambda p: orden.append("crear")
+        m["event_append"].side_effect = lambda *a, **kw: orden.append(a[1])
+        asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
+    assert orden == ["contar", "candado", "contar", "crear", "PIPELINE_CREATED", "soltar"]
+
+
+def test_crear_sin_candado_falla_cerrado_con_503():
+    from jacobs import store
+
+    with ExitStack() as pila:
+        m = _parches(pila)
+        falso = CandadoFalso(falla=store.CandadoNoDisponible("GET_LOCK venció a los 10 s"))
+        pila.enter_context(patch.object(routes.store, "candado_de_activos", falso))
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
+        m["pipeline_create"].assert_not_awaited()
+    assert e.value.status_code == 503
+    assert e.value.detail["code"] == "prevuelo_no_disponible"
+    assert "GET_LOCK" in e.value.detail["motivo"]

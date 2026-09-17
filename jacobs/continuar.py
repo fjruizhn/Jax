@@ -220,11 +220,20 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
             "by": invoked_by, "from_status": a.pipeline.status.value, "run_epoch": a.pipeline.run_epoch + 1,
             **_pasos(a), "reasignados": a.reasignados, "costo_max_usd": formatear_usd(veredicto.costo_max_usd),
         }
-        nueva = await store.continuar_transaccion(
-            pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
-            [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
-            evento_payload=evento_payload,
-        )
+        # F3 (ola final, Ruling R31): el conteo de arriba sólo evita sondear en
+        # vano; el cupo se decide recontando DENTRO del candado con nombre de
+        # MariaDB, que también toma crear en LAS MANOS -- este servicio corre
+        # además en el CLI, otro proceso. CandadoNoDisponible se propaga:
+        # el endpoint responde 503 y el CLI sale con error.
+        async with store.candado_de_activos() as conexion_del_candado:
+            activos = await store.pipeline_count_active(conexion=conexion_del_candado)
+            if activos >= MAX_PARALLEL_PIPELINES:
+                raise ContinuarRechazado(429, "limite_de_activos", _texto_limite(activos))
+            nueva = await store.continuar_transaccion(
+                pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
+                [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
+                evento_payload=evento_payload,
+            )
         if nueva is None:
             raise ContinuarRechazado(409, "estado_no_continuable", {
                 "status": None,

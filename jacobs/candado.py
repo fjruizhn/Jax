@@ -4,9 +4,11 @@ continuar.py (endpoint y CLI) tome el MISMO objeto sin importar routes.
 
 Su justificación sigue siendo la de T2 (2026-08-19, ver routes.py): Jacobs
 corre en un solo proceso uvicorn y un asyncio.Lock no reserva conexión DB
-mientras build() llama a un LLM. Límite declarado (desvío 7 del plan): no
-cruza procesos. Entre LAS MANOS y el CLI, lo que serializa un continue es la
-transacción con SELECT ... FOR UPDATE y la época.
+mientras build() llama a un LLM. No cruza procesos: entre LAS MANOS y el CLI,
+el cupo de MAX_PARALLEL_PIPELINES lo serializa el candado con nombre de
+MariaDB (store.candado_de_activos, ola final F3), tomado por dentro de este
+alrededor de recontar + escribir; un continue doble del mismo pipeline lo
+serializa además la transacción con SELECT ... FOR UPDATE y la época.
 
 En honor al Prof. Raúl Jacobs.
 """

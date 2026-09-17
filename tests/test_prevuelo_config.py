@@ -63,3 +63,16 @@ def test_pool_max_invalido_lanza_con_el_nombre(monkeypatch):
     monkeypatch.setenv(pc.DB_POOL_MAX, "cinco")
     with pytest.raises(RuntimeError, match="JAX_PREVUELO_DB_POOL_MAX"):
         pc.db_pool_max()
+
+
+def test_timeout_del_candado_de_activos_por_defecto_es_10(monkeypatch):
+    """F3 (ola final): JAX_PREVUELO_CANDADO_TIMEOUT_S acota el GET_LOCK que
+    serializa crear y continuar entre procesos."""
+    monkeypatch.delenv(pc.CANDADO_TIMEOUT_S, raising=False)
+    assert pc.candado_timeout_s() == 10
+
+
+def test_timeout_del_candado_invalido_lanza_con_el_nombre(monkeypatch):
+    monkeypatch.setenv(pc.CANDADO_TIMEOUT_S, "0")
+    with pytest.raises(RuntimeError, match="JAX_PREVUELO_CANDADO_TIMEOUT_S"):
+        pc.candado_timeout_s()

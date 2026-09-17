@@ -76,7 +76,30 @@ def _entorno(pipeline=_NADA, pasos=None, activos=0, veredicto=None, transaccion=
         m["capacidades"] = pila.enter_context(patch.object(
             continuar, "_validate_plan_capabilities", AsyncMock()))
         pila.enter_context(patch.object(continuar, "check_kill_switch", return_value=kill))
+        m["candado"] = _CandadoFalso()
+        pila.enter_context(patch.object(continuar.store, "candado_de_activos", m["candado"], create=True))
         yield m
+
+
+class _CandadoFalso:
+    def __init__(self, falla: Exception | None = None):
+        self.falla, self.orden = falla, []
+        self.entradas = self.salidas = 0
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        if self.falla is not None:
+            raise self.falla
+        self.entradas += 1
+        self.orden.append("candado")
+        return "conexion-del-candado"
+
+    async def __aexit__(self, *exc):
+        self.salidas += 1
+        self.orden.append("soltar")
+        return False
 
 
 def _continuar(**kw):
@@ -454,3 +477,43 @@ def test_previsualizar_relanza_403_y_404():
             asyncio.run(continuar.previsualizar("p1", "plataforma"))
         m["prevuelo"].assert_not_awaited()
     assert e.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# F3 (ola final, Ruling R31): continuar recuenta el cupo y escribe dentro del
+# candado con nombre de MariaDB (el CLI corre en otro proceso que LAS MANOS).
+# ---------------------------------------------------------------------------
+
+def test_continuar_recuenta_bajo_el_candado_y_respeta_el_cupo_que_otro_proceso_lleno():
+    with _entorno() as m:
+        m["activos"].side_effect = [0, 3]
+        e = _rechazo()
+        m["tx"].assert_not_awaited()
+        assert m["activos"].await_args.kwargs == {"conexion": "conexion-del-candado"}
+        assert (m["candado"].entradas, m["candado"].salidas) == (1, 1)
+    assert (e.status_code, e.code) == (429, "limite_de_activos")
+
+
+def test_continuar_escribe_la_transaccion_dentro_del_candado():
+    with _entorno() as m:
+        orden = m["candado"].orden
+        m["activos"].side_effect = lambda **kw: orden.append("contar") or 0
+
+        async def tx(*a, **kw):
+            orden.append("transaccion")
+            return 3
+
+        m["tx"].side_effect = tx
+        _continuar()
+    assert orden == ["contar", "candado", "contar", "transaccion", "soltar"]
+
+
+def test_continuar_sin_candado_no_escribe_y_propaga():
+    from jacobs import store
+
+    with _entorno() as m:
+        falso = _CandadoFalso(falla=store.CandadoNoDisponible("GET_LOCK venció"))
+        with patch.object(continuar.store, "candado_de_activos", falso):
+            with pytest.raises(store.CandadoNoDisponible):
+                _continuar()
+        m["tx"].assert_not_awaited()

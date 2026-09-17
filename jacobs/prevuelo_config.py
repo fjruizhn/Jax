@@ -23,6 +23,12 @@ Defaults declarados, no medidos:
   base. 5 es el menor medido y deja margen en una MariaDB compartida con
   max_connections=151. Se lee al CREAR el pool: un cambio vale después de
   reiniciar el proceso (o de store.cerrar_pool()).
+- JAX_PREVUELO_CANDADO_TIMEOUT_S=10 (ola final F3, 2026-09-17): segundos que
+  crear o continuar esperan el candado con nombre de MariaDB que serializa el
+  cupo de MAX_PARALLEL_PIPELINES entre procesos (LAS MANOS y el CLI). La
+  sección que protege es recontar + escribir (milisegundos, sin LLM ni
+  sonda adentro): 10 s cubre una base lenta sin dejar a nadie colgado. Si
+  vence, falla cerrado con 503 prevuelo_no_disponible.
 
 En honor al Prof. Raúl Jacobs.
 """
@@ -34,6 +40,7 @@ SONDA_TIMEOUT_S = "JAX_PREVUELO_SONDA_TIMEOUT_S"
 CHARS_POR_TOKEN = "JAX_PREVUELO_CHARS_POR_TOKEN"
 SONDA_MAX_TOKENS = "JAX_PREVUELO_SONDA_MAX_TOKENS"
 DB_POOL_MAX = "JAX_PREVUELO_DB_POOL_MAX"
+CANDADO_TIMEOUT_S = "JAX_PREVUELO_CANDADO_TIMEOUT_S"
 
 
 def _entero_positivo(nombre: str, crudo: str) -> int:
@@ -67,3 +74,8 @@ def sonda_max_tokens() -> int:
 def db_pool_max() -> int:
     """Conexiones máximas del pool de lectura del pre-vuelo."""
     return _entero_positivo(DB_POOL_MAX, os.getenv(DB_POOL_MAX, "5"))
+
+
+def candado_timeout_s() -> int:
+    """Segundos de espera del GET_LOCK del cupo de pipelines activos."""
+    return _entero_positivo(CANDADO_TIMEOUT_S, os.getenv(CANDADO_TIMEOUT_S, "10"))

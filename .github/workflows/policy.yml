@@ -1314,8 +1314,20 @@ jobs:
           #   approve-step evalúa la ola completa, no sólo el paso aprobado. Rojo
           #   contra b9be03f: 8 failed (DID NOT RAISE / KeyError costo_max_usd / el
           #   pre-vuelo no se llamaba).
-          grep -qE "^1015 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1015 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1015 -> 1023 el 2026-09-17 (ola final de arreglos, F3, Ruling R31): el cupo de
+          #   MAX_PARALLEL_PIPELINES se recuenta y se escribe dentro del candado con
+          #   nombre de MariaDB (store.candado_de_activos), que cruza procesos.
+          #   test_jacobs_preflight_endpoint.py (+3): crear recuenta por la conexión
+          #   del candado y respeta el cupo que otro proceso llenó (422, sin crear),
+          #   crear escribe dentro del candado, candado no disponible -> 503
+          #   prevuelo_no_disponible sin crear. test_jacobs_continuar.py (+3): lo mismo
+          #   para continuar (429 sin transacción; transacción dentro del candado;
+          #   candado no disponible se propaga sin escribir). test_prevuelo_config.py
+          #   (+2): JAX_PREVUELO_CANDADO_TIMEOUT_S por defecto 10 e inválido lanza con
+          #   el nombre. Rojo contra c66705a: 8 failed (DID NOT RAISE / orden sin
+          #   candado / AttributeError).
+          grep -qE "^1023 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1023 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1383,6 +1395,7 @@ jobs:
           tests/test_jacobs_continuar_db.py
           tests/test_jacobs_events_indice_causa_db.py
           tests/test_prevuelo_pool_db.py
+          tests/test_jacobs_candado_activos_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1396,6 +1409,7 @@ jobs:
             tests/test_jacobs_continuar_db.py \
             tests/test_jacobs_events_indice_causa_db.py \
             tests/test_prevuelo_pool_db.py \
+            tests/test_jacobs_candado_activos_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1501,5 +1515,14 @@ jobs:
           #   lee bien por otra; resolver_motores y leer_catalogo leen por UNA
           #   conexión prestada sin cerrarla. Rojo contra fcb0c6a:
           #   AttributeError (store.conexion_de_lectura no existía).
-          grep -qE "^67 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 67 tests CORRIDOS."; exit 1; }
+          # 67 -> 72 el 2026-09-17 (ola final de arreglos, F3, Ruling R31):
+          #   test_jacobs_candado_activos_db.py (+5) -- contra MariaDB real, dos
+          #   sesiones que cuentan y crean con una pausa no superan el cupo (rojo por
+          #   mutación con un nombre de candado por sesión: assert 2 == 1; contra
+          #   c66705a: AttributeError), GET_LOCK que vence a 1 s da
+          #   CandadoNoDisponible, el candado se suelta aunque el bloque lance
+          #   (IS_FREE_LOCK=1 y se vuelve a tomar al instante), el nombre lleva la base
+          #   (los candados son del servidor, compartido con producción), y EXPLAIN:
+          #   GET_LOCK/RELEASE_LOCK sin tablas, recuento por idx_pipelines_status.
+          grep -qE "^72 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 72 tests CORRIDOS."; exit 1; }

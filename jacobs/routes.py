@@ -337,12 +337,36 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             updated_at=now,
         )
 
-        await store.pipeline_create(pipeline)
-        for step in steps:
-            await store.step_upsert(step)
-        await store.event_append(pipeline_id, "PIPELINE_CREATED", {
-            "name": req.name, "mode": req.mode, "steps": len(steps), **costo,
-        })
+        # F3 (ola final, Ruling R31): el conteo de arriba sólo evita planificar
+        # y sondear en vano; el cupo se decide recontando DENTRO del candado
+        # con nombre de MariaDB y escribiendo en el mismo bloque -- el
+        # asyncio.Lock no cruza al CLI de continuar, que corre en otro proceso.
+        try:
+            async with store.candado_de_activos() as conexion_del_candado:
+                active_count = await store.pipeline_count_active(conexion=conexion_del_candado)
+                policy = validate_create(
+                    invoked_by=req.invoked_by,
+                    mode=req.mode,
+                    max_steps=req.max_steps,
+                    active_count=active_count,
+                    subpipeline_token=req.subpipeline_token,
+                )
+                if not policy.ok:
+                    status_code = 423 if "kill switch" in policy.reason.lower() else 422
+                    raise HTTPException(status_code=status_code, detail=policy.reason)
+
+                await store.pipeline_create(pipeline)
+                for step in steps:
+                    await store.step_upsert(step)
+                await store.event_append(pipeline_id, "PIPELINE_CREATED", {
+                    "name": req.name, "mode": req.mode, "steps": len(steps), **costo,
+                })
+        except store.CandadoNoDisponible as exc:
+            motivo = _motivo_redactado(exc)
+            logger.error("crear: candado del cupo de activos no disponible: %s", motivo)
+            raise HTTPException(
+                status_code=503, detail={"code": "prevuelo_no_disponible", "motivo": motivo},
+            ) from exc
 
     # dry_run: no ejecuta en background, solo completa inmediatamente
     if req.mode == "dry_run":
