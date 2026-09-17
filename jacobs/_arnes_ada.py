@@ -76,23 +76,17 @@ async def cerrar(pipeline_id: str) -> None:
 
 
 async def una_fila(sql: str, args: tuple = ()) -> dict | None:
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(sql, args)
             return await cur.fetchone()
-    finally:
-        conn.close()
 
 
 async def ejecutar(sql: str, args: tuple = ()) -> int:
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(sql, args)
             return cur.rowcount
-    finally:
-        conn.close()
 
 
 async def fila_token(token_hash: str) -> dict | None:

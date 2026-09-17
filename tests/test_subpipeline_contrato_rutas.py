@@ -45,14 +45,21 @@ def test_ada_con_token_inventado_no_crea_pipeline():
         finally:
             await ada.cerrar(padre)
 
-    rechazo = asyncio.run(escenario())
+    rechazo = _correr(escenario)
     assert rechazo.status_code == 403
     assert "token_desconocido" in rechazo.detail
     assert TOKEN_INVENTADO not in rechazo.detail
 
 
 def _correr(escenario):
-    return asyncio.run(escenario())
+    async def con_cierre():
+        # Cada asyncio.run es un loop nuevo con su pool (jacobs/store.py): se
+        # cierra antes de que el loop muera, para no dejar sockets colgados.
+        try:
+            return await escenario()
+        finally:
+            await store.cerrar_pool()
+    return asyncio.run(con_cierre())
 
 
 def test_camino_legitimo_crea_el_hijo_con_padre_y_profundidad_del_token():

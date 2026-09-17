@@ -90,8 +90,7 @@ async def check_facet_health() -> dict:
     from jacobs.reaper import send_telegram_alert   # import diferido: evita ciclo
 
     now = time.time()
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT e.facet, e.ts, e.outcome FROM facet_health_event e "
@@ -149,7 +148,5 @@ async def check_facet_health() -> dict:
                 (now - HEALTH_EVENT_RETENTION_DAYS * 86400,),
             )
         await conn.commit()
-    finally:
-        conn.close()
 
     return {"states": states, "notified": [k for k, _ in notify]}

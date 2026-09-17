@@ -33,4 +33,10 @@ app.include_router(routes.router)
 
 @app.on_event("startup")
 async def _init() -> None:
+    store.tamanio_pool()  # mismo orden que LAS MANOS: validar antes de conectar
     await store.init_tables()
+
+
+@app.on_event("shutdown")
+async def _cerrar() -> None:
+    await store.cerrar_pool()

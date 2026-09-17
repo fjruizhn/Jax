@@ -273,8 +273,7 @@ def _compute_reconciliation_gap(motor_jobs: list[dict], usage_job_ids: set) -> d
 async def _fetch_reconciled_job_ids(job_ids: list[str]) -> set:
     if not job_ids:
         return set()
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         placeholders = ",".join(["%s"] * len(job_ids))
         async with conn.cursor() as cur:
             await cur.execute(
@@ -283,8 +282,6 @@ async def _fetch_reconciled_job_ids(job_ids: list[str]) -> set:
                 tuple(job_ids),
             )
             return {row[0] for row in await cur.fetchall()}
-    finally:
-        conn.close()
 
 
 async def _fetch_http_direct_expected(since: float) -> dict[str, int]:
@@ -296,8 +293,7 @@ async def _fetch_http_direct_expected(since: float) -> dict[str, int]:
     Motor Registry esto NO puede confirmar qué dispatch puntual falta --
     solo cuántos se esperaban por facet. `ts` es epoch (DOUBLE), inmune
     a timezone -- comparar directo contra `since` (también epoch)."""
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         placeholders = ",".join(["%s"] * len(HTTP_FACETS))
         async with conn.cursor() as cur:
             await cur.execute(
@@ -312,8 +308,6 @@ async def _fetch_http_direct_expected(since: float) -> dict[str, int]:
                 (*HTTP_FACETS, since),
             )
             return {row[0]: row[1] for row in await cur.fetchall()}
-    finally:
-        conn.close()
 
 
 async def _fetch_http_direct_actual(since: float) -> dict[str, int]:
@@ -326,8 +320,7 @@ async def _fetch_http_direct_actual(since: float) -> dict[str, int]:
     (limpieza de axioma_usage, 2026-08-21) perdió 90/106 filas de un
     WHERE por string de fecha exactamente por este motivo, detectado
     solo porque se verificó el conteo real del resultado."""
-    conn = await store.get_conn()
-    try:
+    async with store.conexion() as conn:
         placeholders = ",".join(["%s"] * len(HTTP_FACETS))
         async with conn.cursor() as cur:
             await cur.execute(
@@ -338,8 +331,6 @@ async def _fetch_http_direct_actual(since: float) -> dict[str, int]:
                 (*HTTP_FACETS, since),
             )
             return {row[0]: row[1] for row in await cur.fetchall()}
-    finally:
-        conn.close()
 
 
 def _compute_http_direct_gap(expected_by_facet: dict[str, int], actual_by_facet: dict[str, int]) -> dict:

@@ -212,12 +212,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest aiomysql==0.3.2 pydantic httpx cryptography pyyaml aiofiles fastapi==0.139.0
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
           python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
-            tests/test_subpipeline_contrato_rutas.py 2>&1 | tee /tmp/out
+            tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -233,8 +233,16 @@ jobs:
           #   creacion); en los dos: SUBPIPELINE_RECHAZADO sin el token, hijo no
           #   creado, error relanzado. Vistos en rojo; mutacion de cada except a
           #   `except Exception` vuelve a romper el de la cancelacion.
-          grep -qE "^36 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 36 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 36 -> 61 el 2026-09-17 (pool de conexiones de Jacobs): +25 de
+          #   jacobs/_store_pool_test.py -- 20 llamadas concurrentes no abren 20
+          #   conexiones (rojo contra eb72e78: 20 de 20; en serie 30 de 30), sesion
+          #   identica a la conexion directa, sin fugas en excepcion/cancelacion/
+          #   autocommit apagado/transaccion abierta/desechable, espera y cierre
+          #   acotados, el que espera se despierta, un pool por loop cerrado al fin
+          #   del loop, tamano validado y server.py lo valida y lo cierra. Cada
+          #   guarda validada por mutacion (pool-report.md del frente F).
+          grep -qE "^61 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 61 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

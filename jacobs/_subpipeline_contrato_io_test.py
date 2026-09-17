@@ -38,6 +38,8 @@ COLUMNAS_TOKENS = [
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
 class _ConBase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Pool por loop: cada test trae el suyo y lo cierra (jacobs/store.py).
+        self.addAsyncCleanup(store.cerrar_pool)
         await store.init_tables()
         freno = patch("jacobs.policy.check_kill_switch", return_value=False)
         freno.start()
@@ -59,8 +61,7 @@ class _ConBase(unittest.IsolatedAsyncioTestCase):
         return pid, paso
 
     async def columnas(self, tabla: str) -> list[str]:
-        conn = await store.get_conn()
-        try:
+        async with store.conexion() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
@@ -68,8 +69,6 @@ class _ConBase(unittest.IsolatedAsyncioTestCase):
                     (tabla,),
                 )
                 return [r[0] for r in await cur.fetchall()]
-        finally:
-            conn.close()
 
 
 class EsquemaTest(_ConBase):
@@ -287,29 +286,29 @@ class ConsumoTest(_ConBase):
         padre, paso = await self.padre()
         token = await sp.emitir_token_subpipeline(padre, paso)
         max_prof = sp.config_subpipelines().max_profundidad
-        conn_a = await store.get_conn()
-        try:
-            await conn_a.autocommit(False)
-            async with conn_a.cursor() as cur:
-                ahora = time.time()
-                await cur.execute(
-                    store.SQL_CONSUMIR_TOKEN,
-                    (ahora, "hijo-a", sp.hash_token(token), ahora, padre, max_prof),
+        # desechable: la sesion de A apaga autocommit a proposito; no vuelve al pool.
+        async with store.conexion(desechable=True) as conn_a:
+            try:
+                await conn_a.autocommit(False)
+                async with conn_a.cursor() as cur:
+                    ahora = time.time()
+                    await cur.execute(
+                        store.SQL_CONSUMIR_TOKEN,
+                        (ahora, "hijo-a", sp.hash_token(token), ahora, padre, max_prof),
+                    )
+                    self.assertEqual(cur.rowcount, 1)
+                tarea_b = asyncio.create_task(sp.consumir_token_subpipeline(token, padre, "hijo-b"))
+                await asyncio.sleep(1.0)
+                self.assertFalse(
+                    tarea_b.done(),
+                    "B no esperó el candado de fila de A: el consumo no es atómico",
                 )
-                self.assertEqual(cur.rowcount, 1)
-            tarea_b = asyncio.create_task(sp.consumir_token_subpipeline(token, padre, "hijo-b"))
-            await asyncio.sleep(1.0)
-            self.assertFalse(
-                tarea_b.done(),
-                "B no esperó el candado de fila de A: el consumo no es atómico",
-            )
-            await conn_a.commit()
-            resultado_b = await asyncio.wait_for(tarea_b, timeout=15)
-        finally:
-            conn_a.close()
-            # Si una aserción cortó antes de esperar a B, no queda colgada.
-            if "tarea_b" in locals() and not tarea_b.done():
-                tarea_b.cancel()
+                await conn_a.commit()
+                resultado_b = await asyncio.wait_for(tarea_b, timeout=15)
+            finally:
+                # Si una aserción cortó antes de esperar a B, no queda colgada.
+                if "tarea_b" in locals() and not tarea_b.done():
+                    tarea_b.cancel()
         self.assertEqual(resultado_b, sp.ConsumoRechazado(sp.Motivo.TOKEN_USADO))
         self.assertEqual((await ada.fila_token(sp.hash_token(token)))["hijo_pipeline_id"], "hijo-a")
 
@@ -326,8 +325,7 @@ class ConsumoTest(_ConBase):
         for _ in range(30):  # volumen: con tablas casi vacías el optimizador puede elegir ALL
             await sp.emitir_token_subpipeline(padre, paso)
         token = await sp.emitir_token_subpipeline(padre, paso)
-        conn = await store.get_conn()
-        try:
+        async with store.conexion() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 ahora = time.time()
                 # La SQL REAL (la constante que ejecuta el store), no una copia.
@@ -337,8 +335,6 @@ class ConsumoTest(_ConBase):
                      sp.config_subpipelines().max_profundidad),
                 )
                 plan = await cur.fetchall()
-        finally:
-            conn.close()
         por_tabla = {f["table"]: f for f in plan}
         self.assertEqual(set(por_tabla), {"t", "p", "s"}, plan)
         for alias, fila in por_tabla.items():
@@ -346,13 +342,10 @@ class ConsumoTest(_ConBase):
             self.assertEqual(fila["key"], "PRIMARY", f"{alias}: {fila}")
         # Las dos lecturas de identidad del padre (revisión final, I-3): t y p por PK.
         for sql in (store.SQL_TOKEN_CONSUMIDO, store.SQL_IDENTIDAD_PADRE_DEL_TOKEN):
-            conn = await store.get_conn()
-            try:
+            async with store.conexion() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cur:
                     await cur.execute("EXPLAIN " + sql, (sp.hash_token(token),))
                     plan = await cur.fetchall()
-            finally:
-                conn.close()
             por_tabla = {f["table"]: f for f in plan}
             self.assertEqual(set(por_tabla), {"t", "p"}, plan)
             for alias, fila in por_tabla.items():

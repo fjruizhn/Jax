@@ -248,6 +248,12 @@ async def _jacobs_init() -> None:
     from jacobs.subpipelines import config_subpipelines
     config_subpipelines()
 
+    # Pool de conexiones de Jacobs (2026-09-17): el tamano se valida ACA, antes
+    # de conectar. JAX_JACOBS_DB_POOL_SIZE invalido tumba el arranque
+    # (fail-closed). init_tables() crea el pool de este loop; se cierra en
+    # _jacobs_shutdown.
+    jacobs_store.tamanio_pool()
+
     await jacobs_store.init_tables()
 
     from motor_registry.routes import init_motor_catalog
@@ -293,6 +299,14 @@ async def _cerrar_cliente_http() -> None:
     await cerrar_cliente_http()
 
 
+@app.on_event("shutdown")
+async def _jacobs_shutdown() -> None:
+    """Cierra el pool de conexiones de Jacobs: espera a que vuelvan las
+    conexiones en uso y las cierra, en vez de dejar que el proceso corte los
+    sockets a mitad de una consulta."""
+    await jacobs_store.cerrar_pool()
+
+
 app.include_router(motor_router)
 app.include_router(jacobs_router)
 
@@ -331,7 +345,7 @@ async def envelope_structural_rejection(request: Request, exc: RequestValidation
 from salud import Salud, comprobar_audit, comprobar_base  # noqa: E402
 
 _salud = Salud({
-    "base de datos": lambda: comprobar_base(jacobs_store.get_conn),
+    "base de datos": lambda: comprobar_base(jacobs_store.conexion),
     "log de auditoria": lambda: comprobar_audit(audit.log_path),
 })
 

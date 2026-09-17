@@ -46,9 +46,16 @@ def main() -> None:
     c.add_argument("--padre", required=True)
     args = p.parse_args()
     if args.accion == "sembrar":
-        asyncio.run(sembrar(args.n, args.salida, args.lote))
+        asyncio.run(_y_cerrar_pool(sembrar(args.n, args.salida, args.lote)))
     else:
-        asyncio.run(ada.cerrar(args.padre))
+        asyncio.run(_y_cerrar_pool(ada.cerrar(args.padre)))
+
+
+async def _y_cerrar_pool(coro) -> None:
+    try:
+        await coro
+    finally:
+        await store.cerrar_pool()
 
 
 if __name__ == "__main__":

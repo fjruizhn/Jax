@@ -6,10 +6,13 @@ En honor al Prof. Raúl Jacobs.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 import os
 import time
+import weakref
 from typing import Any
 
 import aiomysql
@@ -48,11 +51,184 @@ def _db_cfg() -> dict:
     }
 
 
-async def get_conn() -> aiomysql.Connection:
-    # connect_timeout explícito (no en _db_cfg()): hallazgo de revisión,
-    # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
-    # aiomysql espera sin límite si la DB se cuelga.
-    return await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
+# --- Pool de conexiones ------------------------------------------------------
+# POR QUE (2026-09-17). Hasta eb72e78 cada consulta abria una conexion
+# `aiomysql` NUEVA, cerrada al terminar. Una creacion en dry_run hace
+# 5-6 llamadas; la Task 8 del frente F midio bajo carga entre 22 y 38 % de fallas
+# a 10 VUs en los tres escenarios (incluido el que no toca el contrato): cada
+# conexion deja un socket en TIME_WAIT, el rango de puertos efimeros del host se
+# agota y MariaDB ni se entera (`Lost connection ... system error 11`). Politica
+# 2 de LAS CUATRO DEL RENDIMIENTO: el pool se comparte, no se rehace por request.
+#
+# UN POOL POR EVENT LOOP, no un global unico -- misma trampa que resolvio
+# jax-platform (backend/db/connection.py): el pool de aiomysql queda atado al
+# loop que lo creo. En LAS MANOS hay un solo loop y una sola entrada; en los
+# tests cada IsolatedAsyncioTestCase trae su loop. WeakKeyDictionary: cuando un
+# loop muere su entrada se va sola.
+#
+# CICLO DE VIDA. Se crea perezosamente en el primer `conexion()` (en LAS MANOS,
+# init_tables() del startup) y se cierra en el shutdown de las_manos/server.py
+# con `cerrar_pool()`. Quien cree un loop propio (scripts, tests) lo cierra el;
+# si no, lo cierra el fin del loop (ver _guardian_del_pool).
+_pools: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[aiomysql.Pool, Any]]" = (
+    weakref.WeakKeyDictionary()
+)
+
+ENV_TAMANIO_POOL = "JAX_JACOBS_DB_POOL_SIZE"
+
+# Medido 2026-09-17 (loadtest/jacobs_subpipelines.js, app aislada sobre
+# jax_memory_test, pool-report.md del frente F): ver la tabla de tamanos en el
+# reporte. Un solo proceso de LAS MANOS con un solo loop.
+TAMANIO_POOL_POR_DEFECTO = 10
+
+# max_connections de la MariaDB de hall9000 = 151 (SHOW GLOBAL VARIABLES,
+# 2026-09-17; Max_used_connections=95 historico). jax-platform abre hasta 10 por
+# proceso y hay mas clientes (workers de memoria, jobs, la consola de
+# emergencia): mas de un tercio del servidor para Jacobs solo seria quitarselo a
+# los demas.
+TAMANIO_POOL_MAXIMO = 50
+
+# Una conexion ociosa mas vieja que esto se recicla al pedirla. wait_timeout del
+# servidor = 28800 s (medido el mismo dia): una hora queda muy por debajo, asi
+# que el pool nunca entrega una conexion que MariaDB ya corto por inactividad.
+_RECICLAR_SEGUNDOS = 3600
+
+
+def tamanio_pool() -> int:
+    """Lee y valida `JAX_JACOBS_DB_POOL_SIZE`. Ausente -> default. Presente pero
+    vacia, no entera o fuera de [1, TAMANIO_POOL_MAXIMO] -> RuntimeError
+    (fail-closed: un typo no se convierte en un pool de 0 o de 5000)."""
+    crudo = os.environ.get(ENV_TAMANIO_POOL)
+    if crudo is None:
+        return TAMANIO_POOL_POR_DEFECTO
+    try:
+        valor = int(crudo)
+    except ValueError:
+        valor = None
+    if valor is None or not 1 <= valor <= TAMANIO_POOL_MAXIMO:
+        raise RuntimeError(
+            f"{ENV_TAMANIO_POOL}={crudo!r} invalido -- tiene que ser un entero entre 1 "
+            f"y {TAMANIO_POOL_MAXIMO} (max_connections de la MariaDB es 151 y la "
+            "comparten todos los servicios)."
+        )
+    return valor
+
+
+async def obtener_pool() -> aiomysql.Pool:
+    """El pool de ESTE loop; lo crea si no hay o si el que habia se cerro."""
+    loop = asyncio.get_running_loop()
+    entrada = _pools.get(loop)
+    if entrada is None or entrada[0].closed:
+        cfg = _db_cfg()
+        maximo = tamanio_pool()
+        pool = await aiomysql.create_pool(
+            minsize=1,
+            maxsize=maximo,
+            pool_recycle=_RECICLAR_SEGUNDOS,
+            # connect_timeout explicito: sin esto aiomysql espera sin limite si
+            # la DB se cuelga (Tarea 2b, tanda A, 2026-09-14).
+            connect_timeout=db_connect_timeout_seconds(),
+            **cfg,
+        )
+        guardian = _guardian_del_pool(pool)
+        await guardian.__anext__()
+        _pools[loop] = (pool, guardian)
+        return pool
+    return entrada[0]
+
+
+async def _guardian_del_pool(pool: aiomysql.Pool):
+    """Ata el cierre del pool al fin de SU loop.
+
+    Un generador asincrono vivo queda registrado en el loop, y
+    `asyncio.run()`/`asyncio.Runner` (y por lo tanto uvicorn y cada
+    IsolatedAsyncioTestCase) llaman `loop.shutdown_asyncgens()` antes de cerrar
+    el loop: eso corre este `finally`. Sin esto, quien crea un loop y no llama a
+    `cerrar_pool()` deja sockets abiertos que el recolector cierra con el loop ya
+    muerto (medido en la suite: 29 `Exception ignored ... Event loop is closed`).
+    `cerrar_pool()` explicito sigue siendo el camino declarado; este es la red."""
+    try:
+        yield
+    finally:
+        await _cerrar(pool)
+
+
+async def _cerrar(pool: aiomysql.Pool) -> None:
+    """Cierra esperando a que vuelvan las conexiones en uso, con limite: una
+    consulta colgada no puede dejar el apagado colgado. Vencido el limite, se
+    cortan a la fuerza (terminate) y queda ERROR en el log."""
+    if pool.closed:
+        return
+    pool.close()
+    limite = db_connect_timeout_seconds()
+    try:
+        await asyncio.wait_for(pool.wait_closed(), timeout=limite)
+    except TimeoutError:
+        logger.error(
+            "jacobs.store: %d conexion(es) seguian en uso %d s despues de cerrar el "
+            "pool; se cortan a la fuerza.", pool.size - pool.freesize, limite,
+        )
+        pool.terminate()
+        await pool.wait_closed()
+
+
+async def cerrar_pool() -> None:
+    """Cierra el pool DE ESTE loop (esperar el de otro loop volveria a cruzar
+    loops). Idempotente."""
+    entrada = _pools.pop(asyncio.get_running_loop(), None)
+    if entrada is not None:
+        pool, guardian = entrada
+        await guardian.aclose()  # corre el finally: _cerrar(pool)
+        await _cerrar(pool)      # por si el guardian ya habia terminado
+
+
+def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
+    """Solo vuelve al pool una sesion igual a la que el pool entrego: abierta,
+    autocommit encendido y sin transaccion en curso. aiomysql 0.3.2 solo mira
+    la transaccion; un `autocommit(False)` sin consulta pasaria."""
+    return (not conn.closed) and conn.get_autocommit() and not conn.get_transaction_status()
+
+
+@contextlib.asynccontextmanager
+async def conexion(desechable: bool = False):
+    """Una conexion del pool, devuelta al salir.
+
+    Se DESCARTA (se cierra, el pool abre otra cuando haga falta) si el cuerpo
+    termino con excepcion o cancelacion -- el socket puede haber quedado a mitad
+    de una respuesta --, si la sesion quedo sucia, o si `desechable=True` (para
+    quien cambia variables de sesion, como el DDL acotado de init_tables).
+
+    Esperar un hueco tiene limite: `JAX_DB_CONNECT_TIMEOUT_SECONDS`, el mismo
+    que acota abrir el socket. Con el pool lleno mas alla de eso, TimeoutError:
+    fail-closed, no una espera infinita (aiomysql espera sin limite)."""
+    pool = await obtener_pool()
+    limite = db_connect_timeout_seconds()
+    try:
+        conn = await asyncio.wait_for(pool.acquire(), timeout=limite)
+    except TimeoutError as e:
+        raise TimeoutError(
+            f"jacobs.store: sin conexion libre en el pool tras {limite} s "
+            f"(tamano {pool.maxsize}, en uso {pool.size - pool.freesize})"
+        ) from e
+    limpia = False
+    try:
+        yield conn
+        limpia = True
+    finally:
+        descartar = desechable or not limpia or not _sesion_reutilizable(conn)
+        if descartar:
+            conn.close()
+        # release() es sincronico en lo que importa: saca la conexion de
+        # `_used` antes de devolver. Lo que se espera es el aviso a los que
+        # esperan hueco.
+        espera = pool.release(conn)
+        if descartar:
+            # aiomysql 0.3.2 NO despierta a quien espera cuando la conexion
+            # devuelta esta cerrada: con el pool lleno se quedaria colgado hasta
+            # el limite aunque ya hay hueco. Probado en _store_pool_test.py.
+            await pool._wakeup()
+        else:
+            await espera
 
 
 # Hijo de "jacobs": LAS MANOS le pone handler INFO a ese logger al arrancar
@@ -136,8 +312,9 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
 
 async def init_tables() -> None:
     """Crea las tablas si no existen. Llamar al arrancar."""
-    conn = await get_conn()
-    try:
+    # desechable: _crear_indice_acotado cambia lock_wait_timeout de la SESION.
+    # Lo restaura en su finally, pero una sesion tocada no vuelve al pool.
+    async with conexion(desechable=True) as conn:
         async with conn.cursor() as cur:
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS jacobs_pipelines (
@@ -274,8 +451,6 @@ async def init_tables() -> None:
                     await _crear_indice_acotado(cur, tabla, indice, ddl)
                 else:
                     await cur.execute(ddl)
-    finally:
-        conn.close()
 
 
 # ----------------------------------------------------------------
@@ -283,8 +458,7 @@ async def init_tables() -> None:
 # ----------------------------------------------------------------
 
 async def pipeline_create(p: Pipeline) -> None:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -305,20 +479,15 @@ async def pipeline_create(p: Pipeline) -> None:
                     p.parent_pipeline_id, p.depth,
                 ),
             )
-    finally:
-        conn.close()
 
 
 async def pipeline_get(pipeline_id: str) -> Pipeline | None:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s", (pipeline_id,)
             )
             row = await cur.fetchone()
-    finally:
-        conn.close()
     if not row:
         return None
     return _row_to_pipeline(row)
@@ -331,8 +500,7 @@ async def pipeline_update_status(
     context: dict | None = None,
 ) -> None:
     now = time.time()
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor() as cur:
             if current_step_index is not None and context is not None:
                 await cur.execute(
@@ -357,8 +525,6 @@ async def pipeline_update_status(
                     "UPDATE jacobs_pipelines SET status=%s, updated_at=%s WHERE pipeline_id=%s",
                     (status.value, now, pipeline_id),
                 )
-    finally:
-        conn.close()
 
 
 async def pipelines_by_status(statuses: list[PipelineStatus]) -> list[Pipeline]:
@@ -367,8 +533,7 @@ async def pipelines_by_status(statuses: list[PipelineStatus]) -> list[Pipeline]:
     es criterio del reaper."""
     if not statuses:
         return []
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             placeholders = ",".join(["%s"] * len(statuses))
             await cur.execute(
@@ -376,22 +541,17 @@ async def pipelines_by_status(statuses: list[PipelineStatus]) -> list[Pipeline]:
                 tuple(s.value for s in statuses),
             )
             rows = await cur.fetchall()
-    finally:
-        conn.close()
     return [_row_to_pipeline(row) for row in rows]
 
 
 async def pipeline_count_active() -> int:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')"
             )
             row = await cur.fetchone()
             return int(row[0]) if row else 0
-    finally:
-        conn.close()
 
 
 def _row_to_pipeline(row: dict) -> Pipeline:
@@ -431,8 +591,7 @@ def _row_to_pipeline(row: dict) -> Pipeline:
 # ----------------------------------------------------------------
 
 async def step_upsert(s: Step) -> None:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -461,21 +620,16 @@ async def step_upsert(s: Step) -> None:
                     json.dumps(s.depends_on, ensure_ascii=False),
                 ),
             )
-    finally:
-        conn.close()
 
 
 async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_steps WHERE pipeline_id=%s ORDER BY step_index",
                 (pipeline_id,),
             )
             rows = await cur.fetchall()
-    finally:
-        conn.close()
     result = []
     for row in rows:
         input_raw = row.get("input_ref") or "{}"
@@ -546,8 +700,7 @@ async def get_motor_governance() -> dict[str, dict]:
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
     no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) se agregó
     después y NO está medido."""
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute("SELECT `key`, has_tool_access FROM motor")
             motors: dict[str, bool] = {key: bool(has_tools) for key, has_tools in await cur.fetchall()}
@@ -601,8 +754,6 @@ async def get_motor_governance() -> dict[str, dict]:
             # despachar. Catálogo de 7 filas: sin índice, declarado en DEUDA.md.
             await cur.execute("SELECT `key` FROM facet WHERE status = 'active'")
             facets = frozenset(key for (key,) in await cur.fetchall())
-    finally:
-        conn.close()
     return {"capabilities": capabilities, "motors": motors, "facets": facets}
 
 
@@ -638,8 +789,7 @@ async def subpipeline_token_emitir(
     """Inserta el hash solo si el padre está `running`, el paso existe, es de
     ese padre y es de Ada (en cualquier estado: enmienda 2026-09-16), y el
     hijo no excede la profundidad. Devuelve depth_hijo, o None si no insertó."""
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 SQL_EMITIR_TOKEN,
@@ -653,13 +803,10 @@ async def subpipeline_token_emitir(
             )
             (depth_hijo,) = await cur.fetchone()
             return int(depth_hijo)
-    finally:
-        conn.close()
 
 
 async def subpipeline_emision_diagnostico(parent_pipeline_id: str, parent_step: str) -> dict:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT status, depth FROM jacobs_pipelines WHERE pipeline_id = %s",
@@ -671,8 +818,6 @@ async def subpipeline_emision_diagnostico(parent_pipeline_id: str, parent_step: 
                 (parent_step,),
             )
             paso = await cur.fetchone()
-    finally:
-        conn.close()
     return {
         "padre_status": padre["status"] if padre else None,
         "padre_depth": int(padre["depth"]) if padre else None,
@@ -748,8 +893,7 @@ async def subpipeline_token_consumir(
     condicionado no están haciendo lo que dicen (invariante roto), y eso NO
     es un rechazo -- se revienta fuerte en vez de devolver un TOKEN_USADO
     engañoso que quemaría el token contra el hijo equivocado en silencio."""
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 SQL_CONSUMIR_TOKEN,
@@ -765,30 +909,22 @@ async def subpipeline_token_consumir(
                     f"la relectura por PK no es del hijo esperado (hijo_pipeline_id={hijo_pipeline_id!r})"
                 )
             return fila
-    finally:
-        conn.close()
 
 
 async def subpipeline_token_identidad_padre(token_hash: str) -> dict | None:
     """(parent_pipeline_id, user_id, tenant_id) del padre del token, o None si
     el hash no existe o el padre ya no está. Solo lectura: no consume."""
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(SQL_IDENTIDAD_PADRE_DEL_TOKEN, (token_hash,))
             return await cur.fetchone()
-    finally:
-        conn.close()
 
 
 async def subpipeline_token_diagnostico(token_hash: str) -> dict | None:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(SQL_DIAGNOSTICO_TOKEN, (token_hash,))
             return await cur.fetchone()
-    finally:
-        conn.close()
 
 
 # ----------------------------------------------------------------
@@ -801,8 +937,7 @@ async def event_append(
     payload: dict | None = None,
     step_id: str | None = None,
 ) -> None:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """INSERT INTO jacobs_events (pipeline_id, step_id, event_type, payload, ts)
@@ -813,21 +948,16 @@ async def event_append(
                     time.time(),
                 ),
             )
-    finally:
-        conn.close()
 
 
 async def events_by_pipeline(pipeline_id: str) -> list[dict[str, Any]]:
-    conn = await get_conn()
-    try:
+    async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_events WHERE pipeline_id=%s ORDER BY id",
                 (pipeline_id,),
             )
             rows = await cur.fetchall()
-    finally:
-        conn.close()
     result = []
     for row in rows:
         payload_raw = row.get("payload") or "{}"
