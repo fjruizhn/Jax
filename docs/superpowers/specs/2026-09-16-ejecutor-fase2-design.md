@@ -275,6 +275,31 @@ con un tope de espera configurable que, al vencerse, **falla la misión** en vez
 
 ---
 
+### 3.4 bis · Dónde se engancha la cola, en la realidad (2026-09-16, al ir a conectarla)
+
+§3.4 suponía que el Ejecutor es código nuestro que puede tomar un carril. **No lo es.** El arnés de la
+Fase 0 corre **Claude Code** como el usuario `axioma`, con `ANTHROPIC_BASE_URL` apuntando **directo**
+a Ollama. Un `flock` en Python no frena tráfico que sale de un proceso Node hacia un puerto HTTP.
+Y la Mesa tampoco llama a Ollama desde jax-platform: pasa por LAS MANOS (`motor_registry`) y Jacobs.
+
+**Lado Ejecutor — un proxy con carril.** `ANTHROPIC_BASE_URL` apunta a un proxy local. Por **cada
+petición** toma `carril_ejecutor`, reenvía a Ollama **con streaming** y suelta el carril cuando termina
+la respuesta (o se corta). Tope vencido → **HTTP 503**: la misión falla, no se cuela. Suelta entre
+*peticiones*, que es más fino que el «entre pasos» de §3.4.
+
+**Lado Mesa — carril async.** El worker llama a Ollama con `httpx` async y `flock` es bloqueante:
+usarlo tal cual congelaría el event loop de LAS MANOS (tercera de LAS CUATRO DEL RENDIMIENTO). El
+lock se toma con `asyncio.to_thread` y se sostiene mientras dura la respuesta.
+
+**Acoplamiento declarado:** el carril de Mesa serializa peticiones de Mesa entre sí. Hoy es gratis
+porque Ollama ya corre con **`OLLAMA_NUM_PARALLEL=1`** (verificado en `/proc/<pid>/environ`). Si ese
+valor sube, la cola pasaría a **frenar a la Mesa en silencio**. Por eso el valor queda atado al
+tripwire que ya vigila `OLLAMA_NUM_PARALLEL`.
+
+**V3 se mide antes de cablear producción:** la sonda de U5 toma el carril de Mesa y el Ejecutor pasa
+por el proxy. Eso valida el **mecanismo**. Cablear el worker real de LAS MANOS es un despliegue aparte,
+con su propia verificación.
+
 ## 4. Flujo de un turno
 
 ```
