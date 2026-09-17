@@ -91,6 +91,19 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_pipelines", "idx_jacobs_pipelines_duenio",
      "CREATE INDEX idx_jacobs_pipelines_duenio ON jacobs_pipelines "
      "(user_id, tenant_id, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    # idx_events_pipeline_tipo (2026-09-17, Ruling R20, LAS CUATRO #1): la
+    # Mesa (jax-platform backend/api/pipelines.py::sql_eventos_de_causa) lee
+    # la causa de aborto de hasta 50 pipelines con
+    # WHERE pipeline_id IN (...) AND event_type IN (5 tipos). Medido por el
+    # plan P en jax_memory_test (50 pipelines, 11.050 eventos): con solo
+    # idx_events_pipeline (pipeline_id), EXPLAIN range examina las 11.050
+    # filas de esos pipelines para devolver 1.050 (8,1 ms; carga c=25 p95
+    # 147 ms). idx_events_pipeline NO se borra -- otras consultas filtran
+    # solo por pipeline_id (events_by_pipeline) y ese acceso les sigue
+    # sirviendo igual.
+    ("jacobs_events", "idx_events_pipeline_tipo",
+     "CREATE INDEX idx_events_pipeline_tipo ON jacobs_events "
+     "(pipeline_id, event_type) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB

@@ -1246,6 +1246,7 @@ jobs:
           tests/test_run_epoch_db.py
           tests/test_prevuelo_catalogo_db.py
           tests/test_jacobs_continuar_db.py
+          tests/test_jacobs_events_indice_causa_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1257,6 +1258,7 @@ jobs:
             tests/test_run_epoch_db.py \
             tests/test_prevuelo_catalogo_db.py \
             tests/test_jacobs_continuar_db.py \
+            tests/test_jacobs_events_indice_causa_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1345,5 +1347,15 @@ jobs:
           #   RuntimeError en su lugar (store.time.time mutado) en cada uno:
           #   el pytest.raises angosto no lo atrapa y el test falla de
           #   verdad, a diferencia del Exception genérico de antes.
-          grep -qE "^62 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 62 tests CORRIDOS."; exit 1; }
+          # 62 -> 64 el 2026-09-17 (Task 12b, Ruling R20): +2 en
+          #   test_jacobs_events_indice_causa_db.py -- init_tables() crea
+          #   idx_events_pipeline_tipo (pipeline_id, event_type) sin borrar
+          #   idx_events_pipeline; EXPLAIN FORMAT=JSON de la consulta EXACTA
+          #   de la Mesa (sql_eventos_de_causa/EVENTOS_DE_CAUSA, copiada sin
+          #   importar de jax-platform) con 20 pipelines/4.040 eventos usa el
+          #   compuesto (used_key_parts incluye event_type, sin ALL ni
+          #   filesort, rows estimado 120 << 4.000). Rojo visto contra el
+          #   código viejo: key=idx_events_pipeline, used_key_parts=[pipeline_id]
+          #   solamente (report Task 12b).
+          grep -qE "^64 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 64 tests CORRIDOS."; exit 1; }
