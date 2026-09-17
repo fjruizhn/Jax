@@ -26,6 +26,9 @@ import { SharedArray } from 'k6/data';
 const BASE = __ENV.BASE || 'http://127.0.0.1:7799';
 const ESCENARIO = __ENV.ESCENARIO || 'legitimo';
 const VUS = parseInt(__ENV.VUS || '25', 10);
+// Credencial de servicio (las_manos/auth_servicio.py): sin ella LAS MANOS responde 401.
+const CREDENCIAL = __ENV.CREDENCIAL || '';
+if (!CREDENCIAL) throw new Error('falta CREDENCIAL (JAX_LAS_MANOS_CREDENCIAL_* de la app de carga)');
 const PADRE = __ENV.PADRE || '';
 
 const TOKENS = ESCENARIO === 'legitimo'
@@ -69,7 +72,7 @@ function cuerpo() {
 
 export default function () {
   const r = http.post(`${BASE}/jacobs/pipeline`, JSON.stringify(cuerpo()), {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-Jax-Credencial-Servicio': CREDENCIAL },
     tags: { escenario: ESCENARIO },
   });
   const limite = r.status === 422 && String(r.body).includes('pipelines activos');

@@ -282,6 +282,11 @@ Fase 0 corre **Claude Code** como el usuario `axioma`, con `ANTHROPIC_BASE_URL` 
 a Ollama. Un `flock` en Python no frena tráfico que sale de un proceso Node hacia un puerto HTTP.
 Y la Mesa tampoco llama a Ollama desde jax-platform: pasa por LAS MANOS (`motor_registry`) y Jacobs.
 
+> **CORREGIDO 2026-09-17 (Mr. Hyde, medido en SP3 contra el código):** la frase de arriba es falsa. La Mesa
+> llama a Ollama **directo** desde `jax-platform/backend/api/chat.py` (`_call_ollama`), y la sonda de
+> `facet_canary` entra por el mismo camino. El carril de la Mesa se tomó ahí (§6.3.1), no en LAS MANOS; el
+> «lado Mesa» de abajo vale con ese lugar cambiado.
+
 **Lado Ejecutor — un proxy con carril.** `ANTHROPIC_BASE_URL` apunta a un proxy local. Por **cada
 petición** toma `carril_ejecutor`, reenvía a Ollama **con streaming** y suelta el carril cuando termina
 la respuesta (o se corta). Tope vencido → **HTTP 503**: la misión falla, no se cuela. Suelta entre
@@ -381,6 +386,13 @@ misma que la de U5, así que la mejora no es atribuible entera a la cola.
 ### 6.2 Condiciones para poner el Ejecutor en producción (derivadas de 6.1)
 
 No se cumplen hoy, y ninguna se cambió en producción: **sin Ejecutor en producción, pagarlas no compra nada**.
+
+> **CORREGIDO 2026-09-17 (Mr. Hyde):** el punto 1 nombra mal al tercer consumidor — el memory worker NO usa
+> `jax_local`, sólo `bge-m3`; el tercer consumidor real de `jax_local` es `facet_canary` (junto a la Mesa y el
+> Ejecutor). El punto 4 cablea en el lugar equivocado: el carril va en `api/chat.py` de jax-platform. Ver §6.3.
+> **Estado en producción 2026-09-17:** 1 hecho (`unificar_contexto_mesa.sh`, Mesa en 131072); 2 hecho (proxy
+> `jax-ejecutor-proxy` con tope y modelo fijo); 4 hecho (carriles en `/var/lib/jax-carril`, grupo `jax-carril`, sin
+> `axioma`). Ver §6.4.
 
 1. **Contexto unificado en 131072 para TODO consumidor de `jax_local`**, o las recargas vuelven. Incluye un
    **tercer consumidor** hallado al medir: `jax-memory-worker.timer` (cada 20 min, destila con `jax_local` y
@@ -482,3 +494,17 @@ después. C5 conserva el resto de su alcance (salirse de misión, prohibidos) y 
    el valor convertido sí es citable—, **no** aflojar el verificador.
 4. **Los hechos inyectados caducan.** Un hecho de hace una hora presentado como actual es una
    mentira nueva. Por eso el TTL, y por eso cada hecho lleva su hora a la vista.
+
+### 6.4 Estado en producción — 2026-09-17 (Mr. Hyde, verificado en vivo)
+
+- **Contratos C1–C6 y arranque condicionado desplegados en hall9000.** C1: 21 reglas (incluye 7 contra
+  envoltorios: 15/15 bloqueados, 10/10 legítimos pasan). Arranque acotado a las máquinas de la misión.
+- **Blanco:** VM desechable `ejecutor-prueba` (192.168.122.50:58291, sin datos de clientes, C4/C6 remotos
+  instalados). atemai, prod y bridge siguen **no elegibles** (datos de clientes, compuerta de C5 cerrada, sin
+  C4/C6 remotos): habilitarlos es decisión de Fernando.
+- **SP2 (vía de producto):** jax-platform `/api/ejecutor/*` (superadmin) + modo «Ejecutor» en la UI, desplegado
+  09:53 (`5a0832d`, frontend `index-W1A2HA8K.js`). Misión real desde la API de producción: con atemai → 403
+  `ejecutor_maquina_no_elegible`; contra la VM, turno 1 respaldó el kernel y **descartó** la memoria (citó un
+  token, la línea real era la fila de `free`); turno 2 retomado respaldó las dos con línea literal;
+  `registro_cuadra`, `cadena_ok`, auditor legible, sin pausa. Carga de la API: 25 VUs p95 25 ms.
+

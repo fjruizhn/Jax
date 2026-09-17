@@ -30,6 +30,13 @@ routes._build_plan_or_reject = _arnes_ada.plan_de_un_paso
 app = FastAPI(title="carga-contrato-subpipelines")
 app.include_router(routes.router)
 
+# Mismo middleware que LAS MANOS (auth_servicio.proteger): lee las credenciales
+# JAX_LAS_MANOS_CREDENCIAL_* del entorno y falla cerrado si faltan. k6 manda
+# la de jacobs en __ENV.CREDENCIAL.
+from auth_servicio import proteger  # noqa: E402
+
+proteger(app)
+
 
 @app.on_event("startup")
 async def _init() -> None:

@@ -457,6 +457,21 @@ su fecha de última verificación real, no una nueva.
   cuenta de servicio para LAS MANOS/jax-platform. (2) frente G (emisor de sub-pipelines de Ada) tiene que mandar
   `headers=encabezado_propio(IDENTIDAD_JACOBS)`. (3) los apps de carga de `loadtest/` montan los routers sin
   `proteger()`.
+- **CORREGIDO 2026-09-17 (Mr. Hyde, verificado):**
+  - **(3) CERRADO.** `loadtest/authorize_facet_app.py` y `loadtest/jacobs_subpipelines_app.py` llaman `proteger(app)`;
+    los k6 mandan `X-Jax-Credencial-Servicio` desde `__ENV.CREDENCIAL` y abortan sin ella. Guardia
+    `tests/test_loadtest_apps_protegidas.py` (AST; vista en rojo, mutación → 1 rojo). Medido contra `jax_memory_test`:
+    sin credencial 401, identidad ajena 403, propia pasa; `authorize_facet.js` a 25 VUs con los tres caminos
+    (permitido / fail-closed / caller ajeno) p95 5,81 ms, 6140 req/s, 100 % checks, 0 fallas.
+  - **(2) CERRADO como propiedad.** No hay en el árbol un emisor de sub-pipelines de Ada que llame
+    `POST /jacobs/pipeline` (`grep` sin coincidencias fuera de tests/loadtest). Los tres llamados de `jacobs/executor.py`
+    ya mandan `encabezado_propio(IDENTIDAD_JACOBS)`. Un emisor futuro sin cabecera recibe 401 (el middleware es
+    deny-by-default), así que no puede quedar abierto en silencio.
+  - **(1) DECISIÓN DE FERNANDO, no deuda técnica.** Medido: `fruiz` tiene `(ALL : ALL) ALL` en sudo (con contraseña y
+    caché de sesión). Una cuenta de servicio para LAS MANOS/jax-platform con `.env` `root:jaxsvc 640` sólo cierra el
+    caso "proceso de `fruiz` sin sudo en caché"; cambia cómo operan y despliegan TODAS las sesiones de Mr. Hyde
+    (checkouts, venvs, `/etc/jax/.env`, unidades). La jaula de Hyde no monta `.env` y el Ejecutor corre como `axioma`
+    (sin acceso), que son los procesos no-operador. Queda como decisión del operador, con este análisis.
 
 ## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 2: C3 registro intocable y cerco (2026-09-17)
 
@@ -491,7 +506,13 @@ Rama `feat/ejecutor-arranque` (sobre master `6563cb4`), SIN PUBLICAR. `arranque.
   (`freno_sin_remotos`; `llaves_no_son_de_root`, `sin_llave_del_freno`, `sin_revocador` en atemai, prod y bridge). Se
   cierra con `instalar_en_maquina.sh <m>` + `JAX_EJECUTOR_FRENO_REMOTOS` (DEUDA «plan 3»). Y toda misión: las cuatro
   máquinas tienen `con_datos_de_clientes=1` y la compuerta sigue en `false` ⇒ `auditor_no_admite_datos_de_clientes`.
-- [ ] **2026-09-24 · Obligaciones del transporte `harness` (SP2) que dejan vivos los contratos de SP1:**
+- [x] **2026-09-24 · Obligaciones del transporte `harness` (SP2) que dejan vivos los contratos de SP1:**
+  **CORREGIDO 2026-09-17 (Mr. Hyde):** 1–6 hechos y ejercitados en producción por SP2 (misión 9c2a9d8d desde
+  `/api/ejecutor`: arranque verificado, vigía latiendo, afirmaciones con `proposito` citadas, `registro_cuadra`,
+  `cadena_ok`, auditor legible, cierre del vigía). 7 no aplica hoy (el único cerebro es local; un cerebro de nube es
+  una capacidad nueva con su propio proxy, no una obligación de SP2). 8 queda como está a propósito: `jax_local` es
+  el cerebro medido en U3/V1–V4 y la faceta `ejecutor` sin binding hacía reventar C5; crearla sería una faceta
+  duplicada del mismo modelo sin nada que la distinga.
   1. Lanzar sólo con `ejecutor-vigia@<mision>` activo y latiendo (`vigia_servicio` ya exige los contratos con los
      `hosts` reales); la guardia `test_ejecutor_lanza_solo_con_contratos.py` impone `exigir_contratos` a quien use
      `remoto_claude` o `vigilar`.
@@ -576,6 +597,10 @@ los commits propios de C4 se reaplican encima.
 - **Por qué no en C3:** el modelo permitido sale de `facet_binding` en vivo y el proxy no tiene DB; es el transporte
   `harness` de SP2 / el tope del proxy de SP3 (§6.2), que ya tienen que resolver el modelo del cerebro.
 - **Verificación de cierre:** un `POST /v1/messages` con `model` distinto del del cerebro da 403 sin tocar el upstream.
+- **CERRADO 2026-09-17 (SP3, desplegado):** `jax/ejecutor/proxy_carril.py` fija `JAX_PROXY_CARRIL_MODELO`
+  (producción: `qwen3.6-mesa-131k`), tope de salida y rutas (`HEAD /api/hello`, `POST /v1/messages`). Tests
+  `tests/test_ejecutor_proxy_modelo_y_rutas.py` (otro modelo, cuerpo ilegible, tope y GET arbitrario no llegan a
+  Ollama). En vivo sin vigía el proxy responde 423 antes de mirar el modelo (la pausa va primero).
 
 ## Cerrado en código, deploy de jax URGENTE — frente B: kill switch real (2026-09-17)
 
