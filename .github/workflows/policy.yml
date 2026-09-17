@@ -1193,8 +1193,14 @@ jobs:
           #   en local (3.14) simulando el runner (env limpio, sin JAX_DB_HOST, sin
           #   checkout de jax-platform): "872 passed, 1 skipped, 1 xfailed".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1108 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1108 + 19 -> 1127 el 2026-09-17, rebase del frente F sobre origin/master
+          #   f9c7073 (frente B y C3): las dos listas de tests-puros suman
+          #   test_subpipeline_contrato_puro.py (+19 del frente F) a los 1108 de master.
+          #   MEDIDO dos veces en local (3.14), env limpio, sin JAX_DB_HOST y con
+          #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1127 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1127 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1127 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1309,5 +1315,9 @@ jobs:
           # 29 sin cambio tras el rebase del frente F (2026-09-17): el test de E
           #   pasa por store.conexion() (get_conn ya no existe). Medido dos veces
           #   con las migraciones de jax-platform c414eba y el sello en un tmp.
+          # 31 sin cambio tras el rebase del frente F sobre f9c7073 (2026-09-17): los
+          #   29 de E/F + los 2 del Ejecutor; test_ejecutor_politica_db.py migra de
+          #   get_conn() a store.conexion(). Medido dos veces con las migraciones de
+          #   jax-platform 0c6eb67 y el sello en un tmp: 31 passed.
           grep -qE "^31 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 31 tests CORRIDOS."; exit 1; }
