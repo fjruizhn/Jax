@@ -702,9 +702,9 @@ SQL_CONSUMIR_TOKEN = """
 """
 
 SQL_TOKEN_CONSUMIDO = """
-    SELECT parent_pipeline_id, parent_step, depth_hijo
+    SELECT parent_pipeline_id, parent_step, depth_hijo, hijo_pipeline_id
       FROM jacobs_subpipeline_tokens
-     WHERE token_hash = %s AND hijo_pipeline_id = %s
+     WHERE token_hash = %s
 """
 
 SQL_DIAGNOSTICO_TOKEN = """
@@ -726,7 +726,14 @@ async def subpipeline_token_consumir(
     max_profundidad: int,
 ) -> dict | None:
     """Consume el token para `hijo_pipeline_id`. Devuelve la fila consumida
-    (parent_pipeline_id, parent_step, depth_hijo) o None si no afectó una fila."""
+    (parent_pipeline_id, parent_step, depth_hijo) o None si no afectó una fila.
+
+    La confirmación lee por PK (token_hash), no por hijo_pipeline_id: si el
+    UPDATE reportó una fila afectada pero la relectura no existe o su
+    hijo_pipeline_id no es el nuestro, el candado de fila y el UPDATE
+    condicionado no están haciendo lo que dicen (invariante roto), y eso NO
+    es un rechazo -- se revienta fuerte en vez de devolver un TOKEN_USADO
+    engañoso que quemaría el token contra el hijo equivocado en silencio."""
     conn = await get_conn()
     try:
         async with conn.cursor(aiomysql.DictCursor) as cur:
@@ -736,8 +743,14 @@ async def subpipeline_token_consumir(
             )
             if cur.rowcount != 1:
                 return None
-            await cur.execute(SQL_TOKEN_CONSUMIDO, (token_hash, hijo_pipeline_id))
-            return await cur.fetchone()
+            await cur.execute(SQL_TOKEN_CONSUMIDO, (token_hash,))
+            fila = await cur.fetchone()
+            if fila is None or fila["hijo_pipeline_id"] != hijo_pipeline_id:
+                raise RuntimeError(
+                    "invariante del consumo roto: el UPDATE reportó una fila afectada pero "
+                    f"la relectura por PK no es del hijo esperado (hijo_pipeline_id={hijo_pipeline_id!r})"
+                )
+            return fila
     finally:
         conn.close()
 

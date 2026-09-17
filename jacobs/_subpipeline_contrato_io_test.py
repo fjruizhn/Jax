@@ -253,15 +253,21 @@ class ConsumoTest(_ConBase):
         padre, paso = await self.padre()
         for ronda in range(10):
             token = await sp.emitir_token_subpipeline(padre, paso)
+            hijos = [str(uuid.uuid4()) for _ in range(20)]
             resultados = await asyncio.gather(*[
-                sp.consumir_token_subpipeline(token, padre, str(uuid.uuid4()))
-                for _ in range(20)
+                sp.consumir_token_subpipeline(token, padre, hijo) for hijo in hijos
             ])
             ganadores = [r for r in resultados if isinstance(r, sp.TokenConsumido)]
             perdedores = [r for r in resultados if not isinstance(r, sp.TokenConsumido)]
             self.assertEqual(len(ganadores), 1, f"ronda {ronda}: {resultados}")
             self.assertEqual(
                 set(perdedores), {sp.ConsumoRechazado(sp.Motivo.TOKEN_USADO)}, f"ronda {ronda}")
+            hijo_ganador = hijos[resultados.index(ganadores[0])]
+            fila = await ada.fila_token(sp.hash_token(token))
+            self.assertEqual(
+                fila["hijo_pipeline_id"], hijo_ganador,
+                f"ronda {ronda}: la fila quedó atada a un hijo que no es el que ganó",
+            )
 
     async def test_carrera_forzada_el_segundo_espera_el_candado_y_pierde(self):
         """Intercalado forzado con dos sesiones reales: A consume y NO confirma;
