@@ -218,19 +218,35 @@ def test_explain_credencial_y_modelos_usan_sus_indices():
 # ---------------------------------------------------------------------------
 
 def test_registrar_evento_de_sonda_redacta_antes_de_recortar():
-    """Item 1: un secreto que cruza el corte de 255 no puede sobrevivir en
-    ningún fragmento. Si se recorta ANTES de redactar (o si no se redacta),
-    el pedazo visible del valor ya no tiene la forma `api_key=...` completa
-    y queda en claro -- exactamente lo que describe recortar_redactado en
-    jax/core/redaccion.py:163-168."""
+    """Item 1 (fix round 2: sensible al ORDEN de verdad). La forma libre
+    `api_key=valor` NO tiene mínimo de longitud (`[^&\\s'",;<>}\\]]+`, un
+    `+` sin cota) -- un valor cortado a la mitad sigue matcheando "api_key="
+    + lo que quede, así que ese caso pasa aunque se recorte primero y se
+    redacte después: no prueba el orden.
+
+    La key con forma `AIza...` sí lo prueba: `_KEY_GOOGLE` exige un mínimo
+    de 10 caracteres después de `AIza` (`{10,}`, jax/core/redaccion.py).
+    Si se recorta ANTES de redactar y el corte deja MENOS de 10 caracteres
+    visibles después de `AIza`, la regex ya NO reconoce la forma y el
+    pedazo (`AIza` + unos pocos caracteres) queda en claro -- el mismo caso
+    de tests/test_redaccion.py::test_una_key_AIza_que_cruza_el_corte_no_deja_un_pedazo,
+    portado acá contra el escritor real de la sonda.
+
+    Verificado a mano con la mutación slice-then-redact (recortar primero,
+    redactar después): con esa mutación este test da rojo -- `AIza` +
+    3 caracteres sobrevive en claro. Revertida, ver task-6-report.md ronda 2."""
     ahora = time.time()
-    valor_secreto = "S3CR3TVALUE" + "Q" * 60  # 71 chars
-    detalle = ("relleno de la sonda " * 10) + f"api_key={valor_secreto}" + " cola"
+    key_falsa = "AIza" + "Q" * 60  # forma real: AIza + >=10 (regex), 60 de sobra
+    detalle = ("x" * 248) + key_falsa + " cola"
     assert len(detalle) > fh._LARGO_DETALLE
-    inicio = detalle.index(valor_secreto)
-    # El valor del secreto arranca ANTES del corte y termina DESPUES: cruza
-    # el borde de los 255 caracteres.
-    assert inicio < fh._LARGO_DETALLE < inicio + len(valor_secreto)
+    inicio = detalle.index(key_falsa)
+    fin_prefijo_AIza = inicio + len("AIza")
+    # El corte de 255 cae DENTRO de la key, a menos de 10 caracteres del
+    # prefijo "AIza": si alguien recortara antes de redactar, la regex de
+    # forma (`{10,}`) ya no reconocería lo que queda.
+    chars_visibles_tras_AIza = fh._LARGO_DETALLE - fin_prefijo_AIza
+    assert 0 < chars_visibles_tras_AIza < 10, chars_visibles_tras_AIza
+    assert fin_prefijo_AIza < fh._LARGO_DETALLE < inicio + len(key_falsa)
 
     async def cuerpo(s, conn):
         await fh.registrar_evento_de_sonda(s.faceta, "provider_error", detalle, ahora)
@@ -241,10 +257,11 @@ def test_registrar_evento_de_sonda_redacta_antes_de_recortar():
     _, (guardado,) = _con_semilla(cuerpo)
     assert guardado is not None
     assert len(guardado) <= fh._LARGO_DETALLE
-    assert "S3CR3TVALUE" not in guardado
-    # Ningun fragmento del valor (ni un prefijo parcial) sobrevive.
-    for corte in range(10, len(valor_secreto), 10):
-        assert valor_secreto[:corte] not in guardado, (corte, guardado)
+    assert "AIza" not in guardado, guardado
+    # Ningun fragmento reconocible de la key (ni un prefijo parcial largo)
+    # sobrevive.
+    for corte in range(10, len(key_falsa), 10):
+        assert key_falsa[:corte] not in guardado, (corte, guardado)
 
 
 def test_empate_de_ts_lo_gana_provider_error():
@@ -322,4 +339,21 @@ def test_explain_salud_n2_usa_idx_facet_ts():
             (s1.faceta, s2.faceta, ahora - fh.HEALTH_WINDOW_SECONDS))
     _, filas = _con_semillas(2, cuerpo)
     assert any(f["key"] == "idx_facet_ts" for f in filas), filas
+    assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (revisión de la ronda de arreglo 1)
+# ---------------------------------------------------------------------------
+
+def test_explain_facetas_n3_evita_full_scan():
+    """Item 2 (ronda 2): el pre-vuelo real pasa VARIAS facetas en la misma
+    consulta, no una sola -- n=3 para que el plan de sql_facetas(n) siga
+    siendo por PK/índice único en las 4 tablas y no degrade a un scan
+    cuando la lista de claves crece."""
+    async def cuerpo(s_list, conn):
+        claves = sorted(s.faceta for s in s_list)
+        return await _explain(conn, pc.sql_facetas(3), claves)
+    _, filas = _con_semillas(3, cuerpo)
+    assert all(f["type"] != "ALL" for f in filas), filas
     assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas

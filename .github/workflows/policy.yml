@@ -1121,5 +1121,13 @@ jobs:
           #   MAX(ts) lo gana provider_error de forma determinista (visto en
           #   rojo insertando provider_error antes que ok: el código viejo
           #   daba 'ok' por orden físico de filas, no por regla).
-          grep -qE "^49 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 49 tests CORRIDOS."; exit 1; }
+          # 49 -> 50 el 2026-09-17 (Task 6, ronda de arreglo 2, re-revisión):
+          #   +1 en test_prevuelo_catalogo_db.py -- item 1 se reescribió
+          #   sensible al ORDEN de verdad (key con forma AIza, que exige un
+          #   mínimo de 10 caracteres tras el prefijo para que la regex la
+          #   reconozca; la forma libre `api_key=valor` no tiene ese mínimo
+          #   y no probaba el orden). Item 2: EXPLAIN de sql_facetas con
+          #   n=3 (el pre-vuelo real pasa varias facetas), sin ALL ni
+          #   filesort.
+          grep -qE "^50 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 50 tests CORRIDOS."; exit 1; }
