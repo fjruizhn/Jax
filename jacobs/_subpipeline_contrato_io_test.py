@@ -92,9 +92,18 @@ class EsquemaTest(_ConBase):
         )
 
     async def test_jacobs_pipelines_gana_parent_y_depth_aun_si_la_tabla_ya_existia(self):
+        # ALGORITHM=COPY: el DROP RECONSTRUYE la tabla copiandola. Con el DROP por
+        # defecto, cada corrida dejaba la historia de columnas instantaneas en la
+        # metadata de InnoDB y a la corrida 27 el ADD ... ALGORITHM=INSTANT de
+        # init_tables() daba `1118 Row size too large` (visto el 2026-09-17 en
+        # jax_memory_test: 57 tests en rojo, `depth` ausente). Medido en MariaDB
+        # 12.3.3 con el par DROP+ADD en bucle: DROP por defecto rompe en la 27,
+        # ALGORITHM=INPLACE TAMBIEN en la 27 (no limpia esa historia), COPY llega
+        # a 60 sin error. En produccion el ADD corre una sola vez; el que se
+        # repetia era este test.
         await ada.ejecutar(
             "ALTER TABLE jacobs_pipelines DROP COLUMN IF EXISTS parent_pipeline_id, "
-            "DROP COLUMN IF EXISTS depth"
+            "DROP COLUMN IF EXISTS depth, ALGORITHM=COPY"
         )
         await store.init_tables()
         columnas = await self.columnas("jacobs_pipelines")
