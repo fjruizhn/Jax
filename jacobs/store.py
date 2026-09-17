@@ -611,16 +611,20 @@ _SQL_STEP_SI_EPOCA = (
 )
 
 
-def _sql_update_si_epoca(con_indice: bool, con_contexto: bool, n_desde: int) -> str:
+def _sql_update_si_epoca(con_indice: bool, con_contexto: bool, n_desde: int,
+                         con_corte: bool = False) -> str:
     sets = ["status=%s", "updated_at=%s"]
     if con_indice:
         sets.append("current_step_index=%s")
     if con_contexto:
         sets.append("context_refs=%s")
     desde = ",".join(["%s"] * n_desde)
+    # con_corte (pasada final R34): el reaper exige que la fila SIGA sin avance
+    # al escribir; un avance entre su lectura y esta escritura la saca.
+    corte = " AND updated_at < %s" if con_corte else ""
     return (
         f"UPDATE jacobs_pipelines SET {', '.join(sets)} "
-        f"WHERE pipeline_id=%s AND run_epoch=%s AND status IN ({desde})"
+        f"WHERE pipeline_id=%s AND run_epoch=%s AND status IN ({desde}){corte}"
     )
 
 
@@ -663,8 +667,11 @@ async def pipeline_update_status_si_epoca(
     context: dict | None = None,
     *,
     desde: tuple[PipelineStatus, ...] = (PipelineStatus.running,),
+    sin_avance_desde: float | None = None,
 ) -> bool:
-    """True si escribió: el pipeline estaba en `epoca` y en uno de `desde`."""
+    """True si escribió: el pipeline estaba en `epoca` y en uno de `desde` (y,
+    con `sin_avance_desde`, su updated_at sigue anterior a ese instante --
+    lo usa el reaper, pasada final R34)."""
     if not desde:
         raise ValueError(
             "pipeline_update_status_si_epoca: 'desde' no puede estar vacío -- "
@@ -676,7 +683,10 @@ async def pipeline_update_status_si_epoca(
     if context is not None:
         params.append(json.dumps(context, ensure_ascii=False))
     params += [pipeline_id, epoca, *(d.value for d in desde)]
-    sql = _sql_update_si_epoca(current_step_index is not None, context is not None, len(desde))
+    if sin_avance_desde is not None:
+        params.append(sin_avance_desde)
+    sql = _sql_update_si_epoca(current_step_index is not None, context is not None, len(desde),
+                               con_corte=sin_avance_desde is not None)
     return await _ejecutar_condicional(sql, params) == 1
 
 

@@ -158,8 +158,15 @@ async def reap_orphaned_pipelines() -> list[dict]:
             # en este barrido. Un /continue, /resume o el propio ejecutor que
             # cambió la fila después de la lectura gana: no se pisa, y el
             # próximo barrido la vuelve a evaluar con datos frescos.
+            # Pasada final R34: para running, además, updated_at tiene que
+            # SEGUIR anterior al corte al escribir -- un ejecutor que avanzó
+            # entre la lectura y esta escritura no se cosecha. pending e
+            # interrupted se cosechan por antigüedad (created_at, que no
+            # cambia); lo que los saca de ahí cambia status o época.
+            corte = now - RUNNING_STALE_SECONDS if p.status == PipelineStatus.running else None
             if not await store.pipeline_update_status_si_epoca(
                 p.pipeline_id, p.run_epoch, PipelineStatus.expired, desde=(p.status,),
+                sin_avance_desde=corte,
             ):
                 logger.info("Reaper: %s no cosechado, cambió después de leerlo (época %s, status %s)",
                             p.pipeline_id, p.run_epoch, p.status.value)

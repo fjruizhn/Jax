@@ -1386,8 +1386,12 @@ jobs:
           #   hyde_approved_*; sin refs ilegibles resume no reescribe el contexto
           #   (control). Rojo contra 74cb5f9: 2 failed (IndexError: tomar_epoca sin
           #   contexto; la ref rota seguía en el contexto de approve).
-          grep -qE "^1067 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1067 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1067 -> 1068 el 2026-09-17 (pasada final R34, 5): +1 en
+          #   test_jacobs_cancel_reaper_epoca.py -- el reaper pide, para un running,
+          #   sin_avance_desde = ahora - RUNNING_STALE_SECONDS en la escritura
+          #   condicional. Rojo contra 74cb5f9: KeyError sin_avance_desde.
+          grep -qE "^1068 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1068 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1456,6 +1460,7 @@ jobs:
           tests/test_jacobs_events_indice_causa_db.py
           tests/test_prevuelo_pool_db.py
           tests/test_jacobs_candado_activos_db.py
+          tests/test_jacobs_reaper_cas_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1470,6 +1475,7 @@ jobs:
             tests/test_jacobs_events_indice_causa_db.py \
             tests/test_prevuelo_pool_db.py \
             tests/test_jacobs_candado_activos_db.py \
+            tests/test_jacobs_reaper_cas_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1597,5 +1603,12 @@ jobs:
           #   primaria sale type='index' con key='PRIMARY', y mirar sólo key lo daba
           #   por bueno. Visto: con el WHERE mutado a name=%s la aserción vieja pasaba
           #   (1 passed) y la nueva falla (type 'index', 5.810 filas).
-          grep -qE "^74 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 74 tests CORRIDOS."; exit 1; }
+          # 74 -> 77 el 2026-09-17 (pasada final R34, 5): test_jacobs_reaper_cas_db.py
+          #   (+3) -- el barrido real sobre una fila propia: un running cuyo
+          #   updated_at avanza entre la lectura y la escritura del reaper NO se
+          #   cosecha ni emite REAPED (rojo contra 74cb5f9: lo cosechaba); uno
+          #   estancado de verdad sí (control); EXPLAIN del UPDATE con
+          #   'updated_at < %s' por PRIMARY, sin ALL/index/filesort (rojo:
+          #   TypeError, la variante no existía).
+          grep -qE "^77 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 77 tests CORRIDOS."; exit 1; }

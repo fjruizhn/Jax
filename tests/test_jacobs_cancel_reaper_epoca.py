@@ -75,7 +75,9 @@ def test_reaper_cosecha_con_la_epoca_y_el_status_leidos():
     cas = AsyncMock(return_value=True)
     cosechados, viejo, eventos = _cosechar([viejo_running], cas)
     assert [c["pipeline_id"] for c in cosechados] == ["p1"]
-    cas.assert_awaited_once_with("p1", 2, PipelineStatus.expired, desde=(PipelineStatus.running,))
+    cas.assert_awaited_once()
+    assert cas.await_args.args == ("p1", 2, PipelineStatus.expired)
+    assert cas.await_args.kwargs["desde"] == (PipelineStatus.running,)
     viejo.assert_not_awaited()
     assert [c.args[1] for c in eventos.await_args_list] == ["REAPED"]
 
@@ -88,3 +90,16 @@ def test_reaper_no_pisa_un_pipeline_que_otro_tomo_despues_de_leerlo(caplog):
     viejo.assert_not_awaited()
     eventos.assert_not_awaited()
     assert any("p1" in m and "cambió" in m for m in caplog.messages), caplog.messages
+
+
+# Pasada final R34, 5: un running se cosecha sólo si SIGUE sin avance al
+# escribir -- `updated_at < ahora - RUNNING_STALE_SECONDS` va en el UPDATE.
+
+def test_reaper_de_running_pide_que_siga_sin_avance_al_escribir(monkeypatch):
+    monkeypatch.setattr(reaper.time, "time", lambda: 1_000_000.0)
+    p = Pipeline(pipeline_id="p1", name="t", invoked_by="plataforma", mode="autonomous",
+                 status=PipelineStatus.running, run_epoch=2, created_at=1.0,
+                 updated_at=1_000_000.0 - reaper.RUNNING_STALE_SECONDS - 60)
+    cas = AsyncMock(return_value=True)
+    _cosechar([p], cas)
+    assert cas.await_args.kwargs["sin_avance_desde"] == 1_000_000.0 - reaper.RUNNING_STALE_SECONDS
