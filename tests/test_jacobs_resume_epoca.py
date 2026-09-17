@@ -260,3 +260,21 @@ def test_approve_quita_la_ref_ilegible_y_conserva_la_marca_de_hyde():
     assert "step_0_ref" not in lanzado.context and lanzado.context.get("hyde_approved_s1") is True
     assert lanzado.plan[0].status == StepStatus.pending and lanzado.plan[0].output_ref is None
     assert sorted(c.args[0].step_index for c in upsert.await_args_list) == [0, 1]
+
+
+# Pasada R37, 3: si el pedido PIERDE la carrera por la época, no toca pasos
+# aunque haya refs ilegibles que rehacer (el reset va DESPUÉS de tomarla).
+
+@pytest.mark.parametrize("endpoint", ["resume", "approve"])
+def test_carrera_perdida_con_ref_ilegible_da_409_sin_tocar_pasos(endpoint):
+    pasos = [_paso(0, status=StepStatus.completed),
+             _paso(1, facet="hyde", status=StepStatus.blocked_human_gate, depends_on=[0])]
+    pasos[0].output_ref = _REF_ROTA
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA})
+    upsert = AsyncMock()
+    with pytest.raises(HTTPException) as e:
+        _llamar(endpoint, pipeline, pasos, AsyncMock(return_value=_veredicto()),
+                tomar=AsyncMock(return_value=None), upsert=upsert)
+    assert e.value.status_code == 409 and isinstance(e.value.detail, str)
+    upsert.assert_not_awaited()
+    assert pasos[0].status == StepStatus.completed and pasos[0].output_ref == _REF_ROTA

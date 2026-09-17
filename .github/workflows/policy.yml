@@ -1397,8 +1397,13 @@ jobs:
           #   un connect colgado más que el timeout de httpx sale como ConnectTimeout y
           #   no se cobra: wait_for lleva MARGEN_DE_WAIT_FOR_S=1 sobre el timeout de
           #   httpx. Rojo contra e50a6e2: wait_for ganaba y se cobraba (Awaited 1 times).
-          grep -qE "^1070 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1070 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1070 -> 1072 el 2026-09-17 (pasada R37, 3): +2 en test_jacobs_resume_epoca.py --
+          #   resume y approve-step que pierden la carrera por la época con una ref
+          #   ilegible dan 409 sin upsert de pasos. Controles contra e50a6e2; rojo por
+          #   mutación moviendo el reset y el upsert ANTES de tomar la época: 2 failed
+          #   (los 15 anteriores seguían en verde).
+          grep -qE "^1072 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1072 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
