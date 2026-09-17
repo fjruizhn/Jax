@@ -1000,3 +1000,25 @@ def test_el_docstring_de_crear_declara_el_commit_incierto():
     Expected contra 36e539f: no lo menciona."""
     doc = routes.create_pipeline.__doc__ or ""
     assert "COMMIT" in doc and "incierto" in doc
+
+
+# ---------------------------------------------------------------------------
+# Excepción documentada: resolvedores directos en la rama de la sonda (R39)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("ruta", ["jax/core/facet_resolver.py", "las_manos/credential_resolver.py"])
+def test_la_conexion_directa_de_los_resolvedores_declara_por_que(ruta):
+    """Ruling R39: facet_resolver y credential_resolver quedan con conexión
+    propia (excepción aceptada). La razón se escribe EN el sitio, en el bloque
+    de comentarios inmediatamente arriba de `_db_conn` (fuera del segmento que
+    compara scripts/check_mirror_sync.py, así no es drift con jax-platform).
+    Expected contra 36e539f: no hay nota."""
+    lineas = (RAIZ / ruta).read_text(encoding="utf-8").splitlines()
+    i = next(n for n, l in enumerate(lineas) if l.startswith("async def _db_conn("))
+    bloque = []
+    while i > 0 and lineas[i - 1].startswith("#"):
+        i -= 1
+        bloque.insert(0, lineas[i])
+    nota = "\n".join(bloque)
+    for parte in ("R39", "sonda", "ok fresco", "un vuelo por clave", "30 s", "jax-platform", "camino caliente"):
+        assert parte in nota, f"{ruta}: falta '{parte}' en la nota sobre _db_conn:\n{nota}"

@@ -1467,8 +1467,14 @@ jobs:
           #   (rojo contra 36e539f: KeyError 'detalle', x2); una falla ANTES del COMMIT no
           #   lo dice y no deja nada escrito (control); el docstring de crear declara el
           #   COMMIT incierto (rojo: no lo mencionaba).
-          grep -qE "^1104 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1104 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1104 -> 1106 el 2026-09-17 (Ruling R39): +2 en test_jacobs_conexiones_por_pedido.py
+          #   -- el bloque de comentarios arriba de `_db_conn` en jax/core/facet_resolver.py y
+          #   las_manos/credential_resolver.py declara por qué la conexión queda directa (sonda
+          #   sólo sin ok fresco, un vuelo por clave, caché 30 s espejada con jax-platform,
+          #   fuera del camino caliente). Rojo contra 36e539f: falta la nota. Fuera del segmento
+          #   que compara check_mirror_sync.py (salida idéntica antes y después).
+          grep -qE "^1106 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1106 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

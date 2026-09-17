@@ -203,6 +203,16 @@ def invalidate_facet_cache(facet_key: str) -> bool:
     return _cache.pop(facet_key, None) is not None
 
 
+# Ruling R39 (Jacobs, 2026-09-17): conexión PROPIA, no el pool del store de
+# Jacobs, a propósito. En el pre-vuelo esta función la alcanza sólo la sonda
+# (jacobs/sonda.py::_preparar -> resolve_facet), y la sonda corre sólo cuando
+# la clave no tiene un evento ok fresco en facet_health_event, con
+# un vuelo por clave en el proceso (jacobs/prevuelo.py::_sondear_una_vez, F5).
+# resolve_facet cachea 30 s por clave (FACET_CACHE_TTL_SECONDS, sello
+# cross-proceso): a lo sumo una conexión por clave cada 30 s, no una por
+# pedido. Este archivo está espejado con jax-platform
+# (scripts/check_mirror_sync.py), que no tiene el pool de Jacobs. Fuera del
+# camino caliente; costo si está mal: una conexión por sonda.
 async def _db_conn() -> aiomysql.Connection:
     host = os.environ.get("JAX_DB_HOST")
     port = os.environ.get("JAX_DB_PORT")
