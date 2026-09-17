@@ -6,7 +6,7 @@ PYTHONPATH apuntando a las_manos, el REPL via el paquete jax.core. jax-platform
 sigue con copia propia aparte (repo distinto, con su propio
 credential_resolver.py local -- un symlink cruzado de repos no sobrevive un
 clone fresco); ver scripts/check_mirror_sync.py para detectar drift entre
-ambas (renombrado el 2026-09-01 al generalizarse a familias de espejos). Consume resolve_credential_instrumented, no reimplementa Fase 1.
+ambas (renombrado el 2026-09-01 al generalizarse a familias de espejos). Consume resolve_credential, no reimplementa Fase 1.
 Ver jax-platform/docs/fase2-facetas-diseno.md.
 """
 import logging
@@ -19,11 +19,11 @@ import aiomysql
 try:
     # las_manos y jacobs (PYTHONPATH incluye las_manos/, sin la raiz del
     # paquete jax): credential_resolver.py vive directo en las_manos/.
-    from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+    from credential_resolver import resolve_credential, CredentialUnavailableError
 except ImportError:
     # REPL (PYTHONPATH=. desde la raiz del repo, `python -m jax.core.main`):
     # las_manos/ no esta en sys.path, solo el paquete jax.core.
-    from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+    from jax.core.credential_resolver import resolve_credential, CredentialUnavailableError
 
 try:
     # Mismo doble camino que credential_resolver arriba -- este archivo
@@ -256,7 +256,7 @@ async def _query_facet(facet_key: str) -> ResolvedFacet:
     credential = ""
     if transport not in ("ollama", "subprocess"):  # ollama/subprocess no usan credencial de proveedor gestionada aqui
         try:
-            credential = await resolve_credential_instrumented(provider_id)
+            credential = await resolve_credential(provider_id)
         except CredentialUnavailableError as e:
             raise FacetUnavailableError(f"facet '{facet_key}': {e}") from e
 

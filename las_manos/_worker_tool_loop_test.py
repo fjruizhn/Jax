@@ -153,7 +153,7 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         """thot no tiene has_tool_access en el fixture (default False) --
         aunque el modelo "alucine" tool_calls en la respuesta mockeada, el
         payload real enviado a la API no debe incluir 'tools'."""
-        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+        with patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")):
             state, mock_post = await self._run(
                 [_resp(content="listo, sin tools", finish_reason="stop")],
                 motor="thot", capability="critique",
@@ -169,7 +169,7 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         todavía comparara motor=="jax_local" a mano, este test fallaría
         aunque el dato real diga que sí puede."""
         self.catalog._motors["thot"].has_tool_access = True
-        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+        with patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")):
             state, mock_post = await self._run(
                 [_resp(content="listo, con tools ofrecidas", finish_reason="stop")],
                 motor="thot", capability="critique",
@@ -406,7 +406,7 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         return r
 
     async def test_write_file_ejecuta_commitea_y_auditor_pass_notifica_verde(self):
-        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+        with patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")):
             state, _ = await self._run([
                 _resp(tool_calls=[_tc("write_file", {"path": "out.html", "content": "<h1>hola</h1>"})], finish_reason="tool_calls"),
                 _resp(content="listo, escribí el archivo", finish_reason="stop"),
@@ -419,7 +419,7 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         assert "🟢" in msg and "thot" in msg and "pass" in msg, msg
 
     async def test_auditor_revert_deshace_con_git_y_notifica_rojo(self):
-        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+        with patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")):
             state, _ = await self._run([
                 _resp(tool_calls=[_tc("write_file", {"path": "malo.html", "content": "contenido malo"})], finish_reason="tool_calls"),
                 _resp(content="listo", finish_reason="stop"),
@@ -432,7 +432,7 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_auditor_override_por_request_cambia_el_auditor(self):
         self.catalog._motors["kimi"] = self.catalog._motors["thot"]  # reusa fixture de motor http_openai_compat
-        with patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")):
+        with patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")):
             state, _ = await self._run([
                 _resp(tool_calls=[_tc("write_file", {"path": "x.txt", "content": "y"})], finish_reason="tool_calls"),
                 _resp(content="listo", finish_reason="stop"),
