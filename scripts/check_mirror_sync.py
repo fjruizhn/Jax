@@ -381,6 +381,35 @@ FAMILIAS = (
              "deposita (encolar); leer_pendientes/quitar son de la plataforma, que "
              "es la duena de la tabla y la unica con migraciones.",
     ),
+    Familia(
+        nombre="router_keywords",
+        canonico=JAX_ROOT / "jax" / "core" / "router.py",
+        espejos=(
+            # La Mesa web copia las keywords del auto-ruteo (A-22 de la auditoria
+            # de sobre-ingenieria, 2026-09-16). NO puede importarlas: jax.core.router
+            # arrastra contrato_dispatch -> `from facet_resolver import _db_conn`, que
+            # dentro del backend resuelve al facet_resolver de la plataforma, y ~/jax
+            # no existe en el runner (verificado por terceros). Hasta hoy la copia
+            # podia divergir sin que nada avisara: los 10 sets y el desempate estaban
+            # identicos por AST y ningun checker los miraba.
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "api" / "chat.py"),
+        ),
+        # Los 10 sets, el orden de desempate y el mapa faceta -> (keywords, fuertes).
+        # _sin_tildes y el scoring quedan afuera: el de la Mesa tiene logs y
+        # docstring propios. Si un dia divergen por diseno, se declara con el marcador.
+        compartidos=(
+            "KIMI_KW", "KIMI_STRONG",
+            "HIPATIA_KW", "HIPATIA_STRONG",
+            "JEKYLL_KW", "JEKYLL_STRONG",
+            "THOT_KW", "THOT_STRONG",
+            "ADA_KW", "ADA_STRONG",
+            "_TIEBREAK",
+            "_KW_SETS",
+        ),
+        nota="Copia en jax-platform backend/api/chat.py (nombres alineados 2026-09-16). "
+             "ORDEN DE MERGE: la plataforma primero -- contra un jax-platform con los "
+             "nombres viejos (_KIMI_KW...) esta familia da 'falta' en los 12 simbolos.",
+    ),
 )
 
 
