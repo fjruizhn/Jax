@@ -700,12 +700,20 @@ conexion_del_pool = conexion
 async def conexion_dedicada(found_rows: bool = False) -> aiomysql.Connection:
     """Una conexion DEDICADA (fuera del pool), que quien la pide cierra.
 
-    Es la UNICA excepcion al pool y tiene exactamente DOS llamadores, los dos
-    con una razon que el pool no puede cubrir:
+    Es la UNICA excepcion al pool. En CODIGO DE SERVICIO (jacobs/, las_manos/,
+    jax/, tools/) la piden exactamente TRES funciones, por las dos razones que
+    siguen, cada una fuera del alcance del pool. Fuera del codigo de servicio
+    tambien la usan TESTS (tests/, jacobs/*_test.py) y SCRIPTS DE MEDICION
+    (scripts/perfil_prevuelo.py, scripts/medir_min_output_tokens.py), que
+    necesitan una conexion propia y la cierran ellos; eso no es camino de
+    pedidos y no cuenta para esta garantia. La lista de servicio la vigila
+    `jacobs/_store_pool_test.py::ExcepcionAlPoolTest`: un llamador nuevo ahi
+    pone el guard en rojo, porque la excepcion al pool no se amplia sin una
+    decision.
 
-    1. `found_rows=True` -- las escrituras CONDICIONALES por epoca
-       (`_ejecutar_condicional`, `pipeline_tomar_epoca`,
-       `continuar_transaccion`). Por defecto MariaDB devuelve de un UPDATE las
+    1. `found_rows=True` -- las escrituras CONDICIONALES por epoca. La piden
+       `_ejecutar_condicional` (por donde pasa `pipeline_tomar_epoca`, que no
+       la llama directo) y `continuar_transaccion`. Por defecto MariaDB devuelve de un UPDATE las
        filas CAMBIADAS, no las que cumplen el WHERE: una escritura condicional
        que reescribe los mismos valores devolveria 0 y el ejecutor creeria
        haber PERDIDO la epoca -- y dejaria de escribir. CLIENT.FOUND_ROWS se

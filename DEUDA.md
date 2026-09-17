@@ -21,6 +21,28 @@ Los items sin fecha de "verificado hoy" vienen de CONTEXT.md §9 — heredan
 su fecha de última verificación real, no una nueva.
 
 ## Bloquea trabajo
+- **Una excepción dentro del `finally` de `conexion()` cuelga el apagado del servicio — hallado 2026-09-17 (ronda pre-vuelo y continuar), CÓDIGO Y ARREGLO DEL FRENTE F.**
+  - **Archivo y función:** `jacobs/store.py`, el context manager `conexion()`
+    (alias `conexion_del_pool()`), su bloque `finally`.
+  - **Condición exacta:** si una excepción INESPERADA (no una de las que el
+    bloque contempla) cae dentro de ese `finally` **antes** de que corra
+    `pool.release(conn)` — por ejemplo al invalidar el envoltorio vigilado, al
+    evaluar si la sesión es reutilizable o al cerrar la conexión — la conexión
+    nunca vuelve al pool y queda en `_used`.
+  - **Consecuencia:** `pool.wait_closed()` espera para siempre a que `_used`
+    quede vacío, así que **el apagado del servicio se cuelga** (el lifespan de
+    LAS MANOS no termina; `systemctl stop` va al timeout y mata el proceso).
+  - **Cómo se destapó:** un `AttributeError` de un doble de test dentro de ese
+    tramo, durante la ronda de pre-vuelo y continuar. No es un caso teórico.
+  - **De quién es:** el pool de `jacobs/store.py` es del **frente F** (sesión
+    `fruiz-47`); este código vino de master, **no** de la rama
+    `feat/prevuelo-y-continuar`, y **esa rama NO lo toca**. El dueño ya
+    respondió: el frente F toma el arreglo con la verificación propuesta.
+  - **Verificación propuesta (acordada con el dueño):** un test que fuerce una
+    excepción en ese tramo del `finally` y mida que `wait_closed()` **no**
+    cuelga — con **timeout duro** (`asyncio.wait_for` / `timeout` de pytest),
+    para que el control muera **en rojo** y no colgando la suite entera.
+  - **Cierre:** lo borra el frente F citando su PR cuando lo cierre.
 - **La ruta vieja del freno `/etc/jax/PAUSE` sigue frenando — frente B, Task H (2026-09-17).**
   - **DECISIÓN** (controlador principal del frente B, 2026-09-17; rulings R11-R15 del ledger
     `jax-platform/.superpowers/sdd/2026-09-16-frente-b-kill-switch/progress.md`): mientras exista

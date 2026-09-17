@@ -312,8 +312,17 @@ jobs:
           #   uso, inventado, vencido, 20 consumos a la vez -> 1 gana, EXPLAIN por PK.
           #   Mutacion: quitar `usado_at IS NULL` del UPDATE -> 2 rojos (un solo uso y
           #   la carrera).
-          grep -qE "^109 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 109 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 109 -> 112 el 2026-09-17 (rama feat/prevuelo-y-continuar, guard de la
+          #   excepcion al pool): +3 puros de jacobs/_store_pool_test.py
+          #   (ExcepcionAlPoolTest) -- la lista de llamadores de
+          #   conexion_dedicada() en CODIGO DE SERVICIO (jacobs/, las_manos/,
+          #   jax/, tools/; sin tests ni scripts/) no crece sola, la lista no
+          #   nombra llamadores muertos, y el docstring no vuelve a prometer
+          #   "exactamente DOS llamadores" (era falso: tests y scripts tambien
+          #   la usan). Visto en rojo agregando un llamador falso en jacobs/ y,
+          #   el del docstring, mutando el docstring. Medido: "112 passed".
+          grep -qE "^112 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 112 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
