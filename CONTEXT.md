@@ -743,15 +743,44 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
     Las dos últimas corridas de c=50 volvieron a 118 y 125 ms. **Causa identificada, no
     supuesta:** tres sondas REALES de pre-vuelo que se dispararon a mitad de la medición (ver
     la desviación de abajo); el orden de magnitud —un viaje de red a un proveedor— coincide.
-  - **R44 — máximo de conexiones del pool en uso.** Mismo método que la corrida anterior:
-    `ss -tnp` filtrado al PID del uvicorn aislado y al puerto 3308 de MariaDB, muestreado cada
-    0,1 s durante cada corrida sostenida (97-140 muestras por corrida). Máximos: **10** (c=25)
-    y **11 / 12 / 13** (las cuatro de c=50) → **máximo global observado 13, contra
-    `JAX_DB_POOL_MAX=10`**. La corrida anterior observó 11 y lo explicó como un instante de
-    superposición durante el reemplazo de una conexión; **con 12 y 13 esa explicación ya no
-    alcanza sola y el excedente crece entre corridas (11, 12, 11, 13)**. No se investigó más
-    en esta ronda: queda anotado como lo que es, un número medido que no cuadra con el techo
-    configurado, para quien toque el pool.
+  - **R44 — máximo de conexiones del pool. CORREGIDO 2026-09-17 (Mr. Hyde, subagente):
+    el excedente NO existía. Era un defecto DE LA MEDICIÓN, y venía de antes.** Lo que se
+    publicó primero en esta entrada —"máximo global observado 13 contra
+    `JAX_DB_POOL_MAX=10`"— queda **ANULADO**. Se conserva dicho acá, con su corrección,
+    porque una memoria falsa no se borra en silencio.
+    - **El defecto:** el contador era `ss -tnp | grep "pid=<PID>," | grep -c ':3308'`. Ese
+      `grep` cuenta toda línea que CONTENGA la subcadena `:3308`, y un puerto efímero del
+      cliente entre **33080 y 33089** la contiene. O sea que conexiones HTTP entrantes a la
+      propia instancia se contaban como conexiones a MariaDB. El mismo filtro lo usó la
+      medición anterior (la del "11 explicado como superposición del muestreo"): **las tres
+      cifras, 11, 12 y 13, son falsos positivos del mismo error.**
+    - **Medido con el filtro corregido** (el par es EXACTAMENTE el puerto 3308) durante
+      `/preflight` a c=50 con n=8000: **máximo 10**, contra 11 del filtro viejo en la misma
+      corrida y en las mismas muestras. El falso positivo se identificó en vivo: una línea
+      `ESTAB 127.0.0.1:17792 → 127.0.0.1:3308X` del cliente de carga.
+    - **Confirmado DESDE ADENTRO, que es la prueba que no depende de `ss`:** se instrumentó
+      un contador por ORIGEN envolviendo `aiomysql.connect` (incluido
+      `aiomysql.pool.connect`, que el pool resuelve por `from .connection import connect` y
+      sin el cual sus conexiones no se cuentan), atribuyendo cada conexión al código que la
+      abrió. En 16.000 pre-vuelos el proceso abrió **10 conexiones en toda su vida**, las
+      diez del pool (`jacobs/store.py::_estado_del_loop` + el llenado perezoso), y las diez
+      seguían vivas al final. **Cero conexiones de otro origen, cero dedicadas, cero
+      descartes: el pool no se pasa de 10 ni pierde ninguna.**
+    - **El tope del pool igual NO es el tope del proceso, y eso sí es verdad medida:**
+      `conexion_dedicada()` abre fuera del pool a propósito (máximo observado **1** con
+      `crear` en vuelo y **2** con `continue` que gana y escribe), y
+      `las_manos/facet_resolver.py:226` y `las_manos/credential_resolver.py:94` abren con
+      `aiomysql.connect` directo — **una cada uno, cacheada** (3 llamadas seguidas a
+      `resolve_facet`/`resolve_credential` abren 1 sola conexión cada una, y la cierran).
+      Ninguno de los dos lo toca el camino de `/preflight` sin sonda: en las 16.000 no
+      aparecieron nunca. **Techo del proceso = 10 del pool + hasta 2 dedicadas + hasta 2 de
+      los resolvers = 14**, y en reposo son exactamente 10.
+    - **Lección (va acá porque se pagó dos veces):** *la herramienta de verificación también
+      se verifica.* `grep ':3308'` no cuenta conexiones al puerto 3308, cuenta líneas que
+      contienen ese texto — y con puertos efímeros de cinco dígitos eso es un rango entero.
+      Un número que no cuadra con el diseño es, primero, un número sospechoso de estar mal
+      medido; dos sesiones seguidas construyeron una explicación ("superposición del
+      muestreo") para un dato que nunca existió, en vez de revisar el instrumento.
   - **25 `continue` concurrentes sobre el mismo pipeline:** 1 ganó, 24 recibieron 409, época
     final 1, status `interrupted`, eventos `['PIPELINE_CONTINUED', 'PIPELINE_STARTED',
     'STEP_BLOCKED_HUMAN_GATE', 'PIPELINE_INTERRUPTED']` — **exactamente UN `PIPELINE_CONTINUED`
@@ -830,7 +859,9 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
     `event_append` y el resto de los caminos de `/preflight`, `create` y `continue` pasan
     por `store.conexion_del_pool()`, `JAX_DB_POOL_MAX=10` por defecto) — verificado en esta
     corrida, no en teoría. **R44 — máximo de conexiones del pool en uso durante c=50
-    sostenido:** medido correlacionando `ss -tnp` (conexiones TCP del proceso uvicorn de la
+    sostenido (ANULADO 2026-09-17: el filtro `grep ':3308'` contaba puertos efímeros
+    33080-33089 del cliente como conexiones a MariaDB; con el par exacto el máximo es
+    10 — ver la corrección en la entrada de arriba):** medido correlacionando `ss -tnp` (conexiones TCP del proceso uvicorn de la
     instancia aislada hacia `127.0.0.1:3308`) con el PID de la instancia, muestreado cada
     0,1 s durante cada una de las cuatro corridas — no por `SHOW PROCESSLIST` puro, porque
     `jax_memory_test` es compartida por otras sesiones en paralelo y esa vista no distingue
