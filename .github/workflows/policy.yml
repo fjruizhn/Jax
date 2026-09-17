@@ -1418,8 +1418,12 @@ jobs:
           # 1584 -> 1585 el 2026-09-17 (el dato se copia, no se redacta): test_ejecutor_mision.py +1 (el prompt
           #   exige el dato literal y una afirmación por valor). Visto en rojo. Origen: primera misión con la
           #   compuerta abierta, el modelo mandó "51G disponible de 94G total (44% usado)" y la cita lo tiró.
-          grep -qE "^1585 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1585 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1585 -> 1587 el 2026-09-17 (la tubería va dentro del comando remoto): test_ejecutor_mision.py +2
+          #   (el prompt lo pide; y el control: `capturas` ignora el comando con tubería afuera, que toca dos
+          #   máquinas, y sí captura el mismo con la tubería adentro). Vistos en rojo. Origen: misión real en
+          #   atemai que corrió dos pasos y entregó cero afirmaciones.
+          grep -qE "^1587 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1587 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
