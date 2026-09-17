@@ -1383,8 +1383,30 @@ jobs:
           #   (el auditor final las recibe). Vistos en rojo antes del arreglo. MEDIDO en local (3.14), env -i, sin
           #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1576 passed, 1 skipped, 1 xfailed,
           #   16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1576 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1576 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1576 -> 1579 el 2026-09-17 (barrera del freno por archivo, falso
+          #   positivo del frente B): tests/test_interruptor_heredada.py, dentro de
+          #   las DOS listas. La barrera de sesion miraba el DIRECTORIO
+          #   /etc/jax/interruptor entero -- compartido con `EJECUTOR_PAUSA` (la
+          #   pausa del Ejecutor, que NO es el kill switch), que otra sesion pone y
+          #   suelta ahi en una prueba de contrato legitima: falso positivo contra
+          #   corridas ajenas. Ahora solo mira los DOS ARCHIVOS del freno (la ruta
+          #   de JAX_KILL_SWITCH_PATH, literal /etc/jax/interruptor/PAUSE, y la
+          #   heredada), nunca el directorio ni otras entradas.
+          #   test_barrera_detecta_altas_en_el_directorio (el caso que documentaba
+          #   el falso positivo) se retira y se suman
+          #   test_barrera_no_dispara_por_un_hermano_en_el_directorio (+1, crear y
+          #   borrar un hermano en el directorio NO dispara),
+          #   test_barrera_detecta_el_freno_que_aparece (+1, crear el archivo del
+          #   freno SI dispara) y test_barrera_stat_roto_en_el_freno_cuenta_como_puesto
+          #   (+2, parametrizado: permiso y E/S al stat del freno cuentan como
+          #   PUESTO, mismo criterio fail-closed que interruptor.pausa_presente).
+          #   Neto +4-1 = +3. Vistos en rojo contra el codigo viejo (TypeError:
+          #   firma vieja de 4 argumentos). MEDIDO dos veces en local (3.14), env
+          #   limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS
+          #   listas: "1579 passed, 1 skipped, 1 xfailed, 16 subtests passed" las
+          #   dos veces. Si el runner da otro numero, manda el runner.
+          grep -qE "^1579 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1579 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

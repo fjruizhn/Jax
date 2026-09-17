@@ -231,11 +231,20 @@ def test_las_manos_mata_el_motor_en_vuelo_cuando_aparece_la_heredada(tmp_path, m
 # freno: un test que creara o borrara el directorio del interruptor o la ruta
 # heredada de producción pasaba en verde. Sólo tmp_path: la barrera real nunca
 # se ejercita contra /etc.
+#
+# CORREGIDO el mismo día (segunda revisión, falso positivo del frente B): la
+# barrera vigilaba el DIRECTORIO /etc/jax/interruptor entero, y ese
+# directorio es compartido con `EJECUTOR_PAUSA` (la pausa del Ejecutor, que
+# NO es el kill switch) -- otra sesión la pone y suelta ahí como parte de una
+# prueba de contrato legítima, y eso disparaba esta barrera contra corridas
+# ajenas al freno real. Ahora sólo mira los DOS ARCHIVOS del freno (la ruta
+# de JAX_KILL_SWITCH_PATH y la heredada), nunca el directorio ni otras
+# entradas.
 
 def test_la_barrera_vigila_el_freno_real():
     import conftest
     assert conftest.HEREDADA_DE_PRODUCCION == Path(LITERAL_VIEJO)
-    assert conftest.FRENO_DE_PRODUCCION == Path("/etc/jax/interruptor")
+    assert conftest.FRENO_DE_PRODUCCION == Path("/etc/jax/interruptor/PAUSE")
 
 
 def _al_pasado(*rutas):
@@ -249,46 +258,96 @@ def test_barrera_sin_nada_en_disco_son_cero_cambios(tmp_path):
     import conftest
     import time
     assert conftest.cambios_del_freno_de_produccion(
-        tmp_path / "no-dir", tmp_path / "no-PAUSE", time.time() - 1, False) == []
+        tmp_path / "no-freno", tmp_path / "no-PAUSE", time.time() - 1, False, False) == []
 
 
-def test_barrera_detecta_la_heredada_que_aparece(tmp_path):
+def test_barrera_no_dispara_por_un_hermano_en_el_directorio(tmp_path):
+    """Caso (a) del defecto: crear y borrar un archivo HERMANO en el mismo
+    directorio del freno (el caso real es `EJECUTOR_PAUSA`) no es un cambio
+    del freno -- la barrera ya no mira el directorio."""
+    import conftest
+    import time
+    directorio = tmp_path / "interruptor"
+    directorio.mkdir()
+    freno = directorio / "PAUSE"
+    heredada = tmp_path / "vieja" / "PAUSE"
+    inicio = time.time() - 1
+    hermano = directorio / "EJECUTOR_PAUSA"
+    hermano.write_text("")
+    assert conftest.cambios_del_freno_de_produccion(
+        freno, heredada, inicio, False, False) == []
+    hermano.unlink()
+    assert conftest.cambios_del_freno_de_produccion(
+        freno, heredada, inicio, False, False) == []
+
+
+def test_barrera_detecta_el_freno_que_aparece(tmp_path):
+    """Caso (b): crear el archivo del freno (JAX_KILL_SWITCH_PATH) SÍ
+    dispara la barrera."""
     import conftest
     import time
     inicio = time.time() - 1
+    directorio = tmp_path / "interruptor"
+    directorio.mkdir()
+    freno = directorio / "PAUSE"
+    heredada = tmp_path / "no-heredada"
+    freno.write_text("")
+    _al_pasado(freno)  # aunque el mtime mienta: no existía al empezar
+    assert conftest.cambios_del_freno_de_produccion(
+        freno, heredada, inicio, False, False) == [str(freno)]
+
+
+def test_barrera_detecta_la_heredada_que_aparece(tmp_path):
+    """Caso (c): tocar la ruta heredada SÍ dispara la barrera."""
+    import conftest
+    import time
+    inicio = time.time() - 1
+    freno = tmp_path / "no-freno"
     archivo = tmp_path / "PAUSE"
     archivo.write_text("")
     _al_pasado(archivo)  # aunque el mtime mienta: no existía al empezar
     assert conftest.cambios_del_freno_de_produccion(
-        tmp_path / "no-dir", archivo, inicio, False) == [str(archivo)]
+        freno, archivo, inicio, False, False) == [str(archivo)]
 
 
 def test_barrera_detecta_la_heredada_que_cambia_o_desaparece(tmp_path):
     import conftest
     import time
     inicio = time.time() - 1
+    freno = tmp_path / "no-freno"
     archivo = tmp_path / "PAUSE"
     archivo.write_text("")
     _al_pasado(archivo)
-    assert conftest.cambios_del_freno_de_produccion(tmp_path / "no-dir", archivo, inicio, True) == []
+    assert conftest.cambios_del_freno_de_produccion(freno, archivo, inicio, False, True) == []
     os.utime(archivo, (inicio + 10, inicio + 10))
     assert conftest.cambios_del_freno_de_produccion(
-        tmp_path / "no-dir", archivo, inicio, True) == [str(archivo)]
+        freno, archivo, inicio, False, True) == [str(archivo)]
     archivo.unlink()
     assert conftest.cambios_del_freno_de_produccion(
-        tmp_path / "no-dir", archivo, inicio, True) == [f"{archivo} (desapareció)"]
+        freno, archivo, inicio, False, True) == [f"{archivo} (desapareció)"]
 
 
-def test_barrera_detecta_altas_en_el_directorio(tmp_path):
+@pytest.mark.parametrize("error", [
+    PermissionError(errno.EACCES, "sin permiso"),
+    OSError(errno.EIO, "error de E/S"),
+])
+def test_barrera_stat_roto_en_el_freno_cuenta_como_puesto(tmp_path, monkeypatch, error):
+    """Caso (d): un error de permisos (o de E/S) al stat del archivo del
+    freno cuenta como presente -- mismo criterio fail-closed que
+    `interruptor.pausa_presente`."""
     import conftest
     import time
-    directorio = tmp_path / "interruptor"
-    directorio.mkdir()
-    viejo = directorio / "viejo"
-    viejo.write_text("")
-    _al_pasado(viejo, directorio)
+
+    freno = tmp_path / "interruptor" / "PAUSE"
+    heredada = tmp_path / "no-heredada"
     inicio = time.time() - 1
-    assert conftest.cambios_del_freno_de_produccion(directorio, tmp_path / "no-PAUSE", inicio, False) == []
-    (directorio / "PAUSE").write_text("")
-    cambios = conftest.cambios_del_freno_de_produccion(directorio, tmp_path / "no-PAUSE", inicio, False)
-    assert str(directorio / "PAUSE") in cambios
+    lstat_real = os.lstat
+
+    def lstat_selectivo(ruta, *args, **kwargs):
+        if Path(ruta) == freno:
+            raise error
+        return lstat_real(ruta, *args, **kwargs)
+
+    monkeypatch.setattr(conftest.os, "lstat", lstat_selectivo)
+    assert conftest.cambios_del_freno_de_produccion(
+        freno, heredada, inicio, False, False) == [str(freno)]
