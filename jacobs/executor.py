@@ -36,6 +36,7 @@ from jacobs.plan import CapabilityUnbound
 from jacobs.policy import check_kill_switch
 from jacobs.usage_writer import record_direct_usage
 from hyde_sandbox import run_sandboxed_claude
+from interruptor import correr_con_interruptor
 
 logger = logging.getLogger("jacobs.executor")
 
@@ -1034,7 +1035,13 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
 
     try:
         raw_output = await asyncio.wait_for(
-            _dispatch_step(step, pipeline),
+            # El freno en vuelo (2026-09-16, frente B): antes un step ya lanzado
+            # seguía hasta terminar la ola aunque el kill switch estuviera
+            # puesto. Si aparece, se cancela en <= 250 ms: run_sandboxed_claude
+            # mata a Hyde y _invoke_motor cancela el job en LAS MANOS.
+            # InterruptorActivado cae en el except general de abajo, así que
+            # queda _fail_step con "killed_by_switch".
+            correr_con_interruptor(_dispatch_step(step, pipeline)),
             timeout=step.timeout_seconds,
         )
 

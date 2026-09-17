@@ -40,7 +40,7 @@ from jacobs.policy import check_kill_switch  # noqa: E402
 
 async def relaunch(pipeline_id: str, from_step: int) -> int:
     if check_kill_switch():
-        print("✗ Kill switch activo (/etc/jax/PAUSE). Abortando.")
+        print("✗ Kill switch activo (archivo de JAX_KILL_SWITCH_PATH). Abortando.")
         return 2
 
     pipeline = await store.pipeline_get(pipeline_id)

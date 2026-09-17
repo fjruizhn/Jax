@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Motor Registry v0.2 — pruebas de integración MANUALES contra producción real
-(dispatch real a Kimi, activa el kill switch /etc/jax/PAUSE vía sudo).
+(dispatch real a Kimi, activa el kill switch de PRODUCCIÓN: el archivo de
+JAX_KILL_SWITCH_PATH).
 
 Movido fuera de las_manos/ y renombrado (2026-08-24): el nombre original
 `_motor_v02_test.py` matcheaba el patrón de descubrimiento default de
@@ -35,7 +36,6 @@ import urllib.request
 
 LAS_MANOS_DIR = "/home/fruiz/jax/las_manos"
 BASE_URL = "http://127.0.0.1:7777"
-PAUSE_PATH = "/etc/jax/PAUSE"
 ENV_FILE = "/etc/jax/.env"
 UVICORN = f"{LAS_MANOS_DIR}/.venv/bin/uvicorn"
 LOG_FILE = f"{LAS_MANOS_DIR}/logs/uvicorn.out"
@@ -220,33 +220,34 @@ else:
 
 print()
 print("=" * 60)
-print("PRUEBA 3 — Kill switch (/etc/jax/PAUSE)")
+print("PRUEBA 3 — Kill switch (archivo de JAX_KILL_SWITCH_PATH)")
 print("=" * 60)
 
-# Limpiar PAUSE previo
-if os.path.exists(PAUSE_PATH):
-    subprocess.run(["sudo", "rm", "-f", PAUSE_PATH], check=False)
-    print(f"PAUSE previo eliminado")
+from pathlib import Path  # noqa: E402
+from interruptor import borrar_pausa, escribir_pausa, interruptor_activo  # noqa: E402
 
-# Crear PAUSE
+# Sin la variable en /etc/jax/.env esto lanza KeyError: sin freno no hay prueba.
+PAUSE_PATH = Path(load_env(ENV_FILE)["JAX_KILL_SWITCH_PATH"])
+
+if borrar_pausa(PAUSE_PATH):
+    print("PAUSE previo eliminado")
+
 ks_ok = False
 try:
-    subprocess.run(["sudo", "mkdir", "-p", "/etc/jax"], check=True)
-    subprocess.run(["sudo", "touch", PAUSE_PATH], check=True)
-    print(f"PAUSE creado. Existe: {os.path.exists(PAUSE_PATH)}")
-except Exception as e:
+    escribir_pausa(PAUSE_PATH, '{"accion": "prueba-manual-motor-v02"}')
+    print(f"PAUSE creado. Puesto: {interruptor_activo(PAUSE_PATH)}")
+except OSError as e:
     print(f"{FAIL} No se pudo crear PAUSE: {e}")
     stop_server()
     sys.exit(1)
 
-# Dispatch con kill switch activo
 try:
     resp3 = http_post("/motor/dispatch", DISPATCH_PAYLOAD)
     print(f"\nDispatch:\n{json.dumps(resp3, indent=2, ensure_ascii=False)}")
     job_id3 = resp3.get("job_id")
 except Exception as e:
     print(f"{FAIL} dispatch con PAUSE activo falló: {e}")
-    subprocess.run(["sudo", "rm", "-f", PAUSE_PATH], check=False)
+    borrar_pausa(PAUSE_PATH)
     stop_server()
     sys.exit(1)
 
@@ -274,9 +275,8 @@ for ok, msg in checks3:
 ks_ok = all(ok for ok, _ in checks3)
 print(f"\n{PASS if ks_ok else FAIL} PRUEBA 3")
 
-# Limpiar PAUSE
-subprocess.run(["sudo", "rm", "-f", PAUSE_PATH], check=False)
-print(f"PAUSE eliminado. Existe: {os.path.exists(PAUSE_PATH)}")
+borrar_pausa(PAUSE_PATH)
+print(f"PAUSE eliminado. Puesto: {interruptor_activo(PAUSE_PATH)}")
 
 # ---------------------------------------------------------------------------
 # Detener servidor si lo arrancamos nosotros

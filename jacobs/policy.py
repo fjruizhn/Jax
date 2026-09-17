@@ -7,11 +7,9 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 
+from interruptor import interruptor_activo
 from jacobs.models import INVOKER_PLATAFORMA, MAX_STEPS_PER_PIPELINE, VALID_INVOKERS
-
-KILL_SWITCH_PATH = Path("/etc/jax/PAUSE")
 
 # MAX_PARALLEL_PIPELINES se espeja en jax-platform backend/ajustes.py (familia
 # `tope_pipelines` de scripts/check_mirror_sync.py, frente C 2026-09-16): es el
@@ -28,8 +26,12 @@ class PolicyResult:
 
 
 def check_kill_switch() -> bool:
-    """True si el kill switch está activo."""
-    return KILL_SWITCH_PATH.exists()
+    """True si el kill switch está puesto (archivo de JAX_KILL_SWITCH_PATH).
+
+    Sin la variable lanza InterruptorSinConfigurar: sin saber dónde está el
+    freno no se ejecuta nada. Un error al mirarlo que no sea "no existe"
+    cuenta como PUESTO (interruptor.py)."""
+    return interruptor_activo()
 
 
 def validate_create(
