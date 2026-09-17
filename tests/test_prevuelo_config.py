@@ -51,3 +51,15 @@ def test_negativo_lanza(monkeypatch):
     monkeypatch.setenv(pc.CHARS_POR_TOKEN, "-2")
     with pytest.raises(RuntimeError, match="JAX_PREVUELO_CHARS_POR_TOKEN"):
         pc.chars_por_token()
+
+
+# Task 15b (2026-09-17): tamaño del pool de lectura del pre-vuelo.
+def test_pool_max_por_defecto_es_5(monkeypatch):
+    monkeypatch.delenv(pc.DB_POOL_MAX, raising=False)
+    assert pc.db_pool_max() == 5
+
+
+def test_pool_max_invalido_lanza_con_el_nombre(monkeypatch):
+    monkeypatch.setenv(pc.DB_POOL_MAX, "cinco")
+    with pytest.raises(RuntimeError, match="JAX_PREVUELO_DB_POOL_MAX"):
+        pc.db_pool_max()

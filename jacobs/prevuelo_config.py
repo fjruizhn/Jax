@@ -15,6 +15,14 @@ Defaults declarados, no medidos:
   subestima (spec §4.6).
 - JAX_PREVUELO_SONDA_MAX_TOKENS=16: la sonda mide disponibilidad, no calidad;
   se manda el menor entre esto y model.max_output_tokens.
+- JAX_PREVUELO_DB_POOL_MAX=5 (Task 15b, 2026-09-17): conexiones del pool de
+  lectura del pre-vuelo (jacobs/store.py::conexion_de_lectura). Medido en
+  proceso contra jax_memory_test (task-15b-report.md), p95 a c=25 / c=50:
+  maxsize 5 = 30,3 / 54,8 ms; 10 = 31,1 / 60,1 ms; 25 = 38,4 / 56,2 ms. Un
+  pool más grande no mejora: el límite es la CPU del único event loop, no la
+  base. 5 es el menor medido y deja margen en una MariaDB compartida con
+  max_connections=151. Se lee al CREAR el pool: un cambio vale después de
+  reiniciar el proceso (o de store.cerrar_pool()).
 
 En honor al Prof. Raúl Jacobs.
 """
@@ -25,6 +33,7 @@ import os
 SONDA_TIMEOUT_S = "JAX_PREVUELO_SONDA_TIMEOUT_S"
 CHARS_POR_TOKEN = "JAX_PREVUELO_CHARS_POR_TOKEN"
 SONDA_MAX_TOKENS = "JAX_PREVUELO_SONDA_MAX_TOKENS"
+DB_POOL_MAX = "JAX_PREVUELO_DB_POOL_MAX"
 
 
 def _entero_positivo(nombre: str, crudo: str) -> int:
@@ -53,3 +62,8 @@ def chars_por_token() -> int:
 def sonda_max_tokens() -> int:
     """Techo de tokens de salida que pide la sonda."""
     return _entero_positivo(SONDA_MAX_TOKENS, os.getenv(SONDA_MAX_TOKENS, "16"))
+
+
+def db_pool_max() -> int:
+    """Conexiones máximas del pool de lectura del pre-vuelo."""
+    return _entero_positivo(DB_POOL_MAX, os.getenv(DB_POOL_MAX, "5"))

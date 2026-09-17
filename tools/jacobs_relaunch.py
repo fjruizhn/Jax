@@ -95,6 +95,21 @@ def _costo(valor: str) -> Decimal:
 
 
 async def relanzar(pipeline_id: str, reasignar: dict[str, str], costo_max_aceptado: Decimal | None) -> int:
+    """Corre _relanzar y, pase lo que pase, cierra el pool de lectura del
+    pre-vuelo (jacobs/store.py, Task 15b) en ESTE event loop antes de que
+    asyncio.run lo cierre. El código de salida es el de la corrida."""
+    from jacobs import store
+
+    try:
+        return await _relanzar(pipeline_id, reasignar, costo_max_aceptado)
+    finally:
+        try:
+            await store.cerrar_pool()
+        except Exception as exc:  # fail-soft: el proceso termina igual y el SO cierra sus sockets; tapar el código de salida de la corrida con este error mentiría sobre el resultado del pipeline -- se imprime
+            print(f"⚠ no se pudo cerrar el pool de conexiones al salir: {type(exc).__name__}: {exc}")
+
+
+async def _relanzar(pipeline_id: str, reasignar: dict[str, str], costo_max_aceptado: Decimal | None) -> int:
     from jacobs import continuar, store
     from jacobs.executor import run_pipeline
     from jacobs.models import INVOKER_PLATAFORMA, PipelineStatus

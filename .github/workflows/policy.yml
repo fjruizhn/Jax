@@ -610,6 +610,7 @@ jobs:
           tests/test_jacobs_continuar.py
           tests/test_jacobs_continue_endpoint.py
           tests/test_jacobs_relaunch_cli.py
+          tests/test_prevuelo_pool.py
           tests/test_medir_min_output_tokens.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
@@ -664,6 +665,7 @@ jobs:
             tests/test_jacobs_continuar.py \
             tests/test_jacobs_continue_endpoint.py \
             tests/test_jacobs_relaunch_cli.py \
+            tests/test_prevuelo_pool.py \
             tests/test_medir_min_output_tokens.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
@@ -1257,8 +1259,26 @@ jobs:
           #   mire asignaciones de NIVEL DE MÓDULO, no cualquier asignación
           #   del árbol (una variable local con el mismo nombre podía pisar el
           #   valor real).
-          grep -qE "^943 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 943 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 943 -> 968 el 2026-09-17 (Task 15b, pool de lectura del pre-vuelo,
+          #   LAS CUATRO #2): test_prevuelo_pool.py (+23) -- un pre-vuelo usa UNA
+          #   conexión para los dos lectores del catálogo (from_db y
+          #   leer_catalogo reciben la misma), el segundo pre-vuelo del proceso no
+          #   abre ninguna, 25 concurrentes no pasan de JAX_PREVUELO_DB_POOL_MAX,
+          #   el pool lleva connect_timeout y no lleva CLIENT.FOUND_ROWS, cerrar
+          #   cierra y el siguiente pedido crea otro; fail-closed: base caída,
+          #   tamaño inválido, pool agotado y conexión colgada dan 503
+          #   prevuelo_no_disponible acotado; una conexión rota (de red o por un
+          #   error de Python a mitad de lectura) se cierra y no vuelve, una que
+          #   la base cortó en reposo no se reusa; el pool de otro event loop se
+          #   niega; from_db sin conexión sigue igual para el worker y con
+          #   conexión prestada no la cierra; el shutdown de LAS MANOS y el CLI
+          #   (con 0/1/3/4, y aunque cerrar falle) cierran el pool. Con el Pool
+          #   REAL de aiomysql y conexiones dobles. 18 vistos en rojo contra
+          #   fcb0c6a (conteo: `assert 2 == 1` y `assert 2 == 0`); 4 controles
+          #   ya pasaban. test_prevuelo_config.py (+2): JAX_PREVUELO_DB_POOL_MAX
+          #   por defecto 5 e inválido lanza con el nombre (rojo: AttributeError).
+          grep -qE "^968 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 968 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1325,6 +1345,7 @@ jobs:
           tests/test_prevuelo_catalogo_db.py
           tests/test_jacobs_continuar_db.py
           tests/test_jacobs_events_indice_causa_db.py
+          tests/test_prevuelo_pool_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1337,6 +1358,7 @@ jobs:
             tests/test_prevuelo_catalogo_db.py \
             tests/test_jacobs_continuar_db.py \
             tests/test_jacobs_events_indice_causa_db.py \
+            tests/test_prevuelo_pool_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1435,5 +1457,12 @@ jobs:
           #   filesort, rows estimado 120 << 4.000). Rojo visto contra el
           #   código viejo: key=idx_events_pipeline, used_key_parts=[pipeline_id]
           #   solamente (report Task 12b).
-          grep -qE "^64 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 64 tests CORRIDOS."; exit 1; }
+          # 64 -> 67 el 2026-09-17 (Task 15b, pool de lectura del pre-vuelo):
+          #   test_prevuelo_pool_db.py (+3) -- contra MariaDB real: dos pedidos
+          #   seguidos ven el mismo CONNECTION_ID(); una conexión ociosa que el
+          #   servidor mata (KILL CONNECTION) no se entrega y el pedido siguiente
+          #   lee bien por otra; resolver_motores y leer_catalogo leen por UNA
+          #   conexión prestada sin cerrarla. Rojo contra fcb0c6a:
+          #   AttributeError (store.conexion_de_lectura no existía).
+          grep -qE "^67 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 67 tests CORRIDOS."; exit 1; }

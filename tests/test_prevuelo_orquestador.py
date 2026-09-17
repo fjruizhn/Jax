@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -49,7 +50,15 @@ def _paso(i, facet, capability="research", deps=None, prompt="investigá"):
                 input={"prompt": prompt}, depends_on=deps or [])
 
 
+@asynccontextmanager
+async def _conexion_de_prueba():
+    # Task 15b: prevuelo() toma UNA conexión del pool de lectura y la pasa a
+    # los dos lectores, que acá están mockeados: no se abre nada real.
+    yield object()
+
+
 def _instalar(monkeypatch, catalogo, motores=None, sondear=None):
+    monkeypatch.setattr(pv.store, "conexion_de_lectura", _conexion_de_prueba)
     leer = AsyncMock(return_value=catalogo)
     monkeypatch.setattr(pv.prevuelo_catalogo, "leer_catalogo", leer)
     monkeypatch.setattr(pv.prevuelo_catalogo, "resolver_motores", AsyncMock(return_value=motores or {}))

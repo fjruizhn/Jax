@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
@@ -298,6 +298,11 @@ def test_el_prevuelo_real_mide_el_peor_caso_del_dependiente_de_un_paso_a_rehacer
         min_output_tokens={}, proveedores_con_credencial=frozenset({"deepseek"}),
         salud={"jekyll": (ahora - 60, "ok")},
     )
+    @asynccontextmanager
+    async def conexion_de_prueba():  # Task 15b: sin conexión real, los lectores están mockeados
+        yield object()
+
+    monkeypatch.setattr(pv.store, "conexion_de_lectura", conexion_de_prueba)
     monkeypatch.setattr(pv.prevuelo_catalogo, "leer_catalogo", AsyncMock(return_value=catalogo))
     monkeypatch.setattr(pv.prevuelo_catalogo, "resolver_motores", AsyncMock(return_value={}))
     monkeypatch.setattr(pv.sonda, "sondear", AsyncMock(return_value=ResultadoSonda(True, None)))

@@ -182,12 +182,20 @@ class MotorCatalog:
         return [n for n, m in self._motors.items() if m.enabled]
 
     @classmethod
-    async def from_db(cls) -> "MotorCatalog":
+    async def from_db(cls, conexion: aiomysql.Connection | None = None) -> "MotorCatalog":
         """Carga motor/capability (con `mode`, tanda A v2)/capability_motor
         desde la DB compartida jax_memory -- mismo pool/patron de conexion
         que credential_resolver.py. Reemplaza la lectura de config.toml
         (TOML queda solo para [server]/kill_switch_path y lo que routes.py
-        todavia usa aparte)."""
+        todavia usa aparte).
+
+        `conexion` (Task 15b, 2026-09-17): el pre-vuelo de Jacobs pasa la
+        conexión que ya tomó de su pool, para leer todo su catálogo por UNA
+        sola (jacobs/prevuelo.py). Con conexión prestada, from_db NO la
+        cierra: es de quien la prestó. Sin argumento (el worker, el ejecutor,
+        motor_registry/routes.py) abre y cierra la suya como siempre."""
+        if conexion is not None:
+            return await cls._leer(conexion)
         host = os.environ.get("JAX_DB_HOST")
         port = os.environ.get("JAX_DB_PORT")
         if not host or not port:
@@ -223,91 +231,95 @@ class MotorCatalog:
             connect_timeout=db_connect_timeout_seconds(),
         )
         try:
-            instance = cls.__new__(cls)
-            instance._motors = {}
-            instance._capabilities = {}
-            async with conn.cursor() as cur:
-                # motor_resolved (no motor): para una clave con faceta homonima
-                # (ada/jax_local/kimi/thot hoy) resuelve el modelo real por
-                # facet_binding, no por motor.model_ref -- ver
-                # jax-platform/backend/db/migrations.py::
-                # _eliminate_motor_model_ref_denormalization. Sin esto, el
-                # payload que Motor Registry manda a la API real (worker.py,
-                # motor_entry.model) podia divergir en silencio de lo que
-                # facet_resolver.py resuelve para el mismo facet_key.
-                await cur.execute(
-                    "SELECT m.`key`, m.model_ref, mo.provider_id, mo.model_id, p.base_url, "
-                    "       m.transport, m.max_tokens, m.default_timeout_seconds, "
-                    "       m.supports_reasoning, m.reasoning_default_visibility, "
-                    "       m.disable_reasoning, m.sandbox_only, m.status, m.has_tool_access "
-                    "FROM motor_resolved m "
-                    "JOIN model mo ON mo.id = m.model_ref "
-                    "JOIN provider p ON p.id = mo.provider_id"
-                )
-                # api_url viene de provider.base_url (JOIN arriba) -- sin esto
-                # _call_http_openai_compat (Task 3) arma "/chat/completions" sin
-                # host, porque MotorEntry.api_url nunca se pobló desde ningun lado.
-                for (key, model_ref, provider_id, model_id, base_url, transport, max_tokens,
-                     timeout, reasoning, visibility, disable_reasoning, sandbox, status,
-                     has_tool_access) in await cur.fetchall():
-                    instance._motors[key] = MotorEntry(
-                        name=key,
-                        enabled=(status == "active"),
-                        provider=provider_id,
-                        api_key_env="",
-                        api_url=base_url or "",
-                        model=model_id,
-                        max_context_tokens=0,
-                        sandbox_only=bool(sandbox),
-                        default_timeout_seconds=timeout,
-                        supports_reasoning=bool(reasoning),
-                        reasoning_default_visibility=visibility,
-                        max_tokens=max_tokens or 0,
-                        transport=transport,
-                        model_ref=model_ref,
-                        provider_id=provider_id,
-                        disable_reasoning=bool(disable_reasoning),
-                        has_tool_access=bool(has_tool_access),
-                    )
-
-                await cur.execute(
-                    "SELECT `key`, risk_level, sandbox_only, requires_human_gate, "
-                    "       max_execution_minutes, max_recursion_depth, output_schema, "
-                    "       fallback_motor, fallback_mode, allowed_callers, forbidden_paths, "
-                    "       auditor_motor, mode "
-                    "FROM capability"
-                )
-                cap_rows = await cur.fetchall()
-
-                await cur.execute(
-                    "SELECT capability_key, motor_key FROM capability_motor ORDER BY capability_key, priority ASC"
-                )
-                motor_rows = await cur.fetchall()
-
-            import json as _json
-            allowed_by_cap: dict[str, list[str]] = {}
-            for capability_key, motor_key in motor_rows:
-                allowed_by_cap.setdefault(capability_key, []).append(motor_key)
-
-            for (key, risk_level, sandbox_only, gate, max_exec, max_rec, schema,
-                 fallback_motor, fallback_mode, callers, forbidden, auditor_motor,
-                 mode) in cap_rows:
-                instance._capabilities[key] = CapabilityEntry(
-                    name=key,
-                    allowed_motors=allowed_by_cap.get(key, []),
-                    allowed_callers=_json.loads(callers) if callers else [],
-                    risk_level=risk_level,
-                    sandbox_only=bool(sandbox_only),
-                    requires_human_gate=bool(gate),
-                    max_execution_minutes=max_exec,
-                    max_recursion_depth=max_rec,
-                    output_schema=schema or "",
-                    fallback_motor=fallback_motor,
-                    fallback_mode=fallback_mode or "manual_only",
-                    forbidden_paths=_json.loads(forbidden) if forbidden else [],
-                    auditor_motor=auditor_motor,
-                    mode=_modo_valido(key, mode),
-                )
-            return instance
+            return await cls._leer(conn)
         finally:
             conn.close()
+
+    @classmethod
+    async def _leer(cls, conn: aiomysql.Connection) -> "MotorCatalog":
+        instance = cls.__new__(cls)
+        instance._motors = {}
+        instance._capabilities = {}
+        async with conn.cursor() as cur:
+            # motor_resolved (no motor): para una clave con faceta homonima
+            # (ada/jax_local/kimi/thot hoy) resuelve el modelo real por
+            # facet_binding, no por motor.model_ref -- ver
+            # jax-platform/backend/db/migrations.py::
+            # _eliminate_motor_model_ref_denormalization. Sin esto, el
+            # payload que Motor Registry manda a la API real (worker.py,
+            # motor_entry.model) podia divergir en silencio de lo que
+            # facet_resolver.py resuelve para el mismo facet_key.
+            await cur.execute(
+                "SELECT m.`key`, m.model_ref, mo.provider_id, mo.model_id, p.base_url, "
+                "       m.transport, m.max_tokens, m.default_timeout_seconds, "
+                "       m.supports_reasoning, m.reasoning_default_visibility, "
+                "       m.disable_reasoning, m.sandbox_only, m.status, m.has_tool_access "
+                "FROM motor_resolved m "
+                "JOIN model mo ON mo.id = m.model_ref "
+                "JOIN provider p ON p.id = mo.provider_id"
+            )
+            # api_url viene de provider.base_url (JOIN arriba) -- sin esto
+            # _call_http_openai_compat (Task 3) arma "/chat/completions" sin
+            # host, porque MotorEntry.api_url nunca se pobló desde ningun lado.
+            for (key, model_ref, provider_id, model_id, base_url, transport, max_tokens,
+                 timeout, reasoning, visibility, disable_reasoning, sandbox, status,
+                 has_tool_access) in await cur.fetchall():
+                instance._motors[key] = MotorEntry(
+                    name=key,
+                    enabled=(status == "active"),
+                    provider=provider_id,
+                    api_key_env="",
+                    api_url=base_url or "",
+                    model=model_id,
+                    max_context_tokens=0,
+                    sandbox_only=bool(sandbox),
+                    default_timeout_seconds=timeout,
+                    supports_reasoning=bool(reasoning),
+                    reasoning_default_visibility=visibility,
+                    max_tokens=max_tokens or 0,
+                    transport=transport,
+                    model_ref=model_ref,
+                    provider_id=provider_id,
+                    disable_reasoning=bool(disable_reasoning),
+                    has_tool_access=bool(has_tool_access),
+                )
+
+            await cur.execute(
+                "SELECT `key`, risk_level, sandbox_only, requires_human_gate, "
+                "       max_execution_minutes, max_recursion_depth, output_schema, "
+                "       fallback_motor, fallback_mode, allowed_callers, forbidden_paths, "
+                "       auditor_motor, mode "
+                "FROM capability"
+            )
+            cap_rows = await cur.fetchall()
+
+            await cur.execute(
+                "SELECT capability_key, motor_key FROM capability_motor ORDER BY capability_key, priority ASC"
+            )
+            motor_rows = await cur.fetchall()
+
+        import json as _json
+        allowed_by_cap: dict[str, list[str]] = {}
+        for capability_key, motor_key in motor_rows:
+            allowed_by_cap.setdefault(capability_key, []).append(motor_key)
+
+        for (key, risk_level, sandbox_only, gate, max_exec, max_rec, schema,
+             fallback_motor, fallback_mode, callers, forbidden, auditor_motor,
+             mode) in cap_rows:
+            instance._capabilities[key] = CapabilityEntry(
+                name=key,
+                allowed_motors=allowed_by_cap.get(key, []),
+                allowed_callers=_json.loads(callers) if callers else [],
+                risk_level=risk_level,
+                sandbox_only=bool(sandbox_only),
+                requires_human_gate=bool(gate),
+                max_execution_minutes=max_exec,
+                max_recursion_depth=max_rec,
+                output_schema=schema or "",
+                fallback_motor=fallback_motor,
+                fallback_mode=fallback_mode or "manual_only",
+                forbidden_paths=_json.loads(forbidden) if forbidden else [],
+                auditor_motor=auditor_motor,
+                mode=_modo_valido(key, mode),
+            )
+        return instance

@@ -117,7 +117,7 @@ async def _explain(conn, sql, params):
 
 def test_lee_faceta_modelo_precio_y_contrato():
     async def cuerpo(s, conn):
-        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
+        return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
     s, cat = _con_semilla(cuerpo)
     fila = cat.facetas[s.faceta]
     assert (fila.provider_id, fila.model_id, fila.base_url, fila.transport) == (
@@ -129,14 +129,14 @@ def test_lee_faceta_modelo_precio_y_contrato():
 
 def test_faceta_inactiva_no_aparece():
     async def cuerpo(s, conn):
-        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
+        return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
     s, cat = _con_semilla(cuerpo, faceta_status="disabled")
     assert s.faceta not in cat.facetas
 
 
 def test_credencial_revocada_no_cuenta():
     async def cuerpo(s, conn):
-        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
+        return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
     s, cat = _con_semilla(cuerpo, credencial="revoked")
     assert s.proveedor not in cat.proveedores_con_credencial
 
@@ -149,7 +149,7 @@ def test_salud_toma_el_ultimo_evento_de_proveedor_e_ignora_los_del_gate():
         await _evento(conn, s.faceta, "provider_error", "preflight", ahora - 300)
         await _evento(conn, s.faceta, "unsupported_transport", "canary_periodic", ahora - 10)
         await _evento(conn, s.faceta, "gate_denied", "chat", ahora - 5)
-        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+        return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
     s, cat = _con_semilla(cuerpo)
     assert cat.salud[s.faceta] == (ahora - 300, "provider_error")
 
@@ -159,7 +159,7 @@ def test_salud_fuera_de_ventana_no_cuenta():
 
     async def cuerpo(s, conn):
         await _evento(conn, s.faceta, "ok", "preflight", ahora - fh.HEALTH_WINDOW_SECONDS - 5)
-        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+        return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
     s, cat = _con_semilla(cuerpo)
     assert s.faceta not in cat.salud
 
@@ -183,7 +183,7 @@ def test_min_output_tokens_sale_de_la_capability():
         async with conn.cursor() as cur:
             await cur.execute("SELECT min_output_tokens FROM capability WHERE `key`='research'")
             (esperado,) = await cur.fetchone()
-        cat = await pc.leer_catalogo(facetas=set(), motores=[], capabilities={"research"}, ahora=time.time())
+        cat = await pc.leer_catalogo(conexion=conn, facetas=set(), motores=[], capabilities={"research"}, ahora=time.time())
         return esperado, cat.min_output_tokens
     _, (esperado, minimos) = _con_semilla(cuerpo)
     assert minimos == {"research": int(esperado)}
@@ -279,7 +279,7 @@ def test_empate_de_ts_lo_gana_provider_error():
     async def cuerpo(s, conn):
         await _evento(conn, s.faceta, "provider_error", "preflight", empate)
         await _evento(conn, s.faceta, "ok", "chat", empate)
-        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+        return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
     s, cat = _con_semilla(cuerpo)
     assert cat.salud[s.faceta] == (empate, "provider_error")
     assert fh.salud_de_proveedor(cat.salud[s.faceta], ahora) == "sondear"
@@ -407,6 +407,6 @@ def test_salud_ignora_config_error_como_los_gate():
     async def cuerpo(s, conn):
         await _evento(conn, s.faceta, "ok", "chat", ahora - 600)
         await _evento(conn, s.faceta, "config_error", "preflight", ahora - 10)
-        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+        return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
     s, cat = _con_semilla(cuerpo)
     assert cat.salud[s.faceta] == (ahora - 600, "ok")

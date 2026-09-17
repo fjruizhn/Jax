@@ -32,7 +32,7 @@ import time
 
 from motor_registry.output_validator import puede_pedir_reintento
 
-from jacobs import prevuelo_catalogo, prevuelo_config, sonda
+from jacobs import prevuelo_catalogo, prevuelo_config, sonda, store
 from jacobs.executor import MAX_DEP_CONTEXT_CHARS, _build_context_input, _enrich_prompt
 from jacobs.facet_health import salud_de_proveedor
 from jacobs.models import MOTOR_FACETS, Pipeline, Step
@@ -170,13 +170,18 @@ async def prevuelo(
         return armar_veredicto([], costos, [])
 
     ahora = _ahora()
-    motores = await prevuelo_catalogo.resolver_motores([s for s in evaluables if s.facet in MOTOR_FACETS])
-    catalogo = await prevuelo_catalogo.leer_catalogo(
-        facetas={s.facet for s in evaluables if s.facet not in MOTOR_FACETS},
-        motores=[m for m in motores.values() if m is not None],
-        capabilities={s.capability for s in evaluables},
-        ahora=ahora,
-    )
+    # UNA conexión del pool de lectura para todo el catálogo (Task 15b): se
+    # devuelve antes de armar prompts y sondear, que no tocan la base.
+    async with store.conexion_de_lectura() as conexion:
+        motores = await prevuelo_catalogo.resolver_motores(
+            [s for s in evaluables if s.facet in MOTOR_FACETS], conexion=conexion)
+        catalogo = await prevuelo_catalogo.leer_catalogo(
+            conexion=conexion,
+            facetas={s.facet for s in evaluables if s.facet not in MOTOR_FACETS},
+            motores=[m for m in motores.values() if m is not None],
+            capabilities={s.capability for s in evaluables},
+            ahora=ahora,
+        )
     chars_por_token = prevuelo_config.chars_por_token()
     max_iteraciones = _max_iteraciones()
 
