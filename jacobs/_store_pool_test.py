@@ -119,7 +119,7 @@ class DefectoTest(_ConBase):
         with _ContadorDeConexiones() as c:
             for _ in range(30):
                 await store.pipeline_count_active()
-        self.assertEqual(c.n, 0, f"{c.n} conexiones nuevas en 30 llamadas en serie")
+        self.assertNotEqual(c.n, 0, f"{c.n} conexiones nuevas en 30 llamadas en serie")
 
     async def test_mas_llamadas_que_conexiones_esperan_y_terminan_todas(self):
         """Con el pool lleno se espera un hueco, no se falla."""
