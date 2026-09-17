@@ -52,7 +52,7 @@ def test_sin_variable_mirar_el_freno_tambien_lanza(monkeypatch):
 
 def test_la_ruta_se_lee_en_cada_llamada(monkeypatch, tmp_path):
     monkeypatch.setenv(VARIABLE, str(tmp_path / "a" / "PAUSE"))
-    assert not interruptor.ruta_del_interruptor() == tmp_path / "a" / "PAUSE"
+    assert interruptor.ruta_del_interruptor() == tmp_path / "a" / "PAUSE"
     monkeypatch.setenv(VARIABLE, str(tmp_path / "b" / "PAUSE"))
     assert interruptor.ruta_del_interruptor() == tmp_path / "b" / "PAUSE"
 
