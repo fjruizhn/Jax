@@ -1402,8 +1402,13 @@ jobs:
           #   ilegible dan 409 sin upsert de pasos. Controles contra e50a6e2; rojo por
           #   mutación moviendo el reset y el upsert ANTES de tomar la época: 2 failed
           #   (los 15 anteriores seguían en verde).
-          grep -qE "^1072 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1072 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1072 -> 1074 el 2026-09-17 (Ruling R37): +2 en test_jacobs_resume_epoca.py --
+          #   un paso hyde que resume o approve-step rehacen por ref ilegible pierde su
+          #   hyde_approved_<step_id> en el contexto guardado y en el del ejecutor
+          #   (desvío 10, como continue); approve-step conserva la aprobación que da en
+          #   el mismo pedido. Rojo contra e50a6e2: 2 failed (la marca vieja seguía).
+          grep -qE "^1074 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1074 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

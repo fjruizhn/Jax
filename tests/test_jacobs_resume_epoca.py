@@ -278,3 +278,32 @@ def test_carrera_perdida_con_ref_ilegible_da_409_sin_tocar_pasos(endpoint):
     assert e.value.status_code == 409 and isinstance(e.value.detail, str)
     upsert.assert_not_awaited()
     assert pasos[0].status == StepStatus.completed and pasos[0].output_ref == _REF_ROTA
+
+
+# Ruling R37: un paso hyde que se rehace porque su ref no se lee pierde su
+# hyde_approved_<step_id> (desvío 10, como continue): la aprobación humana de
+# una corrida no autoriza la siguiente. approve-step conserva la que está
+# dando AHORA.
+
+def test_resume_quita_la_aprobacion_de_hyde_del_paso_que_se_rehace():
+    pasos = [_paso(0, facet="hyde", status=StepStatus.completed), _paso(1, depends_on=[0])]
+    pasos[0].output_ref = _REF_ROTA
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA, "hyde_approved_s0": True})
+    tomar = AsyncMock(return_value=4)
+    r, bg = _llamar("resume", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar)
+    guardado = tomar.await_args.args[3]
+    assert "step_0_ref" not in guardado and "hyde_approved_s0" not in guardado
+    assert "hyde_approved_s0" not in bg.tasks[0].args[0].context
+
+
+def test_approve_quita_la_aprobacion_vieja_y_conserva_la_que_da_ahora():
+    pasos = [_paso(0, facet="hyde", status=StepStatus.completed),
+             _paso(1, facet="hyde", status=StepStatus.blocked_human_gate, depends_on=[0])]
+    pasos[0].output_ref = _REF_ROTA
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA, "hyde_approved_s0": True})
+    tomar = AsyncMock(return_value=4)
+    r, bg = _llamar("approve", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar)
+    guardado = tomar.await_args.args[3]
+    assert "hyde_approved_s0" not in guardado
+    assert guardado.get("hyde_approved_s1") is True
+    assert bg.tasks[0].args[0].context.get("hyde_approved_s1") is True

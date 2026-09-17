@@ -127,7 +127,9 @@ def _resumen_de_costo(veredicto: Veredicto) -> dict:
     }
 
 
-async def _prevuelo_de_reanudacion(pipeline: Pipeline, pasos: list[Step]) -> tuple[dict, dict, list[Step]]:
+async def _prevuelo_de_reanudacion(
+    pipeline: Pipeline, pasos: list[Step], *, aprobados_ahora: frozenset[str] = frozenset(),
+) -> tuple[dict, dict, list[Step]]:
     """Ola final F2 (Ruling R32, criterio de Fernando "nada gasta sin
     pre-vuelo"): resume y approve-step lanzan run_pipeline igual que continue,
     así que corren el pre-vuelo ANTES de tomar la época, sobre los pasos SIN
@@ -161,6 +163,12 @@ async def _prevuelo_de_reanudacion(pipeline: Pipeline, pasos: list[Step]) -> tup
     a_rehacer = set(a_correr)
     ilegibles = [p for p in pasos
                  if p.step_index in a_rehacer and pipeline.context.get(f"step_{p.step_index}_ref")]
+    # Ruling R37 (desvío 10, como continue): un paso que se rehace pierde su
+    # hyde_approved_*: la aprobación humana de una corrida no autoriza la
+    # siguiente. Salvo la que approve-step está dando en ESTE pedido.
+    for p in ilegibles:
+        if p.step_id not in aprobados_ahora:
+            contexto.pop(f"hyde_approved_{p.step_id}", None)
     return _resumen_de_costo(veredicto), contexto, ilegibles
 
 
@@ -666,7 +674,9 @@ async def approve_step(
     # F2 (Ruling R32): pre-vuelo de la ola completa que se va a lanzar (todos
     # los pasos sin ref legible), antes de tomar la época y de persistir las
     # marcas de hyde.
-    costo, contexto, ilegibles = await _prevuelo_de_reanudacion(pipeline, steps)
+    costo, contexto, ilegibles = await _prevuelo_de_reanudacion(
+        pipeline, steps, aprobados_ahora=frozenset(s.step_id for s in gated if s.facet == "hyde"),
+    )
     # Pasada final R34: el contexto sin las refs ilegibles (con las marcas
     # hyde_approved_* intactas) es el que viaja con la época.
     pipeline.context = contexto
