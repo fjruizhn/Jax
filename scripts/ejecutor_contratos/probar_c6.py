@@ -102,6 +102,12 @@ async def principal(nombre: str, env) -> int:
         if centinela is not None and centinela.returncode is None:
             centinela.kill()
             await centinela.wait()
+        # La precondición fue «cero procesos de la cuenta»: lo que quede vivo lo dejó esta
+        # prueba (una centinela que la revocación no mató). Sin pty, cortar el cliente ssh
+        # no la mata en la máquina: se mata como root y se dice.
+        if await _vivos(h, env, c.nombre) != 0:
+            rc, _, _ = await _root(h, env, f"pkill -KILL -u {shlex.quote(c.nombre)}; true")
+            pasos.append(("limpieza_de_restos", rc == 0))
         orden = (f"install -m 0644 -o root -g root {shlex.quote(respaldo)} {shlex.quote(archivo)} && "
                  f"cmp {shlex.quote(respaldo)} {shlex.quote(archivo)} && rm {shlex.quote(respaldo)}")
         rc, _, _ = await _root(h, env, orden)
