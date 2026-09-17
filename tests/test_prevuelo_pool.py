@@ -544,3 +544,62 @@ def test_dos_primeros_pedidos_a_la_vez_crean_un_solo_pool(base, monkeypatch):
 
     _correr(cuerpo)
     assert len(creados) == 1
+
+
+# --- Fix round 2 de la revisión (2026-09-17) ---------------------------------
+
+@pytest.mark.parametrize("falla", ["revienta", "cuelga"])
+def test_un_connect_fallido_no_se_queda_con_el_turno(base, monkeypatch, falla):
+    """Con POOL_MAX=1, un connect que revienta (o que se cuelga hasta el
+    timeout) durante una caída no puede quedarse con el único turno: cuando la
+    base vuelve, el pedido siguiente tiene que conseguir conexión. Si el turno
+    se perdiera, después de POOL_MAX connects fallidos todo pre-vuelo sería
+    503 para siempre. Rojo por mutación: sin `turno.release()` en el except
+    alrededor de `pool.acquire()` -> TimeoutError en el segundo pedido."""
+    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
+
+    async def cuerpo():
+        if falla == "revienta":
+            base.falla_al_conectar = pymysql.err.OperationalError(2003, "Can't connect to MySQL server")
+            esperado = pymysql.err.OperationalError
+        else:
+            base.cuelga_al_conectar = True
+            esperado = TimeoutError
+        with pytest.raises(esperado):
+            async with store.conexion_de_lectura():
+                pass
+        base.falla_al_conectar = None
+        base.cuelga_al_conectar = False
+        async with store.conexion_de_lectura() as conn:
+            return conn.closed
+
+    assert _correr(cuerpo) is False
+
+
+def test_si_devolver_la_conexion_falla_el_turno_vuelve_igual(base, monkeypatch):
+    """Si `pool.release()` lanza, el turno se suelta igual (finally): el pedido
+    siguiente no se queda sin turno. Rojo por mutación: soltar el turno sólo si
+    release no lanzó -> TimeoutError en el segundo pedido."""
+    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
+    release_real = aiomysql.pool.Pool.release
+    llamadas = []
+
+    def release_que_falla_una_vez(self, conn):
+        fut = release_real(self, conn)  # la conexión vuelve al pool de verdad
+        llamadas.append(conn)
+        if len(llamadas) == 1:
+            raise RuntimeError("release falló")
+        return fut
+
+    monkeypatch.setattr(aiomysql.pool.Pool, "release", release_que_falla_una_vez)
+
+    async def cuerpo():
+        with pytest.raises(RuntimeError, match="release falló"):
+            async with store.conexion_de_lectura():
+                pass
+        async with store.conexion_de_lectura() as conn:
+            return conn.closed
+
+    assert _correr(cuerpo) is False

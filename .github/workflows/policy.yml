@@ -1290,8 +1290,15 @@ jobs:
           #   (sale 2), filtro de sólo lectura, argumentos, percentil de rango
           #   más cercano, agrupación de CPU y resumen; el script no importa
           #   jacobs al importarse. Rojo: el script no existía (FileNotFoundError).
-          grep -qE "^1001 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1001 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1001 -> 1004 el 2026-09-17 (Task 15b, fix round 2 de la re-revisión):
+          #   +3 en test_prevuelo_pool.py -- un connect que revienta o se cuelga
+          #   hasta el timeout no se queda con el turno del semáforo (POOL_MAX=1:
+          #   al volver la base, el pedido siguiente consigue conexión), y si
+          #   pool.release() lanza el turno vuelve igual. Rojos por mutación
+          #   (sin turno.release() en el except de pool.acquire(): 2 TimeoutError;
+          #   sin el finally alrededor de pool.release(): 1 TimeoutError).
+          grep -qE "^1004 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1004 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
