@@ -432,6 +432,60 @@ política que exporta el plan 1).
   `harness` de SP2 / el tope del proxy de SP3 (§6.2), que ya tienen que resolver el modelo del cerebro.
 - **Verificación de cierre:** un `POST /v1/messages` con `model` distinto del del cerebro da 403 sin tocar el upstream.
 
+## Cerrado en código, deploy de jax URGENTE — frente B: kill switch real (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 (Mr. Hyde, verificado con `stat`, `systemctl show` y `git log`).** Lado plataforma
+MERGEADO Y EN PRODUCCIÓN: jax-platform#95 → `e715c28` (mergeado 04:23:49), `jax-platform.service` activo desde
+04:46:16 y escribe el freno en `/etc/jax/interruptor/PAUSE`. Lado jax: rama `feat/kill-switch-real`
+(`/home/fruiz/worktrees/jax-frente-b`), rebasada sobre `origin/master` `56d8c24` (frente E y Ejecutor C1/C2 adentro,
+frente F NO), SIN publicar, SIN mergear, SIN desplegar: `jax-las-manos` sigue corriendo desde 03:23:03 con el código
+que lee `/etc/jax/PAUSE`. Ledger: `jax-platform-frente-b/.superpowers/sdd/2026-09-16-frente-b-kill-switch/progress.md`.
+
+**Qué hace el frente (lado jax):**
+- **Módulo `interruptor` compartido** (`jax/core/interruptor.py`, symlink `las_manos/interruptor.py`, copia en
+  `jax-platform/backend/interruptor.py`, familia `interruptor` de `scripts/check_mirror_sync.py`): la ruta del freno sale
+  de `JAX_KILL_SWITCH_PATH` — OBLIGATORIA y absoluta (`InterruptorSinConfigurar` si falta); lectura fail-closed
+  (cualquier `OSError` que no sea ENOENT = freno PUESTO); escritura atómica.
+- **Lectores:** LAS MANOS (`server.py`, `ssh_worker`, `motor_registry` routes/worker — el job cancelado con el freno
+  queda `killed_by_switch`), Jacobs (`policy.check_kill_switch` y cada step de `executor` corre bajo
+  `correr_con_interruptor`, que frena en vuelo), REPL y `jax --task`. Ninguna ruta fija en el repo
+  (`tests/test_interruptor_sin_rutas_fijas.py`).
+- **La ruta heredada `/etc/jax/PAUSE` sigue frenando** mientras exista (fail-closed, WARNING por episodio): pedido de la
+  sesión del Ejecutor `fruiz-a1`, cuyo contrato C4 (freno en vuelo) se construye encima. DECISIÓN completa en
+  «Bloquea trabajo», arriba.
+- **Canary de facetas y `probe_after_rebind` frenados** (lado plataforma, en #95): con el freno puesto devuelven
+  `SALTADA_POR_FRENO`, sin llamar a proveedores ni escribir fila.
+- **k6** `loadtest/kill-switch.js` (423 y admin, sólo con el freno puesto).
+
+**Infraestructura (hecha 2026-09-17 ~04:05 por el controlador principal):** `/etc/jax/interruptor` `root:fruiz` `2770`;
+`JAX_KILL_SWITCH_PATH` en `/etc/jax/.env` (backup `/etc/jax/.env.backup-pre-kill-switch-20260917-040558`).
+
+**Incidente (HISTORIA, 2026-09-17 04:46):** otra sesión reinició `jax-platform` y desplegó #95 ANTES que el lado jax. Su
+chequeo comparó el checkout contra master, pero no el proceso en marcha contra el checkout. **Exposición:** freno a
+medias — el botón KILL de la Mesa escribe `/etc/jax/interruptor/PAUSE` y la Mesa responde 423, pero LAS MANOS y Jacobs
+de producción siguen mirando `/etc/jax/PAUSE`: los pipelines en vuelo NO se frenan hasta desplegar esta rama.
+**Lección: antes de reiniciar un servicio, comparar el proceso en marcha contra el checkout (`/proc/<pid>/cwd`,
+`ActiveEnterTimestamp` contra la fecha del commit), no sólo el checkout contra master.**
+
+**Rebase del 2026-09-17 sobre `56d8c24`:** conflictos en `.github/workflows/policy.yml` (listas de tests-puros: se
+conservan las de E, Ejecutor y B; pisos re-medidos), `conftest.py` (aislamientos de E — URLs, `JAX_REPO_BASE`,
+`JAX_FACET_SEAL_PATH` — más el del freno), `jacobs/policy.py` (E-13 `MAX_STEPS_PER_PIPELINE` desde `models.py` + el
+freno desde `interruptor`) y `jax/core/main.py` (imports de E y del interruptor). El commit que sólo re-redactaba un
+comentario de piso quedó vacío. **El tripwire de E-19 vio en rojo** el paso nuevo de `mirror-sync` que instalaba
+`aiofiles`: ahora instala desde `requirements.txt`.
+
+**Pisos (medidos dos veces, local 3.14):** tests-puros 979 → **1044 passed, 1 skipped** con `JAX_PLATFORM_REPO_ROOT`
+inexistente (como el runner); `mirror-sync`: `check_mirror_sync.py` exit 0 (diez familias) y 15 + **2 passed** del
+escritor real contra un worktree temporal de jax-platform `origin/master` `97e4b3e` (incluye #95);
+`jacobs-gobernanza-db` **31** y `facet-health-io` **9** sin cambio contra `jax_memory_test`;
+`policy/tests/test_no_fail_open_except.py` 21 passed.
+
+- [ ] **2026-09-17** Publicar la rama, PR, confirmar pisos en el runner (si difiere, manda el runner), canario rojo por API y merge.
+- [ ] **2026-09-17** Deploy de jax con 0 pipelines en vuelo: verificar `JAX_KILL_SWITCH_PATH` en `/proc/<pid>/environ` de
+  `jax-las-manos` tras el reinicio; poner y quitar el freno desde la Mesa y ver a LAS MANOS responder (el peor caso:
+  un pipeline en vuelo se detiene).
+- [ ] **2026-09-17** Carga del lado jax sobre el HEAD rebasado (k6 `kill-switch.js`, regla TIME-WAIT < 10k).
+
 ## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 1: C1 prohibiciones y C2 respaldo (2026-09-17)
 
 Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~04:40). Ramas locales con commits, SIN PUBLICAR
