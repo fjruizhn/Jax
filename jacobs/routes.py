@@ -6,6 +6,7 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -374,6 +375,14 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         # y sondear en vano; el cupo se decide recontando DENTRO del candado
         # con nombre de MariaDB y escribiendo en el mismo bloque -- el
         # asyncio.Lock no cruza al CLI de continuar, que corre en otro proceso.
+        #
+        # R38, fix round 1 (2b): pipeline, pasos, PIPELINE_CREATED y, en
+        # dry_run, el completed y DRY_RUN_COMPLETE van en UNA transacción
+        # sobre la conexión del candado. Antes iban por conexiones separadas
+        # (del pool, esperando turno con el GET_LOCK tomado): un vencimiento a
+        # mitad dejaba un pipeline sin sus pasos y un 500. Ahora es todo o
+        # nada, acotado por JAX_DB_CONNECT_TIMEOUT_SECONDS; cualquier falla es
+        # 503 prevuelo_no_disponible sin nada escrito.
         try:
             async with store.candado_de_activos() as conexion_del_candado:
                 active_count = await store.pipeline_count_active(conexion=conexion_del_candado)
@@ -388,23 +397,29 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                     status_code = 423 if "kill switch" in policy.reason.lower() else 422
                     raise HTTPException(status_code=status_code, detail=policy.reason)
 
-                await store.pipeline_create(pipeline)
-                for step in steps:
-                    await store.step_upsert(step)
-                await store.event_append(pipeline_id, "PIPELINE_CREATED", {
-                    "name": req.name, "mode": req.mode, "steps": len(steps), **costo,
-                })
-        except store.CandadoNoDisponible as exc:
+                async with asyncio.timeout(store.db_connect_timeout_seconds()):
+                    async with store.transaccion(conexion_del_candado) as tx:
+                        await store.pipeline_create(pipeline, conexion=tx)
+                        for step in steps:
+                            await store.step_upsert(step, conexion=tx)
+                        await store.event_append(pipeline_id, "PIPELINE_CREATED", {
+                            "name": req.name, "mode": req.mode, "steps": len(steps), **costo,
+                        }, conexion=tx)
+                        if req.mode == "dry_run":
+                            await store.pipeline_update_status(
+                                pipeline_id, PipelineStatus.completed, conexion=tx)
+                            await store.event_append(pipeline_id, "DRY_RUN_COMPLETE", conexion=tx)
+        except HTTPException:
+            raise
+        except Exception as exc:  # fail-closed: candado, recuento o transacción de creación que no se pudo completar -> nada quedó escrito (la transacción se descarta) y no se crea (spec §8)
             motivo = _motivo_redactado(exc)
-            logger.error("crear: candado del cupo de activos no disponible: %s", motivo)
+            logger.error("crear: no se pudo escribir el pipeline: %s", motivo)
             raise HTTPException(
                 status_code=503, detail={"code": "prevuelo_no_disponible", "motivo": motivo},
             ) from exc
 
-    # dry_run: no ejecuta en background, solo completa inmediatamente
+    # dry_run: no ejecuta en background; ya quedó completed en la transacción
     if req.mode == "dry_run":
-        await store.pipeline_update_status(pipeline_id, PipelineStatus.completed)
-        await store.event_append(pipeline_id, "DRY_RUN_COMPLETE")
         return {
             "pipeline_id": pipeline_id,
             "status": "completed",

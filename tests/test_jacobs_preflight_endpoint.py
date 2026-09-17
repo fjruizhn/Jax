@@ -55,7 +55,35 @@ def _parches(pila, veredicto=None, prevuelo=None, build=None):
     pila.enter_context(patch.object(policy, "check_kill_switch", return_value=False))
     m["candado"] = CandadoFalso()
     pila.enter_context(patch.object(routes.store, "candado_de_activos", m["candado"], create=True))
+    m["transaccion"] = TransaccionFalsa(m["candado"].orden)
+    pila.enter_context(patch.object(routes.store, "transaccion", m["transaccion"], create=True))
     return m
+
+
+class TransaccionFalsa:
+    """Doble de store.transaccion (R38, fix round 1): la creación escribe en
+    UNA transacción sobre la conexión del candado. Registra la conexión que
+    recibió y si confirmó o se descartó."""
+
+    def __init__(self, orden: list):
+        self.orden, self.conexiones, self.confirmadas, self.descartadas = orden, [], 0, 0
+
+    def __call__(self, conexion):
+        self.conexiones.append(conexion)
+        return self
+
+    async def __aenter__(self):
+        self.orden.append("begin")
+        return self.conexiones[-1]
+
+    async def __aexit__(self, tipo, *exc):
+        if tipo is None:
+            self.confirmadas += 1
+            self.orden.append("commit")
+        else:
+            self.descartadas += 1
+            self.orden.append("descartada")
+        return False
 
 
 class CandadoFalso:
@@ -289,7 +317,7 @@ def test_el_prevuelo_corre_despues_de_build_y_antes_de_crear():
 
     with ExitStack() as pila:
         m = _parches(pila, build=AsyncMock(side_effect=build), prevuelo=AsyncMock(side_effect=prevuelo))
-        m["pipeline_create"].side_effect = lambda p: orden.append("crear")
+        m["pipeline_create"].side_effect = lambda p, **kw: orden.append("crear")
         asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
     assert orden == ["build", "prevuelo", "crear"]
 
@@ -334,7 +362,7 @@ def test_crear_escribe_dentro_del_candado():
         m = _parches(pila)
         m["candado"].orden = orden
         m["pipeline_count_active"].side_effect = lambda **kw: orden.append("contar") or 0
-        m["pipeline_create"].side_effect = lambda p: orden.append("crear")
+        m["pipeline_create"].side_effect = lambda p, **kw: orden.append("crear")
         m["event_append"].side_effect = lambda *a, **kw: orden.append(a[1])
         asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
     assert orden == ["contar", "candado", "contar", "crear", "PIPELINE_CREATED", "soltar"]

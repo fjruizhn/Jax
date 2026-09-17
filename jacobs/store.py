@@ -296,6 +296,37 @@ async def conexion_del_pool() -> AsyncIterator[aiomysql.Connection]:
             turno.release()
 
 
+@asynccontextmanager
+async def _conexion_o_pool(conexion: aiomysql.Connection | None) -> AsyncIterator[aiomysql.Connection]:
+    """La conexión prestada (p. ej. la del candado, dentro de una transacción)
+    sin tocarla, o una del pool."""
+    if conexion is not None:
+        yield conexion
+        return
+    async with conexion_del_pool() as conn:
+        yield conn
+
+
+@asynccontextmanager
+async def transaccion(conn: aiomysql.Connection) -> AsyncIterator[aiomysql.Connection]:
+    """Una transacción sobre `conn` (R38, fix round 1, 2b: crear escribe
+    pipeline, pasos y eventos en UNA, sobre la conexión del candado).
+
+    Si el bloque falla o lo cancela un timeout, la conexión se CIERRA en vez
+    de mandar ROLLBACK: tras una consulta cancelada el protocolo queda en un
+    estado desconocido y un ROLLBACK por la red podría colgarse de nuevo.
+    Cerrar la sesión hace que el servidor descarte la transacción sin
+    confirmar (y suelte el GET_LOCK de esa sesión). Límite: si la conexión se
+    corta DURANTE el COMMIT, el resultado no se puede saber desde acá."""
+    await conn.begin()
+    try:
+        yield conn
+    except BaseException:
+        conn.close()
+        raise
+    await conn.commit()
+
+
 async def cerrar_pool() -> None:
     """Cierra el pool del store (shutdown de LAS MANOS, salida del CLI).
     Sin pool, no hace nada. Después se puede volver a pedir: se crea otro."""
@@ -527,8 +558,8 @@ async def init_tables() -> None:
 #  Pipeline CRUD
 # ----------------------------------------------------------------
 
-async def pipeline_create(p: Pipeline) -> None:
-    async with conexion_del_pool() as conn:
+async def pipeline_create(p: Pipeline, conexion: aiomysql.Connection | None = None) -> None:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -566,9 +597,10 @@ async def pipeline_update_status(
     status: PipelineStatus,
     current_step_index: int | None = None,
     context: dict | None = None,
+    conexion: aiomysql.Connection | None = None,
 ) -> None:
     now = time.time()
-    async with conexion_del_pool() as conn:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             if current_step_index is not None and context is not None:
                 await cur.execute(
@@ -972,8 +1004,8 @@ def _row_to_pipeline(row: dict) -> Pipeline:
 #  Step CRUD
 # ----------------------------------------------------------------
 
-async def step_upsert(s: Step) -> None:
-    async with conexion_del_pool() as conn:
+async def step_upsert(s: Step, conexion: aiomysql.Connection | None = None) -> None:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -1145,8 +1177,9 @@ async def event_append(
     event_type: str,
     payload: dict | None = None,
     step_id: str | None = None,
+    conexion: aiomysql.Connection | None = None,
 ) -> None:
-    async with conexion_del_pool() as conn:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """INSERT INTO jacobs_events (pipeline_id, step_id, event_type, payload, ts)

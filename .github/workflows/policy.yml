@@ -1433,8 +1433,17 @@ jobs:
           #   existía); sin plazo de turno una base caída sigue fallando al conectar
           #   (rojo: AttributeError); un pedido HTTP con el pool lleno sigue dando 503
           #   acotado (control).
-          grep -qE "^1089 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1089 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1089 -> 1093 el 2026-09-17 (R38, fix round 1, 2b y 3): +4 en
+          #   test_jacobs_conexiones_por_pedido.py -- crear confirma pipeline, pasos y
+          #   PIPELINE_CREATED en UNA transacción por la conexión del candado (rojo
+          #   contra 1d84e82: cada escritura por el pool en autocommit); la base que
+          #   corta a mitad da 503 sin nada confirmado (rojo: pipeline confirmado y
+          #   OperationalError sin atrapar); la base colgada a mitad da 503 en ~1 s sin
+          #   nada confirmado (rojo: el pedido se colgaba); dry_run completa en la misma
+          #   transacción y sólo abre el candado (rojo: UPDATE y DRY_RUN_COMPLETE por el
+          #   pool). test_jacobs_preflight_endpoint.py agrega el doble de la transacción.
+          grep -qE "^1093 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1093 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

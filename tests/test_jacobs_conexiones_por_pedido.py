@@ -54,7 +54,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 PID = "p-conexiones"
 REF = 'inline:{"result": "hecho"}'
 # Marcos que no son "el sitio" sino la cañería de la conexión.
-_CANERIA = {"get_conn", "_ejecutar_condicional", "conexion_del_pool", "_pool_del_store",
+_CANERIA = {"get_conn", "_ejecutar_condicional", "conexion_del_pool", "_pool_del_store", "_conexion_o_pool",
             "__aenter__", "__aexit__", "_correr_endpoint"}
 
 
@@ -73,8 +73,9 @@ class _Lector:
 
 
 class _Cursor:
-    def __init__(self, base):
+    def __init__(self, base, conn):
         self._base = base
+        self._conn = conn
         self._fila = None
         self._filas = ()
 
@@ -106,7 +107,15 @@ class _Cursor:
         elif s == store._SQL_BLOQUEAR_PIPELINE:
             self._fila = (0, b.status)
         elif s.startswith(("UPDATE ", "INSERT ")):
-            b.escrituras.append((s, params))
+            if b.falla_en and s.startswith(b.falla_en):
+                raise pymysql.err.OperationalError(2013, "Lost connection to MySQL server during query")
+            if b.cuelga_en and s.startswith(b.cuelga_en):
+                await asyncio.sleep(3600)
+            escritura = (s, params, self._conn.sitio)
+            if self._conn.en_transaccion:
+                self._conn.pendientes.append(escritura)
+            else:
+                b.escrituras.append(escritura)  # autocommit: confirmada al escribir
             return 1
         else:
             raise AssertionError(f"consulta no prevista por el doble: {s[:120]}")
@@ -120,17 +129,23 @@ class _Cursor:
 
 
 class _Conexion:
-    def __init__(self, base):
+    def __init__(self, base, sitio):
         self._base = base
+        self.sitio = sitio
+        self.en_transaccion = False
+        self.pendientes: list = []
         self.closed = False
         self._reader = _Lector()
         self.last_usage = time.monotonic()
 
     def cursor(self, *_clase):
-        return _Cursor(self._base)
+        return _Cursor(self._base, self)
 
     def close(self):
+        # Cerrar la sesión descarta lo no confirmado (como el servidor).
         self.closed = True
+        self.pendientes.clear()
+        self.en_transaccion = False
 
     async def ensure_closed(self):
         self.closed = True
@@ -139,13 +154,16 @@ class _Conexion:
         return False
 
     async def begin(self):
-        pass
+        self.en_transaccion = True
 
     async def commit(self):
-        pass
+        self._base.escrituras.extend(self.pendientes)
+        self.pendientes.clear()
+        self.en_transaccion = False
 
     async def rollback(self):
-        pass
+        self.pendientes.clear()
+        self.en_transaccion = False
 
 
 def _sitio() -> str:
@@ -166,14 +184,17 @@ class _Base:
         self.status = status
         self.pasos = pasos
         self.aperturas: list[tuple[str, str, bool]] = []  # (via, sitio, found_rows)
-        self.escrituras: list[tuple[str, object]] = []
+        self.escrituras: list[tuple[str, object, str]] = []  # CONFIRMADAS: (sql, params, sitio de la conexión)
+        self.falla_en: str | None = None
+        self.cuelga_en: str | None = None
         self.falla_al_conectar: BaseException | None = None
 
     def _abrir(self, via, kwargs):
         if self.falla_al_conectar is not None:
             raise self.falla_al_conectar
-        self.aperturas.append((via, _sitio(), "client_flag" in kwargs))
-        return _Conexion(self)
+        sitio = _sitio()
+        self.aperturas.append((via, sitio, "client_flag" in kwargs))
+        return _Conexion(self, sitio)
 
     async def directa(self, *_a, **kwargs):
         return self._abrir("directa", kwargs)
@@ -244,9 +265,9 @@ def _pedido_preflight():
         invoked_by="plataforma", steps=[StepSpec(facet="jekyll", capability="research", prompt="p")]))
 
 
-def _pedido_crear():
+def _pedido_crear(mode="autonomous"):
     return routes.create_pipeline(PipelineCreateRequest(
-        name="t", objective="o", invoked_by="plataforma", mode="autonomous",
+        name="t", objective="o", invoked_by="plataforma", mode=mode,
         steps=[StepSpec(facet="jekyll", capability="research", prompt="p")]), BackgroundTasks())
 
 
@@ -483,7 +504,7 @@ def test_el_ejecutor_espera_turno_con_el_pool_lleno_y_termina(entorno, monkeypat
             await store.cerrar_pool()
 
     asyncio.run(cuerpo())
-    tipos = [p[2] for s, p in base.escrituras if s.startswith("INSERT INTO jacobs_events")]
+    tipos = [p[2] for s, p, _ in base.escrituras if s.startswith("INSERT INTO jacobs_events")]
     assert tipos == ["PIPELINE_STARTED", "WAVE_STARTED", "STEP_STARTED", "STEP_COMPLETED",
                      "WAVE_COMPLETED", "PIPELINE_COMPLETED"]
 
@@ -556,3 +577,98 @@ def test_el_reaper_barre_sin_plazo_de_turno(monkeypatch):
         asyncio.run(reaper.start_reaper_loop())
     assert vistas == [True]
     assert store.turno_sin_plazo() is False
+
+
+# ---------------------------------------------------------------------------
+# Crear es atómico (R38, fix round 1, 2b) y dry_run (3)
+# ---------------------------------------------------------------------------
+
+def _escrituras_de_crear(base):
+    return [(s.split(" (")[0].split(" SET")[0], sitio) for s, _p, sitio in base.escrituras]
+
+
+def test_crear_escribe_todo_en_una_transaccion_sobre_la_conexion_del_candado(entorno, monkeypatch):
+    """Pipeline, paso y PIPELINE_CREATED se confirman juntos por la conexión
+    del GET_LOCK. Expected contra 1d84e82: cada escritura por su propia
+    conexión del pool, en autocommit (sitios pipeline_create, step_upsert,
+    event_append)."""
+    base = entorno()
+    monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
+
+    async def cuerpo():
+        try:
+            return await _pedido_crear()
+        finally:
+            await store.cerrar_pool()
+
+    asyncio.run(cuerpo())
+    assert _escrituras_de_crear(base) == [
+        ("INSERT INTO jacobs_pipelines", "candado_de_activos"),
+        ("INSERT INTO jacobs_steps", "candado_de_activos"),
+        ("INSERT INTO jacobs_events", "candado_de_activos"),
+    ]
+
+
+def test_crear_con_la_base_que_corta_a_mitad_da_503_sin_nada_escrito(entorno, monkeypatch):
+    """La base corta al escribir el paso: nada queda confirmado (ni el
+    pipeline sin pasos) y el pedido es 503 prevuelo_no_disponible.
+    Expected contra 1d84e82: el pipeline quedaba confirmado y salía el
+    OperationalError sin atrapar (un 500)."""
+    base = entorno()
+    base.falla_en = "INSERT INTO jacobs_steps"
+    monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
+
+    async def cuerpo():
+        try:
+            with pytest.raises(HTTPException) as exc:
+                await _pedido_crear()
+            return exc.value
+        finally:
+            await store.cerrar_pool()
+
+    error = asyncio.run(cuerpo())
+    assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
+    assert base.escrituras == []
+
+
+def test_crear_con_la_base_colgada_a_mitad_da_503_acotado_sin_nada_escrito(entorno, monkeypatch):
+    """La escritura del paso se cuelga: el pedido vence a
+    JAX_DB_CONNECT_TIMEOUT_SECONDS (1 s acá), responde 503 y no confirma nada.
+    Expected contra 1d84e82: el pedido queda colgado (TimeoutError del
+    wait_for de 5 s del test) con el pipeline ya confirmado."""
+    base = entorno()
+    base.cuelga_en = "INSERT INTO jacobs_steps"
+    monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
+
+    async def cuerpo():
+        try:
+            inicio = time.monotonic()
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(_pedido_crear(), 5)
+            return exc.value, time.monotonic() - inicio
+        finally:
+            await store.cerrar_pool()
+
+    error, espera = asyncio.run(cuerpo())
+    assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
+    assert espera < 3
+    assert base.escrituras == []
+
+
+def test_dry_run_solo_abre_el_candado_y_completa_en_la_misma_transaccion(entorno, monkeypatch):
+    """Item 3 de la revisión: dry_run escribe además el completed y
+    DRY_RUN_COMPLETE. Van en la transacción de crear (un dry_run no queda
+    pending si la base corta después de crear).
+    Expected contra 1d84e82: UPDATE y DRY_RUN_COMPLETE por el pool, fuera de
+    la transacción."""
+    base = entorno()
+    monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
+    assert _medir(base, lambda: _pedido_crear("dry_run")) == [("directa", "candado_de_activos", False)]
+    segundo = _escrituras_de_crear(base)[len(_escrituras_de_crear(base)) // 2:]
+    assert segundo == [
+        ("INSERT INTO jacobs_pipelines", "candado_de_activos"),
+        ("INSERT INTO jacobs_steps", "candado_de_activos"),
+        ("INSERT INTO jacobs_events", "candado_de_activos"),
+        ("UPDATE jacobs_pipelines", "candado_de_activos"),
+        ("INSERT INTO jacobs_events", "candado_de_activos"),
+    ]
