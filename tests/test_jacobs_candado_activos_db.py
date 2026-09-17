@@ -23,6 +23,22 @@ from jacobs import store  # noqa: E402
 from jacobs.models import Pipeline, PipelineStatus  # noqa: E402
 
 
+@pytest.fixture
+def candado_propio(monkeypatch):
+    """Re-review m2 (R38 fix round 3): GET_LOCK es del SERVIDOR. Con el nombre
+    real (`jacobs_crear_o_continuar:jax_memory_test`), cualquier crear o
+    continue de otra sesión sobre jax_memory_test lo tiene tomado unos
+    milisegundos y estos tests fallan sin defecto (medido: con el candado real
+    tomado por otra conexión, los cinco viejos fallan). Cada test que ejercita
+    el candado usa un nombre propio con sufijo uuid; el nombre real sigue
+    probado por test_el_nombre_del_candado_es_por_base y el EXPLAIN."""
+    real = store.nombre_del_candado_de_activos()
+    propio = f"{real}-{uuid.uuid4().hex[:8]}"
+    assert len(propio) <= 64
+    monkeypatch.setattr(store, "nombre_del_candado_de_activos", lambda: propio)
+    return propio
+
+
 async def _uno(sql, params=()):
     conn = await store.get_conn()
     try:
@@ -44,7 +60,7 @@ async def _borrar(pids):
         conn.close()
 
 
-def test_dos_procesos_no_superan_el_cupo(monkeypatch):
+def test_dos_procesos_no_superan_el_cupo(monkeypatch, candado_propio):
     """Cada "proceso" cuenta y, si hay cupo, tarda y crea un pipeline pending
     (un activo). Sin exclusión entre sesiones los dos ven el mismo conteo y
     crean los dos; con el candado el segundo recuenta después del primero.
@@ -89,7 +105,7 @@ def test_dos_procesos_no_superan_el_cupo(monkeypatch):
     assert len(creados) == 1
 
 
-def test_get_lock_que_vence_falla_cerrado(monkeypatch):
+def test_get_lock_que_vence_falla_cerrado(monkeypatch, candado_propio):
     monkeypatch.setenv("JAX_PREVUELO_CANDADO_TIMEOUT_S", "1")
 
     async def cuerpo():
@@ -123,7 +139,7 @@ def test_get_lock_que_vence_falla_cerrado(monkeypatch):
     assert 0.9 <= espera < 5
 
 
-def test_el_candado_se_suelta_aunque_el_bloque_lance():
+def test_el_candado_se_suelta_aunque_el_bloque_lance(candado_propio):
     async def cuerpo():
         with pytest.raises(ValueError):
             async with store.candado_de_activos():
@@ -198,7 +214,7 @@ async def _borrar_con_pasos(pid):
     await _borrar([pid])
 
 
-def test_crear_en_transaccion_bajo_el_candado_confirma_todo_junto():
+def test_crear_en_transaccion_bajo_el_candado_confirma_todo_junto(candado_propio):
     """R38, fix round 1 (2b), contra MariaDB real: BEGIN sobre la conexión del
     GET_LOCK (autocommit) y las tres escrituras con conexion= quedan
     confirmadas al salir. Expected contra 1d84e82: AttributeError
@@ -225,7 +241,7 @@ def test_crear_en_transaccion_bajo_el_candado_confirma_todo_junto():
     assert despues == (1, 1, 1)
 
 
-def test_crear_en_transaccion_que_falla_a_mitad_no_deja_nada_y_suelta_el_candado():
+def test_crear_en_transaccion_que_falla_a_mitad_no_deja_nada_y_suelta_el_candado(candado_propio):
     """Si el bloque lanza después de escribir pipeline y paso, la conexión se
     cierra: el servidor descarta la transacción y suelta el GET_LOCK.
     Expected contra 1d84e82: AttributeError (store.transaccion no existía)."""
