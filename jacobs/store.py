@@ -496,6 +496,59 @@ async def pipeline_tomar_epoca(
     return epoca_leida + 1 if filas == 1 else None
 
 
+_SQL_BLOQUEAR_PIPELINE = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s FOR UPDATE"
+_SQL_PASO_A_CORRER = (
+    "UPDATE jacobs_steps SET facet=%s, motor=%s, status='pending', output_ref=NULL, "
+    "started_at=NULL, finished_at=NULL, error=NULL WHERE step_id=%s AND pipeline_id=%s"
+)
+_SQL_PIPELINE_CONTINUAR = (
+    "UPDATE jacobs_pipelines SET status='running', run_epoch=run_epoch+1, plan=%s, "
+    "context_refs=%s, current_step_index=%s, updated_at=%s "
+    "WHERE pipeline_id=%s AND run_epoch=%s"
+)
+
+
+async def continuar_transaccion(
+    pipeline_id: str,
+    epoca_leida: int,
+    status_leido: PipelineStatus,
+    pasos_a_correr: list[Step],
+    plan: list[Step],
+    context: dict,
+    current_step_index: int,
+) -> int | None:
+    """Escrituras de continue en UNA transacción (spec 2026-09-17 §5.2 regla
+    10): bloquea la fila del pipeline, confirma que nadie la cambió desde el
+    análisis (misma época y mismo status), resetea los pasos a correr, reescribe
+    plan y contexto, pone running e incrementa la época. Devuelve la época
+    nueva, o None si otro pedido ganó. Un error a mitad hace ROLLBACK: nada
+    cambia."""
+    conn = await get_conn(found_rows=True)
+    try:
+        await conn.begin()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(_SQL_BLOQUEAR_PIPELINE, (pipeline_id,))
+                fila = await cur.fetchone()
+                if fila is None or int(fila[0]) != epoca_leida or fila[1] != status_leido.value:
+                    await conn.rollback()
+                    return None
+                for paso in pasos_a_correr:
+                    await cur.execute(_SQL_PASO_A_CORRER, (paso.facet, paso.motor, paso.step_id, pipeline_id))
+                await cur.execute(_SQL_PIPELINE_CONTINUAR, (
+                    json.dumps([s.model_dump() for s in plan], ensure_ascii=False),
+                    json.dumps(context, ensure_ascii=False),
+                    current_step_index, time.time(), pipeline_id, epoca_leida,
+                ))
+            await conn.commit()
+        except BaseException:
+            await conn.rollback()
+            raise
+    finally:
+        conn.close()
+    return epoca_leida + 1
+
+
 def _row_to_pipeline(row: dict) -> Pipeline:
     plan_raw = row.get("plan") or "[]"
     plan_data = json.loads(plan_raw) if isinstance(plan_raw, str) else plan_raw

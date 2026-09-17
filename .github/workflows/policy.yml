@@ -607,6 +607,7 @@ jobs:
           tests/test_prevuelo_sonda.py
           tests/test_prevuelo_orquestador.py
           tests/test_jacobs_preflight_endpoint.py
+          tests/test_jacobs_continuar.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -657,6 +658,7 @@ jobs:
             tests/test_prevuelo_sonda.py \
             tests/test_prevuelo_orquestador.py \
             tests/test_jacobs_preflight_endpoint.py \
+            tests/test_jacobs_continuar.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1091,8 +1093,24 @@ jobs:
           #   decimales. 9 vistos en rojo (4 por mutación temporal revertida
           #   sobre código ya correcto, 5 por TDD natural contra el código
           #   sin R17/R18/R19).
-          grep -qE "^873 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 873 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 873 -> 894 el 2026-09-17 (Task 10, continuar): test_jacobs_continuar.py
+          #   (+21) -- estados continuables (aborted/expired) vs. 409 en el resto
+          #   (incluido failed, desvío 11), 403 invocador, 404, kill switch 423,
+          #   refs ilegibles que se rehacen y salen del contexto, pasos a correr
+          #   quedan pending limpios, reasignación válida recalcula el motor y
+          #   registra el evento, reasignar un paso reusado o una faceta
+          #   desconocida da 422, una reasignación que rompe cleanroom da 422 sin
+          #   escribir, límite de activos 429, pre-vuelo rechazado 422 sin escribir
+          #   con evento PREVUELO_RECHAZADO, costo por encima del aceptado 409 sin
+          #   escribir (con el eco a 6 decimales, R18), otro pedido que ganó la
+          #   transacción da 409, el evento PIPELINE_CONTINUED lleva todo el
+          #   detalle, las marcas hyde_approved del paso a rehacer se quitan, el
+          #   pre-vuelo solo mira los pendientes, previsualizar no escribe y
+          #   explica el motivo, y el costo cero no queda pelado ("0.000000",
+          #   mismo hallazgo de R18 que ya se había arreglado en /preflight).
+          #   Vistos en rojo (ImportError) antes de crear jacobs/continuar.py.
+          grep -qE "^894 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 894 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1157,6 +1175,7 @@ jobs:
           jacobs/_direct_usage_test.py
           tests/test_run_epoch_db.py
           tests/test_prevuelo_catalogo_db.py
+          tests/test_jacobs_continuar_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1167,6 +1186,7 @@ jobs:
             jacobs/_direct_usage_test.py \
             tests/test_run_epoch_db.py \
             tests/test_prevuelo_catalogo_db.py \
+            tests/test_jacobs_continuar_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1220,5 +1240,13 @@ jobs:
           #   código viejo, que solo aceptaba ok/provider_error), sigue
           #   rechazando cualquier otro valor, y el lector de salud ignora
           #   un config_error más fresco que un 'ok' viejo (no lo tapa).
-          grep -qE "^53 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 53 tests CORRIDOS."; exit 1; }
+          # 53 -> 57 el 2026-09-17 (Task 10, continuar): test_jacobs_continuar_db.py
+          #   (+4) -- la transacción aplica pasos, plan, contexto y época contra el
+          #   esquema real (EXPLAIN por PRIMARY en _SQL_BLOQUEAR_PIPELINE y
+          #   _SQL_PASO_A_CORRER); un fallo a mitad (UPDATE final contra una tabla
+          #   que no existe) hace ROLLBACK y no cambia nada; dos transacciones con
+          #   la misma época: gana una sola; diez continue concurrentes sobre el
+          #   mismo pipeline: gana uno solo, los otros nueve dan 409. Vistos en rojo
+          #   (ImportError) antes de crear jacobs/continuar.py y store.continuar_transaccion.
+          grep -qE "^57 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 57 tests CORRIDOS."; exit 1; }

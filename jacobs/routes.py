@@ -6,7 +6,6 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -57,7 +56,7 @@ _plan_builder = PlanBuilder()
 # sección crítica) tarda 20-40s llamando a un LLM externo -- mantener esa
 # transacción/fila lockeada todo ese tiempo arriesgaría agotar el pool de
 # conexiones bajo carga real; un lock en memoria no reserva conexión DB.
-_pipeline_create_lock = asyncio.Lock()
+from jacobs.candado import candado_de_creacion as _pipeline_create_lock  # noqa: E402  (2026-09-17: compartido con continuar.py)
 
 
 async def _build_plan_or_reject(
