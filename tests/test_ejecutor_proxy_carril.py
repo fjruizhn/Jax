@@ -23,6 +23,7 @@ import pytest
 from jax.ejecutor.cita import Motivo
 from jax.ejecutor.contratos.pausa import latir
 from jax.ejecutor.prioridad import carril_mesa
+from jax.ejecutor import proxy_carril
 from jax.ejecutor.proxy_carril import (
     CONFIG_FALTA, CONFIG_INVALIDA, ESPERA_AGOTADA, UPSTREAM_INALCANZABLE, Config,
     ConfigInvalida, arrancar, config_desde_entorno,
@@ -441,3 +442,32 @@ def test_config_invalida_falla_cerrado(variable, valor):
     with pytest.raises(ConfigInvalida) as err:
         config_desde_entorno({**_ENTORNO, variable: valor})
     assert err.value.args == (Motivo(CONFIG_INVALIDA, (("variable", variable),)),)
+
+
+def test_la_cola_del_carril_se_ve_y_vuelve_a_cero(tmp_path):
+    """`esperando_carril()` cuenta las que esperan el carril y vuelve a cero al soltarlo. Sin este
+    estado, una prueba sólo puede dormir un rato y cruzar los dedos (rojo intermitente en CI,
+    2026-09-17). Cuenta también la que se va por el tope: si no, la cola quedaría inflada."""
+    async def escenario():
+        # n_trozos=2: el upstream de la primera espera `avanzar`, así que retiene el carril
+        # mientras la segunda hace cola (con 1 trozo la primera terminaba antes y no había cola).
+        async with Upstream(n_trozos=2) as up, Proxy(up.url, tmp_path, 30) as px, httpx.AsyncClient() as cli:
+            assert proxy_carril.esperando_carril() == 0
+            primera = asyncio.create_task(cli.post(px.url + "/v1/messages", content=_CUERPO))
+            while not up.recibidas:
+                await asyncio.sleep(0.02)
+            segunda = asyncio.create_task(cli.post(px.url + "/v1/messages", content=_CUERPO))
+            limite = time.monotonic() + 5
+            while proxy_carril.esperando_carril() < 1:
+                assert time.monotonic() < limite
+                await asyncio.sleep(0.02)
+            en_cola = proxy_carril.esperando_carril()
+            up.avanzar.set()
+            await asyncio.gather(primera, segunda, return_exceptions=True)
+            limite = time.monotonic() + 5
+            while proxy_carril.esperando_carril() != 0:
+                assert time.monotonic() < limite
+                await asyncio.sleep(0.02)
+            return en_cola
+
+    assert _correr(escenario()) == 1

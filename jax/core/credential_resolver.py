@@ -8,6 +8,19 @@ que podía driftear dentro de jax. La familia la vigila scripts/check_mirror_syn
 
 Diseño completo: jax-platform/docs/fase1-credenciales-diseno.md (B1.2/B1.4).
 Resuelve R3 de la auditoria (rotar una key no la propagaba sin restart).
+
+B1.4 CERRADO el 2026-09-17. La ventana de medicion (la doble lectura DB->env:
+una funcion instrumentada y su mapa proveedor -> variable de entorno, las dos
+retiradas) tenia un criterio de salida escrito: 7 dias consecutivos sin
+ninguna linea `source=env_fallback`,
+incluyendo al menos una rotacion real. Medido sobre 30 dias de journal: **2.760
+lineas `source=db`, 0 lineas `source=env_fallback`**, con la rotacion real de la
+llave de Gemini del 2026-09-15 dentro de la ventana. Por decision de Fernando el
+fallback se retiro en los dos repos: la DB es la UNICA fuente. Sin credencial
+activa en la DB, `resolve_credential` levanta `CredentialUnavailableError`
+(fail-closed) -- nunca cae a una variable de entorno, que era un fail-open de la
+rotacion: una llave revocada en la DB seguia viva mientras el .env la tuviera.
+Vigilado por tests/test_credencial_sin_fallback_env.py.
 """
 import logging
 import os
@@ -38,18 +51,6 @@ logger = logging.getLogger("credential_resolver")
 # explicito, nunca una llamada silenciosa con credencial vieja.
 CREDENTIAL_CACHE_TTL_SECONDS = int(os.getenv("CREDENTIAL_CACHE_TTL_SECONDS", "30"))
 CREDENTIAL_STALE_MAX_SECONDS = int(os.getenv("CREDENTIAL_STALE_MAX_SECONDS", "300"))
-
-# Mapeo provider_id -> env var, usado solo por resolve_credential_instrumented
-# durante la ventana de doble lectura (B1.4). Se retira cuando el criterio de
-# salida (7 dias sin source=env_fallback) se cumpla.
-_PROVIDER_ENV_KEY_MAP = {
-    "openai": "OPENAI_API_KEY",
-    "deepseek": "DEEPSEEK_API_KEY",
-    "gemini": "GEMINI_API_KEY",
-    "moonshot": "KIMI_API_KEY",
-    "zhipu": "ZAI_API_KEY",
-}
-
 
 class CredentialUnavailableError(Exception):
     """FAIL-CLOSED: no hay credencial valida (ni fresca ni stale dentro del
@@ -145,21 +146,3 @@ async def resolve_credential(provider_id: str) -> str:
             return cached.value
         logger.error(f"credential_resolver provider={provider_id} FAIL_CLOSED reason={type(e).__name__}")
         raise CredentialUnavailableError(provider_id) from e
-
-
-async def resolve_credential_instrumented(provider_id: str) -> str:
-    """Doble lectura DB->env con logging (B1.4). Criterio de salida: 7 dias
-    consecutivos sin ninguna linea source=env_fallback, incluyendo al menos
-    una rotacion real en la ventana. No es una solucion temporal — tiene
-    condicion de salida medible y su proposito es medir, no tapar."""
-    try:
-        value = await resolve_credential(provider_id)
-        logger.info(f"credential_resolution provider={provider_id} source=db")
-        return value
-    except CredentialUnavailableError:
-        env_key = _PROVIDER_ENV_KEY_MAP.get(provider_id)
-        env_value = decrypt_secret(os.environ.get(env_key, "")) if env_key else ""
-        if not env_value:
-            raise
-        logger.warning(f"credential_resolution provider={provider_id} source=env_fallback")
-        return env_value

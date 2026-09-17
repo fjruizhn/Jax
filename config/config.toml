@@ -28,8 +28,6 @@ modo_pesado = { faceta = "jekyll", modelo = "deepseek-v4-pro" }
 type = "ollama"
 provider = "ollama"
 model_default = "qwen3-coder:30b"
-voice_id = "em_alex"
-voice_speed = 1.0
 models_allowed = ["qwen3-coder:30b", "qwen3:14b", "qwen2.5:7b", "llama3.2:3b"]
 authority_origin = "🏠 *Origen de autoridad: conversación local de JAX, fundada en su memoria verificada. Los datos externos se derivan a investigación.*"
 system_prompt = """
@@ -87,8 +85,6 @@ inventado.
 [personalities.hyde]
 type = "subprocess"
 model_default = "sonnet"
-voice_id = "em_santa"
-voice_speed = 1.0
 models_allowed = ["sonnet", "opus", "haiku"]
 authority_origin = "🔧 *Origen de autoridad: conocimiento técnico de Hyde. Los comandos ejecutados o verificados se indican en el cuerpo; el resto es de conocimiento, no verificado en vivo.*"
 system_prompt = """
@@ -117,8 +113,6 @@ que harías. "El que supone se equivoca."
 type = "http"
 provider = "deepseek"
 model_default = "deepseek-v4-flash"
-voice_id = "em_santa"
-voice_speed = 0.85
 models_allowed = ["deepseek-v4-flash", "deepseek-v4-pro"]
 authority_origin = "🧠 *Origen de autoridad: conocimiento propio del modelo (no verificado en web). Consulta sugerida con Hipatia para verificación.*"
 system_prompt = """
@@ -161,8 +155,6 @@ inventado.
 type = "http"
 provider = "gemini"
 model_default = "gemini-2.5-flash"
-voice_id = "ef_dora"
-voice_speed = 1.0
 models_allowed = ["gemini-2.5-flash", "gemini-2.5-pro"]
 # Politica de grounding por defecto de Hipatia: required_web (Decision 2).
 # Hipatia ES investigacion: sin grounding explicito en la tarea, DEBE buscar
@@ -214,8 +206,6 @@ inventado.
 type = "http"
 provider = "openai"
 model_default = "gpt-5.5"
-voice_id = "em_alex"
-voice_speed = 0.9
 models_allowed = ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini", "gpt-5.1-codex", "gpt-4o"]
 authority_origin = "📜 *Origen de autoridad: fundado en el archivo de tarea provisto y conocimiento propio. Sin verificación externa.*"
 system_prompt = """
@@ -276,8 +266,6 @@ inventado.
 type = "http"
 provider = "zai"
 model_default = "glm-5.2"
-voice_id = "em_alex"
-voice_speed = 0.9
 models_allowed = ["glm-5.2"]
 authority_origin = "⚛️ *Origen de autoridad: GLM-5.2 (Z.ai). Razonamiento analítico y formalización. Sin verificación externa por defecto.*"
 system_prompt = """
@@ -325,8 +313,6 @@ inventado.
 type = "http"
 provider = "kimi"
 model_default = "kimi-k2.7-code"
-voice_id = "em_alex"
-voice_speed = 1.0
 models_allowed = ["kimi-k2.7-code", "kimi-k2.6"]
 authority_origin = "⚙️ *Origen de autoridad: Kimi K2.7 Code (Moonshot AI). Motor de enjambre — coding agéntico de largo horizonte. Sin verificación externa.*"
 system_prompt = """

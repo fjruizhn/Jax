@@ -16,9 +16,11 @@ test "$(git -C "$REPO" branch --show-current)" = master
 PY="$REPO/.venv/bin/python"
 MARCA="$(date +%Y%m%d-%H%M%S)"
 
-# Registro: directorio de fruiz 0750 (la cuenta ni lo lista), archivo 0640, append-only.
+# Registro: directorio de la cuenta de SERVICIO (jaxsvc) 0750 -- la cuenta de la JAULA ni lo
+# lista --, archivo 0640, append-only. Desde 2026-09-17 los servicios no corren como el
+# operador: el proxy escribe el registro como jaxsvc (ver tests/test_ejecutor_cuenta_de_servicio.py).
 DIR="$(dirname "$JAX_EJECUTOR_REGISTRO")"
-sudo install -d -o fruiz -g fruiz -m 0750 "$DIR"
+sudo install -d -o jaxsvc -g jaxsvc -m 0750 "$DIR"
 test -e "$JAX_EJECUTOR_REGISTRO" || install -m 0640 /dev/null "$JAX_EJECUTOR_REGISTRO"
 sudo chattr +a "$JAX_EJECUTOR_REGISTRO"
 lsattr "$JAX_EJECUTOR_REGISTRO" | cut -d' ' -f1 | grep -q a
@@ -27,10 +29,10 @@ lsattr "$JAX_EJECUTOR_REGISTRO" | cut -d' ' -f1 | grep -q a
 # cuenta del Ejecutor no la puede borrar). El latido, en un directorio de fruiz 0750: si la
 # cuenta pudiera tocarlo, fingiría un vigía vivo.
 test -d "$(dirname "$JAX_EJECUTOR_PAUSA")"
-sudo install -d -o fruiz -g fruiz -m 0750 "$(dirname "$JAX_EJECUTOR_VIGIA_LATIDO")"
+sudo install -d -o jaxsvc -g jaxsvc -m 0750 "$(dirname "$JAX_EJECUTOR_VIGIA_LATIDO")"
 
 # Locks del carril: de fruiz; la cuenta del Ejecutor nunca los toca (tests/test_ejecutor_carril_solo_en_el_proxy.py).
-sudo install -d -o fruiz -g fruiz -m 0750 "$JAX_PROXY_CARRIL_RAIZ"
+sudo install -d -o jaxsvc -g jaxsvc -m 0750 "$JAX_PROXY_CARRIL_RAIZ"
 
 # Cerco: backup de TODA la red antes de tocar nada, y prueba de que se restaura.
 # Medido 2026-09-17: `nft list ruleset` de hall9000 NO se puede volver a cargar (las tablas

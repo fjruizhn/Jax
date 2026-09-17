@@ -171,7 +171,7 @@ def test_latido_cada_tiene_que_ser_menor_que_el_maximo(valor):
 def test_la_unidad_lanza_este_modulo_con_la_mision_de_su_instancia():
     unidad = (Path(__file__).resolve().parents[1] / "ops" / "ejecutor" / "ejecutor-vigia@.service").read_text()
     assert "-m jax.ejecutor.contratos.vigia_servicio ${JAX_EJECUTOR_MISIONES}/%i.json" in unidad
-    assert "Restart=no" in unidad and "User=fruiz" in unidad and "KillSignal=SIGTERM" in unidad
+    assert "Restart=no" in unidad and "User=jaxsvc" in unidad and "KillSignal=SIGTERM" in unidad
 
 
 def test_el_vigia_audita_con_las_maquinas_de_la_mision(tmp_path):

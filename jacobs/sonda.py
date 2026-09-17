@@ -69,7 +69,7 @@ from dataclasses import dataclass
 import httpx
 
 from cliente_http_compartido import obtener_cliente_http
-from credential_resolver import CredentialUnavailableError, resolve_credential_instrumented
+from credential_resolver import CredentialUnavailableError, resolve_credential
 from facet_resolver import resolve_facet
 from redaccion import recortar_redactado
 
@@ -191,7 +191,7 @@ async def _preparar(clave: str, d: Despacho):
             api_key, campo = "", "max_tokens"
         else:
             try:
-                api_key = await resolve_credential_instrumented(d.provider_id)
+                api_key = await resolve_credential(d.provider_id)
             except CredentialUnavailableError as exc:
                 # Ruling R16: resolve_credential() (las_manos/credential_resolver.py:108-128)
                 # SIEMPRE envuelve en CredentialUnavailableError, tanto si la
@@ -200,9 +200,12 @@ async def _preparar(clave: str, d: Despacho):
                 # Exception as e` de la línea 120 atrapa cualquier otra cosa
                 # -- un aiomysql.OperationalError real, por ejemplo -- y la
                 # re-envuelve con `from e` en la línea 128).
-                # resolve_credential_instrumented (líneas 131-146) reintenta
-                # por .env y, si tampoco hay valor, relanza la MISMA excepción
-                # con `raise` pelado -- la cadena de causa no se pierde.
+                # B1.4 (master, 2026-09-17): la variante con respaldo por .env
+                # ya no existe -- la base es la única fuente de credenciales, y
+                # el guard de tests/test_credencial_sin_fallback_env.py prohíbe
+                # hasta nombrarla. La distinción de abajo NO cambia: sigue
+                # estando en la causa que `resolve_credential` encadena con
+                # `from e`.
                 # La única señal que distingue los dos casos es esa causa: si
                 # es OTRO CredentialUnavailableError, la fila genuinamente no
                 # existe -> config_error. Cualquier otra causa (una caída real

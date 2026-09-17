@@ -25,10 +25,6 @@ _DISTRIBUCION = {
 
 # Terceros que NO van en requirements.txt, cada uno con su motivo.
 _FUERA_DE_REQUIREMENTS = {
-    "faster_whisper": "jax/voice: venv propio de la voz (JAX_KOKORO_PYTHON), no el de servicio",
-    "kokoro": "jax/voice: venv propio de la voz (JAX_KOKORO_PYTHON), no el de servicio",
-    "numpy": "jax/voice: venv propio de la voz (JAX_KOKORO_PYTHON), no el de servicio",
-    "soundfile": "jax/voice: venv propio de la voz (JAX_KOKORO_PYTHON), no el de servicio",
     "sentence_transformers": "reranker opcional de jax/memory/db.py::_get_reranker, import perezoso con fail-soft declarado",
 }
 

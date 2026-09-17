@@ -140,7 +140,7 @@ def test_motor_usa_el_cliente_del_worker_con_su_credencial(monkeypatch):
     llamar = AsyncMock(return_value=_OK_OPENAI)
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
-         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda, "resolve_credential", AsyncMock(return_value="k-moon")), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
          patch.object(sonda, "record_direct_usage", AsyncMock()):
         r = asyncio.run(sonda.sondear("kimi", d))
@@ -157,7 +157,7 @@ def test_motor_ollama_sin_credencial_y_con_max_tokens(monkeypatch):
     llamar, credencial = AsyncMock(return_value=_OK_OPENAI), AsyncMock()
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
-         patch.object(sonda, "resolve_credential_instrumented", credencial), \
+         patch.object(sonda, "resolve_credential", credencial), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
          patch.object(sonda, "record_direct_usage", AsyncMock()):
         asyncio.run(sonda.sondear("jax_local", d))
@@ -237,7 +237,7 @@ def test_credencial_ausente_en_motor_es_config_error_no_provider_error(monkeypat
     se intentó llamar al proveedor) -- outcome 'config_error', no
     'provider_error'. El lector de salud (OUTCOMES_DE_PROVEEDOR) ignora
     config_error, así que el próximo pre-vuelo vuelve a sondear. Mock a
-    nivel de sonda.resolve_credential_instrumented (la cadena REAL de
+    nivel de sonda.resolve_credential (la cadena REAL de
     credential_resolver.py se ejercita en
     test_credencial_sin_fila_via_cadena_real_es_config_error, abajo)."""
     d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
@@ -248,7 +248,7 @@ def test_credencial_ausente_en_motor_es_config_error_no_provider_error(monkeypat
     sin_fila.__cause__ = CredentialUnavailableError("no active credential for moonshot")
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
-         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(side_effect=sin_fila)), \
+         patch.object(sonda, "resolve_credential", AsyncMock(side_effect=sin_fila)), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
          patch.object(sonda, "record_direct_usage", AsyncMock()):
         r = asyncio.run(sonda.sondear("kimi", d))
@@ -261,7 +261,7 @@ def test_credencial_ausente_en_motor_es_config_error_no_provider_error(monkeypat
 def test_credencial_con_causa_de_db_se_propaga_en_el_motor(monkeypatch):
     """Item 1 (fix round 2, Ruling R16): sobre la cadena REAL de
     credential_resolver -- se mockea SOLO `_query_active_credential`, no
-    `resolve_credential_instrumented` -- para que resolve_credential()
+    `resolve_credential` -- para que resolve_credential()
     (credential_resolver.py:108-128) envuelva un aiomysql.OperationalError
     REAL en CredentialUnavailableError con esa causa
     (credential_resolver.py:120,128). sondear() tiene que propagar esa
@@ -371,7 +371,7 @@ def test_motor_401_es_provider_error(monkeypatch):
     registrar = AsyncMock()
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
-         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda, "resolve_credential", AsyncMock(return_value="k-moon")), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
          patch.object(sonda, "record_direct_usage", AsyncMock()):
         r = asyncio.run(sonda.sondear("kimi", d))
@@ -390,7 +390,7 @@ def test_motor_4xx_redacta_la_credencial_en_el_detalle(monkeypatch):
                   base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
-         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon-secreta")), \
+         patch.object(sonda, "resolve_credential", AsyncMock(return_value="k-moon-secreta")), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
          patch.object(sonda, "record_direct_usage", AsyncMock()):
         r = asyncio.run(sonda.sondear("kimi", d))
@@ -454,7 +454,7 @@ def test_el_tope_de_motor_tambien_entra_en_el_minimo(monkeypatch):
     llamar = AsyncMock(return_value=_OK_OPENAI)
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
-         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda, "resolve_credential", AsyncMock(return_value="k-moon")), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
          patch.object(sonda, "record_direct_usage", AsyncMock()):
         asyncio.run(sonda.sondear("kimi", d))
@@ -597,7 +597,7 @@ def test_motor_2xx_sin_usage_registra_uso_estimado(monkeypatch):
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat",
                AsyncMock(return_value={"choices": [{"message": {"content": "ok"}}]})), \
-         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda, "resolve_credential", AsyncMock(return_value="k-moon")), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
          patch.object(sonda, "record_direct_usage", uso):
         r = asyncio.run(sonda.sondear("kimi", d, user_id="7", tenant_id="1"))
@@ -698,7 +698,7 @@ def test_motor_decide_el_cobro_por_el_status(monkeypatch, status, cobrable):
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat",
                AsyncMock(side_effect=httpx.HTTPStatusError(str(status), request=None, response=resp))), \
-         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda, "resolve_credential", AsyncMock(return_value="k-moon")), \
          patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
          patch.object(sonda, "record_direct_usage", uso):
         r = asyncio.run(sonda.sondear("kimi", d))

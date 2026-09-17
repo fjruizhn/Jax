@@ -53,7 +53,7 @@ def test_E06_las_voces_piper_ya_no_estan_en_el_arbol():
 
 
 _IMPORTS_RETIRADOS = {
-    "jacobs/executor.py": {"Any", "resolve_credential_instrumented", "CredentialUnavailableError", "FacetUnavailableError"},
+    "jacobs/executor.py": {"Any", "resolve_credential", "CredentialUnavailableError", "FacetUnavailableError"},
     "jax/muscles/base.py": {"os", "decrypt_secret"},
     "jax/muscles/ollama_muscle.py": {"MuscleTimeoutError"},
     "las_manos/audit.py": {"os"},

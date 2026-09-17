@@ -806,6 +806,7 @@ jobs:
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
           tests/test_loadtest_apps_protegidas.py
           tests/test_ejecutor_probar_c4_conteo_remoto.py
+          tests/test_ejecutor_cuenta_de_servicio.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -836,6 +837,8 @@ jobs:
           tests/test_facet_health_tabla_exclusiva.py
           tests/test_delete_de_tablas_compartidas.py
           tests/test_frente_e_retiros.py
+          tests/test_credencial_sin_fallback_env.py
+          tests/test_retiro_de_la_voz.py
           tests/test_max_steps_una_sola_constante.py
           tests/test_plan_facetas_de_la_tabla.py
           tests/test_espejos_symlink_frente_e.py
@@ -924,6 +927,7 @@ jobs:
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
             tests/test_loadtest_apps_protegidas.py \
             tests/test_ejecutor_probar_c4_conteo_remoto.py \
+            tests/test_ejecutor_cuenta_de_servicio.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -954,6 +958,8 @@ jobs:
             tests/test_facet_health_tabla_exclusiva.py \
             tests/test_delete_de_tablas_compartidas.py \
             tests/test_frente_e_retiros.py \
+            tests/test_credencial_sin_fallback_env.py \
+            tests/test_retiro_de_la_voz.py \
             tests/test_max_steps_una_sola_constante.py \
             tests/test_plan_facetas_de_la_tabla.py \
             tests/test_espejos_symlink_frente_e.py \
@@ -2098,8 +2104,36 @@ jobs:
           #   "no pude mirar" NO es "está limpio"). Rojo contra 44250a1: la función no
           #   existía, y por eso la re-medición del pre-vuelo se declaró "sin sondas"
           #   mirando `sondeadas: []` una sola vez y salieron 3 llamadas pagas reales.
-          grep -qE "^1989 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1989 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1590 -> 1597 el 2026-09-17 (los servicios corren como la cuenta de servicio): las DOS listas suman
+          #   tests/test_ejecutor_cuenta_de_servicio.py (7: unidades con User=jaxsvc y hogar propio,
+          #   instaladores sin `-o fruiz`). Vistos en rojo contra las unidades viejas; el control de la unidad
+          #   del vigía (test_ejecutor_vigia_servicio.py) pasó a exigir jaxsvc. MEDIDO en local (3.14), env -i,
+          #   sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1597 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 1597 -> 1598 el 2026-09-17 (la cola del carril se ve): test_ejecutor_proxy_carril.py +1 (la cola
+          #   sube con la que espera y vuelve a cero al soltar). El test del freno mientras espera el carril
+          #   dejó de dormir 0,3 s y espera ese estado: era rojo intermitente en CI (RemoteProtocolError) con
+          #   el runner lento. Corrido 5 veces seguidas en verde. Si el runner da otro numero, manda el runner.
+          # 1598 -> 1603 el 2026-09-17. Dos ramas del mismo dia, sumadas al
+          #   rebasear: +3 de B1.4 (tests/test_credencial_sin_fallback_env.py,
+          #   los tres vistos en ROJO contra 351ec95, el primero con la linea
+          #   `source=env_fallback` en el log capturado) y +2 netos del RETIRO de
+          #   la voz (-1 por test_config_entorno.py::test_la_voz_toma_el_python_de_
+          #   kokoro_del_entorno, que describia una variable que ya no existe, +3
+          #   por tests/test_retiro_de_la_voz.py). Bajar un piso solo se justifica
+          #   cuando se retira funcionalidad y se dice; aca ni siquiera baja.
+          #   Los dos archivos entran a las DOS listas. Si el runner da otro
+          #   numero, manda el runner.
+          # PISO MEDIDO TRAS EL SEGUNDO MERGE DE MASTER (2026-09-17, pre-vuelo y
+          # continuar sobre 6604474: cuenta de servicio, B1.4 y retiro de la voz).
+          # La union de las dos listas no da el piso de ninguna de las dos ramas.
+          # Medido en hall9000 con la lista unificada: 2003 passed, 1 xfailed,
+          # 16 subtests. El runner cuenta UNO MENOS y reporta como `skipped` el
+          # caso que aca sale `xfailed` (mismo desfase de los pisos anteriores),
+          # asi que el piso del job queda en 2002. Si el runner da otro numero,
+          # manda el runner.
+          grep -qE "^2002 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2002 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

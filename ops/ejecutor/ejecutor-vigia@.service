@@ -11,7 +11,10 @@ After=network.target jax-ejecutor-proxy.service ejecutor-freno.service
 
 [Service]
 Type=simple
-User=fruiz
+User=jaxsvc
+Group=jaxsvc
+# Hogar propio: ssh (a la cuenta de la jaula) busca known_hosts en $HOME.
+Environment=HOME=/var/lib/jaxsvc
 WorkingDirectory=/home/fruiz/jax
 EnvironmentFile=/etc/jax/.env
 Environment=PYTHONPATH=/home/fruiz/jax:/home/fruiz/jax/las_manos

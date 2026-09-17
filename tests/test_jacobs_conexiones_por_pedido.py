@@ -1117,7 +1117,7 @@ def _trabajo_del_motor_registry(tmp_path, llamar):
 
     async def correr():
         with patch.dict(worker._TRANSPORT_DISPATCH, {"http_openai_compat": llamar}), \
-             patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")), \
+             patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")), \
              patch("contrato_dispatch._leer_contrato", AsyncMock(return_value=("max_tokens", 131072))), \
              patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()), \
              patch("httpx.AsyncClient.post", AsyncMock(side_effect=AssertionError("red real"))):
