@@ -248,7 +248,8 @@ def principal() -> int:
     activo_antes = False
     while True:
         estado = freno.paso()
-        if estado["activo"] and (not activo_antes or estado.get("muertos") or estado.get("cgroup")):
+        # Una línea al poner el freno y una por vuelta que mató algo: no cuatro por segundo.
+        if estado["activo"] and (not activo_antes or estado.get("muertos")):
             log.warning("freno activo frenos=%s cgroup=%s muertos=%s", ",".join(estado["frenos"]),
                         estado.get("cgroup"), estado.get("muertos"))
         elif activo_antes and not estado["activo"]:
