@@ -1415,8 +1415,11 @@ jobs:
           #   rojo; sin el `systemctl --user exit` -> 1 rojo. MEDIDO en local (3.14), env -i, sin JAX_DB_HOST y
           #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1584 passed, 1 skipped, 1 xfailed, 16 subtests
           #   passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1584 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1584 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1584 -> 1585 el 2026-09-17 (el dato se copia, no se redacta): test_ejecutor_mision.py +1 (el prompt
+          #   exige el dato literal y una afirmación por valor). Visto en rojo. Origen: primera misión con la
+          #   compuerta abierta, el modelo mandó "51G disponible de 94G total (44% usado)" y la cita lo tiró.
+          grep -qE "^1585 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1585 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

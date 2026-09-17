@@ -380,3 +380,14 @@ def test_el_auditor_final_recibe_las_maquinas_de_la_mision_con_su_direccion():
     _correr(f)
     assert [(m.nombre, m.ip) for m in f.maquinas_auditadas] == [("ejecutor-prueba", "192.0.2.50")]
 
+
+
+def test_el_prompt_exige_el_dato_literal_y_una_afirmacion_por_valor():
+    """Misión real en atemai (2026-09-17 13:0x, primera con la compuerta abierta): el modelo mandó
+    `dato` en prosa («51G disponible de 94G total (44% usado)») y la cita lo tiró con `dato_no_entero`.
+    El turno terminó bien y sin afirmaciones: fail-closed correcto, resultado inútil. El prompt tiene
+    que decir que el dato es UN valor que aparece tal cual en la línea, y que dos preguntas son dos
+    afirmaciones."""
+    p = M.prompt_del_turno("espacio libre y versión", HOSTS, frozenset({"ejecutor-prueba"}))
+    assert "tal cual" in p and "una afirmación por cada" in p
+    assert "no juntes" in p.lower() and "no calcules" in p.lower()
