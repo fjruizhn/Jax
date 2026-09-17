@@ -1482,5 +1482,11 @@ jobs:
           # 31 + 3 -> 34 tras el rebase de C5 sobre master c13d066 (frente F):
           #   test_ejecutor_c5_db.py migra de get_conn() a store.conexion(). Medido en local
           #   contra jax_memory_test con el sello en un tmp: 34 passed.
-          grep -qE "^34 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 34 tests CORRIDOS."; exit 1; }
+          # 34 -> 35 el 2026-09-17 (C1 contra envoltorios): tests/test_ejecutor_politica_db.py (+1) --
+          #   la política exportada de la DB real bloquea la evasión con tmux vista en la misión,
+          #   setsid y dangerouslyDisableSandbox, y deja pasar la misión de humo y `ssh -tt … 'tmux ls'`.
+          #   Requiere jax-platform feat/ejecutor-c1-envoltorios en master (ejecutor_reglas_envoltorios_v1).
+          #   Visto en rojo con la regla desactivada (2 failed). Local dos veces contra jax_memory_test
+          #   con las migraciones de esa rama y el sello en un tmp: 35 passed.
+          grep -qE "^35 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 35 tests CORRIDOS."; exit 1; }
