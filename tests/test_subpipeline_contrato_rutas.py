@@ -258,3 +258,47 @@ def test_plan_rechazado_quema_el_token_y_deja_evento():
     assert fila["usado_at"] is not None
     payload = json.loads(evento["payload"])
     assert (payload["fase"], payload["motivo"]) == ("plan", sp.Motivo.PLAN_RECHAZADO.value)
+
+
+def test_fallo_de_creacion_tras_el_consumo_deja_evento_y_propaga_el_error():
+    """Revisión final, I-2: después de consumir, CUALQUIER excepción (no solo el
+    plan rechazado) quema el token; tiene que quedar SUBPIPELINE_RECHAZADO con
+    fase=creacion y el error original tiene que llegar al llamador, aunque
+    escribir ese evento también falle (M-2)."""
+    from unittest.mock import AsyncMock, patch
+
+    async def escenario():
+        padre, paso = await ada.padre_en_ejecucion()
+        try:
+            token = await ada.emitir(padre, paso)
+            token_2 = await ada.emitir(padre, paso)
+            with patch.object(store, "pipeline_create",
+                              AsyncMock(side_effect=RuntimeError("fallo de escritura (arnés)"))), \
+                 pytest.raises(RuntimeError, match="fallo de escritura"):
+                await ada.pedir_hijo(token, padre)
+            fila = await ada.fila_token(sp.hash_token(token))
+            evento = await ada.una_fila(
+                "SELECT payload FROM jacobs_events WHERE event_type = 'SUBPIPELINE_RECHAZADO' "
+                "AND JSON_VALUE(payload, '$.parent_pipeline_id') = %s "
+                "AND JSON_VALUE(payload, '$.fase') = 'creacion'",
+                (padre,),
+            )
+            # El evento tampoco se puede escribir: el error que sube es el ORIGINAL.
+            with patch.object(store, "pipeline_create",
+                              AsyncMock(side_effect=RuntimeError("fallo de escritura (arnés)"))), \
+                 patch.object(store, "event_append",
+                              AsyncMock(side_effect=ConnectionError("base caída (arnés)"))), \
+                 pytest.raises(RuntimeError, match="fallo de escritura"):
+                await ada.pedir_hijo(token_2, padre)
+            return token, fila, evento
+        finally:
+            await ada.cerrar(padre)
+
+    token, fila, evento = _correr(escenario)
+    assert fila["usado_at"] is not None
+    assert evento is not None, "token quemado sin SUBPIPELINE_RECHAZADO fase=creacion"
+    payload = json.loads(evento["payload"])
+    assert payload["motivo"] == sp.Motivo.CREACION_FALLIDA.value
+    assert payload["excepcion"] == "RuntimeError"
+    assert "fallo de escritura" not in evento["payload"]
+    assert token not in evento["payload"]

@@ -145,6 +145,29 @@ async def plan_only(req: PlanRequest) -> dict:
 #  POST /jacobs/pipeline  — crea y ejecuta
 # ----------------------------------------------------------------
 
+async def _auditar_token_quemado(
+    hijo_pipeline_id: str,
+    parent_pipeline_id: str,
+    fase: str,
+    motivo: Motivo,
+    excepcion: str | None = None,
+) -> None:
+    """Deja SUBPIPELINE_RECHAZADO para un token que ya se consumió y cuyo hijo
+    no llegó a crearse. Best-effort: si el evento no se puede escribir se loguea
+    (sin token, sin mensaje de la excepción) y el llamador relanza igual su
+    error original -- un fallo de auditoría no puede tapar la causa (M-2)."""
+    payload = {"fase": fase, "motivo": motivo.value, "parent_pipeline_id": parent_pipeline_id}
+    if excepcion is not None:
+        payload["excepcion"] = excepcion
+    try:
+        await store.event_append(hijo_pipeline_id, "SUBPIPELINE_RECHAZADO", payload)
+    except Exception as exc_evento:  # fail-soft: el error original lo relanza create_pipeline; tragar este evita que un fallo de auditoría reemplace la causa real
+        logger.error(
+            "SUBPIPELINE_RECHAZADO sin registrar: hijo=%s padre=%s fase=%s motivo=%s error_evento=%s",
+            hijo_pipeline_id, parent_pipeline_id, fase, motivo.value, type(exc_evento).__name__,
+        )
+
+
 @router.post("/pipeline")
 async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTasks) -> dict:
     """Crea un pipeline y lo ejecuta en background."""
@@ -189,42 +212,54 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             parent_step = consumo.parent_step
             depth = consumo.depth
 
-        steps_spec = [s.model_dump() for s in req.steps] if req.steps else None
+        # Revisión final (I-2): desde acá el token ya está quemado. CUALQUIER
+        # error antes de que el hijo exista (plan, builder, pipeline_create,
+        # step_upsert) deja SUBPIPELINE_RECHAZADO (plan rechazado -> fase=plan;
+        # lo demás -> fase=creacion, motivo creacion_fallida, clase de la
+        # excepción sin su mensaje) y se relanza el error ORIGINAL.
         try:
+            steps_spec = [s.model_dump() for s in req.steps] if req.steps else None
             steps = await _build_plan_or_reject(pipeline_id, req.objective, req.max_steps, steps_spec)
+
+            # Asignar pipeline_id a cada step
+            for step in steps:
+                step.pipeline_id = pipeline_id
+
+            now = time.time()
+            pipeline = Pipeline(
+                pipeline_id=pipeline_id,
+                name=req.name,
+                invoked_by=req.invoked_by,
+                user_id=req.user_id,
+                tenant_id=req.tenant_id,
+                parent_pipeline_id=parent_pipeline_id,
+                depth=depth,
+                mode=req.mode,
+                plan=steps,
+                max_steps=req.max_steps,
+                context={"objective": req.objective},
+                created_at=now,
+                updated_at=now,
+            )
+
+            await store.pipeline_create(pipeline)
+            for step in steps:
+                await store.step_upsert(step)
         except HTTPException:
             if parent_pipeline_id is not None:
-                await store.event_append(pipeline_id, "SUBPIPELINE_RECHAZADO", {
-                    "fase": "plan",
-                    "motivo": Motivo.PLAN_RECHAZADO.value,
-                    "parent_pipeline_id": parent_pipeline_id,
-                })
+                await _auditar_token_quemado(
+                    pipeline_id, parent_pipeline_id, "plan", Motivo.PLAN_RECHAZADO)
+            raise
+        except Exception as exc:
+            if parent_pipeline_id is not None:
+                await _auditar_token_quemado(
+                    pipeline_id, parent_pipeline_id, "creacion", Motivo.CREACION_FALLIDA,
+                    excepcion=type(exc).__name__,
+                )
             raise
 
-        # Asignar pipeline_id a cada step
-        for step in steps:
-            step.pipeline_id = pipeline_id
-
-        now = time.time()
-        pipeline = Pipeline(
-            pipeline_id=pipeline_id,
-            name=req.name,
-            invoked_by=req.invoked_by,
-            user_id=req.user_id,
-            tenant_id=req.tenant_id,
-            parent_pipeline_id=parent_pipeline_id,
-            depth=depth,
-            mode=req.mode,
-            plan=steps,
-            max_steps=req.max_steps,
-            context={"objective": req.objective},
-            created_at=now,
-            updated_at=now,
-        )
-
-        await store.pipeline_create(pipeline)
-        for step in steps:
-            await store.step_upsert(step)
+        # Fuera del try: con la fila y los pasos escritos el hijo EXISTE; un
+        # fallo de estos eventos no es "token quemado sin hijo".
         await store.event_append(pipeline_id, "PIPELINE_CREATED", {
             "name": req.name, "mode": req.mode, "steps": len(steps),
             "parent_pipeline_id": parent_pipeline_id, "depth": depth,

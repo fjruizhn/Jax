@@ -103,6 +103,10 @@ class Motivo(str, Enum):
     # la causa (el estado cambió entre las dos lecturas). Se rechaza igual.
     ESTADO_CAMBIO        = "estado_cambio"
     PLAN_RECHAZADO       = "plan_rechazado"
+    # Después de consumir, la creación falló por un error que no es un plan
+    # rechazado (base, relectura, builder). El nombre de la clase va aparte, en
+    # el campo `excepcion` del evento: el motivo queda enumerable.
+    CREACION_FALLIDA     = "creacion_fallida"
 
 
 @dataclass(frozen=True)
