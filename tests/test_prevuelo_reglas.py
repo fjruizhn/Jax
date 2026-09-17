@@ -9,6 +9,8 @@ import json
 import os
 from decimal import Decimal
 
+import pytest
+
 os.environ["JAX_DB_NAME"] = "jax_memory_test"
 
 from jacobs import prevuelo_reglas as pr  # noqa: E402
@@ -174,3 +176,120 @@ def test_puede_pedir_reintento_segun_el_validador():
     assert puede_pedir_reintento("") is False
     assert puede_pedir_reintento(None) is False
     assert puede_pedir_reintento("typo.v9") is True
+
+
+# ---- Ronda de arreglo 1 (revisión, Rulings R9-R11) ----
+
+
+def test_motor_con_herramientas_no_esta_acotado():
+    """R9a: worker.py no recorta el historial creciente ni los resultados de
+    tools (worker.py:970) -- un motor con herramientas no tiene tope de costo
+    conocido, aunque llamadas_max siga siendo el cálculo normal (el clamp de
+    max_iteraciones)."""
+    d = _despacho(via_motor=True, tiene_herramientas=True, schema_con_reintento=True)
+    v, c = _evaluar(d)
+    assert v == []
+    assert c.usd_max is None and c.motivo == "herramientas_sin_tope"
+    assert c.llamadas_max == 5
+
+
+def test_motor_con_reintento_de_schema_acumula_el_costo():
+    """R9b: la llamada k de un reintento de schema (worker.py:832-838) manda
+    la respuesta de las k-1 llamadas previas como parte del prompt -- la
+    entrada de la llamada k es tokens_in + (k-1)*tokens_out, no tokens_in
+    repetido. Con tokens_in=1001, tokens_out=8192, precio_in=0.27,
+    precio_out=1.10: llamada 1 = 1001*0.27 + 8192*1.10 = 9281.47; llamada 2 =
+    (1001+8192)*0.27 + 8192*1.10 = 11492.27; total 20773.74 / 1e6 = 0.02077374
+    -> 0.020775 redondeado hacia arriba."""
+    d = _despacho(via_motor=True, schema_con_reintento=True)
+    _, c = _evaluar(d, chars_entrada=2001)
+    assert c.llamadas_max == 2
+    assert c.usd_max == Decimal("0.020775") and c.motivo == "acotado"
+
+
+def test_gemini_grounding_reintento_no_acumula_cobra_el_doble_exacto():
+    """R9c: _invoke_http_gemini reenvía el MISMO payload en el reintento sin
+    grounding (executor.py:307-316) -- sin acumulación, el costo es
+    exactamente 2x el de una sola llamada (sobre el bruto sin redondear:
+    2*9281.47/1e6 = 0.01856294 -> 0.018563)."""
+    d = _despacho(transporte="http_gemini", max_tokens_param=None)
+    _, c = _evaluar(d, chars_entrada=2001)
+    assert c.llamadas_max == 2
+    assert c.usd_max == Decimal("0.018563") and c.motivo == "acotado"
+
+
+def test_ollama_sin_max_output_tokens_bloquea():
+    """Desvío 5 del plan: ollama falla cerrado igual que un transporte que
+    cobra si no declara max_output_tokens -- sin este test, errores_de_contrato
+    podría "arreglarse" para devolver [] en ollama sin que nada lo note."""
+    v, c = _evaluar(_despacho(transporte="ollama", via_motor=True, max_tokens_param=None,
+                              max_output_tokens=None))
+    assert [x.regla for x in v] == ["sin_contrato_de_salida"]
+    assert c.usd_max is None and c.motivo == "sin_contrato_de_salida"
+
+
+def test_tope_efectivo_motor_por_encima_del_catalogo_no_lo_baja():
+    """Mitad no cubierta de tope_efectivo: cuando motor.max_tokens es MAYOR
+    que el tope del catálogo, gana el catálogo (el motor no puede ampliar el
+    tope de la fila de `model`) y "qué subir" queda en model.max_output_tokens."""
+    d = _despacho(via_motor=True, max_output_tokens=4096, motor_max_tokens=8000)
+    assert pr.tope_efectivo(d) == (4096, "model.max_output_tokens")
+
+
+def test_tope_efectivo_http_ignora_motor_max_tokens():
+    """La otra mitad: un paso HTTP directo (via_motor=False) no tiene
+    MotorPolicy -- motor_max_tokens es ruido y se ignora aunque venga con un
+    valor bajo."""
+    d = _despacho(via_motor=False, max_output_tokens=8192, motor_max_tokens=1)
+    assert pr.tope_efectivo(d) == (8192, "model.max_output_tokens")
+
+
+def test_llamadas_max_respeta_el_clamp_de_max_iteraciones():
+    """Sin este test, quitar el min() de llamadas_max (motor sin herramientas
+    con reintento de schema) no lo nota nada: con max_iteraciones=1 el
+    reintento de schema NO cabe, tiene que quedar en 1."""
+    d = _despacho(via_motor=True, schema_con_reintento=True)
+    assert pr.llamadas_max(d, max_iteraciones=1) == 1
+
+
+def test_subprocess_no_hyde_no_explota_y_es_suscripcion():
+    """R11: subprocess sin contrato de salida (max_output_tokens=None) no
+    puede pasar por tope_efectivo -- None < int revienta con TypeError. Toda
+    faceta subprocess (no solo hyde) es suscripción: costo 0, sin chequeo de
+    tope ni credencial."""
+    d = _despacho(transporte="subprocess", max_tokens_param=None, max_output_tokens=None,
+                  precio_in=None, precio_out=None)
+    v, c = _evaluar(d)
+    assert v == []
+    assert c.usd_max == Decimal(0) and c.motivo == "suscripcion"
+
+
+def test_transporte_desconocido_se_rechaza():
+    """R10: un transporte fuera de {http_openai_compat, http_gemini, ollama,
+    subprocess} no es un caso libre de contrato -- es uno que el pre-vuelo
+    todavía no conoce, y falla cerrado con el nombre del transporte en el
+    detalle."""
+    v, c = _evaluar(_despacho(transporte="websocket_experimental"))
+    assert [x.regla for x in v] == ["sin_contrato_de_salida"]
+    assert "websocket_experimental" in v[0].detalle
+    assert c.usd_max is None and c.motivo == "sin_contrato_de_salida"
+
+
+def test_armar_veredicto_ordena_pasos_costo_y_sondeadas():
+    costos = [_costo(2, "0.100000"), _costo(0, "0.200000"), _costo(1, None)]
+    v = pr.armar_veredicto([], costos, ["zeta", "alfa"])
+    assert [c.paso for c in v.pasos_costo] == [0, 1, 2]
+    assert v.sondeadas == ("alfa", "zeta")
+
+
+def test_violacion_regla_desconocida_rechaza():
+    with pytest.raises(ValueError):
+        pr.Violacion(0, "jekyll", "regla_inventada", "detalle")
+
+
+def test_dos_errores_de_contrato_se_unen_con_pipe():
+    v, _ = _evaluar(_despacho(max_tokens_param=None, max_output_tokens=None))
+    assert [x.regla for x in v] == ["sin_contrato_de_salida"]
+    assert " | " in v[0].detalle
+    assert "max_tokens_param" in v[0].detalle
+    assert "max_output_tokens" in v[0].detalle

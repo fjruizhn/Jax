@@ -958,8 +958,25 @@ jobs:
           #   gemini directo), costo redondeado hacia arriba a 6 decimales, pasos
           #   sin precio que se declaran no acotados sin bloquear, hyde/assemble
           #   sin evaluar y output_validator.puede_pedir_reintento.
-          grep -qE "^788 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 788 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 788 -> 800 el 2026-09-17 (Task 5, ronda de arreglo 1, Rulings R9-R11):
+          #   +12 en el mismo archivo -- motor con herramientas no acotado
+          #   (R9a, "herramientas_sin_tope"), reintento de schema en motor que
+          #   ACUMULA el costo por llamada en vez de repetirlo (R9b), el
+          #   reintento de grounding de Gemini que NO acumula (R9c, control),
+          #   ollama sin max_output_tokens bloqueado (desvío 5, control),
+          #   tope_efectivo con motor por encima del catálogo y con un paso
+          #   HTTP que ignora motor_max_tokens (control), el clamp de
+          #   max_iteraciones en llamadas_max (control), subprocess no-hyde
+          #   que ya no revienta con TypeError (R11), transporte desconocido
+          #   rechazado (R10), y sondeadas/pasos_costo ordenados, el guard de
+          #   REGLAS en Violacion y la unión " | " de dos errores de contrato
+          #   (control). Los "control" pasaban ya contra el código sin
+          #   arreglar (deviation 5, tope_efectivo y el clamp ya eran
+          #   correctos, solo no tenían test); confirmados en rojo por
+          #   mutación (revertida) en vez de por el código viejo. R9a, R9b,
+          #   R11 y R10 sí se vieron en rojo contra el código viejo.
+          grep -qE "^800 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 800 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

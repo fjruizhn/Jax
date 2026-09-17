@@ -53,6 +53,16 @@ class Violacion:
 
 @dataclass(frozen=True)
 class CostoPaso:
+    """Motivos: "acotado" (precio y tope conocidos), "sin_precio" (el catálogo
+    no declara precio_in/precio_out), "local" (ollama, sin costo), "suscripcion"
+    (subprocess -- hyde y cualquier otra faceta subprocess, R11), "mecanico"
+    (assemble), "sin_contrato_de_salida" (bloqueado, incluye transporte
+    desconocido -- R10) y "faceta_inexistente". "herramientas_sin_tope"
+    (Ruling R9a, 2026-09-17): un motor con herramientas no recorta el
+    historial creciente ni los resultados de tools (worker.py:970) -- no hay
+    tope de tokens de salida que acotar, así que NO se acota el costo (cuenta
+    como no acotado, `hay_no_acotados`, aunque llamadas_max siga siendo el
+    cálculo normal)."""
     paso: int
     faceta: str
     modelo: str | None
@@ -114,20 +124,38 @@ class Despacho:
     persona: str | None
 
 
+_TRANSPORTES_CONOCIDOS = frozenset({"http_openai_compat", "http_gemini", "ollama", "subprocess"})
+
+
 def errores_de_contrato(d: Despacho) -> list[str]:
     """Los MISMOS validadores que el despacho: http_openai_compat exige nombre
-    y tope (contrato_dispatch.faltantes_del_contrato); ollama exige tope
-    (limite_de_salida); http_gemini exige el tope de la fila porque sin él no
-    hay costo máximo (§4.4). subprocess no lleva."""
+    y tope (contrato_dispatch.faltantes_del_contrato); ollama y http_gemini
+    exigen el tope de la fila porque sin él no hay costo máximo (§4.4,
+    desvío 5). subprocess no lleva (R11: lo maneja evaluar_paso ANTES de
+    llegar acá, así que este caso no se ejercita desde ahí, pero se deja
+    fail-open a propósito por si algo más lo llama directo).
+
+    Un transporte fuera de este conjunto (Ruling R10, ronda de arreglo 1) NO
+    es "sin contrato que exigir": es uno que el pre-vuelo todavía no conoce.
+    Antes de R10 cualquier transporte desconocido caía en la rama de
+    http_gemini/ollama, y si max_output_tokens venía seteado (aunque ese
+    transporte ni lo usara) pasaba sin error -- un transporte nuevo real
+    quedaba sin cubrir en vez de rechazado. Fail-closed: se rechaza hasta que
+    alguien le enseñe la regla al pre-vuelo."""
     if d.transporte == "subprocess":
         return []
     if d.transporte == "http_openai_compat":
         return [str(e) for _, e in errores_del_contrato(d.modelo, d.max_tokens_param, d.max_output_tokens)]
-    try:
-        _max_output_tokens_value(d.modelo, d.max_output_tokens)
-    except ModelDispatchConfigError as e:
-        return [str(e)]
-    return []
+    if d.transporte in ("http_gemini", "ollama"):
+        try:
+            _max_output_tokens_value(d.modelo, d.max_output_tokens)
+        except ModelDispatchConfigError as e:
+            return [str(e)]
+        return []
+    return [
+        f"transporte '{d.transporte}' desconocido: el pre-vuelo solo sabe evaluar "
+        f"{sorted(_TRANSPORTES_CONOCIDOS)}; enseñale la regla antes de despachar por acá",
+    ]
 
 
 def tope_efectivo(d: Despacho) -> tuple[int, str]:
@@ -162,6 +190,23 @@ def costo_usd(llamadas: int, tokens_in: int, tokens_out: int,
     return bruto.quantize(_GRANO_USD, rounding=ROUND_CEILING)
 
 
+def costo_usd_acumulado_motor(llamadas: int, tokens_in: int, tokens_out: int,
+                               precio_in: Decimal, precio_out: Decimal) -> Decimal:
+    """Ruling R9b (ronda de arreglo 1): en un motor SIN herramientas con
+    reintento de schema (worker.py:832-838, rama `validation_retried`), la
+    llamada k reenvía la respuesta de las k-1 llamadas previas como parte del
+    prompt -- a diferencia del reintento de grounding de Gemini (mismo
+    payload, R9c), acá la entrada CRECE. La llamada k lleva
+    tokens_in + (k-1)*tokens_out de entrada; el costo es la SUMA sobre las
+    `llamadas` llamadas, no `llamadas` veces la misma -- costo_usd
+    subestimaría (spec §4.6: "sobreestima, nunca subestima")."""
+    bruto = sum(
+        (Decimal(tokens_in + (k - 1) * tokens_out) * precio_in + Decimal(tokens_out) * precio_out)
+        for k in range(1, llamadas + 1)
+    ) / _UN_MILLON
+    return bruto.quantize(_GRANO_USD, rounding=ROUND_CEILING)
+
+
 def costo_sin_evaluar(step: Step) -> CostoPaso | None:
     """Pasos que no consultan catálogo: `assemble` es mecánico
     (executor._assemble_mechanical) y `hyde` es suscripción (sin tope,
@@ -190,6 +235,14 @@ def evaluar_paso(
         return ([Violacion(paso, faceta, "faceta_inexistente", detalle)],
                 CostoPaso(paso, faceta, None, 0, 0, 0, None, "faceta_inexistente"))
 
+    if d.transporte == "subprocess":
+        # R11 (ronda de arreglo 1): subprocess (hyde, y cualquier otra faceta
+        # que despache por acá) no declara max_output_tokens -- tope_efectivo
+        # comparando None < min_output_tokens revienta con TypeError. Es
+        # suscripción, igual que costo_sin_evaluar() para hyde: sin tope,
+        # credencial ni sonda que chequear.
+        return [], CostoPaso(paso, faceta, d.modelo, 0, 0, 0, Decimal(0), "suscripcion")
+
     violaciones: list[Violacion] = []
     tokens_in = tokens_de_entrada(chars_entrada, chars_por_token)
     llamadas = llamadas_max(d, max_iteraciones)
@@ -216,10 +269,19 @@ def evaluar_paso(
 
     if errores:
         costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, 0, None, "sin_contrato_de_salida")
+    elif d.via_motor and d.tiene_herramientas:
+        # R9a: sin tope de costo conocido (ver docstring de CostoPaso).
+        costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, tokens_out, None, "herramientas_sin_tope")
     elif d.transporte == "ollama":
         costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, tokens_out, Decimal(0), "local")
     elif d.precio_in is None or d.precio_out is None:
         costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, tokens_out, None, "sin_precio")
+    elif d.via_motor and llamadas > 1:
+        # R9b: motor sin herramientas con reintento de schema -- acumula.
+        # (Gemini nunca entra acá: via_motor es False en ese transporte.)
+        costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, tokens_out,
+                          costo_usd_acumulado_motor(llamadas, tokens_in, tokens_out, d.precio_in, d.precio_out),
+                          "acotado")
     else:
         costo = CostoPaso(paso, faceta, d.modelo, llamadas, tokens_in, tokens_out,
                           costo_usd(llamadas, tokens_in, tokens_out, d.precio_in, d.precio_out),
