@@ -612,6 +612,7 @@ jobs:
           tests/test_documentos_del_repo.py
           tests/test_requirements_completos.py
           tests/test_sin_autoetiqueta.py
+          tests/test_errores_de_proveedor_redactados.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -662,6 +663,7 @@ jobs:
             tests/test_documentos_del_repo.py \
             tests/test_requirements_completos.py \
             tests/test_sin_autoetiqueta.py \
+            tests/test_errores_de_proveedor_redactados.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el

@@ -31,6 +31,7 @@ import httpx
 
 from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from jax.core.model_catalog import record_resolved_version_safe
+from jax.core.redaccion import recortar_redactado
 from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocationError
 
 # Semaforo de GPU -- UNA inferencia local a la vez DENTRO DE ESTE PROCESO.
@@ -115,12 +116,13 @@ class OllamaMuscle(Muscle):
                 if resp.status_code != 200:
                     raise MuscleInvocationError(
                         f"[{self.name}] Ollama HTTP {resp.status_code}: "
-                        f"{resp.text[:200]}"
+                        f"{recortar_redactado(resp.text, 200)}"
                     )
                 data = resp.json()
                 try:
                     contenido = data["message"]["content"]
                 except (KeyError, TypeError) as exc:
+                    # JSON ya parseado de un 200 del Ollama local (sin credencial): fuera de E-16, declarado.
                     raise MuscleInvocationError(
                         f"[{self.name}] respuesta inesperada de Ollama: "
                         f"{str(data)[:200]}"

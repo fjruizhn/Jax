@@ -263,7 +263,8 @@ class HttpMuscle(Muscle):
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
         url = self._url_del_catalogo()
-        headers = {"Authorization": f"Bearer {await self._resolve_api_key()}"}
+        api_key = await self._resolve_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"}
 
         # messages = system + historial previo + mensaje actual.
         # El historial ya viene en formato {"role": "user"|"assistant", ...},
@@ -283,7 +284,7 @@ class HttpMuscle(Muscle):
             resp = await client.post(url, headers=headers, json=payload)
             if resp.status_code != 200:
                 raise MuscleInvocationError(
-                    f"[{self.name}] DeepSeek HTTP {resp.status_code}: {resp.text[:200]}"
+                    f"[{self.name}] DeepSeek HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [api_key])}"
                 )
             data = resp.json()
             msg = data["choices"][0]["message"]
@@ -302,8 +303,9 @@ class HttpMuscle(Muscle):
         self, prompt: str, model: str, history: list[dict] | None = None
     ) -> str:
         url = self._url_del_catalogo()
+        api_key = await self._resolve_api_key()
         headers = {
-            "Authorization": f"Bearer {await self._resolve_api_key()}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
         messages = [{"role": "system", "content": self.system_prompt}]
@@ -322,8 +324,9 @@ class HttpMuscle(Muscle):
             async with client.stream("POST", url, headers=headers, json=payload) as resp:
                 if resp.status_code != 200:
                     body = await resp.aread()
+                    cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [api_key])
                     raise MuscleInvocationError(
-                        f"[{self.name}] OpenAI HTTP {resp.status_code}: {body[:200]!r}"
+                        f"[{self.name}] OpenAI HTTP {resp.status_code}: {cuerpo}"
                     )
                 partes = []
                 async for linea in resp.aiter_lines():

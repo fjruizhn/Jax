@@ -182,6 +182,14 @@ def humanizar_error(label: str, err: Exception) -> str:
     return f"[{label} fallo] {corto}"
 
 
+def _texto_de_error_de_tarea(e: BaseException) -> str:
+    """El error de run_task se ESCRIBE en <tarea>_result.md: se redacta antes de
+    tocar disco (E-16, 2026-09-16). Entero, sin recortar: es el diagnóstico de
+    la tarea. humanizar_error ya redactaba lo que se imprime; el archivo no."""
+    from jax.core.redaccion import redactar_secretos
+    return redactar_secretos(str(e) or repr(e) or "error sin detalle")
+
+
 async def handle_fact_command(db, line: str, pending_delete: dict) -> str:
     """Procesa comandos /fact. Devuelve el texto a mostrar.
     pending_delete: dict mutable {id: texto} para confirmar borrados."""
@@ -485,7 +493,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
         return True
 
     except (MuscleError, Exception) as e:  # fail-closed: el contenido dice el error Y el proceso sale con 1
-        error_msg = str(e) or repr(e) or "error sin detalle"
+        error_msg = _texto_de_error_de_tarea(e)
 
         result_file.write_text(
             f"# Error en tarea: {task_file.name}\n\n{error_msg}\n",

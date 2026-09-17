@@ -24,6 +24,7 @@ from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from config_entorno import url_requerida
+from redaccion import recortar_redactado
 
 logger = logging.getLogger("jacobs.plan")
 
@@ -667,7 +668,10 @@ class PlanBuilder:
                         # PR-K ronda 2 (M2): ERROR, no warning -- un 400 "max_tokens
                         # too large" del proveedor es un contrato roto, no ruido.
                         body = await resp.aread()
-                        motivo = f"Ada HTTP {resp.status_code}: {body[:200]!r}"
+                        # E-16: redactar (con la credencial de Ada) ANTES de recortar;
+                        # este motivo va a logger.error y a jacobs_events.
+                        cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [f.credential])
+                        motivo = f"Ada HTTP {resp.status_code}: {cuerpo}"
                         logger.error(motivo)
                         raise CerebroNoDisponible(motivo)
                     partes = []

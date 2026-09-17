@@ -390,7 +390,7 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {resp.text[:200]}")
+            raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [f.credential])}")
         data  = resp.json()
         texto = data["choices"][0]["message"].get("content", "")
 
@@ -452,7 +452,7 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(OLLAMA_URL, json=payload)
         if resp.status_code != 200:
-            raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
+            raise RuntimeError(f"Ollama HTTP {resp.status_code}: {recortar_redactado(resp.text, 200)}")
         data  = resp.json()
         texto = data.get("message", {}).get("content", "")
 
