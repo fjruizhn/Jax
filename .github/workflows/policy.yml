@@ -223,13 +223,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
           python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
             tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
-            las_manos/_human_gate_io_test.py 2>&1 | tee /tmp/out
+            las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -301,8 +301,17 @@ jobs:
           #   uso, inventado, vencido, 20 consumos a la vez -> 1 gana, EXPLAIN por PK.
           #   Mutacion: quitar `usado_at IS NULL` del UPDATE -> 2 rojos (un solo uso y
           #   la carrera).
-          grep -qE "^109 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 109 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 109 -> 119 el 2026-09-17 (el cupo lo hace cumplir la base):
+          #   jacobs/_cupo_io_test.py (+10) -- 25 y 50 corrutinas reservando a la vez sin
+          #   superar el cupo y sin un solo deadlock sin reintentar, soltar devuelve el cupo,
+          #   soltar no toca un pipeline que ya arranco, completar escribe plan/identidad/padre,
+          #   fail-closed sin base y con el reintento agotado, EXPLAIN de la sentencia REAL por
+          #   idx_pipelines_status, y por la ruta completa: 10 POST /jacobs/pipeline a la vez
+          #   admiten exactamente MAX_PARALLEL_PIPELINES (y en menos de 0,35 s: con el candado
+          #   global esas diez planificaciones de 50 ms se serializaban en 0,5 s) y un plan
+          #   rechazado devuelve el cupo. Medido en local (3.14) contra jax_memory_test.
+          grep -qE "^119 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 119 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -810,6 +819,7 @@ jobs:
           tests/test_subpipeline_contrato_puro.py
           tests/test_human_gate_sin_emision_http.py
           tests/test_las_manos_auth_servicio.py
+          tests/test_creacion_sin_candado_global.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -910,6 +920,7 @@ jobs:
             tests/test_subpipeline_contrato_puro.py \
             tests/test_human_gate_sin_emision_http.py \
             tests/test_las_manos_auth_servicio.py \
+            tests/test_creacion_sin_candado_global.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1439,8 +1450,14 @@ jobs:
           #   sube con la que espera y vuelve a cero al soltar). El test del freno mientras espera el carril
           #   dejó de dormir 0,3 s y espera ese estado: era rojo intermitente en CI (RemoteProtocolError) con
           #   el runner lento. Corrido 5 veces seguidas en verde. Si el runner da otro numero, manda el runner.
-          grep -qE "^1598 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1598 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1598 -> 1606 el 2026-09-17 (el cupo lo hace cumplir la base): las DOS listas suman
+          #   tests/test_creacion_sin_candado_global.py (8: routes.py sin candado de modulo, el nombre
+          #   viejo fuera del CODIGO —no del comentario que cuenta por que se fue—, create_pipeline sin
+          #   acquire, la sentencia del cupo entera en una sola, validate_create sin active_count y el
+          #   contrato de jacobs/cupo.py). Vistos en rojo contra master (ImportError de jacobs.cupo, y
+          #   el barrido del Lock global con el candado puesto). Si el runner da otro numero, manda el runner.
+          grep -qE "^1606 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1606 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

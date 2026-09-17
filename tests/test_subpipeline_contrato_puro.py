@@ -85,7 +85,7 @@ def _forma_rechazada_sin_eco(req: PipelineCreateRequest, campo: str) -> None:
     `input`, token incluido (hallazgo I-1 de la revisión final, 2026-09-16)."""
     with patch.object(policy, "check_kill_switch", return_value=False):
         r = policy.validate_create(
-            req.invoked_by, req.mode, req.max_steps, 0,
+            req.invoked_by, req.mode, req.max_steps,
             subpipeline_token=req.subpipeline_token,
             parent_pipeline_id=req.parent_pipeline_id,
         )
@@ -128,7 +128,9 @@ def test_el_422_de_forma_no_devuelve_el_token_por_http():
         {"invoked_by": "ada", "subpipeline_token": SECRETO, "parent_pipeline_id": "p",
          "mode_invalido": True},
     )
-    with patch.object(routes.store, "pipeline_count_active", AsyncMock(return_value=0)), \
+    with patch.object(routes.cupo, "reservar_cupo", AsyncMock(return_value=True)), \
+         patch.object(routes.cupo, "completar_reserva", AsyncMock(return_value=None)), \
+         patch.object(routes.cupo, "soltar_reserva", AsyncMock(return_value=1)), \
          patch.object(policy, "check_kill_switch", return_value=False), \
          patch.object(routes, "_build_plan_or_reject", _NO_PLANIFICAR), \
          TestClient(app) as cliente:
@@ -148,14 +150,14 @@ def test_la_profundidad_nunca_la_pone_el_llamador():
 
 def test_validate_create_rechaza_plataforma_con_token():
     with patch.object(policy, "check_kill_switch", return_value=False):
-        r = policy.validate_create("plataforma", "dry_run", 3, 0, subpipeline_token="x")
+        r = policy.validate_create("plataforma", "dry_run", 3, subpipeline_token="x")
     assert not r.ok
     assert "subpipeline_token" in r.reason
 
 
 def test_validate_create_ada_sin_padre_se_rechaza():
     with patch.object(policy, "check_kill_switch", return_value=False):
-        r = policy.validate_create("ada", "dry_run", 3, 0, subpipeline_token="x")
+        r = policy.validate_create("ada", "dry_run", 3, subpipeline_token="x")
     assert not r.ok
     assert "parent_pipeline_id" in r.reason
 
@@ -163,7 +165,7 @@ def test_validate_create_ada_sin_padre_se_rechaza():
 def test_validate_create_ada_con_token_y_padre_pasa_solo_la_forma():
     with patch.object(policy, "check_kill_switch", return_value=False):
         r = policy.validate_create(
-            "ada", "dry_run", 3, 0, subpipeline_token="x", parent_pipeline_id="p")
+            "ada", "dry_run", 3, subpipeline_token="x", parent_pipeline_id="p")
     assert r.ok, r.reason
 
 

@@ -62,7 +62,7 @@ def test_check_kill_switch_con_directorio_ilegible_esta_puesto(tmp_path, monkeyp
 def test_validate_create_con_freno_puesto_rechaza(tmp_path, monkeypatch):
     (tmp_path / "PAUSE").write_text("")
     monkeypatch.setenv("JAX_KILL_SWITCH_PATH", str(tmp_path / "PAUSE"))
-    r = policy.validate_create("plataforma", "supervised", 3, 0)
+    r = policy.validate_create("plataforma", "supervised", 3)
     assert not r.ok
     assert "Kill switch" in r.reason
 

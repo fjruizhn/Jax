@@ -6,7 +6,6 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -15,7 +14,7 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
-from jacobs import store
+from jacobs import cupo, store
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
 from jacobs.models import (
@@ -31,6 +30,7 @@ from jacobs.models import (
 )
 from jacobs.plan import PlanBuilder, PlanRejected
 from jacobs.policy import (
+    MAX_PARALLEL_PIPELINES,
     check_kill_switch,
     validate_create,
     validate_resume,
@@ -47,18 +47,18 @@ logger = logging.getLogger(__name__)
 
 _plan_builder = PlanBuilder()
 
-# T2 (2026-08-19): active_count = await store.pipeline_count_active() y el
-# INSERT posterior corrían en conexiones DB separadas, sin lock ni
-# transacción -- dos POST /pipeline concurrentes podían leer el mismo
-# active_count y ambos pasar validate_create(), superando
-# MAX_PARALLEL_PIPELINES. Jacobs corre en un solo proceso uvicorn (sin
-# --workers, confirmado por systemctl/ps) así que un asyncio.Lock() de
-# proceso es válido y cubre el caso real. Se prefiere sobre una transacción
-# con SELECT...FOR UPDATE porque _plan_builder.build() (adentro de la
-# sección crítica) tarda 20-40s llamando a un LLM externo -- mantener esa
-# transacción/fila lockeada todo ese tiempo arriesgaría agotar el pool de
-# conexiones bajo carga real; un lock en memoria no reserva conexión DB.
-_pipeline_create_lock = asyncio.Lock()
+# HISTORIA DEL CANDADO QUE YA NO ESTÁ (2026-09-17, decisión de Fernando).
+# Acá vivía `_pipeline_create_lock = asyncio.Lock()`: un candado GLOBAL del
+# proceso que envolvía el conteo de activos, el consumo del token de Ada, la
+# planificación (20-40 s de LLM) y el INSERT, porque leer el conteo en una
+# consulta y decidir en otra es una lectura optimista (T2, 2026-08-19: dos POST
+# concurrentes leían el mismo número y los dos pasaban). Hacía cumplir el
+# límite, sí, pero serializaba TODA la creación en un solo objeto: la medición
+# del frente G (2026-09-17) dio un techo de ~43 delegaciones/s y, peor, la
+# creación de pipelines de la MESA esperaba detrás de las delegaciones de Ada.
+# El cupo lo hace cumplir ahora la base, en una sola sentencia que decide por
+# filas afectadas (`jacobs/cupo.py`). El barrido de fuente
+# `tests/test_creacion_sin_candado_global.py` impide que el candado vuelva.
 
 
 async def _build_plan_or_reject(
@@ -173,39 +173,85 @@ async def _auditar_token_quemado(
         )
 
 
+async def _soltar_reserva(pipeline_id: str) -> None:
+    """Devuelve el cupo de una reserva que no llegó a ser pipeline.
+
+    Best-effort A PROPÓSITO y NO es fail-open: si el DELETE falla, el cupo
+    queda OCUPADO, que es el lado restrictivo, y el reaper cosecha la fila
+    `pending` a los 300 s. Lo que no puede pasar es que un fallo al liberar
+    reemplace el error original que trajo al llamador hasta acá.
+    """
+    try:
+        await cupo.soltar_reserva(pipeline_id)
+    except Exception as exc:  # fail-soft: soltar es best-effort; el error original manda y el reaper cosecha la fila pending
+        logger.error(
+            "cupo: reserva %s no liberada (%s); queda ocupada hasta el reaper",
+            pipeline_id, type(exc).__name__,
+        )
+
+
 @router.post("/pipeline")
 async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTasks) -> dict:
     """Crea un pipeline y lo ejecuta en background."""
 
-    # Lock de proceso: active_count (lectura) y pipeline_create (escritura)
-    # deben ser atómicos entre sí para que MAX_PARALLEL_PIPELINES sea un
-    # límite real, no una lectura optimista. Incluye build() adentro a
-    # propósito -- ver justificación en _pipeline_create_lock arriba.
-    async with _pipeline_create_lock:
-        active_count = await store.pipeline_count_active()
-        policy = validate_create(
-            invoked_by=req.invoked_by,
-            mode=req.mode,
-            max_steps=req.max_steps,
-            active_count=active_count,
-            subpipeline_token=req.subpipeline_token,
-            parent_pipeline_id=req.parent_pipeline_id,
+    policy = validate_create(
+        invoked_by=req.invoked_by,
+        mode=req.mode,
+        max_steps=req.max_steps,
+        subpipeline_token=req.subpipeline_token,
+        parent_pipeline_id=req.parent_pipeline_id,
+    )
+    if not policy.ok:
+        status_code = 423 if "kill switch" in policy.reason.lower() else 422
+        raise HTTPException(status_code=status_code, detail=policy.reason)
+
+    pipeline_id = str(uuid.uuid4())
+    now = time.time()
+
+    # LA RESERVA ES EL CONTROL DE CUPO (2026-09-17). Se toma ANTES del token de
+    # Ada y ANTES de planificar, y no hay candado de proceso: la sentencia de
+    # `cupo.reservar_cupo` cuenta e inserta a la vez, así que nadie se cuela
+    # entre las dos cosas. Tomarla primero conserva los dos invariantes que
+    # sostenía el candado viejo: ningún token se quema sin cupo, y no puede
+    # haber más planificaciones en vuelo que cupo (antes: una sola).
+    #
+    # La fila nace SIN plan y, para un hijo de Ada, SIN identidad: user_id y
+    # tenant_id del cuerpo no se escriben nunca (I-3) -- los trae la fila del
+    # token, más abajo, con `completar_reserva`.
+    es_de_ada = req.invoked_by == INVOKER_ADA
+    pipeline = Pipeline(
+        pipeline_id=pipeline_id,
+        name=req.name,
+        invoked_by=req.invoked_by,
+        user_id=None if es_de_ada else req.user_id,
+        tenant_id=None if es_de_ada else req.tenant_id,
+        mode=req.mode,
+        plan=[],
+        max_steps=req.max_steps,
+        context={"objective": req.objective},
+        created_at=now,
+        updated_at=now,
+    )
+    if not await cupo.reservar_cupo(pipeline):
+        # 0 filas = cupo agotado. Mismo rechazo explícito (422) y mismo texto
+        # que daba validate_create. El conteo es solo para el MENSAJE: la
+        # decisión ya la tomó la base.
+        raise HTTPException(
+            status_code=422,
+            detail=str(cupo.CupoAgotado(await cupo.activos(), MAX_PARALLEL_PIPELINES)),
         )
-        if not policy.ok:
-            status_code = 423 if "kill switch" in policy.reason.lower() else 422
-            raise HTTPException(status_code=status_code, detail=policy.reason)
 
-        pipeline_id = str(uuid.uuid4())
-
+    try:
         # Frente F (2026-09-16): un hijo de Ada consume su token ACÁ, después de
-        # validate_create (un 423 del kill switch no lo quema) y ANTES de
-        # planificar (no se sostiene una transacción los 20-40 s del LLM). Padre,
-        # profundidad e identidad salen de la fila del token, nunca del cuerpo.
+        # validate_create (un 423 del kill switch no lo quema), con el cupo ya
+        # reservado y ANTES de planificar (no se sostiene una transacción los
+        # 20-40 s del LLM). Padre, profundidad e identidad salen de la fila del
+        # token, nunca del cuerpo.
         parent_pipeline_id: str | None = None
         parent_step: str | None = None
         depth = 0
         user_id, tenant_id = req.user_id, req.tenant_id
-        if req.invoked_by == INVOKER_ADA:
+        if es_de_ada:
             # Residual de I-2 (R13): el UPDATE del consumo se confirma solo; si
             # DESPUÉS falla la relectura (error de base, invariante roto) o llega
             # una cancelación, el token puede estar quemado sin hijo. BaseException
@@ -238,7 +284,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             user_id, tenant_id = consumo.user_id, consumo.tenant_id
 
         # Revisión final (I-2): desde acá el token ya está quemado. CUALQUIER
-        # error antes de que el hijo exista (plan, builder, pipeline_create,
+        # error antes de que el hijo exista (plan, builder, completar_reserva,
         # step_upsert) deja SUBPIPELINE_RECHAZADO (plan rechazado -> fase=plan;
         # lo demás -> fase=creacion, motivo creacion_fallida, clase de la
         # excepción sin su mensaje) y se relanza el error ORIGINAL.
@@ -250,24 +296,14 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             for step in steps:
                 step.pipeline_id = pipeline_id
 
-            now = time.time()
-            pipeline = Pipeline(
-                pipeline_id=pipeline_id,
-                name=req.name,
-                invoked_by=req.invoked_by,
-                user_id=user_id,
-                tenant_id=tenant_id,
-                parent_pipeline_id=parent_pipeline_id,
-                depth=depth,
-                mode=req.mode,
-                plan=steps,
-                max_steps=req.max_steps,
-                context={"objective": req.objective},
-                created_at=now,
-                updated_at=now,
-            )
+            pipeline.plan = steps
+            pipeline.parent_pipeline_id = parent_pipeline_id
+            pipeline.depth = depth
+            pipeline.user_id = user_id
+            pipeline.tenant_id = tenant_id
+            pipeline.updated_at = time.time()
 
-            await store.pipeline_create(pipeline)
+            await cupo.completar_reserva(pipeline)
             for step in steps:
                 await store.step_upsert(step)
         except HTTPException:
@@ -282,19 +318,26 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                     excepcion=type(exc).__name__,
                 )
             raise
+    except BaseException:
+        # La reserva existe y el pipeline no llegó a ser: se devuelve el cupo.
+        # CancelledError incluida -- un cliente que corta no puede dejar un
+        # lugar del cupo tomado hasta que pase el reaper.
+        await _soltar_reserva(pipeline_id)
+        raise
 
-        # Fuera del try: con la fila y los pasos escritos el hijo EXISTE; un
-        # fallo de estos eventos no es "token quemado sin hijo".
-        await store.event_append(pipeline_id, "PIPELINE_CREATED", {
-            "name": req.name, "mode": req.mode, "steps": len(steps),
-            "parent_pipeline_id": parent_pipeline_id, "depth": depth,
-        })
-        if parent_pipeline_id is not None:
-            await store.event_append(
-                parent_pipeline_id, "SUBPIPELINE_CREADO",
-                {"hijo_pipeline_id": pipeline_id, "depth": depth},
-                parent_step,
-            )
+    # Fuera del try: con la fila completa y los pasos escritos el pipeline
+    # EXISTE; un fallo de estos eventos no es "token quemado sin hijo" ni deja
+    # una reserva colgada.
+    await store.event_append(pipeline_id, "PIPELINE_CREATED", {
+        "name": req.name, "mode": req.mode, "steps": len(steps),
+        "parent_pipeline_id": parent_pipeline_id, "depth": depth,
+    })
+    if parent_pipeline_id is not None:
+        await store.event_append(
+            parent_pipeline_id, "SUBPIPELINE_CREADO",
+            {"hijo_pipeline_id": pipeline_id, "depth": depth},
+            parent_step,
+        )
 
     # dry_run: no ejecuta en background, solo completa inmediatamente
     if req.mode == "dry_run":

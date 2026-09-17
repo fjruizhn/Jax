@@ -40,7 +40,6 @@ def validate_create(
     invoked_by: str,
     mode: str,
     max_steps: int,
-    active_count: int,
     subpipeline_token: str | None = None,
     parent_pipeline_id: str | None = None,
 ) -> PolicyResult:
@@ -49,7 +48,16 @@ def validate_create(
     Para ada controla la FORMA (token y padre presentes; nadie más puede
     traerlos). La VALIDEZ del token no se decide acá: es un consumo atómico en
     la base (subpipelines.consumir_token_subpipeline), que routes.create_pipeline
-    corre justo después de esta función, dentro del mismo candado."""
+    corre justo después de esta función.
+
+    EL CUPO TAMPOCO SE DECIDE ACÁ (2026-09-17). Hasta hoy esta función recibía
+    `active_count` y comparaba contra MAX_PARALLEL_PIPELINES: un conteo leído
+    en una consulta y decidido en otra, que sólo era un límite de verdad
+    porque routes.py lo envolvía en un candado global del proceso. Ese candado
+    serializaba toda la creación (~43 delegaciones/s, y la Mesa esperando
+    detrás de Ada). Ahora el cupo lo hace cumplir la base en UNA sentencia:
+    `jacobs/cupo.py::reservar_cupo`. La constante sigue viviendo acá porque es
+    la que `scripts/check_mirror_sync.py` espeja contra jax-platform."""
 
     if invoked_by not in VALID_INVOKERS:
         return PolicyResult(
@@ -76,15 +84,6 @@ def validate_create(
         return PolicyResult(
             ok=False,
             reason=f"max_steps={max_steps} excede límite duro ({MAX_STEPS_PER_PIPELINE})",
-        )
-
-    if active_count >= MAX_PARALLEL_PIPELINES:
-        return PolicyResult(
-            ok=False,
-            reason=(
-                f"Ya hay {active_count} pipelines activos. "
-                f"Límite duro: {MAX_PARALLEL_PIPELINES}"
-            ),
         )
 
     if check_kill_switch():
