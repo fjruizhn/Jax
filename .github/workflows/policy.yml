@@ -1461,8 +1461,14 @@ jobs:
           #   _validate_plan_capabilities y al parseo del plan del planificador: preflight 1,
           #   crear con pasos 1, crear por objetivo (qwen sin red, sólo OLLAMA_URL) 1. Rojo
           #   contra 36e539f: assert 2 == 1, 2 == 1 y 3 == 1.
-          grep -qE "^1100 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1100 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1100 -> 1104 el 2026-09-17 (Ruling R41): +4 en test_jacobs_conexiones_por_pedido.py
+          #   -- un COMMIT de crear que se corta o que vence da el 503 prevuelo_no_disponible
+          #   con `detalle`: el pipeline puede existir, revisar la lista antes de reintentar
+          #   (rojo contra 36e539f: KeyError 'detalle', x2); una falla ANTES del COMMIT no
+          #   lo dice y no deja nada escrito (control); el docstring de crear declara el
+          #   COMMIT incierto (rojo: no lo mencionaba).
+          grep -qE "^1104 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1104 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

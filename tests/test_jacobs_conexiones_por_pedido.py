@@ -164,6 +164,14 @@ class _Conexion:
         self.en_transaccion = True
 
     async def commit(self):
+        if self._base.commit_falla is not None:
+            # El corte llega DESPUÉS de que el servidor recibió el COMMIT: el
+            # doble confirma y el cliente ve el error (el caso incierto).
+            self._base.escrituras.extend(self.pendientes)
+            self.pendientes.clear()
+            raise self._base.commit_falla
+        if self._base.commit_cuelga:
+            await asyncio.sleep(3600)
         self._base.escrituras.extend(self.pendientes)
         self.pendientes.clear()
         self.en_transaccion = False
@@ -193,6 +201,8 @@ class _Base:
         self.aperturas: list[tuple[str, str, bool]] = []  # (via, sitio, found_rows)
         self.escrituras: list[tuple[str, object, str]] = []  # CONFIRMADAS: (sql, params, sitio de la conexión)
         self.falla_en: str | None = None
+        self.commit_falla: BaseException | None = None
+        self.commit_cuelga = False
         self.cuelga_en: str | None = None
         self.falla_al_conectar: BaseException | None = None
 
@@ -932,3 +942,61 @@ def test_crear_por_objetivo_lee_la_gobernanza_una_vez(entorno, monkeypatch):
     respuesta = _un_pedido(crear_por_objetivo)
     assert respuesta["step_count"] == 1
     assert len(lecturas) == 1
+
+
+# ---------------------------------------------------------------------------
+# COMMIT cortado: resultado incierto (Ruling R41)
+# ---------------------------------------------------------------------------
+
+def _crear_y_capturar_503(base, monkeypatch):
+    monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
+
+    async def cuerpo():
+        try:
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(_pedido_crear(), 5)
+            return exc.value
+        finally:
+            await store.cerrar_pool()
+
+    return asyncio.run(cuerpo())
+
+
+def test_commit_cortado_da_503_que_avisa_que_el_pipeline_puede_existir(entorno, monkeypatch):
+    """La conexión se corta DURANTE el COMMIT: el servidor pudo haberlo
+    confirmado. El 503 conserva code prevuelo_no_disponible y agrega un
+    `detalle` que lo dice. Expected contra 36e539f: KeyError 'detalle'."""
+    base = entorno()
+    base.commit_falla = pymysql.err.OperationalError(2013, "Lost connection to MySQL server during query")
+    error = _crear_y_capturar_503(base, monkeypatch)
+    assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
+    assert "puede existir" in error.detail["detalle"]
+    assert "lista" in error.detail["detalle"] and "reintentar" in error.detail["detalle"]
+
+
+def test_commit_colgado_que_vence_tambien_es_incierto(entorno, monkeypatch):
+    """El COMMIT no responde y vence el plazo: tampoco se sabe si confirmó.
+    Expected contra 36e539f: KeyError 'detalle'."""
+    base = entorno()
+    base.commit_cuelga = True
+    error = _crear_y_capturar_503(base, monkeypatch)
+    assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
+    assert "puede existir" in error.detail["detalle"]
+
+
+def test_falla_antes_del_commit_no_dice_incierto(entorno, monkeypatch):
+    """Control: si falla una escritura ANTES del COMMIT, nada quedó escrito y
+    el 503 no sugiere que el pipeline pueda existir."""
+    base = entorno()
+    base.falla_en = "INSERT INTO jacobs_steps"
+    error = _crear_y_capturar_503(base, monkeypatch)
+    assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
+    assert "detalle" not in error.detail
+    assert base.escrituras == []
+
+
+def test_el_docstring_de_crear_declara_el_commit_incierto():
+    """R41: el contrato se declara donde se lee el endpoint.
+    Expected contra 36e539f: no lo menciona."""
+    doc = routes.create_pipeline.__doc__ or ""
+    assert "COMMIT" in doc and "incierto" in doc

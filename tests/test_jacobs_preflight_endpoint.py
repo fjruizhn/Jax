@@ -68,8 +68,10 @@ class TransaccionFalsa:
     def __init__(self, orden: list):
         self.orden, self.conexiones, self.confirmadas, self.descartadas = orden, [], 0, 0
 
-    def __call__(self, conexion):
+    def __call__(self, conexion, estado=None):
+        # estado (R41): EstadoDeTransaccion; este doble siempre confirma.
         self.conexiones.append(conexion)
+        self.estado = estado
         return self
 
     async def __aenter__(self):
@@ -78,6 +80,8 @@ class TransaccionFalsa:
 
     async def __aexit__(self, tipo, *exc):
         if tipo is None:
+            if self.estado is not None:
+                self.estado.enviando_commit = self.estado.confirmada = True
             self.confirmadas += 1
             self.orden.append("commit")
         else:

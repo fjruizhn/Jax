@@ -13,6 +13,7 @@ import os
 import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Iterator
 
 import aiomysql
@@ -307,8 +308,25 @@ async def _conexion_o_pool(conexion: aiomysql.Connection | None) -> AsyncIterato
         yield conn
 
 
+@dataclass
+class EstadoDeTransaccion:
+    """Hasta dónde llegó una transacción (Ruling R41). `enviando_commit`
+    queda en True desde que se manda el COMMIT; `confirmada`, cuando el
+    servidor respondió. Si falla entre las dos, el resultado es INCIERTO: el
+    servidor pudo haber confirmado antes de que se cortara la respuesta."""
+
+    enviando_commit: bool = False
+    confirmada: bool = False
+
+    @property
+    def incierta(self) -> bool:
+        return self.enviando_commit and not self.confirmada
+
+
 @asynccontextmanager
-async def transaccion(conn: aiomysql.Connection) -> AsyncIterator[aiomysql.Connection]:
+async def transaccion(
+    conn: aiomysql.Connection, estado: EstadoDeTransaccion | None = None,
+) -> AsyncIterator[aiomysql.Connection]:
     """Una transacción sobre `conn` (R38, fix round 1, 2b: crear escribe
     pipeline, pasos y eventos en UNA, sobre la conexión del candado).
 
@@ -316,15 +334,22 @@ async def transaccion(conn: aiomysql.Connection) -> AsyncIterator[aiomysql.Conne
     de mandar ROLLBACK: tras una consulta cancelada el protocolo queda en un
     estado desconocido y un ROLLBACK por la red podría colgarse de nuevo.
     Cerrar la sesión hace que el servidor descarte la transacción sin
-    confirmar (y suelte el GET_LOCK de esa sesión). Límite: si la conexión se
-    corta DURANTE el COMMIT, el resultado no se puede saber desde acá."""
+    confirmar (y suelte el GET_LOCK de esa sesión).
+
+    Límite declarado (R41): si la conexión se corta o vence DURANTE el COMMIT,
+    desde acá no se puede saber si el servidor confirmó. `estado.incierta`
+    queda en True para que quien llama lo diga (crear responde 503 con
+    `detalle`: el pipeline puede existir)."""
+    estado = estado if estado is not None else EstadoDeTransaccion()
     await conn.begin()
     try:
         yield conn
+        estado.enviando_commit = True
+        await conn.commit()
+        estado.confirmada = True
     except BaseException:
         conn.close()
         raise
-    await conn.commit()
 
 
 async def cerrar_pool() -> None:

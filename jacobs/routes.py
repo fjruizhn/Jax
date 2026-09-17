@@ -303,6 +303,17 @@ async def plan_only(req: PlanRequest) -> dict:
 async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTasks) -> dict:
     """Crea un pipeline y lo ejecuta en background.
 
+    Escritura (R38 fix round 1, 2b): pipeline, pasos y PIPELINE_CREATED (y en
+    dry_run el completed y DRY_RUN_COMPLETE) van en UNA transacción bajo el
+    candado de activos. Si algo falla ANTES del COMMIT, nada queda escrito y
+    responde 503 {"code": "prevuelo_no_disponible", "motivo"}.
+
+    COMMIT cortado (Ruling R41): si la conexión se corta o vence DURANTE el
+    COMMIT, el resultado es incierto -- el servidor pudo haberlo confirmado.
+    Responde el mismo 503 con un `detalle` que lo dice: el pipeline puede
+    existir, y hay que revisar la lista antes de reintentar (un reintento
+    ciego podría crearlo dos veces).
+
     Spec 2026-09-17 §4.7: en el camino por objetivo (req.steps=None, el plan
     lo arma _build_plan_or_reject() llamando a un LLM pago), el pre-vuelo
     corre DESPUÉS, sobre el plan que el LLM ya devolvió -- lo gastado en
@@ -383,6 +394,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         # mitad dejaba un pipeline sin sus pasos y un 500. Ahora es todo o
         # nada, acotado por JAX_DB_CONNECT_TIMEOUT_SECONDS; cualquier falla es
         # 503 prevuelo_no_disponible sin nada escrito.
+        estado_tx = store.EstadoDeTransaccion()
         try:
             async with store.candado_de_activos() as conexion_del_candado:
                 active_count = await store.pipeline_count_active(conexion=conexion_del_candado)
@@ -398,7 +410,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                     raise HTTPException(status_code=status_code, detail=policy.reason)
 
                 async with asyncio.timeout(store.db_connect_timeout_seconds()):
-                    async with store.transaccion(conexion_del_candado) as tx:
+                    async with store.transaccion(conexion_del_candado, estado_tx) as tx:
                         await store.pipeline_create(pipeline, conexion=tx)
                         for step in steps:
                             await store.step_upsert(step, conexion=tx)
@@ -413,10 +425,17 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             raise
         except Exception as exc:  # fail-closed: candado, recuento o transacción de creación que no se pudo completar -> nada quedó escrito (la transacción se descarta) y no se crea (spec §8)
             motivo = _motivo_redactado(exc)
-            logger.error("crear: no se pudo escribir el pipeline: %s", motivo)
-            raise HTTPException(
-                status_code=503, detail={"code": "prevuelo_no_disponible", "motivo": motivo},
-            ) from exc
+            detalle = {"code": "prevuelo_no_disponible", "motivo": motivo}
+            if estado_tx.incierta:
+                # R41: el COMMIT salió y la respuesta no llegó.
+                logger.error("crear: COMMIT del pipeline %s con resultado INCIERTO: %s", pipeline_id, motivo)
+                detalle["detalle"] = (
+                    f"Resultado incierto: la conexión se cortó mientras se confirmaba. El pipeline "
+                    f"{pipeline_id} puede existir: revisá la lista de pipelines antes de reintentar."
+                )
+            else:
+                logger.error("crear: no se pudo escribir el pipeline: %s", motivo)
+            raise HTTPException(status_code=503, detail=detalle) from exc
 
     # dry_run: no ejecuta en background; ya quedó completed en la transacción
     if req.mode == "dry_run":
