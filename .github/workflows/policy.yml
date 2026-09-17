@@ -915,8 +915,9 @@ jobs:
           #   la primera no queda vigilado por este piso.
           #   test_ejecutor_reproduccion_u3.py NO entra: mide contra el corpus de U3, que
           #   tiene datos de clientes y vive fuera del repo; en CI solo sumaria skips.
-          #   PROVISIONAL: numero medido en local (3.14). Se re-fija con lo que cuente el
-          #   runner (3.12) -- el piso NO se calcula a mano.
+          #   CONFIRMADO POR EL RUNNER (Python 3.12, run de PR #172): "712 passed, 1 skipped,
+          #   1 xfailed". Coincide con lo medido en local (3.14). Confirma ademas que el test
+          #   de systemd de hechos CORRE en el runner -- si se salteara, esto daria 711/2.
           grep -qE "^712 passed, 1 skipped" /tmp/out || {
             echo "PISO ROTO: se esperaban 712 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
