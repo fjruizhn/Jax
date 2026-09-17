@@ -8,9 +8,12 @@ POST /jacobs/pipeline/{id}/continue, y después corre la corrida en este
 proceso. Los tres agujeros de la versión anterior se cierran por construcción:
   1. usaba la foto de `plan` de la creación -> continuar lee jacobs_steps;
   2. no borraba las refs de los pasos a rehacer -> continuar las quita;
-  3. se saltaba el candado y el límite -> continuar los aplica. El candado es
-     de proceso: entre este CLI y LAS MANOS serializa la transacción con
-     SELECT ... FOR UPDATE y la época (desvío 7 del plan).
+  3. se saltaba el candado y el límite -> continuar los aplica. El cupo de
+     MAX_PARALLEL_PIPELINES entre este CLI y LAS MANOS lo serializa el
+     candado con nombre de MariaDB `store.candado_de_activos` (ola final F3,
+     Ruling R31): recuento y escritura dentro de él; si no se obtiene, sale
+     con 4. Un continue doble del MISMO pipeline lo impide además la
+     transacción con SELECT ... FOR UPDATE y la época.
 
 `--from-step` ya no existe: qué se reusa lo decide la ref legible de cada
 paso, no un número elegido a mano.
