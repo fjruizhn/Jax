@@ -1334,8 +1334,16 @@ jobs:
           #   usage medido sigue preflight_probe, y ni la falla local ni la base caída
           #   registran (3 controles). Rojo contra 4768484: 6 failed (Awaited 0 times /
           #   AttributeError).
-          grep -qE "^1032 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1032 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1032 -> 1036 el 2026-09-17 (ola final de arreglos, F5): +4 en
+          #   test_prevuelo_orquestador.py -- un solo vuelo de sonda por clave en el
+          #   proceso: 10 pre-vuelos concurrentes con la misma clave vencida lanzan UNA
+          #   sonda; su excepción llega a los 5 que esperan y el registro queda vacío;
+          #   cancelar a uno no corta la sonda de los demás y cancelar a todos la
+          #   cancela sin dejar tareas; terminado el vuelo, el siguiente pre-vuelo
+          #   vuelve a sondear (control: no es caché). Rojo contra 014aeb0: 3 failed
+          #   (10 y 5 sondas; cada pre-vuelo lanzaba y cancelaba la suya propia).
+          grep -qE "^1036 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1036 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

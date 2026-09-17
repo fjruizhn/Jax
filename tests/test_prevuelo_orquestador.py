@@ -326,3 +326,102 @@ def test_medir_el_prompt_corre_por_asyncio_to_thread(monkeypatch):
 
     assert pv._chars_de_entrada in llamadas
     assert v.ok
+
+
+# ---------------------------------------------------------------------
+# F5 (ola final, 2026-09-17): estampida de sondas. N pre-vuelos concurrentes
+# con la misma clave vencida lanzaban N sondas PAGAS. Ahora hay un solo vuelo
+# por clave en el proceso: los demás esperan el mismo resultado; el registro
+# se limpia al terminar (también con excepción o cancelación) y una
+# excepción llega a todos los que esperan.
+# ---------------------------------------------------------------------
+
+def _sonda_lenta(llamadas, resultado=None, error=None, pausa=0.05):
+    async def sondear(clave, d, **kw):
+        llamadas.append(clave)
+        await asyncio.sleep(pausa)
+        if error is not None:
+            raise error
+        return resultado or ResultadoSonda(True, None)
+    return sondear
+
+
+def test_diez_prevuelos_concurrentes_lanzan_una_sola_sonda(monkeypatch):
+    llamadas = []
+    _instalar(monkeypatch, _catalogo(salud={}), sondear=_sonda_lenta(llamadas))
+
+    async def correr():
+        return await asyncio.gather(*[
+            pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}) for _ in range(10)])
+
+    veredictos = asyncio.run(correr())
+    assert llamadas == ["jekyll"]
+    assert all(v.ok and v.sondeadas == ("jekyll",) for v in veredictos)
+    assert pv._sondas_en_vuelo == {}
+
+
+def test_la_excepcion_del_vuelo_llega_a_todos_y_el_registro_se_limpia(monkeypatch):
+    from facet_resolver import FacetUnavailableError
+
+    llamadas = []
+    _instalar(monkeypatch, _catalogo(salud={}),
+              sondear=_sonda_lenta(llamadas, error=FacetUnavailableError("DB caída")))
+
+    async def correr():
+        return await asyncio.gather(*[
+            pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}) for _ in range(5)],
+            return_exceptions=True)
+
+    salidas = asyncio.run(correr())
+    assert llamadas == ["jekyll"]
+    assert all(isinstance(s, FacetUnavailableError) for s in salidas)
+    assert pv._sondas_en_vuelo == {}
+
+
+def test_terminado_el_vuelo_el_siguiente_prevuelo_vuelve_a_sondear(monkeypatch):
+    """No es una caché de resultados: sólo se comparte lo que está EN VUELO.
+    El dato fresco lo guarda facet_health_event, no este registro."""
+    llamadas = []
+    _instalar(monkeypatch, _catalogo(salud={}), sondear=_sonda_lenta(llamadas, pausa=0))
+    _correr([_paso(0, "jekyll")])
+    _correr([_paso(0, "jekyll")])
+    assert llamadas == ["jekyll", "jekyll"]
+
+
+def test_cancelar_a_uno_no_corta_la_sonda_de_los_demas_y_cancelar_a_todos_si(monkeypatch):
+    llamadas, terminadas = [], []
+
+    async def sondear(clave, d, **kw):
+        llamadas.append(clave)
+        try:
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            terminadas.append("cancelada")
+            raise
+        terminadas.append("completa")
+        return ResultadoSonda(True, None)
+
+    _instalar(monkeypatch, _catalogo(salud={}), sondear=sondear)
+
+    async def correr():
+        a = asyncio.ensure_future(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
+        b = asyncio.ensure_future(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
+        await asyncio.sleep(0.02)
+        a.cancel()
+        veredicto_b = await b
+        assert a.cancelled()
+        assert veredicto_b.ok and terminadas == ["completa"]
+
+        c = asyncio.ensure_future(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
+        d = asyncio.ensure_future(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
+        await asyncio.sleep(0.02)
+        c.cancel()
+        d.cancel()
+        await asyncio.gather(c, d, return_exceptions=True)
+        assert terminadas == ["completa", "cancelada"]
+        assert pv._sondas_en_vuelo == {}
+        pendientes = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        assert pendientes == []
+
+    asyncio.run(correr())
+    assert llamadas == ["jekyll", "jekyll"]

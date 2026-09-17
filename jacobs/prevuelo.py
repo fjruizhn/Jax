@@ -29,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 
 from motor_registry.output_validator import puede_pedir_reintento
 
@@ -122,6 +123,55 @@ def _chars_de_entrada(step: Step, pasos: list[Step], contexto: dict, d: Despacho
     return chars
 
 
+@dataclass
+class _Vuelo:
+    loop: asyncio.AbstractEventLoop
+    tarea: asyncio.Future
+    esperando: int = 0
+
+
+# F5 (ola final, 2026-09-17): UN solo vuelo de sonda por clave en el proceso.
+# Antes, N pre-vuelos concurrentes con la misma clave sin `ok` fresco lanzaban
+# N sondas pagas. No es una caché de resultados (LAS CUATRO #2 no aplica): la
+# entrada vive mientras la sonda está EN VUELO y se borra al terminar -- con
+# resultado, excepción o cancelación (done callback). El dato fresco para
+# después lo guarda facet_health_event. El uso de la sonda compartida queda
+# atribuido a la identidad del primer pre-vuelo que la lanzó.
+_sondas_en_vuelo: dict[str, _Vuelo] = {}
+
+
+def _olvidar_vuelo(clave: str, vuelo: _Vuelo) -> None:
+    if _sondas_en_vuelo.get(clave) is vuelo:
+        del _sondas_en_vuelo[clave]
+
+
+async def _sondear_una_vez(clave: str, d: Despacho, user_id: str | None,
+                           tenant_id: str | None):
+    """Se suma al vuelo en curso de `clave` o lanza uno. La sonda corre en su
+    propia tarea (shield): cancelar a UNO de los que esperan no la corta para
+    los demás; si se cancelan TODOS, se cancela y se espera (no queda tarea
+    huérfana). Una excepción de la sonda llega a todos."""
+    loop = asyncio.get_running_loop()
+    vuelo = _sondas_en_vuelo.get(clave)
+    if vuelo is None or vuelo.loop is not loop or vuelo.tarea.done():
+        tarea = asyncio.ensure_future(sonda.sondear(clave, d, user_id=user_id, tenant_id=tenant_id))
+        vuelo = _Vuelo(loop, tarea)
+        _sondas_en_vuelo[clave] = vuelo
+        tarea.add_done_callback(lambda _t, c=clave, v=vuelo: _olvidar_vuelo(c, v))
+    vuelo.esperando += 1
+    try:
+        return await asyncio.shield(vuelo.tarea)
+    finally:
+        vuelo.esperando -= 1
+        if vuelo.esperando == 0 and not vuelo.tarea.done():
+            # Fuera del registro ANTES de cancelar: un pre-vuelo que llega
+            # mientras esta cancelación termina lanza su propia sonda en vez
+            # de sumarse a una que ya no va a responder.
+            _olvidar_vuelo(clave, vuelo)
+            vuelo.tarea.cancel()
+            await asyncio.wait({vuelo.tarea})
+
+
 async def _sondear_todas(a_sondear: dict[str, Despacho], claves: list[str],
                          user_id: str | None, tenant_id: str | None) -> list:
     """`asyncio.gather` sin `return_exceptions`: la primera sonda que revienta
@@ -135,7 +185,7 @@ async def _sondear_todas(a_sondear: dict[str, Despacho], claves: list[str],
     `return_exceptions=True`, así ESA espera no puede volver a reventar)
     antes de relanzar la excepción original."""
     tareas = [
-        asyncio.ensure_future(sonda.sondear(c, a_sondear[c], user_id=user_id, tenant_id=tenant_id))
+        asyncio.ensure_future(_sondear_una_vez(c, a_sondear[c], user_id, tenant_id))
         for c in claves
     ]
     try:
