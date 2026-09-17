@@ -162,7 +162,7 @@ class SinFugasTest(_ConBase):
             async with store.conexion() as conn:
                 1 / 0
         self.assertTrue(conn.closed, "una conexion con estado desconocido volvio al pool")
-        self.assertNotIn(conn, pool._free)
+        self.assertNotIn(conn.crudo, pool._free)
         self.assertEqual(len(pool._used), 0, "conexion filtrada: sigue marcada en uso")
 
     async def test_error_de_sql_en_una_funcion_del_store_no_filtra(self):
@@ -227,7 +227,7 @@ class SinFugasTest(_ConBase):
                     await cur.execute("SELECT 1")
         pool = await store.obtener_pool()
         self.assertTrue(conn.closed, "una sesion con transaccion abierta volvio al pool")
-        self.assertNotIn(conn, pool._free)
+        self.assertNotIn(conn.crudo, pool._free)
 
     async def test_si_aiomysql_falla_al_entregar_el_permiso_vuelve(self):
         """Sin devolver el permiso cuando `pool.acquire()` explota, cada falla
@@ -247,7 +247,7 @@ class SinFugasTest(_ConBase):
         async with store.conexion(desechable=True) as conn:
             pass
         self.assertTrue(conn.closed)
-        self.assertNotIn(conn, pool._free)
+        self.assertNotIn(conn.crudo, pool._free)
         self.assertEqual(len(pool._used), 0)
 
     async def test_conexion_limpia_vuelve_al_pool(self):
@@ -256,7 +256,7 @@ class SinFugasTest(_ConBase):
             pass
         pool = await store.obtener_pool()
         self.assertFalse(conn.closed)
-        self.assertIn(conn, pool._free)
+        self.assertIn(conn.crudo, pool._free)
 
 
 _TABLA_INEXISTENTE = "tabla_que_no_existe_pool_test"
@@ -297,10 +297,10 @@ class ErrorDelServidorTest(_ConBase):
         conn = await self._falla_en_el_servidor()
         pool = await store.obtener_pool()
         self.assertFalse(conn.closed, "un error del servidor descarto una conexion sana")
-        self.assertIn(conn, pool._free)
+        self.assertIn(conn.crudo, pool._free)
         self.assertEqual(len(pool._used), 0)
         async with store.conexion() as otra:
-            self.assertIs(otra, conn)
+            self.assertIs(otra.crudo, conn.crudo)
             async with otra.cursor() as cur:
                 await cur.execute("SELECT 1, @@SESSION.autocommit")
                 self.assertEqual(await cur.fetchone(), (1, 1))
@@ -346,8 +346,8 @@ async def _conexion_directa():
 
 
 class ErrorAtribuidoTest(_ConBase):
-    """Revision de 1a478d5: el error tiene que haber salido de ESTA conexion y
-    la conexion tiene que estar en reposo, o se cierra (fail-closed)."""
+    """Atribucion POR CONSTRUCCION (ruling 2026-09-17 sobre b97e0fb): solo el
+    error que el cursor vigilado marco, por identidad, devuelve la conexion."""
 
     async def _error_de(self, conn) -> BaseException:
         try:
@@ -355,6 +355,9 @@ class ErrorAtribuidoTest(_ConBase):
         except aiomysql.ProgrammingError as e:
             return e
         self.fail("la consulta a una tabla inexistente no fallo")
+
+    async def _error_de_y_relanza(self, conn):
+        await _consulta(conn, f"SELECT * FROM {_TABLA_INEXISTENTE}")
 
     async def test_error_de_otra_conexion_propagado_en_el_bloque_descarta(self):
         otra = await _conexion_directa()
@@ -367,69 +370,15 @@ class ErrorAtribuidoTest(_ConBase):
                 raise ajeno
         self.assertTrue(conn.closed, "un error de OTRA conexion devolvio esta al pool")
 
-    async def test_gather_con_hermana_que_usa_la_conexion_descarta(self):
-        hermanas: list = []
-
-        async def hermana(c):
-            await asyncio.sleep(0.3)
-            return await _consulta(c, "SELECT 1")
-
+    async def test_error_de_otra_conexion_del_pool_descarta(self):
+        """Dos bloques del pool: el error marcado en uno no vale en el otro."""
         with self.assertRaises(aiomysql.ProgrammingError):
             async with store.conexion() as conn:
-                hermanas.append(asyncio.create_task(hermana(conn)))
-                await asyncio.gather(hermanas[0], self._error_de_y_relanza(conn))
-        cerrada = conn.closed
-        await _a_lo_sumo(asyncio.gather(*hermanas, return_exceptions=True))
-        self.assertTrue(cerrada, "volvio al pool con una tarea hermana todavia usandola")
-
-    async def _error_de_y_relanza(self, conn):
-        await _consulta(conn, f"SELECT * FROM {_TABLA_INEXISTENTE}")
-
-    async def test_gather_sin_hermana_viva_la_devuelve(self):
-        """Control del control: el mismo error dentro de un gather, sin nadie mas
-        usando la conexion, vuelve al pool (si no, el de arriba pasaria cerrando
-        siempre)."""
-        with self.assertRaises(aiomysql.ProgrammingError):
-            async with store.conexion() as conn:
-                await asyncio.gather(asyncio.sleep(0), self._error_de_y_relanza(conn))
-        self.assertFalse(conn.closed)
-        self.assertIn(conn, (await store.obtener_pool())._free)
-
-    async def test_respuesta_sin_leer_descarta(self):
-        """Nadie en otra tarea, pero quedo una respuesta en vuelo en el socket."""
-        from pymysql.constants import COMMAND
-
-        with self.assertRaises(aiomysql.ProgrammingError):
-            async with store.conexion() as conn:
-                e = await self._error_de(conn)
-                await conn._execute_command(COMMAND.COM_QUERY, "SELECT 1")
-                await asyncio.sleep(0.3)  # la respuesta llega al buffer del lector
-                raise e
-        self.assertTrue(conn.closed, "volvio al pool con una respuesta sin leer")
-
-    async def test_error_real_del_servidor_fuera_de_la_lista_descarta(self):
-        """El servidor responde 1927 (conexion matada) a ESTA conexion, en reposo:
-        solo la lista blanca decide, y 1927 no esta. SIGNAL lo emite sin matar
-        nada, asi que si se descartara por otra razon el test no lo veria: por
-        eso el control es que la atribucion y el reposo SI dan verde."""
-        with self.assertRaises(aiomysql.OperationalError) as ctx:
-            async with store.conexion() as conn:
-                try:
-                    await _consulta(conn, "BEGIN NOT ATOMIC SIGNAL SQLSTATE '70100' "
-                                          "SET MYSQL_ERRNO = 1927, MESSAGE_TEXT = 'simulado'; END")
-                except aiomysql.OperationalError as e:
-                    self.assertTrue(store._lanzado_por(e, conn) and store._en_reposo(conn))
-                    raise
-        self.assertEqual(ctx.exception.args[0], 1927)
-        self.assertTrue(conn.closed, "un 1927 del servidor devolvio la conexion al pool")
-
-    async def test_si_la_verificacion_explota_se_descarta(self):
-        """Estado interno de aiomysql que ya no esta (otra version): se cierra."""
-        with patch.object(store, "_en_reposo", side_effect=AttributeError("_waiter")):
-            with self.assertRaises(aiomysql.ProgrammingError):
-                async with store.conexion() as conn:
-                    await self._error_de_y_relanza(conn)
-        self.assertTrue(conn.closed, "una verificacion que fallo devolvio la conexion")
+                async with store.conexion() as vecina:
+                    ajeno = await self._error_de(vecina)
+                raise ajeno
+        self.assertTrue(conn.closed)
+        self.assertFalse(vecina.closed)
 
     async def test_error_relanzado_como_otro_descarta(self):
         with self.assertRaises(aiomysql.ProgrammingError):
@@ -439,6 +388,126 @@ class ErrorAtribuidoTest(_ConBase):
                 except aiomysql.ProgrammingError as e:
                     raise aiomysql.ProgrammingError(*e.args) from None
         self.assertTrue(conn.closed)
+
+    async def test_error_ajeno_tras_uno_marcado_descarta(self):
+        """El marcado se atrapo; lo que sale del bloque es otra cosa."""
+        with self.assertRaises(RuntimeError):
+            async with store.conexion() as conn:
+                await self._error_de(conn)
+                raise RuntimeError("otra cosa")
+        self.assertTrue(conn.closed)
+
+    async def test_gather_sin_hermana_viva_la_devuelve(self):
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                await asyncio.gather(asyncio.sleep(0), self._error_de_y_relanza(conn))
+        self.assertFalse(conn.closed)
+        self.assertIn(conn.crudo, (await store.obtener_pool())._free)
+
+    async def test_cursor_sin_buffer_abierto_descarta(self):
+        """Resultados sin leer que el envoltorio SI conoce: un SSCursor abierto."""
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                e = await self._error_de(conn)
+                cur = await conn.cursor(aiomysql.SSCursor)
+                await cur.execute("SELECT seq FROM seq_1_to_10000")
+                await cur.fetchone()
+                raise e
+        self.assertTrue(conn.closed, "volvio al pool con un cursor sin buffer a medio leer")
+
+    async def test_cursor_sin_buffer_cerrado_la_devuelve(self):
+        """Control del de arriba."""
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                async with conn.cursor(aiomysql.SSCursor) as cur:
+                    await cur.execute("SELECT seq FROM seq_1_to_10")
+                    await cur.fetchall()
+                await self._error_de_y_relanza(conn)
+        self.assertFalse(conn.closed)
+
+    async def test_error_real_del_servidor_fuera_de_la_lista_descarta(self):
+        """El servidor responde 1927 (conexion matada) por el cursor vigilado.
+        SIGNAL lo emite sin matar nada: solo la lista blanca decide."""
+        with self.assertRaises(aiomysql.OperationalError) as ctx:
+            async with store.conexion() as conn:
+                await _consulta(conn, "BEGIN NOT ATOMIC SIGNAL SQLSTATE '70100' "
+                                      "SET MYSQL_ERRNO = 1927, MESSAGE_TEXT = 'simulado'; END")
+        self.assertEqual(ctx.exception.args[0], 1927)
+        self.assertIsNone(conn.ultimo_error_sano)
+        self.assertTrue(conn.closed, "un 1927 del servidor devolvio la conexion al pool")
+
+
+class EnvoltorioPuroTest(unittest.IsolatedAsyncioTestCase):
+    """Puro, sin base: la marca y la decision de ConexionVigilada."""
+
+    class _CursorFalso:
+        def __init__(self, error=None, espera=None):
+            self.error, self.espera, self.closed = error, espera, False
+
+        async def execute(self, *a, **k):
+            if self.espera is not None:
+                await self.espera.wait()
+            if self.error is not None:
+                raise self.error
+
+        async def close(self):
+            self.closed = True
+
+    def _vigilada(self):
+        return store.ConexionVigilada(object())
+
+    async def test_marca_y_reusa_solo_ese_objeto(self):
+        c = self._vigilada()
+        e = aiomysql.ProgrammingError(1146, "x")
+        with self.assertRaises(aiomysql.ProgrammingError):
+            await store.CursorVigilado(c, self._CursorFalso(e)).execute("q")
+        self.assertIs(c.ultimo_error_sano, e)
+        self.assertTrue(c.reutilizable_tras(e))
+        self.assertFalse(c.reutilizable_tras(aiomysql.ProgrammingError(*e.args)))
+        self.assertFalse(c.reutilizable_tras(RuntimeError()))
+
+    async def test_sin_marca_no_reusa(self):
+        c = self._vigilada()
+        self.assertFalse(c.reutilizable_tras(aiomysql.ProgrammingError(1146, "x")))
+
+    async def test_error_fuera_de_la_lista_no_marca(self):
+        c = self._vigilada()
+        e = aiomysql.OperationalError(2013, "lost")
+        with self.assertRaises(aiomysql.OperationalError):
+            await store.CursorVigilado(c, self._CursorFalso(e)).execute("q")
+        self.assertIsNone(c.ultimo_error_sano)
+        self.assertFalse(c.reutilizable_tras(e))
+
+    async def test_llamada_hermana_en_vuelo_no_reusa(self):
+        c = self._vigilada()
+        e = aiomysql.ProgrammingError(1146, "x")
+        evento = asyncio.Event()
+        hermana = asyncio.create_task(store.CursorVigilado(c, self._CursorFalso(espera=evento)).execute("q"))
+        await asyncio.sleep(0)
+        with self.assertRaises(aiomysql.ProgrammingError):
+            await store.CursorVigilado(c, self._CursorFalso(e)).execute("q")
+        self.assertFalse(c.reutilizable_tras(e), "reuso con otra llamada propia en vuelo")
+        evento.set()
+        await hermana
+        self.assertTrue(c.reutilizable_tras(e))
+
+    async def test_cada_metodo_vigilado_marca(self):
+        e = aiomysql.IntegrityError(1062, "dup")
+        for metodo in ("execute", "executemany", "fetchone", "fetchmany", "fetchall"):
+            with self.subTest(metodo=metodo):
+                c = self._vigilada()
+                crudo = self._CursorFalso()
+
+                async def lanza(*a, **k):
+                    raise e
+
+                setattr(crudo, metodo, lanza)
+                cur = store.CursorVigilado(c, crudo)
+                args = ("q", []) if metodo == "executemany" else (("q",) if metodo == "execute" else ())
+                with self.assertRaises(aiomysql.IntegrityError):
+                    await getattr(cur, metodo)(*args)
+                self.assertIs(c.ultimo_error_sano, e)
+                self.assertEqual(c._en_vuelo, 0)
 
 
 _TABLA_LOCKS = "jacobs_pool_test_locks"
@@ -496,7 +565,7 @@ class ErroresDeLockRealesTest(_ConBase):
         self.assertEqual(ctx.exception.args[0], 1205)
         self.assertFalse(conn.closed, "un 1205 sin transaccion descarto una conexion sana")
         async with store.conexion() as otra:
-            self.assertIs(otra, conn)
+            self.assertIs(otra.crudo, conn.crudo)
             self.assertEqual(await _consulta(otra, "SELECT 1"), ((1,),))
 
     async def test_1213_real_con_transaccion_descarta(self):

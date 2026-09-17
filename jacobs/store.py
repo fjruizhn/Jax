@@ -91,8 +91,8 @@ ENV_TAMANIO_POOL = "JAX_JACOBS_DB_POOL_SIZE"
 # size >= maxsize; connection.py: connect_timeout acota solo el socket). La fija
 # requirements.txt y la vigila jacobs/_store_pool_test.py::VersionDeAiomysqlTest.
 AIOMYSQL_REVISADO = "0.3.2"
-# _lanzado_por lee nombres de frame de PyMySQL (raise_for_error ->
-# raise_mysql_exception) y _codigo_del_servidor_sano su tabla error_map.
+# _codigo_del_servidor_sano lee la tabla error_map de PyMySQL: se fija junto
+# con aiomysql y lo vigila VersionDeAiomysqlTest.
 PYMYSQL_REVISADO = "1.2.0"
 
 # Medido 2026-09-17 (loadtest/jacobs_subpipelines.js, app aislada sobre
@@ -259,33 +259,21 @@ def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
     return (not conn.closed) and conn.get_autocommit() and not conn.get_transaction_status()
 
 
-# Una conexion que termino el cuerpo con excepcion vuelve al pool SOLO si hay
-# evidencia de tres cosas; si falta una, se cierra (fail-closed). Descartarla
-# siempre abria un handshake por pedido fallido: el job de CI de 13b7759 (base
-# sin la tabla `facet`, 1146) midio 20 conexiones para 20 autorizaciones, el
-# mismo agotamiento de puertos que el pool vino a cerrar, disparado por una
-# rafaga de errores. Las tres:
+# Una conexion cuyo cuerpo termino con excepcion vuelve al pool SOLO si esa
+# excepcion es, por IDENTIDAD, un error del servidor que el propio envoltorio
+# vio salir de una llamada suya: atribucion por construccion (ruling del
+# 2026-09-17). Sin tracebacks, pilas de tareas ni internals de asyncio/aiomysql.
 #
-#   1. QUE error: uno que respondio el servidor y no termina la sesion
-#      (_codigo_del_servidor_sano). LISTA BLANCA: pymysql mapea un codigo
-#      desconocido a OperationalError, y ahi caen tambien los que SI cortan la
-#      sesion (1927 conexion matada, 1053 apagado).
-#   2. DE QUIEN: lo lanzo ESTA conexion al leer el paquete de error
-#      (_lanzado_por). Un error de otra conexion propagado dentro del bloque no
-#      dice nada del estado de esta.
-#   3. EN QUE ESTADO: nadie mas la esta usando y no queda nada en vuelo
-#      (_en_reposo). Una tarea hermana de un `gather` que sigue viva con la
-#      conexion en sus frames, bytes sin leer, una lectura esperando o una
-#      escritura sin vaciar: se cierra.
+# POR QUE. Cerrar ante cualquier error abre un handshake por pedido fallido.
+# Medido el 2026-09-17 (k6, 25 VUs, 60 s, /motor/authorize-facet con la
+# consulta forzada a 1146, cerrando siempre): 1040 rps, 12 548 TIME-WAIT hacia
+# la base y 3072 conexiones perdidas (2013) en la app: el agotamiento de
+# puertos que el pool vino a cerrar, disparado por una rafaga de errores (tabla
+# faltante, clave duplicada, lock). Tabla en pool-report.md del frente F.
 #
-# Lo que (3) NO ve: una tarea que guarda la conexion dentro de un contenedor
-# (lista, dict, atributo de otro objeto) y esta suspendida fuera de la E/S de
-# la conexion. Es el mismo uso fuera del bloque que el contrato de conexion()
-# ya prohibe tambien para la salida sin error.
-#
-# (2) y (3) leen estado interno de aiomysql 0.3.2 / pymysql 1.2 (nombres de
-# frame, `_reader`, `_writer`, `_result`): las dos versiones estan fijadas y las
-# vigila VersionDeAiomysqlTest. Si un nombre no esta, AttributeError -> se cierra.
+# LISTA BLANCA (_codigo_del_servidor_sano): pymysql mapea un codigo desconocido
+# a OperationalError, y ahi caen tambien los que SI cortan la sesion (1927
+# conexion matada, 1053 apagado). Ante la duda se cierra.
 _CLASES_DE_ERROR_DEL_SERVIDOR = (
     aiomysql.ProgrammingError,
     aiomysql.IntegrityError,
@@ -313,56 +301,112 @@ def _codigo_del_servidor_sano(e: BaseException) -> bool:
     return type(e) in _CLASES_DE_ERROR_DEL_SERVIDOR and _pymysql_err.error_map.get(codigo) is type(e)
 
 
-def _lanzado_por(e: BaseException, conn: aiomysql.Connection) -> bool:
-    """El final del traceback es el paquete de error leido por ESTA conexion:
-    `Connection._read_packet` (self is conn) -> `raise_for_error` ->
-    `raise_mysql_exception`. Nada despues: si alguien lo atrapo y relanzo
-    otro, el ultimo frame ya no es ese."""
-    frames = []
-    tb = e.__traceback__
-    while tb is not None:
-        frames.append(tb.tb_frame)
-        tb = tb.tb_next
-    if len(frames) < 3:
-        return False
-    lectura, paquete, lanzamiento = frames[-3:]
-    return (
-        lanzamiento.f_code.co_name == "raise_mysql_exception"
-        and paquete.f_code.co_name == "raise_for_error"
-        and lectura.f_code.co_name == "_read_packet"
-        and lectura.f_locals.get("self") is conn
-    )
+class CursorVigilado:
+    """El cursor de `ConexionVigilada.cursor()`. Sus llamadas de uso normal
+    (`execute`, `executemany`, `fetchone`, `fetchmany`, `fetchall`) cuentan como
+    en vuelo mientras corren y, si lanzan un error de la lista blanca, lo marcan
+    en la conexion ANTES de relanzarlo. Lo demas se delega al cursor de aiomysql
+    sin marcar: un error por ahi cierra la conexion."""
+
+    def __init__(self, conexion: "ConexionVigilada", crudo: aiomysql.Cursor):
+        self._conexion = conexion
+        self._crudo = crudo
+        self._sin_buffer = isinstance(crudo, aiomysql.SSCursor)
+        if self._sin_buffer:
+            conexion._sin_buffer_abiertos += 1
+
+    async def _vigilar(self, metodo, *args, **kwargs):
+        c = self._conexion
+        c._en_vuelo += 1
+        try:
+            return await metodo(*args, **kwargs)
+        except aiomysql.MySQLError as e:
+            if _codigo_del_servidor_sano(e):
+                c.ultimo_error_sano = e
+            raise
+        finally:
+            c._en_vuelo -= 1
+
+    async def execute(self, *args, **kwargs):
+        return await self._vigilar(self._crudo.execute, *args, **kwargs)
+
+    async def executemany(self, *args, **kwargs):
+        return await self._vigilar(self._crudo.executemany, *args, **kwargs)
+
+    async def fetchone(self):
+        return await self._vigilar(self._crudo.fetchone)
+
+    async def fetchmany(self, *args, **kwargs):
+        return await self._vigilar(self._crudo.fetchmany, *args, **kwargs)
+
+    async def fetchall(self):
+        return await self._vigilar(self._crudo.fetchall)
+
+    async def close(self):
+        if self._sin_buffer:
+            self._sin_buffer = False
+            self._conexion._sin_buffer_abiertos -= 1
+        await self._crudo.close()
+
+    def __getattr__(self, nombre):
+        return getattr(self._crudo, nombre)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        await self.close()
 
 
-def _referencia_a(valor: Any, conn: aiomysql.Connection) -> bool:
-    return valor is conn or (isinstance(valor, aiomysql.Cursor) and valor._connection is conn)
+class _CursorPendiente:
+    """`conn.cursor(...)` se usa con `async with` o con `await`, como en aiomysql."""
+
+    def __init__(self, conexion: "ConexionVigilada", args, kwargs):
+        self._conexion, self._args, self._kwargs = conexion, args, kwargs
+        self._cursor: CursorVigilado | None = None
+
+    async def _abrir(self) -> CursorVigilado:
+        crudo = await self._conexion.crudo.cursor(*self._args, **self._kwargs)
+        return CursorVigilado(self._conexion, crudo)
+
+    def __await__(self):
+        return self._abrir().__await__()
+
+    async def __aenter__(self) -> CursorVigilado:
+        self._cursor = await self._abrir()
+        return self._cursor
+
+    async def __aexit__(self, *exc):
+        await self._cursor.close()
 
 
-def _en_reposo(conn: aiomysql.Connection) -> bool:
-    lector = conn._reader
-    if (conn.closed or lector is None or lector._waiter is not None or len(lector._buffer)
-            or lector.at_eof() or lector.exception() is not None):
-        return False
-    if conn._writer is None or conn._writer.transport.get_write_buffer_size():
-        return False
-    if conn._result is not None and conn._result.unbuffered_active:
-        return False
-    actual = asyncio.current_task()
-    for tarea in asyncio.all_tasks():
-        if tarea is actual:
-            continue
-        for frame in tarea.get_stack():
-            if any(_referencia_a(v, conn) for v in frame.f_locals.values()):
-                return False
-    return True
+class ConexionVigilada:
+    """Lo que entrega `conexion()`. Delega en la conexion de aiomysql (`crudo`)
+    salvo `cursor()`, que devuelve un CursorVigilado."""
 
+    def __init__(self, crudo: aiomysql.Connection):
+        self.crudo = crudo
+        self.ultimo_error_sano: BaseException | None = None
+        self._en_vuelo = 0
+        self._sin_buffer_abiertos = 0
 
-def _reutilizable_tras_error(e: BaseException, conn: aiomysql.Connection) -> bool:
-    try:
-        return _codigo_del_servidor_sano(e) and _lanzado_por(e, conn) and _en_reposo(conn)
-    except Exception:  # fail-soft: la verificacion no pudo probar el reposo; devuelve False y la conexion se CIERRA (fail-closed)
-        logger.exception("jacobs.store: no se pudo verificar la conexion tras un error; se cierra")
-        return False
+    def cursor(self, *args, **kwargs) -> _CursorPendiente:
+        return _CursorPendiente(self, args, kwargs)
+
+    def __getattr__(self, nombre):
+        return getattr(self.crudo, nombre)
+
+    def reutilizable_tras(self, e: BaseException) -> bool:
+        """Tras `e`, vuelve al pool solo si `e` ES el error que marco una llamada
+        propia, no queda ninguna llamada propia en vuelo y no hay un cursor sin
+        buffer abierto (resultados sin leer). La sesion la mira despues
+        _sesion_reutilizable."""
+        return (
+            self.ultimo_error_sano is not None
+            and e is self.ultimo_error_sano
+            and self._en_vuelo == 0
+            and self._sin_buffer_abiertos == 0
+        )
 
 
 @contextlib.asynccontextmanager
@@ -372,9 +416,13 @@ async def conexion(desechable: bool = False):
     Se DESCARTA (se cierra, el pool abre otra cuando haga falta) si el cuerpo
     termino con excepcion o cancelacion -- el socket puede haber quedado a mitad
     de una respuesta --, si la sesion quedo sucia, o si `desechable=True` (ver el
-    contrato en _sesion_reutilizable). La excepcion a esa regla es un error que
-    respondio el servidor a ESTA conexion y la deja en reposo
-    (_reutilizable_tras_error): vuelve al pool si la sesion sigue limpia.
+    contrato en _sesion_reutilizable). La excepcion a esa regla es un error del
+    servidor de la lista blanca que el propio envoltorio marco al salir de una
+    llamada suya (ConexionVigilada.reutilizable_tras): vuelve al pool si la
+    sesion sigue limpia.
+
+    Entrega una ConexionVigilada, no la conexion de aiomysql: `cursor()` vigila
+    las llamadas, el resto se delega (`crudo` es la conexion real).
 
     Esperar un hueco tiene limite: `JAX_DB_CONNECT_TIMEOUT_SECONDS`, el mismo
     que acota abrir el socket. Con el pool lleno mas alla de eso, TimeoutError:
@@ -396,12 +444,13 @@ async def conexion(desechable: bool = False):
     except BaseException:
         permisos.release()
         raise
+    vigilada = ConexionVigilada(conn)
     limpia = False
     try:
-        yield conn
-        limpia = True
+        yield vigilada
+        limpia = vigilada._sin_buffer_abiertos == 0
     except BaseException as e:
-        limpia = _reutilizable_tras_error(e, conn)
+        limpia = vigilada.reutilizable_tras(e)
         raise
     finally:
         try:
