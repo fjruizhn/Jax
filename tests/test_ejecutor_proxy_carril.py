@@ -182,6 +182,32 @@ def test_una_peticion_pasa_y_el_stream_llega_por_partes(tmp_path):
     assert cabeceras[b"authorization"] == b"Bearer llave-secreta-XYZ"
 
 
+def test_el_reenvio_no_tiene_tope_de_lectura(tmp_path, monkeypatch):
+    """El primer byte de Ollama puede tardar lo que tarde su cola: el reenvío
+    va sin tope de lectura (connect 10 s). Desde E-24 el proxy usa el cliente de
+    jax/core/cliente_http_compartido.py, cuyo default es 5 s: el timeout lo pone
+    CADA petición. Sin eso, un primer byte de más de 5 s sería un 502."""
+    vistos = []
+    send_real = httpx.AsyncClient.send
+
+    async def send_espia(self, request, **kw):
+        vistos.append((request.url.port, request.extensions.get("timeout")))
+        return await send_real(self, request, **kw)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send_espia)
+
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px:
+            async with httpx.AsyncClient(timeout=10) as cli:
+                r = await cli.post(px.url + "/v1/messages", content=_CUERPO)
+            return r.status_code, int(up.url.rsplit(":", 1)[1])
+
+    estado, puerto_up = _correr(escenario())
+    assert estado == 200
+    al_upstream = [t for puerto, t in vistos if puerto == puerto_up]
+    assert al_upstream == [{"connect": 10.0, "read": None, "write": None, "pool": None}]
+
+
 def test_con_la_mesa_en_el_carril_la_peticion_espera_y_entra_cuando_suelta(tmp_path):
     listo, suelte = _CTX.Event(), _CTX.Event()
     p = _CTX.Process(target=_mesa_retiene, args=(tmp_path, listo, suelte, 0.6))

@@ -20,7 +20,7 @@ _EXCLUIDOS = {".git", "__pycache__", ".venv", "venv", "node_modules", "tests", "
 # import de nivel superior -> distribución fijada en requirements.txt
 _DISTRIBUCION = {
     "aiomysql": "aiomysql", "cryptography": "cryptography", "fastapi": "fastapi",
-    "httpx": "httpx", "pydantic": "pydantic", "uvicorn": "uvicorn", "yaml": "pyyaml",
+    "h11": "h11", "httpx": "httpx", "pydantic": "pydantic", "uvicorn": "uvicorn", "yaml": "pyyaml",
 }
 
 # Terceros que NO van en requirements.txt, cada uno con su motivo.
