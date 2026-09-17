@@ -48,13 +48,19 @@ def config_desde_filas(filas: dict) -> ConfigC5:
                     intervalo, tokens, admite == "true")
 
 
+def validar_proveedores(*, proveedor_cerebro: str, proveedor_auditor: str) -> tuple:
+    """La mitad de la elección que no depende de la misión: quien produce no aprueba.
+    La usa también el arranque del Ejecutor sin misión (plan 6)."""
+    if not (proveedor_cerebro or "").strip() or not (proveedor_auditor or "").strip():
+        return (Fallo("c5", "proveedor_desconocido"),)
+    if proveedor_cerebro == proveedor_auditor:
+        return (Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro"),)
+    return ()
+
+
 def validar_eleccion(*, proveedor_cerebro: str, proveedor_auditor: str, auditor_es_local: bool,
                      admite_datos_de_clientes: bool, hosts_mision, hosts_con_clientes, hosts_conocidos) -> tuple:
-    fallos = []
-    if not (proveedor_cerebro or "").strip() or not (proveedor_auditor or "").strip():
-        fallos.append(Fallo("c5", "proveedor_desconocido"))
-    elif proveedor_cerebro == proveedor_auditor:
-        fallos.append(Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro"))
+    fallos = list(validar_proveedores(proveedor_cerebro=proveedor_cerebro, proveedor_auditor=proveedor_auditor))
     if not hosts_mision:
         fallos.append(Fallo("c5", "mision_sin_maquinas"))
     sensibles = sorted(h for h in hosts_mision if h in hosts_con_clientes or h not in hosts_conocidos)

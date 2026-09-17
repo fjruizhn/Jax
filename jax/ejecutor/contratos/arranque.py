@@ -1,0 +1,271 @@
+# jax/ejecutor/contratos/arranque.py
+"""El Ejecutor NO arranca si un contrato no está vivo.
+
+Spec 2026-09-15 §4: «cada contrato existe y se vio fallar antes de que el Ejecutor
+toque un servidor»; «C1 y C5 llevan una entrada canario permanente; si no se dispara,
+el Ejecutor no arranca». Principio IX: el contrato antes que la capacidad.
+
+`exigir_contratos` corre TODAS las pruebas (lista completa para quien tenga que
+arreglar) y lanza ContratosNoVerificados con un solo fallo. Una prueba que revienta o
+que falta es un fallo. La guardia policy/tests/test_ejecutor_lanza_solo_con_contratos.py
+impide lanzar el cerebro del Ejecutor sin pasar por acá.
+
+Dos formas (plan 6 con la enmienda del plan 4):
+- `hosts_mision=None`: el arranque del Ejecutor sin misión. Verifica los seis contratos
+  y que cerebro y auditor sean de proveedores distintos.
+- `hosts_mision` con máquinas: antes de CADA misión. Además aplica la compuerta de datos
+  de clientes (`eleccion_c5.verificar_eleccion`): con la compuerta cerrada, una misión
+  sobre máquinas con datos de clientes NO arranca.
+En las dos, la pausa del Ejecutor tiene que estar ausente y no puede haber otro vigía
+latiendo (una misión por vez: el registro y la pausa son uno solo).
+
+Lo que el arranque NO acota a la misión, a propósito: C6 y los remotos del freno se
+exigen en TODAS las máquinas de la política. El cerco de C3 deja a la cuenta entrar por
+SSH a todas; una máquina sin llaves de root o sin freno remoto es alcanzable igual,
+aunque la misión no la nombre.
+"""
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import shlex
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from jax.ejecutor.contratos import cuenta_axioma, instalacion, pausa, politica
+from jax.ejecutor.contratos.cuenta_axioma import Cuenta
+from jax.ejecutor.contratos.fallo import Fallo
+
+# El freno late cada INTERVALO_DE_SONDEO (0,25 s); el instalador (ops/ejecutor/instalar_freno.sh)
+# exige el mismo margen de 2 s. Tolerancia del código, no configuración de despliegue.
+LATIDO_MAX_S = 2.0
+_ORDEN = ("instalacion", "exportar", "c1", "c3", "c4", "c5", "c6")
+_CONTRATO_DE = {"instalacion": "arranque", "exportar": "c1"}
+_TOPE_C6_S = 30
+
+
+class ContratosNoVerificados(RuntimeError):
+    def __init__(self, fallos):
+        super().__init__(len(fallos))
+        self.fallos = tuple(fallos)
+
+
+@dataclass(frozen=True)
+class Contexto:
+    cuenta: Cuenta
+    repo: Path
+    puerto_canario: int
+    registro: Path
+    puerto_proxy: int
+    sondas: tuple
+    estado_freno: Path
+    llaves_root: Path
+    tope_gancho_s: int
+    hosts_mision: frozenset | None
+    pausa: Path
+    latido: Path
+    latido_max_s: float
+    cron_deny: Path = field(default=Path("/etc/cron.deny"))
+    linger_dir: Path = field(default=Path("/var/lib/systemd/linger"))
+    unidad_freno: Path = field(default=Path("/etc/systemd/system/ejecutor-freno.service"))
+    unidad_freno_habilitada: Path = field(default=Path("/etc/systemd/system/multi-user.target.wants/ejecutor-freno.service"))
+
+
+def contexto_desde_entorno(env, hosts_mision=None) -> Contexto:
+    latido_max_s = float(env[pausa.VARIABLE_LATIDO_MAX_S])
+    if not 0 < latido_max_s < float("inf"):
+        raise ValueError("latido_max_invalido")
+    return Contexto(
+        cuenta=cuenta_axioma.cuenta_desde_entorno(env), repo=Path(__file__).resolve().parents[3],
+        puerto_canario=int(env["JAX_EJECUTOR_CANARIO_PUERTO"]), registro=Path(env["JAX_EJECUTOR_REGISTRO"]),
+        puerto_proxy=int(env["JAX_PROXY_CARRIL_PUERTO"]),
+        sondas=tuple(int(p) for p in env["JAX_EJECUTOR_CERCO_SONDAS"].split(",")),
+        estado_freno=Path(env["JAX_EJECUTOR_FRENO_ESTADO"]), llaves_root=Path(env["JAX_EJECUTOR_LLAVES_ROOT"]),
+        tope_gancho_s=int(env["JAX_EJECUTOR_GANCHO_TOPE_S"]),
+        hosts_mision=None if hosts_mision is None else frozenset(hosts_mision),
+        pausa=pausa.ruta_de_la_pausa(env), latido=pausa.ruta_del_latido(env), latido_max_s=latido_max_s)
+
+
+def _sha(datos: bytes) -> str:
+    return hashlib.sha256(datos).hexdigest()
+
+
+def verificar_instalacion(ctx: Contexto) -> tuple:
+    lib = str(ctx.cuenta.lib)
+    esperados = {rel: (ctx.repo / rel).read_bytes() for rel in instalacion.INSTALABLES}
+    esperados["gancho.sh"] = instalacion.renderizar_gancho(lib, ctx.tope_gancho_s).encode()
+    esperados["managed-settings.json"] = instalacion.renderizar_managed_settings(
+        lib, str(ctx.cuenta.politica), ctx.tope_gancho_s).encode()
+    esperados["settings-usuario.json"] = instalacion.SETTINGS_USUARIO.encode()
+    fallos = []
+    for rel, datos in esperados.items():
+        try:
+            igual = _sha((ctx.cuenta.lib / rel).read_bytes()) == _sha(datos)
+        except OSError:
+            igual = False
+        if not igual:
+            fallos.append(Fallo("arranque", "instalado_distinto_del_repo", (("archivo", rel),)))
+    unidad = instalacion.renderizar_unidad_freno(lib)
+    for nombre, ruta in (("ejecutor-freno.service", ctx.unidad_freno),
+                         ("lib/ejecutor-freno.service", ctx.cuenta.lib / "ejecutor-freno.service")):
+        try:
+            unidad_igual = ruta.read_text(encoding="utf-8") == unidad
+        except OSError:
+            unidad_igual = False
+        if not unidad_igual:
+            fallos.append(Fallo("arranque", "instalado_distinto_del_repo", (("archivo", nombre),)))
+    return tuple(fallos)
+
+
+def verificar_c4_estatico(ctx: Contexto, *, ahora=time.time) -> tuple:
+    fallos = []
+    try:
+        latido = json.loads(ctx.estado_freno.read_text(encoding="utf-8"))
+        fresco = ahora() - float(latido["momento"]) <= LATIDO_MAX_S
+    except (OSError, ValueError, KeyError, TypeError):
+        latido, fresco = {}, False
+    if not fresco:
+        fallos.append(Fallo("c4", "freno_sin_latido"))
+    else:
+        if latido.get("activo") is not False:
+            fallos.append(Fallo("c4", "interruptor_puesto"))
+        if latido.get("remotos_cargados") is not True:
+            fallos.append(Fallo("c4", "freno_sin_remotos"))
+        if latido.get("uid_resuelto") is not True:
+            fallos.append(Fallo("c4", "freno_sin_cuenta"))
+    if not ctx.unidad_freno_habilitada.exists():
+        fallos.append(Fallo("c4", "freno_no_habilitado"))
+    try:
+        cerrado = ctx.cuenta.nombre in ctx.cron_deny.read_text(encoding="utf-8").split()
+    except OSError:
+        cerrado = False
+    if not cerrado:
+        fallos.append(Fallo("c4", "cron_abierto_para_la_cuenta"))
+    if (ctx.linger_dir / ctx.cuenta.nombre).exists():
+        fallos.append(Fallo("c4", "linger_activo"))
+    return tuple(fallos)
+
+
+def verificar_c5_estatico(ctx: Contexto, *, ahora: float | None = None) -> tuple:
+    """La pausa del Ejecutor ausente y ningún otro vigía latiendo."""
+    fallos = []
+    if pausa.pausa_puesta(ctx.pausa):
+        fallos.append(Fallo("c5", "pausa_del_ejecutor_puesta"))
+    if pausa.latido_fresco(ctx.latido, ctx.latido_max_s, ahora=ahora):
+        fallos.append(Fallo("c5", "vigia_ya_activo"))
+    return tuple(fallos)
+
+
+def remoto_c6(llaves_root: str) -> str:
+    q = shlex.quote(llaves_root)
+    return (f'echo "llaves=$(stat -c \'%U %a\' {q} 2>/dev/null)"; '
+            f'echo "freno=$(grep -c \' ejecutor-freno$\' {q} 2>/dev/null || true)"; '
+            'echo "revocador=$(stat -c \'%U %a\' /usr/local/sbin/ejecutor-revocar 2>/dev/null)"')
+
+
+def leer_c6(salida: bytes, *, exige_freno: bool) -> tuple:
+    """Códigos de fallo de una máquina. La llave del freno sólo se exige en las remotas:
+    en la máquina local el freno mata por cgroup, sin ssh."""
+    vistas = dict(linea.split("=", 1) for linea in salida.decode(errors="replace").splitlines() if "=" in linea)
+    codigos = []
+    if vistas.get("llaves") != "root 644":
+        codigos.append("llaves_no_son_de_root")
+    if exige_freno and vistas.get("freno", "0").strip() in ("", "0"):
+        codigos.append("sin_llave_del_freno")
+    if vistas.get("revocador") != "root 755":
+        codigos.append("sin_revocador")
+    return tuple(codigos)
+
+
+async def verificar_c6_estatico(ctx: Contexto, hosts, *, correr=cuenta_axioma.correr_en_la_cuenta) -> tuple:
+    async def una(h):
+        remoto = remoto_c6(str(ctx.llaves_root))
+        if not h.es_local:
+            remoto = (f"ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes -p {int(h.puerto)} "
+                      f"{ctx.cuenta.nombre}@{shlex.quote(h.ip)} {shlex.quote(remoto)}")
+        rc, salida, _ = await correr(ctx.cuenta, remoto, tope_s=_TOPE_C6_S)
+        if rc != 0:
+            return (Fallo("c6", "maquina_inalcanzable", (("host", h.nombre),)),)
+        return tuple(Fallo("c6", c, (("host", h.nombre),)) for c in leer_c6(salida, exige_freno=not h.es_local))
+
+    resultados = await asyncio.gather(*(una(h) for h in hosts))
+    return tuple(f for r in resultados for f in r)
+
+
+def pruebas_reales(ctx: Contexto) -> dict:
+    from facet_resolver import resolve_facet
+    from jacobs.store import conexion
+    from jax.ejecutor.contratos import auditor_cliente, canario_c1, canario_c3, canario_c5, eleccion_c5, exportar
+
+    def _politica():
+        return politica.validar(json.loads(ctx.cuenta.politica.read_bytes()))
+
+    async def p_instalacion():
+        return await asyncio.to_thread(verificar_instalacion, ctx)
+
+    async def p_exportar():
+        try:
+            await exportar.exportar(ctx.cuenta.politica, conexion)
+        except exportar.ExportacionImposible as exc:
+            return (Fallo("c1", "exportacion_imposible", (("codigo", exc.codigo),)),)
+        return ()
+
+    async def p_c1():
+        return await canario_c1.verificar_c1(ctx.cuenta, puerto_canario=ctx.puerto_canario)
+
+    async def p_c3():
+        return await canario_c3.verificar_c3(ctx.cuenta, registro=ctx.registro, puerto_proxy=ctx.puerto_proxy,
+                                             sondas=ctx.sondas)
+
+    async def p_c4():
+        return await asyncio.to_thread(verificar_c4_estatico, ctx)
+
+    async def p_c5():
+        estaticos = await asyncio.to_thread(verificar_c5_estatico, ctx)
+        # desechable=True: el arranque corre una vez por misión; no deja la conexión en un pool
+        # que puede morir con el loop (igual que exportar.py y probar_c5.py).
+        async with conexion(desechable=True) as conn:
+            cfg = await eleccion_c5.leer_config(conn)
+            cerebro, auditor_f = await resolve_facet(cfg.cerebro_faceta), await resolve_facet(cfg.auditor_faceta)
+            if ctx.hosts_mision is None:
+                eleccion = eleccion_c5.validar_proveedores(proveedor_cerebro=cerebro.provider_id,
+                                                           proveedor_auditor=auditor_f.provider_id)
+            else:
+                eleccion = await eleccion_c5.verificar_eleccion(
+                    conn, cfg=cfg, proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id,
+                    hosts_mision=ctx.hosts_mision)
+
+        async def auditar(lote):
+            return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
+
+        return tuple(estaticos) + tuple(eleccion) + await canario_c5.verificar_c5(auditar)
+
+    async def p_c6():
+        return await verificar_c6_estatico(ctx, (await asyncio.to_thread(_politica)).hosts)
+
+    return {"instalacion": p_instalacion, "exportar": p_exportar, "c1": p_c1, "c3": p_c3, "c4": p_c4,
+            "c5": p_c5, "c6": p_c6}
+
+
+async def verificar_contratos(ctx: Contexto, pruebas: dict | None = None) -> tuple:
+    pruebas = pruebas if pruebas is not None else pruebas_reales(ctx)
+    fallos = []
+    for nombre in _ORDEN:
+        contrato = _CONTRATO_DE.get(nombre, nombre)
+        prueba = pruebas.get(nombre)
+        if prueba is None:
+            fallos.append(Fallo(contrato, "prueba_ausente"))
+            continue
+        try:
+            fallos.extend(await prueba())
+        except Exception as exc:  # fail-soft: una prueba que revienta se reporta como Fallo y el arranque se niega (cerrado)
+            fallos.append(Fallo(contrato, "prueba_reventada", (("tipo", type(exc).__name__),)))
+    return tuple(fallos)
+
+
+async def exigir_contratos(ctx: Contexto, pruebas: dict | None = None) -> None:
+    fallos = await verificar_contratos(ctx, pruebas)
+    if fallos:
+        raise ContratosNoVerificados(fallos)
