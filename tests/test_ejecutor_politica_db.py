@@ -7,7 +7,7 @@ import asyncio
 
 import pytest
 
-from jacobs.store import get_conn
+from jacobs import store
 from jax.ejecutor.contratos import exportar, politica
 
 INVENTARIO = [("hall9000", "192.0.2.5", "hypervisor", 1), ("atemai", "192.0.2.11", "desarrollo", 0),
@@ -15,27 +15,30 @@ INVENTARIO = [("hall9000", "192.0.2.5", "hypervisor", 1), ("atemai", "192.0.2.11
 
 
 async def _con_inventario(accion):
-    conn = await get_conn()
+    # store.conexion() y no una conexion suelta: get_conn() ya no existe (frente F,
+    # pool de Jacobs). La limpieza va en su propia conexion para que un error de
+    # `accion` (que descarta la primera) no deje filas de prueba.
     try:
-        async with conn.cursor() as cur:
-            for nombre, ip, rol, local in INVENTARIO:
-                await cur.execute("INSERT IGNORE INTO ejecutor_host (nombre, ip, puerto, rol, es_local) "
-                                  "VALUES (%s, %s, 58291, %s, %s)", (nombre, ip, rol, local))
-            # Con la tabla vacía el optimizador puede no mostrar el índice: se mide con filas.
-            for k in range(200):
-                await cur.execute(
-                    "INSERT INTO ejecutor_punto_restauracion (host_nombre, referencia, metodo, "
-                    "restaurado_y_verificado_at, verificado_por, evidencia) VALUES (%s, %s, 'prueba', "
-                    "UTC_TIMESTAMP() - INTERVAL %s MINUTE, 'test', 'test')",
-                    (INVENTARIO[k % 4][0], f"prueba-{k}", k))
-        await conn.commit()
-        return await accion(conn)
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                for nombre, ip, rol, local in INVENTARIO:
+                    await cur.execute("INSERT IGNORE INTO ejecutor_host (nombre, ip, puerto, rol, es_local) "
+                                      "VALUES (%s, %s, 58291, %s, %s)", (nombre, ip, rol, local))
+                # Con la tabla vacía el optimizador puede no mostrar el índice: se mide con filas.
+                for k in range(200):
+                    await cur.execute(
+                        "INSERT INTO ejecutor_punto_restauracion (host_nombre, referencia, metodo, "
+                        "restaurado_y_verificado_at, verificado_por, evidencia) VALUES (%s, %s, 'prueba', "
+                        "UTC_TIMESTAMP() - INTERVAL %s MINUTE, 'test', 'test')",
+                        (INVENTARIO[k % 4][0], f"prueba-{k}", k))
+            await conn.commit()
+            return await accion(conn)
     finally:
-        async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM ejecutor_punto_restauracion WHERE referencia LIKE %s", ("prueba-%",))
-            await cur.execute("DELETE FROM ejecutor_host WHERE ip LIKE %s", ("192.0.2.%",))
-        await conn.commit()
-        conn.close()
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM ejecutor_punto_restauracion WHERE referencia LIKE %s", ("prueba-%",))
+                await cur.execute("DELETE FROM ejecutor_host WHERE ip LIKE %s", ("192.0.2.%",))
+            await conn.commit()
 
 
 def test_la_semilla_real_exporta_legible_y_pasa_su_autoprueba():

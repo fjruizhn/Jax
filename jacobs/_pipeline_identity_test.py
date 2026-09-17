@@ -27,6 +27,8 @@ from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 
 class PipelineIdentityTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        # Pool por loop: cada test trae el suyo y lo cierra (jacobs/store.py).
+        self.addAsyncCleanup(store.cerrar_pool)
         await store.init_tables()
 
     async def test_pipeline_create_y_lectura_conservan_user_id_tenant_id(self):
@@ -37,6 +39,12 @@ class PipelineIdentityTest(unittest.IsolatedAsyncioTestCase):
             created_at=time.time(), updated_at=time.time(),
         )
         await store.pipeline_create(p)
+        # Sin esto la fila quedaba `pending` para siempre en jax_memory_test y
+        # contaba contra MAX_PARALLEL_PIPELINES=3: cada corrida de la suite
+        # bloqueaba las pruebas de carga de Jacobs (medido 2026-09-17, dos filas
+        # `test`/`Fernando` tapaban los tres escenarios con 422). Registrada antes
+        # de las aserciones para que tambien cierre si fallan.
+        self.addAsyncCleanup(store.pipeline_update_status, pid, PipelineStatus.expired)
         loaded = await store.pipeline_get(pid)  # confirmado: nombre real, ver store.py:116
         self.assertEqual(loaded.user_id, "1")
         self.assertEqual(loaded.tenant_id, "test-tenant")

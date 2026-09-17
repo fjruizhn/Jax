@@ -176,6 +176,121 @@ jobs:
           grep -qE "^9 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
 
+  # Frente F (2026-09-16): contrato de sub-pipelines contra una MariaDB REAL.
+  # Las tablas de Jacobs (jacobs_pipelines/steps/events y la nueva
+  # jacobs_subpipeline_tokens) las crea ESTE repo con store.init_tables(): no
+  # hace falta clonar jax-platform. PYTHONPATH incluye las_manos/ porque la
+  # ruta importa executor -> credential_resolver (sin eso, error de coleccion).
+  # Deps medidas en un venv limpio antes de escribir esta lista.
+  #
+  # Lo que prueba y por que necesita base: la carrera de consumos (20 a la vez
+  # y un intercalado forzado con dos sesiones) y el EXPLAIN de la SQL real no
+  # existen sin InnoDB de verdad. Un doble de la base daria verde sin probar
+  # la atomicidad.
+  #
+  # Todo sale de requirements.txt (E-19; rebase del frente F sobre de6964e,
+  # 2026-09-17): jacobs/store.py depende de comportamiento de aiomysql revisado
+  # a mano, y jacobs/_store_pool_test.py::VersionDeAiomysqlTest falla si la
+  # instalada no es la revisada. Sin aiofiles (E-18 lo retiro).
+  subpipeline-contrato-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+      PYTHONPATH: .:las_manos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py
+      - name: Piso exacto de tests CORRIDOS
+        # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
+        run: |
+          python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
+            tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py 2>&1 | tee /tmp/out
+          # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
+          #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
+          #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
+          #   hace de Ada. Vistos en rojo contra master; carrera, EXPLAIN, orden del
+          #   kill switch y enmienda del paso validados por mutacion.
+          # 31 -> 34 el 2026-09-16 (revision final del frente F): +3 por la ruta --
+          #   error tras consumir deja SUBPIPELINE_RECHAZADO fase=creacion y relanza el
+          #   original (I-2), el hijo hereda la identidad del padre y un cuerpo con otra
+          #   identidad es 403 sin quemar el token (I-3). Los tres vistos en rojo.
+          # 34 -> 36 el 2026-09-17 (residual de I-2, R13): +2 por la ruta -- la
+          #   relectura tras el UPDATE confirmado falla con un error REAL de la base
+          #   y una cancelacion llega tras quemar el token (en el consumo y en la
+          #   creacion); en los dos: SUBPIPELINE_RECHAZADO sin el token, hijo no
+          #   creado, error relanzado. Vistos en rojo; mutacion de cada except a
+          #   `except Exception` vuelve a romper el de la cancelacion.
+          # 36 -> 61 el 2026-09-17 (pool de conexiones de Jacobs): +25 de
+          #   jacobs/_store_pool_test.py -- 20 llamadas concurrentes no abren 20
+          #   conexiones (rojo contra eb72e78: 20 de 20; en serie 30 de 30), sesion
+          #   identica a la conexion directa, sin fugas en excepcion/cancelacion/
+          #   autocommit apagado/transaccion abierta/desechable, espera y cierre
+          #   acotados, el que espera se despierta, un pool por loop cerrado al fin
+          #   del loop, tamano validado y server.py lo valida y lo cierra. Cada
+          #   guarda validada por mutacion (pool-report.md del frente F).
+          # 61 -> 71 el 2026-09-17 (revision de concurrencia del pool): +10 de
+          #   jacobs/_store_pool_test.py -- cancelar a quien libera no pierde el aviso
+          #   (rojo contra d50c9cd: TimeoutError falso con una conexion libre) y
+          #   cancelar a quien espera no bloquea al siguiente; 20 pedidos en frio crean
+          #   UN pool (rojo: 20); N loops terminados dejan 0 entradas (rojo: 6); la
+          #   transaccion abierta se descarta aunque aiomysql no lo haga; el permiso
+          #   vuelve si aiomysql falla al entregar; version de aiomysql = la revisada
+          #   y requirements la fija (rojo: sin constante); facet_policy y los dos
+          #   escritores de uso sin aiomysql.connect (rojo); 20 autorizaciones de facet
+          #   no abren 20 conexiones (rojo: 20). Medido: "71 passed" 35 corridas
+          #   seguidas con los tres archivos.
+          # 71 sin cambio tras el rebase sobre de6964e (2026-09-17): medido dos
+          #   veces, e instala desde requirements.txt como el resto (E-19).
+          # 71 -> 76 el 2026-09-17 (CI rojo de 13b7759: "20 conexiones para 20
+          #   autorizaciones"): la base de este job no tiene la tabla `facet`, la
+          #   consulta da 1146 y conexion() cerraba la conexion ante CUALQUIER
+          #   excepcion. En local la tabla existe y pasaba. +5 de
+          #   jacobs/_store_pool_test.py -- 20 errores de SQL concurrentes y 20
+          #   autorizaciones sin `facet` no abren 20 conexiones (rojo: 20), el error
+          #   del servidor devuelve la conexion sana, con transaccion abierta se
+          #   descarta, y los errores del cliente o fuera de la lista blanca se
+          #   descartan (cada guarda validada por mutacion).
+          # 76 -> 97 el 2026-09-17 (revisiones de 1a478d5 y b97e0fb): la
+          #   atribucion por traceback/pilas de tareas se reemplazo por un
+          #   envoltorio propio (ConexionVigilada/CursorVigilado) que marca el
+          #   error de la lista blanca ANTES de relanzarlo; solo ese objeto
+          #   devuelve la conexion. +21 de jacobs/_store_pool_test.py: error de
+          #   otra conexion (directa o del pool), re-envuelto, ajeno tras uno
+          #   marcado, SSCursor abierto y 1927 real -> se cierra; control sin
+          #   hermana y SSCursor cerrado -> vuelve; 1205 real con transaccion y
+          #   1213 real -> se cierra, 1205 en autocommit -> vuelve; 5 puros del
+          #   envoltorio (identidad, sin marca, fuera de lista, llamada hermana
+          #   en vuelo, cada metodo vigilado); 4 puros de la clasificacion;
+          #   PyMySQL fijado. Cada clase, codigo y guarda validados por mutacion.
+          #   Medido: "97 passed" dos corridas seguidas.
+          # 97 -> 101 el 2026-09-17 (revision de eca432b): al salir de conexion()
+          #   el envoltorio se invalida. +4 de jacobs/_store_pool_test.py: una
+          #   hermana que despierta despues no manda SQL a la sesion del pedido
+          #   siguiente (rojo contra eca432b: Com_select +1), todo acceso posterior
+          #   lanza ConexionInvalidada, tambien tras salir con error, y una
+          #   salida normal con una llamada propia en vuelo cierra la conexion.
+          #   Validados por mutacion. Medido: "101 passed" dos corridas seguidas.
+          grep -qE "^101 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 101 tests CORRIDOS (no skipeados)."; exit 1; }
+
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
   # contra filas de norma cero: da NaN, que `IS NULL` no atrapa, que el
@@ -655,6 +770,7 @@ jobs:
           tests/test_repl_interruptor.py
           tests/test_interruptor_sin_rutas_fijas.py
           tests/test_interruptor_heredada.py
+          tests/test_subpipeline_contrato_puro.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -728,6 +844,7 @@ jobs:
             tests/test_repl_interruptor.py \
             tests/test_interruptor_sin_rutas_fijas.py \
             tests/test_interruptor_heredada.py \
+            tests/test_subpipeline_contrato_puro.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1065,8 +1182,25 @@ jobs:
           #   heredada): no dependen de la versión ni de ser root. MEDIDO en local
           #   (3.14), dos corridas, sin checkout de plataforma: "1108 passed, 1 skipped,
           #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1108 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 742 -> 760 el 2026-09-16 (frente F): test_subpipeline_contrato_puro.py (+18) -- forma del pedido por rol, validate_create sin profundidad del llamador, /plan sin ada, config con rango validada al arrancar, motivos de emision/consumo, hijo frenado por el kill switch, sin ruta HTTP de emision. 8 vistos en rojo contra master; 2 guardas validadas por mutacion. Medido en local (3.14): 761 passed, 1 xfailed; FALTA confirmarlo en el runner.
+          # 760 -> 761 el 2026-09-16 (revision final del frente F, I-1): +1 en
+          #   test_subpipeline_contrato_puro.py -- POST /jacobs/pipeline por TestClient con
+          #   token y forma invalida -> 422 sin el token en el cuerpo (Pydantic lo eco-eaba
+          #   en `input`). Visto en rojo. Medido en local (3.14): 762 passed, 1 xfailed;
+          #   FALTA confirmarlo en el runner.
+          # 853 -> 872 el 2026-09-17 (rebase del frente F sobre de6964e, con E mergeado):
+          #   +19 del frente F (18 + 1 de arriba) sobre los 853 de E. MEDIDO dos veces
+          #   en local (3.14) simulando el runner (env limpio, sin JAX_DB_HOST, sin
+          #   checkout de jax-platform): "872 passed, 1 skipped, 1 xfailed".
+          #   Si el runner da otro numero, manda el runner.
+          # 1108 + 19 -> 1127 el 2026-09-17, rebase del frente F sobre origin/master
+          #   f9c7073 (frente B y C3): las dos listas de tests-puros suman
+          #   test_subpipeline_contrato_puro.py (+19 del frente F) a los 1108 de master.
+          #   MEDIDO dos veces en local (3.14), env limpio, sin JAX_DB_HOST y con
+          #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1127 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1127 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1127 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1178,5 +1312,12 @@ jobs:
           #   autoprueba con el evaluador de jax; EXPLAIN de respaldos con su índice.
           #   Requiere jax-platform con las tablas del Ejecutor en master. Medido en
           #   local (3.14, jax_memory_test con las migraciones de la rama de tablas): 2 passed.
+          # 29 sin cambio tras el rebase del frente F (2026-09-17): el test de E
+          #   pasa por store.conexion() (get_conn ya no existe). Medido dos veces
+          #   con las migraciones de jax-platform c414eba y el sello en un tmp.
+          # 31 sin cambio tras el rebase del frente F sobre f9c7073 (2026-09-17): los
+          #   29 de E/F + los 2 del Ejecutor; test_ejecutor_politica_db.py migra de
+          #   get_conn() a store.conexion(). Medido dos veces con las migraciones de
+          #   jax-platform 0c6eb67 y el sello en un tmp: 31 passed.
           grep -qE "^31 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 31 tests CORRIDOS."; exit 1; }

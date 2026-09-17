@@ -65,15 +65,16 @@ class Salud:
         self._t = 0.0
 
 
-async def comprobar_base(get_conn) -> None:
-    """La base responde. De ahi salen pipelines, catalogo de motores y reaper."""
-    conn = await get_conn()
-    try:
+async def comprobar_base(abrir_conexion) -> None:
+    """La base responde. De ahi salen pipelines, catalogo de motores y reaper.
+
+    `abrir_conexion()` es un context manager asincrono (en LAS MANOS,
+    `jacobs.store.conexion`): se mide por el MISMO pool que usan los pipelines,
+    asi que un pool agotado o roto tambien pone /health en rojo."""
+    async with abrir_conexion() as conn:
         async with conn.cursor() as cur:
             await cur.execute("SELECT 1")
             await cur.fetchone()
-    finally:
-        conn.close()
 
 
 async def comprobar_audit(log_path: Path) -> None:

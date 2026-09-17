@@ -21,6 +21,7 @@ logica se extrajo a `las_manos/salud.py`, que no arrastra el servidor entero.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sys
 import unittest
 from pathlib import Path
@@ -42,14 +43,33 @@ def _conn_ok():
     ctx.__aexit__ = mock.AsyncMock(return_value=False)
     conn = mock.MagicMock()
     conn.cursor = mock.MagicMock(return_value=ctx)
-    conn.close = mock.MagicMock()
     return conn
+
+
+class _Abridor:
+    """Doble de `jacobs.store.conexion`: context manager asincrono que entrega
+    una conexion sana o explota al abrir. Cuenta cuantas veces se abrio."""
+
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+        self.llamadas = 0
+
+    def __call__(self):
+        self.llamadas += 1
+
+        @contextlib.asynccontextmanager
+        async def _ctx():
+            if self.error is not None:
+                raise self.error
+            yield _conn_ok()
+
+        return _ctx()
 
 
 class SaludTest(unittest.TestCase):
     def test_con_la_base_caida_NO_esta_sano(self):
-        get_conn = mock.AsyncMock(side_effect=OSError("connection refused"))
-        s = Salud({"base de datos": lambda: comprobar_base(get_conn)})
+        abrir = _Abridor(OSError("connection refused"))
+        s = Salud({"base de datos": lambda: comprobar_base(abrir)})
         estado = asyncio.run(s.estado())
         self.assertFalse(estado["ok"], "el servicio se declaro sano con la base caida")
         self.assertTrue(any("base de datos" in p for p in estado["fallos"]))
@@ -67,14 +87,14 @@ class SaludTest(unittest.TestCase):
 
     def test_con_todo_sano_esta_sano(self):
         """Control del control: el caso bueno sigue siendo verde."""
-        s = Salud({"base de datos": lambda: comprobar_base(mock.AsyncMock(return_value=_conn_ok()))})
+        s = Salud({"base de datos": lambda: comprobar_base(_Abridor())})
         estado = asyncio.run(s.estado())
         self.assertTrue(estado["ok"])
         self.assertEqual(estado["fallos"], [])
 
     def test_una_dependencia_caida_no_tapa_a_las_otras(self):
         """Se reportan TODAS las que fallan, no la primera."""
-        rota = mock.AsyncMock(side_effect=OSError("no responde"))
+        rota = _Abridor(OSError("no responde"))
         s = Salud({"uno": lambda: comprobar_base(rota), "dos": lambda: comprobar_base(rota)})
         estado = asyncio.run(s.estado())
         self.assertEqual(len(estado["fallos"]), 2)
@@ -82,21 +102,21 @@ class SaludTest(unittest.TestCase):
     def test_la_cache_evita_una_consulta_por_peticion(self):
         """20.000 req/s en las pruebas de carga: sin cache, el remedio tumbaria
         la base que el chequeo quiere vigilar."""
-        get_conn = mock.AsyncMock(return_value=_conn_ok())
-        s = Salud({"base de datos": lambda: comprobar_base(get_conn)}, ttl=5.0)
+        abrir = _Abridor()
+        s = Salud({"base de datos": lambda: comprobar_base(abrir)}, ttl=5.0)
 
         async def veinticinco():
             for _ in range(25):
                 await s.estado()
         asyncio.run(veinticinco())
-        self.assertEqual(get_conn.await_count, 1,
-                         f"se consultó la base {get_conn.await_count} veces en 25 peticiones")
+        self.assertEqual(abrir.llamadas, 1,
+                         f"se consultó la base {abrir.llamadas} veces en 25 peticiones")
 
     def test_vencido_el_ttl_se_vuelve_a_medir(self):
         """La cache no puede volverse ciega: si el TTL vence, se mide de nuevo."""
         reloj = {"t": 0.0}
-        get_conn = mock.AsyncMock(return_value=_conn_ok())
-        s = Salud({"base de datos": lambda: comprobar_base(get_conn)},
+        abrir = _Abridor()
+        s = Salud({"base de datos": lambda: comprobar_base(abrir)},
                   ttl=5.0, reloj=lambda: reloj["t"])
 
         async def dos_ventanas():
@@ -104,19 +124,18 @@ class SaludTest(unittest.TestCase):
             reloj["t"] = 6.0
             await s.estado()
         asyncio.run(dos_ventanas())
-        self.assertEqual(get_conn.await_count, 2, "la cache no expiró nunca")
+        self.assertEqual(abrir.llamadas, 2, "la cache no expiró nunca")
 
     def test_una_caida_posterior_se_nota_al_vencer_el_ttl(self):
         """El caso que de verdad importa: sano primero, caido despues."""
         reloj = {"t": 0.0}
-        get_conn = mock.AsyncMock(return_value=_conn_ok())
-        s = Salud({"base de datos": lambda: comprobar_base(get_conn)},
+        abrir = _Abridor()
+        s = Salud({"base de datos": lambda: comprobar_base(abrir)},
                   ttl=5.0, reloj=lambda: reloj["t"])
 
         async def sano_y_luego_caido():
             primero = await s.estado()
-            get_conn.side_effect = OSError("se cayo")
-            get_conn.return_value = None
+            abrir.error = OSError("se cayo")
             reloj["t"] = 6.0
             return primero, await s.estado()
         primero, segundo = asyncio.run(sano_y_luego_caido())

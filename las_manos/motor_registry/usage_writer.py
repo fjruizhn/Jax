@@ -1,9 +1,10 @@
 # jax/las_manos/motor_registry/usage_writer.py
 """Escritura directa a axioma_usage (jax-platform) desde motor_registry.
-Mismo patron de conexion que credential_resolver.py/jacobs/store.py: cada
-repo se conecta a la misma DB jax_memory con su propio conector minimo,
-sin paquete compartido (repos/venvs independientes, mismo trade-off
-documentado desde Fase 1).
+CONEXION (2026-09-17): del pool compartido de Jacobs (`jacobs.store.conexion`),
+no una conexion suelta por intento: LAS MANOS ya importa jacobs.store (worker,
+tool_authority) y el pool es por proceso. Una falla del pool sube como
+excepcion y toma el MISMO camino de reintento y cola durable que antes tomaba
+un `aiomysql.connect` caido.
 
 COLA DURABLE (Task 7, 2026-09-15): agotados los reintentos en línea, la fila ya
 no se pierde -- se deposita en el respaldo de `cola_uso` con
@@ -18,17 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 
-import aiomysql
-
-try:
-    # Producción (uvicorn, WorkingDirectory=las_manos): jax.core no es
-    # importable desde ahi, medido 2026-09-14 -- db_connect_config.py vive
-    # symlinkeado directo en las_manos/ (mismo patron que facet_resolver.py).
-    from db_connect_config import db_connect_timeout_seconds
-except ImportError:
-    from jax.core.db_connect_config import db_connect_timeout_seconds
+from jacobs import store as jacobs_store
 
 try:
     # Mismo doble import que db_connect_config, por la misma razón:
@@ -63,27 +55,6 @@ def _entero_o_none(valor) -> int | None:
     except (TypeError, ValueError):
         logger.warning("tenant_id/user_id no numérico (%r) -- se encola como NULL", valor)
         return None
-
-
-def _db_cfg() -> dict:
-    host = os.environ.get("JAX_DB_HOST")
-    port = os.environ.get("JAX_DB_PORT")
-    if not host or not port:
-        raise RuntimeError(
-            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
-            "silencioso a localhost:3306 (esa instancia está muerta, ver "
-            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
-            "exportalos a mano antes de conectar."
-        )
-    return {
-        "host": host,
-        "port": int(port),
-        "user": os.getenv("JAX_DB_USER", ""),
-        "password": os.getenv("JAX_DB_PASSWORD", ""),
-        "db": os.getenv("JAX_DB_NAME", "jax_memory"),
-        "charset": "utf8mb4",
-        "autocommit": True,
-    }
 
 
 async def _lookup_model_price(conn, provider_id: str, model: str) -> tuple[float | None, float | None]:
@@ -149,11 +120,9 @@ async def record_motor_usage(
     last_exc: Exception | None = None
     for attempt in range(1, _WRITE_MAX_ATTEMPTS + 1):
         try:
-            # connect_timeout explícito (no en _db_cfg()): hallazgo de
-            # revisión, Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) --
-            # sin esto, aiomysql espera sin límite si la DB se cuelga.
-            conn = await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
-            try:
+            # Pool compartido (2026-09-17): el guard de JAX_DB_HOST/PORT, el
+            # connect_timeout y el limite de espera por hueco viven en store.
+            async with jacobs_store.conexion() as conn:
                 price_in, price_out = await _lookup_model_price(conn, provider_id, model)
                 if price_in is not None and price_out is not None:
                     cost = (tokens_in * float(price_in) + tokens_out * float(price_out)) / 1_000_000
@@ -168,8 +137,6 @@ async def record_motor_usage(
                             facet, model, tokens_in, tokens_out, cost, status, job_id,
                         ),
                     )
-            finally:
-                conn.close()
             return
         except Exception as e:  # fail-soft: contabilidad no debe tumbar un job ya terminado
             last_exc = e
