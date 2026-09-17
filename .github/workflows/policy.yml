@@ -1545,8 +1545,12 @@ jobs:
           #   ninguna fila con la corrida VIGENTE (la fila cambió) aborta con motivo en el
           #   evento (rojo contra cfb0bd1: "errores": {"0": null}); si la época SÍ se perdió,
           #   sigue saliendo por RUN_SUPERSEDED sin PIPELINE_ABORTED (control).
-          grep -qE "^1131 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1131 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1131 -> 1132 el 2026-09-17 (re-revisión final, m3): +1 en
+          #   test_jacobs_conexiones_por_pedido.py -- GET /jacobs/pipeline/{id}/events lee por
+          #   el pool; era el último endpoint HTTP con conexión propia por pedido. Rojo contra
+          #   1da52bc: [('directa', 'events_by_pipeline', False)].
+          grep -qE "^1132 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1132 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

@@ -102,6 +102,8 @@ class _Cursor:
             self._fila = (0,)
         elif s.startswith("SELECT * FROM jacobs_pipelines"):
             self._fila = b.fila_pipeline()
+        elif s.startswith("SELECT * FROM jacobs_events"):
+            self._filas = ()
         elif s.startswith("SELECT * FROM jacobs_steps"):
             self._filas = b.filas_pasos()
         elif s.startswith("SELECT GET_LOCK") or s.startswith("SELECT RELEASE_LOCK"):
@@ -303,6 +305,10 @@ def _pedido_resume():
     return routes.resume_pipeline(PID, routes.ResumeRequest(invoked_by="plataforma"), BackgroundTasks())
 
 
+def _pedido_eventos():
+    return routes.get_events(PID)
+
+
 def _pedido_approve():
     return routes.approve_step(PID, routes.ApproveStepRequest(invoked_by="plataforma"), BackgroundTasks())
 
@@ -405,6 +411,15 @@ def test_el_pool_nunca_tiene_mas_conexiones_vivas_que_su_tamano(entorno, monkeyp
     asyncio.run(cuerpo())
     assert base.vivas_max <= 4, base.vivas_max
     assert len(base.aperturas) <= 4
+
+
+def test_get_events_no_abre_conexion_por_pedido(entorno):
+    """m3 de la re-revisión final: GET /jacobs/pipeline/{id}/events era el
+    último endpoint HTTP con conexión propia por pedido -- la misma forma que
+    a c=50 dio 0/13/49/61 % de errores en get_motor_governance (R38).
+    Expected contra 1da52bc: [('directa', 'events_by_pipeline', False)]."""
+    base = entorno()
+    assert _medir(base, _pedido_eventos) == []
 
 
 def test_cincuenta_preflight_concurrentes_no_superan_el_tamano_del_pool(entorno, monkeypatch):

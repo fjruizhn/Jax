@@ -1226,16 +1226,17 @@ async def event_append(
 
 
 async def events_by_pipeline(pipeline_id: str) -> list[dict[str, Any]]:
-    conn = await get_conn()
-    try:
+    # m3 de la re-revisión final (2026-09-17): por el pool, como el resto de
+    # los endpoints. GET /jacobs/pipeline/{id}/events era el último que abría
+    # una conexión por pedido -- la misma forma que a c=50 dio 0/13/49/61 % de
+    # errores en get_motor_governance (R38).
+    async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_events WHERE pipeline_id=%s ORDER BY id",
                 (pipeline_id,),
             )
             rows = await cur.fetchall()
-    finally:
-        conn.close()
     result = []
     for row in rows:
         payload_raw = row.get("payload") or "{}"
