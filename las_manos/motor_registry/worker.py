@@ -31,6 +31,7 @@ from typing import Any
 
 import httpx
 
+from cliente_http_compartido import obtener_cliente_http
 from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
@@ -161,10 +162,9 @@ async def _call_http_openai_compat(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(f"{api_url}/chat/completions", json=payload, headers=headers)
-        response.raise_for_status()
-        return response.json()
+    response = await obtener_cliente_http().post(f"{api_url}/chat/completions", json=payload, headers=headers, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 
 # transport -> función de dispatch. Un motor nuevo elige un transporte

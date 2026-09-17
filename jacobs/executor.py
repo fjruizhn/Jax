@@ -15,14 +15,9 @@ import shutil
 import time
 import tomllib
 from pathlib import Path
-from typing import Any
-
-from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
-from facet_resolver import resolve_facet, ResolvedFacet, FacetUnavailableError
+from facet_resolver import resolve_facet, ResolvedFacet
 from contrato_dispatch import limite_de_salida
 from model_catalog import record_resolved_version_safe
-
-import httpx
 
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
@@ -31,6 +26,9 @@ from jacobs.artifacts import read_artifact, save_if_large
 from grounding_sources import build_sources, render_sources_block, resolve_redirects
 # Ruling T6-6: jax/core/redaccion.py por symlink en las_manos/, como arriba.
 from redaccion import recortar_redactado, redactar_secretos
+# E-21: jax/core/config_entorno.py por symlink en las_manos/, como arriba.
+from config_entorno import ruta_absoluta_requerida, url_requerida
+from cliente_http_compartido import obtener_cliente_http
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -41,8 +39,16 @@ from hyde_sandbox import run_sandboxed_claude
 
 logger = logging.getLogger("jacobs.executor")
 
-LAS_MANOS_BASE = "http://127.0.0.1:7777"
-OLLAMA_URL     = "http://localhost:11434/api/chat"
+# E-21 (2026-09-16): del entorno, validadas al importar. Sin ellas LAS MANOS no
+# arranca (EntornoInvalido en el journal) en vez de apuntar a un host fijo.
+LAS_MANOS_BASE = url_requerida("LAS_MANOS_URL")
+OLLAMA_URL     = url_requerida("JAX_OLLAMA_URL") + "/api/chat"
+
+# E-22 (2026-09-16): `documents/` dentro de JAX_REPO_BASE, la MISMA variable
+# con la que jax-platform (api/admin/repository.py, REPO_BASE) lista y sirve
+# estos .md. Validada al importar: sin ella LAS MANOS no arranca.
+REPO_DOCUMENTS_DIR = ruta_absoluta_requerida("JAX_REPO_BASE") / "documents"
+
 MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 
 # Tope de seguridad para el output COMPLETO de cada dependencia declarada (~15K tokens).
@@ -284,15 +290,14 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     }
 
     async def _call() -> dict:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code != 200:
-                # Google devuelve la key rechazada DENTRO del cuerpo del error:
-                # redactar antes de recortar (y este texto termina en
-                # jacobs_steps.error via _fail_step).
-                cuerpo = recortar_redactado(resp.text, 200, [f.credential])
-                raise RuntimeError(f"Gemini HTTP {resp.status_code}: {cuerpo}")
-            return resp.json()
+        resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            # Google devuelve la key rechazada DENTRO del cuerpo del error:
+            # redactar antes de recortar (y este texto termina en
+            # jacobs_steps.error via _fail_step).
+            cuerpo = recortar_redactado(resp.text, 200, [f.credential])
+            raise RuntimeError(f"Gemini HTTP {resp.status_code}: {cuerpo}")
+        return resp.json()
 
     data = await _call()
     final_data = data
@@ -380,12 +385,11 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     payload = {"model": f.model, "messages": messages, "stream": False,
                **await limite_de_salida(f.transport, f.provider_id, f.model)}
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {resp.text[:200]}")
-        data  = resp.json()
-        texto = data["choices"][0]["message"].get("content", "")
+    resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=timeout)
+    if resp.status_code != 200:
+        raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [f.credential])}")
+    data  = resp.json()
+    texto = data["choices"][0]["message"].get("content", "")
 
     # D1.2 — best-effort, fuera del context manager del client: nunca debe
     # poder romper la respuesta al step (record_resolved_version_safe ya
@@ -417,7 +421,7 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     espera (respuesta en data["message"]["content"]) es siempre local y
     fijo. Solo el modelo viene del facet, nunca la URL — bug real hasta
     2026-08-19 (404 por concatenar
-    f.base_url + "/api/chat"). jax_local SI esta en VALID_FACETS (plan.py),
+    f.base_url + "/api/chat"). jax_local es una faceta activa de la tabla facet (E-03),
     solo no aparece en la lista de facetas que _llm_plan le sugiere al LLM
     para auto-generar steps — un pipeline con step facet="jax_local" armado
     a mano (_from_spec) si lo hubiera disparado.
@@ -442,12 +446,11 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         "stream":   False,
         **await limite_de_salida(f.transport, f.provider_id, f.model),
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(OLLAMA_URL, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Ollama HTTP {resp.status_code}: {resp.text[:200]}")
-        data  = resp.json()
-        texto = data.get("message", {}).get("content", "")
+    resp = await obtener_cliente_http().post(OLLAMA_URL, json=payload, timeout=timeout)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Ollama HTTP {resp.status_code}: {recortar_redactado(resp.text, 200)}")
+    data  = resp.json()
+    texto = data.get("message", {}).get("content", "")
 
     # D1.2 — capturado por consistencia con los transportes HTTP; ver
     # CONTEXT.md para la limitacion real (tags de Ollama no son alias
@@ -574,10 +577,9 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
         "timeout_seconds": timeout,
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload)
-        resp.raise_for_status()
-        dispatch = resp.json()
+    resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30)
+    resp.raise_for_status()
+    dispatch = resp.json()
 
     job_id = dispatch.get("job_id")
     if dispatch.get("status") == "rejected":
@@ -595,10 +597,9 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(MOTOR_POLL_INTERVAL)
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(f"{LAS_MANOS_BASE}/motor/job/{job_id}")
-                resp.raise_for_status()
-                job = resp.json()
+            resp = await obtener_cliente_http().get(f"{LAS_MANOS_BASE}/motor/job/{job_id}", timeout=15)
+            resp.raise_for_status()
+            job = resp.json()
 
             status = job.get("status", "")
             if status == "completed":
@@ -653,8 +654,7 @@ async def _cancel_motor_job(job_id: str) -> None:
     falla, queda en el log con el job_id -- nunca reemplaza la causa real.
     409 = el job ya había terminado solo, no hay nada que cortar."""
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel")
+        resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel", timeout=5)
         if resp.status_code not in (200, 409):
             logger.error(
                 "No se pudo cancelar el motor job %s tras vencer su paso: HTTP %s",
@@ -1064,7 +1064,7 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
                 capability=step.capability,
                 raw_output=raw_output,
             )
-        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia .md de cortesía en ~/jax/repo/documents -- el output canónico ya quedó en output_ref y en store.step_upsert antes de este try, nadie lee ese .md
+        except Exception as _persist_err:  # noqa: BLE001  # fail-soft: es la copia .md de cortesía en REPO_DOCUMENTS_DIR que el admin de jax-platform lista (/api/admin/repo) -- el output canónico ya quedó en output_ref y en store.step_upsert antes de este try; si la copia falla queda el warning y el step sigue completado
             logger.warning("No se pudo persistir step %d al repo: %s", i, _persist_err)
         return True
 
@@ -1217,15 +1217,12 @@ async def _persist_step_to_repo(
     capability: str,
     raw_output: dict,
 ) -> None:
-    """Guarda el output de un step como .md en ~/jax/repo/documents/"""
-    import aiofiles
-    from pathlib import Path
-
-    repo_dir = Path(os.path.expanduser("~/jax/repo/documents"))
-    repo_dir.mkdir(parents=True, exist_ok=True)
-
+    """Guarda el output de un step como .md en REPO_DOCUMENTS_DIR: copia de
+    cortesía que el admin de jax-platform lista en /api/admin/repo. La escritura
+    (mkdir incluido) corre en un hilo: nada de disco dentro del event loop (E-12)."""
     filename = f"{pipeline_id[:8]}_{step_index:02d}_{facet}.md"
-    filepath = repo_dir / filename
+    directorio = REPO_DOCUMENTS_DIR
+    filepath = directorio / filename
 
     result_text = raw_output.get("result", "")
     sources     = raw_output.get("sources", [])
@@ -1254,8 +1251,11 @@ async def _persist_step_to_repo(
 
     content = "\n".join(lines)
 
-    async with aiofiles.open(filepath, "w", encoding="utf-8") as f:
-        await f.write(content)
+    def _escribir() -> None:
+        directorio.mkdir(parents=True, exist_ok=True)
+        filepath.write_text(content, encoding="utf-8")
+
+    await asyncio.to_thread(_escribir)
 
     logger.info("Step output persistido: %s", filename)
 

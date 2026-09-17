@@ -1,9 +1,10 @@
 """
 Resolver de credenciales de proveedor — Fase 1 (DB como fuente de verdad).
 
-Espejo minimo en los 3 codebases (jax-platform, jax/core, las_manos), mismo
-patron que crypto_secrets.py: repos/venvs independientes, no justifica un
-paquete compartido en esta fase.
+Dos archivos reales: este (jax/core, canónico dentro de jax) y la copia de
+jax-platform (backend/credential_resolver.py). las_manos/credential_resolver.py
+es SYMLINK a este desde 2026-09-16 (E-11); hasta entonces era una tercera copia
+que podía driftear dentro de jax. La familia la vigila scripts/check_mirror_sync.py.
 
 Diseño completo: jax-platform/docs/fase1-credenciales-diseno.md (B1.2/B1.4).
 Resuelve R3 de la auditoria (rotar una key no la propagaba sin restart).
@@ -14,8 +15,20 @@ import time
 
 import aiomysql
 
-from jax.core.crypto_secrets import decrypt_secret
-from jax.core.db_connect_config import db_connect_timeout_seconds
+try:
+    # LAS MANOS y Jacobs: este archivo corre como las_manos/credential_resolver.py
+    # (symlink) con WorkingDirectory o PYTHONPATH en las_manos/, donde jax.core
+    # NO es importable; crypto_secrets también es symlink ahí. En contextos
+    # `.:las_manos` (CI) gana este camino también para jax.core.credential_resolver.
+    from crypto_secrets import decrypt_secret
+except ImportError:
+    # REPL y workers de jax.memory (PYTHONPATH=. desde la raíz del repo).
+    from jax.core.crypto_secrets import decrypt_secret
+
+try:
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    from jax.core.db_connect_config import db_connect_timeout_seconds
 
 logger = logging.getLogger("credential_resolver")
 

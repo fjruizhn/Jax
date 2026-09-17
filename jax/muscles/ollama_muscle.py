@@ -6,7 +6,7 @@ AI PRO R9700 32GB via ROCm), sin nube, privada. Es JAX en su modo de confianza.
 
 Decisiones firmes (Fernando + DeepSeek + Claude), formato verificado en hall9000
 contra Ollama 0.24.0:
-  - API HTTP local en localhost:11434/api/chat. SIN api key (es local).
+  - API HTTP local en $JAX_OLLAMA_URL/api/chat (E-21). SIN api key (es local).
   - La respuesta viene en message.content (verificado con curl).
   - Semaforo GPU de 1: UNA sola inferencia local a la vez, para no saturar la
     VRAM de 32GB ni degradar tok/s. Protege la regla de concurrencia=1 en GPU.
@@ -27,11 +27,11 @@ from __future__ import annotations
 
 import asyncio
 
-import httpx
-
 from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from jax.core.model_catalog import record_resolved_version_safe
-from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocationError, MuscleTimeoutError
+from jax.core.redaccion import recortar_redactado
+from jax.core.cliente_http_compartido import obtener_cliente_http
+from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocationError
 
 # Semaforo de GPU -- UNA inferencia local a la vez DENTRO DE ESTE PROCESO.
 #
@@ -59,8 +59,6 @@ from jax.muscles.base import DispatchConfigMuscleError, Muscle, MuscleInvocation
 # docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
 GPU_SEMAPHORE = asyncio.Semaphore(1)
 
-DEFAULT_OLLAMA_URL = "http://localhost:11434/api/chat"
-
 
 class OllamaMuscle(Muscle):
     # provider_id del catálogo del modelo (lo pone build_muscles desde el
@@ -74,7 +72,8 @@ class OllamaMuscle(Muscle):
         models_allowed: list[str],
         system_prompt: str,
         timeout: float,
-        api_url: str = DEFAULT_OLLAMA_URL,
+        *,
+        api_url: str,
         authority_origin: str = "",
     ) -> None:
         super().__init__(
@@ -111,21 +110,21 @@ class OllamaMuscle(Muscle):
 
         # Una sola inferencia local a la vez. Si la GPU esta ocupada, espera turno.
         async with GPU_SEMAPHORE:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(self.api_url, json=payload)
-                if resp.status_code != 200:
-                    raise MuscleInvocationError(
-                        f"[{self.name}] Ollama HTTP {resp.status_code}: "
-                        f"{resp.text[:200]}"
-                    )
-                data = resp.json()
-                try:
-                    contenido = data["message"]["content"]
-                except (KeyError, TypeError) as exc:
-                    raise MuscleInvocationError(
-                        f"[{self.name}] respuesta inesperada de Ollama: "
-                        f"{str(data)[:200]}"
-                    ) from exc
+            resp = await obtener_cliente_http().post(self.api_url, json=payload, timeout=self.timeout)
+            if resp.status_code != 200:
+                raise MuscleInvocationError(
+                    f"[{self.name}] Ollama HTTP {resp.status_code}: "
+                    f"{recortar_redactado(resp.text, 200)}"
+                )
+            data = resp.json()
+            try:
+                contenido = data["message"]["content"]
+            except (KeyError, TypeError) as exc:
+                # JSON ya parseado de un 200 del Ollama local (sin credencial): fuera de E-16, declarado.
+                raise MuscleInvocationError(
+                    f"[{self.name}] respuesta inesperada de Ollama: "
+                    f"{str(data)[:200]}"
+                ) from exc
 
         # D1.2 — capturado por consistencia con los transportes HTTP; ver
         # CONTEXT.md ("decision previa al wiring de resolved_version en

@@ -17,12 +17,13 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 
-import httpx
-
-from jacobs.models import MOTOR_FACETS, Step
+from jacobs.models import MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
+from config_entorno import url_requerida
+from redaccion import recortar_redactado
+from cliente_http_compartido import obtener_cliente_http
 
 logger = logging.getLogger("jacobs.plan")
 
@@ -43,7 +44,7 @@ async def _registrar_fallback_de_cerebro(pipeline_id: str, de: str, a: str, moti
         pipeline_id, "PLAN_CEREBRO_FALLBACK", {"de": de, "a": a, "motivo": motivo[:2000]},
     )
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OLLAMA_URL = url_requerida("JAX_OLLAMA_URL") + "/api/chat"  # E-21: del entorno, validada al importar
 OLLAMA_TIMEOUT = 120  # segundos — el modelo local puede tardar
 # T1 (2026-08-19): con think:false medido en 6 corridas reales (3 objetivos
 # x think true/false), eval_count del path think:false fue 181-1159 (el mas
@@ -78,11 +79,7 @@ _FORMAL_KEYWORDS = frozenset({
     "dependencias", "formaliza", "capabilities",
 })
 
-VALID_FACETS = frozenset({
-    "hipatia", "jekyll", "thot", "ada", "kimi", "hyde", "jax_local",
-})
-
-# Espejo de VALID_FACETS para capabilities (FASE A §3.3). Vocabulario del
+# Capabilities (FASE A §3.3), igual que las facetas desde E-03: vocabulario del
 # planner: fuente única desde Bloque 3 (2026-08-21) es la tabla `capability`
 # real, consultada en vivo por _parse_plan_json (degrada a 'reason' si no
 # existe) y por executor.py::validate_capability() (NIVEL A, rechaza el step
@@ -185,8 +182,8 @@ _PLAN_SYSTEM_MODULAR = (
     "paquete (orden de módulos, versiones, índice). El ensamble FÍSICO de los módulos lo hace el "
     "sistema mecánicamente; este step solo produce el manifest/índice, NO el documento completo.\n\n"
     "Cada step: {\"facet\",\"capability\",\"prompt\",\"depends_on\":[indices]}.\n"
-    "- facet para diseño formal/tipos/arquitectura: 'ada'. Para crítica/auditoría: 'thot'. "
-    "Para investigación: 'hipatia'. Para código: 'kimi'.\n"
+    "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido. Diseño formal/tipos/"
+    "arquitectura: 'ada'. Validación/crítica: 'thot'.\n"
     "- depends_on lista los step_index (0-based) de los steps cuyos OUTPUTS este step necesita.\n"
     "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
     "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
@@ -195,6 +192,36 @@ _PLAN_SYSTEM_MODULAR = (
     + _CLEANROOM_RULE +
     "\nSalida: SOLO el array JSON."
 )
+
+
+# Revisión final del frente E (2026-09-16): el menú de facetas que se le ofrece
+# al LLM. Antes era texto fijo en los dos prompts; con E-17 una faceta que no
+# está activa en la tabla `facet` rechaza el plan (422), así que ofrecerla era
+# fabricar planes que se iban a rechazar. Esta tabla da SOLO la descripción y
+# el ejemplo de cada faceta; qué facetas se ofrecen lo decide
+# governance["facets"] en cada build (_menu_de_facetas). Una faceta activa que
+# no está acá no se ofrece: el planner no sabría para qué sirve.
+_MENU_DE_FACETAS: tuple[tuple[str, str, str, str], ...] = (
+    # (faceta, descripción, capability del ejemplo, prompt del ejemplo)
+    ("hipatia", "investigar/research", "research", "Investiga X"),
+    ("jekyll", "analizar", "analysis", "Analiza Y"),
+    ("thot", "criticar/critique", "critique", "Critica Z"),
+    ("ada", "diseñar arquitectura/tipos", "design", "Diseña W"),
+    ("kimi", "coding", "implementation", "Implementa V"),
+    ("hyde", "ejecutar cambios — requiere aprobación", "implementation", "Aplica U"),
+)
+
+# El patrón compilador de Ada (_PLAN_SYSTEM_MODULAR) exige estas facetas: sin
+# alguna activa, su plan se rechaza con certeza y no se gasta la llamada paga.
+_FACETAS_DEL_PATRON_MODULAR = ("thot", "ada")
+
+
+def _menu_de_facetas(facetas_activas: frozenset) -> list[tuple[str, str, str, str]]:
+    return [fila for fila in _MENU_DE_FACETAS if fila[0] in facetas_activas]
+
+
+def _texto_del_menu(menu: list[tuple[str, str, str, str]]) -> str:
+    return ", ".join(f"{faceta} ({descripcion})" for faceta, descripcion, _, _ in menu)
 
 
 _AUDIT_CAPABILITIES = frozenset({
@@ -264,6 +291,21 @@ def _check_cleanroom(steps: list) -> list[PlanViolation]:
                     f"-- no es auditoría independiente (cleanroom)",
                 ))
     return violations
+
+
+def _check_facets(steps: list, facetas_activas: frozenset) -> list[PlanViolation]:
+    """E-17 (2026-09-16): una faceta que no está activa en la tabla `facet`
+    rechaza el plan. Antes `_parse_plan_json` la reemplazaba por jax_local en
+    silencio y el plan corría con una faceta que nadie pidió. Corre en build(),
+    así que vale para los dos caminos (spec y LLM) y para el plan de respaldo."""
+    return [
+        PlanViolation(
+            s.step_index, s.facet, s.motor, s.capability,
+            f"faceta '{s.facet}' no existe o no está activa en la tabla `facet`",
+        )
+        for s in steps
+        if s.facet not in facetas_activas
+    ]
 
 
 # T2: capabilities cuya ejecución real implica que el MOTOR llame una tool
@@ -369,7 +411,8 @@ async def _validate_plan_capabilities(steps: list) -> None:
     relevant = [s for s in steps if (s.motor or s.facet) in MOTOR_FACETS]
     # La gobernanza se consulta SIEMPRE, no solo si hay steps de motor: el techo
     # de ejecucion (mas abajo) aplica a TODOS los steps. Costo medido en
-    # get_motor_governance(): 3 SELECTs, 0.00024s en el servidor.
+    # get_motor_governance() (2026-08-21): 0.00024s en el servidor con 3 SELECTs;
+    # el 4º (facet, 7 filas, E-17) se agregó después y no está medido.
     governance = await _store.get_motor_governance()
     motors = governance["motors"]
     caps = governance["capabilities"]
@@ -434,7 +477,7 @@ class PlanBuilder:
         self,
         pipeline_id: str,
         objective: str,
-        max_steps: int = 20,
+        max_steps: int = MAX_STEPS_PER_PIPELINE,
         steps_spec: list[dict] | None = None,
     ) -> list[Step]:
         # UNA sola consulta de gobernanza por build, propagada a todo lo que la
@@ -456,6 +499,9 @@ class PlanBuilder:
         # plan pueda saltárselo. cleanroom antes solo corría dentro de
         # _from_spec (nunca para planes del LLM) y solo advertía; ahora
         # bloquea para los dos caminos, mismo mecanismo que capabilities.
+        facet_violations = _check_facets(steps, governance["facets"])
+        if facet_violations:
+            raise PlanRejected(facet_violations)
         cleanroom_violations = _check_cleanroom(steps)
         if cleanroom_violations:
             raise PlanRejected(cleanroom_violations)
@@ -495,7 +541,7 @@ class PlanBuilder:
                 step_id=str(uuid.uuid4()),
                 pipeline_id=pipeline_id,
                 step_index=i,
-                facet=spec.get("facet", "jax_local"),
+                facet=spec.get("facet", ""),
                 motor=spec.get("motor"),
                 capability=capability,
                 input=input_data,
@@ -535,7 +581,7 @@ class PlanBuilder:
         if dificultad == "formal":
             logger.info("Jacobs cerebro=Ada (formal) objective=%r", objective[:80])
             specs, motivo = await self._intentar_cerebro(
-                self._ada_plan, "Ada", objective, max_steps, capability_hint)
+                self._ada_plan, "Ada", objective, max_steps, capability_hint, governance["facets"])
             if not specs:
                 logger.warning("Ada falló planificando (%s), cayendo a qwen local", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "ada", "qwen", motivo)
@@ -543,7 +589,7 @@ class PlanBuilder:
             logger.info("Jacobs cerebro=qwen (trivial) objective=%r", objective[:80])
         if not specs:
             specs, motivo = await self._intentar_cerebro(
-                self._llm_plan, "qwen", objective, max_steps, capability_hint)
+                self._llm_plan, "qwen", objective, max_steps, capability_hint, governance["facets"])
             if not specs:
                 logger.warning("qwen falló planificando (%s), usando el plan de respaldo fijo", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "qwen", "fallback_plan", motivo)
@@ -551,10 +597,10 @@ class PlanBuilder:
         return self._from_spec(pipeline_id, specs, governance["capabilities"])
 
     @staticmethod
-    async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint):
+    async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint, facetas_activas):
         """(specs, "") o (None, motivo)."""
         try:
-            specs = await fn(objective, max_steps, capability_hint)
+            specs = await fn(objective, max_steps, capability_hint, facetas_activas=facetas_activas)
         except CerebroNoDisponible as exc:
             return None, str(exc)
         if not specs:
@@ -571,13 +617,20 @@ class PlanBuilder:
         return "trivial"
 
     async def _ada_plan(
-        self, objective: str, max_steps: int, capability_hint: str = ""
+        self, objective: str, max_steps: int, capability_hint: str = "", *, facetas_activas: frozenset
     ) -> list[dict] | None:
         # Modelo, URL y credencial del binding de ada (credencial por
         # credential_resolver, dentro de resolve_facet), y el límite de salida
         # de la fila de ESE modelo. Cualquier falla: ERROR con el motivo y
         # None -> _from_objective cae a qwen. Nunca se despacha a un modelo o
         # URL fijos ni con un límite asumido.
+        faltan = [x for x in _FACETAS_DEL_PATRON_MODULAR if x not in facetas_activas]
+        if faltan:
+            motivo = (f"Ada: no se planifica, el patrón compilador exige facetas que no están "
+                      f"activas en la tabla `facet`: {', '.join(faltan)}")
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo)
+        menu = _texto_del_menu(_menu_de_facetas(facetas_activas))
         try:
             f = await resolve_facet("ada")
         except FacetUnavailableError as exc:
@@ -611,9 +664,7 @@ class PlanBuilder:
             f"reconciliación (ada/reconcile) como penúltimo, ensamble (ada/assemble) al final.\n"
             f"Cada step DEBE incluir el campo 'depends_on' con la lista de step_index "
             f"(0-based) de los que depende (lista vacía [] si no depende de ninguno).\n\n"
-            f"Facetas disponibles: hipatia (investigar/research), jekyll (analizar), "
-            f"thot (criticar/critique), ada (diseñar arquitectura/tipos), "
-            f"kimi (coding), hyde (ejecutar cambios — requiere aprobación).\n\n"
+            f"Facetas disponibles: {menu}.\n\n"
             f"Ejemplo de forma esperada (no de contenido):\n"
             f'[{{"facet":"ada","capability":"design",'
             f'"prompt":"Definí los tipos comunes: enums, identificadores, estructuras base compartidas.",'
@@ -646,34 +697,36 @@ class PlanBuilder:
             **limite,
         }
         try:
-            async with httpx.AsyncClient(timeout=ADA_TIMEOUT) as client:
-                async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                    if resp.status_code != 200:
-                        # PR-K ronda 2 (M2): ERROR, no warning -- un 400 "max_tokens
-                        # too large" del proveedor es un contrato roto, no ruido.
-                        body = await resp.aread()
-                        motivo = f"Ada HTTP {resp.status_code}: {body[:200]!r}"
-                        logger.error(motivo)
-                        raise CerebroNoDisponible(motivo)
-                    partes = []
-                    async for linea in resp.aiter_lines():
-                        if not linea or not linea.startswith("data:"):
-                            continue
-                        chunk_str = linea[5:].strip()
-                        if chunk_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta") or {}
-                        pieza = delta.get("content")
-                        if pieza:
-                            partes.append(pieza)
-                    content = "".join(partes)
+            async with obtener_cliente_http().stream("POST", url, headers=headers, json=payload, timeout=ADA_TIMEOUT) as resp:
+                if resp.status_code != 200:
+                    # PR-K ronda 2 (M2): ERROR, no warning -- un 400 "max_tokens
+                    # too large" del proveedor es un contrato roto, no ruido.
+                    body = await resp.aread()
+                    # E-16: redactar (con la credencial de Ada) ANTES de recortar;
+                    # este motivo va a logger.error y a jacobs_events.
+                    cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [f.credential])
+                    motivo = f"Ada HTTP {resp.status_code}: {cuerpo}"
+                    logger.error(motivo)
+                    raise CerebroNoDisponible(motivo)
+                partes = []
+                async for linea in resp.aiter_lines():
+                    if not linea or not linea.startswith("data:"):
+                        continue
+                    chunk_str = linea[5:].strip()
+                    if chunk_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(chunk_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    pieza = delta.get("content")
+                    if pieza:
+                        partes.append(pieza)
+                content = "".join(partes)
             # Fase D: aquí se capturará el plan de Ada como ejemplo de oro
             return await self._parse_plan_json(content, max_steps)
         except CerebroNoDisponible:
@@ -684,18 +737,27 @@ class PlanBuilder:
             raise CerebroNoDisponible(motivo) from exc
 
     async def _llm_plan(
-        self, objective: str, max_steps: int, capability_hint: str = ""
+        self, objective: str, max_steps: int, capability_hint: str = "", *, facetas_activas: frozenset
     ) -> list[dict] | None:
+        menu = _menu_de_facetas(facetas_activas)
+        if not menu:
+            motivo = "qwen (jax_local): no se planifica, ninguna faceta del menú está activa en la tabla `facet`"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo)
+        # El ejemplo usa las primeras facetas ACTIVAS del menú: un ejemplo con
+        # una faceta inactiva invita a copiarla.
+        ejemplo = json.dumps(
+            [{"facet": faceta, "capability": capability, "prompt": texto}
+             for faceta, _, capability, texto in menu[:2]],
+            ensure_ascii=False, separators=(",", ":"),
+        )
         prompt = (
             f"Dado este objetivo: {objective}\n\n"
             f"Genera un plan de ejecución con MÁXIMO {max_steps} steps.\n"
             f"Cada step debe tener: facet, capability, prompt específico.\n"
-            f"Facetas disponibles: hipatia (investigar/research), jekyll (analizar), "
-            f"thot (criticar/critique), ada (diseñar arquitectura), "
-            f"kimi (coding), hyde (ejecutar cambios — requiere aprobación).\n"
+            f"Facetas disponibles: {_texto_del_menu(menu)}.\n"
             f"Responde SOLO con un array JSON. Ejemplo:\n"
-            f'[{{"facet":"hipatia","capability":"research","prompt":"Investiga X"}},'
-            f'{{"facet":"jekyll","capability":"analysis","prompt":"Analiza Y"}}]'
+            f"{ejemplo}"
         )
         try:
             f = await resolve_facet("jax_local")
@@ -746,13 +808,12 @@ class PlanBuilder:
         # y que lo reabre:
         # docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
         try:
-            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-                resp = await client.post(OLLAMA_URL, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                await record_resolved_version_safe(f.key, data.get("model"))
-                content = data.get("message", {}).get("content", "")
-                return await self._parse_plan_json(content, max_steps)
+            resp = await obtener_cliente_http().post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            await record_resolved_version_safe(f.key, data.get("model"))
+            content = data.get("message", {}).get("content", "")
+            return await self._parse_plan_json(content, max_steps)
         except Exception as exc:  # noqa: BLE001
             motivo = f"qwen (jax_local) no disponible para planificación: {type(exc).__name__}: {exc}"
             logger.error(motivo)
@@ -795,17 +856,18 @@ class PlanBuilder:
         for idx, item in enumerate(data[:max_steps]):
             if not isinstance(item, dict):
                 continue
-            facet = item.get("facet", "")
-            if facet not in VALID_FACETS:
-                facet = "jax_local"
+            # E-17: la faceta viaja TAL CUAL. build() la valida contra la tabla
+            # `facet` y rechaza el plan si no está activa: antes se cambiaba por
+            # jax_local sin rastro.
+            facet = str(item.get("facet", ""))[:50]
             # depends_on: filtrar valores no-enteros y fuera de rango (0 <= dep < idx)
             raw_deps = item.get("depends_on", [])
             depends_on = [
                 int(x) for x in raw_deps
                 if str(x).lstrip("-").isdigit() and 0 <= int(x) < idx
             ]
-            # capability CERRADA al vocabulario conocido (espejo de la mecánica
-            # facet→jax_local de arriba). Fuera del conjunto → degradar a 'reason'.
+            # capability CERRADA al vocabulario conocido (las facetas, en cambio, se
+            # rechazan en build()). Fuera del conjunto → degradar a 'reason'.
             # Bloque 3 (2026-08-21): VALID_CAPABILITIES (frozenset estático)
             # eliminado -- misma fuente que validate_capability() de
             # executor.py (DB real vía get_motor_governance), import diferido

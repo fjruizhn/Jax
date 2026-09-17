@@ -18,7 +18,6 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import json
-import os
 import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,16 +36,9 @@ def environment_from_target(target_environment: str | None) -> str:
     }.get(target_environment or "", "production")
 
 
-# Valores válidos de traffic_class (Mesa, 16-jun-2026). Documentados aquí para
-# referencia; audit.py no los valida (lo hace el Envelope vía Pydantic).
-TRAFFIC_CLASSES = (
-    "test_structural",   # tests que ejercen la capa estructural (Pydantic)
-    "test_semantic",     # tests que ejercen la capa semántica (validate_envelope)
-    "dry_run",           # previsualización sin ejecutar
-    "production",        # tráfico real de facetas
-    "adversarial_test",  # pruebas que atacan la puerta a propósito
-    "unknown",           # nadie lo declaró — default fail-safe
-)
+# Valores válidos de traffic_class (Mesa, 16-jun-2026): el Literal de
+# Envelope.traffic_class (envelope.py) es la única lista y la que se aplica.
+# audit.py no los valida. La tupla que los repetía se retiró el 2026-09-16 (E-04).
 
 
 class AuditLog:

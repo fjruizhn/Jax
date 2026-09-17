@@ -177,9 +177,10 @@ def test_alcanza_con_que_lo_declare_una_de_las_dos_copias(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_compara_TODOS_los_espejos_no_solo_el_primero(tmp_path):
-    """credential_resolver tiene TRES archivos reales (las_manos no es symlink,
-    medido 2026-09-01). Un comparador que se quedara en el primer espejo
-    dejaria al tercero sin vigilancia -- que es la situacion que habia."""
+    """credential_resolver tuvo TRES archivos reales hasta el 2026-09-16 (E-11).
+    Un comparador que se quedara en el primer espejo dejaria al tercero sin
+    vigilancia -- que es la situacion que habia -- y cualquier familia con
+    varios espejos reales vuelve a tener ese riesgo."""
     sano = _escribir(tmp_path, "espejo_sano.py", BASE)
     roto = _escribir(tmp_path, "espejo_roto.py",
                      BASE.replace('UNA_CONSTANTE = "original"', 'UNA_CONSTANTE = "otra"'))

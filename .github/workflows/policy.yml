@@ -101,7 +101,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql pydantic
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: python -m pytest jacobs/_facet_health_test.py -v
 
   # `check_facet_health()` es la unica pieza del lector sin cobertura
@@ -134,6 +135,13 @@ jobs:
       JAX_DB_USER: root
       JAX_DB_PASSWORD: ci
       JAX_DB_NAME: jax_memory_test
+      # las_manos en el path desde E-24 (2026-09-16): jacobs/plan.py, executor.py
+      # y reaper.py importan `cliente_http_compartido` por su nombre corto, como
+      # corren en produccion (dentro de LAS MANOS, con las_manos/ en sys.path).
+      # Importarlo como jax.core.* daria OTRO modulo y otro cliente, que el
+      # shutdown de LAS MANOS no cierra. Sin esto el job no colecta (visto en
+      # rojo al rebasar el frente E: ModuleNotFoundError en la coleccion).
+      PYTHONPATH: las_manos
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -144,7 +152,8 @@ jobs:
       # que importa httpx a nivel de modulo. Sin el, el job falla en la
       # COLECCION y no en un assert -- el mismo modo de falla que rompio
       # PR#25 en la ronda anterior.
-      - run: pip install pytest aiomysql pydantic httpx
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       # El guard de "no correr sin DB" es un skipif: un skip masivo se ve
       # como verde. Se exige que los 6 tests CORRAN de verdad.
       - run: python -m pytest jacobs/_facet_health_io_test.py jacobs/_store_indexes_test.py -v
@@ -209,7 +218,8 @@ jobs:
       # archivo NO COLECTA. Medido 2026-09-11 en un venv limpio con solo este
       # pip install (no en hall9000, donde todo esta instalado): con los 4
       # paquetes, 10 tests colectados; sin cryptography, error de coleccion.
-      - run: pip install pytest aiomysql httpx cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: >-
           PYTHONPATH=. python -m pytest -v
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
@@ -318,7 +328,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: PYTHONPATH=las_manos python -m pytest las_manos/_facet_resolver_seal_test.py -v
       # Los 13 tests tienen que CORRER, no saltarse: dos de ellos se saltan
       # solos si el runner corriera como root (ningun permiso bloquea a root,
@@ -344,10 +355,9 @@ jobs:
   # instancia muerta 3306, y credential_resolver._db_conn -- siempre con la
   # misma forma: se cierra en un repo y sobrevive en el otro.
   #
-  # credential_resolver tiene TRES archivos reales, no dos: las_manos/ tiene
-  # copia propia y NO es un symlink (a diferencia de facet_resolver). Medido el
-  # 2026-09-01. Esa tercera copia puede driftear DENTRO del propio repo jax, y
-  # hasta hoy nadie la comparaba con nada.
+  # credential_resolver tuvo TRES archivos reales hasta el 2026-09-16: la copia
+  # de las_manos/ no era symlink. Desde E-11 lo es (igual crypto_secrets, E-10,
+  # y model_catalog), asi que dentro de jax queda un solo archivo por modulo.
   # El techo declarado en capability.max_execution_minutes es un techo de
   # verdad (2026-09-01). Antes no lo era: un timeout_seconds explicito en el
   # spec de un step pisaba el default y llegaba intacto a asyncio.wait_for --
@@ -371,7 +381,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql pydantic httpx cryptography
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - run: PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -v
       - run: |
           PYTHONPATH=las_manos python -m pytest jacobs/_plan_timeout_ceiling_test.py -q 2>&1 | tee /tmp/ptc
@@ -413,7 +424,8 @@ jobs:
       # aiomysql: tests/test_cola_uso_escritores.py importa los dos escritores
       # reales, y los dos importan aiomysql. Con solo pytest el job fallaria en
       # la COLECCION, que es un rojo por otra razon.
-      - run: pip install aiomysql
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt
       - name: La copia de cola_uso.py es identica a la de jax-platform
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -501,7 +513,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest pyyaml pydantic aiomysql==0.3.2
+      # Desde E-19 (2026-09-16) todo sale de requirements.txt.
+      - run: pip install -r requirements.txt pytest
       - name: Suite de gobernanza
         run: python -m pytest tests/test_governance_claims.py tests/test_governance_loaders.py tests/test_governance_validator.py tests/test_governance_vocab_sweep.py tests/test_governance_renderer.py tests/test_governance_grounding.py -v
       - name: Piso exacto de tests CORRIDOS
@@ -554,11 +567,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # aiofiles: tests/test_hipatia_fuentes.py ejercita _persist_step_to_repo,
-      # que escribe con aiofiles (dependencia real de jacobs en produccion).
-      # fastapi==0.139.0: tests/test_motor_catalog_sello.py importa
-      # motor_registry.routes (pin de requirements.txt).
-      - run: pip install pytest pytest-asyncio aiomysql httpx cryptography pydantic pyyaml aiofiles fastapi==0.139.0
+      # Dependencias de servicio desde requirements.txt (E-19, 2026-09-16): el
+      # archivo es la fuente única; tests/test_requirements_completos.py falla si
+      # un import de terceros no está fijado ahí o si este job deja de usarlo.
+      - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
@@ -599,6 +611,17 @@ jobs:
           tests/test_store_indice_duenio.py
           tests/test_cola_uso_escritores.py
           tests/test_respaldo_de_uso_aislado.py
+          tests/test_frente_e_retiros.py
+          tests/test_max_steps_una_sola_constante.py
+          tests/test_plan_facetas_de_la_tabla.py
+          tests/test_espejos_symlink_frente_e.py
+          tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py
+          tests/test_documentos_del_repo.py
+          tests/test_requirements_completos.py
+          tests/test_sin_autoetiqueta.py
+          tests/test_errores_de_proveedor_redactados.py
+          tests/test_cliente_http_compartido.py
+          tests/test_conftest_aisla_facet_seal.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -641,6 +664,17 @@ jobs:
             tests/test_store_indice_duenio.py \
             tests/test_cola_uso_escritores.py \
             tests/test_respaldo_de_uso_aislado.py \
+            tests/test_frente_e_retiros.py \
+            tests/test_max_steps_una_sola_constante.py \
+            tests/test_plan_facetas_de_la_tabla.py \
+            tests/test_espejos_symlink_frente_e.py \
+            tests/test_config_entorno.py tests/test_url_proveedor_workers_memoria.py \
+            tests/test_documentos_del_repo.py \
+            tests/test_requirements_completos.py \
+            tests/test_sin_autoetiqueta.py \
+            tests/test_errores_de_proveedor_redactados.py \
+            tests/test_cliente_http_compartido.py \
+            tests/test_conftest_aisla_facet_seal.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -745,8 +779,9 @@ jobs:
           #   parsea (SyntaxError) se saltaba en silencio -- ahora hace fallar el
           #   tripwire con su ruta salvo excepción explícita en _NO_PARSEA (+1:
           #   un archivo roto no declarado se reporta; el único caso real del
-          #   árbol, _director_patch/routes_block.py, se verifica declarado y sin
-          #   romper la corrida). Las 9 formas nuevas, vistas en rojo contra el
+          #   árbol entonces, _director_patch/routes_block.py, se verificaba
+          #   declarado -- retirado el 2026-09-16 (E-01): el control se ejercita
+          #   con un .py roto de mentira). Las 9 formas nuevas, vistas en rojo contra el
           #   detector viejo antes del arreglo (verificado aparte, no en CI).
           # 176 -> 199 el 2026-09-14 (PR-K, contrato de dispatch en el REPL y en Ada):
           #   test_contrato_dispatch_repl_ada.py (+19) -- el payload del HttpMuscle
@@ -924,8 +959,30 @@ jobs:
           #   test_ejecutor_prioridad.py (11 async + 1 del arreglo del carril sync, que
           #   colgaba sin tope la segunda peticion paralela) y +18 del proxy nuevo.
           #   CONFIRMADO POR EL RUNNER (3.12, PR #173): "742 passed, 1 skipped, 1 xfailed".
-          grep -qE "^742 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 742 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 742 -> 850 el 2026-09-17 (frente E de la auditoria, rebasado sobre 70e4303):
+          #   +108. Once archivos nuevos: config_entorno 19, plan_facetas_de_la_tabla 12,
+          #   errores_de_proveedor_redactados 12, cliente_http_compartido 11,
+          #   url_proveedor_workers_memoria 11, frente_e_retiros 9,
+          #   espejos_symlink_frente_e 8, requirements_completos 5, sin_autoetiqueta 5,
+          #   max_steps_una_sola_constante 4, documentos_del_repo 3 (= 99); y en
+          #   archivos que ya estaban: payload_max_tokens +4, aiomysql_connect_timeout +2,
+          #   no_blocking_in_async +2 (controles fuera del checkout) y
+          #   ejecutor_proxy_carril +1 (el reenvio sin tope de lectura, tras pasar el
+          #   proxy a crear_cliente_http()). Contado por archivo con --collect-only
+          #   contra master. MEDIDO en local (3.14) simulando el runner (sin
+          #   checkout de jax-platform): "850 passed, 1 skipped, 1 xfailed", dos
+          #   corridas; master en el mismo entorno da 742/1, igual que su runner.
+          #   Si el runner da otro numero, manda el runner.
+          # 850 -> 853 el 2026-09-17 (aislamiento de JAX_FACET_SEAL_PATH en el
+          #   conftest): +3 en tests/test_conftest_aisla_facet_seal.py (nuevo
+          #   -- ver DEUDA.md/CONTEXT.md). Delta medido local (3.14): 851/1
+          #   xfailed/0 skipped sin el archivo, 854/1 xfailed/0 skipped con
+          #   el archivo -- el +3 es lo que importa acá; el 1 skipped que
+          #   documentaba el corte anterior es un drift preexistente de este
+          #   entorno (3.14 vs el runner en 3.12), no algo que este cambio
+          #   toque. Si el runner da otro numero, manda el runner.
+          grep -qE "^853 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 853 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -965,6 +1022,17 @@ jobs:
         with:
           # 3.14: la del backend de jax-platform, con la que se reprodujo.
           python-version: "3.14"
+      # El sello de facet_resolver a un directorio temporal del runner, ANTES de
+      # las migraciones y de los tests (los dos importan facet_resolver, que lee
+      # la ruta al importarse). Sin la variable, la ruta por omision es la de
+      # produccion, /srv/jax-data/facet-cache-seal: el 2026-09-17 un agente que
+      # reprodujo este job en hall9000 sin fijarla le cambio el mtime al sello
+      # real (01:51:21, sin cambio de datos) -- y un toque del sello invalida
+      # la cache de facetas de TODOS los procesos. Declararlo aca hace que copiar
+      # los pasos del job lleve la barrera con ellos. `runner.temp` no existe en
+      # el `env` del job: se exporta por GITHUB_ENV.
+      - name: Sello de facet_resolver fuera de /srv
+        run: echo "JAX_FACET_SEAL_PATH=$RUNNER_TEMP/facet-cache-seal" >> "$GITHUB_ENV"
       - name: Clonar jax-platform (sus migraciones crean la gobernanza)
         run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
       - run: pip install -r /tmp/jax-platform/backend/requirements.txt pytest
@@ -988,6 +1056,7 @@ jobs:
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
+          tests/test_facetas_de_gobernanza_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -996,6 +1065,7 @@ jobs:
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
+            tests/test_facetas_de_gobernanza_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1012,5 +1082,10 @@ jobs:
           #   test_contrato_dispatch_db.py deja de depender de filas sembradas: cada
           #   test crea y borra SU fila de `model` (glm-5.2 no existe con la semilla
           #   de PR-L y rompio este job en Jax#158).
-          grep -qE "^27 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 27 tests CORRIDOS."; exit 1; }
+          # 27 -> 29 el 2026-09-17 (frente E, E-17): tests/test_facetas_de_gobernanza_db.py
+          #   (+2) -- las facetas del planner salen de la tabla `facet` real sembrada
+          #   por las migraciones. Medido en local (3.14, jax_memory_test con las
+          #   migraciones de jax-platform c53ef30), dos corridas: 29 passed; master
+          #   70e4303 en el mismo entorno: 27.
+          grep -qE "^29 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 29 tests CORRIDOS."; exit 1; }

@@ -65,13 +65,11 @@ facets_jax:
   ada: {}
 
 motors:
-  # Fuente: las_manos/config.toml, secciones [motors.*]. Lista parcial —
-  # el catálogo completo de motores/modelos vive en la tabla MariaDB
-  # `facet_models` (ver ~/.claude/CLAUDE.md, sección STACK JAX: "modelo
-  # activo vía tabla facet_models, no hardcodear el nombre, cambia") y en
-  # las_manos/model_catalog.py, no auditados exhaustivamente en esta
-  # migración — solo se transcribe lo verificado directamente en
-  # config.toml.
+  # Fuente: tabla `motor` de jax_memory (MotorCatalog.from_db(), R4) --
+  # la fila de cada motor y su modelo (jax/core/model_catalog.py, symlink
+  # en las_manos/). Lista parcial: solo los motores que este vocabulario
+  # necesita nombrar. Hasta 2026-09-16 citaba las secciones [motors.*] de
+  # las_manos/config (formato TOML), que ya no se leían (E-08).
   kimi: {}
   ada: {}
 

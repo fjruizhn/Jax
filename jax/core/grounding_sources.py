@@ -32,6 +32,14 @@ from urllib.parse import urlparse
 
 import httpx
 
+try:
+    # Doble camino, como facet_resolver: este archivo corre como
+    # las_manos.grounding_sources (bare, symlink) en LAS MANOS/Jacobs, donde
+    # jax.core NO es importable, y como jax.core.grounding_sources en el REPL.
+    from cliente_http_compartido import obtener_cliente_http
+except ImportError:
+    from jax.core.cliente_http_compartido import obtener_cliente_http
+
 logger = logging.getLogger(__name__)
 
 _REDIRECT_HOST = "vertexaisearch.cloud.google.com"
@@ -80,10 +88,10 @@ async def _resolve_one(client: httpx.AsyncClient, source: dict) -> None:
         return
     location = None
     try:
-        head = await client.head(url, follow_redirects=False)
+        head = await client.head(url, follow_redirects=False, timeout=RESOLVE_TIMEOUT_SECONDS)
         location = head.headers.get("location") if head.is_redirect else None
         if not location:
-            async with client.stream("GET", url, follow_redirects=False) as resp:
+            async with client.stream("GET", url, follow_redirects=False, timeout=RESOLVE_TIMEOUT_SECONDS) as resp:
                 location = resp.headers.get("location") if resp.is_redirect else None
     except httpx.HTTPError as exc:
         logger.warning("Fuente '%s': redirección no resuelta (%s)", source.get("title"), exc)
@@ -121,14 +129,12 @@ def _merge_by_final_url(sources: list[dict]) -> None:
 async def resolve_redirects(sources: list[dict], client: httpx.AsyncClient | None = None) -> list[dict]:
     """Agrega `final_url` y `resolved` a cada fuente, todas en paralelo, y
     fusiona las que resultan ser el mismo documento (ver _merge_by_final_url).
-    `client` es para tests (MockTransport); en producción se crea uno."""
+    `client` es para tests (MockTransport); en producción, el cliente
+    compartido del proceso (E-24)."""
     if not sources:
         return sources
-    if client is None:
-        async with httpx.AsyncClient(timeout=RESOLVE_TIMEOUT_SECONDS) as own:
-            await asyncio.gather(*(_resolve_one(own, s) for s in sources))
-    else:
-        await asyncio.gather(*(_resolve_one(client, s) for s in sources))
+    cliente = client if client is not None else obtener_cliente_http()
+    await asyncio.gather(*(_resolve_one(cliente, s) for s in sources))
     _merge_by_final_url(sources)
     return sources
 

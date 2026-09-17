@@ -50,6 +50,7 @@ from pathlib import Path
 import h11
 import httpx
 
+from jax.core.cliente_http_compartido import crear_cliente_http
 from jax.ejecutor.cita import Motivo
 from jax.ejecutor.prioridad import ESPERA_AGOTADA, EsperaAgotada, carril_ejecutor_async
 
@@ -70,6 +71,8 @@ _NO_REENVIAR = frozenset({
     b"host", b"content-length",
 })
 _NO_DEVOLVER = _NO_REENVIAR - {b"content-length"}
+
+_TIMEOUT_UPSTREAM = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
 
 
 class ConfigInvalida(ValueError):
@@ -167,11 +170,12 @@ def _ruta_sin_query(destino: bytes) -> str:
 class _Proxy:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        # Un cliente compartido (pool de conexiones), no uno por petición.
-        # Sin tope de lectura: el primer byte puede tardar lo que tarde la cola
-        # de Ollama; el corte lo decide el cliente, y el proxy lo ve.
-        self.cliente = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=None, write=None, pool=None))
+        # Un cliente propio del proxy (pool de conexiones), no uno por petición:
+        # vive lo que vive el servidor y se cierra en `cerrar()`. Se construye con
+        # crear_cliente_http() (E-24, el único constructor del árbol de servicio)
+        # y no con obtener_cliente_http(): cerrar el del proceso al apagar el
+        # proxy cerraría el de cualquier otro usuario del mismo loop.
+        self.cliente = crear_cliente_http()
 
     async def cerrar(self) -> None:
         await self.cliente.aclose()
@@ -214,7 +218,11 @@ class _Proxy:
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
                 solicitud = self.cliente.build_request(
                     metodo, self.cfg.upstream + peticion.target.decode("latin-1"),
-                    headers=cabeceras, content=cuerpo)
+                    headers=cabeceras, content=cuerpo,
+                    # Sin tope de lectura: el primer byte puede tardar lo que
+                    # tarde la cola de Ollama; el corte lo decide el cliente, y
+                    # el proxy lo ve. Por petición: el default del cliente es 5 s.
+                    timeout=_TIMEOUT_UPSTREAM)
                 try:
                     respuesta = await self.cliente.send(solicitud, stream=True)
                 except httpx.HTTPError as exc:

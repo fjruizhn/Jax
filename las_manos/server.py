@@ -28,7 +28,6 @@ import json
 import logging
 import os
 import time
-import uuid
 import secrets
 import hashlib
 import tomllib
@@ -278,6 +277,13 @@ async def _jacobs_init() -> None:
             "algo recreó el directorio sin su .git.",
             WORKSPACE_ROOT,
         )
+
+
+@app.on_event("shutdown")
+async def _cerrar_cliente_http() -> None:
+    """E-24: el cliente HTTP compartido del proceso se cierra al apagar."""
+    from cliente_http_compartido import cerrar_cliente_http
+    await cerrar_cliente_http()
 
 
 app.include_router(motor_router)
