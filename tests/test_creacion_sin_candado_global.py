@@ -86,3 +86,52 @@ def test_policy_ya_no_decide_el_cupo_con_un_conteo_recibido():
 @pytest.mark.parametrize("nombre", ["reservar_cupo", "soltar_reserva", "completar_reserva"])
 def test_cupo_expone_el_contrato_completo(nombre):
     assert callable(getattr(cupo, nombre))
+
+
+# ---------------------------------------------------------------------------
+#  Qué estados ocupan cupo: el contrato que tiene que ponerse rojo solo
+# ---------------------------------------------------------------------------
+# Pedido del coordinador (2026-09-17): que el próximo que agregue un estado se
+# entere por un rojo, no por un cupo mal contado en producción. El frente G ya
+# trae `queued`, `awaiting_approval` y `waiting_children`.
+
+def test_todo_estado_de_pipeline_esta_clasificado():
+    """Partición EXHAUSTIVA de `PipelineStatus`. Un estado nuevo sin clasificar
+    es un cupo mal contado: si es un estado vivo y queda afuera, entran más
+    pipelines de los permitidos y nadie se entera."""
+    from jacobs.models import PipelineStatus
+
+    clasificados = set(cupo.ESTADOS_QUE_OCUPAN_CUPO) | set(cupo.ESTADOS_SIN_CUPO)
+    sin_clasificar = set(PipelineStatus) - clasificados
+    assert sin_clasificar == set(), (
+        f"estados de pipeline sin clasificar en jacobs/cupo.py: "
+        f"{sorted(e.value for e in sin_clasificar)}. Decidí si ocupan cupo y "
+        "agregalos a ESTADOS_QUE_OCUPAN_CUPO o a ESTADOS_SIN_CUPO."
+    )
+    assert not (set(cupo.ESTADOS_QUE_OCUPAN_CUPO) & set(cupo.ESTADOS_SIN_CUPO))
+
+
+def test_la_sentencia_cuenta_exactamente_los_estados_declarados():
+    """La lista de la sentencia no puede escribirse a mano aparte del contrato:
+    se genera de él, y esto lo comprueba sobre el SQL que de verdad corre."""
+    sql = cupo.SQL_RESERVAR
+    for estado in cupo.ESTADOS_QUE_OCUPAN_CUPO:
+        assert f"'{estado.value}'" in sql, estado
+    for estado in cupo.ESTADOS_SIN_CUPO:
+        assert f"'{estado.value}'" not in sql, estado
+
+
+def test_la_otra_copia_del_criterio_cuenta_lo_mismo():
+    """`store.pipeline_count_active()` es la OTRA copia del criterio y vive en
+    un archivo que esta rama no toca. Si las dos se desincronizan, el mensaje
+    del rechazo y la decisión hablarían de cosas distintas."""
+    import re
+
+    from jacobs import store
+
+    fuente = inspect.getsource(store.pipeline_count_active)
+    en_store = set(re.findall(r"'([a-z_]+)'", fuente))
+    assert en_store == {e.value for e in cupo.ESTADOS_QUE_OCUPAN_CUPO}, (
+        f"store.pipeline_count_active() cuenta {sorted(en_store)} y el cupo cuenta "
+        f"{sorted(e.value for e in cupo.ESTADOS_QUE_OCUPAN_CUPO)}"
+    )

@@ -76,17 +76,50 @@ MAX_REINTENTOS_DEADLOCK = 12
 #: menos que lo que tarda planificar.
 ESPERA_MAXIMA_SEGUNDOS = 0.05
 
+# ---------------------------------------------------------------------------
+#  QUÉ ESTADOS OCUPAN CUPO — ESTO ES UN CONTRATO, NO UNA LISTA DE CONVENIENCIA
+# ---------------------------------------------------------------------------
+# La sentencia de abajo cuenta el cupo con estos estados y NADA MÁS. Agregar un
+# estado nuevo a `PipelineStatus` sin decidir de qué lado cae **cuenta mal el
+# cupo en producción y no lo avisa nadie**: un estado vivo que quede afuera deja
+# entrar más pipelines de los permitidos. Es riesgo concreto y con fecha: el
+# frente G agrega `queued`, `awaiting_approval` y `waiting_children` (decisión de
+# Fernando sobre cuáles ocupan cupo, 2026-09-17).
+#
+# Por eso la partición es EXHAUSTIVA y hay controles que se ponen rojos solos:
+#   - `tests/test_creacion_sin_candado_global.py` exige que TODO miembro de
+#     `PipelineStatus` esté clasificado acá, y que la sentencia use exactamente
+#     `ESTADOS_QUE_OCUPAN_CUPO`;
+#   - el mismo archivo compara esta lista contra la de
+#     `store.pipeline_count_active()`, que es la otra copia del criterio y vive
+#     en un archivo que esta rama no toca;
+#   - `jacobs/_cupo_io_test.py` falla si en `jacobs_pipelines` aparece un estado
+#     que `PipelineStatus` no conoce (otro servicio o otra rama escribiendo un
+#     estado que acá no está clasificado).
+ESTADOS_QUE_OCUPAN_CUPO = (PipelineStatus.pending, PipelineStatus.running)
+
+#: El otro lado de la partición, declarado y no implícito. `interrupted` NO ocupa
+#: cupo: es la semántica heredada de `store.pipeline_count_active()` y esta rama
+#: no la cambia (un pipeline interrumpido espera un /resume humano; si ocupara
+#: cupo, tres interrupciones sin atender frenarían la Mesa entera).
+ESTADOS_SIN_CUPO = (
+    PipelineStatus.completed, PipelineStatus.failed, PipelineStatus.aborted,
+    PipelineStatus.interrupted, PipelineStatus.expired,
+)
+
+_EN_VIVOS = ",".join(f"'{e.value}'" for e in ESTADOS_QUE_OCUPAN_CUPO)
+
 #: LA sentencia que decide. Una sola, autocommit, y se juzga por `rowcount`.
 #: `FROM DUAL` para que el SELECT no tenga tabla de origen: lo único que se lee
 #: es el COUNT del cupo.
-SQL_RESERVAR = """
+SQL_RESERVAR = f"""
 INSERT INTO jacobs_pipelines
     (pipeline_id, name, invoked_by, mode, status, plan, current_step_index,
      max_steps, context_refs, created_at, updated_at, user_id, tenant_id,
      parent_pipeline_id, depth)
 SELECT %s, %s, %s, %s, %s, '[]', 0, %s, %s, %s, %s, %s, %s, NULL, 0
 FROM DUAL
-WHERE (SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')) < %s
+WHERE (SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ({_EN_VIVOS})) < %s
 """
 
 #: Completa la reserva con lo que sólo se sabe después: el plan, y —para un hijo

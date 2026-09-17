@@ -301,17 +301,18 @@ jobs:
           #   uso, inventado, vencido, 20 consumos a la vez -> 1 gana, EXPLAIN por PK.
           #   Mutacion: quitar `usado_at IS NULL` del UPDATE -> 2 rojos (un solo uso y
           #   la carrera).
-          # 109 -> 119 el 2026-09-17 (el cupo lo hace cumplir la base):
-          #   jacobs/_cupo_io_test.py (+10) -- 25 y 50 corrutinas reservando a la vez sin
+          # 109 -> 120 el 2026-09-17 (el cupo lo hace cumplir la base):
+          #   jacobs/_cupo_io_test.py (+11) -- 25 y 50 corrutinas reservando a la vez sin
           #   superar el cupo y sin un solo deadlock sin reintentar, soltar devuelve el cupo,
           #   soltar no toca un pipeline que ya arranco, completar escribe plan/identidad/padre,
           #   fail-closed sin base y con el reintento agotado, EXPLAIN de la sentencia REAL por
           #   idx_pipelines_status, y por la ruta completa: 10 POST /jacobs/pipeline a la vez
           #   admiten exactamente MAX_PARALLEL_PIPELINES (y en menos de 0,35 s: con el candado
           #   global esas diez planificaciones de 50 ms se serializaban en 0,5 s) y un plan
-          #   rechazado devuelve el cupo. Medido en local (3.14) contra jax_memory_test.
-          grep -qE "^119 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 119 tests CORRIDOS (no skipeados)."; exit 1; }
+          #   rechazado devuelve el cupo; y que la tabla REAL no traiga un estado que PipelineStatus no
+          #   clasifica (el frente G trae `queued`). Medido en local (3.14) contra jax_memory_test.
+          grep -qE "^120 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 120 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -1464,14 +1465,18 @@ jobs:
           #   cuando se retira funcionalidad y se dice; aca ni siquiera baja.
           #   Los dos archivos entran a las DOS listas. Si el runner da otro
           #   numero, manda el runner.
-          # 1603 -> 1611 el 2026-09-17 (el cupo lo hace cumplir la base): las DOS listas suman
-          #   tests/test_creacion_sin_candado_global.py (8: routes.py sin candado de modulo, el nombre
+          # 1603 -> 1614 el 2026-09-17 (el cupo lo hace cumplir la base): las DOS listas suman
+          #   tests/test_creacion_sin_candado_global.py (11: routes.py sin candado de modulo, el nombre
           #   viejo fuera del CODIGO —no del comentario que cuenta por que se fue—, create_pipeline sin
-          #   acquire, la sentencia del cupo entera en una sola, validate_create sin active_count y el
-          #   contrato de jacobs/cupo.py). Vistos en rojo contra master (ImportError de jacobs.cupo, y
-          #   el barrido del Lock global con el candado puesto). Si el runner da otro numero, manda el runner.
-          grep -qE "^1611 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1611 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          #   acquire, la sentencia del cupo entera en una sola, validate_create sin active_count, el
+          #   contrato de jacobs/cupo.py, y los TRES del contrato de estados: particion exhaustiva de
+          #   PipelineStatus, la sentencia cuenta exactamente los declarados, y store.pipeline_count_active
+          #   —la otra copia del criterio— cuenta lo mismo). Vistos en rojo contra master (ImportError de
+          #   jacobs.cupo, y el barrido del Lock global con el candado puesto); el de la particion,
+          #   validado por MUTACION: agregando `queued` a PipelineStatus se pone rojo nombrandolo.
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^1614 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1614 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

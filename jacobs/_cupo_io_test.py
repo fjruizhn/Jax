@@ -182,7 +182,29 @@ class CupoEnLaBaseTest(unittest.IsolatedAsyncioTestCase):
                 await cupo.reservar_cupo(_pipeline(PREFIJO + "trabado"), limite=3)
         self.assertEqual(await self._vivos(), 0)
 
-    # ---- 5. el plan de la consulta REAL ---------------------------------
+    # ---- 5. un estado que el cupo no conoce es un cupo mal contado -------
+
+    async def test_la_tabla_no_trae_un_estado_que_el_cupo_no_clasifica(self):
+        """Contra la tabla REAL: si otro servicio u otra rama escribe un estado
+        que `PipelineStatus` no conoce (el frente G trae `queued`,
+        `awaiting_approval` y `waiting_children`), el cupo lo cuenta como "no
+        ocupa" sin que nadie lo haya decidido. Esto se pone rojo antes."""
+        from jacobs.models import PipelineStatus
+
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT DISTINCT status FROM jacobs_pipelines")
+                en_la_tabla = {fila[0] for fila in await cur.fetchall()}
+
+        conocidos = {e.value for e in PipelineStatus}
+        desconocidos = en_la_tabla - conocidos
+        self.assertEqual(
+            desconocidos, set(),
+            f"jacobs_pipelines trae estados que jacobs/cupo.py no clasifica: "
+            f"{sorted(desconocidos)}. Decidí si ocupan cupo antes de que lo decida el silencio.",
+        )
+
+    # ---- 6. el plan de la consulta REAL ---------------------------------
 
     async def test_explain_de_la_reserva_usa_el_indice_de_status(self):
         """EXPLAIN sobre la sentencia REAL (Principio I y política 1 de LAS
