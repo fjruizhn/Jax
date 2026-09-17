@@ -424,7 +424,20 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
             status_code=409,
             detail=f"Pipeline ya finalizado con status '{pipeline.status.value}'",
         )
-    await store.pipeline_update_status(pipeline_id, PipelineStatus.aborted)
+    # F6 (ola final): compare-and-set con la época y el status LEÍDOS. Sin
+    # condición, un /continue o /resume que tomó la época entre la lectura y
+    # esta escritura quedaba pisado (el pipeline recién relanzado pasaba a
+    # aborted). Si cambió, 409 de texto como el resto de los 409 de cancel.
+    if not await store.pipeline_update_status_si_epoca(
+        pipeline_id, pipeline.run_epoch, PipelineStatus.aborted, desde=(pipeline.status,),
+    ):
+        logger.info("cancel de %s no escrito: cambió después de leerlo (época %s, status %s)",
+                    pipeline_id, pipeline.run_epoch, pipeline.status.value)
+        raise HTTPException(
+            status_code=409,
+            detail="El pipeline cambió mientras se cancelaba (otro pedido lo reanudó, continuó o "
+                   "terminó): volvé a consultarlo",
+        )
     await store.event_append(pipeline_id, "PIPELINE_CANCELLED", {"by": "API request"})
     return {"pipeline_id": pipeline_id, "status": "aborted"}
 

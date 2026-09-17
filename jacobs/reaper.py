@@ -154,7 +154,16 @@ async def reap_orphaned_pipelines() -> list[dict]:
             continue
 
         try:
-            await store.pipeline_update_status(p.pipeline_id, PipelineStatus.expired)
+            # F6 (ola final): compare-and-set con la época y el status LEÍDOS
+            # en este barrido. Un /continue, /resume o el propio ejecutor que
+            # cambió la fila después de la lectura gana: no se pisa, y el
+            # próximo barrido la vuelve a evaluar con datos frescos.
+            if not await store.pipeline_update_status_si_epoca(
+                p.pipeline_id, p.run_epoch, PipelineStatus.expired, desde=(p.status,),
+            ):
+                logger.info("Reaper: %s no cosechado, cambió después de leerlo (época %s, status %s)",
+                            p.pipeline_id, p.run_epoch, p.status.value)
+                continue
             await store.event_append(p.pipeline_id, "REAPED", {
                 "prev_status": p.status.value, "reason": reason,
             })

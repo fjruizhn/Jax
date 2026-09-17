@@ -613,6 +613,7 @@ jobs:
           tests/test_prevuelo_pool.py
           tests/test_perfil_prevuelo.py
           tests/test_medir_min_output_tokens.py
+          tests/test_jacobs_cancel_reaper_epoca.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -669,6 +670,7 @@ jobs:
             tests/test_prevuelo_pool.py \
             tests/test_perfil_prevuelo.py \
             tests/test_medir_min_output_tokens.py \
+            tests/test_jacobs_cancel_reaper_epoca.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1342,8 +1344,16 @@ jobs:
           #   cancela sin dejar tareas; terminado el vuelo, el siguiente pre-vuelo
           #   vuelve a sondear (control: no es caché). Rojo contra 014aeb0: 3 failed
           #   (10 y 5 sondas; cada pre-vuelo lanzaba y cancelaba la suya propia).
-          grep -qE "^1036 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1036 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1036 -> 1040 el 2026-09-17 (ola final de arreglos, F6):
+          #   test_jacobs_cancel_reaper_epoca.py (+4) -- cancel y el reaper escriben con
+          #   compare-and-set sobre la época y el status LEÍDOS
+          #   (pipeline_update_status_si_epoca, sin SQL nueva: su EXPLAIN por PRIMARY
+          #   ya está en test_run_epoch_db.py); si otro pedido cambió la fila, cancel
+          #   da 409 de texto sin evento y el reaper no cosecha ni emite REAPED (lo
+          #   registra en INFO). Rojo contra f22562e: 4 failed (escritura sin
+          #   condición).
+          grep -qE "^1040 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1040 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

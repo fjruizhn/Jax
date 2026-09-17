@@ -1,0 +1,90 @@
+"""cancel y el reaper escriben con compare-and-set sobre lo que leyeron (ola
+final F6, revisión final m7). Antes escribían `pipeline_update_status` sin
+condición: un /continue o /resume que tomó la época entre la lectura y la
+escritura quedaba pisado -- el pipeline recién continuado pasaba a
+aborted/expired y su ejecutor nuevo moría. Ahora la escritura es
+`UPDATE ... WHERE pipeline_id AND run_epoch AND status` con lo leído
+(store.pipeline_update_status_si_epoca, EXPLAIN por PRIMARY en
+tests/test_run_epoch_db.py). Sin DB.
+
+En memoria de Jairo Urbina.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+from unittest.mock import AsyncMock, patch
+
+os.environ["JAX_DB_NAME"] = "jax_memory_test"
+
+import pytest  # noqa: E402
+from fastapi import HTTPException  # noqa: E402
+
+from jacobs import reaper, routes  # noqa: E402
+from jacobs.models import Pipeline, PipelineStatus  # noqa: E402
+
+
+def _pipeline(status=PipelineStatus.running, epoca=4, edad=0.0):
+    ahora = time.time()
+    return Pipeline(pipeline_id="p1", name="t", invoked_by="plataforma", mode="autonomous",
+                    status=status, run_epoch=epoca, created_at=ahora - edad, updated_at=ahora - edad)
+
+
+def _cancelar(pipeline, cas):
+    viejo, eventos = AsyncMock(), AsyncMock()
+    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=pipeline)), \
+         patch.object(routes.store, "pipeline_update_status", viejo), \
+         patch.object(routes.store, "pipeline_update_status_si_epoca", cas), \
+         patch.object(routes.store, "event_append", eventos):
+        try:
+            return asyncio.run(routes.cancel_pipeline("p1")), viejo, eventos
+        except HTTPException as exc:
+            return exc, viejo, eventos
+
+
+def test_cancel_escribe_con_la_epoca_y_el_status_leidos():
+    cas = AsyncMock(return_value=True)
+    r, viejo, eventos = _cancelar(_pipeline(PipelineStatus.interrupted, epoca=4), cas)
+    assert r == {"pipeline_id": "p1", "status": "aborted"}
+    cas.assert_awaited_once_with("p1", 4, PipelineStatus.aborted, desde=(PipelineStatus.interrupted,))
+    viejo.assert_not_awaited()
+    assert [c.args[1] for c in eventos.await_args_list] == ["PIPELINE_CANCELLED"]
+
+
+def test_cancel_sobre_un_pipeline_que_cambio_da_409_sin_evento():
+    r, viejo, eventos = _cancelar(_pipeline(PipelineStatus.running, epoca=4), AsyncMock(return_value=False))
+    assert isinstance(r, HTTPException) and r.status_code == 409
+    assert isinstance(r.detail, str) and "cambió" in r.detail
+    viejo.assert_not_awaited()
+    eventos.assert_not_awaited()
+
+
+def _cosechar(candidatos, cas):
+    viejo, eventos = AsyncMock(), AsyncMock()
+    with patch.object(reaper.store, "pipelines_by_status", AsyncMock(return_value=candidatos)), \
+         patch.object(reaper.store, "pipeline_update_status", viejo), \
+         patch.object(reaper.store, "pipeline_update_status_si_epoca", cas), \
+         patch.object(reaper.store, "event_append", eventos):
+        cosechados = asyncio.run(reaper.reap_orphaned_pipelines())
+    return cosechados, viejo, eventos
+
+
+def test_reaper_cosecha_con_la_epoca_y_el_status_leidos():
+    viejo_running = _pipeline(PipelineStatus.running, epoca=2, edad=reaper.RUNNING_STALE_SECONDS + 60)
+    cas = AsyncMock(return_value=True)
+    cosechados, viejo, eventos = _cosechar([viejo_running], cas)
+    assert [c["pipeline_id"] for c in cosechados] == ["p1"]
+    cas.assert_awaited_once_with("p1", 2, PipelineStatus.expired, desde=(PipelineStatus.running,))
+    viejo.assert_not_awaited()
+    assert [c.args[1] for c in eventos.await_args_list] == ["REAPED"]
+
+
+def test_reaper_no_pisa_un_pipeline_que_otro_tomo_despues_de_leerlo(caplog):
+    viejo_running = _pipeline(PipelineStatus.running, epoca=2, edad=reaper.RUNNING_STALE_SECONDS + 60)
+    with caplog.at_level("INFO", logger=reaper.logger.name):
+        cosechados, viejo, eventos = _cosechar([viejo_running], AsyncMock(return_value=False))
+    assert cosechados == []
+    viejo.assert_not_awaited()
+    eventos.assert_not_awaited()
+    assert any("p1" in m and "cambió" in m for m in caplog.messages), caplog.messages
