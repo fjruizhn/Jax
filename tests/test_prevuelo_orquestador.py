@@ -16,8 +16,8 @@ os.environ["JAX_DB_NAME"] = "jax_memory_test"
 import pytest  # noqa: E402
 
 from jacobs import prevuelo as pv  # noqa: E402
-from jacobs.executor import MAX_DEP_CONTEXT_CHARS  # noqa: E402
-from jacobs.models import Step  # noqa: E402
+from jacobs.executor import MAX_DEP_CONTEXT_CHARS, _build_context_input, _enrich_prompt  # noqa: E402
+from jacobs.models import Pipeline, Step  # noqa: E402
 from jacobs.prevuelo_catalogo import Catalogo, FilaFaceta, FilaModelo, MotorResuelto  # noqa: E402
 from jacobs.sonda import ResultadoSonda  # noqa: E402
 
@@ -192,3 +192,128 @@ def test_sonda_que_revienta_propaga_sin_dejar_tareas_pendientes(monkeypatch):
         assert pendientes == []
 
     asyncio.run(correr())
+
+
+# ---------------------------------------------------------------------
+# Fix round 1 (revisión de Task 8, 2026-09-17)
+# ---------------------------------------------------------------------
+
+def test_relleno_de_dependencia_faltante_no_subestima_una_real_sobredimensionada(monkeypatch):
+    """Hallazgo [Important] de la revisión: `_RELLENO_DE_DEPENDENCIA` medía
+    exactamente MAX_DEP_CONTEXT_CHARS -- el mismo largo que `_build_context_input`
+    deja pasar SIN marcarlo truncado (executor.py: `truncated = len(text) >
+    MAX_DEP_CONTEXT_CHARS`, estrictamente mayor). Una dependencia real que
+    de verdad excede el tope SÍ queda truncada, y `_enrich_prompt` le agrega
+    la nota " [TRUNCADO -- dependencia excede el tope]" (40 chars) al
+    armar el prompt -- el relleno del peor caso, sin esa nota, contaba 40
+    chars menos que un caso real. "Sobreestima, nunca subestima" (spec
+    §4.6) se rompía por code exacto en el borde.
+    Con el relleno viejo ("x" * MAX_DEP_CONTEXT_CHARS) este test da rojo:
+    el peor caso (sin ref) mide MENOS que una dependencia real de 2x el
+    tope, porque a esta última SÍ se le agrega la nota de truncado."""
+    _instalar(monkeypatch, _catalogo())
+    v_falta = _correr([_paso(0, "jekyll"), _paso(1, "jekyll", deps=[0])])
+
+    contexto = {"objective": "o",
+                "step_0_ref": "inline:" + json.dumps({"result": "z" * (2 * MAX_DEP_CONTEXT_CHARS)})}
+    v_real = _correr([_paso(0, "jekyll"), _paso(1, "jekyll", deps=[0])], contexto, pendientes={1})
+
+    assert v_falta.pasos_costo[1].tokens_in_max >= v_real.pasos_costo[0].tokens_in_max
+
+
+def test_motor_incluye_el_contexto_de_identidad_completo_con_separador(monkeypatch):
+    """M1 de la revisión: si el bloque de `_chars_de_entrada` que suma
+    `build_identity_context(...)` + el separador "\\n---\\n" se salteara para
+    un paso de motor, este valor pinneado (calculado con las MISMAS
+    funciones reales) dejaría de coincidir -- rojo bajo esa mutación."""
+    from motor_registry.identity_context import build_identity_context
+    from motor_registry.worker import _REFORMAS_V3_PREDICATES
+
+    motor = MotorResuelto("kimi", "http_openai_compat", "moonshot",
+                          "https://api.moonshot.example/v1", "kimi-k3", 8000, False, "")
+    _instalar(monkeypatch, _catalogo(salud={}), motores={0: motor})
+    paso = _paso(0, "kimi", capability="generate")
+    v = _correr([paso])
+
+    pipeline = Pipeline(name="prevuelo", invoked_by="plataforma", mode="autonomous",
+                        plan=[paso], context={"objective": "o"})
+    chars = len(_enrich_prompt(_build_context_input(paso, pipeline)))
+    chars += len(build_identity_context(
+        motor_name="kimi", capabilities=["generate"], catalog={},
+        predicates=_REFORMAS_V3_PREDICATES, task_id=pv._TASK_ID_DE_MEDIDA,
+    )) + len("\n---\n")
+    esperado = -(-chars // 2)  # JAX_PREVUELO_CHARS_POR_TOKEN=2, fijado por _instalar
+
+    assert v.pasos_costo[0].tokens_in_max == esperado
+
+
+def test_persona_de_la_faceta_suma_exactamente_su_largo_al_costo(monkeypatch):
+    """M2 de la revisión: si `+ len(d.persona or "")` se sacara de
+    `_chars_de_entrada`, el paso con persona mediría lo mismo que el paso
+    sin persona -- las dos igualdades pinneadas de abajo (y por lo tanto
+    su diferencia exacta) dejarían de cumplirse."""
+    persona = "Sos Jekyll: respondé con evidencia citada, sin inventar."
+    base = _catalogo()
+
+    _instalar(monkeypatch, base)
+    paso = _paso(0, "jekyll")
+    v_sin = _correr([paso])
+
+    catalogo_con = Catalogo(
+        facetas={"jekyll": FilaFaceta("jekyll", "http_openai_compat", persona, "deepseek",
+                                      "https://api.deepseek.example/v1", "deepseek-v4-flash")},
+        modelos=base.modelos, min_output_tokens={},
+        proveedores_con_credencial=frozenset({"deepseek"}),
+        salud={"jekyll": (AHORA - 60, "ok")},
+    )
+    _instalar(monkeypatch, catalogo_con)
+    v_con = _correr([paso])
+
+    pipeline = Pipeline(name="prevuelo", invoked_by="plataforma", mode="autonomous",
+                        plan=[paso], context={"objective": "o"})
+    chars_sin = len(_enrich_prompt(_build_context_input(paso, pipeline)))
+    chars_con = chars_sin + len(persona)
+    tokens_sin = -(-chars_sin // 2)
+    tokens_con = -(-chars_con // 2)
+
+    assert v_sin.pasos_costo[0].tokens_in_max == tokens_sin
+    assert v_con.pasos_costo[0].tokens_in_max == tokens_con
+    assert v_con.pasos_costo[0].tokens_in_max - v_sin.pasos_costo[0].tokens_in_max == tokens_con - tokens_sin
+
+
+def test_tokens_in_max_coincide_con_el_armado_real_del_ejecutor(monkeypatch):
+    """M5 de la revisión: si `_enrich_prompt`/`_build_context_input` se
+    reemplazaran por otra cosa dentro de `_chars_de_entrada`, este valor
+    -- calculado acá con las funciones REALES del ejecutor, no una
+    aproximación -- dejaría de coincidir con `tokens_in_max`."""
+    _instalar(monkeypatch, _catalogo())
+    paso = _paso(0, "jekyll")
+    v = _correr([paso])
+
+    pipeline = Pipeline(name="prevuelo", invoked_by="plataforma", mode="autonomous",
+                        plan=[paso], context={"objective": "o"})
+    chars = len(_enrich_prompt(_build_context_input(paso, pipeline)))
+    esperado = -(-chars // 2)
+
+    assert v.pasos_costo[0].tokens_in_max == esperado
+
+
+def test_medir_el_prompt_corre_por_asyncio_to_thread(monkeypatch):
+    """M6 de la revisión: si el `await asyncio.to_thread(_chars_de_entrada,
+    ...)` de `prevuelo()` se reemplazara por una llamada directa (bloqueante
+    en el loop), este espía -- que envuelve el `asyncio.to_thread` REAL, así
+    que el resultado no cambia -- dejaría de ver pasar `_chars_de_entrada`
+    por él."""
+    _instalar(monkeypatch, _catalogo())
+    real_to_thread = asyncio.to_thread
+    llamadas = []
+
+    async def espia(fn, *args, **kwargs):
+        llamadas.append(fn)
+        return await real_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr(pv.asyncio, "to_thread", espia)
+    v = _correr([_paso(0, "jekyll")])
+
+    assert pv._chars_de_entrada in llamadas
+    assert v.ok

@@ -1052,8 +1052,23 @@ jobs:
           #   motor resuelto (via_motor, tope de motor.max_tokens), paso con
           #   violación no se sondea, y una sonda que revienta en el
           #   asyncio.gather no deja la otra tarea huérfana.
-          grep -qE "^848 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 848 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 848 -> 853 el 2026-09-17 (Task 8, fix round 1 de la revisión):
+          #   +5 en test_prevuelo_orquestador.py -- el relleno del peor caso
+          #   de una dependencia sin ref pasa a MAX_DEP_CONTEXT_CHARS + 1
+          #   (antes medía exactamente el tope, que executor.py NO marca
+          #   truncado, y se quedaba 40 chars corto de una dependencia real
+          #   sobredimensionada -- visto en rojo: 30305 < 30325); más 4 que
+          #   pinnean el armado con las funciones REALES del ejecutor y dan
+          #   rojo bajo mutación: identidad+separador de un paso de motor
+          #   (rojo 245≠518 salteando el bloque via_motor), persona de la
+          #   faceta (rojo 245≠273 sacando `+ len(d.persona or "")`),
+          #   tokens_in_max contra `_enrich_prompt`/`_build_context_input`
+          #   reales (rojo 35≠245 cambiando `_enrich_prompt` por
+          #   `json.dumps`), y que `_chars_de_entrada` corre por
+          #   `asyncio.to_thread` (rojo: lista de llamadas vacía sacando el
+          #   `await asyncio.to_thread(...)`).
+          grep -qE "^853 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 853 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

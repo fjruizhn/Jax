@@ -51,7 +51,15 @@ from jacobs.prevuelo_reglas import (
 _TASK_ID_DE_MEDIDA = "00000000-0000-0000-0000-000000000000"
 # Una dependencia que todavía no corrió: el armado la recorta a
 # MAX_DEP_CONTEXT_CHARS (o a 500 si el paso no declara depends_on).
-_RELLENO_DE_DEPENDENCIA = "inline:" + json.dumps({"result": "x" * MAX_DEP_CONTEXT_CHARS})
+# +1 (fix round 1, revisión de Task 8, 2026-09-17): executor.py marca
+# `truncated` con `len(text) > MAX_DEP_CONTEXT_CHARS`, ESTRICTO. Un relleno
+# de exactamente el tope no se marca truncado y no lleva la nota
+# " [TRUNCADO -- dependencia excede el tope]" que `_enrich_prompt` le agrega
+# a una dependencia real que sí lo excede -- el peor caso contaba 40 chars
+# menos que un caso real (visto en rojo: 30305 < 30325 contra una
+# dependencia real de 2x el tope). "Sobreestima, nunca subestima" (spec
+# §4.6) exige cruzar el borde, no tocarlo.
+_RELLENO_DE_DEPENDENCIA = "inline:" + json.dumps({"result": "x" * (MAX_DEP_CONTEXT_CHARS + 1)})
 _SIN_FILA = FilaModelo(None, None, None, None)
 _SEPARADOR_DE_IDENTIDAD = "\n---\n"  # worker.run: identity + "\n---\n" + prompt
 
