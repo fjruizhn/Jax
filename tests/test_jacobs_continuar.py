@@ -547,3 +547,49 @@ def test_la_transaccion_de_continuar_tiene_plazo_y_no_retiene_el_candado(monkeyp
     espera, candado = asyncio.run(cuerpo())
     assert espera < 3, espera
     assert candado.entradas == candado.salidas == 1, "el candado quedó tomado"
+
+
+def test_un_commit_cortado_de_continuar_avisa_que_puede_haber_empezado(monkeypatch):
+    """Observación de la re-revisión final: R41 le dio a CREAR el aviso de
+    resultado incierto (el COMMIT salió y la respuesta no llegó: el pipeline
+    puede existir) y continuar quedó afuera. Si el plazo de m1 vence JUSTO en
+    el commit, el servidor pudo haber confirmado: la época quedaría
+    incrementada y el pipeline en `running` sin que nadie encolara
+    run_pipeline (lo rescata el reaper). El 503 tiene que decirlo.
+    Expected contra c0d4466: TimeoutError pelado (503 sin `detalle`)."""
+    monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
+
+    async def commit_que_no_responde(*a, estado=None, **kw):
+        if estado is not None:
+            estado.enviando_commit = True  # el COMMIT salió
+        await asyncio.sleep(3600)          # la respuesta nunca llega
+
+    async def cuerpo():
+        with _entorno() as m:
+            m["tx"].side_effect = commit_que_no_responde
+            with pytest.raises(continuar.ContinuarRechazado) as e:
+                await asyncio.wait_for(continuar.continuar("p1", "plataforma"), 5)
+            return e.value
+
+    rechazo = asyncio.run(cuerpo())
+    assert rechazo.status_code == 503
+    cuerpo_del_rechazo = rechazo.cuerpo()
+    assert cuerpo_del_rechazo["code"] == "prevuelo_no_disponible"
+    assert "puede haber empezado" in cuerpo_del_rechazo["detalle"]
+    assert "p1" in cuerpo_del_rechazo["detalle"]
+    assert cuerpo_del_rechazo["motivo"]
+
+
+def test_un_fallo_antes_del_commit_de_continuar_no_dice_incierto(monkeypatch):
+    """Control: si la transacción falla ANTES de mandar el COMMIT, nada quedó
+    escrito y el 503 no sugiere que el continue pueda haber empezado."""
+    async def se_cae_antes_de_confirmar(*a, estado=None, **kw):
+        raise RuntimeError("la base cortó antes del commit")
+
+    async def cuerpo():
+        with _entorno() as m:
+            m["tx"].side_effect = se_cae_antes_de_confirmar
+            with pytest.raises(RuntimeError):
+                await continuar.continuar("p1", "plataforma")
+
+    asyncio.run(cuerpo())

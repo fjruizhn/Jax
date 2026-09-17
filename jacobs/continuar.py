@@ -23,6 +23,8 @@ import logging
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from redaccion import recortar_redactado
+
 from jacobs import store
 from jacobs.candado import candado_de_creacion
 from jacobs.executor import RefIlegible, _load_ref
@@ -238,12 +240,32 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
             # GET_LOCK. Al vencer, la conexión de la transacción se cierra en
             # su propio finally (nada queda a medias) y el candado se suelta;
             # el endpoint responde 503 prevuelo_no_disponible.
-            async with asyncio.timeout(store.db_connect_timeout_seconds()):
-                nueva = await store.continuar_transaccion(
-                    pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
-                    [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
-                    evento_payload=evento_payload,
-                )
+            estado_tx = store.EstadoDeTransaccion()
+            try:
+                async with asyncio.timeout(store.db_connect_timeout_seconds()):
+                    nueva = await store.continuar_transaccion(
+                        pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
+                        [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
+                        evento_payload=evento_payload, estado=estado_tx,
+                    )
+            except BaseException as exc:
+                # Mismo mecanismo que crear (R41): si el corte o el plazo caen
+                # DURANTE el COMMIT, el servidor pudo haberlo confirmado -- la
+                # época quedaría incrementada y el pipeline en `running` sin
+                # que nadie encolara run_pipeline (lo rescata el reaper). El
+                # 503 lo dice; un reintento a ciegas lo continuaría dos veces.
+                # Si el corte fue ANTES del COMMIT no hay nada escrito y el
+                # error sube tal cual (el endpoint responde 503 sin `detalle`).
+                if not estado_tx.incierta:
+                    raise
+                raise ContinuarRechazado(503, "prevuelo_no_disponible", {
+                    "motivo": recortar_redactado(f"{type(exc).__name__}: {exc}", 300),
+                    "detalle": (
+                        f"Resultado incierto: la conexión se cortó mientras se confirmaba. "
+                        f"El continue del pipeline {pipeline_id} puede haber empezado: "
+                        f"revisá su estado antes de reintentar."
+                    ),
+                }) from exc
         if nueva is None:
             raise ContinuarRechazado(409, "estado_no_continuable", {
                 "status": None,

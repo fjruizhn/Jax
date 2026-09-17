@@ -397,7 +397,14 @@ def test_el_pool_nunca_tiene_mas_conexiones_vivas_que_su_tamano(entorno, monkeyp
     lotes c=1/10/25/50 y cuatro sostenidas c=50). Acá se fija la propiedad en
     proceso: con N pedidos a la vez nunca hay más conexiones ABIERTAS Y SIN
     CERRAR que el tamaño del pool. Control: verde también antes de R53; se
-    rompe con un pool que abra de más."""
+    rompe con un pool que abra de más.
+
+    QUÉ ASERCIÓN SOSTIENE LA AFIRMACIÓN (observación de la re-revisión final):
+    la del CONTEO DE APERTURAS (`len(base.aperturas) <= 4`). Ésa es la que un
+    pool que abra de más no puede pasar. `vivas_max` mide el máximo de
+    conexiones abiertas y sin cerrar EN EL INSTANTE de cada apertura, así que
+    con el mismo tope de aperturas nunca puede ser mayor: acompaña, no
+    prueba."""
     monkeypatch.setenv("JAX_DB_POOL_MAX", "4")
     base = entorno()
     _catalogo_vacio(monkeypatch)
@@ -409,8 +416,8 @@ def test_el_pool_nunca_tiene_mas_conexiones_vivas_que_su_tamano(entorno, monkeyp
             await store.cerrar_pool()
 
     asyncio.run(cuerpo())
+    assert len(base.aperturas) <= 4, base.aperturas  # la que sostiene la afirmación
     assert base.vivas_max <= 4, base.vivas_max
-    assert len(base.aperturas) <= 4
 
 
 def test_get_events_no_abre_conexion_por_pedido(entorno):

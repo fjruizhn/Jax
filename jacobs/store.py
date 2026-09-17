@@ -947,6 +947,7 @@ async def continuar_transaccion(
     context: dict,
     current_step_index: int,
     evento_payload: dict | None,
+    estado: EstadoDeTransaccion | None = None,
 ) -> int | None:
     """Escrituras de continue en UNA transacción (spec 2026-09-17 §5.2 regla
     10): bloquea la fila del pipeline, confirma que nadie la cambió desde el
@@ -963,7 +964,13 @@ async def continuar_transaccion(
     (época/status ya no coinciden, o -- cinturón, Ruling R23 -- el UPDATE
     final no tocó la fila que el SELECT...FOR UPDATE acababa de ver). Un error
     a mitad hace ROLLBACK: nada cambia, ni los pasos, ni el pipeline, ni el
-    evento."""
+    evento.
+
+    `estado` (EstadoDeTransaccion, re-revisión final): mismo mecanismo que
+    crear (R41). Si la conexión se corta o el plazo vence DURANTE el COMMIT,
+    desde acá no se puede saber si el servidor confirmó; queda
+    `estado.incierta` para que quien llama lo diga en su 503."""
+    estado = estado if estado is not None else EstadoDeTransaccion()
     conn = await get_conn(found_rows=True)
     try:
         await conn.begin()
@@ -993,7 +1000,9 @@ async def continuar_transaccion(
                         pipeline_id, None, "PIPELINE_CONTINUED",
                         json.dumps(evento_payload, ensure_ascii=False), time.time(),
                     ))
+            estado.enviando_commit = True
             await conn.commit()
+            estado.confirmada = True
         except BaseException:
             await conn.rollback()
             raise

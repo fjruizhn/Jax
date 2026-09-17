@@ -1560,8 +1560,13 @@ jobs:
           #   asyncio.Lock serializa HOY (build + pre-vuelo con sondas + transacción, y
           #   continuar toma el mismo objeto) y el test fija el texto y la identidad del
           #   objeto. Rojo contra 977fbe0: el texto no mencionaba el pre-vuelo ni la sonda.
-          grep -qE "^1135 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1135 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1135 -> 1137 el 2026-09-17 (re-revisión acotada): +2 en
+          #   test_jacobs_continuar.py -- si el plazo vence JUSTO en el COMMIT de continuar,
+          #   el 503 lleva `detalle` diciendo que el continue puede haber empezado (mismo
+          #   mecanismo de R41 que ya tenía crear: EstadoDeTransaccion); un fallo ANTES del
+          #   COMMIT no lo dice (control). Rojo contra c0d4466: TimeoutError pelado.
+          grep -qE "^1137 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1137 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
