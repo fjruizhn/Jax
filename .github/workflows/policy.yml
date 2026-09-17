@@ -753,6 +753,7 @@ jobs:
           tests/test_ejecutor_contratos_registro.py
           tests/test_ejecutor_contratos_lectura.py
           tests/test_ejecutor_contratos_cerco.py
+          tests/test_ejecutor_mision_de_humo.py
           tests/test_ejecutor_contratos_canario_c3.py
           tests/test_ejecutor_proxy_registro.py
           tests/test_ejecutor_carril_solo_en_el_proxy.py
@@ -848,6 +849,7 @@ jobs:
             tests/test_ejecutor_contratos_registro.py \
             tests/test_ejecutor_contratos_lectura.py \
             tests/test_ejecutor_contratos_cerco.py \
+            tests/test_ejecutor_mision_de_humo.py \
             tests/test_ejecutor_contratos_canario_c3.py \
             tests/test_ejecutor_proxy_registro.py \
             tests/test_ejecutor_carril_solo_en_el_proxy.py \
@@ -1334,8 +1336,25 @@ jobs:
           #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1486 passed, 1 skipped, 1 xfailed,
           #   16 subtests passed"; master 6563cb4 en las mismas condiciones da 1418 (= su runner).
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1486 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1486 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1486 -> 1503 el 2026-09-17 (Ejecutor: arranque acotado a la misión): las DOS listas ya tenian
+          #   test_ejecutor_contratos_arranque.py (+14: alcance, remotas del freno, mision solo a la VM
+          #   arranca, mision con atemai rechazada nombrandola, cerco abierto a una maquina sin contratos;
+          #   -1 caso freno_sin_remotos) y test_ejecutor_contratos_cerco.py (+3: solo local + remotas con
+          #   freno). Mutaciones (cmp previo, PYTHONDONTWRITEBYTECODE=1): C6 en todo el inventario -> 4
+          #   rojos (incluido el de la VM); sin rechazar la maquina de la mision -> 2; sin sonda de
+          #   alcance -> 2; cerco con todo el inventario -> 3. MEDIDO en local, env -i, sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1503 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed"; origin/master 9bb2887 da 53 en esos dos archivos, la rama 70.
+          #   Si el runner da otro numero, manda el runner.
+          # 1503 -> 1510 el 2026-09-17 (misión de humo real contra la VM desechable): las DOS listas suman
+          #   tests/test_ejecutor_mision_de_humo.py (6: stream de la jaula -> capturas con la maquina que ve
+          #   el gancho, afirmaciones fail-closed en arreglo o JSON Lines, sha256 igual al del registro de C3,
+          #   comandos con -tt) y test_ejecutor_contratos_cuenta_axioma.py +1 (la jaula tapa
+          #   /etc/ssh/ssh_config.d: dentro de bwrap los archivos de root se ven de 65534 y ssh no entraba a
+          #   ninguna maquina). Los dos vistos en rojo antes del arreglo. MEDIDO en local, env -i, las DOS
+          #   listas: "1510 passed, 1 skipped, 1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1510 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1510 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

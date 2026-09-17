@@ -49,5 +49,32 @@ def test_rechaza_lo_que_no_puede_ser(uid, puertos, destinos):
 def test_desde_la_politica(tmp_path):
     from jax.ejecutor.contratos import politica
     p = politica.cargar(escribir(tmp_path, doc_base()), uid_de_la_cuenta=OTRO_UID)
-    texto = cerco.desde_politica(p, 1001, (18435,))
-    assert "elements = { 192.0.2.5 . 58291, 192.0.2.11 . 58291, 192.0.2.20 . 58291 }" in texto
+    texto = cerco.desde_politica(p, 1001, (18435,), frozenset({"atemai"}))
+    assert "elements = { 192.0.2.5 . 58291, 192.0.2.11 . 58291 }" in texto
+
+
+def test_sin_remotas_habilitadas_solo_la_local(tmp_path):
+    """Una máquina sin contratos remotos (sin llave del freno) no entra al cerco: la cuenta no la alcanza."""
+    from jax.ejecutor.contratos import politica
+    p = politica.cargar(escribir(tmp_path, doc_base()), uid_de_la_cuenta=OTRO_UID)
+    assert "elements = { 192.0.2.5 . 58291 }" in cerco.desde_politica(p, 1001, (18435,), frozenset())
+
+
+def test_habilitada_fuera_de_la_politica_es_un_error(tmp_path):
+    from jax.ejecutor.contratos import politica
+    p = politica.cargar(escribir(tmp_path, doc_base()), uid_de_la_cuenta=OTRO_UID)
+    with pytest.raises(ValueError):
+        cerco.desde_politica(p, 1001, (18435,), frozenset({"otra"}))
+
+
+def test_principal_lee_las_remotas_del_freno(tmp_path, monkeypatch):
+    import pwd
+    ruta = escribir(tmp_path, doc_base())
+    monkeypatch.setattr(pwd, "getpwnam", lambda n: type("P", (), {"pw_uid": 1001})())
+    env = {"JAX_EJECUTOR_CUENTA": "axioma", "JAX_PROXY_CARRIL_PUERTO": "18435", "JAX_EJECUTOR_CANARIO_PUERTO": "18436",
+           "JAX_EJECUTOR_FRENO_REMOTOS": " bridge ,"}
+    assert cerco.principal([str(ruta), str(tmp_path / "c.nft")], env) == 0
+    assert "elements = { 192.0.2.5 . 58291, 192.0.2.20 . 58291 }" in (tmp_path / "c.nft").read_text()
+    del env["JAX_EJECUTOR_FRENO_REMOTOS"]
+    with pytest.raises(KeyError):
+        cerco.principal([str(ruta), str(tmp_path / "c.nft")], env)

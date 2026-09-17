@@ -59,6 +59,19 @@ def test_remoto_claude_va_en_la_jaula_y_sin_la_llave_en_argv():
     assert "hola 'mundo'" in palabras
 
 
+def test_la_jaula_tapa_los_includes_del_ssh_del_sistema():
+    """Dentro del espacio de usuarios de bwrap los archivos de root se ven de 65534, y ssh rechaza
+    un Include del sistema que no es de root («Bad owner or permissions»): sin tapar
+    /etc/ssh/ssh_config.d el Ejecutor no puede entrar por ssh a NINGUNA máquina. Visto 2026-09-17
+    en la misión de humo contra la VM desechable (hall9000 trae 20-systemd-ssh-proxy.conf)."""
+    remoto = CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="canario",
+                              prompt="x")
+    palabras = shlex.split(remoto.split(" && ", 1)[1].replace('"$K"', "K"))
+    i = palabras.index("bwrap")
+    jaula = palabras[i:palabras.index("--", i)]
+    assert ["--tmpfs", "/etc/ssh/ssh_config.d"] in [jaula[k:k + 2] for k in range(len(jaula))]
+
+
 def test_remoto_claude_con_tope_de_salida_lo_pasa_al_arnes():
     # SP3: el proxy rechaza `max_tokens` por encima de JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS; un
     # arnés que pasa por el proxy tiene que pedir ese tope, o todas sus peticiones dan 403.
