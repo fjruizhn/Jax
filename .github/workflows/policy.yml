@@ -791,6 +791,7 @@ jobs:
           tests/test_interruptor_heredada.py
           tests/test_subpipeline_contrato_puro.py
           tests/test_human_gate_sin_emision_http.py
+          tests/test_las_manos_auth_servicio.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -878,6 +879,7 @@ jobs:
             tests/test_interruptor_heredada.py \
             tests/test_subpipeline_contrato_puro.py \
             tests/test_human_gate_sin_emision_http.py \
+            tests/test_las_manos_auth_servicio.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1278,8 +1280,25 @@ jobs:
           #   MEDIDO en local (3.14), env limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT a una
           #   ruta que no existe: "1327 passed, 1 skipped, 1 xfailed, 16 subtests passed".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1327 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1327 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1151 -> 1188 el 2026-09-17 (LAS MANOS autentica a sus llamadores): +37 de
+          #   tests/test_las_manos_auth_servicio.py, en las DOS listas. Deny by default con
+          #   credencial de servicio; la identidad sale de la credencial. Visto en rojo
+          #   contra c7d59cc con server.app real: approve-step SIN credencial -> 200 y el
+          #   paso de Hyde aprobado; con el arreglo 401, con la credencial `jacobs` 403,
+          #   con `plataforma` 200. Mutaciones (cmp previo, PYTHONDONTWRITEBYTECODE=1):
+          #   saltar la verificacion -> 18 rojos; todo publico -> 25; sin permisos por
+          #   ruta -> 6; sin chequeo de identidad declarada -> 7; duplicadas aceptadas
+          #   -> 1; server.py sin proteger(app) -> 1; dispatch de Jacobs sin credencial
+          #   -> 1; jacobs declarando plataforma -> 1. MEDIDO en local (3.14), env limpio,
+          #   JAX_PLATFORM_REPO_ROOT inexistente: "1188 passed, 1 skipped, 1 xfailed, 16
+          #   subtests passed". Si el runner da otro numero, manda el runner.
+          # 1327 + 37 -> 1364 el 2026-09-17, restack de la autenticacion de servicio sobre el
+          #   human gate rebaseado (origin/master f3cf91a): las dos listas suman
+          #   tests/test_las_manos_auth_servicio.py. MEDIDO en local (3.14), env limpio, sin
+          #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1364 passed,
+          #   1 skipped, 1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1364 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1364 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

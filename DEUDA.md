@@ -415,10 +415,48 @@ su fecha de última verificación real, no una nueva.
   reabrir la ruta → 3 rojos, quitar el consumo del motor → 2 rojos, quitar `usado_at IS NULL` → 2 rojos (un uso, carrera).
 - **PENDIENTE 2026-09-18:** PR, CI, merge; deploy = reiniciar `jax-las-manos` (crea la tabla en el arranque, sin
   migración manual; comprobar antes `ActiveEnterTimestamp` contra los commits del checkout). Sin cambios en jax-platform.
-- **Sigue abierto (no es este arreglo), fecha 2026-09-24:** LAS MANOS no autentica al llamador. `facet_id`/`caller`/
+- **CORREGIDO 2026-09-17 (Mr. Hyde, ver "LAS MANOS autentica a sus llamadores"):** ~~Sigue abierto (no es este arreglo), fecha 2026-09-24:~~ LAS MANOS no autenticaba al llamador. `facet_id`/`caller`/
   `invoked_by` son declarados por el cuerpo: `POST /jacobs/pipeline/{id}/approve-step` con `invoked_by="plataforma"`
   aprueba steps de Hyde bloqueados en human gate desde cualquier proceso local; `/execute` con `facet_id="hyde"` ejecuta
   en staging sin gate; `/motor/dispatch` elige `caller`. Ver la entrada de Hyde en la sección de C3.
+
+## Cerrado en código, merge y despliegue pendientes — LAS MANOS autentica a sus llamadores (2026-09-17)
+
+- **HECHO (medido 2026-09-17, Mr. Hyde, rama `fix/las-manos-auth-servicio` sobre `fix/human-gate-sin-auth`):** con
+  `server.app` real de `c7d59cc` y la base sustituida, `POST /jacobs/pipeline/{id}/approve-step` SIN credencial y
+  `{"invoked_by": "plataforma"}` → 200 y el paso de Hyde en `blocked_human_gate` pasaba a `pending`. La jaula de Hyde
+  tiene red local (`--share-net`): Hyde se podía autoaprobar.
+- **Llamadores reales (grep en jax y jax-platform + journal de 7 días de `jax-las-manos`):** jax-platform
+  (`api/pipelines.py`: crear, leer, results, resume, cancel; `jax_engine/state.py`: sondeo de pipelines y `/health`;
+  `api/chat.py`: `/motor/authorize-facet`; tablero: `/health`) y Jacobs dentro del propio proceso
+  (`jacobs/executor.py`: `/motor/dispatch`, `/motor/job/{id}`, `/cancel`). **Nadie** llama `/execute`, `/plan` de LAS
+  MANOS, `/audit/tail` ni `approve-step` (la UI de hoy no aprueba pasos en gate: sólo `resume`). El REPL no llama a
+  LAS MANOS. El proxy del Ejecutor tampoco.
+- **DECISIÓN (autonomía de Fernando, 2026-09-17): credencial de servicio, no SO_PEERCRED.** Hyde, jax-platform y LAS
+  MANOS corren como `fruiz`: el uid del par no distingue a Hyde. Lo que los distingue es qué pueden leer: la jaula no
+  monta `/etc/jax`, corre con `--clearenv` y `--unshare-all` (PID propio: no ve `/proc/<pid>/environ` de los
+  servicios). `las_manos/auth_servicio.py`: middleware ASGI **deny by default** (público sólo `GET /health`), cabecera
+  `X-Jax-Credencial-Servicio`, `hmac.compare_digest` contra todas, identidades `plataforma`
+  (`JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA`: `/jacobs/*` + `POST /motor/authorize-facet`; declara `invoked_by=plataforma`,
+  `caller=jax_platform_chat`) y `jacobs` (`JAX_LAS_MANOS_CREDENCIAL_JACOBS`: `/motor/dispatch`, `/motor/job/*`,
+  `POST /jacobs/pipeline`; declara `caller=jacobs`, `invoked_by=ada`). Un `invoked_by`/`caller` del cuerpo que no es de
+  la credencial → 403 antes de la ruta; claves duplicadas → 400. **Sólo `plataforma` aprueba o reanuda.** Sin las
+  variables (o cortas, o iguales) LAS MANOS no arranca. `/execute`, `/plan` y `/audit/tail` no los alcanza ninguna
+  identidad. Rechazos con `code`, sin prosa. Una ruta nueva bajo `/jacobs/` queda sólo para `plataforma` sin tocar nada.
+- **jax-platform:** `backend/credencial_las_manos.py::encabezados_las_manos()` en cada pedido a LAS MANOS salvo
+  `/health` (rama `fix/las-manos-credencial-servicio`); guard AST en `tests/test_credencial_las_manos.py`.
+- **Pruebas:** `tests/test_las_manos_auth_servicio.py` (37, tests-puros 1151 → 1188). Mutaciones en policy.yml.
+  Carga (middleware aislado, 25 VUs, 15 s, hall9000): cuerpo de 1 KB p95 3,19 → 3,16 ms (10054 → 8650 req/s); cuerpo
+  de 200 KB (peor caso: prompt armado de `/motor/dispatch`) p95 7,91 → 9,47 ms (4133 → 2647 req/s). Tráfico real:
+  ~13 dispatch/semana.
+- **Despliegue (PENDIENTE 2026-09-18):** agregar las dos variables a `/etc/jax/.env` (`secrets.token_urlsafe(32)`,
+  distintas) → mergear y reiniciar **jax-platform primero** (manda la cabecera; LAS MANOS viejo la ignora) →
+  mergear y reiniciar `jax-las-manos` con 0 pipelines en vuelo. Comprobar `ActiveEnterTimestamp` contra los commits.
+- **Sigue abierto, fecha 2026-09-24:** (1) un proceso de `fruiz` FUERA de la jaula lee `/etc/jax/.env` (root:fruiz
+  660) y cualquier `/proc/<pid>/environ` de `fruiz`: contra eso no hay credencial que alcance; el cierre es otra
+  cuenta de servicio para LAS MANOS/jax-platform. (2) frente G (emisor de sub-pipelines de Ada) tiene que mandar
+  `headers=encabezado_propio(IDENTIDAD_JACOBS)`. (3) los apps de carga de `loadtest/` montan los routers sin
+  `proteger()`.
 
 ## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 2: C3 registro intocable y cerco (2026-09-17)
 
@@ -471,6 +509,8 @@ Orden: el PR de jax-platform se mergea ANTES (el job `jacobs-gobernanza-db` clon
 - **CORREGIDO 2026-09-17 (Mr. Hyde):** la emisión de tokens del human gate ya no tiene ruta HTTP (ver la sección
   "human gate de LAS MANOS sin emisión HTTP"). Lo que sigue abierto de esta entrada es la falta de autenticación del
   llamador (`approve-step`, `facet_id`, `caller` declarados por el cuerpo).
+- **CORREGIDO 2026-09-17 (Mr. Hyde):** LAS MANOS exige credencial de servicio (sección "LAS MANOS autentica a sus
+  llamadores"); lo que queda es un proceso de `fruiz` fuera de la jaula (ver allí).
 - **Verificación de cierre:** desde un `claude` sandboxeado de Hyde, `curl -X POST 127.0.0.1:7777/human_gate/token`
   falla; el mismo pedido desde LAS MANOS/Jacobs funciona.
 

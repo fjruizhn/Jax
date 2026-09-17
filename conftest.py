@@ -64,6 +64,13 @@ os.environ["JAX_USAGE_SPOOL_DIR"] = tempfile.mkdtemp(prefix="jax-test-respaldo-u
 os.environ["LAS_MANOS_URL"] = "http://las-manos.invalid:7777"
 os.environ["JAX_OLLAMA_URL"] = "http://ollama.invalid:11434"
 
+#: 2026-09-17 (autenticación de servicio de LAS MANOS): jacobs/executor.py manda
+#: la credencial `jacobs` en cada pedido a LAS MANOS y server.py no arranca sin
+#: las dos. Valores de prueba generados por sesión, NUNCA los de /etc/jax/.env.
+import secrets as _secrets  # noqa: E402
+os.environ["JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA"] = _secrets.token_urlsafe(32)
+os.environ["JAX_LAS_MANOS_CREDENCIAL_JACOBS"] = _secrets.token_urlsafe(32)
+
 #: E-22 (2026-09-16): el .md de cortesía de cada step se escribe en
 #: $JAX_REPO_BASE/documents. En producción es /home/fruiz/jax/repo, que el
 #: admin de jax-platform lista. Un test que ejercite _persist_step_to_repo no
