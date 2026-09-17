@@ -55,7 +55,13 @@ puede anotar, o lo que pasa no se puede leer, se corta: la herramienta nunca lle
 C5 (auditor en vivo, plan 4 de SP1): con la pausa del Ejecutor puesta, o sin un
 vigía que lata, el proxy responde 423 sin tocar el upstream, y el trozo que completa un
 `tool_use` no sale (se corta el stream DESPUÉS de anotarlo). Sin auditor no hay cerebro.
-El interruptor global de JAX lo suma el plan 3 (C4).
+
+C4 (freno en vuelo, plan 3 de SP1): el interruptor global de JAX (`JAX_KILL_SWITCH_PATH`,
+jax/core/interruptor.py, obligatorio: sin saber dónde está no arranca) frena igual que la
+pausa del Ejecutor. Con cualquiera de las dos puestas: 423 sin tocar el upstream (los
+resultados que ya corrieron se anotan igual), y lo que está en vuelo —esperando el carril,
+esperando al upstream o en pleno stream— se corta en menos de un segundo: 423 legible si
+todavía no salieron cabeceras, conexión abortada (stream truncado) si ya salieron.
 
 Corre con:  python -m jax.ejecutor.proxy_carril
 """
@@ -72,6 +78,7 @@ from pathlib import Path
 import h11
 import httpx
 
+from jax.core import interruptor
 from jax.core.cliente_http_compartido import crear_cliente_http
 from jax.ejecutor.cita import Motivo
 from jax.ejecutor.contratos import lectura
@@ -97,6 +104,7 @@ SALIDA_NO_PERMITIDA = "salida_no_permitida"
 #: upstream es el Ollama de producción: nada más llega. SP3 (2026-09-17) cerró también las
 #: lecturas: `/api/ps`, `/api/tags` o `/api/show` le dicen a la jaula qué hay cargado y con qué.
 _RUTAS_PERMITIDAS = frozenset({("HEAD", "/api/hello"), ("POST", "/v1/messages")})
+KILL_SWITCH_ACTIVO = "kill_switch_activo"
 _RUTAS_DE_MENSAJES = frozenset({"/v1/messages"})
 _RESULTADOS_RECORDADOS = 10000
 
@@ -280,18 +288,26 @@ class _Proxy:
                 return
             if peticion is None:
                 return
-            trabajo = asyncio.create_task(self._reenviar(conn, writer, peticion, cuerpo))
+            en_vuelo = asyncio.Event()
+            trabajo = asyncio.create_task(self._reenviar(conn, writer, peticion, cuerpo, en_vuelo))
             vigia = asyncio.create_task(_esperar_cierre(reader))
-            await asyncio.wait({trabajo, vigia}, return_when=asyncio.FIRST_COMPLETED)
+            # C4: el freno vigila sólo lo que ya está en vuelo. Antes, `_reenviar` mira el
+            # freno él mismo DESPUÉS de anotar los resultados: lo que ya corrió no se pierde.
+            freno = asyncio.create_task(self._esperar_freno(en_vuelo))
+            await asyncio.wait({trabajo, vigia, freno}, return_when=asyncio.FIRST_COMPLETED)
             if not trabajo.done():
-                # El cliente cortó antes de terminar: cancelar suelta el carril
+                # Cortó el cliente o se puso el freno: cancelar suelta el carril
                 # (espera o stream) y cierra la respuesta del upstream.
-                log.info("proxy_carril corte_cliente metodo=%s ruta=%s",
+                frenado = freno.result() if freno.done() else None
+                log.info("proxy_carril %s metodo=%s ruta=%s", frenado or "corte_cliente",
                          peticion.method.decode("latin-1"), _ruta_sin_query(peticion.target))
                 trabajo.cancel()
                 await asyncio.wait({trabajo})
-            vigia.cancel()
-            await asyncio.wait({vigia})
+                if frenado is not None:
+                    await _cortar_por_freno(conn, writer, frenado, peticion.method.decode("latin-1"))
+            for t in (vigia, freno):
+                t.cancel()
+            await asyncio.wait({vigia, freno})
             if not trabajo.cancelled() and trabajo.exception() is not None:
                 exc = trabajo.exception()
                 if not isinstance(exc, ConnectionError):
@@ -300,15 +316,32 @@ class _Proxy:
         finally:
             await _cerrar(writer)
 
-    def _frenado_ahora(self) -> str | None:
+    def _freno_puesto_ahora(self) -> str | None:
+        """C4: el interruptor de JAX o la pausa del Ejecutor (las dos frenan en vuelo)."""
+        try:
+            if interruptor.interruptor_activo():
+                return KILL_SWITCH_ACTIVO
+        except interruptor.InterruptorSinConfigurar:
+            return KILL_SWITCH_ACTIVO  # fail-closed: sin saber dónde está el interruptor se frena (arrancar ya lo exige; esto cubre que la variable desaparezca)
         if pausa_c5.pausa_puesta(self.cfg.pausa):
             return EJECUTOR_PAUSADO
+        return None
+
+    async def _esperar_freno(self, en_vuelo: asyncio.Event) -> str:
+        await en_vuelo.wait()
+        while (frenado := await asyncio.to_thread(self._freno_puesto_ahora)) is None:
+            await asyncio.sleep(interruptor.INTERVALO_DE_SONDEO)
+        return frenado
+
+    def _frenado_ahora(self) -> str | None:
+        if (puesto := self._freno_puesto_ahora()) is not None:
+            return puesto
         if not pausa_c5.latido_fresco(self.cfg.latido, self.cfg.latido_max_s):
             return VIGIA_SIN_LATIDO
         return None
 
     async def _frenado(self) -> str | None:
-        """C5: ¿la pausa del Ejecutor está puesta o el vigía dejó de latir? (stat: fuera del loop)."""
+        """C4/C5: ¿interruptor de JAX, pausa del Ejecutor, o vigía sin latido? (stat: fuera del loop)."""
         return await asyncio.to_thread(self._frenado_ahora)
 
     async def _anotar(self, evento: dict) -> None:
@@ -328,16 +361,20 @@ class _Proxy:
             while len(self._resultados_anotados) > _RESULTADOS_RECORDADOS:
                 self._resultados_anotados.popitem(last=False)
 
-    async def _reenviar(self, conn, writer, peticion: h11.Request, cuerpo: bytes) -> None:
+    async def _reenviar(self, conn, writer, peticion: h11.Request, cuerpo: bytes,
+                        en_vuelo: asyncio.Event | None = None) -> None:
         metodo = peticion.method.decode("latin-1")
         ruta = _ruta_sin_query(peticion.target)
         de_mensajes = metodo == "POST" and ruta in _RUTAS_DE_MENSAJES
-        # Orden: el freno de C5 ANTES que la política de rutas y de modelo/salida (SP3). Un
-        # freno no depende de que la petición sea válida: con la pausa puesta o el vigía sin
-        # latido, toda petición recibe 423, y el cuerpo (no confiable) ni se parsea. Ninguna de
-        # las dos comprobaciones toca el carril, el registro ni el upstream.
+        # Orden (C5 + SP3 + C4): con un freno puesto (interruptor de JAX, pausa del Ejecutor
+        # o vigía sin latido) TODA petición recibe 423 sin tocar el carril ni el upstream. La
+        # única que se lee antes de responder es un POST de mensajes que pasa la política de
+        # SP3 (modelo y salida): sus resultados de herramientas ya corrieron y tienen que
+        # quedar en el registro de C3 (C4: el freno no borra el rastro). Lo demás, bajo freno,
+        # ni se anota: una petición fuera de política no se anotaría tampoco sin freno.
         frenado = await self._frenado()
-        if frenado is not None:
+        fuera = _fuera_de_limites(cuerpo, self.cfg) if de_mensajes else None
+        if frenado is not None and (not de_mensajes or fuera is not None):
             log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
             await _responder_error(conn, writer, 423, Motivo(frenado),
                                    extra=((b"x-should-retry", b"false"),), metodo=metodo)
@@ -346,11 +383,11 @@ class _Proxy:
             log.warning("proxy_carril %s metodo=%s", RUTA_NO_PERMITIDA, metodo)
             await _responder_error(conn, writer, 403, Motivo(RUTA_NO_PERMITIDA), metodo=metodo)
             return
-        if de_mensajes and (codigo := _fuera_de_limites(cuerpo, self.cfg)) is not None:
+        if fuera is not None:
             # Antes del carril, del registro y del upstream: otro modelo desalojaría el de la
             # Mesa, y una salida sin tope rompe la cuenta de su espera (§6.3 del spec de Fase 2).
-            log.warning("proxy_carril %s metodo=%s ruta=%s", codigo, metodo, ruta)
-            await _responder_error(conn, writer, 403, Motivo(codigo), metodo=metodo)
+            log.warning("proxy_carril %s metodo=%s ruta=%s", fuera, metodo, ruta)
+            await _responder_error(conn, writer, 403, Motivo(fuera), metodo=metodo)
             return
         if de_mensajes:
             try:
@@ -360,6 +397,15 @@ class _Proxy:
                 log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
                 await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO), metodo=metodo)
                 return
+        # Después de anotar lo que ya corrió (C3) y antes de pedirle nada al cerebro.
+        frenado = await self._frenado()
+        if frenado is not None:
+            log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
+            await _responder_error(conn, writer, 423, Motivo(frenado),
+                                   extra=((b"x-should-retry", b"false"),), metodo=metodo)
+            return
+        if en_vuelo is not None:
+            en_vuelo.set()
         try:
             async with carril_ejecutor_async(self.cfg.raiz, self.cfg.tope_s):
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
@@ -472,6 +518,21 @@ async def _cerrar(writer: asyncio.StreamWriter) -> None:
         log.debug("proxy_carril cierre_con_conexion_perdida")
 
 
+async def _cortar_por_freno(conn: h11.Connection, writer: asyncio.StreamWriter, frenado: str,
+                            metodo: str = "") -> None:
+    """C4: sin cabeceras enviadas, 423 legible con `x-should-retry: false` (el arnés no
+    reintenta); con la respuesta ya empezada, abortar sin EndOfMessage: el arnés ve un
+    stream truncado, nunca uno completo."""
+    if conn.our_state is h11.SEND_RESPONSE:
+        try:
+            await _responder_error(conn, writer, 423, Motivo(frenado),
+                                   extra=((b"x-should-retry", b"false"),), metodo=metodo)
+            return
+        except (ConnectionError, h11.LocalProtocolError):  # fail-soft: el cliente ya no está o h11 no admite respuesta; se aborta igual abajo
+            log.info("proxy_carril corte_sin_respuesta codigo=%s", frenado)
+    writer.transport.abort()
+
+
 async def _esperar_cierre(reader: asyncio.StreamReader) -> None:
     """Con una petición por conexión, lo único que puede llegar después del
     pedido es el cierre. Los bytes de más se descartan."""
@@ -508,6 +569,7 @@ class Servidor:
 
 
 async def arrancar(cfg: Config) -> Servidor:
+    interruptor.ruta_del_interruptor()  # InterruptorSinConfigurar: sin saber dónde está el freno, no hay cerebro
     # Un registro que no cuadra NO se abre (RegistroCorrupto): sin registro no hay cerebro.
     registro = await asyncio.to_thread(Registro, cfg.registro)
     try:
