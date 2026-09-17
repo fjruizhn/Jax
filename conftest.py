@@ -98,17 +98,30 @@ os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
 os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
 
-#: El freno de PRODUCCIÓN que la barrera de sesión vigila (revisión final del
-#: frente B, 2026-09-17): el directorio del interruptor y la ruta heredada.
-#: La heredada se toma del módulo ANTES de que el fixture de abajo la desvíe,
-#: y no se escribe acá: su literal sólo vive en el módulo interruptor
-#: (tests/test_interruptor_sin_rutas_fijas.py). Es un ARCHIVO, no un
-#: directorio: se anota si existía al empezar para distinguir "apareció" de
-#: "ya estaba".
+#: El freno de PRODUCCIÓN que la barrera de sesión vigila: los DOS ARCHIVOS
+#: del interruptor (la ruta de JAX_KILL_SWITCH_PATH y la ruta heredada), NUNCA
+#: el directorio que los contiene. La heredada se toma del módulo ANTES de
+#: que el fixture de abajo la desvíe, y no se escribe acá: su literal sólo
+#: vive en el módulo interruptor (tests/test_interruptor_sin_rutas_fijas.py).
+#: FRENO_DE_PRODUCCION SÍ es literal acá, a propósito, igual criterio que
+#: RESPALDO_DE_PRODUCCION: es el valor real de JAX_KILL_SWITCH_PATH en
+#: /etc/jax/.env (verificado 2026-09-17 con `cat /etc/jax/.env`). Los dos son
+#: ARCHIVOS, no directorios: se anota si cada uno existía al empezar para
+#: distinguir "apareció" de "ya estaba".
+#:
+#: Hasta esta revisión (2026-09-17, false positive del frente B) el chequeo
+#: miraba el DIRECTORIO /etc/jax/interruptor entero (su mtime y sus
+#: entradas). Ese directorio es COMPARTIDO: otra sesión pone y suelta ahí
+#: `EJECUTOR_PAUSA` (la pausa del Ejecutor, que NO es el kill switch) como
+#: parte de una prueba de contrato legítima, y eso disparaba esta barrera
+#: contra corridas de tests completamente ajenas al freno real. Mirar SÓLO
+#: los dos archivos del freno (nunca el directorio ni otras entradas)
+#: elimina el falso positivo sin perder la detección de un toque real.
 from jax.core import interruptor as _interruptor  # noqa: E402
 
-FRENO_DE_PRODUCCION = Path("/etc/jax/interruptor")
+FRENO_DE_PRODUCCION = Path("/etc/jax/interruptor/PAUSE")
 HEREDADA_DE_PRODUCCION = Path(_interruptor.RUTA_HEREDADA)
+FRENO_EXISTIA_AL_INICIO = os.path.lexists(FRENO_DE_PRODUCCION)
 HEREDADA_EXISTIA_AL_INICIO = os.path.lexists(HEREDADA_DE_PRODUCCION)
 
 #: Los objetos módulo del interruptor. Son DOS distintos para el mismo archivo:
@@ -160,38 +173,47 @@ def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
     return sorted(nuevos)
 
 
-def cambios_del_freno_de_produccion(directorio, archivo, inicio: float, archivo_existia: bool) -> list[str]:
-    """Qué tocó la sesión en el freno de producción. Sólo LEE (stat/scandir):
-    nunca crea nada.
+def _cambio_de_archivo(archivo: Path, inicio: float, archivo_existia: bool) -> list[str]:
+    """Qué tocó la sesión en ESTE archivo. Sólo LEE (os.lstat): nunca crea
+    nada, y nunca mira el directorio que lo contiene.
 
-    - `directorio`: su propio mtime (altas y bajas de entradas) y el de cada
-      entrada. Que no exista son 0 cambios (el runner de CI).
-    - `archivo`: apareció (no existía al inicio), desapareció, o su mtime es
-      de esta sesión.
+    Apareció (no existía al inicio), desapareció, o su mtime es de esta
+    sesión: cambió. Fail-closed igual que `interruptor.pausa_presente`: un
+    error de stat que no sea "no existe" (permiso, ENOTDIR, E/S) cuenta como
+    PUESTO -- y sin poder saber si es nuevo, cuenta como cambio.
     """
-    cambios = []
-    try:
-        propio = os.stat(directorio)
-    except FileNotFoundError:
-        propio = None
-    if propio is not None:
-        if propio.st_mtime >= inicio:
-            cambios.append(str(directorio))
-        try:
-            entradas = list(os.scandir(directorio))
-        except PermissionError:  # fail-soft: sin permiso de listar, el mtime del directorio (ya mirado) delata altas y bajas
-            entradas = []
-        cambios += [e.path for e in entradas
-                    if e.stat(follow_symlinks=False).st_mtime >= inicio]
     try:
         estado = os.lstat(archivo)
     except FileNotFoundError:
         if archivo_existia:
-            cambios.append(f"{archivo} (desapareció)")
-        return cambios
+            return [f"{archivo} (desapareció)"]
+        return []
+    except OSError:
+        return [str(archivo)]
     if not archivo_existia or estado.st_mtime >= inicio:
-        cambios.append(str(archivo))
-    return cambios
+        return [str(archivo)]
+    return []
+
+
+def cambios_del_freno_de_produccion(
+    freno: Path, heredada: Path, inicio: float,
+    freno_existia: bool, heredada_existia: bool,
+) -> list[str]:
+    """Qué tocó la sesión en el freno de producción: SÓLO los dos archivos
+    (`freno` = JAX_KILL_SWITCH_PATH, `heredada` = la ruta vieja), nunca el
+    directorio que los contiene.
+
+    El directorio (`/etc/jax/interruptor`) es compartido con la pausa del
+    Ejecutor (`EJECUTOR_PAUSA`), que otra sesión pone y suelta como parte de
+    una prueba de contrato legítima -- mirar el directorio confundía esa
+    prueba con un toque al freno real (falso positivo, revisión del frente B
+    2026-09-17). Mirar sólo estos dos archivos detecta el freno real
+    (puesto, quitado, o su mtime tocado) sin reaccionar a un hermano suyo.
+    """
+    return (
+        _cambio_de_archivo(freno, inicio, freno_existia)
+        + _cambio_de_archivo(heredada, inicio, heredada_existia)
+    )
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -214,7 +236,8 @@ def pytest_sessionfinish(session, exitstatus):
         )
         session.exitstatus = 1
     freno = cambios_del_freno_de_produccion(
-        FRENO_DE_PRODUCCION, HEREDADA_DE_PRODUCCION, INICIO_DE_SESION, HEREDADA_EXISTIA_AL_INICIO)
+        FRENO_DE_PRODUCCION, HEREDADA_DE_PRODUCCION, INICIO_DE_SESION,
+        FRENO_EXISTIA_AL_INICIO, HEREDADA_EXISTIA_AL_INICIO)
     if freno:
         print(
             f"\nBARRERA DEL KILL SWITCH: la suite tocó el freno de producción: {freno}. "
