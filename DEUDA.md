@@ -687,7 +687,7 @@ los commits propios de C4 se reaplican encima.
   `tests/test_ejecutor_proxy_modelo_y_rutas.py` (otro modelo, cuerpo ilegible, tope y GET arbitrario no llegan a
   Ollama). En vivo sin vigía el proxy responde 423 antes de mirar el modelo (la pausa va primero).
 
-## Cerrado en código y DESPLEGADO — faltan la prueba del freno y su carga — frente B: kill switch real (2026-09-17)
+## CERRADO, DESPLEGADO Y PROBADO EN PRODUCCIÓN — frente B: kill switch real (2026-09-17)
 
 **VERDAD OPERACIONAL 2026-09-17 ~15:40 CST (Mr. Hyde · sesión `fruiz-e5`; verificado con `git reflog`,
 `journalctl`, `ps`, `sudo cat /proc/<pid>/environ`, `curl` y SQL).** El código del frente B **está vivo en
@@ -761,15 +761,46 @@ escritor real contra un worktree temporal de jax-platform `origin/master` `97e4b
 - [x] **2026-09-17** Deploy de jax con 0 pipelines en vuelo y `JAX_KILL_SWITCH_PATH` verificada en
   `/proc/2272008/environ` de `jax-las-manos` tras el reinicio. Evidencia completa en la VERDAD OPERACIONAL
   de arriba (incluye el journal sin errores y los 0 pipelines al momento del reinicio).
-- [ ] **2026-09-17 · ventana coordinada** Poner y quitar el freno desde la Mesa y ver a LAS MANOS responder,
-  con el peor caso: un pipeline EN VUELO se detiene. Guion listo (activar → verificar → quitar) y el peor caso
-  se hace con un paso en `jekyll` (el proveedor más barato de los que `jacobs` puede llamar: `jax_local` NO es
-  elegible, su `facet.allowed_callers` es NULL y la regla es fail-closed). Se coordina con las sesiones
-  `fruiz-cc` (mide conexiones del pool) y `fruiz-47` (CI y merges): mientras el freno está puesto la Mesa
-  responde 423 a todo. **Si algo queda trabado, la prioridad es sacar el freno, no terminar la medición.**
-- [ ] **2026-09-17 · ventana coordinada** Carga del lado jax (k6 `kill-switch.js`, regla TIME-WAIT < 10k).
-  Línea base de TIME-WAIT medida hoy: 6.976 → 8.173 con carga ajena → 3.437 en reposo. El escenario exige el
-  freno PUESTO (su `setup()` aborta si no lo está), así que va dentro de la misma ventana.
+- [x] **2026-09-17 21:53–21:54 CST · PROBADO EN PRODUCCIÓN (Mr. Hyde · `fruiz-e5`).** El freno frena de verdad,
+  incluido **el peor caso**: pipeline `b268d849-82a3-4d92-a25e-de812e8a28e6` creado por
+  `POST /api/pipelines` con un paso en `jekyll`, confirmado en `running`; se activa el freno **con el pipeline
+  en vuelo** y **3 segundos después** queda `aborted`, con el paso `failed` y motivo literal
+  `killed_by_switch — /etc/jax/interruptor/PAUSE apareció durante la ejecución`.
+  Puesta: `{"activo":true,"cambio":true,"heredada":false}` y `/health` de LAS MANOS con
+  `kill_switch_active:true`. Quitada: `{"activo":false,"cambio":true,"heredada":false}`, el archivo
+  `/etc/jax/interruptor/PAUSE` deja de existir, `/health` vuelve a `false` y `GET /api/state` de la Mesa
+  responde 200. Ventana total ~3 minutos, coordinada por mensajes con `fruiz-cc` (medía conexiones) y
+  `fruiz-47` (CI y merges), los dos avisados al abrir y al cerrar.
+  **`jax_local` NO sirve para esta prueba:** su `facet.allowed_callers` es NULL y la regla es fail-closed, así
+  que `jacobs` no puede llamarlo; se usa `jekyll` (deepseek), el más barato de los elegibles.
+- [x] **2026-09-17 · CARGA MEDIDA, regla TIME-WAIT cumplida con margen.** `k6 loadtest/kill-switch.js`,
+  50 VUs, con el freno PUESTO: **128.384 peticiones, 0 fallidas (0,00%), 4.279 req/s**, p95 global 27,57 ms
+  — por escenario: freno 16,15 ms, admin 31,26 ms, activar 30,24 ms; los tres umbrales `p(95)<500` en verde y
+  los 3 checks en verde. **TIME-WAIT 31 → 103**, contra la regla de < 10k. Línea base del día para referencia:
+  6.976 → 8.173 con carga ajena → 3.437 en reposo.
+- **HALLAZGO A FAVOR DEL CONTRATO (2026-09-17, bajo carga):** el escenario `activar_idempotente` pidió activar
+  miles de veces con el freno ya puesto y `kill_switch_audit` quedó con **exactamente dos filas nuevas**
+  (id 3 `activar`, id 4 `reanudar`, las dos `user_id=1`). Ni una fila de los activar redundantes, todos con
+  `cambio:false`. La regla «activar no inventa un cambio con el freno ya puesto» aguanta concurrencia real,
+  no sólo el test unitario.
+- **REPL verificado tras el retiro de la voz:** `jax.core.main` importa sin `JAX_KOKORO_PYTHON` y expone
+  `main()`. La puerta de arranque que lo mataba (`JAX_KOKORO_PYTHON no está seteada`) ya no existe.
+
+**LECCIÓN (tercera aparición hoy) — el instrumento que se cuenta, se espera o se mata a sí mismo.**
+Un patrón pasado a `pgrep -f` / `pkill -f` / `grep` sobre `ps` **matchea la propia línea de comando que lo
+invoca**. Tres casos medidos el 2026-09-17, los tres dando una lectura falsa que parecía del sistema:
+1. `pkill -f "authorize_facet_app:app"` mató el shell que lo ejecutaba → **salida 144** sin que fallara nada.
+   Es la causa de un «código 144 sin anotar» que otra sesión estaba por registrar como hallazgo.
+2. Una espera de «máquina libre» que grepeaba `ps -eo args` por `pytest|k6` contaba **las esperas de las otras
+   sesiones** (sus `until` mencionan esos comandos): reportaba 7 procesos de carga con 0 corriendo. Corregida
+   con `pgrep -x k6` y `pgrep -f 'python.*-m pytest'`; la comprobación decisiva del cierre de una app es el
+   **puerto** (`ss -ltnp`), no el patrón.
+3. Un contador de conexiones `ss … | grep -c ':3308'` contaba puertos efímeros del cliente 33080-33089 como
+   conexiones a MariaDB, inventando 13 donde había 10 (otra sesión; cerrado con atribución en proceso).
+**El repo ya tenía la lección escrita** en `scripts/check_ollama_num_parallel.py:127,150` («pgrep -f se ve a sí
+mismo si el patrón aparece en la propia línea de comando», observado en su día). Que haya vuelto tres veces el
+mismo día dice que la lección estaba en un comentario y no en una herramienta compartida: **la próxima vez que
+haga falta contar procesos, se usa un helper con la exclusión adentro, no un `pgrep -f` a mano.**
 
 ## Cerrado en código, merge y despliegue pendientes — Ejecutor SP1 plan 1: C1 prohibiciones y C2 respaldo (2026-09-17)
 
@@ -787,7 +818,7 @@ Detalle y pruebas de «visto fallar» en CONTEXT.md §9 (2026-09-17 ~04:40). Ram
   idénticos); `exportar` → `reglas=14 hosts=4`; `instalar_contratos.sh`; `probar_c1.py` → `c1_vivo=true`, y repetir
   sobre la instalación real los tres «verlo fallar» (Steps 5–6).
 
-## Cerrado en código y DESPLEGADO, falta la carga de authorize-facet — frente F: contrato de sub-pipelines, I-2 y pool de conexiones de Jacobs (2026-09-17)
+## CERRADO, DESPLEGADO Y CON CARGA MEDIDA — frente F: contrato de sub-pipelines, I-2 y pool de conexiones de Jacobs (2026-09-17)
 
 **VERDAD OPERACIONAL 2026-09-17 ~04:30 CST (Mr. Hyde, verificado en el worktree).** Rama jax `feat/contrato-subpipelines` rebasada sobre `origin/master` `de6964e` (frente E #177, frentes A #174 y C #175 ya adentro): 19 commits, sin publicar en GitHub, SIN mergear, SIN desplegar. jax-platform no se toca (master `c414eba`). Plan `docs/superpowers/plans/2026-09-16-frente-f-contrato-subpipelines.md`; ledger `jax-frente-f/.superpowers/sdd/2026-09-16-frente-f-contrato-subpipelines/progress.md` (+ `pr-body.md`, `enmienda.md`, `i2-report.md`, `pool-report.md`, `pool-carga.md`, `pool-ronda2-carga.md`).
 
@@ -840,7 +871,7 @@ Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango 
 
 **Pendientes (fechas propuestas por Hyde; Fernando las confirma o cambia):**
 - **Publicar la rama, CI, canario y merge — control 2026-09-18.**
-- ~~**Deploy de jax F — control 2026-09-18, con 0 pipelines en vuelo.** `/etc/jax/.env` (hoy ninguna de las tres está)~~ — **CORREGIDO Y DESPLEGADO 2026-09-17 ~15:40 (Mr. Hyde · `fruiz-e5`).** La frase «hoy ninguna de las tres está» era una VERDAD OPERACIONAL caducada. **Medido en el proceso vivo** (`sudo cat /proc/2272008/environ` de `jax-las-manos`, reiniciado 15:23:02 con 0 pipelines en vuelo): `JAX_SUBPIPELINE_TOKEN_TTL_SECONDS=300`, `JAX_MAX_SUBPIPELINE_DEPTH=3`, `JAX_JACOBS_DB_POOL_SIZE=10`, las tres presentes; las tres también escritas en `/etc/jax/.env`. Lo único que queda del deploy de F es la carga: **carga post-deuda de `POST /motor/authorize-facet` (`loadtest/authorize_facet.js`, contra la app aislada `authorize_facet_app.py` en :7798 sobre `jax_memory_test`) — sin número no hay GO.** Va en ventana coordinada con `fruiz-cc`, que está midiendo conexiones contra esa MISMA base.
+- ~~**Deploy de jax F — control 2026-09-18, con 0 pipelines en vuelo.** `/etc/jax/.env` (hoy ninguna de las tres está)~~ — **CORREGIDO Y DESPLEGADO 2026-09-17 ~15:40 (Mr. Hyde · `fruiz-e5`).** La frase «hoy ninguna de las tres está» era una VERDAD OPERACIONAL caducada. **Medido en el proceso vivo** (`sudo cat /proc/2272008/environ` de `jax-las-manos`, reiniciado 15:23:02 con 0 pipelines en vuelo): `JAX_SUBPIPELINE_TOKEN_TTL_SECONDS=300`, `JAX_MAX_SUBPIPELINE_DEPTH=3`, `JAX_JACOBS_DB_POOL_SIZE=10`, las tres presentes; las tres también escritas en `/etc/jax/.env`. **CARGA MEDIDA 2026-09-17 21:57 CST — HAY NÚMERO, HAY GO.** `k6 loadtest/authorize_facet.js`, 25 VUs, contra la app aislada `authorize_facet_app.py` en :7798 sobre `jax_memory_test` (nunca contra LAS MANOS de producción; la app se niega a arrancar con otra base): **174.576 peticiones, 0 fallidas (0,00%), 0 checks fallidos de 174.576, 5.819 req/s**, p95 6,88 ms (avg 3,56 ms, max 13,06 ms), umbral `p(95)<500` en verde. Los tres caminos rotados quedan cubiertos (facet permitido, facet sin `allowed_callers` fail-closed, y el caller que el middleware corta con 403). App cerrada al terminar: el puerto 7798 no escucha. Corrida en ventana coordinada con `fruiz-cc`, que mide contra esa MISMA base.
 - **Ningún camino vivo emite tokens todavía:** `emitir_token_subpipeline` solo lo llaman el arnés y los tests, y ningún código de jax ni de jax-platform manda `invoked_by="ada"` a `/jacobs/pipeline` (grep 2026-09-17, Hyde). El emisor de Ada (modo "plan de delegación") es otro trabajo; hasta que exista, `ada` sin token es 422 visible.
 
 ## Cerrado en código y DESPLEGADO (gate cumplido), faltan E-24 y los controles fechados — frente E de la auditoría: limpieza, defectos y reglas en jax (2026-09-17)
