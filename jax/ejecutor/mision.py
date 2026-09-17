@@ -117,8 +117,10 @@ def prompt_del_turno(instruccion: str, hosts, de_la_mision: frozenset, reanudar:
         'afirmación por dato que responda la misión: {"maquina": <nombre de la lista>, '
         '"comando": <el comando COMPLETO tal como lo pasaste a Bash, con el `ssh -tt -p … axioma@…` delante, '
         'carácter por carácter>, "linea": <una línea COPIADA LITERAL de su salida>, '
-        '"dato": <el valor, tal como aparece en esa línea>, "proposito": <la pregunta que responde>}. '
-        "Sin línea literal que lo respalde, un dato no se escribe."
+        '"dato": <UN valor copiado tal cual de esa línea>, "proposito": <la pregunta que responde>}. '
+        "El `dato` se busca entero dentro de la `linea`: no juntes dos valores, no calcules nada "
+        "(ni porcentajes ni totales) y no agregues palabras tuyas. Si la misión pregunta dos cosas, "
+        "manda una afirmación por cada una. Sin línea literal que lo respalde, un dato no se escribe."
     )
 
 
