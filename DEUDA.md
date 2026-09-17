@@ -374,6 +374,47 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado — frente C: los ajustes de Admin mandan de verdad (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 01:32 CST** (desplegado y verificado por el controlador principal). PR jax-platform#91 → `accc641` (mergeado 2026-09-17); familia de espejos `tope_pipelines` + guiones k6 en jax, commit `807cf06` (jax `984ce46..807cf06`, rama `feat/ajustes-que-mandan`). Plan `docs/superpowers/plans/2026-09-16-frente-c-ajustes.md` (worktree `jax-platform-hallazgos-docs`); ledger `jax-platform-frente-c/.superpowers/sdd/2026-09-16-frente-c-ajustes/progress.md` + `carga.md` (18 tasks, subagent-driven-development).
+
+**Qué manda ahora de verdad:** los cinco ajustes de Admin → Configuración (`session_timeout_min`, `max_pipelines`, `web_task_retention_days`, `lang_default`, `system_name`) dejan de ser cosméticos. `backend/ajustes.py` es la única lectura tipada de esas cinco claves de `axioma_config` (consulta por PRIMARY, caché con TTL invalidado en el PUT); un valor ausente o inválido lanza `AjusteIlegible` → 503 `ajuste_ilegible`, nunca un default silencioso. Consumidores: emisión/vida del refresh (`api/auth.py`+`auth/jwt.py`), cupo de pipelines (`api/pipelines.py`+`jax_engine/resource_manager.py`), el reaper de owner files (`jax_engine/owner_cleanup.py`) y `GET /api/apariencia` (idioma inicial y nombre del sistema en el frontend).
+
+**Discrepancias con el spec, resueltas con evidencia (no cambian la intención del ítem):**
+1. **El refresh no rota — la sesión es de vida ABSOLUTA, no deslizante** (`api/auth.py` no rota la cookie; documentado como decisión previa). `session_timeout_min` fija el `exp` del JWT, el `max_age` de la cookie y, además, `/refresh` valida contra un `iat` propio — sin esto último, acortar el ajuste no alcanzaría a las sesiones ya abiertas hasta 7 días después. **Consecuencia (GATE, decidida por Fernando): cada sesión abierta antes del deploy vuelve a iniciar sesión una vez** (un refresh viejo no trae `iat` y da 401 `sesion_expirada`).
+2. **`max_pipelines` no puede superar el candado global de Jacobs** (`jax/jacobs/policy.py`: `MAX_PARALLEL_PIPELINES = 3`, cuenta todos los pending/running de todos los tenants). El valor NO viaja a jax: es una cuota por tenant en la plataforma, acotada por arriba por ese candado. `backend/ajustes.py` lleva una copia textual de `MAX_PARALLEL_PIPELINES` y la familia `tope_pipelines` en `scripts/check_mirror_sync.py` (jax, commit `807cf06`) la vigila — verificado sincronizado contra `jax-platform` master (`accc641`) con `scripts/check_mirror_sync.py` y sus 14 tests, los dos en verde.
+3. **`ws_notifications` sale de `DEFAULT_CONFIG`** (decisión de Fernando, coordinada con la Discrepancia 10 del frente A) y la migración la borra de la fila real una sola vez, con test.
+4. **Retención de tareas web:** al vencer `web_task_retention_days`, `owner_cleanup.py` borra misión, resultado y dueño JUNTOS (misión+resultado primero, dueño al final, para que una caída a mitad deje un dueño huérfano que el ciclo siguiente termina de limpiar) — decisión de Fernando, reemplaza el GATE original del plan.
+
+**Migración `ajustes_que_mandan_v1` (aplicada una sola vez, 01:32:52 CST) — antes / después, medido:**
+
+| Ajuste | Antes | Después |
+|---|---|---|
+| `session_timeout_min` | 60 | 10080 |
+| `max_pipelines` | 1 | 3 |
+| `web_task_retention_days` | 7 | 30 |
+| `lang_default` | es | es |
+| `system_name` | Axioma | Axioma |
+| `ws_notifications` | true | (fila borrada) |
+
+EXPLAIN de la consulta de `ajustes.py`: `key=PRIMARY`. `GET /api/apariencia` en vivo → `theme_default: "dark"` (el plan esperaba `light`: dato anotado, no tocado — no es parte del alcance de este frente).
+
+**Backup y prueba de restauración (Principio VI — un backup sin restauración probada no es backup):** dump `/home/fruiz/backups/axioma_config-pre-frente-c-20260917-013226.sql` (15 filas). La restauración prevista por el plan (`CREATE DATABASE` + reload) **falló**: `jax_user` no tiene permiso para crear bases. Probado en su lugar cargando el dump con la tabla renombrada `axioma_config_restore_check` dentro de `jax_memory_test` → **idéntica fila por fila** (MD5 de valor + `updated_at` comparado por fila), tabla de prueba borrada después. **Lección para la próxima vez: el usuario de servicio no puede crear bases nuevas — la restauración de un dump de una tabla existente se prueba con un nombre de tabla temporal en la base de test, nunca asumiendo `CREATE DATABASE` disponible.**
+
+**Deploy:** `jax-platform.service` reiniciado, `NRestarts=0`, journal limpio. Frontend `index-DO0TEv_Q.js` (antes `index-ChCOZGPN.js`), backup `/www/wwwroot/axioma-ia.io.backup-pre-frente-c-20260917-013311`. Canario por API sobre el sha real: rojo en `d212f4b` (`backend-tests-con-db` y `backend-tests-no-db`), revert verde en `ef25862`. k6 `health.js`, 10 VUs, post-deploy: p95 0,52 ms, 0 fallas de 681.254 peticiones.
+
+**Carga previa al deploy (instancia aislada, puertos propios — Ruling R6 del ledger; usuarios de prueba borrados al cerrar):** login p95 6,81→4,45 ms; refresh p95 5,02→5,63 ms (sin caché, TTL forzado a 0,001 s: 6,01 ms — sobrecosto del caché frío 0,38 ms, no es gate); crear pipeline p95 5,39→5,40 ms. GO en los tres criterios (±10%/+5ms de la base). **Advertencia sobre la medida de login (R17 del ledger): los usuarios de carga usan `bcrypt rounds=4` (fixture de test), no los 12 de producción — el número mide la sobrecarga de `ajustes.py`, no el costo real de bcrypt; no se repitió con rounds=12.**
+
+**Efecto de usuario post-deploy (decisión de Fernando):** re-login único de todas las sesiones activas (consecuencia de la Discrepancia 1, `iat` nuevo en el refresh).
+
+**Revisión final — encontró y arregló ANTES del push (regla "sin hallazgos diferidos"):** `Login.jsx` mostraba "usuario o contraseña incorrectos" ante un 503 `ajuste_ilegible` (en vez de un error genérico de servicio) y `client.js` convertía cualquier 5xx de `/refresh` en `sesion_expirada`; tests de 503 agregados en `/refresh` y `/me/password` (antes solo en login); `?.clave` defensivo en `AdminSettings.jsx` (`errorDeGuardado`); `policy.yml:562` corregido (el mensaje del piso decía 504, el piso real ya era 528).
+
+**Pisos de CI (medidos dos veces cada uno):** con DB 1334→1386, sin DB 764→787, vitest 504→535 (base 6e50959, ya con el frente A mergeado). `scripts/_check_mirror_sync_test.py`: 14/14 verde contra jax-platform `accc641` (ambos frentes A y C mergeados).
+
+**Pendiente sin fecha fija:** verificación en vivo con Fernando (Task 17 del plan) — cambiar cada uno de los cinco ajustes desde Admin, ver el efecto real, restaurar el valor.
+
+**Deuda nueva que este cierre destapa:** ver "Anotado — deuda residual del frente C" en `## Anotado, no bloquea`, más abajo.
+
 ## Cerrado — hallazgos de la auditoría de sobre-ingeniería, frente A (2026-09-17)
 
 **VERDAD OPERACIONAL 2026-09-17 00:28 CST** (desplegado y verificado por el controlador principal). PR jax-platform#90 → `6e50959` (mergeado 2026-09-17); PR de jax (familia de espejos `router_keywords`, A-22), commit `be38494` (jax `984ce46..be38494`). Spec `docs/superpowers/specs/2026-09-16-hallazgos-auditoria-design.md` (sección A, A-01..A-55; A-21 queda para el frente D), plan `docs/superpowers/plans/2026-09-16-frente-a-limpieza-defectos-reglas.md`. Frontend `index-ChCOZGPN.js` (antes `index-Bxqm5swQ.js`).
@@ -3150,6 +3191,13 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 
 ## Anotado, no bloquea
+
+- **Anotado — deuda residual del frente C: los ajustes de Admin mandan de verdad (2026-09-17). jax-platform; dueño: próxima ronda de pago de deuda.** Ninguno bloquea; quedan acá para no perderse (regla "sin hallazgos diferidos" no aplica a los que la revisión final marcó explícitamente como aceptados, no como pendientes de arreglo):
+  - **Medida de login de la carga (R17 del ledger) no representa el costo real de bcrypt en producción:** los usuarios de la carga se crean con `bcrypt rounds=4` (fixture de test, `tests/identidades.py`), no los 12 de producción. El GO del gate de carga es válido para lo que `ajustes.py` agrega, no para el costo de login end-to-end. Repetir con `rounds=12` si alguna vez se necesita ese número (≈15 min, según el ledger).
+  - **`CacheDeAjustes` indexa por la grafía guardada de la clave** — un valor de `axioma_config` con una collation distinta a la canónica (caso borde, solo alcanzable borrando a mano la fila canónica) podría no invalidar igual que la fila esperada. Parqueado por la revisión final; la mitigación real sería un test + un `lower()` explícito por collation.
+  - **`test_grounding_config_revalidation` es flake por pérdida de conexión de MariaDB**, reproducido igual CON y SIN el cambio de este frente (visto en Task 2 y de nuevo tras el rebase de Task 12) — no es una regresión de este cierre, preexiste en `master`. Sin arreglar.
+  - **`test_tablero.py` (frente A) tiene un flake reportado por compartir la base `jax_memory_test` con la carga de otros frentes corriendo en simultáneo** (mismo síntoma que el "ruido de contención" documentado en `carga.md` para los tests de carga de este frente) — anotado por instrucción del ledger sin una reproducción aislada propia en esta sesión; si vuelve a aparecer, aislar con una base de test propia por frente en vez de compartir `jax_memory_test`.
+  - **Carrera check-then-admit en `api/pipelines.py:117-142`** (mencionada ya en la deuda residual del frente A): sigue sin lock porque el área es de `resource_manager.py`, que este frente sí tocó — no se resolvió, queda con el mismo dueño.
 
 - **Anotado — deuda residual del frente A de la auditoría de sobre-ingeniería (triage del review final, 2026-09-17). jax-platform; dueño: próxima ronda de pago de deuda.** Ninguno bloquea; el review final de la rama los marcó como minor y la regla "sin hallazgos diferidos" exige que queden acá, con archivo y motivo, en vez de perderse:
   - **`api/pipelines.py:117-142`, carrera check-then-admit** entre `can_start_pipeline` y `admit_pipeline` (awaits en el medio; el lock que se quitó en A-24 tampoco la cubría). Es del área del frente C (`resource_manager.py`).
