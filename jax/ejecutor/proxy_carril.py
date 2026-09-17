@@ -72,6 +72,13 @@ CONFIG_FALTA = "config_falta"
 CONFIG_INVALIDA = "config_invalida"
 REGISTRO_FALLO = "registro_fallo"
 REGISTRO_ILEGIBLE = "registro_ilegible"
+RUTA_NO_PERMITIDA = "ruta_no_permitida"
+#: Lo que el arnés manda de verdad (medido 2026-09-17, arnés 2.1.273 por este proxy:
+#: `HEAD /api/hello` y `POST /v1/messages`). El upstream es el Ollama de producción:
+#: cualquier otra escritura (`/api/pull`, `DELETE /api/delete`, `/api/create`, `/api/chat`)
+#: no llega. Lecturas (GET/HEAD) pasan: la API de Ollama no escribe por ellas.
+_METODOS_DE_LECTURA = frozenset({"GET", "HEAD"})
+_RUTAS_DE_MENSAJES = frozenset({"/v1/messages"})
 _RESULTADOS_RECORDADOS = 10000
 
 _HOST_POR_OMISION = "127.0.0.1"
@@ -252,7 +259,11 @@ class _Proxy:
     async def _reenviar(self, conn, writer, peticion: h11.Request, cuerpo: bytes) -> None:
         metodo = peticion.method.decode("latin-1")
         ruta = _ruta_sin_query(peticion.target)
-        de_mensajes = metodo == "POST" and ruta.endswith("/messages")
+        de_mensajes = metodo == "POST" and ruta in _RUTAS_DE_MENSAJES
+        if not de_mensajes and metodo not in _METODOS_DE_LECTURA:
+            log.warning("proxy_carril %s metodo=%s", RUTA_NO_PERMITIDA, metodo)
+            await _responder_error(conn, writer, 403, Motivo(RUTA_NO_PERMITIDA))
+            return
         if de_mensajes:
             try:
                 await self._anotar_resultados(ruta, cuerpo)

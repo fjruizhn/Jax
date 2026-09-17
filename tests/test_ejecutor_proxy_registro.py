@@ -198,3 +198,29 @@ def test_stream_comprimido_no_se_entrega(tmp_path):
 
     assert _correr(escenario()) == (502, proxy_carril.REGISTRO_ILEGIBLE)
     assert [e["evento"] for e in _registro(tmp_path)] == ["registro_abierto"]
+
+
+@pytest.mark.parametrize("metodo, ruta", [
+    ("POST", "/api/pull"), ("DELETE", "/api/delete"), ("POST", "/api/create"), ("POST", "/api/chat"),
+    ("POST", "/api/generate"), ("PUT", "/v1/messages"), ("POST", "/v1/messages/../../api/pull"),
+])
+def test_rutas_fuera_de_la_api_de_mensajes_no_llegan_al_upstream(tmp_path, metodo, ruta):
+    # Medido 2026-09-17 con el arnés real (2.1.273) por el proxy: HEAD /api/hello y POST /v1/messages.
+    # El upstream es el Ollama de producción: por el proxy, la jaula no borra, baja ni crea modelos,
+    # ni pide inferencia por una ruta donde el registro no ve herramientas.
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px, httpx.AsyncClient() as cli:
+            r = await cli.request(metodo, px.url + ruta, content=b"{}")
+            return r.status_code, r.json()["error"]["type"], len(up.recibidas)
+
+    assert _correr(escenario()) == (403, proxy_carril.RUTA_NO_PERMITIDA, 0)
+
+
+@pytest.mark.parametrize("metodo, ruta", [("HEAD", "/api/hello"), ("GET", "/api/version"), ("POST", "/v1/messages")])
+def test_las_rutas_del_arnes_si_llegan(tmp_path, metodo, ruta):
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 2) as px, httpx.AsyncClient() as cli:
+            await cli.request(metodo, px.url + ruta + "?beta=true", content=b"{}" if metodo == "POST" else None)
+            return len(up.recibidas)
+
+    assert _correr(escenario()) == 1
