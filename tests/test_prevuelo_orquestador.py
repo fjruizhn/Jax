@@ -425,3 +425,33 @@ def test_cancelar_a_uno_no_corta_la_sonda_de_los_demas_y_cancelar_a_todos_si(mon
 
     asyncio.run(correr())
     assert llamadas == ["jekyll", "jekyll"]
+
+
+def test_un_vuelo_de_un_loop_cerrado_no_se_reusa_y_se_vuelve_a_sondear(monkeypatch):
+    """Pasada final R34, 3: un event loop que se cierra con una sonda en
+    vuelo (un arnés, un CLI que corta) deja su entrada en el registro. El
+    próximo pre-vuelo corre en OTRO loop: sumarse a esa tarea daría
+    "attached to a different loop" (o esperaría para siempre). Tiene que
+    ignorarla y sondear de nuevo."""
+    monkeypatch.setattr(pv, "_sondas_en_vuelo", {})
+    llamadas = []
+
+    async def sondear(clave, d, **kw):
+        llamadas.append(clave)
+        if len(llamadas) == 1:
+            await asyncio.sleep(3600)  # queda en vuelo cuando se cierra el loop
+        return ResultadoSonda(True, None)
+
+    _instalar(monkeypatch, _catalogo(salud={}), sondear=sondear)
+
+    viejo = asyncio.new_event_loop()
+    try:
+        viejo.create_task(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
+        viejo.run_until_complete(asyncio.sleep(0.05))
+        assert llamadas == ["jekyll"] and "jekyll" in pv._sondas_en_vuelo
+    finally:
+        viejo.close()  # sin cancelar ni esperar: el peor caso
+
+    v = asyncio.run(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
+    assert v.ok and v.sondeadas == ("jekyll",)
+    assert llamadas == ["jekyll", "jekyll"]

@@ -1372,8 +1372,14 @@ jobs:
           #   'sonda fallida no registra uso' pasa de 503 a 429. Rojo contra 74cb5f9:
           #   10 failed (ConnectTimeout y PoolTimeout registraban; ReadError,
           #   RemoteProtocolError, los cinco 5xx y el 524 del motor no); 9 controles.
-          grep -qE "^1063 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1063 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1063 -> 1064 el 2026-09-17 (pasada final R34, 3): +1 en
+          #   test_prevuelo_orquestador.py -- un loop cerrado con una sonda en vuelo
+          #   deja su entrada en el registro; el pre-vuelo siguiente, en otro
+          #   asyncio.run, la ignora y vuelve a sondear. Control contra 74cb5f9 (el
+          #   chequeo ya existía, ningún test lo fijaba); rojo quitando
+          #   'vuelo.loop is not loop': RuntimeError ... attached to a different loop.
+          grep -qE "^1064 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1064 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
