@@ -1,0 +1,30 @@
+#!/bin/sh
+# ops/ejecutor/ejecutor-revocar — C6, root, en cada máquina del inventario (/usr/local/sbin, 0755).
+# Uso: ejecutor-revocar <archivo de llaves de la cuenta> <cuenta>
+# Quita toda línea marcada ejecutor-axioma o ejecutor-controlador, la guarda en
+# <archivo>.revocadas-<momento> y mata todo proceso de la cuenta: quitar una llave NO
+# corta una conexión ya abierta. La llave del freno (ejecutor-freno) se queda: después
+# de revocar, el freno tiene que seguir pudiendo entrar a matar.
+set -u
+test $# -eq 2 || { echo "revocar=error codigo=argumentos"; exit 2; }
+archivo=$1
+cuenta=$2
+test -f "$archivo" || { echo "revocar=error codigo=sin_archivo"; exit 2; }
+marcas=' ejecutor-(axioma|controlador)$'
+# Con nanosegundos: dos revocaciones en el mismo segundo no pisan lo guardado.
+momento=$(date -u +%Y%m%dT%H%M%S.%NZ)
+# Se lee UNA vez, a una copia: si no se pudo leer, el archivo NO se reemplaza (se
+# vaciaría entero, también la llave del freno, y diría «ok»).
+cp "$archivo" "$archivo.leido" 2>/dev/null || { rm -f "$archivo.leido"; echo "revocar=error codigo=lectura"; exit 2; }
+grep -E "$marcas" "$archivo.leido" > "$archivo.revocadas-$momento"
+grep -vE "$marcas" "$archivo.leido" > "$archivo.nuevo"
+rm -f "$archivo.leido"
+chmod 0644 "$archivo.nuevo"
+mv "$archivo.nuevo" "$archivo" || { echo "revocar=error codigo=reemplazo"; exit 2; }
+pkill -KILL -u "$cuenta"
+rc=$?
+# pkill: 0 = mató algo, 1 = no había nada; cualquier otro código es un fallo real.
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 1 ]; then echo "revocar=error codigo=pkill"; exit 2; fi
+quitadas=$(wc -l < "$archivo.revocadas-$momento" | tr -d ' ')
+quedan=$(grep -cE "$marcas" "$archivo")
+echo "revocar=ok quitadas=$quitadas quedan=$quedan"
