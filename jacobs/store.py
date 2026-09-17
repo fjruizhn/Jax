@@ -682,6 +682,76 @@ async def subpipeline_emision_diagnostico(parent_pipeline_id: str, parent_step: 
     }
 
 
+# El consumo. Un UPDATE multi-tabla autocommit: toma el candado de fila de la PK
+# del token; un segundo consumo concurrente espera ese candado y, al liberarse,
+# RELEE la versión confirmada (REPEATABLE-READ y READ-COMMITTED), ve usado_at
+# puesto y afecta 0 filas. Probado con intercalado forzado en
+# jacobs/_subpipeline_contrato_io_test.py. Plan: t por PK (const), p y s por PK.
+SQL_CONSUMIR_TOKEN = """
+    UPDATE jacobs_subpipeline_tokens t
+      JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+      JOIN jacobs_steps s     ON s.step_id = t.parent_step
+                             AND s.pipeline_id = t.parent_pipeline_id
+       SET t.usado_at = %s, t.hijo_pipeline_id = %s
+     WHERE t.token_hash = %s
+       AND t.usado_at IS NULL
+       AND t.vence_at > %s
+       AND t.parent_pipeline_id = %s
+       AND t.depth_hijo <= %s
+       AND p.status = 'running'
+"""
+
+SQL_TOKEN_CONSUMIDO = """
+    SELECT parent_pipeline_id, parent_step, depth_hijo
+      FROM jacobs_subpipeline_tokens
+     WHERE token_hash = %s AND hijo_pipeline_id = %s
+"""
+
+SQL_DIAGNOSTICO_TOKEN = """
+    SELECT t.usado_at, t.vence_at, t.parent_pipeline_id, t.depth_hijo,
+           p.status AS padre_status, s.step_id AS paso_step_id
+      FROM jacobs_subpipeline_tokens t
+      LEFT JOIN jacobs_pipelines p ON p.pipeline_id = t.parent_pipeline_id
+      LEFT JOIN jacobs_steps s     ON s.step_id = t.parent_step
+                                  AND s.pipeline_id = t.parent_pipeline_id
+     WHERE t.token_hash = %s
+"""
+
+
+async def subpipeline_token_consumir(
+    token_hash: str,
+    parent_pipeline_id: str,
+    hijo_pipeline_id: str,
+    ahora: float,
+    max_profundidad: int,
+) -> dict | None:
+    """Consume el token para `hijo_pipeline_id`. Devuelve la fila consumida
+    (parent_pipeline_id, parent_step, depth_hijo) o None si no afectó una fila."""
+    conn = await get_conn()
+    try:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                SQL_CONSUMIR_TOKEN,
+                (ahora, hijo_pipeline_id, token_hash, ahora, parent_pipeline_id, max_profundidad),
+            )
+            if cur.rowcount != 1:
+                return None
+            await cur.execute(SQL_TOKEN_CONSUMIDO, (token_hash, hijo_pipeline_id))
+            return await cur.fetchone()
+    finally:
+        conn.close()
+
+
+async def subpipeline_token_diagnostico(token_hash: str) -> dict | None:
+    conn = await get_conn()
+    try:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(SQL_DIAGNOSTICO_TOKEN, (token_hash,))
+            return await cur.fetchone()
+    finally:
+        conn.close()
+
+
 # ----------------------------------------------------------------
 #  Audit events
 # ----------------------------------------------------------------

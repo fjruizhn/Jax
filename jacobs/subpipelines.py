@@ -214,3 +214,36 @@ async def emitir_token_subpipeline(parent_pipeline_id: str, parent_step: str) ->
         parent_step,
     )
     return token
+
+
+async def consumir_token_subpipeline(
+    token: str, parent_pipeline_id: str, hijo_pipeline_id: str,
+) -> TokenConsumido | ConsumoRechazado:
+    """Consume el token de forma atómica para crear `hijo_pipeline_id`.
+
+    Aceptado solo si el hash existe, no venció, no se usó, fue emitido para
+    `parent_pipeline_id`, su profundidad cabe en el límite vigente y el padre
+    sigue `running` y el paso que delegó existe y es de ese padre (en
+    cualquier estado: enmienda 2026-09-16). La profundidad y el padre que se
+    devuelven salen de la FILA. Todo rechazo deja SUBPIPELINE_RECHAZADO con el
+    motivo y sin el token."""
+    cfg = config_subpipelines()
+    token_hash = hash_token(token)
+    fila = await store.subpipeline_token_consumir(
+        token_hash, parent_pipeline_id, hijo_pipeline_id, time.time(), cfg.max_profundidad,
+    )
+    if fila is not None:
+        return TokenConsumido(
+            parent_pipeline_id=fila["parent_pipeline_id"],
+            parent_step=fila["parent_step"],
+            depth=int(fila["depth_hijo"]),
+        )
+    diagnostico = await store.subpipeline_token_diagnostico(token_hash)
+    motivo = motivo_consumo(diagnostico, parent_pipeline_id, time.time(), cfg.max_profundidad)
+    await store.event_append(hijo_pipeline_id, "SUBPIPELINE_RECHAZADO", {
+        "fase": "consumo",
+        "motivo": motivo.value,
+        "parent_pipeline_id_declarado": parent_pipeline_id,
+        "token_ref": token_ref(token_hash) if diagnostico is not None else None,
+    })
+    return ConsumoRechazado(motivo)

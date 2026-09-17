@@ -194,5 +194,137 @@ class EmisionTest(_ConBase):
         self.assertEqual(motivo, sp.Motivo.KILL_SWITCH_ACTIVO)
 
 
+class ConsumoTest(_ConBase):
+    async def test_consumo_legitimo_marca_usado_y_ata_al_hijo(self):
+        padre, paso = await self.padre()
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        hijo = str(uuid.uuid4())
+        resultado = await sp.consumir_token_subpipeline(token, padre, hijo)
+        self.assertEqual(
+            resultado, sp.TokenConsumido(parent_pipeline_id=padre, parent_step=paso, depth=1))
+        fila = await ada.fila_token(sp.hash_token(token))
+        self.assertEqual(fila["hijo_pipeline_id"], hijo)
+        self.assertIsNotNone(fila["usado_at"])
+
+    async def test_token_inexistente_es_desconocido_y_deja_evento_sin_el_token(self):
+        hijo = str(uuid.uuid4())
+        resultado = await sp.consumir_token_subpipeline("no-existe-este-token", "padre-x", hijo)
+        self.assertEqual(resultado, sp.ConsumoRechazado(sp.Motivo.TOKEN_DESCONOCIDO))
+        eventos = await store.events_by_pipeline(hijo)
+        self.assertEqual([e["event_type"] for e in eventos], ["SUBPIPELINE_RECHAZADO"])
+        self.assertEqual(eventos[0]["payload"]["fase"], "consumo")
+        self.assertNotIn("no-existe-este-token", json.dumps(eventos[0]["payload"]))
+
+    async def test_rechazo_por_otro_padre_no_quema_el_token(self):
+        padre, paso = await self.padre()
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        self.assertEqual(
+            await sp.consumir_token_subpipeline(token, str(uuid.uuid4()), str(uuid.uuid4())),
+            sp.ConsumoRechazado(sp.Motivo.PADRE_NO_COINCIDE),
+        )
+        self.assertIsInstance(
+            await sp.consumir_token_subpipeline(token, padre, str(uuid.uuid4())),
+            sp.TokenConsumido,
+        )
+
+    async def test_paso_de_ada_terminado_con_padre_corriendo_emite_y_consume(self):
+        """Enmienda de Fernando 2026-09-16: en el modo "plan de delegación" Jacobs
+        emite los tokens DESPUÉS de que el step `delegate` terminó. Lo que habilita
+        es el pipeline padre `running`; el estado del paso no cuenta."""
+        padre, paso = await self.padre()
+        await ada.ejecutar(
+            "UPDATE jacobs_steps SET status = 'completed' WHERE step_id = %s", (paso,))
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        token_previo = await sp.emitir_token_subpipeline(padre, paso)
+        self.assertIsInstance(
+            await sp.consumir_token_subpipeline(token, padre, str(uuid.uuid4())),
+            sp.TokenConsumido,
+        )
+        await ada.cerrar(padre)
+        with self.assertRaises(sp.EmisionRechazada) as ctx:
+            await sp.emitir_token_subpipeline(padre, paso)
+        self.assertEqual(ctx.exception.motivo, sp.Motivo.PADRE_INACTIVO)
+        self.assertEqual(
+            await sp.consumir_token_subpipeline(token_previo, padre, str(uuid.uuid4())),
+            sp.ConsumoRechazado(sp.Motivo.PADRE_INACTIVO),
+        )
+
+    async def test_carrera_de_veinte_consumos_tiene_un_solo_ganador(self):
+        padre, paso = await self.padre()
+        for ronda in range(10):
+            token = await sp.emitir_token_subpipeline(padre, paso)
+            resultados = await asyncio.gather(*[
+                sp.consumir_token_subpipeline(token, padre, str(uuid.uuid4()))
+                for _ in range(20)
+            ])
+            ganadores = [r for r in resultados if isinstance(r, sp.TokenConsumido)]
+            perdedores = [r for r in resultados if not isinstance(r, sp.TokenConsumido)]
+            self.assertEqual(len(ganadores), 1, f"ronda {ronda}: {resultados}")
+            self.assertEqual(
+                set(perdedores), {sp.ConsumoRechazado(sp.Motivo.TOKEN_USADO)}, f"ronda {ronda}")
+
+    async def test_carrera_forzada_el_segundo_espera_el_candado_y_pierde(self):
+        """Intercalado forzado con dos sesiones reales: A consume y NO confirma;
+        B tiene que quedar esperando el candado de fila y, al confirmar A,
+        releer y perder. Sin `usado_at IS NULL` en el WHERE, B también gana."""
+        padre, paso = await self.padre()
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        max_prof = sp.config_subpipelines().max_profundidad
+        conn_a = await store.get_conn()
+        try:
+            await conn_a.autocommit(False)
+            async with conn_a.cursor() as cur:
+                ahora = time.time()
+                await cur.execute(
+                    store.SQL_CONSUMIR_TOKEN,
+                    (ahora, "hijo-a", sp.hash_token(token), ahora, padre, max_prof),
+                )
+                self.assertEqual(cur.rowcount, 1)
+            tarea_b = asyncio.create_task(sp.consumir_token_subpipeline(token, padre, "hijo-b"))
+            await asyncio.sleep(1.0)
+            self.assertFalse(
+                tarea_b.done(),
+                "B no esperó el candado de fila de A: el consumo no es atómico",
+            )
+            await conn_a.commit()
+        finally:
+            conn_a.close()
+        resultado_b = await asyncio.wait_for(tarea_b, timeout=15)
+        self.assertEqual(resultado_b, sp.ConsumoRechazado(sp.Motivo.TOKEN_USADO))
+        self.assertEqual((await ada.fila_token(sp.hash_token(token)))["hijo_pipeline_id"], "hijo-a")
+
+    async def test_nivel_de_aislamiento_declarado(self):
+        fila = await ada.una_fila("SELECT @@SESSION.transaction_isolation AS nivel")
+        self.assertIn(
+            fila["nivel"], {"REPEATABLE-READ", "READ-COMMITTED"},
+            "el argumento de atomicidad del consumo (UPDATE con candado de fila que "
+            "relee la versión confirmada) está escrito para estos dos niveles",
+        )
+
+    async def test_explain_del_consumo_usa_claves_primarias(self):
+        padre, paso = await self.padre()
+        for _ in range(30):  # volumen: con tablas casi vacías el optimizador puede elegir ALL
+            await sp.emitir_token_subpipeline(padre, paso)
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        conn = await store.get_conn()
+        try:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                ahora = time.time()
+                # La SQL REAL (la constante que ejecuta el store), no una copia.
+                await cur.execute(
+                    "EXPLAIN " + store.SQL_CONSUMIR_TOKEN,
+                    (ahora, "hijo-explain", sp.hash_token(token), ahora, padre,
+                     sp.config_subpipelines().max_profundidad),
+                )
+                plan = await cur.fetchall()
+        finally:
+            conn.close()
+        por_tabla = {f["table"]: f for f in plan}
+        self.assertEqual(set(por_tabla), {"t", "p", "s"}, plan)
+        for alias, fila in por_tabla.items():
+            self.assertIn(fila["type"], {"const", "eq_ref"}, f"{alias}: {fila}")
+            self.assertEqual(fila["key"], "PRIMARY", f"{alias}: {fila}")
+
+
 if __name__ == "__main__":
     unittest.main()
