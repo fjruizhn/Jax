@@ -129,6 +129,38 @@ def _correr(url: str, metodo: str, concurrencia: int, peticiones: int,
     return resumen(latencias, errores, transcurrido)
 
 
+def campo_vacio(url: str, metodo: str, cuerpo: Optional[str], cabeceras: dict,
+                timeout: float, campo: str) -> tuple[bool, object]:
+    """UNA peticion mas, aparte de la medicion, para leer `campo` de la
+    respuesta JSON. Devuelve (esta_vacio, valor_leido).
+
+    POR QUE EXISTE (2026-09-17, leccion de la re-medicion del pre-vuelo). La
+    corrida se declaro "sin sondas" verificando `sondeadas: []` UNA vez, ANTES
+    de medir. A mitad de la medicion otra sesion que comparte `jax_memory_test`
+    borro las filas de salud sembradas, el pre-vuelo volvio a sondear y salieron
+    TRES llamadas reales a proveedores pagos -- que nadie vio hasta revisar
+    `axioma_usage` despues. Una precondicion verificada solo al principio no es
+    una precondicion de la corrida: es una foto del instante anterior. Esto la
+    vuelve a mirar AL FINAL, cuando ya no se puede arreglar pero si se puede
+    DECLARAR, que es lo que convierte una medicion contaminada en una medicion
+    con su salvedad escrita.
+
+    Fail-closed: si la respuesta no se puede leer o no trae el campo, NO se
+    reporta "vacio" -- se reporta que no se pudo verificar.
+    """
+    datos = cuerpo.encode() if cuerpo else None
+    req = urllib.request.Request(url, data=datos, method=metodo, headers=cabeceras)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            cuerpo_resp = json.loads(r.read().decode())
+    except Exception as exc:  # fail-closed: no se pudo mirar != esta vacio
+        return False, f"no verificable: {type(exc).__name__}: {exc}"
+    if campo not in cuerpo_resp:
+        return False, f"no verificable: la respuesta no trae '{campo}'"
+    valor = cuerpo_resp[campo]
+    return (not valor), valor
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Prueba de carga minima (politica 4)")
     ap.add_argument("--url", required=True)
@@ -139,6 +171,11 @@ def main() -> int:
     ap.add_argument("-H", "--cabecera", action="append", default=[],
                     help="'Nombre: valor', repetible")
     ap.add_argument("--timeout", type=float, default=30.0)
+    ap.add_argument(
+        "--exigir-vacio-al-final", metavar="CAMPO", default=None,
+        help="Tras medir, pide UNA vez mas y exige que ese campo de la respuesta "
+             "JSON venga vacio (p. ej. 'sondeadas' en /jacobs/preflight). Si no "
+             "lo esta, o no se pudo verificar, sale distinto de 0.")
     a = ap.parse_args()
 
     cabeceras = {}
@@ -151,10 +188,19 @@ def main() -> int:
     r["url"] = a.url
     r["concurrencia"] = a.concurrencia
     r["fecha"] = time.strftime("%Y-%m-%d %H:%M:%S %Z")
+    vacio_al_final = True
+    if a.exigir_vacio_al_final:
+        vacio_al_final, valor = campo_vacio(
+            a.url, a.metodo, a.cuerpo, cabeceras, a.timeout, a.exigir_vacio_al_final)
+        r["al_final"] = {a.exigir_vacio_al_final: valor, "vacio": vacio_al_final}
     print(json.dumps(r, indent=2, ensure_ascii=False))
     # Exit 1 si hubo CUALQUIER error: un load test que termina en verde con
-    # peticiones fallidas no sirve como gate de lanzamiento.
-    return 1 if r["errores"] else 0
+    # peticiones fallidas no sirve como gate de lanzamiento. Y exit 2 si la
+    # precondicion que se exigio ya no se cumple al terminar: la medicion salio
+    # pero NO es la que se pidio, y eso tiene que doler distinto que un 5xx.
+    if r["errores"]:
+        return 1
+    return 0 if vacio_al_final else 2
 
 
 if __name__ == "__main__":

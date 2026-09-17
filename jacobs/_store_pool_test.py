@@ -1029,6 +1029,62 @@ class MigradosAlPoolTest(unittest.TestCase):
             self.assertIn("conexion()", (RAIZ / rel).read_text(), rel)
 
 
+@unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
+class DedicadasVivasTest(unittest.IsolatedAsyncioTestCase):
+    """El tope del pool NO es el tope de conexiones del proceso (2026-09-17).
+
+    La carga del 2026-09-17 vio hasta 13 conexiones del proceso contra
+    `JAX_DB_POOL_MAX=10`. `conexion_dedicada()` abre FUERA del pool a
+    proposito, asi que el total es pool + dedicadas vivas. Este contador es lo
+    que permite medirlo en vez de razonarlo.
+    """
+
+    async def test_abrir_suma_y_cerrar_resta(self):
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada()
+        try:
+            self.assertEqual(store.dedicadas_vivas(), antes + 1)
+        finally:
+            conn.close()
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+    async def test_cerrar_dos_veces_resta_una_sola_vez(self):
+        """Sin idempotencia el contador se iria a negativo y taparia una fuga."""
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada()
+        conn.close()
+        conn.close()
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+    async def test_la_que_nadie_cierra_queda_contada(self):
+        """Una dedicada sin cerrar TIENE que verse: es el caso que interesa."""
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada()
+        self.assertEqual(store.dedicadas_vivas(), antes + 1)
+        conn.close()  # limpieza del test, ya medido
+
+    async def test_el_pool_no_cuenta_como_dedicada(self):
+        """Si el pool sumara acá, el número no distinguiría una cosa de la otra."""
+        await store.obtener_pool()
+        antes = store.dedicadas_vivas()
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+            self.assertEqual(store.dedicadas_vivas(), antes)
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+    async def test_found_rows_tambien_cuenta(self):
+        """Las escrituras condicionales son DOS de los tres llamadores: si su
+        rama no contara, el excedente medido quedaría sin explicar."""
+        antes = store.dedicadas_vivas()
+        conn = await store.conexion_dedicada(found_rows=True)
+        try:
+            self.assertEqual(store.dedicadas_vivas(), antes + 1)
+        finally:
+            conn.close()
+        self.assertEqual(store.dedicadas_vivas(), antes)
+
+
 class ExcepcionAlPoolTest(unittest.TestCase):
     """Puro: la lista de llamadores de `conexion_dedicada()` EN CODIGO DE
     SERVICIO no crece sola (2026-09-17).

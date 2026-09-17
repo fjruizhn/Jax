@@ -321,8 +321,15 @@ jobs:
           #   "exactamente DOS llamadores" (era falso: tests y scripts tambien
           #   la usan). Visto en rojo agregando un llamador falso en jacobs/ y,
           #   el del docstring, mutando el docstring. Medido: "112 passed".
-          grep -qE "^112 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 112 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 112 -> 117 el 2026-09-17 (medición del excedente de conexiones): +5 de
+          #   jacobs/_store_pool_test.py (DedicadasVivasTest) contra la base real -- el
+          #   contador de conexiones DEDICADAS vivas suma al abrir y resta al cerrar,
+          #   cerrar dos veces resta una sola vez, la que nadie cierra queda contada, el
+          #   pool NO cuenta como dedicada, y la rama found_rows también cuenta.
+          #   Validados por mutación: sin envolver `close()` caen 3; sin la idempotencia
+          #   cae el del doble cierre.
+          grep -qE "^117 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 117 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -2084,8 +2091,15 @@ jobs:
           # El runner cuenta UNO MENOS que el local y reporta como `skipped` el caso que
           # acá sale `xfailed` (mismo desfase que el piso anterior: runner 920 con local
           # 921 passed/1 xfailed), así que el piso del job queda en 1985.
-          grep -qE "^1985 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1985 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1985 -> 1989 el 2026-09-17 (re-medición de carga sobre el HEAD del merge):
+          #   +4 puros de tests/test_load_test_harness.py -- `campo_vacio()` re-verifica
+          #   AL FINAL la precondición que la corrida declaró al principio (vacío, con
+          #   contenido, campo ausente y respuesta ilegible; los dos últimos fail-closed:
+          #   "no pude mirar" NO es "está limpio"). Rojo contra 44250a1: la función no
+          #   existía, y por eso la re-medición del pre-vuelo se declaró "sin sondas"
+          #   mirando `sondeadas: []` una sola vez y salieron 3 llamadas pagas reales.
+          grep -qE "^1989 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1989 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

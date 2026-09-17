@@ -729,11 +729,65 @@ async def conexion_dedicada(found_rows: bool = False) -> aiomysql.Connection:
     Cualquier otro uso va por `conexion()` / `conexion_del_pool()`; una sesion
     con estado propio que NO espera (SET SESSION, temporales) pide
     `conexion(desechable=True)`. Reemplaza a `get_conn()`, que era de uso
-    general: ese nombre no vuelve (jacobs/_store_pool_test.py lo vigila)."""
+    general: ese nombre no vuelve (jacobs/_store_pool_test.py lo vigila).
+
+    CUENTA lo que entrega: ver `dedicadas_vivas()`. El `close()` de la conexion
+    que devuelve queda envuelto para descontar una sola vez, asi que el conteo
+    vale para CUALQUIER llamador (servicio, tests, scripts) sin que nadie tenga
+    que acordarse de avisar."""
     extra = {"client_flag": CLIENT.FOUND_ROWS} if found_rows else {}
-    return await aiomysql.connect(
+    conn = await aiomysql.connect(
         **_db_cfg(), connect_timeout=db_connect_timeout_seconds(), **extra,
     )
+    return _contar_dedicada(conn)
+
+
+# --------------------------------------------------------------------------
+#  Cuenta de conexiones DEDICADAS vivas (2026-09-17)
+#
+#  POR QUE EXISTE. La medicion de carga del 2026-09-17 observo hasta 13
+#  conexiones del proceso contra MariaDB con `JAX_DB_POOL_MAX=10`, y el
+#  reporte anterior habia explicado un excedente de 1 como un instante de
+#  superposicion del muestreo. Con 12 y 13 esa explicacion ya no alcanzaba, y
+#  la diferencia entre "el pool tiene una fuga" y "el tope del pool no es el
+#  tope del proceso" no se resuelve razonando: se mide. Esto es el instrumento.
+#
+#  El tope del pool NO acota estas conexiones: `conexion_dedicada()` abre
+#  FUERA del pool a proposito (ver su docstring). El total de conexiones del
+#  proceso es `tamanio del pool en uso` + `dedicadas_vivas()`.
+# --------------------------------------------------------------------------
+_dedicadas_vivas = 0
+
+
+def dedicadas_vivas() -> int:
+    """Conexiones DEDICADAS abiertas y todavia no cerradas en este proceso."""
+    return _dedicadas_vivas
+
+
+def _contar_dedicada(conn: aiomysql.Connection) -> aiomysql.Connection:
+    """Suma una dedicada y envuelve su `close()` para restarla UNA sola vez.
+
+    Se envuelve el metodo de la instancia (aiomysql.Connection no usa
+    __slots__): cualquier ruta que llame `conn.close()` -- incluida
+    `ensure_closed()`, que lo resuelve por el objeto -- descuenta. Cerrar dos
+    veces no resta dos veces; una conexion que nadie cierra queda contada, que
+    es justo lo que hay que poder ver.
+    """
+    global _dedicadas_vivas
+    _dedicadas_vivas += 1
+    cerrar = conn.close
+    ya_cerrada = False
+
+    def close():
+        nonlocal ya_cerrada
+        global _dedicadas_vivas
+        if not ya_cerrada:
+            ya_cerrada = True
+            _dedicadas_vivas -= 1
+        return cerrar()
+
+    conn.close = close
+    return conn
 
 
 @asynccontextmanager

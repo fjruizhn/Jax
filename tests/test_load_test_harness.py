@@ -13,7 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from load_test import percentil, resumen  # noqa: E402
+from load_test import campo_vacio, percentil, resumen  # noqa: E402
 
 
 class PercentilTest(unittest.TestCase):
@@ -87,6 +87,63 @@ class ResumenTest(unittest.TestCase):
         r = resumen(latencias_ok=[], n_errores=5, segundos=2.0)
         self.assertIsNone(r["p95_ms"])
         self.assertEqual(r["tasa_error"], 1.0)
+
+
+class CampoVacioAlFinalTest(unittest.TestCase):
+    """La precondicion se vuelve a mirar AL FINAL (2026-09-17).
+
+    ROJO CONTRA `44250a1`: `campo_vacio` no existia. La re-medicion del
+    pre-vuelo de ese dia se declaro "sin sondas" mirando `sondeadas: []` UNA
+    vez, antes de medir; a mitad de la corrida otra sesion borro las filas de
+    salud sembradas, el pre-vuelo sondeo y salieron TRES llamadas reales a
+    proveedores pagos que nadie vio hasta revisar `axioma_usage` despues.
+    """
+
+    def _servidor(self, cuerpo: bytes, codigo: int = 200):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(codigo)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(cuerpo)))
+                self.end_headers()
+                self.wfile.write(cuerpo)
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        return f"http://127.0.0.1:{srv.server_address[1]}/"
+
+    def test_campo_vacio_es_vacio(self):
+        url = self._servidor(b'{"sondeadas": []}')
+        vacio, valor = campo_vacio(url, "POST", "{}", {}, 5.0, "sondeadas")
+        self.assertTrue(vacio)
+        self.assertEqual(valor, [])
+
+    def test_campo_con_contenido_no_es_vacio(self):
+        """El caso real: la sonda se disparo durante la medicion."""
+        url = self._servidor(b'{"sondeadas": ["hipatia", "jekyll", "kimi"]}')
+        vacio, valor = campo_vacio(url, "POST", "{}", {}, 5.0, "sondeadas")
+        self.assertFalse(vacio)
+        self.assertEqual(valor, ["hipatia", "jekyll", "kimi"])
+
+    def test_campo_ausente_no_se_lee_como_vacio(self):
+        """Fail-closed: "no pude mirar" no es "esta limpio"."""
+        url = self._servidor(b'{"ok": true}')
+        vacio, valor = campo_vacio(url, "POST", "{}", {}, 5.0, "sondeadas")
+        self.assertFalse(vacio)
+        self.assertIn("no verificable", str(valor))
+
+    def test_respuesta_ilegible_no_se_lee_como_vacio(self):
+        url = self._servidor(b'no soy json')
+        vacio, valor = campo_vacio(url, "POST", "{}", {}, 5.0, "sondeadas")
+        self.assertFalse(vacio)
+        self.assertIn("no verificable", str(valor))
 
 
 if __name__ == "__main__":
