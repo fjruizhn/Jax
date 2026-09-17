@@ -493,8 +493,30 @@ Orden: el PR de jax-platform se mergea ANTES (el job `jacobs-gobernanza-db` clon
   (directorio del frente B), `JAX_EJECUTOR_VIGIA_LATIDO=/var/lib/jax-ejecutor/vigia.latido`,
   `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S=30`. Sin ellas el proxy de C3 NO arranca (el instalador las exige). Tras
   desplegar jax-platform: `probar_c5.py --corridas 10 --cerebro jax_local` → `c5_vivo=true` con la config real.
-- [ ] **2026-09-18** Plan 3 (C4): el freno root actúa también con la pausa del Ejecutor; plan 6: `verificar_eleccion`
-  y vigía con latido antes de abrir el proxy (enmiendas escritas en los planes).
+- [x] **2026-09-17** Plan 3 (C4): el freno root actúa también con la pausa del Ejecutor (hecho, rama `feat/ejecutor-c4`).
+- [ ] **2026-09-18** Plan 6: `verificar_eleccion` y vigía con latido antes de abrir el proxy (enmienda escrita en el plan).
+
+### Ejecutor SP1 plan 3 · C4 freno en vuelo — publicar, desplegar el proxy y la parte remota (2026-09-17, Mr. Hyde)
+
+Rama jax `feat/ejecutor-c4` (SIN PUBLICAR: la publica la sesión principal), desde `origin/master` (`f9c7073`,
+frente B) con merge de `feat/ejecutor-c5` y `feat/ejecutor-c6` (sus PRs sin mergear). Si C5/C6 se rebasan antes,
+los commits propios de C4 se reaplican encima.
+
+- [ ] **2026-09-18** Publicar; piso del runner tests-puros `1273 passed, 1 skipped` (medido local 3.14); comprobar en
+  el log que `test_ejecutor_freno_remoto.py` CORRE. Canario rojo por API: en `freno.py`,
+  `salida["muertos"] = matar_pids(...)` → `salida["muertos"] = 0` ⇒ `tests-puros` = failure; revert = success.
+- [ ] **2026-09-18** Tras mergear: reinstalar desde master `ops/ejecutor/instalar_freno.sh` (hoy corre desde la rama
+  con `--rama-aprobada`, commit `f53b51b`; los archivos instalados son idénticos a la rama).
+- [ ] **2026-09-18** Proxy (C4 en `proxy_carril.py`) sin desplegar: el proxy en vivo es el de C3 y el de la rama exige
+  las variables de C5 (`JAX_EJECUTOR_VIGIA_LATIDO`, `_MAX_S`). Se despliega con C5.
+- [ ] **2026-09-18 · RESERVADO A FERNANDO (servidores de clientes):** parte remota, máquina por máquina, en orden
+  atemai → prod → bridge: `cd /home/fruiz/jax && set -a && . /etc/jax/.env && set +a &&
+  ops/ejecutor/instalar_en_maquina.sh <m>` (SIN `--sin-freno`) `&& PYTHONPATH=.:las_manos python3
+  scripts/ejecutor_contratos/probar_c6.py <m>`; luego agregar `<m>` a `JAX_EJECUTOR_FRENO_REMOTOS` (backup de `.env`),
+  `sudo systemctl restart ejecutor-freno` y `PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c4.py
+  --remoto <m>` → `c4_vivo=true`. Rollback: `ops/ejecutor/revertir_en_maquina.sh <m>` y quitar `<m>` de la variable.
+  Ensayado entero en contenedor (`scripts/ejecutor_contratos/probar_freno_remoto_en_contenedor.sh`, verde 3 veces).
+  Hasta completarla, el latido dice `remotos_cargados=false` y el arranque (plan 6) no debe dejar ir a remotas.
 
 ### Hyde y cualquier proceso de `fruiz` alcanzan LAS MANOS sin autenticación — fecha: 2026-09-24
 

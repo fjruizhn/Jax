@@ -762,6 +762,10 @@ jobs:
           tests/test_ejecutor_proxy_modelo_y_rutas.py
           tests/test_ejecutor_prioridad_espejo.py
           tests/test_ejecutor_sp3_config.py
+          tests/test_ejecutor_proxy_freno.py
+          tests/test_ejecutor_contratos_freno.py
+          tests/test_ejecutor_freno_remoto.py
+          tests/test_ejecutor_probar_c5_importa.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -850,6 +854,10 @@ jobs:
             tests/test_ejecutor_proxy_modelo_y_rutas.py \
             tests/test_ejecutor_prioridad_espejo.py \
             tests/test_ejecutor_sp3_config.py \
+            tests/test_ejecutor_proxy_freno.py \
+            tests/test_ejecutor_contratos_freno.py \
+            tests/test_ejecutor_freno_remoto.py \
+            tests/test_ejecutor_probar_c5_importa.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1297,8 +1305,18 @@ jobs:
           #   tests/test_las_manos_auth_servicio.py. MEDIDO en local (3.14), env limpio, sin
           #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1364 passed,
           #   1 skipped, 1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1364 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1364 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1327 + 54 -> 1381 el 2026-09-17, C4 (freno en vuelo) rebaseado sobre origin/master
+          #   d951490 (C6, C5, SP3, human gate) + cuatro arreglos: las dos listas suman
+          #   test_ejecutor_proxy_freno.py (6), test_ejecutor_contratos_freno.py (30),
+          #   test_ejecutor_freno_remoto.py (4), test_ejecutor_probar_c5_importa.py (2);
+          #   test_ejecutor_contratos_instalacion.py +8 (unidad del freno y su manifiesto),
+          #   test_ejecutor_sp3_config.py +4 (--aplicar contra falsos). MEDIDO en local (3.14),
+          #   env limpio, sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas:
+          #   "1381 passed, 1 skipped, 1 xfailed, 16 subtests passed"; master d951490 en las
+          #   mismas condiciones da 1327 (igual que su runner). Si el runner da otro numero, manda el runner.
+          # 1364 -> 1418 el 2026-09-17: C4 (+54) rebaseado sobre master con auth de LAS MANOS (#187). Lo confirma el runner.
+          grep -qE "^1418 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1418 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

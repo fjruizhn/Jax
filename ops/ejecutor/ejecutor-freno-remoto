@@ -1,0 +1,26 @@
+#!/bin/sh
+# ops/ejecutor/ejecutor-freno-remoto — comando forzado de la llave del freno (C4).
+# Se instala root 0755 en /usr/local/sbin de cada máquina del inventario
+# (ops/ejecutor/instalar_en_maquina.sh, C6) y la llave del freno lo ata con
+# command="/usr/local/sbin/ejecutor-freno-remoto",restrict.
+# Corre COMO la cuenta del Ejecutor: mata todos sus procesos salvo esta misma sesión y
+# el proceso de sshd que la sostiene ($PPID, que corre como la cuenta): si se matara
+# cualquiera de los dos, la conexión se cae antes de decir cuántos quedaron y el freno
+# no sabría si funcionó. Lo dice en una sola línea: freno_remoto=ok quedan=<n>.
+# Límite declarado: un proceso lanzado con sudo corre como root y no es de la cuenta.
+# Hoy la cuenta no tiene sudo en ninguna máquina; antes de dárselo (Fase 3) se amplía esto.
+set -u
+yo=$(ps -o sid= -p $$ | tr -d ' ')
+padre=$PPID
+cuenta=$(id -un)
+ajenos() {
+  ps -u "$cuenta" -o pid=,sid= | awk -v s="$yo" -v p="$padre" '$2 != s && $1 != p {print $1}'
+}
+for vuelta in 1 2 3; do
+  for pid in $(ajenos); do
+    kill -KILL "$pid" 2>/dev/null
+  done
+  sleep 0.2
+done
+quedan=$(ajenos | wc -l | tr -d ' ')
+echo "freno_remoto=ok quedan=$quedan"

@@ -55,11 +55,26 @@ def test_el_modulo_resuelve_al_tempdir_y_no_al_default():
 def test_el_detector_ATRAPA_una_escritura_nueva(tmp_path):
     """Un control que no falla cuando debe no valida nada. Se ejercita contra
     un directorio de mentira, no contra el real: probar el freno no puede
-    ensuciar justo lo que el freno protege."""
+    ensuciar justo lo que el freno protege.
+
+    Los tiempos van FIJADOS con `os.utime`, no leídos del reloj: el mtime lo
+    estampa el reloj grueso del kernel (un tick atrás de `time.time()`), así
+    que escribir justo después de tomar `desde` podía dar mtime < desde y el
+    test fallaba sin que el detector lo hiciera (visto una vez en CI). En
+    segundos enteros para que el float de `st_mtime` sea exactamente `desde`.
+    La escritura nueva cae JUSTO en el borde (mtime == desde: cuenta), y al
+    lado hay una anterior que no cuenta: un detector que no mire el mtime
+    devuelve las dos y cae."""
     falso = tmp_path / "usage-spool"
     falso.mkdir()
-    desde = time.time()
-    (falso / "abc.json").write_text("{}", encoding="utf-8")
+    desde_ns = (time.time_ns() // 10**9) * 10**9
+    desde = desde_ns / 1e9
+    viejo = falso / "anterior.json"
+    viejo.write_text("{}", encoding="utf-8")
+    os.utime(viejo, ns=(desde_ns - 10**9, desde_ns - 10**9))
+    nuevo = falso / "abc.json"
+    nuevo.write_text("{}", encoding="utf-8")
+    os.utime(nuevo, ns=(desde_ns, desde_ns))
     encontrados = conftest.archivos_nuevos_en(falso, desde)
     assert [p.name for p in encontrados] == ["abc.json"], encontrados
 

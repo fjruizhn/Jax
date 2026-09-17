@@ -5,7 +5,10 @@
 set -euo pipefail
 : "${JAX_EJECUTOR_LIB:?}" "${JAX_EJECUTOR_POLITICA:?}" "${JAX_EJECUTOR_GANCHO_TOPE_S:?}" "${JAX_EJECUTOR_CUENTA:?}"
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
-test "$(git -C "$REPO" branch --show-current)" = master
+# Producción se instala desde master. `--rama-aprobada` (sólo con GO/autonomía de Fernando) permite
+# instalar desde la rama del checkout y lo deja dicho en la salida.
+RAMA="$(git -C "$REPO" branch --show-current)"
+test "$RAMA" = master || test "${1:-}" = --rama-aprobada
 ETAPA="$(mktemp -d)"
 trap 'rm -rf "$ETAPA"' EXIT
 ( cd "$REPO" && PYTHONDONTWRITEBYTECODE=1 python3 -m jax.ejecutor.contratos.instalacion "$ETAPA" )
@@ -15,7 +18,7 @@ while IFS= read -r rel; do
   sudo install -D -o root -g root -m 0644 "$REPO/$rel" "$JAX_EJECUTOR_LIB/$rel"
 done < "$ETAPA/instalables.txt"
 sudo install -o root -g root -m 0755 "$ETAPA/gancho.sh" "$JAX_EJECUTOR_LIB/gancho.sh"
-for f in managed-settings.json settings-usuario.json manifiesto.sha256; do
+for f in managed-settings.json settings-usuario.json ejecutor-freno.service manifiesto.sha256; do
   sudo install -o root -g root -m 0644 "$ETAPA/$f" "$JAX_EJECUTOR_LIB/$f"
 done
 
@@ -35,4 +38,4 @@ for f in settings.json settings.local.json; do
 done
 
 ( cd "$JAX_EJECUTOR_LIB" && sudo sha256sum -c --quiet manifiesto.sha256 )
-echo "instalado=true lib=\"$JAX_EJECUTOR_LIB\""
+echo "instalado=true lib=\"$JAX_EJECUTOR_LIB\" rama=\"$RAMA\" commit=\"$(git -C "$REPO" rev-parse --short HEAD)\""
