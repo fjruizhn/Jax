@@ -923,7 +923,7 @@ jobs:
           # 712 -> 742 el 2026-09-16 (carriles async y proxy del Ejecutor): +12 en
           #   test_ejecutor_prioridad.py (11 async + 1 del arreglo del carril sync, que
           #   colgaba sin tope la segunda peticion paralela) y +18 del proxy nuevo.
-          #   PROVISIONAL: medido en local (3.14); se re-fija con lo que cuente el runner.
+          #   CONFIRMADO POR EL RUNNER (3.12, PR #173): "742 passed, 1 skipped, 1 xfailed".
           grep -qE "^742 passed, 1 skipped" /tmp/out || {
             echo "PISO ROTO: se esperaban 742 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
