@@ -199,7 +199,7 @@ def test_motor_con_reintento_de_schema_acumula_el_costo():
     entrada de la llamada k es tokens_in + (k-1)*tokens_out, no tokens_in
     repetido. Con tokens_in=1001, tokens_out=8192, precio_in=0.27,
     precio_out=1.10: llamada 1 = 1001*0.27 + 8192*1.10 = 9281.47; llamada 2 =
-    (1001+8192)*0.27 + 8192*1.10 = 11492.27; total 20773.74 / 1e6 = 0.02077374
+    (1001+8192)*0.27 + 8192*1.10 = 11493.31; total 20774.78 / 1e6 = 0.02077478
     -> 0.020775 redondeado hacia arriba."""
     d = _despacho(via_motor=True, schema_con_reintento=True)
     _, c = _evaluar(d, chars_entrada=2001)
@@ -320,3 +320,29 @@ def test_motor_con_herramientas_en_transporte_que_cobra_no_esta_acotado():
     v, c = _evaluar(d)
     assert v == []
     assert c.usd_max is None and c.motivo == "herramientas_sin_tope"
+
+
+# ---- Ronda de arreglo 3 (segunda re-revisión) ----
+
+
+def test_costo_acumulado_redondea_hacia_arriba_no_al_mas_cercano():
+    """La cuantización de costo_usd_acumulado_motor es ROUND_CEILING (hacia
+    arriba), NO ROUND_HALF_EVEN (bancario): con tokens_out=0 la suma de las
+    2 llamadas es 2*1*5117.2 = 10234.4, bruto = 0.0102344 -- el séptimo
+    decimal es 4, POR DEBAJO de la mitad. ROUND_HALF_EVEN redondearía para
+    abajo (0.010234, el mismo truncado); solo ROUND_CEILING sube a 0.010235.
+    Sin este caso, cambiar el rounding a HALF_EVEN no lo nota nada (todos
+    los demás casos del archivo tienen un séptimo decimal >= 5, donde los
+    dos modos coinciden)."""
+    c = pr.costo_usd_acumulado_motor(2, 1, 0, Decimal("5117.2"), Decimal("0"))
+    assert c == Decimal("0.010235")
+
+
+def test_http_directo_con_herramientas_no_es_motor_y_queda_acotado():
+    """El "sin tope" de R9a es del Motor Registry (via_motor): un paso HTTP
+    DIRECTO (via_motor=False) con tiene_herramientas=True no pasa por el
+    bucle de worker.py -- tools ahí no significa historial sin límite, y el
+    costo sigue siendo el cálculo normal de una sola llamada."""
+    d = _despacho(via_motor=False, tiene_herramientas=True)
+    _, c = _evaluar(d, chars_entrada=2001)
+    assert c.usd_max == Decimal("0.009282") and c.motivo == "acotado"

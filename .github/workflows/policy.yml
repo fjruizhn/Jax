@@ -985,8 +985,22 @@ jobs:
           #   es control (http_openai_compat+herramientas ya daba
           #   "herramientas_sin_tope", ahora con la condición explícita del
           #   transporte que cobra).
-          grep -qE "^802 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 802 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 802 -> 804 el 2026-09-17 (Task 5, ronda de arreglo 3, segunda
+          #   re-revisión): +2 en el mismo archivo -- la cuantización de
+          #   costo_usd_acumulado_motor es ROUND_CEILING, no ROUND_HALF_EVEN
+          #   (bancario): sin un caso cuyo séptimo decimal caiga bajo la
+          #   mitad (0.0102344 -> 0.010235, no 0.010234) cambiar el redondeo
+          #   no lo notaba nada; visto en rojo por mutación temporal
+          #   (revertida). Y un paso HTTP directo (via_motor=False) con
+          #   herramientas activas sigue acotado normal -- "sin tope" es del
+          #   Motor Registry, no de cualquier tools; visto en rojo sacando el
+          #   guard de via_motor (mutación temporal, revertida). También se
+          #   corrigió la aritmética del docstring de
+          #   test_motor_con_reintento_de_schema_acumula_el_costo (11492.27 →
+          #   11493.31, 20773.74 → 20774.78; el valor final ya redondeado,
+          #   0.020775, no cambió).
+          grep -qE "^804 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 804 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
