@@ -176,6 +176,56 @@ jobs:
           grep -qE "^9 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
 
+  # Frente F (2026-09-16): contrato de sub-pipelines contra una MariaDB REAL.
+  # Las tablas de Jacobs (jacobs_pipelines/steps/events y la nueva
+  # jacobs_subpipeline_tokens) las crea ESTE repo con store.init_tables(): no
+  # hace falta clonar jax-platform. PYTHONPATH incluye las_manos/ porque la
+  # ruta importa executor -> credential_resolver (sin eso, error de coleccion).
+  # Deps medidas en un venv limpio antes de escribir esta lista.
+  #
+  # Lo que prueba y por que necesita base: la carrera de consumos (20 a la vez
+  # y un intercalado forzado con dos sesiones) y el EXPLAIN de la SQL real no
+  # existen sin InnoDB de verdad. Un doble de la base daria verde sin probar
+  # la atomicidad.
+  subpipeline-contrato-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+      PYTHONPATH: .:las_manos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest aiomysql==0.3.2 pydantic httpx cryptography pyyaml aiofiles fastapi==0.139.0
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py
+      - name: Piso exacto de tests CORRIDOS
+        # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
+        run: |
+          python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
+            tests/test_subpipeline_contrato_rutas.py 2>&1 | tee /tmp/out
+          # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
+          #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
+          #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
+          #   hace de Ada. Vistos en rojo contra master; carrera, EXPLAIN, orden del
+          #   kill switch y enmienda del paso validados por mutacion.
+          grep -qE "^31 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 31 tests CORRIDOS (no skipeados)."; exit 1; }
+
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
   # contra filas de norma cero: da NaN, que `IS NULL` no atrapa, que el
@@ -655,6 +705,7 @@ jobs:
           tests/test_repl_interruptor.py
           tests/test_interruptor_sin_rutas_fijas.py
           tests/test_interruptor_heredada.py
+          tests/test_subpipeline_contrato_puro.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -728,6 +779,7 @@ jobs:
             tests/test_repl_interruptor.py \
             tests/test_interruptor_sin_rutas_fijas.py \
             tests/test_interruptor_heredada.py \
+            tests/test_subpipeline_contrato_puro.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1065,6 +1117,7 @@ jobs:
           #   heredada): no dependen de la versión ni de ser root. MEDIDO en local
           #   (3.14), dos corridas, sin checkout de plataforma: "1108 passed, 1 skipped,
           #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          # 742 -> 760 el 2026-09-16 (frente F): test_subpipeline_contrato_puro.py (+18) -- forma del pedido por rol, validate_create sin profundidad del llamador, /plan sin ada, config con rango validada al arrancar, motivos de emision/consumo, hijo frenado por el kill switch, sin ruta HTTP de emision. 8 vistos en rojo contra master; 2 guardas validadas por mutacion. Medido en local (3.14): 761 passed, 1 xfailed; FALTA confirmarlo en el runner.
           grep -qE "^1108 passed, 1 skipped" /tmp/out || {
             echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
