@@ -42,6 +42,23 @@ def test_el_freno_y_lo_que_consulta_se_instalan():
         assert rel in instalacion.INSTALABLES
 
 
+def test_lo_que_arranca_la_unidad_del_freno_esta_en_el_manifiesto():
+    """El módulo que importa ExecStart sale de la PLANTILLA, no de una lista escrita a mano:
+    reinstalar desde master no puede dejar el freno root afuera del manifiesto (2026-09-17: la
+    biblioteca de producción se instaló desde la rama porque el manifiesto de master no lo traía).
+    Lo que ese módulo importa lo cubre test_lo_instalable_es_solo_biblioteca_estandar."""
+    import re
+    texto = instalacion.renderizar_unidad_freno("/opt/ejecutor/lib")
+    modulos = re.findall(r"from (jax(?:\.\w+)+) import", texto)
+    assert modulos, texto
+    for m in modulos:
+        assert m.replace(".", "/") + ".py" in instalacion.INSTALABLES, m
+        partes = m.split(".")
+        for i in range(1, len(partes)):
+            assert "/".join(partes[:i]) + "/__init__.py" in instalacion.INSTALABLES, (m, i)
+    assert len(set(instalacion.INSTALABLES)) == len(instalacion.INSTALABLES)
+
+
 def test_render_de_la_unidad_del_freno():
     texto = instalacion.renderizar_unidad_freno("/opt/ejecutor/lib")
     assert "User=root" in texto and "Restart=always" in texto and "EnvironmentFile=/etc/jax/.env" in texto
