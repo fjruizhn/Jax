@@ -319,8 +319,6 @@ def test_credencial_sin_fila_via_cadena_real_es_config_error(monkeypatch):
     assert "la sonda no pudo preparar la llamada" in r.detalle
     llamar.assert_not_awaited()
     registrar.assert_awaited_once_with("kimi", "config_error", r.detalle, ANY)
-    llamar.assert_not_awaited()
-    registrar.assert_awaited_once_with("kimi", "config_error", r.detalle, ANY)
 
 
 def test_transporte_desconocido_es_config_error(monkeypatch):
