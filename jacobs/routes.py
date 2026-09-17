@@ -127,7 +127,7 @@ def _resumen_de_costo(veredicto: Veredicto) -> dict:
     }
 
 
-async def _prevuelo_de_reanudacion(pipeline: Pipeline, pasos: list[Step]) -> dict:
+async def _prevuelo_de_reanudacion(pipeline: Pipeline, pasos: list[Step]) -> tuple[dict, dict, list[Step]]:
     """Ola final F2 (Ruling R32, criterio de Fernando "nada gasta sin
     pre-vuelo"): resume y approve-step lanzan run_pipeline igual que continue,
     así que corren el pre-vuelo ANTES de tomar la época, sobre los pasos SIN
@@ -141,7 +141,11 @@ async def _prevuelo_de_reanudacion(pipeline: Pipeline, pasos: list[Step]) -> dic
     - no puede correr -> 503 prevuelo_no_disponible, motivo redactado.
     - SIN costo_max_aceptado_usd: el consentimiento se dio al crear/continuar.
 
-    Devuelve el resumen de costo que suma la respuesta 200."""
+    Devuelve (resumen de costo para la respuesta 200, contexto sin las refs
+    de los pasos a rehacer, pasos cuya ref era ILEGIBLE). Pasada final R34:
+    resume y approve-step persisten ESE contexto al tomar la época y vuelven
+    a poner esos pasos en pending, como continue -- si no, run_pipeline los
+    daba por hechos (ref presente) y sus dependientes fallaban al leerla."""
     try:
         _, a_correr, contexto = await servicio_continuar.separar_por_ref(pasos, pipeline.context)
     except Exception as exc:  # fail-closed: sin saber qué pasos se corren no hay pre-vuelo, y sin pre-vuelo no se lanza (spec §8)
@@ -154,7 +158,19 @@ async def _prevuelo_de_reanudacion(pipeline: Pipeline, pasos: list[Step]) -> dic
         cuerpo = {"code": "prevuelo_rechazado", **veredicto.to_dict()}
         await store.event_append(pipeline.pipeline_id, "PREVUELO_RECHAZADO", cuerpo)
         raise HTTPException(status_code=422, detail=cuerpo)
-    return _resumen_de_costo(veredicto)
+    a_rehacer = set(a_correr)
+    ilegibles = [p for p in pasos
+                 if p.step_index in a_rehacer and pipeline.context.get(f"step_{p.step_index}_ref")]
+    return _resumen_de_costo(veredicto), contexto, ilegibles
+
+
+def _rehacer(paso: Step) -> None:
+    """Un paso cuya ref no se lee vuelve a correr (mismo reset que continue)."""
+    paso.status = StepStatus.pending
+    paso.error = None
+    paso.started_at = None
+    paso.finished_at = None
+    paso.output_ref = None
 
 
 # ----------------------------------------------------------------
@@ -473,14 +489,21 @@ async def resume_pipeline(
     steps = await store.steps_by_pipeline(pipeline_id)
     # F2 (Ruling R32): pre-vuelo antes de tomar la época -- un rechazo no deja
     # rastro de estado (sólo el evento PREVUELO_RECHAZADO).
-    costo = await _prevuelo_de_reanudacion(pipeline, steps)
+    costo, contexto, ilegibles = await _prevuelo_de_reanudacion(pipeline, steps)
 
     # Época (spec 2026-09-17 §5.3): se toma ANTES de tocar pasos. Si otro
     # resume ganó, este no escribe ni lanza nada: dos ejecutores del mismo
     # pipeline es exactamente lo que la época existe para impedir.
-    nueva_epoca = await store.pipeline_tomar_epoca(
-        pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,),
-    )
+    # Pasada final R34: si había refs ilegibles, el contexto sin ellas viaja
+    # en el MISMO UPDATE que toma la época.
+    if ilegibles:
+        nueva_epoca = await store.pipeline_tomar_epoca(
+            pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,), contexto,
+        )
+    else:
+        nueva_epoca = await store.pipeline_tomar_epoca(
+            pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,),
+        )
     if nueva_epoca is None:
         raise HTTPException(
             status_code=409,
@@ -497,8 +520,12 @@ async def resume_pipeline(
         if s.status == StepStatus.blocked:
             s.status = StepStatus.pending
             await store.step_upsert(s)
+    for s in ilegibles:
+        _rehacer(s)
+        await store.step_upsert(s)
 
     pipeline.plan = steps
+    pipeline.context = contexto
     pipeline.run_epoch = nueva_epoca
     background.add_task(run_pipeline, pipeline)
 
@@ -639,7 +666,10 @@ async def approve_step(
     # F2 (Ruling R32): pre-vuelo de la ola completa que se va a lanzar (todos
     # los pasos sin ref legible), antes de tomar la época y de persistir las
     # marcas de hyde.
-    costo = await _prevuelo_de_reanudacion(pipeline, steps)
+    costo, contexto, ilegibles = await _prevuelo_de_reanudacion(pipeline, steps)
+    # Pasada final R34: el contexto sin las refs ilegibles (con las marcas
+    # hyde_approved_* intactas) es el que viaja con la época.
+    pipeline.context = contexto
 
     # Época (desvío 9 del plan 2026-09-17): approve-step lanza run_pipeline
     # igual que resume. Las marcas hyde_approved_* viajan en el MISMO UPDATE
@@ -665,6 +695,9 @@ async def approve_step(
         current_step.error  = None
         await store.step_upsert(current_step)
         approved_indices.append(current_step.step_index)
+    for s in ilegibles:
+        _rehacer(s)
+        await store.step_upsert(s)
 
     pipeline.plan = steps
     pipeline.run_epoch = nueva_epoca

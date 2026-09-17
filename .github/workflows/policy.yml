@@ -1378,8 +1378,16 @@ jobs:
           #   asyncio.run, la ignora y vuelve a sondear. Control contra 74cb5f9 (el
           #   chequeo ya existía, ningún test lo fijaba); rojo quitando
           #   'vuelo.loop is not loop': RuntimeError ... attached to a different loop.
-          grep -qE "^1064 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1064 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1064 -> 1067 el 2026-09-17 (pasada final R34, 4): +3 en
+          #   test_jacobs_resume_epoca.py -- resume y approve-step quitan del contexto
+          #   las refs ILEGIBLES de los pasos a rehacer (misma regla que continue): el
+          #   contexto sin ellas viaja en el UPDATE que toma la época, el ejecutor lo
+          #   recibe sin la ref y el paso vuelve a pending; approve conserva la marca
+          #   hyde_approved_*; sin refs ilegibles resume no reescribe el contexto
+          #   (control). Rojo contra 74cb5f9: 2 failed (IndexError: tomar_epoca sin
+          #   contexto; la ref rota seguía en el contexto de approve).
+          grep -qE "^1067 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1067 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

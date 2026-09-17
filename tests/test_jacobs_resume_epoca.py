@@ -212,3 +212,51 @@ def test_approve_step_evalua_la_ola_completa_no_solo_el_paso_aprobado():
     prevuelo.assert_awaited_once()
     assert prevuelo.await_args.kwargs["pendientes"] == {1, 2, 3}
     assert prevuelo.await_args.args[1].get("hyde_approved_s1") is True
+
+
+# ---------------------------------------------------------------------------
+# Pasada final R34, 4: resume y approve-step quitan del contexto las refs
+# ILEGIBLES de los pasos que se rehacen (misma regla que continue). Antes el
+# pre-vuelo los cobraba pero run_pipeline los daba por hechos (tenían ref en
+# el contexto) y sus dependientes fallaban al leerla.
+# ---------------------------------------------------------------------------
+
+def test_resume_quita_la_ref_ilegible_y_el_paso_se_vuelve_a_correr():
+    pasos = [_paso(0, status=StepStatus.completed), _paso(1, status=StepStatus.completed, depends_on=[0]),
+             _paso(2, depends_on=[1])]
+    pasos[1].output_ref = _REF_ROTA
+    pipeline = _interrumpido_con({"step_0_ref": _REF_OK, "step_1_ref": _REF_ROTA})
+    tomar, upsert = AsyncMock(return_value=4), AsyncMock()
+    r, bg = _llamar("resume", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar, upsert=upsert)
+    assert tomar.await_args.args[:3] == ("p1", 3, (PipelineStatus.interrupted,))
+    guardado = tomar.await_args.args[3]
+    assert guardado.get("step_0_ref") == _REF_OK and "step_1_ref" not in guardado
+    lanzado = bg.tasks[0].args[0]
+    assert "step_1_ref" not in lanzado.context and lanzado.context.get("step_0_ref") == _REF_OK
+    paso_1 = lanzado.plan[1]
+    assert (paso_1.status, paso_1.output_ref, paso_1.error) == (StepStatus.pending, None, None)
+    assert [c.args[0].step_index for c in upsert.await_args_list] == [1]
+
+
+def test_resume_sin_refs_ilegibles_no_reescribe_el_contexto():
+    pasos = [_paso(0, status=StepStatus.completed), _paso(1, depends_on=[0])]
+    pipeline = _interrumpido_con({"step_0_ref": _REF_OK})
+    tomar, upsert = AsyncMock(return_value=4), AsyncMock()
+    _llamar("resume", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar, upsert=upsert)
+    tomar.assert_awaited_once_with("p1", 3, (PipelineStatus.interrupted,))
+    upsert.assert_not_awaited()
+
+
+def test_approve_quita_la_ref_ilegible_y_conserva_la_marca_de_hyde():
+    pasos = [_paso(0, status=StepStatus.completed),
+             _paso(1, facet="hyde", status=StepStatus.blocked_human_gate, depends_on=[0])]
+    pasos[0].output_ref = _REF_ROTA
+    pipeline = _interrumpido_con({"step_0_ref": _REF_ROTA})
+    tomar, upsert = AsyncMock(return_value=4), AsyncMock()
+    r, bg = _llamar("approve", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar, upsert=upsert)
+    guardado = tomar.await_args.args[3]
+    assert "step_0_ref" not in guardado and guardado.get("hyde_approved_s1") is True
+    lanzado = bg.tasks[0].args[0]
+    assert "step_0_ref" not in lanzado.context and lanzado.context.get("hyde_approved_s1") is True
+    assert lanzado.plan[0].status == StepStatus.pending and lanzado.plan[0].output_ref is None
+    assert sorted(c.args[0].step_index for c in upsert.await_args_list) == [0, 1]
