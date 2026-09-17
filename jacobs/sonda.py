@@ -40,9 +40,19 @@ usage -- el proveedor pudo cobrarla igual: se registra con tokens ESTIMADOS
 tope que pidió la sonda) y request_type='preflight_probe_est', que es la
 marca de estimación (axioma_usage no tiene otra columna donde ponerla sin
 DDL; la columna es VARCHAR(20) y el valor tiene 19). Ola final F4, 2026-09-17,
-revierte el Ruling R14. Una falla local (config_error), un error HTTP del
-proveedor o una base caída al resolver NO registran: no hubo llamada
-cobrable (un 4xx/5xx o una conexión rechazada no se facturan). Si el registro de salud
+revierte el Ruling R14.
+
+Se decide por si el pedido SALIÓ hacia el proveedor (pasada final R34):
+  - no salió, NO registra: httpx.ConnectError y ConnectTimeout (no hubo
+    conexión), PoolTimeout (nunca obtuvo una), UnsupportedProtocol (se
+    rechaza antes de conectar), y un 4xx (el proveedor lo rechazó sin
+    procesarlo); tampoco una falla local (config_error) ni una base caída
+    al resolver;
+  - salió y no hay uso medido, registra ESTIMADO: 2xx sin usage, el timeout
+    propio de la sonda (wait_for: no se sabe en qué fase cortó, se asume que
+    salió), ReadTimeout/WriteTimeout, ReadError, RemoteProtocolError, un 5xx
+    (gateways 504/524 incluidos: el modelo pudo haber corrido detrás) y
+    cualquier otra excepción de la llamada -- ante la duda, el costo se ve. Si el registro de salud
 falla, el veredicto se mantiene (el dato es la respuesta del proveedor, no
 la fila), se loguea WARNING y se cuenta.
 
@@ -92,6 +102,27 @@ def registros_perdidos() -> int:
     return _registros_perdidos
 
 
+class _RespuestaNoExitosa(RuntimeError):
+    """El proveedor respondió fuera de 2xx. `status` decide el cobro: un 4xx
+    no se procesó, un 5xx pudo procesarse (pasada final R34)."""
+
+    def __init__(self, status: int, mensaje: str):
+        super().__init__(mensaje)
+        self.status = status
+
+
+# Excepciones de httpx que garantizan que el pedido NO llegó a salir.
+_NO_SALIO = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.UnsupportedProtocol)
+
+
+def _pudo_cobrarse(exc: BaseException) -> bool:
+    if isinstance(exc, _NO_SALIO):
+        return False
+    if isinstance(exc, _RespuestaNoExitosa):
+        return exc.status >= 500
+    return True
+
+
 class _FallaDePreparacion(Exception):
     """Fallo LOCAL antes de tocar al proveedor: transporte desconocido,
     contrato sin tope de salida (max_output_tokens=None), o -- SOLO en el
@@ -122,7 +153,10 @@ async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
     if not 200 <= resp.status_code < 300:
-        raise RuntimeError(f"HTTP {resp.status_code}: {recortar_redactado(resp.text, _LARGO_DETALLE, secretos)}")
+        raise _RespuestaNoExitosa(
+            resp.status_code,
+            f"HTTP {resp.status_code}: {recortar_redactado(resp.text, _LARGO_DETALLE, secretos)}",
+        )
     return resp.json()
 
 
@@ -172,7 +206,8 @@ async def _preparar(clave: str, d: Despacho):
                     messages=mensajes, timeout=timeout, limite={campo: limite},
                 )
             except httpx.HTTPStatusError as exc:
-                raise RuntimeError(
+                raise _RespuestaNoExitosa(
+                    exc.response.status_code,
                     f"HTTP {exc.response.status_code}: "
                     f"{recortar_redactado(exc.response.text, _LARGO_DETALLE, [api_key])}"
                 ) from exc
@@ -272,16 +307,18 @@ async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
         await _registrar(clave, d, resultado, "config_error", user_id, tenant_id, llamada_cobrable=False)
         return resultado
 
-    # F4: una llamada que venció o volvió 2xx pudo cobrarse; un error HTTP del
-    # proveedor o de conexión, no.
+    # F4 + pasada final R34: se registra uso estimado si el pedido pudo SALIR
+    # (_pudo_cobrarse); ver el docstring del módulo.
     cobrable = True
     try:
         resultado = await asyncio.wait_for(llamada(timeout), timeout=timeout)
-    except (asyncio.TimeoutError, httpx.TimeoutException):
+    except (asyncio.TimeoutError, httpx.TimeoutException) as exc:
         resultado = ResultadoSonda(False, f"timeout de sonda ({timeout}s)", uso_medido=False)
+        cobrable = _pudo_cobrarse(exc)
     except Exception as exc:  # fail-closed: una sonda que no completó la llamada al proveedor da faceta_caida, nunca sana; el motivo redactado viaja en el veredicto
-        resultado = ResultadoSonda(False, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE))
-        cobrable = False
+        resultado = ResultadoSonda(False, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE),
+                                   uso_medido=False)
+        cobrable = _pudo_cobrarse(exc)
     await _registrar(clave, d, resultado, "ok" if resultado.ok else "provider_error", user_id, tenant_id,
                      llamada_cobrable=cobrable)
     return resultado

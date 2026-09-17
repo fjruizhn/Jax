@@ -436,7 +436,9 @@ def test_una_sonda_fallida_no_registra_uso(monkeypatch):
     """Item 8: sin tokens medidos (una sonda que no respondió) no hay nada
     que cobrar -- record_direct_usage no se llama."""
     uso = AsyncMock()
-    r, _ = _sondear(monkeypatch, _despacho(), _Resp(503, "caído"), uso=uso)
+    # Pasada final R34, 2: un 5xx pudo procesarse y cobrarse (registra
+    # estimado, ver abajo); el caso "fallida y NO cobrable" es un 4xx.
+    r, _ = _sondear(monkeypatch, _despacho(), _Resp(429, "cuota agotada"), uso=uso)
     assert not r.ok
     uso.assert_not_awaited()
 
@@ -615,3 +617,78 @@ def test_base_caida_al_resolver_no_registra_uso(monkeypatch):
         with pytest.raises(FacetUnavailableError):
             asyncio.run(sonda.sondear("jekyll", _despacho()))
     uso.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Pasada final R34, 2: la regla de cobro de F4 se decide por si el pedido
+# SALIÓ hacia el proveedor. No salió (nada que registrar): ConnectError y
+# ConnectTimeout (no hubo conexión), PoolTimeout (nunca obtuvo conexión),
+# UnsupportedProtocol (se rechaza antes de conectar) y un 4xx (el proveedor lo
+# rechazó sin procesarlo). Salió y no hay uso medido (estimado): ReadTimeout y
+# WriteTimeout, ReadError, RemoteProtocolError y cualquier 5xx, gateways
+# 504/524 incluidos.
+# ---------------------------------------------------------------------------
+
+_NO_SALIO = [
+    httpx.ConnectError("sin ruta"),
+    httpx.ConnectTimeout("no conectó"),
+    httpx.PoolTimeout("sin conexión libre"),
+    httpx.UnsupportedProtocol("esquema raro"),
+]
+_SALIO = [
+    httpx.ReadTimeout("lento"),
+    httpx.WriteTimeout("lento al escribir"),
+    httpx.ReadError("cortó a mitad"),
+    httpx.RemoteProtocolError("respuesta rota"),
+]
+
+
+@pytest.mark.parametrize("error", _NO_SALIO, ids=lambda e: type(e).__name__)
+def test_pedido_que_no_salio_no_registra_uso(monkeypatch, error):
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(), error, uso=uso)
+    assert not r.ok
+    uso.assert_not_awaited()
+
+
+@pytest.mark.parametrize("error", _SALIO, ids=lambda e: type(e).__name__)
+def test_pedido_que_salio_sin_uso_registra_estimado(monkeypatch, error):
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(), error, uso=uso)
+    assert not r.ok
+    uso.assert_awaited_once_with(None, None, "jekyll", "deepseek", "deepseek-v4-flash", *_estimado(),
+                                 request_type="preflight_probe_est")
+
+
+@pytest.mark.parametrize("status", [400, 401, 404, 429])
+def test_4xx_no_registra_uso(monkeypatch, status):
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(), _Resp(status, "rechazado"), uso=uso)
+    assert not r.ok and str(status) in r.detalle
+    uso.assert_not_awaited()
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504, 524])
+def test_5xx_registra_uso_estimado(monkeypatch, status):
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(), _Resp(status, "falla del lado del proveedor"), uso=uso)
+    assert not r.ok and str(status) in r.detalle
+    uso.assert_awaited_once_with(None, None, "jekyll", "deepseek", "deepseek-v4-flash", *_estimado(),
+                                 request_type="preflight_probe_est")
+
+
+@pytest.mark.parametrize("status,cobrable", [(401, False), (524, True)])
+def test_motor_decide_el_cobro_por_el_status(monkeypatch, status, cobrable):
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
+    resp = _RespuestaHTTPError(status, "respuesta")
+    uso = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    with patch("motor_registry.worker._call_http_openai_compat",
+               AsyncMock(side_effect=httpx.HTTPStatusError(str(status), request=None, response=resp))), \
+         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", uso):
+        r = asyncio.run(sonda.sondear("kimi", d))
+    assert not r.ok
+    assert uso.await_count == (1 if cobrable else 0)
