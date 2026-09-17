@@ -1195,3 +1195,40 @@ def test_store_lista_todas_las_funciones_que_usan_el_pool():
     bloque = texto[texto.index("# Ruling R38 (2026-09-17): el pool es del STORE"):texto.index("_pool_estado: tuple[")]
     for nombre in ("registrar_evento_de_sonda", "record_direct_usage", "event_append", "get_motor_governance"):
         assert nombre in bloque, nombre
+
+
+# ---------------------------------------------------------------------------
+# Capas: motor_registry importa jacobs (m5 de la re-revisión final)
+# ---------------------------------------------------------------------------
+
+def test_la_dependencia_de_motor_registry_sobre_jacobs_esta_declarada():
+    """m5: `worker.py` importa `jacobs.store` (capa alta) en tiempo de import
+    desde el Motor Registry (capa baja). Funciona -- hay symlink
+    las_manos/jacobs -> ../jacobs y todos los jobs de CI lo tienen -- pero
+    tiene que estar DICHO donde se lee, y `jacobs/usage_writer.py` no puede
+    seguir afirmando que los dos módulos no se importan entre sí.
+    Expected contra 49ea939: falta la declaración en worker.py y
+    usage_writer.py dice 'jacobs NO importa motor_registry' a secas."""
+    worker = (RAIZ / "las_manos" / "motor_registry" / "worker.py").read_text(encoding="utf-8")
+    cabeza = worker[:worker.index("import traceback")]
+    for parte in ("jacobs.store", "symlink", "PYTHONPATH"):
+        assert parte in cabeza, f"worker.py no declara la dependencia ({parte})"
+    uso = (RAIZ / "jacobs" / "usage_writer.py").read_text(encoding="utf-8")
+    # No basta con que siga diciendo "jacobs NO importa motor_registry" (sigue
+    # siendo cierto): tiene que decir que la dirección contraria SÍ existe.
+    assert "worker.py importa jacobs.store" in uso
+    assert "la direccion CONTRARIA si existe" in uso
+
+
+def test_el_ejecutor_y_el_motor_registry_comparten_la_misma_marca_de_turno():
+    """Control del riesgo que hace que la marca NO se mueva a jax/core: si
+    `espera_de_turno_sin_plazo` viviera en un módulo espejado, importarlo
+    'a secas' desde las_manos y como `jax.core...` desde jacobs daría DOS
+    módulos y DOS ContextVar -- la marca del job no la vería el pool y N1
+    volvería en silencio. Acá se fija que es el MISMO objeto."""
+    from motor_registry import worker
+
+    assert worker.espera_de_turno_sin_plazo is store.espera_de_turno_sin_plazo
+    with worker.espera_de_turno_sin_plazo():
+        assert store.turno_sin_plazo() is True
+    assert store.turno_sin_plazo() is False

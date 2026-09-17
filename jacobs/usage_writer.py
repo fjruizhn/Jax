@@ -10,7 +10,12 @@ Ruling R38 fix round 1, 2026-09-17); antes abria una conexion propia por
 fila. jacobs NO importa motor_registry (no esta en su sys.path standalone,
 ver comentario en jacobs/executor.py sobre el catalogo de capabilities) --
 por eso este modulo es una copia adaptada de
-las_manos/motor_registry/usage_writer.py, no un import cruzado.
+las_manos/motor_registry/usage_writer.py, no un import cruzado. OJO (m5 de la
+re-revision final, 2026-09-17): la direccion CONTRARIA si existe desde R38 fix
+round 3 -- `las_manos/motor_registry/worker.py importa jacobs.store` para
+correr el job bajo `espera_de_turno_sin_plazo`; esta declarada en el docstring
+de ese archivo. O sea: motor_registry -> jacobs, si; jacobs -> motor_registry,
+no.
 
 request_type='pipeline' (no 'chat'): distingue en /api/admin/usage estos
 mismos transportes invocados DESDE un pipeline de Jacobs (posiblemente sin

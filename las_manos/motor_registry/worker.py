@@ -16,7 +16,24 @@ Ejecuta el job completo:
 Kill switch: si /etc/jax/PAUSE existe antes o durante → FAILED con error "killed_by_switch".
 
 En memoria de Jairo Urbina.
-"""
+
+
+DEPENDENCIA DECLARADA (m5 de la re-revisión final, 2026-09-17): este módulo
+importa `jacobs.store` (capa alta) desde el Motor Registry (capa baja), para
+correr el job bajo `espera_de_turno_sin_plazo` (R38 fix round 3, N1: si no,
+un turno del pool que vence con la base sana hace perder los eventos de
+auditoría de tool_authority). Resuelve porque existe el symlink
+`las_manos/jacobs -> ../jacobs` y porque todos los jobs de CI que tocan este
+archivo corren con `jacobs` importable (`PYTHONPATH=.:las_manos` o
+`PYTHONPATH=las_manos` con el symlink). Un job futuro que corra `worker.py`
+sin `jacobs` importable falla al importar, no en silencio.
+
+Por qué la marca NO se movió a `jax/core/` (la capa compartida): es una
+ContextVar con ESTADO. Importada 'a secas' desde `las_manos/` y como
+`jax.core...` desde `jacobs/` serían dos módulos distintos y dos ContextVar
+distintas -- la marca que pone el job no la vería el pool y el defecto de N1
+volvería sin ruido. Lo fija
+`tests/test_jacobs_conexiones_por_pedido.py::test_el_ejecutor_y_el_motor_registry_comparten_la_misma_marca_de_turno`."""
 from __future__ import annotations
 
 import asyncio

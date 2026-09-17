@@ -1549,8 +1549,14 @@ jobs:
           #   test_jacobs_conexiones_por_pedido.py -- GET /jacobs/pipeline/{id}/events lee por
           #   el pool; era el último endpoint HTTP con conexión propia por pedido. Rojo contra
           #   1da52bc: [('directa', 'events_by_pipeline', False)].
-          grep -qE "^1132 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1132 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1132 -> 1134 el 2026-09-17 (re-revisión final, m5): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- la dependencia motor_registry -> jacobs
+          #   (worker.py importa jacobs.store para N1) queda DECLARADA en worker.py, y
+          #   jacobs/usage_writer.py deja de leerse como que no existe ningún import cruzado
+          #   (rojo contra 49ea939: no estaba declarada); control de que el ejecutor y el
+          #   Motor Registry comparten la MISMA ContextVar (el riesgo de moverla a jax/core).
+          grep -qE "^1134 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1134 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
