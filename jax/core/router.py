@@ -131,7 +131,7 @@ EASTER_EGG_TEXT = (
 # ESPEJO en jax-platform backend/api/chat.py, familia router_keywords de scripts/check_mirror_sync.py: un cambio aca se hace alla en el mismo paso.
 
 KIMI_KW = frozenset((
-    "codigo", "programar", "programa", "script", "funcion", "clase", "metodo",
+    "codigo_canario", "programar", "programa", "script", "funcion", "clase", "metodo",
     "modulo", "libreria", "api", "endpoint", "backend", "frontend",
     "implementar", "implementa", "construir", "refactor", "refactorizar",
     "refactoriza", "debug", "depurar", "bug", "traceback", "excepcion",
