@@ -934,8 +934,18 @@ jobs:
           #   cancelar durante una ola ya no reescribe running, la corrida superada no escribe
           #   contexto ni despacha, relee la época por ola, un solo PIPELINE_ABORTED. 5 vistos
           #   en rojo; la corrida normal es control.
-          grep -qE "^755 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 755 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 755 -> 762 el 2026-09-17 (ronda de arreglo 1, revisión de Task 3): +7 en el mismo
+          #   archivo. 1) la relectura de época antes de cada ola tenía un test que pasaba
+          #   igual con la relectura deshabilitada (mismo resultado final por otro camino); se
+          #   le agregaron aserciones sobre WAVE_STARTED y los intentos de escritura del step
+          #   para distinguirlo (sin test nuevo). 2) siete salidas tempranas por época perdida
+          #   no tenían test propio: el step del kill switch, el `aborted` del kill switch, el
+          #   step del gate de hyde, el `interrupted` del gate de hyde, el `completed` de
+          #   dry_run, el `interrupted` de supervised, y _fail_step cuando su propia escritura
+          #   se rechaza -- siete tests nuevos. Los 7 se vieron en rojo revirtiendo cada
+          #   chequeo a una escritura plana, uno a la vez.
+          grep -qE "^762 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 762 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
