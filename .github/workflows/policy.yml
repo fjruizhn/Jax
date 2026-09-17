@@ -610,6 +610,7 @@ jobs:
           tests/test_jacobs_continuar.py
           tests/test_jacobs_continue_endpoint.py
           tests/test_jacobs_relaunch_cli.py
+          tests/test_medir_min_output_tokens.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -663,6 +664,7 @@ jobs:
             tests/test_jacobs_continuar.py \
             tests/test_jacobs_continue_endpoint.py \
             tests/test_jacobs_relaunch_cli.py \
+            tests/test_medir_min_output_tokens.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1179,8 +1181,21 @@ jobs:
           #   step_upsert`), no solo `store.step_upsert(...)` (`ast.Attribute`) --
           #   sin test nuevo (es el mismo test, más fuerte), visto en rojo con una
           #   copia descartable del CLI que hacía esa llamada bare (no committeada).
-          grep -qE "^920 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 920 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 920 -> 928 el 2026-09-17 (Task 13, medición de solo lectura de
+          #   min_output_tokens): test_medir_min_output_tokens.py (+8) -- los 5
+          #   del brief (redondeo a 1024, sólo jobs completed, líneas rotas
+          #   contadas, máximo por capability) más 3 propios: el JOIN de
+          #   _SQL_HTTP_DIRECTO lleva `COLLATE utf8mb4_uca1400_ai_ci` (Ruling
+          #   del plan P, jax-platform Task 2, commit d79b0f9: sin ella el JOIN
+          #   por facet falla contra producción con 1267 "Illegal mix of
+          #   collations"), y dos que prueban que el script es de sólo lectura
+          #   POR CONSTRUCCIÓN -- cada `cur.execute(...)` real es un SELECT, y
+          #   los `UPDATE capability SET min_output_tokens=...` que arma para
+          #   la migración del plan P sólo se IMPRIMEN, nunca se ejecutan. La
+          #   medición NO se repitió (Ruling R2 del ledger de este plan): los
+          #   números ya los midió P una sola vez.
+          grep -qE "^928 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 928 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
