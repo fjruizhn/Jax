@@ -762,6 +762,9 @@ jobs:
           tests/test_ejecutor_proxy_modelo_y_rutas.py
           tests/test_ejecutor_prioridad_espejo.py
           tests/test_ejecutor_sp3_config.py
+          tests/test_ejecutor_proxy_freno.py
+          tests/test_ejecutor_contratos_freno.py
+          tests/test_ejecutor_freno_remoto.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -850,6 +853,9 @@ jobs:
             tests/test_ejecutor_proxy_modelo_y_rutas.py \
             tests/test_ejecutor_prioridad_espejo.py \
             tests/test_ejecutor_sp3_config.py \
+            tests/test_ejecutor_proxy_freno.py \
+            tests/test_ejecutor_contratos_freno.py \
+            tests/test_ejecutor_freno_remoto.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
