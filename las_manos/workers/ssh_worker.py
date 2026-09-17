@@ -6,7 +6,7 @@ Soporta dry-run: muestra qué haría sin hacerlo.
 
 EL FRENO VIVE EN LA CARRETERA, NO SOLO EN EL PORTÓN:
 mientras un comando corre, un watcher concurrente sondea el kill switch
-cada POLL_INTERVAL segundos. Si /etc/jax/PAUSE aparece a mitad de la
+cada POLL_INTERVAL segundos. Si el archivo de JAX_KILL_SWITCH_PATH aparece a mitad de la
 operación, el watcher mata el cliente SSH. Con `ssh -tt` (pty forzado),
 sshd propaga SIGHUP al proceso remoto: una cadena `sleep 10 && touch`
 muere en el sleep y el touch NUNCA llega a ejecutarse.
@@ -22,6 +22,8 @@ import asyncio
 import os
 from pathlib import Path
 
+from interruptor import interruptor_activo, ruta_del_interruptor
+
 # Puerto/usuario reales viven en /etc/jax/.env (repo público, ronda 9) --
 # sin JAX_SSH_USER seteado, el comando ssh queda mal formado ("@host") y
 # falla ruidosamente en vez de conectar con un usuario adivinado.
@@ -30,12 +32,7 @@ SSH_USER = os.getenv("JAX_SSH_USER", "")
 # -tt fuerza pseudo-tty → al morir el cliente, sshd manda SIGHUP al remoto.
 SSH_OPTS = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new"]
 
-# Configurado por server.py al arrancar. Si está seteado, el watcher vigila.
-KILL_SWITCH_PATH: str | None = None
 POLL_INTERVAL = 0.25  # segundos entre sondeos del kill switch
-
-# Sentinela: distingue "no me pasaron nada" de "me pasaron None a propósito".
-_UNSET = object()
 
 
 def _normalize(raw: bytes) -> str:
@@ -44,13 +41,13 @@ def _normalize(raw: bytes) -> str:
 
 
 async def _kill_switch_watcher(proc, kill_switch_path: str, aborted: dict) -> None:
-    """Sondea el kill switch mientras el proceso corre. Si aparece, mata."""
-    path = Path(kill_switch_path)
+    """Sondea el kill switch mientras el proceso corre. Si aparece (o no se lo
+    puede mirar: interruptor_activo falla cerrado), mata."""
     while True:
         await asyncio.sleep(POLL_INTERVAL)
         if proc.returncode is not None:
             return  # el proceso ya terminó solo
-        if path.exists():
+        if interruptor_activo(kill_switch_path):
             aborted["flag"] = True
             try:
                 proc.kill()  # SIGKILL al cliente ssh → SIGHUP al remoto (pty)
@@ -64,16 +61,16 @@ async def ssh_exec(
     command: str,
     dry_run: bool = False,
     timeout: float = 120.0,
-    kill_switch_path: object = _UNSET,
+    kill_switch_path: str | Path | None = None,
 ) -> dict:
     """Ejecuta un comando vía SSH. Devuelve dict con resultado.
 
-    Si kill_switch_path apunta a un archivo (o se usa el configurado en
-    KILL_SWITCH_PATH), un watcher concurrente aborta la operación en vuelo
-    cuando ese archivo aparece.
+    Un watcher concurrente vigila el freno (por defecto, el de
+    JAX_KILL_SWITCH_PATH) y aborta la operación en vuelo si aparece. Sin la
+    variable lanza InterruptorSinConfigurar antes de ejecutar nada.
     """
-    if kill_switch_path is _UNSET:
-        kill_switch_path = KILL_SWITCH_PATH
+    if kill_switch_path is None:
+        kill_switch_path = ruta_del_interruptor()
 
     full_cmd = ["ssh", "-tt", "-p", SSH_PORT, *SSH_OPTS, f"{SSH_USER}@{host}", command]
 
@@ -94,21 +91,16 @@ async def ssh_exec(
             stderr=asyncio.subprocess.PIPE,
         )
 
-        # El freno en la carretera: watcher concurrente (si hay kill switch).
+        # El freno en la carretera: watcher concurrente, SIEMPRE.
         aborted: dict = {"flag": False}
-        watcher = None
-        if kill_switch_path:
-            watcher = asyncio.create_task(
-                _kill_switch_watcher(proc, str(kill_switch_path), aborted)
-            )
+        watcher = asyncio.create_task(_kill_switch_watcher(proc, str(kill_switch_path), aborted))
 
         try:
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=timeout
             )
         finally:
-            if watcher is not None:
-                watcher.cancel()
+            watcher.cancel()
 
         if aborted["flag"]:
             return {

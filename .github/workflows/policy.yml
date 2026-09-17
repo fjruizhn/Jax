@@ -449,6 +449,17 @@ jobs:
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
           grep -qE "^15 passed" /tmp/cu || {
             echo "PISO ROTO: se esperaban 15 tests CORRIDOS y 0 skipped."; exit 1; }
+      - name: El freno que escribe la plataforma mata el motor en vuelo
+        env:
+          JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
+          PYTHONPATH: .:las_manos
+        run: |
+          pip install pytest-asyncio httpx cryptography pydantic pyyaml aiofiles fastapi==0.139.0
+          python -m pytest tests/test_interruptor_escritor_de_la_plataforma.py -q -rs 2>&1 | tee /tmp/ks
+          # 2026-09-16 (frente B, Task 3): la copia identica + el peor caso con el
+          # escritor real de la plataforma. Sin el checkout se saltan: se exige 0 skipped.
+          grep -qE "^2 passed in" /tmp/ks || {
+            echo "PISO ROTO: se esperaban 2 tests CORRIDOS y 0 skipped."; exit 1; }
 
   ollama-num-parallel:
     # Tripwire del invariante del que cuelga ENTERA la decision de
@@ -637,6 +648,7 @@ jobs:
           tests/test_cliente_http_compartido.py
           tests/test_conftest_aisla_facet_seal.py
           tests/test_interruptor.py
+          tests/test_interruptor_lectores.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -705,6 +717,7 @@ jobs:
             tests/test_cliente_http_compartido.py \
             tests/test_conftest_aisla_facet_seal.py \
             tests/test_interruptor.py \
+            tests/test_interruptor_lectores.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el

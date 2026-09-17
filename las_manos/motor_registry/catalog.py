@@ -183,8 +183,7 @@ class MotorCatalog:
         """Carga motor/capability (con `mode`, tanda A v2)/capability_motor
         desde la DB compartida jax_memory -- mismo pool/patron de conexion
         que credential_resolver.py. Reemplaza la lectura de config.toml
-        (TOML queda solo para [server]/kill_switch_path y lo que routes.py
-        todavia usa aparte)."""
+        (TOML queda solo para [server])."""
         host = os.environ.get("JAX_DB_HOST")
         port = os.environ.get("JAX_DB_PORT")
         if not host or not port:

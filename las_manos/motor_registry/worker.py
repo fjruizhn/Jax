@@ -3,7 +3,7 @@ LAS MANOS — Motor Registry: worker, dispatch por transport (R4).
 
 Ejecuta el job completo:
   1. Marca RUNNING
-  2. Verifica kill switch (/etc/jax/PAUSE) antes de llamar
+  2. Verifica el kill switch (archivo de JAX_KILL_SWITCH_PATH) antes de llamar
   3. Llama a la API del motor con httpx async, vía la función de
      `motor.transport` (ver `_TRANSPORT_DISPATCH`) — no un motor hardcodeado
   4. Comprueba kill switch cada 5s durante la ejecución
@@ -13,7 +13,7 @@ Ejecuta el job completo:
   6. Almacena resultado validado o raw en job_store
   7. Marca COMPLETED / FAILED según corresponda
 
-Kill switch: si /etc/jax/PAUSE existe antes o durante → FAILED con error "killed_by_switch".
+Kill switch: si el archivo existe (o no se lo puede mirar) antes o durante → FAILED con error "killed_by_switch".
 
 En memoria de Jairo Urbina.
 """
@@ -26,7 +26,6 @@ import os
 import subprocess
 import time
 import traceback
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -39,6 +38,7 @@ from contrato_dispatch import OLLAMA_API_V1, ModelDispatchConfigError, limite_de
 from motor_registry.job_store import JobStore
 from motor_registry.tool_authority import authorize_and_execute_tool_call, get_workspace_head
 from motor_registry.models import JobStatus
+from interruptor import interruptor_activo
 from motor_registry.output_validator import validate
 from motor_registry.tools_catalog import TOOLS_CATALOG
 
@@ -96,7 +96,7 @@ _REFORMAS_V3_PREDICATES = [
 async def _watch_kill_switch(path: str) -> None:
     """Retorna en cuanto detecta el archivo PAUSE. Chequea cada 5s."""
     while True:
-        if Path(path).exists():
+        if interruptor_activo(path):
             return
         await asyncio.sleep(_KILL_SWITCH_INTERVAL)
 
@@ -437,7 +437,7 @@ async def run(
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
     # Kill switch: chequeo antes de llamar
-    if Path(kill_switch_path).exists():
+    if interruptor_activo(kill_switch_path):
         store.update(
             job_id,
             status=JobStatus.FAILED.value,
@@ -690,13 +690,24 @@ async def run(
         except asyncio.CancelledError:
             api_task.cancel()
             kill_task.cancel()
-            store.update(
-                job_id,
-                status=JobStatus.CANCELLED.value,
-                finished_at=time.time(),
-                error="Job cancelado externamente",
-            )
-            await _report_usage("cancelled")
+            if interruptor_activo(kill_switch_path):
+                # Jacobs corta el step con el freno puesto y cancela el job
+                # antes del watcher de 5 s: la causa real es el freno.
+                store.update(
+                    job_id,
+                    status=JobStatus.FAILED.value,
+                    finished_at=time.time(),
+                    error="killed_by_switch — PAUSE detectado al cancelar el job",
+                )
+                await _report_usage("failed")
+            else:
+                store.update(
+                    job_id,
+                    status=JobStatus.CANCELLED.value,
+                    finished_at=time.time(),
+                    error="Job cancelado externamente",
+                )
+                await _report_usage("cancelled")
             raise
 
         for task in pending:
