@@ -57,6 +57,11 @@ VALID_INVOKERS = frozenset({INVOKER_PLATAFORMA, "jax_local", "ada"})
 
 VALID_MODES = frozenset({"dry_run", "supervised", "autonomous"})
 
+# Tope duro de steps por pipeline (E-13, 2026-09-16). Vive acá y no en
+# policy.py porque policy importa models: al revés sería un import circular.
+# policy.py, routes.py, plan.py y el validador de abajo lo importan de acá.
+MAX_STEPS_PER_PIPELINE = 20
+
 
 class Step(BaseModel):
     step_id:          str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -98,7 +103,7 @@ class Pipeline(BaseModel):
     plan:               list[Step] = Field(default_factory=list)
     plan_version:       int = 1
     current_step_index: int = 0
-    max_steps:          int = 20
+    max_steps:          int = MAX_STEPS_PER_PIPELINE
     context:            dict[str, Any] = Field(default_factory=dict)
     created_at:         float = 0.0
     updated_at:         float = 0.0
@@ -112,7 +117,7 @@ class PipelineCreateRequest(BaseModel):
     user_id:          str | None = None
     tenant_id:        str | None = None
     mode:             str
-    max_steps:        int = 20
+    max_steps:        int = MAX_STEPS_PER_PIPELINE
     steps:            list[StepSpec] | None = None
     subpipeline_token: str | None = None
 
@@ -126,8 +131,10 @@ class PipelineCreateRequest(BaseModel):
             raise ValueError(
                 f"mode '{self.mode}' inválido. Aceptados: {sorted(VALID_MODES)}"
             )
-        if self.max_steps < 1 or self.max_steps > 20:
-            raise ValueError("max_steps debe estar entre 1 y 20 (límite duro v0.1)")
+        if self.max_steps < 1 or self.max_steps > MAX_STEPS_PER_PIPELINE:
+            raise ValueError(
+                f"max_steps debe estar entre 1 y {MAX_STEPS_PER_PIPELINE} (límite duro v0.1)"
+            )
         return self
 
 

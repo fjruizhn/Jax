@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 
 import httpx
 
-from jacobs.models import MOTOR_FACETS, Step
+from jacobs.models import MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
@@ -434,7 +434,7 @@ class PlanBuilder:
         self,
         pipeline_id: str,
         objective: str,
-        max_steps: int = 20,
+        max_steps: int = MAX_STEPS_PER_PIPELINE,
         steps_spec: list[dict] | None = None,
     ) -> list[Step]:
         # UNA sola consulta de gobernanza por build, propagada a todo lo que la

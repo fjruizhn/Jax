@@ -19,6 +19,7 @@ from jacobs import store
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
 from jacobs.models import (
+    MAX_STEPS_PER_PIPELINE,
     VALID_INVOKERS,
     Pipeline,
     PipelineCreateRequest,
@@ -90,7 +91,7 @@ class PlanRequest(BaseModel):
     objective:  str
     invoked_by: str
     mode:       str
-    max_steps:  int = 20
+    max_steps:  int = MAX_STEPS_PER_PIPELINE
     steps:      list[StepSpec] | None = None
 
 
@@ -98,10 +99,10 @@ class PlanRequest(BaseModel):
 async def plan_only(req: PlanRequest) -> dict:
     """Genera un plan de steps sin ejecutar nada (dry_run de planificación)."""
 
-    if req.max_steps > 20:
+    if req.max_steps > MAX_STEPS_PER_PIPELINE:
         raise HTTPException(
             status_code=422,
-            detail=f"max_steps={req.max_steps} excede límite duro (20)",
+            detail=f"max_steps={req.max_steps} excede límite duro ({MAX_STEPS_PER_PIPELINE})",
         )
     if req.invoked_by not in VALID_INVOKERS:
         raise HTTPException(

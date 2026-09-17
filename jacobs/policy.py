@@ -9,14 +9,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from jacobs.models import INVOKER_PLATAFORMA, VALID_INVOKERS
+from jacobs.models import INVOKER_PLATAFORMA, MAX_STEPS_PER_PIPELINE, VALID_INVOKERS
 
 KILL_SWITCH_PATH = Path("/etc/jax/PAUSE")
 
-MAX_STEPS_PER_PIPELINE  = 20
-# Espejado en jax-platform backend/ajustes.py (familia `tope_pipelines` de
-# scripts/check_mirror_sync.py, frente C 2026-09-16): es el máximo del ajuste
-# max_pipelines de Admin. Cambiarlo acá exige cambiar la copia en el mismo paso.
+# MAX_PARALLEL_PIPELINES se espeja en jax-platform backend/ajustes.py (familia
+# `tope_pipelines` de scripts/check_mirror_sync.py, frente C 2026-09-16): es el
+# máximo del ajuste max_pipelines de Admin. Cambiarlo acá exige cambiar la copia
+# en el mismo paso. MAX_STEPS_PER_PIPELINE vive en jacobs/models.py (E-13).
 MAX_PARALLEL_PIPELINES  = 3
 MAX_SUBPIPELINE_DEPTH   = 1
 
