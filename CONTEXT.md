@@ -715,7 +715,17 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
   454,99 rps, p95 2,74 ms; c=10 → 670,04 rps, p95 17,15 ms; c=25 → 635,20 rps, p95 46,97
   ms, p99 62,02 ms; c=50 → 647,60 rps, p95 83,26 ms, p99 90,62 ms. **Ratio p95 c25/c1 =
   17,14× — UMBRAL 10× NO CUMPLIDO** (c50/c1 = 30,39×, también reportado). **Veredicto:
-  NOT MET** (no se reinterpreta, R33). Carga sostenida (no por rondas cerradas —
+  NOT MET** (no se reinterpreta, R33). **Qué sí se midió, junto al veredicto (Ruling R52):**
+  0 errores en las cuatro concurrencias y en las CUATRO corridas sostenidas a c=50 (la
+  medición anterior daba 0%/13%/49%/61%), p95 absoluto 2,74 ms a c=1, 17,15 a c=10, 46,97
+  a c=25 y 83,26 a c=50, con 635-670 rps. **Decisión (sesión principal, por escrito,
+  2026-09-17, Ruling R52):** acepta el umbral NO CUMPLIDO y deja `JAX_DB_POOL_MAX=10`. La
+  relación mide encolamiento contra un pool de 10 con concurrencias de 25 y 50, muy por
+  encima de la demanda real (MAX_PARALLEL_PIPELINES=3; el pre-vuelo lo dispara una persona
+  desde la Mesa); lo que decide la operación es la latencia absoluta y los errores, y las
+  dos están bien. No se sube el pool para que el número dé: sería acomodar la medición al
+  criterio, y el 10 se derivó contra la MariaDB compartida (151 conexiones máximas, 96 en
+  uso). Revisión con fecha en `DEUDA.md` (2026-10-17). Carga sostenida (no por rondas cerradas —
   `ThreadPoolExecutor` encola todos los pedidos de una vez): c=25/n=10000 (14,4 s) sin
   deriva frente al gate (p95 38,77 ms, 0 errores); **c=50/n=8000 en CUATRO corridas
   idénticas dio 0% de errores en las CUATRO** (p95 75,80/80,56/85,33/81,76 ms) — el
@@ -730,10 +740,20 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
   0,1 s durante cada una de las cuatro corridas — no por `SHOW PROCESSLIST` puro, porque
   `jax_memory_test` es compartida por otras sesiones en paralelo y esa vista no distingue
   conexiones ajenas de las propias. Máximos por corrida: 11, 10, 11, 10 — **máximo global
-  observado: 11**, contra el techo configurado `JAX_DB_POOL_MAX=10` (2 de 4 muestras
-  puntuales por encima del techo por 1, compatible con una superposición de un ciclo de
-  reemplazo de conexión durante el muestreo de 0,1 s, no con una fuga sostenida: las otras
-  2 corridas midieron exactamente 10). 25 `continue` concurrentes sobre el mismo pipeline:
+  observado: 11**, contra el techo configurado `JAX_DB_POOL_MAX=10`. **Ruling R53
+  (investigado antes del merge, 2026-09-17): el 11 NO era una conexión de más a la base.**
+  Con instrumentación en una instancia aislada (envoltorio de `aiomysql.connect` y
+  `aiomysql.pool.connect` con contador de conexiones vivas) y muestreo cada 0,02 s
+  filtrando por destino (`ss -tn "( dport = :3308 )" -p`), el máximo fue **10 en 1.000
+  muestras** durante lotes c=1/10/25/50 y cuatro sostenidas c=50 (0 errores, 638-662 rps);
+  el contador en proceso coincidió: 10 aperturas, todas por el pool, 10 simultáneas como
+  máximo, 0 conexiones directas. Sin ese filtro, `ss -tnp | grep pid=<PID>` cuenta también
+  los **sockets HTTP entrantes del propio servicio** (llega a 56 durante c=50); el caso
+  exacto se reprodujo reteniendo un socket de cliente contra `:17790`: 11 sockets del
+  proceso = 10 a MariaDB + 1 HTTP. O sea: artefacto de la medición anterior (conteo sin
+  filtrar por puerto), no una fuga ni la conexión dedicada de GET_LOCK/FOUND_ROWS — el
+  camino de `/jacobs/preflight` no abre ninguna dedicada. Fijado en proceso por
+  `tests/test_jacobs_conexiones_por_pedido.py::test_el_pool_nunca_tiene_mas_conexiones_vivas_que_su_tamano`. 25 `continue` concurrentes sobre el mismo pipeline:
   **1 ganó, 24 recibieron 409** (verdad de DB: época final 1, status `interrupted`,
   eventos `PIPELINE_CONTINUED` ×1 + `PIPELINE_STARTED` + `STEP_BLOCKED_HUMAN_GATE` +
   `PIPELINE_INTERRUPTED`, sin `STEP_STARTED` — la corrida ganadora paró en el gate de hyde
