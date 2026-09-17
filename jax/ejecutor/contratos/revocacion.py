@@ -37,9 +37,10 @@ def clasificar_intento(rc: int, stderr: bytes) -> str:
     return INALCANZABLE
 
 
-def remoto_probar_entrada(h, cuenta: str) -> str:
+def remoto_probar_entrada(h, cuenta: str, comando: str = "true") -> str:
     return (f"LC_ALL=C ssh -o BatchMode=yes -o PreferredAuthentications=publickey -o ConnectTimeout=5 "
-            f"-o StrictHostKeyChecking=yes -p {int(h.puerto)} {shlex.quote(cuenta)}@{shlex.quote(h.ip)} true")
+            f"-o StrictHostKeyChecking=yes -p {int(h.puerto)} {shlex.quote(cuenta)}@{shlex.quote(h.ip)} "
+            f"{shlex.quote(comando)}")
 
 
 def argv_admin(h, usuario_admin: str, remoto: str) -> list[str]:
