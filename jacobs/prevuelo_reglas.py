@@ -80,7 +80,7 @@ class CostoPaso:
             "paso": self.paso, "faceta": self.faceta, "modelo": self.modelo,
             "llamadas_max": self.llamadas_max, "tokens_in_max": self.tokens_in_max,
             "tokens_out_max": self.tokens_out_max,
-            "usd_max": None if self.usd_max is None else str(self.usd_max),
+            "usd_max": None if self.usd_max is None else formatear_usd(self.usd_max),
             "motivo": self.motivo,
         }
 
@@ -101,7 +101,7 @@ class Veredicto:
         return {
             "ok": self.ok,
             "violaciones": [v.to_dict() for v in self.violaciones],
-            "costo_max_usd": str(self.costo_max_usd),
+            "costo_max_usd": formatear_usd(self.costo_max_usd),
             "pasos_costo": [c.to_dict() for c in self.pasos_costo],
             "sondeadas": list(self.sondeadas),
             "hay_no_acotados": self.hay_no_acotados,
@@ -185,6 +185,15 @@ def llamadas_max(d: Despacho, max_iteraciones: int) -> int:
 
 def tokens_de_entrada(chars: int, chars_por_token: int) -> int:
     return -(-chars // chars_por_token)
+
+
+def formatear_usd(valor: Decimal) -> str:
+    """Ruling R18 (fix round 1, Task 9): todo monto que sale de Jacobs es
+    texto con exactamente 6 decimales, redondeado hacia arriba -- incluye
+    "0.000000" (nunca "0" pelado) y el eco de costo_max_aceptado_usd, que
+    puede llegar sin cuantizar (p.ej. un entero). Un solo lugar: lo usan
+    Veredicto.to_dict(), CostoPaso.to_dict() y el eco del 409 en routes.py."""
+    return str(Decimal(valor).quantize(_GRANO_USD, rounding=ROUND_CEILING))
 
 
 def costo_usd(llamadas: int, tokens_in: int, tokens_out: int,

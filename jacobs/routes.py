@@ -31,7 +31,7 @@ from jacobs.models import (
 )
 from jacobs.plan import PlanBuilder, PlanRejected
 from jacobs.prevuelo import prevuelo
-from jacobs.prevuelo_reglas import Veredicto
+from jacobs.prevuelo_reglas import Veredicto, formatear_usd
 from jacobs.policy import (
     check_kill_switch,
     validate_create,
@@ -108,8 +108,11 @@ async def _prevuelo_o_503(
 
 
 def _resumen_de_costo(veredicto: Veredicto) -> dict:
+    # Ruling R18: mismo grano de 6 decimales que Veredicto.to_dict() -- este
+    # resumen alimenta PIPELINE_CREATED y las respuestas 200/dry_run, no pasa
+    # por to_dict() directo.
     return {
-        "costo_max_usd": str(veredicto.costo_max_usd),
+        "costo_max_usd": formatear_usd(veredicto.costo_max_usd),
         "pasos_costo": [c.to_dict() for c in veredicto.pasos_costo],
     }
 
@@ -136,11 +139,22 @@ async def preflight(req: PreflightRequest) -> dict:
 
     El camino por objetivo (planificación por LLM) NO pasa por acá: lo gastado
     en planificar ya está gastado; crear corre el pre-vuelo sobre el plan que
-    devolvió el LLM."""
+    devolvió el LLM.
+
+    Ruling R17 (fix round 1, Task 9): a diferencia de los rechazos PREEXISTENTES
+    de texto de POST /jacobs/pipeline (que la Mesa ya consume como
+    jacobs_rechazo y no se tocan en esta rama), todo rechazo de este endpoint
+    NUEVO va como dict {code, detalle}."""
     if req.invoked_by not in VALID_INVOKERS:
-        raise HTTPException(status_code=403, detail=f"invoked_by '{req.invoked_by}' no autorizado")
+        raise HTTPException(status_code=403, detail={
+            "code": "invocador_no_autorizado",
+            "detalle": f"invoked_by '{req.invoked_by}' no autorizado",
+        })
     if len(req.steps) > 20:
-        raise HTTPException(status_code=422, detail=f"{len(req.steps)} pasos excede el límite duro (20)")
+        raise HTTPException(status_code=422, detail={
+            "code": "plan_rechazado",
+            "detalle": f"{len(req.steps)} pasos excede el límite duro (20)",
+        })
     steps_spec = [s.model_dump() for s in req.steps]
     try:
         steps = await _plan_builder.build(
@@ -148,7 +162,10 @@ async def preflight(req: PreflightRequest) -> dict:
             max_steps=len(steps_spec), steps_spec=steps_spec,
         )
     except PlanRejected as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail={
+            "code": "plan_rechazado",
+            "detalle": str(exc),
+        }) from exc
     veredicto = await _prevuelo_o_503(
         steps, {"objective": req.objective}, user_id=req.user_id, tenant_id=req.tenant_id,
     )
@@ -210,7 +227,12 @@ async def plan_only(req: PlanRequest) -> dict:
 
 @router.post("/pipeline")
 async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTasks) -> dict:
-    """Crea un pipeline y lo ejecuta en background."""
+    """Crea un pipeline y lo ejecuta en background.
+
+    Spec 2026-09-17 §4.7: en el camino por objetivo (req.steps=None, el plan
+    lo arma _build_plan_or_reject() llamando a un LLM pago), el pre-vuelo
+    corre DESPUÉS, sobre el plan que el LLM ya devolvió -- lo gastado en
+    planificar ya está gastado, igual que en /jacobs/preflight."""
 
     # Lock de proceso: active_count (lectura) y pipeline_create (escritura)
     # deben ser atómicos entre sí para que MAX_PARALLEL_PIPELINES sea un
@@ -243,14 +265,19 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             steps, {"objective": req.objective}, user_id=req.user_id, tenant_id=req.tenant_id,
         )
         if not veredicto.ok:
-            cuerpo = {"code": "prevuelo_rechazado", **veredicto.to_dict()}
+            # Ruling R19 (fix round 1, Task 9): pipeline_id es el MISMO que se
+            # usa para el evento -- campo extra, la whitelist de la Mesa lo
+            # ignora si no lo consume.
+            cuerpo = {"code": "prevuelo_rechazado", "pipeline_id": pipeline_id, **veredicto.to_dict()}
             await store.event_append(pipeline_id, "PREVUELO_RECHAZADO", cuerpo)
             raise HTTPException(status_code=422, detail=cuerpo)
         if (req.costo_max_aceptado_usd is not None
                 and veredicto.costo_max_usd > req.costo_max_aceptado_usd):
             raise HTTPException(status_code=409, detail={
                 "code": "costo_supera_lo_aceptado",
-                "costo_max_aceptado_usd": str(req.costo_max_aceptado_usd),
+                # Ruling R18: mismo grano de 6 decimales que el resto de los
+                # montos de Jacobs -- el valor puede llegar sin cuantizar.
+                "costo_max_aceptado_usd": formatear_usd(req.costo_max_aceptado_usd),
                 **veredicto.to_dict(),
             })
         costo = _resumen_de_costo(veredicto)

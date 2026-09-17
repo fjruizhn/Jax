@@ -170,6 +170,22 @@ def test_to_dict_serializa_decimales_como_texto():
     assert d["hay_no_acotados"] is True
 
 
+def test_costo_max_usd_cero_no_queda_pelado():
+    """Ruling R18 (fix round 1, Task 9): un veredicto sin ningún paso acotado
+    con costo real (todos $0, p.ej. solo hyde/ollama/assemble) serializa
+    "0.000000", nunca "0" pelado -- la Mesa lo parsea igual, pero un monto
+    que sale de Jacobs siempre tiene el mismo grano DECIMAL(10,6)."""
+    v = pr.armar_veredicto([], [_costo(0, "0")], [])
+    assert v.to_dict()["costo_max_usd"] == "0.000000"
+
+
+def test_formatear_usd_normaliza_el_eco_de_un_entero():
+    """Ruling R18: el eco de costo_max_aceptado_usd (que puede llegar como un
+    entero, p.ej. 100) se normaliza al mismo grano que el resto de los
+    montos de Jacobs."""
+    assert pr.formatear_usd(Decimal(100)) == "100.000000"
+
+
 def test_puede_pedir_reintento_segun_el_validador():
     assert puede_pedir_reintento("code_patch.v1") is True
     assert puede_pedir_reintento("critique.v1") is False
