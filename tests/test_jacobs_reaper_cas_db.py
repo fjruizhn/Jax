@@ -66,16 +66,15 @@ async def _borrar(pid):
 
 
 def _es_mia(fila, pid):
-    p = fila[0] if isinstance(fila, tuple) else fila
-    return p.pipeline_id == pid
+    pipeline, _max_timeout = fila
+    return pipeline.pipeline_id == pid
 
 
 async def _barrer(pid, *, avanza_entre_lectura_y_escritura=False):
-    """Barrido real. La lectura es la consulta de producción (candidatos_del_
-    reaper; contra el código anterior a R36, pipelines_by_status) filtrada a la
-    fila propia. Si `avanza`, el ejecutor escribe su avance justo después."""
-    nombre = "candidatos_del_reaper" if hasattr(store, "candidatos_del_reaper") else "pipelines_by_status"
-    real = getattr(store, nombre)
+    """Barrido real. La lectura es la consulta de producción
+    (store.candidatos_del_reaper) filtrada a la fila propia. Si `avanza`, el
+    ejecutor escribe su avance justo después."""
+    real = store.candidatos_del_reaper
 
     async def leer(estados):
         filas = [f for f in await real(estados) if _es_mia(f, pid)]
@@ -83,7 +82,7 @@ async def _barrer(pid, *, avanza_entre_lectura_y_escritura=False):
             await _ejecutar("UPDATE jacobs_pipelines SET updated_at=%s WHERE pipeline_id=%s", (time.time(), pid))
         return filas
 
-    with patch.object(reaper.store, nombre, leer):
+    with patch.object(reaper.store, "candidatos_del_reaper", leer):
         cosechados = await reaper.reap_orphaned_pipelines()
     fila = await store.pipeline_get(pid)
     eventos = await _ejecutar("SELECT event_type FROM jacobs_events WHERE pipeline_id=%s", (pid,))
