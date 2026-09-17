@@ -1,6 +1,8 @@
 """Lector UNICO de salud de facets. La salud se calcula EXCLUSIVAMENTE
-aca, desde facet_health_event. Quien escribe esa tabla es
-jax-platform/backend/facet_health.py; quien la lee es solo este modulo.
+aca, desde facet_health_event. La escriben jax-platform/backend/
+facet_health.py (chat y canarios) y, desde 2026-09-17, la sonda del
+pre-vuelo de Jacobs (source='preflight', registrar_evento_de_sonda abajo);
+quien la LEE es solo este modulo.
 
 facet_health_alert NO es una segunda fuente de verdad: es el registro de
 que ya se aviso -- la distincion entre un valor y su acuse de recibo.
@@ -153,3 +155,70 @@ async def check_facet_health() -> dict:
         conn.close()
 
     return {"states": states, "notified": [k for k, _ in notify]}
+
+
+# ----------------------------------------------------------------
+#  Pre-vuelo (spec 2026-09-17 §4.5)
+# ----------------------------------------------------------------
+# Solo cuentan los eventos de NIVEL PROVEEDOR. Los gate_*, unbound y
+# unsupported_transport son del gate de la Mesa (kimi escribe siempre
+# unsupported_transport porque la Mesa no lo despacha) y probe_error es una
+# falla de la sonda: ninguno dice nada del proveedor.
+OUTCOMES_DE_PROVEEDOR = ("ok", "provider_error")
+SOURCE_PREVUELO = "preflight"
+_LARGO_DETALLE = 255  # facet_health_event.detail VARCHAR(255)
+
+_SQL_EVENTO_DE_SONDA = (
+    "INSERT INTO facet_health_event (facet, outcome, source, detail, ts) "
+    "VALUES (%s, %s, %s, %s, %s)"
+)
+
+
+def sql_ultimo_evento_de_proveedor(n_claves: int) -> str:
+    """Último evento ok/provider_error por clave dentro de la ventana. Va por
+    idx_facet_ts (facet, ts) -- EXPLAIN en tests/test_prevuelo_catalogo_db.py."""
+    ph = ",".join(["%s"] * n_claves)
+    return (
+        "SELECT e.facet, e.ts, e.outcome FROM facet_health_event e "
+        "JOIN (SELECT facet, MAX(ts) mt FROM facet_health_event "
+        f"      WHERE facet IN ({ph}) AND ts >= %s AND outcome IN ('ok','provider_error') "
+        "      GROUP BY facet) m "
+        "  ON m.facet = e.facet AND m.mt = e.ts "
+        "WHERE e.outcome IN ('ok','provider_error')"
+    )
+
+
+def salud_de_proveedor(ultimo: tuple[float, str] | None, ahora: float) -> str:
+    """PURA. 'sana' solo con un `ok` dentro de la ventana; cualquier otra cosa
+    (sin evento, provider_error, viejo) se vuelve a medir: decide un dato
+    fresco, no uno de hace una hora."""
+    if ultimo is None or ultimo[0] < ahora - HEALTH_WINDOW_SECONDS:
+        return "sondear"
+    return "sana" if ultimo[1] == _OK else "sondear"
+
+
+async def ultimo_evento_de_proveedor(cur, claves: set[str], ahora: float) -> dict[str, tuple[float, str]]:
+    if not claves:
+        return {}
+    ordenadas = sorted(claves)
+    await cur.execute(
+        sql_ultimo_evento_de_proveedor(len(ordenadas)),
+        (*ordenadas, ahora - HEALTH_WINDOW_SECONDS),
+    )
+    return {faceta: (float(ts), outcome) for faceta, ts, outcome in await cur.fetchall()}
+
+
+async def registrar_evento_de_sonda(clave: str, outcome: str, detalle: str | None, ts: float) -> None:
+    """Escribe el resultado de una sonda del pre-vuelo. Quien llama decide qué
+    hacer si falla (sonda.py: el veredicto se mantiene y se cuenta)."""
+    if outcome not in OUTCOMES_DE_PROVEEDOR:
+        raise ValueError(f"outcome de sonda inválido: {outcome!r}")
+    conn = await store.get_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                _SQL_EVENTO_DE_SONDA,
+                (clave, outcome, SOURCE_PREVUELO, detalle[:_LARGO_DETALLE] if detalle else None, ts),
+            )
+    finally:
+        conn.close()

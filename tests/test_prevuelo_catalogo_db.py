@@ -1,0 +1,193 @@
+"""Lectura del catálogo del pre-vuelo contra el esquema REAL de jax-platform
+(job jacobs-gobernanza-db). Cada test siembra SU proveedor, modelo, faceta,
+binding y credencial sintéticos y los borra: no depende de semillas.
+
+Requiere el esquema del plan P: capability.min_output_tokens y
+facet_health_event.source con 'preflight'.
+
+En memoria de Jairo Urbina.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import time
+import uuid
+from decimal import Decimal
+
+_db = os.environ.get("JAX_DB_NAME", "")
+if not _db.endswith("_test"):
+    raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test solo corre contra una base *_test.")
+
+from jacobs import facet_health as fh  # noqa: E402
+from jacobs import prevuelo_catalogo as pc  # noqa: E402
+from jacobs import store  # noqa: E402
+
+
+class _Semilla:
+    def __init__(self):
+        sufijo = uuid.uuid4().hex[:8]
+        self.proveedor = f"zz-pv-{sufijo}"
+        self.faceta = f"zz-pv-{sufijo}"
+        self.modelo = f"zz-modelo-{sufijo}"
+
+
+async def _sembrar(cur, s, *, credencial="active", faceta_status="active"):
+    await cur.execute(
+        "INSERT INTO provider (id, display_name, base_url, auth_type, is_local) "
+        "VALUES (%s, 'prevuelo test', 'https://zz.example/v1', 'api_key', FALSE)", (s.proveedor,))
+    await cur.execute(
+        "INSERT INTO model (provider_id, model_id, is_alias, status, source, source_checked_at, "
+        "max_tokens_param, max_output_tokens, price_input_per_1m_usd, price_output_per_1m_usd) "
+        "VALUES (%s, %s, FALSE, 'available', 'manual', NOW(), 'max_tokens', 4096, 0.2700, 1.1000)",
+        (s.proveedor, s.modelo))
+    await cur.execute("SELECT id FROM model WHERE provider_id=%s AND model_id=%s", (s.proveedor, s.modelo))
+    (model_ref,) = await cur.fetchone()
+    await cur.execute(
+        "INSERT INTO facet (`key`, display_name, transport, status) "
+        "VALUES (%s, 'prevuelo test', 'http_openai_compat', %s)", (s.faceta, faceta_status))
+    await cur.execute(
+        "INSERT INTO facet_binding (facet_key, provider_id, model_id, role, model_ref) "
+        "VALUES (%s, %s, %s, 'primary', %s)", (s.faceta, s.proveedor, s.modelo, model_ref))
+    if credencial:
+        await cur.execute(
+            "INSERT INTO credential (provider_id, env_key, encrypted_value, state) "
+            "VALUES (%s, 'ZZ_PV_KEY', 'no-se-descifra', %s)", (s.proveedor, credencial))
+
+
+async def _limpiar(cur, s):
+    await cur.execute("DELETE FROM facet_health_event WHERE facet LIKE %s", (s.faceta + "%",))
+    await cur.execute("DELETE FROM credential WHERE provider_id=%s", (s.proveedor,))
+    await cur.execute("DELETE FROM facet_binding WHERE facet_key=%s", (s.faceta,))
+    await cur.execute("DELETE FROM facet WHERE `key`=%s", (s.faceta,))
+    await cur.execute("DELETE FROM model WHERE provider_id=%s", (s.proveedor,))
+    await cur.execute("DELETE FROM provider WHERE id=%s", (s.proveedor,))
+
+
+def _con_semilla(cuerpo, **kw):
+    async def correr():
+        s = _Semilla()
+        conn = await store.get_conn()
+        try:
+            async with conn.cursor() as cur:
+                await _sembrar(cur, s, **kw)
+            return s, await cuerpo(s, conn)
+        finally:
+            async with conn.cursor() as cur:
+                await _limpiar(cur, s)
+            conn.close()
+    return asyncio.run(correr())
+
+
+async def _evento(conn, faceta, outcome, source, ts):
+    async with conn.cursor() as cur:
+        await cur.execute(
+            "INSERT INTO facet_health_event (facet, outcome, source, detail, ts) VALUES (%s, %s, %s, NULL, %s)",
+            (faceta, outcome, source, ts))
+
+
+async def _explain(conn, sql, params):
+    async with conn.cursor() as cur:
+        await cur.execute("EXPLAIN " + sql, params)
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in await cur.fetchall()]
+
+
+def test_lee_faceta_modelo_precio_y_contrato():
+    async def cuerpo(s, conn):
+        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
+    s, cat = _con_semilla(cuerpo)
+    fila = cat.facetas[s.faceta]
+    assert (fila.provider_id, fila.model_id, fila.base_url, fila.transport) == (
+        s.proveedor, s.modelo, "https://zz.example/v1", "http_openai_compat")
+    assert cat.modelos[(s.proveedor, s.modelo)] == pc.FilaModelo(
+        "max_tokens", 4096, Decimal("0.2700"), Decimal("1.1000"))
+    assert s.proveedor in cat.proveedores_con_credencial
+
+
+def test_faceta_inactiva_no_aparece():
+    async def cuerpo(s, conn):
+        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
+    s, cat = _con_semilla(cuerpo, faceta_status="disabled")
+    assert s.faceta not in cat.facetas
+
+
+def test_credencial_revocada_no_cuenta():
+    async def cuerpo(s, conn):
+        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=time.time())
+    s, cat = _con_semilla(cuerpo, credencial="revoked")
+    assert s.proveedor not in cat.proveedores_con_credencial
+
+
+def test_salud_toma_el_ultimo_evento_de_proveedor_e_ignora_los_del_gate():
+    ahora = time.time()
+
+    async def cuerpo(s, conn):
+        await _evento(conn, s.faceta, "ok", "chat", ahora - 600)
+        await _evento(conn, s.faceta, "provider_error", "preflight", ahora - 300)
+        await _evento(conn, s.faceta, "unsupported_transport", "canary_periodic", ahora - 10)
+        await _evento(conn, s.faceta, "gate_denied", "chat", ahora - 5)
+        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+    s, cat = _con_semilla(cuerpo)
+    assert cat.salud[s.faceta] == (ahora - 300, "provider_error")
+
+
+def test_salud_fuera_de_ventana_no_cuenta():
+    ahora = time.time()
+
+    async def cuerpo(s, conn):
+        await _evento(conn, s.faceta, "ok", "preflight", ahora - fh.HEALTH_WINDOW_SECONDS - 5)
+        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+    s, cat = _con_semilla(cuerpo)
+    assert s.faceta not in cat.salud
+
+
+def test_registrar_evento_de_sonda_escribe_source_preflight_y_recorta():
+    ahora = time.time()
+
+    async def cuerpo(s, conn):
+        await fh.registrar_evento_de_sonda(s.faceta, "ok", "x" * 300, ahora)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT outcome, source, CHAR_LENGTH(detail) FROM facet_health_event WHERE facet=%s",
+                (s.faceta,))
+            return await cur.fetchall()
+    _, filas = _con_semilla(cuerpo)
+    assert list(filas) == [("ok", "preflight", 255)]
+
+
+def test_min_output_tokens_sale_de_la_capability():
+    async def cuerpo(s, conn):
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT min_output_tokens FROM capability WHERE `key`='research'")
+            (esperado,) = await cur.fetchone()
+        cat = await pc.leer_catalogo(facetas=set(), motores=[], capabilities={"research"}, ahora=time.time())
+        return esperado, cat.min_output_tokens
+    _, (esperado, minimos) = _con_semilla(cuerpo)
+    assert minimos == {"research": int(esperado)}
+
+
+def test_explain_salud_usa_idx_facet_ts():
+    ahora = time.time()
+
+    async def cuerpo(s, conn):
+        # Volumen para que el optimizador no prefiera un scan por tabla chica.
+        for n in range(30):
+            for k in range(10):
+                await _evento(conn, f"{s.faceta}-rel-{n:02d}", "ok", "chat", ahora - k)
+        await _evento(conn, s.faceta, "ok", "preflight", ahora)
+        return await _explain(conn, fh.sql_ultimo_evento_de_proveedor(1),
+                              (s.faceta, ahora - fh.HEALTH_WINDOW_SECONDS))
+    _, filas = _con_semilla(cuerpo)
+    assert any(f["key"] == "idx_facet_ts" for f in filas), filas
+    assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas
+
+
+def test_explain_credencial_y_modelos_usan_sus_indices():
+    async def cuerpo(s, conn):
+        cred = await _explain(conn, pc.sql_credenciales(1), (s.proveedor,))
+        modelos = await _explain(conn, pc.sql_modelos(1), (s.proveedor, s.modelo))
+        return cred, modelos
+    _, (cred, modelos) = _con_semilla(cuerpo)
+    assert [f["key"] for f in cred] == ["idx_provider_state"], cred
+    assert [f["key"] for f in modelos] == ["uk_provider_model"], modelos

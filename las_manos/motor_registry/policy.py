@@ -168,6 +168,16 @@ class MotorPolicy:
             requires_human_gate=cap.requires_human_gate,
         )
 
+    def motor_que_despacharia(self, requested: str | None, capability: str) -> str | None:
+        """El motor que check() resolvería para (requested, capability), o None
+        si ninguno. Público para el pre-vuelo de Jacobs (2026-09-17): medir
+        costo, tope y salud del motor que DE VERDAD despacha un paso con
+        motor=None, sin copiar la regla de prioridad."""
+        cap = self._catalog.get_capability(capability)
+        if cap is None:
+            return None
+        return self._resolve_motor(requested, cap)
+
     def _resolve_motor(self, requested: str | None, cap: CapabilityEntry) -> str | None:
         """Motor solicitado si válido y habilitado; si no, el primero habilitado."""
         if requested is not None:

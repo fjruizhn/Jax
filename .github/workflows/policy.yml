@@ -603,6 +603,7 @@ jobs:
           tests/test_jacobs_epoca_ejecutor.py
           tests/test_jacobs_resume_epoca.py
           tests/test_prevuelo_reglas.py
+          tests/test_prevuelo_salud_pura.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -649,6 +650,7 @@ jobs:
             tests/test_jacobs_epoca_ejecutor.py \
             tests/test_jacobs_resume_epoca.py \
             tests/test_prevuelo_reglas.py \
+            tests/test_prevuelo_salud_pura.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -999,8 +1001,13 @@ jobs:
           #   test_motor_con_reintento_de_schema_acumula_el_costo (11492.27 →
           #   11493.31, 20773.74 → 20774.78; el valor final ya redondeado,
           #   0.020775, no cambió).
-          grep -qE "^804 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 804 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 804 -> 809 el 2026-09-17 (Task 6, catálogo/salud/motor resuelto):
+          #   test_prevuelo_salud_pura.py (+5) -- salud de nivel proveedor
+          #   (gate_* no cuenta, provider_error se vuelve a medir, la ventana
+          #   corta) y MotorPolicy.motor_que_despacharia (pedido/prioridad/
+          #   capability inexistente).
+          grep -qE "^809 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 809 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1064,6 +1071,7 @@ jobs:
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
           tests/test_run_epoch_db.py
+          tests/test_prevuelo_catalogo_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1073,6 +1081,7 @@ jobs:
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
             tests/test_run_epoch_db.py \
+            tests/test_prevuelo_catalogo_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1094,5 +1103,13 @@ jobs:
           #   y EXPLAIN por PRIMARY.
           # 33 -> 34 el 2026-09-17 (ronda de arreglo 1, R6): +1, desde vacío es error de
           #   contrato.
-          grep -qE "^34 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 34 tests CORRIDOS."; exit 1; }
+          # 34 -> 43 el 2026-09-17 (Task 6, catálogo del pre-vuelo):
+          #   test_prevuelo_catalogo_db.py (+9) -- faceta/modelo/precio/contrato,
+          #   faceta inactiva y credencial revocada no aparecen, salud toma el
+          #   último evento de nivel proveedor e ignora gate_*/unsupported_
+          #   transport, ventana vencida no cuenta, registrar_evento_de_sonda
+          #   escribe source='preflight' y recorta a 255, min_output_tokens sale
+          #   de capability, y dos EXPLAIN (idx_facet_ts, idx_provider_state +
+          #   uk_provider_model). Requiere el esquema del plan P.
+          grep -qE "^43 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 43 tests CORRIDOS."; exit 1; }
