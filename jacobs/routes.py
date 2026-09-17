@@ -10,6 +10,7 @@ import json
 import logging
 import time
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
@@ -17,6 +18,7 @@ from pydantic import BaseModel, Field
 from redaccion import recortar_redactado
 
 from jacobs import store
+from jacobs import continuar as servicio_continuar
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
 from jacobs.models import (
@@ -84,6 +86,14 @@ async def _build_plan_or_reject(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _motivo_redactado(exc: Exception) -> str:
+    """Redacción + recorte compartidos por todo sitio que convierte un error
+    inesperado en 503 prevuelo_no_disponible (create, preflight, continue) --
+    un solo lugar, para no desincronizar el largo o el filtro de secretos
+    entre ellos (contexto Task 11)."""
+    return recortar_redactado(f"{type(exc).__name__}: {exc}", 300)
+
+
 async def _prevuelo_o_503(
     steps: list[Step],
     contexto: dict,
@@ -99,7 +109,7 @@ async def _prevuelo_o_503(
         return await prevuelo(steps, contexto, pendientes=pendientes,
                               user_id=user_id, tenant_id=tenant_id)
     except Exception as exc:
-        motivo = recortar_redactado(f"{type(exc).__name__}: {exc}", 300)
+        motivo = _motivo_redactado(exc)
         logger.error("pre-vuelo no disponible: %s", motivo, exc_info=True)
         raise HTTPException(
             status_code=503, detail={"code": "prevuelo_no_disponible", "motivo": motivo},
@@ -426,6 +436,67 @@ async def resume_pipeline(
         "from_index": pipeline.current_step_index,
         "run_epoch": nueva_epoca,
     }
+
+
+# ----------------------------------------------------------------
+#  POST /jacobs/pipeline/{id}/continue  (spec 2026-09-17 §5)
+# ----------------------------------------------------------------
+
+class ContinueRequest(BaseModel):
+    invoked_by:             str
+    reasignar:              dict[str, str] | None = None
+    user_id:                str | None = None
+    tenant_id:              str | None = None
+    costo_max_aceptado_usd: Decimal | None = None
+
+
+class ContinuePreflightRequest(BaseModel):
+    invoked_by: str
+    reasignar:  dict[str, str] | None = None
+    user_id:    str | None = None
+    tenant_id:  str | None = None
+
+
+def _no_disponible(exc: Exception) -> HTTPException:
+    motivo = _motivo_redactado(exc)
+    logger.error("continuar no disponible: %s", motivo, exc_info=True)
+    return HTTPException(status_code=503, detail={"code": "prevuelo_no_disponible", "motivo": motivo})
+
+
+@router.post("/pipeline/{pipeline_id}/continue")
+async def continue_pipeline(
+    pipeline_id: str, req: ContinueRequest, background: BackgroundTasks
+) -> dict:
+    """Continúa un pipeline aborted o expired (spec §5.1): reusa los pasos con
+    ref legible, rehace el resto (con reasignación opcional) y corre el
+    pre-vuelo sobre los pendientes. 403/404/409/422/423/429 con
+    {"code", ...}; 503 si el análisis o el pre-vuelo no pueden correr."""
+    try:
+        respuesta, pipeline = await servicio_continuar.continuar(
+            pipeline_id, req.invoked_by, reasignar=req.reasignar, user_id=req.user_id,
+            tenant_id=req.tenant_id, costo_max_aceptado_usd=req.costo_max_aceptado_usd,
+        )
+    except servicio_continuar.ContinuarRechazado as rechazo:
+        raise HTTPException(status_code=rechazo.status_code, detail=rechazo.cuerpo()) from rechazo
+    except Exception as exc:  # fail-closed: sin pre-vuelo/análisis no se continúa (spec §8, desvío 20)
+        raise _no_disponible(exc) from exc
+    background.add_task(run_pipeline, pipeline)
+    return respuesta
+
+
+@router.post("/pipeline/{pipeline_id}/continue/preflight")
+async def continue_preflight(pipeline_id: str, req: ContinuePreflightRequest) -> dict:
+    """Reglas 1-8 de continuar SIN escribir (spec §5.1): lo que la Mesa muestra
+    antes de confirmar."""
+    try:
+        return await servicio_continuar.previsualizar(
+            pipeline_id, req.invoked_by, reasignar=req.reasignar,
+            user_id=req.user_id, tenant_id=req.tenant_id,
+        )
+    except servicio_continuar.ContinuarRechazado as rechazo:
+        raise HTTPException(status_code=rechazo.status_code, detail=rechazo.cuerpo()) from rechazo
+    except Exception as exc:  # fail-closed: sin pre-vuelo no hay vista previa confiable (spec §8, desvío 20)
+        raise _no_disponible(exc) from exc
 
 
 # ----------------------------------------------------------------

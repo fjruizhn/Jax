@@ -608,6 +608,7 @@ jobs:
           tests/test_prevuelo_orquestador.py
           tests/test_jacobs_preflight_endpoint.py
           tests/test_jacobs_continuar.py
+          tests/test_jacobs_continue_endpoint.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -659,6 +660,7 @@ jobs:
             tests/test_prevuelo_orquestador.py \
             tests/test_jacobs_preflight_endpoint.py \
             tests/test_jacobs_continuar.py \
+            tests/test_jacobs_continue_endpoint.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1129,8 +1131,18 @@ jobs:
           #   mutación se vio en rojo contra el código final y se revirtió
           #   (evidencia en task-10-report.md, sección "Fix round 1
           #   (reanudada)").
-          grep -qE "^906 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 906 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 906 -> 911 el 2026-09-17 (Task 11): +5 en test_jacobs_continue_endpoint.py --
+          #   continue lanza run_pipeline con la época nueva de la respuesta del servicio
+          #   (background.add_task), un rechazo del servicio sale con su status y su
+          #   cuerpo ({"code", ...}), un error inesperado del análisis/pre-vuelo da 503
+          #   prevuelo_no_disponible, continue/preflight devuelve 200 sin lanzar (incluso
+          #   con continuable=False), y un rechazo 403/404 de previsualizar se relanza como
+          #   HTTPException. El servicio (jacobs/continuar.py, Task 10) va mockeado: lo que
+          #   se prueba acá es el mapeo HTTP. 4 mutaciones con test (quitar el
+          #   background.add_task, status_code hardcodeado, quitar el except Exception de
+          #   continue, quitar el except ContinuarRechazado de continue/preflight).
+          grep -qE "^911 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 911 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
