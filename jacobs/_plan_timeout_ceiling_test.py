@@ -271,8 +271,11 @@ def test_build_por_el_camino_del_LLM_no_revienta():
     async def _correr():
         b = PlanBuilder()
 
-        async def _fake_llm(objective, max_steps, capability_hint):
+        async def _fake_llm(objective, max_steps, capability_hint, governance=None):
+            # R43 (2026-09-17): build() le pasa al cerebro la foto de gobernanza
+            # que ya leyó, para que el parseo del plan no la vuelva a leer.
             assert isinstance(capability_hint, str)
+            assert governance is not None and "capabilities" in governance
             return [{"facet": "hipatia", "capability": "research", "prompt": "x"}]
 
         b._llm_plan = _fake_llm

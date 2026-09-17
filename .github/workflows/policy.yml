@@ -1456,8 +1456,13 @@ jobs:
           #   paquete no crea loops ni corre corrutinas en hilos (verde contra 1d84e82;
           #   por mutación, un run_in_executor en worker.py da 1 failed); y en ejecución
           #   un rechazo de tool_authority escribe por el pool del loop que lo corre.
-          grep -qE "^1097 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1097 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1097 -> 1100 el 2026-09-17 (Ruling R43): +3 en test_jacobs_conexiones_por_pedido.py
+          #   -- la gobernanza se lee UNA vez por pedido y build() la pasa a
+          #   _validate_plan_capabilities y al parseo del plan del planificador: preflight 1,
+          #   crear con pasos 1, crear por objetivo (qwen sin red, sólo OLLAMA_URL) 1. Rojo
+          #   contra 36e539f: assert 2 == 1, 2 == 1 y 3 == 1.
+          grep -qE "^1100 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1100 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

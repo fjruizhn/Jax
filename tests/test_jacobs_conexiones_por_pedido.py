@@ -847,3 +847,88 @@ def test_un_event_append_del_motor_registry_usa_el_pool_del_loop_que_lo_corre(en
     corriendo, duenio = asyncio.run(cuerpo())
     assert duenio is corriendo
     assert [s.split(" (")[0] for s, _p, _x in base.escrituras] == ["INSERT INTO jacobs_events"]
+
+
+# ---------------------------------------------------------------------------
+# Gobernanza: UNA lectura por pedido (Ruling R43)
+# ---------------------------------------------------------------------------
+
+def _contar_gobernanza(monkeypatch):
+    lecturas = []
+    real = store.get_motor_governance
+
+    async def contada():
+        lecturas.append(1)
+        return await real()
+
+    monkeypatch.setattr(store, "get_motor_governance", contada)
+    return lecturas
+
+
+def _un_pedido(pedido):
+    async def cuerpo():
+        try:
+            return await pedido()
+        finally:
+            await store.cerrar_pool()
+    return asyncio.run(cuerpo())
+
+
+def test_preflight_lee_la_gobernanza_una_vez(entorno, monkeypatch):
+    """R43: build() leía la gobernanza y _validate_plan_capabilities la volvía
+    a leer. Expected contra 36e539f: `assert 2 == 1`."""
+    entorno()
+    _catalogo_vacio(monkeypatch)
+    lecturas = _contar_gobernanza(monkeypatch)
+    _un_pedido(_pedido_preflight)
+    assert len(lecturas) == 1
+
+
+def test_crear_con_pasos_lee_la_gobernanza_una_vez(entorno, monkeypatch):
+    """Expected contra 36e539f: `assert 2 == 1`."""
+    entorno()
+    monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
+    lecturas = _contar_gobernanza(monkeypatch)
+    _un_pedido(_pedido_crear)
+    assert len(lecturas) == 1
+
+
+def test_crear_por_objetivo_lee_la_gobernanza_una_vez(entorno, monkeypatch):
+    """El camino del planificador (qwen, sin red): build() y el parseo del
+    plan que devolvió el LLM usan la MISMA foto. Expected contra 36e539f:
+    `assert 3 == 1` (build, _parse_plan_json y _validate_plan_capabilities)."""
+    from types import SimpleNamespace
+
+    import httpx
+
+    from jacobs import plan as plan_mod
+
+    entorno()
+    monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
+    lecturas = _contar_gobernanza(monkeypatch)
+    monkeypatch.setattr(plan_mod, "resolve_facet", AsyncMock(return_value=SimpleNamespace(
+        key="jax_local", transport="ollama", provider_id="ollama", model="qwen", base_url=None)))
+    monkeypatch.setattr(plan_mod, "limite_de_salida", AsyncMock(return_value={"options": {"num_predict": 512}}))
+    monkeypatch.setattr(plan_mod, "record_resolved_version_safe", AsyncMock())
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"model": "qwen", "message": {"content": json.dumps(
+                [{"facet": "jekyll", "capability": "research", "prompt": "p"}])}}
+
+    async def post(_self, url, json=None, **kw):
+        assert url == plan_mod.OLLAMA_URL  # nunca un proveedor pago
+        return _Resp()
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+
+    def crear_por_objetivo():
+        return routes.create_pipeline(PipelineCreateRequest(
+            name="t", objective="o", invoked_by="plataforma", mode="autonomous"), BackgroundTasks())
+
+    respuesta = _un_pedido(crear_por_objetivo)
+    assert respuesta["step_count"] == 1
+    assert len(lecturas) == 1

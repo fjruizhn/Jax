@@ -352,7 +352,7 @@ def _techo_segundos(caps: dict, capability: str) -> tuple[int, str]:
     return int(minutos) * 60, "capability.max_execution_minutes"
 
 
-async def _validate_plan_capabilities(steps: list) -> None:
+async def _validate_plan_capabilities(steps: list, governance: dict | None = None) -> None:
     """T2: valida cada step contra la DB real (capability_motor +
     motor.has_tool_access, jacobs/store.py::get_motor_governance) ANTES de
     que build() devuelva el plan. Solo aplica a steps cuyo dispatch real
@@ -370,7 +370,11 @@ async def _validate_plan_capabilities(steps: list) -> None:
     # La gobernanza se consulta SIEMPRE, no solo si hay steps de motor: el techo
     # de ejecucion (mas abajo) aplica a TODOS los steps. Costo medido en
     # get_motor_governance(): 3 SELECTs, 0.00024s en el servidor.
-    governance = await _store.get_motor_governance()
+    # Ruling R43 (2026-09-17): build() pasa la foto que ya leyó -- una lectura
+    # por pedido y las decisiones sobre la MISMA foto. Sin ella (continuar.py,
+    # tests) se lee acá como siempre.
+    if governance is None:
+        governance = await _store.get_motor_governance()
     motors = governance["motors"]
     caps = governance["capabilities"]
     violations: list[PlanViolation] = []
@@ -459,7 +463,7 @@ class PlanBuilder:
         cleanroom_violations = _check_cleanroom(steps)
         if cleanroom_violations:
             raise PlanRejected(cleanroom_violations)
-        await _validate_plan_capabilities(steps)
+        await _validate_plan_capabilities(steps, governance)
         return steps
 
     def _from_spec(self, pipeline_id: str, specs: list[dict], caps: dict) -> list[Step]:
@@ -535,7 +539,7 @@ class PlanBuilder:
         if dificultad == "formal":
             logger.info("Jacobs cerebro=Ada (formal) objective=%r", objective[:80])
             specs, motivo = await self._intentar_cerebro(
-                self._ada_plan, "Ada", objective, max_steps, capability_hint)
+                self._ada_plan, "Ada", objective, max_steps, capability_hint, governance)
             if not specs:
                 logger.warning("Ada falló planificando (%s), cayendo a qwen local", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "ada", "qwen", motivo)
@@ -543,7 +547,7 @@ class PlanBuilder:
             logger.info("Jacobs cerebro=qwen (trivial) objective=%r", objective[:80])
         if not specs:
             specs, motivo = await self._intentar_cerebro(
-                self._llm_plan, "qwen", objective, max_steps, capability_hint)
+                self._llm_plan, "qwen", objective, max_steps, capability_hint, governance)
             if not specs:
                 logger.warning("qwen falló planificando (%s), usando el plan de respaldo fijo", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "qwen", "fallback_plan", motivo)
@@ -551,10 +555,10 @@ class PlanBuilder:
         return self._from_spec(pipeline_id, specs, governance["capabilities"])
 
     @staticmethod
-    async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint):
-        """(specs, "") o (None, motivo)."""
+    async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint, governance=None):
+        """(specs, "") o (None, motivo). `governance` (R43): la foto de build()."""
         try:
-            specs = await fn(objective, max_steps, capability_hint)
+            specs = await fn(objective, max_steps, capability_hint, governance=governance)
         except CerebroNoDisponible as exc:
             return None, str(exc)
         if not specs:
@@ -571,7 +575,8 @@ class PlanBuilder:
         return "trivial"
 
     async def _ada_plan(
-        self, objective: str, max_steps: int, capability_hint: str = ""
+        self, objective: str, max_steps: int, capability_hint: str = "",
+        governance: dict | None = None,
     ) -> list[dict] | None:
         # Modelo, URL y credencial del binding de ada (credencial por
         # credential_resolver, dentro de resolve_facet), y el límite de salida
@@ -675,7 +680,7 @@ class PlanBuilder:
                             partes.append(pieza)
                     content = "".join(partes)
             # Fase D: aquí se capturará el plan de Ada como ejemplo de oro
-            return await self._parse_plan_json(content, max_steps)
+            return await self._parse_plan_json(content, max_steps, governance)
         except CerebroNoDisponible:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -684,7 +689,8 @@ class PlanBuilder:
             raise CerebroNoDisponible(motivo) from exc
 
     async def _llm_plan(
-        self, objective: str, max_steps: int, capability_hint: str = ""
+        self, objective: str, max_steps: int, capability_hint: str = "",
+        governance: dict | None = None,
     ) -> list[dict] | None:
         prompt = (
             f"Dado este objetivo: {objective}\n\n"
@@ -752,14 +758,14 @@ class PlanBuilder:
                 data = resp.json()
                 await record_resolved_version_safe(f.key, data.get("model"))
                 content = data.get("message", {}).get("content", "")
-                return await self._parse_plan_json(content, max_steps)
+                return await self._parse_plan_json(content, max_steps, governance)
         except Exception as exc:  # noqa: BLE001
             motivo = f"qwen (jax_local) no disponible para planificación: {type(exc).__name__}: {exc}"
             logger.error(motivo)
             raise CerebroNoDisponible(motivo) from exc
 
     @staticmethod
-    async def _parse_plan_json(text: str, max_steps: int) -> list[dict] | None:
+    async def _parse_plan_json(text: str, max_steps: int, governance: dict | None = None) -> list[dict] | None:
         # Extraer el primer bloque JSON del texto (puede venir con markdown o texto extra)
         text = text.strip()
         # Quitar bloques markdown ```json ... ```
@@ -788,7 +794,10 @@ class PlanBuilder:
             return None
 
         from jacobs import store as _store  # import diferido: evita ciclo store<->plan al import time
-        governance_caps = (await _store.get_motor_governance())["capabilities"]
+        # R43: la foto de build() si llegó; sin ella se lee como siempre.
+        if governance is None:
+            governance = await _store.get_motor_governance()
+        governance_caps = governance["capabilities"]
 
         # Validar y limpiar cada step
         valid = []
