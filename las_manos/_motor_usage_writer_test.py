@@ -25,14 +25,12 @@ import unittest
 # reales contra la DB real en silencio. Pasó de verdad esta sesión: la fila
 # huérfana tenant_id=77/tokens 1000-500 en axioma_usage es exactamente este
 # test corrido así. Fail loud en vez de fail silent.
-_existing_db_name = os.environ.get("JAX_DB_NAME")
-if _existing_db_name and _existing_db_name != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_existing_db_name!r} ya está seteado (¿sourceaste "
-        f"/etc/jax/.env?) -- este archivo escribe filas reales a esa DB. "
-        f"Unset JAX_DB_NAME antes de correr este test."
-    )
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+from base_de_test import (  # noqa: E402
+    exigir_base_de_test,
+    nombre_base_de_test,
+)
+
+exigir_base_de_test()
 
 # Respaldo de uso aislado (Task 7, 2026-09-15). El conftest.py de la raiz ya lo
 # hace para toda la suite, pero este archivo esta escrito para correrse SOLO
@@ -66,7 +64,7 @@ async def _seed_priced_model(provider_id, model_id, price_in, price_out):
     conn = await aiomysql.connect(
         host=_host, port=int(_port),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
-        db=os.getenv("JAX_DB_NAME", "jax_memory_test"), autocommit=True,
+        db=os.getenv("JAX_DB_NAME", nombre_base_de_test()), autocommit=True,
         connect_timeout=db_connect_timeout_seconds(),
     )
     try:
@@ -96,7 +94,7 @@ async def _fetch_last_usage_row():
     conn = await aiomysql.connect(
         host=_host, port=int(_port),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
-        db=os.getenv("JAX_DB_NAME", "jax_memory_test"), autocommit=True,
+        db=os.getenv("JAX_DB_NAME", nombre_base_de_test()), autocommit=True,
         connect_timeout=db_connect_timeout_seconds(),
     )
     try:

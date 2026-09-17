@@ -25,14 +25,9 @@ from unittest.mock import AsyncMock, patch
 # T4 (2026-08-22, auditoria usage_writer): mismo guard que
 # las_manos/_motor_usage_writer_test.py -- fail loud si JAX_DB_NAME ya
 # apunta a otra cosa, en vez de escribir en silencio contra esa DB.
-_existing_db_name = os.environ.get("JAX_DB_NAME")
-if _existing_db_name and _existing_db_name != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_existing_db_name!r} ya está seteado (¿sourceaste "
-        f"/etc/jax/.env?) -- este archivo escribe filas reales a esa DB. "
-        f"Unset JAX_DB_NAME antes de correr este test."
-    )
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 # Respaldo de uso aislado (Task 7, 2026-09-15). El conftest.py de la raiz ya lo
 # hace para toda la suite, pero este archivo esta escrito para correrse SOLO

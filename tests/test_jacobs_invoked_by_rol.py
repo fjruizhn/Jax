@@ -20,7 +20,9 @@ import os
 from unittest.mock import AsyncMock, patch
 
 # Forzado, no setdefault: mismo guard que jacobs/_pipeline_identity_test.py.
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 import pytest  # noqa: E402
 from fastapi import BackgroundTasks, HTTPException  # noqa: E402

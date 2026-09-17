@@ -27,9 +27,11 @@ from pathlib import Path
 
 import pytest
 
+from base_de_test import es_base_de_test  # noqa: E402
+
 _nombre = os.environ.get("JAX_DB_NAME", "")
-if not _nombre.endswith("_test"):
-    pytest.skip(f"JAX_DB_NAME={_nombre!r}: esta prueba escribe y borra tablas, solo en *_test",
+if not es_base_de_test(_nombre):
+    pytest.skip(f"JAX_DB_NAME={_nombre!r}: esta prueba escribe y borra tablas, solo en una base de tests",
                 allow_module_level=True)
 
 aiomysql = pytest.importorskip("aiomysql")

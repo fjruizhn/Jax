@@ -21,7 +21,11 @@ import sys
 from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "las_manos"))
+# la raíz del repo: este probe se corre como script (`python tests/_probe_...`),
+# y ahí sys.path[0] es tests/, no la raíz
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from base_de_test import es_base_de_test  # noqa: E402
 
 import aiomysql
 import httpx
@@ -106,8 +110,8 @@ async def _dump_state(conn, label):
 
 
 async def main():
-    if os.getenv("JAX_DB_NAME") != "jax_memory_test":
-        print("ABORTA: JAX_DB_NAME debe ser jax_memory_test para este probe (no toca produccion).")
+    if not es_base_de_test(os.getenv("JAX_DB_NAME")):
+        print("ABORTA: JAX_DB_NAME debe ser una base de tests para este probe (no toca produccion).")
         sys.exit(1)
 
     conn = await _db_conn()

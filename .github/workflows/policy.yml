@@ -820,6 +820,7 @@ jobs:
           tests/test_subpipeline_contrato_puro.py
           tests/test_human_gate_sin_emision_http.py
           tests/test_las_manos_auth_servicio.py
+          tests/test_base_por_sesion.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -922,6 +923,7 @@ jobs:
             tests/test_subpipeline_contrato_puro.py \
             tests/test_human_gate_sin_emision_http.py \
             tests/test_las_manos_auth_servicio.py \
+            tests/test_base_por_sesion.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1461,8 +1463,12 @@ jobs:
           #   cuando se retira funcionalidad y se dice; aca ni siquiera baja.
           #   Los dos archivos entran a las DOS listas. Si el runner da otro
           #   numero, manda el runner.
-          grep -qE "^1603 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1603 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1603 -> 1621 el 2026-09-17 (una base de tests por sesion): +18 exacto,
+          #   medido con y sin el archivo nuevo en la misma maquina. Es el delta de
+          #   esta rama SUMADO al piso que dejaron B1.4 y el retiro de la voz, no
+          #   uno en vez del otro. Si el runner da otro numero, manda el runner.
+          grep -qE "^1621 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1621 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
