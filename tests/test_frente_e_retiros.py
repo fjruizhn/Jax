@@ -71,3 +71,9 @@ def test_E20_el_gate_de_hyde_es_el_de_la_capability_y_no_una_funcion_que_devuelv
     from jacobs import policy, store
     assert not hasattr(policy, "hyde_requires_human_gate")
     assert "requires_human_gate" in inspect.getsource(store.get_motor_governance)
+
+
+def test_E07_cleanup_sh_retirado():
+    """No tenía scheduler (crontab y systemd sin menciones, 2026-09-16) y, si
+    alguien lo corría a mano, borraba *.backup* de un home que no está en restic."""
+    assert not (RAIZ / "scripts" / "cleanup.sh").exists()
