@@ -1015,8 +1015,9 @@ jobs:
           #   "980 passed, 1 xfailed" -- el mismo +1/-1 skipped de entorno del corte
           #   anterior (854/0 local = 853/1 runner). PENDIENTE DE CONFIRMAR POR EL RUNNER
           #   (3.12) en el run del PR: si da otro numero, manda el runner.
-          grep -qE "^979 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 979 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 979 -> 1038 el 2026-09-17 (C3), CONFIRMADO por el runner del PR #181: "1038 passed, 1 skipped".
+          grep -qE "^1038 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1038 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
