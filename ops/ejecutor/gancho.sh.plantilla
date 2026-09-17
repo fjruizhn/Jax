@@ -1,0 +1,15 @@
+#!/bin/sh
+# ops/ejecutor/gancho.sh.plantilla — gancho PreToolUse del Ejecutor (C1 y C2).
+# Lo renderiza jax/ejecutor/contratos/instalacion.py; no se edita a mano.
+#
+# FAIL-CLOSED. Claude Code NO bloquea si el gancho sale con 1 o 127, se cae o vence
+# su timeout: la herramienta sigue (documentación oficial, 2026-09-17). Por eso todo
+# lo que no sea un 0 explícito sale como 2, y `timeout -s KILL` corta ANTES que el
+# timeout del gancho en managed-settings.json (tope + 5 s).
+# `-I`: sin PYTHONPATH, sin site de usuario, sin el directorio actual en sys.path:
+# la cuenta no puede poner delante un módulo propio con el mismo nombre.
+LIB='@LIB@'
+/usr/bin/timeout -s KILL '@TOPE_S@' /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); from jax.ejecutor.contratos.gancho import principal; sys.exit(principal(sys.argv[2:]))' "$LIB" "$@"
+rc=$?
+if [ "$rc" -eq 0 ]; then exit 0; fi
+exit 2
