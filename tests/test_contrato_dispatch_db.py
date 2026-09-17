@@ -18,9 +18,11 @@ import uuid
 
 import pytest
 
+from base_de_test import es_base_de_test  # noqa: E402
+
 _db = os.environ.get("JAX_DB_NAME", "")
-if not _db.endswith("_test"):
-    raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test solo corre contra una base *_test.")
+if not es_base_de_test(_db):
+    raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test solo corre contra una base de tests.")
 
 import contrato_dispatch as cd  # noqa: E402  (camino de Jacobs: symlink en las_manos/)
 from facet_resolver import _db_conn  # noqa: E402

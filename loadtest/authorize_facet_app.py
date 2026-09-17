@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import os
 
-if os.environ.get("JAX_DB_NAME") != "jax_memory_test":
+from base_de_test import es_base_de_test  # noqa: E402
+
+if not es_base_de_test(os.environ.get("JAX_DB_NAME")):
     raise RuntimeError(
-        "authorize_facet_app solo corre con JAX_DB_NAME=jax_memory_test."
+        "authorize_facet_app solo corre contra una base de tests "
+        "(jax_memory_test o jax_memory_test_<sufijo>)."
     )
 
 from fastapi import FastAPI  # noqa: E402

@@ -19,7 +19,9 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 RAIZ = Path(__file__).resolve().parents[1]
 # Sin forma reconocible: SOLO se tapa si se pasa como secreto conocido.

@@ -18,7 +18,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jacobs import models, routes  # noqa: E402
 from jacobs import plan as plan_mod  # noqa: E402
