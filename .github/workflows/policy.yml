@@ -1631,6 +1631,7 @@ jobs:
           tests/test_prevuelo_pool_db.py
           tests/test_jacobs_candado_activos_db.py
           tests/test_jacobs_reaper_cas_db.py
+          las_manos/_motor_usage_writer_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1646,6 +1647,7 @@ jobs:
             tests/test_prevuelo_pool_db.py \
             tests/test_jacobs_candado_activos_db.py \
             tests/test_jacobs_reaper_cas_db.py \
+            las_manos/_motor_usage_writer_test.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1795,5 +1797,9 @@ jobs:
           #   confirmar y después ve pipeline, paso y evento; si el bloque lanza a mitad
           #   no queda ninguna fila y el candado queda libre (IS_FREE_LOCK=1). Rojo contra
           #   1d84e82: 2 failed (AttributeError: store.transaccion no existía).
-          grep -qE "^82 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 82 tests CORRIDOS."; exit 1; }
+          # 82 -> 86 el 2026-09-17 (re-revisión final, m7): las_manos/_motor_usage_writer_test.py
+          #   (+4) entra a este job -- lo reescribió R49 (marcador propio r46-<uuid>, consulta
+          #   filtrada y limpieza propia, tras el incidente de la fila ajena borrada) y no lo
+          #   corría NINGÚN job. Necesita MariaDB: este job la tiene. Medido local: 86 passed.
+          grep -qE "^86 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 86 tests CORRIDOS."; exit 1; }
