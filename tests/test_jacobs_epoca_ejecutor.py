@@ -383,7 +383,9 @@ def test_artifact_tardio_de_corrida_superada_no_pisa_el_de_la_vigente(monkeypatc
         assert await executor._run_one_step(nueva.plan[0], 0, nueva) is True
         ref_vigente = nueva.context["step_0_ref"]
         soltar_vieja.set()
-        assert await tarea_vieja is False
+        # m2 (2026-09-17): la corrida superada no devuelve False ("el paso
+        # falló") sino PASO_SIN_ESCRITURA ("no pude escribir el paso").
+        assert await tarea_vieja is executor.PASO_SIN_ESCRITURA
         return ref_vigente
 
     ref = asyncio.run(escenario())
@@ -413,3 +415,42 @@ def test_la_ruta_del_artifact_lleva_la_epoca(monkeypatch, tmp_path):
     assert inline is None
     assert ref == "artifact://jacobs/p1/s0/e7/output.json"
     assert artifacts.read_artifact(ref) == datos
+
+
+def test_un_paso_que_no_se_pudo_escribir_aborta_con_motivo_no_con_error_null(monkeypatch):
+    """m2 de la re-revisión final: `_run_one_step` devolvía False tanto por
+    "el paso falló" como por "no pude escribir el paso". step_upsert_si_epoca
+    también da 0 filas si la fila del paso CAMBIÓ (borrada, otro step_id) con
+    la corrida todavía vigente: ahí el pipeline aborta y el evento salía con
+    `"errores": {"0": null}` -- un aborto sin motivo en la Mesa.
+    Expected contra cfb0bd1: `{'0': None}`."""
+    tienda = TiendaFalsa()
+
+    async def despachar(step, pipeline):
+        return {"result": "ok"}
+
+    # La escritura de `running` pasa; la de `completed` (2ª llamada) devuelve
+    # False SIN tocar época ni status: la fila del paso cambió, no la corrida.
+    _fallar_desde_la_llamada(tienda, "step_upsert_si_epoca", 2)
+    _correr(monkeypatch, tienda, _pipeline(1), despachar)
+
+    abortados = [p for t, p in tienda.eventos if t == "PIPELINE_ABORTED"]
+    assert len(abortados) == 1, tienda.tipos()
+    assert abortados[0]["failed_steps"] == [0]
+    motivo = abortados[0]["errores"]["0"]
+    assert motivo is not None and "no se pudo escribir" in motivo, motivo
+    assert "RUN_SUPERSEDED" not in tienda.tipos(), "la corrida seguía vigente"
+
+
+def test_un_paso_sin_escribir_por_epoca_perdida_sigue_siendo_run_superseded(monkeypatch):
+    """Control del otro lado: si la época SÍ se perdió, el camino no cambia --
+    RUN_SUPERSEDED una vez y ningún PIPELINE_ABORTED."""
+    tienda = TiendaFalsa()
+
+    async def despachar(step, pipeline):
+        tienda.epoca += 1  # otro pedido tomó la época mientras el paso corría
+        return {"result": "ok"}
+
+    _correr(monkeypatch, tienda, _pipeline(1), despachar)
+    assert tienda.tipos().count("RUN_SUPERSEDED") == 1, tienda.tipos()
+    assert "PIPELINE_ABORTED" not in tienda.tipos()

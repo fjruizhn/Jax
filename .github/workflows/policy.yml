@@ -1540,8 +1540,13 @@ jobs:
           #   que la de crear (JAX_DB_CONNECT_TIMEOUT_SECONDS) y suelta el candado entre
           #   procesos al vencer. Rojo contra 1b124fe: se colgaba hasta el wait_for de 5 s del
           #   propio test, con el candado retenido.
-          grep -qE "^1129 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1129 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1129 -> 1131 el 2026-09-17 (re-revisión final, m2): +2 en
+          #   test_jacobs_epoca_ejecutor.py -- un paso cuya escritura condicional no toca
+          #   ninguna fila con la corrida VIGENTE (la fila cambió) aborta con motivo en el
+          #   evento (rojo contra cfb0bd1: "errores": {"0": null}); si la época SÍ se perdió,
+          #   sigue saliendo por RUN_SUPERSEDED sin PIPELINE_ABORTED (control).
+          grep -qE "^1131 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1131 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

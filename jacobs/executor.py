@@ -1017,9 +1017,31 @@ def _compute_waves(plan: list[Step], done: set[int]) -> list[list[int]]:
 #  Ejecución de UN step (cuerpo del antiguo try/except, extraído)
 # ----------------------------------------------------------------
 
-async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
-    """Ejecuta un step individual. Devuelve True si completó, False si falló o
-    si la corrida perdió su época.
+class _SinEscritura:
+    """Resultado de un paso que NO se pudo escribir con su escritura
+    condicional (m2 de la re-revisión final, 2026-09-17). Antes era `False`,
+    el mismo valor que "el paso falló": `step_upsert_si_epoca` devuelve 0
+    filas tanto si la corrida perdió la época como si la FILA del paso cambió
+    (borrada, otro step_id) con la corrida vigente, y en ese segundo caso el
+    pipeline abortaba con `"errores": {"3": null}` -- un aborto sin motivo.
+    run_pipeline los distingue releyendo la época."""
+
+    def __repr__(self) -> str:  # pragma: no cover - sólo para diagnósticos
+        return "<paso sin escribir>"
+
+
+PASO_SIN_ESCRITURA = _SinEscritura()
+
+_MOTIVO_SIN_ESCRITURA = (
+    "no se pudo escribir el paso: su fila cambió (otro step_id o borrada) "
+    "mientras la corrida seguía vigente"
+)
+
+
+async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool | _SinEscritura:
+    """Ejecuta un step individual. Devuelve True si completó, False si falló y
+    PASO_SIN_ESCRITURA si su escritura condicional no tocó ninguna fila
+    (época perdida o fila del paso cambiada).
 
     Época (spec 2026-09-17 §5.3): cada escritura del paso es condicional a
     `pipeline.run_epoch` y a status='running'. Si la primera falla, el paso NO
@@ -1033,7 +1055,7 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
     step.status     = StepStatus.running
     step.started_at = time.time()
     if not await store.step_upsert_si_epoca(step, epoca):
-        return False
+        return PASO_SIN_ESCRITURA
     await store.event_append(
         pipeline.pipeline_id, "STEP_STARTED",
         {"step_index": i, "facet": step.facet, "capability": step.capability},
@@ -1060,7 +1082,7 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
         step.status      = StepStatus.completed
         step.finished_at = time.time()
         if not await store.step_upsert_si_epoca(step, epoca):
-            return False
+            return PASO_SIN_ESCRITURA
         pipeline.context[f"step_{i}_ref"] = step.output_ref
         await store.event_append(
             pipeline.pipeline_id, "STEP_COMPLETED",
@@ -1247,10 +1269,25 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
             await _perdio_la_epoca(pipeline)
             return
 
+        # ---- Pasos que no se pudieron escribir (m2) ----
+        # `PASO_SIN_ESCRITURA` no distingue por sí solo entre "perdí la época"
+        # y "la fila del paso cambió": se relee la época para saber cuál fue.
+        # Si la corrida sigue siendo la vigente, es lo segundo y el paso lleva
+        # su motivo al evento en vez de un error nulo. skip_on_fail NO aplica
+        # acá: no se puede saltar un paso cuya fila no se pudo escribir.
+        sin_escritura = [i for i, r in zip(wave, results) if r is PASO_SIN_ESCRITURA]
+        if sin_escritura:
+            if await store.pipeline_epoca_y_status(pipeline_id) != (epoca, PipelineStatus.running):
+                await _perdio_la_epoca(pipeline)
+                return
+            for i in sin_escritura:
+                if pipeline.plan[i].error is None:
+                    pipeline.plan[i].error = _MOTIVO_SIN_ESCRITURA
+
         # ---- ¿Algún step falló sin skip_on_fail? → abortar (UN evento) ----
         failed = [
             i for i, ok in zip(wave, results)
-            if not ok and not pipeline.plan[i].skip_on_fail
+            if ok is not True and (i in sin_escritura or not pipeline.plan[i].skip_on_fail)
         ]
         if failed:
             if not await store.pipeline_update_status_si_epoca(pipeline_id, epoca, PipelineStatus.aborted):
