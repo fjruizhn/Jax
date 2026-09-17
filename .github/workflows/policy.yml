@@ -609,6 +609,7 @@ jobs:
           tests/test_jacobs_preflight_endpoint.py
           tests/test_jacobs_continuar.py
           tests/test_jacobs_continue_endpoint.py
+          tests/test_jacobs_relaunch_cli.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -661,6 +662,7 @@ jobs:
             tests/test_jacobs_preflight_endpoint.py \
             tests/test_jacobs_continuar.py \
             tests/test_jacobs_continue_endpoint.py \
+            tests/test_jacobs_relaunch_cli.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1148,8 +1150,24 @@ jobs:
           #   PipelineCreateRequest, para no duplicar el umbral ni el mensaje. Visto en
           #   rojo (DID NOT RAISE ValidationError) contra 4a1aa33; confirmado por mutación
           #   (quitar el @model_validator lo tira rojo otra vez).
-          grep -qE "^912 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 912 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 912 -> 919 el 2026-09-17 (Task 12): +7 en test_jacobs_relaunch_cli.py --
+          #   el CLI `tools/jacobs_relaunch.py` deja de tener lógica propia: llama a
+          #   jacobs/continuar.py::continuar (la misma función del endpoint) y corre
+          #   run_pipeline() con lo que esa función devuelve. Un rechazo
+          #   (ContinuarRechazado) sale con 1 sin correr nada; un error inesperado del
+          #   análisis/pre-vuelo (DB caída, faceta o credencial no disponible -- el
+          #   brief no cubre este caso, así que se agrega con el mismo criterio de
+          #   jacobs/routes.py::_no_disponible) sale con 2, también sin correr, con el
+          #   motivo redactado y recortado (recortar_redactado, 300); `--reasignar
+          #   PASO=FACETA` se parsea a dict o lanza ArgumentTypeError; el módulo no
+          #   escribe pasos/estado por su cuenta (barrido AST) y no lee /etc/jax/.env
+          #   salvo desde una función (otro barrido AST, `--help` no toca disco).
+          #   7 mutaciones con test: exit code de rechazo (1->9), exit code de error
+          #   inesperado (2->1), --reasignar sin validar, costo_max_aceptado_usd no
+          #   pasado a continuar() -- las 4 documentadas en task-12-report.md, más las
+          #   que ya cubrían los dos barridos AST.
+          grep -qE "^919 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 919 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
