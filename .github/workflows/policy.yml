@@ -779,6 +779,7 @@ jobs:
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
           tests/test_loadtest_apps_protegidas.py
           tests/test_ejecutor_probar_c4_conteo_remoto.py
+          tests/test_ejecutor_cuenta_de_servicio.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -878,6 +879,7 @@ jobs:
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
             tests/test_loadtest_apps_protegidas.py \
             tests/test_ejecutor_probar_c4_conteo_remoto.py \
+            tests/test_ejecutor_cuenta_de_servicio.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1427,8 +1429,14 @@ jobs:
           #   sin cerrar se compara carácter por carácter). Vistos en rojo; mutación (cmp previo): `mismo_comando`
           #   devolviendo True -> 4 rojos. Origen: misión real en prod, datos correctos descartados como
           #   comando_no_corrido porque el modelo citó el comando sin comillas.
-          grep -qE "^1590 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1590 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1590 -> 1597 el 2026-09-17 (los servicios corren como la cuenta de servicio): las DOS listas suman
+          #   tests/test_ejecutor_cuenta_de_servicio.py (7: unidades con User=jaxsvc y hogar propio,
+          #   instaladores sin `-o fruiz`). Vistos en rojo contra las unidades viejas; el control de la unidad
+          #   del vigía (test_ejecutor_vigia_servicio.py) pasó a exigir jaxsvc. MEDIDO en local (3.14), env -i,
+          #   sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1597 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1597 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1597 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

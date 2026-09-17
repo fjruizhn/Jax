@@ -28,7 +28,7 @@ sudo install -d -o root -g root -m 0755 /etc/claude-code
 test -z "$(sudo ls -A /etc/claude-code)"
 
 # Política: la escribe fruiz, la lee la cuenta, nadie más.
-sudo install -d -o fruiz -g "$JAX_EJECUTOR_CUENTA" -m 2750 "$(dirname "$JAX_EJECUTOR_POLITICA")"
+sudo install -d -o jaxsvc -g "$JAX_EJECUTOR_CUENTA" -m 2750 "$(dirname "$JAX_EJECUTOR_POLITICA")"
 
 # Puntos de montaje de los settings de la cuenta (sólo si no existen: no se pisa nada).
 HOME_CUENTA="$(getent passwd "$JAX_EJECUTOR_CUENTA" | cut -d: -f6)"

@@ -13,7 +13,7 @@ python3 -c "import sys; c, m = float(sys.argv[1]), float(sys.argv[2]); sys.exit(
   "$JAX_EJECUTOR_VIGIA_LATIDO_CADA_S" "$JAX_EJECUTOR_VIGIA_LATIDO_MAX_S" \
   || { echo "codigo=latido_cada_invalido" >&2; exit 1; }
 # Misiones: las escribe fruiz (el transporte de SP2); la cuenta del Ejecutor ni las lista.
-sudo install -d -o fruiz -g fruiz -m 0750 "$JAX_EJECUTOR_MISIONES"
+sudo install -d -o jaxsvc -g jaxsvc -m 0750 "$JAX_EJECUTOR_MISIONES"
 sudo install -o root -g root -m 0644 "$REPO/ops/ejecutor/ejecutor-vigia@.service" /etc/systemd/system/
 sudo systemctl daemon-reload
 systemctl cat ejecutor-vigia@verificacion.service >/dev/null
