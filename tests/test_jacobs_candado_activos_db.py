@@ -157,4 +157,4 @@ def test_explain_de_las_consultas_del_candado():
     for nombre in ("tomar", "soltar"):
         assert e[nombre][0]["table"] is None and e[nombre][0]["Extra"] == "No tables used", e[nombre]
     contar = e["contar"][0]
-    assert contar["type"] != "ALL" and contar["key"] == "idx_pipelines_status", contar
+    assert contar["type"] not in ("ALL", "index") and contar["key"] == "idx_pipelines_status", contar

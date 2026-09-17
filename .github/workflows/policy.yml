@@ -1554,5 +1554,14 @@ jobs:
           #   test_prevuelo_catalogo_db.py -- preflight_probe y preflight_probe_est
           #   entran en axioma_usage.request_type según information_schema del esquema
           #   real (rojo contra 4768484: AttributeError).
-          grep -qE "^73 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 73 tests CORRIDOS."; exit 1; }
+          # 73 -> 74 el 2026-09-17 (ola final de arreglos, F7): +1 en
+          #   test_jacobs_continuar_db.py -- EXPLAIN de _SQL_PIPELINE_CONTINUAR (el
+          #   UPDATE final de la transacción no tenía) con parámetros reales: PRIMARY,
+          #   type distinto de ALL e index, sin filesort ni temporary. Se endurecen
+          #   además los EXPLAIN de _SQL_PASO_A_CORRER y de las consultas de época
+          #   (test_run_epoch_db.py): en un UPDATE un recorrido COMPLETO de la clave
+          #   primaria sale type='index' con key='PRIMARY', y mirar sólo key lo daba
+          #   por bueno. Visto: con el WHERE mutado a name=%s la aserción vieja pasaba
+          #   (1 passed) y la nueva falla (type 'index', 5.810 filas).
+          grep -qE "^74 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 74 tests CORRIDOS."; exit 1; }

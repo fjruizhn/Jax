@@ -6,6 +6,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import uuid
@@ -96,7 +97,33 @@ def test_la_transaccion_aplica_pasos_plan_contexto_y_epoca():
         PipelineStatus.running, 1, 2, "thot")
     assert (s2.status, s2.facet, s2.error, s2.output_ref) == (StepStatus.pending, "thot", None, None)
     for filas in explains:
-        assert all(f["key"] == "PRIMARY" for f in filas), filas
+        # type != index: en un UPDATE, un recorrido completo de PRIMARY
+        # también dice key='PRIMARY' (ola final F7).
+        assert all(f["key"] == "PRIMARY" and f["type"] not in ("ALL", "index") for f in filas), filas
+
+
+def test_explain_del_update_final_de_continuar_usa_la_clave_primaria():
+    """Ola final F7 (revisión final m8): la tercera consulta de la
+    transacción, _SQL_PIPELINE_CONTINUAR, no tenía EXPLAIN al lado de las
+    otras dos (LAS CUATRO #1). Se explica con parámetros reales."""
+    async def cuerpo():
+        pipeline, pasos = await _abortado()
+        pid = pipeline.pipeline_id
+        try:
+            return await _explain(store._SQL_PIPELINE_CONTINUAR, (
+                json.dumps([s.model_dump() for s in pasos], ensure_ascii=False),
+                json.dumps(pipeline.context, ensure_ascii=False), 2, time.time(), pid, 0,
+            ))
+        finally:
+            await _borrar(pid)
+    filas = asyncio.run(cuerpo())
+    assert filas, "EXPLAIN vacío"
+    for f in filas:
+        # En un UPDATE, un recorrido COMPLETO de la clave primaria sale como
+        # type='index' con key='PRIMARY' (medido: 5.810 filas con el WHERE
+        # mutado a `name=%s`). Mirar sólo `key` no lo distingue.
+        assert f["type"] not in ("ALL", "index") and f["key"] == "PRIMARY", filas
+        assert "filesort" not in (f.get("Extra") or "") and "temporary" not in (f.get("Extra") or ""), filas
 
 
 def test_si_falla_a_mitad_no_cambia_nada(monkeypatch):

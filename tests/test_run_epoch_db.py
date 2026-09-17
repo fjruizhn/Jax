@@ -189,6 +189,8 @@ def test_explain_de_las_consultas_de_epoca_usa_la_clave_primaria():
             await _borrar(pid)
     for filas in asyncio.run(cuerpo()):
         assert filas, "EXPLAIN vacío"
-        assert all(f["key"] == "PRIMARY" for f in filas), filas
+        # type != index (ola final F7): en un UPDATE, un recorrido completo
+        # de PRIMARY también dice key='PRIMARY'.
+        assert all(f["key"] == "PRIMARY" and f["type"] not in ("ALL", "index") for f in filas), filas
         assert all("filesort" not in (f.get("Extra") or "") and
                    "temporary" not in (f.get("Extra") or "") for f in filas), filas
