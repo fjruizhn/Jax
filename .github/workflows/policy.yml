@@ -1157,17 +1157,30 @@ jobs:
           #   (ContinuarRechazado) sale con 1 sin correr nada; un error inesperado del
           #   análisis/pre-vuelo (DB caída, faceta o credencial no disponible -- el
           #   brief no cubre este caso, así que se agrega con el mismo criterio de
-          #   jacobs/routes.py::_no_disponible) sale con 2, también sin correr, con el
-          #   motivo redactado y recortado (recortar_redactado, 300); `--reasignar
-          #   PASO=FACETA` se parsea a dict o lanza ArgumentTypeError; el módulo no
-          #   escribe pasos/estado por su cuenta (barrido AST) y no lee /etc/jax/.env
-          #   salvo desde una función (otro barrido AST, `--help` no toca disco).
+          #   jacobs/routes.py::_no_disponible) sale con 4 (ver fix round 1 abajo: en
+          #   esta primera versión era 2), también sin correr, con el motivo redactado
+          #   y recortado (recortar_redactado, 300); `--reasignar PASO=FACETA` se
+          #   parsea a dict o lanza ArgumentTypeError; el módulo no escribe
+          #   pasos/estado por su cuenta (barrido AST) y no lee /etc/jax/.env salvo
+          #   desde una función (otro barrido AST, `--help` no toca disco).
           #   7 mutaciones con test: exit code de rechazo (1->9), exit code de error
           #   inesperado (2->1), --reasignar sin validar, costo_max_aceptado_usd no
           #   pasado a continuar() -- las 4 documentadas en task-12-report.md, más las
           #   que ya cubrían los dos barridos AST.
-          grep -qE "^919 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 919 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 919 -> 920 el 2026-09-17 (Task 12, fix round 1): +1 en
+          #   test_jacobs_relaunch_cli.py -- el código de salida del error inesperado
+          #   pasa de 2 a 4: 2 es el que ya usa argparse para sus propios errores de
+          #   uso (parser.error(), p.ej. --reasignar mal formado), así que un error de
+          #   invocación y una falla del servicio quedaban indistinguibles con el
+          #   mismo código. Nuevo test que corre los dos casos en la misma prueba y
+          #   confirma que sus códigos difieren. Además se extendió el barrido AST de
+          #   `test_no_escribe_pasos_ni_estado_por_su_cuenta` para marcar también una
+          #   llamada SIN prefijo (`ast.Name`, p.ej. tras `from jacobs.store import
+          #   step_upsert`), no solo `store.step_upsert(...)` (`ast.Attribute`) --
+          #   sin test nuevo (es el mismo test, más fuerte), visto en rojo con una
+          #   copia descartable del CLI que hacía esa llamada bare (no committeada).
+          grep -qE "^920 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 920 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

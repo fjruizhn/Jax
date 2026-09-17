@@ -21,12 +21,17 @@ Uso:
 Código de salida:
     0 pipeline completado
     1 continuar() lo rechazó (403/404/409/422/423/429; el motivo se imprime)
-    2 error inesperado en el análisis/pre-vuelo (DB caída, faceta o credencial
+    2 error de uso: lo usa argparse por su cuenta (parser.error(), p.ej.
+      --reasignar mal formado o --costo-max-aceptado no numérico) -- no es
+      nuestro, es el código que argparse ya usa siempre
+    3 la corrida terminó, pero el pipeline no quedó `completed`
+    4 error inesperado en el análisis/pre-vuelo (DB caída, faceta o credencial
       no disponible): mismo criterio de fail-closed que jacobs/routes.py::
       _no_disponible (503 prevuelo_no_disponible) -- acá no hay un pipeline
       corriendo, así que no hay un status HTTP que devolver: el motivo se
-      imprime redactado y recortado, y NO se corre nada
-    3 la corrida terminó, pero el pipeline no quedó `completed`
+      imprime redactado y recortado, y NO se corre nada. Fix round 1
+      (2026-09-17): antes era también 2, indistinguible de un error de uso
+      de argparse
 
 En honor al Prof. Raúl Jacobs.
 """
@@ -106,7 +111,7 @@ async def relanzar(pipeline_id: str, reasignar: dict[str, str], costo_max_acepta
     except Exception as exc:  # fail-closed: sin análisis/pre-vuelo no se continúa (mismo criterio que jacobs/routes.py::_no_disponible); no se corre nada
         motivo = recortar_redactado(f"{type(exc).__name__}: {exc}", 300)
         print(f"✗ error inesperado, no se continuó: {motivo}")
-        return 2
+        return 4  # distinto del 2 que usa argparse para sus propios errores de uso (fix round 1)
 
     print(
         f"▶ Continuando {pipeline_id} (época {respuesta['run_epoch']}): "

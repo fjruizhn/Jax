@@ -57,22 +57,43 @@ def test_un_rechazo_sale_con_1_sin_correr():
     corrida.assert_not_awaited()
 
 
-def test_un_error_inesperado_sale_con_2_sin_correr_y_redactado(capsys):
+def test_un_error_inesperado_sale_con_4_sin_correr_y_redactado(capsys):
     """DB caída, faceta o credencial no disponible durante el análisis/pre-vuelo
     (desvío 20 del plan): no es un rechazo de `continuar()` (no hay
     ContinuarRechazado), así que sale distinto de 1 y no corre nada. El
     mensaje se imprime redactado (mismo criterio que
-    jacobs/routes.py::_no_disponible)."""
+    jacobs/routes.py::_no_disponible). Código 4, no 2: 2 es el que usa
+    argparse para sus propios errores de uso (fix round 1, hallazgo 1) --
+    reusarlo mezclaría "invocación mal formada" con "el servicio falló"."""
     cli = _modulo()
     con_secreto = RuntimeError('conexión falló: api_key="sk-super-secreta-123"')
     with patch("jacobs.continuar.continuar", AsyncMock(side_effect=con_secreto)), \
          patch("jacobs.executor.run_pipeline", AsyncMock()) as corrida:
         rc = asyncio.run(cli.relanzar("p1", {}, None))
-    assert rc == 2
+    assert rc == 4
     corrida.assert_not_awaited()
     salida = capsys.readouterr().out
     assert "sk-super-secreta-123" not in salida
     assert "RuntimeError" in salida
+
+
+def test_error_de_uso_sale_2_y_error_de_servicio_sale_4_distintos():
+    """argparse sale con 2 en sus propios errores (parser.error(), disparado
+    acá por --reasignar mal formado); un error inesperado del servicio sale
+    con 4 (test de arriba). Los dos tienen que quedar DISTINGUIBLES: antes
+    del fix round 1 los dos eran 2 (fix round 1, hallazgo 1)."""
+    cli = _modulo()
+    with pytest.raises(SystemExit) as salida_uso:
+        cli.main(["p1", "--reasignar", "bad"])
+    assert salida_uso.value.code == 2
+
+    con_falla = RuntimeError("boom")
+    with patch("jacobs.continuar.continuar", AsyncMock(side_effect=con_falla)), \
+         patch("jacobs.executor.run_pipeline", AsyncMock()) as corrida:
+        rc = asyncio.run(cli.relanzar("p1", {}, None))
+    assert rc == 4
+    corrida.assert_not_awaited()
+    assert rc != salida_uso.value.code
 
 
 def test_parsear_reasignar_valido():
@@ -87,9 +108,19 @@ def test_parsear_reasignar_invalido_lanza():
 
 
 def test_no_escribe_pasos_ni_estado_por_su_cuenta():
+    """Fix round 1, hallazgo 3: además de `store.step_upsert(...)` (ast.Attribute),
+    también se marca una llamada SIN prefijo tras un `from jacobs.store import
+    step_upsert` (ast.Name) -- la versión vieja de este guardia solo miraba
+    Attribute y dejaba pasar esa forma sin verla."""
     arbol = ast.parse(RUTA.read_text(encoding="utf-8"))
-    llamados = {n.func.attr for n in ast.walk(arbol)
-                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+    llamados = set()
+    for n in ast.walk(arbol):
+        if not isinstance(n, ast.Call):
+            continue
+        if isinstance(n.func, ast.Attribute):
+            llamados.add(n.func.attr)
+        elif isinstance(n.func, ast.Name):
+            llamados.add(n.func.id)
     prohibidos = {"step_upsert", "step_upsert_si_epoca", "pipeline_update_status",
                   "pipeline_update_status_si_epoca", "event_append", "continuar_transaccion"}
     assert not (llamados & prohibidos), llamados & prohibidos
