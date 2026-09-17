@@ -743,6 +743,8 @@ jobs:
           tests/test_ejecutor_contratos_canario_c3.py
           tests/test_ejecutor_proxy_registro.py
           tests/test_ejecutor_carril_solo_en_el_proxy.py
+          tests/test_ejecutor_revocar_sh.py
+          tests/test_ejecutor_contratos_revocacion.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -817,6 +819,8 @@ jobs:
             tests/test_ejecutor_contratos_canario_c3.py \
             tests/test_ejecutor_proxy_registro.py \
             tests/test_ejecutor_carril_solo_en_el_proxy.py \
+            tests/test_ejecutor_revocar_sh.py \
+            tests/test_ejecutor_contratos_revocacion.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1199,8 +1203,16 @@ jobs:
           #   MEDIDO dos veces en local (3.14), env limpio, sin JAX_DB_HOST y con
           #   JAX_PLATFORM_REPO_ROOT a una ruta que no existe: "1127 passed, 1 skipped,
           #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1127 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1127 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 979 -> 1000 el 2026-09-17 (Ejecutor SP1 plan 5 parte A): C6 revocacion --
+          #   ejecutor-revocar 6, revocacion (clasificar, orquestar, llaves_root) 15 (= +21).
+          #   MEDIDO en local, ver el commit. Si el runner da otro numero, manda el runner.
+          # 1127 + 21 -> 1148 el 2026-09-17, rebase de C6 sobre origin/master c13d066
+          #   (C3, frente B y frente F): las dos listas suman los 2 archivos de C6.
+          #   MEDIDO dos veces en local (3.14), env limpio, JAX_PLATFORM_REPO_ROOT a una
+          #   ruta que no existe: "1148 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^1148 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1148 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
