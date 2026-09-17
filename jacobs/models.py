@@ -6,6 +6,7 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -120,6 +121,10 @@ class PipelineCreateRequest(BaseModel):
     max_steps:        int = 20
     steps:            list[StepSpec] | None = None
     subpipeline_token: str | None = None
+    # Spec 2026-09-17 §6.1: el costo que el humano confirmó en la Mesa. Si el
+    # pre-vuelo interno da MÁS, Jacobs responde 409 costo_supera_lo_aceptado
+    # sin crear: la condición la hace cumplir quien gasta.
+    costo_max_aceptado_usd: Decimal | None = None
 
     @model_validator(mode="after")
     def validate_fields(self) -> "PipelineCreateRequest":
@@ -133,6 +138,8 @@ class PipelineCreateRequest(BaseModel):
             )
         if self.max_steps < 1 or self.max_steps > 20:
             raise ValueError("max_steps debe estar entre 1 y 20 (límite duro v0.1)")
+        if self.costo_max_aceptado_usd is not None and self.costo_max_aceptado_usd < 0:
+            raise ValueError("costo_max_aceptado_usd no puede ser negativo")
         return self
 
 

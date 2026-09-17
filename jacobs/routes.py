@@ -13,7 +13,9 @@ import time
 import uuid
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from redaccion import recortar_redactado
 
 from jacobs import store
 from jacobs.artifacts import read_artifact
@@ -28,6 +30,8 @@ from jacobs.models import (
     StepStatus,
 )
 from jacobs.plan import PlanBuilder, PlanRejected
+from jacobs.prevuelo import prevuelo
+from jacobs.prevuelo_reglas import Veredicto
 from jacobs.policy import (
     check_kill_switch,
     validate_create,
@@ -79,6 +83,76 @@ async def _build_plan_or_reject(
             {"violations": [v.to_dict() for v in exc.violations]},
         )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _prevuelo_o_503(
+    steps: list[Step],
+    contexto: dict,
+    *,
+    pendientes: set[int] | None = None,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
+) -> Veredicto:
+    """Spec 2026-09-17 §8: sin pre-vuelo no se crea ni se continúa. Un error
+    (DB caída, catálogo ilegible) es 503 prevuelo_no_disponible, nunca un 500
+    genérico ni un pase libre."""
+    try:
+        return await prevuelo(steps, contexto, pendientes=pendientes,
+                              user_id=user_id, tenant_id=tenant_id)
+    except Exception as exc:
+        motivo = recortar_redactado(f"{type(exc).__name__}: {exc}", 300)
+        logger.error("pre-vuelo no disponible: %s", motivo, exc_info=True)
+        raise HTTPException(
+            status_code=503, detail={"code": "prevuelo_no_disponible", "motivo": motivo},
+        ) from exc
+
+
+def _resumen_de_costo(veredicto: Veredicto) -> dict:
+    return {
+        "costo_max_usd": str(veredicto.costo_max_usd),
+        "pasos_costo": [c.to_dict() for c in veredicto.pasos_costo],
+    }
+
+
+# ----------------------------------------------------------------
+#  POST /jacobs/preflight  — pre-vuelo sin escribir
+# ----------------------------------------------------------------
+
+class PreflightRequest(BaseModel):
+    invoked_by: str
+    # Obligatorio y no vacío: sin pasos, build() planifica con un LLM pago y un
+    # pre-vuelo no puede gastar (desvío 6 del plan 2026-09-17).
+    steps:      list[StepSpec] = Field(min_length=1)
+    objective:  str = ""
+    user_id:    str | None = None
+    tenant_id:  str | None = None
+
+
+@router.post("/preflight")
+async def preflight(req: PreflightRequest) -> dict:
+    """Pre-vuelo de un plan explícito (spec 2026-09-17 §4.7). Responde 200 con
+    el veredicto AUNQUE rechace. No crea filas, no escribe eventos, no toma el
+    candado. La sonda sí registra su evento de salud y su uso: se paga.
+
+    El camino por objetivo (planificación por LLM) NO pasa por acá: lo gastado
+    en planificar ya está gastado; crear corre el pre-vuelo sobre el plan que
+    devolvió el LLM."""
+    if req.invoked_by not in VALID_INVOKERS:
+        raise HTTPException(status_code=403, detail=f"invoked_by '{req.invoked_by}' no autorizado")
+    if len(req.steps) > 20:
+        raise HTTPException(status_code=422, detail=f"{len(req.steps)} pasos excede el límite duro (20)")
+    steps_spec = [s.model_dump() for s in req.steps]
+    try:
+        steps = await _plan_builder.build(
+            pipeline_id=str(uuid.uuid4()), objective=req.objective,
+            max_steps=len(steps_spec), steps_spec=steps_spec,
+        )
+    except PlanRejected as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    veredicto = await _prevuelo_o_503(
+        steps, {"objective": req.objective}, user_id=req.user_id, tenant_id=req.tenant_id,
+    )
+    return veredicto.to_dict()
 
 
 # ----------------------------------------------------------------
@@ -163,6 +237,24 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         for step in steps:
             step.pipeline_id = pipeline_id
 
+        # Pre-vuelo (spec 2026-09-17 §4.7): DESPUÉS de build() y ANTES de
+        # crear filas, dentro del candado. dry_run también ("¿cuánto costaría?").
+        veredicto = await _prevuelo_o_503(
+            steps, {"objective": req.objective}, user_id=req.user_id, tenant_id=req.tenant_id,
+        )
+        if not veredicto.ok:
+            cuerpo = {"code": "prevuelo_rechazado", **veredicto.to_dict()}
+            await store.event_append(pipeline_id, "PREVUELO_RECHAZADO", cuerpo)
+            raise HTTPException(status_code=422, detail=cuerpo)
+        if (req.costo_max_aceptado_usd is not None
+                and veredicto.costo_max_usd > req.costo_max_aceptado_usd):
+            raise HTTPException(status_code=409, detail={
+                "code": "costo_supera_lo_aceptado",
+                "costo_max_aceptado_usd": str(req.costo_max_aceptado_usd),
+                **veredicto.to_dict(),
+            })
+        costo = _resumen_de_costo(veredicto)
+
         now = time.time()
         pipeline = Pipeline(
             pipeline_id=pipeline_id,
@@ -182,7 +274,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         for step in steps:
             await store.step_upsert(step)
         await store.event_append(pipeline_id, "PIPELINE_CREATED", {
-            "name": req.name, "mode": req.mode, "steps": len(steps),
+            "name": req.name, "mode": req.mode, "steps": len(steps), **costo,
         })
 
     # dry_run: no ejecuta en background, solo completa inmediatamente
@@ -195,6 +287,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             "mode": "dry_run",
             "plan": [s.model_dump() for s in steps],
             "note": "dry_run — ningún step fue ejecutado",
+            **costo,
         }
 
     background.add_task(run_pipeline, pipeline)
@@ -205,6 +298,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         "mode": req.mode,
         "step_count": len(steps),
         "message": "Pipeline iniciado. Consultar GET /jacobs/pipeline/{id}",
+        **costo,
     }
 
 

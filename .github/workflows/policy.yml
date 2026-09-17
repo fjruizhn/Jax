@@ -606,6 +606,7 @@ jobs:
           tests/test_prevuelo_salud_pura.py
           tests/test_prevuelo_sonda.py
           tests/test_prevuelo_orquestador.py
+          tests/test_jacobs_preflight_endpoint.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -655,6 +656,7 @@ jobs:
             tests/test_prevuelo_salud_pura.py \
             tests/test_prevuelo_sonda.py \
             tests/test_prevuelo_orquestador.py \
+            tests/test_jacobs_preflight_endpoint.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1067,8 +1069,16 @@ jobs:
           #   `json.dumps`), y que `_chars_de_entrada` corre por
           #   `asyncio.to_thread` (rojo: lista de llamadas vacía sacando el
           #   `await asyncio.to_thread(...)`).
-          grep -qE "^853 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 853 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 853 -> 864 el 2026-09-17 (Task 9): test_jacobs_preflight_endpoint.py
+          #   (+11) -- POST /jacobs/preflight (200 con el veredicto aunque
+          #   rechace, 403 invocador, no escribe ni con plan rechazado, 503
+          #   prevuelo_no_disponible con la base caída) y el pre-vuelo
+          #   obligatorio al crear (422 prevuelo_rechazado con evento, 409
+          #   costo_supera_lo_aceptado, dry_run también corre el pre-vuelo, el
+          #   orden build -> prevuelo -> crear, 503 sin crear, y
+          #   costo_max_aceptado_usd negativo inválido). 11 vistos en rojo.
+          grep -qE "^864 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 864 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
