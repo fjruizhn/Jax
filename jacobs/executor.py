@@ -19,8 +19,6 @@ from facet_resolver import resolve_facet, ResolvedFacet
 from contrato_dispatch import limite_de_salida
 from model_catalog import record_resolved_version_safe
 
-import httpx
-
 from jacobs import store
 from jacobs.artifacts import read_artifact, save_if_large
 # Vive en jax/core (capa base, compartido con el HttpMuscle del REPL); llega a
@@ -30,6 +28,7 @@ from grounding_sources import build_sources, render_sources_block, resolve_redir
 from redaccion import recortar_redactado, redactar_secretos
 # E-21: jax/core/config_entorno.py por symlink en las_manos/, como arriba.
 from config_entorno import ruta_absoluta_requerida, url_requerida
+from cliente_http_compartido import obtener_cliente_http
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -291,15 +290,14 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     }
 
     async def _call() -> dict:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code != 200:
-                # Google devuelve la key rechazada DENTRO del cuerpo del error:
-                # redactar antes de recortar (y este texto termina en
-                # jacobs_steps.error via _fail_step).
-                cuerpo = recortar_redactado(resp.text, 200, [f.credential])
-                raise RuntimeError(f"Gemini HTTP {resp.status_code}: {cuerpo}")
-            return resp.json()
+        resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=timeout)
+        if resp.status_code != 200:
+            # Google devuelve la key rechazada DENTRO del cuerpo del error:
+            # redactar antes de recortar (y este texto termina en
+            # jacobs_steps.error via _fail_step).
+            cuerpo = recortar_redactado(resp.text, 200, [f.credential])
+            raise RuntimeError(f"Gemini HTTP {resp.status_code}: {cuerpo}")
+        return resp.json()
 
     data = await _call()
     final_data = data
@@ -387,12 +385,11 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     payload = {"model": f.model, "messages": messages, "stream": False,
                **await limite_de_salida(f.transport, f.provider_id, f.model)}
 
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [f.credential])}")
-        data  = resp.json()
-        texto = data["choices"][0]["message"].get("content", "")
+    resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=timeout)
+    if resp.status_code != 200:
+        raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [f.credential])}")
+    data  = resp.json()
+    texto = data["choices"][0]["message"].get("content", "")
 
     # D1.2 — best-effort, fuera del context manager del client: nunca debe
     # poder romper la respuesta al step (record_resolved_version_safe ya
@@ -449,12 +446,11 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
         "stream":   False,
         **await limite_de_salida(f.transport, f.provider_id, f.model),
     }
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(OLLAMA_URL, json=payload)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Ollama HTTP {resp.status_code}: {recortar_redactado(resp.text, 200)}")
-        data  = resp.json()
-        texto = data.get("message", {}).get("content", "")
+    resp = await obtener_cliente_http().post(OLLAMA_URL, json=payload, timeout=timeout)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Ollama HTTP {resp.status_code}: {recortar_redactado(resp.text, 200)}")
+    data  = resp.json()
+    texto = data.get("message", {}).get("content", "")
 
     # D1.2 — capturado por consistencia con los transportes HTTP; ver
     # CONTEXT.md para la limitacion real (tags de Ollama no son alias
@@ -581,10 +577,9 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
         "timeout_seconds": timeout,
     }
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload)
-        resp.raise_for_status()
-        dispatch = resp.json()
+    resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30)
+    resp.raise_for_status()
+    dispatch = resp.json()
 
     job_id = dispatch.get("job_id")
     if dispatch.get("status") == "rejected":
@@ -602,10 +597,9 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(MOTOR_POLL_INTERVAL)
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(f"{LAS_MANOS_BASE}/motor/job/{job_id}")
-                resp.raise_for_status()
-                job = resp.json()
+            resp = await obtener_cliente_http().get(f"{LAS_MANOS_BASE}/motor/job/{job_id}", timeout=15)
+            resp.raise_for_status()
+            job = resp.json()
 
             status = job.get("status", "")
             if status == "completed":
@@ -660,8 +654,7 @@ async def _cancel_motor_job(job_id: str) -> None:
     falla, queda en el log con el job_id -- nunca reemplaza la causa real.
     409 = el job ya había terminado solo, no hay nada que cortar."""
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel")
+        resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel", timeout=5)
         if resp.status_code not in (200, 409):
             logger.error(
                 "No se pudo cancelar el motor job %s tras vencer su paso: HTTP %s",

@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 from abc import ABC, abstractmethod
 
-import httpx
 import json
 
 from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
@@ -30,6 +29,7 @@ from jax.core.model_catalog import record_resolved_version_safe
 from jax.core.grounding_sources import build_sources, render_sources_block, resolve_redirects
 from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from jax.core.redaccion import recortar_redactado
+from jax.core.cliente_http_compartido import obtener_cliente_http
 
 # provider (nombre interno de config.toml) -> provider_id (tabla `credential`).
 # "kimi"/"zai" son alias historicos que no coinciden con el provider_id real.
@@ -280,15 +280,14 @@ class HttpMuscle(Muscle):
             "stream": False,
             **await self._limite_de_salida(model),
         }
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if resp.status_code != 200:
-                raise MuscleInvocationError(
-                    f"[{self.name}] DeepSeek HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [api_key])}"
-                )
-            data = resp.json()
-            msg = data["choices"][0]["message"]
-            texto = msg.get("content") or ""
+        resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=self.timeout)
+        if resp.status_code != 200:
+            raise MuscleInvocationError(
+                f"[{self.name}] DeepSeek HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [api_key])}"
+            )
+        data = resp.json()
+        msg = data["choices"][0]["message"]
+        texto = msg.get("content") or ""
 
         # D1.2 — best-effort, fuera del try/response: nunca debe poder
         # romper la respuesta al usuario (record_resolved_version_safe ya
@@ -320,38 +319,37 @@ class HttpMuscle(Muscle):
         }
         texto = ""
         resolved_version = None
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                if resp.status_code != 200:
-                    body = await resp.aread()
-                    cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [api_key])
-                    raise MuscleInvocationError(
-                        f"[{self.name}] OpenAI HTTP {resp.status_code}: {cuerpo}"
-                    )
-                partes = []
-                async for linea in resp.aiter_lines():
-                    if not linea or not linea.startswith("data:"):
-                        continue
-                    payload_str = linea[5:].strip()      # quita "data:"
-                    if payload_str == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(payload_str)
-                    except json.JSONDecodeError:
-                        continue
-                    # D1.2 — cada chunk trae 'model' (el resuelto, no el
-                    # alias pedido); alcanza con el primero, es constante
-                    # durante todo el stream.
-                    if resolved_version is None:
-                        resolved_version = chunk.get("model")
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta") or {}
-                    pieza = delta.get("content")
-                    if pieza:
-                        partes.append(pieza)
-                texto = "".join(partes)
+        async with obtener_cliente_http().stream("POST", url, headers=headers, json=payload, timeout=self.timeout) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [api_key])
+                raise MuscleInvocationError(
+                    f"[{self.name}] OpenAI HTTP {resp.status_code}: {cuerpo}"
+                )
+            partes = []
+            async for linea in resp.aiter_lines():
+                if not linea or not linea.startswith("data:"):
+                    continue
+                payload_str = linea[5:].strip()      # quita "data:"
+                if payload_str == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload_str)
+                except json.JSONDecodeError:
+                    continue
+                # D1.2 — cada chunk trae 'model' (el resuelto, no el
+                # alias pedido); alcanza con el primero, es constante
+                # durante todo el stream.
+                if resolved_version is None:
+                    resolved_version = chunk.get("model")
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or {}
+                pieza = delta.get("content")
+                if pieza:
+                    partes.append(pieza)
+            texto = "".join(partes)
 
         await record_resolved_version_safe(self.name, resolved_version)
 
@@ -429,16 +427,15 @@ class HttpMuscle(Muscle):
                 # functionDeclarations). El retry estricto (Decision 6) es el
                 # mecanismo real para forzar la busqueda.
                 payload["tools"] = [{"google_search": {}}]
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-                if resp.status_code != 200:
-                    # Google devuelve la key rechazada DENTRO del cuerpo del
-                    # error: redactar antes de recortar.
-                    cuerpo = recortar_redactado(resp.text, 200, [api_key])
-                    raise MuscleInvocationError(
-                        f"[{self.name}] Gemini HTTP {resp.status_code}: {cuerpo}"
-                    )
-                return resp.json()
+            resp = await obtener_cliente_http().post(url, headers=headers, json=payload, timeout=self.timeout)
+            if resp.status_code != 200:
+                # Google devuelve la key rechazada DENTRO del cuerpo del
+                # error: redactar antes de recortar.
+                cuerpo = recortar_redactado(resp.text, 200, [api_key])
+                raise MuscleInvocationError(
+                    f"[{self.name}] Gemini HTTP {resp.status_code}: {cuerpo}"
+                )
+            return resp.json()
 
         # Intento 1.
         data = await _request()

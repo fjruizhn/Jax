@@ -23,6 +23,7 @@ import logging
 import os
 
 from jax.memory.db import MemoryDB, _col, _zero_embedding_sql
+from jax.core.cliente_http_compartido import cerrar_cliente_http
 
 logging.basicConfig(
     level=logging.INFO,
@@ -197,6 +198,7 @@ async def main() -> None:
     print("=" * 56)
 
     await db.close()
+    await cerrar_cliente_http()
 
 
 if __name__ == "__main__":

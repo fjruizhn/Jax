@@ -55,8 +55,7 @@ import os
 import time
 from pathlib import Path
 
-import httpx
-
+from cliente_http_compartido import obtener_cliente_http
 from jacobs import store
 from jacobs.facet_health import check_facet_health
 from jacobs.models import HTTP_FACETS, PipelineStatus
@@ -97,11 +96,11 @@ async def send_telegram_alert(message: str) -> dict:
         logger.warning("Reaper: alerta suprimida, TELEGRAM_BOT_TOKEN/CHAT_ID no configurados")
         return {"ok": False, "message_id": None, "error": "TELEGRAM_BOT_TOKEN/CHAT_ID no configurados"}
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data={"chat_id": chat_id, "text": message},
-            )
+        resp = await obtener_cliente_http().post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            data={"chat_id": chat_id, "text": message},
+            timeout=10.0,
+        )
         body = resp.json()
     except Exception as exc:  # fail-soft: red caída/timeout -- no debe tumbar el reaper
         logger.error("Reaper: fallo de red enviando alerta a Telegram", exc_info=True)

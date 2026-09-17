@@ -34,6 +34,7 @@ import logging
 
 from jax.memory.db import EMBED, MemoryDB
 from jax.core.registro_facetas import url_del_proveedor
+from jax.core.cliente_http_compartido import cerrar_cliente_http
 from jax.muscles.base import HttpMuscle
 
 logging.basicConfig(
@@ -401,6 +402,7 @@ async def run_once(limit: int = 10) -> None:
             await process_one(db, extractor, conv)
     finally:
         await db.close()
+        await cerrar_cliente_http()
 
 
 if __name__ == "__main__":

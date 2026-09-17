@@ -44,6 +44,7 @@ import tomllib
 from pathlib import Path
 
 from jax.core.config_entorno import url_requerida
+from jax.core.cliente_http_compartido import cerrar_cliente_http
 from jax.core.router import Router
 from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
@@ -523,6 +524,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
 
     finally:
         await voice.shutdown()
+        await cerrar_cliente_http()
 
 
 async def main() -> None:
@@ -911,6 +913,7 @@ async def main() -> None:
                 print("\n[Procesando memoria de esta sesion en background...]")
                 _lanzar_workers_background()
         await db.close()
+        await cerrar_cliente_http()
 
 
 if __name__ == "__main__":

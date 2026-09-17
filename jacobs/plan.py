@@ -17,14 +17,13 @@ import uuid
 import logging
 from dataclasses import dataclass, field
 
-import httpx
-
 from jacobs.models import MAX_STEPS_PER_PIPELINE, MOTOR_FACETS, Step
 from facet_resolver import resolve_facet, FacetUnavailableError
 from model_catalog import record_resolved_version_safe
 from contrato_dispatch import ModelDispatchConfigError, limite_de_salida
 from config_entorno import url_requerida
 from redaccion import recortar_redactado
+from cliente_http_compartido import obtener_cliente_http
 
 logger = logging.getLogger("jacobs.plan")
 
@@ -662,37 +661,36 @@ class PlanBuilder:
             **limite,
         }
         try:
-            async with httpx.AsyncClient(timeout=ADA_TIMEOUT) as client:
-                async with client.stream("POST", url, headers=headers, json=payload) as resp:
-                    if resp.status_code != 200:
-                        # PR-K ronda 2 (M2): ERROR, no warning -- un 400 "max_tokens
-                        # too large" del proveedor es un contrato roto, no ruido.
-                        body = await resp.aread()
-                        # E-16: redactar (con la credencial de Ada) ANTES de recortar;
-                        # este motivo va a logger.error y a jacobs_events.
-                        cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [f.credential])
-                        motivo = f"Ada HTTP {resp.status_code}: {cuerpo}"
-                        logger.error(motivo)
-                        raise CerebroNoDisponible(motivo)
-                    partes = []
-                    async for linea in resp.aiter_lines():
-                        if not linea or not linea.startswith("data:"):
-                            continue
-                        chunk_str = linea[5:].strip()
-                        if chunk_str == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(chunk_str)
-                        except json.JSONDecodeError:
-                            continue
-                        choices = chunk.get("choices") or []
-                        if not choices:
-                            continue
-                        delta = choices[0].get("delta") or {}
-                        pieza = delta.get("content")
-                        if pieza:
-                            partes.append(pieza)
-                    content = "".join(partes)
+            async with obtener_cliente_http().stream("POST", url, headers=headers, json=payload, timeout=ADA_TIMEOUT) as resp:
+                if resp.status_code != 200:
+                    # PR-K ronda 2 (M2): ERROR, no warning -- un 400 "max_tokens
+                    # too large" del proveedor es un contrato roto, no ruido.
+                    body = await resp.aread()
+                    # E-16: redactar (con la credencial de Ada) ANTES de recortar;
+                    # este motivo va a logger.error y a jacobs_events.
+                    cuerpo = recortar_redactado(body.decode("utf-8", errors="replace"), 200, [f.credential])
+                    motivo = f"Ada HTTP {resp.status_code}: {cuerpo}"
+                    logger.error(motivo)
+                    raise CerebroNoDisponible(motivo)
+                partes = []
+                async for linea in resp.aiter_lines():
+                    if not linea or not linea.startswith("data:"):
+                        continue
+                    chunk_str = linea[5:].strip()
+                    if chunk_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(chunk_str)
+                    except json.JSONDecodeError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    delta = choices[0].get("delta") or {}
+                    pieza = delta.get("content")
+                    if pieza:
+                        partes.append(pieza)
+                content = "".join(partes)
             # Fase D: aquí se capturará el plan de Ada como ejemplo de oro
             return await self._parse_plan_json(content, max_steps)
         except CerebroNoDisponible:
@@ -765,13 +763,12 @@ class PlanBuilder:
         # y que lo reabre:
         # docs/superpowers/specs/2026-08-25-gpu-concurrency-resultado.md
         try:
-            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-                resp = await client.post(OLLAMA_URL, json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                await record_resolved_version_safe(f.key, data.get("model"))
-                content = data.get("message", {}).get("content", "")
-                return await self._parse_plan_json(content, max_steps)
+            resp = await obtener_cliente_http().post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            await record_resolved_version_safe(f.key, data.get("model"))
+            content = data.get("message", {}).get("content", "")
+            return await self._parse_plan_json(content, max_steps)
         except Exception as exc:  # noqa: BLE001
             motivo = f"qwen (jax_local) no disponible para planificación: {type(exc).__name__}: {exc}"
             logger.error(motivo)

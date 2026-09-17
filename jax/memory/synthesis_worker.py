@@ -38,6 +38,7 @@ from jax.memory.worker import (
     _parse_json,
 )
 from jax.core.registro_facetas import url_del_proveedor
+from jax.core.cliente_http_compartido import cerrar_cliente_http
 from jax.muscles.base import HttpMuscle
 
 logging.basicConfig(
@@ -194,6 +195,7 @@ async def run_once() -> None:
         logger.info(f"Corrida terminada: {total} insight(s) nuevo(s) en total.")
     finally:
         await db.close()
+        await cerrar_cliente_http()
 
 
 if __name__ == "__main__":
