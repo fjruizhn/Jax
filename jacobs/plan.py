@@ -78,11 +78,7 @@ _FORMAL_KEYWORDS = frozenset({
     "dependencias", "formaliza", "capabilities",
 })
 
-VALID_FACETS = frozenset({
-    "hipatia", "jekyll", "thot", "ada", "kimi", "hyde", "jax_local",
-})
-
-# Espejo de VALID_FACETS para capabilities (FASE A §3.3). Vocabulario del
+# Capabilities (FASE A §3.3), igual que las facetas desde E-03: vocabulario del
 # planner: fuente única desde Bloque 3 (2026-08-21) es la tabla `capability`
 # real, consultada en vivo por _parse_plan_json (degrada a 'reason' si no
 # existe) y por executor.py::validate_capability() (NIVEL A, rechaza el step
@@ -264,6 +260,21 @@ def _check_cleanroom(steps: list) -> list[PlanViolation]:
                     f"-- no es auditoría independiente (cleanroom)",
                 ))
     return violations
+
+
+def _check_facets(steps: list, facetas_activas: frozenset) -> list[PlanViolation]:
+    """E-17 (2026-09-16): una faceta que no está activa en la tabla `facet`
+    rechaza el plan. Antes `_parse_plan_json` la reemplazaba por jax_local en
+    silencio y el plan corría con una faceta que nadie pidió. Corre en build(),
+    así que vale para los dos caminos (spec y LLM) y para el plan de respaldo."""
+    return [
+        PlanViolation(
+            s.step_index, s.facet, s.motor, s.capability,
+            f"faceta '{s.facet}' no existe o no está activa en la tabla `facet`",
+        )
+        for s in steps
+        if s.facet not in facetas_activas
+    ]
 
 
 # T2: capabilities cuya ejecución real implica que el MOTOR llame una tool
@@ -456,6 +467,9 @@ class PlanBuilder:
         # plan pueda saltárselo. cleanroom antes solo corría dentro de
         # _from_spec (nunca para planes del LLM) y solo advertía; ahora
         # bloquea para los dos caminos, mismo mecanismo que capabilities.
+        facet_violations = _check_facets(steps, governance["facets"])
+        if facet_violations:
+            raise PlanRejected(facet_violations)
         cleanroom_violations = _check_cleanroom(steps)
         if cleanroom_violations:
             raise PlanRejected(cleanroom_violations)
@@ -495,7 +509,7 @@ class PlanBuilder:
                 step_id=str(uuid.uuid4()),
                 pipeline_id=pipeline_id,
                 step_index=i,
-                facet=spec.get("facet", "jax_local"),
+                facet=spec.get("facet", ""),
                 motor=spec.get("motor"),
                 capability=capability,
                 input=input_data,
@@ -795,17 +809,18 @@ class PlanBuilder:
         for idx, item in enumerate(data[:max_steps]):
             if not isinstance(item, dict):
                 continue
-            facet = item.get("facet", "")
-            if facet not in VALID_FACETS:
-                facet = "jax_local"
+            # E-17: la faceta viaja TAL CUAL. build() la valida contra la tabla
+            # `facet` y rechaza el plan si no está activa: antes se cambiaba por
+            # jax_local sin rastro.
+            facet = str(item.get("facet", ""))[:50]
             # depends_on: filtrar valores no-enteros y fuera de rango (0 <= dep < idx)
             raw_deps = item.get("depends_on", [])
             depends_on = [
                 int(x) for x in raw_deps
                 if str(x).lstrip("-").isdigit() and 0 <= int(x) < idx
             ]
-            # capability CERRADA al vocabulario conocido (espejo de la mecánica
-            # facet→jax_local de arriba). Fuera del conjunto → degradar a 'reason'.
+            # capability CERRADA al vocabulario conocido (las facetas, en cambio, se
+            # rechazan en build()). Fuera del conjunto → degradar a 'reason'.
             # Bloque 3 (2026-08-21): VALID_CAPABILITIES (frozenset estático)
             # eliminado -- misma fuente que validate_capability() de
             # executor.py (DB real vía get_motor_governance), import diferido

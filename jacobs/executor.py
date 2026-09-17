@@ -414,7 +414,7 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     espera (respuesta en data["message"]["content"]) es siempre local y
     fijo. Solo el modelo viene del facet, nunca la URL — bug real hasta
     2026-08-19 (404 por concatenar
-    f.base_url + "/api/chat"). jax_local SI esta en VALID_FACETS (plan.py),
+    f.base_url + "/api/chat"). jax_local es una faceta activa de la tabla facet (E-03),
     solo no aparece en la lista de facetas que _llm_plan le sugiere al LLM
     para auto-generar steps — un pipeline con step facet="jax_local" armado
     a mano (_from_spec) si lo hubiera disparado.

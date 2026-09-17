@@ -601,6 +601,7 @@ jobs:
           tests/test_respaldo_de_uso_aislado.py
           tests/test_frente_e_retiros.py
           tests/test_max_steps_una_sola_constante.py
+          tests/test_plan_facetas_de_la_tabla.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -645,6 +646,7 @@ jobs:
             tests/test_respaldo_de_uso_aislado.py \
             tests/test_frente_e_retiros.py \
             tests/test_max_steps_una_sola_constante.py \
+            tests/test_plan_facetas_de_la_tabla.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -993,6 +995,7 @@ jobs:
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
+          tests/test_facetas_de_gobernanza_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1001,6 +1004,7 @@ jobs:
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
+            tests/test_facetas_de_gobernanza_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de

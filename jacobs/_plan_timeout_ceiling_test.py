@@ -53,6 +53,7 @@ GOBERNANZA = {
         "research": {"allowed_motors": [], "max_execution_minutes": 5},
     },
     "motors": {"kimi": True, "jax_local": True},
+    "facets": frozenset({"hipatia", "jekyll", "kimi", "jax_local"}),
 }
 
 

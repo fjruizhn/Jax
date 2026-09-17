@@ -44,10 +44,6 @@ class StepStatus(str, Enum):
     blocked_human_gate  = "blocked_human_gate"
 
 
-VALID_FACETS = frozenset({
-    "hipatia", "jekyll", "thot", "ada", "kimi", "hyde", "jax_local",
-})
-
 # `invoked_by` es un ROL de quien pide, no el nombre de una persona (tanda A,
 # 2026-09-14, decisión de Fernando). "plataforma" = pedido de jax-platform en
 # nombre de un usuario autenticado; QUIÉN es viaja en user_id/tenant_id. Las

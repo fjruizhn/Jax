@@ -509,9 +509,10 @@ async def get_motor_governance() -> dict[str, dict]:
        risk_level, sandbox_only, requires_human_gate, max_execution_minutes,
        max_recursion_depth, output_schema, fallback_motor, fallback_mode,
        forbidden_paths, auditor_motor}},
-       "motors": {motor_key: has_tool_access (bool)}}
+       "motors": {motor_key: has_tool_access (bool)},
+       "facets": frozenset de facet.key con status='active'}
 
-    Costo medido en vivo (2026-08-21, DB real): 3 SELECTs, 0.00024s de
+    Costo medido en vivo (2026-08-21, DB real): 4 SELECTs, 0.00024s de
     ejecución total en el servidor (motor: 4 filas, capability: ~17,
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
     no solo en plan-build."""
@@ -563,9 +564,16 @@ async def get_motor_governance() -> dict[str, dict]:
                     "auditor_motor": None,
                 })
                 capabilities[capability_key]["allowed_motors"].append(motor_key)
+
+            # E-03 (2026-09-16): el vocabulario de facetas del planner es la
+            # tabla `facet`, no una lista fija. Mismas reglas que resolve_facet
+            # (status='active'): lo que el planner acepta es lo que se puede
+            # despachar. Catálogo de 7 filas: sin índice, declarado en DEUDA.md.
+            await cur.execute("SELECT `key` FROM facet WHERE status = 'active'")
+            facets = frozenset(key for (key,) in await cur.fetchall())
     finally:
         conn.close()
-    return {"capabilities": capabilities, "motors": motors}
+    return {"capabilities": capabilities, "motors": motors, "facets": facets}
 
 
 # ----------------------------------------------------------------
