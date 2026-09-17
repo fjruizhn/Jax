@@ -349,7 +349,15 @@ def test_explain_salud_n2_usa_idx_facet_ts():
     # todas las filas hacía que el test midiera la versión del motor.
     reales = [f for f in filas if not str(f.get("table") or "").startswith("<derived")]
     assert reales, filas
-    assert all("filesort" not in (f.get("Extra") or "") for f in reales), filas
+    assert all(f["type"] != "ALL" for f in reales), filas
+    # El GROUP BY de la derivada ordena en MariaDB 11.8 (el runner) y no en 12.3
+    # (hall9000): medido 2026-09-17, mismo SQL y mismos datos. Ese orden es sobre
+    # las filas YA acotadas por el rango de idx_facet_ts -- una por clave. Lo que
+    # este test cuida es que facet_health_event no se recorra entera, y eso se
+    # afirma con `type != ALL` y con la clave del índice. Exigir "cero filesort"
+    # en todo el plan hacía que el test midiera la versión del motor.
+    fuera_del_grupo = [f for f in reales if f.get("select_type") != "DERIVED"]
+    assert all("filesort" not in (f.get("Extra") or "") for f in fuera_del_grupo), filas
 
 
 # ---------------------------------------------------------------------------

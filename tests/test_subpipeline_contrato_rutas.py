@@ -35,6 +35,30 @@ pytestmark = pytest.mark.skipif(
 TOKEN_INVENTADO = "token-inventado-por-el-atacante"
 
 
+@pytest.fixture(autouse=True)
+def _prevuelo_que_aprueba(monkeypatch):
+    """El pre-vuelo real (spec 2026-09-17) corre al crear un pipeline y rechaza
+    con 422 si la base no tiene credencial activa ni salud fresca de la faceta.
+    Este archivo prueba el CONTRATO de sub-pipelines -- token, padre,
+    profundidad, identidad, kill switch -- no el pre-vuelo, que tiene sus
+    propios tests (tests/test_prevuelo_*.py, y los de la ruta en
+    tests/test_jacobs_prevuelo_rutas.py). Sin este doble, el resultado del
+    archivo dependía de qué datos tuviera la base: pasaba en hall9000 (con
+    catálogo sembrado) y fallaba en el runner (esquema recién migrado, sin
+    credenciales). Se aprueba con un veredicto sin violaciones y costo cero.
+    """
+    from decimal import Decimal
+
+    from jacobs import routes
+    from jacobs.prevuelo_reglas import Veredicto
+
+    async def _aprobar(*_args, **_kwargs):
+        return Veredicto(ok=True, violaciones=(), costo_max_usd=Decimal("0"),
+                         pasos_costo=(), sondeadas=())
+
+    monkeypatch.setattr(routes, "prevuelo", _aprobar)
+
+
 def test_ada_con_token_inventado_no_crea_pipeline():
     async def escenario():
         padre, _paso = await ada.padre_en_ejecucion()
