@@ -15,6 +15,7 @@ import time
 from typing import Any
 
 import aiomysql
+from pymysql import err as _pymysql_err
 
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 
@@ -90,6 +91,9 @@ ENV_TAMANIO_POOL = "JAX_JACOBS_DB_POOL_SIZE"
 # size >= maxsize; connection.py: connect_timeout acota solo el socket). La fija
 # requirements.txt y la vigila jacobs/_store_pool_test.py::VersionDeAiomysqlTest.
 AIOMYSQL_REVISADO = "0.3.2"
+# _lanzado_por lee nombres de frame de PyMySQL (raise_for_error ->
+# raise_mysql_exception) y _codigo_del_servidor_sano su tabla error_map.
+PYMYSQL_REVISADO = "1.2.0"
 
 # Medido 2026-09-17 (loadtest/jacobs_subpipelines.js, app aislada sobre
 # jax_memory_test, pool-report.md del frente F): ver la tabla de tamanos en el
@@ -242,48 +246,123 @@ def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
     (0.3.2 solo mira la transaccion; un `autocommit(False)` sin consulta pasaria).
 
     CONTRATO DE `conexion()`: esto NO ve el resto del estado de sesion. Quien lo
-    cambia -- `SET SESSION ...`, `GET_LOCK()`, tablas `TEMPORARY`, `USE otra_base`,
-    variables de usuario `@x` de las que otro dependa -- pide
+    cambia -- `SET SESSION ...`, `GET_LOCK()`, `LOCK TABLES`, tablas `TEMPORARY`,
+    `USE otra_base`, variables de usuario `@x` de las que otro dependa -- pide
     `conexion(desechable=True)`, y la conexion se cierra al salir en vez de
-    volver al pool con ese estado."""
+    volver al pool con ese estado.
+
+    CASO CIEGO: un procedimiento almacenado (`CALL`) con autocommit=1 puede
+    dejar cualquiera de esos estados (SET SESSION, GET_LOCK, LOCK TABLES, una
+    TEMPORARY, @variables) sin que el cliente lo vea: el OK final trae
+    autocommit y sin transaccion, y esto da verde. Quien llama un procedimiento
+    que toca estado de sesion pide `desechable=True`."""
     return (not conn.closed) and conn.get_autocommit() and not conn.get_transaction_status()
 
 
-# Errores que el SERVIDOR responde con un paquete de error completo y que no
-# terminan la sesion: el protocolo queda en limite de paquete y la conexion
-# sirve. Descartarla abria un handshake por pedido fallido: el job de CI de
-# 13b7759 (base sin la tabla `facet`, 1146) midio 20 conexiones para 20
-# autorizaciones, el mismo agotamiento de puertos que el pool vino a cerrar,
-# ahora disparado por una rafaga de errores.
+# Una conexion que termino el cuerpo con excepcion vuelve al pool SOLO si hay
+# evidencia de tres cosas; si falta una, se cierra (fail-closed). Descartarla
+# siempre abria un handshake por pedido fallido: el job de CI de 13b7759 (base
+# sin la tabla `facet`, 1146) midio 20 conexiones para 20 autorizaciones, el
+# mismo agotamiento de puertos que el pool vino a cerrar, disparado por una
+# rafaga de errores. Las tres:
 #
-# LISTA BLANCA, no negra: pymysql mapea un codigo desconocido del servidor a
-# OperationalError, y ahi caen tambien los que SI cortan la sesion (1927
-# conexion matada, 1053 apagado). Ante la duda se descarta.
-#   - ProgrammingError / IntegrityError / DataError / NotSupportedError: solo
-#     los emite pymysql para codigos del servidor de su tabla (1146, 1064,
-#     1062, 1452...). Un ProgrammingError sin codigo ("Cursor closed") no entra.
-#   - OperationalError solo con 1205 (lock wait timeout) y 1213 (deadlock).
-# Los codigos 2000-2999 son del CLIENTE (2013 conexion perdida): nunca entran.
+#   1. QUE error: uno que respondio el servidor y no termina la sesion
+#      (_codigo_del_servidor_sano). LISTA BLANCA: pymysql mapea un codigo
+#      desconocido a OperationalError, y ahi caen tambien los que SI cortan la
+#      sesion (1927 conexion matada, 1053 apagado).
+#   2. DE QUIEN: lo lanzo ESTA conexion al leer el paquete de error
+#      (_lanzado_por). Un error de otra conexion propagado dentro del bloque no
+#      dice nada del estado de esta.
+#   3. EN QUE ESTADO: nadie mas la esta usando y no queda nada en vuelo
+#      (_en_reposo). Una tarea hermana de un `gather` que sigue viva con la
+#      conexion en sus frames, bytes sin leer, una lectura esperando o una
+#      escritura sin vaciar: se cierra.
+#
+# Lo que (3) NO ve: una tarea que guarda la conexion dentro de un contenedor
+# (lista, dict, atributo de otro objeto) y esta suspendida fuera de la E/S de
+# la conexion. Es el mismo uso fuera del bloque que el contrato de conexion()
+# ya prohibe tambien para la salida sin error.
+#
+# (2) y (3) leen estado interno de aiomysql 0.3.2 / pymysql 1.2 (nombres de
+# frame, `_reader`, `_writer`, `_result`): las dos versiones estan fijadas y las
+# vigila VersionDeAiomysqlTest. Si un nombre no esta, AttributeError -> se cierra.
 _CLASES_DE_ERROR_DEL_SERVIDOR = (
     aiomysql.ProgrammingError,
     aiomysql.IntegrityError,
     aiomysql.DataError,
     aiomysql.NotSupportedError,
 )
+# 1205 (lock wait timeout) no esta en la tabla de pymysql: le llega como
+# OperationalError por defecto. 1213 (deadlock) si esta, como OperationalError.
 _OPERACIONALES_SANOS = frozenset({1205, 1213})
 
 
-def _error_del_servidor_sano(e: BaseException) -> bool:
+def _codigo_del_servidor_sano(e: BaseException) -> bool:
+    """Puro. Programming/Integrity/Data/NotSupported solo si pymysql eligio esa
+    clase POR el codigo del servidor (`error_map[codigo] is type(e)`): un
+    ProgrammingError sin codigo ("Cursor closed") o con uno inventado no entra.
+    OperationalError solo 1205 y 1213. La tabla de pymysql no tiene codigos del
+    CLIENTE (2000-2999), asi que 2013 o 2014 nunca entran."""
     if not isinstance(e, aiomysql.MySQLError) or not e.args:
         return False
     codigo = e.args[0]
-    if not isinstance(codigo, int) or isinstance(codigo, bool):
+    if type(codigo) is not int:  # 1205.0 == 1205 en un frozenset
         return False
-    if codigo < 1000 or 2000 <= codigo < 3000:
-        return False
-    if isinstance(e, aiomysql.OperationalError):
+    if type(e) is aiomysql.OperationalError:
         return codigo in _OPERACIONALES_SANOS
-    return isinstance(e, _CLASES_DE_ERROR_DEL_SERVIDOR)
+    return type(e) in _CLASES_DE_ERROR_DEL_SERVIDOR and _pymysql_err.error_map.get(codigo) is type(e)
+
+
+def _lanzado_por(e: BaseException, conn: aiomysql.Connection) -> bool:
+    """El final del traceback es el paquete de error leido por ESTA conexion:
+    `Connection._read_packet` (self is conn) -> `raise_for_error` ->
+    `raise_mysql_exception`. Nada despues: si alguien lo atrapo y relanzo
+    otro, el ultimo frame ya no es ese."""
+    frames = []
+    tb = e.__traceback__
+    while tb is not None:
+        frames.append(tb.tb_frame)
+        tb = tb.tb_next
+    if len(frames) < 3:
+        return False
+    lectura, paquete, lanzamiento = frames[-3:]
+    return (
+        lanzamiento.f_code.co_name == "raise_mysql_exception"
+        and paquete.f_code.co_name == "raise_for_error"
+        and lectura.f_code.co_name == "_read_packet"
+        and lectura.f_locals.get("self") is conn
+    )
+
+
+def _referencia_a(valor: Any, conn: aiomysql.Connection) -> bool:
+    return valor is conn or (isinstance(valor, aiomysql.Cursor) and valor._connection is conn)
+
+
+def _en_reposo(conn: aiomysql.Connection) -> bool:
+    lector = conn._reader
+    if (conn.closed or lector is None or lector._waiter is not None or len(lector._buffer)
+            or lector.at_eof() or lector.exception() is not None):
+        return False
+    if conn._writer is None or conn._writer.transport.get_write_buffer_size():
+        return False
+    if conn._result is not None and conn._result.unbuffered_active:
+        return False
+    actual = asyncio.current_task()
+    for tarea in asyncio.all_tasks():
+        if tarea is actual:
+            continue
+        for frame in tarea.get_stack():
+            if any(_referencia_a(v, conn) for v in frame.f_locals.values()):
+                return False
+    return True
+
+
+def _reutilizable_tras_error(e: BaseException, conn: aiomysql.Connection) -> bool:
+    try:
+        return _codigo_del_servidor_sano(e) and _lanzado_por(e, conn) and _en_reposo(conn)
+    except Exception:  # fail-soft: la verificacion no pudo probar el reposo; devuelve False y la conexion se CIERRA (fail-closed)
+        logger.exception("jacobs.store: no se pudo verificar la conexion tras un error; se cierra")
+        return False
 
 
 @contextlib.asynccontextmanager
@@ -294,8 +373,8 @@ async def conexion(desechable: bool = False):
     termino con excepcion o cancelacion -- el socket puede haber quedado a mitad
     de una respuesta --, si la sesion quedo sucia, o si `desechable=True` (ver el
     contrato en _sesion_reutilizable). La excepcion a esa regla es un error que
-    respondio el SERVIDOR y que deja el socket sano (_error_del_servidor_sano):
-    esa conexion vuelve al pool si la sesion sigue limpia.
+    respondio el servidor a ESTA conexion y la deja en reposo
+    (_reutilizable_tras_error): vuelve al pool si la sesion sigue limpia.
 
     Esperar un hueco tiene limite: `JAX_DB_CONNECT_TIMEOUT_SECONDS`, el mismo
     que acota abrir el socket. Con el pool lleno mas alla de eso, TimeoutError:
@@ -322,7 +401,7 @@ async def conexion(desechable: bool = False):
         yield conn
         limpia = True
     except BaseException as e:
-        limpia = _error_del_servidor_sano(e)
+        limpia = _reutilizable_tras_error(e, conn)
         raise
     finally:
         try:

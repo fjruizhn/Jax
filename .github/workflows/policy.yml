@@ -268,8 +268,20 @@ jobs:
           #   del servidor devuelve la conexion sana, con transaccion abierta se
           #   descarta, y los errores del cliente o fuera de la lista blanca se
           #   descartan (cada guarda validada por mutacion).
-          grep -qE "^76 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 76 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 76 -> 91 el 2026-09-17 (revision de 1a478d5: el error tiene que ser de
+          #   ESTA conexion y la conexion estar en reposo): +15 de
+          #   jacobs/_store_pool_test.py -- error de otra conexion, tarea hermana de
+          #   un gather viva con la conexion, respuesta sin leer, error relanzado,
+          #   1927 real del servidor fuera de la lista y verificacion que explota:
+          #   se descarta (los cuatro primeros rojos contra 1a478d5); control sin
+          #   hermana que la devuelve; 1205 real con transaccion y 1213 real
+          #   (deadlock) se descartan, 1205 en autocommit vuelve; 4 puros de la
+          #   clasificacion (positivo por clase y codigo, negativos, 1927 mapeado a
+          #   OperationalError) y PyMySQL instalado y fijado = el revisado. Cada
+          #   clase, cada codigo y cada guarda validados por mutacion. Medido:
+          #   "91 passed" dos corridas seguidas.
+          grep -qE "^91 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 91 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

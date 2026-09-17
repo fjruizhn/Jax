@@ -333,6 +333,259 @@ class ErrorDelServidorTest(_ConBase):
                 self.assertTrue(conn.closed, f"{exc!r} devolvio la conexion al pool")
 
 
+async def _consulta(conn, sql: str):
+    async with conn.cursor() as cur:
+        await cur.execute(sql)
+        return await cur.fetchall()
+
+
+async def _conexion_directa():
+    return await aiomysql.connect(
+        **store._db_cfg(), connect_timeout=store.db_connect_timeout_seconds()
+    )
+
+
+class ErrorAtribuidoTest(_ConBase):
+    """Revision de 1a478d5: el error tiene que haber salido de ESTA conexion y
+    la conexion tiene que estar en reposo, o se cierra (fail-closed)."""
+
+    async def _error_de(self, conn) -> BaseException:
+        try:
+            await _consulta(conn, f"SELECT * FROM {_TABLA_INEXISTENTE}")
+        except aiomysql.ProgrammingError as e:
+            return e
+        self.fail("la consulta a una tabla inexistente no fallo")
+
+    async def test_error_de_otra_conexion_propagado_en_el_bloque_descarta(self):
+        otra = await _conexion_directa()
+        try:
+            ajeno = await self._error_de(otra)
+        finally:
+            otra.close()
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                raise ajeno
+        self.assertTrue(conn.closed, "un error de OTRA conexion devolvio esta al pool")
+
+    async def test_gather_con_hermana_que_usa_la_conexion_descarta(self):
+        hermanas: list = []
+
+        async def hermana(c):
+            await asyncio.sleep(0.3)
+            return await _consulta(c, "SELECT 1")
+
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                hermanas.append(asyncio.create_task(hermana(conn)))
+                await asyncio.gather(hermanas[0], self._error_de_y_relanza(conn))
+        cerrada = conn.closed
+        await _a_lo_sumo(asyncio.gather(*hermanas, return_exceptions=True))
+        self.assertTrue(cerrada, "volvio al pool con una tarea hermana todavia usandola")
+
+    async def _error_de_y_relanza(self, conn):
+        await _consulta(conn, f"SELECT * FROM {_TABLA_INEXISTENTE}")
+
+    async def test_gather_sin_hermana_viva_la_devuelve(self):
+        """Control del control: el mismo error dentro de un gather, sin nadie mas
+        usando la conexion, vuelve al pool (si no, el de arriba pasaria cerrando
+        siempre)."""
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                await asyncio.gather(asyncio.sleep(0), self._error_de_y_relanza(conn))
+        self.assertFalse(conn.closed)
+        self.assertIn(conn, (await store.obtener_pool())._free)
+
+    async def test_respuesta_sin_leer_descarta(self):
+        """Nadie en otra tarea, pero quedo una respuesta en vuelo en el socket."""
+        from pymysql.constants import COMMAND
+
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                e = await self._error_de(conn)
+                await conn._execute_command(COMMAND.COM_QUERY, "SELECT 1")
+                await asyncio.sleep(0.3)  # la respuesta llega al buffer del lector
+                raise e
+        self.assertTrue(conn.closed, "volvio al pool con una respuesta sin leer")
+
+    async def test_error_real_del_servidor_fuera_de_la_lista_descarta(self):
+        """El servidor responde 1927 (conexion matada) a ESTA conexion, en reposo:
+        solo la lista blanca decide, y 1927 no esta. SIGNAL lo emite sin matar
+        nada, asi que si se descartara por otra razon el test no lo veria: por
+        eso el control es que la atribucion y el reposo SI dan verde."""
+        with self.assertRaises(aiomysql.OperationalError) as ctx:
+            async with store.conexion() as conn:
+                try:
+                    await _consulta(conn, "BEGIN NOT ATOMIC SIGNAL SQLSTATE '70100' "
+                                          "SET MYSQL_ERRNO = 1927, MESSAGE_TEXT = 'simulado'; END")
+                except aiomysql.OperationalError as e:
+                    self.assertTrue(store._lanzado_por(e, conn) and store._en_reposo(conn))
+                    raise
+        self.assertEqual(ctx.exception.args[0], 1927)
+        self.assertTrue(conn.closed, "un 1927 del servidor devolvio la conexion al pool")
+
+    async def test_si_la_verificacion_explota_se_descarta(self):
+        """Estado interno de aiomysql que ya no esta (otra version): se cierra."""
+        with patch.object(store, "_en_reposo", side_effect=AttributeError("_waiter")):
+            with self.assertRaises(aiomysql.ProgrammingError):
+                async with store.conexion() as conn:
+                    await self._error_de_y_relanza(conn)
+        self.assertTrue(conn.closed, "una verificacion que fallo devolvio la conexion")
+
+    async def test_error_relanzado_como_otro_descarta(self):
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                try:
+                    await self._error_de_y_relanza(conn)
+                except aiomysql.ProgrammingError as e:
+                    raise aiomysql.ProgrammingError(*e.args) from None
+        self.assertTrue(conn.closed)
+
+
+_TABLA_LOCKS = "jacobs_pool_test_locks"
+
+
+class ErroresDeLockRealesTest(_ConBase):
+    """1205 y 1213 REALES del servidor, con dos conexiones compitiendo."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.duena = await _conexion_directa()
+        self.addAsyncCleanup(self._limpiar)
+        await _consulta(self.duena, f"DROP TABLE IF EXISTS {_TABLA_LOCKS}")
+        await _consulta(
+            self.duena,
+            f"CREATE TABLE {_TABLA_LOCKS} (id INT PRIMARY KEY, v INT NOT NULL) ENGINE=InnoDB",
+        )
+        await _consulta(self.duena, f"INSERT INTO {_TABLA_LOCKS} VALUES (1, 0), (2, 0)")
+
+    async def _limpiar(self):
+        if not self.duena.closed:
+            try:
+                await self.duena.rollback()
+            finally:
+                self.duena.close()
+        otra = await _conexion_directa()
+        try:
+            await _consulta(otra, f"DROP TABLE IF EXISTS {_TABLA_LOCKS}")
+        finally:
+            otra.close()
+
+    async def _bloquear_fila_1(self):
+        await self.duena.begin()
+        await _consulta(self.duena, f"UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 1")
+
+    _ESPERA_CORTA = f"SET STATEMENT innodb_lock_wait_timeout=1 FOR UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 1"
+
+    async def test_1205_real_con_transaccion_abierta_descarta(self):
+        await self._bloquear_fila_1()
+        with self.assertRaises(aiomysql.OperationalError) as ctx:
+            async with store.conexion() as conn:
+                await conn.begin()
+                await _consulta(conn, f"UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 2")
+                await _consulta(conn, self._ESPERA_CORTA)
+        self.assertEqual(ctx.exception.args[0], 1205)
+        self.assertTrue(conn.closed, "volvio al pool con la transaccion abierta tras un 1205")
+
+    async def test_1205_real_en_autocommit_la_devuelve(self):
+        """El 1205 de la lista blanca, de punta a punta: sin transaccion la
+        conexion esta sana y vuelve."""
+        await self._bloquear_fila_1()
+        with self.assertRaises(aiomysql.OperationalError) as ctx:
+            async with store.conexion() as conn:
+                await _consulta(conn, self._ESPERA_CORTA)
+        self.assertEqual(ctx.exception.args[0], 1205)
+        self.assertFalse(conn.closed, "un 1205 sin transaccion descarto una conexion sana")
+        async with store.conexion() as otra:
+            self.assertIs(otra, conn)
+            self.assertEqual(await _consulta(otra, "SELECT 1"), ((1,),))
+
+    async def test_1213_real_con_transaccion_descarta(self):
+        # La duena pesa mas (muchas filas modificadas): InnoDB elige como
+        # victima del deadlock a la transaccion mas liviana, la del pool.
+        await self._bloquear_fila_1()
+        await _consulta(
+            self.duena,
+            f"INSERT INTO {_TABLA_LOCKS} SELECT seq, 0 FROM seq_100_to_300",
+        )
+        espera = None
+        with self.assertRaises(aiomysql.OperationalError) as ctx:
+            async with store.conexion() as conn:
+                await conn.begin()
+                await _consulta(conn, f"UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 2")
+                espera = asyncio.create_task(_consulta(
+                    self.duena, f"UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 2"))
+                await asyncio.sleep(0.3)
+                await _a_lo_sumo(_consulta(conn, f"UPDATE {_TABLA_LOCKS} SET v = v + 1 WHERE id = 1"))
+        self.assertEqual(ctx.exception.args[0], 1213)
+        self.assertTrue(conn.closed, "volvio al pool tras un deadlock con transaccion")
+        await _a_lo_sumo(espera)
+
+
+class ClasificacionDeErrorTest(unittest.TestCase):
+    """Puro, sin base: `_codigo_del_servidor_sano`."""
+
+    def test_positivos_uno_por_clase_de_la_lista(self):
+        for exc in (
+            aiomysql.ProgrammingError(1146, "no such table"),
+            aiomysql.IntegrityError(1062, "duplicate entry"),
+            aiomysql.DataError(1406, "data too long"),
+            aiomysql.NotSupportedError(1235, "not supported yet"),
+            aiomysql.OperationalError(1205, "lock wait timeout"),
+            aiomysql.OperationalError(1213, "deadlock"),
+        ):
+            with self.subTest(exc=repr(exc)):
+                self.assertTrue(store._codigo_del_servidor_sano(exc))
+
+    def test_negativos(self):
+        for exc in (
+            aiomysql.ProgrammingError(999, "x"),
+            aiomysql.ProgrammingError(1999, "x"),
+            aiomysql.ProgrammingError(2000, "x"),
+            aiomysql.ProgrammingError(2014, "commands out of sync"),
+            aiomysql.ProgrammingError(2999, "x"),
+            aiomysql.ProgrammingError(3000, "x"),
+            aiomysql.ProgrammingError(True, "x"),
+            aiomysql.ProgrammingError("Cursor closed"),
+            aiomysql.ProgrammingError(),
+            aiomysql.ProgrammingError(1062, "codigo de IntegrityError en otra clase"),
+            aiomysql.InternalError(1105, "unknown"),
+            aiomysql.InternalError(1146, "x"),
+            aiomysql.OperationalError(2013, "lost connection"),
+            aiomysql.OperationalError(1205.0, "codigo no entero"),
+            aiomysql.OperationalError(1146, "x"),
+            aiomysql.InterfaceError(0, ""),
+            ValueError(1146),
+        ):
+            with self.subTest(exc=repr(exc)):
+                self.assertFalse(store._codigo_del_servidor_sano(exc))
+
+    def test_1927_pymysql_lo_mapea_a_operational_y_no_se_reusa(self):
+        import struct
+
+        from pymysql import err
+
+        with self.assertRaises(err.OperationalError) as ctx:
+            err.raise_mysql_exception(b"\xff" + struct.pack("<h", 1927) + b"#70100Connection was killed")
+        self.assertIs(type(ctx.exception), err.OperationalError)
+        self.assertEqual(ctx.exception.args[0], 1927)
+        self.assertFalse(store._codigo_del_servidor_sano(ctx.exception))
+
+    def test_los_positivos_salen_de_la_tabla_de_pymysql(self):
+        """Fija el supuesto: pymysql elige la clase POR el codigo."""
+        import struct
+
+        from pymysql import err
+
+        for codigo, clase in ((1146, err.ProgrammingError), (1062, err.IntegrityError),
+                              (1406, err.DataError), (1235, err.NotSupportedError),
+                              (1205, err.OperationalError), (1213, err.OperationalError)):
+            with self.subTest(codigo=codigo):
+                with self.assertRaises(clase) as ctx:
+                    err.raise_mysql_exception(b"\xff" + struct.pack("<h", codigo) + b"#HY000x")
+                self.assertIs(type(ctx.exception), clase)
+                self.assertTrue(store._codigo_del_servidor_sano(ctx.exception))
+
+
 class EsperaAcotadaTest(_ConBase):
     TAMANIO = "1"
 
@@ -585,6 +838,18 @@ class VersionDeAiomysqlTest(unittest.TestCase):
         pins = [l.strip() for l in (RAIZ / "requirements.txt").read_text().splitlines()
                 if l.strip().lower().startswith("aiomysql")]
         self.assertEqual(pins, [f"aiomysql=={store.AIOMYSQL_REVISADO}"])
+
+    def test_pymysql_instalado_y_fijado_es_el_revisado(self):
+        """La atribucion de un error a la conexion lee nombres de frame y la
+        tabla error_map de PyMySQL: otra version puede moverlos."""
+        from importlib.metadata import version
+
+        # `pymysql.__version__` es la compatibilidad con mysqlclient (2.2.x), no
+        # la version de la distribucion.
+        self.assertEqual(version("PyMySQL"), store.PYMYSQL_REVISADO)
+        pins = [l.strip() for l in (RAIZ / "requirements.txt").read_text().splitlines()
+                if l.strip().lower().startswith("pymysql")]
+        self.assertEqual(pins, [f"PyMySQL=={store.PYMYSQL_REVISADO}"])
 
 
 class MigradosAlPoolTest(unittest.TestCase):
