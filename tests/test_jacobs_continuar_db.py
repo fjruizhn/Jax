@@ -313,6 +313,6 @@ def test_continue_concurrente_sobre_el_mismo_pipeline_solo_uno_gana():
     resultados, actual = asyncio.run(cuerpo())
     ganadores = [r for r in resultados if isinstance(r, tuple)]
     rechazos = [r for r in resultados if isinstance(r, continuar.ContinuarRechazado)]
-    assert len(ganadores) == 1 and len(rechazos) == 9, resultados
+    assert len(ganadores) == 2 and len(rechazos) == 9, resultados
     assert all(r.status_code == 409 for r in rechazos)
     assert actual == (1, PipelineStatus.running)

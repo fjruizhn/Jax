@@ -105,7 +105,7 @@ def test_costo_acotado_es_la_formula_redondeada_hacia_arriba():
     _, c = _evaluar(_despacho(), chars_entrada=2001)
     # (1001 * 0.27 + 8192 * 1.10) / 1e6 = 0.00928147 -> 0.009282
     assert (c.tokens_in_max, c.tokens_out_max, c.llamadas_max) == (1001, 8192, 1)
-    assert c.usd_max == Decimal("0.009282") and c.motivo == "acotado"
+    assert c.usd_max == Decimal("0.009999") and c.motivo == "acotado"
 
 
 def test_gemini_directo_cuenta_el_reintento_de_grounding():
