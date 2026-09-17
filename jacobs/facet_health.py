@@ -166,13 +166,23 @@ async def check_facet_health() -> dict:
 # unsupported_transport porque la Mesa no lo despacha) y probe_error es una
 # falla de la sonda: ninguno dice nada del proveedor.
 OUTCOMES_DE_PROVEEDOR = ("ok", "provider_error")
+# Fix round 1 (revisión Task 7), Ruling R13b: la sonda también puede escribir
+# 'config_error' -- una falla LOCAL de preparación (sin credencial activa,
+# transporte desconocido, contrato sin tope de salida) que no dice nada del
+# proveedor. Entra al ENUM de escritura (registrar_evento_de_sonda) pero NO a
+# OUTCOMES_DE_PROVEEDOR: el lector (sql_ultimo_evento_de_proveedor) lo ignora
+# a propósito, igual que gate_* -- si está mal, un typo en la credencial
+# marcaría la faceta como "sondeada y caída" en vez de "no se pudo ni
+# preguntar", y dejaría de reintentarse en la próxima ventana.
+OUTCOMES_DE_SONDA = OUTCOMES_DE_PROVEEDOR + ("config_error",)
 SOURCE_PREVUELO = "preflight"
 _LARGO_DETALLE = 255  # facet_health_event.detail VARCHAR(255)
 
 # Fix round 1, item 4: la lista sale de OUTCOMES_DE_PROVEEDOR, no de un
 # literal duplicado. Es un literal generado, no un parametro -- seguro
 # contra inyeccion porque OUTCOMES_DE_PROVEEDOR es una constante fija del
-# modulo, nunca un valor que llegue de afuera.
+# modulo, nunca un valor que llegue de afuera. NO incluye 'config_error' a
+# propósito (ver comentario de OUTCOMES_DE_SONDA arriba).
 _OUTCOMES_SQL = ",".join(f"'{o}'" for o in OUTCOMES_DE_PROVEEDOR)
 
 _SQL_EVENTO_DE_SONDA = (
@@ -235,11 +245,16 @@ async def registrar_evento_de_sonda(clave: str, outcome: str, detalle: str | Non
     """Escribe el resultado de una sonda del pre-vuelo. Quien llama decide qué
     hacer si falla (sonda.py: el veredicto se mantiene y se cuenta).
 
+    outcome ∈ OUTCOMES_DE_SONDA = ('ok', 'provider_error', 'config_error')
+    (Ruling R13b, fix round 1 de Task 7) -- cualquier otro valor se rechaza.
+    'config_error' se guarda igual que los otros dos pero el LECTOR
+    (sql_ultimo_evento_de_proveedor, OUTCOMES_DE_PROVEEDOR) lo ignora.
+
     Fix round 1, item 1: redactar ANTES de recortar (recortar_redactado,
     jax/core/redaccion.py:161-168) -- al reves, un secreto que cruza el
     corte de 255 queda partido, el pedazo visible ya no tiene la forma que
     reconoce la regla y se filtra en claro."""
-    if outcome not in OUTCOMES_DE_PROVEEDOR:
+    if outcome not in OUTCOMES_DE_SONDA:
         raise ValueError(f"outcome de sonda inválido: {outcome!r}")
     conn = await store.get_conn()
     try:

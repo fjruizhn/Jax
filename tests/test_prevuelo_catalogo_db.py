@@ -15,6 +15,8 @@ import time
 import uuid
 from decimal import Decimal
 
+import pytest
+
 _db = os.environ.get("JAX_DB_NAME", "")
 if not _db.endswith("_test"):
     raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test solo corre contra una base *_test.")
@@ -357,3 +359,54 @@ def test_explain_facetas_n3_evita_full_scan():
     _, filas = _con_semillas(3, cuerpo)
     assert all(f["type"] != "ALL" for f in filas), filas
     assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3 (revisión de Task 7, fix round 1 -- Ruling R13b): la sonda
+# también puede escribir 'config_error' (facet_health.OUTCOMES_DE_SONDA),
+# pero SOLO 'ok'/'provider_error' cuentan para la salud -- ver
+# tests/test_prevuelo_salud_pura.py::test_la_consulta_solo_cuenta_eventos_de_proveedor,
+# que ya fija ese contrato a nivel de SQL y no cambió en esta ronda.
+# ---------------------------------------------------------------------------
+
+def test_registrar_evento_de_sonda_acepta_config_error():
+    """R13b: la sonda escribe 'config_error' cuando no pudo ni preparar la
+    llamada (credencial ausente, transporte desconocido, contrato sin tope)
+    -- tiene que poder guardarse igual que 'ok'/'provider_error'."""
+    ahora = time.time()
+
+    async def cuerpo(s, conn):
+        await fh.registrar_evento_de_sonda(
+            s.faceta, "config_error", "la sonda no pudo preparar la llamada: sin credencial", ahora)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT outcome, source FROM facet_health_event WHERE facet=%s", (s.faceta,))
+            return await cur.fetchall()
+    _, filas = _con_semilla(cuerpo)
+    assert list(filas) == [("config_error", "preflight")]
+
+
+def test_registrar_evento_de_sonda_rechaza_outcome_invalido():
+    """R13b, contraparte: cualquier valor que NO sea ok/provider_error/
+    config_error se sigue rechazando -- 'config_error' se agregó a la lista
+    permitida, no se abrió la validación entera."""
+    async def cuerpo():
+        with pytest.raises(ValueError):
+            await fh.registrar_evento_de_sonda("cualquiera", "bogus", None, time.time())
+    asyncio.run(cuerpo())
+
+
+def test_salud_ignora_config_error_como_los_gate():
+    """R13b: el lector de salud (sql_ultimo_evento_de_proveedor,
+    OUTCOMES_DE_PROVEEDOR) ignora 'config_error' igual que gate_*/unbound/
+    unsupported_transport -- un config_error MÁS FRESCO que un 'ok' viejo no
+    tiene que tapar ese 'ok': la salud sigue viendo el último evento de
+    NIVEL PROVEEDOR, no el último evento a secas."""
+    ahora = time.time()
+
+    async def cuerpo(s, conn):
+        await _evento(conn, s.faceta, "ok", "chat", ahora - 600)
+        await _evento(conn, s.faceta, "config_error", "preflight", ahora - 10)
+        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+    s, cat = _con_semilla(cuerpo)
+    assert cat.salud[s.faceta] == (ahora - 600, "ok")

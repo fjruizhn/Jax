@@ -1015,8 +1015,25 @@ jobs:
           #   registrado con el resultado, registro perdido contado sin tumbar
           #   el veredicto, uso de la sonda como preflight_probe (encolado e
           #   insertado con el request_type pedido).
-          grep -qE "^821 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 821 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 821 -> 832 el 2026-09-17 (Task 7, fix round 1, Rulings R13/R14/R15):
+          #   +11 en test_prevuelo_sonda.py -- (a) un error de DB al resolver
+          #   se propaga sin convertirse en veredicto (visto en rojo: el
+          #   código viejo lo tragaba como provider_error); (b) credencial
+          #   ausente, transporte desconocido y contrato sin
+          #   max_output_tokens dan config_error, no provider_error (3 rojos
+          #   vistos contra el código viejo); 401 directo y por el motor son
+          #   provider_error (mutante 2xx→>=500 puesto en rojo a mano); el
+          #   wait_for acota sólo la llamada al proveedor (puesto en rojo
+          #   sacándolo: sin él la sonda tarda 5s en vez de cortar a 1s); el
+          #   camino ollama directo (no motor) manda num_predict; la lista de
+          #   redacción del motor tapa su propia credencial; el
+          #   max_tokens_param del motor se lee del catálogo, no un literal
+          #   (mutante puesto en rojo a mano); el WARNING del registro
+          #   perdido queda en el log; una sonda fallida no registra uso; y
+          #   el tope también entra por motor_max_tokens (R15, visto en
+          #   rojo: el código viejo mandaba 16 en vez de 10).
+          grep -qE "^832 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 832 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1138,5 +1155,11 @@ jobs:
           #   y no probaba el orden). Item 2: EXPLAIN de sql_facetas con
           #   n=3 (el pre-vuelo real pasa varias facetas), sin ALL ni
           #   filesort.
-          grep -qE "^50 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 50 tests CORRIDOS."; exit 1; }
+          # 50 -> 53 el 2026-09-17 (Task 7, fix round 1, Ruling R13b): +3 en
+          #   test_prevuelo_catalogo_db.py -- registrar_evento_de_sonda
+          #   acepta 'config_error' (visto en rojo: ValueError contra el
+          #   código viejo, que solo aceptaba ok/provider_error), sigue
+          #   rechazando cualquier otro valor, y el lector de salud ignora
+          #   un config_error más fresco que un 'ok' viejo (no lo tapa).
+          grep -qE "^53 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 53 tests CORRIDOS."; exit 1; }

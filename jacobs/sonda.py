@@ -2,17 +2,35 @@
 
 Una llamada MÍNIMA por el transporte real de la clave: mismo endpoint,
 resolver y credencial que el ejecutor, pero payload propio (sin google_search
-y con el menor entre JAX_PREVUELO_SONDA_MAX_TOKENS y el tope del catálogo):
-las _invoke_* mandarían herramientas y el tope completo del modelo.
+y con el menor entre JAX_PREVUELO_SONDA_MAX_TOKENS, el tope del catálogo y
+-- via motor -- el presupuesto propio del motor, Ruling R15): las _invoke_*
+mandarían herramientas y el tope completo del modelo.
 
 «Responde» = 2xx del proveedor aunque el contenido venga cortado: mide
-disponibilidad, no calidad. Timeout propio (JAX_PREVUELO_SONDA_TIMEOUT_S).
+disponibilidad, no calidad. Timeout propio (JAX_PREVUELO_SONDA_TIMEOUT_S),
+y acota SOLO la llamada al proveedor (Ruling R13): resolver la faceta o la
+credencial tiene sus propios timeouts de conexión (tripwire aiomysql).
+
+Tres clases de resultado (Ruling R13, fix round 1 de la revisión de Task 7):
+  (a) una caída real de la DB al resolver (FacetUnavailableError -- que ya
+      envuelve aiomysql/pymysql/OSError -- o cualquier excepción que no sea
+      una de las dos siguientes) se PROPAGA fuera de sondear(): jacobs no
+      pudo ni ver su propio catálogo, así que no tiene nada que decir sobre
+      el proveedor -- el llamador responde 503 prevuelo_no_disponible (§8),
+      nunca faceta_caida.
+  (b) una falla LOCAL de preparación (CredentialUnavailableError, transporte
+      desconocido, contrato sin tope de salida) -> ok=False, outcome
+      'config_error': no dice nada del proveedor, así que el próximo
+      pre-vuelo dentro de la ventana vuelve a sondear (el lector de salud,
+      OUTCOMES_DE_PROVEEDOR, lo ignora).
+  (c) sólo la llamada al proveedor en sí (2xx fallido, error HTTP, timeout)
+      -> outcome 'provider_error'.
 
 Cada resultado se registra en facet_health_event (source='preflight', outcome
-ok/provider_error) para que el próximo pre-vuelo dentro de la ventana no
-vuelva a sondear, y su uso en axioma_usage (request_type='preflight_probe'):
-se paga y se ve. Si el registro de salud falla, el veredicto se mantiene (el
-dato es la respuesta del proveedor, no la fila), se loguea WARNING y se cuenta.
+ok/provider_error/config_error) y, si midió tokens, su uso en axioma_usage
+(request_type='preflight_probe'): se paga y se ve. Si el registro de salud
+falla, el veredicto se mantiene (el dato es la respuesta del proveedor, no
+la fila), se loguea WARNING y se cuenta.
 
 En honor al Prof. Raúl Jacobs.
 """
@@ -24,7 +42,7 @@ import time
 from dataclasses import dataclass
 
 import httpx
-from credential_resolver import resolve_credential_instrumented
+from credential_resolver import CredentialUnavailableError, resolve_credential_instrumented
 from facet_resolver import resolve_facet
 from redaccion import recortar_redactado
 
@@ -55,6 +73,28 @@ def registros_perdidos() -> int:
     return _registros_perdidos
 
 
+class _FallaDePreparacion(Exception):
+    """Fallo LOCAL antes de tocar al proveedor (Ruling R13b): credencial
+    ausente (CredentialUnavailableError -- que ya envuelve una caída de DB,
+    resolve_credential() SIEMPRE reduce a esto), transporte desconocido, o
+    contrato sin tope de salida (max_output_tokens=None). Se registra con
+    outcome 'config_error'. Cualquier OTRA excepción durante la preparación
+    (p.ej. FacetUnavailableError, que resolve_facet() usa para envolver una
+    caída real de la DB) NO se atrapa acá: se propaga fuera de sondear()."""
+
+
+def _tope(d: Despacho) -> int:
+    """Ruling R15: el mismo menor-de-tres que worker._limite_del_motor --
+    config, catálogo y (sólo via motor, y sólo si el motor declara uno
+    propio) el presupuesto del motor."""
+    if d.max_output_tokens is None:
+        raise _FallaDePreparacion("el catálogo no declara max_output_tokens")
+    limite = min(prevuelo_config.sonda_max_tokens(), d.max_output_tokens)
+    if d.via_motor and d.motor_max_tokens:
+        limite = min(limite, d.motor_max_tokens)
+    return limite
+
+
 async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: list[str]) -> dict:
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(url, headers=headers, json=payload)
@@ -63,63 +103,90 @@ async def _post(url: str, headers: dict, payload: dict, timeout: int, secretos: 
     return resp.json()
 
 
-async def _llamar(clave: str, d: Despacho, timeout: int) -> ResultadoSonda:
-    limite = min(prevuelo_config.sonda_max_tokens(), d.max_output_tokens)
+async def _preparar(clave: str, d: Despacho):
+    """Resuelve todo lo que la llamada real necesita (faceta o credencial del
+    motor) y devuelve un cerrado (closure) `async def (timeout) -> ResultadoSonda`
+    que HACE la llamada. Nada de esto corre bajo el timeout de la sonda --
+    ver Ruling R13 y el docstring del módulo. Levanta _FallaDePreparacion
+    para las tres fallas LOCALES conocidas; cualquier otra excepción (p.ej.
+    una caída real de la DB al resolver faceta o credencial) se propaga tal
+    cual, sin envolver."""
+    limite = _tope(d)
     mensajes = [{"role": "user", "content": MENSAJE_DE_SONDA}]
 
     if d.via_motor:
         # El MISMO cliente que worker.py usa para despachar el motor.
         from motor_registry import worker
-        api_key = "" if d.transporte == "ollama" else await resolve_credential_instrumented(d.provider_id)
-        campo = "max_tokens" if d.transporte == "ollama" else d.max_tokens_param
-        try:
-            data = await worker._call_http_openai_compat(
-                api_url=d.base_url, model=d.modelo, api_key=api_key,
-                messages=mensajes, timeout=timeout, limite={campo: limite},
-            )
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"HTTP {exc.response.status_code}: "
-                f"{recortar_redactado(exc.response.text, _LARGO_DETALLE, [api_key])}"
-            ) from exc
-        uso = data.get("usage") or {}
-        return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0))
+        if d.transporte == "ollama":
+            api_key, campo = "", "max_tokens"
+        else:
+            try:
+                api_key = await resolve_credential_instrumented(d.provider_id)
+            except CredentialUnavailableError as exc:
+                raise _FallaDePreparacion(f"sin credencial activa para '{d.provider_id}': {exc}") from exc
+            campo = d.max_tokens_param
+
+        async def _llamada(timeout: int) -> ResultadoSonda:
+            try:
+                data = await worker._call_http_openai_compat(
+                    api_url=d.base_url, model=d.modelo, api_key=api_key,
+                    messages=mensajes, timeout=timeout, limite={campo: limite},
+                )
+            except httpx.HTTPStatusError as exc:
+                raise RuntimeError(
+                    f"HTTP {exc.response.status_code}: "
+                    f"{recortar_redactado(exc.response.text, _LARGO_DETALLE, [api_key])}"
+                ) from exc
+            uso = data.get("usage") or {}
+            return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0))
+
+        return _llamada
 
     f = await resolve_facet(clave)
+
     if f.transport == "http_gemini":
-        data = await _post(
-            f"{f.base_url}/models/{f.model}:generateContent",
-            {"x-goog-api-key": f.credential},
-            {"contents": [{"role": "user", "parts": [{"text": MENSAJE_DE_SONDA}]}],
-             "generationConfig": {"maxOutputTokens": limite}},
-            timeout, [f.credential],
-        )
-        uso = data.get("usageMetadata") or {}
-        return ResultadoSonda(True, None, uso.get("promptTokenCount", 0), uso.get("candidatesTokenCount", 0))
+        async def _llamada(timeout: int) -> ResultadoSonda:
+            data = await _post(
+                f"{f.base_url}/models/{f.model}:generateContent",
+                {"x-goog-api-key": f.credential},
+                {"contents": [{"role": "user", "parts": [{"text": MENSAJE_DE_SONDA}]}],
+                 "generationConfig": {"maxOutputTokens": limite}},
+                timeout, [f.credential],
+            )
+            uso = data.get("usageMetadata") or {}
+            return ResultadoSonda(True, None, uso.get("promptTokenCount", 0), uso.get("candidatesTokenCount", 0))
+        return _llamada
+
     if f.transport == "http_openai_compat":
-        data = await _post(
-            f"{f.base_url}/chat/completions",
-            {"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"},
-            {"model": f.model, "messages": mensajes, "stream": False, d.max_tokens_param: limite},
-            timeout, [f.credential],
-        )
-        uso = data.get("usage") or {}
-        return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0))
+        async def _llamada(timeout: int) -> ResultadoSonda:
+            data = await _post(
+                f"{f.base_url}/chat/completions",
+                {"Authorization": f"Bearer {f.credential}", "Content-Type": "application/json"},
+                {"model": f.model, "messages": mensajes, "stream": False, d.max_tokens_param: limite},
+                timeout, [f.credential],
+            )
+            uso = data.get("usage") or {}
+            return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0))
+        return _llamada
+
     if f.transport == "ollama":
         from jacobs.executor import OLLAMA_URL
-        data = await _post(
-            OLLAMA_URL, {},
-            {"model": f.model, "messages": mensajes, "stream": False, "options": {"num_predict": limite}},
-            timeout, [],
-        )
-        return ResultadoSonda(True, None, data.get("prompt_eval_count", 0), data.get("eval_count", 0))
-    raise RuntimeError(f"transporte '{f.transport}' de '{clave}' no tiene sonda")
+
+        async def _llamada(timeout: int) -> ResultadoSonda:
+            data = await _post(
+                OLLAMA_URL, {},
+                {"model": f.model, "messages": mensajes, "stream": False, "options": {"num_predict": limite}},
+                timeout, [],
+            )
+            return ResultadoSonda(True, None, data.get("prompt_eval_count", 0), data.get("eval_count", 0))
+        return _llamada
+
+    raise _FallaDePreparacion(f"transporte '{f.transport}' de '{clave}' no tiene sonda")
 
 
-async def _registrar(clave: str, d: Despacho, r: ResultadoSonda,
+async def _registrar(clave: str, d: Despacho, r: ResultadoSonda, outcome: str,
                      user_id: str | None, tenant_id: str | None) -> None:
     global _registros_perdidos
-    outcome = "ok" if r.ok else "provider_error"
     try:
         await facet_health.registrar_evento_de_sonda(clave, outcome, r.detalle, time.time())
     except Exception as exc:  # fail-soft: el veredicto sale de la respuesta del proveedor, no de esta fila; sin ella el próximo pre-vuelo vuelve a sondear, y la pérdida queda contada en registros_perdidos() y en el WARNING
@@ -129,6 +196,12 @@ async def _registrar(clave: str, d: Despacho, r: ResultadoSonda,
             "van %d registros perdidos",
             clave, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE), _registros_perdidos,
         )
+    # Ruling R14 (2026-09-17, fix round 1 de la revisión de Task 7): un 2xx
+    # SIN campo `usage` (proveedor que no lo declara) deja tokens_in=
+    # tokens_out=0 y NO se registra en axioma_usage -- no hay tokens medidos
+    # que cobrar, y una fila con ceros no es "se cobró $0", es "no se sabe".
+    # Caso agregado a la entrada de DEUDA.md de la Task 14 ("sonda que vence
+    # sin registrar uso"), misma fecha: mientras tanto ese 2xx queda sin fila.
     if r.tokens_in or r.tokens_out:
         await record_direct_usage(
             user_id, tenant_id, clave, d.provider_id, d.modelo, r.tokens_in, r.tokens_out,
@@ -140,10 +213,18 @@ async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
                   tenant_id: str | None = None) -> ResultadoSonda:
     timeout = prevuelo_config.sonda_timeout_s()
     try:
-        resultado = await asyncio.wait_for(_llamar(clave, d, timeout), timeout=timeout)
+        llamada = await _preparar(clave, d)
+    except _FallaDePreparacion as exc:
+        resultado = ResultadoSonda(False, recortar_redactado(
+            f"la sonda no pudo preparar la llamada: {exc}", _LARGO_DETALLE))
+        await _registrar(clave, d, resultado, "config_error", user_id, tenant_id)
+        return resultado
+
+    try:
+        resultado = await asyncio.wait_for(llamada(timeout), timeout=timeout)
     except (asyncio.TimeoutError, httpx.TimeoutException):
         resultado = ResultadoSonda(False, f"timeout de sonda ({timeout}s)")
-    except Exception as exc:  # fail-closed: una sonda que no completó la llamada da faceta_caida, nunca sana; el motivo redactado viaja en el veredicto
+    except Exception as exc:  # fail-closed: una sonda que no completó la llamada al proveedor da faceta_caida, nunca sana; el motivo redactado viaja en el veredicto
         resultado = ResultadoSonda(False, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE))
-    await _registrar(clave, d, resultado, user_id, tenant_id)
+    await _registrar(clave, d, resultado, "ok" if resultado.ok else "provider_error", user_id, tenant_id)
     return resultado

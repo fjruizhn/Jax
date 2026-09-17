@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from decimal import Decimal
 from unittest.mock import ANY, AsyncMock, patch
 
 os.environ["JAX_DB_NAME"] = "jax_memory_test"
 
+import aiomysql  # noqa: E402
 import httpx  # noqa: E402
 
+from credential_resolver import CredentialUnavailableError  # noqa: E402
 from facet_resolver import ResolvedFacet  # noqa: E402
 from jacobs import sonda, usage_writer  # noqa: E402
 from jacobs.prevuelo_reglas import Despacho  # noqa: E402
@@ -55,6 +58,14 @@ class _Resp:
 
 _OK_OPENAI = {"choices": [{"message": {"content": "o"}, "finish_reason": "length"}],
               "usage": {"prompt_tokens": 9, "completion_tokens": 16}}
+
+
+class _RespuestaHTTPError:
+    """Lo mínimo que `exc.response.status_code`/`exc.response.text` de
+    httpx.HTTPStatusError necesitan -- no un httpx.Response real."""
+    def __init__(self, status_code, text):
+        self.status_code = status_code
+        self.text = text
 
 
 def _sondear(monkeypatch, d, respuesta, faceta=None, registrar=None, uso=None):
@@ -118,9 +129,12 @@ def test_timeout_da_faceta_caida_con_los_segundos(monkeypatch):
 
 
 def test_motor_usa_el_cliente_del_worker_con_su_credencial(monkeypatch):
+    # max_tokens_param distinto del hardcode que había antes ("max_tokens"):
+    # si el código volviera a fijar el nombre en vez de leer d.max_tokens_param,
+    # este test lo vería (item 6, revisión Task 7 fix round 1).
     d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
                   base_url="https://api.moonshot.example/v1", max_output_tokens=131072,
-                  motor_max_tokens=8000)
+                  motor_max_tokens=20000, max_tokens_param="max_completion_tokens")
     llamar = AsyncMock(return_value=_OK_OPENAI)
     monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
     with patch("motor_registry.worker._call_http_openai_compat", llamar), \
@@ -131,7 +145,7 @@ def test_motor_usa_el_cliente_del_worker_con_su_credencial(monkeypatch):
     assert r.ok
     kw = llamar.await_args.kwargs
     assert (kw["api_url"], kw["model"], kw["api_key"], kw["limite"]) == (
-        "https://api.moonshot.example/v1", "kimi-k3", "k-moon", {"max_tokens": 16})
+        "https://api.moonshot.example/v1", "kimi-k3", "k-moon", {"max_completion_tokens": 16})
 
 
 def test_motor_ollama_sin_credencial_y_con_max_tokens(monkeypatch):
@@ -159,12 +173,16 @@ def test_registra_el_evento_con_el_resultado(monkeypatch):
     registrar.assert_awaited_once_with("jekyll", "provider_error", r.detalle, ANY)
 
 
-def test_si_no_se_puede_registrar_el_veredicto_se_mantiene_y_se_cuenta(monkeypatch):
+def test_si_no_se_puede_registrar_el_veredicto_se_mantiene_y_se_cuenta(monkeypatch, caplog):
     antes = sonda.registros_perdidos()
-    r, _ = _sondear(monkeypatch, _despacho(), _Resp(200, _OK_OPENAI),
-                    registrar=AsyncMock(side_effect=RuntimeError("base caída")))
+    with caplog.at_level(logging.WARNING, logger="jacobs.sonda"):
+        r, _ = _sondear(monkeypatch, _despacho(), _Resp(200, _OK_OPENAI),
+                        registrar=AsyncMock(side_effect=RuntimeError("base caída")))
     assert r.ok
     assert sonda.registros_perdidos() == antes + 1
+    assert any(
+        "no se pudo registrar la sonda" in m and "jekyll" in m for m in caplog.messages
+    ), caplog.messages
 
 
 def test_el_uso_de_la_sonda_se_registra_como_preflight_probe(monkeypatch):
@@ -172,6 +190,198 @@ def test_el_uso_de_la_sonda_se_registra_como_preflight_probe(monkeypatch):
     _sondear(monkeypatch, _despacho(), _Resp(200, _OK_OPENAI), uso=uso)
     uso.assert_awaited_once_with(None, None, "jekyll", "deepseek", "deepseek-v4-flash", 9, 16,
                                  request_type="preflight_probe")
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (revisión post-Task 7). Ruling R13: tres clases de resultado --
+# (a) una caída real de la DB al resolver SE PROPAGA (nunca se convierte en
+# veredicto); (b) una falla LOCAL de preparación (credencial ausente,
+# transporte desconocido, contrato sin tope) -> config_error; (c) sólo la
+# llamada al proveedor en sí -> provider_error. Ruling R14: una sonda que no
+# midió tokens no registra uso. Ruling R15: el tope también entra por
+# motor_max_tokens.
+# ---------------------------------------------------------------------------
+
+def test_error_de_resolucion_se_propaga_sin_convertirse_en_veredicto(monkeypatch):
+    """R13a: una caída real de la DB al resolver la faceta (aiomysql/pymysql)
+    no se traga como si fuera el proveedor -- sale de sondear() tal cual,
+    para que el llamador responda 503 prevuelo_no_disponible (§8), no
+    faceta_caida. Ni el registro de salud ni el de uso se llaman: no hay
+    veredicto que guardar."""
+    registrar, uso = AsyncMock(), AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_TIMEOUT_S", "1")
+    falla_de_db = aiomysql.OperationalError(2003, "Can't connect to MySQL server")
+    with patch.object(sonda, "resolve_facet", AsyncMock(side_effect=falla_de_db)), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
+         patch.object(sonda, "record_direct_usage", uso):
+        try:
+            asyncio.run(sonda.sondear("jekyll", _despacho()))
+        except aiomysql.OperationalError as exc:
+            assert exc is falla_de_db
+        else:
+            raise AssertionError("sondear() debía propagar el error de DB, no tragarlo")
+    registrar.assert_not_awaited()
+    uso.assert_not_awaited()
+
+
+def test_credencial_ausente_en_motor_es_config_error_no_provider_error(monkeypatch):
+    """R13b: CredentialUnavailableError es una falla LOCAL de preparación
+    (ni siquiera se intentó llamar al proveedor) -- outcome 'config_error',
+    no 'provider_error'. El lector de salud (OUTCOMES_DE_PROVEEDOR) ignora
+    config_error, así que el próximo pre-vuelo vuelve a sondear."""
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
+    registrar = AsyncMock()
+    llamar = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    with patch("motor_registry.worker._call_http_openai_compat", llamar), \
+         patch.object(sonda, "resolve_credential_instrumented",
+                      AsyncMock(side_effect=CredentialUnavailableError("moonshot"))), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        r = asyncio.run(sonda.sondear("kimi", d))
+    assert not r.ok
+    assert "la sonda no pudo preparar la llamada" in r.detalle
+    llamar.assert_not_awaited()
+    registrar.assert_awaited_once_with("kimi", "config_error", r.detalle, ANY)
+
+
+def test_transporte_desconocido_es_config_error(monkeypatch):
+    """R13b: un transporte que la sonda no sabe hablar es un hueco de
+    configuración del catálogo, no una respuesta del proveedor."""
+    f = _faceta(transport="grpc")
+    registrar = AsyncMock()
+    with patch.object(sonda, "resolve_facet", AsyncMock(return_value=f)), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        r = asyncio.run(sonda.sondear("jekyll", _despacho()))
+    assert not r.ok
+    assert "grpc" in r.detalle and "la sonda no pudo preparar la llamada" in r.detalle
+    registrar.assert_awaited_once_with("jekyll", "config_error", r.detalle, ANY)
+
+
+def test_sin_max_output_tokens_es_config_error(monkeypatch):
+    """R13b: contrato sin tope de salida (max_output_tokens=None) -- la
+    sonda no puede armar un límite de salida, así que no puede ni preguntar."""
+    d = _despacho(max_output_tokens=None)
+    registrar = AsyncMock()
+    with patch.object(sonda, "resolve_facet", AsyncMock(return_value=_faceta())), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        r = asyncio.run(sonda.sondear("jekyll", d))
+    assert not r.ok
+    assert "max_output_tokens" in r.detalle
+    registrar.assert_awaited_once_with("jekyll", "config_error", r.detalle, ANY)
+
+
+def test_http_401_no_responde_y_es_provider_error(monkeypatch):
+    """Item 2: un mutante que cambiara el chequeo de 2xx por `>= 500` deja
+    pasar un 4xx como si fuera sano -- este test lo agarra."""
+    registrar = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(), _Resp(401, "no autorizado"), registrar=registrar)
+    assert not r.ok
+    assert "401" in r.detalle
+    registrar.assert_awaited_once_with("jekyll", "provider_error", r.detalle, ANY)
+
+
+def test_motor_401_es_provider_error(monkeypatch):
+    """Item 2, camino del motor: un 401 real llega como httpx.HTTPStatusError
+    desde _call_http_openai_compat (raise_for_status) -- tiene que seguir
+    siendo provider_error, no config_error ni una excepción que se propaga."""
+    resp = _RespuestaHTTPError(401, "no autorizado")
+    llamar = AsyncMock(side_effect=httpx.HTTPStatusError("401", request=None, response=resp))
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
+    registrar = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    with patch("motor_registry.worker._call_http_openai_compat", llamar), \
+         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", registrar), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        r = asyncio.run(sonda.sondear("kimi", d))
+    assert not r.ok
+    assert "401" in r.detalle
+    registrar.assert_awaited_once_with("kimi", "provider_error", r.detalle, ANY)
+
+
+def test_motor_4xx_redacta_la_credencial_en_el_detalle(monkeypatch):
+    """Item 5: la lista de redacción del camino del motor (la credencial
+    resuelta, no la de la faceta) está untested -- un error que la eco en el
+    cuerpo no puede sobrevivir en el detalle guardado."""
+    resp = _RespuestaHTTPError(401, "no autorizado, la key k-moon-secreta no sirve")
+    llamar = AsyncMock(side_effect=httpx.HTTPStatusError("401", request=None, response=resp))
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    with patch("motor_registry.worker._call_http_openai_compat", llamar), \
+         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon-secreta")), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        r = asyncio.run(sonda.sondear("kimi", d))
+    assert not r.ok
+    assert "k-moon-secreta" not in r.detalle
+
+
+def test_sin_wait_for_el_timeout_no_corta_la_llamada_colgada(monkeypatch):
+    """Item 3: si se sacara el asyncio.wait_for que acota la llamada al
+    proveedor, este test se cuelga 5s en vez de cortar a 1s -- visto a mano
+    sacando el wait_for (ver el reporte de arreglos), no se deja así de
+    forma permanente porque colgaría la corrida entera de CI."""
+    async def post(self, url, headers=None, json=None, **kw):
+        await asyncio.sleep(5)
+        return _Resp(200, _OK_OPENAI)
+
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_TIMEOUT_S", "1")
+    with patch("httpx.AsyncClient.post", post), \
+         patch.object(sonda, "resolve_facet", AsyncMock(return_value=_faceta())), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        r = asyncio.run(sonda.sondear("jekyll", _despacho()))
+    assert not r.ok and r.detalle == "timeout de sonda (1s)"
+
+
+def test_ollama_directo_manda_num_predict(monkeypatch):
+    """Item 4: el camino ollama NO via_motor (faceta resuelta con
+    transport='ollama') estaba sin ningún test."""
+    f = _faceta(key="jax_local", provider_id="ollama_local", base_url=None,
+                model="qwen3-coder:30b", credential="", transport="ollama")
+    d = _despacho(clave_salud="jax_local", transporte="ollama", provider_id="ollama_local",
+                  modelo="qwen3-coder:30b", max_tokens_param=None, precio_in=None, precio_out=None)
+    cuerpo = {"message": {"content": "ok"}, "prompt_eval_count": 7, "eval_count": 3}
+    r, c = _sondear(monkeypatch, d, _Resp(200, cuerpo), faceta=f)
+    assert r.ok
+    from jacobs.executor import OLLAMA_URL
+    assert c["url"] == OLLAMA_URL
+    assert c["json"]["options"] == {"num_predict": 16}
+    assert c["headers"] == {}
+
+
+def test_una_sonda_fallida_no_registra_uso(monkeypatch):
+    """Item 8: sin tokens medidos (una sonda que no respondió) no hay nada
+    que cobrar -- record_direct_usage no se llama."""
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(), _Resp(503, "caído"), uso=uso)
+    assert not r.ok
+    uso.assert_not_awaited()
+
+
+def test_el_tope_de_motor_tambien_entra_en_el_minimo(monkeypatch):
+    """R15: min(config, max_output_tokens, motor_max_tokens si via_motor y
+    >0) -- antes el código ignoraba motor_max_tokens y mandaba el tope de
+    config/catálogo aunque el motor pidiera menos."""
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072,
+                  motor_max_tokens=10)
+    llamar = AsyncMock(return_value=_OK_OPENAI)
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    with patch("motor_registry.worker._call_http_openai_compat", llamar), \
+         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", AsyncMock()):
+        asyncio.run(sonda.sondear("kimi", d))
+    assert llamar.await_args.kwargs["limite"] == {"max_tokens": 10}
 
 
 def test_record_direct_usage_encola_con_el_request_type_pedido(monkeypatch):
