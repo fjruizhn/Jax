@@ -588,6 +588,7 @@ jobs:
           tests/test_ejecutor_herramientas.py
           tests/test_ejecutor_prioridad.py
           tests/test_ejecutor_transporte.py
+          tests/test_ejecutor_proxy_carril.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -629,6 +630,7 @@ jobs:
             tests/test_ejecutor_herramientas.py \
             tests/test_ejecutor_prioridad.py \
             tests/test_ejecutor_transporte.py \
+            tests/test_ejecutor_proxy_carril.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -918,8 +920,12 @@ jobs:
           #   CONFIRMADO POR EL RUNNER (Python 3.12, run de PR #172): "712 passed, 1 skipped,
           #   1 xfailed". Coincide con lo medido en local (3.14). Confirma ademas que el test
           #   de systemd de hechos CORRE en el runner -- si se salteara, esto daria 711/2.
-          grep -qE "^712 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 712 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 712 -> 742 el 2026-09-16 (carriles async y proxy del Ejecutor): +12 en
+          #   test_ejecutor_prioridad.py (11 async + 1 del arreglo del carril sync, que
+          #   colgaba sin tope la segunda peticion paralela) y +18 del proxy nuevo.
+          #   CONFIRMADO POR EL RUNNER (3.12, PR #173): "742 passed, 1 skipped, 1 xfailed".
+          grep -qE "^742 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 742 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
