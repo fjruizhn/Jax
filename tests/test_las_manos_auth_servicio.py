@@ -316,18 +316,54 @@ def test_encabezado_propio_sale_del_entorno_y_falla_cerrado(monkeypatch):
 
 def test_la_jaula_de_hyde_no_recibe_la_credencial(monkeypatch, tmp_path):
     """Hyde corre como fruiz igual que los servicios: lo único que lo separa de
-    la credencial es la jaula. Entorno limpio, PID propio, sin /etc/jax."""
+    la credencial es la jaula. Entorno limpio, PID propio, sin /etc/jax.
+
+    Se prueba sobre el argv que arma la función REAL (`wrap_hyde_command`), sin
+    ejecutar bwrap: el runner de CI no lo tiene. Lo único que se sustituye es la
+    ruta del binario (un ejecutable vacío, para pasar el chequeo fail-closed de
+    existencia) y el directorio del template de $HOME (el real vive bajo
+    /home/fruiz, que en el runner no existe). La forma de la jaula no cambia.
+    """
     import hyde_sandbox
 
+    bwrap_falso = tmp_path / "bwrap"
+    bwrap_falso.write_text("#!/bin/sh\nexit 99\n", encoding="ascii")
+    bwrap_falso.chmod(0o755)
+    monkeypatch.setattr(hyde_sandbox, "_BWRAP_BIN", str(bwrap_falso))
+    monkeypatch.setattr(hyde_sandbox, "_TEMPLATE_DIR", tmp_path / "home-template")
+    # El proceso padre TIENE las credenciales en su entorno, como LAS MANOS.
     for identidad, variable in VARIABLES.items():
         monkeypatch.setenv(variable, CRED[identidad])
-    argv = hyde_sandbox.wrap_hyde_command(["claude", "-p"], str(tmp_path))
-    assert "--clearenv" in argv
-    assert "--unshare-all" in argv and "--proc" in argv
+
+    workspace = tmp_path / "workspace"
+    argv = hyde_sandbox.wrap_hyde_command(["claude", "-p"], str(workspace))
+    assert argv[0] == str(bwrap_falso) and argv[-2:] == ["claude", "-p"]
+    jaula = argv[:argv.index("--")]
+
+    # (a) entorno limpio y namespaces propios.
+    assert "--clearenv" in jaula
+    assert "--unshare-all" in jaula and "--proc" in jaula
+    # --clearenv antes de cualquier --setenv: bwrap aplica en orden.
+    setenvs = [i for i, a in enumerate(jaula) if a == "--setenv"]
+    assert setenvs and jaula.index("--clearenv") < min(setenvs)
+
+    # (b) ningún montaje de /etc/jax ni de /etc/jax/.env (ni de /etc entero).
+    montajes = {"--bind", "--ro-bind", "--dev-bind", "--bind-try", "--ro-bind-try",
+                "--dev-bind-try", "--file", "--bind-data", "--ro-bind-data"}
+    for i, a in enumerate(jaula):
+        if a in montajes:
+            origen, destino = jaula[i + 1], jaula[i + 2]
+            for ruta in (origen, destino):
+                assert ruta.rstrip("/") not in ("/etc", "/etc/jax"), jaula[i:i + 3]
+                assert not ruta.startswith("/etc/jax"), jaula[i:i + 3]
     for arg in argv:
         assert "/etc/jax" not in arg, arg
         assert not any(v in arg for v in CRED.values()), "credencial en el argv de la jaula"
-        assert not any(v in arg for v in VARIABLES.values()), arg
-    # --setenv es la única vía de entrada de variables tras --clearenv.
-    seteadas = {argv[i + 1] for i, a in enumerate(argv) if a == "--setenv"}
+
+    # (c) --setenv es la única vía de entrada de variables tras --clearenv:
+    # ninguna JAX_LAS_MANOS_CREDENCIAL_* (ni otra JAX_*) entra por ahí.
+    seteadas = {jaula[i + 1] for i in setenvs}
+    assert seteadas == {"HOME", "PATH", "LANG"}, seteadas
+    assert not any(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in seteadas)
+    assert all(v.startswith("JAX_LAS_MANOS_CREDENCIAL_") for v in VARIABLES.values())
     assert seteadas.isdisjoint(VARIABLES.values())
