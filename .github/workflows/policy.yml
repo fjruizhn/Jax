@@ -1057,6 +1057,7 @@ jobs:
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
           tests/test_facetas_de_gobernanza_db.py
+          tests/test_ejecutor_politica_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1066,6 +1067,7 @@ jobs:
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
             tests/test_facetas_de_gobernanza_db.py \
+            tests/test_ejecutor_politica_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1087,5 +1089,10 @@ jobs:
           #   por las migraciones. Medido en local (3.14, jax_memory_test con las
           #   migraciones de jax-platform c53ef30), dos corridas: 29 passed; master
           #   70e4303 en el mismo entorno: 27.
-          grep -qE "^29 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 29 tests CORRIDOS."; exit 1; }
+          # 29 -> 31 el 2026-09-17 (Ejecutor SP1 plan 1): tests/test_ejecutor_politica_db.py
+          #   (+2) -- la semilla de reglas de jax-platform exporta legible y pasa su
+          #   autoprueba con el evaluador de jax; EXPLAIN de respaldos con su índice.
+          #   Requiere jax-platform con las tablas del Ejecutor en master. Medido en
+          #   local (3.14, jax_memory_test con las migraciones de la rama de tablas): 2 passed.
+          grep -qE "^31 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 31 tests CORRIDOS."; exit 1; }
