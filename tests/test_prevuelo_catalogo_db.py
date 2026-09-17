@@ -58,8 +58,8 @@ async def _sembrar(cur, s, *, credencial="active", faceta_status="active"):
 
 
 async def _limpiar(cur, s):
-    await cur.execute("DELETE FROM facet_health_event WHERE facet LIKE %s", (s.faceta + "%",))
-    await cur.execute("DELETE FROM credential WHERE provider_id=%s", (s.proveedor,))
+    await cur.execute("DELETE FROM facet_health_event WHERE facet LIKE %s", (s.faceta + "%",))  # marcador-propio: s = _Semilla, zz-pv-<uuid>
+    await cur.execute("DELETE FROM credential WHERE provider_id=%s", (s.proveedor,))  # marcador-propio: s = _Semilla, zz-pv-<uuid>
     await cur.execute("DELETE FROM facet_binding WHERE facet_key=%s", (s.faceta,))
     await cur.execute("DELETE FROM facet WHERE `key`=%s", (s.faceta,))
     await cur.execute("DELETE FROM model WHERE provider_id=%s", (s.proveedor,))

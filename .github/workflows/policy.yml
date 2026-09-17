@@ -628,6 +628,7 @@ jobs:
           tests/test_prevuelo_catalogo_de_motores_compartido.py
           tests/test_jacobs_conexiones_por_pedido.py
           tests/test_facet_health_tabla_exclusiva.py
+          tests/test_delete_de_tablas_compartidas.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -688,6 +689,7 @@ jobs:
             tests/test_prevuelo_catalogo_de_motores_compartido.py \
             tests/test_jacobs_conexiones_por_pedido.py \
             tests/test_facet_health_tabla_exclusiva.py \
+            tests/test_delete_de_tablas_compartidas.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1509,8 +1511,16 @@ jobs:
           #   y dice por qué es global (check_facet_health() lee y reescribe TODA la tabla) y
           #   qué variable lo habilita; el test del motivo exige esas partes. Rojo contra
           #   6f8bbd5: 2 failed (el motivo no nombraba check_facet_health).
-          grep -qE "^1118 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1118 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1118 -> 1123 el 2026-09-17 (R50, condición 3): tests/test_delete_de_tablas_compartidas.py
+          #   (+5, archivo nuevo en las dos listas) -- ningún archivo de test hace DELETE sobre
+          #   una tabla compartida (axioma_usage, facet_health_*, jacobs_*, credential,
+          #   capability) sin WHERE o sin marcador propio en los parámetros (o pragma
+          #   `# marcador-propio:`); única excepción explícita, _tabla_limpia de R50; los
+          #   permitidos tienen que seguir existiendo; tres controles del detector. Rojo con
+          #   un borrador en una copia del repo: `DELETE FROM axioma_usage WHERE facet=%s` y
+          #   un DELETE sin WHERE, los dos marcados. Incidente de origen: r38-report.md.
+          grep -qE "^1123 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1123 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
