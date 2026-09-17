@@ -158,3 +158,86 @@ def test_explain_de_las_consultas_del_candado():
         assert e[nombre][0]["table"] is None and e[nombre][0]["Extra"] == "No tables used", e[nombre]
     contar = e["contar"][0]
     assert contar["type"] not in ("ALL", "index") and contar["key"] == "idx_pipelines_status", contar
+
+
+def _pipeline_abortado(pid):
+    # aborted: no cuenta como activo para ninguna otra sesión que use el cupo.
+    from jacobs.models import Step
+
+    ahora = time.time()
+    paso = Step(pipeline_id=pid, step_index=0, facet="jekyll", capability="research", input={"prompt": "p"})
+    return Pipeline(pipeline_id=pid, name="r38-tx", invoked_by="plataforma", mode="autonomous",
+                    status=PipelineStatus.aborted, plan=[paso], context={}, created_at=ahora,
+                    updated_at=ahora), paso
+
+
+async def _filas_de(pid):
+    return (
+        (await _uno("SELECT COUNT(*) FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,)))[0],
+        (await _uno("SELECT COUNT(*) FROM jacobs_steps WHERE pipeline_id=%s", (pid,)))[0],
+        (await _uno("SELECT COUNT(*) FROM jacobs_events WHERE pipeline_id=%s", (pid,)))[0],
+    )
+
+
+async def _borrar_con_pasos(pid):
+    await _uno("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
+    await _borrar([pid])
+
+
+def test_crear_en_transaccion_bajo_el_candado_confirma_todo_junto():
+    """R38, fix round 1 (2b), contra MariaDB real: BEGIN sobre la conexión del
+    GET_LOCK (autocommit) y las tres escrituras con conexion= quedan
+    confirmadas al salir. Expected contra 1d84e82: AttributeError
+    (store.transaccion no existía)."""
+    pid = str(uuid.uuid4())
+    pipeline, paso = _pipeline_abortado(pid)
+
+    async def cuerpo():
+        try:
+            async with store.candado_de_activos() as c:
+                async with store.transaccion(c) as tx:
+                    await store.pipeline_create(pipeline, conexion=tx)
+                    await store.step_upsert(paso, conexion=tx)
+                    await store.event_append(pid, "PIPELINE_CREATED", {}, conexion=tx)
+                    # Otra sesión todavía no ve nada: no está confirmado.
+                    antes = await _filas_de(pid)
+            return antes, await _filas_de(pid)
+        finally:
+            await _borrar_con_pasos(pid)
+            await store.cerrar_pool()
+
+    antes, despues = asyncio.run(cuerpo())
+    assert antes == (0, 0, 0)
+    assert despues == (1, 1, 1)
+
+
+def test_crear_en_transaccion_que_falla_a_mitad_no_deja_nada_y_suelta_el_candado():
+    """Si el bloque lanza después de escribir pipeline y paso, la conexión se
+    cierra: el servidor descarta la transacción y suelta el GET_LOCK.
+    Expected contra 1d84e82: AttributeError (store.transaccion no existía)."""
+    pid = str(uuid.uuid4())
+    pipeline, paso = _pipeline_abortado(pid)
+
+    async def cuerpo():
+        try:
+            with pytest.raises(RuntimeError, match="a mitad"):
+                async with store.candado_de_activos() as c:
+                    async with store.transaccion(c) as tx:
+                        await store.pipeline_create(pipeline, conexion=tx)
+                        await store.step_upsert(paso, conexion=tx)
+                        raise RuntimeError("la base cortó a mitad")
+            # El servidor suelta el candado al procesar el cierre de la
+            # sesión (asíncrono respecto del cliente): se espera acotado.
+            libre, limite = 0, time.monotonic() + 5
+            while libre != 1 and time.monotonic() < limite:
+                libre = (await _uno("SELECT IS_FREE_LOCK(%s)", (store.nombre_del_candado_de_activos(),)))[0]
+                if libre != 1:
+                    await asyncio.sleep(0.05)
+            return await _filas_de(pid), libre
+        finally:
+            await _borrar_con_pasos(pid)
+            await store.cerrar_pool()
+
+    filas, libre = asyncio.run(cuerpo())
+    assert filas == (0, 0, 0)
+    assert libre == 1

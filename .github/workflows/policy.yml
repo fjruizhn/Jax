@@ -1685,5 +1685,11 @@ jobs:
           #   updated_at que avanzó sigue sin cosechar (control); EXPLAIN de la consulta
           #   del barrido: range por idx_pipelines_status y subconsulta ref por
           #   idx_steps_pipeline (rojo: AttributeError).
-          grep -qE "^80 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 80 tests CORRIDOS."; exit 1; }
+          # 80 -> 82 el 2026-09-17 (R38, fix round 1, 2b): +2 en
+          #   test_jacobs_candado_activos_db.py -- contra MariaDB real, crear en UNA
+          #   transacción sobre la conexión del GET_LOCK: otra sesión no ve nada hasta
+          #   confirmar y después ve pipeline, paso y evento; si el bloque lanza a mitad
+          #   no queda ninguna fila y el candado queda libre (IS_FREE_LOCK=1). Rojo contra
+          #   1d84e82: 2 failed (AttributeError: store.transaccion no existía).
+          grep -qE "^82 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 82 tests CORRIDOS."; exit 1; }
