@@ -109,7 +109,11 @@ jobs:
           python-version: "3.12"
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
       - run: pip install -r requirements.txt pytest
-      - run: python -m pytest jacobs/_facet_health_test.py -v
+      # PYTHONPATH=las_manos (2026-09-17): jacobs/facet_health.py importa
+      # `redaccion`, que vive en jax/core y se alcanza por el symlink de
+      # las_manos/. Sin esto el job muere en la colección con
+      # ModuleNotFoundError, no por el código bajo prueba.
+      - run: PYTHONPATH=las_manos python -m pytest jacobs/_facet_health_test.py -v
 
   # `check_facet_health()` es la unica pieza del lector sin cobertura
   # automatica: `evaluate_states`/`transitions_to_notify` tienen 11 tests

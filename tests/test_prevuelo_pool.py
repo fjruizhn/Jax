@@ -493,12 +493,38 @@ def test_from_db_con_conexion_inyectada_no_la_cierra(base):
     assert prestada.consultas == 3
 
 
-def test_el_shutdown_de_las_manos_cierra_el_pool():
+def _audit_modulo():
+    """El módulo `audit` de las_manos, importado por su ruta (el paquete no
+    está en sys.path hasta que el test lo agrega)."""
+    las_manos = str(RAIZ / "las_manos")
+    if las_manos not in sys.path:
+        sys.path.insert(0, las_manos)
+    import audit
+    return audit
+
+
+def _audit_init_a(ruta):
+    """__init__ de AuditLog que ignora la ruta del config y usa `ruta`."""
+    def _init(self, log_path):  # noqa: ARG001 -- la ruta del config no se usa
+        self.log_path = ruta
+        ruta.parent.mkdir(parents=True, exist_ok=True)
+    return _init
+
+
+def test_el_shutdown_de_las_manos_cierra_el_pool(tmp_path):
     """Expected contra fcb0c6a: `app.router.on_shutdown` vacío -> AssertionError."""
     las_manos = str(RAIZ / "las_manos")
     if las_manos not in sys.path:
         sys.path.insert(0, las_manos)
-    import server
+    # `server` construye su AuditLog al importarse y ese AuditLog hace mkdir de
+    # la ruta de `las_manos/config.toml`, que es absoluta y del home del
+    # operador (`/home/fruiz/jax/las_manos/logs`). En el runner ese home no
+    # existe y el import muere con PermissionError. El test mide el handler de
+    # shutdown, no dónde escribe la auditoría: se apunta a un temporal.
+    registro = tmp_path / "audit.jsonl"
+    audit_mod = _audit_modulo()
+    with patch.object(audit_mod.AuditLog, "__init__", _audit_init_a(registro)):
+        import server
 
     cerrar = AsyncMock()
     with patch.object(server.jacobs_store, "cerrar_pool", cerrar):
