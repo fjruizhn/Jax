@@ -97,12 +97,42 @@ def test_el_motivo_aparece_en_el_resumen_rs_de_pytest(tmp_path):
         assert "check_facet_health()" in linea and f"{VARIABLE}=1" in linea, linea
 
 
-def test_solo_el_job_con_mariadb_propia_define_la_variable():
-    """La variable vive SOLO en el job facet-health-io, que tiene su propio
-    service container de MariaDB (base exclusiva)."""
-    texto = (RAIZ / ".github" / "workflows" / "policy.yml").read_text(encoding="utf-8")
-    trabajos = texto.split("\n  facet-health-io:\n", 1)
-    assert len(trabajos) == 2
-    job = trabajos[1].split("\n\n  #", 1)[0]
-    assert f"{VARIABLE}: \"1\"" in job and "services:" in job and "mariadb:" in job
-    assert texto.count(f"{VARIABLE}:") == 1
+def problemas_del_workflow(ruta: Path) -> list[str]:
+    """Condición 2 de la sesión principal sobre R50, leyendo el YAML (no el
+    texto): en el job facet-health-io, CADA paso que corre
+    jacobs/_facet_health_io_test.py ve JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA="1"
+    en su entorno efectivo (env del workflow, del job y del paso, en ese orden
+    de precedencia de GitHub Actions); el job tiene su propio service de
+    MariaDB; y ningún OTRO job ni paso la define. Devuelve la lista de
+    problemas (vacía = bien)."""
+    import yaml
+
+    flujo = yaml.safe_load(ruta.read_text(encoding="utf-8"))
+    problemas = []
+    job = flujo.get("jobs", {}).get("facet-health-io")
+    if job is None:
+        return ["no existe el job facet-health-io"]
+    if "mariadb" not in (job.get("services") or {}):
+        problemas.append("facet-health-io no tiene service propio de mariadb (la base no es exclusiva)")
+    pasos = [p for p in job.get("steps", []) if "_facet_health_io_test.py" in str(p.get("run", ""))]
+    if not pasos:
+        problemas.append("ningún paso de facet-health-io corre _facet_health_io_test.py")
+    for paso in pasos:
+        efectivo = {**(flujo.get("env") or {}), **(job.get("env") or {}), **(paso.get("env") or {})}
+        if str(efectivo.get(VARIABLE)) != "1":
+            problemas.append(f"el paso {str(paso.get('run'))[:60]!r} no ve {VARIABLE}=1 (ve {efectivo.get(VARIABLE)!r})")
+    if VARIABLE in (flujo.get("env") or {}):
+        problemas.append(f"{VARIABLE} definida a nivel workflow: alcanzaría a jobs con base compartida")
+    for nombre, otro in flujo.get("jobs", {}).items():
+        if nombre == "facet-health-io":
+            continue
+        if VARIABLE in (otro.get("env") or {}) or any(VARIABLE in (p.get("env") or {}) for p in otro.get("steps", [])):
+            problemas.append(f"el job {nombre} también define {VARIABLE}")
+    return problemas
+
+
+def test_solo_el_job_con_mariadb_propia_define_la_variable_y_alcanza_a_sus_pasos():
+    """Rojo verificado con una copia de policy.yml sin la variable (ver
+    r38-report.md): 'no ve JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA=1' en los dos
+    pasos del job."""
+    assert problemas_del_workflow(RAIZ / ".github" / "workflows" / "policy.yml") == []
