@@ -13,6 +13,21 @@ del Ejecutor (su proxy corta el stream en curso y rechaza los nuevos) y **todos*
 `axioma` —los desprendidos con `setsid`/`nohup` y los que corren al otro lado de un `ssh -tt`—, verificado dos
 veces con segundos de por medio.
 
+> **EJECUTADO 2026-09-17 (Mr. Hyde, subagente) — lo que manda es la rama `feat/ejecutor-c4`.** Correcciones, cada una
+> con test o prueba real vista en rojo:
+> 1. **Dos frenos:** proxy y freno root actúan con el interruptor de JAX **o** la pausa del Ejecutor (C5). La prueba real
+>    usa la pausa del Ejecutor (`probar_c4.py --freno ejecutor`, por omisión), no el interruptor global.
+> 2. **Proxy:** el 423 del freno va DESPUÉS de anotar los resultados (C3) y el vigía en vuelo arranca recién ahí; en
+>    vuelo, 423 legible si no salieron cabeceras y stream truncado si ya salieron.
+> 3. **Remotas habilitadas a propósito** (`JAX_EJECUTOR_FRENO_REMOTOS`); `remotos_cargados` sólo con todas. La política
+>    se carga con `politica.cargar`. El freno nunca mata root, uid < 1000 ni al administrador. Latido 0644.
+> 4. **`ejecutor-freno-remoto`** salva también a `$PPID` (el `sshd-session` de la cuenta), y da tres vueltas.
+> 5. **INSTALABLES** suma `pausa.py`; la unidad entra en el manifiesto; `--rama-aprobada` explícito para instalar fuera
+>    de master.
+> 6. **`probar_c4.py`:** freno puesto recién con el escenario corriendo; zombis no cuentan; `--remoto` (plan 5 Task 7);
+>    `--lecturas`. Ensayo remoto completo en `probar_freno_remoto_en_contenedor.sh`.
+> 7. **C6:** `revertir_en_maquina.sh` con varias líneas de known_hosts, y `esperar_sshd` tras el reload.
+
 **Arquitectura:** **no se toca la base del kill switch**: la hace el frente B (`feat/kill-switch-real`,
 `jax/core/interruptor.py`: `JAX_KILL_SWITCH_PATH`, `interruptor_activo`, `INTERVALO_DE_SONDEO`, `escribir_pausa`,
 `borrar_pausa`; producción `/etc/jax/interruptor/PAUSE`; la ruta heredada `/etc/jax/PAUSE` sigue frenando). Este plan
