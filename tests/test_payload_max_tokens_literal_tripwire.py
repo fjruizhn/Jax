@@ -65,10 +65,10 @@ _SONDAS_DE_MEDICION = {
         "mide el costo del auditor: el tope acota el gasto de la medicion, no una respuesta",
 }
 
-_NO_PARSEA = {
-    "_director_patch/routes_block.py": "fragmento de patch, no un módulo (ver "
-    "test_aiomysql_connect_timeout_tripwire.py); no menciona max_tokens (grep).",
-}
+# Vacía desde el 2026-09-16 (E-01): el único no-módulo real del árbol,
+# _director_patch/routes_block.py, se retiró. El mecanismo se conserva y se
+# ejercita con un .py roto declarado a propósito dentro del test.
+_NO_PARSEA: dict[str, str] = {}
 
 
 def _es_test(path: Path) -> bool:
@@ -264,3 +264,22 @@ class SondasDeMedicionTest(unittest.TestCase):
                         ofensores.append(f"{py.relative_to(RAIZ)} importa {m}")
         self.assertEqual(ofensores, [], "una sonda de medicion entro al codigo de servicio:\n"
                                         + "\n".join(ofensores))
+
+
+class NoParseaTest(unittest.TestCase):
+    """E-01 (2026-09-16): con la tabla vacía, las dos ramas del SyntaxError
+    quedaban sin ejercitar. Se prueban con archivos de mentira."""
+
+    def test_un_archivo_roto_no_declarado_se_reporta(self):
+        hallazgos = _con_codigo("def f(:\n    pass\n")
+        self.assertEqual(len(hallazgos), 1, hallazgos)
+        self.assertIn("no parsea", hallazgos[0])
+
+    def test_un_archivo_roto_declarado_no_se_reporta(self):
+        from unittest.mock import patch
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+            fh.write("def f(:\n    pass\n")
+            fh.flush()
+            ruta = Path(fh.name)
+            with patch.dict(_NO_PARSEA, {str(ruta.relative_to(RAIZ)): "roto a propósito"}):
+                self.assertEqual(_hallazgos_en(ruta), [])

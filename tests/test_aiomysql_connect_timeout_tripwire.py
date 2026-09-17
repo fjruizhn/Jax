@@ -79,15 +79,10 @@ EXCLUIDOS = {".git", "__pycache__", ".pytest_cache", "node_modules"}
 # que no hay AST que recorrer. Cada entrada es una excepción EXPLÍCITA con
 # el motivo, no un salteo silencioso: un archivo roto que no está acá hace
 # FALLAR el tripwire (ver test_un_archivo_roto_no_declarado_hace_fallar).
-_NO_PARSEA = {
-    "_director_patch/routes_block.py": (
-        "fragmento de patch para pegar a mano en routes.py -- líneas de "
-        "código sueltas, comentadas e indentadas como un diff, no un módulo "
-        "Python válido (confirmado: SyntaxError 'unexpected indent' en la "
-        "línea 21). No menciona aiomysql (grep) ni podría esconder una "
-        "llamada real detrás de un SyntaxError -- el archivo no ejecuta."
-    ),
-}
+# Vacía desde el 2026-09-16 (E-01): el único no-módulo real del árbol,
+# _director_patch/routes_block.py, se retiró. El mecanismo se conserva y se
+# ejercita con un .py roto declarado a propósito dentro del test.
+_NO_PARSEA: dict[str, str] = {}
 
 
 def _excluido(path: Path) -> bool:
@@ -418,15 +413,20 @@ class AiomysqlConnectTimeoutTripwireTest(unittest.TestCase):
         self.assertEqual(len(hallazgos), 1, f"un archivo roto no declarado debería reportarse: {hallazgos}")
         self.assertIn("no parsea", hallazgos[0])
 
-    def test_el_archivo_declarado_en_NO_PARSEA_no_rompe_la_corrida(self):
-        """Control: la excepción explícita SÍ funciona -- _director_patch/
-        routes_block.py (el único no-Python real del árbol, medido) no
-        aparece entre los hallazgos generales."""
-        ruta = RAIZ / "_director_patch" / "routes_block.py"
-        self.assertTrue(ruta.exists(), "el archivo declarado en _NO_PARSEA ya no existe -- retirar la entrada")
-        with self.assertRaises(SyntaxError):
-            ast.parse(ruta.read_text(encoding="utf-8", errors="replace"))
-        self.assertEqual(_hallazgos_en(ruta), [])
+    def test_un_archivo_roto_declarado_en_NO_PARSEA_no_rompe_la_corrida(self):
+        """Control de la excepción explícita. Hasta el 2026-09-16 se probaba con
+        _director_patch/routes_block.py; se retiró (E-01) y la tabla quedó
+        vacía, así que el camino se ejercita con un .py roto declarado acá."""
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+            fh.write("def f(:\n    pasa\n")
+            fh.flush()
+            ruta = Path(fh.name)
+            rel = str(ruta.relative_to(RAIZ))
+            with patch.dict(_NO_PARSEA, {rel: "roto a propósito para este test"}):
+                self.assertEqual(_hallazgos_en(ruta), [])
+            self.assertEqual(len(_hallazgos_en(ruta)), 1, "sin la declaración tiene que reportarse")
 
 
 if __name__ == "__main__":

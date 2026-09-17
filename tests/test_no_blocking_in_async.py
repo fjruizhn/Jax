@@ -36,12 +36,10 @@ EXCLUIDOS = {".git", ".venv", "node_modules", "__pycache__", "docs", "workspace"
 # motivo, igual que en test_aiomysql_connect_timeout_tripwire.py. Uno que no
 # parsee y NO este aqui ES un hallazgo: ver
 # test_un_archivo_ilegible_no_declarado_es_hallazgo.
-_NO_PARSEA = {
-    "_director_patch/routes_block.py": (
-        "fragmento de patch para pegar a mano en routes.py -- lineas sueltas "
-        "indentadas como un diff, no un modulo."
-    ),
-}
+# Vacía desde el 2026-09-16 (E-01): el único no-módulo real del árbol,
+# _director_patch/routes_block.py, se retiró. El mecanismo se conserva y se
+# ejercita con un .py roto declarado a propósito dentro del test.
+_NO_PARSEA: dict[str, str] = {}
 
 # Nombre COMPLETO de la llamada tal como aparece escrita. Se compara por texto
 # del atributo y no resolviendo el import: un `from time import sleep` seguido
@@ -184,8 +182,18 @@ class NoBlockingInAsyncTest(unittest.TestCase):
         self.assertIn("no analizable", hallazgos[0])
 
     def test_un_no_modulo_declarado_no_ensucia(self):
-        """Control de la excepcion: lo declarado no cuenta, y si algun dia
-        parsea, la entrada sobra."""
+        """Control de la excepción: lo declarado no cuenta, y si algún día
+        parsea, la entrada sobra. Con la tabla real vacía desde E-01
+        (2026-09-16), la declaración se ejercita con un .py roto de mentira."""
+        import tempfile
+        from unittest.mock import patch
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+            fh.write("def f(:\n    pass\n")
+            fh.flush()
+            ruta = Path(fh.name)
+            rel = ruta.relative_to(RAIZ).as_posix()
+            with patch.dict(_NO_PARSEA, {rel: "roto a propósito para este test"}):
+                self.assertEqual(_hallazgos_en(ruta), [])
         for rel in _NO_PARSEA:
             ruta = RAIZ / rel
             self.assertTrue(ruta.exists(), f"{rel} ya no existe: retirar de _NO_PARSEA")

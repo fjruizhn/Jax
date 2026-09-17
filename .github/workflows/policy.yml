@@ -745,8 +745,9 @@ jobs:
           #   parsea (SyntaxError) se saltaba en silencio -- ahora hace fallar el
           #   tripwire con su ruta salvo excepción explícita en _NO_PARSEA (+1:
           #   un archivo roto no declarado se reporta; el único caso real del
-          #   árbol, _director_patch/routes_block.py, se verifica declarado y sin
-          #   romper la corrida). Las 9 formas nuevas, vistas en rojo contra el
+          #   árbol entonces, _director_patch/routes_block.py, se verificaba
+          #   declarado -- retirado el 2026-09-16 (E-01): el control se ejercita
+          #   con un .py roto de mentira). Las 9 formas nuevas, vistas en rojo contra el
           #   detector viejo antes del arreglo (verificado aparte, no en CI).
           # 176 -> 199 el 2026-09-14 (PR-K, contrato de dispatch en el REPL y en Ada):
           #   test_contrato_dispatch_repl_ada.py (+19) -- el payload del HttpMuscle
