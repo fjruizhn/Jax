@@ -14,7 +14,6 @@ host = "127.0.0.1"
 port = 7777
 require_mtls = false          # fase 1: token simple. mTLS en fase 2.
 audit_log = "/home/fruiz/jax/las_manos/logs/audit.jsonl"
-kill_switch_path = "/etc/jax/PAUSE"
 
 # ------------------------------------------------------------
 #  AMBIENTES — separación estricta staging vs producción

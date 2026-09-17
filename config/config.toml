@@ -11,7 +11,6 @@
 # ============================================================
 
 [jax]
-kill_switch_path = "/etc/jax/PAUSE"
 default_mode = "auto"
 timeout_seconds = 600
 task_timeout_seconds = 3600

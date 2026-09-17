@@ -18,7 +18,6 @@ import time
 import traceback
 from pathlib import Path
 
-import tomllib
 from fastapi import APIRouter, HTTPException
 
 from motor_registry.catalog import MotorCatalog
@@ -36,12 +35,9 @@ from motor_registry.policy import MotorPolicy
 import facet_resolver  # su sello (mtime de un archivo) invalida también el catálogo
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
+from interruptor import ruta_del_interruptor
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-CONFIG_PATH = BASE_DIR / "config.toml"
-
-with open(CONFIG_PATH, "rb") as _f:
-    _CONFIG = tomllib.load(_f)
 
 _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
 # _CATALOG/_POLICY arrancan None -- se pueblan en el startup hook de
@@ -51,7 +47,6 @@ _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
 # solo los usa este archivo), asi que reasignarlos acá es seguro.
 _CATALOG: MotorCatalog | None = None
 _POLICY: MotorPolicy | None = None
-_KILL_SWITCH_PATH: str = _CONFIG.get("server", {}).get("kill_switch_path", "/etc/jax/PAUSE")
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +179,10 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             rejected_reason=result.reason,
         )
 
+    # La ruta del freno se resuelve en CADA dispatch y ANTES de crear el job:
+    # sin la variable del freno el pedido falla cerrado sin dejar un job
+    # `pending` huérfano (revisión final del frente B, 2026-09-17).
+    ruta_del_freno = str(ruta_del_interruptor())
     job_id = _STORE.create(
         caller=req.caller,
         capability=req.capability,
@@ -202,7 +201,7 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
             context=req.context,
             store=_STORE,
             catalog=_CATALOG,
-            kill_switch_path=_KILL_SWITCH_PATH,
+            kill_switch_path=ruta_del_freno,
             user_id=req.user_id,
             tenant_id=req.tenant_id,
             caller=req.caller,

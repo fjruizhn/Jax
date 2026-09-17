@@ -5,7 +5,7 @@ Bucle de terminal (REPL) que cose todo: lee lo que escribis (o lo que
 DECIS por el microfono), lo pasa por el Router, e invoca la faceta correcta.
 
 Seguridad: antes de CADA invocacion de musculo se chequea el Kill Switch
-(/etc/jax/PAUSE).
+(archivo de JAX_KILL_SWITCH_PATH).
 
 MEMORIA: hilo de sesion compartido en RAM (MAX_TURNS) + MariaDB persistente
 (tolerante a fallos).
@@ -45,6 +45,12 @@ from pathlib import Path
 
 from jax.core.config_entorno import url_requerida
 from jax.core.cliente_http_compartido import cerrar_cliente_http
+from jax.core.interruptor import (
+    InterruptorSinConfigurar,
+    correr_con_interruptor,
+    interruptor_activo,
+    ruta_del_interruptor,
+)
 from jax.core.router import Router
 from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
@@ -130,11 +136,6 @@ def resolver_modo_pesado(cfg: dict) -> tuple[str | None, str | None, str]:
             f"'{faceta}' (catálogo): {permitidos}."
         )
     return faceta, modelo, ""
-
-
-def kill_switch_active(path: str) -> bool:
-    """True si el Kill Switch esta puesto."""
-    return Path(path).exists()
 
 
 def _lanzar_workers_background() -> None:
@@ -397,7 +398,11 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
 
-    kill_path = cfg["jax"]["kill_switch_path"]
+    try:
+        kill_path = ruta_del_interruptor()
+    except InterruptorSinConfigurar as exc:
+        print(f"[tarea] {exc}")
+        sys.exit(1)
     task_timeout = float(cfg["jax"].get("task_timeout_seconds", 600))
     default_faceta = cfg["jax"].get("default_personality", "jax_local")
 
@@ -440,7 +445,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
 
     voice = VoiceEngine()
 
-    if kill_switch_active(kill_path):
+    if interruptor_activo(kill_path):
         print(f"[tarea] PAUSE activo — JAX no puede ejecutar. "
               f"Borrá {kill_path} para reactivar.")
         sys.exit(1)
@@ -483,7 +488,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
     print(f"[tarea] {label} procesando '{task_file.name}'...", flush=True)
 
     try:
-        respuesta = await muscle.invoke(contenido, history=None)
+        respuesta = await correr_con_interruptor(muscle.invoke(contenido, history=None))
 
         result_file.write_text(
             f"# Resultado de: {task_file.name}\n\n{respuesta}\n",
@@ -545,7 +550,11 @@ async def main() -> None:
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
 
-    kill_path = cfg["jax"]["kill_switch_path"]
+    try:
+        kill_path = ruta_del_interruptor()
+    except InterruptorSinConfigurar as exc:
+        print(f"[JAX] {exc}")
+        sys.exit(1)
     default_faceta = cfg["jax"].get("default_personality", "jax_local")
 
     # Bloque C: modelo real desde facet_binding, no config.toml. Se
@@ -816,7 +825,7 @@ async def main() -> None:
                 print(f"\n[router -> {faceta} via clasificador local]")
 
             # Kill Switch: chequeo atomico JUSTO antes de invocar.
-            if kill_switch_active(kill_path):
+            if interruptor_activo(kill_path):
                 print(f"\n[PAUSE activo — JAX no invoca musculos. "
                       f"Borra {kill_path} para reactivar.]")
                 continue
@@ -883,7 +892,9 @@ async def main() -> None:
                         ] + history_for_invocation
 
                 model_override = MODELO_PESADO if (modo_pesado and faceta == FACETA_PESADO) else None
-                respuesta = await muscle.invoke(user_text, history=history_for_invocation, model=model_override)
+                respuesta = await correr_con_interruptor(
+                    muscle.invoke(user_text, history=history_for_invocation, model=model_override)
+                )
                 print(f"\n{label}: {respuesta}")
 
                 # Voz en streaming, de fondo, con la voz/velocidad de la

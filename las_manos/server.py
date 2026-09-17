@@ -5,7 +5,7 @@ El único punto por donde las facetas de JAX tocan el mundo real.
 FastAPI escuchando SOLO en 127.0.0.1:7777 (sin exposición de red en fase 1).
 
 Flujo de cada /execute:
-    1. Kill switch  — ¿existe /etc/jax/PAUSE? Si sí, nada se ejecuta.
+    1. Kill switch  — ¿existe el archivo de JAX_KILL_SWITCH_PATH? Si sí, nada se ejecuta.
     2. audit.log_request
     3. policy.check — faceta, ambiente, operación, comando.
     4. human gate   — si la operación lo exige, validar token de Fernando.
@@ -45,6 +45,11 @@ from policy import PolicyEngine
 from planner import Planner
 from envelope import IntentEnvelope, validate as validate_envelope
 from workers import ssh_worker, file_worker, rsync_worker
+from interruptor import interruptor_activo, ruta_del_interruptor
+
+# El freno ANTES de cualquier otra configuración (2026-09-16, frente B): sin
+# JAX_KILL_SWITCH_PATH, LAS MANOS no arrancan (InterruptorSinConfigurar).
+KILL_SWITCH = ruta_del_interruptor()
 
 
 # ------------------------------------------------------------
@@ -72,15 +77,10 @@ CONFIG["environments"] = _load_environments()
 
 SERVER_CFG = CONFIG["server"]
 GATE_CFG = CONFIG["human_gate"]
-KILL_SWITCH = Path(SERVER_CFG["kill_switch_path"])
 
 audit = AuditLog(SERVER_CFG["audit_log"])
 policy = PolicyEngine(CONFIG)
 planner = Planner(CONFIG)
-
-# El freno en la carretera: el ssh_worker vigila este path durante CADA
-# ejecución y aborta en vuelo si aparece. Lo configuramos al arrancar.
-ssh_worker.KILL_SWITCH_PATH = str(KILL_SWITCH)
 
 
 # ------------------------------------------------------------
@@ -205,7 +205,7 @@ def _extract_command(operation: str, params: dict) -> str | None:
 
 
 def _kill_switch_active() -> bool:
-    return KILL_SWITCH.exists()
+    return interruptor_activo(KILL_SWITCH)
 
 
 # ------------------------------------------------------------
@@ -402,7 +402,7 @@ async def execute(req: IntentEnvelope) -> dict:
         audit.log_kill_switch(triggered_by=f"{req.facet_id}/{req.requested_capability}", **fx)
         raise HTTPException(
             status_code=423,  # Locked
-            detail="KILL SWITCH ACTIVO (/etc/jax/PAUSE) — LAS MANOS están detenidas",
+            detail="KILL SWITCH ACTIVO — LAS MANOS están detenidas",
         )
 
     # ---- 2) Registrar la solicitud ----

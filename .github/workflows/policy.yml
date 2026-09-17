@@ -449,6 +449,19 @@ jobs:
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
           grep -qE "^15 passed" /tmp/cu || {
             echo "PISO ROTO: se esperaban 15 tests CORRIDOS y 0 skipped."; exit 1; }
+      - name: El freno que escribe la plataforma mata el motor en vuelo
+        env:
+          JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
+          PYTHONPATH: .:las_manos
+        run: |
+          pip install -r requirements.txt pytest-asyncio
+          python -m pytest tests/test_interruptor_escritor_de_la_plataforma.py -q -rs 2>&1 | tee /tmp/ks
+          # 2026-09-16 (frente B, Task 3): la copia identica + el peor caso con el
+          # escritor real de la plataforma. Sin el checkout se saltan: se exige 0 skipped.
+          # Rebase 2026-09-17: sin aiofiles (E-19), desde requirements.txt. Medido dos
+          # veces contra jax-platform origin/master 97e4b3e (incluye #95): 2 passed.
+          grep -qE "^2 passed in" /tmp/ks || {
+            echo "PISO ROTO: se esperaban 2 tests CORRIDOS y 0 skipped."; exit 1; }
 
   ollama-num-parallel:
     # Tripwire del invariante del que cuelga ENTERA la decision de
@@ -636,6 +649,12 @@ jobs:
           tests/test_errores_de_proveedor_redactados.py
           tests/test_cliente_http_compartido.py
           tests/test_conftest_aisla_facet_seal.py
+          tests/test_interruptor.py
+          tests/test_interruptor_lectores.py
+          tests/test_jacobs_interruptor.py
+          tests/test_repl_interruptor.py
+          tests/test_interruptor_sin_rutas_fijas.py
+          tests/test_interruptor_heredada.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -703,6 +722,12 @@ jobs:
             tests/test_errores_de_proveedor_redactados.py \
             tests/test_cliente_http_compartido.py \
             tests/test_conftest_aisla_facet_seal.py \
+            tests/test_interruptor.py \
+            tests/test_interruptor_lectores.py \
+            tests/test_jacobs_interruptor.py \
+            tests/test_repl_interruptor.py \
+            tests/test_interruptor_sin_rutas_fijas.py \
+            tests/test_interruptor_heredada.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1016,8 +1041,32 @@ jobs:
           #   anterior (854/0 local = 853/1 runner). PENDIENTE DE CONFIRMAR POR EL RUNNER
           #   (3.12) en el run del PR: si da otro numero, manda el runner.
           # 979 -> 1038 el 2026-09-17 (C3), CONFIRMADO por el runner del PR #181: "1038 passed, 1 skipped".
-          grep -qE "^1038 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1038 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 979 -> 1044 el 2026-09-17 (frente B, kill switch real, medido en paralelo sobre
+          #   56d8c24, antes de este rebase final): +65 sobre el mismo 979 base. Seis
+          #   archivos nuevos: interruptor, interruptor_lectores, jacobs_interruptor,
+          #   repl_interruptor, interruptor_sin_rutas_fijas e interruptor_heredada (la
+          #   ruta vieja del freno sigue frenando). Antes del rebase el frente medía
+          #   742 -> 807 sobre 044cb99: el mismo +65.
+          # 1038 + 65 -> 1103 el 2026-09-17, rebase final de frente B sobre origin/master
+          #   (1216c97, que ya trae C3): las dos listas de tests-puros (run y "Piso
+          #   exacto") quedan idénticas entre sí, 85 archivos = C3 (1038) + frente B (65).
+          #   MEDIDO en local (3.14) con JAX_PLATFORM_REPO_ROOT a una ruta que no
+          #   existe (como el runner, sin checkout de jax-platform), dos corridas:
+          #   "1103 passed, 1 skipped, 1 xfailed, 16 subtests passed". Sin esa variable,
+          #   en hall9000 test_la_copia_es_identica_al_canonico_de_jax_platform corre
+          #   (hay checkout de producción) y da un passed de más con 0 skipped. Si el
+          #   runner da otro numero, manda el runner.
+          # 1103 -> 1108 el 2026-09-17 (fix del interruptor en CI 3.12): el run de
+          #   tests-puros de 94295a6 (PR #183) cayó en test_directorio_ilegible_cuenta_
+          #   como_puesto porque el TEST afirmaba `Path.exists() is False`, que en 3.12
+          #   lanza PermissionError (en 3.14 devuelve False). El módulo ya usaba os.stat.
+          #   La precondición pasa a `os.stat` (igual en toda versión) y se suman +5 con
+          #   os.stat sustituido (EACCES/EIO/ELOOP en la ruta nueva, EACCES/EIO en la
+          #   heredada): no dependen de la versión ni de ser root. MEDIDO en local
+          #   (3.14), dos corridas, sin checkout de plataforma: "1108 passed, 1 skipped,
+          #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
+          grep -qE "^1108 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

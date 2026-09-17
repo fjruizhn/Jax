@@ -383,6 +383,39 @@ FAMILIAS = (
              "es la duena de la tabla y la unica con migraciones.",
     ),
     Familia(
+        nombre="interruptor",
+        canonico=JAX_ROOT / "jax" / "core" / "interruptor.py",
+        espejos=(
+            # Symlink a jax/core (frente B, 2026-09-16), como cola_uso: comparar
+            # hoy es un no-op y se incluye igual.
+            ("las_manos", JAX_ROOT / "las_manos" / "interruptor.py"),
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "interruptor.py"),
+        ),
+        # El que ESCRIBE el freno (la plataforma) y los que lo LEEN (LAS MANOS,
+        # Jacobs, el REPL) tienen que hablar del mismo archivo con la misma
+        # semantica: solo ENOENT es suelto. Un drift aca no se ve como error: se
+        # ve como un boton que dice "detenido" mientras las manos siguen.
+        # `InterruptorActivado`, `INTERVALO_DE_SONDEO` y `correr_con_interruptor`
+        # quedan afuera: son solo de jax (asyncio del REPL y de Jacobs).
+        # La ruta heredada (Task H, 2026-09-17, requisito del controlador
+        # principal): la constante, el estado del aviso, `pausa_presente` y
+        # `_heredada_activa` tambien son compartidos. Si la plataforma dejara de
+        # mirarla, reportaria "suelto" con LAS MANOS frenadas por la ruta vieja.
+        compartidos=(
+            "VARIABLE_RUTA",
+            "InterruptorSinConfigurar",
+            "ruta_del_interruptor",
+            "RUTA_HEREDADA",
+            "_heredada_avisada",
+            "pausa_presente",
+            "_heredada_activa",
+            "interruptor_activo",
+            "_sincronizar_directorio",
+            "escribir_pausa",
+            "borrar_pausa",
+        ),
+    ),
+    Familia(
         nombre="router_keywords",
         canonico=JAX_ROOT / "jax" / "core" / "router.py",
         espejos=(
