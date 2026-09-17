@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from jax.ejecutor import captura
+# El mismo tipo que usan `cita` y `herramientas` (definido en `cita`, sin ciclos).
+from jax.ejecutor.cita import Motivo  # noqa: F401 -- reexportado: `hechos.Motivo`
 
 TTL_S_POR_DEFECTO = 60
 # Los hechos se derivan antes de CADA turno: comandos cortos, salida corta.
@@ -56,15 +58,9 @@ SIN_CODIGO = "sin_codigo"
 CODIGO_DISTINTO_DE_CERO = "codigo_distinto_de_cero"
 SALIDA_VACIA = "salida_vacia"
 NO_SE_PUDO_CORRER = "no_se_pudo_correr"
-
-
-@dataclass(frozen=True)
-class Motivo:
-    """Por qué algo no es un hecho: un código de arriba y sus datos, como
-    pares `(clave, valor)` (inmutables; `dict(motivo.datos)` para serializar).
-    Sin prosa: la frase la pone el frontend."""
-    codigo: str
-    datos: tuple[tuple[str, object], ...] = ()
+# Errores del LLAMADOR (entrada inválida): van como argumento del ValueError.
+NOMBRE_DE_UNIDAD_INVALIDO = "nombre_de_unidad_invalido"
+AHORA_SIN_ZONA = "ahora_sin_zona"
 
 
 @dataclass(frozen=True)
@@ -134,7 +130,7 @@ def fuente_servicio(unidad: str) -> Fuente:
     da código 0 e `inactive` (medido en hall9000 el 2026-09-16): sin él se
     leería «existe y está parada»."""
     if not _NOMBRE_UNIDAD.fullmatch(unidad):
-        raise ValueError(f"nombre de unidad inválido: {unidad!r}")
+        raise ValueError(Motivo(NOMBRE_DE_UNIDAD_INVALIDO, (("unidad", unidad),)))
     return Fuente(f"servicio {unidad}",
                   f"systemctl show -p LoadState -p ActiveState -p ActiveEnterTimestamp -- {unidad}")
 
@@ -163,7 +159,7 @@ def _motivo_de_invalidez(hecho: Hecho, ahora: datetime, ttl_s: float) -> Motivo 
 def _ahora(ahora: str) -> datetime:
     instante = _instante(ahora)
     if instante is None:
-        raise ValueError(f"`ahora` necesita zona horaria: {ahora!r}")
+        raise ValueError(Motivo(AHORA_SIN_ZONA, (("ahora", ahora),)))
     return instante
 
 

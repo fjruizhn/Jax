@@ -28,6 +28,10 @@ Qué se exige, en orden:
 5. máquina y comando coinciden con una captura; el truncado se mira ANTES que
    el contenido; stdout y stderr se recorren por separado.
 
+Cada rechazo lleva un `Motivo` (código estable y datos), no una frase: la
+frase la pone el frontend con sus traducciones (política del ecosistema, sin
+textos visibles hardcodeados). Es el mismo tipo que usa `hechos`.
+
 La regla 4 sin bordes (subcadena pura, como estaba) dejaba salir `active` de
 `inactive` y `3107` de `131072`: con la prosa ya fuera, el dato es lo ÚNICO que
 escribe el modelo, y una subcadena mal cortada es un dato falso sobre una línea
@@ -43,6 +47,30 @@ SIN_RESPALDO = "sin_respaldo"
 FUENTE_TRUNCADA = "fuente_truncada"
 FUENTE_INEXISTENTE = "fuente_inexistente"
 DATO_FUERA_DE_LINEA = "dato_fuera_de_linea"
+
+# Códigos de `Veredicto.motivo`: claves estables del contrato con el frontend,
+# que pone el texto traducido. Cambiar uno rompe esa traducción. Son más finos
+# que el estado (`sin_respaldo` tiene cuatro causas distintas).
+LINEA_VACIA = "linea_vacia"
+MAQUINA_VACIA = "maquina_vacia"
+DATO_VACIO = "dato_vacio"
+DATO_NO_ENTERO = "dato_no_entero"
+LINEA_NO_ESTA = "linea_no_esta"
+COMANDO_NO_CORRIDO = "comando_no_corrido"
+# `fuente_truncada` es a la vez estado y código: tiene una sola causa.
+
+
+@dataclass(frozen=True)
+class Motivo:
+    """Por qué algo no vale: un CÓDIGO estable y sus datos, como pares
+    `(clave, valor)` (inmutables; `dict(motivo.datos)` para serializar). Sin
+    prosa: la frase la pone el frontend con sus traducciones.
+
+    Vive aquí, en el módulo más bajo del Ejecutor (no importa a nadie), para
+    que lo compartan `hechos`, `herramientas` y `transporte` sin ciclos:
+    `hechos` importa `captura`, que importa `cita`."""
+    codigo: str
+    datos: tuple[tuple[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -65,7 +93,8 @@ class Afirmacion:
 @dataclass(frozen=True)
 class Veredicto:
     estado: str
-    motivo: str
+    # `None` sólo si `respaldada`; si no, el código de arriba y sus datos.
+    motivo: Motivo | None
     # Sólo si `respaldada`: la línea TAL COMO LA IMPRIMIÓ la máquina (la cita
     # se compara con espacios colapsados; lo que se muestra es la original).
     linea_capturada: str = ""
@@ -125,19 +154,18 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
     # Una cita vacía no cita nada: `""` es igual a cualquier línea en blanco
     # de la salida y dejaría pasar cualquier afirmación inventada.
     if not aguja:
-        return Veredicto(SIN_RESPALDO, "la afirmación no cita ninguna línea")
+        return Veredicto(SIN_RESPALDO, Motivo(LINEA_VACIA))
     # Lo mismo con la máquina: vacía no identifica nada, y `"" == ""` dejaría
     # que una captura sin procedencia respalde una afirmación sin procedencia.
     if not afirmacion.maquina.strip():
-        return Veredicto(SIN_RESPALDO, "la afirmación no dice de qué máquina viene")
+        return Veredicto(SIN_RESPALDO, Motivo(MAQUINA_VACIA))
     # La ligadura se mira ANTES que las capturas: una afirmación incoherente
     # consigo misma se rechaza por eso, sea cual sea la fuente.
     dato = normalizar(afirmacion.dato)
     if not dato:
-        return Veredicto(SIN_RESPALDO, "la afirmación no dice qué dato afirma")
+        return Veredicto(SIN_RESPALDO, Motivo(DATO_VACIO))
     if not _esta_entero(dato, aguja):
-        return Veredicto(DATO_FUERA_DE_LINEA,
-                         f"el dato {dato!r} no está entero en la línea citada")
+        return Veredicto(DATO_FUERA_DE_LINEA, Motivo(DATO_NO_ENTERO, (("dato", dato),)))
     se_corrio = False
     alguna_truncada = False
     for captura in capturas:
@@ -156,18 +184,13 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
         for flujo in (captura.salida, captura.stderr):
             for linea in flujo.splitlines():
                 if normalizar(linea) == aguja:
-                    return Veredicto(RESPALDADA, "", linea_capturada=linea)
+                    return Veredicto(RESPALDADA, None, linea_capturada=linea)
+    donde = (("comando", afirmacion.comando), ("maquina", afirmacion.maquina))
     if alguna_truncada:
-        return Veredicto(FUENTE_TRUNCADA,
-                         f"la salida de {afirmacion.comando!r} en "
-                         f"{afirmacion.maquina!r} vino truncada")
+        return Veredicto(FUENTE_TRUNCADA, Motivo(FUENTE_TRUNCADA, donde))
     if se_corrio:
-        return Veredicto(SIN_RESPALDO,
-                         f"la línea citada no está en la salida de "
-                         f"{afirmacion.comando!r} en {afirmacion.maquina!r}")
-    return Veredicto(FUENTE_INEXISTENTE,
-                     f"no se corrió el comando {afirmacion.comando!r} "
-                     f"en {afirmacion.maquina!r}")
+        return Veredicto(SIN_RESPALDO, Motivo(LINEA_NO_ESTA, donde))
+    return Veredicto(FUENTE_INEXISTENTE, Motivo(COMANDO_NO_CORRIDO, donde))
 
 
 # Claves estables del contrato con el frontend: los rótulos visibles («dato»,

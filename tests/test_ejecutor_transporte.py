@@ -26,8 +26,9 @@ def test_solo_salen_las_afirmaciones_respaldadas():
 def test_cada_descartada_dice_por_que():
     fuera = Afirmacion(maquina=MAQUINA, comando="uptime -p", linea="up 38 minutes", dato="un día")
     e = transporte.entregar([MALA, fuera], CAPTURAS)
-    assert [(d.estado, bool(d.motivo)) for d in e.descartadas] == [
-        (SIN_RESPALDO, True), (DATO_FUERA_DE_LINEA, True)]
+    assert [(d.estado, d.motivo) for d in e.descartadas] == [
+        (SIN_RESPALDO, cita.Motivo(cita.LINEA_NO_ESTA, (("comando", "uptime -p"), ("maquina", MAQUINA)))),
+        (DATO_FUERA_DE_LINEA, cita.Motivo(cita.DATO_NO_ENTERO, (("dato", "un día"),)))]
 
 
 def test_las_salidas_crudas_se_entregan_SIEMPRE():
@@ -98,7 +99,8 @@ def test_v4_si_el_verificador_falla_NO_sale_ninguna_afirmacion(monkeypatch):
     assert e.respaldadas == ()
     assert e.crudas == tuple(CAPTURAS)
     assert [d.estado for d in e.descartadas] == [transporte.VERIFICADOR_CAIDO] * 2
-    assert all("RuntimeError" in d.motivo for d in e.descartadas)
+    assert [d.motivo for d in e.descartadas] == [
+        cita.Motivo(transporte.VERIFICADOR_CAIDO, (("error", "RuntimeError"),))] * 2
 
 
 def test_v4_si_las_afirmaciones_no_se_pueden_leer_salen_las_crudas_y_ninguna_afirmacion():
@@ -114,6 +116,6 @@ def test_v4_si_las_afirmaciones_no_se_pueden_leer_salen_las_crudas_y_ninguna_afi
 def test_solo_el_estado_exacto_respaldada_deja_salir(monkeypatch, veredicto_raro):
     """Lista de permitidos, no de prohibidos: un estado desconocido descarta."""
     monkeypatch.setattr(transporte.cita, "verificar",
-                        lambda a, c: transporte.cita.Veredicto(veredicto_raro, "raro"))
+                        lambda a, c: transporte.cita.Veredicto(veredicto_raro, cita.Motivo("raro")))
     e = transporte.entregar([BUENA], CAPTURAS)
     assert e.respaldadas == ()

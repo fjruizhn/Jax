@@ -144,7 +144,7 @@ def test_v1_los_conteos_de_t9_los_niega_contar_por_el_truncado(r):
     for id_ in ["t9-todos-noble", "t9-sin-bionic"]:
         conteo = filas[id_]["sin_prosa"]["conteo"]
         assert conteo["rechazada"] is True, id_
-        assert "truncada" in conteo["motivo"], id_
+        assert conteo["motivo"]["codigo"] == "origen_truncado", id_
 
 
 def test_v1_all_es_un_homonimo_que_sólo_frena_el_truncado(r):
@@ -181,8 +181,8 @@ def test_v2_t8_conteo_ssl_con_termina_en_da_14_y_por_subcadena_42(mod):
     assert "(los archivos .ssl.conf)" in mod._sin_markdown(final)  # criterio del modelo
     [origen] = [cu for cu in capturas if "ls /etc/nginx/conf.d/domains/" in cu.captura.comando]
     completa = mod._completa(origen)
-    assert contar(completa, ".ssl.conf", modo=SUBCADENA).salida.startswith("42 lineas de 112 ")
-    assert contar(completa, ".ssl.conf", modo=TERMINA_EN).salida.startswith("14 lineas de 112 ")
+    assert contar(completa, ".ssl.conf", modo=SUBCADENA).salida.startswith("count=42 total=112 ")
+    assert contar(completa, ".ssl.conf", modo=TERMINA_EN).salida.startswith("count=14 total=112 ")
 
 
 def test_v2_t6_sale_el_token_entero_y_no_la_abreviatura(r, mod):

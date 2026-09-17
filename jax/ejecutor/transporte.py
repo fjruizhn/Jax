@@ -28,7 +28,9 @@ VERIFICADOR_CAIDO = "verificador_caido"
 class Descartada:
     afirmacion: object
     estado: str
-    motivo: str
+    # El `Motivo` del veredicto (código y datos), o `VERIFICADOR_CAIDO` con el
+    # tipo del error. Sin prosa: la frase la pone el frontend.
+    motivo: cita.Motivo
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,8 @@ def entregar(afirmaciones, capturas) -> Entrega:
             else:
                 descartadas.append(Descartada(afirmacion, veredicto.estado, veredicto.motivo))
     except Exception as error:  # fail-soft: el turno entrega las crudas; fail-CLOSED para las afirmaciones: ninguna sale si el verificador o la lectura fallan
-        motivo = f"el verificador no pudo terminar ({type(error).__name__}): no sale ninguna afirmación"
+        # Sólo el TIPO del error: el mensaje puede traer cualquier cosa.
+        motivo = cita.Motivo(VERIFICADOR_CAIDO, (("error", type(error).__name__),))
         return Entrega(crudas, (), tuple(Descartada(a, VERIFICADOR_CAIDO, motivo) for a in leidas))
     return Entrega(crudas, tuple(respaldadas), tuple(descartadas))
 

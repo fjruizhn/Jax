@@ -245,8 +245,9 @@ def _completa(cu: CapturaU3) -> CapturaCompleta:
         maquina=c.maquina, comando=c.comando, codigo=cu.codigo, salida=c.salida,
         stderr=c.stderr, truncada=c.truncada, bytes_totales=len(c.salida.encode()),
         momento="",
-        motivos_truncado=("salida persistida a disco: el modelo vio un fragmento",)
-        if c.truncada else ())
+        # Código, como los de `captura.py` (`tope_bytes`, `timeout`): Claude
+        # Code persistió la salida a disco y el modelo vio un fragmento.
+        motivos_truncado=("persistida_a_disco",) if c.truncada else ())
 
 
 def _correr_herramientas(capturas: list[CapturaU3], maquina: str, pedidas,
@@ -265,8 +266,13 @@ def _correr_herramientas(capturas: list[CapturaU3], maquina: str, pedidas,
             else:
                 r = convertir(h.valor, h.desde, h.hacia, maquina=maquina, decimales=h.decimales)
         except HerramientaRechazada as rechazo:
+            # El código no tiene datos de clientes; los datos (comando,
+            # máquina) sí pueden tenerlos, y en esas tareas van con hash.
+            motivo = rechazo.motivo
             registro.append({"herramienta": type(h).__name__, "rechazada": True,
-                             "motivo": str(rechazo) if publicar else _hash(str(rechazo))})
+                             "motivo": {"codigo": motivo.codigo,
+                                        "datos": ({k: v for k, v in motivo.datos} if publicar
+                                                  else _hash(repr(motivo.datos)))}})
             continue
         nuevas.append(CapturaU3(Captura(r.maquina, r.comando, r.salida, r.stderr, r.truncada),
                                 flujos_mezclados=False, codigo=r.codigo))

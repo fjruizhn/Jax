@@ -12,7 +12,11 @@ from dataclasses import asdict, fields
 
 import pytest
 
+from jax.ejecutor import cita as C
+from jax.ejecutor import hechos
 from jax.ejecutor.cita import (
+    COMANDO_NO_CORRIDO, DATO_NO_ENTERO, DATO_VACIO, LINEA_NO_ESTA, LINEA_VACIA, MAQUINA_VACIA,
+    Motivo,
     DATO_FUERA_DE_LINEA, FUENTE_INEXISTENTE, FUENTE_TRUNCADA, RESPALDADA, SIN_RESPALDO,
     CAMPOS_PRESENTACION, Afirmacion, Captura, Presentacion, normalizar, presentar, verificar,
 )
@@ -220,7 +224,7 @@ def test_un_dato_que_no_esta_en_la_linea_citada_es_dato_fuera_de_linea():
     a = Afirmacion(maquina=MAQUINA, comando="free -h", linea=LINEA_MEM, dato="Marte")
     v = verificar(a, CAPTURAS)
     assert v.estado == DATO_FUERA_DE_LINEA
-    assert "Marte" in v.motivo
+    assert v.motivo == Motivo(DATO_NO_ENTERO, (("dato", "Marte"),))
 
 
 def test_la_invencion_real_de_U3_131074_contra_la_linea_real_131072():
@@ -359,3 +363,40 @@ def test_presentar_no_deja_que_un_campo_esconda_ni_reordene_lo_que_se_ve(campo, 
         assert valor.isprintable(), (clave, valor)
         assert len(valor.splitlines()) == 1
     assert ast.literal_eval(getattr(p, campo)) == valores[campo]  # literal: se recupera exacto
+
+
+# --- El motivo de un veredicto es un CÓDIGO con datos, no una frase ---
+# Mismo tipo que `hechos.Motivo`: el frontend traduce el código.
+
+def test_el_motivo_es_el_mismo_tipo_que_el_de_hechos():
+    assert C.Motivo is hechos.Motivo
+
+
+@pytest.mark.parametrize("afirmacion,capturas,estado,motivo", [
+    (Afirmacion(MAQUINA, "free -h", "  ", "89Gi"), CAPTURAS, SIN_RESPALDO, Motivo(LINEA_VACIA)),
+    (Afirmacion(" ", "free -h", LINEA_MEM, "89Gi"), CAPTURAS, SIN_RESPALDO, Motivo(MAQUINA_VACIA)),
+    (Afirmacion(MAQUINA, "free -h", LINEA_MEM, " "), CAPTURAS, SIN_RESPALDO, Motivo(DATO_VACIO)),
+    (Afirmacion(MAQUINA, "free -h", LINEA_MEM, "Mem:   9Gi"), CAPTURAS, DATO_FUERA_DE_LINEA,
+     Motivo(DATO_NO_ENTERO, (("dato", "Mem: 9Gi"),))),
+    (Afirmacion(MAQUINA, "free -h", "Mem: 1Gi", "1Gi"), CAPTURAS, SIN_RESPALDO,
+     Motivo(LINEA_NO_ESTA, (("comando", "free -h"), ("maquina", MAQUINA)))),
+    (Afirmacion(MAQUINA, "free -h", LINEA_MEM, "89Gi"),
+     [Captura(MAQUINA, "free -h", SALIDA_FREE, "", truncada=True)], FUENTE_TRUNCADA,
+     Motivo(FUENTE_TRUNCADA, (("comando", "free -h"), ("maquina", MAQUINA)))),
+    (Afirmacion(MAQUINA, "df -h", LINEA_MEM, "89Gi"), CAPTURAS, FUENTE_INEXISTENTE,
+     Motivo(COMANDO_NO_CORRIDO, (("comando", "df -h"), ("maquina", MAQUINA)))),
+])
+def test_cada_rechazo_dice_su_codigo_y_sus_datos(afirmacion, capturas, estado, motivo):
+    v = verificar(afirmacion, capturas)
+    assert (v.estado, v.motivo) == (estado, motivo)
+
+
+def test_una_respaldada_no_tiene_motivo():
+    assert verificar(Afirmacion(MAQUINA, "free -h", LINEA_MEM, "89Gi"), CAPTURAS).motivo is None
+
+
+def test_los_codigos_son_distintos_entre_si():
+    codigos = [LINEA_VACIA, MAQUINA_VACIA, DATO_VACIO, DATO_NO_ENTERO, LINEA_NO_ESTA,
+               FUENTE_TRUNCADA, COMANDO_NO_CORRIDO]
+    assert len(set(codigos)) == len(codigos)
+    assert all(c.isascii() and c.replace("_", "").isalpha() and c.islower() for c in codigos)

@@ -18,6 +18,10 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from jax.ejecutor.cita import Motivo
+
+ESPERA_AGOTADA = "espera_agotada"
+
 
 class EsperaAgotada(RuntimeError):
     """El Ejecutor no consiguió carril antes del tope. La misión FALLA: si
@@ -59,8 +63,8 @@ def carril_ejecutor(raiz, tope_s: float):
     limite = time.monotonic() + tope_s
     while hay_mesa_esperando(raiz):
         if time.monotonic() >= limite:
-            raise EsperaAgotada(
-                f"no se consiguió carril en {tope_s}s; la Mesa tiene prioridad")
+            # Sin prosa (política del ecosistema): el argumento es un Motivo.
+            raise EsperaAgotada(Motivo(ESPERA_AGOTADA, (("tope_s", tope_s),)))
         time.sleep(0.05)
     with open(_fichero(raiz, "ejecutor.lock"), "r+") as f:
         fcntl.flock(f, fcntl.LOCK_EX)

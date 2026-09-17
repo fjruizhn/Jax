@@ -92,8 +92,10 @@ def test_un_momento_del_futuro_no_es_vigente():
 
 def test_ahora_sin_zona_es_un_error_del_llamador():
     h = Hecho(nombre="uptime", valor="38 min", comando="uptime -p", momento=MOMENTO)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as error:
         vigente(h, ahora="2026-09-16T10:00:10", ttl_s=60)
+    # Sin prosa también en el error: el argumento es un Motivo.
+    assert error.value.args == (Motivo(H.AHORA_SIN_ZONA, (("ahora", "2026-09-16T10:00:10"),)),)
 
 
 def test_el_ttl_por_defecto_arranca_en_60_segundos():
@@ -195,8 +197,9 @@ def test_fuente_servicio_distingue_una_unidad_que_no_existe():
 
 def test_fuente_servicio_no_acepta_un_nombre_que_rompa_el_comando():
     from jax.ejecutor.hechos import fuente_servicio
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as error:
         fuente_servicio("x; rm -rf ~")
+    assert error.value.args == (Motivo(H.NOMBRE_DE_UNIDAD_INVALIDO, (("unidad", "x; rm -rf ~"),)),)
 
 
 def test_un_valor_de_varias_lineas_no_se_confunde_con_otro_hecho():

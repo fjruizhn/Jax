@@ -11,8 +11,9 @@ import time
 
 import pytest
 
+from jax.ejecutor.cita import Motivo
 from jax.ejecutor.prioridad import (
-    EsperaAgotada, carril_ejecutor, carril_mesa, hay_mesa_esperando,
+    ESPERA_AGOTADA, EsperaAgotada, carril_ejecutor, carril_mesa, hay_mesa_esperando,
 )
 
 # `fork` explícito: los objetivos son funciones anidadas en los tests y no se
@@ -72,9 +73,11 @@ def test_el_tope_vencido_FALLA_y_no_se_cuela(tmp_path):
     p = _CTX.Process(target=mesa, args=(listo, suelte)); p.start()
     try:
         assert listo.wait(5) is True
-        with pytest.raises(EsperaAgotada):
+        with pytest.raises(EsperaAgotada) as agotada:
             with carril_ejecutor(tmp_path, tope_s=0.2):
                 pytest.fail("se coló: el carril no debió concederse")
+        # Sin prosa: el argumento es un Motivo con el tope.
+        assert agotada.value.args == (Motivo(ESPERA_AGOTADA, (("tope_s", 0.2),)),)
     finally:
         suelte.set(); _rematar(p)
 
