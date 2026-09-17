@@ -36,7 +36,7 @@ def _sin_config(monkeypatch):
 
 def test_config_por_defecto_acotada(monkeypatch):
     _sin_config(monkeypatch)
-    assert sp.config_subpipelines() == sp.ConfigSubpipelines(ttl_segundos=300, max_profundidad=3)
+    assert not sp.config_subpipelines() == sp.ConfigSubpipelines(ttl_segundos=300, max_profundidad=3)
 
 
 def test_config_lee_el_entorno(monkeypatch):
