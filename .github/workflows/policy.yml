@@ -1435,8 +1435,12 @@ jobs:
           #   del vigía (test_ejecutor_vigia_servicio.py) pasó a exigir jaxsvc. MEDIDO en local (3.14), env -i,
           #   sin JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1597 passed, 1 skipped,
           #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1597 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1597 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1597 -> 1598 el 2026-09-17 (la cola del carril se ve): test_ejecutor_proxy_carril.py +1 (la cola
+          #   sube con la que espera y vuelve a cero al soltar). El test del freno mientras espera el carril
+          #   dejó de dormir 0,3 s y espera ese estado: era rojo intermitente en CI (RemoteProtocolError) con
+          #   el runner lento. Corrido 5 veces seguidas en verde. Si el runner da otro numero, manda el runner.
+          grep -qE "^1598 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1598 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
