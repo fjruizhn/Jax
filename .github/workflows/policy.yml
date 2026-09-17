@@ -61,7 +61,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest
-      - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py -v
+      - run: python -m pytest policy/tests/test_claude_subprocess_solo_via_sandbox.py policy/tests/test_ejecutor_lanza_solo_con_contratos.py -v
+      - name: Piso exacto de la guardia del arranque del Ejecutor
+        # 5 tests (Ejecutor SP1 plan 6, 2026-09-17): nadie usa remoto_claude ni vigilar sin
+        # exigir_contratos. Exacto: uno que desaparezca deja pasar un lanzador sin contratos.
+        run: |
+          python -m pytest -q policy/tests/test_ejecutor_lanza_solo_con_contratos.py 2>&1 | tee /tmp/lanza
+          grep -qE "^5 passed" /tmp/lanza || { echo "PISO ROTO: se esperaban 5 tests CORRIDOS."; exit 1; }
 
   # El scanner de arriba (no-naked-claude-subprocess) protege que nadie
   # lance `claude` fuera de hyde_sandbox.py -- pero hasta 2026-08-25 la
@@ -766,6 +772,9 @@ jobs:
           tests/test_ejecutor_contratos_freno.py
           tests/test_ejecutor_freno_remoto.py
           tests/test_ejecutor_probar_c5_importa.py
+          tests/test_ejecutor_contratos_arranque.py
+          tests/test_ejecutor_vigia_servicio.py
+          tests/test_ejecutor_fase0_retirada.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -858,6 +867,9 @@ jobs:
             tests/test_ejecutor_contratos_freno.py \
             tests/test_ejecutor_freno_remoto.py \
             tests/test_ejecutor_probar_c5_importa.py \
+            tests/test_ejecutor_contratos_arranque.py \
+            tests/test_ejecutor_vigia_servicio.py \
+            tests/test_ejecutor_fase0_retirada.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1315,8 +1327,15 @@ jobs:
           #   "1381 passed, 1 skipped, 1 xfailed, 16 subtests passed"; master d951490 en las
           #   mismas condiciones da 1327 (igual que su runner). Si el runner da otro numero, manda el runner.
           # 1364 -> 1418 el 2026-09-17: C4 (+54) rebaseado sobre master con auth de LAS MANOS (#187). Lo confirma el runner.
-          grep -qE "^1418 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1418 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1418 -> 1486 el 2026-09-17 (Ejecutor SP1 plan 6, arranque condicionado): las DOS listas suman
+          #   test_ejecutor_contratos_arranque.py (44), test_ejecutor_vigia_servicio.py (21),
+          #   test_ejecutor_fase0_retirada.py (2) y test_ejecutor_contratos_eleccion_c5.py +1
+          #   (validar_proveedores). MEDIDO en local (3.14), env limpio (env -i), sin JAX_DB_HOST y
+          #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1486 passed, 1 skipped, 1 xfailed,
+          #   16 subtests passed"; master 6563cb4 en las mismas condiciones da 1418 (= su runner).
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^1486 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1486 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
