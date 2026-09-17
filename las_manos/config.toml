@@ -140,48 +140,12 @@ token_ttl_seconds = 300       # 5 minutos para usar el token
 token_length      = 32
 gate_log          = "/home/fruiz/jax/las_manos/logs/gate.jsonl"
 
-# ============================================================
-#  MOTOR REGISTRY — motores de IA especializados
-#  Cada motor es un agente externo que el Motor Registry
-#  puede convocar bajo supervisión. Falla cerrado si el motor
-#  no está habilitado o no existe.
-#
-#  En memoria de Jairo Urbina.
-# ============================================================
-
-[motors.kimi]
-enabled = true
-provider = "kimi"
-api_key_env = "KIMI_API_KEY"
-api_url = "https://api.moonshot.ai/v1/chat/completions"
-model = "kimi-k2.7-code"
-max_context_tokens = 256000
-sandbox_only = true
-default_timeout_seconds = 600
-supports_reasoning = true
-reasoning_default_visibility = "audit_only"
-# Bug real 2026-08-10: sin esto, el razonamiento se comio mas de la mitad
-# del completion budget con un prompt trivial (usage real verificado:
-# completion_tokens=866, reasoning_tokens=467) — un prompt largo/demandante
-# puede dejar `content` cortado a mitad de palabra. 8000 es punto de partida
-# razonable (holgado sobre lo observado), no un techo medido contra el
-# limite real de Moonshot para este modelo — ajustar si se repite el corte.
-max_tokens = 8000
-
-[motors.ada]
-enabled = true
-provider = "zai"
-api_key_env = "ZAI_API_KEY"
-api_url = "https://api.z.ai/api/paas/v4/chat/completions"
-model = "glm-5.2"
-max_context_tokens = 1000000
-sandbox_only = true
-default_timeout_seconds = 600
-supports_reasoning = true
-reasoning_default_visibility = "audit_only"
-# Mismo razonamiento que kimi: tambien supports_reasoning=true, mismo riesgo
-# de que el razonamiento se coma el budget de la respuesta final.
-max_tokens = 8000
+# ------------------------------------------------------------
+#  MOTORES -- viven en la DB (R4). Fuente única: tabla `motor` de
+#  jax_memory, leída por MotorCatalog.from_db(). Las secciones
+#  [motors.kimi]/[motors.ada] que estaban acá dejaron de leerse con R4
+#  y se retiraron el 2026-09-16 (E-08); su historia queda en git.
+# ------------------------------------------------------------
 
 # ------------------------------------------------------------
 #  CAPABILITIES -- movidas a la DB (Bloque 3, 2026-08-21).

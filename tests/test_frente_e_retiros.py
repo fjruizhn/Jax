@@ -77,3 +77,16 @@ def test_E07_cleanup_sh_retirado():
     """No tenía scheduler (crontab y systemd sin menciones, 2026-09-16) y, si
     alguien lo corría a mano, borraba *.backup* de un home que no está en restic."""
     assert not (RAIZ / "scripts" / "cleanup.sh").exists()
+
+
+def test_E08_config_toml_de_las_manos_ya_no_trae_motores():
+    import tomllib
+    with open(RAIZ / "las_manos" / "config.toml", "rb") as fh:
+        assert "motors" not in tomllib.load(fh)
+
+
+def test_E08_el_vocabulario_cita_la_tabla_motor_como_fuente():
+    texto = (RAIZ / "policy" / "vocabulary" / "closed_vocabulary.yaml").read_text(encoding="utf-8")
+    bloque = texto.split("\nmotors:\n", 1)[1].split("\nconfig_paths:\n", 1)[0]
+    assert "tabla `motor`" in bloque
+    assert "config.toml" not in bloque
