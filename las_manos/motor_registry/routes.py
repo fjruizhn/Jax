@@ -36,6 +36,7 @@ import facet_resolver  # su sello (mtime de un archivo) invalida también el cat
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
 from interruptor import ruta_del_interruptor
+import human_gate
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -139,6 +140,32 @@ def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
         )
 
 
+def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> MotorDispatchResponse:
+    """Un pedido rechazado deja su job REJECTED con la razón (testigo)."""
+    job_id = _STORE.create(
+        caller=req.caller,
+        capability=req.capability,
+        motor=motor or "none",
+        trace_id=req.trace_id,
+        prompt=req.prompt,
+        recursion_depth=req.recursion_depth,
+    )
+    _STORE.update(
+        job_id,
+        status=JobStatus.REJECTED.value,
+        finished_at=time.time(),
+        error=razon,
+    )
+    return MotorDispatchResponse(
+        job_id=job_id,
+        status=JobStatus.REJECTED,
+        motor="none",
+        capability=req.capability,
+        trace_id=req.trace_id,
+        rejected_reason=razon,
+    )
+
+
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     await _ensure_catalog_fresh()
@@ -156,28 +183,18 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     )
 
     if not result.allowed:
-        job_id = _STORE.create(
-            caller=req.caller,
-            capability=req.capability,
-            motor=result.resolved_motor or "none",
-            trace_id=req.trace_id,
-            prompt=req.prompt,
-            recursion_depth=req.recursion_depth,
+        return _rechazado(req, result.resolved_motor, result.reason)
+
+    # Human gate (2026-09-17): la política sólo mira que el token ESTÉ; acá se
+    # consume contra la base (un string inventado ya no aprueba). Va DESPUÉS
+    # de la política: un pedido que la política rechaza no quema el token.
+    cap = _CATALOG.get_capability(req.capability)
+    if cap is not None and cap.requires_human_gate:
+        veredicto = await human_gate.consumir_token_gate(
+            req.human_gate_token, uso=f"motor:{req.trace_id}"[:128],
         )
-        _STORE.update(
-            job_id,
-            status=JobStatus.REJECTED.value,
-            finished_at=time.time(),
-            error=result.reason,
-        )
-        return MotorDispatchResponse(
-            job_id=job_id,
-            status=JobStatus.REJECTED,
-            motor="none",
-            capability=req.capability,
-            trace_id=req.trace_id,
-            rejected_reason=result.reason,
-        )
+        if not veredicto.aceptado:
+            return _rechazado(req, result.resolved_motor, f"Human gate: {veredicto.motivo.value}")
 
     # La ruta del freno se resuelve en CADA dispatch y ANTES de crear el job:
     # sin la variable del freno el pedido falla cerrado sin dejar un job

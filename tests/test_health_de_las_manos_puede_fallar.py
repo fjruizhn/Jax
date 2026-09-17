@@ -156,7 +156,7 @@ class EndpointTest(unittest.TestCase):
         """Estar frenado a proposito es una decision, no una averia: no puede
         aparecer en la condicion del 503."""
         fuente = (RAIZ / "las_manos" / "server.py").read_text(encoding="utf-8")
-        cuerpo = fuente[fuente.index('async def health('):fuente.index('@app.post("/human_gate/token")')]
+        cuerpo = fuente[fuente.index('async def health('):fuente.index('@app.get("/audit/tail")')]
         self.assertIn('"kill_switch_active": _kill_switch_active()', cuerpo)
         condicion = cuerpo[cuerpo.index('if not estado["ok"]'):cuerpo.index("return {")]
         self.assertNotIn("kill_switch", condicion)

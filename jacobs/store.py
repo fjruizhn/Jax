@@ -693,6 +693,21 @@ async def init_tables() -> None:
                     INDEX idx_subpipeline_tokens_padre (parent_pipeline_id)
                 ) ENGINE=InnoDB
             """)
+            # Human gate de LAS MANOS (2026-09-17): mismo contrato que los tokens
+            # de sub-pipelines. SOLO el sha256; un solo uso; sin ruta HTTP de
+            # emisión (la emite las_manos/emitir_token_gate.py con la credencial
+            # de la base). Tabla nueva -> la PK es el único índice que usa el
+            # camino caliente (consumo por token_hash).
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS las_manos_human_gate_tokens (
+                    token_hash   CHAR(64)     NOT NULL PRIMARY KEY,
+                    emitido_por  VARCHAR(64)  NOT NULL,
+                    emitido_at   DOUBLE       NOT NULL,
+                    vence_at     DOUBLE       NOT NULL,
+                    usado_at     DOUBLE       NULL,
+                    usado_en     VARCHAR(128) NULL
+                ) ENGINE=InnoDB
+            """)
             # --- Indices de las columnas por las que se FILTRA ---------------
             # Las tres tablas nacieron con la PK y nada mas, y el codigo las
             # consulta por pipeline_id y por status. Con 611 filas el scan no
@@ -1198,6 +1213,59 @@ async def subpipeline_token_diagnostico(token_hash: str) -> dict | None:
     async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(SQL_DIAGNOSTICO_TOKEN, (token_hash,))
+            return await cur.fetchone()
+
+
+# ----------------------------------------------------------------
+#  Human gate de LAS MANOS (2026-09-17)
+# ----------------------------------------------------------------
+# Mismo patrón que el contrato de sub-pipelines: la decisión es UNA sentencia
+# autocommit (nada de SELECT-y-después-escribir); el diagnóstico solo rotula.
+
+SQL_EMITIR_TOKEN_GATE = """
+    INSERT INTO las_manos_human_gate_tokens
+        (token_hash, emitido_por, emitido_at, vence_at)
+    VALUES (%s, %s, %s, %s)
+"""
+
+# Candado de fila por PK: un segundo consumo concurrente espera, relee la
+# versión confirmada, ve usado_at puesto y afecta 0 filas. Probado con 20
+# consumos a la vez en las_manos/_human_gate_io_test.py.
+SQL_CONSUMIR_TOKEN_GATE = """
+    UPDATE las_manos_human_gate_tokens
+       SET usado_at = %s, usado_en = %s
+     WHERE token_hash = %s
+       AND usado_at IS NULL
+       AND vence_at > %s
+"""
+
+SQL_DIAGNOSTICO_TOKEN_GATE = """
+    SELECT usado_at, vence_at
+      FROM las_manos_human_gate_tokens
+     WHERE token_hash = %s
+"""
+
+
+async def human_gate_token_emitir(
+    token_hash: str, emitido_por: str, emitido_at: float, vence_at: float,
+) -> None:
+    async with conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(SQL_EMITIR_TOKEN_GATE, (token_hash, emitido_por, emitido_at, vence_at))
+
+
+async def human_gate_token_consumir(token_hash: str, usado_en: str, ahora: float) -> bool:
+    """True si ESTE llamador consumió el token (una fila afectada)."""
+    async with conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(SQL_CONSUMIR_TOKEN_GATE, (ahora, usado_en, token_hash, ahora))
+            return cur.rowcount == 1
+
+
+async def human_gate_token_diagnostico(token_hash: str) -> dict | None:
+    async with conexion() as conn:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(SQL_DIAGNOSTICO_TOKEN_GATE, (token_hash,))
             return await cur.fetchone()
 
 
