@@ -455,3 +455,25 @@ def test_un_vuelo_de_un_loop_cerrado_no_se_reusa_y_se_vuelve_a_sondear(monkeypat
     v = asyncio.run(pv.prevuelo([_paso(0, "jekyll")], {"objective": "o"}))
     assert v.ok and v.sondeadas == ("jekyll",)
     assert llamadas == ["jekyll", "jekyll"]
+
+    # Pasada R37, 2: las corrutinas que quedaron en el loop cerrado se
+    # destruyen al recolectarlas y, al cerrarse, intentan cancelar tareas de
+    # ese loop -> "Event loop is closed". Es el peor caso que este test arma a
+    # propósito: se recolectan ACÁ, bajo un hook que las espera, en vez de que
+    # el GC las suelte como PytestUnraisableExceptionWarning sobre otro test.
+    import gc
+    import sys
+
+    capturadas = []
+    hook_original = sys.unraisablehook
+    sys.unraisablehook = capturadas.append
+    try:
+        del viejo
+        monkeypatch.setattr(pv, "_sondas_en_vuelo", {})
+        for _ in range(3):
+            gc.collect()
+    finally:
+        sys.unraisablehook = hook_original
+    inesperadas = [c for c in capturadas
+                   if not (isinstance(c.exc_value, RuntimeError) and "Event loop is closed" in str(c.exc_value))]
+    assert capturadas and inesperadas == [], [(type(c.exc_value), c.exc_value) for c in capturadas]
