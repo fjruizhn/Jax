@@ -76,9 +76,6 @@ MAX_REINTENTOS_DEADLOCK = 12
 #: menos que lo que tarda planificar.
 ESPERA_MAXIMA_SEGUNDOS = 0.05
 
-#: Los estados que ocupan cupo. Mismo criterio que `store.pipeline_count_active`.
-ESTADOS_VIVOS = ("pending", "running")
-
 #: LA sentencia que decide. Una sola, autocommit, y se juzga por `rowcount`.
 #: `FROM DUAL` para que el SELECT no tenga tabla de origen: lo único que se lee
 #: es el COUNT del cupo.
@@ -106,8 +103,6 @@ UPDATE jacobs_pipelines
 #: es decoración: impide que un error de programación borre un pipeline que ya
 #: arrancó.
 SQL_SOLTAR = "DELETE FROM jacobs_pipelines WHERE pipeline_id = %s AND status = %s"
-
-SQL_ACTIVOS = "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')"
 
 
 class CupoAgotado(Exception):
@@ -211,9 +206,10 @@ async def activos() -> int:
     NO decide nada: la decisión es `reservar_cupo`. Esto sirve para el MENSAJE
     del rechazo (cuántos había) y para los tests. Usarlo para decidir sería
     volver a la lectura optimista que este módulo existe para borrar.
+
+    Delega en `store.pipeline_count_active()` a propósito: el criterio de "qué
+    ocupa cupo" no puede tener dos copias que se desincronicen. La única otra
+    aparición de esos estados es `SQL_RESERVAR`, que es la sentencia que decide
+    y no puede delegar en nadie.
     """
-    async with store.conexion() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(SQL_ACTIVOS)
-            fila = await cur.fetchone()
-            return int(fila[0]) if fila else 0
+    return await store.pipeline_count_active()

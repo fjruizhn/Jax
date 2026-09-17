@@ -392,6 +392,72 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado en código, merge y despliegue pendientes — el cupo de pipelines lo hace cumplir la base (2026-09-17)
+
+Rama `perf/candado-creacion-a-la-base` (desde `origin/master` `351ec95`). **NO mergeada, NO
+desplegada.** Decisión de Fernando (2026-09-17): se arregla de raíz ANTES de desplegar el frente G.
+
+**El hallazgo (frente G, Task 13, 2026-09-17).** `routes._pipeline_create_lock` era un
+`asyncio.Lock()` GLOBAL del proceso que envolvía el conteo de activos, el consumo del token de Ada,
+la planificación (20-40 s de LLM) y el INSERT. Hacía cumplir `MAX_PARALLEL_PIPELINES`, sí, pero
+serializaba TODA la creación en un solo objeto compartido: techo de ~43 delegaciones/s y la
+creación de pipelines de la MESA esperando detrás de las delegaciones de Ada.
+
+**El arreglo.** `jacobs/cupo.py`: el cupo lo hace cumplir la base en UNA sentencia que decide por
+filas afectadas — `INSERT ... SELECT ... WHERE (SELECT COUNT(*) …) < limite` —, el mismo patrón
+del consumo del token de sub-pipelines. 1 fila = hay cupo; 0 filas = el mismo rechazo explícito
+(422, mismo texto). La reserva se toma ANTES del token y ANTES de planificar, para conservar los
+**tres** invariantes que sostenía el candado y no sólo el del conteo:
+
+1. conteo + INSERT atómicos entre sí → los hace la base;
+2. ningún token de Ada se quema sin cupo → la reserva va primero;
+3. planificaciones en vuelo acotadas → ahora por el cupo (3), antes por el candado (1). De ahí
+   salía el cuello.
+
+Todo camino de fallo posterior suelta la reserva (`soltar_reserva`, `DELETE ... AND
+status='pending'`); si el proceso muere en el medio, el reaper cosecha lo `pending` de más de
+300 s, que ya existía.
+
+**Deadlock: parte del contrato, no un detalle.** El `INSERT ... SELECT` lee la tabla en la que
+inserta, así que dos reservas simultáneas se traban (1213) — y esos candados son justo lo que la
+hace correcta. Se reintenta. Medido en hall9000 contra `jax_memory_test` (2026-09-17): sin
+reintento mueren 5 de 10, 22 de 25 y 21 de 50 reservas concurrentes; con reintento, cero errores y
+p95 8,41 ms a c=50. **Bajo carga (25 VUs, ~2.900 reservas/s contra el cupo lleno) cinco reintentos
+se agotaron 711 veces y salieron como 500**; con doce y espera creciente hasta 50 ms, cero. Agotar
+los reintentos levanta el error: nunca devuelve "reservado" sin fila.
+
+**EXPLAIN (consulta REAL, no el diseño en la cabeza).** `idx_pipelines_status` YA EXISTÍA: sin
+migración. `EXPLAIN` del COUNT del cupo con 13.524 filas → `type=range key=idx_pipelines_status
+key_len=82 rows=2 Extra: Using where; Using index`. El test corre el `EXPLAIN` sobre
+`cupo.SQL_RESERVAR` entera con los mismos parámetros de producción y exige ese índice sin
+`filesort` ni `Using temporary`.
+
+**Arnés de carga arreglado en el mismo PR.** `loadtest/jacobs_subpipelines.js` había quedado
+obsoleto tras la autenticación de servicio: mandaba una sola credencial y `invoked_by='jax_local'`,
+así que **medía 403 a 28.000 rps** — FastAPI devolviendo un rechazo sin tocar la base ni el cupo.
+Ahora manda la credencial de la identidad que corresponde, consume tokens con `OFFSET` (un token se
+quema una sola vez; la segunda corrida medía "token ya usado") y `JAX_CARGA_PLAN_MS` representa lo
+que tarda planificar (con el plan instantáneo el cuello quedaba subestimado).
+
+**Pisos de CI (MEDICIONES LOCALES; manda el runner):** `tests-puros` 1598 → **1606** (+8,
+`tests/test_creacion_sin_candado_global.py`); `subpipeline-contrato-db` 109 → **119** (+10,
+`jacobs/_cupo_io_test.py`). Detector P10 en cero violaciones.
+
+- **PENDIENTE con fecha:**
+  - [ ] **2026-09-17** Rehacer la prueba de carga completa (antes y después, plan instantáneo y
+        planificador representado). La primera tanda se tomó y quedó **detenida a pedido del
+        coordinador**: otra sesión medía conexiones del pool contra la misma MariaDB `:3308` y las
+        dos mediciones se contaminaban. Los números provisionales están en el informe del
+        scratchpad de la sesión; **no se escriben acá hasta rehacerlos**, porque una prueba de
+        carga es VERDAD OPERACIONAL y una contaminada no es ninguna.
+  - [ ] **2026-09-17** Orden de merge contra el frente G: esa rama renombró el candado a
+        `routes.candado_de_creacion()` y agrega estados (`queued`, `awaiting_approval`,
+        `waiting_children`). **Si alguno de esos estados ocupa cupo, la lista `('pending','running')`
+        de `SQL_RESERVAR` tiene que crecer con ellos** o el cupo se cuenta mal. Decisión de Fernando.
+  - [ ] **2026-09-17** Merge-forward: la rama sale de `351ec95` y `origin/master` ya está en
+        `7957a99` (#204). Volver a medir los pisos después del merge-forward.
+
+
 ## Cerrado en código, merge y despliegue pendientes — human gate de LAS MANOS sin emisión HTTP (2026-09-17)
 
 - **HECHO (medido 2026-09-17, Mr. Hyde, rama `fix/human-gate-sin-auth` desde `c13d066`):** `POST /human_gate/token`
