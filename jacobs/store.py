@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import time
-import weakref
 from typing import Any
 
 import aiomysql
@@ -63,18 +62,34 @@ def _db_cfg() -> dict:
 # UN POOL POR EVENT LOOP, no un global unico -- misma trampa que resolvio
 # jax-platform (backend/db/connection.py): el pool de aiomysql queda atado al
 # loop que lo creo. En LAS MANOS hay un solo loop y una sola entrada; en los
-# tests cada IsolatedAsyncioTestCase trae su loop. WeakKeyDictionary: cuando un
-# loop muere su entrada se va sola.
+# tests cada IsolatedAsyncioTestCase trae su loop.
+#
+# REGISTRO: dict comun, NO WeakKeyDictionary. El Pool guarda una referencia
+# fuerte a su loop, asi que una entrada debil nunca se soltaba (revision
+# 2026-09-17: 5 `asyncio.run` dejaban 5 entradas vivas). La entrada la quita el
+# fin del loop (_guardian) o `cerrar_pool()`; como red, un pedido nuevo purga las
+# de loops ya cerrados.
+#
+# SEMAFORO PROPIO. Cada `conexion()` toma un permiso (hay `maxsize`) ANTES de
+# pedirle la conexion a aiomysql, y lo devuelve despues del release. Con eso el
+# `_acquire` de aiomysql nunca llega a `cond.wait()`: la espera por hueco es del
+# semaforo, que se libera sincronico y no pierde avisos. Antes se dependia de
+# `pool._wakeup()` (API privada) para despertar tras un descarte, y cancelar a
+# quien liberaba mientras esperaba ese aviso dejaba a los demas colgados hasta
+# el limite con una conexion libre (TimeoutError falso, probado).
 #
 # CICLO DE VIDA. Se crea perezosamente en el primer `conexion()` (en LAS MANOS,
 # init_tables() del startup) y se cierra en el shutdown de las_manos/server.py
 # con `cerrar_pool()`. Quien cree un loop propio (scripts, tests) lo cierra el;
 # si no, lo cierra el fin del loop (ver _guardian_del_pool).
-_pools: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, tuple[aiomysql.Pool, Any]]" = (
-    weakref.WeakKeyDictionary()
-)
-
 ENV_TAMANIO_POOL = "JAX_JACOBS_DB_POOL_SIZE"
+
+# Version de aiomysql cuyo pool se reviso a mano para este modulo
+# (aiomysql/pool.py: release() saca de _used antes de devolver y cierra una
+# conexion con transaccion abierta; _acquire solo espera en cond.wait si
+# size >= maxsize; connection.py: connect_timeout acota solo el socket). La fija
+# requirements.txt y la vigila jacobs/_store_pool_test.py::VersionDeAiomysqlTest.
+AIOMYSQL_REVISADO = "0.3.2"
 
 # Medido 2026-09-17 (loadtest/jacobs_subpipelines.js, app aislada sobre
 # jax_memory_test, pool-report.md del frente F): ver la tabla de tamanos en el
@@ -92,6 +107,20 @@ TAMANIO_POOL_MAXIMO = 50
 # servidor = 28800 s (medido el mismo dia): una hora queda muy por debajo, asi
 # que el pool nunca entrega una conexion que MariaDB ya corto por inactividad.
 _RECICLAR_SEGUNDOS = 3600
+
+
+class _PoolDelLoop:
+    """Lo que un loop tiene: el candado de creacion, y una vez creado, el pool,
+    su semaforo y el guardian que lo cierra al terminar el loop."""
+
+    def __init__(self) -> None:
+        self.candado = asyncio.Lock()
+        self.pool: aiomysql.Pool | None = None
+        self.permisos: asyncio.Semaphore | None = None
+        self.guardian: Any = None
+
+
+_pools: dict[asyncio.AbstractEventLoop, _PoolDelLoop] = {}
 
 
 def tamanio_pool() -> int:
@@ -114,11 +143,21 @@ def tamanio_pool() -> int:
     return valor
 
 
-async def obtener_pool() -> aiomysql.Pool:
-    """El pool de ESTE loop; lo crea si no hay o si el que habia se cerro."""
+async def _estado_del_loop() -> _PoolDelLoop:
+    """El estado de ESTE loop con el pool ya creado. Doble chequeo bajo un
+    candado por loop: 20 pedidos concurrentes en frio crean UN pool, no 20
+    (revision 2026-09-17, visto en rojo)."""
     loop = asyncio.get_running_loop()
-    entrada = _pools.get(loop)
-    if entrada is None or entrada[0].closed:
+    estado = _pools.get(loop)
+    if estado is None:
+        for viejo in [l for l in _pools if l.is_closed()]:
+            del _pools[viejo]
+        estado = _pools[loop] = _PoolDelLoop()
+    if estado.pool is not None and not estado.pool.closed:
+        return estado
+    async with estado.candado:
+        if estado.pool is not None and not estado.pool.closed:
+            return estado
         cfg = _db_cfg()
         maximo = tamanio_pool()
         pool = await aiomysql.create_pool(
@@ -130,14 +169,18 @@ async def obtener_pool() -> aiomysql.Pool:
             connect_timeout=db_connect_timeout_seconds(),
             **cfg,
         )
-        guardian = _guardian_del_pool(pool)
+        guardian = _guardian_del_pool(loop, estado, pool)
         await guardian.__anext__()
-        _pools[loop] = (pool, guardian)
-        return pool
-    return entrada[0]
+        estado.pool, estado.permisos, estado.guardian = pool, asyncio.Semaphore(maximo), guardian
+        return estado
 
 
-async def _guardian_del_pool(pool: aiomysql.Pool):
+async def obtener_pool() -> aiomysql.Pool:
+    """El pool de ESTE loop; lo crea si no hay o si el que habia se cerro."""
+    return (await _estado_del_loop()).pool
+
+
+async def _guardian_del_pool(loop, estado: _PoolDelLoop, pool: aiomysql.Pool):
     """Ata el cierre del pool al fin de SU loop.
 
     Un generador asincrono vivo queda registrado en el loop, y
@@ -150,42 +193,59 @@ async def _guardian_del_pool(pool: aiomysql.Pool):
     try:
         yield
     finally:
-        await _cerrar(pool)
+        if _pools.get(loop) is estado:
+            del _pools[loop]
+        await _cerrar(pool, estado.permisos)
 
 
-async def _cerrar(pool: aiomysql.Pool) -> None:
-    """Cierra esperando a que vuelvan las conexiones en uso, con limite: una
-    consulta colgada no puede dejar el apagado colgado. Vencido el limite, se
-    cortan a la fuerza (terminate) y queda ERROR en el log."""
+async def _cerrar(pool: aiomysql.Pool, permisos: asyncio.Semaphore | None) -> None:
+    """Toma los `maxsize` permisos con limite -- cuando los tiene, nadie esta
+    usando una conexion ni puede empezar a pedirla -- y cierra. Si vence el
+    limite (una consulta colgada no puede colgar el apagado), corta a la fuerza
+    (terminate) y deja ERROR en el log."""
     if pool.closed:
         return
-    pool.close()
     limite = db_connect_timeout_seconds()
-    try:
-        await asyncio.wait_for(pool.wait_closed(), timeout=limite)
-    except TimeoutError:
-        logger.error(
-            "jacobs.store: %d conexion(es) seguian en uso %d s despues de cerrar el "
-            "pool; se cortan a la fuerza.", pool.size - pool.freesize, limite,
-        )
+    tomados = 0
+    forzar = False
+    if permisos is not None:
+        try:
+            async with asyncio.timeout(limite):
+                while tomados < pool.maxsize:
+                    await permisos.acquire()
+                    tomados += 1
+        except TimeoutError:
+            forzar = True
+            logger.error(
+                "jacobs.store: %d conexion(es) seguian en uso %d s despues de pedir el "
+                "cierre del pool; se cortan a la fuerza.", pool.maxsize - tomados, limite,
+            )
+    pool.close()
+    if forzar:
         pool.terminate()
-        await pool.wait_closed()
+    await pool.wait_closed()
 
 
 async def cerrar_pool() -> None:
     """Cierra el pool DE ESTE loop (esperar el de otro loop volveria a cruzar
     loops). Idempotente."""
-    entrada = _pools.pop(asyncio.get_running_loop(), None)
-    if entrada is not None:
-        pool, guardian = entrada
-        await guardian.aclose()  # corre el finally: _cerrar(pool)
-        await _cerrar(pool)      # por si el guardian ya habia terminado
+    estado = _pools.pop(asyncio.get_running_loop(), None)
+    if estado is None or estado.pool is None:
+        return
+    await estado.guardian.aclose()               # corre el finally: _cerrar(...)
+    await _cerrar(estado.pool, estado.permisos)  # por si el guardian ya habia terminado
 
 
 def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
     """Solo vuelve al pool una sesion igual a la que el pool entrego: abierta,
-    autocommit encendido y sin transaccion en curso. aiomysql 0.3.2 solo mira
-    la transaccion; un `autocommit(False)` sin consulta pasaria."""
+    autocommit encendido y sin transaccion en curso. No se delega en aiomysql
+    (0.3.2 solo mira la transaccion; un `autocommit(False)` sin consulta pasaria).
+
+    CONTRATO DE `conexion()`: esto NO ve el resto del estado de sesion. Quien lo
+    cambia -- `SET SESSION ...`, `GET_LOCK()`, tablas `TEMPORARY`, `USE otra_base`,
+    variables de usuario `@x` de las que otro dependa -- pide
+    `conexion(desechable=True)`, y la conexion se cierra al salir en vez de
+    volver al pool con ese estado."""
     return (not conn.closed) and conn.get_autocommit() and not conn.get_transaction_status()
 
 
@@ -195,40 +255,43 @@ async def conexion(desechable: bool = False):
 
     Se DESCARTA (se cierra, el pool abre otra cuando haga falta) si el cuerpo
     termino con excepcion o cancelacion -- el socket puede haber quedado a mitad
-    de una respuesta --, si la sesion quedo sucia, o si `desechable=True` (para
-    quien cambia variables de sesion, como el DDL acotado de init_tables).
+    de una respuesta --, si la sesion quedo sucia, o si `desechable=True` (ver el
+    contrato en _sesion_reutilizable).
 
     Esperar un hueco tiene limite: `JAX_DB_CONNECT_TIMEOUT_SECONDS`, el mismo
     que acota abrir el socket. Con el pool lleno mas alla de eso, TimeoutError:
     fail-closed, no una espera infinita (aiomysql espera sin limite)."""
-    pool = await obtener_pool()
+    estado = await _estado_del_loop()
+    pool, permisos = estado.pool, estado.permisos
     limite = db_connect_timeout_seconds()
     try:
-        conn = await asyncio.wait_for(pool.acquire(), timeout=limite)
+        await asyncio.wait_for(permisos.acquire(), timeout=limite)
     except TimeoutError as e:
         raise TimeoutError(
             f"jacobs.store: sin conexion libre en el pool tras {limite} s "
             f"(tamano {pool.maxsize}, en uso {pool.size - pool.freesize})"
         ) from e
+    try:
+        # Con el permiso tomado hay hueco: esto no espera en cond.wait. El
+        # limite acota lo unico que puede tardar, abrir una conexion nueva.
+        conn = await asyncio.wait_for(pool.acquire(), timeout=limite)
+    except BaseException:
+        permisos.release()
+        raise
     limpia = False
     try:
         yield conn
         limpia = True
     finally:
-        descartar = desechable or not limpia or not _sesion_reutilizable(conn)
-        if descartar:
-            conn.close()
-        # release() es sincronico en lo que importa: saca la conexion de
-        # `_used` antes de devolver. Lo que se espera es el aviso a los que
-        # esperan hueco.
-        espera = pool.release(conn)
-        if descartar:
-            # aiomysql 0.3.2 NO despierta a quien espera cuando la conexion
-            # devuelta esta cerrada: con el pool lleno se quedaria colgado hasta
-            # el limite aunque ya hay hueco. Probado en _store_pool_test.py.
-            await pool._wakeup()
-        else:
-            await espera
+        try:
+            if desechable or not limpia or not _sesion_reutilizable(conn):
+                conn.close()
+            # release() saca la conexion de `_used` antes de devolver. El aviso
+            # que agenda es para el cond.wait de aiomysql, al que con el
+            # semaforo nadie llega: no se espera.
+            pool.release(conn)
+        finally:
+            permisos.release()
 
 
 # Hijo de "jacobs": LAS MANOS le pone handler INFO a ese logger al arrancar

@@ -187,6 +187,11 @@ jobs:
   # y un intercalado forzado con dos sesiones) y el EXPLAIN de la SQL real no
   # existen sin InnoDB de verdad. Un doble de la base daria verde sin probar
   # la atomicidad.
+  #
+  # Todo sale de requirements.txt (E-19; rebase del frente F sobre de6964e,
+  # 2026-09-17): jacobs/store.py depende de comportamiento de aiomysql revisado
+  # a mano, y jacobs/_store_pool_test.py::VersionDeAiomysqlTest falla si la
+  # instalada no es la revisada. Sin aiofiles (E-18 lo retiro).
   subpipeline-contrato-db:
     runs-on: ubuntu-latest
     services:
@@ -211,7 +216,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest aiomysql==0.3.2 pydantic httpx cryptography pyyaml aiofiles fastapi==0.139.0
+      - run: pip install -r requirements.txt pytest
       - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
@@ -241,8 +246,19 @@ jobs:
           #   acotados, el que espera se despierta, un pool por loop cerrado al fin
           #   del loop, tamano validado y server.py lo valida y lo cierra. Cada
           #   guarda validada por mutacion (pool-report.md del frente F).
-          grep -qE "^61 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 61 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 61 -> 71 el 2026-09-17 (revision de concurrencia del pool): +10 de
+          #   jacobs/_store_pool_test.py -- cancelar a quien libera no pierde el aviso
+          #   (rojo contra d50c9cd: TimeoutError falso con una conexion libre) y
+          #   cancelar a quien espera no bloquea al siguiente; 20 pedidos en frio crean
+          #   UN pool (rojo: 20); N loops terminados dejan 0 entradas (rojo: 6); la
+          #   transaccion abierta se descarta aunque aiomysql no lo haga; el permiso
+          #   vuelve si aiomysql falla al entregar; version de aiomysql = la revisada
+          #   y requirements la fija (rojo: sin constante); facet_policy y los dos
+          #   escritores de uso sin aiomysql.connect (rojo); 20 autorizaciones de facet
+          #   no abren 20 conexiones (rojo: 20). Medido: "71 passed" 35 corridas
+          #   seguidas con los tres archivos.
+          grep -qE "^71 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 71 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

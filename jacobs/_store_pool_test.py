@@ -75,6 +75,12 @@ class _ContadorDeConexiones:
         self._patch.stop()
 
 
+async def _a_lo_sumo(esperable, segundos: float = 15):
+    """Toda espera de un test con tareas va acotada: un defecto (o una mutacion)
+    tiene que dar un FAILED, no colgar la suite -- visto al mutar el semaforo."""
+    return await asyncio.wait_for(esperable, timeout=segundos)
+
+
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
 class _ConBase(unittest.IsolatedAsyncioTestCase):
     TAMANIO = "5"
@@ -182,7 +188,7 @@ class SinFugasTest(_ConBase):
         await asyncio.sleep(0.5)
         tarea.cancel()
         with self.assertRaises(asyncio.CancelledError):
-            await tarea
+            await _a_lo_sumo(tarea)
         self.assertTrue(capturada[0].closed, "el socket a mitad de respuesta volvio al pool")
         self.assertEqual(len(pool._used), 0)
         self.assertEqual((await ada.una_fila("SELECT 1 AS uno"))["uno"], 1)
@@ -203,6 +209,37 @@ class SinFugasTest(_ConBase):
             async with conn.cursor() as cur:
                 await cur.execute("SELECT 1")
         self.assertTrue(conn.closed)
+
+    async def test_transaccion_abierta_se_descarta_aunque_aiomysql_no_lo_haga(self):
+        """aiomysql 0.3.2 cierra en release() una conexion con transaccion
+        abierta; la garantia no puede depender de eso (ronda de revision
+        2026-09-17). Se simula un aiomysql que no mira la transaccion."""
+        original = aiomysql.Pool.release
+
+        def release_sin_mirar_transaccion(pool_self, conn):
+            with patch.object(type(conn), "get_transaction_status", return_value=False):
+                return original(pool_self, conn)
+
+        with patch.object(aiomysql.Pool, "release", release_sin_mirar_transaccion):
+            async with store.conexion() as conn:
+                await conn.begin()
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT 1")
+        pool = await store.obtener_pool()
+        self.assertTrue(conn.closed, "una sesion con transaccion abierta volvio al pool")
+        self.assertNotIn(conn, pool._free)
+
+    async def test_si_aiomysql_falla_al_entregar_el_permiso_vuelve(self):
+        """Sin devolver el permiso cuando `pool.acquire()` explota, cada falla
+        de la base se comeria un lugar del semaforo para siempre."""
+        n = int(self.TAMANIO) + 2
+        with patch.object(aiomysql.Pool, "acquire", side_effect=OSError("la base no esta")):
+            for _ in range(n):
+                with self.assertRaises(OSError):
+                    async with store.conexion():
+                        pass
+        with patch.dict(os.environ, {"JAX_DB_CONNECT_TIMEOUT_SECONDS": "1"}):
+            self.assertEqual((await ada.una_fila("SELECT 1 AS uno"))["uno"], 1)
 
     async def test_desechable_se_cierra_aunque_este_limpia(self):
         """Para quien cambia variables de sesion (el DDL acotado de init_tables)."""
@@ -268,9 +305,102 @@ class EsperaAcotadaTest(_ConBase):
             await asyncio.sleep(0.2)
             t0 = time.monotonic()
             liberar.set()
-            await tarea
+            await _a_lo_sumo(tarea)
             self.assertEqual(await asyncio.wait_for(espera, timeout=10), (1,))
             self.assertLess(time.monotonic() - t0, 2.0, "el que esperaba no se desperto")
+
+
+class AvisoPerdidoTest(_ConBase):
+    """Ronda de revision 2026-09-17: con el pool lleno, que se CANCELE a quien
+    libera o a quien espera no puede dejar a los demas esperando hasta el limite
+    con una conexion libre (TimeoutError falso)."""
+
+    TAMANIO = "1"
+
+    async def _tomar_con_timeout(self):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT 1")
+                return await cur.fetchone()
+
+    async def test_cancelar_al_que_libera_no_pierde_el_aviso(self):
+        with patch.dict(os.environ, {"JAX_DB_CONNECT_TIMEOUT_SECONDS": "3"}):
+            await self._tomar_con_timeout()  # calienta: la conexion ya existe
+            listo = asyncio.Event()
+            soltar = asyncio.Event()
+
+            async def dueño():
+                async with store.conexion():
+                    listo.set()
+                    await soltar.wait()
+                # Aca, ya fuera del cuerpo, se avisa a los que esperan.
+                await asyncio.sleep(3600)
+
+            a = asyncio.create_task(dueño())
+            await _a_lo_sumo(listo.wait())
+            espera = asyncio.create_task(self._tomar_con_timeout())
+            await asyncio.sleep(0.2)
+            soltar.set()
+            # Un solo turno del loop: el dueño sale del cuerpo y queda
+            # esperando el aviso; se lo cancela JUSTO ahi.
+            await asyncio.sleep(0)
+            a.cancel()
+            t0 = time.monotonic()
+            self.assertEqual(await _a_lo_sumo(espera), (1,))
+            self.assertLess(time.monotonic() - t0, 1.5, "el aviso se perdio con la cancelacion")
+            with self.assertRaises(asyncio.CancelledError):
+                await _a_lo_sumo(a)
+
+    async def test_cancelar_a_un_esperador_no_bloquea_al_siguiente(self):
+        with patch.dict(os.environ, {"JAX_DB_CONNECT_TIMEOUT_SECONDS": "3"}):
+            listo = asyncio.Event()
+            soltar = asyncio.Event()
+
+            async def dueño():
+                async with store.conexion():
+                    listo.set()
+                    await soltar.wait()
+
+            a = asyncio.create_task(dueño())
+            await _a_lo_sumo(listo.wait())
+            cancelado = asyncio.create_task(self._tomar_con_timeout())
+            await asyncio.sleep(0.1)
+            siguiente = asyncio.create_task(self._tomar_con_timeout())
+            await asyncio.sleep(0.1)
+            cancelado.cancel()
+            soltar.set()
+            t0 = time.monotonic()
+            self.assertEqual(await _a_lo_sumo(siguiente), (1,))
+            self.assertLess(time.monotonic() - t0, 1.5)
+            await _a_lo_sumo(a)
+            pool = await store.obtener_pool()
+            self.assertEqual(len(pool._used), 0)
+
+
+@unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
+class EnFrioTest(unittest.IsolatedAsyncioTestCase):
+    """SIN calentar en setUp: la carrera solo existe cuando no hay pool."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+
+    async def test_pedidos_concurrentes_en_frio_crean_un_solo_pool(self):
+        creados = []
+        original = aiomysql.create_pool
+
+        async def contar(*a, **kw):
+            p = await original(*a, **kw)
+            creados.append(p)
+            return p
+
+        with patch.object(store.aiomysql, "create_pool", contar):
+            pools = await asyncio.gather(*[store.obtener_pool() for _ in range(20)])
+        extra = [p for p in creados if p is not pools[0]]
+        for p in extra:  # no dejar sockets de los pools de la carrera
+            p.close()
+            await p.wait_closed()
+        self.assertEqual(len(creados), 1, f"{len(creados)} pools creados por 20 pedidos en frio")
+        self.assertEqual(len({id(p) for p in pools}), 1)
 
 
 class CicloDeVidaTest(_ConBase):
@@ -334,7 +464,7 @@ class CierreAcotadoTest(_ConBase):
                     await asyncio.sleep(30)
 
             tarea = asyncio.create_task(colgada())
-            await entro.wait()
+            await _a_lo_sumo(entro.wait())
             pool = await store.obtener_pool()
             t0 = time.monotonic()
             with self.assertLogs("jacobs.store", level="ERROR"):
@@ -344,7 +474,81 @@ class CierreAcotadoTest(_ConBase):
             self.assertTrue(capturada[0].closed)
             tarea.cancel()
             with self.assertRaises(asyncio.CancelledError):
-                await tarea
+                await _a_lo_sumo(tarea)
+
+
+@unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
+class RegistroDeLoopsTest(unittest.TestCase):
+    def test_n_loops_terminados_no_dejan_entradas_en_el_registro(self):
+        """El Pool retiene su loop: un WeakKeyDictionary nunca soltaba la
+        entrada. El fin del loop la quita."""
+        antes = len(store._pools)
+
+        async def uso_sin_cerrar():
+            await ada.una_fila("SELECT 1 AS uno")
+
+        for _ in range(5):
+            asyncio.run(uso_sin_cerrar())
+        self.assertEqual(len(store._pools), antes, "entradas de loops muertos en el registro")
+
+
+class VersionDeAiomysqlTest(unittest.TestCase):
+    """Puro. El pool depende de comportamiento de aiomysql revisado a mano
+    (release() que saca de _used antes de devolver, _acquire que solo espera en
+    cond.wait si el pool esta lleno, connect_timeout solo del socket). Otra
+    version puede cambiarlo sin que ningun test de logica lo note."""
+
+    def test_la_version_instalada_es_la_revisada(self):
+        self.assertEqual(
+            aiomysql.__version__, store.AIOMYSQL_REVISADO,
+            f"aiomysql {aiomysql.__version__} instalado, revisado {store.AIOMYSQL_REVISADO}: "
+            "jacobs/store.py (pool por loop con semaforo propio) asume el "
+            "comportamiento de release/_acquire/connect_timeout de la version "
+            "revisada. Releer aiomysql/pool.py y connection.py antes de subirla.",
+        )
+
+    def test_requirements_fija_la_version_revisada(self):
+        pins = [l.strip() for l in (RAIZ / "requirements.txt").read_text().splitlines()
+                if l.strip().lower().startswith("aiomysql")]
+        self.assertEqual(pins, [f"aiomysql=={store.AIOMYSQL_REVISADO}"])
+
+
+class MigradosAlPoolTest(unittest.TestCase):
+    """Puro: los modulos del camino de pedidos usan store.conexion(), no una
+    conexion suelta (ronda de revision 2026-09-17)."""
+
+    MIGRADOS = (
+        "las_manos/motor_registry/facet_policy.py",
+        "jacobs/usage_writer.py",
+        "las_manos/motor_registry/usage_writer.py",
+    )
+
+    def test_sin_aiomysql_connect(self):
+        for rel in self.MIGRADOS:
+            arbol = ast.parse((RAIZ / rel).read_text())
+            llamadas = [
+                n.lineno for n in ast.walk(arbol)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "connect"
+            ]
+            self.assertEqual(llamadas, [], f"{rel} abre conexiones sueltas en {llamadas}")
+            self.assertIn("conexion()", (RAIZ / rel).read_text(), rel)
+
+
+@unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
+class AdmisionDeFacetUsaElPoolTest(_ConBase):
+    async def test_autorizaciones_concurrentes_no_abren_una_conexion_cada_una(self):
+        from motor_registry.facet_policy import check_facet_admission
+
+        await store.obtener_pool()
+        with _ContadorDeConexiones() as c:
+            # return_exceptions: en el job de CI sin la tabla `facet` la
+            # consulta falla, pero la conexion ya se pidio -- lo que se cuenta.
+            await asyncio.gather(
+                *[check_facet_admission("jacobs", "hipatia") for _ in range(20)],
+                return_exceptions=True,
+            )
+        self.assertLessEqual(c.n, int(self.TAMANIO), f"{c.n} conexiones para 20 autorizaciones")
 
 
 class TamanioValidadoTest(unittest.TestCase):

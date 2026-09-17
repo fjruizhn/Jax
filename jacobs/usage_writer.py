@@ -5,9 +5,12 @@ compat, jax_local/ollama) cuando se invocan via un pipeline de Jacobs -- no
 via la Mesa web (esa ruta ya escribe axioma_usage desde jax-platform/backend/
 api/chat.py, Tasks 1-4).
 
-Mismo patron de conexion que credential_resolver.py/store.py/
-las_manos/motor_registry/usage_writer.py: cada repo se conecta a la misma DB
-jax_memory con su propio conector minimo, sin paquete compartido. jacobs NO
+CONEXION (2026-09-17): del pool compartido de Jacobs (`store.conexion`), no una
+conexion suelta por fila: esto corre tras cada step HTTP de un pipeline. Una
+falla del pool (base caida, pool agotado) sube como excepcion y toma el MISMO
+camino que antes tomaba un `aiomysql.connect` caido: la fila va a la cola
+durable. Antes: cada repo se conecta a la misma DB jax_memory con su propio
+conector minimo, sin paquete compartido. jacobs NO
 importa motor_registry (no esta en su sys.path standalone, ver comentario en
 jacobs/executor.py sobre el catalogo de capabilities) -- por eso este modulo
 es una copia adaptada, no un import cruzado.
@@ -28,19 +31,8 @@ se duplicaria en la ventana entre el INSERT y el borrado."""
 from __future__ import annotations
 
 import logging
-import os
 
-import aiomysql
-
-try:
-    # LAS MANOS produccion (cwd=las_manos, uvicorn) y jobs con PYTHONPATH
-    # incluyendo las_manos/: bare, resuelve a las_manos/db_connect_config.py
-    # (symlink) o directo si jacobs corre con las_manos en su propio path.
-    from db_connect_config import db_connect_timeout_seconds
-except ImportError:
-    # CI sin PYTHONPATH propio (p.ej. facet-health-io) y REPL: cwd=raiz del
-    # repo, solo el paquete jax.core es importable.
-    from jax.core.db_connect_config import db_connect_timeout_seconds
+from jacobs import store
 
 try:
     # Mismo doble import que db_connect_config, por la misma razon: en
@@ -66,27 +58,6 @@ def _entero_o_none(valor) -> int | None:
     except (TypeError, ValueError):
         logger.warning("tenant_id/user_id no numerico (%r) -- se encola como NULL", valor)
         return None
-
-
-def _db_cfg() -> dict:
-    host = os.environ.get("JAX_DB_HOST")
-    port = os.environ.get("JAX_DB_PORT")
-    if not host or not port:
-        raise RuntimeError(
-            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
-            "silencioso a localhost:3306 (esa instancia está muerta, ver "
-            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
-            "exportalos a mano antes de conectar."
-        )
-    return {
-        "host": host,
-        "port": int(port),
-        "user": os.getenv("JAX_DB_USER", ""),
-        "password": os.getenv("JAX_DB_PASSWORD", ""),
-        "db": os.getenv("JAX_DB_NAME", "jax_memory"),
-        "charset": "utf8mb4",
-        "autocommit": True,
-    }
 
 
 async def _lookup_model_price(conn, provider_id: str, model: str) -> tuple[float | None, float | None]:
@@ -143,11 +114,9 @@ async def record_direct_usage(
     creado_en = _ahora_iso()
     cost = None
     try:
-        # connect_timeout explícito (no en _db_cfg()): hallazgo de revisión,
-        # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
-        # aiomysql espera sin límite si la DB se cuelga.
-        conn = await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
-        try:
+        # Pool compartido (2026-09-17): el guard de JAX_DB_HOST/PORT, el
+        # connect_timeout y el limite de espera por hueco viven en store.
+        async with store.conexion() as conn:
             price_in, price_out = await _lookup_model_price(conn, provider_id, model)
             if price_in is not None and price_out is not None:
                 cost = (tokens_in * float(price_in) + tokens_out * float(price_out)) / 1_000_000
@@ -161,8 +130,6 @@ async def record_direct_usage(
                         facet, model, tokens_in, tokens_out, cost,
                     ),
                 )
-        finally:
-            conn.close()
         return
     except Exception as e:  # fail-soft: la contabilidad no puede tumbar un step ya completado; la fila va al respaldo, no a la basura
         motivo = f"{type(e).__name__}: {e}"

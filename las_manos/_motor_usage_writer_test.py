@@ -159,13 +159,38 @@ class MotorUsageWriterTest(unittest.IsolatedAsyncioTestCase):
         agota, escala a logger.error (no solo warning) -- máxima visibilidad
         posible desde este módulo, ver justificación en el código sobre por
         qué no jacobs_events (sin pipeline_id en este scope)."""
+        # Desde la cola durable (T7, 2026-09-15) agotar los intentos ENCOLA y
+        # loguea INFO; el ERROR es solo cuando tampoco se puede encolar. Este
+        # test quedo afirmando lo de antes y fallaba ya en eb72e78 (visto en la
+        # ronda del pool, 2026-09-17): se simula tambien la cola sin lugar. Y la
+        # base caida se simula en el POOL, que es por donde conecta el escritor.
+        import contextlib
         import unittest.mock as mock
-        with mock.patch("motor_registry.usage_writer.aiomysql.connect", side_effect=RuntimeError("DB caída")):
+
+        pedidos = []
+
+        def pool_caido(desechable=False):
+            pedidos.append(1)
+
+            @contextlib.asynccontextmanager
+            async def _ctx():
+                raise RuntimeError("DB caída")
+                yield  # pragma: no cover
+
+            return _ctx()
+
+        async def cola_sin_lugar(_fila):
+            return None
+
+        with mock.patch("jacobs.store.conexion", pool_caido), \
+                mock.patch("motor_registry.usage_writer.encolar_uso", cola_sin_lugar), \
+                mock.patch("motor_registry.usage_writer.asyncio.sleep", mock.AsyncMock()):
             with self.assertLogs("motor_registry.usage_writer", level="ERROR") as cm:
                 await usage_writer.record_motor_usage(
                     "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 100, 50,
                     job_id="job-4", status="completed",
                 )
+        self.assertEqual(len(pedidos), usage_writer._WRITE_MAX_ATTEMPTS)
         assert any("job-4" in m and "RuntimeError" in m for m in cm.output), cm.output
 
 
