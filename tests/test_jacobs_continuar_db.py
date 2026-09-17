@@ -106,14 +106,124 @@ def test_si_falla_a_mitad_no_cambia_nada(monkeypatch):
         pid = pipeline.pipeline_id
         try:
             pasos[2].facet = "thot"
+            evento = {"by": "plataforma", "from_status": "aborted", "run_epoch": 1,
+                      "pasos_a_correr": [2], "pasos_reusados": [0, 1], "reasignados": {},
+                      "costo_max_usd": "0.000000"}
             with pytest.raises(Exception):
                 await store.continuar_transaccion(
-                    pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2)
-            return await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2]
+                    pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
+                    evento_payload=evento)
+            return (await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2],
+                    await store.events_by_pipeline(pid))
         finally:
             await _borrar(pid)
-    p, s2 = asyncio.run(cuerpo())
+    p, s2, eventos = asyncio.run(cuerpo())
     assert (p.status, p.run_epoch) == (PipelineStatus.aborted, 0)
+    assert (s2.status, s2.facet, s2.error) == (StepStatus.failed, "jekyll", "cortado")
+    # Regla 10 / Ruling R22: la transacción caída no deja NINGÚN rastro, ni
+    # siquiera el evento de auditoría -- si el evento se escribiera con otra
+    # conexión (event_append() fuera de esta transacción) sobreviviría al
+    # rollback y este assert lo vería.
+    assert eventos == []
+
+
+def test_el_evento_continued_se_escribe_con_la_misma_transaccion():
+    async def cuerpo():
+        pipeline, pasos = await _abortado()
+        pid = pipeline.pipeline_id
+        try:
+            pasos[2].facet = "thot"
+            evento = {"by": "plataforma", "from_status": "aborted", "run_epoch": 1,
+                      "pasos_a_correr": [2], "pasos_reusados": [0, 1], "reasignados": {},
+                      "costo_max_usd": "0.000000"}
+            nueva = await store.continuar_transaccion(
+                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
+                evento_payload=evento)
+            eventos = await store.events_by_pipeline(pid)
+            return nueva, eventos
+        finally:
+            await _borrar(pid)
+    nueva, eventos = asyncio.run(cuerpo())
+    assert nueva == 1
+    assert [e["event_type"] for e in eventos] == ["PIPELINE_CONTINUED"]
+    assert eventos[0]["payload"] == {"by": "plataforma", "from_status": "aborted", "run_epoch": 1,
+                                     "pasos_a_correr": [2], "pasos_reusados": [0, 1], "reasignados": {},
+                                     "costo_max_usd": "0.000000"}
+
+
+def test_si_el_evento_falla_no_queda_el_pipeline_a_medias(monkeypatch):
+    # Ruling R22: si la escritura del evento fallara DESPUÉS del commit (como
+    # hacía 45d60ec con event_append() por fuera), el pipeline y los pasos
+    # quedarían escritos y el evento perdido -- un estado a medias. Con el
+    # evento adentro de la MISMA transacción, una falla ahí también hace
+    # ROLLBACK de todo: nada cambia, ni el pipeline, ni los pasos.
+    monkeypatch.setattr(store, "_SQL_EVENTO_CONTINUED",
+                        "INSERT INTO tabla_que_no_existe (pipeline_id, step_id, event_type, payload, ts) "
+                        "VALUES (%s,%s,%s,%s,%s)")
+
+    async def cuerpo():
+        pipeline, pasos = await _abortado()
+        pid = pipeline.pipeline_id
+        try:
+            pasos[2].facet = "thot"
+            evento = {"by": "plataforma", "from_status": "aborted", "run_epoch": 1,
+                      "pasos_a_correr": [2], "pasos_reusados": [0, 1], "reasignados": {},
+                      "costo_max_usd": "0.000000"}
+            with pytest.raises(Exception):
+                await store.continuar_transaccion(
+                    pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
+                    evento_payload=evento)
+            return (await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2],
+                    await store.events_by_pipeline(pid))
+        finally:
+            await _borrar(pid)
+    p, s2, eventos = asyncio.run(cuerpo())
+    assert (p.status, p.run_epoch) == (PipelineStatus.aborted, 0)
+    assert (s2.status, s2.facet, s2.error) == (StepStatus.failed, "jekyll", "cortado")
+    assert eventos == []
+
+
+def test_status_distinto_con_la_misma_epoca_no_gana():
+    # Requisito (a) — mutación: si el chequeo sólo mirara la época y no el
+    # status, esta llamada (época correcta, status equivocado a propósito)
+    # ganaría la transacción igual.
+    async def cuerpo():
+        pipeline, pasos = await _abortado()
+        pid = pipeline.pipeline_id
+        try:
+            pasos[2].facet = "thot"
+            nueva = await store.continuar_transaccion(
+                pid, 0, PipelineStatus.expired, [pasos[2]], pasos, pipeline.context, 2)
+            return nueva, await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2]
+        finally:
+            await _borrar(pid)
+    nueva, p, s2 = asyncio.run(cuerpo())
+    assert nueva is None
+    assert (p.status, p.run_epoch) == (PipelineStatus.aborted, 0)
+    assert (s2.status, s2.facet) == (StepStatus.failed, "jekyll")
+
+
+def test_si_el_update_final_no_toca_la_fila_no_queda_nada(monkeypatch):
+    # Ruling R23 -- cinturón: aunque el SELECT...FOR UPDATE ya vio la fila
+    # con la época correcta, mutamos el UPDATE final para que no toque
+    # ninguna fila (condición imposible añadida) SIN lanzar excepción. Si el
+    # código no revisara rowcount, devolvería la época nueva con nada escrito.
+    monkeypatch.setattr(store, "_SQL_PIPELINE_CONTINUAR", store._SQL_PIPELINE_CONTINUAR + " AND 1=0")
+
+    async def cuerpo():
+        pipeline, pasos = await _abortado()
+        pid = pipeline.pipeline_id
+        try:
+            pasos[2].facet = "thot"
+            nueva = await store.continuar_transaccion(
+                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2)
+            return nueva, await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2]
+        finally:
+            await _borrar(pid)
+    nueva, p, s2 = asyncio.run(cuerpo())
+    assert nueva is None
+    assert (p.status, p.run_epoch) == (PipelineStatus.aborted, 0)
+    # Rollback COMPLETO: ni siquiera el UPDATE de jacobs_steps quedó.
     assert (s2.status, s2.facet, s2.error) == (StepStatus.failed, "jekyll", "cortado")
 
 

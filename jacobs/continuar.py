@@ -198,9 +198,19 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
             })
 
         indice = min(a.pasos_a_correr) if a.pasos_a_correr else len(a.plan)
+        # Regla 10 (Ruling R22): el evento va DENTRO de la misma transacción
+        # que escribe los pasos y el pipeline, no después del commit. La
+        # época nueva se conoce de antemano (epoca_leida+1, bajo el
+        # SELECT...FOR UPDATE de la transacción): si la transacción pierde la
+        # carrera devuelve None y este payload nunca se inserta.
+        evento_payload = {
+            "by": invoked_by, "from_status": a.pipeline.status.value, "run_epoch": a.pipeline.run_epoch + 1,
+            **_pasos(a), "reasignados": a.reasignados, "costo_max_usd": formatear_usd(veredicto.costo_max_usd),
+        }
         nueva = await store.continuar_transaccion(
             pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
             [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
+            evento_payload=evento_payload,
         )
         if nueva is None:
             raise ContinuarRechazado(409, "estado_no_continuable", {
@@ -210,10 +220,6 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
         continuado = a.pipeline.model_copy(update={
             "plan": a.plan, "context": a.contexto, "status": PipelineStatus.running,
             "run_epoch": nueva, "current_step_index": indice,
-        })
-        await store.event_append(pipeline_id, "PIPELINE_CONTINUED", {
-            "by": invoked_by, "from_status": a.pipeline.status.value, "run_epoch": nueva,
-            **_pasos(a), "reasignados": a.reasignados, "costo_max_usd": formatear_usd(veredicto.costo_max_usd),
         })
 
     respuesta = {

@@ -1109,8 +1109,28 @@ jobs:
           #   explica el motivo, y el costo cero no queda pelado ("0.000000",
           #   mismo hallazgo de R18 que ya se había arreglado en /preflight).
           #   Vistos en rojo (ImportError) antes de crear jacobs/continuar.py.
-          grep -qE "^894 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 894 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 894 -> 906 el 2026-09-17 (Task 10, fix round 1 reanudada): +12 en
+          #   test_jacobs_continuar.py -- requisito (b) (I1): el contexto que
+          #   recibe prevuelo() no lleva refs de pasos a rehacer, y con
+          #   prevuelo() REAL (catálogo y sonda mockeados) el dependiente de un
+          #   paso rehecho se costea al peor caso (MAX_DEP_CONTEXT_CHARS+1), no
+          #   al tamaño de la ref vieja. El resto son las 12 mutaciones de I2
+          #   que quedaban verdes: plan_inconsistente (409), plan_rechazado vs.
+          #   reasignacion_invalida cuando NO hay reasignación pedida,
+          #   _validate_plan_capabilities/PlanRejected -> 422, costo ACEPTADO
+          #   == costo COMPUTADO no rechaza (> vs >=), current_step_index es el
+          #   mínimo de los pasos a correr (no 0 fijo), user_id/tenant_id
+          #   explícitos pisan los del pipeline, la lectura de ref corre por
+          #   asyncio.to_thread, y en previsualizar: un error del pre-vuelo se
+          #   propaga (no se traga), 403/404 se relanzan, el motivo
+          #   prevuelo_rechazado no se pierde, y el veredicto va presente
+          #   junto con motivo.code prevuelo_rechazado o limite_de_activos
+          #   (null solo cuando el rechazo es previo al pre-vuelo). Cada
+          #   mutación se vio en rojo contra el código final y se revirtió
+          #   (evidencia en task-10-report.md, sección "Fix round 1
+          #   (reanudada)").
+          grep -qE "^906 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 906 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1248,5 +1268,20 @@ jobs:
           #   la misma época: gana una sola; diez continue concurrentes sobre el
           #   mismo pipeline: gana uno solo, los otros nueve dan 409. Vistos en rojo
           #   (ImportError) antes de crear jacobs/continuar.py y store.continuar_transaccion.
-          grep -qE "^57 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 57 tests CORRIDOS."; exit 1; }
+          # 57 -> 61 el 2026-09-17 (Task 10, fix round 1 reanudada, I3/Ruling R22):
+          #   +4 en test_jacobs_continuar_db.py -- el status (no solo la época) se
+          #   verifica bajo el candado (misma época, status distinto -> None, nada
+          #   cambia); el evento PIPELINE_CONTINUED se escribe con el MISMO cursor
+          #   de la transacción (EXPLAIN implícito en la ausencia de una segunda
+          #   conexión); si la escritura del evento falla, TODO se revierte -- ni
+          #   el pipeline ni los pasos quedan a medias (rojo: simulando el diseño
+          #   de 45d60ec -- evento por una conexión separada DESPUÉS del commit --
+          #   el pipeline queda 'running' sin evento, un estado a medias real); y
+          #   Ruling R23: si el UPDATE final no toca la fila (mutación con
+          #   "AND 1=0" sin lanzar excepción) el cinturón por rowcount hace
+          #   rollback y devuelve None, sin dejar el UPDATE de pasos aplicado.
+          #   Extendido el test de fallo a mitad para confirmar que tampoco deja
+          #   evento. Vistos en rojo contra el código final mutado (evidencia en
+          #   task-10-report.md, sección "Fix round 1 (reanudada)").
+          grep -qE "^61 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 61 tests CORRIDOS."; exit 1; }

@@ -508,6 +508,12 @@ _SQL_PIPELINE_CONTINUAR = (
 )
 
 
+_SQL_EVENTO_CONTINUED = (
+    "INSERT INTO jacobs_events (pipeline_id, step_id, event_type, payload, ts) "
+    "VALUES (%s,%s,%s,%s,%s)"
+)
+
+
 async def continuar_transaccion(
     pipeline_id: str,
     epoca_leida: int,
@@ -516,13 +522,19 @@ async def continuar_transaccion(
     plan: list[Step],
     context: dict,
     current_step_index: int,
+    evento_payload: dict | None = None,
 ) -> int | None:
     """Escrituras de continue en UNA transacción (spec 2026-09-17 §5.2 regla
     10): bloquea la fila del pipeline, confirma que nadie la cambió desde el
     análisis (misma época y mismo status), resetea los pasos a correr, reescribe
-    plan y contexto, pone running e incrementa la época. Devuelve la época
-    nueva, o None si otro pedido ganó. Un error a mitad hace ROLLBACK: nada
-    cambia."""
+    plan y contexto, pone running e incrementa la época, y -- si se pasa
+    `evento_payload` -- inserta el evento PIPELINE_CONTINUED con el MISMO
+    cursor, antes del commit (Ruling R22: regla 10 lo exige dentro de la
+    transacción, no después). Devuelve la época nueva, o None si otro pedido
+    ganó (época/status ya no coinciden, o -- cinturón, Ruling R23 -- el UPDATE
+    final no tocó la fila que el SELECT...FOR UPDATE acababa de ver). Un error
+    a mitad hace ROLLBACK: nada cambia, ni los pasos, ni el pipeline, ni el
+    evento."""
     conn = await get_conn(found_rows=True)
     try:
         await conn.begin()
@@ -535,11 +547,23 @@ async def continuar_transaccion(
                     return None
                 for paso in pasos_a_correr:
                     await cur.execute(_SQL_PASO_A_CORRER, (paso.facet, paso.motor, paso.step_id, pipeline_id))
-                await cur.execute(_SQL_PIPELINE_CONTINUAR, (
+                filas_pipeline = await cur.execute(_SQL_PIPELINE_CONTINUAR, (
                     json.dumps([s.model_dump() for s in plan], ensure_ascii=False),
                     json.dumps(context, ensure_ascii=False),
                     current_step_index, time.time(), pipeline_id, epoca_leida,
                 ))
+                # R23: el SELECT...FOR UPDATE ya lo garantiza (misma fila,
+                # bajo lock, época/status verificados arriba) -- esto es el
+                # cinturón explícito del requisito (a), no una rama que se
+                # espere alcanzar en producción.
+                if filas_pipeline != 1:
+                    await conn.rollback()
+                    return None
+                if evento_payload is not None:
+                    await cur.execute(_SQL_EVENTO_CONTINUED, (
+                        pipeline_id, None, "PIPELINE_CONTINUED",
+                        json.dumps(evento_payload, ensure_ascii=False), time.time(),
+                    ))
             await conn.commit()
         except BaseException:
             await conn.rollback()
