@@ -215,6 +215,18 @@ async def preflight(req: PreflightRequest) -> dict:
             "code": "invocador_no_autorizado",
             "detalle": f"invoked_by '{req.invoked_by}' no autorizado",
         })
+    # I1 / Ruling R54 (2026-09-17): el pre-vuelo GASTA -- la sonda paga una
+    # llamada por cada clave sin evento `ok` fresco y la registra en
+    # axioma_usage (spec §4.5) -- así que el kill switch lo frena como a todo
+    # camino que gasta. Era el único que no lo miraba: el desvío 6 del plan lo
+    # justificaba con "no ejecuta nada", cierto antes de que entrara la sonda.
+    # Va DESPUÉS de validar invoked_by (un invocador no autorizado no se entera
+    # de si Jacobs está frenado) y ANTES de build().
+    if check_kill_switch():
+        raise HTTPException(status_code=423, detail={
+            "code": "kill_switch",
+            "detalle": "Kill switch activo — Jacobs detenido",
+        })
     if len(req.steps) > 20:
         raise HTTPException(status_code=422, detail={
             "code": "plan_rechazado",

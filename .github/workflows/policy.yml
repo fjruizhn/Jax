@@ -1530,8 +1530,13 @@ jobs:
           #   nunca hay más conexiones abiertas y sin cerrar que el tamaño del pool. Fija en
           #   proceso lo que R53 midió afuera: las 11 conexiones del proceso eran 10 a
           #   MariaDB + 1 socket HTTP entrante del propio servicio.
-          grep -qE "^1126 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1126 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1126 -> 1128 el 2026-09-17 (I1 / Ruling R54): +2 en
+          #   test_jacobs_preflight_endpoint.py -- /jacobs/preflight con el kill switch activo
+          #   da 423 {"code":"kill_switch"} sin planificar ni sondear (rojo contra f24edc1:
+          #   DID NOT RAISE, el pre-vuelo corría y pagaba), y con un invocador no autorizado
+          #   sigue ganando el 403 (el orden del chequeo).
+          grep -qE "^1128 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1128 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

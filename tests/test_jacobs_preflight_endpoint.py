@@ -142,6 +142,35 @@ def test_preflight_rechaza_un_invocador_no_valido_con_403():
     m["prevuelo"].assert_not_awaited()
 
 
+def test_preflight_con_kill_switch_da_423_sin_planificar_ni_sondear():
+    """I1 / Ruling R54: el pre-vuelo GASTA (la sonda paga y escribe
+    axioma_usage), así que el kill switch también lo frena -- era el único
+    camino que gastaba sin mirarlo. 423 con dict, como el resto de los
+    rechazos de este endpoint (R17), después de validar invoked_by y antes de
+    build(). Expected contra f24edc1: el pre-vuelo corre igual (200)."""
+    with ExitStack() as pila:
+        m = _parches(pila)
+        pila.enter_context(patch.object(routes, "check_kill_switch", return_value=True))
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(routes.preflight(routes.PreflightRequest(invoked_by="plataforma", steps=_spec())))
+    assert e.value.status_code == 423
+    assert e.value.detail["code"] == "kill_switch"
+    assert "detenido" in e.value.detail["detalle"]
+    m["build"].assert_not_awaited()
+    m["prevuelo"].assert_not_awaited()
+
+
+def test_preflight_con_invocador_invalido_y_kill_switch_responde_403_primero():
+    """El orden del fix: invoked_by se valida ANTES del kill switch (un
+    invocador no autorizado no aprende si Jacobs está frenado)."""
+    with ExitStack() as pila:
+        _parches(pila)
+        pila.enter_context(patch.object(routes, "check_kill_switch", return_value=True))
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(routes.preflight(routes.PreflightRequest(invoked_by="Fernando", steps=_spec())))
+    assert e.value.status_code == 403
+
+
 def test_preflight_rechaza_mas_de_20_pasos_con_422():
     """Ruling R17: el tope duro de 20 pasos también va como dict
     {code: "plan_rechazado", detalle}."""
