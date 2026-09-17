@@ -1232,3 +1232,18 @@ def test_el_ejecutor_y_el_motor_registry_comparten_la_misma_marca_de_turno():
     with worker.espera_de_turno_sin_plazo():
         assert store.turno_sin_plazo() is True
     assert store.turno_sin_plazo() is False
+
+
+def test_el_candado_de_creacion_declara_lo_que_serializa_hoy(entorno, monkeypatch):
+    """m6: el comentario de T2 describía una sección crítica más chica que la
+    real (hoy cubre build + pre-vuelo con sondas + transacción, y continuar
+    toma el mismo objeto). Se fija que el texto lo diga y que el objeto sea
+    realmente compartido. Expected contra 977fbe0: el texto no menciona el
+    pre-vuelo ni la sonda."""
+    from jacobs import candado
+
+    texto = (RAIZ / "jacobs" / "candado.py").read_text(encoding="utf-8")
+    for parte in ("pre-vuelo", "sonda", "continuar", "MISMO objeto"):
+        assert parte in texto, parte
+    assert continuar.candado_de_creacion is candado.candado_de_creacion
+    assert routes._pipeline_create_lock is candado.candado_de_creacion

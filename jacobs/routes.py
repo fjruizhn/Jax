@@ -60,6 +60,10 @@ _plan_builder = PlanBuilder()
 # sección crítica) tarda 20-40s llamando a un LLM externo -- mantener esa
 # transacción/fila lockeada todo ese tiempo arriesgaría agotar el pool de
 # conexiones bajo carga real; un lock en memoria no reserva conexión DB.
+# m6 (re-revisión final, 2026-09-17): hoy la sección crítica es más grande que
+# lo que dice el párrafo de arriba -- cubre build() + el pre-vuelo con sus
+# sondas + la transacción, y continuar.py toma el MISMO objeto. El inventario
+# completo y por qué se deja así está en jacobs/candado.py.
 from jacobs.candado import candado_de_creacion as _pipeline_create_lock  # noqa: E402  (2026-09-17: compartido con continuar.py)
 
 

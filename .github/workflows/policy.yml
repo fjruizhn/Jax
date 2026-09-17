@@ -1555,8 +1555,13 @@ jobs:
           #   jacobs/usage_writer.py deja de leerse como que no existe ningún import cruzado
           #   (rojo contra 49ea939: no estaba declarada); control de que el ejecutor y el
           #   Motor Registry comparten la MISMA ContextVar (el riesgo de moverla a jax/core).
-          grep -qE "^1134 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1134 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1134 -> 1135 el 2026-09-17 (re-revisión final, m6): +1 en
+          #   test_jacobs_conexiones_por_pedido.py -- jacobs/candado.py declara lo que el
+          #   asyncio.Lock serializa HOY (build + pre-vuelo con sondas + transacción, y
+          #   continuar toma el mismo objeto) y el test fija el texto y la identidad del
+          #   objeto. Rojo contra 977fbe0: el texto no mencionaba el pre-vuelo ni la sonda.
+          grep -qE "^1135 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1135 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
