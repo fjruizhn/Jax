@@ -67,6 +67,21 @@ os.environ["JAX_OLLAMA_URL"] = "http://ollama.invalid:11434"
 #: puede dejar ahí un documento de mentira: mismo criterio que el respaldo de uso.
 os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
 
+#: 2026-09-17: `jax/core/facet_resolver.py` y `las_manos/facet_resolver.py`
+#: leen JAX_FACET_SEAL_PATH al importarse, con default
+#: /srv/jax-data/facet-cache-seal -- el sello REAL que jax-platform y LAS
+#: MANOS usan para invalidar el caché de facetas. Sin esto, cualquier test
+#: local que dispare una invalidación de facetas (o una migración que la
+#: dispare) le toca el mtime al archivo de producción -- pasó el
+#: 2026-09-17 01:51:21. Asignación DIRECTA, no `setdefault`: si alguien
+#: llega con JAX_FACET_SEAL_PATH ya apuntando a /srv (p.ej. el .env de
+#: producción sourceado antes de invocar pytest), `setdefault` lo
+#: respetaría; el conftest tiene que pisarlo igual.
+#: tests/test_conftest_aisla_facet_seal.py lo vigila.
+os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
+    tempfile.mkdtemp(prefix="jax-test-facet-seal-"), "facet-cache-seal"
+)
+
 
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
     """Los archivos de `directorio` (y sus subdirectorios, que es donde

@@ -621,6 +621,7 @@ jobs:
           tests/test_sin_autoetiqueta.py
           tests/test_errores_de_proveedor_redactados.py
           tests/test_cliente_http_compartido.py
+          tests/test_conftest_aisla_facet_seal.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -673,6 +674,7 @@ jobs:
             tests/test_sin_autoetiqueta.py \
             tests/test_errores_de_proveedor_redactados.py \
             tests/test_cliente_http_compartido.py \
+            tests/test_conftest_aisla_facet_seal.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -971,8 +973,16 @@ jobs:
           #   checkout de jax-platform): "850 passed, 1 skipped, 1 xfailed", dos
           #   corridas; master en el mismo entorno da 742/1, igual que su runner.
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^850 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 850 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 850 -> 853 el 2026-09-17 (aislamiento de JAX_FACET_SEAL_PATH en el
+          #   conftest): +3 en tests/test_conftest_aisla_facet_seal.py (nuevo
+          #   -- ver DEUDA.md/CONTEXT.md). Delta medido local (3.14): 851/1
+          #   xfailed/0 skipped sin el archivo, 854/1 xfailed/0 skipped con
+          #   el archivo -- el +3 es lo que importa acá; el 1 skipped que
+          #   documentaba el corte anterior es un drift preexistente de este
+          #   entorno (3.14 vs el runner en 3.12), no algo que este cambio
+          #   toque. Si el runner da otro numero, manda el runner.
+          grep -qE "^853 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 853 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
