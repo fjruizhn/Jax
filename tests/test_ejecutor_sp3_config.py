@@ -1,5 +1,5 @@
 # tests/test_ejecutor_sp3_config.py
-"""SP3 del Ejecutor (2026-09-17): los números de ops/ejecutor/sp3_entorno.env y los freno de los
+"""SP3 del Ejecutor (2026-09-17): los números de ops/ejecutor/sp3_entorno.conf y los freno de los
 dos scripts de despliegue. Spec de Fase 2 §6.3.
 
 La cuenta: una petición del Ejecutor en curso NO se interrumpe, así que la Mesa espera, en el peor
@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
-ENTORNO = RAIZ / "ops" / "ejecutor" / "sp3_entorno.env"
+ENTORNO = RAIZ / "ops" / "ejecutor" / "sp3_entorno.conf"
 ESPERA_MAXIMA_V3_S = 60.0
 MARGEN = 0.8
 

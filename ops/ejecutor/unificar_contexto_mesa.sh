@@ -20,8 +20,8 @@
 #   --restaurar-dump DIR   ÚLTIMO RECURSO: reimporta facet_binding desde el dump de DIR. Exige
 #                          JAX_SP3_CONFIRMO_RESTAURAR_DUMP=<nombre de DIR> y estampa el sello.
 #
-# ENTORNO: /etc/jax/.env (DB, JAX_OLLAMA_URL, JAX_PLATFORM_URL) + ops/ejecutor/sp3_entorno.env.
-#   set -a; . /etc/jax/.env; . ops/ejecutor/sp3_entorno.env; set +a
+# ENTORNO: /etc/jax/.env (DB, JAX_OLLAMA_URL, JAX_PLATFORM_URL) + ops/ejecutor/sp3_entorno.conf.
+#   set -a; . /etc/jax/.env; . ops/ejecutor/sp3_entorno.conf; set +a
 # Para --aplicar/--revertir: JAX_ADMIN_TOKEN_ARCHIVO = archivo 0600 con el access token de un
 # superadmin (dura 15 min). El token nunca va en argv (`ps` lo vería): va en una cabecera leída
 # de un archivo temporal 0600.

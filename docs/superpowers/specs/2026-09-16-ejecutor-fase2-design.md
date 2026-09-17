@@ -407,7 +407,7 @@ por el mismo `_call_ollama`. Unificar en 131072 le cuesta a la Mesa −2 % de le
 2. **Proxy** (jax): fija el modelo (`JAX_PROXY_CARRIL_MODELO`; otro → 403 sin tocar Ollama), fija el tope
    de salida (`JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS`; más → 403) y sólo deja pasar `HEAD /api/hello` y
    `POST /v1/messages` (medido: lo único que manda el arnés 2.1.273). Un error a un HEAD sale sin cuerpo.
-3. **Tope de contexto** en `ops/ejecutor/sp3_entorno.env`, con la cuenta de abajo rehecha por
+3. **Tope de contexto** en `ops/ejecutor/sp3_entorno.conf`, con la cuenta de abajo rehecha por
    `tests/test_ejecutor_sp3_config.py`.
 4. **`ops/ejecutor/unificar_contexto_mesa.sh`**: respaldo de `facet_binding`/`model` con restauración
    PROBADA en un MariaDB descartable (hecho 2026-09-17 05:29, checksums iguales; control negativo con un
@@ -442,7 +442,7 @@ Umbral V3: 60 s; objetivo con margen: **≤ 48 s**.
   de leer el prompt al cerrarse la conexión: se mide con G1, no se supone.
 
 **Orden de despliegue** (reservado a un GO; nada de esto se ejecutó salvo `--probar-respaldo`):
-jax-platform primero (el job `mirror-sync` de jax clona su master) → agregar `sp3_entorno.env` a
+jax-platform primero (el job `mirror-sync` de jax clona su master) → agregar `sp3_entorno.conf` a
 `/etc/jax/.env` con respaldo → reiniciar jax-platform (con `ActiveEnterTimestamp` vs commits) → jax →
 reiniciar `jax-ejecutor-proxy` (sin las dos variables nuevas NO arranca) → `instalar_carril_comun.sh` →
 `unificar_contexto_mesa.sh --aplicar` con cero uso real.
