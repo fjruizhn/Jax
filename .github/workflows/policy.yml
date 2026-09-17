@@ -992,6 +992,7 @@ jobs:
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
+          tests/test_run_epoch_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1000,6 +1001,7 @@ jobs:
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
+            tests/test_run_epoch_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1016,5 +1018,8 @@ jobs:
           #   test_contrato_dispatch_db.py deja de depender de filas sembradas: cada
           #   test crea y borra SU fila de `model` (glm-5.2 no existe con la semilla
           #   de PR-L y rompio este job en Jax#158).
-          grep -qE "^27 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 27 tests CORRIDOS."; exit 1; }
+          # 27 -> 33 el 2026-09-17 (época de corrida): test_run_epoch_db.py (+6) -- columna,
+          #   UPDATE condicional por época y status, pasos condicionales, incremento único
+          #   y EXPLAIN por PRIMARY.
+          grep -qE "^33 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 33 tests CORRIDOS."; exit 1; }

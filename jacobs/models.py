@@ -98,6 +98,11 @@ class Pipeline(BaseModel):
     plan:               list[Step] = Field(default_factory=list)
     plan_version:       int = 1
     current_step_index: int = 0
+    # Época de corrida (spec 2026-09-17 §5.3): la toma cada ejecutor al
+    # arrancar; resume, approve-step y continue la INCREMENTAN. Toda escritura
+    # del ejecutor es condicional a su época y a status='running': una corrida
+    # superada (cancelada, vencida, continuada por otro) no escribe nada.
+    run_epoch:          int = 0
     max_steps:          int = 20
     context:            dict[str, Any] = Field(default_factory=dict)
     created_at:         float = 0.0

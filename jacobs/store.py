@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 import aiomysql
+from pymysql.constants import CLIENT
 
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 
@@ -48,11 +49,18 @@ def _db_cfg() -> dict:
     }
 
 
-async def get_conn() -> aiomysql.Connection:
+async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
     # connect_timeout explícito (no en _db_cfg()): hallazgo de revisión,
     # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
     # aiomysql espera sin límite si la DB se cuelga.
-    return await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
+    #
+    # found_rows (2026-09-17, época de corrida): por defecto MariaDB devuelve
+    # las filas CAMBIADAS de un UPDATE, no las que cumplen el WHERE. Un UPDATE
+    # condicional que escribe los mismos valores devolvería 0 y el ejecutor
+    # creería haber perdido la época. Con CLIENT.FOUND_ROWS el conteo es de
+    # filas encontradas.
+    extra = {"client_flag": CLIENT.FOUND_ROWS} if found_rows else {}
+    return await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds(), **extra)
 
 
 # Hijo de "jacobs": LAS MANOS le pone handler INFO a ese logger al arrancar
@@ -160,6 +168,8 @@ async def init_tables() -> None:
                 # Ronda 5 (2026-08-20, T1): reemplaza el owner file de
                 # filesystem -- ver Pipeline.owner_ack_at en models.py.
                 ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL"),
+                # 2026-09-17 (spec prevuelo-y-continuar §5.3): época de corrida.
+                ("run_epoch", "ALTER TABLE jacobs_pipelines ADD COLUMN run_epoch INT NOT NULL DEFAULT 0"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -266,8 +276,8 @@ async def pipeline_create(p: Pipeline) -> None:
                 INSERT INTO jacobs_pipelines
                     (pipeline_id, name, invoked_by, mode, status,
                      plan, current_step_index, max_steps, context_refs,
-                     created_at, updated_at, user_id, tenant_id)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
+                     created_at, updated_at, user_id, tenant_id, run_epoch)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s)
                 """,
                 (
                     p.pipeline_id, p.name, p.invoked_by, p.mode, p.status.value,
@@ -275,7 +285,7 @@ async def pipeline_create(p: Pipeline) -> None:
                     p.current_step_index, p.max_steps,
                     json.dumps(p.context, ensure_ascii=False),
                     p.created_at, p.updated_at,
-                    p.user_id, p.tenant_id,
+                    p.user_id, p.tenant_id, p.run_epoch,
                 ),
             )
     finally:
@@ -367,6 +377,115 @@ async def pipeline_count_active() -> int:
         conn.close()
 
 
+# ----------------------------------------------------------------
+#  Época de corrida (spec 2026-09-17 §5.3)
+# ----------------------------------------------------------------
+# Un solo ejecutor por pipeline. `cancel`, el kill switch y el reaper cambian
+# el STATUS; `resume`, `approve-step` y `continue` INCREMENTAN la época. El
+# ejecutor escribe sólo si el pipeline sigue en SU época y `running`: si no,
+# perdió, registra RUN_SUPERSEDED una vez y termina sin escribir más.
+# Todas van por clave primaria (EXPLAIN en tests/test_run_epoch_db.py).
+
+_SQL_EPOCA_Y_STATUS = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s"
+
+_SQL_STEP_SI_EPOCA = (
+    "UPDATE jacobs_steps s JOIN jacobs_pipelines p ON p.pipeline_id = s.pipeline_id "
+    "SET s.status=%s, s.facet=%s, s.motor=%s, s.output_ref=%s, s.timeout_seconds=%s, "
+    "    s.started_at=%s, s.finished_at=%s, s.error=%s "
+    "WHERE s.step_id=%s AND p.pipeline_id=%s AND p.run_epoch=%s AND p.status='running'"
+)
+
+
+def _sql_update_si_epoca(con_indice: bool, con_contexto: bool, n_desde: int) -> str:
+    sets = ["status=%s", "updated_at=%s"]
+    if con_indice:
+        sets.append("current_step_index=%s")
+    if con_contexto:
+        sets.append("context_refs=%s")
+    desde = ",".join(["%s"] * n_desde)
+    return (
+        f"UPDATE jacobs_pipelines SET {', '.join(sets)} "
+        f"WHERE pipeline_id=%s AND run_epoch=%s AND status IN ({desde})"
+    )
+
+
+def _sql_tomar_epoca(con_contexto: bool, n_desde: int) -> str:
+    extra = ", context_refs=%s" if con_contexto else ""
+    desde = ",".join(["%s"] * n_desde)
+    return (
+        f"UPDATE jacobs_pipelines SET run_epoch=run_epoch+1, updated_at=%s{extra} "
+        f"WHERE pipeline_id=%s AND run_epoch=%s AND status IN ({desde})"
+    )
+
+
+async def _ejecutar_condicional(sql: str, params: tuple | list) -> int:
+    conn = await get_conn(found_rows=True)
+    try:
+        async with conn.cursor() as cur:
+            return await cur.execute(sql, params)
+    finally:
+        conn.close()
+
+
+async def pipeline_epoca_y_status(pipeline_id: str) -> tuple[int, PipelineStatus] | None:
+    conn = await get_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(_SQL_EPOCA_Y_STATUS, (pipeline_id,))
+            fila = await cur.fetchone()
+    finally:
+        conn.close()
+    if not fila:
+        return None
+    return int(fila[0]), PipelineStatus(fila[1])
+
+
+async def pipeline_update_status_si_epoca(
+    pipeline_id: str,
+    epoca: int,
+    status: PipelineStatus,
+    current_step_index: int | None = None,
+    context: dict | None = None,
+    *,
+    desde: tuple[PipelineStatus, ...] = (PipelineStatus.running,),
+) -> bool:
+    """True si escribió: el pipeline estaba en `epoca` y en uno de `desde`."""
+    params: list = [status.value, time.time()]
+    if current_step_index is not None:
+        params.append(current_step_index)
+    if context is not None:
+        params.append(json.dumps(context, ensure_ascii=False))
+    params += [pipeline_id, epoca, *(d.value for d in desde)]
+    sql = _sql_update_si_epoca(current_step_index is not None, context is not None, len(desde))
+    return await _ejecutar_condicional(sql, params) == 1
+
+
+async def step_upsert_si_epoca(s: Step, epoca: int) -> bool:
+    """Escritura de un paso YA EXISTENTE desde el ejecutor. True si escribió."""
+    params = (
+        s.status.value, s.facet, s.motor, s.output_ref, s.timeout_seconds,
+        s.started_at, s.finished_at, s.error,
+        s.step_id, s.pipeline_id, epoca,
+    )
+    return await _ejecutar_condicional(_SQL_STEP_SI_EPOCA, params) == 1
+
+
+async def pipeline_tomar_epoca(
+    pipeline_id: str,
+    epoca_leida: int,
+    desde: tuple[PipelineStatus, ...],
+    context: dict | None = None,
+) -> int | None:
+    """Incrementa la época si nadie la tomó desde que se leyó. Devuelve la
+    nueva, o None si otro pedido ganó (doble resume, doble approve)."""
+    params: list = [time.time()]
+    if context is not None:
+        params.append(json.dumps(context, ensure_ascii=False))
+    params += [pipeline_id, epoca_leida, *(d.value for d in desde)]
+    filas = await _ejecutar_condicional(_sql_tomar_epoca(context is not None, len(desde)), params)
+    return epoca_leida + 1 if filas == 1 else None
+
+
 def _row_to_pipeline(row: dict) -> Pipeline:
     plan_raw = row.get("plan") or "[]"
     plan_data = json.loads(plan_raw) if isinstance(plan_raw, str) else plan_raw
@@ -386,6 +505,7 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         user_id=row.get("user_id"),
         tenant_id=row.get("tenant_id"),
         owner_ack_at=row.get("owner_ack_at"),
+        run_epoch=int(row.get("run_epoch") or 0),
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,
@@ -415,6 +535,7 @@ async def step_upsert(s: Step) -> None:
                 VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s, %s)
                 ON DUPLICATE KEY UPDATE
                     status=VALUES(status),
+                    facet=VALUES(facet),
                     motor=VALUES(motor),
                     output_ref=VALUES(output_ref),
                     timeout_seconds=VALUES(timeout_seconds),
