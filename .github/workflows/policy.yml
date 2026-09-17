@@ -1326,8 +1326,16 @@ jobs:
           #   (+2): JAX_PREVUELO_CANDADO_TIMEOUT_S por defecto 10 e inválido lanza con
           #   el nombre. Rojo contra c66705a: 8 failed (DID NOT RAISE / orden sin
           #   candado / AttributeError).
-          grep -qE "^1023 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1023 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1023 -> 1032 el 2026-09-17 (ola final de arreglos, F4, Ruling R30): +9 en
+          #   test_prevuelo_sonda.py -- una sonda que vence (httpx y wait_for) o un 2xx
+          #   sin usage (openai-compat, gemini, motor) registra uso ESTIMADO con
+          #   request_type='preflight_probe_est' (entrada ceil(len(mensaje)/chars por
+          #   token), salida el tope pedido); el request_type entra en VARCHAR(20); con
+          #   usage medido sigue preflight_probe, y ni la falla local ni la base caída
+          #   registran (3 controles). Rojo contra 4768484: 6 failed (Awaited 0 times /
+          #   AttributeError).
+          grep -qE "^1032 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1032 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1524,5 +1532,9 @@ jobs:
           #   (IS_FREE_LOCK=1 y se vuelve a tomar al instante), el nombre lleva la base
           #   (los candados son del servidor, compartido con producción), y EXPLAIN:
           #   GET_LOCK/RELEASE_LOCK sin tablas, recuento por idx_pipelines_status.
-          grep -qE "^72 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 72 tests CORRIDOS."; exit 1; }
+          # 72 -> 73 el 2026-09-17 (ola final de arreglos, F4): +1 en
+          #   test_prevuelo_catalogo_db.py -- preflight_probe y preflight_probe_est
+          #   entran en axioma_usage.request_type según information_schema del esquema
+          #   real (rojo contra 4768484: AttributeError).
+          grep -qE "^73 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 73 tests CORRIDOS."; exit 1; }

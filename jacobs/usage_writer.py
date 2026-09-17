@@ -27,7 +27,9 @@ insertara, dos procesos borrarian el mismo archivo sin coordinacion y el cobro
 se duplicaria en la ventana entre el INSERT y el borrado.
 
 request_type='preflight_probe' (2026-09-17): la sonda del pre-vuelo de Jacobs
-(jacobs/sonda.py) paga una llamada mínima; se registra aparte para que se vea."""
+(jacobs/sonda.py) paga una llamada mínima; se registra aparte para que se vea.
+request_type='preflight_probe_est' (ola final F4, 2026-09-17): la misma sonda
+cuando venció o el proveedor respondió 2xx sin usage -- tokens ESTIMADOS."""
 from __future__ import annotations
 
 import logging

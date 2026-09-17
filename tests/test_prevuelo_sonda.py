@@ -502,3 +502,116 @@ def test_record_direct_usage_inserta_con_el_request_type_pedido(monkeypatch):
         asyncio.run(usage_writer.record_direct_usage("1", "1", "jekyll", "deepseek", "m", 1, 2))
     inserts = [p for sql, p in ejecutados if sql.startswith("INSERT INTO axioma_usage")]
     assert [p[-1] for p in inserts] == ["preflight_probe", "pipeline"]
+
+
+# ---------------------------------------------------------------------------
+# F4 (ola final, Ruling R30 revierte R14): una sonda que VENCE o un 2xx SIN
+# usage pudo cobrarse y no dejaba fila en axioma_usage. Ahora se registra con
+# tokens ESTIMADOS -- entrada: ⌈len(MENSAJE_DE_SONDA) / chars_por_token⌉;
+# salida: el tope que pidió la sonda -- y request_type='preflight_probe_est'
+# (la marca de estimación: axioma_usage no tiene otra columna para eso). Una
+# falla local (config_error), un error HTTP del proveedor o la base caída al
+# resolver NO registran: no hubo llamada cobrable.
+# ---------------------------------------------------------------------------
+
+import math  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+def _estimado(tope=16, chars_por_token=2):
+    return (math.ceil(len(sonda.MENSAJE_DE_SONDA) / chars_por_token), tope)
+
+
+def test_request_type_estimado_entra_en_la_columna():
+    assert sonda.REQUEST_TYPE_SONDA_ESTIMADA == "preflight_probe_est"
+    assert len(sonda.REQUEST_TYPE_SONDA_ESTIMADA) <= 20  # axioma_usage.request_type VARCHAR(20)
+
+
+def test_sonda_que_vence_registra_uso_estimado(monkeypatch):
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(), httpx.ReadTimeout("lento"), uso=uso)
+    assert not r.ok
+    uso.assert_awaited_once_with(None, None, "jekyll", "deepseek", "deepseek-v4-flash", *_estimado(),
+                                 request_type="preflight_probe_est")
+
+
+def test_sonda_cortada_por_wait_for_registra_uso_estimado(monkeypatch):
+    async def post(self, url, headers=None, json=None, **kw):
+        await asyncio.sleep(5)
+        return _Resp(200, _OK_OPENAI)
+
+    uso = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_TIMEOUT_S", "1")
+    monkeypatch.setenv("JAX_PREVUELO_CHARS_POR_TOKEN", "3")
+    with patch("httpx.AsyncClient.post", post), \
+         patch.object(sonda, "resolve_facet", AsyncMock(return_value=_faceta())), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", uso):
+        r = asyncio.run(sonda.sondear("jekyll", _despacho(max_output_tokens=8)))
+    assert not r.ok
+    uso.assert_awaited_once_with(None, None, "jekyll", "deepseek", "deepseek-v4-flash",
+                                 *_estimado(tope=8, chars_por_token=3), request_type="preflight_probe_est")
+
+
+def test_2xx_sin_usage_registra_uso_estimado_y_sigue_sana(monkeypatch):
+    uso = AsyncMock()
+    cuerpo = {"choices": [{"message": {"content": "ok"}}]}
+    r, _ = _sondear(monkeypatch, _despacho(), _Resp(200, cuerpo), uso=uso)
+    assert r.ok
+    uso.assert_awaited_once_with(None, None, "jekyll", "deepseek", "deepseek-v4-flash", *_estimado(),
+                                 request_type="preflight_probe_est")
+
+
+def test_gemini_2xx_sin_usage_metadata_registra_uso_estimado(monkeypatch):
+    f = _faceta(key="hipatia", provider_id="gemini", base_url="https://g.example/v1beta",
+                model="gemini-x", credential="AIza-secreta", transport="http_gemini")
+    d = _despacho(clave_salud="hipatia", transporte="http_gemini", provider_id="gemini",
+                  modelo="gemini-x", max_tokens_param=None, max_output_tokens=65536)
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, d, _Resp(200, {"candidates": []}), faceta=f, uso=uso)
+    assert r.ok
+    uso.assert_awaited_once_with(None, None, "hipatia", "gemini", "gemini-x", *_estimado(),
+                                 request_type="preflight_probe_est")
+
+
+def test_motor_2xx_sin_usage_registra_uso_estimado(monkeypatch):
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
+                  base_url="https://api.moonshot.example/v1", max_output_tokens=131072)
+    uso = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_MAX_TOKENS", "16")
+    with patch("motor_registry.worker._call_http_openai_compat",
+               AsyncMock(return_value={"choices": [{"message": {"content": "ok"}}]})), \
+         patch.object(sonda, "resolve_credential_instrumented", AsyncMock(return_value="k-moon")), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", uso):
+        r = asyncio.run(sonda.sondear("kimi", d, user_id="7", tenant_id="1"))
+    assert r.ok
+    uso.assert_awaited_once_with("7", "1", "kimi", "moonshot", "kimi-k3", *_estimado(),
+                                 request_type="preflight_probe_est")
+
+
+def test_2xx_con_usage_medido_sigue_como_preflight_probe(monkeypatch):
+    """Control: con tokens medidos no se estima nada."""
+    uso = AsyncMock()
+    _sondear(monkeypatch, _despacho(), _Resp(200, _OK_OPENAI), uso=uso)
+    assert uso.await_args.kwargs == {"request_type": "preflight_probe"}
+
+
+def test_falla_local_no_registra_uso(monkeypatch):
+    uso = AsyncMock()
+    r, _ = _sondear(monkeypatch, _despacho(max_output_tokens=None), _Resp(200, _OK_OPENAI), uso=uso)
+    assert not r.ok
+    uso.assert_not_awaited()
+
+
+def test_base_caida_al_resolver_no_registra_uso(monkeypatch):
+    uso = AsyncMock()
+    monkeypatch.setenv("JAX_PREVUELO_SONDA_TIMEOUT_S", "1")
+    with patch.object(sonda, "resolve_facet", AsyncMock(side_effect=FacetUnavailableError("base caída"))), \
+         patch.object(sonda.facet_health, "registrar_evento_de_sonda", AsyncMock()), \
+         patch.object(sonda, "record_direct_usage", uso):
+        with pytest.raises(FacetUnavailableError):
+            asyncio.run(sonda.sondear("jekyll", _despacho()))
+    uso.assert_not_awaited()

@@ -410,3 +410,27 @@ def test_salud_ignora_config_error_como_los_gate():
         return await pc.leer_catalogo(conexion=conn, facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
     s, cat = _con_semilla(cuerpo)
     assert cat.salud[s.faceta] == (ahora - 600, "ok")
+
+
+def test_los_request_type_de_la_sonda_entran_en_axioma_usage():
+    """F4 (ola final): el uso ESTIMADO de la sonda se marca con
+    request_type='preflight_probe_est'. La columna la define jax-platform
+    (VARCHAR(20)): si se achicara, el INSERT fallaría y la fila iría al
+    respaldo, donde jax-platform tampoco la podría insertar."""
+    from jacobs import sonda
+
+    async def cuerpo():
+        conn = await store.get_conn()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='axioma_usage' "
+                    "AND COLUMN_NAME='request_type'")
+                return (await cur.fetchone())[0]
+        finally:
+            conn.close()
+
+    largo = asyncio.run(cuerpo())
+    assert len(sonda.REQUEST_TYPE_SONDA) <= largo
+    assert len(sonda.REQUEST_TYPE_SONDA_ESTIMADA) <= largo

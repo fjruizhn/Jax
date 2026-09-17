@@ -32,8 +32,17 @@ Tres clases de resultado (Ruling R13, fix round 1 de la revisión de Task 7):
       -> outcome 'provider_error'.
 
 Cada resultado se registra en facet_health_event (source='preflight', outcome
-ok/provider_error/config_error) y, si midió tokens, su uso en axioma_usage
-(request_type='preflight_probe'): se paga y se ve. Si el registro de salud
+ok/provider_error/config_error) y su uso en axioma_usage: se paga y se ve.
+Con tokens medidos, request_type='preflight_probe'. Si la llamada salió pero
+no hay tokens medidos -- la sonda VENCIÓ o el proveedor respondió 2xx SIN
+usage -- el proveedor pudo cobrarla igual: se registra con tokens ESTIMADOS
+(entrada ⌈len(MENSAJE_DE_SONDA) / JAX_PREVUELO_CHARS_POR_TOKEN⌉, salida el
+tope que pidió la sonda) y request_type='preflight_probe_est', que es la
+marca de estimación (axioma_usage no tiene otra columna donde ponerla sin
+DDL; la columna es VARCHAR(20) y el valor tiene 19). Ola final F4, 2026-09-17,
+revierte el Ruling R14. Una falla local (config_error), un error HTTP del
+proveedor o una base caída al resolver NO registran: no hubo llamada
+cobrable (un 4xx/5xx o una conexión rechazada no se facturan). Si el registro de salud
 falla, el veredicto se mantiene (el dato es la respuesta del proveedor, no
 la fila), se loguea WARNING y se cuenta.
 
@@ -43,6 +52,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 
@@ -59,6 +69,7 @@ logger = logging.getLogger("jacobs.sonda")
 
 MENSAJE_DE_SONDA = "Respondé solamente: ok"
 REQUEST_TYPE_SONDA = "preflight_probe"
+REQUEST_TYPE_SONDA_ESTIMADA = "preflight_probe_est"
 _LARGO_DETALLE = 200
 
 
@@ -68,6 +79,9 @@ class ResultadoSonda:
     detalle: str | None
     tokens_in: int = 0
     tokens_out: int = 0
+    # False cuando la respuesta 2xx no trae el campo de uso del proveedor
+    # (F4): los ceros de arriba no son "costó 0", son "no se sabe".
+    uso_medido: bool = True
 
 
 _registros_perdidos = 0
@@ -163,7 +177,8 @@ async def _preparar(clave: str, d: Despacho):
                     f"{recortar_redactado(exc.response.text, _LARGO_DETALLE, [api_key])}"
                 ) from exc
             uso = data.get("usage") or {}
-            return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0))
+            return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0),
+                                  uso_medido=bool(uso))
 
         return _llamada
 
@@ -179,7 +194,8 @@ async def _preparar(clave: str, d: Despacho):
                 timeout, [f.credential],
             )
             uso = data.get("usageMetadata") or {}
-            return ResultadoSonda(True, None, uso.get("promptTokenCount", 0), uso.get("candidatesTokenCount", 0))
+            return ResultadoSonda(True, None, uso.get("promptTokenCount", 0), uso.get("candidatesTokenCount", 0),
+                                  uso_medido=bool(uso))
         return _llamada
 
     if f.transport == "http_openai_compat":
@@ -191,7 +207,8 @@ async def _preparar(clave: str, d: Despacho):
                 timeout, [f.credential],
             )
             uso = data.get("usage") or {}
-            return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0))
+            return ResultadoSonda(True, None, uso.get("prompt_tokens", 0), uso.get("completion_tokens", 0),
+                                  uso_medido=bool(uso))
         return _llamada
 
     if f.transport == "ollama":
@@ -203,14 +220,22 @@ async def _preparar(clave: str, d: Despacho):
                 {"model": f.model, "messages": mensajes, "stream": False, "options": {"num_predict": limite}},
                 timeout, [],
             )
-            return ResultadoSonda(True, None, data.get("prompt_eval_count", 0), data.get("eval_count", 0))
+            return ResultadoSonda(True, None, data.get("prompt_eval_count", 0), data.get("eval_count", 0),
+                                  uso_medido="prompt_eval_count" in data or "eval_count" in data)
         return _llamada
 
     raise _FallaDePreparacion(f"transporte '{f.transport}' de '{clave}' no tiene sonda")
 
 
+def _uso_estimado(d: Despacho) -> tuple[int, int]:
+    """F4: tokens de una llamada que salió sin uso medido. Entrada con el
+    mismo divisor conservador del costo máximo (§4.6); salida, el tope que
+    pidió la sonda (lo máximo que el proveedor pudo facturar)."""
+    return math.ceil(len(MENSAJE_DE_SONDA) / prevuelo_config.chars_por_token()), _tope(d)
+
+
 async def _registrar(clave: str, d: Despacho, r: ResultadoSonda, outcome: str,
-                     user_id: str | None, tenant_id: str | None) -> None:
+                     user_id: str | None, tenant_id: str | None, *, llamada_cobrable: bool) -> None:
     global _registros_perdidos
     try:
         await facet_health.registrar_evento_de_sonda(clave, outcome, r.detalle, time.time())
@@ -221,16 +246,18 @@ async def _registrar(clave: str, d: Despacho, r: ResultadoSonda, outcome: str,
             "van %d registros perdidos",
             clave, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE), _registros_perdidos,
         )
-    # Ruling R14 (2026-09-17, fix round 1 de la revisión de Task 7): un 2xx
-    # SIN campo `usage` (proveedor que no lo declara) deja tokens_in=
-    # tokens_out=0 y NO se registra en axioma_usage -- no hay tokens medidos
-    # que cobrar, y una fila con ceros no es "se cobró $0", es "no se sabe".
-    # Caso agregado a la entrada de DEUDA.md de la Task 14 ("sonda que vence
-    # sin registrar uso"), misma fecha: mientras tanto ese 2xx queda sin fila.
-    if r.tokens_in or r.tokens_out:
+    if not llamada_cobrable:
+        return
+    if r.uso_medido and (r.tokens_in or r.tokens_out):
         await record_direct_usage(
             user_id, tenant_id, clave, d.provider_id, d.modelo, r.tokens_in, r.tokens_out,
             request_type=REQUEST_TYPE_SONDA,
+        )
+    elif not r.uso_medido:
+        tokens_in, tokens_out = _uso_estimado(d)
+        await record_direct_usage(
+            user_id, tenant_id, clave, d.provider_id, d.modelo, tokens_in, tokens_out,
+            request_type=REQUEST_TYPE_SONDA_ESTIMADA,
         )
 
 
@@ -242,14 +269,19 @@ async def sondear(clave: str, d: Despacho, *, user_id: str | None = None,
     except _FallaDePreparacion as exc:
         resultado = ResultadoSonda(False, recortar_redactado(
             f"la sonda no pudo preparar la llamada: {exc}", _LARGO_DETALLE))
-        await _registrar(clave, d, resultado, "config_error", user_id, tenant_id)
+        await _registrar(clave, d, resultado, "config_error", user_id, tenant_id, llamada_cobrable=False)
         return resultado
 
+    # F4: una llamada que venció o volvió 2xx pudo cobrarse; un error HTTP del
+    # proveedor o de conexión, no.
+    cobrable = True
     try:
         resultado = await asyncio.wait_for(llamada(timeout), timeout=timeout)
     except (asyncio.TimeoutError, httpx.TimeoutException):
-        resultado = ResultadoSonda(False, f"timeout de sonda ({timeout}s)")
+        resultado = ResultadoSonda(False, f"timeout de sonda ({timeout}s)", uso_medido=False)
     except Exception as exc:  # fail-closed: una sonda que no completó la llamada al proveedor da faceta_caida, nunca sana; el motivo redactado viaja en el veredicto
         resultado = ResultadoSonda(False, recortar_redactado(f"{type(exc).__name__}: {exc}", _LARGO_DETALLE))
-    await _registrar(clave, d, resultado, "ok" if resultado.ok else "provider_error", user_id, tenant_id)
+        cobrable = False
+    await _registrar(clave, d, resultado, "ok" if resultado.ok else "provider_error", user_id, tenant_id,
+                     llamada_cobrable=cobrable)
     return resultado
