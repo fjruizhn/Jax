@@ -410,6 +410,20 @@ FAMILIAS = (
              "ORDEN DE MERGE: la plataforma primero -- contra un jax-platform con los "
              "nombres viejos (_KIMI_KW...) esta familia da 'falta' en los 12 simbolos.",
     ),
+    Familia(
+        nombre="tope_pipelines",
+        canonico=JAX_ROOT / "jacobs" / "policy.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "ajustes.py"),
+        ),
+        compartidos=("MAX_PARALLEL_PIPELINES",),
+        nota="Frente C (2026-09-16): el ajuste max_pipelines de la plataforma es "
+             "una cuota POR TENANT acotada por el candado GLOBAL de Jacobs (cuenta "
+             "todos los pending/running). Si este tope cambia en Jacobs y no en la "
+             "plataforma, Admin ofrece un valor que Jacobs rechaza con 422. Canonico: "
+             "jacobs/policy.py. ORDEN DE MERGE: la plataforma primero (este job "
+             "clona jax-platform master).",
+    ),
 )
 
 
