@@ -5829,3 +5829,89 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 | §10 rebase preservando frentes E/F | 14 |
 
 Fuera de este plan (plan P, jax-platform): DDL de `capability.min_output_tokens`, ENUM `facet_health_event.source='preflight'`, `request_type` en la Mesa, ajuste `pipeline_confirmar_usd`, backend y frontend de la Mesa (§6), datos A y F (§7), rescate de `ef9b2d6e` (§11, después del deploy).
+
+---
+
+## Semilla medida de min_output_tokens
+
+**La medición NO se repitió en esta rama (Ruling R2 del ledger de este
+plan).** El brief de la Task 13 pedía correr `scripts/medir_min_output_tokens.py`
+contra producción "con GO del controlador"; el controlador confirmó que el
+plan P (jax-platform) ya la había medido una vez, el mismo día, contra la
+misma base (`jax_memory`), con el mismo criterio de solo lectura. Medir dos
+veces no cambia el dato y sí duplica el riesgo de tocar producción sin
+necesidad — "el que supone se equivoca" corre en el sentido contrario acá:
+suponer que hace falta medir de nuevo sería el error. Esta sección copia,
+con referencia, lo que P ya midió y verificó.
+
+- **Quién midió:** plan P (jax-platform), Task 2.
+- **Cuándo:** 2026-09-17, contra `jax_memory` (producción), sesión `SET
+  SESSION TRANSACTION READ ONLY` + `START TRANSACTION READ ONLY` + `ROLLBACK`
+  al final — sin escritura alguna.
+- **Commit:** `d79b0f9` en `/home/fruiz/worktrees/jax-platform-prevuelo`
+  (rama `feat/prevuelo-y-continuar-mesa`), mensaje `feat(prevuelo): semilla
+  medida de min_output_tokens y topes de salida`.
+- **Ledger de origen:** `/home/fruiz/worktrees/jax-platform-prevuelo/.superpowers/sdd/2026-09-17-prevuelo-y-continuar-mesa/progress.md`,
+  bloque "MEDICIÓN DE SEMILLAS" (línea 61), y `task-2-report.md` del mismo
+  directorio (tabla completa, evidencia TDD y preocupaciones).
+
+### Valores medidos
+
+```python
+MIN_OUTPUT_TOKENS_MEDIDOS_2026_09_17 = {
+    "analysis": 16384, "critique": 13312, "design": 14336, "file_write": 2048,
+    "generate": 14336, "reconcile": 21504, "research": 7168, "validate_consistency": 3072,
+}
+```
+
+Sin corridas medibles, quedan en 0 (sin mínimo, no bloquean): `architecture_review`,
+`bug_hunt`, `code_swarm`, `file_read`, `implementation`, `pipeline_analysis`,
+`reason`, `refactor`, `review`.
+
+### Topes de salida agregados (§7 F, GET de metadata de Gemini, sin costo)
+
+`gemini/gemini-2.5-flash` → 65536. `gemini/gemini-3.8-flash` → 65536 (este
+último es el binding primario de `hipatia` en producción; su fila en
+`model` tenía `max_output_tokens` NULL antes de esta medición).
+
+### Las dos adaptaciones de P que se llevan a `scripts/medir_min_output_tokens.py`
+
+1. **COLLATE del JOIN (error 1267).** `axioma_usage.facet` quedó en
+   `utf8mb4_uca1400_ai_ci` y `jacobs_steps.facet` en `utf8mb4_unicode_ci`
+   (esquemas creados en momentos distintos): un JOIN `ON u.facet = s.facet`
+   falla contra producción con `pymysql.err.OperationalError: (1267,
+   "Illegal mix of collations...")`. `_SQL_HTTP_DIRECTO` de este script lleva
+   `ON u.facet = s.facet COLLATE utf8mb4_uca1400_ai_ci`; las claves de faceta
+   son ASCII en minúscula, así que la igualdad da lo mismo con cualquiera de
+   las dos collations. Verificado con un test puro
+   (`tests/test_medir_min_output_tokens.py::test_el_join_http_directo_lleva_la_collate_del_esquema_real`)
+   que el JOIN del script lo lleva, sin necesidad de conectar a producción
+   para descubrirlo de nuevo.
+2. **La unión por faceta + ventana de tiempo puede inflar un máximo.** Si dos
+   pasos de la misma faceta se solapan en el tiempo, el `MAX(u.tokens_out)`
+   agrupado por capability puede tomar tokens de un paso distinto que cayó
+   dentro de la misma ventana. Se acepta como el lado seguro: un `min_output_tokens`
+   sobreestimado no bloquea nada (el admin lo puede bajar si lo ve corto);
+   uno subestimado sí rechazaría pasos legítimos con `tope_insuficiente`.
+
+### Diferencia de P que NO se llevó (documentada, no es una falla de esquema)
+
+El script de medición de P (`scratchpad/medir_prevuelo.py`, no comiteado)
+además excluía en Python las filas de `axioma_usage` cuya ventana [started_at
+− 5s, finished_at + 5s] calzaba con pasos de MÁS de una capability a la vez
+("filas ambiguas", 0 encontradas en la medición real). `scripts/medir_min_output_tokens.py`
+de este plan no reproduce esa exclusión: agrupa y toma el máximo directamente
+en SQL (`GROUP BY s.capability`), lo que corresponde exactamente a la
+adaptación de la Task 13 (aceptar la inflación del máximo como lado seguro,
+arriba). No es una diferencia de esquema — el SQL de este script no fallaría
+contra producción sin ella — así que no se replicó la lógica de exclusión de
+P; queda documentado acá si alguien mide de nuevo y quiere comparar ambos
+caminos.
+
+### Consumo
+
+Los `UPDATE capability SET min_output_tokens=... WHERE key=...` que
+`scripts/medir_min_output_tokens.py` imprime (y que este documento fija con
+los valores de arriba) los consume la migración de P: `backend/db/migrations.py::_semilla_min_output_tokens_v1`
+(marcador `capability_min_output_tokens_v1` en `axioma_migracion_de_datos`,
+una sola vez).
