@@ -341,7 +341,15 @@ def test_explain_salud_n2_usa_idx_facet_ts():
             (s1.faceta, s2.faceta, ahora - fh.HEALTH_WINDOW_SECONDS))
     _, filas = _con_semillas(2, cuerpo)
     assert any(f["key"] == "idx_facet_ts" for f in filas), filas
-    assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas
+    # El filesort se exige sobre la TABLA REAL, no sobre la derivada del JOIN
+    # (2026-09-17): con MariaDB 11.8 (el runner) el optimizador materializa
+    # `m` y la ordena, y esa ordenación es sobre una fila por clave -- el costo
+    # que este test cuida es el de recorrer facet_health_event, y ése va por
+    # idx_facet_ts. Con 12.3 (hall9000) ni siquiera aparece. Exigirlo sobre
+    # todas las filas hacía que el test midiera la versión del motor.
+    reales = [f for f in filas if not str(f.get("table") or "").startswith("<derived")]
+    assert reales, filas
+    assert all("filesort" not in (f.get("Extra") or "") for f in reales), filas
 
 
 # ---------------------------------------------------------------------------

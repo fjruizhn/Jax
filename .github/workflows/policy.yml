@@ -238,6 +238,30 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest
+      # 2026-09-17 (pre-vuelo y continuar): crear un pipeline ahora pasa por el
+      # pre-vuelo, que lee `facet`, `model`, `capability` y `credential` -- tablas
+      # que crean las migraciones de jax-platform, no init_tables() de Jacobs. Sin
+      # este paso el job muere con "Table 'jax_memory_test.facet' doesn't exist",
+      # que no es un fallo del codigo bajo prueba. Mismo patron que el job
+      # jacobs-gobernanza-db.
+      - name: Clonar jax-platform (sus migraciones crean la gobernanza)
+        run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
+      - run: pip install -r /tmp/jax-platform/backend/requirements.txt
+      - name: Esquema de gobernanza con SUS migraciones
+        working-directory: /tmp/jax-platform/backend
+        run: |
+          python - <<'PY'
+          import asyncio
+          from db.connection import close_pool
+          from db.migrations import run_migrations
+
+          async def main():
+              await run_migrations()
+              await close_pool()
+
+          asyncio.run(main())
+          print("run_migrations OK")
+          PY
       - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
