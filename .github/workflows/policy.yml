@@ -599,6 +599,7 @@ jobs:
           tests/test_store_indice_duenio.py
           tests/test_cola_uso_escritores.py
           tests/test_respaldo_de_uso_aislado.py
+          tests/test_prevuelo_config.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -641,6 +642,7 @@ jobs:
             tests/test_store_indice_duenio.py \
             tests/test_cola_uso_escritores.py \
             tests/test_respaldo_de_uso_aislado.py \
+            tests/test_prevuelo_config.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -924,8 +926,10 @@ jobs:
           #   test_ejecutor_prioridad.py (11 async + 1 del arreglo del carril sync, que
           #   colgaba sin tope la segunda peticion paralela) y +18 del proxy nuevo.
           #   CONFIRMADO POR EL RUNNER (3.12, PR #173): "742 passed, 1 skipped, 1 xfailed".
-          grep -qE "^742 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 742 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 742 -> 749 el 2026-09-17 (pre-vuelo): test_prevuelo_config.py (+7) -- timeout,
+          #   divisor y techo de la sonda por entorno; un valor inválido falla con el nombre.
+          grep -qE "^749 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 749 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
