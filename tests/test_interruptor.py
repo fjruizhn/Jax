@@ -168,5 +168,64 @@ def test_correr_cancela_lo_que_corre_cuando_aparece_el_freno(monkeypatch, tmp_pa
     assert duracion < 1.0
 
 
+def test_correr_espera_la_limpieza_interna_ante_un_timeout_externo(monkeypatch, tmp_path):
+    """Fix round 1 (2026-09-17, hallazgo del reviewer sobre Task 4).
+
+    Antes, el `finally` de `correr_con_interruptor` pedía la cancelación de
+    la tarea interna pero no la esperaba: un `asyncio.wait_for` externo (el
+    de `_run_one_step`) podía capturar `TimeoutError` con la limpieza de
+    `run_sandboxed_claude`/`_invoke_motor` todavía en curso. Con el freno
+    NUNCA puesto -- este test no lo activa -- para que el timeout externo sea
+    la única causa de la cancelación.
+    """
+    monkeypatch.setenv(VARIABLE, str(tmp_path / "PAUSE"))
+    limpieza = []
+
+    async def larga():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)  # la limpieza real (kill de proceso) también cede el loop
+            limpieza.append("cancelada")
+            raise
+
+    async def escenario():
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                interruptor.correr_con_interruptor(larga(), intervalo=0.01),
+                timeout=0.05,
+            )
+        return list(limpieza)
+
+    limpieza_al_capturar = asyncio.run(escenario())
+    assert limpieza_al_capturar == ["cancelada"]
+
+
+def test_correr_espera_la_limpieza_interna_ante_una_cancelacion_externa(monkeypatch, tmp_path):
+    """Mismo defecto, vía cancelación directa de la tarea externa (no timeout)."""
+    monkeypatch.setenv(VARIABLE, str(tmp_path / "PAUSE"))
+    limpieza = []
+
+    async def larga():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0)
+            limpieza.append("cancelada")
+            raise
+
+    async def escenario():
+        loop = asyncio.get_running_loop()
+        tarea = loop.create_task(interruptor.correr_con_interruptor(larga(), intervalo=0.01))
+        await asyncio.sleep(0.02)  # deja que `larga()` arranque de verdad
+        tarea.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await tarea
+        return list(limpieza)
+
+    limpieza_al_capturar = asyncio.run(escenario())
+    assert limpieza_al_capturar == ["cancelada"]
+
+
 def test_el_conftest_aisla_la_ruta_de_produccion():
     assert not str(interruptor.ruta_del_interruptor()).startswith("/etc/jax")

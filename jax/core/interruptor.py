@@ -126,5 +126,15 @@ async def correr_con_interruptor(corrutina, *, intervalo: float = INTERVALO_DE_S
                 await asyncio.gather(tarea, return_exceptions=True)
                 raise InterruptorActivado(f"killed_by_switch — {ruta} apareció durante la ejecución")
     finally:
+        # Fix round 1 (2026-09-17): cancelar no alcanza. Un timeout externo
+        # (asyncio.wait_for en _run_one_step) o una cancelación externa de
+        # ESTA corrutina también pasan por acá, y si solo pedimos la
+        # cancelación sin esperarla, la limpieza real del dispatch interno
+        # (run_sandboxed_claude matando a Hyde, _invoke_motor cancelando el
+        # job en LAS MANOS) puede seguir en curso cuando el error ya se
+        # propagó y _fail_step ya corrió. gather() con return_exceptions
+        # espera esa limpieza sin tragarse la CancelledError externa: no la
+        # capturamos, así que sigue su curso normal después del finally.
         if not tarea.done():
             tarea.cancel()
+            await asyncio.gather(tarea, return_exceptions=True)

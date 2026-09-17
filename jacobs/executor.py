@@ -1037,10 +1037,15 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
         raw_output = await asyncio.wait_for(
             # El freno en vuelo (2026-09-16, frente B): antes un step ya lanzado
             # seguía hasta terminar la ola aunque el kill switch estuviera
-            # puesto. Si aparece, se cancela en <= 250 ms: run_sandboxed_claude
-            # mata a Hyde y _invoke_motor cancela el job en LAS MANOS.
-            # InterruptorActivado cae en el except general de abajo, así que
-            # queda _fail_step con "killed_by_switch".
+            # puesto. Si el freno APARECE, se cancela en <= 250 ms:
+            # run_sandboxed_claude mata a Hyde y _invoke_motor cancela el job
+            # en LAS MANOS. InterruptorActivado cae en el except general de
+            # abajo, así que queda _fail_step con "killed_by_switch". Un
+            # timeout de este wait_for (o una cancelación externa de este
+            # mismo step) también esperan esa misma limpieza interna antes de
+            # propagar -- el finally de correr_con_interruptor la awaitea,
+            # fix del 2026-09-17 (antes solo pedía tarea.cancel() sin
+            # esperarla, y _fail_step podía correr con la limpieza a medias).
             correr_con_interruptor(_dispatch_step(step, pipeline)),
             timeout=step.timeout_seconds,
         )
