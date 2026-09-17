@@ -374,6 +374,52 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado — hallazgos de la auditoría de sobre-ingeniería, frente A (2026-09-17)
+
+**VERDAD OPERACIONAL 2026-09-17 00:28 CST** (desplegado y verificado por el controlador principal). PR jax-platform#90 → `6e50959` (mergeado 2026-09-17); PR de jax (familia de espejos `router_keywords`, A-22), commit `be38494` (jax `984ce46..be38494`). Spec `docs/superpowers/specs/2026-09-16-hallazgos-auditoria-design.md` (sección A, A-01..A-55; A-21 queda para el frente D), plan `docs/superpowers/plans/2026-09-16-frente-a-limpieza-defectos-reglas.md`. Frontend `index-ChCOZGPN.js` (antes `index-Bxqm5swQ.js`).
+
+**Qué se borró y qué se arregló, por bloque (16 tareas, A-01..A-55):**
+- **Código muerto y recortes sin cambio de conducta (Task 1, A-02/03/04/12/15/18/19/20/28/33/34):** `aiosmtplib` fuera de `requirements.txt`; `TokenPayload` sin uso borrado; `_load_jax_env` (parser a mano del `.env`, podía re-inyectar en corridas manuales valores YA descifrados) borrado de `chat.py`/`image.py`; `_user_tenant_map` (nadie lo leía) fuera de `jax_engine/state.py`; los dos tokens (access/refresh) salen de un solo `_crear_token`; `CORSMiddleware` solo admite `FRONTEND_ORIGIN`; `db/transaccion.py::AISLAMIENTOS` cerrado a `READ COMMITTED` (nadie pedía otro nivel); el router legado `api/admin/facet_models.py` (desregistrado desde Bloque C, 2026-08-10) **borrado** — la tabla `facet_models` queda como dato histórico sin escritor.
+- **Locks sin `await` entre chequeo y acción (Task 2, A-24):** `EventBus`, `WebSocketHub` y `ResourceManager` tenían un `asyncio.Lock` alrededor de dicts/sets sin ningún `await` adentro — en asyncio esas secciones ya corren sin interrupción, el lock nunca se disputaba. Se sacaron los tres; `lifecycle_lock` (sí serializa secuencias con `await`) no se tocó.
+- **DEFECTO real, ahora HISTORIA — `_safe_path` del repositorio admin (Task 3, A-07/08/26/31/40):** comparaba con `target.startswith(base)` **sin separador de ruta**, así que `documents/../../repo-x/secreto.txt` pasaba si existía una carpeta hermana cuyo nombre empezara con "repo" — **leía y borraba fuera del repositorio, con acceso de superadmin**. Sin carpetas hermanas de ese patrón en producción (verificado), pero explotable si alguna vez existieran. Arreglado con `Path.resolve()` + `is_relative_to(base)`; MIME real por extensión (antes todo lo que no fuera `.png` salía `image/jpeg`); `POST /repo/save` (sin llamador ni tests) borrado.
+- **Admin SMTP/llaves/catálogo (Task 4, A-25/39/46/47):** solo las ramas de excepción comunes se traducen a 502/503 con código estable; `UnicodeEncodeError` (contraseña SMTP no-ASCII) nunca vuelve a loguear la excepción completa.
+- **Rutas obligatorias desde el entorno, fail-closed (Task 5, A-41/54/55):** `JAX_REPO_PATH`, `JAX_CONFIG_PATH`, `JAX_AUDIT_LOG_PATH`, `JAX_MISSIONS_DIR`, `JAX_BIN`, `JAX_REPO_BASE` pasan a ser **obligatorias** (antes tres caían a `~/jax` si faltaban). Único lector: `config_de_entorno.ruta_requerida(nombre)`. **Hallazgo de paso:** `test_command_path_traversal.py` escribía en el `~/jax/missions` REAL — el conftest pasó a fijar directorios temporales.
+- **Tablero que miente (Task 6, A-05/06/35/36/37/49):** `/api/admin/dashboard` marcaba `alive` con `status_code < 500` (un 404 contaba como vivo); ahora exige 200. `JAX_PLATFORM_URL` nueva (si falta, la tarjeta dice `sin_configurar`, nunca `alive`). "Pipelines completados" cuenta el total con índice `idx_pipelines_status`.
+- **Labels crudos de facetas (Task 7, A-42/48):** `display_name` sale de la tabla `facet`, leído UNA vez en el `lifespan` tras `run_migrations()` (invalidación declarada: el reinicio del proceso). El tablero mostraba la clave (`jekyll`), no el nombre ("Dr. Jekyll").
+- **Chat sin texto libre en `detail` (Task 8, A-13/16/22/51/53):** el backend manda `detail.code` (y `aviso.code`+`params` para avisos de chat); el frontend traduce con `codigoDe()`/`textoDeAviso()`. **A-22, mirror-sync de las keywords del auto-ruteo:** los 12 nombres de los sets no coincidían entre `jax-platform/backend/api/chat.py` y `jax/core/router.py` (`_KIMI_KW` vs `KIMI_KW`, etc.) y `check_mirror_sync.py` los comparaba por nombre — daría "falta" en los 12 aunque el contenido fuera idéntico byte a byte. Renombrados en la plataforma; familia `router_keywords` agregada en jax (commit `be38494`).
+- **Mesa (image/command/pipelines/upload) sin texto libre (Task 9, A-14/30/51/53):** mismos códigos estables; `command_completed`/`GET /api/command/{id}` con `code` (`comando_sin_resultado|comando_fallo|comando_simulado`). **Residual R16, arreglado antes del push (regla "sin hallazgos diferidos"):** `_leer_tarea` leía el owner file Y el archivo de resultado en el mismo hilo y cualquier `OSError`/`ValueError` de los dos mapeaba a `404 tarea_no_encontrada` — un error transitorio de LECTURA DEL RESULTADO (no del dueño) se volvía éxito falso permanente en el store del frontend (violaba A-44). Separado en dos lecturas: dueño ilegible sigue 404; resultado ilegible → `500 tarea_resultado_ilegible`.
+- **Login por regex (Task 10, A-50):** bloqueo de cuenta con código estable `cuenta_bloqueada` (423) + `Retry-After`.
+- **Frontend: `errores.js` e i18n con códigos estables (Task 11/12, A-09/10/11/17/27/29/43/44/45/51/52/53):** `textoDeErrorDeMesa`/`textoDeAviso` traducen los códigos nuevos; paridad es/en con las mismas claves; 25 claves muertas de i18n borradas.
+- **Confirmaciones/avisos sin diálogos del navegador (Task 13, A-23/32):** `politica/modales.test.js` verifica que ningún overlay a mano exista fuera de `Dialogo.jsx`. Arreglado, en la raíz y no con un parche local, un defecto real de foco en `Dialogo.jsx` (el `focus()` corría en el cleanup antes de que el trigger dejara de estar disabled) que `AdminSmtp.jsx` tapaba con `flushSync`.
+
+**Discrepancias con el spec 1-10 (verificadas contra `26c9cd5`; ninguna cambia la intención del ítem):**
+1. A-22: los 12 nombres no coincidían entre los dos repos (arriba).
+2. A-24: el test que leía `hub._lock` se reescribió — la propiedad que queda es "un fallo o una desconexión durante el close no frena a las demás".
+3. A-48: `/api/state` no tocaba la base; se leyó `display_name` UNA vez en el lifespan (no por pedido) para no romper los tests puros ni agregar una ida a la DB al camino caliente (medido en 127 ms a c=25).
+4. A-55: `JAX_REPO_PATH`/`JAX_CONFIG_PATH` tenían default y producción no las definía — se volvieron obligatorias las SEIS rutas. Quedan fuera, con motivo escrito: `model_catalog.py` (`~/.claude/.credentials.json`, ubicación que define Claude Code) y el `cwd=Path.home()` del subproceso `jax` en `command.py` (directorio de trabajo de la CLI, no ruta de datos).
+5. A-51: `upload.py` también lo reescribe el frente D (coordinación de merge, ver el archivo del PR).
+6. A-51/A-53: un `detail` objeto rompía un slice en `chat.py:1075` (`detail[:100]` con `detail` dict) — se usa `motivo[:100]`.
+7. A-36: no existía variable para la base de jax-platform → `JAX_PLATFORM_URL` nueva.
+8. A-49: "pipelines completados" sin ventana de fecha en el spec → se cuenta el total, literal, con índice.
+9. A-35: el registro histórico de P10 en jax (`_count_configured_keys`) es HISTORIA de un triage de 2026-08-19 y no se edita.
+10. **A-17 — pregunta para Fernando, SIN decisión registrada al cierre de este documento:** la fila `ws_notifications` ya existe en `axioma_config` de producción (`_ensure_defaults` hace `INSERT IGNORE`); borrarla de `DEFAULT_CONFIG` no la borra de la base y `GET /api/admin/config` la sigue listando. El frente A no tocó datos de producción; el plan recomendó que la borre el frente C (que ya migra `axioma_config` con dump verificado fila por fila). **Pendiente sin fecha:** que el frente C la borre o Fernando decida.
+
+**Carga (Task 15) y EXPLAIN:** primera corrida (`2b7f217`) dio **NO-GO**: `/api/health` con 10 lectores subía 15,7×/17,7×/19,5× contra un límite de 5× — `_ultimas_20_lineas` del audit recorría los 50 MB línea por línea en Python compitiendo por el GIL. Arreglado leyendo desde el final del archivo: 1,28×/2,12×/1,55×, `/api/audit` p95 de 165-181 ms → 4,9-6,2 ms. De paso, `/api/admin/repo/file` con un `.png` de 2 MB también congelaba el loop (`read_bytes`+`b64encode` de 2 MB reteniendo el GIL en 25 lecturas paralelas): bajó a 3,6×-4,5× acotando la concurrencia de lectura; y `SELECT COUNT(*) FROM jax_users WHERE locked_until > %s` hacía `ALL` — arreglado con `idx_jax_users_locked_until` (EXPLAIN: `range`, `Using where; Using index`). **Gate GO** final (`664cb0c`): `/api/state` sin regresión (−12%..+1,9%), 0 5xx inesperados, invariantes de `/api/command` en las 500 tareas, EXPLAIN de las tres consultas del tablero sin `filesort` ni `temporary`.
+
+**Las 9 variables agregadas al `.env` (deploy 2026-09-17 00:28):** `JAX_REPO_PATH`, `JAX_CONFIG_PATH`, `JAX_AUDIT_LOG_PATH`, `JAX_MISSIONS_DIR`, `JAX_BIN`, `JAX_REPO_BASE`, `JAX_PLATFORM_URL`, `JAX_SEED_SUPERADMIN_EMAIL`, `JAX_SEED_TENANT_NAME`. Backup `/etc/jax/.env.backup-pre-frente-a-20260917-002811`; `jax-platform.service` reiniciado, `NRestarts=0`, journal limpio, variables vivas verificadas en `/proc/PID/environ`. Frontend: backup `/www/wwwroot/axioma-ia.io.backup-pre-frente-a-20260917-002830`, servido `index-ChCOZGPN.js`. **Rollback:** restaurar el backup del `.env` y `git checkout 26c9cd5` + reiniciar.
+
+**Incidente del deploy y la lección (2026-09-17):** `JAX_SEED_TENANT_NAME` se escribió sin comillas ("Inversiones Diamante Negro"). `systemd` (`EnvironmentFile=`) lo lee bien, pero `set -a; . /etc/jax/.env` (cualquier script que sourcea el `.env` en un shell) falla con `Diamante: command not found` — el archivo queda roto sin aviso para ese segundo lector. Corregido con comillas, backup `/etc/jax/.env.backup-pre-comillas-tenant-20260917-002841`, verificado que bash y `systemd-run -p EnvironmentFile` leen el mismo valor. **Regla nueva: todo valor con espacios en `/etc/jax/.env` va entre comillas y se verifica parseándolo con los DOS lectores (systemd y un shell que lo sourcea), no solo con el que se usó para escribirlo.** Misma familia que "un default a `$HOME` en un import hace que los tests escriban en producción" (`test_command_path_traversal`, arriba): un archivo de configuración compartido tiene más de un lector, y cada arreglo se verifica contra todos, no contra el que se tuvo a mano.
+
+**Pisos y canario:** vitest 448→504, con DB 1175→1334 (1 skip ambiental), sin DB 614→764 — medidos dos veces cada uno. Canario por API sobre el sha real: rojo en `e418c82` (`backend-tests-con-db` y `backend-tests-no-db`), revert verde en `e6e67f8`.
+
+**Carga en producción post-deploy:** k6 `health.js`, 10 VUs, p95 0,52 ms, 0 fallas de 698.696 peticiones, 19.963 rps.
+
+**Deuda nueva que este cierre destapa:** ver "Anotado — deuda residual del frente A" en `## Anotado, no bloquea`, más abajo.
+
+**Pendientes con fecha:**
+- Verificación en vivo con Fernando (claro/oscuro, es/en): tablero, labels de facetas, chat traducido, Admin Modelos/SMTP/Pipeline con Escape — sin fecha de control fijada; se cierra cuando Fernando la haga.
+- Discrepancia 10 (arriba): decisión sobre `ws_notifications`, recomendado para el frente C.
+
 ## Cerrado — tanda A: gobernanza con el catálogo de la DB, `capability.mode`, rol `plataforma` (2026-09-14)
 
 **VERDAD OPERACIONAL 2026-09-14 19:50 CST** (despliegue verificado en vivo). jax-platform#71 (PR-A) → Jax#156
@@ -3104,6 +3150,26 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 
 ## Anotado, no bloquea
+
+- **Anotado — deuda residual del frente A de la auditoría de sobre-ingeniería (triage del review final, 2026-09-17). jax-platform; dueño: próxima ronda de pago de deuda.** Ninguno bloquea; el review final de la rama los marcó como minor y la regla "sin hallazgos diferidos" exige que queden acá, con archivo y motivo, en vez de perderse:
+  - **`api/pipelines.py:117-142`, carrera check-then-admit** entre `can_start_pipeline` y `admit_pipeline` (awaits en el medio; el lock que se quitó en A-24 tampoco la cubría). Es del área del frente C (`resource_manager.py`).
+  - **`jax_engine/state.py:29`, `LAS_MANOS_URL` con default literal** `http://127.0.0.1:7777`; la tarjeta de LAS MANOS del tablero nunca dice `sin_configurar`.
+  - **`api/admin/dashboard.py`, sondas de servicios secuenciales** (peor caso ~6 s); falta `asyncio.gather` para paralelizarlas (preexistente a la ronda).
+  - **`api/command.py`, `motivo` expone la ruta absoluta de `JAX_BIN` y la URL interna de Jacobs** en el texto de error (preexistente; la redacción de secretos no cubre rutas/URLs).
+  - **`api/command.py`, `.tmp` huérfano del owner file** si el proceso muere entre el `write` y el `os.replace`.
+  - **`api/command.py`, `publish`/`set_facet_status` sin guarda dentro del `except` del fallo sin persistir** (si publicar falla tras un fallo de ejecución, hyde puede quedar en `thinking`; preexistente a la ronda).
+  - **`backend/tests/test_mesa_codigos.py`, el guard AST es laxo:** acepta cualquier `ast.Name` como `detail` y no ve `fastapi.HTTPException(...)` construido inline.
+  - **`Login.test.jsx`, el `grep /minuto/`** es un instrumento romo que no falla contra el código viejo (los otros 3 tests de conducta de A-50 sí).
+  - **El `motivo` de un error se renderiza como Markdown** en el chat — una imagen remota es posible desde ahí (preexistente).
+  - **`frontend/src/politica/modales.test.js:15`** solo detecta el literal `"fixed inset-0"`, no `"inset-0 fixed"` ni `position: fixed` inline.
+  - **Escape no cierra `rotate` (`AdminFacetsModels.jsx`) ni `PipelineModal` mientras el pedido está en vuelo** (preexistente; SMTP sí bloquea Escape durante el pedido).
+  - **El conteo de usuarios activos del tablero recorre todo `idx_jax_users_role_status`** (index scan completo, no range) — fuera del alcance de la ronda de arreglos de carga (R12).
+  - **`api/admin/repository.py:169-170`, el semáforo de lectura se libera al cancelar el pedido con el hilo todavía leyendo** (ventana de concurrencia >1 breve).
+  - **`api/audit.py`, un byte UTF-8 inválido fuera de la cola pedida (o una línea sin `\n` final / con `\r` suelto) ya no da 503**, desde que `_ultimas_20_lineas` lee desde el final del archivo (por diseño: ya no se lee el resto del archivo).
+  - **Warning de `httpx`/`starlette.testclient`** preexistente en la suite sin DB (solo ruido en el log de CI, sin efecto en resultados).
+  - **`api/admin/repository.py`, `delete_file` sobre un symlink borra el destino** (no el link) dentro de la misma carpeta permitida — conducta preexistente, no introducida por A-40; el listado ahora la muestra con su propia ruta.
+  - **`backend/main.py`, el comentario de `facet_models_router` desregistrado queda pegado arriba de `models_router`** y puede leerse como anotación de ese router — la ronda de arreglo despachada durante la ejecución no llegó a commit (ver el ledger, nota del controlador de cierre).
+  - **Coordinación pendiente con el frente D:** los códigos nuevos `archivo_demasiado_grande`/`pdf_ilegible` ya se traducen en `errores.js`, pero `BottomBar.jsx:90-91` (bloque de adjuntos, del frente D) sigue mostrando `t.attachError` genérico — se resuelve cuando el frente D mergee sobre esta rama.
 
 - **Anotados en la etapa 1 de admin usuarios (2026-09-13).**
   - **Dependencia de la etapa 4 — CERRADO 2026-09-15 (jax-platform#82 → `453b128`):**
