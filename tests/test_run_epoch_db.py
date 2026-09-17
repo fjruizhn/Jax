@@ -10,6 +10,8 @@ import os
 import time
 import uuid
 
+import pytest
+
 _db = os.environ.get("JAX_DB_NAME")
 if _db and _db != "jax_memory_test":
     raise RuntimeError(
@@ -76,7 +78,7 @@ def test_init_tables_crea_run_epoch_con_default_cero():
     assert (str(fila[0]), fila[1], fila[2]) == ("0", "NO", "int")
 
 
-def test_update_condicional_respeta_epoca_y_status():
+def test_update_condicional_respeta_epoca_y_status(monkeypatch):
     async def cuerpo():
         pipeline, _ = await _crear(status=PipelineStatus.running, epoca=2)
         pid = pipeline.pipeline_id
@@ -85,11 +87,21 @@ def test_update_condicional_respeta_epoca_y_status():
             otro_status = await store.pipeline_update_status_si_epoca(
                 pid, 2, PipelineStatus.completed, desde=(PipelineStatus.pending,))
             vigente = await store.pipeline_update_status_si_epoca(pid, 2, PipelineStatus.aborted)
+            # FOUND_ROWS (R6): reescribir el MISMO status con el MISMO
+            # updated_at (tiempo congelado) también cuenta como escritura --
+            # sin CLIENT.FOUND_ROWS, MariaDB devolvería 0 filas CAMBIADAS.
+            # Sin congelar el tiempo, updated_at siempre difiere y la fila
+            # cambia igual, sin CLIENT.FOUND_ROWS de por medio -- no probaría nada.
+            monkeypatch.setattr(store.time, "time", lambda: 1234567890.0)
+            await store.pipeline_update_status_si_epoca(
+                pid, 2, PipelineStatus.aborted, desde=(PipelineStatus.aborted,))
+            repetida = await store.pipeline_update_status_si_epoca(
+                pid, 2, PipelineStatus.aborted, desde=(PipelineStatus.aborted,))
             releido = await store.pipeline_get(pid)
-            return otra_epoca, otro_status, vigente, releido.status, releido.run_epoch
+            return otra_epoca, otro_status, vigente, repetida, releido.status, releido.run_epoch
         finally:
             await _borrar(pid)
-    assert asyncio.run(cuerpo()) == (False, False, True, PipelineStatus.aborted, 2)
+    assert asyncio.run(cuerpo()) == (False, False, True, True, PipelineStatus.aborted, 2)
 
 
 def test_step_upsert_si_epoca_solo_con_la_epoca_vigente_y_running():
@@ -101,16 +113,19 @@ def test_step_upsert_si_epoca_solo_con_la_epoca_vigente_y_running():
             ajena = await store.step_upsert_si_epoca(paso, 0)
             propia = await store.step_upsert_si_epoca(paso, 1)
             tras_propia = (await store.steps_by_pipeline(pid))[0].status
+            # FOUND_ROWS (R6): reescribir el MISMO paso, sin cambios, también
+            # cuenta como escritura -- sin CLIENT.FOUND_ROWS esto daría False.
+            repetida = await store.step_upsert_si_epoca(paso, 1)
             await store.pipeline_update_status_si_epoca(pid, 1, PipelineStatus.aborted)
             paso.status = StepStatus.failed
             paso.error = "tarde"
             no_running = await store.step_upsert_si_epoca(paso, 1)
             final = (await store.steps_by_pipeline(pid))[0]
-            return ajena, propia, tras_propia, no_running, final.status, final.error
+            return ajena, propia, tras_propia, repetida, no_running, final.status, final.error
         finally:
             await _borrar(pid)
     assert asyncio.run(cuerpo()) == (
-        False, True, StepStatus.completed, False, StepStatus.completed, None)
+        False, True, StepStatus.completed, True, False, StepStatus.completed, None)
 
 
 def test_tomar_epoca_una_sola_vez():
@@ -140,6 +155,22 @@ def test_step_upsert_actualiza_la_faceta():
         finally:
             await _borrar(pipeline.pipeline_id)
     assert asyncio.run(cuerpo()) == "thot"
+
+
+def test_desde_vacio_es_error_de_contrato():
+    """R6 (ronda de arreglo 1): `desde=()` arma 'status IN ()', SQL inválido.
+    Es un error de contrato del llamador -- ValueError antes de tocar la DB."""
+    async def cuerpo():
+        pipeline, _ = await _crear(status=PipelineStatus.running, epoca=0)
+        pid = pipeline.pipeline_id
+        try:
+            with pytest.raises(ValueError):
+                await store.pipeline_update_status_si_epoca(pid, 0, PipelineStatus.aborted, desde=())
+            with pytest.raises(ValueError):
+                await store.pipeline_tomar_epoca(pid, 0, ())
+        finally:
+            await _borrar(pid)
+    asyncio.run(cuerpo())
 
 
 def test_explain_de_las_consultas_de_epoca_usa_la_clave_primaria():

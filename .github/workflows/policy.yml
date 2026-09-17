@@ -1021,5 +1021,7 @@ jobs:
           # 27 -> 33 el 2026-09-17 (época de corrida): test_run_epoch_db.py (+6) -- columna,
           #   UPDATE condicional por época y status, pasos condicionales, incremento único
           #   y EXPLAIN por PRIMARY.
-          grep -qE "^33 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 33 tests CORRIDOS."; exit 1; }
+          # 33 -> 34 el 2026-09-17 (ronda de arreglo 1, R6): +1, desde vacío es error de
+          #   contrato.
+          grep -qE "^34 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 34 tests CORRIDOS."; exit 1; }

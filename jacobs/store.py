@@ -450,6 +450,11 @@ async def pipeline_update_status_si_epoca(
     desde: tuple[PipelineStatus, ...] = (PipelineStatus.running,),
 ) -> bool:
     """True si escribió: el pipeline estaba en `epoca` y en uno de `desde`."""
+    if not desde:
+        raise ValueError(
+            "pipeline_update_status_si_epoca: 'desde' no puede estar vacío -- "
+            "'status IN ()' es SQL inválido, es un error de contrato del llamador."
+        )
     params: list = [status.value, time.time()]
     if current_step_index is not None:
         params.append(current_step_index)
@@ -478,6 +483,11 @@ async def pipeline_tomar_epoca(
 ) -> int | None:
     """Incrementa la época si nadie la tomó desde que se leyó. Devuelve la
     nueva, o None si otro pedido ganó (doble resume, doble approve)."""
+    if not desde:
+        raise ValueError(
+            "pipeline_tomar_epoca: 'desde' no puede estar vacío -- "
+            "'status IN ()' es SQL inválido, es un error de contrato del llamador."
+        )
     params: list = [time.time()]
     if context is not None:
         params.append(json.dumps(context, ensure_ascii=False))
