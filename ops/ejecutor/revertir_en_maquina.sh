@@ -22,7 +22,10 @@ corre "for f in /etc/cron.deny /etc/at.deny; do [ ! -f \$f ] || sed -i '/^$C\$/d
 corre "rm -f /etc/sudoers.d/50-ejecutor-axioma-registro && visudo -c >/dev/null"
 # 3. sshd: quitar el drop-in, validar, recargar.
 corre "rm -f /etc/ssh/sshd_config.d/50-ejecutor-axioma.conf && sshd -t && systemctl reload $UNIDAD"
-corre "sshd -T -C user=$C,host=x,addr=127.0.0.1" | grep -qx "authorizedkeysfile .ssh/authorized_keys .ssh/authorized_keys2"
+# Sin la cuenta en un Match propio vuelve a leer su home (a archivo: con pipefail, grep -q + SIGPIPE da falso fallo).
+SSHD_T="$(mktemp)"; corre "sshd -T -C user=$C,host=x,addr=127.0.0.1" > "$SSHD_T"
+if grep -qi "^authorizedkeysfile .*authorized_keys.d" "$SSHD_T"; then rm -f "$SSHD_T"; echo "codigo=sshd_sigue_con_llaves_root" >&2; exit 1; fi
+rm -f "$SSHD_T"
 # 2. Archivo root de llaves: se guarda aparte, no se borra (es evidencia de qué llaves tenía).
 corre "[ ! -e $JAX_EJECUTOR_LLAVES_ROOT ] || mv $JAX_EJECUTOR_LLAVES_ROOT $JAX_EJECUTOR_LLAVES_ROOT.revertido-\$(date -u +%Y%m%dT%H%M%SZ)"
 # 1. Scripts root.

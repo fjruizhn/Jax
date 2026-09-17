@@ -27,6 +27,7 @@ from revocar import argv_como_admin, comandos, correr, inventario  # noqa: E402
 
 CENTINELA_S = 300  # la sesión centinela vive como mucho esto; revocar tiene que matarla mucho antes
 ESPERA_S = 15      # cuánto se espera a que la centinela aparezca o muera
+LIBRE_S = 45       # cuánto se espera a que la cuenta quede sin procesos antes de empezar
 
 
 async def _root(h, env, orden):
@@ -50,8 +51,8 @@ async def _centinela(h, env, c):
                                                 start_new_session=True)
 
 
-async def _esperar(condicion):
-    limite = time.monotonic() + ESPERA_S
+async def _esperar(condicion, tope_s=ESPERA_S):
+    limite = time.monotonic() + tope_s
     while time.monotonic() < limite:
         if await condicion():
             return True
@@ -71,8 +72,14 @@ async def principal(nombre: str, env) -> int:
     revocar_en, probar_entrada = comandos(env)
     pasos = []
 
-    vivos = await _vivos(h, env, c.nombre)
-    if vivos != 0:
+    # Tras cualquier entrada (incluida la última comprobación de una corrida anterior) el
+    # administrador de sesión de systemd de la cuenta sigue vivo unos segundos: se espera a
+    # que se vaya solo. Si no se va, la cuenta está en uso y no se revoca.
+    async def sin_procesos():
+        return await _vivos(h, env, c.nombre) == 0
+
+    if not await _esperar(sin_procesos, LIBRE_S):
+        vivos = await _vivos(h, env, c.nombre)
         print(formato.campos((("codigo", "cuenta_ocupada_o_admin_inaccesible"), ("host", nombre), ("vivos", vivos))))
         return 2
     rc, _, err = await _root(h, env, f"cp -a {shlex.quote(archivo)} {shlex.quote(respaldo)}")
@@ -83,8 +90,14 @@ async def principal(nombre: str, env) -> int:
     try:
         centinela = await _centinela(h, env, c)
 
+        # Viva = el `sleep` de la centinela YA corre como la cuenta. No alcanza con «hay procesos»:
+        # con pam_systemd (hall9000) el administrador de sesión aparece antes que el comando, y
+        # una revocación en ese hueco deja entrar al comando DESPUÉS del pkill (visto en hall9000).
         async def centinela_viva():
-            return centinela.returncode is None and await _vivos(h, env, c.nombre) > 0
+            if centinela.returncode is not None:
+                return False
+            rc, salida, _ = await _root(h, env, f"ps -u {shlex.quote(c.nombre)} -o args=")
+            return rc == 0 and f"sleep {CENTINELA_S}" in salida.splitlines()
 
         pasos.append(("centinela_viva", await _esperar(centinela_viva)))
         (resultado,) = await revocacion.revocar_todas([h], revocar_en=revocar_en, probar_entrada=probar_entrada)

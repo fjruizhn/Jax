@@ -67,14 +67,29 @@ for u in root "$ADMIN_LOCAL"; do
   diff "$ETAPA/sshd-$u-antes.txt" "$ETAPA/sshd-$u-despues.txt" \
     || { corre "rm -f $DROPIN"; echo "codigo=sshd_cambio_para_$u" >&2; exit 1; }
 done
-corre "sshd -T -C user=$C,host=x,addr=127.0.0.1" | grep -qx "authorizedkeysfile $DIR_LLAVES/%u" \
+# A archivo y después grep: con pipefail, `grep -q` cierra el caño al primer acierto, sshd muere
+# por SIGPIPE y la tubería «falla» con el acierto hecho (visto en hall9000, no en la desechable).
+corre "sshd -T -C user=$C,host=x,addr=127.0.0.1" > "$ETAPA/sshd-$C-despues.txt"
+grep -qx "authorizedkeysfile $DIR_LLAVES/%u" "$ETAPA/sshd-$C-despues.txt" \
   || { corre "rm -f $DROPIN"; echo "codigo=sshd_no_aplica_a_la_cuenta" >&2; exit 1; }
 corre "systemctl reload $UNIDAD"
 
 # 4. Registro de sudo de la cuenta (C3), validado ANTES de instalar.
-printf 'Defaults:%s log_output, iolog_dir=/var/log/sudo-io/%%{user}, logfile=/var/log/sudo-%s.log\n' "$C" "$C" > "$ETAPA/sudoers"
-sube "$ETAPA/sudoers" /tmp/ejecutor-sudoers-prueba 0440
-corre "visudo -cf /tmp/ejecutor-sudoers-prueba && install -o root -g root -m 0440 /tmp/ejecutor-sudoers-prueba $SUDOERS && rm /tmp/ejecutor-sudoers-prueba && visudo -c >/dev/null"
+# sudo-rs (hall9000: Ubuntu lo trae por defecto) NO tiene log_output/iolog: visudo lo rechaza.
+# Ahí sólo se sigue si la cuenta NO tiene sudo, y se dice (registro_sudo=false): darle sudo en
+# esa máquina exige antes el sudo clásico (sudo.ws) y volver a instalar.
+corre "sudo -V" > "$ETAPA/sudo-V.txt"
+if [[ "$(head -1 "$ETAPA/sudo-V.txt")" == sudo-rs* ]]; then
+  corre "sudo -n -l -U $C" > "$ETAPA/sudo-l.txt" || true
+  grep -q "is not allowed to run sudo" "$ETAPA/sudo-l.txt" \
+    || { echo "codigo=sudo_rs_sin_registro_y_la_cuenta_tiene_sudo" >&2; exit 1; }
+  REGISTRO_SUDO=false
+else
+  printf 'Defaults:%s log_output, iolog_dir=/var/log/sudo-io/%%{user}, logfile=/var/log/sudo-%s.log\n' "$C" "$C" > "$ETAPA/sudoers"
+  sube "$ETAPA/sudoers" /tmp/ejecutor-sudoers-prueba 0440
+  corre "visudo -cf /tmp/ejecutor-sudoers-prueba && install -o root -g root -m 0440 /tmp/ejecutor-sudoers-prueba $SUDOERS && rm /tmp/ejecutor-sudoers-prueba && visudo -c >/dev/null"
+  REGISTRO_SUDO=true
+fi
 
 # 5. cron, at, linger.
 corre "for f in /etc/cron.deny /etc/at.deny; do touch \$f; grep -qx $C \$f || echo $C >> \$f; done; test ! -e /etc/cron.allow; test ! -e /etc/at.allow; loginctl disable-linger $C"
@@ -85,4 +100,4 @@ if [ "$LOCAL" = no ] && [ "$SIN_FRENO" != --sin-freno ]; then
   test -n "$ENTRADA"
   sudo -n grep -qxF "$ENTRADA" "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS" || echo "$ENTRADA" | sudo -n tee -a "$JAX_EJECUTOR_FRENO_KNOWN_HOSTS" >/dev/null
 fi
-echo "maquina_instalada=\"$NOMBRE\" llaves_sha256=\"$(corre "sha256sum $JAX_EJECUTOR_LLAVES_ROOT" | cut -d' ' -f1)\" freno=$([ "$SIN_FRENO" = --sin-freno ] && echo false || echo true)"
+echo "maquina_instalada=\"$NOMBRE\" llaves_sha256=\"$(corre "sha256sum $JAX_EJECUTOR_LLAVES_ROOT" | cut -d' ' -f1)\" freno=$([ "$SIN_FRENO" = --sin-freno ] && echo false || echo true) registro_sudo=$REGISTRO_SUDO"
