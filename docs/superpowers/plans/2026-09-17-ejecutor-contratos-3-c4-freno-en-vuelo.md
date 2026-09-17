@@ -4,6 +4,11 @@
 > (recomendado) o `superpowers:executing-plans`. Los pasos usan casillas (`- [ ]`).
 
 **Objetivo:** que al poner el interruptor de JAX mueran, en menos de un segundo y sin volver a nacer, el cerebro
+
+> **Enmienda 2026-09-17 (plan 4 ejecutado):** C5 no escribe el interruptor global sino la pausa PROPIA del Ejecutor
+> (`jax/ejecutor/contratos/pausa.py`, `JAX_EJECUTOR_PAUSA`). El freno root y el proxy de este plan tienen que actuar
+> con **cualquiera de las dos** puestas (el interruptor de JAX o la pausa del Ejecutor), con los mismos tests. El
+> proxy ya responde 423 con la pausa del Ejecutor o sin latido del vigía (`tests/test_ejecutor_proxy_pausa.py`).
 del Ejecutor (su proxy corta el stream en curso y rechaza los nuevos) y **todos** los procesos de la cuenta
 `axioma` —los desprendidos con `setsid`/`nohup` y los que corren al otro lado de un `ssh -tt`—, verificado dos
 veces con segundos de por medio.

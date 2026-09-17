@@ -4,6 +4,13 @@
 > (recomendado) o `superpowers:executing-plans`. Los pasos usan casillas (`- [ ]`).
 
 **Objetivo:** que ningún camino del código pueda lanzar el cerebro del Ejecutor sin antes pasar
+
+> **Enmienda 2026-09-17 (plan 4 ejecutado):** antes de cada misión el arranque corre
+> `eleccion_c5.verificar_eleccion(conn, cfg=…, proveedor_cerebro=…, proveedor_auditor=…, hosts_mision=…)` (con la
+> compuerta cerrada, una misión sobre máquinas con datos de clientes NO arranca), exige la pausa del Ejecutor
+> ausente, lanza el vigía (`vigia.ConfigVigia` lleva `pausa`, `latido` y `latido_cada_s`, que tiene que ser menor que
+> `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S`) y sólo después abre el proxy al arnés. `aplicar_revision(entrega, revision)` ya no
+> recibe el mapa de ids: usa `auditor.afirmaciones_auditables(entrega)`.
 `exigir_contratos`, y que `exigir_contratos` lance `ContratosNoVerificados` si **cualquiera** de C1–C6 no está vivo
 —con los canarios de C1 y C5 corriendo de verdad en cada arranque—. Y retirar el lanzador de la Fase 0, que hoy
 lanza sin jaula ni gancho.

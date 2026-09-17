@@ -745,6 +745,13 @@ jobs:
           tests/test_ejecutor_carril_solo_en_el_proxy.py
           tests/test_ejecutor_revocar_sh.py
           tests/test_ejecutor_contratos_revocacion.py
+          tests/test_ejecutor_contratos_pausa.py
+          tests/test_ejecutor_contratos_auditor.py
+          tests/test_ejecutor_contratos_auditor_cliente.py
+          tests/test_ejecutor_contratos_eleccion_c5.py
+          tests/test_ejecutor_contratos_vigia.py
+          tests/test_ejecutor_contratos_canario_c5.py
+          tests/test_ejecutor_proxy_pausa.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -821,6 +828,13 @@ jobs:
             tests/test_ejecutor_carril_solo_en_el_proxy.py \
             tests/test_ejecutor_revocar_sh.py \
             tests/test_ejecutor_contratos_revocacion.py \
+            tests/test_ejecutor_contratos_pausa.py \
+            tests/test_ejecutor_contratos_auditor.py \
+            tests/test_ejecutor_contratos_auditor_cliente.py \
+            tests/test_ejecutor_contratos_eleccion_c5.py \
+            tests/test_ejecutor_contratos_vigia.py \
+            tests/test_ejecutor_contratos_canario_c5.py \
+            tests/test_ejecutor_proxy_pausa.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1211,8 +1225,18 @@ jobs:
           #   MEDIDO dos veces en local (3.14), env limpio, JAX_PLATFORM_REPO_ROOT a una
           #   ruta que no existe: "1148 passed, 1 skipped, 1 xfailed, 16 subtests passed".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1148 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1148 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1038 -> 1135 el 2026-09-17 (Ejecutor SP1 plan 4, C5): pausa 5, auditor 23, cliente 9,
+          #   eleccion 18, vigia 12, canario 12, proxy_pausa 5, y +13 en archivos existentes
+          #   (cita +5 por `proposito`, proxy_carril +8 config de C5). MEDIDO en local
+          #   (3.14): 1039 -> 1136 passed, 1 xfailed (delta +97; el +1/-1 skipped de entorno de
+          #   siempre). PENDIENTE DE CONFIRMAR POR EL RUNNER: si da otro numero, manda el runner.
+          # 1148 + 97 -> 1245 el 2026-09-17, rebase de C5 sobre C6 (sobre origin/master c13d066):
+          #   las dos listas suman los 7 archivos de C5 (+84 en ellos y +13 en archivos
+          #   existentes). MEDIDO dos veces en local (3.14), env limpio, JAX_PLATFORM_REPO_ROOT
+          #   a una ruta que no existe: "1245 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^1245 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1245 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1288,6 +1312,7 @@ jobs:
           jacobs/_direct_usage_test.py
           tests/test_facetas_de_gobernanza_db.py
           tests/test_ejecutor_politica_db.py
+          tests/test_ejecutor_c5_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -1298,6 +1323,7 @@ jobs:
             jacobs/_direct_usage_test.py \
             tests/test_facetas_de_gobernanza_db.py \
             tests/test_ejecutor_politica_db.py \
+            tests/test_ejecutor_c5_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -1331,5 +1357,12 @@ jobs:
           #   29 de E/F + los 2 del Ejecutor; test_ejecutor_politica_db.py migra de
           #   get_conn() a store.conexion(). Medido dos veces con las migraciones de
           #   jax-platform 0c6eb67 y el sello en un tmp: 31 passed.
-          grep -qE "^31 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 31 tests CORRIDOS."; exit 1; }
+          # 31 -> 34 el 2026-09-17 (Ejecutor SP1 plan 4, C5): tests/test_ejecutor_c5_db.py (+3) --
+          #   config sembrada y compuerta cerrada, una misión sobre máquinas con datos de clientes NO
+          #   arranca, EXPLAIN por PRIMARY. Requiere jax-platform feat/ejecutor-config-c5 en master.
+          #   Local (3.14, jax_memory_test con las migraciones de esa rama): 3 passed.
+          # 31 + 3 -> 34 tras el rebase de C5 sobre master c13d066 (frente F):
+          #   test_ejecutor_c5_db.py migra de get_conn() a store.conexion(). Medido en local
+          #   contra jax_memory_test con el sello en un tmp: 34 passed.
+          grep -qE "^34 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 34 tests CORRIDOS."; exit 1; }

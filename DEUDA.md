@@ -410,6 +410,26 @@ política que exporta el plan 1).
   roturas del Step 5; y verificar que siguen vivos Mesa, LAS MANOS :7777, Ollama :11434, MariaDB :3308, SSH :58291 de
   fruiz, la VM .11 y Sésamo .6. Rollback del cerco: `sudo nft delete table inet ejecutor_cerco`.
 
+### Ejecutor SP1 plan 4 · C5 auditor en vivo — publicar, desplegar y DECIDIR (2026-09-17, Mr. Hyde)
+
+Ramas SIN PUBLICAR: jax `feat/ejecutor-c5` (apilada sobre `feat/ejecutor-c3`), jax-platform `feat/ejecutor-config-c5`.
+Orden: el PR de jax-platform se mergea ANTES (el job `jacobs-gobernanza-db` clona su master).
+
+- [ ] **2026-09-18 · DECISIÓN RESERVADA A FERNANDO:** `ejecutor.c5_auditor_admite_datos_de_clientes` nace en `false`.
+  Con cerebro local todo auditor de otro proveedor es nube; la Fase 0 prohibió que la nube vea datos de clientes.
+  Opciones: (a) aceptar que el auditor de nube lea datos de clientes; (b) esperar un proveedor local distinto (Red
+  Queen, Q3 2026); (c) auditar sólo misiones sin datos de clientes. Hasta decidir, una misión sobre .10/.11/.20 NO arranca.
+- [ ] **2026-09-18** Publicar ambas ramas; confirmar pisos del runner: jax tests-puros `1135 passed, 1 skipped`,
+  gobernanza-db `34 passed`; jax-platform con DB `1501`, sin DB `886`. Si difieren, manda el runner.
+- [ ] **2026-09-18** Canario rojo por API: en `vigia.py`, `if not (isinstance(exc, asyncio.CancelledError) and fin.is_set()):`
+  → `if False:` ⇒ `tests-puros` = failure; revert = success.
+- [ ] **2026-09-18** Despliegue: `/etc/jax/.env` con backup y sudoedit: `JAX_EJECUTOR_PAUSA=/etc/jax/interruptor/EJECUTOR_PAUSA`
+  (directorio del frente B), `JAX_EJECUTOR_VIGIA_LATIDO=/var/lib/jax-ejecutor/vigia.latido`,
+  `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S=30`. Sin ellas el proxy de C3 NO arranca (el instalador las exige). Tras
+  desplegar jax-platform: `probar_c5.py --corridas 10 --cerebro jax_local` → `c5_vivo=true` con la config real.
+- [ ] **2026-09-18** Plan 3 (C4): el freno root actúa también con la pausa del Ejecutor; plan 6: `verificar_eleccion`
+  y vigía con latido antes de abrir el proxy (enmiendas escritas en los planes).
+
 ### Hyde y cualquier proceso de `fruiz` alcanzan LAS MANOS sin autenticación — fecha: 2026-09-24
 
 - **Hecho (medido 2026-09-17, Mr. Hyde, al planificar C3):** `127.0.0.1:7777` no pide credencial;

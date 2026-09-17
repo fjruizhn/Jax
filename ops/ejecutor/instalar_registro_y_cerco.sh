@@ -7,6 +7,8 @@
 set -euo pipefail
 : "${JAX_EJECUTOR_REGISTRO:?}" "${JAX_EJECUTOR_POLITICA:?}" "${JAX_EJECUTOR_CUENTA:?}"
 : "${JAX_PROXY_CARRIL_PUERTO:?}" "${JAX_EJECUTOR_CANARIO_PUERTO:?}" "${JAX_PROXY_CARRIL_RAIZ:?}"
+# C5 (plan 4): el proxy no arranca sin la pausa del Ejecutor y el latido del vigía configurados.
+: "${JAX_EJECUTOR_PAUSA:?}" "${JAX_EJECUTOR_VIGIA_LATIDO:?}" "${JAX_EJECUTOR_VIGIA_LATIDO_MAX_S:?}"
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 test "$(git -C "$REPO" branch --show-current)" = master
 PY="$REPO/.venv/bin/python"
@@ -18,6 +20,12 @@ sudo install -d -o fruiz -g fruiz -m 0750 "$DIR"
 test -e "$JAX_EJECUTOR_REGISTRO" || install -m 0640 /dev/null "$JAX_EJECUTOR_REGISTRO"
 sudo chattr +a "$JAX_EJECUTOR_REGISTRO"
 lsattr "$JAX_EJECUTOR_REGISTRO" | cut -d' ' -f1 | grep -q a
+
+# C5: la pausa vive junto al interruptor de JAX (directorio del frente B, root:fruiz 2770: la
+# cuenta del Ejecutor no la puede borrar). El latido, en un directorio de fruiz 0750: si la
+# cuenta pudiera tocarlo, fingiría un vigía vivo.
+test -d "$(dirname "$JAX_EJECUTOR_PAUSA")"
+sudo install -d -o fruiz -g fruiz -m 0750 "$(dirname "$JAX_EJECUTOR_VIGIA_LATIDO")"
 
 # Locks del carril: de fruiz; la cuenta del Ejecutor nunca los toca (tests/test_ejecutor_carril_solo_en_el_proxy.py).
 sudo install -d -o fruiz -g fruiz -m 0750 "$JAX_PROXY_CARRIL_RAIZ"

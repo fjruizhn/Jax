@@ -37,11 +37,20 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
                               loopback, por seguridad: el proxy no autentica)
   JAX_EJECUTOR_REGISTRO       registro de C3 (obligatoria, ruta absoluta): sin
                               registro no hay proxy, sin proxy no hay cerebro
+  JAX_EJECUTOR_PAUSA          pausa propia del Ejecutor que pone C5 (obligatoria,
+                              ruta absoluta)
+  JAX_EJECUTOR_VIGIA_LATIDO   latido del vigía de C5 (obligatoria, ruta absoluta)
+  JAX_EJECUTOR_VIGIA_LATIDO_MAX_S  edad máxima del latido, en segundos (obligatoria, > 0)
 
 C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
 el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
 y cada `tool_result` nuevo de una petición, ANTES de subirla al upstream. Si no se
 puede anotar, o lo que pasa no se puede leer, se corta: la herramienta nunca llega.
+
+C5 (auditor en vivo, plan 4 de SP1): con la pausa del Ejecutor puesta, o sin un
+vigía que lata, el proxy responde 423 sin tocar el upstream, y el trozo que completa un
+`tool_use` no sale (se corta el stream DESPUÉS de anotarlo). Sin auditor no hay cerebro.
+El interruptor global de JAX lo suma el plan 3 (C4).
 
 Corre con:  python -m jax.ejecutor.proxy_carril
 """
@@ -61,6 +70,7 @@ import httpx
 from jax.core.cliente_http_compartido import crear_cliente_http
 from jax.ejecutor.cita import Motivo
 from jax.ejecutor.contratos import lectura
+from jax.ejecutor.contratos import pausa as pausa_c5
 from jax.ejecutor.contratos.registro import Registro
 from jax.ejecutor.prioridad import ESPERA_AGOTADA, EsperaAgotada, carril_ejecutor_async
 
@@ -73,6 +83,8 @@ CONFIG_INVALIDA = "config_invalida"
 REGISTRO_FALLO = "registro_fallo"
 REGISTRO_ILEGIBLE = "registro_ilegible"
 RUTA_NO_PERMITIDA = "ruta_no_permitida"
+EJECUTOR_PAUSADO = "ejecutor_pausado"
+VIGIA_SIN_LATIDO = "vigia_sin_latido"
 #: Lo que el arnés manda de verdad (medido 2026-09-17, arnés 2.1.273 por este proxy:
 #: `HEAD /api/hello` y `POST /v1/messages`). El upstream es el Ollama de producción:
 #: cualquier otra escritura (`/api/pull`, `DELETE /api/delete`, `/api/create`, `/api/chat`)
@@ -109,6 +121,9 @@ class Config:
     host: str
     puerto: int
     registro: Path
+    pausa: Path
+    latido: Path
+    latido_max_s: float
 
 
 def config_desde_entorno(env=None) -> Config:
@@ -133,9 +148,18 @@ def config_desde_entorno(env=None) -> Config:
     upstream = obligatoria("JAX_PROXY_CARRIL_UPSTREAM")
     if not upstream.startswith(("http://", "https://")):
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_UPSTREAM"),)))
-    registro = Path(obligatoria("JAX_EJECUTOR_REGISTRO"))
-    if not registro.is_absolute():
-        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_EJECUTOR_REGISTRO"),)))
+    def absoluta(nombre):
+        ruta = Path(obligatoria(nombre))
+        if not ruta.is_absolute():
+            raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", nombre),)))
+        return ruta
+
+    registro = absoluta("JAX_EJECUTOR_REGISTRO")
+    pausa = absoluta(pausa_c5.VARIABLE_RUTA)
+    latido = absoluta(pausa_c5.VARIABLE_LATIDO)
+    latido_max_s = numero(pausa_c5.VARIABLE_LATIDO_MAX_S, float)
+    if not latido_max_s > 0 or latido_max_s == float("inf"):
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", pausa_c5.VARIABLE_LATIDO_MAX_S),)))
     return Config(
         upstream=upstream.rstrip("/"),
         raiz=Path(obligatoria("JAX_PROXY_CARRIL_RAIZ")),
@@ -143,6 +167,9 @@ def config_desde_entorno(env=None) -> Config:
         host=env.get("JAX_PROXY_CARRIL_HOST", "").strip() or _HOST_POR_OMISION,
         puerto=numero("JAX_PROXY_CARRIL_PUERTO", int),
         registro=registro,
+        pausa=pausa,
+        latido=latido,
+        latido_max_s=latido_max_s,
     )
 
 
@@ -239,6 +266,17 @@ class _Proxy:
         finally:
             await _cerrar(writer)
 
+    def _frenado_ahora(self) -> str | None:
+        if pausa_c5.pausa_puesta(self.cfg.pausa):
+            return EJECUTOR_PAUSADO
+        if not pausa_c5.latido_fresco(self.cfg.latido, self.cfg.latido_max_s):
+            return VIGIA_SIN_LATIDO
+        return None
+
+    async def _frenado(self) -> str | None:
+        """C5: ¿la pausa del Ejecutor está puesta o el vigía dejó de latir? (stat: fuera del loop)."""
+        return await asyncio.to_thread(self._frenado_ahora)
+
     async def _anotar(self, evento: dict) -> None:
         # write + fsync bloquean: fuera del event loop.
         await asyncio.to_thread(self.registro.anotar, evento)
@@ -260,6 +298,11 @@ class _Proxy:
         metodo = peticion.method.decode("latin-1")
         ruta = _ruta_sin_query(peticion.target)
         de_mensajes = metodo == "POST" and ruta in _RUTAS_DE_MENSAJES
+        frenado = await self._frenado()
+        if frenado is not None:
+            log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
+            await _responder_error(conn, writer, 423, Motivo(frenado), extra=((b"x-should-retry", b"false"),))
+            return
         if not de_mensajes and metodo not in _METODOS_DE_LECTURA:
             log.warning("proxy_carril %s metodo=%s", RUTA_NO_PERMITIDA, metodo)
             await _responder_error(conn, writer, 403, Motivo(RUTA_NO_PERMITIDA))
@@ -336,6 +379,11 @@ class _Proxy:
                     log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
                     await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO))
                     return
+                if pedidas and (frenado := await self._frenado()) is not None:
+                    # Anotado y NO entregado: con C5 frenando, la herramienta no llega al arnés.
+                    log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
+                    await _responder_error(conn, writer, 423, Motivo(frenado), extra=((b"x-should-retry", b"false"),))
+                    return
             await _enviar(conn, writer, inicio)
             log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)
             await _enviar(conn, writer, h11.Data(data=crudo))
@@ -347,11 +395,17 @@ class _Proxy:
         try:
             async for trozo in respuesta.aiter_raw():
                 try:
-                    for pedida in lector.alimentar(trozo):
+                    pedidas = lector.alimentar(trozo)
+                    for pedida in pedidas:
                         await self._anotar(lectura.evento_de_pedida(pedida, ruta))
                 except OSError as exc:
                     # El trozo que completa el tool_use NO sale: el arnés ve un stream cortado.
                     log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
+                    writer.transport.abort()
+                    return
+                if pedidas and (frenado := await self._frenado()) is not None:
+                    # C5 frenó: el tool_use queda anotado y su trozo final NO sale.
+                    log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
                     writer.transport.abort()
                     return
                 await _enviar(conn, writer, h11.Data(data=trozo))

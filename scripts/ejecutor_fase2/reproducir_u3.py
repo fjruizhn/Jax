@@ -281,6 +281,11 @@ def _correr_herramientas(capturas: list[CapturaU3], maquina: str, pedidas,
     return nuevas, registro
 
 
+# La reproducción mide PROCEDENCIA (¿sale respaldada desde alguna línea real?), no si la
+# línea contesta la pregunta: eso es C5. Un propósito no vacío la deja fuera de la medición.
+_PROPOSITO_U3 = "reproduccion_u3"
+
+
 def emitible(capturas: list[CapturaU3], maquina: str, datos: list[str], publicar: bool) -> dict:
     """¿Hay UNA línea real de `maquina` desde la que TODOS los `datos` salen
     `respaldada` por `cita.verificar`? Se prueba toda línea de toda captura
@@ -294,7 +299,7 @@ def emitible(capturas: list[CapturaU3], maquina: str, datos: list[str], publicar
             for linea in flujo.splitlines():
                 if not normalizar(linea):
                     continue
-                vs = [verificar(Afirmacion(maquina, cap.comando, linea, d), [cap]) for d in datos]
+                vs = [verificar(Afirmacion(maquina, cap.comando, linea, d, _PROPOSITO_U3), [cap]) for d in datos]
                 for v in vs:
                     estados[v.estado] = estados.get(v.estado, 0) + 1
                 if all(v.estado == RESPALDADA for v in vs):

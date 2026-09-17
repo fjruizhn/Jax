@@ -59,7 +59,7 @@ def _linea(completa):
 def _citable(completa, dato):
     """El dato citado desde LA línea de la salida, contra el verificador real."""
     afirmacion = Afirmacion(maquina=completa.maquina, comando=completa.comando,
-                            linea=_linea(completa), dato=dato)
+                            linea=_linea(completa), dato=dato, proposito="dato de la herramienta")
     return verificar(afirmacion, [a_captura(completa)]).estado
 
 

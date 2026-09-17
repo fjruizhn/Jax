@@ -22,7 +22,8 @@ el texto» y «todo número del texto está en la línea») y sus veredictos
 
 Qué se exige, en orden:
 1. cita no vacía; 2. máquina no vacía; 3. dato no vacío (los tres bypass por
-   vacío hallados al implementar).
+   vacío hallados al implementar); 3 bis. propósito no vacío (C5, plan 4 de SP1:
+   el auditor juzga si la línea contesta la pregunta que dice contestar).
 4. `dato` literal dentro de la `linea` citada, SIN CORTAR UN TOKEN
    → si no: `dato_fuera_de_linea`. Ver `_esta_entero`.
 5. máquina y comando coinciden con una captura; el truncado se mira ANTES que
@@ -54,6 +55,7 @@ DATO_FUERA_DE_LINEA = "dato_fuera_de_linea"
 LINEA_VACIA = "linea_vacia"
 MAQUINA_VACIA = "maquina_vacia"
 DATO_VACIO = "dato_vacio"
+PROPOSITO_VACIO = "proposito_vacio"
 DATO_NO_ENTERO = "dato_no_entero"
 LINEA_NO_ESTA = "linea_no_esta"
 COMANDO_NO_CORRIDO = "comando_no_corrido"
@@ -88,6 +90,13 @@ class Afirmacion:
     comando: str
     linea: str
     dato: str
+    # Qué pregunta de la misión dice responder `dato` (plan 4 de SP1, C5). Lo
+    # escribe el modelo y NUNCA se presenta a la persona (no está en
+    # `CAMPOS_PRESENTACION`): es lo que el auditor de C5 juzga. Una cita
+    # verdadera no prueba que la línea conteste la pregunta («el 8188 es Docker
+    # multi-hilo» citando la línea real del puerto); sin el propósito, nadie
+    # puede decir que no la contesta. Obligatorio: sin él, no sale.
+    proposito: str
 
 
 @dataclass(frozen=True)
@@ -164,6 +173,9 @@ def verificar(afirmacion: Afirmacion, capturas) -> Veredicto:
     dato = normalizar(afirmacion.dato)
     if not dato:
         return Veredicto(SIN_RESPALDO, Motivo(DATO_VACIO))
+    # Sin la pregunta que dice responder, C5 no la puede juzgar: no sale.
+    if not afirmacion.proposito.strip():
+        return Veredicto(SIN_RESPALDO, Motivo(PROPOSITO_VACIO))
     if not _esta_entero(dato, aguja):
         return Veredicto(DATO_FUERA_DE_LINEA, Motivo(DATO_NO_ENTERO, (("dato", dato),)))
     se_corrio = False
