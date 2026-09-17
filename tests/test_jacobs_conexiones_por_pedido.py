@@ -1022,3 +1022,89 @@ def test_la_conexion_directa_de_los_resolvedores_declara_por_que(ruta):
     nota = "\n".join(bloque)
     for parte in ("R39", "sonda", "ok fresco", "un vuelo por clave", "30 s", "jax-platform", "camino caliente"):
         assert parte in nota, f"{ruta}: falta '{parte}' en la nota sobre _db_conn:\n{nota}"
+
+
+# ---------------------------------------------------------------------------
+# Motor Registry: los trabajos de fondo esperan turno sin plazo (R38 fix round 3, N1)
+# ---------------------------------------------------------------------------
+
+def _trabajo_del_motor_registry(tmp_path, llamar):
+    """Un job real de motor_registry.worker.run con el transporte falso
+    `llamar` (mismo arnés que tests/test_motor_job_cancel_and_length.py)."""
+    import test_motor_job_cancel_and_length as arnes
+    from motor_registry import worker
+    from motor_registry.catalog import MotorCatalog
+    from motor_registry.job_store import JobStore
+
+    tienda = JobStore(str(tmp_path / "jobs.jsonl"))
+    job_id = tienda.create(caller="jacobs", capability="implementation", motor="kimi",
+                           trace_id="t", prompt="prompt", recursion_depth=0)
+
+    async def correr():
+        with patch.dict(worker._TRANSPORT_DISPATCH, {"http_openai_compat": llamar}), \
+             patch.object(worker, "resolve_credential_instrumented", AsyncMock(return_value="sk-fake")), \
+             patch("contrato_dispatch._leer_contrato", AsyncMock(return_value=("max_tokens", 131072))), \
+             patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()), \
+             patch("httpx.AsyncClient.post", AsyncMock(side_effect=AssertionError("red real"))):
+            await worker.run(
+                job_id=job_id, motor="kimi", capability="implementation", prompt="prompt",
+                context={}, store=tienda, catalog=MotorCatalog(arnes._CFG),
+                kill_switch_path=str(tmp_path / "PAUSE"),
+            )
+    return correr
+
+
+def _llamada_que_rechaza_una_herramienta():
+    from motor_registry import tool_authority
+
+    async def llamar(**_kw):
+        await tool_authority._reject(job_id="job-x", tool_name="write_file", caller="kimi", reason="fuera del sandbox")
+        return {"choices": [{"message": {"content": "listo"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    return llamar
+
+
+def test_un_job_del_motor_registry_espera_turno_y_audita_con_el_pool_lleno(entorno, monkeypatch, tmp_path):
+    """N1 (re-review): motor_registry/routes.py lanza worker.run con create_task
+    desde el handler HTTP, que tiene la espera acotada. Con el pool de 1
+    ocupado 1,5 s (JAX_DB_CONNECT_TIMEOUT_SECONDS=1) y la base SANA, el
+    TOOL_CALL_REJECTED se perdía (TimeoutError en el fail-soft). El job es
+    trabajo de fondo: espera turno sin plazo.
+    Expected contra bd977a4: `assert [] == ['TOOL_CALL_REJECTED']`."""
+    _pool_de_uno(monkeypatch)
+    base = entorno()
+    trabajo = _trabajo_del_motor_registry(tmp_path, _llamada_que_rechaza_una_herramienta())
+
+    async def cuerpo():
+        try:
+            acaparador = await _acaparar_el_pool(1.5)
+            # Como en routes.py: la tarea nace en el contexto del pedido (acotado).
+            assert store.turno_sin_plazo() is False
+            await asyncio.wait_for(asyncio.create_task(trabajo()), 10)
+            await acaparador
+        finally:
+            await store.cerrar_pool()
+
+    asyncio.run(cuerpo())
+    tipos = [p[2] for s, p, _ in base.escrituras if s.startswith("INSERT INTO jacobs_events")]
+    assert tipos == ["TOOL_CALL_REJECTED"]
+
+
+def test_un_job_del_motor_registry_con_la_base_caida_no_se_cuelga(entorno, monkeypatch, tmp_path):
+    """Control fail-closed: sin plazo de TURNO, abrir la conexión sigue acotado;
+    con la base caída el rechazo no se escribe (fail-soft que ya existía,
+    logueado) y el job termina en segundos, no queda colgado."""
+    base = entorno()
+    base.falla_al_conectar = pymysql.err.OperationalError(2003, "Can't connect to MySQL server")
+    trabajo = _trabajo_del_motor_registry(tmp_path, _llamada_que_rechaza_una_herramienta())
+
+    async def cuerpo():
+        try:
+            inicio = time.monotonic()
+            await asyncio.wait_for(asyncio.create_task(trabajo()), 10)
+            return time.monotonic() - inicio
+        finally:
+            await store.cerrar_pool()
+
+    assert asyncio.run(cuerpo()) < 5
+    assert base.escrituras == []

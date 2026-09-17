@@ -31,6 +31,7 @@ from typing import Any
 
 import httpx
 
+from jacobs.store import espera_de_turno_sin_plazo  # R38 fix round 3 (N1): el job es trabajo de fondo
 from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
 from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
@@ -420,6 +421,39 @@ def _humanize_error(exc: Exception) -> str:
 # ---------------------------------------------------------------------------
 
 async def run(
+    *,
+    job_id: str,
+    motor: str,
+    capability: str,
+    prompt: str,
+    context: dict[str, Any],
+    store: JobStore,
+    catalog: MotorCatalog,
+    kill_switch_path: str,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
+    caller: str | None = None,
+    timeout_seconds: int | None = None,
+) -> None:
+    """Corre un job del Motor Registry (ver _correr_trabajo).
+
+    Ruling R38, fix round 3 (N1, 2026-09-17): el job es trabajo de FONDO --
+    motor_registry/routes.py lo lanza con asyncio.create_task desde el handler
+    HTTP y hereda su contexto, con la espera de turno ACOTADA del pool del store
+    de Jacobs. Con el pool lleno y la base sana, sus event_append
+    (tool_authority TOOL_CALL_*, TOOL_WRITE_REVERTED) vencían y el fail-soft
+    perdía la auditoría. Acá espera turno sin plazo, como el ejecutor y el
+    reaper; abrir la conexión sigue acotado por connect_timeout, así que una
+    base caída falla igual."""
+    with espera_de_turno_sin_plazo():
+        await _correr_trabajo(
+            job_id=job_id, motor=motor, capability=capability, prompt=prompt,
+            context=context, store=store, catalog=catalog, kill_switch_path=kill_switch_path,
+            user_id=user_id, tenant_id=tenant_id, caller=caller, timeout_seconds=timeout_seconds,
+        )
+
+
+async def _correr_trabajo(
     *,
     job_id: str,
     motor: str,

@@ -1473,8 +1473,14 @@ jobs:
           #   sólo sin ok fresco, un vuelo por clave, caché 30 s espejada con jax-platform,
           #   fuera del camino caliente). Rojo contra 36e539f: falta la nota. Fuera del segmento
           #   que compara check_mirror_sync.py (salida idéntica antes y después).
-          grep -qE "^1106 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1106 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1106 -> 1108 el 2026-09-17 (R38 fix round 3, N1): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- un job real de motor_registry.worker.run
+          #   lanzado con create_task desde un contexto de pedido (espera acotada), con el pool
+          #   de 1 ocupado 1,5 s y JAX_DB_CONNECT_TIMEOUT_SECONDS=1, escribe su
+          #   TOOL_CALL_REJECTED (rojo contra bd977a4: assert [] == ['TOOL_CALL_REJECTED']);
+          #   con la base caída el job termina en segundos sin escribir (control fail-closed).
+          grep -qE "^1108 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
