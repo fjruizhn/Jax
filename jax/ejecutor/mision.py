@@ -113,6 +113,9 @@ def prompt_del_turno(instruccion: str, hosts, de_la_mision: frozenset, reanudar:
         f"Misión: {instruccion}\n{vigencia}"
         f"Máquinas de esta misión (ninguna otra), y cómo se corre un comando en cada una:\n{maquinas}\n"
         "Corre los comandos con la herramienta Bash, uno por llamada, siempre con `ssh -tt` como arriba. "
+        "Todo lo que filtre o recorte (tubería, `grep`, `tail`, redirección) va DENTRO de las comillas del "
+        "comando remoto: una tubería afuera corre en otra máquina, el comando pasa a tocar dos y entonces "
+        "no respalda nada. "
         "Después responde SOLO un arreglo JSON, sin texto alrededor y sin bloque de código, con una "
         'afirmación por dato que responda la misión: {"maquina": <nombre de la lista>, '
         '"comando": <el comando COMPLETO tal como lo pasaste a Bash, con el `ssh -tt -p … axioma@…` delante, '

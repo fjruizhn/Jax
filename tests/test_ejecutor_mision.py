@@ -391,3 +391,23 @@ def test_el_prompt_exige_el_dato_literal_y_una_afirmacion_por_valor():
     p = M.prompt_del_turno("espacio libre y versión", HOSTS, frozenset({"ejecutor-prueba"}))
     assert "tal cual" in p and "una afirmación por cada" in p
     assert "no juntes" in p.lower() and "no calcules" in p.lower()
+
+
+def test_el_prompt_manda_las_tuberias_dentro_del_comando_remoto():
+    """Misión real en atemai (2026-09-17 13:12): el modelo escribió
+    `ssh -tt … "df -h /" 2>&1 | tail -n 3`. La tubería corre en hall9000, así que el comando toca DOS
+    máquinas y `capturas` no lo respalda (correcto: la máquina la decide el gancho, no el modelo).
+    Resultado: cero capturas y cero afirmaciones. El prompt tiene que pedir la tubería DENTRO de las
+    comillas del comando remoto."""
+    p = M.prompt_del_turno("espacio libre", HOSTS, frozenset({"ejecutor-prueba"}))
+    assert "DENTRO de las comillas" in p and "tubería" in p
+
+
+def test_capturas_ignora_el_comando_que_toca_dos_maquinas():
+    """Control del defecto de arriba, con el mismo comando que mandó el modelo."""
+    con_tuberia = f'ssh -tt -p 58291 axioma@192.0.2.50 "df -h /" 2>&1 | tail -n 3'
+    pedidas, resultados = {"t1": con_tuberia}, {"t1": ("/dev/sda1 20G 1G 19G 5% /", False)}
+    assert M.capturas(pedidas, resultados, HOSTS) == ()
+    adentro = 'ssh -tt -p 58291 axioma@192.0.2.50 "df -h / | tail -n 3"'
+    (captura,) = M.capturas({"t1": adentro}, resultados, HOSTS)
+    assert captura.maquina == "ejecutor-prueba"
