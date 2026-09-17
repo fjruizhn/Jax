@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
 import sys
@@ -220,12 +221,26 @@ async def _connect_ok(*_a, **_k):
     return _ConexionFalsa()
 
 
+# R38 (fix round 1, 2026-09-17): jacobs/usage_writer.py escribe por el pool
+# del store de Jacobs, no por aiomysql.connect. Mismos dos casos: la base (o el
+# pool) no está, y una conexión que responde.
+@asynccontextmanager
+async def _pool_que_explota():
+    raise OSError("la base no está")
+    yield
+
+
+@asynccontextmanager
+async def _pool_ok():
+    yield _ConexionFalsa()
+
+
 # --- jacobs -----------------------------------------------------------------
 
 def test_jacobs_encola_la_fila_cuando_la_base_falla(respaldo, monkeypatch):
     from jacobs import usage_writer
 
-    monkeypatch.setattr(usage_writer.aiomysql, "connect", _connect_que_explota)
+    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_que_explota)
     asyncio.run(usage_writer.record_direct_usage(
         user_id="7", tenant_id="77", facet="jekyll", provider_id="deepseek",
         model="deepseek-v4-flash", tokens_in=123, tokens_out=45,
@@ -251,7 +266,7 @@ def test_jacobs_encola_la_fila_cuando_la_base_falla(respaldo, monkeypatch):
 def test_jacobs_camino_feliz_no_deja_nada_en_el_respaldo(respaldo, monkeypatch):
     from jacobs import usage_writer
 
-    monkeypatch.setattr(usage_writer.aiomysql, "connect", _connect_ok)
+    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_ok)
     asyncio.run(usage_writer.record_direct_usage(
         user_id="7", tenant_id="77", facet="jekyll", provider_id="deepseek",
         model="m", tokens_in=1, tokens_out=2,
@@ -267,7 +282,7 @@ def test_jacobs_loguea_ERROR_si_tampoco_puede_encolar(respaldo, monkeypatch, cap
     async def _encolar_que_no_puede(_fila):
         return None
 
-    monkeypatch.setattr(usage_writer.aiomysql, "connect", _connect_que_explota)
+    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_que_explota)
     monkeypatch.setattr(usage_writer, "encolar_uso", _encolar_que_no_puede)
     with caplog.at_level("ERROR", logger="jacobs.usage_writer"):
         asyncio.run(usage_writer.record_direct_usage(
@@ -283,7 +298,7 @@ def test_jacobs_no_loguea_ERROR_cuando_pudo_encolar(respaldo, monkeypatch, caplo
     """Encolada NO es perdida: un ERROR ahi entrena a ignorar el log."""
     from jacobs import usage_writer
 
-    monkeypatch.setattr(usage_writer.aiomysql, "connect", _connect_que_explota)
+    monkeypatch.setattr(usage_writer.store, "conexion_del_pool", _pool_que_explota)
     with caplog.at_level("DEBUG", logger="jacobs.usage_writer"):
         asyncio.run(usage_writer.record_direct_usage(
             user_id="7", tenant_id="77", facet="jekyll", provider_id="p",

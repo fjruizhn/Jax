@@ -51,10 +51,11 @@ from jacobs.models import PipelineCreateRequest, PipelineStatus, StepSpec  # noq
 from jacobs.prevuelo_reglas import CostoPaso, Veredicto  # noqa: E402
 
 RAIZ = Path(__file__).resolve().parents[1]
+_SONDEAR_REAL = pv.sonda.sondear  # el fixture la apaga; el caso de sonda la vuelve a usar
 PID = "p-conexiones"
 REF = 'inline:{"result": "hecho"}'
 # Marcos que no son "el sitio" sino la cañería de la conexión.
-_CANERIA = {"get_conn", "_ejecutar_condicional", "conexion_del_pool", "_pool_del_store", "_conexion_o_pool",
+_CANERIA = {"get_conn", "_db_conn", "_ejecutar_condicional", "conexion_del_pool", "_pool_del_store", "_conexion_o_pool",
             "__aenter__", "__aexit__", "_correr_endpoint"}
 
 
@@ -106,6 +107,12 @@ class _Cursor:
             self._fila = (1,)
         elif s == store._SQL_BLOQUEAR_PIPELINE:
             self._fila = (0, b.status)
+        elif s.startswith("SELECT f.transport, f.persona, p.base_url"):
+            self._fila = ("http_openai_compat", None, "http://proveedor.invalid/v1", "deepseek", "m1", None)
+        elif s.startswith("SELECT encrypted_value FROM credential"):
+            self._fila = ("cifrado",)
+        elif s.startswith("SELECT price_input_per_1m_usd, price_output_per_1m_usd FROM model WHERE provider_id"):
+            self._fila = (Decimal("1"), Decimal("2"))
         elif s.startswith(("UPDATE ", "INSERT ")):
             if b.falla_en and s.startswith(b.falla_en):
                 raise pymysql.err.OperationalError(2013, "Lost connection to MySQL server during query")
@@ -672,3 +679,104 @@ def test_dry_run_solo_abre_el_candado_y_completa_en_la_misma_transaccion(entorno
         ("UPDATE jacobs_pipelines", "candado_de_activos"),
         ("INSERT INTO jacobs_events", "candado_de_activos"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# La rama de la sonda (R38, fix round 1, 1)
+# ---------------------------------------------------------------------------
+
+def _catalogo_que_sondea(monkeypatch):
+    """jekyll con contrato, precio y credencial, SIN evento de salud: el
+    pre-vuelo real la sondea. Los lectores del catálogo van mockeados (su
+    conexión del pool ya está contada en los tests de arriba)."""
+    from decimal import Decimal as D
+
+    async def resolver(pasos, *, conexion):
+        return {}
+
+    async def leer(*, conexion, **_kw):
+        return pv.Catalogo(
+            {"jekyll": pv.prevuelo_catalogo.FilaFaceta(
+                "jekyll", "http_openai_compat", None, "deepseek", "http://proveedor.invalid/v1", "m1")},
+            {("deepseek", "m1"): pv.FilaModelo("max_tokens", 8192, D("1"), D("2"))},
+            {}, frozenset({"deepseek"}), {},
+        )
+
+    monkeypatch.setattr(pv.prevuelo_catalogo, "resolver_motores", resolver)
+    monkeypatch.setattr(pv.prevuelo_catalogo, "leer_catalogo", leer)
+
+
+def _sonda_sin_red(monkeypatch, tmp_path):
+    import credential_resolver
+    import facet_resolver
+
+    monkeypatch.setattr(pv.sonda, "sondear", _SONDEAR_REAL)
+    llamada = AsyncMock(return_value={"usage": {"prompt_tokens": 3, "completion_tokens": 1}})
+    monkeypatch.setattr(pv.sonda, "_post", llamada)  # ningún proveedor real
+    monkeypatch.setattr(credential_resolver, "decrypt_secret", lambda _v: "clave-de-prueba")
+    monkeypatch.setattr(credential_resolver, "_cache", {})
+    monkeypatch.setattr(facet_resolver, "_cache", {})
+    monkeypatch.setattr(facet_resolver, "FACET_SEAL_PATH", str(tmp_path / "sin-sello"))
+    return llamada
+
+
+def test_la_sonda_escribe_por_el_pool_y_los_resolvedores_solo_leen_sin_cache(entorno, monkeypatch, tmp_path):
+    """Un pre-vuelo con salud vieja sondea. Primer pedido: los dos
+    resolvedores COMPARTIDOS con el ejecutor (facet_resolver,
+    credential_resolver) abren su conexión directa con la caché fría --
+    excepción justificada en r38-report.md (módulos espejados con
+    jax-platform, caché de 30 s por clave). Segundo pedido, dentro del TTL:
+    ninguna conexión directa; el evento de salud y el uso de la sonda van por
+    el pool. Expected contra 1d84e82: en el segundo pedido, directas de
+    registrar_evento_de_sonda y record_direct_usage."""
+    base = entorno()
+    _catalogo_que_sondea(monkeypatch)
+    llamada = _sonda_sin_red(monkeypatch, tmp_path)
+
+    async def cuerpo():
+        try:
+            primero = await _pedido_preflight()
+            n = len(base.aperturas)
+            segundo = await _pedido_preflight()
+            return primero, base.aperturas[:n], base.aperturas[n:], segundo
+        finally:
+            await store.cerrar_pool()
+
+    primero, aperturas_1, aperturas_2, segundo = asyncio.run(cuerpo())
+    assert primero["sondeadas"] == ["jekyll"] and segundo["sondeadas"] == ["jekyll"]
+    assert llamada.await_count == 2
+    assert [a for a in aperturas_1 if a[0] == "directa"] == [
+        ("directa", "_query_facet", False),
+        ("directa", "_query_active_credential", False),
+    ]
+    assert aperturas_2 == []
+    tipos = [s.split(" (")[0] for s, _p, _sitio in base.escrituras]
+    assert tipos == ["INSERT INTO facet_health_event", "INSERT INTO axioma_usage"] * 2
+
+
+def test_sonda_con_la_base_caida_al_resolver_da_503(entorno, monkeypatch, tmp_path):
+    """R13/R16 se conservan: una caída real de la base al resolver la faceta
+    se propaga y el pedido es 503 prevuelo_no_disponible, nunca faceta_caida
+    ni un veredicto. (Control: el cambio no toca los resolvedores.)"""
+    base = entorno()
+    _catalogo_que_sondea(monkeypatch)
+    llamada = _sonda_sin_red(monkeypatch, tmp_path)
+    real = base.directa
+
+    async def directa_caida(*a, **kw):
+        raise pymysql.err.OperationalError(2003, "Can't connect to MySQL server")
+
+    monkeypatch.setattr(aiomysql, "connect", directa_caida)
+
+    async def cuerpo():
+        try:
+            with pytest.raises(HTTPException) as exc:
+                await _pedido_preflight()
+            return exc.value
+        finally:
+            await store.cerrar_pool()
+
+    error = asyncio.run(cuerpo())
+    assert real is not None
+    assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
+    llamada.assert_not_awaited()

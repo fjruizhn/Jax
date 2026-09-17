@@ -9,6 +9,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
@@ -460,13 +461,20 @@ def test_el_tope_de_motor_tambien_entra_en_el_minimo(monkeypatch):
     assert llamar.await_args.kwargs["limite"] == {"max_tokens": 10}
 
 
+@asynccontextmanager
+async def _pool_que_explota():
+    # R38 (fix round 1): usage_writer escribe por el pool del store.
+    raise OSError("sin base")
+    yield
+
+
 def test_record_direct_usage_encola_con_el_request_type_pedido(monkeypatch):
     # Host y puerto de mentira: sin ellos _db_cfg() lanza ANTES de conectar y
     # el test no ejercitaría el camino de la conexión caída.
     monkeypatch.setenv("JAX_DB_HOST", "127.0.0.1")
     monkeypatch.setenv("JAX_DB_PORT", "1")
     encolar = AsyncMock(return_value="spool-1")
-    with patch.object(usage_writer.aiomysql, "connect", AsyncMock(side_effect=OSError("sin base"))), \
+    with patch.object(usage_writer.store, "conexion_del_pool", _pool_que_explota), \
          patch.object(usage_writer, "encolar_uso", encolar):
         asyncio.run(usage_writer.record_direct_usage(
             "1", "1", "jekyll", "deepseek", "m", 1, 2, request_type="preflight_probe"))
@@ -498,7 +506,11 @@ def test_record_direct_usage_inserta_con_el_request_type_pedido(monkeypatch):
         def close(self):
             pass
 
-    with patch.object(usage_writer.aiomysql, "connect", AsyncMock(return_value=_Conn())):
+    @asynccontextmanager
+    async def pool_ok():
+        yield _Conn()
+
+    with patch.object(usage_writer.store, "conexion_del_pool", pool_ok):
         asyncio.run(usage_writer.record_direct_usage(
             "1", "1", "jekyll", "deepseek", "m", 1, 2, request_type="preflight_probe"))
         asyncio.run(usage_writer.record_direct_usage("1", "1", "jekyll", "deepseek", "m", 1, 2))

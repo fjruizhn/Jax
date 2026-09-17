@@ -5,12 +5,12 @@ compat, jax_local/ollama) cuando se invocan via un pipeline de Jacobs -- no
 via la Mesa web (esa ruta ya escribe axioma_usage desde jax-platform/backend/
 api/chat.py, Tasks 1-4).
 
-Mismo patron de conexion que credential_resolver.py/store.py/
-las_manos/motor_registry/usage_writer.py: cada repo se conecta a la misma DB
-jax_memory con su propio conector minimo, sin paquete compartido. jacobs NO
-importa motor_registry (no esta en su sys.path standalone, ver comentario en
-jacobs/executor.py sobre el catalogo de capabilities) -- por eso este modulo
-es una copia adaptada, no un import cruzado.
+Conexion: por el pool del store de Jacobs (jacobs/store.py::conexion_del_pool,
+Ruling R38 fix round 1, 2026-09-17); antes abria una conexion propia por
+fila. jacobs NO importa motor_registry (no esta en su sys.path standalone,
+ver comentario en jacobs/executor.py sobre el catalogo de capabilities) --
+por eso este modulo es una copia adaptada de
+las_manos/motor_registry/usage_writer.py, no un import cruzado.
 
 request_type='pipeline' (no 'chat'): distingue en /api/admin/usage estos
 mismos transportes invocados DESDE un pipeline de Jacobs (posiblemente sin
@@ -33,22 +33,11 @@ cuando venció o el proveedor respondió 2xx sin usage -- tokens ESTIMADOS."""
 from __future__ import annotations
 
 import logging
-import os
 
-import aiomysql
-
-try:
-    # LAS MANOS produccion (cwd=las_manos, uvicorn) y jobs con PYTHONPATH
-    # incluyendo las_manos/: bare, resuelve a las_manos/db_connect_config.py
-    # (symlink) o directo si jacobs corre con las_manos en su propio path.
-    from db_connect_config import db_connect_timeout_seconds
-except ImportError:
-    # CI sin PYTHONPATH propio (p.ej. facet-health-io) y REPL: cwd=raiz del
-    # repo, solo el paquete jax.core es importable.
-    from jax.core.db_connect_config import db_connect_timeout_seconds
+from jacobs import store
 
 try:
-    # Mismo doble import que db_connect_config, por la misma razon: en
+    # Doble import (mismo patron que db_connect_config en store.py): en
     # produccion `jax.core` no es importable con cwd=las_manos, y
     # las_manos/cola_uso.py es un symlink a jax/core/cola_uso.py.
     from cola_uso import _ahora_iso, encolar as encolar_uso
@@ -71,27 +60,6 @@ def _entero_o_none(valor) -> int | None:
     except (TypeError, ValueError):
         logger.warning("tenant_id/user_id no numerico (%r) -- se encola como NULL", valor)
         return None
-
-
-def _db_cfg() -> dict:
-    host = os.environ.get("JAX_DB_HOST")
-    port = os.environ.get("JAX_DB_PORT")
-    if not host or not port:
-        raise RuntimeError(
-            "JAX_DB_HOST/JAX_DB_PORT no están seteados -- sin default "
-            "silencioso a localhost:3306 (esa instancia está muerta, ver "
-            "memoria jax-dual-mariadb-instances). Sourceá /etc/jax/.env o "
-            "exportalos a mano antes de conectar."
-        )
-    return {
-        "host": host,
-        "port": int(port),
-        "user": os.getenv("JAX_DB_USER", ""),
-        "password": os.getenv("JAX_DB_PASSWORD", ""),
-        "db": os.getenv("JAX_DB_NAME", "jax_memory"),
-        "charset": "utf8mb4",
-        "autocommit": True,
-    }
 
 
 async def _lookup_model_price(conn, provider_id: str, model: str) -> tuple[float | None, float | None]:
@@ -149,11 +117,13 @@ async def record_direct_usage(
     creado_en = _ahora_iso()
     cost = None
     try:
-        # connect_timeout explícito (no en _db_cfg()): hallazgo de revisión,
-        # Tarea 2b (tanda A, ronda de arreglo 1, 2026-09-14) -- sin esto,
-        # aiomysql espera sin límite si la DB se cuelga.
-        conn = await aiomysql.connect(**_db_cfg(), connect_timeout=db_connect_timeout_seconds())
-        try:
+        # R38, fix round 1 (2026-09-17): por el pool del store de Jacobs y no
+        # por una conexión propia -- la sonda del pre-vuelo escribe acá en el
+        # camino de /jacobs/preflight, crear y continue, y el ejecutor en cada
+        # paso HTTP. Un error del pool (turno vencido en un pedido, base caída)
+        # cae al respaldo igual que antes caía un connect fallido; el ejecutor
+        # espera turno sin plazo (store.espera_de_turno_sin_plazo).
+        async with store.conexion_del_pool() as conn:
             price_in, price_out = await _lookup_model_price(conn, provider_id, model)
             if price_in is not None and price_out is not None:
                 cost = (tokens_in * float(price_in) + tokens_out * float(price_out)) / 1_000_000
@@ -167,8 +137,6 @@ async def record_direct_usage(
                         facet, model, tokens_in, tokens_out, cost, request_type,
                     ),
                 )
-        finally:
-            conn.close()
         return
     except Exception as e:  # fail-soft: la contabilidad no puede tumbar un step ya completado; la fila va al respaldo, no a la basura
         motivo = f"{type(e).__name__}: {e}"

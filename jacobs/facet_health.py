@@ -256,12 +256,11 @@ async def registrar_evento_de_sonda(clave: str, outcome: str, detalle: str | Non
     reconoce la regla y se filtra en claro."""
     if outcome not in OUTCOMES_DE_SONDA:
         raise ValueError(f"outcome de sonda inválido: {outcome!r}")
-    conn = await store.get_conn()
-    try:
+    # R38, fix round 1: por el pool del store (la sonda corre en el camino de
+    # /jacobs/preflight, crear y continue), no por una conexión propia.
+    async with store.conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 _SQL_EVENTO_DE_SONDA,
                 (clave, outcome, SOURCE_PREVUELO, recortar_redactado(detalle, _LARGO_DETALLE), ts),
             )
-    finally:
-        conn.close()

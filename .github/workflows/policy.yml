@@ -1442,8 +1442,16 @@ jobs:
           #   nada confirmado (rojo: el pedido se colgaba); dry_run completa en la misma
           #   transacción y sólo abre el candado (rojo: UPDATE y DRY_RUN_COMPLETE por el
           #   pool). test_jacobs_preflight_endpoint.py agrega el doble de la transacción.
-          grep -qE "^1093 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1093 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1093 -> 1095 el 2026-09-17 (R38, fix round 1, 1): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- la rama de la sonda: con salud
+          #   vieja, el evento de salud y el uso de la sonda van por el pool y, dentro
+          #   del TTL de los resolvedores, un segundo pre-vuelo no abre ninguna conexión
+          #   directa (rojo contra 1d84e82: directas de registrar_evento_de_sonda y
+          #   record_direct_usage); una caída real de la base al resolver sigue siendo
+          #   503 (control de R13/R16). test_cola_uso_escritores.py y
+          #   test_prevuelo_sonda.py simulan la base por el pool del store.
+          grep -qE "^1095 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1095 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
