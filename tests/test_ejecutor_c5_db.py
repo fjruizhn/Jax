@@ -4,7 +4,7 @@ sembrada se lee, la compuerta nace CERRADA y, con ella, una misión que toca una
 máquina con datos de clientes NO arranca. IPs de documentación (RFC 5737)."""
 import asyncio
 
-from jacobs.store import get_conn
+from jacobs import store
 from jax.ejecutor.contratos import eleccion_c5 as E
 from jax.ejecutor.contratos.fallo import Fallo
 
@@ -14,20 +14,23 @@ INVENTARIO = [("c5-hall9000", "192.0.2.105", "hypervisor", 1, 0), ("c5-atemai", 
 
 
 async def _con_inventario(accion):
-    conn = await get_conn()
+    # store.conexion() y no una conexion suelta: get_conn() ya no existe (frente F,
+    # pool de Jacobs). La limpieza va en su propia conexion para que un error de
+    # `accion` (que descarta la primera) no deje filas de prueba.
     try:
-        async with conn.cursor() as cur:
-            for nombre, ip, rol, local, clientes in INVENTARIO:
-                await cur.execute("INSERT IGNORE INTO ejecutor_host (nombre, ip, puerto, rol, es_local, "
-                                  "con_datos_de_clientes, activo) VALUES (%s, %s, 58291, %s, %s, %s, %s)",
-                                  (nombre, ip, rol, local, clientes, 0 if nombre == "c5-baja" else 1))
-        await conn.commit()
-        return await accion(conn)
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                for nombre, ip, rol, local, clientes in INVENTARIO:
+                    await cur.execute("INSERT IGNORE INTO ejecutor_host (nombre, ip, puerto, rol, es_local, "
+                                      "con_datos_de_clientes, activo) VALUES (%s, %s, 58291, %s, %s, %s, %s)",
+                                      (nombre, ip, rol, local, clientes, 0 if nombre == "c5-baja" else 1))
+            await conn.commit()
+            return await accion(conn)
     finally:
-        async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM ejecutor_host WHERE nombre LIKE %s", ("c5-%",))
-        await conn.commit()
-        conn.close()
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM ejecutor_host WHERE nombre LIKE %s", ("c5-%",))
+            await conn.commit()
 
 
 def test_la_config_sembrada_se_lee_y_la_compuerta_nace_cerrada():
