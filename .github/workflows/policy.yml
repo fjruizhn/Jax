@@ -135,6 +135,13 @@ jobs:
       JAX_DB_USER: root
       JAX_DB_PASSWORD: ci
       JAX_DB_NAME: jax_memory_test
+      # las_manos en el path desde E-24 (2026-09-16): jacobs/plan.py, executor.py
+      # y reaper.py importan `cliente_http_compartido` por su nombre corto, como
+      # corren en produccion (dentro de LAS MANOS, con las_manos/ en sys.path).
+      # Importarlo como jax.core.* daria OTRO modulo y otro cliente, que el
+      # shutdown de LAS MANOS no cierra. Sin esto el job no colecta (visto en
+      # rojo al rebasar el frente E: ModuleNotFoundError en la coleccion).
+      PYTHONPATH: las_manos
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -950,8 +957,22 @@ jobs:
           #   test_ejecutor_prioridad.py (11 async + 1 del arreglo del carril sync, que
           #   colgaba sin tope la segunda peticion paralela) y +18 del proxy nuevo.
           #   CONFIRMADO POR EL RUNNER (3.12, PR #173): "742 passed, 1 skipped, 1 xfailed".
-          grep -qE "^742 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 742 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 742 -> 850 el 2026-09-17 (frente E de la auditoria, rebasado sobre 70e4303):
+          #   +108. Once archivos nuevos: config_entorno 19, plan_facetas_de_la_tabla 12,
+          #   errores_de_proveedor_redactados 12, cliente_http_compartido 11,
+          #   url_proveedor_workers_memoria 11, frente_e_retiros 9,
+          #   espejos_symlink_frente_e 8, requirements_completos 5, sin_autoetiqueta 5,
+          #   max_steps_una_sola_constante 4, documentos_del_repo 3 (= 99); y en
+          #   archivos que ya estaban: payload_max_tokens +4, aiomysql_connect_timeout +2,
+          #   no_blocking_in_async +2 (controles fuera del checkout) y
+          #   ejecutor_proxy_carril +1 (el reenvio sin tope de lectura, tras pasar el
+          #   proxy a crear_cliente_http()). Contado por archivo con --collect-only
+          #   contra master. MEDIDO en local (3.14) simulando el runner (sin
+          #   checkout de jax-platform): "850 passed, 1 skipped, 1 xfailed", dos
+          #   corridas; master en el mismo entorno da 742/1, igual que su runner.
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^850 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 850 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -991,6 +1012,17 @@ jobs:
         with:
           # 3.14: la del backend de jax-platform, con la que se reprodujo.
           python-version: "3.14"
+      # El sello de facet_resolver a un directorio temporal del runner, ANTES de
+      # las migraciones y de los tests (los dos importan facet_resolver, que lee
+      # la ruta al importarse). Sin la variable, la ruta por omision es la de
+      # produccion, /srv/jax-data/facet-cache-seal: el 2026-09-17 un agente que
+      # reprodujo este job en hall9000 sin fijarla le cambio el mtime al sello
+      # real (01:51:21, sin cambio de datos) -- y un toque del sello invalida
+      # la cache de facetas de TODOS los procesos. Declararlo aca hace que copiar
+      # los pasos del job lleve la barrera con ellos. `runner.temp` no existe en
+      # el `env` del job: se exporta por GITHUB_ENV.
+      - name: Sello de facet_resolver fuera de /srv
+        run: echo "JAX_FACET_SEAL_PATH=$RUNNER_TEMP/facet-cache-seal" >> "$GITHUB_ENV"
       - name: Clonar jax-platform (sus migraciones crean la gobernanza)
         run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
       - run: pip install -r /tmp/jax-platform/backend/requirements.txt pytest
@@ -1040,5 +1072,10 @@ jobs:
           #   test_contrato_dispatch_db.py deja de depender de filas sembradas: cada
           #   test crea y borra SU fila de `model` (glm-5.2 no existe con la semilla
           #   de PR-L y rompio este job en Jax#158).
-          grep -qE "^27 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 27 tests CORRIDOS."; exit 1; }
+          # 27 -> 29 el 2026-09-17 (frente E, E-17): tests/test_facetas_de_gobernanza_db.py
+          #   (+2) -- las facetas del planner salen de la tabla `facet` real sembrada
+          #   por las migraciones. Medido en local (3.14, jax_memory_test con las
+          #   migraciones de jax-platform c53ef30), dos corridas: 29 passed; master
+          #   70e4303 en el mismo entorno: 27.
+          grep -qE "^29 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 29 tests CORRIDOS."; exit 1; }
