@@ -106,6 +106,7 @@ class _Cursor:
         elif s == store._SQL_BLOQUEAR_PIPELINE:
             self._fila = (0, b.status)
         elif s.startswith(("UPDATE ", "INSERT ")):
+            b.escrituras.append((s, params))
             return 1
         else:
             raise AssertionError(f"consulta no prevista por el doble: {s[:120]}")
@@ -165,6 +166,7 @@ class _Base:
         self.status = status
         self.pasos = pasos
         self.aperturas: list[tuple[str, str, bool]] = []  # (via, sitio, found_rows)
+        self.escrituras: list[tuple[str, object]] = []
         self.falla_al_conectar: BaseException | None = None
 
     def _abrir(self, via, kwargs):
@@ -221,7 +223,10 @@ def entorno(monkeypatch):
     monkeypatch.setenv("JAX_DB_PORT", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
     monkeypatch.delenv("JAX_DB_POOL_MAX", raising=False)
-    for modulo in (policy, routes, continuar):
+    monkeypatch.delenv("JAX_PREVUELO_DB_POOL_MAX", raising=False)
+    from jacobs import executor
+
+    for modulo in (policy, routes, continuar, executor):
         monkeypatch.setattr(modulo, "check_kill_switch", lambda: False)
     monkeypatch.setattr(pv.sonda, "sondear", AsyncMock(side_effect=AssertionError("sin sondas")))
 
@@ -418,3 +423,136 @@ def test_crear_con_la_base_caida_conserva_su_error_y_no_escribe(entorno, monkeyp
     asyncio.run(cuerpo())
     prevuelo.assert_not_awaited()
     assert base.aperturas == []
+
+
+# ---------------------------------------------------------------------------
+# Contención del pool: los trabajos de fondo esperan turno (R38, fix round 1, 2a)
+# ---------------------------------------------------------------------------
+
+def _pool_de_uno(monkeypatch):
+    # Los dos nombres: 1d84e82 leía JAX_PREVUELO_DB_POOL_MAX, hoy JAX_DB_POOL_MAX.
+    monkeypatch.setenv("JAX_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+
+
+async def _acaparar_el_pool(segundos: float) -> asyncio.Task:
+    """Toma la única conexión del pool y la retiene `segundos` (más que
+    JAX_DB_CONNECT_TIMEOUT_SECONDS=1): contención con la base SANA."""
+    ocupada = asyncio.Event()
+
+    async def acaparar():
+        async with store.conexion_del_pool():
+            ocupada.set()
+            await asyncio.sleep(segundos)
+
+    tarea = asyncio.ensure_future(acaparar())
+    await ocupada.wait()
+    return tarea
+
+
+def test_el_ejecutor_espera_turno_con_el_pool_lleno_y_termina(entorno, monkeypatch):
+    """La revisión de 1d84e82: `event_append` de STEP_STARTED está fuera del
+    try (executor.py) -- un turno del pool que vence salía del gather y mataba
+    run_pipeline con el paso en running. Con la base sana, el ejecutor espera
+    turno sin plazo y la corrida termina.
+    Expected contra 1d84e82: TimeoutError desde run_pipeline."""
+    from jacobs import executor
+    from jacobs.models import Pipeline, PipelineStatus, Step
+
+    _pool_de_uno(monkeypatch)
+    base = entorno()
+    monkeypatch.setattr(store, "pipeline_update_status_si_epoca", AsyncMock(return_value=True))
+    monkeypatch.setattr(store, "pipeline_epoca_y_status", AsyncMock(return_value=(0, PipelineStatus.running)))
+    monkeypatch.setattr(store, "step_upsert_si_epoca", AsyncMock(return_value=True))
+    monkeypatch.setattr(executor, "_dispatch_step", AsyncMock(return_value={"result": "ok"}))
+    monkeypatch.setattr(executor, "_persist_step_to_repo", AsyncMock())
+    monkeypatch.setattr(executor, "save_if_large", lambda *a, **k: (None, {"result": "ok"}))
+    pipeline = Pipeline(
+        pipeline_id=PID, name="t", invoked_by="plataforma", mode="autonomous",
+        status=PipelineStatus.running, run_epoch=0,
+        plan=[Step(pipeline_id=PID, step_index=0, facet="jekyll", capability="research",
+                   input={"prompt": "p"})],
+    )
+
+    async def cuerpo():
+        try:
+            tarea = await _acaparar_el_pool(1.5)
+            await asyncio.wait_for(executor.run_pipeline(pipeline), 10)
+            await tarea
+        finally:
+            await store.cerrar_pool()
+
+    asyncio.run(cuerpo())
+    tipos = [p[2] for s, p in base.escrituras if s.startswith("INSERT INTO jacobs_events")]
+    assert tipos == ["PIPELINE_STARTED", "WAVE_STARTED", "STEP_STARTED", "STEP_COMPLETED",
+                     "WAVE_COMPLETED", "PIPELINE_COMPLETED"]
+
+
+def test_un_pedido_http_con_el_pool_lleno_sigue_dando_503_acotado(entorno, monkeypatch):
+    """Control del otro lado de la decisión: fuera del ejecutor y del reaper
+    la espera de turno sigue acotada por JAX_DB_CONNECT_TIMEOUT_SECONDS y el
+    pedido responde 503 prevuelo_no_disponible, no queda colgado."""
+    _pool_de_uno(monkeypatch)
+    entorno()
+    _catalogo_vacio(monkeypatch)
+
+    async def cuerpo():
+        try:
+            tarea = await _acaparar_el_pool(3)
+            inicio = time.monotonic()
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(_pedido_preflight(), 10)
+            espera = time.monotonic() - inicio
+            tarea.cancel()
+            await asyncio.gather(tarea, return_exceptions=True)
+            return exc.value, espera
+        finally:
+            await store.cerrar_pool()
+
+    error, espera = asyncio.run(cuerpo())
+    assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
+    assert espera < 2.5
+
+
+def test_sin_plazo_de_turno_la_base_caida_sigue_fallando_cerrado(entorno, monkeypatch):
+    """Fail-closed para una caída REAL: sin plazo de turno, abrir la conexión
+    sigue acotado por connect_timeout y el error sube (el ejecutor no se
+    cuelga esperando una base muerta)."""
+    base = entorno()
+    base.falla_al_conectar = pymysql.err.OperationalError(2003, "Can't connect to MySQL server")
+
+    async def cuerpo():
+        try:
+            with store.espera_de_turno_sin_plazo():
+                with pytest.raises(pymysql.err.OperationalError):
+                    await store.event_append(PID, "X")
+        finally:
+            await store.cerrar_pool()
+
+    asyncio.run(cuerpo())
+
+
+def test_el_reaper_barre_sin_plazo_de_turno(monkeypatch):
+    """El reaper es el otro trabajo de fondo que escribe (REAPED): su barrido
+    corre con la misma espera sin plazo que el ejecutor.
+    Expected contra 1d84e82: AttributeError (no existía la marca)."""
+    from jacobs import reaper
+
+    vistas = []
+
+    async def barrido():
+        vistas.append(store.turno_sin_plazo())
+
+    class _Corte(Exception):
+        pass
+
+    async def dormir(_s):
+        raise _Corte
+
+    monkeypatch.setattr(reaper, "reap_orphaned_pipelines", barrido)
+    monkeypatch.setattr(reaper, "check_facet_health", AsyncMock())
+    monkeypatch.setattr(reaper.asyncio, "sleep", dormir)
+    with pytest.raises(_Corte):
+        asyncio.run(reaper.start_reaper_loop())
+    assert vistas == [True]
+    assert store.turno_sin_plazo() is False

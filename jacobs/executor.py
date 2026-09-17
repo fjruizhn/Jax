@@ -25,6 +25,7 @@ from model_catalog import record_resolved_version_safe
 import httpx
 
 from jacobs import store
+from jacobs.store import espera_de_turno_sin_plazo  # R38: sobrevive a los tests que reemplazan `store`
 from jacobs.artifacts import read_artifact, save_if_large
 # Vive en jax/core (capa base, compartido con el HttpMuscle del REPL); llega a
 # este proceso por el symlink las_manos/grounding_sources.py, como facet_resolver.
@@ -1116,6 +1117,15 @@ async def _perdio_la_epoca(pipeline: Pipeline) -> None:
 
 
 async def run_pipeline(pipeline: Pipeline) -> None:
+    """Corre el pipeline (ver _correr_pipeline). Ruling R38, fix round 1: la
+    corrida es un trabajo de fondo -- sus escrituras esperan turno del pool
+    sin plazo (store.espera_de_turno_sin_plazo) en vez de morir por cola con
+    la base sana; una base caída sigue fallando al conectar."""
+    with espera_de_turno_sin_plazo():
+        await _correr_pipeline(pipeline)
+
+
+async def _correr_pipeline(pipeline: Pipeline) -> None:
     """
     Ejecuta el pipeline por OLAS topológicas. Dentro de cada ola, los steps
     corren EN PARALELO (asyncio.gather). El orden entre olas respeta depends_on.

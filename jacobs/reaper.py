@@ -60,6 +60,7 @@ from pathlib import Path
 import httpx
 
 from jacobs import store
+from jacobs.store import espera_de_turno_sin_plazo  # R38: sobrevive a los tests que reemplazan `store`
 from jacobs.facet_health import check_facet_health
 from jacobs.models import HTTP_FACETS, PipelineStatus
 
@@ -499,7 +500,10 @@ async def start_reaper_loop() -> None:
     sweep_count = 0
     while True:
         try:
-            await reap_orphaned_pipelines()
+            # R38, fix round 1: trabajo de fondo -- espera turno del pool sin
+            # plazo (jacobs/store.py::espera_de_turno_sin_plazo).
+            with espera_de_turno_sin_plazo():
+                await reap_orphaned_pipelines()
         except Exception:  # fail-soft: loop de limpieza en background, mismo patron que jax-platform/jax_engine/owner_cleanup.py -- nunca debe tumbar el proceso, el proximo ciclo reintenta
             logger.warning("Reaper: barrido periódico falló", exc_info=True)
         try:

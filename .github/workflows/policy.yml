@@ -1425,8 +1425,16 @@ jobs:
           #   crea otro; un pool de un loop cerrado sin apagado se reemplaza. Rojo contra
           #   2fd3778: 2 failed (RuntimeError 'otro event loop'). El test del pool de otro
           #   loop pasa a usar un loop VIVO (el caso que sigue negándose).
-          grep -qE "^1085 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1085 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1085 -> 1089 el 2026-09-17 (R38, fix round 1, 2a): +4 en
+          #   test_jacobs_conexiones_por_pedido.py -- con el pool de 1 conexión tomada
+          #   más que JAX_DB_CONNECT_TIMEOUT_SECONDS y la base sana, run_pipeline espera
+          #   turno y termina con sus 6 eventos (rojo contra 1d84e82: TimeoutError salía
+          #   del gather); el reaper barre bajo la misma marca (rojo: la marca no
+          #   existía); sin plazo de turno una base caída sigue fallando al conectar
+          #   (rojo: AttributeError); un pedido HTTP con el pool lleno sigue dando 503
+          #   acotado (control).
+          grep -qE "^1089 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1089 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

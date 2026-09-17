@@ -11,8 +11,9 @@ import json
 import logging
 import os
 import time
-from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from typing import Any, AsyncIterator, Iterator
 
 import aiomysql
 from pymysql.constants import CLIENT
@@ -149,7 +150,9 @@ def db_pool_max() -> int:
     midió que más conexiones no bajan el p95 del pre-vuelo (5 -> 30,3 ms,
     10 -> 31,1, 25 -> 38,4 a c=25): el límite es la CPU del event loop. 10
     (el doble de lo que alcanzaba al pre-vuelo solo) ocupa 10 de las 55
-    libres."""
+    libres. La cola no mata a los trabajos de fondo: el ejecutor y el reaper
+    esperan turno sin plazo (espera_de_turno_sin_plazo); los pedidos HTTP
+    esperan a lo sumo JAX_DB_CONNECT_TIMEOUT_SECONDS y dan 503."""
     from jacobs.prevuelo_config import _entero_positivo
 
     return _entero_positivo(DB_POOL_MAX, os.getenv(DB_POOL_MAX, "10"))
@@ -226,19 +229,61 @@ async def _pool_del_store() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
     return actual[0], actual[1]
 
 
+# --- Espera de turno de los trabajos de fondo (R38, fix round 1, 2a) ---------
+# Revisión de 1d84e82: con el pool compartido, una escritura del ejecutor que
+# esperaba turno más de JAX_DB_CONNECT_TIMEOUT_SECONDS con la base SANA
+# lanzaba TimeoutError. `event_append(STEP_STARTED)` está fuera del try del
+# paso: salía del gather, mataba run_pipeline y el paso quedaba en running.
+# Decisión: el ejecutor y el reaper (trabajos de fondo, sin nadie esperando la
+# respuesta) esperan turno SIN plazo; abrir la conexión sigue acotado por
+# connect_timeout, así que una base caída falla igual (fail-closed). Los
+# pedidos HTTP mantienen la espera acotada y responden 503. Se descartaron:
+# un cupo aparte para el ejecutor (más conexiones sobre una MariaDB
+# compartida, y el cupo propio también se llena en una ola de 20 pasos) y
+# tratar el vencimiento como fallo del paso (un paso fallaría por cola con la
+# base sana).
+# Es una ContextVar y no un argumento: run_pipeline la pone una vez y la
+# heredan las tareas del gather de cada ola (asyncio copia el contexto al
+# crearlas) y todas las escrituras de store/usage_writer que hacen, sin
+# pasar un parámetro por ~20 llamadas. Límite: una consulta que la base deja
+# COLGADA retiene su turno sin plazo (igual que antes del pool, que no
+# acotaba consultas).
+_turno_sin_plazo: ContextVar[bool] = ContextVar("jacobs_turno_sin_plazo", default=False)
+
+
+def turno_sin_plazo() -> bool:
+    return _turno_sin_plazo.get()
+
+
+@contextmanager
+def espera_de_turno_sin_plazo() -> Iterator[None]:
+    """Dentro del bloque (y en las tareas que se creen en él), pedir una
+    conexión del pool espera turno sin plazo. Para trabajos de fondo."""
+    marca = _turno_sin_plazo.set(True)
+    try:
+        yield
+    finally:
+        _turno_sin_plazo.reset(marca)
+
+
 @asynccontextmanager
 async def conexion_del_pool() -> AsyncIterator[aiomysql.Connection]:
     """Una conexión del pool del store, devuelta al salir. Cualquier error de
     la base (al conectar, al esperar turno o a mitad de consulta) se propaga:
     quien llama responde 503, nunca un veredicto por defecto."""
     pool, turno = await _pool_del_store()
-    async with asyncio.timeout(db_connect_timeout_seconds()):
-        await turno.acquire()
-        try:
+    if _turno_sin_plazo.get():
+        await turno.acquire()  # trabajo de fondo: espera la cola (ver arriba)
+    else:
+        async with asyncio.timeout(db_connect_timeout_seconds()):
+            await turno.acquire()
+    try:
+        # Abrir o reusar: acotado siempre. Una base caída falla cerrado.
+        async with asyncio.timeout(db_connect_timeout_seconds()):
             conn = await pool.acquire()
-        except BaseException:
-            turno.release()
-            raise
+    except BaseException:
+        turno.release()
+        raise
     try:
         yield conn
     except BaseException:
