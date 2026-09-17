@@ -22,15 +22,15 @@ Visión: JAX es base y laboratorio de un producto comercial globalmente escalabl
 
 ## 3. Las 7 facetas (estado real) — REESCRITO 2026-08-20 (ronda 7, T3), modelos verificados contra `facet_binding` real (`SELECT * FROM facet_binding WHERE role='primary'`), no contra este documento
 
-| Faceta | Icono | Músculo | Modelo (facet_binding, verificado hoy) | Rol | Voz |
-|---|---|---|---|---|---|
-| JAX local | 🏠 | OllamaMuscle (GPU local, ROCm) | **qwen3.6:35b-a3b-q4_K_M** (`resolved_version`, confirmado cargado con `ollama ps`) — el binding declara `qwen3-coder:30b` pero el `resolved_version` posterior a la última proposal aprobada (2026-08-19 03:45:42) es el que realmente corre; **no `qwen3:14b`**, desactualizado desde jun-2026 | Conversación cotidiana, privada. Tono hondureño **sobrio**: "maje" con medida, sin groserías, sin modismos ajenos | em_alex @1.0 |
-| Hyde | 🔧 | SubprocessMuscle (`claude -p`) | `facet_binding` declara **claude-opus-5** (no `sonnet`) — ⚠️ no verificado si `subprocess_muscle.py` realmente consume este campo (Hyde invoca la CLI de Claude Code, que puede resolver su propio modelo por fuera de esta tabla); dato de catálogo, no confirmado en ejecución | Técnico: código, infra | em_santa @1.0 |
-| Jekyll | 🧠 | HttpMuscle (DeepSeek) | **deepseek-v4-flash** (no `deepseek-chat`) | Humanista erudito, español neutro formal | em_santa @0.85 |
-| Hipatia | 🔍 | HttpMuscle (Gemini + grounding) | **gemini-3.6-flash** (no `gemini` genérico) | Investigación con fuentes web | ef_dora @1.0 |
-| Thot | 📜 | HttpMuscle (OpenAI) | **gpt-5.5** (`resolved_version` gpt-5.5-2026-04-23) — sin cambio | Crítico: abogado del diablo, guardián del largo plazo | em_alex @0.9 |
-| Kimi | ⚙️ | HttpMuscle (Moonshot AI) | **kimi-k3** (no `kimi-k2.7-code`) | Motor de enjambre: coding agéntico, refactors amplios, exploración paralela. Subordinado a Ada/Hyde. | em_alex @1.0 |
-| Ada | 🏛️ | HttpMuscle (Z.ai) | **glm-5.2** — sin cambio, key Z.ai ya activa (no "pendiente", esa nota es de jun-2026) | Arquitecta de código: 1M contexto, largo horizonte. Nombrada en honor a Ada Lovelace. | ef_dora @1.0 |
+| Faceta | Icono | Músculo | Modelo (facet_binding, verificado hoy) | Rol |
+|---|---|---|---|---|
+| JAX local | 🏠 | OllamaMuscle (GPU local, ROCm) | **qwen3.6:35b-a3b-q4_K_M** (`resolved_version`, confirmado cargado con `ollama ps`) — el binding declara `qwen3-coder:30b` pero el `resolved_version` posterior a la última proposal aprobada (2026-08-19 03:45:42) es el que realmente corre; **no `qwen3:14b`**, desactualizado desde jun-2026 | Conversación cotidiana, privada. Tono hondureño **sobrio**: "maje" con medida, sin groserías, sin modismos ajenos |
+| Hyde | 🔧 | SubprocessMuscle (`claude -p`) | `facet_binding` declara **claude-opus-5** (no `sonnet`) — ⚠️ no verificado si `subprocess_muscle.py` realmente consume este campo (Hyde invoca la CLI de Claude Code, que puede resolver su propio modelo por fuera de esta tabla); dato de catálogo, no confirmado en ejecución | Técnico: código, infra |
+| Jekyll | 🧠 | HttpMuscle (DeepSeek) | **deepseek-v4-flash** (no `deepseek-chat`) | Humanista erudito, español neutro formal |
+| Hipatia | 🔍 | HttpMuscle (Gemini + grounding) | **gemini-3.6-flash** (no `gemini` genérico) | Investigación con fuentes web |
+| Thot | 📜 | HttpMuscle (OpenAI) | **gpt-5.5** (`resolved_version` gpt-5.5-2026-04-23) — sin cambio | Crítico: abogado del diablo, guardián del largo plazo |
+| Kimi | ⚙️ | HttpMuscle (Moonshot AI) | **kimi-k3** (no `kimi-k2.7-code`) | Motor de enjambre: coding agéntico, refactors amplios, exploración paralela. Subordinado a Ada/Hyde. |
+| Ada | 🏛️ | HttpMuscle (Z.ai) | **glm-5.2** — sin cambio, key Z.ai ya activa (no "pendiente", esa nota es de jun-2026) | Arquitecta de código: 1M contexto, largo horizonte. Nombrada en honor a Ada Lovelace. |
 
 3 de 7 modelos coincidían con lo que decía el documento (thot, ada — y de forma parcial hyde, sin verificar). Los otros 4 habían cambiado sin que nadie actualizara esta tabla. Recordatorio operativo vigente (ver `jax-platform/CLAUDE.md`): el modelo real de cualquier faceta se resuelve en vivo vía `facet_binding`/`resolve_facet()`, nunca a mano — esta tabla es un snapshot verificado hoy, no la fuente de verdad (esa es la DB).
 
@@ -38,13 +38,11 @@ Visión: JAX es base y laboratorio de un producto comercial globalmente escalabl
 
 ## 4. Arquitectura del código (`~/jax/jax/`)
 
-- `core/main.py` — REPL. Input vía **run_in_executor** (no congela el event loop; la voz suena de fondo). Comandos: `/voz on|off`, `/callate`, `/fact ...`, `salir`. Hilo de conversación en RAM + guardado MariaDB + voz como task de fondo. Kill switch antes de cada invoke. Errores humanizados.
+- `core/main.py` — REPL. Input vía **run_in_executor** (no congela el event loop). Comandos: `/fact ...`, `/decisions ...`, `/pendientes ...`, `/pesado`, `/normal`, `salir`. Hilo de conversación en RAM + guardado MariaDB. Kill switch antes de cada invoke. Errores humanizados. **Sin comandos de voz desde el 2026-09-17** (ver §6).
 - `core/router.py` — Híbrido: easter egg → adiós → invocar/fijar → manual → saludos puros → keywords de dominio → **clasificador LLM local** → default. **Blindado a tildes/voseo** (`_sin_tildes`: "traé"="trae", "adiós"="adios"; jun-4). Clasificador: jax_local (qwen2.5:7b), medido **~200 ms**, 4/4 aciertos; fallback a default si falla; migrable vía `set_classifier()`.
 - `muscles/base.py` — Contrato `Muscle.invoke(prompt, model=None, history=None)`. HttpMuscle (DeepSeek/Gemini; grounding adjunta fuentes). Excepciones: ModelNotAllowed (fallo duro), Timeout, Invocation.
 - `muscles/ollama_muscle.py` — localhost:11434/api/chat, **GPU_SEMAPHORE=1** (una inferencia GPU a la vez).
 - `muscles/subprocess_muscle.py` — Hyde: `claude -p --append-system-prompt`, historial serializado a texto (la CLI no acepta array), kill+wait al timeout.
-- `voice/kokoro_worker.py` — Proceso dedicado de TTS. Corre con el venv de Kokoro (`~/kokoro-test/.venv/bin/python`), **NUNCA** con el de JAX. `lang_code='e'` (⚠️ 'a' es inglés — error que propuso Deep, corregido). Voces directas (sin mapas). Protocolo: JSON por línea en stdin → 4 bytes LE (tamaño) + WAV por stdout; tamaño 0 = error.
-- `voice/tts.py` — VoiceEngine: lazy (worker arranca al primer uso), lock (una locución a la vez), `/callate` mata aplay **sin tomar el lock** (anti-deadlock), limpieza para voz (markdown/código/URLs/emojis fuera), recorte a `MAX_PALABRAS_VOZ` con oraciones completas + "El resto te lo dejo en pantalla". La voz jamás tumba el latido (errores silenciosos). Texto completo SIEMPRE en pantalla.
 - `memory/db.py` + worker.py — MariaDB (abajo).
 
 ## 5. Memoria (dos sistemas independientes)
@@ -52,13 +50,25 @@ Visión: JAX es base y laboratorio de un producto comercial globalmente escalabl
 1. **Hilo de conversación (corto plazo, RAM):** lista compartida entre TODAS las facetas (un solo JAX), `MAX_TURNS=10` pares, snapshot previo al turno (sin duplicación), historial estructurado role/content insertado en el formato nativo de cada API. Decisión: **compartido** (jun-4).
 2. **Persistente (largo plazo, MariaDB):** base `jax_memory`. ⚠️ **CORREGIDO 2026-08-20 (ronda 7, T3):** este documento decía "9 tablas" desde jun-2026 — `SHOW TABLES` real hoy devuelve **33** (`conversations`/`messages`/`facts`/`decisions`/`errors`/`people`/`projects`/`action_items` originales, más todo lo que GAP2/Bloque C/Jacobs fueron agregando: `jacobs_pipelines`, `jacobs_steps`, `jacobs_events`, `capability`, `motor`, `capability_motor`, `facet_binding`, `facet_models`, `axioma_usage`, `credential_audit`, `shadow_messages`, `axioma_artifacts`, y otras — catálogo completo fuera de alcance de esta pasada, corrección puntual del número que mentía). VECTOR(768) para embeddings (nomic-embed-text) SÍ está en producción, no "preparado" — `jax/memory/worker.py` lo puebla cada 20 min. Usuario `jax_user`@localhost confinado. `messages.conversation_id` es **int**. Escritura fire-and-forget; tolerante a fallos (sin DB, JAX conversa igual). Comandos `/fact list|verify|delete`, y desde ronda 4 `/decisions list` + `/pendientes list|done`. Jairo Urbina = primer registro en `people` (`honor_memory=1`) — semántica de ese campo sigue sin definir, bloqueada esperando a Fernando (ver T5 de rondas recientes).
 
-## 6. Voz (Kokoro — Fase 1 COMPLETA, jun-4)
+## 6. Voz — RETIRADA (2026-09-17)
 
-- **Motor:** Kokoro-82M (Apache 2.0, uso comercial libre), español latino, **CPU puro** (torch CPU en `~/kokoro-test/.venv`) — esquiva por completo el muro CUDA/ROCm de la GPU AMD. Calidad validada a oído: **85/100** ("fluido, no perfecto pero funciona").
-- **Voces español disponibles:** em_alex, em_santa (masculinas), ef_dora (femenina). Jekyll comparte timbre con Hyde pero a 0.85 (profesor pausado).
-- **Medición clave (hall9000):** generación ~4× tiempo real → 650 palabras = 43.3 s de generación para 179 s de audio. El diseño Fase 1 genera TODO antes de sonar → respuestas largas tienen 20-40 s de silencio inicial. `MAX_PALABRAS_VOZ` (en tts.py) controla el techo; decidido subirlo de 90 a ~300 (verificar valor vigente en el archivo).
-- **Fase 2 (PRIORIDAD SIGUIENTE): streaming por oraciones** — reproducir la oración 1 mientras se genera la 2; latencia de arranque ~2 s sin importar el largo, techo eliminado. Prompt de diseño para Deep ya redactado; pendiente cruzar su respuesta (⚠️ validar contra evidencia local: Deep ya alucinó lang_code y voice_map).
-- Escalera si algún día se quiere premium (pitch del producto financiero): Google TTS → ElevenLabs. Para JAX personal, Kokoro basta.
+**DECISIÓN de Fernando, 2026-09-17: la voz sale del árbol.** Se retiró el paquete
+`jax/voice/` completo (`tts.py`, `ears.py`, `kokoro_worker.py`, `whisper_worker.py`),
+sus comandos del REPL (`/voz on|off`, `/callate`, `/escucha`), las claves
+`voice_id`/`voice_speed` de `config/config.toml` y la variable `JAX_KOKORO_PYTHON`.
+
+**Por qué (medido el 2026-09-17, no supuesto):** el venv `~/kokoro-test` no existía,
+no había modelos en `/srv/jax-data/`, `python3 -c "import kokoro"` daba
+ModuleNotFoundError y `JAX_KOKORO_PYTHON` no estaba en `/etc/jax/.env` — pero
+`main()` llamaba `_python_de_kokoro()` al arrancar, así que **el REPL entero no
+arrancaba** por la puerta de una funcionalidad que no existía.
+
+La última versión funcional del código de voz queda en la historia de git. Cómo
+traerla de vuelta: ver `DEUDA.md` § "Retiro de la voz (2026-09-17)". No se
+reinstala sin un plan de voz de verdad — venv propio, modelos en disco y una
+prueba que se ejercite.
+
+Lo que sigue siendo cierto de la Fase 1/2 (jun-2026) está en §9, como historia.
 
 ## 7. Método de trabajo (innegociable)
 
@@ -101,12 +111,12 @@ Políticas no negociables: **i18n SIEMPRE** (cero strings hardcodeados), **Dark/
 **Item 0 de la versión anterior (Intent Envelope como bloqueante de LAS MANOS) — OBSOLETO, no solo completado.** LAS MANOS existe, corre en producción (`jax-las-manos.service`), y sobre esa base se construyó GAP 2 completo (4 fases: tool-calling con gate de autoridad → bucle multi-turno con cotas → write_file con reversibilidad por git → auditor configurable + notificación asíncrona) — un diseño distinto y más específico que el "Intent Envelope de 16 campos" que este documento seguía listando como el próximo paso obligatorio. El orden real de conexión de facetas tampoco fue "Thot→Hipatia→Jekyll→Hyde": hoy `jax_local`/`kimi` pasan por el Motor Registry gobernado (`MotorPolicy.check()`, 8 checks incluido el techo de timeout), y `hipatia/jekyll/thot/ada` van directo por HTTP sin esa gobernanza (ver diagnóstico de `_HTTP_FACETS`, ronda 6). **La lista de pendientes real y vigente hoy no es esta sección — es [`DEUDA.md`](./DEUDA.md), documento canónico único (Bloque 2, 2026-08-21).** Antes de `DEUDA.md`, la deuda real vivía dispersa en las entradas "DEUDA" (T5/T6) de cada sesión de pago de deuda al final de este documento — exactamente el error que congeló esta sección §8 mientras el trabajo real se movía a otro lado. `DEUDA.md` reemplaza ese patrón: se edita en el lugar cuando algo se cierra o se abre, no se agrega una entrada más al historial. Las entradas de "DEUDA" de §9 (abajo) siguen existiendo como registro histórico fechado de lo que era cierto en cada sesión — no como fuente de verdad del estado actual.
 
 **De la lista anterior, verificado hoy sin reabrir cada ítem a fondo:**
-- Voz (streaming por oraciones), EL OÍDO, LA CARA: no re-verificados en esta pasada — sin evidencia de que hayan avanzado desde jun-2026, pero tampoco se confirmó que sigan parados. Pendiente de una verificación propia si vuelven a ser prioridad.
+- Voz y OÍDO: **RETIRADOS el 2026-09-17** (ver §6). LA CARA: no re-verificada en esta pasada — sin evidencia de que haya avanzado desde jun-2026.
 - LAS MANOS: completado y superado — ver arriba, ahora es la base de GAP 2, no un pendiente.
 - Decisión de hardware (¿devolver la GPU por otra?): **resuelta de hecho** — el hardware real hoy (§2, verificado) es Ryzen 9 9950X + Radeon AI PRO R9700 con ROCm funcionando, no la RX 9060 XT/Vulkan que este documento describía como "a decidir". Alguien ya decidió y ejecutó el upgrade sin que se actualizara esta sección.
 - get_datetime / tool calling de Ollama: superado — GAP 2 construyó tool-calling real (`read_file`/`write_file` gobernados) muy por encima de lo que este ítem pedía.
 - LA MEMORIA VIVA (embeddings + worker de hechos): construida — `jax/memory/worker.py` corre cada 20 min (`jax-memory-worker.timer`), destila facts/decisions/action_items con embeddings VECTOR(768); `decisions`/`action_items` tienen lector desde ronda 4.
-- Resto (chat multiagente, rate limits de Gemini, easter egg con voz, rotación de key filtrada, producto financiero): no re-verificados en esta pasada — listados tal cual, sin la confianza de una verificación propia.
+- Resto (chat multiagente, rate limits de Gemini, rotación de key filtrada, producto financiero): no re-verificados en esta pasada — listados tal cual, sin la confianza de una verificación propia.
 
 ## 9. Historial de hitos
 

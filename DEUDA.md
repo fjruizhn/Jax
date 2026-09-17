@@ -392,6 +392,62 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Retiro de la voz (2026-09-17) — Kokoro TTS y Whisper fuera del árbol
+
+**DECISIÓN de Fernando, 2026-09-17.** Se retira la voz. No se reinstala hasta que
+haya un plan de voz de verdad.
+
+**Qué se retiró:**
+- `jax/voice/` completo: `tts.py` (VoiceEngine/Kokoro), `ears.py` (EarEngine),
+  `kokoro_worker.py`, `whisper_worker.py`, `__init__.py`.
+- La puerta de arranque de `jax/core/main.py::main()`
+  (`from jax.voice.tts import _python_de_kokoro` + su llamada). **`url_requerida
+  ("JAX_OLLAMA_URL")`, en esa misma función, SE QUEDA:** esa variable sí está viva.
+- Los comandos del REPL `/voz on`, `/voz off`, `/callate`, `/silencio`, `/escucha`,
+  la locución de `run_task` y la del easter egg.
+- Las claves `voice_id` / `voice_speed` de las 7 facetas en `config/config.toml`
+  (nadie más las leía) y la columna "Voz" de la tabla de facetas de `CONTEXT.md`.
+- La variable de entorno `JAX_KOKORO_PYTHON` (E-21). Ya no se necesita en
+  `/etc/jax/.env`, y el pendiente de deploy que la pedía quedó corregido arriba.
+- Los tests que describían la voz: `test_la_voz_toma_el_python_de_kokoro_del_entorno`
+  (`tests/test_config_entorno.py`) y las 4 entradas de `_FUERA_DE_REQUIREMENTS`
+  (`faster_whisper`, `kokoro`, `numpy`, `soundfile`) en
+  `tests/test_requirements_completos.py`.
+- De `requirements.txt` no salió nada: la voz nunca estuvo ahí (corría en su propio
+  venv, por eso las 4 entradas vivían en la lista de excluidos).
+
+**Por qué (VERDAD OPERACIONAL medida el 2026-09-17, no supuesta):**
+1. El venv de la voz **no existe**: `~/kokoro-test` no está, no hay modelos en
+   `/srv/jax-data/`, y `python3 -c "import kokoro"` da `ModuleNotFoundError`.
+2. `JAX_KOKORO_PYTHON` **no está** en `/etc/jax/.env`.
+3. `jax/core/main.py::main()` llamaba `_python_de_kokoro()` →
+   `ruta_absoluta_requerida("JAX_KOKORO_PYTHON")`, que falla cerrado si la variable
+   no está. **Resultado: el REPL de JAX no arrancaba**, y no por un problema de
+   JAX sino por la puerta de una funcionalidad que no podía funcionar de todos
+   modos. Un fail-closed correcto custodiando algo que ya no existe es una puerta
+   de una casa demolida.
+
+**Dónde queda la última versión funcional (para recuperarla):**
+- Último commit que tocó `jax/voice/`: **`3b2887d`** (E-21, 2026-09-16).
+- Último commit con `jax/voice/` presente en el árbol: **`351ec95`** (master al
+  momento del retiro). Recuperación:
+  `git checkout 351ec95 -- jax/voice/` — y `git show 351ec95:jax/core/main.py`
+  para el cableado del REPL.
+
+**Qué hace falta para traerla de vuelta (no es un `git checkout` y ya):**
+1. Un plan de voz escrito: para qué, en qué camino de usuario, y quién la apaga.
+2. Venv propio y reproducible, con `kokoro` / `faster-whisper` / `soundfile` /
+   `numpy` fijados, y su ruta declarada en `/etc/jax/.env`.
+3. Los modelos en disco, en una ruta bajo control (no `~/kokoro-test`).
+4. Una prueba que se ejercite de verdad — Principio VII: un freno sin prueba no es
+   freno; una voz sin prueba es una puerta más que rompe el arranque.
+5. **La puerta de arranque NO vuelve a `main()`.** Si la voz vuelve, se resuelve
+   perezosamente, al primer uso, y su falla degrada la voz, no el REPL.
+
+**Controles del retiro:** `tests/test_retiro_de_la_voz.py` (el paquete no está, el
+arranque no exige la variable, ningún módulo de servicio importa la voz). Los tres
+fallan contra `351ec95`.
+
 ## Cerrado en código, merge y despliegue pendientes — human gate de LAS MANOS sin emisión HTTP (2026-09-17)
 
 - **HECHO (medido 2026-09-17, Mr. Hyde, rama `fix/human-gate-sin-auth` desde `c13d066`):** `POST /human_gate/token`
@@ -737,7 +793,7 @@ Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango 
 - **Una sola constante (E-13):** `MAX_STEPS_PER_PIPELINE` vive en `jacobs/models.py`; `policy.py`, `routes.py`, `plan.py` y el validador la importan (antes, literales `20` repartidos).
 - **Facetas del planner desde la tabla `facet` (E-03/17/23):** una faceta desconocida o inactiva rechaza el plan (422 + `PLAN_REJECTED`) en vez de caer a `jax_local`; el menú de facetas de los prompts de Ada y qwen sale de las activas.
 - **Un archivo real por módulo (E-10/11):** `crypto_secrets`, `credential_resolver`, `model_catalog` y `cliente_http_compartido` de `las_manos/` son symlinks a `jax/core`.
-- **URLs de servicio desde el entorno, fail-closed (E-21):** `LAS_MANOS_URL`, `JAX_OLLAMA_URL`, `JAX_KOKORO_PYTHON` sin default; `config_entorno.url_requerida` exige URL base (sin path, query ni fragmento). Los workers de memoria leen la URL de DeepSeek de `provider.base_url`; un proveedor `deprecated` no da URL. Familia de espejos `config_entorno` en `scripts/check_mirror_sync.py` (copia verbatim en jax-platform).
+- **URLs de servicio desde el entorno, fail-closed (E-21):** `LAS_MANOS_URL`, `JAX_OLLAMA_URL`, `JAX_KOKORO_PYTHON` (esta última **retirada el 2026-09-17** con la voz) sin default; `config_entorno.url_requerida` exige URL base (sin path, query ni fragmento). Los workers de memoria leen la URL de DeepSeek de `provider.base_url`; un proveedor `deprecated` no da URL. Familia de espejos `config_entorno` en `scripts/check_mirror_sync.py` (copia verbatim en jax-platform).
 - **Documentos en `JAX_REPO_BASE`, escritura en `asyncio.to_thread`, sin `aiofiles` (E-12/18/22); `requirements.txt` fuente única del CI con `cryptography`/`pyyaml` fijados (E-19).**
 - **`_sin_autoetiqueta` con la cabecera de `authority_origin` y recorte simple del embedding (E-14/15).**
 - **Errores de proveedor redactados con la credencial conocida ANTES de recortar (E-16)** en executor, Ada y REPL; el error de tarea se redacta antes de ir a disco.
@@ -761,7 +817,7 @@ Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango 
 
 **Pendientes (fechas propuestas por Hyde; Fernando las confirma o cambia):**
 - **Publicar la rama jax, CI, canario y merge — control 2026-09-18.** jax-platform ya tiene `c53ef30`, así que `mirror-sync` puede correr en verde.
-- **Deploy de jax E — control 2026-09-18, con 0 pipelines en vuelo** (al apagar LAS MANOS se cierra el cliente compartido): `/etc/jax/.env` necesita `JAX_OLLAMA_URL` (el journal de sudo registra su escritura a las 02:06:58 para el deploy de jax-platform; verificar en `/proc/<pid>/environ` de `jax-las-manos` tras el reinicio) y `JAX_KOKORO_PYTHON` (sin ella el REPL no arranca); `JAX_REPO_BASE` existe desde el frente A. Gate previo: facetas `hipatia, jekyll, thot, ada, kimi, hyde, jax_local` en `active` y `provider.base_url` de deepseek presente (E-17 y los workers de memoria dependen de eso).
+- **Deploy de jax E — control 2026-09-18, con 0 pipelines en vuelo** (al apagar LAS MANOS se cierra el cliente compartido): `/etc/jax/.env` necesita `JAX_OLLAMA_URL` (el journal de sudo registra su escritura a las 02:06:58 para el deploy de jax-platform; verificar en `/proc/<pid>/environ` de `jax-las-manos` tras el reinicio) ~~y `JAX_KOKORO_PYTHON` (sin ella el REPL no arranca)~~ — **CORREGIDO 2026-09-17: `JAX_KOKORO_PYTHON` ya NO se necesita, la voz se retiró** (ver § "Retiro de la voz"); `JAX_REPO_BASE` existe desde el frente A. Gate previo: facetas `hipatia, jekyll, thot, ada, kimi, hyde, jax_local` en `active` y `provider.base_url` de deepseek presente (E-17 y los workers de memoria dependen de eso).
 - **Medición de E-24 contra el Ollama de producción (modo `embedding`, antes/después) — en el deploy.** Sin ese número no hay GO del deploy de E-24.
 - **E-25: decisión de Fernando sobre el retiro del fallback — control 2026-09-24.**
 - **E-26: borrado de los 25 backups — control 2026-09-18.**

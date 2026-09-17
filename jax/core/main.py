@@ -1,8 +1,8 @@
 """
-JAX 2.0 — El primer latido (memoria + hilo + VOZ streaming + OIDO).
+JAX 2.0 — El primer latido (memoria + hilo).
 
-Bucle de terminal (REPL) que cose todo: lee lo que escribis (o lo que
-DECIS por el microfono), lo pasa por el Router, e invoca la faceta correcta.
+Bucle de terminal (REPL) que cose todo: lee lo que escribis, lo pasa por el
+Router, e invoca la faceta correcta.
 
 Seguridad: antes de CADA invocacion de musculo se chequea el Kill Switch
 (archivo de JAX_KILL_SWITCH_PATH).
@@ -10,17 +10,11 @@ Seguridad: antes de CADA invocacion de musculo se chequea el Kill Switch
 MEMORIA: hilo de sesion compartido en RAM (MAX_TURNS) + MariaDB persistente
 (tolerante a fallos).
 
-VOZ (salida, Fase 2 streaming): cada faceta habla con su voz Kokoro; la
-primera oracion suena en ~2-3s y el resto se genera mientras suena.
-/voz on|off, /callate.
+VOZ: RETIRADA el 2026-09-17 (Kokoro TTS + Whisper). Ver DEUDA.md §
+"Retiro de la voz" — no habia venv ni paquete instalado y su puerta de
+arranque rompia el REPL. Vuelve con un plan de voz propio, no antes.
 
-OIDO (entrada): /escucha corta la locucion en curso, graba 8 segundos del
-microfono (jack ALC897, calibrado), transcribe con Whisper local, y el
-texto entra al flujo NORMAL del router como si lo hubieras tecleado.
-Defensas: gate de silencio + filtro de alucinaciones (en el worker).
-
-NOTA TECNICA input(): via run_in_executor para NO congelar el event loop —
-asi la voz suena de fondo y /callate entra mientras JAX habla.
+NOTA TECNICA input(): via run_in_executor para NO congelar el event loop.
 
 Uso:
     jax            (lanzador en ~/.local/bin/jax)
@@ -56,17 +50,12 @@ from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
 from jax.muscles.ollama_muscle import OllamaMuscle
 from jax.memory.db import MemoryDB, detect_completeness_intent
-from jax.voice.tts import VoiceEngine
-from jax.voice.ears import EarEngine
 
 CONFIG_PATH = "config/config.toml"
 
 # Cuantos turnos del hilo de la sesion se conservan en RAM y se pasan a la
 # faceta. Un "turno" = un par (user + respuesta). 10 turnos = 20 mensajes.
 MAX_TURNS = 10
-
-# Segundos que graba /escucha (v1: duracion fija, simple y predecible).
-ESCUCHA_SEGUNDOS = 8
 
 # Marca que acompana al prompt del REPL mientras la sesion corra degradada.
 # Vacia en operacion normal. Se enciende si no se pudo leer facet_binding: un
@@ -443,8 +432,6 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
         debug=False,
     )
 
-    voice = VoiceEngine()
-
     if interruptor_activo(kill_path):
         print(f"[tarea] PAUSE activo — JAX no puede ejecutar. "
               f"Borrá {kill_path} para reactivar.")
@@ -496,14 +483,7 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
         )
         print(f"\n[tarea] Resultado guardado en: {result_file}")
 
-        voz_msg = f"Tarea completada. El resultado está en {result_file.name}."
-        print(voz_msg)
-        voice.enabled = True
-        await voice.speak(
-            voz_msg,
-            voz=pconf.get("voice_id", "em_alex"),
-            velocidad=float(pconf.get("voice_speed", 1.0)),
-        )
+        print(f"Tarea completada. El resultado está en {result_file.name}.")
         return True
 
     except (MuscleError, Exception) as e:  # fail-closed: el contenido dice el error Y el proceso sale con 1
@@ -516,17 +496,10 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
         print(f"\n[tarea] {error_msg}")
         print(f"[tarea] Error guardado en: {result_file}")
 
-        voz_fallo = "La tarea falló. Revisá el archivo de resultado."
-        print(voz_fallo)
-        voice.enabled = True
-        await voice.speak(
-            voz_fallo,
-            voz=pconf.get("voice_id", "em_alex"),
-            velocidad=float(pconf.get("voice_speed", 1.0)),
-        )
+        print("La tarea falló. Revisá el archivo de resultado.")
 
         # ARREGLADO 2026-09-16: run_task escribia "# Error en tarea:" en el
-        # archivo de resultado y lo decia por voz —— el contenido nunca mintio ——
+        # archivo de resultado —— el contenido nunca mintio ——
         # pero el proceso terminaba con codigo 0. Cualquier cron, script u
         # orquestador que mirara $? trataba la tarea fallida como exitosa: un
         # fail-open justo en la frontera con todo lo que invoque a JAX. Hoy nada
@@ -536,16 +509,13 @@ async def run_task(task_file: Path, facet_cli: str | None = None) -> bool:
         return False
 
     finally:
-        await voice.shutdown()
         await cerrar_cliente_http()
 
 
 async def main() -> None:
-    # E-21: sin estas variables el REPL no arranca; fallar acá y no en el
-    # primer turno o la primera frase hablada.
+    # E-21: sin esta variable el REPL no arranca; fallar acá y no en el
+    # primer turno.
     url_requerida("JAX_OLLAMA_URL")
-    from jax.voice.tts import _python_de_kokoro
-    _python_de_kokoro()
 
     with open(CONFIG_PATH, "rb") as f:
         cfg = tomllib.load(f)
@@ -685,11 +655,6 @@ async def main() -> None:
     historial: list[dict] = []
     # --------------------------------------------------------------------
 
-    # --- Voz (salida) y Oido (entrada): apagados/lazy por defecto -------
-    voice = VoiceEngine()
-    ears = EarEngine()
-    # --------------------------------------------------------------------
-
     # Estado para confirmar borrados de facts (comando /fact delete).
     pending_delete: dict = {}
 
@@ -703,7 +668,6 @@ async def main() -> None:
     print("=" * 56)
     print("  JAX 2.0 — En memoria de Jairo Urbina.")
     print("  Escribi para hablar. 'salir' para terminar.")
-    print("  Voz: /voz on | /voz off | /callate    Oido: /escucha")
     print("  Modo: /pesado (modelo pesado de config.toml) | /normal")
     if not db_ok:
         print("  [memoria offline — converso, pero no guardo esta sesion]")
@@ -713,7 +677,7 @@ async def main() -> None:
         while True:
             try:
                 # input() en un thread del executor: el event loop queda
-                # libre y la voz suena de fondo mientras esperamos teclas.
+                # libre mientras esperamos teclas.
                 user_text = (
                     await loop.run_in_executor(
                         None, lambda: input(f"\n{_MARCA_DEGRADADO}> "))
@@ -728,42 +692,7 @@ async def main() -> None:
                 print("Hasta luego.")
                 break
 
-            # --- Comandos de voz y oido: antes del router ----------------
             lt = user_text.lower()
-            if lt == "/voz on":
-                voice.enabled = True
-                print("\n[voz activada — la primera locucion tarda unos "
-                      "segundos extra mientras despierta el motor]")
-                continue
-            if lt == "/voz off":
-                voice.enabled = False
-                await voice.stop_playing()
-                print("\n[voz desactivada]")
-                continue
-            if lt in ("/callate", "/silencio"):
-                await voice.stop_playing()
-                print("\n[locucion cortada]")
-                continue
-
-            if lt == "/escucha":
-                # 1) Que JAX no se oiga a si mismo: cortar locucion y dejar
-                #    que el buffer del hardware se vacie.
-                await voice.stop_playing()
-                await asyncio.sleep(0.3)
-                # 2) Grabar (el REPL espera aqui: no hay input simultaneo).
-                print(f"\n[🎤 grabando {ESCUCHA_SEGUNDOS} segundos — habla ya]",
-                      flush=True)
-                texto_voz = await ears.listen(ESCUCHA_SEGUNDOS)
-                if not texto_voz:
-                    motivo = ears.last_reason or "no entendi"
-                    print(f"[oido: {motivo} — intenta de nuevo]")
-                    continue
-                # 3) El texto entra al flujo NORMAL, como si lo tecleara.
-                print(f"\n> [voz] {texto_voz}")
-                user_text = texto_voz
-                lt = user_text.lower()
-                # (sin continue: sigue al router como cualquier mensaje)
-            # --------------------------------------------------------------
 
             if lt == "/pesado":
                 if FACETA_PESADO is None:
@@ -805,14 +734,6 @@ async def main() -> None:
             # Easter egg o mensaje del propio router (no es dialogo con faceta).
             if decision.kind in ("easter_egg", "say"):
                 print(f"\n{decision.text}")
-                # El easter egg tambien merece voz (la voz de la casa).
-                if voice.enabled:
-                    pconf = cfg["personalities"][default_faceta]
-                    asyncio.create_task(voice.speak(
-                        decision.text,
-                        voz=pconf.get("voice_id", "em_alex"),
-                        velocidad=float(pconf.get("voice_speed", 1.0)),
-                    ))
                 continue
 
             # kind == "route": invocar la faceta elegida.
@@ -897,16 +818,6 @@ async def main() -> None:
                 )
                 print(f"\n{label}: {respuesta}")
 
-                # Voz en streaming, de fondo, con la voz/velocidad de la
-                # faceta. La primera oracion suena en ~2-3s.
-                if voice.enabled:
-                    pconf = cfg["personalities"][faceta]
-                    asyncio.create_task(voice.speak(
-                        respuesta,
-                        voz=pconf.get("voice_id", "em_alex"),
-                        velocidad=float(pconf.get("voice_speed", 1.0)),
-                    ))
-
                 # Turno exitoso -> entra al hilo compartido en RAM.
                 historial.append({"role": "user", "content": user_text})
                 historial.append({"role": "assistant", "content": respuesta})
@@ -923,9 +834,7 @@ async def main() -> None:
             except Exception as e:  # fail-soft: red de seguridad del bucle del REPL — el fallo se le muestra a Fernando con humanizar_error y el turno NO entra al historial ni a la memoria; tumbar el latido por un error de un musculo seria peor
                 print(f"\n{humanizar_error(label, e)}")
     finally:
-        # Cierre limpio en CUALQUIER salida: oido, voz, luego memoria.
-        await ears.shutdown()
-        await voice.shutdown()
+        # Cierre limpio en CUALQUIER salida: memoria y cliente HTTP.
         if conv_uuid:
             await db.end_conversation(conv_uuid)
             if db_ok:
