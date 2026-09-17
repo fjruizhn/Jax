@@ -114,3 +114,11 @@ de revisión). Los dos comparten contrato (F), techos, cola, auditoría, kill sw
 - **Modo 2:** medición de tool-calling de GLM con GO (5 llamadas reales al formato de GAP2;
   pasa si ≥ 4/5 llamadas producen tool_calls válidos con argumentos que validan el schema, y
   0 invenciones de nombres de tool); luego las mismas pruebas del emisor por la tool.
+
+---
+
+## Aprobación
+
+- **2026-09-16 (chat):** Fernando revisó y aprobó este spec ("todo aprobado tienes mi GO").
+  GO incluido para: medición de tool-calling de GLM (llamadas reales a Z.ai), árbol real chico
+  en vivo con techos bajados, y deploys de los frentes A-G.
