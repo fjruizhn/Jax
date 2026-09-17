@@ -70,6 +70,28 @@ def _ref_legible(ref: str) -> bool:
     return True
 
 
+async def separar_por_ref(plan: list[Step], contexto: dict) -> tuple[list[int], list[int], dict]:
+    """Regla 5 de continuar (§5.2), compartida con resume y approve-step (ola
+    final F2, Ruling R32): un paso se REUSA si tiene `step_{i}_ref` en el
+    contexto y la ref se lee; todos los demás se corren. Devuelve
+    (reusados, a_correr, contexto SIN las refs de los pasos a correr) -- el
+    pre-vuelo necesita ese contexto: con la ref de un paso a rehacer mediría
+    a sus dependientes con una salida que no va a existir. No toca `plan` ni
+    `contexto` (copia). Las refs se leen en un hilo (disco)."""
+    limpio = dict(contexto)
+    reusados: list[int] = []
+    a_correr: list[int] = []
+    for paso in plan:
+        clave = f"step_{paso.step_index}_ref"
+        ref = limpio.get(clave)
+        if ref and await asyncio.to_thread(_ref_legible, ref):
+            reusados.append(paso.step_index)
+            continue
+        limpio.pop(clave, None)
+        a_correr.append(paso.step_index)
+    return reusados, a_correr, limpio
+
+
 def _texto_limite(activos: int) -> str:
     return f"Ya hay {activos} pipelines activos. Límite duro: {MAX_PARALLEL_PIPELINES}"
 
@@ -95,16 +117,8 @@ async def analizar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str] 
         raise ContinuarRechazado(409, "plan_inconsistente",
                                  "los pasos guardados no son 0..N-1 sin huecos")
 
-    contexto = dict(pipeline.context)
-    reusados: list[int] = []
-    a_correr: list[int] = []
-    for paso in plan:
-        clave = f"step_{paso.step_index}_ref"
-        ref = contexto.get(clave)
-        if ref and await asyncio.to_thread(_ref_legible, ref):
-            reusados.append(paso.step_index)
-            continue
-        contexto.pop(clave, None)
+    reusados, a_correr, contexto = await separar_por_ref(plan, pipeline.context)
+    for paso in (plan[i] for i in a_correr):
         # La aprobación humana de hyde era para la corrida anterior (desvío 10).
         contexto.pop(f"hyde_approved_{paso.step_id}", None)
         paso.status = StepStatus.pending
@@ -112,7 +126,6 @@ async def analizar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str] 
         paso.started_at = None
         paso.finished_at = None
         paso.output_ref = None
-        a_correr.append(paso.step_index)
 
     reasignados: dict[str, dict] = {}
     invalidas: list[dict] = []

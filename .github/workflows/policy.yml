@@ -1304,8 +1304,18 @@ jobs:
           #   {pipeline}/{step}/e{epoca}/output.json; rojo contra 616c428: la vigente
           #   leía la salida VIEJA), la ruta lleva la época, y una ref sin época
           #   (pipelines guardados antes) se sigue leyendo (control, ya pasaba).
-          grep -qE "^1007 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1007 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1007 -> 1015 el 2026-09-17 (ola final de arreglos, F2, Ruling R32): +8 en
+          #   test_jacobs_resume_epoca.py -- resume y approve-step corren el pre-vuelo
+          #   ANTES de tomar la época: rechazo -> 422 prevuelo_rechazado con el
+          #   veredicto y evento PREVUELO_RECHAZADO, sin tomar la época ni tocar pasos
+          #   (x2); pre-vuelo que no puede correr -> 503 prevuelo_no_disponible
+          #   redactado (x2); la respuesta 200 suma costo_max_usd y pasos_costo (x2);
+          #   resume evalúa los pasos sin ref LEGIBLE con un contexto sin sus refs;
+          #   approve-step evalúa la ola completa, no sólo el paso aprobado. Rojo
+          #   contra b9be03f: 8 failed (DID NOT RAISE / KeyError costo_max_usd / el
+          #   pre-vuelo no se llamaba).
+          grep -qE "^1015 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1015 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

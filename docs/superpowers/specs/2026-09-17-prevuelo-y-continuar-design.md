@@ -189,6 +189,13 @@ Por paso que cobra:
   con el mismo contenido. `ok=True` → la respuesta de creación suma `costo_max_usd` y `pasos_costo`, y el
   evento `PIPELINE_CREATED` también.
 - `POST /jacobs/pipeline/{id}/continue`: igual, sobre los pasos pendientes (§5).
+- `POST /jacobs/pipeline/{id}/resume` y `POST /jacobs/pipeline/{id}/approve-step` *(Nota, 2026-09-17,
+  Ruling R32 / ola final F2)*: también lanzan `run_pipeline`, así que corren el pre-vuelo **antes de tomar la
+  época**, sobre los pasos sin ref legible (regla 5 de §5.2; en approve-step, la ola completa que se lanza, no
+  sólo el paso aprobado). `ok=False` → 422 `{code:"prevuelo_rechazado", ...veredicto}` + evento
+  `PREVUELO_RECHAZADO`, sin tocar época ni pasos; error → 503 `prevuelo_no_disponible`. Sin
+  `costo_max_aceptado_usd` (el consentimiento se dio al crear o continuar). La respuesta 200 suma
+  `costo_max_usd` y `pasos_costo`.
 - `_from_objective` (planificación por LLM): el pre-vuelo corre sobre el plan que devolvió el LLM; lo gastado
   en planificar ya está gastado y se declara en la doc del endpoint.
 - `dry_run`: corre el pre-vuelo igual (es el uso natural de «¿cuánto costaría?»).

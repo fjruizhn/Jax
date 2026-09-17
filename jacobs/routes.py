@@ -127,6 +127,36 @@ def _resumen_de_costo(veredicto: Veredicto) -> dict:
     }
 
 
+async def _prevuelo_de_reanudacion(pipeline: Pipeline, pasos: list[Step]) -> dict:
+    """Ola final F2 (Ruling R32, criterio de Fernando "nada gasta sin
+    pre-vuelo"): resume y approve-step lanzan run_pipeline igual que continue,
+    así que corren el pre-vuelo ANTES de tomar la época, sobre los pasos SIN
+    ref legible (la misma regla 5 de continue, servicio_continuar.
+    separar_por_ref) -- en approve-step eso es la ola COMPLETA que se va a
+    lanzar, no sólo el paso aprobado; hyde no cobra (regla existente). El
+    contexto que recibe el pre-vuelo no lleva refs de pasos a rehacer.
+
+    - ok=False -> 422 {"code": "prevuelo_rechazado", **veredicto} y evento
+      PREVUELO_RECHAZADO con el mismo cuerpo; ni época ni pasos se tocan.
+    - no puede correr -> 503 prevuelo_no_disponible, motivo redactado.
+    - SIN costo_max_aceptado_usd: el consentimiento se dio al crear/continuar.
+
+    Devuelve el resumen de costo que suma la respuesta 200."""
+    try:
+        _, a_correr, contexto = await servicio_continuar.separar_por_ref(pasos, pipeline.context)
+    except Exception as exc:  # fail-closed: sin saber qué pasos se corren no hay pre-vuelo, y sin pre-vuelo no se lanza (spec §8)
+        raise _no_disponible(exc) from exc
+    veredicto = await _prevuelo_o_503(
+        pasos, contexto, pendientes=set(a_correr),
+        user_id=pipeline.user_id, tenant_id=pipeline.tenant_id,
+    )
+    if not veredicto.ok:
+        cuerpo = {"code": "prevuelo_rechazado", **veredicto.to_dict()}
+        await store.event_append(pipeline.pipeline_id, "PREVUELO_RECHAZADO", cuerpo)
+        raise HTTPException(status_code=422, detail=cuerpo)
+    return _resumen_de_costo(veredicto)
+
+
 # ----------------------------------------------------------------
 #  POST /jacobs/preflight  — pre-vuelo sin escribir
 # ----------------------------------------------------------------
@@ -403,6 +433,11 @@ async def resume_pipeline(
     if check_kill_switch():
         raise HTTPException(status_code=423, detail="Kill switch activo — no se puede reanudar")
 
+    steps = await store.steps_by_pipeline(pipeline_id)
+    # F2 (Ruling R32): pre-vuelo antes de tomar la época -- un rechazo no deja
+    # rastro de estado (sólo el evento PREVUELO_RECHAZADO).
+    costo = await _prevuelo_de_reanudacion(pipeline, steps)
+
     # Época (spec 2026-09-17 §5.3): se toma ANTES de tocar pasos. Si otro
     # resume ganó, este no escribe ni lanza nada: dos ejecutores del mismo
     # pipeline es exactamente lo que la época existe para impedir.
@@ -421,7 +456,6 @@ async def resume_pipeline(
     # Desbloquear TODOS los steps en estado blocked (una ola supervised pudo
     # dejar varios). El executor recalcula las olas desde los refs en context,
     # así que basta con poner los blocked en pending para que entren a su ola.
-    steps = await store.steps_by_pipeline(pipeline_id)
     for s in steps:
         if s.status == StepStatus.blocked:
             s.status = StepStatus.pending
@@ -436,6 +470,7 @@ async def resume_pipeline(
         "status": "resuming",
         "from_index": pipeline.current_step_index,
         "run_epoch": nueva_epoca,
+        **costo,
     }
 
 
@@ -564,6 +599,11 @@ async def approve_step(
         if current_step.facet == "hyde":
             pipeline.context[f"hyde_approved_{current_step.step_id}"] = True
 
+    # F2 (Ruling R32): pre-vuelo de la ola completa que se va a lanzar (todos
+    # los pasos sin ref legible), antes de tomar la época y de persistir las
+    # marcas de hyde.
+    costo = await _prevuelo_de_reanudacion(pipeline, steps)
+
     # Época (desvío 9 del plan 2026-09-17): approve-step lanza run_pipeline
     # igual que resume. Las marcas hyde_approved_* viajan en el MISMO UPDATE
     # que toma la época (antes iban en un pipeline_update_status aparte).
@@ -598,6 +638,7 @@ async def approve_step(
         "status":          "resuming",
         "approved_steps":  approved_indices,
         "run_epoch":       nueva_epoca,
+        **costo,
     }
 
 
