@@ -650,6 +650,8 @@ jobs:
           tests/test_interruptor.py
           tests/test_interruptor_lectores.py
           tests/test_jacobs_interruptor.py
+          tests/test_repl_interruptor.py
+          tests/test_interruptor_sin_rutas_fijas.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -720,6 +722,8 @@ jobs:
             tests/test_interruptor.py \
             tests/test_interruptor_lectores.py \
             tests/test_jacobs_interruptor.py \
+            tests/test_repl_interruptor.py \
+            tests/test_interruptor_sin_rutas_fijas.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
