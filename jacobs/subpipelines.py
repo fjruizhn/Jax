@@ -31,8 +31,13 @@ from __future__ import annotations
 
 import hashlib
 import os
+import secrets
+import time
 from dataclasses import dataclass
 from enum import Enum
+from typing import NoReturn
+
+from jacobs import policy, store
 
 ENV_TTL = "JAX_SUBPIPELINE_TOKEN_TTL_SECONDS"
 ENV_MAX_PROFUNDIDAD = "JAX_MAX_SUBPIPELINE_DEPTH"
@@ -167,3 +172,45 @@ def motivo_consumo(
     if diagnostico["paso_step_id"] is None:
         return Motivo.PASO_DESCONOCIDO
     return Motivo.ESTADO_CAMBIO
+
+
+async def _rechazar_emision(parent_pipeline_id: str, parent_step: str, motivo: Motivo) -> NoReturn:
+    await store.event_append(
+        parent_pipeline_id, "SUBPIPELINE_RECHAZADO",
+        {"fase": "emision", "motivo": motivo.value}, parent_step,
+    )
+    raise EmisionRechazada(motivo)
+
+
+async def emitir_token_subpipeline(parent_pipeline_id: str, parent_step: str) -> str:
+    """Emite un token de un solo uso para que el paso de Ada `parent_step` del
+    pipeline `parent_pipeline_id` cree UN hijo. El paso puede haber terminado
+    (modo plan de delegación): lo que se exige es que el pipeline padre siga
+    `running`.
+
+    Solo servidor: no hay ruta HTTP (las rutas de Jacobs no autentican). La
+    llama el emisor dentro del proceso de Jacobs. Devuelve el token en claro, y
+    es la única vez que existe: en la base queda su sha256 y en el evento, los
+    primeros 12 caracteres del hash."""
+    cfg = config_subpipelines()
+    if policy.check_kill_switch():
+        await _rechazar_emision(parent_pipeline_id, parent_step, Motivo.KILL_SWITCH_ACTIVO)
+    token = secrets.token_urlsafe(TOKEN_BYTES)
+    token_hash = hash_token(token)
+    emitido_at = time.time()
+    vence_at = emitido_at + cfg.ttl_segundos
+    depth_hijo = await store.subpipeline_token_emitir(
+        token_hash, parent_pipeline_id, parent_step, emitido_at, vence_at, cfg.max_profundidad,
+    )
+    if depth_hijo is None:
+        diagnostico = await store.subpipeline_emision_diagnostico(parent_pipeline_id, parent_step)
+        await _rechazar_emision(
+            parent_pipeline_id, parent_step,
+            motivo_emision(diagnostico, parent_pipeline_id, cfg.max_profundidad),
+        )
+    await store.event_append(
+        parent_pipeline_id, "SUBPIPELINE_TOKEN_EMITIDO",
+        {"token_ref": token_ref(token_hash), "depth_hijo": depth_hijo, "vence_at": vence_at},
+        parent_step,
+    )
+    return token

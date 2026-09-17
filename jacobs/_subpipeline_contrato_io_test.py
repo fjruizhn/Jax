@@ -120,5 +120,79 @@ class EsquemaTest(_ConBase):
         self.assertEqual((leido.parent_pipeline_id, leido.depth), ("padre-x", 1))
 
 
+class EmisionTest(_ConBase):
+    async def test_guarda_solo_el_hash(self):
+        padre, paso = await self.padre()
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        self.assertGreaterEqual(len(token), 43)  # 32 bytes en base64url
+        self.assertIsNotNone(await ada.fila_token(sp.hash_token(token)))
+        self.assertIsNone(await ada.fila_token(token))
+        fila = await ada.una_fila(
+            "SELECT COUNT(*) AS n FROM jacobs_subpipeline_tokens "
+            "WHERE parent_step=%s OR hijo_pipeline_id=%s OR parent_pipeline_id=%s",
+            (token, token, token),
+        )
+        self.assertEqual(fila["n"], 0)
+
+    async def test_depth_hijo_es_la_del_padre_mas_uno_y_vence_con_el_ttl(self):
+        os.environ[sp.ENV_MAX_PROFUNDIDAD] = "3"
+        os.environ[sp.ENV_TTL] = "120"
+        padre, paso = await self.padre(depth=2)
+        antes = time.time()
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        fila = await ada.fila_token(sp.hash_token(token))
+        self.assertEqual(fila["depth_hijo"], 3)
+        self.assertEqual((fila["parent_pipeline_id"], fila["parent_step"]), (padre, paso))
+        self.assertAlmostEqual(fila["vence_at"] - fila["emitido_at"], 120, delta=0.01)
+        self.assertGreaterEqual(fila["emitido_at"], antes)
+        self.assertIsNone(fila["usado_at"])
+        self.assertIsNone(fila["hijo_pipeline_id"])
+
+    async def test_deja_evento_emitido_sin_el_token(self):
+        padre, paso = await self.padre()
+        token = await sp.emitir_token_subpipeline(padre, paso)
+        eventos = [e for e in await store.events_by_pipeline(padre)
+                   if e["event_type"] == "SUBPIPELINE_TOKEN_EMITIDO"]
+        self.assertEqual(len(eventos), 1)
+        self.assertEqual(eventos[0]["step_id"], paso)
+        self.assertEqual(eventos[0]["payload"]["token_ref"], sp.token_ref(sp.hash_token(token)))
+        self.assertEqual(eventos[0]["payload"]["depth_hijo"], 1)
+        self.assertNotIn(token, json.dumps(eventos[0]["payload"]))
+
+    async def _rechazo(self, padre: str, paso: str) -> sp.Motivo:
+        with self.assertRaises(sp.EmisionRechazada) as ctx:
+            await sp.emitir_token_subpipeline(padre, paso)
+        eventos = [e for e in await store.events_by_pipeline(padre)
+                   if e["event_type"] == "SUBPIPELINE_RECHAZADO"]
+        self.assertTrue(eventos, "un rechazo de emisión tiene que dejar evento")
+        self.assertEqual(eventos[-1]["payload"]["fase"], "emision")
+        self.assertEqual(eventos[-1]["payload"]["motivo"], ctx.exception.motivo.value)
+        n = await ada.una_fila(
+            "SELECT COUNT(*) AS n FROM jacobs_subpipeline_tokens WHERE parent_pipeline_id=%s",
+            (padre,),
+        )
+        self.assertEqual(n["n"], 0, "un rechazo no puede dejar un token emitido")
+        return ctx.exception.motivo
+
+    async def test_rechaza_padre_que_no_corre(self):
+        padre, paso = await self.padre()
+        await ada.cerrar(padre)
+        self.assertEqual(await self._rechazo(padre, paso), sp.Motivo.PADRE_INACTIVO)
+
+    async def test_rechaza_paso_que_no_es_de_ada(self):
+        padre, paso = await self.padre(facet_del_paso="jekyll")
+        self.assertEqual(await self._rechazo(padre, paso), sp.Motivo.PASO_NO_ES_ADA)
+
+    async def test_rechaza_profundidad_excedida(self):
+        padre, paso = await self.padre(depth=3)  # con el máximo por defecto (3)
+        self.assertEqual(await self._rechazo(padre, paso), sp.Motivo.PROFUNDIDAD_EXCEDIDA)
+
+    async def test_rechaza_con_kill_switch_activo(self):
+        padre, paso = await self.padre()
+        with patch("jacobs.policy.check_kill_switch", return_value=True):
+            motivo = await self._rechazo(padre, paso)
+        self.assertEqual(motivo, sp.Motivo.KILL_SWITCH_ACTIVO)
+
+
 if __name__ == "__main__":
     unittest.main()

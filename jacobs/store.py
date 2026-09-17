@@ -607,6 +607,82 @@ async def get_motor_governance() -> dict[str, dict]:
 
 
 # ----------------------------------------------------------------
+#  Contrato de sub-pipelines (frente F, 2026-09-16)
+# ----------------------------------------------------------------
+# Las dos sentencias que deciden son UNA sola cada una, autocommit: nada de
+# SELECT-y-después-escribir, que es exactamente la ventana de carrera que este
+# contrato cierra. Si no afectan una fila, un diagnóstico APARTE nombra el
+# motivo; el diagnóstico solo etiqueta el rechazo, no lo decide.
+
+SQL_EMITIR_TOKEN = """
+    INSERT INTO jacobs_subpipeline_tokens
+        (token_hash, parent_pipeline_id, parent_step, depth_hijo, emitido_at, vence_at)
+    SELECT %s, p.pipeline_id, s.step_id, p.depth + 1, %s, %s
+      FROM jacobs_pipelines p
+      JOIN jacobs_steps s ON s.step_id = %s AND s.pipeline_id = p.pipeline_id
+     WHERE p.pipeline_id = %s
+       AND p.status = 'running'
+       AND s.facet = 'ada'
+       AND p.depth + 1 <= %s
+"""
+
+
+async def subpipeline_token_emitir(
+    token_hash: str,
+    parent_pipeline_id: str,
+    parent_step: str,
+    emitido_at: float,
+    vence_at: float,
+    max_profundidad: int,
+) -> int | None:
+    """Inserta el hash solo si el padre está `running`, el paso existe, es de
+    ese padre y es de Ada (en cualquier estado: enmienda 2026-09-16), y el
+    hijo no excede la profundidad. Devuelve depth_hijo, o None si no insertó."""
+    conn = await get_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                SQL_EMITIR_TOKEN,
+                (token_hash, emitido_at, vence_at, parent_step, parent_pipeline_id, max_profundidad),
+            )
+            if cur.rowcount != 1:
+                return None
+            await cur.execute(
+                "SELECT depth_hijo FROM jacobs_subpipeline_tokens WHERE token_hash = %s",
+                (token_hash,),
+            )
+            (depth_hijo,) = await cur.fetchone()
+            return int(depth_hijo)
+    finally:
+        conn.close()
+
+
+async def subpipeline_emision_diagnostico(parent_pipeline_id: str, parent_step: str) -> dict:
+    conn = await get_conn()
+    try:
+        async with conn.cursor(aiomysql.DictCursor) as cur:
+            await cur.execute(
+                "SELECT status, depth FROM jacobs_pipelines WHERE pipeline_id = %s",
+                (parent_pipeline_id,),
+            )
+            padre = await cur.fetchone()
+            await cur.execute(
+                "SELECT status, facet, pipeline_id FROM jacobs_steps WHERE step_id = %s",
+                (parent_step,),
+            )
+            paso = await cur.fetchone()
+    finally:
+        conn.close()
+    return {
+        "padre_status": padre["status"] if padre else None,
+        "padre_depth": int(padre["depth"]) if padre else None,
+        "paso_status": paso["status"] if paso else None,
+        "paso_facet": paso["facet"] if paso else None,
+        "paso_pipeline_id": paso["pipeline_id"] if paso else None,
+    }
+
+
+# ----------------------------------------------------------------
 #  Audit events
 # ----------------------------------------------------------------
 
