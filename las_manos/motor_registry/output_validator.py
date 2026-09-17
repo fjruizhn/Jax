@@ -56,6 +56,17 @@ _KNOWN_UNIMPLEMENTED_SCHEMAS: frozenset[str] = frozenset({
 })
 
 
+def puede_pedir_reintento(schema_name: str | None) -> bool:
+    """True si worker.py puede gastar un SEGUNDO turno por este schema: la
+    validación puede fallar y el bucle reintenta una vez (worker.py, rama
+    `validation_retried`). Un schema declarado-pendiente acepta texto libre y
+    nunca reintenta; un nombre desconocido falla cerrado y SÍ reintenta.
+
+    Público para el pre-vuelo de Jacobs (2026-09-17): el costo máximo de un
+    paso de motor cuenta ese turno sin copiar la lista de pendientes."""
+    return bool(schema_name) and schema_name not in _KNOWN_UNIMPLEMENTED_SCHEMAS
+
+
 def validate(content: str, schema_name: str, has_tool_calls: bool = False) -> dict[str, Any]:
     """
     Valida `content` contra `schema_name`.

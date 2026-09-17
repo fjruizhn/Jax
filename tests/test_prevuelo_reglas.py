@@ -1,0 +1,176 @@
+"""Reglas puras del pre-vuelo (spec 2026-09-17 §4.1, §4.3, §4.4, §4.6; desvíos
+2, 5 y 13 del plan). Sin DB ni red.
+
+En memoria de Jairo Urbina.
+"""
+from __future__ import annotations
+
+import json
+import os
+from decimal import Decimal
+
+os.environ["JAX_DB_NAME"] = "jax_memory_test"
+
+from jacobs import prevuelo_reglas as pr  # noqa: E402
+from jacobs.models import Step  # noqa: E402
+from motor_registry.output_validator import puede_pedir_reintento  # noqa: E402
+
+
+def _despacho(**cambios):
+    base = dict(
+        clave_salud="jekyll", via_motor=False, transporte="http_openai_compat",
+        provider_id="deepseek", base_url="https://api.example/v1", modelo="deepseek-v4-flash",
+        max_tokens_param="max_tokens", max_output_tokens=8192, motor_max_tokens=0,
+        precio_in=Decimal("0.27"), precio_out=Decimal("1.10"),
+        tiene_herramientas=False, schema_con_reintento=False, persona=None,
+    )
+    base.update(cambios)
+    return pr.Despacho(**base)
+
+
+def _evaluar(d, **k):
+    args = dict(min_output_tokens=0, credencial_activa=True, chars_entrada=2000,
+                chars_por_token=2, max_iteraciones=5)
+    args.update(k)
+    return pr.evaluar_paso(3, "jekyll", d, **args)
+
+
+def test_faceta_inexistente_bloquea():
+    v, c = pr.evaluar_paso(0, "zz", None, min_output_tokens=0, credencial_activa=False,
+                           chars_entrada=0, chars_por_token=2, max_iteraciones=5)
+    assert [x.regla for x in v] == ["faceta_inexistente"]
+    assert c.usd_max is None and c.motivo == "faceta_inexistente"
+
+
+def test_contrato_completo_y_credencial_no_bloquea():
+    v, _ = _evaluar(_despacho())
+    assert v == []
+
+
+def test_openai_compat_sin_max_tokens_param_bloquea():
+    v, c = _evaluar(_despacho(max_tokens_param=None))
+    assert [x.regla for x in v] == ["sin_contrato_de_salida"]
+    assert "UPDATE model SET max_tokens_param" in v[0].detalle
+    assert c.usd_max is None and c.motivo == "sin_contrato_de_salida"
+
+
+def test_gemini_sin_max_output_tokens_bloquea():
+    v, _ = _evaluar(_despacho(transporte="http_gemini", max_tokens_param=None, max_output_tokens=None))
+    assert [x.regla for x in v] == ["sin_contrato_de_salida"]
+    assert "max_output_tokens" in v[0].detalle
+
+
+def test_tope_igual_al_minimo_pasa():
+    v, _ = _evaluar(_despacho(max_output_tokens=8192), min_output_tokens=8192)
+    assert v == []
+
+
+def test_motor_por_debajo_del_minimo_dice_subir_motor_max_tokens():
+    d = _despacho(clave_salud="kimi", via_motor=True, provider_id="moonshot", modelo="kimi-k3",
+                  max_output_tokens=131072, motor_max_tokens=8000)
+    v, _ = _evaluar(d, min_output_tokens=16384)
+    assert [x.regla for x in v] == ["tope_insuficiente"]
+    assert "8000" in v[0].detalle and "motor.max_tokens" in v[0].detalle and "kimi" in v[0].detalle
+
+
+def test_catalogo_por_debajo_del_minimo_dice_model_max_output_tokens():
+    v, _ = _evaluar(_despacho(max_output_tokens=4096), min_output_tokens=8192)
+    assert [x.regla for x in v] == ["tope_insuficiente"]
+    assert "model.max_output_tokens" in v[0].detalle and "deepseek-v4-flash" in v[0].detalle
+
+
+def test_motor_max_tokens_cero_usa_el_tope_del_catalogo():
+    d = _despacho(via_motor=True, max_output_tokens=131072, motor_max_tokens=0)
+    _, c = _evaluar(d)
+    assert c.tokens_out_max == 131072
+
+
+def test_credencial_ausente_bloquea_en_transporte_que_cobra():
+    v, _ = _evaluar(_despacho(), credencial_activa=False)
+    assert [x.regla for x in v] == ["credencial_ausente"]
+    assert "deepseek" in v[0].detalle
+
+
+def test_ollama_sin_credencial_no_bloquea_y_cuesta_cero():
+    d = _despacho(transporte="ollama", via_motor=True, max_tokens_param=None,
+                  precio_in=None, precio_out=None)
+    v, c = _evaluar(d, credencial_activa=False)
+    assert v == []
+    assert c.usd_max == Decimal(0) and c.motivo == "local"
+
+
+def test_costo_acotado_es_la_formula_redondeada_hacia_arriba():
+    _, c = _evaluar(_despacho(), chars_entrada=2001)
+    # (1001 * 0.27 + 8192 * 1.10) / 1e6 = 0.00928147 -> 0.009282
+    assert (c.tokens_in_max, c.tokens_out_max, c.llamadas_max) == (1001, 8192, 1)
+    assert c.usd_max == Decimal("0.009282") and c.motivo == "acotado"
+
+
+def test_gemini_directo_cuenta_el_reintento_de_grounding():
+    _, c = _evaluar(_despacho(transporte="http_gemini", max_tokens_param=None))
+    assert c.llamadas_max == 2
+
+
+def test_motor_con_schema_validable_cuenta_el_reintento():
+    _, c = _evaluar(_despacho(via_motor=True, schema_con_reintento=True))
+    assert c.llamadas_max == 2
+
+
+def test_motor_sin_schema_validable_una_llamada():
+    _, c = _evaluar(_despacho(via_motor=True, schema_con_reintento=False))
+    assert c.llamadas_max == 1
+
+
+def test_motor_con_herramientas_cuenta_todas_las_iteraciones():
+    _, c = _evaluar(_despacho(via_motor=True, tiene_herramientas=True, schema_con_reintento=True),
+                    max_iteraciones=5)
+    assert c.llamadas_max == 5
+
+
+def test_precio_null_no_acotado_y_no_bloquea():
+    v, c = _evaluar(_despacho(precio_in=None))
+    assert v == []
+    assert c.usd_max is None and c.motivo == "sin_precio"
+
+
+def test_tokens_de_entrada_redondea_hacia_arriba():
+    assert [pr.tokens_de_entrada(n, 2) for n in (0, 1, 4, 5)] == [0, 1, 2, 3]
+
+
+def test_hyde_no_se_evalua_y_cuesta_cero_por_suscripcion():
+    c = pr.costo_sin_evaluar(Step(step_index=1, facet="hyde", capability="execute"))
+    assert c is not None and c.usd_max == Decimal(0) and c.motivo == "suscripcion"
+
+
+def test_assemble_no_se_evalua_y_es_mecanico():
+    c = pr.costo_sin_evaluar(Step(step_index=2, facet="ada", capability="assemble"))
+    assert c is not None and c.usd_max == Decimal(0) and c.motivo == "mecanico"
+    assert pr.costo_sin_evaluar(Step(step_index=0, facet="jekyll", capability="research")) is None
+
+
+def _costo(paso, usd):
+    return pr.CostoPaso(paso, "jekyll", "m", 1, 1, 1, None if usd is None else Decimal(usd), "acotado")
+
+
+def test_veredicto_suma_solo_los_acotados():
+    costos = [_costo(0, "0.100000"), _costo(1, None), _costo(2, "0.200000")]
+    v = pr.armar_veredicto([], costos, [])
+    assert v.ok and v.costo_max_usd == Decimal("0.300000") and v.hay_no_acotados
+    malo = pr.armar_veredicto([pr.Violacion(0, "jekyll", "faceta_caida", "x")], costos, ["jekyll"])
+    assert not malo.ok and malo.sondeadas == ("jekyll",)
+
+
+def test_to_dict_serializa_decimales_como_texto():
+    v = pr.armar_veredicto([], [_costo(0, "0.100000"), _costo(1, None), _costo(2, "0.200000")], [])
+    d = json.loads(json.dumps(v.to_dict()))
+    assert d["costo_max_usd"] == "0.300000"
+    assert d["pasos_costo"][1]["usd_max"] is None
+    assert d["hay_no_acotados"] is True
+
+
+def test_puede_pedir_reintento_segun_el_validador():
+    assert puede_pedir_reintento("code_patch.v1") is True
+    assert puede_pedir_reintento("critique.v1") is False
+    assert puede_pedir_reintento("") is False
+    assert puede_pedir_reintento(None) is False
+    assert puede_pedir_reintento("typo.v9") is True
