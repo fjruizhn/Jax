@@ -25,7 +25,7 @@ import tempfile
 from pathlib import Path
 
 from facet_resolver import resolve_facet
-from jacobs.store import get_conn
+from jacobs.store import conexion
 from jax.ejecutor.contratos import auditor_cliente, canario_c5, eleccion_c5, formato, vigia
 from jax.ejecutor.contratos.registro import Registro
 
@@ -57,14 +57,14 @@ async def _mision(pasos, mision, auditar, dir_, nombre, cfg_c5):
 
 
 async def principal(args) -> int:
-    conn = await get_conn()
-    try:
+    # `conexion` es jacobs.store.conexion (context manager async del pool; el frente F retiró
+    # get_conn). desechable=True: un script de una sola corrida no deja la conexión en un pool
+    # que muere con el loop (igual que jax/ejecutor/contratos/exportar.py).
+    async with conexion(desechable=True) as conn:
         cfg = await eleccion_c5.leer_config(conn)
         cerebro = await resolve_facet(args.cerebro or cfg.cerebro_faceta)
         auditor_f = await resolve_facet(args.auditor or cfg.auditor_faceta)
         local = await eleccion_c5.es_local(conn, auditor_f.provider_id)
-    finally:
-        conn.close()
     if args.url_auditor:
         auditor_f = dataclasses.replace(auditor_f, base_url=args.url_auditor)
     if args.instrucciones:
