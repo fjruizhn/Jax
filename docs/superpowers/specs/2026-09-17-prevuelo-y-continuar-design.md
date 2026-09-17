@@ -179,8 +179,11 @@ Por paso que cobra:
 
 ### 4.7 Dónde corre
 
-- `POST /jacobs/preflight` `{invoked_by, steps}` → 200 con el `Veredicto` (aunque `ok=False`). No crea filas,
-  no toma el candado. Valida `invoked_by` como `/plan`.
+- `POST /jacobs/preflight` `{invoked_by, steps (≥1), objective?, user_id?, tenant_id?}` → 200 con el
+  `Veredicto` (aunque `ok=False`). No crea filas, no toma el candado. Valida `invoked_by` como `/plan`.
+  *(Nota, 2026-09-17, Ruling R21 / desvío 6 del plan: `objective` es opcional y la Mesa lo manda para que
+  el costo previsualizado en el pre-vuelo iguale al costo que calcula `POST /jacobs/pipeline` al crear —
+  ese endpoint también usa `objective` para `_from_objective`.)*
 - `POST /jacobs/pipeline`: dentro del candado, **después** de `build()` y **antes** de `pipeline_create`. `ok=False`
   → 422 `{code:"prevuelo_rechazado", violaciones, costo_max_usd, pasos_costo}` + evento `PREVUELO_RECHAZADO`
   con el mismo contenido. `ok=True` → la respuesta de creación suma `costo_max_usd` y `pasos_costo`, y el
@@ -257,8 +260,11 @@ sin lógica propia: se cierran sus tres agujeros por construcción.
 
 ### 6.1 Backend `api/pipelines.py`
 
-- `POST /api/pipelines/preflight` `{steps}` → reenvía a `/jacobs/preflight` con la identidad inyectada y agrega
+- `POST /api/pipelines/preflight` `{steps, objective?}` → reenvía a `/jacobs/preflight`
+  `{invoked_by, steps (≥1), objective?, user_id?, tenant_id?}` con la identidad inyectada y agrega
   `umbral_usd` (ajuste) y `requiere_confirmacion = costo_max_usd > umbral or hay paso no acotado`.
+  *(Nota, 2026-09-17, Ruling R21 / desvío 6 del plan: la Mesa manda `objective` en el reenvío para que el
+  costo previsualizado sea igual al que calcula `POST /jacobs/pipeline` al crear.)*
 - `POST /api/pipelines` acepta `costo_confirmado_usd: Decimal | None`. Secuencia: cupo → **pre-vuelo** (Jacobs) →
   si `ok=False` → 422 `prevuelo_rechazado` (con violaciones) → si `requiere_confirmacion` y
   (`costo_confirmado_usd` es None o < `costo_max_usd`) → **409 `confirmacion_de_costo`** con el veredicto → crear.
