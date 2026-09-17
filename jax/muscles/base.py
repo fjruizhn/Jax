@@ -24,7 +24,7 @@ from abc import ABC, abstractmethod
 
 import json
 
-from jax.core.credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+from jax.core.credential_resolver import resolve_credential, CredentialUnavailableError
 from jax.core.model_catalog import record_resolved_version_safe
 from jax.core.grounding_sources import build_sources, render_sources_block, resolve_redirects
 from jax.core.contrato_dispatch import ModelDispatchConfigError, limite_de_salida
@@ -214,7 +214,7 @@ class HttpMuscle(Muscle):
     async def _resolve_api_key(self) -> str:
         provider_id = _PROVIDER_ID_MAP[self.provider]
         try:
-            return await resolve_credential_instrumented(provider_id)
+            return await resolve_credential(provider_id)
         except CredentialUnavailableError as e:
             raise MuscleInvocationError(
                 f"[{self.name}] sin credencial válida configurada para {provider_id}"

@@ -92,7 +92,7 @@ class _Captura:
         return [
             patch.object(httpx.AsyncClient, "post", fake_post),
             patch.object(httpx.AsyncClient, "stream", fake_stream),
-            patch.object(base, "resolve_credential_instrumented", AsyncMock(return_value="k")),
+            patch.object(base, "resolve_credential", AsyncMock(return_value="k")),
             patch.object(base, "record_resolved_version_safe", AsyncMock()),
         ]
 

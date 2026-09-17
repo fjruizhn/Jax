@@ -751,7 +751,7 @@ Antes: 22-50 % de fallas en todas las celdas, TIME_WAIT 33.000-42.000 (el rango 
 
 **Pisos (medidos dos veces, local 3.14):** tests-puros 742 → **850 passed, 1 skipped** simulando el runner sin checkout de jax-platform (master en el mismo entorno: 742/1, igual que su runner); +108 contados por archivo con `--collect-only`. `jacobs-gobernanza-db` 27 → **29** (master: 27) contra `jax_memory_test` con las migraciones de jax-platform `c53ef30`. Sin cambio y verdes: facet-health-io 9, facet-resolver-seal 13, plan-timeout-ceiling 16, mirror-sync 14 + cola_uso 15, governance 90, ollama-num-parallel 33, hyde-containment 14; `policy/tests/test_no_fail_open_except.py` 21. `check_mirror_sync.py` contra jax-platform `c53ef30`: exit 0, las nueve familias sincronizadas. **Los pisos no los confirmó todavía ningún runner: si el runner da otro número, manda el runner.**
 
-**E-25 (B1.4, retiro del fallback a `.env` de credenciales) — MEDIDO, retiro PENDIENTE DE DECISIÓN DE FERNANDO (propuesto: retiro completo).** Controlador principal: `env_fallback` 0 en 7 días en `jax-platform`, `jax-las-manos`, `jax-memory-worker` y `jax-memory-synthesis`, con 922 lecturas `source=db`; 5 proveedores con credencial activa; 0 rotaciones en toda la historia (`credential_audit` vacío). Consumidores fuera del resolver que el retiro tiene que resolver: `/api/admin/keys` escribe llaves a `/etc/jax/.env` y a `os.environ`; `scripts/manual_motor_v02_integration.py` lee `KIMI_API_KEY` del archivo.
+**E-25 (B1.4, retiro del fallback a `.env` de credenciales) — ✅ CERRADO EN `jax` EL 2026-09-17.** La medición del 2026-09-17, sobre **30 días** de journal (no 7): **2.760 líneas `source=db`, 0 líneas `source=env_fallback`**, con **una rotación real** dentro de la ventana — la llave de Gemini, rotada el 2026-09-15. El criterio de salida escrito en B1.4 (7 días consecutivos sin `env_fallback`, incluyendo al menos una rotación real) **se cumple**. **Decisión de Fernando: se retira el fallback en los dos repos.** Hecho en `jax`: `jax/core/credential_resolver.py` pierde el mapa proveedor→variable de entorno y la función instrumentada de doble lectura; `jax/core/facet_resolver.py`, `jax/muscles/base.py` y `las_manos/motor_registry/worker.py` llaman directo a `resolve_credential()`. **La DB es la única fuente y sin credencial activa se falla cerrado** (`CredentialUnavailableError`) — nunca a una variable de entorno, que era un fail-open de la rotación: una llave revocada en la DB seguía viva mientras el `.env` la tuviera. Vigilado por `tests/test_credencial_sin_fallback_env.py` (3 tests, los 3 vistos en rojo contra `351ec95`; el primero con la línea `source=env_fallback` en el log capturado). `scripts/check_mirror_sync.py`: la familia `credential_resolver` pasa de 10 a 8 símbolos compartidos — declarar los dos retirados dejaría el checker en rojo permanente por símbolos que no existen en ninguna copia, y un checker siempre rojo se ignora. El gemelo de `jax-platform` va en su propio PR (otra sesión, en paralelo). **LO QUE SIGUE ABIERTO, fuera del resolver:** `/api/admin/keys` (jax-platform) escribe llaves a `/etc/jax/.env` y a `os.environ`; `scripts/manual_motor_v02_integration.py` (script manual de diagnóstico, no un servicio) lee `KIMI_API_KEY` del archivo; y `crypto_secrets.PROVIDER_ENV_KEYS` / `decrypt_provider_keys_in_env()` siguen existiendo — son familia espejada compartida y su retiro es una decisión aparte, no parte de B1.4.
 
 **E-26:** 25 backups sin trackear en `/home/fruiz/jax`, los 25 idénticos byte a byte a blobs de git (`git hash-object`). Borrado pendiente del controlador principal, con re-verificación antes de borrar.
 
@@ -1818,9 +1818,10 @@ retractaciones, que no se borran. Ninguno requiere acción.
   sería **"Ada anda en Jacobs y no en Mesa web"**: un fallo de proveedor
   externo, no de configuración local, y nadie miraría la lista de descifrado.
 
-  **Precedente de la misma forma:** `_PROVIDER_ENV_KEY_MAP` en
-  `credential_resolver` —el otro mapa proveedor→variable de entorno—, señalado
-  el mismo día como el símbolo cuyo drift produciría exactamente ese síntoma. Es
+  **Precedente de la misma forma:** el mapa proveedor → variable de entorno que
+  `credential_resolver` tuvo durante la ventana B1.4 (retirado el 2026-09-17 al
+  cerrar E-25), señalado en su día como el símbolo cuyo drift produciría
+  exactamente ese síntoma. Es
   la segunda instancia de la clase: **un mapa de secretos replicado, donde la
   copia incompleta no falla, sólo deja de hacer algo.**
 

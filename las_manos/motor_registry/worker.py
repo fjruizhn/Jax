@@ -33,7 +33,7 @@ import httpx
 from cliente_http_compartido import obtener_cliente_http
 from motor_registry.catalog import MotorCatalog
 from motor_registry.identity_context import build_identity_context
-from credential_resolver import resolve_credential_instrumented, CredentialUnavailableError
+from credential_resolver import resolve_credential, CredentialUnavailableError
 from contrato_dispatch import OLLAMA_API_V1, ModelDispatchConfigError, limite_de_salida
 from motor_registry.job_store import JobStore
 from motor_registry.tool_authority import authorize_and_execute_tool_call, get_workspace_head
@@ -310,7 +310,7 @@ async def _audit_and_notify(
                 )
                 auditor_api_key = ""
                 if auditor_entry.transport not in ("ollama", "subprocess"):
-                    auditor_api_key = await resolve_credential_instrumented(auditor_entry.provider_id or auditor_motor)
+                    auditor_api_key = await resolve_credential(auditor_entry.provider_id or auditor_motor)
                 auditor_reasoning_effort = "none" if (auditor_entry.transport == "ollama" and auditor_entry.disable_reasoning) else None
                 # Contrato del modelo del AUDITOR. Si falta, cae en el except de
                 # abajo como cualquier falla del auditor (log con el motivo).
@@ -474,7 +474,7 @@ async def run(
     api_key = ""
     if motor_entry.transport not in ("ollama", "subprocess"):
         try:
-            api_key = await resolve_credential_instrumented(provider_id)
+            api_key = await resolve_credential(provider_id)
         except CredentialUnavailableError:
             store.update(
                 job_id,

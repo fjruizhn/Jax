@@ -233,27 +233,35 @@ FAMILIAS = (
             ("las_manos", JAX_ROOT / "las_manos" / "credential_resolver.py"),
             ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "credential_resolver.py"),
         ),
-        # Los 10 simbolos de nivel superior, medidos identicos en los tres
-        # archivos el 2026-09-01. La unica diferencia real es el import de
-        # crypto_secrets (`from jax.core.crypto_secrets` vs `from
-        # crypto_secrets`), que es un ImportFrom y no un simbolo nombrado: no
-        # entra a la comparacion y no necesita marcador.
+        # Los 8 simbolos de nivel superior que quedan tras cerrar B1.4
+        # (2026-09-17). Eran 10: la funcion instrumentada de la ventana de
+        # doble lectura DB->env y su mapa proveedor -> variable de entorno se
+        # RETIRARON de los dos archivos reales, asi que declararlos aca dejaria
+        # la familia en rojo permanente por simbolos que ya no existen en
+        # ninguna copia -- y un checker siempre rojo se termina ignorando.
+        # Lo que la familia sigue vigilando es lo que de verdad existe: el
+        # camino unico a la DB y su fail-closed.
         #
-        # _PROVIDER_ENV_KEY_MAP importa especialmente: mapea proveedor -> env
-        # var de fallback. Si un espejo tuviera un mapa distinto, un proceso
-        # leeria la credencial de OTRA variable de entorno y el sintoma seria
-        # "esa faceta no funciona en Jacobs pero si en Mesa web".
+        # La unica diferencia real es el import de crypto_secrets (`from
+        # jax.core.crypto_secrets` vs `from crypto_secrets`), que es un
+        # ImportFrom y no un simbolo nombrado: no entra a la comparacion y no
+        # necesita marcador.
+        #
+        # `resolve_credential` importa especialmente ahora: es el UNICO camino a
+        # una credencial. Si un espejo drifteara aca -- por ejemplo, volviendo a
+        # leer una variable de entorno cuando la DB no tiene credencial activa --
+        # un proceso seguiria usando una llave revocada y el sintoma seria
+        # "la rotacion no llego a Jacobs pero si a la Mesa web", exactamente el
+        # R3 que la Fase 1 vino a cerrar.
         compartidos=(
             "logger",
             "CREDENTIAL_CACHE_TTL_SECONDS",
             "CREDENTIAL_STALE_MAX_SECONDS",
-            "_PROVIDER_ENV_KEY_MAP",
             "CredentialUnavailableError",
             "_CacheEntry",
             "_db_conn",
             "_query_active_credential",
             "resolve_credential",
-            "resolve_credential_instrumented",
         ),
         nota="Dos archivos reales (jax/core y jax-platform) + symlink en las_manos/ "
              "desde 2026-09-16 (E-11). El canónico de jax importa bare primero y cae "
