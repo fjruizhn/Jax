@@ -36,10 +36,26 @@ class PipelineIdentityTest(unittest.IsolatedAsyncioTestCase):
             status=PipelineStatus.pending, user_id="1", tenant_id="test-tenant",
             created_at=time.time(), updated_at=time.time(),
         )
-        await store.pipeline_create(p)
-        loaded = await store.pipeline_get(pid)  # confirmado: nombre real, ver store.py:116
-        self.assertEqual(loaded.user_id, "1")
-        self.assertEqual(loaded.tenant_id, "test-tenant")
+        # R40 (2026-09-17): la fila se borra al terminar. Antes quedaba en
+        # pending para siempre: cada corrida sumaba un pipeline ACTIVO a
+        # jax_memory_test (76 filas 'test'/'Fernando' vencidas por un reaper
+        # ajeno), y eso movía la cuenta global que usan otros tests.
+        try:
+            await store.pipeline_create(p)
+            loaded = await store.pipeline_get(pid)  # confirmado: nombre real, ver store.py:116
+            self.assertEqual(loaded.user_id, "1")
+            self.assertEqual(loaded.tenant_id, "test-tenant")
+        finally:
+            conn = await store.get_conn()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("SELECT COUNT(*) FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                    restantes = (await cur.fetchone())[0]
+            finally:
+                conn.close()
+            await store.cerrar_pool()
+        self.assertEqual(restantes, 0, "el test dejó su pipeline en la base")
 
 
 class ExecutorMotorPayloadTest(unittest.IsolatedAsyncioTestCase):

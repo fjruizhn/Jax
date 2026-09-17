@@ -44,10 +44,23 @@ async def _borrar(pids):
         conn.close()
 
 
-def test_dos_procesos_no_superan_el_cupo():
+def test_dos_procesos_no_superan_el_cupo(monkeypatch):
     """Cada "proceso" cuenta y, si hay cupo, tarda y crea un pipeline pending
     (un activo). Sin exclusión entre sesiones los dos ven el mismo conteo y
-    crean los dos; con el candado el segundo recuenta después del primero."""
+    crean los dos; con el candado el segundo recuenta después del primero.
+
+    R40 (2026-09-17): el recuento se acota a los pipelines de ESTE test. Con la
+    cuenta global, una sesión ajena que cambia pipelines activos durante el
+    test (medido: el 2026-09-17 ~10:40 una carga ajena pasó 9 pending a expired)
+    hacía que los dos procesos vieran cupo y el test fallara con
+    `assert 2 == 1` sin defecto en el candado (reproducido borrando un activo
+    ajeno entre la lectura de `base` y los recuentos). El candado es lo que se
+    prueba; la consulta de conteo tiene su EXPLAIN en este mismo archivo."""
+    nombre = f"t-candado-activos-{uuid.uuid4().hex[:8]}"
+    monkeypatch.setattr(
+        store, "_SQL_CONTAR_ACTIVOS",
+        store._SQL_CONTAR_ACTIVOS + f" AND name='{nombre}'",
+    )
     creados: list[str] = []
 
     async def proceso(cupo: int):
@@ -59,7 +72,7 @@ def test_dos_procesos_no_superan_el_cupo():
             pid = str(uuid.uuid4())
             ahora = time.time()
             await store.pipeline_create(Pipeline(
-                pipeline_id=pid, name="t-candado-activos", invoked_by="plataforma",
+                pipeline_id=pid, name=nombre, invoked_by="plataforma",
                 mode="autonomous", status=PipelineStatus.pending, created_at=ahora, updated_at=ahora))
             creados.append(pid)
 
@@ -70,6 +83,7 @@ def test_dos_procesos_no_superan_el_cupo():
             await asyncio.gather(proceso(base + 1), proceso(base + 1))
         finally:
             await _borrar(creados)
+            await store.cerrar_pool()
 
     asyncio.run(cuerpo())
     assert len(creados) == 1
