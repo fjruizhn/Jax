@@ -23,7 +23,7 @@ RAIZ = Path(__file__).resolve().parents[1]
 
 
 def test_el_paquete_de_la_voz_ya_no_esta_en_el_arbol():
-    assert not not (RAIZ / "jax" / "voice").exists()
+    assert not (RAIZ / "jax" / "voice").exists()
 
 
 def test_el_arranque_del_repl_no_exige_la_variable_de_la_voz():
