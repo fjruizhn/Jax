@@ -1297,8 +1297,15 @@ jobs:
           #   pool.release() lanza el turno vuelve igual. Rojos por mutación
           #   (sin turno.release() en el except de pool.acquire(): 2 TimeoutError;
           #   sin el finally alrededor de pool.release(): 1 TimeoutError).
-          grep -qE "^1004 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1004 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1004 -> 1007 el 2026-09-17 (ola final de arreglos, F1): +3 en
+          #   test_jacobs_epoca_ejecutor.py -- una corrida superada cuyo proveedor
+          #   responde tarde con una salida >60 KB NO pisa el artifact de la corrida
+          #   vigente del mismo paso (la época entra en la ruta:
+          #   {pipeline}/{step}/e{epoca}/output.json; rojo contra 616c428: la vigente
+          #   leía la salida VIEJA), la ruta lleva la época, y una ref sin época
+          #   (pipelines guardados antes) se sigue leyendo (control, ya pasaba).
+          grep -qE "^1007 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1007 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

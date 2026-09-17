@@ -91,7 +91,7 @@ def _pipeline_hyde(epoca=0):
 def _correr(monkeypatch, tienda, pipeline, despachar, *, kill_switch=False):
     monkeypatch.setattr(executor, "store", tienda)
     monkeypatch.setattr(executor, "check_kill_switch", lambda: kill_switch)
-    monkeypatch.setattr(executor, "save_if_large", lambda pid, sid, raw: (None, raw))
+    monkeypatch.setattr(executor, "save_if_large", lambda pid, sid, raw, **kw: (None, raw))
     monkeypatch.setattr(executor, "_persist_step_to_repo", AsyncMock())
     monkeypatch.setattr(executor, "_dispatch_step", despachar)
     asyncio.run(executor.run_pipeline(pipeline))
@@ -340,3 +340,76 @@ def test_fail_step_no_escribe_step_failed_si_perdio_la_epoca(monkeypatch):
     assert step.status == StepStatus.failed  # el objeto en memoria SÍ queda marcado
     assert tienda.pasos == {}  # pero la tienda nunca lo recibió
     assert "STEP_FAILED" not in tienda.tipos()
+
+
+# ---------------------------------------------------------------------------
+# F1 (ola final, 2026-09-17): el artifact (>60 KB) de una corrida superada no
+# pisa el de la vigente. Antes la ruta era {pipeline}/{step}/output.json, sin
+# época, y save_if_large corría ANTES de la escritura condicional.
+# ---------------------------------------------------------------------------
+
+def test_artifact_tardio_de_corrida_superada_no_pisa_el_de_la_vigente(monkeypatch, tmp_path):
+    from jacobs import artifacts
+
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", tmp_path)
+    monkeypatch.setattr(executor, "_persist_step_to_repo", AsyncMock())
+    tienda = TiendaFalsa(status="running", epoca=1)
+    monkeypatch.setattr(executor, "store", tienda)
+    grande = artifacts.SIZE_LIMIT + 10
+
+    vieja_despachada, soltar_vieja = asyncio.Event(), asyncio.Event()
+
+    async def despachar(step, pipeline):
+        if pipeline.run_epoch == 1:
+            vieja_despachada.set()
+            await soltar_vieja.wait()
+            return {"success": True, "result": "V" * grande}
+        return {"success": True, "result": "N" * grande}
+
+    monkeypatch.setattr(executor, "_dispatch_step", despachar)
+
+    def _corrida(epoca):
+        paso = Step(step_id="s0", pipeline_id="p1", step_index=0, facet="jekyll",
+                    capability="research", input={"prompt": "x"}, timeout_seconds=30)
+        return Pipeline(pipeline_id="p1", name="t", invoked_by="plataforma", mode="autonomous",
+                        plan=[paso], context={"objective": "o"}, run_epoch=epoca)
+
+    async def escenario():
+        vieja = _corrida(1)
+        tarea_vieja = asyncio.create_task(executor._run_one_step(vieja.plan[0], 0, vieja))
+        await vieja_despachada.wait()
+        tienda.epoca = 2  # POST /continue tomó el pipeline mientras la vieja esperaba al proveedor
+        nueva = _corrida(2)
+        assert await executor._run_one_step(nueva.plan[0], 0, nueva) is True
+        ref_vigente = nueva.context["step_0_ref"]
+        soltar_vieja.set()
+        assert await tarea_vieja is False
+        return ref_vigente
+
+    ref = asyncio.run(escenario())
+    assert ref.startswith("artifact://")
+    assert artifacts.read_artifact(ref)["result"].startswith("N")
+
+
+def test_ref_de_artifact_sin_epoca_se_sigue_leyendo(monkeypatch, tmp_path):
+    """Compatibilidad hacia atrás: los pipelines guardados antes de F1 tienen
+    refs {pipeline}/{step}/output.json en context; continuar y los lectores
+    las tienen que seguir leyendo."""
+    from jacobs import artifacts
+
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", tmp_path)
+    viejo = tmp_path / "p1" / "s0"
+    viejo.mkdir(parents=True)
+    (viejo / "output.json").write_text('{"result": "de antes"}', encoding="utf-8")
+    assert executor._load_ref("artifact://jacobs/p1/s0/output.json") == {"result": "de antes"}
+
+
+def test_la_ruta_del_artifact_lleva_la_epoca(monkeypatch, tmp_path):
+    from jacobs import artifacts
+
+    monkeypatch.setattr(artifacts, "ARTIFACTS_DIR", tmp_path)
+    datos = {"result": "x" * (artifacts.SIZE_LIMIT + 1)}
+    ref, inline = artifacts.save_if_large("p1", "s0", datos, epoca=7)
+    assert inline is None
+    assert ref == "artifact://jacobs/p1/s0/e7/output.json"
+    assert artifacts.read_artifact(ref) == datos

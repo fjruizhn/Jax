@@ -1045,7 +1045,12 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool:
             timeout=step.timeout_seconds,
         )
 
-        ref, inline = save_if_large(pipeline.pipeline_id, step.step_id, raw_output)
+        # F1 (ola final): la época va en la ruta -- este archivo se escribe
+        # antes de la escritura condicional y una corrida superada no puede
+        # pisar el de la vigente. En un hilo: es escritura a disco.
+        ref, inline = await asyncio.to_thread(
+            save_if_large, pipeline.pipeline_id, step.step_id, raw_output, epoca=epoca,
+        )
         if ref:
             step.output_ref = ref
         else:

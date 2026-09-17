@@ -14,27 +14,41 @@ ARTIFACTS_DIR = Path(__file__).resolve().parent / "artifacts"
 SIZE_LIMIT = 60_000  # bytes. >60 KB → artifact en archivo (output_ref no aguanta más inline).
 
 
-def save_if_large(pipeline_id: str, step_id: str, data: dict) -> tuple[str | None, dict | None]:
+def save_if_large(
+    pipeline_id: str, step_id: str, data: dict, *, epoca: int,
+) -> tuple[str | None, dict | None]:
     """
     Si data serializado supera SIZE_LIMIT, guarda en archivo y devuelve (ref, None).
     Si cabe, devuelve (None, data) para guardarlo inline.
+
+    `epoca` (ola final F1, 2026-09-17): la época de la corrida entra en la
+    ruta, {pipeline}/{step}/e{epoca}/output.json. El ejecutor escribe el
+    archivo ANTES de su escritura condicional por época (spec §5.3): sin la
+    época en la ruta, una llamada de una corrida superada que vuelve tarde
+    sobrescribía la salida que la corrida vigente ya había referenciado.
+    Obligatoria y por nombre: un llamador que la olvide falla en el sitio.
+    Las refs viejas, sin época, se siguen leyendo: read_artifact resuelve
+    cualquier ruta relativa bajo ARTIFACTS_DIR.
+
+    SÍNCRONA (escribe a disco): el ejecutor la llama por asyncio.to_thread.
     """
     raw = json.dumps(data, ensure_ascii=False)
     if len(raw.encode()) <= SIZE_LIMIT:
         return None, data
 
-    target = ARTIFACTS_DIR / pipeline_id / step_id
+    target = ARTIFACTS_DIR / pipeline_id / step_id / f"e{epoca}"
     target.mkdir(parents=True, exist_ok=True)
     artifact_path = target / "output.json"
     artifact_path.write_text(raw, encoding="utf-8")
 
-    ref = f"artifact://jacobs/{pipeline_id}/{step_id}/output.json"
+    ref = f"artifact://jacobs/{pipeline_id}/{step_id}/e{epoca}/output.json"
     return ref, None
 
 
 def read_artifact(ref: str) -> dict:
     """Carga un artifact desde disco dado su ref URI."""
-    # ref = artifact://jacobs/{pipeline_id}/{step_id}/output.json
+    # ref = artifact://jacobs/{pipeline_id}/{step_id}/e{epoca}/output.json
+    # (o, antes de F1, artifact://jacobs/{pipeline_id}/{step_id}/output.json)
     rel = ref.removeprefix("artifact://jacobs/")
     path = ARTIFACTS_DIR / rel
     return json.loads(path.read_text(encoding="utf-8"))
