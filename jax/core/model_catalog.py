@@ -1,6 +1,7 @@
 """
 Catalogo de modelos — captura de resolved_version (Bloque D, D1.2). Espejo
-minimo en jax-platform, jax/core, las_manos, mismo patron que
+minimo en jax-platform y jax/core (las_manos/model_catalog.py es symlink a este desde
+2026-09-16, E-11), mismo patron que
 facet_resolver.py/credential_resolver.py: repos/venvs independientes, no
 justifica un paquete compartido.
 
@@ -19,7 +20,10 @@ import os
 
 import aiomysql
 
-from jax.core.db_connect_config import db_connect_timeout_seconds
+try:
+    from db_connect_config import db_connect_timeout_seconds
+except ImportError:
+    from jax.core.db_connect_config import db_connect_timeout_seconds
 
 logger = logging.getLogger("model_catalog")
 

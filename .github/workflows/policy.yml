@@ -344,10 +344,9 @@ jobs:
   # instancia muerta 3306, y credential_resolver._db_conn -- siempre con la
   # misma forma: se cierra en un repo y sobrevive en el otro.
   #
-  # credential_resolver tiene TRES archivos reales, no dos: las_manos/ tiene
-  # copia propia y NO es un symlink (a diferencia de facet_resolver). Medido el
-  # 2026-09-01. Esa tercera copia puede driftear DENTRO del propio repo jax, y
-  # hasta hoy nadie la comparaba con nada.
+  # credential_resolver tuvo TRES archivos reales hasta el 2026-09-16: la copia
+  # de las_manos/ no era symlink. Desde E-11 lo es (igual crypto_secrets, E-10,
+  # y model_catalog), asi que dentro de jax queda un solo archivo por modulo.
   # El techo declarado en capability.max_execution_minutes es un techo de
   # verdad (2026-09-01). Antes no lo era: un timeout_seconds explicito en el
   # spec de un step pisaba el default y llegaba intacto a asyncio.wait_for --
@@ -602,6 +601,7 @@ jobs:
           tests/test_frente_e_retiros.py
           tests/test_max_steps_una_sola_constante.py
           tests/test_plan_facetas_de_la_tabla.py
+          tests/test_espejos_symlink_frente_e.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -647,6 +647,7 @@ jobs:
             tests/test_frente_e_retiros.py \
             tests/test_max_steps_una_sola_constante.py \
             tests/test_plan_facetas_de_la_tabla.py \
+            tests/test_espejos_symlink_frente_e.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el

@@ -28,8 +28,8 @@ db_connect_timeout_seconds`. Pero LAS MANOS corre en producción como
 `jax.core` NO es importable ("No module named 'jax'"), solo lo que vive
 DIRECTO en `las_manos/` (bare). Por eso los archivos que corren (también o
 solo) en ese contexto --`jax/core/facet_resolver.py` (symlinkeado como
-`las_manos/facet_resolver.py`), `las_manos/credential_resolver.py`,
-`las_manos/model_catalog.py`, `las_manos/motor_registry/{catalog,
+`las_manos/facet_resolver.py`), `jax/core/credential_resolver.py` y
+`jax/core/model_catalog.py` (symlinkeados en `las_manos/` desde 2026-09-16), `las_manos/motor_registry/{catalog,
 facet_policy,usage_writer}.py`, `jacobs/store.py`, `jacobs/usage_writer.py`
 -- usan el mismo `try/except` bare-primero-calificado-después que este
 módulo comparte con `credential_resolver.py`: el bare `from

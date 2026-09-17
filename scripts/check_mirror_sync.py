@@ -193,9 +193,9 @@ FAMILIAS = (
         nombre="crypto_secrets",
         canonico=JAX_ROOT / "jax" / "core" / "crypto_secrets.py",
         espejos=(
-            # Tres archivos reales otra vez -- ninguno es symlink, medido el
-            # 2026-09-01. Misma forma que credential_resolver: dos copias
-            # dentro de jax y una en jax-platform.
+            # las_manos/crypto_secrets.py es SYMLINK a jax/core desde el
+            # 2026-09-16 (E-10): comparar ahí es un no-op, a propósito, como
+            # facet_resolver. Hasta ese día eran tres archivos reales.
             ("las_manos", JAX_ROOT / "las_manos" / "crypto_secrets.py"),
             ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "crypto_secrets.py"),
         ),
@@ -217,19 +217,19 @@ FAMILIAS = (
             "decrypt_secret",
             "decrypt_provider_keys_in_env",
         ),
-        nota="TRES archivos reales. jax-platform tiene ademas encrypt_secret y "
+        nota="Dos archivos reales (jax/core y jax-platform) + symlink en las_manos/ "
+             "desde 2026-09-16 (E-10). jax-platform tiene ademas encrypt_secret y "
              "decrypt_db_secret, excluidos por diseno (es el lado que cifra).",
     ),
     Familia(
         nombre="credential_resolver",
         canonico=JAX_ROOT / "jax" / "core" / "credential_resolver.py",
         espejos=(
-            # OJO -- aca la forma NO es la de facet_resolver, y esto se midio
-            # antes de escribirlo (2026-09-01): `las_manos/credential_resolver.py`
-            # NO es un symlink, es un TERCER ARCHIVO REAL. O sea que esta
-            # familia puede driftear DENTRO del propio repo jax, sin cruzar
-            # repos -- una copia mas suelta que la de facet_resolver, y hasta
-            # hoy nadie la comparaba con nada.
+            # las_manos/credential_resolver.py es SYMLINK a jax/core desde el
+            # 2026-09-16 (E-11). Hasta ese día era un TERCER archivo real que
+            # podía driftear dentro de jax. El test de no-fail-open escanea el
+            # symlink por las dos rutas (no deduplica por resolve()): inocuo,
+            # las dos muestran la misma marca.
             ("las_manos", JAX_ROOT / "las_manos" / "credential_resolver.py"),
             ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "credential_resolver.py"),
         ),
@@ -255,8 +255,9 @@ FAMILIAS = (
             "resolve_credential",
             "resolve_credential_instrumented",
         ),
-        nota="TRES archivos reales, no dos: las_manos/ tiene copia propia, no "
-             "symlink. Verificado 2026-09-01.",
+        nota="Dos archivos reales (jax/core y jax-platform) + symlink en las_manos/ "
+             "desde 2026-09-16 (E-11). El canónico de jax importa bare primero y cae "
+             "a jax.core; los ImportFrom no se comparan.",
     ),
     Familia(
         nombre="db_connect_config",
