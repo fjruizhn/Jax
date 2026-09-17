@@ -611,6 +611,7 @@ jobs:
           tests/test_jacobs_continue_endpoint.py
           tests/test_jacobs_relaunch_cli.py
           tests/test_prevuelo_pool.py
+          tests/test_perfil_prevuelo.py
           tests/test_medir_min_output_tokens.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
@@ -666,6 +667,7 @@ jobs:
             tests/test_jacobs_continue_endpoint.py \
             tests/test_jacobs_relaunch_cli.py \
             tests/test_prevuelo_pool.py \
+            tests/test_perfil_prevuelo.py \
             tests/test_medir_min_output_tokens.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
@@ -1277,8 +1279,19 @@ jobs:
           #   fcb0c6a (conteo: `assert 2 == 1` y `assert 2 == 0`); 4 controles
           #   ya pasaban. test_prevuelo_config.py (+2): JAX_PREVUELO_DB_POOL_MAX
           #   por defecto 5 e inválido lanza con el nombre (rojo: AttributeError).
-          grep -qE "^968 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 968 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 968 -> 1001 el 2026-09-17 (Task 15b, fix round 1 de la revisión):
+          #   +2 en test_prevuelo_pool.py -- una conexión que se rompe despierta
+          #   al que espera turno (con el Pool real, POOL_MAX=1: aiomysql 0.3.2
+          #   no llama _wakeup() al devolver una conexión cerrada; rojo contra
+          #   607f84c: TimeoutError a los 3 s) y dos primeros pedidos a la vez
+          #   crean un solo pool (rojo por mutación sin el candado: 5 pools).
+          #   test_perfil_prevuelo.py (+31) -- partes puras de
+          #   scripts/perfil_prevuelo.py: guardia exacta de jax_memory_test
+          #   (sale 2), filtro de sólo lectura, argumentos, percentil de rango
+          #   más cercano, agrupación de CPU y resumen; el script no importa
+          #   jacobs al importarse. Rojo: el script no existía (FileNotFoundError).
+          grep -qE "^1001 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1001 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

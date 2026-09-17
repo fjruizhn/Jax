@@ -86,49 +86,64 @@ async def get_conn(found_rows: bool = False) -> aiomysql.Connection:
 #   medido las pone en la ruta caliente.
 # - Pedir una conexión espera a lo sumo JAX_DB_CONNECT_TIMEOUT_SECONDS: con el
 #   pool lleno de conexiones colgadas, un pedido no espera para siempre.
+# - El TURNO lo da un asyncio.Semaphore propio del tamaño del pool, no la
+#   condición interna de aiomysql (fix round 1 de la revisión, 2026-09-17):
+#   aiomysql 0.3.2 `Pool.release()` no despierta a quien espera si la conexión
+#   devuelta ya está cerrada (sólo agenda `_wakeup()` en la rama
+#   `not conn.closed`), así que tras una conexión rota el siguiente esperaba el
+#   timeout entero y daba 503. Con el semáforo, nunca hay más pedidos adentro
+#   del pool que conexiones posibles: `pool.acquire()` encuentra una libre o
+#   abre otra, sin esperar la condición de aiomysql, y soltar el semáforo
+#   despierta siempre al siguiente.
 # - Una conexión que sale del bloque con una excepción se CIERRA y no vuelve:
 #   puede tener filas sin leer o el socket roto. Las que la base cortó en
 #   reposo (wait_timeout) las descarta el propio Pool de aiomysql al pedirlas
 #   (EOF en el lector).
-_pool_de_lectura_estado: tuple[asyncio.AbstractEventLoop, aiomysql.Pool] | None = None
+_pool_de_lectura_estado: tuple[asyncio.AbstractEventLoop, aiomysql.Pool, asyncio.Semaphore] | None = None
 # El candado sólo serializa la CREACIÓN (dos primeros pedidos a la vez no
-# crean dos pools). Es de un loop; si todavía no hay pool, uno de otro loop
+# crean dos pools; hoy create_pool con minsize=0 no cede el loop antes de
+# volver, pero con minsize>0 conectaría al crear y la carrera sería real --
+# test_dos_primeros_pedidos_a_la_vez_crean_un_solo_pool la fuerza con una pausa). Es de un loop; si todavía no hay pool, uno de otro loop
 # (el anterior ya cerrado, p. ej. tras un intento fallido) se reemplaza.
 _candado_de_creacion: tuple[asyncio.AbstractEventLoop, asyncio.Lock] | None = None
 
 
-def _pool_del_loop(loop: asyncio.AbstractEventLoop) -> aiomysql.Pool | None:
+def _pool_del_loop(
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[aiomysql.Pool, asyncio.Semaphore] | None:
     if _pool_de_lectura_estado is None:
         return None
-    duenio, pool = _pool_de_lectura_estado
+    duenio, pool, turno = _pool_de_lectura_estado
     if duenio is not loop:
         raise RuntimeError(
             "el pool de lectura de Jacobs se creó en otro event loop: hay que "
             "cerrarlo con store.cerrar_pool() en el loop que lo creó antes de "
             "pedir conexiones desde este"
         )
-    return pool
+    return pool, turno
 
 
-async def _pool_de_lectura() -> aiomysql.Pool:
+async def _pool_de_lectura() -> tuple[aiomysql.Pool, asyncio.Semaphore]:
     global _pool_de_lectura_estado, _candado_de_creacion
     loop = asyncio.get_running_loop()
-    pool = _pool_del_loop(loop)
-    if pool is not None:
-        return pool
+    actual = _pool_del_loop(loop)
+    if actual is not None:
+        return actual
     if _candado_de_creacion is None or _candado_de_creacion[0] is not loop:
         _candado_de_creacion = (loop, asyncio.Lock())
     async with _candado_de_creacion[1]:
-        pool = _pool_del_loop(loop)
-        if pool is None:
+        actual = _pool_del_loop(loop)
+        if actual is None:
             from jacobs.prevuelo_config import db_pool_max
 
+            tamanio = db_pool_max()
             pool = await aiomysql.create_pool(
-                minsize=0, maxsize=db_pool_max(),
+                minsize=0, maxsize=tamanio,
                 **_db_cfg(), connect_timeout=db_connect_timeout_seconds(),
             )
-            _pool_de_lectura_estado = (loop, pool)
-    return pool
+            actual = (pool, asyncio.Semaphore(tamanio))
+            _pool_de_lectura_estado = (loop, *actual)
+    return actual
 
 
 @asynccontextmanager
@@ -136,24 +151,34 @@ async def conexion_de_lectura() -> AsyncIterator[aiomysql.Connection]:
     """Una conexión del pool de lectura, devuelta al salir. Cualquier error de
     la base (al conectar, al esperar turno o a mitad de consulta) se propaga:
     quien llama responde 503, nunca un veredicto por defecto."""
-    pool = await _pool_de_lectura()
-    conn = await asyncio.wait_for(pool.acquire(), timeout=db_connect_timeout_seconds())
+    pool, turno = await _pool_de_lectura()
+    async with asyncio.timeout(db_connect_timeout_seconds()):
+        await turno.acquire()
+        try:
+            conn = await pool.acquire()
+        except BaseException:
+            turno.release()
+            raise
     try:
         yield conn
     except BaseException:
         conn.close()  # puede tener filas sin leer o el socket roto: no vuelve al pool
         raise
     finally:
-        await pool.release(conn)
+        try:
+            await pool.release(conn)
+        finally:
+            turno.release()
 
 
 async def cerrar_pool() -> None:
     """Cierra el pool de lectura (shutdown de LAS MANOS, salida del CLI).
     Sin pool, no hace nada. Después se puede volver a pedir: se crea otro."""
     global _pool_de_lectura_estado
-    pool = _pool_del_loop(asyncio.get_running_loop())
-    if pool is None:
+    actual = _pool_del_loop(asyncio.get_running_loop())
+    if actual is None:
         return
+    pool, _ = actual
     _pool_de_lectura_estado = None
     pool.close()
     await pool.wait_closed()

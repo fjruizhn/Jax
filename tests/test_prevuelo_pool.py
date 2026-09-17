@@ -484,3 +484,63 @@ def test_el_cli_conserva_su_codigo_si_cerrar_el_pool_falla(capsys):
         rc = asyncio.run(cli.relanzar("p1", {}, None))
     assert rc == 1
     assert "pool" in capsys.readouterr().out
+
+
+# --- Fix round 1 de la revisión (2026-09-17) ---------------------------------
+
+def test_una_conexion_que_se_rompe_despierta_al_que_espera_turno(base, monkeypatch):
+    """Hallazgo 1: aiomysql 0.3.2 `Pool.release` NO despierta a quien espera
+    turno si la conexión devuelta ya está cerrada. Con POOL_MAX=1, A tiene la
+    única conexión y revienta a los 0,2 s; B, que esperaba, tiene que recibir
+    una conexión enseguida, no a los 3 s del timeout con un 503.
+    Expected contra 607f84c: B tarda ~3 s -> TimeoutError."""
+    monkeypatch.setenv("JAX_PREVUELO_DB_POOL_MAX", "1")
+    monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "3")
+
+    async def cuerpo():
+        tomada = asyncio.Event()
+
+        async def a():
+            with pytest.raises(RuntimeError):
+                async with store.conexion_de_lectura():
+                    tomada.set()
+                    await asyncio.sleep(0.2)
+                    raise RuntimeError("se rompió a mitad de lectura")
+
+        async def b():
+            await tomada.wait()
+            inicio = time.monotonic()
+            async with store.conexion_de_lectura() as conn:
+                return time.monotonic() - inicio, conn.closed
+
+        _, (espera, cerrada) = await asyncio.gather(a(), b())
+        return espera, cerrada
+
+    espera, cerrada = _correr(cuerpo)
+    assert espera < 1.0, f"B esperó {espera:.2f} s: nadie lo despertó cuando se liberó el lugar"
+    assert not cerrada, "B recibió la conexión rota"
+
+
+def test_dos_primeros_pedidos_a_la_vez_crean_un_solo_pool(base, monkeypatch):
+    """Hallazgo 3: el candado de creación. Hoy minsize=0 hace create_pool casi
+    instantáneo, pero con una pausa forzada adentro (lo que sería minsize>0,
+    que conecta al crear) dos primeros pedidos concurrentes no deben crear dos
+    pools. Rojo por mutación (sin el candado): 2 pools."""
+    creados = []
+    real = aiomysql.create_pool
+
+    async def lento(*args, **kwargs):
+        creados.append(kwargs)
+        await asyncio.sleep(0.05)
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(aiomysql, "create_pool", lento)
+
+    async def cuerpo():
+        async def pedir():
+            async with store.conexion_de_lectura():
+                await asyncio.sleep(0)
+        await asyncio.gather(*[pedir() for _ in range(5)])
+
+    _correr(cuerpo)
+    assert len(creados) == 1
