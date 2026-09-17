@@ -12,6 +12,7 @@ import logging
 import time
 
 from jacobs import store
+from redaccion import recortar_redactado
 
 logger = logging.getLogger("jacobs.facet_health")
 
@@ -168,6 +169,12 @@ OUTCOMES_DE_PROVEEDOR = ("ok", "provider_error")
 SOURCE_PREVUELO = "preflight"
 _LARGO_DETALLE = 255  # facet_health_event.detail VARCHAR(255)
 
+# Fix round 1, item 4: la lista sale de OUTCOMES_DE_PROVEEDOR, no de un
+# literal duplicado. Es un literal generado, no un parametro -- seguro
+# contra inyeccion porque OUTCOMES_DE_PROVEEDOR es una constante fija del
+# modulo, nunca un valor que llegue de afuera.
+_OUTCOMES_SQL = ",".join(f"'{o}'" for o in OUTCOMES_DE_PROVEEDOR)
+
 _SQL_EVENTO_DE_SONDA = (
     "INSERT INTO facet_health_event (facet, outcome, source, detail, ts) "
     "VALUES (%s, %s, %s, %s, %s)"
@@ -176,15 +183,20 @@ _SQL_EVENTO_DE_SONDA = (
 
 def sql_ultimo_evento_de_proveedor(n_claves: int) -> str:
     """Último evento ok/provider_error por clave dentro de la ventana. Va por
-    idx_facet_ts (facet, ts) -- EXPLAIN en tests/test_prevuelo_catalogo_db.py."""
+    idx_facet_ts (facet, ts) -- EXPLAIN en tests/test_prevuelo_catalogo_db.py.
+
+    Puede devolver DOS filas para la misma clave si `ok` y `provider_error`
+    empatan en MAX(ts): el desempate (R12, provider_error gana) lo hace
+    ultimo_evento_de_proveedor() en Python, no esta consulta -- ordenar aca
+    forzaria un filesort sobre el resultado del JOIN sin necesidad."""
     ph = ",".join(["%s"] * n_claves)
     return (
         "SELECT e.facet, e.ts, e.outcome FROM facet_health_event e "
         "JOIN (SELECT facet, MAX(ts) mt FROM facet_health_event "
-        f"      WHERE facet IN ({ph}) AND ts >= %s AND outcome IN ('ok','provider_error') "
+        f"      WHERE facet IN ({ph}) AND ts >= %s AND outcome IN ({_OUTCOMES_SQL}) "
         "      GROUP BY facet) m "
         "  ON m.facet = e.facet AND m.mt = e.ts "
-        "WHERE e.outcome IN ('ok','provider_error')"
+        f"WHERE e.outcome IN ({_OUTCOMES_SQL})"
     )
 
 
@@ -205,12 +217,28 @@ async def ultimo_evento_de_proveedor(cur, claves: set[str], ahora: float) -> dic
         sql_ultimo_evento_de_proveedor(len(ordenadas)),
         (*ordenadas, ahora - HEALTH_WINDOW_SECONDS),
     )
-    return {faceta: (float(ts), outcome) for faceta, ts, outcome in await cur.fetchall()}
+    filas = await cur.fetchall()
+    # R12 (fix round 1, item 3): un empate en MAX(ts) devuelve `ok` Y
+    # `provider_error` para la misma clave; sin este orden, cual de los dos
+    # gana el dict de abajo depende del orden fisico en que MariaDB los
+    # devolvio (medido: cambia con el orden de insercion, no es un empate
+    # "sano" por default). provider_error tiene que ganar SIEMPRE el empate:
+    # el resultado es 'sondear', el lado que no se equivoca por optimismo.
+    # sorted() es estable, asi que las filas 'ok' quedan antes que las
+    # 'provider_error' para la misma clave y el dict comprehension de abajo
+    # se queda con la ultima -- provider_error.
+    filas_en_orden = sorted(filas, key=lambda fila: fila[2] == "provider_error")
+    return {faceta: (float(ts), outcome) for faceta, ts, outcome in filas_en_orden}
 
 
 async def registrar_evento_de_sonda(clave: str, outcome: str, detalle: str | None, ts: float) -> None:
     """Escribe el resultado de una sonda del pre-vuelo. Quien llama decide qué
-    hacer si falla (sonda.py: el veredicto se mantiene y se cuenta)."""
+    hacer si falla (sonda.py: el veredicto se mantiene y se cuenta).
+
+    Fix round 1, item 1: redactar ANTES de recortar (recortar_redactado,
+    jax/core/redaccion.py:161-168) -- al reves, un secreto que cruza el
+    corte de 255 queda partido, el pedazo visible ya no tiene la forma que
+    reconoce la regla y se filtra en claro."""
     if outcome not in OUTCOMES_DE_PROVEEDOR:
         raise ValueError(f"outcome de sonda inválido: {outcome!r}")
     conn = await store.get_conn()
@@ -218,7 +246,7 @@ async def registrar_evento_de_sonda(clave: str, outcome: str, detalle: str | Non
         async with conn.cursor() as cur:
             await cur.execute(
                 _SQL_EVENTO_DE_SONDA,
-                (clave, outcome, SOURCE_PREVUELO, detalle[:_LARGO_DETALLE] if detalle else None, ts),
+                (clave, outcome, SOURCE_PREVUELO, recortar_redactado(detalle, _LARGO_DETALLE), ts),
             )
     finally:
         conn.close()

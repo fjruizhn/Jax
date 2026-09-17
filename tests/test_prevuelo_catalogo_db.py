@@ -79,6 +79,26 @@ def _con_semilla(cuerpo, **kw):
     return asyncio.run(correr())
 
 
+def _con_semillas(n, cuerpo):
+    """Como _con_semilla pero con N proveedores/facetas/modelos sintéticos --
+    para EXPLAIN con n>=2 (fix round 1, item 2: sql_modelos es una cadena OR
+    de pares, sql_ultimo_evento_de_proveedor lleva N claves)."""
+    async def correr():
+        s_list = [_Semilla() for _ in range(n)]
+        conn = await store.get_conn()
+        try:
+            async with conn.cursor() as cur:
+                for s in s_list:
+                    await _sembrar(cur, s)
+            return s_list, await cuerpo(s_list, conn)
+        finally:
+            async with conn.cursor() as cur:
+                for s in s_list:
+                    await _limpiar(cur, s)
+            conn.close()
+    return asyncio.run(correr())
+
+
 async def _evento(conn, faceta, outcome, source, ts):
     async with conn.cursor() as cur:
         await cur.execute(
@@ -191,3 +211,115 @@ def test_explain_credencial_y_modelos_usan_sus_indices():
     _, (cred, modelos) = _con_semilla(cuerpo)
     assert [f["key"] for f in cred] == ["idx_provider_state"], cred
     assert [f["key"] for f in modelos] == ["uk_provider_model"], modelos
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (revisión post-Task 6)
+# ---------------------------------------------------------------------------
+
+def test_registrar_evento_de_sonda_redacta_antes_de_recortar():
+    """Item 1: un secreto que cruza el corte de 255 no puede sobrevivir en
+    ningún fragmento. Si se recorta ANTES de redactar (o si no se redacta),
+    el pedazo visible del valor ya no tiene la forma `api_key=...` completa
+    y queda en claro -- exactamente lo que describe recortar_redactado en
+    jax/core/redaccion.py:163-168."""
+    ahora = time.time()
+    valor_secreto = "S3CR3TVALUE" + "Q" * 60  # 71 chars
+    detalle = ("relleno de la sonda " * 10) + f"api_key={valor_secreto}" + " cola"
+    assert len(detalle) > fh._LARGO_DETALLE
+    inicio = detalle.index(valor_secreto)
+    # El valor del secreto arranca ANTES del corte y termina DESPUES: cruza
+    # el borde de los 255 caracteres.
+    assert inicio < fh._LARGO_DETALLE < inicio + len(valor_secreto)
+
+    async def cuerpo(s, conn):
+        await fh.registrar_evento_de_sonda(s.faceta, "provider_error", detalle, ahora)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT detail FROM facet_health_event WHERE facet=%s", (s.faceta,))
+            return await cur.fetchone()
+    _, (guardado,) = _con_semilla(cuerpo)
+    assert guardado is not None
+    assert len(guardado) <= fh._LARGO_DETALLE
+    assert "S3CR3TVALUE" not in guardado
+    # Ningun fragmento del valor (ni un prefijo parcial) sobrevive.
+    for corte in range(10, len(valor_secreto), 10):
+        assert valor_secreto[:corte] not in guardado, (corte, guardado)
+
+
+def test_empate_de_ts_lo_gana_provider_error():
+    """Item 3 / Ruling R12: con el mismo MAX(ts), provider_error gana el
+    empate -- determinista, y el resultado es 'sondear', no 'sana' por
+    casualidad de orden físico de filas. `provider_error` se inserta
+    PRIMERO a propósito: contra el código viejo (sin orden explícito) esto
+    devolvía 'ok' -- verificado a mano insertando en este orden, ver
+    fix-round-1 en task-6-report.md."""
+    ahora = time.time()
+    empate = ahora - 10
+
+    async def cuerpo(s, conn):
+        await _evento(conn, s.faceta, "provider_error", "preflight", empate)
+        await _evento(conn, s.faceta, "ok", "chat", empate)
+        return await pc.leer_catalogo(facetas={s.faceta}, motores=[], capabilities=set(), ahora=ahora)
+    s, cat = _con_semilla(cuerpo)
+    assert cat.salud[s.faceta] == (empate, "provider_error")
+    assert fh.salud_de_proveedor(cat.salud[s.faceta], ahora) == "sondear"
+
+
+def test_explain_facetas_evita_full_scan():
+    """Item 2: sql_facetas(n) es un JOIN de 4 tablas (facet, facet_binding,
+    provider, model); cada salto va por PK o índice único, nunca un scan."""
+    async def cuerpo(s, conn):
+        return await _explain(conn, pc.sql_facetas(1), (s.faceta,))
+    s, filas = _con_semilla(cuerpo)
+    assert all(f["type"] != "ALL" for f in filas), filas
+    assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas
+
+
+def test_explain_min_output_tokens_evita_full_scan():
+    """Item 2: sql_min_output_tokens(n) contra capability.key (PRIMARY),
+    con n=2 claves reales de la semilla de producción."""
+    async def correr():
+        conn = await store.get_conn()
+        try:
+            return await _explain(conn, pc.sql_min_output_tokens(2), ("research", "analysis"))
+        finally:
+            conn.close()
+    filas = asyncio.run(correr())
+    assert all(f["type"] != "ALL" for f in filas), filas
+    assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas
+
+
+def test_explain_modelos_n2_usa_uk_provider_model():
+    """Item 2: sql_modelos(n) es una cadena OR de pares (provider_id,
+    model_id); con n=2 cada rama tiene que seguir yendo por uk_provider_model,
+    no degradar a un scan de la tabla."""
+    async def cuerpo(s_list, conn):
+        s1, s2 = s_list
+        return await _explain(
+            conn, pc.sql_modelos(2), (s1.proveedor, s1.modelo, s2.proveedor, s2.modelo))
+    _, filas = _con_semillas(2, cuerpo)
+    assert all(f["key"] == "uk_provider_model" for f in filas), filas
+    assert all(f["type"] != "ALL" for f in filas), filas
+    assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas
+
+
+def test_explain_salud_n2_usa_idx_facet_ts():
+    """Item 2: sql_ultimo_evento_de_proveedor(n) con n=2 claves, mismo
+    volumen que el test de n=1 para que el optimizador no prefiera un scan
+    por tabla chica."""
+    ahora = time.time()
+
+    async def cuerpo(s_list, conn):
+        s1, s2 = s_list
+        for n in range(30):
+            for k in range(10):
+                await _evento(conn, f"{s1.faceta}-rel-{n:02d}", "ok", "chat", ahora - k)
+        await _evento(conn, s1.faceta, "ok", "preflight", ahora)
+        await _evento(conn, s2.faceta, "ok", "preflight", ahora)
+        return await _explain(
+            conn, fh.sql_ultimo_evento_de_proveedor(2),
+            (s1.faceta, s2.faceta, ahora - fh.HEALTH_WINDOW_SECONDS))
+    _, filas = _con_semillas(2, cuerpo)
+    assert any(f["key"] == "idx_facet_ts" for f in filas), filas
+    assert all("filesort" not in (f.get("Extra") or "") for f in filas), filas

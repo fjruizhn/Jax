@@ -1111,5 +1111,15 @@ jobs:
           #   escribe source='preflight' y recorta a 255, min_output_tokens sale
           #   de capability, y dos EXPLAIN (idx_facet_ts, idx_provider_state +
           #   uk_provider_model). Requiere el esquema del plan P.
-          grep -qE "^43 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 43 tests CORRIDOS."; exit 1; }
+          # 43 -> 49 el 2026-09-17 (Task 6, ronda de arreglo 1, revisión):
+          #   +6 en test_prevuelo_catalogo_db.py -- item 1: registrar_evento_
+          #   de_sonda redacta ANTES de recortar (un secreto que cruza el
+          #   corte de 255 no deja fragmento); item 2: EXPLAIN de sql_facetas
+          #   (join de 4 tablas), sql_min_output_tokens y, con n=2,
+          #   sql_modelos (cadena OR) y sql_ultimo_evento_de_proveedor,
+          #   ninguno cae a ALL ni filesort; item 3/Ruling R12: un empate en
+          #   MAX(ts) lo gana provider_error de forma determinista (visto en
+          #   rojo insertando provider_error antes que ok: el código viejo
+          #   daba 'ok' por orden físico de filas, no por regla).
+          grep -qE "^49 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 49 tests CORRIDOS."; exit 1; }
