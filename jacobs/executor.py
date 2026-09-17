@@ -29,6 +29,7 @@ from redaccion import recortar_redactado, redactar_secretos
 # E-21: jax/core/config_entorno.py por symlink en las_manos/, como arriba.
 from config_entorno import ruta_absoluta_requerida, url_requerida
 from cliente_http_compartido import obtener_cliente_http
+from auth_servicio import IDENTIDAD_JACOBS, encabezado_propio
 from jacobs.models import HTTP_FACETS as _HTTP_FACETS
 from jacobs.models import MOTOR_FACETS as _MOTOR_FACETS
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -578,7 +579,8 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
         "timeout_seconds": timeout,
     }
-    resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30)
+    resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30,
+                                           headers=encabezado_propio(IDENTIDAD_JACOBS))
     resp.raise_for_status()
     dispatch = resp.json()
 
@@ -598,7 +600,8 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             await asyncio.sleep(MOTOR_POLL_INTERVAL)
-            resp = await obtener_cliente_http().get(f"{LAS_MANOS_BASE}/motor/job/{job_id}", timeout=15)
+            resp = await obtener_cliente_http().get(f"{LAS_MANOS_BASE}/motor/job/{job_id}", timeout=15,
+                                                      headers=encabezado_propio(IDENTIDAD_JACOBS))
             resp.raise_for_status()
             job = resp.json()
 
@@ -655,7 +658,8 @@ async def _cancel_motor_job(job_id: str) -> None:
     falla, queda en el log con el job_id -- nunca reemplaza la causa real.
     409 = el job ya había terminado solo, no hay nada que cortar."""
     try:
-        resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel", timeout=5)
+        resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/job/{job_id}/cancel", timeout=5,
+                                                   headers=encabezado_propio(IDENTIDAD_JACOBS))
         if resp.status_code not in (200, 409):
             logger.error(
                 "No se pudo cancelar el motor job %s tras vencer su paso: HTTP %s",

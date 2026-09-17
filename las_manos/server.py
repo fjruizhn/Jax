@@ -170,6 +170,12 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# Autenticación de servicio (2026-09-17): deny by default, la identidad sale de
+# la credencial y no del cuerpo. Sin las credenciales en /etc/jax/.env, LAS
+# MANOS no arranca (EntornoInvalido). Ver las_manos/auth_servicio.py.
+from auth_servicio import proteger  # noqa: E402
+proteger(app)
+
 
 @app.on_event("startup")
 async def _jacobs_init() -> None:
