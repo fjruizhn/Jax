@@ -1227,8 +1227,38 @@ jobs:
           #   `corridas_de_motor` de P. Los 7 tests de comportamiento se
           #   vieron en rojo contra a215959; el octavo (fail-closed) ya pasaba
           #   ahí (nada que marcar todavía) y se verificó por inyección.
-          grep -qE "^936 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 936 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 936 -> 943 el 2026-09-17 (Task 13, fix round 2 de la revisión):
+          #   +7 en el mismo archivo -- un control puro más (_SQL_HTTP_DIRECTO
+          #   no usa GROUP BY: el agrupado es post-procesamiento en Python,
+          #   no SQL) y seis tests del re-review. Dos hallazgos Minor en el
+          #   texto del plan (sin test, documentación corregida: "dos puntos"
+          #   → tres, uno de ellos -- COLLATE -- no era una divergencia; el
+          #   ejemplo de fila ambigua marcado como HIPOTÉTICO, no observado --
+          #   la medición real de P dio 0 filas ambiguas). Detector fail-closed
+          #   con tres huecos más, cada uno con un test sobre fuente sintética
+          #   (`ast.parse` de un snippet, sin tocar disco): `.query(...)`
+          #   (Connection de aiomysql, más bajo nivel que un cursor) no estaba
+          #   en la lista de formas vigiladas; una referencia guardada en
+          #   variable (`ex = cur.execute; await ex(...)`) no es un
+          #   Call(func=Attribute) y quedaba invisible -- ahora se marca la
+          #   referencia misma; y `"SELECT 1; DELETE ..."` pasaba el chequeo
+          #   de `startswith("SELECT")` -- ahora se pela un `;` final único
+          #   (estilo SQL) y cualquier `;` que quede adentro es hallazgo (con
+          #   su control: un solo `;` final no se marca). Verificado además
+          #   con una inyección real sobre una copia descartable del script
+          #   (no committeada, borrada después): el detector de la ronda 1
+          #   daba 0 hallazgos contra las tres formas nuevas, el de esta ronda
+          #   da 3. Un test más deja el ROLLBACK en su propio `finally` (antes
+          #   vivía después de las SELECT en el cuerpo del try, así que una
+          #   consulta rota lo salteaba y la sesión de sólo lectura quedaba
+          #   abierta en el servidor real) -- visto en rojo con una conexión
+          #   mockeada cuya SELECT revienta a propósito. El último test fija
+          #   que el resolutor de "constantes de módulo" del detector sólo
+          #   mire asignaciones de NIVEL DE MÓDULO, no cualquier asignación
+          #   del árbol (una variable local con el mismo nombre podía pisar el
+          #   valor real).
+          grep -qE "^943 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 943 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

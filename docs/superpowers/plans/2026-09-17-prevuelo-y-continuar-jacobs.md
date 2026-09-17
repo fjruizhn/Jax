@@ -5874,14 +5874,19 @@ Sin corridas medibles, quedan en 0 (sin mínimo, no bloquean): `architecture_rev
 último es el binding primario de `hipatia` en producción; su fila en
 `model` tenía `max_output_tokens` NULL antes de esta medición).
 
-### Método de P que `scripts/medir_min_output_tokens.py` sigue (fix round 1: alineado, no aproximado)
+### Método de P que `scripts/medir_min_output_tokens.py` sigue (fix rounds 1-2: alineado, no aproximado)
 
-La primera versión de este script (commit `a215959`) se apartó del método real
-de P en dos puntos, encontrados en la revisión (`git -C
-jax-platform-prevuelo show d79b0f9`, brief y salida de Task 2 de P) y
-corregidos en el commit siguiente:
+Este script sigue el método real de P en TRES respectos. De los tres, sólo
+DOS eran divergencias de la primera versión (commit `a215959`) — la ventana
+del JOIN y la exclusión de filas ambiguas —, encontradas en la revisión
+(`git -C jax-platform-prevuelo show d79b0f9`, brief y salida de Task 2 de P)
+y corregidas en el commit siguiente. El COLLATE (punto 1) NO fue una
+divergencia: ya estaba correcto desde el commit original de la Task 13 (era
+parte del alcance desde el principio, no un fix de esta ronda); se lista acá
+porque también es parte del método de P que el script sigue.
 
-1. **COLLATE del JOIN (error 1267).** `axioma_usage.facet` quedó en
+1. **COLLATE del JOIN (error 1267) — correcto desde el commit original,
+   `a215959`, no un fix de esta ronda.** `axioma_usage.facet` quedó en
    `utf8mb4_uca1400_ai_ci` y `jacobs_steps.facet` en `utf8mb4_unicode_ci`
    (esquemas creados en momentos distintos): un JOIN `ON u.facet = s.facet`
    falla contra producción con `pymysql.err.OperationalError: (1267,
@@ -5890,7 +5895,7 @@ corregidos en el commit siguiente:
    son ASCII en minúscula, así que la igualdad da lo mismo con cualquiera de
    las dos collations. Verificado con un test puro
    (`tests/test_medir_min_output_tokens.py::test_el_join_http_directo_lleva_la_collate_del_esquema_real`).
-2. **Ventana del JOIN, IDÉNTICA a la de P.** P usa
+2. **Ventana del JOIN, IDÉNTICA a la de P — corregida en fix round 1.** P usa
    `UNIX_TIMESTAMP(u.created_at) BETWEEN FLOOR(s.started_at) AND
    CEIL(s.finished_at) + 5` — holgura SÓLO del lado derecho (`created_at` es
    `TIMESTAMP`, segundos enteros; `started_at`/`finished_at` son `DOUBLE`;
@@ -5901,29 +5906,43 @@ corregidos en el commit siguiente:
    probabilidad de fila ambigua sin necesidad. Corregido a `FLOOR(s.started_at)
    AND CEIL(s.finished_at) + %s`, con un test puro que lo fija.
 3. **Exclusión de filas ambiguas (P la hace; la primera versión NO la
-   hacía).** P no arma el máximo con `MAX()+GROUP BY` en SQL: trae
-   `(u.id, s.capability, u.tokens_out)` fila por fila y excluye en Python las
-   filas cuyo `id` de `axioma_usage` cae en la ventana de pasos de MÁS de una
-   capability a la vez ("filas ambiguas", 0 encontradas en la medición real
-   de P). Sin esa exclusión, un `MAX()+GROUP BY` le atribuye una fila
-   compartida a TODAS las capabilities cuya ventana la toca — no sólo la
-   infla hacia arriba (lado "seguro" de un mínimo), se la puede atribuir
-   ENTERA a una capability que no la generó. Ejemplo real de la revisión: un
-   paso `reconcile` de la faceta `thot` termina en t=100 con una fila de
-   20664 tokens; un paso `file_write` de la MISMA faceta arranca en t=103 —
-   sin exclusión, `file_write` mide 20664/21504; P (y ahora este script)
-   miden `file_write` en 1301/2048 (su valor real) porque la fila del
-   `reconcile` queda excluida por ambigua. `maximos_http()` reproduce el
+   hacía) — corregida en fix round 1.** P no arma el máximo con
+   `MAX()+GROUP BY` en SQL: trae `(u.id, s.capability, u.tokens_out)` fila
+   por fila y excluye en Python las filas cuyo `id` de `axioma_usage` cae en
+   la ventana de pasos de MÁS de una capability a la vez ("filas ambiguas",
+   **0 encontradas en la medición real de P** — su propia salida dice
+   `filas de uso ambiguas excluidas: []`). Sin esa exclusión, un
+   `MAX()+GROUP BY` le atribuye una fila compartida a TODAS las capabilities
+   cuya ventana la toca — no sólo la infla hacia arriba (lado "seguro" de un
+   mínimo), se la puede atribuir ENTERA a una capability que no la generó.
+   **Ejemplo HIPOTÉTICO** (construido para el test que fija el mecanismo, NO
+   observado en la medición real de P — que dio cero filas ambiguas): SI un
+   paso `reconcile` de la faceta `thot` terminara en t=100 con una fila de
+   20664 tokens y un paso `file_write` de la MISMA faceta arrancara en
+   t=103, sin exclusión `file_write` mediría 20664/21504 en vez de su valor
+   REAL medido por P, 1301/2048. `maximos_http()` reproduce el
    post-procesamiento de P: agrupa por `id`, excluye `len(capabilities) > 1`,
-   descarta `tokens_out == 0`, toma el máximo de lo que queda. Cuatro tests
-   puros lo cubren (fila ambigua excluida con el ejemplo de arriba, máximo
-   sin ambiguas con cero descartado, filas vacías, y el JOIN reescrito sin
-   `GROUP BY`).
+   descarta `tokens_out == 0`, toma el máximo de lo que queda. Cinco tests
+   puros lo cubren: fila ambigua excluida con el ejemplo hipotético de
+   arriba, máximo sin ambiguas con cero descartado, filas vacías, y un
+   control que fija que `_SQL_HTTP_DIRECTO` NO contiene `GROUP BY` (el
+   agrupado es post-procesamiento en Python, no SQL).
 
-Los tres puntos se vieron en ROJO contra el commit `a215959` antes de
-corregirse (evidencia completa: `task-13-report.md`, sección "Fix round 1").
-Ninguno queda como "adaptación aceptada" — el script sigue el método de P
-tal cual, no una aproximación propia.
+Los DOS puntos de comportamiento (2 y 3, ventana y exclusión de ambiguas) se
+vieron en ROJO contra el commit `a215959` antes de corregirse; el COLLATE
+(punto 1) no, porque ya estaba bien desde el commit original — nunca fue
+rojo. Evidencia completa: `task-13-report.md`, secciones "Fix round 1" y
+"Fix round 2". Ninguno de los tres queda como "adaptación aceptada" — el
+script sigue el método de P tal cual, no una aproximación propia.
+
+Fix round 2 (revisión, 2026-09-17) además endureció la prueba de solo
+lectura (detecta `.query(...)` además de `.execute`/`.executemany`/
+`.callproc`/`.commit`, una referencia guardada en variable sin llamar de
+inmediato, y una sentencia con `;` que esconde una segunda), movió el
+`ROLLBACK` a su propio `finally` (corre aunque la consulta falle, con
+`conn.close()` después) y acotó el resolutor de "constantes de módulo" al
+nivel de módulo real (no cualquier asignación del árbol). Detalle completo
+en `task-13-report.md`, sección "Fix round 2".
 
 ### Consumo
 

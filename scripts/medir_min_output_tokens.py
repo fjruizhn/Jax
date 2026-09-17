@@ -157,11 +157,18 @@ async def _maximos_http_directo() -> tuple[dict[str, int], list[Any], list[str]]
         async with conn.cursor() as cur:
             await cur.execute("SET SESSION TRANSACTION READ ONLY")
             await cur.execute("START TRANSACTION READ ONLY")
-            await cur.execute(_SQL_HTTP_DIRECTO, (HOLGURA_S,))
-            filas = await cur.fetchall()
-            await cur.execute("SELECT `key` FROM capability ORDER BY `key`")
-            capabilities = [r[0] for r in await cur.fetchall()]
-            await cur.execute("ROLLBACK")
+            # ROLLBACK en su propio finally (ronda de arreglo 2, observación
+            # 3): si cualquiera de las SELECT de acá abajo revienta, la
+            # sesión de sólo lectura se cierra igual -- no queda colgada en
+            # el servidor. conn.close() sigue viniendo DESPUÉS (finally
+            # exterior); la excepción original se relanza sin tragarse.
+            try:
+                await cur.execute(_SQL_HTTP_DIRECTO, (HOLGURA_S,))
+                filas = await cur.fetchall()
+                await cur.execute("SELECT `key` FROM capability ORDER BY `key`")
+                capabilities = [r[0] for r in await cur.fetchall()]
+            finally:
+                await cur.execute("ROLLBACK")
     finally:
         conn.close()
     maximos, ambiguas = maximos_http(filas)

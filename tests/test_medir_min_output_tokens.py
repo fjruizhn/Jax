@@ -28,6 +28,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from medir_min_output_tokens import combinar, maximos_de_jobs, redondear  # noqa: E402
@@ -92,6 +94,16 @@ def test_la_ventana_del_join_es_la_de_p_sin_holgura_del_lado_izquierdo():
     assert "FLOOR(s.started_at)" in plano
     assert "CEIL(s.finished_at) + %s" in plano
     assert "s.started_at - " not in plano, "la ventana no debe restar holgura del lado izquierdo (diverge de P)"
+
+
+def test_sql_http_directo_no_agrupa_en_sql_el_post_procesamiento_lo_hace_python():
+    """Control (ronda de arreglo 2, hallazgo 1 del plan): la sección del plan
+    afirma que `_SQL_HTTP_DIRECTO` no usa `GROUP BY` -- P no agrupa en SQL,
+    excluye filas ambiguas en Python (`maximos_http`, abajo). Esta aserción
+    lo fija con un test en vez de quedar como una afirmación sin verificar."""
+    from medir_min_output_tokens import _SQL_HTTP_DIRECTO
+
+    assert "GROUP BY" not in _SQL_HTTP_DIRECTO.upper()
 
 
 def test_fila_ambigua_no_se_atribuye_a_ninguna_capability():
@@ -174,16 +186,31 @@ _PERMITIDAS_EXACTAS = {
 }
 
 
-def _constantes_de_modulo(arbol: ast.AST) -> dict[str, str]:
-    return {
-        nodo.targets[0].id: nodo.value.value
-        for nodo in ast.walk(arbol)
-        if isinstance(nodo, ast.Assign)
-        and len(nodo.targets) == 1
-        and isinstance(nodo.targets[0], ast.Name)
-        and isinstance(nodo.value, ast.Constant)
-        and isinstance(nodo.value.value, str)
-    }
+def _constantes_de_modulo(arbol: ast.Module) -> dict[str, str]:
+    """SOLO asignaciones de NIVEL DE MÓDULO (ronda de arreglo 2, observación
+    4): la versión anterior recorría TODO el árbol (`ast.walk`), así que una
+    asignación adentro de una función con el MISMO nombre que una constante
+    real de módulo podía pisar su valor en este diccionario -- una llamada
+    real que resuelve contra el nombre "correcto" terminaría resolviendo al
+    valor de la variable local equivocada."""
+    constantes: dict[str, str] = {}
+    for nodo in arbol.body:
+        if (
+            isinstance(nodo, ast.Assign)
+            and len(nodo.targets) == 1
+            and isinstance(nodo.targets[0], ast.Name)
+            and isinstance(nodo.value, ast.Constant)
+            and isinstance(nodo.value.value, str)
+        ):
+            constantes[nodo.targets[0].id] = nodo.value.value
+        elif (
+            isinstance(nodo, ast.AnnAssign)
+            and isinstance(nodo.target, ast.Name)
+            and isinstance(nodo.value, ast.Constant)
+            and isinstance(nodo.value.value, str)
+        ):
+            constantes[nodo.target.id] = nodo.value.value
+    return constantes
 
 
 def _resolver_str(nodo: ast.AST, constantes: dict[str, str]) -> str | None:
@@ -199,31 +226,58 @@ def _resolver_str(nodo: ast.AST, constantes: dict[str, str]) -> str | None:
     return None
 
 
+_ATRIBUTOS_DB = {"execute", "executemany", "callproc", "query", "commit"}
+
+
 def _llamadas_db(arbol: ast.AST) -> list[ast.Call]:
     """Toda llamada `<algo>.execute(...)`, `.executemany(...)`,
-    `.callproc(...)` o `.commit()` -- las formas DB-API de mandar SQL o de
+    `.callproc(...)`, `.query(...)` (Connection de aiomysql, más bajo nivel
+    que un cursor) o `.commit()` -- las formas DB-API de mandar SQL o de
     confirmar una transacción."""
     return [
         nodo
         for nodo in ast.walk(arbol)
         if isinstance(nodo, ast.Call)
         and isinstance(nodo.func, ast.Attribute)
-        and nodo.func.attr in {"execute", "executemany", "callproc", "commit"}
+        and nodo.func.attr in _ATRIBUTOS_DB
     ]
 
 
-def hallazgos_de_solo_lectura(ruta: Path) -> list[str]:
-    """FAIL-CLOSED (ronda de arreglo 1, revisión): la versión anterior de
-    este detector sólo miraba `.execute(...)` y sólo marcaba lo que SÍ podía
-    resolver -- verificado que un `f"UPDATE capability SET ..."` pasado a
-    `.execute(...)` y un `.executemany("DELETE FROM jacobs_steps", filas)`
-    inyectados en una copia de prueba quedaban SIN marcar (task-13-report.md,
-    Fix round 1). Ahora: cada llamada real tiene que resolver a un SELECT o a
-    una de las tres sentencias de transacción de sólo lectura permitidas;
+def _referencias_no_llamadas_db(arbol: ast.AST) -> list[ast.Attribute]:
+    """Ronda de arreglo 2, hallazgo 2b: cualquier `.execute`/`.executemany`/
+    `.callproc`/`.query`/`.commit` que aparece como Attribute pero NO es el
+    `.func` inmediato de un Call -- p.ej. `ex = cur.execute` guardado para
+    llamarlo después por otro nombre. Fail-closed: no hace falta seguir el
+    alias para saber qué hace con él; la referencia misma es el hallazgo."""
+    ids_de_llamadas = {id(nodo.func) for nodo in _llamadas_db(arbol)}
+    return [
+        nodo
+        for nodo in ast.walk(arbol)
+        if isinstance(nodo, ast.Attribute)
+        and nodo.attr in _ATRIBUTOS_DB
+        and id(nodo) not in ids_de_llamadas
+    ]
+
+
+def _hallazgos_de_arbol(arbol: ast.AST) -> list[str]:
+    """FAIL-CLOSED (ronda de arreglo 1 + 2, revisión). Ronda 1: la primera
+    versión de este detector sólo miraba `.execute(...)` y sólo marcaba lo
+    que SÍ podía resolver -- verificado que un `f"UPDATE capability SET
+    ..."` pasado a `.execute(...)` y un `.executemany("DELETE FROM
+    jacobs_steps", filas)` inyectados en una copia de prueba quedaban SIN
+    marcar (task-13-report.md, Fix round 1). Ronda 2: tres huecos más --
+    (a) `.query(...)` (Connection de aiomysql) no estaba en la lista de
+    formas vigiladas; (b) una referencia guardada en variable (`ex =
+    cur.execute; await ex(...)`) no es un Call(func=Attribute(...)) y
+    quedaba invisible -- se marca la referencia misma, no la llamada
+    posterior; (c) `"SELECT 1; DELETE ..."` empieza con SELECT y pasaba el
+    chequeo de `startswith`, pero es más de una sentencia -- se pela un `;`
+    final único (estilo SQL común) y cualquier `;` que quede adentro es
+    hallazgo. Cada llamada real tiene que resolver a un SELECT (de una sola
+    sentencia) o a una de las tres transacciones de sólo lectura permitidas;
     cualquier argumento no resoluble ESTÁTICAMENTE es un hallazgo (no un
-    permiso); y `.commit()` SIEMPRE es un hallazgo -- una sesión de sólo
+    permiso); `.commit()` SIEMPRE es un hallazgo -- una sesión de sólo
     lectura no tiene nada que confirmar."""
-    arbol = ast.parse(ruta.read_text(encoding="utf-8"))
     constantes = _constantes_de_modulo(arbol)
     hallazgos: list[str] = []
     for nodo in _llamadas_db(arbol):
@@ -238,12 +292,28 @@ def hallazgos_de_solo_lectura(ruta: Path) -> list[str]:
             hallazgos.append(f"línea {nodo.lineno}: {nodo.func.attr}(...) con SQL NO resoluble estáticamente")
             continue
         cuerpo = resuelto.strip()
+        if cuerpo.endswith(";"):
+            cuerpo = cuerpo[:-1].rstrip()  # un ; final unico es estilo, no una segunda sentencia
+        if ";" in cuerpo:
+            hallazgos.append(
+                f"línea {nodo.lineno}: {nodo.func.attr}(...) tiene más de una sentencia (`;`): {cuerpo[:60]!r}"
+            )
+            continue
         if cuerpo.upper() in _PERMITIDAS_EXACTAS or cuerpo.upper().startswith("SELECT"):
             continue
         hallazgos.append(
             f"línea {nodo.lineno}: {nodo.func.attr}(...) no es SELECT ni transacción de sólo lectura permitida: {cuerpo[:60]!r}"
         )
+    for nodo in _referencias_no_llamadas_db(arbol):
+        hallazgos.append(
+            f"línea {nodo.lineno}: referencia a `.{nodo.attr}` que no es una llamada inmediata -- "
+            "no se puede verificar qué hace con ella"
+        )
     return hallazgos
+
+
+def hallazgos_de_solo_lectura(ruta: Path) -> list[str]:
+    return _hallazgos_de_arbol(ast.parse(ruta.read_text(encoding="utf-8")))
 
 
 def test_el_script_es_de_solo_lectura_fail_closed():
@@ -251,6 +321,63 @@ def test_el_script_es_de_solo_lectura_fail_closed():
     assert hallazgos == [], "\n".join(hallazgos)
     arbol = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
     assert _llamadas_db(arbol), "no se encontró ninguna llamada db-api -- el detector no vigila nada"
+
+
+# --- Ronda de arreglo 2: tres huecos del detector, cada uno con un test ---
+# aislado (fuente sintética por `ast.parse`, sin tocar disco) que lo prueba
+# en rojo contra el detector de la ronda 1 y en verde después del arreglo.
+
+
+def test_detecta_conn_query_como_las_demas_llamadas_db():
+    """`.query(...)` es la forma de más bajo nivel de aiomysql.Connection
+    (por debajo de `.execute()` de un cursor) -- el detector de la ronda 1
+    sólo miraba execute/executemany/callproc/commit y la dejaba pasar."""
+    codigo = 'async def f(conn):\n    await conn.query("DELETE FROM jacobs_steps")\n'
+    hallazgos = _hallazgos_de_arbol(ast.parse(codigo))
+    assert hallazgos, "conn.query(...) con DELETE tiene que marcarse"
+
+
+def test_detecta_referencia_no_llamada_a_execute_guardada_en_variable():
+    """`ex = cur.execute` guarda la referencia sin llamarla en el momento --
+    el detector de la ronda 1 sólo miraba Call(func=Attribute(...)), así que
+    una llamada posterior por un Name (`await ex(...)`) quedaba invisible.
+    Fail-closed: se marca la REFERENCIA misma, no hace falta ver la llamada
+    después."""
+    codigo = "async def f(cur):\n    ex = cur.execute\n    await ex(\"DELETE FROM jacobs_steps\")\n"
+    hallazgos = _hallazgos_de_arbol(ast.parse(codigo))
+    assert hallazgos, "una referencia a .execute guardada en una variable tiene que marcarse"
+
+
+def test_detecta_multiples_sentencias_con_punto_y_coma():
+    """`"SELECT 1; DELETE ..."` empieza con SELECT (pasaba el chequeo viejo
+    de `startswith`) pero es más de una sentencia."""
+    codigo = 'async def f(cur):\n    await cur.execute("SELECT 1; DELETE FROM jacobs_steps")\n'
+    hallazgos = _hallazgos_de_arbol(ast.parse(codigo))
+    assert hallazgos, "una sentencia con ; después de un SELECT tiene que marcarse"
+
+
+def test_un_punto_y_coma_final_unico_no_se_marca():
+    """Un `;` final de una única sentencia (estilo SQL común) no es una
+    inyección de una segunda sentencia -- se pela antes de mirar si queda
+    otro `;` adentro."""
+    codigo = 'async def f(cur):\n    await cur.execute("SELECT 1;")\n'
+    assert _hallazgos_de_arbol(ast.parse(codigo)) == []
+
+
+def test_constantes_de_modulo_solo_mira_el_nivel_de_modulo():
+    """Una asignación adentro de una función NO es una constante de módulo,
+    aunque tenga el mismo nombre que una que sí lo es -- si `_resolver_str`
+    la tomara igual, una variable local con el mismo nombre podría pisar (o
+    disfrazar) el valor real que usa una llamada real en otra parte del
+    archivo."""
+    codigo = (
+        'X = "SELECT nivel de modulo"\n\n'
+        "def f():\n"
+        '    X = "UPDATE nivel de funcion -- no es una constante de modulo"\n'
+        "    return X\n"
+    )
+    arbol = ast.parse(codigo)
+    assert _constantes_de_modulo(arbol) == {"X": "SELECT nivel de modulo"}
 
 
 def test_los_update_que_imprime_para_la_migracion_no_se_ejecutan():
@@ -323,3 +450,43 @@ def test_la_conexion_abre_sesion_de_solo_lectura_y_hace_rollback_no_commit(monke
         for s in normalizadas
     )
     assert conexion.cerrada
+
+
+class _CursorQueFalla(_CursorFalso):
+    """Revienta al ejecutar la consulta principal (contiene `jacobs_steps`),
+    para probar que el ROLLBACK corre aunque la SELECT falle (ronda de
+    arreglo 2, observación 3)."""
+
+    async def execute(self, sql, params=None):
+        self.ejecutadas.append(sql)
+        if isinstance(sql, str) and "jacobs_steps" in sql:
+            raise RuntimeError("boom -- SELECT reventada a propósito por el test")
+
+
+def test_rollback_corre_aunque_la_select_falle_y_cierra_despues(monkeypatch):
+    """Antes de esta ronda, `await cur.execute("ROLLBACK")` vivía DESPUÉS de
+    la consulta principal en el cuerpo del `try`, así que una excepción ahí
+    lo salteaba: la sesión de sólo lectura quedaba abierta en el servidor
+    real. Ahora el ROLLBACK está en un `finally` propio, adentro del cursor,
+    y `conn.close()` sigue viniendo DESPUÉS (finally exterior) -- la
+    excepción original se relanza sin que ninguna limpieza se salte."""
+    import jacobs.store as store
+    from medir_min_output_tokens import _maximos_http_directo
+
+    conexion = _ConexionFalsa()
+    conexion.cursor_falso = _CursorQueFalla()
+
+    async def _get_conn_falso(*a, **kw):
+        return conexion
+
+    monkeypatch.setattr(store, "get_conn", _get_conn_falso)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(_maximos_http_directo())
+
+    normalizadas = [
+        s.strip().upper() if isinstance(s, str) else s for s in conexion.cursor_falso.ejecutadas
+    ]
+    assert "ROLLBACK" in normalizadas
+    assert normalizadas[-1] == "ROLLBACK", "el ROLLBACK tiene que ser lo último que se ejecuta, aun con la SELECT rota"
+    assert conexion.cerrada, "conn.close() tiene que correr DESPUÉS del ROLLBACK, incluso si la consulta reventó"
