@@ -77,8 +77,10 @@ export default function () {
   else if (limite) limiteParalelo.add(1);
   else if (r.status === 403) rechazosToken.add(1);
   check(r, {
+    // El 422 del limite paralelo se cuenta aparte (limite_paralelo) en los TRES
+    // escenarios: no es un fallo del camino del token.
     'respuesta esperada': (res) => (ESCENARIO === 'inventado'
-      ? res.status === 403
+      ? res.status === 403 || limite
       : res.status === 200 || limite),
   });
 }

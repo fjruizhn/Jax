@@ -223,8 +223,12 @@ jobs:
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
           #   hace de Ada. Vistos en rojo contra master; carrera, EXPLAIN, orden del
           #   kill switch y enmienda del paso validados por mutacion.
-          grep -qE "^31 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 31 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 31 -> 34 el 2026-09-16 (revision final del frente F): +3 por la ruta --
+          #   error tras consumir deja SUBPIPELINE_RECHAZADO fase=creacion y relanza el
+          #   original (I-2), el hijo hereda la identidad del padre y un cuerpo con otra
+          #   identidad es 403 sin quemar el token (I-3). Los tres vistos en rojo.
+          grep -qE "^34 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 34 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -1118,6 +1122,11 @@ jobs:
           #   (3.14), dos corridas, sin checkout de plataforma: "1108 passed, 1 skipped,
           #   1 xfailed, 16 subtests passed". Si el runner da otro numero, manda el runner.
           # 742 -> 760 el 2026-09-16 (frente F): test_subpipeline_contrato_puro.py (+18) -- forma del pedido por rol, validate_create sin profundidad del llamador, /plan sin ada, config con rango validada al arrancar, motivos de emision/consumo, hijo frenado por el kill switch, sin ruta HTTP de emision. 8 vistos en rojo contra master; 2 guardas validadas por mutacion. Medido en local (3.14): 761 passed, 1 xfailed; FALTA confirmarlo en el runner.
+          # 760 -> 761 el 2026-09-16 (revision final del frente F, I-1): +1 en
+          #   test_subpipeline_contrato_puro.py -- POST /jacobs/pipeline por TestClient con
+          #   token y forma invalida -> 422 sin el token en el cuerpo (Pydantic lo eco-eaba
+          #   en `input`). Visto en rojo. Medido en local (3.14): 762 passed, 1 xfailed;
+          #   FALTA confirmarlo en el runner.
           grep -qE "^1108 passed, 1 skipped" /tmp/out || {
             echo "PISO ROTO: se esperaban 1108 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
