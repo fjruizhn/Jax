@@ -792,6 +792,7 @@ jobs:
           tests/test_respaldo_de_uso_aislado.py
           tests/test_frente_e_retiros.py
           tests/test_credencial_sin_fallback_env.py
+          tests/test_retiro_de_la_voz.py
           tests/test_max_steps_una_sola_constante.py
           tests/test_plan_facetas_de_la_tabla.py
           tests/test_espejos_symlink_frente_e.py
@@ -893,6 +894,7 @@ jobs:
             tests/test_respaldo_de_uso_aislado.py \
             tests/test_frente_e_retiros.py \
             tests/test_credencial_sin_fallback_env.py \
+            tests/test_retiro_de_la_voz.py \
             tests/test_max_steps_una_sola_constante.py \
             tests/test_plan_facetas_de_la_tabla.py \
             tests/test_espejos_symlink_frente_e.py \
@@ -1441,20 +1443,18 @@ jobs:
           #   sube con la que espera y vuelve a cero al soltar). El test del freno mientras espera el carril
           #   dejó de dormir 0,3 s y espera ese estado: era rojo intermitente en CI (RemoteProtocolError) con
           #   el runner lento. Corrido 5 veces seguidas en verde. Si el runner da otro numero, manda el runner.
-          # 1598 -> 1601 el 2026-09-17 (B1.4 cerrado: se retira el fallback a
-          #   variables de entorno): las DOS listas suman
-          #   tests/test_credencial_sin_fallback_env.py (3: sin credencial en la DB
-          #   y con la env var presente el consumidor falla cerrado; el mapa
-          #   proveedor->env var y la funcion instrumentada ya no existen en el
-          #   modulo; ningun consumidor del arbol las nombra). LOS TRES VISTOS EN
-          #   ROJO contra origin/master 351ec95 -- el primero con la linea
-          #   `source=env_fallback` en el log capturado, que es exactamente el
-          #   fail-open que se retira. MEDIDO en local (3.14), env -i, sin
-          #   JAX_DB_HOST y JAX_PLATFORM_REPO_ROOT a una ruta que no existe, las DOS
-          #   listas: "1601 passed, 1 skipped, 1 xfailed, 16 subtests passed".
-          #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1601 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1601 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1598 -> 1603 el 2026-09-17. Dos ramas del mismo dia, sumadas al
+          #   rebasear: +3 de B1.4 (tests/test_credencial_sin_fallback_env.py,
+          #   los tres vistos en ROJO contra 351ec95, el primero con la linea
+          #   `source=env_fallback` en el log capturado) y +2 netos del RETIRO de
+          #   la voz (-1 por test_config_entorno.py::test_la_voz_toma_el_python_de_
+          #   kokoro_del_entorno, que describia una variable que ya no existe, +3
+          #   por tests/test_retiro_de_la_voz.py). Bajar un piso solo se justifica
+          #   cuando se retira funcionalidad y se dice; aca ni siquiera baja.
+          #   Los dos archivos entran a las DOS listas. Si el runner da otro
+          #   numero, manda el runner.
+          grep -qE "^1603 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1603 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

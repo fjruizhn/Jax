@@ -148,19 +148,8 @@ def test_sin_url_del_catalogo_el_musculo_http_no_despacha(proveedor, metodo):
     assert "catálogo" in str(e.value)
 
 
-def test_la_voz_toma_el_python_de_kokoro_del_entorno(monkeypatch):
-    from jax.core.config_entorno import EntornoInvalido
-    from jax.voice import tts
-    assert not hasattr(tts, "KOKORO_PYTHON")
-    monkeypatch.delenv("JAX_KOKORO_PYTHON", raising=False)
-    with pytest.raises(EntornoInvalido):
-        tts._python_de_kokoro()
-    monkeypatch.setenv("JAX_KOKORO_PYTHON", "/opt/voz/bin/python")
-    assert tts._python_de_kokoro() == Path("/opt/voz/bin/python")
-
-
 _SIN_URLS_LITERALES = ("jacobs/executor.py", "jacobs/plan.py", "jax/memory/db.py",
-                       "jax/muscles/base.py", "jax/muscles/ollama_muscle.py", "jax/voice/tts.py")
+                       "jax/muscles/base.py", "jax/muscles/ollama_muscle.py")
 
 
 def _urls_literales(fuente: str) -> list[int]:
