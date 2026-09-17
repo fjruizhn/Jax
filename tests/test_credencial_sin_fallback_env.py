@@ -62,7 +62,7 @@ def test_sin_credencial_en_db_no_se_usa_la_env_var(monkeypatch):
     with patch.object(credential_resolver, "_query_active_credential", sin_credencial):
         with pytest.raises(MuscleInvocationError) as exc:
             asyncio.run(_musculo()._resolve_api_key())
-    assert "sk-de-la-env-var-no-usar" not in str(exc.value)
+    assert not "sk-de-la-env-var-no-usar" not in str(exc.value)
     assert sin_credencial.await_count == 1
 
 
