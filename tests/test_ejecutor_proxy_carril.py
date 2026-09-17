@@ -129,7 +129,7 @@ class Upstream:
 class Proxy:
     def __init__(self, upstream_url, raiz, tope_s):
         self.cfg = Config(upstream=upstream_url, raiz=raiz, tope_s=tope_s,
-                          host="127.0.0.1", puerto=0)
+                          host="127.0.0.1", puerto=0, registro=raiz / "registro.jsonl")
 
     async def __aenter__(self):
         self.server = await arrancar(self.cfg)
@@ -387,6 +387,7 @@ _ENTORNO = {
     "JAX_PROXY_CARRIL_RAIZ": "/srv/ejemplo/locks",
     "JAX_PROXY_CARRIL_TOPE_S": "120",
     "JAX_PROXY_CARRIL_PUERTO": "8199",
+    "JAX_EJECUTOR_REGISTRO": "/var/log/jax-ejecutor/registro.jsonl",
 }
 
 
@@ -395,6 +396,7 @@ def test_config_sale_del_entorno_sin_upstream_hardcodeado():
     assert cfg.upstream == "http://ollama.invalid:9"
     assert (str(cfg.raiz), cfg.tope_s, cfg.puerto) == ("/srv/ejemplo/locks", 120.0, 8199)
     assert cfg.host == "127.0.0.1", "sin HOST, sólo loopback: el proxy no autentica"
+    assert str(cfg.registro) == "/var/log/jax-ejecutor/registro.jsonl"
 
 
 @pytest.mark.parametrize("variable", sorted(_ENTORNO))
@@ -408,6 +410,7 @@ def test_config_sin_una_obligatoria_falla_cerrado(variable):
 @pytest.mark.parametrize("variable,valor", [
     ("JAX_PROXY_CARRIL_TOPE_S", "mucho"), ("JAX_PROXY_CARRIL_TOPE_S", "-1"),
     ("JAX_PROXY_CARRIL_PUERTO", "8199.5"), ("JAX_PROXY_CARRIL_UPSTREAM", "ollama:11434"),
+    ("JAX_EJECUTOR_REGISTRO", "relativa/registro.jsonl"),
 ])
 def test_config_invalida_falla_cerrado(variable, valor):
     with pytest.raises(ConfigInvalida) as err:

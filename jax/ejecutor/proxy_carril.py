@@ -35,12 +35,20 @@ Configuración (sin defaults para lo que decide a dónde va el tráfico):
   JAX_PROXY_CARRIL_PUERTO     puerto de escucha (obligatoria)
   JAX_PROXY_CARRIL_HOST       dirección de escucha (opcional; por omisión sólo
                               loopback, por seguridad: el proxy no autentica)
+  JAX_EJECUTOR_REGISTRO       registro de C3 (obligatoria, ruta absoluta): sin
+                              registro no hay proxy, sin proxy no hay cerebro
+
+C3 (registro intocable, decisión D-SP1-2 del índice de SP1): cada `tool_use` que
+el cerebro pide se anota en el registro ANTES de reenviar el trozo que lo completa,
+y cada `tool_result` nuevo de una petición, ANTES de subirla al upstream. Si no se
+puede anotar, o lo que pasa no se puede leer, se corta: la herramienta nunca llega.
 
 Corre con:  python -m jax.ejecutor.proxy_carril
 """
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import os
@@ -52,6 +60,8 @@ import httpx
 
 from jax.core.cliente_http_compartido import crear_cliente_http
 from jax.ejecutor.cita import Motivo
+from jax.ejecutor.contratos import lectura
+from jax.ejecutor.contratos.registro import Registro
 from jax.ejecutor.prioridad import ESPERA_AGOTADA, EsperaAgotada, carril_ejecutor_async
 
 log = logging.getLogger(__name__)
@@ -60,15 +70,19 @@ UPSTREAM_INALCANZABLE = "upstream_inalcanzable"
 PETICION_INVALIDA = "peticion_invalida"
 CONFIG_FALTA = "config_falta"
 CONFIG_INVALIDA = "config_invalida"
+REGISTRO_FALLO = "registro_fallo"
+REGISTRO_ILEGIBLE = "registro_ilegible"
+_RESULTADOS_RECORDADOS = 10000
 
 _HOST_POR_OMISION = "127.0.0.1"
 _LEER_BYTES = 65536
 
-#: Cabeceras de salto (RFC 9110 §7.6.1) y las que el proxy recalcula.
+#: Cabeceras de salto (RFC 9110 §7.6.1) y las que el proxy recalcula. `accept-encoding`
+#: lo pone SIEMPRE el proxy en `identity`: un cuerpo comprimido no se puede leer al pasar.
 _NO_REENVIAR = frozenset({
     b"connection", b"keep-alive", b"proxy-connection", b"proxy-authenticate",
     b"proxy-authorization", b"te", b"trailer", b"transfer-encoding", b"upgrade",
-    b"host", b"content-length",
+    b"host", b"content-length", b"accept-encoding",
 })
 _NO_DEVOLVER = _NO_REENVIAR - {b"content-length"}
 
@@ -87,6 +101,7 @@ class Config:
     tope_s: float
     host: str
     puerto: int
+    registro: Path
 
 
 def config_desde_entorno(env=None) -> Config:
@@ -111,12 +126,16 @@ def config_desde_entorno(env=None) -> Config:
     upstream = obligatoria("JAX_PROXY_CARRIL_UPSTREAM")
     if not upstream.startswith(("http://", "https://")):
         raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_PROXY_CARRIL_UPSTREAM"),)))
+    registro = Path(obligatoria("JAX_EJECUTOR_REGISTRO"))
+    if not registro.is_absolute():
+        raise ConfigInvalida(Motivo(CONFIG_INVALIDA, (("variable", "JAX_EJECUTOR_REGISTRO"),)))
     return Config(
         upstream=upstream.rstrip("/"),
         raiz=Path(obligatoria("JAX_PROXY_CARRIL_RAIZ")),
         tope_s=numero("JAX_PROXY_CARRIL_TOPE_S", float),
         host=env.get("JAX_PROXY_CARRIL_HOST", "").strip() or _HOST_POR_OMISION,
         puerto=numero("JAX_PROXY_CARRIL_PUERTO", int),
+        registro=registro,
     )
 
 
@@ -168,15 +187,18 @@ def _ruta_sin_query(destino: bytes) -> str:
 
 
 class _Proxy:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, registro: Registro) -> None:
         self.cfg = cfg
+        self.registro = registro
+        # tool_use_id ya anotados como resultado: la historia se repite entera en cada
+        # petición (medido con el arnés 2.1.273), cada resultado se anota una vez.
+        self._resultados_anotados: collections.OrderedDict = collections.OrderedDict()
         # Un cliente propio del proxy (pool de conexiones), no uno por petición:
         # vive lo que vive el servidor y se cierra en `cerrar()`. Se construye con
         # crear_cliente_http() (E-24, el único constructor del árbol de servicio)
         # y no con obtener_cliente_http(): cerrar el del proceso al apagar el
         # proxy cerraría el de cualquier otro usuario del mismo loop.
         self.cliente = crear_cliente_http()
-
     async def cerrar(self) -> None:
         await self.cliente.aclose()
 
@@ -210,12 +232,39 @@ class _Proxy:
         finally:
             await _cerrar(writer)
 
+    async def _anotar(self, evento: dict) -> None:
+        # write + fsync bloquean: fuera del event loop.
+        await asyncio.to_thread(self.registro.anotar, evento)
+
+    async def _anotar_resultados(self, ruta: str, cuerpo: bytes) -> None:
+        resultados = lectura.resultados_de_peticion(cuerpo)
+        if resultados is None:
+            await self._anotar({"evento": "peticion_ilegible", "ruta": ruta})
+            return
+        for r in resultados:
+            if r.tool_use_id in self._resultados_anotados:
+                continue
+            await self._anotar(lectura.evento_de_resultado(r, ruta))
+            self._resultados_anotados[r.tool_use_id] = None
+            while len(self._resultados_anotados) > _RESULTADOS_RECORDADOS:
+                self._resultados_anotados.popitem(last=False)
+
     async def _reenviar(self, conn, writer, peticion: h11.Request, cuerpo: bytes) -> None:
         metodo = peticion.method.decode("latin-1")
         ruta = _ruta_sin_query(peticion.target)
+        de_mensajes = metodo == "POST" and ruta.endswith("/messages")
+        if de_mensajes:
+            try:
+                await self._anotar_resultados(ruta, cuerpo)
+            except OSError as exc:
+                # Un resultado sin anotar no sube al cerebro.
+                log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
+                await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO))
+                return
         try:
             async with carril_ejecutor_async(self.cfg.raiz, self.cfg.tope_s):
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
+                cabeceras.append((b"accept-encoding", b"identity"))
                 solicitud = self.cliente.build_request(
                     metodo, self.cfg.upstream + peticion.target.decode("latin-1"),
                     headers=cabeceras, content=cuerpo,
@@ -231,26 +280,7 @@ class _Proxy:
                     await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE))
                     return
                 try:
-                    devolver = [(k, v) for k, v in respuesta.headers.raw
-                                if k.lower() not in _NO_DEVOLVER]
-                    devolver.append((b"connection", b"close"))
-                    await _enviar(conn, writer, h11.Response(
-                        status_code=respuesta.status_code, headers=devolver,
-                        reason=respuesta.reason_phrase.encode("latin-1")))
-                    log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d",
-                             metodo, ruta, respuesta.status_code)
-                    try:
-                        async for trozo in respuesta.aiter_raw():
-                            await _enviar(conn, writer, h11.Data(data=trozo))
-                    except httpx.HTTPError as exc:
-                        # Las cabeceras ya salieron: no hay estado que cambiar. Se
-                        # corta la conexión SIN cerrar el mensaje, para que el
-                        # cliente vea un stream truncado y no uno completo.
-                        log.warning("proxy_carril upstream_cortado metodo=%s ruta=%s tipo=%s",
-                                    metodo, ruta, type(exc).__name__)
-                        writer.transport.abort()
-                        return
-                    await _enviar(conn, writer, h11.EndOfMessage())
+                    await self._devolver(conn, writer, respuesta, metodo, ruta, de_mensajes)
                 finally:
                     await respuesta.aclose()
         except EsperaAgotada as exc:
@@ -260,6 +290,67 @@ class _Proxy:
             # Reintentar un 503 del carril sería colarse en cuotas.
             await _responder_error(conn, writer, 503, motivo,
                                    extra=((b"x-should-retry", b"false"),))
+
+    async def _devolver(self, conn, writer, respuesta, metodo: str, ruta: str, de_mensajes: bool) -> None:
+        codificacion = respuesta.headers.get("content-encoding", "identity").strip().lower()
+        if codificacion not in ("", "identity"):
+            log.error("proxy_carril %s metodo=%s ruta=%s codificacion=%s", REGISTRO_ILEGIBLE, metodo, ruta, codificacion)
+            await _responder_error(conn, writer, 502, Motivo(REGISTRO_ILEGIBLE))
+            return
+        devolver = [(k, v) for k, v in respuesta.headers.raw if k.lower() not in _NO_DEVOLVER]
+        devolver.append((b"connection", b"close"))
+        inicio = h11.Response(status_code=respuesta.status_code, headers=devolver,
+                              reason=respuesta.reason_phrase.encode("latin-1"))
+        es_sse = respuesta.headers.get("content-type", "").startswith("text/event-stream")
+        if not es_sse:
+            # Un cuerpo entero se lee ANTES de entregarlo: un tool_use dentro no sale sin anotar.
+            try:
+                crudo = b"".join([trozo async for trozo in respuesta.aiter_raw()])
+            except httpx.HTTPError as exc:
+                log.warning("proxy_carril upstream_cortado metodo=%s ruta=%s tipo=%s", metodo, ruta, type(exc).__name__)
+                await _responder_error(conn, writer, 502, Motivo(UPSTREAM_INALCANZABLE))
+                return
+            if de_mensajes:
+                pedidas = lectura.herramientas_de_mensaje(crudo)
+                if pedidas is None and 200 <= respuesta.status_code < 300:
+                    # El arnés decide si es stream por lo que pidió, no por el content-type:
+                    # lo que el proxy no puede leer, no se entrega.
+                    log.error("proxy_carril %s metodo=%s ruta=%s", REGISTRO_ILEGIBLE, metodo, ruta)
+                    await _responder_error(conn, writer, 502, Motivo(REGISTRO_ILEGIBLE))
+                    return
+                try:
+                    for pedida in pedidas or []:
+                        await self._anotar(lectura.evento_de_pedida(pedida, ruta))
+                except OSError as exc:
+                    log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
+                    await _responder_error(conn, writer, 502, Motivo(REGISTRO_FALLO))
+                    return
+            await _enviar(conn, writer, inicio)
+            log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)
+            await _enviar(conn, writer, h11.Data(data=crudo))
+            await _enviar(conn, writer, h11.EndOfMessage())
+            return
+        await _enviar(conn, writer, inicio)
+        log.info("proxy_carril peticion metodo=%s ruta=%s estado=%d", metodo, ruta, respuesta.status_code)
+        lector = lectura.LectorSSE()
+        try:
+            async for trozo in respuesta.aiter_raw():
+                try:
+                    for pedida in lector.alimentar(trozo):
+                        await self._anotar(lectura.evento_de_pedida(pedida, ruta))
+                except OSError as exc:
+                    # El trozo que completa el tool_use NO sale: el arnés ve un stream cortado.
+                    log.error("proxy_carril %s metodo=%s ruta=%s tipo=%s", REGISTRO_FALLO, metodo, ruta, type(exc).__name__)
+                    writer.transport.abort()
+                    return
+                await _enviar(conn, writer, h11.Data(data=trozo))
+        except httpx.HTTPError as exc:
+            # Las cabeceras ya salieron: no hay estado que cambiar. Se corta la conexión
+            # SIN cerrar el mensaje, para que el cliente vea un stream truncado.
+            log.warning("proxy_carril upstream_cortado metodo=%s ruta=%s tipo=%s", metodo, ruta, type(exc).__name__)
+            writer.transport.abort()
+            return
+        await _enviar(conn, writer, h11.EndOfMessage())
 
 
 async def _cerrar(writer: asyncio.StreamWriter) -> None:
@@ -295,6 +386,7 @@ class Servidor:
     async def wait_closed(self) -> None:
         await self._servidor.wait_closed()
         await self._proxy.cerrar()
+        self._proxy.registro.cerrar()
 
     async def serve_forever(self) -> None:
         try:
@@ -305,8 +397,15 @@ class Servidor:
 
 
 async def arrancar(cfg: Config) -> Servidor:
-    proxy = _Proxy(cfg)
-    servidor = await asyncio.start_server(proxy.atender, cfg.host, cfg.puerto)
+    # Un registro que no cuadra NO se abre (RegistroCorrupto): sin registro no hay cerebro.
+    registro = await asyncio.to_thread(Registro, cfg.registro)
+    try:
+        await asyncio.to_thread(registro.anotar, {"evento": "registro_abierto", "pid": os.getpid()})
+        proxy = _Proxy(cfg, registro)
+        servidor = await asyncio.start_server(proxy.atender, cfg.host, cfg.puerto)
+    except BaseException:
+        registro.cerrar()
+        raise
     return Servidor(servidor, proxy)
 
 
