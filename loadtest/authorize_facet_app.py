@@ -29,6 +29,13 @@ from motor_registry.routes import router  # noqa: E402
 app = FastAPI(title="carga-authorize-facet")
 app.include_router(router)
 
+# Mismo middleware que LAS MANOS (auth_servicio.proteger): lee las credenciales
+# JAX_LAS_MANOS_CREDENCIAL_* del entorno y falla cerrado si faltan. k6 manda
+# la de plataforma en __ENV.CREDENCIAL.
+from auth_servicio import proteger  # noqa: E402
+
+proteger(app)
+
 
 @app.on_event("shutdown")
 async def _cerrar() -> None:

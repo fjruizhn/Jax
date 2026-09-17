@@ -6,16 +6,25 @@
 // antes de CADA turno de la Mesa web a un facet HTTP: una consulta a
 // `facet.allowed_callers` por pedido.
 //
-// Alterna un caller autorizado (200 allowed=true) y uno que no (200
-// allowed=false): los dos caminos leen la misma fila, los dos cuentan.
+// Rota tres caminos: facet permitido (200 allowed=true), facet sin
+// allowed_callers (200 allowed=false, fail-closed) y un caller que la
+// credencial de la plataforma no puede declarar (403 del middleware de
+// auth_servicio, sin llegar a la base). Desde 2026-09-17 el caller ajeno ya no
+// llega a la ruta: lo corta el middleware.
 //
-// USO:  k6 run -e VUS=25 loadtest/authorize_facet.js
+// USO:  CREDENCIAL=<JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA de la app> k6 run -e VUS=25 loadtest/authorize_facet.js
 
 import http from 'k6/http';
 import { check } from 'k6';
 
+// El 403 del caller ajeno es la respuesta correcta, no una falla del servicio.
+http.setResponseCallback(http.expectedStatuses(200, 403));
+
 const BASE = __ENV.BASE || 'http://127.0.0.1:7798';
 const VUS = parseInt(__ENV.VUS || '25', 10);
+// Credencial de servicio (las_manos/auth_servicio.py): sin ella LAS MANOS responde 401.
+const CREDENCIAL = __ENV.CREDENCIAL || '';
+if (!CREDENCIAL) throw new Error('falta CREDENCIAL (JAX_LAS_MANOS_CREDENCIAL_* de la app de carga)');
 
 export const options = {
   stages: [
@@ -31,12 +40,15 @@ export const options = {
 };
 
 export default function () {
-  const autorizado = __ITER % 2 === 0;
-  const caller = autorizado ? 'jax_platform_chat' : 'caller_de_carga_no_autorizado';
+  const camino = __ITER % 3;
+  const caller = camino === 2 ? 'caller_de_carga_no_autorizado' : 'jax_platform_chat';
+  const facet = camino === 1 ? 'hyde' : 'hipatia';
   const r = http.post(`${BASE}/motor/authorize-facet`,
-    JSON.stringify({ caller, facet: 'hipatia' }),
-    { headers: { 'Content-Type': 'application/json' } });
+    JSON.stringify({ caller, facet }),
+    { headers: { 'Content-Type': 'application/json', 'X-Jax-Credencial-Servicio': CREDENCIAL } });
   check(r, {
-    'veredicto correcto': (res) => res.status === 200 && res.json('allowed') === autorizado,
+    'veredicto correcto': (res) => (camino === 2
+      ? res.status === 403
+      : res.status === 200 && res.json('allowed') === (camino === 0)),
   });
 }

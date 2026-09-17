@@ -777,6 +777,7 @@ jobs:
           tests/test_ejecutor_vigia_servicio.py
           tests/test_ejecutor_fase0_retirada.py
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
+          tests/test_loadtest_apps_protegidas.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -874,6 +875,7 @@ jobs:
             tests/test_ejecutor_vigia_servicio.py \
             tests/test_ejecutor_fase0_retirada.py \
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
+            tests/test_loadtest_apps_protegidas.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -1368,8 +1370,13 @@ jobs:
           #   invertidas -> 1; tope inválido aceptado -> 4. MEDIDO en local (3.14), env -i, sin JAX_DB_HOST y
           #   JAX_PLATFORM_REPO_ROOT inexistente, las DOS listas: "1564 passed, 1 skipped, 1 xfailed, 16 subtests
           #   passed". Si el runner da otro numero, manda el runner.
-          grep -qE "^1564 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1564 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1564 -> 1566 el 2026-09-17 (cierre de deuda: apps de carga con credencial de servicio): las DOS
+          #   listas suman tests/test_loadtest_apps_protegidas.py (2: el glob encuentra apps; toda
+          #   loadtest/*_app.py que construye FastAPI llama proteger(app)). Visto en rojo antes del arreglo;
+          #   mutación (cmp previo, PYTHONDONTWRITEBYTECODE=1): quitar proteger(app) de authorize_facet_app -> 1 rojo.
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^1566 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1566 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
