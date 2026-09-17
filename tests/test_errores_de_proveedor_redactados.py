@@ -30,7 +30,19 @@ CUERPO_CON_BEARER = "p" * 170 + "Authorization: Bearer tok-FAKE-e16-0123456789 f
 
 
 def _cuerpos_recortados(fuente: str) -> list[int]:
-    """Líneas con `X.text[:N]` o `body[:N]` (body = await resp.aread())."""
+    """Líneas con `X.text[:N]` o `body[:N]` (body = await resp.aread()).
+
+    LÍMITES (lo que este detector NO ve; un cuerpo recortado por cualquiera de
+    estas formas pasa en verde sin redactar):
+    - `X.content[:N]` (bytes en vez de `.text`);
+    - un cuerpo leído con `read()` síncrono, o con `aread()` sin asignar a un
+      nombre (`(await resp.aread())[:N]`);
+    - recortes inline sobre otra expresión (`resp.text.strip()[:N]`,
+      `f"{resp.text}"[:N]`, `str(resp.json())[:N]`);
+    - nombres con alias (`t = resp.text; t[:N]`, o el resultado de `aread()`
+      reasignado a otro nombre).
+    Cubre la forma que tenían los sitios reales al 2026-09-16; un sitio nuevo
+    con otra forma se revisa a mano en la revisión de código."""
     lineas = set()
     for funcion in ast.walk(ast.parse(fuente)):
         if not isinstance(funcion, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -118,7 +130,7 @@ class JacobsTest(unittest.IsolatedAsyncioTestCase):
              patch.object(plan, "limite_de_salida", AsyncMock(return_value={"max_tokens": 10})), \
              self.assertLogs("jacobs.plan", level="ERROR") as logs:
             with self.assertRaises(plan.CerebroNoDisponible) as ctx:
-                await plan.PlanBuilder()._ada_plan("objetivo", 3)
+                await plan.PlanBuilder()._ada_plan("objetivo", 3, facetas_activas=frozenset({"ada", "thot"}))
         self.assertIn("Ada HTTP 400", str(ctx.exception))
         self.assertNotIn(SECRETO[:8], str(ctx.exception))
         self.assertNotIn(SECRETO[:8], "\n".join(logs.output))

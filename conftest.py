@@ -53,11 +53,13 @@ os.environ["JAX_USAGE_SPOOL_DIR"] = tempfile.mkdtemp(prefix="jax-test-respaldo-u
 
 #: E-21 (2026-09-16): jacobs/executor.py y plan.py leen LAS_MANOS_URL y
 #: JAX_OLLAMA_URL al importarse y NO arrancan sin ellas (fail-closed). Se fijan
-#: acá, antes de cualquier import, con los mismos valores que producción: los
-#: tests no salen a la red (cada uno parchea el transporte), así que el valor
-#: solo tiene que ser una URL válida y estable para las aserciones de ruta.
-os.environ["LAS_MANOS_URL"] = "http://127.0.0.1:7777"
-os.environ["JAX_OLLAMA_URL"] = "http://localhost:11434"
+#: acá, antes de cualquier import. NO con los valores de producción: un test
+#: que olvide parchear el transporte le pegaría a LAS MANOS o al Ollama vivos.
+#: El dominio `.invalid` (RFC 6761) nunca resuelve, así que ese olvido falla con
+#: un error de DNS; el valor sigue siendo una URL válida y estable para las
+#: aserciones de ruta. tests/test_config_entorno.py lo vigila.
+os.environ["LAS_MANOS_URL"] = "http://las-manos.invalid:7777"
+os.environ["JAX_OLLAMA_URL"] = "http://ollama.invalid:11434"
 
 #: E-22 (2026-09-16): el .md de cortesía de cada step se escribe en
 #: $JAX_REPO_BASE/documents. En producción es /home/fruiz/jax/repo, que el

@@ -34,11 +34,21 @@ def _valor(nombre: str) -> str:
 
 
 def url_requerida(nombre: str) -> str:
-    """URL http(s) con host, sin barra final."""
+    """URL BASE http(s) con host, sin barra final.
+
+    Base quiere decir sin path (más allá de "/"), sin query y sin fragmento:
+    todos los que la usan (LAS_MANOS_URL, JAX_OLLAMA_URL) le agregan la ruta
+    ellos mismos, así que JAX_OLLAMA_URL=http://host:11434/v1 terminaría en
+    /v1/api/chat. Si algún día una variable necesita un path, se agrega un
+    parámetro; no se afloja esta regla."""
     valor = _valor(nombre)
     partes = urlsplit(valor)
     if partes.scheme not in ("http", "https") or not partes.hostname:
         raise EntornoInvalido(f"{nombre}={valor!r} no es una URL http(s) con host.")
+    if partes.path not in ("", "/") or partes.query or partes.fragment:
+        raise EntornoInvalido(
+            f"{nombre}={valor!r} tiene que ser una URL base (esquema y host, sin path, query ni fragmento)."
+        )
     return valor.rstrip("/")
 
 

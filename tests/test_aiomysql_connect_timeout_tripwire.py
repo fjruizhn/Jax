@@ -62,7 +62,9 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import ast
+import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -95,8 +97,8 @@ def _excluido(path: Path) -> bool:
     return False
 
 
-def _archivos_py():
-    for p in RAIZ.rglob("*.py"):
+def _archivos_py(raiz: Path = RAIZ):
+    for p in raiz.rglob("*.py"):
         if _excluido(p):
             continue
         yield p
@@ -182,12 +184,12 @@ def _funcion_vigilada(nodo_func: ast.expr, alias_modulo: set[str],
     return None
 
 
-def _hallazgos_en(path: Path) -> list[str]:
+def _hallazgos_en(path: Path, raiz: Path = RAIZ) -> list[str]:
     fuente = path.read_text(encoding="utf-8", errors="replace")
     try:
         arbol = ast.parse(fuente)
     except SyntaxError:
-        rel = str(path.relative_to(RAIZ))
+        rel = str(path.relative_to(raiz))
         if rel in _NO_PARSEA:
             return []
         return [
@@ -211,8 +213,19 @@ def _hallazgos_en(path: Path) -> list[str]:
             nombre = forma
         tiene_timeout = any(kw.arg == "connect_timeout" for kw in nodo.keywords)
         if not tiene_timeout:
-            encontrados.append(f"{path.relative_to(RAIZ)}:{nodo.lineno}: {nombre}() sin connect_timeout")
+            encontrados.append(f"{path.relative_to(raiz)}:{nodo.lineno}: {nombre}() sin connect_timeout")
     return encontrados
+
+
+@contextmanager
+def _temporal_fuera_del_checkout():
+    """Un .py sintético para los controles, dentro de un directorio temporal
+    FUERA del checkout: una corrida matada o dos en paralelo no dejan un
+    archivo roto a la vista del escaneo del árbol completo. Se escanea con
+    `_hallazgos_en(ruta, ruta.parent)`."""
+    with tempfile.TemporaryDirectory(prefix="jax-tripwire-") as directorio:
+        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=directorio, delete=True) as fh:
+            yield fh
 
 
 class AiomysqlConnectTimeoutTripwireTest(unittest.TestCase):
@@ -231,32 +244,30 @@ class AiomysqlConnectTimeoutTripwireTest(unittest.TestCase):
         """El freno se ejercita: si el detector no atrapa un caso obvio, el
         verde del test de arriba no significa nada (un control que no falla
         no valida nada)."""
-        import tempfile
         codigo = (
             "import aiomysql\n"
             "async def f():\n"
             "    return await aiomysql.connect(host='x', port=3306)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"el detector no vio el sitio sin connect_timeout: {hallazgos}")
 
     def test_el_detector_reconoce_un_create_pool_sin_connect_timeout(self):
         """Mismo control que arriba, para la otra forma vigilada
         (create_pool) -- connect() y create_pool() son detectores
         independientes en el código, así que uno solo no prueba el otro."""
-        import tempfile
         codigo = (
             "import aiomysql\n"
             "async def f():\n"
             "    return await aiomysql.create_pool(host='x', port=3306, minsize=1, maxsize=5)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"el detector no vio el create_pool sin connect_timeout: {hallazgos}")
 
     # -----------------------------------------------------------------
@@ -266,87 +277,80 @@ class AiomysqlConnectTimeoutTripwireTest(unittest.TestCase):
     # -----------------------------------------------------------------
 
     def test_el_detector_ve_from_aiomysql_import_connect_sin_alias(self):
-        import tempfile
         codigo = (
             "from aiomysql import connect\n"
             "async def f():\n"
             "    return await connect(host='x', port=3306)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"no vio `from aiomysql import connect` + connect(): {hallazgos}")
 
     def test_el_detector_ve_from_aiomysql_import_connect_con_alias(self):
-        import tempfile
         codigo = (
             "from aiomysql import connect as c\n"
             "async def f():\n"
             "    return await c(host='x', port=3306)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"no vio `from aiomysql import connect as c` + c(): {hallazgos}")
 
     def test_el_detector_ve_from_aiomysql_import_create_pool(self):
-        import tempfile
         codigo = (
             "from aiomysql import create_pool\n"
             "async def f():\n"
             "    return await create_pool(host='x', port=3306, minsize=1)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"no vio `from aiomysql import create_pool`: {hallazgos}")
 
     def test_el_detector_ve_import_aiomysql_as_alias(self):
-        import tempfile
         codigo = (
             "import aiomysql as db\n"
             "async def f():\n"
             "    return await db.connect(host='x', port=3306)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"no vio `import aiomysql as db` + db.connect(): {hallazgos}")
 
     def test_el_detector_ve_aiomysql_pool_create_pool(self):
-        import tempfile
         codigo = (
             "import aiomysql\n"
             "async def f():\n"
             "    return await aiomysql.pool.create_pool(host='x', port=3306, minsize=1)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"no vio `aiomysql.pool.create_pool(`: {hallazgos}")
 
     def test_el_detector_ve_import_aiomysql_pool_as_alias(self):
-        import tempfile
         codigo = (
             "import aiomysql.pool as ap\n"
             "async def f():\n"
             "    return await ap.create_pool(host='x', port=3306, minsize=1)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(len(hallazgos), 1, f"no vio `import aiomysql.pool as ap` + ap.create_pool(): {hallazgos}")
 
     def test_el_detector_acepta_las_formas_alternativas_con_connect_timeout(self):
         """Control positivo de las formas de arriba: con connect_timeout,
         ninguna reporta -- el resolvedor de alias no infla falsos positivos."""
-        import tempfile
         codigo = (
             "from aiomysql import connect as c, create_pool\n"
             "import aiomysql as db\n"
@@ -355,43 +359,41 @@ class AiomysqlConnectTimeoutTripwireTest(unittest.TestCase):
             "    await create_pool(host='x', port=3306, minsize=1, connect_timeout=10)\n"
             "    await db.connect(host='x', port=3306, connect_timeout=10)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(hallazgos, [], f"formas alternativas CON connect_timeout no deberían reportarse: {hallazgos}")
 
     def test_el_detector_no_confunde_texto_con_una_llamada_real(self):
         """Un comentario o docstring que MENCIONA `aiomysql.connect(`/
         `create_pool(` (como el de este propio archivo) no es una llamada --
         el AST no lo ve como ast.Call, a diferencia de un grep de texto."""
-        import tempfile
         codigo = (
             '"""Este módulo habla de aiomysql.connect( y de '
             'aiomysql.create_pool( en un docstring, no los llama."""\n'
             "# aiomysql.connect( también en un comentario.\n"
             "x = 1\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(hallazgos, [], f"texto confundido con una llamada real: {hallazgos}")
 
     def test_el_detector_acepta_connect_timeout_explicito(self):
         """Control positivo: un sitio QUE SÍ pasa connect_timeout (las dos
         formas) no aparece entre los hallazgos."""
-        import tempfile
         codigo = (
             "import aiomysql\n"
             "async def f():\n"
             "    await aiomysql.connect(host='x', port=3306, connect_timeout=10)\n"
             "    await aiomysql.create_pool(host='x', port=3306, minsize=1, connect_timeout=10)\n"
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
-            hallazgos = _hallazgos_en(Path(fh.name))
+            hallazgos = _hallazgos_en(Path(fh.name), Path(fh.name).parent)
         self.assertEqual(hallazgos, [], f"un sitio con connect_timeout no debería reportarse: {hallazgos}")
 
     # -----------------------------------------------------------------
@@ -402,14 +404,13 @@ class AiomysqlConnectTimeoutTripwireTest(unittest.TestCase):
         """Un SyntaxError en un archivo que NO está en _NO_PARSEA tiene que
         aparecer como hallazgo (con su ruta), no saltearse en silencio --
         ese era el hueco Minor de la re-revisión."""
-        import tempfile
         codigo = "def f(:\n    pasa\n"  # SyntaxError a propósito
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write(codigo)
             fh.flush()
             ruta = Path(fh.name)
-            self.assertNotIn(str(ruta.relative_to(RAIZ)), _NO_PARSEA)
-            hallazgos = _hallazgos_en(ruta)
+            self.assertNotIn(str(ruta.relative_to(ruta.parent)), _NO_PARSEA)
+            hallazgos = _hallazgos_en(ruta, ruta.parent)
         self.assertEqual(len(hallazgos), 1, f"un archivo roto no declarado debería reportarse: {hallazgos}")
         self.assertIn("no parsea", hallazgos[0])
 
@@ -417,17 +418,42 @@ class AiomysqlConnectTimeoutTripwireTest(unittest.TestCase):
         """Control de la excepción explícita. Hasta el 2026-09-16 se probaba con
         _director_patch/routes_block.py; se retiró (E-01) y la tabla quedó
         vacía, así que el camino se ejercita con un .py roto declarado acá."""
-        import tempfile
         from unittest.mock import patch
-        with tempfile.NamedTemporaryFile("w", suffix=".py", dir=RAIZ, delete=True) as fh:
+        with _temporal_fuera_del_checkout() as fh:
             fh.write("def f(:\n    pasa\n")
             fh.flush()
             ruta = Path(fh.name)
-            rel = str(ruta.relative_to(RAIZ))
+            rel = str(ruta.relative_to(ruta.parent))
             with patch.dict(_NO_PARSEA, {rel: "roto a propósito para este test"}):
-                self.assertEqual(_hallazgos_en(ruta), [])
-            self.assertEqual(len(_hallazgos_en(ruta)), 1, "sin la declaración tiene que reportarse")
+                self.assertEqual(_hallazgos_en(ruta, ruta.parent), [])
+            self.assertEqual(len(_hallazgos_en(ruta, ruta.parent)), 1, "sin la declaración tiene que reportarse")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ControlesFueraDelCheckoutTest(unittest.TestCase):
+    """Revisión final del frente E: los controles escribían su .py sintético
+    (a veces roto a propósito) en la raíz del checkout. Una corrida matada a
+    mitad de camino, o dos corridas en paralelo, dejaban ese archivo a la vista
+    del escaneo del árbol completo y todos los tripwires se ponían rojos. El
+    escaneo recibe la raíz inyectada y los controles escriben en un directorio
+    temporal fuera del checkout."""
+
+    def test_los_controles_no_escriben_en_el_checkout(self):
+        arbol = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        ofensores = [
+            n.value.lineno for n in ast.walk(arbol)
+            if isinstance(n, ast.keyword) and n.arg == "dir"
+            and isinstance(n.value, ast.Name) and n.value.id == "RAIZ"
+        ]
+        self.assertEqual(ofensores, [], f"un control escribe dentro del checkout (dir=RAIZ) en las líneas {ofensores}")
+
+    def test_la_raiz_del_escaneo_se_inyecta(self):
+        with tempfile.TemporaryDirectory(prefix="jax-tripwire-") as d:
+            ruta = Path(d) / "roto.py"
+            ruta.write_text("def f(:\n    pass\n", encoding="utf-8")
+            hallazgos = _hallazgos_en(ruta, Path(d))
+        self.assertEqual(len(hallazgos), 1, hallazgos)
+        self.assertTrue(hallazgos[0].startswith("roto.py"), hallazgos)

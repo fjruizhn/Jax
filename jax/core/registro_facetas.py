@@ -182,9 +182,11 @@ async def url_del_proveedor(clave_http: str) -> str:
     extractor y el sintetizador de la memoria), desde provider.base_url del
     catálogo, la misma columna que usa aplicar_registro. Antes esos workers no
     pasaban api_url y despachaban a la URL fija de DeepSeek en base.py.
-    Consulta por clave primaria (provider.id). Sin fila o sin base_url:
-    MuscleInvocationError y la corrida falla visible; no hay URL de respaldo.
-    Si la DB no responde, el error de conexión sube tal cual."""
+    Consulta por clave primaria (provider.id). Sin fila, sin base_url o con el
+    proveedor en status 'deprecated' (misma regla que ESTADOS_INVOCABLES aplica
+    a los modelos: deprecated no se invoca): MuscleInvocationError y la corrida
+    falla visible; no hay URL de respaldo. Si la DB no responde, el error de
+    conexión sube tal cual."""
     provider_id = _PROVIDER_ID_MAP.get(clave_http)
     if provider_id is None:
         raise MuscleInvocationError(
@@ -193,7 +195,7 @@ async def url_del_proveedor(clave_http: str) -> str:
     conn = await _db_conn()
     try:
         async with conn.cursor() as cur:
-            await cur.execute("SELECT base_url FROM provider WHERE id = %s", (provider_id,))
+            await cur.execute("SELECT base_url, status FROM provider WHERE id = %s", (provider_id,))
             fila = await cur.fetchone()
     finally:
         conn.close()
@@ -201,5 +203,10 @@ async def url_del_proveedor(clave_http: str) -> str:
         raise MuscleInvocationError(
             f"sin URL del proveedor: '{provider_id}' no tiene base_url en el catálogo "
             f"(tabla provider); no se despacha a una URL fija."
+        )
+    if fila[1] != "active":
+        raise MuscleInvocationError(
+            f"sin URL del proveedor: '{provider_id}' está en status {fila[1]!r} en el catálogo "
+            f"(tabla provider); un proveedor que no está active no se despacha."
         )
     return _url_de_despacho(provider_id, fila[0])

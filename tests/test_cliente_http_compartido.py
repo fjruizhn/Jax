@@ -137,7 +137,7 @@ def test_el_plan_local_manda_ollama_timeout():
         with parche, patch.object(plan, "resolve_facet", AsyncMock(return_value=local)), \
                 patch.object(plan, "limite_de_salida", AsyncMock(return_value={"options": {"num_predict": 1000}})), \
                 patch.object(plan, "record_resolved_version_safe", AsyncMock()):
-            await plan.PlanBuilder()._llm_plan("objetivo", 3)
+            await plan.PlanBuilder()._llm_plan("objetivo", 3, facetas_activas=frozenset({"hipatia"}))
         await chc.cerrar_cliente_http()
 
     asyncio.run(correr())

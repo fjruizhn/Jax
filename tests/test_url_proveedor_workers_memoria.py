@@ -71,16 +71,16 @@ def _catalogo(monkeypatch, fila):
 ])
 def test_el_worker_de_memoria_toma_la_url_de_deepseek_del_catalogo(monkeypatch, modulo, constructor):
     import importlib
-    consultas, conexiones = _catalogo(monkeypatch, ("https://deepseek.catalogo.test/",))
+    consultas, conexiones = _catalogo(monkeypatch, ("https://deepseek.catalogo.test/", "active"))
     construir = getattr(importlib.import_module(modulo), constructor)
     musculo = asyncio.run(construir())
     assert musculo.api_url == "https://deepseek.catalogo.test/chat/completions"
     assert musculo._url_del_catalogo() == "https://deepseek.catalogo.test/chat/completions"
-    assert consultas == [("SELECT base_url FROM provider WHERE id = %s", ("deepseek",))]
+    assert consultas == [("SELECT base_url, status FROM provider WHERE id = %s", ("deepseek",))]
     assert all(c.cerrada for c in conexiones)
 
 
-@pytest.mark.parametrize("fila", [None, (None,), ("",)])
+@pytest.mark.parametrize("fila", [None, (None, "active"), ("", "active")])
 @pytest.mark.parametrize("modulo, constructor", [
     ("jax.memory.worker", "build_extractor"),
     ("jax.memory.synthesis_worker", "build_synthesizer"),
@@ -98,7 +98,7 @@ def test_sin_base_url_en_el_catalogo_el_worker_no_arranca(monkeypatch, modulo, c
 
 def test_gemini_usa_la_base_sin_sufijo(monkeypatch):
     from jax.core.registro_facetas import url_del_proveedor
-    consultas, _ = _catalogo(monkeypatch, ("https://gemini.catalogo.test/v1beta",))
+    consultas, _ = _catalogo(monkeypatch, ("https://gemini.catalogo.test/v1beta", "active"))
     assert asyncio.run(url_del_proveedor("gemini")) == "https://gemini.catalogo.test/v1beta"
     assert consultas[0][1] == ("gemini",)
 
@@ -106,7 +106,21 @@ def test_gemini_usa_la_base_sin_sufijo(monkeypatch):
 def test_clave_de_proveedor_desconocida_no_consulta(monkeypatch):
     from jax.core.registro_facetas import url_del_proveedor
     from jax.muscles.base import MuscleInvocationError
-    consultas, _ = _catalogo(monkeypatch, ("https://x.test",))
+    consultas, _ = _catalogo(monkeypatch, ("https://x.test", "active"))
     with pytest.raises(MuscleInvocationError):
         asyncio.run(url_del_proveedor("inexistente"))
     assert consultas == []
+
+
+def test_proveedor_deprecated_no_da_url(monkeypatch):
+    """Revisión final del frente E: url_del_proveedor ignoraba provider.status.
+    Misma regla que el catálogo aplica a los modelos (ESTADOS_INVOCABLES:
+    deprecated no se invoca): un proveedor marcado deprecated no da URL y la
+    corrida del worker falla visible, sin consultar otra fuente."""
+    from jax.core.registro_facetas import url_del_proveedor
+    from jax.muscles.base import MuscleInvocationError
+    _, conexiones = _catalogo(monkeypatch, ("https://deepseek.catalogo.test/", "deprecated"))
+    with pytest.raises(MuscleInvocationError) as e:
+        asyncio.run(url_del_proveedor("deepseek"))
+    assert "sin URL del proveedor" in str(e.value) and "deprecated" in str(e.value)
+    assert all(c.cerrada for c in conexiones)

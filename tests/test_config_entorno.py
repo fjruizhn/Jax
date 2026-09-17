@@ -181,3 +181,47 @@ def test_config_toml_de_jax_no_trae_urls():
     with open(RAIZ / "config" / "config.toml", "rb") as fh:
         cfg = tomllib.load(fh)
     assert [clave for clave, p in cfg["personalities"].items() if "api_url" in p] == []
+
+
+def test_el_conftest_no_apunta_a_los_servicios_de_produccion():
+    """Revisión final del frente E: el conftest raíz fijaba LAS_MANOS_URL y
+    JAX_OLLAMA_URL a 127.0.0.1:7777 y localhost:11434, los mismos valores que
+    producción. Un test que olvide parchear el transporte le pegaba a LAS MANOS
+    o al Ollama vivos. Con un host `.invalid` (RFC 6761, nunca resuelve) ese
+    olvido falla con un error de DNS en vez de salir a un servicio real."""
+    from urllib.parse import urlsplit
+    for nombre in ("LAS_MANOS_URL", "JAX_OLLAMA_URL"):
+        host = urlsplit(os.environ[nombre]).hostname
+        assert host.endswith(".invalid"), f"{nombre} del conftest apunta a {host!r}"
+
+
+def test_url_base_con_path_query_o_fragmento_es_error(monkeypatch):
+    """Revisión final del frente E: JAX_OLLAMA_URL=http://localhost:11434/v1
+    pasaba y el código armaba /v1/api/chat. Las dos variables que usan
+    url_requerida (LAS_MANOS_URL, JAX_OLLAMA_URL) son URLs BASE: el código les
+    agrega la ruta, así que un path, una query o un fragmento es un error."""
+    from jax.core.config_entorno import EntornoInvalido, url_requerida
+    for valor in ("http://ollama.test:11434/v1", "http://ollama.test:11434/v1/",
+                  "http://ollama.test:11434?x=1", "http://ollama.test:11434#f"):
+        monkeypatch.setenv("JAX_URL_DE_PRUEBA", valor)
+        with pytest.raises(EntornoInvalido) as e:
+            url_requerida("JAX_URL_DE_PRUEBA")
+        assert "JAX_URL_DE_PRUEBA" in str(e.value), valor
+
+
+def test_la_copia_de_jax_platform_es_una_familia_de_espejos_completa():
+    """Revisión final del frente E: jax-platform valida JAX_OLLAMA_URL al
+    arrancar con una copia verbatim de este módulo (backend/config_entorno.py).
+    Sin familia en check_mirror_sync, un arreglo de la regla en un repo no se
+    vería en el otro. `compartidos` cubre TODOS los símbolos de nivel superior:
+    una familia a medias da verde sin mirar lo que falta."""
+    sys.path.insert(0, str(RAIZ / "scripts"))
+    from check_mirror_sync import FAMILIAS  # noqa: E402
+
+    familia = next((f for f in FAMILIAS if f.nombre == "config_entorno"), None)
+    assert familia is not None, [f.nombre for f in FAMILIAS]
+    assert familia.canonico == RAIZ / "jax" / "core" / "config_entorno.py"
+    assert {e for e, _ in familia.espejos} == {"las_manos", "jax-platform"}
+    arbol = ast.parse(familia.canonico.read_text(encoding="utf-8"))
+    del_archivo = {n.name for n in arbol.body if hasattr(n, "name")}
+    assert del_archivo - set(familia.compartidos) == set()

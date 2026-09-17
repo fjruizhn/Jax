@@ -182,8 +182,8 @@ _PLAN_SYSTEM_MODULAR = (
     "paquete (orden de módulos, versiones, índice). El ensamble FÍSICO de los módulos lo hace el "
     "sistema mecánicamente; este step solo produce el manifest/índice, NO el documento completo.\n\n"
     "Cada step: {\"facet\",\"capability\",\"prompt\",\"depends_on\":[indices]}.\n"
-    "- facet para diseño formal/tipos/arquitectura: 'ada'. Para crítica/auditoría: 'thot'. "
-    "Para investigación: 'hipatia'. Para código: 'kimi'.\n"
+    "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido. Diseño formal/tipos/"
+    "arquitectura: 'ada'. Validación/crítica: 'thot'.\n"
     "- depends_on lista los step_index (0-based) de los steps cuyos OUTPUTS este step necesita.\n"
     "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
     "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
@@ -192,6 +192,36 @@ _PLAN_SYSTEM_MODULAR = (
     + _CLEANROOM_RULE +
     "\nSalida: SOLO el array JSON."
 )
+
+
+# Revisión final del frente E (2026-09-16): el menú de facetas que se le ofrece
+# al LLM. Antes era texto fijo en los dos prompts; con E-17 una faceta que no
+# está activa en la tabla `facet` rechaza el plan (422), así que ofrecerla era
+# fabricar planes que se iban a rechazar. Esta tabla da SOLO la descripción y
+# el ejemplo de cada faceta; qué facetas se ofrecen lo decide
+# governance["facets"] en cada build (_menu_de_facetas). Una faceta activa que
+# no está acá no se ofrece: el planner no sabría para qué sirve.
+_MENU_DE_FACETAS: tuple[tuple[str, str, str, str], ...] = (
+    # (faceta, descripción, capability del ejemplo, prompt del ejemplo)
+    ("hipatia", "investigar/research", "research", "Investiga X"),
+    ("jekyll", "analizar", "analysis", "Analiza Y"),
+    ("thot", "criticar/critique", "critique", "Critica Z"),
+    ("ada", "diseñar arquitectura/tipos", "design", "Diseña W"),
+    ("kimi", "coding", "implementation", "Implementa V"),
+    ("hyde", "ejecutar cambios — requiere aprobación", "implementation", "Aplica U"),
+)
+
+# El patrón compilador de Ada (_PLAN_SYSTEM_MODULAR) exige estas facetas: sin
+# alguna activa, su plan se rechaza con certeza y no se gasta la llamada paga.
+_FACETAS_DEL_PATRON_MODULAR = ("thot", "ada")
+
+
+def _menu_de_facetas(facetas_activas: frozenset) -> list[tuple[str, str, str, str]]:
+    return [fila for fila in _MENU_DE_FACETAS if fila[0] in facetas_activas]
+
+
+def _texto_del_menu(menu: list[tuple[str, str, str, str]]) -> str:
+    return ", ".join(f"{faceta} ({descripcion})" for faceta, descripcion, _, _ in menu)
 
 
 _AUDIT_CAPABILITIES = frozenset({
@@ -381,7 +411,8 @@ async def _validate_plan_capabilities(steps: list) -> None:
     relevant = [s for s in steps if (s.motor or s.facet) in MOTOR_FACETS]
     # La gobernanza se consulta SIEMPRE, no solo si hay steps de motor: el techo
     # de ejecucion (mas abajo) aplica a TODOS los steps. Costo medido en
-    # get_motor_governance(): 3 SELECTs, 0.00024s en el servidor.
+    # get_motor_governance() (2026-08-21): 0.00024s en el servidor con 3 SELECTs;
+    # el 4º (facet, 7 filas, E-17) se agregó después y no está medido.
     governance = await _store.get_motor_governance()
     motors = governance["motors"]
     caps = governance["capabilities"]
@@ -550,7 +581,7 @@ class PlanBuilder:
         if dificultad == "formal":
             logger.info("Jacobs cerebro=Ada (formal) objective=%r", objective[:80])
             specs, motivo = await self._intentar_cerebro(
-                self._ada_plan, "Ada", objective, max_steps, capability_hint)
+                self._ada_plan, "Ada", objective, max_steps, capability_hint, governance["facets"])
             if not specs:
                 logger.warning("Ada falló planificando (%s), cayendo a qwen local", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "ada", "qwen", motivo)
@@ -558,7 +589,7 @@ class PlanBuilder:
             logger.info("Jacobs cerebro=qwen (trivial) objective=%r", objective[:80])
         if not specs:
             specs, motivo = await self._intentar_cerebro(
-                self._llm_plan, "qwen", objective, max_steps, capability_hint)
+                self._llm_plan, "qwen", objective, max_steps, capability_hint, governance["facets"])
             if not specs:
                 logger.warning("qwen falló planificando (%s), usando el plan de respaldo fijo", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "qwen", "fallback_plan", motivo)
@@ -566,10 +597,10 @@ class PlanBuilder:
         return self._from_spec(pipeline_id, specs, governance["capabilities"])
 
     @staticmethod
-    async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint):
+    async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint, facetas_activas):
         """(specs, "") o (None, motivo)."""
         try:
-            specs = await fn(objective, max_steps, capability_hint)
+            specs = await fn(objective, max_steps, capability_hint, facetas_activas=facetas_activas)
         except CerebroNoDisponible as exc:
             return None, str(exc)
         if not specs:
@@ -586,13 +617,20 @@ class PlanBuilder:
         return "trivial"
 
     async def _ada_plan(
-        self, objective: str, max_steps: int, capability_hint: str = ""
+        self, objective: str, max_steps: int, capability_hint: str = "", *, facetas_activas: frozenset
     ) -> list[dict] | None:
         # Modelo, URL y credencial del binding de ada (credencial por
         # credential_resolver, dentro de resolve_facet), y el límite de salida
         # de la fila de ESE modelo. Cualquier falla: ERROR con el motivo y
         # None -> _from_objective cae a qwen. Nunca se despacha a un modelo o
         # URL fijos ni con un límite asumido.
+        faltan = [x for x in _FACETAS_DEL_PATRON_MODULAR if x not in facetas_activas]
+        if faltan:
+            motivo = (f"Ada: no se planifica, el patrón compilador exige facetas que no están "
+                      f"activas en la tabla `facet`: {', '.join(faltan)}")
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo)
+        menu = _texto_del_menu(_menu_de_facetas(facetas_activas))
         try:
             f = await resolve_facet("ada")
         except FacetUnavailableError as exc:
@@ -626,9 +664,7 @@ class PlanBuilder:
             f"reconciliación (ada/reconcile) como penúltimo, ensamble (ada/assemble) al final.\n"
             f"Cada step DEBE incluir el campo 'depends_on' con la lista de step_index "
             f"(0-based) de los que depende (lista vacía [] si no depende de ninguno).\n\n"
-            f"Facetas disponibles: hipatia (investigar/research), jekyll (analizar), "
-            f"thot (criticar/critique), ada (diseñar arquitectura/tipos), "
-            f"kimi (coding), hyde (ejecutar cambios — requiere aprobación).\n\n"
+            f"Facetas disponibles: {menu}.\n\n"
             f"Ejemplo de forma esperada (no de contenido):\n"
             f'[{{"facet":"ada","capability":"design",'
             f'"prompt":"Definí los tipos comunes: enums, identificadores, estructuras base compartidas.",'
@@ -701,18 +737,27 @@ class PlanBuilder:
             raise CerebroNoDisponible(motivo) from exc
 
     async def _llm_plan(
-        self, objective: str, max_steps: int, capability_hint: str = ""
+        self, objective: str, max_steps: int, capability_hint: str = "", *, facetas_activas: frozenset
     ) -> list[dict] | None:
+        menu = _menu_de_facetas(facetas_activas)
+        if not menu:
+            motivo = "qwen (jax_local): no se planifica, ninguna faceta del menú está activa en la tabla `facet`"
+            logger.error(motivo)
+            raise CerebroNoDisponible(motivo)
+        # El ejemplo usa las primeras facetas ACTIVAS del menú: un ejemplo con
+        # una faceta inactiva invita a copiarla.
+        ejemplo = json.dumps(
+            [{"facet": faceta, "capability": capability, "prompt": texto}
+             for faceta, _, capability, texto in menu[:2]],
+            ensure_ascii=False, separators=(",", ":"),
+        )
         prompt = (
             f"Dado este objetivo: {objective}\n\n"
             f"Genera un plan de ejecución con MÁXIMO {max_steps} steps.\n"
             f"Cada step debe tener: facet, capability, prompt específico.\n"
-            f"Facetas disponibles: hipatia (investigar/research), jekyll (analizar), "
-            f"thot (criticar/critique), ada (diseñar arquitectura), "
-            f"kimi (coding), hyde (ejecutar cambios — requiere aprobación).\n"
+            f"Facetas disponibles: {_texto_del_menu(menu)}.\n"
             f"Responde SOLO con un array JSON. Ejemplo:\n"
-            f'[{{"facet":"hipatia","capability":"research","prompt":"Investiga X"}},'
-            f'{{"facet":"jekyll","capability":"analysis","prompt":"Analiza Y"}}]'
+            f"{ejemplo}"
         )
         try:
             f = await resolve_facet("jax_local")

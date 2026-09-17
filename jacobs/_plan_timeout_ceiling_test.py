@@ -272,7 +272,7 @@ def test_build_por_el_camino_del_LLM_no_revienta():
     async def _correr():
         b = PlanBuilder()
 
-        async def _fake_llm(objective, max_steps, capability_hint):
+        async def _fake_llm(objective, max_steps, capability_hint, *, facetas_activas):
             assert isinstance(capability_hint, str)
             return [{"facet": "hipatia", "capability": "research", "prompt": "x"}]
 

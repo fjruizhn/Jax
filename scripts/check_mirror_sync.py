@@ -425,6 +425,31 @@ FAMILIAS = (
              "jacobs/policy.py. ORDEN DE MERGE: la plataforma primero (este job "
              "clona jax-platform master).",
     ),
+    Familia(
+        nombre="config_entorno",
+        canonico=JAX_ROOT / "jax" / "core" / "config_entorno.py",
+        espejos=(
+            # Symlink a jax/core (E-21), como facet_resolver: no-op hoy, a
+            # proposito.
+            ("las_manos", JAX_ROOT / "las_manos" / "config_entorno.py"),
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "config_entorno.py"),
+        ),
+        # TODOS los simbolos del archivo: el modulo entero es la regla de que
+        # vale como configuracion de servicio. tests/test_config_entorno.py
+        # exige que esta tupla cubra el archivo.
+        compartidos=(
+            "EntornoInvalido",
+            "_valor",
+            "url_requerida",
+            "ruta_absoluta_requerida",
+        ),
+        nota="Revision final del frente E (2026-09-16): jax-platform valida "
+             "JAX_OLLAMA_URL al arrancar con una copia verbatim, no importando "
+             "jax (api/chat.py pone en sys.path el checkout de produccion de jax, "
+             "que puede ir detras). ORDEN DE MERGE: jax-platform primero -- contra "
+             "un jax-platform sin backend/config_entorno.py este checker sale con "
+             "exit 2.",
+    ),
 )
 
 

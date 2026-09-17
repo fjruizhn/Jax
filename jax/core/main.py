@@ -186,7 +186,15 @@ def humanizar_error(label: str, err: Exception) -> str:
 def _texto_de_error_de_tarea(e: BaseException) -> str:
     """El error de run_task se ESCRIBE en <tarea>_result.md: se redacta antes de
     tocar disco (E-16, 2026-09-16). Entero, sin recortar: es el diagnóstico de
-    la tarea. humanizar_error ya redactaba lo que se imprime; el archivo no."""
+    la tarea. humanizar_error ya redactaba lo que se imprime; el archivo no.
+
+    Redacta SOLO POR PATRÓN (redactar_secretos sin `secretos`): acá no se
+    conoce la credencial del proveedor, así que una key sin forma reconocible
+    (sin `key=`, sin contexto Authorization, sin prefijo `AIza`) pasaría tal
+    cual. Es aceptable porque el texto de proveedor no llega crudo: los
+    músculos (jax/muscles/base.py) ya arman sus excepciones con
+    recortar_redactado(..., [api_key]), redactadas con la credencial conocida
+    antes de subir hasta run_task; este paso es la segunda capa."""
     from jax.core.redaccion import redactar_secretos
     return redactar_secretos(str(e) or repr(e) or "error sin detalle")
 

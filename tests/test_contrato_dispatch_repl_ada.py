@@ -258,7 +258,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_ada_manda_modelo_url_y_credencial_del_binding_y_el_tope_de_su_fila(self):
         self.arrancar(("max_tokens", 131072))
-        await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
+        await self.plan.PlanBuilder()._ada_plan("objetivo", 3, facetas_activas=frozenset({"ada", "thot"}))
         body = self.cap.bodies[0]
         self.assertEqual(body["model"], "glm-5.3")
         self.assertEqual(body["max_tokens"], 131072)
@@ -269,7 +269,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_ada_con_otro_nombre_de_parametro_lo_respeta(self):
         self.arrancar(("max_completion_tokens", 5000))
-        await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
+        await self.plan.PlanBuilder()._ada_plan("objetivo", 3, facetas_activas=frozenset({"ada", "thot"}))
         body = self.cap.bodies[0]
         self.assertEqual(body["max_completion_tokens"], 5000)
         self.assertNotIn("max_tokens", body)
@@ -278,7 +278,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         self.arrancar((None, None))
         with self.assertLogs("jacobs.plan", level="ERROR") as logs, \
                 self.assertRaises(self.plan.CerebroNoDisponible):
-            await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
+            await self.plan.PlanBuilder()._ada_plan("objetivo", 3, facetas_activas=frozenset({"ada", "thot"}))
         self.assertEqual(self.cap.bodies, [], "Ada no puede despachar sin contrato")
         salida = "\n".join(logs.output)
         self.assertIn("UPDATE model SET max_tokens_param", salida)
@@ -289,7 +289,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         self.arrancar(("max_tokens", 1), facet_error=FacetUnavailableError("ada"))
         with self.assertLogs("jacobs.plan", level="ERROR") as logs, \
                 self.assertRaises(self.plan.CerebroNoDisponible):
-            await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
+            await self.plan.PlanBuilder()._ada_plan("objetivo", 3, facetas_activas=frozenset({"ada", "thot"}))
         self.assertEqual(self.cap.bodies, [])
         self.assertIn("faceta no resoluble", "\n".join(logs.output))
         self.leer.assert_not_awaited()
@@ -298,7 +298,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         self.arrancar(("max_tokens", 1), facet=_facet_ada(transport="http_gemini"))
         with self.assertLogs("jacobs.plan", level="ERROR") as logs, \
                 self.assertRaises(self.plan.CerebroNoDisponible):
-            await self.plan.PlanBuilder()._ada_plan("objetivo", 3)
+            await self.plan.PlanBuilder()._ada_plan("objetivo", 3, facetas_activas=frozenset({"ada", "thot"}))
         self.assertEqual(self.cap.bodies, [])
         self.assertIn("http_gemini", "\n".join(logs.output))
 
@@ -315,7 +315,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
                 patch.object(store, "event_append", evento), \
                 self.assertLogs("jacobs.plan", level="INFO") as logs:
-            specs = await b._from_objective("p", "x" * 250, 3, {"capabilities": {}})
+            specs = await b._from_objective("p", "x" * 250, 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"})})
         self.assertEqual(specs[0]["facet"], "jekyll")
         qwen.assert_awaited_once()
         errores = [l for l in logs.output if l.startswith("ERROR")]
@@ -351,7 +351,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
                 patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
                 patch.object(store, "event_append", evento), \
                 self.assertLogs("jacobs.plan", level="ERROR") as logs:
-            await b._from_objective("p", "x" * 250, 3, {"capabilities": {}})
+            await b._from_objective("p", "x" * 250, 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"})})
         self.assertTrue(any(l.startswith("ERROR") and "Ada HTTP 400" in l for l in logs.output), logs.output)
         self.assertIn("Ada HTTP 400", evento.await_args.args[2]["motivo"])
 
@@ -365,7 +365,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         evento = AsyncMock()
         with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
                 patch.object(store, "event_append", evento):
-            specs = await b._from_objective("p", "corto", 3, {"capabilities": {}})
+            specs = await b._from_objective("p", "corto", 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"})})
         self.assertEqual(specs[0]["prompt"], "fijo")
         _, tipo, payload = evento.await_args.args
         self.assertEqual((tipo, payload["de"], payload["a"]), ("PLAN_CEREBRO_FALLBACK", "qwen", "fallback_plan"))
@@ -535,14 +535,14 @@ class JacobsOllamaNumPredictTest(unittest.IsolatedAsyncioTestCase):
         from jacobs import plan
         with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local())):
             self.arrancar((None, 1000))
-            await plan.PlanBuilder()._llm_plan("o", 3)
+            await plan.PlanBuilder()._llm_plan("o", 3, facetas_activas=frozenset({"hipatia"}))
             self.assertEqual(self.cap.bodies[0]["options"]["num_predict"], 1000)
 
     async def test_llm_plan_con_tope_mayor_manda_su_presupuesto(self):
         from jacobs import plan
         with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local())):
             self.arrancar((None, 10 ** 6))
-            await plan.PlanBuilder()._llm_plan("o", 3)
+            await plan.PlanBuilder()._llm_plan("o", 3, facetas_activas=frozenset({"hipatia"}))
             self.assertEqual(self.cap.bodies[0]["options"]["num_predict"], plan._LLM_PLAN_NUM_PREDICT)
 
     async def test_llm_plan_sin_contrato_no_despacha_y_da_error(self):
@@ -550,7 +550,7 @@ class JacobsOllamaNumPredictTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local())):
             self.arrancar((None, None))
             with self.assertLogs("jacobs.plan", level="ERROR"), self.assertRaises(plan.CerebroNoDisponible):
-                await plan.PlanBuilder()._llm_plan("o", 3)
+                await plan.PlanBuilder()._llm_plan("o", 3, facetas_activas=frozenset({"hipatia"}))
             self.assertEqual(self.cap.bodies, [])
 
 
@@ -713,7 +713,7 @@ class UrlRealPorCaminoTest(_Base):
         from jax.core.main import build_muscles
         from jax.core.registro_facetas import aplicar_registro
         self.arrancar((None, 262144))
-        nativo = "http://localhost:11434/api/chat"  # JAX_OLLAMA_URL del conftest + /api/chat
+        nativo = "http://ollama.invalid:11434/api/chat"  # JAX_OLLAMA_URL del conftest + /api/chat
         cfg = _cfg_repl({"jax_local": {"type": "ollama", "provider": "ollama", "model_default": "q",
                                        "models_allowed": ["q"], "system_prompt": "s"}})
         aplicar_registro(cfg, {"jax_local": {"model": "qwen-x", "models_allowed": ["qwen-x"],
@@ -746,7 +746,7 @@ class UrlRealJacobsYMotorTest(unittest.IsolatedAsyncioTestCase):
         from jacobs import plan
         with patch.object(plan, "resolve_facet", AsyncMock(return_value=self._local_prod())):
             self.arrancar((None, 262144))
-            await plan.PlanBuilder()._llm_plan("o", 3)
+            await plan.PlanBuilder()._llm_plan("o", 3, facetas_activas=frozenset({"hipatia"}))
         self.assertEqual(self.cap.urls, [plan.OLLAMA_URL])
         self.assertNotIn("/v1/", self.cap.urls[0])
         self.assertIn("num_predict", self.cap.bodies[0]["options"])

@@ -512,10 +512,11 @@ async def get_motor_governance() -> dict[str, dict]:
        "motors": {motor_key: has_tool_access (bool)},
        "facets": frozenset de facet.key con status='active'}
 
-    Costo medido en vivo (2026-08-21, DB real): 4 SELECTs, 0.00024s de
+    Costo medido en vivo (2026-08-21, DB real) con 3 SELECTs: 0.00024s de
     ejecución total en el servidor (motor: 4 filas, capability: ~17,
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
-    no solo en plan-build."""
+    no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) se agregó
+    después y NO está medido."""
     conn = await get_conn()
     try:
         async with conn.cursor() as cur:
