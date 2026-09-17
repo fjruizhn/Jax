@@ -62,7 +62,8 @@ def test_cancel_sobre_un_pipeline_que_cambio_da_409_sin_evento():
 
 def _cosechar(candidatos, cas):
     viejo, eventos = AsyncMock(), AsyncMock()
-    with patch.object(reaper.store, "pipelines_by_status", AsyncMock(return_value=candidatos)), \
+    filas = [c if isinstance(c, tuple) else (c, 0) for c in candidatos]
+    with patch.object(reaper.store, "candidatos_del_reaper", AsyncMock(return_value=filas)), \
          patch.object(reaper.store, "pipeline_update_status", viejo), \
          patch.object(reaper.store, "pipeline_update_status_si_epoca", cas), \
          patch.object(reaper.store, "event_append", eventos):
@@ -103,3 +104,19 @@ def test_reaper_de_running_pide_que_siga_sin_avance_al_escribir(monkeypatch):
     cas = AsyncMock(return_value=True)
     _cosechar([p], cas)
     assert cas.await_args.kwargs["sin_avance_desde"] == 1_000_000.0 - reaper.RUNNING_STALE_SECONDS
+
+
+def test_reaper_usa_el_umbral_del_pipeline_en_el_corte(monkeypatch):
+    """Ruling R36: con un paso en curso de 1800 s el umbral es 3600 s, y el
+    corte del CAS usa ESE umbral."""
+    monkeypatch.setattr(reaper.time, "time", lambda: 1_000_000.0)
+    p = Pipeline(pipeline_id="p1", name="t", invoked_by="plataforma", mode="autonomous",
+                 status=PipelineStatus.running, run_epoch=2, created_at=1.0, updated_at=1_000_000.0 - 3700)
+    cas = AsyncMock(return_value=True)
+    cosechados, _, _ = _cosechar([(p, 1800)], cas)
+    assert len(cosechados) == 1
+    assert cas.await_args.kwargs["sin_avance_desde"] == 1_000_000.0 - 3600
+    cas.reset_mock()
+    p2 = p.model_copy(update={"updated_at": 1_000_000.0 - 1900})
+    cosechados, _, _ = _cosechar([(p2, 1800)], cas)
+    assert cosechados == [] and not cas.await_count

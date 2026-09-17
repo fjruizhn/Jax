@@ -1390,8 +1390,11 @@ jobs:
           #   test_jacobs_cancel_reaper_epoca.py -- el reaper pide, para un running,
           #   sin_avance_desde = ahora - RUNNING_STALE_SECONDS en la escritura
           #   condicional. Rojo contra 74cb5f9: KeyError sin_avance_desde.
-          grep -qE "^1068 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1068 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1068 -> 1069 el 2026-09-17 (Ruling R36): +1 en test_jacobs_cancel_reaper_epoca.py
+          #   -- con un paso en curso de 1800 s el umbral del running es 3600 s y el
+          #   corte del CAS usa ese umbral (3700 s sin avance se cosecha, 1900 s no).
+          grep -qE "^1069 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 1069 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1610,5 +1613,14 @@ jobs:
           #   estancado de verdad sí (control); EXPLAIN del UPDATE con
           #   'updated_at < %s' por PRIMARY, sin ALL/index/filesort (rojo:
           #   TypeError, la variante no existía).
-          grep -qE "^77 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 77 tests CORRIDOS."; exit 1; }
+          # 77 -> 80 el 2026-09-17 (Ruling R36): +3 en test_jacobs_reaper_cas_db.py --
+          #   umbral por pipeline max(RUNNING_STALE_SECONDS, 2x timeout_seconds de los
+          #   pasos en running) leído en la misma consulta del barrido: paso de 1800 s
+          #   en curso y 1900 s sin avance NO vence (rojo contra 8a6b2f4: lo cosechaba
+          #   con umbral 1800); con 3700 s vence con umbral 3600 (rojo: umbral 1800 en
+          #   el motivo); sin pasos en curso sigue 1800 (control); el CAS con
+          #   updated_at que avanzó sigue sin cosechar (control); EXPLAIN de la consulta
+          #   del barrido: range por idx_pipelines_status y subconsulta ref por
+          #   idx_steps_pipeline (rojo: AttributeError).
+          grep -qE "^80 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 80 tests CORRIDOS."; exit 1; }

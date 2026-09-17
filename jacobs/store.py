@@ -478,24 +478,39 @@ async def pipeline_update_status(
         conn.close()
 
 
-async def pipelines_by_status(statuses: list[PipelineStatus]) -> list[Pipeline]:
-    """Usado por jacobs/reaper.py -- lista pipelines en los status dados
-    para evaluar edad/estancamiento. No filtra por antigüedad acá, eso
-    es criterio del reaper."""
+def _sql_candidatos_del_reaper(n_estados: int) -> str:
+    """Ruling R36 (2026-09-17): el barrido del reaper trae, en la MISMA
+    consulta, el mayor timeout_seconds de los pasos EN CURSO (status
+    'running' en jacobs_steps, el valor que el ejecutor aplica con
+    asyncio.wait_for) de cada pipeline candidato. EXPLAIN en
+    tests/test_jacobs_reaper_cas_db.py: range por idx_pipelines_status y la
+    subconsulta ref por idx_steps_pipeline (a lo sumo 20 pasos por plan)."""
+    estados = ",".join(["%s"] * n_estados)
+    return (
+        "SELECT p.*, (SELECT MAX(s.timeout_seconds) FROM jacobs_steps s "
+        "WHERE s.pipeline_id = p.pipeline_id AND s.status = 'running') AS max_timeout_en_curso "
+        f"FROM jacobs_pipelines p WHERE p.status IN ({estados})"
+    )
+
+
+async def candidatos_del_reaper(statuses: list[PipelineStatus]) -> list[tuple[Pipeline, int]]:
+    """Usado por jacobs/reaper.py: los pipelines en los status dados, cada uno
+    con el mayor timeout_seconds de sus pasos en curso (0 si no tiene). No
+    filtra por antigüedad: eso es criterio del reaper."""
     if not statuses:
         return []
     conn = await get_conn()
     try:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            placeholders = ",".join(["%s"] * len(statuses))
-            await cur.execute(
-                f"SELECT * FROM jacobs_pipelines WHERE status IN ({placeholders})",
-                tuple(s.value for s in statuses),
-            )
+            await cur.execute(_sql_candidatos_del_reaper(len(statuses)), tuple(s.value for s in statuses))
             rows = await cur.fetchall()
     finally:
         conn.close()
-    return [_row_to_pipeline(row) for row in rows]
+    salida = []
+    for row in rows:
+        maximo = row.pop("max_timeout_en_curso", None)
+        salida.append((_row_to_pipeline(row), int(maximo or 0)))
+    return salida
 
 
 _SQL_CONTAR_ACTIVOS = "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')"
