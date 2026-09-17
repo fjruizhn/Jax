@@ -1,7 +1,8 @@
 """Arnés que hace de Ada contra Jacobs, para las pruebas del contrato de
 sub-pipelines (frente F, 2026-09-16).
 
-Escribe pipelines, pasos, tokens y eventos: SOLO contra jax_memory_test. Si el
+Escribe pipelines, pasos, tokens y eventos: SOLO contra una base de tests
+(`jax_memory_test`, o la de la sesión si hay `JAX_TEST_DB_SUFIJO`). Si el
 proceso ya trae JAX_DB_NAME apuntando a otra base (típico después de sourcear
 /etc/jax/.env), se niega a importar en vez de escribir ahí en silencio.
 
@@ -15,14 +16,9 @@ from __future__ import annotations
 
 import os
 
-_nombre = os.environ.get("JAX_DB_NAME")
-if _nombre is not None and _nombre != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_nombre!r}: el arnés de Ada escribe pipelines, pasos, tokens y "
-        "eventos. Solo corre contra jax_memory_test (exportala después de sourcear "
-        "/etc/jax/.env)."
-    )
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 import time  # noqa: E402
 import uuid  # noqa: E402

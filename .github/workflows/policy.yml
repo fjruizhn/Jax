@@ -356,8 +356,16 @@ jobs:
           #   pool NO cuenta como dedicada, y la rama found_rows también cuenta.
           #   Validados por mutación: sin envolver `close()` caen 3; sin la idempotencia
           #   cae el del doble cierre.
-          grep -qE "^117 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 117 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 109 -> 113 el 2026-09-17 (cuelgue del apagado, fix/pool-release-siempre):
+          #   +4 de jacobs/_store_pool_test.py -- un error al DECIDIR el destino de la
+          #   conexion (AttributeError de un doble) devuelve igual la conexion y no
+          #   cuelga el apagado; un `pool.release()` que explota no se come el permiso;
+          #   y el apagado TERMINA aunque una conexion quede marcada en `_used`.
+          #   Los cuatro vistos en rojo contra 351ec95: dos con "cerrar_pool() no
+          #   termino en 10 s" (el cuelgue reproducido, acotado para no colgar la suite)
+          #   y dos con el error del tramo de la decision subiendo sin release.
+          grep -qE "^113 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 113 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -886,6 +894,7 @@ jobs:
           tests/test_subpipeline_contrato_puro.py
           tests/test_human_gate_sin_emision_http.py
           tests/test_las_manos_auth_servicio.py
+          tests/test_base_por_sesion.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1007,6 +1016,7 @@ jobs:
             tests/test_subpipeline_contrato_puro.py \
             tests/test_human_gate_sin_emision_http.py \
             tests/test_las_manos_auth_servicio.py \
+            tests/test_base_por_sesion.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -2160,8 +2170,17 @@ jobs:
           # caso que aca sale `xfailed` (mismo desfase de los pisos anteriores),
           # asi que el piso del job queda en 2002. Si el runner da otro numero,
           # manda el runner.
-          grep -qE "^2002 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2002 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 1603 -> 1621 el 2026-09-17 (una base de tests por sesion): +18 exacto,
+          #   medido con y sin el archivo nuevo en la misma maquina. Es el delta de
+          #   esta rama SUMADO al piso que dejaron B1.4 y el retiro de la voz, no
+          #   uno en vez del otro. Si el runner da otro numero, manda el runner.
+          # 1621 -> 2020 el 2026-09-17 (pre-vuelo y continuar, tras mergear
+          # master con jax#207): la union de las dos listas. Medido en hall9000:
+          # 2021 passed, 1 xfailed, 16 subtests; el runner cuenta uno menos y
+          # reporta ese xfail como skipped (mismo desfase de siempre), asi que
+          # el piso queda en 2020. Si el runner da otro numero, manda el runner.
+          grep -qE "^2020 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2020 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

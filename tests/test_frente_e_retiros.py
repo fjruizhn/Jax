@@ -14,7 +14,9 @@ import os
 import typing
 from pathlib import Path
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"  # barrera: nada acá abre conexión, y si algo se escapa no es producción
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()  # barrera: nada acá abre conexión, y si algo se escapa no es producción
 
 RAIZ = Path(__file__).resolve().parents[1]
 

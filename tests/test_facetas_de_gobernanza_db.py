@@ -11,9 +11,9 @@ from __future__ import annotations
 import os
 import unittest
 
-_db = os.environ.get("JAX_DB_NAME", "")
-if _db != "jax_memory_test":
-    raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test escribe una fila de `facet`; solo corre contra jax_memory_test.")
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 from jacobs import store  # noqa: E402
 

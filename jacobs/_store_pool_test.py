@@ -35,6 +35,7 @@ from jacobs import _arnes_ada as ada  # primero: barrera de base de prueba
 
 import ast  # noqa: E402
 import asyncio  # noqa: E402
+import contextlib  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
 import unittest  # noqa: E402
@@ -957,6 +958,117 @@ class CierreAcotadoTest(_ConBase):
             tarea.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await _a_lo_sumo(tarea)
+
+
+class DevolucionPorConstruccionTest(_ConBase):
+    """El cuelgue del apagado (hallazgo del 2026-09-17).
+
+    `conexion()` decidia el destino de la conexion (sesion limpia? desechable?)
+    y recien despues llamaba `pool.release(conn)`, las dos cosas en el MISMO
+    `finally`. Una excepcion inesperada en el tramo de la decision -- la
+    destapo un AttributeError de un doble de test -- saltaba el release: la
+    conexion quedaba marcada en `_used` del pool de aiomysql y
+    `pool.wait_closed()` la esperaba PARA SIEMPRE. Consecuencia real: el
+    apagado del servicio no termina nunca.
+
+    Dos garantias, dos capas:
+      1. `conexion()`: la devolucion vive en un `finally` propio, afuera del
+         tramo que puede explotar. Pase lo que pase, la conexion vuelve.
+      2. `_cerrar()`: `wait_closed()` va acotado y con `terminate()` detras. Si
+         una conexion queda atrapada igual -- por un defecto nuestro o de
+         aiomysql --, el apagado TERMINA, con ERROR en el log.
+
+    Toda espera de estos tests esta acotada: un cuelgue tiene que dar FAILED
+    con un mensaje claro, no colgar la suite entera."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # La limpieza del padre (`cerrar_pool`) NO esta acotada: contra el
+        # codigo viejo estos tests dejan una conexion atrapada y esa limpieza
+        # colgaria la suite entera. Los cleanups corren LIFO: este, agregado
+        # despues, corre ANTES y deja el pool cortado a la fuerza.
+        self.addAsyncCleanup(self._cortar_a_la_fuerza)
+
+    async def _cortar_a_la_fuerza(self):
+        estado = store._pools.get(asyncio.get_running_loop())
+        if estado is not None and estado.pool is not None:
+            estado.pool.terminate()
+
+    async def _apagado_acotado(self, pool, segundos: float = 10):
+        """`cerrar_pool()` con limite duro. Si vence, corta a la fuerza (para no
+        dejar la limpieza colgada) y FALLA con el motivo."""
+        try:
+            await asyncio.wait_for(store.cerrar_pool(), timeout=segundos)
+        except TimeoutError:
+            pool.terminate()
+            self.fail(
+                f"cerrar_pool() no termino en {segundos} s: una conexion quedo atrapada en "
+                "_used y wait_closed() la espera para siempre -- el apagado del servicio "
+                "se cuelga."
+            )
+
+    async def test_error_al_decidir_el_destino_devuelve_la_conexion(self):
+        """Contra el codigo viejo: el AttributeError sube sin release y la
+        conexion queda en `_used`."""
+        pool = await store.obtener_pool()
+        with patch.object(store, "_sesion_reutilizable",
+                          side_effect=AttributeError("doble sin get_autocommit")):
+            with self.assertLogs("jacobs.store", level="ERROR"):
+                async with store.conexion() as conn:
+                    pass
+        self.assertEqual(
+            len(pool._used), 0,
+            "la conexion quedo marcada en uso: pool.wait_closed() la espera para siempre",
+        )
+        self.assertTrue(
+            _crudo(conn).closed,
+            "fail-closed: sin poder decidir si la sesion sirve, la conexion no se reusa",
+        )
+        # Y el pool sigue sirviendo: el permiso del semaforo tambien volvio.
+        self.assertEqual((await ada.una_fila("SELECT 1 AS uno"))["uno"], 1)
+
+    async def test_error_al_decidir_no_cuelga_el_apagado(self):
+        """El cuelgue, de punta a punta: la excepcion en el tramo de la decision
+        y despues el apagado. Contra el codigo viejo, `cerrar_pool()` no vuelve."""
+        pool = await store.obtener_pool()
+        with patch.object(store, "_sesion_reutilizable",
+                          side_effect=AttributeError("doble sin get_autocommit")):
+            # Contra el codigo viejo la excepcion sube; con el arreglo, no. Lo
+            # que se prueba aca es el apagado, no por donde sale el error.
+            with contextlib.suppress(AttributeError):
+                async with store.conexion():
+                    pass
+        await self._apagado_acotado(pool)
+        self.assertTrue(pool.closed)
+
+    async def test_si_release_falla_la_conexion_no_queda_en_uso(self):
+        """`pool.release()` tambien puede explotar (mira la transaccion de la
+        conexion). Ni asi se pierde el permiso ni sube un error ajeno."""
+        pool = await store.obtener_pool()
+        with patch.object(aiomysql.Pool, "release", side_effect=RuntimeError("release roto")):
+            with self.assertLogs("jacobs.store", level="ERROR"):
+                async with store.conexion() as conn:
+                    pass
+        self.assertTrue(_crudo(conn).closed, "fail-closed: si no vuelve al pool, se cierra")
+        self.assertEqual((await ada.una_fila("SELECT 1 AS uno"))["uno"], 1,
+                         "el permiso del semaforo no volvio")
+
+    async def test_el_apagado_termina_aunque_una_conexion_quede_en_uso(self):
+        """Capa 2, independiente de `conexion()`: si una conexion queda marcada
+        en `_used` pase lo que pase, el apagado igual TERMINA (acotado +
+        terminate), con ERROR en el log. Se simula un aiomysql cuyo `release()`
+        no saca la conexion de `_used`."""
+        with patch.dict(os.environ, {"JAX_DB_CONNECT_TIMEOUT_SECONDS": "1"}):
+            pool = await store.obtener_pool()
+            with patch.object(aiomysql.Pool, "release", lambda self_, conn: None):
+                async with store.conexion() as conn:
+                    pass
+            self.assertIn(_crudo(conn), pool._used, "el arnes no dejo la conexion atrapada")
+            t0 = time.monotonic()
+            with self.assertLogs("jacobs.store", level="ERROR"):
+                await self._apagado_acotado(pool)
+            self.assertLess(time.monotonic() - t0, 6.0, "el apagado tardo mas que los limites")
+            self.assertTrue(pool.closed)
 
 
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")

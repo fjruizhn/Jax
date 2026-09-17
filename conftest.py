@@ -98,6 +98,30 @@ os.environ["JAX_FACET_SEAL_PATH"] = os.path.join(
 os.environ["JAX_KILL_SWITCH_PATH"] = os.path.join(
     tempfile.mkdtemp(prefix="jax-test-interruptor-"), "PAUSE")
 
+#: La base de tests de ESTA sesión (decisión de Fernando, 2026-09-17).
+#: Tres sesiones de Claude compartían `jax_memory_test` y se pisaban de
+#: verdad: filas con `mode` en NULL, un arnés expirando pipelines ajenos, una
+#: sesión borrando la fila de uso de otra. Con `JAX_TEST_DB_SUFIJO=<sufijo>`
+#: cada sesión corre contra `jax_memory_test_<sufijo>`; sin la variable, la
+#: base sigue siendo `jax_memory_test` -- el CI no cambia.
+#:
+#: Se fija acá, en tiempo de IMPORT y antes de cualquier import del repo, por
+#: la misma razón que el resto de este archivo: hay módulos que leen
+#: `JAX_DB_NAME` al importarse. Cada archivo de test sigue llamando a
+#: `fijar_base_de_test()`/`exigir_base_de_test()` por su cuenta -- muchos se
+#: corren sueltos, sin pasar por acá.
+#:
+#: `asegurar_base_de_test()` crea la base de la sesión si no existía (esquema
+#: clonado de `jax_memory_test` + `init_tables()` del repo). Sin sufijo no
+#: hace nada. `tests/test_base_por_sesion.py` lo vigila.
+from base_de_test import (  # noqa: E402
+    asegurar_base_de_test,
+    fijar_base_de_test,
+)
+
+fijar_base_de_test()
+asegurar_base_de_test()
+
 #: El freno de PRODUCCIÓN que la barrera de sesión vigila: los DOS ARCHIVOS
 #: del interruptor (la ruta de JAX_KILL_SWITCH_PATH y la ruta heredada), NUNCA
 #: el directorio que los contiene. La heredada se toma del módulo ANTES de

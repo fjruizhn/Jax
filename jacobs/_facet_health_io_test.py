@@ -65,10 +65,12 @@ def asincrono(fn):
     return wrapper
 
 
+from base_de_test import es_base_de_test  # noqa: E402
+
 _DB = os.getenv("JAX_DB_NAME", "")
 requiere_db_de_prueba = pytest.mark.skipif(
-    not os.getenv("JAX_DB_HOST") or not _DB.endswith("_test"),
-    reason="necesita una MariaDB real con JAX_DB_NAME terminado en '_test'",
+    not os.getenv("JAX_DB_HOST") or not es_base_de_test(_DB),
+    reason="necesita una MariaDB real y JAX_DB_NAME en una base de tests",
 )
 
 # Esquema esperado. Las tablas las CREA `jax-platform` (migrations.py), otro

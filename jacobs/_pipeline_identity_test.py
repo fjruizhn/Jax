@@ -19,7 +19,9 @@ from unittest.mock import patch
 # "test"/pending reales en la DB de producción sin pasar por
 # jacobs.policy.validate_create(). Confirmado 2026-08-19: 8 filas huérfanas
 # en jax_memory.jacobs_pipelines por este mecanismo.
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jacobs import store
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus

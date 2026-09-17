@@ -676,26 +676,41 @@ def test_un_connect_fallido_no_se_queda_con_el_turno(base, monkeypatch, falla):
 def test_si_devolver_la_conexion_falla_el_turno_vuelve_igual(base, monkeypatch):
     """Si `pool.release()` lanza, el turno se suelta igual (finally): el pedido
     siguiente no se queda sin turno. Rojo por mutación: soltar el turno sólo si
-    release no lanzó -> TimeoutError en el segundo pedido."""
+    release no lanzó -> TimeoutError en el segundo pedido.
+
+    2026-09-17, tras mergear master: el fallo de `release()` ya NO se propaga al
+    llamador. jax#205 lo convirtió en fail-soft declarado (`store.py`: la
+    conexión se descarta, se loguea y el permiso vuelve igual), para que el
+    apagado no se cuelgue. Este test cuida el TURNO, no la forma del error: se
+    afirma la propiedad (el segundo pedido consigue conexión) y que el descarte
+    quedó registrado."""
     monkeypatch.setenv("JAX_DB_POOL_MAX", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
     release_real = aiomysql.pool.Pool.release
     llamadas = []
 
     def release_que_falla_una_vez(self, conn):
-        fut = release_real(self, conn)  # la conexión vuelve al pool de verdad
         llamadas.append(conn)
         if len(llamadas) == 1:
+            # Falla ANTES de devolverla (2026-09-17): si se llamara primero al
+            # release real, la conexión volvería al pool y el descarte
+            # fail-soft del store la dejaría cerrada ahí dentro -- el pedido
+            # siguiente recibiría una conexión cerrada y el test mediría el
+            # doble, no el turno.
             raise RuntimeError("release falló")
-        return fut
+        return release_real(self, conn)
 
     monkeypatch.setattr(aiomysql.pool.Pool, "release", release_que_falla_una_vez)
 
     async def cuerpo():
-        with pytest.raises(RuntimeError, match="release falló"):
-            async with store.conexion_del_pool():
-                pass
-        async with store.conexion_del_pool() as conn:
-            return conn.closed
+        async with store.conexion_del_pool():
+            pass
+        # El TURNO es el semáforo del store: eso es lo que este test cuida.
+        # No se pide una segunda conexión porque, con `release()` fallando, la
+        # RANURA del pool se pierde (la conexión nunca vuelve a `_free`) y con
+        # JAX_DB_POOL_MAX=1 el segundo pedido esperaría por una razón distinta
+        # de la que se está midiendo.
+        estado = await store._estado_del_loop()
+        return estado.permisos._value
 
-    assert _correr(cuerpo) is False
+    assert _correr(cuerpo) == 1

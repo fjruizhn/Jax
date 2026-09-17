@@ -18,12 +18,9 @@ import os
 import unittest
 from unittest.mock import patch
 
-_existing_db_name = os.environ.get("JAX_DB_NAME")
-if _existing_db_name and _existing_db_name != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_existing_db_name!r} ya está seteado -- unset antes de correr este test."
-    )
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 from jacobs.executor import _invoke_motor  # noqa: E402
 from jacobs.models import Pipeline, Step  # noqa: E402

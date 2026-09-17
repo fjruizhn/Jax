@@ -22,6 +22,10 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+# la raíz ya quedó en el path (línea de arriba): este probe se corre como
+# script y ahí sys.path[0] es tests/, no la raíz
+from base_de_test import es_base_de_test  # noqa: E402
+
 import aiomysql
 import httpx
 
@@ -112,8 +116,8 @@ async def _fetch_state(conn):
 
 
 async def main():
-    if os.getenv("JAX_DB_NAME") != "jax_memory_test":
-        print("ABORTA: JAX_DB_NAME debe ser jax_memory_test para este probe.")
+    if not es_base_de_test(os.getenv("JAX_DB_NAME")):
+        print("ABORTA: JAX_DB_NAME debe ser una base de tests para este probe.")
         sys.exit(1)
 
     conn = await _db_conn()

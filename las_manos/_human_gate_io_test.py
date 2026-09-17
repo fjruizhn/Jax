@@ -1,7 +1,7 @@
 """Human gate de LAS MANOS contra una MariaDB REAL (2026-09-17): esquema,
 emisión con solo el sha256, consumo de un solo uso, carrera y plan.
 
-Seguridad: con JAX_DB_NAME apuntando a otra base que no sea jax_memory_test
+Seguridad: con JAX_DB_NAME apuntando a una base que no sea de tests
 (típico después de sourcear /etc/jax/.env), el módulo se niega a importar.
 
 Corre con:
@@ -12,12 +12,9 @@ from __future__ import annotations
 
 import os
 
-_nombre = os.environ.get("JAX_DB_NAME")
-if _nombre is not None and _nombre != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_nombre!r}: este test escribe tokens. Solo corre contra jax_memory_test."
-    )
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 import asyncio  # noqa: E402
 import time  # noqa: E402

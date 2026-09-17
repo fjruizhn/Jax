@@ -367,7 +367,32 @@ async def _cerrar(pool: aiomysql.Pool, permisos: asyncio.Semaphore | None) -> No
     pool.close()
     if forzar:
         pool.terminate()
-    await pool.wait_closed()
+    # SEGUNDA CAPA (2026-09-17): `wait_closed()` de aiomysql espera SIN LIMITE a
+    # que `_used` quede vacio. Con los permisos tomados nadie deberia tener una
+    # conexion, pero si una quedo marcada igual -- un defecto nuestro o de
+    # aiomysql --, el apagado del servicio se colgaba para siempre. Acotado y
+    # con `terminate()` detras (vacia `_used` y cierra esos sockets): el apagado
+    # TERMINA, pase lo que pase, y deja ERROR en el log.
+    try:
+        async with asyncio.timeout(limite):
+            await pool.wait_closed()
+        return
+    except TimeoutError:
+        logger.error(
+            "jacobs.store: el cierre del pool no termino en %d s con %d conexion(es) "
+            "marcadas en uso; se cortan a la fuerza.", limite, len(pool._used),
+        )
+    pool.terminate()
+    try:
+        async with asyncio.timeout(limite):
+            await pool.wait_closed()
+    except TimeoutError:
+        # Ni despues de terminate(). No se espera mas: colgar el apagado es peor
+        # que dejar sockets que el sistema operativo cerrara con el proceso.
+        logger.error(
+            "jacobs.store: el pool sigue sin cerrar %d s despues de terminate(); "
+            "se abandona la espera para no colgar el apagado.", limite,
+        )
 
 
 async def cerrar_pool() -> None:
@@ -376,8 +401,13 @@ async def cerrar_pool() -> None:
     estado = _pools.pop(asyncio.get_running_loop(), None)
     if estado is None or estado.pool is None:
         return
-    await estado.guardian.aclose()               # corre el finally: _cerrar(...)
-    await _cerrar(estado.pool, estado.permisos)  # por si el guardian ya habia terminado
+    # El cierre va en el `finally`: si `aclose()` explota (el finally del
+    # guardian corre `_cerrar`), el pool se cierra igual en vez de quedar vivo y
+    # fuera del registro -- mismo patron que la devolucion de `conexion()`.
+    try:
+        await estado.guardian.aclose()           # corre el finally: _cerrar(...)
+    finally:
+        await _cerrar(estado.pool, estado.permisos)  # por si el guardian ya habia terminado
 
 
 def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
@@ -675,18 +705,47 @@ async def conexion(desechable: bool = False):
         limpia = vigilada.reutilizable_tras(e)
         raise
     finally:
-        # Antes de devolver o cerrar: quien se quedo con el envoltorio (una
-        # tarea hermana) ya no llega al socket.
-        vigilada._invalidar()
+        # DEVOLUCION POR CONSTRUCCION (2026-09-17). Decidir el destino de la
+        # conexion y devolverla vivian en el MISMO `finally`, en ese orden: una
+        # excepcion inesperada al decidir (la destapo un AttributeError de un
+        # doble de test) saltaba `pool.release(conn)`, la conexion quedaba
+        # marcada en `_used` del pool de aiomysql y `pool.wait_closed()` la
+        # esperaba PARA SIEMPRE -- el apagado del servicio no terminaba nunca.
+        # Ahora la decision va en su propio bloque y la devolucion en el
+        # `finally` de afuera: pase lo que pase aca, la conexion vuelve.
         try:
+            # Antes de devolver o cerrar: quien se quedo con el envoltorio (una
+            # tarea hermana) ya no llega al socket.
+            vigilada._invalidar()
             if desechable or not limpia or not _sesion_reutilizable(conn):
                 conn.close()
-            # release() saca la conexion de `_used` antes de devolver. El aviso
-            # que agenda es para el cond.wait de aiomysql, al que con el
-            # semaforo nadie llega: no se espera.
-            pool.release(conn)
+        except Exception:  # fail-soft: no tapa el error del cuerpo -- se registra y la conexion se DESCARTA (fail-closed en la sesion); relanzar aca dejaria a `conexion()` fallando por un defecto del cierre
+            # Fail-closed: si no se pudo decidir si la sesion sirve, no se
+            # reusa. El error se registra y no tapa el del cuerpo (la
+            # cancelacion y los BaseException NO se tragan: suben, y la
+            # devolucion de abajo corre igual).
+            logger.exception(
+                "jacobs.store: error al decidir el destino de una conexion; se descarta."
+            )
+            with contextlib.suppress(Exception):
+                conn.close()
         finally:
-            permisos.release()
+            try:
+                # release() saca la conexion de `_used` antes de devolver. El
+                # aviso que agenda es para el cond.wait de aiomysql, al que con
+                # el semaforo nadie llega: no se espera.
+                pool.release(conn)
+            except Exception:  # fail-soft: la conexion se DESCARTA y el permiso vuelve igual; relanzar desde el finally del cierre taparia el error real del cuerpo
+                # release() tambien mira la conexion (transaccion abierta): si
+                # explota, la conexion no vuelve al pool y se descarta. Que el
+                # apagado no se cuelgue lo garantiza el limite de _cerrar().
+                logger.exception(
+                    "jacobs.store: pool.release() fallo; la conexion se descarta."
+                )
+                with contextlib.suppress(Exception):
+                    conn.close()
+            finally:
+                permisos.release()
 
 
 # `conexion_del_pool()` es el MISMO objeto que `conexion()`: las dos ramas le

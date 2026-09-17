@@ -20,14 +20,12 @@ import uuid
 # las_manos/_motor_usage_writer_test.py -- setdefault() no pisa un
 # JAX_DB_NAME ya exportado, y ese silencio ya escribió una fila real de
 # prueba en axioma_usage esta sesión. Fail loud en vez de fail silent.
-_existing_db_name = os.environ.get("JAX_DB_NAME")
-if _existing_db_name and _existing_db_name != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_existing_db_name!r} ya está seteado (¿sourceaste "
-        f"/etc/jax/.env?) -- este archivo escribe filas reales a esa DB. "
-        f"Unset JAX_DB_NAME antes de correr este test."
-    )
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+from base_de_test import (  # noqa: E402
+    exigir_base_de_test,
+    nombre_base_de_test,
+)
+
+exigir_base_de_test()
 
 from jacobs import store, usage_writer
 
@@ -59,7 +57,7 @@ async def _conexion():
     return await aiomysql.connect(
         host=_host, port=int(_port),
         user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
-        db=os.getenv("JAX_DB_NAME", "jax_memory_test"), autocommit=True,
+        db=os.getenv("JAX_DB_NAME", nombre_base_de_test()), autocommit=True,
         connect_timeout=db_connect_timeout_seconds(),
     )
 

@@ -28,7 +28,9 @@ import unittest
 # Forzado, no setdefault: si el proceso ya sourceo /etc/jax/.env, JAX_DB_NAME
 # apunta a produccion y este test crearia indices ahi sin pasar por el camino
 # real. Mismo blindaje que _pipeline_identity_test.py.
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jacobs import store
 
