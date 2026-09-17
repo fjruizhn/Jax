@@ -160,6 +160,14 @@ async def init_tables() -> None:
                 # Ronda 5 (2026-08-20, T1): reemplaza el owner file de
                 # filesystem -- ver Pipeline.owner_ack_at en models.py.
                 ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL"),
+                # Frente F (2026-09-16): de quién es hijo un pipeline de Ada y a
+                # qué profundidad. ALGORITHM=INSTANT explícito: si MariaDB no
+                # puede agregarla sin copiar la tabla, FALLA en vez de bloquear
+                # las escrituras de Jacobs mientras copia.
+                ("parent_pipeline_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "parent_pipeline_id VARCHAR(36) NULL, ALGORITHM=INSTANT"),
+                ("depth", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "depth INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -217,6 +225,23 @@ async def init_tables() -> None:
                     ts          DOUBLE NOT NULL
                 )
             """)
+            # Frente F (2026-09-16): contrato de sub-pipelines. Se guarda SOLO
+            # el sha256 del token. Tabla nueva -> el índice va en el CREATE (no
+            # hay filas que migrar). Tiempos en DOUBLE epoch como el resto de
+            # Jacobs: inmunes a la zona horaria de la sesión.
+            await cur.execute("""
+                CREATE TABLE IF NOT EXISTS jacobs_subpipeline_tokens (
+                    token_hash         CHAR(64)    NOT NULL PRIMARY KEY,
+                    parent_pipeline_id VARCHAR(36) NOT NULL,
+                    parent_step        VARCHAR(36) NOT NULL,
+                    depth_hijo         INT         NOT NULL,
+                    emitido_at         DOUBLE      NOT NULL,
+                    vence_at           DOUBLE      NOT NULL,
+                    usado_at           DOUBLE      NULL,
+                    hijo_pipeline_id   VARCHAR(36) NULL,
+                    INDEX idx_subpipeline_tokens_padre (parent_pipeline_id)
+                ) ENGINE=InnoDB
+            """)
             # --- Indices de las columnas por las que se FILTRA ---------------
             # Las tres tablas nacieron con la PK y nada mas, y el codigo las
             # consulta por pipeline_id y por status. Con 611 filas el scan no
@@ -266,8 +291,9 @@ async def pipeline_create(p: Pipeline) -> None:
                 INSERT INTO jacobs_pipelines
                     (pipeline_id, name, invoked_by, mode, status,
                      plan, current_step_index, max_steps, context_refs,
-                     created_at, updated_at, user_id, tenant_id)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s)
+                     created_at, updated_at, user_id, tenant_id,
+                     parent_pipeline_id, depth)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s,%s)
                 """,
                 (
                     p.pipeline_id, p.name, p.invoked_by, p.mode, p.status.value,
@@ -276,6 +302,7 @@ async def pipeline_create(p: Pipeline) -> None:
                     json.dumps(p.context, ensure_ascii=False),
                     p.created_at, p.updated_at,
                     p.user_id, p.tenant_id,
+                    p.parent_pipeline_id, p.depth,
                 ),
             )
     finally:
@@ -386,6 +413,8 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         user_id=row.get("user_id"),
         tenant_id=row.get("tenant_id"),
         owner_ack_at=row.get("owner_ack_at"),
+        parent_pipeline_id=row.get("parent_pipeline_id"),
+        depth=int(row.get("depth") or 0),
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,
