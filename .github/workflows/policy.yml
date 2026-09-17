@@ -259,8 +259,17 @@ jobs:
           #   seguidas con los tres archivos.
           # 71 sin cambio tras el rebase sobre de6964e (2026-09-17): medido dos
           #   veces, e instala desde requirements.txt como el resto (E-19).
-          grep -qE "^71 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 71 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 71 -> 76 el 2026-09-17 (CI rojo de 13b7759: "20 conexiones para 20
+          #   autorizaciones"): la base de este job no tiene la tabla `facet`, la
+          #   consulta da 1146 y conexion() cerraba la conexion ante CUALQUIER
+          #   excepcion. En local la tabla existe y pasaba. +5 de
+          #   jacobs/_store_pool_test.py -- 20 errores de SQL concurrentes y 20
+          #   autorizaciones sin `facet` no abren 20 conexiones (rojo: 20), el error
+          #   del servidor devuelve la conexion sana, con transaccion abierta se
+          #   descarta, y los errores del cliente o fuera de la lista blanca se
+          #   descartan (cada guarda validada por mutacion).
+          grep -qE "^76 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 76 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

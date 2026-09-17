@@ -259,6 +259,80 @@ class SinFugasTest(_ConBase):
         self.assertIn(conn, pool._free)
 
 
+_TABLA_INEXISTENTE = "tabla_que_no_existe_pool_test"
+
+
+class ErrorDelServidorTest(_ConBase):
+    """Un error que MANDA EL SERVIDOR no ensucia el socket (2026-09-17).
+
+    POR QUE EXISTE. El job `subpipeline-contrato-db` de 13b7759 fallo con "20
+    conexiones para 20 autorizaciones": su MariaDB recien creada no tiene la
+    tabla `facet`, la consulta da ProgrammingError 1146 y `conexion()` cerraba
+    la conexion ante CUALQUIER excepcion -- un handshake nuevo por pedido
+    fallido. En local la tabla existe y el test pasaba por el camino feliz.
+    Es el mismo agotamiento de puertos que el pool vino a cerrar, disparado por
+    una rafaga de errores (tabla faltante, clave duplicada, deadlock). El error
+    del servidor llega como un paquete completo: el protocolo queda en limite
+    de paquete y la sesion se sigue validando con _sesion_reutilizable."""
+
+    async def _falla_en_el_servidor(self):
+        with self.assertRaises(aiomysql.ProgrammingError) as ctx:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(f"SELECT * FROM {_TABLA_INEXISTENTE}")
+        self.assertEqual(ctx.exception.args[0], 1146)
+        return conn
+
+    async def test_errores_de_sql_concurrentes_no_abren_una_conexion_cada_una(self):
+        await store.obtener_pool()
+        with _ContadorDeConexiones() as c:
+            resultados = await _a_lo_sumo(asyncio.gather(
+                *[self._falla_en_el_servidor() for _ in range(20)],
+                return_exceptions=True,
+            ))
+        self.assertEqual([r for r in resultados if isinstance(r, BaseException)], [])
+        self.assertLessEqual(c.n, int(self.TAMANIO), f"{c.n} conexiones para 20 errores de SQL")
+
+    async def test_error_del_servidor_devuelve_la_conexion_sana(self):
+        conn = await self._falla_en_el_servidor()
+        pool = await store.obtener_pool()
+        self.assertFalse(conn.closed, "un error del servidor descarto una conexion sana")
+        self.assertIn(conn, pool._free)
+        self.assertEqual(len(pool._used), 0)
+        async with store.conexion() as otra:
+            self.assertIs(otra, conn)
+            async with otra.cursor() as cur:
+                await cur.execute("SELECT 1, @@SESSION.autocommit")
+                self.assertEqual(await cur.fetchone(), (1, 1))
+
+    async def test_error_del_servidor_con_transaccion_abierta_se_descarta(self):
+        with self.assertRaises(aiomysql.ProgrammingError):
+            async with store.conexion() as conn:
+                await conn.begin()
+                async with conn.cursor() as cur:
+                    await cur.execute("SELECT 1")
+                    await cur.execute(f"SELECT * FROM {_TABLA_INEXISTENTE}")
+        self.assertTrue(conn.closed, "una transaccion abierta volvio al pool tras un error")
+
+    async def test_error_del_cliente_descarta_aunque_parezca_de_sql(self):
+        """Perdida de conexion (2013), un error sin codigo del servidor o uno
+        del servidor que no esta en la lista de los que dejan el socket sano:
+        estado desconocido, se descarta. Fail-closed ante la duda."""
+        for exc in (
+            aiomysql.OperationalError(2013, "Lost connection to MySQL server during query"),
+            aiomysql.ProgrammingError("Cursor closed"),
+            aiomysql.ProgrammingError(2014, "Commands out of sync"),
+            aiomysql.InterfaceError(0, ""),
+            aiomysql.OperationalError(1927, "Connection was killed"),
+            aiomysql.InternalError(1105, "Unknown error"),
+        ):
+            with self.subTest(exc=repr(exc)):
+                with self.assertRaises(type(exc)):
+                    async with store.conexion() as conn:
+                        raise exc
+                self.assertTrue(conn.closed, f"{exc!r} devolvio la conexion al pool")
+
+
 class EsperaAcotadaTest(_ConBase):
     TAMANIO = "1"
 
@@ -548,6 +622,28 @@ class AdmisionDeFacetUsaElPoolTest(_ConBase):
                 *[check_facet_admission("jacobs", "hipatia") for _ in range(20)],
                 return_exceptions=True,
             )
+        self.assertLessEqual(c.n, int(self.TAMANIO), f"{c.n} conexiones para 20 autorizaciones")
+
+    async def test_autorizaciones_sin_tabla_facet_no_abren_una_conexion_cada_una(self):
+        """La condicion EXACTA del job de CI de 13b7759 (base sin `facet`), fijada
+        aca para que no dependa de que la base local tenga o no la tabla: la
+        consulta se redirige a una tabla inexistente y el SERVIDOR responde 1146."""
+        from aiomysql.cursors import Cursor
+        from motor_registry.facet_policy import check_facet_admission
+
+        original = Cursor.execute
+
+        async def execute_sin_facet(cur_self, query, args=None):
+            return await original(cur_self, query.replace("FROM facet ", f"FROM {_TABLA_INEXISTENTE} "), args)
+
+        await store.obtener_pool()
+        with patch.object(Cursor, "execute", execute_sin_facet), _ContadorDeConexiones() as c:
+            resultados = await asyncio.gather(
+                *[check_facet_admission("jacobs", "hipatia") for _ in range(20)],
+                return_exceptions=True,
+            )
+        codigos = {r.args[0] for r in resultados if isinstance(r, aiomysql.ProgrammingError)}
+        self.assertEqual(codigos, {1146}, f"no se reprodujo la base sin `facet`: {resultados[:3]}")
         self.assertLessEqual(c.n, int(self.TAMANIO), f"{c.n} conexiones para 20 autorizaciones")
 
 

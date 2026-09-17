@@ -249,6 +249,43 @@ def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
     return (not conn.closed) and conn.get_autocommit() and not conn.get_transaction_status()
 
 
+# Errores que el SERVIDOR responde con un paquete de error completo y que no
+# terminan la sesion: el protocolo queda en limite de paquete y la conexion
+# sirve. Descartarla abria un handshake por pedido fallido: el job de CI de
+# 13b7759 (base sin la tabla `facet`, 1146) midio 20 conexiones para 20
+# autorizaciones, el mismo agotamiento de puertos que el pool vino a cerrar,
+# ahora disparado por una rafaga de errores.
+#
+# LISTA BLANCA, no negra: pymysql mapea un codigo desconocido del servidor a
+# OperationalError, y ahi caen tambien los que SI cortan la sesion (1927
+# conexion matada, 1053 apagado). Ante la duda se descarta.
+#   - ProgrammingError / IntegrityError / DataError / NotSupportedError: solo
+#     los emite pymysql para codigos del servidor de su tabla (1146, 1064,
+#     1062, 1452...). Un ProgrammingError sin codigo ("Cursor closed") no entra.
+#   - OperationalError solo con 1205 (lock wait timeout) y 1213 (deadlock).
+# Los codigos 2000-2999 son del CLIENTE (2013 conexion perdida): nunca entran.
+_CLASES_DE_ERROR_DEL_SERVIDOR = (
+    aiomysql.ProgrammingError,
+    aiomysql.IntegrityError,
+    aiomysql.DataError,
+    aiomysql.NotSupportedError,
+)
+_OPERACIONALES_SANOS = frozenset({1205, 1213})
+
+
+def _error_del_servidor_sano(e: BaseException) -> bool:
+    if not isinstance(e, aiomysql.MySQLError) or not e.args:
+        return False
+    codigo = e.args[0]
+    if not isinstance(codigo, int) or isinstance(codigo, bool):
+        return False
+    if codigo < 1000 or 2000 <= codigo < 3000:
+        return False
+    if isinstance(e, aiomysql.OperationalError):
+        return codigo in _OPERACIONALES_SANOS
+    return isinstance(e, _CLASES_DE_ERROR_DEL_SERVIDOR)
+
+
 @contextlib.asynccontextmanager
 async def conexion(desechable: bool = False):
     """Una conexion del pool, devuelta al salir.
@@ -256,7 +293,9 @@ async def conexion(desechable: bool = False):
     Se DESCARTA (se cierra, el pool abre otra cuando haga falta) si el cuerpo
     termino con excepcion o cancelacion -- el socket puede haber quedado a mitad
     de una respuesta --, si la sesion quedo sucia, o si `desechable=True` (ver el
-    contrato en _sesion_reutilizable).
+    contrato en _sesion_reutilizable). La excepcion a esa regla es un error que
+    respondio el SERVIDOR y que deja el socket sano (_error_del_servidor_sano):
+    esa conexion vuelve al pool si la sesion sigue limpia.
 
     Esperar un hueco tiene limite: `JAX_DB_CONNECT_TIMEOUT_SECONDS`, el mismo
     que acota abrir el socket. Con el pool lleno mas alla de eso, TimeoutError:
@@ -282,6 +321,9 @@ async def conexion(desechable: bool = False):
     try:
         yield conn
         limpia = True
+    except BaseException as e:
+        limpia = _error_del_servidor_sano(e)
+        raise
     finally:
         try:
             if desechable or not limpia or not _sesion_reutilizable(conn):
