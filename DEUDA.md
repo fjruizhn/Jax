@@ -625,12 +625,41 @@ volumen de datos, `MAX_PARALLEL_PIPELINES` o la infraestructura.
 test del GET_LOCK junto con el GET_LOCK; bajar un piso sólo se justifica cuando se retira
 funcionalidad y se dice). Detector P10 en cero violaciones.
 
+**El rojo de CI del 2026-09-17 y su diagnóstico (no era ni el cupo ni la versión).**
+`CreacionConcurrenteSinCandadoTest::test_diez_creaciones_a_la_vez_admiten_exactamente_el_cupo` falló
+en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 3.
+
+- **Descartado que sea de versión, con evidencia.** MariaDB 11.8 efímero en Docker (la del runner;
+  producción corre 12.3.3): las dos formas de UPDATE condicionado y la carrera de 50 creaciones
+  cruzadas con 50 reanimaciones dan el cupo EXACTO con cero errores, **igual en 11.8 que en 12.3**.
+  Y el job entero (135 passed) pasa en esa 11.8 recién creada. La diferencia de optimizador que otra
+  sesión midió ese día (el `GROUP BY` de una derivada ordena en 11.8 y no en 12.3) **no afecta a
+  estas sentencias**: no dependen del orden, sólo del `COUNT`.
+- **Descartado que el cupo estuviera tomado.** La precondición de la clase ya exigía
+  `cupo.activos() == 0`; el error vino de la medición, así que la base arrancó limpia.
+- **La causa real: el test medía la gobernanza, no el cupo.** `create_pipeline` corre el pre-vuelo
+  (jax#209), que lee `facet`, `model`, `capability` y `credential` — tablas de las migraciones de
+  **jax-platform**, no de `store.init_tables()`. Sin sustituirlo, las diez creaciones morían con 503
+  `prevuelo_no_disponible`. En la `jax_memory_test` compartida de hall9000 esas tablas existen porque
+  las sembró otro job: **el verde local dependía de un estado que el test no fijaba.**
+- **Arreglo:** se sustituye el pre-vuelo (este test mide el cupo; el pre-vuelo tiene sus tests), las
+  aserciones van en orden de diagnóstico (primero "todo rechazo es el 422 del cupo", después las
+  cuentas) y la precondición aborta ruidosamente **con el censo de la tabla**
+  (`SELECT status, COUNT(*) ... GROUP BY status`) en el mensaje, en las tres clases. Validado por
+  mutación: sin el sustituto nombra la tabla que falta; con el cupo desactivado cae `10 != 3`; con
+  tres `running` ajenos aborta con `3 != 0 ... [censo: completed=81, running=3]`.
+
 - **PENDIENTE con fecha:**
   - [ ] **2026-09-17** Orden de merge contra el frente G: agrega `queued`, `awaiting_approval` y
         `waiting_children`. **Decidir cuáles ocupan cupo** y clasificarlos en
         `policy.ESTADOS_QUE_OCUPAN_CUPO` / `ESTADOS_SIN_CUPO`. Ya no se puede olvidar en silencio:
         la partición es exhaustiva y hay controles que se ponen rojos solos (validado por mutación
         con `queued`), más uno contra la tabla real. Decisión de Fernando.
+  - [ ] **2026-09-17** El CI corre MariaDB **11.8** y producción **12.3.3**. En este trabajo se
+        comprobó que para las sentencias del cupo las dos versiones coinciden, pero ese mismo día
+        otra sesión midió una diferencia REAL de optimizador entre ellas (el `GROUP BY` de una
+        derivada ordena en 11.8 y no en 12.3). Decidir si el CI se sube a 12.3: es una decisión de
+        infraestructura, no un parche de SQL.
   - [ ] **2026-09-17** Las suites de base dejan pipelines VIVOS en `jax_memory_test`
         (`arnes-ada-padre`, `secreto de B`, `causa running`): ocupan cupo y hacen abortar cualquier
         medición posterior. El pre-vuelo del arnés los detecta, pero la limpieza es a mano. Cerrarlos
