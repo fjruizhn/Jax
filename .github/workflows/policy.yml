@@ -109,7 +109,11 @@ jobs:
           python-version: "3.12"
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
       - run: pip install -r requirements.txt pytest
-      - run: python -m pytest jacobs/_facet_health_test.py -v
+      # PYTHONPATH=las_manos (2026-09-17): jacobs/facet_health.py importa
+      # `redaccion`, que vive en jax/core y se alcanza por el symlink de
+      # las_manos/. Sin esto el job muere en la colección con
+      # ModuleNotFoundError, no por el código bajo prueba.
+      - run: PYTHONPATH=las_manos python -m pytest jacobs/_facet_health_test.py -v
 
   # `check_facet_health()` es la unica pieza del lector sin cobertura
   # automatica: `evaluate_states`/`transitions_to_notify` tienen 11 tests
@@ -141,6 +145,13 @@ jobs:
       JAX_DB_USER: root
       JAX_DB_PASSWORD: ci
       JAX_DB_NAME: jax_memory_test
+      # Ruling R50 (2026-09-17): la MariaDB de ESTE job es un service container
+      # propio (base exclusiva, nadie más escribe facet_health_event/alert), así
+      # que acá corren los tres tests de aserción global de
+      # jacobs/_facet_health_io_test.py (__system__, tabla vacía, supresión 6h).
+      # En cualquier otro lado (jax_memory_test compartida) se saltan. Único
+      # lugar que define la variable (lo fija tests/test_facet_health_tabla_exclusiva.py).
+      JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA: "1"
       # las_manos en el path desde E-24 (2026-09-16): jacobs/plan.py, executor.py
       # y reaper.py importan `cliente_http_compartido` por su nombre corto, como
       # corren en produccion (dentro de LAS MANOS, con las_manos/ en sys.path).
@@ -179,6 +190,10 @@ jobs:
           #   idx_jacobs_pipelines_duenio (user_id, tenant_id, created_at) lo crea
           #   init_tables(); el test lo BORRA antes y lo exige de vuelta, porque la
           #   jax_memory_test local ya lo tenia y pasaba sin el cambio. Visto en rojo.
+          # 9 sigue en 9 el 2026-09-17 (Ruling R50): los tres tests globales de
+          #   _facet_health_io_test.py quedan detrás de JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA,
+          #   que este job define (base propia): corren acá. Fuera de este job (hall9000,
+          #   base compartida) la misma lista da "6 passed, 3 skipped" -- no es este piso.
           grep -qE "^9 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
 
@@ -223,6 +238,30 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest
+      # 2026-09-17 (pre-vuelo y continuar): crear un pipeline ahora pasa por el
+      # pre-vuelo, que lee `facet`, `model`, `capability` y `credential` -- tablas
+      # que crean las migraciones de jax-platform, no init_tables() de Jacobs. Sin
+      # este paso el job muere con "Table 'jax_memory_test.facet' doesn't exist",
+      # que no es un fallo del codigo bajo prueba. Mismo patron que el job
+      # jacobs-gobernanza-db.
+      - name: Clonar jax-platform (sus migraciones crean la gobernanza)
+        run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
+      - run: pip install -r /tmp/jax-platform/backend/requirements.txt
+      - name: Esquema de gobernanza con SUS migraciones
+        working-directory: /tmp/jax-platform/backend
+        run: |
+          python - <<'PY'
+          import asyncio
+          from db.connection import close_pool
+          from db.migrations import run_migrations
+
+          async def main():
+              await run_migrations()
+              await close_pool()
+
+          asyncio.run(main())
+          print("run_migrations OK")
+          PY
       - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
@@ -301,7 +340,34 @@ jobs:
           #   uso, inventado, vencido, 20 consumos a la vez -> 1 gana, EXPLAIN por PK.
           #   Mutacion: quitar `usado_at IS NULL` del UPDATE -> 2 rojos (un solo uso y
           #   la carrera).
-          # 109 -> 120 el 2026-09-17 (el cupo lo hace cumplir la base):
+          # 109 -> 112 el 2026-09-17 (rama feat/prevuelo-y-continuar, guard de la
+          #   excepcion al pool): +3 puros de jacobs/_store_pool_test.py
+          #   (ExcepcionAlPoolTest) -- la lista de llamadores de
+          #   conexion_dedicada() en CODIGO DE SERVICIO (jacobs/, las_manos/,
+          #   jax/, tools/; sin tests ni scripts/) no crece sola, la lista no
+          #   nombra llamadores muertos, y el docstring no vuelve a prometer
+          #   "exactamente DOS llamadores" (era falso: tests y scripts tambien
+          #   la usan). Visto en rojo agregando un llamador falso en jacobs/ y,
+          #   el del docstring, mutando el docstring. Medido: "112 passed".
+          # 112 -> 117 el 2026-09-17 (medición del excedente de conexiones): +5 de
+          #   jacobs/_store_pool_test.py (DedicadasVivasTest) contra la base real -- el
+          #   contador de conexiones DEDICADAS vivas suma al abrir y resta al cerrar,
+          #   cerrar dos veces resta una sola vez, la que nadie cierra queda contada, el
+          #   pool NO cuenta como dedicada, y la rama found_rows también cuenta.
+          #   Validados por mutación: sin envolver `close()` caen 3; sin la idempotencia
+          #   cae el del doble cierre.
+          # 109 -> 113 el 2026-09-17 (cuelgue del apagado, fix/pool-release-siempre):
+          #   +4 de jacobs/_store_pool_test.py -- un error al DECIDIR el destino de la
+          #   conexion (AttributeError de un doble) devuelve igual la conexion y no
+          #   cuelga el apagado; un `pool.release()` que explota no se come el permiso;
+          #   y el apagado TERMINA aunque una conexion quede marcada en `_used`.
+          #   Los cuatro vistos en rojo contra 351ec95: dos con "cerrar_pool() no
+          #   termino en 10 s" (el cuelgue reproducido, acotado para no colgar la suite)
+          #   y dos con el error del tramo de la decision subiendo sin release.
+          # 113 -> 121 el 2026-09-17 (pre-vuelo y continuar sobre master con
+          # jax#207): la union de las dos listas. El runner conto 121 passed y
+          # 49 subtests; manda el runner, como dice la nota de arriba.
+          # 121 -> 133 el 2026-09-17 (el cupo lo hace cumplir la base):
           #   jacobs/_cupo_io_test.py (+11) -- 25 y 50 corrutinas reservando a la vez sin
           #   superar el cupo y sin un solo deadlock sin reintentar, soltar devuelve el cupo,
           #   soltar no toca un pipeline que ya arranco, completar escribe plan/identidad/padre,
@@ -311,8 +377,8 @@ jobs:
           #   global esas diez planificaciones de 50 ms se serializaban en 0,5 s) y un plan
           #   rechazado devuelve el cupo; y que la tabla REAL no traiga un estado que PipelineStatus no
           #   clasifica (el frente G trae `queued`). Medido en local (3.14) contra jax_memory_test.
-          grep -qE "^120 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 120 tests CORRIDOS (no skipeados)."; exit 1; }
+          grep -qE "^133 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 133 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -800,6 +866,25 @@ jobs:
           tests/test_store_indice_duenio.py
           tests/test_cola_uso_escritores.py
           tests/test_respaldo_de_uso_aislado.py
+          tests/test_prevuelo_config.py
+          tests/test_jacobs_epoca_ejecutor.py
+          tests/test_jacobs_resume_epoca.py
+          tests/test_prevuelo_reglas.py
+          tests/test_prevuelo_salud_pura.py
+          tests/test_prevuelo_sonda.py
+          tests/test_prevuelo_orquestador.py
+          tests/test_jacobs_preflight_endpoint.py
+          tests/test_jacobs_continuar.py
+          tests/test_jacobs_continue_endpoint.py
+          tests/test_jacobs_relaunch_cli.py
+          tests/test_prevuelo_pool.py
+          tests/test_perfil_prevuelo.py
+          tests/test_medir_min_output_tokens.py
+          tests/test_jacobs_cancel_reaper_epoca.py
+          tests/test_prevuelo_catalogo_de_motores_compartido.py
+          tests/test_jacobs_conexiones_por_pedido.py
+          tests/test_facet_health_tabla_exclusiva.py
+          tests/test_delete_de_tablas_compartidas.py
           tests/test_frente_e_retiros.py
           tests/test_credencial_sin_fallback_env.py
           tests/test_retiro_de_la_voz.py
@@ -823,6 +908,8 @@ jobs:
           tests/test_human_gate_sin_emision_http.py
           tests/test_las_manos_auth_servicio.py
           tests/test_creacion_sin_candado_global.py
+          tests/test_cupo_en_todos_los_caminos.py
+          tests/test_base_por_sesion.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -903,6 +990,25 @@ jobs:
             tests/test_store_indice_duenio.py \
             tests/test_cola_uso_escritores.py \
             tests/test_respaldo_de_uso_aislado.py \
+            tests/test_prevuelo_config.py \
+            tests/test_jacobs_epoca_ejecutor.py \
+            tests/test_jacobs_resume_epoca.py \
+            tests/test_prevuelo_reglas.py \
+            tests/test_prevuelo_salud_pura.py \
+            tests/test_prevuelo_sonda.py \
+            tests/test_prevuelo_orquestador.py \
+            tests/test_jacobs_preflight_endpoint.py \
+            tests/test_jacobs_continuar.py \
+            tests/test_jacobs_continue_endpoint.py \
+            tests/test_jacobs_relaunch_cli.py \
+            tests/test_prevuelo_pool.py \
+            tests/test_perfil_prevuelo.py \
+            tests/test_medir_min_output_tokens.py \
+            tests/test_jacobs_cancel_reaper_epoca.py \
+            tests/test_prevuelo_catalogo_de_motores_compartido.py \
+            tests/test_jacobs_conexiones_por_pedido.py \
+            tests/test_facet_health_tabla_exclusiva.py \
+            tests/test_delete_de_tablas_compartidas.py \
             tests/test_frente_e_retiros.py \
             tests/test_credencial_sin_fallback_env.py \
             tests/test_retiro_de_la_voz.py \
@@ -926,6 +1032,8 @@ jobs:
             tests/test_human_gate_sin_emision_http.py \
             tests/test_las_manos_auth_servicio.py \
             tests/test_creacion_sin_candado_global.py \
+            tests/test_cupo_en_todos_los_caminos.py \
+            tests/test_base_por_sesion.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -1210,6 +1318,598 @@ jobs:
           #   test_ejecutor_prioridad.py (11 async + 1 del arreglo del carril sync, que
           #   colgaba sin tope la segunda peticion paralela) y +18 del proxy nuevo.
           #   CONFIRMADO POR EL RUNNER (3.12, PR #173): "742 passed, 1 skipped, 1 xfailed".
+          # 742 -> 749 el 2026-09-17 (pre-vuelo): test_prevuelo_config.py (+7) -- timeout,
+          #   divisor y techo de la sonda por entorno; un valor inválido falla con el nombre.
+          # 749 -> 755 el 2026-09-17 (época de corrida): test_jacobs_epoca_ejecutor.py (+6) --
+          #   cancelar durante una ola ya no reescribe running, la corrida superada no escribe
+          #   contexto ni despacha, relee la época por ola, un solo PIPELINE_ABORTED. 5 vistos
+          #   en rojo; la corrida normal es control.
+          # 755 -> 762 el 2026-09-17 (ronda de arreglo 1, revisión de Task 3): +7 en el mismo
+          #   archivo. 1) la relectura de época antes de cada ola tenía un test que pasaba
+          #   igual con la relectura deshabilitada (mismo resultado final por otro camino); se
+          #   le agregaron aserciones sobre WAVE_STARTED y los intentos de escritura del step
+          #   para distinguirlo (sin test nuevo). 2) siete salidas tempranas por época perdida
+          #   no tenían test propio: el step del kill switch, el `aborted` del kill switch, el
+          #   step del gate de hyde, el `interrupted` del gate de hyde, el `completed` de
+          #   dry_run, el `interrupted` de supervised, y _fail_step cuando su propia escritura
+          #   se rechaza -- siete tests nuevos. Los 7 se vieron en rojo revirtiendo cada
+          #   chequeo a una escritura plana, uno a la vez.
+          # 762 -> 766 el 2026-09-17 (ronda de arreglo 1, Task 4): +4 en
+          #   test_jacobs_resume_epoca.py -- resume y approve-step toman la época;
+          #   el pedido doble recibe 409 sin tocar pasos. 4 vistos en rojo.
+          # 766 -> 788 el 2026-09-17 (Task 5, reglas puras del pre-vuelo):
+          #   test_prevuelo_reglas.py (+22) -- contrato de salida, tope efectivo
+          #   (motor vs catálogo), credencial ausente, llamadas máximas por
+          #   transporte (motor con/sin herramientas, schema con reintento,
+          #   gemini directo), costo redondeado hacia arriba a 6 decimales, pasos
+          #   sin precio que se declaran no acotados sin bloquear, hyde/assemble
+          #   sin evaluar y output_validator.puede_pedir_reintento.
+          # 788 -> 800 el 2026-09-17 (Task 5, ronda de arreglo 1, Rulings R9-R11):
+          #   +12 en el mismo archivo -- motor con herramientas no acotado
+          #   (R9a, "herramientas_sin_tope"), reintento de schema en motor que
+          #   ACUMULA el costo por llamada en vez de repetirlo (R9b), el
+          #   reintento de grounding de Gemini que NO acumula (R9c, control),
+          #   ollama sin max_output_tokens bloqueado (desvío 5, control),
+          #   tope_efectivo con motor por encima del catálogo y con un paso
+          #   HTTP que ignora motor_max_tokens (control), el clamp de
+          #   max_iteraciones en llamadas_max (control), subprocess no-hyde
+          #   que ya no revienta con TypeError (R11), transporte desconocido
+          #   rechazado (R10), y sondeadas/pasos_costo ordenados, el guard de
+          #   REGLAS en Violacion y la unión " | " de dos errores de contrato
+          #   (control). Los "control" pasaban ya contra el código sin
+          #   arreglar (deviation 5, tope_efectivo y el clamp ya eran
+          #   correctos, solo no tenían test); confirmados en rojo por
+          #   mutación (revertida) en vez de por el código viejo. R9a, R9b,
+          #   R11 y R10 sí se vieron en rojo contra el código viejo.
+          # 800 -> 802 el 2026-09-17 (Task 5, ronda de arreglo 2, R9a acotada
+          #   a TRANSPORTES_QUE_COBRAN): +2 en el mismo archivo -- R9a se
+          #   había puesto SIN mirar el transporte, así que un motor con
+          #   herramientas en ollama (gratis) quedaba "herramientas_sin_tope"
+          #   en vez de "local" $0. test_motor_ollama_con_herramientas_sigue_siendo_local
+          #   se vio en rojo contra c827902 (AssertionError: usd_max None,
+          #   se esperaba Decimal(0)); test_motor_con_herramientas_en_transporte_que_cobra_no_esta_acotado
+          #   es control (http_openai_compat+herramientas ya daba
+          #   "herramientas_sin_tope", ahora con la condición explícita del
+          #   transporte que cobra).
+          # 802 -> 804 el 2026-09-17 (Task 5, ronda de arreglo 3, segunda
+          #   re-revisión): +2 en el mismo archivo -- la cuantización de
+          #   costo_usd_acumulado_motor es ROUND_CEILING, no ROUND_HALF_EVEN
+          #   (bancario): sin un caso cuyo séptimo decimal caiga bajo la
+          #   mitad (0.0102344 -> 0.010235, no 0.010234) cambiar el redondeo
+          #   no lo notaba nada; visto en rojo por mutación temporal
+          #   (revertida). Y un paso HTTP directo (via_motor=False) con
+          #   herramientas activas sigue acotado normal -- "sin tope" es del
+          #   Motor Registry, no de cualquier tools; visto en rojo sacando el
+          #   guard de via_motor (mutación temporal, revertida). También se
+          #   corrigió la aritmética del docstring de
+          #   test_motor_con_reintento_de_schema_acumula_el_costo (11492.27 →
+          #   11493.31, 20773.74 → 20774.78; el valor final ya redondeado,
+          #   0.020775, no cambió).
+          # 804 -> 809 el 2026-09-17 (Task 6, catálogo/salud/motor resuelto):
+          #   test_prevuelo_salud_pura.py (+5) -- salud de nivel proveedor
+          #   (gate_* no cuenta, provider_error se vuelve a medir, la ventana
+          #   corta) y MotorPolicy.motor_que_despacharia (pedido/prioridad/
+          #   capability inexistente).
+          # 809 -> 821 el 2026-09-17 (Task 7, la sonda): test_prevuelo_sonda.py
+          #   (+12) -- 2xx cortado responde, límite mínimo (config vs catálogo),
+          #   gemini sin herramientas, 5xx redactado, timeout, motor con el
+          #   cliente del worker (con y sin credencial), evento preflight
+          #   registrado con el resultado, registro perdido contado sin tumbar
+          #   el veredicto, uso de la sonda como preflight_probe (encolado e
+          #   insertado con el request_type pedido).
+          # 821 -> 832 el 2026-09-17 (Task 7, fix round 1, Rulings R13/R14/R15):
+          #   +11 en test_prevuelo_sonda.py -- (a) un error de DB al resolver
+          #   se propaga sin convertirse en veredicto (visto en rojo: el
+          #   código viejo lo tragaba como provider_error); (b) credencial
+          #   ausente, transporte desconocido y contrato sin
+          #   max_output_tokens dan config_error, no provider_error (3 rojos
+          #   vistos contra el código viejo); 401 directo y por el motor son
+          #   provider_error (mutante 2xx→>=500 puesto en rojo a mano); el
+          #   wait_for acota sólo la llamada al proveedor (puesto en rojo
+          #   sacándolo: sin él la sonda tarda 5s en vez de cortar a 1s); el
+          #   camino ollama directo (no motor) manda num_predict; la lista de
+          #   redacción del motor tapa su propia credencial; el
+          #   max_tokens_param del motor se lee del catálogo, no un literal
+          #   (mutante puesto en rojo a mano); el WARNING del registro
+          #   perdido queda en el log; una sonda fallida no registra uso; y
+          #   el tope también entra por motor_max_tokens (R15, visto en
+          #   rojo: el código viejo mandaba 16 en vez de 10).
+          # 832 -> 834 el 2026-09-17 (Task 7, fix round 2, Ruling R16): +2 en
+          #   test_prevuelo_sonda.py -- sobre la cadena REAL de
+          #   credential_resolver (sólo _query_active_credential mockeado,
+          #   no resolve_credential_instrumented): una causa de
+          #   aiomysql.OperationalError se propaga sin convertirse en
+          #   config_error (visto en rojo contra 3ba6f71: ese commit
+          #   atrapaba CUALQUIER CredentialUnavailableError sin mirar la
+          #   causa); una causa de CredentialUnavailableError (fila
+          #   genuinamente ausente) sigue dando config_error.
+          # 834 -> 848 el 2026-09-17 (Task 8, el orquestador): test_prevuelo_
+          #   orquestador.py (+14) -- pendientes vs. crear completo, sonda
+          #   solo sin ok fresco, una por clave y en paralelo, peor caso de
+          #   dependencias con el armado real del ejecutor (worst-case) vs.
+          #   ref ya existente medida de verdad, hyde sin catálogo
+          #   (suscripción), error de base propagado (503 aguas arriba),
+          #   motor resuelto (via_motor, tope de motor.max_tokens), paso con
+          #   violación no se sondea, y una sonda que revienta en el
+          #   asyncio.gather no deja la otra tarea huérfana.
+          # 848 -> 853 el 2026-09-17 (Task 8, fix round 1 de la revisión):
+          #   +5 en test_prevuelo_orquestador.py -- el relleno del peor caso
+          #   de una dependencia sin ref pasa a MAX_DEP_CONTEXT_CHARS + 1
+          #   (antes medía exactamente el tope, que executor.py NO marca
+          #   truncado, y se quedaba 40 chars corto de una dependencia real
+          #   sobredimensionada -- visto en rojo: 30305 < 30325); más 4 que
+          #   pinnean el armado con las funciones REALES del ejecutor y dan
+          #   rojo bajo mutación: identidad+separador de un paso de motor
+          #   (rojo 245≠518 salteando el bloque via_motor), persona de la
+          #   faceta (rojo 245≠273 sacando `+ len(d.persona or "")`),
+          #   tokens_in_max contra `_enrich_prompt`/`_build_context_input`
+          #   reales (rojo 35≠245 cambiando `_enrich_prompt` por
+          #   `json.dumps`), y que `_chars_de_entrada` corre por
+          #   `asyncio.to_thread` (rojo: lista de llamadas vacía sacando el
+          #   `await asyncio.to_thread(...)`).
+          # 853 -> 864 el 2026-09-17 (Task 9): test_jacobs_preflight_endpoint.py
+          #   (+11) -- POST /jacobs/preflight (200 con el veredicto aunque
+          #   rechace, 403 invocador, no escribe ni con plan rechazado, 503
+          #   prevuelo_no_disponible con la base caída) y el pre-vuelo
+          #   obligatorio al crear (422 prevuelo_rechazado con evento, 409
+          #   costo_supera_lo_aceptado, dry_run también corre el pre-vuelo, el
+          #   orden build -> prevuelo -> crear, 503 sin crear, y
+          #   costo_max_aceptado_usd negativo inválido). 11 vistos en rojo.
+          # 864 -> 873 el 2026-09-17 (Task 9, fix round 1): +7 en
+          #   test_jacobs_preflight_endpoint.py -- 503 redacta y recorta el
+          #   motivo (key AIza real no queda en claro), 422 de >20 pasos en
+          #   /preflight, evento PREVUELO_RECHAZADO con el MISMO contenido
+          #   que el 422 (incluye pipeline_id, R19), identidad+objetivo
+          #   llegan a prevuelo() en crear, costo_max_usd == costo_max_
+          #   aceptado_usd (estricto ">") deja crear, y el costo cero del
+          #   200/dry_run/PIPELINE_CREATED tampoco queda pelado (hallazgo
+          #   propio, mismo bug de R18 en _resumen_de_costo). +2 en
+          #   test_prevuelo_reglas.py -- formatear_usd (R18): "0.000000"
+          #   nunca "0" pelado, y el eco de un entero se normaliza a 6
+          #   decimales. 9 vistos en rojo (4 por mutación temporal revertida
+          #   sobre código ya correcto, 5 por TDD natural contra el código
+          #   sin R17/R18/R19).
+          # 873 -> 894 el 2026-09-17 (Task 10, continuar): test_jacobs_continuar.py
+          #   (+21) -- estados continuables (aborted/expired) vs. 409 en el resto
+          #   (incluido failed, desvío 11), 403 invocador, 404, kill switch 423,
+          #   refs ilegibles que se rehacen y salen del contexto, pasos a correr
+          #   quedan pending limpios, reasignación válida recalcula el motor y
+          #   registra el evento, reasignar un paso reusado o una faceta
+          #   desconocida da 422, una reasignación que rompe cleanroom da 422 sin
+          #   escribir, límite de activos 429, pre-vuelo rechazado 422 sin escribir
+          #   con evento PREVUELO_RECHAZADO, costo por encima del aceptado 409 sin
+          #   escribir (con el eco a 6 decimales, R18), otro pedido que ganó la
+          #   transacción da 409, el evento PIPELINE_CONTINUED lleva todo el
+          #   detalle, las marcas hyde_approved del paso a rehacer se quitan, el
+          #   pre-vuelo solo mira los pendientes, previsualizar no escribe y
+          #   explica el motivo, y el costo cero no queda pelado ("0.000000",
+          #   mismo hallazgo de R18 que ya se había arreglado en /preflight).
+          #   Vistos en rojo (ImportError) antes de crear jacobs/continuar.py.
+          # 894 -> 906 el 2026-09-17 (Task 10, fix round 1 reanudada): +12 en
+          #   test_jacobs_continuar.py -- requisito (b) (I1): el contexto que
+          #   recibe prevuelo() no lleva refs de pasos a rehacer, y con
+          #   prevuelo() REAL (catálogo y sonda mockeados) el dependiente de un
+          #   paso rehecho se costea al peor caso (MAX_DEP_CONTEXT_CHARS+1), no
+          #   al tamaño de la ref vieja. El resto son las 12 mutaciones de I2
+          #   que quedaban verdes: plan_inconsistente (409), plan_rechazado vs.
+          #   reasignacion_invalida cuando NO hay reasignación pedida,
+          #   _validate_plan_capabilities/PlanRejected -> 422, costo ACEPTADO
+          #   == costo COMPUTADO no rechaza (> vs >=), current_step_index es el
+          #   mínimo de los pasos a correr (no 0 fijo), user_id/tenant_id
+          #   explícitos pisan los del pipeline, la lectura de ref corre por
+          #   asyncio.to_thread, y en previsualizar: un error del pre-vuelo se
+          #   propaga (no se traga), 403/404 se relanzan, el motivo
+          #   prevuelo_rechazado no se pierde, y el veredicto va presente
+          #   junto con motivo.code prevuelo_rechazado o limite_de_activos
+          #   (null solo cuando el rechazo es previo al pre-vuelo). Cada
+          #   mutación se vio en rojo contra el código final y se revirtió
+          #   (evidencia en task-10-report.md, sección "Fix round 1
+          #   (reanudada)").
+          # 906 -> 911 el 2026-09-17 (Task 11): +5 en test_jacobs_continue_endpoint.py --
+          #   continue lanza run_pipeline con la época nueva de la respuesta del servicio
+          #   (background.add_task), un rechazo del servicio sale con su status y su
+          #   cuerpo ({"code", ...}), un error inesperado del análisis/pre-vuelo da 503
+          #   prevuelo_no_disponible, continue/preflight devuelve 200 sin lanzar (incluso
+          #   con continuable=False), y un rechazo 403/404 de previsualizar se relanza como
+          #   HTTPException. El servicio (jacobs/continuar.py, Task 10) va mockeado: lo que
+          #   se prueba acá es el mapeo HTTP. 4 mutaciones con test (quitar el
+          #   background.add_task, status_code hardcodeado, quitar el except Exception de
+          #   continue, quitar el except ContinuarRechazado de continue/preflight).
+          # 911 -> 912 el 2026-09-17 (Task 11, fix round 1): +1 en
+          #   test_jacobs_continue_endpoint.py -- ContinueRequest.costo_max_aceptado_usd
+          #   negativo es inválido (422) y no llega a invocar al servicio; usaba
+          #   jacobs.models.validar_costo_max_aceptado, el mismo guardia extraído de
+          #   PipelineCreateRequest, para no duplicar el umbral ni el mensaje. Visto en
+          #   rojo (DID NOT RAISE ValidationError) contra 4a1aa33; confirmado por mutación
+          #   (quitar el @model_validator lo tira rojo otra vez).
+          # 912 -> 919 el 2026-09-17 (Task 12): +7 en test_jacobs_relaunch_cli.py --
+          #   el CLI `tools/jacobs_relaunch.py` deja de tener lógica propia: llama a
+          #   jacobs/continuar.py::continuar (la misma función del endpoint) y corre
+          #   run_pipeline() con lo que esa función devuelve. Un rechazo
+          #   (ContinuarRechazado) sale con 1 sin correr nada; un error inesperado del
+          #   análisis/pre-vuelo (DB caída, faceta o credencial no disponible -- el
+          #   brief no cubre este caso, así que se agrega con el mismo criterio de
+          #   jacobs/routes.py::_no_disponible) sale con 4 (ver fix round 1 abajo: en
+          #   esta primera versión era 2), también sin correr, con el motivo redactado
+          #   y recortado (recortar_redactado, 300); `--reasignar PASO=FACETA` se
+          #   parsea a dict o lanza ArgumentTypeError; el módulo no escribe
+          #   pasos/estado por su cuenta (barrido AST) y no lee /etc/jax/.env salvo
+          #   desde una función (otro barrido AST, `--help` no toca disco).
+          #   7 mutaciones con test: exit code de rechazo (1->9), exit code de error
+          #   inesperado (2->1), --reasignar sin validar, costo_max_aceptado_usd no
+          #   pasado a continuar() -- las 4 documentadas en task-12-report.md, más las
+          #   que ya cubrían los dos barridos AST.
+          # 919 -> 920 el 2026-09-17 (Task 12, fix round 1): +1 en
+          #   test_jacobs_relaunch_cli.py -- el código de salida del error inesperado
+          #   pasa de 2 a 4: 2 es el que ya usa argparse para sus propios errores de
+          #   uso (parser.error(), p.ej. --reasignar mal formado), así que un error de
+          #   invocación y una falla del servicio quedaban indistinguibles con el
+          #   mismo código. Nuevo test que corre los dos casos en la misma prueba y
+          #   confirma que sus códigos difieren. Además se extendió el barrido AST de
+          #   `test_no_escribe_pasos_ni_estado_por_su_cuenta` para marcar también una
+          #   llamada SIN prefijo (`ast.Name`, p.ej. tras `from jacobs.store import
+          #   step_upsert`), no solo `store.step_upsert(...)` (`ast.Attribute`) --
+          #   sin test nuevo (es el mismo test, más fuerte), visto en rojo con una
+          #   copia descartable del CLI que hacía esa llamada bare (no committeada).
+          # 920 -> 928 el 2026-09-17 (Task 13, medición de solo lectura de
+          #   min_output_tokens): test_medir_min_output_tokens.py (+8) -- los 5
+          #   del brief (redondeo a 1024, sólo jobs completed, líneas rotas
+          #   contadas, máximo por capability) más 3 propios: el JOIN de
+          #   _SQL_HTTP_DIRECTO lleva `COLLATE utf8mb4_uca1400_ai_ci` (Ruling
+          #   del plan P, jax-platform Task 2, commit d79b0f9: sin ella el JOIN
+          #   por facet falla contra producción con 1267 "Illegal mix of
+          #   collations"), y dos que prueban que el script es de sólo lectura
+          #   POR CONSTRUCCIÓN -- cada `cur.execute(...)` real es un SELECT, y
+          #   los `UPDATE capability SET min_output_tokens=...` que arma para
+          #   la migración del plan P sólo se IMPRIMEN, nunca se ejecutan. La
+          #   medición NO se repitió (Ruling R2 del ledger de este plan): los
+          #   números ya los midió P una sola vez.
+          # 928 -> 936 el 2026-09-17 (Task 13, fix round 1 de la revisión):
+          #   +8 en el mismo archivo -- tres hallazgos de la revisión contra el
+          #   método REAL de P (`git show d79b0f9` en jax-platform-prevuelo):
+          #   (1) la ventana del JOIN restaba holgura también del lado
+          #   izquierdo (P sólo la suma del lado derecho, `FLOOR(started_at)
+          #   AND CEIL(finished_at) + holgura`) -- un test la fija; y el JOIN
+          #   sin la exclusión de filas ambiguas de P le atribuía a CUALQUIER
+          #   capability cuya ventana tocara la fila (visto en rojo:
+          #   `maximos_http` no existía -- ImportError); ahora agrupa fila por
+          #   fila y excluye las que caen en más de una capability (ejemplo de
+          #   la revisión: reconcile+file_write de la misma faceta compartiendo
+          #   una fila de 20664 tokens, +4 tests: ambigua excluida, máximo sin
+          #   ambiguas y con cero descartado, filas vacías, control). (2) la
+          #   prueba de sólo lectura era fail-open (sólo miraba `.execute`, y
+          #   sólo lo que podía resolver): reescrita fail-closed -- cualquier
+          #   `execute`/`executemany`/`callproc` con SQL no resoluble
+          #   estáticamente es hallazgo, y cualquier `.commit()` también.
+          #   Verificado por inyección en una copia descartable (no
+          #   committeada, borrada después): un `execute(f"UPDATE ...")` y un
+          #   `executemany("DELETE ...", ...)` que el test VIEJO dejaba pasar
+          #   (0 ofensoras) el test NUEVO los marca (3 hallazgos). Más un test
+          #   con conexión mockeada que confirma que el código abre `SET
+          #   SESSION TRANSACTION READ ONLY` + `START TRANSACTION READ ONLY`
+          #   antes de consultar y cierra con `ROLLBACK`, nunca `commit()`
+          #   (visto en rojo contra a215959: no las abría). (3) el parseo de
+          #   motor_jobs.jsonl contaba CADA línea `completed` sin mirar el
+          #   estado FINAL del job_id (2 tests: una línea `completed` de un
+          #   job que terminó `failed` no cuenta; el último registro
+          #   `completed` gana aunque su valor sea MENOR que uno anterior del
+          #   mismo job_id) -- mismo criterio que jacobs/reaper.py:228 y
+          #   `corridas_de_motor` de P. Los 7 tests de comportamiento se
+          #   vieron en rojo contra a215959; el octavo (fail-closed) ya pasaba
+          #   ahí (nada que marcar todavía) y se verificó por inyección.
+          # 936 -> 943 el 2026-09-17 (Task 13, fix round 2 de la revisión):
+          #   +7 en el mismo archivo -- un control puro más (_SQL_HTTP_DIRECTO
+          #   no usa GROUP BY: el agrupado es post-procesamiento en Python,
+          #   no SQL) y seis tests del re-review. Dos hallazgos Minor en el
+          #   texto del plan (sin test, documentación corregida: "dos puntos"
+          #   → tres, uno de ellos -- COLLATE -- no era una divergencia; el
+          #   ejemplo de fila ambigua marcado como HIPOTÉTICO, no observado --
+          #   la medición real de P dio 0 filas ambiguas). Detector fail-closed
+          #   con tres huecos más, cada uno con un test sobre fuente sintética
+          #   (`ast.parse` de un snippet, sin tocar disco): `.query(...)`
+          #   (Connection de aiomysql, más bajo nivel que un cursor) no estaba
+          #   en la lista de formas vigiladas; una referencia guardada en
+          #   variable (`ex = cur.execute; await ex(...)`) no es un
+          #   Call(func=Attribute) y quedaba invisible -- ahora se marca la
+          #   referencia misma; y `"SELECT 1; DELETE ..."` pasaba el chequeo
+          #   de `startswith("SELECT")` -- ahora se pela un `;` final único
+          #   (estilo SQL) y cualquier `;` que quede adentro es hallazgo (con
+          #   su control: un solo `;` final no se marca). Verificado además
+          #   con una inyección real sobre una copia descartable del script
+          #   (no committeada, borrada después): el detector de la ronda 1
+          #   daba 0 hallazgos contra las tres formas nuevas, el de esta ronda
+          #   da 3. Un test más deja el ROLLBACK en su propio `finally` (antes
+          #   vivía después de las SELECT en el cuerpo del try, así que una
+          #   consulta rota lo salteaba y la sesión de sólo lectura quedaba
+          #   abierta en el servidor real) -- visto en rojo con una conexión
+          #   mockeada cuya SELECT revienta a propósito. El último test fija
+          #   que el resolutor de "constantes de módulo" del detector sólo
+          #   mire asignaciones de NIVEL DE MÓDULO, no cualquier asignación
+          #   del árbol (una variable local con el mismo nombre podía pisar el
+          #   valor real).
+          # 943 -> 968 el 2026-09-17 (Task 15b, pool de lectura del pre-vuelo,
+          #   LAS CUATRO #2): test_prevuelo_pool.py (+23) -- un pre-vuelo usa UNA
+          #   conexión para los dos lectores del catálogo (from_db y
+          #   leer_catalogo reciben la misma), el segundo pre-vuelo del proceso no
+          #   abre ninguna, 25 concurrentes no pasan de JAX_PREVUELO_DB_POOL_MAX,
+          #   el pool lleva connect_timeout y no lleva CLIENT.FOUND_ROWS, cerrar
+          #   cierra y el siguiente pedido crea otro; fail-closed: base caída,
+          #   tamaño inválido, pool agotado y conexión colgada dan 503
+          #   prevuelo_no_disponible acotado; una conexión rota (de red o por un
+          #   error de Python a mitad de lectura) se cierra y no vuelve, una que
+          #   la base cortó en reposo no se reusa; el pool de otro event loop se
+          #   niega; from_db sin conexión sigue igual para el worker y con
+          #   conexión prestada no la cierra; el shutdown de LAS MANOS y el CLI
+          #   (con 0/1/3/4, y aunque cerrar falle) cierran el pool. Con el Pool
+          #   REAL de aiomysql y conexiones dobles. 18 vistos en rojo contra
+          #   fcb0c6a (conteo: `assert 2 == 1` y `assert 2 == 0`); 4 controles
+          #   ya pasaban. test_prevuelo_config.py (+2): JAX_PREVUELO_DB_POOL_MAX
+          #   por defecto 5 e inválido lanza con el nombre (rojo: AttributeError).
+          # 968 -> 1001 el 2026-09-17 (Task 15b, fix round 1 de la revisión):
+          #   +2 en test_prevuelo_pool.py -- una conexión que se rompe despierta
+          #   al que espera turno (con el Pool real, POOL_MAX=1: aiomysql 0.3.2
+          #   no llama _wakeup() al devolver una conexión cerrada; rojo contra
+          #   607f84c: TimeoutError a los 3 s) y dos primeros pedidos a la vez
+          #   crean un solo pool (rojo por mutación sin el candado: 5 pools).
+          #   test_perfil_prevuelo.py (+31) -- partes puras de
+          #   scripts/perfil_prevuelo.py: guardia exacta de jax_memory_test
+          #   (sale 2), filtro de sólo lectura, argumentos, percentil de rango
+          #   más cercano, agrupación de CPU y resumen; el script no importa
+          #   jacobs al importarse. Rojo: el script no existía (FileNotFoundError).
+          # 1001 -> 1004 el 2026-09-17 (Task 15b, fix round 2 de la re-revisión):
+          #   +3 en test_prevuelo_pool.py -- un connect que revienta o se cuelga
+          #   hasta el timeout no se queda con el turno del semáforo (POOL_MAX=1:
+          #   al volver la base, el pedido siguiente consigue conexión), y si
+          #   pool.release() lanza el turno vuelve igual. Rojos por mutación
+          #   (sin turno.release() en el except de pool.acquire(): 2 TimeoutError;
+          #   sin el finally alrededor de pool.release(): 1 TimeoutError).
+          # 1004 -> 1007 el 2026-09-17 (ola final de arreglos, F1): +3 en
+          #   test_jacobs_epoca_ejecutor.py -- una corrida superada cuyo proveedor
+          #   responde tarde con una salida >60 KB NO pisa el artifact de la corrida
+          #   vigente del mismo paso (la época entra en la ruta:
+          #   {pipeline}/{step}/e{epoca}/output.json; rojo contra 616c428: la vigente
+          #   leía la salida VIEJA), la ruta lleva la época, y una ref sin época
+          #   (pipelines guardados antes) se sigue leyendo (control, ya pasaba).
+          # 1007 -> 1015 el 2026-09-17 (ola final de arreglos, F2, Ruling R32): +8 en
+          #   test_jacobs_resume_epoca.py -- resume y approve-step corren el pre-vuelo
+          #   ANTES de tomar la época: rechazo -> 422 prevuelo_rechazado con el
+          #   veredicto y evento PREVUELO_RECHAZADO, sin tomar la época ni tocar pasos
+          #   (x2); pre-vuelo que no puede correr -> 503 prevuelo_no_disponible
+          #   redactado (x2); la respuesta 200 suma costo_max_usd y pasos_costo (x2);
+          #   resume evalúa los pasos sin ref LEGIBLE con un contexto sin sus refs;
+          #   approve-step evalúa la ola completa, no sólo el paso aprobado. Rojo
+          #   contra b9be03f: 8 failed (DID NOT RAISE / KeyError costo_max_usd / el
+          #   pre-vuelo no se llamaba).
+          # 1015 -> 1023 el 2026-09-17 (ola final de arreglos, F3, Ruling R31): el cupo de
+          #   MAX_PARALLEL_PIPELINES se recuenta y se escribe dentro del candado con
+          #   nombre de MariaDB (store.candado_de_activos), que cruza procesos.
+          #   test_jacobs_preflight_endpoint.py (+3): crear recuenta por la conexión
+          #   del candado y respeta el cupo que otro proceso llenó (422, sin crear),
+          #   crear escribe dentro del candado, candado no disponible -> 503
+          #   prevuelo_no_disponible sin crear. test_jacobs_continuar.py (+3): lo mismo
+          #   para continuar (429 sin transacción; transacción dentro del candado;
+          #   candado no disponible se propaga sin escribir). test_prevuelo_config.py
+          #   (+2): JAX_PREVUELO_CANDADO_TIMEOUT_S por defecto 10 e inválido lanza con
+          #   el nombre. Rojo contra c66705a: 8 failed (DID NOT RAISE / orden sin
+          #   candado / AttributeError).
+          # 1023 -> 1032 el 2026-09-17 (ola final de arreglos, F4, Ruling R30): +9 en
+          #   test_prevuelo_sonda.py -- una sonda que vence (httpx y wait_for) o un 2xx
+          #   sin usage (openai-compat, gemini, motor) registra uso ESTIMADO con
+          #   request_type='preflight_probe_est' (entrada ceil(len(mensaje)/chars por
+          #   token), salida el tope pedido); el request_type entra en VARCHAR(20); con
+          #   usage medido sigue preflight_probe, y ni la falla local ni la base caída
+          #   registran (3 controles). Rojo contra 4768484: 6 failed (Awaited 0 times /
+          #   AttributeError).
+          # 1032 -> 1036 el 2026-09-17 (ola final de arreglos, F5): +4 en
+          #   test_prevuelo_orquestador.py -- un solo vuelo de sonda por clave en el
+          #   proceso: 10 pre-vuelos concurrentes con la misma clave vencida lanzan UNA
+          #   sonda; su excepción llega a los 5 que esperan y el registro queda vacío;
+          #   cancelar a uno no corta la sonda de los demás y cancelar a todos la
+          #   cancela sin dejar tareas; terminado el vuelo, el siguiente pre-vuelo
+          #   vuelve a sondear (control: no es caché). Rojo contra 014aeb0: 3 failed
+          #   (10 y 5 sondas; cada pre-vuelo lanzaba y cancelaba la suya propia).
+          # 1036 -> 1040 el 2026-09-17 (ola final de arreglos, F6):
+          #   test_jacobs_cancel_reaper_epoca.py (+4) -- cancel y el reaper escriben con
+          #   compare-and-set sobre la época y el status LEÍDOS
+          #   (pipeline_update_status_si_epoca, sin SQL nueva: su EXPLAIN por PRIMARY
+          #   ya está en test_run_epoch_db.py); si otro pedido cambió la fila, cancel
+          #   da 409 de texto sin evento y el reaper no cosecha ni emite REAPED (lo
+          #   registra en INFO). Rojo contra f22562e: 4 failed (escritura sin
+          #   condición).
+          # 1040 -> 1044 el 2026-09-17 (ola final de arreglos, F8, Ruling R33):
+          #   test_prevuelo_catalogo_de_motores_compartido.py (+4) -- el pre-vuelo lee
+          #   el catálogo de motores del proceso del Motor Registry con SU sello
+          #   (_ensure_catalog_fresh): sin cambio de sello no llama from_db() (rojo
+          #   contra a34a969: assert 4 == 1) y la carga usa la conexión del pre-vuelo;
+          #   con el sello nuevo recarga y ve el cambio (control contra a34a969; rojo
+          #   por mutación con un catálogo que ignora el sello: assert 1 == 2); pre-vuelo
+          #   y despacho comparten el mismo catálogo (rojo: 2 == 1); recarga fallida
+          #   falla cerrado con el 503 del Motor Registry, sin el catálogo viejo.
+          # 1044 -> 1063 el 2026-09-17 (pasada final R34, 2): +19 en test_prevuelo_sonda.py
+          #   -- el cobro de la sonda se decide por si el pedido SALIÓ: ConnectError,
+          #   ConnectTimeout, PoolTimeout, UnsupportedProtocol y 4xx (400/401/404/429)
+          #   no registran uso; ReadTimeout, WriteTimeout, ReadError,
+          #   RemoteProtocolError y 5xx (500/502/503/504/524) registran estimado; el
+          #   camino motor decide por el status (401 no, 524 sí). El test viejo de
+          #   'sonda fallida no registra uso' pasa de 503 a 429. Rojo contra 74cb5f9:
+          #   10 failed (ConnectTimeout y PoolTimeout registraban; ReadError,
+          #   RemoteProtocolError, los cinco 5xx y el 524 del motor no); 9 controles.
+          # 1063 -> 1064 el 2026-09-17 (pasada final R34, 3): +1 en
+          #   test_prevuelo_orquestador.py -- un loop cerrado con una sonda en vuelo
+          #   deja su entrada en el registro; el pre-vuelo siguiente, en otro
+          #   asyncio.run, la ignora y vuelve a sondear. Control contra 74cb5f9 (el
+          #   chequeo ya existía, ningún test lo fijaba); rojo quitando
+          #   'vuelo.loop is not loop': RuntimeError ... attached to a different loop.
+          # 1064 -> 1067 el 2026-09-17 (pasada final R34, 4): +3 en
+          #   test_jacobs_resume_epoca.py -- resume y approve-step quitan del contexto
+          #   las refs ILEGIBLES de los pasos a rehacer (misma regla que continue): el
+          #   contexto sin ellas viaja en el UPDATE que toma la época, el ejecutor lo
+          #   recibe sin la ref y el paso vuelve a pending; approve conserva la marca
+          #   hyde_approved_*; sin refs ilegibles resume no reescribe el contexto
+          #   (control). Rojo contra 74cb5f9: 2 failed (IndexError: tomar_epoca sin
+          #   contexto; la ref rota seguía en el contexto de approve).
+          # 1067 -> 1068 el 2026-09-17 (pasada final R34, 5): +1 en
+          #   test_jacobs_cancel_reaper_epoca.py -- el reaper pide, para un running,
+          #   sin_avance_desde = ahora - RUNNING_STALE_SECONDS en la escritura
+          #   condicional. Rojo contra 74cb5f9: KeyError sin_avance_desde.
+          # 1068 -> 1069 el 2026-09-17 (Ruling R36): +1 en test_jacobs_cancel_reaper_epoca.py
+          #   -- con un paso en curso de 1800 s el umbral del running es 3600 s y el
+          #   corte del CAS usa ese umbral (3700 s sin avance se cosecha, 1900 s no).
+          # 1069 -> 1070 el 2026-09-17 (pasada R37, 1): +1 en test_prevuelo_sonda.py --
+          #   un connect colgado más que el timeout de httpx sale como ConnectTimeout y
+          #   no se cobra: wait_for lleva MARGEN_DE_WAIT_FOR_S=1 sobre el timeout de
+          #   httpx. Rojo contra e50a6e2: wait_for ganaba y se cobraba (Awaited 1 times).
+          # 1070 -> 1072 el 2026-09-17 (pasada R37, 3): +2 en test_jacobs_resume_epoca.py --
+          #   resume y approve-step que pierden la carrera por la época con una ref
+          #   ilegible dan 409 sin upsert de pasos. Controles contra e50a6e2; rojo por
+          #   mutación moviendo el reset y el upsert ANTES de tomar la época: 2 failed
+          #   (los 15 anteriores seguían en verde).
+          # 1072 -> 1074 el 2026-09-17 (Ruling R37): +2 en test_jacobs_resume_epoca.py --
+          #   un paso hyde que resume o approve-step rehacen por ref ilegible pierde su
+          #   hyde_approved_<step_id> en el contexto guardado y en el del ejecutor
+          #   (desvío 10, como continue); approve-step conserva la aprobación que da en
+          #   el mismo pedido. Rojo contra e50a6e2: 2 failed (la marca vieja seguía).
+          # 1074 -> 1085 el 2026-09-17 (Ruling R38): +9 test_jacobs_conexiones_por_pedido.py
+          #   -- con un doble que cuenta cada conexión abierta y de dónde, el segundo
+          #   pedido de /jacobs/preflight no abre ninguna; crear sólo abre la dedicada
+          #   del candado (GET_LOCK); continue la del candado y la transacción con
+          #   FOUND_ROWS; resume y approve-step sólo la escritura condicional de la
+          #   época; 50 preflight concurrentes no superan JAX_PREVUELO_DB_POOL_MAX;
+          #   /preflight con la base caída da 503 prevuelo_no_disponible (antes 500);
+          #   controles: rechazo del plan sigue 422 y crear con la base caída conserva
+          #   su error sin escribir. Rojo contra 2fd3778: 7 failed (get_motor_governance,
+          #   pipeline_get, steps_by_pipeline, pipeline_count_active, pipeline_create,
+          #   step_upsert y event_append abrían conexión propia por pedido; /preflight
+          #   daba OperationalError sin atrapar). +2 en test_prevuelo_pool.py -- al
+          #   apagarse el loop (shutdown_asyncgens) el pool se cierra y el loop siguiente
+          #   crea otro; un pool de un loop cerrado sin apagado se reemplaza. Rojo contra
+          #   2fd3778: 2 failed (RuntimeError 'otro event loop'). El test del pool de otro
+          #   loop pasa a usar un loop VIVO (el caso que sigue negándose).
+          # 1085 -> 1089 el 2026-09-17 (R38, fix round 1, 2a): +4 en
+          #   test_jacobs_conexiones_por_pedido.py -- con el pool de 1 conexión tomada
+          #   más que JAX_DB_CONNECT_TIMEOUT_SECONDS y la base sana, run_pipeline espera
+          #   turno y termina con sus 6 eventos (rojo contra 1d84e82: TimeoutError salía
+          #   del gather); el reaper barre bajo la misma marca (rojo: la marca no
+          #   existía); sin plazo de turno una base caída sigue fallando al conectar
+          #   (rojo: AttributeError); un pedido HTTP con el pool lleno sigue dando 503
+          #   acotado (control).
+          # 1089 -> 1093 el 2026-09-17 (R38, fix round 1, 2b y 3): +4 en
+          #   test_jacobs_conexiones_por_pedido.py -- crear confirma pipeline, pasos y
+          #   PIPELINE_CREATED en UNA transacción por la conexión del candado (rojo
+          #   contra 1d84e82: cada escritura por el pool en autocommit); la base que
+          #   corta a mitad da 503 sin nada confirmado (rojo: pipeline confirmado y
+          #   OperationalError sin atrapar); la base colgada a mitad da 503 en ~1 s sin
+          #   nada confirmado (rojo: el pedido se colgaba); dry_run completa en la misma
+          #   transacción y sólo abre el candado (rojo: UPDATE y DRY_RUN_COMPLETE por el
+          #   pool). test_jacobs_preflight_endpoint.py agrega el doble de la transacción.
+          # 1093 -> 1095 el 2026-09-17 (R38, fix round 1, 1): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- la rama de la sonda: con salud
+          #   vieja, el evento de salud y el uso de la sonda van por el pool y, dentro
+          #   del TTL de los resolvedores, un segundo pre-vuelo no abre ninguna conexión
+          #   directa (rojo contra 1d84e82: directas de registrar_evento_de_sonda y
+          #   record_direct_usage); una caída real de la base al resolver sigue siendo
+          #   503 (control de R13/R16). test_cola_uso_escritores.py y
+          #   test_prevuelo_sonda.py simulan la base por el pool del store.
+          # 1095 -> 1097 el 2026-09-17 (R38, fix round 1, 4): +2 controles en
+          #   test_jacobs_conexiones_por_pedido.py -- los event_append del Motor Registry
+          #   son await en async def, el trabajo nace con create_task en routes.py, y el
+          #   paquete no crea loops ni corre corrutinas en hilos (verde contra 1d84e82;
+          #   por mutación, un run_in_executor en worker.py da 1 failed); y en ejecución
+          #   un rechazo de tool_authority escribe por el pool del loop que lo corre.
+          # 1097 -> 1100 el 2026-09-17 (Ruling R43): +3 en test_jacobs_conexiones_por_pedido.py
+          #   -- la gobernanza se lee UNA vez por pedido y build() la pasa a
+          #   _validate_plan_capabilities y al parseo del plan del planificador: preflight 1,
+          #   crear con pasos 1, crear por objetivo (qwen sin red, sólo OLLAMA_URL) 1. Rojo
+          #   contra 36e539f: assert 2 == 1, 2 == 1 y 3 == 1.
+          # 1100 -> 1104 el 2026-09-17 (Ruling R41): +4 en test_jacobs_conexiones_por_pedido.py
+          #   -- un COMMIT de crear que se corta o que vence da el 503 prevuelo_no_disponible
+          #   con `detalle`: el pipeline puede existir, revisar la lista antes de reintentar
+          #   (rojo contra 36e539f: KeyError 'detalle', x2); una falla ANTES del COMMIT no
+          #   lo dice y no deja nada escrito (control); el docstring de crear declara el
+          #   COMMIT incierto (rojo: no lo mencionaba).
+          # 1104 -> 1106 el 2026-09-17 (Ruling R39): +2 en test_jacobs_conexiones_por_pedido.py
+          #   -- el bloque de comentarios arriba de `_db_conn` en jax/core/facet_resolver.py y
+          #   las_manos/credential_resolver.py declara por qué la conexión queda directa (sonda
+          #   sólo sin ok fresco, un vuelo por clave, caché 30 s espejada con jax-platform,
+          #   fuera del camino caliente). Rojo contra 36e539f: falta la nota. Fuera del segmento
+          #   que compara check_mirror_sync.py (salida idéntica antes y después).
+          # 1106 -> 1108 el 2026-09-17 (R38 fix round 3, N1): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- un job real de motor_registry.worker.run
+          #   lanzado con create_task desde un contexto de pedido (espera acotada), con el pool
+          #   de 1 ocupado 1,5 s y JAX_DB_CONNECT_TIMEOUT_SECONDS=1, escribe su
+          #   TOOL_CALL_REJECTED (rojo contra bd977a4: assert [] == ['TOOL_CALL_REJECTED']);
+          #   con la base caída el job termina en segundos sin escribir (control fail-closed).
+          # 1108 -> 1110 el 2026-09-17 (R38 fix round 3, m1): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- ningún archivo del pool describe al
+          #   pool del store como "de lectura" o "del pre-vuelo" (rojo contra bd977a4: 7
+          #   sitios, store.py:70/110 entre ellos) y el comentario de R38 en store.py nombra
+          #   también a registrar_evento_de_sonda y record_direct_usage (rojo: faltaban).
+          # 1110 -> 1117 el 2026-09-17 (Ruling R50): tests/test_facet_health_tabla_exclusiva.py
+          #   (+7, archivo nuevo en las dos listas) -- sin JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA=1
+          #   (ausente, "0", "true", "") los tres tests globales de _facet_health_io_test.py
+          #   llevan el skipif de R50 y los dos acotados no; con "1" no se saltan y pytest los
+          #   colecta; el motivo nombra la regla; la variable vive sólo en el job
+          #   facet-health-io (MariaDB propia). Rojo contra 49f4faa: 7 failed (sin compuerta).
+          #   Este job no corre _facet_health_io_test.py: su "N passed" no cambia por los skips.
+          # 1117 -> 1118 el 2026-09-17 (R50, condición 1): +1 en
+          #   test_facet_health_tabla_exclusiva.py -- el motivo del skip sale en `pytest -rs`
+          #   y dice por qué es global (check_facet_health() lee y reescribe TODA la tabla) y
+          #   qué variable lo habilita; el test del motivo exige esas partes. Rojo contra
+          #   6f8bbd5: 2 failed (el motivo no nombraba check_facet_health).
+          # 1118 -> 1123 el 2026-09-17 (R50, condición 3): tests/test_delete_de_tablas_compartidas.py
+          #   (+5, archivo nuevo en las dos listas) -- ningún archivo de test hace DELETE sobre
+          #   una tabla compartida (axioma_usage, facet_health_*, jacobs_*, credential,
+          #   capability) sin WHERE o sin marcador propio en los parámetros (o pragma
+          #   `# marcador-propio:`); única excepción explícita, _tabla_limpia de R50; los
+          #   permitidos tienen que seguir existiendo; tres controles del detector. Rojo con
+          #   un borrador en una copia del repo: `DELETE FROM axioma_usage WHERE facet=%s` y
+          #   un DELETE sin WHERE, los dos marcados. Incidente de origen: r38-report.md.
+          # 1123 -> 1125 el 2026-09-17 (re-review ronda 3, m3): +2 en
+          #   test_delete_de_tablas_compartidas.py -- el detector cubre las otras dos formas
+          #   de DELETE de MariaDB (multi-tabla con alias `DELETE u FROM t u ...` y
+          #   `DELETE LOW_PRIORITY/QUICK/IGNORE FROM ...`) y mira TODAS las tablas del FROM;
+          #   control de que la forma multi-tabla con marcador propio no se marca. Rojo con
+          #   un archivo de las tres formas: el detector de f744e8a marcaba 0 y éste 3.
+          # 1125 -> 1126 el 2026-09-17 (Ruling R53): +1 control en
+          #   test_jacobs_conexiones_por_pedido.py -- con 60 pedidos a la vez y el pool en 4,
+          #   nunca hay más conexiones abiertas y sin cerrar que el tamaño del pool. Fija en
+          #   proceso lo que R53 midió afuera: las 11 conexiones del proceso eran 10 a
+          #   MariaDB + 1 socket HTTP entrante del propio servicio.
+          # 1126 -> 1128 el 2026-09-17 (I1 / Ruling R54): +2 en
+          #   test_jacobs_preflight_endpoint.py -- /jacobs/preflight con el kill switch activo
+          #   da 423 {"code":"kill_switch"} sin planificar ni sondear (rojo contra f24edc1:
+          #   DID NOT RAISE, el pre-vuelo corría y pagaba), y con un invocador no autorizado
+          #   sigue ganando el 403 (el orden del chequeo).
+          # 1128 -> 1129 el 2026-09-17 (re-revisión final, m1): +1 en
+          #   test_jacobs_continuar.py -- la transacción de continuar corre con el mismo plazo
+          #   que la de crear (JAX_DB_CONNECT_TIMEOUT_SECONDS) y suelta el candado entre
+          #   procesos al vencer. Rojo contra 1b124fe: se colgaba hasta el wait_for de 5 s del
+          #   propio test, con el candado retenido.
+          # 1129 -> 1131 el 2026-09-17 (re-revisión final, m2): +2 en
+          #   test_jacobs_epoca_ejecutor.py -- un paso cuya escritura condicional no toca
+          #   ninguna fila con la corrida VIGENTE (la fila cambió) aborta con motivo en el
+          #   evento (rojo contra cfb0bd1: "errores": {"0": null}); si la época SÍ se perdió,
+          #   sigue saliendo por RUN_SUPERSEDED sin PIPELINE_ABORTED (control).
+          # 1131 -> 1132 el 2026-09-17 (re-revisión final, m3): +1 en
+          #   test_jacobs_conexiones_por_pedido.py -- GET /jacobs/pipeline/{id}/events lee por
+          #   el pool; era el último endpoint HTTP con conexión propia por pedido. Rojo contra
+          #   1da52bc: [('directa', 'events_by_pipeline', False)].
+          # 1132 -> 1134 el 2026-09-17 (re-revisión final, m5): +2 en
+          #   test_jacobs_conexiones_por_pedido.py -- la dependencia motor_registry -> jacobs
+          #   (worker.py importa jacobs.store para N1) queda DECLARADA en worker.py, y
+          #   jacobs/usage_writer.py deja de leerse como que no existe ningún import cruzado
+          #   (rojo contra 49ea939: no estaba declarada); control de que el ejecutor y el
+          #   Motor Registry comparten la MISMA ContextVar (el riesgo de moverla a jax/core).
+          # 1134 -> 1135 el 2026-09-17 (re-revisión final, m6): +1 en
+          #   test_jacobs_conexiones_por_pedido.py -- jacobs/candado.py declara lo que el
+          #   asyncio.Lock serializa HOY (build + pre-vuelo con sondas + transacción, y
+          #   continuar toma el mismo objeto) y el test fija el texto y la identidad del
+          #   objeto. Rojo contra 977fbe0: el texto no mencionaba el pre-vuelo ni la sonda.
+          # 1135 -> 1137 el 2026-09-17 (re-revisión acotada): +2 en
+          #   test_jacobs_continuar.py -- si el plazo vence JUSTO en el COMMIT de continuar,
+          #   el 503 lleva `detalle` diciendo que el continue puede haber empezado (mismo
+          #   mecanismo de R41 que ya tenía crear: EstadoDeTransaccion); un fallo ANTES del
+          #   COMMIT no lo dice (control). Rojo contra c0d4466: TimeoutError pelado.
           # 742 -> 850 el 2026-09-17 (frente E de la auditoria, rebasado sobre 70e4303):
           #   +108. Once archivos nuevos: config_entorno 19, plan_facetas_de_la_tabla 12,
           #   errores_de_proveedor_redactados 12, cliente_http_compartido 11,
@@ -1445,6 +2145,20 @@ jobs:
           #   sin cerrar se compara carácter por carácter). Vistos en rojo; mutación (cmp previo): `mismo_comando`
           #   devolviendo True -> 4 rojos. Origen: misión real en prod, datos correctos descartados como
           #   comando_no_corrido porque el modelo citó el comando sin comillas.
+          # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). Cada rama traía el
+          # suyo (HEAD 1137 passed/1 skipped; origin/master 1590 passed/1 skipped) y la
+          # unión de las dos listas no da ninguno de los dos. Medido en hall9000 con la
+          # lista unificada de este job: 1986 passed, 1 xfailed, 16 subtests passed.
+          # El runner cuenta UNO MENOS que el local y reporta como `skipped` el caso que
+          # acá sale `xfailed` (mismo desfase que el piso anterior: runner 920 con local
+          # 921 passed/1 xfailed), así que el piso del job queda en 1985.
+          # 1985 -> 1989 el 2026-09-17 (re-medición de carga sobre el HEAD del merge):
+          #   +4 puros de tests/test_load_test_harness.py -- `campo_vacio()` re-verifica
+          #   AL FINAL la precondición que la corrida declaró al principio (vacío, con
+          #   contenido, campo ausente y respuesta ilegible; los dos últimos fail-closed:
+          #   "no pude mirar" NO es "está limpio"). Rojo contra 44250a1: la función no
+          #   existía, y por eso la re-medición del pre-vuelo se declaró "sin sondas"
+          #   mirando `sondeadas: []` una sola vez y salieron 3 llamadas pagas reales.
           # 1590 -> 1597 el 2026-09-17 (los servicios corren como la cuenta de servicio): las DOS listas suman
           #   tests/test_ejecutor_cuenta_de_servicio.py (7: unidades con User=jaxsvc y hogar propio,
           #   instaladores sin `-o fruiz`). Vistos en rojo contra las unidades viejas; el control de la unidad
@@ -1465,18 +2179,34 @@ jobs:
           #   cuando se retira funcionalidad y se dice; aca ni siquiera baja.
           #   Los dos archivos entran a las DOS listas. Si el runner da otro
           #   numero, manda el runner.
-          # 1603 -> 1614 el 2026-09-17 (el cupo lo hace cumplir la base): las DOS listas suman
-          #   tests/test_creacion_sin_candado_global.py (11: routes.py sin candado de modulo, el nombre
-          #   viejo fuera del CODIGO —no del comentario que cuenta por que se fue—, create_pipeline sin
-          #   acquire, la sentencia del cupo entera en una sola, validate_create sin active_count, el
-          #   contrato de jacobs/cupo.py, y los TRES del contrato de estados: particion exhaustiva de
-          #   PipelineStatus, la sentencia cuenta exactamente los declarados, y store.pipeline_count_active
-          #   —la otra copia del criterio— cuenta lo mismo). Vistos en rojo contra master (ImportError de
-          #   jacobs.cupo, y el barrido del Lock global con el candado puesto); el de la particion,
-          #   validado por MUTACION: agregando `queued` a PipelineStatus se pone rojo nombrandolo.
+          # PISO MEDIDO TRAS EL SEGUNDO MERGE DE MASTER (2026-09-17, pre-vuelo y
+          # continuar sobre 6604474: cuenta de servicio, B1.4 y retiro de la voz).
+          # La union de las dos listas no da el piso de ninguna de las dos ramas.
+          # Medido en hall9000 con la lista unificada: 2003 passed, 1 xfailed,
+          # 16 subtests. El runner cuenta UNO MENOS y reporta como `skipped` el
+          # caso que aca sale `xfailed` (mismo desfase de los pisos anteriores),
+          # asi que el piso del job queda en 2002. Si el runner da otro numero,
+          # manda el runner.
+          # 1603 -> 1621 el 2026-09-17 (una base de tests por sesion): +18 exacto,
+          #   medido con y sin el archivo nuevo en la misma maquina. Es el delta de
+          #   esta rama SUMADO al piso que dejaron B1.4 y el retiro de la voz, no
+          #   uno en vez del otro. Si el runner da otro numero, manda el runner.
+          # 1621 -> 2020 el 2026-09-17 (pre-vuelo y continuar, tras mergear
+          # master con jax#207): la union de las dos listas. Medido en hall9000:
+          # 2021 passed, 1 xfailed, 16 subtests; el runner cuenta uno menos y
+          # reporta ese xfail como skipped (mismo desfase de siempre), asi que
+          # el piso queda en 2020. Si el runner da otro numero, manda el runner.
+          # 2020 -> 2039 el 2026-09-17 (union del cupo en la base): las DOS listas suman
+          #   tests/test_creacion_sin_candado_global.py (12) y tests/test_cupo_en_todos_los_caminos.py
+          #   (8: las cuatro escrituras que ocupan cupo llevan la condicion, resume y approve-step le
+          #   pasan el tope, y el motivo del rechazo no miente), mas los retiros que arrastran
+          #   (el timeout del candado sale de prevuelo_config, y el test del candado de creacion pasa
+          #   a exigir que NO quede ninguno). El ROJO del hallazgo se verifico
+          #   POR COMPORTAMIENTO contra master b450248 con un canario contra la base real: con el cupo
+          #   LLENO, pipeline_tomar_epoca admitia el resume (devolvio epoca 1) -- "1 is not None".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^1614 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 1614 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          grep -qE "^2039 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2039 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -1550,6 +2280,13 @@ jobs:
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
+          tests/test_run_epoch_db.py
+          tests/test_prevuelo_catalogo_db.py
+          tests/test_jacobs_continuar_db.py
+          tests/test_jacobs_events_indice_causa_db.py
+          tests/test_prevuelo_pool_db.py
+          tests/test_jacobs_reaper_cas_db.py
+          las_manos/_motor_usage_writer_test.py
           tests/test_facetas_de_gobernanza_db.py
           tests/test_ejecutor_politica_db.py
           tests/test_ejecutor_c5_db.py
@@ -1561,6 +2298,13 @@ jobs:
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
+            tests/test_run_epoch_db.py \
+            tests/test_prevuelo_catalogo_db.py \
+            tests/test_jacobs_continuar_db.py \
+            tests/test_jacobs_events_indice_causa_db.py \
+            tests/test_prevuelo_pool_db.py \
+            tests/test_jacobs_reaper_cas_db.py \
+            las_manos/_motor_usage_writer_test.py \
             tests/test_facetas_de_gobernanza_db.py \
             tests/test_ejecutor_politica_db.py \
             tests/test_ejecutor_c5_db.py \
@@ -1580,6 +2324,143 @@ jobs:
           #   test_contrato_dispatch_db.py deja de depender de filas sembradas: cada
           #   test crea y borra SU fila de `model` (glm-5.2 no existe con la semilla
           #   de PR-L y rompio este job en Jax#158).
+          # 27 -> 33 el 2026-09-17 (época de corrida): test_run_epoch_db.py (+6) -- columna,
+          #   UPDATE condicional por época y status, pasos condicionales, incremento único
+          #   y EXPLAIN por PRIMARY.
+          # 33 -> 34 el 2026-09-17 (ronda de arreglo 1, R6): +1, desde vacío es error de
+          #   contrato.
+          # 34 -> 43 el 2026-09-17 (Task 6, catálogo del pre-vuelo):
+          #   test_prevuelo_catalogo_db.py (+9) -- faceta/modelo/precio/contrato,
+          #   faceta inactiva y credencial revocada no aparecen, salud toma el
+          #   último evento de nivel proveedor e ignora gate_*/unsupported_
+          #   transport, ventana vencida no cuenta, registrar_evento_de_sonda
+          #   escribe source='preflight' y recorta a 255, min_output_tokens sale
+          #   de capability, y dos EXPLAIN (idx_facet_ts, idx_provider_state +
+          #   uk_provider_model). Requiere el esquema del plan P.
+          # 43 -> 49 el 2026-09-17 (Task 6, ronda de arreglo 1, revisión):
+          #   +6 en test_prevuelo_catalogo_db.py -- item 1: registrar_evento_
+          #   de_sonda redacta ANTES de recortar (un secreto que cruza el
+          #   corte de 255 no deja fragmento); item 2: EXPLAIN de sql_facetas
+          #   (join de 4 tablas), sql_min_output_tokens y, con n=2,
+          #   sql_modelos (cadena OR) y sql_ultimo_evento_de_proveedor,
+          #   ninguno cae a ALL ni filesort; item 3/Ruling R12: un empate en
+          #   MAX(ts) lo gana provider_error de forma determinista (visto en
+          #   rojo insertando provider_error antes que ok: el código viejo
+          #   daba 'ok' por orden físico de filas, no por regla).
+          # 49 -> 50 el 2026-09-17 (Task 6, ronda de arreglo 2, re-revisión):
+          #   +1 en test_prevuelo_catalogo_db.py -- item 1 se reescribió
+          #   sensible al ORDEN de verdad (key con forma AIza, que exige un
+          #   mínimo de 10 caracteres tras el prefijo para que la regex la
+          #   reconozca; la forma libre `api_key=valor` no tiene ese mínimo
+          #   y no probaba el orden). Item 2: EXPLAIN de sql_facetas con
+          #   n=3 (el pre-vuelo real pasa varias facetas), sin ALL ni
+          #   filesort.
+          # 50 -> 53 el 2026-09-17 (Task 7, fix round 1, Ruling R13b): +3 en
+          #   test_prevuelo_catalogo_db.py -- registrar_evento_de_sonda
+          #   acepta 'config_error' (visto en rojo: ValueError contra el
+          #   código viejo, que solo aceptaba ok/provider_error), sigue
+          #   rechazando cualquier otro valor, y el lector de salud ignora
+          #   un config_error más fresco que un 'ok' viejo (no lo tapa).
+          # 53 -> 57 el 2026-09-17 (Task 10, continuar): test_jacobs_continuar_db.py
+          #   (+4) -- la transacción aplica pasos, plan, contexto y época contra el
+          #   esquema real (EXPLAIN por PRIMARY en _SQL_BLOQUEAR_PIPELINE y
+          #   _SQL_PASO_A_CORRER); un fallo a mitad (UPDATE final contra una tabla
+          #   que no existe) hace ROLLBACK y no cambia nada; dos transacciones con
+          #   la misma época: gana una sola; diez continue concurrentes sobre el
+          #   mismo pipeline: gana uno solo, los otros nueve dan 409. Vistos en rojo
+          #   (ImportError) antes de crear jacobs/continuar.py y store.continuar_transaccion.
+          # 57 -> 61 el 2026-09-17 (Task 10, fix round 1 reanudada, I3/Ruling R22):
+          #   +4 en test_jacobs_continuar_db.py -- el status (no solo la época) se
+          #   verifica bajo el candado (misma época, status distinto -> None, nada
+          #   cambia); el evento PIPELINE_CONTINUED se escribe con el MISMO cursor
+          #   de la transacción (EXPLAIN implícito en la ausencia de una segunda
+          #   conexión); si la escritura del evento falla, TODO se revierte -- ni
+          #   el pipeline ni los pasos quedan a medias (rojo: simulando el diseño
+          #   de 45d60ec -- evento por una conexión separada DESPUÉS del commit --
+          #   el pipeline queda 'running' sin evento, un estado a medias real); y
+          #   Ruling R23: si el UPDATE final no toca la fila (mutación con
+          #   "AND 1=0" sin lanzar excepción) el cinturón por rowcount hace
+          #   rollback y devuelve None, sin dejar el UPDATE de pasos aplicado.
+          #   Extendido el test de fallo a mitad para confirmar que tampoco deja
+          #   evento. Vistos en rojo contra el código final mutado (evidencia en
+          #   task-10-report.md, sección "Fix round 1 (reanudada)").
+          # 61 -> 62 el 2026-09-17 (Task 10, fix round 2, Principio IX): +1 en
+          #   test_jacobs_continuar_db.py -- test_evento_payload_es_obligatorio:
+          #   store.continuar_transaccion ya no acepta un default silencioso
+          #   para evento_payload (era `= None`); omitirlo da TypeError en el
+          #   sitio de la llamada. Rojo visto restaurando el default y
+          #   corriendo el test solo (DID NOT RAISE TypeError; coroutine never
+          #   awaited). Los dos tests que usaban `pytest.raises(Exception)`
+          #   (fallo a mitad, evento que falla) se angostaron a
+          #   aiomysql.ProgrammingError -- rojo visto inyectando un
+          #   RuntimeError en su lugar (store.time.time mutado) en cada uno:
+          #   el pytest.raises angosto no lo atrapa y el test falla de
+          #   verdad, a diferencia del Exception genérico de antes.
+          # 62 -> 64 el 2026-09-17 (Task 12b, Ruling R20): +2 en
+          #   test_jacobs_events_indice_causa_db.py -- init_tables() crea
+          #   idx_events_pipeline_tipo (pipeline_id, event_type) sin borrar
+          #   idx_events_pipeline; EXPLAIN FORMAT=JSON de la consulta EXACTA
+          #   de la Mesa (sql_eventos_de_causa/EVENTOS_DE_CAUSA, copiada sin
+          #   importar de jax-platform) con 20 pipelines/4.040 eventos usa el
+          #   compuesto (used_key_parts incluye event_type, sin ALL ni
+          #   filesort, rows estimado 120 << 4.000). Rojo visto contra el
+          #   código viejo: key=idx_events_pipeline, used_key_parts=[pipeline_id]
+          #   solamente (report Task 12b).
+          # 64 -> 67 el 2026-09-17 (Task 15b, pool de lectura del pre-vuelo):
+          #   test_prevuelo_pool_db.py (+3) -- contra MariaDB real: dos pedidos
+          #   seguidos ven el mismo CONNECTION_ID(); una conexión ociosa que el
+          #   servidor mata (KILL CONNECTION) no se entrega y el pedido siguiente
+          #   lee bien por otra; resolver_motores y leer_catalogo leen por UNA
+          #   conexión prestada sin cerrarla. Rojo contra fcb0c6a:
+          #   AttributeError (store.conexion_de_lectura no existía).
+          # 67 -> 72 el 2026-09-17 (ola final de arreglos, F3, Ruling R31):
+          #   test_jacobs_candado_activos_db.py (+5) -- contra MariaDB real, dos
+          #   sesiones que cuentan y crean con una pausa no superan el cupo (rojo por
+          #   mutación con un nombre de candado por sesión: assert 2 == 1; contra
+          #   c66705a: AttributeError), GET_LOCK que vence a 1 s da
+          #   CandadoNoDisponible, el candado se suelta aunque el bloque lance
+          #   (IS_FREE_LOCK=1 y se vuelve a tomar al instante), el nombre lleva la base
+          #   (los candados son del servidor, compartido con producción), y EXPLAIN:
+          #   GET_LOCK/RELEASE_LOCK sin tablas, recuento por idx_pipelines_status.
+          # 72 -> 73 el 2026-09-17 (ola final de arreglos, F4): +1 en
+          #   test_prevuelo_catalogo_db.py -- preflight_probe y preflight_probe_est
+          #   entran en axioma_usage.request_type según information_schema del esquema
+          #   real (rojo contra 4768484: AttributeError).
+          # 73 -> 74 el 2026-09-17 (ola final de arreglos, F7): +1 en
+          #   test_jacobs_continuar_db.py -- EXPLAIN de _SQL_PIPELINE_CONTINUAR (el
+          #   UPDATE final de la transacción no tenía) con parámetros reales: PRIMARY,
+          #   type distinto de ALL e index, sin filesort ni temporary. Se endurecen
+          #   además los EXPLAIN de _SQL_PASO_A_CORRER y de las consultas de época
+          #   (test_run_epoch_db.py): en un UPDATE un recorrido COMPLETO de la clave
+          #   primaria sale type='index' con key='PRIMARY', y mirar sólo key lo daba
+          #   por bueno. Visto: con el WHERE mutado a name=%s la aserción vieja pasaba
+          #   (1 passed) y la nueva falla (type 'index', 5.810 filas).
+          # 74 -> 77 el 2026-09-17 (pasada final R34, 5): test_jacobs_reaper_cas_db.py
+          #   (+3) -- el barrido real sobre una fila propia: un running cuyo
+          #   updated_at avanza entre la lectura y la escritura del reaper NO se
+          #   cosecha ni emite REAPED (rojo contra 74cb5f9: lo cosechaba); uno
+          #   estancado de verdad sí (control); EXPLAIN del UPDATE con
+          #   'updated_at < %s' por PRIMARY, sin ALL/index/filesort (rojo:
+          #   TypeError, la variante no existía).
+          # 77 -> 80 el 2026-09-17 (Ruling R36): +3 en test_jacobs_reaper_cas_db.py --
+          #   umbral por pipeline max(RUNNING_STALE_SECONDS, 2x timeout_seconds de los
+          #   pasos en running) leído en la misma consulta del barrido: paso de 1800 s
+          #   en curso y 1900 s sin avance NO vence (rojo contra 8a6b2f4: lo cosechaba
+          #   con umbral 1800); con 3700 s vence con umbral 3600 (rojo: umbral 1800 en
+          #   el motivo); sin pasos en curso sigue 1800 (control); el CAS con
+          #   updated_at que avanzó sigue sin cosechar (control); EXPLAIN de la consulta
+          #   del barrido: range por idx_pipelines_status y subconsulta ref por
+          #   idx_steps_pipeline (rojo: AttributeError).
+          # 80 -> 82 el 2026-09-17 (R38, fix round 1, 2b): +2 en
+          #   test_jacobs_candado_activos_db.py -- contra MariaDB real, crear en UNA
+          #   transacción sobre la conexión del GET_LOCK: otra sesión no ve nada hasta
+          #   confirmar y después ve pipeline, paso y evento; si el bloque lanza a mitad
+          #   no queda ninguna fila y el candado queda libre (IS_FREE_LOCK=1). Rojo contra
+          #   1d84e82: 2 failed (AttributeError: store.transaccion no existía).
+          # 82 -> 86 el 2026-09-17 (re-revisión final, m7): las_manos/_motor_usage_writer_test.py
+          #   (+4) entra a este job -- lo reescribió R49 (marcador propio r46-<uuid>, consulta
+          #   filtrada y limpieza propia, tras el incidente de la fila ajena borrada) y no lo
+          #   corría NINGÚN job. Necesita MariaDB: este job la tiene. Medido local: 86 passed.
           # 27 -> 29 el 2026-09-17 (frente E, E-17): tests/test_facetas_de_gobernanza_db.py
           #   (+2) -- las facetas del planner salen de la tabla `facet` real sembrada
           #   por las migraciones. Medido en local (3.14, jax_memory_test con las
@@ -1610,5 +2491,15 @@ jobs:
           #   Requiere jax-platform feat/ejecutor-c1-envoltorios en master (ejecutor_reglas_envoltorios_v1).
           #   Visto en rojo con la regla desactivada (2 failed). Local dos veces contra jax_memory_test
           #   con las migraciones de esa rama y el sello en un tmp: 35 passed.
-          grep -qE "^35 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 35 tests CORRIDOS."; exit 1; }
+          # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). HEAD esperaba 86 passed y
+          # origin/master 35; la unión de los dos conjuntos no da ninguno de los dos.
+          # Medido en hall9000 contra jax_memory_test con la lista unificada: 94 passed.
+          grep -qE "^87 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 87 tests CORRIDOS."; exit 1; }
+          # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
+          #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
+          #   probaba. Bajar un piso solo se justifica cuando se retira
+          #   funcionalidad y se dice: acá se retira el candado entero, y lo que
+          #   hacía cumplir pasa a estar dentro de cada escritura (sus controles
+          #   nuevos viven en jacobs/_cupo_io_test.py y tests/test_cupo_en_todos_los_caminos.py,
+          #   que suman a OTROS dos jobs). Medido en local contra jax_memory_test.

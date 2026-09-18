@@ -9,13 +9,68 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from interruptor import interruptor_activo
-from jacobs.models import INVOKER_ADA, INVOKER_PLATAFORMA, MAX_STEPS_PER_PIPELINE, VALID_INVOKERS
+from jacobs.models import (
+    INVOKER_ADA,
+    INVOKER_PLATAFORMA,
+    MAX_STEPS_PER_PIPELINE,
+    VALID_INVOKERS,
+    PipelineStatus,
+)
 
 # MAX_PARALLEL_PIPELINES se espeja en jax-platform backend/ajustes.py (familia
 # `tope_pipelines` de scripts/check_mirror_sync.py, frente C 2026-09-16): es el
 # máximo del ajuste max_pipelines de Admin. Cambiarlo acá exige cambiar la copia
 # en el mismo paso. MAX_STEPS_PER_PIPELINE vive en jacobs/models.py (E-13).
 MAX_PARALLEL_PIPELINES  = 3
+
+
+# ---------------------------------------------------------------------------
+#  QUÉ ESTADOS OCUPAN CUPO — ESTO ES UN CONTRATO, NO UNA LISTA DE CONVENIENCIA
+# ---------------------------------------------------------------------------
+# El cupo se hace cumplir metiendo una condición DENTRO de cada escritura que lo
+# consume (`jacobs/cupo.py` para el INSERT de crear; `jacobs/store.py` para los
+# UPDATE de continuar, resume y approve-step). Las tres sentencias cuentan con
+# estos estados y NADA MÁS, y por eso la lista vive acá, en un módulo que no
+# importa a ninguno de los dos: una segunda copia se desincroniza sola.
+#
+# Agregar un estado a `PipelineStatus` sin decidir de qué lado cae **cuenta mal
+# el cupo en producción y no lo avisa nadie**. Riesgo concreto y con fecha: el
+# frente G agrega `queued`, `awaiting_approval` y `waiting_children`.
+# Por eso la partición es EXHAUSTIVA y hay controles que se ponen rojos solos
+# (`tests/test_creacion_sin_candado_global.py`, `jacobs/_cupo_io_test.py`).
+ESTADOS_QUE_OCUPAN_CUPO = (PipelineStatus.pending, PipelineStatus.running)
+
+#: El otro lado, declarado y no implícito. `interrupted` NO ocupa cupo: es la
+#: semántica heredada de `store.pipeline_count_active()` y esta rama no la
+#: cambia (un interrumpido espera un /resume humano; si ocupara cupo, tres
+#: interrupciones sin atender frenarían la Mesa entera).
+ESTADOS_SIN_CUPO = (
+    PipelineStatus.completed, PipelineStatus.failed, PipelineStatus.aborted,
+    PipelineStatus.interrupted, PipelineStatus.expired,
+)
+
+#: La lista para un `IN (...)` de SQL. Literal y no parámetros: son valores del
+#: enum, no datos del usuario, y así la sentencia queda legible en un EXPLAIN.
+SQL_ESTADOS_VIVOS = ",".join(f"'{e.value}'" for e in ESTADOS_QUE_OCUPAN_CUPO)
+
+#: El JOIN que le mete la condición del cupo a un UPDATE. MariaDB no deja
+#: subconsultar en el `SET`/`WHERE` de un UPDATE en todas las versiones, pero un
+#: JOIN con tabla derivada sí, y —medido el 2026-09-17 contra MariaDB 12.3 con
+#: 10, 25 y 50 corrutinas— sostiene el cupo exacto sin un solo error.
+SQL_JOIN_CUPO = (
+    f"JOIN (SELECT COUNT(*) AS c FROM jacobs_pipelines "
+    f"WHERE status IN ({SQL_ESTADOS_VIVOS})) cupo_x"
+)
+
+
+class CupoAgotado(Exception):
+    """El cupo global está lleno. Vive acá, y no en cupo.py o store.py, para que
+    los dos puedan levantarla sin importarse entre sí."""
+
+    def __init__(self, activos: int, limite: int = MAX_PARALLEL_PIPELINES) -> None:
+        self.activos, self.limite = activos, limite
+        super().__init__(f"Ya hay {activos} pipelines activos. Límite duro: {limite}")
+
 # MAX_SUBPIPELINE_DEPTH se borró (frente F, 2026-09-16): era un literal que
 # ningún llamador alimentaba. La profundidad vive en la fila del token y el
 # límite en JAX_MAX_SUBPIPELINE_DEPTH (jacobs/subpipelines.py).

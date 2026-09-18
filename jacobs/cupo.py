@@ -56,7 +56,13 @@ import aiomysql
 
 from jacobs import store
 from jacobs.models import Pipeline, PipelineStatus
-from jacobs.policy import MAX_PARALLEL_PIPELINES
+from jacobs.policy import (
+    ESTADOS_QUE_OCUPAN_CUPO,
+    ESTADOS_SIN_CUPO,
+    MAX_PARALLEL_PIPELINES,
+    SQL_ESTADOS_VIVOS,
+    CupoAgotado,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,38 +82,6 @@ MAX_REINTENTOS_DEADLOCK = 12
 #: menos que lo que tarda planificar.
 ESPERA_MAXIMA_SEGUNDOS = 0.05
 
-# ---------------------------------------------------------------------------
-#  QUÉ ESTADOS OCUPAN CUPO — ESTO ES UN CONTRATO, NO UNA LISTA DE CONVENIENCIA
-# ---------------------------------------------------------------------------
-# La sentencia de abajo cuenta el cupo con estos estados y NADA MÁS. Agregar un
-# estado nuevo a `PipelineStatus` sin decidir de qué lado cae **cuenta mal el
-# cupo en producción y no lo avisa nadie**: un estado vivo que quede afuera deja
-# entrar más pipelines de los permitidos. Es riesgo concreto y con fecha: el
-# frente G agrega `queued`, `awaiting_approval` y `waiting_children` (decisión de
-# Fernando sobre cuáles ocupan cupo, 2026-09-17).
-#
-# Por eso la partición es EXHAUSTIVA y hay controles que se ponen rojos solos:
-#   - `tests/test_creacion_sin_candado_global.py` exige que TODO miembro de
-#     `PipelineStatus` esté clasificado acá, y que la sentencia use exactamente
-#     `ESTADOS_QUE_OCUPAN_CUPO`;
-#   - el mismo archivo compara esta lista contra la de
-#     `store.pipeline_count_active()`, que es la otra copia del criterio y vive
-#     en un archivo que esta rama no toca;
-#   - `jacobs/_cupo_io_test.py` falla si en `jacobs_pipelines` aparece un estado
-#     que `PipelineStatus` no conoce (otro servicio o otra rama escribiendo un
-#     estado que acá no está clasificado).
-ESTADOS_QUE_OCUPAN_CUPO = (PipelineStatus.pending, PipelineStatus.running)
-
-#: El otro lado de la partición, declarado y no implícito. `interrupted` NO ocupa
-#: cupo: es la semántica heredada de `store.pipeline_count_active()` y esta rama
-#: no la cambia (un pipeline interrumpido espera un /resume humano; si ocupara
-#: cupo, tres interrupciones sin atender frenarían la Mesa entera).
-ESTADOS_SIN_CUPO = (
-    PipelineStatus.completed, PipelineStatus.failed, PipelineStatus.aborted,
-    PipelineStatus.interrupted, PipelineStatus.expired,
-)
-
-_EN_VIVOS = ",".join(f"'{e.value}'" for e in ESTADOS_QUE_OCUPAN_CUPO)
 
 #: LA sentencia que decide. Una sola, autocommit, y se juzga por `rowcount`.
 #: `FROM DUAL` para que el SELECT no tenga tabla de origen: lo único que se lee
@@ -119,7 +93,7 @@ INSERT INTO jacobs_pipelines
      parent_pipeline_id, depth)
 SELECT %s, %s, %s, %s, %s, '[]', 0, %s, %s, %s, %s, %s, %s, NULL, 0
 FROM DUAL
-WHERE (SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ({_EN_VIVOS})) < %s
+WHERE (SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ({SQL_ESTADOS_VIVOS})) < %s
 """
 
 #: Completa la reserva con lo que sólo se sabe después: el plan, y —para un hijo
@@ -138,14 +112,15 @@ UPDATE jacobs_pipelines
 SQL_SOLTAR = "DELETE FROM jacobs_pipelines WHERE pipeline_id = %s AND status = %s"
 
 
-class CupoAgotado(Exception):
-    """El cupo global está lleno. Lleva el mensaje que ve el cliente."""
-
-    def __init__(self, activos: int, limite: int) -> None:
-        self.activos, self.limite = activos, limite
-        super().__init__(
-            f"Ya hay {activos} pipelines activos. Límite duro: {limite}"
-        )
+#: Re-exportados desde `jacobs/policy.py`, que es donde viven para que
+#: `jacobs/store.py` pueda usarlos sin importar este módulo (y al revés).
+#: `ESTADOS_QUE_OCUPAN_CUPO`, `ESTADOS_SIN_CUPO` y `CupoAgotado` se siguen
+#: pidiendo por acá porque este es el módulo del cupo.
+__all__ = [
+    "CupoAgotado", "ESTADOS_QUE_OCUPAN_CUPO", "ESTADOS_SIN_CUPO",
+    "reservar_cupo", "completar_reserva", "soltar_reserva", "activos",
+    "SQL_RESERVAR", "parametros_de_reserva",
+]
 
 
 def parametros_de_reserva(p: Pipeline, limite: int) -> tuple:
@@ -210,16 +185,21 @@ async def reservar_cupo(p: Pipeline, limite: int | None = None) -> bool:
     raise ultimo
 
 
-async def completar_reserva(p: Pipeline) -> None:
-    """Escribe en la fila reservada lo que sólo se sabe después de planificar."""
-    async with store.conexion() as conn:
+async def completar_reserva(p: Pipeline, conexion=None) -> None:
+    """Escribe en la fila reservada lo que sólo se sabe después de planificar.
+
+    `conexion`: la del bloque de la transacción de creación, para que el plan,
+    los pasos y los eventos entren todo-o-nada. Sin ella, una del pool.
+    """
+    args = (
+        json.dumps([s.model_dump() for s in p.plan], ensure_ascii=False),
+        json.dumps(p.context, ensure_ascii=False),
+        p.parent_pipeline_id, p.depth, p.user_id, p.tenant_id,
+        p.updated_at, p.pipeline_id,
+    )
+    async with store._conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
-            await cur.execute(SQL_COMPLETAR, (
-                json.dumps([s.model_dump() for s in p.plan], ensure_ascii=False),
-                json.dumps(p.context, ensure_ascii=False),
-                p.parent_pipeline_id, p.depth, p.user_id, p.tenant_id,
-                p.updated_at, p.pipeline_id,
-            ))
+            await cur.execute(SQL_COMPLETAR, args)
 
 
 async def soltar_reserva(pipeline_id: str) -> int:

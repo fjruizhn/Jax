@@ -1,6 +1,8 @@
 """Lector UNICO de salud de facets. La salud se calcula EXCLUSIVAMENTE
-aca, desde facet_health_event. Quien escribe esa tabla es
-jax-platform/backend/facet_health.py; quien la lee es solo este modulo.
+aca, desde facet_health_event. La escriben jax-platform/backend/
+facet_health.py (chat y canarios) y, desde 2026-09-17, la sonda del
+pre-vuelo de Jacobs (source='preflight', registrar_evento_de_sonda abajo);
+quien la LEE es solo este modulo.
 
 facet_health_alert NO es una segunda fuente de verdad: es el registro de
 que ya se aviso -- la distincion entre un valor y su acuse de recibo.
@@ -10,6 +12,7 @@ import logging
 import time
 
 from jacobs import store
+from redaccion import recortar_redactado
 
 logger = logging.getLogger("jacobs.facet_health")
 
@@ -150,3 +153,111 @@ async def check_facet_health() -> dict:
         await conn.commit()
 
     return {"states": states, "notified": [k for k, _ in notify]}
+
+
+# ----------------------------------------------------------------
+#  Pre-vuelo (spec 2026-09-17 §4.5)
+# ----------------------------------------------------------------
+# Solo cuentan los eventos de NIVEL PROVEEDOR. Los gate_*, unbound y
+# unsupported_transport son del gate de la Mesa (kimi escribe siempre
+# unsupported_transport porque la Mesa no lo despacha) y probe_error es una
+# falla de la sonda: ninguno dice nada del proveedor.
+OUTCOMES_DE_PROVEEDOR = ("ok", "provider_error")
+# Fix round 1 (revisión Task 7), Ruling R13b: la sonda también puede escribir
+# 'config_error' -- una falla LOCAL de preparación (sin credencial activa,
+# transporte desconocido, contrato sin tope de salida) que no dice nada del
+# proveedor. Entra al ENUM de escritura (registrar_evento_de_sonda) pero NO a
+# OUTCOMES_DE_PROVEEDOR: el lector (sql_ultimo_evento_de_proveedor) lo ignora
+# a propósito, igual que gate_* -- si está mal, un typo en la credencial
+# marcaría la faceta como "sondeada y caída" en vez de "no se pudo ni
+# preguntar", y dejaría de reintentarse en la próxima ventana.
+OUTCOMES_DE_SONDA = OUTCOMES_DE_PROVEEDOR + ("config_error",)
+SOURCE_PREVUELO = "preflight"
+_LARGO_DETALLE = 255  # facet_health_event.detail VARCHAR(255)
+
+# Fix round 1, item 4: la lista sale de OUTCOMES_DE_PROVEEDOR, no de un
+# literal duplicado. Es un literal generado, no un parametro -- seguro
+# contra inyeccion porque OUTCOMES_DE_PROVEEDOR es una constante fija del
+# modulo, nunca un valor que llegue de afuera. NO incluye 'config_error' a
+# propósito (ver comentario de OUTCOMES_DE_SONDA arriba).
+_OUTCOMES_SQL = ",".join(f"'{o}'" for o in OUTCOMES_DE_PROVEEDOR)
+
+_SQL_EVENTO_DE_SONDA = (
+    "INSERT INTO facet_health_event (facet, outcome, source, detail, ts) "
+    "VALUES (%s, %s, %s, %s, %s)"
+)
+
+
+def sql_ultimo_evento_de_proveedor(n_claves: int) -> str:
+    """Último evento ok/provider_error por clave dentro de la ventana. Va por
+    idx_facet_ts (facet, ts) -- EXPLAIN en tests/test_prevuelo_catalogo_db.py.
+
+    Puede devolver DOS filas para la misma clave si `ok` y `provider_error`
+    empatan en MAX(ts): el desempate (R12, provider_error gana) lo hace
+    ultimo_evento_de_proveedor() en Python, no esta consulta -- ordenar aca
+    forzaria un filesort sobre el resultado del JOIN sin necesidad."""
+    ph = ",".join(["%s"] * n_claves)
+    return (
+        "SELECT e.facet, e.ts, e.outcome FROM facet_health_event e "
+        "JOIN (SELECT facet, MAX(ts) mt FROM facet_health_event "
+        f"      WHERE facet IN ({ph}) AND ts >= %s AND outcome IN ({_OUTCOMES_SQL}) "
+        "      GROUP BY facet) m "
+        "  ON m.facet = e.facet AND m.mt = e.ts "
+        f"WHERE e.outcome IN ({_OUTCOMES_SQL})"
+    )
+
+
+def salud_de_proveedor(ultimo: tuple[float, str] | None, ahora: float) -> str:
+    """PURA. 'sana' solo con un `ok` dentro de la ventana; cualquier otra cosa
+    (sin evento, provider_error, viejo) se vuelve a medir: decide un dato
+    fresco, no uno de hace una hora."""
+    if ultimo is None or ultimo[0] < ahora - HEALTH_WINDOW_SECONDS:
+        return "sondear"
+    return "sana" if ultimo[1] == _OK else "sondear"
+
+
+async def ultimo_evento_de_proveedor(cur, claves: set[str], ahora: float) -> dict[str, tuple[float, str]]:
+    if not claves:
+        return {}
+    ordenadas = sorted(claves)
+    await cur.execute(
+        sql_ultimo_evento_de_proveedor(len(ordenadas)),
+        (*ordenadas, ahora - HEALTH_WINDOW_SECONDS),
+    )
+    filas = await cur.fetchall()
+    # R12 (fix round 1, item 3): un empate en MAX(ts) devuelve `ok` Y
+    # `provider_error` para la misma clave; sin este orden, cual de los dos
+    # gana el dict de abajo depende del orden fisico en que MariaDB los
+    # devolvio (medido: cambia con el orden de insercion, no es un empate
+    # "sano" por default). provider_error tiene que ganar SIEMPRE el empate:
+    # el resultado es 'sondear', el lado que no se equivoca por optimismo.
+    # sorted() es estable, asi que las filas 'ok' quedan antes que las
+    # 'provider_error' para la misma clave y el dict comprehension de abajo
+    # se queda con la ultima -- provider_error.
+    filas_en_orden = sorted(filas, key=lambda fila: fila[2] == "provider_error")
+    return {faceta: (float(ts), outcome) for faceta, ts, outcome in filas_en_orden}
+
+
+async def registrar_evento_de_sonda(clave: str, outcome: str, detalle: str | None, ts: float) -> None:
+    """Escribe el resultado de una sonda del pre-vuelo. Quien llama decide qué
+    hacer si falla (sonda.py: el veredicto se mantiene y se cuenta).
+
+    outcome ∈ OUTCOMES_DE_SONDA = ('ok', 'provider_error', 'config_error')
+    (Ruling R13b, fix round 1 de Task 7) -- cualquier otro valor se rechaza.
+    'config_error' se guarda igual que los otros dos pero el LECTOR
+    (sql_ultimo_evento_de_proveedor, OUTCOMES_DE_PROVEEDOR) lo ignora.
+
+    Fix round 1, item 1: redactar ANTES de recortar (recortar_redactado,
+    jax/core/redaccion.py:161-168) -- al reves, un secreto que cruza el
+    corte de 255 queda partido, el pedazo visible ya no tiene la forma que
+    reconoce la regla y se filtra en claro."""
+    if outcome not in OUTCOMES_DE_SONDA:
+        raise ValueError(f"outcome de sonda inválido: {outcome!r}")
+    # R38, fix round 1: por el pool del store (la sonda corre en el camino de
+    # /jacobs/preflight, crear y continue), no por una conexión propia.
+    async with store.conexion_del_pool() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                _SQL_EVENTO_DE_SONDA,
+                (clave, outcome, SOURCE_PREVUELO, recortar_redactado(detalle, _LARGO_DETALLE), ts),
+            )

@@ -19,7 +19,9 @@ from unittest.mock import patch
 # "test"/pending reales en la DB de producción sin pasar por
 # jacobs.policy.validate_create(). Confirmado 2026-08-19: 8 filas huérfanas
 # en jax_memory.jacobs_pipelines por este mecanismo.
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jacobs import store
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -38,16 +40,31 @@ class PipelineIdentityTest(unittest.IsolatedAsyncioTestCase):
             status=PipelineStatus.pending, user_id="1", tenant_id="test-tenant",
             created_at=time.time(), updated_at=time.time(),
         )
-        await store.pipeline_create(p)
-        # Sin esto la fila quedaba `pending` para siempre en jax_memory_test y
-        # contaba contra MAX_PARALLEL_PIPELINES=3: cada corrida de la suite
-        # bloqueaba las pruebas de carga de Jacobs (medido 2026-09-17, dos filas
-        # `test`/`Fernando` tapaban los tres escenarios con 422). Registrada antes
-        # de las aserciones para que tambien cierre si fallan.
-        self.addAsyncCleanup(store.pipeline_update_status, pid, PipelineStatus.expired)
-        loaded = await store.pipeline_get(pid)  # confirmado: nombre real, ver store.py:116
-        self.assertEqual(loaded.user_id, "1")
-        self.assertEqual(loaded.tenant_id, "test-tenant")
+        # R40 (2026-09-17): la fila se BORRA al terminar, pase lo que pase.
+        # Antes quedaba en `pending` para siempre en jax_memory_test: cada
+        # corrida sumaba un pipeline ACTIVO (76 filas 'test'/'Fernando'
+        # vencidas por un reaper ajeno) que movía la cuenta global que usan
+        # otros tests y contaba contra MAX_PARALLEL_PIPELINES=3 — medido
+        # 2026-09-17, dos filas `test`/`Fernando` tapaban los tres escenarios
+        # de la prueba de carga de Jacobs con 422. Borrar la fila (y no sólo
+        # marcarla `expired`) cierra las dos cosas; el finally corre también
+        # si fallan las aserciones.
+        try:
+            await store.pipeline_create(p)
+            loaded = await store.pipeline_get(pid)  # confirmado: nombre real, ver store.py:116
+            self.assertEqual(loaded.user_id, "1")
+            self.assertEqual(loaded.tenant_id, "test-tenant")
+        finally:
+            conn = await store.conexion_dedicada()
+            try:
+                async with conn.cursor() as cur:
+                    await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("SELECT COUNT(*) FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                    restantes = (await cur.fetchone())[0]
+            finally:
+                conn.close()
+            await store.cerrar_pool()
+        self.assertEqual(restantes, 0, "el test dejó su pipeline en la base")
 
 
 class ExecutorMotorPayloadTest(unittest.IsolatedAsyncioTestCase):

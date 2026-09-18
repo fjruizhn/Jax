@@ -26,12 +26,9 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-_existing_db_name = os.environ.get("JAX_DB_NAME")
-if _existing_db_name and _existing_db_name != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_existing_db_name!r} ya está seteado -- unset antes de correr este test."
-    )
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 KEY = "AIzaFAKE-t66-cabecera-0123456789"
 
@@ -151,8 +148,8 @@ class JacobsGeminiCabeceraTest(unittest.IsolatedAsyncioTestCase):
 
 class JacobsFailStepRedactaTest(unittest.IsolatedAsyncioTestCase):
     """_fail_step es donde el error de un paso se ESCRIBE (jacobs_steps.error
-    y los eventos STEP_FAILED / PIPELINE_ABORTED): se redacta ahi, asi un
-    llamador nuevo no puede saltarselo."""
+    y el evento STEP_FAILED): se redacta ahi, asi un llamador nuevo no puede
+    saltarselo."""
 
     async def test_el_error_guardado_y_los_eventos_van_redactados(self):
         from jacobs import executor
@@ -162,9 +159,8 @@ class JacobsFailStepRedactaTest(unittest.IsolatedAsyncioTestCase):
         pipeline = Pipeline(name="t", invoked_by="plataforma", mode="auto", plan=[step])
         crudo = (f"HTTPStatusError: 400 for url 'https://g.example/m:generateContent?key={KEY}'"
                  f" cuerpo {KEY}")
-        with patch.object(executor.store, "step_upsert", AsyncMock()), \
-             patch.object(executor.store, "event_append", AsyncMock()) as ev, \
-             patch.object(executor.store, "pipeline_update_status", AsyncMock()):
+        with patch.object(executor.store, "step_upsert_si_epoca", AsyncMock(return_value=True)), \
+             patch.object(executor.store, "event_append", AsyncMock()) as ev:
             await executor._fail_step(pipeline, step, 0, crudo)
 
         self.assertNotIn(KEY, step.error)

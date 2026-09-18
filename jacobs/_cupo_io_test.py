@@ -38,6 +38,7 @@ from jacobs import _arnes_ada as ada  # primero: barrera de base de prueba
 import asyncio  # noqa: E402
 import os  # noqa: E402
 import time  # noqa: E402
+import inspect  # noqa: E402
 import unittest  # noqa: E402
 import uuid  # noqa: E402
 from unittest.mock import patch  # noqa: E402
@@ -78,7 +79,8 @@ class CupoEnLaBaseTest(unittest.IsolatedAsyncioTestCase):
 
     async def _limpiar(self):
         await ada.ejecutar(
-            "DELETE FROM jacobs_pipelines WHERE name LIKE %s", (PREFIJO + "%",)
+            "DELETE FROM jacobs_pipelines WHERE name LIKE %s",  # marcador-propio: PREFIJO
+            (PREFIJO + "%",),
         )
 
     async def _vivos(self) -> int:
@@ -225,6 +227,73 @@ class CupoEnLaBaseTest(unittest.IsolatedAsyncioTestCase):
 
 
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
+class ReanudarRespetaElCupoTest(unittest.IsolatedAsyncioTestCase):
+    """EL HALLAZGO del 2026-09-17, contra la base real.
+
+    `resume` y `approve-step` mueven un pipeline de `interrupted` a correr. Como
+    `interrupted` NO cuenta como activo, y como ninguno de los dos tomaba el
+    candado, **con el cupo lleno igual entraban**: tres interrumpidos y tres
+    `resume` dejaban cuatro corriendo con el límite en tres.
+
+    Este test llama a la MISMA función que usan los dos endpoints
+    (`store.pipeline_tomar_epoca`) con el cupo LLENO y exige que no admita. Le
+    pasa `cupo_maximo` sólo si el parámetro existe, así que contra master corre
+    igual y se pone ROJO por comportamiento —"admitió con el cupo lleno"— y no
+    por un TypeError de firma.
+    """
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        self.addAsyncCleanup(self._limpiar)
+        await store.init_tables()
+        await self._limpiar()
+        self.assertEqual(await cupo.activos(), 0, "hay pipelines vivos ajenos en jax_memory_test")
+
+    async def _limpiar(self):
+        await ada.ejecutar(
+            "DELETE FROM jacobs_pipelines WHERE name LIKE %s",  # marcador-propio: PREFIJO
+            (PREFIJO + "%",),
+        )
+
+    async def _sembrar(self, estado: str, n: int = 1) -> list[str]:
+        ids = []
+        for i in range(n):
+            p = _pipeline(f"{PREFIJO}{estado}-{i}-{uuid.uuid4().hex[:6]}")
+            await store.pipeline_create(p)
+            await ada.ejecutar(
+                "UPDATE jacobs_pipelines SET status=%s WHERE pipeline_id=%s", (estado, p.pipeline_id))
+            ids.append(p.pipeline_id)
+        return ids
+
+    async def test_con_el_cupo_lleno_un_resume_no_entra(self):
+        from jacobs.models import PipelineStatus
+        from jacobs.policy import MAX_PARALLEL_PIPELINES
+
+        limite = MAX_PARALLEL_PIPELINES
+        await self._sembrar("running", limite)          # el cupo, lleno
+        (interrumpido,) = await self._sembrar("interrupted", 1)
+        self.assertEqual(await cupo.activos(), limite)
+
+        tope = {}
+        if "cupo_maximo" in inspect.signature(store.pipeline_tomar_epoca).parameters:
+            tope["cupo_maximo"] = limite
+
+        admitido = None
+        try:
+            admitido = await store.pipeline_tomar_epoca(
+                interrumpido, 0, (PipelineStatus.interrupted,), **tope)
+        except Exception as exc:  # fail-soft: NO traga nada -- afirma que el error es el rechazo por cupo y, si no lo es, el assert pone el test en rojo con el error a la vista
+            self.assertEqual(type(exc).__name__, "CupoAgotado", f"error inesperado: {exc!r}")
+            return
+
+        self.assertIsNone(
+            admitido,
+            "reanudar entró con el cupo LLENO: el límite dice que existe y no existe "
+            "(tres interrumpidos y tres resume lo pasan)",
+        )
+
+
+@unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
 class CreacionConcurrenteSinCandadoTest(unittest.IsolatedAsyncioTestCase):
     """El endpoint completo, con el candado global BORRADO: `POST
     /jacobs/pipeline` concurrente nunca supera `MAX_PARALLEL_PIPELINES`."""
@@ -241,7 +310,8 @@ class CreacionConcurrenteSinCandadoTest(unittest.IsolatedAsyncioTestCase):
 
     async def _limpiar(self):
         await ada.ejecutar(
-            "DELETE FROM jacobs_pipelines WHERE name LIKE %s", (PREFIJO + "%",)
+            "DELETE FROM jacobs_pipelines WHERE name LIKE %s",  # marcador-propio: PREFIJO
+            (PREFIJO + "%",),
         )
 
     async def test_diez_creaciones_a_la_vez_admiten_exactamente_el_cupo(self):

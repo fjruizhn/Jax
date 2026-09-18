@@ -18,7 +18,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jacobs import models, routes  # noqa: E402
 from jacobs import plan as plan_mod  # noqa: E402
@@ -69,7 +71,7 @@ def test_build_rechaza_una_faceta_del_spec_que_no_esta_en_la_tabla():
 
 
 def test_build_rechaza_la_faceta_inventada_por_el_llm():
-    async def llm(objective, max_steps, capability_hint, *, facetas_activas):
+    async def llm(objective, max_steps, capability_hint, *, facetas_activas, governance=None):
         return await plan_mod.PlanBuilder._parse_plan_json(
             '[{"facet": "inventada", "capability": "research", "prompt": "x"}]', max_steps)
     with pytest.raises(plan_mod.PlanRejected) as e:

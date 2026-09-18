@@ -30,7 +30,9 @@ import unittest
 
 import aiomysql
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jacobs import store  # noqa: E402
 

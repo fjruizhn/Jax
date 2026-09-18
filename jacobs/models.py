@@ -6,6 +6,7 @@ En honor al Prof. Raúl Jacobs.
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -106,11 +107,27 @@ class Pipeline(BaseModel):
     plan:               list[Step] = Field(default_factory=list)
     plan_version:       int = 1
     current_step_index: int = 0
+    # Época de corrida (spec 2026-09-17 §5.3): la toma cada ejecutor al
+    # arrancar; resume, approve-step y continue la INCREMENTAN. Toda escritura
+    # del ejecutor es condicional a su época y a status='running': una corrida
+    # superada (cancelada, vencida, continuada por otro) no escribe nada.
+    run_epoch:          int = 0
     max_steps:          int = MAX_STEPS_PER_PIPELINE
     context:            dict[str, Any] = Field(default_factory=dict)
     created_at:         float = 0.0
     updated_at:         float = 0.0
     # dedication: interno, no expuesto en API
+
+
+def validar_costo_max_aceptado(costo: Decimal | None) -> None:
+    """Spec 2026-09-17 §6.1: costo_max_aceptado_usd no puede ser negativo.
+    Compartido por PipelineCreateRequest (acá abajo) y ContinueRequest
+    (jacobs/routes.py, Task 11 fix round 1) para no duplicar el umbral ni el
+    mensaje en dos sitios -- una revisión encontró que ContinueRequest había
+    quedado sin este guardia y un valor negativo llegaba hasta el servicio,
+    donde salía como 409 costo_supera_lo_aceptado en vez de 422."""
+    if costo is not None and costo < 0:
+        raise ValueError("costo_max_aceptado_usd no puede ser negativo")
 
 
 class PipelineCreateRequest(BaseModel):
@@ -126,6 +143,10 @@ class PipelineCreateRequest(BaseModel):
     # `depth` o `subpipeline_depth` en el JSON se ignora (nadie lo lee).
     subpipeline_token:  str | None = Field(default=None, min_length=1, max_length=128)
     parent_pipeline_id: str | None = Field(default=None, min_length=1, max_length=36)
+    # Spec 2026-09-17 §6.1: el costo que el humano confirmó en la Mesa. Si el
+    # pre-vuelo interno da MÁS, Jacobs responde 409 costo_supera_lo_aceptado
+    # sin crear: la condición la hace cumplir quien gasta.
+    costo_max_aceptado_usd: Decimal | None = None
 
     # Validadores POR CAMPO, no de modelo (revisión final del frente F,
     # 2026-09-16, hallazgo I-1): un error de un `model_validator` lleva en
@@ -158,6 +179,16 @@ class PipelineCreateRequest(BaseModel):
             raise ValueError(
                 f"max_steps debe estar entre 1 y {MAX_STEPS_PER_PIPELINE} (límite duro v0.1)"
             )
+        return valor
+
+    # Spec 2026-09-17 §6.1. Por campo y no en un model_validator, por la misma
+    # razón del bloque de arriba (hallazgo I-1 del frente F): un error de
+    # model_validator devuelve el cuerpo entero en el 422, con el
+    # subpipeline_token en claro.
+    @field_validator("costo_max_aceptado_usd")
+    @classmethod
+    def _costo_max_aceptado_valido(cls, valor: Decimal | None) -> Decimal | None:
+        validar_costo_max_aceptado(valor)
         return valor
 
 

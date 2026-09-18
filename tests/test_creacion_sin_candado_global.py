@@ -121,17 +121,41 @@ def test_la_sentencia_cuenta_exactamente_los_estados_declarados():
         assert f"'{estado.value}'" not in sql, estado
 
 
-def test_la_otra_copia_del_criterio_cuenta_lo_mismo():
-    """`store.pipeline_count_active()` es la OTRA copia del criterio y vive en
-    un archivo que esta rama no toca. Si las dos se desincronizan, el mensaje
-    del rechazo y la decisión hablarían de cosas distintas."""
-    import re
-
+def test_no_hay_una_segunda_copia_del_criterio():
+    """El recuento de `store` y las tres escrituras condicionadas tienen que
+    contar los MISMOS estados. Se comprueba sobre el SQL que de verdad corre, no
+    sobre la intención: si alguien vuelve a escribir la lista a mano en uno de
+    los cuatro lugares, esto se pone rojo."""
     from jacobs import store
 
-    fuente = inspect.getsource(store.pipeline_count_active)
-    en_store = set(re.findall(r"'([a-z_]+)'", fuente))
-    assert en_store == {e.value for e in cupo.ESTADOS_QUE_OCUPAN_CUPO}, (
-        f"store.pipeline_count_active() cuenta {sorted(en_store)} y el cupo cuenta "
-        f"{sorted(e.value for e in cupo.ESTADOS_QUE_OCUPAN_CUPO)}"
-    )
+    esperado = {e.value for e in cupo.ESTADOS_QUE_OCUPAN_CUPO}
+    sentencias = {
+        "contar (store)": store._SQL_CONTAR_ACTIVOS,
+        "reservar (cupo)": cupo.SQL_RESERVAR,
+        "continuar (store)": store._SQL_PIPELINE_CONTINUAR,
+        "tomar época con cupo (store)": store._sql_tomar_epoca(False, 1, True),
+    }
+    for nombre, sql in sentencias.items():
+        presentes = {e.value for e in cupo.ESTADOS_QUE_OCUPAN_CUPO if f"'{e.value}'" in sql}
+        assert presentes == esperado, f"{nombre} no cuenta {esperado - presentes}"
+        for fuera in cupo.ESTADOS_SIN_CUPO:
+            # `aborted`/`expired` aparecen en el WHERE de continuar como estados
+            # de ORIGEN, no como parte del recuento: se mira sólo el paréntesis
+            # del COUNT.
+            conteo = sql[sql.index("COUNT(*)"):sql.index(")", sql.index("status IN (", sql.index("COUNT(*)")))]
+            assert f"'{fuera.value}'" not in conteo, f"{nombre} cuenta {fuera.value}"
+
+
+def test_las_tres_escrituras_que_ocupan_cupo_llevan_la_condicion():
+    """Crear INSERTA, continuar/resume/approve REVIVEN. Las dos formas tienen
+    que llevar la condición: el INSERT condicionado solo no cubre a las que
+    reviven una fila que ya existe, y ese fue el hallazgo que obligó a ampliar
+    el alcance (2026-09-17)."""
+    from jacobs import store
+
+    assert "COUNT(*)" in cupo.SQL_RESERVAR
+    assert "cupo_x.c <" in store._SQL_PIPELINE_CONTINUAR
+    assert "cupo_x.c <" in store._sql_tomar_epoca(False, 1, True)
+    # …y sin pedir cupo, la sentencia de la época queda como estaba: el
+    # llamador DECLARA que su escritura ocupa cupo.
+    assert "cupo_x" not in store._sql_tomar_epoca(False, 1, False)

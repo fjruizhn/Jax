@@ -69,6 +69,19 @@ class _CacheEntry:
 _cache: dict[str, _CacheEntry] = {}
 
 
+# Ruling R39 (Jacobs, 2026-09-17): conexión PROPIA, no el pool del store de
+# Jacobs, a propósito. En el pre-vuelo esta función la alcanza sólo la sonda
+# (jacobs/sonda.py::_preparar, directo o vía facet_resolver), y la sonda corre
+# sólo cuando la clave no tiene un evento ok fresco en facet_health_event, con
+# un vuelo por clave en el proceso (jacobs/prevuelo.py::_sondear_una_vez, F5).
+# resolve_credential cachea 30 s por proveedor (CREDENTIAL_CACHE_TTL_SECONDS):
+# a lo sumo una conexión por proveedor cada 30 s, no una por pedido. Este
+# archivo está espejado con jax-platform (scripts/check_mirror_sync.py), que no
+# tiene el pool de Jacobs. Fuera del camino caliente; costo si está mal: una
+# conexión por sonda.
+# (Merge 2026-09-17: la nota vivía en las_manos/credential_resolver.py, que el
+# frente E convirtió en symlink a ESTE archivo (E-11); se reubica acá, arriba
+# de _db_conn, fuera del segmento que compara check_mirror_sync.py.)
 async def _db_conn() -> aiomysql.Connection:
     host = os.environ.get("JAX_DB_HOST")
     port = os.environ.get("JAX_DB_PORT")

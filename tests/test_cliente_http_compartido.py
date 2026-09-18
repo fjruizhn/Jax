@@ -18,7 +18,9 @@ from unittest.mock import patch
 
 import httpx
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jax.core import cliente_http_compartido as chc  # noqa: E402
 

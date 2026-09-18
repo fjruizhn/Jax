@@ -12,11 +12,21 @@ import json
 import logging
 import os
 import time
-from typing import Any
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, AsyncIterator, Iterator
 
 import aiomysql
 from pymysql import err as _pymysql_err
+from pymysql.constants import CLIENT
 
+from jacobs.policy import (
+    MAX_PARALLEL_PIPELINES,
+    SQL_ESTADOS_VIVOS,
+    SQL_JOIN_CUPO,
+    CupoAgotado,
+)
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 
 try:
@@ -124,27 +134,154 @@ class _PoolDelLoop:
         self.guardian: Any = None
 
 
+# ------------------------------------------------------------------
+#  MERGE 2026-09-17 (master <- feat/prevuelo-y-continuar)
+#  Las dos ramas escribieron un pool para este módulo el mismo día. Queda el
+#  de master (frente F): tiene la higiene de sesión que la otra no tenía
+#  (ConexionVigilada, _sesion_reutilizable, _codigo_del_servidor_sano,
+#  pool_recycle) y su medición de carga. De la rama de pre-vuelo se conservan,
+#  portadas sobre él: la espera de turno SIN PLAZO de los trabajos de fondo
+#  (R38 fix round 1), `conexion_del_pool` como nombre alterno de `conexion()`,
+#  `_conexion_o_pool` (conexión prestada o del pool), `transaccion` +
+#  `EstadoDeTransaccion` (R41: commit incierto) y las conexiones DEDICADAS con
+#  CLIENT.FOUND_ROWS de las escrituras condicionales por época
+#  (`conexion_dedicada`, ver su docstring). `JAX_DB_POOL_MAX` sigue
+#  dimensionando el pool, igual que `JAX_JACOBS_DB_POOL_SIZE`.
+# ------------------------------------------------------------------
+
+# --- Pool de conexiones del store de Jacobs (Task 15b y R38, 2026-09-17, LAS CUATRO #2) ---
+# Medido (task-15b-report.md): cada pre-vuelo abría 2 conexiones nuevas
+# (MotorCatalog.from_db y prevuelo_catalogo.leer_catalogo), ~0,15 ms de CPU
+# del event loop cada una más el handshake en la base. Ahora el pre-vuelo
+# toma UNA conexión de este pool y la pasa a los dos lectores.
+#
+# Ruling R38 (2026-09-17): el pool es del STORE, no sólo del pre-vuelo. Medido
+# a c=50 sostenido contra /jacobs/preflight: 0 %, 13 %, 49 % y 61 % de errores
+# (OperationalError 2013) por get_motor_governance() abriendo una conexión por
+# pedido fuera del pool; el inventario (r38-report.md) encontró lo mismo en
+# crear, continue, resume y approve-step. Ahora van por este pool las lecturas
+# y las escrituras SIN condición de esos caminos (pipeline_get,
+# steps_by_pipeline, pipeline_count_active, get_motor_governance,
+# pipeline_create, step_upsert, pipeline_update_status, event_append, y --
+# desde el fix round 1 -- los dos escritores de la sonda del pre-vuelo,
+# facet_health.registrar_evento_de_sonda y usage_writer.record_direct_usage):
+# son
+# autocommit, no miran el conteo de filas y no dejan estado de sesión, así que
+# la conexión que vuelve al pool vuelve igual a como salió. Quedan DEDICADAS
+# a propósito: las escrituras condicionales con CLIENT.FOUND_ROWS (ver abajo) y
+# init_tables (cambia lock_wait_timeout de la sesión). Ninguna de estas
+# funciones pide una segunda conexión del pool mientras tiene una: con el pool
+# lleno, eso sería esperar a sí misma.
+#
+# - Un pool por proceso y por event loop: se crea perezosamente en el primer
+#   pedido y queda atado al loop que lo creó (aiomysql.Pool guarda el loop).
+#   Usarlo desde otro loop VIVO se niega con RuntimeError -- fallaría más tarde
+#   con un error críptico. LAS MANOS lo cierra en su shutdown y el CLI
+#   (tools/jacobs_relaunch.py) antes de salir.
+# - R38: el pool se cierra también CUANDO SE APAGA SU LOOP. Los tests y los
+#   scripts corren un asyncio.run por llamada al store; sin esto el loop
+#   siguiente chocaba con el RuntimeError de arriba, y soltar el pool viejo sin
+#   cerrarlo deja que el recolector intente cerrar sus sockets sobre un loop
+#   muerto (PytestUnraisableExceptionWarning, medido: +31 en gobernanza-db). Un
+#   generador asíncrono guardián, arrancado en el loop del pool, lo cierra en
+#   su `finally`: asyncio.run (y uvicorn, que corre sobre asyncio.Runner)
+#   llaman loop.shutdown_asyncgens() antes de cerrar el loop. Un loop que se
+#   cerró SIN ese paso (loop.close() a mano) deja un pool que no puede volver
+#   a usarse nunca: se suelta y se crea otro.
+# - minsize=0: crear el pool no toca la base; la primera conexión se abre al
+#   pedirla, así una base caída falla en el pedido (503), no en un pool roto
+#   guardado.
+# - SIN CLIENT.FOUND_ROWS, por la semántica de las escrituras CONDICIONALES:
+#   pipeline_tomar_epoca, pipeline_update_status_si_epoca, step_upsert_si_epoca
+#   y continuar_transaccion necesitan contar filas ENCONTRADAS (un UPDATE que
+#   escribe los mismos valores cuenta 0 sin el flag y la época se daría por
+#   perdida), así que siguen con conexion_dedicada(found_rows=True). Lo que
+#   va por el pool (lecturas y escrituras sin condición) no mira el conteo, y
+#   meterle el flag al pool cambiaría en silencio el conteo de cualquier UPDATE
+#   que se agregue después.
+# - Pedir una conexión espera a lo sumo JAX_DB_CONNECT_TIMEOUT_SECONDS: con el
+#   pool lleno de conexiones colgadas, un pedido no espera para siempre.
+# - El TURNO lo da un asyncio.Semaphore propio del tamaño del pool, no la
+#   condición interna de aiomysql (fix round 1 de la revisión, 2026-09-17):
+#   aiomysql 0.3.2 `Pool.release()` no despierta a quien espera si la conexión
+#   devuelta ya está cerrada (sólo agenda `_wakeup()` en la rama
+#   `not conn.closed`), así que tras una conexión rota el siguiente esperaba el
+#   timeout entero y daba 503. Con el semáforo, nunca hay más pedidos adentro
+#   del pool que conexiones posibles: `pool.acquire()` encuentra una libre o
+#   abre otra, sin esperar la condición de aiomysql, y soltar el semáforo
+#   despierta siempre al siguiente.
+# - Una conexión que sale del bloque con una excepción se CIERRA y no vuelve:
+#   puede tener filas sin leer o el socket roto. Las que la base cortó en
+#   reposo (wait_timeout) las descarta el propio Pool de aiomysql al pedirlas
+#   (EOF en el lector).
+
+
 _pools: dict[asyncio.AbstractEventLoop, _PoolDelLoop] = {}
 
 
-def tamanio_pool() -> int:
-    """Lee y valida `JAX_JACOBS_DB_POOL_SIZE`. Ausente -> default. Presente pero
-    vacia, no entera o fuera de [1, TAMANIO_POOL_MAXIMO] -> RuntimeError
-    (fail-closed: un typo no se convierte en un pool de 0 o de 5000)."""
-    crudo = os.environ.get(ENV_TAMANIO_POOL)
+DB_POOL_MAX = "JAX_DB_POOL_MAX"
+
+
+def db_pool_max() -> int:
+    """Conexiones máximas del pool del store (JAX_DB_POOL_MAX, default 10).
+
+    Ruling R38 (2026-09-17). Se lee al CREAR el pool: un cambio vale después
+    de reiniciar el proceso (o de cerrar_pool()). Un valor inválido lanza con
+    el nombre de la variable (mismo patrón que jacobs/prevuelo_config.py), no
+    cae a un default.
+
+    Derivación del default. Demanda PICO de conexiones a la vez en LAS MANOS:
+    al arrancar una ola, cada paso escribe su STEP_STARTED a la vez --
+    MAX_PARALLEL_PIPELINES (3) x MAX_STEPS_PER_PIPELINE (20, una ola puede
+    tenerlos todos) = 60 -- más los pedidos HTTP en curso (a c=50, 50 más) y
+    el reaper (1): ~111. NO se dimensiona al pico: la MariaDB es compartida
+    con producción, max_connections=151 y Max_used_connections=96 medido el
+    2026-09-17 (SHOW GLOBAL STATUS), así que un pool de 111 la agotaría. Cada
+    uso del pool es una consulta (~1 ms en esta base; perfil de la Task 15b:
+    execute p95 1,2 ms a 50 trabajadores); con 10 conexiones, el pico de 60
+    escrituras de una ola se drena en ~6 ms de cola. El perfil de la 15b
+    midió que más conexiones no bajan el p95 del pre-vuelo (5 -> 30,3 ms,
+    10 -> 31,1, 25 -> 38,4 a c=25): el límite es la CPU del event loop. 10
+    (el doble de lo que alcanzaba al pre-vuelo solo) ocupa 10 de las 55
+    libres. La cola no mata a los trabajos de fondo: el ejecutor, el reaper y
+    los jobs del Motor Registry (R38 fix round 3, N1) esperan turno sin plazo
+    (espera_de_turno_sin_plazo); los pedidos HTTP
+    esperan a lo sumo JAX_DB_CONNECT_TIMEOUT_SECONDS y dan 503."""
+    crudo = os.environ.get(DB_POOL_MAX)
     if crudo is None:
         return TAMANIO_POOL_POR_DEFECTO
+    return _tamanio_valido(DB_POOL_MAX, crudo)
+
+
+def _tamanio_valido(nombre: str, crudo: str) -> int:
+    """Valida el valor de una de las dos variables que dimensionan el pool.
+    Fail-closed: un typo no se convierte en un pool de 0 o de 5000, y el error
+    NOMBRA la variable que estaba mal puesta."""
     try:
         valor = int(crudo)
     except ValueError:
         valor = None
     if valor is None or not 1 <= valor <= TAMANIO_POOL_MAXIMO:
         raise RuntimeError(
-            f"{ENV_TAMANIO_POOL}={crudo!r} invalido -- tiene que ser un entero entre 1 "
+            f"{nombre}={crudo!r} invalido -- tiene que ser un entero entre 1 "
             f"y {TAMANIO_POOL_MAXIMO} (max_connections de la MariaDB es 151 y la "
             "comparten todos los servicios)."
         )
     return valor
+
+
+def tamanio_pool() -> int:
+    """Tamano del pool. Lee `JAX_JACOBS_DB_POOL_SIZE` (frente F) o, si no esta,
+    `JAX_DB_POOL_MAX` (Task 15b / R38): las dos ramas nombraron la misma
+    perilla distinto el mismo dia y el merge conserva los dos nombres en vez de
+    romper en silencio el despliegue de cualquiera de las dos. Ninguna de las
+    dos -> TAMANIO_POOL_POR_DEFECTO. Presente pero vacia, no entera o fuera de
+    [1, TAMANIO_POOL_MAXIMO] -> RuntimeError nombrandola."""
+    for nombre in (ENV_TAMANIO_POOL, DB_POOL_MAX):
+        crudo = os.environ.get(nombre)
+        if crudo is not None:
+            return _tamanio_valido(nombre, crudo)
+    return TAMANIO_POOL_POR_DEFECTO
 
 
 async def _estado_del_loop() -> _PoolDelLoop:
@@ -164,15 +301,23 @@ async def _estado_del_loop() -> _PoolDelLoop:
             return estado
         cfg = _db_cfg()
         maximo = tamanio_pool()
-        pool = await aiomysql.create_pool(
-            minsize=1,
-            maxsize=maximo,
-            pool_recycle=_RECICLAR_SEGUNDOS,
-            # connect_timeout explicito: sin esto aiomysql espera sin limite si
-            # la DB se cuelga (Tarea 2b, tanda A, 2026-09-14).
-            connect_timeout=db_connect_timeout_seconds(),
-            **cfg,
-        )
+        # Merge 2026-09-17: CREAR el pool tambien esta acotado. minsize=1 abre
+        # una conexion al crear, y `connect_timeout` solo acota el socket: una
+        # base que ACEPTA y no responde el handshake colgaba la creacion sin
+        # limite (visto en rojo con la base falsa de
+        # tests/test_prevuelo_pool.py::test_conexion_colgada_al_abrir_da_503_
+        # acotado). Con el timeout, una base colgada es un 503, no un pedido
+        # que no vuelve nunca: fail-closed.
+        async with asyncio.timeout(db_connect_timeout_seconds()):
+            pool = await aiomysql.create_pool(
+                minsize=1,
+                maxsize=maximo,
+                pool_recycle=_RECICLAR_SEGUNDOS,
+                # connect_timeout explicito: sin esto aiomysql espera sin limite si
+                # la DB se cuelga (Tarea 2b, tanda A, 2026-09-14).
+                connect_timeout=db_connect_timeout_seconds(),
+                **cfg,
+            )
         guardian = _guardian_del_pool(loop, estado, pool)
         await guardian.__anext__()
         estado.pool, estado.permisos, estado.guardian = pool, asyncio.Semaphore(maximo), guardian
@@ -227,7 +372,32 @@ async def _cerrar(pool: aiomysql.Pool, permisos: asyncio.Semaphore | None) -> No
     pool.close()
     if forzar:
         pool.terminate()
-    await pool.wait_closed()
+    # SEGUNDA CAPA (2026-09-17): `wait_closed()` de aiomysql espera SIN LIMITE a
+    # que `_used` quede vacio. Con los permisos tomados nadie deberia tener una
+    # conexion, pero si una quedo marcada igual -- un defecto nuestro o de
+    # aiomysql --, el apagado del servicio se colgaba para siempre. Acotado y
+    # con `terminate()` detras (vacia `_used` y cierra esos sockets): el apagado
+    # TERMINA, pase lo que pase, y deja ERROR en el log.
+    try:
+        async with asyncio.timeout(limite):
+            await pool.wait_closed()
+        return
+    except TimeoutError:
+        logger.error(
+            "jacobs.store: el cierre del pool no termino en %d s con %d conexion(es) "
+            "marcadas en uso; se cortan a la fuerza.", limite, len(pool._used),
+        )
+    pool.terminate()
+    try:
+        async with asyncio.timeout(limite):
+            await pool.wait_closed()
+    except TimeoutError:
+        # Ni despues de terminate(). No se espera mas: colgar el apagado es peor
+        # que dejar sockets que el sistema operativo cerrara con el proceso.
+        logger.error(
+            "jacobs.store: el pool sigue sin cerrar %d s despues de terminate(); "
+            "se abandona la espera para no colgar el apagado.", limite,
+        )
 
 
 async def cerrar_pool() -> None:
@@ -236,8 +406,13 @@ async def cerrar_pool() -> None:
     estado = _pools.pop(asyncio.get_running_loop(), None)
     if estado is None or estado.pool is None:
         return
-    await estado.guardian.aclose()               # corre el finally: _cerrar(...)
-    await _cerrar(estado.pool, estado.permisos)  # por si el guardian ya habia terminado
+    # El cierre va en el `finally`: si `aclose()` explota (el finally del
+    # guardian corre `_cerrar`), el pool se cierra igual en vez de quedar vivo y
+    # fuera del registro -- mismo patron que la devolucion de `conexion()`.
+    try:
+        await estado.guardian.aclose()           # corre el finally: _cerrar(...)
+    finally:
+        await _cerrar(estado.pool, estado.permisos)  # por si el guardian ya habia terminado
 
 
 def _sesion_reutilizable(conn: aiomysql.Connection) -> bool:
@@ -446,6 +621,44 @@ class ConexionVigilada:
         )
 
 
+# --- Espera de turno de los trabajos de fondo (R38, fix round 1, 2a) ---------
+# Revisión de 1d84e82: con el pool compartido, una escritura del ejecutor que
+# esperaba turno más de JAX_DB_CONNECT_TIMEOUT_SECONDS con la base SANA
+# lanzaba TimeoutError. `event_append(STEP_STARTED)` está fuera del try del
+# paso: salía del gather, mataba run_pipeline y el paso quedaba en running.
+# Decisión: el ejecutor, el reaper y (fix round 3, N1) los jobs del Motor
+# Registry (trabajos de fondo, sin nadie esperando la
+# respuesta) esperan turno SIN plazo; abrir la conexión sigue acotado por
+# connect_timeout, así que una base caída falla igual (fail-closed). Los
+# pedidos HTTP mantienen la espera acotada y responden 503. Se descartaron:
+# un cupo aparte para el ejecutor (más conexiones sobre una MariaDB
+# compartida, y el cupo propio también se llena en una ola de 20 pasos) y
+# tratar el vencimiento como fallo del paso (un paso fallaría por cola con la
+# base sana).
+# Es una ContextVar y no un argumento: run_pipeline la pone una vez y la
+# heredan las tareas del gather de cada ola (asyncio copia el contexto al
+# crearlas) y todas las escrituras de store/usage_writer que hacen, sin
+# pasar un parámetro por ~20 llamadas. Límite: una consulta que la base deja
+# COLGADA retiene su turno sin plazo (igual que antes del pool, que no
+# acotaba consultas).
+_turno_sin_plazo: ContextVar[bool] = ContextVar("jacobs_turno_sin_plazo", default=False)
+
+
+def turno_sin_plazo() -> bool:
+    return _turno_sin_plazo.get()
+
+
+@contextmanager
+def espera_de_turno_sin_plazo() -> Iterator[None]:
+    """Dentro del bloque (y en las tareas que se creen en él), pedir una
+    conexión del pool espera turno sin plazo. Para trabajos de fondo."""
+    marca = _turno_sin_plazo.set(True)
+    try:
+        yield
+    finally:
+        _turno_sin_plazo.reset(marca)
+
+
 @contextlib.asynccontextmanager
 async def conexion(desechable: bool = False):
     """Una conexion del pool, devuelta al salir.
@@ -467,13 +680,19 @@ async def conexion(desechable: bool = False):
     estado = await _estado_del_loop()
     pool, permisos = estado.pool, estado.permisos
     limite = db_connect_timeout_seconds()
-    try:
-        await asyncio.wait_for(permisos.acquire(), timeout=limite)
-    except TimeoutError as e:
-        raise TimeoutError(
-            f"jacobs.store: sin conexion libre en el pool tras {limite} s "
-            f"(tamano {pool.maxsize}, en uso {pool.size - pool.freesize})"
-        ) from e
+    if _turno_sin_plazo.get():
+        # Trabajo de fondo (ejecutor, reaper, jobs del Motor Registry): espera
+        # la cola sin plazo -- ver el bloque de arriba. Abrir la conexion sigue
+        # acotado, asi que una base caida falla igual (fail-closed).
+        await permisos.acquire()
+    else:
+        try:
+            await asyncio.wait_for(permisos.acquire(), timeout=limite)
+        except TimeoutError as e:
+            raise TimeoutError(
+                f"jacobs.store: sin conexion libre en el pool tras {limite} s "
+                f"(tamano {pool.maxsize}, en uso {pool.size - pool.freesize})"
+            ) from e
     try:
         # Con el permiso tomado hay hueco: esto no espera en cond.wait. El
         # limite acota lo unico que puede tardar, abrir una conexion nueva.
@@ -491,18 +710,201 @@ async def conexion(desechable: bool = False):
         limpia = vigilada.reutilizable_tras(e)
         raise
     finally:
-        # Antes de devolver o cerrar: quien se quedo con el envoltorio (una
-        # tarea hermana) ya no llega al socket.
-        vigilada._invalidar()
+        # DEVOLUCION POR CONSTRUCCION (2026-09-17). Decidir el destino de la
+        # conexion y devolverla vivian en el MISMO `finally`, en ese orden: una
+        # excepcion inesperada al decidir (la destapo un AttributeError de un
+        # doble de test) saltaba `pool.release(conn)`, la conexion quedaba
+        # marcada en `_used` del pool de aiomysql y `pool.wait_closed()` la
+        # esperaba PARA SIEMPRE -- el apagado del servicio no terminaba nunca.
+        # Ahora la decision va en su propio bloque y la devolucion en el
+        # `finally` de afuera: pase lo que pase aca, la conexion vuelve.
         try:
+            # Antes de devolver o cerrar: quien se quedo con el envoltorio (una
+            # tarea hermana) ya no llega al socket.
+            vigilada._invalidar()
             if desechable or not limpia or not _sesion_reutilizable(conn):
                 conn.close()
-            # release() saca la conexion de `_used` antes de devolver. El aviso
-            # que agenda es para el cond.wait de aiomysql, al que con el
-            # semaforo nadie llega: no se espera.
-            pool.release(conn)
+        except Exception:  # fail-soft: no tapa el error del cuerpo -- se registra y la conexion se DESCARTA (fail-closed en la sesion); relanzar aca dejaria a `conexion()` fallando por un defecto del cierre
+            # Fail-closed: si no se pudo decidir si la sesion sirve, no se
+            # reusa. El error se registra y no tapa el del cuerpo (la
+            # cancelacion y los BaseException NO se tragan: suben, y la
+            # devolucion de abajo corre igual).
+            logger.exception(
+                "jacobs.store: error al decidir el destino de una conexion; se descarta."
+            )
+            with contextlib.suppress(Exception):
+                conn.close()
         finally:
-            permisos.release()
+            try:
+                # release() saca la conexion de `_used` antes de devolver. El
+                # aviso que agenda es para el cond.wait de aiomysql, al que con
+                # el semaforo nadie llega: no se espera.
+                pool.release(conn)
+            except Exception:  # fail-soft: la conexion se DESCARTA y el permiso vuelve igual; relanzar desde el finally del cierre taparia el error real del cuerpo
+                # release() tambien mira la conexion (transaccion abierta): si
+                # explota, la conexion no vuelve al pool y se descarta. Que el
+                # apagado no se cuelgue lo garantiza el limite de _cerrar().
+                logger.exception(
+                    "jacobs.store: pool.release() fallo; la conexion se descarta."
+                )
+                with contextlib.suppress(Exception):
+                    conn.close()
+            finally:
+                permisos.release()
+
+
+# `conexion_del_pool()` es el MISMO objeto que `conexion()`: las dos ramas le
+# pusieron nombre distinto a lo mismo y los dos nombres quedan en uso en el
+# arbol. Tambien evita el sombreado en las funciones del store que reciben un
+# parametro llamado `conexion` (pipeline_create, pipeline_update_status, ...):
+# ahi se usa `_conexion_o_pool(conexion)`.
+conexion_del_pool = conexion
+
+
+async def conexion_dedicada(found_rows: bool = False) -> aiomysql.Connection:
+    """Una conexion DEDICADA (fuera del pool), que quien la pide cierra.
+
+    Es la UNICA excepcion al pool. En CODIGO DE SERVICIO (jacobs/, las_manos/,
+    jax/, tools/) la piden exactamente TRES funciones, por las dos razones que
+    siguen, cada una fuera del alcance del pool. Fuera del codigo de servicio
+    tambien la usan TESTS (tests/, jacobs/*_test.py) y SCRIPTS DE MEDICION
+    (scripts/perfil_prevuelo.py, scripts/medir_min_output_tokens.py), que
+    necesitan una conexion propia y la cierran ellos; eso no es camino de
+    pedidos y no cuenta para esta garantia. La lista de servicio la vigila
+    `jacobs/_store_pool_test.py::ExcepcionAlPoolTest`: un llamador nuevo ahi
+    pone el guard en rojo, porque la excepcion al pool no se amplia sin una
+    decision.
+
+    1. `found_rows=True` -- las escrituras CONDICIONALES por epoca. La piden
+       `_ejecutar_condicional` (por donde pasa `pipeline_tomar_epoca`, que no
+       la llama directo) y `continuar_transaccion`. Por defecto MariaDB devuelve de un UPDATE las
+       filas CAMBIADAS, no las que cumplen el WHERE: una escritura condicional
+       que reescribe los mismos valores devolveria 0 y el ejecutor creeria
+       haber PERDIDO la epoca -- y dejaria de escribir. CLIENT.FOUND_ROWS se
+       negocia en el handshake, no se enciende por sesion, y ponerselo al pool
+       cambiaria en silencio el conteo de filas de cualquier UPDATE que se
+       agregue despues.
+    (Hasta el 2026-09-17 habia una segunda razon, `candado_de_activos()`, el
+    GET_LOCK del cupo: se retiro junto con el candado, porque el cupo lo hace
+    cumplir ahora una condicion dentro de cada escritura que lo consume.)
+
+    Cualquier otro uso va por `conexion()` / `conexion_del_pool()`; una sesion
+    con estado propio que NO espera (SET SESSION, temporales) pide
+    `conexion(desechable=True)`. Reemplaza a `get_conn()`, que era de uso
+    general: ese nombre no vuelve (jacobs/_store_pool_test.py lo vigila).
+
+    CUENTA lo que entrega: ver `dedicadas_vivas()`. El `close()` de la conexion
+    que devuelve queda envuelto para descontar una sola vez, asi que el conteo
+    vale para CUALQUIER llamador (servicio, tests, scripts) sin que nadie tenga
+    que acordarse de avisar."""
+    extra = {"client_flag": CLIENT.FOUND_ROWS} if found_rows else {}
+    conn = await aiomysql.connect(
+        **_db_cfg(), connect_timeout=db_connect_timeout_seconds(), **extra,
+    )
+    return _contar_dedicada(conn)
+
+
+# --------------------------------------------------------------------------
+#  Cuenta de conexiones DEDICADAS vivas (2026-09-17)
+#
+#  POR QUE EXISTE. La medicion de carga del 2026-09-17 observo hasta 13
+#  conexiones del proceso contra MariaDB con `JAX_DB_POOL_MAX=10`, y el
+#  reporte anterior habia explicado un excedente de 1 como un instante de
+#  superposicion del muestreo. Con 12 y 13 esa explicacion ya no alcanzaba, y
+#  la diferencia entre "el pool tiene una fuga" y "el tope del pool no es el
+#  tope del proceso" no se resuelve razonando: se mide. Esto es el instrumento.
+#
+#  El tope del pool NO acota estas conexiones: `conexion_dedicada()` abre
+#  FUERA del pool a proposito (ver su docstring). El total de conexiones del
+#  proceso es `tamanio del pool en uso` + `dedicadas_vivas()`.
+# --------------------------------------------------------------------------
+_dedicadas_vivas = 0
+
+
+def dedicadas_vivas() -> int:
+    """Conexiones DEDICADAS abiertas y todavia no cerradas en este proceso."""
+    return _dedicadas_vivas
+
+
+def _contar_dedicada(conn: aiomysql.Connection) -> aiomysql.Connection:
+    """Suma una dedicada y envuelve su `close()` para restarla UNA sola vez.
+
+    Se envuelve el metodo de la instancia (aiomysql.Connection no usa
+    __slots__): cualquier ruta que llame `conn.close()` -- incluida
+    `ensure_closed()`, que lo resuelve por el objeto -- descuenta. Cerrar dos
+    veces no resta dos veces; una conexion que nadie cierra queda contada, que
+    es justo lo que hay que poder ver.
+    """
+    global _dedicadas_vivas
+    _dedicadas_vivas += 1
+    cerrar = conn.close
+    ya_cerrada = False
+
+    def close():
+        nonlocal ya_cerrada
+        global _dedicadas_vivas
+        if not ya_cerrada:
+            ya_cerrada = True
+            _dedicadas_vivas -= 1
+        return cerrar()
+
+    conn.close = close
+    return conn
+
+
+@asynccontextmanager
+async def _conexion_o_pool(conexion: aiomysql.Connection | None) -> AsyncIterator[aiomysql.Connection]:
+    """La conexión prestada (p. ej. la del candado, dentro de una transacción)
+    sin tocarla, o una del pool."""
+    if conexion is not None:
+        yield conexion
+        return
+    async with conexion_del_pool() as conn:
+        yield conn
+
+
+@dataclass
+class EstadoDeTransaccion:
+    """Hasta dónde llegó una transacción (Ruling R41). `enviando_commit`
+    queda en True desde que se manda el COMMIT; `confirmada`, cuando el
+    servidor respondió. Si falla entre las dos, el resultado es INCIERTO: el
+    servidor pudo haber confirmado antes de que se cortara la respuesta."""
+
+    enviando_commit: bool = False
+    confirmada: bool = False
+
+    @property
+    def incierta(self) -> bool:
+        return self.enviando_commit and not self.confirmada
+
+
+@asynccontextmanager
+async def transaccion(
+    conn: aiomysql.Connection, estado: EstadoDeTransaccion | None = None,
+) -> AsyncIterator[aiomysql.Connection]:
+    """Una transacción sobre `conn` (R38, fix round 1, 2b: crear escribe
+    pipeline, pasos y eventos en UNA, sobre la conexión del candado).
+
+    Si el bloque falla o lo cancela un timeout, la conexión se CIERRA en vez
+    de mandar ROLLBACK: tras una consulta cancelada el protocolo queda en un
+    estado desconocido y un ROLLBACK por la red podría colgarse de nuevo.
+    Cerrar la sesión hace que el servidor descarte la transacción sin
+    confirmar (y suelte el GET_LOCK de esa sesión).
+
+    Límite declarado (R41): si la conexión se corta o vence DURANTE el COMMIT,
+    desde acá no se puede saber si el servidor confirmó. `estado.incierta`
+    queda en True para que quien llama lo diga (crear responde 503 con
+    `detalle`: el pipeline puede existir)."""
+    estado = estado if estado is not None else EstadoDeTransaccion()
+    await conn.begin()
+    try:
+        yield conn
+        estado.enviando_commit = True
+        await conn.commit()
+        estado.confirmada = True
+    except BaseException:
+        conn.close()
+        raise
 
 
 # Hijo de "jacobs": LAS MANOS le pone handler INFO a ese logger al arrancar
@@ -533,6 +935,19 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_pipelines", "idx_jacobs_pipelines_duenio",
      "CREATE INDEX idx_jacobs_pipelines_duenio ON jacobs_pipelines "
      "(user_id, tenant_id, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    # idx_events_pipeline_tipo (2026-09-17, Ruling R20, LAS CUATRO #1): la
+    # Mesa (jax-platform backend/api/pipelines.py::sql_eventos_de_causa) lee
+    # la causa de aborto de hasta 50 pipelines con
+    # WHERE pipeline_id IN (...) AND event_type IN (5 tipos). Medido por el
+    # plan P en jax_memory_test (50 pipelines, 11.050 eventos): con solo
+    # idx_events_pipeline (pipeline_id), EXPLAIN range examina las 11.050
+    # filas de esos pipelines para devolver 1.050 (8,1 ms; carga c=25 p95
+    # 147 ms). idx_events_pipeline NO se borra -- otras consultas filtran
+    # solo por pipeline_id (events_by_pipeline) y ese acceso les sigue
+    # sirviendo igual.
+    ("jacobs_events", "idx_events_pipeline_tipo",
+     "CREATE INDEX idx_events_pipeline_tipo ON jacobs_events "
+     "(pipeline_id, event_type) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
@@ -611,6 +1026,8 @@ async def init_tables() -> None:
                 # Ronda 5 (2026-08-20, T1): reemplaza el owner file de
                 # filesystem -- ver Pipeline.owner_ack_at en models.py.
                 ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL"),
+                # 2026-09-17 (spec prevuelo-y-continuar §5.3): época de corrida.
+                ("run_epoch", "ALTER TABLE jacobs_pipelines ADD COLUMN run_epoch INT NOT NULL DEFAULT 0"),
                 # Frente F (2026-09-16): de quién es hijo un pipeline de Ada y a
                 # qué profundidad. ALGORITHM=INSTANT explícito: si MariaDB no
                 # puede agregarla sin copiar la tabla, FALLA en vez de bloquear
@@ -746,17 +1163,17 @@ async def init_tables() -> None:
 #  Pipeline CRUD
 # ----------------------------------------------------------------
 
-async def pipeline_create(p: Pipeline) -> None:
-    async with conexion() as conn:
+async def pipeline_create(p: Pipeline, conexion: aiomysql.Connection | None = None) -> None:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
                 INSERT INTO jacobs_pipelines
                     (pipeline_id, name, invoked_by, mode, status,
                      plan, current_step_index, max_steps, context_refs,
-                     created_at, updated_at, user_id, tenant_id,
+                     created_at, updated_at, user_id, tenant_id, run_epoch,
                      parent_pipeline_id, depth)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s,%s)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s, %s,%s)
                 """,
                 (
                     p.pipeline_id, p.name, p.invoked_by, p.mode, p.status.value,
@@ -764,14 +1181,14 @@ async def pipeline_create(p: Pipeline) -> None:
                     p.current_step_index, p.max_steps,
                     json.dumps(p.context, ensure_ascii=False),
                     p.created_at, p.updated_at,
-                    p.user_id, p.tenant_id,
+                    p.user_id, p.tenant_id, p.run_epoch,
                     p.parent_pipeline_id, p.depth,
                 ),
             )
 
 
 async def pipeline_get(pipeline_id: str) -> Pipeline | None:
-    async with conexion() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_pipelines WHERE pipeline_id=%s", (pipeline_id,)
@@ -787,9 +1204,10 @@ async def pipeline_update_status(
     status: PipelineStatus,
     current_step_index: int | None = None,
     context: dict | None = None,
+    conexion: aiomysql.Connection | None = None,
 ) -> None:
     now = time.time()
-    async with conexion() as conn:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             if current_step_index is not None and context is not None:
                 await cur.execute(
@@ -816,31 +1234,346 @@ async def pipeline_update_status(
                 )
 
 
-async def pipelines_by_status(statuses: list[PipelineStatus]) -> list[Pipeline]:
-    """Usado por jacobs/reaper.py -- lista pipelines en los status dados
-    para evaluar edad/estancamiento. No filtra por antigüedad acá, eso
-    es criterio del reaper."""
+def _sql_candidatos_del_reaper(n_estados: int) -> str:
+    """Ruling R36 (2026-09-17): el barrido del reaper trae, en la MISMA
+    consulta, el mayor timeout_seconds de los pasos EN CURSO (status
+    'running' en jacobs_steps, el valor que el ejecutor aplica con
+    asyncio.wait_for) de cada pipeline candidato. EXPLAIN en
+    tests/test_jacobs_reaper_cas_db.py: range por idx_pipelines_status y la
+    subconsulta ref por idx_steps_pipeline (a lo sumo 20 pasos por plan)."""
+    estados = ",".join(["%s"] * n_estados)
+    return (
+        "SELECT p.*, (SELECT MAX(s.timeout_seconds) FROM jacobs_steps s "
+        "WHERE s.pipeline_id = p.pipeline_id AND s.status = 'running') AS max_timeout_en_curso "
+        f"FROM jacobs_pipelines p WHERE p.status IN ({estados})"
+    )
+
+
+async def candidatos_del_reaper(statuses: list[PipelineStatus]) -> list[tuple[Pipeline, int]]:
+    """Usado por jacobs/reaper.py: los pipelines en los status dados, cada uno
+    con el mayor timeout_seconds de sus pasos en curso (0 si no tiene). No
+    filtra por antigüedad: eso es criterio del reaper."""
     if not statuses:
         return []
     async with conexion() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
-            placeholders = ",".join(["%s"] * len(statuses))
-            await cur.execute(
-                f"SELECT * FROM jacobs_pipelines WHERE status IN ({placeholders})",
-                tuple(s.value for s in statuses),
-            )
+            await cur.execute(_sql_candidatos_del_reaper(len(statuses)), tuple(s.value for s in statuses))
             rows = await cur.fetchall()
-    return [_row_to_pipeline(row) for row in rows]
+    salida = []
+    for row in rows:
+        maximo = row.pop("max_timeout_en_curso", None)
+        salida.append((_row_to_pipeline(row), int(maximo or 0)))
+    return salida
 
 
-async def pipeline_count_active() -> int:
-    async with conexion() as conn:
+# Los estados salen de `jacobs/policy.py`, la MISMA fuente que usan el INSERT de
+# la reserva y los UPDATE que reviven un pipeline. Escribirlos otra vez acá era
+# una segunda copia del criterio, y una segunda copia se desincroniza sola.
+_SQL_CONTAR_ACTIVOS = (
+    f"SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ({SQL_ESTADOS_VIVOS})"
+)
+
+
+async def pipeline_count_active(conexion: aiomysql.Connection | None = None) -> int:
+    """Pipelines activos. Con `conexion` (la del candado de activos, F3) lee por
+    ella y no la cierra; sin ella lee por una del pool (R38)."""
+    if conexion is not None:
+        return await _contar_activos(conexion)
+    async with conexion_del_pool() as conn:
+        return await _contar_activos(conn)
+
+
+async def _contar_activos(conn: aiomysql.Connection) -> int:
+    async with conn.cursor() as cur:
+        await cur.execute(_SQL_CONTAR_ACTIVOS)
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+# ----------------------------------------------------------------
+#  Acá vivía el candado del cupo entre procesos — retirado 2026-09-17
+# ----------------------------------------------------------------
+# `candado_de_activos()` tomaba un GET_LOCK del SERVIDOR MariaDB para que crear
+# y continuar recontaran y escribieran sin pisarse, incluso desde el CLI (otro
+# proceso), que era lo que el asyncio.Lock de `jacobs/candado.py` no cubría.
+# Resolvía un problema real y lo resolvía bien.
+#
+# Se retira porque **un candado hay que acordarse de pedirlo**, y este ya se
+# había olvidado dos veces: `resume` y `approve-step` movían un pipeline a
+# correr sin tomarlo y sin mirar el cupo. Ahora la condición del cupo viaja
+# DENTRO de cada escritura que lo consume -- el INSERT de crear
+# (`jacobs/cupo.py`) y los UPDATE de continuar, resume y approve-step (acá
+# mismo, vía `SQL_JOIN_CUPO` de `jacobs/policy.py`) --, así que un camino nuevo
+# hereda el límite aunque quien lo escriba no sepa que existe. Dos mecanismos
+# para el mismo invariante era peor que cualquiera de los dos: no se veían
+# entre sí (uno no ve la reserva del otro hasta que commitea).
+
+# ----------------------------------------------------------------
+#  Época de corrida (spec 2026-09-17 §5.3)
+# ----------------------------------------------------------------
+# Un solo ejecutor por pipeline. `cancel`, el kill switch y el reaper cambian
+# el STATUS; `resume`, `approve-step` y `continue` INCREMENTAN la época. El
+# ejecutor escribe sólo si el pipeline sigue en SU época y `running`: si no,
+# perdió, registra RUN_SUPERSEDED una vez y termina sin escribir más.
+# Todas van por clave primaria (EXPLAIN en tests/test_run_epoch_db.py).
+
+_SQL_EPOCA_Y_STATUS = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s"
+
+_SQL_STEP_SI_EPOCA = (
+    "UPDATE jacobs_steps s JOIN jacobs_pipelines p ON p.pipeline_id = s.pipeline_id "
+    "SET s.status=%s, s.facet=%s, s.motor=%s, s.output_ref=%s, s.timeout_seconds=%s, "
+    "    s.started_at=%s, s.finished_at=%s, s.error=%s "
+    "WHERE s.step_id=%s AND p.pipeline_id=%s AND p.run_epoch=%s AND p.status='running'"
+)
+
+
+def _sql_update_si_epoca(con_indice: bool, con_contexto: bool, n_desde: int,
+                         con_corte: bool = False) -> str:
+    sets = ["status=%s", "updated_at=%s"]
+    if con_indice:
+        sets.append("current_step_index=%s")
+    if con_contexto:
+        sets.append("context_refs=%s")
+    desde = ",".join(["%s"] * n_desde)
+    # con_corte (pasada final R34): el reaper exige que la fila SIGA sin avance
+    # al escribir; un avance entre su lectura y esta escritura la saca.
+    corte = " AND updated_at < %s" if con_corte else ""
+    return (
+        f"UPDATE jacobs_pipelines SET {', '.join(sets)} "
+        f"WHERE pipeline_id=%s AND run_epoch=%s AND status IN ({desde}){corte}"
+    )
+
+
+def _sql_tomar_epoca(con_contexto: bool, n_desde: int, con_cupo: bool = False) -> str:
+    """El UPDATE condicional de resume y approve-step.
+
+    `con_cupo` (2026-09-17): le mete la condicion del cupo DENTRO de la misma
+    sentencia. Antes, `resume` y `approve-step` movian un pipeline
+    `interrupted` a correr SIN mirar MAX_PARALLEL_PIPELINES -- ni el
+    asyncio.Lock ni el GET_LOCK los tomaban, solo crear y continuar. Con tres
+    interrumpidos y tres `resume` se pasaba el limite y nadie se enteraba: el
+    limite decia que existia y no existia. Ahora la condicion viaja adentro de
+    la escritura, que es la unica forma de que un camino nuevo la herede sin
+    acordarse de pedir nada.
+    """
+    extra = ", context_refs=%s" if con_contexto else ""
+    desde = ",".join(["%s"] * n_desde)
+    join = f" {SQL_JOIN_CUPO}" if con_cupo else ""
+    tabla = "jacobs_pipelines p" if con_cupo else "jacobs_pipelines"
+    col = "p." if con_cupo else ""
+    tope = " AND cupo_x.c < %s" if con_cupo else ""
+    return (
+        f"UPDATE {tabla}{join} SET {col}run_epoch={col}run_epoch+1, {col}updated_at=%s{extra} "
+        f"WHERE {col}pipeline_id=%s AND {col}run_epoch=%s AND {col}status IN ({desde}){tope}"
+    )
+
+
+async def _ejecutar_condicional(sql: str, params: tuple | list) -> int:
+    conn = await conexion_dedicada(found_rows=True)
+    try:
         async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')"
-            )
-            row = await cur.fetchone()
-            return int(row[0]) if row else 0
+            return await cur.execute(sql, params)
+    finally:
+        conn.close()
+
+
+async def pipeline_epoca_y_status(pipeline_id: str) -> tuple[int, PipelineStatus] | None:
+    # Merge 2026-09-17: es un SELECT sin condición de filas afectadas -- va por
+    # el pool, no por una conexión dedicada (la dedicada queda para
+    # CLIENT.FOUND_ROWS y para el GET_LOCK; ver conexion_dedicada).
+    async with conexion_del_pool() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_SQL_EPOCA_Y_STATUS, (pipeline_id,))
+            fila = await cur.fetchone()
+    if not fila:
+        return None
+    return int(fila[0]), PipelineStatus(fila[1])
+
+
+async def pipeline_update_status_si_epoca(
+    pipeline_id: str,
+    epoca: int,
+    status: PipelineStatus,
+    current_step_index: int | None = None,
+    context: dict | None = None,
+    *,
+    desde: tuple[PipelineStatus, ...] = (PipelineStatus.running,),
+    sin_avance_desde: float | None = None,
+) -> bool:
+    """True si escribió: el pipeline estaba en `epoca` y en uno de `desde` (y,
+    con `sin_avance_desde`, su updated_at sigue anterior a ese instante --
+    lo usa el reaper, pasada final R34)."""
+    if not desde:
+        raise ValueError(
+            "pipeline_update_status_si_epoca: 'desde' no puede estar vacío -- "
+            "'status IN ()' es SQL inválido, es un error de contrato del llamador."
+        )
+    params: list = [status.value, time.time()]
+    if current_step_index is not None:
+        params.append(current_step_index)
+    if context is not None:
+        params.append(json.dumps(context, ensure_ascii=False))
+    params += [pipeline_id, epoca, *(d.value for d in desde)]
+    if sin_avance_desde is not None:
+        params.append(sin_avance_desde)
+    sql = _sql_update_si_epoca(current_step_index is not None, context is not None, len(desde),
+                               con_corte=sin_avance_desde is not None)
+    return await _ejecutar_condicional(sql, params) == 1
+
+
+async def step_upsert_si_epoca(s: Step, epoca: int) -> bool:
+    """Escritura de un paso YA EXISTENTE desde el ejecutor. True si escribió."""
+    params = (
+        s.status.value, s.facet, s.motor, s.output_ref, s.timeout_seconds,
+        s.started_at, s.finished_at, s.error,
+        s.step_id, s.pipeline_id, epoca,
+    )
+    return await _ejecutar_condicional(_SQL_STEP_SI_EPOCA, params) == 1
+
+
+async def pipeline_tomar_epoca(
+    pipeline_id: str,
+    epoca_leida: int,
+    desde: tuple[PipelineStatus, ...],
+    context: dict | None = None,
+    cupo_maximo: int | None = None,
+) -> int | None:
+    """Incrementa la época si nadie la tomó desde que se leyó. Devuelve la
+    nueva, o None si otro pedido ganó (doble resume, doble approve).
+
+    `cupo_maximo` (2026-09-17): con un tope, la sentencia lleva además la
+    condición del cupo y levanta `CupoAgotado` si no hay lugar. Es un parámetro
+    y no una constante a propósito: el llamador DECLARA que esta escritura
+    ocupa cupo."""
+    if not desde:
+        raise ValueError(
+            "pipeline_tomar_epoca: 'desde' no puede estar vacío -- "
+            "'status IN ()' es SQL inválido, es un error de contrato del llamador."
+        )
+    params: list = [time.time()]
+    if context is not None:
+        params.append(json.dumps(context, ensure_ascii=False))
+    params += [pipeline_id, epoca_leida, *(d.value for d in desde)]
+    if cupo_maximo is not None:
+        params.append(cupo_maximo)
+    filas = await _ejecutar_condicional(
+        _sql_tomar_epoca(context is not None, len(desde), cupo_maximo is not None), params)
+    if filas == 1:
+        return epoca_leida + 1
+    if cupo_maximo is not None:
+        # 0 filas con la condición del cupo puesta tiene DOS causas: otro pedido
+        # ganó la época, o no hay lugar. La sentencia no las distingue, así que
+        # se pregunta -- una sola lectura, y sólo en el camino de rechazo. Un
+        # 409 "otro pedido ganó" cuando lo que pasó es que el cupo estaba lleno
+        # manda a buscar un problema que no existe.
+        activos = await pipeline_count_active()
+        if activos >= cupo_maximo:
+            raise CupoAgotado(activos, cupo_maximo)
+    return None
+
+
+_SQL_BLOQUEAR_PIPELINE = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s FOR UPDATE"
+_SQL_PASO_A_CORRER = (
+    "UPDATE jacobs_steps SET facet=%s, motor=%s, status='pending', output_ref=NULL, "
+    "started_at=NULL, finished_at=NULL, error=NULL WHERE step_id=%s AND pipeline_id=%s"
+)
+# El UPDATE que revive un pipeline OCUPA CUPO, así que lleva la condición del
+# cupo adentro (2026-09-17). `continuar` no INSERTA una fila -- revive una que
+# ya existe --, así que el INSERT condicionado de crear no lo cubre: hace falta
+# la misma regla en forma de UPDATE. Medido contra MariaDB 12.3: 10, 25 y 50
+# reanimaciones a la vez respetan el cupo exacto, y 50 creaciones CRUZADAS con
+# 50 reanimaciones también -- que era justo la carrera que rompía tener dos
+# mecanismos distintos (uno no ve la reserva del otro hasta que commitea).
+_SQL_PIPELINE_CONTINUAR = (
+    f"UPDATE jacobs_pipelines p {SQL_JOIN_CUPO} "
+    "SET p.status='running', p.run_epoch=p.run_epoch+1, p.plan=%s, "
+    "p.context_refs=%s, p.current_step_index=%s, p.updated_at=%s "
+    "WHERE p.pipeline_id=%s AND p.run_epoch=%s AND cupo_x.c < %s"
+)
+
+
+_SQL_EVENTO_CONTINUED = (
+    "INSERT INTO jacobs_events (pipeline_id, step_id, event_type, payload, ts) "
+    "VALUES (%s,%s,%s,%s,%s)"
+)
+
+
+async def continuar_transaccion(
+    pipeline_id: str,
+    epoca_leida: int,
+    status_leido: PipelineStatus,
+    pasos_a_correr: list[Step],
+    plan: list[Step],
+    context: dict,
+    current_step_index: int,
+    evento_payload: dict | None,
+    estado: EstadoDeTransaccion | None = None,
+    cupo_maximo: int = MAX_PARALLEL_PIPELINES,
+) -> int | None:
+    """Escrituras de continue en UNA transacción (spec 2026-09-17 §5.2 regla
+    10): bloquea la fila del pipeline, confirma que nadie la cambió desde el
+    análisis (misma época y mismo status), resetea los pasos a correr, reescribe
+    plan y contexto, pone running e incrementa la época, y -- si `evento_payload`
+    no es None -- inserta el evento PIPELINE_CONTINUED con el MISMO cursor,
+    antes del commit (Ruling R22: regla 10 lo exige dentro de la transacción,
+    no después). `evento_payload` es OBLIGATORIO (Principio IX / revisión
+    fix round 2): un default silencioso dejaría que un llamador se saltara el
+    evento de auditoría sin que se note en el sitio de la llamada -- el
+    llamador tiene que decidir explícitamente None si de verdad no quiere
+    evento (ningún camino de producción lo hace: continuar.py siempre arma un
+    payload real). Devuelve la época nueva, o None si otro pedido ganó
+    (época/status ya no coinciden, o -- cinturón, Ruling R23 -- el UPDATE
+    final no tocó la fila que el SELECT...FOR UPDATE acababa de ver). Un error
+    a mitad hace ROLLBACK: nada cambia, ni los pasos, ni el pipeline, ni el
+    evento.
+
+    `estado` (EstadoDeTransaccion, re-revisión final): mismo mecanismo que
+    crear (R41). Si la conexión se corta o el plazo vence DURANTE el COMMIT,
+    desde acá no se puede saber si el servidor confirmó; queda
+    `estado.incierta` para que quien llama lo diga en su 503."""
+    estado = estado if estado is not None else EstadoDeTransaccion()
+    conn = await conexion_dedicada(found_rows=True)
+    try:
+        await conn.begin()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(_SQL_BLOQUEAR_PIPELINE, (pipeline_id,))
+                fila = await cur.fetchone()
+                if fila is None or int(fila[0]) != epoca_leida or fila[1] != status_leido.value:
+                    await conn.rollback()
+                    return None
+                for paso in pasos_a_correr:
+                    await cur.execute(_SQL_PASO_A_CORRER, (paso.facet, paso.motor, paso.step_id, pipeline_id))
+                filas_pipeline = await cur.execute(_SQL_PIPELINE_CONTINUAR, (
+                    json.dumps([s.model_dump() for s in plan], ensure_ascii=False),
+                    json.dumps(context, ensure_ascii=False),
+                    current_step_index, time.time(), pipeline_id, epoca_leida,
+                    cupo_maximo,
+                ))
+                if filas_pipeline != 1:
+                    await conn.rollback()
+                    # R23 decía que esta rama no se alcanza: el SELECT...FOR
+                    # UPDATE ya fijó la fila, la época y el status. Desde que el
+                    # UPDATE lleva la condición del cupo (2026-09-17) SÍ se
+                    # alcanza, y por una sola causa -- no hay lugar --, porque
+                    # todo lo demás quedó verificado bajo el candado de fila unas
+                    # líneas más arriba. Por eso se puede afirmar el motivo sin
+                    # volver a leer: es el único que queda.
+                    raise CupoAgotado(cupo_maximo, cupo_maximo)
+                if evento_payload is not None:
+                    await cur.execute(_SQL_EVENTO_CONTINUED, (
+                        pipeline_id, None, "PIPELINE_CONTINUED",
+                        json.dumps(evento_payload, ensure_ascii=False), time.time(),
+                    ))
+            estado.enviando_commit = True
+            await conn.commit()
+            estado.confirmada = True
+        except BaseException:
+            await conn.rollback()
+            raise
+    finally:
+        conn.close()
+    return epoca_leida + 1
 
 
 def _row_to_pipeline(row: dict) -> Pipeline:
@@ -862,6 +1595,7 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         user_id=row.get("user_id"),
         tenant_id=row.get("tenant_id"),
         owner_ack_at=row.get("owner_ack_at"),
+        run_epoch=int(row.get("run_epoch") or 0),
         parent_pipeline_id=row.get("parent_pipeline_id"),
         depth=int(row.get("depth") or 0),
         mode=row["mode"],
@@ -879,8 +1613,8 @@ def _row_to_pipeline(row: dict) -> Pipeline:
 #  Step CRUD
 # ----------------------------------------------------------------
 
-async def step_upsert(s: Step) -> None:
-    async with conexion() as conn:
+async def step_upsert(s: Step, conexion: aiomysql.Connection | None = None) -> None:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -892,6 +1626,7 @@ async def step_upsert(s: Step) -> None:
                 VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s, %s)
                 ON DUPLICATE KEY UPDATE
                     status=VALUES(status),
+                    facet=VALUES(facet),
                     motor=VALUES(motor),
                     output_ref=VALUES(output_ref),
                     timeout_seconds=VALUES(timeout_seconds),
@@ -912,7 +1647,7 @@ async def step_upsert(s: Step) -> None:
 
 
 async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
-    async with conexion() as conn:
+    async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_steps WHERE pipeline_id=%s ORDER BY step_index",
@@ -988,8 +1723,13 @@ async def get_motor_governance() -> dict[str, dict]:
     ejecución total en el servidor (motor: 4 filas, capability: ~17,
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
     no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) se agregó
-    después y NO está medido."""
-    async with conexion() as conn:
+    después y NO está medido.
+
+    Ruling R38 (2026-09-17): por el pool del store, no por una conexión propia
+    -- era la conexión por pedido que tiraba /jacobs/preflight a c=50. Sin
+    caché: cada llamada sigue leyendo las tablas (misma foto que antes);
+    un error de la base se propaga igual (fail-closed)."""
+    async with conexion_del_pool() as conn:
         async with conn.cursor() as cur:
             await cur.execute("SELECT `key`, has_tool_access FROM motor")
             motors: dict[str, bool] = {key: bool(has_tools) for key, has_tools in await cur.fetchall()}
@@ -1278,8 +2018,9 @@ async def event_append(
     event_type: str,
     payload: dict | None = None,
     step_id: str | None = None,
+    conexion: aiomysql.Connection | None = None,
 ) -> None:
-    async with conexion() as conn:
+    async with _conexion_o_pool(conexion) as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """INSERT INTO jacobs_events (pipeline_id, step_id, event_type, payload, ts)
@@ -1293,7 +2034,11 @@ async def event_append(
 
 
 async def events_by_pipeline(pipeline_id: str) -> list[dict[str, Any]]:
-    async with conexion() as conn:
+    # m3 de la re-revisión final (2026-09-17): por el pool, como el resto de
+    # los endpoints. GET /jacobs/pipeline/{id}/events era el último que abría
+    # una conexión por pedido -- la misma forma que a c=50 dio 0/13/49/61 % de
+    # errores en get_motor_governance (R38).
+    async with conexion_del_pool() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT * FROM jacobs_events WHERE pipeline_id=%s ORDER BY id",

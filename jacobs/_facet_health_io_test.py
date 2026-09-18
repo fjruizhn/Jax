@@ -44,6 +44,7 @@ import asyncio
 import functools
 import os
 import time
+import uuid
 
 import aiomysql
 import pytest
@@ -64,10 +65,12 @@ def asincrono(fn):
     return wrapper
 
 
+from base_de_test import es_base_de_test  # noqa: E402
+
 _DB = os.getenv("JAX_DB_NAME", "")
 requiere_db_de_prueba = pytest.mark.skipif(
-    not os.getenv("JAX_DB_HOST") or not _DB.endswith("_test"),
-    reason="necesita una MariaDB real con JAX_DB_NAME terminado en '_test'",
+    not os.getenv("JAX_DB_HOST") or not es_base_de_test(_DB),
+    reason="necesita una MariaDB real y JAX_DB_NAME en una base de tests",
 )
 
 # Esquema esperado. Las tablas las CREA `jax-platform` (migrations.py), otro
@@ -101,6 +104,32 @@ _DDL = {
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4""",
 }
 
+# Ruling R50 (2026-09-17): los tres tests de `__system__` / tabla vacía tienen
+# aserciones GLOBALES -- `check_facet_health()` deriva los facets de TODA la
+# tabla y sólo alerta `__system__` si TODOS están unknown o la tabla está
+# vacía -- y empiezan con un DELETE sin filtro. En una base compartida
+# (jax_memory_test de hall9000) borran filas de otras sesiones y fallan por
+# filas ajenas. Corren sólo donde la tabla es EXCLUSIVA: el job facet-health-io
+# de .github/workflows/policy.yml, con su propio service container de MariaDB,
+# define la variable. Sin ella se saltan (no se debilitan sus aserciones).
+VARIABLE_TABLA_EXCLUSIVA = "JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA"
+
+
+def tabla_exclusiva() -> bool:
+    return os.getenv(VARIABLE_TABLA_EXCLUSIVA) == "1"
+
+
+requiere_tabla_exclusiva = pytest.mark.skipif(
+    not tabla_exclusiva(),
+    reason=(
+        f"Ruling R50: test global -- check_facet_health() lee y reescribe TODA la tabla "
+        f"(facet_health_event y facet_health_alert: facets conocidos, ledger y poda) y el "
+        f"test la vacía sin filtro. Se habilita con {VARIABLE_TABLA_EXCLUSIVA}=1 sólo con "
+        f"base exclusiva (job facet-health-io de policy.yml). En una base compartida "
+        f"borraría filas ajenas."
+    ),
+)
+
 VENCIDO = fh.HEALTH_WINDOW_SECONDS + 3600      # fuera de la ventana de 2h,
                                                # dentro de la retencion de 30d
 
@@ -124,9 +153,35 @@ async def _sql(query, args=(), fetch=False):
 
 
 async def _tabla_limpia():
+    # GLOBAL: borra las dos tablas enteras. Sólo la usan los tres tests cuya
+    # aserción es intrínsecamente global (ver R46 abajo); los demás usan
+    # _claves_propias / _borrar_claves.
     for nombre, ddl in _DDL.items():
         await _sql(ddl)
         await _sql(f"DELETE FROM {nombre}")
+
+
+# R46 (R38 fix round 3, 2026-09-17): jax_memory_test es compartida. Otras
+# sesiones y otros tests escriben facet_health_event (sondas del pre-vuelo,
+# semillas de tests/test_prevuelo_catalogo_db.py, instancias de carga con
+# eventos ok frescos). Un test que puede aislarse usa claves PROPIAS
+# (`zz-fh-<uuid>`), borra sólo sus filas y filtra sus aserciones a esas claves.
+# Los tres tests de `__system__` / tabla vacía NO se pueden acotar así sin
+# debilitarlos: su aserción depende de TODA la tabla (quedan con
+# _tabla_limpia; ver NEEDS_CONTEXT en r38-report.md, Fix round 3).
+def _claves_propias(n):
+    sufijo = uuid.uuid4().hex[:8]
+    return [f"zz-fh-{sufijo}-{i}" for i in range(n)]
+
+
+async def _borrar_claves(claves):
+    marcas = ",".join(["%s"] * len(claves))
+    for nombre in _DDL:
+        await _sql(f"DELETE FROM {nombre} WHERE facet IN ({marcas})", tuple(claves))
+    for nombre in _DDL:
+        (n,), = await _sql(f"SELECT COUNT(*) FROM {nombre} WHERE facet IN ({marcas})",
+                           tuple(claves), fetch=True)
+        assert n == 0, f"quedaron filas propias en {nombre}"
 
 
 @pytest.fixture
@@ -166,21 +221,30 @@ async def test_eventos_vencidos_dan_unknown_y_NUNCA_ok(sin_telegram):
 
     Los eventos existen -- estan en la tabla y dicen `ok` -- pero cayeron
     fuera de la ventana. Un lector que mirara solo el outcome del ultimo
-    evento diria `ok` sobre una sonda muerta hace horas."""
-    await _tabla_limpia()
+    evento diria `ok` sobre una sonda muerta hace horas.
+
+    R46: claves propias y aserción filtrada a ellas; no borra filas ajenas."""
+    for nombre, ddl in _DDL.items():
+        await _sql(ddl)
+    claves = _claves_propias(2)
     ahora = time.time()
-    for facet in ("thot", "ada"):
-        await _sql("INSERT INTO facet_health_event (facet,outcome,source,ts) "
-                   "VALUES (%s,'ok','canary_periodic',%s)",
-                   (facet, ahora - VENCIDO))
+    try:
+        for facet in claves:
+            await _sql("INSERT INTO facet_health_event (facet,outcome,source,ts) "
+                       "VALUES (%s,'ok','canary_periodic',%s)",
+                       (facet, ahora - VENCIDO))
 
-    res = await fh.check_facet_health()
+        res = await fh.check_facet_health()
 
-    assert res["states"] == {"thot": "unknown", "ada": "unknown"}
-    assert "ok" not in res["states"].values()
+        propios = {k: v for k, v in res["states"].items() if k in claves}
+        assert propios == {claves[0]: "unknown", claves[1]: "unknown"}
+        assert "ok" not in propios.values()
+    finally:
+        await _borrar_claves(claves)
 
 
 @requiere_db_de_prueba
+@requiere_tabla_exclusiva
 @asincrono
 async def test_la_alerta_va_bajo___system___y_no_es_lista_vacia(sin_telegram):
     """Propiedad 2. Con TODO en unknown el diagnostico es 'la sonda no esta
@@ -208,6 +272,7 @@ async def test_la_alerta_va_bajo___system___y_no_es_lista_vacia(sin_telegram):
 
 
 @requiere_db_de_prueba
+@requiere_tabla_exclusiva
 @asincrono
 async def test_tabla_VACIA_alerta_igual_bajo___system__(sin_telegram):
     """Propiedad 2, en su forma mas fuerte y la que el codigo llama aparte:
@@ -229,6 +294,7 @@ async def test_tabla_VACIA_alerta_igual_bajo___system__(sin_telegram):
 
 
 @requiere_db_de_prueba
+@requiere_tabla_exclusiva
 @asincrono
 async def test_la_supresion_de_6h_se_respeta_en_la_alerta_agregada(sin_telegram):
     """Propiedad 3. Sin supresion, una sonda muerta el viernes produce 288
@@ -263,20 +329,28 @@ async def test_eventos_frescos_no_producen___system__(sin_telegram):
     """Contrapositivo, y no es decorado: sin el, un `check_facet_health()`
     que devolviera SIEMPRE `__system__` pasaria los tres tests de arriba.
     Un guard que dice violacion siempre no protege mas que uno que calla
-    siempre; solo se rompe distinto."""
-    await _tabla_limpia()
+    siempre; solo se rompe distinto.
+
+    R46: clave propia con evento ok fresco. Con ella en la tabla, no TODO es
+    unknown, así que `__system__` no debe avisar aunque haya filas ajenas;
+    los avisos por facet se filtran a la clave propia."""
+    for nombre, ddl in _DDL.items():
+        await _sql(ddl)
+    clave, = _claves_propias(1)
     ahora = time.time()
-    await _sql("INSERT INTO facet_health_event (facet,outcome,source,ts) "
-               "VALUES ('thot','ok','canary_periodic',%s)", (ahora - 60,))
+    try:
+        await _sql("INSERT INTO facet_health_event (facet,outcome,source,ts) "
+                   "VALUES (%s,'ok','canary_periodic',%s)", (clave, ahora - 60))
 
-    res = await fh.check_facet_health()
+        res = await fh.check_facet_health()
 
-    assert res["states"] == {"thot": "ok"}
-    assert fh.SYSTEM_KEY not in res["notified"]
-    # Con el ledger vacio, `thot` transiciona None -> ok y una transicion
-    # SIEMPRE avisa: es la recuperacion automatica, deliberada (un detector
-    # que avisa cuando algo se rompe pero no cuando se arregla obliga a
-    # mirar a mano). Lo que este test fija es que ese aviso nombre al FACET
-    # y no sea la alerta agregada de sonda muerta.
-    assert sin_telegram == ["JAX -- facet 'thot': ok"]
-    assert not any(fh.SYSTEM_KEY in m for m in sin_telegram)
+        assert {k: v for k, v in res["states"].items() if k == clave} == {clave: "ok"}
+        assert fh.SYSTEM_KEY not in res["notified"]
+        # Con el ledger vacio para la clave, transiciona None -> ok y una
+        # transicion SIEMPRE avisa: es la recuperacion automatica, deliberada.
+        # Lo que este test fija es que ese aviso nombre al FACET y no sea la
+        # alerta agregada de sonda muerta.
+        assert [m for m in sin_telegram if clave in m] == [f"JAX -- facet '{clave}': ok"]
+        assert not any(fh.SYSTEM_KEY in m for m in sin_telegram)
+    finally:
+        await _borrar_claves(claves=[clave])

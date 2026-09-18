@@ -17,7 +17,9 @@ import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
@@ -100,9 +102,12 @@ def test_step_en_vuelo_se_corta_al_poner_el_freno(tmp_path, monkeypatch):
 
         step = SimpleNamespace(status=None, started_at=None, finished_at=None, facet="hyde",
                                capability="implementation", timeout_seconds=30, step_id="s0",
-                               output_ref=None)
-        pipeline = SimpleNamespace(pipeline_id="p-freno", context={}, name="t")
+                               output_ref=None, motor=None, error=None, pipeline_id="p-freno")
+        # run_epoch (spec 2026-09-17 §5.3): toda escritura del ejecutor es
+        # condicional a la época del pipeline; el doble tiene que traerla.
+        pipeline = SimpleNamespace(pipeline_id="p-freno", context={}, name="t", run_epoch=1)
         with patch.object(executor.store, "step_upsert", AsyncMock()), \
+             patch.object(executor.store, "step_upsert_si_epoca", AsyncMock(return_value=True)), \
              patch.object(executor.store, "event_append", AsyncMock()), \
              patch.object(executor, "_dispatch_step", despacho_largo), \
              patch.object(executor, "_fail_step", fail_step):

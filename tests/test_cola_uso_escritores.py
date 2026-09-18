@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+from contextlib import asynccontextmanager
 import json
 import os
 import sys
@@ -262,6 +263,13 @@ def _usar_pool(monkeypatch, pool: _Pool) -> _Pool:
     from jacobs import store
     monkeypatch.setattr(store, "conexion", pool)
     return pool
+
+
+# R38 (fix round 1, 2026-09-17): jacobs/usage_writer.py escribe por el pool del
+# store de Jacobs, no por aiomysql.connect. Mismos dos casos: la base (o el
+# pool) no está, y una conexión que responde. Merge 2026-09-17: el doble es el
+# `_Pool` de arriba (cuenta pedidos y acepta `desechable=`, como `conexion()`);
+# las dos ramas escribieron su propio doble y el que queda es ese.
 
 
 # --- jacobs -----------------------------------------------------------------

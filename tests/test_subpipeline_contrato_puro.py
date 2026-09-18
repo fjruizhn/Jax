@@ -231,15 +231,23 @@ def test_hijo_respeta_el_kill_switch_antes_de_su_primera_ola():
     async def _evento(pipeline_id, event_type, payload=None, step_id=None):
         eventos.append(event_type)
 
-    with patch.object(executor.store, "pipeline_update_status", AsyncMock()) as estado, \
+    # Merge 2026-09-17 (época de corrida, spec §5.3): el ejecutor escribe por las
+    # variantes CONDICIONALES a la época; el doble las tiene que interceptar y
+    # devolver True (la escritura se aplicó).
+    with patch.object(executor.store, "pipeline_update_status_si_epoca",
+                      AsyncMock(return_value=True)) as estado, \
+         patch.object(executor.store, "pipeline_update_status", AsyncMock()), \
          patch.object(executor.store, "event_append", AsyncMock(side_effect=_evento)), \
          patch.object(executor.store, "step_upsert", AsyncMock()), \
+         patch.object(executor.store, "step_upsert_si_epoca", AsyncMock(return_value=True)), \
+         patch.object(executor.store, "pipeline_epoca_y_status",
+                      AsyncMock(return_value=(0, PipelineStatus.running))), \
          patch.object(executor, "check_kill_switch", return_value=True), \
          patch.object(executor, "_dispatch_step",
                       AsyncMock(side_effect=AssertionError("un hijo frenado no despacha"))):
         asyncio.run(executor.run_pipeline(hijo))
     assert "KILL_SWITCH_ABORTED" in eventos
-    assert estado.await_args_list[-1].args[1] == PipelineStatus.aborted
+    assert estado.await_args_list[-1].args[2] == PipelineStatus.aborted
 
 
 def test_la_emision_no_tiene_ruta_http():
