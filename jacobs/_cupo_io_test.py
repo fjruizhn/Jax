@@ -41,6 +41,7 @@ import time  # noqa: E402
 import inspect  # noqa: E402
 import unittest  # noqa: E402
 import uuid  # noqa: E402
+from decimal import Decimal  # noqa: E402
 from unittest.mock import patch  # noqa: E402
 
 import aiomysql  # noqa: E402
@@ -58,6 +59,36 @@ def _pipeline(nombre: str) -> Pipeline:
         pipeline_id=str(uuid.uuid4()), name=nombre, invoked_by="plataforma",
         mode="dry_run", created_at=ahora, updated_at=ahora,
     )
+
+
+async def _censo_de_estados() -> str:
+    """`SELECT status, COUNT(*) ... GROUP BY status` para el mensaje de fallo.
+
+    Pedido del coordinador (2026-09-17): cuando uno de estos tests falla en el
+    runner, el censo de la tabla tiene que estar EN EL LOG, no adivinarse. Un
+    `0 != 3` sin el censo no distingue "el freno anda" de "el cupo ya estaba
+    tomado", y eso costó una ronda entera de diagnóstico.
+    """
+    async with store.conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT status, COUNT(*) FROM jacobs_pipelines GROUP BY status ORDER BY status")
+            filas = await cur.fetchall()
+    return ", ".join(f"{e}={n}" for e, n in filas) or "tabla vacía"
+
+
+async def _prevuelo_que_pasa():
+    """Un veredicto OK, armado con las clases REALES del pre-vuelo.
+
+    Se usa para sustituir el pre-vuelo en los tests que miden el CUPO: el
+    pre-vuelo lee tablas que crean las migraciones de jax-platform y no
+    `store.init_tables()`, así que dejarlo vivo ataría estos tests al estado de
+    la gobernanza en la base de turno -- que es justo lo que puso el rojo de CI.
+    """
+    from jacobs.prevuelo_reglas import Veredicto
+
+    return Veredicto(ok=True, violaciones=(), costo_max_usd=Decimal("0"),
+                     pasos_costo=(), sondeadas=())
 
 
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
@@ -253,7 +284,18 @@ class ReanudarRespetaElCupoTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self._limpiar)
         await store.init_tables()
         await self._limpiar()
-        self.assertEqual(await cupo.activos(), 0, "hay pipelines vivos ajenos en jax_memory_test")
+        # PRE-VUELO DEL TEST, ruidoso a propósito (mismo criterio que el arnés de
+        # carga): si el cupo ya está tomado, "admitió 0" es CORRECTO y el test no
+        # mediría nada. Mejor abortar diciendo por qué que dar un verde vacío o un
+        # rojo indescifrable.
+        vivos = await cupo.activos()
+        self.assertEqual(
+            vivos, 0,
+            f"hay {vivos} pipeline(s) vivo(s) en la base de test antes de empezar "
+            f"[censo: {await _censo_de_estados()}]: este test mide que el cupo admita "
+            "EXACTAMENTE el tope, y con el cupo ya ocupado admitiría menos por el motivo "
+            "correcto. Cerrá esas filas (las suites de base dejan `arnes-ada-padre`, "
+            "`secreto de B`, `causa running`) y volvé a correr.")
 
     async def _limpiar(self):
         await ada.ejecutar(
@@ -316,7 +358,18 @@ class ContinuarRespetaElCupoTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self._limpiar)
         await store.init_tables()
         await self._limpiar()
-        self.assertEqual(await cupo.activos(), 0, "hay pipelines vivos ajenos en jax_memory_test")
+        # PRE-VUELO DEL TEST, ruidoso a propósito (mismo criterio que el arnés de
+        # carga): si el cupo ya está tomado, "admitió 0" es CORRECTO y el test no
+        # mediría nada. Mejor abortar diciendo por qué que dar un verde vacío o un
+        # rojo indescifrable.
+        vivos = await cupo.activos()
+        self.assertEqual(
+            vivos, 0,
+            f"hay {vivos} pipeline(s) vivo(s) en la base de test antes de empezar "
+            f"[censo: {await _censo_de_estados()}]: este test mide que el cupo admita "
+            "EXACTAMENTE el tope, y con el cupo ya ocupado admitiría menos por el motivo "
+            "correcto. Cerrá esas filas (las suites de base dejan `arnes-ada-padre`, "
+            "`secreto de B`, `causa running`) y volvé a correr.")
 
     async def _limpiar(self):
         await ada.ejecutar(
@@ -373,7 +426,18 @@ class CreacionConcurrenteSinCandadoTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self._limpiar)
         await store.init_tables()
         await self._limpiar()
-        self.assertEqual(await cupo.activos(), 0, "hay pipelines vivos ajenos en jax_memory_test")
+        # PRE-VUELO DEL TEST, ruidoso a propósito (mismo criterio que el arnés de
+        # carga): si el cupo ya está tomado, "admitió 0" es CORRECTO y el test no
+        # mediría nada. Mejor abortar diciendo por qué que dar un verde vacío o un
+        # rojo indescifrable.
+        vivos = await cupo.activos()
+        self.assertEqual(
+            vivos, 0,
+            f"hay {vivos} pipeline(s) vivo(s) en la base de test antes de empezar "
+            f"[censo: {await _censo_de_estados()}]: este test mide que el cupo admita "
+            "EXACTAMENTE el tope, y con el cupo ya ocupado admitiría menos por el motivo "
+            "correcto. Cerrá esas filas (las suites de base dejan `arnes-ada-padre`, "
+            "`secreto de B`, `causa running`) y volvé a correr.")
         freno = patch("jacobs.policy.check_kill_switch", return_value=False)
         freno.start()
         self.addCleanup(freno.stop)
@@ -410,7 +474,19 @@ class CreacionConcurrenteSinCandadoTest(unittest.IsolatedAsyncioTestCase):
             except HTTPException as exc:
                 return exc
 
+        # EL PRE-VUELO SE SUSTITUYE, Y NO ES COMODIDAD (2026-09-17, diagnóstico
+        # del rojo de CI). `create_pipeline` corre el pre-vuelo, que lee las
+        # tablas de gobernanza (`facet`, `model`, `capability`, `credential`) --
+        # las crean las migraciones de jax-platform, NO `store.init_tables()`.
+        # Sin sustituirlo, este test medía el estado de la gobernanza en vez del
+        # cupo: en la `jax_memory_test` compartida de hall9000 esas tablas
+        # existen (las sembró otro job) y daba verde; en el runner no, y las diez
+        # creaciones morían con 503 `prevuelo_no_disponible` -> "0 != 3". Un
+        # verde que depende de un estado que el test no fija no prueba nada.
+        # El pre-vuelo tiene sus propios tests; acá lo que se mide es el cupo.
+        veredicto = await _prevuelo_que_pasa()
         with patch.object(routes, "_plan_builder") as builder, \
+             patch.object(routes, "_prevuelo_o_503", AsyncMock(return_value=veredicto)), \
              patch.object(routes.store, "step_upsert", AsyncMock(return_value=None)):
             builder.build = AsyncMock(side_effect=plan_lento)
             comenzo = time.perf_counter()
@@ -419,10 +495,23 @@ class CreacionConcurrenteSinCandadoTest(unittest.IsolatedAsyncioTestCase):
 
         creados = [r for r in resultados if isinstance(r, dict)]
         rechazos = [r for r in resultados if isinstance(r, HTTPException)]
-        self.assertEqual(len(creados), MAX_PARALLEL_PIPELINES)
+        # PRIMERO el porqué de cada respuesta, y DESPUÉS las cuentas: un 503 de
+        # cualquier otra cosa tiene que decirlo con su propio mensaje en vez de
+        # aparecer como "0 != 3", que fue exactamente lo que costó diagnosticar.
+        self.assertEqual(
+            len(creados) + len(rechazos), 10,
+            f"alguna creación no terminó ni en pipeline ni en HTTPException: {resultados}")
+        ajenos = [r for r in rechazos
+                  if r.status_code != 422 or "Límite duro" not in str(r.detail)]
+        self.assertEqual(
+            ajenos, [],
+            "hay rechazos que NO son el 422 del cupo: este test mide el cupo, así que "
+            f"cualquier otro motivo invalida la medición -> {[(r.status_code, str(r.detail)[:120]) for r in ajenos]}")
+        self.assertEqual(
+            len(creados), MAX_PARALLEL_PIPELINES,
+            f"admitidos={len(creados)} con el tope en {MAX_PARALLEL_PIPELINES} "
+            f"[censo: {await _censo_de_estados()}]")
         self.assertEqual(len(rechazos), 10 - MAX_PARALLEL_PIPELINES)
-        self.assertTrue(all(r.status_code == 422 for r in rechazos), rechazos)
-        self.assertTrue(all("Límite duro" in str(r.detail) for r in rechazos), rechazos)
         self.assertEqual(await cupo.activos(), MAX_PARALLEL_PIPELINES)
         # Sin candado global las diez planificaciones se solapan: el total
         # tiene que parecerse a UNA, no a diez en fila (10 x 50 ms = 0,5 s).
@@ -442,10 +531,13 @@ class CreacionConcurrenteSinCandadoTest(unittest.IsolatedAsyncioTestCase):
             "name": PREFIJO + "plan-roto", "objective": "o",
             "invoked_by": "plataforma", "mode": "autonomous",
         })
+        # Igual que arriba: el plan se rechaza ANTES del pre-vuelo, así que este
+        # test no lo necesita, pero se sustituye por si el orden cambia.
         with patch.object(
             routes, "_build_plan_or_reject",
             AsyncMock(side_effect=HTTPException(status_code=422, detail="plan inejecutable")),
-        ):
+        ), patch.object(routes, "_prevuelo_o_503", AsyncMock(side_effect=AssertionError(
+            "el plan rechazado no debería llegar al pre-vuelo"))):
             with self.assertRaises(HTTPException):
                 await routes.create_pipeline(req, BackgroundTasks())
 
