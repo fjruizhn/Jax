@@ -37,6 +37,26 @@ conteo:
     para recibir un 422);
   - la planificación sigue acotada: sólo puede haber tantas en vuelo como cupo
     hay (3), porque cada una tiene su reserva. Antes el candado la acotaba a 1.
+LA FILA VISIBLE ANTES DE PLANIFICAR — averiguado, no supuesto (2026-09-17,
+pedido del autor del mecanismo retirado).
+La reserva deja una fila ANTES de que existan los pasos, y planificar tarda
+1,3-8,7 s en el camino sano. ¿La ve alguien? **No.** La fila nace con
+`status='pending'`, `plan='[]'` y `owner_ack_at` en NULL, y la consulta que
+lista los pipelines de la Mesa
+(`jax-platform backend/api/pipelines.py::SQL_PIPELINES_DEL_USUARIO`) filtra por
+`owner_ack_at IS NOT NULL`. Esa marca la escribe jax-platform
+(`_record_pipeline_owner`) DESPUÉS de que este endpoint responde, así que
+durante toda la ventana de planificación la fila es invisible: no hay pipeline
+fantasma sin pasos en la lista de nadie. Para un hijo de Ada ni siquiera tiene
+`user_id`/`tenant_id`, así que no puede calzar con la lista de ningún usuario.
+¿Y si el proceso muere ahí? La cosecha el reaper a los
+`PENDING_MAX_AGE_SECONDS` = **300 s**, el mismo mecanismo y el mismo número de
+antes: lo que crece es la ventana de exposición (de milisegundos —el hueco entre
+el INSERT y `background.add_task`— a los segundos que tarda planificar), no el
+plazo de limpieza. Se declara y no se arregla: bajar los 300 s arriesgaría
+cosechar pendientes legítimos, y el costo real de la ventana es una fila
+invisible ocupando cupo unos segundos.
+
 La contrapartida es que existe una fila `pending` sin plan mientras se
 planifica. No es un estado nuevo: `routes.create_pipeline` ya dejaba filas
 `pending` antes de arrancar el background, y el reaper cosecha lo `pending` de
@@ -61,6 +81,7 @@ from jacobs.policy import (
     ESTADOS_SIN_CUPO,
     MAX_PARALLEL_PIPELINES,
     SQL_ESTADOS_VIVOS,
+    ContencionAlReservar,
     CupoAgotado,
 )
 
@@ -83,6 +104,24 @@ MAX_REINTENTOS_DEADLOCK = 24
 #: ~3 ms y tope de 100 ms suman ~2 s en el peor caso, que sigue siendo menos que
 #: lo que tarda planificar y no alcanza el plazo del pedido.
 ESPERA_MAXIMA_SEGUNDOS = 0.1
+
+#: EL TECHO REAL DE ESPERA ACUMULADA EN EL CAMINO DEL USUARIO (2026-09-17,
+#: pedido del autor del mecanismo retirado: "decime el techo real").
+#:
+#: Sin este presupuesto, 24 intentos con espera creciente hasta 100 ms dan un
+#: peor caso de **2,06 s** (0,155 s de los cinco primeros, que todavía crecen,
+#: más 19 x 0,1 s). Dos segundos colgado esperando a que la base se destrabe es
+#: demasiado para el camino de un pedido, así que el techo se DECLARA y se hace
+#: cumplir: cuando la espera acumulada llegaría acá se deja de reintentar y sale
+#: `ContencionAlReservar` -> 503 `contencion_al_reservar`, que el cliente puede
+#: reintentar cuando quiera. Mejor un 503 rápido y honesto que un pedido que no
+#: contesta.
+#:
+#: Con la calibración de arriba corta en el intento 14 con 0,955 s acumulados, y
+#: en la carga medida no se llegó a usar ni uno solo (cero contenciones
+#: agotadas). `tests/test_cupo_en_todos_los_caminos.py` fija ese cálculo, así
+#: que subir los reintentos sin mirar el techo se pone rojo.
+PRESUPUESTO_DE_ESPERA_SEGUNDOS = 1.0
 
 
 #: LA sentencia que decide. Una sola, autocommit, y se juzga por `rowcount`.
@@ -119,7 +158,7 @@ SQL_SOLTAR = "DELETE FROM jacobs_pipelines WHERE pipeline_id = %s AND status = %
 #: `ESTADOS_QUE_OCUPAN_CUPO`, `ESTADOS_SIN_CUPO` y `CupoAgotado` se siguen
 #: pidiendo por acá porque este es el módulo del cupo.
 __all__ = [
-    "CupoAgotado", "ESTADOS_QUE_OCUPAN_CUPO", "ESTADOS_SIN_CUPO",
+    "ContencionAlReservar", "CupoAgotado", "ESTADOS_QUE_OCUPAN_CUPO", "ESTADOS_SIN_CUPO",
     "reservar_cupo", "completar_reserva", "soltar_reserva", "activos",
     "SQL_RESERVAR", "parametros_de_reserva",
 ]
@@ -159,32 +198,39 @@ async def reservar_cupo(p: Pipeline, limite: int | None = None) -> bool:
     False = cupo agotado. El llamador responde el mismo rechazo explícito de
             siempre (422 con el motivo).
 
-    Fail-closed: cualquier error de base (pool lleno, socket caído, deadlock
-    que no cede) SUBE. No hay rama que cree el pipeline "por las dudas": sin
-    base no se sabe si hay cupo, y sin saberlo no se crea nada.
+    Fail-closed: cualquier error de base SUBE. No hay rama que cree el pipeline
+    "por las dudas": sin base no se sabe si hay cupo, y sin saberlo no se crea
+    nada. Si lo que falla es la CONTENCIÓN (deadlocks que no ceden dentro del
+    presupuesto de espera), sale `ContencionAlReservar`, que el llamador
+    traduce a 503 `contencion_al_reservar` -- no a un 500: trabarse con otra
+    escritura es lo esperado bajo carga, no una falla del sistema.
     """
     tope = MAX_PARALLEL_PIPELINES if limite is None else limite
-    ultimo: BaseException | None = None
+    esperado = 0.0
     for intento in range(MAX_REINTENTOS_DEADLOCK):
         try:
             return await _ejecutar_reserva(p, tope) == 1
         except aiomysql.OperationalError as exc:
             if exc.args[0] != _DEADLOCK:
                 raise
-            ultimo = exc
             # Espera con jitter y crecimiento: sin azar, las dos víctimas de un
             # deadlock reintentan a la vez y se vuelven a trabar; sin
             # crecimiento, una tormenta de reservas no se dispersa nunca.
-            await asyncio.sleep(min(
-                random.uniform(0.001, 0.005) * (2 ** intento),
-                ESPERA_MAXIMA_SEGUNDOS,
-            ))
+            espera = min(random.uniform(0.001, 0.005) * (2 ** intento),
+                         ESPERA_MAXIMA_SEGUNDOS)
+            if esperado + espera > PRESUPUESTO_DE_ESPERA_SEGUNDOS:
+                logger.error(
+                    "cupo: contención al reservar %s -- %d intentos, %.2f s de espera",
+                    p.pipeline_id, intento + 1, esperado,
+                )
+                raise ContencionAlReservar(intento + 1, esperado) from exc
+            await asyncio.sleep(espera)
+            esperado += espera
     logger.error(
-        "cupo: %d reintentos de deadlock agotados reservando %s",
-        MAX_REINTENTOS_DEADLOCK, p.pipeline_id,
+        "cupo: %d reintentos agotados reservando %s (%.2f s de espera)",
+        MAX_REINTENTOS_DEADLOCK, p.pipeline_id, esperado,
     )
-    assert ultimo is not None
-    raise ultimo
+    raise ContencionAlReservar(MAX_REINTENTOS_DEADLOCK, esperado)
 
 
 async def completar_reserva(p: Pipeline, conexion=None) -> None:

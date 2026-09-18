@@ -367,8 +367,8 @@ jobs:
           # 113 -> 121 el 2026-09-17 (pre-vuelo y continuar sobre master con
           # jax#207): la union de las dos listas. El runner conto 121 passed y
           # 49 subtests; manda el runner, como dice la nota de arriba.
-          # 121 -> 133 el 2026-09-17 (el cupo lo hace cumplir la base):
-          #   jacobs/_cupo_io_test.py (+11) -- 25 y 50 corrutinas reservando a la vez sin
+          # 121 -> 135 el 2026-09-17 (el cupo lo hace cumplir la base):
+          #   jacobs/_cupo_io_test.py (+14) -- 25 y 50 corrutinas reservando a la vez sin
           #   superar el cupo y sin un solo deadlock sin reintentar, soltar devuelve el cupo,
           #   soltar no toca un pipeline que ya arranco, completar escribe plan/identidad/padre,
           #   fail-closed sin base y con el reintento agotado, EXPLAIN de la sentencia REAL por
@@ -376,9 +376,13 @@ jobs:
           #   admiten exactamente MAX_PARALLEL_PIPELINES (y en menos de 0,35 s: con el candado
           #   global esas diez planificaciones de 50 ms se serializaban en 0,5 s) y un plan
           #   rechazado devuelve el cupo; y que la tabla REAL no traiga un estado que PipelineStatus no
-          #   clasifica (el frente G trae `queued`). Medido en local (3.14) contra jax_memory_test.
-          grep -qE "^133 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 133 tests CORRIDOS (no skipeados)."; exit 1; }
+          #   clasifica (el frente G trae `queued`); que REANUDAR con el cupo LLENO no entre (el
+          #   hallazgo: rojo por COMPORTAMIENTO contra b450248, "1 is not None"); y que el UPDATE que
+          #   REVIVE (continuar_transaccion) rechace con el cupo lleno y admita con lugar -- la cuarta
+          #   sentencia, que el autor del mecanismo retirado pidio ver probada contra la base antes del
+          #   merge. Medido en local (3.14) contra jax_memory_test.
+          grep -qE "^135 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 135 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -2196,17 +2200,22 @@ jobs:
           # 2021 passed, 1 xfailed, 16 subtests; el runner cuenta uno menos y
           # reporta ese xfail como skipped (mismo desfase de siempre), asi que
           # el piso queda en 2020. Si el runner da otro numero, manda el runner.
-          # 2020 -> 2039 el 2026-09-17 (union del cupo en la base): las DOS listas suman
+          # 2020 -> 2049 el 2026-09-17 (union del cupo en la base): las DOS listas suman
           #   tests/test_creacion_sin_candado_global.py (12) y tests/test_cupo_en_todos_los_caminos.py
-          #   (8: las cuatro escrituras que ocupan cupo llevan la condicion, resume y approve-step le
+          #   (18 tras la revision del autor del mecanismo retirado: las cuatro escrituras que ocupan
+          #   cupo llevan la condicion; el cupo se mira ANTES del pre-vuelo, que SONDEA y es una llamada
+          #   PAGA -- por orden en el codigo y tambien por comportamiento: con el cupo lleno el prevuelo
+          #   no se llama; el techo de espera acumulada esta declarado y se cumple (2,06 s sin
+          #   presupuesto, <=1 s con el); y la contencion sale 503 con Retry-After, no 500 ni 422. Antes
+          #   eran 8: las cuatro escrituras que ocupan cupo llevan la condicion, resume y approve-step le
           #   pasan el tope, y el motivo del rechazo no miente), mas los retiros que arrastran
           #   (el timeout del candado sale de prevuelo_config, y el test del candado de creacion pasa
           #   a exigir que NO quede ninguno). El ROJO del hallazgo se verifico
           #   POR COMPORTAMIENTO contra master b450248 con un canario contra la base real: con el cupo
           #   LLENO, pipeline_tomar_epoca admitia el resume (devolvio epoca 1) -- "1 is not None".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^2039 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2039 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          grep -qE "^2049 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2049 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

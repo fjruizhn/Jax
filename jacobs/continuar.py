@@ -32,6 +32,7 @@ from jacobs.models import MOTOR_FACETS, Pipeline, PipelineStatus, Step, StepStat
 from jacobs.plan import PlanRejected, _check_cleanroom, _validate_plan_capabilities
 from jacobs.policy import (
     MAX_PARALLEL_PIPELINES,
+    ContencionAlReservar,
     CupoAgotado,
     check_kill_switch,
     validate_resume,
@@ -257,6 +258,12 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
                 [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
                 evento_payload=evento_payload, estado=estado_tx,
             )
+    except ContencionAlReservar as exc:
+        # Contención, no falla: 503 para que el llamador reintente. El CLI sale
+        # con error y el endpoint traduce el código (ver routes._contencion_503).
+        raise ContinuarRechazado(503, "contencion_al_reservar", {
+            "intentos": exc.intentos, "espera_s": round(exc.espera_total, 3),
+        }) from exc
     except CupoAgotado as exc:
         # El UPDATE no tocó la fila, y la época y el status ya estaban
         # verificados bajo el candado de FILA unas líneas más arriba: el único

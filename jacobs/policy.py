@@ -63,6 +63,27 @@ SQL_JOIN_CUPO = (
 )
 
 
+class ContencionAlReservar(Exception):
+    """No se pudo DECIDIR el cupo: las escrituras del cupo se trabaron entre sí
+    (deadlock de InnoDB) más veces de las que el presupuesto de espera permite.
+
+    NO es un error del sistema y NO es un pedido inválido: es contención, y lo
+    que corresponde es volver a intentar. Por eso el llamador responde **503
+    con `contencion_al_reservar`** y un `Retry-After`, no un 500 (que manda a
+    buscar un defecto que no existe) ni el 422 del cupo (que diría que el
+    pedido está mal, y no lo está).
+
+    Fail-closed igual: no se creó ni se reanudó nada.
+    """
+
+    def __init__(self, intentos: int, espera_total: float) -> None:
+        self.intentos, self.espera_total = intentos, espera_total
+        super().__init__(
+            f"no se pudo decidir el cupo tras {intentos} intentos "
+            f"({espera_total:.2f} s de espera): contención en la base"
+        )
+
+
 class CupoAgotado(Exception):
     """El cupo global está lleno. Vive acá, y no en cupo.py o store.py, para que
     los dos puedan levantarla sin importarse entre sí."""

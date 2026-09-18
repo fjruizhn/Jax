@@ -98,7 +98,8 @@ def paso_de_hyde_en_gate():
     pipeline = Pipeline(pipeline_id="p1", name="n", invoked_by="plataforma",
                         mode="autonomous", status=PipelineStatus.interrupted)
     step_upsert = AsyncMock()
-    with patch.object(jacobs_routes.store, "pipeline_get", AsyncMock(return_value=pipeline)), \
+    with patch.object(jacobs_routes.cupo, "activos", AsyncMock(return_value=0)), \
+         patch.object(jacobs_routes.store, "pipeline_get", AsyncMock(return_value=pipeline)), \
          patch.object(jacobs_routes.store, "steps_by_pipeline", AsyncMock(return_value=[paso])), \
          patch.object(jacobs_routes.store, "event_append", AsyncMock()), \
          patch.object(jacobs_routes.store, "step_upsert", step_upsert), \

@@ -39,6 +39,7 @@ from jacobs.prevuelo import prevuelo
 from jacobs.prevuelo_reglas import Veredicto, formatear_usd
 from jacobs.policy import (
     MAX_PARALLEL_PIPELINES,
+    ContencionAlReservar,
     CupoAgotado,
     check_kill_switch,
     validate_create,
@@ -376,6 +377,55 @@ async def _soltar_reserva(pipeline_id: str) -> None:
         )
 
 
+def _contencion_503(exc: ContencionAlReservar) -> HTTPException:
+    """La contención NO es un 500 (2026-09-17, revisión del autor del mecanismo
+    retirado). Un 500 dice "me rompí" y manda a alguien a buscar un defecto que
+    no existe; lo que pasó es que dos escrituras del cupo se trabaron y no se
+    destrabaron dentro del presupuesto de espera. Tampoco es el 422 del cupo:
+    422 significa "tu pedido no es válido", y este pedido está perfecto.
+
+    503 + `Retry-After: 1` = "volvé a intentar", que es exactamente lo que hay
+    que hacer. El segundo sale del presupuesto de espera (~0,96 s): reintentar
+    antes es pedirle a la base que se trabe de nuevo.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": "contencion_al_reservar",
+            "intentos": exc.intentos,
+            "espera_s": round(exc.espera_total, 3),
+        },
+        headers={"Retry-After": "1"},
+    )
+
+
+async def _cupo_o_429() -> None:
+    """Compuerta BARATA de cupo, ANTES de cualquier cosa que salga a la red.
+
+    POR QUÉ ESTÁ ACÁ Y NO SÓLO EN LA ESCRITURA (2026-09-17, revisión del autor
+    del mecanismo retirado). `resume` y `approve-step` corren el pre-vuelo, y el
+    pre-vuelo **sondea facetas: es una llamada PAGA**. Si el cupo se mirara sólo
+    en el UPDATE —que va después—, un pedido rechazado por falta de lugar ya
+    habría gastado dinero. No es estética: es plata que se va sin que nadie la
+    vea.
+
+    NO decide: la decisión sigue siendo la condición que viaja dentro del
+    UPDATE (`pipeline_tomar_epoca(cupo_maximo=...)`). Esto es una compuerta que
+    ahorra el gasto en el caso claro. Si la lectura queda vieja y el cupo se
+    llena entre medio, el UPDATE rechaza igual: fail-closed sin depender de
+    esta lectura.
+
+    `tests/test_cupo_en_todos_los_caminos.py` fija el ORDEN: falla si alguien
+    pone el pre-vuelo antes.
+    """
+    activos = await cupo.activos()
+    if activos >= MAX_PARALLEL_PIPELINES:
+        raise HTTPException(status_code=429, detail={
+            "code": "limite_de_activos",
+            "detalle": str(CupoAgotado(activos, MAX_PARALLEL_PIPELINES)),
+        })
+
+
 @router.post("/pipeline")
 async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTasks) -> dict:
     """Crea un pipeline y lo ejecuta en background.
@@ -443,7 +493,11 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
         created_at=now,
         updated_at=now,
     )
-    if not await cupo.reservar_cupo(pipeline):
+    try:
+        hay_lugar = await cupo.reservar_cupo(pipeline)
+    except ContencionAlReservar as exc:
+        raise _contencion_503(exc) from exc
+    if not hay_lugar:
         # 0 filas afectadas = cupo agotado. Mismo 422 y mismo texto que daba
         # validate_create. El conteo es sólo para el MENSAJE: decidió la base.
         raise HTTPException(
@@ -736,6 +790,8 @@ async def resume_pipeline(
     steps = await store.steps_by_pipeline(pipeline_id)
     # F2 (Ruling R32): pre-vuelo antes de tomar la época -- un rechazo no deja
     # rastro de estado (sólo el evento PREVUELO_RECHAZADO).
+    # El cupo ANTES del pre-vuelo: sondear cuesta plata (ver _cupo_o_429).
+    await _cupo_o_429()
     costo, contexto, ilegibles = await _prevuelo_de_reanudacion(pipeline, steps)
 
     # Época (spec 2026-09-17 §5.3): se toma ANTES de tocar pasos. Si otro
@@ -763,6 +819,8 @@ async def resume_pipeline(
         raise HTTPException(status_code=429, detail={
             "code": "limite_de_activos", "detalle": str(exc),
         }) from exc
+    except ContencionAlReservar as exc:
+        raise _contencion_503(exc) from exc
     if nueva_epoca is None:
         raise HTTPException(
             status_code=409,
@@ -925,6 +983,8 @@ async def approve_step(
     # F2 (Ruling R32): pre-vuelo de la ola completa que se va a lanzar (todos
     # los pasos sin ref legible), antes de tomar la época y de persistir las
     # marcas de hyde.
+    # El cupo ANTES del pre-vuelo: sondear cuesta plata (ver _cupo_o_429).
+    await _cupo_o_429()
     costo, contexto, ilegibles = await _prevuelo_de_reanudacion(
         pipeline, steps, aprobados_ahora=frozenset(s.step_id for s in gated if s.facet == "hyde"),
     )
@@ -946,6 +1006,8 @@ async def approve_step(
         raise HTTPException(status_code=429, detail={
             "code": "limite_de_activos", "detalle": str(exc),
         }) from exc
+    except ContencionAlReservar as exc:
+        raise _contencion_503(exc) from exc
     if nueva_epoca is None:
         raise HTTPException(
             status_code=409,

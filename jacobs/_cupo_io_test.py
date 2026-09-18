@@ -46,6 +46,7 @@ from unittest.mock import patch  # noqa: E402
 import aiomysql  # noqa: E402
 
 from jacobs import cupo, store  # noqa: E402
+from jacobs.policy import CupoAgotado  # noqa: E402
 from jacobs.models import Pipeline  # noqa: E402
 
 PREFIJO = "cupo-io-test-"
@@ -175,12 +176,17 @@ class CupoEnLaBaseTest(unittest.IsolatedAsyncioTestCase):
                 await cupo.reservar_cupo(_pipeline(PREFIJO + "sin-base"), limite=3)
         self.assertEqual(await self._vivos(), 0)
 
-    async def test_deadlock_que_no_cede_termina_en_error_no_en_reserva(self):
-        """Fail-closed también cuando el reintento se agota: se levanta el
-        error, jamás se devuelve `True` sin fila."""
+    async def test_deadlock_que_no_cede_termina_en_contencion_no_en_reserva(self):
+        """Fail-closed cuando la contención no cede: no se devuelve `True` sin
+        fila, y el error que sube dice CONTENCIÓN -- el llamador lo traduce a un
+        503 `contencion_al_reservar`, no a un 500 (trabarse con otra escritura
+        bajo carga es lo esperado, no una falla del sistema)."""
+        from jacobs.policy import ContencionAlReservar
+
         agotado = aiomysql.OperationalError(1213, "Deadlock found when trying to get lock")
-        with patch.object(cupo, "_ejecutar_reserva", side_effect=agotado):
-            with self.assertRaises(aiomysql.OperationalError):
+        with patch.object(cupo, "_ejecutar_reserva", side_effect=agotado), \
+             patch.object(cupo.asyncio, "sleep", return_value=None):
+            with self.assertRaises(ContencionAlReservar):
                 await cupo.reservar_cupo(_pipeline(PREFIJO + "trabado"), limite=3)
         self.assertEqual(await self._vivos(), 0)
 
@@ -291,6 +297,70 @@ class ReanudarRespetaElCupoTest(unittest.IsolatedAsyncioTestCase):
             "reanudar entró con el cupo LLENO: el límite dice que existe y no existe "
             "(tres interrumpidos y tres resume lo pasan)",
         )
+
+
+@unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
+class ContinuarRespetaElCupoTest(unittest.IsolatedAsyncioTestCase):
+    """La CUARTA sentencia con base real: el UPDATE que revive un pipeline en
+    `store.continuar_transaccion`.
+
+    Las otras tres ya tienen su prueba contra la base (la reserva, arriba; el
+    UPDATE de la época, en ReanudarRespetaElCupoTest; el recuento, en las dos).
+    Ésta faltaba, y es la que el autor del mecanismo retirado pidió que existiera
+    antes del merge: sin ella, "el cupo viaja en las cuatro escrituras" sería una
+    afirmación sin comprobar en la que más caro sale equivocarse.
+    """
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        self.addAsyncCleanup(self._limpiar)
+        await store.init_tables()
+        await self._limpiar()
+        self.assertEqual(await cupo.activos(), 0, "hay pipelines vivos ajenos en jax_memory_test")
+
+    async def _limpiar(self):
+        await ada.ejecutar(
+            "DELETE FROM jacobs_pipelines WHERE name LIKE %s",  # marcador-propio: PREFIJO
+            (PREFIJO + "%",),
+        )
+
+    async def _con_estado(self, estado: str) -> str:
+        p = _pipeline(f"{PREFIJO}{estado}-{uuid.uuid4().hex[:6]}")
+        await store.pipeline_create(p)
+        await ada.ejecutar(
+            "UPDATE jacobs_pipelines SET status=%s WHERE pipeline_id=%s", (estado, p.pipeline_id))
+        return p.pipeline_id
+
+    async def test_con_el_cupo_lleno_el_update_que_revive_no_toca_la_fila(self):
+        from jacobs.models import PipelineStatus
+        from jacobs.policy import MAX_PARALLEL_PIPELINES
+
+        for _ in range(MAX_PARALLEL_PIPELINES):
+            await self._con_estado("running")
+        abortado = await self._con_estado("aborted")
+        self.assertEqual(await cupo.activos(), MAX_PARALLEL_PIPELINES)
+
+        with self.assertRaises(CupoAgotado):
+            await store.continuar_transaccion(
+                abortado, 0, PipelineStatus.aborted, [], [], {}, 0, evento_payload=None)
+
+        fila = await store.pipeline_get(abortado)
+        self.assertEqual(fila.status, PipelineStatus.aborted, "revivió con el cupo lleno")
+        self.assertEqual(fila.run_epoch, 0, "la época avanzó sin que el pipeline arrancara")
+        self.assertEqual(await cupo.activos(), MAX_PARALLEL_PIPELINES)
+
+    async def test_con_lugar_el_mismo_update_si_revive(self):
+        """El control del control: si no se comprobara que CON lugar sí entra,
+        un WHERE roto daría verde en el test de arriba por el motivo
+        equivocado."""
+        from jacobs.models import PipelineStatus
+
+        abortado = await self._con_estado("aborted")
+        nueva = await store.continuar_transaccion(
+            abortado, 0, PipelineStatus.aborted, [], [], {}, 0, evento_payload=None)
+        self.assertEqual(nueva, 1)
+        fila = await store.pipeline_get(abortado)
+        self.assertEqual(fila.status, PipelineStatus.running)
 
 
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")

@@ -30,7 +30,7 @@ import pytest
 
 from jacobs import continuar as servicio_continuar
 from jacobs import cupo, routes, store
-from jacobs.policy import MAX_PARALLEL_PIPELINES, CupoAgotado
+from jacobs.policy import MAX_PARALLEL_PIPELINES, ContencionAlReservar, CupoAgotado
 
 
 # ---------------------------------------------------------------------------
@@ -116,3 +116,125 @@ def test_continue_traduce_el_cupo_de_la_escritura_a_429():
     fuente = inspect.getsource(servicio_continuar.continuar)
     assert "except CupoAgotado" in fuente
     assert "limite_de_activos" in fuente
+
+
+# ---------------------------------------------------------------------------
+#  El cupo se mira ANTES de gastar plata
+# ---------------------------------------------------------------------------
+# Pedido del autor del mecanismo retirado (2026-09-17): el pre-vuelo SONDEA
+# FACETAS, y sondear es una llamada paga. Si el cupo se revisara después, un
+# resume rechazado por falta de lugar ya habría gastado dinero.
+
+@pytest.mark.parametrize("endpoint", [routes.resume_pipeline, routes.approve_step])
+def test_el_cupo_se_mira_antes_del_prevuelo(endpoint):
+    """Sobre el CÓDIGO y por ORDEN, no por presencia: invertir las dos líneas
+    deja el test rojo, que es justo lo que tiene que pasar."""
+    fuente = inspect.getsource(endpoint)
+    assert "_cupo_o_429()" in fuente, f"{endpoint.__name__} no mira el cupo antes de sondear"
+    assert "_prevuelo_de_reanudacion" in fuente, endpoint.__name__
+    assert fuente.index("_cupo_o_429()") < fuente.index("_prevuelo_de_reanudacion"), (
+        f"{endpoint.__name__} sondea (paga) ANTES de mirar el cupo: un rechazo por "
+        "cupo ya gastó dinero"
+    )
+
+
+def test_la_compuerta_barata_no_es_la_que_decide():
+    """`_cupo_o_429` ahorra el gasto, no hace cumplir el límite. Si alguien la
+    tomara por el control, una lectura vieja dejaría pasar de más -- por eso la
+    decisión sigue viajando dentro del UPDATE."""
+    fuente = inspect.getsource(routes._cupo_o_429)
+    assert "NO decide" in fuente
+    for endpoint in (routes.resume_pipeline, routes.approve_step):
+        assert "cupo_maximo=MAX_PARALLEL_PIPELINES" in inspect.getsource(endpoint)
+
+
+def test_resume_no_sondea_con_el_cupo_lleno():
+    """Comportamiento, no sólo orden: con el cupo lleno, el pre-vuelo NO se
+    llama. Es el test que se pone rojo si alguien mueve la compuerta."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import BackgroundTasks, HTTPException
+
+    from jacobs.models import Pipeline, PipelineStatus
+
+    interrumpido = Pipeline(pipeline_id="p1", name="t", invoked_by="plataforma",
+                            mode="autonomous", status=PipelineStatus.interrupted,
+                            created_at=0.0, updated_at=0.0)
+    prevuelo = AsyncMock()
+    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=interrumpido)), \
+         patch.object(routes.store, "steps_by_pipeline", AsyncMock(return_value=[])), \
+         patch.object(routes, "check_kill_switch", return_value=False), \
+         patch.object(routes, "_prevuelo_de_reanudacion", prevuelo), \
+         patch.object(routes.cupo, "activos", AsyncMock(return_value=MAX_PARALLEL_PIPELINES)):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(routes.resume_pipeline(
+                "p1", routes.ResumeRequest(invoked_by="plataforma"), BackgroundTasks()))
+    assert exc.value.status_code == 429
+    assert exc.value.detail["code"] == "limite_de_activos"
+    prevuelo.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+#  La contención es un 503, no un 500 — y su espera tiene techo declarado
+# ---------------------------------------------------------------------------
+
+def test_el_techo_de_espera_acumulada_esta_declarado_y_se_cumple():
+    """El número que pidió el coordinador, calculado con las MISMAS constantes
+    del código: sin presupuesto, 24 intentos con espera hasta 100 ms dan 2,06 s
+    en el peor caso. Subir los reintentos sin mirar el techo pone esto rojo."""
+    peor_sin_presupuesto = sum(
+        min(0.005 * (2 ** n), cupo.ESPERA_MAXIMA_SEGUNDOS)
+        for n in range(cupo.MAX_REINTENTOS_DEADLOCK)
+    )
+    assert peor_sin_presupuesto > 2.0, peor_sin_presupuesto
+
+    # Con el presupuesto puesto, la espera acumulada NUNCA lo pasa, sea cual sea
+    # el jitter. Se comprueba con las dos puntas del azar (0,001 y 0,005), que
+    # son las que acotan todas las corridas posibles.
+    for base in (0.001, 0.005):
+        acumulado, intentos = 0.0, 0
+        for n in range(cupo.MAX_REINTENTOS_DEADLOCK):
+            espera = min(base * (2 ** n), cupo.ESPERA_MAXIMA_SEGUNDOS)
+            if acumulado + espera > cupo.PRESUPUESTO_DE_ESPERA_SEGUNDOS:
+                break
+            acumulado += espera
+            intentos = n + 1
+        assert acumulado <= cupo.PRESUPUESTO_DE_ESPERA_SEGUNDOS, (base, acumulado)
+        # Y sigue habiendo reintentos de sobra antes de rendirse: el presupuesto
+        # acota el tiempo, no convierte esto en "un intento y chau".
+        assert intentos >= 10, (base, intentos)
+    assert cupo.PRESUPUESTO_DE_ESPERA_SEGUNDOS <= 1.0
+
+
+def test_la_contencion_agotada_sale_como_contencion_no_como_error_de_base():
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+
+    import aiomysql
+
+    from jacobs.models import Pipeline
+
+    p = Pipeline(pipeline_id="p1", name="t", invoked_by="plataforma", mode="dry_run",
+                 created_at=0.0, updated_at=0.0)
+    trabado = aiomysql.OperationalError(1213, "Deadlock found when trying to get lock")
+    with patch.object(cupo, "_ejecutar_reserva", AsyncMock(side_effect=trabado)), \
+         patch.object(cupo.asyncio, "sleep", AsyncMock()):
+        with pytest.raises(ContencionAlReservar) as exc:
+            asyncio.run(cupo.reservar_cupo(p, limite=3))
+    assert exc.value.intentos >= 1
+
+
+@pytest.mark.parametrize("endpoint", ["create_pipeline", "resume_pipeline", "approve_step"])
+def test_los_endpoints_traducen_la_contencion_a_503(endpoint):
+    fuente = inspect.getsource(getattr(routes, endpoint))
+    assert "_contencion_503" in fuente, endpoint
+
+
+def test_el_503_de_contencion_no_se_confunde_con_el_422_del_cupo():
+    """422 = "tu pedido no es válido". La contención no tiene nada de inválido:
+    es "volvé a intentar", y por eso lleva Retry-After."""
+    respuesta = routes._contencion_503(ContencionAlReservar(14, 0.955))
+    assert respuesta.status_code == 503
+    assert respuesta.detail["code"] == "contencion_al_reservar"
+    assert respuesta.headers["Retry-After"] == "1"

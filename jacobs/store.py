@@ -25,6 +25,7 @@ from jacobs.policy import (
     MAX_PARALLEL_PIPELINES,
     SQL_ESTADOS_VIVOS,
     SQL_JOIN_CUPO,
+    ContencionAlReservar,
     CupoAgotado,
 )
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
@@ -1312,7 +1313,14 @@ async def _contar_activos(conn: aiomysql.Connection) -> int:
 #  Época de corrida (spec 2026-09-17 §5.3)
 # ----------------------------------------------------------------
 # Un solo ejecutor por pipeline. `cancel`, el kill switch y el reaper cambian
-# el STATUS; `resume`, `approve-step` y `continue` INCREMENTAN la época. El
+# el STATUS; `resume`, `approve-step` y `continue` INCREMENTAN la época.
+#
+# LA ÉPOCA NO CAMBIÓ DE DUEÑO (2026-09-17, anotado a pedido del autor del
+# mecanismo retirado). La unión del cupo le agregó a estas sentencias una
+# CONDICIÓN más -- `cupo_x.c < %s` --, pero quién incrementa `run_epoch`, cuándo
+# y con qué CAS sigue siendo exactamente lo de antes: continuar, resume y
+# approve-step. El cupo no toca la época, no la lee y no la escribe; sólo decide
+# si esa escritura tiene permiso de ocurrir. El
 # ejecutor escribe sólo si el pipeline sigue en SU época y `running`: si no,
 # perdió, registra RUN_SUPERSEDED una vez y termina sin escribir más.
 # Todas van por clave primaria (EXPLAIN en tests/test_run_epoch_db.py).
@@ -1369,10 +1377,25 @@ def _sql_tomar_epoca(con_contexto: bool, n_desde: int, con_cupo: bool = False) -
 
 
 async def _ejecutar_condicional(sql: str, params: tuple | list) -> int:
+    """Una escritura condicional por época, en su conexión dedicada.
+
+    Un 1213 acá NO se reintenta (2026-09-17, declarado): estas sentencias son
+    de bajo volumen -- resume y approve-step son acciones humanas -- y en la
+    carga medida los deadlocks salieron TODOS del INSERT de la reserva, que sí
+    reintenta. Lo que sí se hace es no disfrazarlo: trabarse con otra escritura
+    es contención, no una falla del sistema, así que sube como
+    `ContencionAlReservar` y el llamador responde 503 `contencion_al_reservar`
+    en vez de un 500. Si algún día se mide contención real por acá, el reintento
+    va en este mismo lugar.
+    """
     conn = await conexion_dedicada(found_rows=True)
     try:
         async with conn.cursor() as cur:
             return await cur.execute(sql, params)
+    except aiomysql.OperationalError as exc:
+        if exc.args[0] == 1213:
+            raise ContencionAlReservar(1, 0.0) from exc
+        raise
     finally:
         conn.close()
 
