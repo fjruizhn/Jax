@@ -40,7 +40,7 @@ Cada uno se verificó contra el código de `origin/master` (`044cb99`). Donde el
 ## Global Constraints
 
 - **Dependencia del plan P (jax-platform) — se mergea ANTES que esta rama.** Este plan CONSUME: `capability.min_output_tokens INT NOT NULL DEFAULT 0`, el valor `'preflight'` del ENUM `facet_health_event.source`, y `axioma_usage.request_type='preflight_probe'` (la columna es `VARCHAR(20)`: entra sin DDL). El job `jacobs-gobernanza-db` clona `jax-platform` **master** y corre `run_migrations()`: hasta que P esté en master, los tests DB de las Tasks 6, 10 y 15 dan rojo en CI por esquema, no por código. Localmente corren contra `jax_memory_test` migrada con la rama de P (Task 6, Step 1).
-- **Base de tests, nunca producción.** Tests DB: `set -a; source /etc/jax/.env; set +a; export JAX_DB_NAME=jax_memory_test` en el MISMO comando. Cada archivo de tests DB lleva la barrera: si `JAX_DB_NAME` apunta a otra base, `RuntimeError` al importar. Los tests puros fuerzan `os.environ["JAX_DB_NAME"] = "jax_memory_test"` antes de importar `jacobs` y mockean todo acceso a DB (patrón `tests/test_jacobs_invoked_by_rol.py`).
+- **Base de tests, nunca producción.** Tests DB: `set -a; source <(sudo -n cat /etc/jax/.env); set +a; export JAX_DB_NAME=jax_memory_test` en el MISMO comando. Cada archivo de tests DB lleva la barrera: si `JAX_DB_NAME` apunta a otra base, `RuntimeError` al importar. Los tests puros fuerzan `os.environ["JAX_DB_NAME"] = "jax_memory_test"` antes de importar `jacobs` y mockean todo acceso a DB (patrón `tests/test_jacobs_invoked_by_rol.py`).
 - **Nada de proveedores pagos ni servicios de producción (:7777, :8080)** en tests ni en la prueba de carga. La instancia de carga es aislada (puerto 17790) y la corrida que se lanza en la prueba de `continue` para en el gate de hyde, sin despacho.
 - **TDD con rojo visto.** Cada test nuevo se corre contra el código viejo ANTES de implementar y falla con el Expected escrito en su paso. Un test que ya pasa antes se declara "control" en el paso.
 - **P10.** Todo `except` amplio que no relanza lleva en la MISMA línea `# fail-soft: <razón de este sitio>` o `# fail-closed: <razón>`. Lo verifica `policy/tests/test_no_fail_open_except.py`.
@@ -5399,7 +5399,7 @@ correrla (Task 13, Step 6 del plan) y un scan se acepta por ser un script
 puntual.
 
 Uso (con GO, contra producción, solo lectura):
-  set -a; source /etc/jax/.env; set +a
+  set -a; source <(sudo -n cat /etc/jax/.env); set +a
   PYTHONPATH=.:las_manos python scripts/medir_min_output_tokens.py --jobs las_manos/logs/motor_jobs.jsonl
 
 En memoria de Jairo Urbina.

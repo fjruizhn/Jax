@@ -22,7 +22,7 @@
 #   nftables inet ejecutor_cerco @destinos_ssh (+ IP del contenedor . 58291, se quita).
 # No toca /etc/jax/.env, la política de producción ni el freno de producción.
 #
-# Uso (como fruiz, desde el checkout): set -a; . /etc/jax/.env; set +a
+# Uso (como fruiz, desde el checkout): set -a; . <(sudo -n cat /etc/jax/.env); set +a
 #      scripts/ejecutor_contratos/probar_freno_remoto_en_contenedor.sh
 set -euo pipefail
 : "${JAX_EJECUTOR_POLITICA:?}" "${JAX_EJECUTOR_CUENTA:?}" "${JAX_EJECUTOR_ADMIN_USUARIO:?}" "${JAX_EJECUTOR_FRENO_LLAVE:?}"

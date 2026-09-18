@@ -7,7 +7,7 @@ credenciales de la base, que viven en /etc/jax/.env: un proceso que no puede
 leer ese archivo (la jaula de Hyde, la cuenta `axioma`) no puede emitir.
 
 Uso (hall9000, como fruiz):
-  set -a; . /etc/jax/.env; set +a
+  set -a; . <(sudo -n cat /etc/jax/.env); set +a
   /home/fruiz/jax/las_manos/.venv/bin/python /home/fruiz/jax/las_manos/emitir_token_gate.py
 
 Imprime el token (una sola vez: en la base queda su sha256) y su vencimiento.

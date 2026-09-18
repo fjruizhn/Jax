@@ -20,7 +20,7 @@ tiene pty); lo desprendido en la remota sólo lo mata el barrido con la llave de
 (`JAX_EJECUTOR_FRENO_REMOTOS` tiene que incluir la máquina). En cada lectura también se cuenta
 `ps -u <cuenta>` en la remota por ssh de administrador.
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c4.py [--freno ejecutor|global]
          [--lecturas 1,6] [--rondas 2] [--remoto <máquina de la política>]
 Sale 0 sólo con `c4_vivo=true`. No toca la DB. Siempre suelta el freno que puso (finally).

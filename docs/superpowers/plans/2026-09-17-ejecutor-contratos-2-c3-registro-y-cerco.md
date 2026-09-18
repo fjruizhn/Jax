@@ -1621,7 +1621,7 @@ Expected: `c3_instalado=true`; `systemctl show jax-ejecutor-proxy -p NRestarts,A
 #!/usr/bin/env python3
 # scripts/ejecutor_contratos/probar_c3.py
 """Prueba real de C3 en hall9000, re-ejecutable por un tercero.
-Uso: set -a; . /etc/jax/.env; set +a; PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c3.py
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a; PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c3.py
 Lee /etc/jax/.env (producción) sólo para JAX_EJECUTOR_* y JAX_PROXY_CARRIL_*; no toca la DB."""
 import asyncio
 import os

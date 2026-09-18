@@ -30,7 +30,7 @@ de esta sesión (docs/columnas-sin-consumidor-2026-08-19.md o el mensaje del
 commit, según lo que exista al momento de leer esto).
 
 Uso:
-  set -a; source /etc/jax/.env; set +a
+  set -a; source <(sudo -n cat /etc/jax/.env); set +a
   /home/fruiz/jax/las_manos/.venv/bin/python scripts/find_unread_columns.py
 
 En memoria de Jairo Urbina.

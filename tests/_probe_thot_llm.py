@@ -6,7 +6,7 @@ sale a la red). Verifica el punto 2 del encargo de Fernando: que OPENAI_API_KEY
 esté cargada y que Thot devuelva una observación REAL, no la revisión mecánica.
 
 Arranque (igual que JAX — la key se sourcea, no se hardcodea):
-    cd ~/jax && set -a; source /etc/jax/.env; set +a
+    cd ~/jax && set -a; source <(sudo -n cat /etc/jax/.env); set +a
     las_manos/.venv/bin/python tests/_probe_thot_llm.py
 
 En memoria de Jairo Urbina.
@@ -59,7 +59,7 @@ async def main() -> int:
 
     if not os.environ.get("OPENAI_API_KEY"):
         print("✗ OPENAI_API_KEY NO está en el entorno.")
-        print("  Arrancá con: set -a; source /etc/jax/.env; set +a  (como JAX).")
+        print("  Arrancá con: set -a; source <(sudo -n cat /etc/jax/.env); set +a  (como JAX).")
         return 1
     print("✓ OPENAI_API_KEY presente en el entorno (no se imprime su valor).")
 

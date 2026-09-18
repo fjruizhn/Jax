@@ -5,7 +5,7 @@
 # timer OnCalendar de fecha fija (ver check-b14-exit-criterion.timer).
 # No modifica nada — solo lee logs y notifica por Telegram.
 set -euo pipefail
-set -a; source /etc/jax/.env; set +a
+set -a; source <(sudo -n cat /etc/jax/.env); set +a
 
 COUNT=$(journalctl -u jax-platform.service -u jax-las-manos.service \
   --since "7 days ago" --no-pager 2>/dev/null \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/ejecutor/instalar_contratos.sh — instala C1/C2 del Ejecutor en hall9000.
 # Corre como fruiz desde el checkout de producción (/home/fruiz/jax en master); usa sudo
-# para lo que es de root. Idempotente. Lee JAX_EJECUTOR_* del entorno (set -a; . /etc/jax/.env).
+# para lo que es de root. Idempotente. Lee JAX_EJECUTOR_* del entorno (set -a; . <(sudo -n cat /etc/jax/.env)).
 set -euo pipefail
 : "${JAX_EJECUTOR_LIB:?}" "${JAX_EJECUTOR_POLITICA:?}" "${JAX_EJECUTOR_GANCHO_TOPE_S:?}" "${JAX_EJECUTOR_CUENTA:?}"
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"

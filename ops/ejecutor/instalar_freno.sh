@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ops/ejecutor/instalar_freno.sh [--rama-aprobada] — C4 en hall9000: freno root de la cuenta del Ejecutor.
-# Corre como fruiz; sudo para lo de root. Idempotente. Lee del entorno (set -a; . /etc/jax/.env).
+# Corre como fruiz; sudo para lo de root. Idempotente. Lee del entorno (set -a; . <(sudo -n cat /etc/jax/.env)).
 # Reversión: ops/ejecutor/revertir_freno.sh.
 set -euo pipefail
 : "${JAX_EJECUTOR_LIB:?}" "${JAX_EJECUTOR_CUENTA:?}" "${JAX_EJECUTOR_ADMIN_USUARIO:?}" "${JAX_EJECUTOR_POLITICA:?}"

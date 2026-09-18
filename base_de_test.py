@@ -142,7 +142,7 @@ def exigir_base_de_test() -> str:
 
     Es el reemplazo del par
     `if _existing and _existing != "jax_memory_test": raise` + `setdefault`,
-    que protege del `set -a; . /etc/jax/.env` (ahí `JAX_DB_NAME=jax_memory`).
+    que protege del `set -a; . <(sudo -n cat /etc/jax/.env)` (ahí `JAX_DB_NAME=jax_memory`).
     """
     actual = os.environ.get(VARIABLE_DE_LA_BASE)
     if actual:

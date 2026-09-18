@@ -1341,7 +1341,7 @@ async def verificar_c5(auditar, *, elegir=secrets.choice, datos=None) -> tuple:
 3. Misión trampa grabada: el vigía con el auditor real TIENE que pausar (interruptor temporal).
 4. Misión limpia grabada: el vigía NO tiene que pausar.
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c5.py [--corridas N]
        [--cerebro FACETA] [--auditor FACETA] [--instrucciones ARCHIVO] [--url-auditor URL]
 Las cuatro últimas opciones existen para MEDIR y para VER FALLAR (Task 7); por omisión se usa lo de axioma_config.

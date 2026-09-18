@@ -493,7 +493,7 @@ fallan contra `351ec95`.
   La jaula de Hyde no monta `/etc/jax` y `axioma` no la lee (`Permission denied`, verificado). `/execute` y
   `/motor/dispatch` consumen contra la base; el motor consume DESPUÉS de la política (un rechazo no quema el token).
   `[human_gate]` queda sólo con `token_ttl_seconds` (rango [10, 3600], validado al importar `server.py`).
-- **Uso para el aprobador humano:** `set -a; . /etc/jax/.env; set +a; ~/jax/las_manos/.venv/bin/python ~/jax/las_manos/emitir_token_gate.py`
+- **Uso para el aprobador humano:** `set -a; . <(sudo -n cat /etc/jax/.env); set +a; ~/jax/las_manos/.venv/bin/python ~/jax/las_manos/emitir_token_gate.py`
   → imprime el token (una vez) y el vencimiento; va en `approval_token` o `human_gate_token`.
 - **Pruebas:** `tests/test_human_gate_sin_emision_http.py` (24, tests-puros, piso 1127→1151) y
   `las_manos/_human_gate_io_test.py` (8, subpipeline-contrato-db, piso 101→109). Vistos en rojo contra master; mutaciones:
@@ -648,7 +648,7 @@ los commits propios de C4 se reaplican encima.
 - [ ] **2026-09-18** Proxy (C4 en `proxy_carril.py`) sin desplegar: el proxy en vivo es el de C3 y el de la rama exige
   las variables de C5 (`JAX_EJECUTOR_VIGIA_LATIDO`, `_MAX_S`). Se despliega con C5.
 - [ ] **2026-09-18 · RESERVADO A FERNANDO (servidores de clientes):** parte remota, máquina por máquina, en orden
-  atemai → prod → bridge: `cd /home/fruiz/jax && set -a && . /etc/jax/.env && set +a &&
+  atemai → prod → bridge: `cd /home/fruiz/jax && set -a && . <(sudo -n cat /etc/jax/.env) && set +a &&
   ops/ejecutor/instalar_en_maquina.sh <m>` (SIN `--sin-freno`) `&& PYTHONPATH=.:las_manos python3
   scripts/ejecutor_contratos/probar_c6.py <m>`; luego agregar `<m>` a `JAX_EJECUTOR_FRENO_REMOTOS` (backup de `.env`),
   `sudo systemctl restart ejecutor-freno` y `PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c4.py
@@ -995,7 +995,7 @@ EXPLAIN de la consulta de `ajustes.py`: `key=PRIMARY`. `GET /api/apariencia` en 
 
 **Las 9 variables agregadas al `.env` (deploy 2026-09-17 00:28):** `JAX_REPO_PATH`, `JAX_CONFIG_PATH`, `JAX_AUDIT_LOG_PATH`, `JAX_MISSIONS_DIR`, `JAX_BIN`, `JAX_REPO_BASE`, `JAX_PLATFORM_URL`, `JAX_SEED_SUPERADMIN_EMAIL`, `JAX_SEED_TENANT_NAME`. Backup `/etc/jax/.env.backup-pre-frente-a-20260917-002811`; `jax-platform.service` reiniciado, `NRestarts=0`, journal limpio, variables vivas verificadas en `/proc/PID/environ`. Frontend: backup `/www/wwwroot/axioma-ia.io.backup-pre-frente-a-20260917-002830`, servido `index-ChCOZGPN.js`. **Rollback:** restaurar el backup del `.env` y `git checkout 26c9cd5` + reiniciar.
 
-**Incidente del deploy y la lección (2026-09-17):** `JAX_SEED_TENANT_NAME` se escribió sin comillas ("Inversiones Diamante Negro"). `systemd` (`EnvironmentFile=`) lo lee bien, pero `set -a; . /etc/jax/.env` (cualquier script que sourcea el `.env` en un shell) falla con `Diamante: command not found` — el archivo queda roto sin aviso para ese segundo lector. Corregido con comillas, backup `/etc/jax/.env.backup-pre-comillas-tenant-20260917-002841`, verificado que bash y `systemd-run -p EnvironmentFile` leen el mismo valor. **Regla nueva: todo valor con espacios en `/etc/jax/.env` va entre comillas y se verifica parseándolo con los DOS lectores (systemd y un shell que lo sourcea), no solo con el que se usó para escribirlo.** Misma familia que "un default a `$HOME` en un import hace que los tests escriban en producción" (`test_command_path_traversal`, arriba): un archivo de configuración compartido tiene más de un lector, y cada arreglo se verifica contra todos, no contra el que se tuvo a mano.
+**Incidente del deploy y la lección (2026-09-17):** `JAX_SEED_TENANT_NAME` se escribió sin comillas ("Inversiones Diamante Negro"). `systemd` (`EnvironmentFile=`) lo lee bien, pero `set -a; . <(sudo -n cat /etc/jax/.env)` (cualquier script que sourcea el `.env` en un shell) falla con `Diamante: command not found` — el archivo queda roto sin aviso para ese segundo lector. Corregido con comillas, backup `/etc/jax/.env.backup-pre-comillas-tenant-20260917-002841`, verificado que bash y `systemd-run -p EnvironmentFile` leen el mismo valor. **Regla nueva: todo valor con espacios en `/etc/jax/.env` va entre comillas y se verifica parseándolo con los DOS lectores (systemd y un shell que lo sourcea), no solo con el que se usó para escribirlo.** Misma familia que "un default a `$HOME` en un import hace que los tests escriban en producción" (`test_command_path_traversal`, arriba): un archivo de configuración compartido tiene más de un lector, y cada arreglo se verifica contra todos, no contra el que se tuvo a mano.
 
 **Pisos y canario:** vitest 448→504, con DB 1175→1334 (1 skip ambiental), sin DB 614→764 — medidos dos veces cada uno. Canario por API sobre el sha real: rojo en `e418c82` (`backend-tests-con-db` y `backend-tests-no-db`), revert verde en `e6e67f8`.
 
