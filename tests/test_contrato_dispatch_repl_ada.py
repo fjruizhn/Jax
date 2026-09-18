@@ -312,7 +312,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
                 patch.object(store, "event_append", evento), \
                 self.assertLogs("jacobs.plan", level="INFO") as logs:
-            specs = await b._from_objective("p", "x" * 250, 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"})})
+            specs = await b._from_objective("p", "x" * 250, 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"}), "arbitro_faceta": "thot"})
         self.assertEqual(specs[0]["facet"], "jekyll")
         qwen.assert_awaited_once()
         errores = [l for l in logs.output if l.startswith("ERROR")]
@@ -348,7 +348,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
                 patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
                 patch.object(store, "event_append", evento), \
                 self.assertLogs("jacobs.plan", level="ERROR") as logs:
-            await b._from_objective("p", "x" * 250, 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"})})
+            await b._from_objective("p", "x" * 250, 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"}), "arbitro_faceta": "thot"})
         self.assertTrue(any(l.startswith("ERROR") and "Ada HTTP 400" in l for l in logs.output), logs.output)
         self.assertIn("Ada HTTP 400", evento.await_args.args[2]["motivo"])
 
@@ -362,7 +362,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         evento = AsyncMock()
         with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
                 patch.object(store, "event_append", evento):
-            specs = await b._from_objective("p", "corto", 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"})})
+            specs = await b._from_objective("p", "corto", 3, {"capabilities": {}, "facets": frozenset({"ada", "thot", "jekyll"}), "arbitro_faceta": "thot"})
         self.assertEqual(specs[0]["prompt"], "fijo")
         _, tipo, payload = evento.await_args.args
         self.assertEqual((tipo, payload["de"], payload["a"]), ("PLAN_CEREBRO_FALLBACK", "qwen", "fallback_plan"))

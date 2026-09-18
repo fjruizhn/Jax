@@ -34,6 +34,8 @@ por build()).
 from __future__ import annotations
 
 import asyncio
+import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
@@ -267,3 +269,134 @@ def test_build_agrega_el_arbitro_por_el_camino_del_llm():
     steps = asyncio.run(correr())
     assert [s.facet for s in steps] == ["hipatia", "jekyll", "thot"]
     assert steps[-1].depends_on == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# Ronda de arreglo 1 (2026-09-18): el prompt modular de Ada (_PLAN_SYSTEM_MODULAR,
+# plan.py:~174) pedía un step FIJO thot/validate_consistency como antepenúltimo
+# de cualquier plan formal -- thot como PRODUCTOR a mitad de plan. Con el
+# árbitro de Task 4 activo, ese step choca con la sala limpia (thot no puede
+# producir Y ser el árbitro configurado del mismo plan): CUALQUIER plan modular
+# real de Ada se rechazaba siempre, no un caso raro -- es el camino principal
+# del patrón compilador. Verificado antes del arreglo simulando el step (dict
+# a mano) contra _con_arbitro -- insuficiente como test: no ejercitaba el
+# camino real (_ada_plan -> HTTP -> _parse_plan_json -> _from_spec -> build()),
+# que es exactamente lo que nadie corría. El test de acá sí lo ejercita.
+# ---------------------------------------------------------------------------
+
+def _governance_patron_modular():
+    entry = {"allowed_motors": [], "max_execution_minutes": 15}
+    return {
+        "capabilities": {"design": entry, "reconcile": entry, "assemble": entry,
+                          "critique": entry, "validate_consistency": entry},
+        "motors": {},
+        "facets": frozenset({"ada", "thot"}),
+        "arbitro_faceta": "thot",
+    }
+
+
+def _correr_ada_plan_real(monkeypatch, plan_json: str):
+    """Ejercita el camino real de Ada: _ada_plan arma el prompt, pega al HTTP
+    (mockeado), _parse_plan_json interpreta la respuesta, _from_spec/_con_arbitro
+    deciden, y build() aplica los gates -- nada de eso se hand-wirea."""
+    from jacobs import store
+    from jacobs import plan as plan_mod
+    from facet_resolver import ResolvedFacet
+
+    class _StreamResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield "data: " + json.dumps({"choices": [{"delta": {"content": plan_json}}]})
+            yield "data: [DONE]"
+
+        async def aread(self):
+            return b""
+
+    class _Cliente:
+        def stream(self, method, url, json=None, **kw):
+            @asynccontextmanager
+            async def _cm():
+                yield _StreamResp()
+            return _cm()
+
+    governance = _governance_patron_modular()
+
+    async def correr():
+        builder = plan_mod.PlanBuilder()
+        original_gov = store.get_motor_governance
+        store.get_motor_governance = AsyncMock(return_value=governance)
+        monkeypatch.setattr(plan_mod, "resolve_facet", AsyncMock(return_value=ResolvedFacet(
+            key="ada", provider_id="p", base_url="http://ada.test/v1", model="m",
+            credential="c", transport="http_openai_compat", persona=None, params=None)))
+        monkeypatch.setattr(plan_mod, "limite_de_salida", AsyncMock(return_value={"max_tokens": 100}))
+        monkeypatch.setattr(plan_mod, "obtener_cliente_http", lambda: _Cliente())
+        try:
+            # objective > 200 caracteres -> _classify_difficulty = "formal" -> Ada.
+            return await builder.build(
+                pipeline_id="p-ada-modular", objective="x" * 250, max_steps=6,
+            )
+        finally:
+            store.get_motor_governance = original_gov
+
+    return asyncio.run(correr())
+
+
+def test_un_plan_modular_de_ada_con_el_step_viejo_de_thot_se_autorrechaza(monkeypatch):
+    """Prueba de raíz: la FORMA que el prompt VIEJO exigía (thot/validate_consistency
+    a mitad de plan) se sigue rechazando -- la sala limpia no se ablandó, lo que
+    cambió es qué le pedimos a Ada que genere. Si este test alguna vez empezara a
+    pasar en verde sin querer, sería porque la sala limpia se rompió, no porque el
+    prompt mejoró."""
+    plan_json_viejo = json.dumps([
+        {"facet": "ada", "capability": "design", "prompt": "tipos comunes", "depends_on": []},
+        {"facet": "ada", "capability": "design", "prompt": "modulo x", "depends_on": [0]},
+        {"facet": "thot", "capability": "validate_consistency", "prompt": "valida",
+         "depends_on": [0, 1]},
+        {"facet": "ada", "capability": "reconcile", "prompt": "aplica parches",
+         "depends_on": [2]},
+        {"facet": "ada", "capability": "assemble", "prompt": "manifest",
+         "depends_on": [0, 1, 2, 3]},
+    ])
+    with pytest.raises(PlanRejected) as exc:
+        _correr_ada_plan_real(monkeypatch, plan_json_viejo)
+    assert "sala limpia" in str(exc.value).lower() or "arbitra" in str(exc.value).lower()
+
+
+def test_un_plan_modular_de_ada_con_el_prompt_actual_no_se_autorrechaza(monkeypatch):
+    """LA regresión de la ronda de arreglo 1: la forma que el prompt ACTUAL le
+    pide a Ada (sin thot/validate_consistency -- ver _PLAN_SYSTEM_MODULAR y el
+    prompt de _ada_plan) llega a build() por el camino real y NO se rechaza.
+    Antes de este arreglo, la única forma "realista" de un plan modular era la
+    del prompt viejo (con thot) -- y esa SIEMPRE se rechazaba (test de arriba).
+    """
+    plan_json_actual = json.dumps([
+        {"facet": "ada", "capability": "design", "prompt": "tipos comunes", "depends_on": []},
+        {"facet": "ada", "capability": "design", "prompt": "modulo x", "depends_on": [0]},
+        {"facet": "ada", "capability": "reconcile", "prompt": "revisa consistencia y aplica parches",
+         "depends_on": [0, 1]},
+        {"facet": "ada", "capability": "assemble", "prompt": "manifest", "depends_on": [0, 1, 2]},
+    ])
+    steps = _correr_ada_plan_real(monkeypatch, plan_json_actual)
+    assert [s.facet for s in steps] == ["ada", "ada", "ada", "ada", "thot"]
+    assert steps[-1].capability == PlanBuilder.CAPABILITY_ARBITRO
+    assert steps[-1].depends_on == [0, 1, 2, 3]
+    assert "thot" not in [s.facet for s in steps[:-1]], (
+        "el patrón modular de Ada no debe producir ningun step con facet 'thot' -- "
+        "ese facet lo reserva el árbitro"
+    )
+
+
+def test_el_prompt_modular_ya_no_pide_thot_como_productor():
+    """Asserción directa sobre el texto del prompt (no solo el comportamiento):
+    ni la regla del sistema ni el prompt de usuario de Ada deben mencionar a
+    'thot' como facet de un step, ni al antiguo step fijo de validación de
+    consistencia -- confirma que el texto es consistente consigo mismo después
+    de sacar ese paso (no quedó un '4. El ANTEPENÚLTIMO...' colgado, ni el
+    ejemplo JSON con {"facet":"thot",...})."""
+    from jacobs.plan import _PLAN_SYSTEM_MODULAR
+
+    assert '"facet":"thot"' not in _PLAN_SYSTEM_MODULAR.replace(" ", "")
+    assert "validate_consistency" not in _PLAN_SYSTEM_MODULAR
+    assert "ANTEPENÚLTIMO" not in _PLAN_SYSTEM_MODULAR
+    assert "PENÚLTIMO" in _PLAN_SYSTEM_MODULAR and "ÚLTIMO" in _PLAN_SYSTEM_MODULAR

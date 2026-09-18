@@ -156,10 +156,14 @@ _PLAN_SYSTEM = (
 _CLEANROOM_RULE = (
     "\nREGLA DE AUDITORÍA INDEPENDIENTE (clean-room): el step que audita, valida "
     "o critica el trabajo de otros steps DEBE usar un facet DISTINTO al de los "
-    "steps que revisa. Un facet no se audita a sí mismo. Si los módulos backend "
-    "y frontend fueron diseñados por 'ada' y 'kimi', su auditor debe ser 'thot' "
-    "(u otro facet que no sea ada ni kimi). La revisión independiente es la "
-    "garantía de calidad: quien produce no es quien aprueba.\n"
+    "steps que revisa, y NUNCA 'thot': ese facet está reservado para el árbitro "
+    "que Jacobs agrega solo al final del plan, después de este que estás generando "
+    "-- ve TODOS los steps, no solo los anteriores a él, así que hace mejor esa "
+    "auditoría que un step intermedio. Un facet no se audita a sí mismo. Si los "
+    "módulos backend y frontend fueron diseñados por 'ada' y 'kimi', un step que "
+    "los audite debe usar un facet que no sea ninguno de los dos (y que tampoco "
+    "sea 'thot'). La revisión independiente es la garantía de calidad: quien "
+    "produce no es quien aprueba.\n"
 )
 
 _PLAN_SYSTEM_MODULAR = (
@@ -171,19 +175,22 @@ _PLAN_SYSTEM_MODULAR = (
     "2. Luego los módulos en ORDEN DE DEPENDENCIA: cada módulo declara de qué steps anteriores "
     "depende (campo depends_on: lista de step_index). Un módulo va DESPUÉS de aquellos que necesita.\n"
     "3. Las piezas que referencian a todo (invariantes, validaciones globales) van AL FINAL.\n"
-    "4. El ANTEPENÚLTIMO step es 'validación de consistencia' (facet thot, capability "
-    "'validate_consistency'): revisa nombres huérfanos, tipos no definidos, referencias rotas. "
-    "Devuelve SOLO discrepancias con referencia al step y nombre.\n"
-    "5. El PENÚLTIMO step es 'reconciliación' (facet ada, capability 'reconcile'): recibe los "
-    "hallazgos del validador y los módulos afectados, y produce SOLO los PARCHES puntuales que "
-    "corrigen cada hallazgo (ej: agregar el método faltante a un módulo). NO reescribe los módulos "
-    "completos — solo los fragmentos a corregir, identificando módulo y ubicación.\n"
-    "6. El ÚLTIMO step es 'ensamble' (facet ada, capability 'assemble'): describe el manifest del "
+    "4. El PENÚLTIMO step es 'reconciliación' (facet ada, capability 'reconcile'): revisa los "
+    "módulos anteriores por consistencia (nombres huérfanos, tipos no definidos, referencias "
+    "rotas) y produce SOLO los PARCHES puntuales que las corrigen (ej: agregar el método "
+    "faltante a un módulo). NO reescribe los módulos completos — solo los fragmentos a "
+    "corregir, identificando módulo y ubicación.\n"
+    "5. El ÚLTIMO step es 'ensamble' (facet ada, capability 'assemble'): describe el manifest del "
     "paquete (orden de módulos, versiones, índice). El ensamble FÍSICO de los módulos lo hace el "
     "sistema mecánicamente; este step solo produce el manifest/índice, NO el documento completo.\n\n"
+    "Este plan NO incluye un step separado de 'validación de consistencia' ni usa el facet "
+    "'thot' en ningún step: Jacobs agrega SOLO, después de este plan, un árbitro final que "
+    "revisa consistencia sobre TODOS los steps (no solo los anteriores al de reconciliación) "
+    "y decide citando la fuente de cada punto. Un step de este plan que use 'thot' hace que "
+    "el plan entero se rechace (el árbitro no puede ser también un productor).\n\n"
     "Cada step: {\"facet\",\"capability\",\"prompt\",\"depends_on\":[indices]}.\n"
-    "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido. Diseño formal/tipos/"
-    "arquitectura: 'ada'. Validación/crítica: 'thot'.\n"
+    "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido, y nunca 'thot'. Diseño "
+    "formal/tipos/arquitectura, reconciliación y ensamble: 'ada'.\n"
     "- depends_on lista los step_index (0-based) de los steps cuyos OUTPUTS este step necesita.\n"
     "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
     "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
@@ -211,9 +218,26 @@ _MENU_DE_FACETAS: tuple[tuple[str, str, str, str], ...] = (
     ("hyde", "ejecutar cambios — requiere aprobación", "implementation", "Aplica U"),
 )
 
-# El patrón compilador de Ada (_PLAN_SYSTEM_MODULAR) exige estas facetas: sin
-# alguna activa, su plan se rechaza con certeza y no se gasta la llamada paga.
-_FACETAS_DEL_PATRON_MODULAR = ("thot", "ada")
+# El patrón compilador de Ada (_PLAN_SYSTEM_MODULAR) exige 'ada' -- sin ada
+# activa, su plan se rechaza con certeza y no se gasta la llamada paga.
+#
+# Ronda de arreglo 1 (2026-09-18, Task 4): ANTES esta tupla también traía
+# 'thot', porque el patrón le pedía a Ada un step fijo thot/validate_consistency
+# a mitad de plan. Se retiró (ver _PLAN_SYSTEM_MODULAR): con el árbitro
+# agregado por build(), ese step mid-plan hacía que Thot juzgara su propio
+# trabajo dos veces -- a mitad de plan Y al final -- y el plan se auto-
+# rechazaba siempre por sala limpia (verificado: cualquier plan modular real
+# de Ada tenía 100% de rechazo con el árbitro activo). El patrón YA NO
+# produce ningún step con facet 'thot'.
+#
+# Pero el plan que arma Ada sigue teniendo 2+ steps SIEMPRE, así que sigue
+# necesitando que la faceta árbitro CONFIGURADA (governance["arbitro_faceta"],
+# no hardcodeada -- hoy 'thot') esté activa: sin ella, _con_arbitro lo va a
+# rechazar más abajo de todas formas. Ese chequeo es dinámico y vive en
+# _ada_plan (necesita `governance`, no una tupla fija acá) -- no se agrega
+# 'thot' de nuevo a esta tupla para no reintroducir el hardcoding que el
+# Ruling 2 de Task 4 elimina en todos lados.
+_FACETAS_DEL_PATRON_MODULAR = ("ada",)
 
 
 def _facetas_del_cerebro(
@@ -775,6 +799,21 @@ class PlanBuilder:
         # URL fijos ni con un límite asumido.
         facetas_activas = _facetas_del_cerebro(facetas_activas, governance)
         faltan = [x for x in _FACETAS_DEL_PATRON_MODULAR if x not in facetas_activas]
+        # Ronda de arreglo 1 (Task 4): el patrón ya no produce un step 'thot'
+        # (ver _FACETAS_DEL_PATRON_MODULAR), pero el plan que arma SIEMPRE
+        # tiene 2+ steps, y _con_arbitro (Ruling 2) lo va a rechazar más abajo
+        # si la faceta árbitro CONFIGURADA no está activa. Chequearlo acá,
+        # ANTES de gastar la llamada paga, es el mismo criterio que 'ada' --
+        # solo que dinámico (gobernanza real), no una tupla fija, para no
+        # reintroducir "thot" hardcodeado. Sólo corre si `governance` llegó
+        # (el camino real, _from_objective, siempre la pasa; los tests que
+        # llaman _ada_plan suelto con solo `facetas_activas` se quedan sin
+        # este chequeo extra y dependen del rechazo de _con_arbitro más
+        # adelante, igual que antes de esta tarea).
+        if governance is not None:
+            arbitro_faceta = governance.get("arbitro_faceta")
+            if not arbitro_faceta or arbitro_faceta not in facetas_activas:
+                faltan = faltan + [arbitro_faceta or "arbitro_faceta (sin configurar)"]
         if faltan:
             motivo = (f"Ada: no se planifica, el patrón compilador exige facetas que no están "
                       f"activas en la tabla `facet`: {', '.join(faltan)}")
@@ -810,8 +849,12 @@ class PlanBuilder:
             f"Dado este objetivo formal: {objective}\n\n"
             f"Genera un plan de ejecución modular con MÁXIMO {max_steps} steps.\n"
             f"Seguí el patrón compilador OBLIGATORIO: common_types primero, módulos en orden "
-            f"de dependencia, validación de consistencia (thot/validate_consistency) como antepenúltimo step, "
-            f"reconciliación (ada/reconcile) como penúltimo, ensamble (ada/assemble) al final.\n"
+            f"de dependencia, reconciliación (ada/reconcile) como penúltimo step, ensamble "
+            f"(ada/assemble) al final. NO incluyas un step separado de validación de "
+            f"consistencia ni uses el facet 'thot' en ningún step: eso lo hace el árbitro que "
+            f"Jacobs agrega SOLO, después de este plan, viendo TODOS los steps (no solo los "
+            f"anteriores al de reconciliación) -- un step de este plan con facet 'thot' hace "
+            f"que el plan entero se rechace.\n"
             f"Cada step DEBE incluir el campo 'depends_on' con la lista de step_index "
             f"(0-based) de los que depende (lista vacía [] si no depende de ninguno).\n\n"
             f"Facetas disponibles: {menu}.\n\n"
@@ -825,15 +868,12 @@ class PlanBuilder:
             f'{{"facet":"ada","capability":"design",'
             f'"prompt":"Usando tipos (0) y capabilities (1), definí las invariantes.",'
             f'"depends_on":[0,1]}},'
-            f'{{"facet":"thot","capability":"validate_consistency",'
-            f'"prompt":"Validá consistencia: nombres huérfanos, tipos no definidos, referencias rotas entre steps 0-2. Devolvé SOLO discrepancias.",'
-            f'"depends_on":[0,1,2]}},'
             f'{{"facet":"ada","capability":"reconcile",'
-            f'"prompt":"Aplicá SOLO los parches puntuales para corregir las discrepancias del step 3. Identificá módulo y ubicación de cada corrección.",'
-            f'"depends_on":[3]}},'
+            f'"prompt":"Revisá los steps 0-2 por consistencia (nombres huérfanos, tipos no definidos, referencias rotas) y aplicá SOLO los parches puntuales que hagan falta.",'
+            f'"depends_on":[0,1,2]}},'
             f'{{"facet":"ada","capability":"assemble",'
             f'"prompt":"Generá el manifest del paquete: orden de módulos, versiones, índice. El ensamble físico lo hace el sistema.",'
-            f'"depends_on":[0,1,2,3,4]}}]\n\n'
+            f'"depends_on":[0,1,2,3]}}]\n\n'
             f"Responde SOLO con el array JSON."
         )
         messages = [
