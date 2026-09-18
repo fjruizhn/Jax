@@ -17,9 +17,15 @@ from decimal import Decimal
 
 import pytest
 
+# La guarda usa el helper canonico, no `endswith("_test")`: desde jax#207 cada
+# sesion corre contra su propia base `jax_memory_test_<sufijo>`, y el sufijo
+# hacia que esta guarda rechazara una base de test legitima. Una sola fuente de
+# verdad para "que es una base de test".
+from base_de_test import es_base_de_test  # noqa: E402
+
 _db = os.environ.get("JAX_DB_NAME", "")
-if not _db.endswith("_test"):
-    raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test solo corre contra una base *_test.")
+if not es_base_de_test(_db):
+    raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test solo corre contra una base de test.")
 
 from jacobs import facet_health as fh  # noqa: E402
 from jacobs import prevuelo_catalogo as pc  # noqa: E402
