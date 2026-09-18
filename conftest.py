@@ -175,6 +175,36 @@ def _ruta_heredada_del_freno_aislada(monkeypatch, tmp_path_factory):
         monkeypatch.setattr(modulo, "_heredada_avisada", False)
 
 
+#: Task 6 (2026-09-18, aviso por Telegram al terminar un pipeline): desde que
+#: `_correr_pipeline` (jacobs/executor.py) llama a
+#: `jacobs.aviso.avisar_fin_pipeline` en cada transición terminal
+#: (completed/aborted), CUALQUIER test que corra un pipeline hasta el final
+#: agenda un envío real vía `send_telegram_alert` (jacobs/reaper.py:82) --
+#: que sólo se abstiene si TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID no están
+#: seteadas en el proceso. Un dev shell que sourceó /etc/jax/.env de
+#: producción antes de invocar pytest SÍ las tiene seteadas (misma fuga que
+#: motivó la barrera de DB de este archivo, T1 2026-09-14) -- sin este freno,
+#: correr la suite local mandaría mensajes reales al chat de producción.
+#: Mismo criterio que `_aviso_pipeline_no_dispara_solo` en el conftest de
+#: jax-platform (Task 8 de esta misma ronda): no-op por defecto para TODA la
+#: suite; los tests de `jacobs/_aviso_test.py` que quieren el comportamiento
+#: real lo reponen con su propio `monkeypatch.setattr`, que corre DESPUÉS de
+#: este fixture (dentro del cuerpo del test) y gana.
+@pytest.fixture(autouse=True)
+def _telegram_no_manda_de_verdad(monkeypatch):
+    try:
+        import jacobs.reaper as _reaper
+    except ImportError:
+        # sin las_manos en sys.path jacobs.reaper no se puede importar --
+        # tampoco hay nada que pueda dispararlo desde este test
+        return
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        _reaper, "send_telegram_alert",
+        AsyncMock(return_value={"ok": False, "message_id": None, "error": "no-op de test (conftest raíz)"}),
+    )
+
+
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:
     """Los archivos de `directorio` (y sus subdirectorios, que es donde
     `cola_uso` manda los corruptos) con mtime igual o posterior a `desde`.

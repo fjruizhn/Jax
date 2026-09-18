@@ -20,6 +20,7 @@ from contrato_dispatch import limite_de_salida
 from model_catalog import record_resolved_version_safe
 
 from jacobs import store
+from jacobs import aviso
 from jacobs.store import espera_de_turno_sin_plazo  # R38: sobrevive a los tests que reemplazan `store`
 from jacobs.artifacts import read_artifact, save_if_large
 # Vive en jax/core (capa base, compartido con el HttpMuscle del REPL); llega a
@@ -1232,6 +1233,33 @@ async def _perdio_la_epoca(pipeline: Pipeline) -> None:
     })
 
 
+def _disparar_aviso_fin(pipeline: Pipeline, estado: PipelineStatus) -> None:
+    """Task 6 (2026-09-18): avisa por Telegram que el pipeline terminó.
+
+    Se llama SOLO desde los puntos donde `pipeline_update_status_si_epoca`
+    ya devolvió True para un status terminal (completed/aborted) -- esa
+    escritura es el mismo reclamo atómico condicional (WHERE pipeline_id=?
+    AND run_epoch=? AND status IN (...), store.py:1436) que el resto del
+    ejecutor usa para "una sola vez gana"; una corrida que perdió la época
+    nunca llega hasta acá (se va por `_perdio_la_epoca`). No hace falta una
+    tabla de deduplicación aparte -- ver jacobs/aviso.py.
+
+    `aviso.avisar_fin_pipeline` ya es fire-and-forget (no espera el POST a
+    Telegram) y fail-soft por dentro (nunca lanza). Este try/except es la
+    última barrera, solo contra un fallo agendando la tarea en sí -- para
+    que un pipeline YA completado/abortado (el status ya está escrito) jamás
+    vea ese status revertido ni la excepción propagarse hacia arriba."""
+    try:
+        aviso.avisar_fin_pipeline(
+            pipeline_id=pipeline.pipeline_id, nombre=pipeline.name, estado=estado.value,
+        )
+    except Exception:
+        logger.error(
+            "Pipeline %s: no se pudo agendar el aviso de Telegram de fin (status %s ya escrito)",
+            pipeline.pipeline_id, estado.value, exc_info=True,
+        )
+
+
 async def run_pipeline(pipeline: Pipeline) -> None:
     """Corre el pipeline (ver _correr_pipeline). Ruling R38, fix round 1: la
     corrida es un trabajo de fondo -- sus escrituras esperan turno del pool
@@ -1268,6 +1296,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
             await _perdio_la_epoca(pipeline)
             return
         await store.event_append(pipeline_id, "DRY_RUN_COMPLETE", {"steps": len(pipeline.plan)})
+        _disparar_aviso_fin(pipeline, PipelineStatus.completed)
         return
 
     if not await store.pipeline_update_status_si_epoca(
@@ -1312,6 +1341,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
             await store.event_append(
                 pipeline_id, "KILL_SWITCH_ABORTED", {"wave": wave_num, "steps": wave}
             )
+            _disparar_aviso_fin(pipeline, PipelineStatus.aborted)
             return
 
         # ---- Hyde gate: si algún step de la ola es hyde sin aprobar, interrumpir ----
@@ -1392,6 +1422,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
                 {"at_wave": wave_num, "failed_steps": failed,
                  "errores": {str(i): pipeline.plan[i].error for i in failed}},
             )
+            _disparar_aviso_fin(pipeline, PipelineStatus.aborted)
             return
 
         await store.event_append(
@@ -1419,6 +1450,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
         await _perdio_la_epoca(pipeline)
         return
     await store.event_append(pipeline_id, "PIPELINE_COMPLETED")
+    _disparar_aviso_fin(pipeline, PipelineStatus.completed)
 
 
 async def _persist_step_to_repo(
