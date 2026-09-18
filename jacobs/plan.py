@@ -498,6 +498,90 @@ async def _validate_plan_capabilities(steps: list, governance: dict | None = Non
 class PlanBuilder:
     """Construye un plan de steps desde un objetivo."""
 
+    # Task 4 (2026-09-18, informe "cinco hojas de ruta que no convergían"):
+    # el último step de todo plan de 2+ pasos es un ÁRBITRO -- recibe la
+    # salida de los demás y produce UNA decisión citando el paso que la
+    # sostiene. QUIÉN arbitra sale de axioma_config (governance["arbitro_faceta"],
+    # ver store.get_motor_governance) -- nunca hardcodeado acá, fail-closed si
+    # no hay faceta configurada o no está activa (_con_arbitro).
+    #
+    # QUÉ capability usa: a diferencia de la faceta, no hay una fuente de
+    # configuración para esto -- es una decisión de diseño de esta tarea, no
+    # un valor por ambiente. 'critique' es la capability REAL de la tabla
+    # `capability` (verificado contra la base de test 2026-09-18; el brief
+    # traía 'text_generation', que no existe -- mismo patrón de nombres
+    # inventados que la Task 1) y la que YA usa este módulo para el rol de
+    # juicio/crítica de un facet auditor: es el ejemplo de thot en
+    # _MENU_DE_FACETAS (línea ~208), la capability del auditor en
+    # _fallback_plan, y está en _AUDIT_CAPABILITIES (así que el árbitro
+    # también queda sujeto a _check_cleanroom si alguna vez dependiera de un
+    # step del mismo facet -- no puede pasar hoy, ver _con_arbitro).
+    CAPABILITY_ARBITRO = "critique"
+
+    PROMPT_ARBITRO = (
+        "Recibiste la salida de todos los pasos anteriores. Produci UNA "
+        "decision y UN plan. Cada punto del plan cita el paso que lo "
+        "sostiene, con el formato [paso N]. Lo que no tenga un paso que lo "
+        "respalde NO entra al plan: decilo como pendiente sin fuente, nunca "
+        "como conclusion."
+    )
+
+    @staticmethod
+    def _con_arbitro(
+        specs: list[dict], facetas_activas: frozenset, arbitro_faceta: str | None,
+    ) -> list[dict]:
+        """Sala limpia + disponibilidad, sobre la representación list[dict]
+        que _from_spec recibe de LOS DOS caminos (steps_spec explícito y los
+        specs que arma _from_objective, ya sea del LLM o de _fallback_plan --
+        ver el llamado dentro de _from_spec). Con eso alcanza: no hace falta
+        repetir esta lógica para Step, porque _from_spec construye el Step
+        del árbitro con el MISMO código que usa para cualquier otro step.
+
+        Orden de las tres reglas (en ese orden, a propósito):
+
+        1. Sala limpia primero, SIN IMPORTAR el largo del plan: si la faceta
+           árbitro ya aparece como productor, es un rechazo de diseño del
+           plan (quien produce no puede juzgar lo que produjo), no una
+           cuestión de si hace falta o no un árbitro. Un plan de 1 paso cuyo
+           único step ya es la faceta árbitro cae acá (test del brief).
+        2. Un solo paso: nada que arbitrar -- se devuelve tal cual, SIN
+           consultar disponibilidad (Ruling 2 no aplica si no hace falta
+           árbitro).
+        3. Disponibilidad (Ruling 2, fail-closed): con 2+ pasos y la sala
+           limpia en orden, el árbitro tiene que poder correr de verdad --
+           faceta configurada Y activa en la tabla `facet`. Si no, PlanRejected
+           con 'arbitro_no_disponible' en la razón (código propio, distinto
+           del genérico de _check_facets) -- nunca un plan sin árbitro."""
+        if arbitro_faceta and any(s.get("facet") == arbitro_faceta for s in specs):
+            step_index = next(i for i, s in enumerate(specs) if s.get("facet") == arbitro_faceta)
+            raise PlanRejected([PlanViolation(
+                step_index, arbitro_faceta, None, PlanBuilder.CAPABILITY_ARBITRO,
+                f"{arbitro_faceta} no puede producir y arbitrar el mismo plan: "
+                f"el árbitro juzga lo que otros produjeron (sala limpia).",
+            )])
+
+        if len(specs) < 2:
+            return specs
+
+        if not arbitro_faceta or arbitro_faceta not in facetas_activas:
+            motivo = (
+                f"la faceta árbitro '{arbitro_faceta}' no está activa en la tabla `facet`"
+                if arbitro_faceta else
+                "no hay faceta árbitro configurada (axioma_config.ejecutor.auditor_faceta)"
+            )
+            raise PlanRejected([PlanViolation(
+                len(specs), arbitro_faceta or "", None, PlanBuilder.CAPABILITY_ARBITRO,
+                f"arbitro_no_disponible: {motivo} -- un plan de 2+ pasos sin "
+                f"quien arbitre no se entrega.",
+            )])
+
+        return specs + [{
+            "facet": arbitro_faceta,
+            "capability": PlanBuilder.CAPABILITY_ARBITRO,
+            "prompt": PlanBuilder.PROMPT_ARBITRO,
+            "depends_on": list(range(len(specs))),
+        }]
+
     async def build(
         self,
         pipeline_id: str,
@@ -516,7 +600,15 @@ class PlanBuilder:
         governance = await _store.get_motor_governance()
         caps = governance["capabilities"]
         if steps_spec:
-            steps = self._from_spec(pipeline_id, steps_spec, caps)
+            # Task 4: el árbitro se agrega DENTRO de _from_spec (ver ahí) --
+            # es el único punto de conversión dict->Step que comparten los
+            # dos caminos, así que pasarle la gobernanza acá alcanza para
+            # este camino (steps_spec explícito).
+            steps = self._from_spec(
+                pipeline_id, steps_spec, caps,
+                facetas_activas=governance["facets"],
+                arbitro_faceta=governance.get("arbitro_faceta"),
+            )
         else:
             steps = await self._from_objective(pipeline_id, objective, max_steps, governance)
         # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
@@ -533,7 +625,26 @@ class PlanBuilder:
         await _validate_plan_capabilities(steps, governance)
         return steps
 
-    def _from_spec(self, pipeline_id: str, specs: list[dict], caps: dict) -> list[Step]:
+    def _from_spec(
+        self, pipeline_id: str, specs: list[dict], caps: dict, *,
+        facetas_activas: frozenset | None = None, arbitro_faceta: str | None = None,
+    ) -> list[Step]:
+        # Task 4 (2026-09-18, Ruling 1): acá conviven LOS DOS caminos --
+        # build() llama esto directo para steps_spec, y _from_objective()
+        # llama esto al final con los specs del LLM/Ada o de _fallback_plan.
+        # Enganchar _con_arbitro ACÁ, antes de convertir a Step, cubre los
+        # dos con una sola línea: ningún camino puede terminar sin árbitro
+        # coleándose por el otro.
+        #
+        # `facetas_activas is None` (no `arbitro_faceta is None`) es la señal
+        # de "sin gobernanza real" -- los tests de bajo nivel que llaman
+        # _from_spec directo (timeout por capability, encadenado por
+        # defecto) no la pasan y siguen sin árbitro, a propósito: no piden
+        # gobernanza, no la reciben. build()/_from_objective() SIEMPRE la
+        # pasan (aunque arbitro_faceta salga en None de una gobernanza real
+        # sin configurar -- ahí _con_arbitro rechaza fail-closed, Ruling 2).
+        if facetas_activas is not None:
+            specs = self._con_arbitro(specs, facetas_activas, arbitro_faceta)
         steps = []
         for i, spec in enumerate(specs):
             input_data = dict(spec.get("input", {}))
@@ -623,7 +734,11 @@ class PlanBuilder:
                 logger.warning("qwen falló planificando (%s), usando el plan de respaldo fijo", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "qwen", "fallback_plan", motivo)
                 specs = self._fallback_plan(objective)
-        return self._from_spec(pipeline_id, specs, governance["capabilities"])
+        return self._from_spec(
+            pipeline_id, specs, governance["capabilities"],
+            facetas_activas=governance["facets"],
+            arbitro_faceta=governance.get("arbitro_faceta"),
+        )
 
     @staticmethod
     async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint, governance):
@@ -938,6 +1053,16 @@ class PlanBuilder:
 
     @staticmethod
     def _fallback_plan(objective: str) -> list[dict]:
+        # Task 4 (2026-09-18): el 3er step ERA {"facet": "thot", "capability":
+        # "critique", ...} -- productor Y (desde esta tarea) árbitro
+        # configurado del mismo plan, sala-limpia (_con_arbitro) lo rechaza
+        # SIEMPRE, sin importar qué tan disponibles estén sus facetas: el
+        # último recurso quedaba auto-rechazado, exactamente cuando más hace
+        # falta que funcione. Se retira: _from_spec (vía _con_arbitro) agrega
+        # el árbitro solo, con el mismo facet/capability y un prompt que
+        # además exige citar el paso que sostiene cada punto -- el plan de
+        # respaldo termina igual (hipatia -> jekyll -> thot), por el camino
+        # unificado en vez de un tercer step fijo.
         return [
             {
                 "facet": "hipatia",
@@ -948,10 +1073,5 @@ class PlanBuilder:
                 "facet": "jekyll",
                 "capability": "analysis",
                 "prompt": "Analiza la investigación anterior desde una perspectiva humanista.",
-            },
-            {
-                "facet": "thot",
-                "capability": "critique",
-                "prompt": "Critica el análisis anterior. ¿Qué riesgos no se mencionaron?",
             },
         ]

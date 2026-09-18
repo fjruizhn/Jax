@@ -1772,13 +1772,21 @@ async def get_motor_governance() -> dict[str, dict]:
        max_recursion_depth, output_schema, fallback_motor, fallback_mode,
        forbidden_paths, auditor_motor}},
        "motors": {motor_key: has_tool_access (bool)},
-       "facets": frozenset de facet.key con status='active'}
+       "facets": frozenset de facet.key con status='active',
+       "arbitro_faceta": str | None -- quién arbitra el plan final (Task 4,
+       2026-09-18). Sale de axioma_config.config_key='ejecutor.auditor_faceta'
+       -- el MISMO config que ya lee jax/ejecutor/contratos/eleccion_c5.py
+       para elegir el auditor del Ejecutor de Contratos (verificado contra la
+       base de test: valor 'thot'). No se hardcodea acá -- PlanBuilder._con_arbitro
+       recibe este valor y rechaza el plan (fail-closed) si viene vacío/None
+       o si la faceta no está activa: un plan de 2+ pasos sin quien arbitre
+       es el defecto que esa tarea cierra, no un modo de operar.
 
     Costo medido en vivo (2026-08-21, DB real) con 3 SELECTs: 0.00024s de
     ejecución total en el servidor (motor: 4 filas, capability: ~17,
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
-    no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) se agregó
-    después y NO está medido.
+    no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) y el 5º
+    (axioma_config, 1 fila, Task 4) se agregaron después y NO están medidos.
 
     Ruling R38 (2026-09-17): por el pool del store, no por una conexión propia
     -- era la conexión por pedido que tiraba /jacobs/preflight a c=50. Sin
@@ -1838,7 +1846,24 @@ async def get_motor_governance() -> dict[str, dict]:
             # despachar. Catálogo de 7 filas: sin índice, declarado en DEUDA.md.
             await cur.execute("SELECT `key` FROM facet WHERE status = 'active'")
             facets = frozenset(key for (key,) in await cur.fetchall())
-    return {"capabilities": capabilities, "motors": motors, "facets": facets}
+
+            # Task 4 (2026-09-18): quién arbitra el plan final -- config, no
+            # hardcodeado. Vacío/NULL -> None, y PlanBuilder._con_arbitro lo
+            # trata igual que "no configurado" (rechazo fail-closed).
+            await cur.execute(
+                "SELECT config_value FROM axioma_config WHERE config_key = %s",
+                ("ejecutor.auditor_faceta",),
+            )
+            fila_arbitro = await cur.fetchone()
+            arbitro_faceta = (
+                fila_arbitro[0].strip()
+                if fila_arbitro and fila_arbitro[0] and fila_arbitro[0].strip()
+                else None
+            )
+    return {
+        "capabilities": capabilities, "motors": motors, "facets": facets,
+        "arbitro_faceta": arbitro_faceta,
+    }
 
 
 # ----------------------------------------------------------------

@@ -306,7 +306,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         b = self.plan.PlanBuilder()
         qwen = AsyncMock(return_value=[{"facet": "jekyll", "capability": "analysis", "prompt": "x"}])
         b._llm_plan = qwen
-        b._from_spec = lambda pipeline_id, specs, caps: specs
+        b._from_spec = lambda pipeline_id, specs, caps, **_: specs
         from jacobs import store
         evento = AsyncMock()
         with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \
@@ -341,7 +341,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
 
         b = self.plan.PlanBuilder()
         b._llm_plan = AsyncMock(return_value=[{"facet": "jekyll", "capability": "analysis", "prompt": "x"}])
-        b._from_spec = lambda pipeline_id, specs, caps: specs
+        b._from_spec = lambda pipeline_id, specs, caps, **_: specs
         from jacobs import store
         evento = AsyncMock()
         with patch.object(httpx.AsyncClient, "stream", stream_400), \
@@ -357,7 +357,7 @@ class AdaPlanDelBindingTest(unittest.IsolatedAsyncioTestCase):
         b = self.plan.PlanBuilder()
         b._llm_plan = AsyncMock(side_effect=self.plan.CerebroNoDisponible("qwen: sin contrato"))
         b._fallback_plan = lambda objective: [{"facet": "jekyll", "capability": "analysis", "prompt": "fijo"}]
-        b._from_spec = lambda pipeline_id, specs, caps: specs
+        b._from_spec = lambda pipeline_id, specs, caps, **_: specs
         from jacobs import store
         evento = AsyncMock()
         with patch.object(self.plan, "_build_capability_hint", lambda g: ""), \

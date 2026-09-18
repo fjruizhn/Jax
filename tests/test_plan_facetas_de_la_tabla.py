@@ -29,9 +29,17 @@ GOBERNANZA = {
     "capabilities": {
         "research": {"allowed_motors": [], "max_execution_minutes": 5},
         "analysis": {"allowed_motors": ["kimi"], "max_execution_minutes": 5},
+        # Task 4 (2026-09-18): capability real del árbitro (PlanBuilder.CAPABILITY_ARBITRO).
+        "critique": {"allowed_motors": [], "max_execution_minutes": 15},
     },
     "motors": {"kimi": True, "jax_local": True},
-    "facets": frozenset({"hipatia", "jekyll", "kimi", "jax_local"}),
+    # "thot" activo: sin él, todo plan de 2+ pasos de este archivo se
+    # rechazaría por arbitro_no_disponible (Ruling 2, Task 4) -- salvo en
+    # los tests que apagan "thot" a propósito para probar exactamente eso.
+    "facets": frozenset({"hipatia", "jekyll", "kimi", "jax_local", "thot"}),
+    # Mismo config real que store.get_motor_governance() lee de
+    # axioma_config.ejecutor.auditor_faceta (verificado: 'thot').
+    "arbitro_faceta": "thot",
 }
 
 
@@ -80,11 +88,15 @@ def test_build_rechaza_la_faceta_inventada_por_el_llm():
 
 
 def test_build_acepta_las_facetas_activas_de_la_tabla():
+    """Task 4: un plan de 2+ pasos termina en el árbitro (thot, activo y
+    configurado en GOBERNANZA) -- el 3er step no lo pidió el caller, lo
+    agrega build()."""
     steps = _build(steps_spec=[
         {"facet": "hipatia", "capability": "research", "prompt": "x"},
         {"facet": "jekyll", "capability": "research", "prompt": "y", "depends_on": [0]},
     ])
-    assert [s.facet for s in steps] == ["hipatia", "jekyll"]
+    assert [s.facet for s in steps] == ["hipatia", "jekyll", "thot"]
+    assert steps[-1].depends_on == [0, 1]
 
 
 def test_un_spec_sin_faceta_se_rechaza_en_vez_de_caer_a_jax_local():
@@ -239,11 +251,16 @@ def test_qwen_no_se_consulta_sin_ninguna_faceta_del_menu_activa(monkeypatch):
 
 
 def test_el_plan_de_respaldo_con_una_faceta_inactiva_se_rechaza_nombrandola(monkeypatch):
-    """El plan fijo (hipatia -> jekyll -> thot) no se reescribe: sin una de sus
-    facetas activa, build() lo rechaza con PlanRejected nombrando la que falta,
-    antes de persistir nada (422 en routes)."""
+    """El plan fijo (hipatia -> jekyll, Task 4: + thot como árbitro agregado
+    por build()) no se reescribe: sin thot activa, build() lo rechaza con
+    PlanRejected nombrandola -- antes por _check_facets (el 3er step fijo
+    del plan), ahora por _con_arbitro (arbitro_no_disponible, porque el 3er
+    step ya no es fijo: build() lo agrega y necesita que thot esté activa
+    para poder agregarlo). Mismo facet en la violación, antes de persistir
+    nada (422 en routes)."""
     _, _, _, correr = _correr_con_cerebros(
         monkeypatch, {"hipatia", "jekyll", "kimi", "jax_local"}, "algo trivial", "no es json")
     with pytest.raises(plan_mod.PlanRejected) as e:
         asyncio.run(correr())
     assert [v.facet for v in e.value.violations] == ["thot"]
+    assert "arbitro_no_disponible" in e.value.violations[0].reason
