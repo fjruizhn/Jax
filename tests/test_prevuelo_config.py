@@ -7,6 +7,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import os
+import pathlib
 
 os.environ["JAX_DB_NAME"] = "jax_memory_test"
 
@@ -71,14 +72,13 @@ def test_pool_max_invalido_lanza_con_el_nombre(monkeypatch):
         store.db_pool_max()
 
 
-def test_timeout_del_candado_de_activos_por_defecto_es_10(monkeypatch):
-    """F3 (ola final): JAX_PREVUELO_CANDADO_TIMEOUT_S acota el GET_LOCK que
-    serializa crear y continuar entre procesos."""
-    monkeypatch.delenv(pc.CANDADO_TIMEOUT_S, raising=False)
-    assert pc.candado_timeout_s() == 10
+def test_la_variable_del_candado_se_retiro_con_el_candado():
+    """2026-09-17: se fue el GET_LOCK del cupo, así que se fue su timeout. Una
+    variable de entorno que no lee nadie es peor que ninguna: el día que
+    alguien la ponga en /etc/jax/.env va a creer que cambió algo."""
+    assert not hasattr(pc, "candado_timeout_s")
+    assert not hasattr(pc, "CANDADO_TIMEOUT_S")
+    fuente = pathlib.Path(pc.__file__).read_text(encoding="utf-8")
+    assert "candado_timeout_s" not in fuente
 
 
-def test_timeout_del_candado_invalido_lanza_con_el_nombre(monkeypatch):
-    monkeypatch.setenv(pc.CANDADO_TIMEOUT_S, "0")
-    with pytest.raises(RuntimeError, match="JAX_PREVUELO_CANDADO_TIMEOUT_S"):
-        pc.candado_timeout_s()

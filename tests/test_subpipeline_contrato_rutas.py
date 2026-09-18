@@ -24,6 +24,7 @@ import time  # noqa: E402
 import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 
+from jacobs import cupo  # noqa: E402
 from jacobs import store  # noqa: E402
 from jacobs import subpipelines as sp  # noqa: E402
 
@@ -318,7 +319,7 @@ def test_fallo_de_creacion_tras_el_consumo_deja_evento_y_propaga_el_error():
         try:
             token = await ada.emitir(padre, paso)
             token_2 = await ada.emitir(padre, paso)
-            with patch.object(store, "pipeline_create",
+            with patch.object(cupo, "completar_reserva",
                               AsyncMock(side_effect=RuntimeError("fallo de escritura (arnés)"))), \
                  pytest.raises(HTTPException) as exc1:
                 await ada.pedir_hijo(token, padre)
@@ -333,7 +334,7 @@ def test_fallo_de_creacion_tras_el_consumo_deja_evento_y_propaga_el_error():
                 (padre,),
             )
             # El evento tampoco se puede escribir: el error que sube es el ORIGINAL.
-            with patch.object(store, "pipeline_create",
+            with patch.object(cupo, "completar_reserva",
                               AsyncMock(side_effect=RuntimeError("fallo de escritura (arnés)"))), \
                  patch.object(store, "event_append",
                               AsyncMock(side_effect=ConnectionError("base caída (arnés)"))), \
@@ -476,7 +477,7 @@ def test_cancelacion_tras_quemar_el_token_deja_evento_y_se_relanza():
                  pytest.raises(asyncio.CancelledError):
                 await ada.pedir_hijo(token_a, padre_a)
             token_b = await ada.emitir(padre_b, paso_b)
-            with patch.object(store, "pipeline_create",
+            with patch.object(cupo, "completar_reserva",
                               AsyncMock(side_effect=asyncio.CancelledError())), \
                  pytest.raises(asyncio.CancelledError):
                 await ada.pedir_hijo(token_b, padre_b)

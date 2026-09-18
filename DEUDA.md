@@ -476,6 +476,194 @@ haya un plan de voz de verdad.
 **Controles del retiro:** `tests/test_retiro_de_la_voz.py` (el paquete no está, el
 arranque no exige la variable, ningún módulo de servicio importa la voz). Los tres
 fallan contra `351ec95`.
+## Cerrado en código, merge y despliegue pendientes — UN solo mecanismo de cupo (2026-09-17)
+
+Rama `perf/candado-creacion-a-la-base`, con merge-forward a `origin/master` `b450248` (jax#209).
+**NO mergeada, NO desplegada.** Decisión de Fernando (arreglar de raíz antes del frente G) y del
+coordinador (queda un solo mecanismo, y es el INSERT condicionado).
+
+**LA REGLA, que reemplaza a dos candados: la condición del cupo viaja DENTRO de la escritura que lo
+consume.** Un candado hay que acordarse de pedirlo; una condición adentro del INSERT o del UPDATE
+se aplica sola aunque quien escriba un camino nuevo no sepa que hay un límite.
+
+**Lo que había.** Dos mecanismos para el mismo invariante: `jacobs/candado.py::candado_de_creacion`
+(un `asyncio.Lock` de proceso) y `store.candado_de_activos()` (un `GET_LOCK` del servidor MariaDB,
+jax#209, que existía porque el de proceso no cruzaba al CLI). Los dos hacían cumplir el límite y los
+dos serializaban: techo de ~43 delegaciones/s y la Mesa esperando detrás de Ada.
+
+**EL HALLAZGO que amplió el alcance.** `resume` y `approve-step` mueven un pipeline de
+`interrupted` —que NO cuenta como activo— a correr, **sin mirar el cupo**: ninguno de los dos
+candados los tomaba. Con tres interrumpidos y tres `resume` se pasaba el límite. No es de jax#209 ni
+de esta rama: es anterior. Un límite que dice que existe y no existe es peor que no tenerlo, porque
+alguien dimensionó GPU, pool y techos de costo creyendo que como mucho hay tres.
+**Verificado ROJO POR COMPORTAMIENTO contra `b450248`**, con un canario contra la base real: con el
+cupo LLENO, `pipeline_tomar_epoca` admitió el resume y devolvió época 1 (`1 is not None`).
+
+**Por qué no se podía mergear a medias.** Con crear usando el INSERT y continuar el GET_LOCK, los
+dos no se ven: continuar cuenta 2 bajo su candado, crear inserta contando 2 filas **commiteadas**,
+los dos commitean y quedan **4 activos con el límite en 3**. Dos mecanismos para un invariante es
+peor que cualquiera de los dos solo.
+
+**Cómo queda — los CUATRO caminos que ocupan cupo:**
+
+| camino | forma | dónde va la condición |
+|---|---|---|
+| crear | INSERT | `cupo.SQL_RESERVAR`, reserva ANTES de planificar |
+| continue | UPDATE | `store._SQL_PIPELINE_CONTINUAR`, JOIN con la derivada del recuento |
+| resume | UPDATE | `store.pipeline_tomar_epoca(cupo_maximo=...)` |
+| approve-step | UPDATE | ídem |
+
+La partición de `PipelineStatus` y la lista de estados viven **una sola vez**, en `jacobs/policy.py`,
+y de ahí salen las cuatro sentencias **y el recuento de `store`**. `interrupted` NO ocupa cupo:
+semántica heredada, declarada, no cambiada acá.
+
+**Verificado contra MariaDB 12.3** antes de escribir el código: 10, 25 y 50 reanimaciones
+concurrentes respetan el cupo exacto con las dos formas de UPDATE (subconsulta directa y JOIN con
+derivada; se eligió el JOIN por portabilidad, CI corre 11.8), y **50 creaciones CRUZADAS con 50
+reanimaciones** —la carrera que rompía tener dos mecanismos— también, con cero errores.
+
+**Deadlock: calibrado midiendo, no estimando.** El `INSERT`/`UPDATE` lee la tabla en la que escribe,
+así que dos escrituras simultáneas se traban (1213) — y esos candados son justo lo que las hace
+correctas. Se reintenta: 5 reintentos se agotaron 711 veces bajo carga; 12 dejaron 1 de cada
+~530.000; con la unión (el UPDATE que completa la reserva pelea por los mismos candados de rango),
+12 dejaron 23 de ~250.000. **Con 24 y espera creciente hasta 100 ms: cero.** Agotarlos levanta el
+error, nunca devuelve "reservado" sin fila.
+
+**Retirados con el candado:** `jacobs/candado.py`, `store.candado_de_activos`, `CandadoNoDisponible`,
+`JAX_PREVUELO_CANDADO_TIMEOUT_S` + `candado_timeout_s()` (una variable que no lee nadie es una
+trampa) y `tests/test_jacobs_candado_activos_db.py`. **Crear dejó de necesitar una conexión
+DEDICADA** y sale de la lista de excepciones al pool: era la única que estaba ahí por ESPERAR.
+
+**EXPLAIN de las sentencias REALES.** El COUNT del cupo va por `idx_pipelines_status` (ya existía:
+sin migración). El UPDATE de continuar: la fila del pipeline por `PRIMARY`, el COUNT por
+`idx_pipelines_status`, y la tabla derivada materializada con una fila. Sin `filesort` ni scans.
+
+**Carga (2026-09-17, hall9000, k6 v2.2.0, instancias AISLADAS sobre `jax_memory_test`).** Antes =
+`b450248`; después = la rama sobre ese mismo árbol. Mismo arnés, mismos offsets de token, 5 s de
+rampa + 20 s sostenidos + 5 s de bajada, pool 10, **cupo efectivo 2 de 3** en las dos columnas (el
+padre `running` que el arnés necesita ocupa un lugar; el pre-vuelo del arnés lo exige y aborta si
+hay más — abortó dos veces de verdad, por filas vivas que dejaron las suites de base).
+
+`JAX_CARGA_PLAN_MS=300` (planificador representado; el real tarda 1,3-8,7 s) — **la tabla que
+prueba la tesis**:
+
+| escenario | VUs | rps antes | p95 antes | rps después | p95 después |
+|---|---|---|---|---|---|
+| Mesa | 10 | 3,3 | 3.071,67 ms | **3.708,3** | **2,24 ms** |
+| Mesa | 25 | 3,3 | 7.667,85 ms | **4.083,9** | **6,25 ms** |
+| Ada (hijo con token real) | 10 | 3,2 | 3.083,17 ms | **3.778,7** | **2,07 ms** |
+| Ada | 25 | 3,3 | 7.693,00 ms | **4.073,6** | **6,01 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 1,0 | 4.614,49 ms | **1.299,5** | **3,67 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | **0,5** | **9.233,50 ms** | **1.146,1** | **7,61 ms** |
+
+`JAX_CARGA_PLAN_MS=0` (plan instantáneo):
+
+| escenario | VUs | rps antes | p95 antes | rps después | p95 después |
+|---|---|---|---|---|---|
+| Mesa | 10 | 330,3 | 42,01 ms | **1.199,6** | **22,62 ms** |
+| Mesa | 25 | 311,4 | 97,20 ms | **1.375,8** | **43,66 ms** |
+| Ada | 10 | 213,7 | 56,78 ms | **1.461,1** | **20,69 ms** |
+| Ada | 25 | 160,1 | 324,78 ms | **2.642,1** | **21,88 ms** |
+| **Mesa (5 VUs) con Ada a 10** | 5 | 104,5 | 64,11 ms | **837,9** | **15,66 ms** |
+| **Mesa (5 VUs) con Ada a 25** | 5 | 56,2 | 140,04 ms | **564,6** | **19,64 ms** |
+
+**El techo del candado se ve desnudo: 3,3 rps = exactamente 1/0,300 s.** Toda la creación, la de la
+Mesa y la de Ada, pasaba por un solo planificador a la vez.
+
+**¿La Mesa dejó de esperar detrás de Ada? SÍ.** Con el planificador representado y Ada delegando a
+25 VUs: de **0,5 rps y p95 9,23 s** a **1.146,1 rps y p95 7,61 ms**.
+
+**Degradación.** Antes, con el planificador representado, la Mesa no aguanta ni c=5 (p95 4,6 s
+detrás de Ada). Después no se degrada en el rango medido: p95 2,24 → 6,25 ms de c=10 a c=25, muy por
+debajo del umbral de 500 ms del arnés.
+
+**Errores: CERO 500 en las cuatro corridas.** Con el plan instantáneo salieron **21 respuestas 503
+`contencion_al_reservar` de ~250.000** (0,008 %): es el comportamiento nuevo funcionando — la
+contención se contesta "volvé a intentar" con `Retry-After`, en vez de un 500 que manda a buscar un
+defecto que no existe. Ninguna esperó más de 1 s (14-16 intentos, 0,90-1,00 s: el presupuesto
+declarado haciéndose cumplir). Con el planificador representado, cero de todo. **Caduca** si cambia el esquema, el
+volumen de datos, `MAX_PARALLEL_PIPELINES` o la infraestructura.
+
+**Revisión del autor del mecanismo retirado (2026-09-17) — los cinco puntos:**
+
+1. **El cupo se mira ANTES del pre-vuelo.** El pre-vuelo SONDEA facetas: es una llamada PAGA. Con el
+   cupo revisado después, un `resume` rechazado por falta de lugar ya había gastado dinero.
+   `routes._cupo_o_429()` es una compuerta barata antes de cualquier cosa que salga a la red; **no
+   decide** (eso sigue en la condición del UPDATE), sólo ahorra el gasto. El orden está fijado por
+   test: por posición en el código **y** por comportamiento (con el cupo lleno el pre-vuelo no se
+   llama).
+2. **La fila visible antes de planificar: averiguado, no supuesto.** Nace `pending`, con `plan='[]'`
+   y `owner_ack_at` NULL. La consulta que lista los pipelines de la Mesa
+   (`jax-platform ... SQL_PIPELINES_DEL_USUARIO`) filtra por `owner_ack_at IS NOT NULL`, y esa marca
+   la escribe jax-platform **después** de que Jacobs responde: **no hay pipeline fantasma en la lista
+   de nadie** durante la planificación (un hijo de Ada ni siquiera tiene dueño). Si el proceso muere
+   ahí, la cosecha el reaper a los **300 s** — mismo mecanismo y mismo número que antes; lo que crece
+   es la ventana (de milisegundos a los segundos que tarda planificar), no el plazo. **Declarado, no
+   arreglado**: bajar los 300 s arriesgaría cosechar pendientes legítimos.
+3. **La contención ya no es un 500.** Sale **503 `contencion_al_reservar`** con `Retry-After: 1` — no
+   el 422 del cupo, que diría que el pedido es inválido, y no lo es. **Techo real de espera, medido:**
+   sin presupuesto, 24 intentos con espera hasta 100 ms dan **2,06 s** en el camino del usuario; se
+   declara `PRESUPUESTO_DE_ESPERA_SEGUNDOS = 1,0` y se hace cumplir (en la carga cortó a los 14-16
+   intentos con 0,90-1,00 s). El cálculo está fijado por test. La traducción del código en la Mesa va
+   en jax-platform, rama `feat/contencion-al-reservar` (es.js y en.js, más la lista de códigos de
+   `errores.test.js`, que exige texto en los dos idiomas).
+4. **Las CUATRO sentencias tienen test con base real**, y tres de los cuatro en el MISMO job:
+   | sentencia | test | job |
+   |---|---|---|
+   | INSERT de la reserva (crear) | `jacobs/_cupo_io_test.py::CupoEnLaBaseTest` (25 y 50 corrutinas, EXPLAIN de la sentencia real, soltar, completar, fail-closed) y `::CreacionConcurrenteSinCandadoTest` (la ruta completa) | `subpipeline-contrato-db` |
+   | UPDATE que revive (continue) | `jacobs/_cupo_io_test.py::ContinuarRespetaElCupoTest` (rechaza con el cupo lleno, admite con lugar) | `subpipeline-contrato-db` |
+   | UPDATE de la época (resume y approve-step: **la misma sentencia**) | `jacobs/_cupo_io_test.py::ReanudarRespetaElCupoTest` (el hallazgo, rojo por comportamiento contra `b450248`) | `subpipeline-contrato-db` |
+   | recuento del cupo | las de arriba (`cupo.activos()` en cada `asyncSetUp`) + `tests/test_jacobs_continuar_db.py` (EXPLAIN con el JOIN, y 0 filas → `CupoAgotado`) | `subpipeline-contrato-db` y `jacobs-gobernanza-db` |
+   Que `resume` y `approve-step` usen esa sentencia lo fija `tests/test_cupo_en_todos_los_caminos.py`
+   (puro): los dos endpoints pasan `cupo_maximo` y traducen `CupoAgotado`.
+5. **`run_epoch` NO cambió de dueño**: anotado en `jacobs/store.py`, sobre las sentencias de época. El
+   cupo les agregó una condición; quién incrementa la época, cuándo y con qué CAS sigue siendo
+   continuar, resume y approve-step.
+
+**Pisos de CI (MEDICIONES LOCALES; manda el runner):** `tests-puros` 2020 → **2049**;
+`subpipeline-contrato-db` 121 → **135**; `jacobs-gobernanza-db` 94 → **87** (BAJA porque se retira el
+test del GET_LOCK junto con el GET_LOCK; bajar un piso sólo se justifica cuando se retira
+funcionalidad y se dice). Detector P10 en cero violaciones.
+
+**El rojo de CI del 2026-09-17 y su diagnóstico (no era ni el cupo ni la versión).**
+`CreacionConcurrenteSinCandadoTest::test_diez_creaciones_a_la_vez_admiten_exactamente_el_cupo` falló
+en el runner con `AssertionError: 0 != 3` — admitió cero — y en local daba 3.
+
+- **Descartado que sea de versión, con evidencia.** MariaDB 11.8 efímero en Docker (la del runner;
+  producción corre 12.3.3): las dos formas de UPDATE condicionado y la carrera de 50 creaciones
+  cruzadas con 50 reanimaciones dan el cupo EXACTO con cero errores, **igual en 11.8 que en 12.3**.
+  Y el job entero (135 passed) pasa en esa 11.8 recién creada. La diferencia de optimizador que otra
+  sesión midió ese día (el `GROUP BY` de una derivada ordena en 11.8 y no en 12.3) **no afecta a
+  estas sentencias**: no dependen del orden, sólo del `COUNT`.
+- **Descartado que el cupo estuviera tomado.** La precondición de la clase ya exigía
+  `cupo.activos() == 0`; el error vino de la medición, así que la base arrancó limpia.
+- **La causa real: el test medía la gobernanza, no el cupo.** `create_pipeline` corre el pre-vuelo
+  (jax#209), que lee `facet`, `model`, `capability` y `credential` — tablas de las migraciones de
+  **jax-platform**, no de `store.init_tables()`. Sin sustituirlo, las diez creaciones morían con 503
+  `prevuelo_no_disponible`. En la `jax_memory_test` compartida de hall9000 esas tablas existen porque
+  las sembró otro job: **el verde local dependía de un estado que el test no fijaba.**
+- **Arreglo:** se sustituye el pre-vuelo (este test mide el cupo; el pre-vuelo tiene sus tests), las
+  aserciones van en orden de diagnóstico (primero "todo rechazo es el 422 del cupo", después las
+  cuentas) y la precondición aborta ruidosamente **con el censo de la tabla**
+  (`SELECT status, COUNT(*) ... GROUP BY status`) en el mensaje, en las tres clases. Validado por
+  mutación: sin el sustituto nombra la tabla que falta; con el cupo desactivado cae `10 != 3`; con
+  tres `running` ajenos aborta con `3 != 0 ... [censo: completed=81, running=3]`.
+
+- **PENDIENTE con fecha:**
+  - [ ] **2026-09-17** Orden de merge contra el frente G: agrega `queued`, `awaiting_approval` y
+        `waiting_children`. **Decidir cuáles ocupan cupo** y clasificarlos en
+        `policy.ESTADOS_QUE_OCUPAN_CUPO` / `ESTADOS_SIN_CUPO`. Ya no se puede olvidar en silencio:
+        la partición es exhaustiva y hay controles que se ponen rojos solos (validado por mutación
+        con `queued`), más uno contra la tabla real. Decisión de Fernando.
+  - [ ] **2026-09-17** El CI corre MariaDB **11.8** y producción **12.3.3**. En este trabajo se
+        comprobó que para las sentencias del cupo las dos versiones coinciden, pero ese mismo día
+        otra sesión midió una diferencia REAL de optimizador entre ellas (el `GROUP BY` de una
+        derivada ordena en 11.8 y no en 12.3). Decidir si el CI se sube a 12.3: es una decisión de
+        infraestructura, no un parche de SQL.
+  - [ ] **2026-09-17** Las suites de base dejan pipelines VIVOS en `jax_memory_test`
+        (`arnes-ada-padre`, `secreto de B`, `causa running`): ocupan cupo y hacen abortar cualquier
+        medición posterior. El pre-vuelo del arnés los detecta, pero la limpieza es a mano. Cerrarlos
+        en el `addAsyncCleanup` de cada suite.
 
 ## Cerrado en código, merge y despliegue pendientes — human gate de LAS MANOS sin emisión HTTP (2026-09-17)
 

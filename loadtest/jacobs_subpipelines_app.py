@@ -24,11 +24,28 @@ if not es_base_de_test(os.environ.get("JAX_DB_NAME")):
         "tokens y eventos."
     )
 
+import asyncio  # noqa: E402
+
 from fastapi import FastAPI  # noqa: E402
 
 from jacobs import _arnes_ada, routes, store  # noqa: E402
 
-routes._build_plan_or_reject = _arnes_ada.plan_de_un_paso
+# JAX_CARGA_PLAN_MS (2026-09-17, medición del candado de creación): el
+# planificador REAL tarda 1,3-8,7 s en el camino sano y hasta 20-40 s con el
+# LLM cargado. Con el plan instantáneo del arnés, la sección crítica del
+# candado viejo duraba microsegundos y el cuello quedaba SUBESTIMADO: lo que
+# ponía a la Mesa a esperar detrás de Ada era justamente planificar adentro del
+# candado. Este retardo lo representa. En 0 (el defecto) se comporta como antes.
+_PLAN_MS = float(os.environ.get("JAX_CARGA_PLAN_MS", "0"))
+
+
+async def _plan_con_retardo(pipeline_id, objective, max_steps, steps_spec):
+    if _PLAN_MS:
+        await asyncio.sleep(_PLAN_MS / 1000.0)
+    return await _arnes_ada.plan_de_un_paso(pipeline_id, objective, max_steps, steps_spec)
+
+
+routes._build_plan_or_reject = _plan_con_retardo
 
 app = FastAPI(title="carga-contrato-subpipelines")
 app.include_router(routes.router)

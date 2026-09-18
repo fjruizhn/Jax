@@ -53,9 +53,19 @@ def _parches(pila, veredicto=None, prevuelo=None, build=None):
     m["prevuelo"] = pila.enter_context(patch.object(
         routes, "prevuelo", prevuelo or AsyncMock(return_value=veredicto or _veredicto()), create=True))
     pila.enter_context(patch.object(policy, "check_kill_switch", return_value=False))
-    m["candado"] = CandadoFalso()
-    pila.enter_context(patch.object(routes.store, "candado_de_activos", m["candado"], create=True))
-    m["transaccion"] = TransaccionFalsa(m["candado"].orden)
+    # 2026-09-17: ya no hay candado. La reserva del cupo es un INSERT
+    # condicionado y la conexión de la transacción sale del pool.
+    m["conexion"] = ConexionFalsa()
+    pila.enter_context(patch.object(routes.store, "conexion_del_pool", m["conexion"], create=True))
+    m["reservar"] = pila.enter_context(
+        patch.object(routes.cupo, "reservar_cupo", AsyncMock(return_value=True)))
+    m["completar"] = pila.enter_context(
+        patch.object(routes.cupo, "completar_reserva", AsyncMock(return_value=None)))
+    m["soltar"] = pila.enter_context(
+        patch.object(routes.cupo, "soltar_reserva", AsyncMock(return_value=1)))
+    m["activos"] = pila.enter_context(
+        patch.object(routes.cupo, "activos", AsyncMock(return_value=3)))
+    m["transaccion"] = TransaccionFalsa(m["conexion"].orden)
     pila.enter_context(patch.object(routes.store, "transaccion", m["transaccion"], create=True))
     return m
 
@@ -87,6 +97,30 @@ class TransaccionFalsa:
         else:
             self.descartadas += 1
             self.orden.append("descartada")
+        return False
+
+
+class ConexionFalsa:
+    """Doble de `store.conexion_del_pool` (2026-09-17, sin candado): registra
+    entradas y salidas y, con `falla`, se niega como un pool sin huecos."""
+
+    def __init__(self, falla: Exception | None = None, orden: list | None = None):
+        self.falla, self.orden = falla, orden if orden is not None else []
+        self.entradas = self.salidas = 0
+
+    def __call__(self, *a, **k):
+        return self
+
+    async def __aenter__(self):
+        if self.falla is not None:
+            raise self.falla
+        self.entradas += 1
+        self.orden.append("conexion")
+        return "conexion-del-pool"
+
+    async def __aexit__(self, *exc):
+        self.salidas += 1
+        self.orden.append("soltar")
         return False
 
 
@@ -235,7 +269,7 @@ def test_crear_con_prevuelo_rechazado_da_422_sin_crear_y_deja_evento():
         m = _parches(pila, veredicto=_veredicto(ok=False))
         with pytest.raises(HTTPException) as e:
             asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
-        m["pipeline_create"].assert_not_awaited()
+        m["completar"].assert_not_awaited()
         tipos = [c.args[1] for c in m["event_append"].await_args_list]
     assert e.value.status_code == 422
     assert e.value.detail["code"] == "prevuelo_rechazado"
@@ -286,7 +320,7 @@ def test_crear_con_costo_mayor_al_aceptado_da_409_sin_crear():
         with pytest.raises(HTTPException) as e:
             asyncio.run(routes.create_pipeline(
                 _crear(costo_max_aceptado_usd=Decimal("0.40")), BackgroundTasks()))
-        m["pipeline_create"].assert_not_awaited()
+        m["completar"].assert_not_awaited()
     assert e.value.status_code == 409
     assert e.value.detail["code"] == "costo_supera_lo_aceptado"
     assert e.value.detail["costo_max_usd"] == "0.500000"
@@ -301,7 +335,7 @@ def test_crear_permite_cuando_el_costo_es_igual_al_aceptado():
         m = _parches(pila, veredicto=_veredicto(usd="0.500000"))
         r = asyncio.run(routes.create_pipeline(
             _crear(costo_max_aceptado_usd=Decimal("0.5")), BackgroundTasks()))
-    m["pipeline_create"].assert_awaited_once()
+    m["completar"].assert_awaited_once()
     assert r["costo_max_usd"] == "0.500000"
 
 
@@ -350,7 +384,7 @@ def test_el_prevuelo_corre_despues_de_build_y_antes_de_crear():
 
     with ExitStack() as pila:
         m = _parches(pila, build=AsyncMock(side_effect=build), prevuelo=AsyncMock(side_effect=prevuelo))
-        m["pipeline_create"].side_effect = lambda p, **kw: orden.append("crear")
+        m["completar"].side_effect = lambda p, **kw: orden.append("crear")
         asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
     assert orden == ["build", "prevuelo", "crear"]
 
@@ -360,7 +394,7 @@ def test_crear_con_la_base_caida_da_503_sin_crear():
         m = _parches(pila, prevuelo=AsyncMock(side_effect=OSError("base caída")))
         with pytest.raises(HTTPException) as e:
             asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
-        m["pipeline_create"].assert_not_awaited()
+        m["completar"].assert_not_awaited()
     assert e.value.status_code == 503
 
 
@@ -375,42 +409,72 @@ def test_costo_max_aceptado_negativo_es_invalido():
 # procesos (el CLI de continuar corre en otro). El asyncio.Lock no alcanza.
 # ---------------------------------------------------------------------------
 
-def test_crear_recuenta_bajo_el_candado_y_respeta_el_cupo_que_otro_proceso_lleno():
+def test_el_cupo_lleno_lo_rechaza_la_reserva_y_no_se_planifica():
+    """2026-09-17: el cupo lo decide la RESERVA, que cuenta e inserta en la
+    misma sentencia. Con el cupo lleno devuelve False, y la creación se corta
+    ANTES de planificar y sondear -- no se gasta un LLM para un 422."""
     with ExitStack() as pila:
         m = _parches(pila)
-        # 0 al validar temprano; al recontar bajo el candado otro proceso ya llenó el cupo.
-        m["pipeline_count_active"].side_effect = [0, policy.MAX_PARALLEL_PIPELINES]
+        m["reservar"].return_value = False
         with pytest.raises(HTTPException) as e:
             asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
-        m["pipeline_create"].assert_not_awaited()
-        assert m["pipeline_count_active"].await_args.kwargs == {"conexion": "conexion-del-candado"}
-        assert (m["candado"].entradas, m["candado"].salidas) == (1, 1)
+        m["completar"].assert_not_awaited()
+        m["build"].assert_not_awaited()
+        m["soltar"].assert_not_awaited()   # no hay reserva que soltar
     assert e.value.status_code == 422
     assert "Límite duro" in e.value.detail
 
 
-def test_crear_escribe_dentro_del_candado():
+def test_crear_reserva_antes_de_planificar_y_completa_en_la_transaccion():
     orden = []
     with ExitStack() as pila:
         m = _parches(pila)
-        m["candado"].orden = orden
-        m["pipeline_count_active"].side_effect = lambda **kw: orden.append("contar") or 0
-        m["pipeline_create"].side_effect = lambda p, **kw: orden.append("crear")
+        m["conexion"].orden = orden
+        m["reservar"].side_effect = lambda p, **kw: orden.append("reservar") or True
+        m["build"].side_effect = lambda **kw: orden.append("build") or _pasos()
+        m["completar"].side_effect = lambda p, **kw: orden.append("completar")
         m["event_append"].side_effect = lambda *a, **kw: orden.append(a[1])
         asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
-    assert orden == ["contar", "candado", "contar", "crear", "PIPELINE_CREATED", "soltar"]
+    # Sin "contar" al principio: crear ya no hace un recuento suelto -- la
+    # reserva cuenta y escribe en la misma sentencia, y es la que decide.
+    assert orden == ["reservar", "build", "conexion", "completar",
+                     "PIPELINE_CREATED", "soltar"]
 
 
-def test_crear_sin_candado_falla_cerrado_con_503():
-    from jacobs import store
+def test_si_la_escritura_falla_se_suelta_la_reserva_y_da_503():
+    """La reserva ocupa cupo desde antes de planificar: si la transacción no
+    llega a confirmar, hay que devolver el lugar o el cupo queda comido por un
+    pipeline que nunca existió."""
+    with ExitStack() as pila:
+        m = _parches(pila)
+        m["completar"].side_effect = OSError("base caída a mitad")
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
+        m["soltar"].assert_awaited_once()
+    assert e.value.status_code == 503
+    assert e.value.detail["code"] == "prevuelo_no_disponible"
+
+
+def test_un_commit_incierto_no_suelta_la_reserva():
+    """R41 con reserva: si el COMMIT salió y la respuesta no llegó, la fila
+    PUEDE ser un pipeline completo. Soltarla borraría un pipeline real."""
+    class TxIncierta(TransaccionFalsa):
+        def __call__(self, conexion, estado=None):
+            self.estado = estado
+            return self
+
+        async def __aenter__(self):
+            return "tx"
+
+        async def __aexit__(self, *exc):
+            self.estado.enviando_commit = True
+            raise OSError("se cortó confirmando")
 
     with ExitStack() as pila:
         m = _parches(pila)
-        falso = CandadoFalso(falla=store.CandadoNoDisponible("GET_LOCK venció a los 10 s"))
-        pila.enter_context(patch.object(routes.store, "candado_de_activos", falso))
+        pila.enter_context(patch.object(routes.store, "transaccion", TxIncierta([])))
         with pytest.raises(HTTPException) as e:
             asyncio.run(routes.create_pipeline(_crear(), BackgroundTasks()))
-        m["pipeline_create"].assert_not_awaited()
+        m["soltar"].assert_not_awaited()
     assert e.value.status_code == 503
-    assert e.value.detail["code"] == "prevuelo_no_disponible"
-    assert "GET_LOCK" in e.value.detail["motivo"]
+    assert "puede existir" in e.value.detail["detalle"]

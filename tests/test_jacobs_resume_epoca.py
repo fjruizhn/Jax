@@ -14,6 +14,7 @@ os.environ["JAX_DB_NAME"] = "jax_memory_test"
 import pytest  # noqa: E402
 from fastapi import BackgroundTasks, HTTPException  # noqa: E402
 
+from jacobs.policy import MAX_PARALLEL_PIPELINES
 from jacobs import routes  # noqa: E402
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus  # noqa: E402
 
@@ -30,21 +31,24 @@ def _paso_hyde():
 
 def test_resume_toma_la_epoca_y_lanza_con_ella():
     tomar, bg = AsyncMock(return_value=4), BackgroundTasks()
-    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido())), \
+    with patch.object(routes.cupo, "activos", AsyncMock(return_value=0)), \
+         patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido())), \
          patch.object(routes.store, "steps_by_pipeline", AsyncMock(return_value=[])), \
          patch.object(routes.store, "pipeline_tomar_epoca", tomar, create=True), \
          patch.object(routes.store, "event_append", AsyncMock()), \
          patch.object(routes, "check_kill_switch", return_value=False):
         r = asyncio.run(routes.resume_pipeline(
             "p1", routes.ResumeRequest(invoked_by="plataforma"), bg))
-    tomar.assert_awaited_once_with("p1", 3, (PipelineStatus.interrupted,))
+    tomar.assert_awaited_once_with("p1", 3, (PipelineStatus.interrupted,),
+                                   cupo_maximo=MAX_PARALLEL_PIPELINES)
     assert r["run_epoch"] == 4
     assert bg.tasks[0].args[0].run_epoch == 4
 
 
 def test_resume_doble_el_segundo_recibe_409_y_no_lanza():
     bg, upsert = BackgroundTasks(), AsyncMock()
-    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido())), \
+    with patch.object(routes.cupo, "activos", AsyncMock(return_value=0)), \
+         patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido())), \
          patch.object(routes.store, "steps_by_pipeline", AsyncMock(return_value=[])), \
          patch.object(routes.store, "pipeline_tomar_epoca", AsyncMock(return_value=None), create=True), \
          patch.object(routes.store, "step_upsert", upsert), \
@@ -59,7 +63,8 @@ def test_resume_doble_el_segundo_recibe_409_y_no_lanza():
 
 def test_approve_step_persiste_las_marcas_de_hyde_al_tomar_la_epoca():
     tomar, bg = AsyncMock(return_value=8), BackgroundTasks()
-    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido(epoca=7))), \
+    with patch.object(routes.cupo, "activos", AsyncMock(return_value=0)), \
+         patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido(epoca=7))), \
          patch.object(routes.store, "steps_by_pipeline", AsyncMock(return_value=[_paso_hyde()])), \
          patch.object(routes.store, "pipeline_tomar_epoca", tomar, create=True), \
          patch.object(routes.store, "pipeline_update_status", AsyncMock()), \
@@ -78,7 +83,8 @@ def test_approve_step_persiste_las_marcas_de_hyde_al_tomar_la_epoca():
 
 def test_approve_step_doble_409_sin_tocar_pasos():
     bg, upsert = BackgroundTasks(), AsyncMock()
-    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido())), \
+    with patch.object(routes.cupo, "activos", AsyncMock(return_value=0)), \
+         patch.object(routes.store, "pipeline_get", AsyncMock(return_value=_interrumpido())), \
          patch.object(routes.store, "steps_by_pipeline", AsyncMock(return_value=[_paso_hyde()])), \
          patch.object(routes.store, "pipeline_tomar_epoca", AsyncMock(return_value=None), create=True), \
          patch.object(routes.store, "pipeline_update_status", AsyncMock()), \
@@ -131,7 +137,8 @@ def _llamar(endpoint, pipeline, pasos, prevuelo, tomar=None, eventos=None, upser
     tomar = tomar or AsyncMock(return_value=4)
     eventos = eventos or AsyncMock()
     upsert = upsert or AsyncMock()
-    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=pipeline)), \
+    with patch.object(routes.cupo, "activos", AsyncMock(return_value=0)), \
+         patch.object(routes.store, "pipeline_get", AsyncMock(return_value=pipeline)), \
          patch.object(routes.store, "steps_by_pipeline", AsyncMock(return_value=pasos)), \
          patch.object(routes.store, "pipeline_tomar_epoca", tomar, create=True), \
          patch.object(routes.store, "step_upsert", upsert), \
@@ -243,7 +250,8 @@ def test_resume_sin_refs_ilegibles_no_reescribe_el_contexto():
     pipeline = _interrumpido_con({"step_0_ref": _REF_OK})
     tomar, upsert = AsyncMock(return_value=4), AsyncMock()
     _llamar("resume", pipeline, pasos, AsyncMock(return_value=_veredicto()), tomar=tomar, upsert=upsert)
-    tomar.assert_awaited_once_with("p1", 3, (PipelineStatus.interrupted,))
+    tomar.assert_awaited_once_with("p1", 3, (PipelineStatus.interrupted,),
+                                   cupo_maximo=MAX_PARALLEL_PIPELINES)
     upsert.assert_not_awaited()
 
 

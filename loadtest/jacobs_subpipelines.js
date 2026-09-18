@@ -5,7 +5,7 @@
 // nunca contra LAS MANOS de produccion.
 //
 // ESCENARIO:
-//   base      -- jax_local sin token (el "antes", mismo plan sustituto)
+//   base      -- la MESA: invoked_by='plataforma', sin token
 //   legitimo  -- ada con un token sembrado distinto por iteracion
 //   inventado -- ada con tokens inventados: el peor caso del atacante (rechazo
 //                con diagnostico y un evento escrito por pedido)
@@ -27,9 +27,19 @@ const BASE = __ENV.BASE || 'http://127.0.0.1:7799';
 const ESCENARIO = __ENV.ESCENARIO || 'legitimo';
 const VUS = parseInt(__ENV.VUS || '25', 10);
 // Credencial de servicio (las_manos/auth_servicio.py): sin ella LAS MANOS responde 401.
+// Una credencial POR IDENTIDAD (2026-09-17): auth_servicio solo deja a
+// `plataforma` declarar invoked_by='plataforma' y a `jacobs` declarar
+// invoked_by='ada'. Con una sola credencial el arnes medía 403 a 28.000/s --
+// un 403 no toca la base ni el cupo, o sea que medía FastAPI, no el servicio.
 const CREDENCIAL = __ENV.CREDENCIAL || '';
-if (!CREDENCIAL) throw new Error('falta CREDENCIAL (JAX_LAS_MANOS_CREDENCIAL_* de la app de carga)');
+const CREDENCIAL_JACOBS = __ENV.CREDENCIAL_JACOBS || '';
+if (!CREDENCIAL) throw new Error('falta CREDENCIAL (JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA de la app de carga)');
+if (!CREDENCIAL_JACOBS) throw new Error('falta CREDENCIAL_JACOBS (JAX_LAS_MANOS_CREDENCIAL_JACOBS de la app de carga)');
 const PADRE = __ENV.PADRE || '';
+// OFFSET (2026-09-17): un token se quema una sola vez. Varias corridas contra
+// el MISMO archivo sembrado tienen que arrancar donde terminó la anterior; si
+// no, la segunda mide 403 de token ya usado y no el camino que se quería medir.
+const OFFSET = parseInt(__ENV.OFFSET || '0', 10);
 
 const TOKENS = ESCENARIO === 'legitimo'
   ? new SharedArray('tokens', () => JSON.parse(open(__ENV.TOKENS)))
@@ -57,22 +67,24 @@ export const options = {
 function cuerpo() {
   const base = { name: 'carga-subpipeline', objective: 'o', mode: 'dry_run' };
   if (ESCENARIO === 'base') {
-    return { ...base, invoked_by: 'jax_local' };
+    return { ...base, invoked_by: 'plataforma' };
   }
   const i = exec.scenario.iterationInTest;
   if (ESCENARIO === 'inventado') {
     return { ...base, invoked_by: 'ada', parent_pipeline_id: PADRE,
              subpipeline_token: `inventado-${exec.vu.idInTest}-${i}` };
   }
-  if (i >= TOKENS.length) {
-    exec.test.abort(`tokens agotados en la iteracion ${i}: sembrar mas`);
+  if (OFFSET + i >= TOKENS.length) {
+    exec.test.abort(`tokens agotados en la iteracion ${OFFSET + i}: sembrar mas`);
   }
-  return { ...base, invoked_by: 'ada', parent_pipeline_id: PADRE, subpipeline_token: TOKENS[i] };
+  return { ...base, invoked_by: 'ada', parent_pipeline_id: PADRE,
+           subpipeline_token: TOKENS[OFFSET + i] };
 }
 
 export default function () {
+  const credencial = ESCENARIO === 'base' ? CREDENCIAL : CREDENCIAL_JACOBS;
   const r = http.post(`${BASE}/jacobs/pipeline`, JSON.stringify(cuerpo()), {
-    headers: { 'Content-Type': 'application/json', 'X-Jax-Credencial-Servicio': CREDENCIAL },
+    headers: { 'Content-Type': 'application/json', 'X-Jax-Credencial-Servicio': credencial },
     tags: { escenario: ESCENARIO },
   });
   const limite = r.status === 422 && String(r.body).includes('pipelines activos');

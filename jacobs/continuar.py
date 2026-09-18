@@ -5,8 +5,9 @@ y /continue/preflight) y para el CLI (tools/jacobs_relaunch.py): ninguno tiene
 lógica propia.
 
 Reglas (§5.2): sólo `plataforma` (el dueño lo verifica jax-platform); estados
-aborted (cualquier causa, D2) o expired; kill switch 423; dentro del candado y
-contra MAX_PARALLEL_PIPELINES; se reusan los pasos con ref LEGIBLE y se
+aborted (cualquier causa, D2) o expired; kill switch 423; contra
+MAX_PARALLEL_PIPELINES, con la condición del cupo DENTRO del UPDATE que revive
+el pipeline (2026-09-17: ya no hay candado, ni de proceso ni con nombre); se reusan los pasos con ref LEGIBLE y se
 rehacen todos los demás; reasignar solo pasos a correr, con clean-room y
 gobernanza sobre el plan completo; pre-vuelo sobre los pendientes; escrituras
 en una transacción que incrementa la época.
@@ -26,11 +27,16 @@ from decimal import Decimal
 from redaccion import recortar_redactado
 
 from jacobs import store
-from jacobs.candado import candado_de_creacion
 from jacobs.executor import RefIlegible, _load_ref
 from jacobs.models import MOTOR_FACETS, Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import PlanRejected, _check_cleanroom, _validate_plan_capabilities
-from jacobs.policy import MAX_PARALLEL_PIPELINES, check_kill_switch, validate_resume
+from jacobs.policy import (
+    MAX_PARALLEL_PIPELINES,
+    ContencionAlReservar,
+    CupoAgotado,
+    check_kill_switch,
+    validate_resume,
+)
 from jacobs.prevuelo import prevuelo
 from jacobs.prevuelo_reglas import formatear_usd
 
@@ -205,84 +211,93 @@ async def previsualizar(pipeline_id: str, invoked_by: str, reasignar: dict[str, 
 async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str] | None = None,
                     user_id: str | None = None, tenant_id: str | None = None,
                     costo_max_aceptado_usd: Decimal | None = None) -> tuple[dict, Pipeline]:
-    async with candado_de_creacion:
-        a = await analizar(pipeline_id, invoked_by, reasignar)
-        activos = await store.pipeline_count_active()
-        if activos >= MAX_PARALLEL_PIPELINES:
-            raise ContinuarRechazado(429, "limite_de_activos", _texto_limite(activos))
-        veredicto = await _prevuelo_de(a, user_id, tenant_id)
-        if not veredicto.ok:
-            await store.event_append(pipeline_id, "PREVUELO_RECHAZADO",
-                                     {"code": "prevuelo_rechazado", **veredicto.to_dict()})
-            raise ContinuarRechazado(422, "prevuelo_rechazado", veredicto.to_dict())
-        if costo_max_aceptado_usd is not None and veredicto.costo_max_usd > costo_max_aceptado_usd:
-            raise ContinuarRechazado(409, "costo_supera_lo_aceptado", {
-                "costo_max_aceptado_usd": formatear_usd(costo_max_aceptado_usd), **veredicto.to_dict(),
-            })
-
-        indice = min(a.pasos_a_correr) if a.pasos_a_correr else len(a.plan)
-        # Regla 10 (Ruling R22): el evento va DENTRO de la misma transacción
-        # que escribe los pasos y el pipeline, no después del commit. La
-        # época nueva se conoce de antemano (epoca_leida+1, bajo el
-        # SELECT...FOR UPDATE de la transacción): si la transacción pierde la
-        # carrera devuelve None y este payload nunca se inserta.
-        evento_payload = {
-            "by": invoked_by, "from_status": a.pipeline.status.value, "run_epoch": a.pipeline.run_epoch + 1,
-            **_pasos(a), "reasignados": a.reasignados, "costo_max_usd": formatear_usd(veredicto.costo_max_usd),
-        }
-        # F3 (ola final, Ruling R31): el conteo de arriba sólo evita sondear en
-        # vano; el cupo se decide recontando DENTRO del candado con nombre de
-        # MariaDB, que también toma crear en LAS MANOS -- este servicio corre
-        # además en el CLI, otro proceso. CandadoNoDisponible se propaga:
-        # el endpoint responde 503 y el CLI sale con error.
-        async with store.candado_de_activos() as conexion_del_candado:
-            activos = await store.pipeline_count_active(conexion=conexion_del_candado)
-            if activos >= MAX_PARALLEL_PIPELINES:
-                raise ContinuarRechazado(429, "limite_de_activos", _texto_limite(activos))
-            # m1 de la re-revisión final (2026-09-17): con plazo, como la
-            # transacción de crear (routes.py). El SELECT ... FOR UPDATE de
-            # continuar_transaccion puede quedarse esperando un lock de fila
-            # hasta innodb_lock_wait_timeout (50 s por defecto) y, mientras,
-            # este bloque retiene el candado con nombre: cualquier create o
-            # continue de cualquier proceso respondería 503 al vencer su
-            # GET_LOCK. Al vencer, la conexión de la transacción se cierra en
-            # su propio finally (nada queda a medias) y el candado se suelta;
-            # el endpoint responde 503 prevuelo_no_disponible.
-            estado_tx = store.EstadoDeTransaccion()
-            try:
-                async with asyncio.timeout(store.db_connect_timeout_seconds()):
-                    nueva = await store.continuar_transaccion(
-                        pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
-                        [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
-                        evento_payload=evento_payload, estado=estado_tx,
-                    )
-            except BaseException as exc:
-                # Mismo mecanismo que crear (R41): si el corte o el plazo caen
-                # DURANTE el COMMIT, el servidor pudo haberlo confirmado -- la
-                # época quedaría incrementada y el pipeline en `running` sin
-                # que nadie encolara run_pipeline (lo rescata el reaper). El
-                # 503 lo dice; un reintento a ciegas lo continuaría dos veces.
-                # Si el corte fue ANTES del COMMIT no hay nada escrito y el
-                # error sube tal cual (el endpoint responde 503 sin `detalle`).
-                if not estado_tx.incierta:
-                    raise
-                raise ContinuarRechazado(503, "prevuelo_no_disponible", {
-                    "motivo": recortar_redactado(f"{type(exc).__name__}: {exc}", 300),
-                    "detalle": (
-                        f"Resultado incierto: la conexión se cortó mientras se confirmaba. "
-                        f"El continue del pipeline {pipeline_id} puede haber empezado: "
-                        f"revisá su estado antes de reintentar."
-                    ),
-                }) from exc
-        if nueva is None:
-            raise ContinuarRechazado(409, "estado_no_continuable", {
-                "status": None,
-                "mensaje": "otro pedido cambió el pipeline mientras se preparaba este: volvé a consultarlo",
-            })
-        continuado = a.pipeline.model_copy(update={
-            "plan": a.plan, "context": a.contexto, "status": PipelineStatus.running,
-            "run_epoch": nueva, "current_step_index": indice,
+    # SIN CANDADO (2026-09-17). Este recuento suelto sólo evita sondear en vano
+    # con el cupo lleno: NO decide. El que decide está dentro de la sentencia
+    # que escribe, más abajo.
+    a = await analizar(pipeline_id, invoked_by, reasignar)
+    activos = await store.pipeline_count_active()
+    if activos >= MAX_PARALLEL_PIPELINES:
+        raise ContinuarRechazado(429, "limite_de_activos", _texto_limite(activos))
+    veredicto = await _prevuelo_de(a, user_id, tenant_id)
+    if not veredicto.ok:
+        await store.event_append(pipeline_id, "PREVUELO_RECHAZADO",
+                                 {"code": "prevuelo_rechazado", **veredicto.to_dict()})
+        raise ContinuarRechazado(422, "prevuelo_rechazado", veredicto.to_dict())
+    if costo_max_aceptado_usd is not None and veredicto.costo_max_usd > costo_max_aceptado_usd:
+        raise ContinuarRechazado(409, "costo_supera_lo_aceptado", {
+            "costo_max_aceptado_usd": formatear_usd(costo_max_aceptado_usd), **veredicto.to_dict(),
         })
+
+    indice = min(a.pasos_a_correr) if a.pasos_a_correr else len(a.plan)
+    # Regla 10 (Ruling R22): el evento va DENTRO de la misma transacción
+    # que escribe los pasos y el pipeline, no después del commit. La
+    # época nueva se conoce de antemano (epoca_leida+1, bajo el
+    # SELECT...FOR UPDATE de la transacción): si la transacción pierde la
+    # carrera devuelve None y este payload nunca se inserta.
+    evento_payload = {
+        "by": invoked_by, "from_status": a.pipeline.status.value, "run_epoch": a.pipeline.run_epoch + 1,
+        **_pasos(a), "reasignados": a.reasignados, "costo_max_usd": formatear_usd(veredicto.costo_max_usd),
+    }
+    # EL CUPO LO DECIDE LA ESCRITURA. Ya no hay GET_LOCK ni candado de proceso:
+    # `store.continuar_transaccion` lleva la condición del cupo DENTRO de su
+    # UPDATE, así que cuenta y escribe en la misma sentencia y se interbloquea
+    # con el INSERT de crear aunque el otro corra en OTRO PROCESO (el CLI) --
+    # que era exactamente lo que el GET_LOCK vino a arreglar. Ahora se arregla
+    # solo: un camino nuevo hereda el límite sin acordarse de pedir nada.
+    #
+    # m1: con plazo, como la transacción de crear. El SELECT ... FOR UPDATE
+    # puede esperar un lock de fila hasta innodb_lock_wait_timeout (50 s por
+    # defecto); al vencer, la conexión se cierra en su propio finally (nada
+    # queda a medias) y el endpoint responde 503. Sin candado con nombre, esa
+    # espera ya no frena a los demás procesos.
+    estado_tx = store.EstadoDeTransaccion()
+    try:
+        async with asyncio.timeout(store.db_connect_timeout_seconds()):
+            nueva = await store.continuar_transaccion(
+                pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
+                [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
+                evento_payload=evento_payload, estado=estado_tx,
+            )
+    except ContencionAlReservar as exc:
+        # Contención, no falla: 503 para que el llamador reintente. El CLI sale
+        # con error y el endpoint traduce el código (ver routes._contencion_503).
+        raise ContinuarRechazado(503, "contencion_al_reservar", {
+            "intentos": exc.intentos, "espera_s": round(exc.espera_total, 3),
+        }) from exc
+    except CupoAgotado as exc:
+        # El UPDATE no tocó la fila, y la época y el status ya estaban
+        # verificados bajo el candado de FILA unas líneas más arriba: el único
+        # motivo que queda es que no hay lugar. 429, el mismo rechazo que da el
+        # recuento de arriba.
+        raise ContinuarRechazado(
+            429, "limite_de_activos", _texto_limite(exc.activos)) from exc
+    except BaseException as exc:
+        # Mismo mecanismo que crear (R41): si el corte o el plazo caen
+        # DURANTE el COMMIT, el servidor pudo haberlo confirmado -- la
+        # época quedaría incrementada y el pipeline en `running` sin
+        # que nadie encolara run_pipeline (lo rescata el reaper). El
+        # 503 lo dice; un reintento a ciegas lo continuaría dos veces.
+        # Si el corte fue ANTES del COMMIT no hay nada escrito y el
+        # error sube tal cual (el endpoint responde 503 sin `detalle`).
+        if not estado_tx.incierta:
+            raise
+        raise ContinuarRechazado(503, "prevuelo_no_disponible", {
+            "motivo": recortar_redactado(f"{type(exc).__name__}: {exc}", 300),
+            "detalle": (
+                f"Resultado incierto: la conexión se cortó mientras se confirmaba. "
+                f"El continue del pipeline {pipeline_id} puede haber empezado: "
+                f"revisá su estado antes de reintentar."
+            ),
+        }) from exc
+    if nueva is None:
+        raise ContinuarRechazado(409, "estado_no_continuable", {
+            "status": None,
+            "mensaje": "otro pedido cambió el pipeline mientras se preparaba este: volvé a consultarlo",
+        })
+    continuado = a.pipeline.model_copy(update={
+        "plan": a.plan, "context": a.contexto, "status": PipelineStatus.running,
+        "run_epoch": nueva, "current_step_index": indice,
+    })
 
     respuesta = {
         "pipeline_id": pipeline_id, "status": "running", "run_epoch": nueva, **_pasos(a),

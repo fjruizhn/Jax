@@ -21,6 +21,13 @@ import aiomysql
 from pymysql import err as _pymysql_err
 from pymysql.constants import CLIENT
 
+from jacobs.policy import (
+    MAX_PARALLEL_PIPELINES,
+    SQL_ESTADOS_VIVOS,
+    SQL_JOIN_CUPO,
+    ContencionAlReservar,
+    CupoAgotado,
+)
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 
 try:
@@ -162,8 +169,7 @@ class _PoolDelLoop:
 # son
 # autocommit, no miran el conteo de filas y no dejan estado de sesión, así que
 # la conexión que vuelve al pool vuelve igual a como salió. Quedan DEDICADAS
-# a propósito: GET_LOCK (candado_de_activos, el candado vive en la sesión) y
-# las escrituras condicionales con CLIENT.FOUND_ROWS (ver abajo), además de
+# a propósito: las escrituras condicionales con CLIENT.FOUND_ROWS (ver abajo) y
 # init_tables (cambia lock_wait_timeout de la sesión). Ninguna de estas
 # funciones pide una segunda conexión del pool mientras tiene una: con el pool
 # lleno, eso sería esperar a sí misma.
@@ -779,11 +785,9 @@ async def conexion_dedicada(found_rows: bool = False) -> aiomysql.Connection:
        negocia en el handshake, no se enciende por sesion, y ponerselo al pool
        cambiaria en silencio el conteo de filas de cualquier UPDATE que se
        agregue despues.
-    2. `candado_de_activos()` -- el GET_LOCK del cupo. Podria pedir
-       `conexion(desechable=True)`, pero el candado se ESPERA (hasta
-       JAX_PREVUELO_CANDADO_TIMEOUT_S): varios `crear`/`continue` a la vez se
-       quedarian con las conexiones del pool mientras esperan el candado y
-       dejarian sin conexiones al resto del servicio.
+    (Hasta el 2026-09-17 habia una segunda razon, `candado_de_activos()`, el
+    GET_LOCK del cupo: se retiro junto con el candado, porque el cupo lo hace
+    cumplir ahora una condicion dentro de cada escritura que lo consume.)
 
     Cualquier otro uso va por `conexion()` / `conexion_del_pool()`; una sesion
     con estado propio que NO espera (SET SESSION, temporales) pide
@@ -1263,7 +1267,12 @@ async def candidatos_del_reaper(statuses: list[PipelineStatus]) -> list[tuple[Pi
     return salida
 
 
-_SQL_CONTAR_ACTIVOS = "SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ('pending','running')"
+# Los estados salen de `jacobs/policy.py`, la MISMA fuente que usan el INSERT de
+# la reserva y los UPDATE que reviven un pipeline. Escribirlos otra vez acá era
+# una segunda copia del criterio, y una segunda copia se desincroniza sola.
+_SQL_CONTAR_ACTIVOS = (
+    f"SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ({SQL_ESTADOS_VIVOS})"
+)
 
 
 async def pipeline_count_active(conexion: aiomysql.Connection | None = None) -> int:
@@ -1283,87 +1292,35 @@ async def _contar_activos(conn: aiomysql.Connection) -> int:
 
 
 # ----------------------------------------------------------------
-#  Candado del cupo de activos entre procesos (ola final F3, Ruling R31)
+#  Acá vivía el candado del cupo entre procesos — retirado 2026-09-17
 # ----------------------------------------------------------------
-# MAX_PARALLEL_PIPELINES se contaba bajo un asyncio.Lock de PROCESO
-# (jacobs/candado.py): el CLI de continuar (tools/jacobs_relaunch.py) corre en
-# otro proceso y cada uno contaba y escribía sin ver la reserva del otro. Ahora
-# crear y continuar recuentan y escriben dentro de un candado con nombre del
-# SERVIDOR MariaDB (GET_LOCK), tomado en UNA conexión dedicada que vive todo el
-# bloque. El asyncio.Lock sigue por fuera: dentro del proceso evita pedir
-# conexiones de más.
+# `candado_de_activos()` tomaba un GET_LOCK del SERVIDOR MariaDB para que crear
+# y continuar recontaran y escribieran sin pisarse, incluso desde el CLI (otro
+# proceso), que era lo que el asyncio.Lock de `jacobs/candado.py` no cubría.
+# Resolvía un problema real y lo resolvía bien.
 #
-# - El nombre lleva la base: los candados con nombre son del servidor, no de la
-#   base, y jax_memory_test comparte servidor con producción.
-# - GET_LOCK devuelve 1 (tomado), 0 (venció) o NULL (error): lo que no sea 1,
-#   o una conexión que no abre, es CandadoNoDisponible -> quien llama falla
-#   cerrado (503 prevuelo_no_disponible). Nunca se cuenta sin candado.
-# - Se suelta SIEMPRE: RELEASE_LOCK en finally y, pase lo que pase, la conexión
-#   se cierra -- cerrar la sesión libera el candado en el servidor aunque
-#   RELEASE_LOCK haya fallado.
-# EXPLAIN en tests/test_jacobs_candado_activos_db.py.
-NOMBRE_CANDADO_DE_ACTIVOS = "jacobs_crear_o_continuar"
-_SQL_TOMAR_CANDADO = "SELECT GET_LOCK(%s, %s)"
-_SQL_SOLTAR_CANDADO = "SELECT RELEASE_LOCK(%s)"
-
-
-class CandadoNoDisponible(RuntimeError):
-    """No se obtuvo el candado del cupo de activos: venció, la base lo negó o
-    no hubo conexión. Falla cerrado: sin candado no se crea ni se continúa."""
-
-
-def nombre_del_candado_de_activos() -> str:
-    return f"{NOMBRE_CANDADO_DE_ACTIVOS}:{_db_cfg()['db']}"
-
-
-@asynccontextmanager
-async def candado_de_activos() -> AsyncIterator[aiomysql.Connection]:
-    """Toma el candado del cupo de activos y entrega su conexión (para
-    recontar por ella). Ver el bloque de comentarios de arriba."""
-    from jacobs.prevuelo_config import candado_timeout_s
-
-    timeout = candado_timeout_s()
-    nombre = nombre_del_candado_de_activos()
-    try:
-        conn = await conexion_dedicada()
-    except Exception as exc:  # fail-closed: se relanza como CandadoNoDisponible; sin conexión no hay candado y sin candado no se cuenta
-        raise CandadoNoDisponible(
-            f"no se pudo abrir la conexión del candado '{nombre}': {type(exc).__name__}: {exc}"
-        ) from exc
-    try:
-        try:
-            async with conn.cursor() as cur:
-                await cur.execute(_SQL_TOMAR_CANDADO, (nombre, timeout))
-                fila = await cur.fetchone()
-        except Exception as exc:  # fail-closed: se relanza como CandadoNoDisponible
-            raise CandadoNoDisponible(
-                f"GET_LOCK('{nombre}') falló: {type(exc).__name__}: {exc}"
-            ) from exc
-        resultado = fila[0] if fila else None
-        if resultado != 1:
-            motivo = "venció" if resultado == 0 else "devolvió NULL"
-            raise CandadoNoDisponible(
-                f"GET_LOCK('{nombre}', {timeout}) {motivo}: otro proceso tiene el cupo de "
-                f"pipelines activos tomado o la base no lo concedió"
-            )
-        try:
-            yield conn
-        finally:
-            try:
-                async with conn.cursor() as cur:
-                    await cur.execute(_SQL_SOLTAR_CANDADO, (nombre,))
-            except Exception as exc:  # fail-soft: cerrar la conexión (finally de abajo) termina la sesión y el servidor suelta el candado igual; se deja WARNING
-                logger.warning("RELEASE_LOCK('%s') falló (%s); se cierra la conexión, que lo suelta",
-                               nombre, type(exc).__name__)
-    finally:
-        conn.close()
-
+# Se retira porque **un candado hay que acordarse de pedirlo**, y este ya se
+# había olvidado dos veces: `resume` y `approve-step` movían un pipeline a
+# correr sin tomarlo y sin mirar el cupo. Ahora la condición del cupo viaja
+# DENTRO de cada escritura que lo consume -- el INSERT de crear
+# (`jacobs/cupo.py`) y los UPDATE de continuar, resume y approve-step (acá
+# mismo, vía `SQL_JOIN_CUPO` de `jacobs/policy.py`) --, así que un camino nuevo
+# hereda el límite aunque quien lo escriba no sepa que existe. Dos mecanismos
+# para el mismo invariante era peor que cualquiera de los dos: no se veían
+# entre sí (uno no ve la reserva del otro hasta que commitea).
 
 # ----------------------------------------------------------------
 #  Época de corrida (spec 2026-09-17 §5.3)
 # ----------------------------------------------------------------
 # Un solo ejecutor por pipeline. `cancel`, el kill switch y el reaper cambian
-# el STATUS; `resume`, `approve-step` y `continue` INCREMENTAN la época. El
+# el STATUS; `resume`, `approve-step` y `continue` INCREMENTAN la época.
+#
+# LA ÉPOCA NO CAMBIÓ DE DUEÑO (2026-09-17, anotado a pedido del autor del
+# mecanismo retirado). La unión del cupo le agregó a estas sentencias una
+# CONDICIÓN más -- `cupo_x.c < %s` --, pero quién incrementa `run_epoch`, cuándo
+# y con qué CAS sigue siendo exactamente lo de antes: continuar, resume y
+# approve-step. El cupo no toca la época, no la lee y no la escribe; sólo decide
+# si esa escritura tiene permiso de ocurrir. El
 # ejecutor escribe sólo si el pipeline sigue en SU época y `running`: si no,
 # perdió, registra RUN_SUPERSEDED una vez y termina sin escribir más.
 # Todas van por clave primaria (EXPLAIN en tests/test_run_epoch_db.py).
@@ -1395,20 +1352,50 @@ def _sql_update_si_epoca(con_indice: bool, con_contexto: bool, n_desde: int,
     )
 
 
-def _sql_tomar_epoca(con_contexto: bool, n_desde: int) -> str:
+def _sql_tomar_epoca(con_contexto: bool, n_desde: int, con_cupo: bool = False) -> str:
+    """El UPDATE condicional de resume y approve-step.
+
+    `con_cupo` (2026-09-17): le mete la condicion del cupo DENTRO de la misma
+    sentencia. Antes, `resume` y `approve-step` movian un pipeline
+    `interrupted` a correr SIN mirar MAX_PARALLEL_PIPELINES -- ni el
+    asyncio.Lock ni el GET_LOCK los tomaban, solo crear y continuar. Con tres
+    interrumpidos y tres `resume` se pasaba el limite y nadie se enteraba: el
+    limite decia que existia y no existia. Ahora la condicion viaja adentro de
+    la escritura, que es la unica forma de que un camino nuevo la herede sin
+    acordarse de pedir nada.
+    """
     extra = ", context_refs=%s" if con_contexto else ""
     desde = ",".join(["%s"] * n_desde)
+    join = f" {SQL_JOIN_CUPO}" if con_cupo else ""
+    tabla = "jacobs_pipelines p" if con_cupo else "jacobs_pipelines"
+    col = "p." if con_cupo else ""
+    tope = " AND cupo_x.c < %s" if con_cupo else ""
     return (
-        f"UPDATE jacobs_pipelines SET run_epoch=run_epoch+1, updated_at=%s{extra} "
-        f"WHERE pipeline_id=%s AND run_epoch=%s AND status IN ({desde})"
+        f"UPDATE {tabla}{join} SET {col}run_epoch={col}run_epoch+1, {col}updated_at=%s{extra} "
+        f"WHERE {col}pipeline_id=%s AND {col}run_epoch=%s AND {col}status IN ({desde}){tope}"
     )
 
 
 async def _ejecutar_condicional(sql: str, params: tuple | list) -> int:
+    """Una escritura condicional por época, en su conexión dedicada.
+
+    Un 1213 acá NO se reintenta (2026-09-17, declarado): estas sentencias son
+    de bajo volumen -- resume y approve-step son acciones humanas -- y en la
+    carga medida los deadlocks salieron TODOS del INSERT de la reserva, que sí
+    reintenta. Lo que sí se hace es no disfrazarlo: trabarse con otra escritura
+    es contención, no una falla del sistema, así que sube como
+    `ContencionAlReservar` y el llamador responde 503 `contencion_al_reservar`
+    en vez de un 500. Si algún día se mide contención real por acá, el reintento
+    va en este mismo lugar.
+    """
     conn = await conexion_dedicada(found_rows=True)
     try:
         async with conn.cursor() as cur:
             return await cur.execute(sql, params)
+    except aiomysql.OperationalError as exc:
+        if exc.args[0] == 1213:
+            raise ContencionAlReservar(1, 0.0) from exc
+        raise
     finally:
         conn.close()
 
@@ -1472,9 +1459,15 @@ async def pipeline_tomar_epoca(
     epoca_leida: int,
     desde: tuple[PipelineStatus, ...],
     context: dict | None = None,
+    cupo_maximo: int | None = None,
 ) -> int | None:
     """Incrementa la época si nadie la tomó desde que se leyó. Devuelve la
-    nueva, o None si otro pedido ganó (doble resume, doble approve)."""
+    nueva, o None si otro pedido ganó (doble resume, doble approve).
+
+    `cupo_maximo` (2026-09-17): con un tope, la sentencia lleva además la
+    condición del cupo y levanta `CupoAgotado` si no hay lugar. Es un parámetro
+    y no una constante a propósito: el llamador DECLARA que esta escritura
+    ocupa cupo."""
     if not desde:
         raise ValueError(
             "pipeline_tomar_epoca: 'desde' no puede estar vacío -- "
@@ -1484,8 +1477,22 @@ async def pipeline_tomar_epoca(
     if context is not None:
         params.append(json.dumps(context, ensure_ascii=False))
     params += [pipeline_id, epoca_leida, *(d.value for d in desde)]
-    filas = await _ejecutar_condicional(_sql_tomar_epoca(context is not None, len(desde)), params)
-    return epoca_leida + 1 if filas == 1 else None
+    if cupo_maximo is not None:
+        params.append(cupo_maximo)
+    filas = await _ejecutar_condicional(
+        _sql_tomar_epoca(context is not None, len(desde), cupo_maximo is not None), params)
+    if filas == 1:
+        return epoca_leida + 1
+    if cupo_maximo is not None:
+        # 0 filas con la condición del cupo puesta tiene DOS causas: otro pedido
+        # ganó la época, o no hay lugar. La sentencia no las distingue, así que
+        # se pregunta -- una sola lectura, y sólo en el camino de rechazo. Un
+        # 409 "otro pedido ganó" cuando lo que pasó es que el cupo estaba lleno
+        # manda a buscar un problema que no existe.
+        activos = await pipeline_count_active()
+        if activos >= cupo_maximo:
+            raise CupoAgotado(activos, cupo_maximo)
+    return None
 
 
 _SQL_BLOQUEAR_PIPELINE = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s FOR UPDATE"
@@ -1493,10 +1500,18 @@ _SQL_PASO_A_CORRER = (
     "UPDATE jacobs_steps SET facet=%s, motor=%s, status='pending', output_ref=NULL, "
     "started_at=NULL, finished_at=NULL, error=NULL WHERE step_id=%s AND pipeline_id=%s"
 )
+# El UPDATE que revive un pipeline OCUPA CUPO, así que lleva la condición del
+# cupo adentro (2026-09-17). `continuar` no INSERTA una fila -- revive una que
+# ya existe --, así que el INSERT condicionado de crear no lo cubre: hace falta
+# la misma regla en forma de UPDATE. Medido contra MariaDB 12.3: 10, 25 y 50
+# reanimaciones a la vez respetan el cupo exacto, y 50 creaciones CRUZADAS con
+# 50 reanimaciones también -- que era justo la carrera que rompía tener dos
+# mecanismos distintos (uno no ve la reserva del otro hasta que commitea).
 _SQL_PIPELINE_CONTINUAR = (
-    "UPDATE jacobs_pipelines SET status='running', run_epoch=run_epoch+1, plan=%s, "
-    "context_refs=%s, current_step_index=%s, updated_at=%s "
-    "WHERE pipeline_id=%s AND run_epoch=%s"
+    f"UPDATE jacobs_pipelines p {SQL_JOIN_CUPO} "
+    "SET p.status='running', p.run_epoch=p.run_epoch+1, p.plan=%s, "
+    "p.context_refs=%s, p.current_step_index=%s, p.updated_at=%s "
+    "WHERE p.pipeline_id=%s AND p.run_epoch=%s AND cupo_x.c < %s"
 )
 
 
@@ -1516,6 +1531,7 @@ async def continuar_transaccion(
     current_step_index: int,
     evento_payload: dict | None,
     estado: EstadoDeTransaccion | None = None,
+    cupo_maximo: int = MAX_PARALLEL_PIPELINES,
 ) -> int | None:
     """Escrituras de continue en UNA transacción (spec 2026-09-17 §5.2 regla
     10): bloquea la fila del pipeline, confirma que nadie la cambió desde el
@@ -1555,14 +1571,18 @@ async def continuar_transaccion(
                     json.dumps([s.model_dump() for s in plan], ensure_ascii=False),
                     json.dumps(context, ensure_ascii=False),
                     current_step_index, time.time(), pipeline_id, epoca_leida,
+                    cupo_maximo,
                 ))
-                # R23: el SELECT...FOR UPDATE ya lo garantiza (misma fila,
-                # bajo lock, época/status verificados arriba) -- esto es el
-                # cinturón explícito del requisito (a), no una rama que se
-                # espere alcanzar en producción.
                 if filas_pipeline != 1:
                     await conn.rollback()
-                    return None
+                    # R23 decía que esta rama no se alcanza: el SELECT...FOR
+                    # UPDATE ya fijó la fila, la época y el status. Desde que el
+                    # UPDATE lleva la condición del cupo (2026-09-17) SÍ se
+                    # alcanza, y por una sola causa -- no hay lugar --, porque
+                    # todo lo demás quedó verificado bajo el candado de fila unas
+                    # líneas más arriba. Por eso se puede afirmar el motivo sin
+                    # volver a leer: es el único que queda.
+                    raise CupoAgotado(cupo_maximo, cupo_maximo)
                 if evento_payload is not None:
                     await cur.execute(_SQL_EVENTO_CONTINUED, (
                         pipeline_id, None, "PIPELINE_CONTINUED",

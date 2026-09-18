@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from redaccion import recortar_redactado
 
-from jacobs import store
+from jacobs import cupo, store
 from jacobs import continuar as servicio_continuar
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
@@ -38,6 +38,9 @@ from jacobs.plan import PlanBuilder, PlanRejected
 from jacobs.prevuelo import prevuelo
 from jacobs.prevuelo_reglas import Veredicto, formatear_usd
 from jacobs.policy import (
+    MAX_PARALLEL_PIPELINES,
+    ContencionAlReservar,
+    CupoAgotado,
     check_kill_switch,
     validate_create,
     validate_resume,
@@ -54,22 +57,25 @@ logger = logging.getLogger(__name__)
 
 _plan_builder = PlanBuilder()
 
-# T2 (2026-08-19): active_count = await store.pipeline_count_active() y el
-# INSERT posterior corrían en conexiones DB separadas, sin lock ni
-# transacción -- dos POST /pipeline concurrentes podían leer el mismo
-# active_count y ambos pasar validate_create(), superando
-# MAX_PARALLEL_PIPELINES. Jacobs corre en un solo proceso uvicorn (sin
-# --workers, confirmado por systemctl/ps) así que un asyncio.Lock() de
-# proceso es válido y cubre el caso real. Se prefiere sobre una transacción
-# con SELECT...FOR UPDATE porque _plan_builder.build() (adentro de la
-# sección crítica) tarda 20-40s llamando a un LLM externo -- mantener esa
-# transacción/fila lockeada todo ese tiempo arriesgaría agotar el pool de
-# conexiones bajo carga real; un lock en memoria no reserva conexión DB.
-# m6 (re-revisión final, 2026-09-17): hoy la sección crítica es más grande que
-# lo que dice el párrafo de arriba -- cubre build() + el pre-vuelo con sus
-# sondas + la transacción, y continuar.py toma el MISMO objeto. El inventario
-# completo y por qué se deja así está en jacobs/candado.py.
-from jacobs.candado import candado_de_creacion as _pipeline_create_lock  # noqa: E402  (2026-09-17: compartido con continuar.py)
+# HISTORIA DE LOS CANDADOS QUE YA NO ESTÁN (2026-09-17, decisión de Fernando y
+# del coordinador). Acá vivieron, uno después del otro:
+#   - `_pipeline_create_lock = asyncio.Lock()` (T2, 2026-08-19): candado GLOBAL
+#     del proceso alrededor del recuento, el consumo del token de Ada, la
+#     planificación (20-40 s de LLM) y el INSERT, porque leer el conteo en una
+#     consulta y decidir en otra es una lectura optimista;
+#   - después `jacobs/candado.py::candado_de_creacion` (el mismo objeto, mudado
+#     para compartirlo con continuar.py) más `store.candado_de_activos()`, un
+#     GET_LOCK del servidor MariaDB, porque el candado de proceso no cruzaba al
+#     CLI (jax#209, Ruling R31).
+# Los dos hacían cumplir el límite y los dos serializaban: la medición del
+# frente G dio ~43 delegaciones/s, y la creación de la MESA esperaba detrás de
+# las delegaciones de Ada.
+#
+# QUEDA UN SOLO MECANISMO, y es una REGLA, no un objeto: **la condición del cupo
+# viaja dentro de la escritura que lo consume** (`jacobs/cupo.py`). Un candado
+# hay que acordarse de pedirlo; una condición adentro del INSERT o del UPDATE se
+# aplica sola aunque quien escriba un camino nuevo no sepa que hay un límite. El
+# barrido `tests/test_creacion_sin_candado_global.py` impide que vuelvan.
 
 
 async def _build_plan_or_reject(
@@ -354,14 +360,88 @@ async def _auditar_token_quemado(
         )
 
 
+async def _soltar_reserva(pipeline_id: str) -> None:
+    """Devuelve el cupo de una reserva que no llegó a ser pipeline.
+
+    Best-effort A PROPÓSITO y NO es fail-open: si el DELETE falla, el cupo queda
+    OCUPADO —el lado restrictivo— y el reaper cosecha la fila `pending` a los
+    300 s. Lo que no puede pasar es que un fallo al liberar reemplace el error
+    original que trajo al llamador hasta acá.
+    """
+    try:
+        await cupo.soltar_reserva(pipeline_id)
+    except Exception as exc:  # fail-soft: soltar es best-effort; el error original manda y el reaper cosecha la fila pending
+        logger.error(
+            "cupo: reserva %s no liberada (%s); queda ocupada hasta el reaper",
+            pipeline_id, type(exc).__name__,
+        )
+
+
+def _es_deadlock(exc: BaseException) -> bool:
+    """Un 1213 de InnoDB, venga envuelto o no. Se mira el código, no el texto:
+    el mensaje del servidor cambia con la versión y el idioma."""
+    args = getattr(exc, "args", ())
+    return bool(args) and args[0] == 1213
+
+
+def _contencion_503(exc: ContencionAlReservar) -> HTTPException:
+    """La contención NO es un 500 (2026-09-17, revisión del autor del mecanismo
+    retirado). Un 500 dice "me rompí" y manda a alguien a buscar un defecto que
+    no existe; lo que pasó es que dos escrituras del cupo se trabaron y no se
+    destrabaron dentro del presupuesto de espera. Tampoco es el 422 del cupo:
+    422 significa "tu pedido no es válido", y este pedido está perfecto.
+
+    503 + `Retry-After: 1` = "volvé a intentar", que es exactamente lo que hay
+    que hacer. El segundo sale del presupuesto de espera (~0,96 s): reintentar
+    antes es pedirle a la base que se trabe de nuevo.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "code": "contencion_al_reservar",
+            "intentos": exc.intentos,
+            "espera_s": round(exc.espera_total, 3),
+        },
+        headers={"Retry-After": "1"},
+    )
+
+
+async def _cupo_o_429() -> None:
+    """Compuerta BARATA de cupo, ANTES de cualquier cosa que salga a la red.
+
+    POR QUÉ ESTÁ ACÁ Y NO SÓLO EN LA ESCRITURA (2026-09-17, revisión del autor
+    del mecanismo retirado). `resume` y `approve-step` corren el pre-vuelo, y el
+    pre-vuelo **sondea facetas: es una llamada PAGA**. Si el cupo se mirara sólo
+    en el UPDATE —que va después—, un pedido rechazado por falta de lugar ya
+    habría gastado dinero. No es estética: es plata que se va sin que nadie la
+    vea.
+
+    NO decide: la decisión sigue siendo la condición que viaja dentro del
+    UPDATE (`pipeline_tomar_epoca(cupo_maximo=...)`). Esto es una compuerta que
+    ahorra el gasto en el caso claro. Si la lectura queda vieja y el cupo se
+    llena entre medio, el UPDATE rechaza igual: fail-closed sin depender de
+    esta lectura.
+
+    `tests/test_cupo_en_todos_los_caminos.py` fija el ORDEN: falla si alguien
+    pone el pre-vuelo antes.
+    """
+    activos = await cupo.activos()
+    if activos >= MAX_PARALLEL_PIPELINES:
+        raise HTTPException(status_code=429, detail={
+            "code": "limite_de_activos",
+            "detalle": str(CupoAgotado(activos, MAX_PARALLEL_PIPELINES)),
+        })
+
+
 @router.post("/pipeline")
 async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTasks) -> dict:
     """Crea un pipeline y lo ejecuta en background.
 
-    Escritura (R38 fix round 1, 2b): pipeline, pasos y PIPELINE_CREATED (y en
-    dry_run el completed y DRY_RUN_COMPLETE) van en UNA transacción bajo el
-    candado de activos. Si algo falla ANTES del COMMIT, nada queda escrito y
-    responde 503 {"code": "prevuelo_no_disponible", "motivo"}.
+    Escritura (R38 fix round 1, 2b): los pasos, PIPELINE_CREATED y —en
+    dry_run— el completed y DRY_RUN_COMPLETE van en UNA transacción, junto con
+    el UPDATE que completa la RESERVA de cupo tomada al principio. Si algo falla
+    ANTES del COMMIT, nada queda escrito, la reserva se suelta y responde 503
+    {"code": "prevuelo_no_disponible", "motivo"}.
 
     COMMIT cortado (Ruling R41): si la conexión se corta o vence DURANTE el
     COMMIT, el resultado es incierto -- el servidor pudo haberlo confirmado.
@@ -374,26 +454,68 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
     corre DESPUÉS, sobre el plan que el LLM ya devolvió -- lo gastado en
     planificar ya está gastado, igual que en /jacobs/preflight."""
 
-    # Lock de proceso: active_count (lectura) y pipeline_create (escritura)
-    # deben ser atómicos entre sí para que MAX_PARALLEL_PIPELINES sea un
-    # límite real, no una lectura optimista. Incluye build() adentro a
-    # propósito -- ver justificación en _pipeline_create_lock arriba.
-    async with _pipeline_create_lock:
-        active_count = await store.pipeline_count_active()
-        policy = validate_create(
-            invoked_by=req.invoked_by,
-            mode=req.mode,
-            max_steps=req.max_steps,
-            active_count=active_count,
-            subpipeline_token=req.subpipeline_token,
-            parent_pipeline_id=req.parent_pipeline_id,
+
+    # EL CUPO LO HACE CUMPLIR LA BASE (2026-09-17, decisión de Fernando y del
+    # coordinador). `validate_create` ya no recibe `active_count`: las
+    # comprobaciones baratas (rol, forma, max_steps, kill switch) van primero y
+    # el cupo lo decide LA RESERVA, una sola sentencia que cuenta e inserta a la
+    # vez. No hay candado de proceso ni GET_LOCK: la condición viaja dentro de
+    # la escritura que consume el cupo.
+    policy = validate_create(
+        invoked_by=req.invoked_by,
+        mode=req.mode,
+        max_steps=req.max_steps,
+        subpipeline_token=req.subpipeline_token,
+        parent_pipeline_id=req.parent_pipeline_id,
+    )
+    if not policy.ok:
+        status_code = 423 if "kill switch" in policy.reason.lower() else 422
+        raise HTTPException(status_code=status_code, detail=policy.reason)
+
+    pipeline_id = str(uuid.uuid4())
+    now = time.time()
+
+    # La reserva se toma ANTES del token de Ada y ANTES de planificar y sondear.
+    # Ese orden conserva los invariantes que sostenían los candados, no sólo el
+    # del conteo:
+    #   - ningún token de sub-pipeline se quema sin que haya cupo;
+    #   - no se planifica ni se sondea en vano con el cupo lleno -- eso hacía el
+    #     recuento suelto de antes, pero ahora la respuesta es AUTORITATIVA en
+    #     vez de una lectura optimista que había que reconfirmar después;
+    #   - las planificaciones en vuelo siguen acotadas: como máximo tantas como
+    #     cupo hay. Antes el candado las acotaba a UNA, y de ahí salía el cuello.
+    # La fila nace SIN plan y, para un hijo de Ada, SIN identidad: user_id y
+    # tenant_id del cuerpo no se escriben nunca (I-3); los trae la fila del token.
+    es_de_ada = req.invoked_by == INVOKER_ADA
+    pipeline = Pipeline(
+        pipeline_id=pipeline_id,
+        name=req.name,
+        invoked_by=req.invoked_by,
+        user_id=None if es_de_ada else req.user_id,
+        tenant_id=None if es_de_ada else req.tenant_id,
+        mode=req.mode,
+        plan=[],
+        max_steps=req.max_steps,
+        context={"objective": req.objective},
+        created_at=now,
+        updated_at=now,
+    )
+    try:
+        hay_lugar = await cupo.reservar_cupo(pipeline)
+    except ContencionAlReservar as exc:
+        raise _contencion_503(exc) from exc
+    if not hay_lugar:
+        # 0 filas afectadas = cupo agotado. Mismo 422 y mismo texto que daba
+        # validate_create. El conteo es sólo para el MENSAJE: decidió la base.
+        raise HTTPException(
+            status_code=422,
+            detail=str(cupo.CupoAgotado(await cupo.activos(), MAX_PARALLEL_PIPELINES)),
         )
-        if not policy.ok:
-            status_code = 423 if "kill switch" in policy.reason.lower() else 422
-            raise HTTPException(status_code=status_code, detail=policy.reason)
 
-        pipeline_id = str(uuid.uuid4())
-
+    # Desde acá la reserva ocupa un lugar del cupo: todo camino de salida que no
+    # deje un pipeline de verdad tiene que devolverlo.
+    soltar_la_reserva = True
+    try:
         # Frente F (2026-09-16): un hijo de Ada consume su token ACÁ, después de
         # validate_create (un 423 del kill switch no lo quema) y ANTES de
         # planificar (no se sostiene una transacción los 20-40 s del LLM). Padre,
@@ -436,7 +558,7 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
 
         # Revisión final (I-2, frente F): desde acá el token ya está quemado.
         # CUALQUIER error antes de que el hijo exista (plan, pre-vuelo,
-        # candado, transacción) deja SUBPIPELINE_RECHAZADO y se relanza el
+        # transacción) deja SUBPIPELINE_RECHAZADO y se relanza el
         # error ORIGINAL. Este primer bloque cubre plan y pre-vuelo (fase
         # `plan`); el de la escritura, más abajo, cubre la fase `creacion`.
         try:
@@ -500,37 +622,18 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                 )
             raise
 
-        # F3 (ola final, Ruling R31): el conteo de arriba sólo evita planificar
-        # y sondear en vano; el cupo se decide recontando DENTRO del candado
-        # con nombre de MariaDB y escribiendo en el mismo bloque -- el
-        # asyncio.Lock no cruza al CLI de continuar, que corre en otro proceso.
-        #
-        # R38, fix round 1 (2b): pipeline, pasos, PIPELINE_CREATED y, en
-        # dry_run, el completed y DRY_RUN_COMPLETE van en UNA transacción
-        # sobre la conexión del candado. Antes iban por conexiones separadas
-        # (del pool, esperando turno con el GET_LOCK tomado): un vencimiento a
-        # mitad dejaba un pipeline sin sus pasos y un 500. Ahora es todo o
-        # nada, acotado por JAX_DB_CONNECT_TIMEOUT_SECONDS; cualquier falla es
-        # 503 prevuelo_no_disponible sin nada escrito.
+
+        # R38, fix round 1 (2b): pasos, PIPELINE_CREATED y, en dry_run, el
+        # completed y DRY_RUN_COMPLETE van en UNA transacción junto con
+        # `completar_reserva`, el UPDATE que le pone el plan a la fila
+        # reservada. Todo o nada: si algo falla antes del COMMIT no queda nada
+        # escrito y la reserva se suelta en el `except` de afuera.
         estado_tx = store.EstadoDeTransaccion()
         try:
-            async with store.candado_de_activos() as conexion_del_candado:
-                active_count = await store.pipeline_count_active(conexion=conexion_del_candado)
-                policy = validate_create(
-                    invoked_by=req.invoked_by,
-                    mode=req.mode,
-                    max_steps=req.max_steps,
-                    active_count=active_count,
-                    subpipeline_token=req.subpipeline_token,
-                    parent_pipeline_id=req.parent_pipeline_id,
-                )
-                if not policy.ok:
-                    status_code = 423 if "kill switch" in policy.reason.lower() else 422
-                    raise HTTPException(status_code=status_code, detail=policy.reason)
-
+            async with store.conexion_del_pool() as conn:
                 async with asyncio.timeout(store.db_connect_timeout_seconds()):
-                    async with store.transaccion(conexion_del_candado, estado_tx) as tx:
-                        await store.pipeline_create(pipeline, conexion=tx)
+                    async with store.transaccion(conn, estado_tx) as tx:
+                        await cupo.completar_reserva(pipeline, conexion=tx)
                         for step in steps:
                             await store.step_upsert(step, conexion=tx)
                         await store.event_append(pipeline_id, "PIPELINE_CREATED", {
@@ -554,15 +657,29 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                     pipeline_id, parent_pipeline_id, "creacion", Motivo.CREACION_FALLIDA,
                     excepcion=type(exc).__name__,
                 )
+            if estado_tx.incierta:
+                # R41 con reserva: el COMMIT salió y la respuesta no llegó, así
+                # que la fila PUEDE ser un pipeline completo. Soltarla borraría
+                # un pipeline real. Se deja ocupando cupo; si quedó `pending` la
+                # cosecha el reaper a los 300 s. Fail-closed por el lado que no
+                # destruye datos.
+                soltar_la_reserva = False
             if not isinstance(exc, Exception):
                 raise  # cancelación: no se convierte en un 503
-            # fail-closed: candado, recuento o transacción de creación que no se
-            # pudo completar -> nada quedó escrito (la transacción se descarta)
-            # y no se crea (spec §8).
+            if _es_deadlock(exc) and not estado_tx.incierta:
+                # Contención DENTRO de la transacción (el UPDATE que completa la
+                # reserva y los pasos pelean por los mismos candados de rango).
+                # No se reintenta acá -- reintentar significaría rehacer la
+                # transacción entera --, pero tampoco se etiqueta mal: es
+                # contención, y decirlo `prevuelo_no_disponible` mandaría a
+                # revisar el pre-vuelo, que no tuvo nada que ver. Medido: 2 de
+                # ~250.000 pedidos en la carga del 2026-09-17.
+                raise _contencion_503(ContencionAlReservar(1, 0.0)) from exc
+            # fail-closed: transacción de creación que no se pudo completar ->
+            # nada quedó escrito y no se crea (spec §8).
             motivo = _motivo_redactado(exc)
             detalle = {"code": "prevuelo_no_disponible", "motivo": motivo}
             if estado_tx.incierta:
-                # R41: el COMMIT salió y la respuesta no llegó.
                 logger.error("crear: COMMIT del pipeline %s con resultado INCIERTO: %s", pipeline_id, motivo)
                 detalle["detalle"] = (
                     f"Resultado incierto: la conexión se cortó mientras se confirmaba. El pipeline "
@@ -571,9 +688,14 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
             else:
                 logger.error("crear: no se pudo escribir el pipeline: %s", motivo)
             raise HTTPException(status_code=503, detail=detalle) from exc
+        soltar_la_reserva = False
+    except BaseException:
+        if soltar_la_reserva:
+            await _soltar_reserva(pipeline_id)
+        raise
 
-    # Fuera del candado: con la fila y los pasos escritos el hijo EXISTE; un
-    # fallo de este evento no es "token quemado sin hijo" (frente F).
+    # Con la fila completa y los pasos escritos el hijo EXISTE; un fallo de
+    # este evento no es "token quemado sin hijo" (frente F) ni deja reserva.
     if parent_pipeline_id is not None:
         await store.event_append(
             parent_pipeline_id, "SUBPIPELINE_CREADO",
@@ -684,6 +806,8 @@ async def resume_pipeline(
     steps = await store.steps_by_pipeline(pipeline_id)
     # F2 (Ruling R32): pre-vuelo antes de tomar la época -- un rechazo no deja
     # rastro de estado (sólo el evento PREVUELO_RECHAZADO).
+    # El cupo ANTES del pre-vuelo: sondear cuesta plata (ver _cupo_o_429).
+    await _cupo_o_429()
     costo, contexto, ilegibles = await _prevuelo_de_reanudacion(pipeline, steps)
 
     # Época (spec 2026-09-17 §5.3): se toma ANTES de tocar pasos. Si otro
@@ -691,14 +815,28 @@ async def resume_pipeline(
     # pipeline es exactamente lo que la época existe para impedir.
     # Pasada final R34: si había refs ilegibles, el contexto sin ellas viaja
     # en el MISMO UPDATE que toma la época.
-    if ilegibles:
-        nueva_epoca = await store.pipeline_tomar_epoca(
-            pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,), contexto,
-        )
-    else:
-        nueva_epoca = await store.pipeline_tomar_epoca(
-            pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,),
-        )
+    # `cupo_maximo` (2026-09-17): reanudar OCUPA CUPO -- el pipeline pasa de
+    # `interrupted`, que no cuenta, a correr --, y hasta hoy este camino no
+    # miraba MAX_PARALLEL_PIPELINES: ni el candado de proceso ni el GET_LOCK lo
+    # tomaban. Con tres interrumpidos y tres `resume` se pasaba el límite. La
+    # condición viaja ahora dentro del mismo UPDATE que toma la época.
+    try:
+        if ilegibles:
+            nueva_epoca = await store.pipeline_tomar_epoca(
+                pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,), contexto,
+                cupo_maximo=MAX_PARALLEL_PIPELINES,
+            )
+        else:
+            nueva_epoca = await store.pipeline_tomar_epoca(
+                pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,),
+                cupo_maximo=MAX_PARALLEL_PIPELINES,
+            )
+    except CupoAgotado as exc:
+        raise HTTPException(status_code=429, detail={
+            "code": "limite_de_activos", "detalle": str(exc),
+        }) from exc
+    except ContencionAlReservar as exc:
+        raise _contencion_503(exc) from exc
     if nueva_epoca is None:
         raise HTTPException(
             status_code=409,
@@ -861,6 +999,8 @@ async def approve_step(
     # F2 (Ruling R32): pre-vuelo de la ola completa que se va a lanzar (todos
     # los pasos sin ref legible), antes de tomar la época y de persistir las
     # marcas de hyde.
+    # El cupo ANTES del pre-vuelo: sondear cuesta plata (ver _cupo_o_429).
+    await _cupo_o_429()
     costo, contexto, ilegibles = await _prevuelo_de_reanudacion(
         pipeline, steps, aprobados_ahora=frozenset(s.step_id for s in gated if s.facet == "hyde"),
     )
@@ -871,9 +1011,19 @@ async def approve_step(
     # Época (desvío 9 del plan 2026-09-17): approve-step lanza run_pipeline
     # igual que resume. Las marcas hyde_approved_* viajan en el MISMO UPDATE
     # que toma la época (antes iban en un pipeline_update_status aparte).
-    nueva_epoca = await store.pipeline_tomar_epoca(
-        pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,), pipeline.context,
-    )
+    # `cupo_maximo`: aprobar un paso relanza el pipeline, así que ocupa cupo
+    # igual que resume, y hasta hoy tampoco lo miraba (ver resume_pipeline).
+    try:
+        nueva_epoca = await store.pipeline_tomar_epoca(
+            pipeline_id, pipeline.run_epoch, (PipelineStatus.interrupted,), pipeline.context,
+            cupo_maximo=MAX_PARALLEL_PIPELINES,
+        )
+    except CupoAgotado as exc:
+        raise HTTPException(status_code=429, detail={
+            "code": "limite_de_activos", "detalle": str(exc),
+        }) from exc
+    except ContencionAlReservar as exc:
+        raise _contencion_503(exc) from exc
     if nueva_epoca is None:
         raise HTTPException(
             status_code=409,

@@ -17,6 +17,7 @@ os.environ["JAX_DB_NAME"] = "jax_memory_test"
 
 import pytest  # noqa: E402
 
+from jacobs.policy import CupoAgotado
 from jacobs import continuar  # noqa: E402
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus  # noqa: E402
 from jacobs.prevuelo_reglas import CostoPaso, Veredicto, Violacion  # noqa: E402
@@ -87,8 +88,8 @@ def _entorno(pipeline=_NADA, pasos=None, activos=0, veredicto=None, transaccion=
                                      "kimi", "hyde", "jax_local"}),
             })))
         pila.enter_context(patch.object(continuar, "check_kill_switch", return_value=kill))
-        m["candado"] = _CandadoFalso()
-        pila.enter_context(patch.object(continuar.store, "candado_de_activos", m["candado"], create=True))
+        # 2026-09-17: sin candado. El cupo lo hace cumplir la condición que va
+        # DENTRO del UPDATE de continuar_transaccion.
         yield m
 
 
@@ -495,51 +496,33 @@ def test_previsualizar_relanza_403_y_404():
 # candado con nombre de MariaDB (el CLI corre en otro proceso que LAS MANOS).
 # ---------------------------------------------------------------------------
 
-def test_continuar_recuenta_bajo_el_candado_y_respeta_el_cupo_que_otro_proceso_lleno():
+def test_el_cupo_lo_decide_el_update_y_devuelve_429():
+    """2026-09-17: `continuar` NO revisa el cupo con una lectura y después
+    escribe -- la condición viaja dentro del UPDATE de continuar_transaccion.
+    Cuando ese UPDATE no toca la fila por falta de lugar levanta CupoAgotado, y
+    el servicio lo traduce al mismo 429 `limite_de_activos` de siempre."""
     with _entorno() as m:
-        m["activos"].side_effect = [0, 3]
+        m["activos"].return_value = 0          # el recuento suelto deja pasar
+        m["tx"].side_effect = CupoAgotado(3, 3)  # la ESCRITURA es la que rechaza
         e = _rechazo()
-        m["tx"].assert_not_awaited()
-        assert m["activos"].await_args.kwargs == {"conexion": "conexion-del-candado"}
-        assert (m["candado"].entradas, m["candado"].salidas) == (1, 1)
     assert (e.status_code, e.code) == (429, "limite_de_activos")
 
 
-def test_continuar_escribe_la_transaccion_dentro_del_candado():
+def test_el_recuento_suelto_evita_sondear_en_vano_pero_no_decide():
+    """El recuento de antes del pre-vuelo sigue existiendo para no gastar un
+    sondeo con el cupo lleno. Es una optimización, no el control: por eso el
+    test de arriba pasa con ese recuento en 0."""
     with _entorno() as m:
-        orden = m["candado"].orden
-        m["activos"].side_effect = lambda **kw: orden.append("contar") or 0
-
-        async def tx(*a, **kw):
-            orden.append("transaccion")
-            return 3
-
-        m["tx"].side_effect = tx
-        _continuar()
-    assert orden == ["contar", "candado", "contar", "transaccion", "soltar"]
-
-
-def test_continuar_sin_candado_no_escribe_y_propaga():
-    from jacobs import store
-
-    with _entorno() as m:
-        falso = _CandadoFalso(falla=store.CandadoNoDisponible("GET_LOCK venció"))
-        with patch.object(continuar.store, "candado_de_activos", falso):
-            with pytest.raises(store.CandadoNoDisponible):
-                _continuar()
+        m["activos"].return_value = 3
+        e = _rechazo()
         m["tx"].assert_not_awaited()
+        m["prevuelo"].assert_not_awaited()
+    assert (e.status_code, e.code) == (429, "limite_de_activos")
 
 
-def test_la_transaccion_de_continuar_tiene_plazo_y_no_retiene_el_candado(monkeypatch):
-    """m1 de la re-revisión final: la transacción de continuar corría bajo el
-    candado entre procesos SIN techo de tiempo, mientras que la de crear sí lo
-    tiene. Un `SELECT ... FOR UPDATE` esperando un lock de fila (hasta
-    innodb_lock_wait_timeout, 50 s por defecto) dejaba el candado
-    `jacobs_crear_o_continuar:<base>` tomado y cualquier create o continue de
-    cualquier proceso respondía 503. Ahora vence con el mismo plazo que crear
-    (JAX_DB_CONNECT_TIMEOUT_SECONDS) y suelta el candado.
-    Expected contra 1b124fe: el test se cuelga y lo corta su propio
-    asyncio.wait_for (TimeoutError a los 5 s, con el candado retenido)."""
+def test_la_transaccion_de_continuar_tiene_plazo(monkeypatch):
+    """Sin candado con nombre, una transacción colgada ya no frena a los demás
+    procesos -- pero el plazo sigue, para que el pedido no cuelgue al cliente."""
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
 
     async def transaccion_colgada(*a, **kw):
@@ -550,13 +533,10 @@ def test_la_transaccion_de_continuar_tiene_plazo_y_no_retiene_el_candado(monkeyp
             m["tx"].side_effect = transaccion_colgada
             inicio = time.monotonic()
             with pytest.raises(TimeoutError):
-                await asyncio.wait_for(
-                    continuar.continuar("p1", "plataforma"), 5)
-            return time.monotonic() - inicio, m["candado"]
+                await asyncio.wait_for(continuar.continuar("p1", "plataforma"), 5)
+            return time.monotonic() - inicio
 
-    espera, candado = asyncio.run(cuerpo())
-    assert espera < 3, espera
-    assert candado.entradas == candado.salidas == 1, "el candado quedó tomado"
+    assert asyncio.run(cuerpo()) < 3
 
 
 def test_un_commit_cortado_de_continuar_avisa_que_puede_haber_empezado(monkeypatch):

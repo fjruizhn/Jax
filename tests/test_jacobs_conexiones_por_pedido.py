@@ -81,6 +81,10 @@ class _Cursor:
         self._conn = conn
         self._fila = None
         self._filas = ()
+        # 2026-09-17: las escrituras del cupo deciden por FILAS AFECTADAS
+        # (la reserva de crear es un INSERT condicionado), así que la base
+        # falsa tiene que contestar `rowcount` como la de verdad.
+        self.rowcount = 1
 
     # Merge 2026-09-17: en aiomysql `conn.cursor(...)` es AWAITABLE además de
     # usarse con `async with`, y el envoltorio del pool (store.ConexionVigilada)
@@ -100,7 +104,7 @@ class _Cursor:
         return False
 
     async def execute(self, sql, params=None):
-        self._fila, self._filas = None, ()
+        self._fila, self._filas, self.rowcount = None, (), 1
         s = " ".join(sql.split())
         b = self._base
         if s.startswith("SELECT `key`, has_tool_access FROM motor"):
@@ -375,13 +379,14 @@ def test_preflight_no_abre_ninguna_conexion_por_pedido(entorno, monkeypatch):
     assert _medir(base, _pedido_preflight) == []
 
 
-def test_crear_solo_abre_la_conexion_dedicada_del_candado(entorno, monkeypatch):
-    """Expected contra 2fd3778: además del candado, directas de
-    pipeline_count_active, get_motor_governance x2, pipeline_create,
-    step_upsert y event_append."""
+def test_crear_no_abre_NINGUNA_conexion_dedicada(entorno, monkeypatch):
+    """2026-09-17: al retirarse el GET_LOCK, crear dejó de necesitar una
+    conexión DEDICADA. Todo su camino —la reserva, la transacción, los pasos y
+    los eventos— va por el pool. Es una conexión dedicada MENOS por cada
+    creación, y el pool vuelve a ser el único dueño de las conexiones."""
     base = entorno()
     monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
-    assert _medir(base, _pedido_crear) == [("directa", "candado_de_activos", False)]
+    assert _medir(base, _pedido_crear) == []
 
 
 def test_continue_solo_abre_el_candado_y_la_transaccion_con_found_rows(entorno, monkeypatch):
@@ -389,8 +394,9 @@ def test_continue_solo_abre_el_candado_y_la_transaccion_con_found_rows(entorno, 
     steps_by_pipeline, get_motor_governance y pipeline_count_active."""
     base = entorno(status="aborted", pasos="failed")
     monkeypatch.setattr(continuar, "prevuelo", _prevuelo_que_lee_del_pool)
+    # Sin candado queda SOLO la transacción con FOUND_ROWS, que es dedicada por
+    # su propia razón (el conteo de filas de las escrituras condicionales).
     assert _medir(base, _pedido_continue) == [
-        ("directa", "candado_de_activos", False),
         ("directa", "continuar_transaccion", True),
     ]
 
@@ -679,6 +685,25 @@ def _escrituras_de_crear(base):
     return [(s.split(" (")[0].split(" SET")[0], sitio) for s, _p, sitio in base.escrituras]
 
 
+def _nada_quedo_escrito(base):
+    """2026-09-17: con la reserva, "nada quedó escrito" ya no es "no se escribió
+    NADA". La reserva del cupo se INSERTA antes de planificar —es la que ocupa
+    el lugar— y el camino de fallo la suelta. Lo que NO puede haber es un
+    pipeline a medias: ni el UPDATE que le pone el plan, ni pasos, ni eventos.
+
+    Y cuando la base está caída, el DELETE de la reserva TAMPOCO puede salir: la
+    fila queda `pending` sin plan y la cosecha el reaper a los 300 s. Eso es
+    fail-closed por el lado bueno (ocupa cupo de más, no de menos), y se declara
+    acá en vez de exigir un borrado que la base rota no puede hacer.
+    """
+    confirmadas = [s for s, _p, _sitio in base.escrituras]
+    assert not any("jacobs_steps" in s for s in confirmadas), confirmadas
+    assert not any("jacobs_events" in s for s in confirmadas), confirmadas
+    assert not any(s.startswith("UPDATE jacobs_pipelines") for s in confirmadas), confirmadas
+    reservas = [s for s in confirmadas if s.startswith("INSERT INTO jacobs_pipelines")]
+    assert len(reservas) <= 1, confirmadas
+
+
 def test_crear_escribe_todo_en_una_transaccion_sobre_la_conexion_del_candado(entorno, monkeypatch):
     """Pipeline, paso y PIPELINE_CREATED se confirman juntos por la conexión
     del GET_LOCK. Expected contra 1d84e82: cada escritura por su propia
@@ -695,9 +720,14 @@ def test_crear_escribe_todo_en_una_transaccion_sobre_la_conexion_del_candado(ent
 
     asyncio.run(cuerpo())
     assert _escrituras_de_crear(base) == [
-        ("INSERT INTO jacobs_pipelines", "candado_de_activos"),
-        ("INSERT INTO jacobs_steps", "candado_de_activos"),
-        ("INSERT INTO jacobs_events", "candado_de_activos"),
+        # La reserva primero, fuera de la transacción: es la que decide el cupo
+        # y tiene que estar ANTES de planificar. Abre la conexión del pool, y
+        # por eso el resto —que la reusa— lleva su mismo sitio: es UNA sola
+        # conexión para todo el pedido, que es justo lo que este test cuida.
+        ("INSERT INTO jacobs_pipelines", "_ejecutar_reserva"),
+        ("UPDATE jacobs_pipelines", "_ejecutar_reserva"),
+        ("INSERT INTO jacobs_steps", "_ejecutar_reserva"),
+        ("INSERT INTO jacobs_events", "_ejecutar_reserva"),
     ]
 
 
@@ -720,7 +750,7 @@ def test_crear_con_la_base_que_corta_a_mitad_da_503_sin_nada_escrito(entorno, mo
 
     error = asyncio.run(cuerpo())
     assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
-    assert base.escrituras == []
+    _nada_quedo_escrito(base)
 
 
 def test_crear_con_la_base_colgada_a_mitad_da_503_acotado_sin_nada_escrito(entorno, monkeypatch):
@@ -744,7 +774,7 @@ def test_crear_con_la_base_colgada_a_mitad_da_503_acotado_sin_nada_escrito(entor
     error, espera = asyncio.run(cuerpo())
     assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
     assert espera < 3
-    assert base.escrituras == []
+    _nada_quedo_escrito(base)
 
 
 def test_dry_run_solo_abre_el_candado_y_completa_en_la_misma_transaccion(entorno, monkeypatch):
@@ -755,15 +785,18 @@ def test_dry_run_solo_abre_el_candado_y_completa_en_la_misma_transaccion(entorno
     la transacción."""
     base = entorno()
     monkeypatch.setattr(routes, "prevuelo", _prevuelo_que_lee_del_pool)
-    assert _medir(base, lambda: _pedido_crear("dry_run")) == [("directa", "candado_de_activos", False)]
+    assert _medir(base, lambda: _pedido_crear("dry_run")) == []
     segundo = _escrituras_de_crear(base)[len(_escrituras_de_crear(base)) // 2:]
-    assert segundo == [
-        ("INSERT INTO jacobs_pipelines", "candado_de_activos"),
-        ("INSERT INTO jacobs_steps", "candado_de_activos"),
-        ("INSERT INTO jacobs_events", "candado_de_activos"),
-        ("UPDATE jacobs_pipelines", "candado_de_activos"),
-        ("INSERT INTO jacobs_events", "candado_de_activos"),
+    assert [sql for sql, _sitio in segundo] == [
+        "INSERT INTO jacobs_pipelines",   # la reserva del cupo
+        "UPDATE jacobs_pipelines",        # completar_reserva (plan e identidad)
+        "INSERT INTO jacobs_steps",
+        "INSERT INTO jacobs_events",      # PIPELINE_CREATED
+        "UPDATE jacobs_pipelines",        # completed
+        "INSERT INTO jacobs_events",      # DRY_RUN_COMPLETE
     ]
+    # Una sola conexión para todo el pedido: la que abrió la reserva.
+    assert len({sitio for _sql, sitio in segundo}) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1067,7 +1100,7 @@ def test_falla_antes_del_commit_no_dice_incierto(entorno, monkeypatch):
     error = _crear_y_capturar_503(base, monkeypatch)
     assert error.status_code == 503 and error.detail["code"] == "prevuelo_no_disponible"
     assert "detalle" not in error.detail
-    assert base.escrituras == []
+    _nada_quedo_escrito(base)
 
 
 def test_el_docstring_de_crear_declara_el_commit_incierto():
@@ -1182,7 +1215,7 @@ def test_un_job_del_motor_registry_con_la_base_caida_no_se_cuelga(entorno, monke
             await store.cerrar_pool()
 
     assert asyncio.run(cuerpo()) < 5
-    assert base.escrituras == []
+    _nada_quedo_escrito(base)
 
 
 # ---------------------------------------------------------------------------
@@ -1263,16 +1296,14 @@ def test_el_ejecutor_y_el_motor_registry_comparten_la_misma_marca_de_turno():
     assert store.turno_sin_plazo() is False
 
 
-def test_el_candado_de_creacion_declara_lo_que_serializa_hoy(entorno, monkeypatch):
-    """m6: el comentario de T2 describía una sección crítica más chica que la
-    real (hoy cubre build + pre-vuelo con sondas + transacción, y continuar
-    toma el mismo objeto). Se fija que el texto lo diga y que el objeto sea
-    realmente compartido. Expected contra 977fbe0: el texto no menciona el
-    pre-vuelo ni la sonda."""
-    from jacobs import candado
-
-    texto = (RAIZ / "jacobs" / "candado.py").read_text(encoding="utf-8")
-    for parte in ("pre-vuelo", "sonda", "continuar", "MISMO objeto"):
-        assert parte in texto, parte
-    assert continuar.candado_de_creacion is candado.candado_de_creacion
-    assert routes._pipeline_create_lock is candado.candado_de_creacion
+def test_no_queda_ningun_candado_de_creacion():
+    """2026-09-17: se retiraron los DOS candados -- el `asyncio.Lock` de
+    `jacobs/candado.py` y el `GET_LOCK` de `store.candado_de_activos`. El cupo
+    lo hace cumplir una condición dentro de cada escritura que lo consume, así
+    que un camino nuevo lo hereda sin acordarse de pedir nada. Esto se pone rojo
+    si alguno vuelve."""
+    assert not (RAIZ / "jacobs" / "candado.py").exists()
+    assert not hasattr(store, "candado_de_activos")
+    assert not hasattr(store, "CandadoNoDisponible")
+    assert not hasattr(routes, "_pipeline_create_lock")
+    assert not hasattr(continuar, "candado_de_creacion")

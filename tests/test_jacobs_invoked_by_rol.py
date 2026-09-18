@@ -40,14 +40,14 @@ def test_los_invocadores_validos_son_plataforma_jax_local_y_ada():
 
 def test_crear_rechaza_fernando_como_invocador():
     with patch.object(policy, "check_kill_switch", return_value=False):
-        r = policy.validate_create("Fernando", "supervised", 3, 0)
+        r = policy.validate_create("Fernando", "supervised", 3)
     assert not r.ok
     assert "Fernando" in r.reason
 
 
 def test_crear_acepta_plataforma():
     with patch.object(policy, "check_kill_switch", return_value=False):
-        r = policy.validate_create("plataforma", "supervised", 3, 0)
+        r = policy.validate_create("plataforma", "supervised", 3)
     assert r.ok, r.reason
 
 

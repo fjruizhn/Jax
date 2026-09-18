@@ -23,6 +23,7 @@ os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
 import pytest  # noqa: E402
 
 from jacobs import continuar, store  # noqa: E402
+from jacobs.policy import MAX_PARALLEL_PIPELINES, CupoAgotado  # noqa: E402
 from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus  # noqa: E402
 from jacobs.prevuelo_reglas import Veredicto  # noqa: E402
 
@@ -110,26 +111,48 @@ def test_explain_del_update_final_de_continuar_usa_la_clave_primaria():
         pipeline, pasos = await _abortado()
         pid = pipeline.pipeline_id
         try:
+            # El último parámetro es el tope del cupo: desde el 2026-09-17 el
+            # UPDATE lleva la condición adentro (JOIN con la derivada del
+            # recuento), así que el EXPLAIN mide la sentencia REAL, con su JOIN.
             return await _explain(store._SQL_PIPELINE_CONTINUAR, (
                 json.dumps([s.model_dump() for s in pasos], ensure_ascii=False),
                 json.dumps(pipeline.context, ensure_ascii=False), 2, time.time(), pid, 0,
+                MAX_PARALLEL_PIPELINES,
             ))
         finally:
             await _borrar(pid)
     filas = asyncio.run(cuerpo())
     assert filas, "EXPLAIN vacío"
+    # Tres filas de plan desde el 2026-09-17, y cada una tiene que justificarse:
+    #   1. la fila del pipeline, por PRIMARY;
+    #   2. la tabla DERIVADA del cupo -- sale type=ALL porque es materializada,
+    #      pero tiene UNA fila (el COUNT): un "scan" de una fila no es un scan,
+    #      y por eso se exige rows<=1 en vez de mirar sólo el type;
+    #   3. el COUNT de adentro, por idx_pipelines_status (el mismo índice que
+    #      usa el INSERT de la reserva: una sola fuente, un solo índice).
+    por_clave = {f["key"] for f in filas}
+    assert "PRIMARY" in por_clave, filas
+    assert "idx_pipelines_status" in por_clave, filas
     for f in filas:
-        # En un UPDATE, un recorrido COMPLETO de la clave primaria sale como
-        # type='index' con key='PRIMARY' (medido: 5.810 filas con el WHERE
-        # mutado a `name=%s`). Mirar sólo `key` no lo distingue.
-        assert f["type"] not in ("ALL", "index") and f["key"] == "PRIMARY", filas
-        assert "filesort" not in (f.get("Extra") or "") and "temporary" not in (f.get("Extra") or ""), filas
+        derivada = str(f.get("table") or "").startswith("<derived")
+        if derivada:
+            # La derivada materializa el COUNT: es UNA fila de verdad, aunque el
+            # optimizador estime 2. Lo que importa es que sea diminuta y que el
+            # COUNT de adentro (id=2) vaya por índice, que se exige arriba.
+            assert int(f.get("rows") or 0) <= 10, filas
+            continue
+        assert f["type"] not in ("ALL", "index"), filas
+        assert "filesort" not in (f.get("Extra") or ""), filas
 
 
 def test_si_falla_a_mitad_no_cambia_nada(monkeypatch):
+    # El sexto y último %s es el tope del cupo (2026-09-17): la sentencia real
+    # lo lleva, así que el doble tiene que aceptarlo o el test falla por el
+    # número de parámetros y no por lo que quiere probar.
     monkeypatch.setattr(store, "_SQL_PIPELINE_CONTINUAR",
                         "UPDATE tabla_que_no_existe SET plan=%s, context_refs=%s, "
-                        "current_step_index=%s, updated_at=%s WHERE pipeline_id=%s AND run_epoch=%s")
+                        "current_step_index=%s, updated_at=%s "
+                        "WHERE pipeline_id=%s AND run_epoch=%s AND %s > 0")
 
     async def cuerpo():
         pipeline, pasos = await _abortado()
@@ -246,6 +269,10 @@ def test_si_el_update_final_no_toca_la_fila_no_queda_nada(monkeypatch):
     # con la época correcta, mutamos el UPDATE final para que no toque
     # ninguna fila (condición imposible añadida) SIN lanzar excepción. Si el
     # código no revisara rowcount, devolvería la época nueva con nada escrito.
+    # `AND 1=0` hace que el UPDATE no toque ninguna fila SIN lanzar. Desde que
+    # la sentencia lleva la condición del cupo, 0 filas se interpreta como cupo
+    # lleno y sale CupoAgotado: el cinturón de R23 sigue estando (no devuelve
+    # una época con nada escrito), pero ahora dice cuál es el motivo.
     monkeypatch.setattr(store, "_SQL_PIPELINE_CONTINUAR", store._SQL_PIPELINE_CONTINUAR + " AND 1=0")
 
     async def cuerpo():
@@ -253,10 +280,14 @@ def test_si_el_update_final_no_toca_la_fila_no_queda_nada(monkeypatch):
         pid = pipeline.pipeline_id
         try:
             pasos[2].facet = "thot"
-            nueva = await store.continuar_transaccion(
-                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
-                evento_payload=None)
-            return nueva, await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2]
+            # Ya no devuelve None: 0 filas con la condición del cupo puesta
+            # sólo puede ser el cupo (la época y el status quedaron fijados por
+            # el SELECT...FOR UPDATE), y decirlo es mejor que un None mudo.
+            with pytest.raises(CupoAgotado):
+                await store.continuar_transaccion(
+                    pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, pipeline.context, 2,
+                    evento_payload=None)
+            return None, await store.pipeline_get(pid), (await store.steps_by_pipeline(pid))[2]
         finally:
             await _borrar(pid)
     nueva, p, s2 = asyncio.run(cuerpo())

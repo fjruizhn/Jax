@@ -7,7 +7,9 @@ proceso ya trae JAX_DB_NAME apuntando a otra base (típico después de sourcear
 /etc/jax/.env), se niega a importar en vez de escribir ahí en silencio.
 
 Lo único que sustituye es lo que no es el contrato: el planificador (llama a un
-LLM) y el conteo de pipelines activos (el límite de 3 no es lo que se prueba).
+LLM) y el tope del cupo (el límite de 3 no es lo que se prueba acá; quien lo
+prueba es jacobs/_cupo_io_test.py). La reserva de cupo que hace la base sigue
+siendo la REAL: sólo se le sube el tope.
 El token, la base y los eventos son los reales.
 
 En honor al Prof. Raúl Jacobs.
@@ -116,6 +118,6 @@ async def pedir_hijo(
     cuerpo.update(cuerpo_extra or {})
     req = PipelineCreateRequest.model_validate(cuerpo)
     with patch.object(routes, "_build_plan_or_reject", AsyncMock(side_effect=plan)), \
-         patch.object(store, "pipeline_count_active", AsyncMock(return_value=1)), \
+         patch("jacobs.cupo.MAX_PARALLEL_PIPELINES", 10_000), \
          patch("jacobs.policy.check_kill_switch", return_value=kill_switch):
         return await routes.create_pipeline(req, BackgroundTasks())

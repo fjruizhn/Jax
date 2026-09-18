@@ -262,13 +262,13 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
           python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
             tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
-            las_manos/_human_gate_io_test.py 2>&1 | tee /tmp/out
+            las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -367,8 +367,22 @@ jobs:
           # 113 -> 121 el 2026-09-17 (pre-vuelo y continuar sobre master con
           # jax#207): la union de las dos listas. El runner conto 121 passed y
           # 49 subtests; manda el runner, como dice la nota de arriba.
-          grep -qE "^121 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 121 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 121 -> 135 el 2026-09-17 (el cupo lo hace cumplir la base):
+          #   jacobs/_cupo_io_test.py (+14) -- 25 y 50 corrutinas reservando a la vez sin
+          #   superar el cupo y sin un solo deadlock sin reintentar, soltar devuelve el cupo,
+          #   soltar no toca un pipeline que ya arranco, completar escribe plan/identidad/padre,
+          #   fail-closed sin base y con el reintento agotado, EXPLAIN de la sentencia REAL por
+          #   idx_pipelines_status, y por la ruta completa: 10 POST /jacobs/pipeline a la vez
+          #   admiten exactamente MAX_PARALLEL_PIPELINES (y en menos de 0,35 s: con el candado
+          #   global esas diez planificaciones de 50 ms se serializaban en 0,5 s) y un plan
+          #   rechazado devuelve el cupo; y que la tabla REAL no traiga un estado que PipelineStatus no
+          #   clasifica (el frente G trae `queued`); que REANUDAR con el cupo LLENO no entre (el
+          #   hallazgo: rojo por COMPORTAMIENTO contra b450248, "1 is not None"); y que el UPDATE que
+          #   REVIVE (continuar_transaccion) rechace con el cupo lleno y admita con lugar -- la cuarta
+          #   sentencia, que el autor del mecanismo retirado pidio ver probada contra la base antes del
+          #   merge. Medido en local (3.14) contra jax_memory_test.
+          grep -qE "^135 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 135 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -898,6 +912,8 @@ jobs:
           tests/test_subpipeline_contrato_puro.py
           tests/test_human_gate_sin_emision_http.py
           tests/test_las_manos_auth_servicio.py
+          tests/test_creacion_sin_candado_global.py
+          tests/test_cupo_en_todos_los_caminos.py
           tests/test_base_por_sesion.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
@@ -1021,6 +1037,8 @@ jobs:
             tests/test_subpipeline_contrato_puro.py \
             tests/test_human_gate_sin_emision_http.py \
             tests/test_las_manos_auth_servicio.py \
+            tests/test_creacion_sin_candado_global.py \
+            tests/test_cupo_en_todos_los_caminos.py \
             tests/test_base_por_sesion.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
@@ -2184,14 +2202,31 @@ jobs:
           # 2021 passed, 1 xfailed, 16 subtests; el runner cuenta uno menos y
           # reporta ese xfail como skipped (mismo desfase de siempre), asi que
           # el piso queda en 2020. Si el runner da otro numero, manda el runner.
+          # 2020 -> 2049 el 2026-09-17 (union del cupo en la base): las DOS listas suman
+          #   tests/test_creacion_sin_candado_global.py (12) y tests/test_cupo_en_todos_los_caminos.py
+          #   (18 tras la revision del autor del mecanismo retirado: las cuatro escrituras que ocupan
+          #   cupo llevan la condicion; el cupo se mira ANTES del pre-vuelo, que SONDEA y es una llamada
+          #   PAGA -- por orden en el codigo y tambien por comportamiento: con el cupo lleno el prevuelo
+          #   no se llama; el techo de espera acumulada esta declarado y se cumple (2,06 s sin
+          #   presupuesto, <=1 s con el); y la contencion sale 503 con Retry-After, no 500 ni 422. Antes
+          #   eran 8: las cuatro escrituras que ocupan cupo llevan la condicion, resume y approve-step le
+          #   pasan el tope, y el motivo del rechazo no miente), mas los retiros que arrastran
+          #   (el timeout del candado sale de prevuelo_config, y el test del candado de creacion pasa
+          #   a exigir que NO quede ninguno). El ROJO del hallazgo se verifico
+          #   POR COMPORTAMIENTO contra master b450248 con un canario contra la base real: con el cupo
+          #   LLENO, pipeline_tomar_epoca admitia el resume (devolvio epoca 1) -- "1 is not None".
+          #   Si el runner da otro numero, manda el runner.
           # 2020 -> 2023 el 2026-09-17 (el .env se lee con sudo -n): las DOS listas suman
           #   tests/test_env_se_lee_con_sudo.py (3: hay archivos que lo nombran; ninguno lo SOURCEA sin sudo;
           #   y el control ve la forma prohibida, que es lo que lo hace valer). Desde hoy el archivo es
           #   root:jaxsvc 640 y sourcearlo directo ya no funciona: quedó cambiado en 43 archivos vivos (los
           #   planes de docs/superpowers/plans son actas fechadas y no se reescriben). MEDIDO en local
           #   (3.14), env -i, las DOS listas: "2023 passed, 1 skipped, 1 xfailed, 16 subtests passed".
-          grep -qE "^2023 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2023 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2049 + 3 = 2052: los dos deltas del mismo dia, sumados al mergear master
+          #   (la union del cupo, +29, y el .env por sudo, +3). Sumar deltas, no elegir
+          #   un lado. Si el runner da otro numero, manda el runner.
+          grep -qE "^2052 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2052 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -2270,7 +2305,6 @@ jobs:
           tests/test_jacobs_continuar_db.py
           tests/test_jacobs_events_indice_causa_db.py
           tests/test_prevuelo_pool_db.py
-          tests/test_jacobs_candado_activos_db.py
           tests/test_jacobs_reaper_cas_db.py
           las_manos/_motor_usage_writer_test.py
           tests/test_facetas_de_gobernanza_db.py
@@ -2289,7 +2323,6 @@ jobs:
             tests/test_jacobs_continuar_db.py \
             tests/test_jacobs_events_indice_causa_db.py \
             tests/test_prevuelo_pool_db.py \
-            tests/test_jacobs_candado_activos_db.py \
             tests/test_jacobs_reaper_cas_db.py \
             las_manos/_motor_usage_writer_test.py \
             tests/test_facetas_de_gobernanza_db.py \
@@ -2481,5 +2514,12 @@ jobs:
           # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). HEAD esperaba 86 passed y
           # origin/master 35; la unión de los dos conjuntos no da ninguno de los dos.
           # Medido en hall9000 contra jax_memory_test con la lista unificada: 94 passed.
-          grep -qE "^94 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 94 tests CORRIDOS."; exit 1; }
+          grep -qE "^87 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 87 tests CORRIDOS."; exit 1; }
+          # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
+          #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
+          #   probaba. Bajar un piso solo se justifica cuando se retira
+          #   funcionalidad y se dice: acá se retira el candado entero, y lo que
+          #   hacía cumplir pasa a estar dentro de cada escritura (sus controles
+          #   nuevos viven en jacobs/_cupo_io_test.py y tests/test_cupo_en_todos_los_caminos.py,
+          #   que suman a OTROS dos jobs). Medido en local contra jax_memory_test.

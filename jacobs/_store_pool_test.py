@@ -1212,9 +1212,10 @@ class ExcepcionAlPoolTest(unittest.TestCase):
 
     # Cada entrada es un llamador VIVO en codigo de servicio, con su razon.
     LLAMADORES = {
-        # El GET_LOCK del cupo: se ESPERA, y esperar con una conexion del pool
-        # deja sin conexiones al resto del servicio.
-        "jacobs/store.py::candado_de_activos",
+        # (candado_de_activos salio de esta lista el 2026-09-17, con el GET_LOCK
+        # del cupo: era la UNICA excepcion al pool que existia por ESPERAR. El
+        # cupo ya no se espera -- se decide dentro de la misma sentencia que
+        # escribe --, asi que crear dejo de abrir una conexion dedicada.)
         # Escrituras CONDICIONALES por epoca: necesitan CLIENT.FOUND_ROWS, que
         # se negocia en el handshake y no se enciende por sesion.
         "jacobs/store.py::_ejecutar_condicional",
