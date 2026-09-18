@@ -276,6 +276,58 @@ def _enrich_prompt(ctx_input: dict) -> str:
 #  Invocadores por faceta
 # ----------------------------------------------------------------
 
+class PasoTruncado(Exception):
+    """El proveedor corto la salida por tope de longitud. Entregar el texto a
+    medias es peor que fallar: el paso siguiente construye sobre una frase
+    cortada y nadie se entera. Fallo cerrado, y el pipeline queda continuable
+    (cae en el `except Exception` de `_run_one_step` -> `_fail_step`, el mismo
+    camino que cualquier otro error de un step; nada nuevo que mantener ahí).
+
+    Espejo del camino de motor: las_manos/motor_registry/worker.py:828 ya
+    falla el job cuando `finish_reason == "length"`. Esto cubre los tres
+    transportes HTTP directos, que ni leían ese campo."""
+    codigo = "paso_truncado"
+
+
+# Cada proveedor nombra el corte de longitud distinto -- no se adivina, se
+# verifica contra la respuesta real de cada API. Un solo lugar que lo sepa.
+_CORTE_POR_LONGITUD = {
+    "openai_compat": ("length",),
+    "ollama": ("length",),
+    "gemini": ("MAX_TOKENS",),
+}
+
+
+def _texto_o_truncado(data: dict, transporte: str) -> str:
+    """Lee el texto de la respuesta cruda de `transporte` y lo devuelve, o
+    levanta `PasoTruncado` si el proveedor cortó por tope de longitud.
+
+    Único lector de "¿este texto vino completo?" para los tres transportes
+    HTTP directos -- evita que cada `_invoke_*` reimplemente (o se olvide de)
+    el nombre del campo de corte, que es distinto en cada API."""
+    if transporte == "openai_compat":
+        eleccion = (data.get("choices") or [{}])[0]
+        razon = eleccion.get("finish_reason")
+        texto = (eleccion.get("message") or {}).get("content", "")
+    elif transporte == "ollama":
+        razon = data.get("done_reason")
+        texto = (data.get("message") or {}).get("content", "")
+    elif transporte == "gemini":
+        candidato = (data.get("candidates") or [{}])[0]
+        razon = candidato.get("finishReason")
+        partes = (candidato.get("content") or {}).get("parts") or [{}]
+        texto = "".join(p.get("text", "") for p in partes)
+    else:
+        raise ValueError(f"transporte sin lector de truncado: {transporte}")
+
+    if razon in _CORTE_POR_LONGITUD.get(transporte, ()):
+        raise PasoTruncado(
+            f"{transporte} corto la salida por longitud ({razon}); "
+            f"{len(texto)} caracteres entregados"
+        )
+    return texto
+
+
 async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     """Formato Gemini + grounding required_web. Transporte, no faceta —
     hoy solo hipatia lo usa, pero cualquier facet con transport=http_gemini
@@ -305,8 +357,9 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     data = await _call()
     final_data = data
     candidate = data.get("candidates", [{}])[0]
-    parts_raw = candidate.get("content", {}).get("parts", []) or []
-    texto = "".join(p.get("text", "") for p in parts_raw)
+    # E-25: PasoTruncado si Gemini cortó por MAX_TOKENS -- antes de leer
+    # groundingMetadata, que igual no importa sobre una respuesta a medias.
+    texto = _texto_o_truncado(data, "gemini")
     meta  = candidate.get("groundingMetadata", {}) or {}
     chunks = meta.get("groundingChunks") or []
     supports = meta.get("groundingSupports") or []
@@ -323,8 +376,9 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
         ]
         data2 = await _call()
         candidate2 = data2.get("candidates", [{}])[0]
-        parts2  = candidate2.get("content", {}).get("parts", []) or []
-        texto2  = "".join(p.get("text", "") for p in parts2)
+        # Mismo control en el retry: el corte por longitud puede pasar en
+        # cualquiera de los dos llamados, no solo en el primero.
+        texto2  = _texto_o_truncado(data2, "gemini")
         meta2   = candidate2.get("groundingMetadata", {}) or {}
         chunks2 = meta2.get("groundingChunks") or []
         if chunks2:
@@ -392,7 +446,9 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     if resp.status_code != 200:
         raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [f.credential])}")
     data  = resp.json()
-    texto = data["choices"][0]["message"].get("content", "")
+    # E-25: PasoTruncado si el proveedor cortó por longitud (finish_reason
+    # "length") en vez de entregar el texto a medias como resultado bueno.
+    texto = _texto_o_truncado(data, "openai_compat")
 
     # D1.2 — best-effort, fuera del context manager del client: nunca debe
     # poder romper la respuesta al step (record_resolved_version_safe ya
@@ -453,7 +509,8 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     if resp.status_code != 200:
         raise RuntimeError(f"Ollama HTTP {resp.status_code}: {recortar_redactado(resp.text, 200)}")
     data  = resp.json()
-    texto = data.get("message", {}).get("content", "")
+    # E-25: PasoTruncado si Ollama cortó por longitud (done_reason "length").
+    texto = _texto_o_truncado(data, "ollama")
 
     # D1.2 — capturado por consistencia con los transportes HTTP; ver
     # CONTEXT.md para la limitacion real (tags de Ollama no son alias
