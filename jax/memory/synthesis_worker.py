@@ -20,7 +20,7 @@ origino esta comparacion):
     NO habilitado por defecto — activarlo es una decision explicita.
 
 Uso:
-    set -a; source /etc/jax/.env; set +a
+    set -a; source <(sudo -n cat /etc/jax/.env); set +a
     PYTHONPATH=. .venv/bin/python -m jax.memory.synthesis_worker
 
 En memoria de Jairo Urbina.

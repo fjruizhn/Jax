@@ -9,7 +9,7 @@
 5. Comprobar que la centinela MURIÓ y que no queda ningún proceso de la cuenta.
 6. REPONER (finally: también si algo falló), `cmp` contra el respaldo, y comprobar que vuelve a entrar.
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c6.py <nombre-de-máquina>
 Sale 0 sólo con `c6_probado=true`.
 """

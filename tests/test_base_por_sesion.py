@@ -136,7 +136,7 @@ def test_nunca_resuelve_a_produccion():
 
 
 def test_una_base_de_produccion_ya_exportada_es_error(monkeypatch):
-    """El caso real: `set -a; . /etc/jax/.env; set +a` deja
+    """El caso real: `set -a; . <(sudo -n cat /etc/jax/.env); set +a` deja
     JAX_DB_NAME=jax_memory. Un test que escribe filas no puede correr así."""
     monkeypatch.setenv("JAX_DB_NAME", BASE_DE_PRODUCCION)
     with pytest.raises(BaseDeTestInvalida):

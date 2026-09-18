@@ -10,7 +10,7 @@
 Lee la DB de producción (config, proveedores, facetas) SIN escribir. La pausa y el latido
 del vigía van a un directorio temporal: la pausa real del Ejecutor no se toca.
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:las_manos .venv/bin/python scripts/ejecutor_contratos/probar_c5.py \
        [--corridas N] [--cerebro FACETA] [--auditor FACETA] [--instrucciones ARCHIVO] [--url-auditor URL]
 Las cuatro últimas opciones existen para MEDIR y para VER FALLAR; por omisión, lo de axioma_config.

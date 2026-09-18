@@ -43,7 +43,7 @@ POR FASE (modos de carga), p50/p95 por pedido: espera de conexión del pool
 leer_catalogo y armado del prompt; y la CPU agregada / pedidos.
 
 Uso:
-  set -a; source /etc/jax/.env; set +a; export JAX_DB_NAME=jax_memory_test
+  set -a; source <(sudo -n cat /etc/jax/.env); set +a; export JAX_DB_NAME=jax_memory_test
   PYTHONPATH=.:las_manos las_manos/.venv/bin/python scripts/perfil_prevuelo.py \\
       trabajadores -c 1,25,50 --duracion 10
   ... abierto --rps 100,400,700 --duracion 10

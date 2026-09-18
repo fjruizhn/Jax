@@ -12,7 +12,7 @@
 # retenerlo y la Mesa esperaría para siempre (el carril de la Mesa no tiene tope, a propósito).
 # El script se niega antes de tocar nada — tests/test_ejecutor_sp3_config.py lo ejercita.
 #
-# Uso:     set -a; . /etc/jax/.env; set +a; ops/ejecutor/instalar_carril_comun.sh
+# Uso:     set -a; . <(sudo -n cat /etc/jax/.env); set +a; ops/ejecutor/instalar_carril_comun.sh
 # Rollback: sudo chown fruiz:fruiz "$JAX_PROXY_CARRIL_RAIZ" && sudo chmod 0750 "$JAX_PROXY_CARRIL_RAIZ"
 #           (y `sudo gpasswd -d <cuenta> "$JAX_CARRIL_GRUPO"` por cada cuenta agregada)
 set -euo pipefail

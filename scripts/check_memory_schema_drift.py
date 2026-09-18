@@ -22,7 +22,7 @@ difiere o falta; 2 si no se pudo leer el archivo o la base. Nunca "no
 aplica".
 
 Uso (hall9000, contra produccion; solo lectura):
-    set -a; . /etc/jax/.env; set +a
+    set -a; . <(sudo -n cat /etc/jax/.env); set +a
     .venv/bin/python scripts/check_memory_schema_drift.py
 
 Limite declarado: la salida de `SHOW CREATE TABLE` depende de la version del

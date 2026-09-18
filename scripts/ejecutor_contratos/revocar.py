@@ -2,7 +2,7 @@
 # scripts/ejecutor_contratos/revocar.py
 """C6 — REVOCA el acceso del Ejecutor en TODAS las máquinas del inventario y corta sus sesiones.
 
-Uso de emergencia:  set -a; . /etc/jax/.env; set +a
+Uso de emergencia:  set -a; . <(sudo -n cat /etc/jax/.env); set +a
                     PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/revocar.py --confirmo-revocar-todo
 Sin la bandera no hace nada. Reponer el acceso es a mano, con los archivos .revocadas-* de cada máquina.
 Lee /etc/jax/.env (producción) para JAX_EJECUTOR_* y la política exportada; no toca la DB.

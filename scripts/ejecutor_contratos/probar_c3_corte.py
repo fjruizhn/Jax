@@ -2,7 +2,7 @@
 """C3 VISTO FALLAR con el arnés real: con el registro no escribible, la herramienta NO corre.
 
 Re-ejecutable por un tercero en hall9000 (necesita sudo para `chattr`):
-  set -a; . /etc/jax/.env; set +a
+  set -a; . <(sudo -n cat /etc/jax/.env); set +a
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:las_manos .venv/bin/python scripts/ejecutor_contratos/probar_c3_corte.py
 
 Dos corridas del arnés real, como la cuenta del Ejecutor y dentro de su jaula, contra

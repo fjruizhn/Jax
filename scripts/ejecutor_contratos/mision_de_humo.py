@@ -18,7 +18,7 @@ un servidor de clientes: el arranque la rechaza (compuerta de C5 y contratos rem
 7. SIGTERM al vigía (fin normal: audita lo pendiente, borra el latido) → proxy en 423 otra vez.
 Al final: cadena del registro, pasos de la misión en el registro, pausa ausente.
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:las_manos .venv/bin/python scripts/ejecutor_contratos/mision_de_humo.py \
        ejecutor-prueba
 Salida `clave=valor`; sale 0 sólo con `humo_ok=true`.

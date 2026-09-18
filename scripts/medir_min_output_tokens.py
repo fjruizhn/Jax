@@ -51,7 +51,7 @@ Este script sigue el MISMO método de P, no una aproximación propia:
     código.
 
 Uso (con GO, contra producción, solo lectura):
-  set -a; source /etc/jax/.env; set +a
+  set -a; source <(sudo -n cat /etc/jax/.env); set +a
   PYTHONPATH=.:las_manos python scripts/medir_min_output_tokens.py --jobs las_manos/logs/motor_jobs.jsonl
 
 En memoria de Jairo Urbina.

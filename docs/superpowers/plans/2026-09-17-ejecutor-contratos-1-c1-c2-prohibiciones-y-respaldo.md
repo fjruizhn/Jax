@@ -3039,7 +3039,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 #!/usr/bin/env bash
 # ops/ejecutor/instalar_contratos.sh — instala C1/C2 del Ejecutor en hall9000.
 # Corre como fruiz desde el checkout de producción (/home/fruiz/jax en master); usa sudo
-# para lo que es de root. Idempotente. Lee JAX_EJECUTOR_* del entorno (set -a; . /etc/jax/.env).
+# para lo que es de root. Idempotente. Lee JAX_EJECUTOR_* del entorno (set -a; . <(sudo -n cat /etc/jax/.env)).
 set -euo pipefail
 : "${JAX_EJECUTOR_LIB:?}" "${JAX_EJECUTOR_POLITICA:?}" "${JAX_EJECUTOR_GANCHO_TOPE_S:?}" "${JAX_EJECUTOR_CUENTA:?}"
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
@@ -3094,7 +3094,7 @@ de `jax_memory_test`, restart, `NRestarts=0`):
 
 ```bash
 cd /home/fruiz/jax && pwd && git branch --show-current
-set -a; . /etc/jax/.env; set +a
+set -a; . <(sudo -n cat /etc/jax/.env); set +a
 PYTHONPATH=.:las_manos python3 -m jax.ejecutor.contratos.exportar
 ops/ejecutor/instalar_contratos.sh
 ```
@@ -3109,7 +3109,7 @@ Expected: `sha256="…" reglas=14 hosts=4` e `instalado=true`. `stat -c '%U:%G %
 
 Corre verificar_c1 contra la cuenta real, el gancho instalado y el arnés real en la
 jaula. Imprime cada Fallo en formato neutro y sale 0 sólo si no hay ninguno.
-Uso:  set -a; . /etc/jax/.env; set +a
+Uso:  set -a; . <(sudo -n cat /etc/jax/.env); set +a
       PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c1.py
 Lee /etc/jax/.env (producción) sólo para JAX_EJECUTOR_*: no toca la DB.
 """
@@ -3144,7 +3144,7 @@ agregarlo con test): qué rutas y modelos pide el arnés. Si pide algo que el up
 - [ ] **Step 5: VERLO FALLAR — lista ilegible bloquea TODO (el caso del spec)**
 
 ```bash
-set -a; . /etc/jax/.env; set +a
+set -a; . <(sudo -n cat /etc/jax/.env); set +a
 cp -a "$JAX_EJECUTOR_POLITICA" /tmp/politica.mut-bak
 python3 - <<'PY'
 import json, os, pathlib

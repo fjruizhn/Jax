@@ -19,7 +19,7 @@ Por omisión NO BORRA: lista lo que borraría (`--dry-run` es el default).
 Para borrar de verdad hay que escribir `--borrar-de-verdad`.
 
 USO
-    set -a; . /etc/jax/.env; set +a
+    set -a; . <(sudo -n cat /etc/jax/.env); set +a
     python3 scripts/limpiar_bases_de_test.py --dias 7
     python3 scripts/limpiar_bases_de_test.py --dias 7 --borrar-de-verdad
 
@@ -77,7 +77,7 @@ def _parametros_de_conexion() -> dict:
     if faltantes:
         raise SystemExit(
             f"faltan variables de conexión: {', '.join(faltantes)}. "
-            f"Sourceá /etc/jax/.env (set -a; . /etc/jax/.env; set +a)."
+            f"Sourceá /etc/jax/.env (set -a; . <(sudo -n cat /etc/jax/.env); set +a)."
         )
     return {
         "host": os.environ["JAX_DB_HOST"],

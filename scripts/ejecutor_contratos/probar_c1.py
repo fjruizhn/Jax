@@ -4,7 +4,7 @@
 
 Corre verificar_c1 contra la cuenta real, el gancho instalado y el arnés real en la
 jaula. Imprime cada Fallo en formato neutro y sale 0 sólo si no hay ninguno.
-Uso:  set -a; . /etc/jax/.env; set +a
+Uso:  set -a; . <(sudo -n cat /etc/jax/.env); set +a
       PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c1.py
 Lee /etc/jax/.env (producción) sólo para JAX_EJECUTOR_*: no toca la DB.
 """

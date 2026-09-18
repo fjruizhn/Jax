@@ -41,7 +41,7 @@ ORIGIN = "auditoría de rutina de Thot (Mesa)"
 _STAGING_HOST = os.getenv("JAX_ENV_STAGING_HOSTS", "").split(",")[0].strip()
 assert _STAGING_HOST, (
     "JAX_ENV_STAGING_HOSTS no seteada -- sourcear /etc/jax/.env "
-    "(set -a; source /etc/jax/.env; set +a) antes de correr este test"
+    "(set -a; source <(sudo -n cat /etc/jax/.env); set +a) antes de correr este test"
 )
 REVIEW_FILE = Path(__file__).resolve().parent.parent / "missions" / "thot-review-001.md"
 

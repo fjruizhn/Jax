@@ -5,7 +5,7 @@ Seguridad: con JAX_DB_NAME apuntando a una base que no sea de tests
 (típico después de sourcear /etc/jax/.env), el módulo se niega a importar.
 
 Corre con:
-  set -a; . /etc/jax/.env; set +a; export JAX_DB_NAME=jax_memory_test
+  set -a; . <(sudo -n cat /etc/jax/.env); set +a; export JAX_DB_NAME=jax_memory_test
   PYTHONPATH=.:las_manos python -m pytest -v las_manos/_human_gate_io_test.py
 """
 from __future__ import annotations

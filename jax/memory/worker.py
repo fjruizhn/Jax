@@ -19,7 +19,7 @@ Filosofia (decidido por Claude + DeepSeek + Hipatia):
     El worker no cambia; solo cambia quien extrae.
 
 Uso:
-    set -a; source /etc/jax/.env; set +a
+    set -a; source <(sudo -n cat /etc/jax/.env); set +a
     PYTHONPATH=. .venv/bin/python -m jax.memory.worker
 
 En memoria de Jairo Urbina.
