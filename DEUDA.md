@@ -476,125 +476,125 @@ haya un plan de voz de verdad.
 **Controles del retiro:** `tests/test_retiro_de_la_voz.py` (el paquete no está, el
 arranque no exige la variable, ningún módulo de servicio importa la voz). Los tres
 fallan contra `351ec95`.
-## Cerrado en código, merge y despliegue pendientes — el cupo de pipelines lo hace cumplir la base (2026-09-17)
+## Cerrado en código, merge y despliegue pendientes — UN solo mecanismo de cupo (2026-09-17)
 
-Rama `perf/candado-creacion-a-la-base`, con merge-forward a `origin/master` `b4543ec`. **NO
-mergeada, NO desplegada.** Decisión de Fernando (2026-09-17): se arregla de raíz ANTES de desplegar el frente G.
+Rama `perf/candado-creacion-a-la-base`, con merge-forward a `origin/master` `b450248` (jax#209).
+**NO mergeada, NO desplegada.** Decisión de Fernando (arreglar de raíz antes del frente G) y del
+coordinador (queda un solo mecanismo, y es el INSERT condicionado).
 
-**El hallazgo (frente G, Task 13, 2026-09-17).** `routes._pipeline_create_lock` era un
-`asyncio.Lock()` GLOBAL del proceso que envolvía el conteo de activos, el consumo del token de Ada,
-la planificación (20-40 s de LLM) y el INSERT. Hacía cumplir `MAX_PARALLEL_PIPELINES`, sí, pero
-serializaba TODA la creación en un solo objeto compartido: techo de ~43 delegaciones/s y la
-creación de pipelines de la MESA esperando detrás de las delegaciones de Ada.
+**LA REGLA, que reemplaza a dos candados: la condición del cupo viaja DENTRO de la escritura que lo
+consume.** Un candado hay que acordarse de pedirlo; una condición adentro del INSERT o del UPDATE
+se aplica sola aunque quien escriba un camino nuevo no sepa que hay un límite.
 
-**El arreglo.** `jacobs/cupo.py`: el cupo lo hace cumplir la base en UNA sentencia que decide por
-filas afectadas — `INSERT ... SELECT ... WHERE (SELECT COUNT(*) …) < limite` —, el mismo patrón
-del consumo del token de sub-pipelines. 1 fila = hay cupo; 0 filas = el mismo rechazo explícito
-(422, mismo texto). La reserva se toma ANTES del token y ANTES de planificar, para conservar los
-**tres** invariantes que sostenía el candado y no sólo el del conteo:
+**Lo que había.** Dos mecanismos para el mismo invariante: `jacobs/candado.py::candado_de_creacion`
+(un `asyncio.Lock` de proceso) y `store.candado_de_activos()` (un `GET_LOCK` del servidor MariaDB,
+jax#209, que existía porque el de proceso no cruzaba al CLI). Los dos hacían cumplir el límite y los
+dos serializaban: techo de ~43 delegaciones/s y la Mesa esperando detrás de Ada.
 
-1. conteo + INSERT atómicos entre sí → los hace la base;
-2. ningún token de Ada se quema sin cupo → la reserva va primero;
-3. planificaciones en vuelo acotadas → ahora por el cupo (3), antes por el candado (1). De ahí
-   salía el cuello.
+**EL HALLAZGO que amplió el alcance.** `resume` y `approve-step` mueven un pipeline de
+`interrupted` —que NO cuenta como activo— a correr, **sin mirar el cupo**: ninguno de los dos
+candados los tomaba. Con tres interrumpidos y tres `resume` se pasaba el límite. No es de jax#209 ni
+de esta rama: es anterior. Un límite que dice que existe y no existe es peor que no tenerlo, porque
+alguien dimensionó GPU, pool y techos de costo creyendo que como mucho hay tres.
+**Verificado ROJO POR COMPORTAMIENTO contra `b450248`**, con un canario contra la base real: con el
+cupo LLENO, `pipeline_tomar_epoca` admitió el resume y devolvió época 1 (`1 is not None`).
 
-Todo camino de fallo posterior suelta la reserva (`soltar_reserva`, `DELETE ... AND
-status='pending'`); si el proceso muere en el medio, el reaper cosecha lo `pending` de más de
-300 s, que ya existía.
+**Por qué no se podía mergear a medias.** Con crear usando el INSERT y continuar el GET_LOCK, los
+dos no se ven: continuar cuenta 2 bajo su candado, crear inserta contando 2 filas **commiteadas**,
+los dos commitean y quedan **4 activos con el límite en 3**. Dos mecanismos para un invariante es
+peor que cualquiera de los dos solo.
 
-**Deadlock: parte del contrato, no un detalle.** El `INSERT ... SELECT` lee la tabla en la que
-inserta, así que dos reservas simultáneas se traban (1213) — y esos candados son justo lo que la
-hace correcta. Se reintenta. Medido en hall9000 contra `jax_memory_test` (2026-09-17): sin
-reintento mueren 5 de 10, 22 de 25 y 21 de 50 reservas concurrentes; con reintento, cero errores y
-p95 8,41 ms a c=50. **Bajo carga (25 VUs, ~2.900 reservas/s contra el cupo lleno) cinco reintentos
-se agotaron 711 veces y salieron como 500**; con doce y espera creciente hasta 50 ms, cero. Agotar
-los reintentos levanta el error: nunca devuelve "reservado" sin fila.
+**Cómo queda — los CUATRO caminos que ocupan cupo:**
 
-**EXPLAIN (consulta REAL, no el diseño en la cabeza).** `idx_pipelines_status` YA EXISTÍA: sin
-migración. `EXPLAIN` del COUNT del cupo con 13.524 filas → `type=range key=idx_pipelines_status
-key_len=82 rows=2 Extra: Using where; Using index`. El test corre el `EXPLAIN` sobre
-`cupo.SQL_RESERVAR` entera con los mismos parámetros de producción y exige ese índice sin
-`filesort` ni `Using temporary`.
+| camino | forma | dónde va la condición |
+|---|---|---|
+| crear | INSERT | `cupo.SQL_RESERVAR`, reserva ANTES de planificar |
+| continue | UPDATE | `store._SQL_PIPELINE_CONTINUAR`, JOIN con la derivada del recuento |
+| resume | UPDATE | `store.pipeline_tomar_epoca(cupo_maximo=...)` |
+| approve-step | UPDATE | ídem |
 
-**Arnés de carga arreglado en el mismo PR.** `loadtest/jacobs_subpipelines.js` había quedado
-obsoleto tras la autenticación de servicio: mandaba una sola credencial y `invoked_by='jax_local'`,
-así que **medía 403 a 28.000 rps** — FastAPI devolviendo un rechazo sin tocar la base ni el cupo.
-Ahora manda la credencial de la identidad que corresponde, consume tokens con `OFFSET` (un token se
-quema una sola vez; la segunda corrida medía "token ya usado") y `JAX_CARGA_PLAN_MS` representa lo
-que tarda planificar (con el plan instantáneo el cuello quedaba subestimado).
+La partición de `PipelineStatus` y la lista de estados viven **una sola vez**, en `jacobs/policy.py`,
+y de ahí salen las cuatro sentencias **y el recuento de `store`**. `interrupted` NO ocupa cupo:
+semántica heredada, declarada, no cambiada acá.
 
-**Pisos de CI (MEDICIONES LOCALES; manda el runner):** tras el merge-forward y **sumando deltas**,
-`tests-puros` 1603 → **1614** (+11, `tests/test_creacion_sin_candado_global.py`);
-`subpipeline-contrato-db` 109 → **120** (+11, `jacobs/_cupo_io_test.py`). Detector P10 en cero
-violaciones.
+**Verificado contra MariaDB 12.3** antes de escribir el código: 10, 25 y 50 reanimaciones
+concurrentes respetan el cupo exacto con las dos formas de UPDATE (subconsulta directa y JOIN con
+derivada; se eligió el JOIN por portabilidad, CI corre 11.8), y **50 creaciones CRUZADAS con 50
+reanimaciones** —la carrera que rompía tener dos mecanismos— también, con cero errores.
 
-**Carga (2026-09-17, hall9000, k6 v2.2.0, instancias AISLADAS sobre `jax_memory_test` — nunca :7777
-ni :8080).** Antes = `origin/master` `b4543ec`; después = la rama sobre ese mismo merge-forward.
-Mismo arnés, misma máquina, mismos offsets de token, 5 s de rampa + 20 s sostenidos + 5 s de bajada,
-pool 10. **Cupo efectivo 2 de 3** en las dos columnas: el padre `running` que el arnés necesita para
-que Ada pueda pedir un hijo ocupa un lugar (el pre-vuelo del arnés lo exige y aborta si hay más).
+**Deadlock: calibrado midiendo, no estimando.** El `INSERT`/`UPDATE` lee la tabla en la que escribe,
+así que dos escrituras simultáneas se traban (1213) — y esos candados son justo lo que las hace
+correctas. Se reintenta: 5 reintentos se agotaron 711 veces bajo carga; 12 dejaron 1 de cada
+~530.000; con la unión (el UPDATE que completa la reserva pelea por los mismos candados de rango),
+12 dejaron 23 de ~250.000. **Con 24 y espera creciente hasta 100 ms: cero.** Agotarlos levanta el
+error, nunca devuelve "reservado" sin fila.
 
-`JAX_CARGA_PLAN_MS=0` (plan instantáneo, comparable al arnés de los frentes F/G):
+**Retirados con el candado:** `jacobs/candado.py`, `store.candado_de_activos`, `CandadoNoDisponible`,
+`JAX_PREVUELO_CANDADO_TIMEOUT_S` + `candado_timeout_s()` (una variable que no lee nadie es una
+trampa) y `tests/test_jacobs_candado_activos_db.py`. **Crear dejó de necesitar una conexión
+DEDICADA** y sale de la lista de excepciones al pool: era la única que estaba ahí por ESPERAR.
 
-| escenario | VUs | rps antes | p95 antes | rps después | p95 después |
-|---|---|---|---|---|---|
-| Mesa (`invoked_by=plataforma`) | 10 | 309,0 | 33,83 ms | **3.070,4** | **7,86 ms** |
-| Mesa | 25 | 185,8 | 160,57 ms | **3.161,3** | **18,64 ms** |
-| Ada (hijo con token real) | 10 | 199,3 | 51,69 ms | **3.153,6** | **9,36 ms** |
-| Ada | 25 | 206,8 | 126,88 ms | **3.668,0** | **8,27 ms** |
-| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 90,4 | 67,90 ms | **1.134,5** | **11,11 ms** |
-| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | 37,2 | 245,22 ms | **1.159,4** | **7,68 ms** |
+**EXPLAIN de las sentencias REALES.** El COUNT del cupo va por `idx_pipelines_status` (ya existía:
+sin migración). El UPDATE de continuar: la fila del pipeline por `PRIMARY`, el COUNT por
+`idx_pipelines_status`, y la tabla derivada materializada con una fila. Sin `filesort` ni scans.
 
-`JAX_CARGA_PLAN_MS=300` (planificador representado; el real tarda 1,3-8,7 s en el camino sano, así
-que 300 ms es conservador). **Con el plan instantáneo la sección crítica del candado duraba
-microsegundos y el cuello quedaba SUBESTIMADO: lo que ponía a la Mesa a esperar era planificar
-adentro del candado.** Esta es la tabla que prueba la tesis:
+**Carga (2026-09-17, hall9000, k6 v2.2.0, instancias AISLADAS sobre `jax_memory_test`).** Antes =
+`b450248`; después = la rama sobre ese mismo árbol. Mismo arnés, mismos offsets de token, 5 s de
+rampa + 20 s sostenidos + 5 s de bajada, pool 10, **cupo efectivo 2 de 3** en las dos columnas (el
+padre `running` que el arnés necesita ocupa un lugar; el pre-vuelo del arnés lo exige y aborta si
+hay más — abortó dos veces de verdad, por filas vivas que dejaron las suites de base).
+
+`JAX_CARGA_PLAN_MS=300` (planificador representado; el real tarda 1,3-8,7 s) — **la tabla que
+prueba la tesis**:
 
 | escenario | VUs | rps antes | p95 antes | rps después | p95 después |
 |---|---|---|---|---|---|
-| Mesa | 10 | 3,3 | 3.047,91 ms | **3.998,1** | **1,98 ms** |
-| Mesa | 25 | 3,3 | 7.634,00 ms | **4.299,4** | **5,66 ms** |
-| Ada | 10 | 3,2 | 3.177,88 ms | **3.932,5** | **2,00 ms** |
-| Ada | 25 | 3,3 | 7.686,32 ms | **4.248,9** | **5,97 ms** |
-| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 1,1 | 4.599,36 ms | **1.403,0** | **3,33 ms** |
-| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | **0,5** | **9.202,47 ms** | **1.441,8** | **6,66 ms** |
+| Mesa | 10 | 3,3 | 3.071,67 ms | **3.548,7** | **2,33 ms** |
+| Mesa | 25 | 3,3 | 7.667,85 ms | **3.857,1** | **6,61 ms** |
+| Ada (hijo con token real) | 10 | 3,2 | 3.083,17 ms | **3.605,4** | **2,21 ms** |
+| Ada | 25 | 3,3 | 7.693,00 ms | **3.888,3** | **6,37 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 1,0 | 4.614,49 ms | **1.264,8** | **3,88 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | **0,5** | **9.233,50 ms** | **1.134,8** | **7,45 ms** |
 
-**El techo del candado se ve desnudo: 3,3 rps = exactamente 1/0,300 s.** Toda la creación, la de
-la Mesa y la de Ada, pasaba por un solo planificador a la vez.
+`JAX_CARGA_PLAN_MS=0` (plan instantáneo):
+
+| escenario | VUs | rps antes | p95 antes | rps después | p95 después |
+|---|---|---|---|---|---|
+| Mesa | 10 | 330,3 | 42,01 ms | **1.047,1** | **24,95 ms** |
+| Mesa | 25 | 311,4 | 97,20 ms | **2.182,5** | **24,01 ms** |
+| Ada | 10 | 213,7 | 56,78 ms | **1.755,9** | **17,33 ms** |
+| Ada | 25 | 160,1 | 324,78 ms | **2.552,2** | **22,50 ms** |
+| **Mesa (5 VUs) con Ada a 10** | 5 | 104,5 | 64,11 ms | **799,8** | **16,27 ms** |
+| **Mesa (5 VUs) con Ada a 25** | 5 | 56,2 | 140,04 ms | **530,5** | **22,22 ms** |
+
+**El techo del candado se ve desnudo: 3,3 rps = exactamente 1/0,300 s.** Toda la creación, la de la
+Mesa y la de Ada, pasaba por un solo planificador a la vez.
 
 **¿La Mesa dejó de esperar detrás de Ada? SÍ.** Con el planificador representado y Ada delegando a
-25 VUs, la Mesa pasa de **0,5 rps y p95 9,20 s** a **1.441,8 rps y p95 6,66 ms**.
+25 VUs: de **0,5 rps y p95 9,23 s** a **1.134,8 rps y p95 7,45 ms**.
 
-**Degradación.** Antes, con el planificador representado, la Mesa **no aguanta ni c=5** (p95 4,6 s
-detrás de Ada) y a c=25 va a 7,6 s. Después no se degrada dentro del rango medido: p95 1,98 → 5,66 ms
-de c=10 a c=25, muy por debajo del umbral de 500 ms del arnés.
+**Degradación.** Antes, con el planificador representado, la Mesa no aguanta ni c=5 (p95 4,6 s
+detrás de Ada). Después no se degrada en el rango medido: p95 2,33 → 6,61 ms de c=10 a c=25, muy por
+debajo del umbral de 500 ms del arnés.
 
-**Lo que NO mejora, dicho de frente.** Con el plan instantáneo el "antes" **admite más pipelines
-por segundo** (mesa c=25: 5.575 admitidos en la corrida contra 2.863). El candado hacía de COLA y,
-cuando crear cuesta 3 ms, una cola aprovecha mejor el cupo que rechazar rápido. Es un artefacto del
-arnés, no del sistema: con el planificador representado —el régimen real— el "después" admite **más**
-(193 contra 114 a c=25) y además contesta el resto con un 422 explícito en 6 ms en vez de hacerlo
-esperar 7,6 s. El cambio de comportamiento es deliberado: **el cupo lleno ahora se rechaza rápido en
-vez de encolarse**, que es justo lo que se pidió.
+**Errores: CERO en las cuatro corridas**, con los 24 reintentos. **Caduca** si cambia el esquema, el
+volumen de datos, `MAX_PARALLEL_PIPELINES` o la infraestructura.
 
-**Errores.** Cero en todas las corridas salvo **un (1) 500 en ~530.000 pedidos** (0,0002 %) en la
-corrida de plan instantáneo: un deadlock que agotó los doce reintentos. Fail-closed (no creó nada) y
-a ~100× la carga de producción. Cero en las corridas con el planificador representado.
-
-**Caduca** si cambia el esquema, el volumen de datos, `MAX_PARALLEL_PIPELINES` o la infraestructura.
+**Pisos de CI (MEDICIONES LOCALES; manda el runner):** `tests-puros` 2020 → **2039**;
+`subpipeline-contrato-db` 121 → **133**; `jacobs-gobernanza-db` 94 → **87** (BAJA porque se retira el
+test del GET_LOCK junto con el GET_LOCK; bajar un piso sólo se justifica cuando se retira
+funcionalidad y se dice). Detector P10 en cero violaciones.
 
 - **PENDIENTE con fecha:**
-  - [ ] **2026-09-17** Orden de merge contra el frente G: esa rama renombró el candado a
-        `routes.candado_de_creacion()` y agrega los estados `queued`, `awaiting_approval` y
-        `waiting_children`. **Decidir cuáles ocupan cupo** y agregarlos a
-        `cupo.ESTADOS_QUE_OCUPAN_CUPO` o a `cupo.ESTADOS_SIN_CUPO`. Ya no se puede olvidar en
-        silencio: la partición de `PipelineStatus` es exhaustiva y hay tres controles que se ponen
-        rojos solos (validado por mutación con `queued`), más uno contra la tabla real. Decisión de
-        Fernando.
-  - [ ] **2026-09-17** Si se quiere, convertir el 500 del deadlock agotado en un 503 explícito
-        ("no pude decidir el cupo, no creé nada"). Hoy es un 500 con traza; es fail-closed y pasa 1
-        de cada 530.000 a 100× la carga de producción, así que no se cambió el contrato HTTP dentro
-        de este PR sin pedirlo.
+  - [ ] **2026-09-17** Orden de merge contra el frente G: agrega `queued`, `awaiting_approval` y
+        `waiting_children`. **Decidir cuáles ocupan cupo** y clasificarlos en
+        `policy.ESTADOS_QUE_OCUPAN_CUPO` / `ESTADOS_SIN_CUPO`. Ya no se puede olvidar en silencio:
+        la partición es exhaustiva y hay controles que se ponen rojos solos (validado por mutación
+        con `queued`), más uno contra la tabla real. Decisión de Fernando.
+  - [ ] **2026-09-17** Las suites de base dejan pipelines VIVOS en `jax_memory_test`
+        (`arnes-ada-padre`, `secreto de B`, `causa running`): ocupan cupo y hacen abortar cualquier
+        medición posterior. El pre-vuelo del arnés los detecta, pero la limpieza es a mano. Cerrarlos
+        en el `addAsyncCleanup` de cada suite.
 
 ## Cerrado en código, merge y despliegue pendientes — human gate de LAS MANOS sin emisión HTTP (2026-09-17)
 

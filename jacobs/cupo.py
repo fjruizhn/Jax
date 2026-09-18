@@ -69,18 +69,20 @@ logger = logging.getLogger(__name__)
 #: Error de MariaDB "Deadlock found when trying to get lock".
 _DEADLOCK = 1213
 
-#: Reintentos del 1213. Con 50 corrutinas nunca hizo falta más de uno, pero la
-#: prueba de carga del 2026-09-17 (25 VUs, ~2.900 reservas/s contra el cupo
-#: lleno) agotó CINCO reintentos 711 veces y las devolvió como 500. Fail-closed,
-#: sí, pero un 500 lo ve el usuario. Doce con espera creciente hasta 50 ms cubre
-#: ese peor caso medido; agotarlos sigue levantando el error, nunca devuelve
-#: "reservado" sin fila.
-MAX_REINTENTOS_DEADLOCK = 12
+#: Reintentos del 1213, calibrados MIDIENDO y no estimando. Con 50 corrutinas
+#: nunca hizo falta más de uno; bajo carga real hizo falta mucho más:
+#:   - 5 reintentos, 25 VUs (~2.900 reservas/s): se agotaron 711 veces -> 500;
+#:   - 12 reintentos, misma carga: 1 de cada ~530.000;
+#:   - 12 reintentos, ya con la unión (el UPDATE que completa la reserva pelea
+#:     por los mismos candados de rango): 23 de ~250.000.
+#: 24 con espera creciente hasta 100 ms. Agotarlos sigue levantando el error:
+#: fail-closed, nunca devuelve "reservado" sin fila.
+MAX_REINTENTOS_DEADLOCK = 24
 
-#: Tope de la espera entre reintentos. Doce reintentos con crecimiento x2 desde
-#: ~3 ms suman ~0,4 s en el peor caso: menos que el timeout del pool y mucho
-#: menos que lo que tarda planificar.
-ESPERA_MAXIMA_SEGUNDOS = 0.05
+#: Tope de la espera entre reintentos. 24 reintentos con crecimiento x2 desde
+#: ~3 ms y tope de 100 ms suman ~2 s en el peor caso, que sigue siendo menos que
+#: lo que tarda planificar y no alcanza el plazo del pedido.
+ESPERA_MAXIMA_SEGUNDOS = 0.1
 
 
 #: LA sentencia que decide. Una sola, autocommit, y se juzga por `rowcount`.
