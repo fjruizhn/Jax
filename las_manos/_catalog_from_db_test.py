@@ -27,7 +27,24 @@ class CatalogFromDbTest(unittest.IsolatedAsyncioTestCase):
         assert kimi.transport == "http_openai_compat", kimi.transport
         assert kimi.provider_id == "moonshot", kimi.provider_id
         assert kimi.model == "kimi-k3", kimi.model  # model reusa el campo existente (no model_id nuevo)
-        assert kimi.max_tokens == 8000, kimi.max_tokens
+        # max_tokens == 0, NO 8000 (arreglo-ci-3, 2026-09-18): este test nunca
+        # había corrido en CI -- el detector de cobertura recién lo enganchó
+        # esta noche, y afirmaba el valor VIEJO de antes de D1. D1 de Fernando
+        # (spec 2026-09-17 §1 y §7 A, jax-platform/backend/db/migrations.py::
+        # _motor_max_tokens_al_catalogo_v1 + MOTORES_AL_TOPE_DEL_CATALOGO):
+        # kimi y ada pasan a motor.max_tokens=0 a propósito -- 0 = "sin
+        # presupuesto propio, usá model.max_output_tokens del catálogo" (ver
+        # las_manos/motor_registry/worker.py::_limite_del_motor y
+        # motor_registry/catalog.py::MotorEntry.max_tokens). El 8000 fijo fue
+        # el que cortó el pipeline ef9b2d6e el 2026-09-16 -- por eso se
+        # corrigió. Verificado en vivo 2026-09-18 con SELECT directo contra
+        # jax_memory Y jax_memory_test (127.0.0.1:3308): las dos tienen
+        # kimi.max_tokens=0 y ada.max_tokens=0 hoy. En CI (jacobs-gobernanza-db,
+        # DB efímera con las migraciones de jax-platform), _MOTOR_SEED siembra
+        # kimi/ada con max_tokens=0 directo -- no depende del UPDATE de
+        # corrección. Si esto vuelve a fallar en 8000, alguien deshizo D1 sin
+        # querer.
+        assert kimi.max_tokens == 0, kimi.max_tokens
         assert kimi.enabled is True
 
     async def test_from_db_carga_capability_con_allowed_motors_en_orden(self):
