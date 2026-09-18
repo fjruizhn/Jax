@@ -197,6 +197,43 @@ jobs:
           grep -qE "^9 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
 
+  # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
+  # Mesa necesita prompt/modelo_real/depends_on por paso en
+  # GET /pipeline/{id}/results (jacobs/routes.py:get_pipeline_results). Las
+  # tablas que necesita (jacobs_pipelines/jacobs_steps) las crea ESTE repo con
+  # store.init_tables(): no hace falta el esquema de jax-platform, mismo
+  # motivo que facet-health-io de arriba.
+  pipeline-results-historial-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+      PYTHONPATH: .:las_manos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest pytest-asyncio
+      - run: python -m pytest jacobs/_pipeline_results_historial_test.py -v
+      - run: |
+          python -m pytest jacobs/_pipeline_results_historial_test.py -q 2>&1 | tee /tmp/out
+          grep -qE "^2 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2 tests CORRIDOS (no skipeados)."; exit 1; }
+
   # Frente F (2026-09-16): contrato de sub-pipelines contra una MariaDB REAL.
   # Las tablas de Jacobs (jacobs_pipelines/steps/events y la nueva
   # jacobs_subpipeline_tokens) las crea ESTE repo con store.init_tables(): no
