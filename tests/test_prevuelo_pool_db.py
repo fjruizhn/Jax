@@ -13,9 +13,14 @@ from __future__ import annotations
 import asyncio
 import os
 
-_db = os.environ.get("JAX_DB_NAME", "")
-if not _db.endswith("_test"):
-    raise RuntimeError(f"JAX_DB_NAME={_db!r}: este test solo corre contra una base *_test.")
+# Base de tests de ESTA sesión (decisión de Fernando, 2026-09-17). Reemplaza
+# la guarda vieja `if _db != "jax_memory_test": raise` + `setdefault`, que es
+# anterior a `JAX_TEST_DB_SUFIJO` y rechazaba `jax_memory_test_<sufijo>`:
+# protege lo mismo (nunca producción, nunca una base que no sea de tests) y
+# además deja correr la base propia de la sesión.
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 from jacobs import prevuelo_catalogo as pc  # noqa: E402
 from jacobs import store  # noqa: E402

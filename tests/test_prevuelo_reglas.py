@@ -11,7 +11,11 @@ from decimal import Decimal
 
 import pytest
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+# Base de tests de ESTA sesión: respeta JAX_TEST_DB_SUFIJO en vez de
+# clavar el nombre (mismo override incondicional que antes).
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from jacobs import prevuelo_reglas as pr  # noqa: E402
 from jacobs.models import Step  # noqa: E402

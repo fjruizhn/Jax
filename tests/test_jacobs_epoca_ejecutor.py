@@ -14,7 +14,11 @@ from __future__ import annotations
 import asyncio
 import os
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+# Base de tests de ESTA sesión: respeta JAX_TEST_DB_SUFIJO en vez de
+# clavar el nombre (mismo override incondicional que antes).
+from base_de_test import fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 from unittest.mock import AsyncMock  # noqa: E402
 

@@ -24,7 +24,11 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-os.environ["JAX_DB_NAME"] = "jax_memory_test"
+# Base de tests de ESTA sesión: respeta JAX_TEST_DB_SUFIJO en vez de
+# clavar el nombre (mismo override incondicional que antes).
+from base_de_test import es_base_de_test, fijar_base_de_test  # noqa: E402
+
+fijar_base_de_test()
 
 import aiomysql  # noqa: E402
 import aiomysql.pool  # noqa: E402
@@ -242,7 +246,11 @@ def test_el_pool_lleva_connect_timeout_y_la_base_de_la_configuracion(base, monke
     assert base.kwargs, "no se abrió ninguna conexión"
     for kw in base.kwargs:
         assert kw["connect_timeout"] == 7
-        assert kw["db"] == "jax_memory_test"
+        # La base REAL de la sesión, no el literal: con JAX_TEST_DB_SUFIJO es
+        # `jax_memory_test_<sufijo>` y el literal hacía fallar al test justo
+        # cuando el mecanismo de base por sesión funcionaba.
+        assert kw["db"] == store._db_cfg()["db"]
+        assert es_base_de_test(kw["db"]), kw["db"]
         assert kw["autocommit"] is True
         # El pool del store va sin CLIENT.FOUND_ROWS: las escrituras
         # CONDICIONALES por época necesitan el flag y siguen por

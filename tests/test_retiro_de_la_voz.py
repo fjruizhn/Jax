@@ -17,7 +17,11 @@ import ast
 import os
 from pathlib import Path
 
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")  # barrera: acá no se abre conexión
+# Base de tests de ESTA sesión: respeta JAX_TEST_DB_SUFIJO y, si ya venía
+# una base que NO es de tests, corta en vez de seguir. barrera: acá no se abre conexión
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 RAIZ = Path(__file__).resolve().parents[1]
 
