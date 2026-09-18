@@ -27,6 +27,15 @@ from jacobs import subpipelines as sp
 from jacobs.models import Pipeline, PipelineCreateRequest, PipelineStatus, Step
 
 _NO_PLANIFICAR = AsyncMock(side_effect=AssertionError("el test no debe llegar a planificar"))
+# 2026-09-17: crear un pipeline pasa por el pre-vuelo, que lee la gobernanza
+# (facet/model/capability/credential) de la base. Este archivo es PURO: el 422 de
+# forma sale de Pydantic antes del cuerpo de la ruta, así que el pre-vuelo no
+# debería correr nunca. El doble lo hace explícito y lo deja demostrado -- si
+# algún día la validación se mueve detrás del pre-vuelo, este test grita acá y no
+# con un "Table 'facet' doesn't exist" en el runner.
+# (tests/test_tripwire_crear_pipeline_exige_gobernanza.py)
+_PREVUELO_QUE_NO_CORRE = AsyncMock(
+    side_effect=AssertionError("el 422 de forma no debe llegar al pre-vuelo"))
 
 
 def _sin_config(monkeypatch):
@@ -133,6 +142,7 @@ def test_el_422_de_forma_no_devuelve_el_token_por_http():
          patch.object(routes.cupo, "soltar_reserva", AsyncMock(return_value=1)), \
          patch.object(policy, "check_kill_switch", return_value=False), \
          patch.object(routes, "_build_plan_or_reject", _NO_PLANIFICAR), \
+         patch.object(routes, "prevuelo", _PREVUELO_QUE_NO_CORRE), \
          TestClient(app) as cliente:
         for extra in cuerpos:
             cuerpo = {"name": "t", "objective": "o", "mode": "dry_run", **extra}

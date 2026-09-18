@@ -915,6 +915,7 @@ jobs:
           tests/test_creacion_sin_candado_global.py
           tests/test_cupo_en_todos_los_caminos.py
           tests/test_base_por_sesion.py
+          tests/test_tripwire_crear_pipeline_exige_gobernanza.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1040,6 +1041,7 @@ jobs:
             tests/test_creacion_sin_candado_global.py \
             tests/test_cupo_en_todos_los_caminos.py \
             tests/test_base_por_sesion.py \
+            tests/test_tripwire_crear_pipeline_exige_gobernanza.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -2225,8 +2227,22 @@ jobs:
           # 2049 + 3 = 2052: los dos deltas del mismo dia, sumados al mergear master
           #   (la union del cupo, +29, y el .env por sudo, +3). Sumar deltas, no elegir
           #   un lado. Si el runner da otro numero, manda el runner.
-          grep -qE "^2052 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2052 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2052 -> 2068 el 2026-09-17 (tripwire: crear un pipeline exige la gobernanza):
+          #   las DOS listas suman tests/test_tripwire_crear_pipeline_exige_gobernanza.py (16).
+          #   Desde que crear pasa por el pre-vuelo, un test que crea pipelines lee facet/model/
+          #   capability/credential -- tablas de jax-platform que init_tables() NO crea. El mismo dia
+          #   eso rompio dos archivos por dos caminos y cada uno se cerro con una salida distinta
+          #   (el job con run_migrations; el doble del pre-vuelo). El tercer caso -- ninguna de las dos --
+          #   da un verde que depende de lo que otro job haya sembrado en la base compartida. El tripwire
+          #   es PURO (AST + el YAML del flujo parseado de verdad) y exige una de las dos salidas,
+          #   nombrando archivo y linea. ROJO VISTO con un archivo falso que creaba sin salida; el mismo
+          #   rojo destapo tests/test_subpipeline_contrato_puro.py (POST /jacobs/pipeline sin doble), que
+          #   queda con el doble explicito. MUTACIONES: sin el reconocimiento del doble -> 5 rojos;
+          #   sin el del esquema -> 3 rojos. MEDIDO en local (3.14), env -i, JAX_PLATFORM_REPO_ROOT
+          #   inexistente, las DOS listas: "2068 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          #   Si el runner da otro numero, manda el runner.
+          grep -qE "^2068 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2068 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
