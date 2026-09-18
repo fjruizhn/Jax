@@ -860,6 +860,7 @@ jobs:
           tests/test_loadtest_apps_protegidas.py
           tests/test_ejecutor_probar_c4_conteo_remoto.py
           tests/test_ejecutor_cuenta_de_servicio.py
+          tests/test_env_se_lee_con_sudo.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
@@ -984,6 +985,7 @@ jobs:
             tests/test_loadtest_apps_protegidas.py \
             tests/test_ejecutor_probar_c4_conteo_remoto.py \
             tests/test_ejecutor_cuenta_de_servicio.py \
+            tests/test_env_se_lee_con_sudo.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
@@ -2214,8 +2216,17 @@ jobs:
           #   POR COMPORTAMIENTO contra master b450248 con un canario contra la base real: con el cupo
           #   LLENO, pipeline_tomar_epoca admitia el resume (devolvio epoca 1) -- "1 is not None".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^2049 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2049 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2020 -> 2023 el 2026-09-17 (el .env se lee con sudo -n): las DOS listas suman
+          #   tests/test_env_se_lee_con_sudo.py (3: hay archivos que lo nombran; ninguno lo SOURCEA sin sudo;
+          #   y el control ve la forma prohibida, que es lo que lo hace valer). Desde hoy el archivo es
+          #   root:jaxsvc 640 y sourcearlo directo ya no funciona: quedó cambiado en 43 archivos vivos (los
+          #   planes de docs/superpowers/plans son actas fechadas y no se reescriben). MEDIDO en local
+          #   (3.14), env -i, las DOS listas: "2023 passed, 1 skipped, 1 xfailed, 16 subtests passed".
+          # 2049 + 3 = 2052: los dos deltas del mismo dia, sumados al mergear master
+          #   (la union del cupo, +29, y el .env por sudo, +3). Sumar deltas, no elegir
+          #   un lado. Si el runner da otro numero, manda el runner.
+          grep -qE "^2052 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2052 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

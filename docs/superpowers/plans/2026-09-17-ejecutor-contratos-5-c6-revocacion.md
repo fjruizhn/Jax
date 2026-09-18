@@ -404,7 +404,7 @@ Nota para `test_una_excepcion_al_revocar_es_error_no_silencio`: la excepción es
 # scripts/ejecutor_contratos/revocar.py
 """C6 — REVOCA el acceso del Ejecutor en TODAS las máquinas del inventario y corta sus sesiones.
 
-Uso de emergencia:  set -a; . /etc/jax/.env; set +a
+Uso de emergencia:  set -a; . <(sudo -n cat /etc/jax/.env); set +a
                     PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/revocar.py --confirmo-revocar-todo
 Sin la bandera no hace nada. Reponer el acceso es a mano, con los archivos .revocadas-* de cada máquina.
 Lee /etc/jax/.env (producción) para JAX_EJECUTOR_* y la política exportada; no toca la DB.
@@ -482,7 +482,7 @@ revocar, comprobar que no entra (Permission denied), REPONER, comprobar con cmp 
 quedó idéntico, comprobar que vuelve a entrar. Si algo falla después de revocar, repone
 igual (finally) y lo dice.
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c6.py <nombre-de-máquina>
 Precondición que el script comprueba: ningún proceso de la cuenta vivo en esa máquina
 (revocar mata sus sesiones).

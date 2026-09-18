@@ -35,7 +35,7 @@
 
 ```bash
 cd /home/fruiz/worktrees/jax-ejecutor
-set -a; source /etc/jax/.env; set +a
+set -a; source <(sudo -n cat /etc/jax/.env); set +a
 export PYTHONPATH=/home/fruiz/worktrees/jax-ejecutor/las_manos
 PY=/home/fruiz/jax/las_manos/.venv/bin/python
 R=~/ejecutor-fase0/resultados

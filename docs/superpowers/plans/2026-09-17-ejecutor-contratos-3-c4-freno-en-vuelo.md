@@ -1080,7 +1080,7 @@ real contra otra máquina se prueba en el plan 5 Parte B.
 """Simulacro real de C4 en hall9000, re-ejecutable por un tercero.
 
 Uso (con la Mesa sin uso real):
-  set -a; . /etc/jax/.env; set +a
+  set -a; . <(sudo -n cat /etc/jax/.env); set +a
   PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_c4.py
 Pone el interruptor GLOBAL de JAX durante ~8 s por ronda y lo quita. Lee /etc/jax/.env (producción) para
 JAX_EJECUTOR_* y JAX_KILL_SWITCH_PATH; no toca la DB.

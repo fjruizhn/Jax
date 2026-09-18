@@ -11,7 +11,7 @@ encontraba nunca nada. Ahora usa el mismo predicado de vector cero que
 MemoryDB.backfill_zero_embeddings, y el UPDATE esta guardado por el.
 
 Uso:
-    set -a; source /etc/jax/.env; set +a
+    set -a; source <(sudo -n cat /etc/jax/.env); set +a
     cd ~/jax && .venv/bin/python -m jax.memory.embedding_worker
 
 En memoria de Jairo Urbina.

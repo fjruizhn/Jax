@@ -19,7 +19,7 @@ NOTA TECNICA input(): via run_in_executor para NO congelar el event loop.
 Uso:
     jax            (lanzador en ~/.local/bin/jax)
   o:
-    cd ~/jax && set -a; source /etc/jax/.env; set +a
+    cd ~/jax && set -a; source <(sudo -n cat /etc/jax/.env); set +a
     PYTHONPATH=. .venv/bin/python -m jax.core.main
 
 En memoria de Jairo Urbina.

@@ -732,7 +732,7 @@ revert → `success`.
 """Arranque real del Ejecutor en hall9000 SIN lanzar ninguna misión: corre exigir_contratos
 para una misión sobre las máquinas dadas y dice si arrancaría, con cada fallo y el tiempo.
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONPATH=.:las_manos python3 scripts/ejecutor_contratos/probar_arranque.py [--instrucciones-auditor ARCHIVO] hall9000 [otra …]
 `--instrucciones-auditor` existe sólo para VER FALLAR a C5 sin escribir en la DB (Task 3): cambia, en este proceso,
 el archivo de instrucciones del auditor. El arranque de producción no tiene esa opción.

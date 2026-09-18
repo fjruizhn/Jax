@@ -15,7 +15,7 @@ Por qué migrar (medido sobre `jax_memory` real, solo lectura, 2026-09-12):
 
 ## 1. Backup (antes de tocar datos)
 ```bash
-set -a; . /etc/jax/.env; set +a
+set -a; . <(sudo -n cat /etc/jax/.env); set +a
 B=~/backups/jax_memory_pre_bge_$(date +%F-%H%M).sql      # contiene datos personales
 ( umask 077; mysqldump --single-transaction --skip-lock-tables --no-tablespaces \
     -h$JAX_DB_HOST -P$JAX_DB_PORT -u$JAX_DB_USER -p$JAX_DB_PASSWORD $JAX_DB_NAME \

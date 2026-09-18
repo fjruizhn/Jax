@@ -6,7 +6,7 @@ exigir_contratos y dice si arrancaría, con cada fallo y el tiempo.
 Sin máquinas: el arranque del Ejecutor (seis contratos + proveedores distintos). Con máquinas:
 el arranque de una misión sobre ellas (además, la compuerta de datos de clientes).
 
-Uso: set -a; . /etc/jax/.env; set +a
+Uso: set -a; . <(sudo -n cat /etc/jax/.env); set +a
      PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.:las_manos .venv/bin/python scripts/ejecutor_contratos/probar_arranque.py \
        [--instrucciones-auditor ARCHIVO] [hall9000 otra …]
 `--instrucciones-auditor` existe sólo para VER FALLAR a C5 sin escribir en la DB: cambia, en este
