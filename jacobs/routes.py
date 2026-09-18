@@ -1112,6 +1112,15 @@ async def get_pipeline_results(pipeline_id: str) -> dict:
             "facet":             step.facet,
             "capability":        step.capability,
             "name":              step.input.get("name", f"{step.facet} — {step.capability}"),
+            # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el
+            # historial de la Mesa necesita el prompt EXACTO, el modelo REAL
+            # y de qué pasos dependía -- los tres ya sobreviven el round-trip
+            # por jacobs_steps (jacobs/_modelo_real_test.py,
+            # jacobs/_pipeline_results_historial_test.py) y antes se tiraban
+            # acá, en la lista blanca del dict de salida.
+            "prompt":            step.input.get("prompt"),
+            "modelo_real":       step.modelo_real,
+            "depends_on":        step.depends_on,
             "status":            step.status.value,
             "result":            result_text,
             "sources":           sources,

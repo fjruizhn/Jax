@@ -153,45 +153,74 @@ _PLAN_SYSTEM = (
     "se equivoca.' (Tu salida sigue siendo SOLO el array JSON.)"
 )
 
-_CLEANROOM_RULE = (
-    "\nREGLA DE AUDITORÍA INDEPENDIENTE (clean-room): el step que audita, valida "
-    "o critica el trabajo de otros steps DEBE usar un facet DISTINTO al de los "
-    "steps que revisa. Un facet no se audita a sí mismo. Si los módulos backend "
-    "y frontend fueron diseñados por 'ada' y 'kimi', su auditor debe ser 'thot' "
-    "(u otro facet que no sea ada ni kimi). La revisión independiente es la "
-    "garantía de calidad: quien produce no es quien aprueba.\n"
-)
+# Ronda de arreglo 2 (2026-09-18): _CLEANROOM_RULE y _PLAN_SYSTEM_MODULAR ERAN
+# constantes de módulo con 'thot' escrito como literal cuatro veces -- _con_arbitro
+# (Ruling 2, Task 4) ya lee governance["arbitro_faceta"] en vez de hardcodear, pero
+# el TEXTO que recibe Ada seguía diciendo 'thot' a mano. Si ejecutor.auditor_faceta
+# cambiara de valor mañana, la lógica exigiría la faceta nueva y el prompt le
+# seguiría prohibiendo a Ada la VIEJA (ya irrelevante) sin mencionar la nueva --
+# Ada volvería a producir la faceta árbitro como productora, y todo plan modular
+# se autorrechazaría otra vez: el mismo defecto de la ronda 1, reaparecido bajo
+# otro nombre la primera vez que alguien toque la config.
+#
+# Se convierten en funciones parametrizadas por `arbitro_faceta` en vez de texto
+# fijo -- la forma más simple que no duplica el cuerpo del texto (nada de una
+# copia por faceta posible, ni de post-procesar un str.replace() sobre un
+# literal ya escrito). _ada_plan (único llamador de las dos) resuelve
+# `arbitro_faceta` una vez desde `governance["arbitro_faceta"]` -- la MISMA
+# fuente que ya usa _con_arbitro -- y se lo pasa a las dos.
 
-_PLAN_SYSTEM_MODULAR = (
-    "Eres Jacobs, el Director, planificando trabajo FORMAL COMPLEJO. Generás un plan de "
-    "ejecución como JSON (array de objetos), SOLO JSON, sin markdown ni explicaciones.\n\n"
-    "Patrón OBLIGATORIO para trabajo formal (compilador de especificaciones):\n"
-    "1. El PRIMER step SIEMPRE produce 'common_types': define UNA vez todos los tipos, enums "
-    "e identificadores compartidos. Todos los demás módulos los referencian, ninguno los redefine.\n"
-    "2. Luego los módulos en ORDEN DE DEPENDENCIA: cada módulo declara de qué steps anteriores "
-    "depende (campo depends_on: lista de step_index). Un módulo va DESPUÉS de aquellos que necesita.\n"
-    "3. Las piezas que referencian a todo (invariantes, validaciones globales) van AL FINAL.\n"
-    "4. El ANTEPENÚLTIMO step es 'validación de consistencia' (facet thot, capability "
-    "'validate_consistency'): revisa nombres huérfanos, tipos no definidos, referencias rotas. "
-    "Devuelve SOLO discrepancias con referencia al step y nombre.\n"
-    "5. El PENÚLTIMO step es 'reconciliación' (facet ada, capability 'reconcile'): recibe los "
-    "hallazgos del validador y los módulos afectados, y produce SOLO los PARCHES puntuales que "
-    "corrigen cada hallazgo (ej: agregar el método faltante a un módulo). NO reescribe los módulos "
-    "completos — solo los fragmentos a corregir, identificando módulo y ubicación.\n"
-    "6. El ÚLTIMO step es 'ensamble' (facet ada, capability 'assemble'): describe el manifest del "
-    "paquete (orden de módulos, versiones, índice). El ensamble FÍSICO de los módulos lo hace el "
-    "sistema mecánicamente; este step solo produce el manifest/índice, NO el documento completo.\n\n"
-    "Cada step: {\"facet\",\"capability\",\"prompt\",\"depends_on\":[indices]}.\n"
-    "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido. Diseño formal/tipos/"
-    "arquitectura: 'ada'. Validación/crítica: 'thot'.\n"
-    "- depends_on lista los step_index (0-based) de los steps cuyos OUTPUTS este step necesita.\n"
-    "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
-    "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
-    "PRINCIPIO DE EVIDENCIA (innegociable): no asumas hechos no verificados; si un dato es "
-    "incógnita, incluí un step que lo verifique. 'El que supone se equivoca.'\n"
-    + _CLEANROOM_RULE +
-    "\nSalida: SOLO el array JSON."
-)
+
+def _texto_cleanroom(arbitro_faceta: str) -> str:
+    return (
+        "\nREGLA DE AUDITORÍA INDEPENDIENTE (clean-room): el step que audita, valida "
+        "o critica el trabajo de otros steps DEBE usar un facet DISTINTO al de los "
+        f"steps que revisa, y NUNCA '{arbitro_faceta}': ese facet está reservado para "
+        "el árbitro que Jacobs agrega solo al final del plan, después de este que "
+        "estás generando -- ve TODOS los steps, no solo los anteriores a él, así que "
+        "hace mejor esa auditoría que un step intermedio. Un facet no se audita a sí "
+        "mismo. Si los módulos backend y frontend fueron diseñados por 'ada' y 'kimi', "
+        "un step que los audite debe usar un facet que no sea ninguno de los dos (y "
+        f"que tampoco sea '{arbitro_faceta}'). La revisión independiente es la "
+        "garantía de calidad: quien produce no es quien aprueba.\n"
+    )
+
+
+def _texto_plan_system_modular(arbitro_faceta: str) -> str:
+    return (
+        "Eres Jacobs, el Director, planificando trabajo FORMAL COMPLEJO. Generás un plan de "
+        "ejecución como JSON (array de objetos), SOLO JSON, sin markdown ni explicaciones.\n\n"
+        "Patrón OBLIGATORIO para trabajo formal (compilador de especificaciones):\n"
+        "1. El PRIMER step SIEMPRE produce 'common_types': define UNA vez todos los tipos, enums "
+        "e identificadores compartidos. Todos los demás módulos los referencian, ninguno los redefine.\n"
+        "2. Luego los módulos en ORDEN DE DEPENDENCIA: cada módulo declara de qué steps anteriores "
+        "depende (campo depends_on: lista de step_index). Un módulo va DESPUÉS de aquellos que necesita.\n"
+        "3. Las piezas que referencian a todo (invariantes, validaciones globales) van AL FINAL.\n"
+        "4. El PENÚLTIMO step es 'reconciliación' (facet ada, capability 'reconcile'): revisa los "
+        "módulos anteriores por consistencia (nombres huérfanos, tipos no definidos, referencias "
+        "rotas) y produce SOLO los PARCHES puntuales que las corrigen (ej: agregar el método "
+        "faltante a un módulo). NO reescribe los módulos completos — solo los fragmentos a "
+        "corregir, identificando módulo y ubicación.\n"
+        "5. El ÚLTIMO step es 'ensamble' (facet ada, capability 'assemble'): describe el manifest del "
+        "paquete (orden de módulos, versiones, índice). El ensamble FÍSICO de los módulos lo hace el "
+        "sistema mecánicamente; este step solo produce el manifest/índice, NO el documento completo.\n\n"
+        "Este plan NO incluye un step separado de 'validación de consistencia' ni usa el facet "
+        f"'{arbitro_faceta}' en ningún step: Jacobs agrega SOLO, después de este plan, un árbitro "
+        "final que revisa consistencia sobre TODOS los steps (no solo los anteriores al de "
+        "reconciliación) y decide citando la fuente de cada punto. Un step de este plan que use "
+        f"'{arbitro_faceta}' hace que el plan entero se rechace (el árbitro no puede ser también "
+        "un productor).\n\n"
+        "Cada step: {\"facet\",\"capability\",\"prompt\",\"depends_on\":[indices]}.\n"
+        "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido, y nunca "
+        f"'{arbitro_faceta}'. Diseño formal/tipos/arquitectura, reconciliación y ensamble: 'ada'.\n"
+        "- depends_on lista los step_index (0-based) de los steps cuyos OUTPUTS este step necesita.\n"
+        "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
+        "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
+        "PRINCIPIO DE EVIDENCIA (innegociable): no asumas hechos no verificados; si un dato es "
+        "incógnita, incluí un step que lo verifique. 'El que supone se equivoca.'\n"
+        + _texto_cleanroom(arbitro_faceta) +
+        "\nSalida: SOLO el array JSON."
+    )
 
 
 # Revisión final del frente E (2026-09-16): el menú de facetas que se le ofrece
@@ -211,9 +240,26 @@ _MENU_DE_FACETAS: tuple[tuple[str, str, str, str], ...] = (
     ("hyde", "ejecutar cambios — requiere aprobación", "implementation", "Aplica U"),
 )
 
-# El patrón compilador de Ada (_PLAN_SYSTEM_MODULAR) exige estas facetas: sin
-# alguna activa, su plan se rechaza con certeza y no se gasta la llamada paga.
-_FACETAS_DEL_PATRON_MODULAR = ("thot", "ada")
+# El patrón compilador de Ada (_PLAN_SYSTEM_MODULAR) exige 'ada' -- sin ada
+# activa, su plan se rechaza con certeza y no se gasta la llamada paga.
+#
+# Ronda de arreglo 1 (2026-09-18, Task 4): ANTES esta tupla también traía
+# 'thot', porque el patrón le pedía a Ada un step fijo thot/validate_consistency
+# a mitad de plan. Se retiró (ver _PLAN_SYSTEM_MODULAR): con el árbitro
+# agregado por build(), ese step mid-plan hacía que Thot juzgara su propio
+# trabajo dos veces -- a mitad de plan Y al final -- y el plan se auto-
+# rechazaba siempre por sala limpia (verificado: cualquier plan modular real
+# de Ada tenía 100% de rechazo con el árbitro activo). El patrón YA NO
+# produce ningún step con facet 'thot'.
+#
+# Pero el plan que arma Ada sigue teniendo 2+ steps SIEMPRE, así que sigue
+# necesitando que la faceta árbitro CONFIGURADA (governance["arbitro_faceta"],
+# no hardcodeada -- hoy 'thot') esté activa: sin ella, _con_arbitro lo va a
+# rechazar más abajo de todas formas. Ese chequeo es dinámico y vive en
+# _ada_plan (necesita `governance`, no una tupla fija acá) -- no se agrega
+# 'thot' de nuevo a esta tupla para no reintroducir el hardcoding que el
+# Ruling 2 de Task 4 elimina en todos lados.
+_FACETAS_DEL_PATRON_MODULAR = ("ada",)
 
 
 def _facetas_del_cerebro(
@@ -237,8 +283,29 @@ def _facetas_del_cerebro(
     )
 
 
-def _menu_de_facetas(facetas_activas: frozenset) -> list[tuple[str, str, str, str]]:
-    return [fila for fila in _MENU_DE_FACETAS if fila[0] in facetas_activas]
+def _menu_de_facetas(
+    facetas_activas: frozenset, arbitro_faceta: str | None = None,
+) -> list[tuple[str, str, str, str]]:
+    """El menú que se le OFRECE al planificador como opción de productor.
+
+    BLOQUEANTE 1 (revisión final 2026-09-18): antes esto filtraba SOLO por
+    facetas activas -- si la faceta árbitro configurada
+    (`governance["arbitro_faceta"]`) estaba activa (la condición normal, no
+    un caso raro), quedaba en el menú con su descripción real. `_llm_plan`
+    (camino de qwen, prompt `_PLAN_SYSTEM`) no sabe nada de la reserva del
+    árbitro -- se lo ofrecía, el LLM la usaba como productor, y `_con_arbitro`
+    (sala limpia) rechazaba el plan DESPUÉS de haber pagado la llamada.
+    "Quién puede ser productor" vivía en tres lugares (la prosa de Ada,
+    `_con_arbitro`, y por omisión acá). Arreglo de raíz: acá también se
+    excluye -- un solo lugar decide qué se ofrece.
+
+    `arbitro_faceta=None` (el default) no filtra nada -- retrocompatible con
+    los callers de bajo nivel que no tienen gobernanza real (mismo criterio
+    que el resto de este módulo: sin gobernanza, sin árbitro que reservar)."""
+    return [
+        fila for fila in _MENU_DE_FACETAS
+        if fila[0] in facetas_activas and fila[0] != arbitro_faceta
+    ]
 
 
 def _texto_del_menu(menu: list[tuple[str, str, str, str]]) -> str:
@@ -498,6 +565,95 @@ async def _validate_plan_capabilities(steps: list, governance: dict | None = Non
 class PlanBuilder:
     """Construye un plan de steps desde un objetivo."""
 
+    # Task 4 (2026-09-18, informe "cinco hojas de ruta que no convergían"):
+    # el último step de todo plan de 2+ pasos es un ÁRBITRO -- recibe la
+    # salida de los demás y produce UNA decisión citando el paso que la
+    # sostiene. QUIÉN arbitra sale de axioma_config (governance["arbitro_faceta"],
+    # ver store.get_motor_governance) -- nunca hardcodeado acá, fail-closed si
+    # no hay faceta configurada o no está activa (_con_arbitro).
+    #
+    # QUÉ capability usa: a diferencia de la faceta, no hay una fuente de
+    # configuración para esto -- es una decisión de diseño de esta tarea, no
+    # un valor por ambiente. 'critique' es la capability REAL de la tabla
+    # `capability` (verificado contra la base de test 2026-09-18; el brief
+    # traía 'text_generation', que no existe -- mismo patrón de nombres
+    # inventados que la Task 1) y la que YA usa este módulo para el rol de
+    # juicio/crítica de un facet auditor: es el ejemplo de thot en
+    # _MENU_DE_FACETAS (línea ~208), la capability del auditor en
+    # _fallback_plan, y está en _AUDIT_CAPABILITIES (así que el árbitro
+    # también queda sujeto a _check_cleanroom si alguna vez dependiera de un
+    # step del mismo facet -- no puede pasar hoy, ver _con_arbitro).
+    CAPABILITY_ARBITRO = "critique"
+
+    PROMPT_ARBITRO = (
+        "Recibiste la salida de todos los pasos anteriores. Produci UNA "
+        "decision y UN plan. Cada punto del plan cita el paso que lo "
+        "sostiene, con el formato [paso N]. Lo que no tenga un paso que lo "
+        "respalde NO entra al plan: decilo como pendiente sin fuente, nunca "
+        "como conclusion."
+    )
+
+    @staticmethod
+    def _con_arbitro(
+        specs: list[dict], facetas_activas: frozenset, arbitro_faceta: str | None,
+    ) -> list[dict]:
+        """Sala limpia + disponibilidad, sobre la representación list[dict]
+        que _from_spec recibe de LOS DOS caminos (steps_spec explícito y los
+        specs que arma _from_objective, ya sea del LLM o de _fallback_plan --
+        ver el llamado dentro de _from_spec). Con eso alcanza: no hace falta
+        repetir esta lógica para Step, porque _from_spec construye el Step
+        del árbitro con el MISMO código que usa para cualquier otro step.
+
+        Orden de las tres reglas (en ese orden, a propósito):
+
+        1. Un solo paso: nada que arbitrar -- se devuelve TAL CUAL, sin
+           mirar sala limpia ni disponibilidad. MEDIA 7 (revisión final
+           2026-09-18): este chequeo va PRIMERO, no la sala limpia. El spec
+           §3.6 dice "si el plan pone a Thot TAMBIÉN como productor" -- con
+           un solo paso no hay "también" (no hay ningún árbitro que se
+           vaya a agregar, así que no hay conflicto que evitar). Antes, la
+           sala limpia corría sin importar el largo del plan y rechazaba un
+           plan de un solo step cuyo único productor era la faceta árbitro,
+           aunque build() jamás le fuera a agregar un árbitro a ESE plan.
+        2. Sala limpia, con 2+ pasos: si la faceta árbitro ya aparece como
+           productor, es un rechazo de diseño del plan (quien produce no
+           puede juzgar lo que produjo) -- acá SÍ hay "también", porque con
+           2+ pasos el árbitro se va a agregar.
+        3. Disponibilidad (Ruling 2, fail-closed): con 2+ pasos y la sala
+           limpia en orden, el árbitro tiene que poder correr de verdad --
+           faceta configurada Y activa en la tabla `facet`. Si no, PlanRejected
+           con 'arbitro_no_disponible' en la razón (código propio, distinto
+           del genérico de _check_facets) -- nunca un plan sin árbitro."""
+        if len(specs) < 2:
+            return specs
+
+        if arbitro_faceta and any(s.get("facet") == arbitro_faceta for s in specs):
+            step_index = next(i for i, s in enumerate(specs) if s.get("facet") == arbitro_faceta)
+            raise PlanRejected([PlanViolation(
+                step_index, arbitro_faceta, None, PlanBuilder.CAPABILITY_ARBITRO,
+                f"{arbitro_faceta} no puede producir y arbitrar el mismo plan: "
+                f"el árbitro juzga lo que otros produjeron (sala limpia).",
+            )])
+
+        if not arbitro_faceta or arbitro_faceta not in facetas_activas:
+            motivo = (
+                f"la faceta árbitro '{arbitro_faceta}' no está activa en la tabla `facet`"
+                if arbitro_faceta else
+                "no hay faceta árbitro configurada (axioma_config.ejecutor.auditor_faceta)"
+            )
+            raise PlanRejected([PlanViolation(
+                len(specs), arbitro_faceta or "", None, PlanBuilder.CAPABILITY_ARBITRO,
+                f"arbitro_no_disponible: {motivo} -- un plan de 2+ pasos sin "
+                f"quien arbitre no se entrega.",
+            )])
+
+        return specs + [{
+            "facet": arbitro_faceta,
+            "capability": PlanBuilder.CAPABILITY_ARBITRO,
+            "prompt": PlanBuilder.PROMPT_ARBITRO,
+            "depends_on": list(range(len(specs))),
+        }]
+
     async def build(
         self,
         pipeline_id: str,
@@ -516,9 +672,33 @@ class PlanBuilder:
         governance = await _store.get_motor_governance()
         caps = governance["capabilities"]
         if steps_spec:
-            steps = self._from_spec(pipeline_id, steps_spec, caps)
+            # Task 4: el árbitro se agrega DENTRO de _from_spec (ver ahí) --
+            # es el único punto de conversión dict->Step que comparten los
+            # dos caminos, así que pasarle la gobernanza acá alcanza para
+            # este camino (steps_spec explícito).
+            steps = self._from_spec(
+                pipeline_id, steps_spec, caps,
+                facetas_activas=governance["facets"],
+                arbitro_faceta=governance.get("arbitro_faceta"),
+            )
         else:
             steps = await self._from_objective(pipeline_id, objective, max_steps, governance)
+        # MEDIA 8 (revisión final 2026-09-18): el tope duro de pasos se
+        # validaba ANTES de construir el plan -- routes.py rechaza
+        # `len(req.steps) > 20` y el camino del LLM trunca a `data[:max_steps]`
+        # -- pero _con_arbitro (dentro de _from_spec, arriba) agrega UN paso
+        # más DESPUÉS de esa validación, y nada revalidaba el conteo final:
+        # un pedido de EXACTAMENTE 20 pasos explícitos (que pasa el chequeo
+        # de routes.py) terminaba persistiendo 21. Este es el ÚNICO punto
+        # donde convergen los dos caminos con el árbitro YA agregado -- un
+        # solo lugar revalida, en vez de parchear cada entrada por separado.
+        if len(steps) > MAX_STEPS_PER_PIPELINE:
+            ultimo = steps[-1]
+            raise PlanRejected([PlanViolation(
+                ultimo.step_index, ultimo.facet, ultimo.motor, ultimo.capability,
+                f"{len(steps)} pasos (incluido el árbitro que agrega Jacobs) "
+                f"excede el límite duro de {MAX_STEPS_PER_PIPELINE}",
+            )])
         # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
         # dentro de _from_spec ni _from_objective, para que ningún origen de
         # plan pueda saltárselo. cleanroom antes solo corría dentro de
@@ -533,7 +713,26 @@ class PlanBuilder:
         await _validate_plan_capabilities(steps, governance)
         return steps
 
-    def _from_spec(self, pipeline_id: str, specs: list[dict], caps: dict) -> list[Step]:
+    def _from_spec(
+        self, pipeline_id: str, specs: list[dict], caps: dict, *,
+        facetas_activas: frozenset | None = None, arbitro_faceta: str | None = None,
+    ) -> list[Step]:
+        # Task 4 (2026-09-18, Ruling 1): acá conviven LOS DOS caminos --
+        # build() llama esto directo para steps_spec, y _from_objective()
+        # llama esto al final con los specs del LLM/Ada o de _fallback_plan.
+        # Enganchar _con_arbitro ACÁ, antes de convertir a Step, cubre los
+        # dos con una sola línea: ningún camino puede terminar sin árbitro
+        # coleándose por el otro.
+        #
+        # `facetas_activas is None` (no `arbitro_faceta is None`) es la señal
+        # de "sin gobernanza real" -- los tests de bajo nivel que llaman
+        # _from_spec directo (timeout por capability, encadenado por
+        # defecto) no la pasan y siguen sin árbitro, a propósito: no piden
+        # gobernanza, no la reciben. build()/_from_objective() SIEMPRE la
+        # pasan (aunque arbitro_faceta salga en None de una gobernanza real
+        # sin configurar -- ahí _con_arbitro rechaza fail-closed, Ruling 2).
+        if facetas_activas is not None:
+            specs = self._con_arbitro(specs, facetas_activas, arbitro_faceta)
         steps = []
         for i, spec in enumerate(specs):
             input_data = dict(spec.get("input", {}))
@@ -562,6 +761,10 @@ class PlanBuilder:
             # que hacia el dict.
             default_timeout, _ = _techo_segundos(caps, capability)
             explicit_timeout = spec.get("timeout_seconds")
+            deps_explicitas = spec.get("depends_on")
+            depends_on = deps_explicitas if deps_explicitas is not None else (
+                [i - 1] if i > 0 else []
+            )
             steps.append(Step(
                 step_id=str(uuid.uuid4()),
                 pipeline_id=pipeline_id,
@@ -570,7 +773,7 @@ class PlanBuilder:
                 motor=spec.get("motor"),
                 capability=capability,
                 input=input_data,
-                depends_on=spec.get("depends_on", []),
+                depends_on=depends_on,
                 timeout_seconds=explicit_timeout if explicit_timeout is not None else default_timeout,
                 skip_on_fail=spec.get("skip_on_fail", False),
             ))
@@ -619,7 +822,11 @@ class PlanBuilder:
                 logger.warning("qwen falló planificando (%s), usando el plan de respaldo fijo", motivo)
                 await _registrar_fallback_de_cerebro(pipeline_id, "qwen", "fallback_plan", motivo)
                 specs = self._fallback_plan(objective)
-        return self._from_spec(pipeline_id, specs, governance["capabilities"])
+        return self._from_spec(
+            pipeline_id, specs, governance["capabilities"],
+            facetas_activas=governance["facets"],
+            arbitro_faceta=governance.get("arbitro_faceta"),
+        )
 
     @staticmethod
     async def _intentar_cerebro(fn, nombre, objective, max_steps, capability_hint, governance):
@@ -656,12 +863,42 @@ class PlanBuilder:
         # URL fijos ni con un límite asumido.
         facetas_activas = _facetas_del_cerebro(facetas_activas, governance)
         faltan = [x for x in _FACETAS_DEL_PATRON_MODULAR if x not in facetas_activas]
+        # Ronda de arreglo 1 (Task 4): el patrón ya no produce un step 'thot'
+        # (ver _FACETAS_DEL_PATRON_MODULAR), pero el plan que arma SIEMPRE
+        # tiene 2+ steps, y _con_arbitro (Ruling 2) lo va a rechazar más abajo
+        # si la faceta árbitro CONFIGURADA no está activa. Chequearlo acá,
+        # ANTES de gastar la llamada paga, es el mismo criterio que 'ada' --
+        # solo que dinámico (gobernanza real), no una tupla fija, para no
+        # reintroducir "thot" hardcodeado. Sólo corre si `governance` llegó
+        # (el camino real, _from_objective, siempre la pasa; los tests que
+        # llaman _ada_plan suelto con solo `facetas_activas` se quedan sin
+        # este chequeo extra y dependen del rechazo de _con_arbitro más
+        # adelante, igual que antes de esta tarea).
+        # Ronda de arreglo 2 (2026-09-18): `arbitro_faceta` resuelto UNA vez,
+        # acá, tanto para el chequeo de disponibilidad de arriba como para
+        # armar el TEXTO del prompt más abajo (_texto_plan_system_modular +
+        # el f-string de esta función) -- antes decían 'thot' como literal,
+        # divorciado de esta misma variable.
+        arbitro_faceta = (governance or {}).get("arbitro_faceta")
+        if governance is not None:
+            if not arbitro_faceta or arbitro_faceta not in facetas_activas:
+                faltan = faltan + [arbitro_faceta or "arbitro_faceta (sin configurar)"]
         if faltan:
             motivo = (f"Ada: no se planifica, el patrón compilador exige facetas que no están "
                       f"activas en la tabla `facet`: {', '.join(faltan)}")
             logger.error(motivo)
             raise CerebroNoDisponible(motivo)
-        menu = _texto_del_menu(_menu_de_facetas(facetas_activas))
+        # A partir de acá, si `governance` llegó, `arbitro_faceta` ya está
+        # validado (activo) -- si no fuera así, ya se rechazó arriba. Si NO
+        # llegó `governance` (solo pasa en tests de bajo nivel que llaman
+        # _ada_plan suelto con nada más que `facetas_activas`, nunca en el
+        # camino real de _from_objective/build()), no hay de dónde resolverlo:
+        # rótulo genérico, nunca un nombre de faceta inventado.
+        # BLOQUEANTE 1: excluir la faceta árbitro REAL del menú (antes de
+        # reemplazarla por el rótulo genérico de abajo, que no matchea nada
+        # de _MENU_DE_FACETAS y por lo tanto no filtraría nada).
+        menu = _texto_del_menu(_menu_de_facetas(facetas_activas, arbitro_faceta))
+        arbitro_faceta = arbitro_faceta or "la faceta reservada para el árbitro (sin gobernanza)"
         try:
             f = await resolve_facet("ada")
         except FacetUnavailableError as exc:
@@ -691,8 +928,12 @@ class PlanBuilder:
             f"Dado este objetivo formal: {objective}\n\n"
             f"Genera un plan de ejecución modular con MÁXIMO {max_steps} steps.\n"
             f"Seguí el patrón compilador OBLIGATORIO: common_types primero, módulos en orden "
-            f"de dependencia, validación de consistencia (thot/validate_consistency) como antepenúltimo step, "
-            f"reconciliación (ada/reconcile) como penúltimo, ensamble (ada/assemble) al final.\n"
+            f"de dependencia, reconciliación (ada/reconcile) como penúltimo step, ensamble "
+            f"(ada/assemble) al final. NO incluyas un step separado de validación de "
+            f"consistencia ni uses el facet '{arbitro_faceta}' en ningún step: eso lo hace el "
+            f"árbitro que Jacobs agrega SOLO, después de este plan, viendo TODOS los steps (no "
+            f"solo los anteriores al de reconciliación) -- un step de este plan con facet "
+            f"'{arbitro_faceta}' hace que el plan entero se rechace.\n"
             f"Cada step DEBE incluir el campo 'depends_on' con la lista de step_index "
             f"(0-based) de los que depende (lista vacía [] si no depende de ninguno).\n\n"
             f"Facetas disponibles: {menu}.\n\n"
@@ -706,19 +947,16 @@ class PlanBuilder:
             f'{{"facet":"ada","capability":"design",'
             f'"prompt":"Usando tipos (0) y capabilities (1), definí las invariantes.",'
             f'"depends_on":[0,1]}},'
-            f'{{"facet":"thot","capability":"validate_consistency",'
-            f'"prompt":"Validá consistencia: nombres huérfanos, tipos no definidos, referencias rotas entre steps 0-2. Devolvé SOLO discrepancias.",'
-            f'"depends_on":[0,1,2]}},'
             f'{{"facet":"ada","capability":"reconcile",'
-            f'"prompt":"Aplicá SOLO los parches puntuales para corregir las discrepancias del step 3. Identificá módulo y ubicación de cada corrección.",'
-            f'"depends_on":[3]}},'
+            f'"prompt":"Revisá los steps 0-2 por consistencia (nombres huérfanos, tipos no definidos, referencias rotas) y aplicá SOLO los parches puntuales que hagan falta.",'
+            f'"depends_on":[0,1,2]}},'
             f'{{"facet":"ada","capability":"assemble",'
             f'"prompt":"Generá el manifest del paquete: orden de módulos, versiones, índice. El ensamble físico lo hace el sistema.",'
-            f'"depends_on":[0,1,2,3,4]}}]\n\n'
+            f'"depends_on":[0,1,2,3]}}]\n\n'
             f"Responde SOLO con el array JSON."
         )
         messages = [
-            {"role": "system", "content": _PLAN_SYSTEM_MODULAR + capability_hint},
+            {"role": "system", "content": _texto_plan_system_modular(arbitro_faceta) + capability_hint},
             {"role": "user", "content": prompt},
         ]
         payload = {
@@ -773,7 +1011,13 @@ class PlanBuilder:
         governance: dict | None = None,
     ) -> list[dict] | None:
         facetas_activas = _facetas_del_cerebro(facetas_activas, governance)
-        menu = _menu_de_facetas(facetas_activas)
+        # BLOQUEANTE 1 (revisión final 2026-09-18): `_PLAN_SYSTEM` (el prompt
+        # de este camino) no dice nada de la reserva del árbitro -- antes de
+        # este arreglo, si la faceta árbitro configurada estaba activa (lo
+        # normal), quedaba en el menú y qwen podía elegirla como productora;
+        # `_con_arbitro` recién la rechazaba DESPUÉS de pagar la llamada.
+        arbitro_faceta = (governance or {}).get("arbitro_faceta") if governance else None
+        menu = _menu_de_facetas(facetas_activas, arbitro_faceta)
         if not menu:
             motivo = "qwen (jax_local): no se planifica, ninguna faceta del menú está activa en la tabla `facet`"
             logger.error(motivo)
@@ -899,11 +1143,16 @@ class PlanBuilder:
             # jax_local sin rastro.
             facet = str(item.get("facet", ""))[:50]
             # depends_on: filtrar valores no-enteros y fuera de rango (0 <= dep < idx)
-            raw_deps = item.get("depends_on", [])
-            depends_on = [
-                int(x) for x in raw_deps
-                if str(x).lstrip("-").isdigit() and 0 <= int(x) < idx
-            ]
+            # Ausencia != vacio declarado. Sin dependencias declaradas, el paso
+            # depende del anterior: correr todo junto fue el defecto de b8f80733.
+            raw_deps = item.get("depends_on")
+            if raw_deps is None:
+                depends_on = [idx - 1] if idx > 0 else []
+            else:
+                depends_on = [
+                    int(x) for x in raw_deps
+                    if str(x).lstrip("-").isdigit() and 0 <= int(x) < idx
+                ]
             # capability CERRADA al vocabulario conocido (las facetas, en cambio, se
             # rechazan en build()). Fuera del conjunto → degradar a 'reason'.
             # Bloque 3 (2026-08-21): VALID_CAPABILITIES (frozenset estático)
@@ -929,6 +1178,16 @@ class PlanBuilder:
 
     @staticmethod
     def _fallback_plan(objective: str) -> list[dict]:
+        # Task 4 (2026-09-18): el 3er step ERA {"facet": "thot", "capability":
+        # "critique", ...} -- productor Y (desde esta tarea) árbitro
+        # configurado del mismo plan, sala-limpia (_con_arbitro) lo rechaza
+        # SIEMPRE, sin importar qué tan disponibles estén sus facetas: el
+        # último recurso quedaba auto-rechazado, exactamente cuando más hace
+        # falta que funcione. Se retira: _from_spec (vía _con_arbitro) agrega
+        # el árbitro solo, con el mismo facet/capability y un prompt que
+        # además exige citar el paso que sostiene cada punto -- el plan de
+        # respaldo termina igual (hipatia -> jekyll -> thot), por el camino
+        # unificado en vez de un tercer step fijo.
         return [
             {
                 "facet": "hipatia",
@@ -939,10 +1198,5 @@ class PlanBuilder:
                 "facet": "jekyll",
                 "capability": "analysis",
                 "prompt": "Analiza la investigación anterior desde una perspectiva humanista.",
-            },
-            {
-                "facet": "thot",
-                "capability": "critique",
-                "prompt": "Critica el análisis anterior. ¿Qué riesgos no se mencionaron?",
             },
         ]

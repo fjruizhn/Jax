@@ -20,6 +20,7 @@ from contrato_dispatch import limite_de_salida
 from model_catalog import record_resolved_version_safe
 
 from jacobs import store
+from jacobs import aviso
 from jacobs.store import espera_de_turno_sin_plazo  # R38: sobrevive a los tests que reemplazan `store`
 from jacobs.artifacts import read_artifact, save_if_large
 # Vive en jax/core (capa base, compartido con el HttpMuscle del REPL); llega a
@@ -57,6 +58,25 @@ MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 # Tope de seguridad para el output COMPLETO de cada dependencia declarada (~15K tokens).
 # Si el ensamble de muchas deps roza la ventana, ajustar y re-verificar con el log de C1.
 MAX_DEP_CONTEXT_CHARS = 60_000
+
+# IMPORTANTE 2 (revisión final 2026-09-18, tanda historial-y-arreglos-de-pipeline):
+# MAX_DEP_CONTEXT_CHARS es un tope POR DEPENDENCIA, no agregado -- se eligió
+# cuando ningún step tenía más de dos o tres deps. Con el árbitro (Task 4)
+# TODO plan de 2+ pasos termina en un step que depende de TODOS los
+# anteriores: con 10 pasos de salida larga son hasta 540.000 caracteres
+# armados en un solo prompt; con 20, 1,1 millones. El síntoma real es un 400
+# del proveedor en el ÚLTIMO paso, con todo el trabajo anterior ya pagado.
+#
+# El valor no sale de `model.context_window` por-motor: el árbitro puede
+# resolver a CUALQUIER motor del catálogo (la faceta árbitro es
+# configurable, axioma_config.ejecutor.auditor_faceta), y ese catálogo hoy
+# va de ~32k a más de 1M tokens de ventana -- este tope tiene que proteger
+# también al motor más chico. 180.000 caracteres (~45.000 tokens con la
+# regla general de ~4 chars/token) deja margen para el prompt fijo más el
+# objetivo sin acercarse a ningún contrato real del catálogo (verificar
+# contra `model.context_window` si se agrega un motor con ventana menor).
+# Sin este tope, CUALQUIER número de deps podía crecer sin techo.
+MAX_TOTAL_DEP_CONTEXT_CHARS = 180_000
 
 # T2 (2026-08-21): _HTTP_FACETS/_MOTOR_FACETS ahora viven en jacobs.models
 # (import de arriba) -- plan.py los necesita para la validación pre-persist
@@ -161,12 +181,57 @@ _EVIDENCE_RULE = (
 )
 
 
+def _aplicar_tope_total_de_contexto(previous_outputs: list[dict]) -> list[dict]:
+    """Recorta `previous_outputs` para que la SUMA de sus `summary` no supere
+    MAX_TOTAL_DEP_CONTEXT_CHARS (IMPORTANTE 2, revisión final 2026-09-18).
+
+    El recorte es HONESTO y VISIBLE, nunca silencioso: la dep que pierde
+    contenido queda con `truncated=True` y su `summary` termina con una nota
+    explícita -- nunca desaparece de la lista. El step que recibe este
+    contexto (típicamente el árbitro) necesita saber que esa fuente EXISTIÓ
+    aunque no la haya visto completa: si desapareciera, citaría solo lo que
+    sí vio sin saber que hubo más -- el mismo defecto de fondo que esta
+    ronda entera viene a cerrar (Principio VIII en el propio mecanismo de
+    contexto).
+
+    Reparto: primero llega, primero se sirve, en el orden en que
+    `previous_outputs` ya trae las deps (orden de `depends_on`/step_index).
+    No hay una noción de "dep más importante" en esta capa -- es una cota de
+    seguridad contra el 400 del proveedor, no un resumidor inteligente.
+
+    El aviso "visible" NO es un texto agregado adentro del `summary` (eso
+    haría crecer el total más allá del tope que este mismo código impone):
+    es el `truncated=True` que ya trae cada dep, que `_enrich_prompt` YA
+    convierte en la marca "[TRUNCADO — dependencia excede el tope]" junto al
+    encabezado de esa dependencia -- el mismo mecanismo que el tope por-dep,
+    sin duplicar la señal."""
+    total = sum(len(p["summary"]) for p in previous_outputs)
+    if total <= MAX_TOTAL_DEP_CONTEXT_CHARS:
+        return previous_outputs
+
+    restante = MAX_TOTAL_DEP_CONTEXT_CHARS
+    resultado = []
+    for p in previous_outputs:
+        summary = p["summary"]
+        if len(summary) <= restante:
+            restante -= len(summary)
+            resultado.append(p)
+            continue
+        # Esta dep (y todas las que sigan, con `restante` ya en 0) se
+        # recortan -- nunca se sacan de la lista: el árbitro tiene que poder
+        # ver que esa fuente EXISTIÓ aunque no la haya visto completa.
+        resultado.append({**p, "summary": summary[:restante], "truncated": True})
+        restante = 0
+    return resultado
+
+
 def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
     """Construye el input enriquecido.
 
     Si el step declara depends_on, carga el output COMPLETO de esas dependencias
-    (hasta MAX_DEP_CONTEXT_CHARS por dep). Si no, resumen 500 chars de los anteriores
-    (comportamiento original — no rompe pipelines triviales).
+    (hasta MAX_DEP_CONTEXT_CHARS por dep, y MAX_TOTAL_DEP_CONTEXT_CHARS en total
+    -- IMPORTANTE 2, revisión final 2026-09-18). Si no, resumen 500 chars de
+    los anteriores (comportamiento original — no rompe pipelines triviales).
     """
     objective = pipeline.context.get("objective", "")
     previous_outputs: list[dict] = []
@@ -235,6 +300,8 @@ def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
             "perdido": perdido,
         })
 
+    previous_outputs = _aplicar_tope_total_de_contexto(previous_outputs)
+
     total_chars = sum(len(p["summary"]) for p in previous_outputs)
     logger.info(
         "Jacobs step %s deps=%s contexto=%d chars%s",
@@ -276,6 +343,90 @@ def _enrich_prompt(ctx_input: dict) -> str:
 #  Invocadores por faceta
 # ----------------------------------------------------------------
 
+class PasoTruncado(Exception):
+    """El proveedor corto la salida por tope de longitud. Entregar el texto a
+    medias es peor que fallar: el paso siguiente construye sobre una frase
+    cortada y nadie se entera. Fallo cerrado, y el pipeline queda continuable
+    (cae en el `except Exception` de `_run_one_step` -> `_fail_step`, el mismo
+    camino que cualquier otro error de un step; nada nuevo que mantener ahí).
+
+    Espejo del camino de motor: las_manos/motor_registry/worker.py:828 ya
+    falla el job cuando `finish_reason == "length"`. Esto cubre los tres
+    transportes HTTP directos, que ni leían ese campo.
+
+    IMPORTANTE 3 (revisión final 2026-09-18): `tokens_in`/`tokens_out`
+    viajan EN la excepción -- es la llamada MÁS CARA posible (gastó todo el
+    tope de salida) y antes de este arreglo su costo nunca llegaba a
+    `record_direct_usage` (que corre después de que `invoke()` retorna
+    normalmente; acá nunca retorna). `codigo` ya existía sin que nadie lo
+    leyera -- `_fail_step` guardaba `str(exc)` a secas, así que la Mesa no
+    podía distinguir un fallo por truncado (justo el caso donde Continuar
+    tiene remedio) de cualquier otro error; ahora `_run_one_step` lo usa
+    para prefijar el error guardado (ver más abajo)."""
+    codigo = "paso_truncado"
+
+    def __init__(self, mensaje: str, *, tokens_in: int = 0, tokens_out: int = 0):
+        super().__init__(mensaje)
+        self.tokens_in = tokens_in
+        self.tokens_out = tokens_out
+
+
+# Cada proveedor nombra el corte de longitud distinto -- no se adivina, se
+# verifica contra la respuesta real de cada API. Un solo lugar que lo sepa.
+_CORTE_POR_LONGITUD = {
+    "openai_compat": ("length",),
+    "ollama": ("length",),
+    "gemini": ("MAX_TOKENS",),
+}
+
+
+def _texto_o_truncado(data: dict, transporte: str) -> str:
+    """Lee el texto de la respuesta cruda de `transporte` y lo devuelve, o
+    levanta `PasoTruncado` si el proveedor cortó por tope de longitud.
+
+    Único lector de "¿este texto vino completo?" para los tres transportes
+    HTTP directos -- evita que cada `_invoke_*` reimplemente (o se olvide de)
+    el nombre del campo de corte, que es distinto en cada API.
+
+    IMPORTANTE 3 (revisión final 2026-09-18): además del texto, lee el
+    CONSUMO (`tokens_in`/`tokens_out`) del mismo `data` -- los mismos campos
+    que cada `_invoke_*` ya extrae por separado, DESPUÉS de este punto, para
+    el caso de éxito. Cuando corta, ese consumo viaja EN la excepción
+    (`PasoTruncado.tokens_in/tokens_out`) para que `invoke()` lo pueda
+    registrar antes de propagar el fallo -- es la llamada MÁS CARA posible
+    (gastó todo el tope de salida) y antes no se medía."""
+    if transporte == "openai_compat":
+        eleccion = (data.get("choices") or [{}])[0]
+        razon = eleccion.get("finish_reason")
+        texto = (eleccion.get("message") or {}).get("content", "")
+        usage = data.get("usage") or {}
+        tokens_in = usage.get("prompt_tokens", 0)
+        tokens_out = usage.get("completion_tokens", 0)
+    elif transporte == "ollama":
+        razon = data.get("done_reason")
+        texto = (data.get("message") or {}).get("content", "")
+        tokens_in = data.get("prompt_eval_count", 0)
+        tokens_out = data.get("eval_count", 0)
+    elif transporte == "gemini":
+        candidato = (data.get("candidates") or [{}])[0]
+        razon = candidato.get("finishReason")
+        partes = (candidato.get("content") or {}).get("parts") or [{}]
+        texto = "".join(p.get("text", "") for p in partes)
+        gemini_usage = data.get("usageMetadata") or {}
+        tokens_in = gemini_usage.get("promptTokenCount", 0)
+        tokens_out = gemini_usage.get("candidatesTokenCount", 0)
+    else:
+        raise ValueError(f"transporte sin lector de truncado: {transporte}")
+
+    if razon in _CORTE_POR_LONGITUD.get(transporte, ()):
+        raise PasoTruncado(
+            f"{transporte} corto la salida por longitud ({razon}); "
+            f"{len(texto)} caracteres entregados",
+            tokens_in=tokens_in, tokens_out=tokens_out,
+        )
+    return texto
+
+
 async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     """Formato Gemini + grounding required_web. Transporte, no faceta —
     hoy solo hipatia lo usa, pero cualquier facet con transport=http_gemini
@@ -305,8 +456,9 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
     data = await _call()
     final_data = data
     candidate = data.get("candidates", [{}])[0]
-    parts_raw = candidate.get("content", {}).get("parts", []) or []
-    texto = "".join(p.get("text", "") for p in parts_raw)
+    # E-25: PasoTruncado si Gemini cortó por MAX_TOKENS -- antes de leer
+    # groundingMetadata, que igual no importa sobre una respuesta a medias.
+    texto = _texto_o_truncado(data, "gemini")
     meta  = candidate.get("groundingMetadata", {}) or {}
     chunks = meta.get("groundingChunks") or []
     supports = meta.get("groundingSupports") or []
@@ -323,8 +475,9 @@ async def _invoke_http_gemini(f: "ResolvedFacet", prompt: str, timeout: int) -> 
         ]
         data2 = await _call()
         candidate2 = data2.get("candidates", [{}])[0]
-        parts2  = candidate2.get("content", {}).get("parts", []) or []
-        texto2  = "".join(p.get("text", "") for p in parts2)
+        # Mismo control en el retry: el corte por longitud puede pasar en
+        # cualquiera de los dos llamados, no solo en el primero.
+        texto2  = _texto_o_truncado(data2, "gemini")
         meta2   = candidate2.get("groundingMetadata", {}) or {}
         chunks2 = meta2.get("groundingChunks") or []
         if chunks2:
@@ -392,7 +545,9 @@ async def _invoke_http_openai_compat(f: "ResolvedFacet", prompt: str, timeout: i
     if resp.status_code != 200:
         raise RuntimeError(f"[{f.key}] HTTP {resp.status_code}: {recortar_redactado(resp.text, 200, [f.credential])}")
     data  = resp.json()
-    texto = data["choices"][0]["message"].get("content", "")
+    # E-25: PasoTruncado si el proveedor cortó por longitud (finish_reason
+    # "length") en vez de entregar el texto a medias como resultado bueno.
+    texto = _texto_o_truncado(data, "openai_compat")
 
     # D1.2 — best-effort, fuera del context manager del client: nunca debe
     # poder romper la respuesta al step (record_resolved_version_safe ya
@@ -453,7 +608,8 @@ async def _invoke_ollama(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     if resp.status_code != 200:
         raise RuntimeError(f"Ollama HTTP {resp.status_code}: {recortar_redactado(resp.text, 200)}")
     data  = resp.json()
-    texto = data.get("message", {}).get("content", "")
+    # E-25: PasoTruncado si Ollama cortó por longitud (done_reason "length").
+    texto = _texto_o_truncado(data, "ollama")
 
     # D1.2 — capturado por consistencia con los transportes HTTP; ver
     # CONTEXT.md para la limitacion real (tags de Ollama no son alias
@@ -579,6 +735,12 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         # de worker.py lo consume como SU presupuesto de tiempo, no uno
         # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
         "timeout_seconds": timeout,
+        # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): sin esto,
+        # record_motor_usage() (LAS MANOS) nunca sabe de qué pipeline es este
+        # job -- kimi/jax_local son las facetas de la MAYORIA de los pasos
+        # reales (Ruling 7, Task 1), asi que sin este campo el historial
+        # seguiria sin poder sumar el costo real para casi ningun pipeline.
+        "pipeline_id": pipeline.pipeline_id,
     }
     resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30,
                                            headers=encabezado_propio(IDENTIDAD_JACOBS))
@@ -608,6 +770,14 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
 
             status = job.get("status", "")
             if status == "completed":
+                # Ronda de arreglo 1 de Task 1 (2026-09-18): con
+                # MotorJobView.model expuesto (las_manos/motor_registry/
+                # models.py + worker.py, esta misma ronda) el job trae el
+                # model_id REAL que despachó -- ya no None por default.
+                # kimi/jax_local son las facetas de la mayoría de los pasos
+                # reales; sin esto, casi todo el historial decía "Modelo
+                # desconocido".
+                step.modelo_real = job.get("model")
                 return {
                     "success":        True,
                     "facet":          step.facet,
@@ -849,6 +1019,49 @@ async def validate_capability(step: Step) -> CapabilityUnbound | str | None:
     return None
 
 
+async def _despachar_transporte_directo(
+    step: Step, pipeline: Pipeline, f: "ResolvedFacet", prompt: str, timeout: int,
+) -> dict:
+    """El despacho de los tres transportes HTTP directos (gemini,
+    openai_compat, ollama), extraído de `_dispatch_step` para poder probarlo
+    sin pasar por `validate_capability()` (que toca la DB).
+
+    IMPORTANTE 3 (revisión final 2026-09-18): antes, `record_direct_usage`
+    corría DESPUÉS de que el `_invoke_*` retornara -- si el paso cortaba por
+    longitud, `PasoTruncado` se lanzaba DENTRO de `_invoke_*` y esa línea
+    nunca corría. El paso que corta es la llamada MÁS CARA posible (gastó
+    todo el tope de salida) y su costo se perdía. Ahora el consumo se
+    registra en los DOS caminos -- éxito y truncado -- con el consumo real
+    de cada uno (`result.get(...)` o `exc.tokens_in/tokens_out`), antes de
+    devolver o de dejar que el fallo suba. `record_direct_usage` sigue
+    siendo fail-soft por su cuenta (sin identidad no escribe; error de DB
+    solo loguea) -- nunca puede romper un step ya exitoso, y acá tampoco
+    puede tapar el fallo de un step truncado."""
+    try:
+        if f.transport == "http_gemini":
+            result = await _invoke_http_gemini(f, prompt, timeout)
+        elif f.transport == "http_openai_compat":
+            result = await _invoke_http_openai_compat(f, prompt, timeout)
+        else:
+            result = await _invoke_ollama(f, prompt, timeout)
+    except PasoTruncado as exc:
+        await record_direct_usage(
+            pipeline.user_id, pipeline.tenant_id, step.facet,
+            f.provider_id, f.model,
+            exc.tokens_in, exc.tokens_out,
+            pipeline_id=pipeline.pipeline_id,
+        )
+        raise
+
+    await record_direct_usage(
+        pipeline.user_id, pipeline.tenant_id, step.facet,
+        f.provider_id, f.model,
+        result.get("tokens_in", 0), result.get("tokens_out", 0),
+        pipeline_id=pipeline.pipeline_id,
+    )
+    return result
+
+
 async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     """Selecciona el worker correcto según la faceta."""
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
@@ -946,29 +1159,29 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # _run_one_step la captura igual que cualquier otra excepcion — el step
     # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
+        # Task 1 (2026-09-18, historial-y-arreglos-de-pipeline): este camino
+        # NO pasa por resolve_facet(). Hasta la ronda de arreglo 1 (mismo
+        # día), MotorJobView no traía el model_id real -- worker.py SÍ lo
+        # conocía (motor_entry.model, worker.py:672/725) pero nunca lo
+        # exponía en el job (job_store.py filtraba cualquier campo fuera de
+        # MotorJobView.model_fields al leer), así que escribir
+        # job.get("motor") acá hubiera guardado el NOMBRE del motor
+        # (kimi/jax_local, lo mismo que step.facet ya dice) disfrazado de
+        # model_id: el mismo defecto que esta tarea cierra. Con
+        # MotorJobView.model expuesto (las_manos/motor_registry/models.py +
+        # worker.py), _invoke_motor ahora escribe step.modelo_real de verdad
+        # al completar (ver abajo, status == "completed").
         return await _invoke_motor(step, pipeline, timeout, prompt)
 
     f = await resolve_facet(step.facet)
+    step.modelo_real = f.model
 
     # Transportes HTTP directos (scope expansion 2026-08-10): la Mesa web ya
     # atribuye costo para estas mismas facetas via jax-platform/backend/api/
     # chat.py (Tasks 1-4); esto cubre el MISMO transporte cuando lo dispara un
-    # pipeline de Jacobs en vez de un chat directo. record_direct_usage es
-    # fail-soft por su cuenta (sin identidad no escribe; error de DB solo
-    # loguea) -- nunca puede romper un step ya exitoso.
+    # pipeline de Jacobs en vez de un chat directo.
     if f.transport in ("http_gemini", "http_openai_compat", "ollama"):
-        if f.transport == "http_gemini":
-            result = await _invoke_http_gemini(f, prompt, timeout)
-        elif f.transport == "http_openai_compat":
-            result = await _invoke_http_openai_compat(f, prompt, timeout)
-        else:
-            result = await _invoke_ollama(f, prompt, timeout)
-        await record_direct_usage(
-            pipeline.user_id, pipeline.tenant_id, step.facet,
-            f.provider_id, f.model,
-            result.get("tokens_in", 0), result.get("tokens_out", 0),
-        )
-        return result
+        return await _despachar_transporte_directo(step, pipeline, f, prompt, timeout)
     if f.transport == "subprocess":
         # Llegamos aquí solo si Fernando aprobó vía /approve-step (gate de
         # aprobación intacto, no tocado en esta misión).
@@ -1122,7 +1335,15 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool | _SinEs
         await _fail_step(pipeline, step, i, f"Timeout ({step.timeout_seconds}s)")
         return False
     except Exception as exc:  # noqa: BLE001  # fail-soft: no traga nada -- convierte cualquier error del step en fallo EXPLÍCITO vía _fail_step (status=failed + STEP_FAILED + error) y devuelve False, que es lo que la ola usa para cortar el pipeline
-        await _fail_step(pipeline, step, i, str(exc))
+        # MENOR (revisión final 2026-09-18): `PasoTruncado.codigo` existía
+        # sin que nadie lo leyera -- se guardaba `str(exc)` a secas, y la
+        # Mesa no podía distinguir un fallo por truncado (justo el caso
+        # donde Continuar tiene remedio) de cualquier otro error. El código
+        # viaja como prefijo -- vale para PasoTruncado y para cualquier
+        # excepción futura que declare `.codigo`, no sólo esta.
+        codigo = getattr(exc, "codigo", None)
+        mensaje = f"[{codigo}] {exc}" if codigo else str(exc)
+        await _fail_step(pipeline, step, i, mensaje)
         return False
 
 
@@ -1152,6 +1373,33 @@ async def _perdio_la_epoca(pipeline: Pipeline) -> None:
         "epoca_actual": epoca_actual,
         "status_actual": status_actual,
     })
+
+
+def _disparar_aviso_fin(pipeline: Pipeline, estado: PipelineStatus) -> None:
+    """Task 6 (2026-09-18): avisa por Telegram que el pipeline terminó.
+
+    Se llama SOLO desde los puntos donde `pipeline_update_status_si_epoca`
+    ya devolvió True para un status terminal (completed/aborted) -- esa
+    escritura es el mismo reclamo atómico condicional (WHERE pipeline_id=?
+    AND run_epoch=? AND status IN (...), store.py:1436) que el resto del
+    ejecutor usa para "una sola vez gana"; una corrida que perdió la época
+    nunca llega hasta acá (se va por `_perdio_la_epoca`). No hace falta una
+    tabla de deduplicación aparte -- ver jacobs/aviso.py.
+
+    `aviso.avisar_fin_pipeline` ya es fire-and-forget (no espera el POST a
+    Telegram) y fail-soft por dentro (nunca lanza). Este try/except es la
+    última barrera, solo contra un fallo agendando la tarea en sí -- para
+    que un pipeline YA completado/abortado (el status ya está escrito) jamás
+    vea ese status revertido ni la excepción propagarse hacia arriba."""
+    try:
+        aviso.avisar_fin_pipeline(
+            pipeline_id=pipeline.pipeline_id, nombre=pipeline.name, estado=estado.value,
+        )
+    except Exception:  # fail-soft: fallar agendando el aviso no puede revertir ni bloquear el status terminal ya escrito -- se loguea con exc_info arriba
+        logger.error(
+            "Pipeline %s: no se pudo agendar el aviso de Telegram de fin (status %s ya escrito)",
+            pipeline.pipeline_id, estado.value, exc_info=True,
+        )
 
 
 async def run_pipeline(pipeline: Pipeline) -> None:
@@ -1190,6 +1438,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
             await _perdio_la_epoca(pipeline)
             return
         await store.event_append(pipeline_id, "DRY_RUN_COMPLETE", {"steps": len(pipeline.plan)})
+        _disparar_aviso_fin(pipeline, PipelineStatus.completed)
         return
 
     if not await store.pipeline_update_status_si_epoca(
@@ -1234,6 +1483,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
             await store.event_append(
                 pipeline_id, "KILL_SWITCH_ABORTED", {"wave": wave_num, "steps": wave}
             )
+            _disparar_aviso_fin(pipeline, PipelineStatus.aborted)
             return
 
         # ---- Hyde gate: si algún step de la ola es hyde sin aprobar, interrumpir ----
@@ -1314,6 +1564,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
                 {"at_wave": wave_num, "failed_steps": failed,
                  "errores": {str(i): pipeline.plan[i].error for i in failed}},
             )
+            _disparar_aviso_fin(pipeline, PipelineStatus.aborted)
             return
 
         await store.event_append(
@@ -1341,6 +1592,7 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
         await _perdio_la_epoca(pipeline)
         return
     await store.event_append(pipeline_id, "PIPELINE_COMPLETED")
+    _disparar_aviso_fin(pipeline, PipelineStatus.completed)
 
 
 async def _persist_step_to_repo(

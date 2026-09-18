@@ -93,9 +93,19 @@ async def record_direct_usage(
     tokens_in: int,
     tokens_out: int,
     request_type: str = "pipeline",
+    pipeline_id: str | None = None,
 ) -> None:
     """Best-effort (usage tracking no debe romper un step ya completado),
     pero no silencioso.
+
+    pipeline_id (Task 7b, 2026-09-18): Pipeline.pipeline_id (jacobs/models.py)
+    de quien dispara este uso. executor.py lo manda siempre (un step SIEMPRE
+    corre dentro de un pipeline); sonda.py (pre-vuelo) NO lo manda -- una
+    sonda no es un paso de un pipeline, y None ahí es correcto, no un hueco.
+    Sin esta columna, api/pipelines.py::list_pipelines() (jax-platform) no
+    tiene con qué sumar el costo real de un pipeline (Principio VIII: hasta
+    esta ronda costo_usd salía null siempre, documentado en el HALLAZGO de
+    Task 7 de jax-platform).
 
     T1.c (2026-08-22, auditoria usage_writer): mismo bug que
     motor_registry/usage_writer.py::record_motor_usage -- sin user_id/
@@ -140,12 +150,12 @@ async def record_direct_usage(
                 cost = (tokens_in * float(price_in) + tokens_out * float(price_out)) / 1_000_000
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "INSERT INTO axioma_usage (tenant_id, user_id, facet, model, tokens_in, tokens_out, cost_usd, request_type) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    "INSERT INTO axioma_usage (tenant_id, user_id, facet, model, tokens_in, tokens_out, cost_usd, request_type, pipeline_id) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         int(tenant_id) if tenant_id is not None else None,
                         int(user_id) if user_id is not None else None,
-                        facet, model, tokens_in, tokens_out, cost, request_type,
+                        facet, model, tokens_in, tokens_out, cost, request_type, pipeline_id,
                     ),
                 )
         return
@@ -175,6 +185,7 @@ async def record_direct_usage(
         # no un campo que se olvido de mandar.
         "status": None,
         "job_id": None,
+        "pipeline_id": pipeline_id,
     })
     if spool_id:
         # INFO, no ERROR: encolada NO es perdida. Un ERROR acá entrena a

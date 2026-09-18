@@ -451,6 +451,7 @@ async def run(
     tenant_id: str | None = None,
     caller: str | None = None,
     timeout_seconds: int | None = None,
+    pipeline_id: str | None = None,
 ) -> None:
     """Corre un job del Motor Registry (ver _correr_trabajo).
 
@@ -467,6 +468,7 @@ async def run(
             job_id=job_id, motor=motor, capability=capability, prompt=prompt,
             context=context, store=store, catalog=catalog, kill_switch_path=kill_switch_path,
             user_id=user_id, tenant_id=tenant_id, caller=caller, timeout_seconds=timeout_seconds,
+            pipeline_id=pipeline_id,
         )
 
 
@@ -484,6 +486,7 @@ async def _correr_trabajo(
     tenant_id: str | None = None,
     caller: str | None = None,
     timeout_seconds: int | None = None,
+    pipeline_id: str | None = None,
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -507,6 +510,16 @@ async def _correr_trabajo(
             error=f"Motor '{motor}' no encontrado en el catálogo",
         )
         return
+
+    # Ronda de arreglo 1 de Task 1 (2026-09-18, historial-y-arreglos-de-
+    # pipeline): expone el model_id real apenas se conoce -- MotorJobView.model
+    # (motor_registry/models.py). Se escribe temprano y no solo al completar
+    # porque cada store.update() posterior reesparce el estado ENTERO
+    # (JobStore.update: `{**self._index[job_id], **kwargs}`), así que un
+    # solo write acá alcanza para que sobreviva hasta el evento final,
+    # completed o failed -- se sabe qué modelo se IBA a usar aunque el turno
+    # con la API falle después.
+    store.update(job_id, model=motor_entry.model)
 
     # Validar transporte soportado (R4 -- generalizado, ya no solo Kimi)
     call_fn = _TRANSPORT_DISPATCH.get(motor_entry.transport)
@@ -671,7 +684,7 @@ async def _correr_trabajo(
             await record_motor_usage(
                 user_id, tenant_id, motor, provider_id, motor_entry.model,
                 cumulative_prompt_tokens, cumulative_completion_tokens,
-                job_id=job_id, status=status,
+                job_id=job_id, status=status, pipeline_id=pipeline_id,
             )
         elif provider_id:
             logger.warning(

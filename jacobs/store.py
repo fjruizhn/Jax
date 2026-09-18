@@ -1075,6 +1075,26 @@ async def init_tables() -> None:
                 ("depends_on", "ALTER TABLE jacobs_steps ADD COLUMN depends_on LONGTEXT "
                     "CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL "
                     "CHECK (json_valid(depends_on))"),
+                # Task 1 (2026-09-18, historial-y-arreglos-de-pipeline): el
+                # model_id real que despachó el step (Step.modelo_real,
+                # jacobs/models.py). La faceta sola no alcanza -- el binding
+                # cambia -- así que el historial necesita esta columna, no
+                # solo el JSON de jacobs_pipelines.plan (get_pipeline_results
+                # lee steps_by_pipeline(), no el plan). EN la lista y no un
+                # ALTER a mano: el comentario de `depends_on` arriba documenta
+                # por qué (una columna fuera de esta lista nunca llega a una
+                # base nueva, jax_memory_test incluida).
+                #
+                # VARCHAR(100): medido contra producción por el coordinador
+                # de esta ronda (2026-09-18, ronda de arreglo 1) -- el
+                # model_id más largo del catálogo real (`model.model_id`)
+                # son 45 caracteres sobre 242 filas, y esa columna canónica
+                # es ella misma `varchar(100)`. El ancho coincide con la
+                # fuente de verdad y no es una estimación de esta tarea; no
+                # lo volví a medir yo mismo contra `jax_memory` (fuera de
+                # los permisos de este worktree, ver "NUNCA corras tests
+                # contra la base de producción").
+                ("modelo_real", "ALTER TABLE jacobs_steps ADD COLUMN modelo_real VARCHAR(100) NULL"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -1330,7 +1350,7 @@ _SQL_EPOCA_Y_STATUS = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipe
 _SQL_STEP_SI_EPOCA = (
     "UPDATE jacobs_steps s JOIN jacobs_pipelines p ON p.pipeline_id = s.pipeline_id "
     "SET s.status=%s, s.facet=%s, s.motor=%s, s.output_ref=%s, s.timeout_seconds=%s, "
-    "    s.started_at=%s, s.finished_at=%s, s.error=%s "
+    "    s.started_at=%s, s.finished_at=%s, s.error=%s, s.modelo_real=%s "
     "WHERE s.step_id=%s AND p.pipeline_id=%s AND p.run_epoch=%s AND p.status='running'"
 )
 
@@ -1448,7 +1468,7 @@ async def step_upsert_si_epoca(s: Step, epoca: int) -> bool:
     """Escritura de un paso YA EXISTENTE desde el ejecutor. True si escribió."""
     params = (
         s.status.value, s.facet, s.motor, s.output_ref, s.timeout_seconds,
-        s.started_at, s.finished_at, s.error,
+        s.started_at, s.finished_at, s.error, s.modelo_real,
         s.step_id, s.pipeline_id, epoca,
     )
     return await _ejecutar_condicional(_SQL_STEP_SI_EPOCA, params) == 1
@@ -1496,9 +1516,22 @@ async def pipeline_tomar_epoca(
 
 
 _SQL_BLOQUEAR_PIPELINE = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s FOR UPDATE"
+# ANTES DE MERGEAR 6 (revisión final 2026-09-18): SÍ resetea modelo_real.
+# Estaba diferido (Task 1, mismo día) porque no lo pedía ni el brief ni el
+# coordinador -- la revisión final lo subió de prioridad: es el ÚNICO punto
+# donde la función que esta misma ronda entregó ("el paso guarda qué modelo
+# lo ejecutó de verdad") muestra un dato FALSO con cara de verdadero. Un
+# step 'pending' recién continuado por `/continue` seguía mostrando el
+# modelo_real de SU corrida anterior -- el resto de las columnas de estado
+# (facet, motor, status, output_ref, started_at, finished_at, error) ya se
+# reseteaban acá mismo; a ésta se la había dejado afuera. Se sobreescribe de
+# nuevo con el modelo real en cuanto el step vuelve a correr
+# (executor.py::_invoke_motor al completar, o `step.modelo_real = f.model`
+# en el despacho HTTP directo) -- es una columna y dos palabras.
 _SQL_PASO_A_CORRER = (
     "UPDATE jacobs_steps SET facet=%s, motor=%s, status='pending', output_ref=NULL, "
-    "started_at=NULL, finished_at=NULL, error=NULL WHERE step_id=%s AND pipeline_id=%s"
+    "started_at=NULL, finished_at=NULL, error=NULL, modelo_real=NULL "
+    "WHERE step_id=%s AND pipeline_id=%s"
 )
 # El UPDATE que revive un pipeline OCUPA CUPO, así que lleva la condición del
 # cupo adentro (2026-09-17). `continuar` no INSERTA una fila -- revive una que
@@ -1645,8 +1678,8 @@ async def step_upsert(s: Step, conexion: aiomysql.Connection | None = None) -> N
                     (step_id, pipeline_id, step_index, facet, motor, capability,
                      input_ref, output_ref, status, timeout_seconds,
                      retries_allowed, skip_on_fail, trace_id,
-                     started_at, finished_at, error, depends_on)
-                VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s, %s)
+                     started_at, finished_at, error, depends_on, modelo_real)
+                VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s,%s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                     status=VALUES(status),
                     facet=VALUES(facet),
@@ -1656,7 +1689,8 @@ async def step_upsert(s: Step, conexion: aiomysql.Connection | None = None) -> N
                     started_at=VALUES(started_at),
                     finished_at=VALUES(finished_at),
                     error=VALUES(error),
-                    depends_on=VALUES(depends_on)
+                    depends_on=VALUES(depends_on),
+                    modelo_real=VALUES(modelo_real)
                 """,
                 (
                     s.step_id, s.pipeline_id, s.step_index, s.facet, s.motor, s.capability,
@@ -1665,6 +1699,7 @@ async def step_upsert(s: Step, conexion: aiomysql.Connection | None = None) -> N
                     s.retries_allowed, s.skip_on_fail, s.trace_id,
                     s.started_at, s.finished_at, s.error,
                     json.dumps(s.depends_on, ensure_ascii=False),
+                    s.modelo_real,
                 ),
             )
 
@@ -1707,6 +1742,7 @@ async def steps_by_pipeline(pipeline_id: str) -> list[Step]:
             finished_at=row["finished_at"],
             error=row["error"],
             depends_on=depends_on,
+            modelo_real=row.get("modelo_real"),
         ))
     return result
 
@@ -1740,13 +1776,21 @@ async def get_motor_governance() -> dict[str, dict]:
        max_recursion_depth, output_schema, fallback_motor, fallback_mode,
        forbidden_paths, auditor_motor}},
        "motors": {motor_key: has_tool_access (bool)},
-       "facets": frozenset de facet.key con status='active'}
+       "facets": frozenset de facet.key con status='active',
+       "arbitro_faceta": str | None -- quién arbitra el plan final (Task 4,
+       2026-09-18). Sale de axioma_config.config_key='ejecutor.auditor_faceta'
+       -- el MISMO config que ya lee jax/ejecutor/contratos/eleccion_c5.py
+       para elegir el auditor del Ejecutor de Contratos (verificado contra la
+       base de test: valor 'thot'). No se hardcodea acá -- PlanBuilder._con_arbitro
+       recibe este valor y rechaza el plan (fail-closed) si viene vacío/None
+       o si la faceta no está activa: un plan de 2+ pasos sin quien arbitre
+       es el defecto que esa tarea cierra, no un modo de operar.
 
     Costo medido en vivo (2026-08-21, DB real) con 3 SELECTs: 0.00024s de
     ejecución total en el servidor (motor: 4 filas, capability: ~17,
     capability_motor: ~26) -- insignificante para llamar en cada dispatch,
-    no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) se agregó
-    después y NO está medido.
+    no solo en plan-build. El 4º SELECT (facet, 7 filas, E-17) y el 5º
+    (axioma_config, 1 fila, Task 4) se agregaron después y NO están medidos.
 
     Ruling R38 (2026-09-17): por el pool del store, no por una conexión propia
     -- era la conexión por pedido que tiraba /jacobs/preflight a c=50. Sin
@@ -1806,7 +1850,24 @@ async def get_motor_governance() -> dict[str, dict]:
             # despachar. Catálogo de 7 filas: sin índice, declarado en DEUDA.md.
             await cur.execute("SELECT `key` FROM facet WHERE status = 'active'")
             facets = frozenset(key for (key,) in await cur.fetchall())
-    return {"capabilities": capabilities, "motors": motors, "facets": facets}
+
+            # Task 4 (2026-09-18): quién arbitra el plan final -- config, no
+            # hardcodeado. Vacío/NULL -> None, y PlanBuilder._con_arbitro lo
+            # trata igual que "no configurado" (rechazo fail-closed).
+            await cur.execute(
+                "SELECT config_value FROM axioma_config WHERE config_key = %s",
+                ("ejecutor.auditor_faceta",),
+            )
+            fila_arbitro = await cur.fetchone()
+            arbitro_faceta = (
+                fila_arbitro[0].strip()
+                if fila_arbitro and fila_arbitro[0] and fila_arbitro[0].strip()
+                else None
+            )
+    return {
+        "capabilities": capabilities, "motors": motors, "facets": facets,
+        "arbitro_faceta": arbitro_faceta,
+    }
 
 
 # ----------------------------------------------------------------

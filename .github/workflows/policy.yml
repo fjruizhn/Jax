@@ -53,6 +53,32 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
 
+  # Detector de archivos de test sin job de CI (historial-y-arreglos-de-pipeline,
+  # 2026-09-18). El hallazgo que lo motiva: de 6 archivos de test creados en
+  # esta ronda, 5 no corrían en ningún job -- y las_manos/_tool_authority_test.py
+  # (el jail de rutas del Ejecutor) llevaba MESES sin correr en CI porque nadie
+  # se acordó de agregarlo a la lista de policy.yml. Este job no reemplaza esa
+  # lista por otra lista: lee policy.yml con PyYAML y falla si encuentra un
+  # archivo de test (tests/, jacobs/_*_test.py, las_manos/_*_test.py y
+  # cualquier otro test_*.py/_*_test.py del árbol) que ningún `run:` de ningún
+  # job invoque, salvo que esté declarado en EXCEPCIONES con motivo escrito.
+  # Job propio, sin dependencias pesadas: solo pytest + pyyaml.
+  archivos-de-test-en-ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pyyaml
+      - run: python -m pytest policy/tests/test_archivos_de_test_wireados_en_ci.py -v
+      - name: Piso exacto de tests CORRIDOS
+        # Medido 2026-09-18 en venv limpio: 7 passed.
+        run: |
+          python -m pytest -q policy/tests/test_archivos_de_test_wireados_en_ci.py 2>&1 | tee /tmp/wireados
+          grep -qE "^7 passed" /tmp/wireados || {
+            echo "PISO ROTO: se esperaban 7 tests CORRIDOS."; exit 1; }
+
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest
     steps:
@@ -208,6 +234,43 @@ jobs:
           grep -qE "^9 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
 
+  # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
+  # Mesa necesita prompt/modelo_real/depends_on por paso en
+  # GET /pipeline/{id}/results (jacobs/routes.py:get_pipeline_results). Las
+  # tablas que necesita (jacobs_pipelines/jacobs_steps) las crea ESTE repo con
+  # store.init_tables(): no hace falta el esquema de jax-platform, mismo
+  # motivo que facet-health-io de arriba.
+  pipeline-results-historial-db:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:12.3.3
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+      PYTHONPATH: .:las_manos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest pytest-asyncio
+      - run: python -m pytest jacobs/_pipeline_results_historial_test.py -v
+      - run: |
+          python -m pytest jacobs/_pipeline_results_historial_test.py -q 2>&1 | tee /tmp/out
+          grep -qE "^2 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2 tests CORRIDOS (no skipeados)."; exit 1; }
+
   # Frente F (2026-09-16): contrato de sub-pipelines contra una MariaDB REAL.
   # Las tablas de Jacobs (jacobs_pipelines/steps/events y la nueva
   # jacobs_subpipeline_tokens) las crea ESTE repo con store.init_tables(): no
@@ -273,13 +336,14 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
           python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
             tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
-            las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py 2>&1 | tee /tmp/out
+            las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py \
+            jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -392,8 +456,16 @@ jobs:
           #   REVIVE (continuar_transaccion) rechace con el cupo lleno y admita con lugar -- la cuarta
           #   sentencia, que el autor del mecanismo retirado pidio ver probada contra la base antes del
           #   merge. Medido en local (3.14) contra jax_memory_test.
-          grep -qE "^135 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 135 tests CORRIDOS (no skipeados)."; exit 1; }
+          #
+          # 135 -> 141 (2026-09-18, historial-y-arreglos-de-pipeline, detector de
+          # archivos de test sin CI): jacobs/_pipeline_identity_test.py (+2) y
+          # jacobs/_step_motor_test.py (+4) usaban jacobs.store real (init_tables(),
+          # pipeline_create(), step_upsert()) contra DB -- ningún job los corría.
+          # Medido contra una MariaDB 11.8 efímera fresca en Docker con las
+          # migraciones de jax-platform, mismo patrón que este job: 135 -> 141, 0
+          # fallas nuevas.
+          grep -qE "^141 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 141 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -664,10 +736,26 @@ jobs:
         # contrario; no agrega ni quita archivos de test. Medido dos veces:
         # 15 passed, 0 skipped, con JAX_PLATFORM_REPO_ROOT apuntando a un
         # checkout real de jax-platform.
+        # 15 -> 17 el 2026-09-18 (Task 7b, historial-y-arreglos-de-pipeline): el
+        # contrato pasa a CATORCE campos (pipeline_id). +2:
+        # test_jacobs_encola_pipeline_id_null_cuando_el_uso_no_viene_de_un_pipeline
+        # y test_motor_encola_pipeline_id_null_cuando_el_caller_no_es_un_pipeline.
+        # ORDEN DE MERGE: la migración de pipeline_id en jax-platform (Task 7b)
+        # tiene que estar en su master ANTES de mergear esta rama -- este job
+        # clona jax-platform@master real. Medido en local con
+        # JAX_PLATFORM_REPO_ROOT apuntando al worktree de jax-platform con la
+        # Task 7b ya aplicada: 17 passed, 0 skipped.
+        # 17 -> 22 (2026-09-18, tanda final de la revisión, Importante 4): +5
+        # -- una fila vieja de 13 campos (sin pipeline_id) sobrevive con
+        # pipeline_id=None en vez de ir a corruptos/, y sigue yendo a
+        # cuarentena si le falta cualquier campo de los que YA exigía el
+        # contrato desde antes (status/job_id incluidos -- esa decisión de
+        # 2026-09-15 no se reabre). Mismo ORDEN DE MERGE de arriba: depende
+        # del mismo checkout de jax-platform@master con Task 7b adentro.
         run: |
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
-          grep -qE "^15 passed" /tmp/cu || {
-            echo "PISO ROTO: se esperaban 15 tests CORRIDOS y 0 skipped."; exit 1; }
+          grep -qE "^22 passed" /tmp/cu || {
+            echo "PISO ROTO: se esperaban 22 tests CORRIDOS y 0 skipped."; exit 1; }
       - name: El freno que escribe la plataforma mata el motor en vuelo
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -878,6 +966,7 @@ jobs:
           tests/test_health_de_las_manos_puede_fallar.py
           tests/test_degradaciones_declaradas.py
           las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py
+          las_manos/_tool_authority_test.py
           tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py
           tests/test_store_indice_duenio.py
           tests/test_cola_uso_escritores.py
@@ -927,6 +1016,13 @@ jobs:
           tests/test_cupo_en_todos_los_caminos.py
           tests/test_base_por_sesion.py
           tests/test_tripwire_crear_pipeline_exige_gobernanza.py
+          las_manos/motor_registry/_policy_test.py
+          jacobs/_arbitro_test.py jacobs/_aviso_executor_test.py jacobs/_aviso_test.py
+          jacobs/_encadenado_por_defecto_test.py jacobs/_truncado_falla_test.py
+          jacobs/_usage_reconciliation_test.py las_manos/_motor_job_model_test.py
+          tests/test_ejecutor_reproduccion_u3.py
+          jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py
+          jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1004,6 +1100,7 @@ jobs:
             tests/test_health_de_las_manos_puede_fallar.py \
             tests/test_degradaciones_declaradas.py \
             las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
+            las_manos/_tool_authority_test.py \
             tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py \
             tests/test_store_indice_duenio.py \
             tests/test_cola_uso_escritores.py \
@@ -1053,6 +1150,13 @@ jobs:
             tests/test_cupo_en_todos_los_caminos.py \
             tests/test_base_por_sesion.py \
             tests/test_tripwire_crear_pipeline_exige_gobernanza.py \
+            las_manos/motor_registry/_policy_test.py \
+            jacobs/_arbitro_test.py jacobs/_aviso_executor_test.py jacobs/_aviso_test.py \
+            jacobs/_encadenado_por_defecto_test.py jacobs/_truncado_falla_test.py \
+            jacobs/_usage_reconciliation_test.py las_manos/_motor_job_model_test.py \
+            tests/test_ejecutor_reproduccion_u3.py \
+            jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py \
+            jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -2265,8 +2369,104 @@ jobs:
           #   mutacion en dos sitios). Los otros 25 archivos del commit no suman tests:
           #   cambian como resuelven el nombre de la base. Medido local: 2070 passed,
           #   1 xfailed, 16 subtests; el runner cuenta uno menos (el xfail sale skipped).
-          grep -qE "^2069 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2069 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2069 -> 2095 el 2026-09-18 (Task 5, historial-y-arreglos-de-pipeline --
+          #   el jail con su peor caso, a CI): +26, las_manos/_tool_authority_test.py.
+          #   Existía desde GAP2 Fase2 (2026-08-19) con cobertura real del peor caso
+          #   del jail (`../fuera.txt`, `sub/../.env`, symlink que escapa el
+          #   workspace, symlink a un forbidden_path, variantes de mayúsculas,
+          #   `.env`/`secrets/` sin barra final) pero NUNCA estuvo wireado a ningún
+          #   job -- un freno sin prueba automática no es freno (Principio VII).
+          #   Importa más ahora que `ada`/`kimi` (no solo `jax_local`) pueden pedir
+          #   lecturas de verdad (ver _seed_ada_kimi_has_tool_access, jax-platform).
+          #   Corrido suelto primero y confirmado 26/26 verde antes de sumarlo acá.
+          #   No usa DB ni red -- WORKSPACE_ROOT se parchea a un tempdir por test,
+          #   MotorCatalog se arma desde un dict, mismo criterio que
+          #   _worker_tool_loop_test.py, ya en este job. Medido local (env -i, sin
+          #   JAX_DB_HOST): 2096 passed, 1 xfailed, 16 subtests; mismo desfase de
+          #   siempre (el runner cuenta uno menos, el xfail sale skipped). Si el
+          #   runner da otro numero, manda el runner.
+          # 2095 -> 2098 el 2026-09-18 (Task 7b, historial-y-arreglos-de-pipeline --
+          #   costo real del historial): +3. tests/test_cola_uso_escritores.py suma
+          #   test_jacobs_encola_pipeline_id_null_cuando_el_uso_no_viene_de_un_pipeline
+          #   y test_motor_encola_pipeline_id_null_cuando_el_caller_no_es_un_pipeline
+          #   (+2, el contrato CAMPOS_DEL_CONTRATO pasa de trece a catorce campos);
+          #   las_manos/_worker_max_tokens_test.py suma
+          #   test_run_con_pipeline_id_lo_pasa_a_record_motor_usage (+1, el pipeline_id
+          #   de MotorDispatchRequest viaja hasta record_motor_usage() y hasta
+          #   MotorJobView). tests/test_prevuelo_sonda.py::
+          #   test_record_direct_usage_inserta_con_el_request_type_pedido se ajustó
+          #   (mismo test, sin sumar caso: el INSERT tiene una columna más al final,
+          #   request_type pasa de índice -1 a -2) -- no cuenta en el delta. Medido
+          #   local (env -i, sin JAX_DB_HOST, JAX_PLATFORM_REPO_ROOT a este worktree):
+          #   2099 passed, 1 xfailed, 16 subtests; mismo desfase de siempre. Si el
+          #   runner da otro numero, manda el runner.
+          # 2098 -> 2171 (2026-09-18, historial-y-arreglos-de-pipeline, detector
+          # de archivos de test sin CI -- policy/tests/test_archivos_de_test_wireados_en_ci.py):
+          # +73 de 9 archivos que el detector encontró SIN NINGÚN job, puros
+          # (sin DB, sin red): las_manos/motor_registry/_policy_test.py (+11),
+          # jacobs/_arbitro_test.py (+13), jacobs/_aviso_executor_test.py (+3),
+          # jacobs/_aviso_test.py (+7), jacobs/_encadenado_por_defecto_test.py (+4),
+          # jacobs/_truncado_falla_test.py (+6), jacobs/_usage_reconciliation_test.py (+10),
+          # las_manos/_motor_job_model_test.py (+2), tests/test_ejecutor_reproduccion_u3.py
+          # (+17, y 2 xfail más -- ya venía con xfail(strict=True), no cambia el delta
+          # de passed). Medido local (mismo desfase de siempre con el runner, ver nota
+          # de arriba): 2098 -> 2171 passed, 1 -> 3 xfailed, mismo 1 failed ajeno
+          # (test_cola_uso_escritores.py, mirror desactualizado, ver mirror-sync).
+          # 2171 -> 2206 (2026-09-18, tanda final de la revisión de
+          # historial-y-arreglos-de-pipeline): +35 de 4 archivos nuevos (sin
+          # job todavía, mismo detector) más tests agregados a 4 archivos que
+          # YA estaban acá -- los 8 arreglos de la revisión, con su test
+          # rojo-antes-verde-después cada uno:
+          #   jacobs/_arbitro_test.py (+2) -- Media 7 (sala limpia después del
+          #     caso de 1 paso) + Media 8 (build() rechaza si el árbitro pasa
+          #     el tope de 20 pasos);
+          #   jacobs/_aviso_test.py (+1) -- menor: CancelledError deja rastro;
+          #   jacobs/_truncado_falla_test.py (+8) -- Importante 3 (el consumo
+          #     viaja en la excepción y record_direct_usage corre igual) +
+          #     menor (PasoTruncado.codigo como prefijo del error guardado);
+          #   tests/test_cola_uso_escritores.py (+5) -- Importante 4 (una fila
+          #     vieja de 13 campos sobrevive con pipeline_id=None, y sigue
+          #     yendo a cuarentena si le falta cualquier campo de SIEMPRE);
+          #   jacobs/_menu_sin_arbitro_test.py (+5, archivo nuevo) -- Bloqueante 1
+          #     (el menú del planificador excluye la faceta árbitro);
+          #   jacobs/_contexto_tope_total_test.py (+6, archivo nuevo) --
+          #     Importante 2 (tope TOTAL de contexto, recorte honesto y visible);
+          #   jacobs/_reaper_aviso_test.py (+4, archivo nuevo) -- Importante 5
+          #     (expired también dispara el aviso de Telegram);
+          #   jacobs/_continue_modelo_real_reset_test.py (+4, archivo nuevo) --
+          #     Antes de mergear 6 (continuar resetea modelo_real).
+          # Medido local (mismo desfase de siempre con el runner, ver nota de
+          # arriba): 2171 -> 2206 passed, mismo 3 xfailed, mismo 1 failed ajeno
+          # (test_cola_uso_escritores.py, mirror desactualizado -- acá se ve
+          # como failed porque este checkout tiene ~/jax-platform local; en el
+          # runner, sin ese checkout, es skip, como dice el piso).
+          #
+          # CORRECCIÓN 2026-09-18 (jax#220, arreglo de CI): el 2206 de arriba
+          # se midió en hall9000, donde ~/ejecutor-fase0/resultados EXISTE
+          # (datos reales de U3, ver [[jax-ejecutor-fase0-qwen]]). El runner
+          # de GitHub Actions nunca tiene ese corpus -- vive fuera del repo a
+          # propósito, porque son transcripciones de cliente (docstring de
+          # tests/test_ejecutor_reproduccion_u3.py: "Se saltea si el corpus
+          # no está en disco"). Bloque anterior lo etiquetó "(sin DB, sin
+          # red)": correcto en que no toca DB ni red, pero SÍ depende de un
+          # filesystem local que nunca va a estar en CI -- no es una falta de
+          # cableado (el jail de rutas SÍ era eso), es un skip estructural y
+          # permanente por diseño de privacidad. Moverlo a jacobs-gobernanza-db
+          # o subpipeline-contrato-db no lo arregla: esos jobs tampoco tienen
+          # el corpus, así que seguiría salteándose ahí igual -- cambiaría de
+          # lugar el mismo skip sin hacerlo correr. Se queda en tests-puros,
+          # que es donde corresponde por lo que el test REALMENTE necesita
+          # (nada de red ni DB; el corpus es opcional, no un requisito de este
+          # job). Confirmado contra el run real de CI (run 35372766868): 16
+          # tests de tests/test_ejecutor_reproduccion_u3.py (14 que acá salen
+          # passed + 2 que acá salen xfailed) se saltean en el runner --
+          # 2206 - 14 = 2192 passed, 1 + 16 = 17 skipped. Ningún otro archivo
+          # de los agregados hoy se saltea sin DB: corrido local con env -i y
+          # sin JAX_DB_HOST, los otros 12 dan verde (passed/xfailed), cero
+          # skips. Piso corregido con el número del RUNNER, no el de esta
+          # máquina.
+          grep -qE "^2192 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2192 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -2300,6 +2500,12 @@ jobs:
       JAX_DB_PASSWORD: ci
       JAX_DB_NAME: jax_memory_test
       PYTHONPATH: .:las_manos
+      # las_manos/motor_registry/_authorize_facet_endpoint_test.py (agregado
+      # 2026-09-18, detector de archivos de test sin CI) levanta el server.app
+      # real de LAS MANOS y necesita presentar la credencial de servicio
+      # 'plataforma' (las_manos/auth_servicio.py) -- valor de mentira, solo para
+      # este job efímero, nunca el secreto real de /etc/jax/.env.
+      JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA: "ci-jacobs-gobernanza-db-credencial-de-mentira-0000000000"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -2320,6 +2526,12 @@ jobs:
       - name: Clonar jax-platform (sus migraciones crean la gobernanza)
         run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
       - run: pip install -r /tmp/jax-platform/backend/requirements.txt pytest
+      # las_manos/motor_registry/_authorize_facet_endpoint_test.py (agregado
+      # 2026-09-18) hace `from server import app`: server.py importa workers
+      # (ssh/file/rsync), jacobs.routes y demás -- más de lo que trae el
+      # requirements.txt de jax-platform. Sin este paso la COLECCIÓN del test
+      # falla con ModuleNotFoundError, antes de correr un solo caso (medido).
+      - run: pip install -r requirements.txt
       - name: Esquema de gobernanza con SUS migraciones
         working-directory: /tmp/jax-platform/backend
         run: |
@@ -2337,6 +2549,7 @@ jobs:
           PY
       - run: >-
           python -m pytest -v tests/test_plan_validation.py
+          tests/test_lectura_de_pasos_db.py
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
@@ -2350,11 +2563,19 @@ jobs:
           tests/test_facetas_de_gobernanza_db.py
           tests/test_ejecutor_politica_db.py
           tests/test_ejecutor_c5_db.py
+          las_manos/motor_registry/_facet_policy_test.py
+          jacobs/_http_facet_admission_test.py
+          las_manos/motor_registry/_authorize_facet_endpoint_test.py
+          jacobs/_usage_writer_test.py
+          las_manos/_catalog_from_db_test.py
+          jacobs/_modelo_real_test.py
+          las_manos/_output_validator_db_drift_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
         run: |
           python -m pytest -q tests/test_plan_validation.py \
+            tests/test_lectura_de_pasos_db.py \
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
@@ -2368,6 +2589,13 @@ jobs:
             tests/test_facetas_de_gobernanza_db.py \
             tests/test_ejecutor_politica_db.py \
             tests/test_ejecutor_c5_db.py \
+            las_manos/motor_registry/_facet_policy_test.py \
+            jacobs/_http_facet_admission_test.py \
+            las_manos/motor_registry/_authorize_facet_endpoint_test.py \
+            jacobs/_usage_writer_test.py \
+            las_manos/_catalog_from_db_test.py \
+            jacobs/_modelo_real_test.py \
+            las_manos/_output_validator_db_drift_test.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -2554,8 +2782,21 @@ jobs:
           # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). HEAD esperaba 86 passed y
           # origin/master 35; la unión de los dos conjuntos no da ninguno de los dos.
           # Medido en hall9000 contra jax_memory_test con la lista unificada: 94 passed.
-          grep -qE "^87 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 87 tests CORRIDOS."; exit 1; }
+          # 120 -> 121 (2026-09-18, tanda final de la revisión): +1 en
+          # tests/test_jacobs_continuar_db.py --
+          # test_continuar_resetea_modelo_real_contra_la_db_real (Antes de
+          # mergear 6: `/continue` resetea `modelo_real`, no lo deja ver el
+          # de la corrida anterior). Ejercitado en rojo-antes-verde-después
+          # contra una base de test propia (jax_memory_test_<sufijo>,
+          # clonada del esquema de jax_memory_test con
+          # base_de_test.asegurar_base_de_test()), no la MariaDB efímera con
+          # migraciones de jax-platform que usa este job -- el mismo bloqueo
+          # de arriba (107/13 hasta que jax-platform entre a master) sigue
+          # igual: éste es un test nuevo que no depende de ese esquema, así
+          # que el número final es 121 pasando (o 108/13 mientras la
+          # dependencia siga pendiente, +1 sobre el 107 de antes).
+          grep -qE "^121 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 121 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
@@ -2563,3 +2804,66 @@ jobs:
           #   hacía cumplir pasa a estar dentro de cada escritura (sus controles
           #   nuevos viven en jacobs/_cupo_io_test.py y tests/test_cupo_en_todos_los_caminos.py,
           #   que suman a OTROS dos jobs). Medido en local contra jax_memory_test.
+          # 87 -> 90 el 2026-09-18 (Task 5, historial-y-arreglos-de-pipeline): +3.
+          #   tests/test_lectura_de_pasos_db.py es nuevo (+2): los dos frenos
+          #   permanentes de la corrección de rumbo -- 'jacobs' en allowed_callers
+          #   de file_read es HISTORIA (GAP2 Fase2, 2026-08-19), no algo que esta
+          #   tarea otorgó, y el de file_write es un DETECTOR DE CAMBIO (hoy la
+          #   escritura NO está cerrada -- Fase4, deuda registrada para que
+          #   Fernando decida -- no una afirmación falsa de que sí lo está).
+          #   tests/test_plan_validation.py suma 1 neto: +1 test nuevo
+          #   (test_rechaza_file_write_real_contra_todos_los_motores_sembrados,
+          #   real contra jax_local/kimi) y el test que dependía del viejo hueco
+          #   (kimi con capability_motor pero sin has_tool_access) se reescribió
+          #   contra una `governance` sintética porque ese caso real ya no existe
+          #   -- mismo nombre, mismo conteo. Requiere jax-platform con
+          #   _seed_ada_kimi_has_tool_access (migrations.py) en master: sube
+          #   ada/kimi a has_tool_access=1, deja thot en 0 (su proveedor rechaza
+          #   function tools con reasoning_effort, medido HTTP 400 con
+          #   gpt-6-astra; además es la faceta árbitro). Medido en local (3.14),
+          #   env -i, contra una base de sesión clonada de jax_memory_test con
+          #   las migraciones de esta rama aplicadas: 90 passed. Si el runner da
+          #   otro número, manda el runner.
+          # 90 -> 92 el 2026-09-18 (Task 7b, historial-y-arreglos-de-pipeline):
+          #   +2 en las_manos/_motor_usage_writer_test.py --
+          #   test_record_motor_usage_escribe_pipeline_id y
+          #   test_record_motor_usage_sin_pipeline_id_escribe_null.
+          #   record_motor_usage() pasa a insertar SIEMPRE la columna
+          #   axioma_usage.pipeline_id (nueva, migrations.py de jax-platform) --
+          #   sin ella, ESTE job entero rompería contra cualquier schema viejo,
+          #   no solo estos dos tests nuevos. DEPENDENCIA DE ORDEN DE DESPLIEGUE
+          #   (mismo patrón que Ruling 3 del ledger de esta ronda, jax-platform#PENDIENTE):
+          #   este job clona jax-platform@master real (no un branch), así que
+          #   CI se queda rojo hasta que la migración de pipeline_id (Task 7b,
+          #   jax-platform) esté en master ANTES de mergear esta rama. Medido
+          #   en local (3.14), contra jax_memory_test con la migración de esta
+          #   ronda ya aplicada (por jax-platform/backend/db/migrations.py):
+          #   92 passed. Si el runner da otro número, manda el runner.
+          # 92 -> 120 el 2026-09-18 (historial-y-arreglos-de-pipeline, detector de
+          # archivos de test sin CI, policy/tests/test_archivos_de_test_wireados_en_ci.py):
+          # +28 de 7 archivos que el detector encontró SIN NINGÚN job, todos
+          # dependientes de la DB de gobernanza (facet/capability/model de
+          # jax-platform) o de `server.py` real: las_manos/motor_registry/_facet_policy_test.py
+          # (+7), jacobs/_http_facet_admission_test.py (+3),
+          # las_manos/motor_registry/_authorize_facet_endpoint_test.py (+3, el propio
+          # docstring de este archivo decía "nunca se vio el fallo porque el archivo no
+          # está en ningún job de CI" -- necesita además JAX_LAS_MANOS_CREDENCIAL_PLATAFORMA
+          # en el env del job y requirements.txt de ESTE repo, los dos agregados en el
+          # mismo commit), jacobs/_usage_writer_test.py (+4), las_manos/_catalog_from_db_test.py
+          # (+4), jacobs/_modelo_real_test.py (+6), las_manos/_output_validator_db_drift_test.py
+          # (+1). Los 5 primeros de esa lista (17 tests) pasan limpio; DOS arrastran la
+          # MISMA dependencia de orden de despliegue que ya declaraba el bloque de arriba:
+          # jacobs/_usage_writer_test.py::DirectUsageWriterTest (4 tests, los 4 rojos hoy
+          # -- mismo motivo que las_manos/_motor_usage_writer_test.py, Task 7b) y
+          # las_manos/_catalog_from_db_test.py (2 de 4 rojos hoy -- mismo motivo que
+          # test_plan_validation.py/test_plan_capability_hint.py más arriba,
+          # _seed_ada_kimi_has_tool_access pendiente en jax-platform master). Ningún
+          # test nuevo, ninguna falla nueva: exactamente el mismo bloqueo que ya
+          # tenía este job, contado dos veces más porque estos dos archivos también
+          # ejercitan esas dos columnas. Medido contra una MariaDB 11.8 efímera fresca
+          # en Docker (no la de producción), con las migraciones reales de jax-platform
+          # clonadas en frío: 92 -> 120 si las dos dependencias de jax-platform están en
+          # master; hoy, con las dos pendientes, salen 13 rojos (7 de antes + 6 de estos
+          # dos archivos) y 107 passed -- el mismo "CI se queda rojo hasta que..." de
+          # arriba, no una regresión de este cambio. Si el runner da otro número, manda
+          # el runner.

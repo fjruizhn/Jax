@@ -56,6 +56,13 @@ class MotorDispatchRequest(BaseModel):
     # el timeout por-llamada de motor.default_timeout_seconds), compat con
     # cualquier caller que no lo mande.
     timeout_seconds: int | None = None
+    # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): el pipeline de
+    # Jacobs que despacha este job (Pipeline.pipeline_id, jacobs/models.py),
+    # para que record_motor_usage() lo escriba en axioma_usage.pipeline_id y
+    # el historial pueda sumar el costo real por pipeline. None = quien
+    # despacha no viene de un pipeline (un caller directo contra este
+    # endpoint, sin Jacobs de por medio) -- válido, no un hueco.
+    pipeline_id: str | None = None
 
     model_config = {"extra": "forbid"}
 
@@ -84,6 +91,22 @@ class MotorJobView(BaseModel):
     # Salida completa (2026-09-12): antes no se guardaba en ningún lado y los
     # pasos siguientes de Jacobs recibían solo result_summary.
     result_path: str | None = None
+    # Ronda de arreglo 1 de Task 1 (2026-09-18, historial-y-arreglos-de-
+    # pipeline): el model_id REAL que despachó este job (motor_entry.model
+    # en worker.py, el mismo que va en el payload a la API -- worker.py:171
+    # y worker.py:725). 'motor' de arriba es el NOMBRE del motor
+    # (kimi/jax_local), no el modelo; sin este campo, Jacobs no tenía forma
+    # de saber qué modelo corrió un paso de motor sin inventarlo. None
+    # hasta que worker.py resuelve motor_entry con éxito -- un job que
+    # falla ANTES de eso (motor inexistente, transporte no soportado)
+    # nunca llegó a saber qué modelo iba a usar.
+    model: str | None = None
+    # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): el mismo
+    # pipeline_id que llegó en MotorDispatchRequest, expuesto acá por
+    # completitud (así el job se puede leer también por pipeline desde
+    # afuera) -- sin este campo, JobStore.get() lo filtraría en silencio
+    # igual que filtraba `model` antes de la ronda de arreglo 1 de Task 1.
+    pipeline_id: str | None = None
 
 
 class FacetAuthorizeRequest(BaseModel):

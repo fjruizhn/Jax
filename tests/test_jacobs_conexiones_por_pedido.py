@@ -123,6 +123,12 @@ class _Cursor:
                            ("kimi",), ("hyde",), ("jax_local",))
         elif s.startswith("SELECT capability_key, motor_key FROM capability_motor"):
             self._filas = ()
+        elif s.startswith("SELECT config_value FROM axioma_config WHERE config_key"):
+            # Task 4 (2026-09-18): 5º SELECT de get_motor_governance -- quién
+            # arbitra el plan final. 'thot' ya está activo en el fixture de
+            # facets de arriba, así que el árbitro puede agregarse sin abrir
+            # una conexión nueva (este doble existe para probar eso).
+            self._fila = ("thot",)
         elif s == store._SQL_CONTAR_ACTIVOS:
             self._fila = (0,)
         elif s.startswith("SELECT * FROM jacobs_pipelines"):

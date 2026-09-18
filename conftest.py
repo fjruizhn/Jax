@@ -77,6 +77,22 @@ os.environ["JAX_LAS_MANOS_CREDENCIAL_JACOBS"] = _secrets.token_urlsafe(32)
 #: puede dejar ahí un documento de mentira: mismo criterio que el respaldo de uso.
 os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
 
+#: 2026-09-18 (detector de cobertura, hallazgo real: FileNotFoundError/
+#: PermissionError en las_manos/motor_registry/_authorize_facet_endpoint_test.py
+#: y cualquier otro test que importe `server`). `las_manos/config.toml` trae
+#: `audit_log` como ruta absoluta del home de producción
+#: (/home/fruiz/jax/las_manos/logs/audit.jsonl); `server.py` la lee al
+#: importarse y `AuditLog.__init__` le hace `mkdir` -- en cualquier checkout
+#: que no sea exactamente /home/fruiz/jax (cualquier runner de CI, este
+#: worktree incluido) eso revienta antes de que corra un solo test. Mismo
+#: criterio que el resto de este archivo: se fija en tiempo de IMPORT, antes
+#: de que nada pueda importar `server`. tests/test_prevuelo_pool.py ya
+#: documentaba el mismo bug con un monkeypatch local de AuditLog.__init__
+#: (ver _audit_init_a) -- eso sigue funcionando, esto lo cierra para TODO el
+#: resto de la suite, no solo para ese test.
+os.environ["JAX_AUDIT_LOG_PATH"] = os.path.join(
+    tempfile.mkdtemp(prefix="jax-test-audit-log-"), "audit.jsonl")
+
 #: 2026-09-17: `jax/core/facet_resolver.py` y `las_manos/facet_resolver.py`
 #: leen JAX_FACET_SEAL_PATH al importarse, con default
 #: /srv/jax-data/facet-cache-seal -- el sello REAL que jax-platform y LAS
@@ -173,6 +189,36 @@ def _ruta_heredada_del_freno_aislada(monkeypatch, tmp_path_factory):
             continue
         monkeypatch.setattr(modulo, "RUTA_HEREDADA", inexistente)
         monkeypatch.setattr(modulo, "_heredada_avisada", False)
+
+
+#: Task 6 (2026-09-18, aviso por Telegram al terminar un pipeline): desde que
+#: `_correr_pipeline` (jacobs/executor.py) llama a
+#: `jacobs.aviso.avisar_fin_pipeline` en cada transición terminal
+#: (completed/aborted), CUALQUIER test que corra un pipeline hasta el final
+#: agenda un envío real vía `send_telegram_alert` (jacobs/reaper.py:82) --
+#: que sólo se abstiene si TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID no están
+#: seteadas en el proceso. Un dev shell que sourceó /etc/jax/.env de
+#: producción antes de invocar pytest SÍ las tiene seteadas (misma fuga que
+#: motivó la barrera de DB de este archivo, T1 2026-09-14) -- sin este freno,
+#: correr la suite local mandaría mensajes reales al chat de producción.
+#: Mismo criterio que `_aviso_pipeline_no_dispara_solo` en el conftest de
+#: jax-platform (Task 8 de esta misma ronda): no-op por defecto para TODA la
+#: suite; los tests de `jacobs/_aviso_test.py` que quieren el comportamiento
+#: real lo reponen con su propio `monkeypatch.setattr`, que corre DESPUÉS de
+#: este fixture (dentro del cuerpo del test) y gana.
+@pytest.fixture(autouse=True)
+def _telegram_no_manda_de_verdad(monkeypatch):
+    try:
+        import jacobs.reaper as _reaper
+    except ImportError:
+        # sin las_manos en sys.path jacobs.reaper no se puede importar --
+        # tampoco hay nada que pueda dispararlo desde este test
+        return
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(
+        _reaper, "send_telegram_alert",
+        AsyncMock(return_value={"ok": False, "message_id": None, "error": "no-op de test (conftest raíz)"}),
+    )
 
 
 def archivos_nuevos_en(directorio: Path, desde: float) -> list[Path]:

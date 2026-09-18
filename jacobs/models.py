@@ -82,6 +82,10 @@ class Step(BaseModel):
     started_at:       float | None = None
     finished_at:      float | None = None
     error:            str | None = None
+    # El model_id que REALMENTE despacho este paso, escrito en el momento del
+    # despacho. La faceta no alcanza: facet_binding cambia y un historial que
+    # solo guarde la faceta miente con el tiempo.
+    modelo_real:      str | None = None
 
 
 class Pipeline(BaseModel):
@@ -210,7 +214,11 @@ class StepSpec(BaseModel):
     # distinga "ausente" de "override real" y aplique el default correcto.
     timeout_seconds: int | None = None
     skip_on_fail:    bool = False
-    depends_on:      list[int] = Field(default_factory=list)
+    # None = el caller no dijo nada; [] = pidio paralelo explicito. Mismo
+    # motivo que timeout_seconds arriba: model_dump() SIEMPRE incluye la
+    # clave, asi que un default de lista vacia se lee como una decision del
+    # caller que nunca existio -- y asi corrio b8f80733, seis pasos a la vez.
+    depends_on:      list[int] | None = None
 
 
 # Evitar forward-reference con StepSpec antes de Step

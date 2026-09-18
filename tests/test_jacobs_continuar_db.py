@@ -107,6 +107,37 @@ def test_la_transaccion_aplica_pasos_plan_contexto_y_epoca():
         assert all(f["key"] == "PRIMARY" and f["type"] not in ("ALL", "index") for f in filas), filas
 
 
+def test_continuar_resetea_modelo_real_contra_la_db_real():
+    """ANTES DE MERGEAR 6 (revisión final 2026-09-18): un step que /continue
+    vuelve a poner en 'pending' NO puede seguir mostrando el modelo_real de
+    su corrida anterior. Complementa el test puro de texto de SQL
+    (jacobs/_continue_modelo_real_reset_test.py) con la prueba de que el
+    UPDATE real, contra MariaDB, deja la columna en NULL."""
+    async def cuerpo():
+        pipeline, pasos = await _abortado()
+        pid = pipeline.pipeline_id
+        try:
+            pasos[2].modelo_real = "modelo-de-la-corrida-anterior"
+            await store.step_upsert(pasos[2])
+            antes = (await store.steps_by_pipeline(pid))[2]
+
+            contexto = {"objective": "o", "step_0_ref": _REF, "step_1_ref": _REF}
+            await store.continuar_transaccion(
+                pid, 0, PipelineStatus.aborted, [pasos[2]], pasos, contexto, 2,
+                evento_payload=None)
+            despues = (await store.steps_by_pipeline(pid))[2]
+            return antes, despues
+        finally:
+            await _borrar(pid)
+
+    antes, despues = asyncio.run(cuerpo())
+    assert antes.modelo_real == "modelo-de-la-corrida-anterior"
+    assert despues.modelo_real is None, (
+        "el step continuado sigue mostrando el modelo_real de la corrida "
+        "anterior -- un dato falso con cara de verdadero"
+    )
+
+
 def test_explain_del_update_final_de_continuar_usa_la_clave_primaria():
     """Ola final F7 (revisión final m8): la tercera consulta de la
     transacción, _SQL_PIPELINE_CONTINUAR, no tenía EXPLAIN al lado de las

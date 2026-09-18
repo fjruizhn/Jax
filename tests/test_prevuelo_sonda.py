@@ -519,7 +519,12 @@ def test_record_direct_usage_inserta_con_el_request_type_pedido(monkeypatch):
             "1", "1", "jekyll", "deepseek", "m", 1, 2, request_type="preflight_probe"))
         asyncio.run(usage_writer.record_direct_usage("1", "1", "jekyll", "deepseek", "m", 1, 2))
     inserts = [p for sql, p in ejecutados if sql.startswith("INSERT INTO axioma_usage")]
-    assert [p[-1] for p in inserts] == ["preflight_probe", "pipeline"]
+    # Task 7b (2026-09-18): pipeline_id se sumó DESPUÉS de request_type en el
+    # INSERT -- request_type pasa de -1 a -2. La sonda del pre-vuelo no manda
+    # pipeline_id (no es un paso de un pipeline): las dos filas quedan en
+    # None, ahora en -1.
+    assert [p[-2] for p in inserts] == ["preflight_probe", "pipeline"]
+    assert [p[-1] for p in inserts] == [None, None]
 
 
 # ---------------------------------------------------------------------------
