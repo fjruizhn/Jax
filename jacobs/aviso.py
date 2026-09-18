@@ -129,7 +129,7 @@ async def _avisar(pipeline_id: str, nombre: str, estado: str) -> None:
             pipeline_id,
         )
         raise
-    except Exception:  # fail-soft real: send_telegram_alert no debería lanzar, pero esto es la última barrera
+    except Exception:  # fail-soft: send_telegram_alert no debería lanzar, pero esto es la última barrera -- ya se loguea con exc_info arriba, nunca sube al caller
         logger.error(
             "Aviso Telegram de fin de pipeline %s: excepción inesperada llamando a send_telegram_alert",
             pipeline_id, exc_info=True,

@@ -2429,8 +2429,33 @@ jobs:
           # (test_cola_uso_escritores.py, mirror desactualizado -- acá se ve
           # como failed porque este checkout tiene ~/jax-platform local; en el
           # runner, sin ese checkout, es skip, como dice el piso).
-          grep -qE "^2206 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2206 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          #
+          # CORRECCIÓN 2026-09-18 (jax#220, arreglo de CI): el 2206 de arriba
+          # se midió en hall9000, donde ~/ejecutor-fase0/resultados EXISTE
+          # (datos reales de U3, ver [[jax-ejecutor-fase0-qwen]]). El runner
+          # de GitHub Actions nunca tiene ese corpus -- vive fuera del repo a
+          # propósito, porque son transcripciones de cliente (docstring de
+          # tests/test_ejecutor_reproduccion_u3.py: "Se saltea si el corpus
+          # no está en disco"). Bloque anterior lo etiquetó "(sin DB, sin
+          # red)": correcto en que no toca DB ni red, pero SÍ depende de un
+          # filesystem local que nunca va a estar en CI -- no es una falta de
+          # cableado (el jail de rutas SÍ era eso), es un skip estructural y
+          # permanente por diseño de privacidad. Moverlo a jacobs-gobernanza-db
+          # o subpipeline-contrato-db no lo arregla: esos jobs tampoco tienen
+          # el corpus, así que seguiría salteándose ahí igual -- cambiaría de
+          # lugar el mismo skip sin hacerlo correr. Se queda en tests-puros,
+          # que es donde corresponde por lo que el test REALMENTE necesita
+          # (nada de red ni DB; el corpus es opcional, no un requisito de este
+          # job). Confirmado contra el run real de CI (run 35372766868): 16
+          # tests de tests/test_ejecutor_reproduccion_u3.py (14 que acá salen
+          # passed + 2 que acá salen xfailed) se saltean en el runner --
+          # 2206 - 14 = 2192 passed, 1 + 16 = 17 skipped. Ningún otro archivo
+          # de los agregados hoy se saltea sin DB: corrido local con env -i y
+          # sin JAX_DB_HOST, los otros 12 dan verde (passed/xfailed), cero
+          # skips. Piso corregido con el número del RUNNER, no el de esta
+          # máquina.
+          grep -qE "^2192 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2192 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

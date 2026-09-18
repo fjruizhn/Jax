@@ -1395,7 +1395,7 @@ def _disparar_aviso_fin(pipeline: Pipeline, estado: PipelineStatus) -> None:
         aviso.avisar_fin_pipeline(
             pipeline_id=pipeline.pipeline_id, nombre=pipeline.name, estado=estado.value,
         )
-    except Exception:
+    except Exception:  # fail-soft: fallar agendando el aviso no puede revertir ni bloquear el status terminal ya escrito -- se loguea con exc_info arriba
         logger.error(
             "Pipeline %s: no se pudo agendar el aviso de Telegram de fin (status %s ya escrito)",
             pipeline.pipeline_id, estado.value, exc_info=True,
