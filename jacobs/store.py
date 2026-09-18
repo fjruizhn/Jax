@@ -1516,18 +1516,22 @@ async def pipeline_tomar_epoca(
 
 
 _SQL_BLOQUEAR_PIPELINE = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s FOR UPDATE"
-# NO resetea modelo_real (Task 1, 2026-09-18): un step que `continue` vuelve
-# a poner en 'pending' conserva el modelo_real de SU corrida anterior hasta
-# que el próximo despacho lo pisa (executor.py:951/`_invoke_motor` al
-# completar). Ventana conocida, no arreglada a propósito -- no la pidió ni
-# el brief ni el coordinador, y el dato nunca queda mal disfrazado de
-# definitivo: en cuanto el step vuelve a correr, se sobreescribe con el
-# modelo real de la corrida nueva. Si algún consumidor llega a leer
-# modelo_real de un step 'pending'/'running' (no 'completed') y necesita que
-# sea exacto en esa ventana, hace falta sumar `modelo_real=NULL` acá.
+# ANTES DE MERGEAR 6 (revisión final 2026-09-18): SÍ resetea modelo_real.
+# Estaba diferido (Task 1, mismo día) porque no lo pedía ni el brief ni el
+# coordinador -- la revisión final lo subió de prioridad: es el ÚNICO punto
+# donde la función que esta misma ronda entregó ("el paso guarda qué modelo
+# lo ejecutó de verdad") muestra un dato FALSO con cara de verdadero. Un
+# step 'pending' recién continuado por `/continue` seguía mostrando el
+# modelo_real de SU corrida anterior -- el resto de las columnas de estado
+# (facet, motor, status, output_ref, started_at, finished_at, error) ya se
+# reseteaban acá mismo; a ésta se la había dejado afuera. Se sobreescribe de
+# nuevo con el modelo real en cuanto el step vuelve a correr
+# (executor.py::_invoke_motor al completar, o `step.modelo_real = f.model`
+# en el despacho HTTP directo) -- es una columna y dos palabras.
 _SQL_PASO_A_CORRER = (
     "UPDATE jacobs_steps SET facet=%s, motor=%s, status='pending', output_ref=NULL, "
-    "started_at=NULL, finished_at=NULL, error=NULL WHERE step_id=%s AND pipeline_id=%s"
+    "started_at=NULL, finished_at=NULL, error=NULL, modelo_real=NULL "
+    "WHERE step_id=%s AND pipeline_id=%s"
 )
 # El UPDATE que revive un pipeline OCUPA CUPO, así que lleva la condición del
 # cupo adentro (2026-09-17). `continuar` no INSERTA una fila -- revive una que

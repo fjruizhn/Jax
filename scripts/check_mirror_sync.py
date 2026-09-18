@@ -354,6 +354,7 @@ FAMILIAS = (
             "SUBDIRECTORIO_CORRUPTOS",
             "CAMPOS",
             "CAMPOS_OBLIGATORIOS",
+            "CAMPOS_NUEVOS_TOLERADOS_SI_FALTAN",
             "ORIGENES",
             "_lock",
             "_medicion",

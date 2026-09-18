@@ -734,10 +734,17 @@ jobs:
         # clona jax-platform@master real. Medido en local con
         # JAX_PLATFORM_REPO_ROOT apuntando al worktree de jax-platform con la
         # Task 7b ya aplicada: 17 passed, 0 skipped.
+        # 17 -> 22 (2026-09-18, tanda final de la revisión, Importante 4): +5
+        # -- una fila vieja de 13 campos (sin pipeline_id) sobrevive con
+        # pipeline_id=None en vez de ir a corruptos/, y sigue yendo a
+        # cuarentena si le falta cualquier campo de los que YA exigía el
+        # contrato desde antes (status/job_id incluidos -- esa decisión de
+        # 2026-09-15 no se reabre). Mismo ORDEN DE MERGE de arriba: depende
+        # del mismo checkout de jax-platform@master con Task 7b adentro.
         run: |
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
-          grep -qE "^17 passed" /tmp/cu || {
-            echo "PISO ROTO: se esperaban 17 tests CORRIDOS y 0 skipped."; exit 1; }
+          grep -qE "^22 passed" /tmp/cu || {
+            echo "PISO ROTO: se esperaban 22 tests CORRIDOS y 0 skipped."; exit 1; }
       - name: El freno que escribe la plataforma mata el motor en vuelo
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -1003,6 +1010,8 @@ jobs:
           jacobs/_encadenado_por_defecto_test.py jacobs/_truncado_falla_test.py
           jacobs/_usage_reconciliation_test.py las_manos/_motor_job_model_test.py
           tests/test_ejecutor_reproduccion_u3.py
+          jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py
+          jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1135,6 +1144,8 @@ jobs:
             jacobs/_encadenado_por_defecto_test.py jacobs/_truncado_falla_test.py \
             jacobs/_usage_reconciliation_test.py las_manos/_motor_job_model_test.py \
             tests/test_ejecutor_reproduccion_u3.py \
+            jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py \
+            jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -2390,8 +2401,36 @@ jobs:
           # de passed). Medido local (mismo desfase de siempre con el runner, ver nota
           # de arriba): 2098 -> 2171 passed, 1 -> 3 xfailed, mismo 1 failed ajeno
           # (test_cola_uso_escritores.py, mirror desactualizado, ver mirror-sync).
-          grep -qE "^2171 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2171 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2171 -> 2206 (2026-09-18, tanda final de la revisión de
+          # historial-y-arreglos-de-pipeline): +35 de 4 archivos nuevos (sin
+          # job todavía, mismo detector) más tests agregados a 4 archivos que
+          # YA estaban acá -- los 8 arreglos de la revisión, con su test
+          # rojo-antes-verde-después cada uno:
+          #   jacobs/_arbitro_test.py (+2) -- Media 7 (sala limpia después del
+          #     caso de 1 paso) + Media 8 (build() rechaza si el árbitro pasa
+          #     el tope de 20 pasos);
+          #   jacobs/_aviso_test.py (+1) -- menor: CancelledError deja rastro;
+          #   jacobs/_truncado_falla_test.py (+8) -- Importante 3 (el consumo
+          #     viaja en la excepción y record_direct_usage corre igual) +
+          #     menor (PasoTruncado.codigo como prefijo del error guardado);
+          #   tests/test_cola_uso_escritores.py (+5) -- Importante 4 (una fila
+          #     vieja de 13 campos sobrevive con pipeline_id=None, y sigue
+          #     yendo a cuarentena si le falta cualquier campo de SIEMPRE);
+          #   jacobs/_menu_sin_arbitro_test.py (+5, archivo nuevo) -- Bloqueante 1
+          #     (el menú del planificador excluye la faceta árbitro);
+          #   jacobs/_contexto_tope_total_test.py (+6, archivo nuevo) --
+          #     Importante 2 (tope TOTAL de contexto, recorte honesto y visible);
+          #   jacobs/_reaper_aviso_test.py (+4, archivo nuevo) -- Importante 5
+          #     (expired también dispara el aviso de Telegram);
+          #   jacobs/_continue_modelo_real_reset_test.py (+4, archivo nuevo) --
+          #     Antes de mergear 6 (continuar resetea modelo_real).
+          # Medido local (mismo desfase de siempre con el runner, ver nota de
+          # arriba): 2171 -> 2206 passed, mismo 3 xfailed, mismo 1 failed ajeno
+          # (test_cola_uso_escritores.py, mirror desactualizado -- acá se ve
+          # como failed porque este checkout tiene ~/jax-platform local; en el
+          # runner, sin ese checkout, es skip, como dice el piso).
+          grep -qE "^2206 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2206 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -2707,8 +2746,21 @@ jobs:
           # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). HEAD esperaba 86 passed y
           # origin/master 35; la unión de los dos conjuntos no da ninguno de los dos.
           # Medido en hall9000 contra jax_memory_test con la lista unificada: 94 passed.
-          grep -qE "^120 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 120 tests CORRIDOS."; exit 1; }
+          # 120 -> 121 (2026-09-18, tanda final de la revisión): +1 en
+          # tests/test_jacobs_continuar_db.py --
+          # test_continuar_resetea_modelo_real_contra_la_db_real (Antes de
+          # mergear 6: `/continue` resetea `modelo_real`, no lo deja ver el
+          # de la corrida anterior). Ejercitado en rojo-antes-verde-después
+          # contra una base de test propia (jax_memory_test_<sufijo>,
+          # clonada del esquema de jax_memory_test con
+          # base_de_test.asegurar_base_de_test()), no la MariaDB efímera con
+          # migraciones de jax-platform que usa este job -- el mismo bloqueo
+          # de arriba (107/13 hasta que jax-platform entre a master) sigue
+          # igual: éste es un test nuevo que no depende de ese esquema, así
+          # que el número final es 121 pasando (o 108/13 mientras la
+          # dependencia siga pendiente, +1 sobre el 107 de antes).
+          grep -qE "^121 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 121 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

@@ -59,6 +59,25 @@ MOTOR_POLL_INTERVAL = 5  # segundos entre polls de job
 # Si el ensamble de muchas deps roza la ventana, ajustar y re-verificar con el log de C1.
 MAX_DEP_CONTEXT_CHARS = 60_000
 
+# IMPORTANTE 2 (revisión final 2026-09-18, tanda historial-y-arreglos-de-pipeline):
+# MAX_DEP_CONTEXT_CHARS es un tope POR DEPENDENCIA, no agregado -- se eligió
+# cuando ningún step tenía más de dos o tres deps. Con el árbitro (Task 4)
+# TODO plan de 2+ pasos termina en un step que depende de TODOS los
+# anteriores: con 10 pasos de salida larga son hasta 540.000 caracteres
+# armados en un solo prompt; con 20, 1,1 millones. El síntoma real es un 400
+# del proveedor en el ÚLTIMO paso, con todo el trabajo anterior ya pagado.
+#
+# El valor no sale de `model.context_window` por-motor: el árbitro puede
+# resolver a CUALQUIER motor del catálogo (la faceta árbitro es
+# configurable, axioma_config.ejecutor.auditor_faceta), y ese catálogo hoy
+# va de ~32k a más de 1M tokens de ventana -- este tope tiene que proteger
+# también al motor más chico. 180.000 caracteres (~45.000 tokens con la
+# regla general de ~4 chars/token) deja margen para el prompt fijo más el
+# objetivo sin acercarse a ningún contrato real del catálogo (verificar
+# contra `model.context_window` si se agrega un motor con ventana menor).
+# Sin este tope, CUALQUIER número de deps podía crecer sin techo.
+MAX_TOTAL_DEP_CONTEXT_CHARS = 180_000
+
 # T2 (2026-08-21): _HTTP_FACETS/_MOTOR_FACETS ahora viven en jacobs.models
 # (import de arriba) -- plan.py los necesita para la validación pre-persist
 # y no puede importar este módulo (circular: executor.py ya importa de
@@ -162,12 +181,57 @@ _EVIDENCE_RULE = (
 )
 
 
+def _aplicar_tope_total_de_contexto(previous_outputs: list[dict]) -> list[dict]:
+    """Recorta `previous_outputs` para que la SUMA de sus `summary` no supere
+    MAX_TOTAL_DEP_CONTEXT_CHARS (IMPORTANTE 2, revisión final 2026-09-18).
+
+    El recorte es HONESTO y VISIBLE, nunca silencioso: la dep que pierde
+    contenido queda con `truncated=True` y su `summary` termina con una nota
+    explícita -- nunca desaparece de la lista. El step que recibe este
+    contexto (típicamente el árbitro) necesita saber que esa fuente EXISTIÓ
+    aunque no la haya visto completa: si desapareciera, citaría solo lo que
+    sí vio sin saber que hubo más -- el mismo defecto de fondo que esta
+    ronda entera viene a cerrar (Principio VIII en el propio mecanismo de
+    contexto).
+
+    Reparto: primero llega, primero se sirve, en el orden en que
+    `previous_outputs` ya trae las deps (orden de `depends_on`/step_index).
+    No hay una noción de "dep más importante" en esta capa -- es una cota de
+    seguridad contra el 400 del proveedor, no un resumidor inteligente.
+
+    El aviso "visible" NO es un texto agregado adentro del `summary` (eso
+    haría crecer el total más allá del tope que este mismo código impone):
+    es el `truncated=True` que ya trae cada dep, que `_enrich_prompt` YA
+    convierte en la marca "[TRUNCADO — dependencia excede el tope]" junto al
+    encabezado de esa dependencia -- el mismo mecanismo que el tope por-dep,
+    sin duplicar la señal."""
+    total = sum(len(p["summary"]) for p in previous_outputs)
+    if total <= MAX_TOTAL_DEP_CONTEXT_CHARS:
+        return previous_outputs
+
+    restante = MAX_TOTAL_DEP_CONTEXT_CHARS
+    resultado = []
+    for p in previous_outputs:
+        summary = p["summary"]
+        if len(summary) <= restante:
+            restante -= len(summary)
+            resultado.append(p)
+            continue
+        # Esta dep (y todas las que sigan, con `restante` ya en 0) se
+        # recortan -- nunca se sacan de la lista: el árbitro tiene que poder
+        # ver que esa fuente EXISTIÓ aunque no la haya visto completa.
+        resultado.append({**p, "summary": summary[:restante], "truncated": True})
+        restante = 0
+    return resultado
+
+
 def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
     """Construye el input enriquecido.
 
     Si el step declara depends_on, carga el output COMPLETO de esas dependencias
-    (hasta MAX_DEP_CONTEXT_CHARS por dep). Si no, resumen 500 chars de los anteriores
-    (comportamiento original — no rompe pipelines triviales).
+    (hasta MAX_DEP_CONTEXT_CHARS por dep, y MAX_TOTAL_DEP_CONTEXT_CHARS en total
+    -- IMPORTANTE 2, revisión final 2026-09-18). Si no, resumen 500 chars de
+    los anteriores (comportamiento original — no rompe pipelines triviales).
     """
     objective = pipeline.context.get("objective", "")
     previous_outputs: list[dict] = []
@@ -236,6 +300,8 @@ def _build_context_input(step: Step, pipeline: Pipeline) -> dict:
             "perdido": perdido,
         })
 
+    previous_outputs = _aplicar_tope_total_de_contexto(previous_outputs)
+
     total_chars = sum(len(p["summary"]) for p in previous_outputs)
     logger.info(
         "Jacobs step %s deps=%s contexto=%d chars%s",
@@ -286,8 +352,23 @@ class PasoTruncado(Exception):
 
     Espejo del camino de motor: las_manos/motor_registry/worker.py:828 ya
     falla el job cuando `finish_reason == "length"`. Esto cubre los tres
-    transportes HTTP directos, que ni leían ese campo."""
+    transportes HTTP directos, que ni leían ese campo.
+
+    IMPORTANTE 3 (revisión final 2026-09-18): `tokens_in`/`tokens_out`
+    viajan EN la excepción -- es la llamada MÁS CARA posible (gastó todo el
+    tope de salida) y antes de este arreglo su costo nunca llegaba a
+    `record_direct_usage` (que corre después de que `invoke()` retorna
+    normalmente; acá nunca retorna). `codigo` ya existía sin que nadie lo
+    leyera -- `_fail_step` guardaba `str(exc)` a secas, así que la Mesa no
+    podía distinguir un fallo por truncado (justo el caso donde Continuar
+    tiene remedio) de cualquier otro error; ahora `_run_one_step` lo usa
+    para prefijar el error guardado (ver más abajo)."""
     codigo = "paso_truncado"
+
+    def __init__(self, mensaje: str, *, tokens_in: int = 0, tokens_out: int = 0):
+        super().__init__(mensaje)
+        self.tokens_in = tokens_in
+        self.tokens_out = tokens_out
 
 
 # Cada proveedor nombra el corte de longitud distinto -- no se adivina, se
@@ -305,26 +386,43 @@ def _texto_o_truncado(data: dict, transporte: str) -> str:
 
     Único lector de "¿este texto vino completo?" para los tres transportes
     HTTP directos -- evita que cada `_invoke_*` reimplemente (o se olvide de)
-    el nombre del campo de corte, que es distinto en cada API."""
+    el nombre del campo de corte, que es distinto en cada API.
+
+    IMPORTANTE 3 (revisión final 2026-09-18): además del texto, lee el
+    CONSUMO (`tokens_in`/`tokens_out`) del mismo `data` -- los mismos campos
+    que cada `_invoke_*` ya extrae por separado, DESPUÉS de este punto, para
+    el caso de éxito. Cuando corta, ese consumo viaja EN la excepción
+    (`PasoTruncado.tokens_in/tokens_out`) para que `invoke()` lo pueda
+    registrar antes de propagar el fallo -- es la llamada MÁS CARA posible
+    (gastó todo el tope de salida) y antes no se medía."""
     if transporte == "openai_compat":
         eleccion = (data.get("choices") or [{}])[0]
         razon = eleccion.get("finish_reason")
         texto = (eleccion.get("message") or {}).get("content", "")
+        usage = data.get("usage") or {}
+        tokens_in = usage.get("prompt_tokens", 0)
+        tokens_out = usage.get("completion_tokens", 0)
     elif transporte == "ollama":
         razon = data.get("done_reason")
         texto = (data.get("message") or {}).get("content", "")
+        tokens_in = data.get("prompt_eval_count", 0)
+        tokens_out = data.get("eval_count", 0)
     elif transporte == "gemini":
         candidato = (data.get("candidates") or [{}])[0]
         razon = candidato.get("finishReason")
         partes = (candidato.get("content") or {}).get("parts") or [{}]
         texto = "".join(p.get("text", "") for p in partes)
+        gemini_usage = data.get("usageMetadata") or {}
+        tokens_in = gemini_usage.get("promptTokenCount", 0)
+        tokens_out = gemini_usage.get("candidatesTokenCount", 0)
     else:
         raise ValueError(f"transporte sin lector de truncado: {transporte}")
 
     if razon in _CORTE_POR_LONGITUD.get(transporte, ()):
         raise PasoTruncado(
             f"{transporte} corto la salida por longitud ({razon}); "
-            f"{len(texto)} caracteres entregados"
+            f"{len(texto)} caracteres entregados",
+            tokens_in=tokens_in, tokens_out=tokens_out,
         )
     return texto
 
@@ -921,6 +1019,49 @@ async def validate_capability(step: Step) -> CapabilityUnbound | str | None:
     return None
 
 
+async def _despachar_transporte_directo(
+    step: Step, pipeline: Pipeline, f: "ResolvedFacet", prompt: str, timeout: int,
+) -> dict:
+    """El despacho de los tres transportes HTTP directos (gemini,
+    openai_compat, ollama), extraído de `_dispatch_step` para poder probarlo
+    sin pasar por `validate_capability()` (que toca la DB).
+
+    IMPORTANTE 3 (revisión final 2026-09-18): antes, `record_direct_usage`
+    corría DESPUÉS de que el `_invoke_*` retornara -- si el paso cortaba por
+    longitud, `PasoTruncado` se lanzaba DENTRO de `_invoke_*` y esa línea
+    nunca corría. El paso que corta es la llamada MÁS CARA posible (gastó
+    todo el tope de salida) y su costo se perdía. Ahora el consumo se
+    registra en los DOS caminos -- éxito y truncado -- con el consumo real
+    de cada uno (`result.get(...)` o `exc.tokens_in/tokens_out`), antes de
+    devolver o de dejar que el fallo suba. `record_direct_usage` sigue
+    siendo fail-soft por su cuenta (sin identidad no escribe; error de DB
+    solo loguea) -- nunca puede romper un step ya exitoso, y acá tampoco
+    puede tapar el fallo de un step truncado."""
+    try:
+        if f.transport == "http_gemini":
+            result = await _invoke_http_gemini(f, prompt, timeout)
+        elif f.transport == "http_openai_compat":
+            result = await _invoke_http_openai_compat(f, prompt, timeout)
+        else:
+            result = await _invoke_ollama(f, prompt, timeout)
+    except PasoTruncado as exc:
+        await record_direct_usage(
+            pipeline.user_id, pipeline.tenant_id, step.facet,
+            f.provider_id, f.model,
+            exc.tokens_in, exc.tokens_out,
+            pipeline_id=pipeline.pipeline_id,
+        )
+        raise
+
+    await record_direct_usage(
+        pipeline.user_id, pipeline.tenant_id, step.facet,
+        f.provider_id, f.model,
+        result.get("tokens_in", 0), result.get("tokens_out", 0),
+        pipeline_id=pipeline.pipeline_id,
+    )
+    return result
+
+
 async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     """Selecciona el worker correcto según la faceta."""
     # Ensamble mecánico: NO pasa por ningún LLM. Concatena los módulos ya generados.
@@ -1038,23 +1179,9 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # Transportes HTTP directos (scope expansion 2026-08-10): la Mesa web ya
     # atribuye costo para estas mismas facetas via jax-platform/backend/api/
     # chat.py (Tasks 1-4); esto cubre el MISMO transporte cuando lo dispara un
-    # pipeline de Jacobs en vez de un chat directo. record_direct_usage es
-    # fail-soft por su cuenta (sin identidad no escribe; error de DB solo
-    # loguea) -- nunca puede romper un step ya exitoso.
+    # pipeline de Jacobs en vez de un chat directo.
     if f.transport in ("http_gemini", "http_openai_compat", "ollama"):
-        if f.transport == "http_gemini":
-            result = await _invoke_http_gemini(f, prompt, timeout)
-        elif f.transport == "http_openai_compat":
-            result = await _invoke_http_openai_compat(f, prompt, timeout)
-        else:
-            result = await _invoke_ollama(f, prompt, timeout)
-        await record_direct_usage(
-            pipeline.user_id, pipeline.tenant_id, step.facet,
-            f.provider_id, f.model,
-            result.get("tokens_in", 0), result.get("tokens_out", 0),
-            pipeline_id=pipeline.pipeline_id,
-        )
-        return result
+        return await _despachar_transporte_directo(step, pipeline, f, prompt, timeout)
     if f.transport == "subprocess":
         # Llegamos aquí solo si Fernando aprobó vía /approve-step (gate de
         # aprobación intacto, no tocado en esta misión).
@@ -1208,7 +1335,15 @@ async def _run_one_step(step: Step, i: int, pipeline: Pipeline) -> bool | _SinEs
         await _fail_step(pipeline, step, i, f"Timeout ({step.timeout_seconds}s)")
         return False
     except Exception as exc:  # noqa: BLE001  # fail-soft: no traga nada -- convierte cualquier error del step en fallo EXPLÍCITO vía _fail_step (status=failed + STEP_FAILED + error) y devuelve False, que es lo que la ola usa para cortar el pipeline
-        await _fail_step(pipeline, step, i, str(exc))
+        # MENOR (revisión final 2026-09-18): `PasoTruncado.codigo` existía
+        # sin que nadie lo leyera -- se guardaba `str(exc)` a secas, y la
+        # Mesa no podía distinguir un fallo por truncado (justo el caso
+        # donde Continuar tiene remedio) de cualquier otro error. El código
+        # viaja como prefijo -- vale para PasoTruncado y para cualquier
+        # excepción futura que declare `.codigo`, no sólo esta.
+        codigo = getattr(exc, "codigo", None)
+        mensaje = f"[{codigo}] {exc}" if codigo else str(exc)
+        await _fail_step(pipeline, step, i, mensaje)
         return False
 
 

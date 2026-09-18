@@ -114,6 +114,21 @@ async def _avisar(pipeline_id: str, nombre: str, estado: str) -> None:
     mensaje = mensaje_de_fin(pipeline_id=pipeline_id, nombre=nombre, estado=estado)
     try:
         resultado = await send_telegram_alert(mensaje)
+    except asyncio.CancelledError:
+        # MENOR (revisión final 2026-09-18): `except Exception` de abajo NO
+        # atrapa esto -- desde Python 3.8 CancelledError hereda de
+        # BaseException, no de Exception. Si el proceso se apaga mientras
+        # este aviso está en vuelo, la cancelación se propagaba sin dejar
+        # rastro: el aviso se perdía en silencio, justo el caso que el resto
+        # de esta función existe para evitar. Queda logueado ANTES de dejar
+        # que la cancelación siga su curso -- NUNCA se traga: una tarea
+        # cancelada tiene que seguir cancelada.
+        logger.warning(
+            "Aviso Telegram de fin de pipeline %s: cancelado antes de completarse "
+            "(el proceso se está apagando) -- el aviso no salió",
+            pipeline_id,
+        )
+        raise
     except Exception:  # fail-soft real: send_telegram_alert no debería lanzar, pero esto es la última barrera
         logger.error(
             "Aviso Telegram de fin de pipeline %s: excepción inesperada llamando a send_telegram_alert",

@@ -237,16 +237,32 @@ def _normalizar(fila) -> dict:
     return normalizada
 
 
+#: Campos NUEVOS del contrato cuya ausencia en un archivo YA EN EL SPOOL no
+#: lo declara corrupto -- se leen como `None` (IMPORTANTE 4, revisión final
+#: 2026-09-18). Ruling de Fernando: un campo nuevo ausente en una fila VIEJA
+#: se acepta como `None`; perder la traza (lo que ya exigían `status`/
+#: `job_id` desde 2026-09-15, decisión previa que esto NO reabre) es una
+#: cosa, perder el IMPORTE es otra. Sólo `pipeline_id` (Task 7b, el campo que
+#: llevó CAMPOS de 13 a 14) entra hoy -- el resto del contrato sigue
+#: exigiéndose completo.
+CAMPOS_NUEVOS_TOLERADOS_SI_FALTAN = frozenset({"pipeline_id"})
+
+
 def _motivo_de_corrupcion(datos) -> str | None:
     if not isinstance(datos, dict):
         return f"el contenido no es un objeto JSON ({type(datos).__name__})"
-    # Se exigen los TRECE, no sólo los obligatorios del llamador, y es a
-    # propósito: fail-closed. Un archivo escrito por una copia VIEJA del módulo
-    # (once campos, sin `status`/`job_id`) cae en `corruptos/` en vez de entrar
-    # a medias -- entraría con esas dos columnas en NULL y sin manera de saber,
-    # después, que faltaban. El que encola completa el archivo; el que drena
-    # exige el archivo completo.
-    faltantes = [c for c in CAMPOS if c not in datos]
+    # Se exigen los del contrato ORIGINAL (CAMPOS menos
+    # CAMPOS_NUEVOS_TOLERADOS_SI_FALTAN), y es a propósito: fail-closed. Un
+    # archivo escrito por una copia VIEJA del módulo sin `status`/`job_id`
+    # cae en `corruptos/` en vez de entrar a medias -- entraría con esas dos
+    # columnas en NULL y sin manera de saber, después, que faltaban. El que
+    # encola completa el archivo; el que drena exige el archivo completo,
+    # SALVO el/los campos nuevos que el archivo es demasiado viejo para
+    # conocer (ver CAMPOS_NUEVOS_TOLERADOS_SI_FALTAN).
+    faltantes = [
+        c for c in CAMPOS
+        if c not in datos and c not in CAMPOS_NUEVOS_TOLERADOS_SI_FALTAN
+    ]
     if faltantes:
         return f"faltan campos del contrato: {', '.join(faltantes)}"
     if not _id_seguro(datos.get("spool_id")):
@@ -426,6 +442,14 @@ def _leer_lote(directorio: Path, entradas: list, limite: int) -> list:
         if motivo:
             _cuarentena(directorio, ruta, motivo)
             continue
+        # IMPORTANTE 4: una fila vieja que pasó la corrupción de arriba
+        # PORQUE le falta un campo tolerado (ver CAMPOS_NUEVOS_TOLERADOS_SI_FALTAN)
+        # todavía no tiene esa clave en el dict -- se completa acá, explícita
+        # en `None`, para que el drenaje (y cualquier código que lea
+        # `fila["pipeline_id"]` en vez de `.get(...)`) la vea igual que una
+        # fila nueva que sí la trae en null.
+        for campo in CAMPOS_NUEVOS_TOLERADOS_SI_FALTAN:
+            datos.setdefault(campo, None)
         # el NOMBRE del archivo manda sobre el contenido: es lo que `quitar`
         # usa para borrarlo y lo que la columna UNIQUE va a guardar.
         datos["spool_id"] = ruta.name[:-len(SUFIJO)]

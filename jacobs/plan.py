@@ -283,8 +283,29 @@ def _facetas_del_cerebro(
     )
 
 
-def _menu_de_facetas(facetas_activas: frozenset) -> list[tuple[str, str, str, str]]:
-    return [fila for fila in _MENU_DE_FACETAS if fila[0] in facetas_activas]
+def _menu_de_facetas(
+    facetas_activas: frozenset, arbitro_faceta: str | None = None,
+) -> list[tuple[str, str, str, str]]:
+    """El menú que se le OFRECE al planificador como opción de productor.
+
+    BLOQUEANTE 1 (revisión final 2026-09-18): antes esto filtraba SOLO por
+    facetas activas -- si la faceta árbitro configurada
+    (`governance["arbitro_faceta"]`) estaba activa (la condición normal, no
+    un caso raro), quedaba en el menú con su descripción real. `_llm_plan`
+    (camino de qwen, prompt `_PLAN_SYSTEM`) no sabe nada de la reserva del
+    árbitro -- se lo ofrecía, el LLM la usaba como productor, y `_con_arbitro`
+    (sala limpia) rechazaba el plan DESPUÉS de haber pagado la llamada.
+    "Quién puede ser productor" vivía en tres lugares (la prosa de Ada,
+    `_con_arbitro`, y por omisión acá). Arreglo de raíz: acá también se
+    excluye -- un solo lugar decide qué se ofrece.
+
+    `arbitro_faceta=None` (el default) no filtra nada -- retrocompatible con
+    los callers de bajo nivel que no tienen gobernanza real (mismo criterio
+    que el resto de este módulo: sin gobernanza, sin árbitro que reservar)."""
+    return [
+        fila for fila in _MENU_DE_FACETAS
+        if fila[0] in facetas_activas and fila[0] != arbitro_faceta
+    ]
 
 
 def _texto_del_menu(menu: list[tuple[str, str, str, str]]) -> str:
@@ -585,19 +606,27 @@ class PlanBuilder:
 
         Orden de las tres reglas (en ese orden, a propósito):
 
-        1. Sala limpia primero, SIN IMPORTAR el largo del plan: si la faceta
-           árbitro ya aparece como productor, es un rechazo de diseño del
-           plan (quien produce no puede juzgar lo que produjo), no una
-           cuestión de si hace falta o no un árbitro. Un plan de 1 paso cuyo
-           único step ya es la faceta árbitro cae acá (test del brief).
-        2. Un solo paso: nada que arbitrar -- se devuelve tal cual, SIN
-           consultar disponibilidad (Ruling 2 no aplica si no hace falta
-           árbitro).
+        1. Un solo paso: nada que arbitrar -- se devuelve TAL CUAL, sin
+           mirar sala limpia ni disponibilidad. MEDIA 7 (revisión final
+           2026-09-18): este chequeo va PRIMERO, no la sala limpia. El spec
+           §3.6 dice "si el plan pone a Thot TAMBIÉN como productor" -- con
+           un solo paso no hay "también" (no hay ningún árbitro que se
+           vaya a agregar, así que no hay conflicto que evitar). Antes, la
+           sala limpia corría sin importar el largo del plan y rechazaba un
+           plan de un solo step cuyo único productor era la faceta árbitro,
+           aunque build() jamás le fuera a agregar un árbitro a ESE plan.
+        2. Sala limpia, con 2+ pasos: si la faceta árbitro ya aparece como
+           productor, es un rechazo de diseño del plan (quien produce no
+           puede juzgar lo que produjo) -- acá SÍ hay "también", porque con
+           2+ pasos el árbitro se va a agregar.
         3. Disponibilidad (Ruling 2, fail-closed): con 2+ pasos y la sala
            limpia en orden, el árbitro tiene que poder correr de verdad --
            faceta configurada Y activa en la tabla `facet`. Si no, PlanRejected
            con 'arbitro_no_disponible' en la razón (código propio, distinto
            del genérico de _check_facets) -- nunca un plan sin árbitro."""
+        if len(specs) < 2:
+            return specs
+
         if arbitro_faceta and any(s.get("facet") == arbitro_faceta for s in specs):
             step_index = next(i for i, s in enumerate(specs) if s.get("facet") == arbitro_faceta)
             raise PlanRejected([PlanViolation(
@@ -605,9 +634,6 @@ class PlanBuilder:
                 f"{arbitro_faceta} no puede producir y arbitrar el mismo plan: "
                 f"el árbitro juzga lo que otros produjeron (sala limpia).",
             )])
-
-        if len(specs) < 2:
-            return specs
 
         if not arbitro_faceta or arbitro_faceta not in facetas_activas:
             motivo = (
@@ -657,6 +683,22 @@ class PlanBuilder:
             )
         else:
             steps = await self._from_objective(pipeline_id, objective, max_steps, governance)
+        # MEDIA 8 (revisión final 2026-09-18): el tope duro de pasos se
+        # validaba ANTES de construir el plan -- routes.py rechaza
+        # `len(req.steps) > 20` y el camino del LLM trunca a `data[:max_steps]`
+        # -- pero _con_arbitro (dentro de _from_spec, arriba) agrega UN paso
+        # más DESPUÉS de esa validación, y nada revalidaba el conteo final:
+        # un pedido de EXACTAMENTE 20 pasos explícitos (que pasa el chequeo
+        # de routes.py) terminaba persistiendo 21. Este es el ÚNICO punto
+        # donde convergen los dos caminos con el árbitro YA agregado -- un
+        # solo lugar revalida, en vez de parchear cada entrada por separado.
+        if len(steps) > MAX_STEPS_PER_PIPELINE:
+            ultimo = steps[-1]
+            raise PlanRejected([PlanViolation(
+                ultimo.step_index, ultimo.facet, ultimo.motor, ultimo.capability,
+                f"{len(steps)} pasos (incluido el árbitro que agrega Jacobs) "
+                f"excede el límite duro de {MAX_STEPS_PER_PIPELINE}",
+            )])
         # T2/T3 (2026-08-21): gate único para AMBOS caminos -- vive acá, no
         # dentro de _from_spec ni _from_objective, para que ningún origen de
         # plan pueda saltárselo. cleanroom antes solo corría dentro de
@@ -852,8 +894,11 @@ class PlanBuilder:
         # _ada_plan suelto con nada más que `facetas_activas`, nunca en el
         # camino real de _from_objective/build()), no hay de dónde resolverlo:
         # rótulo genérico, nunca un nombre de faceta inventado.
+        # BLOQUEANTE 1: excluir la faceta árbitro REAL del menú (antes de
+        # reemplazarla por el rótulo genérico de abajo, que no matchea nada
+        # de _MENU_DE_FACETAS y por lo tanto no filtraría nada).
+        menu = _texto_del_menu(_menu_de_facetas(facetas_activas, arbitro_faceta))
         arbitro_faceta = arbitro_faceta or "la faceta reservada para el árbitro (sin gobernanza)"
-        menu = _texto_del_menu(_menu_de_facetas(facetas_activas))
         try:
             f = await resolve_facet("ada")
         except FacetUnavailableError as exc:
@@ -966,7 +1011,13 @@ class PlanBuilder:
         governance: dict | None = None,
     ) -> list[dict] | None:
         facetas_activas = _facetas_del_cerebro(facetas_activas, governance)
-        menu = _menu_de_facetas(facetas_activas)
+        # BLOQUEANTE 1 (revisión final 2026-09-18): `_PLAN_SYSTEM` (el prompt
+        # de este camino) no dice nada de la reserva del árbitro -- antes de
+        # este arreglo, si la faceta árbitro configurada estaba activa (lo
+        # normal), quedaba en el menú y qwen podía elegirla como productora;
+        # `_con_arbitro` recién la rechazaba DESPUÉS de pagar la llamada.
+        arbitro_faceta = (governance or {}).get("arbitro_faceta") if governance else None
+        menu = _menu_de_facetas(facetas_activas, arbitro_faceta)
         if not menu:
             motivo = "qwen (jax_local): no se planifica, ninguna faceta del menú está activa en la tabla `facet`"
             logger.error(motivo)

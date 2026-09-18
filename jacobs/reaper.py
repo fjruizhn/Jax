@@ -182,6 +182,18 @@ async def reap_orphaned_pipelines() -> list[dict]:
             await store.event_append(p.pipeline_id, "REAPED", {
                 "prev_status": p.status.value, "reason": reason,
             })
+            # IMPORTANTE 5 (revisión final 2026-09-18): `expired` es un
+            # status TERMINAL como completed/aborted -- el spec §3.3 exige
+            # avisar SIEMPRE al terminar, "bien o mal", y los pipelines que
+            # el reaper cosecha son justo los que nadie está mirando (murieron
+            # solos). Mismo punto que executor.py::_disparar_aviso_fin: DESPUÉS
+            # de que `pipeline_update_status_si_epoca` ya ganó la escritura
+            # atómica (arriba). Import diferido -- mismo criterio que
+            # `send_telegram_alert` en jacobs/aviso.py y jacobs/facet_health.py
+            # (evita cargar el import pesado de executor.py en el módulo del
+            # reaper para todo lo demás, no por un ciclo real)."""
+            from jacobs.executor import _disparar_aviso_fin
+            _disparar_aviso_fin(p, PipelineStatus.expired)
         except Exception:  # fail-soft: un fallo cosechando ESTE pipeline no debe abortar el resto del barrido; el proximo ciclo (SWEEP_INTERVAL_SECONDS) reintenta
             logger.warning("Reaper: fallo cosechando %s", p.pipeline_id, exc_info=True)
             continue

@@ -25,6 +25,8 @@ import asyncio
 import logging
 from unittest.mock import AsyncMock
 
+import pytest
+
 from jacobs.aviso import avisar_fin_pipeline, mensaje_de_fin
 
 
@@ -110,6 +112,30 @@ def test_avisar_fin_pipeline_registra_el_rechazo_de_telegram(monkeypatch, caplog
         asyncio.run(escenario())
     assert "abc-123" in caplog.text
     assert "no configurados" in caplog.text
+
+
+def test_avisar_fin_pipeline_deja_rastro_si_lo_cancelan(monkeypatch, caplog):
+    """MENOR (revisión final 2026-09-18): `except Exception` (fail-soft de
+    arriba) NO atrapa `asyncio.CancelledError` -- desde Python 3.8 hereda de
+    BaseException, no de Exception. Si el proceso se apaga mientras el aviso
+    está en vuelo, la cancelación se propagaba sin dejar rastro: el aviso se
+    perdía en silencio. Ahora queda logueado ANTES de que la cancelación
+    siga su curso (nunca se traga -- una tarea cancelada tiene que seguir
+    cancelada, no convertirse en 'terminó bien')."""
+    async def _cancelado(mensaje):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr("jacobs.reaper.send_telegram_alert", AsyncMock(side_effect=_cancelado))
+
+    async def escenario():
+        task = avisar_fin_pipeline(pipeline_id="abc-123", nombre="ERP", estado="completed")
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with caplog.at_level(logging.WARNING, logger="jacobs.aviso"):
+        asyncio.run(escenario())
+    assert "abc-123" in caplog.text
+    assert "cancel" in caplog.text.lower()
 
 
 def test_avisar_fin_pipeline_manda_el_mensaje_correcto(monkeypatch):

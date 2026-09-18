@@ -513,3 +513,118 @@ def test_created_at_es_la_hora_del_TURNO_no_la_del_reintento(respaldo, monkeypat
     filas = _filas_del_respaldo(respaldo)
     assert len(filas) == 1, filas
     assert filas[0]["created_at"] == "2026-09-15T00:00:00+00:00"
+
+
+# ---------------------------------------------------------------------------
+# IMPORTANTE 4 (revisión final 2026-09-18, tanda historial-y-arreglos-de-pipeline):
+# la cola durable pierde PLATA al desplegar.
+#
+# EL DEFECTO. `CAMPOS` pasó de 13 a 14 (Task 7b agregó `pipeline_id`), y
+# `_motivo_de_corrupcion` seguía exigiendo los CATORCE contra un archivo que
+# YA estaba en el spool, escrito por una versión VIEJA del módulo (13
+# campos, sin `pipeline_id`) -- ej: se cae la DB, las filas se encolan con
+# 13 campos, se despliega esta ronda, el drenaje las lee y las manda a
+# `corruptos/`. Cobro REAL perdido, no sólo trazabilidad.
+#
+# EL ARREGLO (Ruling de Fernando). Un campo NUEVO ausente en una fila vieja
+# se acepta como `None`; no se declara corrupta la fila. Perder la traza es
+# una cosa (la decisión previa de 2026-09-15 sobre `status`/`job_id` sigue
+# fail-closed -- eso NO se reabre acá), perder el importe es otra.
+# ---------------------------------------------------------------------------
+
+def _escribir_fila_cruda(directorio: Path, spool_id: str, datos: dict) -> Path:
+    directorio.mkdir(parents=True, exist_ok=True)
+    ruta = directorio / f"{spool_id}.json"
+    ruta.write_text(json.dumps(datos), encoding="utf-8")
+    return ruta
+
+
+def _fila_de_trece_campos(spool_id: str) -> dict:
+    """Una fila tal como la escribía la versión VIEJA del módulo -- los
+    TRECE campos de antes de la Task 7b, SIN `pipeline_id`."""
+    return {
+        "spool_id": spool_id, "created_at": "2026-09-10T00:00:00+00:00",
+        "tenant_id": 77, "user_id": 7, "facet": "jekyll", "model": "modelo-x",
+        "tokens_in": 10, "tokens_out": 20, "cost_usd": "0.01",
+        "request_type": "pipeline", "origen": "jacobs",
+        "status": None, "job_id": None,
+        # pipeline_id: AUSENTE a propósito -- el campo nuevo de esta ronda.
+    }
+
+
+def test_una_fila_vieja_de_13_campos_sobrevive_con_pipeline_id_null(respaldo):
+    import cola_uso
+
+    _escribir_fila_cruda(respaldo, "fila-vieja-1", _fila_de_trece_campos("fila-vieja-1"))
+
+    filas = asyncio.run(cola_uso.leer_pendientes(10))
+
+    assert len(filas) == 1, (
+        "una fila vieja de 13 campos (sin pipeline_id) tiene que LEERSE, no "
+        "ponerse en cuarentena -- perder el importe es peor que perder la traza"
+    )
+    assert filas[0]["pipeline_id"] is None
+    assert filas[0]["spool_id"] == "fila-vieja-1"
+    assert cola_uso.estadisticas()["corruptos"] == 0
+    assert not (respaldo / cola_uso.SUBDIRECTORIO_CORRUPTOS / "fila-vieja-1.json").exists()
+
+
+def test_una_fila_vieja_no_se_mueve_a_corruptos(respaldo):
+    import cola_uso
+
+    _escribir_fila_cruda(respaldo, "fila-vieja-2", _fila_de_trece_campos("fila-vieja-2"))
+    asyncio.run(cola_uso.leer_pendientes(10))
+
+    corruptos = respaldo / cola_uso.SUBDIRECTORIO_CORRUPTOS
+    assert not corruptos.is_dir() or list(corruptos.iterdir()) == []
+
+
+def test_una_fila_a_la_que_le_falta_un_campo_de_SIEMPRE_sigue_corrupta(respaldo):
+    """No se reabre la decisión previa (2026-09-15): a una fila le falta
+    `tenant_id` -- uno de los campos que existían desde ANTES de esta ronda,
+    no uno nuevo -- y sigue yendo a cuarentena, exactamente como hoy."""
+    import cola_uso
+
+    fila = _fila_de_trece_campos("fila-rota")
+    del fila["tenant_id"]
+    fila["pipeline_id"] = None  # el campo nuevo SÍ presente, no es lo que rompe acá
+    _escribir_fila_cruda(respaldo, "fila-rota", fila)
+
+    filas = asyncio.run(cola_uso.leer_pendientes(10))
+
+    assert filas == []
+    assert cola_uso.estadisticas()["corruptos"] == 1
+    assert (respaldo / cola_uso.SUBDIRECTORIO_CORRUPTOS / "fila-rota.json").exists()
+
+
+def test_una_fila_a_la_que_le_falta_status_o_job_id_SIGUE_corrupta(respaldo):
+    """MISMO criterio que arriba, pero para `status`/`job_id` puntualmente:
+    esa exigencia es la decisión de Fernando de 2026-09-15 (opción (b)) --
+    esta tarea NO la ablanda, sólo agrega la excepción de `pipeline_id`."""
+    import cola_uso
+
+    fila = _fila_de_trece_campos("fila-sin-status")
+    del fila["status"]
+    fila["pipeline_id"] = None
+    _escribir_fila_cruda(respaldo, "fila-sin-status", fila)
+
+    filas = asyncio.run(cola_uso.leer_pendientes(10))
+
+    assert filas == []
+    assert cola_uso.estadisticas()["corruptos"] == 1
+
+
+def test_una_fila_nueva_completa_con_pipeline_id_sigue_entrando_normal(respaldo):
+    """Camino feliz sin cambios: una fila de los CATORCE campos (la versión
+    ACTUAL del módulo) entra igual que siempre."""
+    import cola_uso
+
+    fila = _fila_de_trece_campos("fila-nueva")
+    fila["pipeline_id"] = "pl-real"
+    _escribir_fila_cruda(respaldo, "fila-nueva", fila)
+
+    filas = asyncio.run(cola_uso.leer_pendientes(10))
+
+    assert len(filas) == 1
+    assert filas[0]["pipeline_id"] == "pl-real"
+    assert cola_uso.estadisticas()["corruptos"] == 0

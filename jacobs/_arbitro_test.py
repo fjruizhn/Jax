@@ -66,12 +66,20 @@ def test_el_plan_termina_en_un_arbitro_configurado():
 
 
 def test_thot_productor_rechaza_el_plan():
-    """El que produce no arbitra. Es rechazo al crearse, no un aviso -- ni
-    siquiera hace falta un segundo paso para que dispare (brief Step 1)."""
+    """El que produce no arbitra. Es rechazo al crearse, no un aviso -- con
+    OTRO productor en el plan, así que sí hay un 'también' (spec §3.6:
+    'si el plan pone a Thot TAMBIÉN como productor'). Ver MEDIA 7 (revisión
+    final 2026-09-18) y test_un_plan_de_un_solo_paso_con_la_faceta_arbitro_NO_se_rechaza
+    más abajo -- con UN solo paso no hay 'también', y antes de ese arreglo
+    este mismo caso con un solo step (thot, sin otro productor) también
+    rechazaba, lo cual contradecía el spec."""
     with pytest.raises(PlanRejected) as exc:
         PlanBuilder._con_arbitro(
-            [{"facet": "thot", "capability": "text_generation", "prompt": "uno", "depends_on": []}],
-            facetas_activas=frozenset({"thot"}),
+            [
+                {"facet": "jekyll", "capability": "analysis", "prompt": "uno", "depends_on": []},
+                {"facet": "thot", "capability": "text_generation", "prompt": "dos", "depends_on": [0]},
+            ],
+            facetas_activas=frozenset({"jekyll", "thot"}),
             arbitro_faceta="thot",
         )
     msg = str(exc.value).lower()
@@ -88,6 +96,25 @@ def test_un_plan_de_un_solo_paso_no_gana_arbitro():
         arbitro_faceta=None,
     )
     assert len(pasos) == 1
+
+
+def test_un_plan_de_un_solo_paso_con_la_faceta_arbitro_NO_se_rechaza():
+    """MEDIA 7 (revisión final 2026-09-18): la sala limpia corría ANTES del
+    caso 'menos de 2 pasos', así que un plan de UN solo step con la faceta
+    árbitro como su único productor se rechazaba igual -- aunque build() NO
+    fuera a agregar ningún árbitro (len(specs) < 2 corta antes). El spec
+    §3.6 dice 'si el plan pone a Thot TAMBIÉN como productor': con un solo
+    paso no hay 'también' -- no hay nada que thot esté arbitrando además de
+    producir. El chequeo de sala limpia ahora corre DESPUÉS del caso de un
+    solo paso, así que este plan se devuelve TAL CUAL, sin árbitro agregado
+    y sin rechazo."""
+    pasos = PlanBuilder._con_arbitro(
+        [{"facet": "thot", "capability": "text_generation", "prompt": "uno", "depends_on": []}],
+        facetas_activas=frozenset({"thot"}),
+        arbitro_faceta="thot",
+    )
+    assert len(pasos) == 1
+    assert pasos[0]["facet"] == "thot"
 
 
 def test_arbitro_no_disponible_si_la_faceta_configurada_no_esta_activa():
@@ -219,6 +246,62 @@ def test_build_agrega_el_arbitro_por_el_camino_de_steps_spec():
     steps = asyncio.run(correr())
     assert [s.facet for s in steps] == ["hipatia", "jekyll", "thot"]
     assert steps[-1].capability == PlanBuilder.CAPABILITY_ARBITRO
+
+
+def test_build_rechaza_cuando_el_arbitro_pasa_el_tope_de_20_pasos():
+    """MEDIA 8 (revisión final 2026-09-18): routes.py rechaza un steps_spec
+    de MÁS de 20 pasos ANTES de llamar a build() -- pero build() agrega el
+    árbitro DESPUÉS, y nada revalida el conteo final. Un steps_spec de
+    EXACTAMENTE 20 pasos explícitos (que pasa el chequeo de routes.py, que
+    usa '> 20') termina persistiendo 21 -- el tope duro
+    (MAX_STEPS_PER_PIPELINE) se pasa por uno. build() tiene que rechazar
+    esto: es el único punto donde convergen los dos caminos (steps_spec y
+    LLM) después de que el árbitro ya se agregó."""
+    from jacobs import store
+    from jacobs.models import MAX_STEPS_PER_PIPELINE
+    from jacobs.plan import PlanRejected as _PlanRejected
+
+    governance = {
+        "capabilities": {
+            "research": {
+                "allowed_motors": [], "allowed_callers": ["jacobs"], "risk_level": "low",
+                "sandbox_only": True, "requires_human_gate": False, "max_execution_minutes": 5,
+                "max_recursion_depth": 0, "output_schema": "", "fallback_motor": None,
+                "fallback_mode": "manual_only", "forbidden_paths": [], "auditor_motor": None,
+            },
+            "critique": {
+                "allowed_motors": [], "allowed_callers": ["jacobs", "hyde", "thot"], "risk_level": "low",
+                "sandbox_only": True, "requires_human_gate": False, "max_execution_minutes": 15,
+                "max_recursion_depth": 0, "output_schema": "", "fallback_motor": None,
+                "fallback_mode": "manual_only", "forbidden_paths": [], "auditor_motor": None,
+            },
+        },
+        "motors": {},
+        "facets": frozenset({"hipatia", "jekyll", "thot"}),
+        "arbitro_faceta": "thot",
+    }
+    assert MAX_STEPS_PER_PIPELINE == 20, "el test asume el tope real; si cambió, ajustar N"
+
+    steps_spec = [
+        {"facet": "hipatia" if i % 2 == 0 else "jekyll", "capability": "research",
+         "prompt": f"paso {i}", "depends_on": [i - 1] if i else []}
+        for i in range(MAX_STEPS_PER_PIPELINE)
+    ]
+
+    async def correr():
+        builder = PlanBuilder()
+        original = store.get_motor_governance
+        store.get_motor_governance = AsyncMock(return_value=governance)
+        try:
+            return await builder.build(
+                pipeline_id="p-tope-20", objective="objetivo de prueba", steps_spec=steps_spec,
+            )
+        finally:
+            store.get_motor_governance = original
+
+    with pytest.raises(_PlanRejected) as exc:
+        asyncio.run(correr())
+    assert "21" in str(exc.value) and "20" in str(exc.value), str(exc.value)
 
 
 def test_build_agrega_el_arbitro_por_el_camino_del_llm():
