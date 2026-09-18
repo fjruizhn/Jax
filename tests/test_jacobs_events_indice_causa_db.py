@@ -27,12 +27,14 @@ import os
 import time
 import uuid
 
-_db = os.environ.get("JAX_DB_NAME")
-if _db and _db != "jax_memory_test":
-    raise RuntimeError(
-        f"JAX_DB_NAME={_db!r}: este archivo siembra eventos y solo corre contra jax_memory_test."
-    )
-os.environ.setdefault("JAX_DB_NAME", "jax_memory_test")
+# Base de tests de ESTA sesión (decisión de Fernando, 2026-09-17). Reemplaza
+# la guarda vieja `if _db != "jax_memory_test": raise` + `setdefault`, que es
+# anterior a `JAX_TEST_DB_SUFIJO` y rechazaba `jax_memory_test_<sufijo>`:
+# protege lo mismo (nunca producción, nunca una base que no sea de tests) y
+# además deja correr la base propia de la sesión.
+from base_de_test import exigir_base_de_test  # noqa: E402
+
+exigir_base_de_test()
 
 from jacobs import store  # noqa: E402
 

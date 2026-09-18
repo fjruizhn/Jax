@@ -83,7 +83,13 @@ def test_el_motivo_aparece_en_el_resumen_rs_de_pytest(tmp_path):
     Sin JAX_DB_HOST los cinco quedan por el skip de "necesita MariaDB"; con uno
     de mentira que termina en _test, sólo los tres de R50 se saltan por R50 y
     los demás no se ejecutan (se deseleccionan con -k)."""
-    entorno = {k: v for k, v in os.environ.items() if k != VARIABLE}
+    # JAX_TEST_DB_SUFIJO se saca junto con VARIABLE: este test arma el entorno
+    # del subproceso A MANO y fija `JAX_DB_NAME`; si el sufijo de la sesión se
+    # heredara, el conftest del hijo lo pisaría con la base de la sesión y el
+    # subproceso no quedaría en el estado que este test dice estar probando
+    # (visto en rojo el 2026-09-18 corriendo la suite con base propia).
+    entorno = {k: v for k, v in os.environ.items()
+               if k not in (VARIABLE, "JAX_TEST_DB_SUFIJO")}
     entorno.update({"PYTHONPATH": ".:las_manos", "JAX_DB_HOST": "127.0.0.1", "JAX_DB_PORT": "1",
                     "JAX_DB_NAME": "jax_memory_test", "COLUMNS": "400"})
     seleccion = " or ".join(GLOBALES)

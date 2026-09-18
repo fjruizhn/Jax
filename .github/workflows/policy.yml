@@ -2241,8 +2241,21 @@ jobs:
           #   sin el del esquema -> 3 rojos. MEDIDO en local (3.14), env -i, JAX_PLATFORM_REPO_ROOT
           #   inexistente, las DOS listas: "2068 passed, 1 skipped, 1 xfailed, 16 subtests passed".
           #   Si el runner da otro numero, manda el runner.
-          grep -qE "^2068 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2068 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2020 -> 2021 el 2026-09-18 (+1): tests/test_base_por_sesion.py suma
+          # `test_ningun_test_vuelve_a_hardcodear_el_nombre_de_la_base`, el detector
+          # que impide que vuelva la guarda con el nombre de la base clavado (la
+          # que rechazaba jax_memory_test_<sufijo>). Medido en hall9000: 2022
+          # passed, 1 xfailed, 16 subtests, IDENTICO con y sin JAX_TEST_DB_SUFIJO
+          # -- que es lo que el arreglo buscaba. Si el runner da otro numero,
+          # manda el runner.
+          # 2068 -> 2069 el 2026-09-18 (la base por sesion sirve de verdad): +1 en
+          #   tests/test_base_de_test_sin_hardcodear.py (barre el arbol y falla si alguien
+          #   vuelve a decidir el nombre de la base fuera del modulo dueno; validado por
+          #   mutacion en dos sitios). Los otros 25 archivos del commit no suman tests:
+          #   cambian como resuelven el nombre de la base. Medido local: 2070 passed,
+          #   1 xfailed, 16 subtests; el runner cuenta uno menos (el xfail sale skipped).
+          grep -qE "^2069 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2069 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
