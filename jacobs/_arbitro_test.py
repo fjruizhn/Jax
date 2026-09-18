@@ -284,21 +284,28 @@ def test_build_agrega_el_arbitro_por_el_camino_del_llm():
 # que es exactamente lo que nadie corría. El test de acá sí lo ejercita.
 # ---------------------------------------------------------------------------
 
-def _governance_patron_modular():
+def _governance_patron_modular(arbitro_faceta: str = "thot"):
     entry = {"allowed_motors": [], "max_execution_minutes": 15}
     return {
         "capabilities": {"design": entry, "reconcile": entry, "assemble": entry,
                           "critique": entry, "validate_consistency": entry},
         "motors": {},
-        "facets": frozenset({"ada", "thot"}),
-        "arbitro_faceta": "thot",
+        "facets": frozenset({"ada", arbitro_faceta}),
+        "arbitro_faceta": arbitro_faceta,
     }
 
 
-def _correr_ada_plan_real(monkeypatch, plan_json: str):
+def _correr_ada_plan_real(monkeypatch, plan_json: str, *, arbitro_faceta: str = "thot",
+                           capturados: list | None = None):
     """Ejercita el camino real de Ada: _ada_plan arma el prompt, pega al HTTP
     (mockeado), _parse_plan_json interpreta la respuesta, _from_spec/_con_arbitro
-    deciden, y build() aplica los gates -- nada de eso se hand-wirea."""
+    deciden, y build() aplica los gates -- nada de eso se hand-wirea.
+
+    `capturados`, si se pasa, recibe los payloads (`json=`) que _ada_plan
+    mandó al `.stream()` mockeado -- para inspeccionar el TEXTO real que le
+    llegó a Ada, no solo el resultado final del plan (Ronda de arreglo 2:
+    demostrar que el prompt nombra la faceta árbitro CONFIGURADA, no un
+    literal)."""
     from jacobs import store
     from jacobs import plan as plan_mod
     from facet_resolver import ResolvedFacet
@@ -315,12 +322,15 @@ def _correr_ada_plan_real(monkeypatch, plan_json: str):
 
     class _Cliente:
         def stream(self, method, url, json=None, **kw):
+            if capturados is not None:
+                capturados.append(json)
+
             @asynccontextmanager
             async def _cm():
                 yield _StreamResp()
             return _cm()
 
-    governance = _governance_patron_modular()
+    governance = _governance_patron_modular(arbitro_faceta)
 
     async def correr():
         builder = plan_mod.PlanBuilder()
@@ -389,14 +399,77 @@ def test_un_plan_modular_de_ada_con_el_prompt_actual_no_se_autorrechaza(monkeypa
 
 def test_el_prompt_modular_ya_no_pide_thot_como_productor():
     """Asserción directa sobre el texto del prompt (no solo el comportamiento):
-    ni la regla del sistema ni el prompt de usuario de Ada deben mencionar a
-    'thot' como facet de un step, ni al antiguo step fijo de validación de
-    consistencia -- confirma que el texto es consistente consigo mismo después
-    de sacar ese paso (no quedó un '4. El ANTEPENÚLTIMO...' colgado, ni el
-    ejemplo JSON con {"facet":"thot",...})."""
-    from jacobs.plan import _PLAN_SYSTEM_MODULAR
+    con la faceta árbitro de HOY ('thot'), ni la regla del sistema ni el resto
+    del texto de _ada_plan deben mencionar a 'thot' como facet de un step, ni
+    al antiguo step fijo de validación de consistencia -- confirma que el
+    texto es consistente consigo mismo después de sacar ese paso (no quedó un
+    '4. El ANTEPENÚLTIMO...' colgado)."""
+    from jacobs.plan import _texto_plan_system_modular
 
-    assert '"facet":"thot"' not in _PLAN_SYSTEM_MODULAR.replace(" ", "")
-    assert "validate_consistency" not in _PLAN_SYSTEM_MODULAR
-    assert "ANTEPENÚLTIMO" not in _PLAN_SYSTEM_MODULAR
-    assert "PENÚLTIMO" in _PLAN_SYSTEM_MODULAR and "ÚLTIMO" in _PLAN_SYSTEM_MODULAR
+    texto = _texto_plan_system_modular("thot")
+
+    assert "validate_consistency" not in texto
+    assert "ANTEPENÚLTIMO" not in texto
+    assert "PENÚLTIMO" in texto and "ÚLTIMO" in texto
+    # 'thot' SÍ aparece -- pero solo en la prohibición ("NUNCA 'thot'"), no
+    # como facet de un step productor: no hay ejemplo JSON en este texto (el
+    # ejemplo vive en el f-string de _ada_plan, cubierto por el test de abajo).
+    assert "'thot'" in texto
+
+
+# ---------------------------------------------------------------------------
+# Ronda de arreglo 2 (2026-09-18): _con_arbitro ya leía governance["arbitro_faceta"]
+# (dinámico, Ruling 2), pero el TEXTO que le llegaba a Ada seguía diciendo
+# 'thot' como literal en _CLEANROOM_RULE, _PLAN_SYSTEM_MODULAR y el f-string
+# de _ada_plan -- si ejecutor.auditor_faceta cambiara de valor, la LÓGICA
+# exigiría la faceta nueva pero el PROMPT le seguiría prohibiendo a Ada la
+# vieja (ya irrelevante) y nunca mencionaría la nueva: Ada volvería a
+# producir la faceta árbitro real como productora, y todo plan modular real
+# se autorrechazaría otra vez -- el mismo defecto de la ronda 1, reaparecido
+# bajo otro nombre la primera vez que alguien toque la config.
+#
+# El test de abajo NO mira solo que el literal 'thot' desapareciera (eso lo
+# probaría incluso si el código simplemente lo hubiera borrado sin reemplazo,
+# dejando el prompt mudo sobre qué faceta evitar) -- ejercita el camino real
+# con la faceta árbitro configurada a 'hipatia' (algo DISTINTO de 'thot') y
+# lee el payload HTTP que _ada_plan realmente mandó, verificando que NOMBRA
+# 'hipatia' como la faceta prohibida y que 'thot' no aparece en ningún lado.
+# ---------------------------------------------------------------------------
+
+def test_el_prompt_que_recibe_ada_nombra_la_faceta_arbitro_configurada(monkeypatch):
+    """Con arbitro_faceta='hipatia' (no 'thot'), el prompt real que _ada_plan
+    manda por HTTP prohíbe 'hipatia' -- no 'thot'. Ejercita _ada_plan de punta
+    a punta (HTTP mockeado únicamente), no un string armado a mano."""
+    plan_json = json.dumps([
+        {"facet": "ada", "capability": "design", "prompt": "tipos comunes", "depends_on": []},
+        {"facet": "ada", "capability": "design", "prompt": "modulo x", "depends_on": [0]},
+        {"facet": "ada", "capability": "reconcile", "prompt": "revisa consistencia y aplica parches",
+         "depends_on": [0, 1]},
+        {"facet": "ada", "capability": "assemble", "prompt": "manifest", "depends_on": [0, 1, 2]},
+    ])
+    # 'zeta', no 'hipatia': una faceta que NO está en _MENU_DE_FACETAS, para
+    # que "aparece en el texto" no pueda deberse a que además se ofrece en el
+    # menú general de facetas (eso pasaría con cualquier faceta real activa,
+    # y volvería ambigua la aserción -- con 'zeta' el único lugar posible
+    # donde puede aparecer es la prohibición que arma el código).
+    capturados: list = []
+    steps = _correr_ada_plan_real(
+        monkeypatch, plan_json, arbitro_faceta="zeta", capturados=capturados,
+    )
+
+    # El plan construido termina en la faceta árbitro CONFIGURADA, no en thot.
+    assert steps[-1].facet == "zeta"
+    assert steps[-1].capability == PlanBuilder.CAPABILITY_ARBITRO
+
+    # El TEXTO que salió por HTTP -- lo que Ada de verdad recibió -- nombra
+    # 'zeta' como la faceta reservada, y 'thot' no aparece en ningún lado (ni
+    # en el system prompt ni en el prompt de usuario, los dos mensajes que
+    # arma _ada_plan).
+    assert len(capturados) == 1, "se esperaba una sola llamada HTTP a Ada"
+    mensajes = capturados[0]["messages"]
+    texto_completo = "\n".join(m["content"] for m in mensajes)
+    assert "zeta" in texto_completo
+    assert "thot" not in texto_completo.lower()
+    # Y el motivo concreto: la prohibición explícita nombra a la faceta real,
+    # entre comillas, como todas las menciones de facet en este prompt.
+    assert "'zeta'" in texto_completo

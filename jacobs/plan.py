@@ -153,52 +153,74 @@ _PLAN_SYSTEM = (
     "se equivoca.' (Tu salida sigue siendo SOLO el array JSON.)"
 )
 
-_CLEANROOM_RULE = (
-    "\nREGLA DE AUDITORÍA INDEPENDIENTE (clean-room): el step que audita, valida "
-    "o critica el trabajo de otros steps DEBE usar un facet DISTINTO al de los "
-    "steps que revisa, y NUNCA 'thot': ese facet está reservado para el árbitro "
-    "que Jacobs agrega solo al final del plan, después de este que estás generando "
-    "-- ve TODOS los steps, no solo los anteriores a él, así que hace mejor esa "
-    "auditoría que un step intermedio. Un facet no se audita a sí mismo. Si los "
-    "módulos backend y frontend fueron diseñados por 'ada' y 'kimi', un step que "
-    "los audite debe usar un facet que no sea ninguno de los dos (y que tampoco "
-    "sea 'thot'). La revisión independiente es la garantía de calidad: quien "
-    "produce no es quien aprueba.\n"
-)
+# Ronda de arreglo 2 (2026-09-18): _CLEANROOM_RULE y _PLAN_SYSTEM_MODULAR ERAN
+# constantes de módulo con 'thot' escrito como literal cuatro veces -- _con_arbitro
+# (Ruling 2, Task 4) ya lee governance["arbitro_faceta"] en vez de hardcodear, pero
+# el TEXTO que recibe Ada seguía diciendo 'thot' a mano. Si ejecutor.auditor_faceta
+# cambiara de valor mañana, la lógica exigiría la faceta nueva y el prompt le
+# seguiría prohibiendo a Ada la VIEJA (ya irrelevante) sin mencionar la nueva --
+# Ada volvería a producir la faceta árbitro como productora, y todo plan modular
+# se autorrechazaría otra vez: el mismo defecto de la ronda 1, reaparecido bajo
+# otro nombre la primera vez que alguien toque la config.
+#
+# Se convierten en funciones parametrizadas por `arbitro_faceta` en vez de texto
+# fijo -- la forma más simple que no duplica el cuerpo del texto (nada de una
+# copia por faceta posible, ni de post-procesar un str.replace() sobre un
+# literal ya escrito). _ada_plan (único llamador de las dos) resuelve
+# `arbitro_faceta` una vez desde `governance["arbitro_faceta"]` -- la MISMA
+# fuente que ya usa _con_arbitro -- y se lo pasa a las dos.
 
-_PLAN_SYSTEM_MODULAR = (
-    "Eres Jacobs, el Director, planificando trabajo FORMAL COMPLEJO. Generás un plan de "
-    "ejecución como JSON (array de objetos), SOLO JSON, sin markdown ni explicaciones.\n\n"
-    "Patrón OBLIGATORIO para trabajo formal (compilador de especificaciones):\n"
-    "1. El PRIMER step SIEMPRE produce 'common_types': define UNA vez todos los tipos, enums "
-    "e identificadores compartidos. Todos los demás módulos los referencian, ninguno los redefine.\n"
-    "2. Luego los módulos en ORDEN DE DEPENDENCIA: cada módulo declara de qué steps anteriores "
-    "depende (campo depends_on: lista de step_index). Un módulo va DESPUÉS de aquellos que necesita.\n"
-    "3. Las piezas que referencian a todo (invariantes, validaciones globales) van AL FINAL.\n"
-    "4. El PENÚLTIMO step es 'reconciliación' (facet ada, capability 'reconcile'): revisa los "
-    "módulos anteriores por consistencia (nombres huérfanos, tipos no definidos, referencias "
-    "rotas) y produce SOLO los PARCHES puntuales que las corrigen (ej: agregar el método "
-    "faltante a un módulo). NO reescribe los módulos completos — solo los fragmentos a "
-    "corregir, identificando módulo y ubicación.\n"
-    "5. El ÚLTIMO step es 'ensamble' (facet ada, capability 'assemble'): describe el manifest del "
-    "paquete (orden de módulos, versiones, índice). El ensamble FÍSICO de los módulos lo hace el "
-    "sistema mecánicamente; este step solo produce el manifest/índice, NO el documento completo.\n\n"
-    "Este plan NO incluye un step separado de 'validación de consistencia' ni usa el facet "
-    "'thot' en ningún step: Jacobs agrega SOLO, después de este plan, un árbitro final que "
-    "revisa consistencia sobre TODOS los steps (no solo los anteriores al de reconciliación) "
-    "y decide citando la fuente de cada punto. Un step de este plan que use 'thot' hace que "
-    "el plan entero se rechace (el árbitro no puede ser también un productor).\n\n"
-    "Cada step: {\"facet\",\"capability\",\"prompt\",\"depends_on\":[indices]}.\n"
-    "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido, y nunca 'thot'. Diseño "
-    "formal/tipos/arquitectura, reconciliación y ensamble: 'ada'.\n"
-    "- depends_on lista los step_index (0-based) de los steps cuyos OUTPUTS este step necesita.\n"
-    "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
-    "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
-    "PRINCIPIO DE EVIDENCIA (innegociable): no asumas hechos no verificados; si un dato es "
-    "incógnita, incluí un step que lo verifique. 'El que supone se equivoca.'\n"
-    + _CLEANROOM_RULE +
-    "\nSalida: SOLO el array JSON."
-)
+
+def _texto_cleanroom(arbitro_faceta: str) -> str:
+    return (
+        "\nREGLA DE AUDITORÍA INDEPENDIENTE (clean-room): el step que audita, valida "
+        "o critica el trabajo de otros steps DEBE usar un facet DISTINTO al de los "
+        f"steps que revisa, y NUNCA '{arbitro_faceta}': ese facet está reservado para "
+        "el árbitro que Jacobs agrega solo al final del plan, después de este que "
+        "estás generando -- ve TODOS los steps, no solo los anteriores a él, así que "
+        "hace mejor esa auditoría que un step intermedio. Un facet no se audita a sí "
+        "mismo. Si los módulos backend y frontend fueron diseñados por 'ada' y 'kimi', "
+        "un step que los audite debe usar un facet que no sea ninguno de los dos (y "
+        f"que tampoco sea '{arbitro_faceta}'). La revisión independiente es la "
+        "garantía de calidad: quien produce no es quien aprueba.\n"
+    )
+
+
+def _texto_plan_system_modular(arbitro_faceta: str) -> str:
+    return (
+        "Eres Jacobs, el Director, planificando trabajo FORMAL COMPLEJO. Generás un plan de "
+        "ejecución como JSON (array de objetos), SOLO JSON, sin markdown ni explicaciones.\n\n"
+        "Patrón OBLIGATORIO para trabajo formal (compilador de especificaciones):\n"
+        "1. El PRIMER step SIEMPRE produce 'common_types': define UNA vez todos los tipos, enums "
+        "e identificadores compartidos. Todos los demás módulos los referencian, ninguno los redefine.\n"
+        "2. Luego los módulos en ORDEN DE DEPENDENCIA: cada módulo declara de qué steps anteriores "
+        "depende (campo depends_on: lista de step_index). Un módulo va DESPUÉS de aquellos que necesita.\n"
+        "3. Las piezas que referencian a todo (invariantes, validaciones globales) van AL FINAL.\n"
+        "4. El PENÚLTIMO step es 'reconciliación' (facet ada, capability 'reconcile'): revisa los "
+        "módulos anteriores por consistencia (nombres huérfanos, tipos no definidos, referencias "
+        "rotas) y produce SOLO los PARCHES puntuales que las corrigen (ej: agregar el método "
+        "faltante a un módulo). NO reescribe los módulos completos — solo los fragmentos a "
+        "corregir, identificando módulo y ubicación.\n"
+        "5. El ÚLTIMO step es 'ensamble' (facet ada, capability 'assemble'): describe el manifest del "
+        "paquete (orden de módulos, versiones, índice). El ensamble FÍSICO de los módulos lo hace el "
+        "sistema mecánicamente; este step solo produce el manifest/índice, NO el documento completo.\n\n"
+        "Este plan NO incluye un step separado de 'validación de consistencia' ni usa el facet "
+        f"'{arbitro_faceta}' en ningún step: Jacobs agrega SOLO, después de este plan, un árbitro "
+        "final que revisa consistencia sobre TODOS los steps (no solo los anteriores al de "
+        "reconciliación) y decide citando la fuente de cada punto. Un step de este plan que use "
+        f"'{arbitro_faceta}' hace que el plan entero se rechace (el árbitro no puede ser también "
+        "un productor).\n\n"
+        "Cada step: {\"facet\",\"capability\",\"prompt\",\"depends_on\":[indices]}.\n"
+        "- facet: SOLO una de las 'Facetas disponibles' que lista el pedido, y nunca "
+        f"'{arbitro_faceta}'. Diseño formal/tipos/arquitectura, reconciliación y ensamble: 'ada'.\n"
+        "- depends_on lista los step_index (0-based) de los steps cuyos OUTPUTS este step necesita.\n"
+        "- El prompt de cada step debe ser autocontenido y referir explícitamente a sus dependencias "
+        "(\"usando los tipos comunes del step 0 y las capabilities del step 1, definí...\").\n\n"
+        "PRINCIPIO DE EVIDENCIA (innegociable): no asumas hechos no verificados; si un dato es "
+        "incógnita, incluí un step que lo verifique. 'El que supone se equivoca.'\n"
+        + _texto_cleanroom(arbitro_faceta) +
+        "\nSalida: SOLO el array JSON."
+    )
 
 
 # Revisión final del frente E (2026-09-16): el menú de facetas que se le ofrece
@@ -810,8 +832,13 @@ class PlanBuilder:
         # llaman _ada_plan suelto con solo `facetas_activas` se quedan sin
         # este chequeo extra y dependen del rechazo de _con_arbitro más
         # adelante, igual que antes de esta tarea).
+        # Ronda de arreglo 2 (2026-09-18): `arbitro_faceta` resuelto UNA vez,
+        # acá, tanto para el chequeo de disponibilidad de arriba como para
+        # armar el TEXTO del prompt más abajo (_texto_plan_system_modular +
+        # el f-string de esta función) -- antes decían 'thot' como literal,
+        # divorciado de esta misma variable.
+        arbitro_faceta = (governance or {}).get("arbitro_faceta")
         if governance is not None:
-            arbitro_faceta = governance.get("arbitro_faceta")
             if not arbitro_faceta or arbitro_faceta not in facetas_activas:
                 faltan = faltan + [arbitro_faceta or "arbitro_faceta (sin configurar)"]
         if faltan:
@@ -819,6 +846,13 @@ class PlanBuilder:
                       f"activas en la tabla `facet`: {', '.join(faltan)}")
             logger.error(motivo)
             raise CerebroNoDisponible(motivo)
+        # A partir de acá, si `governance` llegó, `arbitro_faceta` ya está
+        # validado (activo) -- si no fuera así, ya se rechazó arriba. Si NO
+        # llegó `governance` (solo pasa en tests de bajo nivel que llaman
+        # _ada_plan suelto con nada más que `facetas_activas`, nunca en el
+        # camino real de _from_objective/build()), no hay de dónde resolverlo:
+        # rótulo genérico, nunca un nombre de faceta inventado.
+        arbitro_faceta = arbitro_faceta or "la faceta reservada para el árbitro (sin gobernanza)"
         menu = _texto_del_menu(_menu_de_facetas(facetas_activas))
         try:
             f = await resolve_facet("ada")
@@ -851,10 +885,10 @@ class PlanBuilder:
             f"Seguí el patrón compilador OBLIGATORIO: common_types primero, módulos en orden "
             f"de dependencia, reconciliación (ada/reconcile) como penúltimo step, ensamble "
             f"(ada/assemble) al final. NO incluyas un step separado de validación de "
-            f"consistencia ni uses el facet 'thot' en ningún step: eso lo hace el árbitro que "
-            f"Jacobs agrega SOLO, después de este plan, viendo TODOS los steps (no solo los "
-            f"anteriores al de reconciliación) -- un step de este plan con facet 'thot' hace "
-            f"que el plan entero se rechace.\n"
+            f"consistencia ni uses el facet '{arbitro_faceta}' en ningún step: eso lo hace el "
+            f"árbitro que Jacobs agrega SOLO, después de este plan, viendo TODOS los steps (no "
+            f"solo los anteriores al de reconciliación) -- un step de este plan con facet "
+            f"'{arbitro_faceta}' hace que el plan entero se rechace.\n"
             f"Cada step DEBE incluir el campo 'depends_on' con la lista de step_index "
             f"(0-based) de los que depende (lista vacía [] si no depende de ninguno).\n\n"
             f"Facetas disponibles: {menu}.\n\n"
@@ -877,7 +911,7 @@ class PlanBuilder:
             f"Responde SOLO con el array JSON."
         )
         messages = [
-            {"role": "system", "content": _PLAN_SYSTEM_MODULAR + capability_hint},
+            {"role": "system", "content": _texto_plan_system_modular(arbitro_faceta) + capability_hint},
             {"role": "user", "content": prompt},
         ]
         payload = {
