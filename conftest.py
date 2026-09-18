@@ -77,6 +77,22 @@ os.environ["JAX_LAS_MANOS_CREDENCIAL_JACOBS"] = _secrets.token_urlsafe(32)
 #: puede dejar ahí un documento de mentira: mismo criterio que el respaldo de uso.
 os.environ["JAX_REPO_BASE"] = tempfile.mkdtemp(prefix="jax-test-repo-")
 
+#: 2026-09-18 (detector de cobertura, hallazgo real: FileNotFoundError/
+#: PermissionError en las_manos/motor_registry/_authorize_facet_endpoint_test.py
+#: y cualquier otro test que importe `server`). `las_manos/config.toml` trae
+#: `audit_log` como ruta absoluta del home de producción
+#: (/home/fruiz/jax/las_manos/logs/audit.jsonl); `server.py` la lee al
+#: importarse y `AuditLog.__init__` le hace `mkdir` -- en cualquier checkout
+#: que no sea exactamente /home/fruiz/jax (cualquier runner de CI, este
+#: worktree incluido) eso revienta antes de que corra un solo test. Mismo
+#: criterio que el resto de este archivo: se fija en tiempo de IMPORT, antes
+#: de que nada pueda importar `server`. tests/test_prevuelo_pool.py ya
+#: documentaba el mismo bug con un monkeypatch local de AuditLog.__init__
+#: (ver _audit_init_a) -- eso sigue funcionando, esto lo cierra para TODO el
+#: resto de la suite, no solo para ese test.
+os.environ["JAX_AUDIT_LOG_PATH"] = os.path.join(
+    tempfile.mkdtemp(prefix="jax-test-audit-log-"), "audit.jsonl")
+
 #: 2026-09-17: `jax/core/facet_resolver.py` y `las_manos/facet_resolver.py`
 #: leen JAX_FACET_SEAL_PATH al importarse, con default
 #: /srv/jax-data/facet-cache-seal -- el sello REAL que jax-platform y LAS

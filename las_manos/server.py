@@ -77,7 +77,20 @@ CONFIG["environments"] = _load_environments()
 SERVER_CFG = CONFIG["server"]
 GATE_CFG = CONFIG["human_gate"]
 
-audit = AuditLog(SERVER_CFG["audit_log"])
+#: `config.toml` trae `audit_log` como ruta absoluta del home de producción
+#: (`/home/fruiz/jax/las_manos/logs/audit.jsonl`) -- mismo criterio que
+#: `JAX_WORKSPACE_DIR`/`WORKSPACE_ROOT` en tool_authority.py: un default de
+#: producción, pero SIEMPRE overrideable, nunca el único camino. Sin esto,
+#: cualquier test que importe `server` (aunque sea indirecto, vía
+#: `from server import app`) dispara `AuditLog.__init__` -> `mkdir` sobre ESA
+#: ruta literal, que en cualquier runner de CI o checkout que no sea
+#: /home/fruiz/jax revienta con PermissionError o FileNotFoundError --
+#: violación directa de "sin hardcoding" (2026-09-18, detector de cobertura:
+#: las_manos/motor_registry/_authorize_facet_endpoint_test.py). `conftest.py`
+#: de la raíz fija JAX_AUDIT_LOG_PATH a un temporal antes de cualquier import,
+#: mismo patrón que JAX_KILL_SWITCH_PATH/JAX_FACET_SEAL_PATH/JAX_REPO_BASE.
+AUDIT_LOG_PATH = os.getenv("JAX_AUDIT_LOG_PATH", SERVER_CFG["audit_log"])
+audit = AuditLog(AUDIT_LOG_PATH)
 policy = PolicyEngine(CONFIG)
 planner = Planner(CONFIG)
 
