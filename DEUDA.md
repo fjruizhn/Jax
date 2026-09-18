@@ -549,39 +549,79 @@ prueba la tesis**:
 
 | escenario | VUs | rps antes | p95 antes | rps después | p95 después |
 |---|---|---|---|---|---|
-| Mesa | 10 | 3,3 | 3.071,67 ms | **3.548,7** | **2,33 ms** |
-| Mesa | 25 | 3,3 | 7.667,85 ms | **3.857,1** | **6,61 ms** |
-| Ada (hijo con token real) | 10 | 3,2 | 3.083,17 ms | **3.605,4** | **2,21 ms** |
-| Ada | 25 | 3,3 | 7.693,00 ms | **3.888,3** | **6,37 ms** |
-| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 1,0 | 4.614,49 ms | **1.264,8** | **3,88 ms** |
-| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | **0,5** | **9.233,50 ms** | **1.134,8** | **7,45 ms** |
+| Mesa | 10 | 3,3 | 3.071,67 ms | **3.708,3** | **2,24 ms** |
+| Mesa | 25 | 3,3 | 7.667,85 ms | **4.083,9** | **6,25 ms** |
+| Ada (hijo con token real) | 10 | 3,2 | 3.083,17 ms | **3.778,7** | **2,07 ms** |
+| Ada | 25 | 3,3 | 7.693,00 ms | **4.073,6** | **6,01 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 10** | 5 | 1,0 | 4.614,49 ms | **1.299,5** | **3,67 ms** |
+| **Mesa (5 VUs) MIENTRAS Ada delega a 25** | 5 | **0,5** | **9.233,50 ms** | **1.146,1** | **7,61 ms** |
 
 `JAX_CARGA_PLAN_MS=0` (plan instantáneo):
 
 | escenario | VUs | rps antes | p95 antes | rps después | p95 después |
 |---|---|---|---|---|---|
-| Mesa | 10 | 330,3 | 42,01 ms | **1.047,1** | **24,95 ms** |
-| Mesa | 25 | 311,4 | 97,20 ms | **2.182,5** | **24,01 ms** |
-| Ada | 10 | 213,7 | 56,78 ms | **1.755,9** | **17,33 ms** |
-| Ada | 25 | 160,1 | 324,78 ms | **2.552,2** | **22,50 ms** |
-| **Mesa (5 VUs) con Ada a 10** | 5 | 104,5 | 64,11 ms | **799,8** | **16,27 ms** |
-| **Mesa (5 VUs) con Ada a 25** | 5 | 56,2 | 140,04 ms | **530,5** | **22,22 ms** |
+| Mesa | 10 | 330,3 | 42,01 ms | **1.199,6** | **22,62 ms** |
+| Mesa | 25 | 311,4 | 97,20 ms | **1.375,8** | **43,66 ms** |
+| Ada | 10 | 213,7 | 56,78 ms | **1.461,1** | **20,69 ms** |
+| Ada | 25 | 160,1 | 324,78 ms | **2.642,1** | **21,88 ms** |
+| **Mesa (5 VUs) con Ada a 10** | 5 | 104,5 | 64,11 ms | **837,9** | **15,66 ms** |
+| **Mesa (5 VUs) con Ada a 25** | 5 | 56,2 | 140,04 ms | **564,6** | **19,64 ms** |
 
 **El techo del candado se ve desnudo: 3,3 rps = exactamente 1/0,300 s.** Toda la creación, la de la
 Mesa y la de Ada, pasaba por un solo planificador a la vez.
 
 **¿La Mesa dejó de esperar detrás de Ada? SÍ.** Con el planificador representado y Ada delegando a
-25 VUs: de **0,5 rps y p95 9,23 s** a **1.134,8 rps y p95 7,45 ms**.
+25 VUs: de **0,5 rps y p95 9,23 s** a **1.146,1 rps y p95 7,61 ms**.
 
 **Degradación.** Antes, con el planificador representado, la Mesa no aguanta ni c=5 (p95 4,6 s
-detrás de Ada). Después no se degrada en el rango medido: p95 2,33 → 6,61 ms de c=10 a c=25, muy por
+detrás de Ada). Después no se degrada en el rango medido: p95 2,24 → 6,25 ms de c=10 a c=25, muy por
 debajo del umbral de 500 ms del arnés.
 
-**Errores: CERO en las cuatro corridas**, con los 24 reintentos. **Caduca** si cambia el esquema, el
+**Errores: CERO 500 en las cuatro corridas.** Con el plan instantáneo salieron **21 respuestas 503
+`contencion_al_reservar` de ~250.000** (0,008 %): es el comportamiento nuevo funcionando — la
+contención se contesta "volvé a intentar" con `Retry-After`, en vez de un 500 que manda a buscar un
+defecto que no existe. Ninguna esperó más de 1 s (14-16 intentos, 0,90-1,00 s: el presupuesto
+declarado haciéndose cumplir). Con el planificador representado, cero de todo. **Caduca** si cambia el esquema, el
 volumen de datos, `MAX_PARALLEL_PIPELINES` o la infraestructura.
 
-**Pisos de CI (MEDICIONES LOCALES; manda el runner):** `tests-puros` 2020 → **2039**;
-`subpipeline-contrato-db` 121 → **133**; `jacobs-gobernanza-db` 94 → **87** (BAJA porque se retira el
+**Revisión del autor del mecanismo retirado (2026-09-17) — los cinco puntos:**
+
+1. **El cupo se mira ANTES del pre-vuelo.** El pre-vuelo SONDEA facetas: es una llamada PAGA. Con el
+   cupo revisado después, un `resume` rechazado por falta de lugar ya había gastado dinero.
+   `routes._cupo_o_429()` es una compuerta barata antes de cualquier cosa que salga a la red; **no
+   decide** (eso sigue en la condición del UPDATE), sólo ahorra el gasto. El orden está fijado por
+   test: por posición en el código **y** por comportamiento (con el cupo lleno el pre-vuelo no se
+   llama).
+2. **La fila visible antes de planificar: averiguado, no supuesto.** Nace `pending`, con `plan='[]'`
+   y `owner_ack_at` NULL. La consulta que lista los pipelines de la Mesa
+   (`jax-platform ... SQL_PIPELINES_DEL_USUARIO`) filtra por `owner_ack_at IS NOT NULL`, y esa marca
+   la escribe jax-platform **después** de que Jacobs responde: **no hay pipeline fantasma en la lista
+   de nadie** durante la planificación (un hijo de Ada ni siquiera tiene dueño). Si el proceso muere
+   ahí, la cosecha el reaper a los **300 s** — mismo mecanismo y mismo número que antes; lo que crece
+   es la ventana (de milisegundos a los segundos que tarda planificar), no el plazo. **Declarado, no
+   arreglado**: bajar los 300 s arriesgaría cosechar pendientes legítimos.
+3. **La contención ya no es un 500.** Sale **503 `contencion_al_reservar`** con `Retry-After: 1` — no
+   el 422 del cupo, que diría que el pedido es inválido, y no lo es. **Techo real de espera, medido:**
+   sin presupuesto, 24 intentos con espera hasta 100 ms dan **2,06 s** en el camino del usuario; se
+   declara `PRESUPUESTO_DE_ESPERA_SEGUNDOS = 1,0` y se hace cumplir (en la carga cortó a los 14-16
+   intentos con 0,90-1,00 s). El cálculo está fijado por test. La traducción del código en la Mesa va
+   en jax-platform, rama `feat/contencion-al-reservar` (es.js y en.js, más la lista de códigos de
+   `errores.test.js`, que exige texto en los dos idiomas).
+4. **Las CUATRO sentencias tienen test con base real**, y tres de los cuatro en el MISMO job:
+   | sentencia | test | job |
+   |---|---|---|
+   | INSERT de la reserva (crear) | `jacobs/_cupo_io_test.py::CupoEnLaBaseTest` (25 y 50 corrutinas, EXPLAIN de la sentencia real, soltar, completar, fail-closed) y `::CreacionConcurrenteSinCandadoTest` (la ruta completa) | `subpipeline-contrato-db` |
+   | UPDATE que revive (continue) | `jacobs/_cupo_io_test.py::ContinuarRespetaElCupoTest` (rechaza con el cupo lleno, admite con lugar) | `subpipeline-contrato-db` |
+   | UPDATE de la época (resume y approve-step: **la misma sentencia**) | `jacobs/_cupo_io_test.py::ReanudarRespetaElCupoTest` (el hallazgo, rojo por comportamiento contra `b450248`) | `subpipeline-contrato-db` |
+   | recuento del cupo | las de arriba (`cupo.activos()` en cada `asyncSetUp`) + `tests/test_jacobs_continuar_db.py` (EXPLAIN con el JOIN, y 0 filas → `CupoAgotado`) | `subpipeline-contrato-db` y `jacobs-gobernanza-db` |
+   Que `resume` y `approve-step` usen esa sentencia lo fija `tests/test_cupo_en_todos_los_caminos.py`
+   (puro): los dos endpoints pasan `cupo_maximo` y traducen `CupoAgotado`.
+5. **`run_epoch` NO cambió de dueño**: anotado en `jacobs/store.py`, sobre las sentencias de época. El
+   cupo les agregó una condición; quién incrementa la época, cuándo y con qué CAS sigue siendo
+   continuar, resume y approve-step.
+
+**Pisos de CI (MEDICIONES LOCALES; manda el runner):** `tests-puros` 2020 → **2049**;
+`subpipeline-contrato-db` 121 → **135**; `jacobs-gobernanza-db` 94 → **87** (BAJA porque se retira el
 test del GET_LOCK junto con el GET_LOCK; bajar un piso sólo se justifica cuando se retira
 funcionalidad y se dice). Detector P10 en cero violaciones.
 

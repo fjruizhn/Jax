@@ -377,6 +377,13 @@ async def _soltar_reserva(pipeline_id: str) -> None:
         )
 
 
+def _es_deadlock(exc: BaseException) -> bool:
+    """Un 1213 de InnoDB, venga envuelto o no. Se mira el código, no el texto:
+    el mensaje del servidor cambia con la versión y el idioma."""
+    args = getattr(exc, "args", ())
+    return bool(args) and args[0] == 1213
+
+
 def _contencion_503(exc: ContencionAlReservar) -> HTTPException:
     """La contención NO es un 500 (2026-09-17, revisión del autor del mecanismo
     retirado). Un 500 dice "me rompí" y manda a alguien a buscar un defecto que
@@ -659,6 +666,15 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                 soltar_la_reserva = False
             if not isinstance(exc, Exception):
                 raise  # cancelación: no se convierte en un 503
+            if _es_deadlock(exc) and not estado_tx.incierta:
+                # Contención DENTRO de la transacción (el UPDATE que completa la
+                # reserva y los pasos pelean por los mismos candados de rango).
+                # No se reintenta acá -- reintentar significaría rehacer la
+                # transacción entera --, pero tampoco se etiqueta mal: es
+                # contención, y decirlo `prevuelo_no_disponible` mandaría a
+                # revisar el pre-vuelo, que no tuvo nada que ver. Medido: 2 de
+                # ~250.000 pedidos en la carga del 2026-09-17.
+                raise _contencion_503(ContencionAlReservar(1, 0.0)) from exc
             # fail-closed: transacción de creación que no se pudo completar ->
             # nada quedó escrito y no se crea (spec §8).
             motivo = _motivo_redactado(exc)
