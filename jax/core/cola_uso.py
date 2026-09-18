@@ -68,20 +68,26 @@ SUBDIRECTORIO_CORRUPTOS = "corruptos"
 CAMPOS = (
     "spool_id", "created_at", "tenant_id", "user_id", "facet", "model",
     "tokens_in", "tokens_out", "cost_usd", "request_type", "origen",
-    "status", "job_id",
+    "status", "job_id", "pipeline_id",
 )
 #: `spool_id` y `created_at` los completa el módulo si el llamador no los trae;
-#: `status` y `job_id` son opcionales PARA EL LLAMADOR (sólo `motor_registry`
-#: los tiene) y `_normalizar` los deja en `None`. El resto son obligatorios.
+#: `status`, `job_id` y `pipeline_id` son opcionales PARA EL LLAMADOR (sólo
+#: `motor_registry` tiene los dos primeros; `pipeline_id` lo tienen los DOS
+#: escritores de jax cuando el uso viene de un pipeline, y ninguno cuando no
+#: -- Task 7b, 2026-09-18) y `_normalizar` los deja en `None`. El resto son
+#: obligatorios.
 #: `created_at` es la hora del TURNO, no la del reintento: si no, una caída de
 #: dos horas movería el costo al día siguiente.
 #: `status`/`job_id` están en el archivo (DECISIÓN de Fernando 2026-09-15,
 #: opción (b)) porque sin ellos la fila recuperada entra a `axioma_usage` con
 #: esas dos columnas en NULL y la reconciliación contra `motor_jobs.jsonl` no
 #: la puede emparejar: se recupera el cobro y se pierde la trazabilidad.
+#: `pipeline_id` sigue el mismo criterio (Task 7b): sin él, una fila
+#: recuperada del respaldo entra a `axioma_usage` sin poder sumarse al costo
+#: de ningún pipeline en el historial.
 CAMPOS_OBLIGATORIOS = tuple(
     c for c in CAMPOS
-    if c not in ("spool_id", "created_at", "status", "job_id")
+    if c not in ("spool_id", "created_at", "status", "job_id", "pipeline_id")
 )
 ORIGENES = frozenset({"platform", "jacobs", "motor_registry"})
 
@@ -207,11 +213,11 @@ def _ahora_iso() -> str:
 
 
 def _normalizar(fila) -> dict:
-    """Devuelve la fila con los trece campos del contrato, o lanza ValueError.
+    """Devuelve la fila con los catorce campos del contrato, o lanza ValueError.
 
     Los que el llamador no trae quedan en `None` por la comprensión sobre
-    `CAMPOS` de más abajo: hoy eso alcanza para `status` y `job_id`, que sólo
-    tiene `motor_registry`.
+    `CAMPOS` de más abajo: hoy eso alcanza para `status`, `job_id` y
+    `pipeline_id`, que no todos los llamadores tienen.
     """
     if not isinstance(fila, dict):
         raise ValueError(f"la fila no es un diccionario: {type(fila).__name__}")

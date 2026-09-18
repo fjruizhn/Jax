@@ -113,9 +113,13 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
         self._tmpdir.cleanup()
 
     async def _run_job(self, fake_resp, **run_kwargs):
+        # pipeline_id (Task 7b): en producción, routes.py::dispatch() lo pasa
+        # a LOS DOS, _STORE.create() Y motor_worker.run() -- se replica acá
+        # para que el fixture simule el flujo real, no solo la mitad.
         job_id = self.store.create(
             caller="jacobs", capability="implementation", motor="kimi",
             trace_id="t1", prompt="prompt de prueba", recursion_depth=0,
+            pipeline_id=run_kwargs.get("pipeline_id"),
         )
         with patch.object(worker, "resolve_credential", AsyncMock(return_value="sk-fake")), \
              patch("httpx.AsyncClient.post", AsyncMock(return_value=fake_resp)) as mock_post:
@@ -158,7 +162,7 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
             )
         mock_record.assert_awaited_once_with(
             "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 46, 866,
-            job_id=job_id, status="completed",
+            job_id=job_id, status="completed", pipeline_id=None,
         )
 
     async def test_run_sin_identidad_pasa_none_a_record_motor_usage(self):
@@ -176,9 +180,33 @@ class WorkerMaxTokensTest(unittest.IsolatedAsyncioTestCase):
             )
         mock_record.assert_awaited_once_with(
             None, None, "kimi", "moonshot", "kimi-k2.7-code", 10, 20,
-            job_id=job_id, status="completed",
+            job_id=job_id, status="completed", pipeline_id=None,
         )
         assert self.store._index[job_id]["status"] == "completed"
+
+    async def test_run_con_pipeline_id_lo_pasa_a_record_motor_usage(self):
+        """Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): el
+        pipeline_id que llega a worker.run() (MotorDispatchRequest.pipeline_id
+        via routes.py) tiene que viajar a record_motor_usage() -- sin esto,
+        api/pipelines.py::list_pipelines() (jax-platform) no puede sumar el
+        costo real de kimi/jax_local, las facetas de la MAYORÍA de los pasos
+        reales (Ruling 7, Task 1)."""
+        with patch("motor_registry.usage_writer.record_motor_usage", AsyncMock()) as mock_record:
+            job_id, _ = await self._run_job(
+                _fake_response(
+                    content="respuesta completa", finish_reason="stop",
+                    usage={"prompt_tokens": 46, "completion_tokens": 866, "total_tokens": 912},
+                ),
+                user_id="1", tenant_id="77", pipeline_id="pl-worker-1",
+            )
+        mock_record.assert_awaited_once_with(
+            "1", "77", "kimi", "moonshot", "kimi-k2.7-code", 46, 866,
+            job_id=job_id, status="completed", pipeline_id="pl-worker-1",
+        )
+        # También expuesto en el job -- mismo criterio que `model` (Task 1,
+        # ronda de arreglo 1): JobStore.get() filtra por MotorJobView.
+        job = self.store.get(job_id)
+        assert job.pipeline_id == "pl-worker-1", job
 
     async def test_finish_reason_length_queda_registrado(self):
         """El caso real que motivo el fix: si Moonshot corta por limite de

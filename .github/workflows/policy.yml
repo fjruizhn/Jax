@@ -690,10 +690,19 @@ jobs:
         # contrario; no agrega ni quita archivos de test. Medido dos veces:
         # 15 passed, 0 skipped, con JAX_PLATFORM_REPO_ROOT apuntando a un
         # checkout real de jax-platform.
+        # 15 -> 17 el 2026-09-18 (Task 7b, historial-y-arreglos-de-pipeline): el
+        # contrato pasa a CATORCE campos (pipeline_id). +2:
+        # test_jacobs_encola_pipeline_id_null_cuando_el_uso_no_viene_de_un_pipeline
+        # y test_motor_encola_pipeline_id_null_cuando_el_caller_no_es_un_pipeline.
+        # ORDEN DE MERGE: la migración de pipeline_id en jax-platform (Task 7b)
+        # tiene que estar en su master ANTES de mergear esta rama -- este job
+        # clona jax-platform@master real. Medido en local con
+        # JAX_PLATFORM_REPO_ROOT apuntando al worktree de jax-platform con la
+        # Task 7b ya aplicada: 17 passed, 0 skipped.
         run: |
           python -m pytest tests/test_cola_uso_escritores.py -q 2>&1 | tee /tmp/cu
-          grep -qE "^15 passed" /tmp/cu || {
-            echo "PISO ROTO: se esperaban 15 tests CORRIDOS y 0 skipped."; exit 1; }
+          grep -qE "^17 passed" /tmp/cu || {
+            echo "PISO ROTO: se esperaban 17 tests CORRIDOS y 0 skipped."; exit 1; }
       - name: El freno que escribe la plataforma mata el motor en vuelo
         env:
           JAX_PLATFORM_REPO_ROOT: /tmp/jax-platform
@@ -2309,8 +2318,23 @@ jobs:
           #   JAX_DB_HOST): 2096 passed, 1 xfailed, 16 subtests; mismo desfase de
           #   siempre (el runner cuenta uno menos, el xfail sale skipped). Si el
           #   runner da otro numero, manda el runner.
-          grep -qE "^2095 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2095 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2095 -> 2098 el 2026-09-18 (Task 7b, historial-y-arreglos-de-pipeline --
+          #   costo real del historial): +3. tests/test_cola_uso_escritores.py suma
+          #   test_jacobs_encola_pipeline_id_null_cuando_el_uso_no_viene_de_un_pipeline
+          #   y test_motor_encola_pipeline_id_null_cuando_el_caller_no_es_un_pipeline
+          #   (+2, el contrato CAMPOS_DEL_CONTRATO pasa de trece a catorce campos);
+          #   las_manos/_worker_max_tokens_test.py suma
+          #   test_run_con_pipeline_id_lo_pasa_a_record_motor_usage (+1, el pipeline_id
+          #   de MotorDispatchRequest viaja hasta record_motor_usage() y hasta
+          #   MotorJobView). tests/test_prevuelo_sonda.py::
+          #   test_record_direct_usage_inserta_con_el_request_type_pedido se ajustó
+          #   (mismo test, sin sumar caso: el INSERT tiene una columna más al final,
+          #   request_type pasa de índice -1 a -2) -- no cuenta en el delta. Medido
+          #   local (env -i, sin JAX_DB_HOST, JAX_PLATFORM_REPO_ROOT a este worktree):
+          #   2099 passed, 1 xfailed, 16 subtests; mismo desfase de siempre. Si el
+          #   runner da otro numero, manda el runner.
+          grep -qE "^2098 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2098 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -2600,8 +2624,8 @@ jobs:
           # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). HEAD esperaba 86 passed y
           # origin/master 35; la unión de los dos conjuntos no da ninguno de los dos.
           # Medido en hall9000 contra jax_memory_test con la lista unificada: 94 passed.
-          grep -qE "^90 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 90 tests CORRIDOS."; exit 1; }
+          grep -qE "^92 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 92 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
@@ -2629,3 +2653,18 @@ jobs:
           #   env -i, contra una base de sesión clonada de jax_memory_test con
           #   las migraciones de esta rama aplicadas: 90 passed. Si el runner da
           #   otro número, manda el runner.
+          # 90 -> 92 el 2026-09-18 (Task 7b, historial-y-arreglos-de-pipeline):
+          #   +2 en las_manos/_motor_usage_writer_test.py --
+          #   test_record_motor_usage_escribe_pipeline_id y
+          #   test_record_motor_usage_sin_pipeline_id_escribe_null.
+          #   record_motor_usage() pasa a insertar SIEMPRE la columna
+          #   axioma_usage.pipeline_id (nueva, migrations.py de jax-platform) --
+          #   sin ella, ESTE job entero rompería contra cualquier schema viejo,
+          #   no solo estos dos tests nuevos. DEPENDENCIA DE ORDEN DE DESPLIEGUE
+          #   (mismo patrón que Ruling 3 del ledger de esta ronda, jax-platform#PENDIENTE):
+          #   este job clona jax-platform@master real (no un branch), así que
+          #   CI se queda rojo hasta que la migración de pipeline_id (Task 7b,
+          #   jax-platform) esté en master ANTES de mergear esta rama. Medido
+          #   en local (3.14), contra jax_memory_test con la migración de esta
+          #   ronda ya aplicada (por jax-platform/backend/db/migrations.py):
+          #   92 passed. Si el runner da otro número, manda el runner.

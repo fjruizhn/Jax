@@ -81,10 +81,21 @@ async def record_motor_usage(
     *,
     job_id: str | None = None,
     status: str = "unknown",
+    pipeline_id: str | None = None,
 ) -> None:
     """Best-effort: nunca debe romper el flujo del worker (mismo criterio
     que record_usage en jax-platform), pero best-effort no es lo mismo que
     silencioso.
+
+    pipeline_id (Task 7b, 2026-09-18): el Pipeline.pipeline_id de Jacobs que
+    dispara este job, si vino de uno -- viaja desde
+    MotorDispatchRequest.pipeline_id (routes.py) via worker.py:run(). None
+    es válido y correcto cuando el caller no es un pipeline (mismo criterio
+    que user_id/tenant_id en None: no se inventa, se declara ausente).
+    Sin esta columna, api/pipelines.py::list_pipelines() no tiene con qué
+    sumar el costo real de un pipeline -- verificado que ES el camino que
+    ejecuta la mayoría de los pasos reales (kimi/jax_local, Ruling 7 de
+    Task 1 en el ledger de esta ronda).
 
     T1.c (2026-08-22, auditoria usage_writer): antes, sin user_id/tenant_id
     esto retornaba SIN loguear nada -- un dispatch sin identidad (pruebas
@@ -129,12 +140,12 @@ async def record_motor_usage(
                 async with conn.cursor() as cur:
                     await cur.execute(
                         "INSERT INTO axioma_usage "
-                        "(tenant_id, user_id, facet, model, tokens_in, tokens_out, cost_usd, request_type, status, job_id) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, 'motor', %s, %s)",
+                        "(tenant_id, user_id, facet, model, tokens_in, tokens_out, cost_usd, request_type, status, job_id, pipeline_id) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, 'motor', %s, %s, %s)",
                         (
                             int(tenant_id) if tenant_id is not None else None,
                             int(user_id) if user_id is not None else None,
-                            facet, model, tokens_in, tokens_out, cost, status, job_id,
+                            facet, model, tokens_in, tokens_out, cost, status, job_id, pipeline_id,
                         ),
                     )
             return
@@ -168,6 +179,7 @@ async def record_motor_usage(
         "origen": "motor_registry",
         "status": status,
         "job_id": job_id,
+        "pipeline_id": pipeline_id,
     })
     if spool_id:
         # INFO, no ERROR: encolada NO es pérdida. Un ERROR acá entrena a

@@ -62,6 +62,7 @@ class JobStore:
         trace_id: str,
         prompt: str,
         recursion_depth: int,
+        pipeline_id: str | None = None,
     ) -> str:
         job_id = str(uuid.uuid4())
         event: dict[str, Any] = {
@@ -78,6 +79,14 @@ class JobStore:
             "finished_at": None,
             "error": None,
             "result_summary": None,
+            # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): puesto
+            # acá y no via update() posterior porque ya se conoce al
+            # despachar (a diferencia de `model`, que worker.py resuelve
+            # recién al validar el motor) -- update() re-esparce el estado
+            # ENTERO (`{**self._index[job_id], **kwargs}`), así que este
+            # valor sobrevive a cada escritura posterior sin que nadie tenga
+            # que repetirlo.
+            "pipeline_id": pipeline_id,
         }
         self._append(event)
         return job_id

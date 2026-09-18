@@ -213,11 +213,12 @@ class DispatchStepUsageTest(unittest.IsolatedAsyncioTestCase):
 
         captured = {}
 
-        async def fake_record_direct_usage(user_id, tenant_id, facet, provider_id, model, tokens_in, tokens_out):
+        async def fake_record_direct_usage(user_id, tenant_id, facet, provider_id, model, tokens_in, tokens_out, pipeline_id=None):
             captured.update(
                 user_id=user_id, tenant_id=tenant_id, facet=facet,
                 provider_id=provider_id, model=model,
                 tokens_in=tokens_in, tokens_out=tokens_out,
+                pipeline_id=pipeline_id,
             )
 
         # PR-K ronda 4: el contrato se inyecta -- no depender de que la semilla
@@ -237,6 +238,9 @@ class DispatchStepUsageTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["model"], "deepseek-v4-flash")
         self.assertEqual(captured["tokens_in"], 10)
         self.assertEqual(captured["tokens_out"], 5)
+        # Task 7b (2026-09-18): sin esto, api/pipelines.py::list_pipelines()
+        # (jax-platform) no tiene con qué sumar el costo real de este pipeline.
+        self.assertEqual(captured["pipeline_id"], "p1")
 
     async def test_dispatch_step_no_registra_usage_para_hyde_subprocess(self):
         """Hyde (subprocess) esta deliberadamente excluido -- sin señal de

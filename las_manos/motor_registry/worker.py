@@ -451,6 +451,7 @@ async def run(
     tenant_id: str | None = None,
     caller: str | None = None,
     timeout_seconds: int | None = None,
+    pipeline_id: str | None = None,
 ) -> None:
     """Corre un job del Motor Registry (ver _correr_trabajo).
 
@@ -467,6 +468,7 @@ async def run(
             job_id=job_id, motor=motor, capability=capability, prompt=prompt,
             context=context, store=store, catalog=catalog, kill_switch_path=kill_switch_path,
             user_id=user_id, tenant_id=tenant_id, caller=caller, timeout_seconds=timeout_seconds,
+            pipeline_id=pipeline_id,
         )
 
 
@@ -484,6 +486,7 @@ async def _correr_trabajo(
     tenant_id: str | None = None,
     caller: str | None = None,
     timeout_seconds: int | None = None,
+    pipeline_id: str | None = None,
 ) -> None:
     store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
 
@@ -681,7 +684,7 @@ async def _correr_trabajo(
             await record_motor_usage(
                 user_id, tenant_id, motor, provider_id, motor_entry.model,
                 cumulative_prompt_tokens, cumulative_completion_tokens,
-                job_id=job_id, status=status,
+                job_id=job_id, status=status, pipeline_id=pipeline_id,
             )
         elif provider_id:
             logger.warning(

@@ -637,6 +637,12 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
         # de worker.py lo consume como SU presupuesto de tiempo, no uno
         # nuevo. Ningun cambio para el polling mismo, que sigue intacto.
         "timeout_seconds": timeout,
+        # Task 7b (2026-09-18, historial-y-arreglos-de-pipeline): sin esto,
+        # record_motor_usage() (LAS MANOS) nunca sabe de qué pipeline es este
+        # job -- kimi/jax_local son las facetas de la MAYORIA de los pasos
+        # reales (Ruling 7, Task 1), asi que sin este campo el historial
+        # seguiria sin poder sumar el costo real para casi ningun pipeline.
+        "pipeline_id": pipeline.pipeline_id,
     }
     resp = await obtener_cliente_http().post(f"{LAS_MANOS_BASE}/motor/dispatch", json=payload, timeout=30,
                                            headers=encabezado_propio(IDENTIDAD_JACOBS))
@@ -1046,6 +1052,7 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
             pipeline.user_id, pipeline.tenant_id, step.facet,
             f.provider_id, f.model,
             result.get("tokens_in", 0), result.get("tokens_out", 0),
+            pipeline_id=pipeline.pipeline_id,
         )
         return result
     if f.transport == "subprocess":

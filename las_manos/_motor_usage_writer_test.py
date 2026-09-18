@@ -164,6 +164,31 @@ class MotorUsageWriterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(filas[0][5], "failed")
         self.assertEqual(filas[0][6], self.job_id)
 
+    async def test_record_motor_usage_escribe_pipeline_id(self):
+        """Task 7b (2026-09-18): kimi/jax_local son las facetas de la
+        mayoría de los pasos reales (Ruling 7, Task 1) -- sin esto, el
+        historial no podría sumar el costo real de casi ningún pipeline."""
+        await self.modelo.sembrar()
+        await usage_writer.record_motor_usage(
+            "1", "77", "kimi", "moonshot", self.modelo.model_id, 10, 5,
+            job_id=self.job_id, status="completed", pipeline_id="pl-motor-1",
+        )
+        filas = await self.modelo.filas_de_uso("pipeline_id")
+        self.assertEqual(len(filas), 1, filas)
+        self.assertEqual(filas[0][0], "pl-motor-1")
+
+    async def test_record_motor_usage_sin_pipeline_id_escribe_null(self):
+        """Un caller directo contra /motor/dispatch (sin Jacobs de por
+        medio) no manda pipeline_id -- None es correcto, no un hueco."""
+        await self.modelo.sembrar()
+        await usage_writer.record_motor_usage(
+            "1", "77", "kimi", "moonshot", self.modelo.model_id, 10, 5,
+            job_id=self.job_id, status="completed",
+        )
+        filas = await self.modelo.filas_de_uso("pipeline_id")
+        self.assertEqual(len(filas), 1, filas)
+        self.assertIsNone(filas[0][0])
+
     async def test_record_motor_usage_sin_identidad_escribe_con_null_y_loguea(self):
         """T1.c: antes esto retornaba en silencio (fail-open puro) -- un
         dispatch sin identidad sigue gastando dinero real. Ahora escribe con

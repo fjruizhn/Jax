@@ -129,6 +129,29 @@ class DirectUsageWriterTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(float(cost_usd), expected, places=9)
         self.assertEqual(request_type, "pipeline")
 
+    async def test_record_direct_usage_escribe_pipeline_id(self):
+        """Task 7b (2026-09-18): sin esto, api/pipelines.py::list_pipelines()
+        (jax-platform) no tiene con qué sumar el costo real de un pipeline."""
+        await self.modelo.sembrar()
+        await usage_writer.record_direct_usage(
+            "1", "77", "jekyll", "deepseek", self.modelo.model_id, 10, 5,
+            pipeline_id="pl-directo-1",
+        )
+        filas = await self.modelo.filas_de_uso("pipeline_id")
+        self.assertEqual(len(filas), 1, filas)
+        self.assertEqual(filas[0][0], "pl-directo-1")
+
+    async def test_record_direct_usage_sin_pipeline_id_escribe_null(self):
+        """La sonda del pre-vuelo (jacobs/sonda.py) no manda pipeline_id --
+        None es correcto, no un hueco."""
+        await self.modelo.sembrar()
+        await usage_writer.record_direct_usage(
+            "1", "77", "jekyll", "deepseek", self.modelo.model_id, 10, 5,
+        )
+        filas = await self.modelo.filas_de_uso("pipeline_id")
+        self.assertEqual(len(filas), 1, filas)
+        self.assertIsNone(filas[0][0])
+
     async def test_record_direct_usage_sin_identidad_escribe_con_null_y_loguea(self):
         """T1.c (2026-08-22, auditoria usage_writer): mismo bug que
         motor_registry/usage_writer.py -- antes retornaba en silencio."""

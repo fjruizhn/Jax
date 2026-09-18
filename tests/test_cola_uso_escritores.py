@@ -34,14 +34,15 @@ RAIZ = Path(__file__).resolve().parent.parent
 CANONICO_EN_JAX = RAIZ / "jax" / "core" / "cola_uso.py"
 ESPEJO_EN_LAS_MANOS = RAIZ / "las_manos" / "cola_uso.py"
 
-#: Los TRECE del contrato (Task 8, 2026-09-15: `status` y `job_id` pasaron a
-#: viajar en el archivo). Se escriben aca a mano, no se importan de `cola_uso`:
-#: importarlos haria que el test dijera "el archivo tiene los campos que el
-#: modulo dice tener" -- verde aunque el contrato cambiara solo de un lado.
+#: Los CATORCE del contrato (Task 8, 2026-09-15: `status` y `job_id` pasaron a
+#: viajar en el archivo; Task 7b, 2026-09-18: se suma `pipeline_id`). Se
+#: escriben aca a mano, no se importan de `cola_uso`: importarlos haria que el
+#: test dijera "el archivo tiene los campos que el modulo dice tener" -- verde
+#: aunque el contrato cambiara solo de un lado.
 CAMPOS_DEL_CONTRATO = {
     "spool_id", "created_at", "tenant_id", "user_id", "facet", "model",
     "tokens_in", "tokens_out", "cost_usd", "request_type", "origen",
-    "status", "job_id",
+    "status", "job_id", "pipeline_id",
 }
 
 # La API que SOLO puede usar la plataforma: es la duena de `axioma_usage` y la
@@ -281,6 +282,7 @@ def test_jacobs_encola_la_fila_cuando_la_base_falla(respaldo, monkeypatch):
     asyncio.run(usage_writer.record_direct_usage(
         user_id="7", tenant_id="77", facet="jekyll", provider_id="deepseek",
         model="deepseek-v4-flash", tokens_in=123, tokens_out=45,
+        pipeline_id="pl-1",
     ))
 
     filas = _filas_del_respaldo(respaldo)
@@ -296,8 +298,28 @@ def test_jacobs_encola_la_fila_cuando_la_base_falla(respaldo, monkeypatch):
     # drena, del lado de la plataforma.
     assert fila["cost_usd"] is None
     # jacobs no invoca trabajos del motor: los dos campos viajan explicitos en
-    # null, no ausentes -- el que drena exige los TRECE.
+    # null, no ausentes -- el que drena exige los CATORCE.
     assert fila["status"] is None and fila["job_id"] is None
+    # Task 7b: sin esto, api/pipelines.py::list_pipelines() (jax-platform) no
+    # tiene con qué sumar el costo real de este pipeline.
+    assert fila["pipeline_id"] == "pl-1"
+
+
+def test_jacobs_encola_pipeline_id_null_cuando_el_uso_no_viene_de_un_pipeline(respaldo, monkeypatch):
+    """La sonda del pre-vuelo (jacobs/sonda.py) llama a record_direct_usage
+    sin pipeline_id -- None es correcto ahí, no un hueco (ver el docstring
+    del módulo)."""
+    from jacobs import usage_writer
+
+    _usar_pool(monkeypatch, _pool_que_explota())
+    asyncio.run(usage_writer.record_direct_usage(
+        user_id="7", tenant_id="77", facet="jekyll", provider_id="deepseek",
+        model="deepseek-v4-flash", tokens_in=1, tokens_out=1,
+    ))
+
+    filas = _filas_del_respaldo(respaldo)
+    assert len(filas) == 1, filas
+    assert filas[0]["pipeline_id"] is None
 
 
 def test_jacobs_camino_feliz_no_deja_nada_en_el_respaldo(respaldo, monkeypatch):
@@ -358,6 +380,7 @@ def test_motor_encola_tras_agotar_los_reintentos(respaldo, monkeypatch):
     asyncio.run(motor.record_motor_usage(
         user_id="7", tenant_id="77", facet="ada", provider_id="openai",
         model="gpt-x", tokens_in=10, tokens_out=20, job_id="j1", status="failed",
+        pipeline_id="pl-2",
     ))
 
     assert pool.pedidos == motor._WRITE_MAX_ATTEMPTS, pool.pedidos
@@ -370,6 +393,31 @@ def test_motor_encola_tras_agotar_los_reintentos(respaldo, monkeypatch):
     assert fila["facet"] == "ada" and fila["model"] == "gpt-x"
     assert fila["tokens_in"] == 10 and fila["tokens_out"] == 20
     assert fila["status"] == "failed" and fila["job_id"] == "j1"
+    # Task 7b: kimi/jax_local son las facetas de la mayoría de los pasos
+    # reales (Ruling 7, Task 1) -- sin esto, el historial no podría sumar el
+    # costo real de casi ningún pipeline.
+    assert fila["pipeline_id"] == "pl-2"
+
+
+def test_motor_encola_pipeline_id_null_cuando_el_caller_no_es_un_pipeline(respaldo, monkeypatch):
+    """Un caller directo contra /motor/dispatch (sin Jacobs de por medio) no
+    manda pipeline_id -- None es correcto, no un hueco."""
+    from motor_registry import usage_writer as motor
+
+    _usar_pool(monkeypatch, _pool_que_explota())
+
+    async def _sin_espera(_s):
+        return None
+
+    monkeypatch.setattr(motor.asyncio, "sleep", _sin_espera)
+    asyncio.run(motor.record_motor_usage(
+        user_id="7", tenant_id="77", facet="ada", provider_id="openai",
+        model="gpt-x", tokens_in=1, tokens_out=1, job_id="j9", status="failed",
+    ))
+
+    filas = _filas_del_respaldo(respaldo)
+    assert len(filas) == 1, filas
+    assert filas[0]["pipeline_id"] is None
 
 
 def test_motor_camino_feliz_no_deja_nada_en_el_respaldo(respaldo, monkeypatch):
