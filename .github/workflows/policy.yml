@@ -53,6 +53,17 @@ jobs:
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
 
+  ci-usa-la-mariadb-de-produccion:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Sin dependencias: lee los YAML de este mismo repo. Sale != 0 si algun
+      # workflow levanta una MariaDB distinta a la de produccion.
+      - run: python3 policy/tests/test_ci_usa_la_mariadb_de_produccion.py
+
   no-naked-claude-subprocess:
     runs-on: ubuntu-latest
     steps:
@@ -131,7 +142,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mariadb:
-        image: mariadb:11.8
+        image: mariadb:12.3.3
         env:
           MARIADB_ROOT_PASSWORD: ci
           MARIADB_DATABASE: jax_memory_test
@@ -217,7 +228,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mariadb:
-        image: mariadb:11.8
+        image: mariadb:12.3.3
         env:
           MARIADB_ROOT_PASSWORD: ci
           MARIADB_DATABASE: jax_memory_test
@@ -401,7 +412,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mariadb:
-        image: mariadb:11.8
+        image: mariadb:12.3.3
         env:
           MARIADB_ROOT_PASSWORD: ci
           MARIADB_DATABASE: jax_memory_test
@@ -2274,7 +2285,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       mariadb:
-        image: mariadb:11.8
+        image: mariadb:12.3.3
         env:
           MARIADB_ROOT_PASSWORD: ci
           MARIADB_DATABASE: jax_memory_test
