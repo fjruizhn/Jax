@@ -562,6 +562,10 @@ class PlanBuilder:
             # que hacia el dict.
             default_timeout, _ = _techo_segundos(caps, capability)
             explicit_timeout = spec.get("timeout_seconds")
+            deps_explicitas = spec.get("depends_on")
+            depends_on = deps_explicitas if deps_explicitas is not None else (
+                [i - 1] if i > 0 else []
+            )
             steps.append(Step(
                 step_id=str(uuid.uuid4()),
                 pipeline_id=pipeline_id,
@@ -570,7 +574,7 @@ class PlanBuilder:
                 motor=spec.get("motor"),
                 capability=capability,
                 input=input_data,
-                depends_on=spec.get("depends_on", []),
+                depends_on=depends_on,
                 timeout_seconds=explicit_timeout if explicit_timeout is not None else default_timeout,
                 skip_on_fail=spec.get("skip_on_fail", False),
             ))
@@ -899,11 +903,16 @@ class PlanBuilder:
             # jax_local sin rastro.
             facet = str(item.get("facet", ""))[:50]
             # depends_on: filtrar valores no-enteros y fuera de rango (0 <= dep < idx)
-            raw_deps = item.get("depends_on", [])
-            depends_on = [
-                int(x) for x in raw_deps
-                if str(x).lstrip("-").isdigit() and 0 <= int(x) < idx
-            ]
+            # Ausencia != vacio declarado. Sin dependencias declaradas, el paso
+            # depende del anterior: correr todo junto fue el defecto de b8f80733.
+            raw_deps = item.get("depends_on")
+            if raw_deps is None:
+                depends_on = [idx - 1] if idx > 0 else []
+            else:
+                depends_on = [
+                    int(x) for x in raw_deps
+                    if str(x).lstrip("-").isdigit() and 0 <= int(x) < idx
+                ]
             # capability CERRADA al vocabulario conocido (las facetas, en cambio, se
             # rechazan en build()). Fuera del conjunto → degradar a 'reason'.
             # Bloque 3 (2026-08-21): VALID_CAPABILITIES (frozenset estático)
