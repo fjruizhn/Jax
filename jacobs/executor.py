@@ -608,6 +608,14 @@ async def _invoke_motor(step: Step, pipeline: Pipeline, timeout: int, prompt: st
 
             status = job.get("status", "")
             if status == "completed":
+                # Ronda de arreglo 1 de Task 1 (2026-09-18): con
+                # MotorJobView.model expuesto (las_manos/motor_registry/
+                # models.py + worker.py, esta misma ronda) el job trae el
+                # model_id REAL que despachó -- ya no None por default.
+                # kimi/jax_local son las facetas de la mayoría de los pasos
+                # reales; sin esto, casi todo el historial decía "Modelo
+                # desconocido".
+                step.modelo_real = job.get("model")
                 return {
                     "success":        True,
                     "facet":          step.facet,
@@ -947,16 +955,17 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
         # Task 1 (2026-09-18, historial-y-arreglos-de-pipeline): este camino
-        # NO pasa por resolve_facet(), así que step.modelo_real queda en None
-        # acá. Verificado contra el código de LAS MANOS: MotorJobView
-        # (las_manos/motor_registry/models.py) no trae ningún campo con el
-        # model_id real que usó el motor -- worker.py SÍ lo conoce
-        # (motor_entry.model, worker.py:672/725) pero nunca lo escribe en el
-        # job (job_store.py filtra cualquier campo fuera de
-        # MotorJobView.model_fields al leer). Escribir job.get("motor") acá
-        # sería inventar el dato: "motor" es el NOMBRE del motor (kimi/
-        # jax_local), lo mismo que step.facet ya dice, no el model_id real.
-        # Pendiente de una ronda futura que agregue el campo en LAS MANOS.
+        # NO pasa por resolve_facet(). Hasta la ronda de arreglo 1 (mismo
+        # día), MotorJobView no traía el model_id real -- worker.py SÍ lo
+        # conocía (motor_entry.model, worker.py:672/725) pero nunca lo
+        # exponía en el job (job_store.py filtraba cualquier campo fuera de
+        # MotorJobView.model_fields al leer), así que escribir
+        # job.get("motor") acá hubiera guardado el NOMBRE del motor
+        # (kimi/jax_local, lo mismo que step.facet ya dice) disfrazado de
+        # model_id: el mismo defecto que esta tarea cierra. Con
+        # MotorJobView.model expuesto (las_manos/motor_registry/models.py +
+        # worker.py), _invoke_motor ahora escribe step.modelo_real de verdad
+        # al completar (ver abajo, status == "completed").
         return await _invoke_motor(step, pipeline, timeout, prompt)
 
     f = await resolve_facet(step.facet)

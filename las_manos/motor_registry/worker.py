@@ -508,6 +508,16 @@ async def _correr_trabajo(
         )
         return
 
+    # Ronda de arreglo 1 de Task 1 (2026-09-18, historial-y-arreglos-de-
+    # pipeline): expone el model_id real apenas se conoce -- MotorJobView.model
+    # (motor_registry/models.py). Se escribe temprano y no solo al completar
+    # porque cada store.update() posterior reesparce el estado ENTERO
+    # (JobStore.update: `{**self._index[job_id], **kwargs}`), así que un
+    # solo write acá alcanza para que sobreviva hasta el evento final,
+    # completed o failed -- se sabe qué modelo se IBA a usar aunque el turno
+    # con la API falle después.
+    store.update(job_id, model=motor_entry.model)
+
     # Validar transporte soportado (R4 -- generalizado, ya no solo Kimi)
     call_fn = _TRANSPORT_DISPATCH.get(motor_entry.transport)
     if call_fn is None:

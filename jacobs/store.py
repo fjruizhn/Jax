@@ -1084,6 +1084,16 @@ async def init_tables() -> None:
                 # ALTER a mano: el comentario de `depends_on` arriba documenta
                 # por qué (una columna fuera de esta lista nunca llega a una
                 # base nueva, jax_memory_test incluida).
+                #
+                # VARCHAR(100): medido contra producción por el coordinador
+                # de esta ronda (2026-09-18, ronda de arreglo 1) -- el
+                # model_id más largo del catálogo real (`model.model_id`)
+                # son 45 caracteres sobre 242 filas, y esa columna canónica
+                # es ella misma `varchar(100)`. El ancho coincide con la
+                # fuente de verdad y no es una estimación de esta tarea; no
+                # lo volví a medir yo mismo contra `jax_memory` (fuera de
+                # los permisos de este worktree, ver "NUNCA corras tests
+                # contra la base de producción").
                 ("modelo_real", "ALTER TABLE jacobs_steps ADD COLUMN modelo_real VARCHAR(100) NULL"),
             ]:
                 await cur.execute(
@@ -1506,6 +1516,15 @@ async def pipeline_tomar_epoca(
 
 
 _SQL_BLOQUEAR_PIPELINE = "SELECT run_epoch, status FROM jacobs_pipelines WHERE pipeline_id=%s FOR UPDATE"
+# NO resetea modelo_real (Task 1, 2026-09-18): un step que `continue` vuelve
+# a poner en 'pending' conserva el modelo_real de SU corrida anterior hasta
+# que el próximo despacho lo pisa (executor.py:951/`_invoke_motor` al
+# completar). Ventana conocida, no arreglada a propósito -- no la pidió ni
+# el brief ni el coordinador, y el dato nunca queda mal disfrazado de
+# definitivo: en cuanto el step vuelve a correr, se sobreescribe con el
+# modelo real de la corrida nueva. Si algún consumidor llega a leer
+# modelo_real de un step 'pending'/'running' (no 'completed') y necesita que
+# sea exacto en esa ventana, hace falta sumar `modelo_real=NULL` acá.
 _SQL_PASO_A_CORRER = (
     "UPDATE jacobs_steps SET facet=%s, motor=%s, status='pending', output_ref=NULL, "
     "started_at=NULL, finished_at=NULL, error=NULL WHERE step_id=%s AND pipeline_id=%s"

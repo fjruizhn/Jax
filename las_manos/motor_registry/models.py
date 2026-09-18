@@ -84,6 +84,16 @@ class MotorJobView(BaseModel):
     # Salida completa (2026-09-12): antes no se guardaba en ningún lado y los
     # pasos siguientes de Jacobs recibían solo result_summary.
     result_path: str | None = None
+    # Ronda de arreglo 1 de Task 1 (2026-09-18, historial-y-arreglos-de-
+    # pipeline): el model_id REAL que despachó este job (motor_entry.model
+    # en worker.py, el mismo que va en el payload a la API -- worker.py:171
+    # y worker.py:725). 'motor' de arriba es el NOMBRE del motor
+    # (kimi/jax_local), no el modelo; sin este campo, Jacobs no tenía forma
+    # de saber qué modelo corrió un paso de motor sin inventarlo. None
+    # hasta que worker.py resuelve motor_entry con éxito -- un job que
+    # falla ANTES de eso (motor inexistente, transporte no soportado)
+    # nunca llegó a saber qué modelo iba a usar.
+    model: str | None = None
 
 
 class FacetAuthorizeRequest(BaseModel):

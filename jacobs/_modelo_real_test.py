@@ -196,5 +196,106 @@ class ModeloRealPersistenceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reloaded[0].modelo_real, "glm-4.6")
 
 
+class InvokeMotorModeloRealTest(unittest.IsolatedAsyncioTestCase):
+    """Ronda de arreglo 1 (2026-09-18): el hueco declarado en la primera
+    entrega de Task 1 -- kimi/jax_local (_MOTOR_FACETS) son las facetas de
+    la MAYORÍA de los pasos reales, y ese camino no escribía modelo_real
+    porque MotorJobView no traía el model_id real.
+
+    Este test demuestra el viaje COMPLETO del lado de Jacobs: LAS MANOS ya
+    expone 'model' en el job (las_manos/motor_registry/models.py +
+    worker.py, mismo commit de esta ronda -- ver
+    las_manos/_motor_job_model_test.py para el lado del worker/JobStore) ->
+    _invoke_motor lo lee y lo guarda en step.modelo_real -> sobrevive
+    step_upsert_si_epoca -> steps_by_pipeline lo relee de jacobs_steps.
+
+    El JSON que simula la respuesta de LAS MANOS se arma con MotorJobView
+    de verdad (import cruzado a motor_registry, mismo patrón que
+    jacobs/executor.py y jacobs/_step_motor_test.py ya usan) y no a mano:
+    así el test no puede divergir en silencio de la forma real que
+    MotorJobView.model_dump() produce."""
+
+    async def asyncSetUp(self):
+        await store.init_tables()
+        self.pids: list[str] = []
+
+    async def asyncTearDown(self):
+        conn = await store.conexion_dedicada()
+        try:
+            async with conn.cursor() as cur:
+                for pid in self.pids:
+                    await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                marcas = ",".join(["%s"] * len(self.pids)) or "NULL"
+                await cur.execute(
+                    f"SELECT COUNT(*) FROM jacobs_steps WHERE pipeline_id IN ({marcas})",
+                    tuple(self.pids),
+                )
+                restantes = (await cur.fetchone())[0]
+        finally:
+            conn.close()
+        await store.cerrar_pool()
+        assert restantes == 0, f"el test dejó {restantes} pasos en jacobs_steps"
+
+    def _pid(self) -> str:
+        pid = str(uuid.uuid4())
+        self.pids.append(pid)
+        return pid
+
+    async def test_modelo_real_del_camino_de_motor_viaja_completo(self):
+        from motor_registry.models import JobStatus, MotorJobView  # las_manos, mismo proceso
+
+        pid = self._pid()
+        step = Step(
+            step_id=str(uuid.uuid4()), pipeline_id=pid, step_index=0,
+            facet="kimi", capability="implementation", input={"prompt": "x"},
+            status=StepStatus.pending, trace_id=str(uuid.uuid4()),
+        )
+        ahora = time.time()
+        pipeline = Pipeline(
+            pipeline_id=pid, name="t-motor-modelo", invoked_by="plataforma",
+            mode="autonomous", status=PipelineStatus.running, plan=[step],
+            created_at=ahora, updated_at=ahora, run_epoch=0,
+        )
+        await store.pipeline_create(pipeline)
+        await store.step_upsert(step)
+
+        class _DispatchResp:
+            status_code = 200
+            def json(self): return {"job_id": "j1", "status": "pending"}
+            def raise_for_status(self): pass
+
+        job_view = MotorJobView(
+            job_id="j1", status=JobStatus.COMPLETED, motor="kimi",
+            capability="implementation", caller="jacobs", trace_id=step.trace_id,
+            created_at=ahora, result_summary="ok", model="kimi-k2.7-code",
+        )
+
+        class _JobResp:
+            status_code = 200
+            def json(self): return job_view.model_dump(mode="json")
+            def raise_for_status(self): pass
+
+        async def fake_post(self, url, json=None, **kw):
+            return _DispatchResp()
+
+        async def fake_get(self, url, **kw):
+            return _JobResp()
+
+        with patch("httpx.AsyncClient.post", fake_post), \
+             patch("httpx.AsyncClient.get", fake_get):
+            await executor._invoke_motor(step, pipeline, timeout=5)
+
+        self.assertEqual(step.modelo_real, "kimi-k2.7-code")
+
+        step.status = StepStatus.completed
+        escrito = await store.step_upsert_si_epoca(step, 0)
+        self.assertTrue(escrito)
+
+        reloaded = await store.steps_by_pipeline(pid)
+        self.assertEqual(len(reloaded), 1)
+        self.assertEqual(reloaded[0].modelo_real, "kimi-k2.7-code")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
