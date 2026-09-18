@@ -38,7 +38,7 @@ from jacobs.policy import MAX_PARALLEL_PIPELINES, ContencionAlReservar, CupoAgot
 # ---------------------------------------------------------------------------
 
 def test_crear_ocupa_cupo_con_un_insert_condicionado():
-    assert "COUNT(*)" in cupo.SQL_RESERVAR
+    assert not "COUNT(*)" in cupo.SQL_RESERVAR
     assert "< %s" in cupo.SQL_RESERVAR
 
 
