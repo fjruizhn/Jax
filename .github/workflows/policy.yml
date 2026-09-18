@@ -904,6 +904,7 @@ jobs:
           tests/test_health_de_las_manos_puede_fallar.py
           tests/test_degradaciones_declaradas.py
           las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py
+          las_manos/_tool_authority_test.py
           tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py
           tests/test_store_indice_duenio.py
           tests/test_cola_uso_escritores.py
@@ -1030,6 +1031,7 @@ jobs:
             tests/test_health_de_las_manos_puede_fallar.py \
             tests/test_degradaciones_declaradas.py \
             las_manos/_worker_max_tokens_test.py las_manos/_worker_tool_loop_test.py \
+            las_manos/_tool_authority_test.py \
             tests/test_redaccion.py tests/test_gemini_key_en_cabecera.py \
             tests/test_store_indice_duenio.py \
             tests/test_cola_uso_escritores.py \
@@ -2291,8 +2293,24 @@ jobs:
           #   mutacion en dos sitios). Los otros 25 archivos del commit no suman tests:
           #   cambian como resuelven el nombre de la base. Medido local: 2070 passed,
           #   1 xfailed, 16 subtests; el runner cuenta uno menos (el xfail sale skipped).
-          grep -qE "^2069 passed, 1 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2069 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
+          # 2069 -> 2095 el 2026-09-18 (Task 5, historial-y-arreglos-de-pipeline --
+          #   el jail con su peor caso, a CI): +26, las_manos/_tool_authority_test.py.
+          #   Existía desde GAP2 Fase2 (2026-08-19) con cobertura real del peor caso
+          #   del jail (`../fuera.txt`, `sub/../.env`, symlink que escapa el
+          #   workspace, symlink a un forbidden_path, variantes de mayúsculas,
+          #   `.env`/`secrets/` sin barra final) pero NUNCA estuvo wireado a ningún
+          #   job -- un freno sin prueba automática no es freno (Principio VII).
+          #   Importa más ahora que `ada`/`kimi` (no solo `jax_local`) pueden pedir
+          #   lecturas de verdad (ver _seed_ada_kimi_has_tool_access, jax-platform).
+          #   Corrido suelto primero y confirmado 26/26 verde antes de sumarlo acá.
+          #   No usa DB ni red -- WORKSPACE_ROOT se parchea a un tempdir por test,
+          #   MotorCatalog se arma desde un dict, mismo criterio que
+          #   _worker_tool_loop_test.py, ya en este job. Medido local (env -i, sin
+          #   JAX_DB_HOST): 2096 passed, 1 xfailed, 16 subtests; mismo desfase de
+          #   siempre (el runner cuenta uno menos, el xfail sale skipped). Si el
+          #   runner da otro numero, manda el runner.
+          grep -qE "^2095 passed, 1 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2095 tests CORRIDOS y exactamente 1 skipped."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
@@ -2363,6 +2381,7 @@ jobs:
           PY
       - run: >-
           python -m pytest -v tests/test_plan_validation.py
+          tests/test_lectura_de_pasos_db.py
           tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py
           tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py
           jacobs/_direct_usage_test.py
@@ -2381,6 +2400,7 @@ jobs:
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
         run: |
           python -m pytest -q tests/test_plan_validation.py \
+            tests/test_lectura_de_pasos_db.py \
             tests/test_valid_capabilities_includes_file_tools.py tests/test_plan_capability_hint.py \
             tests/test_catalog_mode_db.py tests/test_contrato_dispatch_db.py \
             jacobs/_direct_usage_test.py \
@@ -2580,8 +2600,8 @@ jobs:
           # PISO MEDIDO TRAS EL MERGE DE MASTER (2026-09-17). HEAD esperaba 86 passed y
           # origin/master 35; la unión de los dos conjuntos no da ninguno de los dos.
           # Medido en hall9000 contra jax_memory_test con la lista unificada: 94 passed.
-          grep -qE "^87 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 87 tests CORRIDOS."; exit 1; }
+          grep -qE "^90 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 90 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
@@ -2589,3 +2609,23 @@ jobs:
           #   hacía cumplir pasa a estar dentro de cada escritura (sus controles
           #   nuevos viven en jacobs/_cupo_io_test.py y tests/test_cupo_en_todos_los_caminos.py,
           #   que suman a OTROS dos jobs). Medido en local contra jax_memory_test.
+          # 87 -> 90 el 2026-09-18 (Task 5, historial-y-arreglos-de-pipeline): +3.
+          #   tests/test_lectura_de_pasos_db.py es nuevo (+2): los dos frenos
+          #   permanentes de la corrección de rumbo -- 'jacobs' en allowed_callers
+          #   de file_read es HISTORIA (GAP2 Fase2, 2026-08-19), no algo que esta
+          #   tarea otorgó, y el de file_write es un DETECTOR DE CAMBIO (hoy la
+          #   escritura NO está cerrada -- Fase4, deuda registrada para que
+          #   Fernando decida -- no una afirmación falsa de que sí lo está).
+          #   tests/test_plan_validation.py suma 1 neto: +1 test nuevo
+          #   (test_rechaza_file_write_real_contra_todos_los_motores_sembrados,
+          #   real contra jax_local/kimi) y el test que dependía del viejo hueco
+          #   (kimi con capability_motor pero sin has_tool_access) se reescribió
+          #   contra una `governance` sintética porque ese caso real ya no existe
+          #   -- mismo nombre, mismo conteo. Requiere jax-platform con
+          #   _seed_ada_kimi_has_tool_access (migrations.py) en master: sube
+          #   ada/kimi a has_tool_access=1, deja thot en 0 (su proveedor rechaza
+          #   function tools con reasoning_effort, medido HTTP 400 con
+          #   gpt-6-astra; además es la faceta árbitro). Medido en local (3.14),
+          #   env -i, contra una base de sesión clonada de jax_memory_test con
+          #   las migraciones de esta rama aplicadas: 90 passed. Si el runner da
+          #   otro número, manda el runner.

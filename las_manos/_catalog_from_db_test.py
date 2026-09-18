@@ -45,23 +45,38 @@ class CatalogFromDbTest(unittest.IsolatedAsyncioTestCase):
         assert "thot" in cap.allowed_motors, cap.allowed_motors
         assert cap.allowed_motors == ["thot", "ada"], cap.allowed_motors
 
-    async def test_from_db_has_tool_access_jax_local_true_kimi_false(self):
+    async def test_from_db_has_tool_access_jax_local_kimi_ada_true_thot_false(self):
         """T1 (diagnóstico pipeline 19ad2c42-cdf): has_tool_access vivía solo
         como `if motor == "jax_local"` en worker.py:488, sin fuente
         consultable. Ahora es columna en `motor` -- este test confirma que
-        MotorCatalog la lee (no la vuelve a hardcodear en otro lado)."""
+        MotorCatalog la lee (no la vuelve a hardcodear en otro lado).
+
+        Task 5 (2026-09-18, historial-y-arreglos-de-pipeline): la
+        contradicción original (kimi con fila capability_motor pero
+        has_tool_access=False) se cerró -- `jacobs` ya tenía 'jacobs' en
+        `capability.allowed_callers` de file_read/file_write desde GAP2
+        Fase2 (2026-08-19); el hueco real era este, no el del caller.
+        Medido con una llamada real por faceta contra su proveedor real:
+        ada (glm-5.3, zhipu) y kimi (kimi-k3, moonshot) responden HTTP 200
+        y llaman a read_file; thot (gpt-6-astra, openai) responde HTTP 400
+        ("Function tools with reasoning_effort are not supported for
+        gpt-6-astra in /v1/chat/completions"). thot se queda en False a
+        propósito, dos razones: su proveedor la rechaza, y es la faceta
+        árbitro (juzga lo que otros steps produjeron, no necesita leer el
+        workspace). Ver migrations.py::_seed_ada_kimi_has_tool_access."""
         catalog = await MotorCatalog.from_db()
         jax_local = catalog.get_motor("jax_local")
         assert jax_local is not None
         assert jax_local.has_tool_access is True, jax_local
         kimi = catalog.get_motor("kimi")
         assert kimi is not None
-        # kimi tiene filas en capability_motor para file_write/file_read
-        # (ronda 7) pero NO recibe el catálogo de tools (worker.py:488,
-        # GAP2 Fase1, posterior) -- esta es exactamente la contradicción
-        # diagnosticada en T2 de la sesión anterior, y has_tool_access=False
-        # es la fuente de verdad que la hace explícita.
-        assert kimi.has_tool_access is False, kimi
+        assert kimi.has_tool_access is True, kimi
+        ada = catalog.get_motor("ada")
+        assert ada is not None
+        assert ada.has_tool_access is True, ada
+        thot = catalog.get_motor("thot")
+        assert thot is not None
+        assert thot.has_tool_access is False, thot
 
 
 if __name__ == "__main__":

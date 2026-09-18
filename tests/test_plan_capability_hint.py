@@ -81,13 +81,20 @@ class CapabilityHintContraDBRealTest(unittest.IsolatedAsyncioTestCase):
     arriba. Corre contra jax_memory real (mismo criterio que
     test_plan_validation.py), sin mutar nada (solo SELECT)."""
 
-    async def test_hint_contra_governance_real_nombra_jax_local_como_unico_motor_con_tools(self):
+    async def test_hint_contra_governance_real_nombra_a_los_tres_motores_con_tools(self):
+        """Task 5 (2026-09-18): jax_local dejó de ser el único -- `ada`/
+        `kimi` subieron a has_tool_access=1 (medido con una llamada real
+        contra su proveedor: los dos llaman a read_file). `thot` se queda
+        afuera (su proveedor rechaza function tools con reasoning_effort, y
+        es la faceta árbitro). `_build_capability_hint` lee `motors` tal
+        cual viene de `motor.has_tool_access` -- no filtra por MOTOR_FACETS
+        -- así que `ada` aparece en la regla aunque hoy no esté en
+        MOTOR_FACETS (jacobs/models.py) y su dispatch HTTP-directo
+        (executor.py) todavía no consulte esta columna."""
         governance = await _store.get_motor_governance()
         hint = _build_capability_hint(governance)
         regla, _, _ = hint.partition("Capabilities reales")
-        assert "motor en: jax_local" in regla
-        assert "kimi" not in regla
-        assert "ada" not in regla
+        assert "motor en: ada, jax_local, kimi" in regla
         assert "thot" not in regla
 
 
