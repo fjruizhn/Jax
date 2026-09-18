@@ -184,7 +184,8 @@ def test_explain_de_las_consultas_de_epoca_usa_la_clave_primaria():
             update = await _explain(store._sql_update_si_epoca(False, False, 1),
                                     ("aborted", time.time(), pid, 0, "running"))
             pasos = await _explain(store._SQL_STEP_SI_EPOCA, (
-                "completed", "jekyll", None, None, 300, None, None, None, paso.step_id, pid, 0))
+                "completed", "jekyll", None, None, 300, None, None, None, None,
+                paso.step_id, pid, 0))
             tomar = await _explain(store._sql_tomar_epoca(False, 1), (time.time(), pid, 0, "running"))
             return lectura, update, pasos, tomar
         finally:

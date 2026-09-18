@@ -946,9 +946,21 @@ async def _dispatch_step(step: Step, pipeline: Pipeline) -> dict:
     # _run_one_step la captura igual que cualquier otra excepcion — el step
     # falla con motivo explicito, nunca un default silencioso.
     if step.facet in _MOTOR_FACETS:
+        # Task 1 (2026-09-18, historial-y-arreglos-de-pipeline): este camino
+        # NO pasa por resolve_facet(), así que step.modelo_real queda en None
+        # acá. Verificado contra el código de LAS MANOS: MotorJobView
+        # (las_manos/motor_registry/models.py) no trae ningún campo con el
+        # model_id real que usó el motor -- worker.py SÍ lo conoce
+        # (motor_entry.model, worker.py:672/725) pero nunca lo escribe en el
+        # job (job_store.py filtra cualquier campo fuera de
+        # MotorJobView.model_fields al leer). Escribir job.get("motor") acá
+        # sería inventar el dato: "motor" es el NOMBRE del motor (kimi/
+        # jax_local), lo mismo que step.facet ya dice, no el model_id real.
+        # Pendiente de una ronda futura que agregue el campo en LAS MANOS.
         return await _invoke_motor(step, pipeline, timeout, prompt)
 
     f = await resolve_facet(step.facet)
+    step.modelo_real = f.model
 
     # Transportes HTTP directos (scope expansion 2026-08-10): la Mesa web ya
     # atribuye costo para estas mismas facetas via jax-platform/backend/api/

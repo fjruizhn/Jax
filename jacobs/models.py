@@ -82,6 +82,10 @@ class Step(BaseModel):
     started_at:       float | None = None
     finished_at:      float | None = None
     error:            str | None = None
+    # El model_id que REALMENTE despacho este paso, escrito en el momento del
+    # despacho. La faceta no alcanza: facet_binding cambia y un historial que
+    # solo guarde la faceta miente con el tiempo.
+    modelo_real:      str | None = None
 
 
 class Pipeline(BaseModel):
