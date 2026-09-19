@@ -590,7 +590,24 @@ class PlanBuilder:
         "decision y UN plan. Cada punto del plan cita el paso que lo "
         "sostiene, con el formato [paso N]. Lo que no tenga un paso que lo "
         "respalde NO entra al plan: decilo como pendiente sin fuente, nunca "
-        "como conclusion."
+        "como conclusion.\n\n"
+        # El árbitro devuelve (spec 2026-09-18-arbitro-devuelve-design §3.1):
+        # ADEMÁS de la prosa de siempre, un bloque con estructura que el
+        # sistema pueda accionar -- ver jacobs/veredicto.py::parsear_veredicto,
+        # que es quien lo lee. Al FINAL de la respuesta, no en el medio: si
+        # el bloque no viene, o no parsea, NO hay devolución (fallo cerrado)
+        # y esta respuesta se trata exactamente como hoy.
+        "Además de esa decisión en prosa, terminá tu respuesta con UN bloque "
+        "de código de lenguaje \"veredicto\" (```veredicto ... ```) con un "
+        "objeto JSON:\n"
+        "- Si no hay nada que devolver: {\"decision\": \"aprobar\"}.\n"
+        "- Si un paso concreto está mal y hay que rehacerlo: {\"decision\": "
+        "\"devolver\", \"paso\": N, \"motivo\": \"qué está mal, en palabras "
+        "que sirvan a quien lo rehace -- nunca 'está mal' a secas, por "
+        "ejemplo 'usaste BIGSERIAL y TIMESTAMPTZ; el destino es MariaDB'\", "
+        "\"cita\": \"[paso N]\"}, con el MISMO N en \"paso\" y en \"cita\". "
+        "Nunca devuelvas al árbitro (vos mismo): paso tiene que ser un "
+        "paso PRODUCTOR, uno de los que recibiste, no el tuyo."
     )
 
     @staticmethod

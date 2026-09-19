@@ -140,10 +140,21 @@ WHERE (SELECT COUNT(*) FROM jacobs_pipelines WHERE status IN ({SQL_ESTADOS_VIVOS
 #: Completa la reserva con lo que sólo se sabe después: el plan, y —para un hijo
 #: de Ada— el padre, la profundidad y la identidad, que salen de la FILA del
 #: token y nunca del cuerpo del pedido (I-3 del frente F).
+#:
+#: costo_max_aceptado_usd (spec 2026-09-18-arbitro-devuelve-design §3.4): ESTE
+#: es el UPDATE real que persiste la fila de creación -- verificado contra el
+#: código: `SQL_RESERVAR` (arriba) es deliberadamente mínimo (solo lo que
+#: decide el cupo) y `store.pipeline_create` es un camino DISTINTO que ni
+#: siquiera usa `/jacobs/pipeline` (routes.py llama reservar_cupo +
+#: completar_reserva, no pipeline_create). Antes de esta ronda, ninguno de
+#: los dos escribía costo_max_aceptado_usd -- el valor se validaba contra el
+#: pre-vuelo en routes.py y se descartaba. Sin esto persistido, una
+#: devolución automática (jacobs/devolucion.py, horas después) no tiene
+#: contra qué presupuesto medirse.
 SQL_COMPLETAR = """
 UPDATE jacobs_pipelines
    SET plan = %s, context_refs = %s, parent_pipeline_id = %s, depth = %s,
-       user_id = %s, tenant_id = %s, updated_at = %s
+       user_id = %s, tenant_id = %s, costo_max_aceptado_usd = %s, updated_at = %s
  WHERE pipeline_id = %s
 """
 
@@ -243,6 +254,7 @@ async def completar_reserva(p: Pipeline, conexion=None) -> None:
         json.dumps([s.model_dump() for s in p.plan], ensure_ascii=False),
         json.dumps(p.context, ensure_ascii=False),
         p.parent_pipeline_id, p.depth, p.user_id, p.tenant_id,
+        p.costo_max_aceptado_usd,
         p.updated_at, p.pipeline_id,
     )
     async with store._conexion_o_pool(conexion) as conn:
