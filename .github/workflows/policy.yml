@@ -477,8 +477,19 @@ jobs:
           # saturada, CupoAgotado sí sale). Medido local contra jax_memory_test_<sufijo>
           # (MariaDB de hall9000, con la gobernanza real ya desplegada): 141 -> 151,
           # 0 fallas nuevas.
-          grep -qE "^151 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 151 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 151 -> 152 (2026-09-18, arbitro-devuelve, ronda de arreglo 1,
+          # hallazgo ALTO): +1 en jacobs/_devolucion_persistencia_test.py --
+          # `CriticaSobreviveALaRecuperacionTest` arma la fila real vía
+          # continuar_transaccion, la releé con steps_by_pipeline (lo que
+          # continuar.analizar()/resume/approve-step usan de verdad, no la
+          # foto de jacobs_pipelines.plan) y confirma que la crítica del
+          # árbitro sigue en el prompt RENDERIZADO (_build_context_input +
+          # _enrich_prompt), no solo en el campo. Visto rojo contra
+          # `_SQL_PASO_A_CORRER` sin `input_ref` (el código de antes de este
+          # arreglo, reproducido a mano): 1 failed. Medido local: 151 -> 152,
+          # 0 fallas nuevas.
+          grep -qE "^152 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 152 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -2499,8 +2510,20 @@ jobs:
           # entorno de siempre, no algo que sumar al piso del runner: el
           # piso de acá se corrige con 2192 (el número YA corregido para el
           # runner, sin el efecto de ninguno de los dos ajustes locales) + 33.
-          grep -qE "^2225 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2225 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          #
+          # 2225 -> 2228 (2026-09-18, arbitro-devuelve, ronda de arreglo 1,
+          # hallazgo CRÍTICO): +3 en jacobs/_devolucion_test.py --
+          # test_devuelve_con_el_pipeline_construido_como_routes_py_lo_construye
+          # (el pipeline que /jacobs/pipeline despacha nunca tiene
+          # pipeline.status='running' en memoria -- solo la FILA lo tiene;
+          # antes de este arreglo la devolución comparaba contra ese status
+          # viejo y abortaba SIEMPRE fuera de /continue), más el control
+          # positivo/negativo (sin running vigente, sin fila vigente: no
+          # devuelve). Los 3 vistos rojos contra el código de antes de esta
+          # ronda de arreglo (reproducido a mano, revertido y restaurado).
+          # Puro, sin U3 ni jax-platform: suma directo, igual que arriba.
+          grep -qE "^2228 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2228 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

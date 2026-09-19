@@ -53,7 +53,7 @@ from redaccion import recortar_redactado
 
 from jacobs import store
 from jacobs.executor import RefIlegible, _load_ref
-from jacobs.models import Pipeline, Step, StepStatus
+from jacobs.models import Pipeline, PipelineStatus, Step, StepStatus
 from jacobs.plan import PlanBuilder
 from jacobs.prevuelo import prevuelo
 from jacobs.prevuelo_reglas import formatear_usd
@@ -176,6 +176,32 @@ async def evaluar_y_devolver(pipeline: Pipeline) -> tuple[str, dict]:
         }, step_id=arbitro.step_id)
         return RESULTADO_TOPE, {"veredicto": veredicto}
 
+    # Ronda de arreglo 1 (revisión 2026-09-18): Principio IX -- `aplicar_cupo=
+    # False` le pide a continuar_transaccion que salte la condición del cupo
+    # PORQUE el pipeline ya está vivo y no está pidiendo un lugar nuevo. Ese
+    # supuesto se EXIGE acá, no se asume: `pipeline.status` (el objeto en
+    # memoria) nunca se actualiza a `running` en el camino de creación --
+    # routes.py arma el Pipeline con el status por defecto (`pending`,
+    # models.py) y despacha ESE objeto; _correr_pipeline solo actualiza la
+    # FILA, nunca `pipeline.status`. El único lugar que lo actualizaba era
+    # continuar.py (vía /continue). Reenviar ese status viejo como
+    # `status_leido` hacía que el SELECT...FOR UPDATE de continuar_transaccion
+    # comparara 'running' (la fila real) contra 'pending' (el objeto) y
+    # abortara SIEMPRE fuera de /continue -- exactamente el final del caso
+    # e570ac1c que esta ronda existe para cambiar. Se lee el status VIGENTE
+    # con la misma consulta que el resto del ejecutor usa para "¿sigo siendo
+    # mi corrida?" (store.pipeline_epoca_y_status) y se EXIGE 'running' antes
+    # de tomar el atajo sin cupo: es lo único que hoy distingue "devolver un
+    # pipeline vivo" de "revivir uno en un status que no ocupa cupo".
+    vigente = await store.pipeline_epoca_y_status(pipeline.pipeline_id)
+    if vigente is None or vigente[1] != PipelineStatus.running:
+        logger.warning(
+            "devolucion: pipeline %s no está running (vigente=%s) -- se completa sin devolver",
+            pipeline.pipeline_id, vigente,
+        )
+        return RESULTADO_COMPLETAR, {}
+    epoca_vigente, status_vigente = vigente
+
     if pipeline.costo_max_aceptado_usd is None:
         # §3.4, fail-closed: sin tope persistido no hay contra qué medir, y
         # nunca se inventa un permiso de gasto nuevo.
@@ -216,10 +242,10 @@ async def evaluar_y_devolver(pipeline: Pipeline) -> tuple[str, dict]:
     evento_payload = {
         "paso": veredicto.paso, "motivo": veredicto.motivo, "cita": veredicto.cita,
         "afectados": afectados, "devolucion_num": pipeline.devoluciones + 1,
-        "run_epoch": pipeline.run_epoch + 1,
+        "run_epoch": epoca_vigente + 1,
     }
     nueva = await store.continuar_transaccion(
-        pipeline.pipeline_id, pipeline.run_epoch, pipeline.status,
+        pipeline.pipeline_id, epoca_vigente, status_vigente,
         [plan[i] for i in afectados], plan, contexto, min(afectados),
         evento_payload=evento_payload, evento_tipo="PIPELINE_DEVUELTO",
         aplicar_cupo=False, incrementar_devoluciones=True,

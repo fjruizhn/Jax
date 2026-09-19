@@ -246,5 +246,81 @@ class CupoDeLaDevolucionTest(_ConLimpieza):
             )
 
 
+# ---------------------------------------------------------------------------
+# ALTO (Ronda de arreglo 1): la crítica tiene que sobrevivir a los TRES
+# caminos de recuperación (/continue, /resume, /approve-step) -- los tres
+# reconstruyen su plan de trabajo desde `jacobs_steps` vía
+# `store.steps_by_pipeline()` ("los pasos VIGENTES, no la foto de creación"),
+# NO desde `jacobs_pipelines.plan`. `_inyectar_critica` (jacobs/devolucion.py)
+# solo tocaba el objeto en memoria; sin que `_SQL_PASO_A_CORRER` persista
+# `input_ref`, un abort después de la devolución perdía la crítica en el
+# primer /continue -- se paga dos veces el mismo error, el defecto que esta
+# ronda entera existe para cerrar.
+#
+# El test NO mira que el campo `input["prompt"]` exista (eso ya lo prueba
+# jacobs/_devolucion_test.py, con mocks, sobre el payload en memoria): arma
+# la fila real vía continuar_transaccion, la relee con steps_by_pipeline
+# (exactamente lo que hacen continuar.analizar/resume/approve-step) y
+# renderiza el prompt con jacobs.executor._build_context_input +
+# _enrich_prompt -- lo que el modelo REALMENTE va a leer.
+# ---------------------------------------------------------------------------
+
+class CriticaSobreviveALaRecuperacionTest(_ConLimpieza):
+    async def test_la_critica_sobrevive_steps_by_pipeline_tras_abortar_y_releer(self):
+        from jacobs import executor
+        from jacobs.devolucion import _inyectar_critica
+        from jacobs.veredicto import VeredictoArbitro
+
+        p = _pipeline(status=PipelineStatus.running, run_epoch=1)
+        self._rastrear(p.pipeline_id)
+        original = Step(
+            step_id="s0", pipeline_id=p.pipeline_id, step_index=0, facet="ada",
+            capability="architecture_review", status=StepStatus.completed,
+            input={"prompt": "prompt original del paso 0"},
+        )
+        p.plan = [original]
+        p.costo_max_aceptado_usd = Decimal("9.9900")
+        await store.pipeline_create(p)
+        await store.step_upsert(original)
+
+        # La devolución: MISMO mecanismo que jacobs/devolucion.py usa --
+        # copiar el Step, inyectar la crítica en su prompt, pasarlo como
+        # `pasos_a_correr` de continuar_transaccion.
+        devuelto = original.model_copy(deep=True)
+        devuelto.status = StepStatus.pending
+        veredicto = VeredictoArbitro(
+            decision="devolver", paso=0,
+            motivo="usaste BIGSERIAL y TIMESTAMPTZ; el destino es MariaDB",
+            cita="[paso 0]",
+        )
+        _inyectar_critica(devuelto, veredicto, 1)
+        nueva = await store.continuar_transaccion(
+            p.pipeline_id, p.run_epoch, p.status, [devuelto], [devuelto], p.context, 0,
+            evento_payload={"paso": 0, "motivo": veredicto.motivo, "cita": veredicto.cita},
+            evento_tipo="PIPELINE_DEVUELTO",
+            aplicar_cupo=False, incrementar_devoluciones=True,
+        )
+        self.assertIsNotNone(nueva)
+
+        # "ADA rehace, timeout, aborted" -- el escenario exacto del hallazgo.
+        await store.pipeline_update_status(p.pipeline_id, PipelineStatus.aborted)
+
+        # "Fernando hace /continue": la reconstrucción real de
+        # continuar.analizar()/resume/approve-step, no el objeto en memoria.
+        releido = await store.steps_by_pipeline(p.pipeline_id)
+        paso_releido = next(s for s in releido if s.step_index == 0)
+        self.assertIn("BIGSERIAL", paso_releido.input.get("prompt", ""))
+        self.assertIn("prompt original del paso 0", paso_releido.input.get("prompt", ""))
+
+        # Y lo que el modelo REALMENTE va a leer, no solo el campo crudo.
+        pipeline_releido = await store.pipeline_get(p.pipeline_id)
+        pipeline_releido.plan = releido
+        ctx_input = executor._build_context_input(paso_releido, pipeline_releido)
+        prompt_renderizado = executor._enrich_prompt(ctx_input)
+        self.assertIn("BIGSERIAL", prompt_renderizado)
+        self.assertIn("MariaDB", prompt_renderizado)
+        self.assertIn("prompt original del paso 0", prompt_renderizado)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

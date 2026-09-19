@@ -85,15 +85,22 @@ def _correr(coro):
     return asyncio.run(coro)
 
 
-def _mocks(*, tope=2, transaccion=2, veredicto_costo=None):
+def _mocks(*, tope=2, transaccion=2, veredicto_costo=None, vigente=(1, PipelineStatus.running)):
     """Mockea todo lo que `evaluar_y_devolver` toca fuera de sí mismo:
-    jacobs.store (event_append/get_tope_devoluciones/continuar_transaccion) y
-    jacobs.prevuelo.prevuelo. Nunca la base real."""
+    jacobs.store (event_append/get_tope_devoluciones/continuar_transaccion/
+    pipeline_epoca_y_status) y jacobs.prevuelo.prevuelo. Nunca la base real.
+
+    `vigente`: lo que devuelve `store.pipeline_epoca_y_status` -- el status
+    REAL de la fila, no el de `pipeline.status` en memoria (que routes.py
+    nunca actualiza a running, ver Ronda de arreglo 1). Default (1, running):
+    coincide con el `run_epoch=1` de `_pipeline()`."""
     pila = ExitStack()
     m = {}
     m["evento"] = pila.enter_context(patch("jacobs.devolucion.store.event_append", AsyncMock()))
     m["tope"] = pila.enter_context(
         patch("jacobs.devolucion.store.get_tope_devoluciones", AsyncMock(return_value=tope)))
+    m["vigente"] = pila.enter_context(
+        patch("jacobs.devolucion.store.pipeline_epoca_y_status", AsyncMock(return_value=vigente)))
     m["tx"] = pila.enter_context(
         patch("jacobs.devolucion.store.continuar_transaccion", AsyncMock(return_value=transaccion)))
     m["prevuelo"] = pila.enter_context(
@@ -172,6 +179,80 @@ def test_devuelve_a_ada_con_la_critica_inyectada_y_afectados_correctos():
     assert kwargs["aplicar_cupo"] is False
     assert kwargs["incrementar_devoluciones"] is True
     assert payload["run_epoch"] == 2
+
+
+def test_devuelve_con_el_pipeline_construido_como_routes_py_lo_construye():
+    """Ronda de arreglo 1 (CRÍTICO). `POST /jacobs/pipeline` (jacobs/routes.py
+    ~596-616) arma el `Pipeline` SIN pasar `status=`, así que queda en el
+    default de models.py (`pending`) -- y ese es el objeto que
+    `background.add_task(run_pipeline, pipeline)` despacha. `_correr_pipeline`
+    (jacobs/executor.py) actualiza la FILA a `running` pero nunca reasigna
+    `pipeline.status`; el único lugar que lo hacía era continuar.py (vía
+    /continue). Si `evaluar_y_devolver` comparara contra `pipeline.status` en
+    vez de leer la fila vigente, este test (el camino de CREACIÓN, no de
+    /continue) quedaría en RESULTADO_COMPLETAR aunque el veredicto sea
+    'devolver' -- exactamente el final del caso real e570ac1c que esta ronda
+    existe para cambiar."""
+    from jacobs.devolucion import RESULTADO_DEVUELTO, evaluar_y_devolver
+
+    pipeline = _pipeline(
+        status=PipelineStatus.pending,  # EXACTO default de models.py, como routes.py lo construye
+        context={
+            **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+            "step_6_ref": _bloque_devolver(4),
+        },
+    )
+    # La FILA real sí está running (la escribió _correr_pipeline) -- eso es
+    # lo único que `evaluar_y_devolver` tiene que confiar.
+    pila, m = _mocks(vigente=(pipeline.run_epoch, PipelineStatus.running))
+    with pila:
+        resultado, payload = _correr(evaluar_y_devolver(pipeline))
+
+    assert resultado == RESULTADO_DEVUELTO
+    m["vigente"].assert_awaited_once_with(pipeline.pipeline_id)
+    # continuar_transaccion tiene que recibir el status VIGENTE (running),
+    # nunca el 'pending' del objeto en memoria -- si no, su propio
+    # SELECT...FOR UPDATE (store.py) lo compara contra la fila real y aborta.
+    args, kwargs = m["tx"].call_args
+    assert args[2] == PipelineStatus.running
+
+
+def test_sin_running_vigente_no_devuelve_ni_escribe_nada():
+    """Control (Principio VII): si la fila YA NO está running cuando se
+    evalúa el veredicto (alguien la canceló, el kill switch la abortó a
+    mitad de la última ola), NO se toma el atajo `aplicar_cupo=False` --
+    ese atajo asume 'ya está vivo', y sin confirmarlo sería indistinguible
+    de revivir un pipeline en un status que no ocupa cupo."""
+    from jacobs.devolucion import RESULTADO_COMPLETAR, evaluar_y_devolver
+
+    pipeline = _pipeline(context={
+        **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+        "step_6_ref": _bloque_devolver(4),
+    })
+    pila, m = _mocks(vigente=(pipeline.run_epoch, PipelineStatus.aborted))
+    with pila:
+        resultado, payload = _correr(evaluar_y_devolver(pipeline))
+
+    assert resultado == RESULTADO_COMPLETAR
+    assert payload == {}
+    m["tx"].assert_not_awaited()
+    m["prevuelo"].assert_not_awaited()  # ni se llega a estimar costo
+
+
+def test_sin_fila_vigente_no_devuelve():
+    """El pipeline desapareció (borrado, id inválido) -- None de
+    pipeline_epoca_y_status, mismo camino fail-closed."""
+    from jacobs.devolucion import RESULTADO_COMPLETAR, evaluar_y_devolver
+
+    pipeline = _pipeline(context={
+        **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+        "step_6_ref": _bloque_devolver(4),
+    })
+    pila, m = _mocks(vigente=None)
+    with pila:
+        resultado, _ = _correr(evaluar_y_devolver(pipeline))
+    assert resultado == RESULTADO_COMPLETAR
+    m["tx"].assert_not_awaited()
 
 
 def test_el_arbitro_no_reescribe_solo_devuelve():

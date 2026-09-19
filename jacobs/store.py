@@ -1555,8 +1555,25 @@ _SQL_BLOQUEAR_PIPELINE = "SELECT run_epoch, status FROM jacobs_pipelines WHERE p
 # nuevo con el modelo real en cuanto el step vuelve a correr
 # (executor.py::_invoke_motor al completar, o `step.modelo_real = f.model`
 # en el despacho HTTP directo) -- es una columna y dos palabras.
+# Ronda de arreglo 1 (2026-09-18-arbitro-devuelve, revisión ALTO): SÍ
+# resetea input_ref. Antes NO lo tocaba -- correcto mientras el único
+# escritor de `plan` era continuar.py reasignando FACET/MOTOR (nunca el
+# prompt). El árbitro devuelve (jacobs/devolucion.py) inyecta la crítica en
+# `paso.input["prompt"]` del objeto en memoria y la persiste en
+# `jacobs_pipelines.plan` (el JSON completo) -- pero `continuar.analizar()`,
+# `/resume` y `/approve-step` reconstruyen el plan de trabajo desde
+# `jacobs_steps` ("los pasos VIGENTES, no la foto de creación en `plan`"),
+# vía `steps_by_pipeline()`, que SÍ lee `input_ref` (jacobs/store.py, más
+# abajo). Sin este UPDATE, una devolución que luego aborta (timeout de ADA)
+# perdía la crítica en el primer /continue -- se pagaba dos veces el mismo
+# error, que es el defecto que esta ronda entera existe para cerrar. Mismo
+# criterio que ya se usa para modelo_real (comentario de arriba): la fila es
+# la fuente de verdad para cualquier camino de recuperación, así que se
+# reescribe con el `paso.input` VIGENTE cada vez que el paso se resetea a
+# pending -- idempotente para el /continue de siempre (mismo input, mismo
+# JSON).
 _SQL_PASO_A_CORRER = (
-    "UPDATE jacobs_steps SET facet=%s, motor=%s, status='pending', output_ref=NULL, "
+    "UPDATE jacobs_steps SET facet=%s, motor=%s, input_ref=%s, status='pending', output_ref=NULL, "
     "started_at=NULL, finished_at=NULL, error=NULL, modelo_real=NULL "
     "WHERE step_id=%s AND pipeline_id=%s"
 )
@@ -1681,7 +1698,11 @@ async def continuar_transaccion(
                     await conn.rollback()
                     return None
                 for paso in pasos_a_correr:
-                    await cur.execute(_SQL_PASO_A_CORRER, (paso.facet, paso.motor, paso.step_id, pipeline_id))
+                    await cur.execute(_SQL_PASO_A_CORRER, (
+                        paso.facet, paso.motor,
+                        json.dumps(paso.input, ensure_ascii=False),
+                        paso.step_id, pipeline_id,
+                    ))
                 params = [
                     json.dumps([s.model_dump() for s in plan], ensure_ascii=False),
                     json.dumps(context, ensure_ascii=False),

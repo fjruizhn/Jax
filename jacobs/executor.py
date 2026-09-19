@@ -1592,7 +1592,14 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
     # circular. Para acá mismo (import module-level de jacobs.devolucion)
     # solo cuando este módulo YA terminó de cargar.
     from jacobs import devolucion as _devolucion
-    resultado, payload = await _devolucion.evaluar_y_devolver(pipeline)
+    try:
+        resultado, payload = await _devolucion.evaluar_y_devolver(pipeline)
+    except Exception:  # fail-soft: el trabajo de TODAS las olas ya corrió y se pagó -- un parpadeo de la base evaluando el veredicto (get_tope_devoluciones/event_append/prevuelo abren pool y catálogo) no puede dejar el pipeline `running` para siempre; se completa como si el árbitro hubiera aprobado, nunca se pierde el status terminal
+        logger.error(
+            "Jacobs pipeline %s: evaluar_y_devolver falló -- se completa sin devolver",
+            pipeline_id, exc_info=True,
+        )
+        resultado, payload = _devolucion.RESULTADO_COMPLETAR, {}
     if resultado == _devolucion.RESULTADO_DEVUELTO:
         # Misma corrida, época nueva: NO se agenda un background task nuevo
         # (ya estamos en uno) -- se recorre _correr_pipeline de nuevo, igual
