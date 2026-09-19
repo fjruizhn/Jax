@@ -257,6 +257,12 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
                 pipeline_id, a.pipeline.run_epoch, a.pipeline.status,
                 [a.plan[i] for i in a.pasos_a_correr], a.plan, a.contexto, indice,
                 evento_payload=evento_payload, estado=estado_tx,
+                # El árbitro devuelve (spec 2026-09-18 §3.4): un /continue
+                # humano con un tope nuevo lo PERSISTE, no solo lo valida
+                # para este pedido -- si no, una devolución automática
+                # minutos después de este continue seguiría viendo el tope
+                # de la creación original (o ninguno).
+                costo_max_aceptado_usd=costo_max_aceptado_usd,
             )
     except ContencionAlReservar as exc:
         # Contención, no falla: 503 para que el llamador reintente. El CLI sale
@@ -297,6 +303,10 @@ async def continuar(pipeline_id: str, invoked_by: str, reasignar: dict[str, str]
     continuado = a.pipeline.model_copy(update={
         "plan": a.plan, "context": a.contexto, "status": PipelineStatus.running,
         "run_epoch": nueva, "current_step_index": indice,
+        "costo_max_aceptado_usd": (
+            costo_max_aceptado_usd if costo_max_aceptado_usd is not None
+            else a.pipeline.costo_max_aceptado_usd
+        ),
     })
 
     respuesta = {

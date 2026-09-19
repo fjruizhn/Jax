@@ -1585,7 +1585,59 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
             )
             return
 
-    # ---- Todas las olas terminaron ----
+    # ---- Todas las olas terminaron: ¿el árbitro devuelve? ----
+    # spec 2026-09-18-arbitro-devuelve-design: import perezoso -- jacobs.devolucion
+    # importa _load_ref/RefIlegible DE ESTE módulo (mismo patrón que ya usa
+    # jacobs/continuar.py), así que un import a nivel de módulo acá sería
+    # circular. Para acá mismo (import module-level de jacobs.devolucion)
+    # solo cuando este módulo YA terminó de cargar.
+    from jacobs import devolucion as _devolucion
+    try:
+        resultado, payload = await _devolucion.evaluar_y_devolver(pipeline)
+    except Exception:  # fail-soft: el trabajo de TODAS las olas ya corrió y se pagó -- un parpadeo de la base evaluando el veredicto (get_tope_devoluciones/event_append/prevuelo abren pool y catálogo) no puede dejar el pipeline `running` para siempre; se completa como si el árbitro hubiera aprobado, nunca se pierde el status terminal
+        logger.error(
+            "Jacobs pipeline %s: evaluar_y_devolver falló -- se completa sin devolver",
+            pipeline_id, exc_info=True,
+        )
+        resultado, payload = _devolucion.RESULTADO_COMPLETAR, {}
+    if resultado == _devolucion.RESULTADO_DEVUELTO:
+        # Misma corrida, época nueva: NO se agenda un background task nuevo
+        # (ya estamos en uno) -- se recorre _correr_pipeline de nuevo, igual
+        # que un /continue real dispara un run_pipeline fresco. El tope de
+        # devoluciones (configurado, spec §3.3) acota la profundidad de esta
+        # recursión: como mucho `tope` niveles extra.
+        pipeline.plan = payload["plan"]
+        pipeline.context = payload["context"]
+        pipeline.run_epoch = payload["run_epoch"]
+        pipeline.devoluciones += 1
+        pipeline.current_step_index = min(payload["afectados"])
+        await _correr_pipeline(pipeline)
+        return
+    if resultado == _devolucion.RESULTADO_TOPE:
+        # Ronda de arreglo 2 (revisión 2026-09-18): estado PROPIO, no
+        # `completed`. El árbitro agotó el tope de devoluciones (spec §3.3)
+        # con una objeción SIN RESOLVER -- desde afuera, `completed` es
+        # indistinguible de un pipeline que el árbitro aprobó, y la
+        # objeción quedaba enterrada en jacobs_events. `disputed` no ocupa
+        # cupo (jacobs/policy.py::ESTADOS_SIN_CUPO) -- el trabajo terminó de
+        # correr, solo que sin que nadie lo haya aprobado.
+        if not await store.pipeline_update_status_si_epoca(
+            pipeline_id, epoca, PipelineStatus.disputed, len(pipeline.plan), pipeline.context,
+        ):
+            await _perdio_la_epoca(pipeline)
+            return
+        # DEVOLUCION_TOPE_ALCANZADO (jacobs/devolucion.py) ya dejó la
+        # objeción y el paso en jacobs_events -- este evento es el que dice
+        # QUE EL PIPELINE terminó así, mismo par completed/PIPELINE_COMPLETED
+        # de siempre.
+        await store.event_append(pipeline_id, "PIPELINE_DISPUTED")
+        _disparar_aviso_fin(pipeline, PipelineStatus.disputed)
+        return
+
+    # RESULTADO_COMPLETAR: el árbitro aprobó, o no hubo estructura
+    # accionable, o no había presupuesto/no alcanzaba para devolver -- en
+    # los tres casos el trabajo está hecho y aprobado (o sin objeción
+    # accionable), y se marca completed como siempre.
     if not await store.pipeline_update_status_si_epoca(
         pipeline_id, epoca, PipelineStatus.completed, len(pipeline.plan), pipeline.context,
     ):

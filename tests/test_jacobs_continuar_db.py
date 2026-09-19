@@ -91,7 +91,18 @@ def test_la_transaccion_aplica_pasos_plan_contexto_y_epoca():
             s2 = (await store.steps_by_pipeline(pid))[2]
             explains = [
                 await _explain(store._SQL_BLOQUEAR_PIPELINE, (pid,)),
-                await _explain(store._SQL_PASO_A_CORRER, ("thot", None, s2.step_id, pid)),
+                # Ronda de arreglo 1 (2026-09-18-arbitro-devuelve, hallazgo
+                # ALTO): _SQL_PASO_A_CORRER ahora también escribe input_ref
+                # (jacobs/store.py) -- el EXPLAIN tiene que mandar los MISMOS
+                # parámetros que la sentencia real recibe, o el placeholder
+                # de más revienta con "not enough arguments for format
+                # string" (regresión vista en CI del PR #221, job
+                # jacobs-gobernanza-db). pasos[2].input no cambió desde
+                # _abortado(): es el mismo JSON que la llamada real de arriba
+                # ya escribió.
+                await _explain(store._SQL_PASO_A_CORRER, (
+                    "thot", None, json.dumps(pasos[2].input, ensure_ascii=False), s2.step_id, pid,
+                )),
             ]
             return nueva, p, s2, explains
         finally:

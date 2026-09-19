@@ -33,6 +33,17 @@ class PipelineStatus(str, Enum):
     interrupted = "interrupted"
     expired     = "expired"  # T4 (2026-08-19): cosechado por jacobs/reaper.py,
                               # distinto de aborted (decisión humana/API explícita)
+    # Ronda de arreglo 2 (2026-09-18-arbitro-devuelve): el árbitro agotó el
+    # tope de devoluciones (spec §3.3) con una objeción SIN RESOLVER --
+    # jacobs/devolucion.py::RESULTADO_TOPE. Terminal, no ocupa cupo
+    # (jacobs/policy.py::ESTADOS_SIN_CUPO), y DISTINTO de `completed`: un
+    # pipeline `completed` fue aprobado (por el árbitro o porque no tiene
+    # uno); uno `disputed` terminó de correr con una objeción que ningún
+    # humano resolvió todavía. jax-platform tiene que mapearlo en su propio
+    # `_JACOBS_STATUS_MAP` (backend/jax_engine/state.py) -- sin esa entrada
+    # el poller lo trata como "running" para siempre (mismo defecto que
+    # `expired` tuvo hasta la Importante B de la ronda anterior).
+    disputed    = "disputed"
 
 
 class StepStatus(str, Enum):
@@ -120,6 +131,17 @@ class Pipeline(BaseModel):
     context:            dict[str, Any] = Field(default_factory=dict)
     created_at:         float = 0.0
     updated_at:         float = 0.0
+    # El árbitro devuelve (spec 2026-09-18-arbitro-devuelve-design §3.4): el
+    # tope que el humano aceptó en la Mesa, PERSISTIDO -- antes era un
+    # parámetro por pedido que se perdía apenas terminaba el request
+    # (verificado: ni pipeline_create() ni continuar_transaccion() lo
+    # escribían). Una devolución automática lo necesita disponible minutos u
+    # horas después de creado el pipeline, no solo durante el request que lo
+    # aceptó.
+    costo_max_aceptado_usd: Decimal | None = None
+    # §3.3: cuántas veces YA devolvió el árbitro este pipeline. Contra el
+    # tope de axioma_config.jacobs.tope_devoluciones (store.get_tope_devoluciones).
+    devoluciones:       int = 0
     # dedication: interno, no expuesto en API
 
 
