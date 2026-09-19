@@ -93,6 +93,25 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
             await cur.execute(
                 "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
                 "VALUES ('auditor_local', 't-c5db-auditor-local', 'modelo-cpu', %s, 'primary')", (model_ref,))
+            # El auditor de NUBE también se siembra acá. No alcanza con sembrar el local:
+            # estos tests resuelven LOS DOS (una máquina con datos de clientes y una sin
+            # ellos), y el job `jacobs-gobernanza-db` arma su base clonando jax-platform y
+            # corriendo SUS migraciones -- que no dejan a 'thot' con binding resoluble.
+            # En una máquina de desarrollo el test pasaba porque la base ya lo traía de
+            # antes: es el mismo defecto que ya mordió con auditor_local/model_ref --
+            # un test que depende de que OTRO haya sembrado lo que necesita.
+            await cur.execute(
+                "INSERT IGNORE INTO provider (id, display_name, auth_type, is_local) "
+                "VALUES ('openai', 'OpenAI', 'bearer', 0)")
+            await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'thot'")
+            await cur.execute("DELETE FROM model WHERE model_id = 't-c5db-modelo-nube'")
+            await cur.execute(
+                "INSERT INTO model (provider_id, model_id, source, source_checked_at) "
+                "VALUES ('openai', 't-c5db-modelo-nube', 'manual', UTC_TIMESTAMP())")
+            nube_ref = cur.lastrowid
+            await cur.execute(
+                "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
+                "VALUES ('thot', 'openai', 't-c5db-modelo-nube', %s, 'primary')", (nube_ref,))
         await conn.commit()
     try:
         return await _con_inventario(accion)
@@ -102,6 +121,8 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
                 await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
                 await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
                 await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
+                await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'thot'")
+                await cur.execute("DELETE FROM model WHERE model_id = 't-c5db-modelo-nube'")
             await conn.commit()
 
 
