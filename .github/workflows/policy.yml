@@ -2543,7 +2543,6 @@ jobs:
           # sobre los dos archivos: cero matches de 'skip'/'xfail') -- así que
           # el delta de +4 se aplica derecho sobre el piso ya calibrado del
           # runner, sin tocar el 17 de skipped.
-            echo "PISO ROTO: se esperaban 2196 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
           # 2192 -> 2225 (2026-09-18, arbitro-devuelve): +33 de dos archivos
           # nuevos, puros (sin DB, sin red, sin el corpus de U3 ni el checkout
           # de jax-platform -- así que no les toca ninguna de las dos
@@ -2589,12 +2588,12 @@ jobs:
           # anterior, ahora con arnés propio). Los 9 vistos rojos contra el
           # código de antes de esta ronda de arreglo (reproducido a mano,
           # revertido y restaurado cada uno).
-            echo "PISO ROTO: se esperaban 2237 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
           # MERGE 2026-09-18: las dos ramas subieron este piso desde la MISMA base
           #   (2192): auditor local +4, arbitro que devuelve +45. El piso es la SUMA
           #   de los dos deltas; el mayor de los dos numeros consagraria que los
           #   tests de la otra rama no corren. Si el runner da otro numero, manda el runner.
           grep -qE "^2241 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2241 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea
