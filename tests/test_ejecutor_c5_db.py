@@ -65,3 +65,127 @@ def test_la_consulta_de_hosts_va_por_la_clave_primaria():
             return await cur.fetchall()
     filas = asyncio.run(_con_inventario(accion))
     assert any("PRIMARY" in str(f) for f in filas), filas
+
+
+# --- spec 2026-09-18-auditor-local-opcion.md §4: el auditor se elige según los hosts -------
+
+async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
+    """Provider+model+binding sintéticos para 'auditor_local' -- la migración real de
+    jax-platform sólo los siembra con JAX_OLLAMA_CPU_URL en el entorno (no seteada acá),
+    igual que la fixture `auditor_local_bindeado` del lado de jax-platform. `model_ref` se
+    fija a mano (no vía el backfill de _seed_models_and_backfill): resolve_facet real
+    (facet_resolver._query_facet) hace JOIN contra `model` por esa columna. `is_local`
+    parametrizable: el peor caso (spec §4) es un 'auditor_local' bindeado a un proveedor
+    que NO es local de verdad."""
+    from jacobs import store
+    async with store.conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+            await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
+            await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
+            await cur.execute(
+                "INSERT INTO provider (id, display_name, auth_type, is_local) "
+                "VALUES ('t-c5db-auditor-local', 'auditor local de prueba', 'none', %s)", (is_local,))
+            await cur.execute(
+                "INSERT INTO model (provider_id, model_id, source, source_checked_at) "
+                "VALUES ('t-c5db-auditor-local', 'modelo-cpu', 'manual', UTC_TIMESTAMP())")
+            model_ref = cur.lastrowid
+            await cur.execute(
+                "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
+                "VALUES ('auditor_local', 't-c5db-auditor-local', 'modelo-cpu', %s, 'primary')", (model_ref,))
+        await conn.commit()
+    try:
+        return await _con_inventario(accion)
+    finally:
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+                await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
+                await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
+            await conn.commit()
+
+
+def test_elegir_y_resolver_auditor_usa_el_local_con_datos_de_clientes():
+    """El punto único de elección (mision_servicio.py, vigia_servicio.py y arranque.py lo
+    llaman igual): una máquina con datos de clientes resuelve al proveedor local REAL; una
+    sin datos, al de nube -- con el mismo resolve_facet, contra la DB real."""
+    from facet_resolver import resolve_facet
+
+    async def accion(conn):
+        cfg = await E.leer_config(conn)
+        de_clientes, _, _ = await E.elegir_y_resolver_auditor(
+            conn, cfg=cfg, hosts_mision=frozenset({"c5-bridge"}), resolve_facet=resolve_facet)
+        propia, _, _ = await E.elegir_y_resolver_auditor(
+            conn, cfg=cfg, hosts_mision=frozenset({"c5-hall9000"}), resolve_facet=resolve_facet)
+        return de_clientes, propia
+    de_clientes, propia = asyncio.run(_con_auditor_local_de_prueba(accion))
+    assert de_clientes.provider_id == "t-c5db-auditor-local"
+    assert propia.provider_id == "openai"  # 'thot', el auditor de nube -- sin datos que proteger
+
+
+# --- arranque.py::eleccion_del_auditor -- el freno que la revisión encontró sin prueba ------
+#
+# Hallazgo de la revisión 2026-09-18: "arranque.py:305-330 -- donde se elige la faceta, se
+# consulta es_local(...) y se corre validar_eleccion -- no tiene test. El código está bien,
+# pero si alguien cambia `auditor_es_local=` por una comparación de nombre, nada se pone
+# rojo." Los tests de acá abajo ejercitan exactamente esa línea contra la DB real: el
+# PEOR CASO (auditor_local bindeado a un proveedor que NO es local) tiene que seguir
+# rechazando con la compuerta cerrada. Se verificó en rojo a mano (2026-09-18): reemplazar
+# `await eleccion_c5.es_local(conn, auditor_f.provider_id)` por
+# `auditor_f.key == cfg.auditor_faceta_local` en arranque.py hace que
+# test_peor_caso_arranque_auditor_local_mal_bindeado_no_pasa_la_compuerta falle (el
+# fallo esperado desaparece) -- exactamente la regresión que el hallazgo describe.
+
+def _cfg_con_cerebro_seedeado(cfg):
+    """`ejecutor.cerebro_faceta` vale 'ejecutor' en la config real, pero esa faceta no
+    tiene binding en jax_memory_test (deuda preexistente, ajena a esta ronda -- por eso
+    los tests de más arriba pasan `proveedor_cerebro` a mano en vez de resolverlo).
+    `eleccion_del_auditor` SÍ resuelve el cerebro de verdad (es fiel a p_c5 real): se
+    sustituye por 'jax_local' (sembrada, proveedor 'ollama', distinto de cualquier
+    auditor de esta suite) sólo para tener un cerebro resoluble de verdad."""
+    import dataclasses
+    return dataclasses.replace(cfg, cerebro_faceta="jax_local")
+
+
+def test_arranque_elige_el_auditor_local_con_datos_de_clientes_y_pasa_la_compuerta():
+    from facet_resolver import resolve_facet
+    from jax.ejecutor.contratos import arranque
+
+    async def accion(conn):
+        cfg = _cfg_con_cerebro_seedeado(await E.leer_config(conn))
+        return await arranque.eleccion_del_auditor(
+            conn, hosts_mision=frozenset({"c5-bridge"}), cfg=cfg, resolve_facet=resolve_facet)
+    auditor_f, fallos = asyncio.run(_con_auditor_local_de_prueba(accion, is_local=True))
+    assert auditor_f.provider_id == "t-c5db-auditor-local"
+    assert fallos == ()
+
+
+def test_peor_caso_arranque_auditor_local_mal_bindeado_no_pasa_la_compuerta():
+    """auditor_es_local mira provider.is_local, NUNCA el nombre 'auditor_local'. Con la
+    compuerta cerrada (semilla real) y el binding apuntando a un proveedor is_local=0, la
+    misión contra c5-bridge (con datos de clientes) sigue rechazada. Verificado en rojo a
+    mano (2026-09-18): cambiar `es_local(conn, auditor_f.provider_id)` por
+    `auditor_f.key == cfg.auditor_faceta_local` en arranque.py hace que este test falle."""
+    from facet_resolver import resolve_facet
+    from jax.ejecutor.contratos import arranque
+
+    async def accion(conn):
+        cfg = _cfg_con_cerebro_seedeado(await E.leer_config(conn))
+        return await arranque.eleccion_del_auditor(
+            conn, hosts_mision=frozenset({"c5-bridge"}), cfg=cfg, resolve_facet=resolve_facet)
+    auditor_f, fallos = asyncio.run(_con_auditor_local_de_prueba(accion, is_local=False))
+    assert auditor_f.provider_id == "t-c5db-auditor-local"  # se resolvió -- el bloqueo es la compuerta, no la resolución
+    assert fallos == (Fallo("c5", "auditor_no_admite_datos_de_clientes", (("hosts", ("c5-bridge",)),)),)
+
+
+def test_arranque_sin_mision_usa_el_auditor_de_nube_por_defecto():
+    """hosts_mision=None (arranque sin turno, plan 6): sin hosts que mirar, se valida sólo
+    que cerebro y auditor sean proveedores distintos -- el mismo comportamiento de siempre."""
+    from facet_resolver import resolve_facet
+    from jax.ejecutor.contratos import arranque
+
+    async def accion(conn):
+        cfg = _cfg_con_cerebro_seedeado(await E.leer_config(conn))
+        return await arranque.eleccion_del_auditor(conn, hosts_mision=None, cfg=cfg, resolve_facet=resolve_facet)
+    auditor_f, fallos = asyncio.run(_con_auditor_local_de_prueba(accion, is_local=True))
+    assert auditor_f.provider_id == "openai" and fallos == ()

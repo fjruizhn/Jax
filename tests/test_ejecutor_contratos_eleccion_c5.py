@@ -6,13 +6,14 @@ import pytest
 from jax.ejecutor.contratos import eleccion_c5 as E
 from jax.ejecutor.contratos.fallo import Fallo
 
-FILAS = {"ejecutor.cerebro_faceta": "ejecutor", "ejecutor.auditor_faceta": "thot", "ejecutor.c5_lote_max": "20",
+FILAS = {"ejecutor.cerebro_faceta": "ejecutor", "ejecutor.auditor_faceta": "thot",
+         "ejecutor.auditor_faceta_local": "auditor_local", "ejecutor.c5_lote_max": "20",
          "ejecutor.c5_intervalo_s": "15", "ejecutor.c5_max_tokens": "4000",
          "ejecutor.c5_auditor_admite_datos_de_clientes": "false"}
 
 
 def test_config_desde_filas():
-    assert E.config_desde_filas(FILAS) == E.ConfigC5("ejecutor", "thot", 20, 15.0, 4000, False)
+    assert E.config_desde_filas(FILAS) == E.ConfigC5("ejecutor", "thot", "auditor_local", 20, 15.0, 4000, False)
 
 
 @pytest.mark.parametrize("clave, valor", [("ejecutor.c5_lote_max", "0"), ("ejecutor.c5_intervalo_s", "x"),
@@ -20,7 +21,8 @@ def test_config_desde_filas():
                                           ("ejecutor.c5_max_tokens", "-1"),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "si"),
                                           ("ejecutor.c5_auditor_admite_datos_de_clientes", "True"),
-                                          ("ejecutor.auditor_faceta", "")])
+                                          ("ejecutor.auditor_faceta", ""),
+                                          ("ejecutor.auditor_faceta_local", "")])
 def test_config_invalida(clave, valor):
     with pytest.raises(ValueError):
         E.config_desde_filas({**FILAS, clave: valor})
@@ -75,3 +77,21 @@ def test_validar_proveedores_sin_mision():
         Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro"),)
     assert E.validar_proveedores(proveedor_cerebro="", proveedor_auditor="openai") == (
         Fallo("c5", "proveedor_desconocido"),)
+
+
+# --- elección del auditor según la máquina de la misión (spec 2026-09-18) -------------------
+
+def test_elegir_auditor_faceta_segun_datos_de_clientes():
+    """Decisión de Fernando: la máquina de la misión decide el auditor, no una clave global.
+    Sin nombre de faceta hardcodeado -- los dos salen de axioma_config vía ConfigC5."""
+    cfg = E.config_desde_filas(FILAS)
+    assert E.elegir_auditor_faceta(cfg, hay_datos_de_clientes=True) == "auditor_local"
+    assert E.elegir_auditor_faceta(cfg, hay_datos_de_clientes=False) == "thot"
+
+
+def test_sensibles_son_las_con_datos_o_desconocidas():
+    """Mismo hecho que gobierna la compuerta (validar_eleccion): con datos de clientes, o
+    fuera del inventario/dada de baja (cuenta como con datos, cerrado)."""
+    assert E.sensibles(frozenset({"hall9000", "bridge", "nueva"}), frozenset({"bridge"}),
+                       frozenset({"hall9000", "bridge"})) == frozenset({"bridge", "nueva"})
+    assert E.sensibles(frozenset({"hall9000"}), frozenset(), frozenset({"hall9000"})) == frozenset()

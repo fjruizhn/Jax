@@ -140,9 +140,13 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         from facet_resolver import resolve_facet
         from jacobs.store import conexion
         from jax.ejecutor.contratos import auditor_cliente, eleccion_c5
+        # Spec 2026-09-18-auditor-local-opcion.md §4: `turno.hosts`, no `maquinas` (que ya
+        # perdió el nombre plano por A.maquinas_de) -- son las mismas máquinas de la misión,
+        # y elegir_y_resolver_auditor necesita nombres para consultar ejecutor_host.
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-        faceta = await resolve_facet(cfg.auditor_faceta)
+            faceta, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
+                conn, cfg=cfg, hosts_mision=turno.hosts, resolve_facet=resolve_facet)
         return await auditor_cliente.auditar(A.Lote(texto, (), A.afirmaciones_auditables(entrega), maquinas),
                                              faceta=faceta, max_tokens=cfg.max_tokens)
 
