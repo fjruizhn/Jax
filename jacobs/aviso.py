@@ -63,6 +63,10 @@ _ESTADOS_LEGIBLES = {
     "aborted": "abortado",
     "failed": "fallido",
     "expired": "expirado",
+    # Ronda de arreglo 2 (2026-09-18-arbitro-devuelve, spec §3.3): "que el
+    # aviso lo diga" -- un pipeline `disputed` NO es "completado", es una
+    # objeción del árbitro sin resolver que espera una decisión humana.
+    "disputed": "con objeción del árbitro sin resolver -- requiere tu decisión",
 }
 
 #: Fire-and-forget: referencia fuerte a las tareas en vuelo para que el GC no

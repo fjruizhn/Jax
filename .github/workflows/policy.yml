@@ -488,8 +488,16 @@ jobs:
           # `_SQL_PASO_A_CORRER` sin `input_ref` (el código de antes de este
           # arreglo, reproducido a mano): 1 failed. Medido local: 151 -> 152,
           # 0 fallas nuevas.
-          grep -qE "^152 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 152 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 152 -> 155 (2026-09-18, arbitro-devuelve, ronda de arreglo 2):
+          # +3 en jacobs/_devolucion_persistencia_test.py --
+          # `CostoGastadoPipelineTest` contra `axioma_usage` real: sin filas
+          # gastado=0 sin incertidumbre, la suma de varias filas de ESTE
+          # pipeline (ignorando las de otro), y una fila con `cost_usd IS
+          # NULL` marca incertidumbre (el caso real de e570ac1c-8cae-4423-
+          # b397-d354f30b4328, que tiene 2 filas así). Medido local: 152 ->
+          # 155, 0 fallas nuevas.
+          grep -qE "^155 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 155 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -1048,6 +1056,7 @@ jobs:
           jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py
           jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py
           jacobs/_veredicto_test.py jacobs/_devolucion_test.py
+          jacobs/_devolucion_ejecutor_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1183,6 +1192,7 @@ jobs:
             jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py \
             jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py \
             jacobs/_veredicto_test.py jacobs/_devolucion_test.py \
+            jacobs/_devolucion_ejecutor_test.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -2522,8 +2532,22 @@ jobs:
           # devuelve). Los 3 vistos rojos contra el código de antes de esta
           # ronda de arreglo (reproducido a mano, revertido y restaurado).
           # Puro, sin U3 ni jax-platform: suma directo, igual que arriba.
-          grep -qE "^2228 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2228 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2228 -> 2237 (2026-09-18, arbitro-devuelve, ronda de arreglo 2):
+          # +9, puros (sin DB, sin red -- suman directo, mismo criterio que
+          # arriba): jacobs/_devolucion_test.py (+5) -- el presupuesto contra
+          # LO QUE QUEDA (store.costo_gastado_pipeline), no el techo completo,
+          # más las dos trampas del registro atrasado (cost_usd NULL, cola
+          # durable sin drenar) tratadas como incertidumbre, fail-closed; y
+          # jacobs/_devolucion_ejecutor_test.py (+4, archivo nuevo) --
+          # RESULTADO_TOPE termina el pipeline en `disputed` (evento
+          # PIPELINE_DISPUTED, aviso con estado 'disputed'), nunca
+          # `completed`, más el control de RESULTADO_COMPLETAR/DEVUELTO/una
+          # excepción evaluando el veredicto (hallazgo MEDIO de la ronda
+          # anterior, ahora con arnés propio). Los 9 vistos rojos contra el
+          # código de antes de esta ronda de arreglo (reproducido a mano,
+          # revertido y restaurado cada uno).
+          grep -qE "^2237 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2237 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

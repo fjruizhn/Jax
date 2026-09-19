@@ -757,7 +757,13 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
     pipeline = await store.pipeline_get(pipeline_id)
     if not pipeline:
         raise HTTPException(status_code=404, detail=f"Pipeline '{pipeline_id}' no encontrado")
-    if pipeline.status in (PipelineStatus.completed, PipelineStatus.failed, PipelineStatus.aborted):
+    if pipeline.status in (
+        PipelineStatus.completed, PipelineStatus.failed, PipelineStatus.aborted,
+        # Ronda de arreglo 2 (2026-09-18-arbitro-devuelve): `disputed` es
+        # terminal (ESTADOS_SIN_CUPO) -- no se cancela lo que ya terminó de
+        # correr, aunque nadie haya resuelto la objeción todavía.
+        PipelineStatus.disputed,
+    ):
         raise HTTPException(
             status_code=409,
             detail=f"Pipeline ya finalizado con status '{pipeline.status.value}'",

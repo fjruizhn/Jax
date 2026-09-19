@@ -30,15 +30,20 @@ comportamiento.
        como CONTEXTO real, ver executor.py::_build_context_input).
   §3.3 tope de vueltas, en configuración -> `store.get_tope_devoluciones()`,
        comparado contra `pipeline.devoluciones` (persistido).
-  §3.4 el dinero: cabe en lo aceptado o no ocurre -> `pipeline.
-       costo_max_aceptado_usd` (persistido, ver jacobs/store.py y
-       jacobs/cupo.py::completar_reserva) contra el estimado de
-       `jacobs.prevuelo.prevuelo` para los pasos afectados. Mismo criterio
-       que ya usa `jacobs/continuar.py::continuar()` para su propio 409
-       costo_supera_lo_aceptado: el estimado de ESTA corrida contra el tope
-       COMPLETO, no un saldo neto de gasto acumulado -- Jacobs no lleva ese
-       ledger por pipeline hoy, y este módulo no lo inventa (declarado, no
-       verificado más allá de lo que continuar() ya hace).
+  §3.4 el dinero: cabe en lo QUE QUEDA o no ocurre -> `pipeline.
+       costo_max_aceptado_usd` MENOS `store.costo_gastado_pipeline()`
+       (Ronda de arreglo 2, revisión 2026-09-18: contra el techo completo,
+       sin restar, con tope=2 se podían gastar hasta 3x lo aceptado -- la
+       corrida original más dos devoluciones, cada una validada contra el
+       100%). `_presupuesto_disponible` fail-closed ante DOS trampas de
+       medir "lo gastado" con un registro que puede ir atrasado: una fila
+       con `cost_usd IS NULL` (se cobró, el precio no se pudo resolver) o
+       uso de este pipeline todavía en la cola durable sin drenar a
+       `axioma_usage` -- las dos hacen que la suma leída sea una COTA
+       INFERIOR, nunca el total, y usarla como si fuera el total arriesga
+       gastar de más. Ante cualquiera de las dos, NO se devuelve (mismo
+       fail-closed que sin `costo_max_aceptado_usd` -- errar hacia gastar
+       de menos, pedido explícito de Fernando).
   §3.5 devuelve, no reescribe -> `_inyectar_critica` solo TOCA el prompt del
        paso devuelto; nunca su `facet`, nunca su `output_ref`. Lo rehace la
        MISMA faceta que lo produjo la vez anterior.
@@ -48,6 +53,7 @@ En memoria de Jairo Urbina.
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 
 from redaccion import recortar_redactado
 
@@ -58,6 +64,17 @@ from jacobs.plan import PlanBuilder
 from jacobs.prevuelo import prevuelo
 from jacobs.prevuelo_reglas import formatear_usd
 from jacobs.veredicto import DECISION_DEVOLVER, VeredictoArbitro, parsear_veredicto
+
+try:
+    # Mismo doble import que jacobs/usage_writer.py (production con
+    # cwd=las_manos vs. CI/REPL con jax.core importable): el respaldo de la
+    # cola durable de uso, para detectar gasto de ESTE pipeline que todavía
+    # no drenó a axioma_usage (Ronda de arreglo 2, §3.4).
+    from cola_uso import contar_pendientes as _uso_contar_pendientes
+    from cola_uso import leer_pendientes as _uso_leer_pendientes
+except ImportError:
+    from jax.core.cola_uso import contar_pendientes as _uso_contar_pendientes
+    from jax.core.cola_uso import leer_pendientes as _uso_leer_pendientes
 
 logger = logging.getLogger("jacobs.devolucion")
 
@@ -105,6 +122,38 @@ def _inyectar_critica(paso: Step, veredicto: VeredictoArbitro, intento: int) -> 
         f"en esta versión -- no repitas el mismo error."
     )
     paso.input["prompt"] = f"{previo}\n\n{critica}" if previo else critica
+
+
+async def _presupuesto_disponible(pipeline: Pipeline) -> tuple[Decimal | None, str | None]:
+    """(restante, motivo_incierto) para el presupuesto de una devolución
+    (Ronda de arreglo 2, §3.4: "lo que queda", no el techo completo).
+
+    `motivo_incierto is not None` -> `restante` es None y NO hay presupuesto
+    confiable con el que medir: fail-closed, se prefiere errar gastando de
+    menos (pedido explícito de Fernando) antes que aprobar una devolución
+    sobre un "gastado" que podría estar SUBESTIMADO por un registro atrasado.
+
+    Dos trampas, las dos tratadas como incertidumbre (nunca como "gastado =
+    lo que se pudo leer"):
+      1. `axioma_usage` tiene filas de ESTE pipeline con `cost_usd IS NULL`
+         -- se cobraron de verdad, el precio no se pudo resolver (ver
+         jacobs/usage_writer.py). Sumar ignorándolas (SUM ignora NULL) daría
+         un total más bajo que el real.
+      2. Hay uso de ESTE pipeline todavía en la cola durable de respaldo
+         (jax/core/cola_uso.py), esperando que jax-platform lo drene a
+         `axioma_usage` -- mientras tanto, ese gasto tampoco aparece en la
+         suma."""
+    gastado, hay_costo_desconocido = await store.costo_gastado_pipeline(pipeline.pipeline_id)
+    if hay_costo_desconocido:
+        return None, "hay uso de este pipeline con costo desconocido (cost_usd NULL) en axioma_usage"
+
+    pendientes_totales = await _uso_contar_pendientes()
+    if pendientes_totales:
+        entradas = await _uso_leer_pendientes(pendientes_totales)
+        if any(e.get("pipeline_id") == pipeline.pipeline_id for e in entradas):
+            return None, "hay uso de este pipeline en la cola durable, todavía sin drenar a axioma_usage"
+
+    return pipeline.costo_max_aceptado_usd - gastado, None
 
 
 def _es_arbitro(pipeline: Pipeline) -> Step | None:
@@ -210,16 +259,26 @@ async def evaluar_y_devolver(pipeline: Pipeline) -> tuple[str, dict]:
         }, step_id=arbitro.step_id)
         return RESULTADO_COMPLETAR, {}
 
+    # Ronda de arreglo 2 (revisión 2026-09-18): contra lo que QUEDA, no
+    # contra el techo completo -- ver _presupuesto_disponible.
+    restante, motivo_incierto = await _presupuesto_disponible(pipeline)
+    if motivo_incierto is not None:
+        await store.event_append(pipeline.pipeline_id, "DEVOLUCION_PRESUPUESTO_INCIERTO", {
+            "paso": veredicto.paso, "motivo": veredicto.motivo, "motivo_incierto": motivo_incierto,
+        }, step_id=arbitro.step_id)
+        return RESULTADO_COMPLETAR, {}
+
     afectados = sorted(pasos_afectados(pipeline.plan, veredicto.paso))
     estimado = await prevuelo(
         pipeline.plan, pipeline.context, pendientes=set(afectados),
         user_id=pipeline.user_id, tenant_id=pipeline.tenant_id,
     )
-    if not estimado.ok or estimado.costo_max_usd > pipeline.costo_max_aceptado_usd:
+    if not estimado.ok or estimado.costo_max_usd > restante:
         await store.event_append(pipeline.pipeline_id, "DEVOLUCION_SUPERA_PRESUPUESTO", {
             "paso": veredicto.paso,
             "costo_max_usd": formatear_usd(estimado.costo_max_usd),
             "costo_max_aceptado_usd": formatear_usd(pipeline.costo_max_aceptado_usd),
+            "restante_usd": formatear_usd(restante),
             "prevuelo_ok": estimado.ok,
         }, step_id=arbitro.step_id)
         return RESULTADO_COMPLETAR, {}

@@ -47,6 +47,10 @@ ESTADOS_QUE_OCUPAN_CUPO = (PipelineStatus.pending, PipelineStatus.running)
 ESTADOS_SIN_CUPO = (
     PipelineStatus.completed, PipelineStatus.failed, PipelineStatus.aborted,
     PipelineStatus.interrupted, PipelineStatus.expired,
+    # Ronda de arreglo 2 (2026-09-18-arbitro-devuelve): `disputed` es
+    # terminal -- el árbitro agotó el tope de devoluciones y el pipeline
+    # dejó de correr, igual que `completed`/`failed`. No ocupa cupo.
+    PipelineStatus.disputed,
 )
 
 #: La lista para un `IN (...)` de SQL. Literal y no parámetros: son valores del

@@ -1613,11 +1613,31 @@ async def _correr_pipeline(pipeline: Pipeline) -> None:
         pipeline.current_step_index = min(payload["afectados"])
         await _correr_pipeline(pipeline)
         return
-    # RESULTADO_COMPLETAR o RESULTADO_TOPE: el pipeline terminó de correr --
-    # con la crítica del árbitro aprobada, sin estructura accionable, sin
-    # presupuesto para devolver, o porque ya se devolvió lo que el tope
-    # permite. En los tres casos el trabajo está hecho y se marca completed;
-    # RESULTADO_TOPE ya dejó su propio evento de auditoría (DEVOLUCION_TOPE_ALCANZADO).
+    if resultado == _devolucion.RESULTADO_TOPE:
+        # Ronda de arreglo 2 (revisión 2026-09-18): estado PROPIO, no
+        # `completed`. El árbitro agotó el tope de devoluciones (spec §3.3)
+        # con una objeción SIN RESOLVER -- desde afuera, `completed` es
+        # indistinguible de un pipeline que el árbitro aprobó, y la
+        # objeción quedaba enterrada en jacobs_events. `disputed` no ocupa
+        # cupo (jacobs/policy.py::ESTADOS_SIN_CUPO) -- el trabajo terminó de
+        # correr, solo que sin que nadie lo haya aprobado.
+        if not await store.pipeline_update_status_si_epoca(
+            pipeline_id, epoca, PipelineStatus.disputed, len(pipeline.plan), pipeline.context,
+        ):
+            await _perdio_la_epoca(pipeline)
+            return
+        # DEVOLUCION_TOPE_ALCANZADO (jacobs/devolucion.py) ya dejó la
+        # objeción y el paso en jacobs_events -- este evento es el que dice
+        # QUE EL PIPELINE terminó así, mismo par completed/PIPELINE_COMPLETED
+        # de siempre.
+        await store.event_append(pipeline_id, "PIPELINE_DISPUTED")
+        _disparar_aviso_fin(pipeline, PipelineStatus.disputed)
+        return
+
+    # RESULTADO_COMPLETAR: el árbitro aprobó, o no hubo estructura
+    # accionable, o no había presupuesto/no alcanzaba para devolver -- en
+    # los tres casos el trabajo está hecho y aprobado (o sin objeción
+    # accionable), y se marca completed como siempre.
     if not await store.pipeline_update_status_si_epoca(
         pipeline_id, epoca, PipelineStatus.completed, len(pipeline.plan), pipeline.context,
     ):

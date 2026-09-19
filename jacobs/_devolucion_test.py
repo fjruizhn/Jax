@@ -85,15 +85,24 @@ def _correr(coro):
     return asyncio.run(coro)
 
 
-def _mocks(*, tope=2, transaccion=2, veredicto_costo=None, vigente=(1, PipelineStatus.running)):
+def _mocks(*, tope=2, transaccion=2, veredicto_costo=None, vigente=(1, PipelineStatus.running),
+           gastado=(Decimal("0"), False), pendientes_uso=0, pendientes_uso_entradas=None):
     """Mockea todo lo que `evaluar_y_devolver` toca fuera de sí mismo:
     jacobs.store (event_append/get_tope_devoluciones/continuar_transaccion/
-    pipeline_epoca_y_status) y jacobs.prevuelo.prevuelo. Nunca la base real.
+    pipeline_epoca_y_status/costo_gastado_pipeline) y jacobs.prevuelo.prevuelo,
+    más el peek de la cola durable de uso. Nunca la base real.
 
     `vigente`: lo que devuelve `store.pipeline_epoca_y_status` -- el status
     REAL de la fila, no el de `pipeline.status` en memoria (que routes.py
     nunca actualiza a running, ver Ronda de arreglo 1). Default (1, running):
-    coincide con el `run_epoch=1` de `_pipeline()`."""
+    coincide con el `run_epoch=1` de `_pipeline()`.
+
+    `gastado`: (Decimal, hay_costo_desconocido) que devuelve
+    `store.costo_gastado_pipeline` -- Ronda de arreglo 2, §3.4: "lo que
+    queda", no el techo completo. Default: nada gastado, nada incierto.
+
+    `pendientes_uso`/`pendientes_uso_entradas`: la cola durable de uso
+    (jax.core.cola_uso) -- por default vacía (0 pendientes, sin entradas)."""
     pila = ExitStack()
     m = {}
     m["evento"] = pila.enter_context(patch("jacobs.devolucion.store.event_append", AsyncMock()))
@@ -101,6 +110,13 @@ def _mocks(*, tope=2, transaccion=2, veredicto_costo=None, vigente=(1, PipelineS
         patch("jacobs.devolucion.store.get_tope_devoluciones", AsyncMock(return_value=tope)))
     m["vigente"] = pila.enter_context(
         patch("jacobs.devolucion.store.pipeline_epoca_y_status", AsyncMock(return_value=vigente)))
+    m["gastado"] = pila.enter_context(
+        patch("jacobs.devolucion.store.costo_gastado_pipeline", AsyncMock(return_value=gastado)))
+    m["cola_contar"] = pila.enter_context(
+        patch("jacobs.devolucion._uso_contar_pendientes", AsyncMock(return_value=pendientes_uso)))
+    m["cola_leer"] = pila.enter_context(
+        patch("jacobs.devolucion._uso_leer_pendientes",
+              AsyncMock(return_value=pendientes_uso_entradas or [])))
     m["tx"] = pila.enter_context(
         patch("jacobs.devolucion.store.continuar_transaccion", AsyncMock(return_value=transaccion)))
     m["prevuelo"] = pila.enter_context(
@@ -437,6 +453,128 @@ def test_sin_presupuesto_persistido_no_ocurre():
     m["prevuelo"].assert_not_awaited()
     args, _ = m["evento"].call_args
     assert args[1] == "DEVOLUCION_SIN_PRESUPUESTO"
+
+
+# ---------------------------------------------------------------------------
+# Ronda de arreglo 2: el presupuesto es LO QUE QUEDA, no el techo completo.
+# Con tope=2, medir cada devolución contra el 100% del tope dejaba gastar
+# hasta 3x lo aceptado (corrida original + dos rehechas, cada una "cabe"
+# sola). Acá se prueba contra `store.costo_gastado_pipeline` (axioma_usage).
+# ---------------------------------------------------------------------------
+
+def test_lo_ya_gastado_se_descuenta_del_tope_no_del_techo_completo():
+    """costo_max_aceptado_usd=5.00, ya gastado=4.50 -> queda 0.50. Un
+    estimado de 1.00 "cabría" contra el techo completo (5.00) pero NO
+    contra lo que queda (0.50): no puede ocurrir."""
+    from jacobs.devolucion import RESULTADO_COMPLETAR, evaluar_y_devolver
+
+    pipeline = _pipeline(
+        costo_max_aceptado_usd=Decimal("5.00"),
+        context={
+            **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+            "step_6_ref": _bloque_devolver(4),
+        },
+    )
+    estimado_de_1 = _ok_veredicto(usd="1.00")
+    pila, m = _mocks(veredicto_costo=estimado_de_1, gastado=(Decimal("4.50"), False))
+    with pila:
+        resultado, payload = _correr(evaluar_y_devolver(pipeline))
+
+    assert resultado == RESULTADO_COMPLETAR
+    assert payload == {}
+    m["tx"].assert_not_awaited()
+    args, _ = m["evento"].call_args
+    assert args[1] == "DEVOLUCION_SUPERA_PRESUPUESTO"
+    assert args[2]["restante_usd"] == "0.500000"
+
+
+def test_lo_que_queda_alcanza_la_devolucion_ocurre():
+    """Control positivo del mismo mecanismo: costo_max_aceptado_usd=5.00,
+    gastado=1.00 -> queda 4.00, y el estimado (1.00) cabe."""
+    from jacobs.devolucion import RESULTADO_DEVUELTO, evaluar_y_devolver
+
+    pipeline = _pipeline(
+        costo_max_aceptado_usd=Decimal("5.00"),
+        context={
+            **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+            "step_6_ref": _bloque_devolver(4),
+        },
+    )
+    pila, m = _mocks(gastado=(Decimal("1.00"), False))
+    with pila:
+        resultado, _ = _correr(evaluar_y_devolver(pipeline))
+    assert resultado == RESULTADO_DEVUELTO
+
+
+def test_costo_desconocido_en_axioma_usage_no_devuelve():
+    """Trampa 1 (revisión de Fernando): una fila de ESTE pipeline con
+    `cost_usd IS NULL` -- se cobró de verdad, el precio no se pudo resolver.
+    Sumar ignorándola daría un 'gastado' más bajo que el real -- fail-closed,
+    no se puede confirmar que queda presupuesto."""
+    from jacobs.devolucion import RESULTADO_COMPLETAR, evaluar_y_devolver
+
+    pipeline = _pipeline(context={
+        **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+        "step_6_ref": _bloque_devolver(4),
+    })
+    pila, m = _mocks(gastado=(Decimal("0.20"), True))  # hay_costo_desconocido=True
+    with pila:
+        resultado, payload = _correr(evaluar_y_devolver(pipeline))
+
+    assert resultado == RESULTADO_COMPLETAR
+    assert payload == {}
+    m["tx"].assert_not_awaited()
+    m["prevuelo"].assert_not_awaited()
+    args, _ = m["evento"].call_args
+    assert args[1] == "DEVOLUCION_PRESUPUESTO_INCIERTO"
+    assert "cost_usd" in args[2]["motivo_incierto"] or "desconocido" in args[2]["motivo_incierto"]
+
+
+def test_uso_en_la_cola_durable_sin_drenar_no_devuelve():
+    """Trampa 2: uso de ESTE pipeline todavía en el respaldo de
+    jax.core.cola_uso, esperando que jax-platform lo drene a axioma_usage --
+    mientras tanto tampoco aparece en la suma. Mismo fail-closed."""
+    from jacobs.devolucion import RESULTADO_COMPLETAR, evaluar_y_devolver
+
+    pipeline = _pipeline(context={
+        **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+        "step_6_ref": _bloque_devolver(4),
+    })
+    pila, m = _mocks(
+        pendientes_uso=3,
+        pendientes_uso_entradas=[
+            {"pipeline_id": "otro-pipeline"},
+            {"pipeline_id": pipeline.pipeline_id},  # ESTE pipeline, sin drenar
+            {"pipeline_id": "otro-mas"},
+        ],
+    )
+    with pila:
+        resultado, payload = _correr(evaluar_y_devolver(pipeline))
+
+    assert resultado == RESULTADO_COMPLETAR
+    assert payload == {}
+    m["tx"].assert_not_awaited()
+    m["prevuelo"].assert_not_awaited()
+    args, _ = m["evento"].call_args
+    assert args[1] == "DEVOLUCION_PRESUPUESTO_INCIERTO"
+
+
+def test_cola_durable_con_otros_pipelines_no_bloquea_este():
+    """Control (Principio VII): la cola tiene entradas, pero NINGUNA es de
+    este pipeline -- no tiene que bloquear."""
+    from jacobs.devolucion import RESULTADO_DEVUELTO, evaluar_y_devolver
+
+    pipeline = _pipeline(context={
+        **{f"step_{i}_ref": "inline:{}" for i in range(6)},
+        "step_6_ref": _bloque_devolver(4),
+    })
+    pila, m = _mocks(
+        pendientes_uso=2,
+        pendientes_uso_entradas=[{"pipeline_id": "otro-1"}, {"pipeline_id": "otro-2"}],
+    )
+    with pila:
+        resultado, _ = _correr(evaluar_y_devolver(pipeline))
+    assert resultado == RESULTADO_DEVUELTO
 
 
 if __name__ == "__main__":

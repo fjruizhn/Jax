@@ -2057,6 +2057,41 @@ async def get_tope_devoluciones() -> int:
     return valor
 
 
+async def costo_gastado_pipeline(pipeline_id: str) -> tuple[Decimal, bool]:
+    """Ronda de arreglo 2 (2026-09-18-arbitro-devuelve): cuánto gastó YA este
+    pipeline, de `axioma_usage.pipeline_id` (Task 7b, 2026-09-17 -- la
+    columna que atribuye costo real por pipeline; verificado contra
+    producción: el pipeline e570ac1c-8cae-4423-b397-d354f30b4328 acumuló
+    $0.469447 en 8 filas). `jacobs/devolucion.py` la usa para medir el
+    presupuesto contra LO QUE QUEDA (spec §3.4), no contra el techo
+    completo -- sin esto, dos devoluciones (tope de hoy) más la corrida
+    original podían gastar hasta 3x lo que el humano aceptó.
+
+    Devuelve (suma, hay_costo_desconocido). `hay_costo_desconocido` es True
+    si alguna fila de este pipeline tiene `cost_usd IS NULL` -- una llamada
+    que SÍ se cobró (jacobs/usage_writer.py la escribe con costo NULL cuando
+    el lookup de precio falla, nunca la descarta) pero cuyo monto no se
+    pudo resolver. Verificado contra producción: el mismo pipeline
+    e570ac1c tiene 2 filas así. Con `hay_costo_desconocido=True` la suma NO
+    es un techo confiable de lo gastado -- es una COTA INFERIOR, y usarla
+    como si fuera el total arriesga "gastar de más" (Principio I). El
+    llamador decide fail-closed: sin saber cuánto se gastó, no se puede
+    confirmar que queda presupuesto.
+
+    Índice: `idx_axioma_usage_pipeline` (verificado en el `SHOW CREATE
+    TABLE` real de producción) cubre el `WHERE pipeline_id=%s` -- no hace
+    falta uno nuevo."""
+    async with conexion_del_pool() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT COALESCE(SUM(cost_usd), 0), SUM(cost_usd IS NULL) "
+                "FROM axioma_usage WHERE pipeline_id = %s",
+                (pipeline_id,),
+            )
+            total, nulos = await cur.fetchone()
+    return Decimal(total), bool(nulos)
+
+
 # ----------------------------------------------------------------
 #  Contrato de sub-pipelines (frente F, 2026-09-16)
 # ----------------------------------------------------------------

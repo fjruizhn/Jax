@@ -322,5 +322,75 @@ class CriticaSobreviveALaRecuperacionTest(_ConLimpieza):
         self.assertIn("prompt original del paso 0", prompt_renderizado)
 
 
+# ---------------------------------------------------------------------------
+# Ronda de arreglo 2: store.costo_gastado_pipeline contra axioma_usage real
+# (Task 7b, 2026-09-17 -- verificado contra producción: el pipeline
+# e570ac1c-8cae-4423-b397-d354f30b4328 tiene 8 filas, 2 con cost_usd NULL).
+# ---------------------------------------------------------------------------
+
+class CostoGastadoPipelineTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        await store.init_tables()
+        self.pipeline_id = str(uuid.uuid4())  # VARCHAR(36) en axioma_usage: el UUID a secas
+        self._otros_pipeline_ids: list[str] = []
+        self.addAsyncCleanup(self._limpiar)
+
+    async def _limpiar(self):
+        conn = await store.conexion_dedicada()
+        try:
+            async with conn.cursor() as cur:
+                for pid in (self.pipeline_id, *self._otros_pipeline_ids):
+                    await cur.execute("DELETE FROM axioma_usage WHERE pipeline_id=%s", (pid,))
+        finally:
+            conn.close()
+
+    async def _insertar(self, cost_usd) -> None:
+        conn = await store.conexion_dedicada()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "INSERT INTO axioma_usage (facet, model, tokens_in, tokens_out, "
+                    "cost_usd, request_type, pipeline_id) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                    ("ada", "glm-5.3", 100, 200, cost_usd, "pipeline", self.pipeline_id),
+                )
+        finally:
+            conn.close()
+
+    async def test_sin_filas_gastado_es_cero_sin_incertidumbre(self):
+        gastado, incierto = await store.costo_gastado_pipeline(self.pipeline_id)
+        self.assertEqual(gastado, Decimal("0"))
+        self.assertFalse(incierto)
+
+    async def test_suma_las_filas_reales_del_pipeline(self):
+        await self._insertar(Decimal("0.123456"))
+        await self._insertar(Decimal("0.234567"))
+        # De OTRO pipeline: no tiene que sumar acá.
+        conn = await store.conexion_dedicada()
+        try:
+            async with conn.cursor() as cur:
+                otro_pipeline_id = str(uuid.uuid4())
+                self._otros_pipeline_ids.append(otro_pipeline_id)
+                await cur.execute(
+                    "INSERT INTO axioma_usage (facet, model, cost_usd, pipeline_id) "
+                    "VALUES ('ada','glm-5.3',9.999999,%s)", (otro_pipeline_id,),
+                )
+        finally:
+            conn.close()
+
+        gastado, incierto = await store.costo_gastado_pipeline(self.pipeline_id)
+        self.assertEqual(gastado, Decimal("0.358023"))
+        self.assertFalse(incierto)
+
+    async def test_una_fila_con_costo_null_marca_incertidumbre(self):
+        """El caso real de e570ac1c: se cobró, el precio no se pudo resolver
+        -- la suma NO es un techo confiable (Principio I, "errar hacia
+        gastar de menos")."""
+        await self._insertar(Decimal("0.100000"))
+        await self._insertar(None)
+        gastado, incierto = await store.costo_gastado_pipeline(self.pipeline_id)
+        self.assertTrue(incierto)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -33,6 +33,17 @@ class PipelineStatus(str, Enum):
     interrupted = "interrupted"
     expired     = "expired"  # T4 (2026-08-19): cosechado por jacobs/reaper.py,
                               # distinto de aborted (decisión humana/API explícita)
+    # Ronda de arreglo 2 (2026-09-18-arbitro-devuelve): el árbitro agotó el
+    # tope de devoluciones (spec §3.3) con una objeción SIN RESOLVER --
+    # jacobs/devolucion.py::RESULTADO_TOPE. Terminal, no ocupa cupo
+    # (jacobs/policy.py::ESTADOS_SIN_CUPO), y DISTINTO de `completed`: un
+    # pipeline `completed` fue aprobado (por el árbitro o porque no tiene
+    # uno); uno `disputed` terminó de correr con una objeción que ningún
+    # humano resolvió todavía. jax-platform tiene que mapearlo en su propio
+    # `_JACOBS_STATUS_MAP` (backend/jax_engine/state.py) -- sin esa entrada
+    # el poller lo trata como "running" para siempre (mismo defecto que
+    # `expired` tuvo hasta la Importante B de la ronda anterior).
+    disputed    = "disputed"
 
 
 class StepStatus(str, Enum):
