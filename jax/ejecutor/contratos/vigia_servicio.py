@@ -107,9 +107,14 @@ async def _principal(ruta_mision: Path) -> int:
     mision = mision_desde_bytes(await asyncio.to_thread(ruta_mision.read_bytes))
     ctx = arranque.contexto_desde_entorno(os.environ, mision.hosts)
     latido_cada_s = latido_cada_desde_entorno(os.environ, ctx.latido_max_s)
+    # Spec 2026-09-18-auditor-local-opcion.md §4: mismo punto único que
+    # mision_servicio.py::auditar y arranque.py::p_c5 -- las tres piezas de C5 auditan la
+    # MISMA misión con la MISMA faceta, elegida según si sus máquinas cargan datos de
+    # clientes.
     async with conexion(desechable=True) as conn:
         cfg = await eleccion_c5.leer_config(conn)
-    auditor_f = await resolve_facet(cfg.auditor_faceta)
+        auditor_f, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
+            conn, cfg=cfg, hosts_mision=mision.hosts, resolve_facet=resolve_facet)
     doc = json.loads(await asyncio.to_thread(ctx.cuenta.politica.read_bytes))
     maquinas = A.maquinas_de(politica.validar(doc).hosts, mision.hosts)
 

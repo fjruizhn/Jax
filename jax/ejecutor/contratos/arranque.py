@@ -13,9 +13,10 @@ impide lanzar el cerebro del Ejecutor sin pasar por acá.
 Dos formas (plan 6 con la enmienda del plan 4):
 - `hosts_mision=None`: el arranque del Ejecutor sin misión. Verifica los seis contratos
   y que cerebro y auditor sean de proveedores distintos.
-- `hosts_mision` con máquinas: antes de CADA misión. Además aplica la compuerta de datos
-  de clientes (`eleccion_c5.verificar_eleccion`): con la compuerta cerrada, una misión
-  sobre máquinas con datos de clientes NO arranca.
+- `hosts_mision` con máquinas: antes de CADA misión. Elige QUÉ faceta audita según si esas
+  máquinas cargan datos de clientes (`eleccion_c5.elegir_auditor_faceta`) y aplica la
+  compuerta (`eleccion_c5.validar_eleccion`): con la compuerta cerrada y el auditor
+  resuelto NO local, una misión sobre máquinas con datos de clientes NO arranca.
 En las dos, la pausa del Ejecutor tiene que estar ausente y no puede haber otro vigía
 latiendo (una misión por vez: el registro y la pausa son uno solo).
 
@@ -304,14 +305,28 @@ def pruebas_reales(ctx: Contexto) -> dict:
         # que puede morir con el loop (igual que exportar.py y probar_c5.py).
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-            cerebro, auditor_f = await resolve_facet(cfg.cerebro_faceta), await resolve_facet(cfg.auditor_faceta)
+            # Spec 2026-09-18-auditor-local-opcion.md §4: qué faceta audita ESTA misión depende
+            # de si sus máquinas cargan datos de clientes. `elegir_y_resolver_auditor` es el
+            # punto único: lo mismo usan mision_servicio.py (el turno) y vigia_servicio.py (el
+            # vigía en vivo), así los tres auditan una misión con la MISMA faceta.
+            auditor_f, con_clientes, conocidos = await eleccion_c5.elegir_y_resolver_auditor(
+                conn, cfg=cfg, hosts_mision=ctx.hosts_mision, resolve_facet=resolve_facet)
+            cerebro = await resolve_facet(cfg.cerebro_faceta)
             if ctx.hosts_mision is None:
                 eleccion = eleccion_c5.validar_proveedores(proveedor_cerebro=cerebro.provider_id,
                                                            proveedor_auditor=auditor_f.provider_id)
             else:
-                eleccion = await eleccion_c5.verificar_eleccion(
-                    conn, cfg=cfg, proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id,
-                    hosts_mision=ctx.hosts_mision)
+                # validar_eleccion, no verificar_eleccion: los hosts ya se leyeron arriba: una
+                # segunda consulta idéntica no aporta nada. auditor_es_local mira la DB (provider.
+                # is_local), NUNCA el nombre de la faceta elegida -- un 'auditor_local' mal
+                # bindeado a un proveedor de nube NO pasa gratis; sigue necesitando la compuerta
+                # abierta. Es la distinción que el spec pide dejar escrita: la compuerta ya no es
+                # el bloqueo, pero sigue gobernando el caso que de verdad importa.
+                eleccion = eleccion_c5.validar_eleccion(
+                    proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id,
+                    auditor_es_local=await eleccion_c5.es_local(conn, auditor_f.provider_id),
+                    admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset(ctx.hosts_mision),
+                    hosts_con_clientes=con_clientes, hosts_conocidos=conocidos)
 
         async def auditar(lote):
             return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)

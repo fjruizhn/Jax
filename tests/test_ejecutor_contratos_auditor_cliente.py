@@ -66,6 +66,28 @@ def test_transporte_no_soportado():
         asyncio.run(AC.auditar(LOTE, faceta=SimpleNamespace(**{**vars(FACETA), "transport": "http_gemini"}), max_tokens=10))
 
 
+def test_transporte_ollama_del_auditor_local_es_soportado():
+    """El auditor local (spec 2026-09-18-auditor-local-opcion.md) es un proveedor
+    'ollama': mismo body OpenAI-compat, sin credencial gestionada (facet_resolver exime
+    a 'ollama' de pedir una)."""
+    vistas = {}
+
+    def manejar(req):
+        vistas["url"] = str(req.url)
+        contenido = json.dumps({"hallazgos": [], "afirmaciones": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": contenido}}]})
+
+    faceta_local = SimpleNamespace(**{**vars(FACETA), "transport": "ollama",
+                                      "base_url": "http://127.0.0.1:11435/v1", "credential": ""})
+
+    async def escenario():
+        async with _cliente(manejar) as cli:
+            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, cliente=cli)
+    rev = asyncio.run(escenario())
+    assert rev.pausar is False
+    assert vistas["url"] == "http://127.0.0.1:11435/v1/chat/completions"
+
+
 def test_las_instrucciones_son_un_archivo_no_vacio():
     assert "fuera_de_mision" in AC.instrucciones() and "no_responde" in AC.instrucciones()
 

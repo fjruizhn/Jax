@@ -65,3 +65,57 @@ def test_la_consulta_de_hosts_va_por_la_clave_primaria():
             return await cur.fetchall()
     filas = asyncio.run(_con_inventario(accion))
     assert any("PRIMARY" in str(f) for f in filas), filas
+
+
+# --- spec 2026-09-18-auditor-local-opcion.md §4: el auditor se elige según los hosts -------
+
+async def _con_auditor_local_de_prueba(accion):
+    """Provider+model+binding sintéticos para 'auditor_local' -- la migración real de
+    jax-platform sólo los siembra con JAX_OLLAMA_CPU_URL en el entorno (no seteada acá),
+    igual que la fixture `auditor_local_bindeado` del lado de jax-platform. `model_ref` se
+    fija a mano (no vía el backfill de _seed_models_and_backfill): resolve_facet real
+    (facet_resolver._query_facet) hace JOIN contra `model` por esa columna."""
+    from jacobs import store
+    async with store.conexion() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+            await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
+            await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
+            await cur.execute(
+                "INSERT INTO provider (id, display_name, auth_type, is_local) "
+                "VALUES ('t-c5db-auditor-local', 'auditor local de prueba', 'none', TRUE)")
+            await cur.execute(
+                "INSERT INTO model (provider_id, model_id, source, source_checked_at) "
+                "VALUES ('t-c5db-auditor-local', 'modelo-cpu', 'manual', UTC_TIMESTAMP())")
+            model_ref = cur.lastrowid
+            await cur.execute(
+                "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
+                "VALUES ('auditor_local', 't-c5db-auditor-local', 'modelo-cpu', %s, 'primary')", (model_ref,))
+        await conn.commit()
+    try:
+        return await _con_inventario(accion)
+    finally:
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+                await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
+                await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
+            await conn.commit()
+
+
+def test_elegir_y_resolver_auditor_usa_el_local_con_datos_de_clientes():
+    """El punto único de elección (mision_servicio.py, vigia_servicio.py y arranque.py lo
+    llaman igual): una máquina con datos de clientes resuelve al proveedor local REAL; una
+    sin datos, al de nube -- con el mismo resolve_facet, contra la DB real."""
+    from facet_resolver import resolve_facet
+
+    async def accion(conn):
+        cfg = await E.leer_config(conn)
+        de_clientes, _, _ = await E.elegir_y_resolver_auditor(
+            conn, cfg=cfg, hosts_mision=frozenset({"c5-bridge"}), resolve_facet=resolve_facet)
+        propia, _, _ = await E.elegir_y_resolver_auditor(
+            conn, cfg=cfg, hosts_mision=frozenset({"c5-hall9000"}), resolve_facet=resolve_facet)
+        return de_clientes, propia
+    de_clientes, propia = asyncio.run(_con_auditor_local_de_prueba(accion))
+    assert de_clientes.provider_id == "t-c5db-auditor-local"
+    assert propia.provider_id == "openai"  # 'thot', el auditor de nube -- sin datos que proteger
