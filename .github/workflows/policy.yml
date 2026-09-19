@@ -336,14 +336,15 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
           python -m pytest -q jacobs/_subpipeline_contrato_io_test.py \
             tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
             las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py \
-            jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py 2>&1 | tee /tmp/out
+            jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py \
+            jacobs/_devolucion_persistencia_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -464,8 +465,20 @@ jobs:
           # Medido contra una MariaDB 11.8 efímera fresca en Docker con las
           # migraciones de jax-platform, mismo patrón que este job: 135 -> 141, 0
           # fallas nuevas.
-          grep -qE "^141 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 141 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 141 -> 151 (2026-09-18, arbitro-devuelve): +10 de
+          # jacobs/_devolucion_persistencia_test.py (archivo nuevo) -- la migración
+          # idempotente de costo_max_aceptado_usd/devoluciones, que persiste por los
+          # DOS caminos reales de creación (store.pipeline_create y
+          # cupo.reservar_cupo+completar_reserva -- este último es el que routes.py
+          # usa de verdad y NO escribía el tope antes de esta ronda), el tope de
+          # devoluciones fail-closed contra axioma_config, y el control (Principio
+          # VII) que prueba que aplicar_cupo=False evita que una devolución se frene
+          # contra su propio cupo (con aplicar_cupo=True, en la MISMA situación
+          # saturada, CupoAgotado sí sale). Medido local contra jax_memory_test_<sufijo>
+          # (MariaDB de hall9000, con la gobernanza real ya desplegada): 141 -> 151,
+          # 0 fallas nuevas.
+          grep -qE "^151 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 151 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -1023,6 +1036,7 @@ jobs:
           tests/test_ejecutor_reproduccion_u3.py
           jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py
           jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py
+          jacobs/_veredicto_test.py jacobs/_devolucion_test.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1157,6 +1171,7 @@ jobs:
             tests/test_ejecutor_reproduccion_u3.py \
             jacobs/_menu_sin_arbitro_test.py jacobs/_contexto_tope_total_test.py \
             jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py \
+            jacobs/_veredicto_test.py jacobs/_devolucion_test.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -2465,8 +2480,27 @@ jobs:
           # sin JAX_DB_HOST, los otros 12 dan verde (passed/xfailed), cero
           # skips. Piso corregido con el número del RUNNER, no el de esta
           # máquina.
-          grep -qE "^2192 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2192 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2192 -> 2225 (2026-09-18, arbitro-devuelve): +33 de dos archivos
+          # nuevos, puros (sin DB, sin red, sin el corpus de U3 ni el checkout
+          # de jax-platform -- así que no les toca ninguna de las dos
+          # correcciones de runner de la nota de arriba, y suman DIRECTO):
+          # jacobs/_veredicto_test.py (+20, jacobs/veredicto.py::parsear_veredicto
+          # -- el caso real es el primer test: la prosa REAL del step 6 de
+          # e570ac1c-8cae-4423-b397-d354f30b4328, leída de la base el
+          # 2026-09-18, da None porque no trae bloque ```veredicto```) y
+          # jacobs/_devolucion_test.py (+13, jacobs/devolucion.py::evaluar_y_devolver,
+          # mockeando jacobs.store y jacobs.prevuelo.prevuelo -- nunca la base
+          # real). Medido local (hall9000, con el corpus de U3 y sin el
+          # checkout de jax-platform que causa el 1 failed ajeno documentado
+          # arriba): 2206 -> 2240 passed (delta +34, no +33: el mirror de
+          # test_cola_uso_escritores.py PASA acá en vez de fallar -- este
+          # checkout no tiene ~/jax-platform local, así que no hay mirror
+          # desactualizado que comparar). Ese +1 es el mismo ajuste de
+          # entorno de siempre, no algo que sumar al piso del runner: el
+          # piso de acá se corrige con 2192 (el número YA corregido para el
+          # runner, sin el efecto de ninguno de los dos ajustes locales) + 33.
+          grep -qE "^2225 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2225 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
   # Los 3 tests de tests/ que validan contra la gobernanza REAL
   # (capability / capability_motor / motor), no un mock. Esas tablas las crea

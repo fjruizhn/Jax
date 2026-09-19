@@ -120,6 +120,17 @@ class Pipeline(BaseModel):
     context:            dict[str, Any] = Field(default_factory=dict)
     created_at:         float = 0.0
     updated_at:         float = 0.0
+    # El árbitro devuelve (spec 2026-09-18-arbitro-devuelve-design §3.4): el
+    # tope que el humano aceptó en la Mesa, PERSISTIDO -- antes era un
+    # parámetro por pedido que se perdía apenas terminaba el request
+    # (verificado: ni pipeline_create() ni continuar_transaccion() lo
+    # escribían). Una devolución automática lo necesita disponible minutos u
+    # horas después de creado el pipeline, no solo durante el request que lo
+    # aceptó.
+    costo_max_aceptado_usd: Decimal | None = None
+    # §3.3: cuántas veces YA devolvió el árbitro este pipeline. Contra el
+    # tope de axioma_config.jacobs.tope_devoluciones (store.get_tope_devoluciones).
+    devoluciones:       int = 0
     # dedication: interno, no expuesto en API
 
 

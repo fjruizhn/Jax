@@ -15,6 +15,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, AsyncIterator, Iterator
 
 import aiomysql
@@ -1037,6 +1038,31 @@ async def init_tables() -> None:
                     "parent_pipeline_id VARCHAR(36) NULL, ALGORITHM=INSTANT"),
                 ("depth", "ALTER TABLE jacobs_pipelines ADD COLUMN "
                     "depth INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
+                # El árbitro devuelve (spec 2026-09-18-arbitro-devuelve-design
+                # §3.4): "hoy costo_max_aceptado_usd es un parámetro por
+                # pedido y NO se persiste" -- verificado contra este mismo
+                # archivo antes de esta ronda: PipelineCreateRequest y
+                # ContinueRequest lo reciben, pero ni pipeline_create() ni
+                # continuar_transaccion() lo escribían. Sin esto, una
+                # devolución automática (jacobs/devolucion.py) no tiene
+                # contra qué presupuesto medirse -- y §3.4 es fail-closed:
+                # sin tope persistido, la devolución NO ocurre (nunca se
+                # inventa un permiso de gasto nuevo). DECIMAL(12,4): mismo
+                # grano que formatear_usd (jacobs/prevuelo_reglas.py,
+                # _GRANO_USD = 6 decimales) redondeado a 4 alcanza para
+                # guardar el máximo aceptado por un humano en la Mesa; el
+                # cálculo fino de costo sigue viviendo en prevuelo, esto solo
+                # persiste el tope.
+                ("costo_max_aceptado_usd", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "costo_max_aceptado_usd DECIMAL(12,4) NULL, ALGORITHM=INSTANT"),
+                # Cuántas veces el árbitro ya devolvió ESTE pipeline (spec
+                # §3.3): el tope de vueltas vive en axioma_config
+                # (jacobs.tope_devoluciones, ver get_tope_devoluciones), pero
+                # CONTRA QUÉ se compara ese tope es este contador, por
+                # pipeline -- nunca en memoria (un pipeline puede continuar
+                # en otro proceso/host).
+                ("devoluciones", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "devoluciones INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -1193,8 +1219,8 @@ async def pipeline_create(p: Pipeline, conexion: aiomysql.Connection | None = No
                     (pipeline_id, name, invoked_by, mode, status,
                      plan, current_step_index, max_steps, context_refs,
                      created_at, updated_at, user_id, tenant_id, run_epoch,
-                     parent_pipeline_id, depth)
-                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s, %s,%s)
+                     parent_pipeline_id, depth, costo_max_aceptado_usd, devoluciones)
+                VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s, %s,%s, %s, %s,%s, %s,%s)
                 """,
                 (
                     p.pipeline_id, p.name, p.invoked_by, p.mode, p.status.value,
@@ -1204,6 +1230,7 @@ async def pipeline_create(p: Pipeline, conexion: aiomysql.Connection | None = No
                     p.created_at, p.updated_at,
                     p.user_id, p.tenant_id, p.run_epoch,
                     p.parent_pipeline_id, p.depth,
+                    p.costo_max_aceptado_usd, p.devoluciones,
                 ),
             )
 
@@ -1540,12 +1567,41 @@ _SQL_PASO_A_CORRER = (
 # reanimaciones a la vez respetan el cupo exacto, y 50 creaciones CRUZADAS con
 # 50 reanimaciones también -- que era justo la carrera que rompía tener dos
 # mecanismos distintos (uno no ve la reserva del otro hasta que commitea).
-_SQL_PIPELINE_CONTINUAR = (
-    f"UPDATE jacobs_pipelines p {SQL_JOIN_CUPO} "
-    "SET p.status='running', p.run_epoch=p.run_epoch+1, p.plan=%s, "
-    "p.context_refs=%s, p.current_step_index=%s, p.updated_at=%s "
-    "WHERE p.pipeline_id=%s AND p.run_epoch=%s AND cupo_x.c < %s"
-)
+def _sql_pipeline_continuar(*, con_cupo: bool, incrementar_devoluciones: bool, con_costo: bool) -> str:
+    """El árbitro devuelve (spec 2026-09-18 §3.3/§3.4): mismo UPDATE
+    condicional de siempre, con tres SETs opcionales.
+
+    `con_cupo=False` es lo que usa jacobs/devolucion.py, y por un motivo
+    preciso: el pipeline que se devuelve está `running` AHORA MISMO -- ya
+    ocupa su lugar en `SQL_JOIN_CUPO` (cuenta los estados vivos). Unir el
+    JOIN igual haría que el propio pipeline se contara contra su propio
+    cupo (a cupo lleno, 3 de 3, `cupo_x.c < 3` da False aunque nadie esté
+    pidiendo un lugar NUEVO) -- un continue/resume externo SÍ necesita el
+    JOIN porque revive un pipeline que dejó de estar vivo (aborted/expired,
+    fuera de ESTADOS_QUE_OCUPAN_CUPO); una devolución nunca deja de estarlo."""
+    join = f" {SQL_JOIN_CUPO}" if con_cupo else ""
+    sets = [
+        "p.status='running'", "p.run_epoch=p.run_epoch+1",
+        "p.plan=%s", "p.context_refs=%s", "p.current_step_index=%s",
+    ]
+    if incrementar_devoluciones:
+        sets.append("p.devoluciones=p.devoluciones+1")
+    if con_costo:
+        sets.append("p.costo_max_aceptado_usd=%s")
+    sets.append("p.updated_at=%s")
+    tope = " AND cupo_x.c < %s" if con_cupo else ""
+    return (
+        f"UPDATE jacobs_pipelines p{join} SET {', '.join(sets)} "
+        f"WHERE p.pipeline_id=%s AND p.run_epoch=%s{tope}"
+    )
+
+
+#: La forma de siempre (continue/resume externos): con cupo, sin
+#: devoluciones, sin costo -- exactamente la sentencia que ya corría antes
+#: de esta ronda, ahora armada por `_sql_pipeline_continuar` en vez de
+#: escrita literal, para no mantener dos copias del mismo SQL.
+_SQL_PIPELINE_CONTINUAR = _sql_pipeline_continuar(
+    con_cupo=True, incrementar_devoluciones=False, con_costo=False)
 
 
 _SQL_EVENTO_CONTINUED = (
@@ -1565,29 +1621,55 @@ async def continuar_transaccion(
     evento_payload: dict | None,
     estado: EstadoDeTransaccion | None = None,
     cupo_maximo: int = MAX_PARALLEL_PIPELINES,
+    *,
+    evento_tipo: str = "PIPELINE_CONTINUED",
+    aplicar_cupo: bool = True,
+    incrementar_devoluciones: bool = False,
+    costo_max_aceptado_usd: Decimal | None = None,
 ) -> int | None:
     """Escrituras de continue en UNA transacción (spec 2026-09-17 §5.2 regla
     10): bloquea la fila del pipeline, confirma que nadie la cambió desde el
     análisis (misma época y mismo status), resetea los pasos a correr, reescribe
     plan y contexto, pone running e incrementa la época, y -- si `evento_payload`
-    no es None -- inserta el evento PIPELINE_CONTINUED con el MISMO cursor,
-    antes del commit (Ruling R22: regla 10 lo exige dentro de la transacción,
-    no después). `evento_payload` es OBLIGATORIO (Principio IX / revisión
-    fix round 2): un default silencioso dejaría que un llamador se saltara el
-    evento de auditoría sin que se note en el sitio de la llamada -- el
-    llamador tiene que decidir explícitamente None si de verdad no quiere
-    evento (ningún camino de producción lo hace: continuar.py siempre arma un
-    payload real). Devuelve la época nueva, o None si otro pedido ganó
-    (época/status ya no coinciden, o -- cinturón, Ruling R23 -- el UPDATE
-    final no tocó la fila que el SELECT...FOR UPDATE acababa de ver). Un error
-    a mitad hace ROLLBACK: nada cambia, ni los pasos, ni el pipeline, ni el
-    evento.
+    no es None -- inserta el evento (MISMO cursor, antes del commit — Ruling
+    R22: regla 10 lo exige dentro de la transacción, no después).
+    `evento_payload` es OBLIGATORIO (Principio IX / revisión fix round 2): un
+    default silencioso dejaría que un llamador se saltara el evento de
+    auditoría sin que se note en el sitio de la llamada -- el llamador tiene
+    que decidir explícitamente None si de verdad no quiere evento (ningún
+    camino de producción lo hace: continuar.py y jacobs/devolucion.py
+    siempre arman un payload real). Devuelve la época nueva, o None si otro
+    pedido ganó (época/status ya no coinciden, o -- cinturón, Ruling R23 --
+    el UPDATE final no tocó la fila que el SELECT...FOR UPDATE acababa de
+    ver). Un error a mitad hace ROLLBACK: nada cambia, ni los pasos, ni el
+    pipeline, ni el evento.
+
+    Parámetros nuevos (spec 2026-09-18-arbitro-devuelve-design), todos
+    keyword-only y con el default que reproduce el comportamiento de
+    siempre -- ningún caller existente (continuar.py) cambia:
+      - `evento_tipo`: el árbitro devuelve con "PIPELINE_DEVUELTO", no
+        "PIPELINE_CONTINUED" -- son dos motivos de auditoría distintos
+        aunque la escritura sea la misma.
+      - `aplicar_cupo`: False para una devolución (ver
+        `_sql_pipeline_continuar` -- el pipeline ya está vivo, no está
+        pidiendo un lugar nuevo).
+      - `incrementar_devoluciones`: True suma 1 a `jacobs_pipelines.devoluciones`
+        en la MISMA sentencia (spec §3.3: el contador es lo que el tope mide).
+      - `costo_max_aceptado_usd`: cuando no es None, lo persiste junto con
+        el resto (spec §3.4: un /continue humano con un nuevo tope lo deja
+        disponible para la próxima devolución automática, no solo para
+        ESTE pedido).
 
     `estado` (EstadoDeTransaccion, re-revisión final): mismo mecanismo que
     crear (R41). Si la conexión se corta o el plazo vence DURANTE el COMMIT,
     desde acá no se puede saber si el servidor confirmó; queda
     `estado.incierta` para que quien llama lo diga en su 503."""
     estado = estado if estado is not None else EstadoDeTransaccion()
+    con_costo = costo_max_aceptado_usd is not None
+    sql_pipeline = _SQL_PIPELINE_CONTINUAR if (aplicar_cupo and not incrementar_devoluciones and not con_costo) else (
+        _sql_pipeline_continuar(
+            con_cupo=aplicar_cupo, incrementar_devoluciones=incrementar_devoluciones, con_costo=con_costo)
+    )
     conn = await conexion_dedicada(found_rows=True)
     try:
         await conn.begin()
@@ -1600,25 +1682,44 @@ async def continuar_transaccion(
                     return None
                 for paso in pasos_a_correr:
                     await cur.execute(_SQL_PASO_A_CORRER, (paso.facet, paso.motor, paso.step_id, pipeline_id))
-                filas_pipeline = await cur.execute(_SQL_PIPELINE_CONTINUAR, (
+                params = [
                     json.dumps([s.model_dump() for s in plan], ensure_ascii=False),
                     json.dumps(context, ensure_ascii=False),
-                    current_step_index, time.time(), pipeline_id, epoca_leida,
-                    cupo_maximo,
-                ))
+                    current_step_index,
+                ]
+                if con_costo:
+                    params.append(costo_max_aceptado_usd)
+                params.append(time.time())
+                params += [pipeline_id, epoca_leida]
+                if aplicar_cupo:
+                    params.append(cupo_maximo)
+                filas_pipeline = await cur.execute(sql_pipeline, params)
                 if filas_pipeline != 1:
                     await conn.rollback()
-                    # R23 decía que esta rama no se alcanza: el SELECT...FOR
-                    # UPDATE ya fijó la fila, la época y el status. Desde que el
-                    # UPDATE lleva la condición del cupo (2026-09-17) SÍ se
-                    # alcanza, y por una sola causa -- no hay lugar --, porque
-                    # todo lo demás quedó verificado bajo el candado de fila unas
-                    # líneas más arriba. Por eso se puede afirmar el motivo sin
-                    # volver a leer: es el único que queda.
-                    raise CupoAgotado(cupo_maximo, cupo_maximo)
+                    if aplicar_cupo:
+                        # R23 decía que esta rama no se alcanza: el SELECT...FOR
+                        # UPDATE ya fijó la fila, la época y el status. Desde que el
+                        # UPDATE lleva la condición del cupo (2026-09-17) SÍ se
+                        # alcanza, y por una sola causa -- no hay lugar --, porque
+                        # todo lo demás quedó verificado bajo el candado de fila unas
+                        # líneas más arriba. Por eso se puede afirmar el motivo sin
+                        # volver a leer: es el único que queda.
+                        raise CupoAgotado(cupo_maximo, cupo_maximo)
+                    # aplicar_cupo=False (devolución): sin el JOIN del cupo no
+                    # hay una segunda causa posible -- el SELECT...FOR UPDATE
+                    # de arriba, en ESTA misma transacción, ya fijó fila,
+                    # época y status por clave primaria. Que el UPDATE
+                    # siguiente por esa MISMA clave y época no toque la fila
+                    # es un invariante roto, no un motivo de negocio.
+                    raise RuntimeError(
+                        f"continuar_transaccion: el UPDATE de {pipeline_id} afectó "
+                        f"{filas_pipeline} filas con aplicar_cupo=False -- el "
+                        f"SELECT...FOR UPDATE previo ya había verificado época y "
+                        f"status; esto no debería poder pasar."
+                    )
                 if evento_payload is not None:
                     await cur.execute(_SQL_EVENTO_CONTINUED, (
-                        pipeline_id, None, "PIPELINE_CONTINUED",
+                        pipeline_id, None, evento_tipo,
                         json.dumps(evento_payload, ensure_ascii=False), time.time(),
                     ))
             estado.enviando_commit = True
@@ -1654,6 +1755,13 @@ def _row_to_pipeline(row: dict) -> Pipeline:
         run_epoch=int(row.get("run_epoch") or 0),
         parent_pipeline_id=row.get("parent_pipeline_id"),
         depth=int(row.get("depth") or 0),
+        # .get() (mismo motivo que user_id/tenant_id, línea de arriba): una
+        # DB sin migrar todavía (columnas nuevas de esta ronda ausentes) no
+        # tiene que romper la lectura -- degrada a "sin tope persistido" /
+        # "cero devoluciones", que es lo mismo que valdría si la fila fuera
+        # anterior a esta ronda.
+        costo_max_aceptado_usd=row.get("costo_max_aceptado_usd"),
+        devoluciones=int(row.get("devoluciones") or 0),
         mode=row["mode"],
         status=PipelineStatus(row["status"]),
         plan=steps,
@@ -1868,6 +1976,64 @@ async def get_motor_governance() -> dict[str, dict]:
         "capabilities": capabilities, "motors": motors, "facets": facets,
         "arbitro_faceta": arbitro_faceta,
     }
+
+
+# ----------------------------------------------------------------
+#  El árbitro devuelve (spec 2026-09-18-arbitro-devuelve-design §3.3)
+# ----------------------------------------------------------------
+
+#: config_key en axioma_config. Mismo esquema clave/valor que ya usa
+#: 'ejecutor.auditor_faceta' (get_motor_governance, arriba) -- ni una fila
+#: nueva de infraestructura ni una tabla propia. "jacobs." y no "ejecutor."
+#: porque esto es del orquestador de Jacobs (cuántas veces SU árbitro puede
+#: devolver un paso), no del Ejecutor de Contratos.
+_CONFIG_KEY_TOPE_DEVOLUCIONES = "jacobs.tope_devoluciones"
+
+#: Fail-closed (Ruling 2, mismo criterio que arbitro_faceta): sin la fila en
+#: axioma_config, o con un valor que no es un entero >= 0, el tope es CERO --
+#: nunca "sin tope" ni un valor inventado. Cero significa que toda devolución
+#: cae de inmediato en la rama "tope alcanzado" (jacobs/devolucion.py): el
+#: pipeline no se rompe, simplemente no devuelve nada hasta que alguien ponga
+#: la fila a propósito. Es el mismo defecto seguro que "sin faceta árbitro no
+#: hay plan de 2+ pasos": faltar la config no habilita en silencio.
+TOPE_DEVOLUCIONES_POR_DEFECTO = 0
+
+
+async def get_tope_devoluciones() -> int:
+    """Cuántas veces puede devolver el árbitro UN pipeline (spec §3.3): "el
+    tope vive en configuración, no en el código". Se lee en el momento en
+    que el ejecutor evalúa el veredicto (jacobs/devolucion.py), no en
+    build() -- una devolución puede pasar minutos u horas después de armado
+    el plan, y el valor tiene que ser el vigente en ESE momento, no una foto
+    vieja de get_motor_governance()."""
+    async with conexion_del_pool() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT config_value FROM axioma_config WHERE config_key = %s",
+                (_CONFIG_KEY_TOPE_DEVOLUCIONES,),
+            )
+            fila = await cur.fetchone()
+    if not fila or fila[0] is None:
+        logger.warning(
+            "get_tope_devoluciones: sin fila axioma_config.%s -- tope=%d (fail-closed)",
+            _CONFIG_KEY_TOPE_DEVOLUCIONES, TOPE_DEVOLUCIONES_POR_DEFECTO,
+        )
+        return TOPE_DEVOLUCIONES_POR_DEFECTO
+    try:
+        valor = int(str(fila[0]).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "get_tope_devoluciones: axioma_config.%s=%r no es un entero -- tope=%d (fail-closed)",
+            _CONFIG_KEY_TOPE_DEVOLUCIONES, fila[0], TOPE_DEVOLUCIONES_POR_DEFECTO,
+        )
+        return TOPE_DEVOLUCIONES_POR_DEFECTO
+    if valor < 0:
+        logger.warning(
+            "get_tope_devoluciones: axioma_config.%s=%d es negativo -- tope=%d (fail-closed)",
+            _CONFIG_KEY_TOPE_DEVOLUCIONES, valor, TOPE_DEVOLUCIONES_POR_DEFECTO,
+        )
+        return TOPE_DEVOLUCIONES_POR_DEFECTO
+    return valor
 
 
 # ----------------------------------------------------------------

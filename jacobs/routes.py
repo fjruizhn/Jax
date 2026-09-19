@@ -606,6 +606,11 @@ async def create_pipeline(req: PipelineCreateRequest, background: BackgroundTask
                 plan=steps,
                 max_steps=req.max_steps,
                 context={"objective": req.objective},
+                # El árbitro devuelve (spec 2026-09-18 §3.4): PERSISTIDO
+                # desde la creación -- antes se validaba contra el pre-vuelo
+                # (arriba) y se descartaba; una devolución automática, horas
+                # después, necesita seguir viéndolo.
+                costo_max_aceptado_usd=req.costo_max_aceptado_usd,
                 created_at=now,
                 updated_at=now,
             )
