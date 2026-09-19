@@ -25,6 +25,30 @@ escrito, nunca una lista que alguien tiene que recordar actualizar.
 Auto-verificado (Principio VII -- un freno sin prueba no es freno): un archivo sintético
 con el patrón prohibido, sin excepción, tiene que aparecer; retirado (o con excepción),
 tiene que desaparecer. Ver test_un_archivo_con_el_patron_se_detecta.
+
+**Qué NO ve este detector (deuda declarada, aceptada por Fernando el 2026-09-18, misma
+limitación que P10/test_no_fail_open_except.py -- un control que no dice lo que no ve
+invita a confiar de más en él).** El patrón es un grep sobre el TEXTO literal
+`resolve_facet(... cfg.auditor_faceta ...)`, no un analizador que entiende el flujo de
+datos. Tres formas reales de esquivarlo, ninguna hipotética:
+
+1. **Alias.** `f = cfg.auditor_faceta; auditor = await resolve_facet(f)` -- la mención de
+   `cfg.auditor_faceta` y la llamada a `resolve_facet` quedan en líneas (o expresiones)
+   distintas; el regex exige las dos DENTRO del mismo paréntesis.
+2. **Un objeto de config con otro nombre.** `configuracion.auditor_faceta` en vez de
+   `cfg.auditor_faceta` -- el detector busca el identificador `cfg` literal, no CUALQUIER
+   variable que resulte ser una `ConfigC5`. Un `leer_config()` asignado a `configuracion`,
+   `c`, `conf`, etc. pasa por debajo.
+3. **`getattr` dinámico.** `getattr(cfg, "auditor_faceta")` -- no hay ningún atributo
+   `.auditor_faceta` como texto en la llamada a `resolve_facet`; el nombre del campo está
+   en un string aparte.
+
+Endurecerlo (parsear con `ast`, seguir asignaciones simples, mirar `getattr` con literal)
+es posible -- ver cómo `test_aiomysql_connect_timeout_tripwire.py` usa `ast` en vez de grep
+para este mismo tipo de problema -- pero por decisión de Fernando (revisión 2026-09-18) NO
+se hace en esta ronda: el detector actual ya cerró el hallazgo real (mision_de_humo.py) y
+endurecerlo sin un segundo caso real que lo justifique es alcance nuevo, no la corrección
+pedida. Queda para cuando aparezca la próxima variante real, igual que P10.
 """
 from __future__ import annotations
 
