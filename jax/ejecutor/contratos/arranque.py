@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from jax.ejecutor.contratos import cuenta_axioma, instalacion, pausa, politica
+from jax.ejecutor.contratos import cuenta_axioma, eleccion_c5, instalacion, pausa, politica
 from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.fallo import Fallo
 
@@ -271,10 +271,31 @@ async def verificar_maquinas(ctx: Contexto, hosts, *, correr=cuenta_axioma.corre
             + await verificar_c6_estatico(ctx, a.con_c6, correr=correr))
 
 
+async def eleccion_del_auditor(conn, *, hosts_mision, cfg: eleccion_c5.ConfigC5, resolve_facet) -> tuple:
+    """Elige y resuelve el auditor de C5 para ESTA misión, y corre la compuerta. Punto de
+    prueba directo de la parte que el spec 2026-09-18-auditor-local-opcion.md §4 exige
+    dejar escrita: `auditor_es_local` sale de `eleccion_c5.es_local(conn, ...)` --
+    `provider.is_local` en la DB -- NUNCA de comparar el nombre de la faceta elegida. Un
+    'auditor_local' mal bindeado a un proveedor de nube no pasa gratis; sigue
+    necesitando la compuerta abierta. Devuelve `(faceta_resuelta, fallos_de_eleccion)`;
+    `p_c5` sólo le agrega los estáticos y el canario."""
+    auditor_f, con_clientes, conocidos = await eleccion_c5.elegir_y_resolver_auditor(
+        conn, cfg=cfg, hosts_mision=hosts_mision, resolve_facet=resolve_facet)
+    cerebro = await resolve_facet(cfg.cerebro_faceta)
+    if hosts_mision is None:
+        return auditor_f, eleccion_c5.validar_proveedores(proveedor_cerebro=cerebro.provider_id,
+                                                           proveedor_auditor=auditor_f.provider_id)
+    return auditor_f, eleccion_c5.validar_eleccion(
+        proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id,
+        auditor_es_local=await eleccion_c5.es_local(conn, auditor_f.provider_id),
+        admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset(hosts_mision),
+        hosts_con_clientes=con_clientes, hosts_conocidos=conocidos)
+
+
 def pruebas_reales(ctx: Contexto) -> dict:
     from facet_resolver import resolve_facet
     from jacobs.store import conexion
-    from jax.ejecutor.contratos import auditor_cliente, canario_c1, canario_c3, canario_c5, eleccion_c5, exportar
+    from jax.ejecutor.contratos import auditor_cliente, canario_c1, canario_c3, canario_c5, exportar
 
     def _politica():
         return politica.validar(json.loads(ctx.cuenta.politica.read_bytes()))
@@ -305,28 +326,8 @@ def pruebas_reales(ctx: Contexto) -> dict:
         # que puede morir con el loop (igual que exportar.py y probar_c5.py).
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-            # Spec 2026-09-18-auditor-local-opcion.md §4: qué faceta audita ESTA misión depende
-            # de si sus máquinas cargan datos de clientes. `elegir_y_resolver_auditor` es el
-            # punto único: lo mismo usan mision_servicio.py (el turno) y vigia_servicio.py (el
-            # vigía en vivo), así los tres auditan una misión con la MISMA faceta.
-            auditor_f, con_clientes, conocidos = await eleccion_c5.elegir_y_resolver_auditor(
-                conn, cfg=cfg, hosts_mision=ctx.hosts_mision, resolve_facet=resolve_facet)
-            cerebro = await resolve_facet(cfg.cerebro_faceta)
-            if ctx.hosts_mision is None:
-                eleccion = eleccion_c5.validar_proveedores(proveedor_cerebro=cerebro.provider_id,
-                                                           proveedor_auditor=auditor_f.provider_id)
-            else:
-                # validar_eleccion, no verificar_eleccion: los hosts ya se leyeron arriba: una
-                # segunda consulta idéntica no aporta nada. auditor_es_local mira la DB (provider.
-                # is_local), NUNCA el nombre de la faceta elegida -- un 'auditor_local' mal
-                # bindeado a un proveedor de nube NO pasa gratis; sigue necesitando la compuerta
-                # abierta. Es la distinción que el spec pide dejar escrita: la compuerta ya no es
-                # el bloqueo, pero sigue gobernando el caso que de verdad importa.
-                eleccion = eleccion_c5.validar_eleccion(
-                    proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id,
-                    auditor_es_local=await eleccion_c5.es_local(conn, auditor_f.provider_id),
-                    admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset(ctx.hosts_mision),
-                    hosts_con_clientes=con_clientes, hosts_conocidos=conocidos)
+            auditor_f, eleccion = await eleccion_del_auditor(
+                conn, hosts_mision=ctx.hosts_mision, cfg=cfg, resolve_facet=resolve_facet)
 
         async def auditar(lote):
             return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)

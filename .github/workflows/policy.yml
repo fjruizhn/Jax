@@ -52,6 +52,30 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
+      # Detector agregado 2026-09-18 (ronda de arreglo del auditor local, hallazgo
+      # CRÍTICO de la revisión): scripts/ejecutor_contratos/mision_de_humo.py validaba
+      # el arranque contra la máquina de la misión (auditor local incluido) y auditaba
+      # la entrega real con la faceta de NUBE, resuelta por su cuenta -- mismo criterio
+      # de detector mecánico que P10, sin dependencias nuevas.
+      - run: python -m pytest policy/tests/test_auditor_c5_punto_unico.py -v
+
+  # Job propio, chico, sin dependencias pesadas (mismo criterio que no-fail-open-except):
+  # la garantía de "cero GPU" del auditor local (2026-09-18, hallazgo ALTO de la revisión)
+  # vive en ops/ejecutor/ollama-cpu.env.plantilla, no sólo en /etc/jax/ollama-cpu.env --
+  # este job audita que las cuatro variables sigan escritas y vacías, y que el instalador
+  # exija lo que hace falta y corra el canario. El canario en sí (una generación real
+  # contra Ollama) no corre acá -- este runner no tiene la GPU ni el Ollama de hall9000;
+  # se verificó a mano contra el proceso real (rojo con la config rota, verde restaurada,
+  # ver ops/ejecutor/canario_ollama_cpu.sh y la Biblioteca de esta ronda).
+  auditor-local-gpu-off:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest tests/test_ejecutor_ollama_cpu_gpu_off.py -v
 
   # Detector de archivos de test sin job de CI (historial-y-arreglos-de-pipeline,
   # 2026-09-18). El hallazgo que lo motiva: de 6 archivos de test creados en
