@@ -1,0 +1,14 @@
+# SHADOW ONLY: no autoriza, no bloquea producción y no reemplaza policy/VERSION.
+schema_version: "1.0"
+kind: JAX_POLICY_SHADOW_MANIFEST
+mode: SHADOW
+canonicalizer_version: JAX-POLICY-C14N/2
+bootstrap_bundle_id: sha256:a01df4bb87f628202b7ffa5b28e72f50238f5a00dc6bd29b11fbe7241eacf594
+source_classification: LEGACY_RULE_SHADOW
+legacy_rule_glob: policy/rules/*.yaml
+authorizes: false
+blocks_production: false
+replaces_legacy_identity: false
+writes_policy: false
+shadow_policy_corpus_hash: sha256:2ff0a5e264bb956ce9c6890f4d379ae7f1d56f57197ceb72c5d95cc383ca8536
+legacy_identity_mode: COMPARE_ONLY

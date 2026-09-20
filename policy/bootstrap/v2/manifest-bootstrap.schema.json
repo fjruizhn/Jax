@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jax://policy/bootstrap/v2/manifest-bootstrap.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "mode",
+    "canonicalizer_version",
+    "bootstrap_bundle_id",
+    "source_classification",
+    "legacy_rule_glob",
+    "authorizes",
+    "blocks_production",
+    "replaces_legacy_identity",
+    "writes_policy",
+    "shadow_policy_corpus_hash",
+    "legacy_identity_mode"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "kind": {"const": "JAX_POLICY_SHADOW_MANIFEST"},
+    "mode": {"const": "SHADOW"},
+    "canonicalizer_version": {"const": "JAX-POLICY-C14N/2"},
+    "bootstrap_bundle_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "source_classification": {"const": "LEGACY_RULE_SHADOW"},
+    "legacy_rule_glob": {"const": "policy/rules/*.yaml"},
+    "authorizes": {"const": false},
+    "blocks_production": {"const": false},
+    "replaces_legacy_identity": {"const": false},
+    "writes_policy": {"const": false},
+    "shadow_policy_corpus_hash": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "legacy_identity_mode": {"const": "COMPARE_ONLY"}
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "jax://policy/bootstrap/v2/legacy-rule-shadow.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "statement",
+    "origin",
+    "status",
+    "enforcement",
+    "version",
+    "created",
+    "amended_by"
+  ],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*$"},
+    "statement": {"type": "string", "minLength": 1},
+    "scope": {"type": "string", "minLength": 1},
+    "blocking": {"type": "boolean"},
+    "origin": {"type": "string", "minLength": 1},
+    "status": {
+      "enum": ["NORMATIVA", "NORMATIVA_PENDIENTE", "CULTURAL", "HISTORICA"]
+    },
+    "enforcement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mechanism", "test"],
+      "properties": {
+        "mechanism": {"type": ["string", "null"]},
+        "test": {"type": ["string", "null"]}
+      }
+    },
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+$"},
+    "created": {"type": "string", "minLength": 1},
+    "amended_by": {"type": ["string", "null"]},
+    "notes": {"type": ["string", "null"]},
+    "history": {"type": "array", "items": {"type": "string"}},
+    "document_reference": {"type": "string"},
+    "runtime_fact": {}
+  }
+}
