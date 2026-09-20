@@ -1,0 +1,13 @@
+schema_version: "1.0"
+kind: JAX_AUTHORITATIVE_POLICY_MANIFEST
+canonicalizer_version: JAX-POLICY-C14N/3
+bootstrap_bundle_id: sha256:181729b45aa186b353390c304700848ba43d4208ee8f800e2c4915d083141aab
+id: jax-authoritative-policy-manifest
+manifest_version: "1.0"
+governed_by: {authority_meta_contract_id: jax-authority-meta-contract, authority_meta_contract_kind: JAX_AUTHORITY_META_CONTRACT}
+candidate_lifecycle: {activation_mode: CANDIDATE_ONLY, authorizes_production: false}
+corpus: {jurisdiction: JAX, legacy_identity_mode: COMPARE_ONLY}
+membership: {paths_are_explicit: true, symlinks_allowed: false, unlisted_documents_have_normative_force: false, duplicate_ids: forbidden, duplicate_paths: forbidden, document_self_classification_authoritative: false}
+normative_documents: []
+reference_documents:
+  - {reference_id: legacy-p10-fail-open, source_locator: policy/rules/P10-fail-open-prohibido.yaml, source_type: LEGACY_CORPUS, legacy_status: NORMATIVA, display_name: P10 fail-open prohibido}

@@ -1,0 +1,32 @@
+schema_version: "1.0"
+kind: JAX_AUTHORITY_META_CONTRACT
+canonicalizer_version: JAX-POLICY-C14N/3
+bootstrap_bundle_id: sha256:181729b45aa186b353390c304700848ba43d4208ee8f800e2c4915d083141aab
+id: jax-authority-meta-contract
+contract_version: "1.0"
+root_pair: {authoritative_manifest_id: jax-authoritative-policy-manifest, authoritative_manifest_kind: JAX_AUTHORITATIVE_POLICY_MANIFEST}
+scope: {jurisdiction: JAX, governs: [policy_corpus, authority_resolution], excludes: [runtime_authority_state, authority_ledger, decision_ledger, external_constraint_evidence]}
+human_authority:
+  constitutional_ratifier: {actor_id: human:fernando, actor_kind: HUMAN_LOGICAL, powers: [RATIFY_CONSTITUTION, RATIFY_AMENDMENT, RATIFY_REPEAL, RATIFY_AUTHENTIC_INTERPRETATION, RATIFY_PROTECTED_METANORM_CHANGE, RATIFY_AUTHORITY_META_CONTRACT_CHANGE]}
+  mesa: {role: ADVISORY_REVIEW_AUDIT, normative_vote: false, may_ratify: false}
+  agents: {normative_vote: false, may_ratify: false, may_expand_authority: false}
+candidate_lifecycle: {activation_mode: CANDIDATE_ONLY, activation_requires: [FUTURE_HUMAN_RATIFICATION_RECORD, EXACT_POLICY_CORPUS_HASH_BINDING], git_commit_is_ratification: false, git_push_is_ratification: false}
+precedence: {authority_meta_contract: ROOT_META_LEVEL, ordered_document_layers: [PROTECTED_METANORM, CONSTITUTIONAL_CORE, PRODUCT_POLICY, SUBORDINATE_POLICY], overlay_position: POST_CORPUS_WITHIN_VALID_DELEGATED_SCOPE, external_constraints: EXTERNAL_CEILING, equal_rank_conflict: REJECT_UNTIL_RATIFIED_RESOLUTION, unresolved_conflict: REJECT}
+normative_sources: {permitted_document_classes: [CONSTITUTIONAL_CORE, PRODUCT_POLICY, SUBORDINATE_POLICY], manifest_classification_required: true, document_self_classification_authoritative: false, legacy_status_is_normative_force: false, unlisted_documents_have_normative_force: false}
+protected_metanorms:
+  - {id: HUMAN_RATIFICATION_REQUIRED, statement: Constitutional changes require authorized human ratification., non_waivable: true}
+  - {id: AGENTS_HAVE_NO_NORMATIVE_VOTE, statement: Agents have no normative vote and may not ratify policy., non_waivable: true}
+  - {id: NO_SELF_EXPANSION_OF_AUTHORITY, statement: No actor or mechanism may self-expand authority., non_waivable: true}
+  - {id: FAIL_CLOSED_BY_DEFAULT, statement: Missing invalid ambiguous or unauthorized authority is rejected., non_waivable: true}
+  - {id: NON_WAIVABLE_RULES_CANNOT_BE_WAIVED, statement: Exceptions suspensions and delegations may not waive non-waivable rules., non_waivable: true}
+meta_contract_amendment: {requires: [RATIFY_AUTHORITY_META_CONTRACT_CHANGE, NEW_ROOT_PAIR, NEW_POLICY_CORPUS_HASH], implicit_amendment: forbidden, subordinate_document_may_amend: false, protected_metanorm_document_may_amend: false}
+exceptions: {storage: SEPARATE_AUTHORITY_LEDGER, modifies_policy_corpus: false, creates_precedent: false, requires_explicit_scope: true, requires_explicit_expiry_or_bound: true, may_waive_non_waivable: false, absent_or_invalid: REJECT}
+delegations: {storage: SEPARATE_AUTHORITY_LEDGER, default: DENY, may_self_expand: false, must_be_scope_bounded: true, must_be_time_or_event_bounded: true, may_override_protected_metanorm: false}
+suspensions: {storage: SEPARATE_AUTHORITY_LEDGER, modifies_policy_corpus: false, requires_explicit_scope: true, requires_explicit_expiry_or_bound: true, may_suspend_non_waivable: false, absent_or_invalid: REJECT}
+interpretations:
+  GENERAL_NORMATIVE: {changes_policy_corpus: true, requires_human_ratification: true}
+  BINDING_PARTICULAR: {storage: SEPARATE_AUTHORITY_LEDGER, changes_policy_corpus: false, changes_effective_authority_context: WHEN_MATERIAL}
+  EXPLANATORY: {binding_force: NONE, changes_policy_corpus: false, changes_effective_authority_context: false}
+amendment_and_repeal: {changes_policy_corpus: true, requires_human_ratification: true, requires_new_policy_corpus_hash: true, implicit_repeal: forbidden}
+external_constraints: {jax_normative: false, effect: CEILING_ONLY, may_grant_authority: false, provenance_required_at_evaluation: true}
+fail_closed: {default: REJECT, missing_or_invalid_root_pair: REJECT, invalid_membership: REJECT, unknown_document_class: REJECT, use_of_non_active_candidate: REJECT, invalid_or_expired_overlay: REJECT, unresolved_precedence: REJECT}

@@ -1,0 +1,14 @@
+{
+  "authorizes": false,
+  "bundle_format": "JAX-POLICY-BOOTSTRAP/3",
+  "canonicalizer_version": "JAX-POLICY-C14N/3",
+  "purpose": "CANDIDATE_AUTHORITY_CONTRACT",
+  "unicode_normalization": "NFC",
+  "unicode_version": "16.0.0",
+  "fixed_root_locators": {"authority_meta_contract": "policy/authority.yaml", "authoritative_manifest": "policy/manifest.yaml"},
+  "schema_ids": {"authority_meta_contract": "JAX_AUTHORITY_META_CONTRACT/1", "authoritative_manifest": "JAX_AUTHORITATIVE_POLICY_MANIFEST/1", "normative_policy_document": "JAX_NORMATIVE_POLICY_DOCUMENT/1"},
+  "schema_files": {"authority_meta_contract": "authority-meta-contract.schema.json", "authoritative_manifest": "authoritative-policy-manifest.schema.json", "normative_policy_document": "normative-policy-document.schema.json"},
+  "allowed_document_classes": ["CONSTITUTIONAL_CORE", "PRODUCT_POLICY", "SUBORDINATE_POLICY"],
+  "field_class_registry": {"id": "JAX_POLICY_FIELD_CLASSES/3", "file": "field-classes.json"},
+  "digest_resources": ["bundle.json", "field-classes.json", "authority-meta-contract.schema.json", "authoritative-policy-manifest.schema.json", "normative-policy-document.schema.json"]
+}

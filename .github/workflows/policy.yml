@@ -2569,6 +2569,7 @@ jobs:
           tests/policy/test_policy_corpus_hash.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
+          tests/policy/test_v3_policy_corpus_hash.py
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"

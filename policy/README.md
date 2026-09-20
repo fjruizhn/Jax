@@ -78,3 +78,10 @@ policy/
     validate_corpus.py    valida el esquema de rules/*.yaml
     generate_corpus.py    genera generated/CORPUS.md
 ```
+# C14N/3 candidate authority corpus
+
+`policy/authority.yaml` and `policy/manifest.yaml` are a candidate-only,
+bootstrap-pinned C14N/3 root pair. They do not activate, ratify, or enforce
+authority. Run `policy/canonicalization/jax-policy-c14n-v3 candidate-hash .`
+to validate and print the candidate corpus hash read-only. C14N/2 remains the
+immutable shadow foundation.
