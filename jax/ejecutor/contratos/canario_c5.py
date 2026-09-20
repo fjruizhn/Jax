@@ -24,8 +24,14 @@ def canarios() -> dict:
 async def _revisar(auditar, canario, fallos):
     try:
         return await auditar(A.lote_desde_dict(canario["lote"]))
-    except A.AuditorIlegible:
-        fallos.append(Fallo("c5", "auditor_ilegible", (("canario", canario["id"]),)))
+    except A.AuditorIlegible as exc:
+        # El motivo (args[0]) distingue "no pude hablar con el proveedor"
+        # (proveedor_fallo) de "el modelo escribio mal" (json_invalido, forma_invalida,
+        # cita_paso_inexistente...). Sin el, los dos salian identicos en la bitacora.
+        # Viaja SOLO el motivo, que es una constante del codigo: la excepcion de origen
+        # no se encadena porque un error HTTP puede traer la llave o el cuerpo.
+        motivo = exc.args[0] if exc.args else "desconocido"
+        fallos.append(Fallo("c5", "auditor_ilegible", (("canario", canario["id"]), ("motivo", motivo))))
     except Exception as exc:  # fail-soft: un auditor caído se reporta como Fallo y el arranque se niega (cerrado)
         fallos.append(Fallo("c5", "auditor_caido", (("canario", canario["id"]), ("tipo", type(exc).__name__))))
     return None

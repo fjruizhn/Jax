@@ -102,3 +102,86 @@ def test_la_llave_no_sale_en_el_error():
     with pytest.raises(A.AuditorIlegible) as e:
         asyncio.run(escenario())
     assert "llave-XYZ" not in repr(e.value) and e.value.__cause__ is None
+
+
+# --- Auditor local sin credencial: la cabecera no se emite (2026-09-20) -------------------------
+# Defecto encontrado en produccion: con transporte 'ollama' facet_resolver deja
+# credential="" a proposito (pedirle una llave a un Ollama que no la usa seria
+# inventar un secreto). La f-string incondicional producia el valor de cabecera
+# literal "Bearer " -- con espacio final y sin valor -- y h11 rechaza una cabecera
+# con espacio al final: httpx.LocalProtocolError, subclase de httpx.HTTPError, que
+# el except de auditar() convertia en AuditorIlegible("proveedor_fallo"). La llamada
+# moria ANTES de abrir el socket: los tres canarios de C5 fallaban en microsegundos
+# y ninguna mision sobre maquina con datos de clientes podia arrancar.
+#
+# El test viejo (test_transporte_ollama_del_auditor_local_es_soportado) pasaba con el
+# defecto presente porque MockTransport no pasa por h11 y no valida cabeceras: cubria
+# el caso en el papel, no en la realidad. Por eso aca van DOS controles: uno sobre la
+# cabecera emitida, y otro contra un servidor HTTP de verdad, que es el unico que
+# ejercita el camino que fallo.
+
+def test_sin_credencial_no_se_emite_la_cabecera_authorization():
+    """Ausencia de credencial es un hecho del transporte, no un valor vacio que se
+    serializa. Con el codigo viejo la cabecera viajaba como 'Bearer ' y este test falla."""
+    vistas = {}
+
+    def manejar(req):
+        vistas["tiene_auth"] = "authorization" in req.headers
+        vistas["auth"] = req.headers.get("authorization")
+        contenido = json.dumps({"hallazgos": [], "afirmaciones": []})
+        return httpx.Response(200, json={"choices": [{"message": {"content": contenido}}]})
+
+    faceta_local = SimpleNamespace(**{**vars(FACETA), "transport": "ollama",
+                                      "base_url": "http://127.0.0.1:11435/v1", "credential": ""})
+
+    async def escenario():
+        async with _cliente(manejar) as cli:
+            return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, cliente=cli)
+
+    asyncio.run(escenario())
+    assert vistas["tiene_auth"] is False, f"se emitio authorization={vistas['auth']!r}"
+
+
+def test_auditor_local_sin_credencial_contra_un_servidor_http_real():
+    """El control que el test con MockTransport NO puede dar: un socket de verdad, con
+    h11 validando cabeceras. Con el codigo viejo levanta AuditorIlegible('proveedor_fallo')
+    sin que el servidor reciba una sola peticion."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    recibidas = []
+
+    class Manejador(BaseHTTPRequestHandler):
+        def do_POST(self):
+            recibidas.append(dict(self.headers))
+            cuerpo = json.dumps({"choices": [{"message": {"content":
+                json.dumps({"hallazgos": [], "afirmaciones": []})}}]}).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(cuerpo)))
+            self.end_headers()
+            self.wfile.write(cuerpo)
+
+        def log_message(self, *_):  # sin ruido en la salida de pytest
+            pass
+
+    servidor = ThreadingHTTPServer(("127.0.0.1", 0), Manejador)
+    hilo = threading.Thread(target=servidor.serve_forever, daemon=True)
+    hilo.start()
+    puerto = servidor.server_address[1]
+    try:
+        faceta_local = SimpleNamespace(**{**vars(FACETA), "transport": "ollama",
+                                          "base_url": f"http://127.0.0.1:{puerto}/v1", "credential": ""})
+
+        async def escenario():
+            async with httpx.AsyncClient() as cli:
+                return await AC.auditar(LOTE, faceta=faceta_local, max_tokens=10, cliente=cli)
+
+        rev = asyncio.run(escenario())
+    finally:
+        servidor.shutdown()
+        servidor.server_close()
+
+    assert rev.pausar is False
+    assert len(recibidas) == 1, "el servidor no recibio la peticion: murio antes del socket"
+    assert "authorization" not in {k.lower() for k in recibidas[0]}
