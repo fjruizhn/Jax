@@ -1,13 +1,17 @@
 # Reporte a MariaDB upstream — MHNSW + cosine + ON DELETE CASCADE
 
-**Estado: PREPARADO, NO ENVIADO.** Hace falta una cuenta de
-[jira.mariadb.org](https://jira.mariadb.org) — no se crea ni se usa una a nombre
-de Fernando sin que él lo decida.
+**Estado: ENVIADO — [MDEV-41227](https://jira.mariadb.org/browse/MDEV-41227).**
 
-**Cómo enviarlo:** entrar a jira.mariadb.org → *Create* → Project **MDEV** →
-Issue Type **Bug** → pegar el título y el cuerpo de abajo → adjuntar
-`mdev-mhnsw-cosine-cascade.sql`. Componente: *Vector search*. Al enviarlo,
-anotar acá el número de MDEV.
+Reportado por Fernando el **2026-09-20 23:39 UTC**. Componente *Vector search*,
+Affects Version 12.3.3, estado `Open` al momento de anotarlo (verificado abriendo
+el ticket, no supuesto).
+
+El texto de abajo es el que se envió, y se conserva por dos motivos: para no
+depender de que el ticket siga accesible, y para que cualquiera pueda reproducir
+sin salir del repo. La reproducción adjunta es `mdev-mhnsw-cosine-cascade.sql`.
+
+**Si upstream pide más:** sólo se midió en 12.3.3; no se probó en 12.4 ni en
+`main`. Eso se dice tal cual en vez de afirmar algo que no se midió.
 
 **Búsqueda previa (2026-09-20):** no aparece ningún reporte que combine índice
 vectorial MHNSW con borrado en cascada. Lo más cercano es **MDEV-36758**

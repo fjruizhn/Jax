@@ -4,6 +4,9 @@
 MariaDB 12.3.3 (`mariadb-12-3-jax`, 127.0.0.1:3308).
 **Producción al escribir esto: SANA.** `messages` (1.638 filas) y `facts` (116)
 devuelven 10/10 por el índice y por scan completo.
+**Reportado a MariaDB: [MDEV-41227](https://jira.mariadb.org/browse/MDEV-41227)**
+(2026-09-20, componente *Vector search*, `Open`). El texto enviado y la
+reproducción en **SQL puro** están en `docs/upstream/`.
 
 ---
 
@@ -128,12 +131,7 @@ la tabla, así que se escribe entero y a propósito.
   el lugar es junto a `/health` o a las migraciones, con el último resultado
   **cacheado**, nunca una consulta vectorial por petición.
 - **No se cambió el `ON DELETE CASCADE`.** El esquema está bien; el defecto es
-  del motor.
-- **El reporte a MariaDB upstream está PREPARADO, no enviado** — hace falta una
-  cuenta de jira.mariadb.org. El texto y una reproducción en **SQL puro**
-  (`VECTOR(4)`, sin cliente) están en `docs/upstream/`. Ahí también está lo que
-  acotó la causa: hacen falta **`DISTANCE='cosine'` Y la cascada**; con el `M`
-  por omisión la ceguera es **total** (0 de 10), no parcial.
+  del motor, y está reportado (MDEV-41227).
 
 ---
 
