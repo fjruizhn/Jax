@@ -528,8 +528,13 @@ jobs:
           # NULL` marca incertidumbre (el caso real de e570ac1c-8cae-4423-
           # b397-d354f30b4328, que tiene 2 filas así). Medido local: 152 ->
           # 155, 0 fallas nuevas.
-          grep -qE "^155 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 155 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 155 -> 157 el 2026-09-20: jacobs/_store_pool_test.py (+2) -- las dos
+          # barandas de NOMBRES_TAMANIO_POOL (cada nombre declarado manda y en
+          # orden; y el chequeo estatico de que tamanio_pool() no nombre
+          # variables a mano). El numero es EL QUE CONTO EL RUNNER ("157
+          # passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
+          grep -qE "^157 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 157 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

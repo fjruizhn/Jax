@@ -223,6 +223,18 @@ _pools: dict[asyncio.AbstractEventLoop, _PoolDelLoop] = {}
 
 DB_POOL_MAX = "JAX_DB_POOL_MAX"
 
+#: TODOS los nombres que dimensionan el pool, EN ORDEN DE PRECEDENCIA.
+#:
+#: Existe como tupla y no suelto dentro de `tamanio_pool()` porque los tests
+#: tienen que neutralizar *todos* para no heredar el valor de produccion. El
+#: 2026-09-20 cuatro tests fallaban para cualquiera que sourceara
+#: `/etc/jax/.env` -- que es lo que el propio USO del repo indica hacer:
+#: sus fixtures limpiaban `JAX_DB_POOL_MAX` pero no `JAX_JACOBS_DB_POOL_SIZE`,
+#: que se lee PRIMERO, asi que el `setenv` del test quedaba pisado y el pool
+#: nunca se llenaba. Con la lista aca, un nombre nuevo lo heredan los fixtures
+#: solos en vez de sumar un cuarto test rojo que nadie entiende.
+NOMBRES_TAMANIO_POOL = (ENV_TAMANIO_POOL, DB_POOL_MAX)
+
 
 def db_pool_max() -> int:
     """Conexiones máximas del pool del store (JAX_DB_POOL_MAX, default 10).
@@ -279,7 +291,7 @@ def tamanio_pool() -> int:
     romper en silencio el despliegue de cualquiera de las dos. Ninguna de las
     dos -> TAMANIO_POOL_POR_DEFECTO. Presente pero vacia, no entera o fuera de
     [1, TAMANIO_POOL_MAXIMO] -> RuntimeError nombrandola."""
-    for nombre in (ENV_TAMANIO_POOL, DB_POOL_MAX):
+    for nombre in NOMBRES_TAMANIO_POOL:
         crudo = os.environ.get(nombre)
         if crudo is not None:
             return _tamanio_valido(nombre, crudo)

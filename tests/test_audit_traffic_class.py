@@ -28,7 +28,14 @@ sys.path.insert(0, str(LAS_MANOS))
 from fastapi.testclient import TestClient  # noqa: E402
 
 import server  # noqa: E402
+import pytest  # noqa: E402
+
 from facet_client import FacetClient  # noqa: E402
+
+from _alcance_las_manos import MOTIVO, cerrada  # noqa: E402
+
+#: Sondeado, no saltado a mano: vuelven solos si se abre el permiso.
+pytestmark = pytest.mark.skipif(cerrada("get", "/audit/tail?n=1"), reason=MOTIVO)
 
 # Un id de corrida fijo para reencontrar exactamente NUESTROS eventos en el log.
 RUN_ID = "audit-watch-proof-001"

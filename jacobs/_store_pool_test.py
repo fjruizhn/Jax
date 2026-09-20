@@ -1390,3 +1390,65 @@ class ServidorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TamanioDelPoolSinHerencia(unittest.TestCase):
+    """Los nombres que dimensionan el pool estan DECLARADOS, no dispersos.
+
+    **Por que existe (2026-09-20).** Cuatro tests fallaban para cualquiera que
+    sourceara `/etc/jax/.env` -- que es exactamente lo que el USO del repo dice
+    que hay que hacer. Sus fixtures limpiaban `JAX_DB_POOL_MAX` pero no
+    `JAX_JACOBS_DB_POOL_SIZE`, que `tamanio_pool()` lee PRIMERO: el `setenv`
+    del test quedaba pisado por el valor de produccion y el pool no se llenaba
+    nunca. El sintoma era `DID NOT RAISE HTTPException`, que no se parece en
+    nada a la causa.
+
+    Estos dos tests cierran la puerta por la que volveria a entrar: que
+    `NOMBRES_TAMANIO_POOL` sea COMPLETA (nadie lee un nombre que no este ahi)
+    y que sea la que manda (cada nombre de la lista tiene efecto, en orden).
+    """
+
+    def setUp(self):
+        self._previo = {n: os.environ.get(n) for n in store.NOMBRES_TAMANIO_POOL}
+        for n in store.NOMBRES_TAMANIO_POOL:
+            os.environ.pop(n, None)
+
+    def tearDown(self):
+        for n, v in self._previo.items():
+            if v is None:
+                os.environ.pop(n, None)
+            else:
+                os.environ[n] = v
+
+    def test_cada_nombre_declarado_manda_y_en_orden(self):
+        """Cada nombre de la lista tiene efecto; el primero gana al segundo."""
+        for i, nombre in enumerate(store.NOMBRES_TAMANIO_POOL):
+            with self.subTest(nombre=nombre):
+                for n in store.NOMBRES_TAMANIO_POOL:
+                    os.environ.pop(n, None)
+                os.environ[nombre] = str(7 + i)
+                self.assertEqual(store.tamanio_pool(), 7 + i)
+
+        # Precedencia: con los dos puestos gana el primero de la tupla.
+        for j, n in enumerate(store.NOMBRES_TAMANIO_POOL):
+            os.environ[n] = str(11 + j)
+        self.assertEqual(store.tamanio_pool(), 11,
+                         "el orden de NOMBRES_TAMANIO_POOL no es el que manda")
+
+    def test_tamanio_pool_no_lee_ningun_nombre_fuera_de_la_lista(self):
+        """Estatico: `tamanio_pool()` no nombra ninguna variable a mano.
+
+        Si alguien agrega `os.environ.get("JAX_OTRA_COSA")` dentro de la
+        funcion, la lista deja de ser la fuente de verdad y los fixtures que
+        la recorren vuelven a quedarse cortos -- sin que nada falle hasta que
+        alguien sourcee el .env equivocado.
+        """
+        arbol = ast.parse((RAIZ / "jacobs" / "store.py").read_text(encoding="utf-8"))
+        fn = next(n for n in ast.walk(arbol)
+                  if isinstance(n, ast.FunctionDef) and n.name == "tamanio_pool")
+        literales = [n.value for n in ast.walk(fn)
+                     if isinstance(n, ast.Constant) and isinstance(n.value, str)
+                     and n.value.startswith("JAX_")]
+        self.assertEqual(literales, [], (
+            f"tamanio_pool() nombra variables a mano: {literales}. "
+            "Van en NOMBRES_TAMANIO_POOL, que es lo que recorren los fixtures."))
