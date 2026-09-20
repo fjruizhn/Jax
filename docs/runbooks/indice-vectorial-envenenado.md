@@ -129,9 +129,11 @@ la tabla, así que se escribe entero y a propósito.
   **cacheado**, nunca una consulta vectorial por petición.
 - **No se cambió el `ON DELETE CASCADE`.** El esquema está bien; el defecto es
   del motor.
-- **No se reportó aún a MariaDB upstream.** Un índice que se corrompe con un
-  borrado en cascada y que `OPTIMIZE` no repara es un defecto de ellos. Vale el
-  reporte, con esta reproducción.
+- **El reporte a MariaDB upstream está PREPARADO, no enviado** — hace falta una
+  cuenta de jira.mariadb.org. El texto y una reproducción en **SQL puro**
+  (`VECTOR(4)`, sin cliente) están en `docs/upstream/`. Ahí también está lo que
+  acotó la causa: hacen falta **`DISTANCE='cosine'` Y la cascada**; con el `M`
+  por omisión la ceguera es **total** (0 de 10), no parcial.
 
 ---
 
