@@ -50,9 +50,16 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest
+      - run: pip install pytest pyyaml
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
       - run: python -m pytest policy/tests/test_stderr_no_se_tira.py -v
+      # Detector agregado 2026-09-20: un `run:` que no es bash valido mata el
+      # job ANTES de que llegue a comprobar lo suyo, asi que el piso nunca se
+      # compara y el hueco queda tapado por el verde del resto de la matriz.
+      # Paso el mismo dia resolviendo un conflicto en el piso de tests-puros:
+      # `yaml.safe_load` daba OK con el bash roto adentro -- parsear no es
+      # validar. El detector se ejercita a si mismo con el bloque que fallo.
+      - run: python -m pytest policy/tests/test_workflows_bash_valido.py -v
       # Detector agregado 2026-09-18 (ronda de arreglo del auditor local, hallazgo
       # CRÍTICO de la revisión): scripts/ejecutor_contratos/mision_de_humo.py validaba
       # el arranque contra la máquina de la misión (auditor local incluido) y auditaba
