@@ -2623,7 +2623,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml
+      - run: pip install pytest pyyaml cryptography==49.0.0
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
