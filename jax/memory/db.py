@@ -820,17 +820,25 @@ class MemoryDB:
             raise BusquedaDeFactFallida(str(e)) from e
 
     @db_error_handler
-    async def supersede_fact(self, old_fact_id: int, new_fact_id: int) -> Optional[bool]:
-        """Marca old_fact_id como reemplazado por new_fact_id. No borra nada:
-        la historia de una correccion queda reconstruible."""
+    async def supersede_fact(self, old_fact_id: int, new_fact_id: int,
+                             superseded_by_user: int) -> Optional[bool]:
+        """Marca old_fact_id como reemplazado por new_fact_id, y registra quien
+        lo decidio. No borra nada: la historia de una correccion queda
+        reconstruible.
+
+        OJO: este metodo tiene DOS llamadores con naturaleza distinta. El
+        automatico (`save_fact`, cuando detecta un casi-duplicado) y el humano
+        (la pantalla de Memoria). Para el automatico, el `superseded_by_user`
+        es el id del usuario cuya sesion produjo el hecho nuevo -- nunca 0 ni
+        None: si no se sabe quien, no se supersede (ver save_fact)."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "UPDATE facts SET superseded_by = %s, superseded_at = NOW() "
-                    "WHERE id = %s",
-                    (new_fact_id, old_fact_id),
+                    "UPDATE facts SET superseded_by = %s, superseded_at = NOW(), "
+                    "superseded_by_user = %s WHERE id = %s",
+                    (new_fact_id, superseded_by_user, old_fact_id),
                 )
         return True
 
@@ -972,7 +980,23 @@ class MemoryDB:
                 # segunda mitad no se puede completar, la primera se deshace.
                 # Mejor no guardar la correccion y que el extractor reintente,
                 # que dejar la memoria contradiciendose.
-                if await self.supersede_fact(candidate["id"], fact_id):
+                #
+                # PERO antes de intentarlo: sin user_id no hay a quien
+                # atribuir la correccion (Task 2 Step 4 del plan de memoria-
+                # admin: "si no se sabe quien, no se supersede"). 0 cuenta
+                # como "no se sabe" -- no es un id de usuario valido en este
+                # sistema. El fact nuevo queda como fact NUEVO (igual que
+                # cuando confirmado=False) y el viejo sigue activo: dos
+                # hechos sin resolver es mejor que un supersede con un dueno
+                # inventado.
+                if not user_id:
+                    logger.warning(
+                        "save_fact: fact %d podria corregir al %d (banda=%s) pero "
+                        "no hay user_id conocido -- NO se supersede sin saber "
+                        "quien. Los dos quedan activos.",
+                        fact_id, candidate["id"], band,
+                    )
+                elif await self.supersede_fact(candidate["id"], fact_id, user_id):
                     logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
                                 f"(banda={band})")
                 else:
@@ -1372,7 +1396,8 @@ class MemoryDB:
                         fact_type: Optional[str] = None,
                         limit: int = 20,
                         user_id: Optional[int] = None,
-                        project_id: Optional[int] = None) -> Optional[list]:
+                        project_id: Optional[int] = None,
+                        incluir_vencidos: bool = False) -> Optional[list]:
         """Lista facts ACTIVOS (superseded_by IS NULL — un fact corregido
         nunca vuelve a aparecer aca). Por defecto solo los no verificados
         (a revisar). only_verified=True hace lo opuesto: solo facts que
@@ -1381,6 +1406,9 @@ class MemoryDB:
         Scope de dos niveles opcional (igual que search_similar_messages):
           - project_id NOT NULL -> facts del proyecto; user_id -> facts individuales.
           - ambos None -> sin filtro de scope (retrocompat).
+        incluir_vencidos=False (default) excluye los facts con expires_at
+        vencido (spec §2.4): un fact caducado no se borra, solo deja de
+        pesar en la busqueda/listado normal.
         Devuelve lista de dicts o None si fallo."""
         if not self.pool:
             return None
@@ -1395,6 +1423,11 @@ class MemoryDB:
         if fact_type:
             conditions.append("fact_type = %s")
             params.append(fact_type)
+        # Spec §2.4: un hecho vencido deja de pesar. `expires_at IS NULL` es
+        # "no caduca" y tiene que seguir entrando -- un `expires_at < NOW()` a
+        # secas los dejaria a TODOS afuera, que es el error clasico con NULL.
+        if not incluir_vencidos:
+            conditions.append("(expires_at IS NULL OR expires_at > NOW())")
         # Scope de dos dimensiones (project compartido / individual de user)
         scope_clauses = []
         if project_id is not None:
@@ -1438,17 +1471,39 @@ class MemoryDB:
                 return await cur.fetchall()
 
     @db_error_handler
-    async def verify_fact(self, fact_id: int) -> Optional[bool]:
-        """Marca un fact como verificado. confidence NO se toca (es ortogonal:
-        confidence = certeza del extractor, is_verified = validacion de Fernando)."""
+    async def verify_fact(self, fact_id: int, verified_by: int) -> Optional[bool]:
+        """Marca un fact como verificado, con QUIEN y cuando. `confidence` NO se
+        toca (es ortogonal: confidence = certeza del extractor, is_verified =
+        validacion de una persona).
+
+        `verified_by` NO tiene default a proposito: un aprobador implicito es
+        un aprobador inventado, y el punto de esta columna es que la
+        aprobacion tenga dueno (spec 2026-09-18-memoria-admin §2.2)."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 affected = await cur.execute(
-                    "UPDATE facts SET is_verified = TRUE, verified_at = NOW() "
-                    "WHERE id = %s",
-                    (fact_id,),
+                    "UPDATE facts SET is_verified = TRUE, verified_at = NOW(), "
+                    "verified_by = %s WHERE id = %s",
+                    (verified_by, fact_id),
+                )
+                return affected > 0
+
+    @db_error_handler
+    async def expire_fact(self, fact_id: int, expires_at) -> Optional[bool]:
+        """Pone (o quita, con None) la fecha de vencimiento de un hecho.
+
+        Caducar NO es borrar: el hecho sigue, deja de pesar en la busqueda y
+        se ve como vencido (spec §2.4). Por eso no hay `delete` en esta
+        pantalla: borrar es perder la historia de lo que creimos."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                affected = await cur.execute(
+                    "UPDATE facts SET expires_at = %s WHERE id = %s",
+                    (expires_at, fact_id),
                 )
                 return affected > 0
 

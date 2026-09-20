@@ -36,3 +36,37 @@ def test_el_esquema_declarado_y_el_migrador_no_se_contradicen():
     texto = esquema.read_text(encoding="utf-8")
     for col in COLUMNAS_NUEVAS:
         assert col in texto, f"{col} no esta en jax_memory_schema.sql"
+
+
+import inspect
+from jax.memory.db import MemoryDB
+
+
+def test_verify_fact_exige_saber_quien_aprueba():
+    """Sin el quien, aprobar es un sello sin dueno -- el problema que la
+    pantalla viene a resolver, no a repetir."""
+    firma = inspect.signature(MemoryDB.verify_fact)
+    assert "verified_by" in firma.parameters
+    assert firma.parameters["verified_by"].default is inspect.Parameter.empty, \
+        "verified_by no puede tener default: un aprobador implicito es un aprobador inventado"
+
+
+def test_supersede_fact_registra_quien_corrigio():
+    firma = inspect.signature(MemoryDB.supersede_fact)
+    assert "superseded_by_user" in firma.parameters
+    assert firma.parameters["superseded_by_user"].default is inspect.Parameter.empty
+
+
+def test_existe_expire_fact():
+    assert hasattr(MemoryDB, "expire_fact")
+    firma = inspect.signature(MemoryDB.expire_fact)
+    assert {"fact_id", "expires_at"} <= set(firma.parameters)
+
+
+def test_get_facts_excluye_vencidos_por_defecto():
+    """El spec §2.4: un hecho vencido no se borra, deja de pesar en la busqueda.
+    Hoy `expires_at` no la lee NADIE (verificado 2026-09-20)."""
+    fuente = inspect.getsource(MemoryDB.get_facts)
+    assert "expires_at" in fuente, "get_facts sigue sin mirar la caducidad"
+    firma = inspect.signature(MemoryDB.get_facts)
+    assert firma.parameters["incluir_vencidos"].default is False

@@ -107,6 +107,10 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(resultado)
 
     async def test_si_supersede_falla_se_revierte_y_no_se_afirma_la_correccion(self):
+        """user_id=990001 EXPLICITO: sin el, el candado de la Task 2 Step 4
+        (feat/memoria-admin, "sin user_id no se supersede") ni siquiera
+        llamaria a supersede_fact, y este test dejaria de probar lo que dice
+        probar -- la falla TECNICA de supersede_fact, no la falta de autor."""
         m = dbmod.MemoryDB()
         m.pool = _pool_falso()
         m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
@@ -116,7 +120,8 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         m.delete_fact = mock.AsyncMock(return_value=True)
         with self.assertLogs(dbmod.logger, level="ERROR") as capturado:
             resultado = await m.save_fact.__wrapped__(
-                m, "Fernando vive en San Pedro Sula", "user", is_correction=True)
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=990001)
         self.assertIsNone(resultado)
         m.delete_fact.assert_awaited_once()
         logs = "\n".join(capturado.output)
@@ -124,6 +129,7 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("se revirtio", logs)
 
     async def test_si_tampoco_se_puede_revertir_se_grita(self):
+        """user_id explicito, mismo motivo que el test anterior."""
         m = dbmod.MemoryDB()
         m.pool = _pool_falso()
         m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
@@ -133,9 +139,47 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         m.delete_fact = mock.AsyncMock(return_value=None)
         with self.assertLogs(dbmod.logger, level="CRITICAL") as capturado:
             resultado = await m.save_fact.__wrapped__(
-                m, "Fernando vive en San Pedro Sula", "user", is_correction=True)
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=990001)
         self.assertIsNone(resultado)
         self.assertIn("dos hechos contradictorios activos", "\n".join(capturado.output))
+
+    async def test_sin_user_id_no_se_supersede(self):
+        """Task 2 Step 4 del plan 2026-09-20-memoria-admin: "si no se sabe
+        quien (user_id None o 0), NO se supersede". Ni siquiera se INTENTA
+        -- no es que supersede_fact falle, es que no se llama. El fact nuevo
+        queda como fact nuevo (igual que cuando confirmado=False) y el viejo
+        sigue activo: dos hechos sin resolver es mejor que un supersede con
+        un autor inventado."""
+        m = dbmod.MemoryDB()
+        m.pool = _pool_falso()
+        m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
+        m._find_nearest_fact = mock.AsyncMock(
+            return_value={"id": 7, "fact_text": "viejo", "distancia": 0.05})
+        m.supersede_fact = mock.AsyncMock()
+        with self.assertLogs(dbmod.logger, level="WARNING") as capturado:
+            resultado = await m.save_fact.__wrapped__(
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=None)
+        self.assertTrue(resultado, "sin user_id la insercion del fact nuevo deberia seguir")
+        m.supersede_fact.assert_not_awaited()
+        self.assertIn("no hay user_id", "\n".join(capturado.output))
+
+    async def test_user_id_cero_tampoco_supersede(self):
+        """0 no es un id de usuario valido: cuenta como 'no se sabe', igual
+        que None. `if not user_id` en save_fact lo cubre a proposito."""
+        m = dbmod.MemoryDB()
+        m.pool = _pool_falso()
+        m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
+        m._find_nearest_fact = mock.AsyncMock(
+            return_value={"id": 7, "fact_text": "viejo", "distancia": 0.05})
+        m.supersede_fact = mock.AsyncMock()
+        with self.assertLogs(dbmod.logger, level="WARNING"):
+            resultado = await m.save_fact.__wrapped__(
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=0)
+        self.assertTrue(resultado)
+        m.supersede_fact.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -1017,7 +1017,7 @@ jobs:
           tests/test_ejecutor_cuenta_de_servicio.py
           tests/test_env_se_lee_con_sudo.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
-          tests/test_memoria_no_traga_fallos_de_escritura.py
+          tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
           tests/test_health_de_las_manos_puede_fallar.py
           tests/test_degradaciones_declaradas.py
@@ -1153,7 +1153,7 @@ jobs:
             tests/test_ejecutor_cuenta_de_servicio.py \
             tests/test_env_se_lee_con_sudo.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
-            tests/test_memoria_no_traga_fallos_de_escritura.py \
+            tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
             tests/test_health_de_las_manos_puede_fallar.py \
             tests/test_degradaciones_declaradas.py \
@@ -2611,11 +2611,20 @@ jobs:
           # "no pude hablar con el proveedor" y "el modelo escribio mal" salian con
           # el MISMO codigo y sin distincion posible en la bitacora.
           # Los 5 vistos ROJOS contra el codigo de antes de este commit.
-          # Delta medido en el runner local con ESTE mismo comando: master 2256 ->
-          # rama 2261. El numero absoluto local difiere del de CI porque aca existe
+          # 2246 -> 2255 (2026-09-20, feat/memoria-admin, Task 1+2 del plan
+          # 2026-09-20-memoria-admin): +9, puros (sin DB, sin red -- suman
+          # directo, mismo criterio que arriba). +7 tests/test_memoria_gobernanza.py
+          # (nuevo: columnas de autoria verified_by/superseded_by_user, indice
+          # idx_facts_revision, y las firmas/comportamiento de verify_fact,
+          # supersede_fact, expire_fact y get_facts(incluir_vencidos=)). +2 en
+          # tests/test_memoria_no_traga_fallos_de_escritura.py: el candado
+          # "sin user_id conocido no se supersede" (0 o None) de save_fact --
+          # los 9 vistos ROJOS contra el codigo de antes de esta ronda.
+          # Delta medido en el runner local con ESTE mismo comando: master 2257 ->
+          # rama 2266. El numero absoluto local difiere del de CI porque aca existe
           # el corpus de U3 y los 17 no se saltean; manda el delta.
-          grep -qE "^2246 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2246 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2255 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2255 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
