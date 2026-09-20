@@ -16,8 +16,15 @@ verificados como para que valga la pena sintetizar sobre el -- y despues el
 sintetizador (item #8) recibe MENOS hechos verificados de los que el conteo
 prometio.
 
-EL CRITERIO (los cinco caminos de lectura de `facts` en este repo, y por que
-cada uno filtra o no filtra `expires_at`):
+EL CRITERIO (los caminos de lectura de `facts` en los DOS repos, y por que
+cada uno filtra o no filtra `expires_at`).
+
+m4 (auditoria adversarial 2026-09-20, SEGUNDA ronda): esta lista decia "los
+CINCO caminos" y nacio desactualizada -- ya habia mas incluso el dia que se
+escribio. Un criterio que se declara completo y no lo es es peor que uno que
+no promete nada: alguien lo lee, confia en el numero, y no busca el resto.
+Que el documento describa el CODIGO, no lo que el codigo tenia cuando se
+escribio el comentario:
 
   1. `_find_nearest_fact` (dedup para save_fact) -- FILTRA. Un hecho vencido
      ya no es autoridad: tratarlo como "todavia ahi" bloquea la reextraccion
@@ -39,6 +46,18 @@ cada uno filtra o no filtra `expires_at`):
      (`expire_fact(id, None)`), el hecho tiene que volver a ser encontrable
      por busqueda semantica de inmediato, sin depender de que el backfill
      vuelva a pasar por el.
+  6. `verify_fact`/`expire_fact` -- su `SELECT 1 FROM facts WHERE id = %s`
+     (jax/memory/db.py, agregado en la primera ronda de esta auditoria para
+     distinguir "no existe" de "no-op idempotente") NO FILTRA a proposito.
+     Es una pregunta de EXISTENCIA, no de vigencia: un hecho vencido sigue
+     siendo un hecho real que se puede aprobar/re-caducar (tests/
+     test_memoria_retorno_no_ambiguo.py cubre este camino especifico).
+  7. `SQL_LISTAR`/`SQL_CONTAR` (jax-platform, backend/api/admin/memoria.py
+     -- la cola de revision de la pantalla de Memoria) -- FILTRA por
+     defecto, con `incluir_vencidos` como escape explicito, MISMO criterio
+     que `get_facts` (2), pero es SQL propio, no pasa por `MemoryDB`: es un
+     camino de lectura aparte, no una llamada a (2) con otro nombre. Ver el
+     comentario de ese archivo sobre por que no reusa `get_facts()`.
 
 Mismo patron de aislamiento que los demas archivos de memoria: user_id
 reservado, solo corre contra una base de tests, limpia lo que crea.
@@ -219,6 +238,116 @@ async def test_un_hecho_vigente_SI_sigue_deduplicando(limpio, monkeypatch):
         "SELECT id FROM facts WHERE user_id=%s AND fact_text=%s",
         (_USER, texto), fetch=True)
     assert len(filas) == 1
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_expire_fact_con_none_devuelve_el_hecho_al_juego_del_dedup(limpio, monkeypatch):
+    """Hueco de cobertura senalado en la auditoria adversarial 2026-09-20:
+    es la justificacion del camino 5 de la lista de arriba ("si mas adelante
+    alguien quita el vencimiento, el hecho tiene que volver a ser encontrable
+    por busqueda semantica de inmediato") pero nadie lo probaba. Si
+    `expire_fact(id, None)` no devolviera al hecho al filtro `expires_at IS
+    NULL OR expires_at > NOW()` de `_find_nearest_fact`, "reactivar" un hecho
+    desde la pantalla de Memoria seria un boton que no hace lo que promete."""
+    vec = _vec(0)
+    m = await _memoria(monkeypatch, vec)
+    texto = "Fernando vive en Comayaguela"
+
+    primero = await m.save_fact(texto, "user", user_id=_USER)
+    assert primero is True
+    filas = await _sql(
+        "SELECT id FROM facts WHERE user_id=%s ORDER BY id DESC LIMIT 1",
+        (_USER,), fetch=True)
+    fid = filas[0][0]
+
+    # Vencido: reextraer el mismo texto ya NO lo ve como duplicado (test de
+    # arriba, con un hecho distinto).
+    ok = await m.expire_fact(fid, datetime.now() - timedelta(days=1))
+    assert ok is True
+
+    # Se le QUITA el vencimiento (equivalente a lo que hace la pantalla de
+    # Memoria al "reactivar" un hecho).
+    quitado = await m.expire_fact(fid, None)
+    assert quitado is True
+
+    # Y tiene que volver a actuar como duplicado activo DE INMEDIATO, sin
+    # depender de que nada mas corra (el backfill de embeddings, un
+    # reindexado, etc.).
+    tercero = await m.save_fact(texto, "user", user_id=_USER)
+    assert tercero is False, (
+        "expire_fact(id, None) no devolvio el hecho al juego del dedup -- "
+        "'reactivar' un hecho desde la pantalla de Memoria no lo reactivo "
+        "de verdad para la busqueda semantica")
+
+    filas = await _sql(
+        "SELECT id FROM facts WHERE user_id=%s AND fact_text=%s",
+        (_USER, texto), fetch=True)
+    assert len(filas) == 1, "el reactivado deberia seguir siendo el UNICO hecho con ese texto"
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_correccion_sobre_un_candidato_vencido_no_lo_supersede_inserta_como_nuevo(
+        limpio, monkeypatch):
+    """Hueco de cobertura + DECISION de diseno (auditoria adversarial
+    2026-09-20). Con el filtro nuevo, `_find_nearest_fact` ya no ve un
+    candidato vencido -- ni para el camino normal (arriba) ni para
+    `is_correction=True`. Consecuencia real: una "correccion" contra un
+    hecho que ya vencio no encuentra nada que corregir, y `save_fact` la
+    trata como un hecho NUEVO SIN RELACION (`band == "unrelated"`): no llama
+    a `supersede_fact`, no revierte nada, no deja registro de que hubo un
+    intento de correccion. La cadena de versiones (`superseded_by`) se
+    "rompe" en el sentido de que el hecho nuevo no queda enlazado al viejo.
+
+    EL CRITERIO (decision de esta ronda): es ACEPTABLE, a proposito. Un
+    hecho vencido ya no es autoridad (docstring de `_find_nearest_fact`, mas
+    arriba en este archivo) -- encadenarlo via `superseded_by` a una
+    correccion nueva mezclaria dos conceptos distintos: "este hecho quedo
+    OBSOLETO por el paso del tiempo" (expires_at) y "este hecho quedo
+    REEMPLAZADO por otro mas preciso" (superseded_by). El hecho vencido
+    sigue existiendo, sigue siendo visible con `incluir_vencidos=True` y
+    `/fact delete`, y el hecho "corregido" queda como un registro nuevo,
+    correcto e independiente: no hay perdida de informacion, solo una
+    cadena de versiones que no se conecta con un eslabon que ya estaba fuera
+    de vigencia. Es el MISMO criterio que
+    `test_un_hecho_vencido_no_bloquea_la_reextraccion_del_mismo_hecho`
+    (arriba): un hecho vencido no bloquea, pero tampoco encadena.
+
+    Si este criterio cambia (por ejemplo, "una correccion SI tiene que
+    poder atar un hecho nuevo a uno vencido"), lo que cambia es
+    `_find_nearest_fact` -- una busqueda de candidato SEPARADA para
+    `is_correction=True` que si mire vencidos, no volver a dejar de filtrar
+    `expires_at` en general (eso reabre el agujero que el resto de este
+    archivo cierra). No es parte de esta ronda: no hay pedido de producto
+    para "corregir un hecho vencido" hoy."""
+    vec = _vec(0)
+    m = await _memoria(monkeypatch, vec)
+    texto = "Fernando vive en Choluteca"
+
+    original = await m.save_fact(texto, "user", user_id=_USER)
+    assert original is True
+    filas = await _sql(
+        "SELECT id FROM facts WHERE user_id=%s ORDER BY id DESC LIMIT 1",
+        (_USER,), fetch=True)
+    fid_viejo = filas[0][0]
+    ok = await m.expire_fact(fid_viejo, datetime.now() - timedelta(days=1))
+    assert ok is True
+
+    correccion = await m.save_fact(
+        "Fernando se mudo de Choluteca", "user", user_id=_USER, is_correction=True)
+    assert correccion is True, "la correccion tiene que insertarse igual, como hecho nuevo"
+
+    filas = await _sql(
+        "SELECT superseded_by FROM facts WHERE id=%s", (fid_viejo,), fetch=True)
+    assert filas[0][0] is None, (
+        "el hecho vencido quedo superseded por la 'correccion' -- eso "
+        "contradice el criterio de esta ronda: un vencido no es candidato "
+        "de correccion, no se encadena")
+
+    filas = await _sql(
+        "SELECT id FROM facts WHERE user_id=%s", (_USER,), fetch=True)
+    assert len(filas) == 2, "el hecho vencido original MAS la correccion como hecho nuevo"
 
 
 # ---------------------------------------------------------------------------

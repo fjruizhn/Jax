@@ -844,17 +844,27 @@ class MemoryDB:
         automatico (`save_fact`, cuando detecta un casi-duplicado) y el humano
         (la pantalla de Memoria). Para el automatico, el `superseded_by_user`
         es el id del usuario cuya sesion produjo el hecho nuevo -- nunca 0 ni
-        None: si no se sabe quien, no se supersede (ver save_fact)."""
+        None: si no se sabe quien, no se supersede (ver save_fact).
+
+        EL RETORNO (arreglado 2026-09-20, auditoria adversarial M3): antes
+        devolvia `True` SIN mirar cuantas filas cambio el UPDATE. Si
+        `old_fact_id` no existe (o desaparecio entre que `save_fact` lo
+        encontro como candidato y este UPDATE), `affected` es 0 y el metodo
+        devolvia `True` igual -- el control que `save_fact` hace sobre este
+        resultado (`elif await self.supersede_fact(...)`) no podia fallar
+        nunca por esta via, y el log afirmaba una correccion que no ocurrio:
+        exactamente el defecto que el arreglo de 2026-09-16 (ver el comentario
+        de `save_fact` mas abajo) dijo haber cerrado."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
+                affected = await cur.execute(
                     "UPDATE facts SET superseded_by = %s, superseded_at = NOW(), "
                     "superseded_by_user = %s WHERE id = %s",
                     (new_fact_id, superseded_by_user, old_fact_id),
                 )
-        return True
+                return affected > 0
 
     @db_error_handler
     async def save_fact(self, fact_text: str, fact_type: str,
@@ -1513,27 +1523,39 @@ class MemoryDB:
         metodo (jax-platform#hechos/aprobar hace `if await
         memoria.verify_fact(...)`).
 
-        Se resuelve con un SELECT de existencia en la MISMA conexion antes
-        del UPDATE, en vez de habilitar CLIENT.FOUND_ROWS en el pool: ese
-        flag es GLOBAL a la conexion y cambiaria el contrato de
-        `rowcount`/`execute()` de cualquier otro escritor que comparte el
-        pool (mark_action_item_done, touch_person_mentions, ...) sin que
-        esta ronda los haya auditado a todos. Asi, True/False dice si el
-        hecho EXISTE (la operacion se aplico, sea o no un no-op), que es lo
-        que el llamador necesita -- no si el UPDATE cambio bytes en disco."""
+        Se resuelve con un SELECT de existencia en la MISMA conexion, en vez
+        de habilitar CLIENT.FOUND_ROWS en el pool: ese flag es GLOBAL a la
+        conexion y cambiaria el contrato de `rowcount`/`execute()` de
+        cualquier otro escritor que comparte el pool (mark_action_item_done,
+        touch_person_mentions, ...) sin que esta ronda los haya auditado a
+        todos. Asi, True/False dice si el hecho EXISTE (la operacion se
+        aplico, sea o no un no-op), que es lo que el llamador necesita -- no
+        si el UPDATE cambio bytes en disco.
+
+        EL ORDEN (arreglado 2026-09-20, auditoria adversarial m1): el UPDATE
+        va PRIMERO y el SELECT de existencia solo corre si `affected == 0`.
+        Antes era al reves (SELECT y despues UPDATE) -- misma conexion, pero
+        con `autocommit=True` eso NO es una transaccion: si otra sesion
+        borraba la fila justo entre el SELECT y el UPDATE, el metodo
+        devolvia True habiendo cambiado 0 filas. Con el UPDATE primero, un
+        `affected > 0` es verdad DEFINITIVA (la fila existia en el momento
+        exacto en que se escribio), y solo el caso ambiguo (0 filas
+        cambiadas, que puede ser "no existe" o "no-op idempotente") necesita
+        el SELECT de desempate. Ahorra ademas un round-trip en el camino
+        comun (la fila casi siempre existe)."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
-                if await cur.fetchone() is None:
-                    return False
-                await cur.execute(
+                affected = await cur.execute(
                     "UPDATE facts SET is_verified = TRUE, verified_at = NOW(), "
                     "verified_by = %s WHERE id = %s",
                     (verified_by, fact_id),
                 )
-                return True
+                if affected:
+                    return True
+                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
+                return await cur.fetchone() is not None
 
     @db_error_handler
     async def expire_fact(self, fact_id: int, expires_at) -> Optional[bool]:
@@ -1549,19 +1571,23 @@ class MemoryDB:
         indistinguibles de "el hecho no existe". jax-platform#hechos/caducar
         hace `if not ok: raise HTTPException(404)`: con el bug, caducar dos
         veces el mismo hecho con la misma fecha le devolvia al operador
-        "hecho no encontrado" sobre un hecho que SI estaba ahi."""
+        "hecho no encontrado" sobre un hecho que SI estaba ahi.
+
+        EL ORDEN: mismo arreglo y mismo motivo que `verify_fact` (ver su
+        docstring, auditoria adversarial m1, 2026-09-20) -- el UPDATE va
+        primero, el SELECT de existencia solo corre si `affected == 0`."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
-                if await cur.fetchone() is None:
-                    return False
-                await cur.execute(
+                affected = await cur.execute(
                     "UPDATE facts SET expires_at = %s WHERE id = %s",
                     (expires_at, fact_id),
                 )
-                return True
+                if affected:
+                    return True
+                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
+                return await cur.fetchone() is not None
 
     @db_error_handler
     async def delete_fact(self, fact_id: int) -> Optional[bool]:

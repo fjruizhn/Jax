@@ -182,5 +182,85 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         m.supersede_fact.assert_not_awaited()
 
 
+class MigracionCompensatoriaTest(unittest.IsolatedAsyncioTestCase):
+    """m2 (auditoria adversarial 2026-09-20 sobre feat/memoria-admin, un
+    cuarto defecto de la MISMA familia que da titulo a este archivo -- el
+    migrador no miraba lo que CADA paso devolvia, todo vivia bajo un unico
+    try/except de la funcion entera).
+
+    `jax/memory/migrations.py::ensure_schema()` agrega `facts.verified_by`
+    con `AFTER verified_at` -- pero no garantiza que `verified_at` exista
+    (una base mas vieja que esa columna no la tiene). Ese ALTER tira ERROR
+    1054 (columna desconocida), y como los tres bucles (columnas, backfill,
+    indices) vivian bajo un solo try/except, esa excepcion abortaba TAMBIEN
+    la creacion de indices y el backfill de `messages`, que no tienen nada
+    que ver con `verified_at`.
+
+    Este test simula el fallo puntual con un cursor mockeado (sin DB real,
+    a proposito) y comprueba que los pasos SIGUIENTES se intentan igual."""
+
+    async def test_un_fallo_puntual_no_aborta_el_resto_de_la_migracion(self):
+        from jax.memory import migrations
+
+        ejecutados: list[str] = []
+
+        class CursorFalso:
+            def __init__(self):
+                self.rowcount = 0
+
+            async def execute(self, sql, args=None):
+                ejecutados.append(sql)
+                if "ADD COLUMN verified_by" in sql:
+                    raise Exception(
+                        "(1054, \"Unknown column 'verified_at' in 'facts'\")")
+                return 0
+
+            async def fetchone(self):
+                # Todo "existe?" da 0: fuerza que CADA columna/indice se
+                # intente agregar/crear, uno por uno.
+                return (0,)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class ConnFalso:
+            def cursor(self):
+                return CursorFalso()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class PoolFalso:
+            def acquire(self):
+                return ConnFalso()
+
+        ok = await migrations.ensure_schema(PoolFalso())
+
+        self.assertFalse(ok, "un paso fallido tiene que dejar ensure_schema() en False")
+        unidos = "\n".join(ejecutados)
+        self.assertIn(
+            "idx_msg_scope", unidos,
+            "el indice de messages ni se intento -- la migracion aborto entera "
+            "por el fallo de verified_by")
+        self.assertIn(
+            "idx_facts_revision", unidos,
+            "el indice de facts ni se intento -- la migracion aborto entera "
+            "por el fallo de verified_by")
+        self.assertIn(
+            "UPDATE messages", unidos,
+            "el backfill ni se intento -- la migracion aborto entera por el "
+            "fallo de verified_by")
+        self.assertIn(
+            "ADD COLUMN superseded_by_user", unidos,
+            "la columna SIGUIENTE a la que fallo ni se intento -- un fallo "
+            "puntual no puede saltarse el resto de las columnas")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ a `jax_memory_schema.sql`. Esto solo lleva un esquema existente hacia adelante.
 from __future__ import annotations
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -100,42 +101,143 @@ _BACKFILL = [
 ]
 
 
-async def ensure_schema(pool) -> bool:
-    """Aplica lo que falte. Devuelve True si el esquema quedo al dia.
+#: Extrae la columna de referencia de un DDL con `AFTER <columna>` (case
+#: insensible -- MariaDB no distingue mayusculas en palabras clave). Entradas
+#: de `_COLUMNAS` sin `AFTER` (la columna va al final, la posicion no
+#: importa) no matchean, y eso es el comportamiento correcto: nada que
+#: reposicionar.
+_AFTER_RE = re.compile(r"\bAFTER\s+(\w+)\b", re.IGNORECASE)
 
-    Fail-soft y RUIDOSO: un error se registra como ERROR y devuelve False, pero
-    no lanza -- el arranque de JAX no depende de esto.
+
+async def _reposicionar_si_hace_falta(cur, tabla: str, columna: str, ddl: str) -> None:
+    """MIGRACION COMPENSATORIA (2026-09-20, auditoria adversarial M2).
+
+    La columna YA EXISTE (si no, el llamador ya la agrego con `ddl` tal
+    cual). Pudo haber quedado en la posicion equivocada porque una version
+    anterior de este migrador la agrego SIN `AFTER` -- un `ALTER TABLE ADD
+    COLUMN` sin eso la deja al FINAL de la tabla, mientras
+    `jax_memory_schema.sql` (la fuente de verdad del checker de deriva) la
+    declara en el MEDIO. El resultado medido 2026-09-20 contra
+    `jax_memory_test`: `verified_by` en la posicion 20 y
+    `superseded_by_user` en la 21, cuando el .sql las pone en la 10 y la 11
+    -- y como `conftest.py`/`base_de_test.py` CLONAN el esquema de esa base
+    para cada base de sesion nueva, la deriva se propaga a toda base que
+    nazca a partir de ahi. Produccion se salvaba solo por cronologia
+    (todavia no tenia las columnas cuando se escribio esto).
+
+    Idempotente: si la columna ya esta en su lugar, el `MODIFY COLUMN` no
+    corre. Si la columna de referencia (`AFTER <esa>`) tampoco existe
+    todavia (base mas vieja que ni siquiera tiene `verified_at`), no hay
+    nada que reposicionar EN ESTA CORRIDA -- eso es lo mismo que documenta
+    `_agregar_columnas_de_facts` sobre `verified_at`: la siguiente corrida
+    de `ensure_schema`, una vez que la referencia exista, lo resuelve."""
+    referencia = _AFTER_RE.search(ddl)
+    if not referencia:
+        return
+    columna_referencia = referencia.group(1)
+    await cur.execute(
+        "SELECT ORDINAL_POSITION FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+        (tabla, columna),
+    )
+    fila = await cur.fetchone()
+    pos_actual = fila[0] if fila else None
+    await cur.execute(
+        "SELECT ORDINAL_POSITION FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+        (tabla, columna_referencia),
+    )
+    fila_ref = await cur.fetchone()
+    pos_referencia = fila_ref[0] if fila_ref else None
+    if pos_actual is None or pos_referencia is None or pos_actual == pos_referencia + 1:
+        return
+    # El DDL de ADD ya trae el tipo/nullability + el mismo `AFTER`: el
+    # MODIFY es literalmente el mismo texto con el verbo cambiado. Dos
+    # fuentes de verdad para "que tipo tiene esta columna" se desincronizan
+    # solas (Regla Absoluta) -- por eso no se repite el tipo a mano aca.
+    reposicionar = ddl.replace("ADD COLUMN", "MODIFY COLUMN", 1)
+    await cur.execute(reposicionar)
+    logger.info(
+        "migracion: %s.%s reposicionada AFTER %s (estaba en la posicion "
+        "%d, no en la %d)",
+        tabla, columna, columna_referencia, pos_actual, pos_referencia + 1,
+    )
+
+
+async def ensure_schema(pool) -> bool:
+    """Aplica lo que falte. Devuelve True si el esquema quedo al dia (todos
+    los pasos, en TODAS las tablas, sin un solo error).
+
+    Fail-soft y RUIDOSO: un error se registra como ERROR y el paso que fallo
+    hace que el resultado final sea False, pero no lanza -- el arranque de
+    JAX no depende de esto.
+
+    CADA PASO va en su propio try/except (arreglado 2026-09-20, auditoria
+    adversarial m2): antes los tres bucles (columnas, backfill, indices)
+    vivian bajo un UNICO try/except de la funcion entera. Si una base
+    todavia no tenia `verified_at` (una base mas vieja que la columna que
+    esta migracion agrego en una ronda anterior), el `ALTER TABLE ... ADD
+    COLUMN verified_by ... AFTER verified_at` de MAS ARRIBA fallaba con
+    ERROR 1054 (columna desconocida) -- y esa excepcion escapaba del bucle
+    de columnas y abortaba TAMBIEN el backfill y la creacion de indices, que
+    no tienen nada que ver con `verified_at`. Con cada paso aislado, un
+    fallo puntual se registra y el resto de la migracion sigue -- la
+    proxima corrida de `ensure_schema()` (el proximo arranque) reintenta
+    el paso que fallo.
     """
+    ok = True
     try:
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
                 for tabla, columna, ddl in _COLUMNAS:
-                    await cur.execute(
-                        "SELECT COUNT(*) FROM information_schema.COLUMNS "
-                        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
-                        (tabla, columna),
-                    )
-                    if not (await cur.fetchone())[0]:
-                        await cur.execute(ddl)
-                        logger.info("migracion: %s.%s agregada", tabla, columna)
+                    try:
+                        await cur.execute(
+                            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                            (tabla, columna),
+                        )
+                        if not (await cur.fetchone())[0]:
+                            await cur.execute(ddl)
+                            logger.info("migracion: %s.%s agregada", tabla, columna)
+                        else:
+                            await _reposicionar_si_hace_falta(cur, tabla, columna, ddl)
+                    except Exception as e:
+                        logger.error(
+                            "migracion: %s.%s fallo (%s: %s) -- se sigue con el "
+                            "resto de la migracion", tabla, columna, type(e).__name__, e)
+                        ok = False
 
                 for tabla, columna, ddl in _BACKFILL:
-                    await cur.execute(ddl)
-                    if cur.rowcount:
-                        logger.info("migracion: backfill de %s.%s en %d filas",
-                                    tabla, columna, cur.rowcount)
+                    try:
+                        await cur.execute(ddl)
+                        if cur.rowcount:
+                            logger.info("migracion: backfill de %s.%s en %d filas",
+                                        tabla, columna, cur.rowcount)
+                    except Exception as e:
+                        logger.error(
+                            "migracion: backfill de %s.%s fallo (%s: %s) -- se sigue "
+                            "con el resto de la migracion",
+                            tabla, columna, type(e).__name__, e)
+                        ok = False
 
                 for tabla, indice, ddl in _INDICES:
-                    await cur.execute(
-                        "SELECT COUNT(*) FROM information_schema.STATISTICS "
-                        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
-                        (tabla, indice),
-                    )
-                    if not (await cur.fetchone())[0]:
-                        await cur.execute(ddl)
-                        logger.info("migracion: indice %s creado", indice)
-        return True
-    except Exception as e:  # fail-soft: el False que devuelve SI se consume desde connect() (self.schema_ok) y health_check() lo reporta como base NO sana; migrar es best-effort, servir mintiendo sobre el esquema no
+                    try:
+                        await cur.execute(
+                            "SELECT COUNT(*) FROM information_schema.STATISTICS "
+                            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
+                            (tabla, indice),
+                        )
+                        if not (await cur.fetchone())[0]:
+                            await cur.execute(ddl)
+                            logger.info("migracion: indice %s creado", indice)
+                    except Exception as e:
+                        logger.error(
+                            "migracion: indice %s (%s) fallo (%s: %s) -- se sigue "
+                            "con el resto de la migracion",
+                            indice, tabla, type(e).__name__, e)
+                        ok = False
+        return ok
+    except Exception as e:  # fail-soft: falla de CONEXION (acquire/cursor), no de un paso puntual -- nada de lo de arriba corrio
         logger.error("migracion del esquema de memoria fallo: %s -- se sigue con "
                      "el esquema que haya", e)
         return False

@@ -165,6 +165,29 @@ async def test_verify_fact_escribe_quien_aprobo(limpio):
     assert verified_at is not None
 
 
+@requiere_db_de_prueba
+@asincrono
+async def test_verify_fact_con_verified_by_cero_escribe_cero_sin_chistar(limpio):
+    """Hueco de cobertura senalado en la auditoria adversarial 2026-09-20:
+    `verify_fact` NO valida `verified_by` (a diferencia de sus DOS
+    llamadores, que si tratan 0 como "no se sabe quien" -- `handle_fact_
+    command`/REPL en tests/test_repl_fact_verify_autoria.py, y el candado de
+    `save_fact` para `supersede_fact` en tests/test_memoria_no_traga_fallos_
+    de_escritura.py). Es a proposito: el candado vive en cada LLAMADOR, que
+    es quien sabe de donde sale el id y si 0 es valido en ese contexto --
+    `MemoryDB.verify_fact` es una escritura generica que hace lo que se le
+    pide. Este test documenta esa frontera, no la mueve."""
+    fid = await _crear_fact()
+    m = await _memoria()
+    ok = await m.verify_fact(fid, 0)
+    assert ok is True
+    is_verified, verified_by = await _fila(fid, "is_verified", "verified_by")
+    assert is_verified == 1
+    assert verified_by == 0, (
+        "verify_fact tiene que escribir 0 tal cual se lo pasaron -- validar "
+        "'0 es no se sabe' es responsabilidad del llamador, no de este metodo")
+
+
 # ---------------------------------------------------------------------------
 # supersede_fact: escribe QUIEN corrigio, no None
 # ---------------------------------------------------------------------------
@@ -185,6 +208,25 @@ async def test_supersede_fact_registra_quien_corrigio(limpio):
     assert superseded_by_user == _OTRO_USER, (
         "supersede_fact no registro quien tomo la decision de corregir")
     assert superseded_at is not None
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_supersede_fact_con_old_fact_id_inexistente_da_false(limpio):
+    """M3 (auditoria adversarial 2026-09-20): antes `supersede_fact`
+    devolvia `True` SIN mirar `rowcount` -- un `old_fact_id` que no existe
+    (o que desaparecio entre que `save_fact` lo encontro como candidato y
+    este UPDATE) da `affected=0` y el metodo devolvia `True` igual. El test
+    viejo (`test_supersede_fact_registra_quien_corrigio`, arriba) solo
+    ejercita el camino feliz y `assert ok is True`: pasaria identico con el
+    bug, porque nunca prueba un `old_fact_id` que no exista. Este lo hace."""
+    nuevo = await _crear_fact("hecho nuevo, sin nada que reemplazar")
+    m = await _memoria()
+    id_inexistente = 900_000_002  # no hay AUTO_INCREMENT que llegue tan alto en test
+    ok = await m.supersede_fact(id_inexistente, nuevo, _OTRO_USER)
+    assert ok is False, (
+        "supersede_fact devolvio True para un old_fact_id que no existe -- "
+        "el rowcount del UPDATE tiene que decir la verdad")
 
 
 # ---------------------------------------------------------------------------
@@ -253,15 +295,145 @@ async def test_ensure_schema_repone_idx_facts_revision_con_las_tres_columnas_en_
     DROPEA primero y se deja que `_memoria()` (que conecta) lo reponga,
     en vez de leerlo tal como lo dejo `_preparar()` desde el .sql."""
     await _sql("DROP INDEX idx_facts_revision ON facts")
-    m = await _memoria()
-    assert m.schema_ok is True
-    filas = await _sql(
-        "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
-        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='facts' "
-        "AND INDEX_NAME='idx_facts_revision' ORDER BY SEQ_IN_INDEX", fetch=True)
-    columnas = [c for (c,) in filas]
-    assert columnas == ["is_verified", "expires_at", "created_at"], (
-        f"el migrador repuso idx_facts_revision como {columnas}: la pantalla "
-        f"de Memoria filtra por is_verified/expires_at y ordena por "
-        f"created_at, y sin las tres columnas EN ESE ORDEN el EXPLAIN cae a "
-        f"filesort")
+    try:
+        m = await _memoria()
+        assert m.schema_ok is True
+        filas = await _sql(
+            "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='facts' "
+            "AND INDEX_NAME='idx_facts_revision' ORDER BY SEQ_IN_INDEX", fetch=True)
+        columnas = [c for (c,) in filas]
+        assert columnas == ["is_verified", "expires_at", "created_at"], (
+            f"el migrador repuso idx_facts_revision como {columnas}: la pantalla "
+            f"de Memoria filtra por is_verified/expires_at y ordena por "
+            f"created_at, y sin las tres columnas EN ESE ORDEN el EXPLAIN cae a "
+            f"filesort")
+    finally:
+        # m5 (auditoria adversarial 2026-09-20): si algun assert de arriba
+        # revienta, el indice queda CAIDO en una base COMPARTIDA
+        # (jax_memory_test, o cualquier otra base de la misma sesion que
+        # otra suite use en paralelo) -- reponerlo no puede depender del
+        # camino feliz de este test, o la siguiente suite que corra pierde
+        # su EXPLAIN sobre idx_facts_revision. Idempotente: si ensure_schema
+        # ya lo repuso, este CREATE corre sobre un indice que ya existe y no
+        # se ejecuta.
+        existe = await _sql(
+            "SELECT 1 FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='facts' "
+            "AND INDEX_NAME='idx_facts_revision'", fetch=True)
+        if not existe:
+            await _sql(
+                "CREATE INDEX idx_facts_revision ON facts "
+                "(is_verified, expires_at, created_at)")
+
+
+# ---------------------------------------------------------------------------
+# M2: la migracion COMPENSATORIA repara una base ya migrada torcida, no solo
+# una virgen (auditoria adversarial 2026-09-20).
+#
+# El test estatico de test_memoria_gobernanza.py (test_el_migrador_agrega_
+# las_columnas_en_la_MISMA_posicion_que_el_esquema) compara TEXTO de DDL --
+# nunca mira una base. No detecta que `ensure_schema()` salteaba la
+# reposicion cuando la columna YA EXISTIA: el bucle de `_COLUMNAS` solo
+# miraba "existe si/no", nunca "esta en el lugar correcto". Una base
+# MIGRADA antes de que el `AFTER` se agregara al DDL (medido 2026-09-20
+# contra jax_memory_test: verified_by en la posicion 20, superseded_by_user
+# en la 21, cuando el .sql las pone en la 10 y la 11) se quedaba torcida
+# PARA SIEMPRE, aunque `connect()`/`ensure_schema()` corriera en cada
+# arranque -- y como `base_de_test.py` CLONA el esquema de esa base para
+# cada base de sesion nueva, la deriva se propagaba a toda base nacida
+# despues.
+#
+# Este test usa una base TEMPORAL propia (creada y borrada aca mismo, nunca
+# `jax_memory_test`): reproduce el escenario a mano (agrega las columnas SIN
+# `AFTER`, tal como las dejaba el migrador viejo) y corre `ensure_schema()`
+# -- el camino real de `connect()` -- contra ella.
+# ---------------------------------------------------------------------------
+
+from jax.memory import migrations as migrations_mod  # noqa: E402
+
+_DB_TEMPORAL_M2 = f"jax_memory_test_m2gobernanza_{os.getpid()}"
+
+
+async def _conn_sin_base():
+    return await aiomysql.connect(
+        host=os.environ["JAX_DB_HOST"], port=int(os.environ["JAX_DB_PORT"]),
+        user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
+        autocommit=True, connect_timeout=db_connect_timeout_seconds())
+
+
+async def _posiciones_de_columnas(pool, tabla: str) -> dict:
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT COLUMN_NAME, ORDINAL_POSITION FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s", (tabla,))
+            return {nombre: pos for nombre, pos in await cur.fetchall()}
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_ensure_schema_repara_una_base_migrada_con_las_columnas_en_mal_lugar():
+    """M2 (auditoria adversarial 2026-09-20). Ver el bloque de comentarios de
+    arriba para el porque completo."""
+    assert _DB_TEMPORAL_M2 != "jax_memory", "nunca DROP/CREATE sobre produccion"
+    assert es_base_de_test(_DB_TEMPORAL_M2), (
+        "el nombre de la base temporal no matchea el patron de bases de "
+        "test -- no se crea sin esa garantia")
+
+    conn = await _conn_sin_base()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(f"DROP DATABASE IF EXISTS `{_DB_TEMPORAL_M2}`")
+            await cur.execute(f"CREATE DATABASE `{_DB_TEMPORAL_M2}`")
+        await conn.select_db(_DB_TEMPORAL_M2)
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "CREATE TABLE facts ("
+                "  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,"
+                "  is_verified TINYINT(1) DEFAULT 0,"
+                "  verified_at TIMESTAMP NULL DEFAULT NULL,"
+                "  expires_at TIMESTAMP NULL DEFAULT NULL,"
+                "  created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP"
+                ") ENGINE=InnoDB")
+            # Lo que dejaba el migrador ANTES de que `AFTER` se agregara al
+            # DDL: la columna existe, pero al FINAL de la tabla -- no entre
+            # `verified_at` y `expires_at`.
+            await cur.execute("ALTER TABLE facts ADD COLUMN verified_by INT NULL")
+            await cur.execute(
+                "ALTER TABLE facts ADD COLUMN superseded_by_user INT NULL")
+    finally:
+        conn.close()
+
+    pool = await aiomysql.create_pool(
+        host=os.environ["JAX_DB_HOST"], port=int(os.environ["JAX_DB_PORT"]),
+        user=os.getenv("JAX_DB_USER", ""), password=os.getenv("JAX_DB_PASSWORD", ""),
+        db=_DB_TEMPORAL_M2, autocommit=True,
+        connect_timeout=db_connect_timeout_seconds())
+    try:
+        antes = await _posiciones_de_columnas(pool, "facts")
+        assert antes["verified_by"] != antes["verified_at"] + 1, (
+            "el escenario no reproduce el bug: verified_by ya estaba en su "
+            "lugar ANTES de correr ensure_schema() -- este test no probaria "
+            "nada")
+
+        await migrations_mod.ensure_schema(pool)
+
+        despues = await _posiciones_de_columnas(pool, "facts")
+        assert despues["verified_by"] == despues["verified_at"] + 1, (
+            f"ensure_schema() no reposiciono verified_by: quedo en la "
+            f"posicion {despues['verified_by']}, verified_at esta en la "
+            f"{despues['verified_at']}")
+        assert despues["superseded_by_user"] == despues["verified_by"] + 1, (
+            f"ensure_schema() no reposiciono superseded_by_user: quedo en "
+            f"la posicion {despues['superseded_by_user']}, verified_by "
+            f"esta en la {despues['verified_by']}")
+    finally:
+        pool.close()
+        await pool.wait_closed()
+        conn = await _conn_sin_base()
+        try:
+            async with conn.cursor() as cur:
+                await cur.execute(f"DROP DATABASE IF EXISTS `{_DB_TEMPORAL_M2}`")
+        finally:
+            conn.close()

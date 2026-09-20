@@ -242,6 +242,17 @@ async def handle_fact_command(db, line: str, pending_delete: dict, repl_uid) -> 
                 "atribuir la aprobacion. Aprobar sin dueno es un sello vacio."
             )
         ok = await db.verify_fact(int(arg), repl_uid)
+        # M1 (auditoria adversarial 2026-09-20): verify_fact devuelve None
+        # cuando la base no respondio (contrato de tres estados, ver su
+        # docstring en jax/memory/db.py) -- NO cuando el hecho no existe.
+        # Tratar None igual que False es exactamente la mentira que esta
+        # rama vino a matar: el operador leia "No encontre el hecho #N" con
+        # el hecho SI ahi, solo que la base estaba caida.
+        if ok is None:
+            return (
+                f"No pude verificar el hecho #{arg}: la base de memoria no "
+                "responde. Reintenta en un momento."
+            )
         return f"Hecho #{arg} verificado." if ok else f"No encontre el hecho #{arg}."
 
     # /fact delete <id>   (atajo: d) — SIEMPRE confirma

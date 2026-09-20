@@ -110,6 +110,23 @@ class VerifyConAutoriaTest(unittest.IsolatedAsyncioTestCase):
         db.verify_fact.assert_not_awaited()
         self.assertIn("Uso:", salida)
 
+    async def test_base_caida_no_se_reporta_como_hecho_inexistente(self):
+        """M1 (auditoria adversarial 2026-09-20): `verify_fact` devuelve
+        `None` cuando la base no respondio (contrato de tres estados,
+        jax/memory/db.py) -- distinto de `False` (el hecho no existe). ANTES
+        de este arreglo, `handle_fact_command` trataba los dos casos igual
+        (`if ok else "No encontre el hecho #N."`): con la base caida, el
+        operador leia que el hecho no existia, cuando lo unico que fallo fue
+        la conexion. Es EXACTAMENTE la mentira que esta rama vino a matar,
+        viva otra vez por el camino del None."""
+        db = _db_falso()
+        db.verify_fact = mock.AsyncMock(return_value=None)
+        salida = await handle_fact_command(db, "/fact verify 7", {}, repl_uid=42)
+        db.verify_fact.assert_awaited_once_with(7, 42)
+        self.assertNotIn("No encontre", salida, (
+            "un None (base caida) no puede leerse como 'el hecho no existe'"))
+        self.assertIn("no responde", salida)
+
 
 class OtrasRamasSinCambiarTest(unittest.IsolatedAsyncioTestCase):
     """Las ramas que el hallazgo NO senalo (list, delete, confirm, help)

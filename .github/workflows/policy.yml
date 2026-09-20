@@ -613,8 +613,48 @@ jobs:
           #     vencido ya no bloquea la reextraccion del mismo hecho
           #     (_find_nearest_fact) ni infla el conteo de
           #     get_scopes_with_verified_facts.
-          grep -qE "^38 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 38 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 38 -> 43 (2026-09-20, SEGUNDA auditoria adversarial sobre
+          # feat/memoria-admin -- los hallazgos M2/M3/huecos de esa ronda):
+          # +5, los cinco contra esta MariaDB real, verificados en rojo
+          # contra el codigo de ANTES del arreglo (revertido a mano a este
+          # mismo commit, corrido, restaurado -- no derivado):
+          #   tests/test_memoria_facts_comportamiento.py (+3) --
+          #     test_verify_fact_con_verified_by_cero_escribe_cero_sin_chistar
+          #     (hueco de cobertura: 0 se escribe tal cual, el candado es de
+          #     cada LLAMADOR, no de este metodo);
+          #     test_supersede_fact_con_old_fact_id_inexistente_da_false (M3:
+          #     supersede_fact devolvia True sin mirar rowcount -- el test
+          #     viejo solo probaba el camino feliz);
+          #     test_ensure_schema_repara_una_base_migrada_con_las_columnas_en_mal_lugar
+          #     (M2: una base YA migrada con verified_by/superseded_by_user al
+          #     final de la tabla se quedaba torcida para siempre -- el
+          #     migrador solo miraba "existe si/no", nunca "esta en el lugar
+          #     correcto"; este usa una base TEMPORAL propia, nunca
+          #     jax_memory_test).
+          #   tests/test_memoria_caducidad_no_es_agujero.py (+2) --
+          #     test_expire_fact_con_none_devuelve_el_hecho_al_juego_del_dedup
+          #     (hueco: es la justificacion del camino 5 de la lista de ese
+          #     archivo, nadie lo probaba);
+          #     test_correccion_sobre_un_candidato_vencido_no_lo_supersede_inserta_como_nuevo
+          #     (hueco + DECISION de diseno documentada en el propio test: es
+          #     ACEPTABLE que una correccion contra un candidato vencido no
+          #     lo encadene via superseded_by -- ver el docstring del test
+          #     para el criterio completo).
+          # OJO (verificacion 2026-09-20): con JAX_TEST_DB_SUFIJO (una base
+          # PROPIA, clonada de jax_memory_test) test_memory_vector_zero_io.py
+          # ::test_backfill_repara_mensajes_y_facts_en_cero_sin_tocar_los_reales
+          # y test_memory_scope_denormalized.py
+          # ::test_la_busqueda_usa_el_indice_vectorial_y_no_une_con_conversations
+          # dan rojo -- reproducido tambien contra el codigo de ANTES de esta
+          # ronda (y de la ronda anterior), asi que NO los causa este cambio.
+          # Probable causa: la clonacion copia FILAS de jax_memory_test (no
+          # solo esquema) y esa base, usada por sesiones de desarrollo desde
+          # hace meses, ya no esta vacia -- distinto del contenedor
+          # mariadb:12.3.3 fresco de este job en CI, que arranca sin datos.
+          # No es hallazgo de esta ronda ni de esta tarea: reportado, no
+          # corregido aca (fuera de alcance del encargo).
+          grep -qE "^43 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 43 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
@@ -2658,8 +2698,43 @@ jobs:
           # Delta medido en el runner local con ESTE mismo comando: master 2257 ->
           # rama 2276. El numero absoluto local difiere del de CI porque aca existe
           # el corpus de U3 y los 17 no se saltean; manda el delta.
-          grep -qE "^2265 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2265 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2265 -> 2268 (2026-09-20, SEGUNDA auditoria adversarial sobre
+          # feat/memoria-admin -- B1 + M1):
+          #   +1 SIN commit propio -- B1: tests/test_memoria_gobernanza.py ya
+          #     tenia 8 tests (no 7) cuando este piso se fijo en 2265; un
+          #     commit de esta rama subio el archivo de 7 a 8 y este piso se
+          #     quedo sin actualizar. `grep -c "^def test_"
+          #     tests/test_memoria_gobernanza.py` da 8, medido 2026-09-20.
+          #   +1 tests/test_repl_fact_verify_autoria.py --
+          #     test_base_caida_no_se_reporta_como_hecho_inexistente (M1):
+          #     handle_fact_command trataba `verify_fact` devolviendo `None`
+          #     (base caida) igual que `False` (hecho no existe) --
+          #     "No encontre el hecho #N." sobre un hecho que SI existe.
+          #   +1 tests/test_memoria_no_traga_fallos_de_escritura.py --
+          #     MigracionCompensatoriaTest::test_un_fallo_puntual_no_aborta_el_resto_de_la_migracion
+          #     (m2): los tres bucles de ensure_schema() (columnas, backfill,
+          #     indices) vivian bajo un UNICO try/except de la funcion
+          #     entera -- si `verified_at` no existe todavia en una base
+          #     vieja, el ALTER de `verified_by ... AFTER verified_at` tira
+          #     ERROR 1054 y esa excepcion se llevaba puesto TAMBIEN el
+          #     backfill y los indices, que no tienen nada que ver.
+          #   +1 tests/test_memoria_gobernanza.py --
+          #     test_la_columna_referenciada_por_AFTER_existe_de_antemano_o_se_agrega_antes
+          #     (m3): el test posicional (arriba) no exigia que la columna
+          #     de referencia de un `AFTER` estuviera ya declarada ANTES en
+          #     `_COLUMNAS` (o preexistiera fuera de esta lista) -- un futuro
+          #     `AFTER <columna-nueva>` mal ordenado fallaria con el MISMO
+          #     'Unknown column' que m2/m2, sin que ningun test lo viera
+          #     venir. Este es de datos (valida `_COLUMNAS` tal como esta
+          #     HOY, ya correcta) -- no hay un "rojo contra el bug" que
+          #     mostrar porque no hay bug hoy, es una guarda preventiva.
+          # Los 2 tests de comportamiento (repl_fact_verify_autoria,
+          # no_traga_fallos_de_escritura) vistos ROJOS contra el codigo de
+          # ANTES de este arreglo (revertido a mano a este mismo commit,
+          # corrido, restaurado -- no derivado). Delta de esta ronda: +4
+          # sobre 2265 (el +1 de B1 sin commit propio, y los +3 nuevos).
+          grep -qE "^2269 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2269 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

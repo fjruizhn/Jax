@@ -6,6 +6,8 @@ Medido el 2026-09-20 contra produccion: `facts` tiene `verified_at` pero NO
 usuario. El spec 2026-09-18-memoria-admin §2.2 pide aprobar "con quien y
 cuando" -- sin estas columnas el quien no se puede guardar.
 """
+import re
+
 import pytest
 
 from jax.memory import migrations
@@ -78,6 +80,45 @@ def test_el_migrador_agrega_las_columnas_en_la_MISMA_posicion_que_el_esquema():
             f"dice `AFTER {anterior}` ({ddl!r}) -- una base MIGRADA (no "
             f"creada desde cero con el .sql) va a terminar con {col!r} en "
             f"otra posicion.")
+
+
+def test_la_columna_referenciada_por_AFTER_existe_de_antemano_o_se_agrega_antes():
+    """m3 (auditoria adversarial 2026-09-20, SEGUNDA ronda). El test de
+    arriba compara el DDL de migrations.py contra jax_memory_schema.sql,
+    pero no exige que la columna de referencia (`AFTER <col>`) exista
+    realmente en el momento en que `ensure_schema()` corre ese ALTER --
+    `_COLUMNAS` se procesa en orden EXACTO (ver `ensure_schema()`): si
+    alguien agregara una entrada nueva con `AFTER <otra-columna-nueva>` y la
+    pusiera ANTES que esa otra en la lista, el `ALTER TABLE ... ADD COLUMN
+    ... AFTER <otra-columna-nueva>` revienta con 'Unknown column' en
+    cualquier base que todavia no la tenga -- el mismo tipo de fallo que
+    dejaba a m2 (`verified_at`) sin cubrir, pero DENTRO de las columnas que
+    este mismo migrador declara.
+
+    Para cada `AFTER <col>`: si `<col>` es una de las que `_COLUMNAS`
+    declara para la MISMA tabla, tiene que aparecer ANTES en la lista (se
+    agrega ella misma antes de que se la use como referencia). Si `<col>` no
+    esta en `_COLUMNAS` para esa tabla, se asume preexistente (como
+    `verified_at`) y no hay nada que este test pueda validar sobre eso --
+    ese caso lo cubre la migracion compensatoria (M2/m2), no esto."""
+    after_re = re.compile(r"AFTER (\w+)")
+    vistas_por_tabla: dict[str, set[str]] = {}
+    for tabla, columna, ddl in migrations._COLUMNAS:
+        vistas = vistas_por_tabla.setdefault(tabla, set())
+        referencia = after_re.search(ddl)
+        if referencia:
+            ref = referencia.group(1)
+            declaradas_en_esta_tabla = {
+                c for (t, c, _ddl) in migrations._COLUMNAS if t == tabla
+            }
+            if ref in declaradas_en_esta_tabla:
+                assert ref in vistas, (
+                    f"{tabla}.{columna} tiene `AFTER {ref}`, pero {ref!r} "
+                    f"TAMBIEN esta declarada en _COLUMNAS para {tabla!r} y "
+                    f"no aparece ANTES que {columna!r} en la lista -- en una "
+                    f"base que no tenga ninguna de las dos, el ALTER de "
+                    f"{columna!r} va a fallar con 'Unknown column {ref!r}'")
+        vistas.add(columna)
 
 
 import inspect
