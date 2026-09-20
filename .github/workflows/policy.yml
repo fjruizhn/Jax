@@ -573,7 +573,7 @@ jobs:
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
           tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py
-          tests/test_memoria_caducidad_no_es_agujero.py
+          tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -584,7 +584,7 @@ jobs:
             tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py \
             tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py \
             tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py \
-            tests/test_memoria_caducidad_no_es_agujero.py 2>&1 | tee /tmp/out
+            tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
           # (el scope copiado al mensaje, el centinela de que el scope de una
           # conversacion sigue siendo inmutable, el plan sin JOIN que si usa el
@@ -654,8 +654,22 @@ jobs:
           # mariadb:12.3.3 fresco de este job en CI, que arranca sin datos.
           # No es hallazgo de esta ronda ni de esta tarea: reportado, no
           # corregido aca (fuera de alcance del encargo).
-          grep -qE "^43 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 43 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 43 -> 50 el mismo dia: tests/test_indice_vectorial.py (+7) -- el
+          #   centinela del indice vectorial. Detecta que el indice MIENTE
+          #   comparando su conteo contra `IGNORE INDEX`, porque la ceguera
+          #   medida fue PARCIAL (1 de 10, no 0) y un detector que solo mire
+          #   el vacio da verde con el indice roto. Incluye el centinela de
+          #   esa ceguera parcial, el de que una tabla sana NO se reporta (una
+          #   alarma que suena siempre termina apagada) y el de que la
+          #   reparacion no degrada la definicion: recrear el indice sin
+          #   `DISTANCE='cosine'` y `M='16'` lo deja con otra distancia y otro
+          #   M, dando resultados distintos sin un solo error.
+          # El piso es el numero que dio el RUNNER (contado archivo por archivo:
+          # 8+2+6+7 = 23 los viejos, 8+7+5 = 20 los de memoria, 7 este), no el
+          # que sale de sumar los comentarios de arriba -- el de "+15" quedo
+          # desfasado y el piso real de master ya era 43.
+          grep -qE "^50 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 50 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
