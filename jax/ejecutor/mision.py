@@ -360,9 +360,14 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
             if codigo is None and rc != 0:
                 codigo = "cerebro_fallo"
     finally:
-        rc_vigia, salida_vigia = await vigia.cerrar()
+        rc_vigia, salida_vigia, err_vigia = await vigia.cerrar()
         cerro = rc_vigia == 0 and "cerrada=true" in salida_vigia
-        dice("vigia_cerrado", rc=rc_vigia, cerrada=cerro)
+        # El stderr SOLO cuando algo salio mal, y solo la cola: en el camino feliz son
+        # lineas de INFO de httpx que no dicen nada y ensucian la bitacora. Va redactado
+        # desde `Vigia.cerrar`. El 2026-09-20 una mision fallo con `vigia_no_latio` y no
+        # habia una sola linea para investigar.
+        dice("vigia_cerrado", rc=rc_vigia, cerrada=cerro,
+             **({} if cerro else {"stderr": err_vigia[-2000:]}))
     cadena = await deps.cadena_ok(ctx)
     pausa = await deps.leer_pausa(ctx)
     puesta = bool(pausa and pausa.get("puesta"))

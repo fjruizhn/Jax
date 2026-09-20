@@ -1013,6 +1013,7 @@ jobs:
           tests/test_ejecutor_vigia_servicio.py
           tests/test_ejecutor_fase0_retirada.py
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
+          tests/test_ejecutor_vigia_stderr.py
           tests/test_loadtest_apps_protegidas.py
           tests/test_ejecutor_probar_c4_conteo_remoto.py
           tests/test_ejecutor_cuenta_de_servicio.py
@@ -1150,6 +1151,7 @@ jobs:
             tests/test_ejecutor_vigia_servicio.py \
             tests/test_ejecutor_fase0_retirada.py \
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
+            tests/test_ejecutor_vigia_stderr.py \
             tests/test_loadtest_apps_protegidas.py \
             tests/test_ejecutor_probar_c4_conteo_remoto.py \
             tests/test_ejecutor_cuenta_de_servicio.py \
@@ -2650,8 +2652,17 @@ jobs:
           #   vigia caido, donde `entrega` es None y la primera version reventaba con
           #   AttributeError. Delta con el comando de ESTE job: master 2284 -> rama 2289,
           #   mismos 4 fallos locales preexistentes.
-          grep -qE "^2278 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2278 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2278 -> 2285 (2026-09-20, stderr-del-vigia): +7, puros.
+          #   El stderr del vigia se tiraba a DEVNULL. Cuando una mision fallo con
+          #   `vigia_no_latio` no habia UNA linea para investigar: el diagnostico salio
+          #   corriendo el vigia a mano. Tercera vez en el dia que un stderr=DEVNULL
+          #   escondio la causa. +5 en test_ejecutor_vigia_stderr.py (archivo nuevo,
+          #   cableado en las dos listas de este job) y +2 en test_ejecutor_mision.py
+          #   (el stderr llega a la bitacora cuando NO cierra, y NO ensucia cuando si).
+          #   Delta con el comando de ESTE job: master 2289 -> rama 2296, mismos 4
+          #   fallos locales preexistentes.
+          grep -qE "^2285 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2285 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
