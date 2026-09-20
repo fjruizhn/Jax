@@ -52,6 +52,30 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
+      # Detector agregado 2026-09-18 (ronda de arreglo del auditor local, hallazgo
+      # CRÍTICO de la revisión): scripts/ejecutor_contratos/mision_de_humo.py validaba
+      # el arranque contra la máquina de la misión (auditor local incluido) y auditaba
+      # la entrega real con la faceta de NUBE, resuelta por su cuenta -- mismo criterio
+      # de detector mecánico que P10, sin dependencias nuevas.
+      - run: python -m pytest policy/tests/test_auditor_c5_punto_unico.py -v
+
+  # Job propio, chico, sin dependencias pesadas (mismo criterio que no-fail-open-except):
+  # la garantía de "cero GPU" del auditor local (2026-09-18, hallazgo ALTO de la revisión)
+  # vive en ops/ejecutor/ollama-cpu.env.plantilla, no sólo en /etc/jax/ollama-cpu.env --
+  # este job audita que las cuatro variables sigan escritas y vacías, y que el instalador
+  # exija lo que hace falta y corra el canario. El canario en sí (una generación real
+  # contra Ollama) no corre acá -- este runner no tiene la GPU ni el Ollama de hall9000;
+  # se verificó a mano contra el proceso real (rojo con la config rota, verde restaurada,
+  # ver ops/ejecutor/canario_ollama_cpu.sh y la Biblioteca de esta ronda).
+  auditor-local-gpu-off:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python -m pytest tests/test_ejecutor_ollama_cpu_gpu_off.py -v
 
   # Detector de archivos de test sin job de CI (historial-y-arreglos-de-pipeline,
   # 2026-09-18). El hallazgo que lo motiva: de 6 archivos de test creados en
@@ -2501,6 +2525,24 @@ jobs:
           # sin JAX_DB_HOST, los otros 12 dan verde (passed/xfailed), cero
           # skips. Piso corregido con el número del RUNNER, no el de esta
           # máquina.
+          # 2192 -> 2196 (2026-09-18, ronda de arreglo del auditor local --
+          # hallazgo de la re-revisión: este job TAMBIÉN corre
+          # tests/test_ejecutor_contratos_eleccion_c5.py y tests/
+          # test_ejecutor_contratos_auditor_cliente.py, el mismo patrón que
+          # rompió jacobs-gobernanza-db en el commit anterior). +4: sensibles()
+          # y elegir_auditor_faceta() (spec 2026-09-18-auditor-local-opcion.md
+          # §4, qué faceta audita según si la misión toca datos de clientes) en
+          # test_ejecutor_contratos_eleccion_c5.py, y el transporte 'ollama' del
+          # auditor local (mismo body OpenAI-compat, sin credencial gestionada)
+          # en test_ejecutor_contratos_auditor_cliente.py. NO se corrió el job
+          # completo de nuevo en esta máquina para sacar el número (el U3 de
+          # arriba hace que el total absoluto local no sea comparable al del
+          # runner sin repetir esa calibración): se midieron ESTOS DOS archivos
+          # aislados, antes (origin/master, worktree separado) y después --
+          # 28 -> 32 tests colectados, ninguno de los dos con skip/xfail (grep
+          # sobre los dos archivos: cero matches de 'skip'/'xfail') -- así que
+          # el delta de +4 se aplica derecho sobre el piso ya calibrado del
+          # runner, sin tocar el 17 de skipped.
           # 2192 -> 2225 (2026-09-18, arbitro-devuelve): +33 de dos archivos
           # nuevos, puros (sin DB, sin red, sin el corpus de U3 ni el checkout
           # de jax-platform -- así que no les toca ninguna de las dos
@@ -2546,8 +2588,12 @@ jobs:
           # anterior, ahora con arnés propio). Los 9 vistos rojos contra el
           # código de antes de esta ronda de arreglo (reproducido a mano,
           # revertido y restaurado cada uno).
-          grep -qE "^2237 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2237 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # MERGE 2026-09-18: las dos ramas subieron este piso desde la MISMA base
+          #   (2192): auditor local +4, arbitro que devuelve +45. El piso es la SUMA
+          #   de los dos deltas; el mayor de los dos numeros consagraria que los
+          #   tests de la otra rama no corren. Si el runner da otro numero, manda el runner.
+          grep -qE "^2241 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2241 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
@@ -2920,8 +2966,35 @@ jobs:
           # igual: éste es un test nuevo que no depende de ese esquema, así
           # que el número final es 121 pasando (o 108/13 mientras la
           # dependencia siga pendiente, +1 sobre el 107 de antes).
-          grep -qE "^121 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 121 tests CORRIDOS."; exit 1; }
+          # 121 -> 125 (2026-09-18, ronda de arreglo del auditor local -- la
+          # re-revisión encontró que este piso había quedado SIN MOVER en el
+          # commit que agregó los tests, y rompía acá): +4 en
+          # tests/test_ejecutor_c5_db.py (de 3 a 7) -- elegir_y_resolver_auditor
+          # resuelve al proveedor local con datos de clientes y al de nube sin
+          # ellos (mismo resolve_facet real contra la DB); arranque.py::
+          # eleccion_del_auditor (extraída de p_c5 para ser testeable directo)
+          # elige y pasa la compuerta con el auditor local real, y el PEOR CASO
+          # -- un 'auditor_local' bindeado a un proveedor is_local=0 sigue
+          # rechazado con la compuerta cerrada (auditor_es_local mira
+          # provider.is_local, nunca el nombre de la faceta; visto en rojo a
+          # mano reemplazándolo por una comparación de nombre); y sin misión
+          # (hosts_mision=None) usa el auditor de nube por defecto. NUEVA
+          # DEPENDENCIA DE ORDEN DE DESPLIEGUE, mismo patrón que el resto de
+          # este job: eleccion_c5.CLAVES ahora incluye
+          # 'ejecutor.auditor_faceta_local', así que TODO este archivo (no
+          # sólo los 4 tests nuevos) exige que la migración de jax-platform
+          # que siembra esa clave (feat/auditor-local, _EJECUTOR_CONFIG_C5)
+          # esté en master ANTES de mergear esta rama -- sin ella,
+          # E.leer_config() revienta con config_c5_incompleta en CADA test del
+          # archivo, incluidos los 3 que ya pasaban. El orden de despliegue
+          # (jax-platform primero) lo maneja Fernando. Medido en hall9000
+          # contra jax_memory_test con las migraciones de jax-platform
+          # feat/auditor-local ya aplicadas (el escenario post-merge): 125
+          # passed, 0 failed, 0 skipped -- corrida completa de los 23 archivos
+          # del job, no sólo el tocado. Si el runner da otro número, manda el
+          # runner.
+          grep -qE "^125 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 125 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

@@ -1,0 +1,41 @@
+# ops/ejecutor/ollama-cpu.service — spec 2026-09-18-auditor-local-opcion.md
+#
+# Segundo Ollama, SOLO CPU: el auditor local de C5. Proceso y puerto PROPIOS, separados
+# del Ollama de la Mesa (ollama.service, GPU, puerto 11434) — si uno se cae o se cuelga,
+# el otro no. OLLAMA_HOST/OLLAMA_NUM_GPU salen de /etc/jax/ollama-cpu.env, NUNCA de este
+# archivo: el puerto es config, no código (ver EnvironmentFile abajo).
+#
+# Por qué NO hay una sola línea "OLLAMA_NUM_GPU=0" acá: ese nombre de variable no existe
+# (verificado con `ollama serve --help` y `strings` contra el binario 0.31.1, 2026-09-18 —
+# `num_gpu` es un parámetro POR PEDIDO del endpoint nativo, no un env var del servidor).
+# La trampa medida (spec §3): el endpoint compatible-OpenAI ignora `options`, así que un
+# `num_gpu` por pedido NO alcanza para el cliente real (jax/ejecutor/contratos/
+# auditor_cliente.py habla ese endpoint). La garantía real es OCULTAR la GPU al PROCESO
+# entero, y con UNA sola variable no alcanza: hall9000 expone la GPU discreta (AMD Radeon
+# AI PRO R9700) por DOS backends independientes -- ROCm/HIP y Vulkan -- y ocultarla sólo
+# de uno deja al otro viéndola igual. Verificado en vivo (2026-09-18): con sólo
+# HIP_VISIBLE_DEVICES/ROCR_VISIBLE_DEVICES vacías, el log de arranque seguía anunciando
+# "inference compute id=0 ... library=Vulkan ... AMD Radeon AI PRO R9700 ... type=discrete"
+# -- la GPU real, alcanzable igual. Agregando GGML_VK_VISIBLE_DEVICES="" (y
+# CUDA_VISIBLE_DEVICES="" por si el build la mira) el mismo arranque quedó con
+# "inference compute id=cpu library=cpu ... total=89.7 GiB" como ÚNICO backend: CPU,
+# sin ninguna GPU listada. Las cuatro variables van en /etc/jax/ollama-cpu.env (config,
+# no código); NINGÚN puerto ni ninguna de ellas se hardcodea en este archivo.
+# Verificado en vivo: `rocm-smi` antes y después de levantar la unidad sin cambios en el
+# uso de la GPU, y que el modelo de la Mesa (qwen3.6-mesa-131k) sigue cargado en
+# `ollama ps` (puerto 11434) — no se desalojó.
+[Unit]
+Description=Ollama Service (CPU-only — auditor local del Ejecutor, C5)
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/jax/ollama-cpu.env
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+ExecStart=/usr/local/bin/ollama serve
+User=ollama
+Group=ollama
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target

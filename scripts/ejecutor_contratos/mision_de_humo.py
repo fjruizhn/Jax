@@ -160,9 +160,16 @@ async def principal(maquina: str) -> int:
         leidas = afirmaciones_del_texto(final)
         dice(("respuesta_final", final if isinstance(final, str) else repr(final)), ("afirmaciones_leidas", len(leidas)))
         entrega = transporte.entregar(leidas, capturas(pedidas, resultados, p.hosts))
+        # Mismo punto único que arranque.py/mision_servicio.py/vigia_servicio.py (spec
+        # 2026-09-18-auditor-local-opcion.md §4): resolver el auditor por su cuenta con
+        # cfg.auditor_faceta (siempre nube) es exactamente el gate-de-teatro que la
+        # elección por máquina vino a cerrar -- el arranque de arriba (línea 106) YA
+        # validó `hosts_mision={maquina}` contra el auditor que de verdad va a auditar;
+        # auditar con OTRO sería aprobar con uno y mandarle los datos a otro.
         async with conexion(desechable=True) as conn:
             cfg = await eleccion_c5.leer_config(conn)
-        auditor_f = await resolve_facet(cfg.auditor_faceta)
+            auditor_f, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
+                conn, cfg=cfg, hosts_mision=frozenset({maquina}), resolve_facet=resolve_facet)
         revision = await auditor_cliente.auditar(A.Lote(texto_mision, (), A.afirmaciones_auditables(entrega), A.maquinas_de(p.hosts, frozenset({maquina}))),
                                                  faceta=auditor_f, max_tokens=cfg.max_tokens)
         final_entrega = A.aplicar_revision(entrega, revision)
