@@ -112,7 +112,7 @@ class Falsas:
         self.fallos = ()
         self.latido = True
         self.vigia_vive = True
-        self.vigia_cierre = (0, "arranco=true cerrada=true")
+        self.vigia_cierre = (0, "arranco=true cerrada=true", "")
         self.cerebro = (0, _crudo(json.dumps([AFIRMACION])))
         self.registro = None  # por defecto: todo anotado y con sha que cuadra
         self.revision = None
@@ -308,7 +308,7 @@ def test_cadena_rota_y_vigia_que_no_cierra_son_fallos():
     f.cadena = False
     assert _correr(f)[0]["codigo"] == "cadena_rota"
     f = Falsas()
-    f.vigia_cierre = (1, "arranco=false")
+    f.vigia_cierre = (1, "arranco=false", "Traceback: el vigia reventó")
     assert _correr(f)[0]["codigo"] == "vigia_no_cerro"
 
 
@@ -481,3 +481,23 @@ def test_el_vigia_que_no_late_conserva_SU_codigo_no_el_del_cero():
     f.latido = False
     r, _ = _correr(f)
     assert (r["estado"], r["codigo"]) == ("fallido", "vigia_no_latio"), r
+
+
+def test_el_stderr_del_vigia_llega_a_la_bitacora_cuando_NO_cierra():
+    """Lo que faltaba el 2026-09-20: una mision fallo con `vigia_no_latio` y no habia
+    una sola linea para investigar. El diagnostico salio corriendo el vigia a mano."""
+    f = Falsas()
+    f.vigia_cierre = (1, "arranco=false", "Traceback: el vigia reventó")
+    _, eventos = _correr(f)
+    (cerrado,) = [e for e in eventos if e["evento"] == "vigia_cerrado"]
+    assert "Traceback" in cerrado["datos"].get("stderr", ""), cerrado
+
+
+def test_el_stderr_NO_ensucia_la_bitacora_cuando_el_vigia_cierra_bien():
+    """En el camino feliz el stderr son lineas de INFO de httpx que no dicen nada.
+    Un log que siempre grita es un log que nadie lee."""
+    f = Falsas()
+    f.vigia_cierre = (0, "arranco=true cerrada=true", "INFO:httpx:HTTP Request: POST ... 200 OK")
+    _, eventos = _correr(f)
+    (cerrado,) = [e for e in eventos if e["evento"] == "vigia_cerrado"]
+    assert "stderr" not in cerrado["datos"], cerrado

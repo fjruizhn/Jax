@@ -117,7 +117,10 @@ def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_p
         await asyncio.sleep(0.3)
         assert v.vive()
         assert json.loads((tmp_path / "m-t1.json").read_text()) == {"mision": "texto", "hosts": ["a", "b"]}
-        rc, salida = await v.cerrar()
+        rc, salida, err = await v.cerrar()
+        # El proceso falso escribe el archivo de mision en stderr: sirve para
+        # comprobar, de paso, que el stderr YA NO se tira (2026-09-20).
+        assert "texto" in err, err
         return rc, salida
     rc, salida = asyncio.run(probar())
     assert rc == 0 and "cerrada=true" in salida and not (tmp_path / "m-t1.json").exists()
