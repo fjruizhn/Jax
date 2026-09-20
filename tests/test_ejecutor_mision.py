@@ -501,3 +501,24 @@ def test_el_stderr_NO_ensucia_la_bitacora_cuando_el_vigia_cierra_bien():
     _, eventos = _correr(f)
     (cerrado,) = [e for e in eventos if e["evento"] == "vigia_cerrado"]
     assert "stderr" not in cerrado["datos"], cerrado
+
+
+# --- `vigia_no_latio` tiene que decir CUANTO espero (2026-09-20) --------------------------------
+# Una mision fallo asi y el evento solo decia `vivo=false`. Para saber si el vigia
+# estaba muerto o simplemente lento hubo que medir a mano, contra la base, la distancia
+# entre `turno_lanzado` y `vigia_late` de las misiones que SI latieron. Resultado: con
+# `el_juez` se tarda 125-199 s contra un presupuesto de 180 -- pegado al techo. Con
+# `thot` eran 16 s: el tope estaba calibrado para el auditor de nube.
+#
+# Si el evento hubiera dicho "espere 180 s", eso se sabia en diez segundos.
+
+def test_vigia_no_latio_dice_cuanto_espero_y_si_el_proceso_vivia():
+    f = Falsas()
+    f.latido = False
+    _, eventos = _correr(f)
+    (e,) = [x for x in eventos if x["evento"] == "vigia_no_latio"]
+    assert "espera_s" in e["datos"], e
+    assert e["datos"]["espera_s"] == pytest.approx(0.2)
+    # `vivo` distingue el caso que importa: un vigia MUERTO es un fallo del vigia; uno
+    # VIVO que no llego a latir es un presupuesto corto, que es otro problema.
+    assert "vivo" in e["datos"]
