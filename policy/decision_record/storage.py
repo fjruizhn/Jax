@@ -21,10 +21,6 @@ class InMemoryDecisionRecordStore:
     _lock: RLock = field(default_factory=RLock, repr=False)
 
     def insert(self, record: DecisionRecord) -> DecisionRecord:
-        try:
-            from pymysql.err import IntegrityError
-        except ImportError as exc:
-            raise DecisionStorageError("MariaDB adapter requiere driver DB-API") from exc
         raw = canonical_decision_record_bytes(record)
         with self._lock:
             existing = self._records.get(record.decision_id)
@@ -46,6 +42,10 @@ class MariaDBDecisionRecordStore:
         self._connect = connection_factory
 
     def insert(self, record: DecisionRecord) -> DecisionRecord:
+        try:
+            from pymysql.err import IntegrityError
+        except ImportError as exc:
+            raise DecisionStorageError("MariaDB adapter requiere driver DB-API") from exc
         raw = canonical_decision_record_bytes(record)
         b = record.authority_binding
         conn = self._connect()
