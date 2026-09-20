@@ -319,7 +319,14 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
         while not await deps.latido_fresco(ctx):
             if not vigia.vive() or time.monotonic() > limite:
                 codigo = "vigia_no_latio"
-                dice("vigia_no_latio", vivo=vigia.vive())
+                # `espera_s` no es adorno: el 2026-09-20 una mision fallo asi y para
+                # saber si el vigia estaba MUERTO o solo lento hubo que medir a mano,
+                # contra la base, la distancia entre `turno_lanzado` y `vigia_late` de
+                # las misiones que si latieron. Con `el_juez` se tarda 125-199 s contra
+                # un presupuesto de 180: el tope estaba calibrado para el auditor de
+                # nube (16 s). `vivo` distingue los dos casos -- muerto es un fallo del
+                # vigia, vivo y sin latir es un presupuesto corto.
+                dice("vigia_no_latio", vivo=vigia.vive(), espera_s=deps.espera_latido_s)
                 break
             await asyncio.sleep(deps.paso_espera_s)
         if codigo is None:

@@ -2669,8 +2669,9 @@ jobs:
           #   logging.basicConfig --que escribe en STDERR--, asi que se tiraba TODO su
           #   registro. Van a ARCHIVO y no a pipe: son desprendidos a proposito y un pipe
           #   muere con el padre. Delta con el comando de ESTE job: master 2296 -> rama 2299.
-          grep -qE "^2288 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2288 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2288 -> 2289 (2026-09-20, vigia_no_latio dice cuanto espero): +1.
+          grep -qE "^2289 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2289 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
