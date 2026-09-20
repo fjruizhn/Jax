@@ -130,6 +130,29 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
             _fila_thot = await cur.fetchone()
             status_thot_previo = _fila_thot[0] if _fila_thot else None
             await cur.execute("UPDATE facet SET status = 'active' WHERE `key` = 'thot'")
+            # Y ademas una credencial ACTIVA: resolve_facet la exige cuando el
+            # transporte de la faceta no es ollama/subprocess (facet_resolver.py
+            # :266-271), y 'thot' es de nube.  ESTA era la causa real del rojo de
+            # jacobs-gobernanza-db -- CredentialUnavailableError, no el binding ni
+            # el status; los dos intentos anteriores arreglaron sintomas.  Vale una
+            # de mentira: sin FERNET_KEY decrypt_secret devuelve el valor tal cual
+            # (crypto_secrets.py:60-62), mismo recurso que test_prevuelo_catalogo_db.
+            await cur.execute(
+                "SELECT provider_id FROM facet_binding "
+                "WHERE facet_key = 'thot' AND role = 'primary'")
+            _fila_prov = await cur.fetchone()
+            proveedor_thot = _fila_prov[0] if _fila_prov else None
+            credencial_sembrada_aca = False
+            if proveedor_thot:
+                await cur.execute(
+                    "SELECT 1 FROM credential WHERE provider_id = %s AND state = 'active'",
+                    (proveedor_thot,))
+                credencial_sembrada_aca = (await cur.fetchone()) is None
+                if credencial_sembrada_aca:
+                    await cur.execute(
+                        "INSERT INTO credential (provider_id, env_key, encrypted_value, state) "
+                        "VALUES (%s, 'ZZ_C5DB_KEY', 'no-se-descifra', 'active')",
+                        (proveedor_thot,))
         await conn.commit()
     try:
         return await _con_inventario(accion)
@@ -146,6 +169,10 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
                 if status_thot_previo is not None and status_thot_previo != 'active':
                     await cur.execute("UPDATE facet SET status = %s WHERE `key` = 'thot'",
                                       (status_thot_previo,))
+                if credencial_sembrada_aca and proveedor_thot:
+                    await cur.execute(
+                        "DELETE FROM credential WHERE provider_id = %s "
+                        "AND env_key = 'ZZ_C5DB_KEY'", (proveedor_thot,))
             await conn.commit()
 
 
