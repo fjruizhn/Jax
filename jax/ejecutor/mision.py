@@ -371,7 +371,28 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
              legible=pausa.get("legible"))
     for condicion, cod in ((auditor_pauso, "auditor_pauso"),
                            (not registro_cuadra, "registro_no_cuadra"), (not cadena, "cadena_rota"),
-                           (not cerro, "vigia_no_cerro"), (not auditor_legible, AUDITOR_ILEGIBLE)):
+                           (not cerro, "vigia_no_cerro"), (not auditor_legible, AUDITOR_ILEGIBLE),
+                           # AL FINAL a proposito (2026-09-20). Si el auditor pauso, si el
+                           # registro no cuadra, si la cadena se rompio o si el vigia no cerro,
+                           # ESE es el motivo del cero y es el que hay que leer; esto es el caso
+                           # RESIDUAL: todo lo demas salio bien y aun asi no salio nada.
+                           #
+                           # Por que es fallo: el Ejecutor existe para producir afirmaciones
+                           # RESPALDADAS; cero entregadas es cero trabajo entregado. Las misiones
+                           # 445ac19c y 10707ccc salieron "completada" con cero y nadie las miro
+                           # -- eso convirtio un defecto de parseo (jax#229) en un FALSO EXITO.
+                           #
+                           # NO distingue "el cerebro no afirmo" de "el auditor las descarto
+                           # todas": las dos entregan cero. Cual fue se lee en `descartadas`,
+                           # que viaja en el mismo resultado.
+                           # `entrega is None` = el cerebro ni corrio (el vigia no latio, por
+                           # ejemplo): ese codigo ya explica el cero y se puso mas arriba.
+                           # `descartadas` vacio ademas de `respaldadas`: si el auditor RETUVO
+                           # algo, el turno sigue "completado" -- el sistema hizo su trabajo y el
+                           # cero SE VE en `descartadas`. Lo que esto caza es el cero INVISIBLE:
+                           # nada propuesto y nada descartado.
+                           (entrega is not None and not entrega.respaldadas
+                            and not entrega.descartadas, "sin_afirmaciones")):
         if codigo is None and condicion:
             codigo = cod
     # Un pausa o un auditor que pausó mandan sobre un fallo de latido o de cerebro: es lo que hay que leer.

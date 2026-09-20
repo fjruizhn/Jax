@@ -2641,8 +2641,17 @@ jobs:
           #   valla, y que lo que NO es una afirmacion siga dando vacio.
           #   Delta medido con el comando de ESTE job: master 2278 -> rama 2284, mismos
           #   4 fallos locales preexistentes en las dos.
-          grep -qE "^2273 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2273 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2273 -> 2278 (2026-09-20, turno-sin-afirmaciones): +5, puros.
+          #   Un turno que no entrega NINGUNA afirmacion deja de reportarse "completado".
+          #   Los 5: el codigo propio; que NO tape el motivo real cuando lo hay
+          #   (registro_no_cuadra manda, el cero es la consecuencia); que un turno que SI
+          #   afirma siga completado; que "todas descartadas por el auditor" SIGA
+          #   completado (decision anterior, esta rama no la pisa); y la regresion del
+          #   vigia caido, donde `entrega` es None y la primera version reventaba con
+          #   AttributeError. Delta con el comando de ESTE job: master 2284 -> rama 2289,
+          #   mismos 4 fallos locales preexistentes.
+          grep -qE "^2278 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2278 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

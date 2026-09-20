@@ -411,3 +411,73 @@ def test_capturas_ignora_el_comando_que_toca_dos_maquinas():
     adentro = 'ssh -tt -p 58291 axioma@192.0.2.50 "df -h / | tail -n 3"'
     (captura,) = M.capturas({"t1": adentro}, resultados, HOSTS)
     assert captura.maquina == "ejecutor-prueba"
+
+
+# --- Un turno que no entrega NINGUNA afirmacion no es "completado" (2026-09-20) ----------------
+# INCIDENTE. Misiones 445ac19c y 10707ccc salieron `estado="completada"`, `codigo=None`,
+# indistinguibles de un turno que si afirmo. La causa de fondo era otra (el cerebro
+# entregaba el JSON dentro de un bloque ```json y el parser lo tiraba, jax#229), pero lo
+# que convirtio un defecto de parseo en un FALSO EXITO fue esto: nadie mira una mision
+# que dice "completada".
+#
+# El Ejecutor existe para producir afirmaciones RESPALDADAS. Cero entregadas es cero
+# trabajo entregado, y tiene que leerse asi.
+#
+# Ubicacion en la lista de codigos: AL FINAL, a proposito. Si el auditor pauso, si el
+# registro no cuadra, si la cadena se rompio o si el vigia no cerro, ESE es el motivo del
+# cero y es el que hay que leer. `sin_afirmaciones` es el caso residual: todo lo demas
+# salio bien y aun asi no salio nada.
+#
+# NO distingue "el cerebro no afirmo nada" de "el auditor las descarto todas": las dos
+# entregan cero. Cual fue se lee en `descartadas`, que viaja en el mismo resultado.
+
+def test_turno_sin_ninguna_afirmacion_es_fallo_con_codigo_propio():
+    f = Falsas()
+    f.cerebro = (0, _crudo("no devolvi ninguna afirmacion"))
+    r, eventos = _correr(f)
+    assert (r["estado"], r["codigo"]) == ("fallido", "sin_afirmaciones"), r
+    assert r["afirmaciones"] == []
+    assert "turno_fallido" in _codigos(eventos)
+
+
+def test_el_cero_no_tapa_el_motivo_real_cuando_lo_hay():
+    """Si el registro no cuadra, el codigo tiene que seguir siendo `registro_no_cuadra`:
+    es la causa, y `sin_afirmaciones` seria la consecuencia. Leer la consecuencia en vez
+    de la causa manda a depurar al lugar equivocado."""
+    f = Falsas()
+    f.cerebro = (0, _crudo("no devolvi ninguna afirmacion"))
+    f.registro = []
+    r, _ = _correr(f)
+    assert r["codigo"] == "registro_no_cuadra", r
+
+
+def test_un_turno_que_SI_afirma_sigue_completado():
+    """El control que impide que esto rompa el camino bueno."""
+    r, _ = _correr(Falsas())
+    assert (r["estado"], r["codigo"]) == ("completado", None), r
+    assert len(r["afirmaciones"]) == 1
+
+
+def test_todas_descartadas_por_el_auditor_SIGUE_completado():
+    """El limite de este cambio, y es deliberado. Si el auditor RETUVO la afirmacion, el
+    turno sigue "completado": el sistema hizo exactamente su trabajo y el cero SE VE en
+    `descartadas`, que la pantalla muestra. Esa decision es anterior (ver
+    test_afirmacion_retenida_por_el_auditor_no_sale) y esta rama NO la pisa.
+
+    Lo que el incidente destapo no es "cero entregadas": es el cero INVISIBLE -- nada
+    propuesto y nada descartado, un turno que no deja rastro de que no hizo nada."""
+    f = Falsas()
+    f.revision = Revision(False, None, None, (), frozenset(), frozenset({"a1"}))
+    r, _ = _correr(f)
+    assert (r["estado"], r["codigo"]) == ("completado", None), r
+    assert r["afirmaciones"] == [] and r["descartadas"], "el cero se ve en descartadas"
+
+
+def test_el_vigia_que_no_late_conserva_SU_codigo_no_el_del_cero():
+    """Regresion de la primera version de este cambio: con el vigia caido el cerebro ni
+    corre, `entrega` queda en None, y `not entrega.respaldadas` reventaba con
+    AttributeError. El codigo del vigia ya explica el cero."""
+    f = Falsas()
+    f.latido = False
+    r, _ = _correr(f)
+    assert (r["estado"], r["codigo"]) == ("fallido", "vigia_no_latio"), r
