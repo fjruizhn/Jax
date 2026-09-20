@@ -13,7 +13,7 @@ from .canonical import canonical_bytes
 from .errors import DecisionRecordIntegrityError, UnsupportedDecisionSchemaError
 from .models import (DecisionAuthorityBinding, DecisionFact, DecisionFactValueType,
     DecisionInput, DecisionRecord, DecisionResult, EffectiveAuthorityEnvelopeSnapshot,
-    _INPUT_SEAL, _RECORD_SEAL)
+    _register_decision_input, _register_decision_record)
 
 
 def _load(value):
@@ -107,15 +107,15 @@ def decision_record_from_bytes(value: bytes | str) -> DecisionRecord:
         c = input_data["evaluation_context"]
         context = EvaluationContext.from_mapping(c)
         facts = tuple(DecisionFact(x["id"], DecisionFactValueType(x["value_type"]), tuple(x["value"]) if x["value_type"] == "STRING_SET" else x["value"], tuple(x.get("evidence_refs", ()))) for x in input_data["facts"])
-        decision_input = DecisionInput(input_data["schema_version"], input_data["kind"], context,
-            datetime.fromisoformat(input_data["evaluation_time_utc"].replace("Z", "+00:00")), facts, _INPUT_SEAL)
+        decision_input = _register_decision_input(DecisionInput(input_data["schema_version"], input_data["kind"], context,
+            datetime.fromisoformat(input_data["evaluation_time_utc"].replace("Z", "+00:00")), facts))
         b = data["authority_binding"]
         checkpoint = AuthorityLedgerCheckpoint(**b["authority_ledger_checkpoint"])
         binding = DecisionAuthorityBinding(b["active_policy_corpus_hash"], b["effective_authority_context_hash"], checkpoint,
             b["authority_ledger_checkpoint_hash"], b["resolver_identity"], b["resolver_version"])
         result = result_from_projection(data["result"])
-        return DecisionRecord(data["schema_version"], data["kind"], data["decision_id"], decision_input, data["decision_input_hash"],
+        return _register_decision_record(DecisionRecord(data["schema_version"], data["kind"], data["decision_id"], decision_input, data["decision_input_hash"],
             binding, result, tuple(data["evidence_refs"]), datetime.fromisoformat(data["recorded_at_utc"].replace("Z", "+00:00")),
-            data["decision_record_hash"], _RECORD_SEAL)
+            data["decision_record_hash"]))
     except (KeyError, TypeError, ValueError) as exc:
         raise DecisionRecordIntegrityError("DecisionRecord serializado inválido") from exc

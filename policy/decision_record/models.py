@@ -1,11 +1,12 @@
 """Deeply immutable value objects for Block 5 decision identity and records."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 import re
 import unicodedata
+import weakref
 from typing import Protocol
 
 from policy.authority_ledger.models import AuthorityLedgerCheckpoint, EffectiveAuthorityEnvelope
@@ -18,9 +19,39 @@ from .errors import (DecisionContractError, DecisionRecordIntegrityError,
 from .ids import canonical_evidence_refs, decision_id, sha256_id
 
 _FACT_ID = re.compile(r"[A-Z][A-Z0-9_]*\Z")
-_INPUT_SEAL = object()
-_EVALUATION_SEAL = object()
-_RECORD_SEAL = object()
+# Provenance is deliberately retained outside value objects.  A caller can
+# inspect every field of an immutable value, but that must never confer the
+# ability to manufacture another object trusted by the recording boundary.
+_verified_inputs: dict[int, weakref.ReferenceType] = {}
+_verified_evaluations: dict[int, weakref.ReferenceType] = {}
+_verified_records: dict[int, weakref.ReferenceType] = {}
+
+
+def _register(registry: dict[int, weakref.ReferenceType], value):
+    value_id = id(value)
+
+    def _remove(_: weakref.ReferenceType, *, key=value_id, target=registry) -> None:
+        target.pop(key, None)
+
+    registry[value_id] = weakref.ref(value, _remove)
+    return value
+
+
+def _registered(registry: dict[int, weakref.ReferenceType], value: object) -> bool:
+    reference = registry.get(id(value))
+    return reference is not None and reference() is value
+
+
+def _register_decision_input(value: "DecisionInput") -> "DecisionInput":
+    return _register(_verified_inputs, value)
+
+
+def _register_verified_evaluation(value: "VerifiedDecisionEvaluation") -> "VerifiedDecisionEvaluation":
+    return _register(_verified_evaluations, value)
+
+
+def _register_decision_record(value: "DecisionRecord") -> "DecisionRecord":
+    return _register(_verified_records, value)
 
 
 def _nfc(value: object, label: str) -> str:
@@ -91,7 +122,6 @@ class DecisionInput:
     evaluation_context: EvaluationContext
     evaluation_time_utc: datetime
     facts: tuple[DecisionFact, ...]
-    _seal: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (self.schema_version, self.kind) != ("1.0", "JAX_DECISION_INPUT"):
@@ -105,11 +135,8 @@ class DecisionInput:
         if len(ids) != len(set(ids)):
             raise InvalidDecisionInputError("facts duplicados")
         object.__setattr__(self, "facts", tuple(sorted(self.facts, key=lambda x: x.id)))
-        if self._seal is not _INPUT_SEAL:
-            raise InvalidDecisionInputError("DecisionInput sólo puede originarse en build_decision_input")
-
     def _is_sealed(self) -> bool:
-        return self._seal is _INPUT_SEAL
+        return _registered(_verified_inputs, self)
 
     def semantic_projection(self) -> dict:
         context = self.evaluation_context
@@ -210,10 +237,9 @@ class VerifiedDecisionEvaluation:
     decision_input: DecisionInput
     authority_binding: DecisionAuthorityBinding
     result: DecisionResult
-    _seal: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not self.decision_input._is_sealed() or self._seal is not _EVALUATION_SEAL:
+        if not self.decision_input._is_sealed():
             raise UnverifiedAuthorityEvaluationError("evaluación no verificada")
         envelope = self.result.effective_authority_envelope
         if (envelope.active_policy_corpus_hash != self.authority_binding.active_policy_corpus_hash or
@@ -223,7 +249,7 @@ class VerifiedDecisionEvaluation:
             raise UnverifiedAuthorityEvaluationError("binding/evaluación no coinciden")
 
     def _is_verified(self) -> bool:
-        return self._seal is _EVALUATION_SEAL
+        return _registered(_verified_evaluations, self)
 
 
 @dataclass(frozen=True)
@@ -238,7 +264,6 @@ class DecisionRecord:
     evidence_refs: tuple[str, ...]
     recorded_at_utc: datetime
     decision_record_hash: str
-    _seal: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (self.schema_version, self.kind) != ("1.0", "JAX_DECISION_RECORD"):
@@ -251,13 +276,11 @@ class DecisionRecord:
         object.__setattr__(self, "recorded_at_utc", _time(self.recorded_at_utc, "recorded_at_utc", DecisionRecordIntegrityError))
         try: object.__setattr__(self, "evidence_refs", canonical_evidence_refs(self.evidence_refs))
         except Exception as exc: raise DecisionRecordIntegrityError("evidence_refs inválidas") from exc
-        if self._seal is not _RECORD_SEAL:
-            raise DecisionRecordIntegrityError("DecisionRecord sólo puede originarse en factory/verify")
         if self.decision_record_hash != decision_record_hash(self.projection_without_hash()):
             raise DecisionRecordIntegrityError("decision_record_hash no coincide")
 
     def _is_sealed(self) -> bool:
-        return self._seal is _RECORD_SEAL
+        return _registered(_verified_records, self)
 
     def projection_without_hash(self) -> dict:
         from .serialization import result_projection

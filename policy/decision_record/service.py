@@ -9,13 +9,13 @@ from policy.authority_resolution.models import EvaluationContext
 from .errors import DecisionEvidenceUnavailableError, DecisionRecordIntegrityError, InvalidDecisionInputError, UnverifiedAuthorityEvaluationError
 from .ids import canonical_evidence_refs, decision_id
 from .models import (DecisionFact, DecisionInput, DecisionRecord, EvidenceProvider,
-    VerifiedDecisionEvaluation, _INPUT_SEAL, _RECORD_SEAL)
+    VerifiedDecisionEvaluation, _register_decision_input, _register_decision_record)
 from .canonical import decision_record_hash, utc_text
 from .serialization import result_projection
 
 
 def build_decision_input(evaluation_context: EvaluationContext, evaluation_time_utc: datetime, *, facts: tuple[DecisionFact, ...] = ()) -> DecisionInput:
-    return DecisionInput("1.0", "JAX_DECISION_INPUT", evaluation_context, evaluation_time_utc, facts, _INPUT_SEAL)
+    return _register_decision_input(DecisionInput("1.0", "JAX_DECISION_INPUT", evaluation_context, evaluation_time_utc, facts))
 
 
 def compute_decision_input_hash(decision_input: DecisionInput) -> str:
@@ -60,9 +60,9 @@ def build_decision_record(evaluation: VerifiedDecisionEvaluation, *, decision_id
         "result": result_projection(evaluation.result), "evidence_refs": list(globals_refs),
         "recorded_at_utc": utc_text(recorded_at_utc),
     })
-    return DecisionRecord("1.0", "JAX_DECISION_RECORD", value_id, evaluation.decision_input,
+    return _register_decision_record(DecisionRecord("1.0", "JAX_DECISION_RECORD", value_id, evaluation.decision_input,
         evaluation.decision_input.decision_input_hash, evaluation.authority_binding, evaluation.result,
-        globals_refs, recorded_at_utc, record_hash, _RECORD_SEAL)
+        globals_refs, recorded_at_utc, record_hash))
 
 
 def record_decision(store, evaluation: VerifiedDecisionEvaluation, *, decision_id: str,

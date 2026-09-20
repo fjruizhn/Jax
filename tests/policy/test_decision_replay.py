@@ -35,6 +35,6 @@ def test_valid_replay_artifact_mismatch_is_divergence(tmp_path, monkeypatch):
             snap.active_policy_corpus_hash, snap.effective_authority_context_hash,
             snap.authority_ledger_checkpoint_hash, ("different-overlay",), snap.lifecycle_status)
         return type(value)(value.decision_input, value.authority_binding,
-            DecisionResult("1.0", "JAX_DECISION_RESULT", "EFFECTIVE_AUTHORITY_ANALYSIS_ONLY", altered), value._seal)
+            DecisionResult("1.0", "JAX_DECISION_RESULT", "EFFECTIVE_AUTHORITY_ANALYSIS_ONLY", altered))
     monkeypatch.setattr(subject, "evaluate_decision_input", changed)
     assert replay_decision(record, store, root, checkpoints).status is DecisionReplayStatus.REPLAY_DIVERGENCE

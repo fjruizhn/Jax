@@ -4,7 +4,7 @@ import pytest
 
 from policy.authority_resolution.models import ConditionResult, EvaluationContext
 from policy.decision_record.errors import InvalidDecisionFactError, InvalidDecisionInputError
-from policy.decision_record.models import DecisionFact, DecisionFactValueType
+from policy.decision_record.models import DecisionFact, DecisionFactValueType, DecisionInput
 from policy.decision_record.service import build_decision_input, compute_decision_input_hash
 
 
@@ -46,3 +46,11 @@ def test_closed_input_rejects_float_bool_int_and_naive_time():
     with pytest.raises(InvalidDecisionFactError): DecisionFact("X", DecisionFactValueType.INTEGER, True)
     with pytest.raises(InvalidDecisionFactError): DecisionFact("X", DecisionFactValueType.STRING_SET, ("X", "X"))
     with pytest.raises(InvalidDecisionInputError): build_decision_input(context(), datetime(2026, 1, 1))
+
+
+def test_publicly_reconstructed_input_is_not_registered_as_verified():
+    genuine = build_decision_input(context(), instant())
+    lookalike = DecisionInput(genuine.schema_version, genuine.kind, genuine.evaluation_context,
+                              genuine.evaluation_time_utc, genuine.facts)
+    with pytest.raises(InvalidDecisionInputError):
+        compute_decision_input_hash(lookalike)

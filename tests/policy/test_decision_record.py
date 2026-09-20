@@ -25,7 +25,7 @@ def test_record_is_integrity_bound_and_immutable():
     with pytest.raises(DecisionRecordIntegrityError):
         type(record)(record.schema_version, record.kind, record.decision_id, record.decision_input,
                      "sha256:" + "f" * 64, record.authority_binding, record.result, record.evidence_refs,
-                     record.recorded_at_utc, record.decision_record_hash, record._seal)
+                     record.recorded_at_utc, record.decision_record_hash)
 
 
 def test_same_case_different_record_instances_keep_input_identity():
