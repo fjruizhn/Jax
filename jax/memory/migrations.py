@@ -201,7 +201,7 @@ async def ensure_schema(pool) -> bool:
                             logger.info("migracion: %s.%s agregada", tabla, columna)
                         else:
                             await _reposicionar_si_hace_falta(cur, tabla, columna, ddl)
-                    except Exception as e:
+                    except Exception as e:  # fail-soft: una columna que no se pudo agregar no tiene que tumbar el backfill ni los indices de las demas tablas -- se registra el error, ok pasa a False (el caller no queda creyendo que el esquema esta al dia) y el resto de la migracion sigue
                         logger.error(
                             "migracion: %s.%s fallo (%s: %s) -- se sigue con el "
                             "resto de la migracion", tabla, columna, type(e).__name__, e)
@@ -213,7 +213,7 @@ async def ensure_schema(pool) -> bool:
                         if cur.rowcount:
                             logger.info("migracion: backfill de %s.%s en %d filas",
                                         tabla, columna, cur.rowcount)
-                    except Exception as e:
+                    except Exception as e:  # fail-soft: un backfill fallido en una tabla no tiene que impedir el backfill de las demas ni la creacion de indices -- se registra, ok pasa a False, y el proximo arranque reintenta este paso puntual
                         logger.error(
                             "migracion: backfill de %s.%s fallo (%s: %s) -- se sigue "
                             "con el resto de la migracion",
@@ -230,7 +230,7 @@ async def ensure_schema(pool) -> bool:
                         if not (await cur.fetchone())[0]:
                             await cur.execute(ddl)
                             logger.info("migracion: indice %s creado", indice)
-                    except Exception as e:
+                    except Exception as e:  # fail-soft: un indice que no se pudo crear en una tabla no tiene que impedir los indices de las demas -- se registra, ok pasa a False, y el arranque de JAX no depende de que este indice exista hoy mismo
                         logger.error(
                             "migracion: indice %s (%s) fallo (%s: %s) -- se sigue "
                             "con el resto de la migracion",
