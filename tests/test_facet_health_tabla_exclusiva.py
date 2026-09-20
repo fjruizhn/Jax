@@ -88,10 +88,15 @@ def test_el_motivo_aparece_en_el_resumen_rs_de_pytest(tmp_path):
     # heredara, el conftest del hijo lo pisaría con la base de la sesión y el
     # subproceso no quedaría en el estado que este test dice estar probando
     # (visto en rojo el 2026-09-18 corriendo la suite con base propia).
+    # `CI=true` (2026-09-20): desde que el default de `base_de_test.py` es
+    # generar un sufijo propio cuando no hay ninguno puesto, hay que decirle
+    # al conftest del hijo que NO lo haga -- este test fija `JAX_DB_NAME` a
+    # mano y necesita que el conftest lo respete tal cual, no que lo pise con
+    # una base nueva.
     entorno = {k: v for k, v in os.environ.items()
                if k not in (VARIABLE, "JAX_TEST_DB_SUFIJO")}
     entorno.update({"PYTHONPATH": ".:las_manos", "JAX_DB_HOST": "127.0.0.1", "JAX_DB_PORT": "1",
-                    "JAX_DB_NAME": "jax_memory_test", "COLUMNS": "400"})
+                    "JAX_DB_NAME": "jax_memory_test", "COLUMNS": "400", "CI": "true"})
     seleccion = " or ".join(GLOBALES)
     salida = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider", "-k", seleccion, str(ARCHIVO)],
