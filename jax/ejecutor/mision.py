@@ -192,6 +192,27 @@ def capturas(pedidas: dict, resultados: dict, hosts) -> tuple:
     return tuple(salida)
 
 
+_VALLA = re.compile(r"```[a-zA-Z0-9_+-]*\s*\n(.*?)\n?```", re.S)
+
+
+def _sin_valla_de_codigo(texto: str) -> str:
+    """Devuelve el contenido del primer bloque ``` ``` ```, o el texto tal cual si no hay uno.
+
+    INCIDENTE 2026-09-20 (misiones 445ac19c y 10707ccc): el cerebro hizo TODO bien
+    --corrio el ssh, copio la linea literal, armo el objeto con los cinco campos-- y lo
+    entrego dentro de un bloque ```json. Un arreglo dentro de la valla ya se leia (el
+    `re.search` de `[...]` lo encuentra igual); un OBJETO UNICO no, porque el respaldo de
+    JSON Lines se atraganta con las lineas de la valla. Las dos misiones salieron
+    "completada" con CERO afirmaciones: un cero silencioso que se lee como exito.
+
+    El prompt pide "sin bloque de codigo" y el modelo lo pone igual: una instruccion no es
+    un contrato. Esto NO afloja la cita -- la valla es envoltorio del transporte, no
+    contenido, y el objeto que sale es identico. `transporte.entregar` y el auditor siguen
+    decidiendo que se publica; lo unico que cambia es que deja de tirarse a la basura."""
+    m = _VALLA.search(texto)
+    return m.group(1) if m else texto
+
+
 def afirmaciones_del_texto(texto) -> tuple:
     """Fail-closed: un arreglo JSON de objetos, o JSON Lines donde TODA línea no vacía es un
     objeto (el cerebro local respondió así, 2026-09-17). Lo demás no afirma nada, y cada objeto
@@ -199,6 +220,7 @@ def afirmaciones_del_texto(texto) -> tuple:
     y el auditor deciden qué sale."""
     if not isinstance(texto, str):
         return ()
+    texto = _sin_valla_de_codigo(texto)
     m = re.search(r"\[.*\]", texto, re.S)
     try:
         doc = json.loads(m.group(0) if m else texto)
