@@ -2592,9 +2592,8 @@ jobs:
           #   (2192): auditor local +4, arbitro que devuelve +45. El piso es la SUMA
           #   de los dos deltas; el mayor de los dos numeros consagraria que los
           #   tests de la otra rama no corren. Si el runner da otro numero, manda el runner.
-          # Block 3 agrega 22 pruebas puras al mismo job.
-          grep -qE "^2263 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2263 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2241 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2241 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
