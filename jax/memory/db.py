@@ -777,17 +777,31 @@ class MemoryDB:
 
     async def _find_nearest_fact(self, embedding: list, user_id: Optional[int],
                                  project_id: Optional[int]) -> Optional[dict]:
-        """Busca el fact ACTIVO (superseded_by IS NULL) mas cercano al
-        embedding dado, scoped por user_id/project_id igual que
+        """Busca el fact ACTIVO (superseded_by IS NULL y sin vencer) mas
+        cercano al embedding dado, scoped por user_id/project_id igual que
         search_similar_messages. None si no hay pool, no hay embedding, o
         no hay ningun fact con embedding real en ese scope (fail-safe: el
         caller inserta). Los facts con vector cero no son candidatos: su
         distancia es NaN y puede llegar como 0.0, que add_fact leeria como un
-        duplicado exacto (ver _nonzero_embedding_sql)."""
+        duplicado exacto (ver _nonzero_embedding_sql).
+
+        `expires_at` se filtra ACA (arreglado 2026-09-20, auditoria
+        adversarial): un hecho vencido no puede actuar como candidato de
+        dedup. Sin este filtro, caducar un hecho lo vuelve un agujero
+        permanente -- semanas despues el extractor vuelve a producir el
+        MISMO hecho, `save_fact` lo encuentra como "duplicado" del vencido,
+        y el hecho nuevo NUNCA se inserta: se pierde en silencio y para
+        siempre (el vencido tampoco pesa en get_facts). Ver el criterio
+        completo de los cinco caminos de lectura de `facts` en
+        tests/test_memoria_caducidad_no_es_agujero.py."""
         if not self.pool or _is_degenerate_embedding(embedding):
             return None
         vec_str = json.dumps(embedding)
-        clauses = ["superseded_by IS NULL", _nonzero_embedding_sql(_col())]
+        clauses = [
+            "superseded_by IS NULL",
+            "(expires_at IS NULL OR expires_at > NOW())",
+            _nonzero_embedding_sql(_col()),
+        ]
         params: list = []
         scope = []
         if project_id is not None:
@@ -1454,9 +1468,17 @@ class MemoryDB:
     @db_error_handler
     async def get_scopes_with_verified_facts(self, min_facts: int = 5) -> Optional[list]:
         """Devuelve los scopes (user_id, project_id) que tienen al menos
-        min_facts facts verificados y activos. Usado por el sintetizador de
-        segundo orden (item #8) para saber sobre que scopes vale la pena
-        correr — nunca sintetiza sobre un scope con pocos facts."""
+        min_facts facts verificados, activos Y VIGENTES. Usado por el
+        sintetizador de segundo orden (item #8) para saber sobre que scopes
+        vale la pena correr — nunca sintetiza sobre un scope con pocos
+        facts.
+
+        `expires_at` se filtra ACA (arreglado 2026-09-20, auditoria
+        adversarial): contar hechos vencidos infla min_facts artificialmente
+        -- el sintetizador correria sobre un scope que el conteo dice que
+        tiene min_facts verificados, y `get_facts`/el prompt real le
+        entregarian MENOS (los vencidos ya no pesan ahi). Mismo criterio
+        que get_facts: un hecho vencido no cuenta como verificado VIGENTE."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
@@ -1464,6 +1486,7 @@ class MemoryDB:
                 await cur.execute(
                     "SELECT user_id, project_id, COUNT(*) AS n_facts FROM facts "
                     "WHERE is_verified = TRUE AND superseded_by IS NULL "
+                    "AND (expires_at IS NULL OR expires_at > NOW()) "
                     "GROUP BY user_id, project_id "
                     "HAVING COUNT(*) >= %s",
                     (min_facts,),
