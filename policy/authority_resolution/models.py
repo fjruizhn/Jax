@@ -1,7 +1,7 @@
 """Frozen value objects used by the pure authority resolver."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 import re
 import unicodedata
@@ -12,6 +12,7 @@ from .errors import InvalidEvaluationContextError, InvalidValidatedCorpusError, 
 _ID = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DOC_ID = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_VALIDATED_CANDIDATE_SEAL = object()
 
 class ApplicabilityState(str, Enum):
     APPLICABLE = "APPLICABLE"
@@ -215,8 +216,13 @@ class ValidatedCandidateCorpus:
     authority: FrozenAuthorityMetaContract
     manifest: ValidatedManifestBinding
     normative_documents: tuple[FrozenNormativeDocument, ...]
+    _loader_seal: object | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self._loader_seal is not _VALIDATED_CANDIDATE_SEAL:
+            raise InvalidValidatedCorpusError(
+                "ValidatedCandidateCorpus sólo puede originarse en el loader"
+            )
         if not _HASH.fullmatch(self.policy_corpus_hash) or not _HASH.fullmatch(self.bootstrap_bundle_id):
             raise InvalidValidatedCorpusError("hash inválido")
         if self.canonicalizer_identity != "JAX-POLICY-C14N/3":
@@ -226,6 +232,30 @@ class ValidatedCandidateCorpus:
         ids = tuple(d.id for d in self.normative_documents)
         if ids != tuple(sorted(ids)) or len(ids) != len(set(ids)):
             raise InvalidValidatedCorpusError("documentos no ordenados o duplicados")
+
+    @classmethod
+    def _from_validated_snapshot(
+        cls,
+        policy_corpus_hash: str,
+        canonicalizer_identity: str,
+        bootstrap_bundle_id: str,
+        authority: FrozenAuthorityMetaContract,
+        manifest: ValidatedManifestBinding,
+        normative_documents: tuple[FrozenNormativeDocument, ...],
+    ) -> "ValidatedCandidateCorpus":
+        """Internal factory: only the loader owns the validation capability."""
+        return cls(
+            policy_corpus_hash,
+            canonicalizer_identity,
+            bootstrap_bundle_id,
+            authority,
+            manifest,
+            normative_documents,
+            _VALIDATED_CANDIDATE_SEAL,
+        )
+
+    def _was_loader_validated(self) -> bool:
+        return self._loader_seal is _VALIDATED_CANDIDATE_SEAL
 
 @dataclass(frozen=True)
 class ValidatedStaticPolicyView:

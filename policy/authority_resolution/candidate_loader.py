@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from pathlib import PurePosixPath
+import shutil
+import tempfile
 
 from policy.canonicalization.bootstrap_v3 import verified_bootstrap_v3
 from policy.canonicalization.corpus_v3 import _safe, validate_candidate_corpus
+from policy.canonicalization.errors import CanonicalizationError
 from policy.canonicalization.schemas_v3 import validate_authority, validate_manifest, validate_document
 from policy.canonicalization.strict_yaml import load_strict_yaml
 
@@ -64,31 +68,63 @@ def _document(value, bootstrap) -> FrozenNormativeDocument:
         FrozenRelationships(tuple(sorted(rel["supersedes"])), tuple(sorted(rel["superseded_by"]))),
     )
 
+
+def _copy_snapshot_locator(source_root: Path, snapshot_root: Path, locator: str) -> None:
+    """Copy one C14N/3-safe locator into a private candidate snapshot."""
+    source = _safe(source_root, locator)
+    target = snapshot_root / PurePosixPath(locator)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+
+
+def _snapshot_candidate(source_root: Path, snapshot_root: Path, bootstrap) -> None:
+    """Capture every corpus input before C14N/3 validates that snapshot."""
+    fixed = bootstrap.bundle["fixed_root_locators"]
+    authority_locator = fixed["authority_meta_contract"]
+    manifest_locator = fixed["authoritative_manifest"]
+    _copy_snapshot_locator(source_root, snapshot_root, authority_locator)
+    _copy_snapshot_locator(source_root, snapshot_root, manifest_locator)
+
+    manifest = load_strict_yaml(snapshot_root / PurePosixPath(manifest_locator))
+    if not isinstance(manifest, dict):
+        # C14N/3 will classify malformed content; this guards the snapshot walk.
+        raise InvalidValidatedCorpusError("manifest snapshot inválido")
+    for member in manifest.get("normative_documents", ()):
+        if not isinstance(member, dict) or not isinstance(member.get("path"), str):
+            raise InvalidValidatedCorpusError("member snapshot inválido")
+        _copy_snapshot_locator(source_root, snapshot_root, member["path"])
+    for reference in manifest.get("reference_documents", ()):
+        if not isinstance(reference, dict) or not isinstance(reference.get("source_locator"), str):
+            raise InvalidValidatedCorpusError("reference snapshot inválido")
+        _copy_snapshot_locator(source_root, snapshot_root, reference["source_locator"])
+
 def load_validated_candidate(repo_root: Path) -> ValidatedCandidateCorpus:
     if not isinstance(repo_root, Path):
         raise InvalidValidatedCorpusError("repo_root debe ser Path")
     try:
-        report = validate_candidate_corpus(repo_root)
         bootstrap = verified_bootstrap_v3()
         root = repo_root.resolve()
-        authority = load_strict_yaml(_safe(root, bootstrap.bundle["fixed_root_locators"]["authority_meta_contract"]))
-        manifest = load_strict_yaml(_safe(root, bootstrap.bundle["fixed_root_locators"]["authoritative_manifest"]))
-        validate_authority(authority, bootstrap)
-        validate_manifest(manifest, bootstrap)
-        docs = []
-        members = []
-        for member in manifest["normative_documents"]:
-            members.append(ValidatedMember(member["id"], member["path"], member["document_class"], member["normative_layer"], member["normative_effect"]))
-            doc = load_strict_yaml(_safe(root, member["path"]))
-            docs.append(_document(doc, bootstrap))
-        docs.sort(key=lambda x: x.id)
-        return ValidatedCandidateCorpus(
-            report["policy_corpus_hash"], report["canonicalizer_identity"],
-            report["bootstrap_bundle_id"], _authority(authority, bootstrap),
-            ValidatedManifestBinding(manifest["id"], authority["id"], tuple(sorted(members, key=lambda x: x.id))),
-            tuple(docs),
-        )
-    except InvalidValidatedCorpusError:
-        raise
-    except Exception as exc:
+        with tempfile.TemporaryDirectory(prefix="jax-authority-candidate-") as temporary:
+            snapshot_root = Path(temporary)
+            _snapshot_candidate(root, snapshot_root, bootstrap)
+            report = validate_candidate_corpus(snapshot_root)
+            fixed = bootstrap.bundle["fixed_root_locators"]
+            authority = load_strict_yaml(snapshot_root / PurePosixPath(fixed["authority_meta_contract"]))
+            manifest = load_strict_yaml(snapshot_root / PurePosixPath(fixed["authoritative_manifest"]))
+            validate_authority(authority, bootstrap)
+            validate_manifest(manifest, bootstrap)
+            docs = []
+            members = []
+            for member in manifest["normative_documents"]:
+                members.append(ValidatedMember(member["id"], member["path"], member["document_class"], member["normative_layer"], member["normative_effect"]))
+                doc = load_strict_yaml(snapshot_root / PurePosixPath(member["path"]))
+                docs.append(_document(doc, bootstrap))
+            docs.sort(key=lambda x: x.id)
+            return ValidatedCandidateCorpus._from_validated_snapshot(
+                report["policy_corpus_hash"], report["canonicalizer_identity"],
+                report["bootstrap_bundle_id"], _authority(authority, bootstrap),
+                ValidatedManifestBinding(manifest["id"], authority["id"], tuple(sorted(members, key=lambda x: x.id))),
+                tuple(docs),
+            )
+    except (CanonicalizationError, OSError) as exc:
         raise InvalidValidatedCorpusError("no se pudo cargar corpus candidato validado") from exc
