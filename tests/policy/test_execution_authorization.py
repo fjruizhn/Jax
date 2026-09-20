@@ -1,0 +1,1 @@
+from tests.policy.test_execution_request import test_authorization_binds_decision_and_catalog

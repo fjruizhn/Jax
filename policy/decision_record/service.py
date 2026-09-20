@@ -80,3 +80,8 @@ def load_decision(store, decision_id: str) -> DecisionRecord:
 def verify_decision_record(canonical_record_bytes: bytes) -> DecisionRecord:
     from .serialization import decision_record_from_bytes
     return decision_record_from_bytes(canonical_record_bytes)
+
+
+def is_verified_decision_record(record: DecisionRecord) -> bool:
+    """Public, capability-free provenance query for governed execution."""
+    return isinstance(record, DecisionRecord) and record._is_sealed()

@@ -178,6 +178,14 @@ def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> Moto
 
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
+    # Block 6 closes the formerly independent worker-launch surface.  A
+    # request body is not an authorization: only the governed adapter may
+    # populate all five immutable bindings after verified storage checks.
+    # This legacy body route has no access to the authoritative execution
+    # store, so accepting caller-provided IDs would be a substitution bypass.
+    # Governed dispatch is entered only by the Block 6 service adapter after
+    # loading and consuming its authorization.
+    return _rechazado(req, None, "GOVERNED_EXECUTION_REQUIRED")
     await _ensure_catalog_fresh()
     if _POLICY is None or _CATALOG is None:
         raise HTTPException(status_code=503, detail="Motor Registry: catálogo no inicializado todavía")

@@ -63,6 +63,13 @@ class MotorDispatchRequest(BaseModel):
     # despacha no viene de un pipeline (un caller directo contra este
     # endpoint, sin Jacobs de por medio) -- válido, no un hueco.
     pipeline_id: str | None = None
+    # Block 6: direct dispatch is never a governed authority boundary.  The
+    # governed adapter supplies these references after durable validation.
+    execution_id: str | None = None
+    decision_id: str | None = None
+    execution_request_hash: str | None = None
+    authorization_id: str | None = None
+    execution_authorization_hash: str | None = None
 
     model_config = {"extra": "forbid"}
 

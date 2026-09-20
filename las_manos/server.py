@@ -374,6 +374,10 @@ async def preview_plan(req: IntentEnvelope) -> dict:
 async def execute(req: IntentEnvelope) -> dict:
     """El corazón de LAS MANOS. Todo pasa por aquí, en orden, con testigo."""
 
+    # Block 6: this legacy endpoint cannot be an alternate execution
+    # authority.  A replayable decision still needs a governed authorization.
+    raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
+
     job_id = req.trace_id  # el trace_id del sobre es el id de la intención
 
     # Procedencia forense (Thot Audit Watch): environment se INFIERE del sobre;

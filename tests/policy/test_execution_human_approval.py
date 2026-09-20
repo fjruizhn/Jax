@@ -1,0 +1,2 @@
+from policy.execution_control.human_approval import HumanApprovalArtifact
+def test_human_approval_artifact_is_closed_value(): assert HumanApprovalArtifact.__dataclass_params__.frozen

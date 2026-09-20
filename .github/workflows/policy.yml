@@ -2908,6 +2908,15 @@ jobs:
           tests/policy/test_decision_authority_binding.py
           tests/policy/test_decision_determinism.py
           tests/policy/test_decision_boundaries.py
+          tests/policy/test_execution_request.py
+          tests/policy/test_execution_authorization.py
+          tests/policy/test_execution_identity.py
+          tests/policy/test_execution_human_approval.py
+          tests/policy/test_execution_dry_run.py
+          tests/policy/test_execution_state_machine.py
+          tests/policy/test_execution_storage.py
+          tests/policy/test_execution_motor_adapter.py
+          tests/policy/test_execution_boundaries.py
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"
