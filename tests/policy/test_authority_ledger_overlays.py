@@ -16,6 +16,9 @@ def context(*conditions):
 
 def state_with(*items):
     store, root, key = setup_ledger()
+    from tests.policy.test_authority_ledger_events import ratification_intent
+    rat = append_authority_event(store, root, key, ratification_intent())
+    append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.ACTIVATION_GRANTED, "human:fernando", ratification_event_id=rat.event_id))
     for item in items:
         append_authority_event(store, root, key, AuthorityEventIntent(AuthorityEventType.OVERLAY_ISSUED, "human:fernando", overlay=item))
     return verify_authority_ledger(store.get_genesis(), store.events(), root)
@@ -31,7 +34,7 @@ def test_false_not_applicable_missing_fails_closed_and_identical_deduplicates():
 
 
 def test_overlapping_different_overlay_fails_and_suspension_removes_target():
-    different = OverlayPayload("exception-b", OverlayType.EXCEPTION, "sha256:" + "a" * 64, OverlayScope(("ALICE",), ("READ",)), base_time(), base_time() + timedelta(hours=2), ("rule-a",))
+    different = OverlayPayload(overlay_id="exception-b", overlay_type=OverlayType.EXCEPTION, policy_corpus_hash=overlay().policy_corpus_hash, scope=OverlayScope(("ALICE",), ("READ",)), valid_from_utc=base_time(), valid_until_utc=base_time() + timedelta(hours=2), target_rule_ids=("rule-a",), exception_code="EXCEPTION")
     with pytest.raises(OverlayConflictError):
         effective_overlays(state_with(overlay(), different), context(), base_time())
     source = overlay()

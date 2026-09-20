@@ -13,6 +13,7 @@ from .signatures import decode_public_key, public_key_bytes, public_key_fingerpr
 from .storage import AuthorityLedgerStore
 from .trusted_root import TrustedAuthorityRoot
 from .canonical import plain
+from .trusted_checkpoint import TrustedCheckpointStore
 
 
 def _uuid7() -> str:
@@ -42,13 +43,12 @@ def ratification_intent_from_candidate(corpus, evidence_refs: tuple[str, ...] = 
         raise AuthorityStateError("ratificación requiere ValidatedCandidateCorpus atómico")
     view = to_static_policy_view(corpus)
     projection = plain(view)
-    return AuthorityEventIntent(
-        AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", evidence_refs,
-        corpus.policy_corpus_hash, static_policy_view_projection=projection,
+    return AuthorityEventIntent._from_validated_snapshot(
+        corpus.policy_corpus_hash, projection, evidence_refs
     )
 
 
-def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None) -> AuthorityEvent:
+def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAuthorityRoot, private_key: Ed25519PrivateKey, intent: AuthorityEventIntent, *, event_id: str | None = None, recorded_at_utc: datetime | None = None, checkpoint_store: TrustedCheckpointStore | None = None) -> AuthorityEvent:
     """Append one signed Fernando event after verifying the complete ledger."""
     state = verify_authority_ledger(store.get_genesis(), store.events(), trusted_root)
     genesis = store.get_genesis()
@@ -64,4 +64,7 @@ def append_authority_event(store: AuthorityLedgerStore, trusted_root: TrustedAut
     signed = AuthorityEvent(provisional.event_id, provisional.sequence, provisional.previous_event_hash, provisional.intent, provisional.recorded_at_utc, signature, "sha256:" + "0" * 64)
     complete = AuthorityEvent(signed.event_id, signed.sequence, signed.previous_event_hash, signed.intent, signed.recorded_at_utc, signed.signature, event_hash(signed))
     store.append(complete)
+    if checkpoint_store is not None:
+        from .models import AuthorityLedgerCheckpoint
+        checkpoint_store.append(AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, complete.sequence, complete.event_id, complete.event_hash))
     return complete

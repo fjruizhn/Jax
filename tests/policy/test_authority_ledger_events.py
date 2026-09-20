@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -22,18 +23,32 @@ def setup_ledger():
     return InMemoryAuthorityLedgerStore(genesis), root, key
 
 
-def overlay(overlay_id="exception-a", *, conditions=(), target=("rule-a",), kind=OverlayType.EXCEPTION, code=None, delegate=None, target_overlay=None):
-    return OverlayPayload(overlay_id, kind, "sha256:" + "a" * 64, OverlayScope(("ALICE",), ("READ",), conditions), base_time(), base_time() + timedelta(days=1), target, delegate, ("READ",) if delegate else (), code, target_overlay)
+def overlay(overlay_id="exception-a", *, conditions=(), target=("rule-a",), kind=OverlayType.EXCEPTION, code="EXCEPTION", delegate=None, target_overlay=None):
+    corpus_hash = ratification_intent().policy_corpus_hash
+    kwargs = dict(overlay_id=overlay_id, overlay_type=kind, policy_corpus_hash=corpus_hash,
+                  scope=OverlayScope(("ALICE",), ("READ",), conditions), valid_from_utc=base_time(), valid_until_utc=base_time() + timedelta(days=1), target_rule_ids=target)
+    if kind is OverlayType.EXCEPTION:
+        kwargs["exception_code"] = code
+    elif kind is OverlayType.SUSPENSION:
+        kwargs.update(target_rule_ids=(), target_overlay_id=target_overlay)
+    elif kind is OverlayType.DELEGATION:
+        kwargs.update(delegate_actor_id=delegate or "actor:delegate", delegate_actor_kind="HUMAN_LOGICAL", delegated_scope=OverlayScope(("ALICE",), ("READ",), conditions), may_subdelegate=False, target_rule_ids=())
+    elif kind is OverlayType.BINDING_PARTICULAR_INTERPRETATION:
+        kwargs["interpretation_code"] = code or "INTERPRET"
+    return OverlayPayload(**kwargs)
 
 
-def ratification_intent(policy_hash="sha256:" + "a" * 64):
-    return AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", (), policy_hash, {"policy_corpus_hash": policy_hash})
+def ratification_intent(policy_hash=None):
+    from policy.authority_ledger.service import ratification_intent_from_candidate
+    from policy.authority_resolution.candidate_loader import load_validated_candidate
+    return ratification_intent_from_candidate(load_validated_candidate(Path(__file__).resolve().parents[2]))
 
 
 def test_evidence_refs_are_set_and_committed():
-    one = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", ("sha256:" + "b" * 64, "sha256:" + "a" * 64), "sha256:" + "c" * 64, {"policy_corpus_hash": "sha256:" + "c" * 64})
-    two = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", ("sha256:" + "a" * 64, "sha256:" + "b" * 64), "sha256:" + "c" * 64, {"policy_corpus_hash": "sha256:" + "c" * 64})
-    changed = AuthorityEventIntent(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", ("sha256:" + "d" * 64,), "sha256:" + "c" * 64, {"policy_corpus_hash": "sha256:" + "c" * 64})
+    base = ratification_intent()
+    one = AuthorityEventIntent._from_validated_snapshot(base.policy_corpus_hash, base.static_policy_view_projection, ("sha256:" + "b" * 64, "sha256:" + "a" * 64))
+    two = AuthorityEventIntent._from_validated_snapshot(base.policy_corpus_hash, base.static_policy_view_projection, ("sha256:" + "a" * 64, "sha256:" + "b" * 64))
+    changed = AuthorityEventIntent._from_validated_snapshot(base.policy_corpus_hash, base.static_policy_view_projection, ("sha256:" + "d" * 64,))
     assert canonical_bytes(one.canonical_projection()) == canonical_bytes(two.canonical_projection())
     assert canonical_bytes(one.canonical_projection()) != canonical_bytes(changed.canonical_projection())
 

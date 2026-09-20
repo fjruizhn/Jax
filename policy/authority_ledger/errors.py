@@ -10,6 +10,14 @@ class LedgerIntegrityError(AuthorityLedgerError):
     pass
 
 
+class LedgerRollbackError(LedgerIntegrityError):
+    pass
+
+
+class UnanchoredLedgerHeadError(LedgerIntegrityError):
+    pass
+
+
 class TrustedRootMismatchError(LedgerIntegrityError):
     pass
 

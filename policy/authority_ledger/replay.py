@@ -3,7 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
+from typing import Iterable, Mapping
+from types import MappingProxyType
 
 from .canonical import canonical_bytes, domain_hash
 from .errors import (AuthorityAuthenticationError, AuthorityStateError,
@@ -14,6 +15,8 @@ from .models import (AuthorityEvent, AuthorityEventType, AuthorityLedgerCheckpoi
                      OverlayPayload, OverlayType)
 from .signatures import decode_public_key, public_key_bytes, public_key_fingerprint, verify
 from .trusted_root import TrustedAuthorityRoot
+from .trusted_checkpoint import TrustedCheckpointStore
+from .errors import LedgerRollbackError, UnanchoredLedgerHeadError
 
 
 def genesis_hash(genesis: AuthorityLedgerGenesis) -> str:
@@ -30,12 +33,13 @@ def event_hash(event: AuthorityEvent) -> str:
 
 @dataclass(frozen=True)
 class ReconstructedAuthorityState:
-    ratifications: dict[str, AuthorityEvent]
+    ratifications: Mapping[str, AuthorityEvent]
     revoked_ratifications: frozenset[str]
     active_ratification_event_id: str | None
-    overlays: dict[str, OverlayPayload]
+    overlays: Mapping[str, OverlayPayload]
     revoked_overlays: frozenset[str]
     checkpoint: AuthorityLedgerCheckpoint
+    _verified_seal: object | None = None
 
     @property
     def active_policy_corpus_hash(self) -> str | None:
@@ -43,8 +47,14 @@ class ReconstructedAuthorityState:
             return None
         return self.ratifications[self.active_ratification_event_id].intent.policy_corpus_hash
 
+    def _is_verified(self) -> bool:
+        return self._verified_seal is _REPLAY_SEAL
 
-def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot) -> ReconstructedAuthorityState:
+
+_REPLAY_SEAL = object()
+
+
+def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[AuthorityEvent], trusted_root: TrustedAuthorityRoot, checkpoint_store: TrustedCheckpointStore | None = None) -> ReconstructedAuthorityState:
     """Verify external genesis anchor before replaying a single ledger event."""
     if trusted_root.ledger_identity != genesis.ledger_identity or trusted_root.genesis_hash != genesis_hash(genesis):
         raise TrustedRootMismatchError("genesis no coincide con trusted root")
@@ -98,7 +108,15 @@ def verify_authority_ledger(genesis: AuthorityLedgerGenesis, events: Iterable[Au
             raise LedgerIntegrityError("authority event type desconocido")
         previous = event.event_hash
     checkpoint = AuthorityLedgerCheckpoint("1.0", "JAX_AUTHORITY_LEDGER_CHECKPOINT", genesis.ledger_identity, len(ordered), ordered[-1].event_id if ordered else None, previous)
-    return ReconstructedAuthorityState(ratifications, frozenset(revoked_ratifications), active, overlays, frozenset(revoked_overlays), checkpoint)
+    if checkpoint_store is not None:
+        anchored = checkpoint_store.latest()
+        if checkpoint.sequence < anchored.sequence:
+            raise LedgerRollbackError("DB ledger truncado antes del checkpoint externo")
+        if checkpoint.sequence > anchored.sequence:
+            raise UnanchoredLedgerHeadError("DB ledger adelante de checkpoint externo")
+        if checkpoint.projection() != anchored.projection():
+            raise LedgerRollbackError("head DB no coincide con checkpoint externo")
+    return ReconstructedAuthorityState(MappingProxyType(dict(ratifications)), frozenset(revoked_ratifications), active, MappingProxyType(dict(overlays)), frozenset(revoked_overlays), checkpoint, _REPLAY_SEAL)
 
 
 def overlay_applicability(overlay: OverlayPayload, context, evaluation_time_utc: datetime) -> OverlayApplicability:
@@ -122,9 +140,16 @@ def _same_semantics(left: OverlayPayload, right: OverlayPayload) -> bool:
 
 def effective_overlays(state: ReconstructedAuthorityState, context, evaluation_time_utc: datetime) -> tuple[OverlayPayload, ...]:
     """Apply the frozen pairwise matrix for one explicit evaluation."""
+    if not isinstance(state, ReconstructedAuthorityState) or not state._is_verified():
+        raise AuthorityStateError("effective state requiere replay verificado")
+    active_hash = state.active_policy_corpus_hash
+    if active_hash is None:
+        return ()
     candidates: list[OverlayPayload] = []
     for overlay_id, overlay in state.overlays.items():
         if overlay_id in state.revoked_overlays:
+            continue
+        if overlay.policy_corpus_hash != active_hash:
             continue
         result = overlay_applicability(overlay, context, evaluation_time_utc)
         if result is OverlayApplicability.INDETERMINATE:

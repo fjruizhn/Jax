@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from enum import Enum
 import re
 import unicodedata
-from typing import Any
+from typing import Any, Mapping
 
 from .canonical import canonical_bytes, domain_hash
 from .errors import AuthorityEventValidationError, AuthorityStateError
@@ -19,6 +19,7 @@ from .ids import canonical_evidence_refs, sha256_id, uuid7_text
 _TOKEN = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 _DOC = re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 _ACTOR = re.compile(r"(?:human|actor):[a-z][a-z0-9-]{0,63}\Z")
+_RATIFICATION_SNAPSHOT_SEAL = object()
 
 
 def _nfc_token(value: object, field: str, pattern=_TOKEN) -> str:
@@ -95,7 +96,11 @@ class OverlayPayload:
     valid_from_utc: datetime
     valid_until_utc: datetime | None
     target_rule_ids: tuple[str, ...] = ()
+    exception_code: str | None = None
     delegate_actor_id: str | None = None
+    delegate_actor_kind: str | None = None
+    delegated_scope: OverlayScope | None = None
+    may_subdelegate: bool | None = None
     delegated_action_ids: tuple[str, ...] = ()
     interpretation_code: str | None = None
     target_overlay_id: str | None = None
@@ -117,16 +122,25 @@ class OverlayPayload:
         if self.interpretation_code is not None:
             object.__setattr__(self, "interpretation_code", _nfc_token(self.interpretation_code, "interpretation_code"))
         if self.overlay_type is OverlayType.DELEGATION:
-            if self.delegate_actor_id is None or not self.delegated_action_ids:
-                raise AuthorityEventValidationError("delegación requiere delegate y actions")
+            if (self.delegate_actor_id is None or self.delegate_actor_kind is None or
+                    self.delegated_scope is None or self.may_subdelegate is not False):
+                raise AuthorityEventValidationError("delegación cerrada inválida")
+            if self.target_rule_ids or self.exception_code or self.target_overlay_id or self.interpretation_code:
+                raise AuthorityEventValidationError("delegación contiene campos prohibidos")
+            if self.delegated_scope.subjects and not set(self.delegated_scope.subjects) <= set(self.scope.subjects):
+                raise AuthorityEventValidationError("delegación amplía subjects")
+            if self.delegated_scope.actions and not set(self.delegated_scope.actions) <= set(self.scope.actions):
+                raise AuthorityEventValidationError("delegación amplía actions")
+            if not set(self.delegated_scope.conditions_all) >= set(self.scope.conditions_all):
+                raise AuthorityEventValidationError("delegación debilita conditions")
         elif self.overlay_type is OverlayType.SUSPENSION:
-            if self.target_overlay_id is None or self.target_rule_ids or self.delegate_actor_id or self.interpretation_code:
+            if self.target_overlay_id is None or self.target_rule_ids or self.exception_code or self.delegate_actor_id or self.delegate_actor_kind or self.delegated_scope or self.may_subdelegate is not None or self.interpretation_code:
                 raise AuthorityEventValidationError("suspensión sólo puede targetear overlay")
         elif self.overlay_type is OverlayType.BINDING_PARTICULAR_INTERPRETATION:
-            if not self.target_rule_ids or self.interpretation_code is None:
+            if not self.target_rule_ids or self.interpretation_code is None or self.exception_code or self.delegate_actor_id or self.delegate_actor_kind or self.delegated_scope or self.may_subdelegate is not None or self.target_overlay_id:
                 raise AuthorityEventValidationError("interpretación requiere target/code")
         elif self.overlay_type is OverlayType.EXCEPTION:
-            if not self.target_rule_ids:
+            if not self.target_rule_ids or self.exception_code is None or self.delegate_actor_id or self.delegate_actor_kind or self.delegated_scope or self.may_subdelegate is not None or self.target_overlay_id or self.interpretation_code:
                 raise AuthorityEventValidationError("exception requiere target_rule_ids")
 
     def semantic_projection(self) -> dict[str, Any]:
@@ -138,7 +152,11 @@ class OverlayPayload:
             "valid_from_utc": self.valid_from_utc.isoformat(),
             "valid_until_utc": self.valid_until_utc.isoformat() if self.valid_until_utc else None,
             "target_rule_ids": list(self.target_rule_ids),
+            "exception_code": self.exception_code,
             "delegate_actor_id": self.delegate_actor_id,
+            "delegate_actor_kind": self.delegate_actor_kind,
+            "delegated_scope": {"subjects": list(self.delegated_scope.subjects), "actions": list(self.delegated_scope.actions), "conditions_all": list(self.delegated_scope.conditions_all)} if self.delegated_scope else None,
+            "may_subdelegate": self.may_subdelegate,
             "delegated_action_ids": list(self.delegated_action_ids),
             "interpretation_code": self.interpretation_code,
             "target_overlay_id": self.target_overlay_id,
@@ -155,6 +173,7 @@ class AuthorityEventIntent:
     ratification_event_id: str | None = None
     overlay: OverlayPayload | None = None
     overlay_id: str | None = None
+    _ratification_snapshot_seal: object | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "actor_id", _actor(self.actor_id, "actor_id"))
@@ -179,6 +198,13 @@ class AuthorityEventIntent:
         if self.event_type is AuthorityEventType.RATIFICATION_GRANTED:
             if not isinstance(self.static_policy_view_projection, dict) or self.static_policy_view_projection.get("policy_corpus_hash") != self.policy_corpus_hash:
                 raise AuthorityEventValidationError("ratificación requiere static policy view ligado al hash")
+            if self._ratification_snapshot_seal is not _RATIFICATION_SNAPSHOT_SEAL:
+                raise AuthorityEventValidationError("ratificación requiere snapshot sellado del candidate boundary")
+
+    @classmethod
+    def _from_validated_snapshot(cls, policy_corpus_hash: str, projection: dict[str, Any], evidence_refs: tuple[str, ...] = ()) -> "AuthorityEventIntent":
+        return cls(AuthorityEventType.RATIFICATION_GRANTED, "human:fernando", evidence_refs,
+                   policy_corpus_hash, projection, _ratification_snapshot_seal=_RATIFICATION_SNAPSHOT_SEAL)
 
     def canonical_projection(self) -> dict[str, Any]:
         return {
