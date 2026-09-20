@@ -70,9 +70,20 @@ _INDICES = [
     # ENCABEZA el indice si lo usa.
     ("messages", "idx_msg_scope",
      "CREATE INDEX idx_msg_scope ON messages (project_id, user_id)"),
-    # La pantalla de Memoria filtra por verificado y por caducidad, y ordena por
-    # fecha. Compuesto en ese orden: los dos predicados de igualdad/rango
-    # primero, el ORDER BY al final, para que no aparezca `Using filesort`.
+    # Sirve a `SQL_LISTAR` de la pantalla de Memoria (jax-platform,
+    # backend/api/admin/memoria.py): filtra por `is_verified` y `expires_at`
+    # y ordena por `expires_at DESC, created_at DESC` -- esos tres, EN ESE
+    # ORDEN, son exactamente las columnas de este indice compuesto.
+    # Verificado con EXPLAIN contra jax_memory_test: sin filesort.
+    #
+    # CORREGIDO 2026-09-20 (auditoria adversarial): este comentario decia
+    # "para que no aparezca Using filesort" sobre LA PANTALLA en general, y
+    # eso es falso para `MemoryDB.get_facts()` (db.py): esa consulta ordena
+    # por `COALESCE(importance, 0) DESC, created_at DESC`, y NINGUNA B-Tree
+    # puede servir un COALESCE -- filesort ahi es inevitable, y este indice
+    # no lo evita ni esta pensado para hacerlo. El indice no sobra (medido:
+    # SQL_LISTAR si lo usa limpio); lo que estaba mal era describir la
+    # consulta equivocada.
     ("facts", "idx_facts_revision",
      "CREATE INDEX idx_facts_revision ON facts (is_verified, expires_at, created_at)"),
 ]
