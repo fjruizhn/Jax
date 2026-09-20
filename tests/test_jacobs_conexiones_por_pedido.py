@@ -305,8 +305,13 @@ def entorno(monkeypatch):
     monkeypatch.setenv("JAX_DB_HOST", "127.0.0.1")
     monkeypatch.setenv("JAX_DB_PORT", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
-    monkeypatch.delenv("JAX_DB_POOL_MAX", raising=False)
-    monkeypatch.delenv("JAX_PREVUELO_DB_POOL_MAX", raising=False)
+    # TODOS los nombres que dimensionan el pool (ver `store.NOMBRES_TAMANIO_POOL`):
+    # `JAX_JACOBS_DB_POOL_SIZE` se lee ANTES que `JAX_DB_POOL_MAX`, asi que
+    # limpiar solo el segundo dejaba que el valor de produccion pisara el
+    # `setenv` de cada test.
+    for _nombre in store.NOMBRES_TAMANIO_POOL:
+        monkeypatch.delenv(_nombre, raising=False)
+    monkeypatch.delenv("JAX_PREVUELO_DB_POOL_MAX", raising=False)  # nombre viejo, ya sin lector
     from jacobs import executor
 
     for modulo in (policy, routes, continuar, executor):

@@ -144,7 +144,13 @@ def base(monkeypatch):
     monkeypatch.setenv("JAX_DB_HOST", "127.0.0.1")
     monkeypatch.setenv("JAX_DB_PORT", "1")
     monkeypatch.setenv("JAX_DB_CONNECT_TIMEOUT_SECONDS", "1")
-    monkeypatch.delenv("JAX_DB_POOL_MAX", raising=False)
+    # TODOS los nombres que dimensionan el pool, no solo uno: `tamanio_pool()`
+    # lee `JAX_JACOBS_DB_POOL_SIZE` ANTES que `JAX_DB_POOL_MAX`, asi que
+    # limpiar solo el segundo dejaba pasar el valor de produccion y el pool no
+    # se llenaba nunca. Salia de la lista del propio `store`, para que un
+    # nombre nuevo lo herede este fixture solo.
+    for _nombre in store.NOMBRES_TAMANIO_POOL:
+        monkeypatch.delenv(_nombre, raising=False)
     monkeypatch.setattr(aiomysql, "connect", b.conectar)
     monkeypatch.setattr(aiomysql.pool, "connect", b.conectar)
     monkeypatch.setattr(pv.sonda, "sondear", AsyncMock(side_effect=AssertionError("sin sondas en este test")))

@@ -27,10 +27,13 @@ from pathlib import Path
 LAS_MANOS = Path(__file__).resolve().parent.parent / "las_manos"
 sys.path.insert(0, str(LAS_MANOS))
 
+import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 import server  # noqa: E402
 from facet_client import FacetClient, FacetRefusal, review_audit  # noqa: E402
+
+from _alcance_las_manos import MOTIVO, cerrada  # noqa: E402
 
 ORIGIN = "auditoría de rutina de Thot (Mesa)"
 
@@ -39,10 +42,22 @@ ORIGIN = "auditoría de rutina de Thot (Mesa)"
 # que este test siga probando la RAZÓN correcta del 403 (faceta no autorizada
 # en el ambiente) en vez de degradar a "host desconocido" por un mismatch.
 _STAGING_HOST = os.getenv("JAX_ENV_STAGING_HOSTS", "").split(",")[0].strip()
-assert _STAGING_HOST, (
-    "JAX_ENV_STAGING_HOSTS no seteada -- sourcear /etc/jax/.env "
-    "(set -a; source <(sudo -n cat /etc/jax/.env); set +a) antes de correr este test"
-)
+
+#: Dos motivos independientes para no correr, y se SALTA en vez de reventar:
+#:
+#:  1. sin `JAX_ENV_STAGING_HOSTS` (de /etc/jax/.env) no hay host de staging
+#:     real -- antes esto era un `assert` a nivel de modulo, que no se salta:
+#:     revienta la COLECCION y se lleva puesto al archivo entero;
+#:  2. aunque lo hubiera, pega /audit/tail y /plan, que `auth_servicio` deja
+#:     sin identidad que las alcance a proposito (ver `_alcance_las_manos`).
+#:
+#: Los dos se sondean, no se suponen: el dia que se abra el permiso y haya
+#: host, estos tests vuelven solos.
+pytestmark = pytest.mark.skipif(
+    not _STAGING_HOST or cerrada("get", "/audit/tail?n=1"),
+    reason=(MOTIVO if _STAGING_HOST else
+            "JAX_ENV_STAGING_HOSTS no seteada: hace falta un host de staging REAL "
+            "de /etc/jax/.env, no algo que se invente un runner efimero"))
 REVIEW_FILE = Path(__file__).resolve().parent.parent / "missions" / "thot-review-001.md"
 
 

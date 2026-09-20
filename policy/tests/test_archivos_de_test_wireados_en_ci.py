@@ -148,6 +148,14 @@ EXCEPCIONES: dict[str, str] = {
         "entorno sin ese checkout'. Se corre a mano desde hall9000 después "
         "de cada deploy, no en un runner efímero de GitHub Actions."
     ),
+    # ACTUALIZADO 2026-09-20: los tres de abajo ya NO fallan cuando alguien
+    # corre la suite a mano. Se SALTAN solos, sondeando el candado con
+    # `tests/_alcance_las_manos.py`, y el motivo sale impreso en el propio
+    # skip en vez de vivir solo aca. Siguen fuera de CI (necesitan levantar
+    # `server.app`, que es mas de lo que estos jobs traen), pero el dia que
+    # `auth_servicio` le abra permiso a una identidad real vuelven a correr
+    # SOLOS donde se los corra, sin que nadie tenga que acordarse de nada.
+    #
     # Los siguientes tres (tests/test_audit_traffic_class.py,
     # tests/test_envelope_brutal.py, tests/test_thot_connection.py) hablan
     # directo con server.app por /plan y /audit/tail. Verificado corriéndolos
