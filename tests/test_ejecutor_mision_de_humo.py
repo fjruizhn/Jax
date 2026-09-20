@@ -90,3 +90,67 @@ def test_afirmaciones_en_json_lines_valen_si_todas_las_lineas_son_objetos():
     assert H.afirmaciones_del_texto(json.dumps(a) + "\ny además inventé esto") == ()
     assert len(H.afirmaciones_del_texto(json.dumps(a))) == 1
     assert H.afirmaciones_del_texto("42") == ()
+
+
+# --- El cerebro envuelve el JSON en un bloque de código (2026-09-20) ----------------------------
+# INCIDENTE REAL. Mision 445ac19c contra bridge y 10707ccc contra ejecutor-prueba:
+# las dos "completada", las dos con CERO afirmaciones. El cerebro (qwen3.6-mesa-131k
+# por el carril del proxy) habia hecho TODO bien -- corrio el ssh, copio la linea
+# literal, armo el objeto con los cinco campos-- y lo entrego asi:
+#
+#     ```json
+#     {"maquina": "...", "comando": "ssh -tt ...", "linea": "15:15:27 up 3 days...", ...}
+#     ```
+#
+# `afirmaciones_del_texto` es fail-closed a proposito, pero rechazaba la forma MAS
+# COMUN en que un modelo devuelve JSON. El prompt pide "sin bloque de codigo" y el
+# modelo lo pone igual: una instruccion no es un contrato.
+#
+# Lo peor no es perder la afirmacion: es que la mision sale "completada" y el turno
+# no falla. Un CERO silencioso que se lee como exito.
+#
+# Esto NO afloja la cita. La valla es envoltorio del transporte, no contenido: el
+# objeto que sale es el mismo, y `transporte.entregar` y el auditor siguen decidiendo
+# que se publica. Lo unico que cambia es que deja de tirarse a la basura.
+
+_AFIRMACION = ('{"maquina": "ejecutor-prueba", "comando": "ssh -tt -p 58291 axioma@192.168.122.50 uptime", '
+               '"linea": "15:15:27 up 3 days, 49 min,  1 user,  load average: 0.00, 0.00, 0.00", '
+               '"dato": "up 3 days, 49 min", "proposito": "tiempo encendido de la maquina"}')
+
+
+def test_objeto_en_bloque_de_codigo_json_se_lee():
+    """El caso EXACTO de la mision 10707ccc, copiado de la transcripcion."""
+    a = H.afirmaciones_del_texto("```json\n" + _AFIRMACION + "\n```")
+    assert len(a) == 1
+    assert a[0].dato == "up 3 days, 49 min"
+    assert a[0].maquina == "ejecutor-prueba"
+
+
+def test_arreglo_en_bloque_de_codigo_se_lee():
+    a = H.afirmaciones_del_texto("```json\n[" + _AFIRMACION + "]\n```")
+    assert len(a) == 1
+
+
+def test_bloque_sin_etiqueta_de_lenguaje_se_lee():
+    assert len(H.afirmaciones_del_texto("```\n[" + _AFIRMACION + "]\n```")) == 1
+
+
+def test_con_texto_alrededor_del_bloque_se_lee():
+    """El modelo tambien suele explicar antes o despues. La valla delimita."""
+    assert len(H.afirmaciones_del_texto("Listo, aca va:\n```json\n[" + _AFIRMACION + "]\n```\nEso es todo.")) == 1
+
+
+def test_el_objeto_que_sale_es_EL_MISMO_con_valla_o_sin_ella():
+    """La valla es envoltorio, no contenido: quitarla no puede cambiar lo afirmado."""
+    con = H.afirmaciones_del_texto("```json\n[" + _AFIRMACION + "]\n```")
+    sin = H.afirmaciones_del_texto("[" + _AFIRMACION + "]")
+    assert con == sin
+
+
+def test_sigue_fail_closed_con_lo_que_no_es_una_afirmacion():
+    """Lo que esta rama NO afloja. Cada caso seguia y sigue dando vacio."""
+    assert H.afirmaciones_del_texto("```json\nno soy json\n```") == ()
+    assert H.afirmaciones_del_texto("```json\n{\"maquina\": \"x\"}\n```") == ()   # faltan campos
+    assert H.afirmaciones_del_texto("```") == ()
+    assert H.afirmaciones_del_texto("```json\n```") == ()
+    assert H.afirmaciones_del_texto(None) == ()

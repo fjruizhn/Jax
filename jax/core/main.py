@@ -127,17 +127,37 @@ def resolver_modo_pesado(cfg: dict) -> tuple[str | None, str | None, str]:
     return faceta, modelo, ""
 
 
+def _log_de_worker(modulo: str):
+    """Archivo de log del worker, o DEVNULL si no se puede abrir.
+
+    Fail-soft a proposito: perder el log es malo, NO lanzar el worker es peor. Por eso
+    cualquier fallo al preparar el archivo cae a DEVNULL en vez de propagarse."""
+    try:
+        base = Path(os.environ["JAX_WORKSPACE_DIR"]) / "logs"
+        base.mkdir(parents=True, exist_ok=True)
+        return open(base / f"{modulo.rsplit('.', 1)[-1]}.log", "ab", buffering=0)
+    except Exception:  # fail-soft: sin archivo el worker se lanza igual, mudo como antes
+        return subprocess.DEVNULL
+
+
 def _lanzar_workers_background() -> None:
     """Lanza worker de extraccion y embedding como subprocesos desacoplados.
     start_new_session=True: sobreviven al cierre de JAX. Fallos al Popen se ignoran."""
     env = os.environ.copy()
     for modulo in ("jax.memory.worker", "jax.memory.embedding_worker"):
+        # Los dos usan logging.basicConfig, que por defecto escribe en STDERR: con
+        # DEVNULL se tiraba TODO su registro y un worker que muriera al importar no
+        # dejaba rastro (2026-09-20). Va a ARCHIVO y no a pipe porque el proceso es
+        # DESPRENDIDO a proposito (start_new_session): sobrevive al cierre de JAX, y un
+        # pipe muere con el padre. Un archivo por modulo: uno compartido mezclaria dos
+        # procesos y seria ilegible.
+        destino = _log_de_worker(modulo)
         try:
             subprocess.Popen(
                 [sys.executable, "-m", modulo],
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=destino,
+                stderr=destino,
                 start_new_session=True,
             )
         except Exception:  # fail-soft: Popen de worker desacoplado; si falla el lanzamiento no hay nada que crea que corrio, y el proximo arranque lo reintenta

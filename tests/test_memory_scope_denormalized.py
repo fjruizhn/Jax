@@ -114,9 +114,35 @@ async def _preparar() -> list[str]:
 
 
 async def _limpiar():
-    for u in (_USER, _OTRO_USER):
-        await _sql("DELETE FROM conversations WHERE user_id = %s", (u,))  # messages: ON DELETE CASCADE
-    await _sql("DELETE FROM conversations WHERE project_id = %s", (_PROYECTO,))
+    """Deja las tablas VACIAS, no solo sin las filas de los usuarios del test.
+
+    El EXPLAIN de `test_la_busqueda_usa_el_indice_vectorial...` depende de la
+    PROPORCION entre las filas del usuario del test y las del resto, no de la
+    consulta. Medido el 2026-09-20 en hall9000, con 336 filas ajenas:
+
+        filas propias:  1, 5, 20  -> ref idx_msg_scope  (el plan NO usa el HNSW)
+        filas propias: 50 o mas   -> idx_embedding_bge_m3
+
+    Con pocas filas propias el filtro de scope estima `rows=1` y el optimizador
+    hace bien en saltarse el indice vectorial. O sea: el test fallaba por la
+    basura acumulada en `jax_memory_test`, no por una regresion -- en CI la base
+    nace vacia y por eso alli siempre paso.
+
+    Vaciar reproduce la condicion de CI: con la tabla limpia el optimizador
+    elige el HNSW incluso con UNA fila (medido igual, 2026-09-20).
+
+    Con TRUNCATE, no con DELETE: ver `_esquema_memoria.vaciar()`.
+    """
+    conn = await _conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT DATABASE()")
+            base = (await cur.fetchone())[0]
+        assert es_base_de_test(base), (
+            f"me negue a vaciar tablas en {base!r}: no es una base de test")
+        await _esquema_memoria.vaciar(conn)
+    finally:
+        conn.close()
 
 
 @pytest.fixture

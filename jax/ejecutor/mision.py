@@ -192,6 +192,27 @@ def capturas(pedidas: dict, resultados: dict, hosts) -> tuple:
     return tuple(salida)
 
 
+_VALLA = re.compile(r"```[a-zA-Z0-9_+-]*\s*\n(.*?)\n?```", re.S)
+
+
+def _sin_valla_de_codigo(texto: str) -> str:
+    """Devuelve el contenido del primer bloque ``` ``` ```, o el texto tal cual si no hay uno.
+
+    INCIDENTE 2026-09-20 (misiones 445ac19c y 10707ccc): el cerebro hizo TODO bien
+    --corrio el ssh, copio la linea literal, armo el objeto con los cinco campos-- y lo
+    entrego dentro de un bloque ```json. Un arreglo dentro de la valla ya se leia (el
+    `re.search` de `[...]` lo encuentra igual); un OBJETO UNICO no, porque el respaldo de
+    JSON Lines se atraganta con las lineas de la valla. Las dos misiones salieron
+    "completada" con CERO afirmaciones: un cero silencioso que se lee como exito.
+
+    El prompt pide "sin bloque de codigo" y el modelo lo pone igual: una instruccion no es
+    un contrato. Esto NO afloja la cita -- la valla es envoltorio del transporte, no
+    contenido, y el objeto que sale es identico. `transporte.entregar` y el auditor siguen
+    decidiendo que se publica; lo unico que cambia es que deja de tirarse a la basura."""
+    m = _VALLA.search(texto)
+    return m.group(1) if m else texto
+
+
 def afirmaciones_del_texto(texto) -> tuple:
     """Fail-closed: un arreglo JSON de objetos, o JSON Lines donde TODA línea no vacía es un
     objeto (el cerebro local respondió así, 2026-09-17). Lo demás no afirma nada, y cada objeto
@@ -199,6 +220,7 @@ def afirmaciones_del_texto(texto) -> tuple:
     y el auditor deciden qué sale."""
     if not isinstance(texto, str):
         return ()
+    texto = _sin_valla_de_codigo(texto)
     m = re.search(r"\[.*\]", texto, re.S)
     try:
         doc = json.loads(m.group(0) if m else texto)
@@ -297,7 +319,14 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
         while not await deps.latido_fresco(ctx):
             if not vigia.vive() or time.monotonic() > limite:
                 codigo = "vigia_no_latio"
-                dice("vigia_no_latio", vivo=vigia.vive())
+                # `espera_s` no es adorno: el 2026-09-20 una mision fallo asi y para
+                # saber si el vigia estaba MUERTO o solo lento hubo que medir a mano,
+                # contra la base, la distancia entre `turno_lanzado` y `vigia_late` de
+                # las misiones que si latieron. Con `el_juez` se tarda 125-199 s contra
+                # un presupuesto de 180: el tope estaba calibrado para el auditor de
+                # nube (16 s). `vivo` distingue los dos casos -- muerto es un fallo del
+                # vigia, vivo y sin latir es un presupuesto corto.
+                dice("vigia_no_latio", vivo=vigia.vive(), espera_s=deps.espera_latido_s)
                 break
             await asyncio.sleep(deps.paso_espera_s)
         if codigo is None:
@@ -338,9 +367,14 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
             if codigo is None and rc != 0:
                 codigo = "cerebro_fallo"
     finally:
-        rc_vigia, salida_vigia = await vigia.cerrar()
+        rc_vigia, salida_vigia, err_vigia = await vigia.cerrar()
         cerro = rc_vigia == 0 and "cerrada=true" in salida_vigia
-        dice("vigia_cerrado", rc=rc_vigia, cerrada=cerro)
+        # El stderr SOLO cuando algo salio mal, y solo la cola: en el camino feliz son
+        # lineas de INFO de httpx que no dicen nada y ensucian la bitacora. Va redactado
+        # desde `Vigia.cerrar`. El 2026-09-20 una mision fallo con `vigia_no_latio` y no
+        # habia una sola linea para investigar.
+        dice("vigia_cerrado", rc=rc_vigia, cerrada=cerro,
+             **({} if cerro else {"stderr": err_vigia[-2000:]}))
     cadena = await deps.cadena_ok(ctx)
     pausa = await deps.leer_pausa(ctx)
     puesta = bool(pausa and pausa.get("puesta"))
@@ -349,7 +383,28 @@ async def correr_turno(turno: Turno, deps: Dependencias, emitir: Callable[[str],
              legible=pausa.get("legible"))
     for condicion, cod in ((auditor_pauso, "auditor_pauso"),
                            (not registro_cuadra, "registro_no_cuadra"), (not cadena, "cadena_rota"),
-                           (not cerro, "vigia_no_cerro"), (not auditor_legible, AUDITOR_ILEGIBLE)):
+                           (not cerro, "vigia_no_cerro"), (not auditor_legible, AUDITOR_ILEGIBLE),
+                           # AL FINAL a proposito (2026-09-20). Si el auditor pauso, si el
+                           # registro no cuadra, si la cadena se rompio o si el vigia no cerro,
+                           # ESE es el motivo del cero y es el que hay que leer; esto es el caso
+                           # RESIDUAL: todo lo demas salio bien y aun asi no salio nada.
+                           #
+                           # Por que es fallo: el Ejecutor existe para producir afirmaciones
+                           # RESPALDADAS; cero entregadas es cero trabajo entregado. Las misiones
+                           # 445ac19c y 10707ccc salieron "completada" con cero y nadie las miro
+                           # -- eso convirtio un defecto de parseo (jax#229) en un FALSO EXITO.
+                           #
+                           # NO distingue "el cerebro no afirmo" de "el auditor las descarto
+                           # todas": las dos entregan cero. Cual fue se lee en `descartadas`,
+                           # que viaja en el mismo resultado.
+                           # `entrega is None` = el cerebro ni corrio (el vigia no latio, por
+                           # ejemplo): ese codigo ya explica el cero y se puso mas arriba.
+                           # `descartadas` vacio ademas de `respaldadas`: si el auditor RETUVO
+                           # algo, el turno sigue "completado" -- el sistema hizo su trabajo y el
+                           # cero SE VE en `descartadas`. Lo que esto caza es el cero INVISIBLE:
+                           # nada propuesto y nada descartado.
+                           (entrega is not None and not entrega.respaldadas
+                            and not entrega.descartadas, "sin_afirmaciones")):
         if codigo is None and condicion:
             codigo = cod
     # Un pausa o un auditor que pausó mandan sobre un fallo de latido o de cerebro: es lo que hay que leer.

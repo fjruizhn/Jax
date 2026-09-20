@@ -9,11 +9,15 @@ from jax.ejecutor.contratos.fallo import Fallo
 FILAS = {"ejecutor.cerebro_faceta": "ejecutor", "ejecutor.auditor_faceta": "thot",
          "ejecutor.auditor_faceta_local": "auditor_local", "ejecutor.c5_lote_max": "20",
          "ejecutor.c5_intervalo_s": "15", "ejecutor.c5_max_tokens": "4000",
-         "ejecutor.c5_auditor_admite_datos_de_clientes": "false"}
+         "ejecutor.c5_auditor_admite_datos_de_clientes": "false",
+         # Compuerta del mismo proveedor (2026-09-20): obligatoria y CERRADA, que es
+         # como nace. Estos tests siguen midiendo el comportamiento estricto.
+         "ejecutor.c5_auditor_admite_mismo_proveedor": "false"}
 
 
 def test_config_desde_filas():
-    assert E.config_desde_filas(FILAS) == E.ConfigC5("ejecutor", "thot", "auditor_local", 20, 15.0, 4000, False)
+    assert E.config_desde_filas(FILAS) == E.ConfigC5("ejecutor", "thot", "auditor_local", 20, 15.0, 4000,
+                                                    False, False)
 
 
 @pytest.mark.parametrize("clave, valor", [("ejecutor.c5_lote_max", "0"), ("ejecutor.c5_intervalo_s", "x"),
@@ -45,7 +49,10 @@ def test_pareja_admisible():
 
 
 def test_mismo_proveedor():
-    assert Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro") in _validar(proveedor_auditor="ollama")
+    # El Fallo ahora lleva datos (el proveedor y la compuerta que lo permitiria),
+    # asi que se compara por codigo: es lo que este test siempre quiso afirmar.
+    assert "auditor_mismo_proveedor_que_el_cerebro" in [
+        f.codigo for f in _validar(proveedor_auditor="ollama")]
 
 
 def test_proveedor_vacio_no_cuenta_como_distinto():
@@ -73,8 +80,8 @@ def test_compuerta_abierta_o_auditor_local(cambios):
 def test_validar_proveedores_sin_mision():
     """El arranque sin misión (plan 6) sólo mira quién produce y quién aprueba."""
     assert E.validar_proveedores(proveedor_cerebro="ollama", proveedor_auditor="openai") == ()
-    assert E.validar_proveedores(proveedor_cerebro="ollama", proveedor_auditor="ollama") == (
-        Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro"),)
+    assert [f.codigo for f in E.validar_proveedores(proveedor_cerebro="ollama", proveedor_auditor="ollama")] == [
+        "auditor_mismo_proveedor_que_el_cerebro"]
     assert E.validar_proveedores(proveedor_cerebro="", proveedor_auditor="openai") == (
         Fallo("c5", "proveedor_desconocido"),)
 

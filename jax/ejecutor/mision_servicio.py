@@ -29,6 +29,8 @@ import signal
 import sys
 from pathlib import Path
 
+import redaccion
+
 from jax.ejecutor import mision as M
 from jax.ejecutor.contratos import arranque, cuenta_axioma, pausa, politica
 from jax.ejecutor.contratos import auditor as A
@@ -70,23 +72,74 @@ def leer_pausa(ruta) -> dict:
     return {"puesta": True, "legible": True, **texto, "paso": paso}
 
 
+#: Cuánto stderr del vigía se conserva. Se guarda la COLA, no la cabeza: una traza
+#: aparece DESPUÉS de las líneas de INFO, así que la cabeza es el ruido y la cola el
+#: diagnóstico.
+TOPE_STDERR_VIGIA = 8192
+#: El stdout del vigía es una línea (`cerrada=...`), pero un pipe sin drenar
+#: bloquea igual: se drena con un tope holgado y también por la COLA, que es
+#: donde está la línea de cierre.
+TOPE_STDOUT_VIGIA = 65536
+
+
+async def _drenar(flujo, tope: int) -> bytes:
+    """Lee `flujo` hasta el EOF conservando los últimos `tope` bytes.
+
+    POR QUÉ NO ALCANZA CON `stderr=PIPE` (2026-09-20). El vigía escribe INFO de httpx
+    en stderr --tres líneas por lote auditado, medido-- y el pipe del sistema son
+    ~64 KB. Con nadie drenando, un turno largo lo llena y el vigía se cuelga en su
+    propio `write`. El síntoma sería `vigia_no_latio`: el MISMO fallo que esto viene a
+    poder diagnosticar. Por eso se drena en continuo desde que el proceso arranca."""
+    cola = bytearray()
+    while True:
+        trozo = await flujo.read(4096)
+        if not trozo:
+            return bytes(cola)
+        cola.extend(trozo)
+        if len(cola) > tope:
+            del cola[:-tope]
+
+
 class Vigia:
-    def __init__(self, proc, ruta: Path):
+    def __init__(self, proc, ruta: Path, salida=None, error=None):
         self._proc, self._ruta = proc, ruta
+        self._salida, self._error = salida, error
 
     def vive(self) -> bool:
         return self._proc.returncode is None
 
     async def cerrar(self) -> tuple:
+        """(rc, stdout, stderr). El stderr ya no se tira: el 2026-09-20 una misión falló
+        con `vigia_no_latio` y NO había una sola línea para investigar -- el diagnóstico
+        salió corriendo el vigía a mano, que es lo que un log existe para evitar. Va
+        redactado: una traza puede traer la llave.
+
+        NO se usa `communicate()`: los dos flujos ya los drenan tareas propias desde que
+        el proceso arranca, y `communicate()` intentaría leerlos otra vez ("read() called
+        while another coroutine is already waiting")."""
         try:
             if self._proc.returncode is None:
                 self._proc.send_signal(signal.SIGTERM)
             try:
-                salida, _ = await asyncio.wait_for(self._proc.communicate(), _CIERRE_VIGIA_S)
+                await asyncio.wait_for(self._proc.wait(), _CIERRE_VIGIA_S)
             except asyncio.TimeoutError:
                 self._proc.kill()
-                salida, _ = await self._proc.communicate()
-            return self._proc.returncode, salida.decode(errors="replace")
+                await self._proc.wait()
+            salida, error = b"", b""
+            for tarea, destino in ((self._salida, "salida"), (self._error, "error")):
+                if tarea is None:
+                    continue
+                try:
+                    trozo = await asyncio.wait_for(tarea, _CIERRE_VIGIA_S)
+                except (asyncio.TimeoutError, asyncio.CancelledError):  # fail-soft: sin un flujo se sigue; el rc manda
+                    tarea.cancel()
+                    trozo = b""
+                if destino == "salida":
+                    salida = trozo
+                else:
+                    error = trozo
+            return (self._proc.returncode, salida.decode(errors="replace"),
+                    redaccion.redactar_secretos(error.decode(errors="replace")) or "")
         finally:
             self._ruta.unlink(missing_ok=True)
 
@@ -96,8 +149,13 @@ async def abrir_vigia(directorio, id_vigia: str, texto: str, hosts, *, argv=None
     await asyncio.to_thread(ruta.write_text, json.dumps({"mision": texto, "hosts": sorted(hosts)}), "utf-8")
     argv = argv or [sys.executable, "-m", "jax.ejecutor.contratos.vigia_servicio"]
     proc = await asyncio.create_subprocess_exec(*argv, str(ruta), stdout=asyncio.subprocess.PIPE,
-                                                stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
-    return Vigia(proc, ruta)
+                                                stderr=asyncio.subprocess.PIPE, start_new_session=True)
+    # Los drenajes arrancan YA, no al cerrar: si se esperara, el pipe se llena y el vigía
+    # se cuelga. Ver el comentario largo de `_drenar`. Los DOS flujos, porque un pipe sin
+    # drenar bloquea igual sea stdout o stderr.
+    return Vigia(proc, ruta,
+                 asyncio.create_task(_drenar(proc.stdout, TOPE_STDOUT_VIGIA)),
+                 asyncio.create_task(_drenar(proc.stderr, TOPE_STDERR_VIGIA)))
 
 
 def _eventos_desde(registro: Path, desde: int) -> list:
