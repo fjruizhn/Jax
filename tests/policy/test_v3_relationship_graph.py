@@ -28,6 +28,23 @@ def test_real_candidate_valid_reciprocal_graph(tmp_path):
  root=_corpus_with_docs(tmp_path,[_named('doc-a',('doc-b',)),_named('doc-b',(),('doc-a',))])
  assert validate_candidate_corpus(root)['state']=='VALID_CANDIDATE'
 
+def test_real_candidate_rejects_three_node_supersession_cycle(tmp_path):
+ root=_corpus_with_docs(tmp_path,[
+  _named('doc-a',('doc-b',),('doc-c',)),
+  _named('doc-b',('doc-c',),('doc-a',)),
+  _named('doc-c',('doc-a',),('doc-b',)),
+ ])
+ with pytest.raises(CanonicalizationError,match='cycle'):
+  validate_candidate_corpus(root)
+
+def test_real_candidate_rejects_cross_layer_supersession(tmp_path):
+ root=_corpus_with_docs(tmp_path,[
+  _named('doc-a',('doc-b',),(), 'CONSTITUTIONAL_CORE'),
+  _named('doc-b',(),('doc-a',), 'PRODUCT_POLICY'),
+ ])
+ with pytest.raises(CanonicalizationError,match='supersession invalid'):
+  validate_candidate_corpus(root)
+
 @pytest.mark.parametrize('docs',[
  lambda:[_named('doc-a',('doc-b',)),_named('doc-b')],
  lambda:[_named('doc-a',('doc-a',))],

@@ -18,6 +18,13 @@ def test_allowed_document_classes_reject_duplicates_even_with_valid_pin(monkeypa
  r['BUNDLE.sha256']=(pin+'\n').encode()
  with pytest.raises(CanonicalizationError): verify_bootstrap_bundle(r)
 
+def test_allowed_document_classes_reject_duplicate_product_policy(monkeypatch):
+ r=bootstrap_resource_bytes(); bundle=json.loads(r['bundle.json'])
+ bundle['allowed_document_classes'].insert(2,'PRODUCT_POLICY')
+ r['bundle.json']=json.dumps(bundle).encode(); pin=compute_bootstrap_bundle_id(r)
+ monkeypatch.setattr(bootstrap_v3,'PINNED_BOOTSTRAP_BUNDLE_ID',pin); r['BUNDLE.sha256']=(pin+'\n').encode()
+ with pytest.raises(CanonicalizationError): verify_bootstrap_bundle(r)
+
 @pytest.mark.parametrize('change',[
  lambda bundle: bundle['allowed_document_classes'].pop(),
  lambda bundle: bundle['allowed_document_classes'].append('EXTRA_CLASS'),
