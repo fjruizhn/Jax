@@ -52,6 +52,7 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
+      - run: python -m pytest policy/tests/test_stderr_no_se_tira.py -v
       # Detector agregado 2026-09-18 (ronda de arreglo del auditor local, hallazgo
       # CRÍTICO de la revisión): scripts/ejecutor_contratos/mision_de_humo.py validaba
       # el arranque contra la máquina de la misión (auditor local incluido) y auditaba
@@ -998,6 +999,7 @@ jobs:
           tests/test_ejecutor_contratos_auditor.py
           tests/test_ejecutor_contratos_auditor_cliente.py
           tests/test_ejecutor_contratos_eleccion_c5.py
+          tests/test_ejecutor_c5_mismo_proveedor.py
           tests/test_ejecutor_contratos_vigia.py
           tests/test_ejecutor_contratos_canario_c5.py
           tests/test_ejecutor_proxy_pausa.py
@@ -1012,6 +1014,8 @@ jobs:
           tests/test_ejecutor_vigia_servicio.py
           tests/test_ejecutor_fase0_retirada.py
           tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py
+          tests/test_ejecutor_vigia_stderr.py
+          tests/test_workers_background_log.py
           tests/test_loadtest_apps_protegidas.py
           tests/test_ejecutor_probar_c4_conteo_remoto.py
           tests/test_ejecutor_cuenta_de_servicio.py
@@ -1134,6 +1138,7 @@ jobs:
             tests/test_ejecutor_contratos_auditor.py \
             tests/test_ejecutor_contratos_auditor_cliente.py \
             tests/test_ejecutor_contratos_eleccion_c5.py \
+            tests/test_ejecutor_c5_mismo_proveedor.py \
             tests/test_ejecutor_contratos_vigia.py \
             tests/test_ejecutor_contratos_canario_c5.py \
             tests/test_ejecutor_proxy_pausa.py \
@@ -1148,6 +1153,8 @@ jobs:
             tests/test_ejecutor_vigia_servicio.py \
             tests/test_ejecutor_fase0_retirada.py \
             tests/test_ejecutor_mision.py tests/test_ejecutor_mision_servicio.py \
+            tests/test_ejecutor_vigia_stderr.py \
+            tests/test_workers_background_log.py \
             tests/test_loadtest_apps_protegidas.py \
             tests/test_ejecutor_probar_c4_conteo_remoto.py \
             tests/test_ejecutor_cuenta_de_servicio.py \
@@ -2614,6 +2621,56 @@ jobs:
           # Delta medido en el runner local con ESTE mismo comando: master 2256 ->
           # rama 2261. El numero absoluto local difiere del de CI porque aca existe
           # el corpus de U3 y los 17 no se saltean; manda el delta.
+          # 2246 -> 2267 (2026-09-20, auditor-mismo-proveedor): +21, puros.
+          #   La compuerta que permite auditar con el MISMO proveedor que el cerebro,
+          #   que NACE CERRADA. Medido ese dia con los canarios reales: ningun auditor
+          #   de proveedor separado servia (qwen3:14b 7/8 a ~250 s, qwen3.6:35b-a3b 6/8
+          #   a ~286 s, granite4.2:8b 2/4 a 412-717 s); el unico que pasa todo es de
+          #   nube y saca datos de la casa. El modelo del cerebro dio 8/8 a mediana 80 s.
+          #   Los 21 cubren: la clave en CLAVES, lectura estricta (nada de bool(texto)),
+          #   fail-closed si falta la fila, la regla con la compuerta abierta y cerrada,
+          #   que un proveedor vacio siga fallando con la compuerta abierta, que el
+          #   rechazo NOMBRE la compuerta en vez de dar a entender que es imposible, y
+          #   que las DOS compuertas sean independientes en los dos sentidos.
+          #   Delta medido en el runner local con el comando de ESTE job: master 2257
+          #   passed -> rama 2278, y los 4 fallos locales son IDENTICOS en las dos
+          #   ramas (preexistentes, de timing). Manda el delta.
+          # 2267 -> 2273 (2026-09-20, afirmaciones-en-bloque-de-codigo): +6, puros.
+          #   INCIDENTE: misiones 445ac19c y 10707ccc salieron "completada" con CERO
+          #   afirmaciones. El cerebro habia hecho TODO bien y entrego el objeto dentro
+          #   de un bloque ```json. Un ARREGLO en valla ya se leia (el re.search de
+          #   `[...]` lo encuentra); un OBJETO UNICO no, porque el respaldo de JSON Lines
+          #   se atraganta con las lineas de la valla. Un cero silencioso que se lee como
+          #   exito. Los 6 cubren el caso exacto de la transcripcion, arreglo en valla,
+          #   valla sin etiqueta, texto alrededor, que el objeto sea IDENTICO con y sin
+          #   valla, y que lo que NO es una afirmacion siga dando vacio.
+          #   Delta medido con el comando de ESTE job: master 2278 -> rama 2284, mismos
+          #   4 fallos locales preexistentes en las dos.
+          # 2273 -> 2278 (2026-09-20, turno-sin-afirmaciones): +5, puros.
+          #   Un turno que no entrega NINGUNA afirmacion deja de reportarse "completado".
+          #   Los 5: el codigo propio; que NO tape el motivo real cuando lo hay
+          #   (registro_no_cuadra manda, el cero es la consecuencia); que un turno que SI
+          #   afirma siga completado; que "todas descartadas por el auditor" SIGA
+          #   completado (decision anterior, esta rama no la pisa); y la regresion del
+          #   vigia caido, donde `entrega` es None y la primera version reventaba con
+          #   AttributeError. Delta con el comando de ESTE job: master 2284 -> rama 2289,
+          #   mismos 4 fallos locales preexistentes.
+          # 2278 -> 2285 (2026-09-20, stderr-del-vigia): +7, puros.
+          #   El stderr del vigia se tiraba a DEVNULL. Cuando una mision fallo con
+          #   `vigia_no_latio` no habia UNA linea para investigar: el diagnostico salio
+          #   corriendo el vigia a mano. Tercera vez en el dia que un stderr=DEVNULL
+          #   escondio la causa. +5 en test_ejecutor_vigia_stderr.py (archivo nuevo,
+          #   cableado en las dos listas de este job) y +2 en test_ejecutor_mision.py
+          #   (el stderr llega a la bitacora cuando NO cierra, y NO ensucia cuando si).
+          #   Delta con el comando de ESTE job: master 2289 -> rama 2296, mismos 4
+          #   fallos locales preexistentes.
+          # 2285 -> 2288 (2026-09-20, workers desprendidos): +3. `_lanzar_workers_background`
+          #   lanzaba los workers de memoria con stdout Y stderr en DEVNULL, y los dos usan
+          #   logging.basicConfig --que escribe en STDERR--, asi que se tiraba TODO su
+          #   registro. Van a ARCHIVO y no a pipe: son desprendidos a proposito y un pipe
+          #   muere con el padre. Delta con el comando de ESTE job: master 2296 -> rama 2299.
+          # 2288 -> 2289 (2026-09-20, vigia_no_latio dice cuanto espero): +1.
+            echo "PISO ROTO: se esperaban 2289 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
           # 2246 -> 2251 el 2026-09-20 (aislar la base de tests, causa raiz): +5 en
           #   tests/test_base_por_sesion.py. El mecanismo (JAX_TEST_DB_SUFIJO) YA
           #   existia desde el 2026-09-17 pero era opt-in -- sin la variable puesta
@@ -2635,8 +2692,8 @@ jobs:
           #   medido en el runner local con ESTE MISMO comando: 2261 -> 2266 (mismo
           #   2261 de la nota de arriba, confirmando que la base no se movio). Si el
           #   runner da otro numero, manda el runner.
-          grep -qE "^2251 passed, 17 skipped" /tmp/out || {
             echo "PISO ROTO: se esperaban 2251 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2313 passed, 17 skipped" /tmp/out || {
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
@@ -2644,7 +2701,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
-      - run: pip install pytest pyyaml
+      - run: pip install pytest pyyaml cryptography==49.0.0
       - name: Identity Foundation Shadow (sin DB)
         env:
           PYTHONPATH: "."
@@ -2688,6 +2745,17 @@ jobs:
           tests/policy/test_authority_resolution_candidate_boundary.py
           tests/policy/test_authority_resolution_determinism.py
           tests/policy/test_authority_resolution_purity.py
+          tests/policy/test_authority_ledger_events.py
+          tests/policy/test_authority_ledger_chain.py
+          tests/policy/test_authority_ledger_ratification.py
+          tests/policy/test_authority_ledger_activation.py
+          tests/policy/test_authority_ledger_overlays.py
+          tests/policy/test_authority_ledger_context_hash.py
+          tests/policy/test_authority_ledger_checkpoint.py
+          tests/policy/test_authority_ledger_authentication.py
+          tests/policy/test_authority_ledger_concurrency.py
+          tests/policy/test_authority_ledger_audit_corrections.py
+          tests/policy/test_effective_authority_envelope.py
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"

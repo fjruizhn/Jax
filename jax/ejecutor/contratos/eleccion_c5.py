@@ -28,7 +28,10 @@ from jax.ejecutor.contratos.fallo import Fallo
 
 CLAVES = ("ejecutor.cerebro_faceta", "ejecutor.auditor_faceta", "ejecutor.auditor_faceta_local",
           "ejecutor.c5_lote_max", "ejecutor.c5_intervalo_s", "ejecutor.c5_max_tokens",
-          "ejecutor.c5_auditor_admite_datos_de_clientes")
+          "ejecutor.c5_auditor_admite_datos_de_clientes",
+          # Compuerta del MISMO proveedor (2026-09-20). Nace cerrada; abrirla es
+          # DECISIÓN de Fernando y queda en axioma_config_audit con actor, fecha e IP.
+          "ejecutor.c5_auditor_admite_mismo_proveedor")
 SQL_CONFIG = ("SELECT config_key, config_value FROM axioma_config WHERE config_key IN "
               f"({', '.join(['%s'] * len(CLAVES))})")
 # Por clave primaria: sólo las máquinas de la misión.
@@ -44,6 +47,7 @@ class ConfigC5:
     intervalo_s: float
     max_tokens: int
     admite_datos_de_clientes: bool
+    admite_mismo_proveedor: bool
 
 
 def config_desde_filas(filas: dict) -> ConfigC5:
@@ -53,12 +57,19 @@ def config_desde_filas(filas: dict) -> ConfigC5:
     admite = filas["ejecutor.c5_auditor_admite_datos_de_clientes"].strip()
     if admite not in ("true", "false"):
         raise ValueError("config_c5_invalida", "ejecutor.c5_auditor_admite_datos_de_clientes")
+    # Nada de bool(texto): "false" es una cadena no vacía y daría True. Mismo
+    # criterio estricto que la compuerta de arriba -- una compuerta que se abre
+    # por un typo no es una compuerta.
+    mismo = filas["ejecutor.c5_auditor_admite_mismo_proveedor"].strip()
+    if mismo not in ("true", "false"):
+        raise ValueError("config_c5_invalida", "ejecutor.c5_auditor_admite_mismo_proveedor")
     lote, intervalo, tokens = (int(filas["ejecutor.c5_lote_max"]), float(filas["ejecutor.c5_intervalo_s"]),
                                int(filas["ejecutor.c5_max_tokens"]))
     if lote <= 0 or not math.isfinite(intervalo) or intervalo <= 0 or tokens <= 0:
         raise ValueError("config_c5_invalida", "numeros")
     return ConfigC5(filas["ejecutor.cerebro_faceta"].strip(), filas["ejecutor.auditor_faceta"].strip(),
-                    filas["ejecutor.auditor_faceta_local"].strip(), lote, intervalo, tokens, admite == "true")
+                    filas["ejecutor.auditor_faceta_local"].strip(), lote, intervalo, tokens,
+                    admite == "true", mismo == "true")
 
 
 def elegir_auditor_faceta(cfg: ConfigC5, *, hay_datos_de_clientes: bool) -> str:
@@ -77,19 +88,52 @@ def sensibles(hosts_mision, hosts_con_clientes, hosts_conocidos) -> frozenset:
     return frozenset(h for h in hosts_mision if h in hosts_con_clientes or h not in hosts_conocidos)
 
 
-def validar_proveedores(*, proveedor_cerebro: str, proveedor_auditor: str) -> tuple:
+CLAVE_MISMO_PROVEEDOR = "ejecutor.c5_auditor_admite_mismo_proveedor"
+
+
+def validar_proveedores(*, proveedor_cerebro: str, proveedor_auditor: str,
+                        admite_mismo_proveedor: bool = False) -> tuple:
     """La mitad de la elección que no depende de la misión: quien produce no aprueba.
-    La usa también el arranque del Ejecutor sin misión (plan 6)."""
+    La usa también el arranque del Ejecutor sin misión (plan 6).
+
+    `admite_mismo_proveedor` (2026-09-20, DECISIÓN de Fernando) es la compuerta que
+    permite auditar con el mismo proveedor que el cerebro. **Nace cerrada** y su
+    default acá es False a propósito: un llamador que se olvide de pasarla obtiene
+    el comportamiento estricto, nunca el permisivo.
+
+    Por qué existe: medido el 2026-09-20 con los canarios reales, ningún auditor de
+    proveedor separado servía --qwen3:14b 7/8 a ~250 s, qwen3.6:35b-a3b 6/8 a ~286 s,
+    granite4.2:8b 2/4 a 412-717 s-- y el único que pasa todo (`thot`, 6/6 en ~10 s) es
+    de nube, o sea manda la salida de máquinas con datos de clientes fuera de la casa,
+    que es lo que la Fase 0 prohibió. El modelo del cerebro, ya cargado en GPU, dio
+    **8/8 con mediana 80 s** y no saca nada de la casa.
+
+    La alternativa fácil era registrar el mismo Ollama con otro `provider_id`: el `if`
+    de abajo habría pasado en verde con la propiedad rota igual. Eso no es cumplir el
+    contrato, es fabricar evidencia de que se cumple. Por eso la regla se cambia acá,
+    a la vista, con su compuerta y su registro de auditoría.
+
+    Lo que sigue decorrelacionado aunque el modelo sea el mismo: los canarios de C5,
+    elegidos AL AZAR en cada arranque, que frenan la misión si el auditor falla."""
     if not (proveedor_cerebro or "").strip() or not (proveedor_auditor or "").strip():
         return (Fallo("c5", "proveedor_desconocido"),)
-    if proveedor_cerebro == proveedor_auditor:
-        return (Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro"),)
+    if proveedor_cerebro == proveedor_auditor and not admite_mismo_proveedor:
+        # El código nombra la compuerta: quien lea el rechazo tiene que saber que hay
+        # una decisión registrable detrás, y no salir a inventar un proveedor nuevo.
+        return (Fallo("c5", "auditor_mismo_proveedor_que_el_cerebro",
+                      (("proveedor", proveedor_auditor), ("compuerta", CLAVE_MISMO_PROVEEDOR))),)
     return ()
 
 
 def validar_eleccion(*, proveedor_cerebro: str, proveedor_auditor: str, auditor_es_local: bool,
-                     admite_datos_de_clientes: bool, hosts_mision, hosts_con_clientes, hosts_conocidos) -> tuple:
-    fallos = list(validar_proveedores(proveedor_cerebro=proveedor_cerebro, proveedor_auditor=proveedor_auditor))
+                     admite_datos_de_clientes: bool, hosts_mision, hosts_con_clientes, hosts_conocidos,
+                     admite_mismo_proveedor: bool = False) -> tuple:
+    """Las DOS compuertas son independientes y se evalúan por separado: abrir la
+    del mismo proveedor no relaja la de datos de clientes, ni al revés. El default
+    False de `admite_mismo_proveedor` es a propósito -- un llamador olvidadizo
+    obtiene el comportamiento estricto."""
+    fallos = list(validar_proveedores(proveedor_cerebro=proveedor_cerebro, proveedor_auditor=proveedor_auditor,
+                                      admite_mismo_proveedor=admite_mismo_proveedor))
     if not hosts_mision:
         fallos.append(Fallo("c5", "mision_sin_maquinas"))
     sens = sensibles(hosts_mision, hosts_con_clientes, hosts_conocidos)
@@ -153,4 +197,5 @@ async def verificar_eleccion(conn, *, cfg: ConfigC5, proveedor_cerebro: str, pro
     return validar_eleccion(proveedor_cerebro=proveedor_cerebro, proveedor_auditor=proveedor_auditor,
                             auditor_es_local=await es_local(conn, proveedor_auditor),
                             admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset(hosts_mision),
-                            hosts_con_clientes=con_clientes, hosts_conocidos=conocidos)
+                            hosts_con_clientes=con_clientes, hosts_conocidos=conocidos,
+                            admite_mismo_proveedor=cfg.admite_mismo_proveedor)

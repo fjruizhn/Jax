@@ -141,9 +141,32 @@ async def _preparar() -> list[str]:
 
 
 async def _limpiar_filas():
-    await _sql("DELETE FROM facts WHERE user_id = %s", (_USER,))
-    # messages cae por ON DELETE CASCADE.
-    await _sql("DELETE FROM conversations WHERE user_id = %s", (_USER,))
+    """Deja las tablas VACIAS, no solo sin las filas de `_USER`.
+
+    Antes borraba por `user_id`, y alcanzaba mientras `jax_memory_test` no
+    tuviera estas tablas. Ya las tiene (337 filas el 2026-09-20), y
+    `backfill_zero_embeddings()` cuenta TODA la tabla: una sola fila ajena en
+    ceros rompe el `{"pendientes": 1}` de abajo. Por eso el test fallaba o
+    pasaba segun lo que hubiera dejado la corrida anterior.
+
+    La cabecera de este archivo ya declaraba la precondicion ("los contadores
+    asumen que en estas tablas solo hay filas de este archivo"). Lo que faltaba
+    era HACERLA CUMPLIR en vez de confiar en que la base estuviera limpia.
+
+    Con TRUNCATE, no con DELETE: ver `_esquema_memoria.vaciar()` -- un DELETE
+    masivo envenena el indice HNSW y la busqueda vectorial deja de encontrar
+    nada, en silencio.
+    """
+    conn = await _conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute("SELECT DATABASE()")
+            base = (await cur.fetchone())[0]
+        assert es_base_de_test(base), (
+            f"me negue a vaciar tablas en {base!r}: no es una base de test")
+        await _esquema_memoria.vaciar(conn)
+    finally:
+        conn.close()
 
 
 @pytest.fixture
