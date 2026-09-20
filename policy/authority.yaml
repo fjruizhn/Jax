@@ -1,7 +1,7 @@
 schema_version: "1.0"
 kind: JAX_AUTHORITY_META_CONTRACT
 canonicalizer_version: JAX-POLICY-C14N/3
-bootstrap_bundle_id: sha256:181729b45aa186b353390c304700848ba43d4208ee8f800e2c4915d083141aab
+bootstrap_bundle_id: sha256:09fdff49b0920939232c6d3a450652b26f4ef36fec27dc0504528307cc4a77bd
 id: jax-authority-meta-contract
 contract_version: "1.0"
 root_pair: {authoritative_manifest_id: jax-authoritative-policy-manifest, authoritative_manifest_kind: JAX_AUTHORITATIVE_POLICY_MANIFEST}

@@ -2569,7 +2569,26 @@ jobs:
           tests/policy/test_policy_corpus_hash.py
           tests/policy/test_shadow_manifest.py
           tests/policy/test_strict_yaml.py
+          tests/policy/test_v3_array_semantics.py
+          tests/policy/test_v3_authoritative_manifest.py
+          tests/policy/test_v3_authority_meta_contract.py
+          tests/policy/test_v3_bootstrap_bundle.py
+          tests/policy/test_v3_bootstrap_root.py
+          tests/policy/test_v3_candidate_activation.py
+          tests/policy/test_v3_cli.py
+          tests/policy/test_v3_cross_validation.py
+          tests/policy/test_v3_external_constraints.py
+          tests/policy/test_v3_field_classes.py
+          tests/policy/test_v3_normative_membership.py
+          tests/policy/test_v3_normative_policy_document.py
+          tests/policy/test_v3_normative_projection.py
+          tests/policy/test_v3_path_security.py
           tests/policy/test_v3_policy_corpus_hash.py
+          tests/policy/test_v3_protected_metanorms.py
+          tests/policy/test_v3_reference_catalog.py
+          tests/policy/test_v3_relationship_graph.py
+          tests/policy/test_v3_root_pair.py
+          tests/policy/test_v3_unicode_normalization.py
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"

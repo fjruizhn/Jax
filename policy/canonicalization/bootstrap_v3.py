@@ -8,7 +8,7 @@ from .errors import BootstrapIntegrityError
 CANONICALIZER_IDENTITY = "JAX-POLICY-C14N/3"
 UNICODE_VERSION = "16.0.0"
 V3_RESOURCE_NAMES = ("bundle.json", "field-classes.json", "authority-meta-contract.schema.json", "authoritative-policy-manifest.schema.json", "normative-policy-document.schema.json")
-PINNED_BOOTSTRAP_BUNDLE_ID = "sha256:181729b45aa186b353390c304700848ba43d4208ee8f800e2c4915d083141aab"
+PINNED_BOOTSTRAP_BUNDLE_ID = "sha256:09fdff49b0920939232c6d3a450652b26f4ef36fec27dc0504528307cc4a77bd"
 BOOTSTRAP_DIR = Path(__file__).resolve().parents[1] / "bootstrap" / "v3"
 
 @dataclass(frozen=True)
@@ -36,7 +36,14 @@ def compute_bootstrap_bundle_id(resources: dict[str, bytes]) -> str:
     return "sha256:" + h.hexdigest()
 
 def _obj(raw: bytes, name: str) -> dict:
-    try: value = json.loads(raw.decode("utf-8"))
+    def no_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"clave JSON duplicada: {key}")
+            result[key] = value
+        return result
+    try: value = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicate_keys)
     except Exception as exc: raise BootstrapIntegrityError(f"{name}: JSON inválido") from exc
     if not isinstance(value, dict): raise BootstrapIntegrityError(f"{name}: raíz no objeto")
     return value
@@ -44,9 +51,9 @@ def _obj(raw: bytes, name: str) -> dict:
 def verify_bootstrap_bundle(resources: dict[str, bytes]) -> VerifiedBootstrapV3:
     got = compute_bootstrap_bundle_id(resources)
     if got != PINNED_BOOTSTRAP_BUNDLE_ID: raise BootstrapIntegrityError(f"bootstrap v3 pin mismatch: {got}")
-    try: artifact = resources["BUNDLE.sha256"].decode("ascii").strip()
+    try: artifact = resources["BUNDLE.sha256"].decode("ascii")
     except Exception as exc: raise BootstrapIntegrityError("BUNDLE.sha256 inválido") from exc
-    if artifact != PINNED_BOOTSTRAP_BUNDLE_ID: raise BootstrapIntegrityError("BUNDLE.sha256 difiere del pin")
+    if artifact != PINNED_BOOTSTRAP_BUNDLE_ID + "\n": raise BootstrapIntegrityError("BUNDLE.sha256 difiere del pin")
     bundle, fields = _obj(resources["bundle.json"], "bundle.json"), _obj(resources["field-classes.json"], "field-classes.json")
     if bundle.get("canonicalizer_version") != CANONICALIZER_IDENTITY or bundle.get("unicode_version") != UNICODE_VERSION: raise BootstrapIntegrityError("identidad bootstrap inválida")
     if bundle.get("authorizes") is not False or bundle.get("purpose") != "CANDIDATE_AUTHORITY_CONTRACT": raise BootstrapIntegrityError("bootstrap autoriza indebidamente")
@@ -54,6 +61,10 @@ def verify_bootstrap_bundle(resources: dict[str, bytes]) -> VerifiedBootstrapV3:
     if set(bundle.get("allowed_document_classes", [])) != {"CONSTITUTIONAL_CORE","PRODUCT_POLICY","SUBORDINATE_POLICY"}: raise BootstrapIntegrityError("clases permitidas inválidas")
     schemas = {name: _obj(resources[name], name) for name in V3_RESOURCE_NAMES[2:]}
     if not isinstance(fields.get("fields"), dict) or not isinstance(fields.get("array_semantics"), dict): raise BootstrapIntegrityError("field registry inválido")
-    return VerifiedBootstrapV3(got,bundle,fields,schemas)
+    verified = VerifiedBootstrapV3(got,bundle,fields,schemas)
+    # The registry is verified from schema structure, never from an instance.
+    from .schemas_v3 import verify_registry
+    verify_registry(verified)
+    return verified
 
 def verified_bootstrap_v3() -> VerifiedBootstrapV3: return verify_bootstrap_bundle(bootstrap_resource_bytes())
