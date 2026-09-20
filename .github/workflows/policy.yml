@@ -925,6 +925,7 @@ jobs:
       - run: pip install -r requirements.txt pytest pytest-asyncio
       - name: Identity Foundation Shadow (sin DB)
         env:
+          PYTHONPATH: "."
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
           python -B -m pytest -v
