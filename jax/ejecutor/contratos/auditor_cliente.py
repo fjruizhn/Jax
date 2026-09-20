@@ -41,8 +41,14 @@ async def auditar(lote: A.Lote, *, faceta, max_tokens: int, cliente=None, tope_s
     cuerpo = {"model": faceta.model, "max_completion_tokens": max_tokens,
               "messages": A.mensajes(lote, instrucciones())}
     try:
+        # Sin credencial NO se manda la cabecera: la ausencia es un hecho del transporte
+        # ('ollama' esta exento por facet_resolver), no un valor vacio que se serializa.
+        # La f-string incondicional producia "Bearer " -- con espacio final -- y h11
+        # rechaza una cabecera con espacio al final: LocalProtocolError, subclase de
+        # httpx.HTTPError, que el except de abajo disfrazaba de "el modelo escribio mal".
+        cabeceras = {"authorization": f"Bearer {faceta.credential}"} if faceta.credential else {}
         r = await cliente.post(faceta.base_url.rstrip("/") + "/chat/completions", json=cuerpo,
-                               headers={"authorization": f"Bearer {faceta.credential}"}, timeout=tope_s)
+                               headers=cabeceras, timeout=tope_s)
         r.raise_for_status()
         texto = r.json()["choices"][0]["message"]["content"]
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError):

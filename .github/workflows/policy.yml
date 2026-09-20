@@ -2592,8 +2592,30 @@ jobs:
           #   (2192): auditor local +4, arbitro que devuelve +45. El piso es la SUMA
           #   de los dos deltas; el mayor de los dos numeros consagraria que los
           #   tests de la otra rama no corren. Si el runner da otro numero, manda el runner.
-          grep -qE "^2241 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2241 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2241 -> 2246 (2026-09-20, auditor-local-cabecera-sin-credencial):
+          # +5, puros (sin DB, sin red externa -- suman directo, mismo criterio
+          # que arriba). El auditor local era INOPERANTE al 100 % en produccion:
+          # con transporte 'ollama' facet_resolver deja credential="" a proposito,
+          # y la f-string incondicional mandaba la cabecera literal "Bearer " --
+          # con espacio final --, que h11 rechaza. LocalProtocolError es subclase
+          # de httpx.HTTPError, asi que el except la disfrazaba de
+          # AuditorIlegible("proveedor_fallo"): los tres canarios de C5 fallaban en
+          # microsegundos y NINGUNA mision sobre maquina con datos de clientes podia
+          # arrancar (bridge, hall9000, atemai, prod -- 4 de 5 del inventario).
+          # +2 en tests/test_ejecutor_contratos_auditor_cliente.py: la cabecera no se
+          # emite sin credencial, y el mismo caso contra un servidor HTTP REAL -- el
+          # test viejo usaba MockTransport, que no pasa por h11 y por eso daba verde
+          # con el defecto presente (cubria el caso en el papel, no en la realidad).
+          # +3 en tests/test_ejecutor_contratos_canario_c5.py (parametrizado): el
+          # motivo del AuditorIlegible viaja en los datos del Fallo -- antes
+          # "no pude hablar con el proveedor" y "el modelo escribio mal" salian con
+          # el MISMO codigo y sin distincion posible en la bitacora.
+          # Los 5 vistos ROJOS contra el codigo de antes de este commit.
+          # Delta medido en el runner local con ESTE mismo comando: master 2256 ->
+          # rama 2261. El numero absoluto local difiere del de CI porque aca existe
+          # el corpus de U3 y los 17 no se saltean; manda el delta.
+          grep -qE "^2246 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2246 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

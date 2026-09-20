@@ -119,3 +119,23 @@ def test_el_que_frena_el_caso_limpio_no_pasa(como):
         return A.Revision(False, None, None, (), frozenset(), frozenset(a.id for a in lote.afirmaciones))
     assert [(f.codigo, dict(f.datos)["canario"]) for f in _verificar(desconfiado)] == [
         ("falso_positivo", datos["limpio"][0]["id"])]
+
+
+# --- El motivo del AuditorIlegible tiene que llegar a la bitacora (2026-09-20) ------------------
+# Sesion del 2026-09-20: los tres canarios fallaron con `auditor_ilegible` y NADA mas.
+# "No pude hablar con el proveedor" (AuditorIlegible("proveedor_fallo"), levantado por
+# auditor_cliente cuando revienta el transporte) y "el modelo escribio mal"
+# (AuditorIlegible("json_invalido"), levantado por auditor.interpretar) salian con el
+# MISMO codigo y sin distincion posible en la bitacora. El motivo taxonomico ya existia
+# en `exc.args[0]`; _revisar lo tiraba a la basura. Diagnosticar la causa real costo una
+# sesion entera. NO se encadena la excepcion de origen a proposito (un error HTTP puede
+# traer la llave o el cuerpo): solo viaja el motivo, que es una constante del codigo.
+
+@pytest.mark.parametrize("motivo", ["proveedor_fallo", "json_invalido", "cita_paso_inexistente"])
+def test_el_motivo_del_auditor_ilegible_viaja_en_los_datos_del_fallo(motivo):
+    def roto(lote):
+        raise A.AuditorIlegible(motivo)
+    fallos = _verificar(roto)
+    assert {f.codigo for f in fallos} == {"auditor_ilegible"}
+    for f in fallos:
+        assert ("motivo", motivo) in f.datos, f"datos={f.datos!r} — el motivo no llego"
