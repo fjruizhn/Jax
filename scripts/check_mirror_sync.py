@@ -557,6 +557,42 @@ FAMILIAS = (
         nota="SP2 del Ejecutor (2026-09-17): el modo Ejecutor de la plataforma pone y quita la "
              "pausa del Ejecutor. ORDEN DE MERGE: jax-platform primero.",
     ),
+    Familia(
+        nombre="base_de_test",
+        canonico=JAX_ROOT / "base_de_test.py",
+        espejos=(
+            ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "base_de_test.py"),
+        ),
+        # Los dos repos comparten la MISMA base fisica (jax_memory_test en la
+        # MariaDB de hall9000: sus tablas mezclan catalogo de jax-platform con
+        # las de jax), asi que el nombre, el prefijo y la validacion de sesion
+        # tienen que ser IDENTICOS o los dos mecanismos inventarian nombres
+        # distintos sobre la misma base. Las 4 funciones de conexion real
+        # (_dropear_base_de_sesion, _clonar_esquema, asegurar_base_de_test) y
+        # las 3 que narran historia propia de cada repo (_sufijo_automatico_
+        # de_sesion, fijar_base_de_test, exigir_base_de_test,
+        # _parametros_de_conexion) quedan con DIVERGENCIA DELIBERADA: el
+        # import del conector local (mismo patron que db_connect_config) y el
+        # camino de esquema propio (jacobs.store.init_tables() en jax,
+        # db.migrations.run_migrations() en jax-platform) no pueden ser
+        # iguales, y no es drift.
+        compartidos=(
+            "BASE_COMPARTIDA", "BASE_DE_PRODUCCION", "VARIABLE_DEL_SUFIJO",
+            "VARIABLE_DE_LA_BASE", "SUFIJO_VALIDO", "LARGO_MAXIMO_DEL_IDENTIFICADOR",
+            "BaseDeTestInvalida", "_verificar_que_no_es_produccion", "es_base_de_test",
+            "_en_ci", "_sufijo_automatico_de_sesion", "_borrar_al_salir",
+            "nombre_base_de_test", "fijar_base_de_test", "exigir_base_de_test",
+            "BASE_PLANTILLA", "FILAS_MAXIMAS_A_COPIAR", "_parametros_de_conexion",
+            "_dropear_base_de_sesion", "_clonar_esquema", "asegurar_base_de_test",
+        ),
+        nota="Aislar la base de tests (2026-09-20): el mecanismo de jax (2026-09-17) "
+             "existia pero jax-platform no lo tenia -- conftest.py:13 fijaba "
+             "JAX_DB_NAME a secas, sin aislamiento de ninguna clase. Portado, no "
+             "reinventado. ORDEN DE MERGE: jax-platform primero (mismo motivo que "
+             "pausa_ejecutor/prioridad: el job mirror-sync de jax clona el master "
+             "de jax-platform, y un espejo que todavia no existe ahi hace fallar "
+             "el checker fuerte, no en silencio).",
+    ),
 )
 
 

@@ -135,9 +135,12 @@ def _sufijo_automatico_de_sesion() -> str:
     Antes de este mecanismo, crear una base con sufijo era un paso que
     alguien pedía a propósito (`export JAX_TEST_DB_SUFIJO=...`); ahora pasa
     en CADA corrida local que no lo pida. Sin limpiar, eso multiplica el
-    ritmo al que se acumulan bases huérfanas (ya había una decena en
-    hall9000 antes de este cambio). Por eso acá mismo se registra el borrado
-    al salir del proceso -- ver `_borrar_al_salir()`. Una base con sufijo
+    ritmo al que se acumulan bases huérfanas -- DIVERGENCIA DELIBERADA con
+    jax-platform: allá no hay un "ya había una decena en hall9000", porque
+    esa cuenta puntual del 2026-09-20 es de ESTA base física, que comparten
+    los dos repos; repetirla en la copia sería inventar una segunda
+    medición que nadie hizo. Por eso acá mismo se registra el borrado al
+    salir del proceso -- ver `_borrar_al_salir()`. Una base con sufijo
     EXPLÍCITO (pasado a mano) NO se registra: alguien pudo poner ese sufijo
     a propósito para reusarla entre corridas, y borrarla forzaría un
     clonado de esquema de más en cada pytest suelto."""
@@ -159,7 +162,7 @@ def _borrar_al_salir(nombre: str) -> None:
     import asyncio
     try:
         asyncio.run(_dropear_base_de_sesion(nombre))
-    except Exception:
+    except Exception:  # fail-soft: best-effort al salir del proceso, no una condición de salida; scripts/limpiar_bases_de_test.py barre lo que quede
         pass
 
 
@@ -236,6 +239,9 @@ def fijar_base_de_test() -> str:
     Es el reemplazo exacto de `os.environ["JAX_DB_NAME"] = "jax_memory_test"`
     que cada archivo de test escribía a mano: mismo comportamiento (override
     incondicional), pero respetando el sufijo de la sesión.
+    DIVERGENCIA DELIBERADA con jax-platform: allá el reemplazo es de UN
+    solo punto, `tests/conftest.py`; acá eran ~20 archivos, historia de por
+    qué existe esta función (no una diferencia de comportamiento).
     """
     nombre = nombre_base_de_test()
     os.environ[VARIABLE_DE_LA_BASE] = nombre
@@ -249,6 +255,9 @@ def exigir_base_de_test() -> str:
     Es el reemplazo del par
     `if _existing and _existing != "jax_memory_test": raise` + `setdefault`,
     que protege del `set -a; . <(sudo -n cat /etc/jax/.env)` (ahí `JAX_DB_NAME=jax_memory`).
+    DIVERGENCIA DELIBERADA con jax-platform: allá nunca existió ese guard
+    viejo -- la protección es nueva, no un reemplazo -- así que el docstring
+    no nombra un código anterior que no existió.
     """
     actual = os.environ.get(VARIABLE_DE_LA_BASE)
     if actual:
@@ -306,7 +315,9 @@ def _parametros_de_conexion() -> dict:
     tripwire `tests/test_aiomysql_connect_timeout_tripwire.py` lee el AST y
     exige el kwarg ESCRITO en la llamada, no escondido en un `**dict` --
     justamente para que no se pierda en una indirección. Me lo encontró a mí
-    el 2026-09-17."""
+    el 2026-09-17. DIVERGENCIA DELIBERADA con jax-platform: ese tripwire
+    puntual sólo existe acá; el criterio del kwarg escrito es el mismo en
+    los dos repos."""
     return {
         "host": os.environ.get("JAX_DB_HOST", "127.0.0.1"),
         "port": int(os.environ.get("JAX_DB_PORT", "3306")),
