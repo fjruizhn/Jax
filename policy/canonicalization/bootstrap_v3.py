@@ -8,7 +8,7 @@ from .errors import BootstrapIntegrityError
 CANONICALIZER_IDENTITY = "JAX-POLICY-C14N/3"
 UNICODE_VERSION = "16.0.0"
 V3_RESOURCE_NAMES = ("bundle.json", "field-classes.json", "authority-meta-contract.schema.json", "authoritative-policy-manifest.schema.json", "normative-policy-document.schema.json")
-PINNED_BOOTSTRAP_BUNDLE_ID = "sha256:09fdff49b0920939232c6d3a450652b26f4ef36fec27dc0504528307cc4a77bd"
+PINNED_BOOTSTRAP_BUNDLE_ID = "sha256:23d5523dcf78a5631aba7f44e6d1c74f3394b7c2594bbb50e2d5392cd688fe99"
 BOOTSTRAP_DIR = Path(__file__).resolve().parents[1] / "bootstrap" / "v3"
 
 @dataclass(frozen=True)
@@ -58,7 +58,17 @@ def verify_bootstrap_bundle(resources: dict[str, bytes]) -> VerifiedBootstrapV3:
     if bundle.get("canonicalizer_version") != CANONICALIZER_IDENTITY or bundle.get("unicode_version") != UNICODE_VERSION: raise BootstrapIntegrityError("identidad bootstrap inválida")
     if bundle.get("authorizes") is not False or bundle.get("purpose") != "CANDIDATE_AUTHORITY_CONTRACT": raise BootstrapIntegrityError("bootstrap autoriza indebidamente")
     if tuple(bundle.get("digest_resources", [])) != V3_RESOURCE_NAMES: raise BootstrapIntegrityError("digest_resources no coincide con constante compilada")
-    if set(bundle.get("allowed_document_classes", [])) != {"CONSTITUTIONAL_CORE","PRODUCT_POLICY","SUBORDINATE_POLICY"}: raise BootstrapIntegrityError("clases permitidas inválidas")
+    allowed = bundle.get("allowed_document_classes")
+    expected_allowed = ("CONSTITUTIONAL_CORE", "PRODUCT_POLICY", "SUBORDINATE_POLICY")
+    if not isinstance(allowed, list) or any(not isinstance(item, str) for item in allowed):
+        raise BootstrapIntegrityError("clases permitidas inválidas")
+    # This is a declared SET_SCALAR.  Do not turn it into a set before
+    # detecting duplicates: doing so would erase an invalid input.
+    normalized_allowed = tuple(item for item in allowed)
+    if len(normalized_allowed) != len(set(normalized_allowed)):
+        raise BootstrapIntegrityError("clases permitidas duplicadas")
+    if tuple(sorted(normalized_allowed)) != tuple(sorted(expected_allowed)):
+        raise BootstrapIntegrityError("clases permitidas inválidas")
     schemas = {name: _obj(resources[name], name) for name in V3_RESOURCE_NAMES[2:]}
     if not isinstance(fields.get("fields"), dict) or not isinstance(fields.get("array_semantics"), dict): raise BootstrapIntegrityError("field registry inválido")
     verified = VerifiedBootstrapV3(got,bundle,fields,schemas)

@@ -10,12 +10,6 @@ ID_RE=re.compile(r"[a-z][a-z0-9-]{0,63}\Z")
 SEL_RE=re.compile(r"[A-Z][A-Z0-9_]*\Z")
 CLASSES=("CONSTITUTIONAL_CORE","PRODUCT_POLICY","SUBORDINATE_POLICY")
 
-# Structural leaves, not a candidate traversal: empty arrays cannot hide a
-# wildcard registry entry.  The registry must be an exact bijection with this.
-LEAVES={
-"authority": """schema_version kind canonicalizer_version bootstrap_bundle_id id contract_version root_pair.authoritative_manifest_id root_pair.authoritative_manifest_kind scope.jurisdiction scope.governs[*] scope.excludes[*] human_authority.constitutional_ratifier.actor_id human_authority.constitutional_ratifier.actor_kind human_authority.constitutional_ratifier.powers[*] human_authority.mesa.role human_authority.mesa.normative_vote human_authority.mesa.may_ratify human_authority.agents.normative_vote human_authority.agents.may_ratify human_authority.agents.may_expand_authority candidate_lifecycle.activation_mode candidate_lifecycle.activation_requires[*] candidate_lifecycle.git_commit_is_ratification candidate_lifecycle.git_push_is_ratification precedence.authority_meta_contract precedence.ordered_document_layers[*] precedence.overlay_position precedence.external_constraints precedence.equal_rank_conflict precedence.unresolved_conflict normative_sources.permitted_document_classes[*] normative_sources.manifest_classification_required normative_sources.document_self_classification_authoritative normative_sources.legacy_status_is_normative_force normative_sources.unlisted_documents_have_normative_force protected_metanorms[*].id protected_metanorms[*].statement protected_metanorms[*].non_waivable meta_contract_amendment.requires[*] meta_contract_amendment.implicit_amendment meta_contract_amendment.subordinate_document_may_amend meta_contract_amendment.protected_metanorm_document_may_amend exceptions.storage exceptions.modifies_policy_corpus exceptions.creates_precedent exceptions.requires_explicit_scope exceptions.requires_explicit_expiry_or_bound exceptions.may_waive_non_waivable exceptions.absent_or_invalid delegations.storage delegations.default delegations.may_self_expand delegations.must_be_scope_bounded delegations.must_be_time_or_event_bounded delegations.may_override_protected_metanorm suspensions.storage suspensions.modifies_policy_corpus suspensions.requires_explicit_scope suspensions.requires_explicit_expiry_or_bound suspensions.may_suspend_non_waivable suspensions.absent_or_invalid interpretations.GENERAL_NORMATIVE.changes_policy_corpus interpretations.GENERAL_NORMATIVE.requires_human_ratification interpretations.BINDING_PARTICULAR.storage interpretations.BINDING_PARTICULAR.changes_policy_corpus interpretations.BINDING_PARTICULAR.changes_effective_authority_context interpretations.EXPLANATORY.binding_force interpretations.EXPLANATORY.changes_policy_corpus interpretations.EXPLANATORY.changes_effective_authority_context amendment_and_repeal.changes_policy_corpus amendment_and_repeal.requires_human_ratification amendment_and_repeal.requires_new_policy_corpus_hash amendment_and_repeal.implicit_repeal external_constraints.jax_normative external_constraints.effect external_constraints.may_grant_authority external_constraints.provenance_required_at_evaluation fail_closed.default fail_closed.missing_or_invalid_root_pair fail_closed.invalid_membership fail_closed.unknown_document_class fail_closed.use_of_non_active_candidate fail_closed.invalid_or_expired_overlay fail_closed.unresolved_precedence""".split(),
-"manifest": """schema_version kind canonicalizer_version bootstrap_bundle_id id manifest_version governed_by.authority_meta_contract_id governed_by.authority_meta_contract_kind candidate_lifecycle.activation_mode candidate_lifecycle.authorizes_production corpus.jurisdiction corpus.legacy_identity_mode membership.paths_are_explicit membership.symlinks_allowed membership.unlisted_documents_have_normative_force membership.duplicate_ids membership.duplicate_paths membership.document_self_classification_authoritative normative_documents[*].id normative_documents[*].path normative_documents[*].document_class normative_documents[*].normative_layer normative_documents[*].normative_effect reference_documents[*].reference_id reference_documents[*].source_locator reference_documents[*].source_type reference_documents[*].legacy_status reference_documents[*].display_name""".split(),
-"document": """schema_version kind id title statement scope.jurisdiction scope.subjects[*] scope.actions[*] scope.conditions_all[*] document_class normative_layer lifecycle_status blocking.mode expected_enforcement.mode effective_semantics.activation effective_semantics.termination relationships.supersedes[*] relationships.superseded_by[*] origin.source_type origin.source_ref notes[*] history[*]""".split(),}
 ARRAYS={"authority.scope.governs":"SET_SCALAR","authority.scope.excludes":"SET_SCALAR","authority.human_authority.constitutional_ratifier.powers":"SET_SCALAR","authority.candidate_lifecycle.activation_requires":"SET_SCALAR","authority.precedence.ordered_document_layers":"ORDERED","authority.normative_sources.permitted_document_classes":"SET_SCALAR","authority.protected_metanorms":"SET_KEYED_ID","authority.meta_contract_amendment.requires":"SET_SCALAR","manifest.normative_documents":"SET_KEYED_ID","manifest.reference_documents":"DISPLAY","document.scope.subjects":"SET_SCALAR","document.scope.actions":"SET_SCALAR","document.scope.conditions_all":"SET_SCALAR","document.relationships.supersedes":"SET_SCALAR","document.relationships.superseded_by":"SET_SCALAR","document.notes":"DISPLAY","document.history":"DISPLAY","bootstrap.digest_resources":"ORDERED","bootstrap.allowed_document_classes":"SET_SCALAR"}
 
 def fail(p,m): raise SchemaValidationError(f"{p}: {m}")
@@ -41,9 +35,36 @@ def exact(v,expected,p):
  for k,x in expected.items():
   if isinstance(x,bool): boolean(v[k],f"{p}.{k}",x)
   elif v[k]!=x: fail(f"{p}.{k}","valor inválido")
+def _schema_leaf_patterns(schema, prefix=""):
+ """Derive legal leaf patterns from the pinned JSON Schema shape."""
+ if not isinstance(schema, dict):
+  raise BootstrapIntegrityError("schema v3 inválido")
+ typ=schema.get("type")
+ if typ == "object":
+  if schema.get("additionalProperties") is not False or not isinstance(schema.get("properties"), dict):
+   raise BootstrapIntegrityError("schema object no cerrado")
+  leaves=set()
+  for name, child in schema["properties"].items():
+   leaves |= _schema_leaf_patterns(child, f"{prefix}.{name}" if prefix else name)
+  return leaves
+ if typ == "array":
+  if "items" not in schema:
+   raise BootstrapIntegrityError("schema array sin items")
+  return _schema_leaf_patterns(schema["items"], prefix + "[*]")
+ # Scalars may express their type through const/enum; either is a legal leaf.
+ if typ in {"string", "boolean", "number", "integer"} or "const" in schema or "enum" in schema:
+  return {prefix}
+ raise BootstrapIntegrityError("schema leaf inválido")
+
 def verify_registry(b):
  fields=b.field_classes.get("fields"); arrays=b.field_classes.get("array_semantics")
- expected={f"{a}.{x}" for a,xs in LEAVES.items() for x in xs}
+ schema_sources={
+  "authority": b.schemas["authority-meta-contract.schema.json"],
+  "manifest": b.schemas["authoritative-policy-manifest.schema.json"],
+  "document": b.schemas["normative-policy-document.schema.json"],
+ }
+ expected={f"{artifact}.{leaf}" for artifact,schema in schema_sources.items()
+           for leaf in _schema_leaf_patterns(schema)}
  if not isinstance(fields,dict) or set(fields)!=expected or any(x not in {"NORMATIVE","PROVENANCE_REQUIRED","DISPLAY","FACTUAL_FORBIDDEN"} for x in fields.values()): raise BootstrapIntegrityError("schema/field registry no es biyectivo")
  if arrays!=ARRAYS: raise BootstrapIntegrityError("array registry v3 inválida")
 
