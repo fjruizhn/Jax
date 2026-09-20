@@ -1,0 +1,13 @@
+{
+  "authorizes": false,
+  "bundle_format": "JAX-POLICY-BOOTSTRAP/2",
+  "canonicalizer_version": "JAX-POLICY-C14N/2",
+  "purpose": "SHADOW_ONLY",
+  "unicode_normalization": "NFC",
+  "unicode_version": "16.0.0",
+  "resources": [
+    "manifest-bootstrap.schema.json",
+    "legacy-rule-shadow.schema.json",
+    "field-classes.json"
+  ]
+}

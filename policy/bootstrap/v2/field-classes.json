@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.0",
+  "source_classification": "LEGACY_RULE_SHADOW",
+  "classes": [
+    "NORMATIVE",
+    "PROVENANCE_REQUIRED",
+    "DISPLAY",
+    "FACTUAL_FORBIDDEN"
+  ],
+  "fields": {
+    "id": "NORMATIVE",
+    "statement": "NORMATIVE",
+    "scope": "NORMATIVE",
+    "blocking": "NORMATIVE",
+    "origin": "PROVENANCE_REQUIRED",
+    "status": "NORMATIVE",
+    "enforcement": "NORMATIVE",
+    "version": "PROVENANCE_REQUIRED",
+    "created": "PROVENANCE_REQUIRED",
+    "amended_by": "DISPLAY",
+    "notes": "DISPLAY",
+    "history": "DISPLAY",
+    "document_reference": "DISPLAY",
+    "runtime_fact": "FACTUAL_FORBIDDEN"
+  }
+}
