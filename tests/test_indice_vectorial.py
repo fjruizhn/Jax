@@ -122,7 +122,11 @@ async def _envenenar(cur):
     Y basta UNA conversacion: no hace falta vaciar la tabla.
     """
     await _poner(cur, 300, desde=1000, uid=1)
-    await cur.execute(f"DELETE FROM {_PADRE} WHERE user_id = 1")
+    await cur.execute(
+        # marcador-propio: `_PADRE` es una tabla EXCLUSIVA de este archivo -- la
+        # crea `_crear_tabla()` y la borra el fixture al terminar. No es una tabla
+        # compartida de `jax_memory_test`: no puede haber filas de otra sesion.
+        f"DELETE FROM {_PADRE} WHERE user_id = 1")
     await _poner(cur, 25)
 
 
