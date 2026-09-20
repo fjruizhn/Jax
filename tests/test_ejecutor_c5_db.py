@@ -100,18 +100,36 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
             # En una máquina de desarrollo el test pasaba porque la base ya lo traía de
             # antes: es el mismo defecto que ya mordió con auditor_local/model_ref --
             # un test que depende de que OTRO haya sembrado lo que necesita.
+            # Sólo se siembra si FALTA, y sólo se limpia lo que se haya agregado.
+            # La primera versión de esto borraba el binding de 'thot' en el
+            # teardown -- y en CI ese binding lo siembra la migración de
+            # jax-platform: al borrarlo, reventaba OTRO test del mismo job
+            # (_catalog_from_db_test, que espera ver a thot en el catálogo).
+            # Un arnés que deja la base peor de como la encontró no es un arnés.
             await cur.execute(
-                "INSERT IGNORE INTO provider (id, display_name, auth_type, is_local) "
-                "VALUES ('openai', 'OpenAI', 'bearer', 0)")
-            await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'thot'")
-            await cur.execute("DELETE FROM model WHERE model_id = 't-c5db-modelo-nube'")
-            await cur.execute(
-                "INSERT INTO model (provider_id, model_id, source, source_checked_at) "
-                "VALUES ('openai', 't-c5db-modelo-nube', 'manual', UTC_TIMESTAMP())")
-            nube_ref = cur.lastrowid
-            await cur.execute(
-                "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
-                "VALUES ('thot', 'openai', 't-c5db-modelo-nube', %s, 'primary')", (nube_ref,))
+                "SELECT 1 FROM facet_binding WHERE facet_key = 'thot' AND role = 'primary'")
+            nube_sembrada_aca = (await cur.fetchone()) is None
+            if nube_sembrada_aca:
+                await cur.execute(
+                    "INSERT IGNORE INTO provider (id, display_name, auth_type, is_local) "
+                    "VALUES ('openai', 'OpenAI', 'bearer', 0)")
+                await cur.execute(
+                    "INSERT INTO model (provider_id, model_id, source, source_checked_at) "
+                    "VALUES ('openai', 't-c5db-modelo-nube', 'manual', UTC_TIMESTAMP())")
+                nube_ref = cur.lastrowid
+                await cur.execute(
+                    "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
+                    "VALUES ('thot', 'openai', 't-c5db-modelo-nube', %s, 'primary')", (nube_ref,))
+            # La faceta tiene que estar ACTIVA para que resolve_facet la vea
+            # (facet_resolver._query_facet filtra por status='active').  Se guarda el
+            # estado previo y se restaura en el teardown: dejar a 'thot' activa para
+            # el resto del job es la MISMA falta que denuncia el bloque de arriba --
+            # un arnes no deja la base distinta de como la encontro, ni siquiera
+            # cuando el cambio parece inofensivo.
+            await cur.execute("SELECT status FROM facet WHERE `key` = 'thot'")
+            _fila_thot = await cur.fetchone()
+            status_thot_previo = _fila_thot[0] if _fila_thot else None
+            await cur.execute("UPDATE facet SET status = 'active' WHERE `key` = 'thot'")
         await conn.commit()
     try:
         return await _con_inventario(accion)
@@ -121,8 +139,13 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
                 await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
                 await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
                 await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
-                await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'thot'")
-                await cur.execute("DELETE FROM model WHERE model_id = 't-c5db-modelo-nube'")
+                if nube_sembrada_aca:
+                    await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'thot' "
+                                      "AND model_id = 't-c5db-modelo-nube'")
+                    await cur.execute("DELETE FROM model WHERE model_id = 't-c5db-modelo-nube'")
+                if status_thot_previo is not None and status_thot_previo != 'active':
+                    await cur.execute("UPDATE facet SET status = %s WHERE `key` = 'thot'",
+                                      (status_thot_previo,))
             await conn.commit()
 
 
