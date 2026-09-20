@@ -572,6 +572,7 @@ jobs:
           PYTHONPATH=. python -m pytest -v
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
+          tests/test_indice_vectorial.py
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -580,7 +581,8 @@ jobs:
       - run: |
           PYTHONPATH=. python -m pytest -q \
             tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py \
-            tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py 2>&1 | tee /tmp/out
+            tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py \
+            tests/test_indice_vectorial.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
           # (el scope copiado al mensaje, el centinela de que el scope de una
           # conversacion sigue siendo inmutable, el plan sin JOIN que si usa el
@@ -593,8 +595,17 @@ jobs:
           # 20 -> 23 el mismo dia, al retirar la columna vieja `embedding`:
           #   test_migrar_embeddings_io.py (+3) -- `retirar` se niega con la columna
           #   activa, se niega con la columna indexada, y borra una sin indice ni uso.
-          grep -qE "^23 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 23 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 23 -> 30 el 2026-09-20: test_indice_vectorial.py (+7) -- el centinela
+          #   del indice vectorial. Detecta que el indice MIENTE comparando su
+          #   conteo contra `IGNORE INDEX`, porque la ceguera medida fue PARCIAL
+          #   (1 de 10, no 0) y un detector que solo mire el vacio da verde con
+          #   el indice roto. Incluye el centinela de la ceguera parcial, el de
+          #   que una tabla sana no se reporta (una alarma que suena siempre se
+          #   apaga), y el de que la reparacion NO degrada la definicion del
+          #   indice -- recrearlo sin `DISTANCE='cosine'` y `M='16'` lo deja con
+          #   otra distancia y otro M, dando resultados distintos sin un error.
+          grep -qE "^30 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 30 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
