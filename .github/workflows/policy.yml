@@ -923,6 +923,21 @@ jobs:
       # archivo es la fuente única; tests/test_requirements_completos.py falla si
       # un import de terceros no está fijado ahí o si este job deja de usarlo.
       - run: pip install -r requirements.txt pytest pytest-asyncio
+      - name: Identity Foundation Shadow (sin DB)
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: >-
+          python -B -m pytest -v
+          tests/policy/test_bootstrap_root.py
+          tests/policy/test_canonical_json.py
+          tests/policy/test_legacy_identity_comparison.py
+          tests/policy/test_normative_projection.py
+          tests/policy/test_policy_corpus_hash.py
+          tests/policy/test_shadow_manifest.py
+          tests/policy/test_strict_yaml.py
+          --confcutdir=tests/policy
+          -p no:cacheprovider
+          --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
