@@ -49,6 +49,7 @@ def _correr(codigo: str, **entorno: str) -> subprocess.CompletedProcess:
     env.pop("JAX_DB_HOST", None)
     env.pop("JAX_DB_NAME", None)
     env.pop("JAX_TEST_DB_SUFIJO", None)
+    env.pop("CI", None)
     # las_manos/ también: los módulos de test importan `interruptor` por su
     # nombre corto, como corren en producción (igual que el CI).
     env["PYTHONPATH"] = f"{RAIZ}:{RAIZ / 'las_manos'}"
@@ -81,10 +82,49 @@ def test_el_sufijo_manda_en_la_base_que_usan_los_tests():
     assert resuelta != BASE_COMPARTIDA
 
 
-def test_sin_sufijo_la_base_sigue_siendo_la_compartida():
-    """Compatibilidad hacia atrás DELIBERADA: el CI no exporta sufijo y no
-    tiene que cambiar, y las ramas abiertas no se rompen."""
+def test_sin_sufijo_fuera_de_ci_la_base_es_propia_y_no_la_compartida():
+    """Decisión de Fernando, 2026-09-20. El choque medido ese día fue
+    exactamente este default: dos worktrees sin `JAX_TEST_DB_SUFIJO` puesto a
+    mano compartían `jax_memory_test` y se pisaron de verdad (filas en NULL,
+    un test borrando la fila de otro). Fuera de CI, el aislamiento pasa a
+    ser el comportamiento por defecto -- nadie tiene que acordarse de
+    exportar nada."""
     r = _correr(CODIGO_QUE_RESUELVE_LA_BASE)
+    assert r.returncode == 0, r.stderr
+    resuelta = r.stdout.strip().splitlines()[-1]
+    assert resuelta != BASE_COMPARTIDA, (
+        f"sin JAX_TEST_DB_SUFIJO y fuera de CI, la suite resolvió {resuelta!r}: "
+        f"sigue siendo la base compartida, que es el defecto que colisionó "
+        f"el 2026-09-20."
+    )
+    assert resuelta.startswith(f"{BASE_COMPARTIDA}_")
+
+
+def test_dos_procesos_sin_sufijo_se_aislan_entre_si():
+    """El control central del choque del 2026-09-20: DOS procesos sin sufijo,
+    cada uno resuelve una base DISTINTA. Antes de este arreglo los dos daban
+    `jax_memory_test` -- la colisión medida ese mismo día entre worktrees."""
+    r1 = _correr(CODIGO_QUE_RESUELVE_LA_BASE)
+    r2 = _correr(CODIGO_QUE_RESUELVE_LA_BASE)
+    assert r1.returncode == 0, r1.stderr
+    assert r2.returncode == 0, r2.stderr
+    base1 = r1.stdout.strip().splitlines()[-1]
+    base2 = r2.stdout.strip().splitlines()[-1]
+    assert base1 != base2, (
+        f"dos procesos sin sufijo resolvieron la MISMA base ({base1!r}): "
+        f"eso es la colisión, no el aislamiento."
+    )
+
+
+def test_sin_sufijo_en_ci_sigue_siendo_la_compartida():
+    """Compatibilidad hacia atrás DELIBERADA para CI: cada job de
+    `.github/workflows/policy.yml` que toca la base ya corre contra su propio
+    contenedor MariaDB efímero (`services: mariadb:` por job) -- no hay
+    sesiones concurrentes que se puedan pisar ahí, y sumar un sufijo metería
+    un clonado de esquema de más en cada corrida sin comprar nada. `CI` es la
+    variable que exportan GitHub Actions, GitLab CI y CircleCI por
+    convención -- un hecho verificable, no una adivinanza."""
+    r = _correr(CODIGO_QUE_RESUELVE_LA_BASE, CI="true")
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip().splitlines()[-1] == BASE_COMPARTIDA
 
@@ -249,3 +289,61 @@ def test_ningun_test_vuelve_a_hardcodear_el_nombre_de_la_base():
         "usar `exigir_base_de_test()` / `fijar_base_de_test()` de base_de_test.py\n"
         + "\n".join(hallazgos)
     )
+
+
+# ---------------------------------------------------------------------------
+# El borrado automático al salir (2026-09-20): el default de arriba crea una
+# base nueva en CADA corrida local sin sufijo -- sin esto se acumulan más
+# rápido de lo que se acumulaban antes, cuando exportar el sufijo era un paso
+# que alguien pedía a propósito.
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+
+from base_de_test import (  # noqa: E402
+    _borrar_al_salir,
+    _dropear_base_de_sesion,
+    _sufijo_automatico_de_sesion,
+)
+
+
+def test_el_borrado_al_salir_se_niega_a_tocar_produccion_y_la_compartida(monkeypatch):
+    """El candado: intenta borrar `jax_memory` (producción), la compartida
+    pelada, y un nombre cualquiera que no lleve el prefijo de test. Ninguno
+    de los tres llega siquiera a abrir una conexión -- `aiomysql.connect`
+    explota el test si algo lo intenta."""
+    import aiomysql
+
+    def _connect_prohibido(*_a, **_k):
+        raise AssertionError("intentó conectar para borrar algo que no es una base de test")
+
+    monkeypatch.setattr(aiomysql, "connect", _connect_prohibido)
+
+    for nombre in (BASE_DE_PRODUCCION, BASE_COMPARTIDA, "otra_cosa_cualquiera"):
+        asyncio.run(_dropear_base_de_sesion(nombre))  # no debe lanzar ni conectar
+
+
+def test_el_borrado_al_salir_no_hace_nada_sin_jax_db_host(monkeypatch):
+    monkeypatch.delenv("JAX_DB_HOST", raising=False)
+
+    def _run_prohibido(*_a, **_k):
+        raise AssertionError("no debería intentar correr nada sin JAX_DB_HOST")
+
+    monkeypatch.setattr(asyncio, "run", _run_prohibido)
+    _borrar_al_salir(f"{BASE_COMPARTIDA}_lo_que_sea")  # no debe lanzar
+
+
+def test_el_sufijo_automatico_se_registra_para_borrarse_al_salir(monkeypatch):
+    """Un sufijo AUTO-generado queda registrado en `atexit` para borrarse.
+    Uno EXPLÍCITO (pasado a mano) NO se registra -- alguien pudo querer
+    reusarlo entre corridas."""
+    registrados = []
+    monkeypatch.setattr(
+        "base_de_test.atexit.register",
+        lambda fn, *args: registrados.append((fn, args)),
+    )
+    sufijo = _sufijo_automatico_de_sesion()
+    assert len(registrados) == 1
+    fn, args = registrados[0]
+    assert fn is _borrar_al_salir
+    assert args == (f"{BASE_COMPARTIDA}_{sufijo}",)

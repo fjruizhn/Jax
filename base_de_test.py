@@ -9,12 +9,33 @@ peor tipo de rojo, porque enseña a reintentar hasta que pase.
 
 **La decisión** (Fernando, 2026-09-17). Cada sesión usa su propia base:
 `JAX_TEST_DB_SUFIJO=<sufijo>` y la suite corre contra
-`jax_memory_test_<sufijo>`. Sin la variable, la base sigue siendo
-`jax_memory_test` pelada, exactamente como hoy: el CI no cambia y las ramas
-abiertas no se rompen.
+`jax_memory_test_<sufijo>`.
 
-**Por qué un error y no un fallback.** Un sufijo inválido es un error explícito
-al arrancar, nunca una caída silenciosa a la base compartida: caer a la
+**El mecanismo existía y colisionó igual** (medido 2026-09-20, dos worktrees
+corriendo la suite a la vez, `tests/test_jacobs_reaper_cas_db.py`,
+`test_memory_vector_zero_io.py` y `test_migrar_embeddings_io.py` variando
+entre corridas). La causa: `JAX_TEST_DB_SUFIJO` era **opt-in** -- sin la
+variable puesta a mano, la base seguía siendo `jax_memory_test` pelada y
+CUALQUIER sesión que no se acordara de exportarla caía ahí, junto con
+cualquier otra que tampoco se acordara. Un mecanismo de aislamiento que hay
+que recordar activar no protege a la sesión que lo olvida.
+
+**La decisión** (Fernando, 2026-09-20). El aislamiento pasa a ser el
+comportamiento por defecto. Sin `JAX_TEST_DB_SUFIJO` puesto, cada proceso
+genera uno propio (`auto<pid><random>`) la primera vez que resuelve el
+nombre, lo fija en `os.environ` para que el resto del proceso -- y los
+subprocesos que heredan el entorno -- vean el mismo valor, y sigue de ahí en
+más como cualquier sesión con sufijo explícito. La única excepción es CI: los
+jobs de `.github/workflows/policy.yml` que tocan la base ya corren cada uno
+contra su propio contenedor MariaDB efímero (no hay sesiones concurrentes que
+se puedan pisar ahí), así que agregar un sufijo ahí sólo metería un clonado
+de esquema de más sin comprar nada. Se detecta con `CI`, la variable que
+exportan GitHub Actions, GitLab CI y CircleCI por convención -- un hecho
+verificable, no una adivinanza.
+
+**Por qué un error y no un fallback.** Un sufijo inválido (puesto a mano, con
+un valor que no matchea `SUFIJO_VALIDO`) sigue siendo un error explícito al
+arrancar, nunca una caída silenciosa a la base compartida: caer a la
 compartida en silencio ES el defecto que esto arregla. Misma razón por la que
 `_verificar_que_no_es_produccion()` existe aunque el nombre se arme con un
 f-string que no puede dar `jax_memory`: el control no está para el camino que
@@ -25,8 +46,10 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import atexit
 import os
 import re
+import secrets
 
 #: La base compartida de siempre. Sin sufijo, la suite sigue corriendo acá.
 BASE_COMPARTIDA = "jax_memory_test"
@@ -91,11 +114,94 @@ def es_base_de_test(nombre: str | None) -> bool:
     return bool(SUFIJO_VALIDO.match(nombre[len(prefijo):]))
 
 
+def _en_ci() -> bool:
+    """¿Esta corrida es un job de CI? `CI` es la variable que exportan
+    GitHub Actions, GitLab CI y CircleCI por convención propia -- se lee
+    tal cual, no se inventa. Cada job de `.github/workflows/policy.yml` que
+    toca la base corre contra su propio contenedor MariaDB efímero (ver
+    `services: mariadb:` de cada job): no hay sesiones concurrentes que se
+    puedan pisar ahí, así que el default automático de acá abajo no hace
+    falta y sólo sumaría un clonado de esquema de más en cada corrida."""
+    return os.environ.get("CI", "").strip().lower() in ("1", "true", "yes")
+
+
+def _sufijo_automatico_de_sesion() -> str:
+    """Un sufijo propio de ESTE proceso, para la sesión que no exportó
+    `JAX_TEST_DB_SUFIJO` a mano. `os.getpid()` más unos bytes al azar: el PID
+    solo no alcanza (se reutiliza entre procesos que ya terminaron), y el
+    azar solo pierde la pista de qué proceso la creó al mirar el nombre en
+    `SHOW DATABASES`.
+
+    Antes de este mecanismo, crear una base con sufijo era un paso que
+    alguien pedía a propósito (`export JAX_TEST_DB_SUFIJO=...`); ahora pasa
+    en CADA corrida local que no lo pida. Sin limpiar, eso multiplica el
+    ritmo al que se acumulan bases huérfanas -- DIVERGENCIA DELIBERADA con
+    jax-platform: allá no hay un "ya había una decena en hall9000", porque
+    esa cuenta puntual del 2026-09-20 es de ESTA base física, que comparten
+    los dos repos; repetirla en la copia sería inventar una segunda
+    medición que nadie hizo. Por eso acá mismo se registra el borrado al
+    salir del proceso -- ver `_borrar_al_salir()`. Una base con sufijo
+    EXPLÍCITO (pasado a mano) NO se registra: alguien pudo poner ese sufijo
+    a propósito para reusarla entre corridas, y borrarla forzaría un
+    clonado de esquema de más en cada pytest suelto."""
+    sufijo = f"auto{os.getpid()}{secrets.token_hex(4)}"
+    atexit.register(_borrar_al_salir, f"{BASE_COMPARTIDA}_{sufijo}")
+    return sufijo
+
+
+def _borrar_al_salir(nombre: str) -> None:
+    """Registrado en `atexit` SOLO para una base auto-generada (nunca para
+    una pasada por `JAX_TEST_DB_SUFIJO` a mano). Sin `JAX_DB_HOST` no hay
+    MariaDB a mano y no hay nada que borrar -- mismo criterio que
+    `asegurar_base_de_test()`. Cualquier error (red caída, timeout) queda
+    silenciado a propósito: es un best-effort de limpieza al cerrar, no una
+    condición de salida del proceso; lo que esto no llegue a borrar lo
+    barre después `scripts/limpiar_bases_de_test.py`."""
+    if not os.environ.get("JAX_DB_HOST"):
+        return
+    import asyncio
+    try:
+        asyncio.run(_dropear_base_de_sesion(nombre))
+    except Exception:  # fail-soft: best-effort al salir del proceso, no una condición de salida; scripts/limpiar_bases_de_test.py barre lo que quede
+        pass
+
+
+async def _dropear_base_de_sesion(nombre: str) -> None:
+    """El DROP de verdad. El candado es el mismo `es_base_de_test()` que usa
+    el resto del módulo, MÁS la exclusión explícita de `BASE_COMPARTIDA`:
+    esta función nunca borra la base pelada ni nada que no lleve el prefijo
+    de test. `tests/test_base_por_sesion.py` lo ejercita intentando borrar
+    `jax_memory` y `jax_memory_test` de verdad."""
+    if nombre == BASE_COMPARTIDA or not es_base_de_test(nombre):
+        return
+    import aiomysql
+
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
+    conn = await aiomysql.connect(
+        db=BASE_PLANTILLA, autocommit=True,
+        connect_timeout=db_connect_timeout_seconds(),
+        **_parametros_de_conexion())
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(f"DROP DATABASE IF EXISTS `{nombre}`")
+    finally:
+        conn.close()
+
+
 def nombre_base_de_test(sufijo: str | None = None) -> str:
     """El nombre de la base de tests de esta sesión.
 
-    Con `JAX_TEST_DB_SUFIJO` puesto: `jax_memory_test_<sufijo>`.
-    Sin la variable: `jax_memory_test`, como siempre.
+    Con `JAX_TEST_DB_SUFIJO` puesto (a mano, o ya fijado por una llamada
+    anterior de este mismo proceso): `jax_memory_test_<sufijo>`.
+
+    Sin la variable: en CI, `jax_memory_test` pelada, como siempre (cada job
+    ya está aislado en su propio contenedor). Fuera de CI -- el caso de
+    cualquier sesión o worktree local -- se genera un sufijo propio del
+    proceso y se fija en `JAX_TEST_DB_SUFIJO` para que el resto de esta
+    sesión (y los subprocesos que hereden el entorno) resuelvan la MISMA
+    base. Decisión de Fernando, 2026-09-20: el aislamiento es el default,
+    nadie tiene que acordarse de exportar nada.
 
     Un sufijo presente pero inválido (vacío, con mayúsculas, con guiones,
     con punto y coma, demasiado largo) es `BaseDeTestInvalida`. Un sufijo
@@ -106,7 +212,10 @@ def nombre_base_de_test(sufijo: str | None = None) -> str:
     if sufijo is None:
         sufijo = os.environ.get(VARIABLE_DEL_SUFIJO)
     if sufijo is None:
-        return _verificar_que_no_es_produccion(BASE_COMPARTIDA)
+        if _en_ci():
+            return _verificar_que_no_es_produccion(BASE_COMPARTIDA)
+        sufijo = _sufijo_automatico_de_sesion()
+        os.environ[VARIABLE_DEL_SUFIJO] = sufijo
     if not SUFIJO_VALIDO.match(sufijo):
         raise BaseDeTestInvalida(
             f"{VARIABLE_DEL_SUFIJO}={sufijo!r} no sirve como sufijo de base: "
@@ -130,6 +239,9 @@ def fijar_base_de_test() -> str:
     Es el reemplazo exacto de `os.environ["JAX_DB_NAME"] = "jax_memory_test"`
     que cada archivo de test escribía a mano: mismo comportamiento (override
     incondicional), pero respetando el sufijo de la sesión.
+    DIVERGENCIA DELIBERADA con jax-platform: allá el reemplazo es de UN
+    solo punto, `tests/conftest.py`; acá eran ~20 archivos, historia de por
+    qué existe esta función (no una diferencia de comportamiento).
     """
     nombre = nombre_base_de_test()
     os.environ[VARIABLE_DE_LA_BASE] = nombre
@@ -143,6 +255,9 @@ def exigir_base_de_test() -> str:
     Es el reemplazo del par
     `if _existing and _existing != "jax_memory_test": raise` + `setdefault`,
     que protege del `set -a; . <(sudo -n cat /etc/jax/.env)` (ahí `JAX_DB_NAME=jax_memory`).
+    DIVERGENCIA DELIBERADA con jax-platform: allá nunca existió ese guard
+    viejo -- la protección es nueva, no un reemplazo -- así que el docstring
+    no nombra un código anterior que no existió.
     """
     actual = os.environ.get(VARIABLE_DE_LA_BASE)
     if actual:
@@ -200,7 +315,9 @@ def _parametros_de_conexion() -> dict:
     tripwire `tests/test_aiomysql_connect_timeout_tripwire.py` lee el AST y
     exige el kwarg ESCRITO en la llamada, no escondido en un `**dict` --
     justamente para que no se pierda en una indirección. Me lo encontró a mí
-    el 2026-09-17."""
+    el 2026-09-17. DIVERGENCIA DELIBERADA con jax-platform: ese tripwire
+    puntual sólo existe acá; el criterio del kwarg escrito es el mismo en
+    los dos repos."""
     return {
         "host": os.environ.get("JAX_DB_HOST", "127.0.0.1"),
         "port": int(os.environ.get("JAX_DB_PORT", "3306")),

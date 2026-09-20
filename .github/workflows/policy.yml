@@ -2810,8 +2810,29 @@ jobs:
           # ANTES de este arreglo (revertido a mano a este mismo commit,
           # corrido, restaurado -- no derivado). Delta de esta ronda: +4
           # sobre 2265 (el +1 de B1 sin commit propio, y los +3 nuevos).
-          grep -qE "^2312 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2312 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2246 -> 2251 el 2026-09-20 (aislar la base de tests, causa raiz): +5 en
+          #   tests/test_base_por_sesion.py. El mecanismo (JAX_TEST_DB_SUFIJO) YA
+          #   existia desde el 2026-09-17 pero era opt-in -- sin la variable puesta
+          #   a mano la base seguia siendo jax_memory_test pelada, y dos worktrees
+          #   sin sufijo se pisaban igual (medido: filas en NULL, un test borrando
+          #   la fila de otro). El aislamiento pasa a ser el default: sin sufijo Y
+          #   fuera de CI se genera uno propio por proceso (+2, reemplaza al test
+          #   viejo que afirmaba lo contrario). +1 confirma que dos procesos sin
+          #   sufijo resuelven bases DISTINTAS (el control central del choque). +1
+          #   confirma que CI (variable CI=true, la que exportan los runners) sigue
+          #   con la compartida sin cambios -- cada job ya esta aislado en su propio
+          #   contenedor MariaDB efimero. +3 sobre el candado del borrado automatico
+          #   al salir (atexit): se niega a tocar jax_memory/jax_memory_test/
+          #   cualquier nombre sin el prefijo de test, sin JAX_DB_HOST no hace nada,
+          #   y un sufijo AUTO-generado (no uno explicito) es el unico que se
+          #   registra para borrarse. tests/test_facet_health_tabla_exclusiva.py
+          #   ajusta su subproceso con CI=true (fija JAX_DB_NAME a mano y necesita
+          #   que el conftest del hijo lo respete tal cual) sin sumar tests. Delta
+          #   medido en el runner local con ESTE MISMO comando: 2261 -> 2266 (mismo
+          #   2261 de la nota de arriba, confirmando que la base no se movio). Si el
+          #   runner da otro numero, manda el runner.
+          grep -qE "^2317 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2317 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
