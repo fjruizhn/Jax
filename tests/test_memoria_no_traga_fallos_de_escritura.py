@@ -107,6 +107,10 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(resultado)
 
     async def test_si_supersede_falla_se_revierte_y_no_se_afirma_la_correccion(self):
+        """user_id=990001 EXPLICITO: sin el, el candado de la Task 2 Step 4
+        (feat/memoria-admin, "sin user_id no se supersede") ni siquiera
+        llamaria a supersede_fact, y este test dejaria de probar lo que dice
+        probar -- la falla TECNICA de supersede_fact, no la falta de autor."""
         m = dbmod.MemoryDB()
         m.pool = _pool_falso()
         m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
@@ -116,7 +120,8 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         m.delete_fact = mock.AsyncMock(return_value=True)
         with self.assertLogs(dbmod.logger, level="ERROR") as capturado:
             resultado = await m.save_fact.__wrapped__(
-                m, "Fernando vive en San Pedro Sula", "user", is_correction=True)
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=990001)
         self.assertIsNone(resultado)
         m.delete_fact.assert_awaited_once()
         logs = "\n".join(capturado.output)
@@ -124,6 +129,7 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("se revirtio", logs)
 
     async def test_si_tampoco_se_puede_revertir_se_grita(self):
+        """user_id explicito, mismo motivo que el test anterior."""
         m = dbmod.MemoryDB()
         m.pool = _pool_falso()
         m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
@@ -133,9 +139,127 @@ class CorreccionTest(unittest.IsolatedAsyncioTestCase):
         m.delete_fact = mock.AsyncMock(return_value=None)
         with self.assertLogs(dbmod.logger, level="CRITICAL") as capturado:
             resultado = await m.save_fact.__wrapped__(
-                m, "Fernando vive en San Pedro Sula", "user", is_correction=True)
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=990001)
         self.assertIsNone(resultado)
         self.assertIn("dos hechos contradictorios activos", "\n".join(capturado.output))
+
+    async def test_sin_user_id_no_se_supersede(self):
+        """Task 2 Step 4 del plan 2026-09-20-memoria-admin: "si no se sabe
+        quien (user_id None o 0), NO se supersede". Ni siquiera se INTENTA
+        -- no es que supersede_fact falle, es que no se llama. El fact nuevo
+        queda como fact nuevo (igual que cuando confirmado=False) y el viejo
+        sigue activo: dos hechos sin resolver es mejor que un supersede con
+        un autor inventado."""
+        m = dbmod.MemoryDB()
+        m.pool = _pool_falso()
+        m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
+        m._find_nearest_fact = mock.AsyncMock(
+            return_value={"id": 7, "fact_text": "viejo", "distancia": 0.05})
+        m.supersede_fact = mock.AsyncMock()
+        with self.assertLogs(dbmod.logger, level="WARNING") as capturado:
+            resultado = await m.save_fact.__wrapped__(
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=None)
+        self.assertTrue(resultado, "sin user_id la insercion del fact nuevo deberia seguir")
+        m.supersede_fact.assert_not_awaited()
+        self.assertIn("no hay user_id", "\n".join(capturado.output))
+
+    async def test_user_id_cero_tampoco_supersede(self):
+        """0 no es un id de usuario valido: cuenta como 'no se sabe', igual
+        que None. `if not user_id` en save_fact lo cubre a proposito."""
+        m = dbmod.MemoryDB()
+        m.pool = _pool_falso()
+        m.get_embedding = mock.AsyncMock(return_value=[0.1, 0.2])
+        m._find_nearest_fact = mock.AsyncMock(
+            return_value={"id": 7, "fact_text": "viejo", "distancia": 0.05})
+        m.supersede_fact = mock.AsyncMock()
+        with self.assertLogs(dbmod.logger, level="WARNING"):
+            resultado = await m.save_fact.__wrapped__(
+                m, "Fernando vive en San Pedro Sula", "user",
+                is_correction=True, user_id=0)
+        self.assertTrue(resultado)
+        m.supersede_fact.assert_not_awaited()
+
+
+class MigracionCompensatoriaTest(unittest.IsolatedAsyncioTestCase):
+    """m2 (auditoria adversarial 2026-09-20 sobre feat/memoria-admin, un
+    cuarto defecto de la MISMA familia que da titulo a este archivo -- el
+    migrador no miraba lo que CADA paso devolvia, todo vivia bajo un unico
+    try/except de la funcion entera).
+
+    `jax/memory/migrations.py::ensure_schema()` agrega `facts.verified_by`
+    con `AFTER verified_at` -- pero no garantiza que `verified_at` exista
+    (una base mas vieja que esa columna no la tiene). Ese ALTER tira ERROR
+    1054 (columna desconocida), y como los tres bucles (columnas, backfill,
+    indices) vivian bajo un solo try/except, esa excepcion abortaba TAMBIEN
+    la creacion de indices y el backfill de `messages`, que no tienen nada
+    que ver con `verified_at`.
+
+    Este test simula el fallo puntual con un cursor mockeado (sin DB real,
+    a proposito) y comprueba que los pasos SIGUIENTES se intentan igual."""
+
+    async def test_un_fallo_puntual_no_aborta_el_resto_de_la_migracion(self):
+        from jax.memory import migrations
+
+        ejecutados: list[str] = []
+
+        class CursorFalso:
+            def __init__(self):
+                self.rowcount = 0
+
+            async def execute(self, sql, args=None):
+                ejecutados.append(sql)
+                if "ADD COLUMN verified_by" in sql:
+                    raise Exception(
+                        "(1054, \"Unknown column 'verified_at' in 'facts'\")")
+                return 0
+
+            async def fetchone(self):
+                # Todo "existe?" da 0: fuerza que CADA columna/indice se
+                # intente agregar/crear, uno por uno.
+                return (0,)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class ConnFalso:
+            def cursor(self):
+                return CursorFalso()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        class PoolFalso:
+            def acquire(self):
+                return ConnFalso()
+
+        ok = await migrations.ensure_schema(PoolFalso())
+
+        self.assertFalse(ok, "un paso fallido tiene que dejar ensure_schema() en False")
+        unidos = "\n".join(ejecutados)
+        self.assertIn(
+            "idx_msg_scope", unidos,
+            "el indice de messages ni se intento -- la migracion aborto entera "
+            "por el fallo de verified_by")
+        self.assertIn(
+            "idx_facts_revision", unidos,
+            "el indice de facts ni se intento -- la migracion aborto entera "
+            "por el fallo de verified_by")
+        self.assertIn(
+            "UPDATE messages", unidos,
+            "el backfill ni se intento -- la migracion aborto entera por el "
+            "fallo de verified_by")
+        self.assertIn(
+            "ADD COLUMN superseded_by_user", unidos,
+            "la columna SIGUIENTE a la que fallo ni se intento -- un fallo "
+            "puntual no puede saltarse el resto de las columnas")
 
 
 if __name__ == "__main__":

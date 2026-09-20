@@ -98,6 +98,8 @@ CREATE TABLE `facts` (
   `source_facet` varchar(20) DEFAULT NULL,
   `is_verified` tinyint(1) DEFAULT 0,
   `verified_at` timestamp NULL DEFAULT NULL,
+  `verified_by` int(11) DEFAULT NULL,
+  `superseded_by_user` int(11) DEFAULT NULL,
   `expires_at` timestamp NULL DEFAULT NULL,
   `created_at` timestamp NULL DEFAULT current_timestamp(),
   `updated_at` timestamp NULL DEFAULT current_timestamp() ON UPDATE current_timestamp(),
@@ -117,6 +119,7 @@ CREATE TABLE `facts` (
   KEY `idx_facts_user` (`user_id`),
   KEY `idx_facts_project` (`project_id`),
   KEY `idx_facts_active` (`superseded_by`),
+  KEY `idx_facts_revision` (`is_verified`,`expires_at`,`created_at`),
   FULLTEXT KEY `ft_fact_text` (`fact_text`),
   VECTOR KEY `idx_embedding_bge_m3` (`embedding_bge_m3`) `DISTANCE`='cosine',
   CONSTRAINT `facts_ibfk_1` FOREIGN KEY (`source_message_id`) REFERENCES `messages` (`id`) ON DELETE SET NULL

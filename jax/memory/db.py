@@ -777,17 +777,31 @@ class MemoryDB:
 
     async def _find_nearest_fact(self, embedding: list, user_id: Optional[int],
                                  project_id: Optional[int]) -> Optional[dict]:
-        """Busca el fact ACTIVO (superseded_by IS NULL) mas cercano al
-        embedding dado, scoped por user_id/project_id igual que
+        """Busca el fact ACTIVO (superseded_by IS NULL y sin vencer) mas
+        cercano al embedding dado, scoped por user_id/project_id igual que
         search_similar_messages. None si no hay pool, no hay embedding, o
         no hay ningun fact con embedding real en ese scope (fail-safe: el
         caller inserta). Los facts con vector cero no son candidatos: su
         distancia es NaN y puede llegar como 0.0, que add_fact leeria como un
-        duplicado exacto (ver _nonzero_embedding_sql)."""
+        duplicado exacto (ver _nonzero_embedding_sql).
+
+        `expires_at` se filtra ACA (arreglado 2026-09-20, auditoria
+        adversarial): un hecho vencido no puede actuar como candidato de
+        dedup. Sin este filtro, caducar un hecho lo vuelve un agujero
+        permanente -- semanas despues el extractor vuelve a producir el
+        MISMO hecho, `save_fact` lo encuentra como "duplicado" del vencido,
+        y el hecho nuevo NUNCA se inserta: se pierde en silencio y para
+        siempre (el vencido tampoco pesa en get_facts). Ver el criterio
+        completo de los cinco caminos de lectura de `facts` en
+        tests/test_memoria_caducidad_no_es_agujero.py."""
         if not self.pool or _is_degenerate_embedding(embedding):
             return None
         vec_str = json.dumps(embedding)
-        clauses = ["superseded_by IS NULL", _nonzero_embedding_sql(_col())]
+        clauses = [
+            "superseded_by IS NULL",
+            "(expires_at IS NULL OR expires_at > NOW())",
+            _nonzero_embedding_sql(_col()),
+        ]
         params: list = []
         scope = []
         if project_id is not None:
@@ -820,19 +834,37 @@ class MemoryDB:
             raise BusquedaDeFactFallida(str(e)) from e
 
     @db_error_handler
-    async def supersede_fact(self, old_fact_id: int, new_fact_id: int) -> Optional[bool]:
-        """Marca old_fact_id como reemplazado por new_fact_id. No borra nada:
-        la historia de una correccion queda reconstruible."""
+    async def supersede_fact(self, old_fact_id: int, new_fact_id: int,
+                             superseded_by_user: int) -> Optional[bool]:
+        """Marca old_fact_id como reemplazado por new_fact_id, y registra quien
+        lo decidio. No borra nada: la historia de una correccion queda
+        reconstruible.
+
+        OJO: este metodo tiene DOS llamadores con naturaleza distinta. El
+        automatico (`save_fact`, cuando detecta un casi-duplicado) y el humano
+        (la pantalla de Memoria). Para el automatico, el `superseded_by_user`
+        es el id del usuario cuya sesion produjo el hecho nuevo -- nunca 0 ni
+        None: si no se sabe quien, no se supersede (ver save_fact).
+
+        EL RETORNO (arreglado 2026-09-20, auditoria adversarial M3): antes
+        devolvia `True` SIN mirar cuantas filas cambio el UPDATE. Si
+        `old_fact_id` no existe (o desaparecio entre que `save_fact` lo
+        encontro como candidato y este UPDATE), `affected` es 0 y el metodo
+        devolvia `True` igual -- el control que `save_fact` hace sobre este
+        resultado (`elif await self.supersede_fact(...)`) no podia fallar
+        nunca por esta via, y el log afirmaba una correccion que no ocurrio:
+        exactamente el defecto que el arreglo de 2026-09-16 (ver el comentario
+        de `save_fact` mas abajo) dijo haber cerrado."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    "UPDATE facts SET superseded_by = %s, superseded_at = NOW() "
-                    "WHERE id = %s",
-                    (new_fact_id, old_fact_id),
+                affected = await cur.execute(
+                    "UPDATE facts SET superseded_by = %s, superseded_at = NOW(), "
+                    "superseded_by_user = %s WHERE id = %s",
+                    (new_fact_id, superseded_by_user, old_fact_id),
                 )
-        return True
+                return affected > 0
 
     @db_error_handler
     async def save_fact(self, fact_text: str, fact_type: str,
@@ -972,7 +1004,23 @@ class MemoryDB:
                 # segunda mitad no se puede completar, la primera se deshace.
                 # Mejor no guardar la correccion y que el extractor reintente,
                 # que dejar la memoria contradiciendose.
-                if await self.supersede_fact(candidate["id"], fact_id):
+                #
+                # PERO antes de intentarlo: sin user_id no hay a quien
+                # atribuir la correccion (Task 2 Step 4 del plan de memoria-
+                # admin: "si no se sabe quien, no se supersede"). 0 cuenta
+                # como "no se sabe" -- no es un id de usuario valido en este
+                # sistema. El fact nuevo queda como fact NUEVO (igual que
+                # cuando confirmado=False) y el viejo sigue activo: dos
+                # hechos sin resolver es mejor que un supersede con un dueno
+                # inventado.
+                if not user_id:
+                    logger.warning(
+                        "save_fact: fact %d podria corregir al %d (banda=%s) pero "
+                        "no hay user_id conocido -- NO se supersede sin saber "
+                        "quien. Los dos quedan activos.",
+                        fact_id, candidate["id"], band,
+                    )
+                elif await self.supersede_fact(candidate["id"], fact_id, user_id):
                     logger.info(f"save_fact: fact {fact_id} corrige a fact {candidate['id']} "
                                 f"(banda={band})")
                 else:
@@ -1372,7 +1420,8 @@ class MemoryDB:
                         fact_type: Optional[str] = None,
                         limit: int = 20,
                         user_id: Optional[int] = None,
-                        project_id: Optional[int] = None) -> Optional[list]:
+                        project_id: Optional[int] = None,
+                        incluir_vencidos: bool = False) -> Optional[list]:
         """Lista facts ACTIVOS (superseded_by IS NULL — un fact corregido
         nunca vuelve a aparecer aca). Por defecto solo los no verificados
         (a revisar). only_verified=True hace lo opuesto: solo facts que
@@ -1381,6 +1430,9 @@ class MemoryDB:
         Scope de dos niveles opcional (igual que search_similar_messages):
           - project_id NOT NULL -> facts del proyecto; user_id -> facts individuales.
           - ambos None -> sin filtro de scope (retrocompat).
+        incluir_vencidos=False (default) excluye los facts con expires_at
+        vencido (spec §2.4): un fact caducado no se borra, solo deja de
+        pesar en la busqueda/listado normal.
         Devuelve lista de dicts o None si fallo."""
         if not self.pool:
             return None
@@ -1395,6 +1447,11 @@ class MemoryDB:
         if fact_type:
             conditions.append("fact_type = %s")
             params.append(fact_type)
+        # Spec §2.4: un hecho vencido deja de pesar. `expires_at IS NULL` es
+        # "no caduca" y tiene que seguir entrando -- un `expires_at < NOW()` a
+        # secas los dejaria a TODOS afuera, que es el error clasico con NULL.
+        if not incluir_vencidos:
+            conditions.append("(expires_at IS NULL OR expires_at > NOW())")
         # Scope de dos dimensiones (project compartido / individual de user)
         scope_clauses = []
         if project_id is not None:
@@ -1421,9 +1478,17 @@ class MemoryDB:
     @db_error_handler
     async def get_scopes_with_verified_facts(self, min_facts: int = 5) -> Optional[list]:
         """Devuelve los scopes (user_id, project_id) que tienen al menos
-        min_facts facts verificados y activos. Usado por el sintetizador de
-        segundo orden (item #8) para saber sobre que scopes vale la pena
-        correr — nunca sintetiza sobre un scope con pocos facts."""
+        min_facts facts verificados, activos Y VIGENTES. Usado por el
+        sintetizador de segundo orden (item #8) para saber sobre que scopes
+        vale la pena correr — nunca sintetiza sobre un scope con pocos
+        facts.
+
+        `expires_at` se filtra ACA (arreglado 2026-09-20, auditoria
+        adversarial): contar hechos vencidos infla min_facts artificialmente
+        -- el sintetizador correria sobre un scope que el conteo dice que
+        tiene min_facts verificados, y `get_facts`/el prompt real le
+        entregarian MENOS (los vencidos ya no pesan ahi). Mismo criterio
+        que get_facts: un hecho vencido no cuenta como verificado VIGENTE."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
@@ -1431,6 +1496,7 @@ class MemoryDB:
                 await cur.execute(
                     "SELECT user_id, project_id, COUNT(*) AS n_facts FROM facts "
                     "WHERE is_verified = TRUE AND superseded_by IS NULL "
+                    "AND (expires_at IS NULL OR expires_at > NOW()) "
                     "GROUP BY user_id, project_id "
                     "HAVING COUNT(*) >= %s",
                     (min_facts,),
@@ -1438,19 +1504,90 @@ class MemoryDB:
                 return await cur.fetchall()
 
     @db_error_handler
-    async def verify_fact(self, fact_id: int) -> Optional[bool]:
-        """Marca un fact como verificado. confidence NO se toca (es ortogonal:
-        confidence = certeza del extractor, is_verified = validacion de Fernando)."""
+    async def verify_fact(self, fact_id: int, verified_by: int) -> Optional[bool]:
+        """Marca un fact como verificado, con QUIEN y cuando. `confidence` NO se
+        toca (es ortogonal: confidence = certeza del extractor, is_verified =
+        validacion de una persona).
+
+        `verified_by` NO tiene default a proposito: un aprobador implicito es
+        un aprobador inventado, y el punto de esta columna es que la
+        aprobacion tenga dueno (spec 2026-09-18-memoria-admin §2.2).
+
+        EL RETORNO, arreglado 2026-09-20 (auditoria adversarial de esta
+        rama). Antes se devolvia `affected > 0`, y aiomysql cuenta filas
+        CAMBIADAS, no COINCIDENTES (`connect()` no pasa CLIENT.FOUND_ROWS al
+        pool). Reafirmar una aprobacion YA hecha por el mismo `verified_by`
+        no cambia ninguna columna: `affected` daba 0 y el metodo devolvia
+        False, indistinguible de "el hecho no existe" -- exactamente el
+        defecto que esta rama vino a arreglar, reencarnado en su propio
+        metodo (jax-platform#hechos/aprobar hace `if await
+        memoria.verify_fact(...)`).
+
+        Se resuelve con un SELECT de existencia en la MISMA conexion, en vez
+        de habilitar CLIENT.FOUND_ROWS en el pool: ese flag es GLOBAL a la
+        conexion y cambiaria el contrato de `rowcount`/`execute()` de
+        cualquier otro escritor que comparte el pool (mark_action_item_done,
+        touch_person_mentions, ...) sin que esta ronda los haya auditado a
+        todos. Asi, True/False dice si el hecho EXISTE (la operacion se
+        aplico, sea o no un no-op), que es lo que el llamador necesita -- no
+        si el UPDATE cambio bytes en disco.
+
+        EL ORDEN (arreglado 2026-09-20, auditoria adversarial m1): el UPDATE
+        va PRIMERO y el SELECT de existencia solo corre si `affected == 0`.
+        Antes era al reves (SELECT y despues UPDATE) -- misma conexion, pero
+        con `autocommit=True` eso NO es una transaccion: si otra sesion
+        borraba la fila justo entre el SELECT y el UPDATE, el metodo
+        devolvia True habiendo cambiado 0 filas. Con el UPDATE primero, un
+        `affected > 0` es verdad DEFINITIVA (la fila existia en el momento
+        exacto en que se escribio), y solo el caso ambiguo (0 filas
+        cambiadas, que puede ser "no existe" o "no-op idempotente") necesita
+        el SELECT de desempate. Ahorra ademas un round-trip en el camino
+        comun (la fila casi siempre existe)."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 affected = await cur.execute(
-                    "UPDATE facts SET is_verified = TRUE, verified_at = NOW() "
-                    "WHERE id = %s",
-                    (fact_id,),
+                    "UPDATE facts SET is_verified = TRUE, verified_at = NOW(), "
+                    "verified_by = %s WHERE id = %s",
+                    (verified_by, fact_id),
                 )
-                return affected > 0
+                if affected:
+                    return True
+                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
+                return await cur.fetchone() is not None
+
+    @db_error_handler
+    async def expire_fact(self, fact_id: int, expires_at) -> Optional[bool]:
+        """Pone (o quita, con None) la fecha de vencimiento de un hecho.
+
+        Caducar NO es borrar: el hecho sigue, deja de pesar en la busqueda y
+        se ve como vencido (spec §2.4). Por eso no hay `delete` en esta
+        pantalla: borrar es perder la historia de lo que creimos.
+
+        EL RETORNO: mismo arreglo y mismo motivo que `verify_fact` (ver su
+        docstring). Sin el, "quitar una caducidad que nunca existio" y
+        "poner dos veces la misma fecha" devolvian False por ser no-ops --
+        indistinguibles de "el hecho no existe". jax-platform#hechos/caducar
+        hace `if not ok: raise HTTPException(404)`: con el bug, caducar dos
+        veces el mismo hecho con la misma fecha le devolvia al operador
+        "hecho no encontrado" sobre un hecho que SI estaba ahi.
+
+        EL ORDEN: mismo arreglo y mismo motivo que `verify_fact` (ver su
+        docstring, auditoria adversarial m1, 2026-09-20) -- el UPDATE va
+        primero, el SELECT de existencia solo corre si `affected == 0`."""
+        if not self.pool:
+            return None
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                affected = await cur.execute(
+                    "UPDATE facts SET expires_at = %s WHERE id = %s",
+                    (expires_at, fact_id),
+                )
+                if affected:
+                    return True
+                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
+                return await cur.fetchone() is not None
 
     @db_error_handler
     async def delete_fact(self, fact_id: int) -> Optional[bool]:
