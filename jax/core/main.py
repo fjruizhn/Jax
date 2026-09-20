@@ -189,9 +189,17 @@ def _texto_de_error_de_tarea(e: BaseException) -> str:
     return redactar_secretos(str(e) or repr(e) or "error sin detalle")
 
 
-async def handle_fact_command(db, line: str, pending_delete: dict) -> str:
+async def handle_fact_command(db, line: str, pending_delete: dict, repl_uid) -> str:
     """Procesa comandos /fact. Devuelve el texto a mostrar.
-    pending_delete: dict mutable {id: texto} para confirmar borrados."""
+    pending_delete: dict mutable {id: texto} para confirmar borrados.
+
+    repl_uid: quien corre esta sesion del REPL (sale de JAX_REPL_USER_ID,
+    resuelto una sola vez en run_repl() y pasado por el unico llamador de
+    esta funcion). OBLIGATORIO y SIN default -- mismo criterio que
+    MemoryDB.verify_fact(verified_by): un aprobador implicito es un
+    aprobador inventado. Su VALOR si puede ser None (la sesion no tiene
+    JAX_REPL_USER_ID configurado) -- eso lo decide la rama 'verify', no la
+    firma: la firma solo exige que quien llama lo haya pensado."""
     parts = line.strip().split()
     sub = parts[1].lower() if len(parts) > 1 else "help"
     arg = parts[2] if len(parts) > 2 else ""
@@ -222,7 +230,18 @@ async def handle_fact_command(db, line: str, pending_delete: dict) -> str:
     if sub in ("verify", "v"):
         if not arg.isdigit():
             return "Uso: /fact verify <id>"
-        ok = await db.verify_fact(int(arg))
+        # Sin repl_uid conocido (None o 0: JAX_REPL_USER_ID sin configurar en
+        # esta sesion) NO se llama a verify_fact -- mismo candado que
+        # save_fact (Task 2, plan memoria-admin 2026-09-20): aprobar sin
+        # dueno es un sello vacio, y eso es justo lo que la pantalla de
+        # Memoria viene a resolver, no a repetir desde el REPL.
+        if not repl_uid:
+            return (
+                f"No pude verificar el hecho #{arg}: esta sesion del REPL no "
+                "tiene JAX_REPL_USER_ID configurado, asi que no hay a quien "
+                "atribuir la aprobacion. Aprobar sin dueno es un sello vacio."
+            )
+        ok = await db.verify_fact(int(arg), repl_uid)
         return f"Hecho #{arg} verificado." if ok else f"No encontre el hecho #{arg}."
 
     # /fact delete <id>   (atajo: d) — SIEMPRE confirma
@@ -710,7 +729,7 @@ async def main() -> None:
 
             # Comandos de gestion de memoria: tampoco son dialogo.
             if lt.startswith("/fact"):
-                salida = await handle_fact_command(db, user_text, pending_delete)
+                salida = await handle_fact_command(db, user_text, pending_delete, repl_uid)
                 print(f"\n{salida}")
                 continue
             if lt.startswith("/decisions"):

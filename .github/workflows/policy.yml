@@ -1017,7 +1017,7 @@ jobs:
           tests/test_ejecutor_cuenta_de_servicio.py
           tests/test_env_se_lee_con_sudo.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
-          tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py
+          tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
           tests/test_health_de_las_manos_puede_fallar.py
           tests/test_degradaciones_declaradas.py
@@ -1153,7 +1153,7 @@ jobs:
             tests/test_ejecutor_cuenta_de_servicio.py \
             tests/test_env_se_lee_con_sudo.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
-            tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py \
+            tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
             tests/test_health_de_las_manos_puede_fallar.py \
             tests/test_degradaciones_declaradas.py \
@@ -2620,11 +2620,25 @@ jobs:
           # tests/test_memoria_no_traga_fallos_de_escritura.py: el candado
           # "sin user_id conocido no se supersede" (0 o None) de save_fact --
           # los 9 vistos ROJOS contra el codigo de antes de esta ronda.
+          # 2255 -> 2265 (2026-09-20, feat/memoria-admin, hallazgo reportado por
+          # Hyde y confirmado por el coordinador: jax/core/main.py:225 llamaba
+          # `db.verify_fact(int(arg))` con UN solo argumento -- db_error_handler
+          # atrapaba el TypeError de aridad y lo convertia en un log de ERROR +
+          # "No encontre el hecho #N.", una mentira, el hecho SI existe): +10,
+          # puros (sin DB, sin red -- suman directo). tests/test_repl_fact_verify_autoria.py
+          # (nuevo): handle_fact_command exige repl_uid obligatorio y sin
+          # default (mismo criterio que verify_fact); sin repl_uid conocido (0
+          # o None) NO se llama a verify_fact, mismo patron que el candado de
+          # save_fact. Los 10 vistos ROJOS contra el codigo de antes de este
+          # commit -- 8 con el TypeError literal de la interfaz vieja sin
+          # repl_uid, 2 con AssertionError probando la ausencia del contrato
+          # (repl_uid no estaba en la firma; la llamada de 3 argumentos no
+          # explotaba, que es justo el bug: el error se tragaba mas adentro).
           # Delta medido en el runner local con ESTE mismo comando: master 2257 ->
-          # rama 2266. El numero absoluto local difiere del de CI porque aca existe
+          # rama 2276. El numero absoluto local difiere del de CI porque aca existe
           # el corpus de U3 y los 17 no se saltean; manda el delta.
-          grep -qE "^2255 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2255 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2265 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2265 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
