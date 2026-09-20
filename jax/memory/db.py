@@ -1478,17 +1478,39 @@ class MemoryDB:
 
         `verified_by` NO tiene default a proposito: un aprobador implicito es
         un aprobador inventado, y el punto de esta columna es que la
-        aprobacion tenga dueno (spec 2026-09-18-memoria-admin §2.2)."""
+        aprobacion tenga dueno (spec 2026-09-18-memoria-admin §2.2).
+
+        EL RETORNO, arreglado 2026-09-20 (auditoria adversarial de esta
+        rama). Antes se devolvia `affected > 0`, y aiomysql cuenta filas
+        CAMBIADAS, no COINCIDENTES (`connect()` no pasa CLIENT.FOUND_ROWS al
+        pool). Reafirmar una aprobacion YA hecha por el mismo `verified_by`
+        no cambia ninguna columna: `affected` daba 0 y el metodo devolvia
+        False, indistinguible de "el hecho no existe" -- exactamente el
+        defecto que esta rama vino a arreglar, reencarnado en su propio
+        metodo (jax-platform#hechos/aprobar hace `if await
+        memoria.verify_fact(...)`).
+
+        Se resuelve con un SELECT de existencia en la MISMA conexion antes
+        del UPDATE, en vez de habilitar CLIENT.FOUND_ROWS en el pool: ese
+        flag es GLOBAL a la conexion y cambiaria el contrato de
+        `rowcount`/`execute()` de cualquier otro escritor que comparte el
+        pool (mark_action_item_done, touch_person_mentions, ...) sin que
+        esta ronda los haya auditado a todos. Asi, True/False dice si el
+        hecho EXISTE (la operacion se aplico, sea o no un no-op), que es lo
+        que el llamador necesita -- no si el UPDATE cambio bytes en disco."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                affected = await cur.execute(
+                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
+                if await cur.fetchone() is None:
+                    return False
+                await cur.execute(
                     "UPDATE facts SET is_verified = TRUE, verified_at = NOW(), "
                     "verified_by = %s WHERE id = %s",
                     (verified_by, fact_id),
                 )
-                return affected > 0
+                return True
 
     @db_error_handler
     async def expire_fact(self, fact_id: int, expires_at) -> Optional[bool]:
@@ -1496,16 +1518,27 @@ class MemoryDB:
 
         Caducar NO es borrar: el hecho sigue, deja de pesar en la busqueda y
         se ve como vencido (spec §2.4). Por eso no hay `delete` en esta
-        pantalla: borrar es perder la historia de lo que creimos."""
+        pantalla: borrar es perder la historia de lo que creimos.
+
+        EL RETORNO: mismo arreglo y mismo motivo que `verify_fact` (ver su
+        docstring). Sin el, "quitar una caducidad que nunca existio" y
+        "poner dos veces la misma fecha" devolvian False por ser no-ops --
+        indistinguibles de "el hecho no existe". jax-platform#hechos/caducar
+        hace `if not ok: raise HTTPException(404)`: con el bug, caducar dos
+        veces el mismo hecho con la misma fecha le devolvia al operador
+        "hecho no encontrado" sobre un hecho que SI estaba ahi."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                affected = await cur.execute(
+                await cur.execute("SELECT 1 FROM facts WHERE id = %s", (fact_id,))
+                if await cur.fetchone() is None:
+                    return False
+                await cur.execute(
                     "UPDATE facts SET expires_at = %s WHERE id = %s",
                     (expires_at, fact_id),
                 )
-                return affected > 0
+                return True
 
     @db_error_handler
     async def delete_fact(self, fact_id: int) -> Optional[bool]:
