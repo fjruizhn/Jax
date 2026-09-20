@@ -3,6 +3,7 @@
 sembrada se lee, la compuerta nace CERRADA y, con ella, una misión que toca una
 máquina con datos de clientes NO arranca. IPs de documentación (RFC 5737)."""
 import asyncio
+import uuid
 
 from jacobs import store
 from jax.ejecutor.contratos import eleccion_c5 as E
@@ -143,16 +144,23 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
             _fila_prov = await cur.fetchone()
             proveedor_thot = _fila_prov[0] if _fila_prov else None
             credencial_sembrada_aca = False
+            clave = f"ZZ_C5DB_{uuid.uuid4().hex[:12]}"  # marcador propio de ESTA corrida
             if proveedor_thot:
                 await cur.execute(
                     "SELECT 1 FROM credential WHERE provider_id = %s AND state = 'active'",
                     (proveedor_thot,))
                 credencial_sembrada_aca = (await cur.fetchone()) is None
                 if credencial_sembrada_aca:
+                    # `credential` es TABLA COMPARTIDA y el proveedor de 'thot' puede
+                    # ser uno real ('openai'): borrar por provider_id en el teardown
+                    # podria llevarse una fila AJENA -- es el incidente de R38, y el
+                    # guardia estatico de tests/test_delete_de_tablas_compartidas.py
+                    # lo rechaza con razon. La clave es unica por corrida y el borrado
+                    # filtra por ella, asi que solo puede alcanzar lo que sembro ESTE test.
                     await cur.execute(
                         "INSERT INTO credential (provider_id, env_key, encrypted_value, state) "
-                        "VALUES (%s, 'ZZ_C5DB_KEY', 'no-se-descifra', 'active')",
-                        (proveedor_thot,))
+                        "VALUES (%s, %s, 'no-se-descifra', 'active')",
+                        (proveedor_thot, clave))
         await conn.commit()
     try:
         return await _con_inventario(accion)
@@ -169,10 +177,9 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
                 if status_thot_previo is not None and status_thot_previo != 'active':
                     await cur.execute("UPDATE facet SET status = %s WHERE `key` = 'thot'",
                                       (status_thot_previo,))
-                if credencial_sembrada_aca and proveedor_thot:
+                if credencial_sembrada_aca:
                     await cur.execute(
-                        "DELETE FROM credential WHERE provider_id = %s "
-                        "AND env_key = 'ZZ_C5DB_KEY'", (proveedor_thot,))
+                        "DELETE FROM credential WHERE env_key = %s", (clave,))  # marcador-propio: clave = ZZ_C5DB_<uuid> de esta corrida
             await conn.commit()
 
 
