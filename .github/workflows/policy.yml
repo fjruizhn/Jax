@@ -2734,6 +2734,14 @@ jobs:
           tests/policy/test_authority_ledger_concurrency.py
           tests/policy/test_authority_ledger_audit_corrections.py
           tests/policy/test_effective_authority_envelope.py
+          tests/policy/test_decision_input.py
+          tests/policy/test_decision_identity.py
+          tests/policy/test_decision_record.py
+          tests/policy/test_decision_storage.py
+          tests/policy/test_decision_replay.py
+          tests/policy/test_decision_authority_binding.py
+          tests/policy/test_decision_determinism.py
+          tests/policy/test_decision_boundaries.py
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"
