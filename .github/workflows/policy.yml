@@ -2657,6 +2657,16 @@ jobs:
           tests/policy/test_v3_relationship_graph.py
           tests/policy/test_v3_root_pair.py
           tests/policy/test_v3_unicode_normalization.py
+          tests/policy/test_authority_resolution_context.py
+          tests/policy/test_authority_resolution_applicability.py
+          tests/policy/test_authority_resolution_indeterminacy.py
+          tests/policy/test_authority_resolution_precedence.py
+          tests/policy/test_authority_resolution_supersession.py
+          tests/policy/test_authority_resolution_conflicts.py
+          tests/policy/test_authority_resolution_result_contract.py
+          tests/policy/test_authority_resolution_candidate_boundary.py
+          tests/policy/test_authority_resolution_determinism.py
+          tests/policy/test_authority_resolution_purity.py
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"
