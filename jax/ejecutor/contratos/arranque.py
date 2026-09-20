@@ -284,12 +284,14 @@ async def eleccion_del_auditor(conn, *, hosts_mision, cfg: eleccion_c5.ConfigC5,
     cerebro = await resolve_facet(cfg.cerebro_faceta)
     if hosts_mision is None:
         return auditor_f, eleccion_c5.validar_proveedores(proveedor_cerebro=cerebro.provider_id,
-                                                           proveedor_auditor=auditor_f.provider_id)
+                                                           proveedor_auditor=auditor_f.provider_id,
+                                                           admite_mismo_proveedor=cfg.admite_mismo_proveedor)
     return auditor_f, eleccion_c5.validar_eleccion(
         proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id,
         auditor_es_local=await eleccion_c5.es_local(conn, auditor_f.provider_id),
         admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset(hosts_mision),
-        hosts_con_clientes=con_clientes, hosts_conocidos=conocidos)
+        hosts_con_clientes=con_clientes, hosts_conocidos=conocidos,
+        admite_mismo_proveedor=cfg.admite_mismo_proveedor)
 
 
 def pruebas_reales(ctx: Contexto) -> dict:
