@@ -33,6 +33,18 @@ _COLUMNAS = [
     # (58,5 ms contra 0,4 ms medidos el 2026-09-11 sobre 1.149 filas).
     ("messages", "user_id", "ALTER TABLE messages ADD COLUMN user_id INT NULL"),
     ("messages", "project_id", "ALTER TABLE messages ADD COLUMN project_id INT NULL"),
+    # Autoria de la aprobacion (spec 2026-09-18-memoria-admin §2.2: "con quien y
+    # cuando"). `verified_at` ya existia; el quien, no. NULL para las filas
+    # viejas: no se inventa un aprobador retroactivo -- el unico hecho
+    # verificado de antes de esta ronda queda con autor desconocido, y eso es
+    # la verdad.
+    ("facts", "verified_by",
+     "ALTER TABLE facts ADD COLUMN verified_by INT NULL"),
+    # Quien CORRIGIO. Distinto de `superseded_by`, que es el id del HECHO que
+    # reemplaza. Los dos hacen falta: uno reconstruye la cadena de versiones, el
+    # otro dice de quien fue la decision.
+    ("facts", "superseded_by_user",
+     "ALTER TABLE facts ADD COLUMN superseded_by_user INT NULL"),
 ]
 
 # (tabla, indice, DDL). MariaDB no acepta CREATE INDEX IF NOT EXISTS.
@@ -44,6 +56,11 @@ _INDICES = [
     # ENCABEZA el indice si lo usa.
     ("messages", "idx_msg_scope",
      "CREATE INDEX idx_msg_scope ON messages (project_id, user_id)"),
+    # La pantalla de Memoria filtra por verificado y por caducidad, y ordena por
+    # fecha. Compuesto en ese orden: los dos predicados de igualdad/rango
+    # primero, el ORDER BY al final, para que no aparezca `Using filesort`.
+    ("facts", "idx_facts_revision",
+     "CREATE INDEX idx_facts_revision ON facts (is_verified, expires_at, created_at)"),
 ]
 
 # Backfill de las filas anteriores a la columna. Idempotente por el WHERE: solo
