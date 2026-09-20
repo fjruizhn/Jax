@@ -38,13 +38,27 @@ _COLUMNAS = [
     # viejas: no se inventa un aprobador retroactivo -- el unico hecho
     # verificado de antes de esta ronda queda con autor desconocido, y eso es
     # la verdad.
+    #
+    # `AFTER verified_at` / `AFTER verified_by` (agregado 2026-09-20,
+    # auditoria adversarial): SIN el AFTER, un `ALTER TABLE ADD COLUMN` pone
+    # la columna nueva al FINAL de la tabla, pero jax_memory_schema.sql (la
+    # fuente de verdad del checker de deriva) la declara en el MEDIO, entre
+    # `verified_at` y `expires_at`. Una base MIGRADA (no creada de cero desde
+    # el .sql) terminaba con las columnas en otra posicion que una base
+    # nueva -- mismas columnas, mismo tipo, y el checker de deriva
+    # (scripts/check_memory_schema_drift.py) salia "DIFIERE" con el mismo
+    # texto a los dos lados: el peor rojo posible, porque parece un bug del
+    # propio checker y no del esquema. Medido 2026-09-20: reproducido contra
+    # jax_memory_test en hall9000. Ver test_el_migrador_agrega_las_columnas_
+    # en_la_MISMA_posicion_que_el_esquema (test_memoria_gobernanza.py), que
+    # ata esta posicion a la del .sql.
     ("facts", "verified_by",
-     "ALTER TABLE facts ADD COLUMN verified_by INT NULL"),
+     "ALTER TABLE facts ADD COLUMN verified_by INT NULL AFTER verified_at"),
     # Quien CORRIGIO. Distinto de `superseded_by`, que es el id del HECHO que
     # reemplaza. Los dos hacen falta: uno reconstruye la cadena de versiones, el
     # otro dice de quien fue la decision.
     ("facts", "superseded_by_user",
-     "ALTER TABLE facts ADD COLUMN superseded_by_user INT NULL"),
+     "ALTER TABLE facts ADD COLUMN superseded_by_user INT NULL AFTER verified_by"),
 ]
 
 # (tabla, indice, DDL). MariaDB no acepta CREATE INDEX IF NOT EXISTS.

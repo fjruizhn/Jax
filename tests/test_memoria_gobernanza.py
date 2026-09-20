@@ -25,17 +25,59 @@ def test_el_indice_de_revision_esta_declarado():
     assert "idx_facts_revision" in indices
 
 
+def _columnas_de_facts_en_orden() -> list[str]:
+    """Las columnas de `facts` tal como las declara jax_memory_schema.sql,
+    EN ORDEN -- no un set: la posicion es justo lo que este archivo verifica."""
+    import pathlib
+    import re
+    esquema = pathlib.Path(__file__).resolve().parent.parent / "jax_memory_schema.sql"
+    texto = esquema.read_text(encoding="utf-8")
+    m = re.search(r"CREATE TABLE `facts` \((.*?)\n\)[^;\n]*", texto, re.S)
+    assert m, "facts no esta en jax_memory_schema.sql"
+    columnas = []
+    for linea in m.group(1).splitlines():
+        cm = re.match(r"\s*`(\w+)`", linea)
+        if cm:
+            columnas.append(cm.group(1))
+    return columnas
+
+
 def test_el_esquema_declarado_y_el_migrador_no_se_contradicen():
     """jax_memory_schema.sql es la fuente de verdad (checker de deriva) y
     migrations.py lleva las bases existentes hacia adelante. Si una columna
     esta en uno y no en el otro, una base nueva y una vieja quedan distintas --
     que es exactamente como `depends_on` de jacobs_steps termino existiendo
     solo en produccion (DEUDA.md)."""
-    import pathlib
-    esquema = pathlib.Path(__file__).resolve().parent.parent / "jax_memory_schema.sql"
-    texto = esquema.read_text(encoding="utf-8")
+    columnas = _columnas_de_facts_en_orden()
     for col in COLUMNAS_NUEVAS:
-        assert col in texto, f"{col} no esta en jax_memory_schema.sql"
+        assert col in columnas, f"{col} no esta en jax_memory_schema.sql"
+
+
+def test_el_migrador_agrega_las_columnas_en_la_MISMA_posicion_que_el_esquema():
+    """No alcanza con que las dos fuentes tengan la columna (test anterior):
+    tienen que tenerla en la MISMA posicion, o un `ALTER TABLE ADD COLUMN`
+    sin `AFTER` la agrega al FINAL de la tabla en una base migrada, mientras
+    jax_memory_schema.sql la declara en el medio (entre `verified_at` y
+    `expires_at`). El checker de deriva (scripts/check_memory_schema_drift.py)
+    compara el DDL completo, no solo que las columnas esten presentes: con
+    las dos fuentes de acuerdo en QUE columnas hay pero en desacuerdo en
+    DONDE, sale "DIFIERE" con el mismo texto a los dos lados -- el peor rojo
+    posible, porque parece un bug del propio checker."""
+    columnas = _columnas_de_facts_en_orden()
+    ddl_por_columna = {
+        col: ddl for (tabla, col, ddl) in migrations._COLUMNAS if tabla == "facts"
+    }
+    for col in COLUMNAS_NUEVAS:
+        idx = columnas.index(col)
+        assert idx > 0, f"{col} es la primera columna de facts en el .sql -- inesperado"
+        anterior = columnas[idx - 1]
+        ddl = ddl_por_columna[col]
+        assert f"AFTER {anterior}" in ddl, (
+            f"jax_memory_schema.sql pone {col!r} justo despues de "
+            f"{anterior!r}, pero el DDL de migrations.py para {col!r} no "
+            f"dice `AFTER {anterior}` ({ddl!r}) -- una base MIGRADA (no "
+            f"creada desde cero con el .sql) va a terminar con {col!r} en "
+            f"otra posicion.")
 
 
 import inspect
