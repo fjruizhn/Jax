@@ -1,37 +1,49 @@
 """OCR para lo que no tiene capa de texto: PDF escaneado e imagen.
 
-tesseract por subproceso, nunca por binding: un binding suma dependencia
-nativa y no aporta nada acá. Se pasa por `spa` porque los documentos son en
-español (verificado 2026-09-20: lee tildes y guion largo exacto).
+tesseract por subproceso, nunca por binding. `spa` porque los documentos son
+en español (verificado 2026-09-20: lee tildes y guion largo exacto).
 
-El defecto propio de este extractor: un umbral de CARACTERES solo no basta
-para distinguir texto real de ruido -- tesseract puede "leer" glifos sueltos
-al azar y devolver más de `MINIMO_CARACTERES` de puro ruido (medido a mano,
-2026-09-21: una imagen con 30 glifos sueltos produjo ~35 caracteres). Lo que
-sí distingue ese caso es la confianza POR PALABRA que tesseract ya calcula
-internamente (modo `tsv`, no expuesto en el modo texto plano): ~96 % en
-texto real, ~55 % en el ruido medido. Se prefirió esto sobre una heurística
-de "proporción de letras" porque esa heurística castigaría contenido
-numérico legítimo -- un renglón como "INGRESOS 1,234,567.89 USD" tiene sólo
-48 % de caracteres alfabéticos pero ~94 % de confianza de tesseract, y en un
-extracto financiero los números SON el contenido.
+Ronda de arreglo 1 (2026-09-21, task-5-6-hallazgos.md — NO ratificado, 3
+críticos + 3 importantes sobre este archivo), tres lecciones que quedan acá
+porque son las que se van a querer deshacer la próxima vez que un test se
+ponga rojo:
 
-La confianza se lee de una segunda invocación a tesseract (mismo archivo,
-mismo idioma, modo `tsv`) -- no es una cuenta paralela que pueda divergir de
-la que decide "hay texto o no" (el defecto C-2 de pdf.py, dos algoritmos
-distintos para la misma pregunta): es la MISMA pasada de reconocimiento de
-tesseract, sólo en otro formato de salida.
+- C-3: tesseract 5.5.0 **no lee PDF** (`Error in pixReadStream: Pdf reading
+  is not supported`) -- defecto del brief original, no verificado contra la
+  herramienta real. El módulo prometía "PDF escaneado e imagen" y sólo
+  hacía lo segundo. Se rasteriza con `pdftoppm` (poppler, ya instalado --
+  la misma suite que usa `pdftotext`) página por página, y se reporta por
+  página igual que `pdf.py`: `paginas`, `paginas_sin_texto`.
+- C-1: el PROMEDIO de confianza diluye -- seis renglones reales más cuatro
+  de ruido promedian 77,73 (por encima de cualquier umbral razonable) y el
+  extracto real termina en basura. Peor: con una foto movida, las palabras
+  de baja confianza son EXACTAMENTE los números (`1,234,567` a 22 de
+  confianza) mientras los rótulos van al 96 % -- el promedio tapa justo lo
+  que importa. La defensa real es un piso POR PALABRA
+  (`CONFIANZA_MINIMA_PALABRA`): las palabras por debajo se cuentan y se
+  NOMBRAN en `detalle["palabras_dudosas"]` (nunca se borran del texto), con
+  más de la mitad de las palabras dudosas el resultado es `error`
+  (`PROPORCION_MAXIMA_PALABRAS_DUDOSAS`), con alguna pero no la mayoría es
+  `parcial`. El promedio se sigue registrando SIEMPRE, como señal
+  secundaria (I-1: antes desaparecía de `detalle` en el camino de "texto
+  corto", justo la franja que hacía falta para calibrar el umbral).
+- C-2: una página casi en blanco con sólo un membrete legible (pocas
+  palabras, alta confianza) pasaba como `ok` -- la misma familia del
+  defecto de los "cuarenta pies de página" de `pdf.py`. `MINIMO_PALABRAS`
+  fuerza `parcial` (nunca `error`: un recibo legítimo puede tener pocas
+  palabras) con la razón y las dimensiones de la imagen en `detalle`.
 
-El número elegido para cada umbral, y por qué falla del lado barato: "no leí
-nada" (falso negativo, se manda a revisar de más) es mucho más barato que
-"leí ruido y lo di por bueno" (falso positivo, el modelo consumidor lo
-inventa todo con la confianza de que es un extracto real). Ante la duda, los
-dos umbrales suben, nunca bajan para que pase un fixture.
+Los cuatro números (`MINIMO_CARACTERES`, `CONFIANZA_MINIMA_PALABRA`,
+`MINIMO_PALABRAS`, `PROPORCION_MAXIMA_PALABRAS_DUDOSAS`) son las perillas
+que un futuro ajuste va a querer mover -- cada una tiene su propio test que
+la fija (I-3: antes se podían correr en una banda ancha sin que CI dijera
+nada), y cada una se muta por separado.
 """
 from __future__ import annotations
 
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from procesamiento.resultado import Resultado
@@ -39,20 +51,38 @@ from procesamiento.resultado import Resultado
 EXTRACTOR = "tesseract"
 
 # Caracteres MÍNIMOS (tras `.strip()`) para que el modo texto plano cuente
-# como "algo se leyó". Defensa barata contra el caso vacío/casi vacío (imagen
-# en blanco, mancha, ruido puro que tesseract ni intenta leer). NO alcanza
-# solo -- ver UMBRAL_CONFIANZA_PROMEDIO para el caso de ruido "leíble".
+# como "algo se leyó". Defensa barata contra el caso vacío (imagen en
+# blanco, página pura imagen). Ante la duda, sube, nunca baja para que pase
+# un fixture.
 MINIMO_CARACTERES = 8
 
-# Confianza PROMEDIO mínima (0-100, la que reporta tesseract por palabra en
-# modo `tsv`) para aceptar el texto como real. Medido a mano 2026-09-21
-# contra tesseract 5.5.0: texto real en español ~96 %, texto numérico real
-# ~94 %, ruido de glifos sueltos ~55 %. 70 queda cómodo entre los dos casos
-# reales medidos y el ruido medido -- ante la duda, sube, no baja para que
-# pase un fixture.
-UMBRAL_CONFIANZA_PROMEDIO = 70.0
+# Confianza mínima (0-100, la que reporta tesseract POR PALABRA en modo
+# `tsv`) para que una palabra individual NO se cuente como dudosa. Medido a
+# mano 2026-09-21: en una foto movida real, los NÚMEROS caían a confianza
+# 22-52 mientras los rótulos seguían en 96 -- 60 separa cómodo ese caso sin
+# castigar texto limpio.
+CONFIANZA_MINIMA_PALABRA = 60.0
+
+# Palabras mínimas reconocidas para que una página/imagen cuente como
+# "cobertura suficiente". Por debajo: `parcial` (nunca `error` -- un recorte
+# chico o un recibo legítimo puede tener pocas palabras, ver C-2).
+MINIMO_PALABRAS = 10
+
+# Proporción de palabras dudosas (confianza < CONFIANZA_MINIMA_PALABRA) que,
+# superada, hace que la página entera se trate como "sin texto útil"
+# (`error`, o esa página cuenta en `paginas_sin_texto` de un PDF) en vez de
+# `parcial`: más de la mitad de las palabras en duda es, en la práctica, la
+# misma situación que no haber leído nada -- no se puede confiar en el resto.
+PROPORCION_MAXIMA_PALABRAS_DUDOSAS = 0.5
 
 TIMEOUT_SEGUNDOS = 300
+
+# DPI de rasterizado para OCR sobre PDF. 300 es el mínimo usual recomendado
+# para OCR de documentos escaneados (por debajo, tesseract pierde exactitud
+# en fuentes pequeñas de recibos/facturas).
+DPI_RASTERIZADO = 300
+
+_FIRMA_PDF = b"%PDF"
 
 
 def _version() -> str:
@@ -65,19 +95,41 @@ def _version() -> str:
         return "desconocida"
 
 
-def _confianza_promedio(origen: Path, idioma: str) -> tuple[float, int]:
-    """Confianza promedio (0-100) de las palabras que tesseract reconoció, y
-    cuántas palabras entraron en el promedio. Sin palabras reconocidas,
-    devuelve (0.0, 0) -- mismo criterio de "no hay nada" que el texto vacío."""
-    proceso = subprocess.run(
-        ["tesseract", str(origen), "stdout", "-l", idioma, "tsv"],
-        capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
-    )
+def _es_pdf(origen: Path) -> bool:
+    try:
+        with open(origen, "rb") as fh:
+            return fh.read(len(_FIRMA_PDF)) == _FIRMA_PDF
+    except OSError:
+        return False
+
+
+def _analizar_tsv(salida_tsv: str) -> dict:
+    """Función PURA (sin subprocesos) sobre la salida `tsv` de tesseract --
+    misma pasada de reconocimiento que el modo texto plano, sólo en otro
+    formato de salida (no es una segunda cuenta que pueda divergir, el
+    defecto C-2 de `pdf.py`). Devuelve cuántas palabras reconoció, la
+    confianza promedio sobre TODAS ellas (nunca una muestra), cuáles están
+    por debajo de `CONFIANZA_MINIMA_PALABRA` (nombradas, no descartadas), y
+    el ancho/alto de la página (fila de nivel 1 del tsv).
+
+    Separada de `_ocr_una_imagen` (que sí corre el subproceso) justo para
+    poder probarse con un `tsv` armado a mano, sin depender de que
+    tesseract reconozca algo en particular -- mismo patrón que
+    `pdf._tabla_a_bloque`, una función pura con sus propios tests directos.
+    """
+    ancho = alto = 0
     confianzas: list[float] = []
-    lineas = (proceso.stdout or "").splitlines()
+    dudosas: list[dict] = []
+    lineas = salida_tsv.splitlines()
     for linea in lineas[1:]:  # lineas[0] es el encabezado de columnas
         campos = linea.split("\t")
         if len(campos) < 12:
+            continue
+        if campos[0] == "1":  # fila de nivel "página": trae ancho/alto
+            try:
+                ancho, alto = int(campos[8]), int(campos[9])
+            except ValueError:
+                pass
             continue
         conf_str, texto_palabra = campos[10], campos[11]
         if not texto_palabra.strip():
@@ -86,12 +138,185 @@ def _confianza_promedio(origen: Path, idioma: str) -> tuple[float, int]:
             conf = float(conf_str)
         except ValueError:
             continue
-        if conf < 0:  # -1: fila estructural (página/bloque/línea), no palabra
+        if conf < 0:  # -1: fila estructural (bloque/párrafo/línea), no palabra
             continue
         confianzas.append(conf)
-    if not confianzas:
-        return 0.0, 0
-    return sum(confianzas) / len(confianzas), len(confianzas)
+        if conf < CONFIANZA_MINIMA_PALABRA:
+            dudosas.append({"palabra": texto_palabra, "confianza": round(conf, 2)})
+
+    n_palabras = len(confianzas)
+    confianza_promedio = sum(confianzas) / n_palabras if n_palabras else 0.0
+    return {
+        "n_palabras": n_palabras,
+        "confianza_promedio": round(confianza_promedio, 2),
+        "palabras_dudosas": dudosas,
+        "ancho": ancho,
+        "alto": alto,
+    }
+
+
+def _clasificar(caracteres: int, analisis: dict) -> str:
+    """Una de 'sin_texto' / 'con_dudas' / 'ok' -- la MISMA función para una
+    imagen suelta y para cada página de un PDF rasterizado (evita repetir
+    la regla en dos lugares que puedan divergir)."""
+    if caracteres < MINIMO_CARACTERES:
+        return "sin_texto"
+    n = analisis["n_palabras"]
+    dudosas = analisis["palabras_dudosas"]
+    if n and len(dudosas) / n > PROPORCION_MAXIMA_PALABRAS_DUDOSAS:
+        return "sin_texto"
+    if n < MINIMO_PALABRAS or dudosas:
+        return "con_dudas"
+    return "ok"
+
+
+def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
+    """Corre tesseract DOS veces sobre la MISMA imagen -- texto plano (para
+    el extracto exacto, tildes y guion largo incluidos) y `tsv` (para la
+    confianza por palabra, que el modo texto plano no expone). `None` si el
+    propio subproceso de tesseract no pudo correr sobre esta imagen
+    (timeout, I/O, `returncode` distinto de cero) -- fallo cerrado del
+    llamador, nunca una excepción escapando de acá."""
+    try:
+        proceso = subprocess.run(
+            ["tesseract", str(ruta), "stdout", "-l", idioma],
+            capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
+        )
+    except Exception:
+        return None
+    if proceso.returncode != 0:
+        return None
+    texto = (proceso.stdout or "").strip()
+
+    try:
+        proceso_tsv = subprocess.run(
+            ["tesseract", str(ruta), "stdout", "-l", idioma, "tsv"],
+            capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
+        )
+    except Exception:
+        return None
+    analisis = _analizar_tsv(proceso_tsv.stdout or "")
+
+    return {
+        "texto": texto,
+        "caracteres": len(texto),
+        **analisis,
+        "clasificacion": _clasificar(len(texto), analisis),
+    }
+
+
+def _rasterizar_pdf(origen: Path, destino: Path) -> list[Path] | None:
+    """`pdftoppm` (poppler, ya instalado -- misma suite que `pdftotext`) una
+    página por PNG. `None` si `pdftoppm` no corrió (no instalado, PDF
+    inválido, timeout)."""
+    prefijo = destino / "pagina"
+    try:
+        proceso = subprocess.run(
+            ["pdftoppm", "-png", "-r", str(DPI_RASTERIZADO), str(origen), str(prefijo)],
+            capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
+        )
+    except Exception:
+        return None
+    if proceso.returncode != 0:
+        return None
+    # pdftoppm rellena con ceros segun la cantidad total de paginas (2
+    # digitos hasta 99, 3 hasta 999, ...) -- el orden lexicografico del glob
+    # ya es correcto para ese rango, pero se ordena por el numero real
+    # extraido del nombre para no depender de esa convencion.
+    paginas = list(destino.glob("pagina-*.png"))
+    return sorted(paginas, key=lambda p: int("".join(c for c in p.stem if c.isdigit())))
+
+
+def _detalle_comun(idioma: str, r: dict) -> dict:
+    detalle = {
+        "idioma": idioma,
+        "caracteres": r["caracteres"],
+        "palabras_totales": r["n_palabras"],
+        "confianza_promedio": r["confianza_promedio"],
+        "ancho": r["ancho"],
+        "alto": r["alto"],
+    }
+    if r["palabras_dudosas"]:
+        detalle["palabras_dudosas"] = r["palabras_dudosas"]
+    return detalle
+
+
+def _resolver_imagen(r: dict, idioma: str) -> Resultado:
+    detalle = _detalle_comun(idioma, r)
+
+    if r["clasificacion"] == "sin_texto":
+        if r["caracteres"] < MINIMO_CARACTERES:
+            detalle["razon"] = "el OCR no devolvio texto util"
+        else:
+            detalle["razon"] = (
+                "mas de la mitad de las palabras reconocidas tienen "
+                "confianza baja (probable ruido o desenfoque) -- ver "
+                "palabras_dudosas"
+            )
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            detalle=detalle,
+        )
+
+    if r["clasificacion"] == "con_dudas":
+        razones = []
+        if r["n_palabras"] < MINIMO_PALABRAS:
+            razones.append(f"cobertura insuficiente (menos de {MINIMO_PALABRAS} palabras)")
+        if r["palabras_dudosas"]:
+            razones.append("hay palabras con confianza baja -- ver palabras_dudosas")
+        detalle["razon"] = "; ".join(razones)
+        return Resultado(
+            estado="parcial", salidas={"texto.txt": r["texto"]},
+            extractor=EXTRACTOR, version=_version(), detalle=detalle,
+        )
+
+    return Resultado(
+        estado="ok", salidas={"texto.txt": r["texto"]},
+        extractor=EXTRACTOR, version=_version(), detalle=detalle,
+    )
+
+
+def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
+    total = len(resultados)
+    paginas_sin_texto: list[int] = []
+    paginas_con_dudas: list[int] = []
+    palabras_dudosas: list[dict] = []
+    partes_texto: list[str] = []
+
+    for numero, r in enumerate(resultados, start=1):
+        if r is None or r["clasificacion"] == "sin_texto":
+            paginas_sin_texto.append(numero)
+            continue
+        partes_texto.append(f"<!-- página {numero} -->\n{r['texto']}")
+        if r["clasificacion"] == "con_dudas":
+            paginas_con_dudas.append(numero)
+        for dudosa in r["palabras_dudosas"]:
+            palabras_dudosas.append({"pagina": numero, **dudosa})
+
+    if len(paginas_sin_texto) == total:
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            detalle={
+                "razon": "ninguna pagina del PDF dio texto util via OCR",
+                "idioma": idioma,
+                "paginas": total,
+            },
+        )
+
+    contenido = "\n\n".join(partes_texto).strip()
+    detalle = {"idioma": idioma, "paginas": total}
+    if paginas_sin_texto:
+        detalle["paginas_sin_texto"] = paginas_sin_texto
+    if paginas_con_dudas:
+        detalle["paginas_con_dudas"] = paginas_con_dudas
+    if palabras_dudosas:
+        detalle["palabras_dudosas"] = palabras_dudosas
+
+    estado = "parcial" if (paginas_sin_texto or paginas_con_dudas or palabras_dudosas) else "ok"
+    return Resultado(
+        estado=estado, salidas={"texto.txt": contenido},
+        extractor=EXTRACTOR, version=_version(), detalle=detalle,
+    )
 
 
 def extraer(origen: Path, idioma: str = "spa") -> Resultado:
@@ -100,66 +325,36 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
             estado="error", salidas={}, extractor=EXTRACTOR, version="ausente",
             detalle={"razon": "tesseract no esta instalado"},
         )
-    if not Path(origen).is_file():
+    origen = Path(origen)
+    if not origen.is_file():
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
             detalle={"razon": f"no existe el archivo: {origen}"},
         )
 
-    try:
-        proceso = subprocess.run(
-            ["tesseract", str(origen), "stdout", "-l", idioma],
-            capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
-        )
-    except subprocess.TimeoutExpired:
-        return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
-            detalle={"razon": f"tesseract excedio {TIMEOUT_SEGUNDOS}s"},
-        )
-    except Exception as exc:
-        return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
-            detalle={"razon": f"no se pudo correr tesseract: {type(exc).__name__}: {exc}"},
-        )
+    if _es_pdf(origen):
+        if shutil.which("pdftoppm") is None:
+            return Resultado(
+                estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+                detalle={
+                    "razon": "pdftoppm no esta instalado (poppler-utils); "
+                    "no se puede rasterizar el PDF para OCR",
+                },
+            )
+        with tempfile.TemporaryDirectory(prefix="ocr-pdf-") as tmp:
+            paginas = _rasterizar_pdf(origen, Path(tmp))
+            if not paginas:
+                return Resultado(
+                    estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+                    detalle={"razon": "no se pudo rasterizar el PDF con pdftoppm"},
+                )
+            resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
+        return _resolver_pdf(resultados, idioma)
 
-    texto = (proceso.stdout or "").strip()
-    if proceso.returncode != 0 or len(texto) < MINIMO_CARACTERES:
+    resultado_img = _ocr_una_imagen(origen, idioma)
+    if resultado_img is None:
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
-            detalle={
-                "razon": "el OCR no devolvio texto util",
-                "returncode": proceso.returncode,
-                "caracteres": len(texto),
-                "stderr": (proceso.stderr or "")[:500],
-            },
+            detalle={"razon": "no se pudo correr tesseract sobre la imagen"},
         )
-
-    try:
-        confianza, n_palabras = _confianza_promedio(origen, idioma)
-    except subprocess.TimeoutExpired:
-        return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
-            detalle={"razon": f"tesseract (calculo de confianza) excedio {TIMEOUT_SEGUNDOS}s"},
-        )
-
-    if confianza < UMBRAL_CONFIANZA_PROMEDIO:
-        return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
-            detalle={
-                "razon": "el OCR devolvio texto de baja confianza (probable ruido)",
-                "confianza_promedio": round(confianza, 2),
-                "palabras": n_palabras,
-                "caracteres": len(texto),
-            },
-        )
-
-    return Resultado(
-        estado="ok", salidas={"texto.txt": texto},
-        extractor=EXTRACTOR, version=_version(),
-        detalle={
-            "idioma": idioma,
-            "caracteres": len(texto),
-            "confianza_promedio": round(confianza, 2),
-            "palabras": n_palabras,
-        },
-    )
+    return _resolver_imagen(resultado_img, idioma)

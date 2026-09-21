@@ -2912,15 +2912,28 @@ jobs:
       # (paquete de sistema, no entra en requirements-archivos.txt). `spa`
       # porque los documentos son en español.
       #
-      # El defecto propio de este extractor: un umbral de CARACTERES solo no
-      # basta -- tesseract puede "leer" glifos sueltos al azar y devolver
-      # más caracteres que cualquier umbral razonable de longitud (medido a
-      # mano, 2026-09-21: ~35 caracteres de puro ruido). La defensa real es
-      # la confianza PROMEDIO por palabra que tesseract ya calcula
-      # internamente (modo `tsv`): ~96 % en texto real, ~55 % en el ruido
-      # medido -- y esta confianza NO castiga contenido numérico legítimo
-      # (un renglón financiero con números reales sigue en ~94 % de
-      # confianza), a diferencia de una heurística por proporción de letras.
+      # Ronda de arreglo 1 (2026-09-21, task-5-6-hallazgos.md -- NO
+      # ratificado, 3 criticos + 3 importantes sobre este archivo):
+      #   - C-3: tesseract 5.5.0 NO LEE PDF ("Error in pixReadStream: Pdf
+      #     reading is not supported") -- el modulo se llamaba "PDF
+      #     escaneado e imagen" y el 100% de los PDF escaneados (el caso de
+      #     uso principal) caia en error. Se rasteriza con `pdftoppm`
+      #     (paquete `poppler-utils`, misma suite que `pdftotext`) pagina
+      #     por pagina, y se reporta por pagina igual que pdf.py.
+      #   - C-1: el PROMEDIO de confianza diluia -- 6 renglones reales + 4
+      #     de ruido promediaban por encima del umbral viejo y salian 'ok'.
+      #     Ahora hay un piso POR PALABRA (CONFIANZA_MINIMA_PALABRA): las
+      #     palabras dudosas se nombran en detalle["palabras_dudosas"], sin
+      #     borrarlas del texto.
+      #   - C-2: una pagina casi en blanco con solo un membrete (pocas
+      #     palabras, alta confianza) fuerza 'parcial' (MINIMO_PALABRAS),
+      #     nunca 'error'.
+      #   - I-1: la confianza promedio se registra SIEMPRE en detalle,
+      #     incluso cuando el texto es demasiado corto.
+      #   - I-3: cada umbral tiene sus propios tests que lo fijan, la
+      #     mayoria contra funciones PURAS (_clasificar, _analizar_tsv) sin
+      #     invocar a tesseract.
+      # De 7 a 28 tests.
       #
       # `pytest.importorskip("PIL.Image")` en `_ocr_test.py` genera los
       # fixtures (imágenes con texto real) -- mismo patrón de riesgo que
@@ -2928,35 +2941,16 @@ jobs:
       # Pillow NO va en requirements-archivos.txt (ese archivo es de
       # dependencias del EXTRACTOR; Pillow sólo genera fixtures de test,
       # tesseract no la usa) -- se instala acá, en el paso que la necesita.
-      - run: sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
+      # poppler-utils (pdftoppm) tampoco -- verificado 2026-09-21 que
+      # NO viene preinstalado en la imagen base de este job (python:3.12-slim
+      # equivalente): `which pdftoppm` da vacío sin este apt-get.
+      - run: sudo apt-get install -y tesseract-ocr tesseract-ocr-spa poppler-utils
       - run: pip install pillow
       - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
-          grep -qE "^7 passed" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 7 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
-
-      # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
-      # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
-      # mismo paso que openpyxl/pdfplumber).
-      #
-      # El defecto propio de este extractor: python-docx da la MISMA
-      # excepción (`PackageNotFoundError`, mismo mensaje) para un `.doc`
-      # binario viejo (formato OLE2, que python-docx NUNCA va a poder leer)
-      # que para un `.docx` genuinamente corrupto -- medido a mano
-      # (2026-09-21). Sin distinguir los dos casos, un `.doc` legítimo con
-      # la extensión mal puesta se reportaría como 'error' (documento roto)
-      # en vez de 'sin_extractor' (herramienta equivocada para este
-      # formato). La firma OLE2 (`D0 CF 11 E0 A1 B1 1A E1`) se comprueba
-      # ANTES de intentar abrir con python-docx.
-      #
-      # `pytest.importorskip("docx")` en `_word_test.py` -- mismo riesgo de
-      # "1 skipped" con EXIT 0 si python-docx no se instaló.
-      - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
-        run: |
-          python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
-          grep -qE "^7 passed" /tmp/word_tests || {
-            echo "PISO ROTO: se esperaban 7 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^28 passed" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 28 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
