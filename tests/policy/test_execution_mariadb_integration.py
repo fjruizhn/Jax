@@ -96,7 +96,7 @@ def test_governed_execution_authoritative_mariadb_contract():
         try:
             return create_execution(MariaDBExecutionStore(_connection),
                 MariaDBExecutionStore(_connection).load_authorization(auth_id), now_utc=now)
-        except Exception:
+        except Exception:  # fail-soft: the losing concurrent transaction is the expected uniqueness proof.
             return None
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(create, (first.authorization_id, second.authorization_id)))

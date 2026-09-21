@@ -50,7 +50,9 @@ jobs:
         image: mariadb:12.3.3
         env:
           MARIADB_ROOT_PASSWORD: ci
-          MARIADB_DATABASE: jax_execution_test
+          # Root conftest deliberately pins all write-capable tests to this
+          # test-only name; isolation comes from this job's fresh container.
+          MARIADB_DATABASE: jax_memory_test
         ports: ["3306:3306"]
         options: >-
           --health-cmd="healthcheck.sh --connect --innodb_initialized"
@@ -61,7 +63,7 @@ jobs:
       JAX_DB_PORT: "3306"
       JAX_DB_USER: root
       JAX_DB_PASSWORD: ci
-      JAX_DB_NAME: jax_execution_test
+      JAX_DB_NAME: jax_memory_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
