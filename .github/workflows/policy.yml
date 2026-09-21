@@ -43,6 +43,36 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  governed-execution-mariadb:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:12.3.3
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          # Root conftest deliberately pins all write-capable tests to this
+          # test-only name; isolation comes from this job's fresh container.
+          MARIADB_DATABASE: jax_memory_test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      JAX_EXECUTION_TEST_MARIADB: "1"
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: root
+      JAX_DB_PASSWORD: ci
+      JAX_DB_NAME: jax_memory_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Canonicalization is pinned to Unicode 16, supplied by Python 3.14.
+          python-version: "3.14"
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest tests/policy/test_execution_mariadb_integration.py -v
+
   no-fail-open-except:
     runs-on: ubuntu-latest
     steps:
@@ -585,7 +615,9 @@ jobs:
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
           tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py
+          tests/test_accion_persona_retorno_no_ambiguo.py
           tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py
+          tests/test_memoria_busqueda_facts.py
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -596,7 +628,9 @@ jobs:
             tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py \
             tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py \
             tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py \
-            tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py 2>&1 | tee /tmp/out
+            tests/test_accion_persona_retorno_no_ambiguo.py \
+            tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py \
+            tests/test_memoria_busqueda_facts.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
           # (el scope copiado al mensaje, el centinela de que el scope de una
           # conversacion sigue siendo inmutable, el plan sin JOIN que si usa el
@@ -684,8 +718,117 @@ jobs:
           #   de la CACHE del indice. Es el otro modo de fallo del HNSW y, a
           #   diferencia del envenenamiento por cascada, este se ve venir: es
           #   aritmetica (bytes / (dim*4)). Numero del RUNNER, no de sumar.
-          grep -qE "^53 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 53 -> 64 el 2026-09-20 (decision de Fernando: JAX busca hechos por
+          #   similitud en cada turno): tests/test_memoria_busqueda_facts.py
+          #   (archivo nuevo, +11) -- `search_similar_facts`, hermano de
+          #   `search_similar_messages` pero sobre `facts`. Cubre el umbral de
+          #   similitud (cerca entra, lejos no, y una pregunta ajena no trae
+          #   nada), que un fact SUPERADO o VENCIDO no vuelve aunque sea el
+          #   mas cercano (ni siquiera para la busqueda semantica), el scope
+          #   de dos niveles (individual/proyecto), el EXPLAIN de la consulta
+          #   REAL a volumen (60 filas propias, no 1 -- misma leccion que
+          #   test_memory_scope_denormalized.py) confirmando que usa
+          #   idx_embedding_bge_m3 sin JOIN, el fail-soft (sin pool, sin
+          #   embedding), y el caso real reproducido a escala (25 facts mas
+          #   cercanos-pero-genericos enterrando al fact del bug bajo un
+          #   `limit=5`, visto en rojo a mano contra el `limit` por defecto
+          #   de `search_similar_messages` antes de fijar el de esta funcion
+          #   en 30) mas el truncado correcto de `limit` entre los que pasan
+          #   el umbral. Numero del RUNNER: 64 passed.
+          # 64 -> 65 el 2026-09-20 (ronda 2, correccion de diseño: `limit`
+          #   baja de 30 a 8 y `FACT_SIMILARITY_THRESHOLD` de 0.62 a 0.45 --
+          #   medido contra produccion, jax_memory, solo SELECT: con el
+          #   limit/umbral viejos "gracias" traia 30 facts (el tope), "hola"
+          #   16; con los nuevos, CERO en ambas. El caso real
+          #   ("jax sabes a que me dedico?") ya no lo resuelve este metodo
+          #   agrandando `limit`, lo resuelve `detect_completeness_intent`
+          #   devolviendo 'user', ver tests/test_completeness_intent.py).
+          #   `test_limit_por_defecto_alcanza_el_caso_real_del_bug` (la
+          #   premisa vieja) se retira; en su lugar,
+          #   `test_limit_por_defecto_es_8` (+1) y
+          #   `test_limit_por_defecto_ya_no_compensa_preguntas_de_completeness`
+          #   (+1, contrapositivo del test retirado) -- neto +1 sobre el
+          #   archivo. Medido en local (MISMA lista de archivos, MISMO
+          #   comando): 65 passed, 0 failed. Si el runner da otro numero,
+          #   manda el runner.
+          # 65 -> 66 el 2026-09-20 (ronda 2b, vocativo de faceta): el nombre
+          #   de una faceta va a aparecer en CASI TODOS los mensajes -- para
+          #   dirigirse a una hay que nombrarla. `_quitar_vocativo_faceta`
+          #   (jax/memory/db.py) pela el nombre SOLO cuando encabeza el
+          #   mensaje como vocativo ("jax ...", "jax, ...", "hyde: ..."),
+          #   nunca cuando el nombre ES la pregunta ("¿que modelo usa JAX?").
+          #   La lista de nombres sale de `jax.core.router.ALIASES` (ya
+          #   existia para que el REPL reconozca invocaciones de faceta; no
+          #   se inventa una lista nueva). Medido contra produccion (solo
+          #   SELECT) que esto mejora de verdad la recuperacion: la
+          #   distancia coseno real al fact de ocupacion (#7) sube del
+          #   puesto 26 de 79 al puesto 5 de 79 al sacar "jax" de "jax sabes
+          #   a que me dedico?" (y mejoras similares en otras dos preguntas
+          #   reales) -- documentado con los numeros en el docstring de la
+          #   funcion. Logica pura cubierta en tests/test_vocativo_faceta.py
+          #   (archivo nuevo, aparte, en el job tests-puros); acá solo se
+          #   suma +1 por el test de CABLEADO
+          #   (`test_pela_el_vocativo_antes_de_pedir_el_embedding`, visto en
+          #   rojo contra el codigo sin la llamada) -- la logica en si no se
+          #   duplica en este job. Medido en local (MISMO comando): 66
+          #   passed, 0 failed. Si el runner da otro numero, manda el
+          #   runner.
+          # 66 -> 72 el 2026-09-21 (pendiente del 2026-09-20:
+          #   mark_action_item_done/touch_person_mentions distinguen no-op
+          #   de "no existe", mismo defecto ya arreglado en
+          #   verify_fact/expire_fact -- ver tests/test_memoria_retorno_no_ambiguo.py,
+          #   arriba). tests/test_accion_persona_retorno_no_ambiguo.py es
+          #   archivo NUEVO (+6, contra la MariaDB real de este job -- se
+          #   agrega a las DOS listas de arriba). Cubre los cuatro casos de
+          #   cada metodo: mark_action_item_done (marcar como hecho un item
+          #   ya hecho, en el mismo segundo -- completed_at es `timestamp`
+          #   SIN microsegundos, asi que es un no-op de verdad; item
+          #   inexistente; base caida) e igual para touch_person_mentions
+          #   (tocar la misma persona dos veces el mismo dia -- CURDATE() no
+          #   cambia dentro del dia; nadie matchea; base caida). Los 2 casos
+          #   de no-op vistos ROJOS contra el codigo de antes de este commit
+          #   (el resto ya pasaba: no hay ambiguedad real en "no existe" ni
+          #   en "base caida", solo en el no-op idempotente). Medido en
+          #   local (MISMO comando, MariaDB real 127.0.0.1:3308): 66 -> 72
+          #   passed. Si el runner da otro numero, manda el runner.
+          # 72 -> 76 el 2026-09-21 (cierre de la auditoria adversarial sobre
+          #   el commit `c687a2e`, jax#247): +4 en
+          #   tests/test_accion_persona_retorno_no_ambiguo.py -- el pool en
+          #   `None` (no un mock de `acquire()` que explota) daba `0` en
+          #   vez de `None` en touch_person_mentions (BLOQUEANTE, hallazgo
+          #   #1); el caso mixto (una persona tocada hoy, otra no) daba dos
+          #   numeros distintos para el mismo estado (hallazgo #2); el
+          #   orden UPDATE-luego-SELECT abria una carrera de verdad con el
+          #   WHERE por nombre (hallazgo #3, ahora COUNT siempre primero);
+          #   y `touch_person_mentions([])` separado de "sin pool". Los 3
+          #   primeros vistos ROJOS contra el codigo de este mismo commit
+          #   (`test_touch_person_mentions_sin_pool_da_none`,
+          #   `test_touch_person_mentions_caso_mixto_es_monotono`,
+          #   `test_touch_person_mentions_cuenta_antes_de_actualizar`; el
+          #   resto ya pasaba). Medido en local (MISMO comando, MariaDB
+          #   real 127.0.0.1:3308): 72 -> 76 passed.
+          # 76 -> 78 el 2026-09-21 (SEGUNDA auditoria adversarial sobre el
+          #   commit `c687a2e`, jax#247): +2 en
+          #   tests/test_accion_persona_retorno_no_ambiguo.py --
+          #   `test_touch_person_mentions_escribe_last_mentioned_de_verdad`
+          #   (hallazgo #1: ningun test leia `last_mentioned` de la base
+          #   despues de llamar al metodo -- verificado por mutacion,
+          #   cambiando el UPDATE por
+          #   `UPDATE people SET last_mentioned=last_mentioned WHERE ...` la
+          #   suite de ese archivo seguia en 10 passed) y
+          #   `test_mark_action_item_done_pool_none_da_none` (hallazgo #2:
+          #   el hallazgo BLOQUEANTE de la primera ronda -- `self.pool` en
+          #   `None` de verdad, no un mock de `acquire()` que explota -- se
+          #   cerro en `touch_person_mentions` pero quedo abierto en el
+          #   vecino; verificado por mutacion, con
+          #   `if not self.pool: return False` en `mark_action_item_done`
+          #   la suite de ese archivo sin este test daba 13 passed). Los 2
+          #   vistos ROJOS contra su mutante correspondiente, revertido
+          #   despues de confirmar. Medido en local (MISMO comando, MariaDB
+          #   real 127.0.0.1:3308): 76 -> 78 passed. Si el runner da otro
+          #   numero, manda el runner.
+          grep -qE "^78 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 78 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
@@ -1043,6 +1186,7 @@ jobs:
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
+          tests/test_vocativo_faceta.py
           tests/test_identity_context.py tests/test_jacobs_director.py
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
@@ -1113,6 +1257,7 @@ jobs:
           tests/test_env_se_lee_con_sudo.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py
+          tests/test_repl_pendientes_base_caida.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
           tests/test_health_de_las_manos_puede_fallar.py
           tests/test_degradaciones_declaradas.py
@@ -1182,6 +1327,7 @@ jobs:
           python -m pytest -q \
             tests/test_capability_unbound_schema.py tests/test_chunking.py \
             tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py \
+            tests/test_vocativo_faceta.py \
             tests/test_identity_context.py tests/test_jacobs_director.py \
             tests/test_memory_correction.py tests/test_memory_helpers.py \
             tests/test_read_audit_log_unbound.py tests/test_template_hash.py \
@@ -1252,6 +1398,7 @@ jobs:
             tests/test_env_se_lee_con_sudo.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py \
+            tests/test_repl_pendientes_base_caida.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
             tests/test_health_de_las_manos_puede_fallar.py \
             tests/test_degradaciones_declaradas.py \
@@ -2840,8 +2987,66 @@ jobs:
           #   medido en el runner local con ESTE MISMO comando: 2261 -> 2266 (mismo
           #   2261 de la nota de arriba, confirmando que la base no se movio). Si el
           #   runner da otro numero, manda el runner.
-          grep -qE "^2317 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2317 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2317 -> 2334 el 2026-09-20 (ronda 2, `detect_completeness_intent`
+          #   ampliado): tests/test_completeness_intent.py sube de 7 a 24
+          #   (+17) -- el caso real ("jax sabes a que me dedico?"), sus
+          #   variantes en espanol (con y sin "jax" al frente, con y sin
+          #   tilde, voseo), sus equivalentes en ingles, y 4 falsos positivos
+          #   en la direccion contraria (un tercero o un producto no cae en
+          #   'user'). "17 skipped" NO cambia: nada de esto toca DB ni
+          #   corpus. NO pude reproducir el numero COMPLETO en local con el
+          #   mismo comando: sin sufijo de base y sin `/etc/jax/.env`
+          #   (replicando el entorno del job, que no fija JAX_DB_HOST), esta
+          #   maquina corrio "2349 passed, 3 xfailed, 0 skipped" en vez de
+          #   "2317 passed, 17 skipped" -- una diferencia de +32 passed / -17
+          #   skipped que NO es de esta ronda: coincide con la nota de
+          #   arriba, "16 de los 17 skips son tests/test_ejecutor_reproduccion_u3.py
+          #   sin el corpus de U3" -- este checkout SI tiene ese corpus (no
+          #   es un runner limpio), asi que esos tests corren en vez de
+          #   saltarse. El delta verificado por MUTACION (agregar/sacar los
+          #   17 tests nuevos con el resto del arbol fijo) es +17 sobre el
+          #   piso declarado; el piso sube por ese delta, no por el passed
+          #   crudo local. Si el runner da otro numero, manda el runner.
+          # 2334 -> 2349 el 2026-09-20 (ronda 2b, vocativo de faceta):
+          #   tests/test_vocativo_faceta.py es archivo NUEVO (+15) -- se
+          #   agrega a la lista de este job, arriba. Cubre
+          #   `_quitar_vocativo_faceta` (jax/memory/db.py): el nombre de la
+          #   faceta se pela SOLO cuando encabeza el mensaje como vocativo
+          #   ("jax ...", "jax, ...", "hyde: ..."), nunca cuando el nombre
+          #   ES la pregunta ("¿que modelo usa JAX?"); la lista de nombres
+          #   sale de `jax.core.router.ALIASES`, no se inventa. "17 skipped"
+          #   NO cambia: archivo puro, sin DB. Delta verificado por MUTACION
+          #   (mismo metodo que la nota de arriba, agregar/sacar el archivo
+          #   con el resto del arbol fijo): +15. Si el runner da otro
+          #   numero, manda el runner.
+          # 2349 -> 2352 el 2026-09-21 (pendiente del 2026-09-20:
+          #   mark_action_item_done/touch_person_mentions distinguen no-op
+          #   de "no existe"): tests/test_repl_pendientes_base_caida.py es
+          #   archivo NUEVO (+3), puro (sin DB, sin red -- se agrega a la
+          #   lista de este job, arriba). Cubre el consumidor real:
+          #   `handle_pendientes_command` (jax/core/main.py) trataba `None`
+          #   (base caida) igual que `False` (el pendiente no existe) en
+          #   `if ok else "No encontre el pendiente #N."` -- mismo
+          #   aplastamiento que ya se arreglo en `handle_fact_command`
+          #   (ver tests/test_repl_fact_verify_autoria.py, arriba). El
+          #   arreglo de la capa de datos (mark_action_item_done, con DB
+          #   real, en el job memory-vector-zero-io) no alcanzaba solo: sin
+          #   este consumidor corregido, un None seguia leyendose como "no
+          #   existe". Los 3 vistos ROJOS contra el codigo de antes de este
+          #   commit (caso feliz y "no existe" ya pasaban; solo la rama de
+          #   base caida fallaba). "17 skipped" NO cambia: archivo puro, sin
+          #   DB. Delta verificado por MUTACION (agregar/sacar el archivo
+          #   con el resto del arbol fijo): +3. Si el runner da otro numero,
+          #   manda el runner.
+          # 2352 -> 2355 (B6-AUD, 2026-09-21): tres regresiones puras
+          # adicionales del cierre de la ruta legacy de Motor Registry. La lista
+          # combinada de master y Block 6 conserva los tres; el comando exacto
+          # de este paso corrió 2368 passed, 3 xfailed en el checkout local
+          # (que no reproduce los skipped estructurales del runner). El piso CI
+          # se deriva del 2352 medido en master más los tres casos B6; los skipped
+          # siguen siendo estructurales.
+          grep -qE "^2355 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2355 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -3344,6 +3549,15 @@ jobs:
           tests/policy/test_decision_authority_binding.py
           tests/policy/test_decision_determinism.py
           tests/policy/test_decision_boundaries.py
+          tests/policy/test_execution_request.py
+          tests/policy/test_execution_authorization.py
+          tests/policy/test_execution_identity.py
+          tests/policy/test_execution_human_approval.py
+          tests/policy/test_execution_dry_run.py
+          tests/policy/test_execution_state_machine.py
+          tests/policy/test_execution_storage.py
+          tests/policy/test_execution_motor_adapter.py
+          tests/policy/test_execution_boundaries.py
           --confcutdir=tests/policy
           -p no:cacheprovider
           --basetemp="${RUNNER_TEMP}/identity-foundation-shadow-pytest"

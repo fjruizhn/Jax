@@ -6,7 +6,7 @@ from threading import RLock
 from typing import Any, Callable, Protocol
 
 from .errors import DecisionIdConflictError, DecisionStorageError
-from .serialization import canonical_decision_record_bytes, decision_record_from_bytes
+from .serialization import _canonical_record_content_bytes, canonical_decision_record_bytes, decision_record_from_bytes
 from .models import DecisionRecord
 
 
@@ -21,7 +21,7 @@ class InMemoryDecisionRecordStore:
     _lock: RLock = field(default_factory=RLock, repr=False)
 
     def insert(self, record: DecisionRecord) -> DecisionRecord:
-        raw = canonical_decision_record_bytes(record)
+        raw = _canonical_record_content_bytes(record)
         with self._lock:
             existing = self._records.get(record.decision_id)
             if existing is None:
@@ -46,7 +46,7 @@ class MariaDBDecisionRecordStore:
             from pymysql.err import IntegrityError
         except ImportError as exc:
             raise DecisionStorageError("MariaDB adapter requiere driver DB-API") from exc
-        raw = canonical_decision_record_bytes(record)
+        raw = _canonical_record_content_bytes(record)
         b = record.authority_binding
         conn = self._connect()
         try:

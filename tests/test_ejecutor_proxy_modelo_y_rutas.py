@@ -43,8 +43,16 @@ def _mensaje(**cambios):
 _FUERA = object()
 
 
-@pytest.mark.parametrize("modelo", ["qwen3.6:35b-a3b-q4_K_M", "claude-haiku-4-5", "modelo-permitido ", "MODELO-PERMITIDO",
-                                    "", None, 7, _FUERA])
+@pytest.mark.parametrize("modelo", [
+    # Dos nombres de modelo REALES (2026-09-21): no importa CUÁLES sean --
+    # lo único que este caso prueba es "cualquier cosa que no sea
+    # MODELO_PERMITIDO se rechaza", así que no dependen del catálogo y no se
+    # rompen si esos dos modelos cambian o se deprecan. Reales a propósito
+    # (no un literal inventado tipo "otro-modelo"): un cliente mal
+    # configurado va a pedir un nombre real, no uno de mentira.
+    "qwen3.6:35b-a3b-q4_K_M", "claude-haiku-4-5",
+    "modelo-permitido ", "MODELO-PERMITIDO",  # variantes de MODELO_PERMITIDO: espacio/mayúsculas NO cuentan como el mismo modelo
+    "", None, 7, _FUERA])
 def test_otro_modelo_no_llega_a_ollama(tmp_path, modelo):
     assert _pedir(tmp_path, "POST", "/v1/messages", _mensaje(model=modelo)) == (
         403, proxy_carril.MODELO_NO_PERMITIDO, 0)

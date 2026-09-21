@@ -18,5 +18,7 @@ def test_publicly_reconstructed_record_is_not_registered_as_verified():
                                record.decision_input, record.decision_input_hash,
                                record.authority_binding, record.result, record.evidence_refs,
                                record.recorded_at_utc, record.decision_record_hash)
-    with pytest.raises(DecisionRecordIntegrityError):
-        canonical_decision_record_bytes(lookalike)
+    # Canonicalization is content verification, not an authority boundary.
+    assert canonical_decision_record_bytes(lookalike)
+    from policy.decision_record import is_verified_decision_record
+    assert not is_verified_decision_record(lookalike)

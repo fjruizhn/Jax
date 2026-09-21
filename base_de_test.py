@@ -420,9 +420,60 @@ async def _clonar_esquema(nombre: str) -> int:
         conn.close()
 
 
+async def _reparar_gobernanza_de_sesion(nombre: str) -> dict:
+    """Corre `jacobs.gobernanza_semilla.reparar_gobernanza_de_test()` contra
+    `nombre` -- SIEMPRE la base de la SESIÓN clonada, nunca `BASE_COMPARTIDA`
+    (`asegurar_base_de_test()` no llama a esto para la base compartida).
+
+    Dos conexiones: una de ESCRITURA contra `nombre` y una de SOLO LECTURA
+    contra `BASE_DE_PRODUCCION` (`jax_memory`) -- ronda 2, 2026-09-21: la
+    semilla ESPEJA el binding vigente de `ada`/`thot`/`el_juez`/`jax_local`
+    contra producción (ver `gobernanza_semilla.py`), así que necesita leerla.
+    `SET SESSION TRANSACTION READ ONLY` inmediatamente después de conectar
+    NO es cosmético: es la misma credencial (`JAX_DB_USER`) que ya tiene
+    permiso de escritura sobre `jax_memory_test`, y ésta es la única función
+    de este repo que abre una conexión hacia PRODUCCIÓN -- el server, no
+    sólo la revisión de código, es quien rechaza cualquier intento de
+    escritura si `gobernanza_semilla.py` alguna vez se equivoca de cursor.
+
+    Conexiones propias por `aiomysql`, no `jacobs.store`: igual criterio que
+    `_clonar_esquema`/`_dropear_base_de_sesion` de este mismo módulo, y evita
+    sumar un llamador nuevo a `store.conexion_dedicada()` -- ese es un guard
+    aparte (`jacobs/_store_pool_test.py::ExcepcionAlPoolTest`) que sólo
+    vigila código DENTRO de `jacobs/`, `las_manos/`, `jax/`, `tools/`; este
+    módulo vive en la raíz del repo a propósito, fuera de ese barrido."""
+    import aiomysql
+
+    from jacobs import gobernanza_semilla
+    from jax.core.db_connect_config import db_connect_timeout_seconds
+
+    timeout = db_connect_timeout_seconds()
+    conn = await aiomysql.connect(
+        db=nombre, autocommit=True, connect_timeout=timeout,
+        **_parametros_de_conexion())
+    conn_prod = await aiomysql.connect(
+        db=BASE_DE_PRODUCCION, autocommit=True, connect_timeout=timeout,
+        **_parametros_de_conexion())
+    try:
+        async with conn_prod.cursor() as cur_prod:
+            await cur_prod.execute("SET SESSION TRANSACTION READ ONLY")
+            async with conn.cursor() as cur:
+                return await gobernanza_semilla.reparar_gobernanza_de_test(cur, cur_prod)
+    finally:
+        conn.close()
+        conn_prod.close()
+
+
 def asegurar_base_de_test(nombre: str | None = None) -> str:
     """Deja lista la base de esta sesión: la crea con el esquema de la
-    plantilla si no existía, y le corre `init_tables()` del repo.
+    plantilla si no existía, le corre `init_tables()` del repo, y espeja el
+    binding vigente de `ada`/`thot`/`el_juez`/`jax_local` contra producción
+    si la plantilla trajo alguno desviado o directamente bloqueado
+    (`jacobs/gobernanza_semilla.py` -- pedido 2026-09-21: la plantilla
+    bloqueaba cualquier ejercicio real de pipeline con esas facetas, y una
+    ronda 1 que sólo reparaba el CONTRATO sin espejar el modelo dejaba
+    `ada`/`thot` apuntando a modelos ya reemplazados en producción). La
+    reparación es idempotente: sobre una base ya sana no toca ninguna fila.
 
     Sin `JAX_DB_HOST` no hay MariaDB a mano (los jobs de tests puros del CI):
     no se crea nada y no es un error.
@@ -442,6 +493,7 @@ def asegurar_base_de_test(nombre: str | None = None) -> str:
         # crear): la plantilla puede estar atrasada respecto de esta rama.
         from jacobs import store  # import perezoso: arrastra el pool
         asyncio.run(store.init_tables())
+        asyncio.run(_reparar_gobernanza_de_sesion(nombre))
     except Exception:
         if anterior is None:
             os.environ.pop(VARIABLE_DE_LA_BASE, None)

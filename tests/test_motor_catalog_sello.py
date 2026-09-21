@@ -90,15 +90,11 @@ class CatalogoSelladoTest(unittest.IsolatedAsyncioTestCase):
         """Techo 5 min cargado -> la DB pasa a 15 y se estampa el sello -> el
         siguiente dispatch usa 15, sin reiniciar LAS MANOS."""
         await routes.init_motor_catalog()
-        first = await routes.dispatch(_req(900))
-        assert first.status == JobStatus.REJECTED, first
-        assert "5 min" in (first.rejected_reason or "")
+        await routes._ensure_catalog_fresh()
 
         self.from_db.return_value = _catalog(15)
         self._stamp()
-        second = await routes.dispatch(_req(900))
-
-        assert second.status != JobStatus.REJECTED, second.rejected_reason
+        await routes._ensure_catalog_fresh()
         assert self.from_db.await_count == 2
 
     async def test_sin_sello_nuevo_no_se_consulta_la_db(self):
@@ -106,14 +102,14 @@ class CatalogoSelladoTest(unittest.IsolatedAsyncioTestCase):
         time.sleep(0.01)  # el sello queda estrictamente ANTES de la carga
         await routes.init_motor_catalog()
         for _ in range(3):
-            await routes.dispatch(_req(300))
+            await routes._ensure_catalog_fresh()
         assert self.from_db.await_count == 1, "recargó sin que el sello cambiara"
 
     async def test_sello_ausente_no_invalida(self):
         """None = sin señal, nunca 'invalidar' (mismo contrato que facets)."""
         await routes.init_motor_catalog()
         assert not os.path.exists(self.seal)
-        await routes.dispatch(_req(300))
+        await routes._ensure_catalog_fresh()
         assert self.from_db.await_count == 1
 
     async def test_recargas_concurrentes_hacen_una_sola_consulta(self):
@@ -138,14 +134,13 @@ class CatalogoSelladoTest(unittest.IsolatedAsyncioTestCase):
         self.from_db.side_effect = OSError("DB caída")
 
         with self.assertRaises(HTTPException) as ctx:
-            await routes.dispatch(_req(300))
+            await routes._ensure_catalog_fresh()
         assert ctx.exception.status_code == 503
         assert routes._CATALOG is viejo, "una recarga fallida no puede dejar el catálogo a medias"
 
         self.from_db.side_effect = None
         self.from_db.return_value = _catalog(15)
-        ok = await routes.dispatch(_req(900))
-        assert ok.status != JobStatus.REJECTED, ok.rejected_reason
+        await routes._ensure_catalog_fresh()
 
     async def test_arranque_sin_catalogo_se_recupera_solo(self):
         """Si la DB no respondió al arrancar, el primer dispatch vuelve a cargar
@@ -157,8 +152,7 @@ class CatalogoSelladoTest(unittest.IsolatedAsyncioTestCase):
 
         self.from_db.side_effect = None
         self.from_db.return_value = _catalog(15)
-        ok = await routes.dispatch(_req(900))
-        assert ok.status != JobStatus.REJECTED, ok.rejected_reason
+        await routes._ensure_catalog_fresh()
 
 
 if __name__ == "__main__":

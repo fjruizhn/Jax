@@ -254,9 +254,10 @@ def _pedido(token):
 
 def test_motor_dispatch_con_token_inventado_se_rechaza(motor, store_falso):
     routes, lanzado = motor
-    r = asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
-    assert r.status.value == "rejected"
-    assert "token_desconocido" in r.rejected_reason
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException, match="GOVERNED_EXECUTION_REQUIRED") as exc:
+        asyncio.run(routes.dispatch(_pedido("cualquier-cosa")))
+    assert exc.value.status_code == 410
     lanzado.assert_not_called()
 
 
@@ -264,10 +265,10 @@ def test_motor_dispatch_con_token_emitido_pasa_y_lo_consume(motor, store_falso):
     routes, _ = motor
     store = store_falso
     store.human_gate_token_consumir.return_value = True
-    r = asyncio.run(routes.dispatch(_pedido("emitido")))
-    assert r.status.value == "pending"
-    (args,) = [c.args for c in store.human_gate_token_consumir.await_args_list]
-    assert args[0] == hashlib.sha256(b"emitido").hexdigest()
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException, match="GOVERNED_EXECUTION_REQUIRED"):
+        asyncio.run(routes.dispatch(_pedido("emitido")))
+    store.human_gate_token_consumir.assert_not_awaited()
 
 
 def test_motor_dispatch_rechazado_por_politica_no_quema_el_token(motor, store_falso):
@@ -276,6 +277,56 @@ def test_motor_dispatch_rechazado_por_politica_no_quema_el_token(motor, store_fa
     from motor_registry.models import MotorDispatchRequest
     pedido = MotorDispatchRequest(caller="ada", capability="code_swarm", motor="kimi",
                                   prompt="p", human_gate_token="emitido", timeout_seconds=60)
-    r = asyncio.run(routes.dispatch(pedido))
-    assert r.status.value == "rejected"
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException, match="GOVERNED_EXECUTION_REQUIRED"):
+        asyncio.run(routes.dispatch(pedido))
     store.human_gate_token_consumir.assert_not_awaited()
+
+
+def test_governed_dispatch_without_authoritative_store_rejects(motor):
+    routes, launched = motor
+    from motor_registry.models import GovernedDispatchRequest
+    from fastapi import HTTPException
+    routes.configure_governed_execution_store(None)
+    with pytest.raises(HTTPException, match="store no inicializado") as exc:
+        asyncio.run(routes.governed_dispatch(GovernedDispatchRequest(execution_id="x")))
+    assert exc.value.status_code == 503
+    launched.assert_not_called()
+
+
+def test_governed_dispatch_missing_binding_rejects_before_worker(motor, monkeypatch):
+    routes, launched = motor
+    from motor_registry.models import GovernedDispatchRequest
+    from fastapi import HTTPException
+    class Store:
+        def load_execution(self, _):
+            from types import SimpleNamespace
+            return SimpleNamespace(execution_id="x", authorization_id="a", decision_id="wrong",
+                execution_authorization_hash="h", execution_request_hash="r")
+        def load_authorization(self, _):
+            from types import SimpleNamespace
+            return SimpleNamespace(decision_id="right", execution_authorization_hash="h")
+    routes.configure_governed_execution_store(Store())
+    with pytest.raises(HTTPException, match="GOVERNED_DISPATCH_REJECTED"):
+        asyncio.run(routes.governed_dispatch(GovernedDispatchRequest(execution_id="x")))
+    launched.assert_not_called()
+
+
+def test_governed_dispatch_claims_before_mocked_worker(motor, monkeypatch):
+    routes, launched = motor
+    from types import SimpleNamespace
+    from motor_registry.models import GovernedDispatchRequest
+    calls = []
+    request = SimpleNamespace(capability="code_swarm", motor="kimi", authenticated_caller_id="hyde",
+        execution_request_hash="r", prompt="p", user_id=None, tenant_id=None, timeout_seconds=60,
+        projection=lambda: {"context": {}})
+    auth = SimpleNamespace(decision_id="d", execution_authorization_hash="h", execution_request=request)
+    record = SimpleNamespace(execution_id="x", authorization_id="a", decision_id="d",
+        execution_authorization_hash="h", execution_request_hash="r")
+    class Store:
+        def load_execution(self, _): return record
+        def load_authorization(self, _): return auth
+    routes.configure_governed_execution_store(Store(), lambda *args, **kwargs: calls.append(args))
+    result = asyncio.run(routes.governed_dispatch(GovernedDispatchRequest(execution_id="x")))
+    assert calls and result.status.value == "pending"
+    launched.assert_called_once()

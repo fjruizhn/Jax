@@ -246,7 +246,7 @@ def _es_llamada_a_la_ruta(nodo):
             and nodo.func.id == "ruta_del_interruptor")
 
 
-def test_routes_resuelve_la_ruta_en_cada_dispatch():
+def test_routes_resuelve_la_ruta_en_cada_governed_dispatch():
     """La ruta se resuelve DENTRO de `dispatch` (en cada pedido, no al
     importar) y lo que recibe el worker es esa resolución. Revisión final del
     frente B (hallazgo 5): se resuelve en una variable ANTES de crear el job,
@@ -255,8 +255,8 @@ def test_routes_resuelve_la_ruta_en_cada_dispatch():
     assert "_KILL_SWITCH_PATH" not in fuente
     arbol = ast.parse(fuente)
     dispatch = next(n for n in arbol.body
-                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "dispatch")
-    fuera = [n for n in arbol.body if n is not dispatch
+                    if isinstance(n, ast.AsyncFunctionDef) and n.name == "governed_dispatch")
+    fuera = [n for n in arbol.body if n is not dispatch and not (isinstance(n, ast.AsyncFunctionDef) and n.name == "dispatch")
              for m in ast.walk(n) if _es_llamada_a_la_ruta(m)]
     assert fuera == []
     asignaciones = [n for n in ast.walk(dispatch)
@@ -274,7 +274,7 @@ def test_dispatch_sin_variable_no_deja_un_job_huerfano(tmp_path, monkeypatch):
     de `_STORE.create`; sin JAX_KILL_SWITCH_PATH el pedido fallaba cerrado
     pero dejaba un job `pending` que ningún worker iba a terminar."""
     from motor_registry import routes
-    from motor_registry.models import MotorDispatchRequest
+    from motor_registry.models import GovernedDispatchRequest
     from motor_registry.policy import MotorPolicy
 
     catalogo = MotorCatalog(_CFG)
@@ -286,11 +286,14 @@ def test_dispatch_sin_variable_no_deja_un_job_huerfano(tmp_path, monkeypatch):
     monkeypatch.setattr(routes, "_ensure_catalog_fresh", AsyncMock())
     monkeypatch.setattr(routes.motor_worker, "run", lanzado)
     monkeypatch.delenv("JAX_KILL_SWITCH_PATH", raising=False)
-    pedido = MotorDispatchRequest(caller="jacobs", capability="implementation", motor="kimi",
-                                  prompt="p", timeout_seconds=60)
+    class Store:
+        def load_execution(self, _):
+            raise AssertionError("la ruta debe fallar antes de cargar")
+    routes.configure_governed_execution_store(Store())
+    pedido = GovernedDispatchRequest(execution_id="x")
 
     with pytest.raises(interruptor.InterruptorSinConfigurar):
-        asyncio.run(routes.dispatch(pedido))
+        asyncio.run(routes.governed_dispatch(pedido))
     assert store._index == {}
     lanzado.assert_not_called()
 
