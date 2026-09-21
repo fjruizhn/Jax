@@ -15,7 +15,10 @@ def derive_assertion(definition, identity, observations, *, claim_level, scope, 
   matching=[x for x in observations if x.control_id==definition.control_id and x.control_version==definition.control_version and x.implementation_identity_hash==identity.implementation_identity_hash and x.scope==scope and x.subject in subjects]
   if any(x.outcome is ObservationOutcome.FAILED for x in matching): verdict=AssertionVerdict.FAILED
   elif any(x.outcome is ObservationOutcome.ERROR for x in matching): verdict=AssertionVerdict.UNVERIFIABLE
-  elif claim_level is ClaimLevel.WRITTEN: verdict=AssertionVerdict.SUPPORTED
+  # A clean registered identity alone is not WRITTEN: the identity's build
+  # manifest and every control implementation reference must be verified by
+  # the authoritative profile evaluator.
+  elif claim_level is ClaimLevel.WRITTEN: verdict=AssertionVerdict.INSUFFICIENT_EVIDENCE
   elif claim_level is ClaimLevel.TESTED: verdict=AssertionVerdict.INSUFFICIENT_EVIDENCE
   elif not matching: verdict=AssertionVerdict.NOT_OBSERVED
   elif any(x.occurred_at_utc < as_of_utc-timedelta(hours=24) for x in matching): verdict=AssertionVerdict.STALE
