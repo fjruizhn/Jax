@@ -381,10 +381,20 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'procesamiento.extracto
 
 ```bash
 printf 'openpyxl==3.1.5\npdfplumber==0.11.10\npython-docx==1.2.0\n' > requirements-archivos.txt
-python -m pip install -r requirements-archivos.txt
+python -m pip install --user -r requirements-archivos.txt
 ```
 
-Si alguna versión no existe, fijar la última estable publicada y anotarla; NO usar rangos.
+**`--user` NO es opcional y no es cosmético.** El spec exige que estas dependencias no
+puedan tocar los servicios de producción. Medido el 2026-09-20: `jax-platform` y
+`jax-las-manos` corren como **`jaxsvc`**, así que una instalación en
+`/home/fruiz/.local/lib/python3.14/site-packages` les es invisible. Una instalación al
+sistema (`sudo pip`) SÍ los alcanzaría.
+
+En CI da igual (el runner es efímero y se descarta), por eso el paso de CI usa
+`pip install -r requirements-archivos.txt` sin `--user`.
+
+Las tres versiones están verificadas contra el índice de PyPI el 2026-09-20. Si alguna
+fallara, fijar la última estable publicada y anotarlo; NO usar rangos.
 
 - [ ] **Step 4: Write minimal implementation**
 
