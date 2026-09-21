@@ -220,3 +220,16 @@ def test_una_chartsheet_no_desaparece_en_silencio(tmp_path: Path):
     assert r.detalle["hojas"] == 2
     assert r.detalle["hojas_extraidas"] == 1
     assert r.detalle["no_tabulares"] == ["grafico"]
+
+
+def test_extraer_sin_openpyxl_instalado_da_sin_extractor(tmp_path: Path, monkeypatch):
+    """Menor 3 de task-4-hallazgos.md (deuda heredada, pagada junto con el
+    mismo defecto en pdf.py): un `ModuleNotFoundError` crudo no es un
+    resultado -- existe el estado 'sin_extractor' justo para esto."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "openpyxl", None)
+    origen = _libro_de_seis_hojas(tmp_path / "eeff.xlsx")
+    r = excel.extraer(origen)
+    assert r.estado == "sin_extractor"
+    assert r.salidas == {}

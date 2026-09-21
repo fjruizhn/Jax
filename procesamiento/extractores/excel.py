@@ -91,7 +91,14 @@ def _formulas_sin_valor(hoja_valores, hoja_cruda) -> int:
 
 
 def extraer(origen: Path) -> Resultado:
-    import openpyxl
+    try:
+        import openpyxl
+    except ModuleNotFoundError as exc:
+        return Resultado(
+            estado="sin_extractor", salidas={}, extractor=EXTRACTOR,
+            version="sin instalar",
+            detalle={"razon": f"openpyxl no esta instalado: {exc}"},
+        )
 
     try:
         libro = openpyxl.load_workbook(origen, data_only=True, read_only=True)
