@@ -2990,13 +2990,23 @@ jobs:
       #     fixture del propio brief, "1000" quedaba de nombre de columna.
       # De 7 a 18 tests.
       #
+      # Task 9 (2026-09-21, D-1, task-9-brief.md): `objeto.style` es `None`
+      # en documentos reales -- medido contra 23 documentos financieros
+      # reales, 3 de cada 4. `(objeto.style.name or "").lower()` levantaba
+      # `AttributeError` CRUDO, escapando del modulo -- contradice el
+      # contrato de los cuatro extractores (siempre Resultado, nunca
+      # excepcion). Se trata `style is None` como "sin estilo" (parrafo
+      # normal), y el resto del cuerpo queda protegido con el mismo patron
+      # que `pdf.py` usa para su bucle de paginas: cualquier excepcion
+      # inesperada sale como Resultado de error, nunca escapa. De 18 a 20.
+      #
       # `pytest.importorskip("docx")` en `_word_test.py` -- mismo riesgo de
       # "1 skipped" con EXIT 0 si python-docx no se instaló.
       - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
-          grep -qE "^18 passed" /tmp/word_tests || {
-            echo "PISO ROTO: se esperaban 18 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^20 passed" /tmp/word_tests || {
+            echo "PISO ROTO: se esperaban 20 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 7 (2026-09-20/21, procesamiento-archivos-nucleo): la compuerta
       # -- elige extractor por tipo, y NUNCA paga el caro (OCR) si el barato
@@ -3143,11 +3153,24 @@ jobs:
       #     al que apuntaban ya no existe), la tercera se demuestra
       #     estructuralmente inalcanzable con la construccion actual de
       #     _nombre_candidato -- detalle completo en task-8-report.md.
+      #
+      # Task 9 (2026-09-21, D-2, task-9-brief.md): un documento que SIEMPRE
+      # falla costaba el precio completo del extractor en CADA ingesta --
+      # medido con un PDF de CamScanner patologico (paginas 1836x2376 pt,
+      # 9x el area normal a 300 DPI) que agota el timeout de pdftoppm
+      # (~300s), y los `error` no se cachean por diseno (I-1: un fallo
+      # transitorio tiene que poder curarse). Se conserva la curacion y se
+      # le pone techo: la ficha registra `_intentos`, y al tercer intento
+      # agotado (mismo `extractor_version` que el vigente) se sirve la
+      # ficha guardada sin volver a invocar al extractor -- un cambio de
+      # version reinicia la cuenta, porque es la senal de que la causa pudo
+      # arreglarse. `sin_extractor` se comporta igual que `error`; `ok` no
+      # se ve afectado. De 25 a 29.
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          grep -qE "^25 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 25 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^29 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 29 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el

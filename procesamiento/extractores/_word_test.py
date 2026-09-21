@@ -417,6 +417,66 @@ def test_ninguna_tabla_trae_fila_separadora_de_encabezado(tmp_path: Path):
     assert "---" not in r.salidas["texto.md"]
 
 
+# ---------------------------------------------------------------------------
+# D-1 (task-9-brief.md, 2026-09-21): `objeto.style` es `None` en documentos
+# reales -- medido: 3 de cada 4 .docx reales del lote de 23 documentos
+# financieros. `(objeto.style.name or "").lower()` levantaba AttributeError
+# CRUDO, escapando del módulo -- contradice el contrato de los cuatro
+# extractores (siempre Resultado, nunca excepción).
+# ---------------------------------------------------------------------------
+
+
+def test_parrafo_con_style_none_no_revienta_y_se_trata_como_normal(
+    tmp_path: Path, monkeypatch
+):
+    """El caso EXACTO del hallazgo: `Paragraph.style` es `None` (python-docx
+    devuelve `None` cuando el documento no define un estilo por defecto para
+    párrafo -- "no común" según el propio docstring de python-docx, pero
+    medido en 3 de 4 documentos reales). Antes: `AttributeError: 'NoneType'
+    object has no attribute 'name'`, crudo, fuera de `Resultado`. Ahora: se
+    trata como "sin estilo" -- párrafo normal, sin encabezado -- y el
+    extracto sigue."""
+    from docx.text.paragraph import Paragraph
+
+    # El documento se construye y se guarda ANTES de parchear -- `python-docx`
+    # necesita el setter real de `style` para armar el `.docx` (add_heading
+    # asigna `paragraph.style = "Heading 1"`). El parche sólo cubre la
+    # LECTURA, que es donde vive el defecto de D-1.
+    origen = _documento_brief(tmp_path / "sin-estilo.docx")
+    monkeypatch.setattr(Paragraph, "style", property(lambda self: None))
+    r = word.extraer(origen)
+
+    assert r.estado == "ok"
+    md = r.salidas["texto.md"]
+    # Con estilo None, "Estado de Resultados" ya NO puede salir como
+    # encabezado (no hay forma de saber que era "Heading 1") -- pero el
+    # texto tiene que sobrevivir como párrafo normal, no perderse.
+    assert "Estado de Resultados" in md
+    assert "# Estado de Resultados" not in md
+    assert "Periodo 2026" in md
+
+
+def test_excepcion_inesperada_en_el_cuerpo_da_resultado_de_error(
+    tmp_path: Path, monkeypatch
+):
+    """No sólo `style=None`: CUALQUIER excepción inesperada leyendo el
+    cuerpo tiene que salir como `Resultado(estado="error", ...)`, nunca
+    escapar cruda -- igual que `pdf.py` protege su bucle de páginas (spec
+    de la tarea D-1)."""
+    from docx.text.paragraph import Paragraph
+
+    def explota(self):
+        raise RuntimeError("fallo inesperado simulado leyendo el estilo")
+
+    origen = _documento_brief(tmp_path / "explota.docx")
+    monkeypatch.setattr(Paragraph, "style", property(explota))
+    r = word.extraer(origen)
+
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert "RuntimeError" in r.detalle["razon"]
+
+
 def test_niveles_de_encabezado_no_colapsan_a_uno(tmp_path: Path):
     """Un "Heading 2" tiene que salir como "## ", no "# " -- una mutación
     que colapsa todos los niveles a 1 no se nota si sólo se prueba un

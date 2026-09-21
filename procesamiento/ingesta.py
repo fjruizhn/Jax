@@ -226,6 +226,19 @@ _MAX_INTENTOS_REEMPLAZO = 10
 # porque el primer intento siempre corre sin sleep.
 _JITTER_MAXIMO_SEGUNDOS = 0.02
 
+# D-2 (task-9-brief.md, 2026-09-21): cuántas veces se reintenta un fallo
+# PERMANENTE (`error`/`sin_extractor`) antes de dejar de pagar el costo
+# completo del extractor en cada llamada. Medido: un PDF de CamScanner con
+# páginas de 1836x2376 pt (9x el área normal a 300 DPI) agota el timeout de
+# `pdftoppm` (~300s) y, como I-1 nunca cachea un `error` (a propósito -- un
+# fallo transitorio tiene que poder curarse), ese documento volvía a costar
+# 300s en CADA ingesta, sin techo. El ruling conserva la curación y le pone
+# techo: tres intentos -- no uno, porque el primero puede fallar por algo de
+# veras pasajero --, y el tercero es el último mientras no cambie la versión
+# del extractor (ver `_estado_de_error_cacheado`, que es la señal de que la
+# causa pudo haberse arreglado).
+_MAX_INTENTOS_ERROR = 3
+
 # nombre del extractor (Resultado.extractor / Ficha.extractor) -> modulo
 # que sabe reportar SU version vigente -- consulta barata (un __version__
 # ya importado, o un `--version` de proceso, nunca una re-extraccion) para
@@ -427,6 +440,55 @@ def _ficha_de_cache_valida(carpeta: Path, huella: str, extension_actual: str) ->
     return ficha
 
 
+def _estado_de_error_cacheado(
+    carpeta: Path, huella: str, extension_actual: str
+) -> tuple[Ficha | None, int]:
+    """D-2: lee la ficha cacheada en `carpeta`, si la hay, y la interpreta
+    como un intento previo FALLIDO (`error` o `sin_extractor` -- el ruling
+    es explícito: los dos se comportan igual acá). Devuelve `(None, 0)`
+    cuando no hay una ficha de fallo UTILIZABLE para contar intentos: no
+    existe, está corrupta (I-4), la huella o la extensión no coinciden
+    (defensivo / I-3), el estado no es de fallo, o el extractor VIGENTE
+    cambió de versión desde que se escribió -- en ese caso la cuenta
+    arranca de cero, porque un cambio de versión es la señal de que la
+    causa del fallo pudo haberse arreglado (misma lógica de I-2, aplicada
+    ahora también al conteo de intentos, no sólo al acierto de caché).
+
+    Si hay una ficha de fallo UTILIZABLE, devuelve `(ficha, intentos)` con
+    el número de intentos ya gastados. Nunca lanza -- un fallo de lectura
+    acá es, igual que en `_ficha_de_cache_valida`, un fallo de caché, no
+    una excepción hacia el llamador."""
+    ficha_json = carpeta / "ficha.json"
+    if not ficha_json.is_file():
+        return None, 0
+    try:
+        ficha = Ficha.desde_json(ficha_json.read_text(encoding="utf8"))
+    except (OSError, ValueError):
+        return None, 0  # I-4
+
+    if ficha.sha256 != huella:
+        return None, 0  # defensivo: no debería pasar, la carpeta ya está indexada por huella
+
+    if ficha.estado not in {"error", "sin_extractor"}:
+        return None, 0  # no es un fallo -- este camino no aplica
+
+    if ficha.detalle.get("_extension_ingesta") != extension_actual:
+        return None, 0  # I-3 aplicado también acá
+
+    version_vigente = _version_vigente(ficha.extractor)
+    if version_vigente is None or ficha.extractor_version != version_vigente:
+        return None, 0  # I-2: el extractor cambió -- la cuenta arranca de cero
+
+    intentos = ficha.detalle.get("_intentos")
+    if not isinstance(intentos, int) or intentos < 1:
+        # Ficha de fallo escrita ANTES de este arreglo (o corrupta en este
+        # campo puntual): no tiene `_intentos` -- cuenta como un primer
+        # intento ya gastado, nunca como cero (que reiniciaría el tope
+        # sin motivo).
+        intentos = 1
+    return ficha, intentos
+
+
 def ingerir(origen: Path, trabajo: Path) -> Ficha:
     origen = Path(origen)
     trabajo_abs = _resolver_bajo_jail(Path(trabajo))  # C-1/I-7
@@ -442,6 +504,18 @@ def ingerir(origen: Path, trabajo: Path) -> Ficha:
     if ficha_cacheada is not None:
         # Cache vivo y VERIFICADO -- cero trabajo.
         return ficha_cacheada
+
+    # D-2: un fallo PERMANENTE (`error`/`sin_extractor`) tiene techo --
+    # tres intentos, y el tercero es el último mientras no cambie la
+    # versión del extractor. Sin esto, un documento que SIEMPRE falla paga
+    # el costo completo del extractor en CADA ingesta (medido: 300s por
+    # llamada con un PDF patológico), porque I-1 nunca cachea un `error` a
+    # propósito -- un fallo transitorio tiene que poder curarse.
+    ficha_error_previa, intentos_previos = _estado_de_error_cacheado(
+        carpeta, huella, extension_actual
+    )
+    if ficha_error_previa is not None and intentos_previos >= _MAX_INTENTOS_ERROR:
+        return ficha_error_previa
 
     resultado = compuerta.extraer(destino)
 
@@ -464,6 +538,11 @@ def ingerir(origen: Path, trabajo: Path) -> Ficha:
             "_extension_ingesta": extension_actual,
             "_salidas_ingesta": sorted(resultado.salidas.keys()),
         }
+        if resultado.estado in {"error", "sin_extractor"}:
+            # D-2: registra CUÁNTOS intentos lleva este fallo -- es lo que
+            # `_estado_de_error_cacheado` lee en la próxima ingesta para
+            # decidir si reintenta o si ya agotó el tope.
+            detalle["_intentos"] = intentos_previos + 1
 
         ficha = Ficha(
             sha256=huella,

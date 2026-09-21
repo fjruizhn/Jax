@@ -769,6 +769,161 @@ def test_A5_extension_en_mayusculas_no_rompe_el_cache(tmp_path: Path, monkeypatc
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# D-2 (task-9-brief.md, 2026-09-21): un documento que SIEMPRE falla costaba
+# 300s en CADA intento -- los `error` no se cachean por diseño (I-1, sigue
+# siendo correcto: un fallo transitorio tiene que poder curarse), así que un
+# fallo PERMANENTE no tenía techo. Ruling: se conserva la curación y se le
+# pone techo -- tres intentos, no uno; el tercero es el último; un cambio de
+# `extractor_version` reinicia la cuenta (es la señal de que la causa pudo
+# arreglarse); `ok` no se ve afectado por nada de esto.
+# ---------------------------------------------------------------------------
+
+
+def test_D2_el_tercer_intento_es_el_ultimo(tmp_path: Path, monkeypatch):
+    """Un archivo que SIEMPRE falla: los primeros TRES `ingerir()` tienen
+    que reintentar la extracción de verdad (la causa podría curarse en el
+    segundo o el tercero, I-1). Del cuarto en adelante, cero llamadas
+    nuevas a `compuerta.extraer` -- se sirve la ficha de error guardada."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    llamadas: list[Path] = []
+
+    def falla_siempre(destino):
+        llamadas.append(destino)
+        # La versión se pide DINÁMICAMENTE (`excel._version()`, real) en
+        # vez de hardcodear un string -- si no coincide con lo que
+        # `_version_vigente` (I-2) lee del módulo instalado, D-2 nunca
+        # bloquea (lo trataría como "cambió de versión" en cada llamada) y
+        # este test daría un falso verde por casualidad de versión.
+        return Resultado(
+            estado="error", salidas={}, detalle={"razon": "PDF patologico, timeout"},
+            extractor=excel.EXTRACTOR, version=excel._version(),
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falla_siempre)
+
+    for _ in range(3):
+        f = ingesta.ingerir(origen, trabajo)
+        assert f.estado == "error"
+    assert len(llamadas) == 3, (
+        f"D-2 REABIERTO: se esperaban 3 llamadas reales a compuerta.extraer "
+        f"tras 3 ingestas, hubo {len(llamadas)}"
+    )
+
+    # Cuarta, quinta, sexta ingesta: CERO trabajo nuevo -- el tope ya se
+    # alcanzó. Ésta es la evidencia central de D-2: sin esto, cada llamada
+    # vuelve a pagar el costo completo del extractor (300s en producción).
+    for _ in range(3):
+        f = ingesta.ingerir(origen, trabajo)
+        assert f.estado == "error"
+    assert len(llamadas) == 3, (
+        f"D-2 REABIERTO: se siguió invocando compuerta.extraer más allá del "
+        f"tope de 3 intentos -- {len(llamadas)} llamadas totales"
+    )
+
+
+def test_D2_cambio_de_version_del_extractor_reinicia_la_cuenta(tmp_path: Path, monkeypatch):
+    """El tope se alcanzó (3 intentos agotados, extractor en su versión
+    VIGENTE de hoy). El extractor se actualiza (I-2: se monkeypatchea
+    `excel._version`, igual que `test_I2_...` -- `_version_vigente` lee la
+    versión REAL del módulo, no lo que devuelva `compuerta.extraer`, así
+    que simular "cambió de versión" es simular ESO, no el resultado) --
+    "ese es el momento en que la causa pudo haberse arreglado". La
+    siguiente ingesta tiene que volver a intentar de verdad, no servir la
+    ficha vieja agotada."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    llamadas: list[Path] = []
+
+    def falla_siempre(destino):
+        llamadas.append(destino)
+        return Resultado(
+            estado="error", salidas={}, detalle={"razon": "algo raro paso"},
+            extractor=excel.EXTRACTOR, version=excel._version(),
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falla_siempre)
+    for _ in range(3):
+        ingesta.ingerir(origen, trabajo)
+    assert len(llamadas) == 3
+
+    # El tope está agotado bajo la versión vigente -- una ingesta más NO
+    # debe reintentar todavía.
+    ingesta.ingerir(origen, trabajo)
+    assert len(llamadas) == 3, "el tope no se respetó antes del cambio de versión"
+
+    # "El extractor cambió de versión" -- la consulta barata que
+    # `_version_vigente` hace (I-2) ahora devuelve otra cosa.
+    monkeypatch.setattr(excel, "_version", lambda: "99.9.9")
+    ingesta.ingerir(origen, trabajo)
+
+    assert len(llamadas) == 4, (
+        "D-2 REABIERTO: el cambio de extractor_version no reinició la cuenta "
+        f"de intentos -- se siguió sirviendo la ficha agotada de la versión "
+        f"vieja (llamadas reales: {len(llamadas)}, se esperaban 4)"
+    )
+
+
+def test_D2_sin_extractor_se_comporta_igual_que_error(tmp_path: Path, monkeypatch):
+    """El ruling es explícito: `sin_extractor` se comporta IGUAL que
+    `error` para el tope de reintentos -- mismo mecanismo, mismo número."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    llamadas: list[Path] = []
+
+    def sin_herramienta(destino):
+        llamadas.append(destino)
+        return Resultado(
+            estado="sin_extractor", salidas={}, detalle={"razon": "no instalado"},
+            extractor=excel.EXTRACTOR, version=excel._version(),
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", sin_herramienta)
+
+    for _ in range(3):
+        f = ingesta.ingerir(origen, trabajo)
+        assert f.estado == "sin_extractor"
+    assert len(llamadas) == 3
+
+    ingesta.ingerir(origen, trabajo)
+    assert len(llamadas) == 3, (
+        "D-2 REABIERTO: 'sin_extractor' no respetó el mismo tope de 3 "
+        "intentos que 'error'"
+    )
+
+
+def test_D2_un_ok_no_se_ve_afectado_por_el_tope_de_reintentos(tmp_path: Path, monkeypatch):
+    """Un `ok` se cachea de la forma de siempre (I-1) -- el mecanismo nuevo
+    del tope de reintentos es exclusivo de `error`/`sin_extractor` y no le
+    agrega ni le saca nada a este camino."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    llamadas: list[Path] = []
+    original_extraer = compuerta.extraer
+
+    def rastreada(destino):
+        llamadas.append(destino)
+        return original_extraer(destino)
+
+    monkeypatch.setattr(compuerta, "extraer", rastreada)
+
+    for _ in range(5):
+        f = ingesta.ingerir(origen, trabajo)
+        assert f.estado == "ok"
+
+    # Cache de siempre: UNA sola extracción real, las otras cuatro cero
+    # trabajo -- el tope de reintentos de D-2 no interfiere con esto.
+    assert len(llamadas) == 1, (
+        f"D-2 REABIERTO: un 'ok' se vio afectado por el mecanismo de tope de "
+        f"reintentos -- {len(llamadas)} llamadas reales en vez de 1"
+    )
+
+
 def test_M2_fecha_cambia_entre_regeneraciones(tmp_path: Path):
     """A propósito NO se monkeypatchea `ingesta._ahora`: la mutación que
     este test tiene que matar reemplaza el CUERPO de `_ahora` por un

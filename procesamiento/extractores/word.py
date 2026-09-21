@@ -278,27 +278,48 @@ def extraer(origen: Path) -> Resultado:
     tablas_con_contenido = 0
     hay_cambios = False
 
-    for tipo, objeto in _iterar_bloques(documento.element.body, documento):
-        if tipo == "parrafo":
-            texto = _texto_parrafo(objeto._p).strip()
-            if _tiene_cambios(objeto._p):
-                hay_cambios = True
-            if not texto:
-                continue
-            parrafos_con_contenido += 1
-            estilo = (objeto.style.name or "").lower()
-            if estilo.startswith("heading"):
-                nivel = "".join(c for c in estilo if c.isdigit()) or "1"
-                lineas.append("#" * min(int(nivel), 6) + " " + texto)
-            else:
-                lineas.append(texto)
-        else:  # tabla
-            if _tiene_cambios(objeto._tbl):
-                hay_cambios = True
-            bloque = _tabla_a_lineas(objeto)
-            if bloque:
-                tablas_con_contenido += 1
-                lineas.extend(bloque)
+    try:
+        for tipo, objeto in _iterar_bloques(documento.element.body, documento):
+            if tipo == "parrafo":
+                texto = _texto_parrafo(objeto._p).strip()
+                if _tiene_cambios(objeto._p):
+                    hay_cambios = True
+                if not texto:
+                    continue
+                parrafos_con_contenido += 1
+                # D-1 (task-9, medido contra 23 documentos financieros
+                # reales: 3 de cada 4 .docx traen `objeto.style is None` --
+                # python-docx lo documenta como "no común", la realidad lo
+                # hace la norma. Se trata como "sin estilo" (parrafo
+                # normal), nunca como un AttributeError crudo escapando del
+                # modulo.
+                estilo_obj = objeto.style
+                estilo = (estilo_obj.name if estilo_obj is not None else "") or ""
+                estilo = estilo.lower()
+                if estilo.startswith("heading"):
+                    nivel = "".join(c for c in estilo if c.isdigit()) or "1"
+                    lineas.append("#" * min(int(nivel), 6) + " " + texto)
+                else:
+                    lineas.append(texto)
+            else:  # tabla
+                if _tiene_cambios(objeto._tbl):
+                    hay_cambios = True
+                bloque = _tabla_a_lineas(objeto)
+                if bloque:
+                    tablas_con_contenido += 1
+                    lineas.extend(bloque)
+    except Exception as exc:
+        # D-1: cualquier excepción inesperada leyendo el cuerpo sale como
+        # Resultado de error, igual que `pdf.py` protege su bucle de
+        # páginas -- nunca una excepción cruda escapando del módulo. Antes
+        # sólo la apertura del documento estaba protegida así; el cuerpo
+        # no, y eso es exactamente lo que este arreglo cierra.
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            detalle={
+                "razon": f"fallo inesperado leyendo el cuerpo: {type(exc).__name__}: {exc}"
+            },
+        )
 
     fragmentos_header_footer = _encabezado_y_pie(documento)
     lineas_header_footer = [f"[{etiqueta}] {texto}" for etiqueta, texto in fragmentos_header_footer]
