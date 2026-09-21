@@ -70,6 +70,6 @@ def test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape():
  import json
  from policy.enforcement_evidence.test_evidence import ingest_test_evidence_manifest
  s=EvidenceStore(); raw=b"pytest output"; h=s.put_evidence_blob(raw).evidence_hash
- manifest={"schema_version":"1.0","kind":"JAX_TEST_EVIDENCE_MANIFEST","provider":"github","repository_id":"fjruizhn/Jax","commit_sha":"a"*40,"implementation_identity_hash":"sha256:"+"a"*64,"workflow":"policy","run_id":"1","job_id":"2","environment":"CI","started_at_utc":"2026-01-01T00:00:00Z","completed_at_utc":"2026-01-01T00:00:01Z","tests":[{"test_id":"tests.policy.x","bindings":[],"result":"PASSED"}],"counts":{"passed":1},"raw_output_blob_hash":h}
+ manifest={"schema_version":"1.0","kind":"JAX_TEST_EVIDENCE_MANIFEST","provider":"github","repository_id":"fjruizhn/Jax","commit_sha":"a"*40,"implementation_identity_hash":"sha256:"+"a"*64,"workflow":"policy","run_id":"1","job_id":"2","environment":"CI","started_at_utc":"2026-01-01T00:00:00Z","completed_at_utc":"2026-01-01T00:00:01Z","tests":[{"test_id":"tests.policy.test_enforcement_evidence_core","bindings":[{"control_id":"CTL.B6.GOVERNED_DISPATCH","control_version":1}],"result":"PASSED"}],"counts":{"passed":1},"raw_output_blob_hash":h}
  assert ingest_test_evidence_manifest(s,json.dumps(manifest).encode(),raw)["commit_sha"]=="a"*40
  with pytest.raises(Exception): ingest_test_evidence_manifest(s,json.dumps(manifest).encode(),b"different")
