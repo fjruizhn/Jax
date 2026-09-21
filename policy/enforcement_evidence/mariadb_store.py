@@ -7,6 +7,8 @@ from __future__ import annotations
 from .evidence_store import EvidenceBlob, MAX_BLOB_BYTES
 from .ids import sha256_bytes, require_hash
 from .errors import EvidenceBlobMissingError, EvidenceBlobHashMismatchError, EvidenceBlobTooLargeError
+from .canonical import canonical_bytes
+from .errors import EvidenceArtifactIntegrityError, ObservationIntegrityError, AssertionIntegrityError
 class MariaDBEvidenceStore:
     def __init__(self, connection_factory): self._connection_factory=connection_factory
     def put_evidence_blob(self, data: bytes) -> EvidenceBlob:
@@ -32,4 +34,47 @@ class MariaDBEvidenceStore:
             data=bytes(row[1])
             if int(row[0])!=len(data) or sha256_bytes(data)!=evidence_hash: raise EvidenceBlobHashMismatchError(evidence_hash)
             return data
+        finally: con.close()
+    def record_artifact(self, artifact):
+        """Persist only after every referenced blob is authoritatively readable."""
+        for ref in artifact.blob_refs: self.get_evidence_blob(ref.evidence_hash)
+        h=artifact.artifact_hash; con=self._connection_factory()
+        try:
+            cur=con.cursor(); payload=canonical_bytes(artifact.projection()).decode("utf-8")
+            cur.execute("SELECT canonical_artifact FROM jax_evidence.evidence_artifacts WHERE artifact_hash=%s FOR UPDATE",(h,)); row=cur.fetchone()
+            if row is None:
+                cur.execute("INSERT INTO jax_evidence.evidence_artifacts(artifact_hash,canonical_artifact) VALUES (%s,%s)",(h,payload))
+                for ref in artifact.blob_refs: cur.execute("INSERT INTO jax_evidence.evidence_artifact_blobs(artifact_hash,evidence_hash) VALUES (%s,%s)",(h,ref.evidence_hash))
+            elif (bytes(row[0]).decode() if isinstance(row[0],bytes) else row[0]) != payload: raise EvidenceArtifactIntegrityError("artifact collision")
+            con.commit(); return artifact
+        except Exception: con.rollback(); raise
+        finally: con.close()
+    def record_observation(self, observation):
+        for h in observation.evidence_artifact_hashes:
+            # FK validates persistence; select makes the failure deterministic before write.
+            con0=self._connection_factory()
+            try:
+                c0=con0.cursor(); c0.execute("SELECT artifact_hash FROM jax_evidence.evidence_artifacts WHERE artifact_hash=%s",(h,))
+                if c0.fetchone() is None: raise EvidenceBlobMissingError(h)
+            finally: con0.close()
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); payload=canonical_bytes(observation.projection()).decode("utf-8")
+            cur.execute("SELECT observation_hash FROM jax_evidence.enforcement_observations WHERE observation_id=%s FOR UPDATE",(observation.observation_id,)); row=cur.fetchone()
+            if row is None:
+                cur.execute("INSERT INTO jax_evidence.enforcement_observations(observation_id,observation_hash,canonical_observation) VALUES (%s,%s,%s)",(observation.observation_id,observation.observation_hash,payload))
+                for h in observation.evidence_artifact_hashes: cur.execute("INSERT INTO jax_evidence.observation_artifacts(observation_id,artifact_hash) VALUES (%s,%s)",(observation.observation_id,h))
+            elif row[0]!=observation.observation_hash: raise ObservationIntegrityError("observation collision")
+            con.commit(); return observation
+        except Exception: con.rollback(); raise
+        finally: con.close()
+    def record_assertion(self, assertion):
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); payload=canonical_bytes(assertion.projection()).decode("utf-8")
+            cur.execute("SELECT canonical_assertion FROM jax_evidence.enforcement_assertions WHERE assertion_hash=%s FOR UPDATE",(assertion.assertion_hash,)); row=cur.fetchone()
+            if row is None: cur.execute("INSERT INTO jax_evidence.enforcement_assertions(assertion_hash,canonical_assertion) VALUES (%s,%s)",(assertion.assertion_hash,payload))
+            elif (bytes(row[0]).decode() if isinstance(row[0],bytes) else row[0]) != payload: raise AssertionIntegrityError("assertion collision")
+            con.commit(); return assertion
+        except Exception: con.rollback(); raise
         finally: con.close()
