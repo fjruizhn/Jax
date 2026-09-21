@@ -380,7 +380,7 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'procesamiento.extracto
 - [ ] **Step 3: Instalar la dependencia fijada**
 
 ```bash
-printf 'openpyxl==3.1.5\npdfplumber==0.11.7\npython-docx==1.2.0\n' > requirements-archivos.txt
+printf 'openpyxl==3.1.5\npdfplumber==0.11.10\npython-docx==1.2.0\n' > requirements-archivos.txt
 python -m pip install -r requirements-archivos.txt
 ```
 
@@ -569,6 +569,14 @@ def test_un_pdf_sin_capa_de_texto_no_se_declara_ok(tmp_path: Path):
     assert r.estado != "ok"
     assert r.salidas == {}
 ```
+
+> **Ruling del controlador (barrido previo):** el PDF escrito a mano en el test no
+> tiene tabla `xref` y pdfminer puede rechazarlo. Si `_pdf_con_texto` no parsea,
+> **generar el fixture con LibreOffice** (instalado, 26.2.5.2) en vez de a mano:
+> escribir un `.txt` y correr
+> `soffice --headless --convert-to pdf --outdir <tmp> <txt>`.
+> Lo que NO se permite es relajar la asercion para que pase: el test debe seguir
+> exigiendo que el texto salga.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1101,7 +1109,7 @@ def test_un_pdf_con_texto_no_paga_ocr(tmp_path: Path, monkeypatch):
         pdf, "extraer",
         lambda origen: Resultado(
             estado="ok", salidas={"texto.md": "hola"}, detalle={},
-            extractor="pdfplumber", version="0.11.7",
+            extractor="pdfplumber", version="0.11.10",
         ),
     )
 
@@ -1442,7 +1450,10 @@ def _libro(destino: Path) -> Path:
 def test_la_medicion_cuenta_una_sola_extraccion_para_varios_pasos(tmp_path: Path):
     archivo = _libro(tmp_path / "e.xlsx")
     r = medir([archivo], tmp_path / "trabajo", pasos=6)
-    assert r["extracciones"] == 1, "se extrajo mas de una vez: el cache no sirve"
+    # Seis pasos piden el mismo archivo. Sin cache serian 6 extracciones.
+    assert r["extracciones"] == 1, (
+        f"se extrajo {r['extracciones']} veces con 6 pasos: el cache no sirve"
+    )
 
 
 def test_la_medicion_reporta_ahorro_porcentual(tmp_path: Path):
@@ -1496,7 +1507,10 @@ def medir(archivos: list[Path], trabajo: Path, pasos: int) -> dict:
     try:
         for archivo in archivos:
             original_real += min(Path(archivo).stat().st_size, TOPE_POR_PASO)
-            ficha = ingesta.ingerir(Path(archivo), Path(trabajo))
+            # Cada paso del pipeline PIDE el archivo. Sin cache eso serian
+            # `pasos` extracciones; con cache tiene que ser exactamente 1.
+            for _ in range(pasos):
+                ficha = ingesta.ingerir(Path(archivo), Path(trabajo))
             carpeta = ingesta.ruta_procesado(Path(trabajo), ficha.sha256)
             extracto_real += sum(
                 p.stat().st_size for p in carpeta.iterdir() if p.name != "ficha.json"
