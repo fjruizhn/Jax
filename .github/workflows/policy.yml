@@ -68,7 +68,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          # Canonicalization is pinned to Unicode 16, supplied by Python 3.14.
+          python-version: "3.14"
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest tests/policy/test_execution_mariadb_integration.py -v
 
