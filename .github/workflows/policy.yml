@@ -2936,6 +2936,28 @@ jobs:
           grep -qE "^7 passed" /tmp/ocr_tests || {
             echo "PISO ROTO: se esperaban 7 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
+      # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
+      # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
+      # mismo paso que openpyxl/pdfplumber).
+      #
+      # El defecto propio de este extractor: python-docx da la MISMA
+      # excepción (`PackageNotFoundError`, mismo mensaje) para un `.doc`
+      # binario viejo (formato OLE2, que python-docx NUNCA va a poder leer)
+      # que para un `.docx` genuinamente corrupto -- medido a mano
+      # (2026-09-21). Sin distinguir los dos casos, un `.doc` legítimo con
+      # la extensión mal puesta se reportaría como 'error' (documento roto)
+      # en vez de 'sin_extractor' (herramienta equivocada para este
+      # formato). La firma OLE2 (`D0 CF 11 E0 A1 B1 1A E1`) se comprueba
+      # ANTES de intentar abrir con python-docx.
+      #
+      # `pytest.importorskip("docx")` en `_word_test.py` -- mismo riesgo de
+      # "1 skipped" con EXIT 0 si python-docx no se instaló.
+      - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
+          grep -qE "^7 passed" /tmp/word_tests || {
+            echo "PISO ROTO: se esperaban 7 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
       # este job, que conserva arriba su entorno Python 3.12 sin alteraciones.
