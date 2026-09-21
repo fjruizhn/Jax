@@ -69,7 +69,7 @@ def _pipeline(**over) -> Pipeline:
 
 def _bloque_devolver(paso: int, motivo: str = "usaste BIGSERIAL y TIMESTAMPTZ; el destino es MariaDB") -> str:
     return "inline:" + (
-        f'{{"success": true, "facet": "thot", "model": "gpt-6-astra", '
+        f'{{"success": true, "facet": "thot", "model": "_test_modelo_thot", '
         f'"result": "## Decisión\\n\\nNo aprobar [paso {paso}]. '
         f'```veredicto\\n{{\\"decision\\": \\"devolver\\", \\"paso\\": {paso}, '
         f'\\"motivo\\": \\"{motivo}\\", \\"cita\\": \\"[paso {paso}]\\"}}\\n```"}}'
@@ -77,7 +77,7 @@ def _bloque_devolver(paso: int, motivo: str = "usaste BIGSERIAL y TIMESTAMPTZ; e
 
 
 def _ok_veredicto(usd: str = "1.00") -> Veredicto:
-    costo = CostoPaso(4, "ada", "glm-5.3", 1, 100, 8192, Decimal(usd), "acotado")
+    costo = CostoPaso(4, "ada", "_test_modelo_ada", 1, 100, 8192, Decimal(usd), "acotado")  # modelo sintético: CostoPaso no lee el catálogo, sólo lo transporta (Principio IV, 2026-09-21)
     return Veredicto(ok=True, violaciones=(), costo_max_usd=Decimal(usd), pasos_costo=(costo,), sondeadas=())
 
 

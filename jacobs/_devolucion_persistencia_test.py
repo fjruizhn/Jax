@@ -346,13 +346,18 @@ class CostoGastadoPipelineTest(unittest.IsolatedAsyncioTestCase):
             conn.close()
 
     async def _insertar(self, cost_usd) -> None:
+        # `axioma_usage.model` es TEXTO libre (sin FK a `model`): esto prueba
+        # que costo_gastado_pipeline() SUMA filas reales, no el catálogo de
+        # modelos -- por eso "_test_modelo_devolucion" y no un nombre real
+        # (Principio IV, hallazgo 2026-09-21: un literal que ES real invita a
+        # confundirlo con gobernanza cuando no lo es).
         conn = await store.conexion_dedicada()
         try:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "INSERT INTO axioma_usage (facet, model, tokens_in, tokens_out, "
                     "cost_usd, request_type, pipeline_id) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                    ("ada", "glm-5.3", 100, 200, cost_usd, "pipeline", self.pipeline_id),
+                    ("ada", "_test_modelo_devolucion", 100, 200, cost_usd, "pipeline", self.pipeline_id),
                 )
         finally:
             conn.close()
@@ -373,7 +378,7 @@ class CostoGastadoPipelineTest(unittest.IsolatedAsyncioTestCase):
                 self._otros_pipeline_ids.append(otro_pipeline_id)
                 await cur.execute(
                     "INSERT INTO axioma_usage (facet, model, cost_usd, pipeline_id) "
-                    "VALUES ('ada','glm-5.3',9.999999,%s)", (otro_pipeline_id,),
+                    "VALUES ('ada','_test_modelo_devolucion',9.999999,%s)", (otro_pipeline_id,),
                 )
         finally:
             conn.close()
