@@ -85,7 +85,7 @@ def _version() -> str:
         from importlib.metadata import version
 
         return version("python-docx")
-    except Exception:
+    except Exception:  # fail-soft: la lectura de metadata del paquete puede fallar; se devuelve "desconocida" para el campo informativo de version, no critico
         return "desconocida"
 
 
@@ -256,7 +256,7 @@ def extraer(origen: Path) -> Resultado:
 
     try:
         documento = Document(str(origen))
-    except Exception as exc:
+    except Exception as exc:  # fail-soft: la apertura del .docx puede fallar (corrupto, formato distinto); se devuelve Resultado(estado="sin_extractor"/"error") con el detalle en vez de propagar
         mensaje = str(exc)
         # I-5: python-docx YA identifica el tipo real de un archivo mal
         # nombrado ("... is not a Word file, content type is '...'"). Un
@@ -308,7 +308,7 @@ def extraer(origen: Path) -> Resultado:
                 if bloque:
                     tablas_con_contenido += 1
                     lineas.extend(bloque)
-    except Exception as exc:
+    except Exception as exc:  # fail-soft: fallo inesperado recorriendo el cuerpo del documento; se devuelve Resultado(estado="error") con el detalle en vez de una excepcion cruda
         # D-1: cualquier excepción inesperada leyendo el cuerpo sale como
         # Resultado de error, igual que `pdf.py` protege su bucle de
         # páginas -- nunca una excepción cruda escapando del módulo. Antes

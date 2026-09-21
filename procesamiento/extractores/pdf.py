@@ -124,7 +124,7 @@ def _paginas_sin_texto(textos: list[str]) -> list[int]:
 def tiene_capa_de_texto(origen: Path) -> bool:
     try:
         textos = _textos_por_pagina(origen)
-    except Exception:
+    except Exception:  # fail-soft: la deteccion barata de capa de texto puede fallar leyendo el PDF; se trata como "sin texto" y la compuerta rutea a OCR en vez de abortar
         return False
     if not textos:
         return False
@@ -198,7 +198,7 @@ def extraer(origen: Path) -> Resultado:
                     if bloque:
                         tablas += 1
                         partes.append(bloque)
-    except Exception as exc:
+    except Exception as exc:  # fail-soft: apertura o lectura del PDF con pdfplumber puede fallar; se devuelve Resultado(estado="error") con el detalle en vez de propagar
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
             detalle={"razon": f"no se pudo leer: {type(exc).__name__}: {exc}"},

@@ -257,7 +257,7 @@ def _version_vigente(nombre_extractor: str) -> str | None:
         return None
     try:
         return modulo._version()
-    except Exception:
+    except Exception:  # fail-soft: modulo._version() puede fallar (import roto, atributo ausente); se devuelve None y el llamador lo trata como version desconocida, forzando reextraccion en vez de confiar en una cache que no puede validar
         return None
 
 

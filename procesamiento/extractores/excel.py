@@ -102,7 +102,7 @@ def extraer(origen: Path) -> Resultado:
 
     try:
         libro = openpyxl.load_workbook(origen, data_only=True, read_only=True)
-    except Exception as exc:  # archivo corrupto, no-zip, protegido
+    except Exception as exc:  # fail-soft: archivo corrupto, no-zip o protegido; se devuelve Resultado(estado="error") con el detalle en vez de propagar
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
             detalle={"razon": f"no se pudo abrir: {type(exc).__name__}: {exc}"},
@@ -110,7 +110,7 @@ def extraer(origen: Path) -> Resultado:
 
     try:
         libro_crudo = openpyxl.load_workbook(origen, data_only=False, read_only=True)
-    except Exception as exc:
+    except Exception as exc:  # fail-soft: apertura del workbook crudo (para chequeo de formulas) puede fallar igual que la primera; se cierra el libro ya abierto y se devuelve Resultado(estado="error")
         libro.close()
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
@@ -134,7 +134,7 @@ def extraer(origen: Path) -> Resultado:
     for indice, hoja in enumerate(libro.worksheets, start=1):
         try:
             csv_texto, celdas = _hoja_a_csv(hoja)
-        except Exception as exc:
+        except Exception as exc:  # fail-soft: una hoja individual puede fallar al extraerse (celda corrupta, formula rota); se registra en 'fallidas' y se sigue con las demas hojas en vez de abortar todo el libro
             fallidas.append(f"{hoja.title}: {type(exc).__name__}: {exc}")
             continue
 

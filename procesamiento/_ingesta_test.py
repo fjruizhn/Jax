@@ -333,7 +333,7 @@ def test_C2_concurrencia_real_procesado_queda_consistente(tmp_path: Path, monkey
     def correr():
         try:
             resultados.append(ingesta.ingerir(origen, trabajo))
-        except BaseException as exc:  # se recolecta, se afirma después
+        except BaseException as exc:  # fail-soft: la excepcion de un hilo no propaga al hilo principal; se recolecta en errores y se afirma vacia despues del join
             errores.append(exc)
 
     hilos = [threading.Thread(target=correr) for _ in range(2)]
@@ -379,7 +379,7 @@ def test_C3_concurrencia_real_fuente_no_se_corrompe(tmp_path: Path):
         try:
             barrera.wait(timeout=5)
             resultados[etiqueta] = ingesta.ingerir(origen, trabajo)
-        except BaseException as exc:
+        except BaseException as exc:  # fail-soft: la excepcion de un hilo no propaga al hilo principal; se recolecta en errores y se afirma vacia despues del join
             errores.append(exc)
 
     hilos = [
@@ -626,7 +626,7 @@ def test_A1_fifo_en_fuente_no_cuelga_la_ingesta(tmp_path: Path):
     def correr():
         try:
             resultado["ficha"] = ingesta.ingerir(origen, trabajo)
-        except BaseException as exc:  # pragma: no cover -- sólo si el arreglo se rompe
+        except BaseException as exc:  # fail-soft: la excepcion de un hilo no propaga al hilo principal; se recolecta para afirmar que no se disparo -- pragma: no cover, solo si el arreglo se rompe
             errores.append(exc)
 
     hilo = threading.Thread(target=correr, daemon=True)

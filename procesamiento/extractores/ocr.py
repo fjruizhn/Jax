@@ -91,7 +91,7 @@ def _version() -> str:
             ["tesseract", "--version"], capture_output=True, text=True, timeout=30
         )
         return salida.stdout.splitlines()[0].split()[-1]
-    except Exception:
+    except Exception:  # fail-soft: "tesseract --version" puede fallar (no instalado, timeout); se devuelve "desconocida" para el campo informativo de version, no critico
         return "desconocida"
 
 
@@ -128,7 +128,7 @@ def _analizar_tsv(salida_tsv: str) -> dict:
         if campos[0] == "1":  # fila de nivel "página": trae ancho/alto
             try:
                 ancho, alto = int(campos[8]), int(campos[9])
-            except ValueError:
+            except ValueError:  # fail-soft: las columnas de ancho/alto del tsv pueden venir no numericas; se dejan en 0 (solo informativas) y sigue el analisis del resto de la fila
                 pass
             continue
         conf_str, texto_palabra = campos[10], campos[11]
@@ -182,7 +182,7 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
             ["tesseract", str(ruta), "stdout", "-l", idioma],
             capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
         )
-    except Exception:
+    except Exception:  # fail-soft: el subproceso de tesseract (modo texto) puede fallar (timeout, I/O); se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
     if proceso.returncode != 0:
         return None
@@ -193,7 +193,7 @@ def _ocr_una_imagen(ruta: Path, idioma: str) -> dict | None:
             ["tesseract", str(ruta), "stdout", "-l", idioma, "tsv"],
             capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
         )
-    except Exception:
+    except Exception:  # fail-soft: el subproceso de tesseract (modo tsv, confianza por palabra) puede fallar igual que el de texto plano; se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
     analisis = _analizar_tsv(proceso_tsv.stdout or "")
 
@@ -215,7 +215,7 @@ def _rasterizar_pdf(origen: Path, destino: Path) -> list[Path] | None:
             ["pdftoppm", "-png", "-r", str(DPI_RASTERIZADO), str(origen), str(prefijo)],
             capture_output=True, text=True, timeout=TIMEOUT_SEGUNDOS,
         )
-    except Exception:
+    except Exception:  # fail-soft: pdftoppm puede fallar rasterizando el PDF (timeout, PDF invalido); se devuelve None y el llamador lo convierte en Resultado(estado="error")
         return None
     if proceso.returncode != 0:
         return None
