@@ -49,6 +49,21 @@ class MariaDBEvidenceStore:
             con.commit(); return artifact
         except Exception: con.rollback(); raise
         finally: con.close()
+    def load_evidence_artifact(self, artifact_hash):
+        """Only this store-load path may establish artifact provenance."""
+        require_hash(artifact_hash); con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SELECT canonical_artifact FROM jax_evidence.evidence_artifacts WHERE artifact_hash=%s",(artifact_hash,)); row=cur.fetchone()
+            if row is None: raise EvidenceBlobMissingError(artifact_hash)
+            from .artifacts import deserialize_evidence_artifact, verify_evidence_artifact_content
+            value=deserialize_evidence_artifact(row[0]);
+            if value.artifact_hash != artifact_hash: raise EvidenceArtifactIntegrityError("row/canonical hash mismatch")
+            cur.execute("SELECT evidence_hash FROM jax_evidence.evidence_artifact_blobs WHERE artifact_hash=%s ORDER BY evidence_hash",(artifact_hash,)); refs=tuple(x[0] for x in cur.fetchall())
+            if refs != tuple(sorted(x.evidence_hash for x in value.blob_refs)): raise EvidenceArtifactIntegrityError("artifact refs mismatch")
+            verify_evidence_artifact_content(value,self.get_evidence_blob)
+            from .evidence_store import _seal, _artifacts
+            return _seal(_artifacts,value)
+        finally: con.close()
     def record_observation(self, observation):
         for h in observation.evidence_artifact_hashes:
             # FK validates persistence; select makes the failure deterministic before write.
