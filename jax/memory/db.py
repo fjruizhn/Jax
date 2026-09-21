@@ -1344,17 +1344,51 @@ class MemoryDB:
 
     @db_error_handler
     async def mark_action_item_done(self, item_id: int) -> Optional[bool]:
-        """Marca un pendiente como completado (comando /pendientes done)."""
+        """Marca un pendiente como completado (comando /pendientes done).
+
+        EL RETORNO (arreglado 2026-09-21, pendiente del 2026-09-20): antes
+        devolvia `cur.rowcount > 0`, y aiomysql cuenta filas CAMBIADAS, no
+        COINCIDENTES (`connect()` no pasa CLIENT.FOUND_ROWS al pool -- ver
+        `connect()`). `completed_at` es `timestamp` SIN microsegundos: marcar
+        como hecho un item que YA esta hecho, dos veces en el mismo segundo,
+        no cambia ninguna columna -- `rowcount=0` e indistinguible de "el
+        item no existe". Mismo defecto que `verify_fact`/`expire_fact`
+        (jax/memory/db.py, auditoria adversarial 2026-09-20), reencarnado en
+        este metodo vecino.
+
+        OJO -- esto NO corrige ningun comportamiento observado en produccion
+        hoy: `completed_at` esta 100% NULL en las 24 filas que tiene hoy
+        `action_items` (verificado con SELECT contra jax_memory, 2026-09-21),
+        asi que el UPDATE de "marcar hecho" SIEMPRE cambia esa columna y el
+        codigo viejo ya devolvia `True`. El no-op-en-el-mismo-segundo es hoy
+        hipotetico: haria falta marcar como hecho un item que YA esta done,
+        sin tocar nada mas, en el mismo segundo -- nadie lo hace desde el
+        unico llamador (`handle_pendientes_command`, el REPL). Se arregla
+        igual para cerrar la ambiguedad ANTES de que un segundo llamador la
+        herede (Principio IX), pero el defecto REAL y observable de este PR
+        estaba en el consumidor: `handle_pendientes_command`
+        (jax/core/main.py) aplastaba `None` (base caida) con `False` (no
+        existe) en `if ok else "No encontre el pendiente #{arg}."` -- ese es
+        el bug que un usuario podia ver, y el que este PR cierra de verdad
+        (ver tests/test_repl_pendientes_base_caida.py).
+
+        EL ORDEN: mismo patron (ver docstring de `verify_fact`) -- el UPDATE
+        va primero, el SELECT de existencia solo corre si `affected == 0`.
+        Con `autocommit=True` la conexion NO es una transaccion: invertir el
+        orden dejaria una carrera entre el SELECT y el UPDATE."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
+                affected = await cur.execute(
                     "UPDATE action_items SET status='done', completed_at=NOW() "
                     "WHERE id=%s",
                     (item_id,),
                 )
-                return cur.rowcount > 0
+                if affected:
+                    return True
+                await cur.execute("SELECT 1 FROM action_items WHERE id = %s", (item_id,))
+                return await cur.fetchone() is not None
 
     @db_error_handler
     async def save_person(self, name: str, nickname: Optional[str] = None) -> Optional[bool]:
@@ -1396,22 +1430,76 @@ class MemoryDB:
     @db_error_handler
     async def touch_person_mentions(self, names_or_nicknames: list) -> Optional[int]:
         """Actualiza last_mentioned=CURDATE() para las personas cuyo name o
-        nickname aparece en `names_or_nicknames` (llamado desde el worker de
+        nickname aparece en `names_or_nicknames` (pensado para el worker de
         destilacion, jax/memory/worker.py, sobre las conversaciones que ya
-        procesa cada 20 min -- reusa esa deteccion en vez de construir una
-        nueva, tal como diseñado en ronda 7). Devuelve cuantas filas se
-        actualizaron, o None si fallo."""
-        if not self.pool or not names_or_nicknames:
+        procesa cada 20 min -- reusaria esa deteccion en vez de construir una
+        nueva, tal como diseñado en ronda 7. Verificado con
+        `grep touch_person_mentions jax/memory/worker.py`: CERO resultados --
+        hoy no tiene ningun consumidor real que lo llame). Devuelve cuantas
+        personas matchearon `names_or_nicknames`
+        (no cuantas filas cambio el UPDATE), o None si fallo (base caida).
+        Sin nombres que buscar (`names_or_nicknames` vacia) devuelve `0`
+        directo: "no me pediste nada" no es lo mismo que "no pude" -- eso
+        sigue siendo `None`, y solo cuando falta el pool (no hay conexion
+        con la que intentar).
+
+        EL RETORNO (arreglado 2026-09-21, pendiente del 2026-09-20): antes
+        devolvia `cur.rowcount` crudo cuando `affected > 0`, y contaba por
+        separado SOLO si `affected == 0` -- dos caminos para la MISMA
+        pregunta ("cuantas personas matchearon") que daban DOS NUMEROS
+        DISTINTOS para el MISMO estado (medido contra MariaDB real: con
+        "ana" ya tocada hoy y "beto" no, `touch_person_mentions(["ana",
+        "beto"])` daba 1 la primera vez y 2 la segunda -- ni monotono ni lo
+        que el docstring prometia). Ahora el conteo sale SIEMPRE de la
+        MISMA consulta (el COUNT); el UPDATE es un efecto de lado que no
+        participa del retorno.
+
+        EL ORDEN, Y POR QUE ES DISTINTO DEL VECINO (`mark_action_item_done`):
+        alla el WHERE filtra por `id` (AUTO_INCREMENT: nadie reinserta el
+        mismo id entre las dos consultas) y el UPDATE va primero. ACA el
+        WHERE filtra por NOMBRE, que SI puede aparecer entre dos consultas
+        (alguien crea "Marina" con `save_person` justo en el medio): si el
+        COUNT corriera DESPUES del UPDATE -- el patron del vecino,
+        condicionado a `affected == 0` -- contaria esa fila nueva como
+        "matcheo" aunque su `last_mentioned` siga en NULL, afirmando una
+        mencion que nadie escribio. Por eso el COUNT corre SIEMPRE PRIMERO,
+        antes de cualquier UPDATE, y el UPDATE ni se emite si `matches == 0`
+        (nada que tocar). Sigue habiendo una ventana minuscula entre el
+        COUNT y el UPDATE (`autocommit=True`: esto no es una transaccion).
+        Si alguien matchea recien DESPUES del COUNT (otra sesion crea o
+        renombra una persona en el medio), el peor caso es SUBcontar: esa
+        persona nueva no se cuenta ni se toca en esta llamada. Pero la
+        garantia de "nunca afirmar una mencion de mas" la da HOY una
+        funcionalidad ausente, no el orden en si: si en el medio se BORRA o
+        RENOMBRA una fila que SI matcheo el COUNT, el UPDATE que sigue
+        (mismo WHERE, mismas placeholders) puede no tocar ninguna fila y el
+        retorno seguiria afirmando `matches` menciones que el UPDATE no
+        escribio. Verificado (2026-09-21): no existe ningun
+        `DELETE FROM people` ni renombre de personas en todo el ecosistema
+        (jax, las_manos, scripts, jax-platform); `/person` solo expone `new`
+        y `list`. El dia que exista un `/person delete` (o un rename) esto
+        hay que revisarlo: ninguno de los dos ordenes posibles (COUNT-luego-
+        UPDATE o UPDATE-luego-COUNT) cierra la carrera sin una transaccion
+        real."""
+        if not self.pool:
+            return None
+        if not names_or_nicknames:
             return 0
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 placeholders = ",".join(["%s"] * len(names_or_nicknames))
+                where = f"name IN ({placeholders}) OR nickname IN ({placeholders})"
                 await cur.execute(
-                    f"UPDATE people SET last_mentioned=CURDATE() "
-                    f"WHERE name IN ({placeholders}) OR nickname IN ({placeholders})",
+                    f"SELECT COUNT(*) FROM people WHERE {where}",
                     (*names_or_nicknames, *names_or_nicknames),
                 )
-                return cur.rowcount
+                matches = (await cur.fetchone())[0]
+                if matches:
+                    await cur.execute(
+                        f"UPDATE people SET last_mentioned=CURDATE() WHERE {where}",
+                        (*names_or_nicknames, *names_or_nicknames),
+                    )
+                return matches
 
     @db_error_handler
     async def mark_processed(self, conv_id: int) -> Optional[bool]:

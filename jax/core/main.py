@@ -376,6 +376,8 @@ async def handle_pendientes_command(db, line: str) -> str:
         if not arg.isdigit():
             return "Uso: /pendientes done <id>"
         ok = await db.mark_action_item_done(int(arg))
+        if ok is None:
+            return "No pude actualizar la memoria (base no disponible)."
         return f"Pendiente #{arg} marcado como hecho." if ok else f"No encontre el pendiente #{arg}."
 
     return (
