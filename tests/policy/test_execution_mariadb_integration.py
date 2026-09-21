@@ -95,6 +95,16 @@ def test_b7_real_mariadb_artifact_and_observation_relations():
     observation=EnforcementObservation("b7-db-observation",definition.control_id,1,definition.control_definition_hash,subject,identity.implementation_identity_hash,ObservationOutcome.DENIED,"DENIED",now,ClaimScope(ClaimEnvironment.CI),(artifact.artifact_hash,))
     store.record_observation(observation)
     assert _scalar("SELECT COUNT(*) FROM jax_evidence.observation_artifacts WHERE observation_id=%s",(observation.observation_id,)) == 1
+    from policy.enforcement_evidence.models import EnforcementAssertion, ClaimLevel, AssertionVerdict
+    assertion=EnforcementAssertion(definition.control_id,1,definition.control_definition_hash,ClaimLevel.ENFORCED,AssertionVerdict.NOT_OBSERVED,identity.implementation_identity_hash,ClaimScope(ClaimEnvironment.CI),(subject,),(artifact.artifact_hash,),(observation.observation_id,),now,now,now)
+    store.record_assertion(assertion)
+    assert _scalar("SELECT COUNT(*) FROM jax_evidence.enforcement_assertions WHERE assertion_hash=%s",(assertion.assertion_hash,)) == 1
+    connection=_connection()
+    try:
+        with pytest.raises(Exception):
+            cursor=connection.cursor(); cursor.execute("DELETE FROM jax_evidence.evidence_artifacts WHERE artifact_hash=%s",(artifact.artifact_hash,)); connection.commit()
+        connection.rollback()
+    finally: connection.close()
 
 
 def _scalar(sql, args=()):
