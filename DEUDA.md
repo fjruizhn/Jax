@@ -414,6 +414,79 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Medido — procesamiento de archivos: rendimiento, utilidad, caché y calidad de señal sobre 23 documentos reales (2026-09-21)
+
+**Task 10 de la rama `feat/procesamiento-archivos`** (worktree
+`jax-procesamiento`, ledger `.superpowers/sdd/2026-09-20-procesamiento-
+archivos-nucleo/`). Cierra §7.A.2 (las 10 cifras) y §7.C (rendimiento) del
+spec de `procesamiento/`, los dos criterios que ningún test de CI puede
+cubrir porque dependen de archivos de clientes. **Ruling de alcance:** el
+`task-10-brief.md` original pedía construir `scripts/
+verificar_archivos_reales.py`; NO se construyó — `scripts/
+medir_utilidad_extractos.py` (Task 9) ya mide lo mismo y más, y el brief se
+escribió antes de que ese medidor existiera. Números tomados de
+`task-9-report.md` y `task-9-defectos-report.md`, medidos contra 23
+documentos financieros reales de Fernando (Nextcloud/macmini-bridge),
+**ya borrados del disco** (ver esos reportes).
+
+**Rendimiento (regla 4):** **2,70 s/página promedio sobre 88 páginas reales
+escaneadas** (7 documentos, rango 2,01-3,50 s/página). Extrapolación
+**serial** (no hay paralelismo en `ingesta.py`/`compuerta.py`, cada
+`ingerir()` bloquea) a partir de ese promedio, asumiendo ~15 páginas por
+documento (mediana de la muestra): 10 docs ≈ 6,7 min, 20 ≈ 13,5 min, 50 ≈
+33,7 min. **Esto es extrapolación, no medición** — no se consiguió un
+documento real de 50 páginas normales en la carpeta revisada. Y un solo
+documento patológico puede costar más que diez normales: un PDF de
+CamScanner con páginas a 9× el tamaño normal (1836×2376 pt) agotó el
+timeout de `pdftoppm` (~300 s) y, antes del arreglo D-2 de esta misma
+ronda, lo pagaba de nuevo en cada intento por no tener techo de
+reintentos (ver "Cerrado" más abajo, D-1/D-2).
+
+**Utilidad (§7.B, medido con `medir_utilidad_extractos.py`):** de 23
+documentos reales, **13 de 13 documentos donde el criterio aplica**
+(el original no cabía en el tope de 200.000 B de `file_read`) tienen un
+extracto que sí cabe. Reducciones medidas por tipo: `.xlsx` 1,06×-268,5×,
+`.pdf` nativo 13,1×-55,26×, `.pdf` escaneado 244,68×-415,53× (rango real de
+`task-9-report.md`; el mayor factor individual es pdf-escaneado-02,
+415,53×). Un `.xlsx` (`xlsx-04`) es la excepción conocida y ya reportada:
+extracto 112× más grande que el original — no entra en los rangos de
+arriba porque no es una reducción.
+
+**Caché (§7.B.3):** 23 extracciones reales en la primera pasada sobre los
+23 documentos, **0 en la segunda** — confirmado envolviendo
+`compuerta.extraer` y contando llamadas reales, no asumiendo.
+
+**Calidad de señal (§7.B.4):** **30,4 % de los documentos quedaron en
+`parcial`** (7 de 23, todos PDF escaneados) — bajo el techo fijado del
+60 %.
+
+**Experimento de DPI (medido, código de producción SIN tocar — pedido
+explícito, no aplicado):** reproducción sintética del tamaño de página
+patológico (1836×2376 pt) con texto tamaño-factura y ruido realista. A
+300 DPI (el actual, `ocr.py:DPI_RASTERIZADO`): 81,25 s, 20/20 campos OCR
+correctos. A 150 DPI: 23,60 s (−71 %), también 20/20. A 75 DPI: 7,03 s,
+pero cae a 5/20 (25 %). **El experimento no logró reproducir los ~300 s
+reales del documento patológico** (su peor caso, a 300 DPI, fue 81 s, no
+300 s) — se reporta como límite honesto del experimento, no como medición
+del caso real; el factor ~3,7× de diferencia probablemente viene de
+compresión JPEG real de una foto de cámara, que el ruido gaussiano
+sintético no reproduce.
+
+**B.1 (las 10 cifras) NO es medible por código — lo firma Fernando.**
+Material preparado en `~/jax-workspace/verificacion-10-cifras/` (fuera del
+repo, documento de cliente): el PDF original, el extracto completo, un
+`COMPARAR.md` con la instrucción, y la lista de cifras que el sistema
+marcó como dudosas (página + confianza) para que Fernando vea si el
+sistema acertó al dudar.
+
+- **PENDIENTE, fecha 2026-09-28:** calibrar el umbral de confianza del OCR
+  con documentos reales (hoy es el default de `ocr.py`, nunca contrastado
+  contra una muestra real más allá de esta ronda).
+- **PENDIENTE, fecha 2026-09-28:** decidir el DPI de rasterizado —
+  Fernando, con el número de arriba (150 DPI: −71 % de tiempo, sin
+  pérdida de exactitud medida en la reproducción; 75 DPI: −91 % pero
+  colapsa a 25 % de exactitud).
+
 ## Cerrado — ola final de arreglos de prevuelo-y-continuar (2026-09-17)
 
 **HISTORIA 2026-09-17** (rama `feat/prevuelo-y-continuar`, sin mergear ni desplegar al escribir esto; revisión final de rama + Rulings R30-R33 del ledger `.superpowers/sdd/2026-09-17-prevuelo-y-continuar-jacobs/progress.md`). Regla de Fernando: ningún hallazgo se difiere, así que las dos entradas que la rama había anotado acá (Rulings R14 y R27) se cierran en la misma rama.
