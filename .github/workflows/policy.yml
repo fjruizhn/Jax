@@ -703,8 +703,46 @@ jobs:
           #   de `search_similar_messages` antes de fijar el de esta funcion
           #   en 30) mas el truncado correcto de `limit` entre los que pasan
           #   el umbral. Numero del RUNNER: 64 passed.
-          grep -qE "^64 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 64 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 64 -> 65 el 2026-09-20 (ronda 2, correccion de diseño: `limit`
+          #   baja de 30 a 8 y `FACT_SIMILARITY_THRESHOLD` de 0.62 a 0.45 --
+          #   medido contra produccion, jax_memory, solo SELECT: con el
+          #   limit/umbral viejos "gracias" traia 30 facts (el tope), "hola"
+          #   16; con los nuevos, CERO en ambas. El caso real
+          #   ("jax sabes a que me dedico?") ya no lo resuelve este metodo
+          #   agrandando `limit`, lo resuelve `detect_completeness_intent`
+          #   devolviendo 'user', ver tests/test_completeness_intent.py).
+          #   `test_limit_por_defecto_alcanza_el_caso_real_del_bug` (la
+          #   premisa vieja) se retira; en su lugar,
+          #   `test_limit_por_defecto_es_8` (+1) y
+          #   `test_limit_por_defecto_ya_no_compensa_preguntas_de_completeness`
+          #   (+1, contrapositivo del test retirado) -- neto +1 sobre el
+          #   archivo. Medido en local (MISMA lista de archivos, MISMO
+          #   comando): 65 passed, 0 failed. Si el runner da otro numero,
+          #   manda el runner.
+          # 65 -> 66 el 2026-09-20 (ronda 2b, vocativo de faceta): el nombre
+          #   de una faceta va a aparecer en CASI TODOS los mensajes -- para
+          #   dirigirse a una hay que nombrarla. `_quitar_vocativo_faceta`
+          #   (jax/memory/db.py) pela el nombre SOLO cuando encabeza el
+          #   mensaje como vocativo ("jax ...", "jax, ...", "hyde: ..."),
+          #   nunca cuando el nombre ES la pregunta ("¿que modelo usa JAX?").
+          #   La lista de nombres sale de `jax.core.router.ALIASES` (ya
+          #   existia para que el REPL reconozca invocaciones de faceta; no
+          #   se inventa una lista nueva). Medido contra produccion (solo
+          #   SELECT) que esto mejora de verdad la recuperacion: la
+          #   distancia coseno real al fact de ocupacion (#7) sube del
+          #   puesto 26 de 79 al puesto 5 de 79 al sacar "jax" de "jax sabes
+          #   a que me dedico?" (y mejoras similares en otras dos preguntas
+          #   reales) -- documentado con los numeros en el docstring de la
+          #   funcion. Logica pura cubierta en tests/test_vocativo_faceta.py
+          #   (archivo nuevo, aparte, en el job tests-puros); acá solo se
+          #   suma +1 por el test de CABLEADO
+          #   (`test_pela_el_vocativo_antes_de_pedir_el_embedding`, visto en
+          #   rojo contra el codigo sin la llamada) -- la logica en si no se
+          #   duplica en este job. Medido en local (MISMO comando): 66
+          #   passed, 0 failed. Si el runner da otro numero, manda el
+          #   runner.
+          grep -qE "^66 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 66 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
@@ -1062,6 +1100,7 @@ jobs:
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
+          tests/test_vocativo_faceta.py
           tests/test_identity_context.py tests/test_jacobs_director.py
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
@@ -1201,6 +1240,7 @@ jobs:
           python -m pytest -q \
             tests/test_capability_unbound_schema.py tests/test_chunking.py \
             tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py \
+            tests/test_vocativo_faceta.py \
             tests/test_identity_context.py tests/test_jacobs_director.py \
             tests/test_memory_correction.py tests/test_memory_helpers.py \
             tests/test_read_audit_log_unbound.py tests/test_template_hash.py \
@@ -2859,8 +2899,40 @@ jobs:
           #   medido en el runner local con ESTE MISMO comando: 2261 -> 2266 (mismo
           #   2261 de la nota de arriba, confirmando que la base no se movio). Si el
           #   runner da otro numero, manda el runner.
-          grep -qE "^2317 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2317 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2317 -> 2334 el 2026-09-20 (ronda 2, `detect_completeness_intent`
+          #   ampliado): tests/test_completeness_intent.py sube de 7 a 24
+          #   (+17) -- el caso real ("jax sabes a que me dedico?"), sus
+          #   variantes en espanol (con y sin "jax" al frente, con y sin
+          #   tilde, voseo), sus equivalentes en ingles, y 4 falsos positivos
+          #   en la direccion contraria (un tercero o un producto no cae en
+          #   'user'). "17 skipped" NO cambia: nada de esto toca DB ni
+          #   corpus. NO pude reproducir el numero COMPLETO en local con el
+          #   mismo comando: sin sufijo de base y sin `/etc/jax/.env`
+          #   (replicando el entorno del job, que no fija JAX_DB_HOST), esta
+          #   maquina corrio "2349 passed, 3 xfailed, 0 skipped" en vez de
+          #   "2317 passed, 17 skipped" -- una diferencia de +32 passed / -17
+          #   skipped que NO es de esta ronda: coincide con la nota de
+          #   arriba, "16 de los 17 skips son tests/test_ejecutor_reproduccion_u3.py
+          #   sin el corpus de U3" -- este checkout SI tiene ese corpus (no
+          #   es un runner limpio), asi que esos tests corren en vez de
+          #   saltarse. El delta verificado por MUTACION (agregar/sacar los
+          #   17 tests nuevos con el resto del arbol fijo) es +17 sobre el
+          #   piso declarado; el piso sube por ese delta, no por el passed
+          #   crudo local. Si el runner da otro numero, manda el runner.
+          # 2334 -> 2349 el 2026-09-20 (ronda 2b, vocativo de faceta):
+          #   tests/test_vocativo_faceta.py es archivo NUEVO (+15) -- se
+          #   agrega a la lista de este job, arriba. Cubre
+          #   `_quitar_vocativo_faceta` (jax/memory/db.py): el nombre de la
+          #   faceta se pela SOLO cuando encabeza el mensaje como vocativo
+          #   ("jax ...", "jax, ...", "hyde: ..."), nunca cuando el nombre
+          #   ES la pregunta ("¿que modelo usa JAX?"); la lista de nombres
+          #   sale de `jax.core.router.ALIASES`, no se inventa. "17 skipped"
+          #   NO cambia: archivo puro, sin DB. Delta verificado por MUTACION
+          #   (mismo metodo que la nota de arriba, agregar/sacar el archivo
+          #   con el resto del arbol fijo): +15. Si el runner da otro
+          #   numero, manda el runner.
+          grep -qE "^2349 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2349 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

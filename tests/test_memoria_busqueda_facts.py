@@ -222,28 +222,51 @@ async def test_una_pregunta_ajena_no_trae_nada(limpio, monkeypatch):
 
 @requiere_db_de_prueba
 @asincrono
-async def test_limit_por_defecto_alcanza_el_caso_real_del_bug(limpio, monkeypatch):
-    """El caso real que origina esta funcion, reproducido a escala: la
-    verificacion contra produccion (2026-09-20, solo SELECT) midio que para
-    "jax sabes a que me dedico?" hay 25 facts sobre JAX (el software) mas
-    cercanos en distancia coseno que el fact de ocupacion de Fernando (rank
-    26 de 28 que pasan `FACT_SIMILARITY_THRESHOLD`). Un `limit` por defecto
-    de 5 -- el de `search_similar_messages` -- corta ANTES de llegar ahi y
-    el bug seguiria sin arreglarse (medido: con `limit=5` explicito, este
-    mismo test da rojo). El default de 30 (documentado en el docstring del
-    metodo) deja margen sobre el peor caso medido."""
+async def test_limit_por_defecto_es_8(limpio, monkeypatch):
+    """Ronda 2 (2026-09-20, decision de Fernando sobre mediciones nuevas):
+    el default baja de 30 a 8 -- este metodo es para RECUERDO ESPECIFICO,
+    no para volcar la memoria. Con mas candidatos vigentes bajo el umbral
+    que el tope, el default sigue truncando a 8, sin importar cuantos mas
+    haya."""
+    m = await _memoria(monkeypatch, _consulta())
+    for i in range(15):
+        await _crear_fact(f"hecho cercano {i}",
+                           _vec_a_distancia(0.10 + i * 0.01))  # 0.10..0.24, todos < 0.45
+
+    filas = await m.search_similar_facts("consulta", user_id=_USER)  # limit por defecto
+    assert len(filas) == 8, (
+        f"el limit por defecto tiene que ser 8 (ronda 2, ya no 30): "
+        f"con 15 candidatos vigentes bajo el umbral se esperaban 8, "
+        f"se obtuvieron {len(filas)}")
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_limit_por_defecto_ya_no_compensa_preguntas_de_completeness(limpio, monkeypatch):
+    """Contrapositivo del test retirado en esta misma ronda
+    (`test_limit_por_defecto_alcanza_el_caso_real_del_bug`, ronda 1): agrandar
+    `limit` para alcanzar un fact lejano (rank 26 de 28 por distancia,
+    reproducido a escala) volcaba entre 16 y 30 facts ante frases sin
+    contenido real -- medido contra produccion, "gracias" traia el tope
+    (30). Con el `limit` nuevo (8), ese fact lejano YA NO vuelve por
+    similitud -- y esta bien: el caso real ("jax sabes a que me dedico?")
+    lo resuelve `detect_completeness_intent` devolviendo 'user'
+    (tests/test_completeness_intent.py), que trae el fact completo via
+    `get_facts()`, no por similitud."""
     m = await _memoria(monkeypatch, _consulta())
     for i in range(25):
         await _crear_fact(f"hecho sobre JAX, mas cercano {i}",
-                           _vec_a_distancia(0.30 + i * 0.01))  # 0.30..0.54, todos < 0.62
+                           _vec_a_distancia(0.10 + i * 0.01))  # 0.10..0.34, todos < 0.45
     await _crear_fact("Fernando es Licenciado en administracion de empresas",
-                       _vec_a_distancia(0.59))  # rank 26: el ultimo en pasar el umbral
+                       _vec_a_distancia(0.40))  # el mas lejano de los vigentes, igual < 0.45
 
     filas = await m.search_similar_facts("a que me dedico?", user_id=_USER)  # limit por defecto
     textos = [f["fact_text"] for f in filas]
-    assert "Fernando es Licenciado en administracion de empresas" in textos, (
-        f"con el limit por defecto, el hecho real del bug sigue sin volver "
-        f"(se trajeron {len(textos)} de 26 sembrados)")
+    assert "Fernando es Licenciado en administracion de empresas" not in textos, (
+        f"con el limit nuevo (8) un hecho fuera de los 8 mas cercanos no "
+        f"tiene que volver por similitud -- ese caso lo resuelve "
+        f"detect_completeness_intent, no este metodo: {textos}")
+    assert len(textos) == 8
 
 
 @requiere_db_de_prueba
@@ -256,7 +279,7 @@ async def test_limit_trunca_a_los_mas_cercanos_entre_los_que_pasan_el_umbral(lim
     m = await _memoria(monkeypatch, _consulta())
     ids_por_distancia = []
     for i in range(8):
-        d = 0.50 - i * 0.01  # 0.50 .. 0.43, todos < 0.62, insertados del MAS lejos al MAS cerca
+        d = 0.30 - i * 0.01  # 0.30 .. 0.23, todos < 0.45 con margen, insertados del MAS lejos al MAS cerca
         texto = f"hecho {i} a distancia {d:.2f}"
         await _crear_fact(texto, _vec_a_distancia(d))
         ids_por_distancia.append((d, texto))
@@ -335,6 +358,34 @@ async def test_encuentra_el_hecho_del_proyecto_compartido(limpio, monkeypatch):
     filas = await m.search_similar_facts("consulta", project_id=_PROYECTO)
     textos = [f["fact_text"] for f in filas]
     assert "dato del proyecto" in textos
+
+
+# ---------------------------------------------------------------------------
+# 3b. El vocativo de faceta se pela ANTES de embeber (2026-09-20, ronda 2b)
+# ---------------------------------------------------------------------------
+# La logica del vocativo (que nombres cuentan, cuando se pela) esta cubierta
+# a fondo en tests/test_vocativo_faceta.py, pura y sin DB. Este test cubre
+# SOLO el cableado: que `search_similar_facts` de verdad llama a
+# `_quitar_vocativo_faceta` antes de pedir el embedding, no que la funcion
+# en si ande bien.
+
+@requiere_db_de_prueba
+@asincrono
+async def test_pela_el_vocativo_antes_de_pedir_el_embedding(limpio, monkeypatch):
+    m = await _memoria(monkeypatch, _consulta())
+    vistos = []
+    get_embedding_real = m.get_embedding
+
+    async def _espia(texto):
+        vistos.append(texto)
+        return await get_embedding_real(texto)
+
+    monkeypatch.setattr(m, "get_embedding", _espia)
+
+    await m.search_similar_facts("jax sabes a que me dedico?", user_id=_USER)
+    assert vistos == ["sabes a que me dedico?"], (
+        f"search_similar_facts tiene que pelar el vocativo ANTES de pedir "
+        f"el embedding: se le paso {vistos!r}")
 
 
 # ---------------------------------------------------------------------------
