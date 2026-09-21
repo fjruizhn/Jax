@@ -2933,7 +2933,13 @@ jobs:
       #   - I-3: cada umbral tiene sus propios tests que lo fijan, la
       #     mayoria contra funciones PURAS (_clasificar, _analizar_tsv) sin
       #     invocar a tesseract.
-      # De 7 a 28 tests.
+      # De 7 a 28 tests. Task 7 (2026-09-21, hueco de cobertura arrastrado
+      # de la ronda anterior): desactivar `paginas_con_dudas.append(numero)`
+      # en `_resolver_pdf` dejaba la suite ENTERA en verde -- ningun test
+      # ejercitaba la propagacion de 'con_dudas' de una pagina al agregado
+      # del PDF. +1 test (pagina con membrete corto de alta confianza, la
+      # UNICA que cae con esa linea desactivada; verificado con la mutacion
+      # a mano: 28 passed, 1 failed). De 28 a 29.
       #
       # `pytest.importorskip("PIL.Image")` en `_ocr_test.py` genera los
       # fixtures (imágenes con texto real) -- mismo patrón de riesgo que
@@ -2949,8 +2955,8 @@ jobs:
       - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
-          grep -qE "^28 passed" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 28 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^29 passed" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -2991,6 +2997,24 @@ jobs:
           python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
           grep -qE "^18 passed" /tmp/word_tests || {
             echo "PISO ROTO: se esperaban 18 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+
+      # Task 7 (2026-09-20/21, procesamiento-archivos-nucleo): la compuerta
+      # -- elige extractor por tipo, y NUNCA paga el caro (OCR) si el barato
+      # (pdfplumber) ya alcanzo. Consume excel/pdf/ocr/word.extraer; su
+      # import de `word` exige python-docx, ya instalado arriba (mismo
+      # `requirements-archivos.txt` que openpyxl/pdfplumber). No necesita
+      # tesseract/poppler: los dos tests de PDF monkeypatchean
+      # `pdf.tiene_capa_de_texto`, `pdf.extraer` y `ocr.extraer`, y afirman
+      # explicitamente que el camino caro NO se invoco cuando no corresponde
+      # -- ese es el punto de la pieza. Sin `pytest.importorskip` acá: a
+      # diferencia de los extractores, `compuerta.py` no tiene un modo
+      # degradado razonable si falta una dependencia -- si algo de esto no
+      # se instaló, el import ya reventó arriba y este paso lo hace visible.
+      - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
+          grep -qE "^3 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 3 tests CORRIDOS de la compuerta."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

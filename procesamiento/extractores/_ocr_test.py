@@ -329,6 +329,46 @@ def test_pdf_con_una_pagina_en_blanco_da_parcial(tmp_path: Path):
     assert "Estado de Situación Financiera" in r.salidas["texto.txt"]
 
 
+def test_pdf_pagina_con_membrete_corto_es_parcial_con_paginas_con_dudas(tmp_path: Path):
+    """Hueco de cobertura (task-7, 2026-09-21): desactivar la propagación de
+    `con_dudas` de una página al resultado agregado del PDF (en
+    `_resolver_pdf`, la línea `paginas_con_dudas.append(numero)`) dejaba la
+    suite ENTERA en verde -- ningún test la ejercitaba. Primera página con
+    contenido completo (>= MINIMO_PALABRAS, sin dudosas) -> 'ok' por sí sola.
+    Segunda página, sólo un membrete corto de alta confianza (< MINIMO_
+    PALABRAS, mismo caso EXACTO de C-2 / `test_membrete_con_pocas_
+    palabras_da_parcial_con_dimensiones`, pero acá dentro de un PDF) ->
+    'con_dudas' por sí sola. El agregado del PDF tiene que ser 'parcial' con
+    `detalle['paginas_con_dudas'] == [2]` -- sin la propagación, ninguna de
+    las dos páginas cuenta como dudosa ni sin texto, y el agregado sale
+    (incorrectamente) 'ok'."""
+    p1 = _imagen_multilinea(
+        tmp_path / "p1.png",
+        [
+            "Estado de Situación Financiera",
+            "Activos totales 1,234,567.89 USD",
+            "Pasivos totales 987,654.32 USD",
+            "Patrimonio neto 246,913.57 USD",
+        ],
+    )
+    p2 = _imagen_una_linea(
+        tmp_path / "p2.png", "CONTADORES ASOCIADOS S.A.", size=(1200, 1600)
+    )
+    from PIL import Image
+
+    origen = _pdf_de_imagenes(
+        tmp_path / "membrete.pdf", [Image.open(p1), Image.open(p2)]
+    )
+
+    r = ocr.extraer(origen)
+
+    assert r.estado == "parcial"
+    assert r.detalle["paginas"] == 2
+    assert r.detalle["paginas_con_dudas"] == [2]
+    assert "paginas_sin_texto" not in r.detalle
+    assert "Estado de Situación Financiera" in r.salidas["texto.txt"]
+
+
 def test_pdf_donde_ninguna_pagina_da_texto_es_error(tmp_path: Path):
     """C-3: escaneo puro imagen, sin ninguna página legible -- 'error', no
     'ok' con un extracto vacío."""
