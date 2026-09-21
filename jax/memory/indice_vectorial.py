@@ -155,3 +155,83 @@ async def reparar_uno(cur, tabla: str, indice: str, columna: str) -> str:
 async def revisar_todos(cur, muestra: int = MUESTRA) -> list[Informe]:
     return [await revisar_uno(cur, t, i, c, muestra)
             for t, i, c in await indices_vectoriales(cur)]
+
+
+# ---------------------------------------------------------------------------
+# La caché del índice: el otro modo de fallo, y este SÍ avisa antes de doler
+# ---------------------------------------------------------------------------
+#
+# `mhnsw_max_cache_size` acota la caché DE CADA índice vectorial. Cuando los
+# vectores no entran, la caché desaloja -- y bajo carga cada búsqueda recorre
+# el grafo por un camino distinto. Medido el 2026-09-20 a 9.000 hechos:
+# `/api/admin/memoria/grupos` devolvía entre 1.596 y 1.606 grupos en corridas
+# consecutivas CON LOS MISMOS DATOS.
+#
+# Ojo con el diagnóstico fácil: NO es "el HNSW es aproximado y ya". Una
+# consulta de vecinos suelta sale determinista 6 de 6 incluso con 9.000 filas,
+# con `ef_search` 20 y 100. Lo que varía es el AGREGADO cuando la caché no
+# alcanza. Por eso el centinela mira el tamaño, no la aproximación.
+#
+# A diferencia del envenenamiento por cascada, esto se puede ver venir: es
+# aritmética. Por eso acá sí hay un aviso y allá no.
+
+#: Un vector ocupa `dim * 4` bytes (float32).
+BYTES_POR_FLOAT = 4
+
+#: Se avisa a partir de este porcentaje de ocupación. 80 % deja margen para
+#: actuar con calma: subir la variable es en caliente, pero hay que decidir el
+#: número y persistirlo en el `conf.d` (si no, se pierde en el reinicio).
+UMBRAL_AVISO = 0.80
+
+
+@dataclass(frozen=True)
+class Ocupacion:
+    tabla: str
+    columna: str
+    filas: int
+    dim: int
+    cache_bytes: int
+
+    @property
+    def bytes_usados(self) -> int:
+        return self.filas * self.dim * BYTES_POR_FLOAT
+
+    @property
+    def caben(self) -> int:
+        return self.cache_bytes // (self.dim * BYTES_POR_FLOAT)
+
+    @property
+    def fraccion(self) -> float:
+        return self.bytes_usados / self.cache_bytes if self.cache_bytes else float("inf")
+
+    @property
+    def holgada(self) -> bool:
+        return self.fraccion < UMBRAL_AVISO
+
+    def __str__(self) -> str:
+        estado = "holgada" if self.holgada else "APRETADA"
+        return (f"{self.tabla}.{self.columna}: caché {estado} "
+                f"({self.filas:,} de ~{self.caben:,} vectores, "
+                f"{self.fraccion * 100:.0f} % de {self.cache_bytes // 1024 // 1024} MB)")
+
+
+async def ocupacion_de_cache(cur) -> list[Ocupacion]:
+    """Cuántos vectores hay contra cuántos entran en la caché, por índice."""
+    await cur.execute("SELECT @@mhnsw_max_cache_size")
+    cache_bytes = int((await cur.fetchone())[0])
+
+    salida = []
+    for tabla, _indice, columna in await indices_vectoriales(cur):
+        await cur.execute(
+            "SELECT COLUMN_TYPE FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+            (tabla, columna))
+        fila = await cur.fetchone()
+        # `vector(1024)` -> 1024. Si el tipo no se puede leer, no se inventa.
+        dim = int(str(fila[0]).split("(")[1].split(")")[0]) if fila and "(" in str(fila[0]) else 0
+        if dim <= 0:
+            continue
+        await cur.execute(f"SELECT COUNT(*) FROM `{tabla}`")
+        filas = (await cur.fetchone())[0]
+        salida.append(Ocupacion(tabla, columna, filas, dim, cache_bytes))
+    return salida

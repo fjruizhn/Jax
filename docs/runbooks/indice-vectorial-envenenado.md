@@ -4,6 +4,9 @@
 MariaDB 12.3.3 (`mariadb-12-3-jax`, 127.0.0.1:3308).
 **Producción al escribir esto: SANA.** `messages` (1.638 filas) y `facts` (116)
 devuelven 10/10 por el índice y por scan completo.
+**Reportado a MariaDB: [MDEV-41227](https://jira.mariadb.org/browse/MDEV-41227)**
+(2026-09-20, componente *Vector search*, `Open`). El texto enviado y la
+reproducción en **SQL puro** están en `docs/upstream/`.
 
 ---
 
@@ -120,6 +123,49 @@ la tabla, así que se escribe entero y a propósito.
 
 ---
 
+## 5bis · El OTRO modo de fallo: la caché del índice
+
+Distinto del envenenamiento, y este **sí se ve venir, porque es aritmética**.
+
+`mhnsw_max_cache_size` acota la caché **de cada** índice. Un vector bge-m3 ocupa
+`1024 × 4 = 4 KB`, así que el valor por omisión de **16 MB se llena con ~4.096
+filas**. Pasado ese punto la caché desaloja y, bajo carga, cada búsqueda recorre
+el grafo por un camino distinto.
+
+Medido el 2026-09-20 a 9.000 hechos: `GET /api/admin/memoria/grupos` devolvía
+entre **1.596 y 1.606 grupos en corridas consecutivas con los mismos datos**.
+
+> **Ojo con el diagnóstico fácil.** No es «el HNSW es aproximado y ya». Una
+> consulta de vecinos **suelta** sale determinista **6 de 6** incluso con 9.000
+> filas, con `ef_search` 20 y 100. Lo que varía es el **agregado** cuando la
+> caché no alcanza.
+
+**Puesto en 256 MB el 2026-09-20** (~65.500 vectores por índice; hoy producción
+tiene 117 facts y 1.638 messages). Se aplicó **dos veces**, y hacen falta las dos:
+
+```bash
+# 1) ya, sin reiniciar (la variable es GLOBAL y no es de solo lectura)
+SET GLOBAL mhnsw_max_cache_size = 268435456;
+# 2) para que sobreviva al reinicio
+/var/lib/mariadb-12.3-docker/conf.d/zz-mhnsw.cnf   ->  [mariadb]
+                                                       mhnsw_max_cache_size = 268435456
+```
+
+Es la misma lección que `virsh setmem`: en caliente **no** sobrevive a un
+reinicio. El archivo se probó levantando un contenedor desechable con la misma
+imagen y la misma `conf.d` — dio 256 MB — para no depender de reiniciar
+producción.
+
+El chequeo lo reporta solo:
+
+```
+facts.embedding_bge_m3: caché holgada (117 de ~65.536 vectores, 0 % de 256 MB)
+```
+
+y sale con código 1 cuando alguna pasa el **80 %**.
+
+---
+
 ## 6 · Qué NO se hizo, y por qué
 
 - **No se le puso un centinela automático al `/health` ni un timer.** Con cero
@@ -128,12 +174,7 @@ la tabla, así que se escribe entero y a propósito.
   el lugar es junto a `/health` o a las migraciones, con el último resultado
   **cacheado**, nunca una consulta vectorial por petición.
 - **No se cambió el `ON DELETE CASCADE`.** El esquema está bien; el defecto es
-  del motor.
-- **El reporte a MariaDB upstream está PREPARADO, no enviado** — hace falta una
-  cuenta de jira.mariadb.org. El texto y una reproducción en **SQL puro**
-  (`VECTOR(4)`, sin cliente) están en `docs/upstream/`. Ahí también está lo que
-  acotó la causa: hacen falta **`DISTANCE='cosine'` Y la cascada**; con el `M`
-  por omisión la ceguera es **total** (0 de 10), no parcial.
+  del motor, y está reportado (MDEV-41227).
 
 ---
 
