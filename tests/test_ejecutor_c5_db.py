@@ -71,17 +71,29 @@ def test_la_consulta_de_hosts_va_por_la_clave_primaria():
 # --- spec 2026-09-18-auditor-local-opcion.md §4: el auditor se elige según los hosts -------
 
 async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
-    """Provider+model+binding sintéticos para 'auditor_local' -- la migración real de
+    """Provider+model+binding sintéticos para la faceta local configurada -- la migración real de
     jax-platform sólo los siembra con JAX_OLLAMA_CPU_URL en el entorno (no seteada acá),
     igual que la fixture `auditor_local_bindeado` del lado de jax-platform. `model_ref` se
     fija a mano (no vía el backfill de _seed_models_and_backfill): resolve_facet real
     (facet_resolver._query_facet) hace JOIN contra `model` por esa columna. `is_local`
-    parametrizable: el peor caso (spec §4) es un 'auditor_local' bindeado a un proveedor
+    parametrizable: el peor caso (spec §4) es un auditor local bindeado a un proveedor
     que NO es local de verdad."""
     from jacobs import store
     async with store.conexion() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+            cfg = await E.leer_config(conn)
+            auditor_faceta_local = cfg.auditor_faceta_local
+            # La configuración del job es la autoridad para esta clave (en CI es
+            # `el_juez`, no el literal histórico `auditor_local`).  Si ya existe
+            # un binding compartido, sólo sustituimos sus tres referencias por la
+            # duración del test y las restauramos exactamente al terminar.
+            await cur.execute(
+                "SELECT provider_id, model_id, model_ref FROM facet_binding "
+                "WHERE facet_key = %s AND role = 'primary'", (auditor_faceta_local,))
+            binding_local_previo = await cur.fetchone()
+            await cur.execute("SELECT status FROM facet WHERE `key` = %s", (auditor_faceta_local,))
+            fila_faceta_local = await cur.fetchone()
+            status_faceta_local_previo = fila_faceta_local[0] if fila_faceta_local else None
             await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
             await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
             await cur.execute(
@@ -91,9 +103,17 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
                 "INSERT INTO model (provider_id, model_id, source, source_checked_at) "
                 "VALUES ('t-c5db-auditor-local', 'modelo-cpu', 'manual', UTC_TIMESTAMP())")
             model_ref = cur.lastrowid
-            await cur.execute(
-                "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
-                "VALUES ('auditor_local', 't-c5db-auditor-local', 'modelo-cpu', %s, 'primary')", (model_ref,))
+            if binding_local_previo is None:
+                await cur.execute(
+                    "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
+                    "VALUES (%s, 't-c5db-auditor-local', 'modelo-cpu', %s, 'primary')",
+                    (auditor_faceta_local, model_ref))
+            else:
+                await cur.execute(
+                    "UPDATE facet_binding SET provider_id = 't-c5db-auditor-local', "
+                    "model_id = 'modelo-cpu', model_ref = %s "
+                    "WHERE facet_key = %s AND role = 'primary'", (model_ref, auditor_faceta_local))
+            await cur.execute("UPDATE facet SET status = 'active' WHERE `key` = %s", (auditor_faceta_local,))
             # El auditor de NUBE también se siembra acá. No alcanza con sembrar el local:
             # estos tests resuelven LOS DOS (una máquina con datos de clientes y una sin
             # ellos), y el job `jacobs-gobernanza-db` arma su base clonando jax-platform y
@@ -167,7 +187,21 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
     finally:
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+                if binding_local_previo is None:
+                    # Alcance el binding que insertó esta corrida, no todos los
+                    # bindings de una tabla compartida.
+                    await cur.execute(
+                        "DELETE FROM facet_binding WHERE facet_key = %s AND role = 'primary' "
+                        "AND provider_id = 't-c5db-auditor-local' AND model_id = 'modelo-cpu'",
+                        (auditor_faceta_local,))
+                else:
+                    await cur.execute(
+                        "UPDATE facet_binding SET provider_id = %s, model_id = %s, model_ref = %s "
+                        "WHERE facet_key = %s AND role = 'primary'",
+                        (*binding_local_previo, auditor_faceta_local))
+                if status_faceta_local_previo is not None:
+                    await cur.execute("UPDATE facet SET status = %s WHERE `key` = %s",
+                                      (status_faceta_local_previo, auditor_faceta_local))
                 await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
                 await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
                 if nube_sembrada_aca:
