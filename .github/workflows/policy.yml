@@ -3003,18 +3003,28 @@ jobs:
       # (pdfplumber) ya alcanzo. Consume excel/pdf/ocr/word.extraer; su
       # import de `word` exige python-docx, ya instalado arriba (mismo
       # `requirements-archivos.txt` que openpyxl/pdfplumber). No necesita
-      # tesseract/poppler: los dos tests de PDF monkeypatchean
-      # `pdf.tiene_capa_de_texto`, `pdf.extraer` y `ocr.extraer`, y afirman
-      # explicitamente que el camino caro NO se invoco cuando no corresponde
-      # -- ese es el punto de la pieza. Sin `pytest.importorskip` acá: a
-      # diferencia de los extractores, `compuerta.py` no tiene un modo
-      # degradado razonable si falta una dependencia -- si algo de esto no
-      # se instaló, el import ya reventó arriba y este paso lo hace visible.
+      # tesseract/poppler: los tests monkeypatchean el extractor caro/ajeno
+      # de cada camino (`pdf.tiene_capa_de_texto`, `pdf.extraer`,
+      # `ocr.extraer`, `excel.extraer`), y afirman explicitamente que el
+      # camino equivocado NO se invoco -- ese es el punto de la pieza. Sin
+      # `pytest.importorskip` acá: a diferencia de los extractores,
+      # `compuerta.py` no tiene un modo degradado razonable si falta una
+      # dependencia -- si algo de esto no se instaló, el import ya reventó
+      # arriba y este paso lo hace visible.
+      #
+      # 3 -> 6 (pedido del coordinador tras el reporte de esta task): el
+      # ruteo por extensión (EXCEL/WORD/IMAGENES) es justo donde un error
+      # manda un archivo al extractor equivocado, y no tenia ningun test
+      # propio -- una mutacion sobre esos tres conjuntos no hacia caer
+      # nada. +3 tests, mismo patron que los de PDF (afirmar tambien que
+      # el camino ajeno NO se invoco): un .xlsx no pasa por OCR, un .docx
+      # no pasa por el extractor de Excel, una imagen no pasa por
+      # pdfplumber.
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          grep -qE "^3 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 3 tests CORRIDOS de la compuerta."; exit 1; }
+          grep -qE "^6 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 6 tests CORRIDOS de la compuerta."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

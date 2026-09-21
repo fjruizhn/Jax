@@ -77,3 +77,75 @@ def test_un_pdf_con_texto_no_paga_ocr(tmp_path: Path, monkeypatch):
     archivo = tmp_path / "nativo.pdf"
     archivo.write_bytes(b"%PDF-1.4 lo que sea")
     assert compuerta.extraer(archivo).estado == "ok"
+
+
+def test_un_xlsx_no_paga_ocr(tmp_path: Path, monkeypatch):
+    """El ruteo por extensión es justo donde un error manda el archivo al
+    extractor equivocado -- un .xlsx tiene que resolver con excel.extraer,
+    nunca con OCR."""
+    from procesamiento.extractores import excel, ocr
+    from procesamiento.resultado import Resultado
+
+    monkeypatch.setattr(
+        excel, "extraer",
+        lambda origen: Resultado(
+            estado="ok", salidas={"hoja1.csv": "a,b"}, detalle={},
+            extractor="openpyxl", version="3.1.5",
+        ),
+    )
+
+    def no_debe_llamarse(origen, idioma="spa"):
+        raise AssertionError("un xlsx no debe pasar por OCR")
+
+    monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
+
+    archivo = tmp_path / "balance.xlsx"
+    archivo.write_bytes(b"PK\x03\x04 lo que sea")
+    assert compuerta.extraer(archivo).estado == "ok"
+
+
+def test_un_docx_no_pasa_por_el_extractor_de_excel(tmp_path: Path, monkeypatch):
+    """Un .docx tiene que resolver con word.extraer, nunca con el de Excel."""
+    from procesamiento.extractores import excel, word
+    from procesamiento.resultado import Resultado
+
+    monkeypatch.setattr(
+        word, "extraer",
+        lambda origen: Resultado(
+            estado="ok", salidas={"texto.md": "hola"}, detalle={},
+            extractor="python-docx", version="1.2.0",
+        ),
+    )
+
+    def no_debe_llamarse(origen):
+        raise AssertionError("un docx no debe pasar por el extractor de Excel")
+
+    monkeypatch.setattr(excel, "extraer", no_debe_llamarse)
+
+    archivo = tmp_path / "informe.docx"
+    archivo.write_bytes(b"PK\x03\x04 lo que sea")
+    assert compuerta.extraer(archivo).estado == "ok"
+
+
+def test_una_imagen_no_pasa_por_pdfplumber(tmp_path: Path, monkeypatch):
+    """Una imagen suelta tiene que resolver con ocr.extraer, nunca con el
+    extractor de PDF nativo (pdfplumber)."""
+    from procesamiento.extractores import ocr, pdf
+    from procesamiento.resultado import Resultado
+
+    monkeypatch.setattr(
+        ocr, "extraer",
+        lambda origen, idioma="spa": Resultado(
+            estado="ok", salidas={"texto.txt": "leido"}, detalle={},
+            extractor="tesseract", version="5.5.0",
+        ),
+    )
+
+    def no_debe_llamarse(origen):
+        raise AssertionError("una imagen no debe pasar por pdfplumber")
+
+    monkeypatch.setattr(pdf, "extraer", no_debe_llamarse)
+
+    archivo = tmp_path / "recibo.png"
+    archivo.write_bytes(b"\x89PNG lo que sea")
+    assert compuerta.extraer(archivo).estado == "ok"
