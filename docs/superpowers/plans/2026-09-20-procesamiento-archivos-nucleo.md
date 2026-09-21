@@ -241,6 +241,15 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'procesamiento.resultad
 
 - [ ] **Step 3: Write minimal implementation**
 
+> ⚠️ **ESTE BLOQUE QUEDÓ SUPERADO — no lo copies.** La auditoría adversarial del
+> 2026-09-20 demostró que NO cumple el spec: `@dataclass(frozen=True)` congela el nombre
+> del atributo, no el diccionario, así que `r.salidas["x"] = ...` después de construir
+> rompía el fallo cerrado. Además 5 de 8 mutaciones al código dejaban los tests en verde.
+> La implementación real y verificada está en `procesamiento/resultado.py` (commit
+> `a7ef8c9`): copia defensiva + `MappingProxyType`, validación de mapa, campos
+> obligatorios no vacíos, "al menos una salida con contenido", y `detalle` validado
+> contra un ida y vuelta de JSON. Se deja este bloque como registro de lo que falló.
+
 ```python
 # procesamiento/resultado.py
 """Lo que devuelve todo extractor. Las reglas de fallo cerrado viven acá,
