@@ -23,7 +23,7 @@ def _record_denial(store, control_id: str, reason_code: str, *, decision_id: str
     if recorder is not None:
         try:
             recorder.record_denial(control_id=control_id, reason_code=reason_code, decision_id=decision_id)
-        except Exception:
+        except Exception:  # fail-soft: primary denial is already fail-closed; evidence outage cannot permit it.
             # Evidence outage must never convert a denial into an allow.
             pass
 
