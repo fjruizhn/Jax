@@ -17,6 +17,16 @@ def _now(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None: raise ExecutionRequestScopeError("now_utc explícito requerido")
     return value.astimezone(timezone.utc)
 
+def _record_denial(store, control_id: str, reason_code: str, *, decision_id: str | None = None) -> None:
+    """Optional fixed-composition B7 seam; never supplied by an operation caller."""
+    recorder = getattr(store, "evidence_recorder", None)
+    if recorder is not None:
+        try:
+            recorder.record_denial(control_id=control_id, reason_code=reason_code, decision_id=decision_id)
+        except Exception:
+            # Evidence outage must never convert a denial into an allow.
+            pass
+
 def _record(authorization: ExecutionAuthorization, *, now_utc: datetime) -> ExecutionRecord:
     request = authorization.execution_request; execution_id = new_execution_id()
     projection = {"schema_version":"1.0","kind":"JAX_GOVERNED_EXECUTION_RECORD","execution_id":execution_id,
@@ -34,9 +44,12 @@ def _record(authorization: ExecutionAuthorization, *, now_utc: datetime) -> Exec
 
 def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: datetime, kill_switch_active: bool = False) -> ExecutionRecord:
     now = _now(now_utc)
-    if kill_switch_active: raise KillSwitchActiveError("kill switch activo")
-    if not isinstance(authorization, ExecutionAuthorization) or not authorization._is_trusted(): raise ExecutionRequestScopeError("authorization no sellada")
-    if now > authorization.expires_at_utc: raise AuthorizationExpiredError("authorization vencida")
+    if kill_switch_active:
+        _record_denial(store, "CTL.B6.KILL_SWITCH", "DENIED", decision_id=getattr(authorization, "decision_id", None)); raise KillSwitchActiveError("kill switch activo")
+    if not isinstance(authorization, ExecutionAuthorization) or not authorization._is_trusted():
+        _record_denial(store, "CTL.B6.AUTHORIZATION_PROVENANCE", "DENIED", decision_id=getattr(authorization, "decision_id", None)); raise ExecutionRequestScopeError("authorization no sellada")
+    if now > authorization.expires_at_utc:
+        _record_denial(store, "CTL.B6.AUTHORIZATION_EXPIRY", "DENIED", decision_id=authorization.decision_id); raise AuthorizationExpiredError("authorization vencida")
     record = _record(authorization, now_utc=now)
     state = initial_state(requires_human_approval=authorization.requires_human_approval, requires_dry_run=authorization.requires_dry_run)
     return store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now))
@@ -63,8 +76,10 @@ def record_dry_run(store, record, authorization, *, status: str, result: object,
 
 def dispatch_execution(store, record, authorization, *, now_utc: datetime, kill_switch_active: bool = False, job_id: str | None = None):
     now = _now(now_utc)
-    if kill_switch_active: raise KillSwitchActiveError("kill switch activo")
-    if now > authorization.expires_at_utc: raise AuthorizationExpiredError("authorization vencida")
+    if kill_switch_active:
+        _record_denial(store, "CTL.B6.KILL_SWITCH", "DENIED", decision_id=record.decision_id); raise KillSwitchActiveError("kill switch activo")
+    if now > authorization.expires_at_utc:
+        _record_denial(store, "CTL.B6.AUTHORIZATION_EXPIRY", "DENIED", decision_id=record.decision_id); raise AuthorizationExpiredError("authorization vencida")
     states = store.events(record.execution_id); current = ExecutionState(states[-1].state)
     if authorization.requires_human_approval and current is ExecutionState.WAITING_HUMAN_APPROVAL: raise HumanApprovalRequiredError("approval requerida")
     if authorization.requires_dry_run:

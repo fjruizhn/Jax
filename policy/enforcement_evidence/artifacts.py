@@ -3,8 +3,12 @@ from datetime import datetime
 from .models import EvidenceArtifact, EvidenceBlobRef, EvidenceType, EvidenceClass, EvidenceTrustDomain, EvidenceSubject, EvidenceSubjectType
 from .errors import EvidenceArtifactIntegrityError
 def verify_evidence_artifact_content(value, blob_reader):
+    if not isinstance(value, EvidenceArtifact): raise EvidenceArtifactIntegrityError("artifact type")
+    # property recomputation is deliberate: it derives from canonical fields,
+    # not a caller-supplied stored digest.
+    expected=value.artifact_hash
+    if not expected.startswith("sha256:"): raise EvidenceArtifactIntegrityError("hash")
     for ref in value.blob_refs: blob_reader(ref.evidence_hash)
-    if value.artifact_hash != value.artifact_hash: raise EvidenceArtifactIntegrityError("hash")
     return value
 def deserialize_evidence_artifact(data):
     try:
