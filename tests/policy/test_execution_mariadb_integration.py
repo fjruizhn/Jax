@@ -134,6 +134,7 @@ def test_b7_writer_failure_rolls_back_real_governed_execution():
     with pytest.raises(RuntimeError): create_execution(store, auth, now_utc=now)
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_authorization_consumptions WHERE authorization_id=%s",(auth.authorization_id,)) == 0
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_records WHERE decision_id=%s",(decision.decision_id,)) == 0
+    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE event_type='EXECUTION_CREATED'") == 0
 
 def test_b7_dispatch_writer_failure_rolls_back_dispatch_event():
     from policy.execution_control.service import dispatch_execution
