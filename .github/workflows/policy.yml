@@ -73,6 +73,18 @@ jobs:
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest tests/policy/test_execution_mariadb_integration.py -v
 
+  enforcement-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements.txt pytest
+      # Do not run these from tests-puros: pytest then places tests/policy
+      # ahead of the production policy package on sys.path.
+      - run: PYTHONPATH=. python -m pytest tests/policy/test_enforcement_evidence_core.py tests/policy/test_enforcement_evidence_mariadb_api.py -q
+
   no-fail-open-except:
     runs-on: ubuntu-latest
     steps:
