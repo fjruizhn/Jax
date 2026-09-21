@@ -74,6 +74,29 @@ def _con_extension_enganosa(r: Resultado, sufijo: str, contenido: str) -> Result
     )
 
 
+def _pdf_o_ocr(origen: Path) -> Resultado:
+    """Decide entre `pdf.extraer` y `ocr.extraer` para un PDF -- la MISMA
+    decisión se necesitaba en dos ramas de `extraer()` (contenido decisivo
+    y respaldo por extensión) y estaba duplicada ahí, cada una con su
+    propia copia de la lógica.
+
+    C-2 (final-hallazgos.md, ronda de cierre): sin `pdfplumber` instalado,
+    `pdf.tiene_capa_de_texto()` ahora deja escapar `ModuleNotFoundError`
+    (ver su docstring) en vez de tragarlo como "sin texto" -- acá se
+    captura para resolver con `pdf.extraer(origen)`, que YA sabe convertir
+    esa misma falta de dependencia en `sin_extractor` (mismo camino que un
+    `.docx` sin `python-docx`). Antes de este arreglo, esa misma falta de
+    dependencia rendía "sin texto" -> se rutea a OCR -> `estado='ok'` con
+    las cifras DESTRUIDAS (medido: 8/8 cifras con pdfplumber, 0/8 sin él),
+    sin que `detalle` dijera una palabra de la dependencia faltante -- un
+    fallo de despliegue produciendo cifras falsas etiquetadas 'ok'."""
+    try:
+        tiene_texto = pdf.tiene_capa_de_texto(origen)
+    except ModuleNotFoundError:
+        return pdf.extraer(origen)
+    return pdf.extraer(origen) if tiene_texto else ocr.extraer(origen)
+
+
 def extraer(origen: Path) -> Resultado:
     origen = Path(origen)
     sufijo = origen.suffix.lower()
@@ -90,7 +113,7 @@ def extraer(origen: Path) -> Resultado:
         return _con_extension_enganosa(r, sufijo, "ole2") if sufijo in EXCEL | WORD else r
 
     if tipo == "pdf":
-        r = pdf.extraer(origen) if pdf.tiene_capa_de_texto(origen) else ocr.extraer(origen)
+        r = _pdf_o_ocr(origen)
         return r if sufijo == ".pdf" else _con_extension_enganosa(r, sufijo, "pdf")
 
     if tipo == "imagen":
@@ -106,7 +129,7 @@ def extraer(origen: Path) -> Resultado:
     if sufijo in IMAGENES:
         return ocr.extraer(origen)
     if sufijo == ".pdf":
-        return pdf.extraer(origen) if pdf.tiene_capa_de_texto(origen) else ocr.extraer(origen)
+        return _pdf_o_ocr(origen)
 
     return Resultado(
         estado="sin_extractor", salidas={}, extractor="ninguno", version="-",

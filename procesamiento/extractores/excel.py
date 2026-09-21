@@ -43,18 +43,29 @@ from procesamiento.resultado import Resultado
 EXTRACTOR = "openpyxl"
 
 
-def _version() -> str:
+def _version() -> str | None:
     """Blindado (ronda P10, 2026-09-21): esta función se llama también desde
     `ingesta._version_vigente`, FUERA de `extraer()` -- ahí no hay ningún
     `except ModuleNotFoundError` que convierta el fallo en 'sin_extractor'.
     Nunca puede dejar escapar una excepción, igual que `word._version()` y
-    `ocr._version()`."""
+    `ocr._version()`.
+
+    `None` cuando no se pudo determinar la versión -- NUNCA la cadena
+    "desconocida" (Menor 10, final-hallazgos.md, ronda de cierre): esa
+    cadena compara IGUAL A SÍ MISMA en dos fallos consecutivos, y
+    `_version_vigente` la reenvía tal cual para invalidar el caché (I-2) --
+    un extractor persistentemente incapaz de reportar su versión parecía
+    "la misma versión de siempre" y el acierto de caché quedaba VÁLIDO
+    justo cuando menos se podía confiar en él. `None` es el sentinel que
+    `_ficha_de_cache_valida` ya trata como fallo de caché SIEMPRE. Los
+    llamadores que necesitan un `str` no vacío para `Resultado.version`
+    usan `_version() or "desconocida"`."""
     try:
         import openpyxl
 
         return openpyxl.__version__
-    except Exception:  # fail-soft: el import o el atributo __version__ pueden fallar (paquete no instalado o roto); se devuelve "desconocida" para el campo informativo de version, no critico
-        return "desconocida"
+    except Exception:  # fail-soft: el import o el atributo __version__ pueden fallar (paquete no instalado o roto); se devuelve None (no determinable) en vez de propagar
+        return None
 
 
 def _slug(texto: str) -> str:
@@ -112,7 +123,8 @@ def extraer(origen: Path) -> Resultado:
         libro = openpyxl.load_workbook(origen, data_only=True, read_only=True)
     except Exception as exc:  # fail-soft: archivo corrupto, no-zip o protegido; se devuelve Resultado(estado="error") con el detalle en vez de propagar
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": f"no se pudo abrir: {type(exc).__name__}: {exc}"},
         )
 
@@ -121,7 +133,8 @@ def extraer(origen: Path) -> Resultado:
     except Exception as exc:  # fail-soft: apertura del workbook crudo (para chequeo de formulas) puede fallar igual que la primera; se cierra el libro ya abierto y se devuelve Resultado(estado="error")
         libro.close()
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={
                 "razon": f"no se pudo abrir para chequeo de formulas: "
                 f"{type(exc).__name__}: {exc}",
@@ -139,34 +152,53 @@ def extraer(origen: Path) -> Resultado:
     celdas_totales = 0
     formulas_por_hoja: dict[str, int] = {}
 
-    for indice, hoja in enumerate(libro.worksheets, start=1):
-        try:
-            csv_texto, celdas = _hoja_a_csv(hoja)
-        except Exception as exc:  # fail-soft: una hoja individual puede fallar al extraerse (celda corrupta, formula rota); se registra en 'fallidas' y se sigue con las demas hojas en vez de abortar todo el libro
-            fallidas.append(f"{hoja.title}: {type(exc).__name__}: {exc}")
-            continue
+    # I-5 (final-hallazgos.md, ronda de cierre): `_formulas_sin_valor()`
+    # quedaba FUERA de todo `try` -- la lección de D-1 (word.py: cualquier
+    # excepcion inesperada del cuerpo sale como Resultado(estado="error"),
+    # nunca cruda) no se habia aplicado acá. El `try` de abajo cubre TODO
+    # el recorrido de hojas (no sólo `_hoja_a_csv`, que ya tenía su propio
+    # guard por hoja); `finally` cierra los DOS libros pase lo que pase --
+    # antes, una excepción en este tramo fugaba los dos descriptores,
+    # porque `libro.close()`/`libro_crudo.close()` nunca corrían.
+    try:
+        for indice, hoja in enumerate(libro.worksheets, start=1):
+            try:
+                csv_texto, celdas = _hoja_a_csv(hoja)
+            except Exception as exc:  # fail-soft: una hoja individual puede fallar al extraerse (celda corrupta, formula rota); se registra en 'fallidas' y se sigue con las demas hojas en vez de abortar todo el libro
+                fallidas.append(f"{hoja.title}: {type(exc).__name__}: {exc}")
+                continue
 
-        salidas[f"{indice:02d}-{_slug(hoja.title)}.csv"] = csv_texto
-        celdas_totales += celdas
+            salidas[f"{indice:02d}-{_slug(hoja.title)}.csv"] = csv_texto
+            celdas_totales += celdas
 
-        hoja_cruda = crudo_por_titulo.get(hoja.title)
-        if hoja_cruda is not None:
-            n_formulas = _formulas_sin_valor(hoja, hoja_cruda)
-            if n_formulas:
-                formulas_por_hoja[hoja.title] = n_formulas
-
-    libro.close()
-    libro_crudo.close()
+            hoja_cruda = crudo_por_titulo.get(hoja.title)
+            if hoja_cruda is not None:
+                n_formulas = _formulas_sin_valor(hoja, hoja_cruda)
+                if n_formulas:
+                    formulas_por_hoja[hoja.title] = n_formulas
+    except Exception as exc:  # fail-soft: I-5, fallo inesperado (p.ej. en _formulas_sin_valor) leyendo el libro; se devuelve Resultado(estado="error") con el detalle en vez de propagar, mismo tratamiento que D-1 en word.py
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
+            detalle={
+                "razon": f"fallo inesperado leyendo el libro: {type(exc).__name__}: {exc}"
+            },
+        )
+    finally:
+        libro.close()
+        libro_crudo.close()
 
     if not salidas:
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": "ninguna hoja pudo extraerse", "fallidas": fallidas},
         )
 
     if celdas_totales == 0:
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": "ninguna hoja tiene datos", "hojas": total},
         )
 
@@ -192,6 +224,7 @@ def extraer(origen: Path) -> Resultado:
         }
 
     return Resultado(
-        estado=estado, salidas=salidas, extractor=EXTRACTOR, version=_version(),
+        estado=estado, salidas=salidas, extractor=EXTRACTOR,
+        version=_version() or "desconocida",
         detalle=detalle,
     )

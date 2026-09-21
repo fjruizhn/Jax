@@ -68,18 +68,29 @@ MINIMO_CARACTERES_PAGINA = 80
 UMBRAL_TEXTO_REPETIDO = 0.6
 
 
-def _version() -> str:
+def _version() -> str | None:
     """Blindado (ronda P10, 2026-09-21): esta función se llama también desde
     `ingesta._version_vigente`, FUERA de `extraer()` -- ahí no hay ningún
     `except ModuleNotFoundError` que convierta el fallo en 'sin_extractor'.
     Nunca puede dejar escapar una excepción, igual que `word._version()` y
-    `ocr._version()`."""
+    `ocr._version()`.
+
+    `None` cuando no se pudo determinar la versión -- NUNCA la cadena
+    "desconocida" (Menor 10, final-hallazgos.md, ronda de cierre): esa
+    cadena compara IGUAL A SÍ MISMA en dos fallos consecutivos, y
+    `_version_vigente` la reenvía tal cual para invalidar el caché (I-2) --
+    un extractor persistentemente incapaz de reportar su versión parecía
+    "la misma versión de siempre" y el acierto de caché quedaba VÁLIDO
+    justo cuando menos se podía confiar en él. `None` es el sentinel que
+    `_ficha_de_cache_valida` ya trata como fallo de caché SIEMPRE. Los
+    llamadores que necesitan un `str` no vacío para `Resultado.version`
+    usan `_version() or "desconocida"`."""
     try:
         import pdfplumber
 
         return pdfplumber.__version__
-    except Exception:  # fail-soft: el import o el atributo __version__ pueden fallar (paquete no instalado o roto); se devuelve "desconocida" para el campo informativo de version, no critico
-        return "desconocida"
+    except Exception:  # fail-soft: el import o el atributo __version__ pueden fallar (paquete no instalado o roto); se devuelve None (no determinable) en vez de propagar
+        return None
 
 
 def _textos_por_pagina(origen: Path) -> list[str]:
@@ -130,9 +141,23 @@ def _paginas_sin_texto(textos: list[str]) -> list[int]:
 
 
 def tiene_capa_de_texto(origen: Path) -> bool:
+    """C-2 (final-hallazgos.md, ronda de cierre): `ModuleNotFoundError` NO
+    se traga acá -- antes CUALQUIER excepción (incluida la de pdfplumber
+    ausente) se trataba como "sin texto" y la compuerta ruteaba el PDF a
+    OCR, que devolvía `estado="ok"` con las cifras DESTRUIDAS (medido: 8/8
+    con pdfplumber, 0/8 sin él, y `detalle` no decía nada de la
+    dependencia faltante). Un fallo de despliegue produciendo cifras
+    falsas etiquetadas 'ok' es el Principio VIII en su peor forma. Se deja
+    propagar `ModuleNotFoundError` -- es `compuerta.extraer` quien decide
+    qué hacer con eso (delegar en `pdf.extraer`, que ya sabe convertirlo en
+    'sin_extractor', igual que un `.docx` sin `python-docx`). El resto de
+    las excepciones (PDF corrupto, lectura rota) SIGUE tratándose como
+    "sin texto", que es correcto: ahí sí corresponde OCR."""
     try:
         textos = _textos_por_pagina(origen)
-    except Exception:  # fail-soft: la deteccion barata de capa de texto puede fallar leyendo el PDF; se trata como "sin texto" y la compuerta rutea a OCR en vez de abortar
+    except ModuleNotFoundError:
+        raise
+    except Exception:  # fail-soft: la deteccion barata de capa de texto puede fallar leyendo el PDF (corrupto, formato raro); se trata como "sin texto" y la compuerta rutea a OCR en vez de abortar
         return False
     if not textos:
         return False
@@ -208,7 +233,8 @@ def extraer(origen: Path) -> Resultado:
                         partes.append(bloque)
     except Exception as exc:  # fail-soft: apertura o lectura del PDF con pdfplumber puede fallar; se devuelve Resultado(estado="error") con el detalle en vez de propagar
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": f"no se pudo leer: {type(exc).__name__}: {exc}"},
         )
 
@@ -222,7 +248,8 @@ def extraer(origen: Path) -> Resultado:
     # nombre hace que un consumidor lo ingiera como si fuera contenido.
     if len(paginas_sin_texto) == paginas:
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={
                 "razon": "sin capa de texto util; corresponde OCR",
                 "paginas": paginas,
@@ -232,7 +259,7 @@ def extraer(origen: Path) -> Resultado:
     if paginas_sin_texto:
         return Resultado(
             estado="parcial", salidas={"texto.md": contenido},
-            extractor=EXTRACTOR, version=_version(),
+            extractor=EXTRACTOR, version=_version() or "desconocida",
             detalle={
                 "razon": "algunas paginas no tienen capa de texto util "
                 "(probable imagen o solo sello); no se resuelven aca, "
@@ -245,6 +272,6 @@ def extraer(origen: Path) -> Resultado:
 
     return Resultado(
         estado="ok", salidas={"texto.md": contenido},
-        extractor=EXTRACTOR, version=_version(),
+        extractor=EXTRACTOR, version=_version() or "desconocida",
         detalle={"paginas": paginas, "tablas": tablas},
     )

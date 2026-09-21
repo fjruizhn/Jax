@@ -161,6 +161,53 @@ def test_b2_es_falso_si_el_original_YA_cabia(tmp_path: Path, monkeypatch):
     assert d["criterio_b2"] is False
 
 
+def test_medir_documento_declara_excede_tope_lectura_desde_la_ficha(
+    tmp_path: Path, monkeypatch
+):
+    """I-6 (final-hallazgos.md, ronda de cierre): `_medir_documento` lee el
+    flag `excede_tope_lectura` que `ingesta.ingerir` escribe en la ficha
+    cuando el extracto TOTAL supera `MAX_READ_BYTES` aunque el original
+    cupiera -- caso medido: xlsx-04, original 159.077 B (cabe), extracto
+    17.861.532 B (89x el tope), 'ok'."""
+    monkeypatch.setattr(tool_authority, "MAX_READ_BYTES", 1_000)
+
+    carpeta = tmp_path / "procesado"
+    carpeta.mkdir()
+    (carpeta / "hoja1.csv").write_text("x" * 2_000, encoding="utf8")
+
+    archivo = tmp_path / "chico.xlsx"
+    archivo.write_bytes(b"0" * 100)  # original: 100 B, cabe en el umbral de 1000
+
+    ficha = _ficha("ok", detalle={"excede_tope_lectura": True})
+    d = _medir_documento(archivo, ficha, carpeta, tiempo_s=0.01)
+
+    assert d["original_no_cabe"] is False
+    assert d["excede_tope_lectura"] is True
+
+
+def test_totales_b2_ve_extracto_que_excede_el_tope_aunque_el_original_cupiera():
+    """I-6: el criterio §7.B.2 viejo sólo evaluaba documentos cuyo ORIGINAL
+    no cabía -- un extracto que el propio sistema INFLÓ hasta superar el
+    tope (el original SÍ cabía) quedaba invisible. `excede_tope_lectura`
+    trae a la evaluación este caso aunque `original_no_cabe` sea False."""
+    docs = [
+        {
+            **_doc("ok", criterio_b2=False),
+            "original_no_cabe": False,
+            "excede_tope_lectura": True,
+        },
+    ]
+
+    t = _totales(docs)
+
+    assert t["documentos_donde_aplica_b2"] == 1
+    assert t["documentos_donde_aplica_b2_ok"] == 0
+    assert t["b2_extracto_util_pass"] is False, (
+        "I-6 REABIERTO: un extracto que excede el tope aunque el original "
+        "cupiera quedo invisible para B.2"
+    )
+
+
 def test_totales_b2_exige_TODOS_los_documentos_aplicables_no_alguno():
     docs = [_doc("ok", criterio_b2=True), _doc("ok", criterio_b2=False)]
 

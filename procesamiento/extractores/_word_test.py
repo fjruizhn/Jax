@@ -495,3 +495,24 @@ def test_niveles_de_encabezado_no_colapsan_a_uno(tmp_path: Path):
     assert "# Titulo principal" in md
     assert "## Subtitulo" in md
     assert "## Titulo principal" not in md
+
+
+def test_version_no_revienta_si_falla_la_metadata_del_paquete(monkeypatch):
+    """Menor 10 (final-hallazgos.md, ronda de cierre): el sentinel de "no se
+    pudo determinar la version" es `None`, NUNCA la cadena "desconocida" --
+    esa cadena compara IGUAL A SÍ MISMA en dos fallos consecutivos, y
+    `ingesta._version_vigente` la reenvía tal cual para decidir si el
+    caché sigue siendo válido (I-2): un extractor que no puede reportar su
+    versión de forma persistente parecía "la misma versión de siempre" y
+    el acierto de caché quedaba VÁLIDO justo cuando menos se podía confiar
+    en él. Se rompe `importlib.metadata.version` (no `sys.modules["docx"]`
+    -- python-docx puede estar instalado y sano y aun así fallar la
+    lectura de metadata del paquete, p.ej. dist-info corrupto)."""
+    import importlib.metadata
+
+    def _rota(nombre):
+        raise importlib.metadata.PackageNotFoundError(nombre)
+
+    monkeypatch.setattr(importlib.metadata, "version", _rota)
+    version = word._version()
+    assert version is None

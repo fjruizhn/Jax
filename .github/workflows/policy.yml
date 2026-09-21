@@ -2846,8 +2846,25 @@ jobs:
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
       # bloque de arriba (2317 passed) por cada archivo nuevo de esta ronda.
-      - run: python -m pytest procesamiento/_ficha_test.py -v
-      - run: python -m pytest procesamiento/_resultado_test.py -v
+      #
+      # Menor 9 (final-hallazgos.md, ronda de cierre): estos DOS pasos eran
+      # los unicos de las nueve unidades de procesamiento/ SIN piso numerico
+      # -- se escribieron en el Task 1-2, antes de que la leccion del piso se
+      # promoviera a restriccion global, y nadie volvio a barrerlos. Son los
+      # dos archivos que fijan el fallo cerrado EN EL TIPO (`Resultado`), la
+      # pieza de la que cuelga todo lo demas: un `@pytest.mark.skip` pasaba
+      # verde. Medido en este entorno (Python 3.14 y, via Docker, Python
+      # 3.12): 16 passed en las dos, en los dos archivos.
+      - name: Ficha -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/_ficha_test.py 2>&1 | tee /tmp/ficha_tests
+          grep -qE "^16 passed" /tmp/ficha_tests || {
+            echo "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_ficha_test.py -- el tipo que fija el fallo cerrado de toda la ronda."; exit 1; }
+      - name: Resultado -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/_resultado_test.py 2>&1 | tee /tmp/resultado_tests
+          grep -qE "^16 passed" /tmp/resultado_tests || {
+            echo "PISO ROTO: se esperaban 16 tests CORRIDOS de procesamiento/_resultado_test.py -- el tipo que fija el fallo cerrado de toda la ronda."; exit 1; }
       # Task 3 (2026-09-20, procesamiento-archivos-nucleo): extractor de Excel
       # -- TODAS las hojas, no la que LibreOffice se digna a convertir (medido
       # 2026-09-20: 1 de 6, sin error y sin aviso). requirements-archivos.txt
@@ -2861,14 +2878,19 @@ jobs:
       # mismo patron que el job archivos-de-test-en-ci. Ronda 2 de PDF
       # (2026-09-21, task-4-hallazgos.md, menor 3): `ModuleNotFoundError`
       # crudo si falta openpyxl -- deuda heredada, pagada junto con el mismo
-      # defecto en pdf.py. +1 test, de 9 a 10. Medido en este entorno
-      # (Python 3.14 y, via Docker, Python 3.12 -- mismo runtime que usa
-      # este job): 10 passed en las dos.
+      # defecto en pdf.py. +1 test, de 9 a 10. Ronda de cierre (final-
+      # hallazgos.md, C-1 + I-5): +3 tests (I-5, excepcion inesperada en
+      # _formulas_sin_valor + cierre en finally, y el sentinel None de
+      # Menor 10), de 10 a 13. C-1 es la ironia que esta ronda vino a
+      # cerrar: el commit que arreglaba esto agrego tests sin tocar este
+      # piso -- CI hubiera quedado rojo al primer push. Medido en este
+      # entorno (Python 3.14 y, via Docker, Python 3.12 -- mismo runtime
+      # que usa este job): 13 passed en las dos.
       - name: Excel -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_excel_test.py 2>&1 | tee /tmp/excel_tests
-          grep -qE "^10 passed" /tmp/excel_tests || {
-            echo "PISO ROTO: se esperaban 10 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^13 passed" /tmp/excel_tests || {
+            echo "PISO ROTO: se esperaban 13 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 4 (2026-09-20/21, procesamiento-archivos-nucleo): PDF nativo
       # -- pdftotext destruye las tablas, y en un expediente financiero la
@@ -2899,13 +2921,16 @@ jobs:
       #     cercado sin promover ninguna fila a encabezado, y un salto de
       #     linea dentro de una celda ya no parte la fila.
       #   - Menor 3: `ModuleNotFoundError` crudo -> 'sin_extractor'.
-      # De 7 a 17 tests. Medido en este entorno (Python 3.14 y, via Docker,
-      # Python 3.12 -- mismo runtime que usa este job): 17 passed en las dos.
+      # De 7 a 17 tests. Ronda de cierre (final-hallazgos.md, C-1 + C-2):
+      # +2 tests (C-2, `tiene_capa_de_texto` deja de tragar
+      # `ModuleNotFoundError`, y el sentinel None de Menor 10), de 17 a 19.
+      # Medido en este entorno (Python 3.14 y, via Docker, Python 3.12 --
+      # mismo runtime que usa este job): 19 passed en las dos.
       - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
-          grep -qE "^17 passed" /tmp/pdf_tests || {
-            echo "PISO ROTO: se esperaban 17 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^19 passed" /tmp/pdf_tests || {
+            echo "PISO ROTO: se esperaban 19 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
       # escaneado e imagen. tesseract por subproceso, nunca por binding
@@ -2939,7 +2964,15 @@ jobs:
       # ejercitaba la propagacion de 'con_dudas' de una pagina al agregado
       # del PDF. +1 test (pagina con membrete corto de alta confianza, la
       # UNICA que cae con esa linea desactivada; verificado con la mutacion
-      # a mano: 28 passed, 1 failed). De 28 a 29.
+      # a mano: 28 passed, 1 failed). De 28 a 29. Ronda de cierre (final-
+      # hallazgos.md, I-3 + I-7 + I-8 + Menor 10): +3 tests (I-3, confianza
+      # por documento y por pagina en `_resolver_pdf`; I-8, tesseract
+      # ausente pasa de 'error' a 'sin_extractor'; I-7, el rasterizado va
+      # bajo JAX_WORKSPACE_DIR; y el sentinel None de Menor 10), de 29 a 32.
+      # +1 test mas, hallazgo PROPIO destapado verificando I-3 contra
+      # `Ficha` (no sólo contra `Resultado`): `confianza_por_pagina` con
+      # claves `int` rompía `Ficha(...)` -- exige que `detalle` sobreviva
+      # un viaje real a JSON, que no admite claves no-string. De 32 a 33.
       #
       # `pytest.importorskip("PIL.Image")` en `_ocr_test.py` genera los
       # fixtures (imágenes con texto real) -- mismo patrón de riesgo que
@@ -2955,8 +2988,8 @@ jobs:
       - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
-          grep -qE "^29 passed" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^33 passed" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 33 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -2999,14 +3032,16 @@ jobs:
       # normal), y el resto del cuerpo queda protegido con el mismo patron
       # que `pdf.py` usa para su bucle de paginas: cualquier excepcion
       # inesperada sale como Resultado de error, nunca escapa. De 18 a 20.
+      # Ronda de cierre (final-hallazgos.md, Menor 10): +1 test (el sentinel
+      # None de `_version()`), de 20 a 21.
       #
       # `pytest.importorskip("docx")` en `_word_test.py` -- mismo riesgo de
       # "1 skipped" con EXIT 0 si python-docx no se instaló.
       - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
-          grep -qE "^20 passed" /tmp/word_tests || {
-            echo "PISO ROTO: se esperaban 20 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^21 passed" /tmp/word_tests || {
+            echo "PISO ROTO: se esperaban 21 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 7 (2026-09-20/21, procesamiento-archivos-nucleo): la compuerta
       # -- elige extractor por tipo, y NUNCA paga el caro (OCR) si el barato
@@ -3070,11 +3105,15 @@ jobs:
       # (`.webp` ya está en `IMAGENES`). +1 test con una firma RIFF/WEBP
       # real renombrada con una extensión que NO es de imagen, mismo
       # patrón que el de OLE2/PNG de la ronda anterior.
+      #
+      # 22 -> 23 (ronda de cierre, final-hallazgos.md, C-2): sin
+      # `pdfplumber`, un PDF nativo tiene que dar 'sin_extractor' -- NUNCA
+      # rutear a OCR (que devolvía 'ok' con las cifras destruidas).
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          grep -qE "^22 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 22 tests CORRIDOS de la compuerta."; exit 1; }
+          grep -qE "^23 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 23 tests CORRIDOS de la compuerta."; exit 1; }
 
       # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
       # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
@@ -3166,11 +3205,20 @@ jobs:
       # version reinicia la cuenta, porque es la senal de que la causa pudo
       # arreglarse. `sin_extractor` se comporta igual que `error`; `ok` no
       # se ve afectado. De 25 a 29.
+      #
+      # Ronda de cierre (final-hallazgos.md, C-1: éste fue el commit
+      # (f059e11) que rompió este piso sin tocarlo -- exactamente la
+      # ironía que el proyecto venía cazando. Reserva arquitectónica +
+      # I-6): +6 tests -- el encabezado que antepone `ingerir()` a un
+      # extracto 'parcial' (aparece; no aparece en 'ok'; resume sin repetir
+      # las cifras) y el flag `excede_tope_lectura` que declara cuando el
+      # extracto total supera `tool_authority.MAX_READ_BYTES` aunque el
+      # original cupiera (declarado; ausente cuando cabe). De 29 a 35.
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          grep -qE "^29 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 29 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^35 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 35 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el
@@ -3196,11 +3244,16 @@ jobs:
       # extraccion_real_no_un_valor_fijo ("no cuenta bien la segunda
       # pasada": rompe el cache a proposito -- I-5, borra una salida
       # listada -- y exige que la reextraccion forzada se cuente 1, no 0).
+      #
+      # Ronda de cierre (final-hallazgos.md, I-6): +2 tests -- el criterio
+      # §7.B.2 sólo evaluaba documentos cuyo ORIGINAL no cabía; el caso
+      # medido de xlsx-04 (112x más grande, 'ok', 89x el tope, original SÍ
+      # cabía) era invisible para el veredicto. De 9 a 11.
       - name: Medidor de utilidad de extractos -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q scripts/_medir_utilidad_extractos_test.py 2>&1 | tee /tmp/medir_utilidad_tests
-          grep -qE "^9 passed" /tmp/medir_utilidad_tests || {
-            echo "PISO ROTO: se esperaban 9 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^11 passed" /tmp/medir_utilidad_tests || {
+            echo "PISO ROTO: se esperaban 11 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

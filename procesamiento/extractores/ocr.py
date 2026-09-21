@@ -41,6 +41,7 @@ nada), y cada una se muta por separado.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -49,6 +50,17 @@ from pathlib import Path
 from procesamiento.resultado import Resultado
 
 EXTRACTOR = "tesseract"
+
+# I-7 (final-hallazgos.md, ronda de cierre): mismo valor que
+# `motor_registry.tool_authority.WORKSPACE_ROOT`,
+# `jacobs/executor.py::HYDE_WORKSPACE_DIR` y
+# `jax/muscles/subprocess_muscle.py` -- los 4 call sites leen la MISMA env
+# var en vez de importarse el módulo pesado de `tool_authority` unos de
+# otros. El rasterizado de un PDF para OCR va acá, no al default de
+# `tempfile` (`/tmp`), que en hall9000 es tmpfs -- RAM, en un hipervisor
+# con dos VMs; un PDF patológico puede dejar decenas de PNG enormes
+# simultáneamente en memoria.
+_WORKSPACE_DIR = Path(os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace"))
 
 # Caracteres MÍNIMOS (tras `.strip()`) para que el modo texto plano cuente
 # como "algo se leyó". Defensa barata contra el caso vacío (imagen en
@@ -85,14 +97,24 @@ DPI_RASTERIZADO = 300
 _FIRMA_PDF = b"%PDF"
 
 
-def _version() -> str:
+def _version() -> str | None:
+    """`None` cuando no se pudo determinar la versión -- NUNCA la cadena
+    "desconocida" (Menor 10, final-hallazgos.md, ronda de cierre): esa
+    cadena compara IGUAL A SÍ MISMA en dos fallos consecutivos, y
+    `_version_vigente` la reenvía tal cual para invalidar el caché (I-2) --
+    un extractor persistentemente incapaz de reportar su versión parecía
+    "la misma versión de siempre" y el acierto de caché quedaba VÁLIDO
+    justo cuando menos se podía confiar en él. `None` es el sentinel que
+    `_ficha_de_cache_valida` ya trata como fallo de caché SIEMPRE. Los
+    llamadores que necesitan un `str` no vacío para `Resultado.version`
+    usan `_version() or "desconocida"`."""
     try:
         salida = subprocess.run(
             ["tesseract", "--version"], capture_output=True, text=True, timeout=30
         )
         return salida.stdout.splitlines()[0].split()[-1]
-    except Exception:  # fail-soft: "tesseract --version" puede fallar (no instalado, timeout); se devuelve "desconocida" para el campo informativo de version, no critico
-        return "desconocida"
+    except Exception:  # fail-soft: "tesseract --version" puede fallar (no instalado, timeout); se devuelve None (no determinable) en vez de propagar
+        return None
 
 
 def _es_pdf(origen: Path) -> bool:
@@ -254,7 +276,8 @@ def _resolver_imagen(r: dict, idioma: str) -> Resultado:
                 "palabras_dudosas"
             )
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle=detalle,
         )
 
@@ -267,12 +290,12 @@ def _resolver_imagen(r: dict, idioma: str) -> Resultado:
         detalle["razon"] = "; ".join(razones)
         return Resultado(
             estado="parcial", salidas={"texto.txt": r["texto"]},
-            extractor=EXTRACTOR, version=_version(), detalle=detalle,
+            extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
         )
 
     return Resultado(
         estado="ok", salidas={"texto.txt": r["texto"]},
-        extractor=EXTRACTOR, version=_version(), detalle=detalle,
+        extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
     )
 
 
@@ -282,6 +305,23 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
     paginas_con_dudas: list[int] = []
     palabras_dudosas: list[dict] = []
     partes_texto: list[str] = []
+    # I-3 (final-hallazgos.md, ronda de cierre): la confianza medida se
+    # registra SIEMPRE (spec §9-bis), pase o no pase -- justo para poder
+    # calibrar el umbral. `_resolver_imagen`/`_detalle_comun` ya lo hacían
+    # para una imagen suelta; este camino (PDF escaneado, el 100% de la
+    # muestra `parcial` medida) armaba su propio `detalle` a mano y NUNCA
+    # la incluía. Ponderada por palabras (no un promedio de promedios de
+    # página): una página con 200 palabras pesa más que una de 3.
+    # Claves STRING, no int: `Ficha` exige que `detalle` sobreviva un viaje
+    # real a JSON y vuelta sin cambios (ficha.py, I-6 de su propia ronda) --
+    # JSON no admite claves que no sean string, así que un dict con claves
+    # `int` acá haría que CUALQUIER ingesta de un PDF escaneado con más de
+    # una página reviente `Ficha(...)` con un `ValueError` en cuanto
+    # `ingesta.ingerir()` intentara construir la ficha. Detectado corriendo
+    # el mismo viaje a mano contra este cambio, no supuesto.
+    confianza_por_pagina: dict[str, float] = {}
+    suma_confianza_ponderada = 0.0
+    palabras_totales = 0
 
     for numero, r in enumerate(resultados, start=1):
         if r is None or r["clasificacion"] == "sin_texto":
@@ -292,10 +332,14 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
             paginas_con_dudas.append(numero)
         for dudosa in r["palabras_dudosas"]:
             palabras_dudosas.append({"pagina": numero, **dudosa})
+        confianza_por_pagina[str(numero)] = r["confianza_promedio"]
+        suma_confianza_ponderada += r["confianza_promedio"] * r["n_palabras"]
+        palabras_totales += r["n_palabras"]
 
     if len(paginas_sin_texto) == total:
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={
                 "razon": "ninguna pagina del PDF dio texto util via OCR",
                 "idioma": idioma,
@@ -304,7 +348,14 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
         )
 
     contenido = "\n\n".join(partes_texto).strip()
-    detalle = {"idioma": idioma, "paginas": total}
+    confianza_promedio = (
+        round(suma_confianza_ponderada / palabras_totales, 2) if palabras_totales else 0.0
+    )
+    detalle = {
+        "idioma": idioma, "paginas": total, "confianza_promedio": confianza_promedio,
+    }
+    if confianza_por_pagina:
+        detalle["confianza_por_pagina"] = confianza_por_pagina
     if paginas_sin_texto:
         detalle["paginas_sin_texto"] = paginas_sin_texto
     if paginas_con_dudas:
@@ -315,37 +366,63 @@ def _resolver_pdf(resultados: list[dict | None], idioma: str) -> Resultado:
     estado = "parcial" if (paginas_sin_texto or paginas_con_dudas or palabras_dudosas) else "ok"
     return Resultado(
         estado=estado, salidas={"texto.txt": contenido},
-        extractor=EXTRACTOR, version=_version(), detalle=detalle,
+        extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
     )
 
 
 def extraer(origen: Path, idioma: str = "spa") -> Resultado:
     if shutil.which("tesseract") is None:
+        # I-8 (final-hallazgos.md, ronda de cierre): antes era 'error',
+        # indistinguible de "este documento es ilegible" -- el spec §8
+        # mapea "sin extractor disponible" a 'sin_extractor', igual que
+        # `openpyxl`/`python-docx`/`pdfplumber` ausentes. Sin esto, una
+        # máquina sin tesseract marca TODOS sus escaneos como 'error' y
+        # quien triagea por estado confunde un problema de despliegue con
+        # documentos malos.
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version="ausente",
+            estado="sin_extractor", salidas={}, extractor=EXTRACTOR, version="ausente",
             detalle={"razon": "tesseract no esta instalado"},
         )
     origen = Path(origen)
     if not origen.is_file():
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": f"no existe el archivo: {origen}"},
         )
 
     if _es_pdf(origen):
         if shutil.which("pdftoppm") is None:
             return Resultado(
-                estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+                estado="error", salidas={}, extractor=EXTRACTOR,
+                version=_version() or "desconocida",
                 detalle={
                     "razon": "pdftoppm no esta instalado (poppler-utils); "
                     "no se puede rasterizar el PDF para OCR",
                 },
             )
-        with tempfile.TemporaryDirectory(prefix="ocr-pdf-") as tmp:
+        # I-7 (final-hallazgos.md, ronda de cierre) -- "ahora" de la
+        # reserva a medias a propósito: el directorio del rasterizado va
+        # BAJO JAX_WORKSPACE_DIR, no al default de `tempfile` (`/tmp`, que
+        # en hall9000 es tmpfs -- RAM -- en un hipervisor con dos VMs). Se
+        # lee la env var directo (mismo patrón que los otros 3 call sites
+        # de esta variable: motor_registry/tool_authority.py,
+        # jacobs/executor.py, jax/muscles/subprocess_muscle.py) en vez de
+        # importar el módulo pesado de tool_authority sólo para esto -- es
+        # el cambio de una línea que pide el ruling, no una migración de
+        # dependencias. Diferido a fase 2, con su razón escrita:
+        # rasterizar página por página con timeout por página, para que un
+        # vencimiento deje 'parcial' con lo que alcanzó en vez de perder
+        # TODO callando el parcial (hoy: un solo `pdftoppm` para el
+        # documento entero) -- es un cambio de estructura, y ésta es una
+        # ronda de cierre, no de rediseño.
+        _WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="ocr-pdf-", dir=_WORKSPACE_DIR) as tmp:
             paginas = _rasterizar_pdf(origen, Path(tmp))
             if not paginas:
                 return Resultado(
-                    estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+                    estado="error", salidas={}, extractor=EXTRACTOR,
+                    version=_version() or "desconocida",
                     detalle={"razon": "no se pudo rasterizar el PDF con pdftoppm"},
                 )
             resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
@@ -354,7 +431,8 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
     resultado_img = _ocr_una_imagen(origen, idioma)
     if resultado_img is None:
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": "no se pudo correr tesseract sobre la imagen"},
         )
     return _resolver_imagen(resultado_img, idioma)

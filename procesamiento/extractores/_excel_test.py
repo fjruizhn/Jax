@@ -138,6 +138,69 @@ def test_formula_sin_valor_cacheado_se_detecta_y_pasa_a_parcial(tmp_path: Path):
     assert "totales" in r.detalle["formulas_sin_valor"]["hojas"]
 
 
+def test_excepcion_inesperada_en_formulas_sin_valor_da_resultado_de_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """I-5 (final-hallazgos.md, ronda de cierre): `_formulas_sin_valor()`
+    quedaba FUERA de todo `try` -- la lección de D-1 (`word.py`: cualquier
+    excepción inesperada del cuerpo sale como `Resultado(estado='error')`,
+    nunca cruda) no se había aplicado acá. Sin este arreglo, una excepción
+    ahí sube CRUDA hasta `ingerir()` (que no tiene guarda) y de paso fuga
+    los dos descriptores del libro, porque `close()` nunca corre."""
+    origen = _libro_de_seis_hojas(tmp_path / "eeff.xlsx")
+
+    def _rota(hoja_valores, hoja_cruda):
+        raise ValueError("boom en formulas_sin_valor")
+
+    monkeypatch.setattr(excel, "_formulas_sin_valor", _rota)
+
+    r = excel.extraer(origen)
+
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert "razon" in r.detalle
+
+
+def test_excepcion_inesperada_cierra_los_dos_libros_en_finally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """I-5, la mitad del hallazgo que un `estado='error'` correcto no
+    prueba por sí sola: los descriptores de los DOS libros (`libro` y
+    `libro_crudo`) tienen que cerrarse aunque el cuerpo reviente -- antes,
+    con el `close()` fuera de cualquier `finally`, una excepción los
+    dejaba abiertos. Se espía `Workbook.close` para contar cuántas veces
+    corrió."""
+    origen = _libro_de_seis_hojas(tmp_path / "eeff.xlsx")
+
+    cierres = {"n": 0}
+    original_close = openpyxl.workbook.workbook.Workbook.close
+
+    def _close_contado(self):
+        cierres["n"] += 1
+        return original_close(self)
+
+    monkeypatch.setattr(openpyxl.workbook.workbook.Workbook, "close", _close_contado)
+    monkeypatch.setattr(
+        excel, "_formulas_sin_valor",
+        lambda *a, **kw: (_ for _ in ()).throw(ValueError("boom")),
+    )
+
+    # Se tolera la excepción acá A PROPÓSITO -- este test aísla el
+    # `finally` del `except` que la convierte en `Resultado(estado=
+    # "error")` (ese es el otro test, "...da_resultado_de_error"): si sólo
+    # se rompe el `finally` (los `close()` sueltos, sin envolver), el
+    # `except` puede seguir sano y este test tiene que caer igual.
+    try:
+        excel.extraer(origen)
+    except Exception:  # fail-soft: este test aisla el close() del finally del comportamiento del except que lo convierte en Resultado -- tolera la excepcion cruda a proposito si esa conversion estuviera rota, no es lo que este test verifica
+        pass
+
+    assert cierres["n"] == 2, (
+        f"I-5 REABIERTO: se esperaban 2 close() (libro + libro_crudo) tras "
+        f"una excepcion inesperada, hubo {cierres['n']}"
+    )
+
+
 def test_una_hoja_que_falla_a_extraerse_dejando_las_demas_produce_parcial_con_fallidas(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -242,9 +305,16 @@ def test_version_no_revienta_si_openpyxl_no_esta_instalado(monkeypatch):
     convierta el fallo en 'sin_extractor'. Antes de este arreglo, `import
     openpyxl` roto acá dejaba escapar un `ImportError` crudo (blindaje que
     `word.py`/`ocr.py` ya tenían y `excel.py` no). Ahora, igual que ellos,
-    nunca revienta: devuelve un string."""
+    nunca revienta.
+
+    Menor 10 (final-hallazgos.md, ronda de cierre): el sentinel de "no se
+    pudo determinar" es `None`, NUNCA la cadena "desconocida" -- esa cadena
+    compara IGUAL A SÍ MISMA en dos fallos consecutivos, y
+    `ingesta._version_vigente` la reenvía tal cual para decidir si el
+    caché sigue siendo válido (I-2). Contra el código viejo esto falla:
+    `_version()` devolvía la cadena "desconocida", no `None`."""
     import sys
 
     monkeypatch.setitem(sys.modules, "openpyxl", None)
     version = excel._version()
-    assert isinstance(version, str)
+    assert version is None

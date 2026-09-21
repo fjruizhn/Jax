@@ -995,3 +995,135 @@ def test_M2_fecha_cambia_entre_regeneraciones(tmp_path: Path):
     assert segunda.fecha != primera.fecha, (
         "M-2 REABIERTO: la fecha no cambió entre dos extracciones reales separadas en el tiempo"
     )
+
+
+# ---------------------------------------------------------------------------
+# Reserva arquitectónica (final-hallazgos.md, ronda de cierre): "Toda la
+# honestidad de este sistema vive en ficha.json, y nadie la lee". Un extracto
+# `parcial` tiene que llevar el aviso DENTRO del propio archivo que el
+# modelo lee -- la ficha no es lo que un `file_read` sobre `procesado/`
+# entrega.
+# ---------------------------------------------------------------------------
+
+
+def test_reserva_extracto_parcial_lleva_encabezado_de_aviso(tmp_path: Path, monkeypatch):
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    def falso_parcial(destino):
+        return Resultado(
+            estado="parcial",
+            salidas={"texto.md": "ACTIVOS TOTALES 1000"},
+            detalle={"paginas": 3, "paginas_sin_texto": [2]},
+            extractor=excel.EXTRACTOR, version=excel._version() or "desconocida",
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falso_parcial)
+
+    ficha = ingesta.ingerir(origen, trabajo)
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+    contenido = (carpeta / "texto.md").read_text(encoding="utf8")
+
+    assert contenido.startswith("<!-- EXTRACTO PARCIAL"), (
+        "RESERVA REABIERTA: un extracto 'parcial' llegó al archivo que el "
+        f"modelo lee sin ningún aviso -- contenido: {contenido[:80]!r}"
+    )
+    assert "ficha.json" in contenido
+    assert "ACTIVOS TOTALES 1000" in contenido, (
+        "el aviso no puede reemplazar el contenido real, sólo anteponerse"
+    )
+
+
+def test_reserva_extracto_ok_no_lleva_encabezado(tmp_path: Path):
+    """Contraparte: el caso feliz no paga ruido -- un 'ok' no lleva ningún
+    encabezado antepuesto."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    ficha = ingesta.ingerir(origen, trabajo)
+    assert ficha.estado == "ok"
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+    salida = ficha.detalle["_salidas_ingesta"][0]
+    contenido = (carpeta / salida).read_text(encoding="utf8")
+
+    assert "EXTRACTO PARCIAL" not in contenido
+
+
+def test_reserva_encabezado_resume_lo_que_falta_sin_repetir_las_cifras(
+    tmp_path: Path, monkeypatch
+):
+    """"Que sea corto y útil: qué falta y dónde está el detalle, no las 141
+    cifras" -- el encabezado no vuelca `palabras_dudosas` completo (cada
+    entrada trae su propio texto y confianza), sólo la CUENTA."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    palabras_dudosas = [
+        {"pagina": 1, "palabra": f"cifra{i}", "confianza": 10.0} for i in range(141)
+    ]
+
+    def falso_parcial(destino):
+        return Resultado(
+            estado="parcial",
+            salidas={"texto.txt": "contenido real del OCR"},
+            detalle={"idioma": "spa", "paginas": 1, "palabras_dudosas": palabras_dudosas},
+            extractor=excel.EXTRACTOR, version=excel._version() or "desconocida",
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falso_parcial)
+
+    ficha = ingesta.ingerir(origen, trabajo)
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+    primera_linea = (carpeta / "texto.txt").read_text(encoding="utf8").splitlines()[0]
+
+    assert "141" in primera_linea
+    assert "cifra0" not in primera_linea, (
+        "el encabezado no puede volcar las 141 cifras, sólo la cuenta"
+    )
+
+
+# ---------------------------------------------------------------------------
+# I-6 (final-hallazgos.md, ronda de cierre): un extracto que en total supera
+# `tool_authority.MAX_READ_BYTES` es ilegible por `file_read` aunque esté
+# COMPLETO y sea CORRECTO -- el criterio §7.B.2 no lo ve si sólo evalúa
+# documentos cuyo ORIGINAL no cabía (xlsx-04: 159.077 B -> 17.861.532 B,
+# 'ok', 89x el tope). La ficha lo declara para que deje de ser invisible.
+# ---------------------------------------------------------------------------
+
+
+def test_I6_extracto_que_excede_el_tope_se_declara_en_la_ficha(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setattr(tool_authority, "MAX_READ_BYTES", 100)
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    def falso_grande(destino):
+        return Resultado(
+            estado="ok", salidas={"hoja1.csv": "x" * 500},  # 500 B > tope de 100
+            detalle={}, extractor=excel.EXTRACTOR, version=excel._version() or "desconocida",
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falso_grande)
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert ficha.estado == "ok", "el estado NO cambia -- el extracto esta completo y es correcto"
+    assert ficha.detalle["excede_tope_lectura"] is True, (
+        "I-6 REABIERTO: un extracto mas grande que el tope de lectura quedo "
+        "invisible en la ficha"
+    )
+    assert ficha.detalle["excede_tope_lectura_bytes"]["extracto"] == 500
+    assert ficha.detalle["excede_tope_lectura_bytes"]["original"] > 0
+    assert ficha.detalle["excede_tope_lectura_bytes"]["tope"] == 100
+
+
+def test_I6_extracto_que_cabe_no_declara_el_flag(tmp_path: Path):
+    """Contraparte: un extracto que cabe en el tope no lleva ningún flag --
+    ni `False` explícito, para no ensuciar `detalle` en el caso normal."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert "excede_tope_lectura" not in ficha.detalle

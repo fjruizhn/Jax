@@ -83,6 +83,12 @@ def _medir_documento(archivo: Path, ficha: Ficha, carpeta: Path, tiempo_s: float
     max_bytes = tool_authority.MAX_READ_BYTES
     original_no_cabe = original_bytes > max_bytes
     extracto_cabe = hay_extracto and extracto_bytes <= max_bytes
+    # I-6 (final-hallazgos.md, ronda de cierre): la ficha declara este flag
+    # cuando el extracto TOTAL supera `MAX_READ_BYTES` aunque el ORIGINAL
+    # cupiera (ver `ingesta.ingerir`) -- el caso medido de xlsx-04 (112x más
+    # grande, 'ok', y el criterio de abajo no lo veía porque sólo miraba
+    # documentos cuyo original no cabía).
+    excede_tope_lectura = bool(ficha.detalle.get("excede_tope_lectura"))
 
     paginas = ficha.detalle.get("paginas")
     if not isinstance(paginas, int) or paginas <= 0:
@@ -95,6 +101,7 @@ def _medir_documento(archivo: Path, ficha: Ficha, carpeta: Path, tiempo_s: float
         "razon": round(original_bytes / extracto_bytes, 2) if extracto_bytes else None,
         "extracto_cabe": extracto_cabe,
         "original_no_cabe": original_no_cabe,
+        "excede_tope_lectura": excede_tope_lectura,
         # B.2: binario -- las DOS cosas a la vez, no un promedio.
         "criterio_b2": extracto_cabe and original_no_cabe,
         "estado": ficha.estado,
@@ -117,7 +124,15 @@ def _totales(documentos: list[dict]) -> dict:
 
     extractos_que_caben = sum(1 for d in documentos if d["extracto_cabe"])
 
-    aplica_b2 = [d for d in documentos if d["original_no_cabe"]]
+    # I-6: un documento entra a la evaluación de B.2 si el original NO
+    # cabía (caso original) O si el extracto EXCEDE el tope aunque el
+    # original sí cabía (xlsx-04) -- las dos son la misma pregunta ("¿el
+    # sistema entregó algo legible por `file_read`?"), medida desde los dos
+    # lados. Sin la segunda condición, el criterio es CIEGO justo al caso
+    # que hallazgo I-6 midió.
+    aplica_b2 = [
+        d for d in documentos if d["original_no_cabe"] or d.get("excede_tope_lectura")
+    ]
     aplica_b2_ok = [d for d in aplica_b2 if d["criterio_b2"]]
     # B.2 es binario POR documento, pero el veredicto de la MUESTRA exige
     # que TODOS los documentos donde el criterio aplica lo cumplan -- un

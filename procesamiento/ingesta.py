@@ -502,6 +502,71 @@ def _estado_de_error_cacheado(
     return ficha, intentos
 
 
+def _resumen_parcial(detalle: dict) -> str:
+    """Frase CORTA -- la reserva arquitectónica de final-hallazgos.md pide
+    explícitamente "qué falta y dónde está el detalle, no las 141 cifras".
+    Mira las claves YA conocidas que los cuatro extractores escriben en
+    `parcial` (nunca inventa una nueva taxonomía); si ninguna aplica, cae
+    en `detalle["razon"]` cuando existe, y si tampoco, un aviso genérico --
+    nunca se queda muda."""
+    partes: list[str] = []
+
+    paginas_sin_texto = detalle.get("paginas_sin_texto")
+    if paginas_sin_texto:
+        total_paginas = detalle.get("paginas")
+        de_total = f" de {total_paginas}" if total_paginas else ""
+        lista = ",".join(str(p) for p in paginas_sin_texto)
+        partes.append(f"{len(paginas_sin_texto)}{de_total} paginas sin texto: {lista}")
+
+    paginas_con_dudas = detalle.get("paginas_con_dudas")
+    if paginas_con_dudas:
+        partes.append(f"{len(paginas_con_dudas)} paginas con dudas")
+
+    palabras_dudosas = detalle.get("palabras_dudosas")
+    if palabras_dudosas:
+        partes.append(f"{len(palabras_dudosas)} palabras/cifras dudosas")
+
+    cuadros = detalle.get("cuadros_de_texto_omitidos")
+    if cuadros:
+        partes.append(f"{cuadros} cuadros de texto omitidos")
+
+    notas = detalle.get("notas_al_pie_omitidas")
+    if notas:
+        partes.append(f"{notas} notas al pie omitidas")
+
+    formulas = detalle.get("formulas_sin_valor")
+    if isinstance(formulas, dict) and formulas.get("total"):
+        partes.append(f"{formulas['total']} formulas sin valor en cache")
+
+    no_tabulares = detalle.get("no_tabulares")
+    if no_tabulares:
+        partes.append(f"{len(no_tabulares)} hoja(s) no tabular(es) omitidas")
+
+    if not partes:
+        razon = detalle.get("razon")
+        if razon:
+            partes.append(str(razon))
+
+    return "; ".join(partes) if partes else "extracto parcial -- ver ficha.json"
+
+
+def _encabezado_parcial(huella: str, detalle: dict) -> str:
+    """La reserva arquitectónica de final-hallazgos.md: "Toda la honestidad
+    de este sistema vive en `ficha.json`, y nadie la lee" -- un modelo que
+    hace `file_read` sobre `procesado/<huella>/texto.txt` (o `.md`, o un
+    `.csv`) recibía un extracto `parcial` SIN ningún aviso: la declaración
+    de qué faltaba vivía sólo en la ficha, que nadie pide. Este encabezado
+    va DENTRO del archivo que el modelo lee -- el único lugar donde sirve
+    -- y sólo se antepone cuando el estado NO es 'ok' (el caso feliz no
+    paga ruido; y `error`/`sin_extractor` nunca traen salidas que decorar,
+    por invariante de `Resultado`)."""
+    resumen = _resumen_parcial(detalle)
+    return (
+        f"<!-- EXTRACTO PARCIAL · {resumen} -- "
+        f"ficha completa: procesado/{huella}/ficha.json -->"
+    )
+
+
 def ingerir(origen: Path, trabajo: Path) -> Ficha:
     origen = Path(origen)
     trabajo_abs = _resolver_bajo_jail(Path(trabajo))  # C-1/I-7
@@ -541,7 +606,18 @@ def ingerir(origen: Path, trabajo: Path) -> Ficha:
     try:
         temporal.mkdir(parents=True)
 
+        # Reserva arquitectónica (final-hallazgos.md, ronda de cierre): un
+        # extracto `parcial` lleva el aviso DENTRO del propio archivo que
+        # el modelo lee -- la ficha (donde vivía la declaración completa)
+        # no es lo que un `file_read` sobre `procesado/<huella>/` entrega.
+        encabezado = (
+            _encabezado_parcial(huella, resultado.detalle)
+            if resultado.estado == "parcial"
+            else None
+        )
         for nombre, contenido in resultado.salidas.items():
+            if encabezado is not None:
+                contenido = f"{encabezado}\n\n{contenido}"
             (temporal / nombre).write_text(contenido, encoding="utf8")
 
         detalle = {
@@ -556,6 +632,27 @@ def ingerir(origen: Path, trabajo: Path) -> Ficha:
             # `_estado_de_error_cacheado` lee en la próxima ingesta para
             # decidir si reintenta o si ya agotó el tope.
             detalle["_intentos"] = intentos_previos + 1
+
+        if resultado.salidas:
+            # I-6 (final-hallazgos.md, ronda de cierre): un extracto que en
+            # total supera el tope de lectura de un tool_call
+            # (`tool_authority.MAX_READ_BYTES`) es ilegible para quien lo
+            # consume vía `file_read`, aunque el extracto esté COMPLETO y
+            # sea CORRECTO -- no cambia el estado (nada se perdió), pero
+            # tampoco puede quedar invisible (medido: xlsx-04, 159.077 B
+            # de original -> 17.861.532 B de extracto, 'ok', 89x el tope --
+            # y el criterio §7.B.2 no lo ve porque sólo evalúa documentos
+            # cuyo ORIGINAL no cabía).
+            total_extracto_bytes = sum(
+                len(c.encode("utf8")) for c in resultado.salidas.values()
+            )
+            if total_extracto_bytes > tool_authority.MAX_READ_BYTES:
+                detalle["excede_tope_lectura"] = True
+                detalle["excede_tope_lectura_bytes"] = {
+                    "extracto": total_extracto_bytes,
+                    "original": origen.stat().st_size,
+                    "tope": tool_authority.MAX_READ_BYTES,
+                }
 
         ficha = Ficha(
             sha256=huella,

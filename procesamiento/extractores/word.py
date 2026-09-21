@@ -80,13 +80,25 @@ EXTRACTOR = "python-docx"
 _FIRMA_OLE2 = bytes.fromhex("D0CF11E0A1B11AE1")
 
 
-def _version() -> str:
+def _version() -> str | None:
+    """`None` cuando no se pudo determinar la versión instalada -- NUNCA la
+    cadena "desconocida" (Menor 10, final-hallazgos.md, ronda de cierre):
+    `ingesta._version_vigente` reenvía este valor tal cual para invalidar
+    el caché (I-2) si el extractor cambió. Una cadena fija ("desconocida")
+    compara IGUAL A SÍ MISMA en dos fallos consecutivos -- un extractor que
+    no puede reportar su versión de forma persistente parecía "la misma
+    versión de siempre" y el acierto de caché quedaba VÁLIDO justo cuando
+    menos se podía confiar en él. `None` es el único sentinel que la guarda
+    de `_ficha_de_cache_valida` (`version_vigente is None`) ya trata como
+    fallo de caché SIEMPRE, sin importar qué haya quedado grabado antes.
+    Los llamadores que necesitan un `str` no vacío para `Resultado.version`
+    (que lo exige) usan `_version() or "desconocida"`."""
     try:
         from importlib.metadata import version
 
         return version("python-docx")
-    except Exception:  # fail-soft: la lectura de metadata del paquete puede fallar; se devuelve "desconocida" para el campo informativo de version, no critico
-        return "desconocida"
+    except Exception:  # fail-soft: la lectura de metadata del paquete puede fallar; se devuelve None (no determinable) en vez de propagar
+        return None
 
 
 def _es_binario_ole2(origen: Path) -> bool:
@@ -244,7 +256,7 @@ def extraer(origen: Path) -> Resultado:
     if _es_binario_ole2(origen):
         return Resultado(
             estado="sin_extractor", salidas={}, extractor=EXTRACTOR,
-            version=_version(),
+            version=_version() or "desconocida",
             detalle={
                 "razon": (
                     "el archivo es un binario de Office antiguo (formato "
@@ -265,11 +277,12 @@ def extraer(origen: Path) -> Resultado:
         if "is not a Word file" in mensaje:
             return Resultado(
                 estado="sin_extractor", salidas={}, extractor=EXTRACTOR,
-                version=_version(),
+                version=_version() or "desconocida",
                 detalle={"razon": f"el archivo no es un Word: {mensaje}"},
             )
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": f"no se pudo abrir: {type(exc).__name__}: {exc}"},
         )
 
@@ -315,7 +328,8 @@ def extraer(origen: Path) -> Resultado:
         # sólo la apertura del documento estaba protegida así; el cuerpo
         # no, y eso es exactamente lo que este arreglo cierra.
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={
                 "razon": f"fallo inesperado leyendo el cuerpo: {type(exc).__name__}: {exc}"
             },
@@ -327,7 +341,8 @@ def extraer(origen: Path) -> Resultado:
     contenido = "\n".join(lineas_header_footer + lineas).strip()
     if not contenido:
         return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR, version=_version(),
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
             detalle={"razon": "el documento no tiene texto"},
         )
 
@@ -359,5 +374,5 @@ def extraer(origen: Path) -> Resultado:
 
     return Resultado(
         estado=estado, salidas={"texto.md": contenido},
-        extractor=EXTRACTOR, version=_version(), detalle=detalle,
+        extractor=EXTRACTOR, version=_version() or "desconocida", detalle=detalle,
     )

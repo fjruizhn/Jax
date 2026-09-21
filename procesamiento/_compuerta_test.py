@@ -421,6 +421,32 @@ def test_webp_real_renombrado_va_por_ocr_y_marca_extension_enganosa(
     assert r.detalle["extension_enganosa"] == {"nombre": ".docx", "contenido": "imagen"}
 
 
+def test_pdf_nativo_sin_pdfplumber_da_sin_extractor_no_ocr(tmp_path: Path, monkeypatch):
+    """C-2 (final-hallazgos.md, ronda de cierre): sin `pdfplumber`
+    instalado, un PDF NATIVO tiene que salir `sin_extractor` -- NUNCA
+    rutear a OCR (que devolvería `estado='ok'` con las cifras DESTRUIDAS,
+    medido: 0 de 8 cifras). Mismo tratamiento que un `.docx` sin
+    `python-docx` (`test_import_compuerta_no_explota_sin_python_docx`)."""
+    import sys
+
+    from procesamiento.extractores import ocr
+
+    def no_debe_llamarse(origen, idioma="spa"):
+        raise AssertionError(
+            "sin pdfplumber, un PDF nativo NO debe pagar OCR -- OCR produce "
+            "'ok' con las cifras destruidas, no una alternativa honesta"
+        )
+
+    monkeypatch.setattr(ocr, "extraer", no_debe_llamarse)
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+
+    archivo = _pdf_nativo(tmp_path / "estado.pdf")
+    r = compuerta.extraer(archivo)
+
+    assert r.estado == "sin_extractor"
+    assert r.salidas == {}
+
+
 def test_pdf_con_extension_pero_contenido_no_decisivo_usa_respaldo_por_extension(
     tmp_path: Path, monkeypatch
 ):

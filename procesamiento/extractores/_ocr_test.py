@@ -244,13 +244,33 @@ def test_un_archivo_inexistente_da_error(tmp_path: Path):
     assert "no existe el archivo" in r.detalle["razon"]
 
 
-def test_tesseract_ausente_da_error_sin_excepcion(tmp_path: Path, monkeypatch):
+def test_tesseract_ausente_da_sin_extractor(tmp_path: Path, monkeypatch):
+    """I-8 (final-hallazgos.md, ronda de cierre): antes era 'error',
+    indistinguible de "este documento es ilegible". El spec §8 mapea "sin
+    extractor disponible" a 'sin_extractor', igual que `openpyxl`/
+    `python-docx`/`pdfplumber` ausentes -- una máquina sin tesseract no
+    puede marcar TODOS sus escaneos como si el documento fuera el
+    problema."""
     origen = _imagen_una_linea(tmp_path / "a.png", "Estado de Situación Financiera")
     monkeypatch.setattr(ocr.shutil, "which", lambda _: None)
     r = ocr.extraer(origen)
-    assert r.estado == "error"
+    assert r.estado == "sin_extractor"
     assert r.salidas == {}
     assert "razon" in r.detalle
+
+
+def test_version_no_revienta_si_tesseract_falla(tmp_path: Path, monkeypatch):
+    """Menor 10 (final-hallazgos.md, ronda de cierre): el sentinel de "no
+    se pudo determinar la version" es `None`, NUNCA la cadena "desconocida"
+    -- esa cadena compara IGUAL A SÍ MISMA en dos fallos consecutivos, y
+    `ingesta._version_vigente` la reenvía tal cual para decidir si el
+    caché sigue siendo válido (I-2)."""
+
+    def _rota(cmd, **kwargs):
+        raise OSError("tesseract --version fallo")
+
+    monkeypatch.setattr(ocr.subprocess, "run", _rota)
+    assert ocr._version() is None
 
 
 # ---------------------------------------------------------------------------
@@ -329,6 +349,87 @@ def test_pdf_con_una_pagina_en_blanco_da_parcial(tmp_path: Path):
     assert "Estado de Situación Financiera" in r.salidas["texto.txt"]
 
 
+def test_pdf_registra_confianza_promedio_del_documento_y_por_pagina(tmp_path: Path):
+    """I-3 (final-hallazgos.md, ronda de cierre): `_resolver_imagen` YA
+    registraba `confianza_promedio` (I-1 de la ronda 1); `_resolver_pdf`
+    armaba su propio `detalle` a mano y NUNCA la incluía -- el PDF
+    escaneado es el caso de uso real (7 de 23 documentos medidos, los 7
+    'parcial'), y el pendiente de calibrar el umbral del OCR se quedaba
+    sin el dato del único camino que necesita calibrarse."""
+    p1 = _imagen_multilinea(
+        tmp_path / "p1.png",
+        [
+            "Estado de Situación Financiera",
+            "Activos totales 1,234,567.89 USD",
+            "Pasivos totales 987,654.32 USD",
+            "Patrimonio neto 246,913.57 USD",
+        ],
+    )
+    p2 = _imagen_multilinea(
+        tmp_path / "p2.png",
+        [
+            "Estado de Resultados",
+            "Ingresos totales 500,000.00 USD",
+            "Costos totales 300,000.00 USD",
+            "Utilidad neta 200,000.00 USD",
+        ],
+    )
+    from PIL import Image
+
+    origen = _pdf_de_imagenes(
+        tmp_path / "escaneado.pdf", [Image.open(p1), Image.open(p2)]
+    )
+
+    r = ocr.extraer(origen)
+
+    assert r.estado == "ok"
+    assert "confianza_promedio" in r.detalle
+    assert r.detalle["confianza_promedio"] > 0
+    assert set(r.detalle["confianza_por_pagina"]) == {"1", "2"}, (
+        "las claves tienen que ser STRING -- Ficha exige que detalle "
+        "sobreviva un viaje a JSON, que no admite claves no-str"
+    )
+    for confianza in r.detalle["confianza_por_pagina"].values():
+        assert confianza > 0
+
+
+def test_pdf_detalle_sobrevive_construccion_de_ficha(tmp_path: Path):
+    """Regresión propia de la ronda de cierre (no está en
+    final-hallazgos.md -- la destapó verificar I-3 contra `Ficha`, no
+    contra `Resultado` solo): `confianza_por_pagina` con claves `int`
+    rompía `Ficha(...)` con un `ValueError` -- `Ficha` exige que `detalle`
+    sobreviva un viaje REAL a JSON y vuelta sin cambios (`ficha.py`, I-6 de
+    su propia ronda), y JSON no admite claves que no sean string. Con
+    claves `int`, CUALQUIER ingesta de un PDF escaneado de más de una
+    página hubiera reventado en cuanto `ingesta.ingerir()` intentara
+    construir la ficha -- un defecto que ningún test contra `Resultado`
+    solo (como el de arriba) podía ver."""
+    from procesamiento.ficha import Ficha
+
+    p1 = _imagen_multilinea(
+        tmp_path / "p1.png",
+        ["Estado de Situación Financiera", "Activos totales 1,234,567.89 USD"],
+    )
+    p2 = _imagen_multilinea(
+        tmp_path / "p2.png",
+        ["Estado de Resultados", "Ingresos totales 500,000.00 USD"],
+    )
+    from PIL import Image
+
+    origen = _pdf_de_imagenes(
+        tmp_path / "escaneado.pdf", [Image.open(p1), Image.open(p2)]
+    )
+
+    r = ocr.extraer(origen)
+
+    Ficha(
+        sha256="a" * 64, origen="fuente/escaneado.pdf",
+        extractor=r.extractor, extractor_version=r.version,
+        fecha="2026-09-21T00:00:00-06:00", estado=r.estado,
+        detalle=dict(r.detalle),
+    )  # no debe lanzar ValueError
+
+
 def test_pdf_pagina_con_membrete_corto_es_parcial_con_paginas_con_dudas(tmp_path: Path):
     """Hueco de cobertura (task-7, 2026-09-21): desactivar la propagación de
     `con_dudas` de una página al resultado agregado del PDF (en
@@ -383,6 +484,39 @@ def test_pdf_donde_ninguna_pagina_da_texto_es_error(tmp_path: Path):
     assert r.estado == "error"
     assert r.salidas == {}
     assert r.detalle["paginas"] == 2
+
+
+def test_rasterizado_usa_workspace_dir_no_tmp(tmp_path: Path, monkeypatch):
+    """I-7 (final-hallazgos.md, ronda de cierre): el directorio temporal
+    del rasterizado va bajo `JAX_WORKSPACE_DIR`, no al default de
+    `tempfile` (`/tmp`, que en hall9000 es tmpfs -- RAM, en un hipervisor
+    con dos VMs). Se verifica interceptando `_rasterizar_pdf` (que recibe
+    el `Path` del directorio temporal ya creado) y comprobando que cuelga
+    de `_WORKSPACE_DIR`, no de `tempfile.gettempdir()`."""
+    workspace = tmp_path / "workspace-ocr"
+    monkeypatch.setattr(ocr, "_WORKSPACE_DIR", workspace)
+
+    rutas_vistas: list[Path] = []
+    original = ocr._rasterizar_pdf
+
+    def _espia(origen, destino):
+        rutas_vistas.append(destino)
+        return original(origen, destino)
+
+    monkeypatch.setattr(ocr, "_rasterizar_pdf", _espia)
+
+    from PIL import Image
+
+    p1 = _imagen_una_linea(tmp_path / "p1.png", "CONTADORES ASOCIADOS S.A.")
+    origen = _pdf_de_imagenes(tmp_path / "escaneado.pdf", [Image.open(p1)])
+    ocr.extraer(origen)
+
+    assert rutas_vistas, "no se llamo a _rasterizar_pdf"
+    assert workspace in rutas_vistas[0].parents, (
+        f"el directorio temporal ({rutas_vistas[0]}) no cuelga de "
+        f"_WORKSPACE_DIR ({workspace}) -- sigue yendo a /tmp"
+    )
+    assert workspace.is_dir(), "_WORKSPACE_DIR no se creo antes de rasterizar"
 
 
 def test_pdftoppm_ausente_da_error_sin_excepcion(tmp_path: Path, monkeypatch):

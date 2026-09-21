@@ -220,6 +220,21 @@ def test_detecta_que_un_pdf_nativo_tiene_texto(tmp_path: Path):
     assert pdf.tiene_capa_de_texto(_pdf_con_texto(tmp_path / "n.pdf")) is True
 
 
+def test_tiene_capa_de_texto_no_traga_modulenotfounderror(tmp_path: Path, monkeypatch):
+    """C-2 (final-hallazgos.md, ronda de cierre): antes, CUALQUIER
+    excepción (incluido `ModuleNotFoundError` por `pdfplumber` ausente) se
+    trataba acá como "sin texto" -- la compuerta ruteaba entonces a OCR,
+    que devolvía `estado='ok'` con las cifras DESTRUIDAS (medido: 8/8
+    cifras con pdfplumber, 0/8 sin él, y `detalle` sin decir una palabra
+    de la dependencia faltante). Ahora `ModuleNotFoundError` se deja
+    propagar -- es `compuerta.extraer` quien decide qué hacer con eso."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+    with pytest.raises(ModuleNotFoundError):
+        pdf.tiene_capa_de_texto(_pdf_con_texto(tmp_path / "n.pdf"))
+
+
 def test_extrae_el_texto_del_pdf_nativo(tmp_path: Path):
     r = pdf.extraer(_pdf_con_texto(tmp_path / "n.pdf"))
     assert r.estado == "ok"
@@ -373,12 +388,19 @@ def test_version_no_revienta_si_pdfplumber_no_esta_instalado(monkeypatch):
     convierta el fallo en 'sin_extractor'. Antes de este arreglo, `import
     pdfplumber` roto acá dejaba escapar un `ImportError` crudo (blindaje que
     `word.py`/`ocr.py` ya tenían y `pdf.py` no). Ahora, igual que ellos,
-    nunca revienta: devuelve un string."""
+    nunca revienta.
+
+    Menor 10 (final-hallazgos.md, ronda de cierre): el sentinel de "no se
+    pudo determinar" es `None`, NUNCA la cadena "desconocida" -- esa cadena
+    compara IGUAL A SÍ MISMA en dos fallos consecutivos, y
+    `ingesta._version_vigente` la reenvía tal cual para decidir si el
+    caché sigue siendo válido (I-2). Contra el código viejo esto falla:
+    `_version()` devolvía la cadena "desconocida", no `None`."""
     import sys
 
     monkeypatch.setitem(sys.modules, "pdfplumber", None)
     version = pdf._version()
-    assert isinstance(version, str)
+    assert version is None
 
 
 def test_tabla_a_bloque_escapa_el_pipe_de_una_celda():
