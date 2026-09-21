@@ -1,7 +1,6 @@
 from datetime import datetime, timezone
 import pytest
 
-from las_manos.motor_registry.catalog import MotorCatalog
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
 from policy.authority_ledger.replay import verify_authority_ledger
 from policy.authority_ledger.service import append_authority_event
@@ -17,8 +16,19 @@ from tests.policy.test_authority_ledger_events import setup_ledger, ratification
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-def catalog():
-    return MotorCatalog({"motors":{"m":{"enabled":True,"sandbox_only":True}}, "capabilities":{"CAP":{"allowed_callers":["jacobs"],"allowed_motors":["m"],"sandbox_only":True,"requires_human_gate":False,"max_execution_minutes":2,"max_recursion_depth":0,"mode":"mutating"}}})
+class _Capability:
+    name = "CAP"; allowed_callers = ["jacobs"]; allowed_motors = ["m"]
+    sandbox_only = True; requires_human_gate = False; max_execution_minutes = 2
+    max_recursion_depth = 0; mode = "mutating"; risk_level = "high"
+
+class _Motor:
+    enabled = True; sandbox_only = True
+
+class _Catalog:
+    def get_capability(self, name): return _Capability() if name == "CAP" else None
+    def get_motor(self, name): return _Motor() if name == "m" else None
+
+def catalog(): return _Catalog()
 
 def record():
     store, root, key = setup_ledger(); rat = append_authority_event(store, root, key, ratification_intent())
