@@ -171,20 +171,59 @@ Docling sólo entra si pdfplumber pierde.
 6. Se borra `procesado/` entero → se reconstruye idéntico. Probado.
 7. **Cero escrituras hacia Nextcloud**, verificado DESDE Nextcloud, no desde nuestro lado.
 
-### B · Ahorro — la razón de existir, y puede decir que NO
+### B · Utilidad — CORREGIDO el 2026-09-21, y puede decir que NO
 
-Se mide primero la **línea base**: el pipeline del ERP como está hoy, tokens de entrada y
-costo en dólares. Después el mismo pipeline con caché.
-
-- El segundo pipeline sobre el mismo archivo paga **$0 de extracción**. Binario.
-- Los tokens de entrada bajan **al menos 30 %**.
-
-> **Si el ahorro queda bajo el 30 %, el proyecto NO justifica su complejidad y se detiene**,
-> quedando `fuente/procesado/` como mejora de orden y nada más. El número se escribe ANTES
-> de medir para que no se acomode al resultado.
+> **El criterio anterior estaba MAL PLANTEADO, y el error fue de Hyde.** Decía: *"los
+> tokens de entrada bajan al menos 30 %, medido contra el pipeline del ERP"*. Los tres
+> archivos de ese pipeline (`brief-multistore.md`, `ateneaerp-estructura.md`,
+> `ateneaerp-esquema.sql`) son **texto plano**: la compuerta responde `sin_extractor`, y
+> hace bien, porque no hay nada que extraer. Medir ahí habría dado cero ahorro por la razón
+> equivocada.
 >
-> *(El 30 % es propuesta de Hyde. Fernando no lo ha fijado todavía — si lo cambia, se
-> cambia acá y se vuelve a medir contra el número nuevo.)*
+> **Este sistema no reduce tokens sobre texto que ya era texto.** Hace usables documentos
+> binarios que antes no se podían leer, y evita reextraerlos. El criterio corregido mide
+> eso. *(Corregido con GO de Fernando, 2026-09-21.)*
+
+**Medido el 2026-09-21 con documentos reales de Nextcloud** (borrados tras medir):
+
+| Documento | Original | Extracto | Reducción | Tiempo | Estado |
+|---|---:|---:|---:|---:|---|
+| EEFF NETEADOS `.xlsx` | 68.464 B | 22.261 B | 3,1× | 0,09 s | ok |
+| Prospección `.xlsx` | 410.001 B | 1.522 B | 269× | 0,01 s | ok |
+| EEFF 2022 `.pdf` escaneado, 17 pág. | 3.131.619 B | 38.292 B | 81,8× | 46,2 s | parcial |
+
+#### B.1 · Lo que MATA el proyecto si falla
+
+**Las 10 cifras que elige Fernando** de un estado financiero escaneado real salen
+correctas. Si el OCR no lee sus documentos de forma confiable, todo lo demás da igual:
+un extracto que no se puede creer no sirve para nada.
+
+#### B.2 · Utilidad — binario y atado a un límite real del sistema
+
+**El extracto de cada documento tiene que caber en el tope de 200 KB de `file_read`**,
+y el original no.
+
+No es un porcentaje inventado: es el límite que ya existe en `tool_authority.MAX_READ_BYTES`.
+El PDF de 3,1 MB **no cabe**; su extracto de 38 KB **sí**. Esa es, literalmente, la
+diferencia entre "no se puede usar" y "se puede usar".
+
+Se mide sobre una muestra de **al menos 20 documentos reales** y se registra cuántos caben.
+
+#### B.3 · El caché
+
+Segundo pase sobre el mismo archivo: **cero trabajo**. Binario. Ya probado en el Task 8.
+
+#### B.4 · Que `parcial` signifique algo
+
+Medido el 2026-09-21: el PDF escaneado real dio **16 de 17 páginas con dudas**, en su
+mayoría por los **puntos suspensivos del índice**, que el OCR lee como basura con confianza
+0,0.
+
+El sistema hace lo que se le pidió, pero **si `parcial` es el estado de casi todos los
+documentos reales, deja de ser una señal y pasa a ser ruido de fondo**.
+
+Criterio: sobre la muestra de 20 documentos, **`parcial` no puede ser el estado de más del
+60 %**. Si lo es, el umbral está mal calibrado y hay que corregirlo antes del GO.
 
 ### C · Rendimiento — las cuatro reglas
 
