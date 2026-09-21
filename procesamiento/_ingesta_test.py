@@ -479,13 +479,26 @@ def test_I2_extractor_desactualizado_es_fallo_de_cache(tmp_path: Path, monkeypat
 # ---------------------------------------------------------------------------
 
 
-def test_I3_mismos_bytes_distinta_extension_no_comparten_cache(tmp_path: Path, monkeypatch):
-    origen_xlsx = tmp_path / "e.xlsx"
-    origen_docx = tmp_path / "e.docx"
+@pytest.mark.parametrize(
+    "primera_extension, segunda_extension",
+    [(".xlsx", ".docx"), (".docx", ".xlsx")],
+    ids=["xlsx-luego-docx", "docx-luego-xlsx"],
+)
+def test_I3_mismos_bytes_distinta_extension_no_comparten_cache(
+    tmp_path: Path, monkeypatch, primera_extension, segunda_extension
+):
+    """A-4 (task-8-hallazgos-r2.md): el agujero estaba en el test, no en
+    el código -- la versión original sólo cubría el orden `.xlsx` ->
+    `.docx`. Al revés (`.docx` primero) el mismo defecto reaparece: el
+    `.xlsx` recibía el extracto que se hizo para el `.docx`. Parametrizado
+    en los DOS órdenes -- mutar `"_extension_ingesta": extension_actual`
+    a un valor constante ya no sobrevive sin importar cuál va primero."""
+    origen_1 = tmp_path / f"e{primera_extension}"
+    origen_2 = tmp_path / f"e{segunda_extension}"
     contenido = b"contenido identico byte a byte"
-    origen_xlsx.write_bytes(contenido)
-    origen_docx.write_bytes(contenido)
-    assert sha256_de(origen_xlsx) == sha256_de(origen_docx)  # mismos bytes, a propósito
+    origen_1.write_bytes(contenido)
+    origen_2.write_bytes(contenido)
+    assert sha256_de(origen_1) == sha256_de(origen_2)  # mismos bytes, a propósito
 
     llamadas: list[str] = []
 
@@ -499,12 +512,12 @@ def test_I3_mismos_bytes_distinta_extension_no_comparten_cache(tmp_path: Path, m
     monkeypatch.setattr(compuerta, "extraer", falsa)
 
     trabajo = tmp_path / "trabajo"
-    primera = ingesta.ingerir(origen_xlsx, trabajo)
-    segunda = ingesta.ingerir(origen_docx, trabajo)
+    primera = ingesta.ingerir(origen_1, trabajo)
+    segunda = ingesta.ingerir(origen_2, trabajo)
 
     assert primera.sha256 == segunda.sha256
-    assert llamadas == [".xlsx", ".docx"], (
-        f"I-3 REABIERTO: la segunda ingesta usó el caché de la primera pese a la "
+    assert llamadas == [primera_extension, segunda_extension], (
+        f"I-3/A-4 REABIERTO: la segunda ingesta usó el caché de la primera pese a la "
         f"extensión distinta (llamadas reales a compuerta.extraer: {llamadas})"
     )
 
@@ -579,6 +592,175 @@ def test_I6_nombre_largo_con_colision_no_revienta(tmp_path: Path):
     assert len(nombres) == 2
     for nombre in nombres:
         assert len(nombre) <= 255, f"I-6 REABIERTO: nombre de {len(nombre)} caracteres en fuente/"
+
+
+# ---------------------------------------------------------------------------
+# A-1/A-2 (task-8-hallazgos-r2.md) -- MISMO modelo de amenaza que C-1: algo
+# plantado en `fuente/`, ahora por el camino de comparar huellas en vez de
+# escribir. Un FIFO cuelga `sha256_de` para siempre (sin timeout); un
+# directorio revienta con `IsADirectoryError`, determinista, en cada pase.
+# ---------------------------------------------------------------------------
+
+
+def test_A1_fifo_en_fuente_no_cuelga_la_ingesta(tmp_path: Path):
+    """El repro exacto del hallazgo: un FIFO con el nombre del candidato
+    primario. `sha256_de` abriría el FIFO y bloquearía sin timeout -- acá
+    se corre en un hilo daemon con `join(timeout=...)` para que el test
+    NUNCA pueda colgar la suite entera aunque el arreglo tuviera un
+    agujero; la evidencia con `timeout` de shell REAL (reproduciendo el
+    cuelgue contra el código mutado y confirmando que NO cuelga contra el
+    arreglado) está pegada en task-8-report.md."""
+    import os
+
+    trabajo = tmp_path / "trabajo"
+    fuente_dir = trabajo / "fuente"
+    fuente_dir.mkdir(parents=True)
+
+    origen = _libro(tmp_path / "informe.xlsx")
+    fifo = fuente_dir / "informe.xlsx"
+    os.mkfifo(fifo)
+
+    resultado: dict[str, Ficha] = {}
+    errores: list[BaseException] = []
+
+    def correr():
+        try:
+            resultado["ficha"] = ingesta.ingerir(origen, trabajo)
+        except BaseException as exc:  # pragma: no cover -- sólo si el arreglo se rompe
+            errores.append(exc)
+
+    hilo = threading.Thread(target=correr, daemon=True)
+    hilo.start()
+    hilo.join(timeout=5)
+
+    assert not hilo.is_alive(), (
+        "A-1 REABIERTO: la ingesta quedó colgada más de 5s con un FIFO en fuente/"
+    )
+    assert not errores, f"errores inesperados: {errores}"
+
+    ficha = resultado["ficha"]
+    assert ficha.estado == "ok"
+    real = trabajo / "fuente" / Path(ficha.origen).name
+    assert real.is_file()
+    assert real.name != "informe.xlsx"  # tuvo que usar el nombre alterno
+
+    # El FIFO nunca se tocó: sigue siendo un FIFO, en el mismo lugar.
+    import stat
+
+    assert stat.S_ISFIFO(os.stat(fifo, follow_symlinks=False).st_mode)
+
+
+def test_A2_directorio_colisionante_cae_al_nombre_alterno(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    fuente_dir = trabajo / "fuente"
+    fuente_dir.mkdir(parents=True)
+
+    origen = _libro(tmp_path / "informe.xlsx")
+    directorio_colisionante = fuente_dir / "informe.xlsx"
+    directorio_colisionante.mkdir()  # directorio con el nombre del candidato primario
+
+    ficha = ingesta.ingerir(origen, trabajo)  # NO debe lanzar IsADirectoryError
+
+    assert ficha.estado == "ok"
+    real = trabajo / "fuente" / Path(ficha.origen).name
+    assert real.is_file()
+    assert real.name != "informe.xlsx"
+
+    # El directorio colisionante sigue ahí, intacto, vacío.
+    assert directorio_colisionante.is_dir()
+    assert list(directorio_colisionante.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# A-5 (task-8-hallazgos-r2.md) -- seis mutaciones menores que sobrevivían.
+# Tres de las seis (quitar O_NOFOLLOW; quitar el unlink de limpieza en la
+# escritura fallida) dejaron de aplicar de raíz: la reescritura de
+# `_asegurar_en_fuente` para el hallazgo propio de A-3 (temporal + hardlink
+# en vez de escritura directa) las volvió estructuralmente imposibles de
+# alcanzar -- el detalle completo, con evidencia, está en task-8-report.md.
+# Acá las tres que sí se atacan con un test propio.
+# ---------------------------------------------------------------------------
+
+
+def test_A5_temporal_huerfano_se_limpia_en_finally(tmp_path: Path):
+    """Quitar el `finally`/`rmtree` de la escritura de `procesado/` deja un
+    directorio `<huella>.<pid>-<uuid>.parcial` huérfano cuando la escritura
+    se cae a la mitad -- I-8 (ronda 1) quedó, en los hechos, sin test
+    propio: el test de atomicidad sólo miraba que la carpeta FINAL no
+    existiera, nunca que el temporal se limpiara."""
+    import unittest.mock
+
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    original_write_text = Path.write_text
+
+    def falla_al_escribir_la_ficha(self, *args, **kwargs):
+        if self.name == "ficha.json":
+            raise OSError("disco lleno, simulado")
+        return original_write_text(self, *args, **kwargs)
+
+    with unittest.mock.patch.object(Path, "write_text", falla_al_escribir_la_ficha):
+        with pytest.raises(OSError):
+            ingesta.ingerir(origen, trabajo)
+
+    procesado_dir = trabajo / "procesado"
+    huerfanos = list(procesado_dir.glob("*.parcial")) if procesado_dir.exists() else []
+    assert huerfanos == [], f"A-5 REABIERTO (I-8): quedó un temporal huérfano: {huerfanos}"
+
+
+def test_A5_ficha_con_huella_distinta_a_la_carpeta_es_fallo_de_cache(tmp_path: Path):
+    """Defensivo: la ficha guardada en `procesado/<huella>/` debería tener
+    SIEMPRE `sha256 == huella` (así se indexa la carpeta) -- pero si algo
+    la corrompe con una huella distinta, confiar en ella ciegamente sería
+    servir el extracto de un archivo por otro."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+    primera = ingesta.ingerir(origen, trabajo)
+    carpeta = ingesta.ruta_procesado(trabajo, primera.sha256)
+
+    datos = json.loads((carpeta / "ficha.json").read_text())
+    datos["sha256"] = "0" * 64  # huella corrupta, distinta a la de la carpeta
+    (carpeta / "ficha.json").write_text(json.dumps(datos))
+
+    segunda = ingesta.ingerir(origen, trabajo)
+
+    assert segunda.sha256 == primera.sha256, (
+        "A-5 REABIERTO: se sirvió una ficha con huella distinta a la de la carpeta"
+    )
+    assert json.loads((carpeta / "ficha.json").read_text())["sha256"] == primera.sha256
+
+
+def test_A5_extension_en_mayusculas_no_rompe_el_cache(tmp_path: Path, monkeypatch):
+    """El `.lower()` sobre la extensión evita que 'E.XLSX' y 'e.xlsx'
+    (mismos bytes) se traten como una colisión de extensión distinta
+    (I-3) y disparen una reextracción innecesaria."""
+    trabajo = tmp_path / "trabajo"
+    base = _libro(tmp_path / "base.xlsx")
+    contenido = base.read_bytes()
+
+    origen_mayusculas = tmp_path / "E.XLSX"
+    origen_mayusculas.write_bytes(contenido)
+    origen_minusculas = tmp_path / "e.xlsx"
+    origen_minusculas.write_bytes(contenido)
+    assert sha256_de(origen_mayusculas) == sha256_de(origen_minusculas)
+
+    llamadas: list[Path] = []
+    original_extraer = compuerta.extraer
+
+    def rastreada(destino):
+        llamadas.append(destino)
+        return original_extraer(destino)
+
+    monkeypatch.setattr(compuerta, "extraer", rastreada)
+
+    ingesta.ingerir(origen_mayusculas, trabajo)
+    ingesta.ingerir(origen_minusculas, trabajo)
+
+    assert len(llamadas) == 1, (
+        f"A-5 REABIERTO: 'E.XLSX' y 'e.xlsx' (mismos bytes) no compartieron "
+        f"caché -- se reextrajo {len(llamadas)} veces"
+    )
 
 
 # ---------------------------------------------------------------------------
