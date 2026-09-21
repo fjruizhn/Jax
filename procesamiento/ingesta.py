@@ -454,6 +454,17 @@ def _estado_de_error_cacheado(
     causa del fallo pudo haberse arreglado (misma lógica de I-2, aplicada
     ahora también al conteo de intentos, no sólo al acierto de caché).
 
+    CORRECCIÓN (ronda P10, 2026-09-21, hallazgo reportado sin tocar --
+    ruling del coordinador): `_version_vigente` devolviendo `None` significa
+    "no se pudo determinar la versión vigente", NO "la versión cambió". Son
+    cosas distintas y antes se trataban igual: un extractor cuya consulta de
+    versión falla de forma PERSISTENTE reiniciaba la cuenta en cada ingesta
+    y el tope de D-2 dejaba de existir en silencio -- exactamente el defecto
+    de los 300s por llamada que D-2 vino a cerrar. Ahora sólo una versión
+    CONOCIDA y DISTINTA de la guardada reinicia la cuenta; un `None` deja el
+    conteo tal cual estaba, como si la consulta de versión no se hubiera
+    podido hacer (que es, literalmente, lo que pasó).
+
     Si hay una ficha de fallo UTILIZABLE, devuelve `(ficha, intentos)` con
     el número de intentos ya gastados. Nunca lanza -- un fallo de lectura
     acá es, igual que en `_ficha_de_cache_valida`, un fallo de caché, no
@@ -476,8 +487,10 @@ def _estado_de_error_cacheado(
         return None, 0  # I-3 aplicado también acá
 
     version_vigente = _version_vigente(ficha.extractor)
-    if version_vigente is None or ficha.extractor_version != version_vigente:
+    if version_vigente is not None and ficha.extractor_version != version_vigente:
         return None, 0  # I-2: el extractor cambió -- la cuenta arranca de cero
+    # version_vigente is None: "no sé" -- se sigue de largo y se cuenta la
+    # ficha como utilizable, con los intentos que ya tenía.
 
     intentos = ficha.detalle.get("_intentos")
     if not isinstance(intentos, int) or intentos < 1:

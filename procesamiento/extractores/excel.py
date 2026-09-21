@@ -44,9 +44,17 @@ EXTRACTOR = "openpyxl"
 
 
 def _version() -> str:
-    import openpyxl
+    """Blindado (ronda P10, 2026-09-21): esta función se llama también desde
+    `ingesta._version_vigente`, FUERA de `extraer()` -- ahí no hay ningún
+    `except ModuleNotFoundError` que convierta el fallo en 'sin_extractor'.
+    Nunca puede dejar escapar una excepción, igual que `word._version()` y
+    `ocr._version()`."""
+    try:
+        import openpyxl
 
-    return openpyxl.__version__
+        return openpyxl.__version__
+    except Exception:  # fail-soft: el import o el atributo __version__ pueden fallar (paquete no instalado o roto); se devuelve "desconocida" para el campo informativo de version, no critico
+        return "desconocida"
 
 
 def _slug(texto: str) -> str:

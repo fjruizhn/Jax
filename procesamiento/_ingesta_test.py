@@ -867,6 +867,56 @@ def test_D2_cambio_de_version_del_extractor_reinicia_la_cuenta(tmp_path: Path, m
     )
 
 
+def test_D2_version_desconocida_no_reinicia_la_cuenta_del_tope(tmp_path: Path, monkeypatch):
+    """Corrección del hallazgo de la ronda P10 (2026-09-21): `None` de
+    `_version_vigente` significa "no se pudo determinar la versión", NO
+    "la versión cambió". Son cosas distintas -- confundirlas reabre D-2 en
+    silencio: un extractor cuya consulta de versión falla de forma
+    persistente reiniciaría la cuenta en CADA ingesta y el tope de 3 dejaría
+    de existir, exactamente el defecto de los 300s por llamada que D-2 vino
+    a cerrar. El tope se agota bajo la versión vigente de hoy; después se
+    rompe `excel._version()` (simulando que la consulta de versión falla) y
+    una ingesta más NO tiene que reintentar -- la cuenta sigue en 3."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    llamadas: list[Path] = []
+    # Capturada ANTES de romper `excel._version` -- el mock necesita seguir
+    # escribiendo la MISMA version en cada ficha (como haría la extracción
+    # real), separado de lo que `_version_vigente` vaya a leer al chequear
+    # el cache. Si el mock llamara a `excel._version()` en vivo después de
+    # romperla, el RuntimeError saldría de acá, no del camino bajo prueba.
+    version_real = excel._version()
+
+    def falla_siempre(destino):
+        llamadas.append(destino)
+        return Resultado(
+            estado="error", salidas={}, detalle={"razon": "algo raro paso"},
+            extractor=excel.EXTRACTOR, version=version_real,
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falla_siempre)
+    for _ in range(3):
+        ingesta.ingerir(origen, trabajo)
+    assert len(llamadas) == 3
+
+    # "No se pudo determinar la versión vigente" -- `excel._version()` ahora
+    # revienta (dependencia rota, timeout, lo que sea). `_version_vigente`
+    # (ingesta.py) lo captura y devuelve `None`: un "no sé", no un "cambió".
+    def version_rota():
+        raise RuntimeError("no se pudo leer la version instalada")
+
+    monkeypatch.setattr(excel, "_version", version_rota)
+    ingesta.ingerir(origen, trabajo)
+
+    assert len(llamadas) == 3, (
+        "D-2 REABIERTO: una version VIGENTE desconocida (None) reinició la "
+        f"cuenta de intentos como si hubiera 'cambiado' -- se volvió a "
+        f"invocar compuerta.extraer ({len(llamadas)} llamadas, se esperaban "
+        "3). None es 'no sé', no es 'cambió'."
+    )
+
+
 def test_D2_sin_extractor_se_comporta_igual_que_error(tmp_path: Path, monkeypatch):
     """El ruling es explícito: `sin_extractor` se comporta IGUAL que
     `error` para el tope de reintentos -- mismo mecanismo, mismo número."""

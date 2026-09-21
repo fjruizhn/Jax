@@ -366,6 +366,21 @@ def test_extraer_sin_pdfplumber_instalado_da_sin_extractor(tmp_path: Path, monke
     assert r.salidas == {}
 
 
+def test_version_no_revienta_si_pdfplumber_no_esta_instalado(monkeypatch):
+    """Ronda P10 (2026-09-21), segundo arreglo del ruling del coordinador:
+    `_version()` se llama desde `ingesta._version_vigente` FUERA de
+    `extraer()` -- ahí no hay ningún `except ModuleNotFoundError` que
+    convierta el fallo en 'sin_extractor'. Antes de este arreglo, `import
+    pdfplumber` roto acá dejaba escapar un `ImportError` crudo (blindaje que
+    `word.py`/`ocr.py` ya tenían y `pdf.py` no). Ahora, igual que ellos,
+    nunca revienta: devuelve un string."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "pdfplumber", None)
+    version = pdf._version()
+    assert isinstance(version, str)
+
+
 def test_tabla_a_bloque_escapa_el_pipe_de_una_celda():
     """M9: si no se escapa, un '|' dentro de una celda se confunde con el
     separador de columnas y desalinea el resto de la fila."""
