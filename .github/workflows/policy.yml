@@ -2907,6 +2907,35 @@ jobs:
           grep -qE "^17 passed" /tmp/pdf_tests || {
             echo "PISO ROTO: se esperaban 17 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
+      # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
+      # escaneado e imagen. tesseract por subproceso, nunca por binding
+      # (paquete de sistema, no entra en requirements-archivos.txt). `spa`
+      # porque los documentos son en español.
+      #
+      # El defecto propio de este extractor: un umbral de CARACTERES solo no
+      # basta -- tesseract puede "leer" glifos sueltos al azar y devolver
+      # más caracteres que cualquier umbral razonable de longitud (medido a
+      # mano, 2026-09-21: ~35 caracteres de puro ruido). La defensa real es
+      # la confianza PROMEDIO por palabra que tesseract ya calcula
+      # internamente (modo `tsv`): ~96 % en texto real, ~55 % en el ruido
+      # medido -- y esta confianza NO castiga contenido numérico legítimo
+      # (un renglón financiero con números reales sigue en ~94 % de
+      # confianza), a diferencia de una heurística por proporción de letras.
+      #
+      # `pytest.importorskip("PIL.Image")` en `_ocr_test.py` genera los
+      # fixtures (imágenes con texto real) -- mismo patrón de riesgo que
+      # openpyxl/pdfplumber: sin Pillow instalado, "1 skipped" y EXIT 0.
+      # Pillow NO va en requirements-archivos.txt (ese archivo es de
+      # dependencias del EXTRACTOR; Pillow sólo genera fixtures de test,
+      # tesseract no la usa) -- se instala acá, en el paso que la necesita.
+      - run: sudo apt-get install -y tesseract-ocr tesseract-ocr-spa
+      - run: pip install pillow
+      - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
+          grep -qE "^7 passed" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 7 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
       # este job, que conserva arriba su entorno Python 3.12 sin alteraciones.
