@@ -43,6 +43,12 @@ import human_gate
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
+_B7_EVIDENCE_RECORDER = None
+
+def configure_b7_evidence_recorder(recorder) -> None:
+    """Startup composition only; the legacy HTTP request cannot choose it."""
+    global _B7_EVIDENCE_RECORDER
+    _B7_EVIDENCE_RECORDER = recorder
 # _CATALOG/_POLICY arrancan None -- se pueblan en el startup hook de
 # server.py (init_motor_catalog, abajo). [motors.*]/[capabilities.*] de
 # config.toml ya no se leen (R4 -- catalogo en DB). Ningun otro modulo
@@ -247,6 +253,12 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     # Block 6: every catalog capability is governed in V1.  This legacy
     # transport endpoint must never consume a gate, create a job, or start a
     # worker; its request body is not an execution authority artifact.
+    if _B7_EVIDENCE_RECORDER is not None:
+        try:
+            _B7_EVIDENCE_RECORDER.record_denial(control_id="CTL.B6.GOVERNED_DISPATCH",
+                reason_code="DENIED")
+        except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
+            pass
     raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
 
     # Kept below as historical defensive logic for the governed adapter while
