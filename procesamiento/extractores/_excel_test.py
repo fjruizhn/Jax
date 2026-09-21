@@ -1,5 +1,14 @@
 """El defecto que este extractor existe para evitar, reproducido con un archivo
-sintético: LibreOffice convierte UNA hoja de seis, calladito."""
+sintético: LibreOffice convierte UNA hoja de seis, calladito.
+
+Ronda de arreglo 1 (2026-09-20, task-3-hallazgos.md): la guarda de "todas las
+hojas en blanco" miraba el TEXTO csv (",\\n,\\n" sobrevive a `.strip()`, así que
+nunca disparaba). Se corrigió contando celdas con contenido real durante la
+conversión (C-1). Además: fórmulas sin valor cacheado se detectan con una
+segunda lectura (C-2), las chartsheets ya no desaparecen del conteo de `hojas`
+(I-2), y el conjunto de mutaciones se amplió (I-4) porque los tests originales
+sólo miraban `hojas`/`hojas_extraidas` en libros donde valen lo mismo.
+"""
 from pathlib import Path
 
 import pytest
@@ -53,17 +62,24 @@ def test_un_archivo_que_no_es_excel_da_error_sin_extracto(tmp_path: Path):
     assert "razon" in r.detalle
 
 
-def test_un_libro_con_TODAS_las_hojas_en_blanco_da_error_sin_reventar(tmp_path: Path):
-    """Resultado exige que un 'ok'/'parcial' tenga al menos una salida con
-    contenido (tras .strip()). Un libro cuyas hojas están todas vacías
-    produciría puros CSV vacíos -- eso ahora levanta ValueError dentro de
-    Resultado si el extractor intenta devolver 'ok'. El extractor tiene que
-    detectarlo ANTES y devolver 'error' con una razón, no reventar."""
+def test_un_libro_con_todas_las_celdas_vacias_da_error_incluso_con_filas_definidas(
+    tmp_path: Path,
+):
+    """C-1, el defecto real medido por el auditor: una plantilla donde las
+    celdas existen (fueron tocadas -- acá con formato, sin valor) produce
+    filas con puras comas (",\\n,\\n"), y ESO sobrevive a `.strip()`. La guarda
+    vieja miraba el texto CSV y nunca disparaba. La correcta cuenta celdas con
+    contenido real durante la conversión, no el texto de salida."""
+    from openpyxl.styles import Font
+
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
     for nombre in ["Hoja A", "Hoja B"]:
-        wb.create_sheet(title=nombre)
-    origen = tmp_path / "todo-en-blanco.xlsx"
+        ws = wb.create_sheet(title=nombre)
+        for col in ("A", "B"):
+            for fila in (1, 2):
+                ws[f"{col}{fila}"].font = Font(bold=True)  # celda tocada, SIN valor
+    origen = tmp_path / "plantilla-vacia.xlsx"
     wb.save(origen)
 
     r = excel.extraer(origen)
@@ -71,7 +87,7 @@ def test_un_libro_con_TODAS_las_hojas_en_blanco_da_error_sin_reventar(tmp_path: 
     assert r.estado == "error"
     assert r.salidas == {}
     assert "razon" in r.detalle
-    assert "blanco" in r.detalle["razon"] or "vacia" in r.detalle["razon"] or "vacías" in r.detalle["razon"]
+    assert "datos" in r.detalle["razon"]
 
 
 def test_una_hoja_en_blanco_entre_varias_con_datos_es_un_archivo_valido(tmp_path: Path):
@@ -95,3 +111,112 @@ def test_una_hoja_en_blanco_entre_varias_con_datos_es_un_archivo_valido(tmp_path
     assert len(r.salidas) == 3
     assert r.detalle["hojas"] == 3
     assert r.detalle["hojas_extraidas"] == 3
+
+
+def test_formula_sin_valor_cacheado_se_detecta_y_pasa_a_parcial(tmp_path: Path):
+    """C-2: los .xlsx generados por openpyxl (y varios exportadores contables)
+    NO traen el caché de fórmulas. Con `data_only=True` esa celda sale `None`
+    -- las etiquetas llegan, los números no, y nada lo decía. Se detecta con
+    una segunda lectura cruda y baja el estado a 'parcial'."""
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "base"
+    ws1["A1"] = "ACTIVOS"
+    ws1["B1"] = 100
+
+    ws2 = wb.create_sheet("totales")
+    ws2["A1"] = "TOTAL ACTIVOS"
+    ws2["B1"] = "=base!B1"
+
+    origen = tmp_path / "con-formula.xlsx"
+    wb.save(origen)
+
+    r = excel.extraer(origen)
+
+    assert r.estado == "parcial"
+    assert r.detalle["formulas_sin_valor"]["total"] == 1
+    assert "totales" in r.detalle["formulas_sin_valor"]["hojas"]
+
+
+def test_una_hoja_que_falla_a_extraerse_dejando_las_demas_produce_parcial_con_fallidas(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """I-4: mata MD (`hojas_extraidas` cableado a `total`), M3 (`estado='ok'`
+    incondicional) y MI (`fallidas` cableado a `[]`) de una sola vez. NO se
+    fuerza corrompiendo el XML -- está medido que openpyxl revienta en
+    `load_workbook`, no al iterar, y el libro entero caería a 'error' (razón
+    equivocada). Se fuerza con monkeypatch sobre `_hoja_a_csv`."""
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for nombre in ["buena", "MALA", "otra"]:
+        ws = wb.create_sheet(title=nombre)
+        ws["A1"] = nombre
+        ws["B1"] = 1
+    origen = tmp_path / "una-hoja-mala.xlsx"
+    wb.save(origen)
+
+    original = excel._hoja_a_csv
+
+    def _rota(hoja):
+        if hoja.title == "MALA":
+            raise ValueError("boom")
+        return original(hoja)
+
+    monkeypatch.setattr(excel, "_hoja_a_csv", _rota)
+
+    r = excel.extraer(origen)
+
+    assert r.estado == "parcial"
+    assert sorted(r.salidas) == ["01-buena.csv", "03-otra.csv"]
+    assert r.detalle["hojas"] == 3
+    assert r.detalle["hojas_extraidas"] == 2
+    assert any("MALA" in f for f in r.detalle["fallidas"]), r.detalle["fallidas"]
+
+
+def test_el_nombre_de_archivo_es_indice_de_dos_digitos_y_slug_exacto(tmp_path: Path):
+    """I-4: mata MA (`_slug` siempre 'hoja') y MB (índice sin cero a la
+    izquierda) -- el contrato del nombre no estaba aseverado en ningún test."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Enero 2025!!"
+    ws["A1"] = "x"
+    origen = tmp_path / "un-solo-nombre.xlsx"
+    wb.save(origen)
+
+    r = excel.extraer(origen)
+
+    assert r.estado == "ok"
+    assert set(r.salidas) == {"01-enero-2025.csv"}, sorted(r.salidas)
+
+
+def test_una_chartsheet_no_desaparece_en_silencio(tmp_path: Path):
+    """I-2: `libro.worksheets` omite las hojas de gráfico -- el usuario ve
+    N pestañas, nosotros contábamos sólo las tabulares y salíamos 'ok'. Ahora
+    `hojas` es lo que el usuario ve (`len(libro.sheetnames)`), y una
+    chartsheet fuerza 'parcial' con `no_tabulares` explicando el porqué."""
+    from openpyxl.chart import BarChart, Reference
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "datos"
+    ws["A1"] = "x"
+    ws["B1"] = 1
+    ws["A2"] = "y"
+    ws["B2"] = 2
+
+    chart = BarChart()
+    data = Reference(ws, min_col=2, min_row=1, max_row=2)
+    chart.add_data(data)
+
+    cs = wb.create_chartsheet(title="grafico")
+    cs.add_chart(chart)
+
+    origen = tmp_path / "con-grafico.xlsx"
+    wb.save(origen)
+
+    r = excel.extraer(origen)
+
+    assert r.estado == "parcial"
+    assert r.detalle["hojas"] == 2
+    assert r.detalle["hojas_extraidas"] == 1
+    assert r.detalle["no_tabulares"] == ["grafico"]

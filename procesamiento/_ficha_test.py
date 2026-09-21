@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -118,3 +119,16 @@ def test_desde_json_que_no_es_un_objeto_se_rechaza():
     un TypeError crudo de firma de constructor, no de dominio."""
     with pytest.raises(ValueError, match="objeto JSON"):
         Ficha.desde_json("[1,2,3]")
+
+
+def test_detalle_se_serializa_con_default_dict():
+    """I-3 (task-3-hallazgos.md): `.a_json()` ya envuelve `dict(self.detalle)`
+    y no tiene el problema -- pero un consumidor que toque `.detalle`
+    directamente (sin pasar por `a_json()`) se topa con el mismo
+    `mappingproxy is not JSON serializable` que Resultado. `default=dict`
+    lo resuelve sin tocar el tipo."""
+    f = Ficha(
+        sha256="a", origen="b", extractor="c", extractor_version="d",
+        fecha="e", estado="ok", detalle={"hojas": 2, "hojas_extraidas": 2},
+    )
+    assert json.loads(json.dumps(f.detalle, default=dict)) == dict(f.detalle)

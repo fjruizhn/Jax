@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from procesamiento.resultado import Resultado
@@ -120,3 +122,18 @@ def test_mutar_el_dict_original_no_afecta_al_resultado():
     r = Resultado(estado="ok", salidas=d, detalle={}, extractor="t", version="1")
     d.clear()
     assert r.salidas == {"a.csv": "x"}
+
+
+def test_detalle_y_salidas_se_serializan_con_default_dict():
+    """I-3 (task-3-hallazgos.md): el endurecimiento con MappingProxyType
+    cerró la mutabilidad y rompió la serialización -- `json.dumps(r.detalle)`
+    a secas revienta con `TypeError: Object of type mappingproxy is not JSON
+    serializable`. No hay que tocar el tipo (no sabe qué va a escribirlo a
+    disco, ni tiene por qué): quien serialice pasa `default=dict`."""
+    r = Resultado(
+        estado="parcial", salidas={"01-a.csv": "x"},
+        detalle={"hojas": 2, "hojas_extraidas": 1, "no_tabulares": ["grafico"]},
+        extractor="t", version="1",
+    )
+    assert json.loads(json.dumps(r.detalle, default=dict)) == dict(r.detalle)
+    assert json.loads(json.dumps(r.salidas, default=dict)) == dict(r.salidas)
