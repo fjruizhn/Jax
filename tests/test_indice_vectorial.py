@@ -263,3 +263,55 @@ async def test_la_reparacion_no_degrada_la_definicion_del_indice(tabla):
     assert "cosine" in antes.lower() and "16" in antes, (
         f"la tabla de prueba no reproduce la definicion de produccion: {antes}")
     assert despues == antes, f"la reparacion cambio el indice:\n  antes:  {antes}\n  despues: {despues}"
+
+
+# --- la caché del índice: el modo de fallo que SÍ se puede ver venir ---------
+
+@requiere_db_de_prueba
+@asincrono
+async def test_una_cache_holgada_no_avisa(tabla):
+    """No se grita cuando no pasa nada: una alarma que suena siempre se apaga."""
+    ocup = await _con_cursor(_ocupacion_de_la_tabla)
+    assert ocup.holgada, ocup
+    assert ocup.filas == 0
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_la_aritmetica_de_la_cache_es_la_que_se_documento(tabla):
+    """`caben` sale de bytes/(dim*4), no de una constante escrita a mano: si
+    cambia la dimensión del embedding -- ya pasó al migrar a bge-m3 -- el
+    umbral se recalcula solo."""
+    async def _caso(cur):
+        await _poner(cur, 5)
+        return await iv.ocupacion_de_cache(cur)
+
+    todas = await _con_cursor(_caso)
+    ocup = next(o for o in todas if o.tabla == _TABLA)
+    assert ocup.dim == _DIM
+    assert ocup.caben == ocup.cache_bytes // (_DIM * iv.BYTES_POR_FLOAT)
+    assert ocup.bytes_usados == 5 * _DIM * iv.BYTES_POR_FLOAT
+
+
+def test_avisa_cuando_los_vectores_no_entran():
+    """El centinela, sobre números puros: con 16 MB y 1.024 dimensiones caben
+    4.096 vectores. Es exactamente el caso medido el 2026-09-20, donde 9.000
+    hechos hacían que `/grupos` devolviera distinto en cada corrida."""
+    cache16 = 16 * 1024 * 1024
+    assert iv.Ocupacion("facts", "v", 4096, 1024, cache16).caben == 4096
+
+    holgada = iv.Ocupacion("facts", "v", 117, 1024, cache16)      # producción hoy
+    assert holgada.holgada, holgada
+
+    apretada = iv.Ocupacion("facts", "v", 9000, 1024, cache16)    # el caso medido
+    assert not apretada.holgada, apretada
+    assert "APRETADA" in str(apretada)
+
+    # el borde del umbral, explícito: 80 % de 4.096
+    assert iv.Ocupacion("facts", "v", 3276, 1024, cache16).holgada
+    assert not iv.Ocupacion("facts", "v", 3277, 1024, cache16).holgada
+
+
+async def _ocupacion_de_la_tabla(cur):
+    todas = await iv.ocupacion_de_cache(cur)
+    return next(o for o in todas if o.tabla == _TABLA)

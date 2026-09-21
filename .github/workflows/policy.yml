@@ -680,8 +680,12 @@ jobs:
           # 8+2+6+7 = 23 los viejos, 8+7+5 = 20 los de memoria, 7 este), no el
           # que sale de sumar los comentarios de arriba -- el de "+15" quedo
           # desfasado y el piso real de master ya era 43.
-          grep -qE "^50 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 50 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 50 -> 53 el 2026-09-20: tests/test_indice_vectorial.py (+3) -- el centinela
+          #   de la CACHE del indice. Es el otro modo de fallo del HNSW y, a
+          #   diferencia del envenenamiento por cascada, este se ve venir: es
+          #   aritmetica (bytes / (dim*4)). Numero del RUNNER, no de sumar.
+          grep -qE "^53 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
