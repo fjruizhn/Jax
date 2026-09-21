@@ -3149,6 +3149,36 @@ jobs:
           grep -qE "^25 passed" /tmp/ingesta_tests || {
             echo "PISO ROTO: se esperaban 25 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
+      # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
+      # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el
+      # anterior, "30% menos tokens contra el pipeline del ERP", media
+      # texto plano contra texto plano y daba cero ahorro por la razon
+      # equivocada; el brief task-9-brief.md quedo obsoleto en su criterio,
+      # se uso solo como referencia de estructura). B.1 (10 cifras a mano
+      # de Fernando sobre un escaneado real) NO es medible por codigo y
+      # queda fuera del veredicto automatico; B.2 (extracto cabe en
+      # tool_authority.MAX_READ_BYTES Y el original no), B.3 (segundo pase
+      # sobre los mismos archivos: CERO extracciones reales, contadas
+      # envolviendo compuerta.extraer) y B.4 (parcial no pasa del 60% de la
+      # muestra) si se evaluan y deciden el codigo de salida. Corre sobre
+      # archivos SINTETICOS (un .xlsx armado con openpyxl) -- documentos
+      # reales de clientes nunca entran al repo ni a CI (medidos y
+      # borrados a mano contra Nextcloud, ver task-9-report.md). Piso
+      # numerico exacto, mismo patron que el resto de este nucleo: 9
+      # tests, uno por cada rama del veredicto, incluidas las dos
+      # mutaciones que el brief pidio nombrar explicitamente --
+      # test_medir_end_to_end_arma_veredicto_y_puede_dar_NO_GO ("el
+      # medidor siempre sale aprobado": fuerza MAX_READ_BYTES=1 y exige
+      # que `go` de False) y test_contar_extracciones_refleja_una_
+      # extraccion_real_no_un_valor_fijo ("no cuenta bien la segunda
+      # pasada": rompe el cache a proposito -- I-5, borra una salida
+      # listada -- y exige que la reextraccion forzada se cuente 1, no 0).
+      - name: Medidor de utilidad de extractos -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q scripts/_medir_utilidad_extractos_test.py 2>&1 | tee /tmp/medir_utilidad_tests
+          grep -qE "^9 passed" /tmp/medir_utilidad_tests || {
+            echo "PISO ROTO: se esperaban 9 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
       # este job, que conserva arriba su entorno Python 3.12 sin alteraciones.
