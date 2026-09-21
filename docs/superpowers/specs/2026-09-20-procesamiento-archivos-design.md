@@ -264,6 +264,17 @@ páginas no dieron nada.
 Arreglarlo bien significa OCR por página dentro de un PDF mixto y decidir cómo se mezclan
 los dos extractos. Es una decisión de diseño nueva, va a fase 2, y **Fernando está avisado**.
 
+### Restricción operativa nueva: el trabajo vive DENTRO del workspace
+
+Desde el arreglo del jail (2026-09-21), `ingerir()` **rechaza con `ValueError`** cualquier
+`trabajo` cuya forma canónica quede fuera de `tool_authority.WORKSPACE_ROOT`
+(`/home/fruiz/jax-workspace` en producción). Una carpeta de cliente fuera de ahí ya no
+funciona.
+
+Es exactamente lo que se pidió —reusar el jail probado en vez de estrenar código de
+seguridad— pero **cambia el contrato de uso** y por eso se escribe acá: quien llame a la
+ingesta tiene que armar el trabajo dentro del workspace.
+
 ### El umbral de confianza del OCR está sin calibrar
 
 `UMBRAL_CONFIANZA_PROMEDIO = 70` y `CONFIANZA_MINIMA_PALABRA = 60` salen de puntos
