@@ -27,7 +27,15 @@ LibreOffice headless (subproceso, sólo para recalcular) · pytest
   `ok` · `parcial` · `error` · `sin_extractor`. Nunca un extracto vacío dado por bueno.
 - **`pandas` NO se instala.** Peso sin beneficio para extraer.
 - Dependencias con versión FIJADA en `requirements-archivos.txt` (igual que `requirements.txt`).
-- Comandos: `python -m pytest <ruta> -v` desde la raíz del worktree.
+- Comandos: `python -m pytest <ruta> -v` desde la raíz del worktree, con el **python del
+  sistema** (`/usr/bin/python3`), que es el único que ve `~/.local`.
+- ⚠️ **`/opt/jax/venv` es el venv de PRODUCCIÓN** (verificado 2026-09-20: tiene
+  `fastapi 0.139.0`, la misma versión que `requirements.txt`). Tiene
+  `include-system-site-packages = false`, así que NO ve `~/.local` — y eso es
+  exactamente lo que queremos: hace a producción inmune a lo que instalemos acá.
+  **Está PROHIBIDO instalarle las dependencias de `procesamiento/` para "que corran los
+  tests".** Si los tests no corren con un intérprete, se cambia el intérprete, nunca el
+  aislamiento de producción.
 - Los extractos viven bajo `JAX_WORKSPACE_DIR`, nunca fuera: reusar el jail existente.
 
 ---
