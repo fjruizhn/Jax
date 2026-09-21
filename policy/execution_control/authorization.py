@@ -21,6 +21,21 @@ from .models import (CapabilityPolicyProjection, ExecutionAuthorization,
 # callback to register from another module.
 _issued_requests: dict[int, weakref.ReferenceType] = {}
 _issued_authorizations: dict[int, weakref.ReferenceType] = {}
+_B7_DECISION_RECORDER = None
+
+def configure_b7_decision_recorder(recorder) -> None:
+    """Application-startup seam; request callers never supply this recorder."""
+    global _B7_DECISION_RECORDER
+    _B7_DECISION_RECORDER = recorder
+
+def _record_unverified_decision(record) -> None:
+    if _B7_DECISION_RECORDER is None:
+        return
+    try:
+        _B7_DECISION_RECORDER.record_denial(control_id="CTL.B5.DECISION_PROVENANCE",
+            reason_code="DENIED", decision_id=getattr(record, "decision_id", None))
+    except Exception:  # fail-soft: rejected DecisionRecord never becomes eligible on evidence outage.
+        pass
 
 def _issued(registry, value):
     key = id(value)
@@ -102,7 +117,7 @@ def build_execution_request(record: DecisionRecord, *, authenticated_caller_id: 
     """Creates the only request shape accepted by the authorization boundary."""
     if not is_verified_decision_record(record):
         from .errors import UnverifiedDecisionRecordError
-        raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
+        _record_unverified_decision(record); raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
     return _issued(_issued_requests, ExecutionRequest("1.0", "JAX_EXECUTION_REQUEST", record.decision_id,
         record.decision_record_hash, capability, authenticated_caller_id, motor, environment,
         target_kind, target_value, prompt, context, timeout_seconds, sandbox_required,
@@ -120,7 +135,7 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
     """Applies the decision facts and the catalog's operational ceilings."""
     if not is_verified_decision_record(record):
         from .errors import UnverifiedDecisionRecordError
-        raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
+        _record_unverified_decision(record); raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
     if not isinstance(request, ExecutionRequest) or not request._is_trusted():
         raise ExecutionRequestScopeError("ExecutionRequest no sellada")
     if request.decision_id != record.decision_id or request.decision_record_hash != record.decision_record_hash:
