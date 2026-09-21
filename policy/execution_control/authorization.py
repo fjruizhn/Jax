@@ -22,11 +22,31 @@ from .models import (CapabilityPolicyProjection, ExecutionAuthorization,
 _issued_requests: dict[int, weakref.ReferenceType] = {}
 _issued_authorizations: dict[int, weakref.ReferenceType] = {}
 _B7_DECISION_RECORDER = None
+_B7_AUTHORIZATION_RECORDER = None
 
 def configure_b7_decision_recorder(recorder) -> None:
     """Application-startup seam; request callers never supply this recorder."""
     global _B7_DECISION_RECORDER
     _B7_DECISION_RECORDER = recorder
+
+def configure_b7_authorization_recorder(recorder) -> None:
+    """Application-startup seam; request callers cannot replace it."""
+    global _B7_AUTHORIZATION_RECORDER
+    _B7_AUTHORIZATION_RECORDER = recorder
+
+def _b7_authorization_outcome(control_id, *, denied=False, decision_id=None, subject_identity=None):
+    recorder=_B7_AUTHORIZATION_RECORDER
+    if recorder is None: return
+    try:
+        if denied:
+            recorder.record_denial(control_id=control_id,reason_code="DENIED",decision_id=decision_id)
+        else:
+            from policy.enforcement_evidence.models import EvidenceSubjectType
+            recorder.record_satisfied(control_id=control_id,subject_type=EvidenceSubjectType.AUTHORIZATION,
+                subject_identity=subject_identity or decision_id,decision_id=decision_id)
+    except Exception:
+        # B7 does not replace the governing authorization decision.
+        pass
 
 def _record_unverified_decision(record) -> None:
     if _B7_DECISION_RECORDER is None:
@@ -155,6 +175,7 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
         if facts[key] != value:
             raise ExecutionRequestScopeError(f"{key} no coincide con la decisión")
     if request.environment is not ExecutionEnvironment.SANDBOX:
+        _b7_authorization_outcome("CTL.B6.SANDBOX_ONLY",denied=True,decision_id=record.decision_id)
         raise UnsupportedExecutionEnvironmentError("B6 V1 sólo autoriza SANDBOX")
     cap = catalog.get_capability(request.capability)
     if cap is None:
@@ -165,8 +186,10 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
     if motor is None or not motor.enabled or request.motor not in cap.allowed_motors:
         raise MotorNotAuthorizedError(request.motor)
     if not cap.sandbox_only or not motor.sandbox_only or request.sandbox_required is not True:
+        _b7_authorization_outcome("CTL.B6.SANDBOX_ONLY",denied=True,decision_id=record.decision_id)
         raise SandboxViolationError("capability/motor/request debe ser sandbox-only")
     if request.timeout_seconds > cap.max_execution_minutes * 60:
+        _b7_authorization_outcome("CTL.B6.TIMEOUT_CEILING",denied=True,decision_id=record.decision_id)
         raise ExecutionTimeoutError("timeout excede capability")
     if not isinstance(now_utc, datetime) or now_utc.tzinfo is None:
         raise ExecutionRequestScopeError("now_utc explícito timezone-aware requerido")
@@ -186,10 +209,13 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
         "issued_at_utc": issued.isoformat().replace("+00:00", "Z"),
         "expires_at_utc": expires.isoformat().replace("+00:00", "Z")}
     digest = execution_authorization_hash(payload)
-    return _issued(_issued_authorizations, ExecutionAuthorization("1.0", "JAX_EXECUTION_AUTHORIZATION", auth_id,
+    result=_issued(_issued_authorizations, ExecutionAuthorization("1.0", "JAX_EXECUTION_AUTHORIZATION", auth_id,
         record.decision_id, record.decision_record_hash, request, policy,
         record.authority_binding.active_policy_corpus_hash,
         record.authority_binding.effective_authority_context_hash,
         record.authority_binding.authority_ledger_checkpoint_hash,
         facts["EXECUTION_HUMAN_APPROVAL_REQUIRED"], facts["EXECUTION_DRY_RUN_REQUIRED"],
         issued, expires, digest))
+    _b7_authorization_outcome("CTL.B6.SANDBOX_ONLY",decision_id=record.decision_id,subject_identity=auth_id)
+    _b7_authorization_outcome("CTL.B6.TIMEOUT_CEILING",decision_id=record.decision_id,subject_identity=auth_id)
+    return result

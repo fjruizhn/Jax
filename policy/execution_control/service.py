@@ -7,7 +7,7 @@ from .canonical import execution_record_hash
 from .dry_run import build_dry_run_artifact
 from .errors import (AuthorizationExpiredError, DryRunFailedError, DryRunRequiredError,
                      ExecutionRequestScopeError, HumanApprovalRequiredError,
-                     KillSwitchActiveError)
+                     KillSwitchActiveError, DecisionExecutionConflictError)
 from .ids import new_execution_id
 from .models import ExecutionAuthorization, ExecutionRecord, ExecutionState
 from .state_machine import initial_state, transition
@@ -67,7 +67,11 @@ def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: d
     record = _record(authorization, now_utc=now)
     state = initial_state(requires_human_approval=authorization.requires_human_approval, requires_dry_run=authorization.requires_dry_run)
     writer = getattr(store, "execution_evidence_writer", None)
-    created=store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now), evidence_writer=writer)
+    try:
+        created=store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now), evidence_writer=writer)
+    except DecisionExecutionConflictError:
+        _record_denial(store,"CTL.B6.ONE_DECISION_ONE_EXECUTION","DENIED",decision_id=authorization.decision_id)
+        raise
     # In MariaDB deployments the execution_evidence_writer is the mandatory
     # same-cursor path.  This is an additive post-commit observation for
     # composition configurations that do not require that stronger profile.
