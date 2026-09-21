@@ -28,3 +28,10 @@ def ingest_test_evidence_manifest(store, manifest_bytes:bytes, raw_output:bytes|
   for cid in expected: load_control_definition(cid,1)
  if not isinstance(data["counts"],dict) or data["counts"].get("passed") != sum(x["result"]=="PASSED" for x in data["tests"]): raise EvidenceBindingError("counts inválidos")
  return data
+
+class TestEvidenceIngester:
+ def __init__(self, store, *, repository_id, commit_sha, implementation_identity_hash):
+  self._store=store; self._repository_id=repository_id; self._commit_sha=commit_sha; self._identity=implementation_identity_hash; self._token=store._fixed_lifecycle_token()
+ def ingest(self, manifest_bytes, raw_output=None):
+  value=ingest_test_evidence_manifest(self._store, manifest_bytes, raw_output, repository_id=self._repository_id, commit_sha=self._commit_sha, implementation_identity_hash=self._identity)
+  return self._store._ingest_test_manifest(value, _token=self._token)

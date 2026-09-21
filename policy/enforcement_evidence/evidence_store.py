@@ -6,7 +6,7 @@ from __future__ import annotations
 import weakref
 from dataclasses import dataclass
 from .ids import sha256_bytes, require_hash
-from .errors import EvidenceBlobMissingError, EvidenceBlobHashMismatchError, EvidenceBlobTooLargeError, EvidenceArtifactIntegrityError, EvidenceArtifactUntrustedError, ObservationIntegrityError, AssertionIntegrityError
+from .errors import EvidenceBlobMissingError, EvidenceBlobHashMismatchError, EvidenceBlobTooLargeError, EvidenceArtifactIntegrityError, EvidenceArtifactUntrustedError, ObservationIntegrityError, AssertionIntegrityError, EvidenceBindingError
 from .models import EvidenceArtifact, EnforcementObservation
 MAX_BLOB_BYTES=1024*1024
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ def _seal(reg,obj):
 def _sealed(reg,obj):
  r=reg.get(id(obj)); return r is not None and r() is obj
 class EvidenceStore:
- def __init__(self): self._blobs={}; self._artifact_rows={}; self._observation_rows={}; self._assertion_rows={}; self._identity_rows={}; self.__lifecycle_token=object()
+ def __init__(self): self._blobs={}; self._artifact_rows={}; self._observation_rows={}; self._assertion_rows={}; self._identity_rows={}; self._test_manifests={}; self.__lifecycle_token=object()
  def _fixed_lifecycle_token(self): return self.__lifecycle_token
  def put_evidence_blob(self,data:bytes)->EvidenceBlob:
   if not isinstance(data,bytes): raise TypeError("bytes requeridos")
@@ -66,6 +66,13 @@ class EvidenceStore:
   if value is None or value.assertion_hash!=h: raise AssertionIntegrityError("assertion missing/corrupt")
   return _seal(_assertions,value)
  def observations(self): return tuple(self._observation_rows.values())
+ def _ingest_test_manifest(self, manifest, *, _token):
+  if _token is not self.__lifecycle_token: raise EvidenceBindingError("fixed lifecycle required")
+  key=(manifest["repository_id"],manifest["commit_sha"],manifest["implementation_identity_hash"],manifest["job_id"])
+  self._test_manifests[key]=manifest
+  return manifest
+ def _test_manifests_for(self, identity_hash):
+  return tuple(x for x in self._test_manifests.values() if x["implementation_identity_hash"]==identity_hash)
 def is_trusted_evidence_artifact(v): return _sealed(_artifacts,v)
 def is_trusted_observation(v): return _sealed(_observations,v)
 def is_trusted_assertion(v): return _sealed(_assertions,v)

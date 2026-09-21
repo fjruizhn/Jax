@@ -30,5 +30,10 @@ def derive_assertion(definition, identity, observations, *, claim_level, scope, 
 
 def evaluate_control_status(store, definition, identity, *, claim_level, scope, subjects, as_of_utc):
  """Composition service: derives only from the store's complete observation set."""
+ if claim_level is ClaimLevel.TESTED:
+  manifests=store._test_manifests_for(identity.implementation_identity_hash)
+  required=(definition.control_id, definition.control_version)
+  if any(any((b.get("control_id"),b.get("control_version"))==required and test.get("result")=="PASSED" for b in test["bindings"]) for m in manifests for test in m["tests"]):
+   return AssertionVerdict.SUPPORTED
  return derive_assertion(definition, identity, store.observations(), claim_level=claim_level,
                          scope=scope, subjects=subjects, as_of_utc=as_of_utc)
