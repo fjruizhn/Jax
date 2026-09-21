@@ -2952,6 +2952,46 @@ jobs:
           grep -qE "^28 passed" /tmp/ocr_tests || {
             echo "PISO ROTO: se esperaban 28 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
+      # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
+      # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
+      # mismo paso que openpyxl/pdfplumber).
+      #
+      # Ronda de arreglo 1 (2026-09-21, task-5-6-hallazgos.md -- NO
+      # ratificado, 4 criticos + 3 importantes sobre este archivo):
+      #   - C-4: emitir todos los parrafos y DESPUES todas las tablas
+      #     perdia el orden real del documento -- el modelo atribuia las
+      #     cifras al año equivocado, en verde. Se recorre
+      #     `document.element.body` en el orden real del XML, igual que
+      #     pdf.py intercala prosa y tablas por pagina. Entra tambien
+      #     dentro de `w:sdt` (control de contenido, la estructura de
+      #     cualquier plantilla de formulario).
+      #   - C-5: una tabla anidada dentro de una celda (`cell.tables`, no
+      #     `cell.text`) desaparecia entera -- se resuelve con recursion.
+      #   - C-6: un control de cambios (`w:ins`/`w:del`) hacia que un
+      #     rotulo con una cifra en revision saliera SIN NINGUN numero
+      #     (`Paragraph.text` de python-docx no ve runs envueltos en
+      #     w:ins/w:del). Se extrae el texto VIGENTE (insertado) y se
+      #     declara en detalle["control_de_cambios"].
+      #   - C-7: encabezado, pie y `w:sdt` se extraen; cuadros de texto y
+      #     notas al pie se CUENTAN y se declaran con 'parcial' (no se
+      #     pierden en silencio).
+      #   - I-4: una celda combinada horizontalmente se deduplica (antes
+      #     salia repetida una vez por columna que ocupa).
+      #   - I-5: un .xlsx con extension .docx ahora es 'sin_extractor'
+      #     (python-docx ya identifica el content-type real), no 'error'.
+      #   - I-6: las tablas se emiten con el MISMO bloque cercado que
+      #     pdf.py, sin promover ninguna fila a encabezado -- con el
+      #     fixture del propio brief, "1000" quedaba de nombre de columna.
+      # De 7 a 18 tests.
+      #
+      # `pytest.importorskip("docx")` en `_word_test.py` -- mismo riesgo de
+      # "1 skipped" con EXIT 0 si python-docx no se instaló.
+      - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
+          grep -qE "^18 passed" /tmp/word_tests || {
+            echo "PISO ROTO: se esperaban 18 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
       # este job, que conserva arriba su entorno Python 3.12 sin alteraciones.

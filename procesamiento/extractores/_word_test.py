@@ -1,17 +1,8 @@
-"""Word (.docx) → Markdown. Un .docx es un ZIP con XML: el texto, los
-títulos y las tablas ya están ahí, estructurados -- no hace falta OCR ni
-modelo.
+"""Word (.docx) → Markdown.
 
-El defecto propio de este extractor: python-docx da la MISMA excepción
-(`PackageNotFoundError`, mismo mensaje) para un `.doc` binario viejo (formato
-OLE2, que python-docx NUNCA va a poder leer, sin importar cuántas veces se
-reintente) que para un `.docx` genuinamente corrupto -- medido a mano
-(2026-09-21) antes de escribir el código. Sin distinguir los dos casos, un
-`.doc` legítimo que un usuario subió por error de extensión se reportaría
-como 'error' (documento roto) en vez de 'sin_extractor' (herramienta
-equivocada para este formato) -- la firma OLE2 (`D0 CF 11 E0 A1 B1 1A E1`,
-los primeros 8 bytes de CUALQUIER archivo binario de Office viejo: .doc,
-.xls, .ppt) se comprueba ANTES de intentar abrir con python-docx.
+Ronda de arreglo 1 (2026-09-21, task-5-6-hallazgos.md — NO ratificado, 4
+críticos + 3 importantes sobre este archivo). Cada Crítico era el mismo
+modo de fallo: un extracto con `ok` que no es el documento.
 """
 from pathlib import Path
 
@@ -24,7 +15,7 @@ from procesamiento.extractores import word
 _FIRMA_OLE2 = bytes.fromhex("D0CF11E0A1B11AE1")
 
 
-def _documento(destino: Path) -> Path:
+def _documento_brief(destino: Path) -> Path:
     from docx import Document
 
     d = Document()
@@ -39,18 +30,28 @@ def _documento(destino: Path) -> Path:
     return destino
 
 
-def test_conserva_titulo_parrafo_y_tabla(tmp_path: Path):
-    r = word.extraer(_documento(tmp_path / "d.docx"))
+# ---------------------------------------------------------------------------
+# Básicos (ya cubiertos antes de esta ronda, con el formato de tabla nuevo)
+# ---------------------------------------------------------------------------
+
+
+def test_conserva_titulo_parrafo_y_TODAS_las_filas_de_la_tabla(tmp_path: Path):
+    """I-7: el único test de tabla del brief sólo aseveraba la primera
+    fila -- una mutación que trunca `tabla.rows` a la primera quedaba en
+    verde. Acá se asevera la tabla completa (encabezado y las DOS filas de
+    datos), con el formato de bloque cercado (I-6: sin fila separadora,
+    ninguna fila promovida)."""
+    r = word.extraer(_documento_brief(tmp_path / "d.docx"))
     assert r.estado == "ok"
     md = r.salidas["texto.md"]
     assert "# Estado de Resultados" in md
     assert "Periodo 2026" in md
-    assert "| INGRESOS | 1000 |" in md
+    assert "```tabla" in md
+    assert "INGRESOS | 1000" in md
+    assert "COSTOS | 400" in md
 
 
 def test_un_docx_roto_da_error_sin_extracto(tmp_path: Path):
-    """Bytes al azar -- NO la firma OLE2 -- así que es un archivo
-    genuinamente corrupto, no un .doc viejo con la extensión equivocada."""
     malo = tmp_path / "roto.docx"
     malo.write_bytes(b"no soy un docx")
     r = word.extraer(malo)
@@ -59,24 +60,17 @@ def test_un_docx_roto_da_error_sin_extracto(tmp_path: Path):
 
 
 def test_un_doc_viejo_da_sin_extractor_no_error_criptico(tmp_path: Path):
-    """El caso real que python-docx NUNCA va a resolver, y que un mensaje de
-    'error' (documento roto) confundiría con un archivo dañado -- acá el
-    archivo no está dañado, es el formato equivocado para esta herramienta.
-    El contenido tras la firma es basura a propósito: lo único que decide
-    la clasificación es la firma OLE2 de los primeros 8 bytes, no el resto."""
+    """I-3 previa (no confundir con I-3 de OCR): la razón NO afirma que es
+    Word -- un .doc, .xls o .ppt viejo dan la misma firma OLE2."""
     viejo = tmp_path / "balance-2020.doc"
     viejo.write_bytes(_FIRMA_OLE2 + b"\x00" * 200)
     r = word.extraer(viejo)
     assert r.estado == "sin_extractor"
     assert r.salidas == {}
-    assert "razon" in r.detalle
+    assert "Word" not in r.detalle["razon"]
 
 
 def test_un_documento_sin_contenido_da_error_sin_extracto(tmp_path: Path):
-    """Fallo cerrado: un .docx válido pero sin un solo párrafo ni tabla con
-    texto (el equivalente Word del libro de Excel con todas las hojas en
-    blanco, o el PDF sin capa de texto) no puede declararse 'ok' con un
-    extracto vacío."""
     from docx import Document
 
     vacio = tmp_path / "vacio.docx"
@@ -87,9 +81,6 @@ def test_un_documento_sin_contenido_da_error_sin_extracto(tmp_path: Path):
 
 
 def test_una_celda_con_pipe_no_desalinea_la_tabla(tmp_path: Path):
-    """Mismo defecto que pdf.py (I-... del extractor hermano): un '|' dentro
-    de una celda se confunde con el separador de columnas de Markdown si no
-    se escapa."""
     from docx import Document
 
     d = Document()
@@ -102,13 +93,10 @@ def test_una_celda_con_pipe_no_desalinea_la_tabla(tmp_path: Path):
     r = word.extraer(origen)
 
     assert r.estado == "ok"
-    md = r.salidas["texto.md"]
-    assert "Ingresos\\|Egresos | 100" in md
+    assert "Ingresos\\|Egresos | 100" in r.salidas["texto.md"]
 
 
 def test_una_celda_con_salto_de_linea_no_parte_la_fila(tmp_path: Path):
-    """Mismo defecto que pdf.py: una celda de tabla con más de un párrafo
-    (un rótulo que envuelve) no puede partir la fila de Markdown en dos."""
     from docx import Document
 
     d = Document()
@@ -125,17 +113,325 @@ def test_una_celda_con_salto_de_linea_no_parte_la_fila(tmp_path: Path):
     assert r.estado == "ok"
     md = r.salidas["texto.md"]
     assert "Cuentas por cobrar diversas | 450" in md
-    # una sola fila de la tabla -> no puede haber una línea de más.
     assert md.count("Cuentas por") == 1
 
 
 def test_extraer_sin_python_docx_instalado_da_sin_extractor(tmp_path: Path, monkeypatch):
-    """Mismo patrón que excel.py y pdf.py: un `ModuleNotFoundError` crudo no
-    es un resultado -- existe el estado 'sin_extractor' justo para esto."""
     import sys
 
-    origen = _documento(tmp_path / "d.docx")
+    origen = _documento_brief(tmp_path / "d.docx")
     monkeypatch.setitem(sys.modules, "docx", None)
     r = word.extraer(origen)
     assert r.estado == "sin_extractor"
     assert r.salidas == {}
+
+
+# ---------------------------------------------------------------------------
+# C-4: el orden real del documento se preserva
+# ---------------------------------------------------------------------------
+
+
+def test_orden_se_preserva_entre_titulos_y_tablas_de_distintos_anios(tmp_path: Path):
+    """El caso EXACTO del hallazgo: "Balance 2025" + tabla, "Balance 2026"
+    + tabla. Con el defecto viejo (todos los párrafos, después todas las
+    tablas) el modelo atribuye las cifras al año equivocado. Acá se pide
+    el orden exacto: 2025 y su cifra ANTES que 2026 y la suya."""
+    from docx import Document
+
+    d = Document()
+    d.add_heading("Balance 2025", level=1)
+    t1 = d.add_table(rows=1, cols=2)
+    t1.cell(0, 0).text = "ACTIVO"
+    t1.cell(0, 1).text = "1000"
+    d.add_heading("Balance 2026", level=1)
+    t2 = d.add_table(rows=1, cols=2)
+    t2.cell(0, 0).text = "ACTIVO"
+    t2.cell(0, 1).text = "9999"
+    origen = tmp_path / "dos-anios.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "ok"
+    md = r.salidas["texto.md"]
+    assert md.index("Balance 2025") < md.index("1000")
+    assert md.index("1000") < md.index("Balance 2026")
+    assert md.index("Balance 2026") < md.index("9999")
+
+
+# ---------------------------------------------------------------------------
+# C-5: tablas anidadas
+# ---------------------------------------------------------------------------
+
+
+def test_tabla_anidada_dentro_de_una_celda_no_desaparece(tmp_path: Path):
+    """El caso EXACTO del hallazgo: una celda "DESGLOSE" con una tabla
+    adentro (Ventas 5000, Otros 300). Los dos importes tienen que estar
+    presentes -- 5.300 USD que antes se perdían enteros."""
+    from docx import Document
+
+    d = Document()
+    outer = d.add_table(rows=1, cols=1)
+    cell = outer.cell(0, 0)
+    cell.text = "DESGLOSE"
+    inner = cell.add_table(rows=2, cols=2)
+    inner.cell(0, 0).text = "Ventas"
+    inner.cell(0, 1).text = "5000"
+    inner.cell(1, 0).text = "Otros"
+    inner.cell(1, 1).text = "300"
+    origen = tmp_path / "anidada.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "ok"
+    md = r.salidas["texto.md"]
+    assert "DESGLOSE" in md
+    assert "5000" in md
+    assert "300" in md
+    assert r.detalle["tablas"] == 1  # sigue siendo UNA tabla de nivel superior
+
+
+# ---------------------------------------------------------------------------
+# C-6: control de cambios
+# ---------------------------------------------------------------------------
+
+
+def test_control_de_cambios_conserva_el_valor_insertado_y_lo_declara(tmp_path: Path):
+    """El caso EXACTO del hallazgo: "Utilidad neta: " con <w:del>100</w:del>
+    <w:ins>9000</w:ins>. El valor VIGENTE (insertado) tiene que aparecer, y
+    el documento tiene que declarar que trae cambios pendientes."""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    d = Document()
+    p = d.add_paragraph()
+    p.add_run("Utilidad neta: ")
+    p_elem = p._p
+    w_del = etree.SubElement(p_elem, qn("w:del"))
+    w_del.set(qn("w:id"), "1")
+    r_del = etree.SubElement(w_del, qn("w:r"))
+    delText = etree.SubElement(r_del, qn("w:delText"))
+    delText.text = "100"
+    w_ins = etree.SubElement(p_elem, qn("w:ins"))
+    w_ins.set(qn("w:id"), "2")
+    r_ins = etree.SubElement(w_ins, qn("w:r"))
+    t_ins = etree.SubElement(r_ins, qn("w:t"))
+    t_ins.text = "9000"
+    origen = tmp_path / "cambios.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "ok"
+    md = r.salidas["texto.md"]
+    assert "9000" in md
+    assert "100" not in md
+    assert r.detalle["control_de_cambios"] is True
+
+
+# ---------------------------------------------------------------------------
+# C-7: encabezado, pie, w:sdt, cuadros de texto, notas al pie
+# ---------------------------------------------------------------------------
+
+
+def test_encabezado_y_pie_se_extraen(tmp_path: Path):
+    from docx import Document
+
+    d = Document()
+    d.add_paragraph("Cuerpo del documento")
+    sec = d.sections[0]
+    sec.header.paragraphs[0].text = "Encabezado del reporte"
+    sec.footer.paragraphs[0].text = "Total general: 1,234,567.89 USD"
+    origen = tmp_path / "headfoot.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "ok"
+    md = r.salidas["texto.md"]
+    assert "Encabezado del reporte" in md
+    assert "Total general: 1,234,567.89 USD" in md
+
+
+def test_control_de_contenido_sdt_extrae_parrafo_y_tabla(tmp_path: Path):
+    """El caso EXACTO del hallazgo: un `w:sdt` (control de contenido -- la
+    estructura de cualquier plantilla de formulario) con un párrafo y una
+    tabla adentro. El párrafo Y la tabla tienen que sobrevivir, y
+    `detalle["parrafos"]` no puede mentir contándolos en cero (I-7 de
+    detalle: `documento.paragraphs` de python-docx NO ve los párrafos
+    dentro de un `w:sdt`)."""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    d = Document()
+    d.add_paragraph("antes")
+    body = d.element.body
+    sdt = etree.SubElement(body, qn("w:sdt"))
+    etree.SubElement(sdt, qn("w:sdtPr"))
+    sdt_content = etree.SubElement(sdt, qn("w:sdtContent"))
+    p = etree.SubElement(sdt_content, qn("w:p"))
+    run = etree.SubElement(p, qn("w:r"))
+    texto = etree.SubElement(run, qn("w:t"))
+    texto.text = "Formulario de cierre"
+    tbl = etree.SubElement(sdt_content, qn("w:tbl"))
+    tr = etree.SubElement(tbl, qn("w:tr"))
+    tc1 = etree.SubElement(tr, qn("w:tc"))
+    p1 = etree.SubElement(tc1, qn("w:p"))
+    r1 = etree.SubElement(p1, qn("w:r"))
+    t1 = etree.SubElement(r1, qn("w:t"))
+    t1.text = "Provision"
+    tc2 = etree.SubElement(tr, qn("w:tc"))
+    p2 = etree.SubElement(tc2, qn("w:p"))
+    r2 = etree.SubElement(p2, qn("w:r"))
+    t2 = etree.SubElement(r2, qn("w:t"))
+    t2.text = "4800000"
+    sect_pr = body.find(qn("w:sectPr"))
+    if sect_pr is not None:
+        body.remove(sect_pr)
+        body.append(sect_pr)
+    origen = tmp_path / "sdt.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "ok"
+    md = r.salidas["texto.md"]
+    assert "Formulario de cierre" in md
+    assert "Provision | 4800000" in md
+    # el detalle NO puede contar cero párrafos habiendo dos reales.
+    assert r.detalle["parrafos"] >= 2
+
+
+def test_cuadro_de_texto_se_cuenta_y_declara_con_parcial(tmp_path: Path):
+    from docx import Document
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    d = Document()
+    p = d.add_paragraph("Cuerpo con contenido suficiente para no quedar vacio")
+    run = p.add_run()
+    drawing = etree.SubElement(run._r, qn("w:drawing"))
+    wps_ns = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+    w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    txbx = etree.SubElement(drawing, f"{{{wps_ns}}}txbx")
+    txbx_content = etree.SubElement(txbx, f"{{{w_ns}}}txbxContent")
+    pp = etree.SubElement(txbx_content, qn("w:p"))
+    rr = etree.SubElement(pp, qn("w:r"))
+    tt = etree.SubElement(rr, qn("w:t"))
+    tt.text = "Provision por litigio: 750,000 USD"
+    origen = tmp_path / "textbox.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "parcial"
+    assert r.detalle["cuadros_de_texto_omitidos"] == 1
+    # NO se extrae -- se cuenta y se declara, no se inventa su contenido.
+    assert "750,000" not in r.salidas["texto.md"]
+
+
+def test_nota_al_pie_se_cuenta_y_declara_con_parcial(tmp_path: Path):
+    from docx import Document
+    from docx.oxml.ns import qn
+    from lxml import etree
+
+    d = Document()
+    p = d.add_paragraph("Cuerpo con nota al pie referenciada")
+    run = p.add_run()
+    ref = etree.SubElement(run._r, qn("w:footnoteReference"))
+    ref.set(qn("w:id"), "1")
+    origen = tmp_path / "nota.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "parcial"
+    assert r.detalle["notas_al_pie_omitidas"] == 1
+
+
+# ---------------------------------------------------------------------------
+# I-4: celdas combinadas
+# ---------------------------------------------------------------------------
+
+
+def test_celda_combinada_horizontalmente_no_se_duplica(tmp_path: Path):
+    """El caso EXACTO del hallazgo: "Total" fusionada sobre dos columnas.
+    `fila.cells` la trae dos veces (mismo `_tc`) -- tiene que aparecer UNA
+    sola vez en la fila de salida."""
+    from docx import Document
+
+    d = Document()
+    t = d.add_table(rows=2, cols=2)
+    a = t.cell(0, 0)
+    b = t.cell(0, 1)
+    fusionada = a.merge(b)
+    fusionada.text = "Total"
+    t.cell(1, 0).text = "Sub1"
+    t.cell(1, 1).text = "Sub2"
+    origen = tmp_path / "merge.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "ok"
+    md = r.salidas["texto.md"]
+    lineas_con_total = [linea for linea in md.splitlines() if "Total" in linea]
+    assert len(lineas_con_total) == 1
+    assert lineas_con_total[0].count("Total") == 1
+
+
+# ---------------------------------------------------------------------------
+# I-5: un .xlsx con extensión .docx
+# ---------------------------------------------------------------------------
+
+
+def test_xlsx_con_extension_docx_da_sin_extractor(tmp_path: Path):
+    openpyxl = pytest.importorskip("openpyxl")
+
+    wb = openpyxl.Workbook()
+    wb.active["A1"] = "hola"
+    origen = tmp_path / "es-un-excel.docx"
+    wb.save(origen)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "sin_extractor"
+    assert r.salidas == {}
+    assert "spreadsheetml" in r.detalle["razon"]
+
+
+# ---------------------------------------------------------------------------
+# I-6: ninguna fila se promueve a encabezado, y no hay fila separadora
+# ---------------------------------------------------------------------------
+
+
+def test_ninguna_tabla_trae_fila_separadora_de_encabezado(tmp_path: Path):
+    """I-6: el formato viejo (`| --- | --- |`) promovía la primera fila a
+    encabezado -- con el propio fixture del brief, "1000" quedaba de
+    nombre de columna. El formato nuevo (bloque cercado, igual que
+    `pdf.py`) NUNCA emite una fila separadora."""
+    r = word.extraer(_documento_brief(tmp_path / "d.docx"))
+    assert "---" not in r.salidas["texto.md"]
+
+
+def test_niveles_de_encabezado_no_colapsan_a_uno(tmp_path: Path):
+    """Un "Heading 2" tiene que salir como "## ", no "# " -- una mutación
+    que colapsa todos los niveles a 1 no se nota si sólo se prueba un
+    documento con Heading 1."""
+    from docx import Document
+
+    d = Document()
+    d.add_heading("Titulo principal", level=1)
+    d.add_heading("Subtitulo", level=2)
+    origen = tmp_path / "niveles.docx"
+    d.save(origen)
+
+    r = word.extraer(origen)
+
+    md = r.salidas["texto.md"]
+    assert "# Titulo principal" in md
+    assert "## Subtitulo" in md
+    assert "## Titulo principal" not in md
