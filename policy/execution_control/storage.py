@@ -28,10 +28,11 @@ class InMemoryExecutionStore:
     def load_authorization(self, authorization_id):
         try: return self._authorizations[authorization_id]
         except KeyError as exc: raise UnknownExecutionError(authorization_id) from exc
-    def create_execution(self, authorization, record, initial_event):
+    def create_execution(self, authorization, record, initial_event, *, evidence_writer=None):
         with self._lock:
             if authorization.authorization_id in self._auth_consumed: raise AuthorizationConsumedError("authorization ya consumida")
             if record.decision_id in self._by_decision: raise DecisionExecutionConflictError("decision ya tiene execution")
+            if evidence_writer is not None: evidence_writer(None, record)
             self._auth_consumed.add(authorization.authorization_id); self._records[record.execution_id] = record
             self._by_decision[record.decision_id] = record.execution_id; self._events[record.execution_id] = [initial_event]
         return record
@@ -87,7 +88,7 @@ class MariaDBExecutionStore:
         finally:
             connection.close()
 
-    def create_execution(self, authorization, record, initial_event):
+    def create_execution(self, authorization, record, initial_event, *, evidence_writer=None):
         connection = self._connection_factory()
         try:
             cur = connection.cursor()
@@ -110,6 +111,11 @@ class MariaDBExecutionStore:
             cur.execute("INSERT INTO jax_execution.execution_events (execution_id,state,event_type,event_at_utc,job_id) VALUES (%s,%s,%s,%s,%s)",
                         (initial_event.execution_id, initial_event.state, initial_event.event_type,
                          initial_event.at_utc, initial_event.job_id))
+            # B7 composition may write its mandatory positive observation using
+            # this exact cursor/transaction.  It runs before commit so an
+            # evidence failure rolls back consumption, record and event too.
+            if evidence_writer is not None:
+                evidence_writer(cur, record)
             connection.commit()
         except Exception:
             connection.rollback(); raise

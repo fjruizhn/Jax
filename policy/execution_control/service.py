@@ -52,7 +52,8 @@ def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: d
         _record_denial(store, "CTL.B6.AUTHORIZATION_EXPIRY", "DENIED", decision_id=authorization.decision_id); raise AuthorizationExpiredError("authorization vencida")
     record = _record(authorization, now_utc=now)
     state = initial_state(requires_human_approval=authorization.requires_human_approval, requires_dry_run=authorization.requires_dry_run)
-    return store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now))
+    writer = getattr(store, "execution_evidence_writer", None)
+    return store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now), evidence_writer=writer)
 
 def consume_human_approval(store, record, authorization, approval, *, now_utc: datetime) -> None:
     from .human_approval import verify_human_approval
