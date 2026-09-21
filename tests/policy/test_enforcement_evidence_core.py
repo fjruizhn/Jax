@@ -53,3 +53,19 @@ def test_fixed_runtime_recorder_persists_bounded_denial_without_prompt():
  a=s.load_evidence_artifact(o.evidence_artifact_hashes[0])
  assert a.evidence_type is EvidenceType.CONTROL_INPUT
  assert b"prompt" not in s.get_evidence_blob(a.blob_refs[0].evidence_hash)
+def test_no_evidence_never_supports_enforced_and_identity_drift_isolated():
+ s=EvidenceStore(); d=load_control_definition("CTL.B6.GOVERNED_DISPATCH"); i=identity(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"x")
+ assert derive_assertion(d,i,(),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW) is AssertionVerdict.NOT_OBSERVED
+ other=ImplementationIdentity("fjruizhn/Jax","c"*40,"d"*40,SourceState.CLEAN,s.put_evidence_blob(b"other").evidence_hash)
+ assert derive_assertion(d,other,(),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW) is AssertionVerdict.NOT_OBSERVED
+def test_tested_is_not_inferred_from_runtime_observation():
+ s=EvidenceStore(); d,i,a=artifact(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)
+ o=EnforcementObservation("obs-runtime",d.control_id,1,d.control_definition_hash,a.subject,i.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",NOW,scope,(a.artifact_hash,))
+ assert derive_assertion(d,i,(o,),claim_level=ClaimLevel.TESTED,scope=scope,subjects=(a.subject,),as_of_utc=NOW) is AssertionVerdict.INSUFFICIENT_EVIDENCE
+def test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape():
+ import json
+ from policy.enforcement_evidence.test_evidence import ingest_test_evidence_manifest
+ s=EvidenceStore(); raw=b"pytest output"; h=s.put_evidence_blob(raw).evidence_hash
+ manifest={"schema_version":"1.0","kind":"JAX_TEST_EVIDENCE_MANIFEST","provider":"github","repository_id":"fjruizhn/Jax","commit_sha":"a"*40,"implementation_identity_hash":"sha256:"+"a"*64,"workflow":"policy","run_id":"1","job_id":"2","environment":"CI","started_at_utc":"2026-01-01T00:00:00Z","completed_at_utc":"2026-01-01T00:00:01Z","tests":[{"test_id":"tests.policy.x","bindings":[],"result":"PASSED"}],"counts":{"passed":1},"raw_output_blob_hash":h}
+ assert ingest_test_evidence_manifest(s,json.dumps(manifest).encode(),raw)["commit_sha"]=="a"*40
+ with pytest.raises(Exception): ingest_test_evidence_manifest(s,json.dumps(manifest).encode(),b"different")
