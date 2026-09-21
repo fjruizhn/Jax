@@ -44,3 +44,12 @@ def test_untrusted_definition_rejected():
  clone=type(d)(d.control_id,d.control_version,d.mechanism,d.supported_subject_types,d.allowed_reason_codes,d.supported_claim_levels)
  s=EvidenceStore(); i=identity(s)
  with pytest.raises(UntrustedControlDefinitionError): derive_assertion(clone,i,(),claim_level=ClaimLevel.WRITTEN,scope=ClaimScope(ClaimEnvironment.LOCAL_TEST),subjects=(),as_of_utc=NOW)
+def test_fixed_runtime_recorder_persists_bounded_denial_without_prompt():
+ from policy.enforcement_evidence.trusted_lifecycle import RuntimeEvidenceRecorder
+ s=EvidenceStore(); i=identity(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)
+ r=RuntimeEvidenceRecorder(s,i,"runtime",scope)
+ o=r.record_denial(control_id="CTL.B6.KILL_SWITCH",reason_code="DENIED",decision_id="d-1")
+ assert o.outcome is ObservationOutcome.DENIED
+ a=s.load_evidence_artifact(o.evidence_artifact_hashes[0])
+ assert a.evidence_type is EvidenceType.CONTROL_INPUT
+ assert b"prompt" not in s.get_evidence_blob(a.blob_refs[0].evidence_hash)
