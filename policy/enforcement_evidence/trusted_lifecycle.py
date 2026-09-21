@@ -2,13 +2,14 @@
 class RuntimeEvidenceRecorder:
  def __init__(self, store, implementation_identity, producer, scope):
   self._store=store; self._identity=implementation_identity; self._producer=producer; self._scope=scope
+  self._token=store._fixed_lifecycle_token()
   store.record_identity(implementation_identity)
  def record_artifact(self,value):
   if value.implementation_identity_hash != self._identity.implementation_identity_hash or value.producer != self._producer: raise ValueError("untrusted artifact composition")
-  return self._store.record_artifact(value)
+  return self._store._record_artifact(value, _token=self._token)
  def record_observation(self,value):
   if value.implementation_identity_hash != self._identity.implementation_identity_hash or value.scope != self._scope: raise ValueError("untrusted observation composition")
-  return self._store.record_observation(value)
+  return self._store._record_observation(value, _token=self._token)
  def record_denial(self, *, control_id, reason_code, decision_id=None):
   """Composition hook. Concrete deployments provide a typed artifact draft.
 

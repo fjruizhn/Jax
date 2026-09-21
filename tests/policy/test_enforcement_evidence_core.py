@@ -12,7 +12,7 @@ def identity(store):
 def artifact(store, control="CTL.B6.GOVERNED_DISPATCH", subject=None):
  d=load_control_definition(control); i=identity(store); b=store.put_evidence_blob(b"evidence")
  a=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,control,1,d.control_definition_hash,subject or EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"attempt:1"),(EvidenceBlobRef(b.evidence_hash,"input"),),EvidenceTrustDomain.JAX_RUNTIME,"runtime",i.implementation_identity_hash,NOW)
- return d,i,store.record_artifact(a)
+ return d,i,store._record_artifact(a, _token=store._fixed_lifecycle_token())
 def test_blob_hash_and_dedup_and_missing():
  s=EvidenceStore(); a=s.put_evidence_blob(b"same"); assert s.put_evidence_blob(b"same") is a
  assert s.get_evidence_blob(a.evidence_hash)==b"same"
@@ -28,7 +28,7 @@ def test_artifact_load_is_only_trusted_lifecycle():
 def test_cross_control_and_subject_never_support():
  s=EvidenceStore(); d,i,a=artifact(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)
  o=EnforcementObservation("obs-1",d.control_id,1,d.control_definition_hash,a.subject,i.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",NOW,scope,(a.artifact_hash,))
- s.record_observation(o)
+ s._record_observation(o, _token=s._fixed_lifecycle_token())
  other=load_control_definition("CTL.B6.KILL_SWITCH")
  assert derive_assertion(other,i,s.observations(),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(a.subject,),as_of_utc=NOW).value == "NOT_OBSERVED"
  assert derive_assertion(d,i,s.observations(),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"other"),),as_of_utc=NOW).value == "NOT_OBSERVED"

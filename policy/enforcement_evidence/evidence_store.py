@@ -17,7 +17,8 @@ def _seal(reg,obj):
 def _sealed(reg,obj):
  r=reg.get(id(obj)); return r is not None and r() is obj
 class EvidenceStore:
- def __init__(self): self._blobs={}; self._artifact_rows={}; self._observation_rows={}; self._assertion_rows={}; self._identity_rows={}
+ def __init__(self): self._blobs={}; self._artifact_rows={}; self._observation_rows={}; self._assertion_rows={}; self._identity_rows={}; self.__lifecycle_token=object()
+ def _fixed_lifecycle_token(self): return self.__lifecycle_token
  def put_evidence_blob(self,data:bytes)->EvidenceBlob:
   if not isinstance(data,bytes): raise TypeError("bytes requeridos")
   if len(data)>MAX_BLOB_BYTES: raise EvidenceBlobTooLargeError("blob > 1 MiB")
@@ -33,7 +34,8 @@ class EvidenceStore:
   if blob is None: raise EvidenceBlobMissingError(evidence_hash)
   if blob.size_bytes!=len(blob.bytes) or sha256_bytes(blob.bytes)!=evidence_hash: raise EvidenceBlobHashMismatchError(evidence_hash)
   return blob.bytes
- def record_artifact(self,artifact:EvidenceArtifact)->EvidenceArtifact:
+ def _record_artifact(self,artifact:EvidenceArtifact, *, _token)->EvidenceArtifact:
+  if _token is not self.__lifecycle_token: raise EvidenceArtifactUntrustedError("fixed lifecycle required")
   for ref in artifact.blob_refs: self.get_evidence_blob(ref.evidence_hash)
   h=artifact.artifact_hash; old=self._artifact_rows.get(h)
   if old is not None and old!=artifact: raise EvidenceArtifactIntegrityError("artifact hash conflict")
@@ -44,7 +46,8 @@ class EvidenceStore:
   if art.artifact_hash!=h: raise EvidenceArtifactIntegrityError("artifact hash")
   for ref in art.blob_refs:self.get_evidence_blob(ref.evidence_hash)
   return _seal(_artifacts,art)
- def record_observation(self,value:EnforcementObservation)->EnforcementObservation:
+ def _record_observation(self,value:EnforcementObservation, *, _token)->EnforcementObservation:
+  if _token is not self.__lifecycle_token: raise ObservationIntegrityError("fixed lifecycle required")
   for h in value.evidence_artifact_hashes:self.load_evidence_artifact(h)
   old=self._observation_rows.get(value.observation_id)
   if old is not None and old.observation_hash!=value.observation_hash: raise ObservationIntegrityError("observation collision")
@@ -53,7 +56,8 @@ class EvidenceStore:
   v=self._observation_rows.get(oid)
   if v is None or not v.observation_hash: raise ObservationIntegrityError("observation missing/corrupt")
   return _seal(_observations,v)
- def record_assertion(self, value):
+ def _record_assertion(self, value, *, _token):
+  if _token is not self.__lifecycle_token: raise AssertionIntegrityError("fixed lifecycle required")
   h=value.assertion_hash; old=self._assertion_rows.get(h)
   if old is not None and old!=value: raise AssertionIntegrityError("assertion collision")
   self._assertion_rows[h]=value; return _seal(_assertions,value)
