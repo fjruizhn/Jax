@@ -2867,6 +2867,25 @@ jobs:
           grep -qE "^9 passed" /tmp/excel_tests || {
             echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados) del extractor de Excel. Si esto da '... skipped', openpyxl no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
+      # Task 4 (2026-09-20/21, procesamiento-archivos-nucleo): PDF nativo
+      # -- pdftotext destruye las tablas, y en un expediente financiero la
+      # tabla ES el documento. pdfplumber conserva filas y columnas porque
+      # detecta las lineas vectoriales que las dibujan. La dependencia ya
+      # se instalo en el `pip install -r requirements-archivos.txt` de
+      # arriba (misma fuente unica de version fijada que openpyxl).
+      # Mismo patron que Excel: `_pdf_test.py` usa
+      # `pytest.importorskip("pdfplumber")`, asi que sin el paquete
+      # instalado el `-v` sin piso daria "1 skipped" y EXIT 0 -- verde con
+      # CERO tests del unico freno contra declarar 'ok' con un extracto
+      # vacio o con las tablas destruidas. Medido en este entorno
+      # (Python 3.14 y, via Docker, Python 3.12 -- mismo runtime que usa
+      # este job): 6 passed en las dos.
+      - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
+          grep -qE "^6 passed" /tmp/pdf_tests || {
+            echo "PISO ROTO: se esperaban 6 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
       # este job, que conserva arriba su entorno Python 3.12 sin alteraciones.
