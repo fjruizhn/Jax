@@ -93,3 +93,17 @@ class MariaDBEvidenceStore:
             con.commit(); return assertion
         except Exception: con.rollback(); raise
         finally: con.close()
+    def load_observation(self, observation_id):
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SELECT observation_hash,canonical_observation FROM jax_evidence.enforcement_observations WHERE observation_id=%s",(observation_id,)); row=cur.fetchone()
+            if row is None: raise ObservationIntegrityError("observation missing")
+            from .observations import deserialize_enforcement_observation
+            value=deserialize_enforcement_observation(row[1])
+            if value.observation_id != observation_id or value.observation_hash != row[0]: raise ObservationIntegrityError("row/canonical mismatch")
+            cur.execute("SELECT artifact_hash FROM jax_evidence.observation_artifacts WHERE observation_id=%s ORDER BY artifact_hash",(observation_id,)); refs=tuple(x[0] for x in cur.fetchall())
+            if refs != tuple(sorted(value.evidence_artifact_hashes)): raise ObservationIntegrityError("observation refs mismatch")
+            for h in refs: self.load_evidence_artifact(h)
+            from .evidence_store import _seal, _observations
+            return _seal(_observations,value)
+        finally: con.close()
