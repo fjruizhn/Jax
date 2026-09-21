@@ -7,6 +7,7 @@ import hashlib
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.exceptions import InvalidSignature
 
 from .canonical import canonical_bytes, utc_text
 from .errors import HumanApprovalBindingError, HumanApprovalExpiredError
@@ -62,4 +63,4 @@ def verify_human_approval(approval: HumanApprovalArtifact, authorization, public
       req.authenticated_caller_id, req.motor, req.environment.value, req.target_value)
     if bound != expected: raise HumanApprovalBindingError("approval no corresponde a authorization")
     try: public_key.verify(base64.b64decode(approval.signature, validate=True), _message(approval.projection()))
-    except Exception as exc: raise HumanApprovalBindingError("firma approval inválida") from exc
+    except (InvalidSignature, ValueError) as exc: raise HumanApprovalBindingError("firma approval inválida") from exc

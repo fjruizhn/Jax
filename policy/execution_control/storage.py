@@ -58,7 +58,7 @@ class MariaDBExecutionStore:
                 await cur.execute("INSERT INTO jax_execution.execution_records (execution_id, decision_id, canonical_record_hash) VALUES (%s,%s,%s)", (record.execution_id, record.decision_id, record.execution_record_hash))
                 await cur.execute("INSERT INTO jax_execution.execution_events (execution_id, state, event_type, event_at_utc) VALUES (%s,%s,%s,%s)", (initial_event.execution_id, initial_event.state, initial_event.event_type, initial_event.at_utc))
             await connection.commit()
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             await connection.rollback(); raise
         finally: connection.close()
         return record
