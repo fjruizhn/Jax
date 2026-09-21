@@ -14,6 +14,35 @@ from .state_machine import initial_state, transition
 from .storage import ExecutionEvent
 from policy.enforcement_evidence.models import EvidenceSubjectType
 
+def configure_b7_execution_evidence(store, evidence_store, recorder) -> None:
+    """Install mandatory same-cursor B7 writers at application composition.
+
+    The store, evidence store and recorder are never parameters of an
+    execution request. MariaDB will reject the cross-schema insert before its
+    single commit if the deployment has not provisioned both schemas together.
+    """
+    from policy.enforcement_evidence.control_registry import load_control_definition
+    from policy.enforcement_evidence.models import (EnforcementObservation, EvidenceSubject,
+        ObservationOutcome)
+    import uuid
+    token=evidence_store._fixed_lifecycle_token()
+    def write_create(cursor, record):
+        definition=load_control_definition("CTL.B6.ONE_DECISION_ONE_EXECUTION")
+        observation=EnforcementObservation(str(uuid.uuid4()),definition.control_id,definition.control_version,
+            definition.control_definition_hash,EvidenceSubject(EvidenceSubjectType.EXECUTION,record.execution_id),
+            recorder._identity.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",
+            record.created_at_utc,recorder._scope,(),decision_id=record.decision_id,execution_id=record.execution_id)
+        evidence_store.write_observation_in_transaction(cursor,observation,_token=token)
+    def write_dispatch(cursor, event):
+        definition=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
+        observation=EnforcementObservation(str(uuid.uuid4()),definition.control_id,definition.control_version,
+            definition.control_definition_hash,EvidenceSubject(EvidenceSubjectType.EXECUTION,event.execution_id),
+            recorder._identity.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",
+            event.at_utc,recorder._scope,(),execution_id=event.execution_id)
+        evidence_store.write_observation_in_transaction(cursor,observation,_token=token)
+    store.execution_evidence_writer=write_create
+    store.dispatch_evidence_writer=write_dispatch
+
 def _now(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None: raise ExecutionRequestScopeError("now_utc explícito requerido")
     return value.astimezone(timezone.utc)
