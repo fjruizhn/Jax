@@ -242,6 +242,41 @@ Ficha por extracto:
 El `sha256` se guarda desde el día uno aunque hoy no se comparta entre trabajos: el día que
 se quiera deduplicar, la huella ya está y no hay que reprocesar nada.
 
+## 9-bis · Limitaciones CONOCIDAS de la fase 1
+
+No son descuidos: son decisiones, y se escriben acá para que nadie las descubra en
+producción creyendo que son defectos.
+
+### PDF híbrido: los anexos escaneados no llegan a OCR
+
+`tiene_capa_de_texto()` es todo-o-nada: basta **una** página con texto para que el PDF
+entero se clasifique como nativo. Un expediente con portada impresa y anexos escaneados
+extrae la portada y **no manda los anexos a OCR**.
+
+**Mitigación, y es la razón por la que se acepta:** la pérdida **no es silenciosa**.
+`pdf.py` devuelve `parcial` y nombra en `detalle["paginas_sin_texto"]` exactamente qué
+páginas no dieron nada.
+
+> La regla de esta casa no es *"no perder nunca"* —eso es imposible—: es **"no perder en
+> silencio"**. Una pérdida declarada es un pendiente; una pérdida callada es un dato
+> inventado esperando a ocurrir.
+
+Arreglarlo bien significa OCR por página dentro de un PDF mixto y decidir cómo se mezclan
+los dos extractos. Es una decisión de diseño nueva, va a fase 2, y **Fernando está avisado**.
+
+### El umbral de confianza del OCR está sin calibrar
+
+`UMBRAL_CONFIANZA_PROMEDIO = 70` y `CONFIANZA_MINIMA_PALABRA = 60` salen de puntos
+sintéticos, no de un corpus real. La confianza medida se registra **siempre** en `detalle`,
+pase o no pase, justamente para poder calibrarlos. Lo hace el Task 10 del plan, con los
+escaneos reales y las 10 cifras que elige Fernando.
+
+### El costo de leer dos veces no está medido
+
+Excel abre el libro dos veces (valores y fórmulas) y el OCR invoca tesseract dos veces por
+página (texto y confianza), más el rasterizado. Se aceptó a cambio de no perder datos en
+silencio. **Sin número medido no hay GO**: lo mide el Task 10 (regla 4 del rendimiento).
+
 ## 10 · Mejoras futuras (NO ahora)
 
 Step de herramienta sin faceta dentro de Jacobs · dedup de extractos entre trabajos ·
