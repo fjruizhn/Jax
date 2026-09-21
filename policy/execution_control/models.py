@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from enum import Enum
 import re
 import unicodedata
-import weakref
 from typing import Any, Mapping
 
 from .canonical import (canonical_value, execution_authorization_hash,
@@ -14,18 +13,6 @@ from .errors import ExecutionIntegrityError
 
 _UUID7 = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _HASH = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_trusted_requests: dict[int, weakref.ReferenceType] = {}
-_trusted_authorizations: dict[int, weakref.ReferenceType] = {}
-_trusted_records: dict[int, weakref.ReferenceType] = {}
-
-def _register(registry, value):
-    key = id(value)
-    registry[key] = weakref.ref(value, lambda _, k=key, r=registry: r.pop(k, None))
-    return value
-
-def _trusted(registry, value) -> bool:
-    ref = registry.get(id(value))
-    return ref is not None and ref() is value
 
 def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value or unicodedata.normalize("NFC", value) != value:
@@ -148,7 +135,11 @@ class ExecutionRequest:
 
     @property
     def execution_request_hash(self) -> str: return execution_request_hash(self.projection())
-    def _is_trusted(self) -> bool: return _trusted(_trusted_requests, self)
+    def _is_trusted(self) -> bool:
+        # The issuer registry lives in the trusted factory module, not in a
+        # public model/serialization registration surface.
+        from .authorization import _request_issued_by_factory
+        return _request_issued_by_factory(self)
 
 @dataclass(frozen=True)
 class ExecutionAuthorization:
@@ -178,7 +169,9 @@ class ExecutionAuthorization:
           "authority_ledger_checkpoint_hash": self.authority_ledger_checkpoint_hash,
           "requires_human_approval": self.requires_human_approval, "requires_dry_run": self.requires_dry_run,
           "issued_at_utc": utc_text(self.issued_at_utc), "expires_at_utc": utc_text(self.expires_at_utc)}
-    def _is_trusted(self) -> bool: return _trusted(_trusted_authorizations, self)
+    def _is_trusted(self) -> bool:
+        from .authorization import _authorization_issued_by_factory
+        return _authorization_issued_by_factory(self)
 
 @dataclass(frozen=True)
 class ExecutionRecord:
@@ -194,7 +187,3 @@ class ExecutionRecord:
         if self.execution_record_hash != execution_record_hash(self.projection_without_hash()): raise ExecutionIntegrityError("hash record inválido")
     def projection_without_hash(self) -> dict:
         return {"schema_version":self.schema_version,"kind":self.kind,"execution_id":self.execution_id,"decision_id":self.decision_id,"decision_record_hash":self.decision_record_hash,"execution_request_hash":self.execution_request_hash,"execution_authorization_hash":self.execution_authorization_hash,"authorization_id":self.authorization_id,"capability":self.capability,"authenticated_caller_id":self.authenticated_caller_id,"motor":self.motor,"environment":self.environment.value,"timeout_seconds":self.timeout_seconds,"created_at_utc":utc_text(self.created_at_utc)}
-
-def register_request(value: ExecutionRequest) -> ExecutionRequest: return _register(_trusted_requests, value)
-def register_authorization(value: ExecutionAuthorization) -> ExecutionAuthorization: return _register(_trusted_authorizations, value)
-def register_record(value: ExecutionRecord) -> ExecutionRecord: return _register(_trusted_records, value)

@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from dataclasses import replace
 import pytest
 
 from policy.authority_ledger.models import AuthorityEventIntent, AuthorityEventType
@@ -8,10 +9,14 @@ from policy.authority_resolution.models import EvaluationContext
 from policy.decision_record import DecisionFact, DecisionFactValueType, build_decision_input, is_verified_decision_record
 from policy.decision_record.authority_binding import evaluate_decision_input
 from policy.decision_record.ids import new_decision_id
-from policy.decision_record.service import build_decision_record
+from policy.decision_record.service import record_decision
+from policy.decision_record.storage import InMemoryDecisionRecordStore
 from policy.execution_control.authorization import authorize_execution, build_execution_request
 from policy.execution_control.canonical import parameters_hash
 from policy.execution_control.models import ExecutionEnvironment
+from policy.execution_control.service import create_execution
+from policy.execution_control.storage import InMemoryExecutionStore
+from policy.execution_control.storage import MariaDBExecutionStore
 from tests.policy.test_authority_ledger_events import setup_ledger, ratification_intent
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -36,7 +41,7 @@ def record():
     state = verify_authority_ledger(store.get_genesis(), store.events(), root)
     facts = (DecisionFact("EXECUTION_CAPABILITY", DecisionFactValueType.STRING, "CAP"), DecisionFact("EXECUTION_CALLER", DecisionFactValueType.STRING, "jacobs"), DecisionFact("EXECUTION_MOTOR", DecisionFactValueType.STRING, "m"), DecisionFact("EXECUTION_ENVIRONMENT", DecisionFactValueType.STRING, "SANDBOX"), DecisionFact("EXECUTION_TARGET", DecisionFactValueType.STRING, "JAX_WORKSPACE"), DecisionFact("EXECUTION_PARAMETERS_HASH", DecisionFactValueType.STRING, parameters_hash("p", {"x": 1})), DecisionFact("EXECUTION_TIMEOUT_SECONDS", DecisionFactValueType.INTEGER, 60), DecisionFact("EXECUTION_SANDBOX_REQUIRED", DecisionFactValueType.BOOLEAN, True), DecisionFact("EXECUTION_DRY_RUN_REQUIRED", DecisionFactValueType.BOOLEAN, False), DecisionFact("EXECUTION_HUMAN_APPROVAL_REQUIRED", DecisionFactValueType.BOOLEAN, False))
     input_ = build_decision_input(EvaluationContext("1.0", "JAX_AUTHORITY_EVALUATION_CONTEXT", "JAX", "S", "EXECUTION", ()), NOW, facts=facts)
-    return build_decision_record(evaluate_decision_input(state, input_), decision_id=new_decision_id(), recorded_at_utc=NOW)
+    return record_decision(InMemoryDecisionRecordStore(), evaluate_decision_input(state, input_), decision_id=new_decision_id(), recorded_at_utc=NOW)
 
 def request(): return build_execution_request(record(), authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x":1}, timeout_seconds=60)
 
@@ -46,6 +51,67 @@ def test_sealed_request_and_authorization():
 def test_context_is_deeply_immutable():
     r = request()
     with pytest.raises((TypeError, AttributeError)): r.context[0] = "bad"
+
+
+def test_reconstructed_record_cannot_enter_execution_boundary():
+    from policy.decision_record.serialization import canonical_decision_record_bytes
+    from policy.decision_record.service import verify_decision_record
+    from policy.execution_control.errors import UnverifiedDecisionRecordError
+    reconstructed = verify_decision_record(canonical_decision_record_bytes(record()))
+    assert not is_verified_decision_record(reconstructed)
+    with pytest.raises(UnverifiedDecisionRecordError):
+        build_execution_request(reconstructed, authenticated_caller_id="jacobs", capability="CAP", motor="m",
+            environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE",
+            prompt="p", context={"x": 1}, timeout_seconds=60)
+
+
+def test_manual_request_and_authorization_are_not_trusted():
+    rec = record()
+    request = build_execution_request(rec, authenticated_caller_id="jacobs", capability="CAP", motor="m",
+        environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE",
+        prompt="p", context={"x": 1}, timeout_seconds=60)
+    with pytest.raises(Exception):
+        authorize_execution(rec, replace(request), catalog(), now_utc=NOW)
+    authorization = authorize_execution(rec, request, catalog(), now_utc=NOW)
+    with pytest.raises(Exception):
+        create_execution(InMemoryExecutionStore(), replace(authorization), now_utc=NOW)
+
+
+def test_models_do_not_publish_trust_registration_symbols():
+    import policy.execution_control.models as models
+    assert not hasattr(models, "register_request")
+    assert not hasattr(models, "register_authorization")
+
+
+def test_mariadb_dbapi_create_persists_canonical_record_and_event():
+    class Cursor:
+        def __init__(self, db): self.db, self.last = db, None
+        def execute(self, sql, args=()):
+            self.last = sql
+            if sql.startswith("INSERT INTO jax_execution.execution_authorizations"):
+                self.db.auth = args
+            elif sql.startswith("INSERT INTO jax_execution.execution_records"):
+                self.db.record = args
+            elif sql.startswith("INSERT INTO jax_execution.execution_events"):
+                self.db.event = args
+        def fetchone(self):
+            if "canonical_authorization_hash" in self.last: return (self.db.auth[2],)
+            return None
+    class Conn:
+        def __init__(self): self.auth = self.record = self.event = None; self.commits = self.rollbacks = 0
+        def cursor(self): return Cursor(self)
+        def commit(self): self.commits += 1
+        def rollback(self): self.rollbacks += 1
+        def close(self): pass
+    conn = Conn(); store = MariaDBExecutionStore(lambda: conn)
+    rec = record(); request = build_execution_request(rec, authenticated_caller_id="jacobs", capability="CAP", motor="m",
+        environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x":1}, timeout_seconds=60)
+    auth = authorize_execution(rec, request, catalog(), now_utc=NOW)
+    store.insert_authorization(auth)
+    execution = create_execution(store, auth, now_utc=NOW)
+    assert execution.execution_id == conn.record[0]
+    assert '"execution_record_hash"' in conn.record[3]
+    assert conn.event[0] == execution.execution_id
 
 def test_authorization_binds_decision_and_catalog():
     rec = record(); req = build_execution_request(rec, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x":1}, timeout_seconds=60)

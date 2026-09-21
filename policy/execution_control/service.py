@@ -9,7 +9,7 @@ from .errors import (AuthorizationExpiredError, DryRunFailedError, DryRunRequire
                      ExecutionRequestScopeError, HumanApprovalRequiredError,
                      KillSwitchActiveError)
 from .ids import new_execution_id
-from .models import ExecutionAuthorization, ExecutionRecord, ExecutionState, register_record
+from .models import ExecutionAuthorization, ExecutionRecord, ExecutionState
 from .state_machine import initial_state, transition
 from .storage import ExecutionEvent
 
@@ -26,11 +26,11 @@ def _record(authorization: ExecutionAuthorization, *, now_utc: datetime) -> Exec
       "authenticated_caller_id":request.authenticated_caller_id,"motor":request.motor,
       "environment":request.environment.value,"timeout_seconds":request.timeout_seconds,
       "created_at_utc":now_utc.isoformat().replace("+00:00","Z")}
-    return register_record(ExecutionRecord("1.0", "JAX_GOVERNED_EXECUTION_RECORD", execution_id,
+    return ExecutionRecord("1.0", "JAX_GOVERNED_EXECUTION_RECORD", execution_id,
       authorization.decision_id, authorization.decision_record_hash, request.execution_request_hash,
       authorization.execution_authorization_hash, authorization.authorization_id, request.capability,
       request.authenticated_caller_id, request.motor, request.environment, request.timeout_seconds,
-      now_utc, execution_record_hash(projection)))
+      now_utc, execution_record_hash(projection))
 
 def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: datetime, kill_switch_active: bool = False) -> ExecutionRecord:
     now = _now(now_utc)
@@ -41,10 +41,16 @@ def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: d
     state = initial_state(requires_human_approval=authorization.requires_human_approval, requires_dry_run=authorization.requires_dry_run)
     return store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now))
 
-def consume_human_approval(store, record, authorization, approval, public_key, *, now_utc: datetime) -> None:
+def consume_human_approval(store, record, authorization, approval, *, now_utc: datetime,
+                           trusted_approver_resolver=None) -> None:
     from .human_approval import verify_human_approval
+    from .adapters.trusted_approver import load_trusted_approver
     now = _now(now_utc)
     if not authorization.requires_human_approval: return
+    resolver = trusted_approver_resolver or load_trusted_approver
+    # Resolver is an injected trusted root for tests, never a verification
+    # key supplied by the approval caller.
+    public_key = resolver(approval.approver_actor_id, approval.approver_key_id)
     verify_human_approval(approval, authorization, public_key, now_utc=now); store.consume_approval(approval.human_approval_id)
     store.append_event(ExecutionEvent(record.execution_id,
       (ExecutionState.READY_FOR_DRY_RUN if authorization.requires_dry_run else ExecutionState.READY_TO_DISPATCH).value,

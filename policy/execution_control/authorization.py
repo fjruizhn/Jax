@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import weakref
 
 from policy.decision_record import is_verified_decision_record
 from policy.decision_record.models import DecisionFactValueType, DecisionRecord
@@ -13,8 +14,51 @@ from .errors import (CallerNotAuthorizedError, ExecutionRequestScopeError,
                      UnsupportedExecutionEnvironmentError)
 from .ids import new_authorization_id
 from .models import (CapabilityPolicyProjection, ExecutionAuthorization,
-                     ExecutionEnvironment, ExecutionRequest, register_authorization,
-                     register_request)
+                     ExecutionEnvironment, ExecutionRequest)
+
+# Exact-instance provenance remains wholly inside the two real issuance
+# factories below.  There is deliberately no helper accepting an artifact or
+# callback to register from another module.
+_issued_requests: dict[int, weakref.ReferenceType] = {}
+_issued_authorizations: dict[int, weakref.ReferenceType] = {}
+
+def _issued(registry, value):
+    key = id(value)
+    registry[key] = weakref.ref(value, lambda _r, k=key, r=registry: r.pop(k, None))
+    return value
+
+def _request_issued_by_factory(value) -> bool:
+    ref = _issued_requests.get(id(value))
+    return ref is not None and ref() is value
+
+def _authorization_issued_by_factory(value) -> bool:
+    ref = _issued_authorizations.get(id(value))
+    return ref is not None and ref() is value
+
+
+def _load_authorization_from_authoritative_projection(data: dict):
+    """Private MariaDB load boundary; revalidates constructors and hashes."""
+    request_data = data["execution_request"]
+    target = request_data["target"]
+    request = _issued(_issued_requests, ExecutionRequest(
+        request_data["schema_version"], request_data["kind"], request_data["decision_id"],
+        request_data["decision_record_hash"], request_data["capability"],
+        request_data["authenticated_caller_id"], request_data["motor"],
+        ExecutionEnvironment(request_data["environment"]), target["kind"], target["value"],
+        request_data["prompt"], request_data["context"], request_data["timeout_seconds"],
+        request_data["sandbox_required"], request_data.get("tenant_id"), request_data.get("user_id")))
+    policy = data["capability_policy"]
+    projection = CapabilityPolicyProjection(policy["capability"], tuple(policy["allowed_callers"]),
+        tuple(policy["allowed_motors"]), policy["sandbox_only"], policy["requires_human_gate"],
+        policy["max_execution_minutes"], policy["max_recursion_depth"], policy["mode"], policy["risk_level"])
+    return _issued(_issued_authorizations, ExecutionAuthorization(
+        data["schema_version"], data["kind"], data["authorization_id"], data["decision_id"],
+        data["decision_record_hash"], request, projection, data["policy_corpus_hash"],
+        data["effective_authority_context_hash"], data["authority_ledger_checkpoint_hash"],
+        data["requires_human_approval"], data["requires_dry_run"],
+        datetime.fromisoformat(data["issued_at_utc"].replace("Z", "+00:00")),
+        datetime.fromisoformat(data["expires_at_utc"].replace("Z", "+00:00")),
+        data["execution_authorization_hash"]))
 
 
 _FACTS = {
@@ -55,7 +99,7 @@ def build_execution_request(record: DecisionRecord, *, authenticated_caller_id: 
     if not is_verified_decision_record(record):
         from .errors import UnverifiedDecisionRecordError
         raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
-    return register_request(ExecutionRequest("1.0", "JAX_EXECUTION_REQUEST", record.decision_id,
+    return _issued(_issued_requests, ExecutionRequest("1.0", "JAX_EXECUTION_REQUEST", record.decision_id,
         record.decision_record_hash, capability, authenticated_caller_id, motor, environment,
         target_kind, target_value, prompt, context, timeout_seconds, sandbox_required,
         tenant_id, user_id))
@@ -123,7 +167,7 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
         "issued_at_utc": issued.isoformat().replace("+00:00", "Z"),
         "expires_at_utc": expires.isoformat().replace("+00:00", "Z")}
     digest = execution_authorization_hash(payload)
-    return register_authorization(ExecutionAuthorization("1.0", "JAX_EXECUTION_AUTHORIZATION", auth_id,
+    return _issued(_issued_authorizations, ExecutionAuthorization("1.0", "JAX_EXECUTION_AUTHORIZATION", auth_id,
         record.decision_id, record.decision_record_hash, request, policy,
         record.authority_binding.active_policy_corpus_hash,
         record.authority_binding.effective_authority_context_hash,

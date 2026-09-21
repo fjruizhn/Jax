@@ -83,6 +83,13 @@ class MotorDispatchResponse(BaseModel):
     rejected_reason: str | None = None    # si status == REJECTED, el motivo
 
 
+class GovernedDispatchRequest(BaseModel):
+    """Only an authoritative execution identity crosses this endpoint."""
+    execution_id: str
+    trace_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    model_config = {"extra": "forbid"}
+
+
 class MotorJobView(BaseModel):
     job_id: str
     status: JobStatus

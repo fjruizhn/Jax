@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -29,13 +30,14 @@ from motor_registry.models import (
     JobStatus,
     MotorDispatchRequest,
     MotorDispatchResponse,
+    GovernedDispatchRequest,
     MotorJobView,
 )
 from motor_registry.policy import MotorPolicy
 import facet_resolver  # su sello (mtime de un archivo) invalida también el catálogo
 from motor_registry import job_tasks
 from motor_registry import worker as motor_worker
-from interruptor import ruta_del_interruptor
+from interruptor import interruptor_activo, ruta_del_interruptor
 import human_gate
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -48,6 +50,11 @@ _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
 # solo los usa este archivo), asi que reasignarlos acá es seguro.
 _CATALOG: MotorCatalog | None = None
 _POLICY: MotorPolicy | None = None
+# Set only by the service composition root.  The route fails closed until the
+# authoritative execution store is present; request-body fields never replace
+# stored artifacts.
+_GOVERNED_EXECUTION_STORE = None
+_GOVERNED_DISPATCH_CLAIMER = None
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +141,13 @@ async def _ensure_catalog_fresh(conexion=None) -> None:
 router = APIRouter(prefix="/motor", tags=["motor_registry"])
 
 
+def configure_governed_execution_store(store, dispatch_claimer=None) -> None:
+    """Composition-root hook for the authoritative Block 6 store."""
+    global _GOVERNED_EXECUTION_STORE, _GOVERNED_DISPATCH_CLAIMER
+    _GOVERNED_EXECUTION_STORE = store
+    _GOVERNED_DISPATCH_CLAIMER = dispatch_claimer
+
+
 def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
     """Done-callback: cierra el punto ciego del create_task fire-and-forget.
     Cualquier excepción que escape de worker.run (incl. fuera de su try interno)
@@ -176,8 +190,66 @@ def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> Moto
     )
 
 
+@router.post("/governed-dispatch", response_model=MotorDispatchResponse, status_code=202)
+async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchResponse:
+    """Launch only a durably claimed, authoritative Block 6 execution."""
+    if _GOVERNED_EXECUTION_STORE is None:
+        raise HTTPException(status_code=503, detail="governed execution store no inicializado")
+    await _ensure_catalog_fresh()
+    if _CATALOG is None:
+        raise HTTPException(status_code=503, detail="Motor Registry: catálogo no inicializado todavía")
+    try:
+        record = _GOVERNED_EXECUTION_STORE.load_execution(req.execution_id)
+        authorization = _GOVERNED_EXECUTION_STORE.load_authorization(record.authorization_id)
+        request = authorization.execution_request
+        if (record.decision_id != authorization.decision_id or
+                record.execution_authorization_hash != authorization.execution_authorization_hash or
+                record.execution_request_hash != request.execution_request_hash):
+            raise ValueError("binding almacenado inválido")
+        cap = _CATALOG.get_capability(request.capability)
+        motor = _CATALOG.get_motor(request.motor)
+        if (cap is None or motor is None or not motor.enabled or
+                request.authenticated_caller_id not in cap.allowed_callers or
+                request.motor not in cap.allowed_motors or not cap.sandbox_only or not motor.sandbox_only):
+            raise ValueError("catálogo actual no permite execution")
+        route = ruta_del_interruptor()
+        if interruptor_activo(route):
+            raise ValueError("kill switch activo")
+        if _GOVERNED_DISPATCH_CLAIMER is None:
+            from policy.execution_control.service import dispatch_execution
+            claimer = dispatch_execution
+        else:
+            claimer = _GOVERNED_DISPATCH_CLAIMER
+        # This is the atomic state claim immediately before job/task creation.
+        claimer(_GOVERNED_EXECUTION_STORE, record, authorization,
+                           now_utc=datetime.now(timezone.utc), kill_switch_active=False)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=f"GOVERNED_DISPATCH_REJECTED: {exc}") from exc
+
+    job_id = _STORE.create(caller=request.authenticated_caller_id, capability=request.capability,
+        motor=request.motor, trace_id=req.trace_id, prompt=request.prompt,
+        recursion_depth=0, pipeline_id=None)
+    task = asyncio.create_task(motor_worker.run(job_id=job_id, motor=request.motor,
+        capability=request.capability, prompt=request.prompt, context=request.projection()["context"],
+        store=_STORE, catalog=_CATALOG, kill_switch_path=str(route), user_id=request.user_id,
+        tenant_id=request.tenant_id, caller=request.authenticated_caller_id,
+        timeout_seconds=request.timeout_seconds, pipeline_id=None))
+    task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
+    job_tasks.register(job_id, task)
+    return MotorDispatchResponse(job_id=job_id, status=JobStatus.PENDING, motor=request.motor,
+        capability=request.capability, trace_id=req.trace_id)
+
+
 @router.post("/dispatch", response_model=MotorDispatchResponse, status_code=202)
 async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
+    # Block 6: every catalog capability is governed in V1.  This legacy
+    # transport endpoint must never consume a gate, create a job, or start a
+    # worker; its request body is not an execution authority artifact.
+    raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
+
+    # Kept below as historical defensive logic for the governed adapter while
+    # it is wired in the service composition root.  It is unreachable from
+    # this legacy endpoint by construction.
     await _ensure_catalog_fresh()
     if _POLICY is None or _CATALOG is None:
         raise HTTPException(status_code=503, detail="Motor Registry: catálogo no inicializado todavía")
