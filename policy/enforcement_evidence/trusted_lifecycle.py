@@ -1,7 +1,10 @@
 """Composition-owned recorder; caller requests cannot select its trust roots."""
 class RuntimeEvidenceRecorder:
- def __init__(self, store, implementation_identity, producer, scope):
+ def __init__(self, store, implementation_identity, producer, scope, *, repository_root=None):
   self._store=store; self._identity=implementation_identity; self._producer=producer; self._scope=scope
+  if repository_root is not None:
+   from .implementation_identity import verify_build_manifest
+   verify_build_manifest(store, implementation_identity, repository_root=repository_root)
   self._token=store._fixed_lifecycle_token()
   store.record_identity(implementation_identity)
  def record_artifact(self,value):
