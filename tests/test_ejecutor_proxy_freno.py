@@ -100,6 +100,26 @@ def test_freno_puesto_mientras_espera_el_carril_da_423_legible(tmp_path, freno):
             while proxy_carril.esperando_carril() < 1:
                 assert time.monotonic() < limite, "la segunda petición nunca llegó a la cola"
                 await asyncio.sleep(0.02)
+            # Las dos suposiciones del test, comprobadas EN EL INSTANTE del corte.
+            #
+            # Falló en CI el 2026-09-20 con `httpx.RemoteProtocolError: peer closed
+            # connection without sending complete message body`, que no dice nada de
+            # lo que pasó. Ese error sale si la segunda YA estaba recibiendo cuerpo
+            # cuando cayó el freno -- o sea, si la primera soltó el carril entre el
+            # `while` de arriba y esta línea. En una máquina descargada no se
+            # reproduce (0 de 30 corridas); solo con el runner cargado.
+            #
+            # No se sabe cerrar esa carrera sin reproducirla, así que al menos se
+            # nombra: si vuelve a pasar, el mensaje dice CUÁL suposición se rompió
+            # en vez de un error de protocolo indescifrable.
+            assert not primera.done(), (
+                "la primera soltó el carril antes del freno: la segunda ya estaba "
+                "recibiendo cuerpo, y el corte sale como error de protocolo en vez "
+                "de como 423. El test no probó lo que dice probar")
+            assert len(up.recibidas) == 1, (
+                f"el upstream recibió {len(up.recibidas)} peticiones, no 1: la segunda "
+                "ya había pasado del carril cuando cayó el freno")
+
             inicio = time.monotonic()
             freno.write_text("{}")
             r = await asyncio.wait_for(segunda, 3)
