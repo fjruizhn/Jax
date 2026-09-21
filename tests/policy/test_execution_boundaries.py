@@ -1,0 +1,2 @@
+from policy.execution_control.errors import GovernedExecutionRequiredError
+def test_governed_boundary_error_is_typed(): assert GovernedExecutionRequiredError

@@ -13,7 +13,7 @@ from .canonical import canonical_bytes
 from .errors import DecisionRecordIntegrityError, UnsupportedDecisionSchemaError
 from .models import (DecisionAuthorityBinding, DecisionFact, DecisionFactValueType,
     DecisionInput, DecisionRecord, DecisionResult, EffectiveAuthorityEnvelopeSnapshot,
-    _register_decision_input, _register_decision_record)
+    _register_decision_input)
 
 
 def _load(value):
@@ -86,8 +86,15 @@ def result_from_projection(data: dict) -> DecisionResult:
 
 
 def canonical_decision_record_bytes(record: DecisionRecord) -> bytes:
-    if not isinstance(record, DecisionRecord) or not record._is_sealed():
-        raise DecisionRecordIntegrityError("DecisionRecord no verificado")
+    if not isinstance(record, DecisionRecord):
+        raise DecisionRecordIntegrityError("DecisionRecord requerido")
+    return canonical_bytes(record.projection_without_hash() | {"decision_record_hash": record.decision_record_hash})
+
+
+def _canonical_record_content_bytes(record: DecisionRecord) -> bytes:
+    """Persistence-only content encoding before provenance is established."""
+    if not isinstance(record, DecisionRecord):
+        raise DecisionRecordIntegrityError("DecisionRecord requerido")
     return canonical_bytes(record.projection_without_hash() | {"decision_record_hash": record.decision_record_hash})
 
 
@@ -114,8 +121,10 @@ def decision_record_from_bytes(value: bytes | str) -> DecisionRecord:
         binding = DecisionAuthorityBinding(b["active_policy_corpus_hash"], b["effective_authority_context_hash"], checkpoint,
             b["authority_ledger_checkpoint_hash"], b["resolver_identity"], b["resolver_version"])
         result = result_from_projection(data["result"])
-        return _register_decision_record(DecisionRecord(data["schema_version"], data["kind"], data["decision_id"], decision_input, data["decision_input_hash"],
+        # Parsing canonical public bytes establishes content integrity only.
+        # It must never turn the resulting object into a trusted record.
+        return DecisionRecord(data["schema_version"], data["kind"], data["decision_id"], decision_input, data["decision_input_hash"],
             binding, result, tuple(data["evidence_refs"]), datetime.fromisoformat(data["recorded_at_utc"].replace("Z", "+00:00")),
-            data["decision_record_hash"]))
+            data["decision_record_hash"])
     except (KeyError, TypeError, ValueError) as exc:
         raise DecisionRecordIntegrityError("DecisionRecord serializado inválido") from exc

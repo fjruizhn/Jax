@@ -13,7 +13,7 @@ from .service import _verify_evidence
 
 
 def replay_decision(record: DecisionRecord, authority_store, trusted_root, checkpoint_store, *, evidence_provider=None) -> DecisionReplayResult:
-    if not isinstance(record, DecisionRecord) or not record._is_sealed():
+    if not isinstance(record, DecisionRecord):
         from .errors import DecisionRecordIntegrityError
         raise DecisionRecordIntegrityError("DecisionRecord no verificado")
     _verify_evidence(record.evidence_refs, evidence_provider)

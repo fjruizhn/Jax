@@ -60,23 +60,38 @@ def build_decision_record(evaluation: VerifiedDecisionEvaluation, *, decision_id
         "result": result_projection(evaluation.result), "evidence_refs": list(globals_refs),
         "recorded_at_utc": utc_text(recorded_at_utc),
     })
-    return _register_decision_record(DecisionRecord("1.0", "JAX_DECISION_RECORD", value_id, evaluation.decision_input,
+    # Building a syntactically valid value is deliberately not a provenance
+    # boundary.  Only a successful authoritative write/load may seal it.
+    return DecisionRecord("1.0", "JAX_DECISION_RECORD", value_id, evaluation.decision_input,
         evaluation.decision_input.decision_input_hash, evaluation.authority_binding, evaluation.result,
-        globals_refs, recorded_at_utc, record_hash))
+        globals_refs, recorded_at_utc, record_hash)
 
 
 def record_decision(store, evaluation: VerifiedDecisionEvaluation, *, decision_id: str,
                     recorded_at_utc: datetime, evidence_refs: tuple[str, ...] = (),
                     evidence_provider: EvidenceProvider | None = None) -> DecisionRecord:
-    return store.insert(build_decision_record(evaluation, decision_id=decision_id, recorded_at_utc=recorded_at_utc,
-                                               evidence_refs=evidence_refs, evidence_provider=evidence_provider))
+    record = build_decision_record(evaluation, decision_id=decision_id, recorded_at_utc=recorded_at_utc,
+                                   evidence_refs=evidence_refs, evidence_provider=evidence_provider)
+    persisted = store.insert(record)
+    # Seal exactly the object returned by the authoritative persistence
+    # boundary.  A deserialized or reconstructed equivalent is not trusted.
+    return _register_decision_record(persisted)
 
 
 def load_decision(store, decision_id: str) -> DecisionRecord:
     from .serialization import decision_record_from_bytes
-    return decision_record_from_bytes(store.load_canonical_bytes(decision_id))
+    record = decision_record_from_bytes(store.load_canonical_bytes(decision_id))
+    if record.decision_id != decision_id:
+        raise DecisionRecordIntegrityError("identidad almacenada no coincide")
+    return _register_decision_record(record)
 
 
 def verify_decision_record(canonical_record_bytes: bytes) -> DecisionRecord:
     from .serialization import decision_record_from_bytes
+    # Content integrity verification is intentionally not provenance minting.
     return decision_record_from_bytes(canonical_record_bytes)
+
+
+def is_verified_decision_record(record: DecisionRecord) -> bool:
+    """Public, capability-free provenance query for governed execution."""
+    return isinstance(record, DecisionRecord) and record._is_sealed()

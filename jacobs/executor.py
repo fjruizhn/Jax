@@ -637,6 +637,11 @@ async def _invoke_hyde(f: "ResolvedFacet", prompt: str, timeout: int) -> dict:
     en el CLI viejo. Adaptado a la firma de Jacobs: sin serialización de
     historial (Jacobs ya arma el contexto completo en `prompt` vía
     _enrich_prompt, antes de llegar acá — igual que para las demás facetas)."""
+    # Block 6 closes the direct subprocess route for governed work.  Hyde
+    # cannot receive a capability through an unbound local process; it must
+    # be represented by a verified decision and governed Motor execution.
+    raise RuntimeError("DirectHydeGovernedExecutionForbiddenError: GOVERNED_EXECUTION_REQUIRED")
+
     model = f.model
 
     safe_prompt = prompt
