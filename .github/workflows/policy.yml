@@ -585,6 +585,7 @@ jobs:
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
           tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py
+          tests/test_accion_persona_retorno_no_ambiguo.py
           tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py
           tests/test_memoria_busqueda_facts.py
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
@@ -597,6 +598,7 @@ jobs:
             tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py \
             tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py \
             tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py \
+            tests/test_accion_persona_retorno_no_ambiguo.py \
             tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py \
             tests/test_memoria_busqueda_facts.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
@@ -741,8 +743,26 @@ jobs:
           #   duplica en este job. Medido en local (MISMO comando): 66
           #   passed, 0 failed. Si el runner da otro numero, manda el
           #   runner.
-          grep -qE "^66 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 66 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 66 -> 72 el 2026-09-27 (pendiente del 2026-09-20:
+          #   mark_action_item_done/touch_person_mentions distinguen no-op
+          #   de "no existe", mismo defecto ya arreglado en
+          #   verify_fact/expire_fact -- ver tests/test_memoria_retorno_no_ambiguo.py,
+          #   arriba). tests/test_accion_persona_retorno_no_ambiguo.py es
+          #   archivo NUEVO (+6, contra la MariaDB real de este job -- se
+          #   agrega a las DOS listas de arriba). Cubre los cuatro casos de
+          #   cada metodo: mark_action_item_done (marcar como hecho un item
+          #   ya hecho, en el mismo segundo -- completed_at es `timestamp`
+          #   SIN microsegundos, asi que es un no-op de verdad; item
+          #   inexistente; base caida) e igual para touch_person_mentions
+          #   (tocar la misma persona dos veces el mismo dia -- CURDATE() no
+          #   cambia dentro del dia; nadie matchea; base caida). Los 2 casos
+          #   de no-op vistos ROJOS contra el codigo de antes de este commit
+          #   (el resto ya pasaba: no hay ambiguedad real en "no existe" ni
+          #   en "base caida", solo en el no-op idempotente). Medido en
+          #   local (MISMO comando, MariaDB real 127.0.0.1:3308): 66 -> 72
+          #   passed. Si el runner da otro numero, manda el runner.
+          grep -qE "^72 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 72 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
@@ -1171,6 +1191,7 @@ jobs:
           tests/test_env_se_lee_con_sudo.py
           tests/test_jacobs_ref_ilegible_no_es_exito.py
           tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py
+          tests/test_repl_pendientes_base_caida.py
           tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py
           tests/test_health_de_las_manos_puede_fallar.py
           tests/test_degradaciones_declaradas.py
@@ -1311,6 +1332,7 @@ jobs:
             tests/test_env_se_lee_con_sudo.py \
             tests/test_jacobs_ref_ilegible_no_es_exito.py \
             tests/test_memoria_no_traga_fallos_de_escritura.py tests/test_memoria_gobernanza.py tests/test_repl_fact_verify_autoria.py \
+            tests/test_repl_pendientes_base_caida.py \
             tests/test_reaper_reconciliacion_no_reporta_verde_si_fallo.py \
             tests/test_health_de_las_manos_puede_fallar.py \
             tests/test_degradaciones_declaradas.py \
@@ -2931,8 +2953,27 @@ jobs:
           #   (mismo metodo que la nota de arriba, agregar/sacar el archivo
           #   con el resto del arbol fijo): +15. Si el runner da otro
           #   numero, manda el runner.
-          grep -qE "^2349 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2349 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2349 -> 2352 el 2026-09-27 (pendiente del 2026-09-20:
+          #   mark_action_item_done/touch_person_mentions distinguen no-op
+          #   de "no existe"): tests/test_repl_pendientes_base_caida.py es
+          #   archivo NUEVO (+3), puro (sin DB, sin red -- se agrega a la
+          #   lista de este job, arriba). Cubre el consumidor real:
+          #   `handle_pendientes_command` (jax/core/main.py) trataba `None`
+          #   (base caida) igual que `False` (el pendiente no existe) en
+          #   `if ok else "No encontre el pendiente #N."` -- mismo
+          #   aplastamiento que ya se arreglo en `handle_fact_command`
+          #   (ver tests/test_repl_fact_verify_autoria.py, arriba). El
+          #   arreglo de la capa de datos (mark_action_item_done, con DB
+          #   real, en el job memory-vector-zero-io) no alcanzaba solo: sin
+          #   este consumidor corregido, un None seguia leyendose como "no
+          #   existe". Los 3 vistos ROJOS contra el codigo de antes de este
+          #   commit (caso feliz y "no existe" ya pasaban; solo la rama de
+          #   base caida fallaba). "17 skipped" NO cambia: archivo puro, sin
+          #   DB. Delta verificado por MUTACION (agregar/sacar el archivo
+          #   con el resto del arbol fijo): +3. Si el runner da otro numero,
+          #   manda el runner.
+          grep -qE "^2352 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2352 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

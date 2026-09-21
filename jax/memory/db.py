@@ -1344,17 +1344,35 @@ class MemoryDB:
 
     @db_error_handler
     async def mark_action_item_done(self, item_id: int) -> Optional[bool]:
-        """Marca un pendiente como completado (comando /pendientes done)."""
+        """Marca un pendiente como completado (comando /pendientes done).
+
+        EL RETORNO (arreglado 2026-09-27, pendiente del 2026-09-20): antes
+        devolvia `cur.rowcount > 0`, y aiomysql cuenta filas CAMBIADAS, no
+        COINCIDENTES (`connect()` no pasa CLIENT.FOUND_ROWS al pool -- ver
+        `connect()`). `completed_at` es `timestamp` SIN microsegundos: marcar
+        como hecho un item que YA esta hecho, dos veces en el mismo segundo,
+        no cambia ninguna columna -- `rowcount=0` e indistinguible de "el
+        item no existe". Mismo defecto que `verify_fact`/`expire_fact`
+        (jax/memory/db.py, auditoria adversarial 2026-09-20), reencarnado en
+        este metodo vecino.
+
+        EL ORDEN: mismo patron (ver docstring de `verify_fact`) -- el UPDATE
+        va primero, el SELECT de existencia solo corre si `affected == 0`.
+        Con `autocommit=True` la conexion NO es una transaccion: invertir el
+        orden dejaria una carrera entre el SELECT y el UPDATE."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
+                affected = await cur.execute(
                     "UPDATE action_items SET status='done', completed_at=NOW() "
                     "WHERE id=%s",
                     (item_id,),
                 )
-                return cur.rowcount > 0
+                if affected:
+                    return True
+                await cur.execute("SELECT 1 FROM action_items WHERE id = %s", (item_id,))
+                return await cur.fetchone() is not None
 
     @db_error_handler
     async def save_person(self, name: str, nickname: Optional[str] = None) -> Optional[bool]:
@@ -1399,19 +1417,41 @@ class MemoryDB:
         nickname aparece en `names_or_nicknames` (llamado desde el worker de
         destilacion, jax/memory/worker.py, sobre las conversaciones que ya
         procesa cada 20 min -- reusa esa deteccion en vez de construir una
-        nueva, tal como diseñado en ronda 7). Devuelve cuantas filas se
-        actualizaron, o None si fallo."""
+        nueva, tal como diseñado en ronda 7). Devuelve cuantas personas
+        matchearon (no cuantas filas cambio el UPDATE), o None si fallo.
+
+        EL RETORNO (arreglado 2026-09-27, pendiente del 2026-09-20): antes
+        devolvia `cur.rowcount` crudo, y aiomysql cuenta filas CAMBIADAS, no
+        COINCIDENTES. `last_mentioned=CURDATE()` es un no-op de verdad
+        cuando la persona ya fue tocada hoy (a diferencia de
+        `mark_action_item_done`, CURDATE() no cambia dentro del mismo dia):
+        tocar dos veces el mismo dia devolvia 0, indistinguible de "nadie
+        matcheo" -- mismo defecto que `verify_fact`/`expire_fact`
+        reencarnado en este metodo vecino.
+
+        EL ORDEN: mismo patron -- el UPDATE va primero; solo si no cambio
+        NINGUNA fila (`affected == 0`, que con nombres repetidos puede
+        pasar aunque haya matches por no-op) se cuenta por separado cuantas
+        personas matchean el WHERE, para distinguir "nadie matchea" (0) de
+        "matcheo pero todos ya estaban al dia" (> 0)."""
         if not self.pool or not names_or_nicknames:
             return 0
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 placeholders = ",".join(["%s"] * len(names_or_nicknames))
-                await cur.execute(
+                affected = await cur.execute(
                     f"UPDATE people SET last_mentioned=CURDATE() "
                     f"WHERE name IN ({placeholders}) OR nickname IN ({placeholders})",
                     (*names_or_nicknames, *names_or_nicknames),
                 )
-                return cur.rowcount
+                if affected:
+                    return affected
+                await cur.execute(
+                    f"SELECT COUNT(*) FROM people "
+                    f"WHERE name IN ({placeholders}) OR nickname IN ({placeholders})",
+                    (*names_or_nicknames, *names_or_nicknames),
+                )
+                return (await cur.fetchone())[0]
 
     @db_error_handler
     async def mark_processed(self, conv_id: int) -> Optional[bool]:
