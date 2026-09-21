@@ -71,17 +71,40 @@ def test_la_consulta_de_hosts_va_por_la_clave_primaria():
 # --- spec 2026-09-18-auditor-local-opcion.md §4: el auditor se elige según los hosts -------
 
 async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
-    """Provider+model+binding sintéticos para 'auditor_local' -- la migración real de
-    jax-platform sólo los siembra con JAX_OLLAMA_CPU_URL en el entorno (no seteada acá),
-    igual que la fixture `auditor_local_bindeado` del lado de jax-platform. `model_ref` se
-    fija a mano (no vía el backfill de _seed_models_and_backfill): resolve_facet real
+    """Provider+model+binding sintéticos para LA CLAVE que `axioma_config` tenga hoy en
+    `ejecutor.auditor_faceta_local` -- nunca 'auditor_local' a mano. Ese nombre es DATO,
+    no una constante del código (eleccion_c5.py lo dice: "Los dos nombres de faceta salen
+    de axioma_config -- ninguno hardcodeado acá"), y jax-platform (repo AJENO, clonado
+    fresco en CADA corrida de este job) ya lo cambió una vez sin tocar jax: el 2026-09-20
+    pasó de 'auditor_local' a 'el_juez' (jax-platform migrations.py, `_EJECUTOR_CONFIG_C5`).
+    Este test rompió ese día -- no porque el código de jax cambiara, sino porque el
+    fixture asumía un nombre que dejó de controlar. Leerlo de la config real en cada
+    corrida hace que la próxima vez que cambie, el test lo siga sin arreglo.
+
+    (Causa raíz completa, reportada aparte porque es de OTRO repo: `_seed_el_juez_facet`
+    en jax-platform corre ANTES de `_seed_models_and_backfill` -- con `model_ref` de
+    `jax_local` todavía NULL y la tabla `model` todavía sin la fila de `qwen3-coder:30b`,
+    así que en una base NUEVA la semilla de 'el_juez' nunca llega a crear su
+    `facet_binding`, aunque en producción sí exista porque se cargó a mano por la
+    pantalla de administración. Este test no depende de que esa semilla funcione: siembra
+    su propia fila para la clave que `axioma_config` diga, exactamente como ya hacía con
+    'thot' más abajo.)
+
+    La migración real de jax-platform sólo siembra un auditor local propio con
+    JAX_OLLAMA_CPU_URL en el entorno (no seteada acá), igual que la fixture
+    `auditor_local_bindeado` del lado de jax-platform. `model_ref` se fija a mano (no vía
+    el backfill de _seed_models_and_backfill): resolve_facet real
     (facet_resolver._query_facet) hace JOIN contra `model` por esa columna. `is_local`
-    parametrizable: el peor caso (spec §4) es un 'auditor_local' bindeado a un proveedor
+    parametrizable: el peor caso (spec §4) es el auditor local bindeado a un proveedor
     que NO es local de verdad."""
     from jacobs import store
     async with store.conexion() as conn:
         async with conn.cursor() as cur:
-            await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+            await cur.execute(
+                "SELECT config_value FROM axioma_config WHERE config_key = 'ejecutor.auditor_faceta_local'")
+            _fila_cfg = await cur.fetchone()
+            faceta_local = (_fila_cfg[0] if _fila_cfg else "").strip() or "auditor_local"
+            await cur.execute("DELETE FROM facet_binding WHERE facet_key = %s", (faceta_local,))
             await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
             await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
             await cur.execute(
@@ -93,7 +116,7 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
             model_ref = cur.lastrowid
             await cur.execute(
                 "INSERT INTO facet_binding (facet_key, provider_id, model_id, model_ref, role) "
-                "VALUES ('auditor_local', 't-c5db-auditor-local', 'modelo-cpu', %s, 'primary')", (model_ref,))
+                "VALUES (%s, 't-c5db-auditor-local', 'modelo-cpu', %s, 'primary')", (faceta_local, model_ref))
             # El auditor de NUBE también se siembra acá. No alcanza con sembrar el local:
             # estos tests resuelven LOS DOS (una máquina con datos de clientes y una sin
             # ellos), y el job `jacobs-gobernanza-db` arma su base clonando jax-platform y
@@ -167,7 +190,7 @@ async def _con_auditor_local_de_prueba(accion, *, is_local: bool = True):
     finally:
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM facet_binding WHERE facet_key = 'auditor_local'")
+                await cur.execute("DELETE FROM facet_binding WHERE facet_key = %s", (faceta_local,))
                 await cur.execute("DELETE FROM model WHERE provider_id = 't-c5db-auditor-local'")
                 await cur.execute("DELETE FROM provider WHERE id = 't-c5db-auditor-local'")
                 if nube_sembrada_aca:
