@@ -100,6 +100,7 @@ def test_b7_real_mariadb_artifact_and_observation_relations():
     assertion=EnforcementAssertion(definition.control_id,1,definition.control_definition_hash,ClaimLevel.ENFORCED,AssertionVerdict.NOT_OBSERVED,identity.implementation_identity_hash,ClaimScope(ClaimEnvironment.CI),(subject,),(artifact.artifact_hash,),(observation.observation_id,),now,now,now)
     store.record_assertion(assertion)
     assert _scalar("SELECT COUNT(*) FROM jax_evidence.enforcement_assertions WHERE assertion_hash=%s",(assertion.assertion_hash,)) == 1
+    assert store.load_assertion(assertion.assertion_hash).assertion_hash == assertion.assertion_hash
     connection=_connection()
     try:
         with pytest.raises(Exception):

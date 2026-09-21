@@ -107,3 +107,16 @@ class MariaDBEvidenceStore:
             from .evidence_store import _seal, _observations
             return _seal(_observations,value)
         finally: con.close()
+    def load_assertion(self, assertion_hash):
+        require_hash(assertion_hash); con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SELECT canonical_assertion FROM jax_evidence.enforcement_assertions WHERE assertion_hash=%s",(assertion_hash,)); row=cur.fetchone()
+            if row is None: raise AssertionIntegrityError("assertion missing")
+            from .assertions import deserialize_enforcement_assertion
+            value=deserialize_enforcement_assertion(row[0])
+            if value.assertion_hash != assertion_hash: raise AssertionIntegrityError("row/canonical mismatch")
+            for h in value.evidence_artifact_hashes: self.load_evidence_artifact(h)
+            for oid in value.observation_ids: self.load_observation(oid)
+            from .evidence_store import _seal, _assertions
+            return _seal(_assertions,value)
+        finally: con.close()
