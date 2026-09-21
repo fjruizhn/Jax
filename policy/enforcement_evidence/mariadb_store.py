@@ -86,6 +86,14 @@ class MariaDBEvidenceStore:
             con.commit(); return observation
         except Exception: con.rollback(); raise
         finally: con.close()
+    def write_observation_in_transaction(self, cursor, observation, *, _token):
+        """Internal B6/B7 composition writer; cursor is the B6 transaction."""
+        if _token is not self.__lifecycle_token: raise ObservationIntegrityError("fixed lifecycle required")
+        from .canonical import canonical_bytes
+        payload=canonical_bytes(observation.projection()).decode("utf-8")
+        cursor.execute("INSERT INTO jax_evidence.enforcement_observations(observation_id,observation_hash,canonical_observation) VALUES (%s,%s,%s)", (observation.observation_id,observation.observation_hash,payload))
+        for h in observation.evidence_artifact_hashes:
+            cursor.execute("INSERT INTO jax_evidence.observation_artifacts(observation_id,artifact_hash) VALUES (%s,%s)", (observation.observation_id,h))
     def _record_assertion(self, assertion, *, _token):
         if _token is not self.__lifecycle_token: raise AssertionIntegrityError("fixed lifecycle required")
         con=self._connection_factory()
