@@ -3,11 +3,23 @@ from __future__ import annotations
 import json
 import hashlib
 from pathlib import Path
-from .models import ImplementationIdentity
+from .models import ImplementationIdentity, SourceState
 from .errors import UntrustedImplementationIdentityError
 def load_runtime_implementation_identity(path="/etc/jax/build/implementation-identity.json"):
  data=json.loads(Path(path).read_text(encoding="utf-8"))
- return ImplementationIdentity(data["repository_id"],data["git_commit_sha"],data["git_tree_id"],data["source_state"],data["build_manifest_blob_hash"],tuple(tuple(x) for x in data.get("schema_versions",())),data.get("build_id"))
+ return implementation_identity_from_projection(data)
+
+def implementation_identity_from_projection(data: dict) -> ImplementationIdentity:
+ """Strict parser only; provenance is deliberately not established here."""
+ try:
+  expected={"schema_version","kind","repository_id","source_revision_kind","git_commit_sha","git_tree_id","source_state","build_manifest_blob_hash","schema_versions","build_id"}
+  if set(data) != expected or data["source_revision_kind"] != "GIT": raise ValueError()
+  return ImplementationIdentity(data["repository_id"], data["git_commit_sha"],
+    data["git_tree_id"], SourceState(data["source_state"]),
+    data["build_manifest_blob_hash"], tuple(tuple(x) for x in data["schema_versions"]),
+    data["build_id"], data["schema_version"], data["kind"])
+ except Exception as exc:
+  raise UntrustedImplementationIdentityError("identity inválida") from exc
 
 def verify_build_manifest(store, identity: ImplementationIdentity, *, repository_root: str) -> dict:
  """Verify the immutable manifest bytes, not a mutable version label.

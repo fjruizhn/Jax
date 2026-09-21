@@ -7,6 +7,18 @@ from typing import Any
 from .ids import domain_hash, require_hash
 from .canonical import utc_text
 
+# These are protocol limits, rather than database implementation details.  They
+# are deliberately repeated at each boundary that accepts the corresponding
+# value so an in-memory test double cannot accidentally accept a value which a
+# production store rejects.
+MAX_BLOB_REFS_PER_ARTIFACT = 32
+MAX_REFERENCED_BYTES_PER_ARTIFACT = 4 * 1024 * 1024
+MAX_ARTIFACT_ENVELOPE_BYTES = 64 * 1024
+MAX_OBSERVATION_ENVELOPE_BYTES = 128 * 1024
+MAX_ASSERTION_ENVELOPE_BYTES = 128 * 1024
+MAX_ASSERTION_SUBJECTS = 1000
+MAX_ASSERTION_OBSERVATIONS = 1000
+
 class EvidenceType(str, Enum):
  SOURCE_SNAPSHOT="SOURCE_SNAPSHOT"; IMPLEMENTATION_MANIFEST="IMPLEMENTATION_MANIFEST"; DECISION_RECORD="DECISION_RECORD"; EXECUTION_REQUEST="EXECUTION_REQUEST"; EXECUTION_AUTHORIZATION="EXECUTION_AUTHORIZATION"; EXECUTION_RECORD="EXECUTION_RECORD"; HUMAN_APPROVAL="HUMAN_APPROVAL"; DRY_RUN_RESULT="DRY_RUN_RESULT"; EXECUTION_EVENT_SNAPSHOT="EXECUTION_EVENT_SNAPSHOT"; CONTROL_INPUT="CONTROL_INPUT"; CONFIG_SNAPSHOT="CONFIG_SNAPSHOT"; TEST_RESULT="TEST_RESULT"; CI_RUN_REFERENCE="CI_RUN_REFERENCE"; DB_SCHEMA_OBSERVATION="DB_SCHEMA_OBSERVATION"; WORKER_RESULT="WORKER_RESULT"
 class EvidenceClass(str, Enum): INTERNAL_STATE="INTERNAL_STATE"; RUNTIME_OBSERVATION="RUNTIME_OBSERVATION"; TEST_EVIDENCE="TEST_EVIDENCE"; EXTERNAL_CITED="EXTERNAL_CITED"
@@ -44,7 +56,7 @@ class ClaimScope:
 class EvidenceArtifact:
  evidence_type:EvidenceType; evidence_class:EvidenceClass; control_id:str; control_version:int; control_definition_hash:str; subject:EvidenceSubject; blob_refs:tuple[EvidenceBlobRef,...]; trust_domain:EvidenceTrustDomain; producer:str; implementation_identity_hash:str; produced_at_utc:datetime; decision_id:str|None=None; execution_id:str|None=None; policy_authority_binding:tuple[tuple[str,str],...]=(); schema_version:str="1.0"; kind:str="JAX_EVIDENCE_ARTIFACT"
  def __post_init__(self):
-  if (self.schema_version,self.kind)!=("1.0","JAX_EVIDENCE_ARTIFACT") or not self.blob_refs or len(self.blob_refs)>32: raise ValueError("EvidenceArtifact inválido")
+  if (self.schema_version,self.kind)!=("1.0","JAX_EVIDENCE_ARTIFACT") or not self.blob_refs or len(self.blob_refs)>MAX_BLOB_REFS_PER_ARTIFACT: raise ValueError("EvidenceArtifact inválido")
   require_hash(self.control_definition_hash); require_hash(self.implementation_identity_hash)
  @property
  def artifact_hash(self): return domain_hash("JAX-EVIDENCE-ARTIFACT/1",self.projection())
@@ -52,7 +64,11 @@ class EvidenceArtifact:
 @dataclass(frozen=True)
 class EnforcementObservation:
  observation_id:str; control_id:str; control_version:int; control_definition_hash:str; subject:EvidenceSubject; implementation_identity_hash:str; outcome:ObservationOutcome; reason_code:str; occurred_at_utc:datetime; scope:ClaimScope; evidence_artifact_hashes:tuple[str,...]; decision_id:str|None=None; execution_id:str|None=None; schema_version:str="1.0"; kind:str="JAX_ENFORCEMENT_OBSERVATION"
- def __post_init__(self): require_hash(self.control_definition_hash); require_hash(self.implementation_identity_hash); [require_hash(x) for x in self.evidence_artifact_hashes]
+ def __post_init__(self):
+  require_hash(self.control_definition_hash); require_hash(self.implementation_identity_hash); [require_hash(x) for x in self.evidence_artifact_hashes]
+  # An observation is an envelope, not an arbitrary log transport.
+  from .canonical import canonical_bytes
+  if len(canonical_bytes(self.projection())) > MAX_OBSERVATION_ENVELOPE_BYTES: raise ValueError("observation envelope too large")
  @property
  def observation_hash(self): return domain_hash("JAX-ENFORCEMENT-OBSERVATION/1",self.projection())
  def projection(self): return {"schema_version":self.schema_version,"kind":self.kind,"observation_id":self.observation_id,"control_id":self.control_id,"control_version":self.control_version,"control_definition_hash":self.control_definition_hash,"subject":self.subject.projection(),"implementation_identity_hash":self.implementation_identity_hash,"outcome":self.outcome.value,"reason_code":self.reason_code,"occurred_at_utc":utc_text(self.occurred_at_utc),"scope":{"environment":self.scope.environment.value,"deployment_id":self.scope.deployment_id,"database_scope_id":self.scope.database_scope_id,"coverage":self.scope.coverage.value},"evidence_artifact_hashes":list(self.evidence_artifact_hashes),"decision_id":self.decision_id,"execution_id":self.execution_id}
@@ -62,6 +78,9 @@ class EnforcementAssertion:
  def __post_init__(self):
   require_hash(self.control_definition_hash); require_hash(self.implementation_identity_hash)
   [require_hash(x) for x in self.evidence_artifact_hashes]
+  if len(self.subject_set)>MAX_ASSERTION_SUBJECTS or len(self.observation_ids)>MAX_ASSERTION_OBSERVATIONS: raise ValueError("assertion relationship bound exceeded")
+  from .canonical import canonical_bytes
+  if len(canonical_bytes(self.projection())) > MAX_ASSERTION_ENVELOPE_BYTES: raise ValueError("assertion envelope too large")
  @property
  def assertion_hash(self): return domain_hash("JAX-ENFORCEMENT-ASSERTION/1",self.projection())
  def projection(self): return {"schema_version":self.schema_version,"kind":self.kind,"control_id":self.control_id,"control_version":self.control_version,"control_definition_hash":self.control_definition_hash,"claim_level":self.claim_level.value,"verdict":self.verdict.value,"implementation_identity_hash":self.implementation_identity_hash,"scope":{"environment":self.scope.environment.value,"deployment_id":self.scope.deployment_id,"database_scope_id":self.scope.database_scope_id,"coverage":self.scope.coverage.value},"subject_set":[x.projection() for x in self.subject_set],"evidence_artifact_hashes":list(self.evidence_artifact_hashes),"observation_ids":list(self.observation_ids),"as_of_utc":utc_text(self.as_of_utc),"evidence_window_start_utc":utc_text(self.evidence_window_start_utc),"evidence_window_end_utc":utc_text(self.evidence_window_end_utc),"trust_domains_used":[x.value for x in self.trust_domains_used],"reason_codes":list(self.reason_codes)}

@@ -73,3 +73,29 @@ def test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape():
  manifest={"schema_version":"1.0","kind":"JAX_TEST_EVIDENCE_MANIFEST","provider":"github-actions","repository_id":"fjruizhn/Jax","commit_sha":"a"*40,"implementation_identity_hash":"sha256:"+"a"*64,"workflow":"policy","run_id":"1","job_id":"2","environment":"CI","started_at_utc":"2026-01-01T00:00:00Z","completed_at_utc":"2026-01-01T00:00:01Z","tests":[{"test_id":"tests.policy.test_enforcement_evidence_core","bindings":[{"control_id":"CTL.B6.GOVERNED_DISPATCH","control_version":1}],"result":"PASSED"}],"counts":{"passed":1},"raw_output_blob_hash":h}
  assert ingest_test_evidence_manifest(s,json.dumps(manifest).encode(),raw)["commit_sha"]=="a"*40
  with pytest.raises(Exception): ingest_test_evidence_manifest(s,json.dumps(manifest).encode(),b"different")
+
+def test_artifact_aggregate_and_envelope_bounds_are_fail_closed():
+ s=EvidenceStore(); d=load_control_definition("CTL.B6.GOVERNED_DISPATCH"); i=identity(s)
+ # One MiB blobs are legal individually but five references exceed the V1
+ # aggregate cap.  This also proves the store, not caller metadata, counts.
+ refs=tuple(EvidenceBlobRef(s.put_evidence_blob(bytes([n])*1024*1024).evidence_hash,str(n)) for n in range(5))
+ a=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,d.control_id,1,d.control_definition_hash,EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"aggregate"),refs,EvidenceTrustDomain.JAX_RUNTIME,"runtime",i.implementation_identity_hash,NOW)
+ with pytest.raises(Exception): s._record_artifact(a,_token=s._fixed_lifecycle_token())
+ # The envelope itself is capped independently of referenced content.
+ b=s.put_evidence_blob(b"x")
+ huge=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,d.control_id,1,d.control_definition_hash,EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"x"*70000),(EvidenceBlobRef(b.evidence_hash,"x"),),EvidenceTrustDomain.JAX_RUNTIME,"runtime",i.implementation_identity_hash,NOW)
+ with pytest.raises(Exception): s._record_artifact(huge,_token=s._fixed_lifecycle_token())
+
+def test_assertion_relationship_bounds_and_worker_result_ingestion(tmp_path):
+ from policy.enforcement_evidence.trusted_lifecycle import RuntimeEvidenceRecorder
+ from policy.enforcement_evidence.worker_results import WorkerResultIngestor
+ s=EvidenceStore(); i=identity(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)
+ recorder=RuntimeEvidenceRecorder(s,i,"worker",scope)
+ p=tmp_path/"result.bin"; p.write_bytes(b"worker bytes")
+ result=WorkerResultIngestor(recorder).ingest(p,execution_id="exec-1")
+ assert result.evidence_type is EvidenceType.WORKER_RESULT
+ assert s.get_evidence_blob(result.blob_refs[0].evidence_hash)==b"worker bytes"
+ with pytest.raises(Exception): WorkerResultIngestor(recorder).ingest(tmp_path/"missing",execution_id="exec-1")
+ d=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
+ subjects=tuple(EvidenceSubject(EvidenceSubjectType.EXECUTION,str(n)) for n in range(1001))
+ with pytest.raises(ValueError): EnforcementAssertion(d.control_id,1,d.control_definition_hash,ClaimLevel.ENFORCED,AssertionVerdict.NOT_OBSERVED,i.implementation_identity_hash,scope,subjects,(),(),NOW,NOW,NOW)

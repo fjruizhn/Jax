@@ -7,7 +7,10 @@ import weakref
 from dataclasses import dataclass
 from .ids import sha256_bytes, require_hash
 from .errors import EvidenceBlobMissingError, EvidenceBlobHashMismatchError, EvidenceBlobTooLargeError, EvidenceArtifactIntegrityError, EvidenceArtifactUntrustedError, ObservationIntegrityError, AssertionIntegrityError, EvidenceBindingError
-from .models import EvidenceArtifact, EnforcementObservation
+from .models import (EvidenceArtifact, EnforcementObservation,
+                     MAX_REFERENCED_BYTES_PER_ARTIFACT,
+                     MAX_ARTIFACT_ENVELOPE_BYTES)
+from .canonical import canonical_bytes
 MAX_BLOB_BYTES=1024*1024
 @dataclass(frozen=True)
 class EvidenceBlob: evidence_hash:str; size_bytes:int; bytes:bytes
@@ -29,6 +32,10 @@ class EvidenceStore:
   h=identity.implementation_identity_hash; old=self._identity_rows.get(h)
   if old is not None and old!=identity: raise EvidenceArtifactIntegrityError("identity collision")
   self._identity_rows[h]=identity; return _seal(_identities, identity)
+ def load_implementation_identity(self, identity_hash):
+  value=self._identity_rows.get(identity_hash)
+  if value is None or value.implementation_identity_hash!=identity_hash: raise EvidenceBlobMissingError(identity_hash)
+  return _seal(_identities,value)
  def get_evidence_blob(self,evidence_hash:str)->bytes:
   require_hash(evidence_hash); blob=self._blobs.get(evidence_hash)
   if blob is None: raise EvidenceBlobMissingError(evidence_hash)
@@ -36,7 +43,13 @@ class EvidenceStore:
   return blob.bytes
  def _record_artifact(self,artifact:EvidenceArtifact, *, _token)->EvidenceArtifact:
   if _token is not self.__lifecycle_token: raise EvidenceArtifactUntrustedError("fixed lifecycle required")
-  for ref in artifact.blob_refs: self.get_evidence_blob(ref.evidence_hash)
+  if len(canonical_bytes(artifact.projection())) > MAX_ARTIFACT_ENVELOPE_BYTES:
+   raise EvidenceArtifactIntegrityError("artifact envelope too large")
+  total=0
+  for ref in artifact.blob_refs:
+   data=self.get_evidence_blob(ref.evidence_hash); total += len(data)
+  if total > MAX_REFERENCED_BYTES_PER_ARTIFACT:
+   raise EvidenceArtifactIntegrityError("artifact referenced bytes too large")
   h=artifact.artifact_hash; old=self._artifact_rows.get(h)
   if old is not None and old!=artifact: raise EvidenceArtifactIntegrityError("artifact hash conflict")
   self._artifact_rows[h]=artifact; return _seal(_artifacts,artifact)
