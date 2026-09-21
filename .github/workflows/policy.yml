@@ -3053,13 +3053,14 @@ jobs:
         run: |
           python - <<'PY'
           import hashlib, json, os
+          from datetime import datetime, timezone
           raw = open('/tmp/out', 'rb').read()
           manifest = {
             'schema_version': '1.0', 'kind': 'JAX_TEST_EVIDENCE_MANIFEST',
             'provider': 'github-actions', 'repository_id': os.environ['GITHUB_REPOSITORY'],
             'commit_sha': os.environ['GITHUB_SHA'], 'implementation_identity_hash': 'sha256:' + hashlib.sha256(os.environ['GITHUB_SHA'].encode()).hexdigest(),
             'workflow': 'policy.yml', 'run_id': os.environ['GITHUB_RUN_ID'], 'job_id': os.environ['GITHUB_JOB'],
-            'environment': 'CI', 'started_at_utc': '', 'completed_at_utc': '',
+            'environment': 'CI', 'started_at_utc': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'), 'completed_at_utc': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             'tests': [], 'counts': {'output_sha256': 'sha256:' + hashlib.sha256(raw).hexdigest()},
             'raw_output_blob_hash': 'sha256:' + hashlib.sha256(raw).hexdigest(),
           }
