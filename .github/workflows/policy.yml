@@ -743,7 +743,7 @@ jobs:
           #   duplica en este job. Medido en local (MISMO comando): 66
           #   passed, 0 failed. Si el runner da otro numero, manda el
           #   runner.
-          # 66 -> 72 el 2026-09-27 (pendiente del 2026-09-20:
+          # 66 -> 72 el 2026-09-21 (pendiente del 2026-09-20:
           #   mark_action_item_done/touch_person_mentions distinguen no-op
           #   de "no existe", mismo defecto ya arreglado en
           #   verify_fact/expire_fact -- ver tests/test_memoria_retorno_no_ambiguo.py,
@@ -761,8 +761,25 @@ jobs:
           #   en "base caida", solo en el no-op idempotente). Medido en
           #   local (MISMO comando, MariaDB real 127.0.0.1:3308): 66 -> 72
           #   passed. Si el runner da otro numero, manda el runner.
-          grep -qE "^72 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 72 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 72 -> 76 el 2026-09-21 (cierre de la auditoria adversarial sobre
+          #   el commit `c687a2e`, jax#247): +4 en
+          #   tests/test_accion_persona_retorno_no_ambiguo.py -- el pool en
+          #   `None` (no un mock de `acquire()` que explota) daba `0` en
+          #   vez de `None` en touch_person_mentions (BLOQUEANTE, hallazgo
+          #   #1); el caso mixto (una persona tocada hoy, otra no) daba dos
+          #   numeros distintos para el mismo estado (hallazgo #2); el
+          #   orden UPDATE-luego-SELECT abria una carrera de verdad con el
+          #   WHERE por nombre (hallazgo #3, ahora COUNT siempre primero);
+          #   y `touch_person_mentions([])` separado de "sin pool". Los 3
+          #   primeros vistos ROJOS contra el codigo de este mismo commit
+          #   (`test_touch_person_mentions_sin_pool_da_none`,
+          #   `test_touch_person_mentions_caso_mixto_es_monotono`,
+          #   `test_touch_person_mentions_cuenta_antes_de_actualizar`; el
+          #   resto ya pasaba). Medido en local (MISMO comando, MariaDB
+          #   real 127.0.0.1:3308): 72 -> 76 passed. Si el runner da otro
+          #   numero, manda el runner.
+          grep -qE "^76 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 76 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
@@ -2953,7 +2970,7 @@ jobs:
           #   (mismo metodo que la nota de arriba, agregar/sacar el archivo
           #   con el resto del arbol fijo): +15. Si el runner da otro
           #   numero, manda el runner.
-          # 2349 -> 2352 el 2026-09-27 (pendiente del 2026-09-20:
+          # 2349 -> 2352 el 2026-09-21 (pendiente del 2026-09-20:
           #   mark_action_item_done/touch_person_mentions distinguen no-op
           #   de "no existe"): tests/test_repl_pendientes_base_caida.py es
           #   archivo NUEVO (+3), puro (sin DB, sin red -- se agrega a la

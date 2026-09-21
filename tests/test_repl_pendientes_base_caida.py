@@ -8,8 +8,11 @@ igual que `False` (el pendiente no existe) en la rama `/pendientes done`:
 borde que ya se arreglo en `handle_fact_command`/`verify_fact`
 (tests/test_repl_fact_verify_autoria.py, `OtrasRamasSinCambiarTest` y
 `VerifyConAutoriaTest::test_base_caida_no_se_reporta_como_hecho_inexistente`)
--- pendiente del 2026-09-27: el arreglo de la capa de datos
-(`mark_action_item_done` distingue `True`/`False`/`None`, ver
+-- pendiente notado el 2026-09-20, arreglado el 2026-09-21 (recordatorio
+agendado en `claude-skills/PENDIENTES.md` para el 2026-09-27: esa fecha es
+de AVISO, no de arreglo -- ver el hallazgo #4 de la auditoria adversarial
+de jax#247). El arreglo de la capa de datos (`mark_action_item_done`
+distingue `True`/`False`/`None`, ver
 tests/test_accion_persona_retorno_no_ambiguo.py) no sirve de nada si el
 consumidor lo vuelve a aplastar en el borde.
 
