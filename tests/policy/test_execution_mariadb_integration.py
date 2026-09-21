@@ -124,6 +124,17 @@ def test_b7_real_mariadb_transaction_rollback_leaves_no_artifact():
         assert cursor.fetchone()[0] == 0
     finally: connection.close()
 
+def test_b7_writer_failure_rolls_back_real_governed_execution():
+    _apply_migration(); now=datetime.now(timezone.utc); decision=record()
+    request=build_execution_request(decision, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={}, timeout_seconds=60)
+    auth=authorize_execution(decision, request, catalog(), now_utc=now)
+    store=MariaDBExecutionStore(_connection); store.insert_authorization(auth)
+    def fail(_cursor, _record): raise RuntimeError("forced B7 persistence failure")
+    store.execution_evidence_writer=fail
+    with pytest.raises(RuntimeError): create_execution(store, auth, now_utc=now)
+    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_authorization_consumptions WHERE authorization_id=%s",(auth.authorization_id,)) == 0
+    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_records WHERE decision_id=%s",(decision.decision_id,)) == 0
+
 
 def _scalar(sql, args=()):
     connection = _connection()
