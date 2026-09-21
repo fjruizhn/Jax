@@ -3045,10 +3045,10 @@ jobs:
           # (que no reproduce los skipped estructurales del runner). El piso CI
           # se deriva del 2352 medido en master más los tres casos B6; los skipped
           # siguen siendo estructurales.
-          # 2355 -> 2360 (B7-R0): cinco controles puros del EvidenceStore;
+          # 2355 -> 2361 (B7-R0): seis controles puros del EvidenceStore;
           # hash/deduplicación, ciclo de confianza, aislamiento y precedencia.
-          grep -qE "^2360 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2360 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2361 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2361 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
       - name: Emitir manifiesto canónico B7 de tests puros
         run: |
           python - <<'PY'
