@@ -65,7 +65,7 @@ def _record_satisfied(store, control_id: str, *, subject_type, subject_identity:
         try:
             recorder.record_satisfied(control_id=control_id, subject_type=subject_type,
                 subject_identity=subject_identity, decision_id=decision_id, execution_id=execution_id)
-        except Exception:
+        except Exception:  # fail-soft: optional post-commit observation cannot alter B6 authority.
             # Existing B6 semantics remain authoritative.  Mandatory pre-side
             # effect recording uses the explicit shared writer instead.
             pass

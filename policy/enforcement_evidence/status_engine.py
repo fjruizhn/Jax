@@ -42,7 +42,7 @@ class EnforcementStatusService:
    from .implementation_identity import verify_build_manifest
    manifest=verify_build_manifest(self._store,self._identity,repository_root=self._repository_root)
    return {"policy/enforcement_evidence/controls/v1.json","policy/enforcement_evidence/migrations/001_enforcement_evidence.sql"}.issubset(manifest["files"])
-  except Exception: return False
+  except Exception: return False  # fail-soft: unverifiable manifest is insufficient evidence.
  def _tested(self, definition, as_of):
   manifests=self._store._test_manifests_for(self._identity.implementation_identity_hash); required=(definition.control_id,definition.control_version)
   for m in manifests:
@@ -51,7 +51,7 @@ class EnforcementStatusService:
     if datetime.fromisoformat(m["completed_at_utc"].replace("Z","+00:00")) < as_of-timedelta(days=30): continue
     tests=[t for t in m["tests"] if any((b["control_id"],b["control_version"])==required for b in t["bindings"])]
     if tests and all(t["result"]=="PASSED" for t in tests): return True
-   except Exception: pass
+   except Exception: pass  # fail-soft: malformed manifest is ineligible, never passing evidence.
   return False
  def evaluate_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
   definition=load_control_definition(control_id,control_version); observations=self._store.observations()

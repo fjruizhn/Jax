@@ -44,7 +44,7 @@ def _b7_authorization_outcome(control_id, *, denied=False, decision_id=None, sub
             from policy.enforcement_evidence.models import EvidenceSubjectType
             recorder.record_satisfied(control_id=control_id,subject_type=EvidenceSubjectType.AUTHORIZATION,
                 subject_identity=subject_identity or decision_id,decision_id=decision_id)
-    except Exception:
+    except Exception:  # fail-soft: optional observation cannot alter B6 authorization.
         # B7 does not replace the governing authorization decision.
         pass
 
