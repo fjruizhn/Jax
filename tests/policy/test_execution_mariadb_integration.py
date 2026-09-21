@@ -106,6 +106,22 @@ def test_b7_real_mariadb_artifact_and_observation_relations():
         connection.rollback()
     finally: connection.close()
 
+def test_b7_real_mariadb_transaction_rollback_leaves_no_artifact():
+    _apply_evidence_migration(); marker = "sha256:" + "f" * 64
+    connection = _connection()
+    try:
+        cursor=connection.cursor()
+        with pytest.raises(Exception):
+            cursor.execute("INSERT INTO jax_evidence.evidence_artifacts(artifact_hash,canonical_artifact) VALUES (%s,%s)",(marker,"{}"))
+            # A missing blob FK makes the relationship insertion fail; rollback
+            # must erase the otherwise valid artifact row as one transaction.
+            cursor.execute("INSERT INTO jax_evidence.evidence_artifact_blobs(artifact_hash,evidence_hash) VALUES (%s,%s)",(marker,"sha256:"+"e"*64))
+            connection.commit()
+        connection.rollback()
+        cursor.execute("SELECT COUNT(*) FROM jax_evidence.evidence_artifacts WHERE artifact_hash=%s",(marker,))
+        assert cursor.fetchone()[0] == 0
+    finally: connection.close()
+
 
 def _scalar(sql, args=()):
     connection = _connection()
