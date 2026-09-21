@@ -147,6 +147,23 @@ def test_b7_dispatch_writer_failure_rolls_back_dispatch_event():
     with pytest.raises(RuntimeError): dispatch_execution(store, execution, auth, now_utc=now, job_id="b7-job")
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE execution_id=%s AND event_type='MOTOR_DISPATCHED'",(execution.execution_id,)) == 0
 
+def test_b7_composed_writer_persists_with_same_create_transaction():
+    """The installed writer uses the B6 cursor; no second B7 commit exists."""
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+    from policy.enforcement_evidence.models import ImplementationIdentity, SourceState, ClaimScope, ClaimEnvironment
+    from policy.enforcement_evidence.trusted_lifecycle import RuntimeEvidenceRecorder
+    from policy.execution_control.service import configure_b7_execution_evidence
+    _apply_migration(); _apply_evidence_migration(); now=datetime.now(timezone.utc); decision=record()
+    evidence=MariaDBEvidenceStore(_connection); manifest=evidence.put_evidence_blob(b"runtime-manifest")
+    identity=ImplementationIdentity("fjruizhn/Jax","a"*40,"b"*40,SourceState.CLEAN,manifest.evidence_hash)
+    recorder=RuntimeEvidenceRecorder(evidence,identity,"ci",ClaimScope(ClaimEnvironment.CI,database_scope_id="ci-mariadb"))
+    request=build_execution_request(decision, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={}, timeout_seconds=60)
+    auth=authorize_execution(decision, request, catalog(), now_utc=now)
+    store=MariaDBExecutionStore(_connection); store.insert_authorization(auth)
+    configure_b7_execution_evidence(store,evidence,recorder)
+    execution=create_execution(store,auth,now_utc=now)
+    assert _scalar("SELECT COUNT(*) FROM jax_evidence.enforcement_observations WHERE canonical_observation LIKE %s",("%"+execution.execution_id+"%",)) == 1
+
 
 def _scalar(sql, args=()):
     connection = _connection()

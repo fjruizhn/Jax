@@ -6,7 +6,12 @@ class RuntimeEvidenceRecorder:
    from .implementation_identity import verify_build_manifest
    verify_build_manifest(store, implementation_identity, repository_root=repository_root)
   self._token=store._fixed_lifecycle_token()
-  store.record_identity(implementation_identity)
+  # MariaDB deliberately exposes only the internal lifecycle write, while the
+  # in-memory test store retains a small convenience method.
+  if hasattr(store, "record_identity"):
+   store.record_identity(implementation_identity)
+  else:
+   store._record_identity(implementation_identity, _token=self._token)
  def record_artifact(self,value):
   if value.implementation_identity_hash != self._identity.implementation_identity_hash or value.producer != self._producer: raise ValueError("untrusted artifact composition")
   return self._store._record_artifact(value, _token=self._token)
