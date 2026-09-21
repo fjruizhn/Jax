@@ -120,3 +120,13 @@ class MariaDBEvidenceStore:
             from .evidence_store import _seal, _assertions
             return _seal(_assertions,value)
         finally: con.close()
+    def derive_in_repeatable_read(self, derive):
+        """Run deterministic derivation over one MariaDB repeatable-read snapshot."""
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"); cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+            value=derive(cur)
+            con.commit(); return value
+        except Exception:
+            con.rollback(); raise
+        finally: con.close()
