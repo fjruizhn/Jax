@@ -295,6 +295,32 @@ def ruta_procesado(trabajo: Path, huella: str) -> Path:
     return trabajo_abs / "procesado" / huella
 
 
+def _resolver_subruta_de_fuente(fuente_abs: Path, subruta: str | Path | None) -> Path:
+    """Resuelve la subcarpeta OPCIONAL de `fuente/` donde se conserva la
+    estructura de origen (camino de entrada más simple, 2026-09-21,
+    `scripts/procesar_archivos.py`: "un archivo que estaba en 'Estados
+    Financieros/EEFF.pdf' tiene que quedar en
+    'fuente/estados-financieros/EEFF.pdf', no suelto en la raíz").
+
+    Pasa por el MISMO jail que el resto de esta pieza (`_resolver_bajo_jail`,
+    spec §4, C-1) -- una subruta también es una ruta que el llamador
+    controla. Y ADEMÁS, acá, se exige que el resultado quede DENTRO de
+    `fuente_abs`: el jail global sólo garantiza "adentro de
+    WORKSPACE_ROOT", así que una subruta con '..' que se quedara dentro del
+    workspace pero saliera de `fuente/` (hacia `procesado/`, por ejemplo)
+    pasaría el jail global sin problema y rompería igual el invariante de
+    ESTA carpeta puntual -- `fuente/` inmutable, cada cosa en su lugar."""
+    if not subruta:
+        return fuente_abs
+    resuelto = _resolver_bajo_jail(fuente_abs / Path(subruta))
+    if resuelto != fuente_abs and fuente_abs not in resuelto.parents:
+        raise ValueError(
+            f"ingesta: la subruta '{subruta}' resuelve fuera de 'fuente/' "
+            f"({resuelto})"
+        )
+    return resuelto
+
+
 def _nombre_candidato(origen: Path, sufijo_extra: str = "") -> str:
     """I-6: el TRONCO se recorta antes de agregar el sufijo de huella, así
     el resultado siempre cabe en el límite del filesystem -- nunca un
@@ -599,10 +625,18 @@ def _encabezado_parcial(huella: str, detalle: dict) -> str:
     )
 
 
-def ingerir(origen: Path, trabajo: Path) -> Ficha:
+def ingerir(origen: Path, trabajo: Path, *, subruta: str | Path | None = None) -> Ficha:
+    """`subruta` (opcional): subcarpeta de `fuente/` donde se conserva la
+    subcarpeta de origen -- ej. `"estados-financieros"` para un archivo que
+    venía de una carpeta `Estados Financieros/` (ver
+    `scripts/procesar_archivos.py`). `None` o `""` es la raíz de `fuente/`,
+    el comportamiento de siempre. `procesado/` NO se ve afectado: sigue
+    indexado por sha256, plano -- sólo cambia dónde vive la copia en
+    `fuente/`."""
     origen = Path(origen)
     trabajo_abs = _resolver_bajo_jail(Path(trabajo))  # C-1/I-7
-    fuente_abs = trabajo_abs / "fuente"
+    fuente_raiz = trabajo_abs / "fuente"
+    fuente_abs = _resolver_subruta_de_fuente(fuente_raiz, subruta)
     fuente_abs.mkdir(parents=True, exist_ok=True)
 
     huella = sha256_de(origen)

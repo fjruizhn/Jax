@@ -1300,3 +1300,85 @@ def test_resumen_parcial_nombra_las_hojas_perdidas_por_error(tmp_path: Path, mon
     assert "extracto parcial -- ver ficha.json" not in aviso, (
         "cayó al genérico en vez de nombrar la hoja perdida"
     )
+
+
+# ---------------------------------------------------------------------------
+# `subruta` (2026-09-21, camino de entrada más simple -- procesar_archivos.py):
+# `ingerir()` conserva la subcarpeta de origen dentro de `fuente/` cuando el
+# llamador la pasa. `procesado/` NO se ve afectado -- sigue indexado por
+# sha256, plano, igual que siempre; sólo cambia DÓNDE vive la copia en
+# `fuente/`. La subruta pasa por el MISMO jail que `trabajo` (spec §4) y,
+# además, tiene que quedar DENTRO de `fuente/` -- un '..' que se quedara
+# adentro del workspace pero saliera de `fuente/` (hacia `procesado/`, por
+# ejemplo) pasaría el jail global sin problema y rompería igual el
+# invariante de esta carpeta puntual.
+# ---------------------------------------------------------------------------
+
+
+def test_subruta_conserva_la_subcarpeta_en_fuente(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "EEFF.xlsx")
+
+    ficha = ingesta.ingerir(origen, trabajo, subruta="estados-financieros")
+
+    assert (trabajo / "fuente" / "estados-financieros" / "EEFF.xlsx").is_file()
+    assert not (trabajo / "fuente" / "EEFF.xlsx").exists()
+    assert ficha.estado == "ok"
+    assert Path(ficha.origen) == Path("fuente/estados-financieros/EEFF.xlsx")
+
+
+def test_subruta_ausente_o_vacia_va_a_la_raiz_de_fuente(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    ficha_sin = ingesta.ingerir(origen, trabajo)
+    assert (trabajo / "fuente" / "e.xlsx").is_file()
+
+    origen2 = _libro(tmp_path / "e2.xlsx", valor=200)
+    ficha_vacia = ingesta.ingerir(origen2, trabajo, subruta="")
+    assert (trabajo / "fuente" / "e2.xlsx").is_file()
+
+    assert ficha_sin.estado == "ok"
+    assert ficha_vacia.estado == "ok"
+
+
+def test_subruta_anidada_multiples_niveles(tmp_path: Path):
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "EEFF.xlsx")
+
+    ficha = ingesta.ingerir(origen, trabajo, subruta="a/b/c")
+
+    assert (trabajo / "fuente" / "a" / "b" / "c" / "EEFF.xlsx").is_file()
+    assert Path(ficha.origen) == Path("fuente/a/b/c/EEFF.xlsx")
+
+
+def test_subruta_que_escapa_de_fuente_se_rechaza(tmp_path: Path):
+    """Una subruta con '..' que sale de `fuente/` pero se queda ADENTRO del
+    workspace (ej. hacia `procesado/`) tiene que rechazarse igual que un
+    escape del workspace -- el jail global por sí solo no alcanza acá."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "EEFF.xlsx")
+
+    with pytest.raises(ValueError, match="fuera de 'fuente/'"):
+        ingesta.ingerir(origen, trabajo, subruta="../procesado")
+
+    assert not (trabajo / "procesado" / "EEFF.xlsx").exists()
+
+
+def test_subruta_mismo_contenido_en_dos_subcarpetas_no_reextrae(tmp_path: Path, monkeypatch):
+    """El mismo archivo (mismos bytes) ingerido bajo DOS subrutas distintas
+    -- cache por sha256 sigue plano en `procesado/`, cero trabajo la
+    segunda vez, igual que sin subruta."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "EEFF.xlsx")
+
+    ingesta.ingerir(origen, trabajo, subruta="documentacion-legal")
+
+    def no_debe_llamarse(_):
+        raise AssertionError("se volvio a extraer el mismo contenido bajo otra subruta")
+
+    monkeypatch.setattr(compuerta, "extraer", no_debe_llamarse)
+    ficha2 = ingesta.ingerir(origen, trabajo, subruta="estados-financieros")
+
+    assert ficha2.estado == "ok"
+    assert (trabajo / "fuente" / "estados-financieros" / "EEFF.xlsx").is_file()

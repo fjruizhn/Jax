@@ -3439,11 +3439,27 @@ jobs:
       # encabezado, no antes) y MINOR 3 (`_resumen_parcial` nombra las
       # hojas perdidas por error -- antes la pérdida más grave que puede
       # tener un libro era la única que el aviso no nombraba). De 35 a 39.
+      #
+      # Camino de entrada más simple (2026-09-21, procesamiento-archivos-
+      # nucleo, scripts/procesar_archivos.py): `ingerir()` gana un parámetro
+      # `subruta` OPCIONAL para conservar la subcarpeta de origen dentro de
+      # `fuente/` -- sin esto, un archivo que venía de "Estados
+      # Financieros/EEFF.pdf" quedaba suelto en la raíz de `fuente/`, y esa
+      # subcarpeta ES información (no es lo mismo "Estados Financieros" que
+      # "Documentación Legal"). La subruta pasa por el MISMO jail que
+      # `trabajo` (spec §4, C-1) y ADEMÁS se valida que el resultado quede
+      # DENTRO de `fuente/` -- el jail global por sí solo no alcanza para un
+      # '..' que se quedara dentro del workspace pero saliera de `fuente/`
+      # (hacia `procesado/`, por ejemplo). +5 tests: conserva la subcarpeta;
+      # ausente/vacía sigue yendo a la raíz (compatibilidad); anidada en
+      # varios niveles; un escape hacia fuera de `fuente/` se rechaza; el
+      # mismo contenido en dos subrutas distintas sigue cacheando (cero
+      # trabajo la segunda vez). De 39 a 44.
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          grep -qE "^39 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 39 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^44 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 44 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el
@@ -3479,6 +3495,30 @@ jobs:
           python -m pytest -q scripts/_medir_utilidad_extractos_test.py 2>&1 | tee /tmp/medir_utilidad_tests
           grep -qE "^11 passed" /tmp/medir_utilidad_tests || {
             echo "PISO ROTO: se esperaban 11 tests CORRIDOS del medidor de utilidad. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+
+      # Camino de entrada más simple (2026-09-21, procesamiento-archivos-
+      # nucleo): `scripts/procesar_archivos.py` -- `procesar(proyecto,
+      # rutas) -> dict` + CLI. `procesamiento/` ya estaba terminado y
+      # auditado (jax#252) pero nadie lo llamaba; esto es el guion que lo
+      # pone a trabajar. Tres reglas, cada una con su test: (1) conserva la
+      # subcarpeta de origen dentro de `fuente/` -- slugificada componente
+      # por componente, el nombre del archivo queda intacto -- apoyándose
+      # en el `subruta` opcional que ganó `ingesta.ingerir()` en el paso de
+      # arriba; (2) las carpetas que empiezan con `_` se podan del
+      # recorrido (`_extractos/`, `_extractos_ocr/` de una corrida vieja no
+      # se reingieren); (3) informe por documento (estado/extractor/
+      # tamaños/segundos) y un resumen (reparto por estado, cuántos caben
+      # en `tool_authority.MAX_READ_BYTES`, tiempo total). +2 tests: el
+      # slug del proyecto arma la carpeta de trabajo esperada, y un
+      # archivo suelto (sin carpeta) va a la raíz de `fuente/`; +1 la CLI
+      # (`main()`) llama a `procesar()` con lo que parseó de `sys.argv`.
+      # Corre sobre archivos SINTETICOS (`.xlsx` armado con openpyxl, `.txt`
+      # plano) -- ningún documento de cliente entra al repo.
+      - name: Procesar archivos -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q scripts/_procesar_archivos_test.py 2>&1 | tee /tmp/procesar_archivos_tests
+          grep -qE "^6 passed" /tmp/procesar_archivos_tests || {
+            echo "PISO ROTO: se esperaban 6 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
