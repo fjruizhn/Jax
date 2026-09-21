@@ -62,6 +62,10 @@ def test_tested_is_not_inferred_from_runtime_observation():
  s=EvidenceStore(); d,i,a=artifact(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)
  o=EnforcementObservation("obs-runtime",d.control_id,1,d.control_definition_hash,a.subject,i.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",NOW,scope,(a.artifact_hash,))
  assert derive_assertion(d,i,(o,),claim_level=ClaimLevel.TESTED,scope=scope,subjects=(a.subject,),as_of_utc=NOW) is AssertionVerdict.INSUFFICIENT_EVIDENCE
+def test_one_runtime_observation_never_mints_enforced():
+ s=EvidenceStore(); d,i,a=artifact(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)
+ o=EnforcementObservation("obs-alone",d.control_id,1,d.control_definition_hash,a.subject,i.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",NOW,scope,(a.artifact_hash,))
+ assert derive_assertion(d,i,(o,),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(a.subject,),as_of_utc=NOW) is AssertionVerdict.INSUFFICIENT_EVIDENCE
 def test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape():
  import json
  from policy.enforcement_evidence.test_evidence import ingest_test_evidence_manifest

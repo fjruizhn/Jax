@@ -19,7 +19,10 @@ def derive_assertion(definition, identity, observations, *, claim_level, scope, 
   elif claim_level is ClaimLevel.TESTED: verdict=AssertionVerdict.INSUFFICIENT_EVIDENCE
   elif not matching: verdict=AssertionVerdict.NOT_OBSERVED
   elif any(x.occurred_at_utc < as_of_utc-timedelta(hours=24) for x in matching): verdict=AssertionVerdict.STALE
-  else: verdict=AssertionVerdict.SUPPORTED
+  # V1 profiles are deliberately fail-closed until a complete trusted test,
+  # runtime and (where required) DB evidence query is supplied.  A manually
+  # constructed or single persisted observation is never ENFORCED.
+  else: verdict=AssertionVerdict.INSUFFICIENT_EVIDENCE
  return verdict
 
 def evaluate_control_status(store, definition, identity, *, claim_level, scope, subjects, as_of_utc):
