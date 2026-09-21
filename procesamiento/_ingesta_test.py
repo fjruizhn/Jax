@@ -1127,3 +1127,176 @@ def test_I6_extracto_que_cabe_no_declara_el_flag(tmp_path: Path):
     ficha = ingesta.ingerir(origen, trabajo)
 
     assert "excede_tope_lectura" not in ficha.detalle
+
+
+def test_I6_excede_tope_lectura_se_cuenta_DESPUES_de_decorar(tmp_path: Path, monkeypatch):
+    """MINOR (final-hallazgos.md, adenda 2026-09-21): antes se sumaban los
+    bytes de `resultado.salidas.values()` SIN transformar -- subestimando
+    el tamaño real cuando el encabezado de la reserva arquitectónica se
+    antepone. Acá el contenido crudo (sin encabezado) queda POR DEBAJO del
+    tope, y sólo con el encabezado antepuesto lo supera -- si el conteo
+    fuera pre-decoración, `excede_tope_lectura` no se declararía."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    contenido_crudo = "x" * 90  # crudo: 90 B, cabe bajo cualquier tope >= 90
+
+    def falso_parcial(destino):
+        return Resultado(
+            estado="parcial",
+            salidas={"texto.md": contenido_crudo},
+            detalle={"razon": "algo quedo afuera"},
+            extractor=excel.EXTRACTOR, version=excel._version() or "desconocida",
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falso_parcial)
+    # El encabezado real (con el prefijo "<!-- EXTRACTO PARCIAL ..." más la
+    # ruta de la ficha) suma bastante más de 10 B -- el tope se fija entre
+    # el tamaño crudo (90) y lo que da crudo+encabezado, así que SÓLO se
+    # supera si el conteo incluye el encabezado.
+    monkeypatch.setattr(tool_authority, "MAX_READ_BYTES", 95)
+
+    ficha = ingesta.ingerir(origen, trabajo)
+
+    assert ficha.estado == "parcial"
+    assert ficha.detalle.get("excede_tope_lectura") is True, (
+        "MINOR REABIERTO: el conteo pre-decoracion no vio que el encabezado "
+        "empuja el archivo real por encima del tope"
+    )
+    assert ficha.detalle["excede_tope_lectura_bytes"]["extracto"] > len(
+        contenido_crudo.encode("utf8")
+    )
+
+
+# ---------------------------------------------------------------------------
+# MAJOR 1 (final-hallazgos.md, adenda 2026-09-21, ruling de Fernando sobre
+# su propio ruling anterior): el encabezado de la reserva arquitectónica se
+# antepone a TODA salida sin mirar el formato -- un comentario HTML dentro
+# de un CSV no es un comentario, es UNA FILA MÁS. `csv.DictReader` la toma
+# como nombre de columna y manda todo lo demás a la clave `None`.
+#
+# Por formato: `.md`/`.txt` siguen con el aviso DENTRO (ya probado arriba).
+# Un `.csv` queda INTACTO y el aviso va a un archivo hermano `AVISO.txt`.
+# ---------------------------------------------------------------------------
+
+
+def test_csv_parcial_queda_intacto_y_el_aviso_va_a_AVISO_txt(tmp_path: Path, monkeypatch):
+    """El caso EXACTO del hallazgo: un `.xlsx` con una fórmula sin caché
+    (condición de 'parcial' frecuentísima en libros financieros) -- el CSV
+    tiene que quedar byte a byte igual al que produjo el extractor, y
+    `csv.DictReader` sobre él tiene que dar las columnas REALES, no el
+    encabezado como nombre de columna."""
+    import csv
+    import io
+
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    csv_real = "ACTIVOS,PASIVOS\n1000,400\n2000,800\n"
+
+    def falso_parcial(destino):
+        return Resultado(
+            estado="parcial",
+            salidas={"01-base.csv": csv_real},
+            detalle={
+                "hojas": 2, "hojas_extraidas": 2,
+                "formulas_sin_valor": {"total": 1, "hojas": ["totales"]},
+            },
+            extractor=excel.EXTRACTOR, version=excel._version() or "desconocida",
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falso_parcial)
+
+    ficha = ingesta.ingerir(origen, trabajo)
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+
+    # El CSV es BYTE A BYTE el que produjo el extractor -- sin decorar.
+    csv_en_disco = (carpeta / "01-base.csv").read_text(encoding="utf8")
+    assert csv_en_disco == csv_real, (
+        "MAJOR 1 REABIERTO: el CSV salió decorado -- csv.DictReader lo "
+        "leería mal"
+    )
+
+    # Evidencia con la MISMA herramienta que reprodujo el hallazgo:
+    # csv.DictReader sobre el archivo real en disco da las columnas
+    # correctas, no el encabezado como nombre de columna.
+    filas = list(csv.DictReader(io.StringIO(csv_en_disco)))
+    assert set(filas[0]) == {"ACTIVOS", "PASIVOS"}, (
+        f"csv.DictReader tomó columnas equivocadas: {set(filas[0])}"
+    )
+    assert filas[0]["ACTIVOS"] == "1000"
+    assert None not in filas[0], (
+        "csv.DictReader mandó datos reales a la clave None -- el "
+        "encabezado se coló como fila"
+    )
+
+    # El aviso SÍ existe, en un archivo hermano.
+    aviso = (carpeta / "AVISO.txt").read_text(encoding="utf8")
+    assert aviso.startswith("<!-- EXTRACTO PARCIAL")
+    assert "ficha.json" in aviso
+
+    # Y queda listado -- si se borra, I-5 lo nota y se regenera.
+    assert "AVISO.txt" in ficha.detalle["_salidas_ingesta"]
+
+
+def test_md_parcial_sigue_con_el_aviso_DENTRO_no_en_AVISO_txt(tmp_path: Path, monkeypatch):
+    """Contraparte: un `.md`/`.txt` NO produce `AVISO.txt` -- el aviso
+    sigue yendo dentro del archivo, que es donde sirve para ese formato."""
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    def falso_parcial(destino):
+        return Resultado(
+            estado="parcial",
+            salidas={"texto.md": "ACTIVOS TOTALES 1000"},
+            detalle={"razon": "algo quedo afuera"},
+            extractor=excel.EXTRACTOR, version=excel._version() or "desconocida",
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falso_parcial)
+
+    ficha = ingesta.ingerir(origen, trabajo)
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+
+    assert not (carpeta / "AVISO.txt").exists()
+    assert "AVISO.txt" not in ficha.detalle["_salidas_ingesta"]
+    assert (carpeta / "texto.md").read_text(encoding="utf8").startswith(
+        "<!-- EXTRACTO PARCIAL"
+    )
+
+
+# ---------------------------------------------------------------------------
+# MINOR 3 (final-hallazgos.md, adenda 2026-09-21): la pérdida MÁS GRAVE que
+# puede tener un libro -- una hoja entera que no se pudo extraer -- era
+# justo la única que `_resumen_parcial` no nombraba.
+# ---------------------------------------------------------------------------
+
+
+def test_resumen_parcial_nombra_las_hojas_perdidas_por_error(tmp_path: Path, monkeypatch):
+    trabajo = tmp_path / "trabajo"
+    origen = _libro(tmp_path / "e.xlsx")
+
+    def falso_parcial(destino):
+        return Resultado(
+            estado="parcial",
+            salidas={"01-buena.csv": "A,B\r\n1,2\r\n"},
+            detalle={
+                "hojas": 2, "hojas_extraidas": 1,
+                "fallidas": ["MALA: ValueError: boom"],
+            },
+            extractor=excel.EXTRACTOR, version=excel._version() or "desconocida",
+        )
+
+    monkeypatch.setattr(compuerta, "extraer", falso_parcial)
+
+    ficha = ingesta.ingerir(origen, trabajo)
+    carpeta = ingesta.ruta_procesado(trabajo, ficha.sha256)
+    aviso = (carpeta / "AVISO.txt").read_text(encoding="utf8")
+
+    assert "MALA" in aviso, (
+        "MINOR 3 REABIERTO: la hoja perdida por error no aparece en el "
+        f"aviso -- {aviso!r}"
+    )
+    assert "extracto parcial -- ver ficha.json" not in aviso, (
+        "cayó al genérico en vez de nombrar la hoja perdida"
+    )

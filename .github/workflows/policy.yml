@@ -2985,11 +2985,17 @@ jobs:
       # equivalente): `which pdftoppm` da vacío sin este apt-get.
       - run: sudo apt-get install -y tesseract-ocr tesseract-ocr-spa poppler-utils
       - run: pip install pillow
+      # MAJOR 2 (final-hallazgos.md, adenda 2026-09-21, ruling de
+      # Fernando): +2 tests -- el cuerpo de `extraer()` sale siempre como
+      # `Resultado` (workspace no escribible, disparador real con permisos
+      # 000, no mockeado) y `_resolver_workspace_dir()` resuelve symlinks.
+      # Cuarta aparición de la familia I-5, introducida por esta misma
+      # ronda. De 33 a 35.
       - name: OCR -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_ocr_test.py 2>&1 | tee /tmp/ocr_tests
-          grep -qE "^33 passed" /tmp/ocr_tests || {
-            echo "PISO ROTO: se esperaban 33 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^35 passed" /tmp/ocr_tests || {
+            echo "PISO ROTO: se esperaban 35 tests CORRIDOS (no skipeados) del extractor de OCR. Si esto da '... skipped', tesseract, poppler-utils o Pillow no se instalaron -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 6 (2026-09-21, procesamiento-archivos-nucleo): Word (.docx) ->
       # Markdown. python-docx ya se instaló arriba (requirements-archivos.txt,
@@ -3220,11 +3226,19 @@ jobs:
       # las cifras) y el flag `excede_tope_lectura` que declara cuando el
       # extracto total supera `tool_authority.MAX_READ_BYTES` aunque el
       # original cupiera (declarado; ausente cuando cabe). De 29 a 35.
+      # Adenda 2026-09-21 (ruling de Fernando): +4 tests -- MAJOR 1 (un
+      # CSV parcial queda intacto y el aviso va a `AVISO.txt`, no dentro
+      # del CSV -- un comentario HTML en un CSV es UNA FILA MÁS, no un
+      # comentario; `.md`/`.txt` siguen con el aviso adentro), MINOR (el
+      # tamaño de `excede_tope_lectura` se cuenta DESPUÉS de anteponer el
+      # encabezado, no antes) y MINOR 3 (`_resumen_parcial` nombra las
+      # hojas perdidas por error -- antes la pérdida más grave que puede
+      # tener un libro era la única que el aviso no nombraba). De 35 a 39.
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          grep -qE "^35 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 35 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^39 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 39 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # Task 9 (2026-09-21, procesamiento-archivos-nucleo): mide si los
       # extractos SIRVEN -- el criterio §7.B corregido ese mismo dia (el

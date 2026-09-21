@@ -60,7 +60,23 @@ EXTRACTOR = "tesseract"
 # `tempfile` (`/tmp`), que en hall9000 es tmpfs -- RAM, en un hipervisor
 # con dos VMs; un PDF patológico puede dejar decenas de PNG enormes
 # simultáneamente en memoria.
-_WORKSPACE_DIR = Path(os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace"))
+#
+# `.resolve()` (adenda MAJOR 2, final-hallazgos.md, ronda de cierre):
+# `tool_authority.py:62` YA resuelve `WORKSPACE_ROOT` así -- acá faltaba.
+# Si `JAX_WORKSPACE_DIR` trae un symlink, el jail (que compara contra la
+# forma canónica) y este rasterizado terminan mirando dos rutas
+# DISTINTAS -- una resuelta, una no -- aunque el valor de la env var sea
+# el mismo en los dos.
+
+
+def _resolver_workspace_dir() -> Path:
+    """Separada de la constante de módulo para poder probar la resolución
+    de symlinks sin recargar el módulo entero ni tocar el `_WORKSPACE_DIR`
+    real que usa `extraer()`."""
+    return Path(os.getenv("JAX_WORKSPACE_DIR", "/home/fruiz/jax-workspace")).resolve()
+
+
+_WORKSPACE_DIR = _resolver_workspace_dir()
 
 # Caracteres MÍNIMOS (tras `.strip()`) para que el modo texto plano cuente
 # como "algo se leyó". Defensa barata contra el caso vacío (imagen en
@@ -383,56 +399,78 @@ def extraer(origen: Path, idioma: str = "spa") -> Resultado:
             estado="sin_extractor", salidas={}, extractor=EXTRACTOR, version="ausente",
             detalle={"razon": "tesseract no esta instalado"},
         )
-    origen = Path(origen)
-    if not origen.is_file():
-        return Resultado(
-            estado="error", salidas={}, extractor=EXTRACTOR,
-            version=_version() or "desconocida",
-            detalle={"razon": f"no existe el archivo: {origen}"},
-        )
 
-    if _es_pdf(origen):
-        if shutil.which("pdftoppm") is None:
+    # MAJOR 2 (final-hallazgos.md, adenda 2026-09-21, ruling de Fernando):
+    # el cuerpo entero corre protegido -- I-7 agregó `mkdir()` y
+    # `TemporaryDirectory(dir=...)` SIN guarda, en una función que no
+    # tenía `try` propio (los tres hermanos sí: D-1 en `word.py`, I-5 en
+    # `excel.py`, el `try` de `extraer()` en `pdf.py`). Con el workspace
+    # no escribible (disco lleno, remontado sólo-lectura, cuota excedida
+    # -- los tres disparadores reales del camino degradado) salía un
+    # `PermissionError`/`OSError` CRUDO de `ocr.extraer`, de
+    # `compuerta.extraer` -- cuyo contrato dice lo contrario -- y de
+    # `ingerir()`, que no lo atrapa. Cuarta aparición de la familia I-5,
+    # introducida por la MISMA ronda que vino a cerrarla: un arreglo es
+    # código nuevo, y el código nuevo entra con los mismos defectos que el
+    # viejo si no se lo revisa igual.
+    try:
+        origen = Path(origen)
+        if not origen.is_file():
             return Resultado(
                 estado="error", salidas={}, extractor=EXTRACTOR,
                 version=_version() or "desconocida",
-                detalle={
-                    "razon": "pdftoppm no esta instalado (poppler-utils); "
-                    "no se puede rasterizar el PDF para OCR",
-                },
+                detalle={"razon": f"no existe el archivo: {origen}"},
             )
-        # I-7 (final-hallazgos.md, ronda de cierre) -- "ahora" de la
-        # reserva a medias a propósito: el directorio del rasterizado va
-        # BAJO JAX_WORKSPACE_DIR, no al default de `tempfile` (`/tmp`, que
-        # en hall9000 es tmpfs -- RAM -- en un hipervisor con dos VMs). Se
-        # lee la env var directo (mismo patrón que los otros 3 call sites
-        # de esta variable: motor_registry/tool_authority.py,
-        # jacobs/executor.py, jax/muscles/subprocess_muscle.py) en vez de
-        # importar el módulo pesado de tool_authority sólo para esto -- es
-        # el cambio de una línea que pide el ruling, no una migración de
-        # dependencias. Diferido a fase 2, con su razón escrita:
-        # rasterizar página por página con timeout por página, para que un
-        # vencimiento deje 'parcial' con lo que alcanzó en vez de perder
-        # TODO callando el parcial (hoy: un solo `pdftoppm` para el
-        # documento entero) -- es un cambio de estructura, y ésta es una
-        # ronda de cierre, no de rediseño.
-        _WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="ocr-pdf-", dir=_WORKSPACE_DIR) as tmp:
-            paginas = _rasterizar_pdf(origen, Path(tmp))
-            if not paginas:
+
+        if _es_pdf(origen):
+            if shutil.which("pdftoppm") is None:
                 return Resultado(
                     estado="error", salidas={}, extractor=EXTRACTOR,
                     version=_version() or "desconocida",
-                    detalle={"razon": "no se pudo rasterizar el PDF con pdftoppm"},
+                    detalle={
+                        "razon": "pdftoppm no esta instalado (poppler-utils); "
+                        "no se puede rasterizar el PDF para OCR",
+                    },
                 )
-            resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
-        return _resolver_pdf(resultados, idioma)
+            # I-7 (final-hallazgos.md, ronda de cierre) -- "ahora" de la
+            # reserva a medias a propósito: el directorio del rasterizado
+            # va BAJO JAX_WORKSPACE_DIR, no al default de `tempfile`
+            # (`/tmp`, que en hall9000 es tmpfs -- RAM -- en un
+            # hipervisor con dos VMs). Se lee la env var directo (mismo
+            # patrón que los otros 3 call sites de esta variable:
+            # motor_registry/tool_authority.py, jacobs/executor.py,
+            # jax/muscles/subprocess_muscle.py) en vez de importar el
+            # módulo pesado de tool_authority sólo para esto -- es el
+            # cambio de una línea que pide el ruling, no una migración de
+            # dependencias. Diferido a fase 2, con su razón escrita:
+            # rasterizar página por página con timeout por página, para
+            # que un vencimiento deje 'parcial' con lo que alcanzó en vez
+            # de perder TODO callando el parcial (hoy: un solo
+            # `pdftoppm` para el documento entero) -- es un cambio de
+            # estructura, y ésta es una ronda de cierre, no de rediseño.
+            _WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="ocr-pdf-", dir=_WORKSPACE_DIR) as tmp:
+                paginas = _rasterizar_pdf(origen, Path(tmp))
+                if not paginas:
+                    return Resultado(
+                        estado="error", salidas={}, extractor=EXTRACTOR,
+                        version=_version() or "desconocida",
+                        detalle={"razon": "no se pudo rasterizar el PDF con pdftoppm"},
+                    )
+                resultados = [_ocr_una_imagen(pagina, idioma) for pagina in paginas]
+            return _resolver_pdf(resultados, idioma)
 
-    resultado_img = _ocr_una_imagen(origen, idioma)
-    if resultado_img is None:
+        resultado_img = _ocr_una_imagen(origen, idioma)
+        if resultado_img is None:
+            return Resultado(
+                estado="error", salidas={}, extractor=EXTRACTOR,
+                version=_version() or "desconocida",
+                detalle={"razon": "no se pudo correr tesseract sobre la imagen"},
+            )
+        return _resolver_imagen(resultado_img, idioma)
+    except Exception as exc:  # fail-soft: cualquier fallo inesperado (permisos, disco lleno, workspace remontado solo-lectura) sale como Resultado(estado="error"), nunca una excepcion cruda -- mismo tratamiento que D-1/I-5 en los hermanos
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR,
             version=_version() or "desconocida",
-            detalle={"razon": "no se pudo correr tesseract sobre la imagen"},
+            detalle={"razon": f"fallo inesperado en OCR: {type(exc).__name__}: {exc}"},
         )
-    return _resolver_imagen(resultado_img, idioma)

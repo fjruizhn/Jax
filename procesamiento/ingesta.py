@@ -542,6 +542,38 @@ def _resumen_parcial(detalle: dict) -> str:
     if no_tabulares:
         partes.append(f"{len(no_tabulares)} hoja(s) no tabular(es) omitidas")
 
+    # MINOR 3 (final-hallazgos.md, adenda 2026-09-21): la pérdida MÁS
+    # GRAVE que puede tener un libro -- una hoja entera que no se pudo
+    # extraer -- era justo la única que este resumen no nombraba. `excel.py`
+    # declara `fallidas` (hoja + excepción) cuando `_hoja_a_csv` revienta, y
+    # `hojas_extraidas < hojas` es la señal binaria de que algo se quedó
+    # afuera. Sin esto, con una hoja perdida el aviso decía el genérico
+    # "extracto parcial -- ver ficha.json" -- nada de qué faltaba.
+    fallidas = detalle.get("fallidas")
+    if fallidas:
+        partes.append(
+            f"{len(fallidas)} hoja(s) perdida(s) por error: "
+            + "; ".join(str(f) for f in fallidas)
+        )
+    else:
+        hojas_totales = detalle.get("hojas")
+        hojas_extraidas = detalle.get("hojas_extraidas")
+        if (
+            isinstance(hojas_totales, int)
+            and isinstance(hojas_extraidas, int)
+            and hojas_extraidas < hojas_totales
+            and not no_tabulares
+        ):
+            # Red de seguridad genérica: el hueco no lo explica ni
+            # `fallidas` ni `no_tabulares` (las dos causas conocidas) --
+            # no debería dispararse hoy, pero si `excel.py` gana una
+            # tercera razón para no extraer una hoja, esto sigue nombrando
+            # el hueco en vez de quedarse callado.
+            partes.append(
+                f"{hojas_totales - hojas_extraidas} de {hojas_totales} hojas "
+                "no se extrajeron"
+            )
+
     if not partes:
         razon = detalle.get("razon")
         if razon:
@@ -610,22 +642,59 @@ def ingerir(origen: Path, trabajo: Path) -> Ficha:
         # extracto `parcial` lleva el aviso DENTRO del propio archivo que
         # el modelo lee -- la ficha (donde vivía la declaración completa)
         # no es lo que un `file_read` sobre `procesado/<huella>/` entrega.
+        #
+        # MAJOR 1 (final-hallazgos.md, adenda 2026-09-21, ruling de
+        # Fernando sobre su propio ruling anterior): ese "dentro" asumía
+        # texto/markdown -- pero `excel.py` emite CSV, y un CSV no tiene
+        # sintaxis de comentario. Un `<!-- EXTRACTO PARCIAL ... -->`
+        # antepuesto a un CSV NO es un comentario: es UNA FILA MÁS.
+        # `csv.DictReader` la toma como nombre de columna y manda todo lo
+        # demás a la clave `None` -- reproducido con un `.xlsx` con una
+        # fórmula sin caché (condición de 'parcial' frecuentísima en
+        # libros financieros): arreglamos la honestidad rompiendo el dato,
+        # justo en los documentos que ya venían declarados dañados.
+        #
+        # Por formato: `.md`/`.txt` siguen llevando el aviso DENTRO (ahí
+        # es texto libre, funciona). Un `.csv` queda INTACTO -- byte a
+        # byte lo que el extractor produjo, nunca decorado -- y el aviso
+        # va a un archivo HERMANO `AVISO.txt` en la misma carpeta
+        # `procesado/<huella>/`. Un modelo que lee sólo el CSV no ve el
+        # aviso -- se acepta a propósito: un CSV corrupto es peor que un
+        # aviso que hay que ir a buscar, y la carpeta lo muestra al
+        # listarla (y queda en `_salidas_ingesta`, así que I-5 lo cubre:
+        # si se borra, el próximo acierto de caché falla y se regenera).
         encabezado = (
             _encabezado_parcial(huella, resultado.detalle)
             if resultado.estado == "parcial"
             else None
         )
+        hubo_csv_sin_encabezado = False
+        total_extracto_bytes = 0
         for nombre, contenido in resultado.salidas.items():
             if encabezado is not None:
-                contenido = f"{encabezado}\n\n{contenido}"
+                if nombre.lower().endswith(".csv"):
+                    hubo_csv_sin_encabezado = True
+                else:
+                    contenido = f"{encabezado}\n\n{contenido}"
             (temporal / nombre).write_text(contenido, encoding="utf8")
+            # MINOR (final-hallazgos.md, adenda): contado DESPUÉS de
+            # decorar -- antes se sumaba `resultado.salidas.values()` sin
+            # transformar, subestimando el tamaño real del archivo que
+            # queda en disco cuando el encabezado se antepone.
+            total_extracto_bytes += len(contenido.encode("utf8"))
+
+        salidas_ingesta = sorted(resultado.salidas.keys())
+        if encabezado is not None and hubo_csv_sin_encabezado:
+            (temporal / "AVISO.txt").write_text(encabezado, encoding="utf8")
+            total_extracto_bytes += len(encabezado.encode("utf8"))
+            salidas_ingesta = sorted(salidas_ingesta + ["AVISO.txt"])
 
         detalle = {
             **dict(resultado.detalle),
             # I-3/I-5: lo que hace falta para verificar un acierto de
             # caché sin tener que confiar ciegamente en él.
             "_extension_ingesta": extension_actual,
-            "_salidas_ingesta": sorted(resultado.salidas.keys()),
+            "_salidas_ingesta": salidas_ingesta,
         }
         if resultado.estado in {"error", "sin_extractor"}:
             # D-2: registra CUÁNTOS intentos lleva este fallo -- es lo que
@@ -642,10 +711,8 @@ def ingerir(origen: Path, trabajo: Path) -> Ficha:
             # tampoco puede quedar invisible (medido: xlsx-04, 159.077 B
             # de original -> 17.861.532 B de extracto, 'ok', 89x el tope --
             # y el criterio §7.B.2 no lo ve porque sólo evalúa documentos
-            # cuyo ORIGINAL no cabía).
-            total_extracto_bytes = sum(
-                len(c.encode("utf8")) for c in resultado.salidas.values()
-            )
+            # cuyo ORIGINAL no cabía). `total_extracto_bytes` ya es el
+            # tamaño REAL post-decoración (ver el conteo arriba).
             if total_extracto_bytes > tool_authority.MAX_READ_BYTES:
                 detalle["excede_tope_lectura"] = True
                 detalle["excede_tope_lectura_bytes"] = {

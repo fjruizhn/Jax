@@ -34,6 +34,26 @@ Image = pytest.importorskip("PIL.Image")
 ImageDraw = pytest.importorskip("PIL.ImageDraw")
 
 
+@pytest.fixture(autouse=True)
+def _workspace_dir_es_tmp(tmp_path, monkeypatch):
+    """Hallazgo PROPIO destapado verificando MAJOR 2 en Docker SIN root
+    (la verificación anterior corría como root, que bypasea permisos de
+    filesystem y tapaba esto): el default de `_WORKSPACE_DIR`
+    (`/home/fruiz/jax-workspace`, I-7) es específico de ESTA máquina. En
+    un runner de CI real (usuario `runner`, sin `/home/fruiz` y sin
+    permiso para crearlo bajo `/home`, que no es escribible por un
+    usuario sin privilegios) el `mkdir(parents=True)` de `extraer()`
+    revienta con `PermissionError` -- que esta misma ronda ya atrapa
+    (MAJOR 2), pero eso vuelve `'error'` CUALQUIER test de OCR sobre PDF
+    que no controle el workspace, sin que tesseract/pdftoppm lleguen a
+    correr. Se parchea a un tempdir por test -- mismo patrón que
+    `_ingesta_test.py` con `tool_authority.WORKSPACE_ROOT`. Los dos tests
+    que necesitan control fino (`test_workspace_no_escribible_...`,
+    `test_rasterizado_usa_workspace_dir_no_tmp`) lo sobreescriben en su
+    propio cuerpo, que corre DESPUÉS de este fixture."""
+    monkeypatch.setattr(ocr, "_WORKSPACE_DIR", tmp_path / "workspace")
+
+
 def _fuente(tamano: int):
     from PIL import ImageFont
 
@@ -665,3 +685,62 @@ def test_returncode_distinto_de_cero_no_se_toma_como_texto_valido(tmp_path, monk
     resultado = ocr._ocr_una_imagen(origen, "spa")
 
     assert resultado is None
+
+
+# ---------------------------------------------------------------------------
+# MAJOR 2 (final-hallazgos.md, adenda 2026-09-21, ruling de Fernando): I-7
+# agregó `mkdir()`/`TemporaryDirectory(dir=...)` SIN guarda en una función
+# que no tenía `try` propio -- cuarta aparición de la familia I-5,
+# introducida por la MISMA ronda que vino a cerrarla.
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_no_escribible_da_resultado_de_error_no_excepcion_cruda(
+    tmp_path: Path, monkeypatch
+):
+    """Disparador REAL (no mockeado): un directorio con permisos 000 --
+    mismo efecto que disco lleno, workspace remontado sólo-lectura o cuota
+    excedida, los tres disparadores reales del camino degradado que
+    Fernando nombró. Antes de este arreglo, esto dejaba escapar un
+    `PermissionError` crudo de `ocr.extraer` (y de `compuerta.extraer`,
+    cuyo contrato dice lo contrario)."""
+    import os
+
+    raiz_sin_permiso = tmp_path / "sin-permiso"
+    raiz_sin_permiso.mkdir()
+    os.chmod(raiz_sin_permiso, 0o000)
+    try:
+        monkeypatch.setattr(ocr, "_WORKSPACE_DIR", raiz_sin_permiso / "workspace")
+
+        origen = tmp_path / "algo.pdf"
+        origen.write_bytes(b"%PDF-1.4\n%%EOF")
+
+        r = ocr.extraer(origen)
+
+        assert r.estado == "error"
+        assert r.salidas == {}
+        assert "razon" in r.detalle
+    finally:
+        os.chmod(raiz_sin_permiso, 0o755)  # permite que tmp_path se limpie despues
+
+
+def test_workspace_dir_resuelve_symlinks(tmp_path: Path, monkeypatch):
+    """`.resolve()` (adenda MAJOR 2): `tool_authority.py:62` YA resuelve
+    `WORKSPACE_ROOT` así -- acá faltaba. Si `JAX_WORKSPACE_DIR` trae un
+    symlink, el jail (que compara contra la forma canónica) y este
+    rasterizado terminan mirando rutas DISTINTAS aunque el valor de la
+    env var sea el mismo en los dos."""
+    real = tmp_path / "real-workspace"
+    real.mkdir()
+    enlace = tmp_path / "enlace-workspace"
+    enlace.symlink_to(real)
+
+    monkeypatch.setenv("JAX_WORKSPACE_DIR", str(enlace))
+
+    resuelto = ocr._resolver_workspace_dir()
+
+    assert resuelto == real.resolve()
+    assert resuelto != enlace, (
+        "sin .resolve(), esto hubiera quedado apuntando al symlink, no al "
+        "destino real"
+    )
