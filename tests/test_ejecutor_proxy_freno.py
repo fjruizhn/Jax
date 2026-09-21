@@ -4,6 +4,7 @@ cerebro no responde (423 legible sin tocar el upstream) y un stream en curso se 
 menos de un segundo, soltando el carril. Sin saber dónde está el interruptor, no arranca."""
 import asyncio
 import json
+import os
 import time
 from contextlib import asynccontextmanager
 
@@ -163,6 +164,82 @@ def test_freno_justo_al_tomar_el_carril_no_toca_upstream(tmp_path, freno, monkey
             return r.status_code, r.headers.get("x-should-retry"), r.json(), len(up.recibidas)
 
     assert _correr(escenario()) == (423, "false", _error(proxy_carril.KILL_SWITCH_ACTIVO), 0)
+
+
+def test_vigia_sin_latido_justo_al_tomar_el_carril_no_toca_upstream(tmp_path):
+    """El re-chequeo al tomar el carril (arriba) usa el predicado ANCHO
+    (`_frenado_con_tope`, que mira el latido), no el que sondea el vigía de `atender()`
+    (que NO lo mira). Sin esto: `tope_s` de producción es 90 s contra
+    `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S` de 30 s -hasta 3 veces la edad máxima del latido-, y
+    una petición podía esperar el carril, obtenerlo, y llegar al upstream con el auditor
+    de C5 ya sin latido: nada en el camino de espera del carril miraba el latido. Contra
+    el código de antes de este re-chequeo (y contra `_freno_puesto_ahora` en su lugar) B
+    llega al upstream; con `_frenado_con_tope`, no."""
+    async def escenario():
+        async with Upstream(n_trozos=2) as up, Proxy(up.url, tmp_path, 30) as px, httpx.AsyncClient() as cli:
+            primera = asyncio.create_task(cli.post(px.url + "/v1/messages", content=_CUERPO))
+            while not up.recibidas:
+                await asyncio.sleep(0.02)
+            segunda = asyncio.create_task(cli.post(px.url + "/v1/messages", content=_CUERPO))
+            limite = time.monotonic() + 5
+            while proxy_carril.esperando_carril() < 1:
+                assert time.monotonic() < limite, "la segunda petición nunca llegó a la cola"
+                await asyncio.sleep(0.02)
+            assert not primera.done()
+            assert len(up.recibidas) == 1
+
+            # El latido queda viejo (px.cfg.latido_max_s es 3600, fijo en el helper
+            # Proxy): nada lo renueva y nadie más lo mira hasta que segunda tome el
+            # carril. Mismo patrón que test_sin_latido_del_vigia_423.
+            viejo = px.cfg.latido.stat().st_mtime - (px.cfg.latido_max_s + 1)
+            os.utime(px.cfg.latido, (viejo, viejo))
+
+            # Libera el carril SIN pasar por el freno (ni interruptor ni pausa se
+            # tocan en este test): sólo el latido está viejo. Si el vigía de
+            # `atender()` (predicado angosto) fuera lo único que corta, primera
+            # seguiría streameando para siempre -- se cancela a mano, como hace el
+            # test hermano de la carrera del freno.
+            primera.cancel()
+            await asyncio.gather(primera, return_exceptions=True)
+
+            r = await asyncio.wait_for(segunda, 3)
+            return r.status_code, r.headers.get("x-should-retry"), r.json(), len(up.recibidas)
+
+    assert _correr(escenario()) == (
+        423, "false", _error(proxy_carril.VIGIA_SIN_LATIDO), 1)
+
+
+def test_frenado_colgado_al_tomar_el_carril_es_fail_closed(tmp_path, monkeypatch):
+    """MINOR 1 de la revisión adversarial (2026-09-21): el re-chequeo al tomar el
+    carril corre DENTRO de la sección crítica (el carril es un `flock` entre
+    procesos). Si el `os.stat` que lo resuelve se cuelga -montaje en mal estado de
+    la raíz del interruptor o de la pausa-, `_frenado_con_tope` no puede esperarlo
+    para siempre: eso retendría el carril indefinidamente y ni el propio vigía de
+    `atender()` podría cortarlo (usa el mismo executor de hilos). Vencido el tope,
+    fail-closed: se trata como frenado, no como libre."""
+    llamadas = {"n": 0}
+    frenado_real = proxy_carril._Proxy._frenado
+
+    async def _frenado_lenta_desde_el_carril(self):
+        llamadas["n"] += 1
+        if llamadas["n"] <= 2:
+            # Los dos chequeos ANTES de tomar el carril (`_reenviar`, antes de
+            # `carril_ejecutor_async`): rápidos, como siempre. Lo que se cuelga es
+            # sólo el de DENTRO de la sección crítica, vía `_frenado_con_tope`.
+            return await frenado_real(self)
+        await asyncio.sleep(10)
+        return None  # nunca se llega acá dentro del tope del test
+
+    monkeypatch.setattr(proxy_carril._Proxy, "_frenado", _frenado_lenta_desde_el_carril)
+    monkeypatch.setattr(proxy_carril, "_TOPE_FRENADO_AL_TOMAR_CARRIL_S", 0.05)
+
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 5) as px, httpx.AsyncClient() as cli:
+            r = await asyncio.wait_for(cli.post(px.url + "/v1/messages", content=_CUERPO), 3)
+            return r.status_code, r.headers.get("x-should-retry"), r.json(), len(up.recibidas)
+
+    assert _correr(escenario()) == (
+        423, "false", _error(proxy_carril.FRENO_INDETERMINADO), 0)
 
 
 def test_con_el_freno_puesto_lo_que_ya_corrio_se_anota(tmp_path, freno):
