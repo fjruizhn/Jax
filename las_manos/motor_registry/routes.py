@@ -198,6 +198,9 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
     await _ensure_catalog_fresh()
     if _CATALOG is None:
         raise HTTPException(status_code=503, detail="Motor Registry: catálogo no inicializado todavía")
+    # Resolve before any state/job work; a missing kill-switch configuration
+    # fails closed without touching authoritative execution state.
+    route = ruta_del_interruptor()
     try:
         record = _GOVERNED_EXECUTION_STORE.load_execution(req.execution_id)
         authorization = _GOVERNED_EXECUTION_STORE.load_authorization(record.authorization_id)
@@ -212,7 +215,6 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
                 request.authenticated_caller_id not in cap.allowed_callers or
                 request.motor not in cap.allowed_motors or not cap.sandbox_only or not motor.sandbox_only):
             raise ValueError("catálogo actual no permite execution")
-        route = ruta_del_interruptor()
         if interruptor_activo(route):
             raise ValueError("kill switch activo")
         if _GOVERNED_DISPATCH_CLAIMER is None:
