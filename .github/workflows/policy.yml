@@ -1188,6 +1188,8 @@ jobs:
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
           tests/test_vocativo_faceta.py
           tests/test_identity_context.py tests/test_jacobs_director.py
+          tests/policy/test_enforcement_evidence_core.py
+          tests/policy/test_enforcement_evidence_mariadb_api.py
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
           tests/test_validate_capability_typed.py
@@ -3045,10 +3047,10 @@ jobs:
           # (que no reproduce los skipped estructurales del runner). El piso CI
           # se deriva del 2352 medido en master más los tres casos B6; los skipped
           # siguen siendo estructurales.
-          # 2355 -> 2361 (B7-R0): seis controles puros del EvidenceStore;
+          # 2355 -> 2365 (B7-R0): diez controles puros del EvidenceStore;
           # hash/deduplicación, ciclo de confianza, aislamiento y precedencia.
-          grep -qE "^2361 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2361 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2365 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2365 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
       - name: Emitir manifiesto canónico B7 de tests puros
         run: |
           python - <<'PY'
