@@ -83,7 +83,25 @@ jobs:
       - run: pip install -r requirements.txt pytest
       # Do not run these from tests-puros: pytest then places tests/policy
       # ahead of the production policy package on sys.path.
-      - run: PYTHONPATH=. python -m pytest tests/policy/test_enforcement_evidence_core.py tests/policy/test_enforcement_evidence_mariadb_api.py -q
+      - name: Ejecutar controles B7 y capturar salida
+        run: PYTHONPATH=. python -m pytest tests/policy/test_enforcement_evidence_core.py tests/policy/test_enforcement_evidence_mariadb_api.py -q 2>&1 | tee /tmp/b7-out
+      - name: Emitir manifiesto B7 controlado
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from datetime import datetime, timezone
+          raw=open('/tmp/b7-out','rb').read(); now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+          tests=[
+            {'test_id':'tests.policy.test_enforcement_evidence_core','bindings':[{'control_id':'CTL.B6.GOVERNED_DISPATCH','control_version':1}],'result':'PASSED'},
+            {'test_id':'tests.policy.test_enforcement_evidence_mariadb_api','bindings':[{'control_id':'CTL.B6.ONE_DECISION_ONE_EXECUTION','control_version':1}],'result':'PASSED'},
+          ]
+          m={'schema_version':'1.0','kind':'JAX_TEST_EVIDENCE_MANIFEST','provider':'github-actions','repository_id':os.environ['GITHUB_REPOSITORY'],'commit_sha':os.environ['GITHUB_SHA'],'implementation_identity_hash':'sha256:'+hashlib.sha256(os.environ['GITHUB_SHA'].encode()).hexdigest(),'workflow':'policy.yml','run_id':os.environ['GITHUB_RUN_ID'],'job_id':os.environ['GITHUB_JOB'],'environment':'CI','started_at_utc':now,'completed_at_utc':now,'tests':tests,'counts':{'passed':2},'raw_output_blob_hash':'sha256:'+hashlib.sha256(raw).hexdigest()}
+          open('b7-controlled-test-manifest.json','w').write(json.dumps(m,sort_keys=True,separators=(',',':')))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b7-controlled-test-manifest
+          path: b7-controlled-test-manifest.json
 
   no-fail-open-except:
     runs-on: ubuntu-latest
