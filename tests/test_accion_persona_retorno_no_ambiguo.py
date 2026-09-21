@@ -201,11 +201,23 @@ def _esperar_borde_de_segundo(margen: float = 0.9) -> None:
     SQL locales tardan milisegundos, asi que en la practica el margen
     sobra; esto reduce la ventana de fallo de "cualquier borde de segundo"
     a "una pausa real de casi un segundo entre dos queries", no la anula
-    matematicamente."""
+    matematicamente.
+
+    EL ESCAPE DE 2s NO ES UN FALLBACK SILENCIOSO (hallazgo #4 de la SEGUNDA
+    auditoria adversarial de jax#247): si no se pudo sincronizar en 2s
+    reales, esta funcion levanta `pytest.fail` en vez de seguir igual. Un
+    `break` mudo dejaria correr el test en el estado flojo de antes de este
+    arreglo -- verde con el defecto presente -- sin que nadie se entere.
+    Medido (2026-09-21): la espera maxima real observada es 0,896s, muy
+    por debajo del limite de 2s -- hoy este camino no se alcanza, pero la
+    forma tiene que gritar si algun dia se alcanza."""
     inicio = time.monotonic()
     while time.time() % 1 > (1 - margen):
         if time.monotonic() - inicio > 2:
-            break  # no se pudo sincronizar en 2s reales -- seguir igual, ver LIMITE arriba
+            pytest.fail(
+                "no se pudo sincronizar al borde de segundo en 2s reales: "
+                "el proceso esta demasiado pausado/lento como para que este "
+                "test pruebe lo que dice probar (ver LIMITE arriba)")
         time.sleep(0.005)
 
 
@@ -242,9 +254,33 @@ async def test_mark_action_item_done_item_inexistente_da_false(limpio):
 @requiere_db_de_prueba
 @asincrono
 async def test_mark_action_item_done_base_caida_da_none(limpio):
+    """El camino de "pool existe pero explota al usarlo" -- `db_error_handler`
+    atrapa la excepcion de `acquire()`. NO ejercita el `if not self.pool:
+    return None` de la primera linea del metodo: eso lo cubre el test de
+    abajo, `test_mark_action_item_done_pool_none_da_none`."""
     m = dbmod.MemoryDB()
     m.pool = mock.MagicMock()
     m.pool.acquire = mock.MagicMock(side_effect=OSError("la base no responde"))
+    resultado = await m.mark_action_item_done(1)
+    assert resultado is None
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_mark_action_item_done_pool_none_da_none(limpio):
+    """EL CAMINO REAL de "base caida" para este metodo, gemelo de
+    `test_touch_person_mentions_sin_pool_da_none`: `self.pool` nunca se
+    establecio (falta `connect()`, o `connect()` fallo). Hallazgo #2 de la
+    SEGUNDA auditoria adversarial de jax#247: el hallazgo #1 de la primera
+    ronda se cerro en `touch_person_mentions` pero quedo abierto en el
+    vecino -- `test_mark_action_item_done_base_caida_da_none` (arriba) deja
+    `self.pool` en un MagicMock truthy y nunca corre el `if not self.pool`
+    real. Verificado por mutacion: con
+    `if not self.pool: return False` en `mark_action_item_done`, la suite
+    de este archivo (sin este test) daba 13 passed -- una regresion al
+    aplastamiento "no pude" vs "no existe" pasaba CI en verde."""
+    m = dbmod.MemoryDB()  # pool nunca se conecto -- self.pool es None de fabrica
+    assert m.pool is None
     resultado = await m.mark_action_item_done(1)
     assert resultado is None
 
@@ -334,6 +370,36 @@ async def test_touch_person_mentions_cuenta_antes_de_actualizar(limpio):
     assert n == 0
     assert consultas == ["SELECT"], (
         f"con matches == 0 no hay nada que tocar, el UPDATE no se emite: {consultas}")
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_touch_person_mentions_escribe_last_mentioned_de_verdad(limpio):
+    """Hallazgo #1 de la SEGUNDA auditoria adversarial de jax#247: ningun
+    test leia `last_mentioned` de la base despues de llamar al metodo --
+    el test de orden (`test_touch_person_mentions_cuenta_antes_de_actualizar`)
+    solo mira que se EMITA un UPDATE, no que escriba nada. Verificado por
+    mutacion: cambiando el UPDATE por
+    `UPDATE people SET last_mentioned=last_mentioned WHERE ...` (el metodo
+    deja de registrar menciones, que es su unica razon de existir) la suite
+    entera de este archivo seguia en 10 passed. Este test sembra la persona
+    con `last_mentioned` en una fecha vieja (NO NULL: CURDATE() siempre
+    difiere de NULL, lo que dejaria pasar el mutante `last_mentioned=NULL`
+    sin detectarlo) y lee la columna de vuelta con una consulta propia,
+    fuera de MemoryDB, para no confiar en el mismo codigo que se audita."""
+    nombre = "__test_retorno_no_ambiguo_escribe"
+    await _crear_persona(nombre, last_mentioned="2020-01-01")
+    m = await _memoria()
+    n = await m.touch_person_mentions([nombre])
+    assert n == 1
+    filas = await _sql(
+        "SELECT last_mentioned FROM people WHERE name = %s", (nombre,), fetch=True)
+    assert len(filas) == 1
+    (last_mentioned,) = filas[0]
+    assert last_mentioned is not None
+    assert str(last_mentioned) != "2020-01-01", (
+        "touch_person_mentions devolvio 1 (matcheo) pero last_mentioned "
+        "sigue en la fecha vieja: no escribio nada")
 
 
 @requiere_db_de_prueba

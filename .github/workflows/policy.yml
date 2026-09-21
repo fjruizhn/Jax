@@ -776,10 +776,29 @@ jobs:
           #   `test_touch_person_mentions_caso_mixto_es_monotono`,
           #   `test_touch_person_mentions_cuenta_antes_de_actualizar`; el
           #   resto ya pasaba). Medido en local (MISMO comando, MariaDB
-          #   real 127.0.0.1:3308): 72 -> 76 passed. Si el runner da otro
+          #   real 127.0.0.1:3308): 72 -> 76 passed.
+          # 76 -> 78 el 2026-09-21 (SEGUNDA auditoria adversarial sobre el
+          #   commit `c687a2e`, jax#247): +2 en
+          #   tests/test_accion_persona_retorno_no_ambiguo.py --
+          #   `test_touch_person_mentions_escribe_last_mentioned_de_verdad`
+          #   (hallazgo #1: ningun test leia `last_mentioned` de la base
+          #   despues de llamar al metodo -- verificado por mutacion,
+          #   cambiando el UPDATE por
+          #   `UPDATE people SET last_mentioned=last_mentioned WHERE ...` la
+          #   suite de ese archivo seguia en 10 passed) y
+          #   `test_mark_action_item_done_pool_none_da_none` (hallazgo #2:
+          #   el hallazgo BLOQUEANTE de la primera ronda -- `self.pool` en
+          #   `None` de verdad, no un mock de `acquire()` que explota -- se
+          #   cerro en `touch_person_mentions` pero quedo abierto en el
+          #   vecino; verificado por mutacion, con
+          #   `if not self.pool: return False` en `mark_action_item_done`
+          #   la suite de ese archivo sin este test daba 13 passed). Los 2
+          #   vistos ROJOS contra su mutante correspondiente, revertido
+          #   despues de confirmar. Medido en local (MISMO comando, MariaDB
+          #   real 127.0.0.1:3308): 76 -> 78 passed. Si el runner da otro
           #   numero, manda el runner.
-          grep -qE "^76 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 76 tests CORRIDOS (no skipeados)."; exit 1; }
+          grep -qE "^78 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 78 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest

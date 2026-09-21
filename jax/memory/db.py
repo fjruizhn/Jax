@@ -1430,11 +1430,13 @@ class MemoryDB:
     @db_error_handler
     async def touch_person_mentions(self, names_or_nicknames: list) -> Optional[int]:
         """Actualiza last_mentioned=CURDATE() para las personas cuyo name o
-        nickname aparece en `names_or_nicknames` (llamado desde el worker de
+        nickname aparece en `names_or_nicknames` (pensado para el worker de
         destilacion, jax/memory/worker.py, sobre las conversaciones que ya
-        procesa cada 20 min -- reusa esa deteccion en vez de construir una
-        nueva, tal como diseñado en ronda 7; TODAVIA sin consumidor real que
-        lo llame). Devuelve cuantas personas matchearon `names_or_nicknames`
+        procesa cada 20 min -- reusaria esa deteccion en vez de construir una
+        nueva, tal como diseñado en ronda 7. Verificado con
+        `grep touch_person_mentions jax/memory/worker.py`: CERO resultados --
+        hoy no tiene ningun consumidor real que lo llame). Devuelve cuantas
+        personas matchearon `names_or_nicknames`
         (no cuantas filas cambio el UPDATE), o None si fallo (base caida).
         Sin nombres que buscar (`names_or_nicknames` vacia) devuelve `0`
         directo: "no me pediste nada" no es lo mismo que "no pude" -- eso
@@ -1463,10 +1465,22 @@ class MemoryDB:
         mencion que nadie escribio. Por eso el COUNT corre SIEMPRE PRIMERO,
         antes de cualquier UPDATE, y el UPDATE ni se emite si `matches == 0`
         (nada que tocar). Sigue habiendo una ventana minuscula entre el
-        COUNT y el UPDATE (`autocommit=True`: esto no es una transaccion),
-        pero ahi el peor caso es SUBcontar -- alguien que matchea recien
-        despues del COUNT no se cuenta, y tampoco hace falta que se toque --
-        nunca afirmar una mencion de mas."""
+        COUNT y el UPDATE (`autocommit=True`: esto no es una transaccion).
+        Si alguien matchea recien DESPUES del COUNT (otra sesion crea o
+        renombra una persona en el medio), el peor caso es SUBcontar: esa
+        persona nueva no se cuenta ni se toca en esta llamada. Pero la
+        garantia de "nunca afirmar una mencion de mas" la da HOY una
+        funcionalidad ausente, no el orden en si: si en el medio se BORRA o
+        RENOMBRA una fila que SI matcheo el COUNT, el UPDATE que sigue
+        (mismo WHERE, mismas placeholders) puede no tocar ninguna fila y el
+        retorno seguiria afirmando `matches` menciones que el UPDATE no
+        escribio. Verificado (2026-09-21): no existe ningun
+        `DELETE FROM people` ni renombre de personas en todo el ecosistema
+        (jax, las_manos, scripts, jax-platform); `/person` solo expone `new`
+        y `list`. El dia que exista un `/person delete` (o un rename) esto
+        hay que revisarlo: ninguno de los dos ordenes posibles (COUNT-luego-
+        UPDATE o UPDATE-luego-COUNT) cierra la carrera sin una transaccion
+        real."""
         if not self.pool:
             return None
         if not names_or_nicknames:
