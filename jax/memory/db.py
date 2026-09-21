@@ -85,6 +85,38 @@ DUP_DISTANCE_THRESHOLD = 0.05
 CORRECTION_DISTANCE_THRESHOLD = 0.25
 
 
+# ------------------------------------------------------------
+# Umbral de similitud de `search_similar_facts` (2026-09-20, decision de
+# Fernando tras un fallo real: "jax sabes a que me dedico?" no traia el
+# hecho #7, guardado y verificado, porque nadie buscaba facts por similitud
+# al LEER -- ver el docstring del metodo). Sin umbral, cada turno inyectaria
+# los `limit` facts mas cercanos SIN IMPORTAR que tan lejos esten: ruido,
+# costo de tokens, y JAX afirmando cosas que no venian al caso.
+#
+# Elegido midiendo distancia coseno REAL (bge-m3) contra los 117 facts
+# vigentes de produccion (jax_memory, 2026-09-20, solo SELECT -- nunca se
+# escribio ahi):
+#
+#   "jax sabes a que me dedico?" (el caso real que origina esta funcion)
+#     -> fact #7 ("Fernando Ruiz es Licenciado en administracion de
+#        empresas...") a 0.5931
+#   "que clima hace hoy?" (control: pregunta AJENA)
+#     -> fact #7 a 0.7267, fact #52 ("...creador de ATENEAERP...") a 0.6638,
+#        fact #55 ("...trabaja en ATENEAERP...") a 0.6734
+#
+# 0.62 separa los dos casos con margen (~0.03 de cada lado): agarra el hecho
+# real que motivo el fix sin agarrar los mismos hechos de ocupacion cuando la
+# pregunta es sobre otra cosa. Con 117 facts en un solo dominio (todos sobre
+# Fernando o JAX) NINGUN umbral global da precision perfecta -- medido: la
+# pregunta del clima igual trae "Fernando suele trabajar de noche" (fact #58)
+# a 0.5905, por DEBAJO de 0.62. Bajar el umbral para tapar ese ruido saca
+# tambien al fact #7 del caso real (0.5931 quedaria fuera): es un trade-off
+# medido, no uno inventado, y el piso de aceptacion (que la frase real de
+# Fernando traiga su hecho de ocupacion) pesa mas que un falso positivo
+# ocasional en una pregunta sin relacion.
+FACT_SIMILARITY_THRESHOLD = 0.62
+
+
 def _validate_importance(importance: Optional[int]) -> Optional[int]:
     """1-5 valido -> se guarda tal cual. Cualquier otra cosa (fuera de
     rango, no-entero, None) -> None (neutral, sin score)."""
@@ -1410,6 +1442,125 @@ class MemoryDB:
                     logger.error(f"reranking fallo, se usa el orden previo: {e}")
 
         return rows[:limit]
+
+    async def search_similar_facts(self, query: str, limit: int = 30,
+                                    user_id: Optional[int] = None,
+                                    project_id: Optional[int] = None,
+                                    recent_history: Optional[list] = None) -> Optional[list]:
+        """Busca facts ACTIVOS y VIGENTES similares a `query` por distancia
+        vectorial. Hermano de `search_similar_messages`, pero sobre `facts`:
+        antes de esta funcion, nadie leia `facts` por similitud -- solo
+        `save_fact` (via `_find_nearest_fact`) para deduplicar al ESCRIBIR.
+        Sin esto, "jax sabes a que me dedico?" no trae el hecho de ocupacion
+        aunque este guardado y verificado, porque no matchea ninguna de las
+        seis categorias de `detect_completeness_intent` (ver ese docstring).
+
+        `limit` por defecto es 30, no 5 como en `search_similar_messages` --
+        ADREDE, medido contra el caso real, no copiado del hermano. Para
+        "jax sabes a que me dedico?" el propio texto de la consulta contiene
+        la palabra "jax", asi que 25 facts que hablan de JAX (el software)
+        quedan MAS cerca en distancia coseno que el fact #7 (ocupacion de
+        Fernando) -- que igual pasa `FACT_SIMILARITY_THRESHOLD` (0.5931 <
+        0.62), pero es el puesto 26 de 28 facts que pasan ese umbral (medido
+        2026-09-20, produccion, solo SELECT). Como el ORDER BY es ascendente
+        por la MISMA distancia que usa el umbral, un fact bajo el umbral
+        NUNCA puede rankear despues de uno que lo supera -- asi que
+        `LIMIT limit` sobre esa misma consulta ya trae, en orden, exactamente
+        los `limit` facts mas cercanos que pasan el umbral (si hay al menos
+        `limit`). Un `limit` de 5 -- razonable para mensajes, que son
+        parrafos completos y caros en tokens -- corta ANTES de llegar al #26:
+        el bug que origina esta funcion seguiria sin arreglarse. Los facts
+        son lineas atomicas cortas (no parrafos), asi que el costo de token
+        de 30 es bajo; el umbral, no `limit`, es el filtro real (ver el
+        comentario de `FACT_SIMILARITY_THRESHOLD` mas arriba) -- `limit` solo
+        decide CUANTOS de los que pasan el umbral se muestran.
+
+        Filtra SIEMPRE (no es opcional, no hay parametro para saltarlo):
+          - `superseded_by IS NULL`: un fact que Fernando corrigio no puede
+            volver por la ventana de la busqueda semantica.
+          - `expires_at IS NULL OR expires_at > NOW()`: un fact vencido
+            tampoco -- mismo criterio que `_find_nearest_fact` y `get_facts`.
+          - distancia coseno < FACT_SIMILARITY_THRESHOLD (documentado arriba
+            con las mediciones reales que lo justifican): sin umbral, se
+            inyectarian los `limit` facts mas cercanos SIN IMPORTAR que tan
+            lejos esten -- un detector que trae todo no filtra nada.
+
+        Scope de dos niveles (identico a `search_similar_messages` /
+        `get_facts`):
+          - project_id NOT NULL -> facts del PROYECTO (compartidos).
+          - user_id    NOT NULL -> facts INDIVIDUALES (project_id IS NULL).
+          - ambos None          -> sin filtro de scope.
+
+        `user_id`/`project_id` ya viven en la propia tabla `facts` (a
+        diferencia de `messages` antes de la desnormalizacion): el WHERE de
+        scope no necesita JOIN, asi que el indice vectorial HNSW
+        (`idx_embedding_bge_m3`) queda disponible sin el trabajo que
+        `search_similar_messages` tuvo que hacer.
+
+        recent_history (opcional): igual que en `search_similar_messages`,
+        mezcla los ultimos turnos con `query` para no depender solo de la
+        ultima frase.
+
+        Devuelve lista de dicts {id, fact_text, fact_type, created_at,
+        distancia}, ya filtrada por el umbral -- puede ser []. `None` si la
+        busqueda no se pudo completar (Ollama caido, DB caida): fail-soft,
+        pero declarando la incertidumbre en vez de fingir que no habia nada
+        que recordar (mismo contrato que `search_similar_messages`)."""
+        if not self.pool:
+            return []
+
+        blended_query = _blend_query(query, recent_history)
+        embedding = await self.get_embedding(blended_query)
+        if embedding is None:
+            return []
+        if _is_degenerate_embedding(embedding):
+            logger.warning("search_similar_facts: embedding de consulta de norma cero, sin busqueda")
+            return []
+
+        vec_str = json.dumps(embedding)
+
+        clauses = [
+            "superseded_by IS NULL",
+            "(expires_at IS NULL OR expires_at > NOW())",
+            _nonzero_embedding_sql(_col()),
+        ]
+        params: list = []
+        scope = []
+        if project_id is not None:
+            scope.append("project_id = %s")
+            params.append(project_id)
+        if user_id is not None:
+            scope.append("(project_id IS NULL AND user_id = %s)")
+            params.append(user_id)
+        if scope:
+            clauses.append("(" + " OR ".join(scope) + ")")
+        where = " AND ".join(clauses)
+
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT id, fact_text, fact_type, created_at, "
+                        f"VEC_DISTANCE_COSINE({_col()}, VEC_FromText(%s)) AS distancia "
+                        f"FROM facts WHERE {where} "
+                        f"ORDER BY VEC_DISTANCE_COSINE({_col()}, VEC_FromText(%s)) ASC "
+                        "LIMIT %s",
+                        ([vec_str] + params + [vec_str, limit]),
+                    )
+                    rows = _finite_distance_rows(
+                        [dict(r) for r in await cur.fetchall()], "search_similar_facts")
+        except Exception as e:  # fail-soft: mismo contrato que search_similar_messages -- None declara "no se pudo buscar", distinto de [] ("se busco y no habia nada cerca")
+            logger.error(f"search_similar_facts fallo: {e}")
+            return None
+
+        # El umbral se aplica ACA, en Python, sobre las filas ya traidas por
+        # el ORDER BY + LIMIT de arriba (que es lo que usa el indice HNSW):
+        # filtrar por distancia dentro del WHERE sacaria a la consulta del
+        # indice, misma leccion que el JOIN de search_similar_messages. Como
+        # el ORDER BY ya es por esa MISMA distancia, ascendente, todo lo que
+        # pasa el umbral quedo agrupado al FRENTE de `rows` -- filtrar aca no
+        # pierde ningun candidato que el `LIMIT` de arriba ya haya traido.
+        return [r for r in rows if r["distancia"] < FACT_SIMILARITY_THRESHOLD]
 
     # --------------------------------------------------------
     # Gestion de facts (comando /fact: control de calidad)

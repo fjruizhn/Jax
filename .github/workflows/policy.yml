@@ -586,6 +586,7 @@ jobs:
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
           tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py
           tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py
+          tests/test_memoria_busqueda_facts.py
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -596,7 +597,8 @@ jobs:
             tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py \
             tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py \
             tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py \
-            tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py 2>&1 | tee /tmp/out
+            tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py \
+            tests/test_memoria_busqueda_facts.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
           # (el scope copiado al mensaje, el centinela de que el scope de una
           # conversacion sigue siendo inmutable, el plan sin JOIN que si usa el
@@ -684,8 +686,25 @@ jobs:
           #   de la CACHE del indice. Es el otro modo de fallo del HNSW y, a
           #   diferencia del envenenamiento por cascada, este se ve venir: es
           #   aritmetica (bytes / (dim*4)). Numero del RUNNER, no de sumar.
-          grep -qE "^53 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 53 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 53 -> 64 el 2026-09-20 (decision de Fernando: JAX busca hechos por
+          #   similitud en cada turno): tests/test_memoria_busqueda_facts.py
+          #   (archivo nuevo, +11) -- `search_similar_facts`, hermano de
+          #   `search_similar_messages` pero sobre `facts`. Cubre el umbral de
+          #   similitud (cerca entra, lejos no, y una pregunta ajena no trae
+          #   nada), que un fact SUPERADO o VENCIDO no vuelve aunque sea el
+          #   mas cercano (ni siquiera para la busqueda semantica), el scope
+          #   de dos niveles (individual/proyecto), el EXPLAIN de la consulta
+          #   REAL a volumen (60 filas propias, no 1 -- misma leccion que
+          #   test_memory_scope_denormalized.py) confirmando que usa
+          #   idx_embedding_bge_m3 sin JOIN, el fail-soft (sin pool, sin
+          #   embedding), y el caso real reproducido a escala (25 facts mas
+          #   cercanos-pero-genericos enterrando al fact del bug bajo un
+          #   `limit=5`, visto en rojo a mano contra el `limit` por defecto
+          #   de `search_similar_messages` antes de fijar el de esta funcion
+          #   en 30) mas el truncado correcto de `limit` entre los que pasan
+          #   el umbral. Numero del RUNNER: 64 passed.
+          grep -qE "^64 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 64 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
