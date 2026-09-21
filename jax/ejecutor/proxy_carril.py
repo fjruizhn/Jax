@@ -423,6 +423,22 @@ class _Proxy:
             async with carril_ejecutor_async(self.cfg.raiz, self.cfg.tope_s):
                 _ESPERANDO_CARRIL -= 1
                 tomado = True
+                # C4: re-chequeo AL TOMAR el carril, antes de construir nada para el
+                # upstream. Sin esto, una petición que estaba en cola puede ganar el
+                # carril que el freno acaba de liberar (canceló a quien lo tenía) y
+                # llegar al upstream ANTES de que el vigía del freno de ESTA petición
+                # —que sondea cada INTERVALO_DE_SONDEO, no en cada instrucción— se
+                # entere. Medido: 2 fallos en 150 corridas bajo carga de CPU
+                # (2026-09-21), mismo `httpx.RemoteProtocolError` que en CI el
+                # 2026-09-20. El chequeo de más arriba no alcanza: el freno puede
+                # caer MIENTRAS se espera el carril, y esperar el carril no tiene
+                # ningún punto de re-chequeo propio.
+                frenado = await self._frenado()
+                if frenado is not None:
+                    log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
+                    await _responder_error(conn, writer, 423, Motivo(frenado),
+                                           extra=((b"x-should-retry", b"false"),), metodo=metodo)
+                    return
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
                 cabeceras.append((b"accept-encoding", b"identity"))
                 solicitud = self.cliente.build_request(

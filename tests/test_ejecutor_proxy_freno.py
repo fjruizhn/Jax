@@ -5,6 +5,7 @@ menos de un segundo, soltando el carril. Sin saber dónde está el interruptor, 
 import asyncio
 import json
 import time
+from contextlib import asynccontextmanager
 
 import httpx
 import pytest
@@ -103,15 +104,19 @@ def test_freno_puesto_mientras_espera_el_carril_da_423_legible(tmp_path, freno):
             # Las dos suposiciones del test, comprobadas EN EL INSTANTE del corte.
             #
             # Falló en CI el 2026-09-20 con `httpx.RemoteProtocolError: peer closed
-            # connection without sending complete message body`, que no dice nada de
-            # lo que pasó. Ese error sale si la segunda YA estaba recibiendo cuerpo
-            # cuando cayó el freno -- o sea, si la primera soltó el carril entre el
-            # `while` de arriba y esta línea. En una máquina descargada no se
-            # reproduce (0 de 30 corridas); solo con el runner cargado.
-            #
-            # No se sabe cerrar esa carrera sin reproducirla, así que al menos se
-            # nombra: si vuelve a pasar, el mensaje dice CUÁL suposición se rompió
-            # en vez de un error de protocolo indescifrable.
+            # connection without sending complete message body`. Causa raíz encontrada
+            # el 2026-09-21 (reproducida 2/150 bajo carga de CPU, y de forma
+            # determinística en test_freno_justo_al_tomar_el_carril_no_toca_upstream,
+            # más abajo): `_reenviar` no re-chequeaba el freno justo al TOMAR el
+            # carril. Si la primera soltaba el carril (cortada por su propio vigía
+            # del freno) en la misma ventana en que la segunda esperaba, la segunda
+            # podía ganar el carril recién liberado y llegar al upstream antes de que
+            # SU PROPIO vigía del freno —que sondea cada INTERVALO_DE_SONDEO, no en
+            # cada instrucción— se enterara. Arreglado con un re-chequeo síncrono
+            # dentro de `_reenviar` al tomar el carril (`jax/ejecutor/proxy_carril.py`).
+            # Estas dos asserts se quedan como red: si la causa vuelve a abrirse por
+            # otra vía, el mensaje dice CUÁL suposición se rompió en vez de un error
+            # de protocolo indescifrable.
             assert not primera.done(), (
                 "la primera soltó el carril antes del freno: la segunda ya estaba "
                 "recibiendo cuerpo, y el corte sale como error de protocolo en vez "
@@ -131,6 +136,33 @@ def test_freno_puesto_mientras_espera_el_carril_da_423_legible(tmp_path, freno):
     estado, reintento, cuerpo, demora, recibidas = _correr(escenario())
     assert (estado, reintento, cuerpo, recibidas) == (423, "false", _error(proxy_carril.KILL_SWITCH_ACTIVO), 1)
     assert demora < 1.0
+
+
+def test_freno_justo_al_tomar_el_carril_no_toca_upstream(tmp_path, freno, monkeypatch):
+    """Causa raíz de la intermitencia de CI 2026-09-20 (ver el comentario del test de
+    arriba), reproducida SIN depender de carga ni de suerte: el freno cae en la misma
+    fracción de segundo en que una petición en cola obtiene el carril, antes de que
+    `_reenviar` construya nada para el upstream. Contra el código de antes del
+    2026-09-21 esto llegaba al upstream (recibía `data: trozo-0`); con el re-chequeo
+    al tomar el carril, no."""
+    real_carril = proxy_carril.carril_ejecutor_async
+
+    @asynccontextmanager
+    async def carril_que_frena_al_conceder(raiz, tope_s):
+        async with real_carril(raiz, tope_s):
+            # El instante exacto de la carrera: el carril se concede y, ANTES de que
+            # `_reenviar` llegue a construir la petición al upstream, el freno ya cayó.
+            freno.write_text("{}")
+            yield
+
+    monkeypatch.setattr(proxy_carril, "carril_ejecutor_async", carril_que_frena_al_conceder)
+
+    async def escenario():
+        async with Upstream(n_trozos=1) as up, Proxy(up.url, tmp_path, 5) as px, httpx.AsyncClient() as cli:
+            r = await cli.post(px.url + "/v1/messages", content=_CUERPO)
+            return r.status_code, r.headers.get("x-should-retry"), r.json(), len(up.recibidas)
+
+    assert _correr(escenario()) == (423, "false", _error(proxy_carril.KILL_SWITCH_ACTIVO), 0)
 
 
 def test_con_el_freno_puesto_lo_que_ya_corrio_se_anota(tmp_path, freno):
