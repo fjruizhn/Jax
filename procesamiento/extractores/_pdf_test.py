@@ -41,8 +41,18 @@ def _pdf_una_pagina(destino: Path, stream: bytes) -> Path:
 
 
 def _pdf_con_texto(destino: Path) -> Path:
-    """PDF mínimo con capa de texto, escrito a mano (sin dependencias)."""
-    stream = b"BT /F1 12 Tf 20 100 Td (ACTIVOS TOTALES 1234) Tj ET\n"
+    """PDF con capa de texto REAL, escrito a mano (sin dependencias): un
+    párrafo, no cuatro palabras -- el umbral (MINIMO_CARACTERES) es la
+    defensa contra un PDF escaneado con un poco de texto suelto encima; el
+    fixture tiene que representar contenido de verdad, no acomodarse al
+    umbral."""
+    stream = (
+        b"BT /F1 12 Tf 20 160 Td (ACTIVOS TOTALES 1234) Tj ET\n"
+        b"BT /F1 10 Tf 20 140 Td "
+        b"(Estado de Situacion Financiera al cierre del periodo,) Tj ET\n"
+        b"BT /F1 10 Tf 20 125 Td "
+        b"(con el detalle completo de las cuentas patrimoniales.) Tj ET\n"
+    )
     return _pdf_una_pagina(destino, stream)
 
 
@@ -62,22 +72,27 @@ def _pdf_sin_texto(destino: Path) -> Path:
 
 def _pdf_con_tabla(destino: Path) -> Path:
     """PDF de una página con una tabla REAL: líneas vectoriales formando una
-    grilla de 2x2, más texto dentro de cada celda -- es lo que hace que
+    grilla de 3x2, más texto dentro de cada celda -- es lo que hace que
     `pagina.extract_tables()` de pdfplumber la reconozca como tabla (su
     estrategia por defecto detecta líneas dibujadas, no separa por espacios).
-    """
+    Tres filas (no dos) para que el texto CRUDO de la página -- lo que
+    clasifica si la página "tiene texto", independiente del markdown de la
+    tabla -- por sí solo supere MINIMO_CARACTERES_PAGINA."""
     stream = (
         b"1 w\n"
+        b"20 200 m 180 200 l S\n"
         b"20 180 m 180 180 l S\n"
-        b"20 150 m 180 150 l S\n"
-        b"20 120 m 180 120 l S\n"
-        b"20 180 m 20 120 l S\n"
-        b"100 180 m 100 120 l S\n"
-        b"180 180 m 180 120 l S\n"
-        b"BT /F1 10 Tf 30 160 Td (Cuenta) Tj ET\n"
-        b"BT /F1 10 Tf 110 160 Td (2025) Tj ET\n"
-        b"BT /F1 10 Tf 30 130 Td (Pasivos) Tj ET\n"
-        b"BT /F1 10 Tf 110 130 Td (450) Tj ET\n"
+        b"20 160 m 180 160 l S\n"
+        b"20 140 m 180 140 l S\n"
+        b"20 200 m 20 140 l S\n"
+        b"100 200 m 100 140 l S\n"
+        b"180 200 m 180 140 l S\n"
+        b"BT /F1 10 Tf 30 180 Td (Cuenta) Tj ET\n"
+        b"BT /F1 10 Tf 110 180 Td (2025) Tj ET\n"
+        b"BT /F1 10 Tf 30 160 Td (Pasivos) Tj ET\n"
+        b"BT /F1 10 Tf 110 160 Td (450) Tj ET\n"
+        b"BT /F1 10 Tf 30 145 Td (Patrimonio) Tj ET\n"
+        b"BT /F1 10 Tf 110 145 Td (550) Tj ET\n"
     )
     return _pdf_una_pagina(destino, stream)
 
@@ -108,6 +123,15 @@ def _pdf_hibrido(destino: Path) -> Path:
     ]
     destino.write_bytes(b"".join(partes))
     return destino
+
+
+def _pdf_con_marca_de_agua(destino: Path) -> Path:
+    """Una página escaneada con un sello/marca de agua corto estampado por
+    el escáner -- el caso que MINIMO_CARACTERES_PAGINA existe para cerrar:
+    hay ALGO de texto (no es el caso vacío de `_pdf_sin_texto`), pero es
+    corto y no es contenido real del documento."""
+    stream = b"BT /F1 10 Tf 20 100 Td (CONFIDENCIAL - COPIA) Tj ET\n"
+    return _pdf_una_pagina(destino, stream)
 
 
 def test_detecta_que_un_pdf_nativo_tiene_texto(tmp_path: Path):
@@ -164,3 +188,14 @@ def test_un_pdf_hibrido_da_parcial_y_lo_dice_en_el_detalle(tmp_path: Path):
     assert "ACTIVOS TOTALES 1234" in r.salidas["texto.md"]
     assert r.detalle["paginas"] == 2
     assert r.detalle["paginas_sin_texto"] == [2]
+
+
+def test_una_marca_de_agua_corta_no_se_declara_ok(tmp_path: Path):
+    """Una página escaneada cuyo único 'texto' es un sello corto
+    (por debajo de MINIMO_CARACTERES_PAGINA) NO puede salir 'ok' con eso
+    como extracto -- sería declarar resuelto un documento que en realidad
+    es una imagen con un sello encima, y que nadie manda a OCR después
+    porque el sistema ya dijo que estaba bien."""
+    r = pdf.extraer(_pdf_con_marca_de_agua(tmp_path / "sello.pdf"))
+    assert r.estado != "ok"
+    assert r.salidas == {}

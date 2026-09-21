@@ -2877,14 +2877,21 @@ jobs:
       # `pytest.importorskip("pdfplumber")`, asi que sin el paquete
       # instalado el `-v` sin piso daria "1 skipped" y EXIT 0 -- verde con
       # CERO tests del unico freno contra declarar 'ok' con un extracto
-      # vacio o con las tablas destruidas. Medido en este entorno
-      # (Python 3.14 y, via Docker, Python 3.12 -- mismo runtime que usa
-      # este job): 6 passed en las dos.
+      # vacio o con las tablas destruidas. Ronda de arreglo (2026-09-21,
+      # ruling del coordinador): MINIMO_CARACTERES vuelve a 32 (una ronda
+      # anterior lo habia bajado a 16 para que pasara el fixture -- eso es
+      # mover la medida, no el arreglo; se agrando el fixture en su lugar) y
+      # se suma MINIMO_CARACTERES_PAGINA=24 para cerrar el caso del PDF
+      # escaneado con un sello/marca de agua corto que, sumado entre varias
+      # paginas, cruzaba el umbral del documento entero. +1 test
+      # (`test_una_marca_de_agua_corta_no_se_declara_ok`), de 6 a 7. Medido
+      # en este entorno (Python 3.14 y, via Docker, Python 3.12 -- mismo
+      # runtime que usa este job): 7 passed en las dos.
       - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
-          grep -qE "^6 passed" /tmp/pdf_tests || {
-            echo "PISO ROTO: se esperaban 6 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^7 passed" /tmp/pdf_tests || {
+            echo "PISO ROTO: se esperaban 7 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
