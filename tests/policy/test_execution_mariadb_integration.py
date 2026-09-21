@@ -89,16 +89,16 @@ def test_b7_real_mariadb_artifact_and_observation_relations():
     raw=store.put_evidence_blob(b"control=CTL.B6.GOVERNED_DISPATCH;reason=DENIED")
     subject=EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"b7-db-attempt")
     artifact=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,definition.control_id,1,definition.control_definition_hash,subject,(EvidenceBlobRef(raw.evidence_hash,"bounded_input","text/plain","utf-8"),),EvidenceTrustDomain.JAX_RUNTIME,"ci",identity.implementation_identity_hash,now)
-    store.record_artifact(artifact)
+    store._record_artifact(artifact, _token=store._fixed_lifecycle_token())
     loaded=store.load_evidence_artifact(artifact.artifact_hash)
     assert loaded.artifact_hash == artifact.artifact_hash
     observation=EnforcementObservation("b7-db-observation",definition.control_id,1,definition.control_definition_hash,subject,identity.implementation_identity_hash,ObservationOutcome.DENIED,"DENIED",now,ClaimScope(ClaimEnvironment.CI),(artifact.artifact_hash,))
-    store.record_observation(observation)
+    store._record_observation(observation, _token=store._fixed_lifecycle_token())
     assert _scalar("SELECT COUNT(*) FROM jax_evidence.observation_artifacts WHERE observation_id=%s",(observation.observation_id,)) == 1
     assert store.load_observation(observation.observation_id).observation_hash == observation.observation_hash
     from policy.enforcement_evidence.models import EnforcementAssertion, ClaimLevel, AssertionVerdict
     assertion=EnforcementAssertion(definition.control_id,1,definition.control_definition_hash,ClaimLevel.ENFORCED,AssertionVerdict.NOT_OBSERVED,identity.implementation_identity_hash,ClaimScope(ClaimEnvironment.CI),(subject,),(artifact.artifact_hash,),(observation.observation_id,),now,now,now)
-    store.record_assertion(assertion)
+    store._record_assertion(assertion, _token=store._fixed_lifecycle_token())
     assert _scalar("SELECT COUNT(*) FROM jax_evidence.enforcement_assertions WHERE assertion_hash=%s",(assertion.assertion_hash,)) == 1
     assert store.load_assertion(assertion.assertion_hash).assertion_hash == assertion.assertion_hash
     connection=_connection()

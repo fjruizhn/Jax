@@ -8,7 +8,7 @@ from policy.enforcement_evidence.errors import EvidenceBlobMissingError, Evidenc
 NOW=datetime(2026,1,1,tzinfo=timezone.utc)
 def identity(store):
  b=store.put_evidence_blob(b'{"sources":[]}')
- return ImplementationIdentity("fjruizhn/Jax","a"*40,"b"*40,SourceState.CLEAN,b.evidence_hash)
+ return store.record_identity(ImplementationIdentity("fjruizhn/Jax","a"*40,"b"*40,SourceState.CLEAN,b.evidence_hash))
 def artifact(store, control="CTL.B6.GOVERNED_DISPATCH", subject=None):
  d=load_control_definition(control); i=identity(store); b=store.put_evidence_blob(b"evidence")
  a=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,control,1,d.control_definition_hash,subject or EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"attempt:1"),(EvidenceBlobRef(b.evidence_hash,"input"),),EvidenceTrustDomain.JAX_RUNTIME,"runtime",i.implementation_identity_hash,NOW)
@@ -56,7 +56,7 @@ def test_fixed_runtime_recorder_persists_bounded_denial_without_prompt():
 def test_no_evidence_never_supports_enforced_and_identity_drift_isolated():
  s=EvidenceStore(); d=load_control_definition("CTL.B6.GOVERNED_DISPATCH"); i=identity(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"x")
  assert derive_assertion(d,i,(),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW) is AssertionVerdict.NOT_OBSERVED
- other=ImplementationIdentity("fjruizhn/Jax","c"*40,"d"*40,SourceState.CLEAN,s.put_evidence_blob(b"other").evidence_hash)
+ other=s.record_identity(ImplementationIdentity("fjruizhn/Jax","c"*40,"d"*40,SourceState.CLEAN,s.put_evidence_blob(b"other").evidence_hash))
  assert derive_assertion(d,other,(),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW) is AssertionVerdict.NOT_OBSERVED
 def test_tested_is_not_inferred_from_runtime_observation():
  s=EvidenceStore(); d,i,a=artifact(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)

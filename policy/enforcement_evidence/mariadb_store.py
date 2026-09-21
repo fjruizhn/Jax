@@ -10,7 +10,8 @@ from .errors import EvidenceBlobMissingError, EvidenceBlobHashMismatchError, Evi
 from .canonical import canonical_bytes
 from .errors import EvidenceArtifactIntegrityError, ObservationIntegrityError, AssertionIntegrityError
 class MariaDBEvidenceStore:
-    def __init__(self, connection_factory): self._connection_factory=connection_factory
+    def __init__(self, connection_factory): self._connection_factory=connection_factory; self.__lifecycle_token=object()
+    def _fixed_lifecycle_token(self): return self.__lifecycle_token
     def put_evidence_blob(self, data: bytes) -> EvidenceBlob:
         if not isinstance(data,bytes): raise TypeError("bytes requeridos")
         if len(data)>MAX_BLOB_BYTES: raise EvidenceBlobTooLargeError("blob > 1 MiB")
@@ -35,8 +36,9 @@ class MariaDBEvidenceStore:
             if int(row[0])!=len(data) or sha256_bytes(data)!=evidence_hash: raise EvidenceBlobHashMismatchError(evidence_hash)
             return data
         finally: con.close()
-    def _record_artifact(self, artifact):
+    def _record_artifact(self, artifact, *, _token):
         """Persist only after every referenced blob is authoritatively readable."""
+        if _token is not self.__lifecycle_token: raise EvidenceArtifactIntegrityError("fixed lifecycle required")
         for ref in artifact.blob_refs: self.get_evidence_blob(ref.evidence_hash)
         h=artifact.artifact_hash; con=self._connection_factory()
         try:
@@ -64,7 +66,8 @@ class MariaDBEvidenceStore:
             from .evidence_store import _seal, _artifacts
             return _seal(_artifacts,value)
         finally: con.close()
-    def _record_observation(self, observation):
+    def _record_observation(self, observation, *, _token):
+        if _token is not self.__lifecycle_token: raise ObservationIntegrityError("fixed lifecycle required")
         for h in observation.evidence_artifact_hashes:
             # FK validates persistence; select makes the failure deterministic before write.
             con0=self._connection_factory()
@@ -83,7 +86,8 @@ class MariaDBEvidenceStore:
             con.commit(); return observation
         except Exception: con.rollback(); raise
         finally: con.close()
-    def _record_assertion(self, assertion):
+    def _record_assertion(self, assertion, *, _token):
+        if _token is not self.__lifecycle_token: raise AssertionIntegrityError("fixed lifecycle required")
         con=self._connection_factory()
         try:
             cur=con.cursor(); payload=canonical_bytes(assertion.projection()).decode("utf-8")

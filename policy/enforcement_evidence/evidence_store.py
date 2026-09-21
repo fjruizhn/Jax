@@ -69,6 +69,7 @@ class EvidenceStore:
 def is_trusted_evidence_artifact(v): return _sealed(_artifacts,v)
 def is_trusted_observation(v): return _sealed(_observations,v)
 def is_trusted_assertion(v): return _sealed(_assertions,v)
+def is_trusted_implementation_identity(v): return _sealed(_identities,v)
 class EvidenceStoreProvider:
  def __init__(self,store:EvidenceStore): self._store=store
  def read(self,evidence_ref:str)->bytes: return self._store.get_evidence_blob(evidence_ref)
