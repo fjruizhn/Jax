@@ -2836,8 +2836,13 @@ jobs:
           #   medido en el runner local con ESTE MISMO comando: 2261 -> 2266 (mismo
           #   2261 de la nota de arriba, confirmando que la base no se movio). Si el
           #   runner da otro numero, manda el runner.
-          grep -qE "^2317 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2317 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2349 -> 2352 (B6-AUD, 2026-09-21): tres regresiones puras
+          # adicionales del cierre de la ruta legacy de Motor Registry. El
+          # workflow efectivo de la base ya fijaba 2349; estos tres casos
+          # verifican que /motor/dispatch no cree trabajo sin el enlace B6.
+          # Los 17 skipped siguen siendo estructurales y no cambian.
+          grep -qE "^2352 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2352 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
