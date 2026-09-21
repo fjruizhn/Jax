@@ -314,12 +314,50 @@ Es exactamente lo que se pidió —reusar el jail probado en vez de estrenar có
 seguridad— pero **cambia el contrato de uso** y por eso se escribe acá: quien llame a la
 ingesta tiene que armar el trabajo dentro del workspace.
 
-### El umbral de confianza del OCR está sin calibrar
+### El umbral de confianza del OCR: CALIBRADO el 2026-09-21, sin cambio justificado
 
-`UMBRAL_CONFIANZA_PROMEDIO = 70` y `CONFIANZA_MINIMA_PALABRA = 60` salen de puntos
-sintéticos, no de un corpus real. La confianza medida se registra **siempre** en `detalle`,
-pase o no pase, justamente para poder calibrarlos. Lo hace el Task 10 del plan, con los
-escaneos reales y las 10 cifras que elige Fernando.
+Se midió sobre **10 documentos escaneados reales** (51 páginas, 1.295 cifras) usando la
+**aritmética como verdad de referencia**: una cifra que participa en una suma que cuadra
+está verificadamente bien leída, sin que nadie tenga que transcribir nada.
+
+| | Cifras **verificadas** | Cifras **no verificadas** |
+|---|---|---|
+| Confianza mediana | 92,59 | **96,22** |
+
+**Los dos grupos no se separan** — el no verificado tiene confianza *más alta*. Mover el
+umbral de 60 a 80 apenas mejora el rechazo (7 % → 13 %) y empieza a perder cifras buenas
+(96,8 % → 92 % de aciertos).
+
+**Los valores se dejan como están** (`UMBRAL_CONFIANZA_PROMEDIO = 70`,
+`CONFIANZA_MINIMA_PALABRA = 60`), ahora **sabiendo que son arbitrarios** en vez de creer
+que estaban calibrados. Eso vale más que el número anterior.
+
+> **Salvedad del método, que no se borra:** *"no verificada"* no es lo mismo que
+> *"incorrecta"* — el método sólo prueba positivos. Esto no demuestra que la confianza de
+> tesseract sea inútil en general; demuestra que **en este rango, con este método, no
+> discrimina**. Si alguna vez hace falta una señal que sí separe, hay que buscar otra cosa.
+
+### El DPI de rasterizado: 300, decidido el 2026-09-21 con datos reales
+
+Un experimento **sintético** prometía −71 % de tiempo sin perder exactitud. Medido sobre
+los 10 documentos reales, el ahorro es **59,2 %** — y la exactitud **sí se pierde**, justo
+en el caso que más importa:
+
+En los **3 documentos que son fotos de celular** (tipo CamScanner, que es lo que mandan los
+clientes), 150 DPI destruye las cifras. Uno pierde el **100 %** de sus sumas verificables
+(12 → 0); otro el 80 % (5 → 1). El caso del inventario que este spec cita como ejemplo
+—las cuatro cifras que suman 25.847.583,99— **desaparece entero**: esa página del balance
+cae de 49 cifras reconocidas a 17.
+
+El sintético daba 20/20 porque era texto renderizado limpio. Una foto de celular tiene
+desenfoque y ruido que a 150 DPI ya no se recuperan.
+
+> **Lección de método: un experimento sintético puede mentir en la dirección cómoda.** Daba
+> exactamente el resultado que uno quería oír, y con documentos reales se cayó.
+
+Queda anotada, sin implementar, una tercera vía: **rasterizar a 150 y reintentar a 300 si
+las cifras no cuadran** — el mismo principio de la compuerta, el caro sólo si el barato no
+alcanzó. Es diseño nuevo con su propio riesgo, para ahorrar lo que menos falta hace.
 
 ### El costo de leer dos veces no está medido
 
