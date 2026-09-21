@@ -381,6 +381,46 @@ def test_imagen_real_renombrada_va_por_ocr_y_marca_extension_enganosa(
     assert r.detalle["extension_enganosa"] == {"nombre": ".docx", "contenido": "imagen"}
 
 
+def test_webp_real_renombrado_va_por_ocr_y_marca_extension_enganosa(
+    tmp_path: Path, monkeypatch
+):
+    """Cobertura que faltaba (task-8, tarea extra que arrastraba la
+    auditoría): la rama RIFF/WEBP de `_tipo_por_contenido`
+    (compuerta.py:59-61) no tenía ningún caso propio -- mutar esa firma
+    (por ejemplo, exigir `cabecera[:4] == b"RIFF"` sin el chequeo de
+    `cabecera[8:12] == b"WEBP"`, o borrar la rama entera) dejaba la suite
+    en verde, porque el respaldo por extensión (`.webp` está en
+    `IMAGENES`) absorbía el caso feliz en silencio -- mismo patrón que
+    `test_imagen_real_renombrada_va_por_ocr_y_marca_extension_enganosa`,
+    ahora con la extensión puesta AL REVÉS (una firma WEBP real, renombrada
+    con una extensión que NO es de imagen) para que sólo el reconocimiento
+    de la firma pueda rutear esto a OCR."""
+    from procesamiento.extractores import ocr, word
+    from procesamiento.resultado import Resultado
+
+    monkeypatch.setattr(
+        ocr, "extraer",
+        lambda origen, idioma="spa": Resultado(
+            estado="ok", salidas={"texto.txt": "leido"}, detalle={},
+            extractor="tesseract", version="5.5.0",
+        ),
+    )
+
+    def no_debe_llamarse(origen):
+        raise AssertionError("un WEBP real no debe pasar por el extractor de Word")
+
+    monkeypatch.setattr(word, "extraer", no_debe_llamarse)
+
+    # Firma RIFF/WEBP real: "RIFF" + 4 bytes de tamaño + "WEBP".
+    firma = b"RIFF" + (100).to_bytes(4, "little") + b"WEBP" + b"resto de bytes"
+    archivo = tmp_path / "foto.docx"
+    archivo.write_bytes(firma)
+    r = compuerta.extraer(archivo)
+
+    assert r.estado == "ok"
+    assert r.detalle["extension_enganosa"] == {"nombre": ".docx", "contenido": "imagen"}
+
+
 def test_pdf_con_extension_pero_contenido_no_decisivo_usa_respaldo_por_extension(
     tmp_path: Path, monkeypatch
 ):

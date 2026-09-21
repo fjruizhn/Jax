@@ -3052,11 +3052,46 @@ jobs:
       #     renombrada .docx, y un `.pdf` con contenido NO decisivo (hueco
       #     que destapó el propio barrido de mutación de esta ronda, no un
       #     hallazgo del auditor -- ver task-7-report.md).
+      #
+      # 21 -> 22 (Task 8, 2026-09-21, tarea extra que arrastraba la
+      # auditoría): faltaba cobertura propia de la rama RIFF/WEBP del
+      # sniffing por contenido (compuerta.py:59-61) -- mutar esa firma
+      # quedaba absorbido en silencio por el respaldo de extensión
+      # (`.webp` ya está en `IMAGENES`). +1 test con una firma RIFF/WEBP
+      # real renombrada con una extensión que NO es de imagen, mismo
+      # patrón que el de OLE2/PNG de la ronda anterior.
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          grep -qE "^21 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 21 tests CORRIDOS de la compuerta."; exit 1; }
+          grep -qE "^22 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 22 tests CORRIDOS de la compuerta."; exit 1; }
+
+      # Task 8 (2026-09-21, procesamiento-archivos-nucleo): la ingesta con
+      # cache -- la tarea que produce el ahorro real. Indexa por sha256 del
+      # original: el segundo pase sobre el mismo archivo hace CERO trabajo
+      # (no vuelve a invocar `compuerta.extraer`), el original que cambia
+      # se regenera, y `procesado/` es desechable -- se borra entero y se
+      # reconstruye igual. Escritura atomica por carpeta (temporal +
+      # rename). Depende de openpyxl (mismo requirements-archivos.txt de
+      # arriba) para el fixture del test.
+      #
+      # Ronda de arreglo (hallazgo de Fernando ANTES del primer commit,
+      # sobre el draft del brief): `fuente/` tenia que ser INMUTABLE y el
+      # draft no lo garantizaba -- dos archivos de contenido distinto con
+      # el mismo nombre hacian que el segundo pisara al primero en
+      # silencio. Ante colision de nombre con contenido distinto, se
+      # guarda como `<nombre>-<primeros 8 del sha256><extension>`, y la
+      # ficha registra el nombre REAL almacenado. +3 tests sobre el piso
+      # de 5 del brief: la colision en si (los dos originales sobreviven,
+      # con sus dos extractos, y el primero sigue legible), la
+      # contraparte (mismo nombre y mismo contenido no duplica), y la
+      # atomicidad (una escritura que se cae a la mitad no deja un
+      # `procesado/` incompleto, y un reintento se cura solo).
+      - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
+          grep -qE "^8 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 8 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
