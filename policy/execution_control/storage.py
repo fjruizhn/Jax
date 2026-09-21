@@ -8,7 +8,8 @@ from .models import ExecutionEnvironment, ExecutionRecord
 from .canonical import execution_record_hash
 
 from .errors import (AuthorizationConsumedError, DecisionExecutionConflictError,
-                     HumanApprovalConsumedError, UnknownExecutionError)
+                     ExecutionRequestScopeError, HumanApprovalConsumedError,
+                     UnknownExecutionError)
 
 @dataclass(frozen=True)
 class ExecutionEvent:
@@ -20,6 +21,8 @@ class InMemoryExecutionStore:
         self._lock = Lock(); self._authorizations = {}; self._records = {}; self._by_decision = {}
         self._events = {}; self._auth_consumed = set(); self._approval_consumed = set(); self._dry_runs = {}
     def insert_authorization(self, value):
+        if not getattr(value, "_is_trusted", lambda: False)():
+            raise ExecutionRequestScopeError("authorization no emitida por ciclo confiable")
         with self._lock: self._authorizations[value.authorization_id] = value
         return value
     def load_authorization(self, authorization_id):
@@ -69,12 +72,14 @@ class MariaDBExecutionStore:
         return json.dumps(data, sort_keys=True, separators=(",", ":"))
 
     def insert_authorization(self, value):
+        if not getattr(value, "_is_trusted", lambda: False)():
+            raise ExecutionRequestScopeError("authorization no emitida por ciclo confiable")
         connection = self._connection_factory()
         try:
             cur = connection.cursor()
-            cur.execute("INSERT INTO jax_execution.execution_authorizations (authorization_id,decision_id,canonical_authorization_hash,canonical_authorization,created_at_utc) VALUES (%s,%s,%s,%s,%s)",
-                        (value.authorization_id, value.decision_id, value.execution_authorization_hash,
-                         self._canonical(value), value.issued_at_utc))
+            cur.execute("INSERT INTO jax_execution.execution_authorizations (authorization_id,decision_id,execution_request_hash,canonical_authorization_hash,canonical_authorization,created_at_utc) VALUES (%s,%s,%s,%s,%s,%s)",
+                        (value.authorization_id, value.decision_id, value.execution_request.execution_request_hash,
+                         value.execution_authorization_hash, self._canonical(value), value.issued_at_utc))
             connection.commit()
             return value
         except Exception:
@@ -116,15 +121,23 @@ class MariaDBExecutionStore:
         connection = self._connection_factory()
         try:
             cur = connection.cursor()
-            cur.execute("SELECT canonical_authorization,canonical_authorization_hash FROM jax_execution.execution_authorizations WHERE authorization_id=%s", (authorization_id,))
+            cur.execute("SELECT authorization_id,decision_id,execution_request_hash,canonical_authorization,canonical_authorization_hash FROM jax_execution.execution_authorizations WHERE authorization_id=%s", (authorization_id,))
             row = cur.fetchone()
             if row is None: raise UnknownExecutionError(authorization_id)
-            raw = row[0].decode() if isinstance(row[0], bytes) else row[0]
-            from .authorization import _load_authorization_from_authoritative_projection
-            value = _load_authorization_from_authoritative_projection(json.loads(raw))
-            if value.execution_authorization_hash != row[1] or value.authorization_id != authorization_id:
+            raw = row[3].decode() if isinstance(row[3], bytes) else row[3]
+            from .authorization import (deserialize_execution_authorization, _issued,
+                                        _issued_authorizations, _issued_requests)
+            value = deserialize_execution_authorization(json.loads(raw))
+            if (row[0] != authorization_id or value.authorization_id != authorization_id
+                    or value.authorization_id != row[0] or value.decision_id != row[1]
+                    or value.execution_request.execution_request_hash != row[2]
+                    or value.execution_authorization_hash != row[4]):
                 raise UnknownExecutionError("authorization canonical corrupta")
-            return value
+            # Provenance is minted only here, after an authoritative row was
+            # fetched by caller-supplied identity and every duplicated row key
+            # agrees with its canonical artifact.  The parser above is pure.
+            _issued(_issued_requests, value.execution_request)
+            return _issued(_issued_authorizations, value)
         finally: connection.close()
 
     def load_execution(self, execution_id):

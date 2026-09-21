@@ -41,16 +41,14 @@ def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: d
     state = initial_state(requires_human_approval=authorization.requires_human_approval, requires_dry_run=authorization.requires_dry_run)
     return store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now))
 
-def consume_human_approval(store, record, authorization, approval, *, now_utc: datetime,
-                           trusted_approver_resolver=None) -> None:
+def consume_human_approval(store, record, authorization, approval, *, now_utc: datetime) -> None:
     from .human_approval import verify_human_approval
     from .adapters.trusted_approver import load_trusted_approver
     now = _now(now_utc)
     if not authorization.requires_human_approval: return
-    resolver = trusted_approver_resolver or load_trusted_approver
-    # Resolver is an injected trusted root for tests, never a verification
-    # key supplied by the approval caller.
-    public_key = resolver(approval.approver_actor_id, approval.approver_key_id)
+    # This fixed adapter is application configuration, never input from the
+    # approval presenter.  Tests replace the adapter at the composition seam.
+    public_key = load_trusted_approver(approval.approver_actor_id, approval.approver_key_id)
     verify_human_approval(approval, authorization, public_key, now_utc=now); store.consume_approval(approval.human_approval_id)
     store.append_event(ExecutionEvent(record.execution_id,
       (ExecutionState.READY_FOR_DRY_RUN if authorization.requires_dry_run else ExecutionState.READY_TO_DISPATCH).value,

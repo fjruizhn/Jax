@@ -36,29 +36,33 @@ def _authorization_issued_by_factory(value) -> bool:
     return ref is not None and ref() is value
 
 
-def _load_authorization_from_authoritative_projection(data: dict):
-    """Private MariaDB load boundary; revalidates constructors and hashes."""
+def deserialize_execution_authorization(data: dict) -> ExecutionAuthorization:
+    """Parse and verify a canonical authorization without granting provenance.
+
+    Canonical bytes establish only internal consistency.  The authoritative
+    store loader is the sole path which may subsequently trust this instance.
+    """
     request_data = data["execution_request"]
     target = request_data["target"]
-    request = _issued(_issued_requests, ExecutionRequest(
+    request = ExecutionRequest(
         request_data["schema_version"], request_data["kind"], request_data["decision_id"],
         request_data["decision_record_hash"], request_data["capability"],
         request_data["authenticated_caller_id"], request_data["motor"],
         ExecutionEnvironment(request_data["environment"]), target["kind"], target["value"],
         request_data["prompt"], request_data["context"], request_data["timeout_seconds"],
-        request_data["sandbox_required"], request_data.get("tenant_id"), request_data.get("user_id")))
+        request_data["sandbox_required"], request_data.get("tenant_id"), request_data.get("user_id"))
     policy = data["capability_policy"]
     projection = CapabilityPolicyProjection(policy["capability"], tuple(policy["allowed_callers"]),
         tuple(policy["allowed_motors"]), policy["sandbox_only"], policy["requires_human_gate"],
         policy["max_execution_minutes"], policy["max_recursion_depth"], policy["mode"], policy["risk_level"])
-    return _issued(_issued_authorizations, ExecutionAuthorization(
+    return ExecutionAuthorization(
         data["schema_version"], data["kind"], data["authorization_id"], data["decision_id"],
         data["decision_record_hash"], request, projection, data["policy_corpus_hash"],
         data["effective_authority_context_hash"], data["authority_ledger_checkpoint_hash"],
         data["requires_human_approval"], data["requires_dry_run"],
         datetime.fromisoformat(data["issued_at_utc"].replace("Z", "+00:00")),
         datetime.fromisoformat(data["expires_at_utc"].replace("Z", "+00:00")),
-        data["execution_authorization_hash"]))
+        data["execution_authorization_hash"])
 
 
 _FACTS = {

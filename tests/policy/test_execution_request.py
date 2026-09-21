@@ -11,7 +11,8 @@ from policy.decision_record.authority_binding import evaluate_decision_input
 from policy.decision_record.ids import new_decision_id
 from policy.decision_record.service import record_decision
 from policy.decision_record.storage import InMemoryDecisionRecordStore
-from policy.execution_control.authorization import authorize_execution, build_execution_request
+from policy.execution_control.authorization import (authorize_execution, build_execution_request,
+    deserialize_execution_authorization)
 from policy.execution_control.canonical import parameters_hash
 from policy.execution_control.models import ExecutionEnvironment
 from policy.execution_control.service import create_execution
@@ -77,6 +78,51 @@ def test_manual_request_and_authorization_are_not_trusted():
         create_execution(InMemoryExecutionStore(), replace(authorization), now_utc=NOW)
 
 
+@pytest.mark.parametrize("field,value", [("motor", "attacker-motor"),
+    ("capability", "ATTACKER")])
+def test_canonical_authorization_parser_never_mints_provenance(field, value):
+    """A self-consistent caller projection is data, not an issuance event."""
+    rec = record(); req = build_execution_request(rec, authenticated_caller_id="jacobs", capability="CAP", motor="m",
+        environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x":1}, timeout_seconds=60)
+    auth = authorize_execution(rec, req, catalog(), now_utc=NOW)
+    projection = auth.projection_without_hash()
+    request = projection["execution_request"]
+    request[field] = value
+    policy = projection["capability_policy"]
+    if field == "motor": policy["allowed_motors"] = [value]
+    if field == "capability": policy["capability"] = value
+    from policy.execution_control.canonical import execution_authorization_hash
+    projection["execution_authorization_hash"] = execution_authorization_hash(projection)
+    parsed = deserialize_execution_authorization(projection)
+    assert not parsed._is_trusted()
+    assert not parsed.execution_request._is_trusted()
+    with pytest.raises(Exception):
+        InMemoryExecutionStore().insert_authorization(parsed)
+    with pytest.raises(Exception):
+        create_execution(InMemoryExecutionStore(), parsed, now_utc=NOW)
+
+
+def test_changed_environment_cannot_be_reconstructed_into_an_authorization():
+    rec = record(); req = build_execution_request(rec, authenticated_caller_id="jacobs", capability="CAP", motor="m",
+        environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x":1}, timeout_seconds=60)
+    auth = authorize_execution(rec, req, catalog(), now_utc=NOW)
+    projection = auth.projection_without_hash()
+    projection["execution_request"]["environment"] = "PRODUCTION"
+    from policy.execution_control.canonical import execution_authorization_hash
+    projection["execution_authorization_hash"] = execution_authorization_hash(projection)
+    with pytest.raises(Exception):
+        deserialize_execution_authorization(projection)
+
+
+def test_authoritative_store_load_is_the_only_authorization_provenance_boundary():
+    store = InMemoryExecutionStore()
+    rec = record(); req = build_execution_request(rec, authenticated_caller_id="jacobs", capability="CAP", motor="m",
+        environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x":1}, timeout_seconds=60)
+    auth = authorize_execution(rec, req, catalog(), now_utc=NOW)
+    assert store.insert_authorization(auth)._is_trusted()
+    assert store.load_authorization(auth.authorization_id)._is_trusted()
+
+
 def test_models_do_not_publish_trust_registration_symbols():
     import policy.execution_control.models as models
     assert not hasattr(models, "register_request")
@@ -95,7 +141,7 @@ def test_mariadb_dbapi_create_persists_canonical_record_and_event():
             elif sql.startswith("INSERT INTO jax_execution.execution_events"):
                 self.db.event = args
         def fetchone(self):
-            if "canonical_authorization_hash" in self.last: return (self.db.auth[2],)
+            if "canonical_authorization_hash" in self.last: return (self.db.auth[3],)
             return None
     class Conn:
         def __init__(self): self.auth = self.record = self.event = None; self.commits = self.rollbacks = 0

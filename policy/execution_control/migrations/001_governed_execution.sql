@@ -3,6 +3,7 @@ CREATE SCHEMA IF NOT EXISTS jax_execution;
 CREATE TABLE IF NOT EXISTS jax_execution.execution_authorizations (
   authorization_id CHAR(36) PRIMARY KEY,
   decision_id CHAR(36) NOT NULL,
+  execution_request_hash CHAR(71) NOT NULL,
   canonical_authorization_hash CHAR(71) NOT NULL UNIQUE,
   canonical_authorization JSON NOT NULL,
   created_at_utc DATETIME(6) NOT NULL

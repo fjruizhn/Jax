@@ -155,7 +155,10 @@ class ExecutionAuthorization:
             raise ExecutionIntegrityError("schema authorization inválido")
         for name in ("authorization_id", "decision_id"): _uuid(getattr(self, name), name)
         for name in ("decision_record_hash", "policy_corpus_hash", "effective_authority_context_hash", "authority_ledger_checkpoint_hash", "execution_authorization_hash"): _hash(getattr(self, name), name)
-        if not isinstance(self.execution_request, ExecutionRequest) or not self.execution_request._is_trusted(): raise ExecutionIntegrityError("request no confiable")
+        # Integrity parsing deliberately permits an untrusted request.  Trust is
+        # a lifecycle property established only by issuance or an authoritative
+        # store load; requiring it here would force deserializers to mint trust.
+        if not isinstance(self.execution_request, ExecutionRequest): raise ExecutionIntegrityError("request inválido")
         if self.decision_id != self.execution_request.decision_id or self.decision_record_hash != self.execution_request.decision_record_hash: raise ExecutionIntegrityError("binding decision/request inválido")
         issued, expires = _utc(self.issued_at_utc, "issued_at_utc"), _utc(self.expires_at_utc, "expires_at_utc")
         object.__setattr__(self, "issued_at_utc", issued); object.__setattr__(self, "expires_at_utc", expires)
