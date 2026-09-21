@@ -3087,11 +3087,38 @@ jobs:
       # contraparte (mismo nombre y mismo contenido no duplica), y la
       # atomicidad (una escritura que se cae a la mitad no deja un
       # `procesado/` incompleto, y un reintento se cura solo).
+      # Ronda de arreglo 1 (2026-09-21, task-8-hallazgos.md -- 3 Criticos, 8
+      # Importantes, veredicto spec NO, sin ratificar nada. 8 -> 19 tests):
+      #   - C-1 (spec §4 incumplido: un symlink roto en fuente/ escribia
+      #     afuera del workspace) -- ahora jailea con
+      #     `tool_authority.resolve_jailed_path` (import nuevo:
+      #     `motor_registry.tool_authority`, ya en PYTHONPATH=.:las_manos
+      #     de este job) + O_NOFOLLOW.
+      #   - C-2/C-3 (el defecto que este PR vino a cerrar, reabierto por
+      #     concurrencia) -- temporal unico por llamada + O_CREAT|O_EXCL.
+      #     +2 tests con HILOS REALES (no simulados): no se pudo reproducir
+      #     el entrelazado EXACTO del auditor para C-2 porque la estructura
+      #     nueva ya no lo permite (cada llamada tiene su propio uuid) --
+      #     documentado en el propio test. La verificacion con hilos reales
+      #     destapo un SEGUNDO defecto no reportado por el auditor (race
+      #     entre el rmtree y el rename de dos escritores de la MISMA
+      #     huella, ~50% de fallo medido): reintento acotado, ver
+      #     task-8-report.md.
+      #   - I-1 (el mas revelador: la mutacion "no cachear cuando no hubo
+      #     salidas" pasaba los 8 tests en verde) -- ok/parcial se cachean,
+      #     error/sin_extractor NO.
+      #   - I-2/I-3/I-5 (invalidacion por version de extractor, por
+      #     extension de ruteo, y por completitud de salidas) -- la ficha
+      #     ahora carga lo que hace falta para verificarse a si misma.
+      #   - I-4 (ficha corrupta explotaba para siempre) -- fallo de lectura
+      #     = fallo de cache, nunca una excepcion.
+      #   - I-6 (nombre largo + colision -> OSError crudo) -- el tronco se
+      #     recorta antes de agregar el sufijo de huella.
       - name: Ingesta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_ingesta_test.py 2>&1 | tee /tmp/ingesta_tests
-          grep -qE "^8 passed" /tmp/ingesta_tests || {
-            echo "PISO ROTO: se esperaban 8 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+          grep -qE "^19 passed" /tmp/ingesta_tests || {
+            echo "PISO ROTO: se esperaban 19 tests CORRIDOS de la ingesta. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
