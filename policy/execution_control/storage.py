@@ -40,9 +40,10 @@ class InMemoryExecutionStore:
         try: return self._records[execution_id]
         except KeyError as exc: raise UnknownExecutionError(execution_id) from exc
     def events(self, execution_id): return tuple(self._events.get(execution_id, ()))
-    def append_event(self, event):
+    def append_event(self, event, *, evidence_writer=None):
         with self._lock:
             if event.execution_id not in self._records: raise UnknownExecutionError(event.execution_id)
+            if evidence_writer is not None: evidence_writer(None, event)
             self._events[event.execution_id].append(event)
     def consume_approval(self, approval_id: str):
         with self._lock:
@@ -171,10 +172,12 @@ class MariaDBExecutionStore:
             return tuple(ExecutionEvent(execution_id, *row) for row in cur.fetchall())
         finally: connection.close()
 
-    def append_event(self, event):
+    def append_event(self, event, *, evidence_writer=None):
         connection = self._connection_factory()
         try:
-            cur = connection.cursor(); cur.execute("INSERT INTO jax_execution.execution_events (execution_id,state,event_type,event_at_utc,job_id) VALUES (%s,%s,%s,%s,%s)", (event.execution_id,event.state,event.event_type,event.at_utc,event.job_id)); connection.commit()
+            cur = connection.cursor(); cur.execute("INSERT INTO jax_execution.execution_events (execution_id,state,event_type,event_at_utc,job_id) VALUES (%s,%s,%s,%s,%s)", (event.execution_id,event.state,event.event_type,event.at_utc,event.job_id))
+            if evidence_writer is not None: evidence_writer(cur, event)
+            connection.commit()
         except Exception: connection.rollback(); raise
         finally: connection.close()
 

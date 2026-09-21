@@ -89,7 +89,7 @@ def dispatch_execution(store, record, authorization, *, now_utc: datetime, kill_
         if artifact.status != "SUCCEEDED" or artifact.execution_request_hash != record.execution_request_hash: raise DryRunFailedError("dry-run no vinculado")
     transition(current, ExecutionState.DISPATCHED)
     event = ExecutionEvent(record.execution_id, ExecutionState.DISPATCHED.value, "MOTOR_DISPATCHED", now, job_id)
-    store.append_event(event); return event
+    store.append_event(event, evidence_writer=getattr(store, "dispatch_evidence_writer", None)); return event
 
 def cancel_execution(store, execution_id: str, *, now_utc: datetime):
     events = store.events(execution_id); current = ExecutionState(events[-1].state)
