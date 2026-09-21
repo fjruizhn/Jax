@@ -12,6 +12,7 @@ from .ids import new_execution_id
 from .models import ExecutionAuthorization, ExecutionRecord, ExecutionState
 from .state_machine import initial_state, transition
 from .storage import ExecutionEvent
+from policy.enforcement_evidence.models import EvidenceSubjectType
 
 def _now(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None: raise ExecutionRequestScopeError("now_utc explícito requerido")
@@ -25,6 +26,19 @@ def _record_denial(store, control_id: str, reason_code: str, *, decision_id: str
             recorder.record_denial(control_id=control_id, reason_code=reason_code, decision_id=decision_id)
         except Exception:  # fail-soft: primary denial is already fail-closed; evidence outage cannot permit it.
             # Evidence outage must never convert a denial into an allow.
+            pass
+
+def _record_satisfied(store, control_id: str, *, subject_type, subject_identity: str,
+                      decision_id: str | None = None, execution_id: str | None = None) -> None:
+    """Startup-owned observational seam; it never participates in authority."""
+    recorder = getattr(store, "evidence_recorder", None)
+    if recorder is not None:
+        try:
+            recorder.record_satisfied(control_id=control_id, subject_type=subject_type,
+                subject_identity=subject_identity, decision_id=decision_id, execution_id=execution_id)
+        except Exception:
+            # Existing B6 semantics remain authoritative.  Mandatory pre-side
+            # effect recording uses the explicit shared writer instead.
             pass
 
 def _record(authorization: ExecutionAuthorization, *, now_utc: datetime) -> ExecutionRecord:
@@ -53,7 +67,12 @@ def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: d
     record = _record(authorization, now_utc=now)
     state = initial_state(requires_human_approval=authorization.requires_human_approval, requires_dry_run=authorization.requires_dry_run)
     writer = getattr(store, "execution_evidence_writer", None)
-    return store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now), evidence_writer=writer)
+    created=store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now), evidence_writer=writer)
+    # In MariaDB deployments the execution_evidence_writer is the mandatory
+    # same-cursor path.  This is an additive post-commit observation for
+    # composition configurations that do not require that stronger profile.
+    _record_satisfied(store,"CTL.B6.ONE_DECISION_ONE_EXECUTION",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    return created
 
 def consume_human_approval(store, record, authorization, approval, *, now_utc: datetime) -> None:
     from .human_approval import verify_human_approval
@@ -63,10 +82,15 @@ def consume_human_approval(store, record, authorization, approval, *, now_utc: d
     # This fixed adapter is application configuration, never input from the
     # approval presenter.  Tests replace the adapter at the composition seam.
     public_key = load_trusted_approver(approval.approver_actor_id, approval.approver_key_id)
-    verify_human_approval(approval, authorization, public_key, now_utc=now); store.consume_approval(approval.human_approval_id)
+    try:
+        verify_human_approval(approval, authorization, public_key, now_utc=now)
+    except Exception:
+        _record_denial(store,"CTL.B6.HUMAN_APPROVAL_BINDING","DENIED",decision_id=record.decision_id); raise
+    store.consume_approval(approval.human_approval_id)
     store.append_event(ExecutionEvent(record.execution_id,
       (ExecutionState.READY_FOR_DRY_RUN if authorization.requires_dry_run else ExecutionState.READY_TO_DISPATCH).value,
       "HUMAN_APPROVAL_CONSUMED", now))
+    _record_satisfied(store,"CTL.B6.HUMAN_APPROVAL_BINDING",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
 
 def record_dry_run(store, record, authorization, *, status: str, result: object, now_utc: datetime):
     now = _now(now_utc); artifact = build_dry_run_artifact(record, authorization, status=status, result=result, recorded_at_utc=now)
@@ -89,7 +113,9 @@ def dispatch_execution(store, record, authorization, *, now_utc: datetime, kill_
         if artifact.status != "SUCCEEDED" or artifact.execution_request_hash != record.execution_request_hash: raise DryRunFailedError("dry-run no vinculado")
     transition(current, ExecutionState.DISPATCHED)
     event = ExecutionEvent(record.execution_id, ExecutionState.DISPATCHED.value, "MOTOR_DISPATCHED", now, job_id)
-    store.append_event(event, evidence_writer=getattr(store, "dispatch_evidence_writer", None)); return event
+    store.append_event(event, evidence_writer=getattr(store, "dispatch_evidence_writer", None))
+    _record_satisfied(store,"CTL.B6.GOVERNED_DISPATCH",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    return event
 
 def cancel_execution(store, execution_id: str, *, now_utc: datetime):
     events = store.events(execution_id); current = ExecutionState(events[-1].state)

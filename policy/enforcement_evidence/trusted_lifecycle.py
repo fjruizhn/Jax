@@ -37,3 +37,17 @@ class RuntimeEvidenceRecorder:
   oid=str(uuid.uuid7()) if hasattr(uuid,"uuid7") else str(uuid.uuid4())
   observation=EnforcementObservation(oid,control_id,definition.control_version,definition.control_definition_hash,subject,self._identity.implementation_identity_hash,ObservationOutcome.DENIED,reason_code,now,self._scope,(trusted.artifact_hash,),decision_id=decision_id)
   return self.record_observation(observation)
+ def record_satisfied(self, *, control_id, subject_type, subject_identity, reason_code="SATISFIED", decision_id=None, execution_id=None):
+  """Bounded positive observation from a fixed runtime composition."""
+  from .control_registry import load_control_definition
+  from .models import (EvidenceArtifact,EvidenceType,EvidenceClass,EvidenceSubject,EvidenceBlobRef,EvidenceTrustDomain,EnforcementObservation,ObservationOutcome)
+  from datetime import datetime, timezone
+  import uuid
+  definition=load_control_definition(control_id)
+  if reason_code not in definition.allowed_reason_codes: raise ValueError("reason code no declarado")
+  subject=EvidenceSubject(subject_type,subject_identity); now=datetime.now(timezone.utc)
+  blob=self._store.put_evidence_blob(("control="+control_id+";subject="+subject_identity).encode())
+  artifact=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,control_id,definition.control_version,definition.control_definition_hash,subject,(EvidenceBlobRef(blob.evidence_hash,"bounded_input","text/plain","utf-8"),),EvidenceTrustDomain.JAX_RUNTIME,self._producer,self._identity.implementation_identity_hash,now,decision_id=decision_id,execution_id=execution_id)
+  artifact=self.record_artifact(artifact)
+  observation=EnforcementObservation(str(uuid.uuid4()),control_id,definition.control_version,definition.control_definition_hash,subject,self._identity.implementation_identity_hash,ObservationOutcome.SATISFIED,reason_code,now,self._scope,(artifact.artifact_hash,),decision_id=decision_id,execution_id=execution_id)
+  return self.record_observation(observation)
