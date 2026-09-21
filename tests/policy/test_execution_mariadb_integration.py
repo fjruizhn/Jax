@@ -135,6 +135,17 @@ def test_b7_writer_failure_rolls_back_real_governed_execution():
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_authorization_consumptions WHERE authorization_id=%s",(auth.authorization_id,)) == 0
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_records WHERE decision_id=%s",(decision.decision_id,)) == 0
 
+def test_b7_dispatch_writer_failure_rolls_back_dispatch_event():
+    from policy.execution_control.service import dispatch_execution
+    _apply_migration(); now=datetime.now(timezone.utc); decision=record()
+    request=build_execution_request(decision, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={}, timeout_seconds=60)
+    auth=authorize_execution(decision, request, catalog(), now_utc=now)
+    store=MariaDBExecutionStore(_connection); store.insert_authorization(auth); execution=create_execution(store, auth, now_utc=now)
+    def fail(_cursor, _event): raise RuntimeError("forced B7 dispatch evidence failure")
+    store.dispatch_evidence_writer=fail
+    with pytest.raises(RuntimeError): dispatch_execution(store, execution, auth, now_utc=now, job_id="b7-job")
+    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE execution_id=%s AND event_type='MOTOR_DISPATCHED'",(execution.execution_id,)) == 0
+
 
 def _scalar(sql, args=()):
     connection = _connection()
