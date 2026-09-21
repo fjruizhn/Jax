@@ -54,6 +54,9 @@ def _apply_evidence_migration() -> None:
     connection = _connection()
     try:
         cursor = connection.cursor()
+        cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='jax_evidence' AND table_name='evidence_blobs'")
+        if cursor.fetchone()[0]:
+            return
         for statement in tables.split(";"):
             if statement.strip(): cursor.execute(statement)
         for statement in triggers.split("//"):
@@ -73,6 +76,25 @@ def test_b7_evidence_blob_real_mariadb_immutability():
             cursor=connection.cursor(); cursor.execute("UPDATE jax_evidence.evidence_blobs SET size_bytes=1 WHERE evidence_hash=%s", (blob.evidence_hash,)); connection.commit()
         connection.rollback()
     finally: connection.close()
+
+def test_b7_real_mariadb_artifact_and_observation_relations():
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+    from policy.enforcement_evidence.control_registry import load_control_definition
+    from policy.enforcement_evidence.models import (ImplementationIdentity, SourceState, EvidenceArtifact,
+        EvidenceType, EvidenceClass, EvidenceTrustDomain, EvidenceSubject, EvidenceSubjectType,
+        EvidenceBlobRef, ClaimScope, ClaimEnvironment, EnforcementObservation, ObservationOutcome)
+    _apply_evidence_migration(); store=MariaDBEvidenceStore(_connection); now=datetime.now(timezone.utc)
+    manifest=store.put_evidence_blob(b"b7-manifest"); definition=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
+    identity=ImplementationIdentity("fjruizhn/Jax","a"*40,"b"*40,SourceState.CLEAN,manifest.evidence_hash)
+    raw=store.put_evidence_blob(b"control=CTL.B6.GOVERNED_DISPATCH;reason=DENIED")
+    subject=EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"b7-db-attempt")
+    artifact=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,definition.control_id,1,definition.control_definition_hash,subject,(EvidenceBlobRef(raw.evidence_hash,"bounded_input","text/plain","utf-8"),),EvidenceTrustDomain.JAX_RUNTIME,"ci",identity.implementation_identity_hash,now)
+    store.record_artifact(artifact)
+    loaded=store.load_evidence_artifact(artifact.artifact_hash)
+    assert loaded.artifact_hash == artifact.artifact_hash
+    observation=EnforcementObservation("b7-db-observation",definition.control_id,1,definition.control_definition_hash,subject,identity.implementation_identity_hash,ObservationOutcome.DENIED,"DENIED",now,ClaimScope(ClaimEnvironment.CI),(artifact.artifact_hash,))
+    store.record_observation(observation)
+    assert _scalar("SELECT COUNT(*) FROM jax_evidence.observation_artifacts WHERE observation_id=%s",(observation.observation_id,)) == 1
 
 
 def _scalar(sql, args=()):
