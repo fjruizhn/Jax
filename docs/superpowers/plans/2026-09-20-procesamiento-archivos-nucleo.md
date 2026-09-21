@@ -21,6 +21,15 @@ LibreOffice headless (subproceso, sólo para recalcular) · pytest
 - **Todo archivo de test nuevo se engancha a un job de `.github/workflows/policy.yml` en el
   MISMO commit**, o el detector `policy/tests/test_archivos_de_test_wireados_en_ci.py` falla.
   Los tests de este plan son puros (sin DB) → job `tests-puros`.
+- **Todo paso de CI de este plan lleva PISO NUMÉRICO.** Un `pytest` con
+  `importorskip` a nivel de módulo y sin piso puede dar `1 skipped` y **exit 0**:
+  verde con CERO tests corridos. Medido el 2026-09-20 en el Task 3. Patrón obligatorio:
+  `python -m pytest <ruta> -q 2>&1 | tee /tmp/x` y después
+  `grep -qE "^N passed" /tmp/x || { echo "PISO ROTO"; exit 1; }`.
+- **CI corre Python 3.12; hall9000 tiene 3.14.** Verificar en la versión de CI antes de
+  cerrar (Docker sirve), o decir explícitamente que no se verificó.
+- **`detalle` y `salidas` salen envueltos en `MappingProxyType`**: para serializar hay que
+  usar `json.dumps(..., default=dict)`. Sin eso da `TypeError`.
 - **Ningún archivo de cliente entra al repositorio.** Los tests construyen sus propios
   archivos de prueba en `tmp_path`.
 - **Fallo cerrado siempre.** Un extractor que no pudo NO escribe extracto. Estados válidos:
