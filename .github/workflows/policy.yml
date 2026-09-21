@@ -2848,6 +2848,12 @@ jobs:
       # bloque de arriba (2317 passed) por cada archivo nuevo de esta ronda.
       - run: python -m pytest procesamiento/_ficha_test.py -v
       - run: python -m pytest procesamiento/_resultado_test.py -v
+      # Task 3 (2026-09-20, procesamiento-archivos-nucleo): extractor de Excel
+      # -- TODAS las hojas, no la que LibreOffice se digna a convertir (medido
+      # 2026-09-20: 1 de 6, sin error y sin aviso). requirements-archivos.txt
+      # es la fuente unica de la version fijada de openpyxl.
+      - run: pip install -r requirements-archivos.txt
+      - run: python -m pytest procesamiento/extractores/_excel_test.py -v
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
