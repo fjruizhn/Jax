@@ -335,7 +335,34 @@ def extraer(origen: Path) -> Resultado:
             },
         )
 
-    fragmentos_header_footer = _encabezado_y_pie(documento)
+    # I-5 (final-hallazgos.md, ronda de cierre -- adenda de alcance de
+    # Fernando: "debí decir los cuatro extractores, no los otros dos"):
+    # este tramo (encabezado/pie + los dos recorridos del XML para C-7)
+    # quedaba FUERA del único `try/except` que protege el cuerpo (arriba) --
+    # la misma grieta que excel.py tenía en `_formulas_sin_valor()`, en el
+    # ARCHIVO que originó el patrón D-1. Tercera aparición de la misma
+    # familia en este proyecto (la primera, en este mismo módulo, D-1,
+    # reventaba en 3 de cada 4 `.docx` reales; la segunda, excel.py, la
+    # encontró la revisión final) -- se cierra con el mismo tratamiento:
+    # cualquier excepción inesperada acá sale como `Resultado(estado=
+    # "error")`, nunca cruda.
+    try:
+        fragmentos_header_footer = _encabezado_y_pie(documento)
+        # C-7: cuadros de texto y notas al pie no se extraen en esta fase
+        # (más trabajo del que corresponde) pero NO se pierden en silencio
+        # -- se cuentan y se declaran, con 'parcial'.
+        cajas_texto = len(documento.element.body.xpath("//*[local-name()='txbxContent']"))
+        notas_pie = len(documento.element.body.findall(".//" + qn("w:footnoteReference")))
+    except Exception as exc:  # fail-soft: fallo inesperado leyendo encabezado/pie/cuadros de texto/notas al pie; se devuelve Resultado(estado="error") con el detalle en vez de propagar
+        return Resultado(
+            estado="error", salidas={}, extractor=EXTRACTOR,
+            version=_version() or "desconocida",
+            detalle={
+                "razon": "fallo inesperado leyendo encabezado/pie/cuadros de "
+                f"texto: {type(exc).__name__}: {exc}"
+            },
+        )
+
     lineas_header_footer = [f"[{etiqueta}] {texto}" for etiqueta, texto in fragmentos_header_footer]
 
     contenido = "\n".join(lineas_header_footer + lineas).strip()
@@ -345,12 +372,6 @@ def extraer(origen: Path) -> Resultado:
             version=_version() or "desconocida",
             detalle={"razon": "el documento no tiene texto"},
         )
-
-    # C-7: cuadros de texto y notas al pie no se extraen en esta fase (más
-    # trabajo del que corresponde) pero NO se pierden en silencio -- se
-    # cuentan y se declaran, con 'parcial'.
-    cajas_texto = len(documento.element.body.xpath("//*[local-name()='txbxContent']"))
-    notas_pie = len(documento.element.body.findall(".//" + qn("w:footnoteReference")))
 
     detalle: dict = {
         "parrafos": parrafos_con_contenido,

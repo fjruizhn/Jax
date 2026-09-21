@@ -3033,15 +3033,21 @@ jobs:
       # que `pdf.py` usa para su bucle de paginas: cualquier excepcion
       # inesperada sale como Resultado de error, nunca escapa. De 18 a 20.
       # Ronda de cierre (final-hallazgos.md, Menor 10): +1 test (el sentinel
-      # None de `_version()`), de 20 a 21.
+      # None de `_version()`), de 20 a 21. Adenda de alcance de Fernando
+      # sobre la misma ronda (I-5 pedía revisar "los otros dos" hermanos;
+      # el defecto estaba en ESTE archivo): el tramo de encabezado/pie +
+      # los dos recorridos del XML para C-7 quedaba fuera del único
+      # `try/except` que protege el cuerpo -- tercera aparición de la
+      # misma familia en el proyecto (la primera, acá mismo, D-1, reventaba
+      # en 3 de cada 4 `.docx` reales). +1 test, de 21 a 22.
       #
       # `pytest.importorskip("docx")` en `_word_test.py` -- mismo riesgo de
       # "1 skipped" con EXIT 0 si python-docx no se instaló.
       - name: Word -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_word_test.py 2>&1 | tee /tmp/word_tests
-          grep -qE "^21 passed" /tmp/word_tests || {
-            echo "PISO ROTO: se esperaban 21 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^22 passed" /tmp/word_tests || {
+            echo "PISO ROTO: se esperaban 22 tests CORRIDOS (no skipeados) del extractor de Word. Si esto da '... skipped', python-docx no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 7 (2026-09-20/21, procesamiento-archivos-nucleo): la compuerta
       # -- elige extractor por tipo, y NUNCA paga el caro (OCR) si el barato

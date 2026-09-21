@@ -516,3 +516,28 @@ def test_version_no_revienta_si_falla_la_metadata_del_paquete(monkeypatch):
     monkeypatch.setattr(importlib.metadata, "version", _rota)
     version = word._version()
     assert version is None
+
+
+def test_excepcion_inesperada_leyendo_encabezado_o_pie_da_resultado_de_error(
+    tmp_path: Path, monkeypatch
+):
+    """I-5 (final-hallazgos.md, adenda de alcance de Fernando -- "debí decir
+    los cuatro extractores, no los otros dos"): el tramo de encabezado/pie
+    + los dos recorridos del XML para C-7 (cuadros de texto, notas al pie)
+    quedaba FUERA del único `try/except` que protege el cuerpo -- la misma
+    grieta que excel.py tenía en `_formulas_sin_valor()`, ahora encontrada
+    en el archivo que originó el patrón D-1. Tercera aparición de la misma
+    familia: la primera (D-1, este mismo módulo) reventaba en 3 de cada 4
+    `.docx` reales; la segunda, excel.py, la encontró la revisión final."""
+    origen = _documento_brief(tmp_path / "explota-header.docx")
+
+    def explota(documento):
+        raise RuntimeError("fallo inesperado simulado leyendo encabezado/pie")
+
+    monkeypatch.setattr(word, "_encabezado_y_pie", explota)
+
+    r = word.extraer(origen)
+
+    assert r.estado == "error"
+    assert r.salidas == {}
+    assert "RuntimeError" in r.detalle["razon"]
