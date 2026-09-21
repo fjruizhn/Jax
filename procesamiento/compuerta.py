@@ -11,6 +11,17 @@ el texto no esta ahi para sacar y se paga OCR. `ocr.extraer` (desde la ronda
 1 de OCR, task-5-6-hallazgos.md) ya acepta PDF ademas de imagen -- rasteriza
 con `pdftoppm` por dentro y reporta por pagina -- asi que no hace falta que
 la compuerta distinga PDF escaneado de imagen suelta para ese camino.
+
+Ronda de arreglo (2026-09-21, task-7-hallazgos.md, I-3): un PDF nativo real
+renombrado `.png` saltaba la compuerta entera -- iba derecho a OCR sin pasar
+nunca por `tiene_capa_de_texto`, pagando OCR pudiendo leerlo gratis, sin
+dejar rastro. Se rutea por CONTENIDO (primeros bytes) cuando el contenido es
+decisivo (PDF, OLE2, imagen); la extension queda de respaldo cuando el
+contenido no dice nada -- un ZIP (`PK\x03\x04`) es ambiguo por si solo entre
+`.xlsx` y `.docx`, así que ahí la extension SIGUE siendo quien decide, igual
+que siempre. Cuando el contenido decisivo no coincide con la extension, se
+anota en `detalle["extension_enganosa"]` -- información que el dueño del
+archivo va a querer, y cuesta cero.
 """
 from __future__ import annotations
 
@@ -23,10 +34,71 @@ IMAGENES = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"}
 EXCEL = {".xlsx", ".xlsm"}
 WORD = {".docx"}
 
+_FIRMA_OLE2 = bytes.fromhex("D0CF11E0A1B11AE1")
+
+# Firma -> tipo decisivo. PK\x03\x04 (zip) NO entra acá a propósito: es el
+# contenedor de .xlsx Y .docx por igual, así que por sí solo no decide nada
+# -- la extensión sigue siendo quien distingue cuál de los dos es.
+_FIRMAS_IMAGEN = (b"\x89PNG", b"\xff\xd8\xff", b"II*\x00", b"MM\x00*", b"BM")
+
+
+def _tipo_por_contenido(origen: Path) -> str | None:
+    """'pdf' / 'ole2' / 'imagen' según los primeros bytes, o `None` si el
+    contenido no da una señal decisiva (zip -- xlsx y docx son el mismo
+    contenedor -- o un formato no reconocido): en ese caso la extensión
+    decide sola, como siempre."""
+    try:
+        with open(origen, "rb") as fh:
+            cabecera = fh.read(16)
+    except OSError:
+        return None
+    if cabecera.startswith(b"%PDF"):
+        return "pdf"
+    if cabecera[:8] == _FIRMA_OLE2:
+        return "ole2"
+    if cabecera.startswith(_FIRMAS_IMAGEN) or (
+        cabecera[:4] == b"RIFF" and cabecera[8:12] == b"WEBP"
+    ):
+        return "imagen"
+    return None
+
+
+def _con_extension_enganosa(r: Resultado, sufijo: str, contenido: str) -> Resultado:
+    detalle = {
+        **dict(r.detalle),
+        "extension_enganosa": {"nombre": sufijo or "(sin extension)", "contenido": contenido},
+    }
+    return Resultado(
+        estado=r.estado, salidas=dict(r.salidas), detalle=detalle,
+        extractor=r.extractor, version=r.version,
+    )
+
 
 def extraer(origen: Path) -> Resultado:
-    sufijo = Path(origen).suffix.lower()
+    origen = Path(origen)
+    sufijo = origen.suffix.lower()
+    tipo = _tipo_por_contenido(origen)
 
+    if tipo == "ole2":
+        r = Resultado(
+            estado="sin_extractor", salidas={}, extractor="ninguno", version="-",
+            detalle={
+                "razon": "binario de Office antiguo (formato OLE2); fuera "
+                "de alcance de esta fase",
+            },
+        )
+        return _con_extension_enganosa(r, sufijo, "ole2") if sufijo in EXCEL | WORD else r
+
+    if tipo == "pdf":
+        r = pdf.extraer(origen) if pdf.tiene_capa_de_texto(origen) else ocr.extraer(origen)
+        return r if sufijo == ".pdf" else _con_extension_enganosa(r, sufijo, "pdf")
+
+    if tipo == "imagen":
+        r = ocr.extraer(origen)
+        return r if sufijo in IMAGENES else _con_extension_enganosa(r, sufijo, "imagen")
+
+    # Contenido no decisivo (zip ambiguo entre xlsx/docx, o formato no
+    # reconocido): la extensión decide sola.
     if sufijo in EXCEL:
         return excel.extraer(origen)
     if sufijo in WORD:
@@ -34,10 +106,7 @@ def extraer(origen: Path) -> Resultado:
     if sufijo in IMAGENES:
         return ocr.extraer(origen)
     if sufijo == ".pdf":
-        # Compuerta: el camino barato primero. OCR solo si no hay capa de texto.
-        if pdf.tiene_capa_de_texto(origen):
-            return pdf.extraer(origen)
-        return ocr.extraer(origen)
+        return pdf.extraer(origen) if pdf.tiene_capa_de_texto(origen) else ocr.extraer(origen)
 
     return Resultado(
         estado="sin_extractor", salidas={}, extractor="ninguno", version="-",

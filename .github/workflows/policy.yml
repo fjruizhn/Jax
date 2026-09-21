@@ -3020,11 +3020,43 @@ jobs:
       # el camino ajeno NO se invoco): un .xlsx no pasa por OCR, un .docx
       # no pasa por el extractor de Excel, una imagen no pasa por
       # pdfplumber.
+      #
+      # 6 -> 21 (ronda de arreglo, 2026-09-21, task-7-hallazgos.md -- sin
+      # Críticos, 3 Importantes, los tres entraron):
+      #   - I-1: `word.py` importaba `docx.oxml.ns`/`docx.table`/
+      #     `docx.text.paragraph` A NIVEL DE MÓDULO -- con python-docx
+      #     ausente, `import procesamiento.compuerta` explotaba ENTERO y
+      #     se caían Excel, PDF y OCR con él, con sus propias dependencias
+      #     sanas. El `try/except ModuleNotFoundError` de `word.extraer()`
+      #     era código MUERTO (nunca se alcanzaba). Imports perezosos,
+      #     igual que los otros tres extractores. +1 test (fuerza un
+      #     import fresco con 'docx' bloqueado en sys.modules -- purgando
+      #     TAMBIÉN el namespace "docx.*" y "procesamiento.*" ya cacheados,
+      #     que si no quedan un falso negativo: Python devuelve un
+      #     submódulo ya cacheado sin tocar el paquete padre bloqueado).
+      #   - I-2: `IMAGENES` tenía cobertura para ".png" y nada más (1 de
+      #     7); `EXCEL` sólo ".xlsx" (1 de 2) -- borrar las otras 6/1 dejaba
+      #     la suite en el número exacto del piso viejo, sin que nada lo
+      #     notara. +9 tests parametrizados (uno por extensión), con
+      #     contenido GENÉRICO (sin firma reconocida) para aislar la ruta
+      #     de respaldo por extensión del enrutado por contenido de I-3.
+      #   - I-3: un PDF nativo real renombrado `.png` saltaba la compuerta
+      #     entera -- iba derecho a OCR sin pasar nunca por
+      #     `tiene_capa_de_texto`, pagando OCR pudiendo leerlo gratis, sin
+      #     dejar rastro. Se rutea por CONTENIDO (primeros bytes) cuando es
+      #     decisivo (PDF/OLE2/imagen); la extensión decide sola cuando el
+      #     contenido no dice nada (ZIP, ambiguo entre .xlsx y .docx).
+      #     Mismatch declarado en `detalle["extension_enganosa"]`. +5
+      #     tests: PDF renombrado, PDF con extensión correcta (no debe
+      #     marcar), OLE2 con extensión .xlsx encima, imagen real
+      #     renombrada .docx, y un `.pdf` con contenido NO decisivo (hueco
+      #     que destapó el propio barrido de mutación de esta ronda, no un
+      #     hallazgo del auditor -- ver task-7-report.md).
       - name: Compuerta -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/_compuerta_test.py 2>&1 | tee /tmp/compuerta_tests
-          grep -qE "^6 passed" /tmp/compuerta_tests || {
-            echo "PISO ROTO: se esperaban 6 tests CORRIDOS de la compuerta."; exit 1; }
+          grep -qE "^21 passed" /tmp/compuerta_tests || {
+            echo "PISO ROTO: se esperaban 21 tests CORRIDOS de la compuerta."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

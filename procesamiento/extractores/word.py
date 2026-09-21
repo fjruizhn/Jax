@@ -52,14 +52,23 @@ ponga rojo:
   la razón real no es "no hay continuación entre páginas" (como decía la
   ronda anterior): es que la PRIMERA FILA PUEDE SER DATO, y con el
   fixture del propio brief lo era (`1000` quedaba de nombre de columna).
+
+Ronda de arreglo de la compuerta (2026-09-21, task-7-hallazgos.md, I-1):
+`docx.oxml.ns.qn`, `docx.table.Table` y `docx.text.paragraph.Paragraph`
+importaban A NIVEL DE MÓDULO -- al revés que `excel.py`, `pdf.py` y
+`ocr.py`, que importan sus dependencias perezosamente DENTRO de cada
+función. Con eso, sin `python-docx` instalado, `import
+procesamiento.compuerta` (que importa los cuatro extractores) explotaba
+ENTERO -- Excel, PDF y OCR se caían con él, con sus propias dependencias
+sanas. El `try/except ModuleNotFoundError` de `extraer()` (abajo) era
+código MUERTO: nunca se alcanzaba, porque el import de módulo ya había
+reventado antes de que Python llegara a ejecutar una sola línea de
+`extraer()`. Los tres imports pasan a ser locales, uno por función que
+los usa (mismo patrón que los hermanos).
 """
 from __future__ import annotations
 
 from pathlib import Path
-
-from docx.oxml.ns import qn
-from docx.table import Table
-from docx.text.paragraph import Paragraph
 
 from procesamiento.resultado import Resultado
 
@@ -108,6 +117,8 @@ def _texto_parrafo(p_elem) -> str:
 
 
 def _tiene_cambios(elem) -> bool:
+    from docx.oxml.ns import qn
+
     return (
         elem.find(".//" + qn("w:ins")) is not None
         or elem.find(".//" + qn("w:del")) is not None
@@ -182,6 +193,10 @@ def _iterar_bloques(contenedor_xml, documento):
     REAL del documento (C-4) -- entra también dentro de `w:sdt` (control de
     contenido, C-7): es la estructura de cualquier plantilla de formulario,
     y quedarse sólo en el nivel de `body` la perdería entera."""
+    from docx.oxml.ns import qn
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
     for child in contenedor_xml.iterchildren():
         if child.tag == qn("w:p"):
             yield ("parrafo", Paragraph(child, documento))
@@ -216,6 +231,7 @@ def _encabezado_y_pie(documento) -> list[tuple[str, str]]:
 def extraer(origen: Path) -> Resultado:
     try:
         from docx import Document
+        from docx.oxml.ns import qn
     except ModuleNotFoundError as exc:
         return Resultado(
             estado="sin_extractor", salidas={}, extractor=EXTRACTOR,
