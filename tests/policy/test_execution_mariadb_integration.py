@@ -47,6 +47,33 @@ def _apply_migration() -> None:
     finally:
         connection.close()
 
+def _apply_evidence_migration() -> None:
+    sql = (Path(__file__).parents[2] / "policy/enforcement_evidence/migrations/001_enforcement_evidence.sql").read_text()
+    tables, triggers = sql.split("DELIMITER //", 1)
+    triggers, _ = triggers.split("DELIMITER ;", 1)
+    connection = _connection()
+    try:
+        cursor = connection.cursor()
+        for statement in tables.split(";"):
+            if statement.strip(): cursor.execute(statement)
+        for statement in triggers.split("//"):
+            if statement.strip(): cursor.execute(statement)
+        connection.commit()
+    finally: connection.close()
+
+def test_b7_evidence_blob_real_mariadb_immutability():
+    """CI-only real DB proof: bytes deduplicate and trigger blocks mutation."""
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+    _apply_evidence_migration()
+    store = MariaDBEvidenceStore(_connection); blob = store.put_evidence_blob(b"b7-real-db")
+    assert store.put_evidence_blob(b"b7-real-db").evidence_hash == blob.evidence_hash
+    connection = _connection()
+    try:
+        with pytest.raises(Exception):
+            cursor=connection.cursor(); cursor.execute("UPDATE jax_evidence.evidence_blobs SET size_bytes=1 WHERE evidence_hash=%s", (blob.evidence_hash,)); connection.commit()
+        connection.rollback()
+    finally: connection.close()
+
 
 def _scalar(sql, args=()):
     connection = _connection()
