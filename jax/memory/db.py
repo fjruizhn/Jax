@@ -17,6 +17,7 @@ En memoria de Jairo Urbina.
 
 import asyncio
 import os
+import re
 import uuid
 import logging
 import functools
@@ -32,6 +33,7 @@ from .embedding_config import CONFIG as EMBED, zero_vector_text
 from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.core.config_entorno import url_requerida
 from jax.core.cliente_http_compartido import crear_cliente_http
+from jax.core.router import ALIASES as _FACET_ALIASES
 from .migrations import ensure_schema
 
 logger = logging.getLogger("jax.memory")
@@ -85,6 +87,69 @@ DUP_DISTANCE_THRESHOLD = 0.05
 CORRECTION_DISTANCE_THRESHOLD = 0.25
 
 
+# ------------------------------------------------------------
+# Umbral de similitud de `search_similar_facts` (2026-09-20, decision de
+# Fernando tras un fallo real: "jax sabes a que me dedico?" no traia el
+# hecho #7, guardado y verificado, porque nadie buscaba facts por similitud
+# al LEER -- ver el docstring del metodo). Sin umbral, cada turno inyectaria
+# los `limit` facts mas cercanos SIN IMPORTAR que tan lejos esten: ruido,
+# costo de tokens, y JAX afirmando cosas que no venian al caso.
+#
+# RONDA 2 (2026-09-20, mismo dia, decision de Fernando sobre mediciones
+# nuevas): el primer umbral (0.62) resolvia el caso real pero era demasiado
+# flojo para todo lo demas -- medido con el `limit` de esa ronda (30):
+# "jax sabes a que me dedico?" volvia 25 hechos, "como configuro nginx?" 26,
+# "hola" 16, "gracias" 30 (el tope). Decir "gracias" volcaba 30 hechos en el
+# prompt: eso no es recuperar contexto, es volcar la memoria entera y
+# esperar que el modelo elija. El reranker (cross-encoder, ya instalado)
+# tampoco lo arregla: corrido sobre los 25 candidatos de "jax sabes a que me
+# dedico?", el hecho de ocupacion bajo del puesto 26 al 25 DE 25 (ultimo) --
+# es un modelo entrenado en ingles que premia la coincidencia lexica con
+# "JAX", y empeora justo el caso real. `JAX_MEMORY_RERANK` sigue apagado.
+#
+# La causa de fondo, medida: con 117 facts en un SOLO dominio (todos sobre
+# Fernando o sobre JAX el software), decenas de hechos hablan de "JAX" nada
+# mas por compartir esa palabra con la consulta -- el hecho que importa (la
+# ocupacion) no comparte una sola palabra con la pregunta. Ningun umbral
+# global sobre ESTE metodo arregla eso: la solucion real es
+# `detect_completeness_intent` devolviendo 'user' para esa forma de
+# pregunta (ver su docstring, y ver que YA NO hace falta que este metodo
+# alcance el fact de ocupacion -- lo trae get_facts() completo, no la
+# similitud). Este metodo pasa a ser lo que su docstring siempre dijo que
+# era: RECUERDO ESPECIFICO ("¿que dije del servidor de correo?"), no una
+# forma de responder preguntas sobre la persona.
+#
+# Con ese cambio de rol, se remidio umbral Y limit juntos (produccion,
+# jax_memory, 2026-09-20, solo SELECT) apretando hasta que las frases SIN
+# contenido real trajeran poco o nada, sobre una tanda mas amplia de
+# saludos/muletillas (no solo "hola"/"gracias"):
+#
+#   distancia MINIMA por frase, con el limit nuevo (8):
+#     "hola"             -> 0.5555   "buenas"          -> 0.5374
+#     "gracias"          -> 0.4753   "ok"              -> 0.5245
+#     "gracias!"         -> 0.4923   "dale"            -> 0.5775
+#     "listo, gracias"   -> 0.4730 (la MAS cercana de las 8 frases triviales)
+#     "que clima hace hoy?" (control AJENO)             -> 0.5905
+#     "como configuro nginx?" (control AJENO)           -> 0.5431
+#
+#   distancia MINIMA en preguntas de recuerdo especifico REAL (para las que
+#   este metodo SI existe):
+#     "que base de datos usa Fernando?"                 -> 0.2197
+#     "donde corre JAX?"                                -> 0.2826
+#     "cual es la cuenta de superadmin de Fernando en Axioma?" -> 0.2476
+#
+# Hay una brecha limpia entre las dos tandas (~0.19 de margen: 0.473 de la
+# frase trivial mas cercana contra 0.28 de la pregunta real mas lejana) que
+# NO existia contra el fact de ocupacion en la ronda 1 (ese caso ya no lo
+# resuelve este umbral, lo resuelve `detect_completeness_intent`).
+# FACT_SIMILARITY_THRESHOLD baja a 0.45, a mitad de esa brecha (margen de
+# ~0.02 contra la frase trivial mas cercana, ~0.04 contra la pregunta real
+# mas lejana de las medidas): con este umbral y `limit=8`, las 8 frases
+# triviales medidas quedan en CERO resultados -- "gracias" pasa de 30 (el
+# tope de la ronda 1) a 0.
+FACT_SIMILARITY_THRESHOLD = 0.45
+
+
 def _validate_importance(importance: Optional[int]) -> Optional[int]:
     """1-5 valido -> se guarda tal cual. Cualquier otra cosa (fuera de
     rango, no-entero, None) -> None (neutral, sin score)."""
@@ -134,6 +199,72 @@ def _blend_query(user_text: str, recent_history: Optional[list]) -> str:
 
 
 # ------------------------------------------------------------
+# Vocativo de faceta al inicio del turno (2026-09-20, decision de Fernando
+# sobre una observacion real, misma ronda que el umbral/limit de arriba): el
+# nombre de la faceta va a aparecer en CASI TODOS los mensajes -- para
+# dirigirse a una hay que nombrarla. La contaminacion medida en el caso real
+# ("jax sabes a que me dedico?" enterrado bajo 25 facts que solo comparten
+# la palabra "jax" con la consulta) NO es un caso raro, es el caso normal.
+#
+# El matiz que importa: el nombre suele ser un VOCATIVO, no parte de la
+# pregunta -- "jax, sabes a que me dedico?" LLAMA a la faceta (el nombre es
+# ruido para la busqueda); "¿que modelo usa JAX?" el nombre ES la pregunta
+# (sacarlo la rompe). Por eso NO se saca el nombre siempre: se saca
+# SOLO el vocativo cuando ENCABEZA el mensaje ("jax ...", "jax, ...",
+# "hyde: ..."), nunca en otra posicion.
+#
+# La lista de nombres NO se hardcodea aca: sale de `jax.core.router.ALIASES`,
+# la unica tabla que ya existe en el repo para "que string cuenta como
+# nombrar una faceta" (la usa el REPL para reconocer INVOCACIONES, incluidas
+# variantes foneticas como "jaid" por Hyde). Esa tabla esta documentada como
+# deliberadamente ESTATICA (comentario "CONSERVADO", Bloque C1.4: no es dato
+# de identidad, no la pisa el registro de la DB en cada arranque), asi que
+# es segura de importar a nivel de modulo sin abrir conexion ninguna.
+#
+# Ordenada por longitud descendente para que "jax local" (alias de dos
+# palabras) se intente ANTES que "jax" solo -- si no, "jax local, ..."
+# perderia solo "jax " y dejaria "local" colgando.
+_VOCATIVOS_FACETA = sorted(_FACET_ALIASES.keys(), key=len, reverse=True)
+_PATRON_VOCATIVO_FACETA = re.compile(
+    r"^(" + "|".join(re.escape(v) for v in _VOCATIVOS_FACETA) + r")\s*[,:]?\s+"
+)
+
+
+def _quitar_vocativo_faceta(text: str) -> str:
+    """Si `text` EMPIEZA con el nombre de una faceta en forma de VOCATIVO
+    ("jax ...", "jax, ...", "hyde: ...", con o sin tilde/mayuscula), lo saca
+    y devuelve el resto (con el case/acentos/puntuacion ORIGINALES del
+    resto intactos -- solo se pela el vocativo). Si el nombre aparece en
+    cualquier otra posicion, o si sacarlo dejaria la cadena vacia (el
+    mensaje ES el nombre, nada que buscar), devuelve `text` intacto.
+
+    Esta funcion es PURA y solo construye el texto que se EMBEBE para la
+    busqueda por similitud (`search_similar_facts`) -- el mensaje que ve el
+    usuario y el que recibe el modelo no pasan por aca, los arma el
+    llamador aparte.
+
+    Medido contra produccion (jax_memory, 2026-09-20, solo SELECT) que esto
+    mejora de verdad la recuperacion, no que "deberia": distancia coseno
+    real (bge-m3) al fact de ocupacion (#7) entre los 79 facts vigentes,
+    con vocativo vs sin el --
+      "jax sabes a que me dedico?"        -> puesto 26 de 79 (d=0.5931)
+      "sabes a que me dedico?"            -> puesto  5 de 79 (d=0.5658)
+      "jax cual es mi profesion?"         -> puesto 21 de 79 (d=0.6079)
+      "cual es mi profesion?"             -> puesto  4 de 79 (d=0.5942)
+      "jax que base de datos usa Fernando?" -> puesto 19 de 79 (d=0.5046)
+      "que base de datos usa Fernando?"     -> puesto 13 de 79 (d=0.4678)
+    Las tres preguntas reales suben de puesto (y bajan de distancia) al
+    sacar el vocativo -- la contaminacion de "jax" acercando facts sobre
+    JAX el software, no sobre Fernando, es consistente y medible."""
+    normalizado = _sin_acentos(text.lower())
+    m = _PATRON_VOCATIVO_FACETA.match(normalizado)
+    if not m:
+        return text
+    resto = text[m.end():]
+    return resto if resto.strip() else text
+
+
+# ------------------------------------------------------------
 # Bypass de categoria para preguntas de completeness (item #4). Preguntas
 # tipo "que proyectos tenes activos" no se responden bien con similitud
 # vectorial contra UN fact — necesitan TODOS los facts de una categoria.
@@ -144,22 +275,81 @@ def _blend_query(user_text: str, recent_history: Optional[list]) -> str:
 # especificas van primero — "de mis finanzas"/"de mis socios" tambien
 # matchean el patron generico "de mi" de la categoria 'user', asi que 'user'
 # (el catch-all) va al final.
+#
+# Ronda 2 (2026-09-20, decision de Fernando tras un fallo real): "jax sabes
+# a que me dedico?" volvia None -- las tres formas de 'user' solo cubrian
+# "que sabes de mi", no las formas naturales de preguntar por la OCUPACION
+# de Fernando (que es justo lo que el fact #7 guarda). Se amplia 'user' con
+# esas formas, EN ESPAÑOL Y EN INGLES -- este detector lo comparten el REPL
+# (jax/core/main.py) y jax-platform (backend/api/chat.py, app bilingue).
+#
+# Cada patron nuevo lleva un marcador de PRIMERA PERSONA ("me", "mi", "yo",
+# "i", "my", "me") a proposito: es la guarda contra el falso positivo que
+# Fernando señalo -- "¿A que se dedica AteneaERP?" (tercera persona, "se"
+# no "me") no puede caer en 'user'. Verificado con test en las dos
+# direcciones (tests/test_completeness_intent.py).
+#
+# Deliberadamente NO se agrega "que hago" / "what do i do" en forma pelada:
+# a diferencia de "a que me dedico", esas frases son de uso corriente para
+# preguntas que NO son sobre identidad ("no se que hago mal en este
+# codigo", "que hago si el servidor cae?", "what do i do next?") -- llevar
+# esas a 'user' volcaria los 13 hechos de la persona sobre una pregunta
+# tecnica cualquiera, el mismo problema de ruido que origina toda esta
+# ronda. Reportado, no resuelto por decision propia: si Fernando quiere esa
+# cobertura de todos modos, es una decision suya, no una omision.
 _COMPLETENESS_PATTERNS = {
     "project": ("que proyectos", "cuales proyectos", "en que proyectos"),
     "preference": ("mis preferencias", "que preferis", "como te gusta que"),
     "technical": ("que decisiones tecnicas", "que elegimos", "que decisiones tomamos"),
     "social": ("mis relaciones", "que sabes de mis contactos", "quienes son mis socios"),
     "financial": ("mis finanzas", "que sabes de mis finanzas", "mi situacion financiera"),
-    "user": ("que sabes de mi", "que sabes sobre mi", "todo lo que sabes de mi"),
+    "user": (
+        "que sabes de mi", "que sabes sobre mi", "todo lo que sabes de mi",
+        # Ocupacion/profesion, en espanol -- el caso real del bug.
+        "a que me dedico", "de que trabajo", "en que trabajo",
+        "cual es mi profesion", "mi profesion",
+        "sabes de mi trabajo", "sepas de mi trabajo",
+        "sabes de mi profesion", "sepas de mi profesion",
+        "quien soy",
+        # Ingles (app bilingue).
+        "what do you know about me", "what's my job", "what is my job",
+        "what's my profession", "what is my profession",
+        "what's my occupation", "what is my occupation",
+        "who am i", "what do i do for a living",
+    ),
 }
+
+#: Tabla de plegado de acentos -- SOLO las 5 vocales, minusculas (el texto
+#: ya paso por .lower() antes de tocar esta tabla). Deliberadamente LEXICO:
+#: no es un clasificador nuevo, es la misma lista de substrings de siempre,
+#: solo que ahora "a qué me dedico" (con tilde) y "a que me dedico" (sin
+#: tilde, la forma en que Fernando escribio el caso real) matchean el MISMO
+#: patron. Efecto secundario deseado: "sabés" (voseo, con tilde) pliega a
+#: "sabes" y cae en el mismo patron que la forma de "tu" -- sin agregar una
+#: forma de voseo aparte.
+_TABLA_ACENTOS = str.maketrans("áéíóúü", "aeiouu")
+
+
+def _sin_acentos(texto: str) -> str:
+    return texto.translate(_TABLA_ACENTOS)
 
 
 def detect_completeness_intent(text: str) -> Optional[str]:
     """Detecta si el texto es una pregunta de 'dame todo lo que sepas de X'
     en vez de una pregunta puntual. Devuelve el fact_type a barrer completo
     via get_facts(), o None si es una pregunta normal (solo retrieval
-    semantico, como siempre)."""
-    normalizado = text.lower()
+    semantico, como siempre).
+
+    La deteccion es deliberadamente LEXICA (una lista de substrings), no un
+    modelo: la similitud vectorial YA se prueba en `search_similar_facts` y
+    ahi mismo se midio que NO resuelve esta clase de pregunta -- "jax sabes
+    a que me dedico?" tiene el fact de ocupacion en el puesto 26 de 28 por
+    distancia coseno, porque la palabra "jax" del propio texto lo acerca a
+    los 25 hechos que hablan de JAX el software antes que al que responde
+    la pregunta (ver el docstring de `search_similar_facts` con los numeros
+    medidos). Una lista de frases fijas no tiene ese problema: no le
+    importa que mas diga la oracion."""
+    normalizado = _sin_acentos(text.lower())
     for fact_type, patrones in _COMPLETENESS_PATTERNS.items():
         if any(p in normalizado for p in patrones):
             return fact_type
@@ -1410,6 +1600,122 @@ class MemoryDB:
                     logger.error(f"reranking fallo, se usa el orden previo: {e}")
 
         return rows[:limit]
+
+    async def search_similar_facts(self, query: str, limit: int = 8,
+                                    user_id: Optional[int] = None,
+                                    project_id: Optional[int] = None,
+                                    recent_history: Optional[list] = None) -> Optional[list]:
+        """Busca facts ACTIVOS y VIGENTES similares a `query` por distancia
+        vectorial. Hermano de `search_similar_messages`, pero sobre `facts`:
+        antes de esta funcion, nadie leia `facts` por similitud -- solo
+        `save_fact` (via `_find_nearest_fact`) para deduplicar al ESCRIBIR.
+
+        Este metodo es para RECUERDO ESPECIFICO ("¿que dije del servidor de
+        correo?"), no para preguntas sobre la persona -- esas las resuelve
+        `detect_completeness_intent` devolviendo 'user' (ver su docstring),
+        que trae TODOS los facts de esa categoria via `get_facts()`, no por
+        similitud. La primera version de este metodo (2026-09-20, misma
+        tarde) intento resolver "jax sabes a que me dedico?" agrandando
+        `limit` a 30 para alcanzar el fact de ocupacion en el puesto 26 de
+        28 -- funcionaba para ESA frase, pero volcaba entre 16 y 30 facts
+        ante frases SIN contenido real ("hola" -> 16, "gracias" -> 30, el
+        tope): eso no es recuperar contexto, es volcar la memoria entera.
+        Fernando lo corrigio el mismo dia: `limit` baja a 8 y el caso real
+        pasa a resolverlo `detect_completeness_intent`, no este metodo (ver
+        el comentario de `FACT_SIMILARITY_THRESHOLD` mas arriba para las
+        mediciones completas de las dos rondas, incluido que el reranker
+        cross-encoder EMPEORA el caso real y por eso `JAX_MEMORY_RERANK`
+        sigue apagado). El umbral, no `limit`, sigue siendo el filtro real
+        -- `limit` solo pone un tope duro a cuantos de los que pasan el
+        umbral se muestran, para que ninguna frase, por floja que sea la
+        coincidencia, pueda volcar mas de un puñado de facts.
+
+        Filtra SIEMPRE (no es opcional, no hay parametro para saltarlo):
+          - `superseded_by IS NULL`: un fact que Fernando corrigio no puede
+            volver por la ventana de la busqueda semantica.
+          - `expires_at IS NULL OR expires_at > NOW()`: un fact vencido
+            tampoco -- mismo criterio que `_find_nearest_fact` y `get_facts`.
+          - distancia coseno < FACT_SIMILARITY_THRESHOLD (documentado arriba
+            con las mediciones reales que lo justifican): sin umbral, se
+            inyectarian los `limit` facts mas cercanos SIN IMPORTAR que tan
+            lejos esten -- un detector que trae todo no filtra nada.
+
+        Scope de dos niveles (identico a `search_similar_messages` /
+        `get_facts`):
+          - project_id NOT NULL -> facts del PROYECTO (compartidos).
+          - user_id    NOT NULL -> facts INDIVIDUALES (project_id IS NULL).
+          - ambos None          -> sin filtro de scope.
+
+        `user_id`/`project_id` ya viven en la propia tabla `facts` (a
+        diferencia de `messages` antes de la desnormalizacion): el WHERE de
+        scope no necesita JOIN, asi que el indice vectorial HNSW
+        (`idx_embedding_bge_m3`) queda disponible sin el trabajo que
+        `search_similar_messages` tuvo que hacer.
+
+        recent_history (opcional): igual que en `search_similar_messages`,
+        mezcla los ultimos turnos con `query` para no depender solo de la
+        ultima frase.
+
+        Devuelve lista de dicts {id, fact_text, fact_type, created_at,
+        distancia}, ya filtrada por el umbral -- puede ser []. `None` si la
+        busqueda no se pudo completar (Ollama caido, DB caida): fail-soft,
+        pero declarando la incertidumbre en vez de fingir que no habia nada
+        que recordar (mismo contrato que `search_similar_messages`)."""
+        if not self.pool:
+            return []
+
+        blended_query = _blend_query(_quitar_vocativo_faceta(query), recent_history)
+        embedding = await self.get_embedding(blended_query)
+        if embedding is None:
+            return []
+        if _is_degenerate_embedding(embedding):
+            logger.warning("search_similar_facts: embedding de consulta de norma cero, sin busqueda")
+            return []
+
+        vec_str = json.dumps(embedding)
+
+        clauses = [
+            "superseded_by IS NULL",
+            "(expires_at IS NULL OR expires_at > NOW())",
+            _nonzero_embedding_sql(_col()),
+        ]
+        params: list = []
+        scope = []
+        if project_id is not None:
+            scope.append("project_id = %s")
+            params.append(project_id)
+        if user_id is not None:
+            scope.append("(project_id IS NULL AND user_id = %s)")
+            params.append(user_id)
+        if scope:
+            clauses.append("(" + " OR ".join(scope) + ")")
+        where = " AND ".join(clauses)
+
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute(
+                        "SELECT id, fact_text, fact_type, created_at, "
+                        f"VEC_DISTANCE_COSINE({_col()}, VEC_FromText(%s)) AS distancia "
+                        f"FROM facts WHERE {where} "
+                        f"ORDER BY VEC_DISTANCE_COSINE({_col()}, VEC_FromText(%s)) ASC "
+                        "LIMIT %s",
+                        ([vec_str] + params + [vec_str, limit]),
+                    )
+                    rows = _finite_distance_rows(
+                        [dict(r) for r in await cur.fetchall()], "search_similar_facts")
+        except Exception as e:  # fail-soft: mismo contrato que search_similar_messages -- None declara "no se pudo buscar", distinto de [] ("se busco y no habia nada cerca")
+            logger.error(f"search_similar_facts fallo: {e}")
+            return None
+
+        # El umbral se aplica ACA, en Python, sobre las filas ya traidas por
+        # el ORDER BY + LIMIT de arriba (que es lo que usa el indice HNSW):
+        # filtrar por distancia dentro del WHERE sacaria a la consulta del
+        # indice, misma leccion que el JOIN de search_similar_messages. Como
+        # el ORDER BY ya es por esa MISMA distancia, ascendente, todo lo que
+        # pasa el umbral quedo agrupado al FRENTE de `rows` -- filtrar aca no
+        # pierde ningun candidato que el `LIMIT` de arriba ya haya traido.
+        return [r for r in rows if r["distancia"] < FACT_SIMILARITY_THRESHOLD]
 
     # --------------------------------------------------------
     # Gestion de facts (comando /fact: control de calidad)
