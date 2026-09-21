@@ -60,7 +60,22 @@ async def _correr(reparar: bool, muestra: int) -> int:
             for inf in informes:
                 print(f"  {inf}")
 
+            # La caché: el otro modo de fallo, y este SÍ se ve venir. Cuando
+            # los vectores no entran, `/grupos` deja de ser determinista bajo
+            # carga (medido a 9.000 hechos el 2026-09-20).
+            ocupaciones = await iv.ocupacion_de_cache(cur)
+            for ocup in ocupaciones:
+                print(f"  {ocup}")
+            apretadas = [o for o in ocupaciones if not o.holgada]
+
             rotos = [i for i in informes if not i.sano]
+            if apretadas and not rotos:
+                print(f"\n{len(apretadas)} índice(s) con la caché al límite. No está "
+                      "roto todavía, pero bajo carga las respuestas empiezan a variar "
+                      "entre corridas. Subí `mhnsw_max_cache_size` -- y hacelo DOS "
+                      "veces: `SET GLOBAL` (surte efecto ya) y el `conf.d` de la "
+                      "MariaDB (sobrevive al reinicio). Ver el runbook.")
+                return 1
             if not rotos:
                 return 0
 
