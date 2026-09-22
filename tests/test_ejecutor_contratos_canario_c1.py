@@ -12,7 +12,7 @@ from jax.ejecutor.contratos.canario_upstream import Resultado
 from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.fallo import Fallo
 
-C = Cuenta("axioma", 58291, Path("/k"), Path("/opt/node/bin"), Path("/opt/ejecutor/lib"), Path("/etc/p.json"))
+C = Cuenta("axioma", 58291, Path("/k"), Path("/opt/node/bin"), Path("/opt/ejecutor/lib"), Path("/etc/p.json"), Path("/home/axioma"))
 NONCE = "abc123"
 BLOQUEO = b'contrato="c1" codigo="prohibido" regla="canario_c1" hosts=["hall9000"]\n'
 

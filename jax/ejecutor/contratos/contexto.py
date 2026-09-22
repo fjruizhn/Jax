@@ -29,12 +29,11 @@ _CEREBROS = RAIZ / "scripts" / "ejecutor_fase0" / "cerebros.toml"
 CLAUDE_MD_REL = "contexto/CLAUDE.md"
 CLAUDE_MD_SHA256_REL = "contexto/CLAUDE.md.sha256"
 SKILLS_REL = "contexto/skills"
-#: Archivo SIEMPRE vacío (M3, auditoría adversarial 2026-09-22): la jaula lo monta ro
-#: sobre "$HOME/CLAUDE.md" -- el CLAUDE.md DE PROYECTO, distinto del de "$HOME/.claude/"
-#: (CLAUDE_MD_REL, ya tapado). Sin esto, axioma podía escribir uno propio ahí y Claude
-#: Code lo carga igual. Vive en el instalable, no en /dev/null: un bind de un carácter
-#: especial se comporta distinto entre mounts según las banderas de bwrap (medido).
-CLAUDE_MD_HOME_VACIO_REL = "contexto/CLAUDE.md.home.vacio"
+# NOTA (B-1/M-4, ronda 3, 2026-09-22): el archivo `contexto/CLAUDE.md.home.vacio` que la
+# ronda 2 (M3) instalaba para tapar "$HOME/CLAUDE.md" a mano queda RETIRADO -- ver
+# cuenta_axioma.py. Con "$HOME" como `--tmpfs` propio de cada invocación, ese archivo (y
+# el directorio de memoria) ya no existen ahí salvo que la jaula los monte, así que un
+# bind puntual sobre uno solo era un parche sobre el síntoma, no la causa.
 
 
 class SkillFaltante(RuntimeError):
@@ -119,7 +118,6 @@ def renderizar_etapa(etapa: Path) -> None:
     doc = claude_md()
     (etapa / "CLAUDE.md").write_bytes(doc)
     (etapa / "CLAUDE.md.sha256").write_text(hashlib.sha256(doc).hexdigest())
-    (etapa / "CLAUDE.md.home.vacio").write_bytes(b"")
     for rel, datos in archivos_de_skills().items():
         destino = etapa / "skills" / rel
         destino.parent.mkdir(parents=True, exist_ok=True)

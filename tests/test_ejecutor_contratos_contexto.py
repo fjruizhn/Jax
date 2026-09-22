@@ -29,7 +29,7 @@ def test_claude_md_no_esta_vacio_y_su_sha256_es_estable():
 # criterio que `skills_fuente()` un poco más abajo.
 
 _DOBLE_CONSTITUCION = ("## LAS POLÍTICAS DE MARINA\n\nx\n\n## LA REGLA ABSOLUTA\n\nx\n\n"
-                      "## LOS NUEVE PRINCIPIOS OPERATIVOS\n\nx\n\n## LOS SEIS IMPOSIBLES\n\nx\n\n"
+                      "## LOS NUEVE PRINCIPIOS OPERATIVOS\n\nx\n\n"
                       "## JERARQUÍA DE AUTORIDAD\n\nx\n\n## HONOR\n\nx\n")
 
 

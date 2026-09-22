@@ -144,12 +144,13 @@ def _archivos_instalados(base) -> frozenset:
 
 
 def verificar_contexto(ctx: Contexto) -> tuple:
-    """El CLAUDE.md (spec §6.1: SIEMPRE generado, nunca a mano), el CLAUDE.md vacío
-    de "$HOME" (M3) y las skills declaradas, al día contra lo que `contexto.py`
-    produce/exige AHORA MISMO. Mismo criterio fail-closed que el resto de
-    `verificar_instalacion`: el sha256 instalado se recalcula contra los bytes
-    reales, nunca se confía en el `.sha256` de acompañamiento (ese archivo es sólo
-    para auditoría humana).
+    """El CLAUDE.md (spec §6.1: SIEMPRE generado, nunca a mano) y las skills
+    declaradas, al día contra lo que `contexto.py` produce/exige AHORA MISMO.
+    Mismo criterio fail-closed que el resto de `verificar_instalacion`: el sha256
+    instalado se recalcula contra los bytes reales, nunca se confía en el
+    `.sha256` de acompañamiento (ese archivo es sólo para auditoría humana).
+    "$HOME" ya no necesita un chequeo acá (B-1/M-4, ronda 3): es un `--tmpfs`
+    propio de cada invocación, ver cuenta_axioma.py.
 
     M4 (auditoría adversarial 2026-09-22): la comparación es del CONJUNTO completo
     de archivos, no sólo de los declarados -- un archivo de MÁS bajo `SKILLS_REL`
@@ -168,13 +169,6 @@ def verificar_contexto(ctx: Contexto) -> tuple:
             instalado = None
         if instalado is None or _sha(instalado) != _sha(esperado):
             fallos.append(Fallo("arranque", "contexto_desactualizado"))
-
-    try:
-        instalado = (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).read_bytes()
-    except OSError:
-        instalado = None
-    if instalado != b"":
-        fallos.append(Fallo("arranque", "contexto_desactualizado", (("archivo", contexto.CLAUDE_MD_HOME_VACIO_REL),)))
 
     try:
         esperadas_skills = contexto.archivos_de_skills()

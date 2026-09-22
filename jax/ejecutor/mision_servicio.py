@@ -183,11 +183,19 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         return await asyncio.to_thread(pausa.latido_fresco, ctx.latido, ctx.latido_max_s)
 
     async def cerebro(ctx, prompt, sesion, reanudar):
+        # B-1/M-4 (ronda 3): el directorio de "$HOME/.claude/projects" es POR MISIÓN, no
+        # por turno -- mismo directorio en todos los turnos de `turno.mision_id`, así
+        # "--resume" encuentra la sesión que el turno anterior dejó. Se prepara (dueño
+        # axioma) ANTES de cada turno: barato si ya existe (`install -d` es idempotente)
+        # y así no hace falta un paso previo separado que pueda quedar desincronizado.
+        directorio_projects = cuenta_axioma.ruta_projects_de_la_mision(
+            Path(env["JAX_EJECUTOR_MISIONES"]), turno.mision_id)
+        await cuenta_axioma.preparar_directorio_projects(ctx.cuenta, directorio_projects)
         remoto = cuenta_axioma.remoto_claude(
             ctx.cuenta, base_url=f"http://127.0.0.1:{ctx.puerto_proxy}", modelo=env["JAX_PROXY_CARRIL_MODELO"],
             prompt=prompt, herramientas="Bash,Skill",
             max_salida_tokens=int(env["JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"]),
-            sesion=sesion, reanudar=reanudar)
+            sesion=sesion, reanudar=reanudar, directorio_projects=directorio_projects)
         rc, crudo, _ = await cuenta_axioma.correr_en_la_cuenta(ctx.cuenta, remoto, entrada=b"sin-clave\n",
                                                                tope_s=tope_s)
         return rc, crudo

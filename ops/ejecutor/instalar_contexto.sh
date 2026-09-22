@@ -44,10 +44,6 @@ echo "--- fin diff ---"
 sudo install -d -o root -g root -m 0755 "$DESTINO"
 sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md" "$DESTINO/CLAUDE.md"
 sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md.sha256" "$DESTINO/CLAUDE.md.sha256"
-# M3: el CLAUDE.md vacío que la jaula monta sobre "$HOME/CLAUDE.md" (el de PROYECTO,
-# no el de "$HOME/.claude/" de arriba) -- ver jax/ejecutor/contratos/contexto.py y
-# cuenta_axioma.py.
-sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md.home.vacio" "$DESTINO/CLAUDE.md.home.vacio"
 
 # Las skills: reemplazo ATÓMICO del árbol completo (M4, auditoría adversarial
 # 2026-09-22). Instalar archivo por archivo, uno por uno, SÓLO agrega -- una skill

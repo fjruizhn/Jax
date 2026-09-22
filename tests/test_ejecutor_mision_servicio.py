@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -132,18 +133,24 @@ def test_el_cerebro_le_da_bash_y_skill_al_arnes(monkeypatch):
     `Read` no hace falta -- el Ejecutor lee con `cat` (Bash), como siempre."""
     vistos = {}
 
-    def remoto_falso(cuenta, *, base_url, modelo, prompt, herramientas, max_salida_tokens, sesion, reanudar):
+    def remoto_falso(cuenta, *, base_url, modelo, prompt, herramientas, max_salida_tokens, sesion, reanudar,
+                     directorio_projects):
         vistos["herramientas"] = herramientas
         return "remoto-de-prueba"
 
     async def correr_falso(cuenta, remoto, *, entrada, tope_s):
         return 0, b"{}", b""
 
+    async def preparar_falso(cuenta, ruta):
+        vistos["directorio_preparado"] = ruta
+
     monkeypatch.setattr(S.cuenta_axioma, "remoto_claude", remoto_falso)
     monkeypatch.setattr(S.cuenta_axioma, "correr_en_la_cuenta", correr_falso)
+    monkeypatch.setattr(S.cuenta_axioma, "preparar_directorio_projects", preparar_falso)
 
     turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
-    env = {"JAX_PROXY_CARRIL_MODELO": "canario", "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024"}
+    env = {"JAX_PROXY_CARRIL_MODELO": "canario", "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
+          "JAX_EJECUTOR_MISIONES": "/var/lib/jax-ejecutor-misiones"}
     deps = S.dependencias_reales(env, turno, tope_s=1.0, espera_s=1.0)
 
     class _CtxFalso:
@@ -152,3 +159,5 @@ def test_el_cerebro_le_da_bash_y_skill_al_arnes(monkeypatch):
 
     asyncio.run(deps.correr_cerebro(_CtxFalso(), "prompt", None, False))
     assert vistos["herramientas"] == "Bash,Skill"
+    assert vistos["directorio_preparado"] == Path(
+        f"/var/lib/jax-ejecutor-misiones/{TURNO['mision_id']}/claude-projects")

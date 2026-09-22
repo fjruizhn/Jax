@@ -27,7 +27,8 @@ from jax.ejecutor.contratos.fallo import Fallo
 
 
 def _ctx(tmp_path, **cambios):
-    base = dict(cuenta=Cuenta("axioma", 58291, Path("/k"), Path("/n"), tmp_path / "lib", tmp_path / "politica.json"),
+    base = dict(cuenta=Cuenta("axioma", 58291, Path("/k"), Path("/n"), tmp_path / "lib", tmp_path / "politica.json",
+                              Path("/home/axioma")),
                 repo=Path(__file__).resolve().parents[1], puerto_canario=18436, registro=tmp_path / "registro.jsonl",
                 puerto_proxy=18435, sondas=(7777,), estado_freno=tmp_path / "estado.json",
                 llaves_root=Path("/etc/ssh/authorized_keys.d/axioma"), tope_gancho_s=10,
@@ -108,6 +109,7 @@ def test_corre_todas_en_orden_aunque_falle_la_primera(tmp_path):
 def _entorno(tmp_path):
     return {"JAX_EJECUTOR_CUENTA": "axioma", "JAX_EJECUTOR_SSH_PUERTO": "58291",
             "JAX_EJECUTOR_CONTROLADOR_LLAVE": "/k", "JAX_EJECUTOR_NODE_BIN": "/n", "JAX_EJECUTOR_LIB": "/opt/lib",
+            "JAX_EJECUTOR_CUENTA_HOME": "/home/axioma",
             "JAX_EJECUTOR_POLITICA": "/etc/p.json", "JAX_EJECUTOR_CANARIO_PUERTO": "18436",
             "JAX_EJECUTOR_REGISTRO": "/var/log/r.jsonl", "JAX_PROXY_CARRIL_PUERTO": "18435",
             "JAX_EJECUTOR_CERCO_SONDAS": "7777,11434", "JAX_EJECUTOR_FRENO_ESTADO": "/run/e.json",
@@ -303,7 +305,7 @@ def _fuente_skills_de_prueba(base: Path) -> Path:
 # corren en CUALQUIER runner (antes se saltaban en CI, que no tiene
 # /home/fruiz/claude-skills).
 _DOBLE_CONSTITUCION = ("## LAS POLÍTICAS DE MARINA\n\nx\n\n## LA REGLA ABSOLUTA\n\nx\n\n"
-                      "## LOS NUEVE PRINCIPIOS OPERATIVOS\n\nx\n\n## LOS SEIS IMPOSIBLES\n\nx\n\n"
+                      "## LOS NUEVE PRINCIPIOS OPERATIVOS\n\nx\n\n"
                       "## JERARQUÍA DE AUTORIDAD\n\nx\n\n## HONOR\n\nx\n")
 
 
@@ -323,7 +325,6 @@ def _instalar_contexto(ctx, monkeypatch, *, fuente_skills=None):
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
     (ctx.cuenta.lib / contexto.CLAUDE_MD_SHA256_REL).write_text(contexto.sha256_claude_md())
-    (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).write_bytes(b"")
     for rel, datos in contexto.archivos_de_skills().items():
         destino = ctx.cuenta.lib / contexto.SKILLS_REL / rel
         destino.parent.mkdir(parents=True, exist_ok=True)
@@ -370,7 +371,6 @@ def test_skill_faltante_en_la_fuente_no_arranca(tmp_path, monkeypatch):
     monkeypatch.setattr(contexto, "constitucion_fuente", lambda: doble)
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
-    (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).write_bytes(b"")
     assert AR.verificar_instalacion(ctx) == (
         Fallo("arranque", "skill_faltante", (("skill", "desde-la-fuente"),)),)
 
@@ -408,18 +408,6 @@ def test_una_skill_entera_de_mas_no_arranca(tmp_path, monkeypatch):
     (ctx.cuenta.lib / contexto.SKILLS_REL / "retirada-hace-meses" / "SKILL.md").write_text("vieja")
     assert AR.verificar_instalacion(ctx) == (
         Fallo("arranque", "skill_extra_instalada", (("archivo", "retirada-hace-meses/SKILL.md"),)),)
-
-
-def test_claude_md_de_home_escrito_a_mano_no_arranca(tmp_path, monkeypatch):
-    """M3: el instalable siempre tiene que ser un archivo VACÍO -- si algo lo
-    sobrescribió con contenido, el arranque lo trata igual que un CLAUDE.md
-    desactualizado."""
-    ctx = _ctx(tmp_path)
-    _instalar_copia(ctx)
-    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
-    (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).write_bytes(b"escrito a mano\n")
-    assert AR.verificar_instalacion(ctx) == (
-        Fallo("arranque", "contexto_desactualizado", (("archivo", contexto.CLAUDE_MD_HOME_VACIO_REL),)),)
 
 
 # --- alcance: los contratos por máquina, acotados a la misión ---------------------
