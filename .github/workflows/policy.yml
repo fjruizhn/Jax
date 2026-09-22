@@ -3450,8 +3450,91 @@ jobs:
           #   ANTES del handler). Los dos vistos en rojo contra el código
           #   viejo (sin el chequeo, y sin `min_length`); verde tras -- 33
           #   passed en el archivo. "17 skipped" no cambia.
-          grep -qE "^2439 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2439 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2439 passed, 17 skipped -> 2440 passed, 19 skipped (Task 1-bis,
+          #   fix round 1, 2026-09-22, revisión NO APTO -- BLOCK-1/MINOR-3):
+          #   +1 passed en tests/test_store_columna_descarte_acotada.py
+          #   (test_visible_es_la_ultima_columna_del_loop, MAJOR-1/Ruling
+          #   19b -- pura, sin DB, corre siempre) y +2 skipped en
+          #   tests/test_base_por_sesion.py
+          #   (test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906
+          #   y test_columnas_copiables_excluye_solo_las_generadas, MINOR-3 --
+          #   `@pytest.mark.skipif(not JAX_DB_HOST)`: este job no tiene
+          #   `services: mariadb`, así que corren SKIPPED acá y PASSED en
+          #   jacobs-gobernanza-db/local con DB real). Prueban el arreglo de
+          #   base_de_test.py::_clonar_esquema() -- `SELECT *`/
+          #   `INSERT ... SELECT *` al copiar filas de una tabla con una
+          #   columna GENERATED (como `jacobs_pipelines.visible`, Ruling 18)
+          #   revienta con 1906; `_columnas_copiables()`/`_copiar_filas()`
+          #   copian con una lista EXPLÍCITA de columnas, sin las
+          #   GENERATED. Vistos en ROJO con el patrón viejo (`INSERT ...
+          #   SELECT *`) contra una tabla de prueba con una columna VIRTUAL
+          #   y filas: `(1906, "The value specified for generated column
+          #   'visible' ... has been ignored")` -- confirmado con un script
+          #   desechable antes del fix, no committeado.
+          #
+          #   NOTA HONESTA -- discrepancia con el runner, no con este diff:
+          #   medido LOCALMENTE en hall9000 contra master d14d67c (ANTES de
+          #   este fix, mismo entorno, misma lista de archivos) da "2454
+          #   passed, 0 skipped" -- no "2439 passed, 17 skipped" como dice
+          #   el piso documentado. La diferencia (15 tests) es el corpus de
+          #   U3 (tests/test_ejecutor_reproduccion_u3.py, nota de arriba:
+          #   "16 de ellos, sin el corpus de U3 -- estructural") SÍ presente
+          #   en este dev machine, algo AJENO a este diff y a esta ronda --
+          #   confirmado corriendo la MISMA lista de archivos contra
+          #   d14d67c puro, 3 veces, resultado estable (2454/0/3xfailed las
+          #   tres). La delta que SÍ aporta este fix round, medida contra
+          #   ESE baseline local (no contra el piso documentado): +3 (2454
+          #   -> 2457, estable en 4 de 5 corridas; una corrida dio 2455/2
+          #   skipped, no reproducida de nuevo en 3 corridas más -- unica
+          #   candidata a flaky, no de un test mío: aislado el archivo
+          #   `tests/test_base_por_sesion.py` solo, 5 corridas seguidas,
+          #   siempre "26 passed" sin variación). El número de ESTE
+          #   `grep` seguye la aritmética del piso DOCUMENTADO (2439/17),
+          #   no el número local (2454/0), porque el runner de CI no tiene
+          #   el corpus de U3 -- si el runner da otro número, manda el
+          #   runner, igual criterio que el resto de este archivo.
+          # 2440 -> 2444 (Task 1-bis, fix round 2, 2026-09-22, MINOR-A de la
+          #   re-review): +4 en tests/test_store_columna_descarte_acotada.py,
+          #   puros -- test_la_ddl_de_visible_usa_la_expresion_esperada
+          #   (baranda mecánica: el DDL de la tupla `visible` del loop de
+          #   columnas y `store._EXPRESION_VISIBLE`, la fuente del chequeo
+          #   de drift, son dos copias escritas a mano -- no un f-string,
+          #   `ast.literal_eval` no acepta interpolación -- así que hace
+          #   falta un test que las mantenga sincronizadas) y
+          #   NormalizarExpresionGeneradaTest (+3: la forma real que
+          #   devuelve MariaDB normaliza igual a `_EXPRESION_VISIBLE`;
+          #   mayúsculas/espacios distintos del DDL fuente tampoco dan
+          #   falsa alarma, con subTest; y un control negativo -- la
+          #   expresión vieja de Ruling 18/`02fbaed` NO normaliza igual).
+          #   "19 skipped" no cambia (tests/test_base_por_sesion.py no se
+          #   tocó en este job -- sus dos MINOR-3 se wirearon en
+          #   jacobs-gobernanza-db, ver ese piso). Medido: local con
+          #   `JAX_DB_HOST` sin poner (mismas condiciones que este job, sin
+          #   MariaDB), tres corridas de los 165 archivos: 2459 passed
+          #   estable las tres, 2 skipped (mis dos de Ruling 19e, sin
+          #   cambio), 3 xfailed. Delta sobre la corrida anterior de este
+          #   mismo fix round (2455 -> 2459): +4, exacto a los 4 tests
+          #   nuevos de este archivo.
+          # 2444 -> 2447 (Task 1-bis, fix round 3, 2026-09-22, MINOR de la
+          #   re-review): +3 en tests/test_store_columna_descarte_acotada.py,
+          #   puros -- CarreraDeVisibleLlamaAlDriftCheckTest: cuando
+          #   `_agregar_columna_acotada` pierde la carrera del 1205 para
+          #   `columna="visible"`, ahora llama al drift check antes de
+          #   devolver -- "otro proceso ganó" deja de ser sinónimo de "está
+          #   bien" si lo que ganó tiene una expresión distinta.
+          #   test_otro_proceso_creo_la_misma_expresion_no_es_fallo (control
+          #   positivo, con `_CursorFalso` extendido con
+          #   `expresion_generada`); test_otro_proceso_creo_una_expresion_distinta_SI_es_fallo
+          #   (el caso que este fix cierra); y
+          #   test_columnas_no_generadas_no_pagan_esta_consulta_extra
+          #   (`status_previo` pierde la misma carrera y NUNCA dispara
+          #   `SELECT GENERATION_EXPRESSION` -- el chequeo es específico de
+          #   `visible`). "19 skipped" no cambia. Medido: local sin
+          #   `JAX_DB_HOST`, 165 archivos: 2462 passed (delta +3 sobre la
+          #   corrida anterior de este fix round, 2459 -> 2462, exacto),
+          #   2 skipped, 3 xfailed.
+          grep -qE "^2447 passed, 19 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2447 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 de Ruling 19e sin JAX_DB_HOST en este job)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4268,6 +4351,8 @@ jobs:
           jacobs/_modelo_real_test.py
           las_manos/_output_validator_db_drift_test.py
           tests/test_jacobs_descarte_db.py
+          tests/test_base_por_sesion.py::test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906
+          tests/test_base_por_sesion.py::test_columnas_copiables_excluye_solo_las_generadas
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -4295,6 +4380,8 @@ jobs:
             jacobs/_modelo_real_test.py \
             las_manos/_output_validator_db_drift_test.py \
             tests/test_jacobs_descarte_db.py \
+            tests/test_base_por_sesion.py::test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906 \
+            tests/test_base_por_sesion.py::test_columnas_copiables_excluye_solo_las_generadas \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -4699,8 +4786,182 @@ jobs:
           #   que ninguno de los dos probaba lo que este nuevo sí prueba.
           #   Revertida byte a byte. Verde tras -- 144 passed, 0 failed (143
           #   anteriores + 1 nuevo).
-          grep -qE "^144 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 144 tests CORRIDOS."; exit 1; }
+          # 144 -> 155 (Task 1-bis, descartar-pipelines, 2026-09-22, Ruling
+          #   18): +11 en tests/test_jacobs_descarte_db.py --
+          #   DescarteColumnasEIndicesDBTest (+2):
+          #   test_columna_visible_generada_existe (SHOW COLUMNS: `visible`
+          #   es tinyint(1), Extra='VIRTUAL GENERATED') y
+          #   test_indice_visibles_existe_en_orden (SHOW INDEX:
+          #   idx_pipelines_visibles en el orden EXACTO user_id, tenant_id,
+          #   visible, created_at). VisibleSigueAlEstadoDBTest (+4, clase
+          #   nueva): `visible` es 1 para cada uno de los ocho estados
+          #   visibles del enum (partición exhaustiva contra PipelineStatus,
+          #   con subTest), 0 para discarded y para hidden, cambia a 0 al
+          #   descartar y vuelve a 1 al recuperar (vía
+          #   pipeline_transicion_descarte real), y se queda en 0 en las dos
+          #   puntas del ciclo hide/restore. CostoAcotadoPorVisibleDBTest
+          #   (+5, clase nueva) -- la propiedad central de Ruling 18, contra
+          #   dos formas sembradas con `cur.executemany` (no INSERT por
+          #   fila): (b) 5000 descartados + 3 vivas -- la forma que en
+          #   jax-platform pagaba 4,2-4,4 ms con FORCE INDEX
+          #   (idx_jacobs_pipelines_duenio) recorriendo casi el tenant
+          #   completo -- EXPLAIN usa idx_pipelines_visibles sin filesort
+          #   (test 1) y el total de `Handler_read%` (FLUSH STATUS antes,
+          #   SHOW SESSION STATUS después) queda en el orden de las 3 filas
+          #   vivas, no de las 5000 descartadas (test 2); (a) 5000 vivas +
+          #   50 descartadas -- mismo plan sin filesort (test 3) y el total
+          #   de Handler_read queda acotado por el LIMIT (50) aunque
+          #   `EXPLAIN.rows` estime ~5000 -- la propiedad que `rows` por sí
+          #   solo NO prueba (test 4); y una cota independiente contra el
+          #   total sembrado, no un número fijo (test 5). Vistos en ROJO
+          #   contra el código sin `visible`/idx_pipelines_visibles: SHOW
+          #   COLUMNS no trae 'visible' (KeyError/None en fetchone) y
+          #   `FORCE INDEX (idx_pipelines_visibles)` da ERROR 1176 de
+          #   MariaDB (Key doesn't exist) -- confirmado mutando la base de
+          #   TEST directamente (DROP INDEX), no revirtiendo store.py: con
+          #   el índice creado en el ORDEN equivocado
+          #   (user_id,tenant_id,created_at,visible en vez de
+          #   user_id,tenant_id,visible,created_at) el total de
+          #   Handler_read pasó de 3 a 3004 sobre la misma forma (b) --
+          #   la cota `<= filas+10` del test 2 cae, confirmando que SÍ mide
+          #   lo que dice medir. Verde tras -- 155 passed, 0 failed (144
+          #   anteriores + 11 nuevos). Medido en local (127.0.0.1:3308,
+          #   base de sesión jax_memory_test_auto<pid>), corrida completa
+          #   de los 24 archivos del job: 155 passed, 0 failed.
+          # 155 -> 161 (Task 1-bis, fix round 1, 2026-09-22, revisión NO APTO
+          #   del coordinador -- Ruling 19): +6 en tests/test_jacobs_descarte_db.py.
+          #   Ruling 19a (`visible` suma "AND owner_ack_at IS NOT NULL" a su
+          #   expresión -- los hijos de Ada sin ack no deben inflar el rango
+          #   del índice): +2 en VisibleSigueAlEstadoDBTest --
+          #   test_visible_es_0_sin_ack_aunque_el_estado_sea_visible (los ocho
+          #   estados visibles, con subTest, CON status visible pero
+          #   owner_ack_at=NULL, dan visible=0) y
+          #   test_visible_es_1_con_ack_para_cada_estado_del_mapeo (cruza
+          #   _VISIBILIDAD_ESPERADA completo, con ack, contra MariaDB real).
+          #   CostoAcotadoPorVisibleDBTest se REESCRIBE para sembrar 2000
+          #   filas sin ack junto con las descartadas/vivas en las 5 formas
+          #   existentes (mismo número de tests, 0 nuevos ahí) -- confirma
+          #   que el plan sigue sin filesort y Handler_read sigue acotado con
+          #   las tres categorías presentes. Ruling 19d/MINOR-4
+          #   (exhaustividad): +1, VisibilidadExhaustivaTest -- pura, sin DB,
+          #   `_VISIBILIDAD_ESPERADA` es un diccionario EXPLÍCITO (no una
+          #   fórmula) que cubre TODO PipelineStatus; un estado nuevo sin
+          #   decisión en el mapeo la pone en rojo. MINOR-1 (consistencia del
+          #   índice): +1, VisibleSigueAlEstadoDBTest::test_el_indice_refleja_el_descarte_y_la_recuperacion
+          #   -- no alcanza con leer la columna `visible` (eso prueba la
+          #   EXPRESIÓN); un SELECT `FORCE INDEX (idx_pipelines_visibles)`
+          #   confirma que el pid deja de aparecer al descartar y vuelve a
+          #   aparecer al recuperar, LEYENDO POR EL ÍNDICE. MAJOR-1 (Ruling
+          #   19b, la trampa del 1845/1846 sobre columnas VIRTUAL indexadas,
+          #   ver jacobs/_subpipeline_contrato_io_test.py y el comentario de
+          #   idx_pipelines_visibles en jacobs/store.py): +1,
+          #   CanarioTrampaInstantDBTest -- después de init_tables() (que ya
+          #   deja idx_pipelines_visibles creado), un
+          #   `ADD COLUMN tmp_canario ... ALGORITHM=INSTANT` TIENE que dar
+          #   1845; si algún día NO lo da, el test falla y avisa que la
+          #   barrera de "visible al final del loop"
+          #   (tests/test_store_columna_descarte_acotada.py) se puede
+          #   retirar. Ruling 19c (el escenario 1205→1846 que pidió el
+          #   coordinador): +1, Escenario1846DBTest -- DROP INDEX
+          #   idx_pipelines_descartados seguido de init_tables() lo recrea
+          #   sin reventar; medido ANTES de escribir el test que la trampa es
+          #   específica de ADD COLUMN (cambia el row format), no de CREATE
+          #   INDEX -- no hizo falta tocar `_crear_indice_acotado`.
+          #   BLOCK-1 (el hallazgo de CI, tests-puros 2438/2439):
+          #   CostoAcotadoPorVisibleDBTest tenía tenants con nombre FIJO
+          #   ("tA-muchos-descartados", ...) -- tests/test_delete_de_tablas_compartidas.py
+          #   los marcaba porque el DELETE de `_borrar()` no tenía un
+          #   marcador propio reconocible. Arreglado con un tenant uuid por
+          #   test (`_tenant_unico()`) y un pragma `# marcador-propio:` en el
+          #   DELETE explicando por qué es seguro -- CERO tests nuevos (es
+          #   el mismo mecanismo de limpieza, no uno nuevo). Vistos en ROJO
+          #   los 6 nuevos contra el código de la Tarea 1-bis original (fix
+          #   round 0, commit 02fbaed): sin el AND de ack, los dos tests
+          #   "sin ack" fallaban (visible=1 en vez de 0); sin
+          #   `_VISIBILIDAD_ESPERADA` no existía el símbolo
+          #   (`NameError`/`AttributeError`); sin el canario, no existía el
+          #   test; sin la re-creación tras DROP INDEX, no existía el test.
+          #   Verde tras -- 161 passed, 0 failed (155 anteriores + 6
+          #   nuevos). Medido en local (127.0.0.1:3308, base de sesión
+          #   jax_memory_test_auto<pid>), corrida completa de los 24
+          #   archivos del job: 161 passed, 0 failed.
+          # 161 -> 166 (Task 1-bis, fix round 2, 2026-09-22, dos MINOR de la
+          #   re-review): +5 en tests/test_jacobs_descarte_db.py (+3) y
+          #   tests/test_base_por_sesion.py (+2, dos NODE ID puntuales, no
+          #   el archivo entero -- ver más abajo).
+          #   MINOR-A (drift de la expresión de `visible`): +3,
+          #   DriftDeExpresionVisibleDBTest -- el chequeo de existencia
+          #   ("existe" -> `continue`) no alcanza para una columna
+          #   GENERATED: una base con `visible` ya creada pero con la
+          #   expresión VIEJA (commit `02fbaed`, sin "AND owner_ack_at IS
+          #   NOT NULL") pasaba en silencio. `store._verificar_expresion_visible`
+          #   compara `information_schema.COLUMNS.GENERATION_EXPRESSION`
+          #   normalizada contra `store._EXPRESION_VISIBLE` y aborta
+          #   `init_tables()` (RuntimeError, sin DDL automático -- modificar
+          #   una columna VIRTUAL indexada cae en la misma trampa del
+          #   1845/1846 de Ruling 19b) si difieren.
+          #   test_la_expresion_esperada_pasa_sin_error (el caso normal, dos
+          #   init_tables() seguidos no levantan);
+          #   test_una_expresion_vieja_frena_init_tables (la expresión de
+          #   02fbaed, creada a mano contra la base de TEST -- nunca
+          #   revirtiendo store.py -- dispara el RuntimeError con el
+          #   mensaje esperado/encontrado); y
+          #   test_normalizar_no_da_falsa_alarma_con_lo_que_devuelve_mariadb
+          #   (la forma REAL que guarda MariaDB, con backticks y
+          #   minúsculas, no dispara el drift check). Vistos en ROJO contra
+          #   el código sin el hook de `_verificar_expresion_visible`
+          #   (confirmado con `unittest.mock.patch.object` reemplazándolo
+          #   por un no-op, no revirtiendo store.py): la expresión vieja ya
+          #   NO frena `init_tables()`.
+          #   MINOR-3 (los dos tests de Ruling 19e, antes SIEMPRE
+          #   skipped en CI -- ver el piso de tests-puros): +2, ahora
+          #   corren acá TAMBIÉN, con MariaDB real de verdad, no sólo en
+          #   local. Se agregaron sus NODE ID puntuales
+          #   (`tests/test_base_por_sesion.py::test_copiar_filas_...` y
+          #   `::test_columnas_copiables_...`), no el archivo completo: el
+          #   resto de ese archivo son controles de aislamiento de sesión
+          #   con subprocess que no necesitan (ni quieren) correr acá de
+          #   nuevo. Mutación pedida por el coordinador (volver a
+          #   `SELECT *` en `_clonar_esquema`): confirmado a mano que
+          #   `test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906`
+          #   cae con `(1906, "The value specified for generated column
+          #   'visible' ... has been ignored")`.
+          #   Verde tras -- 166 passed, 0 failed (161 anteriores + 5
+          #   nuevos). Medido en local (127.0.0.1:3308, base de sesión
+          #   jax_memory_test_auto<pid>), corrida completa de los 24
+          #   archivos + 2 node ID del job: 166 passed, 0 failed.
+          # 166 -> 167 (Task 1-bis, fix round 3, 2026-09-22, MINOR de la
+          #   re-review): +1 en tests/test_jacobs_descarte_db.py --
+          #   DriftDeExpresionVisibleDBTest::test_visible_no_generada_frena_init_tables.
+          #   El caso que MINOR-A (fix round 2) dejaba pasar: `visible`
+          #   existe pero NO es GENERATED en absoluto
+          #   (GENERATION_EXPRESSION es NULL, p.ej. alguien la creó a mano
+          #   como `visible TINYINT(1) DEFAULT 1`) -- el código viejo
+          #   trataba "fila con NULL" igual que "sin fila" (columna
+          #   inexistente) y devolvía en silencio: fail-OPEN, cada fila
+          #   leería visible=1 sin importar status/owner_ack_at.
+          #   `_verificar_expresion_visible` ahora distingue los dos casos:
+          #   sin fila -> return (la columna no existe, la crea el ALTER de
+          #   arriba); fila con NULL -> RuntimeError explícito ("no es una
+          #   columna generada"). Se crea a mano contra la base de TEST
+          #   (`ALTER TABLE ... ADD COLUMN visible TINYINT(1) DEFAULT 1`,
+          #   sin GENERATED), nunca revirtiendo store.py. Vista en ROJO
+          #   contra el código viejo (mutación con `unittest.mock.patch.object`
+          #   reemplazando `_verificar_expresion_visible` por la versión
+          #   con el `return` viejo, no revirtiendo el archivo): el test
+          #   cae con "RuntimeError not raised". También se blindó
+          #   `_agregar_columna_acotada`: cuando pierde la carrera del 1205
+          #   y `columna="visible"`, ahora llama al MISMO drift check antes
+          #   de devolver (antes esa rama devolvía en silencio sin mirar
+          #   la expresión de la columna que "ganó" la carrera) -- pruebas
+          #   puras nuevas en tests/test_store_columna_descarte_acotada.py
+          #   (ver el piso de tests-puros).
+          #   Verde tras -- 167 passed, 0 failed (166 anteriores + 1
+          #   nuevo). Medido en local (127.0.0.1:3308, base de sesión
+          #   jax_memory_test_auto<pid>), corrida completa de los 24
+          #   archivos + 2 node ID del job: 167 passed, 0 failed.
+          grep -qE "^167 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 167 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

@@ -984,6 +984,56 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_pipelines", "idx_pipelines_ocultos",
      "CREATE INDEX idx_pipelines_ocultos ON jacobs_pipelines "
      "(status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    # Task 1-bis (2026-09-22, Ruling 18): el listado principal de
+    # jax-platform (SQL_PIPELINES_DEL_USUARIO) ordena por created_at
+    # DESCENDENTE con LIMIT -- idx_pipelines_descartados/idx_pipelines_ocultos
+    # de arriba no le sirven (su orden es descartado_at, para las vistas de
+    # descarte, no para el listado principal). `visible` (columna VIRTUAL
+    # generada, ver init_tables()) va como PREFIJO antes de created_at para
+    # que el rango del índice ya venga filtrado a las filas visibles -- el
+    # motor no tiene que leer ni una fila descartada/oculta para saltarla:
+    # las deja afuera del propio rango. `user_id, tenant_id` primero porque
+    # son el filtro de igualdad de la consulta (mismo orden que
+    # idx_jacobs_pipelines_duenio); `visible` entre la igualdad y el ORDER
+    # BY, no al final, porque es también un filtro de igualdad (=1), y un
+    # índice ordena primero por sus columnas de igualdad y recién después
+    # por la de rango/orden.
+    #
+    # HECHO operacional para quien toque `jacobs_pipelines` después de esto
+    # (medido contra MariaDB 12.3.3, no documentación genérica): una vez que
+    # esta tabla tiene un ÍNDICE sobre una columna VIRTUAL, un `ADD COLUMN`
+    # posterior de OTRA columna, aunque pida ALGORITHM=INSTANT explícito,
+    # puede rechazarse con `1845 ALGORITHM=INSTANT is not supported` -- y su
+    # propia sugerencia, `ALGORITHM=INPLACE`, sigue sin alcanzar con
+    # `LOCK=NONE`: `1846 ... Reason: online rebuild with indexed virtual
+    # columns`, pide `LOCK=SHARED`. No es un límite de "demasiadas columnas
+    # instantáneas" (el mismo experimento con una columna común en vez de
+    # `visible` no falla): es específico de tener un índice sobre una
+    # columna generada. Se reprodujo y se resolvió en
+    # jacobs/_subpipeline_contrato_io_test.py::test_jacobs_pipelines_gana_parent_y_depth_aun_si_la_tabla_ya_existia
+    # (Task 1-bis, 2026-09-22) -- ver el comentario de ESE test para el
+    # detalle.
+    #
+    # CORREGIDO (fix round 1, Ruling 19b, 2026-09-22): acá decía "no afecta
+    # el arranque normal" sin matiz -- CIERTO para EL DEPLOY de Ruling 18
+    # (`visible` se agrega DESPUÉS de parent_pipeline_id/depth en el loop de
+    # columnas, así que arranca de cero o se pone al día sin que `visible`
+    # exista todavía cuando le toca a esas dos) pero FALSO para el PRÓXIMO
+    # deploy que agregue una columna nueva: una vez que ESTE deploy corrió
+    # en producción, `visible` YA está indexada ahí, y CUALQUIER columna
+    # que se agregue DESPUÉS de ella en el loop corre el mismo riesgo del
+    # 1845/1846 -- y CI no lo va a ver, porque el contenedor efímero de
+    # cada job arranca de una base VACÍA (todas las columnas se agregan en
+    # una tabla sin índice todavía). La barrera contra esto es
+    # `tests/test_store_columna_descarte_acotada.py::test_visible_es_la_ultima_columna_del_loop`
+    # (MAJOR-1, Ruling 19b): mientras `visible` sea la ÚLTIMA columna del
+    # loop, ninguna otra columna nueva queda expuesta -- el día que haga
+    # falta agregar una columna DESPUÉS de `visible`, ese test avisa y hay
+    # que diseñarla con su propia evidencia contra una base que YA tiene
+    # `visible` indexada, no asumir que "pasó CI" alcanza.
+    ("jacobs_pipelines", "idx_pipelines_visibles",
+     "CREATE INDEX idx_pipelines_visibles ON jacobs_pipelines "
+     "(user_id, tenant_id, visible, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
@@ -996,21 +1046,21 @@ _INDICES: list[tuple[str, str, str, bool]] = [
 # lecturas y escrituras NUEVAS sobre la tabla se encolan detras de el. Cada
 # DDL acotado paga SU PROPIA espera de hasta 30 s, y todos corren uno detras
 # de otro en la MISMA sesion de `init_tables()` -- el peor caso es la SUMA,
-# no 30 s fijos. Hoy hay CUATRO indices acotados en `_INDICES`
-# (idx_jacobs_pipelines_duenio, idx_pipelines_descartados e
-# idx_pipelines_ocultos sobre jacobs_pipelines; idx_events_pipeline_tipo
-# sobre jacobs_events): 4 x 30 s = 120 s de Jacobs detenido como peor caso si
-# los cuatro estan bloqueados a la vez, no un dia. Si vence, el indice no se
-# crea (ERROR en el log) y el arranque SIGUE -- la red de seguridad es el
-# test de EXPLAIN de la plataforma en CI, que falla si la consulta que lo
-# necesita no lo usa.
+# no 30 s fijos. Hoy hay CINCO indices acotados en `_INDICES`
+# (idx_jacobs_pipelines_duenio, idx_pipelines_descartados,
+# idx_pipelines_ocultos e idx_pipelines_visibles sobre jacobs_pipelines;
+# idx_events_pipeline_tipo sobre jacobs_events): 5 x 30 s = 150 s de Jacobs
+# detenido como peor caso si los cinco estan bloqueados a la vez, no un dia.
+# Si vence, el indice no se crea (ERROR en el log) y el arranque SIGUE -- la
+# red de seguridad es el test de EXPLAIN de la plataforma en CI, que falla
+# si la consulta que lo necesita no lo usa.
 #
-# Las columnas CONTRATO (status_previo/descartado_por/descartado_at, ver
-# `_agregar_columna_acotada` mas abajo) usan el MISMO limite pero NO son
+# Las columnas CONTRATO (status_previo/descartado_por/descartado_at/visible,
+# ver `_agregar_columna_acotada` mas abajo) usan el MISMO limite pero NO son
 # "solo rendimiento": fallan CERRADO. La primera que vence el MDL aborta
 # `init_tables()` entero con una excepcion -- y como las columnas se agregan
 # ANTES que los indices en esta funcion, ese aborto ni siquiera llega a
-# intentar los 4 indices de arriba (no se suman a los 120 s: el arranque ya
+# intentar los 5 indices de arriba (no se suman a los 150 s: el arranque ya
 # se cayo antes).
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
@@ -1050,6 +1100,110 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
         await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
 
 
+#: Texto EXACTO de la expresión de `visible` -- ver la tupla ("visible", ...)
+#: del loop de columnas de `init_tables()`, que repite este mismo texto a
+#: mano dentro del DDL (no se arma con un f-string: el AST de ese loop se
+#: prueba con `ast.literal_eval`, que no acepta interpolación --
+#: tests/test_store_columna_descarte_acotada.py::test_la_ddl_de_visible_usa_la_expresion_esperada
+#: es la baranda mecánica que evita que las dos copias se desincronicen).
+#: Fuente única para `_verificar_expresion_visible` -- el chequeo de drift
+#: de MINOR-A (fix round 2, revisión del coordinador, 2026-09-22).
+_EXPRESION_VISIBLE = "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL"
+
+
+def _normalizar_expresion_generada(expr: str) -> str:
+    """Una expresión de columna GENERATED (la del DDL fuente, o la que
+    devuelve `information_schema.COLUMNS.GENERATION_EXPRESSION`) a una
+    forma comparable. Medido contra MariaDB 12.3.3 real (no documentación
+    genérica): al guardar una columna GENERATED, el servidor REESCRIBE la
+    expresión -- le pone backticks a cada identificador (`` `status` ``,
+    `` `owner_ack_at` ``) y pasa las palabras clave a minúscula (`not in`,
+    `and`, `is not null`), sin tocar los LITERALES de string ('discarded',
+    'hidden', que ya estaban en minúscula). `.split()` colapsa cualquier
+    corrida de espacios/saltos de línea a uno solo y recorta los bordes --
+    más simple que una regexp para el mismo efecto, sin importar `re`."""
+    return " ".join(expr.replace("`", "").split()).lower()
+
+
+async def _verificar_expresion_visible(cur) -> None:
+    """MINOR-A (fix round 2, revisión del coordinador, 2026-09-22): el
+    chequeo de existencia del loop de columnas (`if exists: continue`) NO
+    alcanza para una columna GENERATED -- confirma que la columna ESTÁ,
+    pero no que tenga la expresión de ESTA versión del código. Una base
+    que ya tenía `visible` con una expresión VIEJA (p.ej. la del commit
+    `02fbaed`, "status NOT IN (...)" SIN "AND owner_ack_at IS NOT NULL")
+    pasaría ese chequeo en silencio y serviría con la semántica equivocada
+    -- Ada, o algún llamador, verían `visible=1` en filas sin ack, que es
+    EXACTAMENTE el costo sin techo que Ruling 19a cerró.
+
+    FALLA CERRADO, sin DDL automático: `visible` está INDEXADA
+    (idx_pipelines_visibles) -- modificarla con un `ALTER` cae en la MISMA
+    trampa del 1845/1846 que Ruling 19b documentó para agregar OTRA
+    columna después de ella (ver el comentario de `idx_pipelines_visibles`
+    más abajo). Arreglarlo a mano (DROP INDEX + DROP COLUMN + recrear los
+    dos, con el `lock_wait_timeout` acotado de siempre) es una decisión
+    operativa, no algo que `init_tables()` pueda resolver solo."""
+    await cur.execute(
+        "SELECT GENERATION_EXPRESSION FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' "
+        "AND COLUMN_NAME='visible'"
+    )
+    fila = await cur.fetchone()
+    if not fila:
+        # Sin fila: la columna NO existe todavía -- no es este chequeo el
+        # que decide eso (lo maneja el ALTER que la crea, más arriba en el
+        # loop de columnas); es defensivo, el llamador ya confirmó "existe".
+        return
+    if fila[0] is None:
+        # Fix round 3 (revisión del coordinador, 2026-09-22): `fila` existe
+        # pero `GENERATION_EXPRESSION` es NULL -- eso significa que
+        # 'visible' SÍ existe como columna, pero NO es GENERATED (p.ej.
+        # alguien la creó a mano como `visible TINYINT(1) DEFAULT 1`, una
+        # columna común). El código viejo trataba esto igual que "no hay
+        # fila" y devolvía en silencio -- fail-OPEN: con una columna común
+        # en vez de generada, CADA fila lee `visible=1` sin importar su
+        # `status`/`owner_ack_at`, el costo sin techo exacto que Ruling 18
+        # quería evitar (ninguna fila queda nunca afuera del rango del
+        # índice). FALLA CERRADO acá también -- mismo criterio que la
+        # rama de abajo (expresión distinta): no hay DDL automático,
+        # 'visible' está INDEXADA y un ALTER sobre una columna VIRTUAL
+        # indexada cae en la misma trampa del 1845/1846 de Ruling 19b.
+        raise RuntimeError(
+            "jacobs_pipelines.visible existe pero no es una columna "
+            "generada (GENERATION_EXPRESSION es NULL) -- init_tables() se "
+            "aborta (fail-closed, contrato de Ruling 18/19a). Con una "
+            "columna COMÚN en vez de GENERATED, todas las filas leerían "
+            "visible=1 sin importar su status/owner_ack_at -- exactamente "
+            "el costo sin techo que Ruling 18 quería evitar. NO se corrige "
+            "solo: 'visible' está INDEXADA (idx_pipelines_visibles) y un "
+            "ALTER sobre una columna VIRTUAL indexada cae en la misma "
+            "trampa del 1845/1846 de Ruling 19b -- hay que decidir a mano "
+            "(DROP INDEX idx_pipelines_visibles, DROP COLUMN visible, y "
+            "recrear los dos con el DDL de esta versión) antes de que este "
+            "proceso pueda arrancar contra esta base."
+        )
+    encontrada = _normalizar_expresion_generada(fila[0])
+    esperada = _normalizar_expresion_generada(_EXPRESION_VISIBLE)
+    if encontrada != esperada:
+        raise RuntimeError(
+            "jacobs_pipelines.visible existe pero con una expresión DISTINTA "
+            "de la esperada por esta versión de jax -- init_tables() se "
+            "aborta (fail-closed, contrato de Ruling 18/19a: jax-platform y "
+            "cualquier otro lector dependen de que 'visible' signifique lo "
+            "mismo en todos lados). "
+            f"Encontrada: {fila[0]!r}. Esperada: {_EXPRESION_VISIBLE!r}. "
+            "Esto pasa si la columna se creó con una versión anterior del "
+            "código (p.ej. sin 'AND owner_ack_at IS NOT NULL', commit "
+            "02fbaed) y esta base nunca se migró. NO se corrige solo: "
+            "'visible' está INDEXADA (idx_pipelines_visibles) y un ALTER "
+            "sobre una columna VIRTUAL indexada cae en la misma trampa del "
+            "1845/1846 de Ruling 19b -- hay que decidir a mano (DROP INDEX "
+            "idx_pipelines_visibles, DROP COLUMN visible, y recrear los dos "
+            "con el DDL de esta versión) antes de que este proceso pueda "
+            "arrancar contra esta base."
+        )
+
+
 async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> None:
     """Como `_crear_indice_acotado`, pero para una COLUMNA CONTRATO: Task 2
     (spec descartar-pipelines §3) escribe status_previo/descartado_por/
@@ -1060,6 +1214,14 @@ async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> N
     FALLA CERRADO (fix round 1 de Task 1, revisión 2026-09-22): si la espera
     del metadata lock vence (1205), levanta la excepción y `init_tables()`
     se aborta -- no sigue como si la columna estuviera.
+
+    Task 1-bis (2026-09-22, Ruling 18) suma `visible` a este mismo camino
+    por una razón distinta a las tres de arriba: nadie la ESCRIBE (es
+    GENERATED, la calcula MariaDB de `status` en cada fila), pero
+    jax-platform va a LEERLA para filtrar su listado principal -- si la
+    columna no está, ese filtro rompe igual que un `UPDATE` contra una
+    columna que no existe. El contrato no es "quién escribe", es "algo de
+    afuera depende de que exista"; por eso fail-closed aplica igual.
 
     Antes de levantar la excepción vuelve a mirar `information_schema`: LAS
     MANOS, jax-platform y el Ejecutor llaman a `init_tables()` cada uno al
@@ -1089,6 +1251,16 @@ async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> N
                 "metadata lock mientras este esperaba %d s. No es un fallo.",
                 tabla, columna, _LOCK_WAIT_DDL_SEGUNDOS,
             )
+            # Fix round 3 (revisión del coordinador, 2026-09-22): "otro
+            # proceso la creó primero" es correcto SÓLO si creó la MISMA
+            # columna -- para 'visible' (GENERATED) eso incluye que haya
+            # usado la expresión de ESTA versión del código, no cualquier
+            # cosa. Mismo chequeo de drift que la rama feliz (exists=True
+            # sin pasar por acá): sin esto, la carrera del metadata lock
+            # sería un segundo camino que se salta el fail-closed de
+            # Ruling 18/19a/fix-round-3.
+            if columna == "visible":
+                await _verificar_expresion_visible(cur)
             return
         raise RuntimeError(
             f"init_tables: no se pudo agregar {tabla}.{columna} -- otra "
@@ -1183,6 +1355,83 @@ async def init_tables() -> None:
                     "descartado_por VARCHAR(50) NULL, ALGORITHM=INSTANT", True),
                 ("descartado_at", "ALTER TABLE jacobs_pipelines ADD COLUMN "
                     "descartado_at DOUBLE NULL, ALGORITHM=INSTANT", True),
+                # Task 1-bis (2026-09-22, Ruling 18 del ledger de
+                # descartar-pipelines): el listado principal de jax-platform
+                # (SQL_PIPELINES_DEL_USUARIO) filtra
+                # "status NOT IN ('discarded','hidden')" -- sin un índice que
+                # cubra ESE filtro, el plan tiene que recorrer el histórico
+                # completo de descartados/ocultos del dueño antes de poder
+                # cortar en el LIMIT (medido: FORCE INDEX
+                # (idx_jacobs_pipelines_duenio) da un range scan de todo el
+                # tenant cuando el LIMIT nunca se satisface con las filas
+                # vivas -- 4,2-4,4 ms con 5000 descartados y 3 vivos, ver
+                # docs/carga-sql-pipelines-del-usuario-indice-2026-09-22.md
+                # en jax-platform). `visible` materializa ese filtro en una
+                # columna propia para que idx_pipelines_visibles (abajo) la
+                # use como PREFIJO del índice, antes de created_at: el motor
+                # descarta las filas no-visibles POR EL ÍNDICE, sin tocar la
+                # tabla, y corta apenas junta el LIMIT de vivas -- el costo
+                # deja de depender de cuántas descartadas tenga el dueño.
+                #
+                # VIRTUAL, no STORED -- evidencia contra ESTA MariaDB
+                # (12.3.3, jax_memory_test, medida antes de escribir esta
+                # línea, no de la documentación genérica):
+                #   - `ALTER TABLE jacobs_pipelines ADD COLUMN x TINYINT(1)
+                #      GENERATED ALWAYS AS (...) VIRTUAL, ALGORITHM=INSTANT`
+                #      -- OK, sin error (metadata-only, no copia la tabla:
+                #      una VIRTUAL no ocupa espacio en la fila, así que
+                #      agregarla no tiene nada que reescribir).
+                #   - La MISMA expresión con STORED (que SÍ hay que
+                #     calcular y guardar por fila) y ALGORITHM=INSTANT:
+                #     `OperationalError: (1845, 'ALGORITHM=INSTANT is not
+                #     supported for this operation. Try ALGORITHM=COPY')`.
+                #     Con ALGORITHM=INPLACE en vez de INSTANT: el MISMO
+                #     1845, pidiendo COPY igual -- STORED no tiene un
+                #     camino sin copiar la tabla completa en esta versión.
+                #   - Una columna VIRTUAL SÍ admite un índice secundario
+                #     normal (`CREATE INDEX ... (columna_virtual)` -- OK,
+                #     sin error) e incluso admite ALGORITHM=INPLACE,
+                #     LOCK=NONE en el propio ADD COLUMN -- confirmado, no
+                #     asumido, porque una VIRTUAL sin índice sería inútil
+                #     acá: el índice de abajo la necesita como columna real
+                #     para poder ordenar por ella.
+                # Con `jacobs_pipelines` creciendo sin techo (el histórico
+                # de descartados "van a ser muchos en el tiempo", spec
+                # §4), STORED habría significado un ALGORITHM=COPY sobre
+                # toda la tabla en producción -- exactamente lo que
+                # idx_jacobs_pipelines_duenio (T6-6) y el resto de esta
+                # lista evitan a propósito. CONTRATO, no aceleración (como
+                # las tres columnas de arriba): jax-platform va a depender
+                # de que esta columna exista y tenga el valor correcto, así
+                # que su ALTER va acotado Y fail-closed
+                # (`_agregar_columna_acotada`), no fail-soft como un
+                # índice.
+                #
+                # Ruling 19a (fix round 1, revisión del coordinador,
+                # 2026-09-22): la expresión suma `AND owner_ack_at IS NOT
+                # NULL` -- SQL_PIPELINES_DEL_USUARIO YA filtra por eso
+                # aparte (owner_ack_at IS NOT NULL es "el dueño reconoció
+                # este pipeline en la Mesa", T6-5a), pero sin sumarlo ACÁ
+                # el índice de abajo no lo sabía: un pipeline hijo de Ada
+                # (jacobs/subpipelines.py) que todavía no tiene ack cuenta
+                # como `visible=1` iguial que uno normal, así que el rango
+                # del índice tiene que incluir esas filas y filtrarlas
+                # DESPUÉS con `Using where` -- si un dueño acumula muchos
+                # hijos sin ack (crecen sin el mismo techo que los
+                # descartados, spec §4), el costo vuelve a depender de
+                # cuántos haya, exactamente lo que Ruling 18 quería evitar.
+                # Con el AND acá, esas filas quedan afuera del rango del
+                # índice directamente, igual que las descartadas/ocultas.
+                #
+                # ADVERTENCIA para la PRÓXIMA columna nueva de esta tabla
+                # (MAJOR-1, Ruling 19b): `visible` tiene que seguir siendo
+                # la ÚLTIMA tupla de este loop -- ver
+                # tests/test_store_columna_descarte_acotada.py::test_visible_es_la_ultima_columna_del_loop.
+                ("visible", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "visible TINYINT(1) GENERATED ALWAYS AS "
+                    "(status NOT IN ('discarded','hidden') "
+                    "AND owner_ack_at IS NOT NULL) VIRTUAL, "
+                    "ALGORITHM=INSTANT", True),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -1191,6 +1440,13 @@ async def init_tables() -> None:
                 )
                 (exists,) = await cur.fetchone()
                 if exists:
+                    # MINOR-A (fix round 2, Ruling del coordinador,
+                    # 2026-09-22): `visible` es GENERATED -- "existe" no
+                    # dice "tiene la expresión de esta versión". Ninguna
+                    # otra columna de esta lista necesita este chequeo (son
+                    # todas columnas comunes: existir alcanza).
+                    if col == "visible":
+                        await _verificar_expresion_visible(cur)
                     continue
                 if acotado:
                     await _agregar_columna_acotada(cur, "jacobs_pipelines", col, ddl)

@@ -326,6 +326,44 @@ def _parametros_de_conexion() -> dict:
     }
 
 
+async def _columnas_copiables(cur, esquema: str, tabla: str) -> list[str]:
+    """Columnas de `esquema.tabla` que se pueden nombrar en un INSERT --
+    todas MENOS las GENERATED (`EXTRA` trae 'STORED GENERATED' o 'VIRTUAL
+    GENERATED'). MariaDB rechaza un valor explícito para una columna
+    generada con el error 1906 (`The value specified for generated column
+    ... is not allowed`), y `SELECT *`/`INSERT INTO t SELECT * FROM t2` la
+    incluye igual que cualquier otra -- MINOR-3 (fix round 1 de Task 1-bis,
+    2026-09-22, Ruling 19e): `jacobs_pipelines.visible` (GENERATED VIRTUAL,
+    Ruling 18) es la primera columna generada que pasa por acá; sin este
+    filtro, clonar una base de sesión desde una plantilla que tuviera
+    aunque sea UNA fila en `jacobs_pipelines` rompía `asegurar_base_de_test()`
+    con un 1906 -- no es hipotético, es la MISMA plantilla compartida que
+    usan todas las sesiones. Orden por ORDINAL_POSITION: no importa para la
+    corrección (los nombres van explícitos en las dos listas del INSERT),
+    pero mantiene el SQL generado legible si algo lo imprime en un log."""
+    await cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=%s AND TABLE_NAME=%s AND EXTRA NOT LIKE '%%GENERATED%%' "
+        "ORDER BY ORDINAL_POSITION",
+        (esquema, tabla),
+    )
+    return [fila[0] for fila in await cur.fetchall()]
+
+
+async def _copiar_filas(cur, esquema_origen: str, esquema_destino: str, tabla: str) -> None:
+    """`INSERT INTO destino.tabla (cols) SELECT cols FROM origen.tabla` con
+    una lista EXPLÍCITA de columnas no generadas (`_columnas_copiables`) --
+    nunca `SELECT *`. Columna propia y testeable aparte de `_clonar_esquema`
+    (que decide CUÁNDO copiar, por el corte de `FILAS_MAXIMAS_A_COPIAR`;
+    esta función sólo sabe copiar)."""
+    columnas = await _columnas_copiables(cur, esquema_origen, tabla)
+    lista = ", ".join(f"`{c}`" for c in columnas)
+    await cur.execute(
+        f"INSERT INTO `{esquema_destino}`.`{tabla}` ({lista}) "
+        f"SELECT {lista} FROM `{esquema_origen}`.`{tabla}`"
+    )
+
+
 async def _clonar_esquema(nombre: str) -> int:
     """Crea `nombre` y le copia el ESQUEMA (no los datos) de la plantilla.
     Devuelve cuántas tablas copió. Idempotente: si la base ya existe, no
@@ -377,9 +415,7 @@ async def _clonar_esquema(nombre: str) -> int:
                 await cur.execute(f"SELECT COUNT(*) FROM `{BASE_PLANTILLA}`.`{tabla}`")
                 filas = (await cur.fetchone())[0]
                 if filas and filas <= FILAS_MAXIMAS_A_COPIAR:
-                    await cur.execute(
-                        f"INSERT INTO `{nombre}`.`{tabla}` "
-                        f"SELECT * FROM `{BASE_PLANTILLA}`.`{tabla}`")
+                    await _copiar_filas(cur, BASE_PLANTILLA, nombre, tabla)
             # Las VISTAS, después de las tablas que miran. `motor_resolved` es
             # una: sin ella `MotorCatalog.from_db()` explota con un 1146 y
             # medio catálogo de LAS MANOS queda sin tests (medido el

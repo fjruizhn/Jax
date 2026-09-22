@@ -101,14 +101,38 @@ class EsquemaTest(_ConBase):
         # ALGORITHM=INPLACE TAMBIEN en la 27 (no limpia esa historia), COPY llega
         # a 60 sin error. En produccion el ADD corre una sola vez; el que se
         # repetia era este test.
+        #
+        # Task 1-bis (2026-09-22, Ruling 18) suma `visible` -- columna GENERATED
+        # VIRTUAL, INDEXADA por idx_pipelines_visibles -- al DROP conjunto, y no
+        # por prolijidad: medido contra MariaDB 12.3.3 real (jax_memory_test),
+        # dropear SOLO parent_pipeline_id/depth (dejando `visible` YA indexada en
+        # la tabla) hace que el ADD ... ALGORITHM=INSTANT de init_tables() para
+        # esas dos columnas falle con `1845 ALGORITHM=INSTANT is not supported`,
+        # y su sugerencia (`ALGORITHM=INPLACE`) tampoco alcanza sola:
+        # `1846 LOCK=NONE is not supported. Reason: online rebuild with indexed
+        # virtual columns` -- una vez que la tabla tiene UN índice sobre una
+        # columna virtual, MariaDB deja de poder tratar cualquier ADD COLUMN
+        # posterior sobre esa tabla como puramente metadata-only; necesita poder
+        # recalcular esa columna virtual, y eso exige un rebuild real (no
+        # instantáneo) con al menos LOCK=SHARED. Simular una tabla más vieja
+        # QUE TAMBIÉN carece de `visible` (dropeando su índice primero, sin el
+        # cual MariaDB no deja soltar la columna que indexa) reproduce la
+        # secuencia REAL de una instalación atrasada -- ninguna de las tres es
+        # anterior a las otras en una base que arranca de cero -- y evita la
+        # combinación que rompe: confirmado en rojo con SOLO `visible` presente
+        # (1845/1846) y en verde dropeando las tres antes del `init_tables()`.
         await ada.ejecutar(
-            "ALTER TABLE jacobs_pipelines DROP COLUMN IF EXISTS parent_pipeline_id, "
+            "ALTER TABLE jacobs_pipelines "
+            "DROP INDEX IF EXISTS idx_pipelines_visibles, "
+            "DROP COLUMN IF EXISTS visible, "
+            "DROP COLUMN IF EXISTS parent_pipeline_id, "
             "DROP COLUMN IF EXISTS depth, ALGORITHM=COPY"
         )
         await store.init_tables()
         columnas = await self.columnas("jacobs_pipelines")
         self.assertIn("parent_pipeline_id", columnas)
         self.assertIn("depth", columnas)
+        self.assertIn("visible", columnas)
 
     async def test_init_tables_es_idempotente_con_el_contrato(self):
         await store.init_tables()
