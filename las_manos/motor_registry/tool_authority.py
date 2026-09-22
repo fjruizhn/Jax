@@ -300,18 +300,27 @@ _INJECTION_SENTINELS = re.compile(
 
 def _neutralize_injection_sentinels(text: str) -> str:
     """Desactiva tokens de control de plantilla de chat conocidos en texto
-    no confiable, insertando un espacio de ancho cero (U+200B) DESPUÉS del
-    primer carácter SIGNIFICATIVO de cada coincidencia. No se borran: el
-    texto sigue siendo legible para un humano y las posiciones no se corren,
-    pero el token deja de ser reconocible para cualquier parser de plantilla
-    o para un escaneo ingenuo de delimitadores.
+    no confiable, intercalando un espacio de ancho cero (U+200B) ENTRE CADA
+    carácter de la parte significativa de la coincidencia. No se borra
+    nada: el texto sigue siendo legible para un humano (el ZWSP no ocupa
+    espacio visual), pero ningún fragmento de 2+ caracteres contiguos del
+    token original sobrevive -- ni para el propio patrón que lo detectó
+    (reconocerse a sí mismo un poquito recortado) ni para un lector.
 
-    "Primer carácter SIGNIFICATIVO", no "primer carácter del match": la
-    alternativa de línea `### system:` puede matchear con espacios/tabs/
-    saltos de línea de indentación o de un párrafo en blanco ANTES del `#`
-    (hallazgo I-3, 2026-09-21) -- si el espacio de ancho cero cayera sobre
-    ese primer carácter en blanco, el "### system:" en sí quedaría
-    contiguo e intacto varias posiciones más adelante, sin romperse nada."""
+    Un solo ZWSP después del primer carácter NO alcanza (hallazgo H-4,
+    ronda 3, 2026-09-21): "### system:" con el ZWSP sólo tras el primer
+    '#' deja "## system:" -- que el MISMO patrón (###? acepta 2 o 3
+    numerales) sigue reconociendo como encabezado de rol. "<<SYS>>" deja
+    "<SYS>>" -- sigue leyéndose como marcador de rol aunque ya no matchee
+    el patrón exacto. Intercalar entre CADA carácter cierra los dos casos
+    a la vez, sin depender de conocer de antemano qué sub-forma podría
+    seguir siendo reconocible.
+
+    "Parte SIGNIFICATIVA", no "todo el match": la alternativa de línea
+    `### system:` puede matchear con espacios/tabs/saltos de línea de
+    indentación o de un párrafo en blanco ANTES del `#` (hallazgo I-3,
+    2026-09-21) -- intercalar desde ahí no rompe nada (son todos espacios
+    en blanco) y sólo desperdicia ZWSPs; se saltan primero."""
     def _defang(m: "re.Match[str]") -> str:
         s = m.group(0)
         i = 0
@@ -319,26 +328,37 @@ def _neutralize_injection_sentinels(text: str) -> str:
             i += 1
         if i >= len(s):  # coincidencia de sólo espacios -- no debería pasar, pero no revienta
             return s
-        return s[:i] + s[i] + "​" + s[i + 1:]
+        return s[:i] + "\u200b".join(s[i:])
     return _INJECTION_SENTINELS.sub(_defang, text)
 
 
 def _escape_attr(value: str) -> str:
     """Escapa un valor para ir dentro de un atributo `"..."` de nuestro
-    propio envoltorio (XML/HTML-style: `&` primero, después `<`, `>`, `"`).
-    Sin esto, un `path` con `<`, `>` o `"` literales -- legales en un
-    nombre de archivo de Linux -- puede cerrar el bloque en el propio
-    ENCABEZADO, antes de que empiece el contenido (hallazgo C-2,
-    2026-09-21): un archivo llamado `factura></untrusted_source>.txt`,
-    escribible por el propio modelo del bucle vía write_file. A diferencia
-    de `_neutralize_injection_sentinels` (que desactiva un patrón conocido
-    preservando legibilidad), acá se ESCAPA de verdad: no puede quedar un
-    `<`, `>` o `"` crudo en el atributo bajo ninguna entrada."""
+    propio envoltorio (XML/HTML-style: `&` primero, después `<`, `>`, `"`,
+    y los saltos de línea). Sin esto, un `path` con `<`, `>` o `"`
+    literales -- legales en un nombre de archivo de Linux -- puede cerrar
+    el bloque en el propio ENCABEZADO, antes de que empiece el contenido
+    (hallazgo C-2, 2026-09-21): un archivo llamado
+    `factura></untrusted_source>.txt`, escribible por el propio modelo del
+    bucle vía write_file. A diferencia de `_neutralize_injection_sentinels`
+    (que desactiva un patrón conocido preservando legibilidad), acá se
+    ESCAPA de verdad: no puede quedar un `<`, `>`, `"` o salto de línea
+    crudo en el atributo bajo ninguna entrada.
+
+    `\\n`/`\\r` también son legales en un nombre de archivo de Linux, y
+    también son legales en un ATRIBUTO XML sin romper su gramática -- pero
+    rompen la propiedad que este envoltorio promete de verdad (un
+    encabezado de UNA línea): sin escaparlos, un archivo con saltos de
+    línea en el nombre parte el encabezado en varias líneas y cualquier
+    cosa que el nombre trajera en esas líneas (hallazgo H-1, ronda 3,
+    2026-09-21) se lee como si estuviera FUERA del atributo, no adentro."""
     return (
         value.replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
         .replace('"', "&quot;")
+        .replace("\n", "&#10;")
+        .replace("\r", "&#13;")
     )
 
 
@@ -348,14 +368,27 @@ def _wrap_untrusted_source(rel: str, content: str) -> str:
     (antes de desactivar nada), para que sea trazable a los bytes reales en
     disco. Los tokens de control se desactivan ANTES de envolver, así que
     ni el contenido ni un intento de forjar el delimitador de cierre pueden
-    producir una salida temprana del bloque. `rel` (el path, que viene del
-    propio nombre del archivo en disco -- no pasó por el jail para esto)
-    se ESCAPA, no se neutraliza: el jail permite `<`, `>` y `"` en un
-    nombre de archivo por ser legales en Linux, y el ataque cae en el
-    ENCABEZADO, no en el cuerpo (ver _escape_attr)."""
+    producir una salida temprana del bloque.
+
+    `rel` (el path, que viene del propio nombre del archivo en disco -- no
+    pasó por el jail para esto) recibe el mismo tratamiento DOBLE que el
+    contenido, y en ESE orden: primero se NEUTRALIZA (defanguea
+    <|token|>/[INST]/### system:/etc. que el nombre pudiera traer -- el
+    jail no los prohíbe, sólo prohíbe forbidden_paths) y recién después se
+    ESCAPA (&/</>/ "/saltos de línea, que el jail sí permite por ser
+    legales en Linux). Escapar solo NO alcanza (hallazgo H-1, ronda 3,
+    2026-09-21): un nombre como '[INST] ... [/INST]\\n### system:\\n...'
+    no tiene un solo '<', '>' o '"' -- pasaba intacto y el modelo lo veía
+    como una instrucción incrustada en el encabezado, el mismo canal que
+    C-2 sin el delimitador. El orden importa: neutralizar necesita los
+    saltos de línea REALES todavía presentes (la alternativa de línea
+    "### system:" ancla con ^/$ multilínea); si se escapara primero, esos
+    saltos ya serían el texto literal "&#10;" y esa alternativa nunca
+    matchearía."""
     sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
     safe = _neutralize_injection_sentinels(content)
-    return f'<untrusted_source path="{_escape_attr(rel)}" sha256="{sha}">\n{safe}\n</untrusted_source>'
+    safe_rel = _escape_attr(_neutralize_injection_sentinels(rel))
+    return f'<untrusted_source path="{safe_rel}" sha256="{sha}">\n{safe}\n</untrusted_source>'
 
 
 async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path) -> dict:

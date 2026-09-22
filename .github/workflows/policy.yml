@@ -3190,8 +3190,68 @@ jobs:
           #   limpios (`git archive`, sin bind-mount): master 2338 passed ->
           #   rama 2355 passed. "17 skipped" no cambia: ninguno de los 7
           #   toca DB. Si el runner da otro número, manda el runner.
-          grep -qE "^2375 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2375 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # CORRECCIÓN (misma rama, ronda 3, re-revisión de
+          #   sobre-hallazgos.md, H-2): la entrada de arriba (2358->2368)
+          #   citó, para explicar M-6, la línea EXACTA que
+          #   tests/test_env_se_lee_con_sudo.py::test_ningun_archivo_sourcea_el_env_sin_sudo
+          #   busca -- y ese informe quedó commiteado en el árbol, así que
+          #   el propio control la encontraba EN EL INFORME y fallaba: medido
+          #   con `git archive` de ESE commit, master 4 failed, la rama 5
+          #   (el quinto era ese). La cita se parafraseó (sin la forma
+          #   literal shell) en .superpowers/sdd/sobre-untrusted-report.md;
+          #   confirmado corriendo tests/test_env_se_lee_con_sudo.py solo
+          #   contra el árbol de ESTE commit: 3 passed. Eso también hacía
+          #   FALSA la afirmación de "conjunto idéntico de fallos" de esa
+          #   entrada: medía un commit que no era éste. Corregido también en
+          #   el informe.
+          # 2375 -> 2381 (feat/sobre-fuente-no-confiable, ronda 3,
+          #   sobre-hallazgos.md): +6, puros. H-1 (re-abre C-2): el `path`
+          #   se escapaba (&/</>/") pero nunca se NEUTRALIZABA -- un nombre
+          #   de archivo con [INST]/### system: y saltos de línea reales,
+          #   SIN un solo '<','>' o '"', pasaba intacto al encabezado (carga
+          #   exacta del auditor, sin un caracter que _escape_attr tocara).
+          #   Arreglo: rel pasa por _neutralize_injection_sentinels() ANTES
+          #   de _escape_attr() (el orden importa: neutralizar necesita los
+          #   saltos de línea REALES, la alternativa de línea "### system:"
+          #   ancla con ^/$ multilínea), y _escape_attr() ahora también
+          #   escapa \n/\r (&#10;/&#13;) -- un path con saltos de línea ya
+          #   no parte el encabezado en varias líneas. +1 test con la carga
+          #   exacta del auditor. H-4: un solo ZWSP tras el primer carácter
+          #   no bastaba -- "### system:" con el ZWSP sólo en el primer '#'
+          #   deja "## system:", que el MISMO patrón (###? acepta 2 o 3)
+          #   sigue reconociendo; "<<SYS>>" deja "<SYS>>", que un lector
+          #   sigue leyendo como marcador de rol. Arreglo: el ZWSP se
+          #   intercala ENTRE CADA carácter de la parte significativa, no
+          #   sólo tras el primero -- ningún fragmento de 2+ caracteres
+          #   contiguos sobrevive. +1 test dedicado, y se corrigieron 2
+          #   tests viejos que afirmaban la forma vieja (ZWSP sólo tras el
+          #   primer carácter) -- consecuencia directa del cambio, no una
+          #   regresión (uno de los dos, además, tenía un error propio: usaba
+          #   <|/system|> como si fuera una forma real de graphify, y esa
+          #   forma con '/' nunca estuvo cubierta por el charset del token
+          #   -- corregido con dos tokens reales). H-3 (5 mutaciones que
+          #   sobrevivían, todas de TEST, sin cambio de producción): N1/N2 --
+          #   el test de C-2 se llamaba "...con_angulos_y_comillas" pero no
+          #   usaba NINGUNA comilla; sacar el escape de '&' o de '"' en
+          #   _escape_attr quedaba en verde. +1 test que ejercita las dos
+          #   (renombrado también el test viejo de C-2, que sólo prueba
+          #   ángulos, para no seguir prometiendo comillas). N6: ###? -> ###
+          #   (exigir 3 numerales) quedaba en verde -- +1 test con "##
+          #   system:" (dos). N7: sacar la alternativa "instruction" quedaba
+          #   en verde -- +1 test con "### instruction:" sola. N9: sacar el
+          #   \b después de "untrusted_source" quedaba en verde -- +1 test
+          #   que confirma que un tag CON EL MISMO PREFIJO pero sin límite
+          #   de palabra (<untrusted_sourceXYZ>, '_' es \w) NO se trata como
+          #   el nuestro. Los 6 vistos ROJOS contra el código de antes de
+          #   este commit (mutando la producción, un fix a la vez, con el
+          #   resto del árbol ya en la ronda 2). Delta medido con `git
+          #   archive` de ESTE MISMO commit (sin bind-mount, sin working
+          #   copy): master 2338 passed (idéntico a la medición de la
+          #   entrada de arriba, sin cambios en master) -> rama 2361 passed,
+          #   delta exacto +23 -- igual a 47+26=73 tests en los dos archivos
+          #   contra los 26+24=50 de master. "17 skipped" no cambia.
+          grep -qE "^2381 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2381 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
