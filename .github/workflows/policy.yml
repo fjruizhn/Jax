@@ -1288,7 +1288,12 @@ jobs:
             echo "(sysctl ausente en este kernel -- no aplica)"
           bwrap --version
           sudo install -d -o root -g root -m 0755 /etc/claude-code
-          sudo tee /usr/local/bin/exch >/dev/null <<'EXCH_CI_SHIM'
+          # /usr/bin, NO /usr/local/bin: test_ejecutor_reemplazar_directorio_atomico.py
+          # corre el script con env={"PATH": "<bin-de-sudo-falso>:/usr/bin:/bin"} --
+          # hermético a propósito, sin el PATH ambiente del runner. Es además la ruta
+          # REAL donde instala util-linux-extra (`dpkg -c` del .deb real: ./usr/bin/…),
+          # así que coincide con producción, no es un lugar inventado para CI.
+          sudo tee /usr/bin/exch >/dev/null <<'EXCH_CI_SHIM'
           #!/usr/bin/env python3
           """exch MÍNIMO, sólo para CI (Ubuntu 24.04, sin util-linux >= 2.40): misma
           interfaz de dos argumentos que el exch real de util-linux -- intercambia dos
@@ -1321,7 +1326,7 @@ jobs:
           if __name__ == "__main__":
               sys.exit(main())
           EXCH_CI_SHIM
-          sudo chmod 0755 /usr/local/bin/exch
+          sudo chmod 0755 /usr/bin/exch
           command -v exch || { echo "exch shim no quedó instalado -- revisar el heredoc de arriba"; exit 1; }
           # Prueba real, no sólo "está en el PATH": intercambia dos archivos de mentira
           # y confirma que el contenido de verdad se intercambió.
@@ -1331,6 +1336,13 @@ jobs:
           [ "$(cat "$tmp/a")" = "BBB" ] && [ "$(cat "$tmp/b")" = "AAA" ] || \
             { echo "el exch shim no intercambió de verdad -- ver /tmp de la prueba"; exit 1; }
           rm -rf "$tmp"
+          # Prueba con el PATH HERMÉTICO real que usa el test -- no sólo el PATH del
+          # runner. jax#260 CI, ronda 2 de fixes: instalado en /usr/local/bin la vez
+          # anterior, y el test lo perdía porque restringe el PATH a
+          # "<bin-de-sudo-falso>:/usr/bin:/bin", sin /usr/local/bin -- este chequeo
+          # habría atrapado eso antes de empujar.
+          env -i PATH=/usr/bin:/bin bash -c 'command -v exch' || \
+            { echo "exch no aparece con PATH=/usr/bin:/bin -- el mismo PATH hermético que usa test_ejecutor_reemplazar_directorio_atomico.py::_correr"; exit 1; }
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
