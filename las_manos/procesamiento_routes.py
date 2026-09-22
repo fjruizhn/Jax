@@ -344,8 +344,12 @@ class _ControlTrabajo:
         self._job_id = job_id
 
     def cancelar(self) -> None:
-        """Llamada desde `cancelar_trabajo()` (loop de eventos). Bajo el
-        MISMO lock que `arrancar_o_marcar_running()` -- ver MINOR-D."""
+        """Llamada desde `cancelar_trabajo()` en un hilo de `_EXECUTOR_IO`,
+        nunca desde el loop de eventos (tomar este lock puede significar
+        esperar una escritura a disco del hilo que lo retiene -- N1, ronda
+        5). Bajo el MISMO lock que `arrancar_o_marcar_running()` -- ver
+        MINOR-D. Es el ÚNICO lugar que escribe `CANCELLING` mientras el
+        trabajo tiene un control vivo."""
         with self._lock:
             if self.cancelado:
                 return  # idempotente -- no reescribe CANCELLING de más
@@ -723,8 +727,21 @@ async def cancelar_trabajo(job_id: str) -> TrabajoEstadoResponse:
             detail=f"Trabajo '{job_id}' ya está en estado terminal: {view.status.value}",
         )
     if view.status != JobStatus.CANCELLING:
-        _STORE.update(job_id, status=JobStatus.CANCELLING.value)
         control = _CONTROLES.get(job_id)
         if control is not None:
-            control.cancelar()
+            # N1 (ronda 5): `CANCELLING` lo escribe `control.cancelar()`,
+            # BAJO el mismo lock que `arrancar_o_marcar_running()` -- antes
+            # se escribía también acá, FUERA del lock, y con un hilo dentro
+            # de la escritura de `running` el historial quedaba
+            # `cancelling, running, cancelling` (para atrás). Y corre en
+            # `_EXECUTOR_IO`, no en el loop: tomar ese `threading.Lock`
+            # puede implicar esperar a que el hilo termine una escritura a
+            # disco, y eso congelaba el loop de eventos entero.
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(_EXECUTOR_IO, control.cancelar)
+        else:
+            # Sin control vivo no hay lock que compartir: `_ejecutar_trabajo`
+            # todavía no arrancó (o ya lo sacó de `_CONTROLES` en su
+            # `finally`, y entonces el estado ya es terminal).
+            _STORE.update(job_id, status=JobStatus.CANCELLING.value)
     return await _construir_respuesta_estado(job_id, _STORE.get(job_id))

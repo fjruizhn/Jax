@@ -26,6 +26,8 @@ Y, más importante, **mide el módulo real**, no `ocr.extraer()` suelto:
 
 Corre con:
   PYTHONPATH=.:las_manos python3 scripts/medir_carga_procesamiento.py
+
+Sale con 1 si la sección 3 mide que NO hay aislamiento (ronda 5, N4).
 """
 from __future__ import annotations
 
@@ -46,6 +48,11 @@ import procesamiento_routes as rutas_mod  # noqa: E402
 from motor_registry import tool_authority  # noqa: E402
 from motor_registry.job_store import JobStore  # noqa: E402
 from motor_registry.models import JobStatus  # noqa: E402
+
+
+#: Por encima de esto, el `to_thread` ajeno esperó detrás del trabajo real:
+#: el pool de Procesamiento NO está aislado y el script sale con 1.
+_UMBRAL_AISLAMIENTO_S = 0.2
 
 
 def _fuente(tamano: int):
@@ -187,4 +194,9 @@ if __name__ == "__main__":
     ajeno_dt, total_dt, estado = asyncio.run(_medir_aislamiento(rutas_mod._MAX_WORKERS, 45))
     print(f"  to_thread ajeno: {ajeno_dt * 1000:.1f} ms")
     print(f"  trabajo real total: {total_dt:.2f}s, estado final={estado}")
-    print(f"  {'AISLADO -- el ajeno no esperó' if ajeno_dt < 0.2 else 'NO AISLADO -- el ajeno esperó detrás del trabajo real'}")
+    aislado = ajeno_dt < _UMBRAL_AISLAMIENTO_S
+    print(f"  {'AISLADO -- el ajeno no esperó' if aislado else 'NO AISLADO -- el ajeno esperó detrás del trabajo real'}")
+    # N4 (ronda 5): el script es una COMPUERTA, no un informe -- antes
+    # imprimía "NO AISLADO" y salía con 0, así que cualquier CI o guion que
+    # lo corriera daba verde con el defecto presente.
+    sys.exit(0 if aislado else 1)

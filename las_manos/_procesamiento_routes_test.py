@@ -40,7 +40,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -700,9 +700,9 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             assert self.store.get(job_id).status == JobStatus.RUNNING
             assert terminados == [], "no debería haber terminado todavía"
 
-            # Mismo mecanismo que el endpoint de cancelación, sin pasar por HTTP.
+            # Mismo mecanismo que el endpoint de cancelación, sin pasar por
+            # HTTP: `cancelar()` es quien escribe CANCELLING (N1, ronda 5).
             control = rutas_mod._CONTROLES[job_id]
-            self.store.update(job_id, status=JobStatus.CANCELLING.value)
             control.cancelar()
 
             # El semáforo TODAVÍA no se liberó -- "primero" sigue corriendo.
@@ -759,6 +759,183 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         resultados = json.loads(Path(job.result_path).read_text())
         assert resultados[0]["estado"] == "cancelado"
 
+    # -- Ronda 5 --------------------------------------------------------------
+    def _historial_de_estados(self, job_id: str) -> list[str]:
+        """El historial REAL del job, leído del JSONL append-only (cada
+        línea es el estado completo tras un `create`/`update`), con los
+        estados repetidos consecutivos colapsados -- `update()` sin
+        `status` (ej. `result_path`) re-escribe el mismo estado."""
+        estados: list[str] = []
+        for linea in self.store._path.read_text(encoding="utf-8").splitlines():
+            evento = json.loads(linea)
+            if evento.get("job_id") != job_id:
+                continue
+            if not estados or estados[-1] != evento["status"]:
+                estados.append(evento["status"])
+        return estados
+
+    async def test_N1r5_cancelar_por_la_ruta_real_no_hace_ir_el_historial_para_atras(self):
+        """N1 (ronda 5): `cancelar_trabajo()` escribía `CANCELLING` FUERA del
+        lock de `_ControlTrabajo` y recién después llamaba a
+        `control.cancelar()`. Si un hilo estaba DENTRO de
+        `arrancar_o_marcar_running()` escribiendo `running` en ese momento,
+        el historial quedaba `cancelling, running, cancelling` -- para
+        atrás. Y además el loop de eventos quedaba congelado esperando un
+        `threading.Lock` que el hilo retenía durante una escritura a disco.
+
+        Pasa por `cancelar_trabajo()` REAL (no por `_ControlTrabajo` suelto,
+        que es por qué el test de MINOR-D no lo vio): la escritura de
+        `running` se bloquea DE VERDAD (`threading.Event`) con el lock
+        tomado, se cancela por la ruta, y se exige (a) historial
+        monótono en el JSONL y (b) que el loop siga respondiendo mientras
+        la cancelación espera ese lock."""
+        executor_1_hilo = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-n1r5")
+        self.addCleanup(executor_1_hilo.shutdown)
+        adentro = threading.Event()
+        seguir = threading.Event()
+        self.addCleanup(seguir.set)  # LIFO: corre antes del shutdown -- ver test_N4_running_no_se_marca...
+        original_update = self.store.update
+
+        def _update_que_retiene_running(job_id, **kwargs):
+            if kwargs.get("status") == JobStatus.RUNNING.value:
+                adentro.set()
+                assert seguir.wait(timeout=5), "seguir nunca se marcó"
+            return original_update(job_id, **kwargs)
+
+        self._archivo_en_workspace("a.pdf")
+        semaforo = asyncio.Semaphore(1)
+        job_id = self._crear_job()
+
+        retrasos: list[float] = []
+        sondeando = True
+
+        async def _sondeo():
+            while sondeando:
+                t0 = time.perf_counter()
+                await asyncio.sleep(0.01)
+                retrasos.append(time.perf_counter() - t0 - 0.01)
+
+        with patch.object(self.store, "update", side_effect=_update_que_retiene_running), \
+             patch.object(rutas_mod, "_STORE", self.store), \
+             patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
+             patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("7" * 64)):
+            await semaforo.acquire()
+            tarea = asyncio.create_task(
+                rutas_mod._ejecutar_trabajo(
+                    job_id, "p", ["a.pdf"], store=self.store,
+                    executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
+                )
+            )
+            assert await asyncio.to_thread(adentro.wait, 2), (
+                "el hilo nunca llegó a escribir running"
+            )
+
+            sondeo = asyncio.create_task(_sondeo())
+            await asyncio.sleep(0.02)  # el sondeo ya está DENTRO de su sleep (lección de B-5)
+            liberador = threading.Timer(0.3, seguir.set)  # suelta el lock en 0,3 s, desde otro hilo
+            liberador.start()
+            self.addCleanup(liberador.cancel)
+            respuesta = await rutas_mod.cancelar_trabajo(job_id)
+            sondeando = False
+            await sondeo
+            await tarea
+
+        assert respuesta.estado == JobStatus.CANCELLING.value, respuesta
+        historial = self._historial_de_estados(job_id)
+        assert historial == [
+            JobStatus.PENDING.value, JobStatus.RUNNING.value,
+            JobStatus.CANCELLING.value, JobStatus.CANCELLED.value,
+        ], f"el historial fue para atrás (o se salteó un paso): {historial}"
+        assert max(retrasos) < 0.15, (
+            f"el loop de eventos se congeló {max(retrasos):.3f}s esperando el lock "
+            f"de _ControlTrabajo desde cancelar_trabajo()"
+        )
+
+    async def test_N3r5_cancelado_antes_de_arrancar_nunca_escribe_running_ni_started_at(self):
+        """N3 (ronda 5): un archivo cancelado mientras esperaba en la cola
+        del pool (ocupado por otro trabajo) nunca corrió nada -- el job no
+        puede haber pasado por `running` ni tener `started_at`. Sobrevivía
+        la mutación que escribe `RUNNING` ANTES de mirar `self.cancelado`:
+        el test de N-3 de arriba sólo mira el estado FINAL."""
+        executor_1_hilo = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-n3r5")
+        self.addCleanup(executor_1_hilo.shutdown)
+        loop = asyncio.get_running_loop()
+        bloqueo = threading.Event()
+        self.addCleanup(bloqueo.set)  # mismo motivo que en test_N4_running_no_se_marca...
+        ocupa = loop.run_in_executor(executor_1_hilo, bloqueo.wait)  # "otro trabajo" ocupa el pool
+
+        semaforo = asyncio.Semaphore(1)
+        self._archivo_en_workspace("en-cola.pdf")
+        ingerir_mock = AsyncMock()
+        job_id = self._crear_job()
+
+        with patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
+            await semaforo.acquire()
+            tarea = asyncio.create_task(
+                rutas_mod._ejecutar_trabajo(
+                    job_id, "p", ["en-cola.pdf"], store=self.store,
+                    executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
+                )
+            )
+            await asyncio.sleep(0.05)  # "en-cola.pdf" quedó esperando turno
+            rutas_mod._CONTROLES[job_id].cancelar()
+            bloqueo.set()  # el pool se libera; ahora le toca el turno al cancelado
+            await tarea
+            await ocupa
+
+        ingerir_mock.assert_not_called()
+        job = self.store.get(job_id)
+        assert job.status == JobStatus.CANCELLED, job
+        historial = self._historial_de_estados(job_id)
+        assert JobStatus.RUNNING.value not in historial, (
+            f"un trabajo que nunca arrancó quedó registrado como running: {historial}"
+        )
+        assert job.started_at is None, (
+            f"un trabajo que nunca arrancó tiene started_at={job.started_at}"
+        )
+
+    # -- N2 (ronda 5): los nombres con tilde son el caso NORMAL -------------
+    _NOMBRES_ACENTUADOS = (
+        "Constitución de sociedad.pdf",
+        "factura_año.pdf",
+        "Remodelación/Crédito Ñandú.xlsx",
+        "Diseño – Etapa Única.docx",
+    )
+
+    def _resultados_acentuados(self) -> list[dict]:
+        return [
+            {
+                "archivo": nombre, "estado": "error" if i == 1 else "ok",
+                "extractor": None if i == 1 else "pdf", "extracto_bytes": 10 * i,
+                "carpeta_procesado": None if i == 1 else f"proyectos/remodelación/procesado/{i}",
+                "error": "no se pudo abrir 'Crédito Ñandú.xlsx'" if i == 1 else None,
+            }
+            for i, nombre in enumerate(self._NOMBRES_ACENTUADOS)
+        ]
+
+    def test_N2r5_leer_resultado_devuelve_los_nombres_acentuados_intactos(self):
+        """N2 (ronda 5): el saneo de lectura de MINOR-C tiene que tocar
+        SÓLO lo que no se puede codificar a UTF-8. Los documentos de este
+        sistema son de clientes hondureños: casi todo nombre lleva tilde o
+        eñe. Sanear todo `str` convertiría `factura_año.pdf` en
+        `factura_a\\xf1o.pdf` en cada respuesta -- y hasta la ronda 4
+        ningún test lo notaba. Se prueban los DOS formatos que
+        `_guardar_resultado` puede dejar en disco (UTF-8 directo y el
+        fallback `ensure_ascii=True`)."""
+        esperados = self._resultados_acentuados()
+        with tempfile.TemporaryDirectory() as d:
+            store = JobStore(str(Path(d) / "jobs.jsonl"))
+            job_id = store.create(caller="x", capability="y", motor="z", trace_id="t", prompt="p", recursion_depth=0)
+            ruta_utf8 = rutas_mod._guardar_resultado(store, job_id, esperados)
+            leidos_utf8 = rutas_mod._leer_resultados_de_disco(ruta_utf8)
+
+            ruta_ascii = Path(d) / "fallback.json"
+            ruta_ascii.write_text(json.dumps(esperados, ensure_ascii=True), encoding="utf-8")
+            leidos_ascii = rutas_mod._leer_resultados_de_disco(str(ruta_ascii))
+
+        assert leidos_utf8 == esperados, leidos_utf8
+        assert leidos_ascii == esperados, leidos_ascii
+        assert leidos_utf8[1]["archivo"] == "factura_año.pdf"
 
 # ===========================================================================
 #  Grupo 2 -- HTTP: admisión, cancelación, no-bloqueo, autenticación
@@ -1112,6 +1289,61 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert not any(_llama_a_reconciliar(f) for f in funciones_shutdown), (
             "reconciliar_trabajos_huerfanos() está en un hook de APAGADO, no de arranque"
         )
+    def test_N2r5_get_devuelve_los_nombres_acentuados_intactos(self):
+        """N2 (ronda 5), por HTTP: lo que ve jax-platform. `factura_año.pdf`
+        tiene que volver como `factura_año.pdf`, no como
+        `factura_a\\xf1o.pdf`."""
+        job_id = self.store.create(
+            caller="x", capability="y", motor="z", trace_id="t", prompt="p",
+            recursion_depth=0,
+        )
+        resultados = [
+            {"archivo": "Constitución de sociedad.pdf", "estado": "ok", "extractor": "pdf",
+             "extracto_bytes": 42, "carpeta_procesado": "proyectos/remodelacion/procesado/abc",
+             "error": None},
+            {"archivo": "factura_año.pdf", "estado": "error", "extractor": None,
+             "extracto_bytes": 0, "carpeta_procesado": None,
+             "error": "no se pudo abrir 'Crédito Ñandú.xlsx'"},
+        ]
+        result_path = rutas_mod._guardar_resultado(self.store, job_id, resultados)
+        self.store.update(
+            job_id, status=JobStatus.COMPLETED.value, finished_at=time.time(),
+            result_path=result_path,
+        )
+
+        with TestClient(_app()) as c:
+            r = c.get(f"/procesamiento/trabajos/{job_id}", headers=_h(IDENTIDAD_PLATAFORMA))
+
+        assert r.status_code == 200, r.text
+        assert r.json()["resultados"] == resultados, r.json()["resultados"]
+
+    # -- N5 (ronda 5): el arranque EJECUTA la reconciliación ----------------
+    def test_N5r5_el_arranque_ejecuta_reconciliar_trabajos_huerfanos(self):
+        """N5 (ronda 5): el test AST de N-6 acepta la llamada dentro de un
+        `if False:` -- aparece en el árbol, dentro del hook de arranque, y
+        nunca corre. Este test corre DE VERDAD todos los handlers de
+        `startup` que `server.app` registra (con lo que tocaría la base
+        reemplazado por dobles) y exige que la reconciliación se haya
+        EJECUTADO una vez."""
+        import server
+
+        reconciliar = Mock(return_value=0)
+
+        async def _arrancar():
+            assert server.app.router.on_startup, "LAS MANOS no registra ningún handler de startup"
+            for handler in server.app.router.on_startup:
+                await handler()
+
+        with patch("jacobs.subpipelines.config_subpipelines"), \
+             patch.object(server.jacobs_store, "tamanio_pool"), \
+             patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
+             patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
+             patch("jacobs.reaper.reap_orphaned_pipelines", AsyncMock()), \
+             patch("jacobs.reaper.start_reaper_loop", AsyncMock()), \
+             patch.object(rutas_mod, "reconciliar_trabajos_huerfanos", reconciliar):
+            asyncio.run(_arrancar())
+
+        reconciliar.assert_called_once_with()
 
     # -- autenticación --------------------------------------------------
     def test_credencial_plataforma_accede_jacobs_no(self):
