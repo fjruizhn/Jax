@@ -1260,6 +1260,9 @@ jobs:
           tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
           tests/test_motor_contrato_dispatch.py
           tests/test_ejecutor_fase0.py
+          tests/test_ejecutor_generar_claude_md.py
+          tests/test_ejecutor_contratos_contexto.py
+          tests/test_ejecutor_reemplazar_directorio_atomico.py
           tests/test_ejecutor_cita.py
           tests/test_ejecutor_captura.py
           tests/test_ejecutor_hechos.py
@@ -1403,6 +1406,9 @@ jobs:
             tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
             tests/test_motor_contrato_dispatch.py \
             tests/test_ejecutor_fase0.py \
+            tests/test_ejecutor_generar_claude_md.py \
+            tests/test_ejecutor_contratos_contexto.py \
+            tests/test_ejecutor_reemplazar_directorio_atomico.py \
             tests/test_ejecutor_cita.py \
             tests/test_ejecutor_captura.py \
             tests/test_ejecutor_hechos.py \
@@ -3533,8 +3539,73 @@ jobs:
           #   `JAX_DB_HOST`, 165 archivos: 2462 passed (delta +3 sobre la
           #   corrida anterior de este fix round, 2459 -> 2462, exacto),
           #   2 skipped, 3 xfailed.
-          grep -qE "^2447 passed, 19 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2447 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 de Ruling 19e sin JAX_DB_HOST en este job)."; exit 1; }
+          # NOTA DE REBASE #2 (ronda 9, 2026-09-22, `git rebase origin/master`, pedida
+          # por el coordinador -- la rama iba 7 commits detrás): esta misma historia YA
+          # tenía una nota de rebase (justo abajo, de cuando la rama divergió de
+          # 2399/17). En ESTE rebase, master había seguido avanzando por su cuenta
+          # hasta 2447/19 tests-puros (Task 1-bis, `feat/descartar-pipelines`, ajeno a
+          # esta rama) mientras las rondas 2-9 de acá construían sobre el 2399 viejo.
+          # El grep de arriba (2447/19) es el que master tenía ANTES de este merge --
+          # queda como historia de master, no como el piso vigente. El piso final,
+          # verificado de nuevo tras el rebase completo, está en el ÚLTIMO `grep -qE`
+          # de este mismo bloque, más abajo -- ronda 9 lo re-midió sobre la suite
+          # COMPLETA ya rebasada, no sumando a mano.
+          # NOTA DE REBASE #1 (2026-09-22): esta rama (feat/ejecutor-contexto-y-skills)
+          # divergió cuando el piso de master era 2399/17 -- master avanzó por su
+          # cuenta a 2439/17 (feat/descartar-pipelines, +40, ver arriba) mientras esta
+          # rama agregaba lo de abajo sobre el 2399 viejo. Las rondas siguientes de
+          # esta rama (ronda 3, ronda 4) vuelven a medir la suite COMPLETA de cero
+          # cada vez -- el número final, más abajo en este mismo archivo, es el
+          # verificado de verdad; éste queda como historia de CÓMO se llegó ahí, no
+          # como la fuente de verdad del piso vigente.
+          # 2399 -> 2467, 17 -> 30 skipped (feat/ejecutor-contexto-y-skills, ronda 2,
+          #   auditoría adversarial B3/M1, 2026-09-22). El número NO sale de sumar a
+          #   mano: la ronda 1 (commit 7d28a99) ya había agregado tests NUEVOS a
+          #   archivos que esta lista YA corría (test_ejecutor_contratos_arranque.py,
+          #   entre otros) sin tocar este piso -- sumar "+lo que agrego yo" sobre 2399
+          #   habría dado un número que ya estaba mal antes de empezar. Se corrió la
+          #   lista COMPLETA de este paso, de verdad, dos veces: con
+          #   /home/fruiz/claude-skills/common/CLAUDE.md.core y
+          #   ~/ejecutor-fase0/resultados (el corpus de U3) TAPADOS con `mv` (lo más
+          #   parecido a un runner de CI efímero que hay en esta máquina) y restaurados
+          #   después. Tres archivos de test nuevos que NINGÚN job corría quedan acá
+          #   -- tests/test_ejecutor_generar_claude_md.py (28), tests/
+          #   test_ejecutor_contratos_contexto.py (9),
+          #   tests/test_ejecutor_reemplazar_directorio_atomico.py (6, prueba REAL
+          #   contra bash+coreutils del reemplazo atómico de M4, sin bwrap: no hace
+          #   falta) -- y las 11 de instalación de test_ejecutor_contratos_arranque.py
+          #   (ese archivo YA corría acá) DEJARON de saltarse: las dos rondas usan un
+          #   DOBLE hermético de la constitución (`constitucion_fuente()`, el seam
+          #   nuevo de esta ronda) en vez de la real de esta máquina, así que ninguna
+          #   de las 43+11 depende de /home/fruiz/claude-skills -- lo comprueba el
+          #   propio "tapado con mv" de la medición. Quedan 30 skipped: 16 de
+          #   test_ejecutor_reproduccion_u3.py sin el corpus de U3 (estructural, sin
+          #   cambios) + 14 de test_ejecutor_generar_claude_md.py/
+          #   test_ejecutor_contratos_contexto.py que SÍ necesitan la constitución REAL
+          #   en particular (no un doble) -- las dejadas explícitamente
+          #   `@requiere_constitucion_real` porque verifican algo del archivo real de
+          #   ESTA máquina, no de la lógica del generador.
+          # ⚠️ HALLAZGO SIN CERRAR (reportado, NO arreglado en esta ronda -- fuera del
+          # encargo de B3/M1): medido 2026-09-22 que este paso YA está rojo hoy, antes
+          # y después de este commit -- reproducido con `git stash` contra 7d28a99
+          # (ronda 1, sin ninguno de los cambios de esta ronda) con el MISMO resultado.
+          # `tests/test_payload_max_tokens_literal_tripwire.py::SondasDeMedicionTest::
+          # test_las_sondas_declaradas_no_son_codigo_de_servicio` hace un match de texto
+          # ingenuo (`f"import {m}"` / `f"from {m} "`) sobre el STEM de cada sonda
+          # declarada -- y `scripts/ejecutor_fase0/contexto.py` (una sonda de
+          # 2026-09-16, mide tok/s) tiene el MISMO stem que el `jax/ejecutor/contratos/
+          # contexto.py` que la ronda 1 de este PR agregó (2026-09-22): el tripwire NO
+          # distingue los dos módulos "contexto" y marca `cuenta_axioma.py`/
+          # `arranque.py` como si importaran la SONDA, cuando importan el otro. El
+          # número de acá abajo (2467 passed, 30 skipped) es el medido CON ese falso
+          # positivo corregido a mano para aislar el cálculo (un `assertFalse` puesto
+          # aparte, no un cambio al archivo real); hoy, tal como está el árbol, este
+          # paso sale "1 failed, 2466 passed, 30 skipped, ...". Necesita su propio
+          # arreglo (calificar el tripwire por RUTA de import, no por stem suelto),
+          # fuera de este encargo -- hasta entonces, este `grep` NO va a dar verde en
+          # CI, y ES CORRECTO que no dé verde: hay un failed real en el árbol.
+          grep -qE "^2467 passed, 30 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2467 tests CORRIDOS y exactamente 30 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 14 de la constitución host-bound, ver notas arriba). Si el rojo es SondasDeMedicionTest por 'contexto', ver la nota de arriba: hallazgo previo (ronda 1), no de este piso -- se esperaría '1 failed, 2466 passed, 30 skipped' hasta que se arregle aparte."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

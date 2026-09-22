@@ -416,6 +416,33 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+- **El tripwire de "sondas de medición" confunde `jax/ejecutor/contratos/contexto.py` con
+  `scripts/ejecutor_fase0/contexto.py` por nombre — HALLADO 2026-09-22 (ronda 2 del contexto
+  del Ejecutor, auditoría adversarial B3/M1), FUERA de ese encargo, sin arreglar.**
+  - **Archivo y función:** `tests/test_payload_max_tokens_literal_tripwire.py::
+    SondasDeMedicionTest::test_las_sondas_declaradas_no_son_codigo_de_servicio`.
+  - **Condición exacta:** el test recorre `jax/`, `jacobs/` y `las_manos/` buscando, por
+    TEXTO literal, `f"import {m}"` / `f"from {m} "` donde `m` es el STEM (sin ruta) de cada
+    sonda declarada en `_SONDAS_DE_MEDICION` — entre ellas `scripts/ejecutor_fase0/
+    contexto.py`. El commit `7d28a99` (ronda 1 de `feat/ejecutor-contexto-y-skills`,
+    2026-09-22) agregó `jax/ejecutor/contratos/contexto.py`, un módulo SIN RELACIÓN con esa
+    sonda que también se llama `contexto` — y el match por stem suelto no distingue los dos:
+    cualquier `from jax.ejecutor.contratos import contexto` (hay tres: `arranque.py`,
+    `cuenta_axioma.py`, y el propio `contexto.py` importándose por nombre en su docstring de
+    módulo) se reporta como si `jax/` importara la sonda de medición de tok/s.
+  - **Consecuencia:** el test sale ROJO — `tests-puros` (el job de CI que lo corre) no puede
+    dar verde tal como está el árbol hoy. Reproducido con `git stash` contra `7d28a99` SIN
+    ningún cambio de la ronda 2: el mismo rojo, así que es de la ronda 1, no de la 2.
+  - **Cómo se descubrió:** al correr la suite completa de `tests-puros` para medir el piso de
+    la aritmética que pide B3/M1 (ver `.github/workflows/policy.yml`, comentario junto al
+    `grep -qE "^2467 passed, 30 skipped"`, con el número verificado A MANO aislando este
+    hallazgo aparte, sin tocar el archivo real).
+  - **Arreglo sugerido, NO aplicado (fuera del encargo de la ronda 2):** calificar el tripwire
+    por RUTA de import (`scripts.ejecutor_fase0.contexto` / `scripts/ejecutor_fase0/contexto`),
+    no por el stem suelto `contexto` — mismo criterio que ya usa para excluir `tests/`.
+  - **De quién es:** ronda 1 de `feat/ejecutor-contexto-y-skills` (commit `7d28a99`), que
+    eligió el nombre `contexto.py` sin correr esta suite completa antes de commitear.
+
 ## Medido — procesamiento de archivos: rendimiento, utilidad, caché y calidad de señal sobre 23 documentos reales (2026-09-21)
 
 **Task 10 de la rama `feat/procesamiento-archivos`** (worktree
@@ -4003,6 +4030,36 @@ retractaciones, que no se borran. Ninguno requiere acción.
 ## Anotado, no bloquea
 
 - **Anotado con fecha 2026-09-22 — `idx_pipelines_status (status)` quedó redundante con `idx_pipelines_ocultos (status, descartado_at)` (Task 1, fix round 1, spec `2026-09-22-descartar-pipelines`).** `idx_pipelines_ocultos` empieza por la misma columna (`status`) que `idx_pipelines_status`: por la regla del prefijo izquierdo de un índice compuesto, MariaDB puede resolver con el nuevo cualquier consulta que hoy elige el viejo filtrando solo por `status`. No se retira en este PR: el viejo puede tener lectores que esta ronda no auditó (el reaper vía `store.candidatos_del_reaper`, `pipeline_count_active`, el candado del cupo), y borrarlo a ciegas es exactamente el tipo de "arreglo" que la Regla Absoluta prohíbe. Retirarlo va en su **PROPIO PR**, con: (a) `EXPLAIN` de la consulta real del reaper (y de cualquier otro caller que filtre `jacobs_pipelines` solo por `status`) contra el índice nuevo, sin filesort ni caída a scan completo; (b) un grep de todos los callers que arman `WHERE status = ...`/`WHERE status IN (...)` sobre `jacobs_pipelines` para confirmar que ninguno depende de una propiedad de `idx_pipelines_status` que `idx_pipelines_ocultos` no cubra (por ejemplo, un `FORCE INDEX`/`USE INDEX` explícito, si existiera).
+
+- **`ejecutor_host.sudo` y `.machine_id` quedan desactualizadas y SIN LECTOR en el código —
+  DECISIÓN 2026-09-22 (ronda 2 del contexto del Ejecutor, auditoría adversarial M6).**
+  La migración que las llenaba (`jax/memory/migrations.py::ensure_schema()`,
+  `_EJECUTOR_HOST_MACHINE_ID`, agregada en la ronda 1) se QUITÓ: ninguna pieza del código lee
+  esas dos columnas (verificado con `grep` sobre el árbol — sólo el propio migrador y su test
+  las tocaban), y la fuente única del sudo/machine-id que de verdad importa (lo que
+  `generar_claude_md.py` pone en el CLAUDE.md de axioma) es `scripts/ejecutor_fase0/
+  maquinas.toml`, que ya lo tenía. Mantener la migración corriendo en CADA `connect()` del
+  memory worker/LAS MANOS/síntesis tenía dos costos sin beneficio: (1) pisaba, en cada
+  arranque, cualquier corrección manual que Fernando hiciera directo en la DB (el propio
+  ledger, `~/ejecutor-producto/LEDGER.md`, ya decía "se corrigen por migración en PR, no a
+  mano" — pero una migración que se REPITE en cada connect es peor que una corrida una vez);
+  (2) ataba la salud de la memoria (`ensure_schema()` es lo que decide si `jax_memory` está al
+  día) a una tabla de otro dominio (`ejecutor_host`, de jax-platform) — ver B3 en el job
+  `memory-vector-zero-io` (`.github/workflows/policy.yml`) para el patrón de acoplamiento que
+  ese job ya vigila para otras columnas.
+  - **Verificado en producción, 2026-09-22 (SELECT de solo lectura, puerto 3308):** las cinco
+    filas de `ejecutor_host` (`atemai`, `bridge`, `ejecutor-prueba`, `hall9000`, `prod`) están
+    HOY con `sudo=0` y `machine_id=NULL` — la migración de la ronda 1 nunca llegó a
+    producción (esta rama no está desplegada), así que quitarla no revierte nada que
+    estuviera en uso.
+  - **`ejecutor-prueba` (auditoría, ítem MINOR):** no tiene línea en `maquinas.toml` (nunca
+    tuvo sudo real — VM desechable de la Fase 2) y su `machine_id` en la DB es `NULL`/no
+    verificado hoy; no se inventó un valor. Con esta migración retirada, no queda ningún
+    artefacto de este repo donde agregarle una línea de machine-id tenga sentido.
+  - **Si algún día algo SÍ necesita leer `ejecutor_host.sudo`/`.machine_id` desde jax:**
+    escribir ese lector primero (Principio IX — el contrato antes que la capacidad), y recién
+    ahí decidir si hace falta una migración de nuevo, en el repo que corresponda
+    (jax-platform, dueño de la tabla) o acá si el lector vive en jax.
 
 - **Anotado con fecha 2026-10-17 — revisar el tamaño del pool del store de Jacobs sólo si el uso real lo pide (Ruling R52, 2026-09-17).** `JAX_DB_POOL_MAX=10` (default derivado en `jacobs/store.py::db_pool_max`). La carga final del pre-vuelo dio el umbral 10× NO CUMPLIDO (p95 c25/c1 = 17,14×; c50/c1 = 30,39×) con 0 errores en todas las concurrencias y p95 absoluto 2,74/17,15/46,97/83,26 ms a c=1/10/25/50. La sesión principal lo aceptó por escrito: la relación mide encolamiento contra un pool de 10 con concurrencia de 25 y 50, muy por encima de la demanda real (`MAX_PARALLEL_PIPELINES=3`; el pre-vuelo lo dispara una persona desde la Mesa), y el pool se dimensionó contra una MariaDB compartida (151 conexiones, 96 en uso).
   - **Qué lo dispara (observación, no calendario):** uso real por encima de **10 pre-vuelos concurrentes sostenidos**. Dónde se ve: (a) en el journal de `jax-las-manos`, 503 `prevuelo_no_disponible` cuyo motivo es un `TimeoutError` esperando turno del pool (un pedido HTTP espera a lo sumo `JAX_DB_CONNECT_TIMEOUT_SECONDS`), que es el síntoma de cola llena; (b) en `jacobs_events` / la Mesa, `/jacobs/preflight` y `POST /jacobs/pipeline` solapados en la misma ventana de segundos por más de 10 pedidos; (c) en el perfil (`scripts/perfil_prevuelo.py trabajadores`), la fase `acquire` dominando el total con la concurrencia real medida, no con una inventada.
