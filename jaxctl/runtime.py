@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
-from policy.enforcement_evidence.status_engine import _runtime_readonly_status_service
+from policy.enforcement_evidence.status_engine import query_control_status as _query_control_status
 
 class UnavailableSource(RuntimeError): pass
 
@@ -14,21 +14,13 @@ def _connection_factory():
         raise UnavailableSource("MariaDB B7 composition unavailable") from exc
     return lambda: pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
 
-def readonly_status_service():
-    try:
-        return _runtime_readonly_status_service()
-    except Exception as exc:
-        raise UnavailableSource("Block 7 read-only status composition unavailable") from exc
-
 def control_status(*, control_id, control_version, claim_level, scope, subjects, as_of_utc):
     """Read-only B7 status query; errors never become guessed CLI output."""
     try:
-        return readonly_status_service().query_control_status(
+        return _query_control_status(
             control_id=control_id, control_version=control_version,
             claim_level=claim_level, scope=scope, subjects=subjects,
             as_of_utc=as_of_utc)
-    except UnavailableSource:
-        raise
     except Exception as exc:
         raise UnavailableSource("Block 7 authoritative status unavailable") from exc
 

@@ -1,11 +1,10 @@
 """Deterministic, composition-owned claim derivation."""
 from __future__ import annotations
 from datetime import timedelta
-import weakref
 from .models import *
 from .control_registry import load_control_definition, require_trusted_definition
 from .evidence_store import is_trusted_implementation_identity
-from .errors import UnsupportedClaimLevelError, InvalidClaimScopeError, EvidenceArtifactUntrustedError
+from .errors import UnsupportedClaimLevelError, InvalidClaimScopeError
 
 def _matching(definition, identity, observations, scope, subjects):
  return tuple(x for x in observations if x.control_id==definition.control_id and x.control_version==definition.control_version and x.control_definition_hash==definition.control_definition_hash and x.implementation_identity_hash==identity.implementation_identity_hash and x.scope==scope and x.subject in subjects)
@@ -107,62 +106,51 @@ class EnforcementStatusService(_StatusDerivationService):
   assertion=EnforcementAssertion(definition.control_id,definition.control_version,definition.control_definition_hash,claim_level,verdict,identity.implementation_identity_hash,scope,subjects,artifacts,tuple(o.observation_id for o in observations),as_of_utc,start,as_of_utc)
   return self._lifecycle._EvidenceLifecycleService__persist_assertion(assertion)
 
-# This follows the existing exact-instance provenance pattern used for Block 6
-# issued artifacts.  It is neither a token nor a caller-provided marker: only
-# the fixed deployment composition below inserts the exact live object.
-_trusted_readonly_queries: dict[int, weakref.ReferenceType] = {}
+class _ReadonlyStatusDerivation(_StatusDerivationService):
+ """Injectable derivation mechanics, deliberately unable to emit a status view.
 
-def _is_runtime_readonly_query(query):
- ref=_trusted_readonly_queries.get(id(query))
- return ref is not None and ref() is query
-
-class _TrustedReadonlyStatusQuery(_StatusDerivationService):
- """Read-only view derivation, usable only by an exact composed instance.
-
- Construction alone is intentionally insufficient.  A caller may create an
- object with matching-looking dependencies, but it has no authoritative-query
- provenance and therefore cannot produce an authoritative status view.
+ This type exists so deterministic snapshot handling can be tested.  It is
+ not an authoritative query capability: it exposes only the shared raw
+ derivation input/output and has no method that constructs a
+ ``ControlStatusView``.
  """
  _readonly=True
  def __init__(self, store, identity_provider, identity_reference_hash):
   self._lifecycle=None; self._store=store; self._identity_provider=identity_provider
   self._identity=type("IdentityReference",(),{"implementation_identity_hash":identity_reference_hash})()
- def query_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
-  if not _is_runtime_readonly_query(self):
-   raise EvidenceArtifactUntrustedError("read-only status query is not fixed-composition provenance")
-  definition, identity, observations, subjects, verdict, start, artifacts, trust_domains=self._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
-  return ControlStatusView(definition.control_id,definition.control_version,claim_level,verdict,identity.implementation_identity_hash,scope,subjects,as_of_utc,start,as_of_utc,tuple(sorted({o.reason_code for o in observations})),trust_domains,artifacts,tuple(o.observation_id for o in observations),as_of_utc)
 
-def _build_runtime_readonly_status_composition():
- """Create the closed production-only B7 read-only composition boundary."""
- def build():
-  """Construct the deployment reader with no caller-selectable dependencies.
+def _compose_runtime_readonly_derivation():
+ """Bind the only production reader to fixed deployment configuration.
 
-  The database endpoint, identity file and provider are all fixed deployment
-  configuration.  The returned object has exact-instance provenance; merely
-  reconstructing it with the same dependencies cannot establish that trust.
-  """
-  try:
-   import os
-   from .mariadb_store import MariaDBEvidenceStore
-   from .implementation_identity import TrustedImplementationIdentityProvider
-   import pymysql
-   host=os.environ["JAX_DB_HOST"]; port=int(os.environ["JAX_DB_PORT"])
-  except (ImportError, KeyError, ValueError) as exc:
-   raise RuntimeError("MariaDB B7 composition unavailable") from exc
-  def connect():
-   return pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
-  store=MariaDBEvidenceStore(connect)
-  provider=TrustedImplementationIdentityProvider(store)
-  # Deployment file supplies only the identity reference.  The authoritative
-  # row and manifest bytes are captured and verified inside the DB snapshot.
-  query=_TrustedReadonlyStatusQuery(store,provider,provider.identity_reference_hash())
-  key=id(query)
-  _trusted_readonly_queries[key]=weakref.ref(query, lambda _ref, k=key: _trusted_readonly_queries.pop(k,None))
-  return query
- return build
+ This internal composition helper takes no dependencies.  Its return value is
+ only a raw derivation helper, never an authoritative status-query object.
+ """
+ try:
+  import os
+  from .mariadb_store import MariaDBEvidenceStore
+  from .implementation_identity import TrustedImplementationIdentityProvider
+  import pymysql
+  host=os.environ["JAX_DB_HOST"]; port=int(os.environ["JAX_DB_PORT"])
+ except (ImportError, KeyError, ValueError) as exc:
+  raise RuntimeError("MariaDB B7 composition unavailable") from exc
+ def connect():
+  return pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
+ store=MariaDBEvidenceStore(connect)
+ provider=TrustedImplementationIdentityProvider(store)
+ # Deployment configuration supplies the identity reference.  The row and
+ # manifest bytes are captured and verified inside the read-only snapshot.
+ return _ReadonlyStatusDerivation(store,provider,provider.identity_reference_hash())
 
-_runtime_readonly_status_service = _build_runtime_readonly_status_composition()
+def query_control_status(*, control_id, control_version, claim_level, scope, subjects, as_of_utc):
+ """Return an ephemeral B7 view from the fixed production composition.
+
+ The semantic claim parameters above are the complete public input surface.
+ Neither a caller-created store/provider/lifecycle nor an injectable query
+ object can select the authoritative universe or emit this classification.
+ """
+ derivation=_compose_runtime_readonly_derivation()
+ definition, identity, observations, subjects, verdict, start, artifacts, trust_domains=derivation._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
+ return ControlStatusView(definition.control_id,definition.control_version,claim_level,verdict,identity.implementation_identity_hash,scope,subjects,as_of_utc,start,as_of_utc,tuple(sorted({o.reason_code for o in observations})),trust_domains,artifacts,tuple(o.observation_id for o in observations),as_of_utc)
 
 def evaluate_control_status(store, definition, identity, *, claim_level, scope, subjects, as_of_utc):
  """Compatibility pure entrypoint; it cannot self-certify prerequisites."""

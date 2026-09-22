@@ -30,22 +30,24 @@ def test_jaxctl_is_readonly_command_surface():
     assert all(word not in result.stdout for word in ("dispatch", "grant", "approve", "cancel"))
 
 def test_readonly_b7_composition_is_not_a_public_dependency_injection_factory():
-    from policy.enforcement_evidence.status_engine import EnforcementStatusService, _TrustedReadonlyStatusQuery, _runtime_readonly_status_service
+    from policy.enforcement_evidence.status_engine import EnforcementStatusService, _ReadonlyStatusDerivation, query_control_status
+    import policy.enforcement_evidence.status_engine as status_engine
     import inspect
     assert not hasattr(EnforcementStatusService, "for_readonly_query")
     assert not hasattr(EnforcementStatusService, "query_control_status")
-    assert tuple(inspect.signature(_TrustedReadonlyStatusQuery.query_control_status).parameters) == (
-        "self", "control_id", "control_version", "claim_level", "scope", "subjects", "as_of_utc")
-    assert tuple(inspect.signature(_runtime_readonly_status_service).parameters) == ()
+    assert not hasattr(_ReadonlyStatusDerivation, "query_control_status")
+    assert not hasattr(status_engine, "_trusted_readonly_queries")
+    assert tuple(inspect.signature(query_control_status).parameters) == (
+        "control_id", "control_version", "claim_level", "scope", "subjects", "as_of_utc")
+    assert tuple(inspect.signature(status_engine._compose_runtime_readonly_derivation).parameters) == ()
 
 def test_jaxctl_control_routes_only_to_fixed_readonly_composition(monkeypatch):
     import jaxctl.runtime as runtime
     from jaxctl.commands import run
     called={}
-    class Reader:
-        def query_control_status(self, **kwargs):
-            called.update(kwargs); return {"persisted":False,"classification":"AUTHORITATIVE_READONLY_DERIVATION"}
-    monkeypatch.setattr(runtime,"_runtime_readonly_status_service",lambda: Reader())
+    def query(**kwargs):
+        called.update(kwargs); return {"persisted":False,"classification":"AUTHORITATIVE_READONLY_DERIVATION"}
+    monkeypatch.setattr(runtime,"_query_control_status",query)
     assert run(["control","CTL.B6.GOVERNED_DISPATCH","--version","1","--claim","ENFORCED","--scope",'{"environment":"SANDBOX_RUNTIME"}',"--subjects",'[{"subject_type":"EXECUTION","identity":"x"}]',"--json"]) == 0
     assert called["control_id"] == "CTL.B6.GOVERNED_DISPATCH"
 

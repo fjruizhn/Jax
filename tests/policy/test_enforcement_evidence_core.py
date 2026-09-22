@@ -136,28 +136,47 @@ def test_persisted_status_service_has_no_readonly_query_capability():
  assert (len(s._assertion_rows),len(s._observation_rows),len(s._artifact_rows)) == (before[0]+1,before[1],before[2])
 
 def test_caller_constructed_readonly_query_cannot_mint_authoritative_view():
- from policy.enforcement_evidence.status_engine import _TrustedReadonlyStatusQuery
- from policy.enforcement_evidence.errors import EvidenceArtifactUntrustedError
+ import inspect
+ import policy.enforcement_evidence.status_engine as status_engine
+ from policy.enforcement_evidence.status_engine import _ReadonlyStatusDerivation
  s=EvidenceStore(); lifecycle,identity_value=composition(s)
  scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.EXECUTION,"x")
  provider=type("CallerProvider",(),{"verify_loaded_identity_bytes":lambda _self, value, manifest: {}})()
- # A caller can construct arbitrary lifecycle/store/provider-shaped values,
- # and can even copy dependencies from a legitimate persisted service.  None
- # are an exact instance registered by the fixed runtime composition.
- query=_TrustedReadonlyStatusQuery(s,provider,identity_value.implementation_identity_hash)
- for query in (
-  query,
-  copy.copy(query),
-  _TrustedReadonlyStatusQuery(lifecycle._store,provider,identity_value.implementation_identity_hash),
- ):
-  with pytest.raises(EvidenceArtifactUntrustedError):
-   query.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
+ # Arbitrary lifecycle/store/provider-shaped values can exercise only the
+ # internal raw derivation helper.  No caller-composed object has a method
+ # that emits AUTHORITATIVE_READONLY_DERIVATION.
+ reader=_ReadonlyStatusDerivation(s,provider,identity_value.implementation_identity_hash)
+ copied=copy.copy(reader)
+ copied_dependencies=_ReadonlyStatusDerivation(lifecycle._store,provider,identity_value.implementation_identity_hash)
+ for value in (reader,copied,copied_dependencies):
+  assert not hasattr(value,"query_control_status")
+  assert not hasattr(value,"status_view")
+ assert not hasattr(status_engine,"_trusted_readonly_queries")
+ assert tuple(inspect.signature(status_engine.query_control_status).parameters) == (
+  "control_id","control_version","claim_level","scope","subjects","as_of_utc")
+ for forbidden in ("store","identity_provider","lifecycle","registry","trusted","verdict","evidence","observations"):
+  assert forbidden not in inspect.signature(status_engine.query_control_status).parameters
+ assert not any(name in status_engine.__dict__ for name in ("register_trusted","mark_trusted","trusted_readonly_queries"))
  assert not hasattr(EnforcementStatusService,"query_control_status")
+
+def test_fixed_production_query_alone_emits_authoritative_readonly_view(monkeypatch):
+ import policy.enforcement_evidence.status_engine as status_engine
+ s=EvidenceStore(); _lifecycle,identity_value=composition(s)
+ definition=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
+ scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.EXECUTION,"x")
+ class FixedComposition:
+  def _derive(self, **kwargs):
+   return definition,identity_value,(),tuple(kwargs["subjects"]),AssertionVerdict.NOT_OBSERVED,NOW-timedelta(hours=24),(),()
+ monkeypatch.setattr(status_engine,"_compose_runtime_readonly_derivation",lambda: FixedComposition())
+ view=status_engine.query_control_status(control_id=definition.control_id,control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
+ assert isinstance(view,ControlStatusView)
+ assert view.classification == "AUTHORITATIVE_READONLY_DERIVATION"
+ assert view.persisted is False
 
 def test_readonly_query_uses_captured_snapshot_without_later_artifact_loads(monkeypatch):
  s=EvidenceStore(); lifecycle,identity_value=composition(s)
- from policy.enforcement_evidence.status_engine import _TrustedReadonlyStatusQuery
- service=_TrustedReadonlyStatusQuery(s,type("Fixed",(),{"verify_loaded_identity_bytes":lambda _self, value, manifest: {}})(),identity_value.implementation_identity_hash)
+ from policy.enforcement_evidence.status_engine import _ReadonlyStatusDerivation
+ service=_ReadonlyStatusDerivation(s,type("Fixed",(),{"verify_loaded_identity_bytes":lambda _self, value, manifest: {}})(),identity_value.implementation_identity_hash)
  captured=s.observations()
  # MariaDB supplies all verified observations/domains from one RR snapshot;
  # a later insert or artifact loader must not affect this query result.
