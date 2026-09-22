@@ -3377,8 +3377,20 @@ jobs:
           #   contra el código viejo (ImportError: cannot import name
           #   'descarte' from 'jacobs') antes de escribir el módulo; verde
           #   tras -- 7 passed (los 3 de Task 1 + los 4 nuevos).
-          grep -qE "^2413 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2413 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2413 -> 2418 (feat/descartar-pipelines, Task 2, fix round 1,
+          #   2026-09-22, Ruling 7, I-1): +5 en tests/test_jacobs_descarte.py --
+          #   descarte.validar_transicion(accion, desde, a), la regla que
+          #   store.pipeline_transicion_descarte tiene que consultar ANTES de
+          #   tocar la base (sin ella, un discard desde running liberaba el
+          #   cupo de un pipeline que seguía corriendo, huérfano para
+          #   siempre): rechaza un `desde` no permitido para la acción,
+          #   rechaza `hide` con `desde` distinto de discarded, exige el
+          #   destino fijo en discard/hide/restore, exige que `a` sea un
+          #   estado previo válido en recover, y confirma que las seis
+          #   transiciones legítimas no levantan. Verde tras -- 12 passed
+          #   (7 anteriores + 5 nuevos).
+          grep -qE "^2418 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2418 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4504,8 +4516,30 @@ jobs:
           #   en hide tumba test_ocultar_y_restaurar_conservan_las_columnas.
           #   No corrida por CI (mutación manual, igual criterio que el
           #   punto anterior de este mismo archivo).
-          grep -qE "^134 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 134 tests CORRIDOS."; exit 1; }
+          # 134 -> 138 (feat/descartar-pipelines, Task 2, fix round 1,
+          #   2026-09-22, Ruling 7, I-1): +4 en tests/test_jacobs_descarte_db.py
+          #   (TransicionDescarteCasDBTest) -- pipeline_transicion_descarte
+          #   ahora valida la transición ANTES de escribir: discard desde
+          #   running levanta descarte.TransicionDescarteInvalida y la fila
+          #   queda intacta (running); hide desde aborted levanta igual (hide
+          #   sólo está permitido desde discarded); recover con un `a` válido
+          #   en general pero que no coincide con el status_previo REAL de la
+          #   fila NO levanta -- devuelve False, no escribe (lo hace cumplir
+          #   el WHERE status_previo=%s, no la validación); ciclo completo de
+          #   expired (M-2) confirma que recover vuelve al estado EXACTO.
+          #   Vistos en ROJO contra el código viejo -- confirmado el bug real
+          #   del hallazgo I-1: discard desde running Y hide desde aborted
+          #   ESCRIBÍAN (2 failed); verde tras el fix -- 13 passed, 0 failed
+          #   (9 anteriores + 4 nuevos). Mutación verificada a mano: quitar
+          #   la llamada a descarte.validar_transicion tumba
+          #   test_descartar_desde_running_rechaza_y_no_escribe y
+          #   test_ocultar_desde_aborted_rechaza_y_no_escribe (2 failed,
+          #   11 passed) -- el test de recover-no-coincide sigue pasando
+          #   porque esa protección vive en el WHERE, no en la validación,
+          #   confirmando que están probando cosas distintas. Revertida.
+          #   No corrida por CI (igual criterio que el punto anterior).
+          grep -qE "^138 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 138 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
