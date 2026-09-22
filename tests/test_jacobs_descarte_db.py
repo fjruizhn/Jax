@@ -18,6 +18,7 @@ import json
 import time
 import unittest
 import uuid
+from unittest import mock
 
 from base_de_test import exigir_base_de_test  # noqa: E402
 
@@ -335,36 +336,36 @@ class TransicionDescarteAtomicaDBTest(unittest.IsolatedAsyncioTestCase):
                     (self.pid,))
                 return list(await cur.fetchall())
 
-    async def test_si_el_insert_del_evento_falla_el_update_no_queda(self):
+    async def test_si_el_insert_del_evento_falla_la_transicion_se_deshace(self):
         """El INSERT del evento revienta con un error REAL de MariaDB, no un
         mock.
 
-        Fix round 2 (MAJOR de la revisión): un `mock.patch.object(store,
-        "event_append", side_effect=...)` que levanta SIN mirar sus
-        argumentos no distingue "el INSERT se intentó en la conexión
-        correcta, dentro de la transacción, y falló" de "ni siquiera se
-        llegó a intentar" -- si alguien saca `conexion=conn` en
-        `store.py::pipeline_transicion_descarte`, el mock ciego de la
-        versión anterior seguía en verde igual, porque de todos modos iba a
-        levantar. Reemplazado por un fallo que la base MISMA produce: el
-        `evento_payload` de este test lleva un `float("nan")` -- Python
-        serializa `NaN`/`Infinity` por defecto (`json.dumps(..., allow_nan=True)`
-        es el default), pero la gramática JSON estricta no los admite. La
-        columna `payload JSON` de `jacobs_events` es, en MariaDB, un alias
-        de `LONGTEXT` con un `CHECK (JSON_VALID(payload))` automático desde
-        10.2.7 -- así que el INSERT choca con ese CHECK. Confirmado contra
-        la base real antes de escribir esta versión:
-        `(4025, "CONSTRAINT \\`jacobs_events.payload\\` failed for ...")`.
+        **Lo que esta prueba SÍ demuestra** (fix round 3, corrección de la
+        revisión): que un fallo en la escritura de auditoría propaga la
+        excepción y DESHACE la transición completa -- la fila queda en
+        `aborted` (no en `discarded`) y no queda ningún evento. Eso es
+        cierto pase lo que pase con `conexion=conn`: si alguien lo sacara,
+        el INSERT fallido en la conexión del pool también levantaría, la
+        excepción también saldría de `async with transaccion(conn):`, y el
+        UPDATE (que sigue sin commitear en `conn` en ESE momento) también se
+        descartaría igual -- esta prueba NO distingue esos dos casos, así
+        que NO prueba que el INSERT haya corrido en la MISMA conexión que
+        el UPDATE. Esa propiedad (la que de verdad exige `conexion=conn`)
+        la prueba `test_el_evento_no_es_visible_para_otra_conexion_antes_del_commit`,
+        de abajo, con una espía y una lectura desde OTRA sesión mientras la
+        transacción sigue abierta.
 
-        Con el error viniendo de la base y no de un doble, la aserción de
-        abajo (`fila.status == aborted`) sí depende de qué conexión recibió
-        el INSERT: si el INSERT fallara en una conexión DISTINTA a la del
-        UPDATE (la mutación de "volver a dos conexiones"), el UPDATE ya
-        habría quedado autocommiteado en su propia conexión ANTES de que el
-        evento fallara, y la fila terminaría en `discarded` -- la aserción
-        cae. Con las dos en la MISMA transacción, el error del INSERT
-        descarta también el UPDATE con ella (`transaccion()` cierra la
-        conexión en vez de mandar `ROLLBACK`), y la fila queda en `aborted`."""
+        El fallo: el `evento_payload` de este test lleva un `float("nan")`
+        -- Python serializa `NaN`/`Infinity` por defecto
+        (`json.dumps(..., allow_nan=True)` es el default), pero la
+        gramática JSON estricta no los admite. La columna `payload JSON` de
+        `jacobs_events` es, en MariaDB, un alias de `LONGTEXT` con un
+        `CHECK (JSON_VALID(payload))` automático **desde 10.4.3** (no
+        10.2.7 -- esa fue la versión que agregó el TIPO `JSON` como alias;
+        el CHECK automático es dos años después) -- así que el INSERT choca
+        con ese CHECK. Confirmado contra la base real antes de escribir
+        esta versión: `(4025, "CONSTRAINT \\`jacobs_events.payload\\`
+        failed for ...")`."""
         payload_invalido = {
             "user_id": "u1", "desde": "aborted", "a": "discarded", "x": float("nan"),
         }
@@ -378,6 +379,66 @@ class TransicionDescarteAtomicaDBTest(unittest.IsolatedAsyncioTestCase):
         fila = await store.pipeline_get(self.pid)
         self.assertEqual(fila.status, PipelineStatus.aborted)
         self.assertEqual(await self._eventos(), [])
+
+    async def test_el_evento_no_es_visible_para_otra_conexion_antes_del_commit(self):
+        """Fix round 3 (MAJOR, la revisión mostró por qué el test anterior
+        no alcanzaba): la única forma de probar "el INSERT del evento corrió
+        en la MISMA conexión/transacción que el UPDATE" es de comportamiento,
+        no de que un error se propague -- eso último es cierto tanto si
+        comparten conexión como si no.
+
+        La prueba real de aislamiento transaccional: mientras la
+        transacción de `pipeline_transicion_descarte` sigue ABIERTA (no
+        confirmada todavía), una conexión DISTINTA no puede ver el evento
+        recién insertado -- MVCC nunca deja ver filas de una transacción sin
+        confirmar, sea cual sea el nivel de aislamiento. Eso sólo es
+        observable si el INSERT corrió DENTRO de esa transacción abierta; si
+        `event_append` escribiera por el pool en autocommit (la mutación de
+        sacar `conexion=conn`, store.py:1722), el evento se confirmaría SOLO
+        (fuera de la transacción del UPDATE) y sería visible de inmediato --
+        la cuenta de abajo daría 1, no 0, y la aserción cae.
+
+        Mecanismo: una espía que ENVUELVE (no reemplaza) el
+        `store.event_append` real -- llama al original de verdad (así el
+        INSERT ocurre) y, ANTES de devolver el control a
+        `pipeline_transicion_descarte` (que todavía no llegó al `commit()`
+        de `transaccion()`), abre una conexión NUEVA del pool y cuenta las
+        filas de `jacobs_events` para este pipeline. Tiene que dar 0."""
+        orig_event_append = store.event_append
+        vistos_durante_la_transaccion: list[int] = []
+
+        async def espia(*args, **kwargs):
+            self.assertIsNotNone(
+                kwargs.get("conexion"),
+                "pipeline_transicion_descarte tiene que pasar conexion= a event_append")
+            await orig_event_append(*args, **kwargs)
+            # Todavía dentro de `async with transaccion(conn):` en el llamador:
+            # el commit del UPDATE+evento no corrió todavía. Otra conexión NO
+            # tiene que poder ver el evento recién insertado.
+            async with store.conexion() as otra_conexion:
+                async with otra_conexion.cursor() as cur:
+                    await cur.execute(
+                        "SELECT COUNT(*) FROM jacobs_events WHERE pipeline_id=%s", (self.pid,))
+                    vistos_durante_la_transaccion.append((await cur.fetchone())[0])
+
+        with mock.patch.object(store, "event_append", new=espia):
+            ok = await store.pipeline_transicion_descarte(
+                self.pid, 3, "discard",
+                desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1",
+                evento_tipo="PIPELINE_DISCARDED",
+                evento_payload={"user_id": "u1", "desde": "aborted", "a": "discarded"},
+            )
+        self.assertTrue(ok)
+        self.assertEqual(
+            vistos_durante_la_transaccion, [0],
+            "el evento ya era visible para OTRA conexión antes de que la "
+            "transacción del CAS confirmara -- el INSERT no corrió en la "
+            "misma conexión/transacción que el UPDATE",
+        )
+        # Después del commit (pipeline_transicion_descarte ya retornó):
+        # ahora SÍ tiene que estar, y ser el único.
+        eventos = await self._eventos()
+        self.assertEqual(len(eventos), 1)
 
     async def test_transicion_exitosa_deja_exactamente_un_evento_con_el_payload(self):
         ok = await _transicion(

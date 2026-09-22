@@ -4647,18 +4647,60 @@ jobs:
           #   serializa (`json.dumps` con `allow_nan=True` por default), pero
           #   la columna `payload JSON` de `jacobs_events` trae un
           #   `CHECK (JSON_VALID(payload))` automático (MariaDB declara JSON
-          #   como alias de LONGTEXT + ese CHECK desde 10.2.7) y `NaN` no es
-          #   JSON válido -- confirmado contra la base real antes de escribir
-          #   el test: `(4025, "CONSTRAINT \`jacobs_events.payload\` failed
-          #   ...")`. CERO tests nuevos (se reescribió el mismo test, no se
-          #   agregó otro): el piso se queda en 143. Mutación re-verificada
-          #   con el error real (no el mock viejo): revertir a dos conexiones
-          #   separadas sigue tumbando el test, y por la razón correcta
-          #   (`fila.status == discarded`, no `aborted`: el UPDATE ya había
-          #   quedado autocommiteado en su propia conexión antes de que el
-          #   INSERT del evento fallara en la otra).
-          grep -qE "^143 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 143 tests CORRIDOS."; exit 1; }
+          #   como alias de LONGTEXT + ese CHECK **desde 10.4.3** -- CORREGIDO
+          #   en fix round 3: acá decía "10.2.7", que es cuando se agregó el
+          #   TIPO `JSON` como alias, no el CHECK automático, dos años antes)
+          #   y `NaN` no es JSON válido -- confirmado contra la base real
+          #   antes de escribir el test: `(4025, "CONSTRAINT
+          #   \`jacobs_events.payload\` failed ...")`. CERO tests nuevos (se
+          #   reescribió el mismo test, no se agregó otro): el piso se queda
+          #   en 143.
+          #
+          #   CLAIM FALSO EN ESTE PUNTO, CORREGIDO en fix round 3 (la
+          #   revisión lo destapó): acá decía que la mutación de "volver a
+          #   dos conexiones separadas" tumbaba el test "por la razón
+          #   correcta". Es cierto para ESA mutación (revertir TODO el
+          #   mecanismo a `_ejecutar_condicional` + `event_append` sin
+          #   conexión), pero esa no es la mutación mínima real: sólo sacar
+          #   `conexion=conn` de la línea 1722 (dejando `transaccion()` y
+          #   `conexion_dedicada()` como están) hace que el INSERT falle en
+          #   OTRA conexión, la excepción salga igual de
+          #   `async with transaccion(conn):`, y el UPDATE (que en ESE
+          #   momento sigue sin commitear en `conn`) se descarte IGUAL --
+          #   este test queda en VERDE con esa mutación mínima. El test de
+          #   NaN prueba que un fallo del evento deshace la transición
+          #   entera (cierto e importante), pero NO prueba que el INSERT
+          #   haya corrido en la misma conexión que el UPDATE -- esa
+          #   propiedad exige ver a través de la transacción TODAVÍA
+          #   ABIERTA, no sólo que algo falle.
+          # 143 -> 144 (feat/descartar-pipelines, Task 3, fix round 3,
+          #   2026-09-22): +1,
+          #   test_el_evento_no_es_visible_para_otra_conexion_antes_del_commit
+          #   -- prueba de comportamiento, no de propagación de error. Una
+          #   ESPÍA envuelve (llama al original de verdad) `store.event_append`;
+          #   justo después de que el INSERT corrió pero ANTES de que
+          #   `pipeline_transicion_descarte` llegue al `commit()` de
+          #   `transaccion()`, abre una conexión NUEVA del pool y cuenta las
+          #   filas de `jacobs_events` para ese pipeline: tiene que dar 0
+          #   (MVCC: ninguna transacción ve filas sin confirmar de otra,
+          #   nunca, sea cual sea el nivel de aislamiento) -- eso SÓLO es
+          #   posible si el INSERT corrió DENTRO de la transacción abierta
+          #   del UPDATE. También exige que `event_append` haya recibido
+          #   `conexion=` no-None. Después de que la función retorna
+          #   (transacción ya confirmada), exactamente un evento. Mutación
+          #   MÍNIMA verificada de verdad (sacar sólo `conexion=conn` de la
+          #   línea 1722, dejando el resto igual): el test nuevo CAE
+          #   (`AssertionError: unexpectedly None`, porque la espía ve
+          #   `kwargs.get("conexion")` en None -- ni siquiera hace falta
+          #   llegar a la cuenta para atraparlo), mientras que
+          #   `test_si_el_insert_del_evento_falla_la_transicion_se_deshace` y
+          #   `test_transicion_exitosa_deja_exactamente_un_evento_con_el_payload`
+          #   SIGUEN EN VERDE con esa misma mutación mínima -- confirmando
+          #   que ninguno de los dos probaba lo que este nuevo sí prueba.
+          #   Revertida byte a byte. Verde tras -- 144 passed, 0 failed (143
+          #   anteriores + 1 nuevo).
+          grep -qE "^144 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 144 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
