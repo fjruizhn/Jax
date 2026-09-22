@@ -6,10 +6,11 @@ from jax.memory.b9 import (
     MemoryReference, MemoryReferenceResolver, ObjectKind, ResolutionResult,
     ResolutionState, ScopeContext, ScopeDenied, Visibility,
 )
+from jax.memory.b9_resolvers import DesignatedSourceResolver
 
 
-def scope(tenant="t1", subject="u1", actor="user:u1"):
-    return ScopeContext(actor, "USER", subject, tenant, "p1", request_id="r")
+def scope(tenant="t1", subject="u1", actor="user:u1", project="p1"):
+    return ScopeContext(actor, "USER", subject, tenant, project, request_id="r")
 
 
 def api(roles=("memory_admin",)):
@@ -101,6 +102,7 @@ def test_projection_mismatch_requires_reconciliation():
     a=api(); mid=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
     a._store.projections[mid] = a._store.projections[mid].__class__(mid, None, None, False, "bad")
     with pytest.raises(ReconciliationRequired): a._store.projection(mid)
+    with pytest.raises(ReconciliationRequired): a.revise(scope(), mid, "cannot mutate")
 
 
 def test_synthesis_is_unverified_and_not_recursive():
@@ -111,8 +113,55 @@ def test_synthesis_is_unverified_and_not_recursive():
     with pytest.raises(Exception): a.synthesize(scope(),[derived],"again",provider="p",model="m",transformation_version="1")
 
 
+def test_retrieve_requires_tenant_and_enforces_project_and_visibility():
+    a=api()
+    private=a.create(scope(),ObjectKind.FACT,"private",Visibility.USER_PRIVATE,user_id="u1")
+    project=a.create(scope(),ObjectKind.FACT,"project",Visibility.PROJECT_SHARED,project_id="p1")
+    assert {e.identity.memory_id for e in a.retrieve(scope())} == {private, project}
+    with pytest.raises(ScopeDenied): a.retrieve(ScopeContext("x","USER","u1","", "p1"))
+    assert {e.identity.memory_id for e in a.retrieve(scope(project="p2"))} == {private}
+
+
+def test_tombstone_expire_and_cross_tenant_rescope_preserve_history():
+    a=api(); mid=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    a.tombstone(scope(),mid,reason="privacy")
+    assert a._store.revisions[mid][-1].lifecycle is Lifecycle.TOMBSTONED
+    with pytest.raises(ScopeDenied): a.envelope(scope(),mid)
+    # New tenant is a new namespace/object, never a revision of old ID.
+    old=a.create(scope(),ObjectKind.FACT,"move",Visibility.USER_PRIVATE,user_id="u1")
+    new=a.rescope(scope(),old,new_visibility=Visibility.USER_PRIVATE,new_user_id="u2",
+                  destination_scope=scope(tenant="t2",subject="u2",actor="admin:u2"))
+    assert new != old and a._store.objects[new].tenant_id == "t2"
+    assert a._store.events[new][-1].kind is EventKind.RE_SCOPE
+
+
+def test_event_records_actor_delegation_component_and_trace():
+    a=api(); worker=ScopeContext("service:worker","SERVICE","u1","t1","p1",
+                                 delegation="user-request",calling_component="memory-worker",
+                                 request_id="r",trace_id="trace")
+    mid=a.create(worker,ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    e=a._store.events[mid][0]
+    assert (e.actor_type,e.delegation,e.calling_component,e.request_id,e.trace_id) == (
+        "SERVICE","user-request","memory-worker","r","trace")
+
+
+def test_typed_resolvers_fail_unavailable_and_reject_wrong_current_source():
+    resolver=DesignatedSourceResolver()
+    assert resolver.resolve(MemoryReference("decision", "d")).state is ResolutionState.SOURCE_UNAVAILABLE
+    bad=DesignatedSourceResolver({"decision": lambda _: ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B7",0,{})})
+    assert bad.resolve(MemoryReference("decision", "d")).state is ResolutionState.INVALID_REFERENCE
+    good=DesignatedSourceResolver({"decision": lambda _: ResolutionResult(ResolutionState.RESOLVED_CURRENT,"B5",0,{})})
+    assert good.resolve(MemoryReference("decision", "d")).current_source_resolved
+
+
+def test_expired_and_tombstoned_content_never_returns_from_retrieval():
+    a=api(); mid=a.create(scope(),ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
+    a.expire(scope(),mid,reason="ttl")
+    assert not a.retrieve(scope())
+
+
 def test_repl_legacy_adapter_requires_tenant_and_labels_memory():
     from jax.core.main import _render_legacy_repl_memory
     assert _render_legacy_repl_memory(1, None, [("fact", "1", "current text")]) == ""
     rendered = _render_legacy_repl_memory(1, 2, [("fact", "1", "current text")])
-    assert "UNVERIFIED MEMORY" in rendered and "current text" in rendered
+    assert "HISTORICAL MEMORY" in rendered and "current text" in rendered

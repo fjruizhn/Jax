@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Instalador idempotente: env REPL + timer del worker + restart jax-platform.
+# Installer helper only.  Production deployment owns enable/restart decisions;
+# B9 does not restart platform services as a side effect of memory setup.
 set -euo pipefail
 ENVF=/etc/jax/.env
 SD=/home/fruiz/jax/config/systemd
@@ -24,10 +25,5 @@ install -m 644 "$SD/jax-memory-worker.timer"  /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now jax-memory-worker.timer
 systemctl list-timers jax-memory-worker.timer --no-pager || true
-
-echo "== 3) Reiniciar jax-platform (carga chat.py/main.py nuevos) =="
-systemctl restart jax-platform
-sleep 3
-systemctl is-active jax-platform && echo "   jax-platform ACTIVO"
 
 echo "LISTO."

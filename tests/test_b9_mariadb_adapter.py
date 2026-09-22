@@ -42,7 +42,8 @@ def bundle():
 @pytest.mark.asyncio
 async def test_bundle_is_one_transaction():
     c=Conn(); await MariaDBB9Store(Pool(c)).persist_bundle(*bundle())
-    assert c.begun and c.committed and not c.rolled and len(c.cur.sql)==5
+    assert c.begun and c.committed and not c.rolled and len(c.cur.sql)==6
+    assert any("memory_revision_payloads" in sql for sql, _ in c.cur.sql)
 
 @pytest.mark.asyncio
 async def test_bundle_failure_rolls_back_every_step():

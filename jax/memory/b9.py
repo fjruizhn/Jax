@@ -156,6 +156,11 @@ class MemoryEvent:
     occurred_at: float
     details: Mapping[str, Any] = field(default_factory=dict)
     compensates_event_id: str | None = None
+    actor_type: str | None = None
+    delegation: str | None = None
+    calling_component: str | None = None
+    request_id: str | None = None
+    trace_id: str | None = None
 
 @dataclass(frozen=True)
 class MemoryProjection:
@@ -229,10 +234,22 @@ class PromptMemoryContext:
         sections: list[str] = []
         for e in self.entries:
             if e.revision.payload is None: continue
-            if e.trust_classification == "CURRENT_SOURCE_RESOLVED": label="CURRENT-SOURCE-RESOLVED REFERENCE"
-            elif e.revision.lifecycle is Lifecycle.VERIFIED: label="VERIFIED MEMORY"
-            elif e.identity.kind is ObjectKind.SYNTHESIS: label="SYNTHESIZED MEMORY"
-            else: label="UNVERIFIED MEMORY"
+            if e.trust_classification == "CURRENT_SOURCE_RESOLVED":
+                label="CURRENT-SOURCE-RESOLVED REFERENCE"
+            elif any(r.state in {ResolutionState.UNRESOLVED, ResolutionState.SOURCE_UNAVAILABLE,
+                                  ResolutionState.INVALID_REFERENCE, ResolutionState.SOURCE_DELETED,
+                                  ResolutionState.SOURCE_PAYLOAD_PURGED} for r in e.resolution):
+                label="UNRESOLVED REFERENCE"
+            elif e.revision.lifecycle is Lifecycle.VERIFIED:
+                label="VERIFIED MEMORY"
+            elif e.identity.kind is ObjectKind.SYNTHESIS:
+                label="SYNTHESIZED MEMORY"
+            elif e.identity.kind is ObjectKind.MESSAGE and any(p.actor_type == "USER" for p in e.provenance):
+                label="USER-PROVIDED MEMORY"
+            elif e.revision.provenance_status.startswith("LEGACY"):
+                label="HISTORICAL MEMORY"
+            else:
+                label="UNVERIFIED MEMORY"
             sections.append(f"[{label} id={e.identity.memory_id} revision={e.revision.revision_id}]\n{e.revision.payload}")
         return "\n\n".join(sections)
 
@@ -259,7 +276,24 @@ def legacy_prompt_context(scope: ScopeContext, entries: Iterable[tuple[str, str,
 
 
 def _derive_projection(memory_id: str, revisions: list[MemoryRevision], events: list[MemoryEvent]) -> MemoryProjection:
+    """Reduce immutable history into an efficiency projection.
+
+    A revision is immutable content/scope state; events decide which state is
+    presently usable.  Keeping that rule here prevents a projection from
+    becoming an alternative source of lifecycle truth.
+    """
     current = revisions[-1] if revisions else None
+    if current is not None:
+        by_id = {revision.revision_id: revision for revision in revisions}
+        state = current.lifecycle
+        for event in events:
+            if event.revision_id and event.revision_id in by_id:
+                state = by_id[event.revision_id].lifecycle
+            elif event.kind is EventKind.TOMBSTONE:
+                state = Lifecycle.TOMBSTONED
+            elif event.kind is EventKind.CONTENT_PURGE:
+                state = Lifecycle.PURGED
+        current = replace(current, lifecycle=state)
     history = [{"r": r.revision_id, "l": r.lifecycle.value, "d": r.content_digest} for r in revisions]
     history += [{"e": e.event_id, "k": e.kind.value, "r": e.revision_id} for e in events]
     return MemoryProjection(memory_id, current.revision_id if current else None,
@@ -305,6 +339,18 @@ class MemoryAPI:
     def _authorize(self, scope: ScopeContext, operation: str, visibility: Visibility) -> MutationAuthorizationContext:
         return self._authorizer.resolve(scope, operation, visibility)
 
+    @staticmethod
+    def _event(scope: ScopeContext, auth: MutationAuthorizationContext, memory_id: str,
+               revision_id: str | None, kind: EventKind, now: float,
+               details: Mapping[str, Any] | None = None) -> MemoryEvent:
+        return MemoryEvent(
+            _uuid7(), memory_id, revision_id, kind, scope.actor_principal,
+            scope.subject_user_id, auth.authority_source, now, details or {},
+            actor_type=scope.actor_type, delegation=scope.delegation,
+            calling_component=scope.calling_component, request_id=scope.request_id,
+            trace_id=scope.trace_id,
+        )
+
     def create(self, scope: ScopeContext, kind: ObjectKind, content: str, visibility: Visibility,
                *, user_id: str | None=None, project_id: str | None=None, transformation_id: str="application",
                provider: str | None=None, model: str | None=None, provenance_status: str="COMPLETE") -> str:
@@ -316,7 +362,7 @@ class MemoryAPI:
             obj = MemoryObject(mid, kind, scope.tenant_id, now)
             rev = MemoryRevision(rid, mid, _digest(content), visibility, user_id, project_id, Lifecycle.ACTIVE, now, content, provenance_status)
             prov = MemoryProvenance(_uuid7(), rid, (), transformation_id, "1", scope.actor_principal, scope.actor_type, scope.subject_user_id, provider, model, now)
-            event = MemoryEvent(_uuid7(), mid, rid, EventKind.CREATE, scope.actor_principal, scope.subject_user_id, auth.authority_source, now)
+            event = self._event(scope, auth, mid, rid, EventKind.CREATE, now)
             s._commit(obj, rev, prov, event); return mid
         return self._store.transaction(work)
 
@@ -328,14 +374,17 @@ class MemoryAPI:
             now=time.time(); mid,rid=_uuid7(),_uuid7(); obj=MemoryObject(mid,kind,scope.tenant_id,now,binding)
             payload=content; rev=MemoryRevision(rid,mid,_digest(content or ""),Visibility.SYSTEM_INTERNAL,None,None,Lifecycle.ACTIVE,now,payload,"LEGACY_PROVENANCE_INCOMPLETE")
             prov=MemoryProvenance(_uuid7(),rid,(),"legacy-import","1",scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now,"LEGACY_PROVENANCE_INCOMPLETE")
-            event=MemoryEvent(_uuid7(),mid,rid,EventKind.IMPORT_LEGACY,scope.actor_principal,scope.subject_user_id,auth.authority_source,now)
+            event=self._event(scope,auth,mid,rid,EventKind.IMPORT_LEGACY,now)
             s._commit(obj,rev,prov,event); s.bindings[binding]=mid; return mid
         return self._store.transaction(work)
 
     def revise(self, scope: ScopeContext, memory_id: str, content: str, *, visibility: Visibility | None=None,
                user_id: str | None=None, project_id: str | None=None, event_kind: EventKind=EventKind.CORRECT) -> str:
-        obj=self._store.objects[memory_id]; old=self._store.projection(memory_id)
-        if old.reconciliation_required: raise ReconciliationRequired(memory_id)
+        obj=self._store.objects[memory_id]
+        # Always compare the stored projection with canonical history before a
+        # sensitive mutation.  Reading a boolean from the projection alone
+        # would let a tampered/stale projection escape detection.
+        self._store.projection(memory_id)
         previous=self._store.revisions[memory_id][-1]; vis=visibility or previous.visibility
         auth=self._authorize(scope,event_kind.value,vis)
         if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant cannot change under same memory id")
@@ -343,7 +392,7 @@ class MemoryAPI:
         def work(s: InMemoryB9Store) -> str:
             now=time.time(); rid=_uuid7(); rev=MemoryRevision(rid,memory_id,_digest(content),vis,user_id,project_id,Lifecycle.ACTIVE,now,content,previous.provenance_status,previous.revision_id)
             prov=MemoryProvenance(_uuid7(),rid,(previous.revision_id,),"revision","1",scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now)
-            event=MemoryEvent(_uuid7(),memory_id,rid,event_kind,scope.actor_principal,scope.subject_user_id,auth.authority_source,now,{"old_scope":previous.visibility.value,"new_scope":vis.value})
+            event=self._event(scope,auth,memory_id,rid,event_kind,now,{"old_scope":previous.visibility.value,"new_scope":vis.value})
             s._commit(obj,rev,prov,event); return rid
         return self._store.transaction(work)
 
@@ -359,11 +408,33 @@ class MemoryAPI:
             # Tenant is namespace identity: transfer is explicitly a new object,
             # never a revision pretending to remain in the old namespace.
             if prior.payload is None: raise ScopeDenied("purged payload cannot be re-scoped")
-            return self.create(destination_scope, obj.kind, prior.payload, new_visibility,
-                               user_id=new_user_id, project_id=new_project_id,
-                               transformation_id="tenant-re-scope", provenance_status=prior.provenance_status)
+            # Tenant is part of namespace identity.  The destination is a
+            # distinct object, but the provenance records the predecessor so
+            # that this is never a silent copy across tenants.
+            return self._create_cross_tenant_successor(
+                destination_scope, obj, prior, new_visibility, new_user_id,
+                new_project_id,
+            )
         return self.revise(scope, memory_id, prior.payload or "", visibility=new_visibility,
                            user_id=new_user_id, project_id=new_project_id, event_kind=EventKind.RE_SCOPE)
+
+    def _create_cross_tenant_successor(self, destination: ScopeContext, old_object: MemoryObject,
+                                       prior: MemoryRevision, visibility: Visibility,
+                                       user_id: str | None, project_id: str | None) -> str:
+        auth = self._authorize(destination, "RE_SCOPE", visibility)
+        def work(s: InMemoryB9Store) -> str:
+            now=time.time(); mid,rid=_uuid7(),_uuid7()
+            obj=MemoryObject(mid,old_object.kind,destination.tenant_id,now)
+            rev=MemoryRevision(rid,mid,_digest(prior.payload or ""),visibility,user_id,project_id,
+                               Lifecycle.ACTIVE,now,prior.payload,prior.provenance_status)
+            prov=MemoryProvenance(_uuid7(),rid,(prior.revision_id,),"tenant-re-scope","1",
+                                  destination.actor_principal,destination.actor_type,
+                                  destination.subject_user_id,None,None,now)
+            event=self._event(destination,auth,mid,rid,EventKind.RE_SCOPE,now,
+                              {"old_memory_id":old_object.memory_id,"old_tenant_id":old_object.tenant_id,
+                               "new_tenant_id":destination.tenant_id})
+            s._commit(obj,rev,prov,event); return mid
+        return self._store.transaction(work)
 
     def verify(self, scope: ScopeContext, memory_id: str, *, method: str, limitations: str | None=None) -> str:
         obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]
@@ -373,7 +444,7 @@ class MemoryAPI:
         def work(s: InMemoryB9Store) -> str:
             now=time.time(); rid=_uuid7(); rev=replace(old,revision_id=rid,lifecycle=Lifecycle.VERIFIED,created_at=now,prior_revision_id=old.revision_id)
             prov=MemoryProvenance(_uuid7(),rid,(old.revision_id,),"human-verification",method,scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now,limitations)
-            event=MemoryEvent(_uuid7(),memory_id,rid,EventKind.VERIFY,scope.actor_principal,scope.subject_user_id,auth.authority_source,now,{"method":method,"limitations":limitations})
+            event=self._event(scope,auth,memory_id,rid,EventKind.VERIFY,now,{"method":method,"limitations":limitations})
             s._commit(obj,rev,prov,event); return rid
         return self._store.transaction(work)
 
@@ -389,7 +460,7 @@ class MemoryAPI:
             now=time.time(); mid,rid=_uuid7(),_uuid7(); obj=MemoryObject(mid,ObjectKind.SYNTHESIS,scope.tenant_id,now)
             rev=MemoryRevision(rid,mid,_digest(content),Visibility.SYSTEM_INTERNAL,None,None,Lifecycle.ACTIVE,now,content,"COMPLETE")
             prov=MemoryProvenance(_uuid7(),rid,tuple(x.revision_id for x in sources),"synthesis",transformation_version,scope.actor_principal,scope.actor_type,scope.subject_user_id,provider,model,now)
-            event=MemoryEvent(_uuid7(),mid,rid,EventKind.SYNTHESIZE,scope.actor_principal,scope.subject_user_id,auth.authority_source,now,{"derivation_depth":1})
+            event=self._event(scope,auth,mid,rid,EventKind.SYNTHESIZE,now,{"derivation_depth":1})
             s._commit(obj,rev,prov,event); return mid
         return self._store.transaction(work)
 
@@ -399,7 +470,42 @@ class MemoryAPI:
         def work(s: InMemoryB9Store) -> str:
             now=time.time(); rid=_uuid7(); rev=replace(old,revision_id=rid,lifecycle=Lifecycle.PURGED,created_at=now,payload=None,prior_revision_id=old.revision_id)
             prov=MemoryProvenance(_uuid7(),rid,(old.revision_id,),"content-purge","1",scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now)
-            event=MemoryEvent(_uuid7(),memory_id,rid,EventKind.CONTENT_PURGE,scope.actor_principal,scope.subject_user_id,auth.authority_source,now)
+            event=self._event(scope,auth,memory_id,rid,EventKind.CONTENT_PURGE,now)
+            s._commit(obj,rev,prov,event); return rid
+        return self._store.transaction(work)
+
+    def tombstone(self, scope: ScopeContext, memory_id: str, *, reason: str) -> str:
+        """Withdraw content from retrieval while preserving privacy-safe identity."""
+        obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]
+        auth=self._authorize(scope,"TOMBSTONE",old.visibility)
+        if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant mismatch")
+        def work(s: InMemoryB9Store) -> str:
+            now=time.time(); rid=_uuid7()
+            rev=replace(old, revision_id=rid, lifecycle=Lifecycle.TOMBSTONED,
+                        created_at=now, payload=None, prior_revision_id=old.revision_id)
+            prov=MemoryProvenance(_uuid7(),rid,(old.revision_id,),"tombstone","1",
+                                  scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now,reason)
+            event=self._event(scope,auth,memory_id,rid,EventKind.TOMBSTONE,now,{"reason":reason})
+            s._commit(obj,rev,prov,event); return rid
+        return self._store.transaction(work)
+
+    def expire(self, scope: ScopeContext, memory_id: str, *, reason: str) -> str:
+        return self._lifecycle_revision(scope, memory_id, Lifecycle.EXPIRED, EventKind.EXPIRE, reason)
+
+    def supersede(self, scope: ScopeContext, memory_id: str, content: str) -> str:
+        return self.revise(scope, memory_id, content, event_kind=EventKind.SUPERSEDE)
+
+    def _lifecycle_revision(self, scope: ScopeContext, memory_id: str, lifecycle: Lifecycle,
+                            event_kind: EventKind, reason: str) -> str:
+        obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]
+        auth=self._authorize(scope,event_kind.value,old.visibility)
+        if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant mismatch")
+        def work(s: InMemoryB9Store) -> str:
+            now=time.time(); rid=_uuid7()
+            rev=replace(old,revision_id=rid,lifecycle=lifecycle,created_at=now,prior_revision_id=old.revision_id)
+            prov=MemoryProvenance(_uuid7(),rid,(old.revision_id,),event_kind.value.lower(),"1",
+                                  scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now,reason)
+            event=self._event(scope,auth,memory_id,rid,event_kind,now,{"reason":reason})
             s._commit(obj,rev,prov,event); return rid
         return self._store.transaction(work)
 
@@ -410,6 +516,27 @@ class MemoryAPI:
         if rev.lifecycle in {Lifecycle.TOMBSTONED,Lifecycle.PURGED} or rev.payload is None: raise ScopeDenied("memory payload unavailable")
         if rev.visibility is Visibility.USER_PRIVATE and rev.user_id != scope.subject_user_id: raise ScopeDenied("private retrieval denied")
         return MemoryEnvelope(obj,rev,tuple(self._store.provenance.get(rev.revision_id,())),tuple(references),{})
+
+    def retrieve(self, scope: ScopeContext, *, visibility: Visibility | None=None,
+                 project_id: str | None=None) -> tuple[MemoryEnvelope, ...]:
+        """Scope-first retrieval reference implementation.
+
+        Ranking is deliberately outside this method: selection never mutates
+        verification, lifecycle, or current-source classification.
+        """
+        if not scope.tenant_id: raise ScopeDenied("tenant scope is required")
+        if project_id is not None and project_id != scope.project_id:
+            raise ScopeDenied("project scope mismatch")
+        results=[]
+        for memory_id, obj in self._store.objects.items():
+            if obj.tenant_id != scope.tenant_id: continue
+            rev=self._store.revisions[memory_id][-1]
+            if visibility is not None and rev.visibility is not visibility: continue
+            if rev.visibility is Visibility.USER_PRIVATE and rev.user_id != scope.subject_user_id: continue
+            if rev.visibility is Visibility.PROJECT_SHARED and (not scope.project_id or rev.project_id != scope.project_id): continue
+            if rev.lifecycle in {Lifecycle.TOMBSTONED,Lifecycle.PURGED,Lifecycle.EXPIRED} or rev.payload is None: continue
+            results.append(self.envelope(scope,memory_id))
+        return tuple(results)
 
 
 class MemoryReferenceResolver:

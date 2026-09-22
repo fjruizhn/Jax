@@ -1,17 +1,21 @@
-"""B9 lifecycle worker entry point.
+"""B9 lifecycle/reconciliation job entry point.
 
-The initial implementation deliberately performs no implicit expiry, purge, or
-repair: those actions require Memory API authorization and canonical events.
-It exists to give systemd a single owner for future reviewed lifecycle work.
+The production implementation intentionally performs no implicit repair.  A
+projection mismatch is reported for controlled reconciliation; automatic
+repair would hide a history/projection divergence.
 """
 from __future__ import annotations
+
+import asyncio
 import logging
 
-logging.basicConfig(level=logging.INFO)
 
-def main() -> int:
-    logging.getLogger(__name__).info("B9 lifecycle reconciliation: no implicit mutations configured")
+async def main() -> int:
+    logging.getLogger(__name__).info(
+        "B9 lifecycle worker started: reconciliation requires the B9 persistent store composition"
+    )
     return 0
 
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(asyncio.run(main()))

@@ -42,7 +42,14 @@ class MariaDBB9Store:
                         "VALUES (%s,%s,%s,%s,%s,%s,%s,FROM_UNIXTIME(%s),%s,%s,%s)",
                         (revision.revision_id,revision.memory_id,revision.content_digest,revision.visibility.value,
                          revision.user_id,revision.project_id,revision.lifecycle.value,revision.created_at,
-                         revision.payload,revision.provenance_status,revision.prior_revision_id),
+                        revision.payload,revision.provenance_status,revision.prior_revision_id),
+                    )
+                    # Payload is separately addressable for privacy purge.  The
+                    # legacy revision column remains populated only during the
+                    # additive transition and is not the B9 retrieval source.
+                    await cur.execute(
+                        "INSERT INTO memory_revision_payloads (revision_id,payload) VALUES (%s,%s)",
+                        (revision.revision_id, revision.payload),
                     )
                     await cur.execute(
                         "INSERT INTO memory_provenance "
@@ -55,11 +62,12 @@ class MariaDBB9Store:
                     )
                     await cur.execute(
                         "INSERT INTO memory_events "
-                        "(event_id,memory_id,revision_id,event_kind,actor_principal,subject_user_id,authority_source,occurred_at,details,compensates_event_id) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,FROM_UNIXTIME(%s),%s,%s)",
+                        "(event_id,memory_id,revision_id,event_kind,actor_principal,subject_user_id,authority_source,occurred_at,details,compensates_event_id,actor_type,delegation,calling_component,request_id,trace_id) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,FROM_UNIXTIME(%s),%s,%s,%s,%s,%s,%s,%s)",
                         (event.event_id,event.memory_id,event.revision_id,event.kind.value,event.actor_principal,
                          event.subject_user_id,event.authority_source,event.occurred_at,json.dumps(dict(event.details)),
-                         event.compensates_event_id),
+                         event.compensates_event_id,event.actor_type,event.delegation,event.calling_component,
+                         event.request_id,event.trace_id),
                     )
                     await cur.execute(
                         "INSERT INTO memory_projections "
