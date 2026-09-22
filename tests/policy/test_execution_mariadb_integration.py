@@ -202,7 +202,7 @@ def _b8_runtime_identity_fixture(tmp_path):
     """Install a test deployment identity only through fixed composition."""
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
     from policy.enforcement_evidence.models import ImplementationIdentity, SourceState
-    from policy.enforcement_evidence.control_registry import _controls
+    from policy.enforcement_evidence.control_registry import _controls, load_control_definition
     from policy.enforcement_evidence.implementation_identity import _V1_REQUIRED_SOURCE_PATHS
     from policy.enforcement_evidence.trusted_lifecycle import EvidenceLifecycleService
     from policy.enforcement_evidence.implementation_identity import _ControlledTestIdentityProvider
@@ -214,7 +214,10 @@ def _b8_runtime_identity_fixture(tmp_path):
     identity=ImplementationIdentity("fjruizhn/Jax","1"*40,"2"*40,SourceState.CLEAN,manifest.evidence_hash)
     EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity))
     for definition in _controls.values():
-        evidence._MariaDBEvidenceStore__persist_control_definition(definition)
+        # Persist only the packaged registry instance; raw module values do
+        # not themselves carry the trusted-definition provenance marker.
+        evidence._MariaDBEvidenceStore__persist_control_definition(
+            load_control_definition(definition.control_id, definition.control_version))
     path=tmp_path/"implementation-identity.json"; path.write_text(json.dumps(identity.projection()),encoding="utf-8")
     return evidence, path
 
