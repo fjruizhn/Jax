@@ -259,3 +259,20 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
             desde=PipelineStatus.discarded, a=PipelineStatus.expired, user_id="u1")
         self.assertTrue(ok_recover)
         self.assertEqual(await self._fila(pid), ("expired", None, None, None))
+
+    # Task 3 (2026-09-22-descartar-pipelines): `store.pipeline_status_previo`
+    # es lo que lee la ruta de `/recover` para calcular `a` ANTES del CAS
+    # (jacobs/routes.py::transicion_descarte). Contra la base real, no un
+    # mock -- lo que se mockea en tests/test_jacobs_descarte.py es esta
+    # misma función.
+    async def test_status_previo_de_un_descartado(self):
+        await store.pipeline_transicion_descarte(
+            self.pid, 3, "discard",
+            desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        self.assertEqual(await store.pipeline_status_previo(self.pid), "aborted")
+
+    async def test_status_previo_de_uno_que_nunca_se_descarto_es_none(self):
+        self.assertIsNone(await store.pipeline_status_previo(self.pid))
+
+    async def test_status_previo_de_un_pipeline_inexistente_es_none(self):
+        self.assertIsNone(await store.pipeline_status_previo(str(uuid.uuid4())))

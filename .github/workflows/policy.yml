@@ -3389,8 +3389,43 @@ jobs:
           #   estado previo válido en recover, y confirma que las seis
           #   transiciones legítimas no levantan. Verde tras -- 12 passed
           #   (7 anteriores + 5 nuevos).
-          grep -qE "^2418 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2418 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2418 -> 2437 (feat/descartar-pipelines, Task 3, 2026-09-22): +19
+          #   en tests/test_jacobs_descarte.py -- rutas de Jacobs
+          #   (jacobs/routes.py): las cuatro rutas LITERALES
+          #   POST /pipeline/{id}/{discard,recover,hide,restore} (Ruling 1
+          #   del controlador: NO la ruta genérica `/{accion}` del brief, que
+          #   dependía del orden de declaración de FastAPI -- cuatro rutas
+          #   explícitas que llaman a la función común `transicion_descarte`
+          #   quitan ese riesgo de raíz) devuelven 200 con el destino, 404 si
+          #   el pipeline no existe, 409 `transicion_no_permitida` si el
+          #   estado actual no admite la acción, 409 `cambio_concurrente` si
+          #   el CAS no escribió (SIN emitir el evento -- mutación "emitir
+          #   antes del CAS" verificada a mano, cae con
+          #   `eventos.assert_not_awaited()`), y 422
+          #   `estado_previo_invalido` si `status_previo` está corrupto
+          #   (Ruling 8: sólo se atrapa `descarte.EstadoPrevioInvalido`, NO
+          #   `TransicionDescarteInvalida` ni `ValueError` genérico -- esas
+          #   son bugs de contrato, 500). `cancel_pipeline` rechaza
+          #   `discarded`/`hidden` con 409 (+ tupla de estados terminales).
+          #   `/continue` ya los rechazaba (ESTADOS_CONTINUABLES es un
+          #   allowlist explícito) -- test de baranda, no hubo cambio de
+          #   código. Evidencia por `TestClient` de que las cuatro rutas
+          #   literales llegan cada una a su propio handler y de que
+          #   `POST /cancel` sigue llegando a `cancel_pipeline` (no a
+          #   `transicion_descarte`). Autenticación (Step 5): `plataforma`
+          #   admite las cuatro rutas nuevas (ya cubierto por su regex
+          #   `/jacobs/.+`, sin cambio de código); `jacobs` NO las admite (su
+          #   único patrón, `POST /jacobs/pipeline`, es un `fullmatch` exacto
+          #   que no matchea `/jacobs/pipeline/p1/discard` -- sin cambio de
+          #   código, test de baranda). Vistos en ROJO contra el código viejo
+          #   (`AttributeError: transicion_descarte`/`pipeline_status_previo`,
+          #   y `test_cancel_rechaza_descartados_y_ocultos` fallando de
+          #   verdad porque cancel_pipeline no rechazaba discarded/hidden)
+          #   antes de escribir `jacobs/routes.py::transicion_descarte` y
+          #   `store.pipeline_status_previo`; verde tras -- 31 passed en el
+          #   archivo (12 anteriores + 19 nuevos). "17 skipped" no cambia.
+          grep -qE "^2437 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2437 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4538,8 +4573,23 @@ jobs:
           #   porque esa protección vive en el WHERE, no en la validación,
           #   confirmando que están probando cosas distintas. Revertida.
           #   No corrida por CI (igual criterio que el punto anterior).
-          grep -qE "^138 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 138 tests CORRIDOS."; exit 1; }
+          # 138 -> 141 (feat/descartar-pipelines, Task 3, 2026-09-22): +3 en
+          #   tests/test_jacobs_descarte_db.py -- store.pipeline_status_previo
+          #   (la que lee la ruta `/recover` de jacobs/routes.py ANTES del
+          #   CAS, para calcular `a`) contra MariaDB real
+          #   (127.0.0.1:3308, base de sesión jax_memory_test_auto<pid>):
+          #   devuelve el `status_previo` real de un descartado, `None` de
+          #   uno que nunca se descartó, y `None` de un pipeline inexistente.
+          #   Vistos en ROJO contra el código viejo (AttributeError: module
+          #   'jacobs.store' has no attribute 'pipeline_status_previo') antes
+          #   de escribir la función en store.py; verde tras -- corrida
+          #   COMPLETA del job (24 archivos, con `las_manos` en PYTHONPATH,
+          #   credenciales SOLO vía `sudo grep JAX_DB_(HOST|PORT|USER|PASSWORD)
+          #   /etc/jax/.env` exportadas en el mismo comando que invoca
+          #   pytest, nunca JAX_DB_NAME ni un `mysql` suelto) -- 141 passed,
+          #   0 failed (138 anteriores + 3 nuevos).
+          grep -qE "^141 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 141 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

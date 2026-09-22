@@ -1359,6 +1359,19 @@ async def pipeline_get(pipeline_id: str) -> Pipeline | None:
     return _row_to_pipeline(row)
 
 
+async def pipeline_status_previo(pipeline_id: str) -> str | None:
+    """`status_previo` de un pipeline (Task 3, spec descartar-pipelines §3):
+    a qué estado vuelve un `discarded` al recuperarlo. `None` si el
+    pipeline no existe o nunca se descartó."""
+    async with conexion_del_pool() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT status_previo FROM jacobs_pipelines WHERE pipeline_id=%s", (pipeline_id,)
+            )
+            fila = await cur.fetchone()
+    return fila[0] if fila else None
+
+
 async def pipeline_update_status(
     pipeline_id: str,
     status: PipelineStatus,
