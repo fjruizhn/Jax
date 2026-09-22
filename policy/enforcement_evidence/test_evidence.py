@@ -22,7 +22,7 @@ _TEST_CONTROL_MAP = {
  "tests/policy/test_enforcement_evidence_core.py::test_one_runtime_observation_never_mints_enforced": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_persisted_status_service_has_no_readonly_query_capability": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_caller_constructed_readonly_query_cannot_mint_authoritative_view": ("CTL.B6.GOVERNED_DISPATCH",),
- "tests/policy/test_enforcement_evidence_core.py::test_fixed_production_query_alone_emits_authoritative_readonly_view": ("CTL.B6.GOVERNED_DISPATCH",),
+ "tests/policy/test_enforcement_evidence_core.py::test_public_readonly_query_has_no_injectable_composition_hook": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_readonly_query_uses_captured_snapshot_without_later_artifact_loads": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_artifact_aggregate_and_envelope_bounds_are_fail_closed": ("CTL.B6.GOVERNED_DISPATCH",),
