@@ -3811,8 +3811,46 @@ jobs:
           #   namespaces/xattr anidados, NO el runner real de CI, y pasan sueltas confirmado) =
           #   2645. Delta +27 = +4 (pausa) +11 (huella_aceptar, B-1 y B-2) +7 (contratos_huella,
           #   M-2) +2 (preparar_directorio_misiones, MINOR) +3 (huella_registro_permisos, nuevo).
-          grep -qE "^2645 passed, 42 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2645 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 12 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 8 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
+          # 2645 -> 2663, 42 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 9,
+          #   auditoría adversarial, 2026-09-22 -- NO-GO de la auditoría 7: BLOCK-1/MAJOR-1
+          #   reproducido -- `quitar_pausa_si` usaba `os.rename` PRIMERO, con una ventana real
+          #   donde la pausa no existía; un kill justo ahí la perdía sin que nadie la hubiera
+          #   aceptado). Rediseñado sin ventana: `os.link` primero (la pausa NUNCA se saca de su
+          #   nombre), lectura de `tmp`, y sólo si coincide Y el inodo de `ruta` sigue siendo el
+          #   mismo que `tmp` (verificado con `os.stat`, `st_ino`+`st_dev`) se borra -- recién
+          #   ahí `unlink(ruta)` y después `unlink(tmp)`. MINOR-1: nada atrapa excepciones para
+          #   seguir de largo y borrar igual (mutante `except OSError` matado con
+          #   `PermissionError` forzado en el stat). Nuevo `pausa.barrer_temporales_huerfanos`,
+          #   llamado al arrancar `aceptar()` y el vigía (`_principal` en vigia_servicio.py) --
+          #   limpia sólo temporales, nunca la pausa. +8 tests netos en
+          #   test_ejecutor_contratos_pausa.py (9 nuevos, 1 invertido de la ronda 8 que daba por
+          #   buena la pérdida) y +1 en test_ejecutor_huella_aceptar.py (el barrido se llama de
+          #   verdad).
+          #   MAJOR-2: esa misma noche se le quitó a `axioma` el sudo en hall9000 (`sudo -l -U
+          #   axioma` → no permitido; las remotas lo conservan). `_resolver_identidad_invocante`
+          #   ahora devuelve `(uid, nombre, declarada_por)` -- `"sudo"` o `"proceso"` -- y ese
+          #   dato se registra TAL CUAL en el evento de C3 (`identidad_declarada_por`): `SUDO_UID`
+          #   es un dato DECLARADO por el entorno, nunca "identidad verificada". El rechazo por
+          #   uid de axioma en `principal()` se queda como freno del error accidental, pero su
+          #   docstring ya no afirma que impide suplantar a nadie -- el control real son los
+          #   permisos del registro/`JAX_EJECUTOR_MISIONES` (ambos `jaxsvc`) más quién tiene sudo
+          #   real hacia `jaxsvc`. `docs/ejecutor-huella-aceptar.md` y el comentario de
+          #   `vigia_servicio.py` sobre hall9000 corregidos con el HECHO NUEVO (texto, sin tests).
+          #   REBASE: la rama iba 7 commits detrás de `origin/master` (Task 1-bis,
+          #   `feat/descartar-pipelines`, ajeno a esta rama) -- rebasada limpia salvo UN
+          #   conflicto en el historial de comentarios de ESTE MISMO bloque (dos "NOTA DE
+          #   REBASE" ahora anidadas, ver arriba), resuelto conservando ambas historias. El
+          #   número de acá abajo absorbe TANTO los tests nuevos de ronda 9 COMO los que
+          #   `feat/descartar-pipelines` sumó a archivos que esta lista ya corría
+          #   (`test_store_columna_descarte_acotada.py`/`test_base_por_sesion.py`/
+          #   `test_jacobs_descarte.py`) -- medido de nuevo sobre el árbol YA rebaseado, no
+          #   sumado a mano (mismo criterio que toda esta lista viene aplicando desde la ronda 2).
+          #   Medido dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del
+          #   worktree): 2651 (wrapped) + 12 sueltas (4 `test_bwrap_real_*` + 8 de setfacl real en
+          #   test_ejecutor_preparar_directorio_misiones.py, mismas que ronda 8, confirmadas
+          #   pasando sueltas de nuevo) = 2663.
+          grep -qE "^2663 passed, 42 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2663 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 12 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 8 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
