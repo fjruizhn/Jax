@@ -1602,6 +1602,43 @@ async def pipeline_update_status_si_epoca(
     return await _ejecutar_condicional(sql, params) == 1
 
 
+#: SET por acción del descarte (spec 2026-09-22 §3). Una sola sentencia por
+#: transición: estado y columnas se escriben JUNTOS o no se escribe nada.
+#: discard recibe `status_previo` como PARÁMETRO (el `desde` leído) y no como
+#: `status_previo=status`: así no depende del orden en que MariaDB evalúa
+#: las asignaciones del SET.
+_SETS_DESCARTE = {
+    "discard": "status=%s, updated_at=%s, status_previo=%s, "
+               "descartado_por=%s, descartado_at=%s",
+    "recover": "status=%s, updated_at=%s, status_previo=NULL, "
+               "descartado_por=NULL, descartado_at=NULL",
+    "hide": "status=%s, updated_at=%s",
+    "restore": "status=%s, updated_at=%s",
+}
+
+
+async def pipeline_transicion_descarte(
+    pipeline_id: str,
+    epoca: int,
+    accion: str,
+    *,
+    desde: PipelineStatus,
+    a: PipelineStatus,
+    user_id: str,
+) -> bool:
+    """Compare-and-set de una transición del descarte. True si escribió
+    (el pipeline estaba en `epoca` y en `desde`)."""
+    ahora = time.time()
+    sets = _SETS_DESCARTE[accion]  # KeyError si la acción no existe: error de contrato
+    params: list = [a.value, ahora]
+    if accion == "discard":
+        params += [desde.value, user_id, ahora]
+    params += [pipeline_id, epoca, desde.value]
+    sql = (f"UPDATE jacobs_pipelines SET {sets} "
+           "WHERE pipeline_id=%s AND run_epoch=%s AND status=%s")
+    return await _ejecutar_condicional(sql, params) == 1
+
+
 async def step_upsert_si_epoca(s: Step, epoca: int) -> bool:
     """Escritura de un paso YA EXISTENTE desde el ejecutor. True si escribió."""
     params = (
