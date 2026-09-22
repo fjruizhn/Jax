@@ -205,19 +205,33 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
     Deliberadamente SIN try/except sobre `tomar_huella` (M-3/M-4, rondas 4/6): si
     revienta la primera vez, la excepción se propaga -- una huella de apertura que no
     se pudo tomar no es "sin cambios", es que la misión no debe abrir. MINOR (ronda 6):
-    una huella de apertura vacía (no parsea/no midió nada real) es el mismo fallo."""
+    una huella de apertura vacía (no parsea/no midió nada real) es el mismo fallo.
+
+    MAJOR-L (ronda 7, auditoría adversarial 2026-09-22): la marca YA PERSISTIDA (el
+    camino de arriba, "si ya hay una línea base... la carga TAL CUAL") se cargaba sin
+    validarla contra las rutas EXIGIDAS de HOY -- sólo el camino "sin marca todavía"
+    (el `except FileNotFoundError`) llamaba a `huella_valida()`. Si lo que hace falta
+    vigilar cambió entre el turno 1 (que fijó esa línea base) y un turno posterior --
+    el caso concreto: `admin_usuario` cambia entre turnos, así que
+    `ruta_authorized_keys_admin` resuelve OTRA ruta -- la apertura seguía abriendo con
+    una línea base que ya no representa lo que HOY hay que exigir, sin que nadie lo
+    notara. Ahora las DOS ramas pasan por el mismo chequeo."""
     ok = await verificar_huellas_huerfanas(misiones, host, tomar_huella=tomar_huella, pausar=pausar,
                                            pausa_ruta=pausa_ruta, rutas_extra=rutas_extra)
     if not ok:
         return None
     ruta = ruta_huella(misiones, mision_id, host)
+    rutas_exigidas = huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra
     try:
         marca = await asyncio.to_thread(huella.leer_marca, ruta)
         h = marca.huella
     except FileNotFoundError:
         h = await tomar_huella(host)
-        if not huella.huella_valida(h, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra):
+        if not huella.huella_valida(h, rutas=rutas_exigidas):
             raise RuntimeError("huella_apertura_vacia")
+    else:
+        if not huella.huella_valida(h, rutas=rutas_exigidas):
+            raise RuntimeError("huella_apertura_persistida_invalida")
     await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=h, estado=huella.ABIERTA))
     return h
 

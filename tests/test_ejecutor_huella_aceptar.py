@@ -6,6 +6,8 @@ de correo de aaPanel) cambia un control durante el turno 1 -> pausa y queda REPO
 -> Fernando acepta -> el turno 2 (y una misión nueva) abren."""
 import asyncio
 import json
+import multiprocessing
+import time
 from pathlib import Path
 
 import pytest
@@ -142,6 +144,102 @@ def test_aceptar_rechaza_una_medicion_invalida_no_la_toma_como_linea_base_major_
     assert marca.estado == H.REPORTADA  # SIGUE reportada -- no se sobreescribió con la rota
     assert marca.huella == vieja
     assert pausa_ruta.exists()  # la pausa NO se borró
+
+
+# --- BLOCK-J (ronda 7, auditoría adversarial 2026-09-22): ningún test de MAJOR-I pasaba
+# `admin_usuario` -- la rama de `aceptar()` que agrega el `authorized_keys` del
+# ADMINISTRADOR a `rutas_exigidas` (justo donde vive la llave del servicio) estaba MUERTA
+# en la suite: un mutante que la borrara dejaba los tests en verde igual. Acá la
+# remedición es COMPLETA para `RUTAS_DECLARADAS_POR_DEFAULT`, y le falla ÚNICAMENTE la
+# ruta del administrador. -----------------------------------------------------------
+
+def test_aceptar_con_admin_usuario_rechaza_si_falla_su_propia_ruta_block_j(tmp_path):
+    admin = "fruiz"
+    ruta_admin = H.ruta_authorized_keys_admin(admin)
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    ruta = H.ruta_huella(misiones, MISION_ID, "atemai")
+    vieja = _huella("atemai")
+    H.escribir_marca(ruta, H.Marca(huella=vieja, estado=H.REPORTADA, diff=("algo cambió",)))
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": "atemai", "mision_id": MISION_ID, "detalle": []})
+
+    # COMPLETA para RUTAS_DECLARADAS_POR_DEFAULT -- lo único roto es la ruta del admin.
+    rota = _huella("atemai", controles=_base_completa() + f"E {ruta_admin} find_fallo\n".encode())
+
+    async def tomar_falso(host):
+        return rota
+
+    registrado = {"n": 0}
+
+    def registrar_falso(*a, **kw):
+        registrado["n"] += 1
+        return 1
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        admin_usuario=admin, tomar_huella_actual=tomar_falso, registrar=registrar_falso,
+        registro_ruta=registro, pausa_ruta=pausa_ruta, salida=salidas.append))
+
+    assert rc == 2
+    assert registrado["n"] == 0
+    assert any("medicion_no_valida" in l for l in salidas), salidas
+    marca = H.leer_marca(ruta)
+    assert marca.estado == H.REPORTADA
+    assert marca.huella == vieja
+    assert pausa_ruta.exists()
+
+
+def test_aceptar_con_admin_usuario_y_medicion_completa_acepta_block_j(tmp_path):
+    """Contraparte de la de arriba: con la ruta del administrador TAMBIÉN medida y
+    sana, `aceptar()` con `admin_usuario` tiene que aceptar igual que sin él -- pasar
+    `admin_usuario` no es, por sí solo, motivo de rechazo."""
+    admin = "fruiz"
+    ruta_admin = H.ruta_authorized_keys_admin(admin)
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    ruta = H.ruta_huella(misiones, MISION_ID, "atemai")
+    vieja = _huella("atemai")
+    H.escribir_marca(ruta, H.Marca(huella=vieja, estado=H.REPORTADA, diff=("algo cambió",)))
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": "atemai", "mision_id": MISION_ID, "detalle": []})
+
+    completa = _huella("atemai", controles=_base_completa() + f"A {ruta_admin}\n".encode())
+
+    async def tomar_falso(host):
+        return completa
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        admin_usuario=admin, tomar_huella_actual=tomar_falso, registrar=lambda *a, **kw: 1,
+        registro_ruta=registro, pausa_ruta=pausa_ruta, salida=salidas.append))
+
+    assert rc == 0
+    marca = H.leer_marca(ruta)
+    assert marca.estado == H.ABIERTA
+    assert marca.huella == completa
+    assert not pausa_ruta.exists()
+
+
+def test_el_mutante_que_ignora_admin_usuario_en_aceptar_muere_block_j():
+    """El mutante EXACTO que pide la auditoría: quitar el `if admin_usuario is not
+    None: rutas_exigidas = ...` de `aceptar()`, dejando `rutas_exigidas` fija en
+    `RUTAS_DECLARADAS_POR_DEFAULT` sin importar qué se pase. Con una medición rota
+    ÚNICAMENTE en la ruta del administrador, el código real la rechaza; el mutante
+    la deja pasar."""
+    admin = "fruiz"
+    ruta_admin = H.ruta_authorized_keys_admin(admin)
+    rota = H.huella_desde_salida("atemai", _base_completa() + f"E {ruta_admin} find_fallo\n".encode())
+
+    rutas_reales = H.RUTAS_DECLARADAS_POR_DEFAULT + (H.ruta_authorized_keys_admin(admin),)
+    rutas_mutadas = H.RUTAS_DECLARADAS_POR_DEFAULT  # el mutante: ignora admin_usuario
+
+    assert H.huella_valida(rota, rutas=rutas_reales) is False  # el código real: rechaza
+    assert H.huella_valida(rota, rutas=rutas_mutadas) is True  # el mutante "logra" pasar
 
 
 def test_aceptar_sin_medir_registra_como_tal_y_no_llama_a_tomar_huella(tmp_path):
@@ -825,3 +923,143 @@ def test_race_real_c5_pone_pausa_mientras_dos_aceptar_compiten_sobrevive_con_can
         if b.is_alive():
             b.terminate()
             b.join(timeout=5)
+
+
+# --- MAJOR-K (ronda 7, auditoría adversarial 2026-09-22): la marca se leía AFUERA del
+# candado que protege `_cuerpo()` -- dos `aceptar()` concurrentes sobre la MISMA marca
+# REPORTADA podían leer los DOS "REPORTADA" antes de que ninguno tuviera ESE candado (el
+# de `_cuerpo()`); el que llegaba SEGUNDO ahí seguía adelante con esa lectura vieja,
+# escribiendo una SEGUNDA línea base y un segundo evento de C3 -- absorbiendo en
+# silencio cualquier cambio ocurrido entre medio. Reproducido con DOS PROCESOS REALES
+# (`flock` es por archivo/proceso, no por hilo -- un solo proceso con dos hilos NO
+# probaría nada de esto).
+#
+# OJO -- `pausa.barrer_temporales_huerfanos()` (que `aceptar()` llama SIEMPRE primero)
+# usa el MISMO archivo de candado que `_cuerpo()`, así que una pausa insertada DESPUÉS
+# de esa llamada (ej. adentro de `tomar()`) queda re-serializada por el candado del
+# barrido de todos modos, y el bug NO se reproduce -- hay que pausar exactamente en el
+# momento de la LECTURA de la marca (vía un monkeypatch de `leer_marca`), que es lo que
+# de verdad se movió de lugar en esta ronda. -------------------------------------------
+
+def _tarea_primero_en_leer_major_k(misiones_str, mision_id, host, registro_str, pausa_str,
+                                   huella_ok_bytes, llego_evt, puede_seguir_evt, resultado_dict):
+    """Este proceso LEE la marca primero, pero queda pausado justo ahí -- ANTES de
+    ronda 7, esa lectura vivía AFUERA del candado de `_cuerpo()`; después de ronda 7,
+    vive DENTRO. El monkeypatch de `leer_marca` marca el momento exacto, sin importar
+    de qué lado del candado esté esta vez."""
+    import asyncio
+    from pathlib import Path
+    from jax.ejecutor.contratos import huella as _H
+
+    real_leer_marca = _H.leer_marca
+
+    def leer_marca_con_pausa(ruta):
+        m = real_leer_marca(ruta)
+        llego_evt.set()
+        puede_seguir_evt.wait(timeout=10)
+        return m
+
+    _H.leer_marca = leer_marca_con_pausa
+
+    async def tomar(h):
+        return _H.huella_desde_salida(h, huella_ok_bytes)
+
+    rc = asyncio.run(_H.aceptar(
+        misiones=Path(misiones_str), mision_id=mision_id, host=host, aceptado_por="primero",
+        tomar_huella_actual=tomar, registro_ruta=Path(registro_str), pausa_ruta=Path(pausa_str)))
+    resultado_dict["primero_rc"] = rc
+
+
+def _tarea_segundo_en_llegar_major_k(misiones_str, mision_id, host, registro_str, pausa_str,
+                                     huella_ok_bytes, resultado_dict, salidas_list):
+    """Arranca DESPUÉS de que el primero ya leyó y quedó pausado -- sin ronda 7, esto
+    alcanza a leer, aceptar y escribir ANTES de que el primero se libere (por eso
+    "segundo en llegar" puede terminar PRIMERO)."""
+    import asyncio
+    from pathlib import Path
+    from jax.ejecutor.contratos import huella as _H
+
+    async def tomar(h):
+        return _H.huella_desde_salida(h, huella_ok_bytes)
+
+    salidas = []
+    rc = asyncio.run(_H.aceptar(
+        misiones=Path(misiones_str), mision_id=mision_id, host=host, aceptado_por="segundo",
+        tomar_huella_actual=tomar, registro_ruta=Path(registro_str), pausa_ruta=Path(pausa_str),
+        salida=salidas.append))
+    resultado_dict["segundo_rc"] = rc
+    salidas_list.extend(salidas)
+
+
+def test_dos_procesos_reales_solo_uno_acepta_la_reportada_major_k(tmp_path):
+    """MAJOR-K: con la marca leída DENTRO del candado de `_cuerpo()`, dos `aceptar()`
+    concurrentes sobre la MISMA `REPORTADA` dan UNA sola aceptación. `primero` lee la
+    marca y queda pausado ahí (dentro del candado, desde ronda 7); `segundo` arranca
+    recién entonces, no puede ni empezar (bloqueado en el candado del propio barrido
+    de temporales, que comparte archivo con el de `_cuerpo()`), y sólo avanza cuando
+    `primero` termina y suelta -- para entonces relee la marca YA `ABIERTA` y
+    rechaza. Los dos procesos comparten el MISMO `registro_ruta`: si el bug
+    reapareciera, aparecerían DOS eventos `huella_aceptada` ahí -- no uno."""
+    ctx = multiprocessing.get_context("fork")
+    misiones = tmp_path / "misiones"
+    pausa_ruta = tmp_path / "PAUSA"
+    registro = tmp_path / "registro.jsonl"
+    host = "atemai"
+
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": host, "mision_id": MISION_ID, "detalle": []})
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, host),
+                     H.Marca(huella=_huella(host), estado=H.REPORTADA, diff=("algo cambió",)))
+
+    huella_ok_bytes = _base_completa_con_cambio()
+
+    manager = ctx.Manager()
+    resultado = manager.dict()
+    salidas_segundo = manager.list()
+    llego = ctx.Event()
+    puede_seguir = ctx.Event()
+
+    primero = ctx.Process(target=_tarea_primero_en_leer_major_k, args=(
+        str(misiones), MISION_ID, host, str(registro), str(pausa_ruta), huella_ok_bytes,
+        llego, puede_seguir, resultado))
+    segundo = ctx.Process(target=_tarea_segundo_en_llegar_major_k, args=(
+        str(misiones), MISION_ID, host, str(registro), str(pausa_ruta), huella_ok_bytes,
+        resultado, salidas_segundo))
+    primero.start()
+    try:
+        assert llego.wait(timeout=10), "el primer proceso no llegó a leer la marca"
+
+        segundo.start()
+        try:
+            segundo.join(timeout=1)
+            assert segundo.is_alive(), "el segundo no debería poder terminar mientras el primero sigue pausado"
+
+            puede_seguir.set()  # se libera al primero: valida, acepta, escribe, suelta
+            primero.join(timeout=10)
+            assert primero.exitcode == 0
+
+            segundo.join(timeout=10)
+            assert segundo.exitcode == 0
+        finally:
+            if segundo.is_alive():
+                segundo.terminate()
+                segundo.join(timeout=5)
+    finally:
+        puede_seguir.set()
+        if primero.is_alive():
+            primero.terminate()
+            primero.join(timeout=5)
+
+    assert resultado.get("primero_rc") == 0  # el que leyó primero, acepta
+    assert resultado.get("segundo_rc") == 2  # el que llegó segundo, NO acepta
+    assert any("huella_no_reportada" in l for l in salidas_segundo), list(salidas_segundo)
+
+    marca = H.leer_marca(H.ruta_huella(misiones, MISION_ID, host))
+    assert marca.estado == H.ABIERTA
+    assert marca.huella == _huella(host, controles=huella_ok_bytes)
+    assert marca.aceptada_por == "primero"  # UNA sola transición -- "segundo" nunca escribió
+
+    eventos = [json.loads(l) for l in registro.read_text().splitlines()]
+    aceptaciones = [e for e in eventos if e.get("evento") == "huella_aceptada"]
+    assert len(aceptaciones) == 1  # un solo evento de C3 -- no dos
+    assert aceptaciones[0]["aceptado_por"] == "primero"

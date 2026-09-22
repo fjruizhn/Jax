@@ -347,10 +347,16 @@ def test_sin_cambio_en_la_huella_no_pausa(tmp_path):
 def test_apertura_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
     """Línea 219 (`huella_de_apertura_de_la_mision`): primer turno, sin marca
     persistida -- si `rutas_extra` no llegara de verdad a `huella_valida()`, una huella
-    que jamás mide el `authorized_keys` del administrador pasaría por completa igual."""
+    que jamás mide el `authorized_keys` del administrador pasaría por completa igual.
+
+    MINOR (ronda 7, auditoría adversarial 2026-09-22): el mock trae una SEGUNDA
+    huella (sin usar contra el código real, que corta en la primera) -- así, bajo el
+    mutante que ronda 6 pedía matar, la ejecución NO revienta con un `IndexError` de
+    mock agotado al llegar al cierre: falla por lo que importa, `pytest.raises` sin
+    haber visto el `RuntimeError` esperado."""
     from jax.ejecutor.contratos import huella as H
     ruta_admin = H.ruta_authorized_keys_admin("fruiz")
-    tomar_huella = _tomador_secuencia({"atemai": [_h("atemai")]})  # SIN la línea del admin
+    tomar_huella = _tomador_secuencia({"atemai": [_h("atemai"), _h("atemai")]})  # SIN la línea del admin
     ctx = _ctx(tmp_path)
 
     with pytest.raises(RuntimeError, match="huella_apertura_vacia"):
@@ -380,14 +386,24 @@ def test_huerfana_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
     son TEXTUALMENTE IGUALES (así `huella.cambio()` da `False` y no puede ser lo que
     hace fallar el test) -- ninguna de las dos trae la línea del admin. Si
     `rutas_extra` no llegara acá, esto se vería "limpio" (mismo texto, nada cambió) y
-    la misión nueva abriría igual, con una deuda de vigilancia real sin cerrar."""
+    la misión nueva abriría igual, con una deuda de vigilancia real sin cerrar.
+
+    MINOR (ronda 7, auditoría adversarial 2026-09-22): bajo el mutante, la huérfana
+    se da por resuelta y `huella_de_apertura_de_la_mision` sigue adelante a abrir SU
+    PROPIA huella (esta misión, `MISION_ID`, todavía no tiene marca) -- eso consume
+    una SEGUNDA llamada a `tomar_huella` que el mock (con un solo elemento) no podía
+    servir, y el test moría con un `IndexError` de mock agotado en vez de fallar por
+    lo que importa. El segundo elemento es una huella COMPLETA (con la línea del
+    admin) -- si la ejecución llega a usarla, `resultado` deja de ser `None` y el
+    `assert` de abajo lo dice con claridad."""
     from jax.ejecutor.contratos import huella as H
     misiones = tmp_path / "misiones"
     ruta_admin = H.ruta_authorized_keys_admin("fruiz")
     huella_vieja = _h("atemai")  # SIN la línea del admin
     H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
 
-    tomar = _tomador_secuencia({"atemai": [_h("atemai")]})  # idéntica a la persistida
+    huella_completa = _h("atemai", controles=_base_completa() + f"A {ruta_admin}\n".encode())
+    tomar = _tomador_secuencia({"atemai": [_h("atemai"), huella_completa]})  # 1ra: idéntica a la persistida
     ctx = _ctx(tmp_path)
 
     async def abrir():
@@ -400,6 +416,37 @@ def test_huerfana_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
     datos = json.loads(ctx.pausa.read_text())
     assert datos["motivo"] == "huella_cambio_no_declarado"
     assert "huella_de_ahora_vacia" in datos["detalle"]
+
+
+def test_apertura_valida_la_marca_ya_persistida_major_l(tmp_path):
+    """MAJOR-L (ronda 7, auditoría adversarial 2026-09-22): si ya hay una línea base
+    persistida (la marca de ESTA `mision_id` quedó `CERRADA` al cerrar un turno
+    anterior -- el caso normal de un turno 2+), se cargaba TAL CUAL, sin validar que
+    siga representando las rutas EXIGIDAS de HOY -- sólo el camino "todavía no hay
+    marca" (`except FileNotFoundError`) llamaba a `huella_valida()`. La persistida de
+    acá es válida para `RUTAS_DECLARADAS_POR_DEFAULT` pero JAMÁS midió el
+    `authorized_keys` del administrador -- si `admin_usuario` cambió entre turnos
+    (`rutas_extra` ahora exige otra ruta), abrir con esa base sería abrir SIN vigilar
+    lo que hoy hace falta. `tomar_huella` no debería llamarse en absoluto: con una
+    marca ya persistida, no hay nada que remedir."""
+    from jax.ejecutor.contratos import huella as H
+    misiones = tmp_path / "misiones"
+    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    persistida = _h("atemai")  # SIN la línea del admin
+    H.escribir_marca(S.ruta_huella(misiones, MISION_ID, "atemai"), H.Marca(huella=persistida, estado=H.CERRADA))
+
+    async def tomar_no_deberia_llamarse(host):
+        raise AssertionError("con una marca ya persistida, no hay que volver a medir")
+
+    ctx = _ctx(tmp_path)
+
+    async def abrir():
+        return await S.huella_de_apertura_de_la_mision(
+            misiones=misiones, mision_id=MISION_ID, host="atemai", tomar_huella=tomar_no_deberia_llamarse,
+            pausar=P.poner_pausa, pausa_ruta=ctx.pausa, rutas_extra=(ruta_admin,))
+
+    with pytest.raises(RuntimeError, match="huella_apertura_persistida_invalida"):
+        asyncio.run(abrir())
 
 
 def test_huella_de_cierre_vacia_pausa_como_no_medible(tmp_path):

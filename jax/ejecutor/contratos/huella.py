@@ -807,19 +807,32 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
                                        huella_llave=huella_llave, huella_known_hosts=huella_known_hosts))
 
     ruta = ruta_huella(misiones, mision_id, host)
-    try:
-        marca = leer_marca(ruta)
-    except (OSError, ValueError, KeyError):
-        salida(f"codigo=huella_no_encontrada host={host} mision_id={mision_id}")
-        return 2
 
     async def _cuerpo() -> int:
-        # MAJOR (ronda 10, auditoría 8): TODO esto -- desde el chequeo de estado hasta
-        # el final -- corre bajo el candado de la pausa (si hay una configurada). Sin
-        # eso, dos `aceptar()` concurrentes (o uno y un barrido) pueden interleavear su
-        # propio chequeo-de-inodo con el `unlink` del otro: B pasa el chequeo, A borra,
-        # C5 pausa de nuevo, y B -- que ya había pasado SU chequeo -- termina borrando
-        # lo que hay AHORA (la pausa nueva de C5), no lo que vio. Ver `pausa.candado`.
+        # MAJOR-K (ronda 7, auditoría adversarial 2026-09-22): la marca se leía UNA
+        # sola vez, AFUERA de este candado (capturada como una variable ya fija que
+        # `_cuerpo()` sólo heredaba por clausura) -- pese a que este mismo comentario
+        # (desde ronda 10, auditoría 8) ya decía "TODO esto ... corre bajo el
+        # candado", sin que fuera cierto para la lectura misma. Con DOS `aceptar()`
+        # concurrentes sobre la MISMA marca REPORTADA: los dos leían `marca.estado ==
+        # REPORTADA` ANTES de que ninguno tuviera el candado; el primero en
+        # adquirirlo acepta y reescribe la marca como `ABIERTA`, lo suelta, y el
+        # segundo -- que YA había decidido "es REPORTADA" con SU lectura vieja --
+        # adquiere el candado y sigue igual, escribiendo una SEGUNDA línea base (con
+        # SU PROPIA remedición, que puede ya no coincidir con la que el primero
+        # aceptó) y un segundo evento de C3, absorbiendo en silencio cualquier cambio
+        # real ocurrido entre medio sin reportarlo nunca. Ahora la lectura (y la
+        # validación de estado) son lo PRIMERO que pasa DENTRO de `_cuerpo()` -- bajo
+        # el candado, si hay uno -- así que el segundo `aceptar()` ve la marca YA
+        # `ABIERTA` (la que el primero dejó) y la rechaza. Sin `pausa_ruta` (más
+        # abajo, `_cuerpo()` corre SIN candado): no hay contra qué serializar, mismo
+        # comportamiento de siempre.
+        try:
+            marca = leer_marca(ruta)
+        except (OSError, ValueError, KeyError):
+            salida(f"codigo=huella_no_encontrada host={host} mision_id={mision_id}")
+            return 2
+
         estados_aceptables = (REPORTADA, ABIERTA) if sin_medir else (REPORTADA,)
         if marca.estado not in estados_aceptables:
             salida(f"codigo=huella_no_reportada host={host} mision_id={mision_id} estado={marca.estado}")
