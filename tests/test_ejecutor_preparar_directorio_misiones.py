@@ -40,17 +40,23 @@ requiere_setfacl = pytest.mark.skipif(shutil.which("setfacl") is None or shutil.
                                       reason="setfacl/getfacl no están instalados")
 
 
-def _bin_con_sudo_falso(tmp_path: Path) -> str:
+def _bin_con_sudo_falso(tmp_path: Path, *, log: Path | None = None) -> str:
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
-    (bin_ / "sudo").write_text(_SUDO_FALSO)
+    contenido = _SUDO_FALSO
+    if log is not None:
+        # MINOR (ronda 8): además de ejecutar, deja constancia de QUÉ programa se
+        # invocó -- para probar el MECANISMO (install -d al crear, chmod al ya
+        # existente), no sólo el resultado final (que ya cubren los tests de arriba).
+        contenido = contenido.replace('prog="$1"; shift\n', f'prog="$1"; shift\necho "$prog" >> "{log}"\n')
+    (bin_ / "sudo").write_text(contenido)
     (bin_ / "sudo").chmod(0o755)
     return f"{bin_}:/usr/bin:/bin"
 
 
-def _correr(tmp_path, destino, admin, cuenta):
+def _correr(tmp_path, destino, admin, cuenta, *, log: Path | None = None):
     return subprocess.run([str(SCRIPT), str(destino), admin, cuenta], capture_output=True, text=True,
-                          env={"PATH": _bin_con_sudo_falso(tmp_path)}, timeout=30)
+                          env={"PATH": _bin_con_sudo_falso(tmp_path, log=log)}, timeout=30)
 
 
 def _replicar_acl_real_de_produccion(destino: Path, dueno: str) -> None:
@@ -209,3 +215,37 @@ def test_directorio_existente_con_acl_vieja_de_produccion_es_idempotente_ronda7(
     assert r2.returncode == 0, r2.stderr
     acl = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
     assert "group::---" in acl
+
+
+@requiere_setfacl
+def test_directorio_nuevo_usa_install_d_no_mkdir_ronda8_minor(tmp_path):
+    """MINOR (ronda 8): para CREAR, vuelve `install -d -m 0700` -- una sola invocación
+    que fija el modo restrictivo sin ventana, en vez de `mkdir -p` (que no fija modo) +
+    un `setfacl` posterior como único punto de corrección."""
+    destino = tmp_path / "misiones"
+    admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    log = tmp_path / "invocaciones.log"
+
+    r = _correr(tmp_path, destino, admin, "nobody", log=log)
+    assert r.returncode == 0, r.stderr
+    invocados = log.read_text().split()
+    assert "install" in invocados, invocados
+    assert "mkdir" not in invocados, invocados
+
+
+@requiere_setfacl
+def test_directorio_existente_usa_chmod_no_install_ronda8_minor(tmp_path):
+    """MINOR (ronda 8): para el directorio que YA EXISTE, `chmod` + el `setfacl`
+    combinado (ronda 7) -- no `install -d`, que resetea el modo incluso sobre un
+    directorio preexistente (comprobado: 700→755 sin `-m`)."""
+    destino = tmp_path / "misiones"
+    admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    destino.mkdir(parents=True)
+    destino.chmod(0o770)
+    log = tmp_path / "invocaciones.log"
+
+    r = _correr(tmp_path, destino, admin, "nobody", log=log)
+    assert r.returncode == 0, r.stderr
+    invocados = log.read_text().split()
+    assert "chmod" in invocados, invocados
+    assert "install" not in invocados, invocados

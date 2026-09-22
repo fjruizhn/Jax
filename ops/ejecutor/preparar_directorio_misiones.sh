@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ops/ejecutor/preparar_directorio_misiones.sh — B-2 (ronda 4, auditoría adversarial
-# 2026-09-22; MINOR endurecido en la ronda 6; corregido en la ronda 7): JAX_EJECUTOR_MISIONES
-# con una ACL EXPLÍCITA, no sólo el modo.
+# 2026-09-22; MINOR endurecido en la ronda 6; corregido en la ronda 7; mecanismo vuelto
+# a separar en la ronda 8): JAX_EJECUTOR_MISIONES con una ACL EXPLÍCITA, no sólo el modo.
 # Uso: preparar_directorio_misiones.sh <directorio> <admin> <cuenta>
 #
 # `<admin>` (JAX_EJECUTOR_ADMIN_USUARIO, fruiz) conserva rwx -- escribe la misión y
@@ -20,22 +20,35 @@
 # CREAR el directorio -- si ya existía (una instalación de ANTES de este script, o
 # cualquier otra cosa que lo hubiera tocado), se quedaba con lo que tuviera puesto
 # para siempre. La ACL real de producción, medida ese mismo día, tenía `drwxrwx---`
-# con `group::rwx` -- exactamente el estado que la ronda 6 no corregía. Ahora el modo
-# y la ACL se aplican SIEMPRE, exista o no el directorio.
+# con `group::rwx` -- exactamente el estado que la ronda 6 no corregía.
 #
-# Sin ventana, de nuevo: la corrección es UN SOLO `setfacl -m` con TODAS las entradas
-# juntas -- base (`u::`, `g::`, `o::`, `m::`) Y nombradas (`admin`, `cuenta`) Y sus
-# default, todas en la MISMA invocación. `setfacl` recalcula la ACL completa a partir
-# de esa única lista: no hay un `chmod` (que además, con una ACL puesta, sólo tocaría
-# el MASK, no `group::` -- por eso un `chmod` suelto NO alcanza para corregir una
-# `group::rwx` vieja) seguido de un `setfacl` por separado, así que no hay un estado
-# intermedio distinto del inicial o del final. `mkdir -p` (no `install -d`: `install
-# -d` SIEMPRE aplica un modo, incluso sin `-m` -- lo comprobado: resetea 700 a 755 en
-# un directorio YA EXISTENTE) para no tocar el modo por su cuenta antes del setfacl
-# atómico; `chown` es idempotente, se corre siempre.
+# Ronda 8 (MINOR): se vuelve a separar el mecanismo por caso, sin resignar la
+# corrección de la ronda 7:
+# - CREAR (el directorio no existe todavía): `install -d -m 0700 -o jaxsvc -g jaxsvc`,
+#   UNA sola invocación que fija dueño+grupo+modo restrictivo de una vez -- sin ventana
+#   donde el directorio quede con un modo más permisivo que el final, ni siquiera un
+#   instante.
+# - YA EXISTE: `chmod 0700` (converge el modo base de inmediato) seguido del MISMO
+#   `setfacl -m` combinado de la ronda 7 -- base (`u::`,`g::`,`o::`,`m::`) Y nombradas
+#   (`admin`,`cuenta`) Y sus default, todas en una sola invocación de `setfacl`. El
+#   `setfacl` combinado es quien realmente corrige `group::` en el caso viejo (medido:
+#   un `chmod` sobre un directorio que YA tiene una ACL con entradas nombradas sólo
+#   toca el MASK, no `group::` -- por eso el `setfacl` no se resigna, se mantiene tal
+#   cual la ronda 7 lo dejó); el `chmod` previo es la corrección inmediata para el caso,
+#   más común, de un directorio SIN ACL extendida todavía (ahí sí gobierna `group::`
+#   directamente) y deja explícito el paso que pide la ronda 8.
+# `install -d` NO se usa para el caso "ya existe": comprobado que resetea el modo
+# (700→755) incluso sobre un directorio YA EXISTENTE, aunque no se le pase `-m`.
 set -euo pipefail
 DESTINO="${1:?}"; ADMIN="${2:?}"; CUENTA="${3:?}"
-sudo mkdir -p "$DESTINO"
-sudo chown jaxsvc:jaxsvc "$DESTINO"
-sudo setfacl -m "u::rwx,g::---,o::---,m::rwx,u:$ADMIN:rwx,u:$CUENTA:--x,d:u::rwx,d:g::---,d:o::---,d:m::rwx,d:u:$ADMIN:rwx,d:u:$CUENTA:--x" "$DESTINO"
+ACL="u::rwx,g::---,o::---,m::rwx,u:$ADMIN:rwx,u:$CUENTA:--x,d:u::rwx,d:g::---,d:o::---,d:m::rwx,d:u:$ADMIN:rwx,d:u:$CUENTA:--x"
+
+if sudo test -d "$DESTINO"; then
+  sudo chown jaxsvc:jaxsvc "$DESTINO"
+  sudo chmod 0700 "$DESTINO"
+  sudo setfacl -m "$ACL" "$DESTINO"
+else
+  sudo install -d -m 0700 -o jaxsvc -g jaxsvc "$DESTINO"
+  sudo setfacl -m "$ACL" "$DESTINO"
+fi
 echo "directorio_misiones_preparado=\"$DESTINO\" admin=\"$ADMIN\" cuenta=\"$CUENTA\""
