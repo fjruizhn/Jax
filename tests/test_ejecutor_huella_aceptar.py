@@ -19,23 +19,37 @@ MISION_ID = "55555555-5555-5555-5555-555555555555"
 # Formas de hash REALES (MAJOR-6, ronda 2: huella_valida() exige 64 hex) -- no "abc"/"def".
 _HASH_A = "a" * 64
 _HASH_B = "b" * 64
+_HASH_C = "c" * 64
 
 
 def _base_completa() -> bytes:
-    """MINOR (ronda 3): `huella_valida()`, llamada por `vigia_servicio.py` con
-    `rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT`, exige que CADA tramo declarado tenga
-    contenido -- una línea `D <ruta>` por cada RUTAS_CONTROLES (menos la primera, que
-    lleva el hash real) más el directorio de binarios alcanza."""
-    lineas = [f"{_HASH_A}  /etc/sudoers"]
-    lineas += [f"D {r}" for r in H.RUTAS_CONTROLES[1:]]
-    lineas.append(f"D {H._DIR_SBIN_EJECUTOR}")
+    """MINOR (ronda 3)/RONDA 4: `huella_valida()`, llamada por `vigia_servicio.py` con
+    `rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT (+ rutas_extra)`, exige que CADA ruta
+    declarada tenga un estado hash/D/A -- nunca E ni ausencia total. Los TIPOS acá
+    reflejan lo medido de verdad en hall9000/atemai/prod (ronda 4, auditoría
+    adversarial 2026-09-22): `/etc/ssh/sshd_config` es un ARCHIVO (hash, no `D`) y
+    `/root/.ssh/authorized_keys` NO EXISTE en ninguna de las tres (`A`, no `D`) --
+    escribir `D` para esas dos era ficción."""
+    lineas_por_ruta = {
+        "/etc/sudoers": f"{_HASH_A}  /etc/sudoers",
+        "/etc/sudoers.d": "D /etc/sudoers.d",
+        "/etc/ssh/sshd_config": f"{_HASH_B}  /etc/ssh/sshd_config",
+        "/etc/ssh/sshd_config.d": "D /etc/ssh/sshd_config.d",
+        "/etc/ssh/authorized_keys.d": "D /etc/ssh/authorized_keys.d",
+        "/root/.ssh/authorized_keys": "A /root/.ssh/authorized_keys",
+        "/etc/ejecutor-huella": "D /etc/ejecutor-huella",
+    }
+    assert set(lineas_por_ruta) == set(H.RUTAS_CONTROLES), "RUTAS_CONTROLES cambió -- actualizar este fixture"
+    lineas = [lineas_por_ruta[r] for r in H.RUTAS_CONTROLES]
     return ("\n".join(lineas) + "\n").encode()
 
 
 def _base_completa_con_cambio() -> bytes:
+    """`/root/.ssh/authorized_keys` pasa de `A` (ausente, confirmado) a un HASH real
+    -- el caso que la ronda 4 señala: "que la ruta pase de A a existir es un CAMBIO"."""
     base = _base_completa().decode()
-    base_sin_root = base.replace("D /root/.ssh/authorized_keys\n", "")
-    return (base_sin_root + f"{_HASH_B}  /root/.ssh/authorized_keys\n").encode()
+    sin_root = base.replace("A /root/.ssh/authorized_keys\n", "")
+    return (sin_root + f"{_HASH_C}  /root/.ssh/authorized_keys\n").encode()
 
 
 def _huella(host, controles=None):

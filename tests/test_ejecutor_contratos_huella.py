@@ -729,3 +729,102 @@ def test_actualizar_authorized_keys_admin_no_toca_otras_llaves_del_administrador
     assert "llave-personal-1" in salida
     assert "llave-personal-2" in salida
     assert salida.count("\n") == 3  # 2 líneas originales + 1 nueva
+
+
+# --- RONDA 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
+# el guion declara SIEMPRE una línea por ruta -- hash/D/A/E. `A` (medida, confirmada
+# AUSENTE) es válido; `E` (no se pudo medir) es inválido. Antes, "ausente" y "no
+# medible" daban lo MISMO (cero líneas) y `huella_valida(rutas=...)` los trataba
+# igual -- bloqueaba el Ejecutor en máquinas SANAS (`/root/.ssh/authorized_keys` no
+# existe en hall9000, atemai NI prod). --------------------------------------------------
+
+def _huella_de_texto(texto: str):
+    return H.huella_desde_salida("atemai", texto.encode())
+
+
+def test_huella_valida_estado_hash_es_valido():
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /etc/sudoers\n")
+    assert H.huella_valida(h, rutas=("/etc/sudoers",)) is True
+
+
+def test_huella_valida_estado_d_es_valido():
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /usr/local/sbin/ejecutor-huella\nD /etc/sudoers.d\n")
+    assert H.huella_valida(h, rutas=("/etc/sudoers.d",)) is True
+
+
+def test_huella_valida_estado_ausente_es_valido():
+    """El punto central de la ronda 4: `/root/.ssh/authorized_keys` NO EXISTE en
+    hall9000, atemai NI prod (verificado por Fernando) -- eso es sano, `A` tiene que
+    contar como medido y válido, no como "no se pudo medir"."""
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /etc/sudoers\nA /root/.ssh/authorized_keys\n")
+    assert H.huella_valida(h, rutas=("/root/.ssh/authorized_keys",)) is True
+
+
+def test_huella_valida_estado_error_es_invalido():
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /etc/sudoers\nE /root/.ssh/authorized_keys permiso_denegado\n")
+    assert H.huella_valida(h, rutas=("/root/.ssh/authorized_keys",)) is False
+
+
+def test_huella_valida_ruta_sin_ninguna_linea_es_invalida():
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /etc/sudoers\n")
+    assert H.huella_valida(h, rutas=("/root/.ssh/authorized_keys",)) is False
+
+
+def test_huella_valida_a_ausente_pasando_a_existir_es_un_cambio():
+    """"Que la ruta pase de A a existir (o al revés) es un CAMBIO y pausa: eso es
+    justo lo que queremos detectar" -- `cambio()`/`hallazgos()` lo ven como cualquier
+    otra línea que cambia de texto, sin lógica especial."""
+    hash64 = "a" * 64
+    antes = _huella_de_texto(f"{hash64}  /etc/sudoers\nA /root/.ssh/authorized_keys\n")
+    despues = _huella_de_texto(f"{hash64}  /etc/sudoers\n{hash64}  /root/.ssh/authorized_keys\n")
+    assert H.cambio(antes, despues) is True
+    assert H.hallazgos(antes, despues) != ()
+
+
+def test_el_mutante_all_a_any_en_huella_valida_muere():
+    """El mutante EXACTO que pide la auditoría: `all` -> `any` en `huella_valida`.
+    Con una ruta válida (hash) y otra que ni siquiera aparece (ni un E), el código
+    real (`all`) rechaza; el mutante (`any`) la dejaría pasar porque la PRIMERA sí es
+    válida."""
+    def huella_valida_mutada(h, *, rutas=None):
+        texto = h.texto.strip()
+        if not texto:
+            return False
+        lineas = texto.splitlines()
+        if not any(H._LINEA_CON_HASH.match(l) for l in lineas):
+            return False
+        if rutas is None:
+            return True
+        return any(H._estado_de_ruta_declarada(lineas, r) in (H._HASH, H._D, H._AUSENTE) for r in rutas)
+
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /etc/sudoers\n")  # falta /etc/sudoers.d por completo
+    rutas = ("/etc/sudoers", "/etc/sudoers.d")
+    assert H.huella_valida(h, rutas=rutas) is False  # el código real: exige LAS DOS
+    assert huella_valida_mutada(h, rutas=rutas) is True  # el mutante "logra" pasar
+
+
+def test_el_mutante_que_trata_ausente_como_invalido_muere():
+    """El mutante que reproduce el BLOCK real de la ronda 3 (reproducido en
+    atemai/prod): tratar `A` igual que "no medible" -- rechazaría una máquina SANA."""
+    def valida_mutada_sin_ausente(h, *, rutas=None):
+        texto = h.texto.strip()
+        if not texto:
+            return False
+        lineas = texto.splitlines()
+        if not any(H._LINEA_CON_HASH.match(l) for l in lineas):
+            return False
+        if rutas is None:
+            return True
+        return all(H._estado_de_ruta_declarada(lineas, r) in (H._HASH, H._D) for r in rutas)  # sin _AUSENTE
+
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /etc/sudoers\nA /root/.ssh/authorized_keys\n")
+    rutas = ("/etc/sudoers", "/root/.ssh/authorized_keys")
+    assert H.huella_valida(h, rutas=rutas) is True  # el código real: A es válido
+    assert valida_mutada_sin_ausente(h, rutas=rutas) is False  # el mutante bloquea una máquina sana

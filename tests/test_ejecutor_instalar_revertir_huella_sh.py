@@ -396,3 +396,33 @@ def test_revertir_sale_distinto_de_cero_si_algo_queda_major4(tmp_path):
     assert r_revertir.returncode != 0
     assert b"verificado=true" not in r_revertir.stdout
     assert (sudoers_d_real / "50-ejecutor-huella").exists()  # sigue ahí -- el guion NO mintió
+
+
+@REQUIERE_BWRAP
+def test_instalar_no_inyecta_comandos_via_tmpdir_hostil_major_d(tmp_path):
+    """MAJOR-D (ronda 4, auditoría adversarial 2026-09-22): `$TMP_SCRIPT_REMOTO`,
+    `$TMP_SUDOERS_REMOTO` y `$TMP_AUTH_REMOTO` salen de `mktemp` EN LA REMOTA -- si el
+    `TMPDIR` de esa sesión trajera un `;` (una variable de entorno hostil, un perfil de
+    shell tocado), el nombre resultante, incrustado SIN COMILLAS en el `corre "..."`,
+    partía la línea en DOS comandos para el shell remoto. Se arma un TMPDIR real (un
+    directorio de verdad, válido en el filesystem -- `;`/espacios SÍ son caracteres de
+    archivo legales en Linux, sólo `/` y NUL no lo son) cuyo nombre, si se interpreta
+    como shell, ejecutaría un `touch` delator -- y se confirma que NUNCA aparece."""
+    politica_ruta = tmp_path / "politica.json"
+    politica_ruta.write_text(json.dumps(_doc_politica()))
+    binds = _arbol_remoto(tmp_path)
+    env = _entorno_de_prueba(tmp_path, politica_ruta)
+
+    marcador = tmp_path / "INYECTADO_RONDA4"
+    tmpdir_hostil = tmp_path / "hostil; touch INYECTADO_RONDA4; echo x"
+    tmpdir_hostil.mkdir()
+    env["TMPDIR"] = str(tmpdir_hostil)
+
+    argv_base = _argv_bwrap(binds) + ["--", "env"] + [f"{k}={v}" for k, v in env.items()]
+    r_instalar = subprocess.run(argv_base + ["bash", str(INSTALAR), "prueba-huella"],
+                                capture_output=True, timeout=60, cwd=str(tmp_path))
+
+    assert not marcador.exists(), "el TMPDIR hostil ejecutó el touch inyectado -- MAJOR-D sin cerrar"
+    assert r_instalar.returncode == 0, r_instalar.stderr.decode()
+    contenido = (binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys").read_text()
+    assert "ejecutor-huella-servicio" in contenido  # el instalador igual terminó bien

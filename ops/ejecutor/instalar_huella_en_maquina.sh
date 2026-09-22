@@ -88,8 +88,17 @@ while IFS= read -r LINEA_KH; do
 done < "$ETAPA/kh-entradas"
 
 # 3. El script en la remota -- BLOCK-2: nunca un nombre fijo (subir_sin_nombre_fijo).
+# MAJOR-D (ronda 4, auditoría adversarial 2026-09-22): `$TMP_SCRIPT_REMOTO` sale de
+# `mktemp` EN LA REMOTA -- si el `TMPDIR` de esa sesión estuviera bajo control de
+# alguien (una variable de entorno hostil, un perfil de shell tocado), el nombre podría
+# traer espacios o `;` e inyectar un comando extra al incrustarlo SIN COMILLAS en el
+# `corre "..."` de abajo. `$(printf %q ...)` -- ya usado en el paso 5 para
+# `$ADMIN_LOCAL` -- lo vuelve UN solo token opaco para el shell remoto. MINOR (ronda
+# 4): `trap ... EXIT` en vez de `&& rm -f` -- si `install` fallara a mitad, el `&&`
+# nunca llegaría al `rm`, y el temporal (con el CONTENIDO del script, no una llave,
+# pero igual basura ajena) quedaría en la remota. El trap limpia SIEMPRE, éxito o no.
 TMP_SCRIPT_REMOTO="$(subir_sin_nombre_fijo "$REPO/ops/ejecutor/ejecutor-huella")"
-corre "install -o root -g root -m 0755 $TMP_SCRIPT_REMOTO /usr/local/sbin/ejecutor-huella && rm -f $TMP_SCRIPT_REMOTO"
+corre "trap 'rm -f $(printf %q "$TMP_SCRIPT_REMOTO")' EXIT; install -o root -g root -m 0755 $(printf %q "$TMP_SCRIPT_REMOTO") /usr/local/sbin/ejecutor-huella"
 
 # 4. sudoers.d ACOTADO -- exactamente este binario, SIN argumentos, nunca ALL. MAJOR-5
 #    (ronda 2, auditoría adversarial 2026-09-22): la cadena vacía `""` NO es decorativa
@@ -101,7 +110,11 @@ corre "install -o root -g root -m 0755 $TMP_SCRIPT_REMOTO /usr/local/sbin/ejecut
 #    BLOCK-2: staging por `subir_sin_nombre_fijo`, no un nombre fijo en /tmp.
 printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/ejecutor-huella ""\n' "$ADMIN_LOCAL" > "$ETAPA/sudoers-huella"
 TMP_SUDOERS_REMOTO="$(subir_sin_nombre_fijo "$ETAPA/sudoers-huella")"
-corre "visudo -cf $TMP_SUDOERS_REMOTO && install -o root -g root -m 0440 $TMP_SUDOERS_REMOTO /etc/sudoers.d/50-ejecutor-huella && rm -f $TMP_SUDOERS_REMOTO"
+# MAJOR-D (ronda 4): mismo motivo que el paso 3 -- `$TMP_SUDOERS_REMOTO` sin comillas
+# sería una inyección posible vía un `TMPDIR` hostil en la sesión del administrador.
+# MINOR: `trap ... EXIT`, no `&& rm -f` -- si `visudo -cf` rechazara el archivo, el
+# temporal (con una línea de sudoers, aunque de prueba) igual se limpia.
+corre "trap 'rm -f $(printf %q "$TMP_SUDOERS_REMOTO")' EXIT; visudo -cf $(printf %q "$TMP_SUDOERS_REMOTO") && install -o root -g root -m 0440 $(printf %q "$TMP_SUDOERS_REMOTO") /etc/sudoers.d/50-ejecutor-huella"
 
 # 5. MAJOR-4 (ronda 3): el guion remoto (ejecutor-huella) YA NO tiene el administrador
 #    hardcodeado -- lo lee de este archivo, que sólo este instalador escribe (root
@@ -109,9 +122,9 @@ corre "visudo -cf $TMP_SUDOERS_REMOTO && install -o root -g root -m 0440 $TMP_SU
 #    quedan dentro de la MISMA invocación de root, sin hop intermedio que necesite
 #    `subir_sin_nombre_fijo` (BLOCK-2: no hay ventana entre crear el nombre y usarlo).
 corre "install -d -o root -g root -m 0755 /etc/ejecutor-huella \
-  && TMP_ADMIN=\$(mktemp) && printf '%s\n' $(printf %q "$ADMIN_LOCAL") > \"\$TMP_ADMIN\" \
-  && install -o root -g root -m 0644 \"\$TMP_ADMIN\" /etc/ejecutor-huella/admin_usuario \
-  && rm -f \"\$TMP_ADMIN\""
+  && TMP_ADMIN=\$(mktemp) && trap 'rm -f \"\$TMP_ADMIN\"' EXIT \
+  && printf '%s\n' $(printf %q "$ADMIN_LOCAL") > \"\$TMP_ADMIN\" \
+  && install -o root -g root -m 0644 \"\$TMP_ADMIN\" /etc/ejecutor-huella/admin_usuario"
 
 # 6. authorized_keys del ADMINISTRADOR en la remota -- BLOCK-2/MAJOR-3 (ronda 2/3): la
 #    línea la arma `huella.linea_authorized_keys_servicio` (Python, TESTEADO, no bash
@@ -137,7 +150,10 @@ if corre "cat ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null" | cmp -s - "$ETAPA
   echo "codigo=llave_huella_ya_convergida host=\"$NOMBRE\""
 else
   TMP_AUTH_REMOTO="$(subir_sin_nombre_fijo "$ETAPA/nuevas")"
-  corre "install -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0600 $TMP_AUTH_REMOTO ~$ADMIN_LOCAL/.ssh/authorized_keys && rm -f $TMP_AUTH_REMOTO"
+  # MAJOR-D (ronda 4): mismo motivo -- `$TMP_AUTH_REMOTO` sin comillas. MINOR: trap,
+  # no `&& rm -f` -- este es el que más importa limpiar SIEMPRE: trae el contenido
+  # completo del nuevo authorized_keys, con la clave del servicio adentro.
+  corre "trap 'rm -f $(printf %q "$TMP_AUTH_REMOTO")' EXIT; install -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0600 $(printf %q "$TMP_AUTH_REMOTO") ~$ADMIN_LOCAL/.ssh/authorized_keys"
 fi
 
 echo "maquina_huella_instalada=\"$NOMBRE\" script_sha256=\"$(corre "sha256sum /usr/local/sbin/ejecutor-huella" | cut -d' ' -f1)\""

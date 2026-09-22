@@ -131,16 +131,58 @@ def _q(ruta: str) -> str:
     return f"'{ruta}'"
 
 
+# RONDA 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
+# `/root/.ssh/authorized_keys` NO EXISTE en hall9000, atemai NI prod -- estado SANO, no
+# una medición rota. La versión de ronda 2/3 (`find ... 2>/dev/null`, sin más) daba CERO
+# líneas tanto si la ruta no existía COMO si no se pudo medir (permiso denegado, `find`
+# roto) -- indistinguibles, y `huella_valida(rutas=...)` trataba las dos como inválidas,
+# bloqueando el Ejecutor en máquinas SANAS. Mirror EXACTO (sin f-string: es texto de
+# shell con sus propias llaves y `$`, interpolarlo habría sido un baño de escapes) de
+# `tramo()` en `ops/ejecutor/ejecutor-huella` -- `tests/test_ejecutor_huella_sh.py`
+# compara la SALIDA de este texto contra la del script real, no sólo su forma.
+_CUERPO_TRAMO_SH = r'''tramo() {
+  ruta="$1"
+  err="$(/usr/bin/mktemp)"
+  tipo="$(/usr/bin/stat -c '%F' "$ruta" 2>"$err")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if grep -q "No such file or directory" "$err"; then
+      echo "A $ruta"
+    else
+      motivo="$(tr '\n' ' ' < "$err" | tr -s ' ')"
+      echo "E $ruta ${motivo:-motivo_desconocido}"
+    fi
+    rm -f "$err"
+    return 0
+  fi
+  rm -f "$err"
+  case "$tipo" in
+    "regular file"|"regular empty file")
+      linea_hash="$(/usr/bin/sha256sum "$ruta" 2>/dev/null)"
+      if [ -n "$linea_hash" ]; then
+        echo "$linea_hash"
+      else
+        echo "E $ruta sha256sum_fallo"
+      fi
+      ;;
+    directory)
+      echo "D $ruta"
+      /usr/bin/find "$ruta" -mindepth 1 -xtype f -exec /usr/bin/sha256sum {} + 2>/dev/null
+      /usr/bin/find "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" 2>/dev/null
+      /usr/bin/find "$ruta" -mindepth 1 -type d -printf "D %p\n" 2>/dev/null
+      ;;
+    *)
+      echo "E $ruta tipo_no_esperado:$tipo"
+      ;;
+  esac
+}'''
+
+
 def _tramo_ruta(ruta: str) -> str:
-    """sha256 del contenido RESUELTO (`-xtype f` sigue symlinks); el DESTINO de cada
-    symlink por separado (`-printf %l`, sin resolver); y el listado de directorios. Una
-    ruta ausente cuenta como "no existe" (`2>/dev/null`), no como error."""
-    q = _q(ruta)
-    return (
-        f'{_FIND} {q} -xtype f -exec {_SHA256SUM} {{}} + 2>/dev/null ; '
-        f'{_FIND} {q} -type l -printf "L %p -> %l\\n" 2>/dev/null ; '
-        f'{_FIND} {q} -type d -printf "D %p\\n" 2>/dev/null'
-    )
+    """UNA llamada a la función `tramo()` (ver `_CUERPO_TRAMO_SH`) -- reemplaza el
+    `find ... 2>/dev/null` de rondas 2/3, que no distinguía "no existe" de "no se pudo
+    medir". `_q`: la MISMA función de escapado que ya usaba esto, sin cambios."""
+    return f"tramo {_q(ruta)}"
 
 
 def _tramo_sbin_ejecutor() -> str:
@@ -198,11 +240,19 @@ def comando_huella(admin_usuario: str) -> str:
     `ruta_authorized_keys_admin`. `test_comando_huella_no_pide_una_cuenta` (ronda 6)
     queda retirado a propósito: la premisa que probaba ("no depende de ninguna
     cuenta") dejó de ser cierta el día que la huella tuvo que empezar a vigilar SU
-    PROPIA llave de acceso, que vive en el `authorized_keys` de una cuenta concreta."""
-    tramos = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
-    tramos.append(_tramo_ruta(ruta_authorized_keys_admin(admin_usuario)))
-    tramos.append(_tramo_sbin_ejecutor())
-    return f'({" ; ".join(tramos)}) | {_SORT}'
+    PROPIA llave de acceso, que vive en el `authorized_keys` de una cuenta concreta.
+
+    Ronda 4: la función `tramo()` (definida UNA vez, `_CUERPO_TRAMO_SH`) va ANTES del
+    grupo que la invoca -- `{ tramo r1 ; tramo r2 ; ... ; <glob de sbin> ; } | sort`.
+    El texto que resuelve `ruta_authorized_keys_admin(admin_usuario)` -- no un `cat`
+    del archivo de config ni un `getent` propios -- porque acá Python YA sabe la
+    cuenta; `ops/ejecutor/ejecutor-huella::tramo_admin()` hace ese trabajo de más
+    (leer el archivo, resolver con `getent`) para el camino real, donde nadie le pasa
+    la cuenta por argv."""
+    llamadas = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
+    llamadas.append(_tramo_ruta(ruta_authorized_keys_admin(admin_usuario)))
+    cuerpo = " ; ".join(llamadas) + " ; " + _tramo_sbin_ejecutor()
+    return f'{_CUERPO_TRAMO_SH}\n{{ {cuerpo} ; }} | {_SORT}'
 
 
 # --- EL CAMINO REMOTO: la llave PROPIA DEL SERVICIO, no la personal del administrador ---
@@ -348,32 +398,62 @@ def huella_desde_salida(host: str, salida: bytes) -> Huella:
 #: MAJOR-6 (ronda 2): 64 hex + dos espacios -- exactamente lo que imprime `sha256sum`.
 _LINEA_CON_HASH = re.compile(r"^[0-9a-f]{64}  ")
 
+#: Los CUATRO estados que `tramo()` puede reportar para una ruta declarada (ronda 4,
+#: auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
+#: `HASH`/`D` (medida, existe) y `AUSENTE` (medida, confirmada que NO existe) son
+#: estados VÁLIDOS -- `/root/.ssh/authorized_keys` no existe en hall9000, atemai NI
+#: prod, y esa es la configuración SANA de esas máquinas, no una medición rota.
+#: `ERROR` (no se pudo medir -- permiso denegado, tipo inesperado, `sha256sum` roto) es
+#: el ÚNICO inválido.
+_HASH, _D, _AUSENTE, _ERROR = "HASH", "D", "AUSENTE", "ERROR"
+
 #: Las rutas que `huella_valida` exige ver representadas -- por default, las FIJAS
-#: (RUTAS_CONTROLES + el directorio de binarios del Ejecutor). El authorized_keys del
-#: administrador NO entra acá por default porque es host/cuenta-dependiente
-#: (`ruta_authorized_keys_admin`); un llamador que la conoce (`vigia_servicio.py`,
-#: `_tomar_huella_actual`) puede pasarla en `rutas=` para exigirla también.
-RUTAS_DECLARADAS_POR_DEFAULT = RUTAS_CONTROLES + (_DIR_SBIN_EJECUTOR,)
+#: (RUTAS_CONTROLES). El glob de binarios de `/usr/local/sbin` NO entra: no tiene una
+#: línea de sí mismo (mide archivos que CALZAN un patrón, no una ruta única) y no
+#: encaja en el chequeo exacto por-ruta de abajo. El authorized_keys del administrador
+#: tampoco entra por default porque es host/cuenta-dependiente
+#: (`ruta_authorized_keys_admin`) -- MAJOR-C (ronda 4): un llamador que conoce la
+#: cuenta (`vigia_servicio.py`) tiene que agregarla explícitamente a `rutas=`.
+RUTAS_DECLARADAS_POR_DEFAULT = RUTAS_CONTROLES
 
 
-def _ruta_de_la_linea(linea: str) -> str | None:
-    """La porción de RUTA de una línea de huella -- `<hash>  <ruta>`, `D <ruta>` o
-    `L <ruta> -> <destino>`. `None` si la línea no tiene una forma reconocible."""
+def _clasificar_linea(linea: str) -> tuple[str, str] | None:
+    """`(ruta, estado)` de una línea de huella, o `None` si no tiene forma reconocible.
+    `E <ruta> <motivo>`: la ruta es el PRIMER token después de `E ` -- nunca puede
+    tener espacios (viene de `_q`/de una ruta de archivo real), a diferencia del
+    motivo, que sí puede traerlos."""
     if _LINEA_CON_HASH.match(linea):
-        return linea[66:]
+        return linea[66:], _HASH
     if linea.startswith("D "):
-        return linea[2:]
+        return linea[2:], _D
+    if linea.startswith("A "):
+        return linea[2:], _AUSENTE
+    if linea.startswith("E "):
+        return linea[2:].split(" ", 1)[0], _ERROR
     if linea.startswith("L "):
-        return linea[2:].split(" -> ", 1)[0]
+        return linea[2:].split(" -> ", 1)[0], "L"
     return None
 
 
-def _alguna_linea_toca(lineas: list[str], ruta: str) -> bool:
+def _estado_de_ruta_declarada(lineas: list[str], ruta: str) -> str | None:
+    """El estado de la línea que representa EXACTAMENTE `ruta` (nunca una línea de
+    CONTENIDO por debajo de ella, que usa la MISMA forma de hash/D/L pero para una
+    ruta más larga). Si ninguna línea representa `ruta` en sí -- ni siquiera un
+    `E` -- pero SÍ hay contenido reportado POR DEBAJO de ella (el caso del glob de
+    `/usr/local/sbin`, que nunca emite una línea de sí mismo), eso cuenta como
+    medido -- si no hay NADA, `None` (ni medido, ni declarado ausente: la medición de
+    esa ruta ni siquiera corrió)."""
+    con_contenido_debajo = False
     for linea in lineas:
-        r = _ruta_de_la_linea(linea)
-        if r is not None and (r == ruta or r.startswith(ruta + "/")):
-            return True
-    return False
+        clasificada = _clasificar_linea(linea)
+        if clasificada is None:
+            continue
+        r, estado = clasificada
+        if r == ruta:
+            return estado
+        if r.startswith(ruta + "/"):
+            con_contenido_debajo = True
+    return _D if con_contenido_debajo else None
 
 
 def huella_valida(h: Huella, *, rutas: tuple | None = None) -> bool:
@@ -383,29 +463,27 @@ def huella_valida(h: Huella, *, rutas: tuple | None = None) -> bool:
     quien llama trata esto como no-medible, no como "todo en orden".
 
     MAJOR-6 (ronda 2, auditoría adversarial 2026-09-22): "no vacía" NO ALCANZABA. Si
-    `sha256sum` faltara en la remota (o cualquier binario que la huella use para medir
-    CONTENIDO), `find <ruta> -xtype f -exec sha256sum {} + 2>/dev/null` falla en
-    silencio -- pero los OTROS dos `find` del mismo tramo (`-type l -printf`, `-type d
-    -printf`) no dependen de `sha256sum` y SIGUEN produciendo líneas `L `/`D `. El
-    texto quedaba "no vacío" con sólo listados de directorios/symlinks y CERO hashes
-    de archivo -- ciego a todo cambio de CONTENIDO, e igual `huella_valida() is True`.
+    `sha256sum` faltara en la remota, el tramo de esa ruta ahora reporta explícitamente
+    `E <ruta> sha256sum_fallo` (ver `tramo()`/`_CUERPO_TRAMO_SH`) -- así que el chequeo
+    de abajo, por-ruta, ya lo cubre cuando se pasa `rutas=`; para el caso genérico
+    (`rutas=None`) se conserva "al menos un hash en algún lado" como red de contención.
 
-    MINOR (ronda 3): "al menos UN hash en cualquier parte" tampoco alcanzaba -- un
-    TRAMO completo podía faltar (esa ruta puntual inaccesible, desaparecida, o el
-    `find` de esa línea reventado) mientras OTROS tramos seguían produciendo hashes, y
-    la huella pasaba igual. Con `rutas` (un tuple explícito -- típicamente
-    `RUTAS_DECLARADAS_POR_DEFAULT`), además del hash, CADA ruta tiene que aparecer --
-    como ruta exacta o como prefijo de alguna línea -- al menos una vez. Un directorio
-    EXISTENTE, aunque esté vacío, siempre se reporta a sí mismo (`find <ruta> -type d`
-    incluye el punto de partida) -- "cero líneas para una ruta declarada" sólo pasa si
-    esa ruta no existe, no es legible, o el comando para medirla se rompió.
+    RONDA 4 (BLOCK reproducido en atemai y prod): "cada ruta declarada tiene que
+    aparecer" (MINOR, ronda 3) NO distinguía "esta ruta no existe" (sano) de "no se
+    pudo medir" (roto) -- las dos daban CERO líneas para esa ruta con el `find`
+    anterior, y esta función las trataba igual: inválida. Eso bloqueaba el Ejecutor en
+    máquinas SANAS (`/root/.ssh/authorized_keys` no existe en NINGUNA de las tres).
+    Ahora exige, para CADA ruta de `rutas`, que su estado sea `HASH`, `D` o `AUSENTE`
+    -- `ERROR` (o ausencia total de la línea) invalida la huella entera. Que una ruta
+    pase de `AUSENTE` a existir (o al revés) sigue siendo un cambio de TEXTO real
+    (`A <ruta>` desaparece, aparece un hash/`D`) -- `cambio()`/`hallazgos()` lo ven
+    igual que cualquier otro, sin tocar nada acá.
 
-    `rutas=None` (el default) SALTA ese chequeo por-ruta -- lo pide `vigia_servicio.py`
-    explícitamente en sus CUATRO llamadas reales (con `RUTAS_DECLARADAS_POR_DEFAULT`);
-    dejarlo opcional evita que esta función necesite adivinar qué se declaró cuando
-    quien llama no lo sabe (por ejemplo, pruebas o usos genéricos de una sola línea),
-    y hace explícito, en el código de producción, DÓNDE se exige la cobertura
-    completa -- no implícito en un default que nadie ve al leer el call site."""
+    `rutas=None` (el default) SALTA el chequeo por-ruta -- lo pide `vigia_servicio.py`
+    explícitamente en sus CUATRO llamadas reales (con `RUTAS_DECLARADAS_POR_DEFAULT`
+    más el authorized_keys del administrador, MAJOR-C); dejarlo opcional evita que
+    esta función necesite adivinar qué se declaró cuando quien llama no lo sabe (por
+    ejemplo, pruebas o usos genéricos de una sola línea)."""
     texto = h.texto.strip()
     if not texto:
         return False
@@ -414,7 +492,7 @@ def huella_valida(h: Huella, *, rutas: tuple | None = None) -> bool:
         return False
     if rutas is None:
         return True
-    return all(_alguna_linea_toca(lineas, ruta) for ruta in rutas)
+    return all(_estado_de_ruta_declarada(lineas, ruta) in (_HASH, _D, _AUSENTE) for ruta in rutas)
 
 
 def cambio(antes: Huella, despues: Huella) -> bool:

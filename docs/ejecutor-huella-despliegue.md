@@ -100,23 +100,47 @@ mensaje que él mismo provocaba. Verificado el 2026-09-22 (sin tocar la llave re
 ninguna máquina remota): un archivo de prueba `jaxsvc:jaxsvc 700/600` da
 `Permission denied` leído como `fruiz` a secas, y `sudo -u jaxsvc cat` lo lee bien --
 misma identidad que ya usa `docs/ejecutor-huella-aceptar.md` para la CLI de aceptación.
-El comando correcto:
+
+**MINOR de la ronda 4 (corregido acá):** el comando además tenía el usuario y el
+puerto FIJOS (`fruiz`, `58291`) -- deberían salir del inventario
+(`JAX_EJECUTOR_POLITICA`), igual que hacen `_maquina.sh` y todos los guiones de
+`ops/ejecutor/`. El comando completo, resolviendo IP/puerto de la máquina por su
+nombre:
 
 ```bash
+MAQUINA=atemai  # el nombre de la máquina a verificar, uno de los cuatro del paso 1
+read -r IP PUERTO < <(python3 -c '
+import json, sys
+from jax.ejecutor.contratos import politica
+doc = json.load(open(sys.argv[1]))
+(h,) = [h for h in politica.validar(doc).hosts if h.nombre == sys.argv[2]]
+print(h.ip, h.puerto)
+' "$JAX_EJECUTOR_POLITICA" "$MAQUINA")
+
 sudo -u jaxsvc ssh -F /dev/null -i "$JAX_EJECUTOR_HUELLA_LLAVE" -o BatchMode=yes \
   -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
   -o UserKnownHostsFile="$JAX_EJECUTOR_HUELLA_KNOWN_HOSTS" \
-  -p 58291 fruiz@<ip-de-la-maquina> ejecutor-huella
+  -p "$PUERTO" "$JAX_EJECUTOR_ADMIN_USUARIO@$IP" ejecutor-huella
 ```
 
-(`sudo -u jaxsvc` necesita que las variables `JAX_EJECUTOR_HUELLA_*` lleguen al entorno
-de jaxsvc -- si se corre en la MISMA terminal donde ya se hizo `export` más arriba,
-`sudo -u jaxsvc` con la sesión de `fruiz` activa las hereda; si no, exportarlas de nuevo
-antes de este comando.)
+**MINOR de la ronda 4 (corregido acá):** la versión anterior de este documento decía
+que `sudo -u jaxsvc` necesitaba que las variables "llegaran al entorno de jaxsvc" y
+que, en la misma terminal, "las heredaba" -- **eso era falso**. Lo que pasa es más
+simple: `"$JAX_EJECUTOR_HUELLA_LLAVE"`, `"$PUERTO"`, `"$JAX_EJECUTOR_ADMIN_USUARIO"`,
+etc. son variables del shell de **fruiz** (esta terminal), y el shell las EXPANDE a su
+valor literal ANTES de ejecutar `sudo` -- `sudo -u jaxsvc` recibe un argv ya armado con
+texto plano (por ejemplo `ssh -i /etc/jax/controlador/id_ejecutor_huella ...`), nunca
+una referencia a una variable que jaxsvc tendría que "heredar". La identidad de
+`jaxsvc` no interviene en absoluto en esa sustitución -- sólo importa para decidir
+QUIÉN abre el archivo de la llave un paso después, que es justo lo que este comando
+corrige.
 
-Tiene que imprimir varias líneas `<sha256>  <ruta>` / `D <ruta>` / `L <ruta> -> <destino>`
-ordenadas — la huella real de esa máquina. Una salida vacía, un `Permission denied` o un
-`command not found` significa que el paso 1 no terminó bien en esa máquina: no seguir.
+Tiene que imprimir varias líneas `<sha256>  <ruta>` / `D <ruta>` / `A <ruta>` (ausente,
+confirmado -- ronda 4) / `E <ruta> <motivo>` (no se pudo medir) ordenadas — la huella
+real de esa máquina. `/root/.ssh/authorized_keys` va a salir como `A` en las cuatro
+máquinas del inventario (no existe en ninguna, verificado) -- eso es SANO, no una
+falla. Una salida vacía, un `Permission denied`, un `command not found`, o cualquier
+línea `E` inesperada significa que el paso 1 no terminó bien en esa máquina: no seguir.
 
 ### Paso 2 — Sembrar `/etc/jax/.env` (lo hace Fernando)
 

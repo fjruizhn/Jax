@@ -205,19 +205,30 @@ OTRA_MISION_ID = "22222222-2222-2222-2222-222222222222"
 # Formas de hash REALES (MAJOR-6, ronda 2: huella_valida() exige 64 hex) -- no "abc"/"def".
 _HASH_A = "a" * 64
 _HASH_B = "b" * 64
+_HASH_C = "c" * 64
 
 
 def _base_completa() -> bytes:
-    """MINOR (ronda 3): `huella_valida()` (llamada por `vigia_servicio.py` con
-    `rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT`) exige que CADA tramo declarado tenga
-    contenido -- no sólo un hash en cualquier parte. Una línea `D <ruta>` por cada
-    RUTAS_CONTROLES (menos la primera, que lleva el hash real que exige MAJOR-6) más el
-    directorio de binarios alcanza para que la huella sea "válida" en los tests que no
-    están probando específicamente esa cobertura."""
+    """MINOR (ronda 3)/RONDA 4: `huella_valida()` (llamada por `vigia_servicio.py` con
+    `rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT (+ rutas_extra)`) exige que CADA ruta
+    declarada tenga un estado válido -- hash/D/A, nunca E ni ausencia total. Los
+    TIPOS de acá reflejan lo que Fernando midió de verdad en hall9000/atemai/prod
+    (ronda 4, auditoría adversarial 2026-09-22): `/etc/ssh/sshd_config` es un ARCHIVO
+    (hash, nunca `D`) y `/root/.ssh/authorized_keys` NO EXISTE en ninguna de las tres
+    -- `A`, no `D`. Escribir `D` para esas dos era ficción, y es justo lo que la
+    ronda 4 vino a corregir."""
     from jax.ejecutor.contratos import huella as H
-    lineas = [f"{_HASH_A}  /etc/sudoers"]
-    lineas += [f"D {r}" for r in H.RUTAS_CONTROLES[1:]]
-    lineas.append(f"D {H._DIR_SBIN_EJECUTOR}")
+    lineas_por_ruta = {
+        "/etc/sudoers": f"{_HASH_A}  /etc/sudoers",
+        "/etc/sudoers.d": "D /etc/sudoers.d",
+        "/etc/ssh/sshd_config": f"{_HASH_B}  /etc/ssh/sshd_config",
+        "/etc/ssh/sshd_config.d": "D /etc/ssh/sshd_config.d",
+        "/etc/ssh/authorized_keys.d": "D /etc/ssh/authorized_keys.d",
+        "/root/.ssh/authorized_keys": "A /root/.ssh/authorized_keys",
+        "/etc/ejecutor-huella": "D /etc/ejecutor-huella",
+    }
+    assert set(lineas_por_ruta) == set(H.RUTAS_CONTROLES), "RUTAS_CONTROLES cambió -- actualizar este fixture"
+    lineas = [lineas_por_ruta[r] for r in H.RUTAS_CONTROLES]
     return ("\n".join(lineas) + "\n").encode()
 
 
@@ -227,13 +238,14 @@ def _h(host, controles=None):
 
 
 def _base_completa_con_cambio() -> bytes:
-    """La base completa MÁS una línea de más (`/root/.ssh/authorized_keys` con hash
-    real) -- representa "cambió algo", pero sigue siendo una huella VÁLIDA (cada tramo
-    declarado sigue teniendo contenido; lo que cambió es el CONTENIDO de uno de ellos,
-    no que un tramo entero desapareciera)."""
+    """La base completa, pero con `/root/.ssh/authorized_keys` pasando de `A`
+    (ausente, confirmado) a un HASH real -- exactamente el caso que la ronda 4 señala:
+    "que la ruta pase de A a existir es un CAMBIO y pausa". Sigue siendo una huella
+    VÁLIDA (cada ruta declarada sigue teniendo un estado hash/D/A), pero DISTINTA de
+    `_base_completa()`."""
     base = _base_completa().decode()
-    base_sin_root = base.replace("D /root/.ssh/authorized_keys\n", "")
-    return (base_sin_root + f"{_HASH_B}  /root/.ssh/authorized_keys\n").encode()
+    sin_root = base.replace("A /root/.ssh/authorized_keys\n", "")
+    return (sin_root + f"{_HASH_C}  /root/.ssh/authorized_keys\n").encode()
 
 
 def test_sin_tomar_huella_no_se_toma_ninguna(tmp_path):

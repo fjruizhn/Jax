@@ -131,7 +131,8 @@ def ruta_huella(misiones: Path, mision_id: str, host: str) -> Path:
     return huella.ruta_huella(misiones, mision_id, host)
 
 
-async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella, pausar, pausa_ruta) -> bool:
+async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella, pausar, pausa_ruta,
+                                      rutas_extra: tuple = ()) -> bool:
     """M-1 (ronda 6; estados con nombre desde ronda 7). Antes de que CUALQUIER misión
     nueva abra su propia huella en `host`, revisa TODAS las marcas de OTRA vuelta --
     de esta misma misión (un turno que se cortó) o de otra:
@@ -172,10 +173,11 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
                 "origen": "huella", "motivo": "huella_no_medible", "host": host, "mision_id": mision_id_de_la_ruta,
                 "detalle": ["huerfana", type(exc).__name__]})
             return False
-        if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT) or huella.cambio(antes, despues):
+        rutas = huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra
+        if not huella.huella_valida(despues, rutas=rutas) or huella.cambio(antes, despues):
             log.critical("vigia_servicio huella_cambio_no_declarado host=%s motivo=huerfana", host)
             detalle = tuple(["huella_de_ahora_vacia"]
-                            if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT)
+                            if not huella.huella_valida(despues, rutas=rutas)
                             else huella.lineas_agregadas_o_quitadas(antes, despues))
             await asyncio.to_thread(huella.escribir_marca, ruta,
                                     huella.Marca(huella=antes, estado=huella.REPORTADA, diff=detalle))
@@ -189,7 +191,7 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
 
 
 async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, host: str, tomar_huella,
-                                          pausar, pausa_ruta) -> huella.Huella | None:
+                                          pausar, pausa_ruta, rutas_extra: tuple = ()) -> huella.Huella | None:
     """La huella de APERTURA de la MISIÓN (ronda 4, M-1) -- NO la del turno. Primero
     resuelve cualquier deuda huérfana en `host` (`verificar_huellas_huerfanas`); si esa
     revisión encuentra un problema, ESTA misión tampoco abre (devuelve `None`) --
@@ -205,7 +207,7 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
     se pudo tomar no es "sin cambios", es que la misión no debe abrir. MINOR (ronda 6):
     una huella de apertura vacía (no parsea/no midió nada real) es el mismo fallo."""
     ok = await verificar_huellas_huerfanas(misiones, host, tomar_huella=tomar_huella, pausar=pausar,
-                                           pausa_ruta=pausa_ruta)
+                                           pausa_ruta=pausa_ruta, rutas_extra=rutas_extra)
     if not ok:
         return None
     ruta = ruta_huella(misiones, mision_id, host)
@@ -214,7 +216,7 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
         h = marca.huella
     except FileNotFoundError:
         h = await tomar_huella(host)
-        if not huella.huella_valida(h, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT):
+        if not huella.huella_valida(h, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra):
             raise RuntimeError("huella_apertura_vacia")
     await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=h, estado=huella.ABIERTA))
     return h
@@ -232,7 +234,8 @@ def hosts_con_sudo(hosts_mision, hosts_pol: dict) -> tuple:
 
 
 async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict, hosts_con_sudo: tuple,
-                                       misiones: Path, mision_id: str, *, tomar_huella, pausar) -> tuple:
+                                       misiones: Path, mision_id: str, *, tomar_huella, pausar,
+                                       rutas_extra: tuple = ()) -> tuple:
     """«El CIERRE falla cerrado». Si la huella de cierre de un host NO SE PUEDE TOMAR
     (ssh caído, sudo denegado, lo que sea), sale vacía, o si no hubo huella de apertura
     que comparar, es un hallazgo `huella_no_medible` y PONE LA PAUSA. Sin declarado
@@ -261,7 +264,7 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict
                 "origen": "huella", "motivo": "huella_no_medible", "host": h, "mision_id": mision_id,
                 "detalle": [type(exc).__name__]})
             continue
-        if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT):
+        if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra):
             log.error("vigia_servicio huella_no_medible host=%s motivo=huella_vacia", h)
             motivos.append((h, "huella_no_medible"))
             await asyncio.to_thread(pausar, pausa_ruta, {
@@ -287,7 +290,7 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
                         intervalo_s: float, auditar, fin: asyncio.Event, exigir=arranque.exigir_contratos,
                         vigilar=vigia.vigilar, maquinas: tuple, hosts_con_sudo: tuple = (),
                         misiones: Path | None = None, mision_id: str | None = None,
-                        tomar_huella=None, pausar=pausa.poner_pausa) -> tuple:
+                        tomar_huella=None, pausar=pausa.poner_pausa, rutas_extra: tuple = ()) -> tuple:
     """Lanza ContratosNoVerificados sin haber latido nunca si un contrato no está vivo.
 
     `hosts_con_sudo`/`tomar_huella` (M-1/M-2, ronda 3; B-1/M-1/M-2 ronda 4;
@@ -303,7 +306,13 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
     `huella_de_apertura_de_la_mision` devuelve `None` para ese host, y acá se propaga
     `HuellaHuerfanaNoResuelta` ANTES de `vigilar()` (no se abre el proxy; `_principal`
     la reporta con su propio código, no como un contrato más). Devuelve los motivos de
-    pausa por huella (vacío si no se pidió huella o si todo midió limpio)."""
+    pausa por huella (vacío si no se pidió huella o si todo midió limpio).
+
+    `rutas_extra` (MAJOR-C, ronda 4): rutas ADEMÁS de `huella.RUTAS_DECLARADAS_POR_DEFAULT`
+    que `huella_valida()` tiene que ver representadas -- típicamente el authorized_keys
+    RESUELTO del administrador (`huella.ruta_authorized_keys_admin(admin_usuario)`),
+    que `_principal` pasa porque es quien conoce la cuenta. Vacío por default: los
+    llamadores de test que no la necesitan no cambian de comportamiento."""
     if ctx.hosts_mision != mision.hosts:
         raise ValueError("contexto_de_otra_mision")
     await exigir(ctx)
@@ -315,7 +324,7 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
         for h in hosts_con_sudo:
             baseline = await huella_de_apertura_de_la_mision(
                 misiones=misiones, mision_id=mision_id, host=h, tomar_huella=tomar_huella,
-                pausar=pausar, pausa_ruta=ctx.pausa)
+                pausar=pausar, pausa_ruta=ctx.pausa, rutas_extra=rutas_extra)
             if baseline is None:
                 log.critical("vigia_servicio mision_no_abre_por_huella_huerfana host=%s", h)
                 raise HuellaHuerfanaNoResuelta(h)
@@ -332,7 +341,7 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
     if tomar_huella is not None and hosts_con_sudo:
         pausas_de_huella = await _verificar_huellas_al_cierre(
             ctx.pausa, huellas_iniciales, hosts_con_sudo, misiones, mision_id,
-            tomar_huella=tomar_huella, pausar=pausar)
+            tomar_huella=tomar_huella, pausar=pausar, rutas_extra=rutas_extra)
     log.info("vigia_servicio mision_cerrada")
     return pausas_de_huella
 
@@ -442,7 +451,11 @@ async def _principal(ruta_mision: Path) -> int:
             ctx, mision, latido_cada_s=latido_cada_s, lote_max=cfg.lote_max,
             intervalo_s=cfg.intervalo_s, auditar=auditar, fin=fin, maquinas=maquinas,
             hosts_con_sudo=remotas_con_sudo, misiones=misiones_dir, mision_id=mision_id,
-            tomar_huella=_tomar_huella)
+            tomar_huella=_tomar_huella,
+            # MAJOR-C (ronda 4): el authorized_keys del administrador entra a las
+            # rutas EXIGIDAS -- acá, y sólo acá, se conoce `admin_usuario` -- así que
+            # `RUTAS_DECLARADAS_POR_DEFAULT` (fija) no podía incluirla por sí sola.
+            rutas_extra=(huella.ruta_authorized_keys_admin(admin_usuario),))
     except arranque.ContratosNoVerificados as exc:
         for f in exc.fallos:
             print(formato.campos((("contrato", f.contrato), ("codigo", f.codigo)) + tuple(f.datos)), flush=True)

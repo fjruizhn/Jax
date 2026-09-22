@@ -27,53 +27,112 @@
 # modos `restrict` + el sudoers acotado a "sin argumentos" (arriba) lo impedirían aunque
 # los hubiera.
 #
-# ADMIN_USUARIO (ronda 3, MAJOR-4: CORREGIDO -- antes era una constante `fruiz` fija en
-# este archivo, que la ronda 2 llamaba "declarada en una variable" pero en los hechos
-# era hardcoding con pasos extra: cambiar de administrador exigía editar este script y
-# reinstalarlo en las N máquinas). Ahora se LEE de un archivo que
-# `instalar_huella_en_maquina.sh` escribe (root 0644, una sola línea):
-# /etc/ejecutor-huella/admin_usuario -- NO de argv, NO del entorno heredado del cliente
-# ssh (sshd no reenvía el entorno del cliente salvo AcceptEnv, que este inventario no
-# habilita a propósito). Ese archivo, a su vez, ES una de las RUTAS_CONTROLES
-# (jax/ejecutor/contratos/huella.py) -- si alguien lo borra o lo cambia para apuntar a
-# otra cuenta, ESE cambio se ve en la huella igual que cualquier otro, sin declarado.
-# Vacío o ausente: fail-closed SÓLO para ESE tramo (ver `tramo_admin` más abajo) -- el
-# resto de la huella sigue midiendo igual.
-ADMIN_USUARIO_ARCHIVO=/etc/ejecutor-huella/admin_usuario
+# ADMIN_USUARIO (ronda 3, MAJOR-4) se LEE de un archivo que `instalar_huella_en_maquina.sh`
+# escribe (root 0644, una sola línea): /etc/ejecutor-huella/admin_usuario -- NO de argv,
+# NO del entorno heredado del cliente ssh. Ese archivo es una de las RUTAS_CONTROLES
+# (jax/ejecutor/contratos/huella.py): tamperearlo se ve en la huella igual que cualquier
+# otro control. El HOME del administrador (ronda 3, MAJOR-5) sale de `getent passwd`, el
+# passwd REAL de esta máquina, no de una convención `/home/<usuario>`.
 #
-# El HOME del administrador (ronda 3, MAJOR-5: CORREGIDO -- antes asumía `/home/$ADMIN_USUARIO`)
-# sale de `getent passwd`, el passwd REAL de esta máquina, no de una convención. Si la
-# cuenta no existe en esta máquina, ese tramo tampoco se mide (mismo criterio fail-closed
-# que arriba).
+# RONDA 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
+# `/root/.ssh/authorized_keys` NO EXISTE en hall9000, atemai NI prod -- y esa es la
+# configuración CORRECTA de esas máquinas, no una medición rota. La versión de ronda 3
+# no distinguía "esta ruta no existe" (estado normal y esperado) de "no pude medir esta
+# ruta" (sudo denegado, `stat` roto, lo que sea) -- las dos daban CERO líneas, y
+# `huella_valida(rutas=...)` trataba ambas como medición inválida, bloqueando el
+# Ejecutor en MÁQUINAS SANAS. Ahora cada ruta declarada (RUTAS_CONTROLES +
+# `tramo_admin`) emite SIEMPRE una de cuatro cosas:
+#   - `<sha256>  <ruta>`           -- es un archivo regular, esto es su contenido;
+#   - `D <ruta>` (+ su listado)    -- es un directorio, existe (aunque esté vacío);
+#   - `A <ruta>`                   -- MEDIDO y CONFIRMADO ausente (no es un error);
+#   - `E <ruta> <motivo>`          -- NO se pudo medir (permiso denegado, tipo raro,
+#                                      sha256sum roto) -- esto SÍ es inválido, ver
+#                                      `huella_valida()` en huella.py.
+# Que una ruta pase de `A` a existir (o al revés) sigue siendo un CAMBIO real, y pausa
+# -- es la señal que este mecanismo existe para dar.
 #
 # MISMA lógica que `jax.ejecutor.contratos.huella.comando_huella()` (RUTAS_CONTROLES +
-# el authorized_keys del administrador + el glob de /usr/local/sbin/ejecutor-*, mismo
-# orden, mismo formato de salida) -- tests/test_ejecutor_huella_sh.py compara las
-# SALIDAS de los dos sobre el mismo árbol de prueba (ronda 2, MAJOR-7), no sólo listas
-# de rutas. Binarios por RUTA ABSOLUTA (sin depender de `secure_path`: un root remoto
-# también podría reemplazar `sha256sum` en el PATH -- esto prueba "el Ejecutor no lo
-# hizo por accidente", no "un root de la máquina es incapaz de mentir", mismo límite
-# documentado en huella.py). `LC_ALL=C` (ronda 2, MINOR): el `sort` final y el `find
-# -printf` no dependen del locale de la sesión ssh -- dos huellas del MISMO estado
-# tienen que comparar textualmente IGUAL sin importar qué locale traía la conexión.
+# el authorized_keys del administrador, mismo orden, mismo formato de salida) --
+# tests/test_ejecutor_huella_sh.py compara las SALIDAS de los dos sobre el mismo árbol
+# de prueba (ronda 2, MAJOR-7), no sólo listas de rutas. Binarios por RUTA ABSOLUTA (sin
+# depender de `secure_path`: un root remoto también podría reemplazar `sha256sum` en el
+# PATH -- esto prueba "el Ejecutor no lo hizo por accidente", no "un root de la máquina
+# es incapaz de mentir", mismo límite documentado en huella.py). `LC_ALL=C` (ronda 2,
+# MINOR): el `sort` final y los mensajes de `stat` no dependen del locale de la sesión
+# ssh -- dos huellas del MISMO estado tienen que comparar textualmente IGUAL sin
+# importar qué locale traía la conexión (y el motivo de un `E` queda en inglés siempre,
+# reconocible por el grep de más abajo).
 set -u
 export LC_ALL=C
 FIND=/usr/bin/find
 SHA256SUM=/usr/bin/sha256sum
 SORT=/usr/bin/sort
 GETENT=/usr/bin/getent
+STAT=/usr/bin/stat
+MKTEMP=/usr/bin/mktemp
+ADMIN_USUARIO_ARCHIVO=/etc/ejecutor-huella/admin_usuario
 
+# tramo(): UNA línea de estado por `ruta` (hash/D/A/E, ronda 4) + el listado recursivo
+# si es un directorio. `stat` (sin `-L`): no sigue symlinks -- un tipo que no sea
+# "regular file"/"regular empty file"/"directory" en la ruta declarada MISMA (por
+# ejemplo, un symlink puesto donde se espera un archivo) es `E`, no se intenta adivinar
+# qué hacer con él.
 tramo() {
-  "$FIND" "$1" -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
-  "$FIND" "$1" -type l -printf "L %p -> %l\n" 2>/dev/null
-  "$FIND" "$1" -type d -printf "D %p\n" 2>/dev/null
+  ruta="$1"
+  err="$("$MKTEMP")"
+  tipo="$("$STAT" -c '%F' "$ruta" 2>"$err")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if grep -q "No such file or directory" "$err"; then
+      echo "A $ruta"
+    else
+      motivo="$(tr '\n' ' ' < "$err" | tr -s ' ')"
+      echo "E $ruta ${motivo:-motivo_desconocido}"
+    fi
+    rm -f "$err"
+    return 0
+  fi
+  rm -f "$err"
+  case "$tipo" in
+    "regular file"|"regular empty file")
+      linea_hash="$("$SHA256SUM" "$ruta" 2>/dev/null)"
+      if [ -n "$linea_hash" ]; then
+        echo "$linea_hash"
+      else
+        echo "E $ruta sha256sum_fallo"
+      fi
+      ;;
+    directory)
+      echo "D $ruta"
+      "$FIND" "$ruta" -mindepth 1 -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
+      "$FIND" "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" 2>/dev/null
+      "$FIND" "$ruta" -mindepth 1 -type d -printf "D %p\n" 2>/dev/null
+      ;;
+    *)
+      echo "E $ruta tipo_no_esperado:$tipo"
+      ;;
+  esac
 }
 
+# tramo_admin(): MAJOR-C (ronda 4) -- NUNCA `return 0` mudo. Si no se puede determinar
+# la CUENTA (archivo de config ausente/vacío, o `getent` no la resuelve), es una medición
+# rota -- `E` con un identificador (no una ruta de archivo real, porque no hay ninguna
+# que reportar) -- nunca silencio. Una vez resuelta la cuenta, la RUTA RESUELTA
+# (`$admin_home/.ssh/authorized_keys`) pasa por `tramo()` como cualquier otra: si el
+# archivo no existe, es `A` (medido y confirmado); si `sha256sum` falla, es `E`. Si
+# alguien cambia el HOME del administrador en el passwd, la ruta que aparece en la
+# huella CAMBIA -- eso es un hallazgo, no algo que este guion deba ocultar.
 tramo_admin() {
   admin_usuario="$(cat "$ADMIN_USUARIO_ARCHIVO" 2>/dev/null)"
-  [ -n "$admin_usuario" ] || return 0
+  if [ -z "$admin_usuario" ]; then
+    echo "E (admin_usuario) archivo_ausente_o_vacio:$ADMIN_USUARIO_ARCHIVO"
+    return 0
+  fi
   admin_home="$("$GETENT" passwd "$admin_usuario" 2>/dev/null | cut -d: -f6)"
-  [ -n "$admin_home" ] || return 0
+  if [ -z "$admin_home" ]; then
+    echo "E ($admin_usuario) getent_no_resuelve"
+    return 0
+  fi
   tramo "$admin_home/.ssh/authorized_keys"
 }
 

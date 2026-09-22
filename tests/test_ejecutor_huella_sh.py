@@ -294,3 +294,84 @@ def test_sin_sha256sum_la_huella_sale_invalida(tmp_path):
     assert r.returncode == 0  # el script no revienta -- rc=0 es justo el peligro que MAJOR-6 señala
     h = H.huella_desde_salida("prueba", r.stdout)
     assert H.huella_valida(h) is False, r.stdout
+
+
+# --- RONDA 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
+# el guion tiene que declarar SIEMPRE una de hash/D/A/E para cada ruta -- probado
+# contra el guion REAL, con bwrap armando cada escenario sin tocar el host. ------------
+
+@REQUIERE_BWRAP
+def test_ruta_ausente_de_verdad_da_a_no_e(tmp_path):
+    """El caso central de la ronda 4: si `/root/.ssh/authorized_keys` NO EXISTE (el
+    estado real en hall9000/atemai/prod), el guion tiene que decir `A`, no quedarse
+    mudo ni decir `E`."""
+    binds = _arbol_de_prueba(tmp_path)
+    del binds["/root/.ssh/authorized_keys"]  # no se bindea nada -- la ruta real
+    # tampoco existe en este host de pruebas (confirmado: hall9000 no tiene /root/.ssh).
+    base = _argv_bwrap(binds)
+    r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    assert r.returncode == 0
+    lineas = r.stdout.decode().splitlines()
+    assert "A /root/.ssh/authorized_keys" in lineas
+
+
+@REQUIERE_BWRAP
+def test_tramo_admin_con_archivo_de_config_ausente_da_error_no_silencio(tmp_path):
+    """MAJOR-C (ronda 4): si `/etc/ejecutor-huella/admin_usuario` no existe (o está
+    vacío), `tramo_admin()` NUNCA se queda mudo (`return 0` sin imprimir nada) --
+    tiene que decir `E`, aunque no tenga una ruta de archivo real que reportar."""
+    binds = _arbol_de_prueba(tmp_path)
+    (binds["/etc/ejecutor-huella"] / "admin_usuario").unlink()
+    base = _argv_bwrap(binds)
+    r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    assert r.returncode == 0
+    lineas = r.stdout.decode().splitlines()
+    assert any(l.startswith("E (admin_usuario) archivo_ausente_o_vacio") for l in lineas), lineas
+
+
+@REQUIERE_BWRAP
+def test_tramo_admin_con_cuenta_inexistente_da_error_no_silencio(tmp_path):
+    """MAJOR-C: si `getent passwd` no resuelve la cuenta que dice el archivo de
+    config (cuenta borrada, nombre mal escrito), es `E`, no silencio."""
+    binds = _arbol_de_prueba(tmp_path)
+    (binds["/etc/ejecutor-huella"] / "admin_usuario").write_text("cuenta-que-no-existe-de-verdad\n")
+    base = _argv_bwrap(binds)
+    r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    assert r.returncode == 0
+    lineas = r.stdout.decode().splitlines()
+    assert any(l.startswith("E (cuenta-que-no-existe-de-verdad) getent_no_resuelve") for l in lineas), lineas
+
+
+@REQUIERE_BWRAP
+def test_tramo_admin_incluye_la_ruta_resuelta_major_c(tmp_path):
+    """MAJOR-C: la línea del admin lleva la RUTA RESUELTA (el HOME real de la cuenta,
+    vía `getent passwd`) -- si el home cambiara en el passwd, la ruta que aparece acá
+    cambia, y eso es justo lo que se quiere ver como cambio."""
+    binds = _arbol_de_prueba(tmp_path, admin_usuario=_OTRO_ADMIN_DE_PRUEBA)
+    base = _argv_bwrap(binds)
+    r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    assert r.returncode == 0
+    salida = r.stdout.decode()
+    assert "/home/axioma/.ssh/authorized_keys" in salida
+    assert "/home/fruiz/.ssh/authorized_keys" not in salida
+
+
+@REQUIERE_BWRAP
+def test_tramo_admin_con_authorized_keys_ausente_da_a_con_ruta_resuelta(tmp_path):
+    """MAJOR-C: si la cuenta SÍ resuelve pero su `authorized_keys` no existe, es `A
+    <ruta resuelta>` -- medido y confirmado ausente, no un error. Se usa `axioma` (no
+    `fruiz`, el usuario del test) y se arma el argv de bwrap A MANO -- `_argv_bwrap`
+    decide poner `--tmpfs` sobre un HOME mirando qué claves `/authorized_keys` hay en
+    `binds`, y acá se necesita el `--tmpfs` (para que el archivo esté REALMENTE
+    ausente, no el de axioma en el host de pruebas) sin bindear ningún archivo
+    encima."""
+    binds = _arbol_de_prueba(tmp_path, admin_usuario=_OTRO_ADMIN_DE_PRUEBA)
+    admin_home = __import__("pwd").getpwnam(_OTRO_ADMIN_DE_PRUEBA).pw_dir
+    del binds[f"{admin_home}/.ssh/authorized_keys"]
+    base = ["bwrap", "--dev-bind", "/", "/", "--die-with-parent", "--tmpfs", "/root", "--tmpfs", admin_home]
+    for real, prueba in binds.items():
+        base += ["--bind", str(prueba), real]
+    r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    assert r.returncode == 0
+    lineas = r.stdout.decode().splitlines()
+    assert f"A {admin_home}/.ssh/authorized_keys" in lineas
