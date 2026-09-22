@@ -130,16 +130,22 @@ def test_readonly_status_view_never_persists_and_matches_persisted_verdict():
  view=service.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
  assert isinstance(view,ControlStatusView) and view.persisted is False
  assert not isinstance(view,EnforcementAssertion)
+ from policy.enforcement_evidence.evidence_store import is_trusted_assertion
+ assert not is_trusted_assertion(view)
  assert (len(s._assertion_rows),len(s._observation_rows),len(s._artifact_rows)) == before
  persisted=service.evaluate_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
  assert view.verdict is persisted.verdict
 
 def test_readonly_query_uses_captured_snapshot_without_later_artifact_loads(monkeypatch):
- s=EvidenceStore(); lifecycle,_=composition(s); service=EnforcementStatusService(lifecycle)
+ s=EvidenceStore(); lifecycle,identity_value=composition(s)
+ service=EnforcementStatusService.__new__(EnforcementStatusService)
+ service._lifecycle=None; service._store=s; service._identity=identity_value; service._readonly=True
+ service._identity_provider=type("Fixed",(),{"verify_loaded_identity_bytes":lambda _self, value, manifest: {}})()
  captured=s.observations()
  # MariaDB supplies all verified observations/domains from one RR snapshot;
  # a later insert or artifact loader must not affect this query result.
- monkeypatch.setattr(s,"readonly_status_snapshot",lambda identity_hash: (captured,(),()),raising=False)
+ snapshot=type("Snapshot",(),{"identity":identity_value,"manifest_bytes":b"{}","observations":captured,"manifests":(),"trust_domains":()})()
+ monkeypatch.setattr(s,"readonly_status_snapshot",lambda identity_hash, control_id, control_version: snapshot,raising=False)
  monkeypatch.setattr(s,"load_evidence_artifact",lambda _hash: (_ for _ in ()).throw(AssertionError("outside snapshot")))
  view=service.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME),subjects=(EvidenceSubject(EvidenceSubjectType.EXECUTION,"x"),),as_of_utc=NOW)
  assert view.persisted is False and view.supporting_observation_ids == ()

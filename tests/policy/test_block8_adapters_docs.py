@@ -28,3 +28,40 @@ def test_generated_manual_is_marked_and_reproducible():
 def test_jaxctl_is_readonly_command_surface():
     result=subprocess.run([sys.executable,"-m","jaxctl","--help"],cwd=ROOT,capture_output=True,text=True,check=True)
     assert all(word not in result.stdout for word in ("dispatch", "grant", "approve", "cancel"))
+
+def test_readonly_b7_composition_is_not_a_public_dependency_injection_factory():
+    from policy.enforcement_evidence.status_engine import EnforcementStatusService, _runtime_readonly_status_service
+    import inspect
+    assert not hasattr(EnforcementStatusService, "for_readonly_query")
+    assert tuple(inspect.signature(EnforcementStatusService.query_control_status).parameters) == (
+        "self", "control_id", "control_version", "claim_level", "scope", "subjects", "as_of_utc")
+    assert tuple(inspect.signature(_runtime_readonly_status_service).parameters) == ()
+
+def test_jaxctl_control_routes_only_to_fixed_readonly_composition(monkeypatch):
+    import jaxctl.runtime as runtime
+    from jaxctl.commands import run
+    called={}
+    class Reader:
+        def query_control_status(self, **kwargs):
+            called.update(kwargs); return {"persisted":False,"classification":"AUTHORITATIVE_READONLY_DERIVATION"}
+    monkeypatch.setattr(runtime,"_runtime_readonly_status_service",lambda: Reader())
+    assert run(["control","CTL.B6.GOVERNED_DISPATCH","--version","1","--claim","ENFORCED","--scope",'{"environment":"SANDBOX_RUNTIME"}',"--subjects",'[{"subject_type":"EXECUTION","identity":"x"}]',"--json"]) == 0
+    assert called["control_id"] == "CTL.B6.GOVERNED_DISPATCH"
+
+def test_jaxctl_replay_invokes_block5_replay_not_load_only(monkeypatch):
+    import jaxctl.runtime as runtime
+    import policy.decision_record.service as decision_service
+    import policy.decision_record.replay as decision_replay
+    from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+    record={"decision_id":"d-1"}; called={}
+    monkeypatch.setattr(runtime,"_connection_factory",lambda: (lambda: object()))
+    monkeypatch.setattr(decision_service,"load_decision",lambda store, decision_id: record)
+    monkeypatch.setattr(TrustedAuthorityRoot,"load",classmethod(lambda cls: object()))
+    result=type("Replay",(),{"status":type("Status",(),{"value":"REPLAY_MATCH"})()})()
+    def replay(value, authority_store, trusted_root, checkpoint_store, **kwargs):
+        called.update(value=value,authority_store=authority_store,trusted_root=trusted_root,checkpoint_store=checkpoint_store)
+        return result
+    monkeypatch.setattr(decision_replay,"replay_decision",replay)
+    result_value=runtime.decision("d-1", replay=True)
+    assert result_value["operation"] == "REPLAY"
+    assert called["value"] is record

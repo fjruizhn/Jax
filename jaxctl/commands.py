@@ -2,7 +2,7 @@ from __future__ import annotations
 import argparse, json
 from datetime import datetime, timezone
 from .formatters import json_output, human_output
-from .runtime import UnavailableSource, readonly_status_service, health, authority, decision, execution, evidence
+from .runtime import UnavailableSource, control_status, health, authority, decision, execution, evidence
 from policy.enforcement_evidence.models import ClaimEnvironment, ClaimLevel, ClaimScope, Coverage, EvidenceSubject, EvidenceSubjectType
 
 def _json(value):
@@ -28,7 +28,7 @@ def run(argv=None):
     try:
         if args.command=="control":
             as_of=datetime.fromisoformat(args.as_of.replace("Z","+00:00")) if args.as_of else datetime.now(timezone.utc)
-            result=readonly_status_service().query_control_status(control_id=args.control_id,control_version=args.version,claim_level=ClaimLevel(args.claim),scope=args.scope,subjects=args.subjects,as_of_utc=as_of)
+            result=control_status(control_id=args.control_id,control_version=args.version,claim_level=ClaimLevel(args.claim),scope=args.scope,subjects=args.subjects,as_of_utc=as_of)
         elif args.command=="health": result=health()
         elif args.command=="authority": result=authority()
         elif args.command=="decision": result=decision(args.decision_id,args.replay)

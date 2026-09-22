@@ -4,12 +4,22 @@ It deliberately exposes only bytes by content identity.  Higher level objects
 are parsed as untrusted values and must be verified by their fixed lifecycle.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from .evidence_store import EvidenceBlob, MAX_BLOB_BYTES
 from .ids import sha256_bytes, require_hash
 from .errors import EvidenceBlobMissingError, EvidenceBlobHashMismatchError, EvidenceBlobTooLargeError
 from .canonical import canonical_bytes
 from .models import MAX_REFERENCED_BYTES_PER_ARTIFACT, MAX_ARTIFACT_ENVELOPE_BYTES
 from .errors import EvidenceArtifactIntegrityError, ObservationIntegrityError, AssertionIntegrityError
+
+@dataclass(frozen=True)
+class ReadonlyStatusSnapshot:
+    """All DB-backed inputs for one ephemeral B7 status derivation."""
+    identity: object
+    manifest_bytes: bytes
+    observations: tuple
+    manifests: tuple
+    trust_domains: tuple
 class MariaDBEvidenceStore:
     def __init__(self, connection_factory): self._connection_factory=connection_factory
     def put_evidence_blob(self, data: bytes) -> EvidenceBlob:
@@ -256,7 +266,7 @@ class MariaDBEvidenceStore:
                 values.append(value)
             return tuple(values)
         finally: con.close()
-    def readonly_status_snapshot(self, identity_hash):
+    def readonly_status_snapshot(self, identity_hash, control_id, control_version):
         """Capture complete B7 status inputs under one read-only RR snapshot.
 
         Rows are immutable after insertion.  IDs and manifest bytes selected
@@ -297,7 +307,16 @@ class MariaDBEvidenceStore:
             identity(cur,value.implementation_identity_hash)
             return value
         def capture(cur):
-            identity(cur,identity_hash)
+            primary_identity=identity(cur,identity_hash)
+            # Verify the packaged definition has an exact authoritative DB row
+            # inside this same snapshot; it never comes from caller data.
+            from .control_registry import load_control_definition
+            expected=load_control_definition(control_id,control_version)
+            cur.execute("SELECT control_id,control_version,canonical_definition FROM jax_evidence.control_definitions WHERE control_definition_hash=%s",(expected.control_definition_hash,))
+            row=cur.fetchone()
+            if row is None or row[0] != control_id or int(row[1]) != control_version or text(row[2]) != canonical_bytes(expected.projection()).decode("utf-8"):
+                raise EvidenceArtifactIntegrityError("snapshot definition mismatch")
+            manifest_bytes=blob(cur,primary_identity.build_manifest_blob_hash)
             cur.execute("SELECT observation_id,observation_hash,canonical_observation FROM jax_evidence.enforcement_observations ORDER BY observation_id")
             observations=[]; domains=set()
             from .observations import deserialize_enforcement_observation
@@ -320,19 +339,26 @@ class MariaDBEvidenceStore:
                 value=json.loads(bytes(row[1]).decode() if isinstance(row[1],bytes) else row[1])
                 if value.get("implementation_identity_hash") != row[0] or row[0] != identity_hash:
                     raise AssertionIntegrityError("test manifest row binding mismatch")
+                # CI manifest raw output is referenced evidence, not trusted
+                # metadata.  Its exact bytes must be present and hash-verified
+                # before this snapshot can support TESTED/ENFORCED.
+                raw_hash=value.get("raw_output_blob_hash")
+                if not isinstance(raw_hash,str):
+                    raise AssertionIntegrityError("test manifest raw output missing")
+                blob(cur,raw_hash)
                 manifests.append(value)
-            return tuple(observations), tuple(manifests), tuple(sorted(domains,key=lambda item:item.value))
+            return ReadonlyStatusSnapshot(primary_identity, manifest_bytes, tuple(observations), tuple(manifests), tuple(sorted(domains,key=lambda item:item.value)))
         con=self._connection_factory()
         try:
             cur=con.cursor(); cur.execute("SET TRANSACTION READ ONLY")
             cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
-            observations, manifests, domains=capture(cur)
+            snapshot=capture(cur)
             con.rollback()
         except Exception:
             con.rollback(); raise
         finally: con.close()
-        return observations, manifests, domains
+        return snapshot
     def derive_in_repeatable_read(self, derive):
         """Run deterministic derivation over one MariaDB repeatable-read snapshot."""
         con=self._connection_factory()

@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import json
 
 import pytest
 
@@ -194,6 +196,52 @@ def test_b7_live_inspector_observes_installed_execution_schema():
     observation=DatabaseControlInspector(_connection,recorder,deployment_id="ci").inspect_one_decision_one_execution()
     assert observation.subject.identity.startswith("dbscope:sha256:")
     assert observation.outcome.value == "SATISFIED"
+
+
+def _b8_runtime_identity_fixture(tmp_path):
+    """Install a test deployment identity only through fixed composition."""
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+    from policy.enforcement_evidence.models import ImplementationIdentity, SourceState
+    from policy.enforcement_evidence.control_registry import _controls
+    from policy.enforcement_evidence.implementation_identity import _V1_REQUIRED_SOURCE_PATHS
+    from policy.enforcement_evidence.trusted_lifecycle import EvidenceLifecycleService
+    from policy.enforcement_evidence.implementation_identity import _ControlledTestIdentityProvider
+    _apply_evidence_migration()
+    evidence=MariaDBEvidenceStore(_connection)
+    root=Path(__file__).parents[2]
+    files={name:"sha256:"+hashlib.sha256((root/name).read_bytes()).hexdigest() for name in _V1_REQUIRED_SOURCE_PATHS}
+    manifest=evidence.put_evidence_blob(json.dumps({"schema_version":"1.0","kind":"JAX_BUILD_MANIFEST","files":files},sort_keys=True,separators=(",",":")).encode())
+    identity=ImplementationIdentity("fjruizhn/Jax","1"*40,"2"*40,SourceState.CLEAN,manifest.evidence_hash)
+    EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity))
+    for definition in _controls.values():
+        evidence._MariaDBEvidenceStore__persist_control_definition(definition)
+    path=tmp_path/"implementation-identity.json"; path.write_text(json.dumps(identity.projection()),encoding="utf-8")
+    return evidence, path
+
+def _b7_counts():
+    tables=("evidence_blobs","evidence_artifacts","enforcement_observations","enforcement_assertions","assertion_artifacts","assertion_observations")
+    return {name:_scalar("SELECT COUNT(*) FROM jax_evidence."+name) for name in tables}
+
+def test_b8_jaxctl_control_real_mariadb_is_zero_write(monkeypatch, tmp_path, capsys):
+    """The actual CLI/runtime/read-only B7 path cannot alter authoritative rows."""
+    evidence, identity_path=_b8_runtime_identity_fixture(tmp_path)
+    import policy.enforcement_evidence.implementation_identity as implementation_identity
+    from jaxctl.commands import run
+    monkeypatch.setattr(implementation_identity,"_DEPLOYMENT_IDENTITY_PATH",str(identity_path))
+    before=_b7_counts()
+    status=run(["control","CTL.B6.GOVERNED_DISPATCH","--version","1","--claim","ENFORCED","--scope",'{"environment":"SANDBOX_RUNTIME"}',"--subjects",'[{"subject_type":"EXECUTION","identity":"b8-readonly"}]',"--json"])
+    assert status == 0 and '"persisted":false' in capsys.readouterr().out
+    assert _b7_counts() == before
+
+def test_b8_jaxctl_control_unavailable_is_zero_write(monkeypatch, tmp_path, capsys):
+    _evidence, identity_path=_b8_runtime_identity_fixture(tmp_path)
+    import policy.enforcement_evidence.implementation_identity as implementation_identity
+    from jaxctl.commands import run
+    monkeypatch.setattr(implementation_identity,"_DEPLOYMENT_IDENTITY_PATH",str(identity_path)+".missing")
+    before=_b7_counts()
+    status=run(["control","CTL.B6.GOVERNED_DISPATCH","--version","1","--claim","ENFORCED","--scope",'{"environment":"SANDBOX_RUNTIME"}',"--subjects",'[{"subject_type":"EXECUTION","identity":"b8-unavailable"}]',"--json"])
+    assert status == 2 and '"status":"UNAVAILABLE"' in capsys.readouterr().out
+    assert _b7_counts() == before
 
 
 def _scalar(sql, args=()):

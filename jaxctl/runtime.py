@@ -1,9 +1,8 @@
 """Fixed, read-only composition for jaxctl. No request controls dependencies."""
 from __future__ import annotations
 import os
-from policy.enforcement_evidence.implementation_identity import TrustedImplementationIdentityProvider
 from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
-from policy.enforcement_evidence.status_engine import EnforcementStatusService
+from policy.enforcement_evidence.status_engine import _runtime_readonly_status_service
 
 class UnavailableSource(RuntimeError): pass
 
@@ -16,8 +15,22 @@ def _connection_factory():
     return lambda: pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
 
 def readonly_status_service():
-    store=MariaDBEvidenceStore(_connection_factory())
-    return EnforcementStatusService.for_readonly_query(store, TrustedImplementationIdentityProvider(store))
+    try:
+        return _runtime_readonly_status_service()
+    except Exception as exc:
+        raise UnavailableSource("Block 7 read-only status composition unavailable") from exc
+
+def control_status(*, control_id, control_version, claim_level, scope, subjects, as_of_utc):
+    """Read-only B7 status query; errors never become guessed CLI output."""
+    try:
+        return readonly_status_service().query_control_status(
+            control_id=control_id, control_version=control_version,
+            claim_level=claim_level, scope=scope, subjects=subjects,
+            as_of_utc=as_of_utc)
+    except UnavailableSource:
+        raise
+    except Exception as exc:
+        raise UnavailableSource("Block 7 authoritative status unavailable") from exc
 
 def health():
     # Reachability only; it intentionally does not claim authority integrity.
@@ -31,8 +44,16 @@ def decision(decision_id, replay=False):
     try:
         from policy.decision_record.storage import MariaDBDecisionRecordStore
         from policy.decision_record.service import load_decision
-        value=load_decision(MariaDBDecisionRecordStore(_connection_factory()),decision_id)
-        return {"classification":"AUTHORITATIVE_RUNTIME_DATA","source":"Block 5 DecisionRecord store","status":"FOUND","decision":value}
+        decision_store=MariaDBDecisionRecordStore(_connection_factory())
+        value=load_decision(decision_store,decision_id)
+        if not replay:
+            return {"classification":"AUTHORITATIVE_RUNTIME_DATA","operation":"LOAD","source":"Block 5 DecisionRecord store","status":"FOUND","decision":value}
+        from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
+        from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+        from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
+        from policy.decision_record.replay import replay_decision
+        result=replay_decision(value, MariaDBAuthorityLedgerStore(_connection_factory()), TrustedAuthorityRoot.load(), TrustedCheckpointStore())
+        return {"classification":"AUTHORITATIVE_RUNTIME_DATA","operation":"REPLAY","source":"Block 5 historical DecisionRecord replay","status":result.status.value,"decision":value,"replay":result}
     except Exception as exc: raise UnavailableSource("Block 5 decision source unavailable") from exc
 
 def execution(execution_id):

@@ -46,6 +46,12 @@ class TrustedImplementationIdentityProvider:
   Status callers deliberately receive no repository-root parameter.
   """
   return verify_build_manifest(self.__store,value,repository_root=_DEPLOYMENT_REPOSITORY_ROOT)
+ def identity_reference_hash(self):
+  """Return the deployment-selected identity without touching evidence DB."""
+  return load_runtime_implementation_identity(_DEPLOYMENT_IDENTITY_PATH).implementation_identity_hash
+ def verify_loaded_identity_bytes(self, value, manifest_bytes):
+  """Verify snapshot-captured manifest bytes against the fixed deployment root."""
+  return verify_build_manifest_bytes(value, manifest_bytes, repository_root=_DEPLOYMENT_REPOSITORY_ROOT)
 
 class _ControlledTestIdentityProvider:
  """Test composition seam; deliberately not exported from package API."""
@@ -54,6 +60,9 @@ class _ControlledTestIdentityProvider:
  def verify_loaded_identity(self, value):
   # Test composition has no deployment filesystem; it is intentionally never
   # a production WRITTEN source.
+  raise UntrustedImplementationIdentityError("test identity has no deployment manifest")
+ def identity_reference_hash(self): return self.__identity.implementation_identity_hash
+ def verify_loaded_identity_bytes(self, value, manifest_bytes):
   raise UntrustedImplementationIdentityError("test identity has no deployment manifest")
 
 def implementation_identity_from_projection(data: dict) -> ImplementationIdentity:
@@ -74,8 +83,12 @@ def verify_build_manifest(store, identity: ImplementationIdentity, *, repository
  V1 deliberately accepts only a closed `{schema_version, kind, files}` form;
  every path is relative and every listed hash must match current source bytes.
  """
+ return verify_build_manifest_bytes(identity, store.get_evidence_blob(identity.build_manifest_blob_hash), repository_root=repository_root)
+
+def verify_build_manifest_bytes(identity: ImplementationIdentity, manifest_bytes: bytes, *, repository_root: str) -> dict:
+ """Verify already captured manifest bytes; callers cannot choose the root."""
  try:
-  data=json.loads(store.get_evidence_blob(identity.build_manifest_blob_hash))
+  data=json.loads(manifest_bytes)
   if set(data)!={"schema_version","kind","files"} or data["schema_version"]!="1.0" or data["kind"]!="JAX_BUILD_MANIFEST" or not isinstance(data["files"],dict) or not data["files"]: raise ValueError()
   root=Path(repository_root).resolve()
   for name,digest in data["files"].items():
