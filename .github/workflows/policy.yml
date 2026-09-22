@@ -332,8 +332,15 @@ jobs:
           #   _facet_health_io_test.py quedan detrás de JAX_TEST_FACET_HEALTH_TABLA_EXCLUSIVA,
           #   que este job define (base propia): corren acá. Fuera de este job (hall9000,
           #   base compartida) la misma lista da "6 passed, 3 skipped" -- no es este piso.
-          grep -qE "^9 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 9 -> 10 el 2026-09-22 (deuda con fecha, revision final de la rama
+          #   Descartar): _store_indexes_test.py suma EngineInnoDBTest (+1) --
+          #   jacobs_pipelines/jacobs_steps/jacobs_events con ENGINE=InnoDB
+          #   EXPLICITO (Ruling 9: pipeline_transicion_descarte depende de que
+          #   sean transaccionales). Corre acá y no en tests-puros por la misma
+          #   razón que los índices: necesita una base real donde ejecutar el
+          #   CREATE TABLE de verdad, no una ya clonada con las tablas puestas.
+          grep -qE "^10 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 10 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en

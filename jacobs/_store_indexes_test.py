@@ -17,6 +17,16 @@ existia en produccion y en ninguna base nueva (ver DEUDA.md). Un indice puesto
 a mano en `jax_memory` tendria exactamente la misma forma: invisible para un
 dev nuevo, para CI y para un restore de desastre.
 
+TAMBIEN cubre `ENGINE=InnoDB` de `jacobs_pipelines`/`jacobs_steps`/
+`jacobs_events` (revision final de la rama Descartar, 2026-09-22): mismo
+mecanismo (`init_tables()`, `information_schema`), mismo job de CI (necesita
+una base VACIA -- ver mas abajo por que el DROP), asi que va aca en vez de en
+un archivo nuevo que requeriria su propio wireado en policy.yml.
+`pipeline_transicion_descarte` (Ruling 9) inserta el evento de auditoria del
+descarte en la MISMA transaccion que el CAS de estado; eso depende de que las
+dos tablas sean transaccionales, y sin la clausula EXPLICITA esa garantia
+depende de `default_storage_engine` del server, no del codigo.
+
 Corre con:
   PYTHONPATH=/home/fruiz/jax .venv/bin/python -m pytest jacobs/_store_indexes_test.py
 """
@@ -24,6 +34,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest import mock
 
 # Forzado, no setdefault: si el proceso ya sourceo /etc/jax/.env, JAX_DB_NAME
 # apunta a produccion y este test crearia indices ahi sin pasar por el camino
@@ -123,6 +134,94 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
         await store.init_tables()
         despues = {(t, c): await self._indice_de(t, c) for t, c in COLUMNAS_CONSULTADAS}
         self.assertEqual(antes, despues, "init_tables() duplico o perdio indices al repetirse")
+
+
+#: (tabla, constante de DDL) -- misma correspondencia que `init_tables()`.
+_DDL_DE = (
+    ("jacobs_pipelines", "_DDL_JACOBS_PIPELINES"),
+    ("jacobs_steps", "_DDL_JACOBS_STEPS"),
+    ("jacobs_events", "_DDL_JACOBS_EVENTS"),
+)
+
+
+class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
+    """Ruling 9 del ledger de descartar-pipelines (revision final, 2026-09-22):
+    `pipeline_transicion_descarte` escribe el CAS de estado y el evento de
+    auditoria en la MISMA transaccion (`jacobs/store.py`). Eso depende de que
+    `jacobs_pipelines` y `jacobs_events` sean transaccionales -- sin
+    `ENGINE=InnoDB` EXPLICITO en el `CREATE TABLE`, la garantia la da el
+    `default_storage_engine` del server, no el codigo: en un server que no
+    lo traiga en InnoDB, un evento fallido ya no revertiria el CAS (o al
+    reves), reabriendo en silencio el hueco que Ruling 9 cerro. `jacobs_steps`
+    tiene el mismo hueco (mismo archivo, mismo patron) aunque nada la use
+    todavia en una transaccion multi-tabla; se corrige junto para no dejarla
+    de deuda a medias."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+
+    async def _engine_de(self, cur, tabla: str) -> str | None:
+        await cur.execute(
+            "SELECT ENGINE FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+            (tabla,),
+        )
+        fila = await cur.fetchone()
+        return fila[0] if fila else None
+
+    async def test_jacobs_pipelines_steps_events_son_innodb_explicito(self):
+        """No alcanza con dropear y recrear en ESTA base: su
+        `default_storage_engine` ya es InnoDB (medido contra la MariaDB real
+        de esta sesion), asi que un `CREATE TABLE` sin `ENGINE=` explicito
+        DA InnoDB igual -- ese control no falla contra el codigo viejo, y un
+        control que no falla no valida nada. `jax_user` tampoco tiene SUPER
+        para un `SET GLOBAL default_storage_engine=...` que lo simule de
+        verdad (probado a mano: 1227 Access denied).
+
+        En cambio `init_command` en la conexion SI cambia el
+        `default_storage_engine` de la SESION sin privilegios especiales
+        (probado a mano), y el pool de aiomysql (`create_pool`) fija los
+        argumentos de conexion UNA vez, al crear el pool, y los reusa para
+        cada conexion nueva que abre despues -- asi que el parche tiene que
+        estar activo ANTES de la primera `conexion()` de este test (loop
+        nuevo por metodo con `IsolatedAsyncioTestCase`: este pool no existe
+        todavia).
+
+        Ejecuta el DDL de cada tabla (`store._DDL_JACOBS_*`, el MISMO texto
+        que corre `init_tables()`) directo, sin pasar por el resto de
+        `init_tables()`: esa funcion sigue con un loop de `ALTER TABLE ...
+        ALGORITHM=INSTANT` sobre columnas de `jacobs_pipelines` (`visible`
+        es GENERATED) que solo InnoDB soporta -- probado a mano: bajo esta
+        misma sesion en MyISAM, ese ALTER revienta con
+        `1845 ALGORITHM=INSTANT is not supported`, ANTES de llegar siquiera
+        a crear `jacobs_steps`/`jacobs_events`. Correr el DDL nombrado
+        aislado evita ese choque y deja probar el ENGINE de las tres, y
+        el test SI falla contra el codigo viejo (medido: las tres dan
+        MyISAM bajo esta sesion)."""
+        cfg_original = store._db_cfg
+
+        def _cfg_con_myisam() -> dict:
+            cfg = cfg_original()
+            cfg["init_command"] = "SET SESSION default_storage_engine='MyISAM'"
+            return cfg
+
+        faltantes = []
+        with mock.patch.object(store, "_db_cfg", _cfg_con_myisam):
+            async with store.conexion(desechable=True) as conn:
+                async with conn.cursor() as cur:
+                    for tabla, nombre_ddl in _DDL_DE:
+                        await cur.execute(f"DROP TABLE IF EXISTS {tabla}")
+                        await cur.execute(getattr(store, nombre_ddl))
+                    for tabla, _ in _DDL_DE:
+                        engine = await self._engine_de(cur, tabla)
+                        if engine != "InnoDB":
+                            faltantes.append(f"{tabla}={engine!r}")
+        self.assertEqual(
+            faltantes, [],
+            f"sin ENGINE=InnoDB explicito: {faltantes} -- agregar ENGINE=InnoDB "
+            "al CREATE TABLE correspondiente en jacobs/store.py (Ruling 9: "
+            "pipeline_transicion_descarte depende de que sean transaccionales).",
+        )
 
 
 if __name__ == "__main__":
