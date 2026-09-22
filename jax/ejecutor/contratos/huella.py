@@ -5,38 +5,38 @@ debe cambiar nunca durante una misión» -- se SIMPLIFICA a propósito: la ronda
 había hecho crecer (log de sudo, sudo-io, dos niveles, declarado por texto) hasta
 volverse otro filtro que no converge.
 
-RUTAS_CONTROLES + RUTAS_SHA_SOLO + el glob `/usr/local/sbin/ejecutor-*` son lo que hace
-cumplir C3/C4/C6 en cada máquina, y NADA de eso tiene que cambiar NUNCA durante una
-misión -- por eso no hay "declarado": cualquier cambio es un hallazgo, sin excepción
-(B-2 de las rondas 4/5 SE QUITA: la lista de "lo que no debe cambiar nunca" no admite
-excepciones por definición, y una lista de rutas declaradas por texto libre en la
-misión era, otra vez, un filtro sobre texto).
+RUTAS_CONTROLES + el glob `/usr/local/sbin/ejecutor-*` son lo que hace cumplir C3/C4/C6
+en cada máquina, y NADA de eso tiene que cambiar NUNCA durante una misión -- por eso no
+hay "declarado": cualquier cambio es un hallazgo, sin excepción (B-2 de las rondas 4/5
+SE QUITA: la lista de "lo que no debe cambiar nunca" no admite excepciones por
+definición, y una lista de rutas declaradas por texto libre en la misión era, otra vez,
+un filtro sobre texto).
 
-Si el cutover algún día necesita crear una cuenta de sistema (tocaría `/etc/passwd` o
-`/etc/group`), eso NO se declara: la misión se pausa igual, y es correcto -- crear una
-cuenta de sistema en una máquina de un cliente es exactamente el tipo de cambio que
-tiene que pasar por un humano, no autorizarse solo con una lista de rutas en el pedido.
-La alternativa (un campo estructurado nuevo en `Mision`/`Turno`, con su propio
-transporte en jax-platform) es la que NO se eligió: agrega una superficie de contrato
-nueva -- entre repos -- para un caso que, hasta hoy, nunca pasó (verificado: ninguna
-misión real tocó `/etc/passwd`). Se elige lo más simple; si el caso aparece, se
-construye el campo estructurado ENTONCES, con su propio contrato (Principio IX).
+`/etc/passwd`, `/etc/group` y `/etc/shadow` SALIERON de la huella (ronda 7, BLOCK
+reproducido en producción, 2026-09-22): la ronda 6 los medía "por las dudas", asumiendo
+que ningún cutover real los tocaba -- FALSO. `apt install` crea cuentas de sistema para
+la mayoría de los paquetes de servicio (nginx, postfix, mysql, …), y el plugin de correo
+de aaPanel hace lo mismo: los dos son administración LEGÍTIMA y COMÚN, no un ataque a
+los controles del Ejecutor. Medirlos hacía que CUALQUIER `apt install` normal pausara el
+cutover -- y, peor, dejaba el host bloqueado sin salida (ver M-1 más abajo, estados de
+la marca). Una cuenta nueva con sudo REAL de todos modos deja rastro en `sudoers.d`, que
+sí se mide -- ese es el control que importa, no `/etc/passwd`.
 
 LÍMITE, dicho en serio (no en el texto de la misión, acá, donde se cumple o no):
-- El registro de sudo (`/var/log/sudo-*`), `sudo-io`, systemd y cron NO están en la
-  huella. Un root en la máquina puede truncar, reemplazar o borrar su propio log de
-  sudo de todos modos (B-1: ya no hay forma honesta de pretender que ese log es
-  intocable frente a un root) -- lo que sí es append-only de verdad es el registro de
-  C3 (`jax.ejecutor.contratos.registro`, la cadena encadenada), que vive en
-  **hall9000**, no en la máquina controlada, así que un root remoto no lo puede tocar.
-  systemd y cron: el cutover crea LEGÍTIMAMENTE unidades/crons del cliente cuando el
-  plan de la misión lo pide -- vigilarlos no distinguía "lo pedido" de "lo indebido"
-  sin volver a inventar declarado.
-- Los binarios del comando (`sha256sum`, `find`, `stat`, `readlink`) se llaman por RUTA
-  ABSOLUTA, no por el PATH (sin `secure_path`): un root también podría reemplazar esos
-  binarios. La huella prueba "el Ejecutor no lo hizo por accidente", no "un root de la
-  máquina es incapaz de mentir" -- eso último no lo cierra ninguna huella tomada DESDE
-  la misma máquina.
+- El registro de sudo (`/var/log/sudo-*`), `sudo-io`, systemd, cron y
+  `/etc/passwd`/`/etc/group`/`/etc/shadow` NO están en la huella. Un root en la máquina
+  puede truncar, reemplazar o borrar su propio log de sudo de todos modos (B-1: ya no
+  hay forma honesta de pretender que ese log es intocable frente a un root) -- lo que sí
+  es append-only de verdad es el registro de C3 (`jax.ejecutor.contratos.registro`, la
+  cadena encadenada), que vive en **hall9000**, no en la máquina controlada, así que un
+  root remoto no lo puede tocar. systemd, cron y las cuentas de sistema: el cutover los
+  crea/toca LEGÍTIMAMENTE cuando el plan de la misión lo pide (instalar un paquete,
+  configurar un servicio del cliente) -- vigilarlos no distinguía "lo pedido" de "lo
+  indebido" sin volver a inventar declarado, y en la práctica pausaba trabajo normal.
+- Los binarios del comando (`sha256sum`, `find`) se llaman por RUTA ABSOLUTA, no por el
+  PATH (sin `secure_path`): un root también podría reemplazar esos binarios. La huella
+  prueba "el Ejecutor no lo hizo por accidente", no "un root de la máquina es incapaz de
+  mentir" -- eso último no lo cierra ninguna huella tomada DESDE la misma máquina.
 
 El CONTROLADOR (fruiz, vía `JAX_EJECUTOR_ADMIN_USUARIO` + ssh + `sudo -n` -- ver
 `vigia_servicio.py`, nunca la cuenta `axioma`) toma la huella AL ABRIR la misión y otra
@@ -44,12 +44,30 @@ AL CERRAR cada turno, contra la línea base de la APERTURA (persistida por `misi
 ver `vigia_servicio.py::huella_de_apertura_de_la_mision` y el seguimiento de marcas
 pendientes de `verificar_huellas_huerfanas`, M-1).
 
+Estados de la marca persistida (ronda 7, M-1 -- el BLOCK reproducido: la ronda 6 sólo
+tenía un booleano "pendiente", y una vez `reportada` el host quedaba bloqueado PARA
+SIEMPRE, sin salida):
+- `ABIERTA`: la línea base se tomó y la comparación de CIERRE nunca se hizo (kill,
+  reinicio). Es la ÚNICA que revisa `verificar_huellas_huerfanas` -- una nueva
+  comparación puede resolverla (limpia -> `CERRADA`) o confirmarla (sucia -> `REPORTADA`).
+- `REPORTADA`: se comparó, salió sucia, ya puso la pausa, con su diff guardado.
+  Bloquea CUALQUIER misión nueva en ese host hasta que Fernando la acepte -- por
+  `python -m jax.ejecutor.contratos.huella aceptar --host <host> --mision <mision_id>`
+  (ver `principal`, más abajo, y `docs/ejecutor-huella-aceptar.md`).
+- `CERRADA`: se comparó, salió limpia. No bloquea nada; sigue guardada como línea
+  base fija de la misión (para los turnos siguientes), no se vuelve a re-tomar.
+
 Sólo biblioteca estándar: lo corre `fruiz`/el controlador, no `axioma`.
 """
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import json
+import os
+import re
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
 
 #: Lo que hace cumplir C3 (registro de sudo -- la INSTALACIÓN de las reglas, no el log)
 #: y C6 (llaves) en cada máquina -- rutas verificadas contra
@@ -63,10 +81,6 @@ RUTAS_CONTROLES = (
     "/etc/ssh/authorized_keys.d",
     "/root/.ssh/authorized_keys",
 )
-
-#: sha256 solamente (nunca el contenido, y `/etc/shadow` en particular NUNCA sale de la
-#: máquina ni como texto: sólo su hash cruza el ssh).
-RUTAS_SHA_SOLO = ("/etc/passwd", "/etc/group", "/etc/shadow")
 
 #: Los binarios propios del Ejecutor en la máquina -- glob, no nombres literales: hoy
 #: son `ejecutor-freno-remoto` y `ejecutor-revocar`, pero el contrato es "nada que
@@ -115,10 +129,6 @@ def _tramo_sbin_ejecutor() -> str:
     )
 
 
-def _tramo_sha_solo(ruta: str) -> str:
-    return f'{_SHA256SUM} {_q(ruta)} 2>/dev/null'
-
-
 def comando_huella() -> str:
     """El comando REMOTO para la huella -- sin `sudo -n` propio (lo corre el
     controlador, envuelto en UN solo `sudo -n sh -c '<esto>'`, ver `vigia_servicio.py`
@@ -126,7 +136,6 @@ def comando_huella() -> str:
     sudo, que era lo único que sí dependía de un nombre."""
     tramos = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
     tramos.append(_tramo_sbin_ejecutor())
-    tramos.extend(_tramo_sha_solo(r) for r in RUTAS_SHA_SOLO)
     return f'({" ; ".join(tramos)}) | {_SORT}'
 
 
@@ -165,3 +174,192 @@ def hallazgos(antes: Huella, despues: Huella) -> tuple:
     if not cambio(antes, despues):
         return ()
     return lineas_agregadas_o_quitadas(antes, despues)
+
+
+# --- M-1 (ronda 7): estados de la marca persistida, y su aceptación --------------------
+
+ABIERTA = "abierta"
+REPORTADA = "reportada"
+CERRADA = "cerrada"
+
+_MISION_ID_VALIDA = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+class MisionIdInvalido(ValueError):
+    """`args[0]` es el valor recibido."""
+
+
+def ruta_huella(misiones, mision_id: str, host: str) -> Path:
+    if not _MISION_ID_VALIDA.match(mision_id):
+        raise MisionIdInvalido(mision_id)
+    if not host or "/" in host or host.strip() != host:
+        raise ValueError("host_invalido")
+    return Path(misiones) / mision_id / "huella" / f"{host}.json"
+
+
+@dataclass(frozen=True)
+class Marca:
+    huella: Huella
+    estado: str  # ABIERTA | REPORTADA | CERRADA
+    diff: tuple = field(default_factory=tuple)
+    aceptada_por: str | None = None
+    aceptada_en: str | None = None
+
+
+def marca_a_json(m: Marca) -> dict:
+    return {"host": m.huella.host, "texto": m.huella.texto, "estado": m.estado,
+            "diff": list(m.diff), "aceptada_por": m.aceptada_por, "aceptada_en": m.aceptada_en}
+
+
+def marca_desde_json(d: dict) -> Marca:
+    return Marca(huella=Huella(host=d["host"], texto=d["texto"]), estado=d["estado"],
+                diff=tuple(d.get("diff") or ()), aceptada_por=d.get("aceptada_por"),
+                aceptada_en=d.get("aceptada_en"))
+
+
+def escribir_marca(ruta: Path, m: Marca) -> None:
+    ruta = Path(ruta)
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ruta.with_suffix(".tmp")
+    tmp.write_text(json.dumps(marca_a_json(m)), encoding="utf-8")
+    os.replace(tmp, ruta)
+
+
+def leer_marca(ruta: Path) -> Marca:
+    return marca_desde_json(json.loads(Path(ruta).read_text(encoding="utf-8")))
+
+
+# --- la CLI de aceptación: `python -m jax.ejecutor.contratos.huella aceptar ...` --------
+#
+# Corre como FRUIZ (nunca axioma -- mismo criterio que toda la toma de huella). Ver
+# docs/ejecutor-huella-aceptar.md para el procedimiento completo y por qué existe.
+
+async def _tomar_huella_actual(host_nombre: str, *, politica_ruta: Path, admin_usuario: str,
+                               tope_s: float = 30) -> Huella:
+    """Toma la huella de AHORA MISMO contra `host_nombre`, leyendo su `ip`/`puerto` de
+    la política exportada (mismo camino que `vigia_servicio._tomar_huella` --
+    `revocacion.argv_admin` + un solo `sudo -n sh -c`). Import diferido: evita un ciclo
+    con `vigia_servicio` (que ya importa `huella`) y a `politica`/`revocacion`, que
+    `huella.py` no necesita para nada más que esto."""
+    import shlex
+
+    from jax.ejecutor.contratos import politica as P
+    from jax.ejecutor.contratos import revocacion
+    from jax.ejecutor.contratos import vigia_servicio as V
+
+    doc = json.loads(Path(politica_ruta).read_bytes())
+    hosts = {h.nombre: h for h in P.validar(doc).hosts}
+    h = hosts.get(host_nombre)
+    if h is None:
+        raise ValueError("host_desconocido", host_nombre)
+    argv = revocacion.argv_admin(h, admin_usuario, f"sudo -n sh -c {shlex.quote(comando_huella())}")
+    return await V.correr_huella_por_ssh(argv, host_nombre, tope_s=tope_s)
+
+
+def _registrar_aceptacion(registro_ruta: Path, *, host: str, mision_id: str, aceptado_por: str,
+                          diff: tuple, sin_medir: bool) -> int:
+    """Deja constancia de la aceptación en el registro append-only de C3 (el mismo que
+    ya audita cada paso del cerebro -- `jax.ejecutor.contratos.registro`, cadena
+    encadenada en hall9000). `fruiz` ya puede escribir ahí: es el mismo dueño."""
+    from jax.ejecutor.contratos.registro import Registro
+
+    reg = Registro(registro_ruta)
+    try:
+        return reg.anotar({"evento": "huella_aceptada", "host": host, "mision_id": mision_id,
+                           "aceptado_por": aceptado_por, "sin_medir": sin_medir, "diff_aceptado": list(diff)})
+    finally:
+        reg.cerrar()
+
+
+async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: str, sin_medir: bool = False,
+                  politica_ruta: Path | None = None, admin_usuario: str | None = None,
+                  registro_ruta: Path | None = None, pausa_ruta: Path | None = None,
+                  tomar_huella_actual=None, registrar=_registrar_aceptacion,
+                  ahora=None, salida=print) -> int:
+    """El camino de aceptación explícita (M-1, ronda 7): muestra el diff que pausó,
+    toma una línea base NUEVA (salvo `sin_medir`: una máquina que ya no existe o no
+    responde -- se acepta sin comparar, registrado como tal), dice quién y cuándo en
+    el registro de C3, deja la marca de nuevo `ABIERTA` con la nueva base, y BORRA la
+    pausa GLOBAL del Ejecutor (`pausa_ruta`, `JAX_EJECUTOR_PAUSA`) -- sin esto no
+    alcanza: `arranque.exigir_contratos` (C5) sigue viendo esa pausa puesta y rechaza
+    CUALQUIER misión nueva, aunque la marca de la huella ya esté `ABIERTA` de nuevo; el
+    pausa.json es un archivo APARTE del que la huella no sabe nada. Devuelve 0 si
+    aceptó, 2 si no encontró la marca.
+
+    `tomar_huella_actual`/`registrar` inyectables (tests): por default,
+    `tomar_huella_actual` es `_tomar_huella_actual` (ssh real, necesita
+    `politica_ruta`/`admin_usuario`) y `registrar` es `_registrar_aceptacion` (escribe
+    en el registro real de C3, necesita `registro_ruta`)."""
+    from datetime import datetime, timezone
+
+    tomar = tomar_huella_actual or (
+        lambda h: _tomar_huella_actual(h, politica_ruta=politica_ruta, admin_usuario=admin_usuario))
+
+    ruta = ruta_huella(misiones, mision_id, host)
+    try:
+        marca = leer_marca(ruta)
+    except (OSError, ValueError, KeyError):
+        salida(f"codigo=huella_no_encontrada host={host} mision_id={mision_id}")
+        return 2
+
+    salida(f"--- diff de {host} ({mision_id}), estado={marca.estado} ---")
+    for linea in marca.diff:
+        salida(linea)
+    salida("--- fin diff ---")
+
+    if sin_medir:
+        nueva_huella = marca.huella
+    else:
+        nueva_huella = await tomar(host)
+
+    momento = ahora() if ahora is not None else datetime.now(timezone.utc).isoformat()
+    registrar(registro_ruta, host=host, mision_id=mision_id, aceptado_por=aceptado_por,
+             diff=marca.diff, sin_medir=sin_medir)
+    escribir_marca(ruta, Marca(huella=nueva_huella, estado=ABIERTA, aceptada_por=aceptado_por,
+                               aceptada_en=momento))
+    if pausa_ruta is not None:
+        try:
+            Path(pausa_ruta).unlink()
+        except FileNotFoundError:  # fail-soft: sin pausa que borrar, ya está en el estado buscado
+            pass
+    salida(f"huella_aceptada=true host={host} mision_id={mision_id} sin_medir={sin_medir}")
+    return 0
+
+
+def principal(argv: list[str]) -> int:
+    """`python -m jax.ejecutor.contratos.huella aceptar --host <host> --mision <id>
+    [--sin-medir]` -- lee `JAX_EJECUTOR_MISIONES`, `JAX_EJECUTOR_ADMIN_USUARIO`,
+    `JAX_EJECUTOR_REGISTRO`, `JAX_EJECUTOR_PAUSA` (se borra al aceptar: sin eso, C5
+    sigue rechazando toda misión nueva aunque la huella ya esté `ABIERTA`) y la
+    política exportada (`JAX_EJECUTOR_POLITICA`, misma que lee
+    `cuenta_axioma.cuenta_desde_entorno`) del entorno. Corre como fruiz --
+    `$SUDO_USER`/`$USER` es quién queda registrado como `aceptado_por`."""
+    import argparse
+    import asyncio
+    import os as _os
+
+    p = argparse.ArgumentParser(prog="python -m jax.ejecutor.contratos.huella")
+    sub = p.add_subparsers(dest="comando", required=True)
+    ac = sub.add_parser("aceptar", help="Acepta una huella REPORTADA y desbloquea el host.")
+    ac.add_argument("--host", required=True)
+    ac.add_argument("--mision", required=True, dest="mision_id")
+    ac.add_argument("--sin-medir", action="store_true",
+                    help="La máquina ya no existe o no responde: acepta sin volver a medir.")
+    args = p.parse_args(argv)
+
+    env = _os.environ
+    aceptado_por = env.get("SUDO_USER") or env.get("USER") or "desconocido"
+    try:
+        from jax.ejecutor.contratos import pausa as _pausa
+        return asyncio.run(aceptar(
+            misiones=Path(env["JAX_EJECUTOR_MISIONES"]), mision_id=args.mision_id, host=args.host,
+            politica_ruta=Path(env["JAX_EJECUTOR_POLITICA"]), admin_usuario=env["JAX_EJECUTOR_ADMIN_USUARIO"],
+            registro_ruta=Path(env["JAX_EJECUTOR_REGISTRO"]), pausa_ruta=_pausa.ruta_de_la_pausa(env),
+            aceptado_por=aceptado_por, sin_medir=args.sin_medir))
+    except KeyError as exc:
+        print(f"codigo=sin_configurar variable={exc.args[0]}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(principal(sys.argv[1:]))
