@@ -1,35 +1,27 @@
 """
-LAS MANOS -- endpoint de Procesamiento de Archivos (2026-09-21, ronda de
+LAS MANOS -- endpoint de Procesamiento de Archivos (2026-09-21, ronda 3 de
 arreglo tras revisión adversarial -- ver
 `.superpowers/sdd/2026-09-20-procesamiento-archivos-nucleo/endpoint-hallazgos.md`
-y `endpoint-report.md`).
+y `endpoint-hallazgos-r2.md`).
 
-Corre en "tests-puros": `procesamiento.ingesta.ingerir` va SUSTITUIDO acá --
-sin pdftoppm/tesseract/libreoffice reales (esos ya los cubre
-`procesamiento/_ingesta_test.py`, jax#252). Cada archivo de esta suite es
-la evidencia de UN hallazgo de la ronda anterior:
+Ronda 2 cerró bien B-1 (NUL), B-3 (reconciliación) y el test del loop
+(B-5) -- esos no se tocan acá. Esta ronda ataca el defecto estructural que
+esa ronda dejó sin nombrar: **el semáforo cuenta TRABAJOS y el pool cuenta
+ARCHIVOS**. Cada grupo de tests de abajo corresponde a un punto del ruling:
 
-  - B-1: una ruta con byte NUL entre sanas no tumba el lote (la causa raíz
-    se arregló en `las_manos/_tool_authority_test.py`, esto prueba el
-    efecto en el endpoint).
-  - B-2: admisión (429/422), y el trabajo NO monopoliza el executor por
-    defecto (se mide el RETRASO DEL LOOP mientras el trabajo corre real, no
-    el retorno del POST -- B-5).
-  - B-3: reconciliación al arrancar + cancelación en vuelo.
-  - B-4: `GET` no bloquea el loop leyendo el resultado.
-  - B-5: las cuatro mutaciones "fire-and-forget sin red" tienen que morir:
-    sacar el `run_in_executor`, sacar el `update(FAILED)` del except, sacar
-    `job_tasks.register()`, sacar el `add_done_callback`.
-  - B-6: `usuario` es obligatorio y se registra como `caller` del job.
-
-Dos grupos:
-
-  - `TrabajoWorkerTest` (asíncrono, `IsolatedAsyncioTestCase`): llama
-    `_ejecutar_trabajo`/`reconciliar_trabajos_huerfanos` DIRECTO, con un
-    `JobStore` de tempdir propio y un executor/semáforo PEQUEÑOS y propios
-    (nunca los módulo-globales -- aislamiento entre tests).
-  - `TrabajoHTTPTest` (síncrono, `TestClient`): la forma HTTP -- 202/404/
-    409/422/429, y la credencial de servicio.
+  - N-1 (bloqueante): el permiso del semáforo se filtraba si `_STORE.
+    create()` reventaba (ej. un `usuario` con un surrogate solitario).
+  - N-2 (bloqueante): un nombre no codificable se rechaza ANTES del
+    executor, y `write_result` no puede tumbar el lote entero por eso.
+  - N-3: cancelar es honesto -- no mata hilos, sólo deja de programar
+    trabajo nuevo y espera a que lo que ya corría termine solo.
+  - N-4 / B-2: executor de E/S SEPARADO del de OCR; `RUNNING` se marca
+    cuando el PRIMER archivo arranca de verdad, no al admitir.
+  - N-5: la mutación que de verdad importa -- `run_in_executor(executor,
+    …)` → `run_in_executor(None, …)` -- con un espía sobre el executor
+    real, no con un test de retraso del loop (que no la distingue).
+  - B-6: `usuario` no vacío, con tope de largo.
+  - N-6: el arranque de LAS MANOS llama a `reconciliar_trabajos_huerfanos`.
 
 Corre con:
   PYTHONPATH=.:las_manos python -m pytest -v las_manos/_procesamiento_routes_test.py
@@ -38,10 +30,12 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import secrets
 import tempfile
+import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -68,6 +62,20 @@ def _ficha(sha256: str, estado: str = "ok", extractor: str = "pdf") -> Ficha:
     )
 
 
+class _ExecutorEspia(ThreadPoolExecutor):
+    """N-5: espía sobre un `ThreadPoolExecutor` REAL -- confirma que el
+    trabajo llegó a ESTE objeto puntual, no a "algún executor que evitó el
+    loop" (un test de retraso del loop no distingue el executor dedicado
+    del executor por defecto: los dos evitan el loop igual)."""
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.llamado = False
+
+    def submit(self, fn, /, *args, **kwargs):
+        self.llamado = True
+        return super().submit(fn, *args, **kwargs)
+
+
 # ===========================================================================
 #  Grupo 1 -- el worker, sin HTTP
 # ===========================================================================
@@ -84,24 +92,28 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self._parche_workspace.stop)
         self.addCleanup(self._tmpdir.cleanup)
 
-        # Executor/semáforo PROPIOS de este test -- nunca los
+        # Executores/semáforo PROPIOS de este test -- nunca los
         # módulo-globales de procesamiento_routes (aislamiento).
-        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test")
+        self.executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-ocr")
         self.addCleanup(self.executor.shutdown)
+        self.executor_io = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-io")
+        self.addCleanup(self.executor_io.shutdown)
         self.semaforo = asyncio.Semaphore(2)
 
     def _archivo_en_workspace(self, nombre: str, contenido: bytes = b"x") -> str:
         (self.workspace / nombre).write_bytes(contenido)
         return nombre  # ruta RELATIVA -- contrato de resolve_jailed_path
 
-    async def _ejecutar(self, job_id, proyecto, rutas, *, semaforo=None, executor=None):
+    async def _ejecutar(self, job_id, proyecto, rutas, *, semaforo=None, executor=None, executor_io=None):
         """Mismo contrato que `crear_trabajo()`: adquiere el semáforo ANTES
         de llamar -- `_ejecutar_trabajo` lo libera en su `finally`."""
         semaforo = semaforo if semaforo is not None else self.semaforo
         executor = executor if executor is not None else self.executor
+        executor_io = executor_io if executor_io is not None else self.executor_io
         await semaforo.acquire()
         await rutas_mod._ejecutar_trabajo(
-            job_id, proyecto, rutas, store=self.store, executor=executor, semaforo=semaforo,
+            job_id, proyecto, rutas, store=self.store,
+            executor=executor, executor_io=executor_io, semaforo=semaforo,
         )
 
     def _crear_job(self):
@@ -137,7 +149,6 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert "contenido secreto" not in json.dumps(r)
         assert set(r) == {"archivo", "estado", "extractor", "extracto_bytes", "carpeta_procesado", "error"}
 
-    # -- B-1 (raíz en tool_authority; esto prueba el EFECTO en el endpoint) --
     async def test_M1_ruta_fuera_del_jail_se_rechaza_sin_llamar_a_ingerir(self):
         ingerir_mock = AsyncMock()
         job_id = self._crear_job()
@@ -155,12 +166,10 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         ingerir_mock.assert_not_called()
 
     async def test_B1_ruta_con_byte_nul_entre_sanas_no_tumba_el_lote(self):
-        """Evidencia exigida para B-1 a nivel endpoint: antes del fix en
-        `tool_authority.py`, un byte NUL en CUALQUIER ruta del lote hacía
-        que `resolve_jailed_path` dejara escapar `ValueError`, y esa
-        excepción no la atrapaba nada en `_procesar_una_ruta` -- el job
-        entero terminaba `failed`, con CERO resultados, sin decir cuál
-        archivo fue."""
+        """Un byte NUL (`\\x00`) es codificable a UTF-8 sin problema (es
+        `resolve()`, no la codificación, lo que se atraganta con él -- ver
+        _tool_authority_test.py::test_3b) -- este caso es DISTINTO de N-2
+        (surrogates solitarios), y sigue sin tumbar el lote."""
         self._archivo_en_workspace("sano1.pdf")
         self._archivo_en_workspace("sano2.pdf")
 
@@ -174,26 +183,18 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             )
 
         job = self.store.get(job_id)
-        assert job.status == JobStatus.COMPLETED, (
-            f"un byte NUL tumbó el lote entero: {job}"
-        )
+        assert job.status == JobStatus.COMPLETED, f"un byte NUL tumbó el lote entero: {job}"
         resultados = json.loads(Path(job.result_path).read_text())
-        assert len(resultados) == 3, "el lote no siguió con los demás archivos"
+        assert len(resultados) == 3
         por_archivo = {r["archivo"]: r for r in resultados}
         assert por_archivo["sano1.pdf"]["estado"] == "ok"
         assert por_archivo["sano2.pdf"]["estado"] == "ok"
         assert por_archivo["archivo\x00malo.pdf"]["estado"] == "rechazado"
 
-    # -- M2: un archivo roto no tumba el lote ----------------------------
     async def test_M2_un_archivo_roto_no_tumba_el_lote(self):
         for nombre in ("uno.pdf", "dos.pdf", "tres.pdf"):
             self._archivo_en_workspace(nombre)
 
-        # B-2: los archivos ahora se procesan EN PARALELO (cada uno en su
-        # propio hilo del executor) -- un side_effect que hace `pop(0)` de
-        # una lista compartida asume orden secuencial y es una carrera de
-        # verdad entre hilos. Se decide por NOMBRE, no por orden de
-        # llamada.
         respuestas_por_nombre = {
             "uno.pdf": _ficha("1" * 64),
             "dos.pdf": RuntimeError("pdftoppm: timeout"),
@@ -213,12 +214,67 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         job = self.store.get(job_id)
         assert job.status == JobStatus.COMPLETED, f"un archivo roto tumbó el lote entero: {job}"
         resultados = json.loads(Path(job.result_path).read_text())
-        assert len(resultados) == 3, "el lote no siguió con los demás archivos"
+        assert len(resultados) == 3
         por_archivo = {r["archivo"]: r for r in resultados}
         assert por_archivo["uno.pdf"]["estado"] == "ok"
         assert por_archivo["dos.pdf"]["estado"] == "error"
         assert "pdftoppm: timeout" in por_archivo["dos.pdf"]["error"]
         assert por_archivo["tres.pdf"]["estado"] == "ok"
+
+    # -- N-2: nombre no codificable -----------------------------------------
+    async def test_N2_ruta_no_codificable_se_rechaza_sin_tumbar_el_lote(self):
+        """`\\udcff` es un surrogate solitario -- típico de un nombre de
+        archivo en cp1252/latin-1 que Python re-expone así al leerlo del
+        filesystem (`surrogateescape`). Antes: `resolve_jailed_path` lo
+        aceptaba bien (es un path POSIX válido, sigue symlinks vía
+        surrogateescape sin problema), `_procesar_una_ruta` lo reportaba
+        'rechazado' bien -- pero ESE string crudo viajaba hasta
+        `write_result`, que hace `Path.write_text(..., encoding='utf-8')`
+        ESTRICTO: revienta, y el job entero (incluidos los dos archivos
+        sanos) terminaba 'failed', con los resultados de los sanos
+        PERDIDOS."""
+        self._archivo_en_workspace("sano1.pdf")
+        self._archivo_en_workspace("sano2.pdf")
+        ruta_mala = "malo\udcff.pdf"
+
+        def _ingerir_falso(origen, trabajo, *, subruta=None):
+            return _ficha("c" * 64)
+
+        job_id = self._crear_job()
+        with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_falso) as ingerir_mock:
+            await self._ejecutar(job_id, "proy", ["sano1.pdf", ruta_mala, "sano2.pdf"])
+
+        job = self.store.get(job_id)
+        assert job.status == JobStatus.COMPLETED, (
+            f"un nombre no codificable tumbó el lote entero (los sanos se perdieron): {job}"
+        )
+        resultados = json.loads(Path(job.result_path).read_text())
+        assert len(resultados) == 3
+        por_archivo = {r["archivo"]: r for r in resultados}
+        assert por_archivo["sano1.pdf"]["estado"] == "ok"
+        assert por_archivo["sano2.pdf"]["estado"] == "ok"
+        # el nombre malo NO aparece literal (no se puede codificar) -- pero
+        # SÍ hay una entrada rechazada por él, y viene saneada.
+        assert ruta_mala not in resultados[0] and ruta_mala not in json.dumps(resultados)
+        rechazados = [r for r in resultados if r["estado"] == "rechazado"]
+        assert len(rechazados) == 1
+        assert "no se puede codificar" in rechazados[0]["error"]
+
+        # nunca se le pagó un hilo real a un nombre que ni se puede reportar
+        llamados = {c.args[1] for c in ingerir_mock.call_args_list}
+        assert ruta_mala not in llamados, "se llegó a llamar ingerir() con la ruta no codificable"
+
+    async def test_N2_guardar_resultado_reintenta_con_ensure_ascii_si_algo_se_cuela(self):
+        """Defensa de última línea de `_guardar_resultado`: si por CUALQUIER
+        otro motivo el JSON no es codificable a UTF-8 estricto, reintenta
+        con `ensure_ascii=True` en vez de perder el resultado entero."""
+        resultados = [{"archivo": "x\udcff", "estado": "ok"}]  # simula algo que se coló
+        with tempfile.TemporaryDirectory() as d:
+            store = JobStore(str(Path(d) / "jobs.jsonl"))
+            job_id = store.create(caller="x", capability="y", motor="z", trace_id="t", prompt="p", recursion_depth=0)
+            ruta = rutas_mod._guardar_resultado(store, job_id, resultados)
+            contenido = Path(ruta).read_text(encoding="utf-8")  # no debe lanzar
+            assert "\\udcff" in contenido  # escapado como \uXXXX (ASCII puro)
 
     async def test_marca_running_antes_de_completed(self):
         vistos: list[str] = []
@@ -249,13 +305,6 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     # -- B-5: la mutación que más importa -- medir el LOOP, no el POST ---
     async def test_B5_el_trabajo_no_bloquea_el_loop_de_eventos(self):
-        """La mutación que sacaría `run_in_executor` (o lo cambiara por una
-        llamada directa) NO rompía ningún test viejo: medían el retorno del
-        POST, y `create_task` difiere el cuerpo del trabajo hasta el
-        siguiente `await`, así que el POST volvía rápido aunque el OCR
-        corriera entero DENTRO del loop. Este test mide el loop mismo,
-        mientras el trabajo (un `time.sleep` REAL, bloqueante, en el hilo)
-        está en vuelo."""
         self._archivo_en_workspace("lento.pdf")
 
         def _ingerir_lento(origen, trabajo, *, subruta=None):
@@ -272,16 +321,12 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
                 retrasos.append(time.perf_counter() - t0 - 0.01)
 
         with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
-            # IMPORTANTE (aprendido de B-5 en la revisión): si el sondeo se
-            # arranca con `asyncio.gather(trabajo, sondeo)` y el trabajo
-            # bloquea ANTES de su primer `await`, el sondeo ni siquiera
-            # llegó a arrancar su primer `sleep(0.01)` cuando el bloqueo ya
-            # pasó -- el test "medía" un intervalo que nunca coincidió con
-            # el bloqueo real y pasaba igual con la mutación que saca el
-            # `run_in_executor` (falso negativo, confirmado a mano). Por
-            # eso el sondeo se crea PRIMERO, como tarea aparte, y se le da
-            # tiempo real de arrancar y quedar DENTRO de su `sleep(0.01)`
-            # antes de lanzar el trabajo.
+            # El sondeo se crea PRIMERO y se le da tiempo real de arrancar
+            # y quedar DENTRO de su `sleep(0.01)` antes de lanzar el
+            # trabajo -- si no, un trabajo que bloquea antes de su primer
+            # `await` puede terminar ANTES de que el sondeo arranque, y el
+            # test pasa igual con una mutación que saca el `run_in_executor`
+            # (falso negativo, confirmado a mano en la ronda anterior).
             sondeo = asyncio.create_task(_sondear_loop())
             await asyncio.sleep(0.02)
             await self._ejecutar(job_id, "p", ["lento.pdf"])
@@ -295,11 +340,6 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert self.store.get(job_id).status == JobStatus.COMPLETED
 
     async def test_B2_archivos_del_mismo_trabajo_se_reparten_entre_hilos(self):
-        """B-2: antes, `_procesar_rutas` metía el LOTE ENTERO en un único
-        `to_thread` -- un job de muchos archivos no se podía repartir ni
-        con un pool más grande. Con dos archivos de 0,3s cada uno y dos
-        hilos disponibles, el trabajo tiene que tardar ~0,3s (en paralelo),
-        no ~0,6s (uno detrás del otro en el mismo hilo)."""
         self._archivo_en_workspace("p1.pdf")
         self._archivo_en_workspace("p2.pdf")
 
@@ -317,11 +357,6 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     # -- outer except: nunca deja running huérfano -----------------------
     async def test_una_excepcion_catastrofica_marca_failed_no_deja_running(self):
-        """Ataca el `except Exception` de `_ejecutar_trabajo` (no el de
-        `_procesar_una_ruta`): si `store.write_result` revienta, el job
-        tiene que quedar `failed` con el motivo -- si se borrara el
-        `update(FAILED, ...)` de ese except, este test vería el job
-        atascado en `running` para siempre."""
         self._archivo_en_workspace("a.pdf")
         job_id = self._crear_job()
         with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("9" * 64)), \
@@ -354,10 +389,6 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
 
     # -- B-6: el principal se registra ------------------------------------
     async def test_B6_usuario_llega_al_job_como_caller(self):
-        """No se ejercita acá el HTTP -- ver `TrabajoHTTPTest` para el
-        camino completo del POST -- esto confirma que `_ejecutar_trabajo`
-        no toca el `caller` que ya viene puesto en `create()` (lo pone
-        `crear_trabajo()`, que es lo que se verifica del lado HTTP)."""
         job_id = self.store.create(
             caller="ana@cliente.com", capability="ingesta_archivos",
             motor="n/a", trace_id="t", prompt="n/a", recursion_depth=0,
@@ -367,23 +398,23 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await self._ejecutar(job_id, "p", ["a.pdf"])
         assert self.store.get(job_id).caller == "ana@cliente.com"
 
-    # -- B-3: reconciliación al arrancar -----------------------------------
-    def test_B3_reconciliar_marca_failed_lo_que_quedo_pending_o_running(self):
-        j_pending = self._crear_job()  # create() deja status=pending
+    # -- B-3: reconciliación al arrancar (ronda anterior, sin cambios) -----
+    def test_B3_reconciliar_marca_failed_lo_que_quedo_pending_running_o_cancelling(self):
+        j_pending = self._crear_job()
         j_running = self._crear_job()
         self.store.update(j_running, status=JobStatus.RUNNING.value)
+        j_cancelling = self._crear_job()
+        self.store.update(j_cancelling, status=JobStatus.CANCELLING.value)
         j_completado = self._crear_job()
         self.store.update(j_completado, status=JobStatus.COMPLETED.value, finished_at=time.time())
 
         n = rutas_mod.reconciliar_trabajos_huerfanos(self.store)
 
-        assert n == 2, n
-        assert self.store.get(j_pending).status == JobStatus.FAILED
-        assert self.store.get(j_pending).error
-        assert self.store.get(j_running).status == JobStatus.FAILED
-        assert self.store.get(j_completado).status == JobStatus.COMPLETED, (
-            "reconciliar tocó un trabajo que ya había terminado"
-        )
+        assert n == 3, n
+        for j in (j_pending, j_running, j_cancelling):
+            assert self.store.get(j).status == JobStatus.FAILED
+            assert self.store.get(j).error
+        assert self.store.get(j_completado).status == JobStatus.COMPLETED
 
     def test_B3_reconciliar_no_hace_nada_sin_huerfanos(self):
         j = self._crear_job()
@@ -391,12 +422,8 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert rutas_mod.reconciliar_trabajos_huerfanos(self.store) == 0
         assert self.store.get(j).status == JobStatus.COMPLETED
 
-    # -- B-4: GET no bloquea el loop leyendo el resultado -------------------
+    # -- B-4/N-4: GET no bloquea el loop leyendo el resultado ---------------
     async def test_B4_leer_resultado_no_bloquea_el_loop(self):
-        """Medido en la revisión con 200.000 rutas: 0,39s con LAS MANOS
-        entero congelado. Acá se simula el mismo bloqueo con un
-        `time.sleep` real y se mide el loop mientras `_construir_respuesta_
-        estado` corre -- tiene que seguir respondiendo."""
         def _lectura_lenta(result_path):
             time.sleep(0.3)
             return [{
@@ -418,12 +445,6 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
                 retrasos.append(time.perf_counter() - t0 - 0.01)
 
         with patch.object(rutas_mod, "_leer_resultados_de_disco", side_effect=_lectura_lenta):
-            # Mismo motivo que en test_B5_el_trabajo_no_bloquea_el_loop_de_
-            # eventos: el sondeo tiene que estar YA dentro de su primer
-            # `sleep(0.01)` antes de disparar la lectura -- si no, una
-            # lectura que bloquea ANTES de su primer `await` termina antes
-            # de que el sondeo llegue a arrancar, y el test pasa igual con
-            # la mutación que saca el `run_in_executor` (falso negativo).
             sondeo = asyncio.create_task(_sondear_loop())
             await asyncio.sleep(0.02)
             await rutas_mod._construir_respuesta_estado("job-x", _VistaFalsa())
@@ -434,6 +455,176 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             f"el loop se retrasó {peor:.3f}s leyendo el resultado -- "
             "la lectura no está corriendo fuera del loop"
         )
+
+    async def test_N4_get_no_espera_detras_del_pool_de_ocr_saturado(self):
+        """Medido en la revisión con tesseract real: consultar un trabajo
+        YA TERMINADO tardó 37s porque la lectura compartía pool con el
+        OCR. Acá se satura el pool de OCR REAL del módulo
+        (`_EXECUTOR_OCR`) con trabajo lento de verdad, y se confirma que
+        leer un resultado (que usa `_EXECUTOR_IO`, un pool DISTINTO)
+        sigue respondiendo rápido."""
+        loop = asyncio.get_running_loop()
+        ocupando = [
+            loop.run_in_executor(rutas_mod._EXECUTOR_OCR, time.sleep, 0.6)
+            for _ in range(rutas_mod._MAX_WORKERS)
+        ]
+        await asyncio.sleep(0.05)  # deja que los hilos del pool de OCR arranquen de verdad
+
+        job_id = self._crear_job()
+        resultados = [{
+            "archivo": "a.pdf", "estado": "ok", "extractor": "pdf",
+            "extracto_bytes": 1, "carpeta_procesado": "c", "error": None,
+        }]
+        result_path = self.store.write_result(job_id, json.dumps(resultados))
+        self.store.update(
+            job_id, status=JobStatus.COMPLETED.value, finished_at=time.time(),
+            result_path=result_path,
+        )
+        view = self.store.get(job_id)
+
+        t0 = time.perf_counter()
+        respuesta = await rutas_mod._construir_respuesta_estado(job_id, view)
+        dt = time.perf_counter() - t0
+
+        assert dt < 0.3, (
+            f"el GET tardó {dt:.2f}s -- esperó detrás del pool de OCR saturado "
+            "(¿la lectura volvió a compartir executor con el OCR?)"
+        )
+        assert respuesta.resultados[0].estado == "ok"
+        await asyncio.gather(*ocupando)
+
+    # -- N-5: la mutación que más importa ------------------------------------
+    async def test_N5_procesar_usa_el_executor_ocr_dedicado(self):
+        espia = _ExecutorEspia(max_workers=2, thread_name_prefix="espia-ocr")
+        self.addCleanup(espia.shutdown)
+        self._archivo_en_workspace("a.pdf")
+        job_id = self._crear_job()
+        with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("7" * 64)):
+            await self._ejecutar(job_id, "p", ["a.pdf"], executor=espia)
+        assert espia.llamado, (
+            "el trabajo no pasó por el executor de OCR dedicado -- "
+            "¿se cambió run_in_executor(executor, …) por run_in_executor(None, …)?"
+        )
+
+    async def test_N5_guardar_resultado_usa_el_executor_io_dedicado(self):
+        espia = _ExecutorEspia(max_workers=2, thread_name_prefix="espia-io")
+        self.addCleanup(espia.shutdown)
+        self._archivo_en_workspace("a.pdf")
+        job_id = self._crear_job()
+        with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("8" * 64)):
+            await self._ejecutar(job_id, "p", ["a.pdf"], executor_io=espia)
+        assert espia.llamado, (
+            "escribir el resultado no pasó por el executor de E/S dedicado"
+        )
+
+    async def test_N5_leer_resultado_usa_el_executor_io_dedicado(self):
+        espia = _ExecutorEspia(max_workers=2, thread_name_prefix="espia-io-lectura")
+        self.addCleanup(espia.shutdown)
+
+        class _VistaFalsa:
+            status = JobStatus.COMPLETED
+            error = None
+            result_path = "irrelevante"
+
+        with patch.object(rutas_mod, "_EXECUTOR_IO", espia), \
+             patch.object(rutas_mod, "_leer_resultados_de_disco", return_value=[]):
+            await rutas_mod._construir_respuesta_estado("job-y", _VistaFalsa())
+
+        assert espia.llamado, "leer el resultado no pasó por _EXECUTOR_IO"
+
+    # -- N-3: cancelación honesta, con el executor REAL --------------------
+    async def test_N3_cancelar_deja_terminar_lo_que_ya_arranco_y_corta_lo_que_esperaba(self):
+        """Pool de UN hilo, dos archivos: el primero arranca YA (ocupa el
+        único hilo real), el segundo queda en cola. Se cancela mientras el
+        primero sigue corriendo de VERDAD (`time.sleep` real, no un
+        `asyncio.sleep` que se pueda saltear) -- el que ya arrancó TERMINA
+        SOLO (Python no mata hilos), el que esperaba nunca arranca. Estado
+        final CANCELLED, nunca COMPLETED. El semáforo NO se libera hasta
+        que el hilo en vuelo termina de verdad."""
+        executor_1_hilo = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-1-hilo")
+        self.addCleanup(executor_1_hilo.shutdown)
+        semaforo = asyncio.Semaphore(1)
+
+        self._archivo_en_workspace("primero.pdf")
+        self._archivo_en_workspace("segundo.pdf")
+
+        terminados: list[str] = []
+
+        def _ingerir_lento(origen, trabajo, *, subruta=None):
+            time.sleep(0.3)  # bloqueante DE VERDAD, en el hilo real
+            terminados.append(Path(origen).name)
+            return _ficha("d" * 64)
+
+        job_id = self._crear_job()
+        with patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento):
+            await semaforo.acquire()
+            tarea = asyncio.create_task(
+                rutas_mod._ejecutar_trabajo(
+                    job_id, "p", ["primero.pdf", "segundo.pdf"], store=self.store,
+                    executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
+                )
+            )
+            await asyncio.sleep(0.08)  # deja que "primero" arranque de VERDAD en el hilo
+            assert self.store.get(job_id).status == JobStatus.RUNNING
+            assert terminados == [], "no debería haber terminado todavía"
+
+            # Mismo mecanismo que el endpoint de cancelación, sin pasar por HTTP.
+            control = rutas_mod._CONTROLES[job_id]
+            self.store.update(job_id, status=JobStatus.CANCELLING.value)
+            control.cancelar()
+
+            # El semáforo TODAVÍA no se liberó -- "primero" sigue corriendo.
+            assert semaforo.locked(), "el semáforo se liberó ANTES de que terminara el hilo en vuelo"
+            assert self.store.get(job_id).status == JobStatus.CANCELLING
+
+            await tarea  # espera a que "primero" termine DE VERDAD
+
+        assert terminados == ["primero.pdf"], (
+            f"'segundo.pdf' no debería haber arrancado nunca: {terminados}"
+        )
+        job = self.store.get(job_id)
+        assert job.status == JobStatus.CANCELLED
+        resultados = json.loads(Path(job.result_path).read_text())
+        por_archivo = {r["archivo"]: r for r in resultados}
+        assert por_archivo["primero.pdf"]["estado"] == "ok"
+        assert por_archivo["segundo.pdf"]["estado"] == "cancelado"
+        assert not semaforo.locked(), "el semáforo sigue tomado después de terminar"
+
+    async def test_N3_cancelar_un_trabajo_sin_ningun_hilo_arrancado_aun(self):
+        """Caso borde: se cancela ANTES de que el primer archivo llegue a
+        arrancar en el hilo (pool ocupado por completo con otra cosa) --
+        el archivo nunca corre, el job pasa directo a CANCELLED."""
+        executor_1_hilo = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-1-hilo-b")
+        self.addCleanup(executor_1_hilo.shutdown)
+        loop = asyncio.get_running_loop()
+        bloqueo = threading.Event()
+        ocupa = loop.run_in_executor(executor_1_hilo, bloqueo.wait)  # ocupa el único hilo hasta que se libere a mano
+
+        semaforo = asyncio.Semaphore(1)
+        self._archivo_en_workspace("nunca.pdf")
+        ingerir_mock = AsyncMock()
+        job_id = self._crear_job()
+
+        with patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
+            await semaforo.acquire()
+            tarea = asyncio.create_task(
+                rutas_mod._ejecutar_trabajo(
+                    job_id, "p", ["nunca.pdf"], store=self.store,
+                    executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
+                )
+            )
+            await asyncio.sleep(0.05)  # el futuro de "nunca.pdf" quedó EN COLA, no arrancó
+            control = rutas_mod._CONTROLES[job_id]
+            control.cancelar()
+            bloqueo.set()  # libera el hilo que lo tenía ocupado
+            await tarea
+            await ocupa
+
+        ingerir_mock.assert_not_called()
+        job = self.store.get(job_id)
+        assert job.status == JobStatus.CANCELLED
+        resultados = json.loads(Path(job.result_path).read_text())
+        assert resultados[0]["estado"] == "cancelado"
 
 
 # ===========================================================================
@@ -449,7 +640,7 @@ def _credenciales() -> dict[str, bytes]:
     return {k: v.encode("ascii") for k, v in CRED.items()}
 
 
-def _app() -> FastAPI:
+def _app(**kw) -> FastAPI:
     app = FastAPI()
     app.include_router(router)
     proteger(app, _credenciales())
@@ -469,10 +660,6 @@ class TrabajoHTTPTest(unittest.TestCase):
         self._parche_store.start()
         self.addCleanup(self._parche_store.stop)
 
-        # Semáforo PROPIO por test -- el módulo-global se compartiría entre
-        # TODOS los tests de esta clase (y entre corridas), y un test que
-        # reemplaza `_ejecutar_trabajo` por un mock que nunca libera de
-        # verdad dejaría el semáforo agotado para el resto.
         self._semaforo_test = asyncio.Semaphore(2)
         self._parche_semaforo = patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", self._semaforo_test)
         self._parche_semaforo.start()
@@ -483,9 +670,48 @@ class TrabajoHTTPTest(unittest.TestCase):
         cuerpo.update(overrides)
         return c.post("/procesamiento/trabajos", json=cuerpo, headers=_h(IDENTIDAD_PLATAFORMA))
 
+    # -- N-1: el permiso siempre vuelve --------------------------------------
+    def test_N1_falla_al_crear_el_job_no_deja_el_semaforo_agotado(self):
+        """`"ana\\ud800"` es JSON válido (pydantic lo acepta como `str`),
+        pero `_STORE.create()` -> `json.dumps(...)` + escritura UTF-8
+        ESTRICTA no puede codificar un surrogate solitario -- antes, el
+        semáforo se adquiría ANTES de `create()` y nadie lo liberaba si
+        create() reventaba. Cuatro pedidos así (el tamaño real del
+        semáforo de producción) agotaban los 4 permisos PARA SIEMPRE: un
+        DoS de cuatro requests."""
+        # httpx (el cliente de TestClient) ni siquiera deja armar el pedido
+        # con `json={...}`: su propio `json.dumps(..., ensure_ascii=False)
+        # .encode('utf-8')` revienta ANTES de salir -- el mismo defecto de
+        # familia, del lado cliente. El body se arma a mano, con
+        # `ensure_ascii=True` (texto ASCII puro: `\ud800` queda como los 6
+        # caracteres literales `\`,`u`,`d`,`8`,`0`,`0`, JSON perfectamente
+        # válido) -- así llega tal cual llegaría de un cliente real que
+        # serializa distinto. El SERVIDOR sí decodifica ese `\ud800` de
+        # vuelta a un `str` Python con el surrogate solitario adentro
+        # (json.loads es tan permisivo como json.dumps con esto).
+        cuerpo_json = json.dumps(
+            {"proyecto": "p", "rutas": [], "usuario": "ana\ud800"}, ensure_ascii=True,
+        ).encode("ascii")
+        with TestClient(_app(), raise_server_exceptions=False) as c:
+            for _ in range(2):  # tamaño del semáforo de prueba
+                r = c.post(
+                    "/procesamiento/trabajos",
+                    content=cuerpo_json,
+                    headers={**_h(IDENTIDAD_PLATAFORMA), "content-type": "application/json"},
+                )
+                assert r.status_code == 500, r.text
+
+            # el semáforo NO debería quedar agotado
+            assert not self._semaforo_test.locked(), (
+                "el semáforo quedó agotado tras dos POST rotos -- DoS de N requests"
+            )
+            # y un pedido LIMPIO subsiguiente se admite normalmente
+            r_limpio = self._post(c)
+            assert r_limpio.status_code == 202, r_limpio.text
+
     # -- B-5 / no bloqueo --------------------------------------------------
     def test_post_no_espera_a_que_el_trabajo_termine(self):
-        async def _lento(job_id, proyecto, rutas, *, store, executor=None, semaforo=None):
+        async def _lento(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
             await asyncio.sleep(2)
             store.update(job_id, status=JobStatus.COMPLETED.value, finished_at=time.time())
 
@@ -530,7 +756,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert cuerpo["estado"] == "completed"
         assert cuerpo["resultados"] == resultados
 
-    # -- B-6: principal obligatorio y registrado -------------------------
+    # -- B-6: principal obligatorio, no vacío, con tope --------------------
     def test_B6_usuario_obligatorio_falta_es_422(self):
         with TestClient(_app()) as c:
             r = c.post(
@@ -539,8 +765,18 @@ class TrabajoHTTPTest(unittest.TestCase):
             )
         assert r.status_code == 422, r.text
 
+    def test_B6_usuario_vacio_es_422(self):
+        with TestClient(_app()) as c:
+            r = self._post(c, usuario="")
+        assert r.status_code == 422, r.text
+
+    def test_B6_usuario_muy_largo_es_422(self):
+        with TestClient(_app()) as c:
+            r = self._post(c, usuario="x" * 300)
+        assert r.status_code == 422, r.text
+
     def test_B6_usuario_se_registra_como_caller_del_job(self):
-        async def _noop(job_id, proyecto, rutas, *, store, executor=None, semaforo=None):
+        async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
             return None
 
         with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as c:
@@ -565,20 +801,21 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert len(self.store._index) == 0, "no debería haberse creado ningún job sin lugar"
 
     def test_B2_con_capacidad_libre_admite(self):
-        async def _noop(job_id, proyecto, rutas, *, store, executor=None, semaforo=None):
+        async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
             return None
 
         with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as c:
             r = self._post(c)
         assert r.status_code == 202, r.text
 
-    # -- B-3: cancelación --------------------------------------------------
-    def test_B3_cancelar_job_desconocido_404(self):
+    # -- N-3: cancelación -- forma HTTP (404/409), el executor real va en
+    #    el Grupo 1 (test_N3_cancelar_deja_terminar...) --------------------
+    def test_N3_cancelar_job_desconocido_404(self):
         with TestClient(_app()) as c:
             r = c.post("/procesamiento/trabajos/no-existe/cancel", headers=_h(IDENTIDAD_PLATAFORMA))
         assert r.status_code == 404, r.text
 
-    def test_B3_cancelar_job_terminal_da_409(self):
+    def test_N3_cancelar_job_terminal_da_409(self):
         job_id = self.store.create(
             caller="x", capability="y", motor="z", trace_id="t", prompt="p",
             recursion_depth=0,
@@ -588,57 +825,32 @@ class TrabajoHTTPTest(unittest.TestCase):
             r = c.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=_h(IDENTIDAD_PLATAFORMA))
         assert r.status_code == 409, r.text
 
-    def test_B3_cancelar_corta_la_tarea_en_vuelo_no_solo_el_registro(self):
-        """Catches la mutación 'borrar `job_tasks.register()`': sin
-        registrar la tarea, `job_tasks.cancel(job_id)` no encuentra nada
-        que cortar y la tarea simulada llegaría a 'completo' igual, aunque
-        el store ya diga 'cancelled'."""
-        marca: list[str] = []
+    def test_N3_cancelar_marca_cancelling_no_cancelled_de_una(self):
+        """La ruta HTTP en sí (sin executor real detrás, `_ejecutar_trabajo`
+        mockeado como algo que nunca termina) tiene que pasar por
+        `CANCELLING` -- nunca saltar directo a `CANCELLED` (eso mentiría
+        sobre hilos que todavía no terminaron)."""
+        async def _nunca_termina(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
+            await asyncio.sleep(10)
 
-        async def _lento(job_id, proyecto, rutas, *, store, executor=None, semaforo=None):
-            try:
-                await asyncio.sleep(5)
-                marca.append("completo")
-            except asyncio.CancelledError:
-                marca.append("cancelado")
-                raise
-
-        with patch.object(rutas_mod, "_ejecutar_trabajo", _lento), TestClient(_app()) as c:
+        with patch.object(rutas_mod, "_ejecutar_trabajo", _nunca_termina), TestClient(_app()) as c:
             job_id = self._post(c).json()["job_id"]
-            time.sleep(0.05)  # deja que la tarea arranque y quede en el sleep(5)
+            time.sleep(0.05)
             r = c.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=_h(IDENTIDAD_PLATAFORMA))
             assert r.status_code == 200, r.text
-            assert r.json()["estado"] == "cancelled"
-            time.sleep(0.05)  # deja que el CancelledError se propague
+            assert r.json()["estado"] == "cancelling", r.json()
 
-            # La aserción va DENTRO del `with` -- al cerrar el bloque,
-            # `TestClient` apaga su loop y eso por sí solo puede cancelar
-            # cualquier tarea pendiente (incluida ésta), sin que tenga nada
-            # que ver con `job_tasks.cancel()`. Afuera del `with`, este test
-            # no distinguía "se canceló porque se lo pedí" de "se canceló
-            # porque el runner cerró el loop" -- confirmado a mano: con
-            # `job_tasks.register()` borrado, este assert acá adentro
-            # falla (`marca == []`, la tarea sigue en su `sleep(5)`).
-            assert marca == ["cancelado"], (
-                f"la tarea no se cortó de verdad (job_tasks.register() sin efecto): {marca}"
-            )
-
-    # -- B-5: el done_callback de excepciones sigue wireado -----------------
-    def test_B5_done_callback_registra_la_excepcion_no_capturada(self):
-        async def _rompe(job_id, proyecto, rutas, *, store, executor=None, semaforo=None):
-            raise RuntimeError("boom-catastrofico")
-
-        with patch.object(rutas_mod, "_ejecutar_trabajo", _rompe), \
-             patch.object(
-                 rutas_mod, "_log_worker_exception",
-                 wraps=rutas_mod._log_worker_exception,
-             ) as espia, \
-             TestClient(_app()) as c:
-            r = self._post(c)
-            assert r.status_code == 202, r.text
-            time.sleep(0.05)
-
-        espia.assert_called_once()
+    # -- N-6: el arranque reconcilia -----------------------------------------
+    def test_N6_arranque_llama_a_reconciliar_trabajos_huerfanos(self):
+        server_py = Path(__file__).resolve().parent / "server.py"
+        arbol = ast.parse(server_py.read_text(encoding="utf-8"))
+        llamadas = [
+            n for n in ast.walk(arbol)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "reconciliar_trabajos_huerfanos"
+        ]
+        assert len(llamadas) == 1, (
+            "server.py tiene que llamar reconciliar_trabajos_huerfanos() en su startup hook"
+        )
 
     # -- autenticación --------------------------------------------------
     def test_credencial_plataforma_accede_jacobs_no(self):

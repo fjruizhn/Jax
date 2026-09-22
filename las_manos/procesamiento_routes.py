@@ -1,7 +1,8 @@
 """
-LAS MANOS -- Endpoint de Procesamiento de Archivos (2026-09-21, ronda de
+LAS MANOS -- Endpoint de Procesamiento de Archivos (2026-09-21, ronda 3 de
 arreglo tras revisión adversarial -- ver
-`.superpowers/sdd/2026-09-20-procesamiento-archivos-nucleo/endpoint-hallazgos.md`).
+`.superpowers/sdd/2026-09-20-procesamiento-archivos-nucleo/endpoint-hallazgos.md`
+y `endpoint-hallazgos-r2.md`).
 
 `procesamiento/` (jax#252, 252 tests, en verde) ya sabe ingerir un documento
 -- lo que faltaba era quien lo llamara desde HTTP sin bloquear el request:
@@ -10,54 +11,66 @@ petición HTTP no puede quedarse esperando eso.
 
     POST /procesamiento/trabajos             {proyecto, rutas[], usuario} -> {job_id} (202)
     GET  /procesamiento/trabajos/{id}        -> estado + resultados por archivo
-    POST /procesamiento/trabajos/{id}/cancel -> corta el trabajo en vuelo
+    POST /procesamiento/trabajos/{id}/cancel -> deja de programar archivos nuevos
 
-Maquinaria REUSADA de `motor_registry` (job_store, job_tasks, tool_authority),
-instancia propia de `JobStore` -- ver el resto del razonamiento en el
-Informe (`endpoint-report.md`). Esta ronda corrige seis hallazgos de la
-revisión adversarial:
+Ronda 2 (B-1..B-6) cerró el jail sobre bytes NUL, el executor propio, la
+reconciliación al arrancar, el GET async y el principal obligatorio. La
+ronda 3 corrige el defecto ESTRUCTURAL que esa ronda dejó sin nombrar,
+señalado por el ruling del coordinador:
 
-- **B-1** (raíz, en `tool_authority.py`): un byte NUL en una ruta dejaba
-  escapar `ValueError` fuera de `resolve_jailed_path` -- arreglado ahí, no
-  acá.
-- **B-2**: el trabajo corre en un `ThreadPoolExecutor` PROPIO
-  (`_EXECUTOR`), nunca el executor por defecto que usa `worker.py` para
-  despachar motores (`git show`/`git reset` vía `asyncio.to_thread`). Cada
-  ARCHIVO es su propia unidad de trabajo (no el lote entero en un solo
-  hilo) -- así un job con muchos archivos se reparte entre los hilos del
-  pool en vez de monopolizar uno solo por horas. Admisión: un semáforo
-  (`_SEMAFORO_TRABAJOS`, del mismo tamaño que el pool) y un tope de
-  `len(rutas)` por pedido (`_MAX_RUTAS_POR_TRABAJO`); sin lugar, 429 ANTES
-  de crear ningún registro.
-- **B-3**: `reconciliar_trabajos_huerfanos()` (llamada desde el startup
-  hook de `server.py`) marca `failed` a lo que haya quedado
-  `pending`/`running` de una corrida anterior -- un reinicio ya no deja un
-  trabajo "corriendo" para siempre. `POST .../cancel` corta uno en vuelo.
-- **B-4**: `GET` ya no lee ni parsea el resultado dentro del loop de
-  eventos -- va al mismo executor dedicado.
-- **B-5**: ver `_procesamiento_routes_test.py` -- la mutación que importa
-  (sacar el `run_in_executor`) ahora se prueba MIDIENDO EL RETRASO DEL LOOP
-  durante el trabajo, no el retorno del POST.
-- **B-6**: `usuario` es obligatorio en el pedido y se registra como
-  `caller` del job (antes era una constante que no identificaba a nadie).
-  No es autorización completa (eso es otra ronda) -- es lo mínimo para que
-  un incidente sea investigable.
+    "El semáforo cuenta TRABAJOS y el pool cuenta ARCHIVOS. Todo lo que
+    miente sale de ahí: running sin hilos, el cupo que se libera antes de
+    tiempo, el GET esperando 37s."
 
-**Limitación documentada, diferida a propósito** (no se arregla en esta
-ronda): `JobStore.create()` exige vocabulario de motores LLM
-(`motor`/`capability`/`prompt`) que este dominio no tiene. En vez de forzar
-`proyecto` dentro de `prompt` (mentir), esos campos llevan un valor que
-declara explícitamente "no aplica", y el proyecto se guarda en un campo
-PROPIO (`proyecto`, vía `JobStore.update()`, que acepta kwargs arbitrarios)
--- el arreglo de raíz (que `JobStore` deje de exigir ese vocabulario) es
-refactor de código compartido con los jobs de motor y no es una decisión de
-esta ronda.
+Siete arreglos, en el orden del ruling:
 
-**MINOR-7, anotado y no explotable hoy:** esta instancia de `JobStore` y la
-de `motor_registry/routes.py` comparten `logs/motor_results/` (mismo
-directorio padre, nombres de archivo por `job_id` -- un UUID4, así que la
-probabilidad de colisión real es nula) y `job_tasks._RUNNING` (mismo
-diccionario global, misma razón).
+- **N-1 (bloqueante):** el semáforo se adquiría ANTES de `_STORE.create()`
+  -- si `create()` lanzaba (ej. un `usuario` con un surrogate solitario,
+  JSON válido que pydantic acepta pero que `json.dumps`+escritura UTF-8 no
+  puede codificar), nadie lo liberaba. Cuatro pedidos así agotaban el
+  semáforo PARA SIEMPRE (DoS con cuatro requests). Ahora todo el tramo
+  entre el `acquire()` y que la tarea quede registrada corre bajo un
+  `try/finally` que libera el permiso si algo falla ANTES de que la tarea
+  tome la responsabilidad de liberarlo ella misma.
+- **N-2 (bloqueante):** una ruta cuyo nombre no se puede codificar a UTF-8
+  (ej. un byte perdido de cp1252 que Python re-expone como surrogate
+  solitario, `\\udcXX`) se rechaza ANTES de tocar el executor -- nunca paga
+  un hilo real por algo que no se puede ni reportar. Y el nombre que SÍ se
+  guarda en el resultado va saneado (`backslashreplace`), así que ESA
+  entrada nunca puede tumbar la escritura del LOTE ENTERO. `_guardar_
+  resultado` además tiene una defensa de última línea: si de cualquier
+  otra forma algo no codificable se cuela, reintenta con
+  `ensure_ascii=True` (texto puro ASCII SIEMPRE es UTF-8 válido) en vez de
+  perder los resultados de los archivos sanos.
+- **N-3:** cancelar es honesto sobre lo que Python puede hacer -- NO se
+  mata un hilo, y `Future.cancel()` NO sirve para simularlo: verificado a
+  mano que, sobre un `run_in_executor` YA corriendo, `.cancel()` devuelve
+  `True` de inmediato mintiendo -- el hilo real sigue solo en segundo
+  plano. `POST .../cancel` marca `_ControlTrabajo.cancelado`; cada archivo
+  se AUTOCONSULTA justo antes de arrancar de verdad y se salta sin tocar
+  el disco si ya se pidió cancelar. Lo que ya arrancó sigue hasta
+  terminar SOLO. El job pasa por `CANCELLING` mientras espera esos hilos,
+  y sólo a `CANCELLED` (terminal) -- y sólo AHÍ se libera el semáforo --
+  cuando el último hilo en vuelo de ESE trabajo terminó.
+- **N-4 / B-2 (executor separado para I/O):** un `ThreadPoolExecutor`
+  chico y propio (`_EXECUTOR_IO`) para leer/escribir el resultado del
+  job -- nunca el mismo pool que hace OCR real. Antes, consultar un
+  trabajo YA TERMINADO podía esperar detrás de horas de cola de OCR (medido
+  en la revisión: 37s). Y `RUNNING` se escribe DESDE DENTRO DEL HILO, la
+  primera vez que un archivo de ESE trabajo arranca de verdad -- no al
+  admitir el pedido.
+- **N-5:** la mutación que de verdad importa es cambiar el executor que se
+  le pasa a `run_in_executor` por `None` (que usa el executor compartido
+  con los motores, EXACTAMENTE lo que B-2 vino a evitar) -- un test de
+  retraso del loop no la detecta (con `None` el trabajo SIGUE fuera del
+  loop, sólo que en el pool equivocado). El test de esta ronda espía el
+  objeto executor real y confirma que es a ÉL a quien le llega el trabajo.
+- **B-6:** `usuario` no puede venir vacío ni arbitrariamente largo
+  (`pydantic.Field(min_length=1, max_length=...)`) -- antes `""` y un
+  string de 2 MB daban 202 los dos, y el de 2 MB inflaba el JSONL en 4 MB
+  (se re-esparce el estado ENTERO en cada `update()`).
+- **N-6:** test dedicado que confirma que el startup hook de `server.py`
+  llama a `reconciliar_trabajos_huerfanos()`.
 
 Jail: cada ruta de entrada pasa por
 `motor_registry.tool_authority.resolve_jailed_path` -- el MISMO jail que
@@ -65,6 +78,19 @@ protege `read_file`/`write_file` (GAP2 Fase 2).
 
 Autenticación: ninguna nueva. Las tres rutas se suman a
 `auth_servicio.PERMISOS[IDENTIDAD_PLATAFORMA]`.
+
+**Limitación documentada, diferida a propósito** (no se arregla en esta
+ronda): `JobStore.create()` exige vocabulario de motores LLM
+(`motor`/`capability`/`prompt`) que este dominio no tiene. `motor`/`prompt`
+llevan un valor que declara explícitamente "no aplica", y `proyecto` se
+guarda en un campo PROPIO vía `JobStore.update()` (acepta kwargs
+arbitrarios). El arreglo de raíz (que `JobStore` deje de exigir ese
+vocabulario) es refactor de código compartido con los jobs de motor.
+
+**MINOR-7, anotado y no explotable hoy:** esta instancia de `JobStore` y la
+de `motor_registry/routes.py` comparten `logs/motor_results/` y
+`job_tasks._RUNNING` -- nombres de archivo/claves por `job_id` (UUID4),
+colisión real nula.
 
 En memoria de Jairo Urbina.
 """
@@ -75,6 +101,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import unicodedata
 import uuid
@@ -82,7 +109,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from motor_registry import job_tasks, tool_authority
 from motor_registry.job_store import JobStore
@@ -99,42 +126,50 @@ _STORE = JobStore(str(BASE_DIR / "logs" / "procesamiento_jobs.jsonl"))
 _NOMBRE_FICHA = "ficha.json"
 
 # ---------------------------------------------------------------------------
-#  B-2: executor propio + admisión
+#  B-2 / N-4: DOS executors propios, con roles distintos
 # ---------------------------------------------------------------------------
-# Medido con tesseract REAL (2026-09-21, ver endpoint-report.md): 1 página
-# sintética de densidad realista, 1,97s secuencial (consistente con los
-# "2,7s/página" ya documentados en el proyecto para un PDF escaneado real).
-# 4 páginas EN PARALELO con este mismo diseño (executor dedicado,
-# max_workers=4): 2,54s totales -- contra 7,90s si fuera secuencial. Con el
-# executor dedicado SATURADO por esas 4 páginas, un `to_thread` ajeno
-# (representando un `git show`/`git reset` de worker.py, que usa el
-# executor POR DEFECTO) tardó 0,4 ms -- el aislamiento es real, no teórico.
-# Configurable porque el número correcto depende del hardware real de
-# producción, nunca hardcodeado sin escape (Principio IV).
+# `_EXECUTOR_OCR`: el trabajo pesado (ingesta.ingerir -- pdftoppm/tesseract
+# reales). Medido con tesseract real (script completo, reproducible, en
+# endpoint-report.md -- la ronda anterior dio un número sin dejar el
+# script, y no se pudo reproducir; esta vez el script queda escrito):
+# 1 página sintética de densidad realista ronda 1,9-2,4s según densidad de
+# texto (dos imágenes distintas midieron 1,97s y 2,3s) -- el propio
+# re-revisor midió 6,3s/página en OTRA imagen, más densa. El número
+# correcto depende del contenido real, no es una constante -- por eso el
+# tamaño del pool es una env var, no un literal.
 _MAX_WORKERS = int(os.getenv("JAX_PROCESAMIENTO_MAX_WORKERS", "4"))
-_EXECUTOR = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="procesamiento")
+_EXECUTOR_OCR = ThreadPoolExecutor(max_workers=_MAX_WORKERS, thread_name_prefix="procesamiento-ocr")
+
+# `_EXECUTOR_IO`: leer/escribir el JSON del resultado -- SEPARADO del OCR a
+# propósito (N-4). Antes, `GET` sobre un trabajo YA TERMINADO podía esperar
+# detrás de horas de cola de OCR real (medido en la revisión: 37s) porque
+# la lectura usaba el MISMO pool que el procesamiento pesado. Chico porque
+# es E/S liviana (un `read_text`/`write_text` de un JSON, nunca un
+# subprocess), no CPU-bound.
+_MAX_WORKERS_IO = int(os.getenv("JAX_PROCESAMIENTO_MAX_WORKERS_IO", "2"))
+_EXECUTOR_IO = ThreadPoolExecutor(max_workers=_MAX_WORKERS_IO, thread_name_prefix="procesamiento-io")
 
 # Como máximo tantos TRABAJOS corriendo a la vez como hilos reales tiene el
-# executor -- un trabajo admitido siempre tiene, por construcción, un hilo
-# real disponible en el mismo pool (nunca "running" mintiendo detrás de una
-# cola sin fondo). Sin lugar -> 429, ANTES de crear ningún registro: nunca
-# queda un job a medias por falta de capacidad.
+# pool de OCR -- sin lugar, 429 ANTES de crear ningún registro.
 _SEMAFORO_TRABAJOS = asyncio.Semaphore(_MAX_WORKERS)
 
 # Tope estructural de archivos por pedido: un solo request no puede
 # monopolizar el pool durante horas. Con 4 hilos y documentos de ~30
-# páginas (~80s cada uno, 2,7s/página), 50 archivos son, en el peor caso,
+# páginas (~80s cada uno a 2,7s/página), 50 archivos son, en el peor caso,
 # (50/4)*80s ≈ 1000s (~17 min) -- contra las 2,2h que ocupaba UN hilo antes
-# de esta ronda. Sigue siendo mucho, y por eso el pedido puede partirse en
-# varios `POST` -- pero ya no puede tumbar el pool compartido con los
-# motores, que es lo que B-2 vino a cerrar.
+# de B-2. El pedido puede partirse en varios `POST`.
 _MAX_RUTAS_POR_TRABAJO = int(os.getenv("JAX_PROCESAMIENTO_MAX_RUTAS", "50"))
 
 # MINOR-6: tope de longitud de `proyecto` -- sin esto, un `proyecto`
 # arbitrariamente largo infla el JSONL append-only sin límite (cada
-# `update()` re-esparce el estado ENTERO, así que un campo largo se
-# duplica en cada línea).
+# `update()` re-esparce el estado ENTERO).
 _MAX_PROYECTO_LEN = 200
+
+#: B-6: `usuario` no vacío, tope de largo -- antes `""` y un string de 2MB
+#: daban 202 los dos, y el de 2MB inflaba el JSONL en 4MB (se re-esparce
+#: el estado ENTERO en cada `update()`, así que un campo largo se duplica
+#: en cada línea).
+_MAX_USUARIO_LEN = 200
 
 router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 
@@ -145,11 +180,10 @@ router = APIRouter(prefix="/procesamiento", tags=["procesamiento"])
 class TrabajoRequest(BaseModel):
     proyecto: str
     rutas: list[str]
-    # B-6: principal obligatorio -- sin esto, todo trabajo tenía el mismo
-    # `caller` constante y ningún incidente era atribuible. jax-platform ya
+    # B-6: principal obligatorio, no vacío, con tope -- jax-platform ya
     # tiene el JWT del usuario; que lo pase. No es autorización completa
     # (eso es otra ronda): es lo mínimo para que un IDOR sea investigable.
-    usuario: str
+    usuario: str = Field(min_length=1, max_length=_MAX_USUARIO_LEN)
     model_config = ConfigDict(extra="forbid")
 
 
@@ -205,15 +239,38 @@ def _trabajo_de(proyecto: str) -> Path:
     return tool_authority.WORKSPACE_ROOT / "proyectos" / _slug(proyecto)
 
 
+def _codificable_utf8(s: str) -> bool:
+    """N-2: `True` si `s` se puede codificar a UTF-8 sin pérdida. Un
+    surrogate solitario (`\\udcXX`, típico de un nombre de archivo en una
+    codificación distinta -- cp1252, latin-1 -- que Python re-expone así
+    vía `surrogateescape` al leer el filesystem) es un `str` Python
+    perfectamente válido, pero NINGÚN `.encode('utf-8')` estricto lo
+    acepta -- y `JobStore`/`write_result` escriben JSON como UTF-8."""
+    try:
+        s.encode("utf-8")
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+def _resultado_no_codificable(ruta: str) -> ResultadoArchivo:
+    """N-2: se rechaza ANTES de tocar el executor (nunca paga un hilo real
+    por algo que ni se puede reportar), y el valor que se guarda en
+    `archivo` va SANEADO (`backslashreplace` produce texto ASCII puro) --
+    para que ESTA entrada nunca pueda tumbar la escritura del resultado
+    del LOTE ENTERO (`write_result` serializa TODOS los resultados
+    juntos, un solo campo envenenado revienta el JSON de todos)."""
+    saneada = ruta.encode("utf-8", errors="backslashreplace").decode("ascii")
+    return ResultadoArchivo(
+        archivo=saneada, estado="rechazado",
+        error="el nombre de la ruta no se puede codificar a UTF-8 (caracteres inválidos)",
+    )
+
+
 def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:
     """Nunca lanza: una ruta fuera del jail, ausente, o cuya ingesta falla
     queda REPORTADA, no propagada -- fallo cerrado por archivo, para que un
-    documento roto no tumbe el resto del lote.
-
-    B-1: antes, una ruta con un byte NUL hacía que `resolve_jailed_path`
-    dejara escapar `ValueError` -- arreglado en la raíz
-    (`tool_authority.py`), no acá: esta función sigue confiando en que
-    `resolve_jailed_path` nunca lanza, y ahora es cierto."""
+    documento roto no tumbe el resto del lote."""
     resolved, razon = tool_authority.resolve_jailed_path(ruta, [])
     if resolved is None:
         return ResultadoArchivo(archivo=ruta, estado="rechazado", error=razon)
@@ -239,84 +296,191 @@ def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:
     )
 
 
+# ---------------------------------------------------------------------------
+#  N-3: control de cancelación cooperativo
+# ---------------------------------------------------------------------------
+class _ControlTrabajo:
+    """Estado compartido entre `cancelar_trabajo()` (que corre en OTRA
+    invocación HTTP, en paralelo) y el worker real de ESTE job.
+
+    En Python no se mata un hilo del sistema operativo. Y `concurrent.
+    futures.Future.cancel()` (vía la envoltura de `asyncio.run_in_executor`)
+    **no sirve para detectar esto**: verificado a mano que, llamado sobre
+    un `run_in_executor` que YA está corriendo de verdad en su hilo,
+    `.cancel()` devuelve `True` y `.cancelled()` se pone en `True` de
+    INMEDIATO -- mintiendo -- mientras el hilo real sigue corriendo en
+    segundo plano y su resultado (que nadie espera ya) se descarta en
+    silencio. Por eso acá NO se cancela ningún `Future`: cada archivo se
+    AUTOCONSULTA (`arrancar_o_saltar()`) bajo el mismo lock que
+    `cancelar()`, en el instante justo antes de arrancar de verdad -- el
+    que ya pasó ese chequeo sigue hasta el final pase lo que pase después;
+    el que todavía no le tocó turno en el pool se salta sin tocar el
+    disco."""
+    __slots__ = ("cancelado", "marcado_running", "_lock")
+
+    def __init__(self) -> None:
+        self.cancelado = False
+        self.marcado_running = threading.Event()
+        self._lock = threading.Lock()
+
+    def cancelar(self) -> None:
+        with self._lock:
+            self.cancelado = True
+
+    def arrancar_o_saltar(self) -> bool:
+        """`True`: este archivo puede arrancar de verdad. `False`: el
+        trabajo ya estaba cancelado ANTES de que le tocara el turno --
+        nunca se paga un hilo real por él. Mismo lock que `cancelar()`:
+        no hay ventana en la que un archivo arranque DESPUÉS de que se
+        pidió cancelar sin que este chequeo lo vea."""
+        with self._lock:
+            return not self.cancelado
+
+
+#: job_id -> control vivo, SOLO mientras `_ejecutar_trabajo` está corriendo
+#: (se registra al empezar, se saca en el `finally`). Permite que
+#: `cancelar_trabajo()`, que corre en otra invocación, encuentre el
+#: control de ESE job para pedirle que deje de programar archivos nuevos.
+_CONTROLES: dict[str, _ControlTrabajo] = {}
+
+
 async def _procesar_rutas_paralelo(
     executor: ThreadPoolExecutor, proyecto: str, rutas: list[str],
+    *, control: _ControlTrabajo, job_id: str, store: JobStore,
 ) -> list[dict]:
-    """B-2: cada RUTA es su propia unidad de trabajo en el executor
-    dedicado -- antes, `_procesar_rutas` metía el lote ENTERO en un único
-    `asyncio.to_thread`, así que ni con un pool más grande se podía
-    repartir un job de muchos archivos entre varios hilos. `gather`
-    conserva el orden de `rutas` en el resultado."""
+    """Cada RUTA CODIFICABLE es su propia unidad de trabajo en el pool de
+    OCR -- un job con muchos archivos se reparte entre los hilos del pool
+    en vez de monopolizar uno solo (B-2). El orden del resultado sigue el
+    orden de `rutas`, sin importar en qué orden terminen los hilos."""
     trabajo = _trabajo_de(proyecto)
     loop = asyncio.get_running_loop()
-    futuros = [
-        loop.run_in_executor(executor, _procesar_una_ruta, trabajo, ruta)
-        for ruta in rutas
-    ]
-    resultados = await asyncio.gather(*futuros)
-    return [r.model_dump() for r in resultados]
+
+    resultados: list[ResultadoArchivo | None] = [None] * len(rutas)
+    indices_pendientes: list[int] = []
+    for i, ruta in enumerate(rutas):
+        if not _codificable_utf8(ruta):  # N-2: rechazo ANTES del executor
+            resultados[i] = _resultado_no_codificable(ruta)
+        else:
+            indices_pendientes.append(i)
+
+    def _marcar_running_una_vez() -> None:
+        """N-4/B-2: se llama DESDE DENTRO DEL HILO real -- la primera vez
+        que un archivo de ESTE trabajo arranca de verdad. `JobStore` es
+        thread-safe (su propio `threading.Lock`), así que escribir el
+        estado directo desde acá, sin volver al loop de eventos, es
+        seguro. Antes `RUNNING` se escribía al admitir el pedido, sin
+        ningún hilo trabajando todavía -- mentía."""
+        if not control.marcado_running.is_set():
+            control.marcado_running.set()
+            store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
+
+    def _trabajo_de_un_archivo(ruta: str) -> ResultadoArchivo:
+        # N-3: el chequeo va PRIMERO, antes de tocar el jail o el disco --
+        # ver `_ControlTrabajo.arrancar_o_saltar`.
+        if not control.arrancar_o_saltar():
+            return ResultadoArchivo(
+                archivo=ruta, estado="cancelado",
+                error="cancelado antes de empezar a procesarse",
+            )
+        _marcar_running_una_vez()
+        return _procesar_una_ruta(trabajo, ruta)
+
+    if indices_pendientes:
+        futuros = [
+            loop.run_in_executor(executor, _trabajo_de_un_archivo, rutas[i])
+            for i in indices_pendientes
+        ]
+        completados = await asyncio.gather(*futuros, return_exceptions=True)
+        for i, resultado in zip(indices_pendientes, completados):
+            if isinstance(resultado, BaseException):
+                # Defensivo: `_procesar_una_ruta` ya atrapa sus propias
+                # excepciones -- esto no debería dispararse nunca, pero si
+                # lo hace, no se pierde el resto del lote por eso.
+                logger.error(
+                    "procesamiento: resultado inesperado para '%s': %r",
+                    rutas[i], resultado,
+                )
+                resultados[i] = ResultadoArchivo(
+                    archivo=rutas[i], estado="error", error=str(resultado),
+                )
+            else:
+                resultados[i] = resultado
+
+    return [r.model_dump() for r in resultados]  # type: ignore[union-attr]
+
+
+def _guardar_resultado(store: JobStore, job_id: str, resultados: list[dict]) -> str:
+    """N-2, defensa de última línea: aunque los nombres de archivo YA
+    vienen saneados (`_resultado_no_codificable`), esta escritura no puede
+    tumbar el lote por un problema de codificación bajo NINGUNA
+    circunstancia. `ensure_ascii=True` es la garantía dura -- texto ASCII
+    puro SIEMPRE se puede escribir como UTF-8, sin excepción posible."""
+    try:
+        return store.write_result(job_id, json.dumps(resultados, ensure_ascii=False))
+    except UnicodeEncodeError as exc:
+        logger.error(
+            "procesamiento: job %s -- el resultado no era codificable a UTF-8 "
+            "(%r), reintentando con ensure_ascii=True", job_id, exc,
+        )
+        return store.write_result(job_id, json.dumps(resultados, ensure_ascii=True))
 
 
 # ---------------------------------------------------------------------------
-#  El worker del job -- toma `store`/`executor`/`semaforo` explícitos
-#  (mismo patrón testable que `motor_registry.worker.run`).
+#  El worker del job -- toma `store`/`executor`/`executor_io`/`semaforo`
+#  explícitos (mismo patrón testable que `motor_registry.worker.run`).
 #
 #  CONTRATO: quien llama a esta función YA tiene que haber adquirido
 #  `semaforo` (una unidad) ANTES de crear la tarea -- esta función lo
-#  libera en un `finally`, pase lo que pase (éxito, excepción, o
-#  cancelación). `crear_trabajo()` es el único caller real; los tests que
-#  la llaman directo tienen que adquirir el semáforo ellos mismos primero.
+#  libera en un `finally`, y SÓLO cuando el trabajo (incluida cualquier
+#  cancelación en curso) terminó de verdad -- nunca antes de que los
+#  hilos en vuelo de este job hayan terminado (N-3).
 # ---------------------------------------------------------------------------
 async def _ejecutar_trabajo(
     job_id: str, proyecto: str, rutas: list[str], *, store: JobStore,
     executor: ThreadPoolExecutor | None = None,
+    executor_io: ThreadPoolExecutor | None = None,
     semaforo: asyncio.Semaphore | None = None,
 ) -> None:
-    executor = executor if executor is not None else _EXECUTOR
+    executor = executor if executor is not None else _EXECUTOR_OCR
+    executor_io = executor_io if executor_io is not None else _EXECUTOR_IO
     semaforo = semaforo if semaforo is not None else _SEMAFORO_TRABAJOS
+    control = _ControlTrabajo()
+    _CONTROLES[job_id] = control
     try:
-        # B-2 (ruling): "movés el store.update(RUNNING) a después de tomar
-        # el hilo". Como la admisión (el semáforo, tomado por el caller
-        # ANTES de crear esta tarea) tiene el MISMO tamaño que el pool de
-        # hilos, que esta corrutina esté corriendo YA significa que hay
-        # capacidad real en el pool -- a diferencia de antes, donde
-        # `RUNNING` se escribía apenas se creaba la tarea, sin importar
-        # cuántos hilos ya estaban ocupados.
-        store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
         try:
-            resultados = await _procesar_rutas_paralelo(executor, proyecto, rutas)
+            resultados = await _procesar_rutas_paralelo(
+                executor, proyecto, rutas, control=control, job_id=job_id, store=store,
+            )
             loop = asyncio.get_running_loop()
             result_path = await loop.run_in_executor(
-                executor, store.write_result, job_id,
-                json.dumps(resultados, ensure_ascii=False),
+                executor_io, _guardar_resultado, store, job_id, resultados,
             )
             por_estado: dict[str, int] = {}
             for r in resultados:
                 por_estado[r["estado"]] = por_estado.get(r["estado"], 0) + 1
+            # N-3: si se pidió cancelar en algún momento, el estado FINAL
+            # es CANCELLED (terminal) -- nunca COMPLETED, aunque algunos
+            # archivos hayan terminado bien antes del pedido.
+            estado_final = (
+                JobStatus.CANCELLED.value if control.cancelado else JobStatus.COMPLETED.value
+            )
             store.update(
-                job_id, status=JobStatus.COMPLETED.value, finished_at=time.time(),
+                job_id, status=estado_final, finished_at=time.time(),
                 result_path=result_path,
                 result_summary=f"{len(resultados)} archivo(s): {por_estado}"[:200],
             )
         except Exception as exc:
-            # `except Exception` -- NO `BaseException` -- a propósito:
-            # `asyncio.CancelledError` hereda de `BaseException` desde
-            # Python 3.8 y pasa de largo. Eso es correcto acá: cuando el
-            # trabajo se cancela, `cancelar_trabajo()` YA marcó
-            # `CANCELLED` en el store ANTES de cortar esta tarea -- si
-            # este bloque atrapara la cancelación y escribiera `FAILED`
-            # encima, pisaría ese estado con uno menos preciso.
             logger.error("procesamiento: job %s falló: %r", job_id, exc)
             store.update(
                 job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
                 error=str(exc),
             )
     finally:
-        # Se libera SIEMPRE -- éxito, excepción capturada arriba, o
-        # cancelación (un `finally` corre igual cuando `CancelledError`
-        # atraviesa la corrutina). Sin esto, un trabajo cancelado o
-        # catastróficamente roto deja el permiso tomado para siempre y el
-        # semáforo se agota en silencio.
+        # El semáforo se libera SIEMPRE, y SÓLO ACÁ -- después de que
+        # `_procesar_rutas_paralelo` (que espera a los hilos en vuelo, no
+        # los abandona) haya terminado de verdad. Nunca antes: eso sería
+        # exactamente la mentira que N-3 vino a cerrar.
+        _CONTROLES.pop(job_id, None)
         semaforo.release()
 
 
@@ -334,10 +498,10 @@ def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
 
 
 def _leer_resultados_de_disco(result_path: str) -> list[dict]:
-    """B-4: corre en el executor dedicado, nunca en el loop de eventos.
-    `read_text` + `json.loads` son bloqueantes; medido con 200.000 rutas en
-    un solo resultado: 0,39s con LAS MANOS entero congelado (`/health`, los
-    pipelines, todo) cuando esto corría directo en una `async def`."""
+    """N-4: corre en `_EXECUTOR_IO`, nunca en el loop de eventos NI en el
+    pool de OCR (antes compartía executor con el OCR -- medido en la
+    revisión: consultar un trabajo YA TERMINADO tardó 37s porque la
+    lectura esperaba detrás de la cola real de tesseract)."""
     try:
         crudos = json.loads(Path(result_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:  # fail-soft: el job YA terminó, un resultado ilegible no tumba la consulta de estado
@@ -353,7 +517,7 @@ async def _construir_respuesta_estado(job_id: str, view) -> TrabajoEstadoRespons
     resultados: list[ResultadoArchivo] = []
     if view.result_path:
         loop = asyncio.get_running_loop()
-        crudos = await loop.run_in_executor(_EXECUTOR, _leer_resultados_de_disco, view.result_path)
+        crudos = await loop.run_in_executor(_EXECUTOR_IO, _leer_resultados_de_disco, view.result_path)
         try:
             resultados = [ResultadoArchivo(**r) for r in crudos]
         except (TypeError, ValueError) as exc:
@@ -364,20 +528,22 @@ async def _construir_respuesta_estado(job_id: str, view) -> TrabajoEstadoRespons
 
 
 # ---------------------------------------------------------------------------
-#  Reconciliación al arrancar (B-3)
+#  Reconciliación al arrancar (B-3, cerrado en la ronda anterior -- sin
+#  cambios acá)
 # ---------------------------------------------------------------------------
 def reconciliar_trabajos_huerfanos(store: JobStore | None = None) -> int:
-    """Al arrancar LAS MANOS: cualquier job `pending`/`running` en el JSONL
-    es, por definición, huérfano -- este proceso recién arrancó y
-    `job_tasks._RUNNING` (in-memory) está vacío, así que NINGUNA tarea viva
-    puede estar trabajando en él. `JobStore._load()` reconstruye el índice
-    desde disco pero nunca reconcilia estados "en vuelo" contra tareas
-    reales -- sin este paso, un reinicio del servicio deja el trabajo
-    'running' PARA SIEMPRE. Se llama una sola vez desde el startup hook de
-    `server.py` (mismo criterio que `jacobs.reaper.reap_orphaned_pipelines`
-    para los pipelines de Jacobs)."""
+    """Al arrancar LAS MANOS: cualquier job `pending`/`running`/`cancelling`
+    en el JSONL es, por definición, huérfano -- este proceso recién
+    arrancó, así que ninguna tarea viva puede estar trabajando en él.
+    `JobStore._load()` reconstruye el índice desde disco pero nunca
+    reconcilia estados "en vuelo" contra tareas reales -- sin este paso, un
+    reinicio del servicio deja el trabajo así PARA SIEMPRE. Se llama una
+    sola vez desde el startup hook de `server.py` (mismo criterio que
+    `jacobs.reaper.reap_orphaned_pipelines`)."""
     store = store if store is not None else _STORE
-    huerfanos = store.ids_en_estado(JobStatus.PENDING.value, JobStatus.RUNNING.value)
+    huerfanos = store.ids_en_estado(
+        JobStatus.PENDING.value, JobStatus.RUNNING.value, JobStatus.CANCELLING.value,
+    )
     for job_id in huerfanos:
         store.update(
             job_id, status=JobStatus.FAILED.value, finished_at=time.time(),
@@ -416,41 +582,49 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
     # Sin ningún `await` entre el chequeo de arriba y este acquire: en
     # asyncio (cooperativo, un solo hilo) eso significa que ningún otro
     # request puede colarse en el medio y robarse el permiso que `locked()`
-    # vio libre -- atómico dentro de este turno del loop de eventos (B-2).
+    # vio libre -- atómico dentro de este turno del loop de eventos.
     await _SEMAFORO_TRABAJOS.acquire()
 
-    proyecto = req.proyecto[:_MAX_PROYECTO_LEN]  # MINOR-6
-    job_id = _STORE.create(
-        # B-6: el principal REAL -- antes era la constante
-        # "las_manos.procesamiento", que no identificaba a nadie.
-        caller=req.usuario,
-        capability="ingesta_archivos",
-        # `motor`/`prompt` son vocabulario de JobStore para motores LLM
-        # (create() los exige) -- este job no despacha ningún motor. En vez
-        # de fingir (poner "procesamiento" como si fuera un motor real, o
-        # el nombre del proyecto como si fuera un prompt), el valor declara
-        # explícitamente que no aplica. El arreglo de raíz (que JobStore
-        # deje de exigir este vocabulario) queda diferido -- ver el
-        # docstring del módulo.
-        motor="n/a_no_es_un_motor_llm",
-        trace_id=str(uuid.uuid4()),
-        prompt="n/a -- este job no despacha un motor LLM, ver el campo 'proyecto'",
-        recursion_depth=0,
-    )
-    # El campo que de verdad significa "proyecto" -- `update()` acepta
-    # kwargs arbitrarios (van tal cual al JSONL), así que no hace falta
-    # forzarlo dentro de `prompt`.
-    _STORE.update(job_id, proyecto=proyecto)
+    # N-1: desde acá hasta que la tarea quede registrada, CUALQUIER
+    # excepción tiene que liberar el permiso -- antes, si `_STORE.create()`
+    # lanzaba (ej. un `usuario` con un surrogate solitario: JSON válido,
+    # pydantic lo acepta como `str`, pero `json.dumps`+escritura UTF-8 no
+    # puede codificarlo), el semáforo quedaba tomado PARA SIEMPRE. Cuatro
+    # pedidos así agotaban los 4 permisos y TODO POST limpio recibía 429
+    # hasta reiniciar el proceso -- un DoS de cuatro requests.
+    permiso_transferido = False
+    try:
+        proyecto = req.proyecto[:_MAX_PROYECTO_LEN]  # MINOR-6
+        job_id = _STORE.create(
+            # B-6: el principal REAL -- antes era la constante
+            # "las_manos.procesamiento", que no identificaba a nadie.
+            caller=req.usuario,
+            capability="ingesta_archivos",
+            # `motor`/`prompt` son vocabulario de JobStore para motores LLM
+            # -- este job no despacha ningún motor. Ver la limitación
+            # documentada al principio del archivo.
+            motor="n/a_no_es_un_motor_llm",
+            trace_id=str(uuid.uuid4()),
+            prompt="n/a -- este job no despacha un motor LLM, ver el campo 'proyecto'",
+            recursion_depth=0,
+        )
+        # El campo que de verdad significa "proyecto" -- `update()` acepta
+        # kwargs arbitrarios (van tal cual al JSONL).
+        _STORE.update(job_id, proyecto=proyecto)
 
-    # El semáforo se libera DENTRO de `_ejecutar_trabajo` (su propio
-    # `finally`, contrato documentado en su docstring) -- no acá, para no
-    # liberarlo dos veces.
-    task = asyncio.create_task(
-        _ejecutar_trabajo(job_id, proyecto, req.rutas, store=_STORE)
-    )
-    task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
-    job_tasks.register(job_id, task)
-    return TrabajoCreadoResponse(job_id=job_id)
+        task = asyncio.create_task(
+            _ejecutar_trabajo(job_id, proyecto, req.rutas, store=_STORE)
+        )
+        task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
+        job_tasks.register(job_id, task)
+        # A partir de ACÁ, `_ejecutar_trabajo` es responsable de liberar el
+        # semáforo (su propio `finally`) -- este `finally` ya no debe
+        # tocarlo, o lo libera dos veces.
+        permiso_transferido = True
+        return TrabajoCreadoResponse(job_id=job_id)
+    finally:
+        if not permiso_transferido:
+            _SEMAFORO_TRABAJOS.release()
 
 
 @router.get("/trabajos/{job_id}", response_model=TrabajoEstadoResponse)
@@ -463,12 +637,17 @@ async def estado_trabajo(job_id: str) -> TrabajoEstadoResponse:
 
 @router.post("/trabajos/{job_id}/cancel", response_model=TrabajoEstadoResponse)
 async def cancelar_trabajo(job_id: str) -> TrabajoEstadoResponse:
-    """Mismo patrón que `POST /motor/job/{id}/cancel`
-    (motor_registry/routes.py::cancel_job): el store se marca `CANCELLED`
-    ANTES de cortar la tarea -- si fuera al revés, `_ejecutar_trabajo`
-    podría alcanzar a escribir `COMPLETED`/`FAILED` en la ventana entre el
-    corte y el update(), y el cliente vería un estado que no refleja lo que
-    pidió."""
+    """N-3: cancelar es honesto sobre lo que Python puede hacer. NO mata
+    ningún hilo -- marca `CANCELLING` y marca `control.cancelado`, que cada
+    archivo AUTOCONSULTA justo antes de arrancar de verdad (ver
+    `_ControlTrabajo`): el que todavía no le tocó turno en el pool se
+    salta sin tocar el disco. Lo que YA está corriendo de verdad (un
+    `tesseract`/`pdftoppm` en vuelo) sigue hasta terminar solo -- no se le
+    llama `.cancel()` a su `Future`, porque eso miente (ver el docstring
+    de `_ControlTrabajo`). Recién cuando el último hilo en vuelo de este
+    job termina, `_ejecutar_trabajo` marca `CANCELLED` (terminal) y libera
+    el permiso del semáforo -- nunca antes, o la admisión estaría
+    mintiendo sobre cuánta capacidad real hay libre."""
     view = _STORE.get(job_id)
     if view is None:
         raise HTTPException(status_code=404, detail=f"Trabajo '{job_id}' no encontrado")
@@ -479,6 +658,9 @@ async def cancelar_trabajo(job_id: str) -> TrabajoEstadoResponse:
             status_code=409,
             detail=f"Trabajo '{job_id}' ya está en estado terminal: {view.status.value}",
         )
-    _STORE.update(job_id, status=JobStatus.CANCELLED.value, finished_at=time.time())
-    job_tasks.cancel(job_id)
+    if view.status != JobStatus.CANCELLING:
+        _STORE.update(job_id, status=JobStatus.CANCELLING.value)
+        control = _CONTROLES.get(job_id)
+        if control is not None:
+            control.cancelar()
     return await _construir_respuesta_estado(job_id, _STORE.get(job_id))
