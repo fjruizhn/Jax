@@ -715,40 +715,79 @@ class TrabajoHTTPTest(unittest.TestCase):
 
     # -- N-1: el permiso siempre vuelve --------------------------------------
     def test_N1_falla_al_crear_el_job_no_deja_el_semaforo_agotado(self):
-        """`"ana\\ud800"` es JSON válido (pydantic lo acepta como `str`),
-        pero `_STORE.create()` -> `json.dumps(...)` + escritura UTF-8
-        ESTRICTA no puede codificar un surrogate solitario -- antes, el
-        semáforo se adquiría ANTES de `create()` y nadie lo liberaba si
-        create() reventaba. Cuatro pedidos así (el tamaño real del
-        semáforo de producción) agotaban los 4 permisos PARA SIEMPRE: un
-        DoS de cuatro requests."""
-        # httpx (el cliente de TestClient) ni siquiera deja armar el pedido
-        # con `json={...}`: su propio `json.dumps(..., ensure_ascii=False)
-        # .encode('utf-8')` revienta ANTES de salir -- el mismo defecto de
-        # familia, del lado cliente. El body se arma a mano, con
-        # `ensure_ascii=True` (texto ASCII puro: `\ud800` queda como los 6
-        # caracteres literales `\`,`u`,`d`,`8`,`0`,`0`, JSON perfectamente
-        # válido) -- así llega tal cual llegaría de un cliente real que
-        # serializa distinto. El SERVIDOR sí decodifica ese `\ud800` de
-        # vuelta a un `str` Python con el surrogate solitario adentro
-        # (json.loads es tan permisivo como json.dumps con esto).
+        """`_STORE.create()`/`update()` -> `json.dumps(...)` + escritura
+        UTF-8 ESTRICTA no puede codificar un `str` Python con un surrogate
+        solitario (`\\udcff`) -- antes, el semáforo se adquiría ANTES de
+        `create()` y nadie lo liberaba si algo de ese tramo reventaba.
+        Cuatro pedidos así (el tamaño real del semáforo de producción)
+        agotaban los 4 permisos PARA SIEMPRE: un DoS de cuatro requests.
+
+        **Nota de método** (hallazgo aparte, no arreglado acá -- ver el
+        Informe): el vector original del ruling era `usuario`, pero desde
+        que B-6 le puso `Field(min_length=..., max_length=...)`, un
+        detalle de implementación de pydantic-core 2.46.4 (verificado en
+        Docker, versiones FIJADAS) hace que CUALQUIER `str` con
+        restricción de longitud rechace un surrogate solitario -- tanto
+        parseando JSON como construyendo el modelo directo en Python. Un
+        `str` SIN esa restricción (`proyecto`, acá) NO tiene esa
+        protección accidental, y SÍ deja pasar el surrogate -- confirmado
+        también por HTTP real en
+        `test_N1_proyecto_no_codificable_por_http_no_deja_el_semaforo_
+        agotado`, más abajo. (Aparte, no acá: el manejador de error 422 de
+        FastAPI/Starlette revienta con el MISMO `UnicodeEncodeError` al
+        intentar renderizar CUALQUIER validation error que incluya un
+        surrogate solitario en el detalle -- defecto real, de una
+        librería de terceros.) Este test llama a `crear_trabajo()`
+        directo, sin pasar por HTTP -- ejercita el mecanismo puntual
+        (`try/finally` alrededor de `_STORE.create()`/`update()`) sin
+        depender de qué campo lo dispare."""
+        proyecto_malo = "p\udcff"
+
+        async def _correr():
+            for _ in range(2):  # tamaño real del semáforo de prueba
+                req = rutas_mod.TrabajoRequest(proyecto=proyecto_malo, rutas=[], usuario="ana@cliente.com")
+                with self.assertRaises(UnicodeEncodeError):
+                    await rutas_mod.crear_trabajo(req)
+
+            assert not self._semaforo_test.locked(), (
+                "el semáforo quedó agotado tras dos pedidos rotos -- DoS de N requests"
+            )
+            # y un pedido LIMPIO subsiguiente se admite normalmente
+            req_limpio = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+            with patch.object(rutas_mod, "_ejecutar_trabajo", AsyncMock()):
+                respuesta = await rutas_mod.crear_trabajo(req_limpio)
+            assert respuesta.job_id
+
+        asyncio.run(_correr())
+
+    def test_N1_proyecto_no_codificable_por_http_no_deja_el_semaforo_agotado(self):
+        """Mismo mecanismo que el test de arriba, pero por el camino REAL
+        de HTTP -- posible precisamente porque `proyecto` (a diferencia de
+        `usuario`, que desde B-6 lleva `Field(min_length=...)`) es un
+        `str` SIN restricciones de longitud. Hallazgo aparte (ver el
+        Informe): un `str` con `Field(min_length=...)` hace que
+        pydantic-core 2.46.4 rechace un surrogate solitario al parsear
+        JSON (detalle de implementación, no contrato documentado); un
+        `str` liso lo deja pasar igual. Verificado a mano que `proyecto`
+        SÍ llega con el surrogate intacto a través de un pedido HTTP real
+        -- `_STORE.update(job_id, proyecto=proyecto)` (que corre DESPUÉS
+        de que `_STORE.create()` ya tuvo éxito) es quien revienta acá."""
+        proyecto_malo = "p\udcff"
         cuerpo_json = json.dumps(
-            {"proyecto": "p", "rutas": [], "usuario": "ana\ud800"}, ensure_ascii=True,
+            {"proyecto": proyecto_malo, "rutas": [], "usuario": "ana@cliente.com"},
+            ensure_ascii=True,
         ).encode("ascii")
         with TestClient(_app(), raise_server_exceptions=False) as c:
-            for _ in range(2):  # tamaño del semáforo de prueba
+            for _ in range(2):  # tamaño real del semáforo de prueba
                 r = c.post(
-                    "/procesamiento/trabajos",
-                    content=cuerpo_json,
+                    "/procesamiento/trabajos", content=cuerpo_json,
                     headers={**_h(IDENTIDAD_PLATAFORMA), "content-type": "application/json"},
                 )
                 assert r.status_code == 500, r.text
 
-            # el semáforo NO debería quedar agotado
             assert not self._semaforo_test.locked(), (
-                "el semáforo quedó agotado tras dos POST rotos -- DoS de N requests"
+                "el semáforo quedó agotado tras dos POST rotos por HTTP -- DoS de N requests"
             )
-            # y un pedido LIMPIO subsiguiente se admite normalmente
             r_limpio = self._post(c)
             assert r_limpio.status_code == 202, r_limpio.text
 
