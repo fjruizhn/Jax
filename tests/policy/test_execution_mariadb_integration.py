@@ -93,7 +93,7 @@ def test_b7_real_mariadb_artifact_and_observation_relations():
     manifest=store.put_evidence_blob(b"b7-manifest"); definition=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
     identity=ImplementationIdentity("fjruizhn/Jax","a"*40,"b"*40,SourceState.CLEAN,manifest.evidence_hash)
     lifecycle=EvidenceLifecycleService(store,_ControlledTestIdentityProvider(identity)); recorder=RuntimeEvidenceRecorder(lifecycle,"ci",ClaimScope(ClaimEnvironment.CI))
-    observation=recorder.record_denial(control_id="CTL.B6.GOVERNED_DISPATCH",reason_code="DENIED")
+    observation=recorder.record_governed_dispatch_denied()
     artifact=store.load_evidence_artifact(observation.evidence_artifact_hashes[0])
     loaded=store.load_evidence_artifact(artifact.artifact_hash)
     assert loaded.artifact_hash == artifact.artifact_hash

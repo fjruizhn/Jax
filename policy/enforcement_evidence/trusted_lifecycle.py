@@ -115,12 +115,12 @@ class RuntimeEvidenceRecorder:
   a request cannot relabel evidence from one database as another.
   """
   import hashlib, json
-  required={"database_scope_id","server_uuid","database_name","deployment_id",
+  required={"database_scope_id","server_id","hostname","database_name","deployment_id",
             "control_id","control_version","installed"}
   if not isinstance(installed, dict) or not required.issubset(installed):
    raise ValueError("complete live database inspection required")
   derived="dbscope:sha256:"+hashlib.sha256(
-   (str(installed["deployment_id"])+"|"+str(installed["server_uuid"])+"|"+str(installed["database_name"])).encode()).hexdigest()
+   (str(installed["deployment_id"])+"|"+str(installed["server_id"])+"|"+str(installed["hostname"])+"|"+str(installed["database_name"])).encode()).hexdigest()
   if installed["database_scope_id"] != derived or installed["control_id"] != "CTL.B6.ONE_DECISION_ONE_EXECUTION" or installed["control_version"] != 1 or installed["installed"] is not True:
    raise ValueError("database inspection identity mismatch")
   payload=json.dumps(installed,sort_keys=True,separators=(",",":"),default=str).encode()
