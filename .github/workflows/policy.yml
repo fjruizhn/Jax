@@ -3368,8 +3368,17 @@ jobs:
           #   exhaustiva columna->acotado: las 3 nuevas del descarte en True,
           #   las 8 viejas en False). Mutacion verificada a mano (sacar el
           #   True de status_previo pone el test en rojo), no corrida por CI.
-          grep -qE "^2409 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2409 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2409 -> 2413 (feat/descartar-pipelines, Task 2, 2026-09-22):
+          #   +4 en tests/test_jacobs_descarte.py -- las reglas puras de
+          #   jacobs/descarte.py (TRANSICIONES, destino_de): las cuatro
+          #   transiciones permitidas, recuperar vuelve al estado EXACTO
+          #   previo (expired->expired, no aborted), y EstadoPrevioInvalido
+          #   fail-closed para None/""/running/discarded. Vistos en ROJO
+          #   contra el código viejo (ImportError: cannot import name
+          #   'descarte' from 'jacobs') antes de escribir el módulo; verde
+          #   tras -- 7 passed (los 3 de Task 1 + los 4 nuevos).
+          grep -qE "^2413 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2413 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4474,8 +4483,29 @@ jobs:
           # tests de este archivo solos confirma que ELLOS pasan, no que el
           # job entero da exactamente 129; no se corrió el job completo por
           # tiempo. Si el runner da otro número, manda el runner.
-          grep -qE "^129 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 129 tests CORRIDOS."; exit 1; }
+          # 129 -> 134 (feat/descartar-pipelines, Task 2, 2026-09-22): +5 en
+          #   tests/test_jacobs_descarte_db.py (TransicionDescarteCasDBTest)
+          #   -- store.pipeline_transicion_descarte contra MariaDB real
+          #   (127.0.0.1:3308, base de sesión jax_memory_test_auto<pid>):
+          #   discard escribe status+status_previo+descartado_por+
+          #   descartado_at en la MISMA sentencia; época vieja y `desde`
+          #   equivocado NO escriben; recover limpia las tres columnas;
+          #   hide/restore las conservan. Vistos en ROJO contra el código
+          #   viejo (AttributeError: module 'jacobs.store' has no attribute
+          #   'pipeline_transicion_descarte') antes de escribir la función en
+          #   store.py; verde tras -- 9 passed, 0 failed (los 4 de Task 1 +
+          #   los 5 nuevos), corrida vía `python3 -m pytest`, nunca `mysql`
+          #   CLI ni consulta fuera de pytest. Mutación verificada a mano
+          #   (los 3 arreglos del brief, cada uno con su test cayendo y
+          #   revertido): quitar `AND run_epoch=%s` tumba
+          #   test_descartar_con_epoca_vieja_no_escribe; no limpiar
+          #   descartado_por en recover tumba
+          #   test_recuperar_limpia_las_tres_columnas; limpiar status_previo
+          #   en hide tumba test_ocultar_y_restaurar_conservan_las_columnas.
+          #   No corrida por CI (mutación manual, igual criterio que el
+          #   punto anterior de este mismo archivo).
+          grep -qE "^134 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 134 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
