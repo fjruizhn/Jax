@@ -984,6 +984,41 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_pipelines", "idx_pipelines_ocultos",
      "CREATE INDEX idx_pipelines_ocultos ON jacobs_pipelines "
      "(status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    # Task 1-bis (2026-09-22, Ruling 18): el listado principal de
+    # jax-platform (SQL_PIPELINES_DEL_USUARIO) ordena por created_at
+    # DESCENDENTE con LIMIT -- idx_pipelines_descartados/idx_pipelines_ocultos
+    # de arriba no le sirven (su orden es descartado_at, para las vistas de
+    # descarte, no para el listado principal). `visible` (columna VIRTUAL
+    # generada, ver init_tables()) va como PREFIJO antes de created_at para
+    # que el rango del índice ya venga filtrado a las filas visibles -- el
+    # motor no tiene que leer ni una fila descartada/oculta para saltarla:
+    # las deja afuera del propio rango. `user_id, tenant_id` primero porque
+    # son el filtro de igualdad de la consulta (mismo orden que
+    # idx_jacobs_pipelines_duenio); `visible` entre la igualdad y el ORDER
+    # BY, no al final, porque es también un filtro de igualdad (=1), y un
+    # índice ordena primero por sus columnas de igualdad y recién después
+    # por la de rango/orden.
+    #
+    # HECHO operacional para quien toque `jacobs_pipelines` después de esto
+    # (medido contra MariaDB 12.3.3, no documentación genérica): una vez que
+    # esta tabla tiene un ÍNDICE sobre una columna VIRTUAL, un `ADD COLUMN`
+    # posterior de OTRA columna, aunque pida ALGORITHM=INSTANT explícito,
+    # puede rechazarse con `1845 ALGORITHM=INSTANT is not supported` -- y su
+    # propia sugerencia, `ALGORITHM=INPLACE`, sigue sin alcanzar con
+    # `LOCK=NONE`: `1846 ... Reason: online rebuild with indexed virtual
+    # columns`, pide `LOCK=SHARED`. No es un límite de "demasiadas columnas
+    # instantáneas" (el mismo experimento con una columna común en vez de
+    # `visible` no falla): es específico de tener un índice sobre una
+    # columna generada. Se reprodujo y se resolvió en
+    # jacobs/_subpipeline_contrato_io_test.py::test_jacobs_pipelines_gana_parent_y_depth_aun_si_la_tabla_ya_existia
+    # (Task 1-bis, 2026-09-22) -- ver el comentario de ESE test para el
+    # detalle. No afecta el arranque normal (`visible` se agrega DESPUÉS de
+    # parent_pipeline_id/depth en esta misma lista, así que una base que
+    # arranca de cero o se pone al día los agrega en orden, sin que
+    # `visible` exista todavía cuando le toca a las otras dos).
+    ("jacobs_pipelines", "idx_pipelines_visibles",
+     "CREATE INDEX idx_pipelines_visibles ON jacobs_pipelines "
+     "(user_id, tenant_id, visible, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
@@ -996,21 +1031,21 @@ _INDICES: list[tuple[str, str, str, bool]] = [
 # lecturas y escrituras NUEVAS sobre la tabla se encolan detras de el. Cada
 # DDL acotado paga SU PROPIA espera de hasta 30 s, y todos corren uno detras
 # de otro en la MISMA sesion de `init_tables()` -- el peor caso es la SUMA,
-# no 30 s fijos. Hoy hay CUATRO indices acotados en `_INDICES`
-# (idx_jacobs_pipelines_duenio, idx_pipelines_descartados e
-# idx_pipelines_ocultos sobre jacobs_pipelines; idx_events_pipeline_tipo
-# sobre jacobs_events): 4 x 30 s = 120 s de Jacobs detenido como peor caso si
-# los cuatro estan bloqueados a la vez, no un dia. Si vence, el indice no se
-# crea (ERROR en el log) y el arranque SIGUE -- la red de seguridad es el
-# test de EXPLAIN de la plataforma en CI, que falla si la consulta que lo
-# necesita no lo usa.
+# no 30 s fijos. Hoy hay CINCO indices acotados en `_INDICES`
+# (idx_jacobs_pipelines_duenio, idx_pipelines_descartados,
+# idx_pipelines_ocultos e idx_pipelines_visibles sobre jacobs_pipelines;
+# idx_events_pipeline_tipo sobre jacobs_events): 5 x 30 s = 150 s de Jacobs
+# detenido como peor caso si los cinco estan bloqueados a la vez, no un dia.
+# Si vence, el indice no se crea (ERROR en el log) y el arranque SIGUE -- la
+# red de seguridad es el test de EXPLAIN de la plataforma en CI, que falla
+# si la consulta que lo necesita no lo usa.
 #
-# Las columnas CONTRATO (status_previo/descartado_por/descartado_at, ver
-# `_agregar_columna_acotada` mas abajo) usan el MISMO limite pero NO son
+# Las columnas CONTRATO (status_previo/descartado_por/descartado_at/visible,
+# ver `_agregar_columna_acotada` mas abajo) usan el MISMO limite pero NO son
 # "solo rendimiento": fallan CERRADO. La primera que vence el MDL aborta
 # `init_tables()` entero con una excepcion -- y como las columnas se agregan
 # ANTES que los indices en esta funcion, ese aborto ni siquiera llega a
-# intentar los 4 indices de arriba (no se suman a los 120 s: el arranque ya
+# intentar los 5 indices de arriba (no se suman a los 150 s: el arranque ya
 # se cayo antes).
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
@@ -1060,6 +1095,14 @@ async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> N
     FALLA CERRADO (fix round 1 de Task 1, revisión 2026-09-22): si la espera
     del metadata lock vence (1205), levanta la excepción y `init_tables()`
     se aborta -- no sigue como si la columna estuviera.
+
+    Task 1-bis (2026-09-22, Ruling 18) suma `visible` a este mismo camino
+    por una razón distinta a las tres de arriba: nadie la ESCRIBE (es
+    GENERATED, la calcula MariaDB de `status` en cada fila), pero
+    jax-platform va a LEERLA para filtrar su listado principal -- si la
+    columna no está, ese filtro rompe igual que un `UPDATE` contra una
+    columna que no existe. El contrato no es "quién escribe", es "algo de
+    afuera depende de que exista"; por eso fail-closed aplica igual.
 
     Antes de levantar la excepción vuelve a mirar `information_schema`: LAS
     MANOS, jax-platform y el Ejecutor llaman a `init_tables()` cada uno al
@@ -1183,6 +1226,61 @@ async def init_tables() -> None:
                     "descartado_por VARCHAR(50) NULL, ALGORITHM=INSTANT", True),
                 ("descartado_at", "ALTER TABLE jacobs_pipelines ADD COLUMN "
                     "descartado_at DOUBLE NULL, ALGORITHM=INSTANT", True),
+                # Task 1-bis (2026-09-22, Ruling 18 del ledger de
+                # descartar-pipelines): el listado principal de jax-platform
+                # (SQL_PIPELINES_DEL_USUARIO) filtra
+                # "status NOT IN ('discarded','hidden')" -- sin un índice que
+                # cubra ESE filtro, el plan tiene que recorrer el histórico
+                # completo de descartados/ocultos del dueño antes de poder
+                # cortar en el LIMIT (medido: FORCE INDEX
+                # (idx_jacobs_pipelines_duenio) da un range scan de todo el
+                # tenant cuando el LIMIT nunca se satisface con las filas
+                # vivas -- 4,2-4,4 ms con 5000 descartados y 3 vivos, ver
+                # docs/carga-sql-pipelines-del-usuario-indice-2026-09-22.md
+                # en jax-platform). `visible` materializa ese filtro en una
+                # columna propia para que idx_pipelines_visibles (abajo) la
+                # use como PREFIJO del índice, antes de created_at: el motor
+                # descarta las filas no-visibles POR EL ÍNDICE, sin tocar la
+                # tabla, y corta apenas junta el LIMIT de vivas -- el costo
+                # deja de depender de cuántas descartadas tenga el dueño.
+                #
+                # VIRTUAL, no STORED -- evidencia contra ESTA MariaDB
+                # (12.3.3, jax_memory_test, medida antes de escribir esta
+                # línea, no de la documentación genérica):
+                #   - `ALTER TABLE jacobs_pipelines ADD COLUMN x TINYINT(1)
+                #      GENERATED ALWAYS AS (...) VIRTUAL, ALGORITHM=INSTANT`
+                #      -- OK, sin error (metadata-only, no copia la tabla:
+                #      una VIRTUAL no ocupa espacio en la fila, así que
+                #      agregarla no tiene nada que reescribir).
+                #   - La MISMA expresión con STORED (que SÍ hay que
+                #     calcular y guardar por fila) y ALGORITHM=INSTANT:
+                #     `OperationalError: (1845, 'ALGORITHM=INSTANT is not
+                #     supported for this operation. Try ALGORITHM=COPY')`.
+                #     Con ALGORITHM=INPLACE en vez de INSTANT: el MISMO
+                #     1845, pidiendo COPY igual -- STORED no tiene un
+                #     camino sin copiar la tabla completa en esta versión.
+                #   - Una columna VIRTUAL SÍ admite un índice secundario
+                #     normal (`CREATE INDEX ... (columna_virtual)` -- OK,
+                #     sin error) e incluso admite ALGORITHM=INPLACE,
+                #     LOCK=NONE en el propio ADD COLUMN -- confirmado, no
+                #     asumido, porque una VIRTUAL sin índice sería inútil
+                #     acá: el índice de abajo la necesita como columna real
+                #     para poder ordenar por ella.
+                # Con `jacobs_pipelines` creciendo sin techo (el histórico
+                # de descartados "van a ser muchos en el tiempo", spec
+                # §4), STORED habría significado un ALGORITHM=COPY sobre
+                # toda la tabla en producción -- exactamente lo que
+                # idx_jacobs_pipelines_duenio (T6-6) y el resto de esta
+                # lista evitan a propósito. CONTRATO, no aceleración (como
+                # las tres columnas de arriba): jax-platform va a depender
+                # de que esta columna exista y tenga el valor correcto, así
+                # que su ALTER va acotado Y fail-closed
+                # (`_agregar_columna_acotada`), no fail-soft como un
+                # índice.
+                ("visible", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "visible TINYINT(1) GENERATED ALWAYS AS "
+                    "(status NOT IN ('discarded','hidden')) VIRTUAL, "
+                    "ALGORITHM=INSTANT", True),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "

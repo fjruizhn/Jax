@@ -11,7 +11,22 @@ no-terminales). Acá se agrega la prueba de comportamiento real: un pipeline
 `discarded` y uno `hidden`, los dos con `updated_at`/`created_at` MUY viejos
 (muy por encima de cualquier umbral del reaper), sobreviven a un barrido
 REAL de `reaper.reap_orphaned_pipelines()` contra la base de TEST -- no un
-mock del barrido, la función que corre en producción."""
+mock del barrido, la función que corre en producción.
+
+Task 1-bis (2026-09-22, Ruling 18): `visible` -- columna GENERATED VIRTUAL
+(1 si status NOT IN ('discarded','hidden'), 0 si no) -- e
+idx_pipelines_visibles (user_id, tenant_id, visible, created_at). El
+listado principal de jax-platform hoy paga un costo LINEAL con el
+histórico de descartados de un dueño (medido en jax-platform,
+docs/carga-sql-pipelines-del-usuario-indice-2026-09-22.md: forma extrema,
+4,2-4,4 ms con 5000 descartados y 3 vivos, recorriendo el tenant casi
+completo antes de poder cortar en el LIMIT) -- este índice deja el filtro
+DENTRO del índice, así que el costo queda acotado por el LIMIT sin
+importar cuántas filas descartadas tenga el dueño. Ver
+VisibleSigueAlEstadoDBTest (el valor de la columna sigue a `status`, en
+creación y en cada transición) y CostoAcotadoPorVisibleDBTest (EXPLAIN +
+contadores `Handler_read%` reales contra dos formas sembradas: la que
+antes pagaba el costo lineal, y un historial largo de filas vivas)."""
 from __future__ import annotations
 
 import json
@@ -78,6 +93,127 @@ class DescarteColumnasEIndicesDBTest(unittest.IsolatedAsyncioTestCase):
             ["user_id", "tenant_id", "status", "descartado_at"],
         )
         self.assertEqual(cols["idx_pipelines_ocultos"], ["status", "descartado_at"])
+
+    # Task 1-bis (2026-09-22, Ruling 18): `visible` -- GENERATED VIRTUAL,
+    # TINYINT(1) -- e idx_pipelines_visibles, en ese orden EXACTO de
+    # columnas (no cualquier orden: un índice con `visible` DESPUÉS de
+    # `created_at` no serviría de nada para el filtro -- el motor sólo
+    # puede usar un prefijo continuo del índice para IGUALDAD antes de
+    # entrar al rango/orden).
+    async def test_columna_visible_generada_existe(self):
+        await store.init_tables()
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SHOW COLUMNS FROM jacobs_pipelines WHERE Field='visible'")
+                (campo, tipo, nulo, clave, default, extra) = await cur.fetchone()
+        self.assertEqual(tipo.lower(), "tinyint(1)")
+        self.assertEqual(extra.upper(), "VIRTUAL GENERATED")
+
+    async def test_indice_visibles_existe_en_orden(self):
+        await store.init_tables()
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SHOW INDEX FROM jacobs_pipelines")
+                filas = await cur.fetchall()
+        por_indice: dict[str, list[tuple[int, str]]] = {}
+        for f in filas:
+            por_indice.setdefault(f[2], []).append((f[3], f[4]))
+        cols = {k: [c for _, c in sorted(v)] for k, v in por_indice.items()}
+        self.assertEqual(
+            cols["idx_pipelines_visibles"],
+            ["user_id", "tenant_id", "visible", "created_at"],
+        )
+
+
+# Task 1-bis (2026-09-22, Ruling 18): los ocho estados VISIBLES del enum
+# (todos menos discarded/hidden) -- partición exhaustiva contra
+# PipelineStatus, mismo criterio que tests/test_creacion_sin_candado_global.py.
+_ESTADOS_VISIBLES = tuple(
+    s for s in PipelineStatus if s not in (PipelineStatus.discarded, PipelineStatus.hidden)
+)
+
+
+class VisibleSigueAlEstadoDBTest(unittest.IsolatedAsyncioTestCase):
+    """`visible` es GENERATED a partir de `status` -- se prueba contra
+    MariaDB real, no contra la expresión en abstracto: la fila se crea con
+    cada `status` del enum y se lee la columna calculada por el motor."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        await store.init_tables()
+        self._pids: list[str] = []
+        self.addAsyncCleanup(self._borrar)
+
+    async def _borrar(self):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                for pid in self._pids:
+                    await cur.execute("DELETE FROM jacobs_events WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+
+    async def _crear(self, status: PipelineStatus) -> str:
+        pid = str(uuid.uuid4())
+        await store.pipeline_create(Pipeline(
+            pipeline_id=pid, name="t-visible", invoked_by="plataforma",
+            mode="autonomous", status=status, user_id="u1", tenant_id="1",
+        ))
+        self._pids.append(pid)
+        return pid
+
+    async def _visible(self, pid: str) -> int:
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT visible FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
+                (v,) = await cur.fetchone()
+                return v
+
+    async def test_visible_es_1_para_cada_estado_visible(self):
+        for status in _ESTADOS_VISIBLES:
+            with self.subTest(status=status):
+                pid = await self._crear(status)
+                self.assertEqual(await self._visible(pid), 1)
+
+    async def test_visible_es_0_para_discarded_y_hidden(self):
+        for status in (PipelineStatus.discarded, PipelineStatus.hidden):
+            with self.subTest(status=status):
+                pid = await self._crear(status)
+                self.assertEqual(await self._visible(pid), 0)
+
+    async def test_visible_cambia_a_0_al_descartar_y_a_1_al_recuperar(self):
+        pid = await self._crear(PipelineStatus.aborted)
+        self.assertEqual(await self._visible(pid), 1)
+        ok = await _transicion(
+            pid, 0, "discard",
+            desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        self.assertTrue(ok)
+        self.assertEqual(await self._visible(pid), 0)
+        ok = await _transicion(
+            pid, 0, "recover",
+            desde=PipelineStatus.discarded, a=PipelineStatus.aborted, user_id="u1")
+        self.assertTrue(ok)
+        self.assertEqual(await self._visible(pid), 1)
+
+    async def test_visible_sigue_en_0_al_ocultar_un_descartado(self):
+        """hide/restore van discarded<->hidden -- las dos puntas de ese ciclo
+        son NO visibles; la propiedad interesante acá es que `visible` NO
+        vuelve a 1 a mitad de camino."""
+        pid = await self._crear(PipelineStatus.aborted)
+        await _transicion(
+            pid, 0, "discard",
+            desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        self.assertEqual(await self._visible(pid), 0)
+        ok = await _transicion(
+            pid, 0, "hide",
+            desde=PipelineStatus.discarded, a=PipelineStatus.hidden, user_id="admin")
+        self.assertTrue(ok)
+        self.assertEqual(await self._visible(pid), 0)
+        ok = await _transicion(
+            pid, 0, "restore",
+            desde=PipelineStatus.hidden, a=PipelineStatus.discarded, user_id="admin")
+        self.assertTrue(ok)
+        self.assertEqual(await self._visible(pid), 0)
 
 
 class ReaperNoTocaDescartadosNiOcultosDBTest(unittest.IsolatedAsyncioTestCase):
@@ -453,3 +589,170 @@ class TransicionDescarteAtomicaDBTest(unittest.IsolatedAsyncioTestCase):
             json.loads(payload_crudo),
             {"user_id": "u1", "desde": "aborted", "a": "discarded"},
         )
+
+
+# Task 1-bis (2026-09-22, Ruling 18): el listado principal de jax-platform
+# (SQL_PIPELINES_DEL_USUARIO) filtra "status NOT IN ('discarded','hidden')".
+# Antes de idx_pipelines_visibles, ese filtro NO estaba en ningún índice de
+# jacobs_pipelines con ese orden -- el plan medido en jax-platform (Ruling
+# 17, docs/carga-sql-pipelines-del-usuario-indice-2026-09-22.md) tenía que
+# recorrer el histórico completo del dueño para descartar filas antes de
+# cortar en el LIMIT (forma extrema: 4,2-4,4 ms con 5000 descartados y 3
+# vivas). Acá se prueba la propiedad DIRECTO contra MariaDB real: el
+# EXPLAIN (la forma del plan) Y los contadores Handler_read (lo que el
+# motor leyó DE VERDAD, no la estimación de `rows`) -- las dos formas
+# sembradas por el controlador.
+_LIMITE = 50
+
+_SQL_VISIBLES = (
+    "SELECT pipeline_id, name, status, created_at, updated_at FROM jacobs_pipelines "
+    "FORCE INDEX (idx_pipelines_visibles) "
+    "WHERE user_id=%s AND tenant_id=%s AND owner_ack_at IS NOT NULL AND visible=1 "
+    "ORDER BY created_at DESC LIMIT %s OFFSET 0"
+)
+
+
+class CostoAcotadoPorVisibleDBTest(unittest.IsolatedAsyncioTestCase):
+    """FORCE INDEX (idx_pipelines_visibles), no `IGNORE INDEX` de la lección
+    de jax-platform (Ruling 17): acá el índice SIEMPRE existe -- lo crea
+    `init_tables()` de este mismo repo en `asyncSetUp` -- así que nombrarlo
+    directo no tiene el riesgo de acoplamiento de deploy que tenía
+    `IGNORE INDEX` contra un índice de OTRO repo. Nombrarlo directo es
+    además lo que hace que la mutación "sin el índice" falle FUERTE (ERROR
+    1176 de MariaDB) en vez de caer en silencio a un plan peor."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        await store.init_tables()
+        self._tenants: list[str] = []
+        self.addAsyncCleanup(self._borrar)
+
+    async def _borrar(self):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                for tenant_id in self._tenants:
+                    await cur.execute(
+                        "DELETE FROM jacobs_pipelines WHERE tenant_id=%s", (tenant_id,))
+            await conn.commit()
+
+    async def _sembrar(self, user_id: str, tenant_id: str, *,
+                        n_no_visibles: int, n_visibles: int, status_no_visible: str) -> None:
+        """`cur.executemany`, no un INSERT por fila -- miles de INSERT
+        individuales tardan minutos (misma lección que
+        docs/carga-sql-pipelines-del-usuario-indice-2026-09-22.md en
+        jax-platform). `ANALYZE TABLE` al final: sin estadísticas frescas el
+        plan puede depender de qué otros tests corrieron antes en la misma
+        base de sesión."""
+        self._tenants.append(tenant_id)
+        base = time.time() - 1_000_000
+        filas = [
+            (str(uuid.uuid4()), "x", "plataforma", "autonomous", status_no_visible,
+             base + i, base + i, user_id, tenant_id, base)
+            for i in range(n_no_visibles)
+        ] + [
+            (str(uuid.uuid4()), "x", "plataforma", "autonomous", "completed",
+             base + n_no_visibles + i, base + n_no_visibles + i, user_id, tenant_id, base)
+            for i in range(n_visibles)
+        ]
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    "INSERT INTO jacobs_pipelines (pipeline_id,name,invoked_by,mode,status,"
+                    "created_at,updated_at,user_id,tenant_id,owner_ack_at) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    filas,
+                )
+                await cur.execute("ANALYZE TABLE jacobs_pipelines")
+            await conn.commit()
+
+    async def _explain_y_handler_read(self, user_id: str, tenant_id: str) -> tuple[dict, dict, list]:
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("EXPLAIN " + _SQL_VISIBLES, (user_id, tenant_id, _LIMITE))
+                cols = [d[0] for d in cur.description]
+                (explain_fila,) = await cur.fetchall()
+                explain = dict(zip(cols, explain_fila))
+
+                await cur.execute("FLUSH STATUS")
+                await cur.execute(_SQL_VISIBLES, (user_id, tenant_id, _LIMITE))
+                filas = await cur.fetchall()
+                await cur.execute("SHOW SESSION STATUS LIKE 'Handler_read%'")
+                handler = {k: int(v) for k, v in await cur.fetchall()}
+        return explain, handler, filas
+
+    async def test_muchos_descartados_el_plan_usa_el_indice_sin_filesort(self):
+        """Forma (b) del controlador: 5000 descartados + 3 vivas. Ésta es la
+        forma que ANTES pagaba el costo lineal (medido en jax-platform:
+        FORCE INDEX (idx_jacobs_pipelines_duenio) da 4,2-4,4 ms recorriendo
+        casi el tenant completo)."""
+        await self._sembrar("userA", "tA-muchos-descartados",
+                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded")
+        explain, _handler, _filas = await self._explain_y_handler_read("userA", "tA-muchos-descartados")
+        self.assertEqual(explain["key"], "idx_pipelines_visibles")
+        self.assertNotEqual(explain["type"], "ALL")
+        extra = (explain["Extra"] or "").lower()
+        self.assertNotIn("filesort", extra)
+        self.assertNotIn("temporary", extra)
+
+    async def test_muchos_descartados_el_motor_no_lee_las_descartadas(self):
+        """La propiedad real (no sólo la clave del plan): con 5000
+        descartadas y 3 vivas, el total de Handler_read tiene que quedar
+        del orden de las 3 vivas -- NO de las 5000 descartadas que
+        `visible=1` deja afuera del rango del índice."""
+        await self._sembrar("userA", "tA-muchos-descartados-2",
+                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded")
+        _explain, handler, filas = await self._explain_y_handler_read("userA", "tA-muchos-descartados-2")
+        self.assertEqual(len(filas), 3)
+        total = sum(handler.values())
+        self.assertLessEqual(
+            total, len(filas) + 10,
+            f"{total} lecturas Handler_read para 3 filas vivas -- huele a que "
+            f"el motor está tocando las 5000 descartadas: {handler}",
+        )
+
+    async def test_historial_largo_el_plan_usa_el_indice_sin_filesort(self):
+        """Forma (a) del controlador: 5000 vivas + 50 descartadas -- un
+        historial largo de filas VISIBLES, no de descartadas. El plan tiene
+        que seguir siendo el mismo índice, sin filesort."""
+        await self._sembrar("userB", "tB-historial-largo",
+                             n_no_visibles=50, n_visibles=5000, status_no_visible="discarded")
+        explain, _handler, _filas = await self._explain_y_handler_read("userB", "tB-historial-largo")
+        self.assertEqual(explain["key"], "idx_pipelines_visibles")
+        self.assertNotEqual(explain["type"], "ALL")
+        extra = (explain["Extra"] or "").lower()
+        self.assertNotIn("filesort", extra)
+        self.assertNotIn("temporary", extra)
+
+    async def test_historial_largo_el_motor_lee_aprox_el_limite_no_las_5000(self):
+        """La propiedad central de Ruling 18: con 5000 filas VISIBLES, el
+        costo del LIMIT no depende de cuántas haya en total -- el
+        `EXPLAIN.rows` estimado para esta forma es ~5000 (la cardinalidad
+        del rango completo de `visible=1` para el tenant), pero el motor
+        CORTA apenas junta el LIMIT -- por eso el número que hay que mirar
+        es Handler_read, no `rows` (el propio pedido del controlador)."""
+        await self._sembrar("userB", "tB-historial-largo-2",
+                             n_no_visibles=50, n_visibles=5000, status_no_visible="discarded")
+        explain, handler, filas = await self._explain_y_handler_read("userB", "tB-historial-largo-2")
+        self.assertEqual(len(filas), _LIMITE)
+        # La propiedad que EXPLAIN.rows por sí solo NO prueba: la estimación
+        # de cardinalidad del rango es del orden de las 5000 visibles del
+        # tenant, muy por encima de lo que el motor termina leyendo de
+        # verdad con el LIMIT.
+        self.assertGreater(int(explain["rows"]), _LIMITE * 5)
+        total = sum(handler.values())
+        self.assertLessEqual(
+            total, _LIMITE + 10,
+            f"{total} lecturas Handler_read para LIMIT={_LIMITE} -- huele a "
+            f"que el motor está leyendo de más de las 5000 vivas: {handler}",
+        )
+
+    async def test_muchos_descartados_lee_bastante_menos_que_el_total_sembrado(self):
+        """Cota independiente de la anterior, contra el TOTAL sembrado (5003
+        filas) en vez de un número fijo -- por si el mecanismo de Handler_read
+        cambiara de forma en una versión futura de MariaDB, esta cota sigue
+        siendo significativa."""
+        await self._sembrar("userA", "tA-muchos-descartados-3",
+                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded")
+        _explain, handler, _filas = await self._explain_y_handler_read("userA", "tA-muchos-descartados-3")
+        total = sum(handler.values())
+        self.assertLess(total, 5003 / 10)

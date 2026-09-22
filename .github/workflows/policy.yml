@@ -4699,8 +4699,50 @@ jobs:
           #   que ninguno de los dos probaba lo que este nuevo sí prueba.
           #   Revertida byte a byte. Verde tras -- 144 passed, 0 failed (143
           #   anteriores + 1 nuevo).
-          grep -qE "^144 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 144 tests CORRIDOS."; exit 1; }
+          # 144 -> 155 (Task 1-bis, descartar-pipelines, 2026-09-22, Ruling
+          #   18): +11 en tests/test_jacobs_descarte_db.py --
+          #   DescarteColumnasEIndicesDBTest (+2):
+          #   test_columna_visible_generada_existe (SHOW COLUMNS: `visible`
+          #   es tinyint(1), Extra='VIRTUAL GENERATED') y
+          #   test_indice_visibles_existe_en_orden (SHOW INDEX:
+          #   idx_pipelines_visibles en el orden EXACTO user_id, tenant_id,
+          #   visible, created_at). VisibleSigueAlEstadoDBTest (+4, clase
+          #   nueva): `visible` es 1 para cada uno de los ocho estados
+          #   visibles del enum (partición exhaustiva contra PipelineStatus,
+          #   con subTest), 0 para discarded y para hidden, cambia a 0 al
+          #   descartar y vuelve a 1 al recuperar (vía
+          #   pipeline_transicion_descarte real), y se queda en 0 en las dos
+          #   puntas del ciclo hide/restore. CostoAcotadoPorVisibleDBTest
+          #   (+5, clase nueva) -- la propiedad central de Ruling 18, contra
+          #   dos formas sembradas con `cur.executemany` (no INSERT por
+          #   fila): (b) 5000 descartados + 3 vivas -- la forma que en
+          #   jax-platform pagaba 4,2-4,4 ms con FORCE INDEX
+          #   (idx_jacobs_pipelines_duenio) recorriendo casi el tenant
+          #   completo -- EXPLAIN usa idx_pipelines_visibles sin filesort
+          #   (test 1) y el total de `Handler_read%` (FLUSH STATUS antes,
+          #   SHOW SESSION STATUS después) queda en el orden de las 3 filas
+          #   vivas, no de las 5000 descartadas (test 2); (a) 5000 vivas +
+          #   50 descartadas -- mismo plan sin filesort (test 3) y el total
+          #   de Handler_read queda acotado por el LIMIT (50) aunque
+          #   `EXPLAIN.rows` estime ~5000 -- la propiedad que `rows` por sí
+          #   solo NO prueba (test 4); y una cota independiente contra el
+          #   total sembrado, no un número fijo (test 5). Vistos en ROJO
+          #   contra el código sin `visible`/idx_pipelines_visibles: SHOW
+          #   COLUMNS no trae 'visible' (KeyError/None en fetchone) y
+          #   `FORCE INDEX (idx_pipelines_visibles)` da ERROR 1176 de
+          #   MariaDB (Key doesn't exist) -- confirmado mutando la base de
+          #   TEST directamente (DROP INDEX), no revirtiendo store.py: con
+          #   el índice creado en el ORDEN equivocado
+          #   (user_id,tenant_id,created_at,visible en vez de
+          #   user_id,tenant_id,visible,created_at) el total de
+          #   Handler_read pasó de 3 a 3004 sobre la misma forma (b) --
+          #   la cota `<= filas+10` del test 2 cae, confirmando que SÍ mide
+          #   lo que dice medir. Verde tras -- 155 passed, 0 failed (144
+          #   anteriores + 11 nuevos). Medido en local (127.0.0.1:3308,
+          #   base de sesión jax_memory_test_auto<pid>), corrida completa
+          #   de los 24 archivos del job: 155 passed, 0 failed.
+          grep -qE "^155 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 155 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

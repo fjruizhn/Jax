@@ -15,6 +15,12 @@ default de MariaDB (86400 s), una transacción larga sobre `jacobs_pipelines`
 en el primer arranque tras el deploy dejaba a Jacobs colgado hasta 24 h, en
 silencio -- cada SELECT/UPDATE nuevo se encolaba detrás del ALTER.
 
+Task 1-bis (2026-09-22, Ruling 18) suma una cuarta CONTRATO al mismo
+mecanismo: `visible`, GENERATED VIRTUAL a partir de `status` -- nadie la
+escribe (la calcula MariaDB por fila), pero jax-platform va a leerla para su
+listado principal, así que el mismo criterio de "algo de afuera depende de
+que exista" aplica igual.
+
 Pruebas puras: un cursor falso, sin DB. La existencia real de las columnas
 en una base vacía la prueba `tests/test_jacobs_descarte_db.py`.
 
@@ -41,12 +47,17 @@ _COLUMNA = "status_previo"
 _DDL = ("ALTER TABLE jacobs_pipelines ADD COLUMN "
         "status_previo VARCHAR(20) NULL, ALGORITHM=INSTANT")
 
-# Las tres columnas CONTRATO del descarte, tal como aparecen literalmente en
-# el `for col, ddl, acotado in [...]` de init_tables() -- ninguna vive en una
+# Las columnas CONTRATO del descarte, tal como aparecen literalmente en el
+# `for col, ddl, acotado in [...]` de init_tables() -- ninguna vive en una
 # lista de módulo (a diferencia de `_INDICES`), así que la forma se vigila
 # sobre el texto fuente, igual criterio que la baranda del reaper
 # (tests/test_jacobs_descarte.py::test_el_reaper_solo_cosecha_no_terminales).
-_COLUMNAS_CONTRATO = ("status_previo", "descartado_por", "descartado_at")
+# `visible` se suma acá (Task 1-bis, 2026-09-22, Ruling 18) -- no la ESCRIBE
+# ninguna transición (es GENERATED, MariaDB la calcula de `status`), pero
+# jax-platform va a LEERLA para su listado principal: mismo criterio de
+# CONTRATO que las otras tres (algo de afuera depende de que exista), así
+# que también va acotada y fail-closed.
+_COLUMNAS_CONTRATO = ("status_previo", "descartado_por", "descartado_at", "visible")
 
 # Columnas viejas: su comportamiento NO debe cambiar (siguen sin acotar).
 _COLUMNAS_VIEJAS_SIN_ACOTAR = (
@@ -158,12 +169,13 @@ def _tuplas_del_loop_de_columnas() -> list[tuple[str, str, bool]]:
 
 
 class FormaDelLoopDeColumnasTest(unittest.TestCase):
-    """Sobre el AST de init_tables(): las tres columnas del descarte van
-    acotadas (acotado=True), las viejas NO cambiaron (acotado=False).
-    Mutación (pedida por el coordinador): sacar el True de cualquiera de las
-    tres columnas del descarte tiene que poner este test en rojo."""
+    """Sobre el AST de init_tables(): las columnas CONTRATO del descarte
+    (incluida `visible`, Task 1-bis) van acotadas (acotado=True), las viejas
+    NO cambiaron (acotado=False). Mutación (pedida por el coordinador): sacar
+    el True de cualquiera de las columnas CONTRATO tiene que poner este test
+    en rojo."""
 
-    def test_las_tres_columnas_del_descarte_van_acotadas(self):
+    def test_las_columnas_contrato_del_descarte_van_acotadas(self):
         por_columna = {col: acotado for col, _ddl, acotado in _tuplas_del_loop_de_columnas()}
         for col in _COLUMNAS_CONTRATO:
             self.assertIn(col, por_columna, f"falta la entrada de {col} en el loop")
