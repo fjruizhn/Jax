@@ -103,39 +103,92 @@ def poner_pausa(ruta: Path, datos: dict) -> bool:
         os.unlink(temporal)
 
 
+def _ruta_patron_temporales(ruta: Path) -> str:
+    return f".{Path(ruta).name}.quitar-tmp-*"
+
+
 def quitar_pausa_si(ruta: Path, *, coincide) -> tuple:
     """Borra la pausa en `ruta` SOLO si `coincide(datos)` es verdadero para su
-    contenido -- NUNCA una pausa ajena (ronda 8, B-1: antes de esto, `aceptar()` de la
-    huella borraba `JAX_EJECUTOR_PAUSA` a ciegas, aunque la hubiera puesto C4 o C5 por
-    otro motivo).
+    contenido -- NUNCA una pausa ajena (ronda 8, B-1) Y NUNCA con una ventana donde la
+    pausa no exista (ronda 9, BLOCK-1/MAJOR-1: la auditoría 7 dio NO-GO porque la
+    versión anterior usaba `os.rename` PRIMERO -- eso saca `ruta` del mundo un
+    instante, y si el proceso muere justo ahí, la pausa desaparece sin que nadie la
+    haya aceptado de verdad).
 
-    Sin carrera: `os.rename` agarra ATÓMICAMENTE lo que HAYA en `ruta` en este
-    instante, sea lo que sea (un solo syscall -- no hay una ventana de "leer y después
-    decidir" sobre el archivo original). Si lo que agarramos no coincide, se repone
-    con `os.link` -- que nunca PISA: si otro proceso ya volvió a poner algo distinto
-    en `ruta` mientras tanto, el link falla (`FileExistsError`) y se descarta la copia
-    en vez de destruir lo nuevo. Devuelve `(se_borro, datos_vistos_o_None)`."""
+    Orden, sin ventana de ausencia:
+    1. `os.link(ruta, tmp)` -- un enlace EXTRA al mismo inodo; `ruta` sigue existiendo
+       tal cual, con su nombre, todo el tiempo. No hay "robo".
+    2. Se lee `tmp` (mismo contenido que `ruta`, mismo inodo).
+    3. Si NO coincide: se borra `tmp` (el enlace extra) y se devuelve False. `ruta`
+       jamás se tocó.
+    4. Si coincide: antes de borrar, se verifica con `os.stat` que `ruta` siga siendo
+       el MISMO inodo que `tmp` (`st_ino` + `st_dev` -- `poner_pausa` nunca pisa una
+       pausa existente con `os.link`, así que mientras el nombre exista nadie puede
+       reemplazar su contenido por otro; la única forma de que cambie es que YA se
+       haya borrado y otra cosa haya tomado su lugar). Si coincide, RECIÉN entonces
+       `os.unlink(ruta)` y después `os.unlink(tmp)`. Si el inodo cambió, no se borra
+       nada -- se avisa devolviendo `(False, datos)`, igual que "no coincide": lo que
+       hay en `ruta` ahora no es lo que vimos.
+
+    MINOR-1: cualquier excepción entre el `link` y el `unlink(ruta)` sale de la
+    función SIN tocar `ruta` -- no hay un `except OSError` (ni ningún otro) que trague
+    el error y siga de largo a borrar; `os.unlink(ruta)` es la última instrucción antes
+    de devolver `True`, con nada arriesgado después.
+
+    Un kill exactamente entre `unlink(ruta)` y `unlink(tmp)` deja un temporal huérfano
+    (`.{nombre}.quitar-tmp-*`) que nunca vuelve a ser la pausa -- `barrer_temporales_
+    huerfanos` lo limpia al arrancar `aceptar` y el vigía. Devuelve
+    `(se_borro, datos_vistos_o_None)`."""
     import secrets
     ruta = Path(ruta)
     tmp = ruta.parent / f".{ruta.name}.quitar-tmp-{os.getpid()}-{secrets.token_hex(4)}"
     try:
-        os.rename(ruta, tmp)
+        os.link(ruta, tmp)
     except FileNotFoundError:
         return False, None
+
     try:
-        datos = json.loads(tmp.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        datos = None
-    if isinstance(datos, dict) and coincide(datos):
-        os.unlink(tmp)
+        try:
+            datos = json.loads(tmp.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            datos = None
+
+        if not (isinstance(datos, dict) and coincide(datos)):
+            return False, datos
+
+        st_tmp = os.stat(tmp)
+        try:
+            st_ruta = os.stat(ruta)
+        except FileNotFoundError:
+            return False, datos  # ya no está -- alguien más la sacó; no hay nada que borrar
+        if (st_ruta.st_ino, st_ruta.st_dev) != (st_tmp.st_ino, st_tmp.st_dev):
+            return False, datos  # cambió de identidad en el medio -- no es la que vimos
+
+        os.unlink(ruta)
         return True, datos
-    try:
-        os.link(tmp, ruta)
-    except FileExistsError:  # alguien más ya volvió a poner algo ahí -- lo suyo manda
-        pass
     finally:
-        os.unlink(tmp)
-    return False, datos
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+
+
+def barrer_temporales_huerfanos(ruta: Path) -> int:
+    """Limpia los `.{nombre}.quitar-tmp-*` que un kill puede haber dejado atrás entre
+    el `unlink(ruta)` y el `unlink(tmp)` de `quitar_pausa_si` (ronda 9) -- SOLO
+    temporales, nunca `ruta` misma (no la toca ni la nombra). Se llama al arrancar
+    `aceptar` y el vigía. Devuelve cuántos se borraron; ausente el directorio, o sin
+    nada que barrer, no falla."""
+    import glob
+    ruta = Path(ruta)
+    borrados = 0
+    for candidato in glob.glob(str(ruta.parent / _ruta_patron_temporales(ruta))):
+        try:
+            os.unlink(candidato)
+            borrados += 1
+        except FileNotFoundError:
+            pass
+    return borrados
 
 
 def latir(ruta: Path) -> None:
