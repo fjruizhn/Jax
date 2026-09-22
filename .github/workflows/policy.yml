@@ -3309,8 +3309,25 @@ jobs:
           #   verificado con los 10 separadores + encabezado-con-texto-
           #   detrás; el caso sin separador alguno queda señalado para que
           #   Fernando/el coordinador decida si el diseño debe ampliarse.
-          grep -qE "^2396 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2396 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2396 -> 2388 (feat/sobre-fuente-no-confiable, ronda 5, ruling de
+          #   diseño sobre la NOTA de arriba): -8, puros. El encabezado
+          #   "### system:" se detecta en CUALQUIER posición, no sólo al
+          #   inicio de línea -- se saca `_INICIO_DE_LINEA` (sin requisito
+          #   de posición no tiene nada que distinguir) y la indentación
+          #   `[ \t]*` delante del '#'. Sin límite de palabra antes de los
+          #   '#', con evidencia: un `(?<!\w)` deja pasar el encabezado tras
+          #   un salto de línea ESCAPADO en JSON (barra + 'n', y la 'n' es
+          #   \w), y en los corpus medidos no evitaba ningún falso positivo.
+          #   -11 tests: los que probaban la DETECCIÓN tras cada separador
+          #   de splitlines() (LF, CR, CRLF, VT, FF, FS, GS, RS, NEL, LS,
+          #   PS) -- ya no hay código que dependa del separador. +3 tests:
+          #   encabezado en medio de la línea, tras salto escapado en JSON,
+          #   y pegado a una palabra; los 3 vistos ROJOS contra el código de
+          #   db14703. _escape_attr no se tocó. Delta medido con `git
+          #   archive` de ESTE MISMO commit: 54+26=80 tests en los dos
+          #   archivos contra 62+26=88 en la ronda 4. "17 skipped" no cambia.
+          grep -qE "^2388 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2388 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
