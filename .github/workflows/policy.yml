@@ -3849,8 +3849,52 @@ jobs:
           #   worktree): 2651 (wrapped) + 12 sueltas (4 `test_bwrap_real_*` + 8 de setfacl real en
           #   test_ejecutor_preparar_directorio_misiones.py, mismas que ronda 8, confirmadas
           #   pasando sueltas de nuevo) = 2663.
-          grep -qE "^2663 passed, 42 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2663 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 12 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 8 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
+          # 2663 -> 2674, 42 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 10 --
+          #   ÚLTIMA de esta rama --, auditoría adversarial, 2026-09-22 -- GO CONDICIONADO de la
+          #   auditoría 8, ya sin BLOCK). MAJOR (concurrencia): `quitar_pausa_si` (ronda 9) cierra
+          #   la ventana DENTRO de un proceso, pero no entre DOS -- reproducido: B pasa su propio
+          #   chequeo de inodo, A (otro proceso) borra la pausa, C5 pausa de nuevo, y B -- que ya
+          #   había pasado SU chequeo antes de que A borrara -- termina haciendo `unlink` sobre lo
+          #   que hay AHORA (la pausa nueva de C5), no sobre lo que vio. Nuevo `pausa.candado`:
+          #   `flock` exclusivo y bloqueante sobre `.{nombre}.candado`, en el mismo directorio.
+          #   Envuelve TODO el cuerpo de `aceptar()` desde el chequeo de estado hasta el final
+          #   (extraído a una función interna `_cuerpo()`) y TODO `barrer_temporales_huerfanos`
+          #   (candado propio, adentro de la función) -- el MISMO candado para los dos, así nunca
+          #   hay dos `quitar_pausa_si` a la vez ni un barrido cruzándose con uno en curso.
+          #   `poner_pausa` NO se tocó -- C5 y la huella siguen pausando sin candado (ya era no
+          #   destructivo por diseño, `os.link`). Test con DOS PROCESOS REALES
+          #   (`multiprocessing`, contexto `fork`) que reproduce el escenario exacto -- B se queda
+          #   esperando justo antes de su `unlink` (un `os.unlink` interceptado dentro del propio
+          #   proceso hijo), A queda BLOQUEADO tratando de adquirir el candado mientras B lo
+          #   sostiene (confirmado: `a.is_alive()` sigue vivo tras 1s), C5 no puede pausar todavía
+          #   (`poner_pausa` da `False`, la original sigue ahí), se libera a B, A recién ENTONCES
+          #   avanza y no encuentra nada que borrar, y sólo con los dos terminados C5 pausa de
+          #   verdad y sobrevive intacta. Verificado FALLANDO contra el código sin el candado
+          #   (revertido a mano, corrido, restaurado): sin él, A corre de inmediato -- ni bloquea
+          #   ni espera -- y se queda con la pausa ORIGINAL antes de que B llegue a actuar,
+          #   exactamente el síntoma que el candado cierra.
+          #   MINOR: un `FileNotFoundError` en el `unlink(ruta)` de `quitar_pausa_si` (alguien más
+          #   ajeno ya la sacó justo en el medio) ya no escapa como traceback -- se atrapa,
+          #   devuelve `(False, datos)`. Orden revisado y documentado en `aceptar()`: la marca y
+          #   el registro se escriben ANTES de tocar la pausa a propósito -- aceptar la huella es
+          #   el acto autoritativo, ya válido y persistido; la pausa es un efecto colateral de
+          #   conveniencia, y si ESE paso revienta (con lo que sea, no sólo `FileNotFoundError`),
+          #   se atrapa con `except Exception`, se reporta `codigo=pausa_no_verificable`, y
+          #   `aceptar` sigue hasta el final igual -- nunca deja la marca escrita con un traceback
+          #   crudo encima. `aceptar` ya NUNCA queda mudo sobre el estado de la pausa: los tres
+          #   casos (`pausa_propia_borrada`, `pausa_de_otro_origen`, `sin_pausa_que_quitar`) se
+          #   dicen siempre, antes de `huella_aceptada=true`. El barrido ahora usa `os.lstat` +
+          #   `stat.S_ISREG` -- ignora lo que no sea un archivo regular (un directorio con el
+          #   nombre de un temporal ya no revienta con `IsADirectoryError`) -- y `glob.escape()`
+          #   sobre el nombre de la pausa, para que un nombre con `[`/`]`/`*`/`?` no haga
+          #   matchear el patrón de más ni de menos.
+          #   +11 tests netos: +7 en test_ejecutor_contratos_pausa.py (3 MINOR + 4 candado) y +4
+          #   en test_ejecutor_huella_aceptar.py (3 MINOR + el test de la carrera real). Medido
+          #   dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del worktree): 2662
+          #   (wrapped) + 12 sueltas (mismas 4 `test_bwrap_real_*` + 8 de setfacl real, sin
+          #   cambio de ronda 9, confirmadas pasando sueltas de nuevo) = 2674.
+          grep -qE "^2674 passed, 42 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2674 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 12 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 8 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
