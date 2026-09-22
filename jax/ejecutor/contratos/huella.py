@@ -345,41 +345,73 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
         salida(f"codigo=huella_no_encontrada host={host} mision_id={mision_id}")
         return 2
 
-    estados_aceptables = (REPORTADA, ABIERTA) if sin_medir else (REPORTADA,)
-    if marca.estado not in estados_aceptables:
-        salida(f"codigo=huella_no_reportada host={host} mision_id={mision_id} estado={marca.estado}")
-        return 2
+    async def _cuerpo() -> int:
+        # MAJOR (ronda 10, auditoría 8): TODO esto -- desde el chequeo de estado hasta
+        # el final -- corre bajo el candado de la pausa (si hay una configurada). Sin
+        # eso, dos `aceptar()` concurrentes (o uno y un barrido) pueden interleavear su
+        # propio chequeo-de-inodo con el `unlink` del otro: B pasa el chequeo, A borra,
+        # C5 pausa de nuevo, y B -- que ya había pasado SU chequeo -- termina borrando
+        # lo que hay AHORA (la pausa nueva de C5), no lo que vio. Ver `pausa.candado`.
+        estados_aceptables = (REPORTADA, ABIERTA) if sin_medir else (REPORTADA,)
+        if marca.estado not in estados_aceptables:
+            salida(f"codigo=huella_no_reportada host={host} mision_id={mision_id} estado={marca.estado}")
+            return 2
 
-    salida(f"--- diff de {host} ({mision_id}), estado={marca.estado} ---")
-    for linea in marca.diff:
-        salida(linea)
-    salida("--- fin diff ---")
+        salida(f"--- diff de {host} ({mision_id}), estado={marca.estado} ---")
+        for linea in marca.diff:
+            salida(linea)
+        salida("--- fin diff ---")
 
-    if sin_medir:
-        nueva_huella = marca.huella
-    else:
-        nueva_huella = await tomar(host)
+        if sin_medir:
+            nueva_huella = marca.huella
+        else:
+            nueva_huella = await tomar(host)
 
-    momento = ahora() if ahora is not None else datetime.now(timezone.utc).isoformat()
-    registrar(registro_ruta, host=host, mision_id=mision_id, aceptado_por=aceptado_por,
-             diff=marca.diff, sin_medir=sin_medir, motivo=motivo,
-             identidad_declarada_por=identidad_declarada_por)
-    escribir_marca(ruta, Marca(huella=nueva_huella, estado=ABIERTA, aceptada_por=aceptado_por,
-                               aceptada_en=momento))
+        momento = ahora() if ahora is not None else datetime.now(timezone.utc).isoformat()
+        registrar(registro_ruta, host=host, mision_id=mision_id, aceptado_por=aceptado_por,
+                 diff=marca.diff, sin_medir=sin_medir, motivo=motivo,
+                 identidad_declarada_por=identidad_declarada_por)
+        escribir_marca(ruta, Marca(huella=nueva_huella, estado=ABIERTA, aceptada_por=aceptado_por,
+                                   aceptada_en=momento))
+        if pausa_ruta is not None:
+            # B-1 (ronda 8): NUNCA levantar una pausa ajena -- sólo la de ESTA huella
+            # (origen=huella, mismo host, misma mision_id). Si C4/C5 pausaron por su
+            # cuenta (o la huella de OTRO host/misión), se deja intacta: la huella ya
+            # se aceptó, pero el Ejecutor sigue pausado por lo que sea que puso esa
+            # otra pausa -- avisa con `codigo=pausa_de_otro_origen`, no falla.
+            #
+            # MINOR (ronda 10): para acá la marca y el registro YA se escribieron -- la
+            # aceptación de la huella en sí es un hecho válido, independiente de que
+            # este paso (un efecto colateral de conveniencia, no la parte autoritativa)
+            # salga bien. Por eso el orden es éste -- marca/registro primero, pausa
+            # después -- y por eso cualquier excepción de acá NUNCA puede escapar como
+            # traceback crudo dejando la marca ya escrita y el mensaje final sin decir
+            # nada: se atrapa, se reporta con un código claro, y `aceptar` sigue hasta
+            # el final igual.
+            try:
+                borro, vista = pausa.quitar_pausa_si(
+                    pausa_ruta, coincide=lambda d: (d.get("origen") == "huella" and d.get("host") == host
+                                                    and d.get("mision_id") == mision_id))
+            except Exception as exc:
+                salida(f"codigo=pausa_no_verificable tipo={type(exc).__name__} detalle=\"{exc}\"")
+            else:
+                # Nunca mudo (ronda 10): SIEMPRE dice qué pasó con la pausa, en los
+                # tres casos -- se borró la propia, sigue puesta y es de otro origen, o
+                # no había ninguna que quitar.
+                if borro:
+                    salida(f"codigo=pausa_propia_borrada host={host} mision_id={mision_id}")
+                elif vista is not None:
+                    salida(f"codigo=pausa_de_otro_origen origen={vista.get('origen')} "
+                          f"motivo={vista.get('motivo')} host_de_la_pausa={vista.get('host')}")
+                else:
+                    salida("codigo=sin_pausa_que_quitar")
+        salida(f"huella_aceptada=true host={host} mision_id={mision_id} sin_medir={sin_medir}")
+        return 0
+
     if pausa_ruta is not None:
-        # B-1 (ronda 8): NUNCA levantar una pausa ajena -- sólo la de ESTA huella
-        # (origen=huella, mismo host, misma mision_id). Si C4/C5 pausaron por su
-        # cuenta (o la huella de OTRO host/misión), se deja intacta: la huella ya se
-        # aceptó, pero el Ejecutor sigue pausado por lo que sea que puso esa otra
-        # pausa -- avisa con `codigo=pausa_de_otro_origen`, no falla.
-        borro, vista = pausa.quitar_pausa_si(
-            pausa_ruta, coincide=lambda d: (d.get("origen") == "huella" and d.get("host") == host
-                                            and d.get("mision_id") == mision_id))
-        if not borro and vista is not None:
-            salida(f"codigo=pausa_de_otro_origen origen={vista.get('origen')} "
-                  f"motivo={vista.get('motivo')} host_de_la_pausa={vista.get('host')}")
-    salida(f"huella_aceptada=true host={host} mision_id={mision_id} sin_medir={sin_medir}")
-    return 0
+        with pausa.candado(pausa_ruta):
+            return await _cuerpo()
+    return await _cuerpo()
 
 
 def _resolver_identidad_invocante(env) -> tuple[int, str, str]:

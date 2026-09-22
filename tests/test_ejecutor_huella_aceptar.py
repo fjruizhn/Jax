@@ -520,3 +520,216 @@ def test_aceptar_barre_temporales_huerfanos_de_la_pausa_al_arrancar_ronda9(tmp_p
     assert rc == 0
     assert not huerfano.exists()
     assert not pausa_ruta.exists()  # la propia sí se borró -- coincide origen/host/mision_id
+
+
+# --- ronda 10, MINOR: nunca un huella_aceptada=true mudo sobre el estado de la pausa --
+
+def test_aceptar_dice_sin_pausa_que_quitar_cuando_no_habia_ninguna(tmp_path):
+    """MINOR (ronda 10): sin pausa puesta (`vista is None`), antes `aceptar` no decía
+    NADA sobre eso -- ahora tiene que avisar explícitamente, nunca quedarse mudo antes
+    de `huella_aceptada=true`."""
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"  # no existe -- nadie pausó nada
+
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta, salida=salidas.append))
+    assert rc == 0
+    assert any("sin_pausa_que_quitar" in l for l in salidas)
+
+
+def test_aceptar_dice_pausa_propia_borrada_cuando_la_borra(tmp_path):
+    """MINOR (ronda 10): cuando SÍ borra su propia pausa, lo dice explícitamente (antes
+    sólo había mensaje en los casos de "otro origen" o silencio)."""
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "host": "atemai", "mision_id": MISION_ID})
+
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta, salida=salidas.append))
+    assert rc == 0
+    assert any("pausa_propia_borrada" in l for l in salidas)
+
+
+def test_aceptar_no_crashea_si_quitar_pausa_si_explota_con_la_marca_ya_escrita(tmp_path):
+    """MINOR (ronda 10): la marca y el registro YA se escribieron para cuando se llega
+    a tocar la pausa -- si `quitar_pausa_si` revienta con algo inesperado, `aceptar` no
+    puede dejar escapar un traceback crudo (la aceptación de la huella en sí YA es
+    válida y ya quedó persistida; lo único que falló es un efecto colateral). Se
+    reporta con un código claro y sigue."""
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "host": "atemai", "mision_id": MISION_ID})
+
+    ruta_marca = H.ruta_huella(misiones, MISION_ID, "atemai")
+    H.escribir_marca(ruta_marca, H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    def quitar_pausa_si_explota(ruta, *, coincide):
+        raise RuntimeError("boom -- algo inesperado del sistema de archivos")
+
+    import jax.ejecutor.contratos.huella as modulo
+    original = modulo.pausa.quitar_pausa_si
+    modulo.pausa.quitar_pausa_si = quitar_pausa_si_explota
+    try:
+        salidas = []
+        rc = asyncio.run(H.aceptar(
+            misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+            tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta,
+            salida=salidas.append))
+    finally:
+        modulo.pausa.quitar_pausa_si = original
+
+    assert rc == 0  # la huella SÍ se aceptó -- no revienta
+    assert any("pausa_no_verificable" in l for l in salidas)
+    marca = H.leer_marca(ruta_marca)
+    assert marca.estado == H.ABIERTA  # la marca quedó escrita igual
+    assert any("huella_aceptada=true" in l for l in salidas)  # y llega hasta el final
+
+
+# --- ronda 10, MAJOR: candado real entre procesos, reproduce el escenario de la
+# auditoría 8 -- "B pasa el chequeo de inode, A borra, C5 pone su pausa y B hace
+# unlink". Con el candado, la pausa de C5 sobrevive. -----------------------------------
+
+def _tarea_aceptar_inmediata(misiones_str, mision_id, host, registro_str, pausa_str, resultado_dict):
+    """Proceso A: acepta sin demora -- si la pausa original sigue en su lugar cuando
+    le toca el turno, la borra de inmediato."""
+    import asyncio
+    from pathlib import Path
+    from jax.ejecutor.contratos import huella as _H
+
+    async def tomar_falso(h):
+        return _H.huella_desde_salida(h, b"abc  /etc/sudoers\n")
+
+    rc = asyncio.run(_H.aceptar(
+        misiones=Path(misiones_str), mision_id=mision_id, host=host, aceptado_por="fruiz",
+        sin_medir=True, motivo="proceso A",
+        tomar_huella_actual=tomar_falso, registro_ruta=Path(registro_str), pausa_ruta=Path(pausa_str)))
+    resultado_dict["a_rc"] = rc
+
+
+def _tarea_aceptar_con_demora_antes_del_unlink(misiones_str, mision_id, host, registro_str, pausa_str,
+                                                b_reviso_evt, puede_borrar_evt, resultado_dict):
+    """Proceso B: llega a pasar su propio chequeo de inodo (dentro de
+    `quitar_pausa_si`, vía `aceptar`) y se queda esperando justo ANTES de llamar
+    `unlink(ruta)` -- reproduce la ventana que describe la auditoría 8."""
+    import asyncio
+    import os as _os
+    from pathlib import Path
+    from jax.ejecutor.contratos import huella as _H
+
+    ruta_pausa = Path(pausa_str)
+    real_unlink = _os.unlink
+
+    def unlink_con_demora(path, *a, **kw):
+        if str(path) == str(ruta_pausa):
+            b_reviso_evt.set()
+            puede_borrar_evt.wait(timeout=10)
+        return real_unlink(path, *a, **kw)
+
+    _os.unlink = unlink_con_demora
+
+    async def tomar_falso(h):
+        return _H.huella_desde_salida(h, b"abc  /etc/sudoers\n")
+
+    rc = asyncio.run(_H.aceptar(
+        misiones=Path(misiones_str), mision_id=mision_id, host=host, aceptado_por="fruiz",
+        sin_medir=True, motivo="proceso B",
+        tomar_huella_actual=tomar_falso, registro_ruta=Path(registro_str), pausa_ruta=Path(pausa_str)))
+    resultado_dict["b_rc"] = rc
+
+
+def test_race_real_c5_pone_pausa_mientras_dos_aceptar_compiten_sobrevive_con_candado(tmp_path):
+    """MAJOR (ronda 10, auditoría 8): reproduce con DOS PROCESOS REALES el escenario
+    exacto -- B pasa el chequeo de inodo, A borra la pausa original, C5 pone una pausa
+    NUEVA, y B (que ya había pasado su chequeo) intenta hacer unlink. Con el candado
+    (ya aplicado dentro de `aceptar()`, ronda 10), B no puede ni EMPEZAR su chequeo
+    hasta que A termine del todo -- para cuando B actúa, ve el estado real, y para
+    cuando C5 consigue pausar de nuevo, tanto A como B ya terminaron: su pausa nunca
+    corre riesgo."""
+    import multiprocessing as mp
+    from jax.ejecutor.contratos import pausa as P
+
+    misiones = tmp_path / "misiones"
+    pausa_ruta = tmp_path / "PAUSA"
+    registro_a = tmp_path / "registro-a.jsonl"
+    registro_b = tmp_path / "registro-b.jsonl"
+    host = "atemai"
+
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "host": host, "mision_id": MISION_ID})
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, host),
+                     H.Marca(huella=_huella(host), estado=H.REPORTADA, diff=("algo cambió",)))
+
+    ctx = mp.get_context("fork")
+    manager = ctx.Manager()
+    resultado = manager.dict()
+    b_reviso = ctx.Event()
+    puede_borrar = ctx.Event()
+
+    b = ctx.Process(target=_tarea_aceptar_con_demora_antes_del_unlink,
+                    args=(str(misiones), MISION_ID, host, str(registro_b), str(pausa_ruta),
+                          b_reviso, puede_borrar, resultado))
+    b.start()
+    try:
+        assert b_reviso.wait(timeout=10), "B no llegó a su chequeo de inodo"
+
+        # Mientras B sostiene el candado (esperando adentro), A tiene que quedar
+        # BLOQUEADO tratando de adquirirlo -- no puede ni empezar su propio chequeo.
+        a = ctx.Process(target=_tarea_aceptar_inmediata,
+                        args=(str(misiones), MISION_ID, host, str(registro_a), str(pausa_ruta), resultado))
+        a.start()
+        try:
+            a.join(timeout=1)
+            assert a.is_alive(), "A no debería poder avanzar mientras B sostiene el candado"
+
+            # C5 tampoco puede pausar todavía: la pausa original SIGUE ahí (B no la
+            # borró -- está esperando), y poner_pausa nunca pisa una existente.
+            assert P.poner_pausa(pausa_ruta, {"origen": "c5", "motivo": "demasiado_pronto"}) is False
+
+            # Se libera a B: borra la pausa ORIGINAL (la que de verdad vio), termina,
+            # suelta el candado.
+            puede_borrar.set()
+            b.join(timeout=10)
+            assert b.exitcode == 0
+            assert resultado.get("b_rc") == 0
+
+            # Ahora A, que estaba bloqueado, puede avanzar -- su propio chequeo ve que
+            # ya no hay nada que borrar.
+            a.join(timeout=10)
+            assert a.exitcode == 0
+            assert resultado.get("a_rc") == 0
+        finally:
+            if a.is_alive():
+                a.terminate()
+                a.join(timeout=5)
+
+        # Recién AHORA, con A y B los dos terminados, C5 pausa de verdad.
+        assert P.poner_pausa(pausa_ruta, {"origen": "c5", "motivo": "ya_libre"}) is True
+        contenido = json.loads(pausa_ruta.read_text())
+        assert contenido["origen"] == "c5"
+        assert contenido["motivo"] == "ya_libre"
+    finally:
+        puede_borrar.set()
+        if b.is_alive():
+            b.terminate()
+            b.join(timeout=5)
