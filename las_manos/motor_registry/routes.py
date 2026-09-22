@@ -183,7 +183,7 @@ def _ingest_governed_worker_completion(task: asyncio.Task, *, execution_id: str,
     try:
         _B7_WORKER_RESULT_INGESTOR.ingest_governed_completion(
             view.result_path, execution_id=execution_id, job_id=job_id)
-    except Exception:
+    except Exception:  # fail-soft: post-completion evidence cannot resurrect or alter a completed job.
         logger.exception("No se pudo ingerir resultado B7 del job gobernado %s", job_id)
 
 

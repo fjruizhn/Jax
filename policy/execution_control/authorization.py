@@ -150,7 +150,7 @@ def build_execution_request(record: DecisionRecord, *, authenticated_caller_id: 
         _record_unverified_decision(record); raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
     if _B7_DECISION_RECORDER is not None:
         try: _B7_DECISION_RECORDER.record_decision_provenance(decision_id=record.decision_id)
-        except Exception: pass  # evidence cannot make an unverified request eligible
+        except Exception: pass  # fail-soft: evidence cannot make an unverified request eligible
     return _issued(_issued_requests, ExecutionRequest("1.0", "JAX_EXECUTION_REQUEST", record.decision_id,
         record.decision_record_hash, capability, authenticated_caller_id, motor, environment,
         target_kind, target_value, prompt, context, timeout_seconds, sandbox_required,

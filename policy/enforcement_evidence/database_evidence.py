@@ -17,9 +17,9 @@ def inspect_database_control(connection_factory, control_id, control_version, *,
  if not isinstance(observed_at_utc, datetime) or observed_at_utc.tzinfo is None or observed_at_utc.astimezone(timezone.utc) > datetime.now(timezone.utc): raise DatabaseObservationMismatchError("observed_at_utc invalid")
  con=connection_factory()
  try:
-  cur=con.cursor(); cur.execute("SELECT VERSION(), DATABASE(), @@server_uuid"); server_version,database_name,server_uuid=cur.fetchone()
+  cur=con.cursor(); cur.execute("SELECT VERSION(), DATABASE(), @@server_id, @@hostname"); server_version,database_name,server_id,hostname=cur.fetchone()
   # This is derived from the inspected endpoint, not a request label.
-  database_scope_id="dbscope:sha256:"+hashlib.sha256((str(deployment_id)+"|"+str(server_uuid)+"|"+str(database_name)).encode()).hexdigest()
+  database_scope_id="dbscope:sha256:"+hashlib.sha256((str(deployment_id)+"|"+str(server_id)+"|"+str(hostname)+"|"+str(database_name)).encode()).hexdigest()
   cur.execute("SELECT index_name FROM information_schema.statistics WHERE table_schema='jax_execution' AND table_name='execution_records' AND column_name='decision_id' AND non_unique=0")
   unique_indexes=tuple(sorted(r[0] for r in cur.fetchall()))
   if not unique_indexes: raise DatabaseObservationMismatchError("unique decision_id absent")
@@ -33,7 +33,7 @@ def inspect_database_control(connection_factory, control_id, control_version, *,
   triggers=tuple(sorted(tuple(r) for r in cur.fetchall()))
   required={("execution_records","UPDATE"),("execution_records","DELETE"),("execution_events","UPDATE"),("execution_events","DELETE")}
   if not required.issubset({(r[1],r[2]) for r in triggers}): raise DatabaseObservationMismatchError("execution immutability triggers absent")
-  return {"database_scope_id":database_scope_id,"observed_at_utc":observed_at_utc,"control_id":control_id,"control_version":control_version,"server_version":server_version,"server_uuid":server_uuid,"database_name":database_name,"deployment_id":deployment_id,"execution_records_unique_indexes":unique_indexes,"consumption_unique_indexes":consumption_indexes,"tables":tables,"triggers":triggers,"installed":True}
+  return {"database_scope_id":database_scope_id,"observed_at_utc":observed_at_utc,"control_id":control_id,"control_version":control_version,"server_version":server_version,"server_id":server_id,"hostname":hostname,"database_name":database_name,"deployment_id":deployment_id,"execution_records_unique_indexes":unique_indexes,"consumption_unique_indexes":consumption_indexes,"tables":tables,"triggers":triggers,"installed":True}
  finally: con.close()
 
 class DatabaseControlInspector:
