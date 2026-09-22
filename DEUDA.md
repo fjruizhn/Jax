@@ -416,33 +416,6 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
-- **El tripwire de "sondas de medición" confunde `jax/ejecutor/contratos/contexto.py` con
-  `scripts/ejecutor_fase0/contexto.py` por nombre — HALLADO 2026-09-22 (ronda 2 del contexto
-  del Ejecutor, auditoría adversarial B3/M1), FUERA de ese encargo, sin arreglar.**
-  - **Archivo y función:** `tests/test_payload_max_tokens_literal_tripwire.py::
-    SondasDeMedicionTest::test_las_sondas_declaradas_no_son_codigo_de_servicio`.
-  - **Condición exacta:** el test recorre `jax/`, `jacobs/` y `las_manos/` buscando, por
-    TEXTO literal, `f"import {m}"` / `f"from {m} "` donde `m` es el STEM (sin ruta) de cada
-    sonda declarada en `_SONDAS_DE_MEDICION` — entre ellas `scripts/ejecutor_fase0/
-    contexto.py`. El commit `7d28a99` (ronda 1 de `feat/ejecutor-contexto-y-skills`,
-    2026-09-22) agregó `jax/ejecutor/contratos/contexto.py`, un módulo SIN RELACIÓN con esa
-    sonda que también se llama `contexto` — y el match por stem suelto no distingue los dos:
-    cualquier `from jax.ejecutor.contratos import contexto` (hay tres: `arranque.py`,
-    `cuenta_axioma.py`, y el propio `contexto.py` importándose por nombre en su docstring de
-    módulo) se reporta como si `jax/` importara la sonda de medición de tok/s.
-  - **Consecuencia:** el test sale ROJO — `tests-puros` (el job de CI que lo corre) no puede
-    dar verde tal como está el árbol hoy. Reproducido con `git stash` contra `7d28a99` SIN
-    ningún cambio de la ronda 2: el mismo rojo, así que es de la ronda 1, no de la 2.
-  - **Cómo se descubrió:** al correr la suite completa de `tests-puros` para medir el piso de
-    la aritmética que pide B3/M1 (ver `.github/workflows/policy.yml`, comentario junto al
-    `grep -qE "^2467 passed, 30 skipped"`, con el número verificado A MANO aislando este
-    hallazgo aparte, sin tocar el archivo real).
-  - **Arreglo sugerido, NO aplicado (fuera del encargo de la ronda 2):** calificar el tripwire
-    por RUTA de import (`scripts.ejecutor_fase0.contexto` / `scripts/ejecutor_fase0/contexto`),
-    no por el stem suelto `contexto` — mismo criterio que ya usa para excluir `tests/`.
-  - **De quién es:** ronda 1 de `feat/ejecutor-contexto-y-skills` (commit `7d28a99`), que
-    eligió el nombre `contexto.py` sin correr esta suite completa antes de commitear.
-
 ## Medido — procesamiento de archivos: rendimiento, utilidad, caché y calidad de señal sobre 23 documentos reales (2026-09-21)
 
 **Task 10 de la rama `feat/procesamiento-archivos`** (worktree

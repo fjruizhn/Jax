@@ -246,6 +246,40 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def _ofensores_de_sondas(raiz: Path, arboles: tuple, sondas: dict) -> list[str]:
+    """El escaneo real, en una funcion pura: recibe `raiz`/`arboles`/`sondas` para que
+    un test pueda apuntarlo a un arbol sintetico en tmp_path (auto-verificacion,
+    Principio VII) sin tocar el arbol real del repo."""
+    modulos = {Path(rel).stem for rel in sondas}
+    ofensores = []
+    for arbol_dir in arboles:
+        base = raiz / arbol_dir
+        if not base.is_dir():
+            continue
+        for py in base.rglob("*.py"):
+            if "__pycache__" in py.parts:
+                continue
+            try:
+                texto = py.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for rel in sondas:
+                if rel in texto:
+                    ofensores.append(f"{py.relative_to(raiz)} referencia la ruta {rel}")
+            try:
+                arbol = ast.parse(texto)
+            except SyntaxError:
+                continue
+            for nodo in ast.walk(arbol):
+                if isinstance(nodo, ast.Import):
+                    for alias in nodo.names:
+                        if alias.name in modulos:
+                            ofensores.append(f"{py.relative_to(raiz)} importa {alias.name}")
+                elif isinstance(nodo, ast.ImportFrom) and nodo.level == 0 and nodo.module in modulos:
+                    ofensores.append(f"{py.relative_to(raiz)} importa {nodo.module}")
+    return ofensores
+
+
 class SondasDeMedicionTest(unittest.TestCase):
     """La exclusion de las sondas se GANA, no se declara y ya."""
 
@@ -257,25 +291,84 @@ class SondasDeMedicionTest(unittest.TestCase):
     def test_las_sondas_declaradas_no_son_codigo_de_servicio(self):
         """Ningun modulo de servicio puede importarlas. El dia que una sonda
         entre al camino de produccion, su limite literal SI es el defecto que
-        este tripwire persigue, y esto se pone rojo."""
-        modulos = {Path(rel).stem for rel in _SONDAS_DE_MEDICION}
-        ofensores = []
-        for arbol_dir in ("jax", "jacobs", "las_manos"):
-            base = RAIZ / arbol_dir
-            if not base.is_dir():
-                continue
-            for py in base.rglob("*.py"):
-                if "__pycache__" in py.parts:
-                    continue
-                try:
-                    texto = py.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                for m in modulos:
-                    if f"import {m}" in texto or f"from {m} " in texto or "ejecutor_fase0" in texto:
-                        ofensores.append(f"{py.relative_to(RAIZ)} importa {m}")
+        este tripwire persigue, y esto se pone rojo.
+
+        CORREGIDO 2026-09-22 (auditoria adversarial, ronda 2 de
+        feat/ejecutor-contexto-y-skills -- hallazgo propio de esta rama, no
+        heredado): la version anterior marcaba CUALQUIER `import <stem>` /
+        `from <stem> ` como si fuera la sonda, sin mirar la RUTA del import.
+        `jax/ejecutor/contratos/contexto.py` (agregado por esta misma rama,
+        commit 7d28a99) es un modulo de negocio SIN NINGUNA relacion con
+        `scripts/ejecutor_fase0/contexto.py` (la sonda que mide tok/s): solo
+        comparte el nombre. `from jax.ejecutor.contratos import contexto`
+        contiene, como sufijo literal, el texto "import contexto" -- y el
+        matcher viejo lo marcaba como si `jax/` importara la sonda. Ahora se
+        resuelve el AST real: un `import contexto` SUELTO, o un
+        `from contexto import X` con `level == 0`, son la unica forma en que
+        una sonda cargada por nombre suelto (el patron real: agregar
+        scripts/ejecutor_fase0/ a sys.path y hacer `import <nombre>`, como
+        hacen los `_cargar()` de varios tests de ese directorio) podria
+        colarse en jax/jacobs/las_manos -- una importacion CALIFICADA de otro
+        paquete que TERMINA en el mismo nombre no es eso, y ya no se reporta.
+
+        La carga dinamica por ruta (`importlib.util.spec_from_file_location`)
+        se sigue cazando por texto, pero contra la RUTA DECLARADA completa
+        (la clave de `_SONDAS_DE_MEDICION`, p. ej.
+        "scripts/ejecutor_fase0/contexto.py"), no contra el nombre del
+        directorio solo: el catch-all viejo (`"ejecutor_fase0" in texto`)
+        marcaba CUALQUIER archivo que mencionara "ejecutor_fase0" en un
+        comentario o docstring -- como el propio
+        jax/ejecutor/contratos/contexto.py, que documenta (legitimo,
+        aprobado en la ronda 1) que carga
+        scripts/ejecutor_fase0/generar_claude_md.py, que NO es ninguna de
+        las cuatro sondas de esta lista."""
+        ofensores = _ofensores_de_sondas(RAIZ, ("jax", "jacobs", "las_manos"), _SONDAS_DE_MEDICION)
         self.assertEqual(ofensores, [], "una sonda de medicion entro al codigo de servicio:\n"
                                         + "\n".join(ofensores))
+
+    def test_una_importacion_calificada_con_el_mismo_nombre_de_hoja_no_se_marca(self):
+        """Control NEGATIVO (Principio VII: un freno sin prueba no es freno). El caso
+        real de esta ronda: `jax/ejecutor/contratos/contexto.py` es un modulo propio,
+        sin relacion con la sonda `scripts/ejecutor_fase0/contexto.py` -- solo
+        coincide el nombre de archivo. `from paquete.propio import contexto` (nodo
+        `ImportFrom(module="paquete.propio", ...)`) no tiene que reportarse."""
+        with tempfile.TemporaryDirectory() as tmp:
+            raiz = Path(tmp)
+            (raiz / "jax" / "ejecutor" / "contratos").mkdir(parents=True)
+            (raiz / "jax" / "ejecutor" / "contratos" / "arranque.py").write_text(
+                "from jax.ejecutor.contratos import contexto\n"
+                "from jax.ejecutor.contratos import endpoints\n"
+            )
+            ofensores = _ofensores_de_sondas(raiz, ("jax", "jacobs", "las_manos"), _SONDAS_DE_MEDICION)
+        self.assertEqual(ofensores, [], ofensores)
+
+    def test_una_importacion_suelta_de_la_sonda_si_se_marca(self):
+        """Control POSITIVO: el patrón real que el tripwire tiene que cazar --
+        `import contexto` a secas (el que resultaría de agregar
+        scripts/ejecutor_fase0/ a sys.path, como hacen los `_cargar()` de otros
+        tests de ese directorio, y traerse la sonda por su nombre suelto)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            raiz = Path(tmp)
+            (raiz / "jax").mkdir()
+            (raiz / "jax" / "malo.py").write_text("import contexto\n")
+            ofensores = _ofensores_de_sondas(raiz, ("jax", "jacobs", "las_manos"), _SONDAS_DE_MEDICION)
+        self.assertEqual(ofensores, ["jax/malo.py importa contexto"], ofensores)
+
+    def test_una_carga_dinamica_por_la_ruta_declarada_se_marca(self):
+        """Control POSITIVO: `importlib.util.spec_from_file_location(..., <ruta>)`
+        con la RUTA COMPLETA declarada de la sonda -- el AST no ve nada raro (es un
+        string, no un import), así que esto lo tiene que cazar el chequeo de texto
+        contra `rel`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            raiz = Path(tmp)
+            (raiz / "jax").mkdir()
+            (raiz / "jax" / "malo.py").write_text(
+                'import importlib.util\n'
+                'importlib.util.spec_from_file_location("x", "scripts/ejecutor_fase0/contexto.py")\n'
+            )
+            ofensores = _ofensores_de_sondas(raiz, ("jax", "jacobs", "las_manos"), _SONDAS_DE_MEDICION)
+        self.assertEqual(ofensores, ["jax/malo.py referencia la ruta scripts/ejecutor_fase0/contexto.py"],
+                         ofensores)
 
 
 class NoParseaTest(unittest.TestCase):

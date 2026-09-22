@@ -3558,7 +3558,7 @@ jobs:
           # cada vez -- el número final, más abajo en este mismo archivo, es el
           # verificado de verdad; éste queda como historia de CÓMO se llegó ahí, no
           # como la fuente de verdad del piso vigente.
-          # 2399 -> 2467, 17 -> 30 skipped (feat/ejecutor-contexto-y-skills, ronda 2,
+          # 2399 -> 2470, 17 -> 30 skipped (feat/ejecutor-contexto-y-skills, ronda 2,
           #   auditoría adversarial B3/M1, 2026-09-22). El número NO sale de sumar a
           #   mano: la ronda 1 (commit 7d28a99) ya había agregado tests NUEVOS a
           #   archivos que esta lista YA corría (test_ejecutor_contratos_arranque.py,
@@ -3585,27 +3585,22 @@ jobs:
           #   en particular (no un doble) -- las dejadas explícitamente
           #   `@requiere_constitucion_real` porque verifican algo del archivo real de
           #   ESTA máquina, no de la lógica del generador.
-          # ⚠️ HALLAZGO SIN CERRAR (reportado, NO arreglado en esta ronda -- fuera del
-          # encargo de B3/M1): medido 2026-09-22 que este paso YA está rojo hoy, antes
-          # y después de este commit -- reproducido con `git stash` contra 7d28a99
-          # (ronda 1, sin ninguno de los cambios de esta ronda) con el MISMO resultado.
-          # `tests/test_payload_max_tokens_literal_tripwire.py::SondasDeMedicionTest::
-          # test_las_sondas_declaradas_no_son_codigo_de_servicio` hace un match de texto
-          # ingenuo (`f"import {m}"` / `f"from {m} "`) sobre el STEM de cada sonda
-          # declarada -- y `scripts/ejecutor_fase0/contexto.py` (una sonda de
-          # 2026-09-16, mide tok/s) tiene el MISMO stem que el `jax/ejecutor/contratos/
-          # contexto.py` que la ronda 1 de este PR agregó (2026-09-22): el tripwire NO
-          # distingue los dos módulos "contexto" y marca `cuenta_axioma.py`/
-          # `arranque.py` como si importaran la SONDA, cuando importan el otro. El
-          # número de acá abajo (2467 passed, 30 skipped) es el medido CON ese falso
-          # positivo corregido a mano para aislar el cálculo (un `assertFalse` puesto
-          # aparte, no un cambio al archivo real); hoy, tal como está el árbol, este
-          # paso sale "1 failed, 2466 passed, 30 skipped, ...". Necesita su propio
-          # arreglo (calificar el tripwire por RUTA de import, no por stem suelto),
-          # fuera de este encargo -- hasta entonces, este `grep` NO va a dar verde en
-          # CI, y ES CORRECTO que no dé verde: hay un failed real en el árbol.
-          grep -qE "^2467 passed, 30 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2467 tests CORRIDOS y exactamente 30 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 14 de la constitución host-bound, ver notas arriba). Si el rojo es SondasDeMedicionTest por 'contexto', ver la nota de arriba: hallazgo previo (ronda 1), no de este piso -- se esperaría '1 failed, 2466 passed, 30 skipped' hasta que se arregle aparte."; exit 1; }
+          #   +3 más (tests/test_payload_max_tokens_literal_tripwire.py,
+          #   SondasDeMedicionTest): el falso positivo de la nota de abajo era
+          #   PROPIO de esta rama (`git stash` contra 7d28a99 ya lo reproducía) y se
+          #   ARREGLÓ acá, no se anotó como deuda -- el matcher por stem suelto pasó a
+          #   AST real (`import <sonda>` suelto o `from <sonda> import` con level 0) +
+          #   un chequeo de texto sólo contra la RUTA COMPLETA declarada de cada sonda
+          #   (ya no contra el nombre del directorio solo, que marcaba CUALQUIER
+          #   mención de "ejecutor_fase0" -- incluida la del propio
+          #   jax/ejecutor/contratos/contexto.py explicando, legítimo, que carga
+          #   generar_claude_md.py). +3 tests: control negativo (una importación
+          #   CALIFICADA con el mismo nombre de hoja, el caso real, no se marca) y dos
+          #   controles positivos (un `import contexto` suelto sí se marca; una carga
+          #   dinámica por la ruta completa declarada también) -- sin ellos no se sabe
+          #   si el tripwire corregido sigue cazando algo o si sólo dejó de quejarse.
+          grep -qE "^2470 passed, 30 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2470 tests CORRIDOS y exactamente 30 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 14 de la constitución host-bound, ver notas arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
