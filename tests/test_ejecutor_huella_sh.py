@@ -101,6 +101,33 @@ def test_el_script_usa_binarios_por_ruta_absoluta():
         assert binario in TEXTO, binario
 
 
+def test_el_script_usa_cat_y_rm_por_ruta_absoluta_minor():
+    """MINOR (ronda 6, auditoría adversarial 2026-09-22): `cat`/`rm` iban SIN ruta
+    absoluta -- inconsistente con find/sha256sum/sort, que sí la tienen desde siempre.
+    `$CAT`/`$RM` (definidos como `/usr/bin/cat`/`/usr/bin/rm`) tienen que ser lo único
+    que aparece, nunca un `cat`/`rm` desnudo."""
+    assert "CAT=/usr/bin/cat" in TEXTO
+    assert "RM=/usr/bin/rm" in TEXTO
+    lineas_de_codigo = [l for l in TEXTO.splitlines() if not l.lstrip().startswith("#")]
+    for linea in lineas_de_codigo:
+        if "=/usr/bin/" in linea:
+            continue  # las asignaciones CAT=/usr/bin/cat / RM=/usr/bin/rm mismas
+        assert not re.search(r'(^|[^"$A-Za-z_])cat ', linea), linea
+        assert not re.search(r'(^|[^"$A-Za-z_])rm -f', linea), linea
+
+
+def test_comando_huella_usa_cat_y_rm_por_ruta_absoluta_minor():
+    """Mismo chequeo que arriba, sobre el texto que arma `comando_huella()` -- el
+    mutante que la ronda 6 señaló vivía justo en la asimetría entre los dos."""
+    comando = H.comando_huella("fruiz")
+    lineas_de_codigo = [l for l in comando.splitlines() if not l.lstrip().startswith("#")]
+    for linea in lineas_de_codigo:
+        assert not re.search(r'(^|[^"$A-Za-z_/])cat ', linea), linea
+        assert not re.search(r'(^|[^"$A-Za-z_/])rm -f', linea), linea
+    assert "/usr/bin/cat" in comando
+    assert "/usr/bin/rm -f" in comando
+
+
 def test_el_script_termina_con_sort():
     """Mismo formato que `comando_huella()`: todo se ordena al final -- la comparación
     `cambio()`/`hallazgos()` no debe depender del orden en que el remoto haya listado
@@ -254,6 +281,35 @@ def test_el_guion_y_comando_huella_dan_la_misma_salida_sobre_el_mismo_arbol(tmp_
     assert salida_python.returncode == 0, salida_python.stderr
     assert salida_guion.stdout  # si saliera vacío, la comparación de abajo no probaría nada
     assert salida_guion.stdout == salida_python.stdout
+
+
+@REQUIERE_BWRAP
+def test_el_guion_y_comando_huella_coinciden_con_un_directorio_ilegible_minor(tmp_path):
+    """MINOR (ronda 6, auditoría adversarial 2026-09-22): el test de sincronía de
+    arriba SÓLO corre sobre árboles SANOS -- con un `find` que no falla en ningún
+    lado, la salida es idéntica CON o SIN el chequeo de `$?` (BLOCK-E, ronda 5), así
+    que un mutante que rompiera ESE chequeo únicamente en `_CUERPO_TRAMO_SH` (el texto
+    que de verdad viaja por ssh a producción -- no el guion instalado en cada remota)
+    pasaría desapercibido. Acá se agrega un directorio ILEGIBLE al mismo árbol de
+    prueba -- el único caso donde el chequeo de `$?` cambia la salida -- y se compara
+    la salida del guion real contra la de `comando_huella()` sobre ESE MISMO árbol
+    roto."""
+    binds = _arbol_de_prueba(tmp_path)
+    inaccesible = binds["/etc/sudoers.d"] / "no-entrar"
+    inaccesible.mkdir()
+    inaccesible.chmod(0o000)
+    try:
+        base = _argv_bwrap(binds)
+        salida_guion = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+        comando = H.comando_huella(_ADMIN_DE_PRUEBA)
+        salida_python = subprocess.run(base + ["--", "/bin/sh", "-c", comando], capture_output=True, timeout=30)
+
+        assert salida_guion.returncode == 0, salida_guion.stderr
+        assert salida_python.returncode == 0, salida_python.stderr
+        assert b"E /etc/sudoers.d find_fallo" in salida_guion.stdout  # si esto no aparece, el árbol no está roto de verdad
+        assert salida_guion.stdout == salida_python.stdout
+    finally:
+        inaccesible.chmod(0o755)  # para que tmp_path se pueda limpiar solo
 
 
 @REQUIERE_BWRAP
@@ -428,9 +484,9 @@ def test_el_mutante_que_ignora_el_rc_de_find_muere_block_e(tmp_path):
             r'        echo "E \$ruta find_fallo"\n'
             r'      else\n'
             r'        echo "D \$ruta"\n'
-            r'        cat "\$salida"\n'
+            r'        "\$CAT" "\$salida"\n'
             r'      fi\n'
-            r'      rm -f "\$salida" "\$errd"\n'
+            r'      "\$RM" -f "\$salida" "\$errd"\n'
             r'      ;;\n',
             '    directory)\n'
             '      echo "D $ruta"\n'

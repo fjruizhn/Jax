@@ -96,6 +96,54 @@ def test_aceptar_muestra_el_diff_toma_linea_base_nueva_y_registra(tmp_path):
     assert marca.aceptada_en == "2026-09-22T12:00:00+00:00"
 
 
+def test_aceptar_rechaza_una_medicion_invalida_no_la_toma_como_linea_base_major_i(tmp_path):
+    """MAJOR-I (ronda 6, auditoría adversarial 2026-09-22): `aceptar()` NO llamaba a
+    `huella_valida()` sobre la medición NUEVA -- una remedición rota (una ruta con
+    `E ... find_fallo`, por ejemplo un `find` que falló a mitad de camino) se aceptaba
+    igual como línea base, `estado=ABIERTA`, y la pausa se borraba -- rc=0, sin que
+    nada de eso fuera cierto. Ahora tiene que rechazarla ANTES de escribir nada: no
+    toca la marca, no registra en C3, no borra la pausa, y lo dice con su propio
+    código."""
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    ruta = H.ruta_huella(misiones, MISION_ID, "atemai")
+    vieja = _huella("atemai")
+    H.escribir_marca(ruta, H.Marca(huella=vieja, estado=H.REPORTADA, diff=("algo cambió",)))
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": "atemai", "mision_id": MISION_ID, "detalle": []})
+
+    rota = _huella("atemai", controles=_base_completa().replace(
+        b"D /etc/sudoers.d", b"E /etc/sudoers.d find_fallo"))
+    llamadas = []
+
+    async def tomar_falso(host):
+        llamadas.append(host)
+        return rota
+
+    registrado = {"n": 0}
+
+    def registrar_falso(*a, **kw):
+        registrado["n"] += 1
+        return 1
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registrar=registrar_falso, registro_ruta=registro,
+        pausa_ruta=pausa_ruta, ahora=lambda: "2026-09-22T12:00:00+00:00", salida=salidas.append))
+
+    assert rc == 2
+    assert llamadas == ["atemai"]  # sí llegó a medir -- el rechazo es DESPUÉS de medir
+    assert registrado["n"] == 0  # nunca se registró en C3: no llegó a "aceptar" de verdad
+    assert any("medicion_no_valida" in l for l in salidas), salidas
+
+    marca = H.leer_marca(ruta)
+    assert marca.estado == H.REPORTADA  # SIGUE reportada -- no se sobreescribió con la rota
+    assert marca.huella == vieja
+    assert pausa_ruta.exists()  # la pausa NO se borró
+
+
 def test_aceptar_sin_medir_registra_como_tal_y_no_llama_a_tomar_huella(tmp_path):
     misiones = tmp_path / "misiones"
     registro = tmp_path / "registro.jsonl"

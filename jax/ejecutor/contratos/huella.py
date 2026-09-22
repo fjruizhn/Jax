@@ -164,6 +164,20 @@ def _q(ruta: str) -> str:
 # contenido real. Ahora el resultado de los tres `find` se junta en un archivo aparte
 # y su `$?` se mira ANTES de decidir si el estado es `D` (los tres a cero) o `E ...
 # find_fallo` (cualquiera de los tres no-cero) -- comprobado por el auditor con bwrap.
+#
+# MINOR (ronda 6, auditoría adversarial 2026-09-22): `cat`/`rm` iban SIN ruta absoluta
+# -- inconsistente con find/sha256sum/stat/mktemp, que sí la tienen (mismo LÍMITE del
+# docstring del módulo). Corregido acá y en `ops/ejecutor/ejecutor-huella`.
+#
+# MINOR, el mutante que sobrevivía (ronda 6): el `if false` en el chequeo de `$?`
+# ($rc1/$rc2/$rc3) sólo se probaba contra EL GUION REAL (`ops/ejecutor/ejecutor-huella`,
+# `tests/test_ejecutor_huella_sh.py`) -- ESTE texto, el que de verdad corre por ssh en
+# producción, podía tener el mismo mutante sin que ningún test lo viera, porque el test
+# de sincronía (MAJOR-7) sólo compara SALIDAS sobre árboles SANOS: con un `find` que no
+# falla en ninguno de los dos lados, la salida es idéntica con o sin el chequeo de
+# `$?`. `tests/test_ejecutor_huella_sh.py` ahora agrega un árbol con un directorio
+# ILEGIBLE a esa misma comparación -- si CUALQUIERA de los dos lados (guion o este
+# texto) perdiera el chequeo, las dos salidas dejarían de coincidir ahí.
 _CUERPO_TRAMO_SH = r'''tramo() {
   ruta="$1"
   err="$(/usr/bin/mktemp)"
@@ -176,10 +190,10 @@ _CUERPO_TRAMO_SH = r'''tramo() {
       motivo="$(tr '\n' ' ' < "$err" | tr -s ' ')"
       echo "E $ruta ${motivo:-motivo_desconocido}"
     fi
-    rm -f "$err"
+    /usr/bin/rm -f "$err"
     return 0
   fi
-  rm -f "$err"
+  /usr/bin/rm -f "$err"
   case "$tipo" in
     "regular file"|"regular empty file")
       linea_hash="$(/usr/bin/sha256sum "$ruta" 2>/dev/null)"
@@ -202,9 +216,9 @@ _CUERPO_TRAMO_SH = r'''tramo() {
         echo "E $ruta find_fallo"
       else
         echo "D $ruta"
-        cat "$salida"
+        /usr/bin/cat "$salida"
       fi
-      rm -f "$salida" "$errd"
+      /usr/bin/rm -f "$salida" "$errd"
       ;;
     *)
       echo "E $ruta tipo_no_esperado:$tipo"
@@ -232,9 +246,9 @@ _CUERPO_TRAMO_SBIN_SH = r'''tramo_sbin_ejecutor() {
     echo "E $base/$patron find_fallo"
   else
     echo "D $base/$patron"
-    cat "$salida"
+    /usr/bin/cat "$salida"
   fi
-  rm -f "$salida" "$errd"
+  /usr/bin/rm -f "$salida" "$errd"
 }'''
 
 
@@ -820,6 +834,21 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
             nueva_huella = marca.huella
         else:
             nueva_huella = await tomar(host)
+            # MAJOR-I (ronda 6, auditoría adversarial 2026-09-22): esto NO llamaba a
+            # `huella_valida()` -- una remedición rota (una ruta con `E ... find_fallo`,
+            # sudo denegado a mitad de camino, lo que sea) se tomaba igual como la
+            # NUEVA línea base, con `estado=ABIERTA` y la pausa BORRADA -- exactamente
+            # lo que este mecanismo existe para impedir. `sin_medir` queda AFUERA de
+            # este chequeo a propósito: ahí `nueva_huella` es la vieja marca ya
+            # aceptada como tal por Fernando (`motivo` obligatorio, ver arriba), no una
+            # medición nueva que pueda salir rota.
+            rutas_exigidas = RUTAS_DECLARADAS_POR_DEFAULT
+            if admin_usuario is not None:
+                rutas_exigidas = rutas_exigidas + (ruta_authorized_keys_admin(admin_usuario),)
+            if not huella_valida(nueva_huella, rutas=rutas_exigidas):
+                salida(f"codigo=medicion_no_valida host={host} mision_id={mision_id} "
+                      "detalle=\"la remedicion no esta completa -- no se acepta, la pausa sigue puesta\"")
+                return 2
 
         momento = ahora() if ahora is not None else datetime.now(timezone.utc).isoformat()
         registrar(registro_ruta, host=host, mision_id=mision_id, aceptado_por=aceptado_por,

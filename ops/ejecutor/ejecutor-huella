@@ -75,6 +75,12 @@ SORT=/usr/bin/sort
 GETENT=/usr/bin/getent
 STAT=/usr/bin/stat
 MKTEMP=/usr/bin/mktemp
+# MINOR (ronda 6, auditoría adversarial 2026-09-22): `cat`/`rm` se llamaban SIN ruta
+# absoluta -- inconsistente con el LÍMITE que ya se documenta arriba para
+# find/sha256sum/sort/getent/stat/mktemp (sin `secure_path`, un root remoto podría
+# reemplazar un binario en el PATH). Mismo criterio, ahora también acá.
+CAT=/usr/bin/cat
+RM=/usr/bin/rm
 ADMIN_USUARIO_ARCHIVO=/etc/ejecutor-huella/admin_usuario
 
 # tramo(): UNA línea de estado por `ruta` (hash/D/A/E, ronda 4) + el listado recursivo
@@ -104,10 +110,10 @@ tramo() {
       motivo="$(tr '\n' ' ' < "$err" | tr -s ' ')"
       echo "E $ruta ${motivo:-motivo_desconocido}"
     fi
-    rm -f "$err"
+    "$RM" -f "$err"
     return 0
   fi
-  rm -f "$err"
+  "$RM" -f "$err"
   case "$tipo" in
     "regular file"|"regular empty file")
       linea_hash="$("$SHA256SUM" "$ruta" 2>/dev/null)"
@@ -130,9 +136,9 @@ tramo() {
         echo "E $ruta find_fallo"
       else
         echo "D $ruta"
-        cat "$salida"
+        "$CAT" "$salida"
       fi
-      rm -f "$salida" "$errd"
+      "$RM" -f "$salida" "$errd"
       ;;
     *)
       echo "E $ruta tipo_no_esperado:$tipo"
@@ -160,9 +166,9 @@ tramo_sbin_ejecutor() {
     echo "E $base/$patron find_fallo"
   else
     echo "D $base/$patron"
-    cat "$salida"
+    "$CAT" "$salida"
   fi
-  rm -f "$salida" "$errd"
+  "$RM" -f "$salida" "$errd"
 }
 
 # tramo_admin(): MAJOR-C (ronda 4) -- NUNCA `return 0` mudo. Si no se puede determinar
@@ -174,7 +180,7 @@ tramo_sbin_ejecutor() {
 # alguien cambia el HOME del administrador en el passwd, la ruta que aparece en la
 # huella CAMBIA -- eso es un hallazgo, no algo que este guion deba ocultar.
 tramo_admin() {
-  admin_usuario="$(cat "$ADMIN_USUARIO_ARCHIVO" 2>/dev/null)"
+  admin_usuario="$("$CAT" "$ADMIN_USUARIO_ARCHIVO" 2>/dev/null)"
   if [ -z "$admin_usuario" ]; then
     echo "E (admin_usuario) archivo_ausente_o_vacio:$ADMIN_USUARIO_ARCHIVO"
     return 0

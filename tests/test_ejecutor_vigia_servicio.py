@@ -293,12 +293,12 @@ def _tomador_secuencia(mapa_por_llamada):
     return tomar
 
 
-def _correr_con_huella(ctx, mision, *, hosts_con_sudo, tomar_huella, misiones, mision_id):
+def _correr_con_huella(ctx, mision, *, hosts_con_sudo, tomar_huella, misiones, mision_id, rutas_extra=()):
     async def escenario():
         return await S.correr_mision(
             ctx, mision, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar, fin=asyncio.Event(),
             exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS, hosts_con_sudo=hosts_con_sudo,
-            misiones=misiones, mision_id=mision_id, tomar_huella=tomar_huella)
+            misiones=misiones, mision_id=mision_id, tomar_huella=tomar_huella, rutas_extra=rutas_extra)
     return asyncio.run(escenario())
 
 
@@ -331,6 +331,75 @@ def test_sin_cambio_en_la_huella_no_pausa(tmp_path):
                                 misiones=tmp_path / "misiones", mision_id=MISION_ID)
     assert pausas == ()
     assert not ctx.pausa.exists()
+
+
+# --- BLOCK-F (ronda 6, auditoría adversarial 2026-09-22): dos mutantes sobrevivían con
+# el resto de la suite en verde -- quitar `+ rutas_extra` en `verificar_huellas_huerfanas`
+# (línea 176), en `huella_de_apertura_de_la_mision` (línea 219) y en
+# `_verificar_huellas_al_cierre` (línea 267); y `rutas_extra=()` en `_principal` (línea
+# 458). Escenario real: con cualquiera de esos mutantes, el `authorized_keys` del
+# ADMINISTRADOR -- donde vive la llave del servicio -- deja de exigirse, y una huella
+# que nunca lo midió se declara completa igual. Los tres tests de abajo aíslan cada
+# línea por separado: la huella "antes"/"después" es TEXTUALMENTE la misma salvo la
+# ruta del admin, así que `huella.cambio()` por sí solo NUNCA alcanza para que el test
+# pase -- sólo el chequeo de `rutas_extra` en `huella_valida()` lo hace. -----------------
+
+def test_apertura_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
+    """Línea 219 (`huella_de_apertura_de_la_mision`): primer turno, sin marca
+    persistida -- si `rutas_extra` no llegara de verdad a `huella_valida()`, una huella
+    que jamás mide el `authorized_keys` del administrador pasaría por completa igual."""
+    from jax.ejecutor.contratos import huella as H
+    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    tomar_huella = _tomador_secuencia({"atemai": [_h("atemai")]})  # SIN la línea del admin
+    ctx = _ctx(tmp_path)
+
+    with pytest.raises(RuntimeError, match="huella_apertura_vacia"):
+        _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                          misiones=tmp_path / "misiones", mision_id=MISION_ID, rutas_extra=(ruta_admin,))
+
+
+def test_cierre_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
+    """Línea 267 (`_verificar_huellas_al_cierre`): la APERTURA sí mide el admin (para
+    aislar SOLO el chequeo del cierre); el CIERRE deja de traer esa línea -- tiene que
+    pausar como no-medible, no pasar como si nada."""
+    from jax.ejecutor.contratos import huella as H
+    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    con_admin = _base_completa() + f"A {ruta_admin}\n".encode()
+    antes = _h("atemai", controles=con_admin)
+    despues = _h("atemai")  # el cierre YA NO trae la línea del admin
+    tomar_huella = _tomador_secuencia({"atemai": [antes, despues]})
+    ctx = _ctx(tmp_path)
+
+    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                                misiones=tmp_path / "misiones", mision_id=MISION_ID, rutas_extra=(ruta_admin,))
+    assert pausas == (("atemai", "huella_no_medible"),)
+
+
+def test_huerfana_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
+    """Línea 176 (`verificar_huellas_huerfanas`): la marca persistida y la remedición
+    son TEXTUALMENTE IGUALES (así `huella.cambio()` da `False` y no puede ser lo que
+    hace fallar el test) -- ninguna de las dos trae la línea del admin. Si
+    `rutas_extra` no llegara acá, esto se vería "limpio" (mismo texto, nada cambió) y
+    la misión nueva abriría igual, con una deuda de vigilancia real sin cerrar."""
+    from jax.ejecutor.contratos import huella as H
+    misiones = tmp_path / "misiones"
+    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    huella_vieja = _h("atemai")  # SIN la línea del admin
+    H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
+
+    tomar = _tomador_secuencia({"atemai": [_h("atemai")]})  # idéntica a la persistida
+    ctx = _ctx(tmp_path)
+
+    async def abrir():
+        return await S.huella_de_apertura_de_la_mision(
+            misiones=misiones, mision_id=MISION_ID, host="atemai", tomar_huella=tomar,
+            pausar=P.poner_pausa, pausa_ruta=ctx.pausa, rutas_extra=(ruta_admin,))
+    resultado = asyncio.run(abrir())
+    assert resultado is None  # no abre: la huérfana no pudo cerrarse limpia sin medir al admin
+    assert ctx.pausa.exists()
+    datos = json.loads(ctx.pausa.read_text())
+    assert datos["motivo"] == "huella_cambio_no_declarado"
+    assert "huella_de_ahora_vacia" in datos["detalle"]
 
 
 def test_huella_de_cierre_vacia_pausa_como_no_medible(tmp_path):
@@ -740,3 +809,96 @@ def test_mision_id_desde_ruta_le_quita_el_sufijo_de_turno():
 
 def test_mision_id_desde_ruta_bare_se_queda_igual():
     assert S.mision_id_desde_ruta(Path(f"/x/{MISION_ID}.json")) == MISION_ID
+
+
+# --- BLOCK-F, línea 458 (`_principal`, ronda 6): el mutante `rutas_extra=()` -- en vez
+# de `(huella.ruta_authorized_keys_admin(admin_usuario),)` -- sobrevivía porque nada
+# corría `_principal` de punta a punta y miraba qué recibía `correr_mision`. Acá se
+# monkeypatchea SOLO el borde caro (conexión a la base, resolución de faceta C5, y
+# `correr_mision` mismo -- que ya tiene sus propios tests de comportamiento arriba) --
+# el resto de `_principal` (parseo del entorno, cómputo de `rutas_extra`) corre DE
+# VERDAD, sin atajos. -----------------------------------------------------------------
+
+class _ConexionFalsa:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _entorno_principal(tmp_path, *, admin="fruiz"):
+    politica_ruta = tmp_path / "politica.json"
+    def _bash(comando):
+        return {"tool_name": "Bash", "tool_input": {"command": comando}}
+
+    doc = {
+        "version": 1, "generada_at": "2026-09-22T00:00:00+00:00",
+        "hosts": [{"nombre": "hall9000", "ip": "127.0.0.1", "puerto": 58291, "rol": "hypervisor",
+                  "es_local": True},
+                 {"nombre": "atemai", "ip": "192.0.2.11", "puerto": 58291, "rol": "desarrollo",
+                  "es_local": False}],
+        "reglas": [
+            {"id": 1, "codigo": "canario_c1", "tipo": "prohibido", "herramientas": "Bash", "campo": "command",
+             "patron": "ejecutor-canario-c1", "ambito_hosts": [], "ambito_roles": [], "es_canario": True,
+             "ejemplos_coincide": [_bash("echo ejecutor-canario-c1")], "ejemplos_no_coincide": [_bash("echo x")]},
+        ],
+        "respaldos": {}, "c2_edad_max_s": 86400,
+    }
+    from jax.ejecutor.contratos import politica as POL
+    politica_ruta.write_text(json.dumps(POL.firmar(doc)))
+    registro = tmp_path / "r.jsonl"
+    Registro(registro).cerrar()
+    return {
+        "JAX_EJECUTOR_CUENTA": "axioma", "JAX_EJECUTOR_SSH_PUERTO": "58291",
+        "JAX_EJECUTOR_CONTROLADOR_LLAVE": "/k", "JAX_EJECUTOR_NODE_BIN": "/n", "JAX_EJECUTOR_LIB": "/opt/lib",
+        "JAX_EJECUTOR_CUENTA_HOME": "/home/axioma", "JAX_EJECUTOR_POLITICA": str(politica_ruta),
+        "JAX_EJECUTOR_CANARIO_PUERTO": "18436", "JAX_EJECUTOR_REGISTRO": str(registro),
+        "JAX_PROXY_CARRIL_PUERTO": "18435", "JAX_EJECUTOR_CERCO_SONDAS": "7777,11434",
+        "JAX_EJECUTOR_FRENO_ESTADO": str(tmp_path / "e.json"), "JAX_EJECUTOR_LLAVES_ROOT": str(tmp_path / "llaves"),
+        "JAX_EJECUTOR_GANCHO_TOPE_S": "10", "JAX_EJECUTOR_PAUSA": str(tmp_path / "PAUSA"),
+        "JAX_EJECUTOR_VIGIA_LATIDO": str(tmp_path / "latido"), "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30",
+        "JAX_EJECUTOR_VIGIA_LATIDO_CADA_S": "1",
+        "JAX_EJECUTOR_ADMIN_USUARIO": admin, "JAX_EJECUTOR_HUELLA_LLAVE": str(tmp_path / "id_huella"),
+        "JAX_EJECUTOR_HUELLA_KNOWN_HOSTS": str(tmp_path / "kh"), "JAX_EJECUTOR_MISIONES": str(tmp_path / "misiones"),
+    }
+
+
+def test_principal_pasa_la_ruta_extra_del_administrador_de_verdad_block_f(tmp_path, monkeypatch):
+    import jacobs.store as jstore
+    from jax.ejecutor.contratos import eleccion_c5, huella as H
+
+    admin = "fruiz"
+    env = _entorno_principal(tmp_path, admin=admin)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    ruta_mision = tmp_path / f"{MISION_ID}.json"
+    ruta_mision.write_text(json.dumps({"mision": "uptime de atemai", "hosts": ["atemai"]}))
+
+    monkeypatch.setattr(jstore, "conexion", lambda **kw: _ConexionFalsa())
+
+    async def _leer_config_falso(conn):
+        return eleccion_c5.ConfigC5(
+            cerebro_faceta="x", auditor_faceta="y", auditor_faceta_local="z",
+            lote_max=5, intervalo_s=1.0, max_tokens=100,
+            admite_datos_de_clientes=False, admite_mismo_proveedor=False)
+
+    async def _elegir_falso(conn, *, cfg, hosts_mision, resolve_facet):
+        return ("faceta-fake", None, None)
+
+    monkeypatch.setattr(eleccion_c5, "leer_config", _leer_config_falso)
+    monkeypatch.setattr(eleccion_c5, "elegir_y_resolver_auditor", _elegir_falso)
+
+    llamadas = {}
+
+    async def _correr_mision_falso(*a, **kw):
+        llamadas["rutas_extra"] = kw.get("rutas_extra")
+        return ()
+
+    monkeypatch.setattr(S, "correr_mision", _correr_mision_falso)
+
+    rc = asyncio.run(S._principal(ruta_mision))
+
+    assert rc == 0
+    assert llamadas["rutas_extra"] == (H.ruta_authorized_keys_admin(admin),)
