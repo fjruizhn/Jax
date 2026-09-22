@@ -3615,15 +3615,52 @@ jobs:
       #       …)` → `run_in_executor(None, …)` -- con un espía sobre el
       #       executor real en los TRES sitios (procesar, guardar
       #       resultado, leer resultado). +3.
-      #   9 (piso original) + 20 (ronda 2) + 14 (ronda 3) = 43. Medido en
-      #   local (mismo comando) y en Docker (python:3.12-slim, requirements.txt
-      #   exacto): 43 passed en los dos. Si el runner da otro número, manda
-      #   el runner.
+      #   9 (piso original) + 20 (ronda 2) + 14 (ronda 3) = 43.
+      # 43 -> 47 (2026-09-21, ronda 4 de arreglo -- ver endpoint-hallazgos-r3.md,
+      #   "los siete puntos están atendidos en el código, y verificados con
+      #   hilos reales"): +4 tests nuevos, uno por cada hallazgo con
+      #   mutación propia:
+      #     MAJOR-1: ningún test anterior pasaba por la ruta HTTP de
+      #       cancelación CON el worker real -- los de N-3 llaman a
+      #       `control.cancelar()` a mano, el HTTP mockeaba
+      #       `_ejecutar_trabajo` entero. +1, con un executor de un hilo
+      #       real y `time.sleep` bloqueante de verdad.
+      #     MINOR-A: la bandera `permiso_transferido` se movió a la línea
+      #       siguiente de `create_task` (antes iba después de
+      #       `add_done_callback`/`job_tasks.register` -- si cualquiera de
+      #       esas dos lanzaba, el semáforo se liberaba DOS veces, subía
+      #       por encima de su capacidad real). +1.
+      #     MINOR-B: `proyecto` se valida (codificable a UTF-8) ANTES del
+      #       `acquire()` -- cierra el vector de N-1 en el origen para ese
+      #       campo, en vez de sólo absorberlo con el try/finally. Sin
+      #       tests nuevos: el test de N-1 que usaba `proyecto` como
+      #       vector se RENOMBRÓ a `test_MINORB_...` (ahora prueba la
+      #       admisión), y el otro test de N-1 se reescribió para probar
+      #       el try/finally genéricamente, mockeando `_STORE.create()`
+      #       -- la pareja sigue siendo 2 tests, mismo conteo que antes.
+      #     MINOR-C: el saneo de N-2 ahora corre también del lado de
+      #       LECTURA (`_leer_resultados_de_disco`) -- un `error` con un
+      #       surrogate solitario se guardaba bien (fallback
+      #       ensure_ascii) pero `json.loads` lo desescapaba de vuelta, y
+      #       la respuesta HTTP daba 500 en cada GET futuro. +1.
+      #     MINOR-D: "decidir si arranca" y "marcar RUNNING" se unificaron
+      #       en una sola operación atómica (mismo lock que `cancelar()`)
+      #       -- antes había una ventana real en la que el estado podía ir
+      #       de `cancelling` para atrás a `running`. +1, con
+      #       sincronización real (`threading.Event`), no depende de la
+      #       suerte del GIL.
+      #     MINOR-E: el test de N-6 ahora verifica que la llamada esté
+      #       DENTRO de un hook de ARRANQUE (no sólo que exista en el
+      #       archivo) -- no suma un test nuevo, reescribe el existente.
+      #   MAJOR-1(+1) + MINOR-A(+1) + MINOR-C(+1) + MINOR-D(+1) = 43 + 4 =
+      #   47. Medido en local (mismo comando) y en Docker (python:3.12-slim,
+      #   requirements.txt exacto, x3 corridas cada uno): 47 passed
+      #   siempre. Si el runner da otro número, manda el runner.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^43 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 43 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^47 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 47 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
