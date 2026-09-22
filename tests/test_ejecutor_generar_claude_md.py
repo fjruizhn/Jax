@@ -219,7 +219,38 @@ def test_crear_servicios_del_cliente_es_legitimo_si_el_plan_lo_pide():
     doc_plano = " ".join(g.generar().split())
     assert "TRABAJO LEGÍTIMO" in doc_plano
     assert "cron es TRABAJO LEGÍTIMO cuando el plan de la misión lo pide" in doc_plano
-    assert "lo prohibido no es" in doc_plano and "tocar systemd/cron" in doc_plano
+    assert "lo prohibido nunca fue" in doc_plano and "tocar systemd/cron" in doc_plano
+
+
+@requiere_constitucion_real
+def test_no_dice_seis_controles_ronda7():
+    """Ronda 7, punto 5: `/etc/passwd`/`group`/`shadow` salieron de la huella --
+    "esos seis controles" ya no es un conteo correcto."""
+    doc = g.generar()
+    assert "seis controles" not in doc
+
+
+@requiere_constitucion_real
+def test_instalar_paquetes_aapanel_y_crear_cuentas_es_legitimo_ronda7():
+    doc_plano = " ".join(g.generar().split())
+    assert "ADMINISTRACIÓN LEGÍTIMA" in doc_plano
+    assert "aaPanel" in doc_plano
+    assert "apt install" in doc_plano
+    assert "crear cuentas de sistema" in doc_plano
+
+
+@requiere_constitucion_real
+def test_dice_explicitamente_que_passwd_group_shadow_no_estan_en_la_huella_ronda7():
+    doc_plano = " ".join(g.generar().split())
+    assert "ni `/etc/passwd`, ni `/etc/group` ni `/etc/shadow` están en la huella" in doc_plano
+
+
+@requiere_constitucion_real
+def test_tocar_un_control_pausa_y_solo_fernando_libera_ronda7():
+    doc_plano = " ".join(g.generar().split())
+    assert "PAUSA la misión" in doc_plano
+    assert "hasta que Fernando lo acepte explícitamente" in doc_plano
+    assert "nunca vos, aunque tengas sudo ahí" in doc_plano
 
 
 @requiere_constitucion_real
@@ -387,7 +418,31 @@ def test_con_doble_crear_servicios_del_cliente_es_legitimo_si_el_plan_lo_pide(do
     doc_plano = " ".join(g.generar(fuente_constitucion=doble_constitucion).split())
     assert "TRABAJO LEGÍTIMO" in doc_plano
     assert "cron es TRABAJO LEGÍTIMO cuando el plan de la misión lo pide" in doc_plano
-    assert "lo prohibido no es" in doc_plano and "tocar systemd/cron" in doc_plano
+    assert "lo prohibido nunca fue" in doc_plano and "tocar systemd/cron" in doc_plano
+
+
+def test_con_doble_no_dice_seis_controles_ronda7(doble_constitucion):
+    assert "seis controles" not in g.generar(fuente_constitucion=doble_constitucion)
+
+
+def test_con_doble_instalar_paquetes_aapanel_y_crear_cuentas_es_legitimo_ronda7(doble_constitucion):
+    doc_plano = " ".join(g.generar(fuente_constitucion=doble_constitucion).split())
+    assert "ADMINISTRACIÓN LEGÍTIMA" in doc_plano
+    assert "aaPanel" in doc_plano
+    assert "apt install" in doc_plano
+    assert "crear cuentas de sistema" in doc_plano
+
+
+def test_con_doble_dice_explicitamente_que_passwd_group_shadow_no_estan_en_la_huella_ronda7(doble_constitucion):
+    doc_plano = " ".join(g.generar(fuente_constitucion=doble_constitucion).split())
+    assert "ni `/etc/passwd`, ni `/etc/group` ni `/etc/shadow` están en la huella" in doc_plano
+
+
+def test_con_doble_tocar_un_control_pausa_y_solo_fernando_libera_ronda7(doble_constitucion):
+    doc_plano = " ".join(g.generar(fuente_constitucion=doble_constitucion).split())
+    assert "PAUSA la misión" in doc_plano
+    assert "hasta que Fernando lo acepte explícitamente" in doc_plano
+    assert "nunca vos, aunque tengas sudo ahí" in doc_plano
 
 
 def test_con_doble_las_skills_son_guia_de_metodo_no_autoridad(doble_constitucion):

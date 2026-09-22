@@ -1279,6 +1279,7 @@ jobs:
           tests/test_ejecutor_reemplazar_directorio_atomico.py
           tests/test_ejecutor_preparar_directorio_misiones.py
           tests/test_ejecutor_contratos_huella.py
+          tests/test_ejecutor_huella_aceptar.py
           tests/test_ejecutor_cita.py
           tests/test_ejecutor_captura.py
           tests/test_ejecutor_hechos.py
@@ -3726,8 +3727,42 @@ jobs:
           #   = 2592. Skips: 35 -> 38 (+3 `@requiere_constitucion_real` nuevos del punto 6 en
           #   test_ejecutor_generar_claude_md.py) -- 16 (U3) + 1 (contexto.py) + 21 (generar_claude_md,
           #   18 antes + 3) = 38.
-          grep -qE "^2592 passed, 38 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2592 tests CORRIDOS y exactamente 38 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 22 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 8 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 4 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
+          # 2592 -> 2618, 38 -> 42 skipped (feat/ejecutor-contexto-y-skills, ronda 7, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la quinta auditoría: BLOCK reproducido en
+          #   producción: `apt install` y el plugin de correo de aaPanel crean cuentas de sistema,
+          #   tocan `/etc/passwd`, y la huella pausaba el cutover -- y encima la marca dejaba el
+          #   host bloqueado PARA SIEMPRE, sin salida). Punto 1: `/etc/passwd`/`group`/`shadow`
+          #   salen de la huella -- crear cuentas es administración legítima; RUTAS_SHA_SOLO se
+          #   retira entera de huella.py. Punto 2 (M-1): la marca ahora tiene ESTADO con nombre
+          #   (`ABIERTA`/`REPORTADA`/`CERRADA`, en vez de un booleano `pendiente`) -- `REPORTADA`
+          #   bloquea sin volver a medir hasta que se acepte explícitamente; nueva CLI `python -m
+          #   jax.ejecutor.contratos.huella aceptar --host <host> --mision <mision_id>`
+          #   [--sin-medir] que muestra el diff, toma línea base nueva, registra en el registro de
+          #   C3 (evento `huella_aceptada`) y BORRA la pausa global (`JAX_EJECUTOR_PAUSA`) -- sin
+          #   eso, C5 seguía rechazando toda misión nueva aunque la marca ya no bloqueara.
+          #   docs/ejecutor-huella-aceptar.md documenta el procedimiento; el mensaje de cada pausa
+          #   por huella referencia el comando exacto para aceptar. Punto 3 (M-3): mata
+          #   `return False -> continue` en `verificar_huellas_huerfanas` (línea 163 de la ronda
+          #   6) con un test de "el primer ssh falla y el segundo responde" -- demostrado real
+          #   contra un mutante literal. Punto 4: `preparar_directorio_misiones.sh` reescrito --
+          #   ya NO se salta el modo/ACL cuando el directorio existe (la ronda 6 lo hacía "para
+          #   evitar una ventana", pero eso dejaba una ACL vieja de producción -- `drwxrwx---`,
+          #   `group::rwx`, medida real -- sin corregir NUNCA); ahora es un solo `setfacl -m` con
+          #   TODAS las entradas (base + nombradas + default) juntas, sin ventana de verdad, y
+          #   `mkdir -p` en vez de `install -d` (que resetea el modo incluso sobre un directorio
+          #   YA existente -- comprobado). Punto 5: cerebros.toml ya no dice "esos seis
+          #   controles" (ahora son los reales, sin passwd/group/shadow), dice con claridad que
+          #   instalar paquetes/aaPanel/crear cuentas es administración legítima, y que tocar un
+          #   control de verdad pausa la misión hasta que Fernando lo acepte explícitamente.
+          #   Medido dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del
+          #   worktree): 2608 (wrapped) + 10 sueltas (4 test_bwrap_real_* + 6 de setfacl real en
+          #   test_ejecutor_preparar_directorio_misiones.py -- 2 de la ronda 6 + 4 nuevas de esta
+          #   ronda, todas fallan bajo el bwrap EXTERNO de este verificador por el mismo límite de
+          #   namespaces/xattr anidados, NO el runner real de CI) = 2618. Skips: 38 -> 42 (+4
+          #   `@requiere_constitucion_real` nuevos del punto 5 en test_ejecutor_generar_claude_md.py)
+          #   -- 16 (U3) + 1 (contexto.py) + 25 (generar_claude_md, 21 antes + 4) = 42.
+          grep -qE "^2618 passed, 42 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2618 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 10 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 6 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
