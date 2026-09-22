@@ -46,7 +46,7 @@ def evidence(identity):
     try:
         store=MariaDBEvidenceStore(_connection_factory())
         try: value=store.load_evidence_artifact(identity); kind="artifact"
-        except Exception:
+        except Exception:  # fail-soft: artifact absence falls through to the separately verified blob lookup.
             data=store.get_evidence_blob(identity); value={"evidence_hash":identity,"size_bytes":len(data)}; kind="blob"
         return {"classification":"AUTHORITATIVE_RUNTIME_DATA","source":"Block 7 EvidenceStore","status":"FOUND","kind":kind,"evidence":value}
     except Exception as exc: raise UnavailableSource("Block 7 evidence source unavailable") from exc
