@@ -24,6 +24,11 @@ class JobStatus(str, Enum):
     COMPLETED = "completed"
     FAILED    = "failed"
     CANCELLED = "cancelled"
+    CANCELLING = "cancelling"  # 2026-09-21 (N-3, endpoint de Procesamiento
+    # de Archivos): un pedido de cancelación no puede matar un hilo del SO
+    # en vuelo (Python no lo permite) -- este estado es honesto sobre eso:
+    # "se pidió, se dejó de programar trabajo nuevo, lo que ya corría sigue
+    # hasta que termina solo". Sólo CANCELLED (arriba) es terminal.
     REJECTED  = "rejected"
     TOOLS_REQUESTED = "tools_requested"  # GAP2 Fase1 (2026-08-19): el modelo
     # pidió tool_calls y Fase 1 no ejecuta nada -- NO es completed (el

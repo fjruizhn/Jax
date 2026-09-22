@@ -123,3 +123,13 @@ class JobStore:
         if state is None:
             return None
         return MotorJobView(**{k: v for k, v in state.items() if k in _JOB_VIEW_FIELDS})
+
+    def ids_en_estado(self, *estados: str) -> list[str]:
+        """job_id de todo lo que esté en alguno de `estados` ahora mismo,
+        según el índice reconstruido en memoria (2026-09-21, B-3 del
+        endpoint de Procesamiento de Archivos). `_load()` reconstruye el
+        índice desde el JSONL al arrancar pero NUNCA reconcilia estados
+        "en vuelo" (`pending`/`running`) contra tareas realmente vivas --
+        un consumidor que reinicia el proceso necesita poder preguntar
+        "¿qué quedó a medias?" sin asomarse a `_index` directo."""
+        return [job_id for job_id, evento in self._index.items() if evento.get("status") in estados]

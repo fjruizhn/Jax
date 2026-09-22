@@ -176,6 +176,7 @@ def _kill_switch_active() -> bool:
 from motor_registry.routes import router as motor_router
 from jacobs.routes import router as jacobs_router
 from jacobs import store as jacobs_store
+from procesamiento_routes import router as procesamiento_router
 
 app = FastAPI(
     title="LAS MANOS",
@@ -280,6 +281,15 @@ async def _jacobs_init() -> None:
     await reap_orphaned_pipelines()
     asyncio.create_task(start_reaper_loop())
 
+    # B-3 (2026-09-21, ronda de arreglo del endpoint de Procesamiento de
+    # Archivos): mismo criterio que el barrido de arriba, pero para los
+    # jobs propios de `procesamiento_routes.py` -- sin esto, un trabajo que
+    # quedó 'pending'/'running' cuando el proceso se reinició queda así
+    # PARA SIEMPRE (JobStore._load() reconstruye el índice pero nunca
+    # reconcilia estados "en vuelo").
+    from procesamiento_routes import reconciliar_trabajos_huerfanos
+    reconciliar_trabajos_huerfanos()
+
     # El chequeo de consistencia codigo-vs-DB de timeouts se ELIMINO el
     # 2026-09-01 al deduplicar: existia para comparar `_CAPABILITY_TIMEOUT_SECONDS`
     # (jacobs/plan.py) contra `capability.max_execution_minutes` (DB). El dict
@@ -328,6 +338,7 @@ async def _jacobs_shutdown() -> None:
 
 app.include_router(motor_router)
 app.include_router(jacobs_router)
+app.include_router(procesamiento_router)
 
 @app.exception_handler(RequestValidationError)
 async def envelope_structural_rejection(request: Request, exc: RequestValidationError):

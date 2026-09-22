@@ -3335,8 +3335,15 @@ jobs:
           #   splitlines() reconoce), con el separador en el PATH y
           #   verificando que el encabezado quede en una sola línea. Los diez
           #   escapes mutados uno por vez: cada uno rompe su propio caso.
-          grep -qE "^2398 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2398 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2398 -> 2399 (feat/procesamiento-archivos, B-1 del endpoint, 2026-09-21):
+          #   las_manos/_tool_authority_test.py::test_3b_nul_en_ruta_rechaza_no_revienta
+          #   (+1). Un byte NUL en una ruta hacía que `resolve_jailed_path`
+          #   dejara escapar un `ValueError` sin capturar en vez de rechazarla.
+          #   Conflicto de merge resuelto sumando: este PR y
+          #   feat/sobre-fuente-no-confiable movieron el piso desde 2358 cada uno
+          #   por su cuenta. Si el runner da otro número, manda el runner.
+          grep -qE "^2399 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2399 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -3421,11 +3428,28 @@ jobs:
       # `ModuleNotFoundError`, y el sentinel None de Menor 10), de 17 a 19.
       # Medido en este entorno (Python 3.14 y, via Docker, Python 3.12 --
       # mismo runtime que usa este job): 19 passed en las dos.
+      #
+      # Ronda 3 (2026-09-21, expediente real de 99 documentos -- 2
+      # fallaron con el MISMO defecto, uno un avalúo de maquinaria de 11
+      # MB): una tabla cuyo `bbox` se sale de la página (defecto conocido
+      # de pdfplumber) tumbaba el documento ENTERO ('error', cero bytes) --
+      # el `ValueError` sale de `Page.outside_bbox()` (el recorte de la
+      # prosa alrededor de la tabla), no de `Table.extract()`. Ahora se
+      # ataja POR TABLA y se sigue: la página aporta su texto igual, el
+      # estado pasa a 'parcial' (nunca 'ok' callándolo), y
+      # `detalle["tablas_fallidas"]` declara cuántas tablas fallaron y en
+      # qué páginas. +1 test
+      # (`test_una_tabla_con_bbox_fuera_de_la_pagina_no_tumba_el_documento`,
+      # PDF sintético que reproduce el bbox negativo real -- visto en rojo
+      # contra el código anterior a este cambio: "assert 'error' ==
+      # 'parcial'"), de 19 a 20. Medido en este entorno (Python 3.14 y, via
+      # Docker, Python 3.12 -- mismo runtime que usa este job): 20 passed
+      # en las dos.
       - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
-          grep -qE "^19 passed" /tmp/pdf_tests || {
-            echo "PISO ROTO: se esperaban 19 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^20 passed" /tmp/pdf_tests || {
+            echo "PISO ROTO: se esperaban 20 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
       # escaneado e imagen. tesseract por subproceso, nunca por binding
@@ -3809,6 +3833,143 @@ jobs:
           python -m pytest -q scripts/_procesar_archivos_test.py 2>&1 | tee /tmp/procesar_archivos_tests
           grep -qE "^6 passed" /tmp/procesar_archivos_tests || {
             echo "PISO ROTO: se esperaban 6 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
+
+      # Endpoint de Procesamiento de Archivos (2026-09-20): `procesamiento/`
+      # (jax#252) estaba terminado pero nadie lo llamaba desde HTTP.
+      # `POST /procesamiento/trabajos` + `GET /procesamiento/trabajos/{id}`
+      # encolan (JobStore/JobStatus REUSADOS, instancia propia -- ver el
+      # docstring de `las_manos/procesamiento_routes.py`) y nunca bloquean el
+      # request: un PDF escaneado de 30 paginas tarda ~80s medidos. Va en
+      # paso propio, mismo motivo que el resto de este nucleo: no tocar el
+      # piso numerico del bloque de arriba (2358 passed) por un archivo mas.
+      # `ingesta.ingerir` va SUSTITUIDO en estos tests (sin
+      # pdftoppm/tesseract/libreoffice reales) -- no necesita
+      # requirements-archivos.txt para pasar, pero corre DESPUES en este job
+      # porque comparte credenciales de servicio con `auth_servicio.py`
+      # (PERMISOS ganó las dos rutas nuevas para IDENTIDAD_PLATAFORMA, mismo
+      # mecanismo que ya cubre /jacobs/* -- ninguna autenticación nueva).
+      # 9 -> 29 (2026-09-21, ronda de arreglo tras revisión adversarial --
+      #   ver .superpowers/sdd/2026-09-20-procesamiento-archivos-nucleo/
+      #   endpoint-hallazgos.md y endpoint-report.md, 6 bloqueantes B-1..B-6).
+      #   +20 tests nuevos, uno por cada hallazgo (a veces varios por
+      #   hallazgo, para que cada mutación tenga SU test):
+      #     B-1: NUL entre rutas sanas no tumba el lote (la causa raíz vive
+      #       en las_manos/_tool_authority_test.py, +1 aparte, 26->27).
+      #     B-2: tope de rutas por pedido (422), sin capacidad (429), admite
+      #       con capacidad libre, los archivos del MISMO job se reparten
+      #       entre hilos (medido, no en un solo hilo), el semáforo se
+      #       libera tanto si el trabajo falla como si completa (2 tests).
+      #     B-3: reconcilia huérfanos al "arrancar" y no toca lo ya
+      #       terminado (2), cancelar job desconocido (404) y terminal
+      #       (409), cancelar corta la tarea EN VUELO (no sólo el registro),
+      #       la credencial jacobs no puede cancelar.
+      #     B-4: GET no bloquea el loop leyendo el resultado.
+      #     B-5: el trabajo no bloquea el loop (reescrito para medir el
+      #       RETRASO DEL LOOP, no el retorno del POST -- la versión vieja
+      #       no distinguía la mutación que saca el run_in_executor), una
+      #       excepción catastrófica marca failed (no dejar running
+      #       huérfano), el done_callback de excepciones sigue wireado.
+      #     B-6: usuario obligatorio (422 si falta), se registra como
+      #       `caller` del job.
+      #   9 + 20 = 29.
+      # 29 -> 43 (2026-09-21, ronda 3 de arreglo -- ver endpoint-hallazgos-r2.md,
+      #   ruling estructural "el semáforo cuenta TRABAJOS y el pool cuenta
+      #   ARCHIVOS"): +14 tests nuevos.
+      #     N-1 (bloqueante): el permiso se filtraba si `_STORE.create()`/
+      #       `update()` reventaba -- `try/finally` alrededor de ese tramo.
+      #       +2 (directo sin HTTP, y por HTTP real -- éste último posible
+      #       porque `proyecto` es un `str` SIN `Field(min_length=...)`;
+      #       `usuario`, que SÍ lo tiene desde B-6, resultó estar protegido
+      #       ya por un detalle de pydantic-core 2.46.4, documentado en el
+      #       test).
+      #     N-2 (bloqueante): un nombre no codificable a UTF-8 se rechaza
+      #       ANTES del executor, nunca tumba el lote entero al escribir el
+      #       resultado. +3 (rechazo sin tumbar el lote, saneado unitario
+      #       del nombre, fallback ensure_ascii de última línea).
+      #     N-3: cancelar dejar de programar archivos nuevos, nunca mata un
+      #       hilo real -- CANCELLING mientras espera, CANCELLED sólo
+      #       cuando el último hilo en vuelo terminó. +3 (deja terminar lo
+      #       que ya arrancó, corta lo que esperaba en cola; cancela un
+      #       trabajo sin ningún hilo arrancado aún; la ruta HTTP marca
+      #       CANCELLING de una, no CANCELLED).
+      #     N-4/B-2: executor de E/S SEPARADO del de OCR; RUNNING se marca
+      #       cuando el PRIMER archivo arranca de verdad, no al admitir.
+      #       +2 (GET no espera detrás del pool de OCR saturado; RUNNING no
+      #       se adelanta mientras el archivo sigue en cola).
+      #     N-5: la mutación que más importa -- `run_in_executor(executor,
+      #       …)` → `run_in_executor(None, …)` -- con un espía sobre el
+      #       executor real en los TRES sitios (procesar, guardar
+      #       resultado, leer resultado). +3.
+      #   9 (piso original) + 20 (ronda 2) + 14 (ronda 3) = 43.
+      # 43 -> 47 (2026-09-21, ronda 4 de arreglo -- ver endpoint-hallazgos-r3.md,
+      #   "los siete puntos están atendidos en el código, y verificados con
+      #   hilos reales"): +4 tests nuevos, uno por cada hallazgo con
+      #   mutación propia:
+      #     MAJOR-1: ningún test anterior pasaba por la ruta HTTP de
+      #       cancelación CON el worker real -- los de N-3 llaman a
+      #       `control.cancelar()` a mano, el HTTP mockeaba
+      #       `_ejecutar_trabajo` entero. +1, con un executor de un hilo
+      #       real y `time.sleep` bloqueante de verdad.
+      #     MINOR-A: la bandera `permiso_transferido` se movió a la línea
+      #       siguiente de `create_task` (antes iba después de
+      #       `add_done_callback`/`job_tasks.register` -- si cualquiera de
+      #       esas dos lanzaba, el semáforo se liberaba DOS veces, subía
+      #       por encima de su capacidad real). +1.
+      #     MINOR-B: `proyecto` se valida (codificable a UTF-8) ANTES del
+      #       `acquire()` -- cierra el vector de N-1 en el origen para ese
+      #       campo, en vez de sólo absorberlo con el try/finally. Sin
+      #       tests nuevos: el test de N-1 que usaba `proyecto` como
+      #       vector se RENOMBRÓ a `test_MINORB_...` (ahora prueba la
+      #       admisión), y el otro test de N-1 se reescribió para probar
+      #       el try/finally genéricamente, mockeando `_STORE.create()`
+      #       -- la pareja sigue siendo 2 tests, mismo conteo que antes.
+      #     MINOR-C: el saneo de N-2 ahora corre también del lado de
+      #       LECTURA (`_leer_resultados_de_disco`) -- un `error` con un
+      #       surrogate solitario se guardaba bien (fallback
+      #       ensure_ascii) pero `json.loads` lo desescapaba de vuelta, y
+      #       la respuesta HTTP daba 500 en cada GET futuro. +1.
+      #     MINOR-D: "decidir si arranca" y "marcar RUNNING" se unificaron
+      #       en una sola operación atómica (mismo lock que `cancelar()`)
+      #       -- antes había una ventana real en la que el estado podía ir
+      #       de `cancelling` para atrás a `running`. +1, con
+      #       sincronización real (`threading.Event`), no depende de la
+      #       suerte del GIL.
+      #     MINOR-E: el test de N-6 ahora verifica que la llamada esté
+      #       DENTRO de un hook de ARRANQUE (no sólo que exista en el
+      #       archivo) -- no suma un test nuevo, reescribe el existente.
+      #   MAJOR-1(+1) + MINOR-A(+1) + MINOR-C(+1) + MINOR-D(+1) = 43 + 4 =
+      #   47. Medido en local (mismo comando) y en Docker (python:3.12-slim,
+      #   requirements.txt exacto, x3 corridas cada uno): 47 passed
+      #   siempre. Si el runner da otro número, manda el runner.
+      # 47 -> 52 el 2026-09-21 (ronda 5, cinco MINOR):
+      #     N1: cancelar por `cancelar_trabajo()` REAL con un hilo dentro de
+      #       la escritura de `running` -- historial monótono en el JSONL
+      #       y el loop sin congelarse esperando el lock. +1, visto en rojo
+      #       contra 146e0a5 (`cancelling, running, cancelling`).
+      #     N2: nombres acentuados válidos (`factura_año.pdf`) vuelven
+      #       intactos al leer -- en disco y por GET. +2.
+      #     N3: cancelado antes de arrancar nunca escribe `running` ni
+      #       `started_at`. +1.
+      #     N5: el arranque EJECUTA `reconciliar_trabajos_huerfanos()`
+      #       (corre los handlers de startup reales) -- el test AST
+      #       aceptaba la llamada dentro de un `if False:`. +1.
+      #   47 + 5 = 52. Medido en Docker (python:3.12-slim) sobre un
+      #   `git archive` del commit final. Si el runner da otro número,
+      #   manda el runner.
+      # 52 -> 56 el 2026-09-21 (ronda 6, los dos defectos reportados en la 5):
+      #     `_saneado_ascii` con tilde + surrogate (`Crédito\udcff.pdf`)
+      #       tumbaba el lote entero: +2 (lote completed; unitario ASCII).
+      #     La carrera del cancel antes de que el worker registrara su
+      #       control: el control se crea en `crear_trabajo()`. +1 que
+      #       reproduce `pending, pending, cancelling, running, completed`
+      #       contra f1d4298, +1 del control huérfano si falla `create_task`.
+      #   52 + 4 = 56. Docker python:3.12-slim sobre `git archive` del
+      #   commit final. Si el runner da otro número, manda el runner.
+      - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
+          grep -qE "^56 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 56 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

@@ -28,6 +28,24 @@ Ronda 2 (2026-09-21, task-4-hallazgos.md -- NO-GO del auditor, 3 críticos):
   que el resultado no es 'ok'.
 - I-3: `test_el_importe_de_una_tabla_no_sale_duplicado` cuenta cuántas
   veces aparece un importe en el extracto -- tiene que ser UNA.
+
+Ronda 3 (2026-09-21, expediente real de 99 documentos -- 2 fallaron con el
+MISMO defecto, uno un avalúo de maquinaria de 11 MB): una tabla detectada
+por pdfplumber puede traer un `bbox` que se sale de la página (defecto
+conocido de la librería, típicamente por una coordenada negativa).
+`_pdf_con_tabla_bbox_fuera_de_la_pagina` reproduce el caso REAL con un PDF
+sintético (no monkeypatch): una tabla cuya línea izquierda se dibuja en
+x=-5, fuera del `MediaBox`. Verificado contra los dos documentos reales de
+`lacteos-victoria` (2026-09-21) que el `ValueError` sale de
+`Page.outside_bbox()` -- el recorte de la PROSA alrededor de la tabla --,
+NO de `Table.extract()`, que funciona perfecto con ese mismo bbox. Antes,
+esa excepción escapaba del bucle y tumbaba el documento ENTERO ('error',
+cero páginas) por una sola tabla mal delimitada.
+`test_una_tabla_con_bbox_fuera_de_la_pagina_no_tumba_el_documento` prueba
+exactamente eso: el texto de la página (prosa Y el contenido crudo de la
+tabla fallida) sigue en el extracto, el estado es 'parcial' -- nunca 'ok'
+callándolo --, y `detalle["tablas_fallidas"]` declara cuántas tablas
+fallaron y en qué páginas.
 """
 from pathlib import Path
 
@@ -216,6 +234,48 @@ def _pdf_con_marca_de_agua(destino: Path) -> Path:
     return _pdf_una_pagina(destino, stream)
 
 
+def _pdf_con_tabla_bbox_fuera_de_la_pagina(destino: Path) -> Path:
+    """Prosa real arriba (suficiente para superar MINIMO_CARACTERES_PAGINA
+    por sí sola) más una tabla de 3x2 cuya línea izquierda se dibuja en
+    x=-5 -- fuera del `MediaBox` (0 0 340 400). pdfplumber SÍ detecta esta
+    tabla y `Table.extract()` funciona con ese bbox (verificado 2026-09-21
+    contra pdfplumber==0.11.10); lo que revienta es
+    `Page.outside_bbox(t.bbox)`, el recorte que arma la prosa alrededor de
+    la tabla -- el mismo `ValueError` de "Bounding box ... is not fully
+    within parent page bounding box" que tumbaba los dos documentos reales
+    de lacteos-victoria."""
+    prosa = (
+        b"BT /F1 12 Tf 20 360 Td (ACTIVOS TOTALES 1234) Tj ET\n"
+        b"BT /F1 10 Tf 20 340 Td "
+        b"(Estado de Situacion Financiera al cierre del periodo,) Tj ET\n"
+        b"BT /F1 10 Tf 20 325 Td "
+        b"(con el detalle completo de las cuentas patrimoniales y del) Tj ET\n"
+        b"BT /F1 10 Tf 20 310 Td "
+        b"(resultado del ejercicio fiscal correspondiente al periodo.) Tj ET\n"
+    )
+    filas = [
+        ("Cuenta", "2025"),
+        ("Efectivo y equivalentes", "1000"),
+        ("Patrimonio neto", "9500"),
+    ]
+    alto_fila = 22
+    x_izq, x_div, x_der = -5, 170, 320  # x_izq NEGATIVO: fuera del MediaBox
+    y_top = 40 + alto_fila * len(filas)
+    comandos = [b"1 w\n"]
+    for i in range(len(filas) + 1):
+        y = y_top - i * alto_fila
+        comandos.append(f"{x_izq} {y} m {x_der} {y} l S\n".encode())
+    y_bottom = y_top - alto_fila * len(filas)
+    for x in (x_izq, x_div, x_der):
+        comandos.append(f"{x} {y_top} m {x} {y_bottom} l S\n".encode())
+    for i, (izq, der) in enumerate(filas):
+        y_texto = y_top - i * alto_fila - int(alto_fila * 0.65)
+        comandos.append(f"BT /F1 9 Tf {x_izq + 5} {y_texto} Td ({izq}) Tj ET\n".encode())
+        comandos.append(f"BT /F1 9 Tf {x_div + 5} {y_texto} Td ({der}) Tj ET\n".encode())
+    stream = prosa + b"".join(comandos)
+    return _pdf_una_pagina(destino, stream, mediabox="0 0 340 400")
+
+
 def test_detecta_que_un_pdf_nativo_tiene_texto(tmp_path: Path):
     assert pdf.tiene_capa_de_texto(_pdf_con_texto(tmp_path / "n.pdf")) is True
 
@@ -401,6 +461,32 @@ def test_version_no_revienta_si_pdfplumber_no_esta_instalado(monkeypatch):
     monkeypatch.setitem(sys.modules, "pdfplumber", None)
     version = pdf._version()
     assert version is None
+
+
+def test_una_tabla_con_bbox_fuera_de_la_pagina_no_tumba_el_documento(tmp_path: Path):
+    """Ronda 3, el caso EXACTO de los dos documentos reales de
+    lacteos-victoria (2026-09-21): antes, este `ValueError` escapaba del
+    bucle entero y `extraer()` devolvía 'error' con CERO bytes -- todo el
+    documento perdido por una sola tabla mal delimitada. Ahora se ataja por
+    tabla: la prosa (incluido el contenido crudo de la tabla fallida, que
+    queda sin recortar) se conserva, el estado es 'parcial' -- nunca 'ok'
+    callando que se perdió una tabla --, y el detalle declara cuántas
+    tablas fallaron y en qué páginas."""
+    origen = _pdf_con_tabla_bbox_fuera_de_la_pagina(tmp_path / "bbox_fuera.pdf")
+    r = pdf.extraer(origen)
+    assert r.estado == "parcial"
+    md = r.salidas["texto.md"]
+    # la prosa de la página no se pierde.
+    assert "ACTIVOS TOTALES 1234" in md
+    assert "Estado de Situacion Financiera" in md
+    # el contenido crudo de la tabla fallida tampoco -- no se recortó, así
+    # que sigue en la prosa (sin la estructura de bloque cercado).
+    assert "Efectivo y equivalentes" in md
+    assert "9500" in md
+    # no se emite bloque estructurado para la tabla que falló.
+    assert "```tabla" not in md
+    assert r.detalle["tablas_fallidas"] == {"cantidad": 1, "paginas": [1]}
+    assert r.detalle["tablas"] == 0
 
 
 def test_tabla_a_bloque_escapa_el_pipe_de_una_celda():
