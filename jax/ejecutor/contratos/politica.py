@@ -111,21 +111,49 @@ class FalloDeEjemplo:
 # con `reglas: []`: no dependen de lo que la DB tenga ni de que `ejecutor_regla` las
 # declare.
 #
+# REDUCIDO (ronda 3, auditoría adversarial, 2026-09-22 -- "no persigas más patrones
+# léxicos: es la tercera vez que un filtro sobre el texto no converge"). La ronda 2 tenía
+# DIEZ reglas, y varias daban falso positivo sobre trabajo LEGÍTIMO de administrar
+# máquinas con clientes -- medido, no supuesto (ver el commit de esta ronda, con los
+# cuatro casos reproducidos ANTES del arreglo):
+#   - `systemctl enable cliente-app.service` en `bridge` -- bloqueaba habilitar un
+#     servicio del CLIENTE, que es trabajo normal de esa máquina.
+#   - `chattr -i /var/www/cliente/.user.ini` -- PHP-FPM usa `.user.ini` con `chattr +i/-i`
+#     como parte de administrar hosting compartido; nada que ver con el registro de C3.
+#   - `chmod 600 /home/cliente/.ssh/authorized_keys` -- el `authorized_keys` de OTRA
+#     cuenta, no el de axioma ni el de `/etc/ssh/authorized_keys.d/`.
+#   - `ls -la .../ejecutor-freno-remoto > /tmp/salida.txt` -- una LECTURA (ls) redirigida
+#     a un archivo se marcaba como si escribiera el binario, por el `>` suelto en `_MUTA`.
+#
+# La respuesta NO es una regex más fina (ese camino ya se probó dos veces y no converge):
+# es reducir el léxico a lo que es INEQUÍVOCO -- nombres que NINGÚN trabajo legítimo de
+# administrar una máquina, cliente o no, va a mencionar nunca -- y mover todo lo genérico
+# (authorized_keys, chattr, cron, unidades de systemd, permisos de sudoers en general) a
+# un contrato ESTRUCTURAL: una huella (sha256 + listado + `lsattr`) tomada por el
+# controlador AL ARRANCAR y AL CERRAR cada misión, fuera de la jaula, que detecta el
+# cambio pase LO QUE PASE por el texto del comando (`verificar_huella.py`). Esa es la
+# diferencia entre "adivinar por patrón" y "detectar por estado": esto último no se le
+# escapa a ningún envoltorio, alias o truco de shell nuevo.
+#
+# Quedan CUATRO reglas, las que superan la prueba "¿alguna vez un trabajo legítimo, de
+# cualquier máquina, con o sin clientes, mencionaría este nombre EXACTO?" con un NO
+# rotundo -- son literalmente el nombre propio de artefactos del Ejecutor, no una ruta de
+# sistema compartida con cualquier otra cosa. Y `_MUTA` ya NO incluye `>` suelto: una
+# lectura redirigida a un archivo no es una escritura del objetivo.
+#
 # Rutas verificadas contra el árbol real (no inventadas): `/etc/sudoers.d/50-ejecutor-
 # axioma-registro` (ops/ejecutor/instalar_en_maquina.sh), `/var/log/sudo-<cuenta>.log`
-# + `/var/log/sudo-io/` (idem, líneas 79-89), `/etc/ssh/authorized_keys.d/<cuenta>`
-# (jax/ejecutor/contratos/revocacion.py), `/usr/local/sbin/ejecutor-revocar` y
+# + `/var/log/sudo-io/` (idem, líneas 79-89), `/usr/local/sbin/ejecutor-revocar` y
 # `/usr/local/sbin/ejecutor-freno-remoto` (mismo instalador).
-_MUTA = r"(?:\brm\b|\bmv\b|\btruncate\b|\bshred\b|\bunlink\b|\bchmod\b|\bchown\b|\bdd\b|\btee\b|\bsed\s+-i\b|>)"
+_MUTA = r"(?:\brm\b|\bmv\b|\btruncate\b|\bshred\b|\bunlink\b|\bchmod\b|\bchown\b|\bdd\b|\btee\b|\bsed\s+-i\b)"
 
 
 def _bash(comando: str) -> dict:
     return {"tool_name": "Bash", "tool_input": {"command": comando}}
 
 
-def _nucleo(codigo: str, objetivo: str, *, exige_muta: bool, coincide: str, no_coincide: tuple[str, ...],
-           id_: int) -> Regla:
-    cuerpo = fr"(?=.*{_MUTA})(?=.*(?:{objetivo}))" if exige_muta else fr"(?:{objetivo})"
+def _nucleo(codigo: str, objetivo: str, *, coincide: str, no_coincide: tuple[str, ...], id_: int) -> Regla:
+    cuerpo = fr"(?=.*{_MUTA})(?=.*(?:{objetivo}))"
     return Regla(
         id=id_, codigo=codigo, tipo="prohibido", herramientas=re.compile(r"Bash"), campo="command",
         patron=re.compile(cuerpo, re.S), ambito_hosts=frozenset(), ambito_roles=frozenset(), es_canario=False,
@@ -138,36 +166,20 @@ def _nucleo(codigo: str, objetivo: str, *, exige_muta: bool, coincide: str, no_c
 # política de turno declare un host remoto con un nombre en particular (la regla
 # igual se aplica sobre SSH: `ambito_hosts` vacío no filtra por destino).
 NUCLEO_REGLAS: tuple[Regla, ...] = (
-    _nucleo("nucleo_sudoers_ejecutor", r"/etc/sudoers\.d/5\d*-ejecutor-", exige_muta=True, id_=90001,
+    _nucleo("nucleo_sudoers_ejecutor", r"/etc/sudoers\.d/5\d*-ejecutor-", id_=90001,
            coincide="rm -f /etc/sudoers.d/50-ejecutor-axioma-registro",
-           no_coincide=("cat /etc/sudoers.d/50-ejecutor-axioma-registro", "rm -f /tmp/basura")),
-    _nucleo("nucleo_authorized_keys", r"authorized_keys", exige_muta=True, id_=90002,
-           coincide="truncate -s0 /etc/ssh/authorized_keys.d/axioma",
-           no_coincide=("cat /etc/ssh/authorized_keys.d/axioma", "rm -f /tmp/otra")),
-    _nucleo("nucleo_freno_remoto", r"ejecutor-freno-remoto", exige_muta=True, id_=90003,
+           no_coincide=("cat /etc/sudoers.d/50-ejecutor-axioma-registro", "rm -f /tmp/basura",
+                        "ls -la /etc/sudoers.d/50-ejecutor-axioma-registro > /tmp/salida.txt")),
+    _nucleo("nucleo_freno_remoto", r"ejecutor-freno-remoto", id_=90002,
            coincide="rm -f /usr/local/sbin/ejecutor-freno-remoto",
-           no_coincide=("ls -la /usr/local/sbin/ejecutor-freno-remoto", "rm -f /tmp/x")),
-    _nucleo("nucleo_revocar", r"ejecutor-revocar", exige_muta=True, id_=90004,
+           no_coincide=("ls -la /usr/local/sbin/ejecutor-freno-remoto", "rm -f /tmp/x",
+                        "ls -la /usr/local/sbin/ejecutor-freno-remoto > /tmp/salida.txt")),
+    _nucleo("nucleo_revocar", r"ejecutor-revocar", id_=90003,
            coincide="chmod 000 /usr/local/sbin/ejecutor-revocar",
            no_coincide=("stat /usr/local/sbin/ejecutor-revocar", "chmod 000 /tmp/x")),
-    _nucleo("nucleo_sudo_log", r"/var/log/sudo-(?:io\b|[\w.-]*\.log\b)", exige_muta=True, id_=90005,
+    _nucleo("nucleo_sudo_log", r"/var/log/sudo-(?:io\b|[\w.-]*\.log\b)", id_=90004,
            coincide="rm -f /var/log/sudo-axioma.log",
            no_coincide=("cat /var/log/sudo-axioma.log", "rm -f /tmp/x")),
-    _nucleo("nucleo_chattr", r"\bchattr\b", exige_muta=False, id_=90006,
-           coincide="chattr -a /opt/ejecutor/lib/registro.jsonl",
-           no_coincide=("lsattr /opt/ejecutor/lib/registro.jsonl",)),
-    _nucleo("nucleo_cron_editar", r"\bcrontab\s+-[a-z]*e\b", exige_muta=False, id_=90007,
-           coincide="crontab -e",
-           no_coincide=("crontab -l",)),
-    _nucleo("nucleo_cron_archivo", r"/etc/cron\.(?:d|daily|hourly|weekly|monthly)/", exige_muta=True, id_=90008,
-           coincide="echo '* * * * * root touch /tmp/x' > /etc/cron.d/persistencia",
-           no_coincide=("cat /etc/cron.d/existente",)),
-    _nucleo("nucleo_systemd_habilitar", r"\bsystemctl\s+(?:--now\s+)?enable\b", exige_muta=False, id_=90009,
-           coincide="systemctl enable mio.service",
-           no_coincide=("systemctl status ejecutor-freno.service",)),
-    _nucleo("nucleo_systemd_archivo", r"/etc/systemd/system/", exige_muta=True, id_=90010,
-           coincide="rm -f /etc/systemd/system/mio.service",
-           no_coincide=("cat /etc/systemd/system/ejecutor-freno.service",)),
 )
 
 

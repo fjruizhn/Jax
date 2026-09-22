@@ -23,16 +23,18 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, pausa, politica, vigia
+from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, huella, pausa, politica, vigia
 from jax.ejecutor.contratos import auditor as A
 
 log = logging.getLogger("ejecutor.vigia_servicio")
 VARIABLE_LATIDO_CADA_S = "JAX_EJECUTOR_VIGIA_LATIDO_CADA_S"
+_TOPE_HUELLA_S = 30
 
 
 class MisionIlegible(ValueError):
@@ -78,10 +80,47 @@ def _borrar_latido(ruta: Path) -> None:
         pass
 
 
+async def _huella_de_cada_host(hosts_con_sudo: tuple, *, tomar_huella) -> dict:
+    return {h: await tomar_huella(h) for h in hosts_con_sudo}
+
+
+async def _verificar_huellas_al_cierre(pausa_ruta: Path, mision: Mision, huellas_iniciales: dict,
+                                       hosts_con_sudo: tuple, *, tomar_huella, pausar) -> None:
+    """M-1/M-2 (ronda 3): huella AL CERRAR contra `huellas_iniciales` (tomada al abrir,
+    por `correr_mision`). Un hallazgo no declarado en el texto de la misión pone la
+    pausa. Fail-soft por host, a propósito: si TOMAR la huella de cierre de UN host
+    falla (máquina caída, ssh que no responde), se registra y no pausa por eso solo --
+    y el resto de los hosts se sigue verificando igual. Perder la verificación no es lo
+    mismo que encontrar un cambio, y esto no reemplaza a C6, que ya exige que la
+    máquina esté viva."""
+    for h in hosts_con_sudo:
+        try:
+            despues = await tomar_huella(h)
+        except Exception as exc:  # fail-soft: ver docstring de la función
+            log.error("vigia_servicio huella_no_verificada host=%s tipo=%s", h, type(exc).__name__)
+            continue
+        antes = huellas_iniciales.get(h)
+        if antes is None:  # no se pudo tomar AL ABRIR (mismo criterio fail-soft): nada que comparar
+            continue
+        encontrados = huella.hallazgos(antes, despues, mision.texto)
+        if encontrados:
+            log.critical("vigia_servicio huella_cambio_no_declarado host=%s lineas=%d", h, len(encontrados))
+            await asyncio.to_thread(pausar, pausa_ruta, {
+                "origen": "huella", "motivo": "huella_cambio_no_declarado",
+                "host": h, "detalle": list(encontrados[:20])})
+
+
 async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s: float, lote_max: int,
                         intervalo_s: float, auditar, fin: asyncio.Event, exigir=arranque.exigir_contratos,
-                        vigilar=vigia.vigilar, maquinas: tuple) -> None:
-    """Lanza ContratosNoVerificados sin haber latido nunca si un contrato no está vivo."""
+                        vigilar=vigia.vigilar, maquinas: tuple, hosts_con_sudo: tuple = (),
+                        tomar_huella=None, pausar=pausa.poner_pausa) -> None:
+    """Lanza ContratosNoVerificados sin haber latido nunca si un contrato no está vivo.
+
+    `hosts_con_sudo`/`tomar_huella` (M-1/M-2, ronda 3): si se dan los dos, se toma una
+    huella de cada host ANTES de latir y otra AL CERRAR (fin normal); un cambio no
+    declarado en el texto de la misión pone la pausa. `tomar_huella=None` (el default):
+    sin huella -- así los llamadores que no la necesitan (o corren en un entorno sin
+    ssh/sudo, como los tests que no la ejercitan) no cambian de comportamiento."""
     if ctx.hosts_mision != mision.hosts:
         raise ValueError("contexto_de_otra_mision")
     await exigir(ctx)
@@ -92,10 +131,16 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
     cfg = vigia.ConfigVigia(registro=ctx.registro, desde_byte=desde, mision=mision.texto, lote_max=lote_max,
                             intervalo_s=intervalo_s, pausa=ctx.pausa, latido=ctx.latido, latido_cada_s=latido_cada_s,
                             maquinas=maquinas)
+    huellas_iniciales = {}
+    if tomar_huella is not None and hosts_con_sudo:
+        huellas_iniciales = await _huella_de_cada_host(hosts_con_sudo, tomar_huella=tomar_huella)
     log.info("vigia_servicio mision_abierta desde_byte=%s hosts=%s", desde, ",".join(sorted(mision.hosts)))
     await vigilar(cfg, auditar, fin)
     # Sólo en el fin normal: con una excepción el latido se deja envejecer y vigia.py ya puso la pausa.
     await asyncio.to_thread(_borrar_latido, ctx.latido)
+    if tomar_huella is not None and hosts_con_sudo:
+        await _verificar_huellas_al_cierre(ctx.pausa, mision, huellas_iniciales, hosts_con_sudo,
+                                           tomar_huella=tomar_huella, pausar=pausar)
     log.info("vigia_servicio mision_cerrada")
 
 
@@ -116,10 +161,27 @@ async def _principal(ruta_mision: Path) -> int:
         auditor_f, _, _ = await eleccion_c5.elegir_y_resolver_auditor(
             conn, cfg=cfg, hosts_mision=mision.hosts, resolve_facet=resolve_facet)
     doc = json.loads(await asyncio.to_thread(ctx.cuenta.politica.read_bytes))
+    hosts_pol = {h.nombre: h for h in politica.validar(doc).hosts}
     maquinas = A.maquinas_de(politica.validar(doc).hosts, mision.hosts)
+    # M-1/M-2 (ronda 3): "con sudo" hoy equivale a "remota" -- hall9000 es la única local
+    # y quedó sudo=false (M2, jaula bwrap con NoNewPrivs); las tres remotas tienen sudo
+    # real (Fase 3). `politica.Host` no trae un campo `sudo` propio (eso vive en
+    # maquinas.toml, host-bound, Fase 0, no se lee en runtime) -- si el día de mañana
+    # una máquina remota pierde el sudo o una local lo gana, este criterio hay que
+    # revisarlo junto con esa migración, no antes.
+    hosts_con_sudo = tuple(sorted(n for n in mision.hosts if n in hosts_pol and not hosts_pol[n].es_local))
 
     async def auditar(lote):
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
+
+    async def tomar_huella(nombre_host: str) -> huella.Huella:
+        h = hosts_pol[nombre_host]
+        remoto = (f"ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=yes -p {int(h.puerto)} "
+                 f"{ctx.cuenta.nombre}@{shlex.quote(h.ip)} {shlex.quote(huella.comando_huella(ctx.cuenta.nombre))}")
+        rc, salida, errores = await cuenta_axioma.correr_en_la_cuenta(ctx.cuenta, remoto, tope_s=_TOPE_HUELLA_S)
+        if rc != 0:
+            raise RuntimeError(f"huella_rc_{rc}: {errores.decode(errors='replace')[:200]}")
+        return huella.huella_desde_salida(nombre_host, salida)
 
     fin = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -127,7 +189,8 @@ async def _principal(ruta_mision: Path) -> int:
         loop.add_signal_handler(senal, fin.set)
     try:
         await correr_mision(ctx, mision, latido_cada_s=latido_cada_s, lote_max=cfg.lote_max,
-                            intervalo_s=cfg.intervalo_s, auditar=auditar, fin=fin, maquinas=maquinas)
+                            intervalo_s=cfg.intervalo_s, auditar=auditar, fin=fin, maquinas=maquinas,
+                            hosts_con_sudo=hosts_con_sudo, tomar_huella=tomar_huella)
     except arranque.ContratosNoVerificados as exc:
         for f in exc.fallos:
             print(formato.campos((("contrato", f.contrato), ("codigo", f.codigo)) + tuple(f.datos)), flush=True)

@@ -105,10 +105,16 @@ def test_las_tres_skills_declaradas():
 
 
 @requiere_constitucion_real
-def test_seis_impossibles_incluido_pero_no_plugins():
+def test_seis_impossibles_y_plugins_no_estan():
+    """MINOR (ronda 3, auditoría adversarial 2026-09-22): LOS SEIS IMPOSIBLES se sacó de
+    `secciones` -- traía "● Operativo"/"◎ Q3 2026" SIN FECHA (una verdad operacional que
+    caduca, sin forma de que axioma sepa si sigue vigente) y una frase que apunta al
+    "bloque de host" que nunca se incluye acá. El inventario de máquinas (de
+    maquinas.toml) ya da la misma topología sin esos dos problemas."""
     doc = g.generar()
-    assert "LOS SEIS IMPOSIBLES" in doc
-    assert "PLUGINS" not in doc.split("LOS SEIS IMPOSIBLES", 1)[0].split("## ")[-1]
+    assert "LOS SEIS IMPOSIBLES" not in doc
+    assert "PLUGINS" not in doc
+    assert "bloque de host" not in doc
 
 
 # --- honestidad de la identidad (auditoría adversarial, ronda 2, 2026-09-22) ------------
@@ -172,12 +178,12 @@ def test_go_por_mision_cubre_solo_el_plan_aprobado():
 # B3/M1 (auditoría adversarial 2026-09-22): las pruebas de arriba dependen de que ESTA
 # máquina tenga /home/fruiz/claude-skills/common/CLAUDE.md.core y se SALTAN donde no
 # está -- en CI, siempre. Ninguna de las afirmaciones que importan (SOLO LEES ausente,
-# C1-C6, machine-id, LOS SEIS IMPOSIBLES incluido/PLUGINS excluido, la honestidad de
-# B1/B2/LÍMITE/M5) depende del CONTENIDO real de la constitución -- la identidad vive
-# en cerebros.toml (siempre disponible) y "LOS SEIS IMPOSIBLES" sólo necesita que la
-# fuente TENGA esa sección con ese título exacto. `generar(fuente_constitucion=...)`
-# (seam agregado en esta ronda) deja pasar un doble hermético con las seis secciones
-# declaradas y nada más -- las mismas pruebas corren en CI sin la ruta host-bound.
+# C1-C6, machine-id, la honestidad de B1/B2/LÍMITE/M5) depende del CONTENIDO real de la
+# constitución -- la identidad vive en cerebros.toml (siempre disponible).
+# `generar(fuente_constitucion=...)` (seam agregado en la ronda 2) deja pasar un doble
+# hermético con las cinco secciones declaradas (LOS SEIS IMPOSIBLES ya no es una de
+# ellas, ronda 3 MINOR) y nada más -- las mismas pruebas corren en CI sin la ruta
+# host-bound.
 
 DOBLE_CONSTITUCION = """## LAS POLÍTICAS DE MARINA
 
@@ -190,10 +196,6 @@ Contenido de prueba.
 ## LOS NUEVE PRINCIPIOS OPERATIVOS
 
 Contenido de prueba.
-
-## LOS SEIS IMPOSIBLES
-
-Contenido de prueba: la topología de las máquinas.
 
 ## JERARQUÍA DE AUTORIDAD
 
@@ -249,10 +251,11 @@ def test_con_doble_la_regla_de_machine_id_esta_escrita(doble_constitucion):
     assert "machine-id" in doc or "machine_id" in doc
 
 
-def test_con_doble_seis_impossibles_incluido_pero_no_plugins(doble_constitucion):
+def test_con_doble_seis_impossibles_y_plugins_no_estan(doble_constitucion):
     doc = g.generar(fuente_constitucion=doble_constitucion)
-    assert "LOS SEIS IMPOSIBLES" in doc
-    assert "PLUGINS" not in doc.split("LOS SEIS IMPOSIBLES", 1)[0].split("## ")[-1]
+    assert "LOS SEIS IMPOSIBLES" not in doc
+    assert "PLUGINS" not in doc
+    assert "bloque de host" not in doc
 
 
 def test_con_doble_no_promete_que_el_gancho_bloquea_todo_lo_destructivo(doble_constitucion):

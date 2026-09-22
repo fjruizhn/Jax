@@ -22,7 +22,7 @@ def _ctx(tmp_path, hosts=frozenset({"hall9000"})):
     reg = Registro(tmp_path / "registro.jsonl")
     reg.anotar({"evento": "registro_abierto", "pid": 1})
     reg.cerrar()
-    return AR.Contexto(cuenta=Cuenta("axioma", 58291, Path("/k"), Path("/n"), tmp_path / "lib", tmp_path / "p.json"),
+    return AR.Contexto(cuenta=Cuenta("axioma", 58291, Path("/k"), Path("/n"), tmp_path / "lib", tmp_path / "p.json", Path("/home/axioma")),
                        repo=tmp_path, puerto_canario=1, registro=tmp_path / "registro.jsonl", puerto_proxy=2,
                        sondas=(3,), estado_freno=tmp_path / "e.json", llaves_root=tmp_path / "llaves",
                        tope_gancho_s=10, hosts_mision=hosts, pausa=tmp_path / "PAUSA", latido=tmp_path / "latido",
@@ -192,3 +192,116 @@ def test_el_vigia_audita_con_las_maquinas_de_la_mision(tmp_path):
                               fin=asyncio.Event(), exigir=exigir, vigilar=vigilar, maquinas=maquinas)
     asyncio.run(escenario())
     assert vistas == [maquinas]
+
+
+# --- huella (M-1/M-2, ronda 3, auditoría adversarial 2026-09-22) ---------------------
+
+async def _exigir_ok(c):
+    return None
+
+
+async def _vigilar_noop(cfg, auditar, fin):
+    return None
+
+
+def test_sin_tomar_huella_no_se_toma_ninguna(tmp_path):
+    """`tomar_huella=None` (el default): cero llamadas, cero pausa -- los llamadores que
+    no la necesitan no cambian de comportamiento."""
+    ctx = _ctx(tmp_path)
+    llamadas = []
+
+    async def tomar_huella_falsa(h):
+        llamadas.append(h)
+
+    async def escenario():
+        await S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
+                              fin=asyncio.Event(), exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS,
+                              hosts_con_sudo=("atemai",))  # sin tomar_huella: no debería usarse
+    asyncio.run(escenario())
+    assert llamadas == []
+    assert not ctx.pausa.exists()
+
+
+def _huella_secuencia(mapa_por_llamada):
+    """`mapa_por_llamada = {host: [huella_1, huella_2, ...]}` -- la primera llamada por
+    host devuelve el primer elemento, la segunda el segundo, etc."""
+    contadores = {h: 0 for h in mapa_por_llamada}
+
+    async def tomar(host):
+        i = contadores[host]
+        contadores[host] += 1
+        valor = mapa_por_llamada[host][i]
+        if isinstance(valor, Exception):
+            raise valor
+        return valor
+    return tomar
+
+
+def test_huella_cambiada_y_no_declarada_pone_la_pausa(tmp_path):
+    from jax.ejecutor.contratos import huella as H
+    ctx = _ctx(tmp_path)
+    antes = H.huella_desde_salida("atemai", b"abc  /etc/sudoers.d/50-ejecutor-axioma-registro\n")
+    despues = H.huella_desde_salida(
+        "atemai", b"abc  /etc/sudoers.d/50-ejecutor-axioma-registro\n"
+                  b"def  /root/.ssh/authorized_keys\n")
+    tomar_huella = _huella_secuencia({"atemai": [antes, despues]})
+
+    async def escenario():
+        await S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
+                              fin=asyncio.Event(), exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS,
+                              hosts_con_sudo=("atemai",), tomar_huella=tomar_huella)
+    asyncio.run(escenario())
+    assert ctx.pausa.exists()
+    import json
+    datos = json.loads(ctx.pausa.read_text())
+    assert datos["origen"] == "huella" and datos["motivo"] == "huella_cambio_no_declarado"
+    assert datos["host"] == "atemai"
+    assert "authorized_keys" in datos["detalle"][0]
+
+
+def test_huella_cambiada_pero_declarada_en_la_mision_no_pausa(tmp_path):
+    from jax.ejecutor.contratos import huella as H
+    ctx = _ctx(tmp_path)
+    antes = H.huella_desde_salida("hall9000", b"abc  /etc/sudoers.d/50-ejecutor-axioma-registro\n")
+    despues = H.huella_desde_salida(
+        "hall9000", b"abc  /etc/sudoers.d/50-ejecutor-axioma-registro\n"
+                    b"def  /etc/systemd/system/mi-servicio.service\n")
+    tomar_huella = _huella_secuencia({"hall9000": [antes, despues]})
+    mision = S.Mision("Crear /etc/systemd/system/mi-servicio.service en hall9000", frozenset({"hall9000"}))
+
+    async def escenario():
+        await S.correr_mision(ctx, mision, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
+                              fin=asyncio.Event(), exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS,
+                              hosts_con_sudo=("hall9000",), tomar_huella=tomar_huella)
+    asyncio.run(escenario())
+    assert not ctx.pausa.exists()
+
+
+def test_sin_cambio_en_la_huella_no_pausa(tmp_path):
+    from jax.ejecutor.contratos import huella as H
+    ctx = _ctx(tmp_path)
+    igual = H.huella_desde_salida("atemai", b"abc  /etc/sudoers.d/50-ejecutor-axioma-registro\n")
+    tomar_huella = _huella_secuencia({"atemai": [igual, igual]})
+
+    async def escenario():
+        await S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
+                              fin=asyncio.Event(), exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS,
+                              hosts_con_sudo=("atemai",), tomar_huella=tomar_huella)
+    asyncio.run(escenario())
+    assert not ctx.pausa.exists()
+
+
+def test_huella_de_cierre_ilegible_no_pausa_por_eso_solo(tmp_path):
+    """Fail-soft: perder la VERIFICACIÓN (ssh caído, timeout) no es, por sí solo, un
+    hallazgo -- eso ya lo cubre C6 (la máquina tiene que estar viva)."""
+    from jax.ejecutor.contratos import huella as H
+    ctx = _ctx(tmp_path)
+    antes = H.huella_desde_salida("atemai", b"abc  /etc/sudoers.d/50-ejecutor-axioma-registro\n")
+    tomar_huella = _huella_secuencia({"atemai": [antes, RuntimeError("ssh caído")]})
+
+    async def escenario():
+        await S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
+                              fin=asyncio.Event(), exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS,
+                              hosts_con_sudo=("atemai",), tomar_huella=tomar_huella)
+    asyncio.run(escenario())
+    assert not ctx.pausa.exists()

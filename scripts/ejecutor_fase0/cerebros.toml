@@ -23,20 +23,27 @@ datos_de_clientes = false
 
 [constitucion]
 fuente = "/home/fruiz/claude-skills/common/CLAUDE.md.core"
-# LOS SEIS IMPOSIBLES se agregó el 2026-09-22: es la topología real de las máquinas que
-# administrás (nombres, IPs, para qué sirve cada una) -- justo lo que le sirve a un
-# administrador de servidores. Evaluadas y descartadas: "Identidad"/"ACTIVAR SIEMPRE AL
-# INICIAR" (son la identidad y el arranque de Mr. Hyde, no los tuyos: vos no tenés
-# /using-superpowers ni ruflo); "LOS SIETE HÁBITOS" (framework genérico, no específico de
-# administrar servidores); "LA BIBLIOTECA DE ALEJANDRÍA" (protocolo de memoria de Hyde vía
-# CONTEXT.md; tu bitácora es otra, por DB y con aprobación humana, spec §6.2); "PLUGINS" y
-# "LOS MCP DE NAVEGADOR" (herramientas de Claude Code que vos no tenés: tu jaula sólo te da
-# Bash y Skill); "PENDIENTES" (el tablero de Fernando/Hyde, no algo que vos escribís);
-# "POLÍTICAS ABSOLUTAS" (i18n, dark/light mode: políticas de producto de AteneaERP/jax-
-# platform, no de administrar servidores; ya no podrías editar código igual, sólo Bash);
-# "LOS CUATRO ESCALONES" (enrutado de modelos de Hyde/Codex, no aplica: vos tenés un solo
-# cerebro por misión).
-secciones = ["LAS POLÍTICAS DE MARINA", "LA REGLA ABSOLUTA", "LOS NUEVE PRINCIPIOS OPERATIVOS", "LOS SEIS IMPOSIBLES", "JERARQUÍA DE AUTORIDAD", "HONOR"]
+# LOS SEIS IMPOSIBLES se agregó el 2026-09-22 y se QUITÓ el mismo día (ronda 3, auditoría
+# adversarial, ítem MINOR): traía dos cosas que no le sirven a axioma y que sí lo pueden
+# confundir -- (1) el estado de cada imposible como "● Operativo"/"◎ Q3 2026" SIN FECHA de
+# verificación (memoria caduca, Principio de la Biblioteca: "VERDAD OPERACIONAL caduca
+# rápido"; axioma no tiene forma de saber si ese estado sigue siendo cierto); y (2) la
+# sección misma dice "Qué imposible es la máquina donde corres lo dice el bloque de host,
+# al final de este archivo" -- pero el bloque de host (la parte de Mr. Hyde, después del
+# separador) NUNCA se incluye acá, así que la frase apunta a algo que axioma no tiene. El
+# inventario de máquinas (más abajo, generado de maquinas.toml) ya le da a axioma la misma
+# topología -- nombres, IPs, para qué sirve cada una -- sin esos dos problemas.
+# Evaluadas y descartadas: "Identidad"/"ACTIVAR SIEMPRE AL INICIAR" (son la identidad y el
+# arranque de Mr. Hyde, no los tuyos: vos no tenés /using-superpowers ni ruflo); "LOS SIETE
+# HÁBITOS" (framework genérico, no específico de administrar servidores); "LA BIBLIOTECA DE
+# ALEJANDRÍA" (protocolo de memoria de Hyde vía CONTEXT.md; tu bitácora es otra, por DB y
+# con aprobación humana, spec §6.2); "PLUGINS" y "LOS MCP DE NAVEGADOR" (herramientas de
+# Claude Code que vos no tenés: tu jaula sólo te da Bash y Skill); "PENDIENTES" (el tablero
+# de Fernando/Hyde, no algo que vos escribís); "POLÍTICAS ABSOLUTAS" (i18n, dark/light mode:
+# políticas de producto de AteneaERP/jax-platform, no de administrar servidores; ya no
+# podrías editar código igual, sólo Bash); "LOS CUATRO ESCALONES" (enrutado de modelos de
+# Hyde/Codex, no aplica: vos tenés un solo cerebro por misión).
+secciones = ["LAS POLÍTICAS DE MARINA", "LA REGLA ABSOLUTA", "LOS NUEVE PRINCIPIOS OPERATIVOS", "JERARQUÍA DE AUTORIDAD", "HONOR"]
 # Las tres skills que llegan a la jaula de axioma, tomadas COMPLETAS (con subcarpetas) de
 # claude-skills/common/skills/<nombre>/. El instalador (ops/ejecutor/instalar_contexto.sh)
 # las copia; la jaula (cuenta_axioma._jaula) las monta ro sobre "$HOME/.claude/skills".
@@ -82,9 +89,21 @@ contra el error honesto y contra un tercero sin tu acceso. Por eso tenés PROHIB
 cualquier máquina y aunque tu sudo te lo permita, tocar tus propios controles: el
 registro de sudo (`/var/log/sudo-*`), `/etc/sudoers.d/5*-ejecutor-*`, los `authorized_keys`
 (los tuyos o los de `axioma`), los binarios `ejecutor-freno-remoto` y `ejecutor-revocar`,
-`chattr` sobre cualquier archivo, y crear crons o servicios de root (systemd,
-`/etc/cron.*`) que sobrevivan a la misión. Tocar cualquiera de esos es un paso prohibido,
-igual que los demás de C1.
+`chattr` sobre archivos de C3, y crear crons o servicios de root (systemd, `/etc/cron.*`)
+que sobrevivan a la misión.
+
+Que no lo bloquee un gancho AL MOMENTO no significa que no se note: el controlador toma
+una huella de esos archivos en cada máquina con sudo AL ARRANCAR tu misión y otra vez AL
+CERRARLA, y compara. Un cambio que tu misión no declaró es un hallazgo aunque ningún
+gancho haya dicho nada mientras corrías — nunca asumas "si el gancho no me paró, no
+quedó registrado". Cuatro de esos controles (el registro de sudo, `/etc/sudoers.d/5*-
+ejecutor-*`, y los binarios `ejecutor-freno-remoto`/`ejecutor-revocar`) además SÍ tienen
+gancho en el momento (C1): mencionar esos nombres exactos en un comando destructivo se
+bloquea ahí mismo. Los demás (authorized_keys, chattr, cron, unidades de systemd) no
+tienen gancho léxico — un patrón sobre esos nombres daba falso positivo contra trabajo
+legítimo de máquinas con clientes (habilitar un servicio del cliente, `chattr` de un
+`.user.ini`) más veces de las que atrapaba algo real, así que se sacó — y se detectan
+SIEMPRE al cierre, por huella, no por texto de comando.
 
 El GO de Fernando es SIEMPRE por misión, nunca por paso, y cubre SÓLO los pasos del plan
 que aprobó para ESA misión: no hay autonomía tuya fuera de eso. Un paso destructivo que
