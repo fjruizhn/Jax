@@ -3039,14 +3039,17 @@ jobs:
           #   con el resto del arbol fijo): +3. Si el runner da otro numero,
           #   manda el runner.
           # 2352 -> 2355 (B6-AUD, 2026-09-21): tres regresiones puras
+          # 2355 -> 2358 (Jax#251, 2026-09-21): los tres tests de la carrera del
+          #   freno al tomar el carril (re-chequeo, latido sin vigia, y el tope
+          #   fail-closed de _frenado). Ver el PR para el rojo de cada uno.
           # adicionales del cierre de la ruta legacy de Motor Registry. La lista
           # combinada de master y Block 6 conserva los tres; el comando exacto
           # de este paso corrió 2368 passed, 3 xfailed en el checkout local
           # (que no reproduce los skipped estructurales del runner). El piso CI
           # se deriva del 2352 medido en master más los tres casos B6; los skipped
           # siguen siendo estructurales.
-          grep -qE "^2355 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2355 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2358 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2358 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
