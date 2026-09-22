@@ -14,9 +14,11 @@ REAL de `reaper.reap_orphaned_pipelines()` contra la base de TEST -- no un
 mock del barrido, la función que corre en producción."""
 from __future__ import annotations
 
+import json
 import time
 import unittest
 import uuid
+from unittest import mock
 
 from base_de_test import exigir_base_de_test  # noqa: E402
 
@@ -24,6 +26,24 @@ exigir_base_de_test()
 
 from jacobs import descarte, reaper, store  # noqa: E402
 from jacobs.models import Pipeline, PipelineStatus  # noqa: E402
+
+#: Mismo mapeo que jacobs/routes.py::_EVENTO_DE -- Task 3, fix round 1
+#: (Ruling 9): `store.pipeline_transicion_descarte` ahora recibe el evento y
+#: lo escribe en la MISMA transacción que el CAS. Este helper arma esos dos
+#: kwargs para no repetir el payload en cada llamada de este archivo.
+_EVENTO_DE = {
+    "discard": "PIPELINE_DISCARDED", "recover": "PIPELINE_RECOVERED",
+    "hide": "PIPELINE_HIDDEN", "restore": "PIPELINE_RESTORED",
+}
+
+
+async def _transicion(pid: str, epoca: int, accion: str, *,
+                       desde: PipelineStatus, a: PipelineStatus, user_id: str) -> bool:
+    return await store.pipeline_transicion_descarte(
+        pid, epoca, accion, desde=desde, a=a, user_id=user_id,
+        evento_tipo=_EVENTO_DE[accion],
+        evento_payload={"user_id": user_id, "desde": desde.value, "a": a.value},
+    )
 
 
 class DescarteColumnasEIndicesDBTest(unittest.IsolatedAsyncioTestCase):
@@ -155,7 +175,7 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
                 return await cur.fetchone()
 
     async def test_descartar_escribe_estado_y_columnas_en_la_misma_escritura(self):
-        ok = await store.pipeline_transicion_descarte(
+        ok = await _transicion(
             self.pid, 3, "discard",
             desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
         self.assertTrue(ok)
@@ -164,7 +184,7 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(fila[3])
 
     async def test_descartar_con_epoca_vieja_no_escribe(self):
-        ok = await store.pipeline_transicion_descarte(
+        ok = await _transicion(
             self.pid, 2, "discard",
             desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
         self.assertFalse(ok)
@@ -174,33 +194,33 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
         # M-1 (fix round 1): `expired` SÍ está permitido para "discard" en
         # general (TRANSICIONES["discard"]) -- lo que falla acá es el CAS
         # (la fila real está en `aborted`, no en `expired`), no la validación.
-        ok = await store.pipeline_transicion_descarte(
+        ok = await _transicion(
             self.pid, 3, "discard",
             desde=PipelineStatus.expired, a=PipelineStatus.discarded, user_id="u1")
         self.assertFalse(ok)
         self.assertEqual((await self._fila())[0], "aborted")
 
     async def test_recuperar_limpia_las_tres_columnas(self):
-        await store.pipeline_transicion_descarte(
+        await _transicion(
             self.pid, 3, "discard",
             desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
-        ok = await store.pipeline_transicion_descarte(
+        ok = await _transicion(
             self.pid, 3, "recover",
             desde=PipelineStatus.discarded, a=PipelineStatus.aborted, user_id="u1")
         self.assertTrue(ok)
         self.assertEqual(await self._fila(), ("aborted", None, None, None))
 
     async def test_ocultar_y_restaurar_conservan_las_columnas(self):
-        await store.pipeline_transicion_descarte(
+        await _transicion(
             self.pid, 3, "discard",
             desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
         antes = await self._fila()
-        ok_hide = await store.pipeline_transicion_descarte(
+        ok_hide = await _transicion(
             self.pid, 3, "hide",
             desde=PipelineStatus.discarded, a=PipelineStatus.hidden, user_id="admin")
         self.assertTrue(ok_hide)
         self.assertEqual((await self._fila())[1:], antes[1:])
-        ok_restore = await store.pipeline_transicion_descarte(
+        ok_restore = await _transicion(
             self.pid, 3, "restore",
             desde=PipelineStatus.hidden, a=PipelineStatus.discarded, user_id="admin")
         self.assertTrue(ok_restore)
@@ -214,7 +234,7 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
     async def test_descartar_desde_running_rechaza_y_no_escribe(self):
         pid = await self._crear(PipelineStatus.running)
         with self.assertRaises(descarte.TransicionDescarteInvalida):
-            await store.pipeline_transicion_descarte(
+            await _transicion(
                 pid, 3, "discard",
                 desde=PipelineStatus.running, a=PipelineStatus.discarded, user_id="u1")
         self.assertEqual((await self._fila(pid))[0], "running")
@@ -224,7 +244,7 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
         # `discarded` (la antesala obligatoria, spec §2: "nunca se oculta en
         # un paso").
         with self.assertRaises(descarte.TransicionDescarteInvalida):
-            await store.pipeline_transicion_descarte(
+            await _transicion(
                 self.pid, 3, "hide",
                 desde=PipelineStatus.aborted, a=PipelineStatus.hidden, user_id="admin")
         self.assertEqual((await self._fila())[0], "aborted")
@@ -234,10 +254,10 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
         # TRANSICIONES["discard"]), pero esta fila se descartó desde
         # `aborted` -- no levanta (no es un error de contrato), simplemente
         # no hay fila que matchee el WHERE (`status_previo='expired'`).
-        await store.pipeline_transicion_descarte(
+        await _transicion(
             self.pid, 3, "discard",
             desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
-        ok = await store.pipeline_transicion_descarte(
+        ok = await _transicion(
             self.pid, 3, "recover",
             desde=PipelineStatus.discarded, a=PipelineStatus.expired, user_id="u1")
         self.assertFalse(ok)
@@ -249,12 +269,12 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
     # -- recuperar tiene que devolver al estado EXACTO previo.
     async def test_ciclo_completo_de_expired_descartar_y_recuperar(self):
         pid = await self._crear(PipelineStatus.expired)
-        ok_discard = await store.pipeline_transicion_descarte(
+        ok_discard = await _transicion(
             pid, 3, "discard",
             desde=PipelineStatus.expired, a=PipelineStatus.discarded, user_id="u1")
         self.assertTrue(ok_discard)
         self.assertEqual((await self._fila(pid))[:3], ("discarded", "expired", "u1"))
-        ok_recover = await store.pipeline_transicion_descarte(
+        ok_recover = await _transicion(
             pid, 3, "recover",
             desde=PipelineStatus.discarded, a=PipelineStatus.expired, user_id="u1")
         self.assertTrue(ok_recover)
@@ -266,7 +286,7 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
     # mock -- lo que se mockea en tests/test_jacobs_descarte.py es esta
     # misma función.
     async def test_status_previo_de_un_descartado(self):
-        await store.pipeline_transicion_descarte(
+        await _transicion(
             self.pid, 3, "discard",
             desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
         self.assertEqual(await store.pipeline_status_previo(self.pid), "aborted")
@@ -276,3 +296,71 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_status_previo_de_un_pipeline_inexistente_es_none(self):
         self.assertIsNone(await store.pipeline_status_previo(str(uuid.uuid4())))
+
+
+class TransicionDescarteAtomicaDBTest(unittest.IsolatedAsyncioTestCase):
+    """Task 3, fix round 1 (2026-09-22, Ruling 9): el CAS y el evento de
+    auditoría van en la MISMA transacción, sobre la MISMA conexión
+    (`conexion_dedicada(found_rows=True)` + `transaccion()`, reutilizados de
+    lo que el store ya usaba en otro lado -- no un mecanismo nuevo). Antes,
+    la ruta llamaba a `store.event_append` en una SEGUNDA conexión, después
+    del CAS: si esa escritura fallaba, la transición quedaba hecha SIN
+    auditoría, y un reintento del llamador ya no la repetía (la fila dejó
+    de estar en `desde`, así que el CAS siguiente da 409 antes de llegar al
+    evento). En `recover`/`hide`/`restore` ese evento es el ÚNICO registro
+    de quién hizo la transición -- `recover` además BORRA `descartado_por`."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        await store.init_tables()
+        self.pid = str(uuid.uuid4())
+        await store.pipeline_create(Pipeline(
+            pipeline_id=self.pid, name="t-descarte-atomico", invoked_by="plataforma",
+            mode="autonomous", status=PipelineStatus.aborted,
+            user_id="u1", tenant_id="1", run_epoch=3,
+        ))
+        self.addAsyncCleanup(self._borrar)
+
+    async def _borrar(self):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DELETE FROM jacobs_events WHERE pipeline_id=%s", (self.pid,))
+                await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (self.pid,))
+                await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (self.pid,))
+
+    async def _eventos(self) -> list[tuple]:
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT event_type, payload FROM jacobs_events WHERE pipeline_id=%s",
+                    (self.pid,))
+                return list(await cur.fetchall())
+
+    async def test_si_el_insert_del_evento_falla_el_update_no_queda(self):
+        """El INSERT del evento revienta (`event_append` mockeado -- inyecta
+        el fallo sin depender de un error real de MariaDB): la fila TIENE
+        que seguir en `aborted` (el UPDATE se descarta con ella, `transaccion()`
+        cierra la conexión en vez de mandar ROLLBACK) y no puede haber
+        quedado NINGÚN evento."""
+        with mock.patch.object(store, "event_append", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                await _transicion(
+                    self.pid, 3, "discard",
+                    desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        fila = await store.pipeline_get(self.pid)
+        self.assertEqual(fila.status, PipelineStatus.aborted)
+        self.assertEqual(await self._eventos(), [])
+
+    async def test_transicion_exitosa_deja_exactamente_un_evento_con_el_payload(self):
+        ok = await _transicion(
+            self.pid, 3, "discard",
+            desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        self.assertTrue(ok)
+        eventos = await self._eventos()
+        self.assertEqual(len(eventos), 1)
+        tipo, payload_crudo = eventos[0]
+        self.assertEqual(tipo, "PIPELINE_DISCARDED")
+        self.assertEqual(
+            json.loads(payload_crudo),
+            {"user_id": "u1", "desde": "aborted", "a": "discarded"},
+        )

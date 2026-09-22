@@ -805,7 +805,10 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
 # ----------------------------------------------------------------
 
 class DescarteRequest(BaseModel):
-    user_id: str
+    # M4 (fix round 1, 2026-09-22): sin min_length, un user_id vacío pasaba
+    # de largo hasta el store y quedaba en descartado_por/el evento como "" --
+    # una auditoría vacía es peor que un 422 explícito.
+    user_id: str = Field(min_length=1)
 
 
 _EVENTO_DE = {
@@ -824,7 +827,15 @@ async def transicion_descarte(pipeline_id: str, accion: str, req: DescarteReques
     `descarte.destino_de` antes de llamar al store) son inalcanzables; si
     aparecen de todos modos es un bug de contrato entre esta ruta y
     `descarte.py`/`store.py`, no un pedido mal formado -- corresponde un
-    500, no disfrazarlo de 4xx (fail-closed, no fail-open)."""
+    500, no disfrazarlo de 4xx (fail-closed, no fail-open).
+
+    Fix round 1 (2026-09-22, Ruling 9): ya NO llama a `store.event_append`
+    por su cuenta -- se lo pasa a `store.pipeline_transicion_descarte`, que
+    escribe el CAS y el evento en la MISMA transacción (ver el docstring de
+    esa función). Antes, esta ruta emitía el evento en una segunda conexión
+    DESPUÉS del CAS: si esa escritura fallaba, la transición quedaba hecha
+    sin auditoría, y un reintento del llamador nunca volvía a intentarla (la
+    fila ya cambió de `desde`, así que el CAS da 409 antes de llegar acá)."""
     pipeline = await store.pipeline_get(pipeline_id)
     if not pipeline:
         raise HTTPException(status_code=404, detail={"code": "pipeline_no_encontrado"})
@@ -839,10 +850,11 @@ async def transicion_descarte(pipeline_id: str, accion: str, req: DescarteReques
     if not await store.pipeline_transicion_descarte(
         pipeline_id, pipeline.run_epoch, accion,
         desde=pipeline.status, a=destino, user_id=req.user_id,
+        evento_tipo=_EVENTO_DE[accion],
+        evento_payload={
+            "user_id": req.user_id, "desde": pipeline.status.value, "a": destino.value},
     ):
         raise HTTPException(status_code=409, detail={"code": "cambio_concurrente"})
-    await store.event_append(pipeline_id, _EVENTO_DE[accion], {
-        "user_id": req.user_id, "desde": pipeline.status.value, "a": destino.value})
     return {"pipeline_id": pipeline_id, "status": destino.value}
 
 

@@ -270,15 +270,21 @@ git commit -m "feat(jacobs): estados discarded/hidden, columnas e índices del d
     conjunto general de estados previos posibles (`TRANSICIONES["discard"]`) -- que coincida con el
     `status_previo` REAL de esa fila lo garantiza el propio `WHERE` del compare-and-set
     (`status_previo=%s` con `a.value`), no esta función.
-  - `store.pipeline_transicion_descarte(pipeline_id: str, epoca: int, accion: str, desde: PipelineStatus, a: PipelineStatus, user_id: str) -> bool`
-    (fix round 1, Ruling 7): llama a `descarte.validar_transicion` ANTES de tocar la base -- una
-    transición inválida (p.ej. `discard` desde `running`) levanta `TransicionDescarteInvalida` sin
-    escribir nada. En `recover`, además de `desde=discarded` y `run_epoch`, el `WHERE` exige
-    `status_previo=a.value`: un `recover` con un `a` que no coincide con el `status_previo` guardado
-    devuelve `False` (no escribe) en vez de levantar, porque `a` sí era válido en general, sólo no
-    coincidía con ESTA fila. `user_id` sólo se persiste en `discard` (columna `descartado_por`); en
-    `recover`/`hide`/`restore` no se escribe en ninguna columna -- la auditoría de quién hizo la
-    transición va en `jacobs_events` (Task 3).
+  - `store.pipeline_transicion_descarte(pipeline_id: str, epoca: int, accion: str, *, desde: PipelineStatus, a: PipelineStatus, user_id: str, evento_tipo: str, evento_payload: dict) -> bool`
+    (fix round 1, Ruling 7 y Ruling 9 -- firma actualizada en la Task 3, fix round 1, 2026-09-22):
+    llama a `descarte.validar_transicion` ANTES de tocar la base -- una transición inválida (p.ej.
+    `discard` desde `running`) levanta `TransicionDescarteInvalida` sin escribir nada. En `recover`,
+    además de `desde=discarded` y `run_epoch`, el `WHERE` exige `status_previo=a.value`: un `recover`
+    con un `a` que no coincide con el `status_previo` guardado devuelve `False` (no escribe) en vez de
+    levantar, porque `a` sí era válido en general, sólo no coincidía con ESTA fila. `user_id` sólo se
+    persiste en `discard` (columna `descartado_por`); en `recover`/`hide`/`restore` no se escribe en
+    ninguna columna. **Ruling 9 (Task 3, fix round 1):** `evento_tipo`/`evento_payload` -- el CAS y el
+    INSERT en `jacobs_events` van en la MISMA transacción (`conexion_dedicada(found_rows=True)` +
+    `transaccion()`, reutilizados del store). Si el UPDATE no escribe (rowcount != 1), no se inserta
+    el evento y devuelve `False`. Si el INSERT falla, la transacción se descarta entera (la conexión
+    se cierra, no se manda un `ROLLBACK` explícito -- mismo patrón que el resto del store) y la
+    excepción sube: el estado nunca cambia sin su evento. La ruta (Task 3) ya NO llama a
+    `store.event_append` por su cuenta.
 
 - [ ] **Step 1: Test de las reglas puras (falla)**
 
@@ -488,14 +494,25 @@ git commit -m "feat(jacobs): transición compare-and-set del descarte, sin borra
 - Test: `tests/test_jacobs_descarte.py`
 
 **Interfaces:**
-- Consumes: `descarte.TRANSICIONES`, `descarte.destino_de`, `descarte.EstadoPrevioInvalido`, `store.pipeline_transicion_descarte`, `store.pipeline_get`, `store.event_append`.
+- Consumes: `descarte.TRANSICIONES`, `descarte.destino_de`, `descarte.EstadoPrevioInvalido`, `store.pipeline_transicion_descarte`, `store.pipeline_get`, `store.pipeline_status_previo`.
+  **Fix round 1 (Ruling 9):** la ruta ya NO consume `store.event_append` directo -- le pasa
+  `evento_tipo`/`evento_payload` a `store.pipeline_transicion_descarte`, que los escribe en la MISMA
+  transacción que el CAS (ver Interfaces de la Task 2, arriba).
 - Produces:
-  - `POST /jacobs/pipeline/{id}/discard|recover|hide|restore`, con cuerpo `{"user_id": str}`.
+  - Ruling 1 (controlador): CUATRO rutas LITERALES, no la genérica `/{accion}` del brief --
+    `POST /jacobs/pipeline/{id}/discard`, `/recover`, `/hide`, `/restore`, cada una llamando a la
+    función común `transicion_descarte(pipeline_id, accion, req)`. Cuerpo `{"user_id": str}` con
+    `Field(min_length=1)` (fix round 1, M4: un `user_id` vacío es 422 de Pydantic, antes de que el
+    handler toque el store).
   - Respuesta 200: `{"pipeline_id", "status"}`.
-  - 404 si no existe.
-  - 409 `{"code": "transicion_no_permitida", "status": <actual>}`, o `{"code": "cambio_concurrente"}`.
+  - 404 `{"code": "pipeline_no_encontrado"}` si no existe.
+  - 409 `{"code": "transicion_no_permitida", "status": <actual>}`, o `{"code": "cambio_concurrente"}`
+    (Ruling 8: sólo se atrapa `descarte.EstadoPrevioInvalido`; `TransicionDescarteInvalida` y un
+    `ValueError` genérico no se atrapan -- son bugs de contrato, 500).
   - 422 `{"code": "estado_previo_invalido"}`.
-  - Eventos `PIPELINE_DISCARDED`, `PIPELINE_RECOVERED`, `PIPELINE_HIDDEN` y `PIPELINE_RESTORED`, con payload `{"user_id", "desde", "a"}`.
+  - Eventos `PIPELINE_DISCARDED`, `PIPELINE_RECOVERED`, `PIPELINE_HIDDEN` y `PIPELINE_RESTORED`, con
+    payload `{"user_id", "desde", "a"}` -- escritos por `store.pipeline_transicion_descarte`, no por
+    esta ruta (Ruling 9).
 
 - [ ] **Step 1: Tests de rutas con store simulado (fallan)**
 

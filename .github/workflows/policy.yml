@@ -3424,8 +3424,19 @@ jobs:
           #   antes de escribir `jacobs/routes.py::transicion_descarte` y
           #   `store.pipeline_status_previo`; verde tras -- 31 passed en el
           #   archivo (12 anteriores + 19 nuevos). "17 skipped" no cambia.
-          grep -qE "^2437 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2437 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2437 -> 2439 (feat/descartar-pipelines, Task 3, fix round 1,
+          #   2026-09-22): +2 en tests/test_jacobs_descarte.py.
+          #   M2 (la revisión encontró que el piso afirmaba "404 si el
+          #   pipeline no existe" sin ningún test): test_pipeline_inexistente_es_404
+          #   -- `pipeline_get` -> None da 404 `pipeline_no_encontrado`. M4:
+          #   `DescarteRequest.user_id` ahora exige `Field(min_length=1)` --
+          #   test_user_id_vacio_es_422 confirma 422 con `user_id=""` y que
+          #   ni `pipeline_get` se llega a tocar (Pydantic valida el cuerpo
+          #   ANTES del handler). Los dos vistos en rojo contra el código
+          #   viejo (sin el chequeo, y sin `min_length`); verde tras -- 33
+          #   passed en el archivo. "17 skipped" no cambia.
+          grep -qE "^2439 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2439 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4588,8 +4599,29 @@ jobs:
           #   /etc/jax/.env` exportadas en el mismo comando que invoca
           #   pytest, nunca JAX_DB_NAME ni un `mysql` suelto) -- 141 passed,
           #   0 failed (138 anteriores + 3 nuevos).
-          grep -qE "^141 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 141 tests CORRIDOS."; exit 1; }
+          # 141 -> 143 (feat/descartar-pipelines, Task 3, fix round 1,
+          #   2026-09-22, Ruling 9): +2 en tests/test_jacobs_descarte_db.py
+          #   (TransicionDescarteAtomicaDBTest) -- el CAS y el INSERT del
+          #   evento de auditoría van en la MISMA transacción
+          #   (`conexion_dedicada(found_rows=True)` + `transaccion()`,
+          #   reutilizados -- no un mecanismo nuevo): si el INSERT del
+          #   evento falla (`store.event_append` mockeado con
+          #   `side_effect=RuntimeError`), la fila queda en su estado
+          #   ORIGINAL (la transacción se descarta con la conexión) y no
+          #   queda ningún evento; una transición exitosa deja EXACTAMENTE
+          #   un evento con el payload `{user_id, desde, a}`. Antes, el
+          #   evento se escribía en una SEGUNDA conexión después del CAS: si
+          #   esa escritura fallaba, la transición quedaba hecha SIN
+          #   auditoría (y en recover/hide/restore el evento es el ÚNICO
+          #   registro de quién la hizo). Visto en ROJO contra la
+          #   implementación de dos conexiones (mutación manual: revertir a
+          #   `_ejecutar_condicional` + `event_append` sin `conexion=conn` --
+          #   `test_si_el_insert_del_evento_falla_el_update_no_queda` cae
+          #   porque el UPDATE queda autocommiteado aunque el evento falle);
+          #   revertida. Verde tras -- 143 passed, 0 failed (141 anteriores
+          #   + 2 nuevos).
+          grep -qE "^143 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 143 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

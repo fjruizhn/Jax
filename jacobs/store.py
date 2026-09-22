@@ -1639,9 +1639,12 @@ async def pipeline_transicion_descarte(
     desde: PipelineStatus,
     a: PipelineStatus,
     user_id: str,
+    evento_tipo: str,
+    evento_payload: dict,
 ) -> bool:
-    """Compare-and-set de una transición del descarte. True si escribió
-    (el pipeline estaba en `epoca` y en `desde`).
+    """Compare-and-set de una transición del descarte MÁS su evento de
+    auditoría, en la MISMA transacción. True si escribió (el pipeline
+    estaba en `epoca` y en `desde`).
 
     Fix round 1 (2026-09-22, Ruling 7, I-1): valida la transición ANTES de
     tocar la base -- `descarte.validar_transicion` levanta
@@ -1661,8 +1664,29 @@ async def pipeline_transicion_descarte(
 
     `user_id` sólo se persiste en `discard` (columna `descartado_por`, quien
     puede recuperar). En `recover`/`hide`/`restore` NO se escribe en
-    ninguna columna: quién hizo la transición queda en el evento de
-    auditoría de Task 3 (`jacobs_events`), no en `jacobs_pipelines`."""
+    ninguna columna: quién hizo la transición sólo queda en `evento_payload`,
+    escrito en `jacobs_events` por esta misma función.
+
+    Fix round 1 de Task 3 (2026-09-22, Ruling 9): en `recover`/`hide`/
+    `restore` el evento es el ÚNICO registro de quién hizo la transición
+    (`recover` además BORRA `descartado_por`). Antes, la ruta llamaba a
+    `store.event_append` por su cuenta, en OTRA conexión, después de este
+    CAS -- si esa segunda escritura fallaba, la transición quedaba hecha
+    SIN auditoría, y un reintento del llamador ya no la volvía a intentar
+    (la fila ya no está en `desde`, así que el CAS da 409 y ni siquiera
+    llega a la parte del evento). Ahora el UPDATE y el INSERT del evento
+    van en la MISMA transacción, sobre la MISMA conexión DEDICADA
+    (`conexion_dedicada(found_rows=True)`, igual que `_ejecutar_condicional`
+    -- CLIENT.FOUND_ROWS para que un CAS que reescribe los mismos valores
+    no se lea como "perdido"), con el patrón de transacción explícita que
+    ya usa el store (`transaccion()`, Ruling R38 -- reutilizado, no uno
+    nuevo): si el UPDATE no afecta ninguna fila, se sale ANTES de insertar
+    el evento y se devuelve False (nada que auditar); si el INSERT del
+    evento falla, `transaccion()` CIERRA la conexión en vez de mandar
+    ROLLBACK (mismo criterio que el resto del store: tras un error a mitad
+    de transacción el protocolo queda en un estado desconocido, y cerrar la
+    sesión hace que el servidor descarte lo no confirmado) y relanza -- el
+    estado no cambia sin su evento."""
     descarte.validar_transicion(accion, desde, a)
     ahora = time.time()
     sets = _SETS_DESCARTE[accion]
@@ -1676,7 +1700,17 @@ async def pipeline_transicion_descarte(
         params.append(a.value)
     sql = (f"UPDATE jacobs_pipelines SET {sets} "
            f"WHERE pipeline_id=%s AND run_epoch=%s AND status=%s{extra_where}")
-    return await _ejecutar_condicional(sql, params) == 1
+    conn = await conexion_dedicada(found_rows=True)
+    try:
+        async with transaccion(conn):
+            async with conn.cursor() as cur:
+                filas = await cur.execute(sql, params)
+            if filas != 1:
+                return False
+            await event_append(pipeline_id, evento_tipo, evento_payload, conexion=conn)
+        return True
+    finally:
+        conn.close()
 
 
 async def step_upsert_si_epoca(s: Step, epoca: int) -> bool:

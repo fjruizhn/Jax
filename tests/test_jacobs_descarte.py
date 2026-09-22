@@ -164,10 +164,19 @@ def _llamar(accion, status, cas=True, previo=None):
 def test_descartar_un_abortado():
     r, trans, eventos = _llamar("discard", PipelineStatus.aborted)
     assert r == {"pipeline_id": "p1", "status": "discarded"}
-    trans.assert_awaited_once_with("p1", 3, "discard", desde=PipelineStatus.aborted,
-                                   a=PipelineStatus.discarded, user_id="u1")
-    eventos.assert_awaited_once_with("p1", "PIPELINE_DISCARDED",
-                                     {"user_id": "u1", "desde": "aborted", "a": "discarded"})
+    trans.assert_awaited_once_with(
+        "p1", 3, "discard", desde=PipelineStatus.aborted, a=PipelineStatus.discarded,
+        user_id="u1", evento_tipo="PIPELINE_DISCARDED",
+        evento_payload={"user_id": "u1", "desde": "aborted", "a": "discarded"})
+    # Fix round 1 (2026-09-22, Ruling 9): la ruta ya NO llama a
+    # `store.event_append` por su cuenta -- le pasa `evento_tipo`/
+    # `evento_payload` a `store.pipeline_transicion_descarte`, que escribe
+    # el CAS y el evento en la MISMA transacción (aserción de arriba). La
+    # atomicidad real (evento e INSERT en la misma conexión, sin evento si
+    # el UPDATE no escribió) se prueba contra MariaDB en
+    # tests/test_jacobs_descarte_db.py -- acá sólo se confirma que la ruta
+    # no abre una segunda escritura por su cuenta.
+    eventos.assert_not_awaited()
 
 
 @pytest.mark.parametrize("accion,status", [
@@ -189,10 +198,13 @@ def test_carrera_perdida_es_409_y_no_emite_evento():
     assert r.status_code == 409
     assert r.detail["code"] == "cambio_concurrente"
     trans.assert_awaited_once()
-    # Step 4 del brief: si el evento se emitiera ANTES de saber si el CAS
-    # escribió, una carrera perdida dejaría un PIPELINE_DISCARDED mintiendo
-    # sobre una transición que nunca ocurrió. Esta aserción es la que hace
-    # caer esa mutación.
+    # Fix round 1 (Ruling 9): a este nivel `store.pipeline_transicion_descarte`
+    # está mockeado ENTERO (`cas=False` sólo controla su valor de retorno),
+    # así que esta aserción confirma que la RUTA no abre una segunda
+    # escritura de evento por su cuenta -- no que el store se comporte bien
+    # ante una carrera. Esa garantía (sin evento si el UPDATE no escribió,
+    # en la MISMA transacción) está probada contra MariaDB real en
+    # tests/test_jacobs_descarte_db.py::TransicionDescarteAtomicaDBTest.
     eventos.assert_not_awaited()
 
 
@@ -200,8 +212,10 @@ def test_recuperar_vuelve_a_expired():
     r, trans, eventos = _llamar("recover", PipelineStatus.discarded, previo="expired")
     assert r == {"pipeline_id": "p1", "status": "expired"}
     assert trans.await_args.kwargs["a"] is PipelineStatus.expired
-    eventos.assert_awaited_once_with("p1", "PIPELINE_RECOVERED",
-                                     {"user_id": "u1", "desde": "discarded", "a": "expired"})
+    assert trans.await_args.kwargs["evento_tipo"] == "PIPELINE_RECOVERED"
+    assert trans.await_args.kwargs["evento_payload"] == {
+        "user_id": "u1", "desde": "discarded", "a": "expired"}
+    eventos.assert_not_awaited()
 
 
 def test_recuperar_con_previo_corrupto_es_422():
@@ -213,13 +227,36 @@ def test_recuperar_con_previo_corrupto_es_422():
     eventos.assert_not_awaited()
 
 
+def test_pipeline_inexistente_es_404():
+    """M2 (fix round 1): el piso de CI afirmaba "404 si el pipeline no
+    existe" sin ningún test que lo ejercitara -- acá queda cubierto."""
+    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=None)):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(
+                routes.transicion_descarte("p1", "discard", routes.DescarteRequest(user_id="u1")))
+    assert e.value.status_code == 404
+    assert e.value.detail["code"] == "pipeline_no_encontrado"
+
+
 @pytest.mark.parametrize("status", [PipelineStatus.discarded, PipelineStatus.hidden])
 def test_cancel_rechaza_descartados_y_ocultos(status):
+    # M3 (fix round 1): sin mockear el CAS ni el evento de cancel, este test
+    # no probaba nada nuevo -- si `PipelineStatus.discarded`/`hidden` se
+    # sacaran de la tupla de 409, `pipeline_update_status_si_epoca` real
+    # intentaría escribir contra una DB inalcanzable y el test igual
+    # "pasaría" (con otro tipo de excepción, no HTTPException 409). Con las
+    # dos mockeadas y `assert_not_awaited()`, la mutación cae por la razón
+    # correcta: NINGUNA escritura se intentó, ni el CAS ni el evento.
     pipeline = _p(status)
-    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=pipeline)):
+    cas, eventos = AsyncMock(), AsyncMock()
+    with patch.object(routes.store, "pipeline_get", AsyncMock(return_value=pipeline)), \
+         patch.object(routes.store, "pipeline_update_status_si_epoca", cas), \
+         patch.object(routes.store, "event_append", eventos):
         with pytest.raises(HTTPException) as e:
             asyncio.run(routes.cancel_pipeline("p1"))
     assert e.value.status_code == 409
+    cas.assert_not_awaited()
+    eventos.assert_not_awaited()
 
 
 def test_continue_no_acepta_descartados():
@@ -234,6 +271,17 @@ def _app() -> FastAPI:
     app = FastAPI()
     app.include_router(routes.router)
     return app
+
+
+def test_user_id_vacio_es_422():
+    """M4 (fix round 1): `Field(min_length=1)` en DescarteRequest.user_id --
+    Pydantic valida el cuerpo ANTES de que FastAPI llame al handler, así que
+    ni `pipeline_get` se toca."""
+    with patch.object(routes.store, "pipeline_get", AsyncMock()) as pg:
+        with TestClient(_app()) as c:
+            r = c.post("/jacobs/pipeline/p1/discard", json={"user_id": ""})
+    assert r.status_code == 422, r.text
+    pg.assert_not_called()
 
 
 @pytest.mark.parametrize("accion,desde,destino", [
