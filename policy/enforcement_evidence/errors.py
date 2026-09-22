@@ -1,0 +1,22 @@
+"""Typed errors for observational Block 7 evidence."""
+class EnforcementEvidenceError(ValueError): pass
+class UnknownControlError(EnforcementEvidenceError): pass
+class UnsupportedControlVersionError(EnforcementEvidenceError): pass
+class UnsupportedClaimLevelError(EnforcementEvidenceError): pass
+class InvalidClaimScopeError(EnforcementEvidenceError): pass
+class UntrustedControlDefinitionError(EnforcementEvidenceError): pass
+class UntrustedImplementationIdentityError(EnforcementEvidenceError): pass
+class EvidenceBlobMissingError(EnforcementEvidenceError): pass
+class EvidenceBlobHashMismatchError(EnforcementEvidenceError): pass
+class EvidenceBlobTooLargeError(EnforcementEvidenceError): pass
+class EvidenceArtifactIntegrityError(EnforcementEvidenceError): pass
+class EvidenceArtifactUntrustedError(EnforcementEvidenceError): pass
+class EvidenceBindingError(EnforcementEvidenceError): pass
+class EvidenceTrustDomainError(EnforcementEvidenceError): pass
+class EvidenceTypeUnsupportedError(EnforcementEvidenceError): pass
+class ObservationIntegrityError(EnforcementEvidenceError): pass
+class ObservationConflictError(EnforcementEvidenceError): pass
+class AssertionIntegrityError(EnforcementEvidenceError): pass
+class CallerSuppliedVerdictError(EnforcementEvidenceError): pass
+class EvidencePersistenceError(EnforcementEvidenceError): pass
+class DatabaseObservationMismatchError(EnforcementEvidenceError): pass

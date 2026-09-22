@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 import traceback
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,6 +44,12 @@ import human_gate
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 _STORE = JobStore(str(BASE_DIR / "logs" / "motor_jobs.jsonl"))
+_B7_EVIDENCE_RECORDER = None
+
+def configure_b7_evidence_recorder(recorder) -> None:
+    """Startup composition only; the legacy HTTP request cannot choose it."""
+    global _B7_EVIDENCE_RECORDER
+    _B7_EVIDENCE_RECORDER = recorder
 # _CATALOG/_POLICY arrancan None -- se pueblan en el startup hook de
 # server.py (init_motor_catalog, abajo). [motors.*]/[capabilities.*] de
 # config.toml ya no se leen (R4 -- catalogo en DB). Ningun otro modulo
@@ -55,6 +62,7 @@ _POLICY: MotorPolicy | None = None
 # stored artifacts.
 _GOVERNED_EXECUTION_STORE = None
 _GOVERNED_DISPATCH_CLAIMER = None
+_B7_WORKER_RESULT_INGESTOR = None
 
 logger = logging.getLogger(__name__)
 
@@ -141,11 +149,12 @@ async def _ensure_catalog_fresh(conexion=None) -> None:
 router = APIRouter(prefix="/motor", tags=["motor_registry"])
 
 
-def configure_governed_execution_store(store, dispatch_claimer=None) -> None:
-    """Composition-root hook for the authoritative Block 6 store."""
-    global _GOVERNED_EXECUTION_STORE, _GOVERNED_DISPATCH_CLAIMER
+def configure_governed_execution_store(store, dispatch_claimer=None, worker_result_ingestor=None) -> None:
+    """Composition-root hook for fixed Block 6/B7 dependencies only."""
+    global _GOVERNED_EXECUTION_STORE, _GOVERNED_DISPATCH_CLAIMER, _B7_WORKER_RESULT_INGESTOR
     _GOVERNED_EXECUTION_STORE = store
     _GOVERNED_DISPATCH_CLAIMER = dispatch_claimer
+    _B7_WORKER_RESULT_INGESTOR = worker_result_ingestor
 
 
 def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
@@ -161,6 +170,21 @@ def _log_worker_exception(task: asyncio.Task, *, job_id: str) -> None:
             job_id,
             "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
         )
+
+
+def _ingest_governed_worker_completion(task: asyncio.Task, *, execution_id: str, job_id: str) -> None:
+    """Fixed post-worker bridge; a legacy job never reaches this callback."""
+    _log_worker_exception(task, job_id=job_id)
+    if task.cancelled() or task.exception() is not None or _B7_WORKER_RESULT_INGESTOR is None:
+        return
+    view = _STORE.get(job_id)
+    if view is None or view.status is not JobStatus.COMPLETED or not view.result_path:
+        return
+    try:
+        _B7_WORKER_RESULT_INGESTOR.ingest_governed_completion(
+            view.result_path, execution_id=execution_id, job_id=job_id)
+    except Exception:  # fail-soft: post-completion evidence cannot resurrect or alter a completed job.
+        logger.exception("No se pudo ingerir resultado B7 del job gobernado %s", job_id)
 
 
 def _rechazado(req: MotorDispatchRequest, motor: str | None, razon: str) -> MotorDispatchResponse:
@@ -222,21 +246,27 @@ async def governed_dispatch(req: GovernedDispatchRequest) -> MotorDispatchRespon
             claimer = dispatch_execution
         else:
             claimer = _GOVERNED_DISPATCH_CLAIMER
+        # Reserve an opaque job identity, but do not create a job yet.  The
+        # B6/B7 shared transaction must commit its exact mapping before any
+        # task exists; evidence failure therefore still leaves no job/worker.
+        job_id = str(uuid.uuid4())
         # This is the atomic state claim immediately before job/task creation.
         claimer(_GOVERNED_EXECUTION_STORE, record, authorization,
-                           now_utc=datetime.now(timezone.utc), kill_switch_active=False)
+                           now_utc=datetime.now(timezone.utc), kill_switch_active=False,
+                           job_id=job_id)
     except Exception as exc:
         raise HTTPException(status_code=409, detail=f"GOVERNED_DISPATCH_REJECTED: {exc}") from exc
 
-    job_id = _STORE.create(caller=request.authenticated_caller_id, capability=request.capability,
+    _STORE.create(caller=request.authenticated_caller_id, capability=request.capability,
         motor=request.motor, trace_id=req.trace_id, prompt=request.prompt,
-        recursion_depth=0, pipeline_id=None)
+        recursion_depth=0, pipeline_id=None, job_id=job_id)
     task = asyncio.create_task(motor_worker.run(job_id=job_id, motor=request.motor,
         capability=request.capability, prompt=request.prompt, context=request.projection()["context"],
         store=_STORE, catalog=_CATALOG, kill_switch_path=str(route), user_id=request.user_id,
         tenant_id=request.tenant_id, caller=request.authenticated_caller_id,
         timeout_seconds=request.timeout_seconds, pipeline_id=None))
-    task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
+    task.add_done_callback(lambda t: _ingest_governed_worker_completion(
+        t, execution_id=record.execution_id, job_id=job_id))
     job_tasks.register(job_id, task)
     return MotorDispatchResponse(job_id=job_id, status=JobStatus.PENDING, motor=request.motor,
         capability=request.capability, trace_id=req.trace_id)
@@ -247,6 +277,11 @@ async def dispatch(req: MotorDispatchRequest) -> MotorDispatchResponse:
     # Block 6: every catalog capability is governed in V1.  This legacy
     # transport endpoint must never consume a gate, create a job, or start a
     # worker; its request body is not an execution authority artifact.
+    if _B7_EVIDENCE_RECORDER is not None:
+        try:
+            _B7_EVIDENCE_RECORDER.record_governed_dispatch_denied()
+        except Exception:  # fail-soft: legacy dispatch remains rejected if evidence persistence is unavailable.
+            pass
     raise HTTPException(status_code=410, detail="GOVERNED_EXECUTION_REQUIRED")
 
     # Kept below as historical defensive logic for the governed adapter while

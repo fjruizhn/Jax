@@ -191,8 +191,54 @@ from auth_servicio import proteger  # noqa: E402
 proteger(app)
 
 
+def _configure_b7_trusted_runtime() -> None:
+    """Build the B7 recorder once, at the real server composition root.
+
+    This deliberately has no request inputs.  Missing deployment identity,
+    database configuration, schema, or build-manifest verification aborts
+    startup: governed execution must not run with observational hooks absent.
+    """
+    deployment_id = os.environ.get("JAX_DEPLOYMENT_ID")
+    host, port = os.environ.get("JAX_DB_HOST"), os.environ.get("JAX_DB_PORT")
+    if not deployment_id or not host or not port:
+        raise RuntimeError("B7 trusted composition requires deployment and MariaDB configuration")
+    try:
+        import pymysql
+        from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+        from policy.enforcement_evidence.implementation_identity import TrustedImplementationIdentityProvider
+        from policy.enforcement_evidence.trusted_lifecycle import EvidenceLifecycleService, RuntimeEvidenceRecorder
+        from policy.enforcement_evidence.models import ClaimEnvironment, ClaimScope
+        from policy.enforcement_evidence.database_evidence import DatabaseControlInspector
+        from policy.enforcement_evidence.worker_results import WorkerResultIngestor
+        from policy.execution_control.storage import MariaDBExecutionStore
+        from policy.execution_control.service import configure_b7_execution_evidence, dispatch_execution
+        from policy.execution_control.authorization import configure_b7_decision_recorder, configure_b7_authorization_recorder
+        from motor_registry.routes import configure_b7_evidence_recorder, configure_governed_execution_store
+    except Exception as exc:
+        raise RuntimeError("B7 trusted composition dependencies unavailable") from exc
+
+    def connection_factory():
+        return pymysql.connect(host=host, port=int(port), user=os.environ.get("JAX_DB_USER", ""),
+            password=os.environ.get("JAX_DB_PASSWORD", ""), database=os.environ.get("JAX_DB_NAME", "jax_memory"),
+            charset="utf8mb4", autocommit=False, connect_timeout=5)
+
+    evidence_store = MariaDBEvidenceStore(connection_factory)
+    lifecycle = EvidenceLifecycleService(evidence_store, TrustedImplementationIdentityProvider(evidence_store))
+    recorder = RuntimeEvidenceRecorder(lifecycle, "las_manos", ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME, deployment_id=deployment_id))
+    execution_store = MariaDBExecutionStore(connection_factory)
+    configure_b7_execution_evidence(execution_store, evidence_store, recorder)
+    execution_store.evidence_recorder = recorder
+    configure_b7_decision_recorder(recorder)
+    configure_b7_authorization_recorder(recorder)
+    configure_b7_evidence_recorder(recorder)
+    configure_governed_execution_store(execution_store, dispatch_execution,
+        WorkerResultIngestor(recorder, execution_store))
+    DatabaseControlInspector(connection_factory, recorder, deployment_id=deployment_id).inspect_one_decision_one_execution()
+
+
 @app.on_event("startup")
 async def _jacobs_init() -> None:
+    _configure_b7_trusted_runtime()
     _jlog = logging.getLogger("jacobs")
     _jlog.setLevel(logging.INFO)
     if not _jlog.handlers:

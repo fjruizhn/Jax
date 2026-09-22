@@ -63,8 +63,15 @@ class JobStore:
         prompt: str,
         recursion_depth: int,
         pipeline_id: str | None = None,
+        job_id: str | None = None,
     ) -> str:
-        job_id = str(uuid.uuid4())
+        # Governed dispatch reserves its identifier before the B6/B7 atomic
+        # claim so the committed execution event and the subsequently-created
+        # Motor job have one exact, durable binding.  Ordinary callers still
+        # receive a store-generated identifier.
+        job_id = job_id or str(uuid.uuid4())
+        if job_id in self._index:
+            raise KeyError(f"job_id ya existe: {job_id}")
         event: dict[str, Any] = {
             "job_id": job_id,
             "status": JobStatus.PENDING.value,
