@@ -207,9 +207,33 @@ _HASH_A = "a" * 64
 _HASH_B = "b" * 64
 
 
+def _base_completa() -> bytes:
+    """MINOR (ronda 3): `huella_valida()` (llamada por `vigia_servicio.py` con
+    `rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT`) exige que CADA tramo declarado tenga
+    contenido -- no sólo un hash en cualquier parte. Una línea `D <ruta>` por cada
+    RUTAS_CONTROLES (menos la primera, que lleva el hash real que exige MAJOR-6) más el
+    directorio de binarios alcanza para que la huella sea "válida" en los tests que no
+    están probando específicamente esa cobertura."""
+    from jax.ejecutor.contratos import huella as H
+    lineas = [f"{_HASH_A}  /etc/sudoers"]
+    lineas += [f"D {r}" for r in H.RUTAS_CONTROLES[1:]]
+    lineas.append(f"D {H._DIR_SBIN_EJECUTOR}")
+    return ("\n".join(lineas) + "\n").encode()
+
+
 def _h(host, controles=None):
     from jax.ejecutor.contratos import huella as H
-    return H.huella_desde_salida(host, f"{_HASH_A}  /etc/sudoers\n".encode() if controles is None else controles)
+    return H.huella_desde_salida(host, _base_completa() if controles is None else controles)
+
+
+def _base_completa_con_cambio() -> bytes:
+    """La base completa MÁS una línea de más (`/root/.ssh/authorized_keys` con hash
+    real) -- representa "cambió algo", pero sigue siendo una huella VÁLIDA (cada tramo
+    declarado sigue teniendo contenido; lo que cambió es el CONTENIDO de uno de ellos,
+    no que un tramo entero desapareciera)."""
+    base = _base_completa().decode()
+    base_sin_root = base.replace("D /root/.ssh/authorized_keys\n", "")
+    return (base_sin_root + f"{_HASH_B}  /root/.ssh/authorized_keys\n").encode()
 
 
 def test_sin_tomar_huella_no_se_toma_ninguna(tmp_path):
@@ -258,7 +282,7 @@ def test_huella_cambiada_pone_la_pausa(tmp_path):
     """Ronda 6: sin declarado -- cualquier cambio pausa, sin importar el texto de la
     misión."""
     antes = _h("atemai")
-    despues = _h("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
+    despues = _h("atemai", controles=_base_completa_con_cambio())
     tomar_huella = _tomador_secuencia({"atemai": [antes, despues]})
     ctx = _ctx(tmp_path)
 
@@ -338,7 +362,7 @@ def test_turno_n_mas_1_no_blanquea_un_cambio_del_turno_n(tmp_path):
     MISMA apertura."""
     misiones = tmp_path / "misiones"
     original = _h("atemai")
-    cambiado_sin_declarar = _h("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
+    cambiado_sin_declarar = _h("atemai", controles=_base_completa_con_cambio())
 
     # Turno 1: abre limpio, cierra limpio (nadie detecta nada -- el cambio pasa DESPUÉS).
     t1 = _tomador_secuencia({"atemai": [original, _h("atemai")]})
@@ -405,7 +429,7 @@ def test_huerfana_abierta_con_cambio_no_deja_abrir_y_queda_reportada(tmp_path):
     huella_vieja = _h("atemai")
     H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
 
-    huella_cambiada = _h("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
+    huella_cambiada = _h("atemai", controles=_base_completa_con_cambio())
     llamadas = {"n": 0}
 
     async def tomar(host):

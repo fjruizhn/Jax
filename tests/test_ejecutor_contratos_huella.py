@@ -25,6 +25,7 @@ def test_rutas_controles_es_exactamente_la_lista_esperada():
         "/etc/ssh/sshd_config.d",
         "/etc/ssh/authorized_keys.d",
         "/root/.ssh/authorized_keys",
+        "/etc/ejecutor-huella",
     )
 
 
@@ -55,10 +56,14 @@ def test_comando_huella_menciona_las_rutas_y_el_glob_de_ejecutor():
 def test_comando_huella_menciona_el_authorized_keys_del_administrador():
     """LÍMITE 9 (ronda 2): el authorized_keys del administrador -- donde vive el acceso
     privilegiado real, y donde este mismo arreglo pone la llave del servicio -- entra
-    a la huella. Con OTRO admin_usuario, la ruta medida cambia con él."""
+    a la huella. Con OTRO admin_usuario, la ruta medida cambia con él.
+
+    MAJOR-5 (ronda 3): `ruta_authorized_keys_admin` ahora sale de `pwd.getpwnam` real
+    -- se usan DOS cuentas reales de esta máquina (`fruiz`, `axioma`), no un nombre
+    inventado que ya no resolvería."""
     assert "/home/fruiz/.ssh/authorized_keys" in H.comando_huella("fruiz")
-    assert "/home/otro-admin/.ssh/authorized_keys" in H.comando_huella("otro-admin")
-    assert "/home/fruiz/.ssh/authorized_keys" not in H.comando_huella("otro-admin")
+    assert "/home/axioma/.ssh/authorized_keys" in H.comando_huella("axioma")
+    assert "/home/fruiz/.ssh/authorized_keys" not in H.comando_huella("axioma")
 
 
 def test_comando_huella_no_mide_passwd_group_shadow_ronda7():
@@ -610,6 +615,68 @@ def test_linea_authorized_keys_servicio_rechaza_llave_o_ip_con_comillas():
         H.linea_authorized_keys_servicio(_TIPO, 'clave"con-comillas', origen_ip="1.2.3.4")
     with pytest.raises(ValueError):
         H.linea_authorized_keys_servicio(_TIPO, _CLAVE, origen_ip='1.2.3.4"; rm -rf /')
+
+
+# --- MAJOR-6 (ronda 3, auditoría adversarial 2026-09-22): `tipo` sin validar permitía
+# colar una SEGUNDA línea de authorized_keys (sin command=/restrict) con un salto de
+# línea; `origen_ip="*"` volvía el `from=` inútil (acepta cualquier origen). ------------
+
+def test_linea_authorized_keys_servicio_rechaza_tipo_con_salto_de_linea():
+    """El caso concreto que pide la auditoría: un `tipo` con `\\n` cuela una SEGUNDA
+    línea de authorized_keys sin `command=`/`restrict` delante -- una llave de acceso
+    COMPLETO disfrazada de este arreglo."""
+    tipo_hostil = "ssh-ed25519\nssh-ed25519 AAAAotra-clave-hostil shell-completa"
+    with pytest.raises(ValueError):
+        H.linea_authorized_keys_servicio(tipo_hostil, _CLAVE, origen_ip="172.16.20.5")
+
+
+def test_linea_authorized_keys_servicio_rechaza_tipo_desconocido():
+    for tipo_malo in ("", "ssh-ed25519 extra", "no-es-un-tipo", "ssh-ed25519;rm -rf /"):
+        with pytest.raises(ValueError):
+            H.linea_authorized_keys_servicio(tipo_malo, _CLAVE, origen_ip="172.16.20.5")
+
+
+def test_linea_authorized_keys_servicio_acepta_los_tipos_reales():
+    for tipo_bueno in ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256",
+                       "sk-ssh-ed25519@openssh.com"):
+        linea = H.linea_authorized_keys_servicio(tipo_bueno, _CLAVE, origen_ip="172.16.20.5")
+        assert linea.endswith(f" {tipo_bueno} {_CLAVE} {H.MARCA_HUELLA_SERVICIO}")
+
+
+def test_linea_authorized_keys_servicio_rechaza_clave_con_salto_de_linea():
+    clave_hostil = f"{_CLAVE}\nssh-ed25519 AAAAotra-clave-hostil shell-completa"
+    with pytest.raises(ValueError):
+        H.linea_authorized_keys_servicio(_TIPO, clave_hostil, origen_ip="172.16.20.5")
+
+
+def test_linea_authorized_keys_servicio_rechaza_origen_ip_con_comodin():
+    """`from="*"` en ssh acepta CUALQUIER origen -- exactamente lo que `from=` existe
+    para impedir."""
+    for comodin in ("*", "?", "172.16.20.*", "0.0.0.0/0", "172.16.20.5,*"):
+        with pytest.raises(ValueError):
+            H.linea_authorized_keys_servicio(_TIPO, _CLAVE, origen_ip=comodin)
+
+
+def test_linea_authorized_keys_servicio_acepta_ip_literal_v4_y_v6():
+    for ip in ("172.16.20.5", "::1", "2001:db8::5"):
+        linea = H.linea_authorized_keys_servicio(_TIPO, _CLAVE, origen_ip=ip)
+        assert f'from="{ip}"' in linea
+
+
+def test_el_mutante_sin_validar_tipo_muere():
+    """El mutante que reproduce el defecto real: `linea_authorized_keys_servicio` SIN
+    validar `tipo` -- un `tipo` con `\\n` pasaría directo a la línea final."""
+    def mutado_sin_validar_tipo(tipo, clave, *, origen_ip):
+        if not clave or any(c.isspace() for c in clave) or "'" in clave or '"' in clave:
+            raise ValueError("llave_invalida")
+        ip = H._validar_ip_literal(origen_ip)
+        return f'command="{H._COMANDO_FORZADO_HUELLA}",restrict,from="{ip}" {tipo} {clave} {H.MARCA_HUELLA_SERVICIO}'
+
+    tipo_hostil = "ssh-ed25519\nssh-ed25519 AAAAhostil shell-completa"
+    with pytest.raises(ValueError):
+        H.linea_authorized_keys_servicio(tipo_hostil, _CLAVE, origen_ip="172.16.20.5")
+    linea_mutada = mutado_sin_validar_tipo(tipo_hostil, _CLAVE, origen_ip="172.16.20.5")
+    assert "\n" in linea_mutada  # el mutante "logra" colar una segunda línea
 
 
 def test_el_mutante_que_borra_command_restrict_muere():

@@ -12,6 +12,7 @@ definición en Python de QUÉ se mide; este archivo mantiene sincronizado el scr
 contra esa definición -- una sola fuente de verdad, dos formas (Python armaba un `sh -c`
 para mandarlo por ssh, el script ahora corre ESTÁTICO en la remota, pero mide las
 MISMAS rutas)."""
+import os
 import re
 import shutil
 import subprocess
@@ -53,10 +54,11 @@ def test_el_script_no_lee_argv_del_script_ignora_lo_que_le_manden():
 def test_el_script_mide_exactamente_las_mismas_rutas_que_rutas_controles():
     for ruta in H.RUTAS_CONTROLES:
         assert TEXTO.count(f"tramo {ruta}") >= 1, ruta
-    # Y nada de más entre las rutas FIJAS: cada línea `tramo <ruta>` del script, salvo
-    # la del administrador (paramétrica, ver test de abajo), está en RUTAS_CONTROLES.
+    # Y nada de más entre las rutas FIJAS de nivel superior: cada línea `tramo <ruta>`
+    # DIRECTA del cuerpo del script (no la del helper `tramo_admin`, paramétrica --
+    # ver el test de abajo) está en RUTAS_CONTROLES.
     rutas_del_script = re.findall(r"^\s{2}tramo (\S+)$", TEXTO, flags=re.MULTILINE)
-    fijas = set(rutas_del_script) - {'"/home/$ADMIN_USUARIO/.ssh/authorized_keys"'}
+    fijas = set(rutas_del_script) - {'"$admin_home/.ssh/authorized_keys"'}  # dentro de tramo_admin(), paramétrica
     assert fijas == set(H.RUTAS_CONTROLES)
 
 
@@ -64,9 +66,16 @@ def test_el_script_mide_el_authorized_keys_del_administrador():
     """LÍMITE 9 (ronda 2, auditoría adversarial 2026-09-22): el `authorized_keys` del
     administrador es donde vive el acceso privilegiado real -- y donde este mismo
     commit pone la llave del servicio; no medirlo dejaría el propio cambio invisible a
-    la huella."""
-    assert 'tramo "/home/$ADMIN_USUARIO/.ssh/authorized_keys"' in TEXTO
-    assert "ADMIN_USUARIO=fruiz" in TEXTO
+    la huella.
+
+    MAJOR-4/MAJOR-5 (ronda 3): ya NO hay un `ADMIN_USUARIO=fruiz` hardcodeado ni un
+    `/home/$ADMIN_USUARIO` armado a mano -- `tramo_admin()` lee la cuenta de
+    `ADMIN_USUARIO_ARCHIVO` (que el instalador escribe) y su home de `getent passwd`."""
+    assert "tramo_admin" in TEXTO
+    assert "ADMIN_USUARIO_ARCHIVO=/etc/ejecutor-huella/admin_usuario" in TEXTO
+    assert "ADMIN_USUARIO=fruiz" not in TEXTO  # MAJOR-4: nunca hardcodeado
+    assert '"/home/' not in TEXTO  # MAJOR-5: nunca /home/<usuario> armado a mano
+    assert "getent" in TEXTO
 
 
 def test_el_script_usa_lc_all_c():
@@ -140,15 +149,26 @@ def test_correr_sin_privilegios_no_revienta_por_rutas_no_legibles():
 # viajaba por ssh) contra ese mismo árbol. -----------------------------------------------
 
 REQUIERE_BWRAP = pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap no disponible")
+#: MAJOR-4 (ronda 3): DOS usuarios reales y distintos de este mismo host (`getent
+#: passwd` los tiene que poder resolver de verdad dentro del bwrap) -- nunca "fruiz"
+#: fijo. `axioma` es una cuenta real en hall9000 con home propio; se usa acá sólo como
+#: SEGUNDO admin de prueba, no porque axioma vaya a ser admin_usuario en producción.
 _ADMIN_DE_PRUEBA = "fruiz"
+_OTRO_ADMIN_DE_PRUEBA = "axioma"
 
 
-def _arbol_de_prueba(tmp_path: Path, *, con_sha256sum: bool = True) -> dict:
-    """Arma un árbol de prueba completo (las seis RUTAS_CONTROLES + el authorized_keys
-    del administrador + /usr/local/sbin con ejecutor-huella instalado de verdad) y
-    devuelve el mapeo {ruta_real: ruta_de_prueba} para bwrap. `con_sha256sum=False`
-    (MAJOR-6): el `sha256sum` que bwrap expone es un binario que SIEMPRE falla --
-    simula que el binario real está roto/ausente sin necesitar borrar nada del host."""
+def _arbol_de_prueba(tmp_path: Path, *, admin_usuario: str = _ADMIN_DE_PRUEBA, con_sha256sum: bool = True) -> dict:
+    """Arma un árbol de prueba completo (las RUTAS_CONTROLES + el authorized_keys del
+    administrador + /usr/local/sbin con ejecutor-huella instalado de verdad +
+    /etc/ejecutor-huella/admin_usuario, MAJOR-4) y devuelve el mapeo
+    {ruta_real: ruta_de_prueba} para bwrap. `admin_usuario` resuelve su HOME con
+    `pwd.getpwnam` LOCAL (MAJOR-5) -- el mismo passwd que `getent` va a ver dentro del
+    bwrap, porque es el MISMO host. `con_sha256sum=False` (MAJOR-6): el `sha256sum`
+    que bwrap expone es un binario que SIEMPRE falla -- simula que el binario real
+    está roto/ausente sin necesitar borrar nada del host."""
+    import pwd as _pwd
+
+    admin_home = _pwd.getpwnam(admin_usuario).pw_dir
     sudoers = tmp_path / "sudoers"; sudoers.write_text("root ALL=(ALL) ALL\n")
     sudoers_d = tmp_path / "sudoers.d"; sudoers_d.mkdir()
     (sudoers_d / "50-x").write_text("fruiz ALL=(ALL) NOPASSWD: ALL\n")
@@ -159,7 +179,9 @@ def _arbol_de_prueba(tmp_path: Path, *, con_sha256sum: bool = True) -> dict:
     root_authorized_keys = tmp_path / "root_authorized_keys"
     root_authorized_keys.write_text("ssh-ed25519 AAAAroot root@hall9000\n")
     admin_authorized_keys = tmp_path / "admin_authorized_keys"
-    admin_authorized_keys.write_text("ssh-ed25519 AAAAadmin fruiz@hall9000\n")
+    admin_authorized_keys.write_text(f"ssh-ed25519 AAAAadmin {admin_usuario}@hall9000\n")
+    ejecutor_huella_dir = tmp_path / "ejecutor-huella-config"; ejecutor_huella_dir.mkdir()
+    (ejecutor_huella_dir / "admin_usuario").write_text(f"{admin_usuario}\n")
     sbin = tmp_path / "sbin"; sbin.mkdir()
     (sbin / "ejecutor-huella").write_bytes(GUION.read_bytes())
     (sbin / "ejecutor-huella").chmod(0o755)
@@ -179,7 +201,8 @@ def _arbol_de_prueba(tmp_path: Path, *, con_sha256sum: bool = True) -> dict:
         "/etc/ssh/sshd_config.d": sshd_config_d,
         "/etc/ssh/authorized_keys.d": authorized_keys_d,
         "/root/.ssh/authorized_keys": root_authorized_keys,
-        f"/home/{_ADMIN_DE_PRUEBA}/.ssh/authorized_keys": admin_authorized_keys,
+        "/etc/ejecutor-huella": ejecutor_huella_dir,
+        f"{admin_home}/.ssh/authorized_keys": admin_authorized_keys,
         "/usr/local/sbin": sbin,
     }
     if bin_falso is not None:
@@ -188,19 +211,43 @@ def _arbol_de_prueba(tmp_path: Path, *, con_sha256sum: bool = True) -> dict:
 
 
 def _argv_bwrap(binds: dict) -> list:
+    """`--tmpfs /root`: `/root/.ssh` no existe en este host, y bwrap necesita poder
+    crear el punto de montaje. Cualquier `.../authorized_keys` (`/root/...` o el HOME
+    de cualquier admin de prueba, MAJOR-4/5: `axioma` tiene `.ssh` 0700 -- fruiz no
+    puede ni entrar ahí para que bwrap monte encima) recibe el mismo tratamiento: un
+    tmpfs PROPIO sobre su `.ssh`, aislado a este sandbox, que no toca el host real."""
     argv = ["bwrap", "--dev-bind", "/", "/", "--die-with-parent", "--tmpfs", "/root"]
+    for real in binds:
+        if not real.endswith("/authorized_keys"):
+            continue
+        home = str(Path(real).parent.parent)
+        if home in ("/root", os.path.expanduser("~")):
+            continue  # /root ya tiene su --tmpfs; el HOME del usuario del test (fruiz)
+            # ya es plenamente suyo -- un --tmpfs de más ahí TAPARÍA el propio checkout
+            # (visto: rompía /home/fruiz/worktrees/... y el guion dejaba de existir).
+        # El HOME entero, no sólo `.ssh`: `axioma` (MAJOR-4/5) tiene `/home/axioma` en
+        # 0750 dueño axioma -- el usuario del test no puede ENTRAR ahí, pero MONTAR un
+        # tmpfs ENCIMA de ese punto sólo exige poder resolver el padre (`/home`, 0755) --
+        # no entrar al directorio que se está reemplazando. Verificado sin sudo: alcanza.
+        argv += ["--tmpfs", home]
     for real, prueba in binds.items():
         argv += ["--bind", str(prueba), real]
     return argv
 
 
 @REQUIERE_BWRAP
-def test_el_guion_y_comando_huella_dan_la_misma_salida_sobre_el_mismo_arbol(tmp_path):
-    binds = _arbol_de_prueba(tmp_path)
+@pytest.mark.parametrize("admin_usuario", [_ADMIN_DE_PRUEBA, _OTRO_ADMIN_DE_PRUEBA])
+def test_el_guion_y_comando_huella_dan_la_misma_salida_sobre_el_mismo_arbol(tmp_path, admin_usuario):
+    """MAJOR-4 (ronda 3): corre con DOS usuarios administradores distintos -- si el
+    guion tuviera `fruiz` hardcodeado en vez de leerlo del archivo que escribe el
+    instalador, la corrida con `axioma` fallaría (el script seguiría midiendo el
+    `authorized_keys` de fruiz, `comando_huella("axioma")` mediría el de axioma, y las
+    salidas NO coincidirían)."""
+    binds = _arbol_de_prueba(tmp_path, admin_usuario=admin_usuario)
     base = _argv_bwrap(binds)
 
     salida_guion = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
-    comando = H.comando_huella(_ADMIN_DE_PRUEBA)
+    comando = H.comando_huella(admin_usuario)
     salida_python = subprocess.run(base + ["--", "/bin/sh", "-c", comando], capture_output=True, timeout=30)
 
     assert salida_guion.returncode == 0, salida_guion.stderr

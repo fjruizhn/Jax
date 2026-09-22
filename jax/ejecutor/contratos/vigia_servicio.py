@@ -172,9 +172,10 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
                 "origen": "huella", "motivo": "huella_no_medible", "host": host, "mision_id": mision_id_de_la_ruta,
                 "detalle": ["huerfana", type(exc).__name__]})
             return False
-        if not huella.huella_valida(despues) or huella.cambio(antes, despues):
+        if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT) or huella.cambio(antes, despues):
             log.critical("vigia_servicio huella_cambio_no_declarado host=%s motivo=huerfana", host)
-            detalle = tuple(["huella_de_ahora_vacia"] if not huella.huella_valida(despues)
+            detalle = tuple(["huella_de_ahora_vacia"]
+                            if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT)
                             else huella.lineas_agregadas_o_quitadas(antes, despues))
             await asyncio.to_thread(huella.escribir_marca, ruta,
                                     huella.Marca(huella=antes, estado=huella.REPORTADA, diff=detalle))
@@ -213,7 +214,7 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
         h = marca.huella
     except FileNotFoundError:
         h = await tomar_huella(host)
-        if not huella.huella_valida(h):
+        if not huella.huella_valida(h, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT):
             raise RuntimeError("huella_apertura_vacia")
     await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=h, estado=huella.ABIERTA))
     return h
@@ -260,7 +261,7 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict
                 "origen": "huella", "motivo": "huella_no_medible", "host": h, "mision_id": mision_id,
                 "detalle": [type(exc).__name__]})
             continue
-        if not huella.huella_valida(despues):
+        if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT):
             log.error("vigia_servicio huella_no_medible host=%s motivo=huella_vacia", h)
             motivos.append((h, "huella_no_medible"))
             await asyncio.to_thread(pausar, pausa_ruta, {

@@ -25,12 +25,26 @@
 #
 # SIN PARÁMETROS DE POSICIÓN (argv): no hay superficie de ataque por ahí, y de todos
 # modos `restrict` + el sudoers acotado a "sin argumentos" (arriba) lo impedirían aunque
-# los hubiera. ADMIN_USUARIO (abajo) es una CONSTANTE declarada acá, no un argumento ni
-# una variable de entorno heredada del cliente ssh (sshd no reenvía el entorno del
-# cliente salvo AcceptEnv, que este inventario no habilita a propósito -- sería abrir
-# una superficie nueva). Si el administrador cambiara, se edita ACÁ y se reinstala con
-# ops/ejecutor/instalar_huella_en_maquina.sh -- igual que ADMIN_USUARIO en el resto de
-# los guiones de ops/ejecutor.
+# los hubiera.
+#
+# ADMIN_USUARIO (ronda 3, MAJOR-4: CORREGIDO -- antes era una constante `fruiz` fija en
+# este archivo, que la ronda 2 llamaba "declarada en una variable" pero en los hechos
+# era hardcoding con pasos extra: cambiar de administrador exigía editar este script y
+# reinstalarlo en las N máquinas). Ahora se LEE de un archivo que
+# `instalar_huella_en_maquina.sh` escribe (root 0644, una sola línea):
+# /etc/ejecutor-huella/admin_usuario -- NO de argv, NO del entorno heredado del cliente
+# ssh (sshd no reenvía el entorno del cliente salvo AcceptEnv, que este inventario no
+# habilita a propósito). Ese archivo, a su vez, ES una de las RUTAS_CONTROLES
+# (jax/ejecutor/contratos/huella.py) -- si alguien lo borra o lo cambia para apuntar a
+# otra cuenta, ESE cambio se ve en la huella igual que cualquier otro, sin declarado.
+# Vacío o ausente: fail-closed SÓLO para ESE tramo (ver `tramo_admin` más abajo) -- el
+# resto de la huella sigue midiendo igual.
+ADMIN_USUARIO_ARCHIVO=/etc/ejecutor-huella/admin_usuario
+#
+# El HOME del administrador (ronda 3, MAJOR-5: CORREGIDO -- antes asumía `/home/$ADMIN_USUARIO`)
+# sale de `getent passwd`, el passwd REAL de esta máquina, no de una convención. Si la
+# cuenta no existe en esta máquina, ese tramo tampoco se mide (mismo criterio fail-closed
+# que arriba).
 #
 # MISMA lógica que `jax.ejecutor.contratos.huella.comando_huella()` (RUTAS_CONTROLES +
 # el authorized_keys del administrador + el glob de /usr/local/sbin/ejecutor-*, mismo
@@ -47,12 +61,20 @@ export LC_ALL=C
 FIND=/usr/bin/find
 SHA256SUM=/usr/bin/sha256sum
 SORT=/usr/bin/sort
-ADMIN_USUARIO=fruiz
+GETENT=/usr/bin/getent
 
 tramo() {
   "$FIND" "$1" -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
   "$FIND" "$1" -type l -printf "L %p -> %l\n" 2>/dev/null
   "$FIND" "$1" -type d -printf "D %p\n" 2>/dev/null
+}
+
+tramo_admin() {
+  admin_usuario="$(cat "$ADMIN_USUARIO_ARCHIVO" 2>/dev/null)"
+  [ -n "$admin_usuario" ] || return 0
+  admin_home="$("$GETENT" passwd "$admin_usuario" 2>/dev/null | cut -d: -f6)"
+  [ -n "$admin_home" ] || return 0
+  tramo "$admin_home/.ssh/authorized_keys"
 }
 
 {
@@ -62,7 +84,8 @@ tramo() {
   tramo /etc/ssh/sshd_config.d
   tramo /etc/ssh/authorized_keys.d
   tramo /root/.ssh/authorized_keys
-  tramo "/home/$ADMIN_USUARIO/.ssh/authorized_keys"
+  tramo /etc/ejecutor-huella
+  tramo_admin
   "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
   "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -type l -printf "L %p -> %l\n" 2>/dev/null
 } | "$SORT"

@@ -21,8 +21,25 @@ _HASH_A = "a" * 64
 _HASH_B = "b" * 64
 
 
+def _base_completa() -> bytes:
+    """MINOR (ronda 3): `huella_valida()`, llamada por `vigia_servicio.py` con
+    `rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT`, exige que CADA tramo declarado tenga
+    contenido -- una línea `D <ruta>` por cada RUTAS_CONTROLES (menos la primera, que
+    lleva el hash real) más el directorio de binarios alcanza."""
+    lineas = [f"{_HASH_A}  /etc/sudoers"]
+    lineas += [f"D {r}" for r in H.RUTAS_CONTROLES[1:]]
+    lineas.append(f"D {H._DIR_SBIN_EJECUTOR}")
+    return ("\n".join(lineas) + "\n").encode()
+
+
+def _base_completa_con_cambio() -> bytes:
+    base = _base_completa().decode()
+    base_sin_root = base.replace("D /root/.ssh/authorized_keys\n", "")
+    return (base_sin_root + f"{_HASH_B}  /root/.ssh/authorized_keys\n").encode()
+
+
 def _huella(host, controles=None):
-    return H.huella_desde_salida(host, f"{_HASH_A}  /etc/sudoers\n".encode() if controles is None else controles)
+    return H.huella_desde_salida(host, _base_completa() if controles is None else controles)
 
 
 def test_aceptar_muestra_el_diff_toma_linea_base_nueva_y_registra(tmp_path):
@@ -32,7 +49,7 @@ def test_aceptar_muestra_el_diff_toma_linea_base_nueva_y_registra(tmp_path):
     diff = ("def  /root/.ssh/authorized_keys",)
     H.escribir_marca(ruta, H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=diff))
 
-    nueva = _huella("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
+    nueva = _huella("atemai", controles=_base_completa_con_cambio())
     llamadas = []
 
     async def tomar_falso(host):
@@ -133,7 +150,7 @@ def test_escenario_completo_turno_1_cambia_un_control_pausa_acepta_turno_2_abre(
     pausa_ruta = tmp_path / "PAUSA"
 
     original = _huella("atemai")
-    cambiada = _huella("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
+    cambiada = _huella("atemai", controles=_base_completa_con_cambio())
 
     # --- Turno 1: abre limpio, cierra con un cambio (apt install tocó un control). ---
     from jax.ejecutor.contratos.fallo import Fallo

@@ -19,6 +19,13 @@
 # el destino de este ssh. Este guion, invocado con `hall9000` (o cualquier host
 # `es_local`), sólo hace el paso 1 (la llave local) y termina ahí.
 #
+# ADVERTENCIA (ronda 3, MINOR): instalar esto CAMBIA la huella de la máquina (agrega el
+# script, el sudoers.d y la línea de authorized_keys -- todos parte de RUTAS_CONTROLES o
+# medidos por la huella). Si hay una MISIÓN EN VUELO sobre esa máquina en ese momento, el
+# PRÓXIMO cierre de turno va a ver ese cambio como `huella_cambio_no_declarado` y PAUSA
+# el Ejecutor -- hay que aceptar esa huella después (`docs/ejecutor-huella-aceptar.md`).
+# La forma correcta es instalar con el Ejecutor SIN misiones activas contra esa máquina.
+#
 # Variables: JAX_EJECUTOR_POLITICA, _ADMIN_USUARIO, _HUELLA_LLAVE, _HUELLA_KNOWN_HOSTS,
 #            _HUELLA_ORIGEN_IP (la IP de hall9000 vista desde la remota -- sin
 #            hardcoding, Principio IV: cada máquina del ecosistema declara la suya).
@@ -34,6 +41,22 @@ JAX_EJECUTOR_CUENTA="${JAX_EJECUTOR_CUENTA:-axioma}"
 export JAX_EJECUTOR_CUENTA
 . "$REPO/ops/ejecutor/_maquina.sh"
 ETAPA="$(mktemp -d)"; trap 'rm -rf "$ETAPA"' EXIT
+
+# BLOCK-2 (ronda 3, auditoría adversarial 2026-09-22): un nombre FIJO en /tmp, escrito
+# por root (vía `install`), permite que un usuario local de la remota plante un symlink
+# en esa ruta ANTES de la subida -- root seguiría ese symlink al leer el contenido para
+# instalarlo, así que el atacante decide qué instala root. `subir_sin_nombre_fijo` corta
+# eso: el ADMINISTRADOR (nunca root) crea el destino con `mktemp` -- un archivo REAL, con
+# un nombre que nadie pudo conocer de antemano, existente desde el instante mismo en que
+# se crea -- y sube ahí con scp (mismo dueño, sin necesitar permisos de root). root sólo
+# LEE ese archivo después, nunca escribe a una ruta que pudo haber sido plantada. Sólo
+# aplica en el camino remoto (SSH_OPC existe recién después del `if LOCAL`, más abajo).
+subir_sin_nombre_fijo() {
+  local origen="$1" remoto
+  remoto="$(ssh "${SSH_OPC[@]}" -p "$PUERTO" "$JAX_EJECUTOR_ADMIN_USUARIO@$IP" mktemp)"
+  scp -q "${SSH_OPC[@]}" -P "$PUERTO" "$origen" "$JAX_EJECUTOR_ADMIN_USUARIO@$IP:$remoto"
+  printf '%s' "$remoto"
+}
 
 # 1. La llave PROPIA del servicio, UNA sola vez para todo el inventario (idempotente:
 #    si ya existe, se reusa tal cual -- no se regenera). jaxsvc:jaxsvc 700/600: el
@@ -64,8 +87,9 @@ while IFS= read -r LINEA_KH; do
     || printf '%s\n' "$LINEA_KH" | sudo tee -a "$JAX_EJECUTOR_HUELLA_KNOWN_HOSTS" >/dev/null
 done < "$ETAPA/kh-entradas"
 
-# 3. El script en la remota.
-sube "$REPO/ops/ejecutor/ejecutor-huella" /usr/local/sbin/ejecutor-huella 0755
+# 3. El script en la remota -- BLOCK-2: nunca un nombre fijo (subir_sin_nombre_fijo).
+TMP_SCRIPT_REMOTO="$(subir_sin_nombre_fijo "$REPO/ops/ejecutor/ejecutor-huella")"
+corre "install -o root -g root -m 0755 $TMP_SCRIPT_REMOTO /usr/local/sbin/ejecutor-huella && rm -f $TMP_SCRIPT_REMOTO"
 
 # 4. sudoers.d ACOTADO -- exactamente este binario, SIN argumentos, nunca ALL. MAJOR-5
 #    (ronda 2, auditoría adversarial 2026-09-22): la cadena vacía `""` NO es decorativa
@@ -74,18 +98,31 @@ sube "$REPO/ops/ejecutor/ejecutor-huella" /usr/local/sbin/ejecutor-huella 0755
 #    binario no los use; sólo con `cmd ""` sudo exige que la invocación no tenga
 #    argumentos. Sin esto, "sin argumentos: no hay superficie de ataque" sería una
 #    afirmación falsa sobre el propio sudoers -- ver huella.py, _COMANDO_FORZADO_HUELLA.
+#    BLOCK-2: staging por `subir_sin_nombre_fijo`, no un nombre fijo en /tmp.
 printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/ejecutor-huella ""\n' "$ADMIN_LOCAL" > "$ETAPA/sudoers-huella"
-sube "$ETAPA/sudoers-huella" /tmp/ejecutor-sudoers-huella-prueba 0440
-corre "visudo -cf /tmp/ejecutor-sudoers-huella-prueba && install -o root -g root -m 0440 /tmp/ejecutor-sudoers-huella-prueba /etc/sudoers.d/50-ejecutor-huella && rm /tmp/ejecutor-sudoers-huella-prueba && visudo -c >/dev/null"
+TMP_SUDOERS_REMOTO="$(subir_sin_nombre_fijo "$ETAPA/sudoers-huella")"
+corre "visudo -cf $TMP_SUDOERS_REMOTO && install -o root -g root -m 0440 $TMP_SUDOERS_REMOTO /etc/sudoers.d/50-ejecutor-huella && rm -f $TMP_SUDOERS_REMOTO"
 
-# 5. authorized_keys del ADMINISTRADOR en la remota -- BLOCK-2/MAJOR-3 (ronda 2): la
+# 5. MAJOR-4 (ronda 3): el guion remoto (ejecutor-huella) YA NO tiene el administrador
+#    hardcodeado -- lo lee de este archivo, que sólo este instalador escribe (root
+#    0644, una sola línea). Todo en UN solo comando remoto -- el `mktemp` y su uso
+#    quedan dentro de la MISMA invocación de root, sin hop intermedio que necesite
+#    `subir_sin_nombre_fijo` (BLOCK-2: no hay ventana entre crear el nombre y usarlo).
+corre "install -d -o root -g root -m 0755 /etc/ejecutor-huella \
+  && TMP_ADMIN=\$(mktemp) && printf '%s\n' $(printf %q "$ADMIN_LOCAL") > \"\$TMP_ADMIN\" \
+  && install -o root -g root -m 0644 \"\$TMP_ADMIN\" /etc/ejecutor-huella/admin_usuario \
+  && rm -f \"\$TMP_ADMIN\""
+
+# 6. authorized_keys del ADMINISTRADOR en la remota -- BLOCK-2/MAJOR-3 (ronda 2/3): la
 #    línea la arma `huella.linea_authorized_keys_servicio` (Python, TESTEADO, no bash
-#    suelto), y `huella.actualizar_authorized_keys_admin` CONVERGE: si ya hay una marca
-#    `ejecutor-huella-servicio`, la REEMPLAZA (por ejemplo si `origen_ip` cambió) --
-#    nunca la duplica. MINOR (ronda 2): `install -o/-g "$ADMIN_LOCAL"` en el directorio
-#    Y el archivo -- antes, si `~$ADMIN_LOCAL/.ssh` no existía, `corre` (que ejecuta como
-#    ROOT vía sudo -n) lo creaba dueño ROOT, dejando al administrador sin poder tocar su
-#    propio `authorized_keys` nunca más.
+#    suelto), y `huella.actualizar_authorized_keys_admin` CONVERGE por MARCA
+#    (`ejecutor-huella-servicio`), no por la clave pública actual -- si la llave del
+#    servicio se REGENERA entre instalaciones, sigue reemplazando la línea vieja en vez
+#    de dejarla huérfana (ver MAJOR-3, `revertir_huella_en_maquina.sh`, mismo criterio).
+#    MINOR (ronda 2): `install -o/-g "$ADMIN_LOCAL"` en el directorio Y el archivo --
+#    antes, si `~$ADMIN_LOCAL/.ssh` no existía, `corre` (que ejecuta como ROOT vía
+#    sudo -n) lo creaba dueño ROOT, dejando al administrador sin poder tocar su propio
+#    `authorized_keys` nunca más.
 corre "install -d -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0700 ~$ADMIN_LOCAL/.ssh"
 ACTUALES="$(corre "cat ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null" || true)"
 printf '%s' "$ACTUALES" > "$ETAPA/actuales"
@@ -99,8 +136,8 @@ sys.stdout.write(actualizar_authorized_keys_admin(
 if corre "cat ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null" | cmp -s - "$ETAPA/nuevas"; then
   echo "codigo=llave_huella_ya_convergida host=\"$NOMBRE\""
 else
-  sube "$ETAPA/nuevas" /tmp/ejecutor-authorized-huella 0600
-  corre "install -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0600 /tmp/ejecutor-authorized-huella ~$ADMIN_LOCAL/.ssh/authorized_keys && rm -f /tmp/ejecutor-authorized-huella"
+  TMP_AUTH_REMOTO="$(subir_sin_nombre_fijo "$ETAPA/nuevas")"
+  corre "install -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0600 $TMP_AUTH_REMOTO ~$ADMIN_LOCAL/.ssh/authorized_keys && rm -f $TMP_AUTH_REMOTO"
 fi
 
 echo "maquina_huella_instalada=\"$NOMBRE\" script_sha256=\"$(corre "sha256sum /usr/local/sbin/ejecutor-huella" | cut -d' ' -f1)\""

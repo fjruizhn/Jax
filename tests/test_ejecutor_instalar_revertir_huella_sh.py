@@ -41,6 +41,31 @@ def test_revertir_pasa_bash_menos_n():
     assert subprocess.run(["bash", "-n", str(REVERTIR)]).returncode == 0
 
 
+def test_instalar_no_usa_nombres_fijos_en_tmp():
+    """BLOCK-2 (ronda 3, auditoría adversarial 2026-09-22): un nombre FIJO en /tmp,
+    escrito por root vía `install`, deja una ventana para que un usuario local de la
+    remota plante un symlink ahí ANTES de la subida. `mktemp` (remoto, vía el
+    administrador -- `subir_sin_nombre_fijo`) cierra esa ventana; ningún `/tmp/ejecutor-*`
+    fijo puede quedar en el guion."""
+    assert "mktemp" in INSTALAR.read_text()
+    assert "/tmp/ejecutor-" not in INSTALAR.read_text()
+
+
+def test_revertir_no_usa_nombres_fijos_en_tmp():
+    assert "mktemp" in REVERTIR.read_text()
+    assert "/tmp/ejecutor-" not in REVERTIR.read_text()
+
+
+def test_el_mutante_con_nombre_fijo_en_tmp_muere():
+    """El mutante que reproduce el defecto real: un `install` a una ruta FIJA en /tmp
+    en vez de a la que devuelve `mktemp`."""
+    texto_mutado = INSTALAR.read_text().replace(
+        'remoto="$(ssh "${SSH_OPC[@]}" -p "$PUERTO" "$JAX_EJECUTOR_ADMIN_USUARIO@$IP" mktemp)"',
+        'remoto="/tmp/ejecutor-subida-fija"')
+    assert "mktemp" in INSTALAR.read_text()
+    assert "mktemp" not in texto_mutado.split("subir_sin_nombre_fijo() {")[1].split("}")[0]
+
+
 def test_revertir_no_deja_copia_con_la_llave_en_el_texto():
     """MAJOR-4: antes había un `cp ~admin/.ssh/authorized_keys ~admin/.ssh/....` que
     dejaba la línea COMPLETA (command= y clave pública) en un archivo aparte en la
@@ -189,6 +214,7 @@ def _arbol_remoto(tmp_path: Path) -> dict:
     sin tocar el `known_hosts` real completo."""
     sbin = tmp_path / "remote-sbin"; sbin.mkdir(exist_ok=True)
     sudoers_d = tmp_path / "remote-sudoersd"; sudoers_d.mkdir(exist_ok=True)
+    ejecutor_huella_dir = tmp_path / "remote-ejecutor-huella"; ejecutor_huella_dir.mkdir(exist_ok=True)
     ssh_admin = tmp_path / "remote-ssh-admin"; ssh_admin.mkdir(exist_ok=True)
     (ssh_admin / "authorized_keys").write_text("ssh-ed25519 AAAAotra otra-llave-de-fruiz\n")
     kh_real = Path.home() / ".ssh" / "known_hosts"
@@ -199,6 +225,7 @@ def _arbol_remoto(tmp_path: Path) -> dict:
     return {
         "/usr/local/sbin": sbin,
         "/etc/sudoers.d": sudoers_d,
+        "/etc/ejecutor-huella": ejecutor_huella_dir,
         f"/home/{ADMIN}/.ssh": ssh_admin,
     }
 
@@ -249,6 +276,49 @@ def test_instalar_con_origen_ip_distinto_converge_major3(tmp_path):
     assert f'from="{ORIGEN_IP_1}"' not in contenido2  # la vieja se fue
     assert f'from="{ORIGEN_IP_2}"' in contenido2  # quedó la nueva
     assert "otra-llave-de-fruiz" in contenido2  # las demás líneas, intactas
+
+
+@REQUIERE_BWRAP
+def test_revertir_funciona_aunque_la_llave_se_haya_regenerado_major3(tmp_path):
+    """MAJOR-3 (ronda 3, auditoría adversarial 2026-09-22): el mutante real que se
+    reprodujo -- instalar (deja la línea marcada con la clave VIEJA), REGENERAR el par
+    local (simula una rotación -- `id_ejecutor_huella`/`.pub` cambian de contenido SIN
+    volver a instalar), revertir. Si revertir filtrara/verificara por la clave pública
+    ACTUAL (la nueva, que nunca llegó a la remota), no encontraría nada que quitar Y la
+    verificación tampoco vería nada (busca la clave nueva, no la vieja que sigue ahí) --
+    saldría `verificado=true` con la línea VIEJA todavía autorizada. Filtrando por
+    MARCA, revertir no necesita que la clave coincida con nada."""
+    politica_ruta = tmp_path / "politica.json"
+    politica_ruta.write_text(json.dumps(_doc_politica()))
+    binds = _arbol_remoto(tmp_path)
+    env = _entorno_de_prueba(tmp_path, politica_ruta)
+    argv_base = _argv_bwrap(binds) + ["--", "env"] + [f"{k}={v}" for k, v in env.items()]
+
+    r_instalar = subprocess.run(argv_base + ["bash", str(INSTALAR), "prueba-huella"],
+                                capture_output=True, timeout=60, cwd=str(RAIZ))
+    assert r_instalar.returncode == 0, r_instalar.stderr.decode()
+    contenido_antes = (binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys").read_text()
+    assert "ejecutor-huella-servicio" in contenido_antes
+    clave_vieja = [l for l in contenido_antes.splitlines() if "ejecutor-huella-servicio" in l][0].split()[-2]
+
+    # "Regenerar el par": la llave local cambia de contenido SIN volver a instalar --
+    # la remota se queda con la línea VIEJA, como pasaría con una rotación real.
+    llave = Path(env["JAX_EJECUTOR_HUELLA_LLAVE"])
+    llave.unlink(missing_ok=True)
+    Path(f"{llave}.pub").unlink(missing_ok=True)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "rotada",
+                    "-f", str(llave)], check=True)
+    clave_nueva = Path(f"{llave}.pub").read_text().split()[1]
+    assert clave_nueva != clave_vieja  # la rotación de verdad cambió la clave
+
+    r_revertir = subprocess.run(argv_base + ["bash", str(REVERTIR), "prueba-huella"],
+                                capture_output=True, timeout=60, cwd=str(RAIZ))
+    assert r_revertir.returncode == 0, r_revertir.stderr.decode()
+    assert b"verificado=true" in r_revertir.stdout
+
+    contenido_despues = (binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys").read_text()
+    assert "ejecutor-huella-servicio" not in contenido_despues  # la línea VIEJA se fue
+    assert clave_vieja not in contenido_despues
 
 
 @REQUIERE_BWRAP

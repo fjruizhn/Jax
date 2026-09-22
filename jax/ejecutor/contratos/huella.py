@@ -83,6 +83,15 @@ from jax.ejecutor.contratos import pausa
 #: privilegiado real, y dónde el arreglo de jax#260 puso la llave del servicio) SÍ entra
 #: a la huella, pero por `ruta_authorized_keys_admin(admin_usuario)` / `comando_huella
 #: (admin_usuario)` -- necesita saber la cuenta, y RUTAS_CONTROLES no depende de nada.
+#:
+#: MAJOR-4 (ronda 3): `/etc/ejecutor-huella` -- el directorio donde
+#: `instalar_huella_en_maquina.sh` escribe `admin_usuario` (root 0644) para que
+#: `ops/ejecutor/ejecutor-huella` sepa a qué cuenta pertenece el `authorized_keys` a
+#: medir SIN hardcodear un nombre en el guion. Que ESTE archivo entre a RUTAS_CONTROLES
+#: (fija, no depende de la cuenta) cierra el hueco obvio: si alguien lo borra o lo
+#: cambia para apuntar a otra cuenta, el tramo derivado (`ruta_authorized_keys_admin`)
+#: puede dejar de medir lo que debía -- pero el cambio en ESTE archivo, que sí es fijo,
+#: se ve igual, sin declarado, como cualquier otro control.
 RUTAS_CONTROLES = (
     "/etc/sudoers",
     "/etc/sudoers.d",
@@ -90,7 +99,12 @@ RUTAS_CONTROLES = (
     "/etc/ssh/sshd_config.d",
     "/etc/ssh/authorized_keys.d",
     "/root/.ssh/authorized_keys",
+    "/etc/ejecutor-huella",
 )
+
+#: Dónde vive el archivo de una sola línea con el usuario administrador -- lo escribe
+#: `instalar_huella_en_maquina.sh`, lo lee `ops/ejecutor/ejecutor-huella` con `cat`.
+RUTA_ADMIN_USUARIO_CONFIG = "/etc/ejecutor-huella/admin_usuario"
 
 #: Los binarios propios del Ejecutor en la máquina -- glob, no nombres literales: hoy
 #: son `ejecutor-freno-remoto` y `ejecutor-revocar`, pero el contrato es "nada que
@@ -144,13 +158,27 @@ def ruta_authorized_keys_admin(admin_usuario: str) -> str:
     `authorized_keys` del ADMINISTRADOR (`JAX_EJECUTOR_ADMIN_USUARIO`, hoy `fruiz`) es
     donde vive el acceso privilegiado real -- y donde este mismo arreglo pone la llave
     del servicio (`instalar_huella_en_maquina.sh`). No medirlo dejaría el propio cambio
-    que este commit hace invisible a la huella. `/home/<admin>` sigue la MISMA
-    convención que ya usa `JAX_EJECUTOR_CUENTA_HOME` en `/etc/jax/.env`
-    (`/home/axioma`) -- no es una ruta inventada, es la que este inventario ya asume
-    para toda cuenta humana/de servicio."""
+    que este commit hace invisible a la huella.
+
+    MAJOR-5 (ronda 3, auditoría adversarial 2026-09-22): esto asumía `/home/<admin>` --
+    CORREGIDO: sale de `pwd.getpwnam(admin_usuario).pw_dir`, el passwd REAL de esta
+    máquina, no una convención. Dato verificado por Fernando esa noche: en `bridge`
+    (Ubuntu 24.04 + Hestia) `/home/fruiz` SÍ existe -- la sospecha de un layout tipo
+    macOS era falsa -- pero igual se lee del passwd: `ejecutor-huella` (el script
+    remoto) hace lo mismo con `getent passwd`, y esta función es la que un test de
+    sincronía (MAJOR-7) compara contra la salida real del script EN ESTA MISMA
+    máquina -- los dos tienen que resolver el mismo passwd para que la comparación
+    signifique algo. `KeyError` (cuenta inexistente) se traduce a `ValueError`, fail-
+    closed, igual que el resto de las validaciones de este módulo."""
     if not admin_usuario or "/" in admin_usuario or admin_usuario.strip() != admin_usuario:
         raise ValueError("admin_usuario_invalido")
-    return f"/home/{admin_usuario}/.ssh/authorized_keys"
+    try:
+        home = pwd.getpwnam(admin_usuario).pw_dir
+    except KeyError:
+        raise ValueError("admin_usuario_sin_passwd") from None
+    if not home or not home.startswith("/"):
+        raise ValueError("admin_usuario_sin_home")
+    return f"{home}/.ssh/authorized_keys"
 
 
 def comando_huella(admin_usuario: str) -> str:
@@ -248,16 +276,48 @@ MARCA_HUELLA_SERVICIO = "ejecutor-huella-servicio"
 _COMANDO_FORZADO_HUELLA = "sudo -n /usr/local/sbin/ejecutor-huella"
 
 
+#: MAJOR-6 (ronda 3, auditoría adversarial 2026-09-22): mismo patrón que
+#: `revocacion._TIPO_DE_LLAVE` -- una LISTA BLANCA de tipos reales de llave ssh, no
+#: "sin caracteres raros". Antes `linea_authorized_keys_servicio` sólo validaba
+#: `clave`/`origen_ip`; un `tipo` con un salto de línea colaba una SEGUNDA línea en el
+#: authorized_keys sin `command=`/`restrict` -- una llave de acceso completo.
+_TIPO_DE_LLAVE = re.compile(r"^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp\d+|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$")
+
+
+def _validar_ip_literal(origen_ip: str) -> str:
+    """MAJOR-6 (ronda 3): `from=` de ssh admite PATRONES (glob) -- `from="*"` autoriza
+    CUALQUIER origen, que es exactamente lo que este control existe para impedir. Se
+    exige una IP LITERAL (v4 o v6), nunca un patrón -- `ipaddress.ip_address` rechaza
+    `*`, `?`, rangos y cualquier otra cosa que no sea una dirección exacta."""
+    import ipaddress
+
+    if not isinstance(origen_ip, str) or not origen_ip or any(c.isspace() for c in origen_ip) or '"' in origen_ip:
+        raise ValueError("origen_ip_invalido")
+    try:
+        ipaddress.ip_address(origen_ip)
+    except ValueError:
+        raise ValueError("origen_ip_invalido") from None
+    return origen_ip
+
+
 def linea_authorized_keys_servicio(tipo: str, clave: str, *, origen_ip: str) -> str:
     """La línea que `instalar_huella_en_maquina.sh` agrega al `authorized_keys` del
     administrador remoto -- `command=` forzado, `restrict` (sin pty/reenvíos/agente/
     variables de entorno del cliente) y `from=` acotado al origen (hall9000). BLOCK-2:
     si falta `command=`, `restrict` o `from=`, esto ya no protege nada -- por eso hay
-    tests que exigen los tres literalmente presentes y un mutante que los borra."""
-    if not tipo or not clave or "'" in clave or '"' in clave or " " in clave:
+    tests que exigen los tres literalmente presentes y un mutante que los borra.
+
+    MAJOR-6 (ronda 3): `tipo` valida contra una lista blanca real (`_TIPO_DE_LLAVE`,
+    mismo patrón que `revocacion.py`) -- un salto de línea en `tipo` (o en `clave`)
+    podía colar una SEGUNDA línea de `authorized_keys` sin `command=`/`restrict`
+    delante, una llave de acceso completo disfrazada de este arreglo. `clave` rechaza
+    CUALQUIER whitespace (no sólo espacio: `\\n`, `\\t`, `\\r`) y comillas. `origen_ip`
+    tiene que ser una IP LITERAL -- `from="*"` autoriza cualquier origen."""
+    if not _TIPO_DE_LLAVE.match(tipo or ""):
+        raise ValueError("tipo_invalido")
+    if not clave or any(c.isspace() for c in clave) or "'" in clave or '"' in clave:
         raise ValueError("llave_invalida")
-    if not origen_ip or '"' in origen_ip:
-        raise ValueError("origen_ip_invalido")
+    origen_ip = _validar_ip_literal(origen_ip)
     return f'command="{_COMANDO_FORZADO_HUELLA}",restrict,from="{origen_ip}" {tipo} {clave} {MARCA_HUELLA_SERVICIO}'
 
 
@@ -288,8 +348,35 @@ def huella_desde_salida(host: str, salida: bytes) -> Huella:
 #: MAJOR-6 (ronda 2): 64 hex + dos espacios -- exactamente lo que imprime `sha256sum`.
 _LINEA_CON_HASH = re.compile(r"^[0-9a-f]{64}  ")
 
+#: Las rutas que `huella_valida` exige ver representadas -- por default, las FIJAS
+#: (RUTAS_CONTROLES + el directorio de binarios del Ejecutor). El authorized_keys del
+#: administrador NO entra acá por default porque es host/cuenta-dependiente
+#: (`ruta_authorized_keys_admin`); un llamador que la conoce (`vigia_servicio.py`,
+#: `_tomar_huella_actual`) puede pasarla en `rutas=` para exigirla también.
+RUTAS_DECLARADAS_POR_DEFAULT = RUTAS_CONTROLES + (_DIR_SBIN_EJECUTOR,)
 
-def huella_valida(h: Huella) -> bool:
+
+def _ruta_de_la_linea(linea: str) -> str | None:
+    """La porción de RUTA de una línea de huella -- `<hash>  <ruta>`, `D <ruta>` o
+    `L <ruta> -> <destino>`. `None` si la línea no tiene una forma reconocible."""
+    if _LINEA_CON_HASH.match(linea):
+        return linea[66:]
+    if linea.startswith("D "):
+        return linea[2:]
+    if linea.startswith("L "):
+        return linea[2:].split(" -> ", 1)[0]
+    return None
+
+
+def _alguna_linea_toca(lineas: list[str], ruta: str) -> bool:
+    for linea in lineas:
+        r = _ruta_de_la_linea(linea)
+        if r is not None and (r == ruta or r.startswith(ruta + "/")):
+            return True
+    return False
+
+
+def huella_valida(h: Huella, *, rutas: tuple | None = None) -> bool:
     """MINOR (ronda 6): una huella vacía (o que no trae ni una línea reconocible) no
     es "sin cambios" ni "máquina limpia" -- es que la medición no sirvió (comando mal
     formado, sudo denegado sin que rc lo reflejara, binarios ausentes). Fail-closed:
@@ -302,14 +389,32 @@ def huella_valida(h: Huella) -> bool:
     -printf`) no dependen de `sha256sum` y SIGUEN produciendo líneas `L `/`D `. El
     texto quedaba "no vacío" con sólo listados de directorios/symlinks y CERO hashes
     de archivo -- ciego a todo cambio de CONTENIDO, e igual `huella_valida() is True`.
-    Ahora exige al menos UNA línea con forma de hash sha256 real. En cualquier
-    despliegue sano esto siempre existe (mínimo, el propio `ejecutor-huella` instalado
-    se hashea a sí mismo vía el glob de `/usr/local/sbin/ejecutor-*`) -- su ausencia es
-    la señal de que la medición no sirvió, no de que "no hay archivos que mirar"."""
+
+    MINOR (ronda 3): "al menos UN hash en cualquier parte" tampoco alcanzaba -- un
+    TRAMO completo podía faltar (esa ruta puntual inaccesible, desaparecida, o el
+    `find` de esa línea reventado) mientras OTROS tramos seguían produciendo hashes, y
+    la huella pasaba igual. Con `rutas` (un tuple explícito -- típicamente
+    `RUTAS_DECLARADAS_POR_DEFAULT`), además del hash, CADA ruta tiene que aparecer --
+    como ruta exacta o como prefijo de alguna línea -- al menos una vez. Un directorio
+    EXISTENTE, aunque esté vacío, siempre se reporta a sí mismo (`find <ruta> -type d`
+    incluye el punto de partida) -- "cero líneas para una ruta declarada" sólo pasa si
+    esa ruta no existe, no es legible, o el comando para medirla se rompió.
+
+    `rutas=None` (el default) SALTA ese chequeo por-ruta -- lo pide `vigia_servicio.py`
+    explícitamente en sus CUATRO llamadas reales (con `RUTAS_DECLARADAS_POR_DEFAULT`);
+    dejarlo opcional evita que esta función necesite adivinar qué se declaró cuando
+    quien llama no lo sabe (por ejemplo, pruebas o usos genéricos de una sola línea),
+    y hace explícito, en el código de producción, DÓNDE se exige la cobertura
+    completa -- no implícito en un default que nadie ve al leer el call site."""
     texto = h.texto.strip()
     if not texto:
         return False
-    return any(_LINEA_CON_HASH.match(linea) for linea in texto.splitlines())
+    lineas = texto.splitlines()
+    if not any(_LINEA_CON_HASH.match(linea) for linea in lineas):
+        return False
+    if rutas is None:
+        return True
+    return all(_alguna_linea_toca(lineas, ruta) for ruta in rutas)
 
 
 def cambio(antes: Huella, despues: Huella) -> bool:
