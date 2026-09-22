@@ -364,10 +364,16 @@ def test_turno_n_mas_1_no_blanquea_un_cambio_del_turno_n(tmp_path):
 
 # --- M-1 (ronda 6): deuda de verificación huérfana --------------------------------------
 
-def test_huerfana_de_otra_mision_limpia_deja_abrir_y_la_marca(tmp_path):
+def _marca(host, estado, *, controles=None, diff=()):
+    from jax.ejecutor.contratos import huella as H
+    return H.Marca(huella=_h(host, controles=controles), estado=estado, diff=tuple(diff))
+
+
+def test_huerfana_abierta_de_otra_mision_limpia_deja_abrir_y_la_cierra(tmp_path):
+    from jax.ejecutor.contratos import huella as H
     misiones = tmp_path / "misiones"
     huella_vieja = _h("atemai")
-    S._escribir_huella_persistida(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), huella_vieja, pendiente=True)
+    H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
 
     # La huérfana se revisa PRIMERO (misma huella=sin cambio), y RECIÉN DESPUÉS se toma
     # la de esta misión nueva -- dos llamadas: la revisión de la huérfana, y la propia.
@@ -381,21 +387,19 @@ def test_huerfana_de_otra_mision_limpia_deja_abrir_y_la_marca(tmp_path):
     resultado = asyncio.run(abrir())
     assert resultado is not None
     assert not ctx.pausa.exists()
-    # La huérfana quedó resuelta (pendiente=False), no borrada.
-    datos = json.loads(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai").read_text())
-    assert datos["pendiente"] is False
+    # La huérfana quedó CERRADA (limpia), no borrada.
+    marca = H.leer_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"))
+    assert marca.estado == H.CERRADA
 
 
-def test_huerfana_con_cambio_no_deja_abrir_la_mision_nueva(tmp_path):
+def test_huerfana_abierta_con_cambio_no_deja_abrir_y_queda_reportada(tmp_path):
     """M-1: «así un kill -9 o un reinicio no blanquean nada» -- una marca huérfana de
     OTRA misión que cambió bloquea la apertura de ÉSTA, aunque su propia huella fuera
-    a salir limpia."""
+    a salir limpia. Ronda 7: la huérfana pasa a REPORTADA, con el diff guardado."""
+    from jax.ejecutor.contratos import huella as H
     misiones = tmp_path / "misiones"
     huella_vieja = _h("atemai")
-    S._escribir_huella_persistida(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), huella_vieja, pendiente=True)
-
-    async def apertura_no_deberia_llamarse(host):
-        raise AssertionError("no debe abrir su propia huella si la huérfana falló")
+    H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
 
     huella_cambiada = _h("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
     llamadas = {"n": 0}
@@ -412,9 +416,30 @@ def test_huerfana_con_cambio_no_deja_abrir_la_mision_nueva(tmp_path):
     assert ctx.pausa.exists()
     datos = json.loads(ctx.pausa.read_text())
     assert datos["motivo"] == "huella_cambio_no_declarado"
-    # La marca huérfana SIGUE pendiente (no se limpió: siguió cambiada).
-    persistida = json.loads(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai").read_text())
-    assert persistida["pendiente"] is True
+    marca = H.leer_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"))
+    assert marca.estado == H.REPORTADA
+    assert marca.diff and "authorized_keys" in marca.diff[0]
+
+
+def test_huerfana_reportada_bloquea_de_una_sin_volver_a_medir(tmp_path):
+    """Ronda 7, punto 2: una marca REPORTADA ya se comparó y ya pausó -- no hace falta
+    (ni corresponde) volver a medir para saber que sigue bloqueando; sólo la
+    aceptación explícita la resuelve."""
+    from jax.ejecutor.contratos import huella as H
+    misiones = tmp_path / "misiones"
+    H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"),
+                     _marca("atemai", H.REPORTADA, diff=("def  /root/.ssh/authorized_keys",)))
+
+    async def tomar_no_deberia_llamarse(host):
+        raise AssertionError("una REPORTADA no se vuelve a medir -- sólo se acepta")
+    ctx = _ctx(tmp_path)
+
+    with pytest.raises(S.HuellaHuerfanaNoResuelta):
+        _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_no_deberia_llamarse,
+                          misiones=misiones, mision_id=MISION_ID)
+    assert ctx.pausa.exists()
+    datos = json.loads(ctx.pausa.read_text())
+    assert datos["motivo"] == "huella_reportada_sin_aceptar"
 
 
 def test_huerfana_ilegible_no_deja_abrir(tmp_path):
@@ -433,9 +458,10 @@ def test_huerfana_ilegible_no_deja_abrir(tmp_path):
     assert ctx.pausa.exists()
 
 
-def test_marca_no_pendiente_no_se_revisa_de_nuevo(tmp_path):
+def test_marca_cerrada_no_se_revisa_de_nuevo(tmp_path):
+    from jax.ejecutor.contratos import huella as H
     misiones = tmp_path / "misiones"
-    S._escribir_huella_persistida(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), _h("atemai"), pendiente=False)
+    H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), _marca("atemai", H.CERRADA))
 
     llamadas = []
 
@@ -453,11 +479,11 @@ def test_marca_no_pendiente_no_se_revisa_de_nuevo(tmp_path):
     assert llamadas == ["atemai"]  # una sola llamada: la propia apertura, sin volver a medir la ya resuelta
 
 
-def test_kill_9_deja_marca_pendiente_que_la_proxima_mision_encuentra(tmp_path):
-    """Simula un `kill -9`: la misión 1 abre (queda `pendiente=true`) y NUNCA cierra
-    (el proceso muere entre abrir y cerrar -- no se llega a
-    `_verificar_huellas_al_cierre`). La misión 2 (otra `mision_id`) tiene que
-    encontrarla al abrir."""
+def test_kill_9_deja_marca_abierta_que_la_proxima_mision_encuentra(tmp_path):
+    """Simula un `kill -9`: la misión 1 abre (queda ABIERTA) y NUNCA cierra (el
+    proceso muere entre abrir y cerrar -- no se llega a `_verificar_huellas_al_cierre`).
+    La misión 2 (otra `mision_id`) tiene que encontrarla al abrir."""
+    from jax.ejecutor.contratos import huella as H
     misiones = tmp_path / "misiones"
     huella_real = _h("atemai")
 
@@ -469,12 +495,12 @@ def test_kill_9_deja_marca_pendiente_que_la_proxima_mision_encuentra(tmp_path):
         # "muere" acá -- nunca cierra.
     asyncio.run(escenario_mision_1())
 
-    persistida = json.loads(S.ruta_huella(misiones, MISION_ID, "atemai").read_text())
-    assert persistida["pendiente"] is True
+    marca = H.leer_marca(S.ruta_huella(misiones, MISION_ID, "atemai"))
+    assert marca.estado == H.ABIERTA
 
     # Misión 2, mismo host, OTRA mision_id, huella actual IGUAL a la que dejó la 1 (nada
     # cambió de verdad) -- tiene que abrir limpio (dos llamadas: la revisión de la
-    # huérfana de la 1, y la propia apertura de la 2) y limpiar la marca de la 1.
+    # huérfana de la 1, y la propia apertura de la 2) y CERRAR la marca de la 1.
     ctx2 = _ctx(tmp_path)
     tomar2 = _tomador_secuencia({"atemai": [huella_real, huella_real]})
 
@@ -485,8 +511,78 @@ def test_kill_9_deja_marca_pendiente_que_la_proxima_mision_encuentra(tmp_path):
     resultado2 = asyncio.run(abrir_mision_2())
     assert resultado2 is not None
     assert not ctx2.pausa.exists()
-    persistida = json.loads(S.ruta_huella(misiones, MISION_ID, "atemai").read_text())
-    assert persistida["pendiente"] is False
+    marca = H.leer_marca(S.ruta_huella(misiones, MISION_ID, "atemai"))
+    assert marca.estado == H.CERRADA
+
+
+# --- M-3, ronda 7: el primer ssh falla y el segundo responde --------------------------
+
+def test_el_primer_ssh_falla_y_el_segundo_responde_no_abre(tmp_path):
+    """Mata el mutante `return False` -> `continue` en `verificar_huellas_huerfanas`:
+    dos marcas ABIERTA huérfanas para el MISMO host (de dos misiones viejas
+    distintas). La primera revisión revienta (ssh caído); la segunda, si se llegara a
+    intentar, respondería LIMPIA. Con el código correcto, la función CORTA en la
+    primera falla y nunca llega a la segunda -- si alguien cambiara el `return False`
+    por un `continue`, la segunda taparía la primera y la misión abriría igual."""
+    from jax.ejecutor.contratos import huella as H
+    misiones = tmp_path / "misiones"
+    primera_mision = "33333333-3333-3333-3333-333333333333"
+    segunda_mision = "44444444-4444-4444-4444-444444444444"
+    huella_vieja = _h("atemai")
+    H.escribir_marca(S.ruta_huella(misiones, primera_mision, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
+    H.escribir_marca(S.ruta_huella(misiones, segunda_mision, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
+
+    llamadas = []
+
+    async def tomar(host):
+        llamadas.append(host)
+        if len(llamadas) == 1:
+            raise RuntimeError("ssh caído")
+        return huella_vieja  # limpia -- pero NO debería llegar a usarse
+    ctx = _ctx(tmp_path)
+
+    ok = asyncio.run(S.verificar_huellas_huerfanas(misiones, "atemai", tomar_huella=tomar,
+                                                    pausar=P.poner_pausa, pausa_ruta=ctx.pausa))
+    assert ok is False
+    assert len(llamadas) == 1  # NUNCA llega a la segunda marca
+    assert ctx.pausa.exists()
+    datos = json.loads(ctx.pausa.read_text())
+    assert datos["motivo"] == "huella_no_medible"
+    # Las dos marcas siguen ABIERTA -- ninguna se tocó (la función cortó antes).
+    assert H.leer_marca(S.ruta_huella(misiones, primera_mision, "atemai")).estado == H.ABIERTA
+    assert H.leer_marca(S.ruta_huella(misiones, segunda_mision, "atemai")).estado == H.ABIERTA
+
+
+def test_el_mutante_continue_en_vez_de_return_false_deja_pasar_la_mision(tmp_path):
+    """Prueba el mutante DE VERDAD: una versión de `verificar_huellas_huerfanas` que
+    hace `continue` en vez de `return False` SÍ dejaría abrir la misión -- por eso el
+    test de arriba, que exige `ok is False` y una sola llamada, es el que lo mata."""
+    from jax.ejecutor.contratos import huella as H
+
+    async def version_mutada(misiones, host, *, tomar_huella, pausar, pausa_ruta):
+        for ruta in sorted(Path(misiones).glob(f"*/huella/{host}.json")):
+            marca = H.leer_marca(ruta)
+            if marca.estado != H.ABIERTA:
+                continue
+            try:
+                despues = await tomar_huella(host)
+            except Exception:  # fail-soft: ESTE except es el MUTANTE bajo prueba (debería ser `return False`, ver el test de arriba que lo mata)
+                continue
+            if H.cambio(marca.huella, despues):
+                continue
+        return True
+
+    misiones = tmp_path / "misiones"
+    primera_mision = "33333333-3333-3333-3333-333333333333"
+    huella_vieja = _h("atemai")
+    H.escribir_marca(H.ruta_huella(misiones, primera_mision, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
+
+    async def tomar(host):
+        raise RuntimeError("ssh caído")
+
+    ok = asyncio.run(version_mutada(misiones, "atemai", tomar_huella=tomar, pausar=P.poner_pausa,
+                                    pausa_ruta=misiones / "PAUSA"))
+    assert ok is True  # el mutante "logra" abrir -- por eso hay que matarlo con el test de arriba
 
 
 

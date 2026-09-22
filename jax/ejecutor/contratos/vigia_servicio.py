@@ -45,6 +45,13 @@ from jax.ejecutor.contratos import auditor as A
 log = logging.getLogger("ejecutor.vigia_servicio")
 VARIABLE_LATIDO_CADA_S = "JAX_EJECUTOR_VIGIA_LATIDO_CADA_S"
 _TOPE_HUELLA_S = 30
+
+
+def _hint_aceptar(host: str) -> str:
+    """M-1 (ronda 7): el mensaje de la pausa dice CÓMO salir -- no sólo qué pasó. Ver
+    docs/ejecutor-huella-aceptar.md para el procedimiento completo."""
+    return ("aceptar con: python -m jax.ejecutor.contratos.huella aceptar "
+            f"--host {host} --mision <mision_id>  (ver docs/ejecutor-huella-aceptar.md)")
 _SUFIJO_TURNO = re.compile(r"-t\d+$")
 
 
@@ -108,51 +115,41 @@ def mision_id_desde_ruta(ruta_mision: Path) -> str:
 
 
 def ruta_huella(misiones: Path, mision_id: str, host: str) -> Path:
-    if not cuenta_axioma._MISION_ID_VALIDA.match(mision_id):
-        raise cuenta_axioma.MisionIdInvalido(mision_id)
-    if not host or "/" in host or host.strip() != host:
-        raise ValueError("host_invalido")
-    return Path(misiones) / mision_id / "huella" / f"{host}.json"
-
-
-def _huella_persistida_a_json(h: huella.Huella, *, pendiente: bool) -> dict:
-    return {"host": h.host, "texto": h.texto, "pendiente": pendiente}
-
-
-def _huella_persistida_desde_json(d: dict) -> tuple:
-    return huella.Huella(host=d["host"], texto=d["texto"]), bool(d["pendiente"])
-
-
-def _escribir_huella_persistida(ruta: Path, h: huella.Huella, *, pendiente: bool) -> None:
-    ruta.parent.mkdir(parents=True, exist_ok=True)
-    tmp = ruta.with_suffix(".tmp")
-    tmp.write_text(json.dumps(_huella_persistida_a_json(h, pendiente=pendiente)), encoding="utf-8")
-    os.replace(tmp, ruta)
+    return huella.ruta_huella(misiones, mision_id, host)
 
 
 async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella, pausar, pausa_ruta) -> bool:
-    """M-1 (ronda 6): «deuda de verificación que se arrastra». Al ABRIR una línea base
-    se escribe una marca `pendiente=true`; al CERRAR con una comparación limpia, se
-    borra (pasa a `pendiente=false`). Antes de que CUALQUIER misión nueva abra su
-    propia huella en `host`, revisa si hay una marca pendiente de OTRA vuelta -- de
-    esta misma misión (un turno que se cortó) o de otra -- que se cortó entre abrir y
-    cerrar con éxito (kill -9, reinicio: nada garantiza que esa vuelta haya llegado a
-    comparar). Compara esa línea base huérfana contra el estado ACTUAL: si cambió, o
-    si la marca es ilegible, o si no se puede volver a medir ahora, PAUSA y reporta
-    ANTES de dejar abrir nada nuevo -- fail-closed en los tres casos. Devuelve `False`
-    si la misión NO debe abrir."""
+    """M-1 (ronda 6; estados con nombre desde ronda 7). Antes de que CUALQUIER misión
+    nueva abra su propia huella en `host`, revisa TODAS las marcas de OTRA vuelta --
+    de esta misma misión (un turno que se cortó) o de otra:
+    - `REPORTADA`: ya se comparó, salió sucia y ya pausó -- bloquea de una, SIN volver
+      a medir (eso es tarea de `python -m jax.ejecutor.contratos.huella aceptar`, no de
+      acá). El único camino de salida es la aceptación explícita.
+    - `CERRADA`: ya se comparó limpia -- no es deuda, se salta.
+    - `ABIERTA`: la comparación de cierre nunca se hizo (kill, reinicio) -- la ÚNICA que
+      esta función vuelve a medir. Si cambió (o la huella de ahora sale vacía), pasa a
+      `REPORTADA` (con diff) y pausa; si no se puede medir, PAUSA y deja la marca
+      `ABIERTA` (se reintentará después); si sale limpia, pasa a `CERRADA`.
+    Marca ilegible: fail-closed, pausa y no sigue. Devuelve `False` si la misión NO
+    debe abrir."""
     for ruta in sorted(Path(misiones).glob(f"*/huella/{host}.json")):
         try:
-            d = json.loads(await asyncio.to_thread(ruta.read_text, "utf-8"))
-            antes, pendiente = _huella_persistida_desde_json(d)
+            marca = huella.leer_marca(ruta)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log.error("vigia_servicio huella_huerfana_ilegible ruta=%s tipo=%s", ruta, type(exc).__name__)
             await asyncio.to_thread(pausar, pausa_ruta, {
                 "origen": "huella", "motivo": "huella_no_medible", "host": host,
                 "detalle": ["huerfana_ilegible", str(ruta)]})
             return False
-        if not pendiente:
+        if marca.estado == huella.CERRADA:
             continue
+        if marca.estado == huella.REPORTADA:
+            log.critical("vigia_servicio huella_reportada_sin_aceptar host=%s ruta=%s", host, ruta)
+            await asyncio.to_thread(pausar, pausa_ruta, {
+                "origen": "huella", "motivo": "huella_reportada_sin_aceptar", "host": host,
+                "detalle": [_hint_aceptar(host)]})
+            return False
+        antes = marca.huella
         try:
             despues = await tomar_huella(host)
         except Exception as exc:  # fail-soft: no medible se reporta como huella_no_medible y PAUSA (fail-closed) -- nunca se sigue como si nada
@@ -163,13 +160,15 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
             return False
         if not huella.huella_valida(despues) or huella.cambio(antes, despues):
             log.critical("vigia_servicio huella_cambio_no_declarado host=%s motivo=huerfana", host)
-            detalle = ["huerfana"]
-            detalle += ["huella_de_ahora_vacia"] if not huella.huella_valida(despues) \
-                else list(huella.lineas_agregadas_o_quitadas(antes, despues)[:20])
+            detalle = tuple(["huella_de_ahora_vacia"] if not huella.huella_valida(despues)
+                            else huella.lineas_agregadas_o_quitadas(antes, despues))
+            await asyncio.to_thread(huella.escribir_marca, ruta,
+                                    huella.Marca(huella=antes, estado=huella.REPORTADA, diff=detalle))
             await asyncio.to_thread(pausar, pausa_ruta, {
-                "origen": "huella", "motivo": "huella_cambio_no_declarado", "host": host, "detalle": detalle})
+                "origen": "huella", "motivo": "huella_cambio_no_declarado", "host": host,
+                "detalle": ["huerfana"] + list(detalle[:20]) + [_hint_aceptar(host)]})
             return False
-        await asyncio.to_thread(_escribir_huella_persistida, ruta, antes, pendiente=False)
+        await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=antes, estado=huella.CERRADA))
     return True
 
 
@@ -195,16 +194,13 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
         return None
     ruta = ruta_huella(misiones, mision_id, host)
     try:
-        datos = await asyncio.to_thread(ruta.read_text, "utf-8")
+        marca = await asyncio.to_thread(huella.leer_marca, ruta)
+        h = marca.huella
     except FileNotFoundError:
-        datos = None
-    if datos is not None:
-        h, _pendiente = _huella_persistida_desde_json(json.loads(datos))
-    else:
         h = await tomar_huella(host)
         if not huella.huella_valida(h):
             raise RuntimeError("huella_apertura_vacia")
-    await asyncio.to_thread(_escribir_huella_persistida, ruta, h, pendiente=True)
+    await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=h, estado=huella.ABIERTA))
     return h
 
 
@@ -252,15 +248,17 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict
                 "origen": "huella", "motivo": "huella_no_medible", "host": h, "detalle": ["huella_de_cierre_vacia"]})
             continue
         encontrados = huella.hallazgos(antes, despues)
+        ruta = ruta_huella(misiones, mision_id, h)
         if encontrados:
             log.critical("vigia_servicio huella_cambio_no_declarado host=%s lineas=%d", h, len(encontrados))
             motivos.append((h, "huella_cambio_no_declarado"))
+            await asyncio.to_thread(huella.escribir_marca, ruta,
+                                    huella.Marca(huella=antes, estado=huella.REPORTADA, diff=tuple(encontrados)))
             await asyncio.to_thread(pausar, pausa_ruta, {
                 "origen": "huella", "motivo": "huella_cambio_no_declarado",
-                "host": h, "detalle": list(encontrados[:20])})
+                "host": h, "detalle": list(encontrados[:20]) + [_hint_aceptar(h)]})
             continue
-        await asyncio.to_thread(_escribir_huella_persistida, ruta_huella(misiones, mision_id, h),
-                                antes, pendiente=False)
+        await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=antes, estado=huella.CERRADA))
     return tuple(motivos)
 
 
