@@ -3048,8 +3048,17 @@ jobs:
           # (que no reproduce los skipped estructurales del runner). El piso CI
           # se deriva del 2352 medido en master más los tres casos B6; los skipped
           # siguen siendo estructurales.
-          grep -qE "^2358 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2358 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2358 -> 2359 (B-1, ronda de arreglo del endpoint de Procesamiento,
+          #   2026-09-21): las_manos/_tool_authority_test.py::test_3b_nul_en_ruta_
+          #   rechaza_no_revienta (+1) -- un byte NUL en una ruta hacía que
+          #   `resolve_jailed_path` (tool_authority.py) dejara escapar un
+          #   `ValueError` sin capturar en vez de rechazar la ruta; el except
+          #   sólo atrapaba `(OSError, RuntimeError)`. Visto en rojo contra el
+          #   código sin `ValueError` en la tupla del except. Delta verificado
+          #   por mutación (agregar/sacar el archivo con el resto del árbol
+          #   fijo): +1. Si el runner da otro número, manda el runner.
+          grep -qE "^2359 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2359 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

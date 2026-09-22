@@ -108,6 +108,9 @@ PERMISOS: dict[str, Permiso] = {
             # identidad -- mismo mecanismo, ninguna autenticación nueva.
             ("POST", re.compile(r"/procesamiento/trabajos")),
             ("GET", re.compile(rf"/procesamiento/trabajos/{_SEGMENTO}")),
+            # B-3 (2026-09-21, ronda de arreglo): cancelación de un trabajo
+            # en vuelo -- mismo mecanismo que /motor/job/{id}/cancel.
+            ("POST", re.compile(rf"/procesamiento/trabajos/{_SEGMENTO}/cancel")),
         ),
         declarables={
             "invoked_by": frozenset({"plataforma"}),

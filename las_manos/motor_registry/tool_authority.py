@@ -142,7 +142,17 @@ def resolve_jailed_path(path_str: str, forbidden_paths: list[str]) -> tuple[Path
         # confirma más abajo, en la lectura) -- pero cada componente que
         # SÍ existe se resuelve de verdad, symlinks incluidos.
         resolved = candidate.resolve(strict=False)
-    except (OSError, RuntimeError) as exc:  # RuntimeError: symlink loop
+    except (OSError, RuntimeError, ValueError) as exc:
+        # RuntimeError: symlink loop. ValueError (2026-09-21, B-1): un byte
+        # NUL en la ruta ("embedded null character") hace que resolve()
+        # levante ValueError -- sin esto escapaba de esta función hacia
+        # CUALQUIER llamador (read_file/write_file vía
+        # authorize_and_execute_tool_call, y el endpoint de Procesamiento de
+        # Archivos vía _procesar_una_ruta) y tumbaba lo que fuera que ese
+        # llamador estuviera haciendo en lote, en vez de rechazar sólo ESA
+        # ruta. Mismo criterio P10 que el resto de esta función: cualquier
+        # ambigüedad al resolver es rechazo, nunca una excepción que se
+        # escapa.
         return None, f"no se pudo resolver la ruta: {exc}"
 
     # Jail: la forma resuelta debe seguir DENTRO de WORKSPACE_ROOT. Esto

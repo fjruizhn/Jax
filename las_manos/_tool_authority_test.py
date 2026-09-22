@@ -137,6 +137,20 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
         assert r["decision"] == "rejected", r
         assert "escapa" in r["reason"], r
 
+    # --- 3b. byte NUL en la ruta (B-1, 2026-09-21) ---
+    async def test_3b_nul_en_ruta_rechaza_no_revienta(self):
+        """`Path.resolve()` levanta `ValueError('embedded null character')`
+        con un byte NUL -- antes del fix, `resolve_jailed_path` sólo atrapaba
+        `(OSError, RuntimeError)` y esa excepción escapaba hacia CUALQUIER
+        llamador (acá, `authorize_and_execute_tool_call`; también el
+        endpoint de Procesamiento de Archivos). Visto en rojo contra el
+        código sin `ValueError` en el except: la llamada completa (esta
+        prueba) reventaba con `ValueError` sin capturar en vez de devolver
+        un rechazo ordenado."""
+        r = await self._call("read_file", {"path": "archivo\x00malo.txt"})
+        assert r["decision"] == "rejected", r
+        assert "no se pudo resolver" in r["reason"], r
+
     # --- 4. forbidden_paths: .env ---
     async def test_4_env_prohibido_rechaza(self):
         r = await self._call("read_file", {"path": ".env"})
