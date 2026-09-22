@@ -34,6 +34,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from jax.ejecutor.contratos import contexto
+
 _NOMBRE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 
 
@@ -90,6 +92,11 @@ def _jaula(c: Cuenta) -> str:
         "--ro-bind", q(str(c.lib / "managed-settings.json")), "/etc/claude-code/managed-settings.json",
         "--ro-bind", q(str(c.lib / "settings-usuario.json")), '"$HOME/.claude/settings.json"',
         "--ro-bind", q(str(c.lib / "settings-usuario.json")), '"$HOME/.claude/settings.local.json"',
+        # El CLAUDE.md GENERADO (spec §6.1: nunca a mano) tapa el de axioma -- no puede
+        # reescribir su propia constitución dentro de la jaula, la única forma en que
+        # corre `claude`. Las skills (cerebros.toml `skills`), igual: solo lectura.
+        "--ro-bind", q(str(c.lib / contexto.CLAUDE_MD_REL)), '"$HOME/.claude/CLAUDE.md"',
+        "--ro-bind", q(str(c.lib / contexto.SKILLS_REL)), '"$HOME/.claude/skills"',
         "--",
     ])
 

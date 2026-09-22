@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from jax.ejecutor.contratos import cuenta_axioma, eleccion_c5, instalacion, pausa, politica
+from jax.ejecutor.contratos import contexto, cuenta_axioma, eleccion_c5, instalacion, pausa, politica
 from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.fallo import Fallo
 
@@ -129,6 +129,42 @@ def verificar_instalacion(ctx: Contexto) -> tuple:
             unidad_igual = False
         if not unidad_igual:
             fallos.append(Fallo("arranque", "instalado_distinto_del_repo", (("archivo", nombre),)))
+    fallos.extend(verificar_contexto(ctx))
+    return tuple(fallos)
+
+
+def verificar_contexto(ctx: Contexto) -> tuple:
+    """El CLAUDE.md (spec §6.1: SIEMPRE generado, nunca a mano) y las skills
+    declaradas, al día contra lo que `contexto.py` produce/exige AHORA MISMO.
+    Mismo criterio fail-closed que el resto de `verificar_instalacion`: el sha256
+    instalado se recalcula contra los bytes reales, nunca se confía en el
+    `.sha256` de acompañamiento (ese archivo es sólo para auditoría humana)."""
+    fallos = []
+    try:
+        esperado = contexto.claude_md()
+    except OSError:
+        fallos.append(Fallo("arranque", "contexto_desactualizado"))
+    else:
+        try:
+            instalado = (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).read_bytes()
+        except OSError:
+            instalado = None
+        if instalado is None or _sha(instalado) != _sha(esperado):
+            fallos.append(Fallo("arranque", "contexto_desactualizado"))
+
+    try:
+        esperadas_skills = contexto.archivos_de_skills()
+    except contexto.SkillFaltante as exc:
+        fallos.append(Fallo("arranque", "skill_faltante", (("skill", exc.args[0]),)))
+        return tuple(fallos)
+
+    for rel, datos in esperadas_skills.items():
+        try:
+            instalado = (ctx.cuenta.lib / contexto.SKILLS_REL / rel).read_bytes()
+        except OSError:
+            instalado = None
+        if instalado is None or _sha(instalado) != _sha(datos):
+            fallos.append(Fallo("arranque", "skill_desactualizada", (("archivo", rel),)))
     return tuple(fallos)
 
 

@@ -59,6 +59,30 @@ def test_remoto_claude_va_en_la_jaula_y_sin_la_llave_en_argv():
     assert "hola 'mundo'" in palabras
 
 
+def test_la_jaula_monta_el_claude_md_generado_y_tapa_el_de_axioma():
+    """C1/C6 del contexto (2026-09-22): el CLAUDE.md instalado (generado, nunca a
+    mano) se monta ro sobre "$HOME/.claude/CLAUDE.md" -- el viejo, propiedad de
+    axioma, queda TAPADO: axioma no puede reescribir su propia constitución
+    dentro de la jaula (la única forma en que corre `claude`)."""
+    remoto = CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="canario",
+                              prompt="x")
+    palabras = shlex.split(remoto.split(" && ", 1)[1].replace('"$K"', "K"))
+    i = palabras.index("bwrap")
+    jaula = palabras[i:palabras.index("--", i)]
+    assert ["--ro-bind", "/opt/ejecutor/lib/contexto/CLAUDE.md", "$HOME/.claude/CLAUDE.md"] in \
+        [jaula[k:k + 3] for k in range(len(jaula))]
+
+
+def test_la_jaula_monta_las_skills():
+    remoto = CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="canario",
+                              prompt="x")
+    palabras = shlex.split(remoto.split(" && ", 1)[1].replace('"$K"', "K"))
+    i = palabras.index("bwrap")
+    jaula = palabras[i:palabras.index("--", i)]
+    assert ["--ro-bind", "/opt/ejecutor/lib/contexto/skills", "$HOME/.claude/skills"] in \
+        [jaula[k:k + 3] for k in range(len(jaula))]
+
+
 def test_la_jaula_tapa_los_includes_del_ssh_del_sistema():
     """Dentro del espacio de usuarios de bwrap los archivos de root se ven de 65534, y ssh rechaza
     un Include del sistema que no es de root («Bad owner or permissions»): sin tapar

@@ -11,10 +11,16 @@ from pathlib import Path
 import pytest
 
 from jax.ejecutor.contratos import arranque as AR
-from jax.ejecutor.contratos import instalacion
+from jax.ejecutor.contratos import contexto, instalacion
 from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.destinos import Host
 from jax.ejecutor.contratos.fallo import Fallo
+
+# `contexto.claude_md()` lee la constitución real de esta máquina (host-bound, Fase 0 --
+# ver jax/ejecutor/contratos/contexto.py). Mismo criterio de skip que
+# tests/test_ejecutor_generar_claude_md.py y tests/test_ejecutor_contratos_contexto.py.
+requiere_constitucion_real = pytest.mark.skipif(
+    not contexto.constitucion_disponible(), reason="constitución host-bound ausente en este runner")
 
 
 def _ctx(tmp_path, **cambios):
@@ -244,15 +250,19 @@ def _instalar_copia(ctx):
     (ctx.cuenta.lib / "ejecutor-freno.service").write_text(instalacion.renderizar_unidad_freno(lib))
 
 
-def test_instalacion_identica_al_repo(tmp_path):
+@requiere_constitucion_real
+def test_instalacion_identica_al_repo(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     assert AR.verificar_instalacion(ctx) == ()
 
 
-def test_instalacion_con_un_byte_distinto(tmp_path):
+@requiere_constitucion_real
+def test_instalacion_con_un_byte_distinto(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     with open(ctx.cuenta.lib / "jax/ejecutor/contratos/politica.py", "a") as f:
         f.write("\n")
     (ctx.cuenta.lib / "gancho.sh").unlink()
@@ -262,9 +272,11 @@ def test_instalacion_con_un_byte_distinto(tmp_path):
     )
 
 
-def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path):
+@requiere_constitucion_real
+def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     ctx.unidad_freno.write_text(ctx.unidad_freno.read_text().replace("Restart=always", "Restart=no"))
     assert AR.verificar_instalacion(ctx) == (
         Fallo("arranque", "instalado_distinto_del_repo", (("archivo", "ejecutor-freno.service"),)),)
@@ -272,6 +284,86 @@ def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path):
 
 def test_pruebas_reales_cubren_el_orden(tmp_path):
     assert set(AR.pruebas_reales(_ctx(tmp_path))) == set(AR._ORDEN)
+
+
+# --- instalación: CLAUDE.md y skills (2026-09-22) -----------------------------
+
+def _fuente_skills_de_prueba(base: Path) -> Path:
+    fuente = base / "skills-fuente"
+    for nombre in contexto.skills_declaradas():
+        (fuente / nombre).mkdir(parents=True)
+        (fuente / nombre / "SKILL.md").write_text(f"skill de prueba: {nombre}")
+    return fuente
+
+
+def _instalar_contexto(ctx, monkeypatch, *, fuente_skills=None):
+    """Instala CLAUDE.md + skills en ctx.cuenta.lib, además de lo que ya deja
+    `_instalar_copia`. `fuente_skills=None` usa la fuente real declarada en
+    cerebros.toml (requiere_constitucion_real ya lo cubrió el llamador);
+    pasarla apunta `contexto.skills_fuente()` a una fuente de prueba hermética."""
+    if fuente_skills is not None:
+        monkeypatch.setattr(contexto, "skills_fuente", lambda: fuente_skills)
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_SHA256_REL).write_text(contexto.sha256_claude_md())
+    for rel, datos in contexto.archivos_de_skills().items():
+        destino = ctx.cuenta.lib / contexto.SKILLS_REL / rel
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_bytes(datos)
+
+
+@requiere_constitucion_real
+def test_instalacion_con_contexto_al_dia_no_falla(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    assert AR.verificar_instalacion(ctx) == ()
+
+
+@requiere_constitucion_real
+def test_claude_md_desactualizado_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(b"# version vieja, escrita a mano\n")
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_desactualizado"),)
+
+
+@requiere_constitucion_real
+def test_claude_md_ausente_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).unlink()
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_desactualizado"),)
+
+
+@requiere_constitucion_real
+def test_skill_faltante_en_la_fuente_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = tmp_path / "skills-incompleta"
+    (fuente / "migrando-sin-romper").mkdir(parents=True)
+    (fuente / "migrando-sin-romper" / "SKILL.md").write_text("m")
+    # "desde-la-fuente" y "endureciendo" NO existen en la fuente: como HOY en la
+    # ruta real (ver test_ejecutor_contratos_contexto.py) hasta que se mergee
+    # cs-freno-generados.
+    monkeypatch.setattr(contexto, "skills_fuente", lambda: fuente)
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_faltante", (("skill", "desde-la-fuente"),)),)
+
+
+@requiere_constitucion_real
+def test_skill_instalada_desactualizada_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "endureciendo" / "SKILL.md").write_text("vieja, a mano")
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_desactualizada", (("archivo", "endureciendo/SKILL.md"),)),)
 
 
 # --- alcance: los contratos por máquina, acotados a la misión ---------------------

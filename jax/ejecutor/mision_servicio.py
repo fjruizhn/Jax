@@ -185,7 +185,8 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
     async def cerebro(ctx, prompt, sesion, reanudar):
         remoto = cuenta_axioma.remoto_claude(
             ctx.cuenta, base_url=f"http://127.0.0.1:{ctx.puerto_proxy}", modelo=env["JAX_PROXY_CARRIL_MODELO"],
-            prompt=prompt, herramientas="Bash", max_salida_tokens=int(env["JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"]),
+            prompt=prompt, herramientas="Bash,Skill",
+            max_salida_tokens=int(env["JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"]),
             sesion=sesion, reanudar=reanudar)
         rc, crudo, _ = await cuenta_axioma.correr_en_la_cuenta(ctx.cuenta, remoto, entrada=b"sin-clave\n",
                                                                tope_s=tope_s)

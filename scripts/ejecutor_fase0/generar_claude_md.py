@@ -15,7 +15,10 @@ def generar() -> str:
     lineas = ["# El Ejecutor de Axioma", "", c["identidad"], "", "## Máquinas", ""]
     for nombre, mq in maquinas.items():
         acceso = "local" if mq.get("local") else f"`ssh {mq['ip']}` (usuario axioma, puerto {mq['puerto']})"
-        lineas.append(f"- **{nombre}** — {mq['descripcion']} Acceso: {acceso}.")
+        sudo = "sí" if mq.get("sudo") else "no"
+        machine_id = mq.get("machine_id") or "SIN VERIFICAR — no operar acá hasta confirmarlo"
+        lineas.append(f"- **{nombre}** — {mq['descripcion']} Acceso: {acceso}. sudo: {sudo}. "
+                      f"machine-id: `{machine_id}`.")
     core = pathlib.Path(c["fuente"]).read_text()
     return "\n".join(lineas) + "\n\n" + extraer_secciones(core, c["secciones"])
 

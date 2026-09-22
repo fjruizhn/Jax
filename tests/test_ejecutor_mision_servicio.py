@@ -124,3 +124,31 @@ def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_p
         return rc, salida
     rc, salida = asyncio.run(probar())
     assert rc == 0 and "cerrada=true" in salida and not (tmp_path / "m-t1.json").exists()
+
+
+def test_el_cerebro_le_da_bash_y_skill_al_arnes(monkeypatch):
+    """El Ejecutor tiene skills (cerebros.toml `skills`, 2026-09-22): `remoto_claude`
+    necesita `Skill` en --allowedTools para poder invocarlas, además de `Bash`.
+    `Read` no hace falta -- el Ejecutor lee con `cat` (Bash), como siempre."""
+    vistos = {}
+
+    def remoto_falso(cuenta, *, base_url, modelo, prompt, herramientas, max_salida_tokens, sesion, reanudar):
+        vistos["herramientas"] = herramientas
+        return "remoto-de-prueba"
+
+    async def correr_falso(cuenta, remoto, *, entrada, tope_s):
+        return 0, b"{}", b""
+
+    monkeypatch.setattr(S.cuenta_axioma, "remoto_claude", remoto_falso)
+    monkeypatch.setattr(S.cuenta_axioma, "correr_en_la_cuenta", correr_falso)
+
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    env = {"JAX_PROXY_CARRIL_MODELO": "canario", "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024"}
+    deps = S.dependencias_reales(env, turno, tope_s=1.0, espera_s=1.0)
+
+    class _CtxFalso:
+        cuenta = object()
+        puerto_proxy = 18435
+
+    asyncio.run(deps.correr_cerebro(_CtxFalso(), "prompt", None, False))
+    assert vistos["herramientas"] == "Bash,Skill"
