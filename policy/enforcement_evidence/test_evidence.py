@@ -20,10 +20,16 @@ _TEST_CONTROL_MAP = {
  "tests/policy/test_enforcement_evidence_core.py::test_no_evidence_never_supports_enforced_and_identity_drift_isolated": ("CTL.B6.AUTHORIZATION_EXPIRY",),
  "tests/policy/test_enforcement_evidence_core.py::test_tested_is_not_inferred_from_runtime_observation": ("CTL.B6.TIMEOUT_CEILING",),
  "tests/policy/test_enforcement_evidence_core.py::test_one_runtime_observation_never_mints_enforced": ("CTL.B6.GOVERNED_DISPATCH",),
+ "tests/policy/test_enforcement_evidence_core.py::test_persisted_status_service_has_no_readonly_query_capability": ("CTL.B6.GOVERNED_DISPATCH",),
+ "tests/policy/test_enforcement_evidence_core.py::test_caller_constructed_readonly_query_cannot_mint_authoritative_view": ("CTL.B6.GOVERNED_DISPATCH",),
+ "tests/policy/test_enforcement_evidence_core.py::test_public_readonly_query_has_no_injectable_composition_hook": ("CTL.B6.GOVERNED_DISPATCH",),
+ "tests/policy/test_enforcement_evidence_core.py::test_readonly_query_uses_captured_snapshot_without_later_artifact_loads": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_artifact_aggregate_and_envelope_bounds_are_fail_closed": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_assertion_relationship_bounds_and_worker_result_ingestion": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_mariadb_api.py::test_repeatable_read_is_explicit_store_boundary": ("CTL.B6.ONE_DECISION_ONE_EXECUTION",),
+ "tests/policy/test_enforcement_evidence_mariadb_api.py::test_readonly_status_snapshot_uses_readonly_repeatable_read_and_rolls_back": ("CTL.B6.ONE_DECISION_ONE_EXECUTION",),
+ "tests/policy/test_enforcement_evidence_mariadb_api.py::test_readonly_snapshot_rejects_manifest_with_missing_raw_output_blob": ("CTL.B6.ONE_DECISION_ONE_EXECUTION",),
  "tests/policy/test_worker_result_execution_binding.py::test_worker_result_requires_exact_authoritative_execution_and_job": ("CTL.B6.GOVERNED_DISPATCH",),
 }
 def ingest_test_evidence_manifest(store, manifest_bytes:bytes, raw_output:bytes|None=None, *, repository_id=None, commit_sha=None, implementation_identity_hash=None):

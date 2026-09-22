@@ -4,12 +4,22 @@ It deliberately exposes only bytes by content identity.  Higher level objects
 are parsed as untrusted values and must be verified by their fixed lifecycle.
 """
 from __future__ import annotations
+from dataclasses import dataclass
 from .evidence_store import EvidenceBlob, MAX_BLOB_BYTES
 from .ids import sha256_bytes, require_hash
 from .errors import EvidenceBlobMissingError, EvidenceBlobHashMismatchError, EvidenceBlobTooLargeError
 from .canonical import canonical_bytes
 from .models import MAX_REFERENCED_BYTES_PER_ARTIFACT, MAX_ARTIFACT_ENVELOPE_BYTES
 from .errors import EvidenceArtifactIntegrityError, ObservationIntegrityError, AssertionIntegrityError
+
+@dataclass(frozen=True)
+class ReadonlyStatusSnapshot:
+    """All DB-backed inputs for one ephemeral B7 status derivation."""
+    identity: object
+    manifest_bytes: bytes
+    observations: tuple
+    manifests: tuple
+    trust_domains: tuple
 class MariaDBEvidenceStore:
     def __init__(self, connection_factory): self._connection_factory=connection_factory
     def put_evidence_blob(self, data: bytes) -> EvidenceBlob:
@@ -256,6 +266,99 @@ class MariaDBEvidenceStore:
                 values.append(value)
             return tuple(values)
         finally: con.close()
+    def readonly_status_snapshot(self, identity_hash, control_id, control_version):
+        """Capture complete B7 status inputs under one read-only RR snapshot.
+
+        Rows are immutable after insertion.  IDs and manifest bytes selected
+        here therefore identify the exact authoritative input set without
+        allowing the later trusted loaders to observe newly inserted rows.
+        """
+        def text(value): return bytes(value).decode() if isinstance(value, bytes) else value
+        def blob(cur, evidence_hash):
+            cur.execute("SELECT size_bytes,blob_bytes FROM jax_evidence.evidence_blobs WHERE evidence_hash=%s",(evidence_hash,))
+            row=cur.fetchone()
+            if row is None or int(row[0]) != len(bytes(row[1])) or sha256_bytes(bytes(row[1])) != evidence_hash:
+                raise EvidenceBlobHashMismatchError("snapshot blob mismatch")
+            return bytes(row[1])
+        def identity(cur, value_hash):
+            cur.execute("SELECT canonical_identity FROM jax_evidence.implementation_identities WHERE identity_hash=%s",(value_hash,))
+            row=cur.fetchone()
+            if row is None: raise EvidenceBlobMissingError(value_hash)
+            import json
+            from .implementation_identity import implementation_identity_from_projection
+            value=implementation_identity_from_projection(json.loads(text(row[0])))
+            if value.implementation_identity_hash != value_hash: raise EvidenceArtifactIntegrityError("snapshot identity mismatch")
+            blob(cur,value.build_manifest_blob_hash)
+            from .evidence_store import _loaded, _identities
+            return _loaded(_identities,value)
+        def artifact(cur, artifact_hash):
+            cur.execute("SELECT canonical_artifact FROM jax_evidence.evidence_artifacts WHERE artifact_hash=%s",(artifact_hash,))
+            row=cur.fetchone()
+            if row is None: raise EvidenceBlobMissingError(artifact_hash)
+            from .artifacts import deserialize_evidence_artifact, verify_evidence_artifact_content
+            value=deserialize_evidence_artifact(row[0])
+            if value.artifact_hash != artifact_hash: raise EvidenceArtifactIntegrityError("snapshot artifact mismatch")
+            cur.execute("SELECT evidence_hash FROM jax_evidence.evidence_artifact_blobs WHERE artifact_hash=%s ORDER BY evidence_hash",(artifact_hash,))
+            refs=tuple(item[0] for item in cur.fetchall())
+            if refs != tuple(sorted(item.evidence_hash for item in value.blob_refs)): raise EvidenceArtifactIntegrityError("snapshot artifact refs mismatch")
+            verify_evidence_artifact_content(value,lambda h: blob(cur,h))
+            from .control_registry import load_control_definition
+            if load_control_definition(value.control_id,value.control_version).control_definition_hash != value.control_definition_hash: raise EvidenceArtifactIntegrityError("snapshot artifact control mismatch")
+            identity(cur,value.implementation_identity_hash)
+            return value
+        def capture(cur):
+            primary_identity=identity(cur,identity_hash)
+            # Verify the packaged definition has an exact authoritative DB row
+            # inside this same snapshot; it never comes from caller data.
+            from .control_registry import load_control_definition
+            expected=load_control_definition(control_id,control_version)
+            cur.execute("SELECT control_id,control_version,canonical_definition FROM jax_evidence.control_definitions WHERE control_definition_hash=%s",(expected.control_definition_hash,))
+            row=cur.fetchone()
+            if row is None or row[0] != control_id or int(row[1]) != control_version or text(row[2]) != canonical_bytes(expected.projection()).decode("utf-8"):
+                raise EvidenceArtifactIntegrityError("snapshot definition mismatch")
+            manifest_bytes=blob(cur,primary_identity.build_manifest_blob_hash)
+            cur.execute("SELECT observation_id,observation_hash,canonical_observation FROM jax_evidence.enforcement_observations ORDER BY observation_id")
+            observations=[]; domains=set()
+            from .observations import deserialize_enforcement_observation
+            from .control_registry import load_control_definition
+            from .evidence_store import _loaded, _observations
+            for observation_id,observation_hash,raw in cur.fetchall():
+                value=deserialize_enforcement_observation(raw)
+                if value.observation_id != observation_id or value.observation_hash != observation_hash: raise ObservationIntegrityError("snapshot observation mismatch")
+                cur.execute("SELECT artifact_hash FROM jax_evidence.observation_artifacts WHERE observation_id=%s ORDER BY artifact_hash",(observation_id,))
+                refs=tuple(item[0] for item in cur.fetchall())
+                if refs != tuple(sorted(value.evidence_artifact_hashes)): raise ObservationIntegrityError("snapshot observation refs mismatch")
+                if load_control_definition(value.control_id,value.control_version).control_definition_hash != value.control_definition_hash: raise ObservationIntegrityError("snapshot observation control mismatch")
+                identity(cur,value.implementation_identity_hash)
+                for ref in refs: domains.add(artifact(cur,ref).trust_domain)
+                observations.append(_loaded(_observations,value))
+            cur.execute("SELECT implementation_identity_hash,canonical_manifest FROM jax_evidence.test_evidence_manifests WHERE implementation_identity_hash=%s ORDER BY manifest_hash",(identity_hash,))
+            import json
+            manifests=[]
+            for row in cur.fetchall():
+                value=json.loads(bytes(row[1]).decode() if isinstance(row[1],bytes) else row[1])
+                if value.get("implementation_identity_hash") != row[0] or row[0] != identity_hash:
+                    raise AssertionIntegrityError("test manifest row binding mismatch")
+                # CI manifest raw output is referenced evidence, not trusted
+                # metadata.  Its exact bytes must be present and hash-verified
+                # before this snapshot can support TESTED/ENFORCED.
+                raw_hash=value.get("raw_output_blob_hash")
+                if not isinstance(raw_hash,str):
+                    raise AssertionIntegrityError("test manifest raw output missing")
+                blob(cur,raw_hash)
+                manifests.append(value)
+            return ReadonlyStatusSnapshot(primary_identity, manifest_bytes, tuple(observations), tuple(manifests), tuple(sorted(domains,key=lambda item:item.value)))
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+            snapshot=capture(cur)
+            con.rollback()
+        except Exception:
+            con.rollback(); raise
+        finally: con.close()
+        return snapshot
     def derive_in_repeatable_read(self, derive):
         """Run deterministic derivation over one MariaDB repeatable-read snapshot."""
         con=self._connection_factory()

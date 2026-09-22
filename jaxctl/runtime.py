@@ -1,0 +1,76 @@
+"""Fixed, read-only composition for jaxctl. No request controls dependencies."""
+from __future__ import annotations
+import os
+from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+from policy.enforcement_evidence.status_engine import query_control_status as _query_control_status
+
+class UnavailableSource(RuntimeError): pass
+
+def _connection_factory():
+    try:
+        import pymysql
+        host=os.environ["JAX_DB_HOST"]; port=int(os.environ["JAX_DB_PORT"])
+    except (ImportError, KeyError, ValueError) as exc:
+        raise UnavailableSource("MariaDB B7 composition unavailable") from exc
+    return lambda: pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
+
+def control_status(*, control_id, control_version, claim_level, scope, subjects, as_of_utc):
+    """Read-only B7 status query; errors never become guessed CLI output."""
+    try:
+        return _query_control_status(
+            control_id=control_id, control_version=control_version,
+            claim_level=claim_level, scope=scope, subjects=subjects,
+            as_of_utc=as_of_utc)
+    except Exception as exc:
+        raise UnavailableSource("Block 7 authoritative status unavailable") from exc
+
+def health():
+    # Reachability only; it intentionally does not claim authority integrity.
+    factory=_connection_factory(); con=factory()
+    try:
+        cur=con.cursor(); cur.execute("SELECT 1"); cur.fetchone()
+        return {"classification":"OPERATIONAL_DIAGNOSTIC","source":"MariaDB","status":"REACHABLE"}
+    finally: con.close()
+
+def decision(decision_id, replay=False):
+    try:
+        from policy.decision_record.storage import MariaDBDecisionRecordStore
+        from policy.decision_record.service import load_decision
+        decision_store=MariaDBDecisionRecordStore(_connection_factory())
+        value=load_decision(decision_store,decision_id)
+        if not replay:
+            return {"classification":"AUTHORITATIVE_RUNTIME_DATA","operation":"LOAD","source":"Block 5 DecisionRecord store","status":"FOUND","decision":value}
+        from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
+        from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+        from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
+        from policy.decision_record.replay import replay_decision
+        result=replay_decision(value, MariaDBAuthorityLedgerStore(_connection_factory()), TrustedAuthorityRoot.load(), TrustedCheckpointStore())
+        return {"classification":"AUTHORITATIVE_RUNTIME_DATA","operation":"REPLAY","source":"Block 5 historical DecisionRecord replay","status":result.status.value,"decision":value,"replay":result}
+    except Exception as exc: raise UnavailableSource("Block 5 decision source unavailable") from exc
+
+def execution(execution_id):
+    try:
+        from policy.execution_control.storage import MariaDBExecutionStore
+        store=MariaDBExecutionStore(_connection_factory()); value=store.load_execution(execution_id)
+        return {"classification":"AUTHORITATIVE_RUNTIME_DATA","source":"Block 6 governed execution store","status":"FOUND","execution":value,"events":store.events(execution_id)}
+    except Exception as exc: raise UnavailableSource("Block 6 execution source unavailable") from exc
+
+def evidence(identity):
+    try:
+        store=MariaDBEvidenceStore(_connection_factory())
+        try: value=store.load_evidence_artifact(identity); kind="artifact"
+        except Exception:  # fail-soft: artifact absence falls through to the separately verified blob lookup.
+            data=store.get_evidence_blob(identity); value={"evidence_hash":identity,"size_bytes":len(data)}; kind="blob"
+        return {"classification":"AUTHORITATIVE_RUNTIME_DATA","source":"Block 7 EvidenceStore","status":"FOUND","kind":kind,"evidence":value}
+    except Exception as exc: raise UnavailableSource("Block 7 evidence source unavailable") from exc
+
+def authority():
+    try:
+        from policy.authority_ledger.storage import MariaDBAuthorityLedgerStore
+        from policy.authority_ledger.trusted_root import TrustedAuthorityRoot
+        from policy.authority_ledger.trusted_checkpoint import TrustedCheckpointStore
+        from policy.authority_ledger.replay import verify_authority_ledger
+        store=MariaDBAuthorityLedgerStore(_connection_factory())
+        state=verify_authority_ledger(store.get_genesis(),store.events(),TrustedAuthorityRoot.load(),TrustedCheckpointStore())
+        return {"classification":"AUTHORITATIVE_RUNTIME_DATA","source":"Block 4 authority ledger","status":"VERIFIED","authority":state}
+    except Exception as exc: raise UnavailableSource("Block 4 authority source unavailable") from exc

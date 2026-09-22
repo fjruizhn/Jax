@@ -4023,6 +4023,7 @@ jobs:
           tests/policy/test_authority_resolution_purity.py
           tests/policy/test_enforcement_evidence_core.py
           tests/policy/test_enforcement_evidence_mariadb_api.py
+          tests/policy/test_block8_adapters_docs.py
           policy/enforcement_evidence/test_evidence.py
           tests/policy/test_authority_ledger_events.py
           tests/policy/test_authority_ledger_chain.py
