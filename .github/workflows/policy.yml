@@ -3450,8 +3450,51 @@ jobs:
           #   ANTES del handler). Los dos vistos en rojo contra el código
           #   viejo (sin el chequeo, y sin `min_length`); verde tras -- 33
           #   passed en el archivo. "17 skipped" no cambia.
-          grep -qE "^2439 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2439 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2439 passed, 17 skipped -> 2440 passed, 19 skipped (Task 1-bis,
+          #   fix round 1, 2026-09-22, revisión NO APTO -- BLOCK-1/MINOR-3):
+          #   +1 passed en tests/test_store_columna_descarte_acotada.py
+          #   (test_visible_es_la_ultima_columna_del_loop, MAJOR-1/Ruling
+          #   19b -- pura, sin DB, corre siempre) y +2 skipped en
+          #   tests/test_base_por_sesion.py
+          #   (test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906
+          #   y test_columnas_copiables_excluye_solo_las_generadas, MINOR-3 --
+          #   `@pytest.mark.skipif(not JAX_DB_HOST)`: este job no tiene
+          #   `services: mariadb`, así que corren SKIPPED acá y PASSED en
+          #   jacobs-gobernanza-db/local con DB real). Prueban el arreglo de
+          #   base_de_test.py::_clonar_esquema() -- `SELECT *`/
+          #   `INSERT ... SELECT *` al copiar filas de una tabla con una
+          #   columna GENERATED (como `jacobs_pipelines.visible`, Ruling 18)
+          #   revienta con 1906; `_columnas_copiables()`/`_copiar_filas()`
+          #   copian con una lista EXPLÍCITA de columnas, sin las
+          #   GENERATED. Vistos en ROJO con el patrón viejo (`INSERT ...
+          #   SELECT *`) contra una tabla de prueba con una columna VIRTUAL
+          #   y filas: `(1906, "The value specified for generated column
+          #   'visible' ... has been ignored")` -- confirmado con un script
+          #   desechable antes del fix, no committeado.
+          #
+          #   NOTA HONESTA -- discrepancia con el runner, no con este diff:
+          #   medido LOCALMENTE en hall9000 contra master d14d67c (ANTES de
+          #   este fix, mismo entorno, misma lista de archivos) da "2454
+          #   passed, 0 skipped" -- no "2439 passed, 17 skipped" como dice
+          #   el piso documentado. La diferencia (15 tests) es el corpus de
+          #   U3 (tests/test_ejecutor_reproduccion_u3.py, nota de arriba:
+          #   "16 de ellos, sin el corpus de U3 -- estructural") SÍ presente
+          #   en este dev machine, algo AJENO a este diff y a esta ronda --
+          #   confirmado corriendo la MISMA lista de archivos contra
+          #   d14d67c puro, 3 veces, resultado estable (2454/0/3xfailed las
+          #   tres). La delta que SÍ aporta este fix round, medida contra
+          #   ESE baseline local (no contra el piso documentado): +3 (2454
+          #   -> 2457, estable en 4 de 5 corridas; una corrida dio 2455/2
+          #   skipped, no reproducida de nuevo en 3 corridas más -- unica
+          #   candidata a flaky, no de un test mío: aislado el archivo
+          #   `tests/test_base_por_sesion.py` solo, 5 corridas seguidas,
+          #   siempre "26 passed" sin variación). El número de ESTE
+          #   `grep` seguye la aritmética del piso DOCUMENTADO (2439/17),
+          #   no el número local (2454/0), porque el runner de CI no tiene
+          #   el corpus de U3 -- si el runner da otro número, manda el
+          #   runner, igual criterio que el resto de este archivo.
+          grep -qE "^2440 passed, 19 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2440 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 nuevos de este fix round sin JAX_DB_HOST en este job)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4741,8 +4784,65 @@ jobs:
           #   anteriores + 11 nuevos). Medido en local (127.0.0.1:3308,
           #   base de sesión jax_memory_test_auto<pid>), corrida completa
           #   de los 24 archivos del job: 155 passed, 0 failed.
-          grep -qE "^155 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 155 tests CORRIDOS."; exit 1; }
+          # 155 -> 161 (Task 1-bis, fix round 1, 2026-09-22, revisión NO APTO
+          #   del coordinador -- Ruling 19): +6 en tests/test_jacobs_descarte_db.py.
+          #   Ruling 19a (`visible` suma "AND owner_ack_at IS NOT NULL" a su
+          #   expresión -- los hijos de Ada sin ack no deben inflar el rango
+          #   del índice): +2 en VisibleSigueAlEstadoDBTest --
+          #   test_visible_es_0_sin_ack_aunque_el_estado_sea_visible (los ocho
+          #   estados visibles, con subTest, CON status visible pero
+          #   owner_ack_at=NULL, dan visible=0) y
+          #   test_visible_es_1_con_ack_para_cada_estado_del_mapeo (cruza
+          #   _VISIBILIDAD_ESPERADA completo, con ack, contra MariaDB real).
+          #   CostoAcotadoPorVisibleDBTest se REESCRIBE para sembrar 2000
+          #   filas sin ack junto con las descartadas/vivas en las 5 formas
+          #   existentes (mismo número de tests, 0 nuevos ahí) -- confirma
+          #   que el plan sigue sin filesort y Handler_read sigue acotado con
+          #   las tres categorías presentes. Ruling 19d/MINOR-4
+          #   (exhaustividad): +1, VisibilidadExhaustivaTest -- pura, sin DB,
+          #   `_VISIBILIDAD_ESPERADA` es un diccionario EXPLÍCITO (no una
+          #   fórmula) que cubre TODO PipelineStatus; un estado nuevo sin
+          #   decisión en el mapeo la pone en rojo. MINOR-1 (consistencia del
+          #   índice): +1, VisibleSigueAlEstadoDBTest::test_el_indice_refleja_el_descarte_y_la_recuperacion
+          #   -- no alcanza con leer la columna `visible` (eso prueba la
+          #   EXPRESIÓN); un SELECT `FORCE INDEX (idx_pipelines_visibles)`
+          #   confirma que el pid deja de aparecer al descartar y vuelve a
+          #   aparecer al recuperar, LEYENDO POR EL ÍNDICE. MAJOR-1 (Ruling
+          #   19b, la trampa del 1845/1846 sobre columnas VIRTUAL indexadas,
+          #   ver jacobs/_subpipeline_contrato_io_test.py y el comentario de
+          #   idx_pipelines_visibles en jacobs/store.py): +1,
+          #   CanarioTrampaInstantDBTest -- después de init_tables() (que ya
+          #   deja idx_pipelines_visibles creado), un
+          #   `ADD COLUMN tmp_canario ... ALGORITHM=INSTANT` TIENE que dar
+          #   1845; si algún día NO lo da, el test falla y avisa que la
+          #   barrera de "visible al final del loop"
+          #   (tests/test_store_columna_descarte_acotada.py) se puede
+          #   retirar. Ruling 19c (el escenario 1205→1846 que pidió el
+          #   coordinador): +1, Escenario1846DBTest -- DROP INDEX
+          #   idx_pipelines_descartados seguido de init_tables() lo recrea
+          #   sin reventar; medido ANTES de escribir el test que la trampa es
+          #   específica de ADD COLUMN (cambia el row format), no de CREATE
+          #   INDEX -- no hizo falta tocar `_crear_indice_acotado`.
+          #   BLOCK-1 (el hallazgo de CI, tests-puros 2438/2439):
+          #   CostoAcotadoPorVisibleDBTest tenía tenants con nombre FIJO
+          #   ("tA-muchos-descartados", ...) -- tests/test_delete_de_tablas_compartidas.py
+          #   los marcaba porque el DELETE de `_borrar()` no tenía un
+          #   marcador propio reconocible. Arreglado con un tenant uuid por
+          #   test (`_tenant_unico()`) y un pragma `# marcador-propio:` en el
+          #   DELETE explicando por qué es seguro -- CERO tests nuevos (es
+          #   el mismo mecanismo de limpieza, no uno nuevo). Vistos en ROJO
+          #   los 6 nuevos contra el código de la Tarea 1-bis original (fix
+          #   round 0, commit 02fbaed): sin el AND de ack, los dos tests
+          #   "sin ack" fallaban (visible=1 en vez de 0); sin
+          #   `_VISIBILIDAD_ESPERADA` no existía el símbolo
+          #   (`NameError`/`AttributeError`); sin el canario, no existía el
+          #   test; sin la re-creación tras DROP INDEX, no existía el test.
+          #   Verde tras -- 161 passed, 0 failed (155 anteriores + 6
+          #   nuevos). Medido en local (127.0.0.1:3308, base de sesión
+          #   jax_memory_test_auto<pid>), corrida completa de los 24
+          #   archivos del job: 161 passed, 0 failed.
+          grep -qE "^161 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 161 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

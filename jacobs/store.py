@@ -1012,10 +1012,25 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     # columna generada. Se reprodujo y se resolvió en
     # jacobs/_subpipeline_contrato_io_test.py::test_jacobs_pipelines_gana_parent_y_depth_aun_si_la_tabla_ya_existia
     # (Task 1-bis, 2026-09-22) -- ver el comentario de ESE test para el
-    # detalle. No afecta el arranque normal (`visible` se agrega DESPUÉS de
-    # parent_pipeline_id/depth en esta misma lista, así que una base que
-    # arranca de cero o se pone al día los agrega en orden, sin que
-    # `visible` exista todavía cuando le toca a las otras dos).
+    # detalle.
+    #
+    # CORREGIDO (fix round 1, Ruling 19b, 2026-09-22): acá decía "no afecta
+    # el arranque normal" sin matiz -- CIERTO para EL DEPLOY de Ruling 18
+    # (`visible` se agrega DESPUÉS de parent_pipeline_id/depth en el loop de
+    # columnas, así que arranca de cero o se pone al día sin que `visible`
+    # exista todavía cuando le toca a esas dos) pero FALSO para el PRÓXIMO
+    # deploy que agregue una columna nueva: una vez que ESTE deploy corrió
+    # en producción, `visible` YA está indexada ahí, y CUALQUIER columna
+    # que se agregue DESPUÉS de ella en el loop corre el mismo riesgo del
+    # 1845/1846 -- y CI no lo va a ver, porque el contenedor efímero de
+    # cada job arranca de una base VACÍA (todas las columnas se agregan en
+    # una tabla sin índice todavía). La barrera contra esto es
+    # `tests/test_store_columna_descarte_acotada.py::test_visible_es_la_ultima_columna_del_loop`
+    # (MAJOR-1, Ruling 19b): mientras `visible` sea la ÚLTIMA columna del
+    # loop, ninguna otra columna nueva queda expuesta -- el día que haga
+    # falta agregar una columna DESPUÉS de `visible`, ese test avisa y hay
+    # que diseñarla con su propia evidencia contra una base que YA tiene
+    # `visible` indexada, no asumir que "pasó CI" alcanza.
     ("jacobs_pipelines", "idx_pipelines_visibles",
      "CREATE INDEX idx_pipelines_visibles ON jacobs_pipelines "
      "(user_id, tenant_id, visible, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
@@ -1277,9 +1292,31 @@ async def init_tables() -> None:
                 # que su ALTER va acotado Y fail-closed
                 # (`_agregar_columna_acotada`), no fail-soft como un
                 # índice.
+                #
+                # Ruling 19a (fix round 1, revisión del coordinador,
+                # 2026-09-22): la expresión suma `AND owner_ack_at IS NOT
+                # NULL` -- SQL_PIPELINES_DEL_USUARIO YA filtra por eso
+                # aparte (owner_ack_at IS NOT NULL es "el dueño reconoció
+                # este pipeline en la Mesa", T6-5a), pero sin sumarlo ACÁ
+                # el índice de abajo no lo sabía: un pipeline hijo de Ada
+                # (jacobs/subpipelines.py) que todavía no tiene ack cuenta
+                # como `visible=1` iguial que uno normal, así que el rango
+                # del índice tiene que incluir esas filas y filtrarlas
+                # DESPUÉS con `Using where` -- si un dueño acumula muchos
+                # hijos sin ack (crecen sin el mismo techo que los
+                # descartados, spec §4), el costo vuelve a depender de
+                # cuántos haya, exactamente lo que Ruling 18 quería evitar.
+                # Con el AND acá, esas filas quedan afuera del rango del
+                # índice directamente, igual que las descartadas/ocultas.
+                #
+                # ADVERTENCIA para la PRÓXIMA columna nueva de esta tabla
+                # (MAJOR-1, Ruling 19b): `visible` tiene que seguir siendo
+                # la ÚLTIMA tupla de este loop -- ver
+                # tests/test_store_columna_descarte_acotada.py::test_visible_es_la_ultima_columna_del_loop.
                 ("visible", "ALTER TABLE jacobs_pipelines ADD COLUMN "
                     "visible TINYINT(1) GENERATED ALWAYS AS "
-                    "(status NOT IN ('discarded','hidden')) VIRTUAL, "
+                    "(status NOT IN ('discarded','hidden') "
+                    "AND owner_ack_at IS NOT NULL) VIRTUAL, "
                     "ALGORITHM=INSTANT", True),
             ]:
                 await cur.execute(

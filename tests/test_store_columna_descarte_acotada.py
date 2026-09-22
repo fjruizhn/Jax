@@ -198,6 +198,44 @@ class FormaDelLoopDeColumnasTest(unittest.TestCase):
         esperadas = set(_COLUMNAS_CONTRATO) | set(_COLUMNAS_VIEJAS_SIN_ACOTAR)
         self.assertEqual(columnas, esperadas)
 
+    def test_visible_es_la_ultima_columna_del_loop(self):
+        """MAJOR-1 (fix round 1, Ruling 19b, 2026-09-22): la TRAMPA del
+        INSTANT. Medido contra MariaDB 12.3.3 real
+        (jacobs/_subpipeline_contrato_io_test.py, Task 1-bis): en cuanto
+        `jacobs_pipelines` tiene un ÍNDICE sobre `visible` (una columna
+        VIRTUAL -- idx_pipelines_visibles, Ruling 18), CUALQUIER `ADD
+        COLUMN` de OTRA columna sobre esa tabla, aunque pida
+        `ALGORITHM=INSTANT` explícito, puede rechazarse con
+        `1845 ALGORITHM=INSTANT is not supported` -- y ni siquiera
+        `ALGORITHM=INPLACE` alcanza con `LOCK=NONE`
+        (`1846 ... online rebuild with indexed virtual columns`, pide
+        `LOCK=SHARED`).
+
+        CI NO VE ESTO: el contenedor efímero de cada job arranca de una
+        base VACÍA, así que TODAS las columnas del loop se agregan a una
+        tabla que todavía no tiene el índice -- el 1845/1846 sólo aparece
+        en una base que YA pasó por este deploy antes (exactamente el
+        estado de producción una vez que Ruling 18 esté desplegado). Por
+        eso este test es MECÁNICO, no una corrida contra DB: mientras
+        `visible` sea la ÚLTIMA tupla del loop, ninguna columna futura
+        queda expuesta al `ADD COLUMN` posterior a un índice sobre columna
+        generada. El día que haga falta una columna nueva DESPUÉS de
+        `visible`, este test cae -- y CADA columna nueva se diseña
+        APARTE, con su propia evidencia contra una base que YA tiene
+        `visible` indexada (ver CanarioTrampaInstantDBTest en
+        tests/test_jacobs_descarte_db.py para el canario que vigila que
+        la trampa siga vigente)."""
+        tuplas = _tuplas_del_loop_de_columnas()
+        ultima = tuplas[-1][0]
+        self.assertEqual(
+            ultima, "visible",
+            f"`visible` dejó de ser la última columna del loop (ahora lo es "
+            f"{ultima!r}) -- eso expone la columna nueva al 1845/1846 en "
+            f"producción, invisible en CI (base fresca sin el índice "
+            f"todavía). Diseñala con su propia evidencia contra una base "
+            f"que YA tiene idx_pipelines_visibles."
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

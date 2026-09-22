@@ -125,18 +125,51 @@ class DescarteColumnasEIndicesDBTest(unittest.IsolatedAsyncioTestCase):
         )
 
 
-# Task 1-bis (2026-09-22, Ruling 18): los ocho estados VISIBLES del enum
-# (todos menos discarded/hidden) -- partición exhaustiva contra
-# PipelineStatus, mismo criterio que tests/test_creacion_sin_candado_global.py.
-_ESTADOS_VISIBLES = tuple(
-    s for s in PipelineStatus if s not in (PipelineStatus.discarded, PipelineStatus.hidden)
-)
+# Task 1-bis (2026-09-22, Ruling 18/19d, MINOR-4): mapeo EXPLÍCITO
+# PipelineStatus -> visibilidad esperada (con owner_ack_at YA puesto --
+# Ruling 19a añade "AND owner_ack_at IS NOT NULL" a la expresión de
+# `visible`; el mapeo de acá es sobre el caso "acked", el caso sin ack se
+# prueba aparte). A propósito NO es una fórmula (`s not in (discarded,
+# hidden)`) que un estado nuevo pasaría a integrar SOLO -- es un diccionario
+# que alguien tiene que tocar a mano. `VisibilidadExhaustivaTest` de abajo
+# exige que cubra TODO PipelineStatus; si el enum suma un estado nuevo sin
+# decidir acá si es visible u oculto, ese test cae.
+_VISIBILIDAD_ESPERADA: dict[PipelineStatus, bool] = {
+    PipelineStatus.pending: True,
+    PipelineStatus.running: True,
+    PipelineStatus.completed: True,
+    PipelineStatus.failed: True,
+    PipelineStatus.aborted: True,
+    PipelineStatus.interrupted: True,
+    PipelineStatus.expired: True,
+    PipelineStatus.disputed: True,
+    PipelineStatus.discarded: False,
+    PipelineStatus.hidden: False,
+}
+_ESTADOS_VISIBLES = tuple(s for s, v in _VISIBILIDAD_ESPERADA.items() if v)
+_ESTADOS_NO_VISIBLES = tuple(s for s, v in _VISIBILIDAD_ESPERADA.items() if not v)
+
+
+class VisibilidadExhaustivaTest(unittest.TestCase):
+    """MINOR-4 (fix round 1, Ruling 19d): pura, sin DB -- si `PipelineStatus`
+    suma un valor nuevo sin decidir su visibilidad en `_VISIBILIDAD_ESPERADA`,
+    este test cae. Es la baranda que fuerza la decisión; DB real prueba que
+    el motor calcula lo mismo (`VisibleSigueAlEstadoDBTest`)."""
+
+    def test_todo_estado_del_enum_tiene_mapeo_de_visibilidad(self):
+        faltan = set(PipelineStatus) - set(_VISIBILIDAD_ESPERADA)
+        self.assertEqual(
+            faltan, set(),
+            f"PipelineStatus sin decisión de visibilidad en _VISIBILIDAD_ESPERADA: "
+            f"{faltan} -- agregalo al mapeo (True/False) antes de seguir."
+        )
 
 
 class VisibleSigueAlEstadoDBTest(unittest.IsolatedAsyncioTestCase):
-    """`visible` es GENERATED a partir de `status` -- se prueba contra
-    MariaDB real, no contra la expresión en abstracto: la fila se crea con
-    cada `status` del enum y se lee la columna calculada por el motor."""
+    """`visible` es GENERATED a partir de `status` Y `owner_ack_at` (Ruling
+    19a) -- se prueba contra MariaDB real, no contra la expresión en
+    abstracto: la fila se crea con cada `status` del enum y se lee la
+    columna calculada por el motor."""
 
     async def asyncSetUp(self):
         self.addAsyncCleanup(store.cerrar_pool)
@@ -152,13 +185,27 @@ class VisibleSigueAlEstadoDBTest(unittest.IsolatedAsyncioTestCase):
                     await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
                     await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
 
-    async def _crear(self, status: PipelineStatus) -> str:
+    async def _crear(self, status: PipelineStatus, *, con_ack: bool = True) -> str:
+        """`con_ack=True` (default): representa el caso normal, "el dueño
+        reconoció este pipeline en la Mesa" (T6-5a). `con_ack=False`
+        simula un hijo de Ada (jacobs/subpipelines.py) que todavía no tiene
+        `owner_ack_at` -- `store.pipeline_create` NUNCA lo acepta como
+        columna (siempre nace NULL, ver jacobs/store.py::pipeline_create),
+        así que "con ack" necesita un UPDATE aparte después de crear."""
         pid = str(uuid.uuid4())
         await store.pipeline_create(Pipeline(
             pipeline_id=pid, name="t-visible", invoked_by="plataforma",
             mode="autonomous", status=status, user_id="u1", tenant_id="1",
         ))
         self._pids.append(pid)
+        if con_ack:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE jacobs_pipelines SET owner_ack_at=%s WHERE pipeline_id=%s",
+                        (time.time(), pid),
+                    )
+                await conn.commit()
         return pid
 
     async def _visible(self, pid: str) -> int:
@@ -176,10 +223,29 @@ class VisibleSigueAlEstadoDBTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(await self._visible(pid), 1)
 
     async def test_visible_es_0_para_discarded_y_hidden(self):
-        for status in (PipelineStatus.discarded, PipelineStatus.hidden):
+        for status in _ESTADOS_NO_VISIBLES:
             with self.subTest(status=status):
                 pid = await self._crear(status)
                 self.assertEqual(await self._visible(pid), 0)
+
+    async def test_visible_es_0_sin_ack_aunque_el_estado_sea_visible(self):
+        """Ruling 19a: un hijo de Ada sin `owner_ack_at` (con_ack=False) es
+        `visible=0` aunque su `status` sea uno de los ocho visibles -- el
+        AND de la expresión, no sólo el NOT IN. Sin este AND, muchos hijos
+        de Ada sin ack le devuelven a idx_pipelines_visibles el mismo costo
+        sin techo que Ruling 18 quería evitar para los descartados."""
+        for status in _ESTADOS_VISIBLES:
+            with self.subTest(status=status):
+                pid = await self._crear(status, con_ack=False)
+                self.assertEqual(await self._visible(pid), 0)
+
+    async def test_visible_es_1_con_ack_para_cada_estado_del_mapeo(self):
+        """Cruza `_VISIBILIDAD_ESPERADA` completo (MINOR-4) contra MariaDB
+        real, no sólo los dos grupos por separado."""
+        for status, esperado in _VISIBILIDAD_ESPERADA.items():
+            with self.subTest(status=status):
+                pid = await self._crear(status, con_ack=True)
+                self.assertEqual(await self._visible(pid), int(esperado))
 
     async def test_visible_cambia_a_0_al_descartar_y_a_1_al_recuperar(self):
         pid = await self._crear(PipelineStatus.aborted)
@@ -214,6 +280,116 @@ class VisibleSigueAlEstadoDBTest(unittest.IsolatedAsyncioTestCase):
             desde=PipelineStatus.hidden, a=PipelineStatus.discarded, user_id="admin")
         self.assertTrue(ok)
         self.assertEqual(await self._visible(pid), 0)
+
+    async def _aparece_por_el_indice(self, pid: str) -> bool:
+        """MINOR-1 (fix round 1): no alcanza con leer la columna `visible`
+        (`_visible()` de arriba) -- eso prueba que la EXPRESIÓN calcula
+        bien, no que MariaDB mantenga el ÍNDICE consistente con la columna
+        generada en cada UPDATE de `status`. `FORCE INDEX` obliga a leer
+        POR el índice, no por un scan que ignoraría una inconsistencia."""
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT pipeline_id FROM jacobs_pipelines "
+                    "FORCE INDEX (idx_pipelines_visibles) "
+                    "WHERE user_id=%s AND tenant_id=%s AND visible=1",
+                    ("u1", "1"),
+                )
+                vistos = {fila[0] for fila in await cur.fetchall()}
+        return pid in vistos
+
+    async def test_el_indice_refleja_el_descarte_y_la_recuperacion(self):
+        pid = await self._crear(PipelineStatus.aborted)
+        self.assertTrue(await self._aparece_por_el_indice(pid))
+        ok = await _transicion(
+            pid, 0, "discard",
+            desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        self.assertTrue(ok)
+        self.assertFalse(await self._aparece_por_el_indice(pid))
+        ok = await _transicion(
+            pid, 0, "recover",
+            desde=PipelineStatus.discarded, a=PipelineStatus.aborted, user_id="u1")
+        self.assertTrue(ok)
+        self.assertTrue(await self._aparece_por_el_indice(pid))
+
+
+class CanarioTrampaInstantDBTest(unittest.IsolatedAsyncioTestCase):
+    """MAJOR-1 (fix round 1, Ruling 19b, 2026-09-22): canario vivo contra
+    MariaDB real de la trampa del 1845 -- ver
+    tests/test_store_columna_descarte_acotada.py::test_visible_es_la_ultima_columna_del_loop
+    y el comentario de `idx_pipelines_visibles` en jacobs/store.py."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        await store.init_tables()  # deja idx_pipelines_visibles creado
+
+    async def test_add_column_instant_sigue_fallando_con_visible_indexada(self):
+        """Si este test se pone en ROJO, MariaDB dejó de rechazar
+        ALGORITHM=INSTANT sobre una tabla con un índice sobre columna
+        VIRTUAL -- la barrera de Ruling 19b (la regla de "visible al
+        final" en test_store_columna_descarte_acotada.py) ya no hace
+        falta contra ESTA versión de MariaDB, y hay que revisar las dos
+        juntas antes de retirarlas."""
+        try:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "ALTER TABLE jacobs_pipelines ADD COLUMN tmp_canario INT NULL, "
+                        "ALGORITHM=INSTANT"
+                    )
+            aplico = True
+        except Exception as e:  # fail-soft: no se sabe de antemano la clase exacta que MariaDB levanta (1845 hoy) -- self.assertIn("1845", mensaje) de abajo sigue exigiendo el mensaje correcto, así que un error DISTINTO (p.ej. de conexión) también pone este test en rojo
+            aplico = False
+            mensaje = str(e)
+        if aplico:
+            # No dejar la base de sesión con la columna de sobra ANTES de
+            # fallar el test -- limpieza primero, fallo después.
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "ALTER TABLE jacobs_pipelines DROP COLUMN tmp_canario, ALGORITHM=COPY"
+                    )
+            self.fail(
+                "ALGORITHM=INSTANT YA NO falla con idx_pipelines_visibles presente "
+                "-- la barrera de Ruling 19b (MAJOR-1, Task 1-bis fix round 1) se "
+                "puede retirar: revisar test_visible_es_la_ultima_columna_del_loop "
+                "en tests/test_store_columna_descarte_acotada.py y el comentario de "
+                "idx_pipelines_visibles en jacobs/store.py antes de sacarlos."
+            )
+        self.assertIn("1845", mensaje)
+
+
+class Escenario1846DBTest(unittest.IsolatedAsyncioTestCase):
+    """Ruling 19c (fix round 1, 2026-09-22): DROP INDEX
+    idx_pipelines_descartados y volver a llamar init_tables() tiene que
+    recrearlo sin reventar -- CREATE INDEX (no ADD COLUMN) sobre una tabla
+    que ya tiene `visible` indexada. Medido contra MariaDB 12.3.3 real
+    ANTES de escribir este test: las tres formas (recrear
+    idx_pipelines_descartados, recrear idx_jacobs_pipelines_duenio, y
+    recrear el propio idx_pipelines_visibles) pasan limpio -- la trampa del
+    1845/1846 es específica de `ADD COLUMN` (que cambia el row format),
+    no de `CREATE INDEX` (que no lo cambia). No hizo falta tocar
+    `_crear_indice_acotado`: ya sube cualquier error que no sea 1205, y acá
+    no aparece ninguno. Este test es la baranda de regresión, no la
+    corrección de un bug -- si algún día una versión de MariaDB empieza a
+    pedir LOCK=SHARED también para CREATE INDEX en esta situación, cae acá
+    primero."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        await store.init_tables()
+
+    async def test_recrear_idx_pipelines_descartados_no_revienta(self):
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("DROP INDEX idx_pipelines_descartados ON jacobs_pipelines")
+        await store.init_tables()
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SHOW INDEX FROM jacobs_pipelines WHERE Key_name='idx_pipelines_descartados'"
+                )
+                self.assertEqual(len(await cur.fetchall()), 4)
 
 
 class ReaperNoTocaDescartadosNiOcultosDBTest(unittest.IsolatedAsyncioTestCase):
@@ -604,10 +780,16 @@ class TransicionDescarteAtomicaDBTest(unittest.IsolatedAsyncioTestCase):
 # sembradas por el controlador.
 _LIMITE = 50
 
+#: Ruling 19a (fix round 1, 2026-09-22): `AND owner_ack_at IS NOT NULL` ya NO
+#: va acá -- la expresión de `visible` (jacobs/store.py::init_tables()) lo
+#: incluye. Dejarlo acá TAMBIÉN sería redundante, no incorrecto, pero esta
+#: consulta es el stand-in de lo que jax-platform va a terminar usando
+#: (SQL_PIPELINES_DEL_USUARIO), y ESA versión futura tampoco lo va a
+#: necesitar aparte.
 _SQL_VISIBLES = (
     "SELECT pipeline_id, name, status, created_at, updated_at FROM jacobs_pipelines "
     "FORCE INDEX (idx_pipelines_visibles) "
-    "WHERE user_id=%s AND tenant_id=%s AND owner_ack_at IS NOT NULL AND visible=1 "
+    "WHERE user_id=%s AND tenant_id=%s AND visible=1 "
     "ORDER BY created_at DESC LIMIT %s OFFSET 0"
 )
 
@@ -628,21 +810,37 @@ class CostoAcotadoPorVisibleDBTest(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(self._borrar)
 
     async def _borrar(self):
+        # BLOCK-1 (fix round 1, revisión del coordinador, 2026-09-22):
+        # tests/test_delete_de_tablas_compartidas.py exige que un DELETE
+        # sobre una tabla COMPARTIDA (jacobs_pipelines lo es) filtre por un
+        # marcador PROPIO de este test -- `tenant_id` acá SIEMPRE lleva un
+        # uuid generado por `_sembrar()` (nunca un literal fijo como
+        # "tA-muchos-descartados"), así que el DELETE es seguro: no puede
+        # tocar la fila de otra sesión ni de otro test. El pragma deja
+        # explícito POR QUÉ para el detector estático (no reconoce
+        # "tenant_id" como nombre de marcador por sí solo).
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
                 for tenant_id in self._tenants:
                     await cur.execute(
-                        "DELETE FROM jacobs_pipelines WHERE tenant_id=%s", (tenant_id,))
+                        "DELETE FROM jacobs_pipelines WHERE tenant_id=%s", (tenant_id,))  # marcador-propio: tenant_id lleva un uuid propio de este test (ver _sembrar)
             await conn.commit()
 
     async def _sembrar(self, user_id: str, tenant_id: str, *,
-                        n_no_visibles: int, n_visibles: int, status_no_visible: str) -> None:
+                        n_no_visibles: int, n_visibles: int, status_no_visible: str,
+                        n_sin_ack: int = 0) -> None:
         """`cur.executemany`, no un INSERT por fila -- miles de INSERT
         individuales tardan minutos (misma lección que
         docs/carga-sql-pipelines-del-usuario-indice-2026-09-22.md en
         jax-platform). `ANALYZE TABLE` al final: sin estadísticas frescas el
         plan puede depender de qué otros tests corrieron antes en la misma
-        base de sesión."""
+        base de sesión.
+
+        `n_sin_ack` (Ruling 19a, fix round 1): filas con `status` VISIBLE
+        pero `owner_ack_at=NULL` -- hijos de Ada sin ack todavía. Tienen
+        que quedar AFUERA del rango del índice igual que las
+        descartadas/ocultas; si no, un dueño con muchos hijos sin ack
+        vuelve a pagar el costo lineal que Ruling 18 quería evitar."""
         self._tenants.append(tenant_id)
         base = time.time() - 1_000_000
         filas = [
@@ -653,6 +851,11 @@ class CostoAcotadoPorVisibleDBTest(unittest.IsolatedAsyncioTestCase):
             (str(uuid.uuid4()), "x", "plataforma", "autonomous", "completed",
              base + n_no_visibles + i, base + n_no_visibles + i, user_id, tenant_id, base)
             for i in range(n_visibles)
+        ] + [
+            (str(uuid.uuid4()), "x", "plataforma", "autonomous", "running",
+             base + n_no_visibles + n_visibles + i, base + n_no_visibles + n_visibles + i,
+             user_id, tenant_id, None)
+            for i in range(n_sin_ack)
         ]
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
@@ -680,14 +883,27 @@ class CostoAcotadoPorVisibleDBTest(unittest.IsolatedAsyncioTestCase):
                 handler = {k: int(v) for k, v in await cur.fetchall()}
         return explain, handler, filas
 
+    @staticmethod
+    def _tenant_unico(prefijo: str) -> str:
+        """BLOCK-1 (fix round 1): un tenant por TEST, nunca un literal fijo
+        -- la base de sesión la comparten otras corridas/tests, y un
+        tenant_id repetido entre dos sesiones concurrentes sembraría (o
+        borraría, ver `_borrar`) filas ajenas."""
+        return f"{prefijo}-{uuid.uuid4().hex[:12]}"
+
     async def test_muchos_descartados_el_plan_usa_el_indice_sin_filesort(self):
-        """Forma (b) del controlador: 5000 descartados + 3 vivas. Ésta es la
-        forma que ANTES pagaba el costo lineal (medido en jax-platform:
-        FORCE INDEX (idx_jacobs_pipelines_duenio) da 4,2-4,4 ms recorriendo
-        casi el tenant completo)."""
-        await self._sembrar("userA", "tA-muchos-descartados",
-                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded")
-        explain, _handler, _filas = await self._explain_y_handler_read("userA", "tA-muchos-descartados")
+        """Forma (b) del controlador: 5000 descartados + 2000 sin ack + 3
+        vivas. Ésta es la forma que ANTES pagaba el costo lineal (medido en
+        jax-platform: FORCE INDEX (idx_jacobs_pipelines_duenio) da 4,2-4,4
+        ms recorriendo casi el tenant completo). Ruling 19a (fix round 1):
+        se suman 2000 hijos de Ada sin ack -- mismo status VISIBLE que las
+        3 vivas, pero sin owner_ack_at -- para confirmar que el plan sigue
+        sin filesort con las tres categorías presentes."""
+        tenant = self._tenant_unico("tA-muchos-descartados")
+        await self._sembrar("userA", tenant,
+                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded",
+                             n_sin_ack=2000)
+        explain, _handler, _filas = await self._explain_y_handler_read("userA", tenant)
         self.assertEqual(explain["key"], "idx_pipelines_visibles")
         self.assertNotEqual(explain["type"], "ALL")
         extra = (explain["Extra"] or "").lower()
@@ -696,27 +912,33 @@ class CostoAcotadoPorVisibleDBTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_muchos_descartados_el_motor_no_lee_las_descartadas(self):
         """La propiedad real (no sólo la clave del plan): con 5000
-        descartadas y 3 vivas, el total de Handler_read tiene que quedar
-        del orden de las 3 vivas -- NO de las 5000 descartadas que
-        `visible=1` deja afuera del rango del índice."""
-        await self._sembrar("userA", "tA-muchos-descartados-2",
-                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded")
-        _explain, handler, filas = await self._explain_y_handler_read("userA", "tA-muchos-descartados-2")
+        descartadas + 2000 sin ack (Ruling 19a) y 3 vivas, el total de
+        Handler_read tiene que quedar del orden de las 3 vivas -- NO de
+        las 7000 filas que `visible=1` deja afuera del rango del índice
+        (5000 por status, 2000 por falta de ack)."""
+        tenant = self._tenant_unico("tA-muchos-descartados")
+        await self._sembrar("userA", tenant,
+                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded",
+                             n_sin_ack=2000)
+        _explain, handler, filas = await self._explain_y_handler_read("userA", tenant)
         self.assertEqual(len(filas), 3)
         total = sum(handler.values())
         self.assertLessEqual(
             total, len(filas) + 10,
             f"{total} lecturas Handler_read para 3 filas vivas -- huele a que "
-            f"el motor está tocando las 5000 descartadas: {handler}",
+            f"el motor está tocando las 7000 no-visibles (descartadas o sin "
+            f"ack): {handler}",
         )
 
     async def test_historial_largo_el_plan_usa_el_indice_sin_filesort(self):
-        """Forma (a) del controlador: 5000 vivas + 50 descartadas -- un
-        historial largo de filas VISIBLES, no de descartadas. El plan tiene
-        que seguir siendo el mismo índice, sin filesort."""
-        await self._sembrar("userB", "tB-historial-largo",
-                             n_no_visibles=50, n_visibles=5000, status_no_visible="discarded")
-        explain, _handler, _filas = await self._explain_y_handler_read("userB", "tB-historial-largo")
+        """Forma (a) del controlador: 5000 vivas + 50 descartadas + 2000
+        sin ack -- un historial largo de filas VISIBLES, no de descartadas.
+        El plan tiene que seguir siendo el mismo índice, sin filesort."""
+        tenant = self._tenant_unico("tB-historial-largo")
+        await self._sembrar("userB", tenant,
+                             n_no_visibles=50, n_visibles=5000, status_no_visible="discarded",
+                             n_sin_ack=2000)
+        explain, _handler, _filas = await self._explain_y_handler_read("userB", tenant)
         self.assertEqual(explain["key"], "idx_pipelines_visibles")
         self.assertNotEqual(explain["type"], "ALL")
         extra = (explain["Extra"] or "").lower()
@@ -724,15 +946,18 @@ class CostoAcotadoPorVisibleDBTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("temporary", extra)
 
     async def test_historial_largo_el_motor_lee_aprox_el_limite_no_las_5000(self):
-        """La propiedad central de Ruling 18: con 5000 filas VISIBLES, el
-        costo del LIMIT no depende de cuántas haya en total -- el
-        `EXPLAIN.rows` estimado para esta forma es ~5000 (la cardinalidad
-        del rango completo de `visible=1` para el tenant), pero el motor
-        CORTA apenas junta el LIMIT -- por eso el número que hay que mirar
-        es Handler_read, no `rows` (el propio pedido del controlador)."""
-        await self._sembrar("userB", "tB-historial-largo-2",
-                             n_no_visibles=50, n_visibles=5000, status_no_visible="discarded")
-        explain, handler, filas = await self._explain_y_handler_read("userB", "tB-historial-largo-2")
+        """La propiedad central de Ruling 18/19a: con 5000 filas VISIBLES y
+        2000 hijos de Ada sin ack, el costo del LIMIT no depende de cuántas
+        haya en total -- el `EXPLAIN.rows` estimado para esta forma es
+        ~5000 (la cardinalidad del rango completo de `visible=1` para el
+        tenant), pero el motor CORTA apenas junta el LIMIT -- por eso el
+        número que hay que mirar es Handler_read, no `rows` (el propio
+        pedido del controlador)."""
+        tenant = self._tenant_unico("tB-historial-largo")
+        await self._sembrar("userB", tenant,
+                             n_no_visibles=50, n_visibles=5000, status_no_visible="discarded",
+                             n_sin_ack=2000)
+        explain, handler, filas = await self._explain_y_handler_read("userB", tenant)
         self.assertEqual(len(filas), _LIMITE)
         # La propiedad que EXPLAIN.rows por sí solo NO prueba: la estimación
         # de cardinalidad del rango es del orden de las 5000 visibles del
@@ -743,16 +968,20 @@ class CostoAcotadoPorVisibleDBTest(unittest.IsolatedAsyncioTestCase):
         self.assertLessEqual(
             total, _LIMITE + 10,
             f"{total} lecturas Handler_read para LIMIT={_LIMITE} -- huele a "
-            f"que el motor está leyendo de más de las 5000 vivas: {handler}",
+            f"que el motor está leyendo de más de las 5000 vivas o de los "
+            f"2000 sin ack: {handler}",
         )
 
     async def test_muchos_descartados_lee_bastante_menos_que_el_total_sembrado(self):
-        """Cota independiente de la anterior, contra el TOTAL sembrado (5003
-        filas) en vez de un número fijo -- por si el mecanismo de Handler_read
-        cambiara de forma en una versión futura de MariaDB, esta cota sigue
-        siendo significativa."""
-        await self._sembrar("userA", "tA-muchos-descartados-3",
-                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded")
-        _explain, handler, _filas = await self._explain_y_handler_read("userA", "tA-muchos-descartados-3")
+        """Cota independiente de la anterior, contra el TOTAL sembrado
+        (7003 filas: 5000 descartadas + 2000 sin ack + 3 vivas) en vez de
+        un número fijo -- por si el mecanismo de Handler_read cambiara de
+        forma en una versión futura de MariaDB, esta cota sigue siendo
+        significativa."""
+        tenant = self._tenant_unico("tA-muchos-descartados")
+        await self._sembrar("userA", tenant,
+                             n_no_visibles=5000, n_visibles=3, status_no_visible="discarded",
+                             n_sin_ack=2000)
+        _explain, handler, _filas = await self._explain_y_handler_read("userA", tenant)
         total = sum(handler.values())
-        self.assertLess(total, 5003 / 10)
+        self.assertLess(total, 7003 / 10)
