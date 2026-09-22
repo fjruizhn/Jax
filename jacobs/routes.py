@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from redaccion import recortar_redactado
 
-from jacobs import cupo, store
+from jacobs import cupo, descarte, store
 from jacobs import continuar as servicio_continuar
 from jacobs.artifacts import read_artifact
 from jacobs.executor import run_pipeline
@@ -763,6 +763,10 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
         # terminal (ESTADOS_SIN_CUPO) -- no se cancela lo que ya terminó de
         # correr, aunque nadie haya resuelto la objeción todavía.
         PipelineStatus.disputed,
+        # 2026-09-22 (spec descartar-pipelines, Task 3): descartado y oculto
+        # son terminales -- se recuperan/restauran con sus rutas propias, no
+        # con /cancel.
+        PipelineStatus.discarded, PipelineStatus.hidden,
     ):
         raise HTTPException(
             status_code=409,
@@ -784,6 +788,94 @@ async def cancel_pipeline(pipeline_id: str) -> dict:
         )
     await store.event_append(pipeline_id, "PIPELINE_CANCELLED", {"by": "API request"})
     return {"pipeline_id": pipeline_id, "status": "aborted"}
+
+
+# ----------------------------------------------------------------
+#  POST /jacobs/pipeline/{id}/{discard,recover,hide,restore}
+#  (spec 2026-09-22-descartar-pipelines, Task 3). Jacobs valida la
+#  transición y escribe con CAS; quién puede PEDIRLA la valida jax-platform
+#  (spec §4), que es quien conoce el papel del usuario -- mismo reparto que
+#  /cancel hoy.
+#
+#  Ruling 1 del controlador: CUATRO rutas LITERALES, no la genérica
+#  `/pipeline/{id}/{accion}` -- así el orden de declaración de rutas de
+#  FastAPI no puede volverse frágil (ninguna ruta futura puede "colarse"
+#  antes de una ruta literal ya registrada). Las cuatro llaman a la misma
+#  función común, `transicion_descarte`.
+# ----------------------------------------------------------------
+
+class DescarteRequest(BaseModel):
+    # M4 (fix round 1, 2026-09-22): sin min_length, un user_id vacío pasaba
+    # de largo hasta el store y quedaba en descartado_por/el evento como "" --
+    # una auditoría vacía es peor que un 422 explícito.
+    user_id: str = Field(min_length=1)
+
+
+_EVENTO_DE = {
+    "discard": "PIPELINE_DISCARDED", "recover": "PIPELINE_RECOVERED",
+    "hide": "PIPELINE_HIDDEN", "restore": "PIPELINE_RESTORED",
+}
+
+
+async def transicion_descarte(pipeline_id: str, accion: str, req: DescarteRequest) -> dict:
+    """Función común de las cuatro rutas literales de abajo.
+
+    Ruling 8 del controlador: sólo se atrapa `descarte.EstadoPrevioInvalido`
+    (-> 422). `descarte.TransicionDescarteInvalida` y un `ValueError`
+    genérico NO se atrapan acá -- con esta función bien escrita (ya valida
+    el estado actual contra `descarte.TRANSICIONES` y calcula `a` con
+    `descarte.destino_de` antes de llamar al store) son inalcanzables; si
+    aparecen de todos modos es un bug de contrato entre esta ruta y
+    `descarte.py`/`store.py`, no un pedido mal formado -- corresponde un
+    500, no disfrazarlo de 4xx (fail-closed, no fail-open).
+
+    Fix round 1 (2026-09-22, Ruling 9): ya NO llama a `store.event_append`
+    por su cuenta -- se lo pasa a `store.pipeline_transicion_descarte`, que
+    escribe el CAS y el evento en la MISMA transacción (ver el docstring de
+    esa función). Antes, esta ruta emitía el evento en una segunda conexión
+    DESPUÉS del CAS: si esa escritura fallaba, la transición quedaba hecha
+    sin auditoría, y un reintento del llamador nunca volvía a intentarla (la
+    fila ya cambió de `desde`, así que el CAS da 409 antes de llegar acá)."""
+    pipeline = await store.pipeline_get(pipeline_id)
+    if not pipeline:
+        raise HTTPException(status_code=404, detail={"code": "pipeline_no_encontrado"})
+    if pipeline.status not in descarte.TRANSICIONES[accion]:
+        raise HTTPException(status_code=409, detail={
+            "code": "transicion_no_permitida", "status": pipeline.status.value})
+    previo = await store.pipeline_status_previo(pipeline_id) if accion == "recover" else None
+    try:
+        destino = descarte.destino_de(accion, previo)
+    except descarte.EstadoPrevioInvalido:
+        raise HTTPException(status_code=422, detail={"code": "estado_previo_invalido"}) from None
+    if not await store.pipeline_transicion_descarte(
+        pipeline_id, pipeline.run_epoch, accion,
+        desde=pipeline.status, a=destino, user_id=req.user_id,
+        evento_tipo=_EVENTO_DE[accion],
+        evento_payload={
+            "user_id": req.user_id, "desde": pipeline.status.value, "a": destino.value},
+    ):
+        raise HTTPException(status_code=409, detail={"code": "cambio_concurrente"})
+    return {"pipeline_id": pipeline_id, "status": destino.value}
+
+
+@router.post("/pipeline/{pipeline_id}/discard")
+async def discard_pipeline(pipeline_id: str, req: DescarteRequest) -> dict:
+    return await transicion_descarte(pipeline_id, "discard", req)
+
+
+@router.post("/pipeline/{pipeline_id}/recover")
+async def recover_pipeline(pipeline_id: str, req: DescarteRequest) -> dict:
+    return await transicion_descarte(pipeline_id, "recover", req)
+
+
+@router.post("/pipeline/{pipeline_id}/hide")
+async def hide_pipeline(pipeline_id: str, req: DescarteRequest) -> dict:
+    return await transicion_descarte(pipeline_id, "hide", req)
+
+
+@router.post("/pipeline/{pipeline_id}/restore")
+async def restore_pipeline(pipeline_id: str, req: DescarteRequest) -> dict:
+    return await transicion_descarte(pipeline_id, "restore", req)
 
 
 # ----------------------------------------------------------------

@@ -22,6 +22,7 @@ import aiomysql
 from pymysql import err as _pymysql_err
 from pymysql.constants import CLIENT
 
+from jacobs import descarte
 from jacobs.policy import (
     MAX_PARALLEL_PIPELINES,
     SQL_ESTADOS_VIVOS,
@@ -798,6 +799,18 @@ async def conexion_dedicada(found_rows: bool = False) -> aiomysql.Connection:
        negocia en el handshake, no se enciende por sesion, y ponerselo al pool
        cambiaria en silencio el conteo de filas de cualquier UPDATE que se
        agregue despues.
+    2. `found_rows=True` MAS una transaccion explicita de dos sentencias --
+       `pipeline_transicion_descarte` (2026-09-22-descartar-pipelines, Task 3,
+       fix round 1, Ruling 9). Misma razon 1 para el CAS (reescribe
+       status/epoca), y ADEMAS necesita que el UPDATE del CAS y el INSERT del
+       evento de auditoria en `jacobs_events` corran en la MISMA transaccion,
+       sobre la MISMA conexion (`transaccion()`, ver mas abajo): si el evento
+       no se pudiera escribir, el CAS tiene que deshacerse con el, porque en
+       `recover`/`hide`/`restore` ese evento es el UNICO registro de quien
+       hizo la transicion. Una conexion del pool no sirve para esto: el pool
+       podria devolver una conexion distinta entre dos adquisiciones
+       separadas, y la transaccion necesita ser una sola conexion de punta a
+       punta.
     (Hasta el 2026-09-17 habia una segunda razon, `candado_de_activos()`, el
     GET_LOCK del cupo: se retiro junto con el candado, porque el cupo lo hace
     cumplir ahora una condicion dentro de cada escritura que lo consume.)
@@ -962,19 +975,43 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_events", "idx_events_pipeline_tipo",
      "CREATE INDEX idx_events_pipeline_tipo ON jacobs_events "
      "(pipeline_id, event_type) ALGORITHM=INPLACE LOCK=NONE", True),
+    # 2026-09-22 (spec descartar-pipelines §6): la vista "Descartados" filtra
+    # por dueño + status y ordena por descartado_at; la de ocultos (todos los
+    # usuarios) por status + descartado_at. Sin estos, EXPLAIN da filesort.
+    ("jacobs_pipelines", "idx_pipelines_descartados",
+     "CREATE INDEX idx_pipelines_descartados ON jacobs_pipelines "
+     "(user_id, tenant_id, status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    ("jacobs_pipelines", "idx_pipelines_ocultos",
+     "CREATE INDEX idx_pipelines_ocultos ON jacobs_pipelines "
+     "(status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
 # (lock_wait_timeout) es 86400 s: una transaccion larga sobre la tabla dejaria
 # el arranque colgado un dia entero, sin error.
 #
-# Costo de la espera (review de 05c028b): mientras el DDL espera su metadata
-# lock EXCLUSIVO (hasta estos 30 s), ese pedido queda en la cola del MDL y las
-# lecturas y escrituras NUEVAS sobre jacobs_pipelines se encolan detras de el.
-# Por eso la espera es corta: 30 s de Jacobs detenido como peor caso, no un dia.
-# Si vence, el indice no se crea (ERROR en el log); la red de seguridad es el
-# test de EXPLAIN de la plataforma en CI, que falla si la consulta de dueño no
-# usa este indice.
+# Costo de la espera (review de 05c028b; actualizado 2026-09-22, fix round 1
+# de Task 1 -- descartar-pipelines): mientras UN DDL espera su metadata lock
+# EXCLUSIVO (hasta estos 30 s), ese pedido queda en la cola del MDL y las
+# lecturas y escrituras NUEVAS sobre la tabla se encolan detras de el. Cada
+# DDL acotado paga SU PROPIA espera de hasta 30 s, y todos corren uno detras
+# de otro en la MISMA sesion de `init_tables()` -- el peor caso es la SUMA,
+# no 30 s fijos. Hoy hay CUATRO indices acotados en `_INDICES`
+# (idx_jacobs_pipelines_duenio, idx_pipelines_descartados e
+# idx_pipelines_ocultos sobre jacobs_pipelines; idx_events_pipeline_tipo
+# sobre jacobs_events): 4 x 30 s = 120 s de Jacobs detenido como peor caso si
+# los cuatro estan bloqueados a la vez, no un dia. Si vence, el indice no se
+# crea (ERROR en el log) y el arranque SIGUE -- la red de seguridad es el
+# test de EXPLAIN de la plataforma en CI, que falla si la consulta que lo
+# necesita no lo usa.
+#
+# Las columnas CONTRATO (status_previo/descartado_por/descartado_at, ver
+# `_agregar_columna_acotada` mas abajo) usan el MISMO limite pero NO son
+# "solo rendimiento": fallan CERRADO. La primera que vence el MDL aborta
+# `init_tables()` entero con una excepcion -- y como las columnas se agregan
+# ANTES que los indices en esta funcion, ese aborto ni siquiera llega a
+# intentar los 4 indices de arriba (no se suman a los 120 s: el arranque ya
+# se cayo antes).
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
 
@@ -1013,6 +1050,57 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
         await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
 
 
+async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> None:
+    """Como `_crear_indice_acotado`, pero para una COLUMNA CONTRATO: Task 2
+    (spec descartar-pipelines §3) escribe status_previo/descartado_por/
+    descartado_at en la MISMA transacción que la transición de estado. Una
+    columna que Jacobs cree que existe y no existe rompe esa escritura en
+    producción -- no es un SELECT lento, es un `Unknown column` en el UPDATE
+    de la transición. A diferencia de un índice (que solo acelera), esto
+    FALLA CERRADO (fix round 1 de Task 1, revisión 2026-09-22): si la espera
+    del metadata lock vence (1205), levanta la excepción y `init_tables()`
+    se aborta -- no sigue como si la columna estuviera.
+
+    Antes de levantar la excepción vuelve a mirar `information_schema`: LAS
+    MANOS, jax-platform y el Ejecutor llaman a `init_tables()` cada uno al
+    arrancar, así que dos procesos pueden intentar el MISMO `ADD COLUMN` a
+    la vez. El que pierde la carrera del metadata lock puede encontrar la
+    columna ya creada por el que ganó cuando reconsulta -- eso NO es un
+    fallo, es la misma columna llegando por el otro proceso, y seguir de
+    largo ahí es correcto (fail-closed protege contra "la columna no está",
+    no contra "otro proceso la creó primero")."""
+    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
+    (previo,) = await cur.fetchone()
+    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
+    try:
+        await cur.execute(ddl)
+    except aiomysql.OperationalError as e:
+        if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
+            raise
+        await cur.execute(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+            (tabla, columna),
+        )
+        (existe,) = await cur.fetchone()
+        if existe:
+            logger.warning(
+                "init_tables: %s.%s ya existe -- otro proceso ganó la carrera del "
+                "metadata lock mientras este esperaba %d s. No es un fallo.",
+                tabla, columna, _LOCK_WAIT_DDL_SEGUNDOS,
+            )
+            return
+        raise RuntimeError(
+            f"init_tables: no se pudo agregar {tabla}.{columna} -- otra "
+            f"transacción tiene la tabla y venció la espera de "
+            f"{_LOCK_WAIT_DDL_SEGUNDOS} s ({e}). Es una columna CONTRATO (spec "
+            f"descartar-pipelines §3, Task 2 la escribe): el arranque FALLA en "
+            f"vez de seguir sin ella."
+        ) from e
+    finally:
+        await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+
+
 async def init_tables() -> None:
     """Crea las tablas si no existen. Llamar al arrancar."""
     # desechable: _crear_indice_acotado cambia lock_wait_timeout de la SESION.
@@ -1034,22 +1122,31 @@ async def init_tables() -> None:
                     updated_at         DOUBLE NOT NULL
                 )
             """)
-            for col, ddl in [
-                ("user_id", "ALTER TABLE jacobs_pipelines ADD COLUMN user_id VARCHAR(50) NULL"),
-                ("tenant_id", "ALTER TABLE jacobs_pipelines ADD COLUMN tenant_id VARCHAR(50) NULL"),
+            # `acotado`: mismo criterio que `_INDICES` (T6-6, 2026-09-15) --
+            # el DDL corre con lock_wait_timeout acotado
+            # (`_agregar_columna_acotada`). Las columnas viejas (user_id..
+            # devoluciones) NO cambian de comportamiento: agregar el tercer
+            # elemento del tuple solo lo declara explícito (False), la rama
+            # `else` de abajo sigue siendo el `await cur.execute(ddl)` sin
+            # bound de siempre. Las tres nuevas del descarte SÍ van acotadas
+            # y además fallan CERRADO -- son un contrato de escritura de
+            # Task 2, no una aceleración (fix round 1, revisión 2026-09-22).
+            for col, ddl, acotado in [
+                ("user_id", "ALTER TABLE jacobs_pipelines ADD COLUMN user_id VARCHAR(50) NULL", False),
+                ("tenant_id", "ALTER TABLE jacobs_pipelines ADD COLUMN tenant_id VARCHAR(50) NULL", False),
                 # Ronda 5 (2026-08-20, T1): reemplaza el owner file de
                 # filesystem -- ver Pipeline.owner_ack_at en models.py.
-                ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL"),
+                ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL", False),
                 # 2026-09-17 (spec prevuelo-y-continuar §5.3): época de corrida.
-                ("run_epoch", "ALTER TABLE jacobs_pipelines ADD COLUMN run_epoch INT NOT NULL DEFAULT 0"),
+                ("run_epoch", "ALTER TABLE jacobs_pipelines ADD COLUMN run_epoch INT NOT NULL DEFAULT 0", False),
                 # Frente F (2026-09-16): de quién es hijo un pipeline de Ada y a
                 # qué profundidad. ALGORITHM=INSTANT explícito: si MariaDB no
                 # puede agregarla sin copiar la tabla, FALLA en vez de bloquear
                 # las escrituras de Jacobs mientras copia.
                 ("parent_pipeline_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "parent_pipeline_id VARCHAR(36) NULL, ALGORITHM=INSTANT"),
+                    "parent_pipeline_id VARCHAR(36) NULL, ALGORITHM=INSTANT", False),
                 ("depth", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "depth INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
+                    "depth INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT", False),
                 # El árbitro devuelve (spec 2026-09-18-arbitro-devuelve-design
                 # §3.4): "hoy costo_max_aceptado_usd es un parámetro por
                 # pedido y NO se persiste" -- verificado contra este mismo
@@ -1066,7 +1163,7 @@ async def init_tables() -> None:
                 # cálculo fino de costo sigue viviendo en prevuelo, esto solo
                 # persiste el tope.
                 ("costo_max_aceptado_usd", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "costo_max_aceptado_usd DECIMAL(12,4) NULL, ALGORITHM=INSTANT"),
+                    "costo_max_aceptado_usd DECIMAL(12,4) NULL, ALGORITHM=INSTANT", False),
                 # Cuántas veces el árbitro ya devolvió ESTE pipeline (spec
                 # §3.3): el tope de vueltas vive en axioma_config
                 # (jacobs.tope_devoluciones, ver get_tope_devoluciones), pero
@@ -1074,7 +1171,18 @@ async def init_tables() -> None:
                 # pipeline -- nunca en memoria (un pipeline puede continuar
                 # en otro proceso/host).
                 ("devoluciones", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "devoluciones INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
+                    "devoluciones INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT", False),
+                # 2026-09-22 (spec descartar-pipelines §3): a qué vuelve al
+                # recuperar, quién descartó (decide quién puede recuperar) y
+                # cuándo (orden de la vista). INSTANT: nunca copiar la tabla.
+                # CONTRATO de Task 2 (escribe estas tres en la misma
+                # transacción que la transición): acotadas Y fail-closed.
+                ("status_previo", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "status_previo VARCHAR(20) NULL, ALGORITHM=INSTANT", True),
+                ("descartado_por", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "descartado_por VARCHAR(50) NULL, ALGORITHM=INSTANT", True),
+                ("descartado_at", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "descartado_at DOUBLE NULL, ALGORITHM=INSTANT", True),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -1082,7 +1190,11 @@ async def init_tables() -> None:
                     (col,),
                 )
                 (exists,) = await cur.fetchone()
-                if not exists:
+                if exists:
+                    continue
+                if acotado:
+                    await _agregar_columna_acotada(cur, "jacobs_pipelines", col, ddl)
+                else:
                     await cur.execute(ddl)
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS jacobs_steps (
@@ -1257,6 +1369,19 @@ async def pipeline_get(pipeline_id: str) -> Pipeline | None:
     if not row:
         return None
     return _row_to_pipeline(row)
+
+
+async def pipeline_status_previo(pipeline_id: str) -> str | None:
+    """`status_previo` de un pipeline (Task 3, spec descartar-pipelines §3):
+    a qué estado vuelve un `discarded` al recuperarlo. `None` si el
+    pipeline no existe o nunca se descartó."""
+    async with conexion_del_pool() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT status_previo FROM jacobs_pipelines WHERE pipeline_id=%s", (pipeline_id,)
+            )
+            fila = await cur.fetchone()
+    return fila[0] if fila else None
 
 
 async def pipeline_update_status(
@@ -1501,6 +1626,103 @@ async def pipeline_update_status_si_epoca(
     sql = _sql_update_si_epoca(current_step_index is not None, context is not None, len(desde),
                                con_corte=sin_avance_desde is not None)
     return await _ejecutar_condicional(sql, params) == 1
+
+
+#: SET por acción del descarte (spec 2026-09-22 §3). Una sola sentencia por
+#: transición: estado y columnas se escriben JUNTOS o no se escribe nada.
+#: discard recibe `status_previo` como PARÁMETRO (el `desde` leído) y no como
+#: `status_previo=status`: así no depende del orden en que MariaDB evalúa
+#: las asignaciones del SET.
+_SETS_DESCARTE = {
+    "discard": "status=%s, updated_at=%s, status_previo=%s, "
+               "descartado_por=%s, descartado_at=%s",
+    "recover": "status=%s, updated_at=%s, status_previo=NULL, "
+               "descartado_por=NULL, descartado_at=NULL",
+    "hide": "status=%s, updated_at=%s",
+    "restore": "status=%s, updated_at=%s",
+}
+
+
+async def pipeline_transicion_descarte(
+    pipeline_id: str,
+    epoca: int,
+    accion: str,
+    *,
+    desde: PipelineStatus,
+    a: PipelineStatus,
+    user_id: str,
+    evento_tipo: str,
+    evento_payload: dict,
+) -> bool:
+    """Compare-and-set de una transición del descarte MÁS su evento de
+    auditoría, en la MISMA transacción. True si escribió (el pipeline
+    estaba en `epoca` y en `desde`).
+
+    Fix round 1 (2026-09-22, Ruling 7, I-1): valida la transición ANTES de
+    tocar la base -- `descarte.validar_transicion` levanta
+    `descarte.TransicionDescarteInvalida` (fail-closed) si `desde` no está
+    permitido para `accion`, o si `a` no es el destino correcto. Sin esto,
+    un llamador que mandara `discard` desde `running` liberaría el cupo de
+    un pipeline que sigue ejecutando, y lo dejaría huérfano para siempre: el
+    compare-and-set por `epoca`/`status` sólo protege CONTRA QUÉ estaba la
+    fila, no si esa acción tenía permitido partir de ahí.
+
+    En `recover` la validación sólo exige que `a` sea UN estado previo
+    válido en general (`descarte.TRANSICIONES["discard"]`); que coincida con
+    el `status_previo` REAL de ESTA fila lo garantiza el propio `WHERE`
+    (`status_previo=%s` con `a.value`) -- si no coincide, la función
+    devuelve `False` (no escribe), no levanta: `a` era válido en general,
+    sólo no era el de esta fila.
+
+    `user_id` sólo se persiste en `discard` (columna `descartado_por`, quien
+    puede recuperar). En `recover`/`hide`/`restore` NO se escribe en
+    ninguna columna: quién hizo la transición sólo queda en `evento_payload`,
+    escrito en `jacobs_events` por esta misma función.
+
+    Fix round 1 de Task 3 (2026-09-22, Ruling 9): en `recover`/`hide`/
+    `restore` el evento es el ÚNICO registro de quién hizo la transición
+    (`recover` además BORRA `descartado_por`). Antes, la ruta llamaba a
+    `store.event_append` por su cuenta, en OTRA conexión, después de este
+    CAS -- si esa segunda escritura fallaba, la transición quedaba hecha
+    SIN auditoría, y un reintento del llamador ya no la volvía a intentar
+    (la fila ya no está en `desde`, así que el CAS da 409 y ni siquiera
+    llega a la parte del evento). Ahora el UPDATE y el INSERT del evento
+    van en la MISMA transacción, sobre la MISMA conexión DEDICADA
+    (`conexion_dedicada(found_rows=True)`, igual que `_ejecutar_condicional`
+    -- CLIENT.FOUND_ROWS para que un CAS que reescribe los mismos valores
+    no se lea como "perdido"), con el patrón de transacción explícita que
+    ya usa el store (`transaccion()`, Ruling R38 -- reutilizado, no uno
+    nuevo): si el UPDATE no afecta ninguna fila, se sale ANTES de insertar
+    el evento y se devuelve False (nada que auditar); si el INSERT del
+    evento falla, `transaccion()` CIERRA la conexión en vez de mandar
+    ROLLBACK (mismo criterio que el resto del store: tras un error a mitad
+    de transacción el protocolo queda en un estado desconocido, y cerrar la
+    sesión hace que el servidor descarte lo no confirmado) y relanza -- el
+    estado no cambia sin su evento."""
+    descarte.validar_transicion(accion, desde, a)
+    ahora = time.time()
+    sets = _SETS_DESCARTE[accion]
+    params: list = [a.value, ahora]
+    if accion == "discard":
+        params += [desde.value, user_id, ahora]
+    params += [pipeline_id, epoca, desde.value]
+    extra_where = ""
+    if accion == "recover":
+        extra_where = " AND status_previo=%s"
+        params.append(a.value)
+    sql = (f"UPDATE jacobs_pipelines SET {sets} "
+           f"WHERE pipeline_id=%s AND run_epoch=%s AND status=%s{extra_where}")
+    conn = await conexion_dedicada(found_rows=True)
+    try:
+        async with transaccion(conn):
+            async with conn.cursor() as cur:
+                filas = await cur.execute(sql, params)
+            if filas != 1:
+                return False
+            await event_append(pipeline_id, evento_tipo, evento_payload, conexion=conn)
+        return True
+    finally:
+        conn.close()
 
 
 async def step_upsert_si_epoca(s: Step, epoca: int) -> bool:

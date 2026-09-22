@@ -51,6 +51,8 @@ ESTADOS_SIN_CUPO = (
     # terminal -- el árbitro agotó el tope de devoluciones y el pipeline
     # dejó de correr, igual que `completed`/`failed`. No ocupa cupo.
     PipelineStatus.disputed,
+    # 2026-09-22 (spec descartar-pipelines): descartado y oculto son terminales.
+    PipelineStatus.discarded, PipelineStatus.hidden,
 )
 
 #: La lista para un `IN (...)` de SQL. Literal y no parámetros: son valores del

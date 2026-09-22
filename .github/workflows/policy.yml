@@ -602,6 +602,21 @@ jobs:
           # orden; y el chequeo estatico de que tamanio_pool() no nombre
           # variables a mano). El numero es EL QUE CONTO EL RUNNER ("157
           # passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
+          # 157 (sin cambio) -- feat/descartar-pipelines, Task 3, fix round 2,
+          #   2026-09-22 (BLOCK-1, hallazgo de este mismo job en 7a3fff3):
+          #   ExcepcionAlPoolTest::test_la_excepcion_al_pool_no_se_amplia_sola
+          #   daba rojo porque `jacobs/store.py::pipeline_transicion_descarte`
+          #   (fix round 1, Ruling 9) llama a `conexion_dedicada()` y no
+          #   estaba en `LLAMADORES` -- el guard existe para que ampliar la
+          #   excepcion al pool sea una decision explicita, y esta rama la
+          #   amplio sin declararla. Se agrega la entrada con su razon
+          #   (CLIENT.FOUND_ROWS, igual que las otras dos, MAS la transaccion
+          #   de auditoria) y se actualiza el docstring de `conexion_dedicada`
+          #   (decía "tres funciones" pero listaba sólo dos razones -- ahora
+          #   son dos razones reales para tres funciones). CERO tests nuevos:
+          #   la lista de `LLAMADORES` es datos, no un test; el piso se queda
+          #   en 157. Corrida COMPLETA de este job confirmada en rojo antes
+          #   del arreglo (mismo mensaje que reportó CI) y en verde después.
           grep -qE "^157 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 157 tests CORRIDOS (no skipeados)."; exit 1; }
 
@@ -1360,6 +1375,8 @@ jobs:
           jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py
           jacobs/_veredicto_test.py jacobs/_devolucion_test.py
           jacobs/_devolucion_ejecutor_test.py
+          tests/test_jacobs_descarte.py
+          tests/test_store_columna_descarte_acotada.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1501,6 +1518,8 @@ jobs:
             jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py \
             jacobs/_veredicto_test.py jacobs/_devolucion_test.py \
             jacobs/_devolucion_ejecutor_test.py \
+            tests/test_jacobs_descarte.py \
+            tests/test_store_columna_descarte_acotada.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -3342,8 +3361,97 @@ jobs:
           #   Conflicto de merge resuelto sumando: este PR y
           #   feat/sobre-fuente-no-confiable movieron el piso desde 2358 cada uno
           #   por su cuenta. Si el runner da otro número, manda el runner.
-          grep -qE "^2399 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2399 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2399 -> 2402 (feat/descartar-pipelines, Task 1, 2026-09-22):
+          #   tests/test_jacobs_descarte.py (+3, archivo nuevo, sin DB) --
+          #   test_los_estados_nuevos_existen y test_descartado_y_oculto_no_ocupan_cupo
+          #   vistos en ROJO contra el codigo viejo (ValueError: 'discarded' is
+          #   not a valid PipelineStatus, luego AttributeError) antes de agregar
+          #   PipelineStatus.discarded/hidden (jacobs/models.py) y sumarlos a
+          #   ESTADOS_SIN_CUPO (jacobs/policy.py); test_el_reaper_solo_cosecha_no_terminales
+          #   es una baranda de regresion (spec Sec.3: el reaper no toca los
+          #   estados nuevos) y YA pasaba contra el codigo viejo -- no hay
+          #   rojo que mostrar para ese caso, es defensivo.
+          # 2402 -> 2409 (feat/descartar-pipelines, Task 1, fix round 1,
+          #   2026-09-22): tests/test_store_columna_descarte_acotada.py (+7,
+          #   archivo nuevo, sin DB) -- cursor falso simulando ER_LOCK_WAIT_TIMEOUT
+          #   (1205) contra _agregar_columna_acotada: acota lock_wait_timeout
+          #   y restaura; FALLA CERRADO (RuntimeError) si vence la espera y la
+          #   columna sigue sin existir; NO falla si otro proceso ya la creó
+          #   (dos servicios llaman a init_tables() al arrancar); otros errores
+          #   (1846, ALGORITHM no soportado) suben directo sin reconsultar.
+          #   Mas dos tests de forma sobre el AST de init_tables() (particion
+          #   exhaustiva columna->acotado: las 3 nuevas del descarte en True,
+          #   las 8 viejas en False). Mutacion verificada a mano (sacar el
+          #   True de status_previo pone el test en rojo), no corrida por CI.
+          # 2409 -> 2413 (feat/descartar-pipelines, Task 2, 2026-09-22):
+          #   +4 en tests/test_jacobs_descarte.py -- las reglas puras de
+          #   jacobs/descarte.py (TRANSICIONES, destino_de): las cuatro
+          #   transiciones permitidas, recuperar vuelve al estado EXACTO
+          #   previo (expired->expired, no aborted), y EstadoPrevioInvalido
+          #   fail-closed para None/""/running/discarded. Vistos en ROJO
+          #   contra el código viejo (ImportError: cannot import name
+          #   'descarte' from 'jacobs') antes de escribir el módulo; verde
+          #   tras -- 7 passed (los 3 de Task 1 + los 4 nuevos).
+          # 2413 -> 2418 (feat/descartar-pipelines, Task 2, fix round 1,
+          #   2026-09-22, Ruling 7, I-1): +5 en tests/test_jacobs_descarte.py --
+          #   descarte.validar_transicion(accion, desde, a), la regla que
+          #   store.pipeline_transicion_descarte tiene que consultar ANTES de
+          #   tocar la base (sin ella, un discard desde running liberaba el
+          #   cupo de un pipeline que seguía corriendo, huérfano para
+          #   siempre): rechaza un `desde` no permitido para la acción,
+          #   rechaza `hide` con `desde` distinto de discarded, exige el
+          #   destino fijo en discard/hide/restore, exige que `a` sea un
+          #   estado previo válido en recover, y confirma que las seis
+          #   transiciones legítimas no levantan. Verde tras -- 12 passed
+          #   (7 anteriores + 5 nuevos).
+          # 2418 -> 2437 (feat/descartar-pipelines, Task 3, 2026-09-22): +19
+          #   en tests/test_jacobs_descarte.py -- rutas de Jacobs
+          #   (jacobs/routes.py): las cuatro rutas LITERALES
+          #   POST /pipeline/{id}/{discard,recover,hide,restore} (Ruling 1
+          #   del controlador: NO la ruta genérica `/{accion}` del brief, que
+          #   dependía del orden de declaración de FastAPI -- cuatro rutas
+          #   explícitas que llaman a la función común `transicion_descarte`
+          #   quitan ese riesgo de raíz) devuelven 200 con el destino, 404 si
+          #   el pipeline no existe, 409 `transicion_no_permitida` si el
+          #   estado actual no admite la acción, 409 `cambio_concurrente` si
+          #   el CAS no escribió (SIN emitir el evento -- mutación "emitir
+          #   antes del CAS" verificada a mano, cae con
+          #   `eventos.assert_not_awaited()`), y 422
+          #   `estado_previo_invalido` si `status_previo` está corrupto
+          #   (Ruling 8: sólo se atrapa `descarte.EstadoPrevioInvalido`, NO
+          #   `TransicionDescarteInvalida` ni `ValueError` genérico -- esas
+          #   son bugs de contrato, 500). `cancel_pipeline` rechaza
+          #   `discarded`/`hidden` con 409 (+ tupla de estados terminales).
+          #   `/continue` ya los rechazaba (ESTADOS_CONTINUABLES es un
+          #   allowlist explícito) -- test de baranda, no hubo cambio de
+          #   código. Evidencia por `TestClient` de que las cuatro rutas
+          #   literales llegan cada una a su propio handler y de que
+          #   `POST /cancel` sigue llegando a `cancel_pipeline` (no a
+          #   `transicion_descarte`). Autenticación (Step 5): `plataforma`
+          #   admite las cuatro rutas nuevas (ya cubierto por su regex
+          #   `/jacobs/.+`, sin cambio de código); `jacobs` NO las admite (su
+          #   único patrón, `POST /jacobs/pipeline`, es un `fullmatch` exacto
+          #   que no matchea `/jacobs/pipeline/p1/discard` -- sin cambio de
+          #   código, test de baranda). Vistos en ROJO contra el código viejo
+          #   (`AttributeError: transicion_descarte`/`pipeline_status_previo`,
+          #   y `test_cancel_rechaza_descartados_y_ocultos` fallando de
+          #   verdad porque cancel_pipeline no rechazaba discarded/hidden)
+          #   antes de escribir `jacobs/routes.py::transicion_descarte` y
+          #   `store.pipeline_status_previo`; verde tras -- 31 passed en el
+          #   archivo (12 anteriores + 19 nuevos). "17 skipped" no cambia.
+          # 2437 -> 2439 (feat/descartar-pipelines, Task 3, fix round 1,
+          #   2026-09-22): +2 en tests/test_jacobs_descarte.py.
+          #   M2 (la revisión encontró que el piso afirmaba "404 si el
+          #   pipeline no existe" sin ningún test): test_pipeline_inexistente_es_404
+          #   -- `pipeline_get` -> None da 404 `pipeline_no_encontrado`. M4:
+          #   `DescarteRequest.user_id` ahora exige `Field(min_length=1)` --
+          #   test_user_id_vacio_es_422 confirma 422 con `user_id=""` y que
+          #   ni `pipeline_get` se llega a tocar (Pydantic valida el cuerpo
+          #   ANTES del handler). Los dos vistos en rojo contra el código
+          #   viejo (sin el chequeo, y sin `min_length`); verde tras -- 33
+          #   passed en el archivo. "17 skipped" no cambia.
+          grep -qE "^2439 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2439 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4159,6 +4267,7 @@ jobs:
           las_manos/_catalog_from_db_test.py
           jacobs/_modelo_real_test.py
           las_manos/_output_validator_db_drift_test.py
+          tests/test_jacobs_descarte_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -4185,6 +4294,7 @@ jobs:
             las_manos/_catalog_from_db_test.py \
             jacobs/_modelo_real_test.py \
             las_manos/_output_validator_db_drift_test.py \
+            tests/test_jacobs_descarte_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -4411,8 +4521,186 @@ jobs:
           # passed, 0 failed, 0 skipped -- corrida completa de los 23 archivos
           # del job, no sólo el tocado. Si el runner da otro número, manda el
           # runner.
-          grep -qE "^125 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 125 tests CORRIDOS."; exit 1; }
+          # 125 -> 129 (feat/descartar-pipelines, Task 1, 2026-09-22, CORREGIDO
+          # en fix round 1): +4 en tests/test_jacobs_descarte_db.py (archivo
+          # nuevo) -- test_columnas_del_descarte_existen y
+          # test_indices_del_descarte_existen contra jacobs_pipelines real:
+          # status_previo/descartado_por/descartado_at (ALTER TABLE ...
+          # ALGORITHM=INSTANT, ahora acotadas y fail-closed via
+          # _agregar_columna_acotada) e idx_pipelines_descartados/
+          # idx_pipelines_ocultos (CREATE INDEX ... ALGORITHM=INPLACE
+          # LOCK=NONE), agregados a jacobs/store.py::init_tables()/_INDICES;
+          # más test_el_reaper_no_toca_un_discarded_stale y
+          # test_el_reaper_no_toca_un_hidden_stale (ReaperNoTocaDescartadosNiOcultosDBTest,
+          # fix round 1 -- comportamiento real, no grep: corren
+          # reaper.reap_orphaned_pipelines() de verdad sobre un discarded y un
+          # hidden con updated_at/created_at 10x más viejo que
+          # RUNNING_STALE_SECONDS, y confirman que ninguno se cosecha).
+          #
+          # La primera vez (127) fue una CUENTA SIN EJECUTAR -- declarada así
+          # explícitamente en el commit original, por la barrera de producción
+          # de esa sesión. Fix round 1 (misma sesión, barrera aclarada por el
+          # coordinador -- Ruling 4: los tests de DB corren, pero SOLO vía
+          # pytest, con `conftest.py` + `base_de_test.fijar_base_de_test()`
+          # forzando la base de test antes de cualquier import; nunca
+          # sourceando /etc/jax/.env en la shell ni consultando MariaDB fuera
+          # de pytest) SÍ corrió este archivo contra MariaDB real
+          # (127.0.0.1:3308, base de sesión jax_memory_test_auto<pid>, nunca
+          # jax_memory): rojo confirmado contra `git show
+          # d7810cc:jacobs/store.py` (KeyError: 'status_previo' /
+          # 'idx_pipelines_descartados'), verde confirmado tras restaurar
+          # `jacobs/store.py` de HEAD -- 4 passed, 0 failed. Ver
+          # task-1-report.md, sección "Fix round 1", para la salida completa.
+          # El piso de ESTE job (129 = 125 + 4) sigue siendo aritmética sobre
+          # el 125 histórico del job completo (23 archivos) -- correr los 4
+          # tests de este archivo solos confirma que ELLOS pasan, no que el
+          # job entero da exactamente 129; no se corrió el job completo por
+          # tiempo. Si el runner da otro número, manda el runner.
+          # 129 -> 134 (feat/descartar-pipelines, Task 2, 2026-09-22): +5 en
+          #   tests/test_jacobs_descarte_db.py (TransicionDescarteCasDBTest)
+          #   -- store.pipeline_transicion_descarte contra MariaDB real
+          #   (127.0.0.1:3308, base de sesión jax_memory_test_auto<pid>):
+          #   discard escribe status+status_previo+descartado_por+
+          #   descartado_at en la MISMA sentencia; época vieja y `desde`
+          #   equivocado NO escriben; recover limpia las tres columnas;
+          #   hide/restore las conservan. Vistos en ROJO contra el código
+          #   viejo (AttributeError: module 'jacobs.store' has no attribute
+          #   'pipeline_transicion_descarte') antes de escribir la función en
+          #   store.py; verde tras -- 9 passed, 0 failed (los 4 de Task 1 +
+          #   los 5 nuevos), corrida vía `python3 -m pytest`, nunca `mysql`
+          #   CLI ni consulta fuera de pytest. Mutación verificada a mano
+          #   (los 3 arreglos del brief, cada uno con su test cayendo y
+          #   revertido): quitar `AND run_epoch=%s` tumba
+          #   test_descartar_con_epoca_vieja_no_escribe; no limpiar
+          #   descartado_por en recover tumba
+          #   test_recuperar_limpia_las_tres_columnas; limpiar status_previo
+          #   en hide tumba test_ocultar_y_restaurar_conservan_las_columnas.
+          #   No corrida por CI (mutación manual, igual criterio que el
+          #   punto anterior de este mismo archivo).
+          # 134 -> 138 (feat/descartar-pipelines, Task 2, fix round 1,
+          #   2026-09-22, Ruling 7, I-1): +4 en tests/test_jacobs_descarte_db.py
+          #   (TransicionDescarteCasDBTest) -- pipeline_transicion_descarte
+          #   ahora valida la transición ANTES de escribir: discard desde
+          #   running levanta descarte.TransicionDescarteInvalida y la fila
+          #   queda intacta (running); hide desde aborted levanta igual (hide
+          #   sólo está permitido desde discarded); recover con un `a` válido
+          #   en general pero que no coincide con el status_previo REAL de la
+          #   fila NO levanta -- devuelve False, no escribe (lo hace cumplir
+          #   el WHERE status_previo=%s, no la validación); ciclo completo de
+          #   expired (M-2) confirma que recover vuelve al estado EXACTO.
+          #   Vistos en ROJO contra el código viejo -- confirmado el bug real
+          #   del hallazgo I-1: discard desde running Y hide desde aborted
+          #   ESCRIBÍAN (2 failed); verde tras el fix -- 13 passed, 0 failed
+          #   (9 anteriores + 4 nuevos). Mutación verificada a mano: quitar
+          #   la llamada a descarte.validar_transicion tumba
+          #   test_descartar_desde_running_rechaza_y_no_escribe y
+          #   test_ocultar_desde_aborted_rechaza_y_no_escribe (2 failed,
+          #   11 passed) -- el test de recover-no-coincide sigue pasando
+          #   porque esa protección vive en el WHERE, no en la validación,
+          #   confirmando que están probando cosas distintas. Revertida.
+          #   No corrida por CI (igual criterio que el punto anterior).
+          # 138 -> 141 (feat/descartar-pipelines, Task 3, 2026-09-22): +3 en
+          #   tests/test_jacobs_descarte_db.py -- store.pipeline_status_previo
+          #   (la que lee la ruta `/recover` de jacobs/routes.py ANTES del
+          #   CAS, para calcular `a`) contra MariaDB real
+          #   (127.0.0.1:3308, base de sesión jax_memory_test_auto<pid>):
+          #   devuelve el `status_previo` real de un descartado, `None` de
+          #   uno que nunca se descartó, y `None` de un pipeline inexistente.
+          #   Vistos en ROJO contra el código viejo (AttributeError: module
+          #   'jacobs.store' has no attribute 'pipeline_status_previo') antes
+          #   de escribir la función en store.py; verde tras -- corrida
+          #   COMPLETA del job (24 archivos, con `las_manos` en PYTHONPATH,
+          #   credenciales SOLO vía `sudo grep JAX_DB_(HOST|PORT|USER|PASSWORD)
+          #   /etc/jax/.env` exportadas en el mismo comando que invoca
+          #   pytest, nunca JAX_DB_NAME ni un `mysql` suelto) -- 141 passed,
+          #   0 failed (138 anteriores + 3 nuevos).
+          # 141 -> 143 (feat/descartar-pipelines, Task 3, fix round 1,
+          #   2026-09-22, Ruling 9): +2 en tests/test_jacobs_descarte_db.py
+          #   (TransicionDescarteAtomicaDBTest) -- el CAS y el INSERT del
+          #   evento de auditoría van en la MISMA transacción
+          #   (`conexion_dedicada(found_rows=True)` + `transaccion()`,
+          #   reutilizados -- no un mecanismo nuevo): si el INSERT del
+          #   evento falla (`store.event_append` mockeado con
+          #   `side_effect=RuntimeError`), la fila queda en su estado
+          #   ORIGINAL (la transacción se descarta con la conexión) y no
+          #   queda ningún evento; una transición exitosa deja EXACTAMENTE
+          #   un evento con el payload `{user_id, desde, a}`. Antes, el
+          #   evento se escribía en una SEGUNDA conexión después del CAS: si
+          #   esa escritura fallaba, la transición quedaba hecha SIN
+          #   auditoría (y en recover/hide/restore el evento es el ÚNICO
+          #   registro de quién la hizo). Visto en ROJO contra la
+          #   implementación de dos conexiones (mutación manual: revertir a
+          #   `_ejecutar_condicional` + `event_append` sin `conexion=conn` --
+          #   `test_si_el_insert_del_evento_falla_el_update_no_queda` cae
+          #   porque el UPDATE queda autocommiteado aunque el evento falle);
+          #   revertida. Verde tras -- 143 passed, 0 failed (141 anteriores
+          #   + 2 nuevos).
+          # 143 (sin cambio) -- feat/descartar-pipelines, Task 3, fix round 2,
+          #   2026-09-22 (MAJOR de la revisión): el mock de
+          #   `test_si_el_insert_del_evento_falla_el_update_no_queda`
+          #   (`side_effect=RuntimeError` SIN mirar sus argumentos) no
+          #   distinguía "el INSERT se intentó en la conexión correcta,
+          #   dentro de la transacción, y falló" de "ni siquiera se llegó a
+          #   intentar" -- seguía en verde aunque alguien sacara
+          #   `conexion=conn`. Reemplazado por un error REAL de MariaDB: el
+          #   `evento_payload` de ese test lleva `float("nan")` -- Python lo
+          #   serializa (`json.dumps` con `allow_nan=True` por default), pero
+          #   la columna `payload JSON` de `jacobs_events` trae un
+          #   `CHECK (JSON_VALID(payload))` automático (MariaDB declara JSON
+          #   como alias de LONGTEXT + ese CHECK **desde 10.4.3** -- CORREGIDO
+          #   en fix round 3: acá decía "10.2.7", que es cuando se agregó el
+          #   TIPO `JSON` como alias, no el CHECK automático, dos años antes)
+          #   y `NaN` no es JSON válido -- confirmado contra la base real
+          #   antes de escribir el test: `(4025, "CONSTRAINT
+          #   \`jacobs_events.payload\` failed ...")`. CERO tests nuevos (se
+          #   reescribió el mismo test, no se agregó otro): el piso se queda
+          #   en 143.
+          #
+          #   CLAIM FALSO EN ESTE PUNTO, CORREGIDO en fix round 3 (la
+          #   revisión lo destapó): acá decía que la mutación de "volver a
+          #   dos conexiones separadas" tumbaba el test "por la razón
+          #   correcta". Es cierto para ESA mutación (revertir TODO el
+          #   mecanismo a `_ejecutar_condicional` + `event_append` sin
+          #   conexión), pero esa no es la mutación mínima real: sólo sacar
+          #   `conexion=conn` de la línea 1722 (dejando `transaccion()` y
+          #   `conexion_dedicada()` como están) hace que el INSERT falle en
+          #   OTRA conexión, la excepción salga igual de
+          #   `async with transaccion(conn):`, y el UPDATE (que en ESE
+          #   momento sigue sin commitear en `conn`) se descarte IGUAL --
+          #   este test queda en VERDE con esa mutación mínima. El test de
+          #   NaN prueba que un fallo del evento deshace la transición
+          #   entera (cierto e importante), pero NO prueba que el INSERT
+          #   haya corrido en la misma conexión que el UPDATE -- esa
+          #   propiedad exige ver a través de la transacción TODAVÍA
+          #   ABIERTA, no sólo que algo falle.
+          # 143 -> 144 (feat/descartar-pipelines, Task 3, fix round 3,
+          #   2026-09-22): +1,
+          #   test_el_evento_no_es_visible_para_otra_conexion_antes_del_commit
+          #   -- prueba de comportamiento, no de propagación de error. Una
+          #   ESPÍA envuelve (llama al original de verdad) `store.event_append`;
+          #   justo después de que el INSERT corrió pero ANTES de que
+          #   `pipeline_transicion_descarte` llegue al `commit()` de
+          #   `transaccion()`, abre una conexión NUEVA del pool y cuenta las
+          #   filas de `jacobs_events` para ese pipeline: tiene que dar 0
+          #   (MVCC: ninguna transacción ve filas sin confirmar de otra,
+          #   nunca, sea cual sea el nivel de aislamiento) -- eso SÓLO es
+          #   posible si el INSERT corrió DENTRO de la transacción abierta
+          #   del UPDATE. También exige que `event_append` haya recibido
+          #   `conexion=` no-None. Después de que la función retorna
+          #   (transacción ya confirmada), exactamente un evento. Mutación
+          #   MÍNIMA verificada de verdad (sacar sólo `conexion=conn` de la
+          #   línea 1722, dejando el resto igual): el test nuevo CAE
+          #   (`AssertionError: unexpectedly None`, porque la espía ve
+          #   `kwargs.get("conexion")` en None -- ni siquiera hace falta
+          #   llegar a la cuenta para atraparlo), mientras que
+          #   `test_si_el_insert_del_evento_falla_la_transicion_se_deshace` y
+          #   `test_transicion_exitosa_deja_exactamente_un_evento_con_el_payload`
+          #   SIGUEN EN VERDE con esa misma mutación mínima -- confirmando
+          #   que ninguno de los dos probaba lo que este nuevo sí prueba.
+          #   Revertida byte a byte. Verde tras -- 144 passed, 0 failed (143
+          #   anteriores + 1 nuevo).
+          grep -qE "^144 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 144 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

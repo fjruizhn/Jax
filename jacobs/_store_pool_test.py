@@ -1220,6 +1220,16 @@ class ExcepcionAlPoolTest(unittest.TestCase):
         # se negocia en el handshake y no se enciende por sesion.
         "jacobs/store.py::_ejecutar_condicional",
         "jacobs/store.py::continuar_transaccion",
+        # pipeline_transicion_descarte (2026-09-22-descartar-pipelines, Task 3,
+        # fix round 1, Ruling 9): CLIENT.FOUND_ROWS -- MISMA razon que las dos
+        # de arriba, el CAS del descarte tambien reescribe status/epoca -- MAS
+        # una transaccion explicita (transaccion()) que necesita mantener la
+        # MISMA conexion abierta para el UPDATE y el INSERT del evento de
+        # auditoria en jacobs_events: si fallaran en dos conexiones separadas,
+        # un evento que no se pudo escribir dejaria la transicion hecha SIN
+        # auditoria (en recover/hide/restore el evento es el UNICO registro
+        # de quien la hizo).
+        "jacobs/store.py::pipeline_transicion_descarte",
     }
 
     CARPETAS = ("jacobs", "las_manos", "jax", "tools")
