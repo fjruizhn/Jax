@@ -3254,7 +3254,7 @@ jobs:
           #   re-revisión de sobre-hallazgos.md): +15, puros. N-1 (MAJOR):
           #   `^`/`$` con re.MULTILINE en Python SÓLO reconocen `\n` -- ni
           #   `\r` solo, `\v`, `\f`, `\x1c`, `\x1d`, `\x1e`, `\x85` (NEL),
-          #   ` ` ni ` `, que `str.splitlines()` SÍ reconoce como
+          #   `\u2028` ni `\u2029`, que `str.splitlines()` SÍ reconoce como
           #   separador de línea (la referencia de qué es "un salto de
           #   línea" para Python es splitlines(), no re.MULTILINE).
           #   `_INICIO_DE_LINEA` reemplaza el `^` desnudo por una
