@@ -3087,8 +3087,47 @@ jobs:
           # (que no reproduce los skipped estructurales del runner). El piso CI
           # se deriva del 2352 medido en master más los tres casos B6; los skipped
           # siguen siendo estructurales.
-          grep -qE "^2358 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2358 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2358 -> 2368 (feat/sobre-fuente-no-confiable, 2026-09-21): +10,
+          #   puros (sin DB, sin red -- las_manos/_tool_authority_test.py y
+          #   las_manos/_worker_tool_loop_test.py YA estaban en las dos listas
+          #   de este job). read_file ahora envuelve el contenido leído en un
+          #   bloque <untrusted_source path="..." sha256="..."> y desactiva
+          #   (espacio de ancho cero, no borrado) los tokens de control de
+          #   plantilla de chat que el archivo pudiera traer -- idea y regex
+          #   tomadas de graphify (Apache 2.0), ver LICENSE-graphify junto a
+          #   tool_authority.py. +9 en las_manos/_tool_authority_test.py: el
+          #   envoltorio con path/sha256, que bytes_read sea el tamaño CRUDO
+          #   (no el envuelto), que el sha256 se calcule sobre el contenido
+          #   ORIGINAL (no el ya defangeado), la neutralización de <|pipe|>,
+          #   de los tokens de Llama 3 (<|start_header_id|>/<|eot_id|>, no
+          #   enumerados -- graphify #3183), de [INST]/[SYSTEM], de una línea
+          #   "### system:" sola, que un cierre </untrusted_source> forjado
+          #   por el propio archivo NO escapa el bloque, y que write_file
+          #   (que no es texto de un tercero) NO se envuelve. +1 en
+          #   las_manos/_worker_tool_loop_test.py: el presupuesto acumulado de
+          #   lectura (MAX_TOTAL_READ_BYTES) cuenta bytes_read (crudo), no el
+          #   tamaño del envoltorio -- si contara el envuelto, 3 lecturas que
+          #   caben cómodas en el presupuesto se cortarían solas por bytes que
+          #   agregó el propio sistema. Dos tests viejos que afirmaban el
+          #   contenido crudo EXACTO del mensaje "tool" (uno en
+          #   _worker_tool_loop_test.py, línea del historial correlacionado;
+          #   otro de read-after-write) se actualizaron para esperar el
+          #   envoltorio -- es la consecuencia directa de este cambio, no una
+          #   regresión. Los 10 vistos ROJOS contra el código de antes de
+          #   este commit. Delta medido con el comando de ESTE job (Python
+          #   3.12, Docker, mismo checkout salvo estos 4 archivos +
+          #   LICENSE-graphify nueva): master 2340 passed -> rama 2348 passed
+          #   (+8 netos: +10 nuevos, -2 de dos tests ajenos --
+          #   test_env_se_lee_con_sudo.py y test_retiro_de_la_voz.py -- que
+          #   fallan SOLO bajo el contenedor de verificación de master, pasan
+          #   solos en ambos checkouts, y no tocan
+          #   read_file/tool_authority/worker; ruido de orden entre tests, no
+          #   de este diff). El total corrido+fallado sí cuadra exacto:
+          #   master 2357 + 10 = 2367 = rama 2367 (19 failed + 2348 passed).
+          #   "17 skipped" NO cambia: ningún archivo nuevo, ninguno de los 10
+          #   toca DB. Si el runner da otro número, manda el runner.
+          grep -qE "^2368 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2368 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

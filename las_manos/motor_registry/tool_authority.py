@@ -39,9 +39,11 @@ En honor al Prof. Raúl Jacobs.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -240,6 +242,64 @@ async def authorize_and_execute_tool_call(
     return await _read_file(job_id=job_id, tool_name=tool_name, caller=caller, resolved=resolved)
 
 
+# --- Sobre fuente no confiable (contenido de read_file) ---
+#
+# Cuando una faceta lee un archivo con read_file, ese contenido entra al
+# contexto de un modelo como resultado de herramienta. Si el archivo es,
+# por ejemplo, el extracto OCR de un documento escaneado de un cliente, ese
+# texto lo controla un tercero -- puede traer algo que PAREZCA una
+# instrucción, y el modelo no tiene forma de distinguirlo de lo que le dijo
+# el operador. _wrap_untrusted_source() rotula el contenido como DATO, no
+# como instrucción (con su sha256, para que un revisor pueda correlacionar
+# un resultado sospechoso con los bytes exactos que lo produjeron), y
+# _neutralize_injection_sentinels() desactiva -- no borra -- cualquier
+# token de control de plantilla de chat que el archivo pudiera traer,
+# incluido un intento de forjar el propio cierre </untrusted_source> para
+# escapar del envoltorio.
+#
+# Idea y regex tomadas de graphify (Apache License 2.0), Graphify-Labs/graphify,
+# graphify/llm.py (rama v8, commit ec12e5e341580eacbd6f15859ecd0260ac85055f,
+# 2026-09-10), funciones _neutralise_injection_sentinels()/_wrap_untrusted()
+# (líneas ~550-600 de ese archivo). Copyright 2026 Safi Shamsi y los
+# contribuyentes de Graphify -- ver LICENSE-graphify, al lado de este archivo.
+#
+# La forma se atrapa, no una lista enumerada: <\|[A-Za-z0-9_.\-]{1,64}\|>
+# en vez de nombrar seis tokens -- el comentario original de graphify
+# (issue #3183) explica por qué: una lista vieja nombraba seis y se le
+# escapaban los de Llama 3 (<|start_header_id|>, <|eot_id|>),
+# <|endofprompt|>, y lo que sea que el próximo template llame a sus turnos.
+_INJECTION_SENTINELS = re.compile(
+    r"</?untrusted_source\b[^>]*>"
+    r"|<\|[A-Za-z0-9_.\-]{1,64}\|>"
+    r"|<<SYS>>|<</SYS>>"
+    r"|\[/?(?:INST|SYSTEM)\]"
+    r"|^\s*###?\s*(?:system|instruction)s?\s*:?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _neutralize_injection_sentinels(text: str) -> str:
+    """Desactiva tokens de control de plantilla de chat conocidos en texto
+    no confiable, insertando un espacio de ancho cero (U+200B) DESPUÉS del
+    primer carácter de cada coincidencia. No se borran: el texto sigue
+    siendo legible para un humano y las posiciones no se corren, pero el
+    token deja de ser reconocible para cualquier parser de plantilla o para
+    un escaneo ingenuo de delimitadores."""
+    return _INJECTION_SENTINELS.sub(lambda m: m.group(0)[0] + "​" + m.group(0)[1:], text)
+
+
+def _wrap_untrusted_source(rel: str, content: str) -> str:
+    """Envuelve el contenido crudo de UN archivo leído en un bloque
+    <untrusted_source>. El sha256 se calcula sobre el contenido ORIGINAL
+    (antes de desactivar nada), para que sea trazable a los bytes reales en
+    disco. Los tokens de control se desactivan ANTES de envolver, así que
+    ni el contenido ni un intento de forjar el delimitador de cierre pueden
+    producir una salida temprana del bloque."""
+    sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    safe = _neutralize_injection_sentinels(content)
+    return f'<untrusted_source path="{rel}" sha256="{sha}">\n{safe}\n</untrusted_source>'
+
+
 async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path) -> dict:
     if not resolved.exists():
         return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="archivo no encontrado")
@@ -269,7 +329,15 @@ async def _read_file(*, job_id: str, tool_name: str, caller: str, resolved: Path
         return await _execution_error(job_id=job_id, tool_name=tool_name, caller=caller, reason="archivo binario -- Fase 2 solo lee texto UTF-8")
 
     logger.info("tool_authority: read_file EJECUTADO job=%s path=%s (%d bytes)", job_id, resolved, size)
-    return {"tool_name": tool_name, "decision": "executed", "reason": None, "content": content}
+    rel = str(resolved.relative_to(WORKSPACE_ROOT))
+    wrapped = _wrap_untrusted_source(rel, content)
+    # bytes_read: tamaño CRUDO leído (== `size`, el stat de arriba), no el
+    # tamaño del envoltorio -- mismo patrón que bytes_written en
+    # _write_file (ver su comentario), puesto ahí a propósito para que
+    # worker.py contabilice el presupuesto acumulado de lectura
+    # (MAX_TOTAL_READ_BYTES) contra lo que el archivo pesa de verdad, no
+    # contra bytes que agregamos nosotros (tags, path, sha256 de 64 hex).
+    return {"tool_name": tool_name, "decision": "executed", "reason": None, "content": wrapped, "bytes_read": size}
 
 
 def _git_commit_write(resolved: Path, *, job_id: str, tool_call_id: str) -> tuple[bool, str | None, str | None]:

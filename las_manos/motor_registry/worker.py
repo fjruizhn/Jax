@@ -1013,8 +1013,16 @@ async def _correr_trabajo(
             iteration_results.append(result)
 
             if result["decision"] == "executed":
-                if name == "read_file" and result.get("content"):
-                    total_read_bytes += len(result["content"].encode("utf-8"))
+                if name == "read_file":
+                    # "content" acá viene envuelto en <untrusted_source>
+                    # (sobre-fuente-no-confiable, ver tool_authority._read_file
+                    # / _wrap_untrusted_source) -- el envoltorio, el path y el
+                    # sha256 son metadata NUESTRA, no el archivo. El tamaño
+                    # real viene de bytes_read, puesto ahí a propósito por
+                    # tool_authority._read_file para no confundir los dos --
+                    # mismo patrón que bytes_written en write_file, dos
+                    # líneas abajo.
+                    total_read_bytes += result.get("bytes_read", 0)
                 elif name == "write_file":
                     # "content" acá es un mensaje de estado ("Escrito: X
                     # bytes"), NO el contenido del archivo -- el tamaño real

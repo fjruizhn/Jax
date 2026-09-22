@@ -340,7 +340,16 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         assert second_messages[1]["tool_calls"][0]["id"] == "call_xyz", second_messages
         assert second_messages[2]["role"] == "tool", second_messages
         assert second_messages[2]["tool_call_id"] == "call_xyz", second_messages
-        assert second_messages[2]["content"] == "contenido de prueba", second_messages
+        # sobre-fuente-no-confiable: lo que el modelo ve de vuelta viene
+        # envuelto en <untrusted_source> (tool_authority._wrap_untrusted_source),
+        # no el contenido crudo.
+        import hashlib
+        sha = hashlib.sha256("contenido de prueba".encode("utf-8")).hexdigest()
+        assert second_messages[2]["content"] == (
+            f'<untrusted_source path="legit.txt" sha256="{sha}">\n'
+            "contenido de prueba"
+            "\n</untrusted_source>"
+        ), second_messages
 
     # --- extra: presupuesto acumulado de bytes leídos ---
     async def test_presupuesto_acumulado_de_lectura_corta_el_bucle(self):
@@ -364,6 +373,32 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         # confirma que los 2 primeros SÍ ejecutaron (180k cada uno, bajo el
         # cap por-llamada) -- el corte es por el acumulado, no por rechazo
         results = [it["results"][0]["decision"] for it in state["_tool_loop_history"]]
+        assert results == ["executed", "executed", "executed"], results
+
+    # --- sobre-fuente-no-confiable: el presupuesto cuenta bytes CRUDOS ---
+    async def test_presupuesto_de_lectura_cuenta_bytes_crudos_no_el_envoltorio(self):
+        """Si el presupuesto contara el tamaño ENVUELTO (con
+        <untrusted_source>, path y sha256 de 64 hex) en vez del crudo
+        (bytes_read), 3 lecturas que caben cómodas en el presupuesto
+        acumulado (499_998 <= 500_000) se cortarían solas por bytes que
+        agregó el propio sistema, no el modelo -- ese es exactamente el
+        defecto que bytes_read existe para evitar."""
+        assert worker.MAX_TOTAL_READ_BYTES == 500_000, "ajustar el fixture si esto cambia"
+        assert tool_authority.MAX_READ_BYTES == 200_000, "ajustar el fixture si esto cambia"
+        chunk_size = 166_666
+        assert 3 * chunk_size <= worker.MAX_TOTAL_READ_BYTES  # el crudo NO corta
+        chunk = "x" * chunk_size
+        for name in ("cruda1.txt", "cruda2.txt", "cruda3.txt"):
+            (self.workspace / name).write_text(chunk)
+        state, mock_post = await self._run([
+            _resp(tool_calls=[_tc("read_file", {"path": "cruda1.txt"}, "c1")], finish_reason="tool_calls"),
+            _resp(tool_calls=[_tc("read_file", {"path": "cruda2.txt"}, "c2")], finish_reason="tool_calls"),
+            _resp(tool_calls=[_tc("read_file", {"path": "cruda3.txt"}, "c3")], finish_reason="tool_calls"),
+            _resp(content="listo, las 3 entraron en el presupuesto", finish_reason="stop"),
+        ])
+        assert state["status"] == "completed", state
+        assert mock_post.await_count == 4, mock_post.await_count  # SÍ llegó al 4to turno
+        results = [it["results"][0]["decision"] for it in state["_tool_loop_history"][:3]]
         assert results == ["executed", "executed", "executed"], results
 
     # --- extra: tool inventada a mitad del bucle ---
@@ -471,7 +506,11 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         assert state["status"] == "completed", state
         read_result = state["_tool_loop_history"][1]["results"][0]
         assert read_result["decision"] == "executed", read_result
-        assert read_result["content"] == "recien escrito", read_result
+        # sobre-fuente-no-confiable: read_file envuelve, no devuelve el
+        # crudo directo -- el texto sigue adentro, legible.
+        assert "recien escrito" in read_result["content"], read_result
+        assert read_result["content"].startswith('<untrusted_source path="nuevo.txt"'), read_result
+        assert read_result["bytes_read"] == len("recien escrito".encode("utf-8")), read_result
 
 
     # --- T2: fail-open de output_validator corregido ---
