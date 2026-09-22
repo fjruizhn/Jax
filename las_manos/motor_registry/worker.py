@@ -1022,7 +1022,20 @@ async def _correr_trabajo(
                     # tool_authority._read_file para no confundir los dos --
                     # mismo patrón que bytes_written en write_file, dos
                     # líneas abajo.
-                    total_read_bytes += result.get("bytes_read", 0)
+                    #
+                    # Default FAIL-CLOSED (hallazgo M-5, 2026-09-21): si
+                    # alguna ruta futura devolviera "executed" sin
+                    # bytes_read, un default de 0 sumaría CERO al
+                    # presupuesto -- el tope dejaría de contar en silencio,
+                    # exactamente lo que P10 prohíbe (ambigüedad = rechazo,
+                    # nunca aprobación implícita). El envoltorio SOLO agrega
+                    # bytes (nunca quita), así que el tamaño de "content" es
+                    # cota SUPERIOR del crudo: como fallback cierra antes de
+                    # tiempo, nunca dejaría pasar de más.
+                    bytes_read = result.get("bytes_read")
+                    if bytes_read is None:
+                        bytes_read = len((result.get("content") or "").encode("utf-8"))
+                    total_read_bytes += bytes_read
                 elif name == "write_file":
                     # "content" acá es un mensaje de estado ("Escrito: X
                     # bytes"), NO el contenido del archivo -- el tamaño real

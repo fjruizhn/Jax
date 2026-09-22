@@ -401,6 +401,28 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         results = [it["results"][0]["decision"] for it in state["_tool_loop_history"][:3]]
         assert results == ["executed", "executed", "executed"], results
 
+    # --- ronda de arreglo (2026-09-21, sobre-hallazgos.md, M-5) ---
+    async def test_presupuesto_bytes_read_ausente_falla_cerrado_no_abierto(self):
+        """M-5: result.get("bytes_read", 0) era fail-OPEN -- si alguna ruta
+        futura devolviera "executed" sin bytes_read (hoy no pasa), el
+        default de 0 sumaría CERO al presupuesto y el tope dejaría de
+        contar en silencio. El fallback correcto cuenta el tamaño de
+        "content" (cota SUPERIOR del crudo, el envoltorio sólo agrega
+        bytes) -- cierra antes de tiempo, nunca deja pasar de más."""
+        fake_result = {
+            "tool_name": "read_file", "decision": "executed", "reason": None,
+            "content": "x" * (worker.MAX_TOTAL_READ_BYTES + 1),
+            # SIN "bytes_read" a propósito -- éste es el caso que se prueba.
+        }
+        with patch.object(worker, "authorize_and_execute_tool_call", AsyncMock(return_value=fake_result)):
+            state, mock_post = await self._run([
+                _resp(tool_calls=[_tc("read_file", {"path": "cualquiera.txt"}, "c1")], finish_reason="tool_calls"),
+                _resp(content="no debería llegar acá", finish_reason="stop"),
+            ])
+        assert state["status"] == "failed", state
+        assert "acumulado" in state["error"], state
+        assert mock_post.await_count == 1, mock_post.await_count  # nunca llegó al 2do turno
+
     # --- extra: tool inventada a mitad del bucle ---
     async def test_tool_inventada_a_mitad_del_bucle_rechaza_y_sigue(self):
         state, _ = await self._run([
@@ -507,9 +529,17 @@ class ToolLoopTest(unittest.IsolatedAsyncioTestCase):
         read_result = state["_tool_loop_history"][1]["results"][0]
         assert read_result["decision"] == "executed", read_result
         # sobre-fuente-no-confiable: read_file envuelve, no devuelve el
-        # crudo directo -- el texto sigue adentro, legible.
-        assert "recien escrito" in read_result["content"], read_result
-        assert read_result["content"].startswith('<untrusted_source path="nuevo.txt"'), read_result
+        # crudo directo -- igualdad exacta contra el envoltorio completo,
+        # mismo criterio que los otros dos tests actualizados por este
+        # cambio (M-7: no aflojar a `in`/`startswith` pudiendo comparar
+        # exacto).
+        import hashlib
+        sha = hashlib.sha256("recien escrito".encode("utf-8")).hexdigest()
+        assert read_result["content"] == (
+            f'<untrusted_source path="nuevo.txt" sha256="{sha}">\n'
+            "recien escrito"
+            "\n</untrusted_source>"
+        ), read_result
         assert read_result["bytes_read"] == len("recien escrito".encode("utf-8")), read_result
 
 

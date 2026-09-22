@@ -3115,19 +3115,83 @@ jobs:
           #   envoltorio -- es la consecuencia directa de este cambio, no una
           #   regresión. Los 10 vistos ROJOS contra el código de antes de
           #   este commit. Delta medido con el comando de ESTE job (Python
-          #   3.12, Docker, mismo checkout salvo estos 4 archivos +
-          #   LICENSE-graphify nueva): master 2340 passed -> rama 2348 passed
-          #   (+8 netos: +10 nuevos, -2 de dos tests ajenos --
-          #   test_env_se_lee_con_sudo.py y test_retiro_de_la_voz.py -- que
-          #   fallan SOLO bajo el contenedor de verificación de master, pasan
-          #   solos en ambos checkouts, y no tocan
-          #   read_file/tool_authority/worker; ruido de orden entre tests, no
-          #   de este diff). El total corrido+fallado sí cuadra exacto:
-          #   master 2357 + 10 = 2367 = rama 2367 (19 failed + 2348 passed).
-          #   "17 skipped" NO cambia: ningún archivo nuevo, ninguno de los 10
+          #   3.12, Docker). CORRECCIÓN (misma ronda, auditoría
+          #   sobre-hallazgos.md M-6): la nota original decía que
+          #   test_env_se_lee_con_sudo.py y test_retiro_de_la_voz.py fallaban
+          #   por "ruido de orden entre tests" -- INVENTADO, nunca verificado
+          #   corriéndolos solos. Medido de nuevo con un checkout LIMPIO
+          #   (`git archive` de la base, sin bind-mount del working copy que
+          #   tenía cruft local): los dos pasan igual de bien que en la rama.
+          #   La causa real del bind-mount sucio eran DOS artefactos locales
+          #   de esta máquina, ninguno rastreado por git: `jax/voice/
+          #   __pycache__/` (bytecode viejo de antes del retiro de la voz,
+          #   2026-09-17) y `.superpowers/sdd/2026-09-14-.../task-11-brief.md`
+          #   (una minuta vieja que sourcea /etc/jax/.env sin sudo). Con los
+          #   DOS checkouts limpios (`git archive` a un directorio nuevo, sin
+          #   .git) el CONJUNTO de falllos es IDÉNTICO en master y en la
+          #   rama -- 19, los mismos 19 nombres, todos ajenos a este diff
+          #   (facet_health_tabla_exclusiva, espejos_symlink_frente_e,
+          #   config_entorno, conftest_aisla_facet_seal,
+          #   interruptor_sin_rutas_fijas x4 -- éste solo por faltar el árbol
+          #   .git completo en el export, no aplica al runner real con
+          #   actions/checkout -- y base_por_sesion x7): master 2338 passed
+          #   -> rama 2355 passed, delta exacto +17, igual a
+          #   26->41 en _tool_authority_test.py (+15, no +9: hubo una
+          #   segunda ronda, ver la entrada de abajo) más 24->26 en
+          #   _worker_tool_loop_test.py. "17 skipped" no cambia.
+          # 2368 -> 2375 (feat/sobre-fuente-no-confiable, ronda de arreglo
+          #   2026-09-21, sobre-hallazgos.md): +7, puros. C-1 (CRÍTICO):
+          #   [^>]* en el regex de untrusted_source era codicioso hasta el
+          #   primer '>' -- una apertura <untrusted_source SIN cerrar se
+          #   tragaba el '>' de un cierre forjado que viniera después en la
+          #   MISMA coincidencia, dejándolo intacto adentro. [^<>]* no cruza
+          #   hacia otro '<...>': el cierre forjado pasa a matchear SOLO, se
+          #   neutraliza de verdad. +1 test con las 3 cargas confirmadas por
+          #   el auditor. C-2 (CRÍTICO): el `path` se interpolaba crudo en el
+          #   atributo -- el jail permite '<', '>' y '"' en un nombre de
+          #   archivo (legales en Linux), y un archivo como
+          #   'factura></untrusted_source>.txt' (que el propio modelo del
+          #   bucle puede crear con write_file) cerraba el bloque en el
+          #   ENCABEZADO, antes del contenido. _escape_attr() escapa
+          #   &/</>/" -- +1 test. I-3 (IMPORTANTE): la sustitución insertaba
+          #   el espacio de ancho cero en el primer carácter del match
+          #   completo, no en el primer carácter SIGNIFICATIVO -- con dos o
+          #   más párrafos en blanco (o un párrafo en blanco MÁS
+          #   indentación) antes de "### system:", el espacio de ancho cero
+          #   caía lejos del '#' y el marcador quedaba intacto y
+          #   reconocible. La sustitución ahora salta los espacios/tabs/
+          #   saltos de línea de indentación antes de insertar -- +2 tests
+          #   (con la carga débil de un solo párrafo en blanco el defecto NO
+          #   se reproduce, así que los tests usan dos párrafos en blanco y
+          #   un párrafo en blanco + indentación, las cargas que sí lo
+          #   reproducen, verificado a mano antes de escribirlas). I-4: no es
+          #   un defecto de código -- re.IGNORECASE ya estaba puesto pero
+          #   ningún test usaba una variante en mayúsculas, y ningún test
+          #   ejercitaba un cierre forjado CON atributos falsos (dejaba
+          #   sobrevivir la mutación de sacar la tolerancia a atributos) --
+          #   +2 tests que cierran ambos huecos, sin tocar producción. M-5:
+          #   result.get("bytes_read", 0) en worker.py era fail-OPEN -- un
+          #   0 por defecto deja de contar en silencio si alguna ruta futura
+          #   devolviera "executed" sin bytes_read. Fallback fail-closed:
+          #   cuenta el tamaño de "content" (cota superior del crudo, el
+          #   envoltorio sólo agrega bytes) -- +1 test con
+          #   authorize_and_execute_tool_call mockeado sin bytes_read. M-7:
+          #   una aserción en _worker_tool_loop_test.py había quedado con
+          #   in/startswith pudiendo ser igualdad exacta como las otras dos
+          #   -- sin test nuevo (es un tightening de una aserción existente,
+          #   no agrega un caso), verificado por mutación (sha256 truncado a
+          #   propósito: con la aserción vieja daba VERDE, con la nueva da
+          #   ROJO). Los 7 vistos ROJOS contra el código de antes de este
+          #   commit. Delta INCREMENTAL sobre la entrada anterior de esta
+          #   MISMA rama (+10, piso ya en 2368): +7 más. Total sobre el
+          #   master original (2358): 41+26=67 tests en los dos archivos
+          #   contra los 26+24=50 de master, +17 -- mismo número que la
+          #   entrada de arriba ya corrigió y verificó con DOS checkouts
+          #   limpios (`git archive`, sin bind-mount): master 2338 passed ->
+          #   rama 2355 passed. "17 skipped" no cambia: ninguno de los 7
           #   toca DB. Si el runner da otro número, manda el runner.
-          grep -qE "^2368 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2368 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          grep -qE "^2375 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2375 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
