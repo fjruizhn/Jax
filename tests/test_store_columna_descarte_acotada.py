@@ -70,14 +70,23 @@ class _CursorFalso:
     """Registra cada execute; el ALTER puede fallar con el error que se
     pida, y la reconsulta de information_schema.COLUMNS devuelve lo que se
     pida (para simular la carrera entre dos procesos que arrancan a la
-    vez)."""
+    vez).
+
+    `expresion_generada` (fix round 3, 2026-09-22): lo que devuelve la
+    reconsulta de `GENERATION_EXPRESSION` cuando `_agregar_columna_acotada`
+    pierde la carrera del 1205 para `columna="visible"` y llama a
+    `store._verificar_expresion_visible`. Default: la expresión esperada
+    (`store._EXPRESION_VISIBLE`) -- el caso feliz, "otro proceso ganó Y
+    creó lo mismo que yo hubiera creado"."""
 
     def __init__(self, previo: int = 86400, error_ddl: Exception | None = None,
-                 existe_tras_el_error: bool = False):
+                 existe_tras_el_error: bool = False,
+                 expresion_generada: str | None = "__default__"):
         self.ejecutados: list[tuple[str, tuple | None]] = []
         self.previo = previo
         self.error_ddl = error_ddl
         self.existe_tras_el_error = existe_tras_el_error
+        self.expresion_generada = expresion_generada
         self._ultimo = None
 
     async def execute(self, sql, args=None):
@@ -91,6 +100,9 @@ class _CursorFalso:
             return (self.previo,)
         if self._ultimo and self._ultimo.startswith("SELECT COUNT(*) FROM information_schema.COLUMNS"):
             return (1 if self.existe_tras_el_error else 0,)
+        if self._ultimo and self._ultimo.startswith("SELECT GENERATION_EXPRESSION"):
+            expr = self.expresion_generada
+            return (store._EXPRESION_VISIBLE if expr == "__default__" else expr,)
         return (0,)
 
 
@@ -149,6 +161,56 @@ class EsperaAcotadaFallaCerradoTest(unittest.IsolatedAsyncioTestCase):
             sqls,
         )
         self.assertEqual(cur.ejecutados[-1], ("SET SESSION lock_wait_timeout=%s", (50,)))
+
+
+class CarreraDeVisibleLlamaAlDriftCheckTest(unittest.IsolatedAsyncioTestCase):
+    """Fix round 3 (revisión del coordinador, 2026-09-22): "otro proceso la
+    creó primero" (1205 + existe_tras_el_error=True) es correcto SÓLO si
+    creó la MISMA columna -- para `visible` (GENERADA) eso incluye la
+    expresión. `_agregar_columna_acotada` ahora llama a
+    `store._verificar_expresion_visible` antes de devolver en esa rama,
+    pero SÓLO para `columna="visible"` -- las otras tres columnas CONTRATO
+    (status_previo/descartado_por/descartado_at) no son generadas y no
+    tienen que pagar esta consulta extra (verificado con `_COLUMNA` de
+    arriba, "status_previo", en `EsperaAcotadaFallaCerradoTest` de arriba:
+    ese cursor falso nunca ve un `SELECT GENERATION_EXPRESSION`)."""
+
+    _DDL_VISIBLE = ("ALTER TABLE jacobs_pipelines ADD COLUMN "
+                     "visible TINYINT(1) GENERATED ALWAYS AS "
+                     "(status NOT IN ('discarded','hidden') "
+                     "AND owner_ack_at IS NOT NULL) VIRTUAL, "
+                     "ALGORITHM=INSTANT")
+
+    async def test_otro_proceso_creo_la_misma_expresion_no_es_fallo(self):
+        cur = _CursorFalso(previo=50, error_ddl=aiomysql.OperationalError(
+            1205, "Lock wait timeout exceeded; try restarting transaction"),
+            existe_tras_el_error=True)  # expresion_generada default: la esperada
+        await store._agregar_columna_acotada(cur, _TABLA, "visible", self._DDL_VISIBLE)
+        sqls = [s for s, _a in cur.ejecutados]
+        self.assertTrue(any(s.startswith("SELECT GENERATION_EXPRESSION") for s in sqls))
+
+    async def test_otro_proceso_creo_una_expresion_distinta_SI_es_fallo(self):
+        """El caso que este fix round cierra: sin la llamada al drift
+        check, esta rama devolvía en silencio aunque la columna que "ganó
+        la carrera" tuviera la expresión VIEJA."""
+        cur = _CursorFalso(previo=50, error_ddl=aiomysql.OperationalError(
+            1205, "Lock wait timeout exceeded; try restarting transaction"),
+            existe_tras_el_error=True,
+            expresion_generada="`status` not in ('discarded','hidden')")  # vieja, sin ack
+        with self.assertRaises(RuntimeError) as ctx:
+            await store._agregar_columna_acotada(cur, _TABLA, "visible", self._DDL_VISIBLE)
+        self.assertIn("expresión DISTINTA", str(ctx.exception))
+
+    async def test_columnas_no_generadas_no_pagan_esta_consulta_extra(self):
+        """Control: `status_previo` (CONTRATO pero no generada) pierde la
+        misma carrera y NO dispara `SELECT GENERATION_EXPRESSION` -- el
+        chequeo es específico de `visible`."""
+        cur = _CursorFalso(previo=50, error_ddl=aiomysql.OperationalError(
+            1205, "Lock wait timeout exceeded; try restarting transaction"),
+            existe_tras_el_error=True)
+        await store._agregar_columna_acotada(cur, _TABLA, _COLUMNA, _DDL)
+        sqls = [s for s, _a in cur.ejecutados]
+        self.assertFalse(any(s.startswith("SELECT GENERATION_EXPRESSION") for s in sqls))
 
 
 def _tuplas_del_loop_de_columnas() -> list[tuple[str, str, bool]]:

@@ -3515,8 +3515,26 @@ jobs:
           #   cambio), 3 xfailed. Delta sobre la corrida anterior de este
           #   mismo fix round (2455 -> 2459): +4, exacto a los 4 tests
           #   nuevos de este archivo.
-          grep -qE "^2444 passed, 19 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2444 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 de Ruling 19e sin JAX_DB_HOST en este job)."; exit 1; }
+          # 2444 -> 2447 (Task 1-bis, fix round 3, 2026-09-22, MINOR de la
+          #   re-review): +3 en tests/test_store_columna_descarte_acotada.py,
+          #   puros -- CarreraDeVisibleLlamaAlDriftCheckTest: cuando
+          #   `_agregar_columna_acotada` pierde la carrera del 1205 para
+          #   `columna="visible"`, ahora llama al drift check antes de
+          #   devolver -- "otro proceso ganó" deja de ser sinónimo de "está
+          #   bien" si lo que ganó tiene una expresión distinta.
+          #   test_otro_proceso_creo_la_misma_expresion_no_es_fallo (control
+          #   positivo, con `_CursorFalso` extendido con
+          #   `expresion_generada`); test_otro_proceso_creo_una_expresion_distinta_SI_es_fallo
+          #   (el caso que este fix cierra); y
+          #   test_columnas_no_generadas_no_pagan_esta_consulta_extra
+          #   (`status_previo` pierde la misma carrera y NUNCA dispara
+          #   `SELECT GENERATION_EXPRESSION` -- el chequeo es específico de
+          #   `visible`). "19 skipped" no cambia. Medido: local sin
+          #   `JAX_DB_HOST`, 165 archivos: 2462 passed (delta +3 sobre la
+          #   corrida anterior de este fix round, 2459 -> 2462, exacto),
+          #   2 skipped, 3 xfailed.
+          grep -qE "^2447 passed, 19 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2447 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 de Ruling 19e sin JAX_DB_HOST en este job)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4912,8 +4930,38 @@ jobs:
           #   nuevos). Medido en local (127.0.0.1:3308, base de sesión
           #   jax_memory_test_auto<pid>), corrida completa de los 24
           #   archivos + 2 node ID del job: 166 passed, 0 failed.
-          grep -qE "^166 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 166 tests CORRIDOS."; exit 1; }
+          # 166 -> 167 (Task 1-bis, fix round 3, 2026-09-22, MINOR de la
+          #   re-review): +1 en tests/test_jacobs_descarte_db.py --
+          #   DriftDeExpresionVisibleDBTest::test_visible_no_generada_frena_init_tables.
+          #   El caso que MINOR-A (fix round 2) dejaba pasar: `visible`
+          #   existe pero NO es GENERATED en absoluto
+          #   (GENERATION_EXPRESSION es NULL, p.ej. alguien la creó a mano
+          #   como `visible TINYINT(1) DEFAULT 1`) -- el código viejo
+          #   trataba "fila con NULL" igual que "sin fila" (columna
+          #   inexistente) y devolvía en silencio: fail-OPEN, cada fila
+          #   leería visible=1 sin importar status/owner_ack_at.
+          #   `_verificar_expresion_visible` ahora distingue los dos casos:
+          #   sin fila -> return (la columna no existe, la crea el ALTER de
+          #   arriba); fila con NULL -> RuntimeError explícito ("no es una
+          #   columna generada"). Se crea a mano contra la base de TEST
+          #   (`ALTER TABLE ... ADD COLUMN visible TINYINT(1) DEFAULT 1`,
+          #   sin GENERATED), nunca revirtiendo store.py. Vista en ROJO
+          #   contra el código viejo (mutación con `unittest.mock.patch.object`
+          #   reemplazando `_verificar_expresion_visible` por la versión
+          #   con el `return` viejo, no revirtiendo el archivo): el test
+          #   cae con "RuntimeError not raised". También se blindó
+          #   `_agregar_columna_acotada`: cuando pierde la carrera del 1205
+          #   y `columna="visible"`, ahora llama al MISMO drift check antes
+          #   de devolver (antes esa rama devolvía en silencio sin mirar
+          #   la expresión de la columna que "ganó" la carrera) -- pruebas
+          #   puras nuevas en tests/test_store_columna_descarte_acotada.py
+          #   (ver el piso de tests-puros).
+          #   Verde tras -- 167 passed, 0 failed (166 anteriores + 1
+          #   nuevo). Medido en local (127.0.0.1:3308, base de sesión
+          #   jax_memory_test_auto<pid>), corrida completa de los 24
+          #   archivos + 2 node ID del job: 167 passed, 0 failed.
+          grep -qE "^167 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 167 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

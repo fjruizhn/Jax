@@ -1149,8 +1149,39 @@ async def _verificar_expresion_visible(cur) -> None:
         "AND COLUMN_NAME='visible'"
     )
     fila = await cur.fetchone()
-    if not fila or fila[0] is None:
-        return  # el llamador ya confirmó que la columna existe; esto es defensivo, no el chequeo que decide eso
+    if not fila:
+        # Sin fila: la columna NO existe todavía -- no es este chequeo el
+        # que decide eso (lo maneja el ALTER que la crea, más arriba en el
+        # loop de columnas); es defensivo, el llamador ya confirmó "existe".
+        return
+    if fila[0] is None:
+        # Fix round 3 (revisión del coordinador, 2026-09-22): `fila` existe
+        # pero `GENERATION_EXPRESSION` es NULL -- eso significa que
+        # 'visible' SÍ existe como columna, pero NO es GENERATED (p.ej.
+        # alguien la creó a mano como `visible TINYINT(1) DEFAULT 1`, una
+        # columna común). El código viejo trataba esto igual que "no hay
+        # fila" y devolvía en silencio -- fail-OPEN: con una columna común
+        # en vez de generada, CADA fila lee `visible=1` sin importar su
+        # `status`/`owner_ack_at`, el costo sin techo exacto que Ruling 18
+        # quería evitar (ninguna fila queda nunca afuera del rango del
+        # índice). FALLA CERRADO acá también -- mismo criterio que la
+        # rama de abajo (expresión distinta): no hay DDL automático,
+        # 'visible' está INDEXADA y un ALTER sobre una columna VIRTUAL
+        # indexada cae en la misma trampa del 1845/1846 de Ruling 19b.
+        raise RuntimeError(
+            "jacobs_pipelines.visible existe pero no es una columna "
+            "generada (GENERATION_EXPRESSION es NULL) -- init_tables() se "
+            "aborta (fail-closed, contrato de Ruling 18/19a). Con una "
+            "columna COMÚN en vez de GENERATED, todas las filas leerían "
+            "visible=1 sin importar su status/owner_ack_at -- exactamente "
+            "el costo sin techo que Ruling 18 quería evitar. NO se corrige "
+            "solo: 'visible' está INDEXADA (idx_pipelines_visibles) y un "
+            "ALTER sobre una columna VIRTUAL indexada cae en la misma "
+            "trampa del 1845/1846 de Ruling 19b -- hay que decidir a mano "
+            "(DROP INDEX idx_pipelines_visibles, DROP COLUMN visible, y "
+            "recrear los dos con el DDL de esta versión) antes de que este "
+            "proceso pueda arrancar contra esta base."
+        )
     encontrada = _normalizar_expresion_generada(fila[0])
     esperada = _normalizar_expresion_generada(_EXPRESION_VISIBLE)
     if encontrada != esperada:
@@ -1220,6 +1251,16 @@ async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> N
                 "metadata lock mientras este esperaba %d s. No es un fallo.",
                 tabla, columna, _LOCK_WAIT_DDL_SEGUNDOS,
             )
+            # Fix round 3 (revisión del coordinador, 2026-09-22): "otro
+            # proceso la creó primero" es correcto SÓLO si creó la MISMA
+            # columna -- para 'visible' (GENERATED) eso incluye que haya
+            # usado la expresión de ESTA versión del código, no cualquier
+            # cosa. Mismo chequeo de drift que la rama feliz (exists=True
+            # sin pasar por acá): sin esto, la carrera del metadata lock
+            # sería un segundo camino que se salta el fail-closed de
+            # Ruling 18/19a/fix-round-3.
+            if columna == "visible":
+                await _verificar_expresion_visible(cur)
             return
         raise RuntimeError(
             f"init_tables: no se pudo agregar {tabla}.{columna} -- otra "

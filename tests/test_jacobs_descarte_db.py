@@ -412,6 +412,38 @@ class DriftDeExpresionVisibleDBTest(unittest.IsolatedAsyncioTestCase):
                     )
             await store.init_tables()
 
+    async def test_visible_no_generada_frena_init_tables(self):
+        """Fix round 3 (revisión del coordinador, 2026-09-22): distinto del
+        caso de arriba -- acá `visible` existe pero NO es GENERATED en
+        absoluto (`GENERATION_EXPRESSION` es NULL). El código viejo
+        trataba "fila con NULL" igual que "sin fila" (columna inexistente)
+        y devolvía en silencio -- fail-OPEN: con una columna COMÚN en vez
+        de generada, TODAS las filas leerían visible=1 sin importar su
+        status/owner_ack_at. Se crea a mano contra la base de TEST --
+        nunca revirtiendo store.py -- para simular ese error operativo."""
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "ALTER TABLE jacobs_pipelines DROP INDEX idx_pipelines_visibles, "
+                    "DROP COLUMN visible, ALGORITHM=COPY"
+                )
+                await cur.execute(
+                    "ALTER TABLE jacobs_pipelines ADD COLUMN visible TINYINT(1) "
+                    "DEFAULT 1, ALGORITHM=INSTANT"
+                )
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                await store.init_tables()
+            mensaje = str(ctx.exception)
+            self.assertIn("no es una columna generada", mensaje)
+        finally:
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "ALTER TABLE jacobs_pipelines DROP COLUMN visible, ALGORITHM=COPY"
+                    )
+            await store.init_tables()
+
     async def test_normalizar_no_da_falsa_alarma_con_lo_que_devuelve_mariadb(self):
         """La forma REAL que guarda MariaDB (con backticks y minúsculas,
         distinta carácter por carácter del DDL fuente) no puede disparar el
