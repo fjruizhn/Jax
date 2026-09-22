@@ -31,7 +31,10 @@ from __future__ import annotations
 import asyncio
 import os
 import logging
+from typing import Awaitable, Callable
 
+from jax.memory.b9 import MutationAuthorizationContext, Visibility
+from jax.memory.b9_mariadb import PersistentMemoryAPI
 from jax.memory.db import MemoryDB
 from jax.memory.worker import (
     FORBIDDEN_CATEGORIES_BLOCK,
@@ -46,6 +49,22 @@ logging.basicConfig(
     format="%(asctime)s [synthesis] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("jax.memory.synthesis_worker")
+
+
+class PersistentSynthesisWriter:
+    """B9-only synthesis sink with externally resolved worker authority."""
+    def __init__(self, api: PersistentMemoryAPI,
+                 resolve_auth: Callable[[int | None, int | None, str, Visibility], Awaitable[MutationAuthorizationContext]]):
+        self._api = api
+        self._resolve_auth = resolve_auth
+
+    async def persist(self, user_id: int | None, project_id: int | None, content: str,
+                      source_revision_ids: tuple[str, ...]) -> str:
+        auth = await self._resolve_auth(user_id, project_id, "SYNTHESIZE", Visibility.SYSTEM_INTERNAL)
+        return await self._api.synthesize_memory(
+            auth, content, source_revision_ids, provider="deepseek", model="deepseek-v4-flash",
+            transformation_version="b9-worker-v1",
+        )
 
 
 # Scope minimo para que valga la pena buscar patrones. Menos que esto y no
@@ -112,7 +131,8 @@ async def build_synthesizer() -> HttpMuscle:
 
 
 async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
-                        user_id: int | None, project_id: int | None) -> int:
+                        user_id: int | None, project_id: int | None,
+                        *, b9_writer: PersistentSynthesisWriter | None = None) -> int:
     """Procesa UN scope (user_id, project_id). Devuelve cuantos insights guardo."""
     facts = await db.get_facts(only_unverified=False, only_verified=True,
                                limit=50, user_id=user_id, project_id=project_id)
@@ -144,12 +164,23 @@ async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
         # Solo se guardan los ids que realmente vinieron en la entrada — un
         # id inventado por el LLM (alucinado) se descarta, no rompe el save.
         source_ids = [i for i in insight.get("source_ids", []) if i in valid_ids]
-        saved = await db.save_fact(
-            insight["text"], insight.get("type", "user"),
-            source_facet="synthesis",
-            user_id=user_id, project_id=project_id,
-            source_fact_ids=source_ids or None,
-        )
+        if b9_writer:
+            source_revision_ids = tuple(
+                str(f["b9_revision_id"]) for f in facts if f["id"] in source_ids and f.get("b9_revision_id")
+            )
+            # B9 synthesis requires exact B9 revision lineage.  Do not turn a
+            # legacy integer id into provenance or silently use raw facts.
+            if len(source_revision_ids) != len(source_ids) or len(source_revision_ids) < 2:
+                logger.error("scope user=%s project=%s: B9 lineage unavailable; synthesis skipped", user_id, project_id)
+                continue
+            saved = await b9_writer.persist(user_id, project_id, insight["text"], source_revision_ids)
+        else:
+            saved = await db.save_fact(
+                insight["text"], insight.get("type", "user"),
+                source_facet="synthesis",
+                user_id=user_id, project_id=project_id,
+                source_fact_ids=source_ids or None,
+            )
         if saved:
             n_saved += 1
 
@@ -159,7 +190,7 @@ async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
     return n_saved
 
 
-async def run_once() -> None:
+async def run_once(*, b9_writer: PersistentSynthesisWriter | None = None) -> None:
     """Una corrida del sintetizador: recorre todos los scopes con suficientes
     facts verificados y busca insights en cada uno."""
     jax_db_host = os.environ.get("JAX_DB_HOST")
@@ -191,7 +222,7 @@ async def run_once() -> None:
         synthesizer = await build_synthesizer()
         total = 0
         for scope in scopes:
-            total += await process_scope(db, synthesizer, scope["user_id"], scope["project_id"])
+            total += await process_scope(db, synthesizer, scope["user_id"], scope["project_id"], b9_writer=b9_writer)
         logger.info(f"Corrida terminada: {total} insight(s) nuevo(s) en total.")
     finally:
         await db.close()

@@ -22,10 +22,13 @@ import argparse
 import json
 import logging
 import os
+from typing import Awaitable, Callable
 
 import aiomysql
 
 from jax.memory.db import MemoryDB, _col, _zero_embedding_sql
+from jax.memory.b9 import EmbeddingSpaceIdentity, MutationAuthorizationContext, Visibility
+from jax.memory.b9_mariadb import PersistentMemoryAPI
 from jax.core.cliente_http_compartido import cerrar_cliente_http
 from jax.core.db_connect_config import db_connect_timeout_seconds
 
@@ -36,6 +39,19 @@ logging.basicConfig(
 logger = logging.getLogger("jax.memory.embedding_worker")
 
 BATCH_SIZE = 50
+
+
+class PersistentEmbeddingWriter:
+    """Dedicated B9 embedding sink; authority comes from composition only."""
+    def __init__(self, api: PersistentMemoryAPI,
+                 resolve_auth: Callable[[str, str, Visibility], Awaitable[MutationAuthorizationContext]]):
+        self._api = api
+        self._resolve_auth = resolve_auth
+
+    async def persist(self, memory_id: str, identity: EmbeddingSpaceIdentity,
+                      vector: tuple[float, ...], visibility: Visibility) -> str:
+        auth = await self._resolve_auth(memory_id, "RE_EMBED", visibility)
+        return await self._api.reembed_memory(auth, memory_id, identity, vector)
 
 
 async def run_b9_vector_health() -> int:

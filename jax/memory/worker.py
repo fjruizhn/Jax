@@ -31,7 +31,10 @@ import asyncio
 import json
 import os
 import logging
+from typing import Awaitable, Callable
 
+from jax.memory.b9 import MutationAuthorizationContext, ObjectKind, Visibility
+from jax.memory.b9_mariadb import PersistentMemoryAPI
 from jax.memory.db import EMBED, MemoryDB
 from jax.core.registro_facetas import url_del_proveedor
 from jax.core.cliente_http_compartido import cerrar_cliente_http
@@ -42,6 +45,30 @@ logging.basicConfig(
     format="%(asctime)s [worker] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("jax.memory.worker")
+
+
+class PersistentExtractionWriter:
+    """Composition seam for extraction output.
+
+    The resolver callback belongs to an authenticated composition layer.  It
+    returns an already-resolved context for each item; this worker never
+    derives tenant, membership, reviewer status, or delegation from a legacy
+    conversation row.
+    """
+    def __init__(self, api: PersistentMemoryAPI,
+                 resolve_auth: Callable[[dict, str, Visibility], Awaitable[MutationAuthorizationContext]]):
+        self._api = api
+        self._resolve_auth = resolve_auth
+
+    async def persist(self, conversation: dict, kind: ObjectKind, content: str) -> str:
+        visibility = Visibility.PROJECT_SHARED if conversation.get("project_id") else Visibility.USER_PRIVATE
+        auth = await self._resolve_auth(conversation, "CREATE", visibility)
+        return await self._api.create_memory(
+            auth, kind, content, visibility,
+            user_id=auth.scope.subject_user_id if visibility is Visibility.USER_PRIVATE else None,
+            project_id=auth.scope.project_id if visibility is Visibility.PROJECT_SHARED else None,
+            transformation_id="conversation-extraction", provider="deepseek", model="deepseek-v4-flash",
+        )
 
 
 # Bloque de categorias prohibidas — compartido entre el extractor (worker.py)
@@ -225,7 +252,8 @@ def _build_verify_correction_fn(extractor: HttpMuscle):
     return verify
 
 
-async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
+async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict,
+                      *, b9_writer: PersistentExtractionWriter | None = None) -> bool:
     """Procesa UNA conversacion. Devuelve True si la marco procesada."""
     conv_id = conv["id"]
     messages = await db.get_conversation_messages(conv_id)
@@ -276,25 +304,40 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict) -> bool:
     n_facts = n_dec = n_act = 0
     for f in data.get("facts", []):
         if f.get("text"):
-            saved = await db.save_fact(f["text"], f.get("type", "user"),
-                                       source_facet="extractor",
-                                       user_id=conv_user, project_id=conv_proj,
-                                       is_correction=bool(f.get("is_correction", False)),
-                                       verify_correction_fn=verify_correction_fn,
-                                       importance=f.get("importance"))
+            if b9_writer:
+                # Any failure leaves the conversation unprocessed, so the
+                # caller sees it rather than silently falling back to raw DB.
+                await b9_writer.persist(conv, ObjectKind.FACT, f["text"])
+                saved = True
+            else:
+                saved = await db.save_fact(f["text"], f.get("type", "user"),
+                                           source_facet="extractor",
+                                           user_id=conv_user, project_id=conv_proj,
+                                           is_correction=bool(f.get("is_correction", False)),
+                                           verify_correction_fn=verify_correction_fn,
+                                           importance=f.get("importance"))
             if saved:
                 n_facts += 1
     for d in data.get("decisions", []):
         if d.get("title") and d.get("chosen"):
-            await db.save_decision(d["title"], d["chosen"],
-                                   d.get("reasoning", ""),
-                                   user_id=conv_user, project_id=conv_proj)
+            if b9_writer:
+                await b9_writer.persist(
+                    conv, ObjectKind.DECISION_MEMORY,
+                    f"{d['title']}\nChosen: {d['chosen']}\nReasoning: {d.get('reasoning', '')}",
+                )
+            else:
+                await db.save_decision(d["title"], d["chosen"],
+                                       d.get("reasoning", ""),
+                                       user_id=conv_user, project_id=conv_proj)
             n_dec += 1
     for a in data.get("action_items", []):
         if a.get("description"):
-            await db.save_action_item(a["description"], a.get("due_date"),
-                                      source_conversation_id=conv_id,
-                                      user_id=conv_user, project_id=conv_proj)
+            if b9_writer:
+                await b9_writer.persist(conv, ObjectKind.ACTION_ITEM, a["description"])
+            else:
+                await db.save_action_item(a["description"], a.get("due_date"),
+                                          source_conversation_id=conv_id,
+                                          user_id=conv_user, project_id=conv_proj)
             n_act += 1
 
     await db.mark_processed(conv_id)
@@ -363,7 +406,7 @@ async def _recalcular_embeddings_en_ceros(db: MemoryDB) -> None:
             logger.info(f"embeddings en ceros ({tabla}): {r}")
 
 
-async def run_once(limit: int = 10) -> None:
+async def run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | None = None) -> None:
     """Una corrida de extracción, propiedad exclusiva del timer systemd.
 
     El trabajo de embeddings es otra clase de trabajo y pertenece únicamente
@@ -396,7 +439,7 @@ async def run_once(limit: int = 10) -> None:
         logger.info(f"Procesando {len(pendientes)} conversacion(es)...")
         extractor = await build_extractor()
         for conv in pendientes:
-            await process_one(db, extractor, conv)
+            await process_one(db, extractor, conv, b9_writer=b9_writer)
     finally:
         await db.close()
         await cerrar_cliente_http()
