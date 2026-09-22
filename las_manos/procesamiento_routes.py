@@ -253,16 +253,23 @@ def _codificable_utf8(s: str) -> bool:
         return False
 
 
+def _saneado_ascii(s: str) -> str:
+    """`backslashreplace` produce texto ASCII puro -- SIEMPRE codificable
+    a UTF-8, sin excepción posible. Usado tanto del lado de ESCRITURA
+    (`_resultado_no_codificable`, N-2) como del lado de LECTURA
+    (`_leer_resultados_de_disco`, MINOR-C, ronda 4)."""
+    return s.encode("utf-8", errors="backslashreplace").decode("ascii")
+
+
 def _resultado_no_codificable(ruta: str) -> ResultadoArchivo:
     """N-2: se rechaza ANTES de tocar el executor (nunca paga un hilo real
     por algo que ni se puede reportar), y el valor que se guarda en
-    `archivo` va SANEADO (`backslashreplace` produce texto ASCII puro) --
-    para que ESTA entrada nunca pueda tumbar la escritura del resultado
-    del LOTE ENTERO (`write_result` serializa TODOS los resultados
-    juntos, un solo campo envenenado revienta el JSON de todos)."""
-    saneada = ruta.encode("utf-8", errors="backslashreplace").decode("ascii")
+    `archivo` va SANEADO -- para que ESTA entrada nunca pueda tumbar la
+    escritura del resultado del LOTE ENTERO (`write_result` serializa
+    TODOS los resultados juntos, un solo campo envenenado revienta el
+    JSON de todos)."""
     return ResultadoArchivo(
-        archivo=saneada, estado="rechazado",
+        archivo=_saneado_ascii(ruta), estado="rechazado",
         error="el nombre de la ruta no se puede codificar a UTF-8 (caracteres inválidos)",
     )
 
@@ -310,31 +317,59 @@ class _ControlTrabajo:
     `.cancel()` devuelve `True` y `.cancelled()` se pone en `True` de
     INMEDIATO -- mintiendo -- mientras el hilo real sigue corriendo en
     segundo plano y su resultado (que nadie espera ya) se descarta en
-    silencio. Por eso acá NO se cancela ningún `Future`: cada archivo se
-    AUTOCONSULTA (`arrancar_o_saltar()`) bajo el mismo lock que
-    `cancelar()`, en el instante justo antes de arrancar de verdad -- el
-    que ya pasó ese chequeo sigue hasta el final pase lo que pase después;
-    el que todavía no le tocó turno en el pool se salta sin tocar el
-    disco."""
-    __slots__ = ("cancelado", "marcado_running", "_lock")
+    silencio. Por eso acá NO se cancela ningún `Future`: cada archivo
+    AUTOCONSULTA Y MARCA `RUNNING` en una sola operación atómica
+    (`arrancar_o_marcar_running()`), en el instante justo antes de arrancar
+    de verdad -- el que ya pasó ese chequeo sigue hasta el final pase lo
+    que pase después; el que todavía no le tocó turno en el pool se salta
+    sin tocar el disco.
 
-    def __init__(self) -> None:
+    MINOR-D (ronda 4): "decidir si arranca" y "marcar RUNNING" eran DOS
+    operaciones separadas -- `arrancar_o_saltar()` bajo el lock, después
+    `_marcar_running_una_vez()` bajo OTRO lock (el `threading.Event`).
+    Entre las dos había una ventana real: un `cancelar()` que llegaba justo
+    ahí dejaba el store en `CANCELLING` y la escritura de `RUNNING`, que
+    seguía de largo, lo pisaba -- el estado iba PARA ATRÁS (de `cancelling`
+    a `running`), visto en rojo 3 de 3 corridas. `cancelar()` ahora también
+    escribe `CANCELLING` en el store, bajo el MISMO lock que
+    `arrancar_o_marcar_running()` -- las dos operaciones (decidir+marcar
+    RUNNING, y cancelar+marcar CANCELLING) son mutuamente excluyentes."""
+    __slots__ = ("cancelado", "marcado_running", "_lock", "_store", "_job_id")
+
+    def __init__(self, store: JobStore, job_id: str) -> None:
         self.cancelado = False
-        self.marcado_running = threading.Event()
+        self.marcado_running = False
         self._lock = threading.Lock()
+        self._store = store
+        self._job_id = job_id
 
     def cancelar(self) -> None:
+        """Llamada desde `cancelar_trabajo()` (loop de eventos). Bajo el
+        MISMO lock que `arrancar_o_marcar_running()` -- ver MINOR-D."""
         with self._lock:
+            if self.cancelado:
+                return  # idempotente -- no reescribe CANCELLING de más
             self.cancelado = True
+            self._store.update(self._job_id, status=JobStatus.CANCELLING.value)
 
-    def arrancar_o_saltar(self) -> bool:
-        """`True`: este archivo puede arrancar de verdad. `False`: el
-        trabajo ya estaba cancelado ANTES de que le tocara el turno --
-        nunca se paga un hilo real por él. Mismo lock que `cancelar()`:
-        no hay ventana en la que un archivo arranque DESPUÉS de que se
-        pidió cancelar sin que este chequeo lo vea."""
+    def arrancar_o_marcar_running(self) -> bool:
+        """`True`: este archivo puede arrancar de verdad -- y, si es el
+        primero de este trabajo, ya dejó `RUNNING` escrito en el store,
+        bajo el mismo lock que decidió que podía arrancar (MINOR-D: sin
+        esto, `cancelar()` podía colarse ENTRE decidir y marcar, y la
+        escritura de `RUNNING` pisaba el `CANCELLING` que se acababa de
+        pedir). `False`: el trabajo ya estaba cancelado ANTES de que le
+        tocara el turno -- nunca se paga un hilo real por él, y nunca se
+        escribe `RUNNING`."""
         with self._lock:
-            return not self.cancelado
+            if self.cancelado:
+                return False
+            if not self.marcado_running:
+                self.marcado_running = True
+                self._store.update(
+                    self._job_id, status=JobStatus.RUNNING.value, started_at=time.time(),
+                )
+            return True
 
 
 #: job_id -> control vivo, SOLO mientras `_ejecutar_trabajo` está corriendo
@@ -346,12 +381,15 @@ _CONTROLES: dict[str, _ControlTrabajo] = {}
 
 async def _procesar_rutas_paralelo(
     executor: ThreadPoolExecutor, proyecto: str, rutas: list[str],
-    *, control: _ControlTrabajo, job_id: str, store: JobStore,
+    *, control: _ControlTrabajo,
 ) -> list[dict]:
     """Cada RUTA CODIFICABLE es su propia unidad de trabajo en el pool de
     OCR -- un job con muchos archivos se reparte entre los hilos del pool
     en vez de monopolizar uno solo (B-2). El orden del resultado sigue el
-    orden de `rutas`, sin importar en qué orden terminen los hilos."""
+    orden de `rutas`, sin importar en qué orden terminen los hilos.
+    `control` ya sabe a qué `store`/`job_id` pertenece (ver
+    `_ControlTrabajo`), así que esta función no necesita esos dos
+    parámetros aparte."""
     trabajo = _trabajo_de(proyecto)
     loop = asyncio.get_running_loop()
 
@@ -363,26 +401,14 @@ async def _procesar_rutas_paralelo(
         else:
             indices_pendientes.append(i)
 
-    def _marcar_running_una_vez() -> None:
-        """N-4/B-2: se llama DESDE DENTRO DEL HILO real -- la primera vez
-        que un archivo de ESTE trabajo arranca de verdad. `JobStore` es
-        thread-safe (su propio `threading.Lock`), así que escribir el
-        estado directo desde acá, sin volver al loop de eventos, es
-        seguro. Antes `RUNNING` se escribía al admitir el pedido, sin
-        ningún hilo trabajando todavía -- mentía."""
-        if not control.marcado_running.is_set():
-            control.marcado_running.set()
-            store.update(job_id, status=JobStatus.RUNNING.value, started_at=time.time())
-
     def _trabajo_de_un_archivo(ruta: str) -> ResultadoArchivo:
-        # N-3: el chequeo va PRIMERO, antes de tocar el jail o el disco --
-        # ver `_ControlTrabajo.arrancar_o_saltar`.
-        if not control.arrancar_o_saltar():
+        # N-3/MINOR-D: decidir y marcar RUNNING son UNA sola operación
+        # atómica -- ver `_ControlTrabajo.arrancar_o_marcar_running`.
+        if not control.arrancar_o_marcar_running():
             return ResultadoArchivo(
                 archivo=ruta, estado="cancelado",
                 error="cancelado antes de empezar a procesarse",
             )
-        _marcar_running_una_vez()
         return _procesar_una_ruta(trabajo, ruta)
 
     if indices_pendientes:
@@ -444,12 +470,12 @@ async def _ejecutar_trabajo(
     executor = executor if executor is not None else _EXECUTOR_OCR
     executor_io = executor_io if executor_io is not None else _EXECUTOR_IO
     semaforo = semaforo if semaforo is not None else _SEMAFORO_TRABAJOS
-    control = _ControlTrabajo()
+    control = _ControlTrabajo(store, job_id)
     _CONTROLES[job_id] = control
     try:
         try:
             resultados = await _procesar_rutas_paralelo(
-                executor, proyecto, rutas, control=control, job_id=job_id, store=store,
+                executor, proyecto, rutas, control=control,
             )
             loop = asyncio.get_running_loop()
             result_path = await loop.run_in_executor(
@@ -501,7 +527,20 @@ def _leer_resultados_de_disco(result_path: str) -> list[dict]:
     """N-4: corre en `_EXECUTOR_IO`, nunca en el loop de eventos NI en el
     pool de OCR (antes compartía executor con el OCR -- medido en la
     revisión: consultar un trabajo YA TERMINADO tardó 37s porque la
-    lectura esperaba detrás de la cola real de tesseract)."""
+    lectura esperaba detrás de la cola real de tesseract).
+
+    MINOR-C (ronda 4): `_guardar_resultado` garantiza que lo que queda en
+    disco SIEMPRE se pudo escribir (su fallback `ensure_ascii=True`
+    escapa cualquier surrogate solitario como texto ASCII) -- pero
+    `json.loads` DESESCAPA ese texto y reconstruye el surrogate original
+    en memoria. Si ese surrogate llegó por un camino que N-2 no sanea (un
+    mensaje de excepción con un nombre de archivo crudo, por ejemplo, no
+    sólo `archivo`), la respuesta HTTP (Starlette `JSONResponse`, que
+    revienta con esto -- ver el hallazgo de N-1 en la ronda anterior)
+    daría 500 en CADA `GET` futuro sobre ese job, dejando los archivos
+    SANOS del mismo lote inaccesibles para siempre. Se sanea acá, del
+    lado de LECTURA, cualquier valor `str` de cualquier campo -- no sólo
+    `archivo` -- antes de que llegue a construir la respuesta."""
     try:
         crudos = json.loads(Path(result_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:  # fail-soft: el job YA terminó, un resultado ilegible no tumba la consulta de estado
@@ -510,7 +549,12 @@ def _leer_resultados_de_disco(result_path: str) -> list[dict]:
     if not isinstance(crudos, list):
         logger.error("procesamiento: resultado con forma inesperada en '%s' (no es una lista)", result_path)
         return []
-    return crudos
+    return [
+        {k: (_saneado_ascii(v) if isinstance(v, str) and not _codificable_utf8(v) else v)
+         for k, v in item.items()}
+        if isinstance(item, dict) else item
+        for item in crudos
+    ]
 
 
 async def _construir_respuesta_estado(job_id: str, view) -> TrabajoEstadoResponse:
@@ -571,6 +615,20 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
                 "partilo en más de un pedido"
             ),
         )
+    proyecto = req.proyecto[:_MAX_PROYECTO_LEN]  # MINOR-6
+    # MINOR-B: validado ANTES del `acquire()` -- `_STORE.create()` corre
+    # DESPUÉS de tomar el semáforo, y un `proyecto` no codificable a UTF-8
+    # lo hace reventar ahí (ver N-1: el `try/finally` de más abajo absorbe
+    # esa falla sin filtrar el permiso, pero un registro `pending` que
+    # nunca avanza -- `create()` YA escribió, `update(proyecto=...)` es
+    # quien revienta -- quedaba de todos modos). Rechazar acá cierra el
+    # vector en el origen: ni se toca el semáforo, ni queda un registro a
+    # medias.
+    if not _codificable_utf8(proyecto):
+        raise HTTPException(
+            status_code=422,
+            detail="el proyecto no se puede codificar a UTF-8 (caracteres inválidos)",
+        )
     if _SEMAFORO_TRABAJOS.locked():
         raise HTTPException(
             status_code=429,
@@ -587,14 +645,15 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
 
     # N-1: desde acá hasta que la tarea quede registrada, CUALQUIER
     # excepción tiene que liberar el permiso -- antes, si `_STORE.create()`
-    # lanzaba (ej. un `usuario` con un surrogate solitario: JSON válido,
-    # pydantic lo acepta como `str`, pero `json.dumps`+escritura UTF-8 no
-    # puede codificarlo), el semáforo quedaba tomado PARA SIEMPRE. Cuatro
-    # pedidos así agotaban los 4 permisos y TODO POST limpio recibía 429
-    # hasta reiniciar el proceso -- un DoS de cuatro requests.
+    # lanzaba, el semáforo quedaba tomado PARA SIEMPRE. Cuatro pedidos así
+    # agotaban los 4 permisos y TODO POST limpio recibía 429 hasta
+    # reiniciar el proceso -- un DoS de cuatro requests. `proyecto` ya no
+    # puede ser la causa (validado arriba), pero el `try/finally` se queda
+    # como defensa general: cualquier otra falla en este tramo (ej. el
+    # propio `usuario`, si algún día pierde su `Field`) tiene que seguir
+    # liberando el permiso.
     permiso_transferido = False
     try:
-        proyecto = req.proyecto[:_MAX_PROYECTO_LEN]  # MINOR-6
         job_id = _STORE.create(
             # B-6: el principal REAL -- antes era la constante
             # "las_manos.procesamiento", que no identificaba a nadie.
@@ -615,12 +674,17 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
         task = asyncio.create_task(
             _ejecutar_trabajo(job_id, proyecto, req.rutas, store=_STORE)
         )
+        # MINOR-A: la bandera va ACÁ, apenas se creó la tarea -- no
+        # después de `add_done_callback`/`job_tasks.register`. Antes,
+        # si CUALQUIERA de esas dos llamadas lanzaba, la tarea YA creada
+        # iba a liberar el semáforo sola (su propio `finally`) Y este
+        # `finally` de acá TAMBIÉN lo liberaba (`permiso_transferido`
+        # seguía en `False`) -- doble liberación, el semáforo sube por
+        # encima de su capacidad real (medido: 4 -> 7). A partir de esta
+        # línea, `_ejecutar_trabajo` es la ÚNICA responsable.
+        permiso_transferido = True
         task.add_done_callback(lambda t: _log_worker_exception(t, job_id=job_id))
         job_tasks.register(job_id, task)
-        # A partir de ACÁ, `_ejecutar_trabajo` es responsable de liberar el
-        # semáforo (su propio `finally`) -- este `finally` ya no debe
-        # tocarlo, o lo libera dos veces.
-        permiso_transferido = True
         return TrabajoCreadoResponse(job_id=job_id)
     finally:
         if not permiso_transferido:

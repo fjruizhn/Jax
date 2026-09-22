@@ -724,39 +724,20 @@ class TrabajoHTTPTest(unittest.TestCase):
 
     # -- N-1: el permiso siempre vuelve --------------------------------------
     def test_N1_falla_al_crear_el_job_no_deja_el_semaforo_agotado(self):
-        """`_STORE.create()`/`update()` -> `json.dumps(...)` + escritura
-        UTF-8 ESTRICTA no puede codificar un `str` Python con un surrogate
-        solitario (`\\udcff`) -- antes, el semáforo se adquiría ANTES de
-        `create()` y nadie lo liberaba si algo de ese tramo reventaba.
-        Cuatro pedidos así (el tamaño real del semáforo de producción)
-        agotaban los 4 permisos PARA SIEMPRE: un DoS de cuatro requests.
-
-        **Nota de método** (hallazgo aparte, no arreglado acá -- ver el
-        Informe): el vector original del ruling era `usuario`, pero desde
-        que B-6 le puso `Field(min_length=..., max_length=...)`, un
-        detalle de implementación de pydantic-core 2.46.4 (verificado en
-        Docker, versiones FIJADAS) hace que CUALQUIER `str` con
-        restricción de longitud rechace un surrogate solitario -- tanto
-        parseando JSON como construyendo el modelo directo en Python. Un
-        `str` SIN esa restricción (`proyecto`, acá) NO tiene esa
-        protección accidental, y SÍ deja pasar el surrogate -- confirmado
-        también por HTTP real en
-        `test_N1_proyecto_no_codificable_por_http_no_deja_el_semaforo_
-        agotado`, más abajo. (Aparte, no acá: el manejador de error 422 de
-        FastAPI/Starlette revienta con el MISMO `UnicodeEncodeError` al
-        intentar renderizar CUALQUIER validation error que incluya un
-        surrogate solitario en el detalle -- defecto real, de una
-        librería de terceros.) Este test llama a `crear_trabajo()`
-        directo, sin pasar por HTTP -- ejercita el mecanismo puntual
-        (`try/finally` alrededor de `_STORE.create()`/`update()`) sin
-        depender de qué campo lo dispare."""
-        proyecto_malo = "p\udcff"
-
+        """El `try/finally` de N-1 protege CUALQUIER falla en el tramo
+        `acquire()` -> tarea registrada -- no sólo la de `proyecto`
+        (que MINOR-B cierra en el ORIGEN, antes de tocar el semáforo
+        siquiera -- ver `test_MINORB_proyecto_no_codificable_se_rechaza_
+        en_la_admision`, más abajo). Se simula con `_STORE.create()`
+        mockeado para reventar -- así este test sigue siendo válido pase
+        lo que pase con las validaciones de campos puntuales, presentes o
+        futuras."""
         async def _correr():
-            for _ in range(2):  # tamaño real del semáforo de prueba
-                req = rutas_mod.TrabajoRequest(proyecto=proyecto_malo, rutas=[], usuario="ana@cliente.com")
-                with self.assertRaises(UnicodeEncodeError):
-                    await rutas_mod.crear_trabajo(req)
+            with patch.object(self.store, "create", side_effect=RuntimeError("boom -- create() reventó")):
+                for _ in range(2):  # tamaño real del semáforo de prueba
+                    req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+                    with self.assertRaises(RuntimeError):
+                        await rutas_mod.crear_trabajo(req)
 
             assert not self._semaforo_test.locked(), (
                 "el semáforo quedó agotado tras dos pedidos rotos -- DoS de N requests"
@@ -769,36 +750,29 @@ class TrabajoHTTPTest(unittest.TestCase):
 
         asyncio.run(_correr())
 
-    def test_N1_proyecto_no_codificable_por_http_no_deja_el_semaforo_agotado(self):
-        """Mismo mecanismo que el test de arriba, pero por el camino REAL
-        de HTTP -- posible precisamente porque `proyecto` (a diferencia de
-        `usuario`, que desde B-6 lleva `Field(min_length=...)`) es un
-        `str` SIN restricciones de longitud. Hallazgo aparte (ver el
-        Informe): un `str` con `Field(min_length=...)` hace que
-        pydantic-core 2.46.4 rechace un surrogate solitario al parsear
-        JSON (detalle de implementación, no contrato documentado); un
-        `str` liso lo deja pasar igual. Verificado a mano que `proyecto`
-        SÍ llega con el surrogate intacto a través de un pedido HTTP real
-        -- `_STORE.update(job_id, proyecto=proyecto)` (que corre DESPUÉS
-        de que `_STORE.create()` ya tuvo éxito) es quien revienta acá."""
+    def test_MINORB_proyecto_no_codificable_se_rechaza_en_la_admision(self):
+        """MINOR-B (ronda 4): antes, un `proyecto` con un surrogate
+        solitario (`\\udcff`) llegaba hasta `_STORE.update()` -- que
+        revienta DESPUÉS de que `create()` YA escribió un registro
+        `pending` que nunca avanza (N-1 evitaba que el semáforo quedara
+        agotado, pero no evitaba el registro huérfano). Ahora se rechaza
+        EN LA ADMISIÓN, antes de tocar el semáforo siquiera: 422 limpio,
+        ningún job creado."""
         proyecto_malo = "p\udcff"
         cuerpo_json = json.dumps(
             {"proyecto": proyecto_malo, "rutas": [], "usuario": "ana@cliente.com"},
             ensure_ascii=True,
         ).encode("ascii")
         with TestClient(_app(), raise_server_exceptions=False) as c:
-            for _ in range(2):  # tamaño real del semáforo de prueba
-                r = c.post(
-                    "/procesamiento/trabajos", content=cuerpo_json,
-                    headers={**_h(IDENTIDAD_PLATAFORMA), "content-type": "application/json"},
-                )
-                assert r.status_code == 500, r.text
-
-            assert not self._semaforo_test.locked(), (
-                "el semáforo quedó agotado tras dos POST rotos por HTTP -- DoS de N requests"
+            r = c.post(
+                "/procesamiento/trabajos", content=cuerpo_json,
+                headers={**_h(IDENTIDAD_PLATAFORMA), "content-type": "application/json"},
             )
-            r_limpio = self._post(c)
-            assert r_limpio.status_code == 202, r_limpio.text
+            assert r.status_code == 422, r.text
+            assert not self._semaforo_test.locked(), (
+                "el semáforo se tocó aunque el proyecto se rechazó en la admisión"
+            )
+            assert len(self.store._index) == 0, "no debería haberse creado ningún job"
 
     # -- B-5 / no bloqueo --------------------------------------------------
     def test_post_no_espera_a_que_el_trabajo_termine(self):
