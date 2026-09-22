@@ -73,6 +73,45 @@ jobs:
       - run: pip install -r requirements.txt pytest
       - run: python -m pytest tests/policy/test_execution_mariadb_integration.py -v
 
+  enforcement-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - run: pip install -r requirements.txt pytest
+      # Do not run these from tests-puros: pytest then places tests/policy
+      # ahead of the production policy package on sys.path.
+      - name: Ejecutar controles B7 y capturar salida
+        run: |
+          set -o pipefail
+          PYTHONPATH=. python -m pytest tests/policy/test_enforcement_evidence_core.py tests/policy/test_enforcement_evidence_mariadb_api.py tests/policy/test_worker_result_execution_binding.py -q --junitxml=/tmp/b7.xml 2>&1 | tee /tmp/b7-out
+      - name: Emitir manifiesto B7 controlado
+        run: |
+          python - <<'PY'
+          import hashlib, json, os, xml.etree.ElementTree as ET
+          from datetime import datetime, timezone
+          raw=open('/tmp/b7-out','rb').read(); now=datetime.now(timezone.utc).isoformat().replace('+00:00','Z')
+          from policy.enforcement_evidence.test_evidence import _TEST_CONTROL_MAP
+          tests=[]
+          for case in ET.parse('/tmp/b7.xml').iter('testcase'):
+            test_id=case.attrib['classname'].replace('.', '/')+'.py::'+case.attrib['name']
+            if test_id not in _TEST_CONTROL_MAP:
+              raise SystemExit('unmapped B7 JUnit node: '+test_id)
+            result='ERROR' if case.find('error') is not None else 'FAILED' if case.find('failure') is not None else 'SKIPPED' if case.find('skipped') is not None else 'PASSED'
+            tests.append({'test_id':test_id,'bindings':[{'control_id':control_id,'control_version':1} for control_id in _TEST_CONTROL_MAP[test_id]],'result':result})
+          if {x['test_id'] for x in tests} != set(_TEST_CONTROL_MAP) or len(tests) != len({x['test_id'] for x in tests}):
+            raise SystemExit('JUnit B7 node coverage incomplete')
+          counts={key:sum(x['result']==name for x in tests) for key,name in [('passed','PASSED'),('failed','FAILED'),('error','ERROR'),('skipped','SKIPPED')]}; counts['total']=len(tests)
+          m={'schema_version':'1.0','kind':'JAX_TEST_EVIDENCE_MANIFEST','provider':'github-actions','repository_id':os.environ['GITHUB_REPOSITORY'],'commit_sha':os.environ['GITHUB_SHA'],'implementation_identity_hash':'sha256:'+hashlib.sha256(os.environ['GITHUB_SHA'].encode()).hexdigest(),'workflow':'policy.yml','run_id':os.environ['GITHUB_JOB'],'job_id':os.environ['GITHUB_JOB'],'environment':'CI','started_at_utc':now,'completed_at_utc':now,'tests':tests,'counts':counts,'raw_output_blob_hash':'sha256:'+hashlib.sha256(raw).hexdigest()}
+          open('b7-controlled-test-manifest.json','w').write(json.dumps(m,sort_keys=True,separators=(',',':')))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: b7-controlled-test-manifest
+          path: b7-controlled-test-manifest.json
+
   no-fail-open-except:
     runs-on: ubuntu-latest
     steps:
@@ -3101,6 +3140,9 @@ jobs:
           tests/policy/test_authority_resolution_candidate_boundary.py
           tests/policy/test_authority_resolution_determinism.py
           tests/policy/test_authority_resolution_purity.py
+          tests/policy/test_enforcement_evidence_core.py
+          tests/policy/test_enforcement_evidence_mariadb_api.py
+          policy/enforcement_evidence/test_evidence.py
           tests/policy/test_authority_ledger_events.py
           tests/policy/test_authority_ledger_chain.py
           tests/policy/test_authority_ledger_ratification.py

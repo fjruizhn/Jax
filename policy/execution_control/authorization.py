@@ -21,6 +21,51 @@ from .models import (CapabilityPolicyProjection, ExecutionAuthorization,
 # callback to register from another module.
 _issued_requests: dict[int, weakref.ReferenceType] = {}
 _issued_authorizations: dict[int, weakref.ReferenceType] = {}
+_B7_DECISION_RECORDER = None
+_B7_AUTHORIZATION_RECORDER = None
+
+def configure_b7_decision_recorder(recorder) -> None:
+    """Application-startup seam; request callers never supply this recorder."""
+    global _B7_DECISION_RECORDER
+    _B7_DECISION_RECORDER = recorder
+
+def configure_b7_authorization_recorder(recorder) -> None:
+    """Application-startup seam; request callers cannot replace it."""
+    global _B7_AUTHORIZATION_RECORDER
+    _B7_AUTHORIZATION_RECORDER = recorder
+
+def _b7_authorization_outcome(control_id, *, denied=False, decision_id=None, subject_identity=None):
+    recorder=_B7_AUTHORIZATION_RECORDER
+    if recorder is None: return
+    try:
+        if denied:
+            typed = {
+                "CTL.B6.AUTHORIZATION_PROVENANCE": recorder.record_authorization_provenance_denied,
+                "CTL.B6.SANDBOX_ONLY": recorder.record_sandbox_denied,
+                "CTL.B6.TIMEOUT_CEILING": recorder.record_timeout_denied,
+            }.get(control_id)
+            if typed is None: raise ValueError("unsupported authorization evidence control")
+            typed(decision_id=decision_id)
+        else:
+            typed = {
+                "CTL.B6.AUTHORIZATION_PROVENANCE": recorder.record_authorization_provenance,
+                "CTL.B6.SANDBOX_ONLY": recorder.record_sandbox_validated,
+                "CTL.B6.TIMEOUT_CEILING": recorder.record_timeout_validated,
+            }.get(control_id)
+            if typed is None: raise ValueError("unsupported authorization evidence control")
+            typed(authorization_id=subject_identity or decision_id, decision_id=decision_id)
+    except Exception:  # fail-soft: optional observation cannot alter B6 authorization.
+        # B7 does not replace the governing authorization decision.
+        pass
+
+def _record_unverified_decision(record) -> None:
+    if _B7_DECISION_RECORDER is None:
+        return
+    try:
+        _B7_DECISION_RECORDER.record_decision_provenance_denied(
+            decision_id=getattr(record, "decision_id", None))
+    except Exception:  # fail-soft: rejected DecisionRecord never becomes eligible on evidence outage.
+        pass
 
 def _issued(registry, value):
     key = id(value)
@@ -102,7 +147,10 @@ def build_execution_request(record: DecisionRecord, *, authenticated_caller_id: 
     """Creates the only request shape accepted by the authorization boundary."""
     if not is_verified_decision_record(record):
         from .errors import UnverifiedDecisionRecordError
-        raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
+        _record_unverified_decision(record); raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
+    if _B7_DECISION_RECORDER is not None:
+        try: _B7_DECISION_RECORDER.record_decision_provenance(decision_id=record.decision_id)
+        except Exception: pass  # fail-soft: evidence cannot make an unverified request eligible
     return _issued(_issued_requests, ExecutionRequest("1.0", "JAX_EXECUTION_REQUEST", record.decision_id,
         record.decision_record_hash, capability, authenticated_caller_id, motor, environment,
         target_kind, target_value, prompt, context, timeout_seconds, sandbox_required,
@@ -120,7 +168,7 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
     """Applies the decision facts and the catalog's operational ceilings."""
     if not is_verified_decision_record(record):
         from .errors import UnverifiedDecisionRecordError
-        raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
+        _record_unverified_decision(record); raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
     if not isinstance(request, ExecutionRequest) or not request._is_trusted():
         raise ExecutionRequestScopeError("ExecutionRequest no sellada")
     if request.decision_id != record.decision_id or request.decision_record_hash != record.decision_record_hash:
@@ -140,6 +188,7 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
         if facts[key] != value:
             raise ExecutionRequestScopeError(f"{key} no coincide con la decisión")
     if request.environment is not ExecutionEnvironment.SANDBOX:
+        _b7_authorization_outcome("CTL.B6.SANDBOX_ONLY",denied=True,decision_id=record.decision_id)
         raise UnsupportedExecutionEnvironmentError("B6 V1 sólo autoriza SANDBOX")
     cap = catalog.get_capability(request.capability)
     if cap is None:
@@ -150,8 +199,10 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
     if motor is None or not motor.enabled or request.motor not in cap.allowed_motors:
         raise MotorNotAuthorizedError(request.motor)
     if not cap.sandbox_only or not motor.sandbox_only or request.sandbox_required is not True:
+        _b7_authorization_outcome("CTL.B6.SANDBOX_ONLY",denied=True,decision_id=record.decision_id)
         raise SandboxViolationError("capability/motor/request debe ser sandbox-only")
     if request.timeout_seconds > cap.max_execution_minutes * 60:
+        _b7_authorization_outcome("CTL.B6.TIMEOUT_CEILING",denied=True,decision_id=record.decision_id)
         raise ExecutionTimeoutError("timeout excede capability")
     if not isinstance(now_utc, datetime) or now_utc.tzinfo is None:
         raise ExecutionRequestScopeError("now_utc explícito timezone-aware requerido")
@@ -171,10 +222,13 @@ def authorize_execution(record: DecisionRecord, request: ExecutionRequest, catal
         "issued_at_utc": issued.isoformat().replace("+00:00", "Z"),
         "expires_at_utc": expires.isoformat().replace("+00:00", "Z")}
     digest = execution_authorization_hash(payload)
-    return _issued(_issued_authorizations, ExecutionAuthorization("1.0", "JAX_EXECUTION_AUTHORIZATION", auth_id,
+    result=_issued(_issued_authorizations, ExecutionAuthorization("1.0", "JAX_EXECUTION_AUTHORIZATION", auth_id,
         record.decision_id, record.decision_record_hash, request, policy,
         record.authority_binding.active_policy_corpus_hash,
         record.authority_binding.effective_authority_context_hash,
         record.authority_binding.authority_ledger_checkpoint_hash,
         facts["EXECUTION_HUMAN_APPROVAL_REQUIRED"], facts["EXECUTION_DRY_RUN_REQUIRED"],
         issued, expires, digest))
+    _b7_authorization_outcome("CTL.B6.SANDBOX_ONLY",decision_id=record.decision_id,subject_identity=auth_id)
+    _b7_authorization_outcome("CTL.B6.TIMEOUT_CEILING",decision_id=record.decision_id,subject_identity=auth_id)
+    return result

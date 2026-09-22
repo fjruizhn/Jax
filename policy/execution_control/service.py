@@ -7,15 +7,72 @@ from .canonical import execution_record_hash
 from .dry_run import build_dry_run_artifact
 from .errors import (AuthorizationExpiredError, DryRunFailedError, DryRunRequiredError,
                      ExecutionRequestScopeError, HumanApprovalRequiredError,
-                     KillSwitchActiveError)
+                     KillSwitchActiveError, DecisionExecutionConflictError)
 from .ids import new_execution_id
 from .models import ExecutionAuthorization, ExecutionRecord, ExecutionState
 from .state_machine import initial_state, transition
 from .storage import ExecutionEvent
+from policy.enforcement_evidence.models import EvidenceSubjectType
+
+def configure_b7_execution_evidence(store, evidence_store, recorder) -> None:
+    """Install mandatory same-cursor B7 writers at application composition.
+
+    The store, evidence store and recorder are never parameters of an
+    execution request. MariaDB will reject the cross-schema insert before its
+    single commit if the deployment has not provisioned both schemas together.
+    """
+    def write_create(cursor, record):
+        recorder._write_transaction_observation(cursor, control_id="CTL.B6.ONE_DECISION_ONE_EXECUTION",
+            execution_id=record.execution_id, decision_id=record.decision_id, occurred_at_utc=record.created_at_utc)
+    def write_dispatch(cursor, event):
+        recorder._write_transaction_observation(cursor, control_id="CTL.B6.GOVERNED_DISPATCH",
+            execution_id=event.execution_id, decision_id=None, occurred_at_utc=event.at_utc)
+    store.execution_evidence_writer=write_create
+    store.dispatch_evidence_writer=write_dispatch
 
 def _now(value: datetime) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None: raise ExecutionRequestScopeError("now_utc explícito requerido")
     return value.astimezone(timezone.utc)
+
+def _record_denial(store, control_id: str, reason_code: str, *, decision_id: str | None = None) -> None:
+    """Optional fixed-composition B7 seam; never supplied by an operation caller."""
+    recorder = getattr(store, "evidence_recorder", None)
+    if recorder is not None:
+        try:
+            typed = {
+                "CTL.B6.AUTHORIZATION_PROVENANCE": recorder.record_authorization_provenance_denied,
+                "CTL.B6.ONE_DECISION_ONE_EXECUTION": recorder.record_one_decision_denied,
+                "CTL.B6.HUMAN_APPROVAL_BINDING": recorder.record_human_approval_denied,
+                "CTL.B6.KILL_SWITCH": recorder.record_kill_switch_denied,
+                "CTL.B6.AUTHORIZATION_EXPIRY": recorder.record_authorization_expired,
+            }.get(control_id)
+            if typed is None:
+                raise ValueError("unsupported runtime denial control")
+            typed(decision_id=decision_id)
+        except Exception:  # fail-soft: primary denial is already fail-closed; evidence outage cannot permit it.
+            # Evidence outage must never convert a denial into an allow.
+            pass
+
+def _record_typed_runtime_observation(store, control_id: str, *, subject_type, subject_identity: str,
+                      decision_id: str | None = None, execution_id: str | None = None) -> None:
+    """Startup-owned observational seam; it never participates in authority."""
+    recorder = getattr(store, "evidence_recorder", None)
+    if recorder is not None:
+        try:
+            typed = {
+                "CTL.B6.ONE_DECISION_ONE_EXECUTION": recorder.record_execution_created,
+                "CTL.B6.HUMAN_APPROVAL_BINDING": recorder.record_human_approval_bound,
+                "CTL.B6.GOVERNED_DISPATCH": recorder.record_governed_dispatch,
+                "CTL.B6.KILL_SWITCH": recorder.record_kill_switch_clear,
+                "CTL.B6.AUTHORIZATION_EXPIRY": recorder.record_authorization_current,
+            }.get(control_id)
+            if typed is None:
+                raise ValueError("unsupported runtime evidence control")
+            typed(execution_id=execution_id or subject_identity, decision_id=decision_id)
+        except Exception:  # fail-soft: optional post-commit observation cannot alter B6 authority.
+            # Existing B6 semantics remain authoritative.  Mandatory pre-side
+            # effect recording uses the explicit shared writer instead.
+            pass
 
 def _record(authorization: ExecutionAuthorization, *, now_utc: datetime) -> ExecutionRecord:
     request = authorization.execution_request; execution_id = new_execution_id()
@@ -34,12 +91,27 @@ def _record(authorization: ExecutionAuthorization, *, now_utc: datetime) -> Exec
 
 def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: datetime, kill_switch_active: bool = False) -> ExecutionRecord:
     now = _now(now_utc)
-    if kill_switch_active: raise KillSwitchActiveError("kill switch activo")
-    if not isinstance(authorization, ExecutionAuthorization) or not authorization._is_trusted(): raise ExecutionRequestScopeError("authorization no sellada")
-    if now > authorization.expires_at_utc: raise AuthorizationExpiredError("authorization vencida")
+    if kill_switch_active:
+        _record_denial(store, "CTL.B6.KILL_SWITCH", "DENIED", decision_id=getattr(authorization, "decision_id", None)); raise KillSwitchActiveError("kill switch activo")
+    if not isinstance(authorization, ExecutionAuthorization) or not authorization._is_trusted():
+        _record_denial(store, "CTL.B6.AUTHORIZATION_PROVENANCE", "DENIED", decision_id=getattr(authorization, "decision_id", None)); raise ExecutionRequestScopeError("authorization no sellada")
+    if now > authorization.expires_at_utc:
+        _record_denial(store, "CTL.B6.AUTHORIZATION_EXPIRY", "DENIED", decision_id=authorization.decision_id); raise AuthorizationExpiredError("authorization vencida")
     record = _record(authorization, now_utc=now)
     state = initial_state(requires_human_approval=authorization.requires_human_approval, requires_dry_run=authorization.requires_dry_run)
-    return store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now))
+    writer = getattr(store, "execution_evidence_writer", None)
+    try:
+        created=store.create_execution(authorization, record, ExecutionEvent(record.execution_id, state.value, "EXECUTION_CREATED", now), evidence_writer=writer)
+    except DecisionExecutionConflictError:
+        _record_denial(store,"CTL.B6.ONE_DECISION_ONE_EXECUTION","DENIED",decision_id=authorization.decision_id)
+        raise
+    # In MariaDB deployments the execution_evidence_writer is the mandatory
+    # same-cursor path.  This is an additive post-commit observation for
+    # composition configurations that do not require that stronger profile.
+    _record_typed_runtime_observation(store,"CTL.B6.ONE_DECISION_ONE_EXECUTION",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    _record_typed_runtime_observation(store,"CTL.B6.KILL_SWITCH",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    _record_typed_runtime_observation(store,"CTL.B6.AUTHORIZATION_EXPIRY",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    return created
 
 def consume_human_approval(store, record, authorization, approval, *, now_utc: datetime) -> None:
     from .human_approval import verify_human_approval
@@ -49,10 +121,15 @@ def consume_human_approval(store, record, authorization, approval, *, now_utc: d
     # This fixed adapter is application configuration, never input from the
     # approval presenter.  Tests replace the adapter at the composition seam.
     public_key = load_trusted_approver(approval.approver_actor_id, approval.approver_key_id)
-    verify_human_approval(approval, authorization, public_key, now_utc=now); store.consume_approval(approval.human_approval_id)
+    try:
+        verify_human_approval(approval, authorization, public_key, now_utc=now)
+    except Exception:
+        _record_denial(store,"CTL.B6.HUMAN_APPROVAL_BINDING","DENIED",decision_id=record.decision_id); raise
+    store.consume_approval(approval.human_approval_id)
     store.append_event(ExecutionEvent(record.execution_id,
       (ExecutionState.READY_FOR_DRY_RUN if authorization.requires_dry_run else ExecutionState.READY_TO_DISPATCH).value,
       "HUMAN_APPROVAL_CONSUMED", now))
+    _record_typed_runtime_observation(store,"CTL.B6.HUMAN_APPROVAL_BINDING",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
 
 def record_dry_run(store, record, authorization, *, status: str, result: object, now_utc: datetime):
     now = _now(now_utc); artifact = build_dry_run_artifact(record, authorization, status=status, result=result, recorded_at_utc=now)
@@ -63,8 +140,10 @@ def record_dry_run(store, record, authorization, *, status: str, result: object,
 
 def dispatch_execution(store, record, authorization, *, now_utc: datetime, kill_switch_active: bool = False, job_id: str | None = None):
     now = _now(now_utc)
-    if kill_switch_active: raise KillSwitchActiveError("kill switch activo")
-    if now > authorization.expires_at_utc: raise AuthorizationExpiredError("authorization vencida")
+    if kill_switch_active:
+        _record_denial(store, "CTL.B6.KILL_SWITCH", "DENIED", decision_id=record.decision_id); raise KillSwitchActiveError("kill switch activo")
+    if now > authorization.expires_at_utc:
+        _record_denial(store, "CTL.B6.AUTHORIZATION_EXPIRY", "DENIED", decision_id=record.decision_id); raise AuthorizationExpiredError("authorization vencida")
     states = store.events(record.execution_id); current = ExecutionState(states[-1].state)
     if authorization.requires_human_approval and current is ExecutionState.WAITING_HUMAN_APPROVAL: raise HumanApprovalRequiredError("approval requerida")
     if authorization.requires_dry_run:
@@ -73,7 +152,9 @@ def dispatch_execution(store, record, authorization, *, now_utc: datetime, kill_
         if artifact.status != "SUCCEEDED" or artifact.execution_request_hash != record.execution_request_hash: raise DryRunFailedError("dry-run no vinculado")
     transition(current, ExecutionState.DISPATCHED)
     event = ExecutionEvent(record.execution_id, ExecutionState.DISPATCHED.value, "MOTOR_DISPATCHED", now, job_id)
-    store.append_event(event); return event
+    store.append_event(event, evidence_writer=getattr(store, "dispatch_evidence_writer", None))
+    _record_typed_runtime_observation(store,"CTL.B6.GOVERNED_DISPATCH",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    return event
 
 def cancel_execution(store, execution_id: str, *, now_utc: datetime):
     events = store.events(execution_id); current = ExecutionState(events[-1].state)
