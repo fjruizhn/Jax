@@ -286,6 +286,39 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         r.archivo.encode("ascii")  # no debe lanzar -- si lanza, no es ASCII puro
         assert "\udcff" not in r.archivo
 
+    def test_MINORC_leer_resultado_sanea_un_error_con_surrogate(self):
+        """MINOR-C (ronda 4): N-2 defiende la ESCRITURA del campo
+        `archivo` -- pero un `error` (mensaje de excepción, no derivado
+        de `_resultado_no_codificable`) puede traer un surrogate
+        solitario por otro camino, y `_guardar_resultado` lo rescata al
+        ESCRIBIR (`ensure_ascii=True`). El problema es que `json.loads`
+        DESESCAPA ese surrogate de vuelta al leer -- si nadie sanea del
+        lado de LECTURA, la respuesta HTTP (bug real de Starlette, ver
+        N-1) daría 500 en CADA `GET` futuro sobre ese job, dejando los
+        archivos SANOS del mismo lote inaccesibles para siempre."""
+        resultados_crudos = [
+            {
+                "archivo": "sano.pdf", "estado": "error",
+                "error": "no se pudo leer 'archivo\udcff.tmp'",
+                "extractor": None, "extracto_bytes": 0, "carpeta_procesado": None,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            result_path = Path(d) / "resultado.json"
+            # Mismo camino que produce `_guardar_resultado`: el fallback
+            # `ensure_ascii=True` es justo lo que permite que ESTO llegue
+            # a existir en disco sin reventar la escritura.
+            result_path.write_text(
+                json.dumps(resultados_crudos, ensure_ascii=True), encoding="utf-8",
+            )
+            leidos = rutas_mod._leer_resultados_de_disco(str(result_path))
+
+        leidos[0]["error"].encode("ascii")  # no debe lanzar -- si lanza, no es ASCII puro
+        assert "\udcff" not in leidos[0]["error"]
+        # y se puede construir la respuesta sin reventar
+        respuesta = rutas_mod.ResultadoArchivo(**leidos[0])
+        assert respuesta.error
+
     # -- N-4: RUNNING no se adelanta a que un hilo REAL arranque -----------
     async def test_N4_running_no_se_marca_mientras_el_archivo_sigue_en_cola(self):
         """Pool de UN hilo, ocupado con otra cosa (bloqueado a propósito):
@@ -582,6 +615,54 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             await rutas_mod._construir_respuesta_estado("job-y", _VistaFalsa())
 
         assert espia.llamado, "leer el resultado no pasó por _EXECUTOR_IO"
+
+    # -- MINOR-D: la carrera entre "decidir" y "marcar RUNNING" -------------
+    def test_MINORD_cancelar_espera_a_que_termine_de_marcar_running(self):
+        """MINOR-D (ronda 4): antes, `arrancar_o_saltar()` (bajo un lock)
+        y `_marcar_running_una_vez()` (bajo OTRO, un `threading.Event`)
+        eran DOS operaciones separadas -- un `cancelar()` que llegaba
+        justo ENTRE medio dejaba escrito `running` DESPUÉS de
+        `cancelling`: el estado iba PARA ATRÁS (visto en rojo 3 de 3
+        corridas). Este test no depende de la suerte del GIL para
+        reproducirlo: bloquea DE VERDAD, con un `threading.Event`, DENTRO
+        de la escritura de `running` (que ahora corre bajo el MISMO lock
+        que `cancelar()`) y confirma que `cancelar()` -- llamado desde
+        OTRO hilo -- queda ESPERANDO ese lock, no se cuela antes."""
+        orden: list[str] = []
+        adentro = threading.Event()
+        seguir = threading.Event()
+
+        class _StoreLento:
+            def update(self, job_id, **kwargs):
+                estado = kwargs.get("status")
+                if estado == JobStatus.RUNNING.value:
+                    orden.append("running:entrando")
+                    adentro.set()
+                    assert seguir.wait(timeout=2), "seguir nunca se marcó -- deadlock"
+                    orden.append("running:saliendo")
+                else:
+                    orden.append(estado)
+
+        control = rutas_mod._ControlTrabajo(_StoreLento(), "job-x")
+
+        hilo_arranca = threading.Thread(target=control.arrancar_o_marcar_running)
+        hilo_arranca.start()
+        self.addCleanup(lambda: (seguir.set(), hilo_arranca.join(timeout=2)))
+        assert adentro.wait(timeout=2), "arrancar_o_marcar_running nunca llegó a marcar running"
+
+        hilo_cancela = threading.Thread(target=control.cancelar)
+        hilo_cancela.start()
+        time.sleep(0.1)  # tiempo de sobra: si pudiera colarse, ya habría terminado
+        assert "cancelling" not in orden, (
+            f"cancelar() terminó mientras arrancar_o_marcar_running seguía "
+            f"DENTRO de su sección crítica -- no comparten el lock de verdad: {orden}"
+        )
+
+        seguir.set()
+        hilo_arranca.join(timeout=2)
+        hilo_cancela.join(timeout=2)
+
+        assert orden == ["running:entrando", "running:saliendo", "cancelling"], orden
 
     # -- N-3: cancelación honesta, con el executor REAL --------------------
     async def test_N3_cancelar_deja_terminar_lo_que_ya_arranco_y_corta_lo_que_esperaba(self):
@@ -905,16 +986,102 @@ class TrabajoHTTPTest(unittest.TestCase):
             assert r.status_code == 200, r.text
             assert r.json()["estado"] == "cancelling", r.json()
 
+    def test_MAJOR1_cancelar_por_http_con_worker_real_termina_cancelled(self):
+        """MAJOR-1 (ronda 4): ninguno de los tests anteriores prueba la
+        cancelación de punta a punta -- los de N-3 llaman a
+        `control.cancelar()` a mano (nunca pasan por la ruta HTTP), y el
+        de arriba mockea `_ejecutar_trabajo` entero (nunca hay un
+        `_ControlTrabajo` real registrado). Si `cancelar_trabajo()`
+        cambiara `control.cancelar()` por un `pass`, TODOS esos tests
+        seguirían en verde -- este es el único que pasa por la ruta HTTP
+        real CON el worker real corriendo sobre un executor de un hilo
+        real (`time.sleep` bloqueante de verdad, no un `asyncio.sleep`
+        que se pueda saltear -- mismo criterio que N-3)."""
+        with tempfile.TemporaryDirectory() as d:
+            workspace = Path(d) / "workspace"
+            workspace.mkdir()
+            (workspace / "lento.pdf").write_bytes(b"x")
+
+            executor_1_hilo = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-major1-ocr")
+            executor_io = ThreadPoolExecutor(max_workers=2, thread_name_prefix="test-major1-io")
+
+            def _ingerir_lento(origen, trabajo, *, subruta=None):
+                time.sleep(0.3)  # bloqueante DE VERDAD, en el hilo real
+                return Ficha(
+                    sha256="9" * 64, origen="fuente/x", extractor="pdf",
+                    extractor_version="1", fecha="2026-09-21T00:00:00+00:00",
+                    estado="ok", detalle={},
+                )
+
+            with patch.object(tool_authority, "WORKSPACE_ROOT", workspace.resolve()), \
+                 patch.object(rutas_mod, "_EXECUTOR_OCR", executor_1_hilo), \
+                 patch.object(rutas_mod, "_EXECUTOR_IO", executor_io), \
+                 patch.object(rutas_mod.ingesta, "ingerir", side_effect=_ingerir_lento), \
+                 TestClient(_app()) as c:
+                job_id = self._post(c, rutas=["lento.pdf"]).json()["job_id"]
+                time.sleep(0.08)  # deja que el hilo arranque de verdad
+                r = c.post(f"/procesamiento/trabajos/{job_id}/cancel", headers=_h(IDENTIDAD_PLATAFORMA))
+                assert r.status_code == 200, r.text
+                assert r.json()["estado"] == "cancelling", r.json()
+
+                # espera a que el worker real termine (el hilo en vuelo
+                # sigue solo -- ver N-3) sin tocar `asyncio.sleep`
+                for _ in range(100):
+                    if self.store.get(job_id).status in (
+                        JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
+                    ):
+                        break
+                    time.sleep(0.02)
+
+            executor_1_hilo.shutdown(wait=True)
+            executor_io.shutdown(wait=True)
+
+        job = self.store.get(job_id)
+        assert job.status == JobStatus.CANCELLED, (
+            f"cancelar por HTTP con el worker real no terminó en 'cancelled': {job}"
+        )
+
     # -- N-6: el arranque reconcilia -----------------------------------------
     def test_N6_arranque_llama_a_reconciliar_trabajos_huerfanos(self):
+        """MINOR-E (ronda 4): no alcanza con que la llamada EXISTA en
+        algún lado del archivo -- tiene que estar DENTRO de una función
+        decorada con `@app.on_event("startup")`. El chequeo viejo
+        (`ast.walk` sobre TODO el árbol) seguía en verde si la llamada se
+        movía a un hook de `shutdown` -- visto en rojo reproduciendo
+        exactamente ese movimiento a mano."""
         server_py = Path(__file__).resolve().parent / "server.py"
         arbol = ast.parse(server_py.read_text(encoding="utf-8"))
-        llamadas = [
-            n for n in ast.walk(arbol)
-            if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "reconciliar_trabajos_huerfanos"
-        ]
-        assert len(llamadas) == 1, (
-            "server.py tiene que llamar reconciliar_trabajos_huerfanos() en su startup hook"
+
+        def _es_on_event(dec: ast.expr, evento: str) -> bool:
+            return (
+                isinstance(dec, ast.Call)
+                and isinstance(dec.func, ast.Attribute) and dec.func.attr == "on_event"
+                and len(dec.args) == 1 and isinstance(dec.args[0], ast.Constant)
+                and dec.args[0].value == evento
+            )
+
+        def _llama_a_reconciliar(func: ast.AST) -> bool:
+            return any(
+                isinstance(n, ast.Call) and getattr(n.func, "id", None) == "reconciliar_trabajos_huerfanos"
+                for n in ast.walk(func)
+            )
+
+        def _funciones_con_hook(evento: str) -> list[ast.AST]:
+            return [
+                n for n in ast.walk(arbol)
+                if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+                and any(_es_on_event(d, evento) for d in n.decorator_list)
+            ]
+
+        funciones_startup = _funciones_con_hook("startup")
+        funciones_shutdown = _funciones_con_hook("shutdown")
+
+        assert funciones_startup, "server.py no tiene ningún hook @app.on_event('startup')"
+        assert any(_llama_a_reconciliar(f) for f in funciones_startup), (
+            "reconciliar_trabajos_huerfanos() no está dentro de ningún hook de ARRANQUE"
+        )
+        assert not any(_llama_a_reconciliar(f) for f in funciones_shutdown), (
+            "reconciliar_trabajos_huerfanos() está en un hook de APAGADO, no de arranque"
         )
 
     # -- autenticación --------------------------------------------------
