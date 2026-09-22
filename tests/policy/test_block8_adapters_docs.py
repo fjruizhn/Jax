@@ -20,7 +20,7 @@ def test_operations_inventory_and_runbooks_are_complete():
         assert all("## "+heading in value for heading in headings)
 
 def test_generated_manual_is_marked_and_reproducible():
-    subprocess.run([sys.executable,"scripts/generate_operational_manual.py"],cwd=ROOT,check=True)
+    subprocess.run([sys.executable,"scripts/generate_operational_manual.py","--check"],cwd=ROOT,check=True)
     value=text("docs/operations/generated/jax-operational-docs.html")
     assert "NON-AUTHORITATIVE GENERATED PRESENTATION" in value
     assert "size: Letter" in value and "operational-manual.md" in value
