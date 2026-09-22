@@ -268,3 +268,161 @@ def test_barrer_temporales_huerfanos_sin_nada_que_barrer_no_falla(tmp_path):
     ruta = tmp_path / "PAUSA"
     P.barrer_temporales_huerfanos(ruta)  # ni la pausa ni el directorio existen todavía
     assert not ruta.exists()
+
+
+# --- ronda 10, MINOR ------------------------------------------------------------------
+
+def test_quitar_pausa_si_filenotfound_en_el_unlink_no_escapa_como_traceback(tmp_path, monkeypatch):
+    """MINOR (ronda 10): si `ruta` desaparece justo entre el chequeo de inodo y el
+    `unlink` de verdad (otro actor, ajeno a esta función, la borró por su cuenta),
+    `quitar_pausa_si` NO puede dejar escapar un `FileNotFoundError` sin atrapar --
+    devuelve `(False, datos)`, igual que cuando no coincide."""
+    ruta = tmp_path / "PAUSA"
+    P.poner_pausa(ruta, {"origen": "huella", "host": "atemai", "mision_id": "m1"})
+
+    real_unlink = os.unlink
+
+    def unlink_que_se_adelanta(path, *a, **kw):
+        if str(path) == str(ruta):
+            real_unlink(path)  # alguien más ya se adelantó y la borró
+            raise FileNotFoundError(2, "No such file or directory")
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(os, "unlink", unlink_que_se_adelanta)
+    borro, datos = P.quitar_pausa_si(ruta, coincide=lambda d: True)
+    assert borro is False
+    assert datos["origen"] == "huella"
+    assert not ruta.exists()
+
+
+def test_barrer_temporales_huerfanos_ignora_directorios_sin_reventar(tmp_path):
+    """MINOR (ronda 10): si algo (no debería, pero) deja un DIRECTORIO con el nombre de
+    un temporal huérfano, el barrido lo ignora -- no revienta con
+    `IsADirectoryError`. Usa `os.lstat` + `S_ISREG`, no `os.unlink` a ciegas."""
+    ruta = tmp_path / "PAUSA"
+    P.poner_pausa(ruta, {"origen": "huella", "host": "atemai", "mision_id": "m1"})
+    directorio_falso = tmp_path / ".PAUSA.quitar-tmp-raro-un-directorio"
+    directorio_falso.mkdir()
+    (directorio_falso / "adentro").write_text("x")
+    huerfano_de_verdad = tmp_path / ".PAUSA.quitar-tmp-normal"
+    huerfano_de_verdad.write_text(ruta.read_text())
+
+    borrados = P.barrer_temporales_huerfanos(ruta)
+
+    assert borrados == 1
+    assert not huerfano_de_verdad.exists()
+    assert directorio_falso.is_dir()  # intacto -- no se tocó
+    assert ruta.exists()
+
+
+def test_barrer_temporales_huerfanos_usa_glob_escape_sobre_el_nombre(tmp_path):
+    """MINOR (ronda 10): un nombre de pausa con caracteres especiales de glob (`[`,
+    `]`, `*`, `?`) no puede hacer que el patrón matchee de más -- `glob.escape()` sobre
+    el NOMBRE (el sufijo `.quitar-tmp-*` sigue siendo un patrón real)."""
+    ruta = tmp_path / "PAUSA[1]"
+    P.poner_pausa(ruta, {"origen": "huella", "host": "atemai", "mision_id": "m1"})
+    # Sin escapar, el patron `.PAUSA[1].quitar-tmp-*` interpretaria `[1]` como una
+    # clase de caracteres (matchea "1") -- este archivo NO debe barrerse igual.
+    trampa = tmp_path / ".PAUSA1.quitar-tmp-trampa"
+    trampa.write_text("{}")
+    huerfano_de_verdad = tmp_path / ".PAUSA[1].quitar-tmp-normal"
+    huerfano_de_verdad.write_text(ruta.read_text())
+
+    borrados = P.barrer_temporales_huerfanos(ruta)
+
+    assert borrados == 1
+    assert not huerfano_de_verdad.exists()
+    assert trampa.exists()  # el patrón escapado NO debía tocarlo
+    assert ruta.exists()
+
+
+# --- ronda 10, MAJOR: candado (flock) para serializar quitar/barrer -------------------
+
+def test_candado_se_puede_adquirir_y_soltar_en_secuencia(tmp_path):
+    ruta = tmp_path / "PAUSA"
+    with P.candado(ruta):
+        pass
+    with P.candado(ruta):
+        pass  # si el primer `with` no soltó bien, este quedaría colgado -- no cuelga
+
+
+def test_candado_crea_el_archivo_propio_junto_a_la_pausa(tmp_path):
+    ruta = tmp_path / "PAUSA"
+    with P.candado(ruta):
+        assert (tmp_path / ".PAUSA.candado").exists()
+
+
+def _tarea_sostener_candado(ruta_str, adquirido_evt, soltar_evt):
+    """Proceso hijo: adquiere el candado, avisa que lo tiene, y lo sostiene hasta que
+    el padre le diga que lo suelte."""
+    from jax.ejecutor.contratos import pausa as _P
+    with _P.candado(Path(ruta_str)):
+        adquirido_evt.set()
+        soltar_evt.wait(timeout=10)
+
+
+def test_candado_bloquea_a_un_segundo_proceso_real_hasta_que_el_primero_libera(tmp_path):
+    """MAJOR (ronda 10): mutex de VERDAD entre procesos -- no una simulación en el
+    mismo proceso. Un hijo real sostiene el candado; el padre confirma que NO puede
+    adquirirlo mientras tanto, y que SÍ puede en cuanto el hijo lo suelta."""
+    import multiprocessing as mp
+
+    ruta = tmp_path / "PAUSA"
+    ctx = mp.get_context("fork")
+    adquirido = ctx.Event()
+    soltar = ctx.Event()
+    hijo = ctx.Process(target=_tarea_sostener_candado, args=(str(ruta), adquirido, soltar))
+    hijo.start()
+    try:
+        assert adquirido.wait(timeout=5), "el hijo no llegó a adquirir el candado"
+
+        # Mientras el hijo lo sostiene, un intento NO bloqueante del padre tiene que
+        # fallar -- confirma que es el MISMO candado de sistema operativo, no uno de
+        # otro proceso ni una ilusión de threading.
+        ruta_candado = tmp_path / ".PAUSA.candado"
+        fd_prueba = os.open(ruta_candado, os.O_CREAT | os.O_RDWR, 0o660)
+        try:
+            import fcntl
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd_prueba, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd_prueba)
+
+        soltar.set()
+        hijo.join(timeout=5)
+        assert hijo.exitcode == 0
+
+        # Ahora que el hijo terminó y liberó, el padre SÍ puede adquirirlo.
+        with P.candado(ruta):
+            pass
+    finally:
+        soltar.set()
+        if hijo.is_alive():
+            hijo.terminate()
+            hijo.join(timeout=5)
+
+
+def test_barrer_temporales_huerfanos_usa_el_candado_de_la_pausa(tmp_path, monkeypatch):
+    """MAJOR (ronda 10): `barrer_temporales_huerfanos` toma el MISMO candado que
+    `quitar_pausa_si` vía `aceptar()` -- se verifica que la llamada quede DENTRO de un
+    `with P.candado(ruta)` real (instrumentando `fcntl.flock` para ver que se pidió
+    ANTES de tocar los temporales)."""
+    import fcntl as _fcntl
+    ruta = tmp_path / "PAUSA"
+    huerfano = tmp_path / ".PAUSA.quitar-tmp-x"
+    huerfano.write_text("{}")
+
+    eventos = []
+    real_flock = _fcntl.flock
+
+    def flock_que_registra(fd, operacion):
+        if operacion == _fcntl.LOCK_EX:
+            eventos.append("lock")
+        elif operacion == _fcntl.LOCK_UN:
+            eventos.append("unlock")
+        return real_flock(fd, operacion)
+
+    monkeypatch.setattr(_fcntl, "flock", flock_que_registra)
+    P.barrer_temporales_huerfanos(ruta)
+    assert eventos == ["lock", "unlock"]
+    assert not huerfano.exists()
