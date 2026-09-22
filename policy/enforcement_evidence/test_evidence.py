@@ -21,6 +21,7 @@ _TEST_CONTROL_MAP = {
  "tests/policy/test_enforcement_evidence_core.py::test_tested_is_not_inferred_from_runtime_observation": ("CTL.B6.TIMEOUT_CEILING",),
  "tests/policy/test_enforcement_evidence_core.py::test_one_runtime_observation_never_mints_enforced": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_readonly_status_view_never_persists_and_matches_persisted_verdict": ("CTL.B6.GOVERNED_DISPATCH",),
+ "tests/policy/test_enforcement_evidence_core.py::test_readonly_query_uses_captured_snapshot_without_later_artifact_loads": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_artifact_aggregate_and_envelope_bounds_are_fail_closed": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_core.py::test_assertion_relationship_bounds_and_worker_result_ingestion": ("CTL.B6.GOVERNED_DISPATCH",),
