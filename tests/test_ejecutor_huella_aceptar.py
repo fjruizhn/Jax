@@ -70,9 +70,11 @@ def test_aceptar_sin_medir_registra_como_tal_y_no_llama_a_tomar_huella(tmp_path)
 
     rc = asyncio.run(H.aceptar(
         misiones=misiones, mision_id=MISION_ID, host="prod-vieja", aceptado_por="fruiz", sin_medir=True,
+        motivo="máquina dada de baja",
         tomar_huella_actual=tomar_no_deberia_llamarse, registrar=registrar_falso, registro_ruta=registro))
 
     assert rc == 0
+    assert registrado.get("motivo") == "máquina dada de baja"
     assert registrado["sin_medir"] is True
     marca = H.leer_marca(ruta)
     assert marca.estado == H.ABIERTA
@@ -266,7 +268,8 @@ def test_aceptar_limpia_la_pausa_global_del_ejecutor(tmp_path):
     misiones = tmp_path / "misiones"
     registro = tmp_path / "registro.jsonl"
     pausa_ruta = tmp_path / "PAUSA"
-    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado", "host": "atemai"})
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": "atemai", "mision_id": MISION_ID})
     assert P.pausa_puesta(pausa_ruta)
 
     H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
@@ -280,3 +283,212 @@ def test_aceptar_limpia_la_pausa_global_del_ejecutor(tmp_path):
         tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta))
     assert rc == 0
     assert not P.pausa_puesta(pausa_ruta)
+
+
+# --- B-1, ronda 8: nunca levantar una pausa ajena ---------------------------------------
+
+def test_aceptar_no_toca_una_pausa_de_c4(tmp_path):
+    """Si C4 (el freno) puso la pausa, `aceptar` la deja intacta -- sólo avisa."""
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "c4", "motivo": "freno_activado"})
+
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta, salida=salidas.append))
+    assert rc == 0  # la huella sí se aceptó
+    assert P.pausa_puesta(pausa_ruta) is True  # pero la pausa de C4 sigue puesta
+    datos = json.loads(pausa_ruta.read_text())
+    assert datos["origen"] == "c4"
+    assert any("pausa_de_otro_origen" in l and "c4" in l for l in salidas)
+
+
+def test_aceptar_no_toca_una_pausa_de_c5(tmp_path):
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "c5", "motivo": "auditor_pauso"})
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta))
+    assert rc == 0
+    assert P.pausa_puesta(pausa_ruta) is True
+    assert json.loads(pausa_ruta.read_text())["origen"] == "c5"
+
+
+def test_aceptar_no_toca_una_pausa_de_huella_de_otro_host(tmp_path):
+    """La pausa es de la huella, pero de OTRO host -- tampoco es la nuestra."""
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": "bridge", "mision_id": MISION_ID})
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta))
+    assert rc == 0
+    assert P.pausa_puesta(pausa_ruta) is True
+    assert json.loads(pausa_ruta.read_text())["host"] == "bridge"
+
+
+def test_aceptar_no_toca_una_pausa_de_huella_de_otra_mision(tmp_path):
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    OTRA = "66666666-6666-6666-6666-666666666666"
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": "atemai", "mision_id": OTRA})
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta))
+    assert rc == 0
+    assert P.pausa_puesta(pausa_ruta) is True
+    assert json.loads(pausa_ruta.read_text())["mision_id"] == OTRA
+
+
+def test_aceptar_borra_la_pausa_propia_de_la_huella(tmp_path):
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "motivo": "huella_cambio_no_declarado",
+                               "host": "atemai", "mision_id": MISION_ID})
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta))
+    assert rc == 0
+    assert not pausa_ruta.exists()
+
+
+def test_aceptar_si_c5_pauso_primero_y_la_huella_no_llego_a_escribir_solo_cambia_la_marca(tmp_path):
+    """Si C5 pausó primero (antes de que la huella pudiera escribir la suya --
+    escenario real: dos motivos casi simultáneos), `aceptar` sólo cambia la marca de
+    la huella y deja la pausa de C5 como está."""
+    misiones = tmp_path / "misiones"
+    registro = tmp_path / "registro.jsonl"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "c5", "motivo": "pausa_del_ejecutor"})
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    async def tomar_falso(host):
+        return _huella("atemai")
+
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_falso, registro_ruta=registro, pausa_ruta=pausa_ruta))
+    assert rc == 0
+    marca = H.leer_marca(H.ruta_huella(misiones, MISION_ID, "atemai"))
+    assert marca.estado == H.ABIERTA
+    assert P.pausa_puesta(pausa_ruta) is True  # la de C5 sigue ahí
+
+
+# --- B-2, ronda 8: aceptar exige REPORTADA (o ABIERTA con --sin-medir) -----------------
+
+def test_aceptar_con_abierta_falla_huella_no_reportada(tmp_path):
+    misiones = tmp_path / "misiones"
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"), H.Marca(huella=_huella("atemai"), estado=H.ABIERTA))
+
+    async def tomar_no_deberia_llamarse(host):
+        raise AssertionError("no debería medir nada: la marca no está reportada")
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=tomar_no_deberia_llamarse, registro_ruta=tmp_path / "r.jsonl", salida=salidas.append))
+    assert rc == 2
+    assert any("huella_no_reportada" in l for l in salidas)
+
+
+def test_aceptar_con_cerrada_falla_huella_no_reportada(tmp_path):
+    misiones = tmp_path / "misiones"
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"), H.Marca(huella=_huella("atemai"), estado=H.CERRADA))
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz",
+        tomar_huella_actual=lambda h: None, registro_ruta=tmp_path / "r.jsonl", salida=salidas.append))
+    assert rc == 2
+    assert any("huella_no_reportada" in l for l in salidas)
+
+
+def test_aceptar_sin_medir_con_abierta_funciona(tmp_path):
+    """--sin-medir es la única excepción, y también exige REPORTADA o ABIERTA -- una
+    máquina que se cayó a mitad de turno (ABIERTA, nunca llegó a compararse) también
+    puede aceptarse sin medir si de verdad ya no responde."""
+    misiones = tmp_path / "misiones"
+    vieja = _huella("atemai")
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"), H.Marca(huella=vieja, estado=H.ABIERTA))
+
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz", sin_medir=True,
+        motivo="máquina dada de baja", registro_ruta=tmp_path / "r.jsonl"))
+    assert rc == 0
+    marca = H.leer_marca(H.ruta_huella(misiones, MISION_ID, "atemai"))
+    assert marca.estado == H.ABIERTA
+    assert marca.huella == vieja
+
+
+def test_aceptar_sin_medir_con_cerrada_no_hace_nada(tmp_path):
+    """Con CERRADA, `--sin-medir` tampoco hace nada -- no hay nada pendiente que aceptar."""
+    misiones = tmp_path / "misiones"
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"), H.Marca(huella=_huella("atemai"), estado=H.CERRADA))
+
+    salidas = []
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz", sin_medir=True,
+        motivo="lo que sea", registro_ruta=tmp_path / "r.jsonl", salida=salidas.append))
+    assert rc == 2
+    assert any("huella_no_reportada" in l for l in salidas)
+
+
+def test_el_mutante_m4_sin_el_chequeo_de_estado_muere(tmp_path):
+    """M4: una versión de `aceptar` sin el chequeo `estado in (...)` aceptaría CUALQUIER
+    marca -- incluida una ABIERTA sin `--sin-medir`, o una CERRADA. Los tests de arriba
+    son los que matan ese mutante; este lo prueba de forma directa, mutando la función
+    real."""
+    import jax.ejecutor.contratos.huella as modulo
+    original = modulo.aceptar
+
+    async def version_mutada(**kwargs):
+        # Simula el mutante: nunca revisa `marca.estado`, siempre sigue.
+        kwargs.pop("_nunca", None)
+        marca = modulo.leer_marca(modulo.ruta_huella(kwargs["misiones"], kwargs["mision_id"], kwargs["host"]))
+        return marca.estado  # si esto NO es "reportada"/"abierta" (sin_medir), el mutante "aceptaría" igual
+
+    misiones = tmp_path / "misiones"
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"), H.Marca(huella=_huella("atemai"), estado=H.CERRADA))
+    resultado_mutante = asyncio.run(version_mutada(misiones=misiones, mision_id=MISION_ID, host="atemai"))
+    assert resultado_mutante == H.CERRADA  # el mutante "ve" una CERRADA y seguiría igual -- por eso hay que matarlo
+    assert original is modulo.aceptar  # confirma que no tocamos la función real

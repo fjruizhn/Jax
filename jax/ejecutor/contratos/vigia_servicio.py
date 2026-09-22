@@ -47,11 +47,13 @@ VARIABLE_LATIDO_CADA_S = "JAX_EJECUTOR_VIGIA_LATIDO_CADA_S"
 _TOPE_HUELLA_S = 30
 
 
-def _hint_aceptar(host: str) -> str:
+def _hint_aceptar(host: str, mision_id: str = "<mision_id>") -> str:
     """M-1 (ronda 7): el mensaje de la pausa dice CÓMO salir -- no sólo qué pasó. Ver
     docs/ejecutor-huella-aceptar.md para el procedimiento completo."""
     return ("aceptar con: python -m jax.ejecutor.contratos.huella aceptar "
-            f"--host {host} --mision <mision_id>  (ver docs/ejecutor-huella-aceptar.md)")
+            f"--host {host} --mision {mision_id}  (ver docs/ejecutor-huella-aceptar.md)")
+
+
 _SUFIJO_TURNO = re.compile(r"-t\d+$")
 
 
@@ -133,12 +135,13 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
     Marca ilegible: fail-closed, pausa y no sigue. Devuelve `False` si la misión NO
     debe abrir."""
     for ruta in sorted(Path(misiones).glob(f"*/huella/{host}.json")):
+        mision_id_de_la_ruta = ruta.parent.parent.name  # misiones/<mision_id>/huella/<host>.json
         try:
             marca = huella.leer_marca(ruta)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             log.error("vigia_servicio huella_huerfana_ilegible ruta=%s tipo=%s", ruta, type(exc).__name__)
             await asyncio.to_thread(pausar, pausa_ruta, {
-                "origen": "huella", "motivo": "huella_no_medible", "host": host,
+                "origen": "huella", "motivo": "huella_no_medible", "host": host, "mision_id": mision_id_de_la_ruta,
                 "detalle": ["huerfana_ilegible", str(ruta)]})
             return False
         if marca.estado == huella.CERRADA:
@@ -147,7 +150,7 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
             log.critical("vigia_servicio huella_reportada_sin_aceptar host=%s ruta=%s", host, ruta)
             await asyncio.to_thread(pausar, pausa_ruta, {
                 "origen": "huella", "motivo": "huella_reportada_sin_aceptar", "host": host,
-                "detalle": [_hint_aceptar(host)]})
+                "mision_id": mision_id_de_la_ruta, "detalle": [_hint_aceptar(host, mision_id_de_la_ruta)]})
             return False
         antes = marca.huella
         try:
@@ -155,7 +158,7 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
         except Exception as exc:  # fail-soft: no medible se reporta como huella_no_medible y PAUSA (fail-closed) -- nunca se sigue como si nada
             log.error("vigia_servicio huella_no_medible host=%s motivo=huerfana tipo=%s", host, type(exc).__name__)
             await asyncio.to_thread(pausar, pausa_ruta, {
-                "origen": "huella", "motivo": "huella_no_medible", "host": host,
+                "origen": "huella", "motivo": "huella_no_medible", "host": host, "mision_id": mision_id_de_la_ruta,
                 "detalle": ["huerfana", type(exc).__name__]})
             return False
         if not huella.huella_valida(despues) or huella.cambio(antes, despues):
@@ -166,7 +169,8 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
                                     huella.Marca(huella=antes, estado=huella.REPORTADA, diff=detalle))
             await asyncio.to_thread(pausar, pausa_ruta, {
                 "origen": "huella", "motivo": "huella_cambio_no_declarado", "host": host,
-                "detalle": ["huerfana"] + list(detalle[:20]) + [_hint_aceptar(host)]})
+                "mision_id": mision_id_de_la_ruta,
+                "detalle": ["huerfana"] + list(detalle[:20]) + [_hint_aceptar(host, mision_id_de_la_ruta)]})
             return False
         await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=antes, estado=huella.CERRADA))
     return True
@@ -207,7 +211,8 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
 def hosts_con_sudo(hosts_mision, hosts_pol: dict) -> tuple:
     """Las máquinas de la misión que son remotas -- M-1/M-2 (ronda 3): "con sudo" hoy
     equivale a "remota" (comentario largo en `_principal`: hall9000 es la única local y
-    quedó `sudo=false`; las tres remotas tienen sudo real, Fase 3). Una máquina de la
+    quedó `sudo=false` EN `maquinas.toml` -- que ahí significa "no utilizable desde la
+    jaula", no "sin sudo real"; ver M-3, ronda 8, en ese comentario). Una máquina de la
     misión que no está en la política se omite acá -- ya la rechaza
     `arranque.exigir_contratos` antes de llegar a este punto."""
     return tuple(sorted(n for n in hosts_mision if n in hosts_pol and not hosts_pol[n].es_local))
@@ -231,7 +236,8 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict
             log.error("vigia_servicio huella_no_medible host=%s motivo=sin_apertura", h)
             motivos.append((h, "huella_no_medible"))
             await asyncio.to_thread(pausar, pausa_ruta, {
-                "origen": "huella", "motivo": "huella_no_medible", "host": h, "detalle": ["sin_huella_de_apertura"]})
+                "origen": "huella", "motivo": "huella_no_medible", "host": h, "mision_id": mision_id,
+                "detalle": ["sin_huella_de_apertura"]})
             continue
         try:
             despues = await tomar_huella(h)
@@ -239,13 +245,15 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict
             log.error("vigia_servicio huella_no_medible host=%s tipo=%s", h, type(exc).__name__)
             motivos.append((h, "huella_no_medible"))
             await asyncio.to_thread(pausar, pausa_ruta, {
-                "origen": "huella", "motivo": "huella_no_medible", "host": h, "detalle": [type(exc).__name__]})
+                "origen": "huella", "motivo": "huella_no_medible", "host": h, "mision_id": mision_id,
+                "detalle": [type(exc).__name__]})
             continue
         if not huella.huella_valida(despues):
             log.error("vigia_servicio huella_no_medible host=%s motivo=huella_vacia", h)
             motivos.append((h, "huella_no_medible"))
             await asyncio.to_thread(pausar, pausa_ruta, {
-                "origen": "huella", "motivo": "huella_no_medible", "host": h, "detalle": ["huella_de_cierre_vacia"]})
+                "origen": "huella", "motivo": "huella_no_medible", "host": h, "mision_id": mision_id,
+                "detalle": ["huella_de_cierre_vacia"]})
             continue
         encontrados = huella.hallazgos(antes, despues)
         ruta = ruta_huella(misiones, mision_id, h)
@@ -255,8 +263,8 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict
             await asyncio.to_thread(huella.escribir_marca, ruta,
                                     huella.Marca(huella=antes, estado=huella.REPORTADA, diff=tuple(encontrados)))
             await asyncio.to_thread(pausar, pausa_ruta, {
-                "origen": "huella", "motivo": "huella_cambio_no_declarado",
-                "host": h, "detalle": list(encontrados[:20]) + [_hint_aceptar(h)]})
+                "origen": "huella", "motivo": "huella_cambio_no_declarado", "host": h, "mision_id": mision_id,
+                "detalle": list(encontrados[:20]) + [_hint_aceptar(h, mision_id)]})
             continue
         await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=antes, estado=huella.CERRADA))
     return tuple(motivos)
@@ -356,12 +364,24 @@ async def _principal(ruta_mision: Path) -> int:
     doc = json.loads(await asyncio.to_thread(ctx.cuenta.politica.read_bytes))
     hosts_pol = {h.nombre: h for h in politica.validar(doc).hosts}
     maquinas = A.maquinas_de(politica.validar(doc).hosts, mision.hosts)
-    # M-1/M-2 (ronda 3): "con sudo" hoy equivale a "remota" -- hall9000 es la única local
-    # y quedó sudo=false (M2, jaula bwrap con NoNewPrivs); las tres remotas tienen sudo
-    # real (Fase 3). `politica.Host` no trae un campo `sudo` propio (eso vive en
+    # M-1/M-2 (ronda 3): "con sudo" hoy equivale a "remota" -- hall9000 es la única
+    # local y quedó `sudo=false` en `maquinas.toml`; las tres remotas tienen sudo real
+    # (Fase 3). `politica.Host` no trae un campo `sudo` propio (eso vive en
     # maquinas.toml, host-bound, Fase 0, no se lee en runtime) -- si el día de mañana
     # una máquina remota pierde el sudo o una local lo gana, este criterio hay que
     # revisarlo junto con esa migración, no antes.
+    #
+    # M-3 (ronda 8, texto): ese `sudo=false` NO dice que axioma no tenga sudo en
+    # hall9000 -- SÍ lo tiene, `NOPASSWD:ALL`, en el sudoers real de la máquina. Lo que
+    # dice es que ese sudo queda INERTE desde donde corre el cerebro: la jaula bwrap de
+    # axioma tiene `NoNewPrivs`, que el kernel hace cumplir pase lo que pase en
+    # sudoers -- ningún exec dentro de la jaula puede ganar privilegio, sudo incluido.
+    # Y aunque NoNewPrivs no estuviera, axioma no tiene con qué entrar por ssh a
+    # hall9000 como otra cuenta: la única llave autorizada para axioma en hall9000 es
+    # la del CONTROLADOR (`/etc/jax/controlador/`, dueño `jaxsvc`, modo `600` --
+    # axioma no puede ni leerla; verificado por Hyde). `maquinas.toml: sudo=false`
+    # entonces significa "no utilizable DESDE LA JAULA", no "sin sudo real": hay dos
+    # capas de freno (NoNewPrivs + la llave que axioma no puede leer), no una sola.
     remotas_con_sudo = hosts_con_sudo(mision.hosts, hosts_pol)
     # M-1 (ronda 4): la huella la toma el CONTROLADOR como `fruiz` (JAX_EJECUTOR_ADMIN_USUARIO),
     # NUNCA como `axioma` -- una cuenta sin privilegios no puede medirse a sí misma. Mismo

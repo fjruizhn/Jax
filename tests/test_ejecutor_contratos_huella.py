@@ -8,6 +8,9 @@ Ronda 7 (BLOCK reproducido): `/etc/passwd`/`group`/`shadow` SALEN de la huella -
 `apt install` y el plugin de correo de aaPanel crean cuentas de sistema, y eso es
 administración LEGÍTIMA del cutover, no un ataque a los controles del Ejecutor. Una
 cuenta nueva con sudo real pasa igual por `sudoers.d`, que sí se mide."""
+import os
+import pwd
+
 import pytest
 
 from jax.ejecutor.contratos import huella as H
@@ -212,6 +215,7 @@ def test_principal_sin_marca_no_toca_la_red(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("JAX_EJECUTOR_REGISTRO", str(tmp_path / "registro.jsonl"))
     monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
     monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
+    monkeypatch.setenv("JAX_EJECUTOR_CUENTA", "axioma-de-prueba-que-no-existe")
     rc = H.principal(["aceptar", "--host", "fantasma", "--mision", "11111111-1111-1111-1111-111111111111"])
     assert rc == 2
     assert "huella_no_encontrada" in capsys.readouterr().out
@@ -228,6 +232,129 @@ def test_principal_sin_medir_es_una_bandera_reconocida(tmp_path, monkeypatch, ca
     monkeypatch.setenv("JAX_EJECUTOR_REGISTRO", str(tmp_path / "registro.jsonl"))
     monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
     monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
+    monkeypatch.setenv("JAX_EJECUTOR_CUENTA", "axioma-de-prueba-que-no-existe")
     rc = H.principal(["aceptar", "--host", "fantasma", "--mision", "11111111-1111-1111-1111-111111111111",
-                      "--sin-medir"])
-    assert rc == 2  # sigue sin marca -- pero no revienta por la bandera
+                      "--sin-medir", "--motivo", "prueba de la bandera"])
+    assert rc == 2  # sigue sin marca -- pero no revienta por la bandera ni por el motivo
+
+
+# --- M-2 (ronda 8): identidad validada por SUDO_UID + pwd, axioma no se acepta a sí mismo
+
+def test_resolver_identidad_invocante_usa_sudo_uid_validado(monkeypatch):
+    monkeypatch.setenv("SUDO_UID", str(os.getuid()))
+    monkeypatch.setenv("SUDO_USER", "mentira-no-deberia-usarse")
+    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    assert uid == os.getuid()
+    assert nombre == pwd.getpwuid(os.getuid()).pw_name
+    assert nombre != "mentira-no-deberia-usarse"
+
+
+def test_resolver_identidad_invocante_ignora_sudo_uid_basura_y_cae_a_getuid(monkeypatch):
+    monkeypatch.setenv("SUDO_UID", "no-es-un-numero")
+    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    assert uid == os.getuid()
+    assert nombre == pwd.getpwuid(os.getuid()).pw_name
+
+
+def test_resolver_identidad_invocante_ignora_sudo_uid_inexistente_y_cae_a_getuid(monkeypatch):
+    monkeypatch.setenv("SUDO_UID", "999999")  # uid que casi seguro no existe en el sistema
+    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    assert uid == os.getuid()
+
+
+def test_resolver_identidad_invocante_sin_sudo_uid_usa_getuid_y_nunca_user(monkeypatch):
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    monkeypatch.setenv("USER", "mentira-no-deberia-usarse")
+    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    assert uid == os.getuid()
+    assert nombre != "mentira-no-deberia-usarse"
+
+
+def test_principal_registra_aceptado_por_desde_sudo_uid_no_desde_sudo_user(tmp_path, monkeypatch):
+    """B-2/M-2 combinados: con --sin-medir + --motivo (no toca la red), la marca queda
+    ABIERTA con `aceptada_por` == el nombre resuelto por SUDO_UID -- nunca la mentira de
+    SUDO_USER/USER."""
+    misiones = tmp_path / "misiones"
+    mision_id = "22222222-2222-2222-2222-222222222222"
+    ruta = H.ruta_huella(misiones, mision_id, "atemai")
+    H.escribir_marca(ruta, H.Marca(huella=H.huella_desde_salida("atemai", b"abc  /etc/sudoers\n"),
+                                    estado=H.REPORTADA, diff=("algo cambió",)))
+
+    monkeypatch.setenv("JAX_EJECUTOR_MISIONES", str(misiones))
+    monkeypatch.setenv("JAX_EJECUTOR_ADMIN_USUARIO", "fruiz")
+    monkeypatch.setenv("JAX_EJECUTOR_REGISTRO", str(tmp_path / "registro.jsonl"))
+    monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
+    monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
+    monkeypatch.setenv("JAX_EJECUTOR_CUENTA", "axioma-de-prueba-que-no-existe")
+    monkeypatch.setenv("SUDO_UID", str(os.getuid()))
+    monkeypatch.setenv("SUDO_USER", "mentira-no-deberia-usarse")
+    monkeypatch.setenv("USER", "otra-mentira")
+
+    rc = H.principal(["aceptar", "--host", "atemai", "--mision", mision_id, "--sin-medir",
+                      "--motivo", "prueba M-2"])
+    assert rc == 0
+    marca = H.leer_marca(ruta)
+    nombre_esperado = pwd.getpwuid(os.getuid()).pw_name
+    assert marca.aceptada_por == nombre_esperado
+    assert marca.aceptada_por not in ("mentira-no-deberia-usarse", "otra-mentira")
+
+
+def test_principal_rechaza_cuando_el_invocante_es_la_propia_cuenta_axioma(tmp_path, monkeypatch, capsys):
+    """axioma no puede aceptar su propia huella -- `JAX_EJECUTOR_CUENTA` apunta al
+    MISMO usuario que está invocando la CLI (simulado: sin SUDO_UID, `os.getuid()` es
+    el del proceso de test, y `JAX_EJECUTOR_CUENTA` se pone con el nombre de ESE mismo
+    usuario)."""
+    misiones = tmp_path / "misiones"
+    mision_id = "33333333-3333-3333-3333-333333333333"
+    ruta = H.ruta_huella(misiones, mision_id, "atemai")
+    H.escribir_marca(ruta, H.Marca(huella=H.huella_desde_salida("atemai", b"abc  /etc/sudoers\n"),
+                                    estado=H.REPORTADA, diff=("algo cambió",)))
+
+    monkeypatch.setenv("JAX_EJECUTOR_MISIONES", str(misiones))
+    monkeypatch.setenv("JAX_EJECUTOR_ADMIN_USUARIO", "fruiz")
+    monkeypatch.setenv("JAX_EJECUTOR_REGISTRO", str(tmp_path / "registro.jsonl"))
+    monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
+    monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    monkeypatch.setenv("JAX_EJECUTOR_CUENTA", pwd.getpwuid(os.getuid()).pw_name)
+
+    rc = H.principal(["aceptar", "--host", "atemai", "--mision", mision_id])
+    assert rc == 2
+    assert "axioma_no_puede_aceptar_su_propia_huella" in capsys.readouterr().err
+    marca = H.leer_marca(ruta)
+    assert marca.estado == H.REPORTADA  # NO se tocó: el rechazo es antes de aceptar nada
+
+
+def test_el_mutante_m5_sin_el_rechazo_de_axioma_muere(tmp_path, monkeypatch):
+    """M5: una versión de `principal` sin la comparación uid_invocante == uid_axioma
+    dejaría que axioma acepte su propia huella. Se mata mutando `_resolver_identidad_invocante`
+    para que el proceso invocante y `JAX_EJECUTOR_CUENTA` resuelvan al mismo uid, y
+    verificando -- contra el código REAL de `principal` -- que rechaza."""
+    import jax.ejecutor.contratos.huella as modulo
+
+    original_resolver = modulo._resolver_identidad_invocante
+    try:
+        modulo._resolver_identidad_invocante = lambda env: (12345, "axioma")
+
+        misiones = tmp_path / "misiones"
+        mision_id = "44444444-4444-4444-4444-444444444444"
+        ruta = H.ruta_huella(misiones, mision_id, "atemai")
+        H.escribir_marca(ruta, H.Marca(huella=H.huella_desde_salida("atemai", b"abc  /etc/sudoers\n"),
+                                        estado=H.REPORTADA, diff=("algo cambió",)))
+
+        monkeypatch.setenv("JAX_EJECUTOR_MISIONES", str(misiones))
+        monkeypatch.setenv("JAX_EJECUTOR_ADMIN_USUARIO", "fruiz")
+        monkeypatch.setenv("JAX_EJECUTOR_REGISTRO", str(tmp_path / "registro.jsonl"))
+        monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
+        monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
+
+        class _PwdFalso:
+            pw_uid = 12345
+
+        monkeypatch.setattr(modulo.pwd, "getpwnam", lambda nombre: _PwdFalso())
+        monkeypatch.setenv("JAX_EJECUTOR_CUENTA", "axioma")
+
+        rc = H.principal(["aceptar", "--host", "atemai", "--mision", mision_id])
+        assert rc == 2
+    finally:
+        modulo._resolver_identidad_invocante = original_resolver

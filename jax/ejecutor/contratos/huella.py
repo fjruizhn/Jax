@@ -57,17 +57,21 @@ SIEMPRE, sin salida):
 - `CERRADA`: se comparó, salió limpia. No bloquea nada; sigue guardada como línea
   base fija de la misión (para los turnos siguientes), no se vuelve a re-tomar.
 
-Sólo biblioteca estándar: lo corre `fruiz`/el controlador, no `axioma`.
+Sólo biblioteca estándar (más `jax.ejecutor.contratos.pausa`, que también lo es --
+para `quitar_pausa_si`, ronda 8 B-1): lo corre `fruiz`/el controlador, no `axioma`.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import os
+import pwd
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from jax.ejecutor.contratos import pausa
 
 #: Lo que hace cumplir C3 (registro de sudo -- la INSTALACIÓN de las reglas, no el log)
 #: y C6 (llaves) en cada máquina -- rutas verificadas contra
@@ -257,21 +261,36 @@ async def _tomar_huella_actual(host_nombre: str, *, politica_ruta: Path, admin_u
 
 
 def _registrar_aceptacion(registro_ruta: Path, *, host: str, mision_id: str, aceptado_por: str,
-                          diff: tuple, sin_medir: bool) -> int:
+                          diff: tuple, sin_medir: bool, motivo: str | None = None) -> int:
     """Deja constancia de la aceptación en el registro append-only de C3 (el mismo que
     ya audita cada paso del cerebro -- `jax.ejecutor.contratos.registro`, cadena
-    encadenada en hall9000). `fruiz` ya puede escribir ahí: es el mismo dueño."""
+    encadenada en hall9000).
+
+    M-1 (ronda 8): `/var/log/jax-ejecutor/registro.jsonl` es de `jaxsvc`, con ACL
+    `fruiz:r--` -- fruiz SÓLO puede LEERLO, no escribir ahí (verificado en producción,
+    `getfacl`, 2026-09-22: `user::rw-`, `user:fruiz:r--`, `other::---`; y el
+    DIRECTORIO, `/var/log/jax-ejecutor/`, también sólo le da `fruiz:r-x` -- ni
+    siquiera puede CREAR un archivo nuevo ahí). Corre esta CLI con
+    `sudo -u jaxsvc python -m jax.ejecutor.contratos.huella aceptar ...` (no
+    `sudo python -m ...`: eso escribiría como root, y la marca de la huella -- que SÍ
+    es escribible por fruiz vía la ACL de `JAX_EJECUTOR_MISIONES` -- quedaría con un
+    dueño distinto al resto del árbol si el mismo proceso la toca de paso). `SUDO_UID`
+    sigue siendo el de quien invocó `sudo` (no el de `jaxsvc`, el destino) -- por eso
+    `aceptado_por` puede seguir resolviendo a la persona real aunque el PROCESO corra
+    como `jaxsvc` (ver `_resolver_aceptado_por`)."""
     from jax.ejecutor.contratos.registro import Registro
 
     reg = Registro(registro_ruta)
     try:
         return reg.anotar({"evento": "huella_aceptada", "host": host, "mision_id": mision_id,
-                           "aceptado_por": aceptado_por, "sin_medir": sin_medir, "diff_aceptado": list(diff)})
+                           "aceptado_por": aceptado_por, "sin_medir": sin_medir, "diff_aceptado": list(diff),
+                           "motivo": motivo})
     finally:
         reg.cerrar()
 
 
 async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: str, sin_medir: bool = False,
+                  motivo: str | None = None,
                   politica_ruta: Path | None = None, admin_usuario: str | None = None,
                   registro_ruta: Path | None = None, pausa_ruta: Path | None = None,
                   tomar_huella_actual=None, registrar=_registrar_aceptacion,
@@ -284,13 +303,25 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
     alcanza: `arranque.exigir_contratos` (C5) sigue viendo esa pausa puesta y rechaza
     CUALQUIER misión nueva, aunque la marca de la huella ya esté `ABIERTA` de nuevo; el
     pausa.json es un archivo APARTE del que la huella no sabe nada. Devuelve 0 si
-    aceptó, 2 si no encontró la marca.
+    aceptó, 2 si no encontró la marca o si no hay nada que aceptar.
+
+    B-2 (ronda 8): sólo se acepta una marca `REPORTADA` -- es la única con un diff de
+    verdad que aceptar. `--sin-medir` es la ÚNICA excepción, y TAMBIÉN exige
+    `REPORTADA` o `ABIERTA` (una máquina que se cayó a mitad de turno, nunca llegó a
+    compararse, y de verdad ya no responde): con `CERRADA` no hay nada pendiente, y
+    `sin_medir` tampoco hace nada ahí. `motivo` (MINOR, ronda 8) es obligatorio con
+    `sin_medir=True` -- se registra en el evento de C3, para que quede escrito POR QUÉ
+    se aceptó sin poder confirmar nada.
 
     `tomar_huella_actual`/`registrar` inyectables (tests): por default,
     `tomar_huella_actual` es `_tomar_huella_actual` (ssh real, necesita
     `politica_ruta`/`admin_usuario`) y `registrar` es `_registrar_aceptacion` (escribe
     en el registro real de C3, necesita `registro_ruta`)."""
     from datetime import datetime, timezone
+
+    if sin_medir and not (motivo and motivo.strip()):
+        salida("codigo=motivo_obligatorio detalle=\"--sin-medir exige --motivo <texto>\"")
+        return 2
 
     tomar = tomar_huella_actual or (
         lambda h: _tomar_huella_actual(h, politica_ruta=politica_ruta, admin_usuario=admin_usuario))
@@ -300,6 +331,11 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
         marca = leer_marca(ruta)
     except (OSError, ValueError, KeyError):
         salida(f"codigo=huella_no_encontrada host={host} mision_id={mision_id}")
+        return 2
+
+    estados_aceptables = (REPORTADA, ABIERTA) if sin_medir else (REPORTADA,)
+    if marca.estado not in estados_aceptables:
+        salida(f"codigo=huella_no_reportada host={host} mision_id={mision_id} estado={marca.estado}")
         return 2
 
     salida(f"--- diff de {host} ({mision_id}), estado={marca.estado} ---")
@@ -314,26 +350,72 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
 
     momento = ahora() if ahora is not None else datetime.now(timezone.utc).isoformat()
     registrar(registro_ruta, host=host, mision_id=mision_id, aceptado_por=aceptado_por,
-             diff=marca.diff, sin_medir=sin_medir)
+             diff=marca.diff, sin_medir=sin_medir, motivo=motivo)
     escribir_marca(ruta, Marca(huella=nueva_huella, estado=ABIERTA, aceptada_por=aceptado_por,
                                aceptada_en=momento))
     if pausa_ruta is not None:
-        try:
-            Path(pausa_ruta).unlink()
-        except FileNotFoundError:  # fail-soft: sin pausa que borrar, ya está en el estado buscado
-            pass
+        # B-1 (ronda 8): NUNCA levantar una pausa ajena -- sólo la de ESTA huella
+        # (origen=huella, mismo host, misma mision_id). Si C4/C5 pausaron por su
+        # cuenta (o la huella de OTRO host/misión), se deja intacta: la huella ya se
+        # aceptó, pero el Ejecutor sigue pausado por lo que sea que puso esa otra
+        # pausa -- avisa con `codigo=pausa_de_otro_origen`, no falla.
+        borro, vista = pausa.quitar_pausa_si(
+            pausa_ruta, coincide=lambda d: (d.get("origen") == "huella" and d.get("host") == host
+                                            and d.get("mision_id") == mision_id))
+        if not borro and vista is not None:
+            salida(f"codigo=pausa_de_otro_origen origen={vista.get('origen')} "
+                  f"motivo={vista.get('motivo')} host_de_la_pausa={vista.get('host')}")
     salida(f"huella_aceptada=true host={host} mision_id={mision_id} sin_medir={sin_medir}")
     return 0
 
 
+def _resolver_identidad_invocante(env) -> tuple[int, str]:
+    """M-2 (ronda 8): la identidad de quien acepta sale de `SUDO_UID` -- el uid de quien
+    invocó `sudo`, que sigue siendo el suyo aunque el proceso corra como otro usuario
+    vía `sudo -u jaxsvc ...` (ver M-1 en `_registrar_aceptacion`) -- VALIDADO
+    resolviéndolo con `pwd`: si no es un entero o no existe ningún usuario con ese uid
+    en el sistema, se descarta y se cae a `os.getuid()` (el uid real del proceso, para
+    cuando esto corre sin `sudo`). Nunca se usan los strings `SUDO_USER`/`USER`
+    directamente -- son variables de entorno que cualquiera con permiso de exportarlas
+    puede poner a mano (`export USER=lo-que-sea`); un uid que además tiene que EXISTIR
+    en `/etc/passwd` es harto más difícil de falsear sin privilegio.
+
+    LÍMITE (declarado, no cerrado): un root arbitrario SÍ puede exportar un `SUDO_UID`
+    falso -- apuntando a cualquier uid real -- antes de invocar esto, y no hay forma de
+    detectarlo desde este proceso. Lo que se cierra es que un usuario SIN privilegios
+    finja ser otro con sólo tocar el entorno."""
+    valor = str(env.get("SUDO_UID", "")).strip()
+    if valor.isdigit():
+        try:
+            uid = int(valor)
+            return uid, pwd.getpwuid(uid).pw_name
+        except (KeyError, OverflowError, ValueError):
+            pass
+    uid = os.getuid()
+    return uid, pwd.getpwuid(uid).pw_name
+
+
 def principal(argv: list[str]) -> int:
     """`python -m jax.ejecutor.contratos.huella aceptar --host <host> --mision <id>
-    [--sin-medir]` -- lee `JAX_EJECUTOR_MISIONES`, `JAX_EJECUTOR_ADMIN_USUARIO`,
-    `JAX_EJECUTOR_REGISTRO`, `JAX_EJECUTOR_PAUSA` (se borra al aceptar: sin eso, C5
-    sigue rechazando toda misión nueva aunque la huella ya esté `ABIERTA`) y la
-    política exportada (`JAX_EJECUTOR_POLITICA`, misma que lee
-    `cuenta_axioma.cuenta_desde_entorno`) del entorno. Corre como fruiz --
-    `$SUDO_USER`/`$USER` es quién queda registrado como `aceptado_por`."""
+    [--sin-medir --motivo "<texto>"]` -- lee `JAX_EJECUTOR_MISIONES`,
+    `JAX_EJECUTOR_ADMIN_USUARIO`, `JAX_EJECUTOR_REGISTRO`, `JAX_EJECUTOR_PAUSA` (se
+    borra al aceptar, y SÓLO si es la pausa de ESTA huella -- ver B-1 en `aceptar()`),
+    `JAX_EJECUTOR_CUENTA` (la cuenta del Ejecutor, `axioma` -- M-2: axioma NUNCA puede
+    aceptar su propia huella, se rechaza antes de tocar nada) y la política exportada
+    (`JAX_EJECUTOR_POLITICA`, misma que lee `cuenta_axioma.cuenta_desde_entorno`) del
+    entorno.
+
+    M-1 (ronda 8): el registro de C3 (`/var/log/jax-ejecutor/registro.jsonl`) y el
+    árbol de misiones (`JAX_EJECUTOR_MISIONES`) son de `jaxsvc` -- `fruiz` sólo tiene
+    lectura sobre el primero. Se corre así:
+
+        sudo -u jaxsvc python -m jax.ejecutor.contratos.huella aceptar \\
+            --host <host> --mision <id>
+
+    (NO `sudo python -m ...`: eso escribe como root, no como el dueño real del árbol.)
+    `SUDO_UID` sigue siendo el de quien tecleó `sudo` -- por eso `aceptado_por` resuelve
+    a la persona real (ver `_resolver_identidad_invocante`) aunque el PROCESO corra como
+    `jaxsvc`."""
     import argparse
     import asyncio
     import os as _os
@@ -345,17 +427,28 @@ def principal(argv: list[str]) -> int:
     ac.add_argument("--mision", required=True, dest="mision_id")
     ac.add_argument("--sin-medir", action="store_true",
                     help="La máquina ya no existe o no responde: acepta sin volver a medir.")
+    ac.add_argument("--motivo", default=None,
+                    help="Obligatorio con --sin-medir: por qué se acepta sin remedir. Queda en el registro.")
     args = p.parse_args(argv)
 
     env = _os.environ
-    aceptado_por = env.get("SUDO_USER") or env.get("USER") or "desconocido"
     try:
+        cuenta_ejecutor = env["JAX_EJECUTOR_CUENTA"]
+        uid_invocante, aceptado_por = _resolver_identidad_invocante(env)
+        try:
+            uid_axioma = pwd.getpwnam(cuenta_ejecutor).pw_uid
+        except KeyError:
+            uid_axioma = None
+        if uid_axioma is not None and uid_invocante == uid_axioma:
+            print(f"codigo=axioma_no_puede_aceptar_su_propia_huella cuenta={cuenta_ejecutor}", file=sys.stderr)
+            return 2
+
         from jax.ejecutor.contratos import pausa as _pausa
         return asyncio.run(aceptar(
             misiones=Path(env["JAX_EJECUTOR_MISIONES"]), mision_id=args.mision_id, host=args.host,
             politica_ruta=Path(env["JAX_EJECUTOR_POLITICA"]), admin_usuario=env["JAX_EJECUTOR_ADMIN_USUARIO"],
             registro_ruta=Path(env["JAX_EJECUTOR_REGISTRO"]), pausa_ruta=_pausa.ruta_de_la_pausa(env),
-            aceptado_por=aceptado_por, sin_medir=args.sin_medir))
+            aceptado_por=aceptado_por, sin_medir=args.sin_medir, motivo=args.motivo))
     except KeyError as exc:
         print(f"codigo=sin_configurar variable={exc.args[0]}", file=sys.stderr)
         return 2
