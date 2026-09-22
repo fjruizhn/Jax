@@ -88,9 +88,29 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
 
         # GAP2 Fase4: write_file commitea -- el fixture necesita ser un repo
         # git real para probar el camino feliz de escritura sin mockear git.
-        subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"], cwd=self.workspace, check=True)
-        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "fixture inicial"], cwd=self.workspace, check=True)
+        #
+        # CI (jax#260, ronda de cierre): `ToolAuthorityTest` reventó UNA vez en el
+        # runner real (nunca en hall9000, ni en 3 corridas completas de la suite ni en
+        # 40 corridas sueltas de este archivo) con `OSError: Directory not empty:
+        # '.../.git/objects'` DENTRO de `TemporaryDirectory.cleanup()` -- `shutil.rmtree`
+        # encontrando algo escrito en `.git/objects` DESPUÉS de que `git commit` ya
+        # había devuelto. Mecanismo confirmado contra `git-gc(1)`, no adivinado: "porcelain
+        # operations that create objects" (commit lo es) disparan `git gc --auto`, y
+        # `gc.autoDetach` -- que decide si esa `gc` corre EN SEGUNDO PLANO -- es `true`
+        # por defecto; `subprocess.run(..., check=True)` sólo espera al `commit` de
+        # primer plano, no al `gc` detached que pudo quedar escribiendo atrás. `gc.auto=0`
+        # apaga la heurística ENTERA de `git gc --auto` (no sólo el umbral de objetos
+        # sueltos -- lo dice el propio manual), así que nunca se dispara nada detrás.
+        # `core.fsmonitor=false` de más, por si el git del runner lo trae encendido por
+        # defecto. Ningún comportamiento observable del fixture cambia (el repo, los
+        # commits y los SHA siguen siendo los mismos), sólo se le saca a
+        # git la posibilidad de dejar algo escribiendo en `.git/` después de salir.
+        _GIT_SIN_AYUDANTES = ["-c", "gc.auto=0", "-c", "core.fsmonitor=false"]
+        subprocess.run(["git", *_GIT_SIN_AYUDANTES, "init", "-q"], cwd=self.workspace, check=True)
+        subprocess.run(["git", *_GIT_SIN_AYUDANTES, "-c", "user.name=t", "-c", "user.email=t@t", "add", "-A"],
+                       cwd=self.workspace, check=True)
+        subprocess.run(["git", *_GIT_SIN_AYUDANTES, "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-q", "-m", "fixture inicial"], cwd=self.workspace, check=True)
 
         # unreadable.txt DESPUÉS del commit inicial -- `git add -A` necesita
         # leer el contenido para hashear el blob; con chmod 000 ya puesto,
