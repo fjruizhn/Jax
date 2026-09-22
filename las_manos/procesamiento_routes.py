@@ -299,7 +299,7 @@ def _procesar_una_ruta(trabajo: Path, ruta: str) -> ResultadoArchivo:
 
     try:
         ficha = ingesta.ingerir(resolved, trabajo)
-    except Exception as exc:  # fail cerrado: un archivo roto no tumba el lote
+    except Exception as exc:  # fail-soft: ingerir() puede fallar por cualquier motivo (formato no soportado, archivo corrupto, extractor roto); se devuelve ResultadoArchivo(estado="error") con el detalle en vez de propagar y tumbar el resto del lote
         logger.error("procesamiento: fallo ingiriendo '%s': %r", ruta, exc)
         return ResultadoArchivo(archivo=ruta, estado="error", error=str(exc))
 
@@ -516,7 +516,7 @@ async def _ejecutar_trabajo(
                 result_path=result_path,
                 result_summary=f"{len(resultados)} archivo(s): {por_estado}"[:200],
             )
-        except Exception as exc:
+        except Exception as exc:  # fail-soft: este worker corre vía create_task fire-and-forget; un fallo inesperado procesando el lote, guardando el resultado o actualizando el store se convierte en job FAILED con el detalle en vez de dejar el job colgado en RUNNING para siempre
             logger.error("procesamiento: job %s falló: %r", job_id, exc)
             store.update(
                 job_id, status=JobStatus.FAILED.value, finished_at=time.time(),

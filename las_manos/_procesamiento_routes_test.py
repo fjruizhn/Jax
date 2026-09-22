@@ -1416,7 +1416,15 @@ class TrabajoHTTPTest(unittest.TestCase):
         nunca corre. Este test corre DE VERDAD todos los handlers de
         `startup` que `server.app` registra (con lo que tocaría la base
         reemplazado por dobles) y exige que la reconciliación se haya
-        EJECUTADO una vez."""
+        EJECUTADO una vez.
+
+        `_configure_b7_trusted_runtime()` corre en el MISMO handler de
+        arranque (jax#250) y exige `JAX_DEPLOYMENT_ID`/`JAX_DB_HOST`/
+        `JAX_DB_PORT` y MariaDB real -- infraestructura ajena a lo que este
+        test mide. Se neutraliza esa exigencia puntual (no el chequeo B7 en
+        sí, que sigue intacto en producción) para poder seguir ejecutando el
+        resto de los handlers reales, reconciliar_trabajos_huerfanos()
+        incluido."""
         import server
 
         reconciliar = Mock(return_value=0)
@@ -1426,7 +1434,8 @@ class TrabajoHTTPTest(unittest.TestCase):
             for handler in server.app.router.on_startup:
                 await handler()
 
-        with patch("jacobs.subpipelines.config_subpipelines"), \
+        with patch.object(server, "_configure_b7_trusted_runtime"), \
+             patch("jacobs.subpipelines.config_subpipelines"), \
              patch.object(server.jacobs_store, "tamanio_pool"), \
              patch.object(server.jacobs_store, "init_tables", AsyncMock()), \
              patch("motor_registry.routes.init_motor_catalog", AsyncMock()), \
