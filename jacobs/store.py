@@ -799,6 +799,18 @@ async def conexion_dedicada(found_rows: bool = False) -> aiomysql.Connection:
        negocia en el handshake, no se enciende por sesion, y ponerselo al pool
        cambiaria en silencio el conteo de filas de cualquier UPDATE que se
        agregue despues.
+    2. `found_rows=True` MAS una transaccion explicita de dos sentencias --
+       `pipeline_transicion_descarte` (2026-09-22-descartar-pipelines, Task 3,
+       fix round 1, Ruling 9). Misma razon 1 para el CAS (reescribe
+       status/epoca), y ADEMAS necesita que el UPDATE del CAS y el INSERT del
+       evento de auditoria en `jacobs_events` corran en la MISMA transaccion,
+       sobre la MISMA conexion (`transaccion()`, ver mas abajo): si el evento
+       no se pudiera escribir, el CAS tiene que deshacerse con el, porque en
+       `recover`/`hide`/`restore` ese evento es el UNICO registro de quien
+       hizo la transicion. Una conexion del pool no sirve para esto: el pool
+       podria devolver una conexion distinta entre dos adquisiciones
+       separadas, y la transaccion necesita ser una sola conexion de punta a
+       punta.
     (Hasta el 2026-09-17 habia una segunda razon, `candado_de_activos()`, el
     GET_LOCK del cupo: se retiro junto con el candado, porque el cupo lo hace
     cumplir ahora una condicion dentro de cada escritura que lo consume.)

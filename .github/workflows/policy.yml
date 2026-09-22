@@ -602,6 +602,21 @@ jobs:
           # orden; y el chequeo estatico de que tamanio_pool() no nombre
           # variables a mano). El numero es EL QUE CONTO EL RUNNER ("157
           # passed"), no el de sumar comentarios: ese error ya rompio CI hoy.
+          # 157 (sin cambio) -- feat/descartar-pipelines, Task 3, fix round 2,
+          #   2026-09-22 (BLOCK-1, hallazgo de este mismo job en 7a3fff3):
+          #   ExcepcionAlPoolTest::test_la_excepcion_al_pool_no_se_amplia_sola
+          #   daba rojo porque `jacobs/store.py::pipeline_transicion_descarte`
+          #   (fix round 1, Ruling 9) llama a `conexion_dedicada()` y no
+          #   estaba en `LLAMADORES` -- el guard existe para que ampliar la
+          #   excepcion al pool sea una decision explicita, y esta rama la
+          #   amplio sin declararla. Se agrega la entrada con su razon
+          #   (CLIENT.FOUND_ROWS, igual que las otras dos, MAS la transaccion
+          #   de auditoria) y se actualiza el docstring de `conexion_dedicada`
+          #   (decía "tres funciones" pero listaba sólo dos razones -- ahora
+          #   son dos razones reales para tres funciones). CERO tests nuevos:
+          #   la lista de `LLAMADORES` es datos, no un test; el piso se queda
+          #   en 157. Corrida COMPLETA de este job confirmada en rojo antes
+          #   del arreglo (mismo mensaje que reportó CI) y en verde después.
           grep -qE "^157 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 157 tests CORRIDOS (no skipeados)."; exit 1; }
 
@@ -4620,6 +4635,28 @@ jobs:
           #   porque el UPDATE queda autocommiteado aunque el evento falle);
           #   revertida. Verde tras -- 143 passed, 0 failed (141 anteriores
           #   + 2 nuevos).
+          # 143 (sin cambio) -- feat/descartar-pipelines, Task 3, fix round 2,
+          #   2026-09-22 (MAJOR de la revisión): el mock de
+          #   `test_si_el_insert_del_evento_falla_el_update_no_queda`
+          #   (`side_effect=RuntimeError` SIN mirar sus argumentos) no
+          #   distinguía "el INSERT se intentó en la conexión correcta,
+          #   dentro de la transacción, y falló" de "ni siquiera se llegó a
+          #   intentar" -- seguía en verde aunque alguien sacara
+          #   `conexion=conn`. Reemplazado por un error REAL de MariaDB: el
+          #   `evento_payload` de ese test lleva `float("nan")` -- Python lo
+          #   serializa (`json.dumps` con `allow_nan=True` por default), pero
+          #   la columna `payload JSON` de `jacobs_events` trae un
+          #   `CHECK (JSON_VALID(payload))` automático (MariaDB declara JSON
+          #   como alias de LONGTEXT + ese CHECK desde 10.2.7) y `NaN` no es
+          #   JSON válido -- confirmado contra la base real antes de escribir
+          #   el test: `(4025, "CONSTRAINT \`jacobs_events.payload\` failed
+          #   ...")`. CERO tests nuevos (se reescribió el mismo test, no se
+          #   agregó otro): el piso se queda en 143. Mutación re-verificada
+          #   con el error real (no el mock viejo): revertir a dos conexiones
+          #   separadas sigue tumbando el test, y por la razón correcta
+          #   (`fila.status == discarded`, no `aborted`: el UPDATE ya había
+          #   quedado autocommiteado en su propia conexión antes de que el
+          #   INSERT del evento fallara en la otra).
           grep -qE "^143 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 143 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA

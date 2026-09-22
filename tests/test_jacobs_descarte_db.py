@@ -18,7 +18,6 @@ import json
 import time
 import unittest
 import uuid
-from unittest import mock
 
 from base_de_test import exigir_base_de_test  # noqa: E402
 
@@ -337,16 +336,45 @@ class TransicionDescarteAtomicaDBTest(unittest.IsolatedAsyncioTestCase):
                 return list(await cur.fetchall())
 
     async def test_si_el_insert_del_evento_falla_el_update_no_queda(self):
-        """El INSERT del evento revienta (`event_append` mockeado -- inyecta
-        el fallo sin depender de un error real de MariaDB): la fila TIENE
-        que seguir en `aborted` (el UPDATE se descarta con ella, `transaccion()`
-        cierra la conexión en vez de mandar ROLLBACK) y no puede haber
-        quedado NINGÚN evento."""
-        with mock.patch.object(store, "event_append", side_effect=RuntimeError("boom")):
-            with self.assertRaises(RuntimeError):
-                await _transicion(
-                    self.pid, 3, "discard",
-                    desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        """El INSERT del evento revienta con un error REAL de MariaDB, no un
+        mock.
+
+        Fix round 2 (MAJOR de la revisión): un `mock.patch.object(store,
+        "event_append", side_effect=...)` que levanta SIN mirar sus
+        argumentos no distingue "el INSERT se intentó en la conexión
+        correcta, dentro de la transacción, y falló" de "ni siquiera se
+        llegó a intentar" -- si alguien saca `conexion=conn` en
+        `store.py::pipeline_transicion_descarte`, el mock ciego de la
+        versión anterior seguía en verde igual, porque de todos modos iba a
+        levantar. Reemplazado por un fallo que la base MISMA produce: el
+        `evento_payload` de este test lleva un `float("nan")` -- Python
+        serializa `NaN`/`Infinity` por defecto (`json.dumps(..., allow_nan=True)`
+        es el default), pero la gramática JSON estricta no los admite. La
+        columna `payload JSON` de `jacobs_events` es, en MariaDB, un alias
+        de `LONGTEXT` con un `CHECK (JSON_VALID(payload))` automático desde
+        10.2.7 -- así que el INSERT choca con ese CHECK. Confirmado contra
+        la base real antes de escribir esta versión:
+        `(4025, "CONSTRAINT \\`jacobs_events.payload\\` failed for ...")`.
+
+        Con el error viniendo de la base y no de un doble, la aserción de
+        abajo (`fila.status == aborted`) sí depende de qué conexión recibió
+        el INSERT: si el INSERT fallara en una conexión DISTINTA a la del
+        UPDATE (la mutación de "volver a dos conexiones"), el UPDATE ya
+        habría quedado autocommiteado en su propia conexión ANTES de que el
+        evento fallara, y la fila terminaría en `discarded` -- la aserción
+        cae. Con las dos en la MISMA transacción, el error del INSERT
+        descarta también el UPDATE con ella (`transaccion()` cierra la
+        conexión en vez de mandar `ROLLBACK`), y la fila queda en `aborted`."""
+        payload_invalido = {
+            "user_id": "u1", "desde": "aborted", "a": "discarded", "x": float("nan"),
+        }
+        with self.assertRaises(Exception) as ctx:
+            await store.pipeline_transicion_descarte(
+                self.pid, 3, "discard",
+                desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1",
+                evento_tipo="PIPELINE_DISCARDED", evento_payload=payload_invalido,
+            )
+        self.assertIn("4025", str(ctx.exception))
         fila = await store.pipeline_get(self.pid)
         self.assertEqual(fila.status, PipelineStatus.aborted)
         self.assertEqual(await self._eventos(), [])
