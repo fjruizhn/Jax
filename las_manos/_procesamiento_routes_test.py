@@ -276,6 +276,49 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             contenido = Path(ruta).read_text(encoding="utf-8")  # no debe lanzar
             assert "\\udcff" in contenido  # escapado como \uXXXX (ASCII puro)
 
+    def test_N2_resultado_no_codificable_sanea_el_nombre(self):
+        """Unitario y directo: el `archivo` que `_resultado_no_codificable`
+        produce tiene que ser ASCII puro -- sin esto, el fallback de
+        `_guardar_resultado` (ensure_ascii=True) terminaría rescatando el
+        lote de todos modos, y un test end-to-end no notaría que ESTA
+        sanitización puntual desapareció."""
+        r = rutas_mod._resultado_no_codificable("malo\udcff.pdf")
+        r.archivo.encode("ascii")  # no debe lanzar -- si lanza, no es ASCII puro
+        assert "\udcff" not in r.archivo
+
+    # -- N-4: RUNNING no se adelanta a que un hilo REAL arranque -----------
+    async def test_N4_running_no_se_marca_mientras_el_archivo_sigue_en_cola(self):
+        """Pool de UN hilo, ocupado con otra cosa (bloqueado a propósito):
+        el archivo del trabajo bajo prueba queda EN COLA, sin arrancar
+        todavía -- el job tiene que seguir en `pending`, nunca `running`,
+        mientras eso dure."""
+        executor_1_hilo = ThreadPoolExecutor(max_workers=1, thread_name_prefix="test-running-tardio")
+        self.addCleanup(executor_1_hilo.shutdown)
+        loop = asyncio.get_running_loop()
+        bloqueo = threading.Event()
+        ocupa = loop.run_in_executor(executor_1_hilo, bloqueo.wait)
+
+        self._archivo_en_workspace("a.pdf")
+        semaforo = asyncio.Semaphore(1)
+        job_id = self._crear_job()
+        with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("6" * 64)):
+            await semaforo.acquire()
+            tarea = asyncio.create_task(
+                rutas_mod._ejecutar_trabajo(
+                    job_id, "p", ["a.pdf"], store=self.store,
+                    executor=executor_1_hilo, executor_io=self.executor_io, semaforo=semaforo,
+                )
+            )
+            await asyncio.sleep(0.05)  # "a.pdf" quedó EN COLA -- el único hilo está ocupado
+            assert self.store.get(job_id).status == JobStatus.PENDING, (
+                f"RUNNING se marcó sin que ningún hilo real hubiera arrancado: {self.store.get(job_id)}"
+            )
+            bloqueo.set()
+            await tarea
+            await ocupa
+
+        assert self.store.get(job_id).status == JobStatus.COMPLETED
+
     async def test_marca_running_antes_de_completed(self):
         vistos: list[str] = []
         original_update = self.store.update
