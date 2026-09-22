@@ -1013,8 +1013,29 @@ async def _correr_trabajo(
             iteration_results.append(result)
 
             if result["decision"] == "executed":
-                if name == "read_file" and result.get("content"):
-                    total_read_bytes += len(result["content"].encode("utf-8"))
+                if name == "read_file":
+                    # "content" acá viene envuelto en <untrusted_source>
+                    # (sobre-fuente-no-confiable, ver tool_authority._read_file
+                    # / _wrap_untrusted_source) -- el envoltorio, el path y el
+                    # sha256 son metadata NUESTRA, no el archivo. El tamaño
+                    # real viene de bytes_read, puesto ahí a propósito por
+                    # tool_authority._read_file para no confundir los dos --
+                    # mismo patrón que bytes_written en write_file, dos
+                    # líneas abajo.
+                    #
+                    # Default FAIL-CLOSED (hallazgo M-5, 2026-09-21): si
+                    # alguna ruta futura devolviera "executed" sin
+                    # bytes_read, un default de 0 sumaría CERO al
+                    # presupuesto -- el tope dejaría de contar en silencio,
+                    # exactamente lo que P10 prohíbe (ambigüedad = rechazo,
+                    # nunca aprobación implícita). El envoltorio SOLO agrega
+                    # bytes (nunca quita), así que el tamaño de "content" es
+                    # cota SUPERIOR del crudo: como fallback cierra antes de
+                    # tiempo, nunca dejaría pasar de más.
+                    bytes_read = result.get("bytes_read")
+                    if bytes_read is None:
+                        bytes_read = len((result.get("content") or "").encode("utf-8"))
+                    total_read_bytes += bytes_read
                 elif name == "write_file":
                     # "content" acá es un mensaje de estado ("Escrito: X
                     # bytes"), NO el contenido del archivo -- el tamaño real
