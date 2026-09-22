@@ -4,7 +4,10 @@
 jax-platform lista los pipelines de un dueño con
 `WHERE user_id=%s AND tenant_id=%s ORDER BY created_at`: el indice compuesto
 (user_id, tenant_id, created_at) cubre el filtro y el orden. Se crea en
-init_tables(), que corre en CADA arranque de los procesos que usan Jacobs.
+init_tables(), que corre en CADA arranque de LAS MANOS -- el unico proceso de
+produccion que lo llama (verificado 2026-09-22 contra el codigo; jax-platform
+y el Ejecutor NO lo hacen) -- y ademas de scripts de este repo o de la suite
+de tests que abren la misma base.
 
 Re-revision de la plataforma (2026-09-15): ese DDL no puede colgar el
 arranque ni dejar a Jacobs detras de un metadata lock:

@@ -339,8 +339,14 @@ jobs:
           #   sean transaccionales). Corre acá y no en tests-puros por la misma
           #   razón que los índices: necesita una base real donde ejecutar el
           #   CREATE TABLE de verdad, no una ya clonada con las tablas puestas.
-          grep -qE "^10 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 10 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 10 -> 11 el 2026-09-22 (PR#261, ronda 1 de revision, MAJOR-2):
+          #   EngineInnoDBTest suma test_selfcheck_detecta_pool_creado_antes_del_parche
+          #   (+1) -- prueba que el propio test revienta con un mensaje claro si
+          #   el pool de su loop ya existia antes de forzar MyISAM via
+          #   init_command (la mutacion que lo haria pasar en falso), en vez de
+          #   dar un falso verde.
+          grep -qE "^11 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 11 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en

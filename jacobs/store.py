@@ -1599,8 +1599,12 @@ async def init_tables() -> None:
             # `CREATE INDEX` no acepta IF NOT EXISTS en MariaDB, asi que se
             # chequea information_schema primero -- mismo patron idempotente
             # que las columnas de arriba. init_tables() corre en CADA arranque
-            # de los tres procesos: si esto no fuera idempotente, el segundo
-            # arranque romperia en produccion.
+            # de LAS MANOS -- el unico proceso de produccion que lo llama
+            # (verificado 2026-09-22, ver el docstring de
+            # `_agregar_columna_acotada` mas arriba) -- y ademas de scripts
+            # de este repo (`loadtest/`) o de la suite de tests contra la
+            # misma base: si esto no fuera idempotente, el segundo arranque
+            # romperia en produccion.
             #
             # La lista vive en _INDICES (arriba) para que su forma se pruebe
             # sin DB (tests/test_store_indice_duenio.py).

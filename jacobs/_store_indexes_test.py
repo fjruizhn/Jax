@@ -18,14 +18,26 @@ a mano en `jax_memory` tendria exactamente la misma forma: invisible para un
 dev nuevo, para CI y para un restore de desastre.
 
 TAMBIEN cubre `ENGINE=InnoDB` de `jacobs_pipelines`/`jacobs_steps`/
-`jacobs_events` (revision final de la rama Descartar, 2026-09-22): mismo
-mecanismo (`init_tables()`, `information_schema`), mismo job de CI (necesita
-una base VACIA -- ver mas abajo por que el DROP), asi que va aca en vez de en
-un archivo nuevo que requeriria su propio wireado en policy.yml.
+`jacobs_events` (revision final de la rama Descartar, 2026-09-22; corregido
+en la ronda 1 de PR#261): mismo mecanismo (`init_tables()`,
+`information_schema`), mismo job de CI, asi que va aca en vez de en un
+archivo nuevo que requeriria su propio wireado en policy.yml.
 `pipeline_transicion_descarte` (Ruling 9) inserta el evento de auditoria del
 descarte en la MISMA transaccion que el CAS de estado; eso depende de que las
 dos tablas sean transaccionales, y sin la clausula EXPLICITA esa garantia
-depende de `default_storage_engine` del server, no del codigo.
+depende de `default_storage_engine` del server, no del codigo. A diferencia
+de `StoreIndexesTest` (arriba), que SI necesita la base compartida real
+(prueba el indice de `jacobs_pipelines`), `EngineInnoDBTest` no toca esa
+tabla en absoluto: corre el DDL contra nombres de tabla DESCARTABLES propios
+(`jacobs_engine_probe_*`) -- MAJOR-3 de la ronda 1 de PR#261: la version
+anterior DROPeaba `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` de la
+base COMPARTIDA (`jax_memory_test` sin `JAX_TEST_DB_SUFIJO`) y las recreaba
+solo con el DDL base, sin las columnas de los ALTER ni los indices de
+`_INDICES` ni filas -- la clase de incidente R38: otra sesion en la misma
+base pierde sus filas y su esquema a mitad de camino. Nombres propios evita
+el problema de raiz, no lo repara despues: no hace falta ninguna base vacia
+ni el permiso de destruir nada, alcanza con poder crear dos tablas chicas
+descartables y dropearlas al terminar.
 
 Corre con:
   PYTHONPATH=/home/fruiz/jax .venv/bin/python -m pytest jacobs/_store_indexes_test.py
@@ -126,9 +138,12 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
     async def test_init_tables_es_idempotente_para_los_indices(self):
         """Correrlo dos veces no duplica indices ni revienta.
 
-        `init_tables()` corre en CADA arranque de los tres procesos: si crear un
-        indice no fuera idempotente, el segundo arranque fallaria -- y fallaria
-        en produccion, no aca.
+        `init_tables()` corre en CADA arranque de LAS MANOS -- el unico
+        proceso de produccion que lo llama (verificado 2026-09-22 contra el
+        codigo; jax-platform y el Ejecutor NO lo hacen) -- y ademas de
+        scripts de este repo o de la suite de tests contra la misma base: si
+        crear un indice no fuera idempotente, el segundo arranque fallaria
+        -- y fallaria en produccion, no aca.
         """
         antes = {(t, c): await self._indice_de(t, c) for t, c in COLUMNAS_CONSULTADAS}
         await store.init_tables()
@@ -136,11 +151,16 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(antes, despues, "init_tables() duplico o perdio indices al repetirse")
 
 
-#: (tabla, constante de DDL) -- misma correspondencia que `init_tables()`.
+#: (tabla real, constante de DDL, nombre DESCARTABLE bajo el que se prueba).
+#: MAJOR-3 (revision 1, PR#261): antes se corria el DDL bajo el nombre REAL
+#: (con un DROP TABLE de la tabla compartida antes) -- el nombre descartable
+#: es lo que evita tocar `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` de
+#: la sesion. El DDL en si es el MISMO texto que corre `init_tables()`
+#: (`store._DDL_JACOBS_*`); solo cambia el nombre de la tabla que declara.
 _DDL_DE = (
-    ("jacobs_pipelines", "_DDL_JACOBS_PIPELINES"),
-    ("jacobs_steps", "_DDL_JACOBS_STEPS"),
-    ("jacobs_events", "_DDL_JACOBS_EVENTS"),
+    ("jacobs_pipelines", "_DDL_JACOBS_PIPELINES", "jacobs_engine_probe_pipelines"),
+    ("jacobs_steps", "_DDL_JACOBS_STEPS", "jacobs_engine_probe_steps"),
+    ("jacobs_events", "_DDL_JACOBS_EVENTS", "jacobs_engine_probe_events"),
 )
 
 
@@ -155,10 +175,39 @@ class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
     reves), reabriendo en silencio el hueco que Ruling 9 cerro. `jacobs_steps`
     tiene el mismo hueco (mismo archivo, mismo patron) aunque nada la use
     todavia en una transaccion multi-tabla; se corrige junto para no dejarla
-    de deuda a medias."""
+    de deuda a medias.
+
+    MAJOR-3 (revision 1, PR#261): la version anterior de este test DROPeaba
+    `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` de la base -- que, sin
+    `JAX_TEST_DB_SUFIJO`, es la `jax_memory_test` COMPARTIDA -- y las
+    recreaba solo con el DDL base, sin las columnas de los ALTER (`user_id`,
+    `tenant_id`, la `visible` GENERATED, las columnas del descarte,
+    `run_epoch`, `owner_ack_at`...), sin ningun indice de `_INDICES` y sin
+    filas. Otra sesion corriendo contra la misma base en ese momento perdia
+    sus filas y podia pegar contra un 1054 (columna desconocida) en su
+    proxima consulta -- la misma clase de incidente que R38, y el detector
+    de DELETE de `tests/test_delete_de_tablas_compartidas.py` no cubre DROP.
+
+    Se decidio por nombres de tabla DESCARTABLES (`jacobs_engine_probe_*`) en
+    vez de restaurar despues (`self.addAsyncCleanup(store.init_tables)`)
+    porque restaurar despues sigue dejando una VENTANA en la que la tabla
+    compartida esta incompleta mientras el test corre, y si el proceso muere
+    a mitad (timeout, OOM, Ctrl-C) el cleanup nunca corre y la base queda
+    rota para todos. Con nombres propios, `jacobs_pipelines`/`jacobs_steps`/
+    `jacobs_events` de la sesion NUNCA se tocan -- no hay ventana que cerrar
+    porque no se abre ninguna. No hace falta una base vacia ni permiso para
+    destruir nada: alcanza con poder crear y dropear tres tablas chicas
+    propias, en cualquier base (compartida o no)."""
 
     async def asyncSetUp(self):
         self.addAsyncCleanup(store.cerrar_pool)
+        self.addAsyncCleanup(self._dropear_tablas_de_prueba)
+
+    async def _dropear_tablas_de_prueba(self) -> None:
+        async with store.conexion(desechable=True) as conn:
+            async with conn.cursor() as cur:
+                for _, _, tabla_prueba in _DDL_DE:
+                    await cur.execute(f"DROP TABLE IF EXISTS {tabla_prueba}")
 
     async def _engine_de(self, cur, tabla: str) -> str | None:
         await cur.execute(
@@ -169,11 +218,15 @@ class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
         fila = await cur.fetchone()
         return fila[0] if fila else None
 
-    async def test_jacobs_pipelines_steps_events_son_innodb_explicito(self):
-        """No alcanza con dropear y recrear en ESTA base: su
-        `default_storage_engine` ya es InnoDB (medido contra la MariaDB real
-        de esta sesion), asi que un `CREATE TABLE` sin `ENGINE=` explicito
-        DA InnoDB igual -- ese control no falla contra el codigo viejo, y un
+    async def _crear_bajo_myisam_forzado(self) -> list[str]:
+        """Ejecuta el DDL de cada tabla bajo una sesion cuyo
+        `default_storage_engine` esta forzado a MyISAM, y devuelve las que
+        NO dieron InnoDB.
+
+        No alcanza con dropear y recrear bajo el `default_storage_engine`
+        real de esta base: ya es InnoDB (medido contra la MariaDB real de
+        esta sesion), asi que un `CREATE TABLE` sin `ENGINE=` explicito DA
+        InnoDB igual -- ese control no falla contra el codigo viejo, y un
         control que no falla no valida nada. `jax_user` tampoco tiene SUPER
         para un `SET GLOBAL default_storage_engine=...` que lo simule de
         verdad (probado a mano: 1227 Access denied).
@@ -183,21 +236,31 @@ class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
         (probado a mano), y el pool de aiomysql (`create_pool`) fija los
         argumentos de conexion UNA vez, al crear el pool, y los reusa para
         cada conexion nueva que abre despues -- asi que el parche tiene que
-        estar activo ANTES de la primera `conexion()` de este test (loop
-        nuevo por metodo con `IsolatedAsyncioTestCase`: este pool no existe
-        todavia).
+        estar activo ANTES de la primera `conexion()` de este test.
 
-        Ejecuta el DDL de cada tabla (`store._DDL_JACOBS_*`, el MISMO texto
-        que corre `init_tables()`) directo, sin pasar por el resto de
-        `init_tables()`: esa funcion sigue con un loop de `ALTER TABLE ...
-        ALGORITHM=INSTANT` sobre columnas de `jacobs_pipelines` (`visible`
-        es GENERATED) que solo InnoDB soporta -- probado a mano: bajo esta
-        misma sesion en MyISAM, ese ALTER revienta con
-        `1845 ALGORITHM=INSTANT is not supported`, ANTES de llegar siquiera
-        a crear `jacobs_steps`/`jacobs_events`. Correr el DDL nombrado
-        aislado evita ese choque y deja probar el ENGINE de las tres, y
-        el test SI falla contra el codigo viejo (medido: las tres dan
-        MyISAM bajo esta sesion)."""
+        MAJOR-2 (revision 1, PR#261): eso significa que si el pool de ESTE
+        loop YA existe cuando se llega aca -- por ejemplo porque alguien
+        agrega `await store.init_tables()` a `asyncSetUp`, copiando el
+        patron de `StoreIndexesTest`, o la suite pasa a un loop de sesion
+        compartido en vez de uno nuevo por metodo -- `init_command` NUNCA
+        corre, la sesion sigue en el `default_storage_engine` real del
+        server (hoy InnoDB), y las tres tablas darian InnoDB aunque el
+        codigo NO tuviera `ENGINE=InnoDB` -- el test pasaria sin haber
+        probado nada. Por eso, antes de crear ninguna tabla, se AUTO-VERIFICA
+        con un `SELECT` que la sesion realmente quedo en MyISAM; si no,
+        revienta con un mensaje que dice por que, en vez de dejar pasar un
+        test que no probo nada. `test_selfcheck_detecta_pool_creado_antes_del_parche`
+        (abajo) es la mutacion que ejercita justo este camino.
+
+        Corre el DDL de cada tabla bajo su nombre DESCARTABLE
+        (`jacobs_engine_probe_*`, ver `_DDL_DE`), no el real: correr
+        `init_tables()` completo bajo MyISAM ademas revienta ANTES de
+        siquiera llegar a crear `jacobs_steps`/`jacobs_events`, en el loop de
+        `ALTER TABLE ... ALGORITHM=INSTANT` sobre `jacobs_pipelines`
+        (`visible` es GENERATED) -- probado a mano: bajo esta misma sesion en
+        MyISAM, ese ALTER da `1845 ALGORITHM=INSTANT is not supported`, que
+        solo InnoDB soporta. Correr el DDL nombrado aislado evita ese choque
+        y deja probar el ENGINE de las tres."""
         cfg_original = store._db_cfg
 
         def _cfg_con_myisam() -> dict:
@@ -205,23 +268,60 @@ class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
             cfg["init_command"] = "SET SESSION default_storage_engine='MyISAM'"
             return cfg
 
-        faltantes = []
+        faltantes: list[str] = []
         with mock.patch.object(store, "_db_cfg", _cfg_con_myisam):
             async with store.conexion(desechable=True) as conn:
                 async with conn.cursor() as cur:
-                    for tabla, nombre_ddl in _DDL_DE:
-                        await cur.execute(f"DROP TABLE IF EXISTS {tabla}")
-                        await cur.execute(getattr(store, nombre_ddl))
-                    for tabla, _ in _DDL_DE:
-                        engine = await self._engine_de(cur, tabla)
+                    await cur.execute("SELECT @@SESSION.default_storage_engine")
+                    (motor_de_sesion,) = await cur.fetchone()
+                    if motor_de_sesion != "MyISAM":
+                        raise AssertionError(
+                            "la simulacion no aplico: "
+                            f"@@SESSION.default_storage_engine={motor_de_sesion!r}, "
+                            "esperaba 'MyISAM'. El pool de este loop ya existia con "
+                            "la conexion REAL antes de este parche (por ejemplo, "
+                            "otro asyncSetUp llamo a store.init_tables() primero): "
+                            "init_command solo se aplica al CREAR una conexion "
+                            "nueva del pool. Sin este chequeo, el test de "
+                            "ENGINE=InnoDB pasaria igual aunque el codigo no lo diga."
+                        )
+                    for tabla, nombre_ddl, tabla_prueba in _DDL_DE:
+                        ddl = getattr(store, nombre_ddl).replace(
+                            f"EXISTS {tabla} (", f"EXISTS {tabla_prueba} (", 1)
+                        await cur.execute(f"DROP TABLE IF EXISTS {tabla_prueba}")
+                        await cur.execute(ddl)
+                    for tabla, _, tabla_prueba in _DDL_DE:
+                        engine = await self._engine_de(cur, tabla_prueba)
                         if engine != "InnoDB":
                             faltantes.append(f"{tabla}={engine!r}")
+        return faltantes
+
+    async def test_jacobs_pipelines_steps_events_son_innodb_explicito(self):
+        """El test SI falla contra el codigo viejo (medido: las tres dan
+        MyISAM bajo esta sesion forzada) -- ver `_crear_bajo_myisam_forzado`
+        para como se fuerza la simulacion."""
+        faltantes = await self._crear_bajo_myisam_forzado()
         self.assertEqual(
             faltantes, [],
             f"sin ENGINE=InnoDB explicito: {faltantes} -- agregar ENGINE=InnoDB "
             "al CREATE TABLE correspondiente en jacobs/store.py (Ruling 9: "
             "pipeline_transicion_descarte depende de que sean transaccionales).",
         )
+
+    async def test_selfcheck_detecta_pool_creado_antes_del_parche(self):
+        """Mutacion pedida en la revision (MAJOR-2, PR#261 ronda 1): crea el
+        pool de ESTE loop con la conexion REAL (la misma trampa que copiar
+        `asyncSetUp` de `StoreIndexesTest`, que llama a `store.init_tables()`
+        ahi) ANTES de que `_crear_bajo_myisam_forzado` parchee `_db_cfg`.
+        `store.init_tables()` en si es seguro contra la base compartida --
+        `CREATE TABLE IF NOT EXISTS` + ALTERs idempotentes, lo mismo que hace
+        `StoreIndexesTest.asyncSetUp` en cada corrida -- lo que se prueba
+        aca es que, con el pool ya creado, la simulacion de MyISAM NO aplica
+        y el auto-chequeo lo detecta y revienta con un mensaje claro, en vez
+        de dejar pasar un test que no probo nada."""
+        await store.init_tables()  # crea el pool de este loop con la cfg REAL
+        with self.assertRaisesRegex(AssertionError, "la simulacion no aplico"):
+            await self._crear_bajo_myisam_forzado()
 
 
 if __name__ == "__main__":
