@@ -49,10 +49,25 @@ def test_ya_no_dice_solo_lees():
     assert "SOLO LEES" not in g.generar()
 
 
-def test_las_cuatro_maquinas_tienen_machine_id_y_sudo_en_el_toml():
+# M2 (2026-09-22, auditoría adversarial): hall9000 corre DENTRO de la jaula bwrap, con
+# NoNewPrivs -- no hay sudo local posible ahí aunque el resto del inventario sí lo tenga.
+SUDO_ESPERADO = {"prod": True, "atemai": True, "bridge": True, "hall9000": False}
+
+
+def test_las_cuatro_maquinas_tienen_machine_id_y_su_sudo_real_en_el_toml():
     for nombre, esperado in MACHINE_ID_ESPERADO.items():
         assert MAQUINAS[nombre]["machine_id"] == esperado, nombre
-        assert MAQUINAS[nombre]["sudo"] is True, nombre
+        assert MAQUINAS[nombre]["sudo"] is SUDO_ESPERADO[nombre], nombre
+
+
+@requiere_constitucion_real
+def test_hall9000_aparece_sin_sudo_en_el_documento():
+    doc = g.generar()
+    linea_hall9000 = next(l for l in doc.splitlines() if l.startswith("- **hall9000**"))
+    assert "sudo: no" in linea_hall9000, linea_hall9000
+    for nombre in ("prod", "atemai", "bridge"):
+        linea = next(l for l in doc.splitlines() if l.startswith(f"- **{nombre}**"))
+        assert "sudo: sí" in linea, linea
 
 
 @requiere_constitucion_real
@@ -94,3 +109,183 @@ def test_seis_impossibles_incluido_pero_no_plugins():
     doc = g.generar()
     assert "LOS SEIS IMPOSIBLES" in doc
     assert "PLUGINS" not in doc.split("LOS SEIS IMPOSIBLES", 1)[0].split("## ")[-1]
+
+
+# --- honestidad de la identidad (auditoría adversarial, ronda 2, 2026-09-22) ------------
+#
+# B1: C1/C2 son ganchos léxicos que atajan ERRORES HONESTOS, no todo lo destructivo --
+# `sudo mv`, `pkill -9`, `iptables -F`, `userdel -r`, `mysqladmin drop`, `sed -i` sobre una
+# zona DNS, `rsync --delete` y `shutil.rmtree` pasan sin disparar nada. La identidad vieja
+# decía "si no existe [el respaldo], el gancho lo bloquea (C2)" -- una promesa de cobertura
+# que C2 no cumple. B2: en producción `ejecutor.c5_auditor_admite_mismo_proveedor = true`
+# y el auditor local es `el_juez` -- "nunca tu mismo proveedor" es falso hoy. LÍMITE: con
+# root, axioma puede anular C3/C4/C6 en esas máquinas -- la identidad no puede prometer
+# "no hay sudo anónimo" ni "te frena de un golpe" como garantías absolutas, y tiene que
+# prohibir explícitamente que axioma toque sus propios controles. M5: el GO es por misión
+# Y por plan -- un paso destructivo fuera del plan se reporta, no se improvisa.
+
+@requiere_constitucion_real
+def test_no_promete_que_el_gancho_bloquea_todo_lo_destructivo():
+    doc = g.generar()
+    assert "el gancho lo bloquea (C2)" not in doc
+    assert "errores honestos" in doc.lower() or "erores honestos" in doc.lower()
+
+
+@requiere_constitucion_real
+def test_nombra_ejemplos_reales_de_lo_que_el_gancho_no_atrapa():
+    doc = g.generar()
+    for ejemplo in ("pkill -9", "iptables -F", "userdel -r", "mysqladmin drop", "shutil.rmtree"):
+        assert ejemplo in doc, ejemplo
+
+
+@requiere_constitucion_real
+def test_exige_citar_el_respaldo_independientemente_del_gancho():
+    doc = g.generar()
+    assert "CITAR" in doc
+
+
+@requiere_constitucion_real
+def test_no_dice_nunca_tu_mismo_proveedor():
+    doc = g.generar()
+    assert "nunca tu mismo proveedor" not in doc
+    assert "ejecutor.c5_auditor_admite_mismo_proveedor" in doc
+
+
+@requiere_constitucion_real
+def test_limite_prohibe_tocar_los_propios_controles():
+    doc = g.generar()
+    assert "LÍMITE" in doc
+    for control in ("sudoers.d/5", "authorized_keys", "ejecutor-freno-remoto", "ejecutor-revocar",
+                    "chattr", "PROHIBIDO"):
+        assert control in doc, control
+
+
+@requiere_constitucion_real
+def test_go_por_mision_cubre_solo_el_plan_aprobado():
+    doc = g.generar()
+    assert "plan" in doc
+    assert "NO SE IMPROVISA" in doc
+
+
+# --- las mismas afirmaciones, con un DOBLE -- corren en CUALQUIER runner ------------
+#
+# B3/M1 (auditoría adversarial 2026-09-22): las pruebas de arriba dependen de que ESTA
+# máquina tenga /home/fruiz/claude-skills/common/CLAUDE.md.core y se SALTAN donde no
+# está -- en CI, siempre. Ninguna de las afirmaciones que importan (SOLO LEES ausente,
+# C1-C6, machine-id, LOS SEIS IMPOSIBLES incluido/PLUGINS excluido, la honestidad de
+# B1/B2/LÍMITE/M5) depende del CONTENIDO real de la constitución -- la identidad vive
+# en cerebros.toml (siempre disponible) y "LOS SEIS IMPOSIBLES" sólo necesita que la
+# fuente TENGA esa sección con ese título exacto. `generar(fuente_constitucion=...)`
+# (seam agregado en esta ronda) deja pasar un doble hermético con las seis secciones
+# declaradas y nada más -- las mismas pruebas corren en CI sin la ruta host-bound.
+
+DOBLE_CONSTITUCION = """## LAS POLÍTICAS DE MARINA
+
+Contenido de prueba, no la constitución real.
+
+## LA REGLA ABSOLUTA
+
+Contenido de prueba.
+
+## LOS NUEVE PRINCIPIOS OPERATIVOS
+
+Contenido de prueba.
+
+## LOS SEIS IMPOSIBLES
+
+Contenido de prueba: la topología de las máquinas.
+
+## JERARQUÍA DE AUTORIDAD
+
+Contenido de prueba.
+
+## HONOR
+
+Contenido de prueba.
+"""
+
+
+@pytest.fixture(scope="session")
+def doble_constitucion(tmp_path_factory):
+    ruta = tmp_path_factory.mktemp("constitucion-doble") / "CLAUDE.md.core"
+    ruta.write_text(DOBLE_CONSTITUCION, encoding="utf-8")
+    return ruta
+
+
+def test_con_doble_ya_no_dice_solo_lees(doble_constitucion):
+    assert "SOLO LEES" not in g.generar(fuente_constitucion=doble_constitucion)
+
+
+def test_con_doble_hall9000_aparece_sin_sudo_en_el_documento(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    linea_hall9000 = next(l for l in doc.splitlines() if l.startswith("- **hall9000**"))
+    assert "sudo: no" in linea_hall9000, linea_hall9000
+    for nombre in ("prod", "atemai", "bridge"):
+        linea = next(l for l in doc.splitlines() if l.startswith(f"- **{nombre}**"))
+        assert "sudo: sí" in linea, linea
+
+
+def test_con_doble_cada_maquina_aparece_con_su_sudo_y_su_machine_id(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    for nombre, machine_id in MACHINE_ID_ESPERADO.items():
+        assert nombre in doc
+        assert machine_id in doc, f"machine-id de {nombre} no aparece en el documento"
+
+
+def test_con_doble_la_identidad_menciona_los_seis_contratos(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    for contrato in ("C1", "C2", "C3", "C4", "C5", "C6"):
+        assert contrato in doc, contrato
+
+
+def test_con_doble_dice_go_por_mision_y_autoridad_de_fernando(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "por misión" in doc or "por mision" in doc
+    assert "Fernando" in doc
+
+
+def test_con_doble_la_regla_de_machine_id_esta_escrita(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "machine-id" in doc or "machine_id" in doc
+
+
+def test_con_doble_seis_impossibles_incluido_pero_no_plugins(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "LOS SEIS IMPOSIBLES" in doc
+    assert "PLUGINS" not in doc.split("LOS SEIS IMPOSIBLES", 1)[0].split("## ")[-1]
+
+
+def test_con_doble_no_promete_que_el_gancho_bloquea_todo_lo_destructivo(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "el gancho lo bloquea (C2)" not in doc
+    assert "errores honestos" in doc.lower()
+
+
+def test_con_doble_nombra_ejemplos_reales_de_lo_que_el_gancho_no_atrapa(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    for ejemplo in ("pkill -9", "iptables -F", "userdel -r", "mysqladmin drop", "shutil.rmtree"):
+        assert ejemplo in doc, ejemplo
+
+
+def test_con_doble_exige_citar_el_respaldo_independientemente_del_gancho(doble_constitucion):
+    assert "CITAR" in g.generar(fuente_constitucion=doble_constitucion)
+
+
+def test_con_doble_no_dice_nunca_tu_mismo_proveedor(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "nunca tu mismo proveedor" not in doc
+    assert "ejecutor.c5_auditor_admite_mismo_proveedor" in doc
+
+
+def test_con_doble_limite_prohibe_tocar_los_propios_controles(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "LÍMITE" in doc
+    for control in ("sudoers.d/5", "authorized_keys", "ejecutor-freno-remoto", "ejecutor-revocar",
+                    "chattr", "PROHIBIDO"):
+        assert control in doc, control
+
+
+def test_con_doble_go_por_mision_cubre_solo_el_plan_aprobado(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "plan" in doc
+    assert "NO SE IMPROVISA" in doc

@@ -151,15 +151,29 @@ def _eventos_del_stream(salida: bytes):
             yield ev
 
 
+#: Herramientas que cuentan como un PASO de la misión: Bash (comandos) y Skill (las
+#: tres skills declaradas en cerebros.toml, spec 2026-09-22 -- el arnés las tiene en
+#: --allowedTools junto con Bash). Cualquier otra (p. ej. Read) NO cuenta: el Ejecutor
+#: lee con `cat` (Bash), nunca con la herramienta Read.
+_HERRAMIENTAS_QUE_CUENTAN_COMO_PASO = frozenset({"Bash", "Skill"})
+
+
 def pasos_del_stream(salida: bytes) -> tuple:
-    """(pedidas {id: comando}, resultados {id: (contenido crudo, es_error)}, texto final)."""
+    """(pedidas {id: comando}, resultados {id: (contenido crudo, es_error)}, texto final).
+
+    `comando` es el texto del `command` para Bash; para Skill (sin ese campo) queda en
+    `None` -- `capturas()` ya descarta cualquier `comando` que no sea `str`, así que un
+    paso de Skill nunca se lee como si tocara una máquina por ssh. Lo que SÍ gana al
+    contar como paso: entra en `pasos` de `cerebro_termino` y se verifica contra el
+    registro de C3 (`registro_cuadra`) igual que un Bash -- antes se perdía en silencio."""
     pedidas, resultados, final = {}, {}, None
     for ev in _eventos_del_stream(salida):
         mensaje = ev.get("message") if isinstance(ev.get("message"), dict) else {}
         for b in mensaje.get("content") or []:
             if not isinstance(b, dict):
                 continue
-            if ev.get("type") == "assistant" and b.get("type") == "tool_use" and b.get("name") == "Bash":
+            if (ev.get("type") == "assistant" and b.get("type") == "tool_use"
+                    and b.get("name") in _HERRAMIENTAS_QUE_CUENTAN_COMO_PASO):
                 pedidas[b.get("id")] = (b.get("input") or {}).get("command")
             elif ev.get("type") == "user" and b.get("type") == "tool_result":
                 resultados[b.get("tool_use_id")] = (b.get("content"), bool(b.get("is_error", False)))

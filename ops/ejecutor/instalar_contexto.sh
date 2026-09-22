@@ -7,8 +7,10 @@
 # (jax.ejecutor.contratos.arranque.verificar_contexto) rechaza la misión si lo
 # instalado no coincide con lo que el generador produce HOY.
 #
-# Corre como fruiz desde el checkout de producción (/home/fruiz/jax en master); usa
-# sudo para lo que es de root. Idempotente. Lee JAX_EJECUTOR_LIB del entorno
+# Corre como fruiz desde el checkout de producción (/srv/jax-prod/jax en master --
+# JAX_REPO_PATH en /etc/jax/.env, NO /home/fruiz/jax: ese es el checkout de trabajo
+# de Codex desde 2026-09-20, ver jax-checkout-de-produccion-separado); usa sudo para
+# lo que es de root. Idempotente. Lee JAX_EJECUTOR_LIB del entorno
 # (set -a; . <(sudo -n cat /etc/jax/.env)).
 set -euo pipefail
 : "${JAX_EJECUTOR_LIB:?}"
@@ -26,20 +28,34 @@ trap 'rm -rf "$ETAPA"' EXIT
 DESTINO="$JAX_EJECUTOR_LIB/contexto"
 
 echo "--- diff CLAUDE.md (instalado -> nuevo) ---"
-sudo test -e "$DESTINO/CLAUDE.md" \
-  && diff -u <(sudo cat "$DESTINO/CLAUDE.md") "$ETAPA/CLAUDE.md" \
-  || echo "(sin CLAUDE.md instalado todavía)"
+# El mensaje "sin CLAUDE.md instalado todavía" es SÓLO para cuando el archivo no
+# existe -- antes salía igual cuando SÍ existía pero difería, porque `diff -u` sale
+# con 1 al encontrar diferencias y el `||` de una sola cadena no distinguía los dos
+# casos (arreglado 2026-09-22, auditoría adversarial, hallazgo MINOR). `|| true`
+# porque el script corre con `set -e` y un diff con diferencias (rc=1) es el camino
+# ESPERADO, no un error.
+if sudo test -e "$DESTINO/CLAUDE.md"; then
+  diff -u <(sudo cat "$DESTINO/CLAUDE.md") "$ETAPA/CLAUDE.md" || true
+else
+  echo "(sin CLAUDE.md instalado todavía)"
+fi
 echo "--- fin diff ---"
 
 sudo install -d -o root -g root -m 0755 "$DESTINO"
 sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md" "$DESTINO/CLAUDE.md"
 sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md.sha256" "$DESTINO/CLAUDE.md.sha256"
+# M3: el CLAUDE.md vacío que la jaula monta sobre "$HOME/CLAUDE.md" (el de PROYECTO,
+# no el de "$HOME/.claude/" de arriba) -- ver jax/ejecutor/contratos/contexto.py y
+# cuenta_axioma.py.
+sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md.home.vacio" "$DESTINO/CLAUDE.md.home.vacio"
 
-# Las skills: carpeta completa (con subcarpetas), una por una desde la etapa.
-sudo install -d -o root -g root -m 0755 "$DESTINO/skills"
-( cd "$ETAPA/skills" && find . -type f ) | while IFS= read -r rel; do
-  sudo install -D -o root -g root -m 0644 "$ETAPA/skills/$rel" "$DESTINO/skills/$rel"
-done
+# Las skills: reemplazo ATÓMICO del árbol completo (M4, auditoría adversarial
+# 2026-09-22). Instalar archivo por archivo, uno por uno, SÓLO agrega -- una skill
+# retirada de cerebros.toml, o cualquier archivo que quedó de una versión vieja,
+# nunca se borraba. reemplazar_directorio_atomico.sh arma el árbol nuevo aparte y lo
+# intercambia con un `mv` (rename atómico): el destino queda EXACTAMENTE igual a la
+# etapa, ni un archivo de más.
+bash "$(dirname "$(readlink -f "$0")")/reemplazar_directorio_atomico.sh" "$ETAPA/skills" "$DESTINO/skills"
 
 # El punto de montaje de la jaula tiene que existir en el HOME real de la cuenta:
 # aunque bwrap crea el destino solo (comprobado empíricamente, bubblewrap 0.11.1,

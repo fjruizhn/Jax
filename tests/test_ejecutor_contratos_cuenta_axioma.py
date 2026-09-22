@@ -83,6 +83,40 @@ def test_la_jaula_monta_las_skills():
         [jaula[k:k + 3] for k in range(len(jaula))]
 
 
+def test_la_jaula_tapa_el_claude_md_del_proyecto_en_home():
+    """M3 (auditoría adversarial, 2026-09-22): desde la jaula, `axioma` puede escribir
+    `~/CLAUDE.md` (el CLAUDE.md DE PROYECTO, distinto del de `~/.claude/`, que ya está
+    tapado) y Claude Code lo carga igual. Se tapa con un archivo vacío de sólo lectura,
+    mismo patrón que el resto de la jaula."""
+    remoto = CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="canario",
+                              prompt="x")
+    palabras = shlex.split(remoto.split(" && ", 1)[1].replace('"$K"', "K"))
+    i = palabras.index("bwrap")
+    jaula = palabras[i:palabras.index("--", i)]
+    tripletes = [jaula[k:k + 3] for k in range(len(jaula))]
+    assert ["--ro-bind", "/opt/ejecutor/lib/contexto/CLAUDE.md.home.vacio", "$HOME/CLAUDE.md"] in tripletes
+
+
+def test_la_jaula_deja_de_solo_lectura_la_memoria_automatica():
+    """M3: la memoria automática de Claude Code vive en
+    `~/.claude/projects/<cwd sanitizado>/memory/` (verificado 2026-09-22 contra el
+    binario pinneado 2.1.273: la propia ayuda de la opción de settings lo dice). Con
+    `cd ~` como cwd, el sanitizado de `/home/<cuenta>` es `-home-<cuenta>`. Un
+    `--tmpfs` + `--remount-ro` (probado con bwrap real: `touch` adentro da
+    "Read-only file system") deja el directorio SIEMPRE vacío y de sólo lectura --
+    axioma no puede escribirse memoria propia entre misiones."""
+    remoto = CA.remoto_claude(CA.cuenta_desde_entorno(ENV), base_url="http://127.0.0.1:18436", modelo="canario",
+                              prompt="x")
+    palabras = shlex.split(remoto.split(" && ", 1)[1].replace('"$K"', "K"))
+    i = palabras.index("bwrap")
+    jaula = palabras[i:palabras.index("--", i)]
+    ruta = "$HOME/.claude/projects/-home-axioma/memory"
+    duplas = [jaula[k:k + 2] for k in range(len(jaula))]
+    assert ["--tmpfs", ruta] in duplas
+    assert ["--remount-ro", ruta] in duplas
+    assert jaula.index("--remount-ro") > jaula.index("--tmpfs")  # el remount va DESPUÉS del tmpfs
+
+
 def test_la_jaula_tapa_los_includes_del_ssh_del_sistema():
     """Dentro del espacio de usuarios de bwrap los archivos de root se ven de 65534, y ssh rechaza
     un Include del sistema que no es de root («Bad owner or permissions»): sin tapar

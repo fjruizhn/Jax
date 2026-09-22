@@ -8,7 +8,11 @@
 ip = "127.0.0.1"
 puerto = 58291
 machine_id = "37ce158242c649fa80804a8c17b83ca4"
-sudo = true
+# sudo = false (corregido 2026-09-22, auditoría adversarial M2): acá corrés DENTRO de la
+# jaula bwrap, que arranca con NoNewPrivs -- no hay sudo local posible aunque la cuenta
+# esté en el grupo. Antes decía `true`, heredado del resto del inventario sin verificarlo
+# en ESTA máquina (Principio I: el que supone se equivoca).
+sudo = false
 descripcion = "hall9000 (172.16.20.5): host KVM de JAX y de las VMs. Aquí corres tú: comandos locales."
 local = true
 

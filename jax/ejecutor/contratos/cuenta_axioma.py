@@ -23,6 +23,19 @@ SP2 reemplaza esta jaula por el perfil `ejecutor` de hyde_sandbox y conserva est
 montajes.
 
 La llave del cerebro viaja por stdin (`read -r K`), nunca en argv: `ps` la vería.
+
+M3 (auditoría adversarial, 2026-09-22): además de `$HOME/.claude/CLAUDE.md`, Claude Code
+carga el CLAUDE.md DE PROYECTO en el directorio actual -- con `cd ~`, eso es
+`$HOME/CLAUDE.md` -- y, aparte, guarda memoria automática entre sesiones en
+`$HOME/.claude/projects/<cwd saneado>/memory/` (verificado contra el binario pinneado
+2.1.273: `CLAUDE_CODE_DISABLE_AUTO_MEMORY`/`autoMemoryEnabled` y la ayuda de la opción de
+directorio de memoria, que documenta ese default -- no se asume). Las dos rutas quedaban
+sin tapar: `axioma` podía escribirse ahí una identidad o una "memoria" propia que
+sobreviviera entre misiones, con la jaula cargándola igual que el CLAUDE.md real. Se
+tapan con el mismo criterio que el resto de la jaula -- de sólo lectura, sin depender de
+que exista nada del lado del host: un archivo vacío instalado (`$HOME/CLAUDE.md`) y un
+`--tmpfs` + `--remount-ro` (`$HOME/.claude/.../memory`, que bwrap crea solo aunque el
+host no tenga esa carpeta -- probado empíricamente).
 """
 from __future__ import annotations
 
@@ -97,6 +110,13 @@ def _jaula(c: Cuenta) -> str:
         # corre `claude`. Las skills (cerebros.toml `skills`), igual: solo lectura.
         "--ro-bind", q(str(c.lib / contexto.CLAUDE_MD_REL)), '"$HOME/.claude/CLAUDE.md"',
         "--ro-bind", q(str(c.lib / contexto.SKILLS_REL)), '"$HOME/.claude/skills"',
+        # M3: el CLAUDE.md DE PROYECTO (distinto del de arriba) y la memoria automática --
+        # ver el docstring del módulo. `-home-<cuenta>` es el saneado de "$HOME" con "cd ~"
+        # como cwd (reemplaza cada "/" por "-"), la misma convención que documenta la ayuda
+        # de Claude Code para el directorio de memoria por omisión.
+        "--ro-bind", q(str(c.lib / contexto.CLAUDE_MD_HOME_VACIO_REL)), '"$HOME/CLAUDE.md"',
+        "--tmpfs", f'"$HOME/.claude/projects/-home-{c.nombre}/memory"',
+        "--remount-ro", f'"$HOME/.claude/projects/-home-{c.nombre}/memory"',
         "--",
     ])
 

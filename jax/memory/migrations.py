@@ -100,27 +100,6 @@ _BACKFILL = [
      "WHERE m.user_id IS NULL AND m.project_id IS NULL"),
 ]
 
-# Ejecutor: sudo real y machine_id del inventario (2026-09-22). `ejecutor_host`
-# la CREA y la puebla jax-platform (backend/db/migrations.py,
-# `_ejecutor_inventario_v1`, desde JAX_EJECUTOR_INVENTARIO) -- esto NO duplica
-# esa migracion ni toca jax-platform. Es solo un DATO que faltaba sobre una
-# tabla que YA EXISTE: la Fase 3 le dio sudo real a `axioma` en las cuatro
-# maquinas con clientes (`~/ejecutor-producto/LEDGER.md`, entradas "2026-09-22
-# · FASE 3 (sudo) APLICADA..." y "SUDO EN LAS CUATRO"), pero
-# `ejecutor_host.sudo`/`.machine_id` quedaron en 0/NULL -- el propio ledger lo
-# deja escrito: "solo informativos, sin lector en el codigo; se corrigen por
-# migracion en PR (regla del ledger), no a mano". Corre ACA porque LAS MANOS,
-# el memory worker y la sintesis ya llaman a `ensure_schema()` en cada
-# `connect()` contra la MISMA base (`jax/memory/db.py`) -- no hace falta una
-# segunda migracion en jax-platform para un dato que ya tiene tabla y columnas.
-# `ejecutor-prueba` (VM desechable de la Fase 2) NO entra: nunca tuvo sudo real.
-_EJECUTOR_HOST_MACHINE_ID = {
-    "atemai": "95e56bf6da0d41f993a3e36869699af1",
-    "bridge": "ee090efa28cd46a7a0bff22d34e57eb4",
-    "prod": "da476dce01ea4c3e9e72a8078a3ffd48",
-    "hall9000": "37ce158242c649fa80804a8c17b83ca4",
-}
-
 
 #: Extrae la columna de referencia de un DDL con `AFTER <columna>` (case
 #: insensible -- MariaDB no distingue mayusculas en palabras clave). Entradas
@@ -239,22 +218,6 @@ async def ensure_schema(pool) -> bool:
                             "migracion: backfill de %s.%s fallo (%s: %s) -- se sigue "
                             "con el resto de la migracion",
                             tabla, columna, type(e).__name__, e)
-                        ok = False
-
-                for nombre, machine_id in _EJECUTOR_HOST_MACHINE_ID.items():
-                    try:
-                        await cur.execute(
-                            "UPDATE ejecutor_host SET sudo=1, machine_id=%s "
-                            "WHERE nombre=%s AND (sudo=0 OR machine_id IS NULL OR machine_id<>%s)",
-                            (machine_id, nombre, machine_id),
-                        )
-                        if cur.rowcount:
-                            logger.info(
-                                "migracion: ejecutor_host.%s sudo=1 machine_id=%s", nombre, machine_id)
-                    except Exception as e:  # fail-soft: ejecutor_host puede no existir todavia (base minima sin las migraciones de jax-platform) -- se registra, ok pasa a False, y el proximo arranque reintenta este host puntual
-                        logger.error(
-                            "migracion: ejecutor_host.%s fallo (%s: %s) -- se sigue con el "
-                            "resto de la migracion", nombre, type(e).__name__, e)
                         ok = False
 
                 for tabla, indice, ddl in _INDICES:

@@ -133,12 +133,29 @@ def verificar_instalacion(ctx: Contexto) -> tuple:
     return tuple(fallos)
 
 
+def _archivos_instalados(base) -> frozenset:
+    """Rutas relativas (posix) de TODOS los archivos bajo `base`, o `frozenset()` si
+    `base` no existe todavía -- un directorio ausente no es "extra", es "nada instalado
+    todavía", y ese caso ya lo cubre `skill_desactualizada`/`contexto_desactualizado`
+    más arriba."""
+    if not base.is_dir():
+        return frozenset()
+    return frozenset(p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file())
+
+
 def verificar_contexto(ctx: Contexto) -> tuple:
-    """El CLAUDE.md (spec §6.1: SIEMPRE generado, nunca a mano) y las skills
-    declaradas, al día contra lo que `contexto.py` produce/exige AHORA MISMO.
-    Mismo criterio fail-closed que el resto de `verificar_instalacion`: el sha256
-    instalado se recalcula contra los bytes reales, nunca se confía en el
-    `.sha256` de acompañamiento (ese archivo es sólo para auditoría humana)."""
+    """El CLAUDE.md (spec §6.1: SIEMPRE generado, nunca a mano), el CLAUDE.md vacío
+    de "$HOME" (M3) y las skills declaradas, al día contra lo que `contexto.py`
+    produce/exige AHORA MISMO. Mismo criterio fail-closed que el resto de
+    `verificar_instalacion`: el sha256 instalado se recalcula contra los bytes
+    reales, nunca se confía en el `.sha256` de acompañamiento (ese archivo es sólo
+    para auditoría humana).
+
+    M4 (auditoría adversarial 2026-09-22): la comparación es del CONJUNTO completo
+    de archivos, no sólo de los declarados -- un archivo de MÁS bajo `SKILLS_REL`
+    (una skill vieja que el instalador debió borrar y no borró, o algo que alguien
+    dejó a mano) también hace fallar el arranque. Verificar sólo "lo que se espera
+    está" deja pasar "y además hay algo que no debería"."""
     fallos = []
     try:
         esperado = contexto.claude_md()
@@ -153,6 +170,13 @@ def verificar_contexto(ctx: Contexto) -> tuple:
             fallos.append(Fallo("arranque", "contexto_desactualizado"))
 
     try:
+        instalado = (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).read_bytes()
+    except OSError:
+        instalado = None
+    if instalado != b"":
+        fallos.append(Fallo("arranque", "contexto_desactualizado", (("archivo", contexto.CLAUDE_MD_HOME_VACIO_REL),)))
+
+    try:
         esperadas_skills = contexto.archivos_de_skills()
     except contexto.SkillFaltante as exc:
         fallos.append(Fallo("arranque", "skill_faltante", (("skill", exc.args[0]),)))
@@ -165,6 +189,9 @@ def verificar_contexto(ctx: Contexto) -> tuple:
             instalado = None
         if instalado is None or _sha(instalado) != _sha(datos):
             fallos.append(Fallo("arranque", "skill_desactualizada", (("archivo", rel),)))
+
+    de_mas = _archivos_instalados(ctx.cuenta.lib / contexto.SKILLS_REL) - frozenset(esperadas_skills)
+    fallos.extend(Fallo("arranque", "skill_extra_instalada", (("archivo", rel),)) for rel in sorted(de_mas))
     return tuple(fallos)
 
 

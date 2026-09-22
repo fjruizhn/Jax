@@ -23,6 +23,39 @@ def test_claude_md_no_esta_vacio_y_su_sha256_es_estable():
     assert CX.sha256_claude_md() == CX.sha256_claude_md()  # determinista
 
 
+# --- con un DOBLE: corre en cualquier runner (B3/M1, auditoría adversarial 2026-09-22) --
+# `constitucion_fuente()` (seam nuevo en esta ronda) es lo que `claude_md()` usa para
+# resolver la ruta -- monkeypatchearlo evita depender de /home/fruiz/claude-skills, mismo
+# criterio que `skills_fuente()` un poco más abajo.
+
+_DOBLE_CONSTITUCION = ("## LAS POLÍTICAS DE MARINA\n\nx\n\n## LA REGLA ABSOLUTA\n\nx\n\n"
+                      "## LOS NUEVE PRINCIPIOS OPERATIVOS\n\nx\n\n## LOS SEIS IMPOSIBLES\n\nx\n\n"
+                      "## JERARQUÍA DE AUTORIDAD\n\nx\n\n## HONOR\n\nx\n")
+
+
+def test_con_doble_claude_md_no_esta_vacio_y_su_sha256_es_estable(tmp_path, monkeypatch):
+    doble = tmp_path / "CLAUDE.md.core"
+    doble.write_text(_DOBLE_CONSTITUCION)
+    monkeypatch.setattr(CX, "constitucion_fuente", lambda: doble)
+    doc = CX.claude_md()
+    assert doc.startswith(b"# El Ejecutor de Axioma")
+    assert CX.sha256_claude_md() == CX.sha256_claude_md()  # determinista
+
+
+def test_constitucion_disponible_sigue_la_ruta_de_constitucion_fuente(tmp_path, monkeypatch):
+    """El seam es el único punto de verdad: `constitucion_disponible()` tiene que
+    seguirlo, no leer la ruta real por su cuenta -- si no, un test que la
+    monkeypatchea a un doble presente igual la vería "no disponible" (y se saltaría
+    donde no debería) o al revés."""
+    ausente = tmp_path / "no-existe.core"
+    monkeypatch.setattr(CX, "constitucion_fuente", lambda: ausente)
+    assert CX.constitucion_disponible() is False
+    presente = tmp_path / "CLAUDE.md.core"
+    presente.write_text(_DOBLE_CONSTITUCION)
+    monkeypatch.setattr(CX, "constitucion_fuente", lambda: presente)
+    assert CX.constitucion_disponible() is True
+
+
 def test_archivos_de_skills_con_una_fuente_de_prueba(tmp_path, monkeypatch):
     fuente = tmp_path / "skills"
     (fuente / "migrando-sin-romper").mkdir(parents=True)
@@ -58,8 +91,10 @@ def test_las_tres_skills_reales_de_claude_skills_hoy_dan_skillfaltante():
     """Verdad operacional al 2026-09-22: las tres skills NO existen todavía en
     /home/fruiz/claude-skills/common/skills/ (sólo en el worktree sin mergear
     cs-freno-generados, rama fix/freno-generados). Esta prueba documenta el estado
-    real y falla sola el día que alguien las mergee -- momento en el que hay que
-    borrarla, no arreglarla."""
+    real y SE SALTA (no falla: `pytest.skip`, más abajo) el día que alguien las
+    mergee -- momento en el que hay que borrarla, no arreglarla. (Corregido
+    2026-09-22, auditoría adversarial: este docstring decía "falla sola", que no es
+    lo que el código hace.)"""
     fuente = CX.skills_fuente()
     if all((fuente / n).is_dir() for n in CX.skills_declaradas()):
         pytest.skip("las tres skills ya existen en la ruta canónica: mergeadas")

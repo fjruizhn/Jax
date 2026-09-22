@@ -16,11 +16,14 @@ from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.destinos import Host
 from jax.ejecutor.contratos.fallo import Fallo
 
-# `contexto.claude_md()` lee la constitución real de esta máquina (host-bound, Fase 0 --
-# ver jax/ejecutor/contratos/contexto.py). Mismo criterio de skip que
-# tests/test_ejecutor_generar_claude_md.py y tests/test_ejecutor_contratos_contexto.py.
-requiere_constitucion_real = pytest.mark.skipif(
-    not contexto.constitucion_disponible(), reason="constitución host-bound ausente en este runner")
+# B3/M1 (auditoría adversarial 2026-09-22): las pruebas de instalación de acá abajo
+# usaban la constitución REAL de esta máquina (host-bound, Fase 0) y se saltaban en
+# cualquier runner sin /home/fruiz/claude-skills -- CI, siempre. Ninguna necesita el
+# CONTENIDO real: comparan "lo instalado" contra "lo que `contexto.claude_md()`
+# produce ahora", y para eso alcanza un DOBLE (`_DOBLE_CONSTITUCION`, más abajo,
+# inyectado vía `contexto.constitucion_fuente()` -- el seam). Ya no hace falta
+# saltarlas; si algún día una prueba necesita la constitución REAL en particular
+# (no es el caso de ninguna de éstas), puede volver a definir este marcador.
 
 
 def _ctx(tmp_path, **cambios):
@@ -250,7 +253,6 @@ def _instalar_copia(ctx):
     (ctx.cuenta.lib / "ejecutor-freno.service").write_text(instalacion.renderizar_unidad_freno(lib))
 
 
-@requiere_constitucion_real
 def test_instalacion_identica_al_repo(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
@@ -258,7 +260,6 @@ def test_instalacion_identica_al_repo(tmp_path, monkeypatch):
     assert AR.verificar_instalacion(ctx) == ()
 
 
-@requiere_constitucion_real
 def test_instalacion_con_un_byte_distinto(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
@@ -272,7 +273,6 @@ def test_instalacion_con_un_byte_distinto(tmp_path, monkeypatch):
     )
 
 
-@requiere_constitucion_real
 def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
@@ -296,23 +296,40 @@ def _fuente_skills_de_prueba(base: Path) -> Path:
     return fuente
 
 
+# B3/M1 (auditoría adversarial 2026-09-22): un DOBLE hermético de la constitución, no
+# la real de esta máquina -- estas pruebas comparan "lo instalado" contra "lo que
+# `contexto.claude_md()` produce AHORA MISMO", y esa comparación es la misma sea cual
+# sea el contenido de la fuente. Con esto, las 11 pruebas de instalación de acá abajo
+# corren en CUALQUIER runner (antes se saltaban en CI, que no tiene
+# /home/fruiz/claude-skills).
+_DOBLE_CONSTITUCION = ("## LAS POLÍTICAS DE MARINA\n\nx\n\n## LA REGLA ABSOLUTA\n\nx\n\n"
+                      "## LOS NUEVE PRINCIPIOS OPERATIVOS\n\nx\n\n## LOS SEIS IMPOSIBLES\n\nx\n\n"
+                      "## JERARQUÍA DE AUTORIDAD\n\nx\n\n## HONOR\n\nx\n")
+
+
 def _instalar_contexto(ctx, monkeypatch, *, fuente_skills=None):
     """Instala CLAUDE.md + skills en ctx.cuenta.lib, además de lo que ya deja
-    `_instalar_copia`. `fuente_skills=None` usa la fuente real declarada en
-    cerebros.toml (requiere_constitucion_real ya lo cubrió el llamador);
-    pasarla apunta `contexto.skills_fuente()` a una fuente de prueba hermética."""
+    `_instalar_copia`. Siempre contra un DOBLE de la constitución (ver arriba):
+    `contexto.constitucion_fuente()` (el seam) apunta a un archivo hermético escrito
+    en `ctx.cuenta.lib.parent`, no a la ruta real de esta máquina. `fuente_skills=None`
+    usa la fuente real de skills declarada en cerebros.toml; pasarla apunta
+    `contexto.skills_fuente()` a una fuente de prueba hermética también."""
+    doble = ctx.cuenta.lib.parent / "constitucion-doble" / "CLAUDE.md.core"
+    doble.parent.mkdir(parents=True, exist_ok=True)
+    doble.write_text(_DOBLE_CONSTITUCION)
+    monkeypatch.setattr(contexto, "constitucion_fuente", lambda: doble)
     if fuente_skills is not None:
         monkeypatch.setattr(contexto, "skills_fuente", lambda: fuente_skills)
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
     (ctx.cuenta.lib / contexto.CLAUDE_MD_SHA256_REL).write_text(contexto.sha256_claude_md())
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).write_bytes(b"")
     for rel, datos in contexto.archivos_de_skills().items():
         destino = ctx.cuenta.lib / contexto.SKILLS_REL / rel
         destino.parent.mkdir(parents=True, exist_ok=True)
         destino.write_bytes(datos)
 
 
-@requiere_constitucion_real
 def test_instalacion_con_contexto_al_dia_no_falla(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
@@ -320,7 +337,6 @@ def test_instalacion_con_contexto_al_dia_no_falla(tmp_path, monkeypatch):
     assert AR.verificar_instalacion(ctx) == ()
 
 
-@requiere_constitucion_real
 def test_claude_md_desactualizado_no_arranca(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
@@ -329,7 +345,6 @@ def test_claude_md_desactualizado_no_arranca(tmp_path, monkeypatch):
     assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_desactualizado"),)
 
 
-@requiere_constitucion_real
 def test_claude_md_ausente_no_arranca(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
@@ -338,24 +353,28 @@ def test_claude_md_ausente_no_arranca(tmp_path, monkeypatch):
     assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_desactualizado"),)
 
 
-@requiere_constitucion_real
 def test_skill_faltante_en_la_fuente_no_arranca(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
     fuente = tmp_path / "skills-incompleta"
     (fuente / "migrando-sin-romper").mkdir(parents=True)
     (fuente / "migrando-sin-romper" / "SKILL.md").write_text("m")
-    # "desde-la-fuente" y "endureciendo" NO existen en la fuente: como HOY en la
-    # ruta real (ver test_ejecutor_contratos_contexto.py) hasta que se mergee
-    # cs-freno-generados.
+    # "desde-la-fuente" y "endureciendo" NO existen en la fuente: mismo defecto que
+    # test_las_tres_skills_reales_de_claude_skills_hoy_dan_skillfaltante documenta
+    # contra la fuente real (test_ejecutor_contratos_contexto.py) -- acá es a
+    # propósito, con una fuente de prueba hermética.
     monkeypatch.setattr(contexto, "skills_fuente", lambda: fuente)
+    doble = tmp_path / "constitucion-doble" / "CLAUDE.md.core"
+    doble.parent.mkdir(parents=True, exist_ok=True)
+    doble.write_text(_DOBLE_CONSTITUCION)
+    monkeypatch.setattr(contexto, "constitucion_fuente", lambda: doble)
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).write_bytes(b"")
     assert AR.verificar_instalacion(ctx) == (
         Fallo("arranque", "skill_faltante", (("skill", "desde-la-fuente"),)),)
 
 
-@requiere_constitucion_real
 def test_skill_instalada_desactualizada_no_arranca(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
@@ -364,6 +383,43 @@ def test_skill_instalada_desactualizada_no_arranca(tmp_path, monkeypatch):
     (ctx.cuenta.lib / contexto.SKILLS_REL / "endureciendo" / "SKILL.md").write_text("vieja, a mano")
     assert AR.verificar_instalacion(ctx) == (
         Fallo("arranque", "skill_desactualizada", (("archivo", "endureciendo/SKILL.md"),)),)
+
+
+def test_un_archivo_de_mas_en_skills_no_arranca(tmp_path, monkeypatch):
+    """M4 (auditoría adversarial 2026-09-22): el arranque compara el CONJUNTO completo
+    de archivos instalados contra lo declarado -- una skill vieja que el instalador
+    dejó atrás (o cualquier archivo agregado a mano) también falla cerrado, aunque
+    todos los archivos DECLARADOS estén al día."""
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "migrando-sin-romper" / "vieja.md").write_text("sobra")
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_extra_instalada", (("archivo", "migrando-sin-romper/vieja.md"),)),)
+
+
+def test_una_skill_entera_de_mas_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "retirada-hace-meses").mkdir()
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "retirada-hace-meses" / "SKILL.md").write_text("vieja")
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_extra_instalada", (("archivo", "retirada-hace-meses/SKILL.md"),)),)
+
+
+def test_claude_md_de_home_escrito_a_mano_no_arranca(tmp_path, monkeypatch):
+    """M3: el instalable siempre tiene que ser un archivo VACÍO -- si algo lo
+    sobrescribió con contenido, el arranque lo trata igual que un CLAUDE.md
+    desactualizado."""
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_HOME_VACIO_REL).write_bytes(b"escrito a mano\n")
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "contexto_desactualizado", (("archivo", contexto.CLAUDE_MD_HOME_VACIO_REL),)),)
 
 
 # --- alcance: los contratos por máquina, acotados a la misión ---------------------

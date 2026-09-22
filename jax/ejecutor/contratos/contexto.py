@@ -29,6 +29,12 @@ _CEREBROS = RAIZ / "scripts" / "ejecutor_fase0" / "cerebros.toml"
 CLAUDE_MD_REL = "contexto/CLAUDE.md"
 CLAUDE_MD_SHA256_REL = "contexto/CLAUDE.md.sha256"
 SKILLS_REL = "contexto/skills"
+#: Archivo SIEMPRE vacío (M3, auditoría adversarial 2026-09-22): la jaula lo monta ro
+#: sobre "$HOME/CLAUDE.md" -- el CLAUDE.md DE PROYECTO, distinto del de "$HOME/.claude/"
+#: (CLAUDE_MD_REL, ya tapado). Sin esto, axioma podía escribir uno propio ahí y Claude
+#: Code lo carga igual. Vive en el instalable, no en /dev/null: un bind de un carácter
+#: especial se comporta distinto entre mounts según las banderas de bwrap (medido).
+CLAUDE_MD_HOME_VACIO_REL = "contexto/CLAUDE.md.home.vacio"
 
 
 class SkillFaltante(RuntimeError):
@@ -47,17 +53,26 @@ def _constitucion() -> dict:
     return tomllib.loads(_CEREBROS.read_text(encoding="utf-8"))["constitucion"]
 
 
+def constitucion_fuente() -> Path:
+    """De dónde sale la constitución real (cerebros.toml `constitucion.fuente`).
+    Función, no constante: igual que `skills_fuente()`, así un test la
+    monkeypatchea con un doble hermético (B3/M1, auditoría adversarial 2026-09-22)
+    sin depender de que ESTA máquina tenga /home/fruiz/claude-skills."""
+    return Path(_constitucion()["fuente"])
+
+
 def constitucion_disponible() -> bool:
-    """¿Existe, en ESTA máquina, el archivo del que `claude_md()` lee la
-    constitución? Host-bound (Fase 0): los tests que llaman a `claude_md()` se
-    saltan con esto donde no exista, en vez de fallar contra un runner que nunca
-    la va a tener."""
-    return Path(_constitucion()["fuente"]).is_file()
+    """¿Existe, en ESTA máquina, el archivo real del que `claude_md()` leería la
+    constitución si no se le da un doble? Host-bound (Fase 0): sigue existiendo
+    para las pruebas que quieren la constitución REAL (no un doble) y se saltan
+    donde no exista -- la mayoría de las afirmaciones, sin embargo, ya no lo
+    necesitan: corren igual con `monkeypatch.setattr(contexto, "constitucion_fuente", ...)`."""
+    return constitucion_fuente().is_file()
 
 
 def claude_md() -> bytes:
-    """El CLAUDE.md que el generador produce AHORA MISMO, desde CLAUDE.md.core."""
-    return _cargar_generador().generar().encode("utf-8")
+    """El CLAUDE.md que el generador produce AHORA MISMO, desde `constitucion_fuente()`."""
+    return _cargar_generador().generar(fuente_constitucion=constitucion_fuente()).encode("utf-8")
 
 
 def sha256_claude_md() -> str:
@@ -104,6 +119,7 @@ def renderizar_etapa(etapa: Path) -> None:
     doc = claude_md()
     (etapa / "CLAUDE.md").write_bytes(doc)
     (etapa / "CLAUDE.md.sha256").write_text(hashlib.sha256(doc).hexdigest())
+    (etapa / "CLAUDE.md.home.vacio").write_bytes(b"")
     for rel, datos in archivos_de_skills().items():
         destino = etapa / "skills" / rel
         destino.parent.mkdir(parents=True, exist_ok=True)
