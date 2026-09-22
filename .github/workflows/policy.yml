@@ -3656,11 +3656,26 @@ jobs:
       #   47. Medido en local (mismo comando) y en Docker (python:3.12-slim,
       #   requirements.txt exacto, x3 corridas cada uno): 47 passed
       #   siempre. Si el runner da otro número, manda el runner.
+      # 47 -> 52 el 2026-09-21 (ronda 5, cinco MINOR):
+      #     N1: cancelar por `cancelar_trabajo()` REAL con un hilo dentro de
+      #       la escritura de `running` -- historial monótono en el JSONL
+      #       y el loop sin congelarse esperando el lock. +1, visto en rojo
+      #       contra 146e0a5 (`cancelling, running, cancelling`).
+      #     N2: nombres acentuados válidos (`factura_año.pdf`) vuelven
+      #       intactos al leer -- en disco y por GET. +2.
+      #     N3: cancelado antes de arrancar nunca escribe `running` ni
+      #       `started_at`. +1.
+      #     N5: el arranque EJECUTA `reconciliar_trabajos_huerfanos()`
+      #       (corre los handlers de startup reales) -- el test AST
+      #       aceptaba la llamada dentro de un `if False:`. +1.
+      #   47 + 5 = 52. Medido en Docker (python:3.12-slim) sobre un
+      #   `git archive` del commit final. Si el runner da otro número,
+      #   manda el runner.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^47 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 47 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^52 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 52 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
