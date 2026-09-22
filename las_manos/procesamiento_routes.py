@@ -254,11 +254,21 @@ def _codificable_utf8(s: str) -> bool:
 
 
 def _saneado_ascii(s: str) -> str:
-    """`backslashreplace` produce texto ASCII puro -- SIEMPRE codificable
-    a UTF-8, sin excepción posible. Usado tanto del lado de ESCRITURA
-    (`_resultado_no_codificable`, N-2) como del lado de LECTURA
-    (`_leer_resultados_de_disco`, MINOR-C, ronda 4)."""
-    return s.encode("utf-8", errors="backslashreplace").decode("ascii")
+    """Texto ASCII puro, legible y determinista: todo lo que no es ASCII
+    -- una tilde válida (`é` -> `\\xe9`) o un surrogate solitario
+    (`\\udcff`) -- sale como su escape. Usado del lado de ESCRITURA
+    (`_resultado_no_codificable`, N-2) y del de LECTURA
+    (`_leer_resultados_de_disco`, MINOR-C, ronda 4).
+
+    Ronda 6: antes codificaba a UTF-8 con `backslashreplace` y decodificaba
+    como ASCII, y este docstring decía "sin excepción posible". Era falso:
+    `backslashreplace` sólo escapa lo que el codec NO puede codificar, así
+    que una tilde válida quedaba como bytes UTF-8 y el `decode("ascii")`
+    reventaba. `Crédito\\udcff.pdf` tumbaba el lote entero. Codificando a
+    ASCII, `backslashreplace` escapa TODO lo no-ASCII y el resultado es
+    ASCII por construcción. `surrogatepass` quedó descartado: produce UTF-8
+    inválido que revienta más adelante, en otro lado."""
+    return s.encode("ascii", errors="backslashreplace").decode("ascii")
 
 
 def _resultado_no_codificable(ruta: str) -> ResultadoArchivo:
@@ -470,11 +480,18 @@ async def _ejecutar_trabajo(
     executor: ThreadPoolExecutor | None = None,
     executor_io: ThreadPoolExecutor | None = None,
     semaforo: asyncio.Semaphore | None = None,
+    control: _ControlTrabajo | None = None,
 ) -> None:
     executor = executor if executor is not None else _EXECUTOR_OCR
     executor_io = executor_io if executor_io is not None else _EXECUTOR_IO
     semaforo = semaforo if semaforo is not None else _SEMAFORO_TRABAJOS
-    control = _ControlTrabajo(store, job_id)
+    # Ronda 6: en producción el control llega YA creado y registrado desde
+    # `crear_trabajo()`, antes de programar esta tarea. Si lo creara el
+    # worker al arrancar, un cancel que llegara antes de esa primera vuelta
+    # del loop no lo encontraría y se perdería (ver `crear_trabajo`). Crearlo
+    # acá queda sólo para quien llama al worker directo (tests, medición).
+    if control is None:
+        control = _ControlTrabajo(store, job_id)
     _CONTROLES[job_id] = control
     try:
         try:
@@ -657,6 +674,7 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
     # propio `usuario`, si algún día pierde su `Field`) tiene que seguir
     # liberando el permiso.
     permiso_transferido = False
+    job_id: str | None = None
     try:
         job_id = _STORE.create(
             # B-6: el principal REAL -- antes era la constante
@@ -675,8 +693,18 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
         # kwargs arbitrarios (van tal cual al JSONL).
         _STORE.update(job_id, proyecto=proyecto)
 
+        # Ronda 6: el control se crea y se registra ANTES de programar la
+        # tarea. Antes lo creaba el worker en su primera vuelta del loop; un
+        # `POST .../cancel` que llegaba en ese hueco no lo encontraba,
+        # escribía CANCELLING a pelo, y el worker arrancaba después con
+        # `cancelado=False`. Historial medido: `pending, pending,
+        # cancelling, running, completed`, con la cancelación perdida. Con
+        # el control creado acá, ningún cancel puede llegar antes que él: la
+        # ventana no existe.
+        control = _ControlTrabajo(_STORE, job_id)
+        _CONTROLES[job_id] = control
         task = asyncio.create_task(
-            _ejecutar_trabajo(job_id, proyecto, req.rutas, store=_STORE)
+            _ejecutar_trabajo(job_id, proyecto, req.rutas, store=_STORE, control=control)
         )
         # MINOR-A: la bandera va ACÁ, apenas se creó la tarea -- no
         # después de `add_done_callback`/`job_tasks.register`. Antes,
@@ -692,6 +720,10 @@ async def crear_trabajo(req: TrabajoRequest) -> TrabajoCreadoResponse:
         return TrabajoCreadoResponse(job_id=job_id)
     finally:
         if not permiso_transferido:
+            # Nadie va a correr el `finally` del worker: el control
+            # registrado arriba (si se llegó a registrar) se saca acá.
+            if job_id is not None:
+                _CONTROLES.pop(job_id, None)
             _SEMAFORO_TRABAJOS.release()
 
 
@@ -740,8 +772,10 @@ async def cancelar_trabajo(job_id: str) -> TrabajoEstadoResponse:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(_EXECUTOR_IO, control.cancelar)
         else:
-            # Sin control vivo no hay lock que compartir: `_ejecutar_trabajo`
-            # todavía no arrancó (o ya lo sacó de `_CONTROLES` en su
-            # `finally`, y entonces el estado ya es terminal).
+            # Sin control vivo no hay lock que compartir. Desde la ronda 6,
+            # el control existe desde `crear_trabajo()` hasta el `finally`
+            # del worker, así que esto sólo alcanza a un job no terminal sin
+            # tarea viva (un huérfano que la reconciliación del arranque
+            # todavía no marcó).
             _STORE.update(job_id, status=JobStatus.CANCELLING.value)
     return await _construir_respuesta_estado(job_id, _STORE.get(job_id))

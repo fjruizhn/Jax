@@ -760,7 +760,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert resultados[0]["estado"] == "cancelado"
 
     # -- Ronda 5 --------------------------------------------------------------
-    def _historial_de_estados(self, job_id: str) -> list[str]:
+    def _historial_de_estados(self, job_id: str, *, crudo: bool = False) -> list[str]:
         """El historial REAL del job, leído del JSONL append-only (cada
         línea es el estado completo tras un `create`/`update`), con los
         estados repetidos consecutivos colapsados -- `update()` sin
@@ -770,7 +770,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
             evento = json.loads(linea)
             if evento.get("job_id") != job_id:
                 continue
-            if not estados or estados[-1] != evento["status"]:
+            if crudo or not estados or estados[-1] != evento["status"]:
                 estados.append(evento["status"])
         return estados
 
@@ -936,6 +936,71 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         assert leidos_utf8 == esperados, leidos_utf8
         assert leidos_ascii == esperados, leidos_ascii
         assert leidos_utf8[1]["archivo"] == "factura_año.pdf"
+    # -- Ronda 6 --------------------------------------------------------------
+    async def test_R6a_tilde_mas_surrogate_no_tumba_el_lote(self):
+        """Ronda 6, defecto 1: `_saneado_ascii` hacía
+        `encode("utf-8", "backslashreplace").decode("ascii")` --
+        `backslashreplace` no toca una tilde VÁLIDA, la deja en bytes UTF-8,
+        y el `decode("ascii")` revienta. Un nombre con tilde Y un surrogate
+        (`Crédito\\udcff.pdf`) tumbaba el lote entero: `failed`, sin
+        resultados, y el sano perdido."""
+        self._archivo_en_workspace("sano.pdf")
+        job_id = self._crear_job()
+        with patch.object(rutas_mod.ingesta, "ingerir", return_value=_ficha("8" * 64)) as ingerir_mock:
+            await self._ejecutar(job_id, "proy", ["sano.pdf", "Crédito\udcff.pdf"])
+
+        job = self.store.get(job_id)
+        assert job.status == JobStatus.COMPLETED, f"tilde + surrogate tumbó el lote: {job}"
+        resultados = json.loads(Path(job.result_path).read_text(encoding="utf-8"))
+        assert [r["estado"] for r in resultados] == ["ok", "rechazado"], resultados
+        assert resultados[0]["archivo"] == "sano.pdf"
+        assert resultados[1]["archivo"] == "Cr\\xe9dito\\udcff.pdf", resultados[1]
+        assert ingerir_mock.call_count == 1
+
+    def test_R6a_saneado_ascii_es_ascii_con_tilde_y_surrogate(self):
+        for s in ("malo\udcff.pdf", "Crédito\udcff.pdf", "factura_año.pdf"):
+            saneado = rutas_mod._saneado_ascii(s)
+            saneado.encode("ascii")  # no debe lanzar
+        assert rutas_mod._saneado_ascii("Crédito\udcff.pdf") == "Cr\\xe9dito\\udcff.pdf"
+
+    async def test_R6b_cancelar_antes_de_que_arranque_el_worker_termina_cancelled(self):
+        """Ronda 6, defecto 2: el `_ControlTrabajo` lo creaba el worker al
+        arrancar. Un `POST .../cancel` que llegaba entre `crear_trabajo()` y
+        esa primera vuelta del loop no encontraba control, escribía
+        `CANCELLING` a pelo, y el worker arrancaba después con
+        `cancelado=False`: historial `pending, pending, cancelling,
+        running, completed` -- la cancelación perdida. Ahora el control
+        existe desde `crear_trabajo()`, antes de programar la tarea: la
+        ventana no existe."""
+        self._archivo_en_workspace("a.pdf")
+        ingerir_mock = AsyncMock()
+        with patch.object(rutas_mod, "_STORE", self.store), \
+             patch.object(rutas_mod, "_EXECUTOR_OCR", self.executor), \
+             patch.object(rutas_mod, "_EXECUTOR_IO", self.executor_io), \
+             patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", asyncio.Semaphore(2)), \
+             patch.object(rutas_mod.ingesta, "ingerir", ingerir_mock):
+            creado = await rutas_mod.crear_trabajo(
+                rutas_mod.TrabajoRequest(proyecto="p", rutas=["a.pdf"], usuario="ana@cliente.com")
+            )
+            # SIN ceder el loop: el worker todavía no dio su primera vuelta.
+            respuesta = await rutas_mod.cancelar_trabajo(creado.job_id)
+            for _ in range(200):
+                if self.store.get(creado.job_id).status in (
+                    JobStatus.CANCELLED, JobStatus.COMPLETED, JobStatus.FAILED,
+                ):
+                    break
+                await asyncio.sleep(0.01)
+
+        assert respuesta.estado == JobStatus.CANCELLING.value, respuesta
+        # CRUDO (una entrada por línea del JSONL): el código de 146e0a5/f1d4298
+        # da exactamente ['pending', 'pending', 'cancelling', 'running', 'completed'].
+        historial = self._historial_de_estados(creado.job_id, crudo=True)
+        assert historial == [
+            JobStatus.PENDING.value, JobStatus.PENDING.value,
+            JobStatus.CANCELLING.value, JobStatus.CANCELLED.value,
+        ], f"la cancelación se perdió o el historial fue para atrás: {historial}"
+        assert self.store.get(creado.job_id).started_at is None
+        ingerir_mock.assert_not_called()
 
 # ===========================================================================
 #  Grupo 2 -- HTTP: admisión, cancelación, no-bloqueo, autenticación
@@ -974,6 +1039,13 @@ class TrabajoHTTPTest(unittest.TestCase):
         self._parche_semaforo = patch.object(rutas_mod, "_SEMAFORO_TRABAJOS", self._semaforo_test)
         self._parche_semaforo.start()
         self.addCleanup(self._parche_semaforo.stop)
+
+        # Ronda 6: `crear_trabajo()` registra el control en `_CONTROLES`, y
+        # los workers falsos de estos tests nunca lo sacan. Cada test arranca
+        # y termina con el registro vacío.
+        self._parche_controles = patch.dict(rutas_mod._CONTROLES, clear=True)
+        self._parche_controles.start()
+        self.addCleanup(self._parche_controles.stop)
 
     def _post(self, c, **overrides):
         cuerpo = {"proyecto": "p", "rutas": ["a.pdf"], "usuario": "ana@cliente.com"}
@@ -1034,7 +1106,7 @@ class TrabajoHTTPTest(unittest.TestCase):
 
     # -- B-5 / no bloqueo --------------------------------------------------
     def test_post_no_espera_a_que_el_trabajo_termine(self):
-        async def _lento(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
+        async def _lento(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None, control=None):
             await asyncio.sleep(2)
             store.update(job_id, status=JobStatus.COMPLETED.value, finished_at=time.time())
 
@@ -1099,7 +1171,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert r.status_code == 422, r.text
 
     def test_B6_usuario_se_registra_como_caller_del_job(self):
-        async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
+        async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None, control=None):
             return None
 
         with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as c:
@@ -1124,7 +1196,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         assert len(self.store._index) == 0, "no debería haberse creado ningún job sin lugar"
 
     def test_B2_con_capacidad_libre_admite(self):
-        async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
+        async def _noop(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None, control=None):
             return None
 
         with patch.object(rutas_mod, "_ejecutar_trabajo", _noop), TestClient(_app()) as c:
@@ -1140,7 +1212,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         bandera seguía en `False` en ese momento, el `finally` de
         `crear_trabajo()` la liberaría OTRA VEZ: el semáforo sube por
         encima de su capacidad real (medido con la mutación: 2 -> 3)."""
-        async def _worker_que_libera(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
+        async def _worker_que_libera(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None, control=None):
             # Simula el contrato real de `_ejecutar_trabajo`: quien lo
             # llama YA adquirió el semáforo, así que este worker (aunque
             # sea un doble falso) lo libera él mismo al terminar.
@@ -1159,6 +1231,22 @@ class TrabajoHTTPTest(unittest.TestCase):
             f"el semáforo subió por encima de su capacidad real (liberado dos veces): "
             f"value={self._semaforo_test._value}"
         )
+    def test_R6b_si_falla_programar_la_tarea_no_queda_control_huerfano(self):
+        """Ronda 6: el control se registra ANTES de `create_task`. Si
+        programar la tarea falla, ningún worker va a correr su `finally`,
+        así que `crear_trabajo()` tiene que sacar el control él mismo (y
+        devolver el permiso, que ya cubre N-1)."""
+        async def _correr():
+            req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+            with patch.object(rutas_mod.asyncio, "create_task", side_effect=RuntimeError("boom -- create_task")):
+                with self.assertRaises(RuntimeError):
+                    await rutas_mod.crear_trabajo(req)
+
+        asyncio.run(_correr())
+        assert len(self.store._index) == 1, "el job tendría que haberse creado antes del fallo"
+        assert rutas_mod._CONTROLES == {}, f"quedó un control huérfano: {rutas_mod._CONTROLES}"
+        # `_value`, no `locked()`: con 2 permisos, uno filtrado no lo agota.
+        assert self._semaforo_test._value == 2, f"el permiso no volvió: value={self._semaforo_test._value}"
 
     # -- N-3: cancelación -- forma HTTP (404/409), el executor real va en
     #    el Grupo 1 (test_N3_cancelar_deja_terminar...) --------------------
@@ -1182,7 +1270,7 @@ class TrabajoHTTPTest(unittest.TestCase):
         mockeado como algo que nunca termina) tiene que pasar por
         `CANCELLING` -- nunca saltar directo a `CANCELLED` (eso mentiría
         sobre hilos que todavía no terminaron)."""
-        async def _nunca_termina(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
+        async def _nunca_termina(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None, control=None):
             await asyncio.sleep(10)
 
         with patch.object(rutas_mod, "_ejecutar_trabajo", _nunca_termina), TestClient(_app()) as c:
