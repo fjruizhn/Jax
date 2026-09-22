@@ -73,6 +73,25 @@ class ScopeContext:
     request_id: str | None = None
     trace_id: str | None = None
 
+    def validate(self) -> None:
+        """Reject incomplete or self-asserted acting contexts before use.
+
+        This is deliberately structural validation only.  Membership and any
+        delegation grant are resolved by ``MembershipResolver``; a request
+        cannot make itself authoritative by filling in these fields.
+        """
+        if not self.tenant_id:
+            raise ScopeDenied("tenant scope is required")
+        if not self.actor_principal or not self.actor_type:
+            raise ScopeDenied("authenticated actor is required")
+        if self.actor_type == "USER":
+            if not self.subject_user_id:
+                raise ScopeDenied("user actor requires subject")
+            if self.delegation:
+                raise ScopeDenied("user actor cannot assert delegation")
+        elif self.delegation and not self.subject_user_id:
+            raise ScopeDenied("delegation requires a subject")
+
     def namespace(self, visibility: Visibility, user_id: str | None, project_id: str | None) -> tuple[str, ...]:
         return (self.tenant_id, visibility.value, user_id or "", project_id or "")
 
@@ -97,8 +116,7 @@ class FixedMembershipResolver:
         self._resolve_roles, self._source = resolve_roles, source
 
     def resolve(self, scope: ScopeContext, operation: str, target_visibility: Visibility) -> MutationAuthorizationContext:
-        if not scope.tenant_id:
-            raise ScopeDenied("tenant scope is required")
+        scope.validate()
         roles = frozenset(self._resolve_roles(scope))
         # private users may act on their subject; shared mutation needs a
         # resolver-derived role, never a boolean in a request payload.
@@ -260,8 +278,10 @@ def legacy_prompt_context(scope: ScopeContext, entries: Iterable[tuple[str, str,
     It deliberately does not grant verification/current truth.  Callers need a
     tenant-bearing ScopeContext before legacy content can reach a model.
     """
-    if not scope.tenant_id:
-        raise ScopeDenied("legacy prompt memory requires tenant scope")
+    try:
+        scope.validate()
+    except ScopeDenied as exc:
+        raise ScopeDenied("legacy prompt memory requires validated scope") from exc
     envelopes=[]
     for kind, source_key, content in entries:
         now=time.time(); mid="legacy:" + _digest((kind, source_key))
@@ -294,8 +314,17 @@ def _derive_projection(memory_id: str, revisions: list[MemoryRevision], events: 
             elif event.kind is EventKind.CONTENT_PURGE:
                 state = Lifecycle.PURGED
         current = replace(current, lifecycle=state)
-    history = [{"r": r.revision_id, "l": r.lifecycle.value, "d": r.content_digest} for r in revisions]
-    history += [{"e": e.event_id, "k": e.kind.value, "r": e.revision_id} for e in events]
+    # Include every state-affecting immutable field.  Hashing only event IDs
+    # would let a modified authorization/detail record look canonical.
+    history = [{"r": r.revision_id, "m": r.memory_id, "l": r.lifecycle.value,
+                "d": r.content_digest, "v": r.visibility.value, "u": r.user_id,
+                "p": r.project_id, "prior": r.prior_revision_id,
+                "provenance": r.provenance_status} for r in revisions]
+    history += [{"e": e.event_id, "m": e.memory_id, "k": e.kind.value,
+                 "r": e.revision_id, "a": e.actor_principal, "s": e.subject_user_id,
+                 "authority": e.authority_source, "at": e.actor_type,
+                 "delegation": e.delegation, "details": dict(e.details),
+                 "compensates": e.compensates_event_id} for e in events]
     return MemoryProjection(memory_id, current.revision_id if current else None,
                             current.lifecycle if current else None,
                             bool(current and current.lifecycle is Lifecycle.VERIFIED), _digest(history))
@@ -307,14 +336,16 @@ class InMemoryB9Store:
         self.objects: dict[str, MemoryObject] = {}; self.revisions: dict[str, list[MemoryRevision]] = {}
         self.events: dict[str, list[MemoryEvent]] = {}; self.provenance: dict[str, list[MemoryProvenance]] = {}
         self.projections: dict[str, MemoryProjection] = {}; self.bindings: dict[tuple[str,str,str], str] = {}
-        self.embeddings: dict[str, list[EmbeddingGeneration]] = {}; self._lock = threading.RLock()
+        self.embeddings: dict[str, list[EmbeddingGeneration]] = {}
+        self.embedding_spaces: dict[str, EmbeddingSpaceIdentity] = {}
+        self._lock = threading.RLock()
 
     def transaction(self, operation: Callable[["InMemoryB9Store"], Any]) -> Any:
         with self._lock:
-            snapshot = copy.deepcopy((self.objects,self.revisions,self.events,self.provenance,self.projections,self.bindings,self.embeddings))
+            snapshot = copy.deepcopy((self.objects,self.revisions,self.events,self.provenance,self.projections,self.bindings,self.embeddings,self.embedding_spaces))
             try: return operation(self)
             except Exception:
-                self.objects,self.revisions,self.events,self.provenance,self.projections,self.bindings,self.embeddings = snapshot
+                self.objects,self.revisions,self.events,self.provenance,self.projections,self.bindings,self.embeddings,self.embedding_spaces = snapshot
                 raise
 
     def _commit(self, obj: MemoryObject, revision: MemoryRevision, provenance: MemoryProvenance, event: MemoryEvent) -> None:
@@ -328,6 +359,50 @@ class InMemoryB9Store:
         if p != expected: raise ReconciliationRequired(memory_id)
         return p
 
+    def rebuild_projection(self, memory_id: str) -> MemoryProjection:
+        """Reconstruct the derived projection from immutable canonical rows."""
+        with self._lock:
+            if memory_id not in self.objects:
+                raise KeyError(memory_id)
+            return _derive_projection(memory_id, self.revisions[memory_id], self.events[memory_id])
+
+    def detect_reconciliation(self, memory_id: str) -> bool:
+        """Mark and report a projection mismatch without silently repairing it."""
+        with self._lock:
+            expected = self.rebuild_projection(memory_id)
+            actual = self.projections.get(memory_id)
+            if actual != expected:
+                self.projections[memory_id] = replace(expected, reconciliation_required=True)
+                return True
+            return actual.reconciliation_required
+
+    def register_embedding_space(self, identity: EmbeddingSpaceIdentity) -> str:
+        space_id = identity.embedding_space_id
+        with self._lock:
+            known = self.embedding_spaces.get(space_id)
+            if known is not None and known != identity:
+                raise B9Error("embedding space ID cannot identify incompatible metadata")
+            self.embedding_spaces[space_id] = identity
+        return space_id
+
+    def add_embedding_generation(self, generation: EmbeddingGeneration) -> None:
+        with self._lock:
+            identity = self.embedding_spaces.get(generation.embedding_space_id)
+            if identity is None:
+                raise B9Error("embedding generation requires registered space")
+            if generation.revision_id not in {r.revision_id for rs in self.revisions.values() for r in rs}:
+                raise KeyError(generation.revision_id)
+            if generation.vector is not None and len(generation.vector) != identity.dimension:
+                raise B9Error("embedding vector dimension does not match space")
+            generations = self.embeddings.setdefault(generation.revision_id, [])
+            if any(g.generation_id == generation.generation_id for g in generations):
+                raise B9Error("embedding generation is immutable")
+            generations.append(generation)
+
+    def compatible_embeddings(self, revision_id: str, space_id: str) -> tuple[EmbeddingGeneration, ...]:
+        """Never return vectors from a different compatibility identity."""
+        return tuple(g for g in self.embeddings.get(revision_id, ()) if g.embedding_space_id == space_id)
+
     def update_event(self, *_: Any, **__: Any) -> None: raise EventImmutable("MemoryEvent is append-only")
     def delete_event(self, *_: Any, **__: Any) -> None: raise EventImmutable("MemoryEvent is append-only")
 
@@ -338,6 +413,23 @@ class MemoryAPI:
 
     def _authorize(self, scope: ScopeContext, operation: str, visibility: Visibility) -> MutationAuthorizationContext:
         return self._authorizer.resolve(scope, operation, visibility)
+
+    def _canonical_for_mutation(self, memory_id: str) -> None:
+        # Detection records a durable repair-needed signal; mutation then fails
+        # closed rather than overwriting a projection discrepancy.
+        if self._store.detect_reconciliation(memory_id):
+            raise ReconciliationRequired(memory_id)
+
+    @staticmethod
+    def _assert_read_scope(scope: ScopeContext, obj: MemoryObject, revision: MemoryRevision) -> None:
+        if obj.tenant_id != scope.tenant_id:
+            raise ScopeDenied("cross-tenant retrieval")
+        if revision.visibility is Visibility.USER_PRIVATE and revision.user_id != scope.subject_user_id:
+            raise ScopeDenied("private retrieval denied")
+        if revision.visibility is Visibility.PROJECT_SHARED and (
+            not scope.project_id or revision.project_id != scope.project_id
+        ):
+            raise ScopeDenied("project retrieval denied")
 
     @staticmethod
     def _event(scope: ScopeContext, auth: MutationAuthorizationContext, memory_id: str,
@@ -384,11 +476,13 @@ class MemoryAPI:
         # Always compare the stored projection with canonical history before a
         # sensitive mutation.  Reading a boolean from the projection alone
         # would let a tampered/stale projection escape detection.
-        self._store.projection(memory_id)
+        self._canonical_for_mutation(memory_id)
         previous=self._store.revisions[memory_id][-1]; vis=visibility or previous.visibility
         auth=self._authorize(scope,event_kind.value,vis)
         if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant cannot change under same memory id")
         if vis is Visibility.USER_PRIVATE and user_id != scope.subject_user_id: raise ScopeDenied("private subject mismatch")
+        if project_id is not None and project_id != scope.project_id:
+            raise ScopeDenied("project scope mismatch")
         def work(s: InMemoryB9Store) -> str:
             now=time.time(); rid=_uuid7(); rev=MemoryRevision(rid,memory_id,_digest(content),vis,user_id,project_id,Lifecycle.ACTIVE,now,content,previous.provenance_status,previous.revision_id)
             prov=MemoryProvenance(_uuid7(),rid,(previous.revision_id,),"revision","1",scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now)
@@ -401,6 +495,7 @@ class MemoryAPI:
                 destination_scope: ScopeContext | None=None) -> str:
         """Create a same-tenant successor revision or a new object across tenants."""
         obj=self._store.objects[memory_id]; prior=self._store.revisions[memory_id][-1]
+        self._canonical_for_mutation(memory_id)
         destination_scope = destination_scope or scope
         self._authorize(scope, "RE_SCOPE", prior.visibility)
         self._authorize(destination_scope, "RE_SCOPE", new_visibility)
@@ -438,6 +533,7 @@ class MemoryAPI:
 
     def verify(self, scope: ScopeContext, memory_id: str, *, method: str, limitations: str | None=None) -> str:
         obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]
+        self._canonical_for_mutation(memory_id)
         auth=self._authorize(scope,"VERIFY",old.visibility)
         if obj.tenant_id != scope.tenant_id or not auth.resolved_roles.intersection({"memory_reviewer","memory_admin"}):
             raise AuthorizationDenied("verification requires resolved reviewer authority")
@@ -452,7 +548,9 @@ class MemoryAPI:
         source_ids=tuple(source_ids)
         if not source_ids: raise B9Error("synthesis needs source memory")
         sources=[self._store.revisions[i][-1] for i in source_ids]
-        if any(self._store.objects[i].tenant_id != scope.tenant_id for i in source_ids): raise ScopeDenied("cross-tenant synthesis")
+        for memory_id, revision in zip(source_ids, sources):
+            self._canonical_for_mutation(memory_id)
+            self._assert_read_scope(scope, self._store.objects[memory_id], revision)
         if any(self._store.objects[i].kind is ObjectKind.SYNTHESIS for i in source_ids): raise B9Error("recursive automated synthesis prohibited")
         # Synthesis cannot self-verify and begins unverified even from verified inputs.
         auth=self._authorize(scope,"SYNTHESIZE",Visibility.SYSTEM_INTERNAL)
@@ -466,6 +564,7 @@ class MemoryAPI:
 
     def purge(self, scope: ScopeContext, memory_id: str) -> str:
         obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]; auth=self._authorize(scope,"CONTENT_PURGE",old.visibility)
+        self._canonical_for_mutation(memory_id)
         if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant mismatch")
         def work(s: InMemoryB9Store) -> str:
             now=time.time(); rid=_uuid7(); rev=replace(old,revision_id=rid,lifecycle=Lifecycle.PURGED,created_at=now,payload=None,prior_revision_id=old.revision_id)
@@ -477,6 +576,7 @@ class MemoryAPI:
     def tombstone(self, scope: ScopeContext, memory_id: str, *, reason: str) -> str:
         """Withdraw content from retrieval while preserving privacy-safe identity."""
         obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]
+        self._canonical_for_mutation(memory_id)
         auth=self._authorize(scope,"TOMBSTONE",old.visibility)
         if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant mismatch")
         def work(s: InMemoryB9Store) -> str:
@@ -498,6 +598,7 @@ class MemoryAPI:
     def _lifecycle_revision(self, scope: ScopeContext, memory_id: str, lifecycle: Lifecycle,
                             event_kind: EventKind, reason: str) -> str:
         obj=self._store.objects[memory_id]; old=self._store.revisions[memory_id][-1]
+        self._canonical_for_mutation(memory_id)
         auth=self._authorize(scope,event_kind.value,old.visibility)
         if obj.tenant_id != scope.tenant_id: raise ScopeDenied("tenant mismatch")
         def work(s: InMemoryB9Store) -> str:
@@ -510,11 +611,11 @@ class MemoryAPI:
         return self._store.transaction(work)
 
     def envelope(self, scope: ScopeContext, memory_id: str, *, references: Iterable[MemoryReference]=()) -> MemoryEnvelope:
+        scope.validate()
         obj=self._store.objects[memory_id]
-        if obj.tenant_id != scope.tenant_id: raise ScopeDenied("cross-tenant retrieval")
         rev=self._store.revisions[memory_id][-1]
+        self._assert_read_scope(scope, obj, rev)
         if rev.lifecycle in {Lifecycle.TOMBSTONED,Lifecycle.PURGED} or rev.payload is None: raise ScopeDenied("memory payload unavailable")
-        if rev.visibility is Visibility.USER_PRIVATE and rev.user_id != scope.subject_user_id: raise ScopeDenied("private retrieval denied")
         return MemoryEnvelope(obj,rev,tuple(self._store.provenance.get(rev.revision_id,())),tuple(references),{})
 
     def retrieve(self, scope: ScopeContext, *, visibility: Visibility | None=None,
@@ -524,7 +625,7 @@ class MemoryAPI:
         Ranking is deliberately outside this method: selection never mutates
         verification, lifecycle, or current-source classification.
         """
-        if not scope.tenant_id: raise ScopeDenied("tenant scope is required")
+        scope.validate()
         if project_id is not None and project_id != scope.project_id:
             raise ScopeDenied("project scope mismatch")
         results=[]
@@ -537,6 +638,53 @@ class MemoryAPI:
             if rev.lifecycle in {Lifecycle.TOMBSTONED,Lifecycle.PURGED,Lifecycle.EXPIRED} or rev.payload is None: continue
             results.append(self.envelope(scope,memory_id))
         return tuple(results)
+
+    def record_embedding(self, scope: ScopeContext, memory_id: str, identity: EmbeddingSpaceIdentity,
+                         vector: Iterable[float] | None = None) -> str:
+        """Record a new immutable generation without changing memory identity.
+
+        The caller can re-embed a revision in a changed compatible space, but
+        consumers must explicitly request that exact space to compare it.
+        """
+        self._canonical_for_mutation(memory_id)
+        obj = self._store.objects[memory_id]
+        revision = self._store.revisions[memory_id][-1]
+        auth = self._authorize(scope, "RE_EMBED", revision.visibility)
+        if obj.tenant_id != scope.tenant_id:
+            raise ScopeDenied("tenant mismatch")
+        space_id = identity.embedding_space_id
+        generation = EmbeddingGeneration(_uuid7(), revision.revision_id, space_id, time.time(),
+                                         tuple(vector) if vector is not None else None)
+        def work(s: InMemoryB9Store) -> str:
+            s.register_embedding_space(identity)
+            s.add_embedding_generation(generation)
+            # Re-embedding is operational history but does not create a
+            # content revision or alter verification/lifecycle state.
+            event = self._event(scope, auth, memory_id, revision.revision_id,
+                                EventKind.RE_EMBED, time.time(), {"embedding_space_id": space_id,
+                                                                    "generation_id": generation.generation_id})
+            s.events.setdefault(memory_id, []).append(event)
+            s.projections[memory_id] = s.rebuild_projection(memory_id)
+            return generation.generation_id
+        return self._store.transaction(work)
+
+    def compensate(self, scope: ScopeContext, memory_id: str, compensates_event_id: str, *, reason: str) -> str:
+        """Append an auditable compensation marker; it never rewrites history."""
+        self._canonical_for_mutation(memory_id)
+        obj = self._store.objects[memory_id]; revision = self._store.revisions[memory_id][-1]
+        auth = self._authorize(scope, "COMPENSATE", revision.visibility)
+        if obj.tenant_id != scope.tenant_id:
+            raise ScopeDenied("tenant mismatch")
+        if compensates_event_id not in {e.event_id for e in self._store.events[memory_id]}:
+            raise B9Error("compensation target is not an event of this memory")
+        def work(s: InMemoryB9Store) -> str:
+            event = replace(self._event(scope, auth, memory_id, revision.revision_id,
+                                        EventKind.COMPENSATE, time.time(), {"reason": reason}),
+                            compensates_event_id=compensates_event_id)
+            s.events[memory_id].append(event)
+            s.projections[memory_id] = s.rebuild_projection(memory_id)
+            return event.event_id
+        return self._store.transaction(work)
 
 
 class MemoryReferenceResolver:

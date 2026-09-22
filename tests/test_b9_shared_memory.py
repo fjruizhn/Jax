@@ -103,6 +103,9 @@ def test_projection_mismatch_requires_reconciliation():
     a._store.projections[mid] = a._store.projections[mid].__class__(mid, None, None, False, "bad")
     with pytest.raises(ReconciliationRequired): a._store.projection(mid)
     with pytest.raises(ReconciliationRequired): a.revise(scope(), mid, "cannot mutate")
+    assert a._store.projections[mid].reconciliation_required
+    rebuilt = a._store.rebuild_projection(mid)
+    assert rebuilt.current_revision_id == a._store.revisions[mid][-1].revision_id
 
 
 def test_synthesis_is_unverified_and_not_recursive():
@@ -120,6 +123,15 @@ def test_retrieve_requires_tenant_and_enforces_project_and_visibility():
     assert {e.identity.memory_id for e in a.retrieve(scope())} == {private, project}
     with pytest.raises(ScopeDenied): a.retrieve(ScopeContext("x","USER","u1","", "p1"))
     assert {e.identity.memory_id for e in a.retrieve(scope(project="p2"))} == {private}
+    with pytest.raises(ScopeDenied): a.envelope(scope(project="p2"), project)
+
+
+def test_synthesis_cannot_read_another_subject_private_memory():
+    a = api()
+    private = a.create(scope(), ObjectKind.FACT, "private", Visibility.USER_PRIVATE, user_id="u1")
+    with pytest.raises(ScopeDenied):
+        a.synthesize(scope(subject="u2", actor="user:u2"), [private], "summary",
+                     provider="p", model="m", transformation_version="1")
 
 
 def test_tombstone_expire_and_cross_tenant_rescope_preserve_history():
@@ -143,6 +155,37 @@ def test_event_records_actor_delegation_component_and_trace():
     e=a._store.events[mid][0]
     assert (e.actor_type,e.delegation,e.calling_component,e.request_id,e.trace_id) == (
         "SERVICE","user-request","memory-worker","r","trace")
+
+
+def test_invalid_delegation_and_unscoped_user_fail_closed():
+    a = api()
+    forged = ScopeContext("user:u1", "USER", "u1", "t1", delegation="forged")
+    with pytest.raises(ScopeDenied): a.create(forged, ObjectKind.FACT, "x", Visibility.USER_PRIVATE, user_id="u1")
+    missing_subject = ScopeContext("user:u1", "USER", None, "t1")
+    with pytest.raises(ScopeDenied): a.retrieve(missing_subject)
+
+
+def test_embedding_generations_preserve_revision_and_exclude_other_space():
+    a = api(); mid = a.create(scope(), ObjectKind.FACT, "x", Visibility.USER_PRIVATE, user_id="u1")
+    revision = a._store.revisions[mid][-1].revision_id
+    one = EmbeddingSpaceIdentity("1", "local", "m", "one", 2, "l2", "cosine")
+    two = EmbeddingSpaceIdentity("1", "local", "m", "two", 2, "l2", "cosine")
+    first = a.record_embedding(scope(), mid, one, [0.1, 0.2])
+    second = a.record_embedding(scope(), mid, two, [0.1, 0.2])
+    assert first != second
+    assert a._store.revisions[mid][-1].revision_id == revision
+    assert len(a._store.compatible_embeddings(revision, one.embedding_space_id)) == 1
+    assert not a._store.compatible_embeddings(revision, "sha256:not-a-space")
+    with pytest.raises(Exception): a.record_embedding(scope(), mid, one, [0.1])
+
+
+def test_compensation_is_append_only_and_cannot_target_another_memory():
+    a = api(); first = a.create(scope(), ObjectKind.FACT, "x", Visibility.USER_PRIVATE, user_id="u1")
+    second = a.create(scope(), ObjectKind.FACT, "y", Visibility.USER_PRIVATE, user_id="u1")
+    event = a._store.events[first][0]
+    compensation = a.compensate(scope(), first, event.event_id, reason="operator correction")
+    assert a._store.events[first][-1].event_id == compensation
+    with pytest.raises(Exception): a.compensate(scope(), second, event.event_id, reason="bad target")
 
 
 def test_typed_resolvers_fail_unavailable_and_reject_wrong_current_source():
