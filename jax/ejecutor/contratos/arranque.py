@@ -144,45 +144,48 @@ def _archivos_instalados(base) -> frozenset:
 
 
 def verificar_contexto(ctx: Contexto) -> tuple:
-    """El CLAUDE.md (spec §6.1: SIEMPRE generado, nunca a mano) y las skills
-    declaradas, al día contra lo que `contexto.py` produce/exige AHORA MISMO.
-    Mismo criterio fail-closed que el resto de `verificar_instalacion`: el sha256
-    instalado se recalcula contra los bytes reales, nunca se confía en el
-    `.sha256` de acompañamiento (ese archivo es sólo para auditoría humana).
-    "$HOME" ya no necesita un chequeo acá (B-1/M-4, ronda 3): es un `--tmpfs`
-    propio de cada invocación, ver cuenta_axioma.py.
+    """M-2 (ronda 6, auditoría adversarial 2026-09-22): «el contexto instalado es la
+    autoridad». Compara los bytes instalados (CLAUDE.md + skills) contra el
+    MANIFIESTO que se escribió AL INSTALAR (`contexto.MANIFIESTO_REL`, root, de sólo
+    lectura para axioma) -- NUNCA regenera desde `/home/fruiz/claude-skills` en cada
+    misión (eso era leer la constitución real en cada arranque, y además rechazaba
+    una instalación ÍNTEGRA sólo porque la constitución de Fernando cambió un
+    carácter DESPUÉS de instalar: integridad y frescura son preguntas distintas.
+    Frescura la contesta `contexto.py --comprobar-frescura`, aparte, sin bloquear
+    ninguna misión -- ver su docstring).
 
-    M4 (auditoría adversarial 2026-09-22): la comparación es del CONJUNTO completo
-    de archivos, no sólo de los declarados -- un archivo de MÁS bajo `SKILLS_REL`
-    (una skill vieja que el instalador debió borrar y no borró, o algo que alguien
-    dejó a mano) también hace fallar el arranque. Verificar sólo "lo que se espera
-    está" deja pasar "y además hay algo que no debería"."""
+    Un manifiesto ilegible (ausente, JSON roto, vacío) falla cerrado: sin manifiesto
+    no hay contra qué comparar. "$HOME" ya no necesita un chequeo acá (B-1/M-4, ronda
+    3): es un `--tmpfs` propio de cada invocación, ver cuenta_axioma.py.
+
+    M4 (ronda 3): la comparación de skills es del CONJUNTO completo de archivos, no
+    sólo de los declarados -- un archivo de MÁS bajo `SKILLS_REL` (una skill vieja que
+    el instalador debió borrar y no borró, o algo que alguien dejó a mano) también
+    hace fallar el arranque."""
+    try:
+        manifiesto = json.loads((ctx.cuenta.lib / contexto.MANIFIESTO_REL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (Fallo("arranque", "manifiesto_ilegible"),)
+    if not isinstance(manifiesto, dict) or not manifiesto:
+        return (Fallo("arranque", "manifiesto_ilegible"),)
+
     fallos = []
+    sha_esperado = manifiesto.get("CLAUDE.md")
     try:
-        esperado = contexto.claude_md()
+        instalado = (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).read_bytes()
     except OSError:
-        fallos.append(Fallo("arranque", "contexto_desactualizado"))
-    else:
-        try:
-            instalado = (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).read_bytes()
-        except OSError:
-            instalado = None
-        if instalado is None or _sha(instalado) != _sha(esperado):
-            fallos.append(Fallo("arranque", "contexto_desactualizado"))
+        instalado = None
+    if not isinstance(sha_esperado, str) or instalado is None or _sha(instalado) != sha_esperado:
+        fallos.append(Fallo("arranque", "contexto_manipulado"))
 
-    try:
-        esperadas_skills = contexto.archivos_de_skills()
-    except contexto.SkillFaltante as exc:
-        fallos.append(Fallo("arranque", "skill_faltante", (("skill", exc.args[0]),)))
-        return tuple(fallos)
-
-    for rel, datos in esperadas_skills.items():
+    esperadas_skills = {k[len("skills/"):]: v for k, v in manifiesto.items() if k.startswith("skills/")}
+    for rel, sha_esperado in sorted(esperadas_skills.items()):
         try:
             instalado = (ctx.cuenta.lib / contexto.SKILLS_REL / rel).read_bytes()
         except OSError:
             instalado = None
-        if instalado is None or _sha(instalado) != _sha(datos):
-            fallos.append(Fallo("arranque", "skill_desactualizada", (("archivo", rel),)))
+        if not isinstance(sha_esperado, str) or instalado is None or _sha(instalado) != sha_esperado:
+            fallos.append(Fallo("arranque", "skill_manipulada", (("archivo", rel),)))
 
     de_mas = _archivos_instalados(ctx.cuenta.lib / contexto.SKILLS_REL) - frozenset(esperadas_skills)
     fallos.extend(Fallo("arranque", "skill_extra_instalada", (("archivo", rel),)) for rel in sorted(de_mas))

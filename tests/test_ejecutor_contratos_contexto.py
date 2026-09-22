@@ -120,6 +120,56 @@ def test_renderizar_etapa_escribe_claude_md_sha256_y_skills(tmp_path, monkeypatc
         assert (etapa / "skills" / nombre / "SKILL.md").read_text() == f"skill {nombre}"
 
 
+def test_renderizar_etapa_escribe_el_manifiesto(tmp_path, monkeypatch):
+    """M-2 (ronda 6): el manifiesto que el arranque va a comparar -- sha256 de
+    CLAUDE.md y de cada archivo de skill, por su ruta EXACTA."""
+    import hashlib
+    import json
+    fuente = tmp_path / "skills-fuente"
+    for nombre in CX.skills_declaradas():
+        (fuente / nombre).mkdir(parents=True)
+        (fuente / nombre / "SKILL.md").write_text(f"skill {nombre}")
+    monkeypatch.setattr(CX, "skills_fuente", lambda: fuente)
+    monkeypatch.setattr(CX, "claude_md", lambda: b"# contenido de prueba\n")
+
+    etapa = tmp_path / "etapa"
+    CX.renderizar_etapa(etapa)
+
+    m = json.loads((etapa / CX.MANIFIESTO_REL.split("/")[-1]).read_text())
+    assert m["CLAUDE.md"] == hashlib.sha256(b"# contenido de prueba\n").hexdigest()
+    for nombre in CX.skills_declaradas():
+        assert m[f"skills/{nombre}/SKILL.md"] == hashlib.sha256(f"skill {nombre}".encode()).hexdigest()
+    assert len(m) == 1 + len(CX.skills_declaradas())
+
+
+def test_manifiesto_coincide_con_lo_que_renderiza(tmp_path, monkeypatch):
+    fuente = tmp_path / "skills-fuente"
+    for nombre in CX.skills_declaradas():
+        (fuente / nombre).mkdir(parents=True)
+        (fuente / nombre / "SKILL.md").write_text(f"skill {nombre}")
+    monkeypatch.setattr(CX, "skills_fuente", lambda: fuente)
+    monkeypatch.setattr(CX, "claude_md", lambda: b"# x\n")
+    assert CX.manifiesto() == CX.manifiesto()  # determinista
+    import json
+    etapa = tmp_path / "etapa"
+    CX.renderizar_etapa(etapa)
+    m_etapa = json.loads((etapa / "MANIFIESTO.sha256.json").read_text())
+    assert m_etapa == CX.manifiesto()
+
+
+def test_principal_manifiesto_imprime_json_a_stdout(tmp_path, monkeypatch, capsys):
+    fuente = tmp_path / "skills-fuente"
+    for nombre in CX.skills_declaradas():
+        (fuente / nombre).mkdir(parents=True)
+        (fuente / nombre / "SKILL.md").write_text("s")
+    monkeypatch.setattr(CX, "skills_fuente", lambda: fuente)
+    monkeypatch.setattr(CX, "claude_md", lambda: b"# x\n")
+    assert CX.principal(["--manifiesto"]) == 0
+    import json
+    salida = json.loads(capsys.readouterr().out)
+    assert salida == CX.manifiesto()
+
+
 def test_principal_cli_escribe_la_etapa(tmp_path, monkeypatch):
     fuente = tmp_path / "skills-fuente"
     for nombre in CX.skills_declaradas():

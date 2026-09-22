@@ -364,12 +364,14 @@ _DOBLE_CONSTITUCION = ("## LAS POLÍTICAS DE MARINA\n\nx\n\n## LA REGLA ABSOLUTA
 
 
 def _instalar_contexto(ctx, monkeypatch, *, fuente_skills=None):
-    """Instala CLAUDE.md + skills en ctx.cuenta.lib, además de lo que ya deja
-    `_instalar_copia`. Siempre contra un DOBLE de la constitución (ver arriba):
-    `contexto.constitucion_fuente()` (el seam) apunta a un archivo hermético escrito
-    en `ctx.cuenta.lib.parent`, no a la ruta real de esta máquina. `fuente_skills=None`
-    usa la fuente real de skills declarada en cerebros.toml; pasarla apunta
-    `contexto.skills_fuente()` a una fuente de prueba hermética también."""
+    """Instala CLAUDE.md + skills + MANIFIESTO en ctx.cuenta.lib (M-2, ronda 6: el
+    manifiesto es lo que `verificar_contexto` compara, no una regeneración en vivo),
+    además de lo que ya deja `_instalar_copia`. Siempre contra un DOBLE de la
+    constitución (ver arriba): `contexto.constitucion_fuente()` (el seam) apunta a un
+    archivo hermético escrito en `ctx.cuenta.lib.parent`, no a la ruta real de esta
+    máquina. `fuente_skills=None` usa la fuente real de skills declarada en
+    cerebros.toml; pasarla apunta `contexto.skills_fuente()` a una fuente de prueba
+    hermética también."""
     doble = ctx.cuenta.lib.parent / "constitucion-doble" / "CLAUDE.md.core"
     doble.parent.mkdir(parents=True, exist_ok=True)
     doble.write_text(_DOBLE_CONSTITUCION)
@@ -383,6 +385,7 @@ def _instalar_contexto(ctx, monkeypatch, *, fuente_skills=None):
         destino = ctx.cuenta.lib / contexto.SKILLS_REL / rel
         destino.parent.mkdir(parents=True, exist_ok=True)
         destino.write_bytes(datos)
+    (ctx.cuenta.lib / contexto.MANIFIESTO_REL).write_text(json.dumps(contexto.manifiesto()), encoding="utf-8")
 
 
 def test_instalacion_con_contexto_al_dia_no_falla(tmp_path, monkeypatch):
@@ -392,12 +395,14 @@ def test_instalacion_con_contexto_al_dia_no_falla(tmp_path, monkeypatch):
     assert AR.verificar_instalacion(ctx) == ()
 
 
-def test_claude_md_desactualizado_no_arranca(tmp_path, monkeypatch):
+def test_claude_md_manipulado_no_arranca(tmp_path, monkeypatch):
+    """M-2 (ronda 6): el CONTENIDO instalado ya no coincide con el sha256 que el
+    MANIFIESTO registró al instalar -- alguien (o algo) lo tocó después."""
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
     _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(b"# version vieja, escrita a mano\n")
-    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_desactualizado"),)
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_manipulado"),)
 
 
 def test_claude_md_ausente_no_arranca(tmp_path, monkeypatch):
@@ -405,38 +410,58 @@ def test_claude_md_ausente_no_arranca(tmp_path, monkeypatch):
     _instalar_copia(ctx)
     _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).unlink()
-    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_desactualizado"),)
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_manipulado"),)
 
 
-def test_skill_faltante_en_la_fuente_no_arranca(tmp_path, monkeypatch):
+def test_manifiesto_ausente_no_arranca(tmp_path, monkeypatch):
+    """M-2 (ronda 6): sin manifiesto no hay contra qué comparar -- falla cerrado, no
+    se cae a regenerar desde la fuente."""
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
-    fuente = tmp_path / "skills-incompleta"
-    (fuente / "migrando-sin-romper").mkdir(parents=True)
-    (fuente / "migrando-sin-romper" / "SKILL.md").write_text("m")
-    # "desde-la-fuente" y "endureciendo" NO existen en la fuente: mismo defecto que
-    # test_las_tres_skills_reales_de_claude_skills_hoy_dan_skillfaltante documenta
-    # contra la fuente real (test_ejecutor_contratos_contexto.py) -- acá es a
-    # propósito, con una fuente de prueba hermética.
-    monkeypatch.setattr(contexto, "skills_fuente", lambda: fuente)
-    doble = tmp_path / "constitucion-doble" / "CLAUDE.md.core"
-    doble.parent.mkdir(parents=True, exist_ok=True)
-    doble.write_text(_DOBLE_CONSTITUCION)
-    monkeypatch.setattr(contexto, "constitucion_fuente", lambda: doble)
-    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
-    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
-    assert AR.verificar_instalacion(ctx) == (
-        Fallo("arranque", "skill_faltante", (("skill", "desde-la-fuente"),)),)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.MANIFIESTO_REL).unlink()
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "manifiesto_ilegible"),)
 
 
-def test_skill_instalada_desactualizada_no_arranca(tmp_path, monkeypatch):
+def test_manifiesto_ilegible_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.MANIFIESTO_REL).write_text("{esto no es json valido")
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "manifiesto_ilegible"),)
+
+
+def test_el_nucleo_cambiado_despues_de_instalar_no_rompe_el_arranque(tmp_path, monkeypatch):
+    """M-2 (ronda 6): el arranque NO regenera desde la constitución en vivo -- si la
+    fuente (`/home/fruiz/claude-skills`, acá un doble) cambia DESPUÉS de instalar, una
+    instalación íntegra sigue arrancando: la pregunta de "¿sigue siendo lo que el
+    núcleo produciría hoy?" es de `--comprobar-frescura`, no del arranque."""
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    doble = ctx.cuenta.lib.parent / "constitucion-doble" / "CLAUDE.md.core"
+    doble.write_text(_DOBLE_CONSTITUCION.replace("x\n\n## HONOR", "OTRO CONTENIDO\n\n## HONOR"))
+    assert AR.verificar_instalacion(ctx) == ()
+
+
+def test_skill_instalada_manipulada_no_arranca(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
     fuente = _fuente_skills_de_prueba(tmp_path)
     _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
     (ctx.cuenta.lib / contexto.SKILLS_REL / "endureciendo" / "SKILL.md").write_text("vieja, a mano")
     assert AR.verificar_instalacion(ctx) == (
-        Fallo("arranque", "skill_desactualizada", (("archivo", "endureciendo/SKILL.md"),)),)
+        Fallo("arranque", "skill_manipulada", (("archivo", "endureciendo/SKILL.md"),)),)
+
+
+def test_skill_declarada_en_el_manifiesto_pero_ausente_del_disco_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "endureciendo" / "SKILL.md").unlink()
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_manipulada", (("archivo", "endureciendo/SKILL.md"),)),)
 
 
 def test_un_archivo_de_mas_en_skills_no_arranca(tmp_path, monkeypatch):

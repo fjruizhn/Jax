@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
-# ops/ejecutor/instalar_contexto.sh [--rama-aprobada] — instala el CLAUDE.md GENERADO
-# (spec §6.1: nunca a mano) y las skills declaradas (cerebros.toml `skills`) en
-# JAX_EJECUTOR_LIB/contexto/, de solo lectura para la cuenta del Ejecutor. La jaula
-# (jax.ejecutor.contratos.cuenta_axioma._jaula) monta esos dos caminos ro sobre
-# "$HOME/.claude/CLAUDE.md" y "$HOME/.claude/skills"; el arranque de cada misión
-# (jax.ejecutor.contratos.arranque.verificar_contexto) rechaza la misión si lo
-# instalado no coincide con lo que el generador produce HOY.
+# ops/ejecutor/instalar_contexto.sh [--rama-aprobada|--comprobar-frescura] — instala el
+# CLAUDE.md GENERADO (spec §6.1: nunca a mano) y las skills declaradas (cerebros.toml
+# `skills`) en JAX_EJECUTOR_LIB/contexto/, de solo lectura para la cuenta del Ejecutor,
+# junto con el MANIFIESTO (sha256 de cada archivo) que el arranque de cada misión
+# compara (M-2, ronda 6: `jax.ejecutor.contratos.arranque.verificar_contexto` ya NO
+# regenera desde la constitución en cada misión -- lee este manifiesto, instalado por
+# ESTE script, root, de sólo lectura para axioma). La jaula
+# (jax.ejecutor.contratos.cuenta_axioma._jaula) monta CLAUDE.md y skills ro sobre
+# "$HOME/.claude/CLAUDE.md" y "$HOME/.claude/skills".
+#
+# --comprobar-frescura: NO instala nada. Compara el manifiesto YA INSTALADO contra lo
+# que el generador produciría AHORA MISMO y avisa si difieren -- INFORMATIVO, nunca
+# bloquea ninguna misión (esa es la integridad, que sí bloquea, y la hace el arranque
+# de cada misión contra el manifiesto). Pensado para engancharse a un timer periódico,
+# no para correr en el camino de una misión.
 #
 # Corre como fruiz desde el checkout de producción (/srv/jax-prod/jax en master --
 # JAX_REPO_PATH en /etc/jax/.env, NO /home/fruiz/jax: ese es el checkout de trabajo
@@ -15,6 +23,23 @@
 set -euo pipefail
 : "${JAX_EJECUTOR_LIB:?}"
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
+
+if [ "${1:-}" = --comprobar-frescura ]; then
+  DESTINO="$JAX_EJECUTOR_LIB/contexto"
+  MANIFIESTO_ACTUAL="$(cd "$REPO" && PYTHONDONTWRITEBYTECODE=1 python3 -m jax.ejecutor.contratos.contexto --manifiesto)"
+  if ! sudo test -e "$DESTINO/MANIFIESTO.sha256.json"; then
+    echo "frescura_ok=false motivo=\"manifiesto_no_instalado\""
+    exit 0
+  fi
+  MANIFIESTO_INSTALADO="$(sudo cat "$DESTINO/MANIFIESTO.sha256.json")"
+  if [ "$MANIFIESTO_ACTUAL" = "$MANIFIESTO_INSTALADO" ]; then
+    echo "frescura_ok=true"
+  else
+    echo "frescura_ok=false motivo=\"desactualizado\""
+  fi
+  exit 0
+fi
+
 # Mismo candado que instalar_contratos.sh: producción se instala desde master;
 # --rama-aprobada (sólo con GO/autonomía de Fernando) permite instalar desde la
 # rama del checkout y lo deja dicho en la salida.
@@ -44,6 +69,7 @@ echo "--- fin diff ---"
 sudo install -d -o root -g root -m 0755 "$DESTINO"
 sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md" "$DESTINO/CLAUDE.md"
 sudo install -o root -g root -m 0644 "$ETAPA/CLAUDE.md.sha256" "$DESTINO/CLAUDE.md.sha256"
+sudo install -o root -g root -m 0644 "$ETAPA/MANIFIESTO.sha256.json" "$DESTINO/MANIFIESTO.sha256.json"
 
 # Las skills: reemplazo ATÓMICO del árbol completo (M4, auditoría adversarial
 # 2026-09-22). Instalar archivo por archivo, uno por uno, SÓLO agrega -- una skill
