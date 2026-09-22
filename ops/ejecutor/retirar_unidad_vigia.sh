@@ -34,7 +34,7 @@ fi
 
 # Por si quedara alguna instancia corriendo (no debería, el camino real nunca la usa):
 # pararlas ANTES de tocar los archivos, para que un SIGTERM normal audite lo pendiente.
-INSTANCIAS="$(systemctl list-units --no-legend 'ejecutor-vigia@*' 2>/dev/null | awk '{print $1}')"
+INSTANCIAS="$(systemctl list-units --plain --no-legend 'ejecutor-vigia@*' 2>/dev/null | awk '{print $1}')"
 if [ -n "$INSTANCIAS" ]; then
   echo "$INSTANCIAS" | xargs -r sudo systemctl stop
 fi

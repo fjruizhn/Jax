@@ -53,7 +53,11 @@ from jax.ejecutor.contratos.registro import verificar_cadena
 
 VARIABLE_TOPE = "JAX_EJECUTOR_TURNO_TOPE_S"
 VARIABLE_ESPERA = "JAX_EJECUTOR_VIGIA_ESPERA_S"
-_CIERRE_VIGIA_S = 200  # TimeoutStopSec de la unidad (150) + margen: el vigía audita lo pendiente al parar
+_CIERRE_VIGIA_S = 200  # MINOR (ronda 6): ya no hay unidad systemd de la que citar un TimeoutStopSec
+# (ejecutor-vigia@.service se retiró, ronda 5) -- el número sale de lo que el vigía hace de
+# verdad al recibir SIGTERM: audita el último lote pendiente, y auditor_cliente.auditar()
+# tiene un tope de 120 s por lote. 200 = 120 + margen para el resto del cierre (borrar el
+# latido, etc.), no un valor heredado de una unidad que nunca arrancó en producción.
 
 
 class SinConfigurar(RuntimeError):

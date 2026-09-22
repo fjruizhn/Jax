@@ -199,7 +199,21 @@ def ruta_projects_de_la_mision(misiones: Path, mision_id: str) -> Path:
     donde ya vive `<id_vigia>.json` (mision_servicio.py::abrir_vigia) -- éste va en un
     subdirectorio nuevo, `<mision_id>/claude-projects`, para no mezclarse con esos
     archivos. Sólo un UUID canónico en minúsculas: termina en una ruta de sistema de
-    archivos y en el argv de `sudo install` (`preparar_directorio_projects`)."""
+    archivos y en el argv de `sudo install` (`preparar_directorio_projects`).
+
+    LÍMITE (MINOR, ronda 6, auditoría adversarial 2026-09-22) -- `claude-projects` de
+    OTRA misión: hoy no hay misiones CONCURRENTES. C5 (`arranque.verificar_c5_estatico`,
+    `pausa.latido_fresco`) exige que ningún otro vigía esté latiendo -- el latido es
+    UN SOLO archivo (`JAX_EJECUTOR_VIGIA_LATIDO`, global, no por misión), así que sólo
+    puede haber una misión abierta a la vez en todo el Ejecutor. Si eso cambiara, la
+    separación entre el `claude-projects` de dos misiones concurrentes depende
+    ENTERAMENTE de que una no adivine el UUID de la otra -- y esa suposición es más
+    débil de lo que parece: las dos correrían bajo la MISMA cuenta `axioma` (un solo
+    UID), y un proceso puede leer `/proc/<pid>/cmdline` de OTRO proceso del MISMO UID
+    sin necesitar sudo ni root -- el UUID de la misión viaja en la ruta que `_jaula`
+    arma para el `--bind` de `claude-projects` dentro del argv de bwrap, visible ahí.
+    Habilitar misiones concurrentes sin resolver esto primero (Principio IX) dejaría
+    a una misión leer/escribir la sesión de otra con sólo mirar `/proc`."""
     if not _MISION_ID_VALIDA.match(mision_id):
         raise MisionIdInvalido(mision_id)
     return misiones / mision_id / "claude-projects"

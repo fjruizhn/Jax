@@ -3693,8 +3693,41 @@ jobs:
           #   (test_la_unidad_del_vigia_no_existe_y_nadie_la_instala: guarda contra que la unidad
           #   vuelva sola). Neto -1. Medido igual que las rondas 3/4, sin tocar nada fuera del
           #   worktree.
-          grep -qE "^2573 passed, 35 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2573 tests CORRIDOS y exactamente 35 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 19 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 6 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 2 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
+          # 2573 -> 2592, 35 -> 38 skipped (feat/ejecutor-contexto-y-skills, ronda 6, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la cuarta auditoría sobre la huella: "está
+          #   creciendo hasta volverse otro filtro que no converge, así que la SIMPLIFICO").
+          #   Punto 1: huella.py reescrito -- RUTAS_CONTROLES baja a sudoers/sshd/authorized_keys
+          #   (6 rutas), + el glob /usr/local/sbin/ejecutor-*, + sha de passwd/group/shadow;
+          #   comandos por RUTA ABSOLUTA de los binarios (no el PATH); se QUITA el nivel
+          #   PERSISTENCIA y toda la lógica de "declarado" (B-2 de la ronda 4 se retira entera --
+          #   cualquier cambio pausa, sin excepciones). Punto 2 (M-1): marca "pendiente" persistida
+          #   en cada huella -- antes de abrir CUALQUIER misión nueva, revisa marcas huérfanas de
+          #   OTRA vuelta (de esta u otra misión) que se cortó sin cerrar limpio, en TODO el host
+          #   (nuevo `verificar_huellas_huerfanas`, glob por mision_id). Punto 3 (M-2): el arranque
+          #   ya NO regenera el contexto desde /home/fruiz/claude-skills -- compara contra un
+          #   MANIFIESTO (`contexto.MANIFIESTO_REL`) escrito AL INSTALAR; frescura es un chequeo
+          #   aparte (`instalar_contexto.sh --comprobar-frescura`) que avisa sin bloquear. Punto 4
+          #   (M-4): `correr_huella_por_ssh` extraída a nivel de módulo para poder probar el
+          #   chequeo de rc por separado (mata el mutante "quitar el chequeo del código de
+          #   salida"; el mutante de `tamano_apertura_log=0` ya no aplica -- esa lógica se fue
+          #   entera con el log de sudo). MINOR: huella vacía en la apertura o el cierre es fallo;
+          #   `RuntimeError` en `principal` tiene su propio código; ACL sin ventana en
+          #   `preparar_directorio_misiones.sh` (0700 base, no vuelve a llamar `install -d` sobre
+          #   un directorio existente); LÍMITE de `claude-projects` de otra misión documentado en
+          #   `cuenta_axioma.py`; `--plain` en `retirar_unidad_vigia.sh`; cita corregida en
+          #   mision_servicio.py:56. Punto 6: CLAUDE.md sin la contradicción de systemd/cron
+          #   (crear servicios del cliente es legítimo si el plan lo pide), las skills son guía de
+          #   método no autoridad, el GO es sólo la misión en la plataforma.
+          #   Medido dos veces, mismo método (`bwrap --tmpfs` envolviendo la corrida, sin tocar
+          #   nada fuera del worktree): 2584 (wrapped) + 8 sueltas (4 test_bwrap_real_* +
+          #   4 nuevas de ACL real en test_ejecutor_preparar_directorio_misiones.py -- las 2
+          #   agregadas esta ronda fallan bajo el bwrap EXTERNO de este verificador por el mismo
+          #   límite de namespaces/xattr anidados que ya afecta a las otras 6, NO el runner real)
+          #   = 2592. Skips: 35 -> 38 (+3 `@requiere_constitucion_real` nuevos del punto 6 en
+          #   test_ejecutor_generar_claude_md.py) -- 16 (U3) + 1 (contexto.py) + 21 (generar_claude_md,
+          #   18 antes + 3) = 38.
+          grep -qE "^2592 passed, 38 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2592 tests CORRIDOS y exactamente 38 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 22 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 8 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 4 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

@@ -88,6 +88,48 @@ def test_admin_conserva_rwx_y_la_cuenta_recibe_solo_travesia(tmp_path):
 
 
 @requiere_setfacl
+def test_directorio_nuevo_queda_en_0700_no_0750(tmp_path):
+    """MINOR (ronda 6): con 0750, `group::r-x` le daría LISTAR a cualquier miembro del
+    grupo jaxsvc -- no sólo a admin/cuenta, que son las dos únicas cuentas pensadas.
+    El acceso de las dos sale ENTERO de sus entradas ACL, no del modo. `group::` es lo
+    que hay que mirar -- una vez que hay una ACL, `stat()`/el modo "de en medio"
+    reflejan el MASK (que sí tiene que dar rwx, para que a `admin` no se le recorte),
+    no la entrada `group::` de base."""
+    destino = tmp_path / "misiones"
+    admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    r = _correr(tmp_path, destino, admin, "nobody")
+    assert r.returncode == 0, r.stderr
+    acl = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
+    assert "group::---" in acl, acl
+
+
+@requiere_setfacl
+def test_en_una_corrida_idempotente_no_se_toca_el_modo_de_un_directorio_existente(tmp_path):
+    """MINOR (ronda 6, sin ventana): en la segunda corrida, el directorio YA existe --
+    no se vuelve a llamar `install -d` (que haría un chmod y, de rebote, angostaría el
+    `mask::` de la ACL por un instante). El resultado final tiene que ser el mismo que
+    en la primera corrida, sin pasar por un estado intermedio distinto."""
+    destino = tmp_path / "misiones"
+    admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    r1 = _correr(tmp_path, destino, admin, "nobody")
+    assert r1.returncode == 0, r1.stderr
+    acl1 = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
+
+    # Alguien deja el directorio con permisos "de más" a mano, para simular el estado
+    # real que preexistiría en una corrida idempotente sobre producción.
+    destino.chmod(0o770)
+    r2 = _correr(tmp_path, destino, admin, "nobody")
+    assert r2.returncode == 0, r2.stderr
+    acl2 = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
+    # El script NO vuelve a poner 0700 (no llama install -d sobre un directorio que ya
+    # existe) -- lo único que garantiza son las entradas ACL nombradas, que sí quedan
+    # iguales las dos veces.
+    for linea in acl1.splitlines():
+        if linea.startswith(("user:", "default:user:")) and ":" in linea.split(":", 1)[1]:
+            assert linea in acl2, (linea, acl2)
+
+
+@requiere_setfacl
 def test_es_idempotente(tmp_path):
     destino = tmp_path / "misiones"
     admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
