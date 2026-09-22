@@ -39,11 +39,21 @@ def _b7_authorization_outcome(control_id, *, denied=False, decision_id=None, sub
     if recorder is None: return
     try:
         if denied:
-            recorder.record_denial(control_id=control_id,reason_code="DENIED",decision_id=decision_id)
+            typed = {
+                "CTL.B6.AUTHORIZATION_PROVENANCE": recorder.record_authorization_provenance_denied,
+                "CTL.B6.SANDBOX_ONLY": recorder.record_sandbox_denied,
+                "CTL.B6.TIMEOUT_CEILING": recorder.record_timeout_denied,
+            }.get(control_id)
+            if typed is None: raise ValueError("unsupported authorization evidence control")
+            typed(decision_id=decision_id)
         else:
-            from policy.enforcement_evidence.models import EvidenceSubjectType
-            recorder.record_satisfied(control_id=control_id,subject_type=EvidenceSubjectType.AUTHORIZATION,
-                subject_identity=subject_identity or decision_id,decision_id=decision_id)
+            typed = {
+                "CTL.B6.AUTHORIZATION_PROVENANCE": recorder.record_authorization_provenance,
+                "CTL.B6.SANDBOX_ONLY": recorder.record_sandbox_validated,
+                "CTL.B6.TIMEOUT_CEILING": recorder.record_timeout_validated,
+            }.get(control_id)
+            if typed is None: raise ValueError("unsupported authorization evidence control")
+            typed(authorization_id=subject_identity or decision_id, decision_id=decision_id)
     except Exception:  # fail-soft: optional observation cannot alter B6 authorization.
         # B7 does not replace the governing authorization decision.
         pass
@@ -52,8 +62,8 @@ def _record_unverified_decision(record) -> None:
     if _B7_DECISION_RECORDER is None:
         return
     try:
-        _B7_DECISION_RECORDER.record_denial(control_id="CTL.B5.DECISION_PROVENANCE",
-            reason_code="DENIED", decision_id=getattr(record, "decision_id", None))
+        _B7_DECISION_RECORDER.record_decision_provenance_denied(
+            decision_id=getattr(record, "decision_id", None))
     except Exception:  # fail-soft: rejected DecisionRecord never becomes eligible on evidence outage.
         pass
 
@@ -138,6 +148,9 @@ def build_execution_request(record: DecisionRecord, *, authenticated_caller_id: 
     if not is_verified_decision_record(record):
         from .errors import UnverifiedDecisionRecordError
         _record_unverified_decision(record); raise UnverifiedDecisionRecordError("DecisionRecord no verificado")
+    if _B7_DECISION_RECORDER is not None:
+        try: _B7_DECISION_RECORDER.record_decision_provenance(decision_id=record.decision_id)
+        except Exception: pass  # evidence cannot make an unverified request eligible
     return _issued(_issued_requests, ExecutionRequest("1.0", "JAX_EXECUTION_REQUEST", record.decision_id,
         record.decision_record_hash, capability, authenticated_caller_id, motor, environment,
         target_kind, target_value, prompt, context, timeout_seconds, sandbox_required,

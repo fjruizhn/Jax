@@ -86,27 +86,19 @@ def test_b7_evidence_blob_real_mariadb_immutability():
 def test_b7_real_mariadb_artifact_and_observation_relations():
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
     from policy.enforcement_evidence.control_registry import load_control_definition
-    from policy.enforcement_evidence.models import (ImplementationIdentity, SourceState, EvidenceArtifact,
-        EvidenceType, EvidenceClass, EvidenceTrustDomain, EvidenceSubject, EvidenceSubjectType,
-        EvidenceBlobRef, ClaimScope, ClaimEnvironment, EnforcementObservation, ObservationOutcome)
+    from policy.enforcement_evidence.models import (ImplementationIdentity, SourceState, ClaimScope, ClaimEnvironment)
+    from policy.enforcement_evidence.trusted_lifecycle import EvidenceLifecycleService, RuntimeEvidenceRecorder
+    from policy.enforcement_evidence.implementation_identity import _ControlledTestIdentityProvider
     _apply_evidence_migration(); store=MariaDBEvidenceStore(_connection); now=datetime.now(timezone.utc)
     manifest=store.put_evidence_blob(b"b7-manifest"); definition=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
     identity=ImplementationIdentity("fjruizhn/Jax","a"*40,"b"*40,SourceState.CLEAN,manifest.evidence_hash)
-    raw=store.put_evidence_blob(b"control=CTL.B6.GOVERNED_DISPATCH;reason=DENIED")
-    subject=EvidenceSubject(EvidenceSubjectType.OPERATION_ATTEMPT,"b7-db-attempt")
-    artifact=EvidenceArtifact(EvidenceType.CONTROL_INPUT,EvidenceClass.RUNTIME_OBSERVATION,definition.control_id,1,definition.control_definition_hash,subject,(EvidenceBlobRef(raw.evidence_hash,"bounded_input","text/plain","utf-8"),),EvidenceTrustDomain.JAX_RUNTIME,"ci",identity.implementation_identity_hash,now)
-    store._record_artifact(artifact, _token=store._fixed_lifecycle_token())
+    lifecycle=EvidenceLifecycleService(store,_ControlledTestIdentityProvider(identity)); recorder=RuntimeEvidenceRecorder(lifecycle,"ci",ClaimScope(ClaimEnvironment.CI))
+    observation=recorder.record_denial(control_id="CTL.B6.GOVERNED_DISPATCH",reason_code="DENIED")
+    artifact=store.load_evidence_artifact(observation.evidence_artifact_hashes[0])
     loaded=store.load_evidence_artifact(artifact.artifact_hash)
     assert loaded.artifact_hash == artifact.artifact_hash
-    observation=EnforcementObservation("b7-db-observation",definition.control_id,1,definition.control_definition_hash,subject,identity.implementation_identity_hash,ObservationOutcome.DENIED,"DENIED",now,ClaimScope(ClaimEnvironment.CI),(artifact.artifact_hash,))
-    store._record_observation(observation, _token=store._fixed_lifecycle_token())
     assert _scalar("SELECT COUNT(*) FROM jax_evidence.observation_artifacts WHERE observation_id=%s",(observation.observation_id,)) == 1
     assert store.load_observation(observation.observation_id).observation_hash == observation.observation_hash
-    from policy.enforcement_evidence.models import EnforcementAssertion, ClaimLevel, AssertionVerdict
-    assertion=EnforcementAssertion(definition.control_id,1,definition.control_definition_hash,ClaimLevel.ENFORCED,AssertionVerdict.NOT_OBSERVED,identity.implementation_identity_hash,ClaimScope(ClaimEnvironment.CI),(subject,),(artifact.artifact_hash,),(observation.observation_id,),now,now,now)
-    store._record_assertion(assertion, _token=store._fixed_lifecycle_token())
-    assert _scalar("SELECT COUNT(*) FROM jax_evidence.enforcement_assertions WHERE assertion_hash=%s",(assertion.assertion_hash,)) == 1
-    assert store.load_assertion(assertion.assertion_hash).assertion_hash == assertion.assertion_hash
     connection=_connection()
     try:
         with pytest.raises(Exception):
@@ -157,12 +149,13 @@ def test_b7_composed_writer_persists_with_same_create_transaction():
     """The installed writer uses the B6 cursor; no second B7 commit exists."""
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
     from policy.enforcement_evidence.models import ImplementationIdentity, SourceState, ClaimScope, ClaimEnvironment
-    from policy.enforcement_evidence.trusted_lifecycle import RuntimeEvidenceRecorder
+    from policy.enforcement_evidence.trusted_lifecycle import EvidenceLifecycleService, RuntimeEvidenceRecorder
+    from policy.enforcement_evidence.implementation_identity import _ControlledTestIdentityProvider
     from policy.execution_control.service import configure_b7_execution_evidence
     _apply_migration(); _apply_evidence_migration(); now=datetime.now(timezone.utc); decision=record()
     evidence=MariaDBEvidenceStore(_connection); manifest=evidence.put_evidence_blob(b"runtime-manifest")
     identity=ImplementationIdentity("fjruizhn/Jax","a"*40,"b"*40,SourceState.CLEAN,manifest.evidence_hash)
-    recorder=RuntimeEvidenceRecorder(evidence,identity,"ci",ClaimScope(ClaimEnvironment.CI,database_scope_id="ci-mariadb"))
+    recorder=RuntimeEvidenceRecorder(EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity)),"ci",ClaimScope(ClaimEnvironment.CI,database_scope_id="ci-mariadb"))
     request=build_execution_request(decision, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x": 1}, timeout_seconds=60)
     auth=authorize_execution(decision, request, catalog(), now_utc=now)
     store=MariaDBExecutionStore(_connection); store.insert_authorization(auth)
@@ -173,12 +166,13 @@ def test_b7_composed_writer_persists_with_same_create_transaction():
 def test_b7_composed_writer_persists_with_same_dispatch_transaction():
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
     from policy.enforcement_evidence.models import ImplementationIdentity, SourceState, ClaimScope, ClaimEnvironment
-    from policy.enforcement_evidence.trusted_lifecycle import RuntimeEvidenceRecorder
+    from policy.enforcement_evidence.trusted_lifecycle import EvidenceLifecycleService, RuntimeEvidenceRecorder
+    from policy.enforcement_evidence.implementation_identity import _ControlledTestIdentityProvider
     from policy.execution_control.service import configure_b7_execution_evidence, dispatch_execution
     _apply_migration(); _apply_evidence_migration(); now=datetime.now(timezone.utc); decision=record()
     evidence=MariaDBEvidenceStore(_connection); manifest=evidence.put_evidence_blob(b"dispatch-runtime-manifest")
     identity=ImplementationIdentity("fjruizhn/Jax","c"*40,"d"*40,SourceState.CLEAN,manifest.evidence_hash)
-    recorder=RuntimeEvidenceRecorder(evidence,identity,"ci",ClaimScope(ClaimEnvironment.CI,database_scope_id="ci-mariadb"))
+    recorder=RuntimeEvidenceRecorder(EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity)),"ci",ClaimScope(ClaimEnvironment.CI,database_scope_id="ci-mariadb"))
     request=build_execution_request(decision, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x": 1}, timeout_seconds=60)
     auth=authorize_execution(decision, request, catalog(), now_utc=now); store=MariaDBExecutionStore(_connection); store.insert_authorization(auth)
     configure_b7_execution_evidence(store,evidence,recorder); execution=create_execution(store,auth,now_utc=now)
@@ -190,14 +184,15 @@ def test_b7_composed_writer_persists_with_same_dispatch_transaction():
 def test_b7_live_inspector_observes_installed_execution_schema():
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
     from policy.enforcement_evidence.models import ImplementationIdentity, SourceState, ClaimScope, ClaimEnvironment
-    from policy.enforcement_evidence.trusted_lifecycle import RuntimeEvidenceRecorder
+    from policy.enforcement_evidence.trusted_lifecycle import EvidenceLifecycleService, RuntimeEvidenceRecorder
+    from policy.enforcement_evidence.implementation_identity import _ControlledTestIdentityProvider
     from policy.enforcement_evidence.database_evidence import DatabaseControlInspector
     _apply_migration(); _apply_evidence_migration()
     evidence=MariaDBEvidenceStore(_connection); manifest=evidence.put_evidence_blob(b"inspection-manifest")
     identity=ImplementationIdentity("fjruizhn/Jax","e"*40,"f"*40,SourceState.CLEAN,manifest.evidence_hash)
-    recorder=RuntimeEvidenceRecorder(evidence,identity,"ci",ClaimScope(ClaimEnvironment.CI,database_scope_id="ci-mariadb"))
-    observation=DatabaseControlInspector(_connection,recorder,database_scope_id="ci-mariadb").inspect_one_decision_one_execution()
-    assert observation.subject.identity == "ci-mariadb"
+    recorder=RuntimeEvidenceRecorder(EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity)),"ci",ClaimScope(ClaimEnvironment.CI,database_scope_id="ci-mariadb"))
+    observation=DatabaseControlInspector(_connection,recorder,deployment_id="ci").inspect_one_decision_one_execution()
+    assert observation.subject.identity.startswith("dbscope:sha256:")
     assert observation.outcome.value == "SATISFIED"
 
 

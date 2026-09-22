@@ -21,25 +21,12 @@ def configure_b7_execution_evidence(store, evidence_store, recorder) -> None:
     execution request. MariaDB will reject the cross-schema insert before its
     single commit if the deployment has not provisioned both schemas together.
     """
-    from policy.enforcement_evidence.control_registry import load_control_definition
-    from policy.enforcement_evidence.models import (EnforcementObservation, EvidenceSubject,
-        ObservationOutcome)
-    import uuid
-    token=evidence_store._fixed_lifecycle_token()
     def write_create(cursor, record):
-        definition=load_control_definition("CTL.B6.ONE_DECISION_ONE_EXECUTION")
-        observation=EnforcementObservation(str(uuid.uuid4()),definition.control_id,definition.control_version,
-            definition.control_definition_hash,EvidenceSubject(EvidenceSubjectType.EXECUTION,record.execution_id),
-            recorder._identity.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",
-            record.created_at_utc,recorder._scope,(),decision_id=record.decision_id,execution_id=record.execution_id)
-        evidence_store.write_observation_in_transaction(cursor,observation,_token=token)
+        recorder._write_transaction_observation(cursor, control_id="CTL.B6.ONE_DECISION_ONE_EXECUTION",
+            execution_id=record.execution_id, decision_id=record.decision_id, occurred_at_utc=record.created_at_utc)
     def write_dispatch(cursor, event):
-        definition=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
-        observation=EnforcementObservation(str(uuid.uuid4()),definition.control_id,definition.control_version,
-            definition.control_definition_hash,EvidenceSubject(EvidenceSubjectType.EXECUTION,event.execution_id),
-            recorder._identity.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",
-            event.at_utc,recorder._scope,(),execution_id=event.execution_id)
-        evidence_store.write_observation_in_transaction(cursor,observation,_token=token)
+        recorder._write_transaction_observation(cursor, control_id="CTL.B6.GOVERNED_DISPATCH",
+            execution_id=event.execution_id, decision_id=None, occurred_at_utc=event.at_utc)
     store.execution_evidence_writer=write_create
     store.dispatch_evidence_writer=write_dispatch
 
@@ -52,19 +39,36 @@ def _record_denial(store, control_id: str, reason_code: str, *, decision_id: str
     recorder = getattr(store, "evidence_recorder", None)
     if recorder is not None:
         try:
-            recorder.record_denial(control_id=control_id, reason_code=reason_code, decision_id=decision_id)
+            typed = {
+                "CTL.B6.AUTHORIZATION_PROVENANCE": recorder.record_authorization_provenance_denied,
+                "CTL.B6.ONE_DECISION_ONE_EXECUTION": recorder.record_one_decision_denied,
+                "CTL.B6.HUMAN_APPROVAL_BINDING": recorder.record_human_approval_denied,
+                "CTL.B6.KILL_SWITCH": recorder.record_kill_switch_denied,
+                "CTL.B6.AUTHORIZATION_EXPIRY": recorder.record_authorization_expired,
+            }.get(control_id)
+            if typed is None:
+                raise ValueError("unsupported runtime denial control")
+            typed(decision_id=decision_id)
         except Exception:  # fail-soft: primary denial is already fail-closed; evidence outage cannot permit it.
             # Evidence outage must never convert a denial into an allow.
             pass
 
-def _record_satisfied(store, control_id: str, *, subject_type, subject_identity: str,
+def _record_typed_runtime_observation(store, control_id: str, *, subject_type, subject_identity: str,
                       decision_id: str | None = None, execution_id: str | None = None) -> None:
     """Startup-owned observational seam; it never participates in authority."""
     recorder = getattr(store, "evidence_recorder", None)
     if recorder is not None:
         try:
-            recorder.record_satisfied(control_id=control_id, subject_type=subject_type,
-                subject_identity=subject_identity, decision_id=decision_id, execution_id=execution_id)
+            typed = {
+                "CTL.B6.ONE_DECISION_ONE_EXECUTION": recorder.record_execution_created,
+                "CTL.B6.HUMAN_APPROVAL_BINDING": recorder.record_human_approval_bound,
+                "CTL.B6.GOVERNED_DISPATCH": recorder.record_governed_dispatch,
+                "CTL.B6.KILL_SWITCH": recorder.record_kill_switch_clear,
+                "CTL.B6.AUTHORIZATION_EXPIRY": recorder.record_authorization_current,
+            }.get(control_id)
+            if typed is None:
+                raise ValueError("unsupported runtime evidence control")
+            typed(execution_id=execution_id or subject_identity, decision_id=decision_id)
         except Exception:  # fail-soft: optional post-commit observation cannot alter B6 authority.
             # Existing B6 semantics remain authoritative.  Mandatory pre-side
             # effect recording uses the explicit shared writer instead.
@@ -104,7 +108,9 @@ def create_execution(store, authorization: ExecutionAuthorization, *, now_utc: d
     # In MariaDB deployments the execution_evidence_writer is the mandatory
     # same-cursor path.  This is an additive post-commit observation for
     # composition configurations that do not require that stronger profile.
-    _record_satisfied(store,"CTL.B6.ONE_DECISION_ONE_EXECUTION",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    _record_typed_runtime_observation(store,"CTL.B6.ONE_DECISION_ONE_EXECUTION",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    _record_typed_runtime_observation(store,"CTL.B6.KILL_SWITCH",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    _record_typed_runtime_observation(store,"CTL.B6.AUTHORIZATION_EXPIRY",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
     return created
 
 def consume_human_approval(store, record, authorization, approval, *, now_utc: datetime) -> None:
@@ -123,7 +129,7 @@ def consume_human_approval(store, record, authorization, approval, *, now_utc: d
     store.append_event(ExecutionEvent(record.execution_id,
       (ExecutionState.READY_FOR_DRY_RUN if authorization.requires_dry_run else ExecutionState.READY_TO_DISPATCH).value,
       "HUMAN_APPROVAL_CONSUMED", now))
-    _record_satisfied(store,"CTL.B6.HUMAN_APPROVAL_BINDING",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    _record_typed_runtime_observation(store,"CTL.B6.HUMAN_APPROVAL_BINDING",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
 
 def record_dry_run(store, record, authorization, *, status: str, result: object, now_utc: datetime):
     now = _now(now_utc); artifact = build_dry_run_artifact(record, authorization, status=status, result=result, recorded_at_utc=now)
@@ -147,7 +153,7 @@ def dispatch_execution(store, record, authorization, *, now_utc: datetime, kill_
     transition(current, ExecutionState.DISPATCHED)
     event = ExecutionEvent(record.execution_id, ExecutionState.DISPATCHED.value, "MOTOR_DISPATCHED", now, job_id)
     store.append_event(event, evidence_writer=getattr(store, "dispatch_evidence_writer", None))
-    _record_satisfied(store,"CTL.B6.GOVERNED_DISPATCH",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
+    _record_typed_runtime_observation(store,"CTL.B6.GOVERNED_DISPATCH",subject_type=EvidenceSubjectType.EXECUTION,subject_identity=record.execution_id,decision_id=record.decision_id,execution_id=record.execution_id)
     return event
 
 def cancel_execution(store, execution_id: str, *, now_utc: datetime):

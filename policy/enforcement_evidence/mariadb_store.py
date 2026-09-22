@@ -11,8 +11,7 @@ from .canonical import canonical_bytes
 from .models import MAX_REFERENCED_BYTES_PER_ARTIFACT, MAX_ARTIFACT_ENVELOPE_BYTES
 from .errors import EvidenceArtifactIntegrityError, ObservationIntegrityError, AssertionIntegrityError
 class MariaDBEvidenceStore:
-    def __init__(self, connection_factory): self._connection_factory=connection_factory; self.__lifecycle_token=object()
-    def _fixed_lifecycle_token(self): return self.__lifecycle_token
+    def __init__(self, connection_factory): self._connection_factory=connection_factory
     def put_evidence_blob(self, data: bytes) -> EvidenceBlob:
         if not isinstance(data,bytes): raise TypeError("bytes requeridos")
         if len(data)>MAX_BLOB_BYTES: raise EvidenceBlobTooLargeError("blob > 1 MiB")
@@ -37,10 +36,10 @@ class MariaDBEvidenceStore:
             if int(row[0])!=len(data) or sha256_bytes(data)!=evidence_hash: raise EvidenceBlobHashMismatchError(evidence_hash)
             return data
         finally: con.close()
-    def _record_identity(self, identity, *, _token):
+    def __record_identity(self, identity):
         """Persist an identity only from a fixed composition boundary."""
-        if _token is not self.__lifecycle_token:
-            raise EvidenceArtifactIntegrityError("fixed lifecycle required")
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
         # A manifest reference is meaningful only if its bytes are present.
         self.get_evidence_blob(identity.build_manifest_blob_hash)
         h=identity.implementation_identity_hash
@@ -65,11 +64,10 @@ class MariaDBEvidenceStore:
             value=implementation_identity_from_projection(json.loads(bytes(row[0]).decode() if isinstance(row[0],bytes) else row[0]))
             if value.implementation_identity_hash != identity_hash: raise EvidenceArtifactIntegrityError("identity row/canonical mismatch")
             self.get_evidence_blob(value.build_manifest_blob_hash)
-            from .evidence_store import _seal, _identities
-            return _seal(_identities,value)
+            from .evidence_store import _loaded, _identities
+            return _loaded(_identities,value)
         finally: con.close()
-    def _persist_control_definition(self, definition, *, _token):
-        if _token is not self.__lifecycle_token: raise EvidenceArtifactIntegrityError("fixed lifecycle required")
+    def __persist_control_definition(self, definition):
         from .control_registry import require_trusted_definition
         require_trusted_definition(definition)
         h=definition.control_definition_hash; payload=canonical_bytes(definition.projection()).decode("utf-8")
@@ -95,9 +93,10 @@ class MariaDBEvidenceStore:
                 raise EvidenceArtifactIntegrityError("definition row/canonical mismatch")
             return expected
         finally: con.close()
-    def _record_artifact(self, artifact, *, _token):
+    def __record_artifact(self, artifact):
         """Persist only after every referenced blob is authoritatively readable."""
-        if _token is not self.__lifecycle_token: raise EvidenceArtifactIntegrityError("fixed lifecycle required")
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
         if len(canonical_bytes(artifact.projection())) > MAX_ARTIFACT_ENVELOPE_BYTES:
             raise EvidenceArtifactIntegrityError("artifact envelope too large")
         total=0
@@ -128,11 +127,16 @@ class MariaDBEvidenceStore:
             cur.execute("SELECT evidence_hash FROM jax_evidence.evidence_artifact_blobs WHERE artifact_hash=%s ORDER BY evidence_hash",(artifact_hash,)); refs=tuple(x[0] for x in cur.fetchall())
             if refs != tuple(sorted(x.evidence_hash for x in value.blob_refs)): raise EvidenceArtifactIntegrityError("artifact refs mismatch")
             verify_evidence_artifact_content(value,self.get_evidence_blob)
-            from .evidence_store import _seal, _artifacts
-            return _seal(_artifacts,value)
+            from .control_registry import load_control_definition
+            definition=load_control_definition(value.control_id,value.control_version)
+            if definition.control_definition_hash != value.control_definition_hash: raise EvidenceArtifactIntegrityError("artifact control binding mismatch")
+            self.load_implementation_identity(value.implementation_identity_hash)
+            from .evidence_store import _loaded, _artifacts
+            return _loaded(_artifacts,value)
         finally: con.close()
-    def _record_observation(self, observation, *, _token):
-        if _token is not self.__lifecycle_token: raise ObservationIntegrityError("fixed lifecycle required")
+    def __record_observation(self, observation):
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
         for h in observation.evidence_artifact_hashes:
             # FK validates persistence; select makes the failure deterministic before write.
             con0=self._connection_factory()
@@ -151,16 +155,18 @@ class MariaDBEvidenceStore:
             con.commit(); return observation
         except Exception: con.rollback(); raise
         finally: con.close()
-    def write_observation_in_transaction(self, cursor, observation, *, _token):
+    def __write_observation_in_transaction(self, cursor, observation):
         """Internal B6/B7 composition writer; cursor is the B6 transaction."""
-        if _token is not self.__lifecycle_token: raise ObservationIntegrityError("fixed lifecycle required")
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
         from .canonical import canonical_bytes
         payload=canonical_bytes(observation.projection()).decode("utf-8")
         cursor.execute("INSERT INTO jax_evidence.enforcement_observations(observation_id,observation_hash,canonical_observation) VALUES (%s,%s,%s)", (observation.observation_id,observation.observation_hash,payload))
         for h in observation.evidence_artifact_hashes:
             cursor.execute("INSERT INTO jax_evidence.observation_artifacts(observation_id,artifact_hash) VALUES (%s,%s)", (observation.observation_id,h))
-    def _record_assertion(self, assertion, *, _token):
-        if _token is not self.__lifecycle_token: raise AssertionIntegrityError("fixed lifecycle required")
+    def __record_assertion(self, assertion):
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
         con=self._connection_factory()
         try:
             cur=con.cursor(); payload=canonical_bytes(assertion.projection()).decode("utf-8")
@@ -186,8 +192,12 @@ class MariaDBEvidenceStore:
             cur.execute("SELECT artifact_hash FROM jax_evidence.observation_artifacts WHERE observation_id=%s ORDER BY artifact_hash",(observation_id,)); refs=tuple(x[0] for x in cur.fetchall())
             if refs != tuple(sorted(value.evidence_artifact_hashes)): raise ObservationIntegrityError("observation refs mismatch")
             for h in refs: self.load_evidence_artifact(h)
-            from .evidence_store import _seal, _observations
-            return _seal(_observations,value)
+            from .control_registry import load_control_definition
+            definition=load_control_definition(value.control_id,value.control_version)
+            if definition.control_definition_hash != value.control_definition_hash: raise ObservationIntegrityError("observation control binding mismatch")
+            self.load_implementation_identity(value.implementation_identity_hash)
+            from .evidence_store import _loaded, _observations
+            return _loaded(_observations,value)
         finally: con.close()
     load_enforcement_observation = load_observation
     def load_assertion(self, assertion_hash):
@@ -204,10 +214,48 @@ class MariaDBEvidenceStore:
             if oids != tuple(sorted(value.observation_ids)): raise AssertionIntegrityError("assertion observation refs mismatch")
             for h in value.evidence_artifact_hashes: self.load_evidence_artifact(h)
             for oid in value.observation_ids: self.load_observation(oid)
-            from .evidence_store import _seal, _assertions
-            return _seal(_assertions,value)
+            from .control_registry import load_control_definition
+            definition=load_control_definition(value.control_id,value.control_version)
+            if definition.control_definition_hash != value.control_definition_hash: raise AssertionIntegrityError("assertion control binding mismatch")
+            self.load_implementation_identity(value.implementation_identity_hash)
+            from .evidence_store import _loaded, _assertions
+            return _loaded(_assertions,value)
         finally: con.close()
     load_enforcement_assertion = load_assertion
+    def observations(self):
+        """Complete authoritative observation set; never caller-supplied."""
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SELECT observation_id FROM jax_evidence.enforcement_observations ORDER BY observation_id")
+            return tuple(self.load_observation(row[0]) for row in cur.fetchall())
+        finally: con.close()
+    def __ingest_test_manifest(self, manifest):
+        """Persist the already context-validated CI projection immutably."""
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
+        from .ids import sha256_bytes
+        payload=canonical_bytes(manifest).decode("utf-8"); digest=sha256_bytes(payload.encode("utf-8"))
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SELECT canonical_manifest FROM jax_evidence.test_evidence_manifests WHERE manifest_hash=%s FOR UPDATE",(digest,)); row=cur.fetchone()
+            if row is None:
+                cur.execute("INSERT INTO jax_evidence.test_evidence_manifests(manifest_hash,implementation_identity_hash,repository_id,commit_sha,job_id,canonical_manifest) VALUES (%s,%s,%s,%s,%s,%s)",(digest,manifest["implementation_identity_hash"],manifest["repository_id"],manifest["commit_sha"],manifest["job_id"],payload))
+            elif (bytes(row[0]).decode() if isinstance(row[0],bytes) else row[0]) != payload: raise AssertionIntegrityError("test manifest collision")
+            con.commit(); return manifest
+        except Exception: con.rollback(); raise
+        finally: con.close()
+    def _test_manifests_for(self, identity_hash):
+        con=self._connection_factory()
+        try:
+            cur=con.cursor(); cur.execute("SELECT implementation_identity_hash,canonical_manifest FROM jax_evidence.test_evidence_manifests WHERE implementation_identity_hash=%s ORDER BY manifest_hash",(identity_hash,))
+            import json
+            values=[]
+            for row in cur.fetchall():
+                value=json.loads(bytes(row[1]).decode() if isinstance(row[1],bytes) else row[1])
+                if value.get("implementation_identity_hash") != row[0] or row[0] != identity_hash: raise AssertionIntegrityError("test manifest row binding mismatch")
+                values.append(value)
+            return tuple(values)
+        finally: con.close()
     def derive_in_repeatable_read(self, derive):
         """Run deterministic derivation over one MariaDB repeatable-read snapshot."""
         con=self._connection_factory()
