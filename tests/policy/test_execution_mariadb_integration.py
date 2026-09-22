@@ -266,7 +266,9 @@ def test_b8_jaxctl_control_real_mariadb_is_zero_write(monkeypatch, tmp_path, cap
             "enforcement_assertions","assertion_artifacts","assertion_observations",
             "test_evidence_manifests"}.issubset(before)
     status=run(["control","CTL.B6.GOVERNED_DISPATCH","--version","1","--claim","ENFORCED","--scope",'{"environment":"SANDBOX_RUNTIME"}',"--subjects",'[{"subject_type":"EXECUTION","identity":"b8-readonly"}]',"--json"])
-    assert status == 0 and '"persisted":false' in capsys.readouterr().out
+    output=capsys.readouterr().out
+    assert status == 0 and '"persisted":false' in output
+    assert '"classification":"AUTHORITATIVE_READONLY_DERIVATION"' in output
     assert _b7_authoritative_fingerprint() == before
 
 def test_b8_jaxctl_control_unavailable_is_zero_write(monkeypatch, tmp_path, capsys):

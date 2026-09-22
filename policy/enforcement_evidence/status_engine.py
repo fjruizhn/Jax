@@ -119,36 +119,34 @@ class _ReadonlyStatusDerivation(_StatusDerivationService):
   self._lifecycle=None; self._store=store; self._identity_provider=identity_provider
   self._identity=type("IdentityReference",(),{"implementation_identity_hash":identity_reference_hash})()
 
-def _compose_runtime_readonly_derivation():
- """Bind the only production reader to fixed deployment configuration.
-
- This internal composition helper takes no dependencies.  Its return value is
- only a raw derivation helper, never an authoritative status-query object.
- """
- try:
-  import os
-  from .mariadb_store import MariaDBEvidenceStore
-  from .implementation_identity import TrustedImplementationIdentityProvider
-  import pymysql
-  host=os.environ["JAX_DB_HOST"]; port=int(os.environ["JAX_DB_PORT"])
- except (ImportError, KeyError, ValueError) as exc:
-  raise RuntimeError("MariaDB B7 composition unavailable") from exc
- def connect():
-  return pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
- store=MariaDBEvidenceStore(connect)
- provider=TrustedImplementationIdentityProvider(store)
- # Deployment configuration supplies the identity reference.  The row and
- # manifest bytes are captured and verified inside the read-only snapshot.
- return _ReadonlyStatusDerivation(store,provider,provider.identity_reference_hash())
-
 def query_control_status(*, control_id, control_version, claim_level, scope, subjects, as_of_utc):
  """Return an ephemeral B7 view from the fixed production composition.
 
  The semantic claim parameters above are the complete public input surface.
  Neither a caller-created store/provider/lifecycle nor an injectable query
  object can select the authoritative universe or emit this classification.
+
+ B8 AUTHORITY BOUNDARY: this production entrypoint is the only supported
+ source of ``AUTHORITATIVE_READONLY_DERIVATION``.  Arbitrary Python execution
+ in this interpreter is part of the TCB; ordinary API callers cannot supply
+ composition, derivation, verdict, or classification inputs.
  """
- derivation=_compose_runtime_readonly_derivation()
+ try:
+  import os
+  import pymysql
+  from .mariadb_store import MariaDBEvidenceStore
+  from .implementation_identity import TrustedImplementationIdentityProvider
+  host=os.environ["JAX_DB_HOST"]; port=int(os.environ["JAX_DB_PORT"])
+ except (ImportError, KeyError, ValueError) as exc:
+  raise RuntimeError("MariaDB B7 composition unavailable") from exc
+ def connect():
+  return pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
+ # The deployment entrypoint itself selects every trusted dependency.  There
+ # is intentionally no factory/registry/provider hook that a supported caller
+ # can replace or feed with another authoritative universe.
+ store=MariaDBEvidenceStore(connect)
+ provider=TrustedImplementationIdentityProvider(store)
+ derivation=_ReadonlyStatusDerivation(store,provider,provider.identity_reference_hash())
  definition, identity, observations, subjects, verdict, start, artifacts, trust_domains=derivation._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
  return ControlStatusView(definition.control_id,definition.control_version,claim_level,verdict,identity.implementation_identity_hash,scope,subjects,as_of_utc,start,as_of_utc,tuple(sorted({o.reason_code for o in observations})),trust_domains,artifacts,tuple(o.observation_id for o in observations),as_of_utc)
 

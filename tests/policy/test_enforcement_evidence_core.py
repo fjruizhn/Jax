@@ -159,19 +159,25 @@ def test_caller_constructed_readonly_query_cannot_mint_authoritative_view():
  assert not any(name in status_engine.__dict__ for name in ("register_trusted","mark_trusted","trusted_readonly_queries"))
  assert not hasattr(EnforcementStatusService,"query_control_status")
 
-def test_fixed_production_query_alone_emits_authoritative_readonly_view(monkeypatch):
+def test_public_readonly_query_has_no_injectable_composition_hook(monkeypatch):
+ import inspect
  import policy.enforcement_evidence.status_engine as status_engine
- s=EvidenceStore(); _lifecycle,identity_value=composition(s)
- definition=load_control_definition("CTL.B6.GOVERNED_DISPATCH")
- scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.EXECUTION,"x")
- class FixedComposition:
-  def _derive(self, **kwargs):
-   return definition,identity_value,(),tuple(kwargs["subjects"]),AssertionVerdict.NOT_OBSERVED,NOW-timedelta(hours=24),(),()
- monkeypatch.setattr(status_engine,"_compose_runtime_readonly_derivation",lambda: FixedComposition())
- view=status_engine.query_control_status(control_id=definition.control_id,control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
- assert isinstance(view,ControlStatusView)
- assert view.classification == "AUTHORITATIVE_READONLY_DERIVATION"
- assert view.persisted is False
+ # Regression for B8-AUD-001: the former module-global composition factory
+ # must not exist, and a normal API caller has no supported injection point.
+ assert not hasattr(status_engine,"_compose_runtime_readonly_derivation")
+ for name in ("composition","derivation","factory","provider","registry",
+              "store","lifecycle","verdict","classification"):
+  assert name not in inspect.signature(status_engine.query_control_status).parameters
+ # Missing deployment configuration fails closed; it cannot be replaced with
+ # caller-derived status data through the public function.
+ # Recreate the former disclosure's replacement attempt.  The injected
+ # attribute is now inert because the production entrypoint never consults it.
+ monkeypatch.setattr(status_engine,"_compose_runtime_readonly_derivation",lambda: object(),raising=False)
+ monkeypatch.delenv("JAX_DB_HOST",raising=False)
+ with pytest.raises(RuntimeError,match="composition unavailable"):
+  status_engine.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,
+   claim_level=ClaimLevel.ENFORCED,scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME),
+   subjects=(EvidenceSubject(EvidenceSubjectType.EXECUTION,"x"),),as_of_utc=NOW)
 
 def test_readonly_query_uses_captured_snapshot_without_later_artifact_loads(monkeypatch):
  s=EvidenceStore(); lifecycle,identity_value=composition(s)

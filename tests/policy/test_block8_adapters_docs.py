@@ -37,9 +37,9 @@ def test_readonly_b7_composition_is_not_a_public_dependency_injection_factory():
     assert not hasattr(EnforcementStatusService, "query_control_status")
     assert not hasattr(_ReadonlyStatusDerivation, "query_control_status")
     assert not hasattr(status_engine, "_trusted_readonly_queries")
+    assert not hasattr(status_engine, "_compose_runtime_readonly_derivation")
     assert tuple(inspect.signature(query_control_status).parameters) == (
         "control_id", "control_version", "claim_level", "scope", "subjects", "as_of_utc")
-    assert tuple(inspect.signature(status_engine._compose_runtime_readonly_derivation).parameters) == ()
 
 def test_jaxctl_control_routes_only_to_fixed_readonly_composition(monkeypatch):
     import jaxctl.runtime as runtime
