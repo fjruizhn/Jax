@@ -364,8 +364,11 @@ async def _recalcular_embeddings_en_ceros(db: MemoryDB) -> None:
 
 
 async def run_once(limit: int = 10) -> None:
-    """Una corrida del worker: recalcula embeddings en ceros y procesa hasta
-    `limit` conversaciones."""
+    """Una corrida de extracción, propiedad exclusiva del timer systemd.
+
+    El trabajo de embeddings es otra clase de trabajo y pertenece únicamente
+    a ``jax-memory-embedding``.  No se duplica desde el extractor.
+    """
     jax_db_host = os.environ.get("JAX_DB_HOST")
     if not jax_db_host:
         raise RuntimeError(
@@ -385,12 +388,6 @@ async def run_once(limit: int = 10) -> None:
         return
 
     try:
-        await _recalcular_embeddings_en_ceros(db)
-        # Va aca por el mismo motivo que el recalculo: `run_once` vuelve temprano
-        # cuando no hay conversaciones pendientes --el caso de casi todas las
-        # corridas-- y despues de ese return no se ejecutaria nunca.
-        await _avisar_si_hay_que_remedir_recall(db)
-
         pendientes = await db.get_unprocessed_conversations(limit=limit)
         if not pendientes:
             logger.info("No hay conversaciones pendientes de procesar.")

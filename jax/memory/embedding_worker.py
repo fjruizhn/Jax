@@ -18,12 +18,16 @@ En memoria de Jairo Urbina.
 """
 
 import asyncio
+import argparse
 import json
 import logging
 import os
 
+import aiomysql
+
 from jax.memory.db import MemoryDB, _col, _zero_embedding_sql
 from jax.core.cliente_http_compartido import cerrar_cliente_http
+from jax.core.db_connect_config import db_connect_timeout_seconds
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,6 +36,42 @@ logging.basicConfig(
 logger = logging.getLogger("jax.memory.embedding_worker")
 
 BATCH_SIZE = 50
+
+
+async def run_b9_vector_health() -> int:
+    """Report B9 revisions that lack an embedding generation.
+
+    This is deliberately read-only and is scheduled separately from embedding
+    generation.  A non-zero result keeps missing vectors visible; it never
+    manufactures a vector or changes lifecycle state.
+    """
+    host, port = os.environ.get("JAX_DB_HOST"), os.environ.get("JAX_DB_PORT")
+    if not host or not port:
+        raise RuntimeError("JAX_DB_HOST and JAX_DB_PORT are required for B9 vector health")
+    pool = await aiomysql.create_pool(
+        host=host, port=int(port), user=os.environ.get("JAX_DB_USER", ""),
+        password=os.environ.get("JAX_DB_PASSWORD", ""), db=os.environ.get("JAX_DB_NAME", "jax_memory"),
+        autocommit=True, minsize=1, maxsize=1, connect_timeout=db_connect_timeout_seconds(),
+    )
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COUNT(*) FROM memory_projections p "
+                    "JOIN memory_revisions r ON r.revision_id=p.current_revision_id "
+                    "LEFT JOIN embedding_generations g ON g.revision_id=r.revision_id "
+                    "WHERE r.lifecycle_state IN ('ACTIVE','VERIFIED') "
+                    "AND r.payload IS NOT NULL AND g.generation_id IS NULL"
+                )
+                (missing,) = await cur.fetchone()
+    finally:
+        pool.close()
+        await pool.wait_closed()
+    if missing:
+        logger.error("B9 vector health: %s current revision(s) have no embedding generation", missing)
+        return 1
+    logger.info("B9 vector health: every current retrievable revision has a generation")
+    return 0
 
 
 async def procesar_mensajes(db: MemoryDB) -> tuple[int, int]:
@@ -202,4 +242,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="JAX memory embedding worker")
+    parser.add_argument("--health", action="store_true", help="check B9 embedding-generation coverage only")
+    args = parser.parse_args()
+    raise SystemExit(asyncio.run(run_b9_vector_health() if args.health else main()) or 0)

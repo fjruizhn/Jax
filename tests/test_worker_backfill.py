@@ -47,20 +47,20 @@ def _correr(monkeypatch, db: _DBFalsa):
     asyncio.run(worker.run_once())
 
 
-def test_recalcula_embeddings_aunque_no_haya_conversaciones_pendientes(monkeypatch):
+def test_extractor_no_duplica_el_trabajo_de_embeddings(monkeypatch):
     db = _DBFalsa()
     _correr(monkeypatch, db)
 
-    assert db.tablas == ["messages", "facts"]
+    assert db.tablas == []
     assert db.pidio_conversaciones
     assert db.cerrada
 
 
-def test_un_fallo_del_recalculo_no_frena_la_extraccion(monkeypatch):
+def test_extractor_sigue_sin_lanzar_embeddings_si_existe_un_fallo_pendiente(monkeypatch):
     db = _DBFalsa(backfill_falla=True)
     _correr(monkeypatch, db)
 
-    # Las dos tablas se intentan: el fallo de una no se lleva a la otra.
-    assert db.tablas == ["messages", "facts"]
+    # La unidad de embeddings es el único dueño de esa clase de trabajo.
+    assert db.tablas == []
     assert db.pidio_conversaciones, "el fallo del recalculo freno la extraccion"
     assert db.cerrada
