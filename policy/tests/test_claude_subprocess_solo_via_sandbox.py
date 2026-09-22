@@ -141,12 +141,49 @@ def _lanza_via_otra_cuenta(tree: ast.AST) -> bool:
     return any(l == "ssh" for l in literales) and any("@" in l for l in literales)
 
 
+# AISLAMIENTO POR bwrap DIRECTO, sin ssh (ronda 3 del contexto del Ejecutor, auditoría
+# adversarial 2026-09-22). `_AISLADO_POR_CUENTA` sólo reconoce ssh-a-otra-cuenta porque
+# es la ÚNICA vía que usa `cuenta_axioma.py` en PRODUCCIÓN. Pero su archivo de test
+# (`tests/test_ejecutor_contratos_cuenta_axioma.py`) agregó pruebas que corren `bwrap`
+# de VERDAD -- pedido explícito del coordinador ("un test tiene que ejecutar bwrap de
+# verdad, no comparar el texto del comando") -- para probar el "$HOME" efímero (B-1/M-4)
+# con un kernel real, sin necesitar un servidor ssh de axioma@127.0.0.1 en el runner de
+# CI. Esas pruebas NUNCA lanzan `/opt/ejecutor/node-*/bin/claude`: el payload dentro de
+# la jaula es `bash -c <script de prueba>` -- no hay ningún `claude` real corriendo, así
+# que el riesgo que esta política persigue (un `claude` sin sandbox, con el HOME y los
+# secretos de Fernando) no existe ahí. Mismo criterio que `_AISLADO_POR_CUENTA`: NO es
+# una allowlist -- `_lanza_via_bwrap_directo` exige que el AST tenga, de verdad, un
+# `bwrap` como primer argumento de un subproceso Y un `--tmpfs` sobre `$HOME` (la pieza
+# central de B-1/M-4); si el archivo deja de invocar bwrap así, vuelve a ser violación
+# (test_un_archivo_declarado_por_bwrap_que_pierde_bwrap_vuelve_a_ser_violacion).
+_AISLADO_POR_BWRAP_DIRECTO = {
+    "tests/test_ejecutor_contratos_cuenta_axioma.py":
+        "corre `bwrap` de verdad (pedido del coordinador, ronda 3) para probar "
+        "cuenta_axioma._jaula() con un kernel real -- el payload es `bash -c <script "
+        "de prueba>`, nunca el binario `claude`; no hay riesgo de un claude sin sandbox",
+}
+
+
+def _lanza_via_bwrap_directo(tree: ast.AST) -> bool:
+    """¿El subproceso arranca con `bwrap` y monta "$HOME" con `--tmpfs`? Las dos cosas
+    juntas: `bwrap` solo no alcanza (podría no tocar $HOME en absoluto), y `--tmpfs`
+    solo tampoco (podría ser sobre cualquier otra ruta)."""
+    literales = [n.value for n in ast.walk(tree)
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    return (any(l == "bwrap" or l.split()[:1] == ["bwrap"] for l in literales)
+            and any("--tmpfs" in l for l in literales) and any("$HOME" in l for l in literales))
+
+
 def _declarado_aislado_por_cuenta(root: Path, path: Path, tree: ast.AST) -> bool:
     try:
         rel = path.resolve().relative_to(root.resolve()).as_posix()
     except ValueError:
         return False
-    return rel in _AISLADO_POR_CUENTA and _lanza_via_otra_cuenta(tree)
+    if rel in _AISLADO_POR_CUENTA and _lanza_via_otra_cuenta(tree):
+        return True
+    if rel in _AISLADO_POR_BWRAP_DIRECTO and _lanza_via_bwrap_directo(tree):
+        return True
+    return False
 
 # Todas las formas de lanzar un subproceso que este repo podria usar. Las
 # dos async eran las unicas cubiertas hasta la review final de rama
@@ -403,6 +440,41 @@ def test_el_harness_declarado_sigue_lanzando_por_ssh() -> None:
             assert _lanza_via_otra_cuenta(arbol), (
                 f"{rel} esta declarado como aislado por cuenta pero ya no lanza "
                 f"por ssh: o se le devuelve el ssh, o se quita de _AISLADO_POR_CUENTA")
+
+
+def test_un_archivo_declarado_por_bwrap_que_pierde_bwrap_vuelve_a_ser_violacion() -> None:
+    """Mismo criterio que `test_un_archivo_declarado_que_pierde_el_ssh_vuelve_a_ser_
+    violacion`, para el mecanismo nuevo: la declaración NO es un salvoconducto."""
+    con_bwrap = ast.parse(
+        'import subprocess\n'
+        'subprocess.run(["bwrap", "--dev-bind", "/", "/", "--tmpfs", "$HOME", "--", "bash"])\n')
+    sin_tmpfs_home = ast.parse(
+        'import subprocess\n'
+        'subprocess.run(["bwrap", "--dev-bind", "/", "/", "--", "bash"])\n')
+    sin_bwrap = ast.parse(
+        'import subprocess\n'
+        'subprocess.run(["/opt/ejecutor/node/bin/claude", "-p", "hola"])\n')
+    assert _lanza_via_bwrap_directo(con_bwrap)
+    assert not _lanza_via_bwrap_directo(sin_tmpfs_home)
+    assert not _lanza_via_bwrap_directo(sin_bwrap)
+
+
+def test_el_archivo_de_test_declarado_por_bwrap_sigue_corriendo_bwrap_de_verdad() -> None:
+    """Control del control sobre el archivo REAL: si
+    tests/test_ejecutor_contratos_cuenta_axioma.py deja de invocar bwrap con
+    "--tmpfs $HOME", esto se pone rojo antes que nadie lo note."""
+    for rel in _AISLADO_POR_BWRAP_DIRECTO:
+        for root, path in _iter_python_files():
+            try:
+                if path.resolve().relative_to(root.resolve()).as_posix() != rel:
+                    continue
+            except ValueError:
+                continue
+            arbol = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            assert _lanza_via_bwrap_directo(arbol), (
+                f"{rel} esta declarado como aislado por bwrap directo pero ya no lo "
+                f"hace: o se le devuelve el bwrap con --tmpfs $HOME, o se quita de "
+                f"_AISLADO_POR_BWRAP_DIRECTO")
 
 
 def test_no_naked_claude_subprocess() -> None:

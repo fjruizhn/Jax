@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from jax.ejecutor.contratos import cuenta_axioma, eleccion_c5, instalacion, pausa, politica
+from jax.ejecutor.contratos import contexto, cuenta_axioma, eleccion_c5, instalacion, pausa, politica
 from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.fallo import Fallo
 
@@ -129,6 +129,66 @@ def verificar_instalacion(ctx: Contexto) -> tuple:
             unidad_igual = False
         if not unidad_igual:
             fallos.append(Fallo("arranque", "instalado_distinto_del_repo", (("archivo", nombre),)))
+    fallos.extend(verificar_contexto(ctx))
+    return tuple(fallos)
+
+
+def _archivos_instalados(base) -> frozenset:
+    """Rutas relativas (posix) de TODOS los archivos bajo `base`, o `frozenset()` si
+    `base` no existe todavía -- un directorio ausente no es "extra", es "nada instalado
+    todavía", y ese caso ya lo cubre `skill_desactualizada`/`contexto_desactualizado`
+    más arriba."""
+    if not base.is_dir():
+        return frozenset()
+    return frozenset(p.relative_to(base).as_posix() for p in base.rglob("*") if p.is_file())
+
+
+def verificar_contexto(ctx: Contexto) -> tuple:
+    """M-2 (ronda 6, auditoría adversarial 2026-09-22): «el contexto instalado es la
+    autoridad». Compara los bytes instalados (CLAUDE.md + skills) contra el
+    MANIFIESTO que se escribió AL INSTALAR (`contexto.MANIFIESTO_REL`, root, de sólo
+    lectura para axioma) -- NUNCA regenera desde `/home/fruiz/claude-skills` en cada
+    misión (eso era leer la constitución real en cada arranque, y además rechazaba
+    una instalación ÍNTEGRA sólo porque la constitución de Fernando cambió un
+    carácter DESPUÉS de instalar: integridad y frescura son preguntas distintas.
+    Frescura la contesta `contexto.py --comprobar-frescura`, aparte, sin bloquear
+    ninguna misión -- ver su docstring).
+
+    Un manifiesto ilegible (ausente, JSON roto, vacío) falla cerrado: sin manifiesto
+    no hay contra qué comparar. "$HOME" ya no necesita un chequeo acá (B-1/M-4, ronda
+    3): es un `--tmpfs` propio de cada invocación, ver cuenta_axioma.py.
+
+    M4 (ronda 3): la comparación de skills es del CONJUNTO completo de archivos, no
+    sólo de los declarados -- un archivo de MÁS bajo `SKILLS_REL` (una skill vieja que
+    el instalador debió borrar y no borró, o algo que alguien dejó a mano) también
+    hace fallar el arranque."""
+    try:
+        manifiesto = json.loads((ctx.cuenta.lib / contexto.MANIFIESTO_REL).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return (Fallo("arranque", "manifiesto_ilegible"),)
+    if not isinstance(manifiesto, dict) or not manifiesto:
+        return (Fallo("arranque", "manifiesto_ilegible"),)
+
+    fallos = []
+    sha_esperado = manifiesto.get("CLAUDE.md")
+    try:
+        instalado = (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).read_bytes()
+    except OSError:
+        instalado = None
+    if not isinstance(sha_esperado, str) or instalado is None or _sha(instalado) != sha_esperado:
+        fallos.append(Fallo("arranque", "contexto_manipulado"))
+
+    esperadas_skills = {k[len("skills/"):]: v for k, v in manifiesto.items() if k.startswith("skills/")}
+    for rel, sha_esperado in sorted(esperadas_skills.items()):
+        try:
+            instalado = (ctx.cuenta.lib / contexto.SKILLS_REL / rel).read_bytes()
+        except OSError:
+            instalado = None
+        if not isinstance(sha_esperado, str) or instalado is None or _sha(instalado) != sha_esperado:
+            fallos.append(Fallo("arranque", "skill_manipulada", (("archivo", rel),)))
+
+    de_mas = _archivos_instalados(ctx.cuenta.lib / contexto.SKILLS_REL) - frozenset(esperadas_skills)
+    fallos.extend(Fallo("arranque", "skill_extra_instalada", (("archivo", rel),)) for rel in sorted(de_mas))
     return tuple(fallos)
 
 
@@ -230,12 +290,19 @@ def remoto_c6(llaves_root: str) -> str:
     q = shlex.quote(llaves_root)
     return (f'echo "llaves=$(stat -c \'%U %a\' {q} 2>/dev/null)"; '
             f'echo "freno=$(grep -c \' ejecutor-freno$\' {q} 2>/dev/null || true)"; '
-            'echo "revocador=$(stat -c \'%U %a\' /usr/local/sbin/ejecutor-revocar 2>/dev/null)"')
+            'echo "revocador=$(stat -c \'%U %a\' /usr/local/sbin/ejecutor-revocar 2>/dev/null)"; '
+            'echo "freno_remoto_sha=$(sha256sum /usr/local/sbin/ejecutor-freno-remoto 2>/dev/null | cut -d\' \' -f1)"; '
+            'echo "revocador_sha=$(sha256sum /usr/local/sbin/ejecutor-revocar 2>/dev/null | cut -d\' \' -f1)"')
 
 
-def leer_c6(salida: bytes, *, exige_freno: bool) -> tuple:
+def leer_c6(salida: bytes, *, exige_freno: bool, sha_freno_remoto: str | None = None,
+           sha_revocador: str | None = None) -> tuple:
     """Códigos de fallo de una máquina. La llave del freno sólo se exige en las remotas:
-    en la máquina local el freno mata por cgroup, sin ssh."""
+    en la máquina local el freno mata por cgroup, sin ssh. Ronda 4 (M-2): además del
+    dueño/modo, el CONTENIDO de `ejecutor-freno-remoto` y `ejecutor-revocar` instalados
+    tiene que ser BIT A BIT el del repo -- dueño/modo correctos no dicen nada del
+    contenido; `sha_*=None` (el default) no exige nada, para no romper llamadores viejos
+    que todavía no pasan el sha esperado."""
     vistas = dict(linea.split("=", 1) for linea in salida.decode(errors="replace").splitlines() if "=" in linea)
     codigos = []
     if vistas.get("llaves") != "root 644":
@@ -244,10 +311,17 @@ def leer_c6(salida: bytes, *, exige_freno: bool) -> tuple:
         codigos.append("sin_llave_del_freno")
     if vistas.get("revocador") != "root 755":
         codigos.append("sin_revocador")
+    if exige_freno and sha_freno_remoto is not None and vistas.get("freno_remoto_sha") != sha_freno_remoto:
+        codigos.append("freno_remoto_distinto_del_repo")
+    if sha_revocador is not None and vistas.get("revocador_sha") != sha_revocador:
+        codigos.append("revocador_distinto_del_repo")
     return tuple(codigos)
 
 
 async def verificar_c6_estatico(ctx: Contexto, hosts, *, correr=cuenta_axioma.correr_en_la_cuenta) -> tuple:
+    sha_freno_remoto = _sha((ctx.repo / "ops" / "ejecutor" / "ejecutor-freno-remoto").read_bytes())
+    sha_revocador = _sha((ctx.repo / "ops" / "ejecutor" / "ejecutor-revocar").read_bytes())
+
     async def una(h):
         remoto = remoto_c6(str(ctx.llaves_root))
         if not h.es_local:
@@ -256,7 +330,9 @@ async def verificar_c6_estatico(ctx: Contexto, hosts, *, correr=cuenta_axioma.co
         rc, salida, _ = await correr(ctx.cuenta, remoto, tope_s=_TOPE_C6_S)
         if rc != 0:
             return (Fallo("c6", "maquina_inalcanzable", (("host", h.nombre),)),)
-        return tuple(Fallo("c6", c, (("host", h.nombre),)) for c in leer_c6(salida, exige_freno=not h.es_local))
+        codigos = leer_c6(salida, exige_freno=not h.es_local, sha_freno_remoto=sha_freno_remoto,
+                          sha_revocador=sha_revocador)
+        return tuple(Fallo("c6", c, (("host", h.nombre),)) for c in codigos)
 
     resultados = await asyncio.gather(*(una(h) for h in hosts))
     return tuple(f for r in resultados for f in r)

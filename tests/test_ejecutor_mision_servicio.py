@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -101,6 +102,38 @@ def test_leer_pausa_fail_closed(tmp_path):
                                   "momento": None}
 
 
+# --- ronda 5, auditoría adversarial 2026-09-22: SIN unidad systemd -----------------------
+#
+# `ejecutor-vigia@.service` se retiró: código muerto, nunca arrancó en producción (verificado
+# por el coordinador contra el journal). El camino REAL es este -- `abrir_vigia` lanza
+# `vigia_servicio` como subproceso DIRECTO, heredando la identidad de quien corre ESTE
+# proceso (jax-platform, `fruiz`). Antes esto lo cubría (débilmente, indirecto) un test sobre
+# el contenido del archivo de la unidad; con la unidad fuera, el default de `abrir_vigia` es
+# lo único que documenta el comando real, y no tenía una prueba propia.
+def test_abrir_vigia_por_defecto_lanza_el_modulo_como_subproceso_directo(tmp_path, monkeypatch):
+    """Sin `argv=` explícito (el caso real, el que usa `dependencias_reales`), `abrir_vigia`
+    tiene que lanzar exactamente `python -m jax.ejecutor.contratos.vigia_servicio <ruta>` --
+    ni una unidad systemd, ni `sudo`, ni ningún cambio de cuenta: el proceso hereda la
+    identidad de quien lo llama."""
+    import sys
+
+    vistos = {}
+    original = asyncio.create_subprocess_exec
+
+    async def espia(*argv, **kwargs):
+        vistos["argv"] = argv
+        falso = tmp_path / "no_arranca_de_verdad.py"
+        falso.write_text("import sys; sys.exit(0)\n")
+        return await original(sys.executable, str(falso), **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", espia)
+    asyncio.run(S.abrir_vigia(tmp_path, "m-t9", "texto", frozenset({"a"})))
+    argv = vistos["argv"]
+    assert argv[0] == sys.executable
+    assert argv[1:3] == ("-m", "jax.ejecutor.contratos.vigia_servicio")
+    assert argv[3] == str(tmp_path / "m-t9.json")
+
+
 def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_path, monkeypatch):
     """El vigía de verdad es `vigia_servicio`; acá un proceso falso que imprime lo que el vigía
     imprime al cerrar y termina con SIGTERM, para probar el manejo del proceso y del archivo."""
@@ -124,3 +157,39 @@ def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_p
         return rc, salida
     rc, salida = asyncio.run(probar())
     assert rc == 0 and "cerrada=true" in salida and not (tmp_path / "m-t1.json").exists()
+
+
+def test_el_cerebro_le_da_bash_y_skill_al_arnes(monkeypatch):
+    """El Ejecutor tiene skills (cerebros.toml `skills`, 2026-09-22): `remoto_claude`
+    necesita `Skill` en --allowedTools para poder invocarlas, además de `Bash`.
+    `Read` no hace falta -- el Ejecutor lee con `cat` (Bash), como siempre."""
+    vistos = {}
+
+    def remoto_falso(cuenta, *, base_url, modelo, prompt, herramientas, max_salida_tokens, sesion, reanudar,
+                     directorio_projects):
+        vistos["herramientas"] = herramientas
+        return "remoto-de-prueba"
+
+    async def correr_falso(cuenta, remoto, *, entrada, tope_s):
+        return 0, b"{}", b""
+
+    async def preparar_falso(cuenta, ruta):
+        vistos["directorio_preparado"] = ruta
+
+    monkeypatch.setattr(S.cuenta_axioma, "remoto_claude", remoto_falso)
+    monkeypatch.setattr(S.cuenta_axioma, "correr_en_la_cuenta", correr_falso)
+    monkeypatch.setattr(S.cuenta_axioma, "preparar_directorio_projects", preparar_falso)
+
+    turno = M.Turno(**{**TURNO, "hosts": frozenset(TURNO["hosts"])})
+    env = {"JAX_PROXY_CARRIL_MODELO": "canario", "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
+          "JAX_EJECUTOR_MISIONES": "/var/lib/jax-ejecutor-misiones"}
+    deps = S.dependencias_reales(env, turno, tope_s=1.0, espera_s=1.0)
+
+    class _CtxFalso:
+        cuenta = object()
+        puerto_proxy = 18435
+
+    asyncio.run(deps.correr_cerebro(_CtxFalso(), "prompt", None, False))
+    assert vistos["herramientas"] == "Bash,Skill"
+    assert vistos["directorio_preparado"] == Path(
+        f"/var/lib/jax-ejecutor-misiones/{TURNO['mision_id']}/claude-projects")

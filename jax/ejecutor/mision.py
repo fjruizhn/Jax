@@ -11,8 +11,10 @@ Orden de un turno (el mismo que el humo, sin atajos):
 1. `exigir_contratos` con las máquinas de la misión (compuerta de datos de clientes incluida).
    Si se niega, el turno termina `rechazado` con los fallos (contrato, código, datos) y no se
    abre nada.
-2. El vigía de C5 (`vigia_servicio`, el módulo que corre la unidad ejecutor-vigia@) arranca,
-   vuelve a exigir los contratos y late: recién ahí el proxy de C3 deja de dar 423.
+2. El vigía de C5 (`vigia_servicio`, lanzado por `abrir_vigia` -- mision_servicio.py -- como
+   SUBPROCESO DIRECTO, heredando la identidad de `jax-platform`, `fruiz`; no hay unidad
+   systemd, ver DEUDA.md) arranca, vuelve a exigir los contratos y late: recién ahí el proxy
+   de C3 deja de dar 423.
 3. El cerebro corre en la jaula de la cuenta, SÓLO contra el proxy.
 4. Capturas desde lo que la jaula devolvió; cada paso se ata al registro de C3 (tool_use_id y
    sha256). Afirmaciones → `transporte.entregar` (cita literal) → auditor de C5.
@@ -151,15 +153,29 @@ def _eventos_del_stream(salida: bytes):
             yield ev
 
 
+#: Herramientas que cuentan como un PASO de la misión: Bash (comandos) y Skill (las
+#: tres skills declaradas en cerebros.toml, spec 2026-09-22 -- el arnés las tiene en
+#: --allowedTools junto con Bash). Cualquier otra (p. ej. Read) NO cuenta: el Ejecutor
+#: lee con `cat` (Bash), nunca con la herramienta Read.
+_HERRAMIENTAS_QUE_CUENTAN_COMO_PASO = frozenset({"Bash", "Skill"})
+
+
 def pasos_del_stream(salida: bytes) -> tuple:
-    """(pedidas {id: comando}, resultados {id: (contenido crudo, es_error)}, texto final)."""
+    """(pedidas {id: comando}, resultados {id: (contenido crudo, es_error)}, texto final).
+
+    `comando` es el texto del `command` para Bash; para Skill (sin ese campo) queda en
+    `None` -- `capturas()` ya descarta cualquier `comando` que no sea `str`, así que un
+    paso de Skill nunca se lee como si tocara una máquina por ssh. Lo que SÍ gana al
+    contar como paso: entra en `pasos` de `cerebro_termino` y se verifica contra el
+    registro de C3 (`registro_cuadra`) igual que un Bash -- antes se perdía en silencio."""
     pedidas, resultados, final = {}, {}, None
     for ev in _eventos_del_stream(salida):
         mensaje = ev.get("message") if isinstance(ev.get("message"), dict) else {}
         for b in mensaje.get("content") or []:
             if not isinstance(b, dict):
                 continue
-            if ev.get("type") == "assistant" and b.get("type") == "tool_use" and b.get("name") == "Bash":
+            if (ev.get("type") == "assistant" and b.get("type") == "tool_use"
+                    and b.get("name") in _HERRAMIENTAS_QUE_CUENTAN_COMO_PASO):
                 pedidas[b.get("id")] = (b.get("input") or {}).get("command")
             elif ev.get("type") == "user" and b.get("type") == "tool_result":
                 resultados[b.get("tool_use_id")] = (b.get("content"), bool(b.get("is_error", False)))

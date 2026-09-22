@@ -7,7 +7,11 @@ un servidor de clientes: el arranque la rechaza (compuerta de C5 y contratos rem
 
 1. `exigir_contratos` con las máquinas de la misión (el mismo arranque que el vigía).
 2. Proxy de C3 en 423 ANTES del vigía (nadie late).
-3. El vigía de C5 (`vigia_servicio`, el módulo que corre la unidad ejecutor-vigia@) arranca,
+3. El vigía de C5 (`vigia_servicio`) arranca como SUBPROCESO DIRECTO de este mismo script
+   (más abajo: `create_subprocess_exec(sys.executable, "-m",
+   "jax.ejecutor.contratos.vigia_servicio", ...)`, heredando la identidad de quien corre
+   esto -- nunca hubo una unidad systemd de por medio acá; la plantilla
+   `ejecutor-vigia@.service` se retiró el 2026-09-22 por código muerto, ver DEUDA.md),
    vuelve a exigir los contratos y late: el proxy deja de dar 423.
 4. El cerebro corre en la jaula de la cuenta (gancho C1/C2), habla SOLO con el proxy (C3,
    registro encadenado; el freno C4 y la pausa de C5 lo cortan) y corre los comandos por ssh.

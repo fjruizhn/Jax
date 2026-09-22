@@ -1236,6 +1236,113 @@ jobs:
       # archivo es la fuente única; tests/test_requirements_completos.py falla si
       # un import de terceros no está fijado ahí o si este job deja de usarlo.
       - run: pip install -r requirements.txt pytest pytest-asyncio
+      # B-1/M-4 (ronda 3, auditoría adversarial 2026-09-22): las pruebas de bwrap REAL
+      # de tests/test_ejecutor_contratos_cuenta_axioma.py (pedido explícito del
+      # coordinador: "un test tiene que ejecutar bwrap de verdad") se saltan solas si
+      # bwrap no está -- pero un skip masivo se ve igual que verde (mismo criterio que
+      # hyde-containment, más abajo, que ya resolvió este mismo problema para su propio
+      # archivo). Mismos dos pasos que ese job: bubblewrap no viene en el runner, y en
+      # Ubuntu 23.10+ AppArmor bloquea los user namespaces sin privilegios, que es
+      # justamente lo que bwrap necesita.
+      #
+      # `exch` (PR #260, CI en rojo -- ronda 3 de este PR lo usaba, medido sólo en
+      # hall9000, nunca contra un runner real hasta que se abrió el PR). Verificado de
+      # verdad, no supuesto: el runner es `ubuntu-24.04` (`Set up job` del propio log
+      # de CI); Ubuntu 24.04 (noble) trae `util-linux` 2.39.3, y `exch` recién se
+      # agregó a util-linux el 2023-12-06 (commit cd094a05, upstream) -- entra en
+      # util-linux 2.40, que noble NO tiene ni en el paquete base ni en
+      # `util-linux-extra` (bajado y abierto el `.deb` real del archivo de Ubuntu:
+      # `fadvise fincore lsfd lsirq pipesz waitpid blkpr hwclock` -- SIN `exch`). Instalar
+      # `util-linux-extra` en este runner NO alcanza (primer intento, descartado tras
+      # verificarlo). hall9000 SÍ lo tiene porque corre Ubuntu 26.04 (`resolute`,
+      # util-linux 2.41+ vía Launchpad).
+      #
+      # En vez de perseguir un paquete/PPA con versiones cruzadas (riesgo real de
+      # incompatibilidad de glibc contra un runner más viejo), se instala un `exch`
+      # MÍNIMO -- sólo para este runner de CI, nunca para producción -- que hace
+      # EXACTAMENTE lo mismo que el real: un wrapper de dos argumentos sobre
+      # `renameat2(RENAME_EXCHANGE)`, vía `ctypes` contra la libc del sistema (glibc
+      # expone `renameat2()` desde 2.28, muy por debajo de lo que trae cualquier Ubuntu
+      # soportado) -- sin compilador, sin depender de los headers internos de
+      # util-linux (`c.h`/`nls.h`, que exigirían todo su árbol de build). El script
+      # real (`reemplazar_directorio_atomico.sh`) sólo le pide `command -v exch` y que
+      # intercambie dos rutas atómicamente -- exactamente lo que hace este shim.
+      #
+      # `/etc/claude-code` (PR #260, CI en rojo -- los 4 `test_bwrap_real_*` de
+      # test_ejecutor_contratos_cuenta_axioma.py, que las notas de rondas anteriores
+      # daban por "pasan sueltas en el runner real" SIN haberlo comprobado nunca contra
+      # un runner de verdad): el error real es `bwrap: Can't mkdir /etc/claude-code:
+      # Permission denied` -- `cuenta_axioma.py::_jaula` hace `--tmpfs /etc/claude-code`
+      # sobre el `/etc` REAL del host (`--dev-bind / /`), y un namespace de usuario sin
+      # privilegios no puede CREAR un directorio nuevo bajo un `/etc` que no es suyo,
+      # aunque root DENTRO del namespace sea el propio usuario. En hall9000 el
+      # directorio YA EXISTE -- lo crea la instalación real
+      # (`ops/ejecutor/instalar_contratos.sh:27`: `sudo install -d -o root -g root -m
+      # 0755 /etc/claude-code`), así que bwrap sólo MONTA encima, sin mkdir. El runner
+      # de CI es una máquina nueva que nunca corrió esa instalación. Se replica ACÁ el
+      # mismo `install -d` que usa producción -- no una ruta inventada para CI.
+      - name: Instalar bubblewrap y un exch mínimo para este runner (Ubuntu 24.04 no trae exch real)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "(sysctl ausente en este kernel -- no aplica)"
+          bwrap --version
+          sudo install -d -o root -g root -m 0755 /etc/claude-code
+          # /usr/bin, NO /usr/local/bin: test_ejecutor_reemplazar_directorio_atomico.py
+          # corre el script con env={"PATH": "<bin-de-sudo-falso>:/usr/bin:/bin"} --
+          # hermético a propósito, sin el PATH ambiente del runner. Es además la ruta
+          # REAL donde instala util-linux-extra (`dpkg -c` del .deb real: ./usr/bin/…),
+          # así que coincide con producción, no es un lugar inventado para CI.
+          sudo tee /usr/bin/exch >/dev/null <<'EXCH_CI_SHIM'
+          #!/usr/bin/env python3
+          """exch MÍNIMO, sólo para CI (Ubuntu 24.04, sin util-linux >= 2.40): misma
+          interfaz de dos argumentos que el exch real de util-linux -- intercambia dos
+          rutas atómicamente vía renameat2(RENAME_EXCHANGE) por ctypes contra la libc
+          del sistema. En producción (hall9000, Ubuntu 26.04) se usa el exch real de
+          util-linux-extra; esto NO se instala ahí. Ver .github/workflows/policy.yml."""
+          import ctypes
+          import ctypes.util
+          import os
+          import sys
+
+          RENAME_EXCHANGE = 1 << 1
+          AT_FDCWD = -100
+
+
+          def main() -> int:
+              if len(sys.argv) != 3:
+                  print("uso: exch ORIGEN DESTINO", file=sys.stderr)
+                  return 1
+              libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+              origen, destino = sys.argv[1].encode(), sys.argv[2].encode()
+              rc = libc.renameat2(AT_FDCWD, origen, AT_FDCWD, destino, RENAME_EXCHANGE)
+              if rc != 0:
+                  err = ctypes.get_errno()
+                  print(f"exch: {os.strerror(err)}", file=sys.stderr)
+                  return 1
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          EXCH_CI_SHIM
+          sudo chmod 0755 /usr/bin/exch
+          command -v exch || { echo "exch shim no quedó instalado -- revisar el heredoc de arriba"; exit 1; }
+          # Prueba real, no sólo "está en el PATH": intercambia dos archivos de mentira
+          # y confirma que el contenido de verdad se intercambió.
+          tmp="$(mktemp -d)"
+          echo AAA > "$tmp/a"; echo BBB > "$tmp/b"
+          exch "$tmp/a" "$tmp/b"
+          [ "$(cat "$tmp/a")" = "BBB" ] && [ "$(cat "$tmp/b")" = "AAA" ] || \
+            { echo "el exch shim no intercambió de verdad -- ver /tmp de la prueba"; exit 1; }
+          rm -rf "$tmp"
+          # Prueba con el PATH HERMÉTICO real que usa el test -- no sólo el PATH del
+          # runner. jax#260 CI, ronda 2 de fixes: instalado en /usr/local/bin la vez
+          # anterior, y el test lo perdía porque restringe el PATH a
+          # "<bin-de-sudo-falso>:/usr/bin:/bin", sin /usr/local/bin -- este chequeo
+          # habría atrapado eso antes de empujar.
+          env -i PATH=/usr/bin:/bin bash -c 'command -v exch' || \
+            { echo "exch no aparece con PATH=/usr/bin:/bin -- el mismo PATH hermético que usa test_ejecutor_reemplazar_directorio_atomico.py::_correr"; exit 1; }
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
@@ -1260,6 +1367,13 @@ jobs:
           tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py
           tests/test_motor_contrato_dispatch.py
           tests/test_ejecutor_fase0.py
+          tests/test_ejecutor_generar_claude_md.py
+          tests/test_ejecutor_contratos_contexto.py
+          tests/test_ejecutor_reemplazar_directorio_atomico.py
+          tests/test_ejecutor_preparar_directorio_misiones.py
+          tests/test_ejecutor_contratos_huella.py
+          tests/test_ejecutor_huella_aceptar.py
+          tests/test_ejecutor_huella_registro_permisos.py
           tests/test_ejecutor_cita.py
           tests/test_ejecutor_captura.py
           tests/test_ejecutor_hechos.py
@@ -1403,6 +1517,13 @@ jobs:
             tests/test_contrato_dispatch_repl_ada.py tests/test_payload_max_tokens_literal_tripwire.py \
             tests/test_motor_contrato_dispatch.py \
             tests/test_ejecutor_fase0.py \
+            tests/test_ejecutor_generar_claude_md.py \
+            tests/test_ejecutor_contratos_contexto.py \
+            tests/test_ejecutor_reemplazar_directorio_atomico.py \
+            tests/test_ejecutor_preparar_directorio_misiones.py \
+            tests/test_ejecutor_contratos_huella.py \
+            tests/test_ejecutor_huella_aceptar.py \
+            tests/test_ejecutor_huella_registro_permisos.py \
             tests/test_ejecutor_cita.py \
             tests/test_ejecutor_captura.py \
             tests/test_ejecutor_hechos.py \
@@ -3533,8 +3654,375 @@ jobs:
           #   `JAX_DB_HOST`, 165 archivos: 2462 passed (delta +3 sobre la
           #   corrida anterior de este fix round, 2459 -> 2462, exacto),
           #   2 skipped, 3 xfailed.
-          grep -qE "^2447 passed, 19 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2447 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 de Ruling 19e sin JAX_DB_HOST en este job)."; exit 1; }
+          # NOTA DE REBASE #2 (ronda 9, 2026-09-22, `git rebase origin/master`, pedida
+          # por el coordinador -- la rama iba 7 commits detrás): esta misma historia YA
+          # tenía una nota de rebase (justo abajo, de cuando la rama divergió de
+          # 2399/17). En ESTE rebase, master había seguido avanzando por su cuenta
+          # hasta 2447/19 tests-puros (Task 1-bis, `feat/descartar-pipelines`, ajeno a
+          # esta rama) mientras las rondas 2-9 de acá construían sobre el 2399 viejo.
+          # El grep de arriba (2447/19) es el que master tenía ANTES de este merge --
+          # queda como historia de master, no como el piso vigente. El piso final,
+          # verificado de nuevo tras el rebase completo, está en el ÚLTIMO `grep -qE`
+          # de este mismo bloque, más abajo -- ronda 9 lo re-midió sobre la suite
+          # COMPLETA ya rebasada, no sumando a mano.
+          # NOTA DE REBASE #1 (2026-09-22): esta rama (feat/ejecutor-contexto-y-skills)
+          # divergió cuando el piso de master era 2399/17 -- master avanzó por su
+          # cuenta a 2439/17 (feat/descartar-pipelines, +40, ver arriba) mientras esta
+          # rama agregaba lo de abajo sobre el 2399 viejo. Las rondas siguientes de
+          # esta rama (ronda 3, ronda 4) vuelven a medir la suite COMPLETA de cero
+          # cada vez -- el número final, más abajo en este mismo archivo, es el
+          # verificado de verdad; éste queda como historia de CÓMO se llegó ahí, no
+          # como la fuente de verdad del piso vigente.
+          # 2399 -> 2470, 17 -> 30 skipped (feat/ejecutor-contexto-y-skills, ronda 2,
+          #   auditoría adversarial B3/M1, 2026-09-22). El número NO sale de sumar a
+          #   mano: la ronda 1 (commit 7d28a99) ya había agregado tests NUEVOS a
+          #   archivos que esta lista YA corría (test_ejecutor_contratos_arranque.py,
+          #   entre otros) sin tocar este piso -- sumar "+lo que agrego yo" sobre 2399
+          #   habría dado un número que ya estaba mal antes de empezar. Se corrió la
+          #   lista COMPLETA de este paso, de verdad, dos veces: con
+          #   /home/fruiz/claude-skills/common/CLAUDE.md.core y
+          #   ~/ejecutor-fase0/resultados (el corpus de U3) TAPADOS con `mv` (lo más
+          #   parecido a un runner de CI efímero que hay en esta máquina) y restaurados
+          #   después. Tres archivos de test nuevos que NINGÚN job corría quedan acá
+          #   -- tests/test_ejecutor_generar_claude_md.py (28), tests/
+          #   test_ejecutor_contratos_contexto.py (9),
+          #   tests/test_ejecutor_reemplazar_directorio_atomico.py (6, prueba REAL
+          #   contra bash+coreutils del reemplazo atómico de M4, sin bwrap: no hace
+          #   falta) -- y las 11 de instalación de test_ejecutor_contratos_arranque.py
+          #   (ese archivo YA corría acá) DEJARON de saltarse: las dos rondas usan un
+          #   DOBLE hermético de la constitución (`constitucion_fuente()`, el seam
+          #   nuevo de esta ronda) en vez de la real de esta máquina, así que ninguna
+          #   de las 43+11 depende de /home/fruiz/claude-skills -- lo comprueba el
+          #   propio "tapado con mv" de la medición. Quedan 30 skipped: 16 de
+          #   test_ejecutor_reproduccion_u3.py sin el corpus de U3 (estructural, sin
+          #   cambios) + 14 de test_ejecutor_generar_claude_md.py/
+          #   test_ejecutor_contratos_contexto.py que SÍ necesitan la constitución REAL
+          #   en particular (no un doble) -- las dejadas explícitamente
+          #   `@requiere_constitucion_real` porque verifican algo del archivo real de
+          #   ESTA máquina, no de la lógica del generador.
+          #   +3 más (tests/test_payload_max_tokens_literal_tripwire.py,
+          #   SondasDeMedicionTest): el falso positivo de la nota de abajo era
+          #   PROPIO de esta rama (`git stash` contra 7d28a99 ya lo reproducía) y se
+          #   ARREGLÓ acá, no se anotó como deuda -- el matcher por stem suelto pasó a
+          #   AST real (`import <sonda>` suelto o `from <sonda> import` con level 0) +
+          #   un chequeo de texto sólo contra la RUTA COMPLETA declarada de cada sonda
+          #   (ya no contra el nombre del directorio solo, que marcaba CUALQUIER
+          #   mención de "ejecutor_fase0" -- incluida la del propio
+          #   jax/ejecutor/contratos/contexto.py explicando, legítimo, que carga
+          #   generar_claude_md.py). +3 tests: control negativo (una importación
+          #   CALIFICADA con el mismo nombre de hoja, el caso real, no se marca) y dos
+          #   controles positivos (un `import contexto` suelto sí se marca; una carga
+          #   dinámica por la ruta completa declarada también) -- sin ellos no se sabe
+          #   si el tripwire corregido sigue cazando algo o si sólo dejó de quejarse.
+          # 2470 -> 2506, 30 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 3,
+          #   auditoría adversarial, 2026-09-22 -- NO-GO de la segunda auditoría sobre la
+          #   ronda 2, decisiones estructurales de Hyde). Medido de nuevo, dos veces, SIN
+          #   tocar nada fuera del worktree (regla nueva del coordinador: nunca `mv` la
+          #   constitución real de Fernando) -- esta vez con `bwrap --tmpfs
+          #   /home/fruiz/claude-skills --tmpfs /home/fruiz/ejecutor-fase0` envolviendo la
+          #   corrida entera (aísla la VISTA del proceso hijo, el host no se toca) en vez
+          #   de `mv`+restore. Las pruebas de bwrap REAL de
+          #   tests/test_ejecutor_contratos_cuenta_axioma.py (agregadas en esta ronda, ver
+          #   más abajo) invocan bwrap ELLAS MISMAS, y este runner no admite espacios de
+          #   nombres de usuario anidados -- se corrieron aparte, sin el envoltorio, una
+          #   sola vez (dan el mismo resultado con o sin la constitución real: no dependen
+          #   de ella) y se sumaron a mano al total de acá, con la aritmética completa
+          #   dejada en el propio commit para que se pueda repetir.
+          #   +36 tests-puros nuevos en total: tests/test_ejecutor_contratos_huella.py
+          #   (+15, M-1/M-2: integridad de los controles del Ejecutor por ESTADO, no por
+          #   texto de comando) y +21 en archivos que este paso YA corría --
+          #   tests/test_ejecutor_contratos_cuenta_axioma.py (+17: HOME efímero por
+          #   misión -- B-1/M-4 -- de las cuales 4 son bwrap REAL, ver arriba),
+          #   tests/test_ejecutor_vigia_servicio.py (+5: la huella al arrancar/cerrar una
+          #   misión pone la pausa si hay un cambio no declarado),
+          #   tests/test_payload_max_tokens_literal_tripwire.py (+9: M-3, todas las formas
+          #   de colar una sonda -- from X import, import X.Y dotted, importlib con ruta
+          #   dotted, ruta armada por partes -- con una lista EXPLÍCITA de excepciones en
+          #   vez de una heurística más fina), tests/test_ejecutor_reemplazar_directorio_
+          #   atomico.py (+2: `exch`/`renameat2` en vez de dos `mv` con ventana),
+          #   tests/test_ejecutor_generar_claude_md.py (+1 neto: LOS SEIS IMPOSIBLES ya no
+          #   es una sección de la identidad -- MINOR, traía un estado sin fecha y una
+          #   referencia a un bloque que no se incluye). `NUCLEO_REGLAS` (politica.py) se
+          #   REDUJO de 10 a 4 reglas (menos código de test, no más: los casos que sobran
+          #   pasaron a `test_el_nucleo_reducido_ya_no_bloquea_lo_legitimo`, dentro del
+          #   mismo archivo que ya corría acá) -- el número neto de tests-puros igual
+          #   creció porque se agregaron controles nuevos para los cuatro falsos positivos
+          #   reproducidos (systemctl enable de un cliente, chattr de un .user.ini, chmod
+          #   de un authorized_keys ajeno, una lectura con `>` que el _MUTA viejo atrapaba).
+          # 2506 -> 2574, 30 -> 35 skipped (feat/ejecutor-contexto-y-skills, ronda 4, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la tercera auditoría: B-1 (log de sudo
+          #   solo-añadido por inode+tamaño+prefijo, no por tamaño a secas), M-1 (la huella la
+          #   toma el CONTROLADOR como fruiz -- `revocacion.argv_admin`, JAX_EJECUTOR_ADMIN_USUARIO
+          #   -- nunca como axioma; línea base persistida por `mision_id`, no por turno; el
+          #   cierre falla cerrado con `huella_no_medible`+pausa), M-2 (huella en dos niveles,
+          #   CONTROLES pausa/PERSISTENCIA sólo informa; símlinks por destino Y contenido
+          #   resuelto; declarado por ruta EXACTA; sha256 de ejecutor-freno-remoto/ejecutor-
+          #   revocar contra el repo en C6), B-2 (ACL explícita del directorio de misiones,
+          #   `ops/ejecutor/preparar_directorio_misiones.sh`, nuevo), M-3 (listas de rutas
+          #   LITERALES, no tautológicas; try/except que traga la apertura sigue fallando de
+          #   verdad) y M-4 (el CLAUDE.md ya no promete "se bloquea ahí mismo"/detección
+          #   "SIEMPRE"; jerarquía de autoridad PROPIA del Ejecutor, sin la sección del núcleo
+          #   que le da autoridad a un CLAUDE.md de proyecto -- vector de inyección acá).
+          #   Medido dos veces, sin tocar nada fuera del worktree, mismo método que la ronda 3
+          #   (`bwrap --tmpfs /home/fruiz/claude-skills --tmpfs /home/fruiz/ejecutor-fase0`
+          #   envolviendo la corrida entera). Bajo ESE bwrap externo, DOS pruebas NUEVAS de
+          #   `tests/test_ejecutor_preparar_directorio_misiones.py` (B-2, `setfacl` real) fallan
+          #   con "Invalid argument" -- el mismo tipo de límite que ya afecta a los 4
+          #   `test_bwrap_real_*` (namespaces/xattr anidados que este verificador no soporta,
+          #   NO el runner real de CI, que no envuelve nada): se miden SUELTAS, igual que ésas,
+          #   y pasan las 6 (confirmado, ver nota de abajo). 2568 (wrapped) + 6 (sueltas) = 2574.
+          #   Los skips pasan de 30 a 35: +5 son los `@requiere_constitucion_real` nuevos de M-4
+          #   (test_ejecutor_generar_claude_md.py, la identidad/autoridad se prueba también con
+          #   el DOBLE hermético -- esas SÍ corren siempre) -- 16 (U3, sin cambio) + 19 (constitución
+          #   real: 14 antes + 5 nuevas) = 35.
+          # 2574 -> 2573, 35 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 5, auditoría
+          #   adversarial, 2026-09-22 -- decisión de Fernando: SE RETIRA `ejecutor-vigia@.service`
+          #   (código muerto -- el camino real, `abrir_vigia` en mision_servicio.py, siempre lanzó
+          #   el vigía como subproceso directo, nunca por esa unidad; el journal de la unidad
+          #   -- verificado de nuevo el 2026-09-22 -- muestra exactamente DOS arranques, los dos
+          #   manuales de verificación del despliegue #190 del 2026-09-17, ninguno de una misión
+          #   real). -1 test (`test_la_unidad_lanza_este_modulo_con_la_mision_de_su_instancia`,
+          #   sobre el archivo de la unidad que ya no existe) -2 (UNIDADES en
+          #   test_ejecutor_cuenta_de_servicio.py pasó de 2 a 1 elemento -- ejecutor-vigia@.service
+          #   salió de ahí -- y son dos tests parametrizados sobre esa lista) +1
+          #   (test_abrir_vigia_por_defecto_lanza_el_modulo_como_subproceso_directo, en
+          #   test_ejecutor_mision_servicio.py: el default de `abrir_vigia` no tenía prueba propia,
+          #   antes lo cubría -- débil, indirecto -- el test de la unidad) +1
+          #   (test_la_unidad_del_vigia_no_existe_y_nadie_la_instala: guarda contra que la unidad
+          #   vuelva sola). Neto -1. Medido igual que las rondas 3/4, sin tocar nada fuera del
+          #   worktree.
+          # 2573 -> 2592, 35 -> 38 skipped (feat/ejecutor-contexto-y-skills, ronda 6, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la cuarta auditoría sobre la huella: "está
+          #   creciendo hasta volverse otro filtro que no converge, así que la SIMPLIFICO").
+          #   Punto 1: huella.py reescrito -- RUTAS_CONTROLES baja a sudoers/sshd/authorized_keys
+          #   (6 rutas), + el glob /usr/local/sbin/ejecutor-*, + sha de passwd/group/shadow;
+          #   comandos por RUTA ABSOLUTA de los binarios (no el PATH); se QUITA el nivel
+          #   PERSISTENCIA y toda la lógica de "declarado" (B-2 de la ronda 4 se retira entera --
+          #   cualquier cambio pausa, sin excepciones). Punto 2 (M-1): marca "pendiente" persistida
+          #   en cada huella -- antes de abrir CUALQUIER misión nueva, revisa marcas huérfanas de
+          #   OTRA vuelta (de esta u otra misión) que se cortó sin cerrar limpio, en TODO el host
+          #   (nuevo `verificar_huellas_huerfanas`, glob por mision_id). Punto 3 (M-2): el arranque
+          #   ya NO regenera el contexto desde /home/fruiz/claude-skills -- compara contra un
+          #   MANIFIESTO (`contexto.MANIFIESTO_REL`) escrito AL INSTALAR; frescura es un chequeo
+          #   aparte (`instalar_contexto.sh --comprobar-frescura`) que avisa sin bloquear. Punto 4
+          #   (M-4): `correr_huella_por_ssh` extraída a nivel de módulo para poder probar el
+          #   chequeo de rc por separado (mata el mutante "quitar el chequeo del código de
+          #   salida"; el mutante de `tamano_apertura_log=0` ya no aplica -- esa lógica se fue
+          #   entera con el log de sudo). MINOR: huella vacía en la apertura o el cierre es fallo;
+          #   `RuntimeError` en `principal` tiene su propio código; ACL sin ventana en
+          #   `preparar_directorio_misiones.sh` (0700 base, no vuelve a llamar `install -d` sobre
+          #   un directorio existente); LÍMITE de `claude-projects` de otra misión documentado en
+          #   `cuenta_axioma.py`; `--plain` en `retirar_unidad_vigia.sh`; cita corregida en
+          #   mision_servicio.py:56. Punto 6: CLAUDE.md sin la contradicción de systemd/cron
+          #   (crear servicios del cliente es legítimo si el plan lo pide), las skills son guía de
+          #   método no autoridad, el GO es sólo la misión en la plataforma.
+          #   Medido dos veces, mismo método (`bwrap --tmpfs` envolviendo la corrida, sin tocar
+          #   nada fuera del worktree): 2584 (wrapped) + 8 sueltas (4 test_bwrap_real_* +
+          #   4 nuevas de ACL real en test_ejecutor_preparar_directorio_misiones.py -- las 2
+          #   agregadas esta ronda fallan bajo el bwrap EXTERNO de este verificador por el mismo
+          #   límite de namespaces/xattr anidados que ya afecta a las otras 6, NO el runner real)
+          #   = 2592. Skips: 35 -> 38 (+3 `@requiere_constitucion_real` nuevos del punto 6 en
+          #   test_ejecutor_generar_claude_md.py) -- 16 (U3) + 1 (contexto.py) + 21 (generar_claude_md,
+          #   18 antes + 3) = 38.
+          # 2592 -> 2618, 38 -> 42 skipped (feat/ejecutor-contexto-y-skills, ronda 7, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la quinta auditoría: BLOCK reproducido en
+          #   producción: `apt install` y el plugin de correo de aaPanel crean cuentas de sistema,
+          #   tocan `/etc/passwd`, y la huella pausaba el cutover -- y encima la marca dejaba el
+          #   host bloqueado PARA SIEMPRE, sin salida). Punto 1: `/etc/passwd`/`group`/`shadow`
+          #   salen de la huella -- crear cuentas es administración legítima; RUTAS_SHA_SOLO se
+          #   retira entera de huella.py. Punto 2 (M-1): la marca ahora tiene ESTADO con nombre
+          #   (`ABIERTA`/`REPORTADA`/`CERRADA`, en vez de un booleano `pendiente`) -- `REPORTADA`
+          #   bloquea sin volver a medir hasta que se acepte explícitamente; nueva CLI `python -m
+          #   jax.ejecutor.contratos.huella aceptar --host <host> --mision <mision_id>`
+          #   [--sin-medir] que muestra el diff, toma línea base nueva, registra en el registro de
+          #   C3 (evento `huella_aceptada`) y BORRA la pausa global (`JAX_EJECUTOR_PAUSA`) -- sin
+          #   eso, C5 seguía rechazando toda misión nueva aunque la marca ya no bloqueara.
+          #   docs/ejecutor-huella-aceptar.md documenta el procedimiento; el mensaje de cada pausa
+          #   por huella referencia el comando exacto para aceptar. Punto 3 (M-3): mata
+          #   `return False -> continue` en `verificar_huellas_huerfanas` (línea 163 de la ronda
+          #   6) con un test de "el primer ssh falla y el segundo responde" -- demostrado real
+          #   contra un mutante literal. Punto 4: `preparar_directorio_misiones.sh` reescrito --
+          #   ya NO se salta el modo/ACL cuando el directorio existe (la ronda 6 lo hacía "para
+          #   evitar una ventana", pero eso dejaba una ACL vieja de producción -- `drwxrwx---`,
+          #   `group::rwx`, medida real -- sin corregir NUNCA); ahora es un solo `setfacl -m` con
+          #   TODAS las entradas (base + nombradas + default) juntas, sin ventana de verdad, y
+          #   `mkdir -p` en vez de `install -d` (que resetea el modo incluso sobre un directorio
+          #   YA existente -- comprobado). Punto 5: cerebros.toml ya no dice "esos seis
+          #   controles" (ahora son los reales, sin passwd/group/shadow), dice con claridad que
+          #   instalar paquetes/aaPanel/crear cuentas es administración legítima, y que tocar un
+          #   control de verdad pausa la misión hasta que Fernando lo acepte explícitamente.
+          #   Medido dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del
+          #   worktree): 2608 (wrapped) + 10 sueltas (4 test_bwrap_real_* + 6 de setfacl real en
+          #   test_ejecutor_preparar_directorio_misiones.py -- 2 de la ronda 6 + 4 nuevas de esta
+          #   ronda, todas fallan bajo el bwrap EXTERNO de este verificador por el mismo límite de
+          #   namespaces/xattr anidados, NO el runner real de CI) = 2618. Skips: 38 -> 42 (+4
+          #   `@requiere_constitucion_real` nuevos del punto 5 en test_ejecutor_generar_claude_md.py)
+          #   -- 16 (U3) + 1 (contexto.py) + 25 (generar_claude_md, 21 antes + 4) = 42.
+          # 2618 -> 2645, 42 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 8, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la sexta auditoría sobre la CLI de aceptación).
+          #   B-1: `aceptar` ya no borra la pausa a ciegas -- sólo la SUYA (origen=huella, mismo
+          #   host, misma mision_id); nuevo `pausa.quitar_pausa_si` (atómico: `os.rename` agarra
+          #   lo que haya, `os.link` repone sin pisar si no coincide) +4 tests en
+          #   test_ejecutor_contratos_pausa.py, +6 en test_ejecutor_huella_aceptar.py (C4/C5/otro
+          #   host/otra misión no se tocan; la propia SÍ se borra; si C5 pausó antes de que la
+          #   huella llegara a escribir, sólo se cambia la marca). B-2: `aceptar` exige
+          #   `estado == REPORTADA` (o `ABIERTA` con `--sin-medir`); +5 tests, incluido uno que
+          #   mata el mutante quitando el chequeo real y viendo caer los dos tests de estado
+          #   (confirmado, restaurado después). M-1: `huella.py:257` ya no dice "fruiz ya puede
+          #   escribir ahí: es el mismo dueño" -- **era falso**, verificado en producción
+          #   (`getfacl`, 2026-09-22): `/var/log/jax-ejecutor/registro.jsonl` es de `jaxsvc`,
+          #   `fruiz` sólo tiene `r--`. El comando documentado pasa a `sudo -u jaxsvc python -m
+          #   ...` (nunca `sudo` a secas, que escribiría como root); nuevo
+          #   test_ejecutor_huella_registro_permisos.py (+3) replica esa ACL real con `chmod` en
+          #   el scratch y prueba que escribir con sólo `r--` falla, y que como dueño funciona.
+          #   M-2: `aceptado_por` sale de `SUDO_UID` validado con `pwd` (nunca de
+          #   `SUDO_USER`/`USER` como texto suelto); `principal` rechaza si el uid invocante es
+          #   el de `JAX_EJECUTOR_CUENTA` (axioma no se acepta a sí mismo) -- +7 tests en
+          #   test_ejecutor_contratos_huella.py, incluido un mutante matado mutando
+          #   `_resolver_identidad_invocante` y viendo que `principal` real rechaza igual. M-3:
+          #   texto -- axioma SÍ tiene `NOPASSWD:ALL` en hall9000, pero queda inerte bajo
+          #   NoNewPrivs en la jaula, y la única llave autorizada para axioma ahí es la del
+          #   controlador (jaxsvc, 600, que axioma no puede leer); `maquinas.toml: sudo=false`
+          #   significa "no utilizable desde la jaula", no "sin sudo real" (sin tests, es texto).
+          #   MINOR: `preparar_directorio_misiones.sh` separa el mecanismo de nuevo -- `install -d
+          #   -m 0700` para CREAR (sin ventana), `chmod` + el mismo `setfacl` combinado de la
+          #   ronda 7 para el que YA EXISTE -- +2 tests que prueban el MECANISMO (qué programa se
+          #   invocó), no sólo el resultado final. `--sin-medir` exige `--motivo` (se registra).
+          #   HALLAZGO FUERA DE ALCANCE (se reporta, no se arregla de más): el propio comando de
+          #   ESTE paso ("Piso exacto de tests CORRIDOS") NO incluía
+          #   `tests/test_ejecutor_preparar_directorio_misiones.py` ni
+          #   `tests/test_ejecutor_huella_aceptar.py` en su lista real -- aunque sus comentarios
+          #   (rondas 4/6/7, arriba) SÍ los contaban como parte del "2618". Es decir, el piso
+          #   documentado nunca ejecutó esos dos archivos de verdad; sólo el paso informativo
+          #   `-v` (sin gate) los tenía. Se agregan ACÁ porque ronda 8 les sumó tests propios que
+          #   sí necesitan quedar bajo este gate -- pero el gap para las rondas 4/6/7 es previo a
+          #   esta ronda y no se investiga más a fondo aquí.
+          #   Medido dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del
+          #   worktree): 2633 (wrapped) + 12 sueltas (4 test_bwrap_real_* + 8 de setfacl real en
+          #   test_ejecutor_preparar_directorio_misiones.py -- 6 heredadas + 2 nuevas de esta
+          #   ronda, todas fallan bajo el bwrap EXTERNO de este verificador por el mismo límite de
+          #   namespaces/xattr anidados, NO el runner real de CI, y pasan sueltas confirmado) =
+          #   2645. Delta +27 = +4 (pausa) +11 (huella_aceptar, B-1 y B-2) +7 (contratos_huella,
+          #   M-2) +2 (preparar_directorio_misiones, MINOR) +3 (huella_registro_permisos, nuevo).
+          # 2645 -> 2663, 42 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 9,
+          #   auditoría adversarial, 2026-09-22 -- NO-GO de la auditoría 7: BLOCK-1/MAJOR-1
+          #   reproducido -- `quitar_pausa_si` usaba `os.rename` PRIMERO, con una ventana real
+          #   donde la pausa no existía; un kill justo ahí la perdía sin que nadie la hubiera
+          #   aceptado). Rediseñado sin ventana: `os.link` primero (la pausa NUNCA se saca de su
+          #   nombre), lectura de `tmp`, y sólo si coincide Y el inodo de `ruta` sigue siendo el
+          #   mismo que `tmp` (verificado con `os.stat`, `st_ino`+`st_dev`) se borra -- recién
+          #   ahí `unlink(ruta)` y después `unlink(tmp)`. MINOR-1: nada atrapa excepciones para
+          #   seguir de largo y borrar igual (mutante `except OSError` matado con
+          #   `PermissionError` forzado en el stat). Nuevo `pausa.barrer_temporales_huerfanos`,
+          #   llamado al arrancar `aceptar()` y el vigía (`_principal` en vigia_servicio.py) --
+          #   limpia sólo temporales, nunca la pausa. +8 tests netos en
+          #   test_ejecutor_contratos_pausa.py (9 nuevos, 1 invertido de la ronda 8 que daba por
+          #   buena la pérdida) y +1 en test_ejecutor_huella_aceptar.py (el barrido se llama de
+          #   verdad).
+          #   MAJOR-2: esa misma noche se le quitó a `axioma` el sudo en hall9000 (`sudo -l -U
+          #   axioma` → no permitido; las remotas lo conservan). `_resolver_identidad_invocante`
+          #   ahora devuelve `(uid, nombre, declarada_por)` -- `"sudo"` o `"proceso"` -- y ese
+          #   dato se registra TAL CUAL en el evento de C3 (`identidad_declarada_por`): `SUDO_UID`
+          #   es un dato DECLARADO por el entorno, nunca "identidad verificada". El rechazo por
+          #   uid de axioma en `principal()` se queda como freno del error accidental, pero su
+          #   docstring ya no afirma que impide suplantar a nadie -- el control real son los
+          #   permisos del registro/`JAX_EJECUTOR_MISIONES` (ambos `jaxsvc`) más quién tiene sudo
+          #   real hacia `jaxsvc`. `docs/ejecutor-huella-aceptar.md` y el comentario de
+          #   `vigia_servicio.py` sobre hall9000 corregidos con el HECHO NUEVO (texto, sin tests).
+          #   REBASE: la rama iba 7 commits detrás de `origin/master` (Task 1-bis,
+          #   `feat/descartar-pipelines`, ajeno a esta rama) -- rebasada limpia salvo UN
+          #   conflicto en el historial de comentarios de ESTE MISMO bloque (dos "NOTA DE
+          #   REBASE" ahora anidadas, ver arriba), resuelto conservando ambas historias. El
+          #   número de acá abajo absorbe TANTO los tests nuevos de ronda 9 COMO los que
+          #   `feat/descartar-pipelines` sumó a archivos que esta lista ya corría
+          #   (`test_store_columna_descarte_acotada.py`/`test_base_por_sesion.py`/
+          #   `test_jacobs_descarte.py`) -- medido de nuevo sobre el árbol YA rebaseado, no
+          #   sumado a mano (mismo criterio que toda esta lista viene aplicando desde la ronda 2).
+          #   Medido dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del
+          #   worktree): 2651 (wrapped) + 12 sueltas (4 `test_bwrap_real_*` + 8 de setfacl real en
+          #   test_ejecutor_preparar_directorio_misiones.py, mismas que ronda 8, confirmadas
+          #   pasando sueltas de nuevo) = 2663.
+          # 2663 -> 2674, 42 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 10 --
+          #   ÚLTIMA de esta rama --, auditoría adversarial, 2026-09-22 -- GO CONDICIONADO de la
+          #   auditoría 8, ya sin BLOCK). MAJOR (concurrencia): `quitar_pausa_si` (ronda 9) cierra
+          #   la ventana DENTRO de un proceso, pero no entre DOS -- reproducido: B pasa su propio
+          #   chequeo de inodo, A (otro proceso) borra la pausa, C5 pausa de nuevo, y B -- que ya
+          #   había pasado SU chequeo antes de que A borrara -- termina haciendo `unlink` sobre lo
+          #   que hay AHORA (la pausa nueva de C5), no sobre lo que vio. Nuevo `pausa.candado`:
+          #   `flock` exclusivo y bloqueante sobre `.{nombre}.candado`, en el mismo directorio.
+          #   Envuelve TODO el cuerpo de `aceptar()` desde el chequeo de estado hasta el final
+          #   (extraído a una función interna `_cuerpo()`) y TODO `barrer_temporales_huerfanos`
+          #   (candado propio, adentro de la función) -- el MISMO candado para los dos, así nunca
+          #   hay dos `quitar_pausa_si` a la vez ni un barrido cruzándose con uno en curso.
+          #   `poner_pausa` NO se tocó -- C5 y la huella siguen pausando sin candado (ya era no
+          #   destructivo por diseño, `os.link`). Test con DOS PROCESOS REALES
+          #   (`multiprocessing`, contexto `fork`) que reproduce el escenario exacto -- B se queda
+          #   esperando justo antes de su `unlink` (un `os.unlink` interceptado dentro del propio
+          #   proceso hijo), A queda BLOQUEADO tratando de adquirir el candado mientras B lo
+          #   sostiene (confirmado: `a.is_alive()` sigue vivo tras 1s), C5 no puede pausar todavía
+          #   (`poner_pausa` da `False`, la original sigue ahí), se libera a B, A recién ENTONCES
+          #   avanza y no encuentra nada que borrar, y sólo con los dos terminados C5 pausa de
+          #   verdad y sobrevive intacta. Verificado FALLANDO contra el código sin el candado
+          #   (revertido a mano, corrido, restaurado): sin él, A corre de inmediato -- ni bloquea
+          #   ni espera -- y se queda con la pausa ORIGINAL antes de que B llegue a actuar,
+          #   exactamente el síntoma que el candado cierra.
+          #   MINOR: un `FileNotFoundError` en el `unlink(ruta)` de `quitar_pausa_si` (alguien más
+          #   ajeno ya la sacó justo en el medio) ya no escapa como traceback -- se atrapa,
+          #   devuelve `(False, datos)`. Orden revisado y documentado en `aceptar()`: la marca y
+          #   el registro se escriben ANTES de tocar la pausa a propósito -- aceptar la huella es
+          #   el acto autoritativo, ya válido y persistido; la pausa es un efecto colateral de
+          #   conveniencia, y si ESE paso revienta (con lo que sea, no sólo `FileNotFoundError`),
+          #   se atrapa con `except Exception`, se reporta `codigo=pausa_no_verificable`, y
+          #   `aceptar` sigue hasta el final igual -- nunca deja la marca escrita con un traceback
+          #   crudo encima. `aceptar` ya NUNCA queda mudo sobre el estado de la pausa: los tres
+          #   casos (`pausa_propia_borrada`, `pausa_de_otro_origen`, `sin_pausa_que_quitar`) se
+          #   dicen siempre, antes de `huella_aceptada=true`. El barrido ahora usa `os.lstat` +
+          #   `stat.S_ISREG` -- ignora lo que no sea un archivo regular (un directorio con el
+          #   nombre de un temporal ya no revienta con `IsADirectoryError`) -- y `glob.escape()`
+          #   sobre el nombre de la pausa, para que un nombre con `[`/`]`/`*`/`?` no haga
+          #   matchear el patrón de más ni de menos.
+          #   +11 tests netos: +7 en test_ejecutor_contratos_pausa.py (3 MINOR + 4 candado) y +4
+          #   en test_ejecutor_huella_aceptar.py (3 MINOR + el test de la carrera real).
+          #
+          # CORRECCIÓN DE MÉTODO (PR #260, jax#260 en rojo -- 2 de los 4 checks fallando eran
+          # "tests-puros"; leído el log real con `gh run view --log-failed`, no supuesto): el
+          # `bwrap --tmpfs ...` que envolvía la corrida completa (método usado desde la ronda 3
+          # para simular "el runner no tiene claude-skills/el corpus de U3") tenía un efecto
+          # colateral que NADIE había verificado contra un runner real hasta que se abrió este
+          # PR -- namespaces de usuario ANIDADOS (bwrap-dentro-de-bwrap) rompen `setfacl` real y
+          # el propio `bwrap` interno, así que 12 tests que en realidad PASAN en CI (confirmado
+          # abajo) se venían tratando como "sueltas" por una limitación de la HERRAMIENTA DE
+          # MEDICIÓN, no del runner. El CI real reveló ADEMÁS dos causas de rojo genuinas, sin
+          # relación con el envoltorio: `exch` (util-linux) no existe en Ubuntu 24.04 (el runner
+          # real, confirmado en el log: `Image: ubuntu-24.04`; `exch` se agregó a util-linux
+          # recién el 2023-12-06, entra en la versión 2.40, y noble trae 2.39.3 -- verificado
+          # bajando el `.deb` real de `util-linux-extra` del archivo de Ubuntu, sin `exch`
+          # adentro) y `/etc/claude-code` no existe en un runner nuevo (`bwrap: Can't mkdir
+          # /etc/claude-code: Permission denied` -- en hall9000 existe porque
+          # `ops/ejecutor/instalar_contratos.sh` ya lo creó ahí; un runner de GH nunca corrió esa
+          # instalación). Los dos arreglados en el paso de arriba (el shim de `exch` vía ctypes +
+          # `sudo install -d ... /etc/claude-code`, el MISMO comando que usa la instalación real,
+          # no uno inventado para CI) -- verificados de a uno: el shim probado contra un
+          # intercambio real de contenido (no sólo "está en el PATH"), y el mkdir reproducido y
+          # corregido con un directorio de prueba antes de tocar el real.
+          #
+          # Medido con el MÉTODO DEL JOB, no el de antes: sin envolver nada en un `bwrap`
+          # externo -- `sudo unshare --mount` (namespace de MONTAJE, no de usuario -- no hay
+          # anidado de user namespaces, así que `setfacl`/`bwrap` internos corren normal) para
+          # tapar `~/claude-skills`, `~/ejecutor-fase0` Y `~/jax-platform` (los tres ausentes en
+          # un runner nuevo) con montajes bind vacíos, más las variables de DB DESHECHAS (este
+          # job no tiene `services: mariadb`). Verificado línea por línea contra el log real de
+          # CI (`gh run view --log-failed`, dos corridas del mismo push): incluso los NOMBRES de
+          # los 45 tests salteados coinciden exactamente, uno por uno, entre este método local y
+          # el runner real -- 16 de test_ejecutor_reproduccion_u3.py (sin el corpus de U3,
+          # estructural) + 26 que exigen la constitución REAL (25 de
+          # test_ejecutor_generar_claude_md.py + 1 de test_ejecutor_contratos_contexto.py) + 2 de
+          # test_base_por_sesion.py (sin `JAX_DB_HOST`, cubiertos aparte en
+          # jacobs-gobernanza-db) + 1 de test_cola_uso_escritores.py (sin checkout de
+          # jax-platform, lo cubre el job `mirror-sync`). Resultado, dos corridas: 2671 passed,
+          # 45 skipped, 1 xfailed -- EXACTO, sin ajustar a mano.
+          grep -qE "^2671 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2671 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

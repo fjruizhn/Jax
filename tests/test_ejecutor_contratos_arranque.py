@@ -2,6 +2,7 @@
 """El arranque del Ejecutor se niega si un contrato no está vivo. Pruebas falsas,
 archivos reales en tmp_path."""
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -11,14 +12,24 @@ from pathlib import Path
 import pytest
 
 from jax.ejecutor.contratos import arranque as AR
-from jax.ejecutor.contratos import instalacion
+from jax.ejecutor.contratos import contexto, instalacion
 from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.destinos import Host
 from jax.ejecutor.contratos.fallo import Fallo
 
+# B3/M1 (auditoría adversarial 2026-09-22): las pruebas de instalación de acá abajo
+# usaban la constitución REAL de esta máquina (host-bound, Fase 0) y se saltaban en
+# cualquier runner sin /home/fruiz/claude-skills -- CI, siempre. Ninguna necesita el
+# CONTENIDO real: comparan "lo instalado" contra "lo que `contexto.claude_md()`
+# produce ahora", y para eso alcanza un DOBLE (`_DOBLE_CONSTITUCION`, más abajo,
+# inyectado vía `contexto.constitucion_fuente()` -- el seam). Ya no hace falta
+# saltarlas; si algún día una prueba necesita la constitución REAL en particular
+# (no es el caso de ninguna de éstas), puede volver a definir este marcador.
+
 
 def _ctx(tmp_path, **cambios):
-    base = dict(cuenta=Cuenta("axioma", 58291, Path("/k"), Path("/n"), tmp_path / "lib", tmp_path / "politica.json"),
+    base = dict(cuenta=Cuenta("axioma", 58291, Path("/k"), Path("/n"), tmp_path / "lib", tmp_path / "politica.json",
+                              Path("/home/axioma")),
                 repo=Path(__file__).resolve().parents[1], puerto_canario=18436, registro=tmp_path / "registro.jsonl",
                 puerto_proxy=18435, sondas=(7777,), estado_freno=tmp_path / "estado.json",
                 llaves_root=Path("/etc/ssh/authorized_keys.d/axioma"), tope_gancho_s=10,
@@ -99,6 +110,7 @@ def test_corre_todas_en_orden_aunque_falle_la_primera(tmp_path):
 def _entorno(tmp_path):
     return {"JAX_EJECUTOR_CUENTA": "axioma", "JAX_EJECUTOR_SSH_PUERTO": "58291",
             "JAX_EJECUTOR_CONTROLADOR_LLAVE": "/k", "JAX_EJECUTOR_NODE_BIN": "/n", "JAX_EJECUTOR_LIB": "/opt/lib",
+            "JAX_EJECUTOR_CUENTA_HOME": "/home/axioma",
             "JAX_EJECUTOR_POLITICA": "/etc/p.json", "JAX_EJECUTOR_CANARIO_PUERTO": "18436",
             "JAX_EJECUTOR_REGISTRO": "/var/log/r.jsonl", "JAX_PROXY_CARRIL_PUERTO": "18435",
             "JAX_EJECUTOR_CERCO_SONDAS": "7777,11434", "JAX_EJECUTOR_FRENO_ESTADO": "/run/e.json",
@@ -207,6 +219,38 @@ def test_leer_c6(salida, exige_freno, codigos):
     assert AR.leer_c6(salida, exige_freno=exige_freno) == codigos
 
 
+# --- ronda 4, M-2: sha256 de ejecutor-freno-remoto/ejecutor-revocar contra el repo --------
+
+_SHA_FRENO_REMOTO = "ecf7b3fd58d7755df4ff40b5702813a1f3ff1bd9261028e169949dd73670450b"
+_SHA_REVOCADOR = "a5af7d9d8c45169ca4eaca6b94298935272fadaa38ddea43434820e70c32e82c"
+_C6_OK = (f"llaves=root 644\nfreno=1\nrevocador=root 755\n"
+         f"freno_remoto_sha={_SHA_FRENO_REMOTO}\nrevocador_sha={_SHA_REVOCADOR}\n").encode()
+
+
+def test_leer_c6_ok_cuando_las_sha_coinciden_con_el_repo():
+    assert AR.leer_c6(_C6_OK, exige_freno=True, sha_freno_remoto=_SHA_FRENO_REMOTO,
+                      sha_revocador=_SHA_REVOCADOR) == ()
+
+
+def test_leer_c6_marca_el_freno_remoto_distinto_del_repo():
+    salida = _C6_OK.replace(_SHA_FRENO_REMOTO.encode(), b"0" * 64, 1)
+    codigos = AR.leer_c6(salida, exige_freno=True, sha_freno_remoto=_SHA_FRENO_REMOTO, sha_revocador=_SHA_REVOCADOR)
+    assert "freno_remoto_distinto_del_repo" in codigos
+
+
+def test_leer_c6_marca_el_revocador_distinto_del_repo():
+    salida = _C6_OK.replace(_SHA_REVOCADOR.encode(), b"1" * 64)
+    codigos = AR.leer_c6(salida, exige_freno=True, sha_freno_remoto=_SHA_FRENO_REMOTO, sha_revocador=_SHA_REVOCADOR)
+    assert "revocador_distinto_del_repo" in codigos
+
+
+def test_leer_c6_no_exige_el_freno_remoto_en_la_local():
+    # exige_freno=False (local): el binario ejecutor-freno-remoto puede ni estar instalado.
+    salida = b"llaves=root 644\nfreno=0\nrevocador=root 755\nrevocador_sha=" + _SHA_REVOCADOR.encode() + b"\n"
+    assert AR.leer_c6(salida, exige_freno=False, sha_freno_remoto=_SHA_FRENO_REMOTO,
+                      sha_revocador=_SHA_REVOCADOR) == ()
+
+
 def test_c6_estatico_por_maquina_local_y_remota(tmp_path):
     hosts = (Host("hall9000", "127.0.0.1", 58291, "hypervisor", True),
              Host("bridge", "192.0.2.20", 58291, "clientes", False),
@@ -222,10 +266,31 @@ def test_c6_estatico_por_maquina_local_y_remota(tmp_path):
         return 0, b"llaves=root 644\nfreno=0\nrevocador=root 755\n", b""
 
     fallos = asyncio.run(AR.verificar_c6_estatico(_ctx(tmp_path), hosts, correr=correr))
-    assert fallos == (Fallo("c6", "maquina_inalcanzable", (("host", "bridge"),)),
-                      Fallo("c6", "sin_llave_del_freno", (("host", "atemai"),)))
+    # Ninguna de las dos salidas trae `*_sha`: las tres máquinas quedan con
+    # "revocador_distinto_del_repo" (dueño/modo sí cuadran, el contenido no se pudo
+    # comparar contra algo igual). hall9000 no exige el freno remoto, así que no suma
+    # "freno_remoto_distinto_del_repo".
+    assert fallos == (Fallo("c6", "revocador_distinto_del_repo", (("host", "hall9000"),)),
+                      Fallo("c6", "maquina_inalcanzable", (("host", "bridge"),)),
+                      Fallo("c6", "sin_llave_del_freno", (("host", "atemai"),)),
+                      Fallo("c6", "freno_remoto_distinto_del_repo", (("host", "atemai"),)),
+                      Fallo("c6", "revocador_distinto_del_repo", (("host", "atemai"),)))
     assert vistos[0] == AR.remoto_c6("/etc/ssh/authorized_keys.d/axioma")
     assert vistos[1].startswith("ssh -o BatchMode=yes") and "axioma@192.0.2.20" in vistos[1]
+
+
+def test_c6_estatico_ok_cuando_las_sha_remotas_coinciden_con_el_repo(tmp_path):
+    ctx = _ctx(tmp_path)
+    sha_freno = hashlib.sha256((ctx.repo / "ops/ejecutor/ejecutor-freno-remoto").read_bytes()).hexdigest()
+    sha_revocar = hashlib.sha256((ctx.repo / "ops/ejecutor/ejecutor-revocar").read_bytes()).hexdigest()
+    hosts = (Host("atemai", "192.0.2.11", 58291, "desarrollo", False),)
+
+    async def correr(c, remoto, *, entrada=b"", tope_s):
+        return 0, (f"llaves=root 644\nfreno=1\nrevocador=root 755\n"
+                   f"freno_remoto_sha={sha_freno}\nrevocador_sha={sha_revocar}\n").encode(), b""
+
+    fallos = asyncio.run(AR.verificar_c6_estatico(ctx, hosts, correr=correr))
+    assert fallos == ()
 
 
 # --- instalación ---------------------------------------------------------------
@@ -244,15 +309,17 @@ def _instalar_copia(ctx):
     (ctx.cuenta.lib / "ejecutor-freno.service").write_text(instalacion.renderizar_unidad_freno(lib))
 
 
-def test_instalacion_identica_al_repo(tmp_path):
+def test_instalacion_identica_al_repo(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     assert AR.verificar_instalacion(ctx) == ()
 
 
-def test_instalacion_con_un_byte_distinto(tmp_path):
+def test_instalacion_con_un_byte_distinto(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     with open(ctx.cuenta.lib / "jax/ejecutor/contratos/politica.py", "a") as f:
         f.write("\n")
     (ctx.cuenta.lib / "gancho.sh").unlink()
@@ -262,9 +329,10 @@ def test_instalacion_con_un_byte_distinto(tmp_path):
     )
 
 
-def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path):
+def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path, monkeypatch):
     ctx = _ctx(tmp_path)
     _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
     ctx.unidad_freno.write_text(ctx.unidad_freno.read_text().replace("Restart=always", "Restart=no"))
     assert AR.verificar_instalacion(ctx) == (
         Fallo("arranque", "instalado_distinto_del_repo", (("archivo", "ejecutor-freno.service"),)),)
@@ -272,6 +340,153 @@ def test_instalacion_con_la_unidad_del_freno_cambiada(tmp_path):
 
 def test_pruebas_reales_cubren_el_orden(tmp_path):
     assert set(AR.pruebas_reales(_ctx(tmp_path))) == set(AR._ORDEN)
+
+
+# --- instalación: CLAUDE.md y skills (2026-09-22) -----------------------------
+
+def _fuente_skills_de_prueba(base: Path) -> Path:
+    fuente = base / "skills-fuente"
+    for nombre in contexto.skills_declaradas():
+        (fuente / nombre).mkdir(parents=True)
+        (fuente / nombre / "SKILL.md").write_text(f"skill de prueba: {nombre}")
+    return fuente
+
+
+# B3/M1 (auditoría adversarial 2026-09-22): un DOBLE hermético de la constitución, no
+# la real de esta máquina -- estas pruebas comparan "lo instalado" contra "lo que
+# `contexto.claude_md()` produce AHORA MISMO", y esa comparación es la misma sea cual
+# sea el contenido de la fuente. Con esto, las 11 pruebas de instalación de acá abajo
+# corren en CUALQUIER runner (antes se saltaban en CI, que no tiene
+# /home/fruiz/claude-skills).
+_DOBLE_CONSTITUCION = ("## LAS POLÍTICAS DE MARINA\n\nx\n\n## LA REGLA ABSOLUTA\n\nx\n\n"
+                      "## LOS NUEVE PRINCIPIOS OPERATIVOS\n\nx\n\n"
+                      "## JERARQUÍA DE AUTORIDAD\n\nx\n\n## HONOR\n\nx\n")
+
+
+def _instalar_contexto(ctx, monkeypatch, *, fuente_skills=None):
+    """Instala CLAUDE.md + skills + MANIFIESTO en ctx.cuenta.lib (M-2, ronda 6: el
+    manifiesto es lo que `verificar_contexto` compara, no una regeneración en vivo),
+    además de lo que ya deja `_instalar_copia`. Siempre contra un DOBLE de la
+    constitución (ver arriba): `contexto.constitucion_fuente()` (el seam) apunta a un
+    archivo hermético escrito en `ctx.cuenta.lib.parent`, no a la ruta real de esta
+    máquina. `fuente_skills=None` usa la fuente real de skills declarada en
+    cerebros.toml; pasarla apunta `contexto.skills_fuente()` a una fuente de prueba
+    hermética también."""
+    doble = ctx.cuenta.lib.parent / "constitucion-doble" / "CLAUDE.md.core"
+    doble.parent.mkdir(parents=True, exist_ok=True)
+    doble.write_text(_DOBLE_CONSTITUCION)
+    monkeypatch.setattr(contexto, "constitucion_fuente", lambda: doble)
+    if fuente_skills is not None:
+        monkeypatch.setattr(contexto, "skills_fuente", lambda: fuente_skills)
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).parent.mkdir(parents=True, exist_ok=True)
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(contexto.claude_md())
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_SHA256_REL).write_text(contexto.sha256_claude_md())
+    for rel, datos in contexto.archivos_de_skills().items():
+        destino = ctx.cuenta.lib / contexto.SKILLS_REL / rel
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        destino.write_bytes(datos)
+    (ctx.cuenta.lib / contexto.MANIFIESTO_REL).write_text(json.dumps(contexto.manifiesto()), encoding="utf-8")
+
+
+def test_instalacion_con_contexto_al_dia_no_falla(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    assert AR.verificar_instalacion(ctx) == ()
+
+
+def test_claude_md_manipulado_no_arranca(tmp_path, monkeypatch):
+    """M-2 (ronda 6): el CONTENIDO instalado ya no coincide con el sha256 que el
+    MANIFIESTO registró al instalar -- alguien (o algo) lo tocó después."""
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).write_bytes(b"# version vieja, escrita a mano\n")
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_manipulado"),)
+
+
+def test_claude_md_ausente_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.CLAUDE_MD_REL).unlink()
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "contexto_manipulado"),)
+
+
+def test_manifiesto_ausente_no_arranca(tmp_path, monkeypatch):
+    """M-2 (ronda 6): sin manifiesto no hay contra qué comparar -- falla cerrado, no
+    se cae a regenerar desde la fuente."""
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.MANIFIESTO_REL).unlink()
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "manifiesto_ilegible"),)
+
+
+def test_manifiesto_ilegible_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    (ctx.cuenta.lib / contexto.MANIFIESTO_REL).write_text("{esto no es json valido")
+    assert AR.verificar_instalacion(ctx) == (Fallo("arranque", "manifiesto_ilegible"),)
+
+
+def test_el_nucleo_cambiado_despues_de_instalar_no_rompe_el_arranque(tmp_path, monkeypatch):
+    """M-2 (ronda 6): el arranque NO regenera desde la constitución en vivo -- si la
+    fuente (`/home/fruiz/claude-skills`, acá un doble) cambia DESPUÉS de instalar, una
+    instalación íntegra sigue arrancando: la pregunta de "¿sigue siendo lo que el
+    núcleo produciría hoy?" es de `--comprobar-frescura`, no del arranque."""
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=_fuente_skills_de_prueba(tmp_path))
+    doble = ctx.cuenta.lib.parent / "constitucion-doble" / "CLAUDE.md.core"
+    doble.write_text(_DOBLE_CONSTITUCION.replace("x\n\n## HONOR", "OTRO CONTENIDO\n\n## HONOR"))
+    assert AR.verificar_instalacion(ctx) == ()
+
+
+def test_skill_instalada_manipulada_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "endureciendo" / "SKILL.md").write_text("vieja, a mano")
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_manipulada", (("archivo", "endureciendo/SKILL.md"),)),)
+
+
+def test_skill_declarada_en_el_manifiesto_pero_ausente_del_disco_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "endureciendo" / "SKILL.md").unlink()
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_manipulada", (("archivo", "endureciendo/SKILL.md"),)),)
+
+
+def test_un_archivo_de_mas_en_skills_no_arranca(tmp_path, monkeypatch):
+    """M4 (auditoría adversarial 2026-09-22): el arranque compara el CONJUNTO completo
+    de archivos instalados contra lo declarado -- una skill vieja que el instalador
+    dejó atrás (o cualquier archivo agregado a mano) también falla cerrado, aunque
+    todos los archivos DECLARADOS estén al día."""
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "migrando-sin-romper" / "vieja.md").write_text("sobra")
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_extra_instalada", (("archivo", "migrando-sin-romper/vieja.md"),)),)
+
+
+def test_una_skill_entera_de_mas_no_arranca(tmp_path, monkeypatch):
+    ctx = _ctx(tmp_path)
+    _instalar_copia(ctx)
+    fuente = _fuente_skills_de_prueba(tmp_path)
+    _instalar_contexto(ctx, monkeypatch, fuente_skills=fuente)
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "retirada-hace-meses").mkdir()
+    (ctx.cuenta.lib / contexto.SKILLS_REL / "retirada-hace-meses" / "SKILL.md").write_text("vieja")
+    assert AR.verificar_instalacion(ctx) == (
+        Fallo("arranque", "skill_extra_instalada", (("archivo", "retirada-hace-meses/SKILL.md"),)),)
 
 
 # --- alcance: los contratos por máquina, acotados a la misión ---------------------
@@ -327,9 +542,10 @@ def _correr_solo_vm_y_local(vistos):
             return 0, "".join(f"alcance={ip}:{pt} cerrada\n" for ip, pt in ips).encode(), b""
         if "192.0.2.11" in remoto or "192.0.2.20" in remoto:
             return 255, b"", b"Connection refused"
+        salida_sha = f"freno_remoto_sha={_SHA_FRENO_REMOTO}\nrevocador_sha={_SHA_REVOCADOR}\n".encode()
         if remoto.startswith("ssh "):
-            return 0, b"llaves=root 644\nfreno=1\nrevocador=root 755\n", b""
-        return 0, b"llaves=root 644\nfreno=0\nrevocador=root 755\n", b""
+            return 0, b"llaves=root 644\nfreno=1\nrevocador=root 755\n" + salida_sha, b""
+        return 0, b"llaves=root 644\nfreno=0\nrevocador=root 755\n" + salida_sha, b""
     return correr
 
 
