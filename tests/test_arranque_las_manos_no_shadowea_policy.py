@@ -41,10 +41,34 @@ bug — y se invoca EXACTAMENTE como la invoca `_jacobs_init()`: primera
 llamada, sin argumentos. Se le da un `JAX_DB_PORT` que rechaza la conexión
 al toque (127.0.0.1:1 — ningún servicio escucha ahí nunca) para no depender
 de ninguna MariaDB real: si el import revienta, jamás llega a conectarse; si
-el import está arreglado, revienta MÁS ADELANTE, con un error de conexión
-(`OSError`/`pymysql.err.OperationalError`), nunca con el
-`ModuleNotFoundError` envuelto en "B7 trusted composition dependencies
-unavailable".
+el import está arreglado, revienta MÁS ADELANTE, con un error DISTINTO
+(`FileNotFoundError` de `implementation-identity.json` o `OperationalError`
+de pymysql conectando al puerto 1) — nunca con el `ModuleNotFoundError`
+envuelto en "B7 trusted composition dependencies unavailable".
+
+**MAJOR-1 (ronda 1 de revisión de PR#262, encontrado por el reviewer,
+verificado acá independientemente).** La primera versión de este archivo
+afirmaba en NEGATIVO ("no contiene ModuleNotFoundError", "no es RESULTADO:OK").
+Quitar `JAX_DEPLOYMENT_ID` del entorno alcanza para que el guard de
+`_configure_b7_trusted_runtime` (`server.py:203-204`) corte ANTES de llegar
+al `try/except` de imports — ni siquiera INTENTA importar
+`policy.enforcement_evidence` — y el resultado
+(`RuntimeError: B7 trusted composition requires deployment and MariaDB
+configuration`) pasaba las dos aserciones en negativo IGUAL contra el
+código viejo (con `las_manos/policy.py` todavía presente): el test daba
+verde con el defecto adentro. Reescrito como ALLOWLIST
+(`_firma_conocida_tras_el_fix`): el resultado tiene que ser una de las DOS
+firmas conocidas de "ya pasé la colisión", o el test falla con el mensaje
+real. `test_allowlist_rechaza_el_guard_cortando_antes_de_los_imports` deja
+esa mutación (quitar `JAX_DEPLOYMENT_ID`) como regresión permanente.
+
+**Sobre el despliegue (no es un test — nada de código lo puede verificar
+desde acá).** El fix depende de que el archivo viejo quede BORRADO del
+checkout de producción, no solo de que el nuevo exista: un `rsync` sin
+`--delete` (o un `cp -r` sobre el árbol existente) deja `policy.py` Y
+`motor_de_politica.py` conviviendo, con la colisión intacta y el merge en
+verde. Quien despliegue tiene que confirmar, DESPUÉS de desplegar:
+`ls /srv/jax-prod/jax/las_manos/policy.py` → `No such file or directory`.
 
 En memoria de Jairo Urbina.
 """
@@ -78,13 +102,17 @@ print("RESULTADO:OK::llego-hasta-el-final-sin-excepcion")
 """
 
 
-def _correr_arranque_real(tmp_path: Path) -> str:
+def _correr_arranque_real(tmp_path: Path, *, omitir: frozenset[str] = frozenset()) -> str:
     """Arranca `server` en un proceso nuevo, con el mismo `cwd`/`PYTHONPATH`
     que usa uvicorn en producción, y devuelve la línea `RESULTADO:...`.
 
     Entorno construido DESDE CERO (nunca `os.environ` heredado): ni lee ni
     depende de `/etc/jax/.env` -- todas las credenciales son de esta corrida,
     generadas con `secrets`, y el `JAX_DB_PORT` nunca alcanza una base real.
+
+    `omitir`: nombres de variable a NO incluir -- lo usa el test de
+    mutación para simular el guard cortando antes de los imports (quitar
+    `JAX_DEPLOYMENT_ID`), sin duplicar la construcción del entorno.
     """
     credencial_plataforma = secrets.token_urlsafe(32)
     credencial_jacobs = secrets.token_urlsafe(32)
@@ -110,6 +138,8 @@ def _correr_arranque_real(tmp_path: Path) -> str:
         # tocar ninguna MariaDB real (ni la de test ni la de producción).
         "JAX_DB_PORT": "1",
     }
+    for clave in omitir:
+        entorno.pop(clave, None)
     proceso = subprocess.run(
         [sys.executable, "-"],
         input=_SCRIPT_HIJO,
@@ -129,6 +159,35 @@ def _correr_arranque_real(tmp_path: Path) -> str:
     return lineas_resultado[-1]
 
 
+#: ALLOWLIST, no denylist (MAJOR-1, ronda 1 de revisión de PR#262 -- ver la
+#: nota en el docstring del módulo). Las dos únicas formas en que ESTE
+#: sandbox (sin `/etc/jax/build/implementation-identity.json`, sin ninguna
+#: MariaDB escuchando en el puerto 1) puede fallar DESPUÉS de haber pasado
+#: el bloque `try/except` de imports de `_configure_b7_trusted_runtime`
+#: (server.py:205-218) -- es decir, después de haber importado
+#: `policy.enforcement_evidence.*`/`policy.execution_control.*` con éxito.
+#: Un resultado que NO matchea ninguna de las dos no prueba que el fix
+#: funcione: hay que mirar cuál es antes de asumir nada.
+def _firma_conocida_tras_el_fix(resultado: str) -> str | None:
+    """Descripción corta de qué firma conocida matcheó `resultado`, o
+    `None` si no es ninguna de las dos -- incluye el caso del guard
+    cortando antes (falta `JAX_DEPLOYMENT_ID`) y el de una dependencia
+    faltante en el intérprete (falta `fastapi`, por ejemplo: en hall9000
+    con el `python3` del sistema en vez del venv del repo, MINOR-1 de la
+    misma ronda)."""
+    if (
+        resultado.startswith("RESULTADO:FileNotFoundError:")
+        and "implementation-identity.json" in resultado
+    ):
+        return (
+            "FileNotFoundError sobre implementation-identity.json "
+            "(TrustedImplementationIdentityProvider -- ya pasó los imports)"
+        )
+    if "OperationalError" in resultado:
+        return "OperationalError de pymysql conectando al puerto 1 (ya pasó los imports)"
+    return None
+
+
 def test_arranque_real_no_colisiona_con_policy_de_la_raiz(tmp_path: Path) -> None:
     """Reproduce el arranque real (cwd=las_manos/, PYTHONPATH=raíz) y exige
     que la colisión de nombres esté resuelta: `_configure_b7_trusted_runtime`
@@ -137,49 +196,57 @@ def test_arranque_real_no_colisiona_con_policy_de_la_raiz(tmp_path: Path) -> Non
 
     Contra 88f9a02 esto da
     `RESULTADO:RuntimeError:ModuleNotFoundError:B7 trusted composition
-    dependencies unavailable` (medido a mano antes de este commit). Con el
-    fix, el import ya no revienta -- lo que revienta después es la conexión
-    a MariaDB (puerto 1, nadie escucha ahí), que es un fallo DISTINTO y
-    esperado en este test, no el que se está cazando acá."""
+    dependencies unavailable` (medido a mano antes de este commit) -- NO
+    matchea `_firma_conocida_tras_el_fix`. Con el fix, el import ya no
+    revienta y el resultado sí matchea una de las dos firmas conocidas."""
     resultado = _correr_arranque_real(tmp_path)
+    firma = _firma_conocida_tras_el_fix(resultado)
 
-    assert "ModuleNotFoundError" not in resultado, (
-        f"el arranque real todavía colisiona con las_manos/policy.py (la "
-        f"colisión de #260/e09c3b3): {resultado}"
+    assert firma is not None, (
+        f"el arranque real NO dio ninguna de las firmas conocidas de 'ya "
+        f"pasé la colisión' -- esto no prueba que el fix funcione, prueba "
+        f"que pasó OTRA cosa y hay que mirar cuál antes de asumir nada. "
+        f"Si el resultado es un ModuleNotFoundError sobre "
+        f"'policy.enforcement_evidence' (o 'policy' a secas), es la "
+        f"colisión de #260/e09c3b3 sin arreglar. Si es un RuntimeError con "
+        f"'B7 trusted composition requires deployment and MariaDB "
+        f"configuration', el guard cortó ANTES de los imports (revisar el "
+        f"entorno del test, no el fix -- ver "
+        f"test_allowlist_rechaza_el_guard_cortando_antes_de_los_imports). "
+        f"Si es un ModuleNotFoundError sobre otra cosa (fastapi, pymysql, "
+        f"...), a ESTE intérprete le falta una dependencia -- correr con "
+        f"el venv del repo, no con un python3 del sistema. "
+        f"resultado real: {resultado!r}"
     )
-    assert "B7 trusted composition dependencies unavailable" not in resultado, (
-        f"_configure_b7_trusted_runtime volvió a envolver un fallo de import "
-        f"como 'dependencies unavailable': {resultado}"
+
+
+def test_allowlist_rechaza_el_guard_cortando_antes_de_los_imports(tmp_path: Path) -> None:
+    """Mutación permanente (MAJOR-1, ronda 1 de revisión de PR#262): el
+    reviewer encontró que quitar `JAX_DEPLOYMENT_ID` del entorno alcanzaba
+    para que las dos aserciones EN NEGATIVO de la versión anterior de este
+    archivo ("no contiene ModuleNotFoundError", "no es RESULTADO:OK")
+    dieran verde -- el guard de `_configure_b7_trusted_runtime`
+    (`server.py:203-204`) corta ANTES de llegar al `try/except` de imports,
+    así que ni siquiera INTENTA importar `policy.enforcement_evidence`. Un
+    denylist no distingue "no colisionó" de "nunca llegó a intentarlo".
+
+    Este test deja esa mutación corriendo de verdad, para siempre: si
+    `_firma_conocida_tras_el_fix` alguna vez se afloja de vuelta a un
+    denylist, este test lo agarra."""
+    resultado = _correr_arranque_real(tmp_path, omitir=frozenset({"JAX_DEPLOYMENT_ID"}))
+
+    assert (
+        "B7 trusted composition requires deployment and MariaDB configuration"
+        in resultado
+    ), (
+        f"se esperaba que quitar JAX_DEPLOYMENT_ID disparara el guard de "
+        f"_configure_b7_trusted_runtime (server.py:203-204) -- si el "
+        f"mensaje cambió, actualizar este test, no borrarlo: {resultado}"
     )
-
-
-def test_arranque_real_sin_fix_falla_mas_adelante_no_por_import(tmp_path: Path) -> None:
-    """Control: con el fix aplicado, `_configure_b7_trusted_runtime` sí llega
-    a ejecutar código DESPUÉS del bloque `try/except` que envuelve los
-    imports (líneas 205-218 de `server.py`) -- prueba que el test de arriba
-    no está verde porque el guard de arriba
-    (`JAX_DEPLOYMENT_ID`/`JAX_DB_HOST`/`JAX_DB_PORT`) cortó ANTES de llegar a
-    los imports.
-
-    Medido en este sandbox: `FileNotFoundError` sobre
-    `/etc/jax/build/implementation-identity.json` (construyendo
-    `TrustedImplementationIdentityProvider`, la primera línea después del
-    `try/except` de imports) -- no depende de red ni de ninguna MariaDB
-    real. En un entorno donde ese archivo SÍ existe, seguiría más adelante y
-    fallaría en la conexión (puerto 1, nadie escucha ahí). Cualquiera de
-    las dos es un fallo DISTINTO al de la colisión de imports, así que el
-    control acepta las dos formas -- lo único que descarta es "OK" (llegó
-    hasta el final, lo que en este sandbox sin MariaDB ni ese archivo no
-    puede pasar) y la firma de la colisión."""
-    resultado = _correr_arranque_real(tmp_path)
-
-    assert not resultado.startswith("RESULTADO:OK:"), (
-        f"se esperaba que este entorno de prueba (sin "
-        f"/etc/jax/build/implementation-identity.json y con JAX_DB_PORT=1) "
-        f"no pudiera completar el arranque -- si llegó OK, revisar el "
-        f"entorno del test: {resultado}"
-    )
-    assert "ModuleNotFoundError" not in resultado, (
-        f"debería haber pasado el punto de la colisión y fallar más "
-        f"adelante, no en el import: {resultado}"
+    assert _firma_conocida_tras_el_fix(resultado) is None, (
+        f"la allowlist NO debería aceptar el resultado del guard cortando "
+        f"antes de los imports -- si esto pasa, la allowlist volvió a ser "
+        f"lo bastante floja como para dar verde con el guard incompleto "
+        f"(el defecto exacto de MAJOR-1, ronda 1 de revisión de PR#262): "
+        f"{resultado}"
     )
