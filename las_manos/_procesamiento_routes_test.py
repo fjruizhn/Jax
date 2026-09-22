@@ -954,6 +954,35 @@ class TrabajoHTTPTest(unittest.TestCase):
             r = self._post(c)
         assert r.status_code == 202, r.text
 
+    def test_MINORA_bandera_no_libera_dos_veces_si_falla_el_registro(self):
+        """MINOR-A (ronda 4): la bandera `permiso_transferido` tiene que
+        quedar en `True` apenas se crea la tarea -- NO después de
+        `add_done_callback`/`job_tasks.register`. Si alguna de esas dos
+        llamadas lanza DESPUÉS de crear la tarea, la tarea YA creada va a
+        liberar el semáforo ella sola (su propio `finally`) -- si la
+        bandera seguía en `False` en ese momento, el `finally` de
+        `crear_trabajo()` la liberaría OTRA VEZ: el semáforo sube por
+        encima de su capacidad real (medido con la mutación: 2 -> 3)."""
+        async def _worker_que_libera(job_id, proyecto, rutas, *, store, executor=None, executor_io=None, semaforo=None):
+            # Simula el contrato real de `_ejecutar_trabajo`: quien lo
+            # llama YA adquirió el semáforo, así que este worker (aunque
+            # sea un doble falso) lo libera él mismo al terminar.
+            (semaforo if semaforo is not None else rutas_mod._SEMAFORO_TRABAJOS).release()
+
+        async def _correr():
+            with patch.object(rutas_mod.job_tasks, "register", side_effect=RuntimeError("boom -- register() reventó")), \
+                 patch.object(rutas_mod, "_ejecutar_trabajo", _worker_que_libera):
+                req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
+                with self.assertRaises(RuntimeError):
+                    await rutas_mod.crear_trabajo(req)
+                await asyncio.sleep(0.05)  # deja correr la tarea ya creada (que se libera sola)
+
+        asyncio.run(_correr())
+        assert self._semaforo_test._value <= 2, (
+            f"el semáforo subió por encima de su capacidad real (liberado dos veces): "
+            f"value={self._semaforo_test._value}"
+        )
+
     # -- N-3: cancelación -- forma HTTP (404/409), el executor real va en
     #    el Grupo 1 (test_N3_cancelar_deja_terminar...) --------------------
     def test_N3_cancelar_job_desconocido_404(self):
