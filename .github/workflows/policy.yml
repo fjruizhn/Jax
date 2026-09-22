@@ -1280,6 +1280,7 @@ jobs:
           tests/test_ejecutor_preparar_directorio_misiones.py
           tests/test_ejecutor_contratos_huella.py
           tests/test_ejecutor_huella_aceptar.py
+          tests/test_ejecutor_huella_registro_permisos.py
           tests/test_ejecutor_cita.py
           tests/test_ejecutor_captura.py
           tests/test_ejecutor_hechos.py
@@ -1426,7 +1427,10 @@ jobs:
             tests/test_ejecutor_generar_claude_md.py \
             tests/test_ejecutor_contratos_contexto.py \
             tests/test_ejecutor_reemplazar_directorio_atomico.py \
+            tests/test_ejecutor_preparar_directorio_misiones.py \
             tests/test_ejecutor_contratos_huella.py \
+            tests/test_ejecutor_huella_aceptar.py \
+            tests/test_ejecutor_huella_registro_permisos.py \
             tests/test_ejecutor_cita.py \
             tests/test_ejecutor_captura.py \
             tests/test_ejecutor_hechos.py \
@@ -3761,8 +3765,54 @@ jobs:
           #   namespaces/xattr anidados, NO el runner real de CI) = 2618. Skips: 38 -> 42 (+4
           #   `@requiere_constitucion_real` nuevos del punto 5 en test_ejecutor_generar_claude_md.py)
           #   -- 16 (U3) + 1 (contexto.py) + 25 (generar_claude_md, 21 antes + 4) = 42.
-          grep -qE "^2618 passed, 42 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2618 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 10 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 6 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
+          # 2618 -> 2645, 42 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 8, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la sexta auditoría sobre la CLI de aceptación).
+          #   B-1: `aceptar` ya no borra la pausa a ciegas -- sólo la SUYA (origen=huella, mismo
+          #   host, misma mision_id); nuevo `pausa.quitar_pausa_si` (atómico: `os.rename` agarra
+          #   lo que haya, `os.link` repone sin pisar si no coincide) +4 tests en
+          #   test_ejecutor_contratos_pausa.py, +6 en test_ejecutor_huella_aceptar.py (C4/C5/otro
+          #   host/otra misión no se tocan; la propia SÍ se borra; si C5 pausó antes de que la
+          #   huella llegara a escribir, sólo se cambia la marca). B-2: `aceptar` exige
+          #   `estado == REPORTADA` (o `ABIERTA` con `--sin-medir`); +5 tests, incluido uno que
+          #   mata el mutante quitando el chequeo real y viendo caer los dos tests de estado
+          #   (confirmado, restaurado después). M-1: `huella.py:257` ya no dice "fruiz ya puede
+          #   escribir ahí: es el mismo dueño" -- **era falso**, verificado en producción
+          #   (`getfacl`, 2026-09-22): `/var/log/jax-ejecutor/registro.jsonl` es de `jaxsvc`,
+          #   `fruiz` sólo tiene `r--`. El comando documentado pasa a `sudo -u jaxsvc python -m
+          #   ...` (nunca `sudo` a secas, que escribiría como root); nuevo
+          #   test_ejecutor_huella_registro_permisos.py (+3) replica esa ACL real con `chmod` en
+          #   el scratch y prueba que escribir con sólo `r--` falla, y que como dueño funciona.
+          #   M-2: `aceptado_por` sale de `SUDO_UID` validado con `pwd` (nunca de
+          #   `SUDO_USER`/`USER` como texto suelto); `principal` rechaza si el uid invocante es
+          #   el de `JAX_EJECUTOR_CUENTA` (axioma no se acepta a sí mismo) -- +7 tests en
+          #   test_ejecutor_contratos_huella.py, incluido un mutante matado mutando
+          #   `_resolver_identidad_invocante` y viendo que `principal` real rechaza igual. M-3:
+          #   texto -- axioma SÍ tiene `NOPASSWD:ALL` en hall9000, pero queda inerte bajo
+          #   NoNewPrivs en la jaula, y la única llave autorizada para axioma ahí es la del
+          #   controlador (jaxsvc, 600, que axioma no puede leer); `maquinas.toml: sudo=false`
+          #   significa "no utilizable desde la jaula", no "sin sudo real" (sin tests, es texto).
+          #   MINOR: `preparar_directorio_misiones.sh` separa el mecanismo de nuevo -- `install -d
+          #   -m 0700` para CREAR (sin ventana), `chmod` + el mismo `setfacl` combinado de la
+          #   ronda 7 para el que YA EXISTE -- +2 tests que prueban el MECANISMO (qué programa se
+          #   invocó), no sólo el resultado final. `--sin-medir` exige `--motivo` (se registra).
+          #   HALLAZGO FUERA DE ALCANCE (se reporta, no se arregla de más): el propio comando de
+          #   ESTE paso ("Piso exacto de tests CORRIDOS") NO incluía
+          #   `tests/test_ejecutor_preparar_directorio_misiones.py` ni
+          #   `tests/test_ejecutor_huella_aceptar.py` en su lista real -- aunque sus comentarios
+          #   (rondas 4/6/7, arriba) SÍ los contaban como parte del "2618". Es decir, el piso
+          #   documentado nunca ejecutó esos dos archivos de verdad; sólo el paso informativo
+          #   `-v` (sin gate) los tenía. Se agregan ACÁ porque ronda 8 les sumó tests propios que
+          #   sí necesitan quedar bajo este gate -- pero el gap para las rondas 4/6/7 es previo a
+          #   esta ronda y no se investiga más a fondo aquí.
+          #   Medido dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del
+          #   worktree): 2633 (wrapped) + 12 sueltas (4 test_bwrap_real_* + 8 de setfacl real en
+          #   test_ejecutor_preparar_directorio_misiones.py -- 6 heredadas + 2 nuevas de esta
+          #   ronda, todas fallan bajo el bwrap EXTERNO de este verificador por el mismo límite de
+          #   namespaces/xattr anidados, NO el runner real de CI, y pasan sueltas confirmado) =
+          #   2645. Delta +27 = +4 (pausa) +11 (huella_aceptar, B-1 y B-2) +7 (contratos_huella,
+          #   M-2) +2 (preparar_directorio_misiones, MINOR) +3 (huella_registro_permisos, nuevo).
+          grep -qE "^2645 passed, 42 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2645 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 12 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 8 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
