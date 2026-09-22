@@ -62,3 +62,41 @@ def test_destinos_fijos():
     assert descarte.destino_de("discard", None) is PipelineStatus.discarded
     assert descarte.destino_de("hide", None) is PipelineStatus.hidden
     assert descarte.destino_de("restore", None) is PipelineStatus.discarded
+
+
+# Fix round 1 (2026-09-22, Ruling 7, I-1): `validar_transicion` es la regla
+# pura que `store.pipeline_transicion_descarte` tiene que consultar ANTES de
+# tocar la base -- sin esto, un `discard` desde `running` liberaba el cupo de
+# un pipeline que sigue corriendo y lo dejaba huérfano para siempre.
+
+def test_validar_transicion_rechaza_desde_no_permitido():
+    with pytest.raises(descarte.TransicionDescarteInvalida):
+        descarte.validar_transicion("discard", PipelineStatus.running, PipelineStatus.discarded)
+
+
+def test_validar_transicion_hide_rechaza_desde_distinto_de_discarded():
+    with pytest.raises(descarte.TransicionDescarteInvalida):
+        descarte.validar_transicion("hide", PipelineStatus.aborted, PipelineStatus.hidden)
+
+
+def test_validar_transicion_discard_hide_restore_exigen_el_destino_fijo():
+    with pytest.raises(descarte.TransicionDescarteInvalida):
+        descarte.validar_transicion("discard", PipelineStatus.aborted, PipelineStatus.hidden)
+    with pytest.raises(descarte.TransicionDescarteInvalida):
+        descarte.validar_transicion("hide", PipelineStatus.discarded, PipelineStatus.discarded)
+    with pytest.raises(descarte.TransicionDescarteInvalida):
+        descarte.validar_transicion("restore", PipelineStatus.hidden, PipelineStatus.hidden)
+
+
+def test_validar_transicion_recover_exige_a_en_los_previos_validos():
+    with pytest.raises(descarte.TransicionDescarteInvalida):
+        descarte.validar_transicion("recover", PipelineStatus.discarded, PipelineStatus.running)
+
+
+def test_validar_transicion_las_transiciones_validas_no_levantan():
+    descarte.validar_transicion("discard", PipelineStatus.aborted, PipelineStatus.discarded)
+    descarte.validar_transicion("discard", PipelineStatus.expired, PipelineStatus.discarded)
+    descarte.validar_transicion("recover", PipelineStatus.discarded, PipelineStatus.aborted)
+    descarte.validar_transicion("recover", PipelineStatus.discarded, PipelineStatus.expired)
+    descarte.validar_transicion("hide", PipelineStatus.discarded, PipelineStatus.hidden)
+    descarte.validar_transicion("restore", PipelineStatus.hidden, PipelineStatus.discarded)

@@ -22,6 +22,7 @@ import aiomysql
 from pymysql import err as _pymysql_err
 from pymysql.constants import CLIENT
 
+from jacobs import descarte
 from jacobs.policy import (
     MAX_PARALLEL_PIPELINES,
     SQL_ESTADOS_VIVOS,
@@ -1627,15 +1628,41 @@ async def pipeline_transicion_descarte(
     user_id: str,
 ) -> bool:
     """Compare-and-set de una transición del descarte. True si escribió
-    (el pipeline estaba en `epoca` y en `desde`)."""
+    (el pipeline estaba en `epoca` y en `desde`).
+
+    Fix round 1 (2026-09-22, Ruling 7, I-1): valida la transición ANTES de
+    tocar la base -- `descarte.validar_transicion` levanta
+    `descarte.TransicionDescarteInvalida` (fail-closed) si `desde` no está
+    permitido para `accion`, o si `a` no es el destino correcto. Sin esto,
+    un llamador que mandara `discard` desde `running` liberaría el cupo de
+    un pipeline que sigue ejecutando, y lo dejaría huérfano para siempre: el
+    compare-and-set por `epoca`/`status` sólo protege CONTRA QUÉ estaba la
+    fila, no si esa acción tenía permitido partir de ahí.
+
+    En `recover` la validación sólo exige que `a` sea UN estado previo
+    válido en general (`descarte.TRANSICIONES["discard"]`); que coincida con
+    el `status_previo` REAL de ESTA fila lo garantiza el propio `WHERE`
+    (`status_previo=%s` con `a.value`) -- si no coincide, la función
+    devuelve `False` (no escribe), no levanta: `a` era válido en general,
+    sólo no era el de esta fila.
+
+    `user_id` sólo se persiste en `discard` (columna `descartado_por`, quien
+    puede recuperar). En `recover`/`hide`/`restore` NO se escribe en
+    ninguna columna: quién hizo la transición queda en el evento de
+    auditoría de Task 3 (`jacobs_events`), no en `jacobs_pipelines`."""
+    descarte.validar_transicion(accion, desde, a)
     ahora = time.time()
-    sets = _SETS_DESCARTE[accion]  # KeyError si la acción no existe: error de contrato
+    sets = _SETS_DESCARTE[accion]
     params: list = [a.value, ahora]
     if accion == "discard":
         params += [desde.value, user_id, ahora]
     params += [pipeline_id, epoca, desde.value]
+    extra_where = ""
+    if accion == "recover":
+        extra_where = " AND status_previo=%s"
+        params.append(a.value)
     sql = (f"UPDATE jacobs_pipelines SET {sets} "
-           "WHERE pipeline_id=%s AND run_epoch=%s AND status=%s")
+           f"WHERE pipeline_id=%s AND run_epoch=%s AND status=%s{extra_where}")
     return await _ejecutar_condicional(sql, params) == 1
 
 

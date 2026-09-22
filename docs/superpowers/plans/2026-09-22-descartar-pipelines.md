@@ -261,9 +261,24 @@ git commit -m "feat(jacobs): estados discarded/hidden, columnas e índices del d
 **Interfaces:**
 - Consumes: estados y columnas de la Task 1.
 - Produces:
-  - `jacobs.descarte.TRANSICIONES: dict[str, tuple[frozenset[PipelineStatus], ...]]`, con las claves `"discard"`, `"recover"`, `"hide"` y `"restore"`.
+  - `jacobs.descarte.TRANSICIONES: dict[str, frozenset[PipelineStatus]]`, con las claves `"discard"`, `"recover"`, `"hide"` y `"restore"`.
   - `jacobs.descarte.destino_de(accion: str, status_previo: str | None) -> PipelineStatus`
+  - `jacobs.descarte.validar_transicion(accion: str, desde: PipelineStatus, a: PipelineStatus) -> None` (fix round 1,
+    Ruling 7): levanta `descarte.TransicionDescarteInvalida` (fail-closed) si `desde` no está en
+    `TRANSICIONES[accion]`, o si `a` no es el destino correcto. Para `discard`/`hide`/`restore`, `a`
+    tiene que ser exactamente `destino_de(accion, None)`. Para `recover`, `a` sólo se valida contra el
+    conjunto general de estados previos posibles (`TRANSICIONES["discard"]`) -- que coincida con el
+    `status_previo` REAL de esa fila lo garantiza el propio `WHERE` del compare-and-set
+    (`status_previo=%s` con `a.value`), no esta función.
   - `store.pipeline_transicion_descarte(pipeline_id: str, epoca: int, accion: str, desde: PipelineStatus, a: PipelineStatus, user_id: str) -> bool`
+    (fix round 1, Ruling 7): llama a `descarte.validar_transicion` ANTES de tocar la base -- una
+    transición inválida (p.ej. `discard` desde `running`) levanta `TransicionDescarteInvalida` sin
+    escribir nada. En `recover`, además de `desde=discarded` y `run_epoch`, el `WHERE` exige
+    `status_previo=a.value`: un `recover` con un `a` que no coincide con el `status_previo` guardado
+    devuelve `False` (no escribe) en vez de levantar, porque `a` sí era válido en general, sólo no
+    coincidía con ESTA fila. `user_id` sólo se persiste en `discard` (columna `descartado_por`); en
+    `recover`/`hide`/`restore` no se escribe en ninguna columna -- la auditoría de quién hizo la
+    transición va en `jacobs_events` (Task 3).
 
 - [ ] **Step 1: Test de las reglas puras (falla)**
 

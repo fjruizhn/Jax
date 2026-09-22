@@ -22,7 +22,7 @@ from base_de_test import exigir_base_de_test  # noqa: E402
 
 exigir_base_de_test()
 
-from jacobs import reaper, store  # noqa: E402
+from jacobs import descarte, reaper, store  # noqa: E402
 from jacobs.models import Pipeline, PipelineStatus  # noqa: E402
 
 
@@ -119,20 +119,30 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.addAsyncCleanup(store.cerrar_pool)
         await store.init_tables()
-        self.pid = str(uuid.uuid4())
+        self._pids: list[str] = []
+        self.pid = await self._crear(PipelineStatus.aborted)
+        self.addAsyncCleanup(self._borrar)
+
+    async def _crear(self, status: PipelineStatus) -> str:
+        """Fix round 1 (I-1): algunas de las pruebas de `validar_transicion`
+        necesitan una fila que arranque en un estado DISTINTO de `aborted`
+        (p.ej. `running`, `expired`) -- `self.pid` solo cubre el caso base."""
+        pid = str(uuid.uuid4())
         await store.pipeline_create(Pipeline(
-            pipeline_id=self.pid, name="t-descarte-cas", invoked_by="plataforma",
-            mode="autonomous", status=PipelineStatus.aborted,
+            pipeline_id=pid, name="t-descarte-cas", invoked_by="plataforma",
+            mode="autonomous", status=status,
             user_id="u1", tenant_id="1", run_epoch=3,
         ))
-        self.addAsyncCleanup(self._borrar)
+        self._pids.append(pid)
+        return pid
 
     async def _borrar(self):
         async with store.conexion() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("DELETE FROM jacobs_events WHERE pipeline_id=%s", (self.pid,))
-                await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (self.pid,))
-                await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (self.pid,))
+                for pid in self._pids:
+                    await cur.execute("DELETE FROM jacobs_events WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("DELETE FROM jacobs_steps WHERE pipeline_id=%s", (pid,))
+                    await cur.execute("DELETE FROM jacobs_pipelines WHERE pipeline_id=%s", (pid,))
 
     async def _fila(self, pid: str | None = None) -> tuple:
         async with store.conexion() as conn:
@@ -161,10 +171,14 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self._fila())[0], "aborted")
 
     async def test_descartar_desde_otro_estado_no_escribe(self):
+        # M-1 (fix round 1): `expired` SÍ está permitido para "discard" en
+        # general (TRANSICIONES["discard"]) -- lo que falla acá es el CAS
+        # (la fila real está en `aborted`, no en `expired`), no la validación.
         ok = await store.pipeline_transicion_descarte(
             self.pid, 3, "discard",
             desde=PipelineStatus.expired, a=PipelineStatus.discarded, user_id="u1")
         self.assertFalse(ok)
+        self.assertEqual((await self._fila())[0], "aborted")
 
     async def test_recuperar_limpia_las_tres_columnas(self):
         await store.pipeline_transicion_descarte(
@@ -191,3 +205,57 @@ class TransicionDescarteCasDBTest(unittest.IsolatedAsyncioTestCase):
             desde=PipelineStatus.hidden, a=PipelineStatus.discarded, user_id="admin")
         self.assertTrue(ok_restore)
         self.assertEqual(await self._fila(), ("discarded",) + antes[1:])
+
+    # Fix round 1 (2026-09-22, Ruling 7, I-1): la escritura tiene que exigir
+    # la transición permitida (descarte.TRANSICIONES), no solo la época y el
+    # estado exacto. Sin esto, `discard` desde `running` liberaba el cupo de
+    # un pipeline que sigue ejecutando y lo dejaba huérfano para siempre.
+
+    async def test_descartar_desde_running_rechaza_y_no_escribe(self):
+        pid = await self._crear(PipelineStatus.running)
+        with self.assertRaises(descarte.TransicionDescarteInvalida):
+            await store.pipeline_transicion_descarte(
+                pid, 3, "discard",
+                desde=PipelineStatus.running, a=PipelineStatus.discarded, user_id="u1")
+        self.assertEqual((await self._fila(pid))[0], "running")
+
+    async def test_ocultar_desde_aborted_rechaza_y_no_escribe(self):
+        # self.pid arranca en `aborted` -- "hide" solo está permitido desde
+        # `discarded` (la antesala obligatoria, spec §2: "nunca se oculta en
+        # un paso").
+        with self.assertRaises(descarte.TransicionDescarteInvalida):
+            await store.pipeline_transicion_descarte(
+                self.pid, 3, "hide",
+                desde=PipelineStatus.aborted, a=PipelineStatus.hidden, user_id="admin")
+        self.assertEqual((await self._fila())[0], "aborted")
+
+    async def test_recuperar_con_a_que_no_coincide_con_status_previo_no_escribe(self):
+        # `a=expired` es un destino VÁLIDO de recover en general (está en
+        # TRANSICIONES["discard"]), pero esta fila se descartó desde
+        # `aborted` -- no levanta (no es un error de contrato), simplemente
+        # no hay fila que matchee el WHERE (`status_previo='expired'`).
+        await store.pipeline_transicion_descarte(
+            self.pid, 3, "discard",
+            desde=PipelineStatus.aborted, a=PipelineStatus.discarded, user_id="u1")
+        ok = await store.pipeline_transicion_descarte(
+            self.pid, 3, "recover",
+            desde=PipelineStatus.discarded, a=PipelineStatus.expired, user_id="u1")
+        self.assertFalse(ok)
+        fila = await self._fila()
+        self.assertEqual(fila[0], "discarded")
+        self.assertEqual(fila[1], "aborted")
+
+    # M-2 (fix round 1): el ciclo completo con `expired`, no solo `aborted`
+    # -- recuperar tiene que devolver al estado EXACTO previo.
+    async def test_ciclo_completo_de_expired_descartar_y_recuperar(self):
+        pid = await self._crear(PipelineStatus.expired)
+        ok_discard = await store.pipeline_transicion_descarte(
+            pid, 3, "discard",
+            desde=PipelineStatus.expired, a=PipelineStatus.discarded, user_id="u1")
+        self.assertTrue(ok_discard)
+        self.assertEqual((await self._fila(pid))[:3], ("discarded", "expired", "u1"))
+        ok_recover = await store.pipeline_transicion_descarte(
+            pid, 3, "recover",
+            desde=PipelineStatus.discarded, a=PipelineStatus.expired, user_id="u1")
+        self.assertTrue(ok_recover)
+        self.assertEqual(await self._fila(pid), ("expired", None, None, None))
