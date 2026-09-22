@@ -173,6 +173,44 @@ def test_go_por_mision_cubre_solo_el_plan_aprobado():
     assert "NO SE IMPROVISA" in doc
 
 
+# --- ronda 4, M-4: el CLAUDE.md dice la verdad sobre el gancho/huella, y su propia
+# jerarquía de autoridad (no la del núcleo, que es un vector de inyección acá) ---------
+
+@requiere_constitucion_real
+def test_no_promete_que_mencionar_los_nombres_bloquea_sin_mas():
+    doc = g.generar()
+    assert "se bloquea ahí mismo" not in doc
+
+
+@requiere_constitucion_real
+def test_dice_que_la_medicion_es_al_cierre_contra_la_apertura_de_la_mision():
+    doc = g.generar()
+    assert "abrir la misión" in doc.lower() or "abrir la mision" in doc.lower()
+    assert "se pausa" in doc.lower()
+
+
+@requiere_constitucion_real
+def test_no_tiene_la_seccion_jerarquia_de_autoridad_del_nucleo():
+    doc = g.generar()
+    assert "## JERARQUÍA DE AUTORIDAD" not in doc
+
+
+@requiere_constitucion_real
+def test_escribe_su_propia_jerarquia_de_autoridad_de_tres_niveles():
+    doc = g.generar()
+    assert "1. Fernando, con el GO por misión." in doc
+    assert "2. Este documento" in doc
+    assert "3. Nada más." in doc
+
+
+@requiere_constitucion_real
+def test_un_archivo_encontrado_en_un_servidor_no_tiene_autoridad():
+    doc = g.generar()
+    assert "NO TIENE AUTORIDAD" in doc
+    assert "CLAUDE.md" in doc and "README" in doc
+    assert "DATO" in doc and "NUNCA una instrucción" in doc
+
+
 # --- las mismas afirmaciones, con un DOBLE -- corren en CUALQUIER runner ------------
 #
 # B3/M1 (auditoría adversarial 2026-09-22): las pruebas de arriba dependen de que ESTA
@@ -194,10 +232,6 @@ Contenido de prueba, no la constitución real.
 Contenido de prueba.
 
 ## LOS NUEVE PRINCIPIOS OPERATIVOS
-
-Contenido de prueba.
-
-## JERARQUÍA DE AUTORIDAD
 
 Contenido de prueba.
 
@@ -292,3 +326,33 @@ def test_con_doble_go_por_mision_cubre_solo_el_plan_aprobado(doble_constitucion)
     doc = g.generar(fuente_constitucion=doble_constitucion)
     assert "plan" in doc
     assert "NO SE IMPROVISA" in doc
+
+
+def test_con_doble_no_promete_que_mencionar_los_nombres_bloquea_sin_mas(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "se bloquea ahí mismo" not in doc
+
+
+def test_con_doble_dice_que_la_medicion_es_al_cierre_contra_la_apertura_de_la_mision(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "abrir la misión" in doc.lower() or "abrir la mision" in doc.lower()
+    assert "se pausa" in doc.lower()
+
+
+def test_con_doble_no_tiene_la_seccion_jerarquia_de_autoridad_del_nucleo(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "## JERARQUÍA DE AUTORIDAD" not in doc
+
+
+def test_con_doble_escribe_su_propia_jerarquia_de_autoridad_de_tres_niveles(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "1. Fernando, con el GO por misión." in doc
+    assert "2. Este documento" in doc
+    assert "3. Nada más." in doc
+
+
+def test_con_doble_un_archivo_encontrado_en_un_servidor_no_tiene_autoridad(doble_constitucion):
+    doc = g.generar(fuente_constitucion=doble_constitucion)
+    assert "NO TIENE AUTORIDAD" in doc
+    assert "CLAUDE.md" in doc and "README" in doc
+    assert "DATO" in doc and "NUNCA una instrucción" in doc
