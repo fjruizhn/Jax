@@ -113,6 +113,15 @@ RUTA_ADMIN_USUARIO_CONFIG = "/etc/ejecutor-huella/admin_usuario"
 _DIR_SBIN_EJECUTOR = "/usr/local/sbin"
 _GLOB_SBIN_EJECUTOR = "ejecutor-*"
 
+#: BLOCK-E (ronda 5, auditoría adversarial 2026-09-22): el sentinela que representa "se
+#: barrió el glob de binarios propios" -- no es una ruta real (el `*` no puede aparecer
+#: en un nombre de archivo real), así que nunca colisiona con un archivo de verdad
+#: encontrado por el barrido. Antes el glob quedaba FUERA de `huella_valida()` por
+#: diseño ("su desaparición total no invalida nada", LÍMITE documentado más abajo) --
+#: eso también dejaba pasar un `find` que fallara en silencio sobre este barrido
+#: exactamente igual que en cualquier directorio de `RUTAS_CONTROLES`.
+RUTA_GLOB_SBIN_EJECUTOR = f"{_DIR_SBIN_EJECUTOR}/{_GLOB_SBIN_EJECUTOR}"
+
 # Rutas ABSOLUTAS de los binarios que arma el comando -- NUNCA por el PATH (ver el
 # LÍMITE del docstring del módulo). Verificadas en Ubuntu/Debian (coreutils, findutils):
 # `/usr/bin/find`, `/usr/bin/sha256sum`, `/usr/bin/sort`. `find -printf "%l"` da el
@@ -131,15 +140,30 @@ def _q(ruta: str) -> str:
     return f"'{ruta}'"
 
 
-# RONDA 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
-# `/root/.ssh/authorized_keys` NO EXISTE en hall9000, atemai NI prod -- estado SANO, no
-# una medición rota. La versión de ronda 2/3 (`find ... 2>/dev/null`, sin más) daba CERO
-# líneas tanto si la ruta no existía COMO si no se pudo medir (permiso denegado, `find`
-# roto) -- indistinguibles, y `huella_valida(rutas=...)` trataba las dos como inválidas,
-# bloqueando el Ejecutor en máquinas SANAS. Mirror EXACTO (sin f-string: es texto de
+# RONDA 4 (auditoría adversarial 2026-09-22): medido el 2026-09-22 (Fernando): el
+# `authorized_keys` del ROOT SÍ EXISTE (archivo vacío, 0600, dueño root) en hall9000,
+# atemai Y prod -- sólo FALTA en `bridge`. El texto anterior de esta ronda decía lo
+# contrario ("no existe en NINGUNA de las tres") -- ERA FALSO; corregido en ronda 5
+# (MAJOR-G) sin tocar el arreglo, que sigue haciendo falta: bridge SÍ está sano con esa
+# ruta ausente, y la ronda 3 bloqueaba el Ejecutor ahí igual que si hubiera fallado la
+# medición. La versión de ronda 2/3 (`find ... 2>/dev/null`, sin más) daba CERO líneas
+# tanto si la ruta no existía COMO si no se pudo medir (permiso denegado, `find` roto) --
+# indistinguibles, y `huella_valida(rutas=...)` trataba las dos como inválidas,
+# bloqueando el Ejecutor en una máquina SANA. Mirror EXACTO (sin f-string: es texto de
 # shell con sus propias llaves y `$`, interpolarlo habría sido un baño de escapes) de
-# `tramo()` en `ops/ejecutor/ejecutor-huella` -- `tests/test_ejecutor_huella_sh.py`
-# compara la SALIDA de este texto contra la del script real, no sólo su forma.
+# `tramo()`/`tramo_sbin_ejecutor()` en `ops/ejecutor/ejecutor-huella` --
+# `tests/test_ejecutor_huella_sh.py` compara la SALIDA de este texto contra la del
+# script real, no sólo su forma.
+#
+# BLOCK-E (ronda 5, auditoría adversarial 2026-09-22): el caso ARCHIVO ya tenía guarda
+# (`sha256sum` sin salida -> `E ... sha256sum_fallo`); el caso DIRECTORIO no la tenía --
+# los tres `find` iban con `2>/dev/null` y SIN mirar su `$?`, así que un `find` que
+# fallara a mitad de camino (un subdirectorio sin permiso, por ejemplo) hacía
+# desaparecer TODAS las líneas de contenido en silencio, y el guion de todos modos
+# imprimía `D <ruta>` -- la huella pasaba por buena sin haber podido enumerar el
+# contenido real. Ahora el resultado de los tres `find` se junta en un archivo aparte
+# y su `$?` se mira ANTES de decidir si el estado es `D` (los tres a cero) o `E ...
+# find_fallo` (cualquiera de los tres no-cero) -- comprobado por el auditor con bwrap.
 _CUERPO_TRAMO_SH = r'''tramo() {
   ruta="$1"
   err="$(/usr/bin/mktemp)"
@@ -166,15 +190,51 @@ _CUERPO_TRAMO_SH = r'''tramo() {
       fi
       ;;
     directory)
-      echo "D $ruta"
-      /usr/bin/find "$ruta" -mindepth 1 -xtype f -exec /usr/bin/sha256sum {} + 2>/dev/null
-      /usr/bin/find "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" 2>/dev/null
-      /usr/bin/find "$ruta" -mindepth 1 -type d -printf "D %p\n" 2>/dev/null
+      salida="$(/usr/bin/mktemp)"
+      errd="$(/usr/bin/mktemp)"
+      /usr/bin/find "$ruta" -mindepth 1 -xtype f -exec /usr/bin/sha256sum {} + >"$salida" 2>>"$errd"
+      rc1=$?
+      /usr/bin/find "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+      rc2=$?
+      /usr/bin/find "$ruta" -mindepth 1 -type d -printf "D %p\n" >>"$salida" 2>>"$errd"
+      rc3=$?
+      if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ] || [ "$rc3" -ne 0 ]; then
+        echo "E $ruta find_fallo"
+      else
+        echo "D $ruta"
+        cat "$salida"
+      fi
+      rm -f "$salida" "$errd"
       ;;
     *)
       echo "E $ruta tipo_no_esperado:$tipo"
       ;;
   esac
+}'''
+
+# BLOCK-E, punto 2 (ronda 5): el glob de `/usr/local/sbin/ejecutor-*` tenía el MISMO
+# defecto que el caso directorio de `tramo()` -- dos `find` con `2>/dev/null` sin mirar
+# `$?` -- y además NO estaba representado en `huella_valida(rutas=...)` en absoluto (su
+# desaparición total no invalidaba nada, por diseño). Ahora reporta su propio estado
+# (`D`/`E ... find_fallo`) bajo el sentinela `RUTA_GLOB_SBIN_EJECUTOR`
+# (`/usr/local/sbin/ejecutor-*`, un `*` literal que nunca puede colisionar con un
+# archivo real) -- y `RUTAS_DECLARADAS_POR_DEFAULT` lo exige como cualquier otra ruta.
+_CUERPO_TRAMO_SBIN_SH = r'''tramo_sbin_ejecutor() {
+  base="$1"
+  patron="$2"
+  salida="$(/usr/bin/mktemp)"
+  errd="$(/usr/bin/mktemp)"
+  /usr/bin/find "$base" -maxdepth 1 -name "$patron" -xtype f -exec /usr/bin/sha256sum {} + >"$salida" 2>>"$errd"
+  rc1=$?
+  /usr/bin/find "$base" -maxdepth 1 -name "$patron" -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+  rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    echo "E $base/$patron find_fallo"
+  else
+    echo "D $base/$patron"
+    cat "$salida"
+  fi
+  rm -f "$salida" "$errd"
 }'''
 
 
@@ -186,13 +246,10 @@ def _tramo_ruta(ruta: str) -> str:
 
 
 def _tramo_sbin_ejecutor() -> str:
-    # `-name` va COMILLADO: sin comillas, el shell expandiría `ejecutor-*` como un glob
-    # contra el directorio de trabajo ANTES de que `find` lo vea.
-    q, glob = _q(_DIR_SBIN_EJECUTOR), _q(_GLOB_SBIN_EJECUTOR)
-    return (
-        f'{_FIND} {q} -maxdepth 1 -name {glob} -xtype f -exec {_SHA256SUM} {{}} + 2>/dev/null ; '
-        f'{_FIND} {q} -maxdepth 1 -name {glob} -type l -printf "L %p -> %l\\n" 2>/dev/null'
-    )
+    # BLOCK-E (ronda 5): ya NO arma el `find ... ; find ...` a mano acá -- llama a
+    # `tramo_sbin_ejecutor()` (ver `_CUERPO_TRAMO_SBIN_SH`), que sí mira el `$?` de los
+    # dos `find` antes de decidir el estado.
+    return f"tramo_sbin_ejecutor {_q(_DIR_SBIN_EJECUTOR)} {_q(_GLOB_SBIN_EJECUTOR)}"
 
 
 def ruta_authorized_keys_admin(admin_usuario: str) -> str:
@@ -211,7 +268,24 @@ def ruta_authorized_keys_admin(admin_usuario: str) -> str:
     sincronía (MAJOR-7) compara contra la salida real del script EN ESTA MISMA
     máquina -- los dos tienen que resolver el mismo passwd para que la comparación
     signifique algo. `KeyError` (cuenta inexistente) se traduce a `ValueError`, fail-
-    closed, igual que el resto de las validaciones de este módulo."""
+    closed, igual que el resto de las validaciones de este módulo.
+
+    MINOR (ronda 5, auditoría adversarial 2026-09-22): dicho en serio, sin dejarlo
+    implícito -- `pwd.getpwnam` resuelve el passwd de la máquina donde CORRE ESTE
+    PROCESO PYTHON (hall9000, siempre: esta función sólo se usa acá y en el instalador,
+    nunca en una remota), NO el de la máquina remota cuya huella se está armando. Que
+    hoy coincida con el passwd de las tres remotas (medido: mismo UID/GID/home para
+    `fruiz` en hall9000, atemai, bridge y prod) es un HECHO de HOY, no una garantía del
+    código -- si una remota cambiara el home de esa cuenta, esta función seguiría
+    devolviendo la ruta de HALL9000, no la real de esa remota. Por eso el camino en
+    PRODUCCIÓN (`ops/ejecutor/ejecutor-huella::tramo_admin()`) nunca llama a esta
+    función: resuelve `getent passwd` EN LA PROPIA REMOTA, en el momento. Esta función
+    sólo sirve para: (a) el test de sincronía (MAJOR-7, ya citado arriba, que compara
+    contra el script real EN ESTE MISMO host) y (b) `vigia_servicio.py::_principal`,
+    que pasa su resultado como `rutas_extra` a `huella_valida()` -- ahí la comparación
+    es de TEXTO contra lo que devolvió la remota, así que si algún día un passwd
+    diverge, el síntoma sería un `huella_valida` que rechaza todo en esa máquina (fail-
+    closed), no un dato mal medido en silencio."""
     if not admin_usuario or "/" in admin_usuario or admin_usuario.strip() != admin_usuario:
         raise ValueError("admin_usuario_invalido")
     try:
@@ -248,11 +322,25 @@ def comando_huella(admin_usuario: str) -> str:
     del archivo de config ni un `getent` propios -- porque acá Python YA sabe la
     cuenta; `ops/ejecutor/ejecutor-huella::tramo_admin()` hace ese trabajo de más
     (leer el archivo, resolver con `getent`) para el camino real, donde nadie le pasa
-    la cuenta por argv."""
+    la cuenta por argv.
+
+    Ronda 5 (BLOCK-E): el glob de sbin también pasa por una función DEFINIDA UNA vez
+    (`_CUERPO_TRAMO_SBIN_SH`/`tramo_sbin_ejecutor()`), igual que `tramo()` -- las DOS
+    definiciones van antes del grupo que las invoca.
+
+    Ronda 5 (hallazgo propio, al agregar la línea del glob de sbin a la comparación):
+    esta función NUNCA había puesto `export LC_ALL=C` en su propio texto -- sólo el
+    script real lo hace (ronda 2, MINOR). Con un único `sort` de pocas líneas, casi
+    siempre coincidía por casualidad con el locale de la sesión que corría el test;
+    agregar la línea del glob lo hizo divergir de verdad (medido: bajo `en_US.UTF-8`,
+    `sort` intercala una línea `D ...` en una posición distinta que bajo `C`, y
+    `test_el_guion_y_comando_huella_dan_la_misma_salida_sobre_el_mismo_arbol` -- que YA
+    existía -- lo detectó). El texto de esta función ahora fija `LC_ALL=C` también,
+    igual que el script."""
     llamadas = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
     llamadas.append(_tramo_ruta(ruta_authorized_keys_admin(admin_usuario)))
     cuerpo = " ; ".join(llamadas) + " ; " + _tramo_sbin_ejecutor()
-    return f'{_CUERPO_TRAMO_SH}\n{{ {cuerpo} ; }} | {_SORT}'
+    return f'export LC_ALL=C\n{_CUERPO_TRAMO_SH}\n{_CUERPO_TRAMO_SBIN_SH}\n{{ {cuerpo} ; }} | {_SORT}'
 
 
 # --- EL CAMINO REMOTO: la llave PROPIA DEL SERVICIO, no la personal del administrador ---
@@ -399,22 +487,25 @@ def huella_desde_salida(host: str, salida: bytes) -> Huella:
 _LINEA_CON_HASH = re.compile(r"^[0-9a-f]{64}  ")
 
 #: Los CUATRO estados que `tramo()` puede reportar para una ruta declarada (ronda 4,
-#: auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
-#: `HASH`/`D` (medida, existe) y `AUSENTE` (medida, confirmada que NO existe) son
-#: estados VÁLIDOS -- `/root/.ssh/authorized_keys` no existe en hall9000, atemai NI
-#: prod, y esa es la configuración SANA de esas máquinas, no una medición rota.
-#: `ERROR` (no se pudo medir -- permiso denegado, tipo inesperado, `sha256sum` roto) es
-#: el ÚNICO inválido.
+#: auditoría adversarial 2026-09-22; hecho corregido en ronda 5, MAJOR-G -- ver el
+#: comentario sobre `_CUERPO_TRAMO_SH` más arriba): `HASH`/`D` (medida, existe) y
+#: `AUSENTE` (medida, confirmada que NO existe) son estados VÁLIDOS -- medido el
+#: 2026-09-22: `/root/.ssh/authorized_keys` SÍ existe (vacío, 0600, root) en hall9000,
+#: atemai y prod; sólo FALTA en `bridge`, y esa es la configuración SANA de bridge, no
+#: una medición rota ahí. `ERROR` (no se pudo medir -- permiso denegado, tipo
+#: inesperado, `sha256sum`/`find` roto) es el ÚNICO inválido.
 _HASH, _D, _AUSENTE, _ERROR = "HASH", "D", "AUSENTE", "ERROR"
 
 #: Las rutas que `huella_valida` exige ver representadas -- por default, las FIJAS
-#: (RUTAS_CONTROLES). El glob de binarios de `/usr/local/sbin` NO entra: no tiene una
-#: línea de sí mismo (mide archivos que CALZAN un patrón, no una ruta única) y no
-#: encaja en el chequeo exacto por-ruta de abajo. El authorized_keys del administrador
-#: tampoco entra por default porque es host/cuenta-dependiente
-#: (`ruta_authorized_keys_admin`) -- MAJOR-C (ronda 4): un llamador que conoce la
-#: cuenta (`vigia_servicio.py`) tiene que agregarla explícitamente a `rutas=`.
-RUTAS_DECLARADAS_POR_DEFAULT = RUTAS_CONTROLES
+#: (RUTAS_CONTROLES) MÁS el glob de binarios de `/usr/local/sbin` (BLOCK-E, ronda 5:
+#: antes NO entraba -- "su desaparición total no invalida nada" -- lo que también
+#: dejaba pasar un `find` roto sobre ese barrido sin que nadie lo notara; ahora
+#: `tramo_sbin_ejecutor()` reporta su propio estado bajo el sentinela
+#: `RUTA_GLOB_SBIN_EJECUTOR`, que se valida como cualquier otra ruta). El
+#: authorized_keys del administrador NO entra por default porque es host/cuenta-
+#: dependiente (`ruta_authorized_keys_admin`) -- MAJOR-C (ronda 4): un llamador que
+#: conoce la cuenta (`vigia_servicio.py`) tiene que agregarla explícitamente a `rutas=`.
+RUTAS_DECLARADAS_POR_DEFAULT = RUTAS_CONTROLES + (RUTA_GLOB_SBIN_EJECUTOR,)
 
 
 def _clasificar_linea(linea: str) -> tuple[str, str] | None:
@@ -439,10 +530,24 @@ def _estado_de_ruta_declarada(lineas: list[str], ruta: str) -> str | None:
     """El estado de la línea que representa EXACTAMENTE `ruta` (nunca una línea de
     CONTENIDO por debajo de ella, que usa la MISMA forma de hash/D/L pero para una
     ruta más larga). Si ninguna línea representa `ruta` en sí -- ni siquiera un
-    `E` -- pero SÍ hay contenido reportado POR DEBAJO de ella (el caso del glob de
-    `/usr/local/sbin`, que nunca emite una línea de sí mismo), eso cuenta como
-    medido -- si no hay NADA, `None` (ni medido, ni declarado ausente: la medición de
-    esa ruta ni siquiera corrió)."""
+    `E` -- pero SÍ hay contenido reportado POR DEBAJO de ella (una ruta que es
+    directorio siempre trae su propia línea `D` de todos modos desde ronda 4 -- esto
+    queda como red de contención para cualquier llamador que pase una ruta que sólo
+    aparezca como padre de contenido), eso cuenta como medido -- si no hay NADA, `None`
+    (ni medido, ni declarado ausente: la medición de esa ruta ni siquiera corrió).
+
+    MAJOR-H (ronda 5, auditoría adversarial 2026-09-22): un destino de symlink (o un
+    nombre de archivo) puede contener un salto de línea DE VERDAD -- `find -printf`
+    lo imprime tal cual, sin escapar nada -- y eso puede partir una línea en dos,
+    forjando una SEGUNDA línea que dice ser la MISMA `ruta` exacta que la línea
+    genuina. Quedarse con la PRIMERA por orden (el criterio de rondas 2-4) deja que la
+    forjada gane si ordena antes que la real -- por ejemplo una `A <ruta>` forjada
+    tapando una `D <ruta>` genuina, o al revés. Dos (o más) líneas que dicen ser
+    EXACTAMENTE la misma ruta declarada NUNCA es un estado sano -- ninguna corrida
+    legítima de `tramo()`/`tramo_sbin_ejecutor()` emite dos líneas de estado para la
+    misma ruta de nivel superior -- así que ante una colisión así, la ruta se reporta
+    `_ERROR` (inválida), sin intentar adivinar cuál de las dos "es la de verdad"."""
+    coincidencias = []
     con_contenido_debajo = False
     for linea in lineas:
         clasificada = _clasificar_linea(linea)
@@ -450,9 +555,13 @@ def _estado_de_ruta_declarada(lineas: list[str], ruta: str) -> str | None:
             continue
         r, estado = clasificada
         if r == ruta:
-            return estado
-        if r.startswith(ruta + "/"):
+            coincidencias.append(estado)
+        elif r.startswith(ruta + "/"):
             con_contenido_debajo = True
+    if len(coincidencias) > 1:
+        return _ERROR
+    if coincidencias:
+        return coincidencias[0]
     return _D if con_contenido_debajo else None
 
 
@@ -472,12 +581,14 @@ def huella_valida(h: Huella, *, rutas: tuple | None = None) -> bool:
     aparecer" (MINOR, ronda 3) NO distinguía "esta ruta no existe" (sano) de "no se
     pudo medir" (roto) -- las dos daban CERO líneas para esa ruta con el `find`
     anterior, y esta función las trataba igual: inválida. Eso bloqueaba el Ejecutor en
-    máquinas SANAS (`/root/.ssh/authorized_keys` no existe en NINGUNA de las tres).
-    Ahora exige, para CADA ruta de `rutas`, que su estado sea `HASH`, `D` o `AUSENTE`
-    -- `ERROR` (o ausencia total de la línea) invalida la huella entera. Que una ruta
-    pase de `AUSENTE` a existir (o al revés) sigue siendo un cambio de TEXTO real
-    (`A <ruta>` desaparece, aparece un hash/`D`) -- `cambio()`/`hallazgos()` lo ven
-    igual que cualquier otro, sin tocar nada acá.
+    la única máquina donde esa ruta de verdad está ausente (medido, ronda 5, MAJOR-G:
+    `bridge` -- hall9000, atemai y prod SÍ la tienen, vacía). Ahora exige, para CADA
+    ruta de `rutas`, que su estado sea `HASH`, `D` o `AUSENTE` -- `ERROR` (o ausencia
+    total de la línea, o MÁS DE UNA línea reclamando la misma ruta -- MAJOR-H, ronda 5,
+    ver `_estado_de_ruta_declarada`) invalida la huella entera. Que una ruta pase de
+    `AUSENTE` a existir (o al revés) sigue siendo un cambio de TEXTO real (`A <ruta>`
+    desaparece, aparece un hash/`D`) -- `cambio()`/`hallazgos()` lo ven igual que
+    cualquier otro, sin tocar nada acá.
 
     `rutas=None` (el default) SALTA el chequeo por-ruta -- lo pide `vigia_servicio.py`
     explícitamente en sus CUATRO llamadas reales (con `RUTAS_DECLARADAS_POR_DEFAULT`

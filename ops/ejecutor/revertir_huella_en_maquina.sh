@@ -43,14 +43,23 @@ MARCA="$(cd "$REPO" && PYTHONDONTWRITEBYTECODE=1 python3 -c \
   'from jax.ejecutor.contratos.huella import MARCA_HUELLA_SERVICIO; print(MARCA_HUELLA_SERVICIO)')"
 test -n "$MARCA"
 
+# MINOR (ronda 5, auditoría adversarial 2026-09-22): mismo arreglo que
+# instalar_huella_en_maquina.sh -- `$ADMIN_LOCAL` escapado (`$ADMIN_Q`), y el HOME sale
+# de `getent passwd` EN LA REMOTA en vez de `~$ADMIN_LOCAL` (que dejaría de expandir el
+# home en cuanto `$ADMIN_LOCAL` estuviera comillado con `%q`, ver el comentario largo
+# en el instalador).
+ADMIN_Q="$(printf %q "$ADMIN_LOCAL")"
+
 # 3. authorized_keys del administrador: quita SÓLO la(s) línea(s) marcadas -- filtrado y
 #    reemplazo EN UN SOLO comando remoto, sin backup con la llave adentro. BLOCK-2
 #    (ronda 3): el `mktemp` y su único uso quedan DENTRO de la misma invocación de root
 #    (sin hop intermedio, sin nombre fijo expuesto entre crear y usar).
-if corre "test -f ~$ADMIN_LOCAL/.ssh/authorized_keys"; then
-  corre "TMP=\$(mktemp) \
-    && { grep -v $(printf %q " $MARCA\$") ~$ADMIN_LOCAL/.ssh/authorized_keys > \"\$TMP\" || true; } \
-    && install -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0600 \"\$TMP\" ~$ADMIN_LOCAL/.ssh/authorized_keys \
+if corre "home=\$(getent passwd $ADMIN_Q | cut -d: -f6); test -n \"\$home\" \
+  && test -f \"\$home/.ssh/authorized_keys\""; then
+  corre "home=\$(getent passwd $ADMIN_Q | cut -d: -f6); test -n \"\$home\" \
+    && TMP=\$(mktemp) \
+    && { grep -v $(printf %q " $MARCA\$") \"\$home/.ssh/authorized_keys\" > \"\$TMP\" || true; } \
+    && install -o $ADMIN_Q -g $ADMIN_Q -m 0600 \"\$TMP\" \"\$home/.ssh/authorized_keys\" \
     && rm -f \"\$TMP\""
 fi
 
@@ -63,9 +72,12 @@ corre "rm -f /usr/local/sbin/ejecutor-huella"
 # MAJOR-4: verificar, no declarar. Un solo chequeo remoto -- si algo de los tres sigue
 # ahí, esto sale ≠0 (el `&&` corta la cadena) y NUNCA se imprime "revertida". MAJOR-3:
 # la verificación también es por MARCA, no por clave -- así una llave rotada entre medio
-# no puede hacer que esto mienta.
+# no puede hacer que esto mienta. MINOR (ronda 5): si `getent` no resuelve el HOME, esto
+# también tiene que fallar (fail-closed) -- nunca declarar "revertida" sin haber podido
+# verificar de verdad la línea de authorized_keys.
 corre "test ! -e /usr/local/sbin/ejecutor-huella \
   && test ! -e /etc/sudoers.d/50-ejecutor-huella \
-  && { ! grep -q $(printf %q " $MARCA\$") ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null; }"
+  && home=\$(getent passwd $ADMIN_Q | cut -d: -f6) && test -n \"\$home\" \
+  && { ! grep -q $(printf %q " $MARCA\$") \"\$home/.ssh/authorized_keys\" 2>/dev/null; }"
 
 echo "maquina_huella_revertida=\"$NOMBRE\" verificado=true"

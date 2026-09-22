@@ -40,6 +40,11 @@ test -f "$REPO/ops/ejecutor/ejecutor-huella"
 JAX_EJECUTOR_CUENTA="${JAX_EJECUTOR_CUENTA:-axioma}"
 export JAX_EJECUTOR_CUENTA
 . "$REPO/ops/ejecutor/_maquina.sh"
+# MINOR (ronda 5, auditoría adversarial 2026-09-22): `$ADMIN_LOCAL` viajaba SIN escapar
+# dentro de los `corre "..."` remotos del paso 6 -- lo mismo que MAJOR-D (ronda 4) ya
+# había corregido para los temporales. `ADMIN_Q` es la forma escapada, para usar en
+# CUALQUIER `corre "..."`.
+ADMIN_Q="$(printf %q "$ADMIN_LOCAL")"
 ETAPA="$(mktemp -d)"; trap 'rm -rf "$ETAPA"' EXIT
 
 # BLOCK-2 (ronda 3, auditoría adversarial 2026-09-22): un nombre FIJO en /tmp, escrito
@@ -136,8 +141,21 @@ corre "install -d -o root -g root -m 0755 /etc/ejecutor-huella \
 #    antes, si `~$ADMIN_LOCAL/.ssh` no existía, `corre` (que ejecuta como ROOT vía
 #    sudo -n) lo creaba dueño ROOT, dejando al administrador sin poder tocar su propio
 #    `authorized_keys` nunca más.
-corre "install -d -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0700 ~$ADMIN_LOCAL/.ssh"
-ACTUALES="$(corre "cat ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null" || true)"
+#
+#    MINOR (ronda 5, auditoría adversarial 2026-09-22): `$ADMIN_LOCAL` viajaba SIN
+#    escapar acá (`-o $ADMIN_LOCAL -g $ADMIN_LOCAL`, `~$ADMIN_LOCAL/...`) -- mismo tipo
+#    de hueco que MAJOR-D ya había cerrado para los temporales. Pero `$(printf %q
+#    "$ADMIN_LOCAL")` a secas NO alcanza para la parte `~$ADMIN_LOCAL`: la expansión de
+#    `~usuario` la hace el shell ANTES de quitarle las comillas a lo que sigue, así que
+#    un `~'fruiz'/.ssh` (comillado) YA NO expande el home -- se toma como un directorio
+#    literal llamado `~'fruiz'`. La forma correcta es dejar de usar `~usuario` del todo:
+#    el HOME se resuelve con `getent passwd` EN LA REMOTA (mismo criterio que
+#    `tramo_admin()` en `ejecutor-huella`), y de ahí en más todo queda citado con
+#    comillas normales, sin tilde de por medio.
+corre "home=\$(getent passwd $ADMIN_Q | cut -d: -f6); test -n \"\$home\" \
+  && install -d -o $ADMIN_Q -g $ADMIN_Q -m 0700 \"\$home/.ssh\""
+ACTUALES="$(corre "home=\$(getent passwd $ADMIN_Q | cut -d: -f6); test -n \"\$home\" \
+  && cat \"\$home/.ssh/authorized_keys\" 2>/dev/null" || true)"
 printf '%s' "$ACTUALES" > "$ETAPA/actuales"
 ( cd "$REPO" && PYTHONDONTWRITEBYTECODE=1 python3 -c '
 import sys
@@ -146,14 +164,17 @@ actuales = open(sys.argv[1], encoding="utf-8").read()
 sys.stdout.write(actualizar_authorized_keys_admin(
     actuales, tipo=sys.argv[2], clave=sys.argv[3], origen_ip=sys.argv[4]))
 ' "$ETAPA/actuales" "$TIPO" "$CLAVE" "$JAX_EJECUTOR_HUELLA_ORIGEN_IP" ) > "$ETAPA/nuevas"
-if corre "cat ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null" | cmp -s - "$ETAPA/nuevas"; then
+if corre "home=\$(getent passwd $ADMIN_Q | cut -d: -f6); test -n \"\$home\" \
+  && cat \"\$home/.ssh/authorized_keys\" 2>/dev/null" | cmp -s - "$ETAPA/nuevas"; then
   echo "codigo=llave_huella_ya_convergida host=\"$NOMBRE\""
 else
   TMP_AUTH_REMOTO="$(subir_sin_nombre_fijo "$ETAPA/nuevas")"
   # MAJOR-D (ronda 4): mismo motivo -- `$TMP_AUTH_REMOTO` sin comillas. MINOR: trap,
   # no `&& rm -f` -- este es el que más importa limpiar SIEMPRE: trae el contenido
   # completo del nuevo authorized_keys, con la clave del servicio adentro.
-  corre "trap 'rm -f $(printf %q "$TMP_AUTH_REMOTO")' EXIT; install -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0600 $(printf %q "$TMP_AUTH_REMOTO") ~$ADMIN_LOCAL/.ssh/authorized_keys"
+  corre "trap 'rm -f $(printf %q "$TMP_AUTH_REMOTO")' EXIT; \
+    home=\$(getent passwd $ADMIN_Q | cut -d: -f6); test -n \"\$home\" \
+    && install -o $ADMIN_Q -g $ADMIN_Q -m 0600 $(printf %q "$TMP_AUTH_REMOTO") \"\$home/.ssh/authorized_keys\""
 fi
 
 echo "maquina_huella_instalada=\"$NOMBRE\" script_sha256=\"$(corre "sha256sum /usr/local/sbin/ejecutor-huella" | cut -d' ' -f1)\""

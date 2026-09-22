@@ -137,10 +137,18 @@ corrige.
 
 Tiene que imprimir varias líneas `<sha256>  <ruta>` / `D <ruta>` / `A <ruta>` (ausente,
 confirmado -- ronda 4) / `E <ruta> <motivo>` (no se pudo medir) ordenadas — la huella
-real de esa máquina. `/root/.ssh/authorized_keys` va a salir como `A` en las cuatro
-máquinas del inventario (no existe en ninguna, verificado) -- eso es SANO, no una
-falla. Una salida vacía, un `Permission denied`, un `command not found`, o cualquier
-línea `E` inesperada significa que el paso 1 no terminó bien en esa máquina: no seguir.
+real de esa máquina.
+
+**MAJOR-G (ronda 5, auditoría adversarial 2026-09-22): hecho corregido.** Esta misma
+línea decía antes que `/root/.ssh/authorized_keys` "va a salir como `A` en las cuatro
+máquinas del inventario (no existe en ninguna, verificado)" -- **ERA FALSO**. Medido
+el 2026-09-22: esa ruta SÍ existe (vacío, 0600, root) en `atemai`, `ejecutor-prueba` y
+`prod`; sólo **falta en `bridge`** (no verificado si `ejecutor-prueba` la trae de
+fábrica o la creó alguna instalación previa -- no se afirma nada sobre eso acá). En las
+tres primeras tiene que salir un HASH (el de un archivo vacío), no `A`; en `bridge`,
+`A` es lo esperado. Una salida vacía, un `Permission denied`, un `command not found`,
+o cualquier línea `E` inesperada significa que el paso 1 no terminó bien en esa
+máquina: no seguir.
 
 ### Paso 2 — Sembrar `/etc/jax/.env` (lo hace Fernando)
 

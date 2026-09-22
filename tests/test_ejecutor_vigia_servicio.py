@@ -212,11 +212,21 @@ def _base_completa() -> bytes:
     """MINOR (ronda 3)/RONDA 4: `huella_valida()` (llamada por `vigia_servicio.py` con
     `rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT (+ rutas_extra)`) exige que CADA ruta
     declarada tenga un estado válido -- hash/D/A, nunca E ni ausencia total. Los
-    TIPOS de acá reflejan lo que Fernando midió de verdad en hall9000/atemai/prod
-    (ronda 4, auditoría adversarial 2026-09-22): `/etc/ssh/sshd_config` es un ARCHIVO
-    (hash, nunca `D`) y `/root/.ssh/authorized_keys` NO EXISTE en ninguna de las tres
-    -- `A`, no `D`. Escribir `D` para esas dos era ficción, y es justo lo que la
-    ronda 4 vino a corregir."""
+    TIPOS de acá reflejan lo que Fernando midió de verdad en hall9000/atemai/prod:
+    `/etc/ssh/sshd_config` es un ARCHIVO (hash, nunca `D`). Escribir `D` para un
+    archivo era ficción, y es justo lo que la ronda 4 vino a corregir.
+
+    MAJOR-G (ronda 5, auditoría adversarial 2026-09-22): esta misma nota decía antes
+    que `/root/.ssh/authorized_keys` "NO EXISTE en ninguna de las tres" -- ERA FALSO.
+    Medido el 2026-09-22: SÍ existe (vacío, 0600, root) en hall9000, atemai y prod;
+    sólo falta en `bridge`. El fixture sigue usando `A` acá (representa el estado
+    SANO de `bridge`, que es la máquina donde el escenario de ronda 4 de verdad
+    aplicaba) -- eso no cambia; lo que se corrige es la afirmación de a qué máquina
+    describía.
+
+    BLOCK-E, punto 2 (ronda 5): `RUTAS_DECLARADAS_POR_DEFAULT` ahora exige TAMBIÉN el
+    glob de sbin (`RUTA_GLOB_SBIN_EJECUTOR`) representado -- antes quedaba fuera del
+    chequeo por diseño."""
     from jax.ejecutor.contratos import huella as H
     lineas_por_ruta = {
         "/etc/sudoers": f"{_HASH_A}  /etc/sudoers",
@@ -226,9 +236,11 @@ def _base_completa() -> bytes:
         "/etc/ssh/authorized_keys.d": "D /etc/ssh/authorized_keys.d",
         "/root/.ssh/authorized_keys": "A /root/.ssh/authorized_keys",
         "/etc/ejecutor-huella": "D /etc/ejecutor-huella",
+        H.RUTA_GLOB_SBIN_EJECUTOR: f"D {H.RUTA_GLOB_SBIN_EJECUTOR}",
     }
-    assert set(lineas_por_ruta) == set(H.RUTAS_CONTROLES), "RUTAS_CONTROLES cambió -- actualizar este fixture"
-    lineas = [lineas_por_ruta[r] for r in H.RUTAS_CONTROLES]
+    assert set(lineas_por_ruta) == set(H.RUTAS_DECLARADAS_POR_DEFAULT), \
+        "RUTAS_DECLARADAS_POR_DEFAULT cambió -- actualizar este fixture"
+    lineas = [lineas_por_ruta[r] for r in H.RUTAS_DECLARADAS_POR_DEFAULT]
     return ("\n".join(lineas) + "\n").encode()
 
 

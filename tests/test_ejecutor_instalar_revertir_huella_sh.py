@@ -426,3 +426,70 @@ def test_instalar_no_inyecta_comandos_via_tmpdir_hostil_major_d(tmp_path):
     assert r_instalar.returncode == 0, r_instalar.stderr.decode()
     contenido = (binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys").read_text()
     assert "ejecutor-huella-servicio" in contenido  # el instalador igual terminó bien
+
+
+# --- MINOR (ronda 5, auditoría adversarial 2026-09-22): `$ADMIN_LOCAL` viajaba SIN
+# escapar en el instalador y en la reversión (`-o $ADMIN_LOCAL`, `~$ADMIN_LOCAL/...`).
+# Citarlo con `%q` (`$ADMIN_Q`) es necesario -- pero `~$ADMIN_Q` YA NO expandiría el
+# home (la tilde sólo expande delante de un nombre de usuario SIN comillas): por eso el
+# HOME ahora sale de `getent passwd` en la remota, nunca de `~usuario`. -----------------
+
+def test_instalar_y_revertir_ya_no_usan_tilde_para_el_home_del_administrador():
+    """Ni `~$ADMIN_LOCAL` ni `~$ADMIN_Q` (la forma citada, que de todos modos ya no
+    expandiría nada) aparecen en ninguno de los dos guiones -- el HOME sale de
+    `getent passwd`, siempre."""
+    for ruta in (INSTALAR, REVERTIR):
+        lineas_de_codigo = [l for l in ruta.read_text().splitlines() if not l.lstrip().startswith("#")]
+        codigo = "\n".join(lineas_de_codigo)
+        assert "~$ADMIN_LOCAL" not in codigo, ruta
+        assert "~$ADMIN_Q" not in codigo, ruta
+        assert "getent passwd $ADMIN_Q" in codigo, ruta
+
+
+def test_instalar_y_revertir_citan_admin_local_con_printf_q():
+    """`$ADMIN_Q` -- la forma escapada -- es la que viaja dentro de los `corre "..."`;
+    el `$ADMIN_LOCAL` crudo sólo puede aparecer en la asignación que lo define."""
+    for ruta in (INSTALAR, REVERTIR):
+        texto = ruta.read_text()
+        assert 'ADMIN_Q="$(printf %q "$ADMIN_LOCAL")"' in texto, ruta
+
+
+@REQUIERE_BWRAP
+def test_instalar_funciona_con_un_home_resuelto_via_getent_con_espacio(tmp_path):
+    """El HOME de una cuenta puede legítimamente traer un espacio (a diferencia del
+    NOMBRE de usuario, que el sistema restringe) -- `~usuario` nunca podría resolver
+    eso de otra forma que como una convención fija; `getent passwd` sí, porque lee lo
+    que el passwd REALMENTE dice. Se fuerza con un `getent` falso que antepone al PATH
+    real, y el resto de la cadena (instalar, verificar convergencia) tiene que seguir
+    funcionando con ese HOME."""
+    home_con_espacio = tmp_path / "remote-home con espacio"
+    ssh_admin = home_con_espacio / ".ssh"
+    ssh_admin.mkdir(parents=True)
+    (ssh_admin / "authorized_keys").write_text("ssh-ed25519 AAAAotra otra-llave-de-fruiz\n")
+
+    politica_ruta = tmp_path / "politica.json"
+    politica_ruta.write_text(json.dumps(_doc_politica()))
+    binds = _arbol_remoto(tmp_path)
+    del binds[f"/home/{ADMIN}/.ssh"]
+    binds[str(ssh_admin)] = ssh_admin  # bind idéntico -- ya está en su lugar real bajo tmp_path
+
+    bin_falso = _bin_falso(tmp_path)
+    getent_falso = bin_falso / "getent"
+    getent_falso.write_text(
+        "#!/bin/bash\n"
+        f'if [ "$1" = passwd ] && [ "$2" = "{ADMIN}" ]; then\n'
+        f'  echo "{ADMIN}:x:1000:1000:prueba:{home_con_espacio}:/bin/bash"\n'
+        "  exit 0\n"
+        "fi\n"
+        'exec /usr/bin/getent "$@"\n')
+    getent_falso.chmod(0o755)
+
+    env = _entorno_de_prueba(tmp_path, politica_ruta)
+    env["PATH"] = f"{bin_falso}:/usr/sbin:/usr/bin:/sbin:/bin"
+    argv_base = _argv_bwrap(binds) + ["--", "env"] + [f"{k}={v}" for k, v in env.items()]
+
+    r = subprocess.run(argv_base + ["bash", str(INSTALAR), "prueba-huella"],
+                       capture_output=True, timeout=60, cwd=str(RAIZ))
+    assert r.returncode == 0, r.stderr.decode()
+    contenido = (ssh_admin / "authorized_keys").read_text()
+    assert "ejecutor-huella-servicio" in contenido

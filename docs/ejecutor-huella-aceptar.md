@@ -12,13 +12,20 @@ binarios `/usr/local/sbin/ejecutor-*`. Nada de eso debe cambiar NUNCA durante un
 misión. Si cambia, la huella pone la pausa del Ejecutor y la marca de esa
 máquina/misión queda en estado `reportada`, con el diff de lo que cambió guardado.
 
-**Ronda 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):**
-cada ruta que se mide reporta exactamente uno de cuatro estados: un hash (existe, es
-un archivo), `D <ruta>` (existe, es un directorio, con su listado), `A <ruta>`
-(medida y CONFIRMADA ausente -- `/root/.ssh/authorized_keys` no existe en hall9000,
-atemai NI prod, y eso es sano) o `E <ruta> <motivo>` (no se pudo medir -- esto SÍ
-bloquea). Antes, "ausente" y "no medible" daban lo mismo (cero líneas) y la huella
-trataba las dos como inválidas, bloqueando el Ejecutor en máquinas SANAS.
+**Ronda 4 (auditoría adversarial 2026-09-22):** cada ruta que se mide reporta
+exactamente uno de cuatro estados: un hash (existe, es un archivo), `D <ruta>`
+(existe, es un directorio, con su listado), `A <ruta>` (medida y CONFIRMADA ausente)
+o `E <ruta> <motivo>` (no se pudo medir -- esto SÍ bloquea). Antes, "ausente" y "no
+medible" daban lo mismo (cero líneas) y la huella trataba las dos como inválidas,
+bloqueando el Ejecutor en una máquina SANA.
+
+**MAJOR-G (ronda 5, auditoría adversarial 2026-09-22): hecho corregido.** El párrafo
+de arriba, en la ronda 4, decía que `/root/.ssh/authorized_keys` "no existe en
+hall9000, atemai NI prod" -- **ERA FALSO**. Medido el 2026-09-22: esa ruta **SÍ
+existe** (archivo vacío, 0600, dueño root) en hall9000, atemai y prod; **sólo falta en
+`bridge`**. El arreglo de la ronda 4 sigue haciendo falta igual -- `bridge` es la
+máquina SANA donde de verdad da `A`, y la ronda 3 la bloqueaba ahí como si la
+medición hubiera fallado -- pero el hecho que se citaba como ejemplo estaba mal.
 
 Una marca `reportada` **bloquea cualquier misión nueva en esa máquina** hasta que
 alguien la acepte explícitamente -- a propósito: no se re-mide sola ni se destraba con

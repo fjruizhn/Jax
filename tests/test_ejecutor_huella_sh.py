@@ -375,3 +375,132 @@ def test_tramo_admin_con_authorized_keys_ausente_da_a_con_ruta_resuelta(tmp_path
     assert r.returncode == 0
     lineas = r.stdout.decode().splitlines()
     assert f"A {admin_home}/.ssh/authorized_keys" in lineas
+
+
+# --- RONDA 5 (auditoría adversarial 2026-09-22): BLOCK-E -- un `find` que falla dentro
+# de `tramo()` (caso directorio) pasaba por bueno: los tres `find` iban con
+# `2>/dev/null` sin mirar su `$?`, así que con un `find` roto TODAS las líneas de
+# contenido desaparecían en silencio y el guion de todos modos declaraba `D <ruta>`. ---
+
+@REQUIERE_BWRAP
+def test_find_roto_en_un_directorio_da_error_no_pasa_por_bueno_block_e(tmp_path):
+    """Un subdirectorio 0000 (ni el propio dueño puede entrar sin ser root) hace que
+    `find /etc/sudoers.d -mindepth 1 ...` falle a mitad de camino -- el guion tiene que
+    decir `E /etc/sudoers.d find_fallo`, no `D /etc/sudoers.d` con el contenido
+    incompleto callado."""
+    binds = _arbol_de_prueba(tmp_path)
+    inaccesible = binds["/etc/sudoers.d"] / "no-entrar"
+    inaccesible.mkdir()
+    inaccesible.chmod(0o000)
+    try:
+        base = _argv_bwrap(binds)
+        r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+        assert r.returncode == 0
+        lineas = r.stdout.decode().splitlines()
+        assert "E /etc/sudoers.d find_fallo" in lineas, lineas
+        assert "D /etc/sudoers.d" not in lineas
+    finally:
+        inaccesible.chmod(0o755)  # para que tmp_path se pueda limpiar solo
+
+
+@REQUIERE_BWRAP
+def test_el_mutante_que_ignora_el_rc_de_find_muere_block_e(tmp_path):
+    """El mutante EXACTO que pide la auditoría: revertir el chequeo de `$?` de los tres
+    `find` del caso directorio a la forma de rondas 2-4 (`2>/dev/null` a secas, sin
+    mirar el `$?`, declarando `D <ruta>` siempre que `stat` haya dicho "directory").
+    Con el mismo árbol roto de arriba, el mutante dice `D`; el guion real dice `E`."""
+    binds = _arbol_de_prueba(tmp_path)
+    inaccesible = binds["/etc/sudoers.d"] / "no-entrar"
+    inaccesible.mkdir()
+    inaccesible.chmod(0o000)
+    try:
+        mutado = re.sub(
+            r'    directory\)\n'
+            r'      salida="\$\("\$MKTEMP"\)"\n'
+            r'      errd="\$\("\$MKTEMP"\)"\n'
+            r'      "\$FIND" "\$ruta" -mindepth 1 -xtype f -exec "\$SHA256SUM" \{\} \+ >"\$salida" 2>>"\$errd"\n'
+            r'      rc1=\$\?\n'
+            r'      "\$FIND" "\$ruta" -mindepth 1 -type l -printf "L %p -> %l\\n" >>"\$salida" 2>>"\$errd"\n'
+            r'      rc2=\$\?\n'
+            r'      "\$FIND" "\$ruta" -mindepth 1 -type d -printf "D %p\\n" >>"\$salida" 2>>"\$errd"\n'
+            r'      rc3=\$\?\n'
+            r'      if \[ "\$rc1" -ne 0 \] \|\| \[ "\$rc2" -ne 0 \] \|\| \[ "\$rc3" -ne 0 \]; then\n'
+            r'        echo "E \$ruta find_fallo"\n'
+            r'      else\n'
+            r'        echo "D \$ruta"\n'
+            r'        cat "\$salida"\n'
+            r'      fi\n'
+            r'      rm -f "\$salida" "\$errd"\n'
+            r'      ;;\n',
+            '    directory)\n'
+            '      echo "D $ruta"\n'
+            '      "$FIND" "$ruta" -mindepth 1 -xtype f -exec "$SHA256SUM" {} + 2>/dev/null\n'
+            '      "$FIND" "$ruta" -mindepth 1 -type l -printf "L %p -> %l\\n" 2>/dev/null\n'
+            '      "$FIND" "$ruta" -mindepth 1 -type d -printf "D %p\\n" 2>/dev/null\n'
+            '      ;;\n',
+            TEXTO, count=1)
+        assert mutado != TEXTO  # si esto falla, el regex de arriba no encontró el bloque -- no es un mutante real
+        guion_mutado = tmp_path / "ejecutor-huella-mutado-rc"
+        guion_mutado.write_text(mutado)
+        guion_mutado.chmod(0o755)
+
+        base = _argv_bwrap(binds)
+        salida_real = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+        salida_mutada = subprocess.run(base + ["--", str(guion_mutado)], capture_output=True, timeout=30)
+
+        assert salida_real.returncode == 0 and salida_mutada.returncode == 0
+        assert "E /etc/sudoers.d find_fallo" in salida_real.stdout.decode().splitlines()
+        assert "D /etc/sudoers.d" in salida_mutada.stdout.decode().splitlines()  # el mutante "logra" pasar
+        assert salida_real.stdout != salida_mutada.stdout
+    finally:
+        inaccesible.chmod(0o755)
+
+
+@REQUIERE_BWRAP
+def test_glob_de_sbin_representado_y_find_roto_tambien_da_error_block_e2(tmp_path):
+    """BLOCK-E, punto 2: el glob de `/usr/local/sbin/ejecutor-*` tenía el MISMO
+    defecto (dos `find` con `2>/dev/null`, sin mirar `$?`) y además no estaba
+    representado en absoluto en `huella_valida()`. Ahora un `find` roto sobre ESE
+    barrido también da `E .../ejecutor-* find_fallo`, nunca silencio ni `D` a medias."""
+    binds = _arbol_de_prueba(tmp_path)
+    sbin = binds["/usr/local/sbin"]
+    # `-maxdepth 1` no BAJA a subcarpetas -- para romper el `find` de verdad hay que
+    # quitarle permiso de lectura/entrada al directorio MISMO que lista, no a algo
+    # adentro (una subcarpeta 0000 ahí abajo nunca la tocaría).
+    sbin.chmod(0o000)
+    try:
+        base = _argv_bwrap(binds)
+        r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+        assert r.returncode == 0
+        lineas = r.stdout.decode().splitlines()
+        assert f"E {H.RUTA_GLOB_SBIN_EJECUTOR} find_fallo" in lineas, lineas
+        assert f"D {H.RUTA_GLOB_SBIN_EJECUTOR}" not in lineas
+    finally:
+        sbin.chmod(0o755)
+
+
+# --- MAJOR-H (ronda 5): un destino de symlink puede contener un salto de línea DE
+# VERDAD -- `find -printf "%l"` lo imprime tal cual, partiendo una línea en dos. Con eso
+# se puede forjar una segunda línea que dice ser la MISMA ruta declarada que la línea
+# genuina (ej. una `A <ruta>` forjada tapando la `D <ruta>` real, o al revés). -----------
+
+@REQUIERE_BWRAP
+def test_symlink_con_salto_de_linea_no_enmascara_un_estado_real_major_h(tmp_path):
+    """La vulnerabilidad es reproducible contra el guion REAL: un symlink dentro de
+    `/etc/sudoers.d` cuyo destino trae un `\\n` seguido de `A /etc/sudoers.d` inyecta
+    esa línea en la salida, conviviendo con la `D /etc/sudoers.d` genuina -- dos
+    líneas que dicen ser la MISMA ruta, con estados CONTRADICTORIOS. `huella_valida`
+    tiene que rechazar esto (MAJOR-H: colisión = inválido), no quedarse con la primera
+    por orden."""
+    binds = _arbol_de_prueba(tmp_path)
+    enlace = binds["/etc/sudoers.d"] / "evil"
+    os.symlink("primera-parte\nA /etc/sudoers.d", enlace)
+    base = _argv_bwrap(binds)
+    r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    assert r.returncode == 0
+    lineas = r.stdout.decode().splitlines()
+    # la vulnerabilidad es real: las dos líneas conviven en la salida de verdad
+    assert lineas.count("D /etc/sudoers.d") == 1
+    assert "A /etc/sudoers.d" in lineas
+    h = H.huella_desde_salida("prueba", r.stdout)
+    assert H.huella_valida(h, rutas=("/etc/sudoers.d",)) is False

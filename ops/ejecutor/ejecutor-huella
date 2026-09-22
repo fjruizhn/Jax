@@ -34,22 +34,27 @@
 # otro control. El HOME del administrador (ronda 3, MAJOR-5) sale de `getent passwd`, el
 # passwd REAL de esta máquina, no de una convención `/home/<usuario>`.
 #
-# RONDA 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
-# `/root/.ssh/authorized_keys` NO EXISTE en hall9000, atemai NI prod -- y esa es la
-# configuración CORRECTA de esas máquinas, no una medición rota. La versión de ronda 3
-# no distinguía "esta ruta no existe" (estado normal y esperado) de "no pude medir esta
-# ruta" (sudo denegado, `stat` roto, lo que sea) -- las dos daban CERO líneas, y
-# `huella_valida(rutas=...)` trataba ambas como medición inválida, bloqueando el
-# Ejecutor en MÁQUINAS SANAS. Ahora cada ruta declarada (RUTAS_CONTROLES +
-# `tramo_admin`) emite SIEMPRE una de cuatro cosas:
+# RONDA 4 (auditoría adversarial 2026-09-22): cada ruta declarada (RUTAS_CONTROLES +
+# `tramo_admin`) emite SIEMPRE una de cuatro cosas, en vez de desaparecer en silencio
+# cuando no existe o cuando no se pudo medir (las dos daban CERO líneas con el `find`
+# de ronda 3, y `huella_valida(rutas=...)` trataba ambas como medición inválida):
 #   - `<sha256>  <ruta>`           -- es un archivo regular, esto es su contenido;
 #   - `D <ruta>` (+ su listado)    -- es un directorio, existe (aunque esté vacío);
 #   - `A <ruta>`                   -- MEDIDO y CONFIRMADO ausente (no es un error);
 #   - `E <ruta> <motivo>`          -- NO se pudo medir (permiso denegado, tipo raro,
-#                                      sha256sum roto) -- esto SÍ es inválido, ver
+#                                      sha256sum/find roto) -- esto SÍ es inválido, ver
 #                                      `huella_valida()` en huella.py.
 # Que una ruta pase de `A` a existir (o al revés) sigue siendo un CAMBIO real, y pausa
 # -- es la señal que este mecanismo existe para dar.
+#
+# MAJOR-G (ronda 5, auditoría adversarial 2026-09-22): el texto de la ronda 4 acá mismo
+# decía "`/root/.ssh/authorized_keys` NO EXISTE en hall9000, atemai NI prod" -- ERA
+# FALSO. Medido el 2026-09-22 (Fernando): esa ruta SÍ existe (archivo vacío, 0600,
+# dueño root) en hall9000, atemai Y prod; sólo FALTA en `bridge`. El arreglo de arriba
+# sigue haciendo falta igual -- bridge es la máquina SANA donde de verdad da `A`, y la
+# ronda 3 la bloqueaba ahí exactamente como si la medición hubiera fallado -- pero el
+# hecho concreto que se citaba estaba mal, y quedaba mal en tres lugares más (huella.py,
+# los dos docs de runbook): corregido en todos.
 #
 # MISMA lógica que `jax.ejecutor.contratos.huella.comando_huella()` (RUTAS_CONTROLES +
 # el authorized_keys del administrador, mismo orden, mismo formato de salida) --
@@ -77,6 +82,16 @@ ADMIN_USUARIO_ARCHIVO=/etc/ejecutor-huella/admin_usuario
 # "regular file"/"regular empty file"/"directory" en la ruta declarada MISMA (por
 # ejemplo, un symlink puesto donde se espera un archivo) es `E`, no se intenta adivinar
 # qué hacer con él.
+#
+# BLOCK-E (ronda 5, auditoría adversarial 2026-09-22): el caso ARCHIVO ya tenía guarda
+# (`sha256sum` sin salida -> `E ... sha256sum_fallo`); el caso DIRECTORIO no la tenía --
+# los tres `find` iban con `2>/dev/null` y SIN mirar su `$?`, así que un `find` roto (un
+# subdirectorio sin permiso a mitad de camino, por ejemplo) hacía desaparecer TODAS las
+# líneas de contenido en silencio, y el guion de todos modos imprimía `D <ruta>` -- la
+# huella pasaba por buena sin haber podido enumerar el contenido real. Ahora la salida
+# de los tres `find` se junta en un archivo aparte y su `$?` se mira ANTES de decidir si
+# el estado es `D` (los tres a cero) o `E ... find_fallo` (cualquiera de los tres
+# no-cero) -- comprobado por el auditor con bwrap.
 tramo() {
   ruta="$1"
   err="$("$MKTEMP")"
@@ -103,15 +118,51 @@ tramo() {
       fi
       ;;
     directory)
-      echo "D $ruta"
-      "$FIND" "$ruta" -mindepth 1 -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
-      "$FIND" "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" 2>/dev/null
-      "$FIND" "$ruta" -mindepth 1 -type d -printf "D %p\n" 2>/dev/null
+      salida="$("$MKTEMP")"
+      errd="$("$MKTEMP")"
+      "$FIND" "$ruta" -mindepth 1 -xtype f -exec "$SHA256SUM" {} + >"$salida" 2>>"$errd"
+      rc1=$?
+      "$FIND" "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+      rc2=$?
+      "$FIND" "$ruta" -mindepth 1 -type d -printf "D %p\n" >>"$salida" 2>>"$errd"
+      rc3=$?
+      if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ] || [ "$rc3" -ne 0 ]; then
+        echo "E $ruta find_fallo"
+      else
+        echo "D $ruta"
+        cat "$salida"
+      fi
+      rm -f "$salida" "$errd"
       ;;
     *)
       echo "E $ruta tipo_no_esperado:$tipo"
       ;;
   esac
+}
+
+# tramo_sbin_ejecutor(): BLOCK-E, punto 2 (ronda 5) -- el glob de binarios propios tenía
+# el MISMO defecto que el caso directorio de arriba (dos `find` con `2>/dev/null` sin
+# mirar `$?`) y además NO estaba representado en `huella_valida(rutas=...)` en absoluto
+# ("su desaparición total no invalida nada", por diseño de ronda 4). Ahora reporta su
+# propio estado (`D`/`E ... find_fallo`) bajo el sentinela `$1/$2` (un `*` literal que
+# nunca puede colisionar con un archivo real) -- `RUTAS_DECLARADAS_POR_DEFAULT`
+# (huella.py) lo exige como cualquier otra ruta declarada.
+tramo_sbin_ejecutor() {
+  base="$1"
+  patron="$2"
+  salida="$("$MKTEMP")"
+  errd="$("$MKTEMP")"
+  "$FIND" "$base" -maxdepth 1 -name "$patron" -xtype f -exec "$SHA256SUM" {} + >"$salida" 2>>"$errd"
+  rc1=$?
+  "$FIND" "$base" -maxdepth 1 -name "$patron" -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+  rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    echo "E $base/$patron find_fallo"
+  else
+    echo "D $base/$patron"
+    cat "$salida"
+  fi
+  rm -f "$salida" "$errd"
 }
 
 # tramo_admin(): MAJOR-C (ronda 4) -- NUNCA `return 0` mudo. Si no se puede determinar
@@ -145,6 +196,5 @@ tramo_admin() {
   tramo /root/.ssh/authorized_keys
   tramo /etc/ejecutor-huella
   tramo_admin
-  "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
-  "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -type l -printf "L %p -> %l\n" 2>/dev/null
+  tramo_sbin_ejecutor /usr/local/sbin 'ejecutor-*'
 } | "$SORT"

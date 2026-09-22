@@ -731,12 +731,14 @@ def test_actualizar_authorized_keys_admin_no_toca_otras_llaves_del_administrador
     assert salida.count("\n") == 3  # 2 líneas originales + 1 nueva
 
 
-# --- RONDA 4 (auditoría adversarial 2026-09-22, BLOCK reproducido en atemai y prod):
-# el guion declara SIEMPRE una línea por ruta -- hash/D/A/E. `A` (medida, confirmada
-# AUSENTE) es válido; `E` (no se pudo medir) es inválido. Antes, "ausente" y "no
-# medible" daban lo MISMO (cero líneas) y `huella_valida(rutas=...)` los trataba
-# igual -- bloqueaba el Ejecutor en máquinas SANAS (`/root/.ssh/authorized_keys` no
-# existe en hall9000, atemai NI prod). --------------------------------------------------
+# --- RONDA 4 (auditoría adversarial 2026-09-22): el guion declara SIEMPRE una línea
+# por ruta -- hash/D/A/E. `A` (medida, confirmada AUSENTE) es válido; `E` (no se pudo
+# medir) es inválido. Antes, "ausente" y "no medible" daban lo MISMO (cero líneas) y
+# `huella_valida(rutas=...)` los trataba igual -- bloqueaba el Ejecutor en la máquina
+# donde esa ruta de verdad está ausente (MAJOR-G, ronda 5: medido el 2026-09-22 --
+# `/root/.ssh/authorized_keys` SÍ existe, vacío, en hall9000, atemai y prod; sólo
+# falta en `bridge`. El texto de esta sección decía antes "no existe en NINGUNA de
+# las tres" -- ERA FALSO, corregido acá y en huella.py/los docs de runbook). ------------
 
 def _huella_de_texto(texto: str):
     return H.huella_desde_salida("atemai", texto.encode())
@@ -755,8 +757,9 @@ def test_huella_valida_estado_d_es_valido():
 
 
 def test_huella_valida_estado_ausente_es_valido():
-    """El punto central de la ronda 4: `/root/.ssh/authorized_keys` NO EXISTE en
-    hall9000, atemai NI prod (verificado por Fernando) -- eso es sano, `A` tiene que
+    """El punto central de la ronda 4: una ruta declarada puede estar genuinamente
+    ausente (medido por Fernando, ronda 5: es el caso de `bridge` -- hall9000, atemai
+    y prod SÍ tienen `/root/.ssh/authorized_keys`) -- eso es sano, `A` tiene que
     contar como medido y válido, no como "no se pudo medir"."""
     hash64 = "a" * 64
     h = _huella_de_texto(f"{hash64}  /etc/sudoers\nA /root/.ssh/authorized_keys\n")
@@ -810,8 +813,9 @@ def test_el_mutante_all_a_any_en_huella_valida_muere():
 
 
 def test_el_mutante_que_trata_ausente_como_invalido_muere():
-    """El mutante que reproduce el BLOCK real de la ronda 3 (reproducido en
-    atemai/prod): tratar `A` igual que "no medible" -- rechazaría una máquina SANA."""
+    """El mutante que reproduce el BLOCK real de la ronda 3: tratar `A` igual que "no
+    medible" -- rechazaría una máquina SANA (`bridge`, donde esa ruta de verdad no
+    existe)."""
     def valida_mutada_sin_ausente(h, *, rutas=None):
         texto = h.texto.strip()
         if not texto:
@@ -828,3 +832,87 @@ def test_el_mutante_que_trata_ausente_como_invalido_muere():
     rutas = ("/etc/sudoers", "/root/.ssh/authorized_keys")
     assert H.huella_valida(h, rutas=rutas) is True  # el código real: A es válido
     assert valida_mutada_sin_ausente(h, rutas=rutas) is False  # el mutante bloquea una máquina sana
+
+
+# --- BLOCK-E, punto 2 (ronda 5, auditoría adversarial 2026-09-22): el glob de sbin
+# tenía el MISMO defecto que el caso directorio (un `find` que falla pasaba por
+# bueno) y además NO estaba representado en `huella_valida()` en absoluto -- "su
+# desaparición total no invalida nada", por diseño de ronda 4. Ahora
+# `RUTAS_DECLARADAS_POR_DEFAULT` lo exige como cualquier otra ruta. --------------------
+
+def test_rutas_declaradas_por_default_incluye_el_glob_de_sbin():
+    assert H.RUTA_GLOB_SBIN_EJECUTOR in H.RUTAS_DECLARADAS_POR_DEFAULT
+    assert H.RUTAS_DECLARADAS_POR_DEFAULT == H.RUTAS_CONTROLES + (H.RUTA_GLOB_SBIN_EJECUTOR,)
+
+
+def test_huella_valida_exige_que_el_glob_de_sbin_este_representado():
+    """Sin ninguna línea (ni D ni E) para el glob de sbin, una huella que por lo
+    demás está completa se rechaza -- antes esta ruta quedaba fuera del chequeo."""
+    hash64 = "a" * 64
+    h = _huella_de_texto(f"{hash64}  /etc/sudoers\n")
+    assert H.huella_valida(h, rutas=(H.RUTA_GLOB_SBIN_EJECUTOR,)) is False
+
+
+def test_huella_valida_con_glob_de_sbin_representado_pasa():
+    hash64 = "a" * 64
+    texto = f"{hash64}  /etc/sudoers\nD {H.RUTA_GLOB_SBIN_EJECUTOR}\n"
+    h = _huella_de_texto(texto)
+    assert H.huella_valida(h, rutas=("/etc/sudoers", H.RUTA_GLOB_SBIN_EJECUTOR)) is True
+
+
+def test_huella_valida_con_glob_de_sbin_roto_es_invalida():
+    hash64 = "a" * 64
+    texto = f"{hash64}  /etc/sudoers\nE {H.RUTA_GLOB_SBIN_EJECUTOR} find_fallo\n"
+    h = _huella_de_texto(texto)
+    assert H.huella_valida(h, rutas=("/etc/sudoers", H.RUTA_GLOB_SBIN_EJECUTOR)) is False
+
+
+# --- MAJOR-H (ronda 5): un destino de symlink (o un nombre de archivo) puede traer un
+# salto de línea de VERDAD -- `find -printf` lo imprime tal cual, partiendo una línea en
+# dos y forjando una SEGUNDA línea que dice ser la MISMA ruta declarada que la línea
+# genuina. Quedarse con la PRIMERA por orden (rondas 2-4) deja que la forjada gane si
+# ordena antes que la real. Dos o más líneas para la MISMA ruta declarada, sin importar
+# sus estados, NUNCA es sano. --------------------------------------------------------
+
+def test_huella_valida_dos_lineas_para_la_misma_ruta_es_invalida_major_h():
+    """Un hash genuino de OTRA ruta hace que el chequeo "al menos un hash en algún
+    lado" pase -- así se aísla la colisión de `/etc/sudoers.d` (una `D` genuina y una
+    `E` forjada, o viceversa: da igual cuál "gane" por orden, las dos juntas ya son
+    inválidas)."""
+    hash64 = "a" * 64
+    texto = f"{hash64}  /etc/ssh/sshd_config\nD /etc/sudoers.d\nE /etc/sudoers.d find_fallo\n"
+    h = _huella_de_texto(texto)
+    assert H.huella_valida(h, rutas=("/etc/sudoers.d",)) is False
+
+
+def test_huella_valida_dos_lineas_para_la_misma_ruta_es_invalida_aunque_ambas_serian_validas_solas():
+    """Ni siquiera dos estados "válidos" (D y A) para la MISMA ruta se toleran -- una
+    colisión es, por definición, una medición que no se puede confiar por sí sola."""
+    hash64 = "a" * 64
+    texto = f"{hash64}  /etc/ssh/sshd_config\nD /etc/sudoers.d\nA /etc/sudoers.d\n"
+    h = _huella_de_texto(texto)
+    assert H.huella_valida(h, rutas=("/etc/sudoers.d",)) is False
+
+
+def test_el_mutante_que_vuelve_al_primer_match_por_orden_muere_major_h():
+    """El mutante EXACTO que pide la auditoría: `_estado_de_ruta_declarada` quedándose
+    con la PRIMERA línea que dice ser `ruta`, en vez de detectar la colisión."""
+    def estado_mutado_primer_match(lineas, ruta):
+        con_contenido_debajo = False
+        for linea in lineas:
+            clasificada = H._clasificar_linea(linea)
+            if clasificada is None:
+                continue
+            r, estado = clasificada
+            if r == ruta:
+                return estado  # el mutante: se queda con la PRIMERA, sin ver si hay otra
+            if r.startswith(ruta + "/"):
+                con_contenido_debajo = True
+        return H._D if con_contenido_debajo else None
+
+    hash64 = "a" * 64
+    # "A" ordena antes que "D" (byte a byte, LC_ALL=C) -- la forjada "gana" con el
+    # criterio viejo si apareciera primero en la lista que se le pasa a la función.
+    lineas = [f"{hash64}  /etc/ssh/sshd_config", "A /etc/sudoers.d", "D /etc/sudoers.d"]
+    assert H._estado_de_ruta_declarada(lineas, "/etc/sudoers.d") == H._ERROR  # el código real: colisión
+    assert estado_mutado_primer_match(lineas, "/etc/sudoers.d") == H._AUSENTE  # el mutante "logra" pasar
