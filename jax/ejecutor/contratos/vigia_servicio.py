@@ -211,9 +211,10 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
 def hosts_con_sudo(hosts_mision, hosts_pol: dict) -> tuple:
     """Las máquinas de la misión que son remotas -- M-1/M-2 (ronda 3): "con sudo" hoy
     equivale a "remota" (comentario largo en `_principal`: hall9000 es la única local y
-    quedó `sudo=false` EN `maquinas.toml` -- que ahí significa "no utilizable desde la
-    jaula", no "sin sudo real"; ver M-3, ronda 8, en ese comentario). Una máquina de la
-    misión que no está en la política se omite acá -- ya la rechaza
+    quedó `sudo=false` en `maquinas.toml` -- y desde la noche del 2026-09-22 (MAJOR-2,
+    ronda 9) eso también es literal: a `axioma` se le quitó el sudo en hall9000, no
+    sólo quedó inerte por la jaula. Ver M-3/MAJOR-2, ronda 9, en ese comentario). Una
+    máquina de la misión que no está en la política se omite acá -- ya la rechaza
     `arranque.exigir_contratos` antes de llegar a este punto."""
     return tuple(sorted(n for n in hosts_mision if n in hosts_pol and not hosts_pol[n].es_local))
 
@@ -352,6 +353,10 @@ async def _principal(ruta_mision: Path) -> int:
 
     mision = mision_desde_bytes(await asyncio.to_thread(ruta_mision.read_bytes))
     ctx = arranque.contexto_desde_entorno(os.environ, mision.hosts)
+    # Barrido (ronda 9): al arrancar el vigía, limpia los temporales huérfanos que un
+    # kill puede haber dejado de una corrida anterior de `quitar_pausa_si` -- nunca la
+    # pausa misma (ver `pausa.barrer_temporales_huerfanos`).
+    await asyncio.to_thread(pausa.barrer_temporales_huerfanos, ctx.pausa)
     latido_cada_s = latido_cada_desde_entorno(os.environ, ctx.latido_max_s)
     # Spec 2026-09-18-auditor-local-opcion.md §4: mismo punto único que
     # mision_servicio.py::auditar y arranque.py::p_c5 -- las tres piezas de C5 auditan la
@@ -371,17 +376,22 @@ async def _principal(ruta_mision: Path) -> int:
     # una máquina remota pierde el sudo o una local lo gana, este criterio hay que
     # revisarlo junto con esa migración, no antes.
     #
-    # M-3 (ronda 8, texto): ese `sudo=false` NO dice que axioma no tenga sudo en
-    # hall9000 -- SÍ lo tiene, `NOPASSWD:ALL`, en el sudoers real de la máquina. Lo que
-    # dice es que ese sudo queda INERTE desde donde corre el cerebro: la jaula bwrap de
-    # axioma tiene `NoNewPrivs`, que el kernel hace cumplir pase lo que pase en
-    # sudoers -- ningún exec dentro de la jaula puede ganar privilegio, sudo incluido.
-    # Y aunque NoNewPrivs no estuviera, axioma no tiene con qué entrar por ssh a
-    # hall9000 como otra cuenta: la única llave autorizada para axioma en hall9000 es
-    # la del CONTROLADOR (`/etc/jax/controlador/`, dueño `jaxsvc`, modo `600` --
-    # axioma no puede ni leerla; verificado por Hyde). `maquinas.toml: sudo=false`
-    # entonces significa "no utilizable DESDE LA JAULA", no "sin sudo real": hay dos
-    # capas de freno (NoNewPrivs + la llave que axioma no puede leer), no una sola.
+    # M-3 (ronda 8, texto) -- CORREGIDO en ronda 9 (MAJOR-2, auditoría 7): esto decía
+    # que axioma SÍ tenía sudo real en hall9000 (NOPASSWD:ALL) pero quedaba inerte por
+    # NoNewPrivs en la jaula. Eso YA NO ES CIERTO -- HECHO NUEVO, verificado la noche
+    # del 2026-09-22: a `axioma` se le QUITÓ el sudo en hall9000 (`sudo -l -U axioma` →
+    # no permitido). Las remotas SÍ lo conservan. `maquinas.toml: sudo=false` para
+    # hall9000 hoy es tanto "no utilizable desde la jaula" (NoNewPrivs, sigue siendo
+    # cierto y sigue siendo una capa aparte) COMO "sin la concesión de sudoers": las
+    # dos cosas, no sólo una. La única llave autorizada para axioma en hall9000 sigue
+    # siendo la del CONTROLADOR (`/etc/jax/controlador/`, dueño `jaxsvc`, modo `600` --
+    # axioma no puede ni leerla; verificado por Hyde) -- eso no cambió.
+    #
+    # EL CONTROL REAL (ronda 9): no es "axioma tiene o no tiene sudo" en abstracto --
+    # son los permisos del registro de C3 y de `JAX_EJECUTOR_MISIONES` (ambos `jaxsvc`)
+    # MÁS quién, concretamente, tiene sudo real hacia `jaxsvc` en esta máquina. Hoy en
+    # hall9000 eso es sólo `fruiz`. Ver `huella.py::principal` y `_registrar_aceptacion`
+    # para el mismo razonamiento aplicado a la CLI de aceptación de huellas.
     remotas_con_sudo = hosts_con_sudo(mision.hosts, hosts_pol)
     # M-1 (ronda 4): la huella la toma el CONTROLADOR como `fruiz` (JAX_EJECUTOR_ADMIN_USUARIO),
     # NUNCA como `axioma` -- una cuenta sin privilegios no puede medirse a sí misma. Mismo

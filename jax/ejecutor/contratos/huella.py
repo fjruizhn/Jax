@@ -261,7 +261,8 @@ async def _tomar_huella_actual(host_nombre: str, *, politica_ruta: Path, admin_u
 
 
 def _registrar_aceptacion(registro_ruta: Path, *, host: str, mision_id: str, aceptado_por: str,
-                          diff: tuple, sin_medir: bool, motivo: str | None = None) -> int:
+                          diff: tuple, sin_medir: bool, motivo: str | None = None,
+                          identidad_declarada_por: str = "proceso") -> int:
     """Deja constancia de la aceptación en el registro append-only de C3 (el mismo que
     ya audita cada paso del cerebro -- `jax.ejecutor.contratos.registro`, cadena
     encadenada en hall9000).
@@ -274,23 +275,27 @@ def _registrar_aceptacion(registro_ruta: Path, *, host: str, mision_id: str, ace
     `sudo -u jaxsvc python -m jax.ejecutor.contratos.huella aceptar ...` (no
     `sudo python -m ...`: eso escribiría como root, y la marca de la huella -- que SÍ
     es escribible por fruiz vía la ACL de `JAX_EJECUTOR_MISIONES` -- quedaría con un
-    dueño distinto al resto del árbol si el mismo proceso la toca de paso). `SUDO_UID`
-    sigue siendo el de quien invocó `sudo` (no el de `jaxsvc`, el destino) -- por eso
-    `aceptado_por` puede seguir resolviendo a la persona real aunque el PROCESO corra
-    como `jaxsvc` (ver `_resolver_aceptado_por`)."""
+    dueño distinto al resto del árbol si el mismo proceso la toca de paso).
+
+    M-2 (ronda 9, MAJOR-2): `aceptado_por` sale de `SUDO_UID`, y el evento lo dice tal
+    cual -- `identidad_declarada_por` queda como `"sudo"` o `"proceso"` (ver
+    `_resolver_identidad_invocante`). No es "identidad verificada": es lo que el
+    entorno DECLARÓ. El control real de quién pudo llegar hasta acá son los permisos
+    de este mismo registro y de `JAX_EJECUTOR_MISIONES` (ambos `jaxsvc`) más quién
+    tiene sudo real hacia `jaxsvc` en esta máquina."""
     from jax.ejecutor.contratos.registro import Registro
 
     reg = Registro(registro_ruta)
     try:
         return reg.anotar({"evento": "huella_aceptada", "host": host, "mision_id": mision_id,
                            "aceptado_por": aceptado_por, "sin_medir": sin_medir, "diff_aceptado": list(diff),
-                           "motivo": motivo})
+                           "motivo": motivo, "identidad_declarada_por": identidad_declarada_por})
     finally:
         reg.cerrar()
 
 
 async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: str, sin_medir: bool = False,
-                  motivo: str | None = None,
+                  motivo: str | None = None, identidad_declarada_por: str = "proceso",
                   politica_ruta: Path | None = None, admin_usuario: str | None = None,
                   registro_ruta: Path | None = None, pausa_ruta: Path | None = None,
                   tomar_huella_actual=None, registrar=_registrar_aceptacion,
@@ -316,8 +321,15 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
     `tomar_huella_actual`/`registrar` inyectables (tests): por default,
     `tomar_huella_actual` es `_tomar_huella_actual` (ssh real, necesita
     `politica_ruta`/`admin_usuario`) y `registrar` es `_registrar_aceptacion` (escribe
-    en el registro real de C3, necesita `registro_ruta`)."""
+    en el registro real de C3, necesita `registro_ruta`).
+
+    Barrido (ronda 9): al arrancar, limpia los temporales huérfanos que un kill puede
+    haber dejado de una corrida anterior de `quitar_pausa_si` (`.{nombre}.quitar-tmp-*`
+    -- nunca la pausa misma, ver `pausa.barrer_temporales_huerfanos`)."""
     from datetime import datetime, timezone
+
+    if pausa_ruta is not None:
+        pausa.barrer_temporales_huerfanos(pausa_ruta)
 
     if sin_medir and not (motivo and motivo.strip()):
         salida("codigo=motivo_obligatorio detalle=\"--sin-medir exige --motivo <texto>\"")
@@ -350,7 +362,8 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
 
     momento = ahora() if ahora is not None else datetime.now(timezone.utc).isoformat()
     registrar(registro_ruta, host=host, mision_id=mision_id, aceptado_por=aceptado_por,
-             diff=marca.diff, sin_medir=sin_medir, motivo=motivo)
+             diff=marca.diff, sin_medir=sin_medir, motivo=motivo,
+             identidad_declarada_por=identidad_declarada_por)
     escribir_marca(ruta, Marca(huella=nueva_huella, estado=ABIERTA, aceptada_por=aceptado_por,
                                aceptada_en=momento))
     if pausa_ruta is not None:
@@ -369,30 +382,43 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
     return 0
 
 
-def _resolver_identidad_invocante(env) -> tuple[int, str]:
-    """M-2 (ronda 8): la identidad de quien acepta sale de `SUDO_UID` -- el uid de quien
-    invocó `sudo`, que sigue siendo el suyo aunque el proceso corra como otro usuario
-    vía `sudo -u jaxsvc ...` (ver M-1 en `_registrar_aceptacion`) -- VALIDADO
-    resolviéndolo con `pwd`: si no es un entero o no existe ningún usuario con ese uid
-    en el sistema, se descarta y se cae a `os.getuid()` (el uid real del proceso, para
-    cuando esto corre sin `sudo`). Nunca se usan los strings `SUDO_USER`/`USER`
-    directamente -- son variables de entorno que cualquiera con permiso de exportarlas
-    puede poner a mano (`export USER=lo-que-sea`); un uid que además tiene que EXISTIR
-    en `/etc/passwd` es harto más difícil de falsear sin privilegio.
+def _resolver_identidad_invocante(env) -> tuple[int, str, str]:
+    """M-2 (ronda 8; corregido ronda 9 tras la auditoría 7, MAJOR-2): esto NO verifica
+    identidad -- lee lo que `SUDO_UID` DECLARA. `SUDO_UID` es el uid de quien invocó
+    `sudo` en la invocación MÁS EXTERNA que tocó este proceso, resuelto con `pwd` para
+    confirmar que ese uid corresponde a ALGÚN usuario real del sistema (no basura ni un
+    uid inexistente) -- pero esa confirmación es sobre el NÚMERO, no sobre la PERSONA:
+    `pwd.getpwuid` no prueba que quien tecleó `sudo` sea de verdad el dueño de ese uid,
+    sólo que el uid declarado existe. Cuando no hay `SUDO_UID` (corre sin `sudo`), cae a
+    `os.getuid()` -- el uid real del proceso. Nunca se usan los strings
+    `SUDO_USER`/`USER` directamente -- cualquiera puede exportarlos a mano.
 
-    LÍMITE (declarado, no cerrado): un root arbitrario SÍ puede exportar un `SUDO_UID`
-    falso -- apuntando a cualquier uid real -- antes de invocar esto, y no hay forma de
-    detectarlo desde este proceso. Lo que se cierra es que un usuario SIN privilegios
-    finja ser otro con sólo tocar el entorno."""
+    Devuelve `(uid, nombre, declarada_por)` -- `declarada_por` es `"sudo"` cuando el
+    uid salió de `SUDO_UID`, o `"proceso"` cuando salió de `os.getuid()`. Esa etiqueta
+    se registra TAL CUAL en el evento de C3 (`_registrar_aceptacion`): el registro dice
+    "declarado por sudo", nunca "identidad verificada" -- no lo es.
+
+    EL CONTROL DE VERDAD no es esta función: es quién puede escribir el registro y la
+    marca (permisos de `/var/log/jax-ejecutor/` y de `JAX_EJECUTOR_MISIONES`, ambos de
+    `jaxsvc`) MÁS quién tiene sudo real hacia `jaxsvc` en esta máquina -- hoy en
+    hall9000, sólo `fruiz` (a `axioma` se le quitó el sudo ahí la noche del
+    2026-09-22; verificado con `sudo -l -U axioma` → no permitido). Esta función sólo
+    decide qué NOMBRE queda escrito junto a una acción que YA requirió ese acceso real
+    para llegar hasta acá.
+
+    LÍMITE, sin cerrar: cualquiera con una regla `ALL` (puede correr como CUALQUIER
+    usuario, no sólo `jaxsvc`) puede encadenar `sudo -u <alguien> sudo -u jaxsvc ...`
+    y hacer que `SUDO_UID` declare el uid de `<alguien>` en vez del propio -- no hace
+    falta ser root, alcanza con esa regla. No hay forma de detectar eso desde acá."""
     valor = str(env.get("SUDO_UID", "")).strip()
     if valor.isdigit():
         try:
             uid = int(valor)
-            return uid, pwd.getpwuid(uid).pw_name
+            return uid, pwd.getpwuid(uid).pw_name, "sudo"
         except (KeyError, OverflowError, ValueError):
             pass
     uid = os.getuid()
-    return uid, pwd.getpwuid(uid).pw_name
+    return uid, pwd.getpwuid(uid).pw_name, "proceso"
 
 
 def principal(argv: list[str]) -> int:
@@ -400,8 +426,7 @@ def principal(argv: list[str]) -> int:
     [--sin-medir --motivo "<texto>"]` -- lee `JAX_EJECUTOR_MISIONES`,
     `JAX_EJECUTOR_ADMIN_USUARIO`, `JAX_EJECUTOR_REGISTRO`, `JAX_EJECUTOR_PAUSA` (se
     borra al aceptar, y SÓLO si es la pausa de ESTA huella -- ver B-1 en `aceptar()`),
-    `JAX_EJECUTOR_CUENTA` (la cuenta del Ejecutor, `axioma` -- M-2: axioma NUNCA puede
-    aceptar su propia huella, se rechaza antes de tocar nada) y la política exportada
+    `JAX_EJECUTOR_CUENTA` (la cuenta del Ejecutor, `axioma`) y la política exportada
     (`JAX_EJECUTOR_POLITICA`, misma que lee `cuenta_axioma.cuenta_desde_entorno`) del
     entorno.
 
@@ -413,9 +438,23 @@ def principal(argv: list[str]) -> int:
             --host <host> --mision <id>
 
     (NO `sudo python -m ...`: eso escribe como root, no como el dueño real del árbol.)
-    `SUDO_UID` sigue siendo el de quien tecleó `sudo` -- por eso `aceptado_por` resuelve
-    a la persona real (ver `_resolver_identidad_invocante`) aunque el PROCESO corra como
-    `jaxsvc`."""
+
+    EL CONTROL DE VERDAD (ronda 9, MAJOR-2, tras la auditoría 7): no es un chequeo de
+    identidad dentro de este código -- son los permisos del registro y de
+    `JAX_EJECUTOR_MISIONES` (ambos `jaxsvc`) MÁS quién tiene sudo real hacia `jaxsvc`.
+    HECHO (verificado 2026-09-22, la misma noche): a `axioma` se le quitó el sudo en
+    hall9000 (`sudo -l -U axioma` → no permitido; las máquinas remotas lo conservan) --
+    así que hoy, en hall9000, `aceptar` sólo lo puede correr de punta a punta quien
+    tenga sudo hacia `jaxsvc`, y eso hoy es sólo `fruiz`. `SUDO_UID` (ver
+    `_resolver_identidad_invocante`) decide el NOMBRE que queda escrito como
+    `aceptado_por` -- pero eso es un DATO DECLARADO por el entorno, no una identidad
+    verificada por este proceso; el registro lo etiqueta `identidad_declarada_por`.
+
+    El rechazo de más abajo (si el uid invocante es el de `JAX_EJECUTOR_CUENTA`) es
+    protección contra el ERROR ACCIDENTAL -- alguien corriendo esto sin darse cuenta
+    de qué cuenta es -- no una barrera anti-suplantación: quien de verdad tiene sudo
+    hacia `jaxsvc` puede declarar cualquier `SUDO_UID` que quiera (ver el LÍMITE en
+    `_resolver_identidad_invocante`)."""
     import argparse
     import asyncio
     import os as _os
@@ -434,12 +473,13 @@ def principal(argv: list[str]) -> int:
     env = _os.environ
     try:
         cuenta_ejecutor = env["JAX_EJECUTOR_CUENTA"]
-        uid_invocante, aceptado_por = _resolver_identidad_invocante(env)
+        uid_invocante, aceptado_por, declarada_por = _resolver_identidad_invocante(env)
         try:
             uid_axioma = pwd.getpwnam(cuenta_ejecutor).pw_uid
         except KeyError:
             uid_axioma = None
         if uid_axioma is not None and uid_invocante == uid_axioma:
+            # Freno del error accidental (no anti-suplantación, ver docstring arriba).
             print(f"codigo=axioma_no_puede_aceptar_su_propia_huella cuenta={cuenta_ejecutor}", file=sys.stderr)
             return 2
 
@@ -448,7 +488,8 @@ def principal(argv: list[str]) -> int:
             misiones=Path(env["JAX_EJECUTOR_MISIONES"]), mision_id=args.mision_id, host=args.host,
             politica_ruta=Path(env["JAX_EJECUTOR_POLITICA"]), admin_usuario=env["JAX_EJECUTOR_ADMIN_USUARIO"],
             registro_ruta=Path(env["JAX_EJECUTOR_REGISTRO"]), pausa_ruta=_pausa.ruta_de_la_pausa(env),
-            aceptado_por=aceptado_por, sin_medir=args.sin_medir, motivo=args.motivo))
+            aceptado_por=aceptado_por, sin_medir=args.sin_medir, motivo=args.motivo,
+            identidad_declarada_por=declarada_por))
     except KeyError as exc:
         print(f"codigo=sin_configurar variable={exc.args[0]}", file=sys.stderr)
         return 2

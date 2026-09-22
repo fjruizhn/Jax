@@ -8,6 +8,7 @@ Ronda 7 (BLOCK reproducido): `/etc/passwd`/`group`/`shadow` SALEN de la huella -
 `apt install` y el plugin de correo de aaPanel crean cuentas de sistema, y eso es
 administración LEGÍTIMA del cutover, no un ataque a los controles del Ejecutor. Una
 cuenta nueva con sudo real pasa igual por `sudoers.d`, que sí se mide."""
+import json
 import os
 import pwd
 
@@ -238,36 +239,43 @@ def test_principal_sin_medir_es_una_bandera_reconocida(tmp_path, monkeypatch, ca
     assert rc == 2  # sigue sin marca -- pero no revienta por la bandera ni por el motivo
 
 
-# --- M-2 (ronda 8): identidad validada por SUDO_UID + pwd, axioma no se acepta a sí mismo
+# --- M-2 (ronda 8, corregido ronda 9): identidad DECLARADA por SUDO_UID + pwd -- no
+# "verificada". El rechazo de axioma queda como freno del error accidental, no como
+# barrera anti-suplantación real (ver docstrings de `_resolver_identidad_invocante` y
+# `principal`).
 
-def test_resolver_identidad_invocante_usa_sudo_uid_validado(monkeypatch):
+def test_resolver_identidad_invocante_usa_sudo_uid_declarada_por_sudo(monkeypatch):
     monkeypatch.setenv("SUDO_UID", str(os.getuid()))
     monkeypatch.setenv("SUDO_USER", "mentira-no-deberia-usarse")
-    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    uid, nombre, declarada_por = H._resolver_identidad_invocante(os.environ)
     assert uid == os.getuid()
     assert nombre == pwd.getpwuid(os.getuid()).pw_name
     assert nombre != "mentira-no-deberia-usarse"
+    assert declarada_por == "sudo"  # ronda 9: "declarado por sudo", no "identidad verificada"
 
 
 def test_resolver_identidad_invocante_ignora_sudo_uid_basura_y_cae_a_getuid(monkeypatch):
     monkeypatch.setenv("SUDO_UID", "no-es-un-numero")
-    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    uid, nombre, declarada_por = H._resolver_identidad_invocante(os.environ)
     assert uid == os.getuid()
     assert nombre == pwd.getpwuid(os.getuid()).pw_name
+    assert declarada_por == "proceso"
 
 
 def test_resolver_identidad_invocante_ignora_sudo_uid_inexistente_y_cae_a_getuid(monkeypatch):
     monkeypatch.setenv("SUDO_UID", "999999")  # uid que casi seguro no existe en el sistema
-    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    uid, nombre, declarada_por = H._resolver_identidad_invocante(os.environ)
     assert uid == os.getuid()
+    assert declarada_por == "proceso"
 
 
 def test_resolver_identidad_invocante_sin_sudo_uid_usa_getuid_y_nunca_user(monkeypatch):
     monkeypatch.delenv("SUDO_UID", raising=False)
     monkeypatch.setenv("USER", "mentira-no-deberia-usarse")
-    uid, nombre = H._resolver_identidad_invocante(os.environ)
+    uid, nombre, declarada_por = H._resolver_identidad_invocante(os.environ)
     assert uid == os.getuid()
     assert nombre != "mentira-no-deberia-usarse"
+    assert declarada_por == "proceso"
 
 
 def test_principal_registra_aceptado_por_desde_sudo_uid_no_desde_sudo_user(tmp_path, monkeypatch):
@@ -297,6 +305,8 @@ def test_principal_registra_aceptado_por_desde_sudo_uid_no_desde_sudo_user(tmp_p
     nombre_esperado = pwd.getpwuid(os.getuid()).pw_name
     assert marca.aceptada_por == nombre_esperado
     assert marca.aceptada_por not in ("mentira-no-deberia-usarse", "otra-mentira")
+    evento = json.loads((tmp_path / "registro.jsonl").read_text().splitlines()[-1])
+    assert evento["identidad_declarada_por"] == "sudo"  # ronda 9: declarada, no "verificada"
 
 
 def test_principal_rechaza_cuando_el_invocante_es_la_propia_cuenta_axioma(tmp_path, monkeypatch, capsys):
@@ -334,7 +344,7 @@ def test_el_mutante_m5_sin_el_rechazo_de_axioma_muere(tmp_path, monkeypatch):
 
     original_resolver = modulo._resolver_identidad_invocante
     try:
-        modulo._resolver_identidad_invocante = lambda env: (12345, "axioma")
+        modulo._resolver_identidad_invocante = lambda env: (12345, "axioma", "sudo")
 
         misiones = tmp_path / "misiones"
         mision_id = "44444444-4444-4444-4444-444444444444"

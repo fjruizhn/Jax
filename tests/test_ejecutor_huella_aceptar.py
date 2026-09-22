@@ -492,3 +492,31 @@ def test_el_mutante_m4_sin_el_chequeo_de_estado_muere(tmp_path):
     resultado_mutante = asyncio.run(version_mutada(misiones=misiones, mision_id=MISION_ID, host="atemai"))
     assert resultado_mutante == H.CERRADA  # el mutante "ve" una CERRADA y seguiría igual -- por eso hay que matarlo
     assert original is modulo.aceptar  # confirma que no tocamos la función real
+
+
+def test_aceptar_barre_temporales_huerfanos_de_la_pausa_al_arrancar_ronda9(tmp_path):
+    """Ronda 9: `aceptar` limpia los `.PAUSA.quitar-tmp-*` huérfanos que un kill previo
+    de `quitar_pausa_si` pueda haber dejado -- ANTES de hacer cualquier otra cosa."""
+    misiones = tmp_path / "misiones"
+    pausa_ruta = tmp_path / "PAUSA"
+    P.poner_pausa(pausa_ruta, {"origen": "huella", "host": "atemai", "mision_id": MISION_ID})
+    huerfano = tmp_path / ".PAUSA.quitar-tmp-9999-cccc"
+    huerfano.write_text(pausa_ruta.read_text())
+    H.escribir_marca(H.ruta_huella(misiones, MISION_ID, "atemai"),
+                     H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=("algo",)))
+
+    registrado = {}
+
+    def registrar_falso(ruta_reg, **kw):
+        registrado.update(kw)
+        return 1
+
+    rc = asyncio.run(H.aceptar(
+        misiones=misiones, mision_id=MISION_ID, host="atemai", aceptado_por="fruiz", sin_medir=True,
+        motivo="prueba barrido",
+        tomar_huella_actual=lambda h: (_ for _ in ()).throw(AssertionError("no debería medir")),
+        registrar=registrar_falso, registro_ruta=tmp_path / "registro.jsonl", pausa_ruta=pausa_ruta))
+
+    assert rc == 0
+    assert not huerfano.exists()
+    assert not pausa_ruta.exists()  # la propia sí se borró -- coincide origen/host/mision_id

@@ -44,10 +44,13 @@ sudo -u jaxsvc PYTHONPATH=.:las_manos JAX_EJECUTOR_MISIONES="$JAX_EJECUTOR_MISIO
 ```
 
 `sudo -u jaxsvc` cambia la identidad del PROCESO, pero `SUDO_UID` sigue siendo el uid
-de quien tecleó `sudo` (`fruiz`, o quien sea) -- por eso `aceptado_por` en la marca y en
-el registro sigue siendo la persona real, no `jaxsvc` (ver M-2 más abajo). `axioma`
-nunca puede correr esto: la CLI se niega si el uid invocante (resuelto por `SUDO_UID`)
-es el de la cuenta configurada en `JAX_EJECUTOR_CUENTA`.
+que `sudo` DECLARA para quien lo invocó (`fruiz`, o quien sea) -- por eso `aceptado_por`
+en la marca y en el registro sigue mostrando a esa persona, no `jaxsvc`. Ojo: es un dato
+DECLARADO, no verificado por este proceso -- el registro lo etiqueta
+`identidad_declarada_por` (ver M-2 más abajo). Hoy, en hall9000, `axioma` directamente
+no puede correr esto de punta a punta: no tiene sudo hacia `jaxsvc` (se le quitó la
+noche del 2026-09-22). La CLI ADEMÁS se niega si el uid invocante declarado es el de
+`JAX_EJECUTOR_CUENTA` -- freno del error accidental, no del que de verdad tiene acceso.
 
 **Requisito nuevo en ronda 8:** la marca tiene que estar en estado `reportada` (no
 `abierta` ni `cerrada`) para que `aceptar` haga algo -- si no, devuelve
@@ -100,10 +103,17 @@ reciente de la máquina. Sin `--motivo`, la CLI se niega con `codigo=motivo_obli
 - No acepta un cambio que todavía no pasó: si la marca está `abierta` (nunca se comparó)
   no hay nada que aceptar -- `aceptar` devuelve `codigo=huella_no_encontrada` si la
   marca no está en estado que tenga un diff guardado, o si simplemente no existe.
-- No es axioma quien acepta: la CLI RECHAZA correr si el uid invocante (resuelto de
-  `SUDO_UID`, validado con `pwd`) es el de la cuenta `JAX_EJECUTOR_CUENTA` -- no hay
-  forma de que la propia jaula se autorice. LÍMITE declarado: un `root` arbitrario
-  podría falsear `SUDO_UID` antes de invocar esto; eso no se puede cerrar desde acá.
+- No es un chequeo de identidad quien evita que axioma acepte su propia huella --
+  ES el acceso: `axioma` no tiene sudo hacia `jaxsvc` en hall9000 (se le quitó la
+  noche del 2026-09-22, `sudo -l -U axioma` → no permitido), y sin eso no puede
+  siquiera escribir el registro o la marca. La CLI ADEMÁS rechaza correr si el uid
+  invocante (declarado por `SUDO_UID`, resuelto con `pwd`) es el de
+  `JAX_EJECUTOR_CUENTA` (ronda 9, MAJOR-2) -- pero eso es protección contra el ERROR
+  ACCIDENTAL, no una barrera anti-suplantación: `SUDO_UID` es un dato que el entorno
+  DECLARA, no una identidad que este proceso verifica. LÍMITE, sin cerrar: cualquiera
+  con una regla `ALL` (puede correr como CUALQUIER usuario, no hace falta ser root)
+  puede encadenar `sudo -u <alguien> sudo -u jaxsvc ...` y hacer que `SUDO_UID`
+  declare el uid de `<alguien>` en vez del propio.
 
 ## Verificar que quedó aceptada
 
