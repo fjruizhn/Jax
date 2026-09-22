@@ -3134,11 +3134,28 @@ jobs:
       # `ModuleNotFoundError`, y el sentinel None de Menor 10), de 17 a 19.
       # Medido en este entorno (Python 3.14 y, via Docker, Python 3.12 --
       # mismo runtime que usa este job): 19 passed en las dos.
+      #
+      # Ronda 3 (2026-09-21, expediente real de 99 documentos -- 2
+      # fallaron con el MISMO defecto, uno un avalúo de maquinaria de 11
+      # MB): una tabla cuyo `bbox` se sale de la página (defecto conocido
+      # de pdfplumber) tumbaba el documento ENTERO ('error', cero bytes) --
+      # el `ValueError` sale de `Page.outside_bbox()` (el recorte de la
+      # prosa alrededor de la tabla), no de `Table.extract()`. Ahora se
+      # ataja POR TABLA y se sigue: la página aporta su texto igual, el
+      # estado pasa a 'parcial' (nunca 'ok' callándolo), y
+      # `detalle["tablas_fallidas"]` declara cuántas tablas fallaron y en
+      # qué páginas. +1 test
+      # (`test_una_tabla_con_bbox_fuera_de_la_pagina_no_tumba_el_documento`,
+      # PDF sintético que reproduce el bbox negativo real -- visto en rojo
+      # contra el código anterior a este cambio: "assert 'error' ==
+      # 'parcial'"), de 19 a 20. Medido en este entorno (Python 3.14 y, via
+      # Docker, Python 3.12 -- mismo runtime que usa este job): 20 passed
+      # en las dos.
       - name: PDF -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q procesamiento/extractores/_pdf_test.py 2>&1 | tee /tmp/pdf_tests
-          grep -qE "^19 passed" /tmp/pdf_tests || {
-            echo "PISO ROTO: se esperaban 19 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
+          grep -qE "^20 passed" /tmp/pdf_tests || {
+            echo "PISO ROTO: se esperaban 20 tests CORRIDOS (no skipeados) del extractor de PDF. Si esto da '... skipped', pdfplumber no se instalo -- no es un piso mas alto, es la falla que este paso existe para atrapar."; exit 1; }
 
       # Task 5 (2026-09-21, procesamiento-archivos-nucleo): OCR -- PDF
       # escaneado e imagen. tesseract por subproceso, nunca por binding

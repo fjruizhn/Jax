@@ -38,6 +38,27 @@ van a querer deshacer la próxima vez que un test se ponga rojo:
   `extract_text()` de la página completa) y otra como tabla. La prosa se
   recorta AFUERA del área de cada tabla (`Page.outside_bbox`); las tablas
   se emiten una sola vez, vía `Page.find_tables()` + `Table.extract()`.
+
+Ronda 3 de arreglo (2026-09-21, expediente real de 99 documentos -- 2
+fallaron con el MISMO defecto, uno de ellos un avalúo de maquinaria):
+- Defecto de pdfplumber ya conocido (coordenada negativa u otra caja fuera
+  de los límites de la página): una tabla detectada puede traer un `bbox`
+  que se sale del `bbox` de la página. Verificado sobre los dos documentos
+  reales (2026-09-21): el `ValueError` NO sale de `Table.extract()` --
+  `t.extract()` funciona perfecto aun con ese `bbox` fuera de rango. Sale
+  de `Page.outside_bbox(t.bbox)`, que es el recorte que arma la PROSA
+  alrededor de la tabla (I-3, arriba). Antes, esa excepción escapaba del
+  bucle entero y `extraer()` la atrapaba en el `except` de apertura del
+  documento -- 'error', cero páginas, el expediente entero perdido por una
+  sola tabla mal delimitada en una de treinta páginas.
+- Ahora el recorte de esa tabla puntual se ataja POR TABLA: si
+  `outside_bbox()` (o `Table.extract()`) revienta para una tabla, esa
+  tabla se cuenta en `detalle["tablas_fallidas"]` y se sigue con el resto.
+  Como el recorte no avanzó para esa tabla, su área queda SIN cortar de la
+  prosa -- se pierde la dedup de I-3 sólo para esa tabla puntual (su
+  contenido sale una vez, como prosa cruda, no como bloque estructurado),
+  pero el texto de la página no se pierde. El estado pasa a 'parcial'
+  -- nunca 'ok' callando que una tabla no se pudo extraer.
 """
 from __future__ import annotations
 
@@ -203,6 +224,7 @@ def extraer(origen: Path) -> Resultado:
         partes: list[str] = []
         textos: list[str] = []
         tablas = 0
+        tablas_fallidas: list[int] = []
         with pdfplumber.open(origen) as doc:
             for numero, pagina in enumerate(doc.pages, start=1):
                 # texto COMPLETO de la página (con tablas incluidas) -- es
@@ -213,12 +235,31 @@ def extraer(origen: Path) -> Resultado:
                 textos.append(texto_completo)
 
                 # I-3: la prosa que se EMITE sí se recorta afuera de cada
-                # tabla, para no repetir el contenido de las celdas.
+                # tabla, para no repetir el contenido de las celdas. Ronda 3
+                # (ver docstring del módulo): una tabla puntual con un bbox
+                # fuera de la página (defecto conocido de pdfplumber, verificado
+                # ahí como el origen REAL del ValueError -- no `Table.extract()`,
+                # sino `outside_bbox()`) no puede tumbar la página entera. Se
+                # ataja POR TABLA: si el recorte o la extracción de ESA tabla
+                # revientan, se cuenta en `tablas_fallidas` y se sigue con el
+                # resto. Como `recorte` no avanza para la tabla que falló, su
+                # área queda SIN cortar de la prosa -- pierde la dedup de I-3
+                # sólo para esa tabla puntual, no el contenido de la página.
                 tablas_pagina = pagina.find_tables()
-                if tablas_pagina:
-                    recorte = pagina
-                    for t in tablas_pagina:
+                recorte = pagina
+                bloques_pagina: list[str] = []
+                for t in tablas_pagina:
+                    try:
                         recorte = recorte.outside_bbox(t.bbox)
+                        bloque = _tabla_a_bloque(t.extract())
+                    except Exception:  # fail-soft: bbox de esta tabla puntual fuera de la página (u otro fallo de ESTA tabla); se cuenta en tablas_fallidas y se sigue con el resto, sin tumbar la página ni el documento
+                        tablas_fallidas.append(numero)
+                        continue
+                    if bloque:
+                        tablas += 1
+                        bloques_pagina.append(bloque)
+
+                if tablas_pagina:
                     prosa = recorte.extract_text() or ""
                 else:
                     prosa = texto_completo
@@ -226,11 +267,7 @@ def extraer(origen: Path) -> Resultado:
                 partes.append(f"<!-- página {numero} -->")
                 if prosa.strip():
                     partes.append(prosa)
-                for t in tablas_pagina:
-                    bloque = _tabla_a_bloque(t.extract())
-                    if bloque:
-                        tablas += 1
-                        partes.append(bloque)
+                partes.extend(bloques_pagina)
     except Exception as exc:  # fail-soft: apertura o lectura del PDF con pdfplumber puede fallar; se devuelve Resultado(estado="error") con el detalle en vez de propagar
         return Resultado(
             estado="error", salidas={}, extractor=EXTRACTOR,
@@ -256,18 +293,35 @@ def extraer(origen: Path) -> Resultado:
             },
         )
 
-    if paginas_sin_texto:
+    # Ronda 3: 'parcial' (nunca 'ok' callándolo) también cuando una o más
+    # tablas no se pudieron extraer -- ver docstring del módulo y el bucle
+    # de arriba. Las dos razones son independientes y pueden darse juntas
+    # (un híbrido con además una tabla de bbox roto en su única página con
+    # texto), así que se combinan en vez de que una tape a la otra.
+    if paginas_sin_texto or tablas_fallidas:
+        razones = []
+        detalle: dict = {"paginas": paginas, "tablas": tablas}
+        if paginas_sin_texto:
+            detalle["paginas_sin_texto"] = paginas_sin_texto
+            razones.append(
+                "algunas paginas no tienen capa de texto util (probable "
+                "imagen o solo sello); no se resuelven aca, corresponde OCR"
+            )
+        if tablas_fallidas:
+            detalle["tablas_fallidas"] = {
+                "cantidad": len(tablas_fallidas),
+                "paginas": sorted(set(tablas_fallidas)),
+            }
+            razones.append(
+                "una o mas tablas no se pudieron extraer (bbox fuera de la "
+                "pagina, defecto conocido de pdfplumber); el texto de esas "
+                "paginas se conserva igual, sin la tabla estructurada"
+            )
+        detalle["razon"] = " / ".join(razones)
         return Resultado(
             estado="parcial", salidas={"texto.md": contenido},
             extractor=EXTRACTOR, version=_version() or "desconocida",
-            detalle={
-                "razon": "algunas paginas no tienen capa de texto util "
-                "(probable imagen o solo sello); no se resuelven aca, "
-                "corresponde OCR",
-                "paginas": paginas,
-                "tablas": tablas,
-                "paginas_sin_texto": paginas_sin_texto,
-            },
+            detalle=detalle,
         )
 
     return Resultado(
