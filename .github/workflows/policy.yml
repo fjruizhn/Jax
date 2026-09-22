@@ -3677,8 +3677,24 @@ jobs:
           #   (test_ejecutor_generar_claude_md.py, la identidad/autoridad se prueba también con
           #   el DOBLE hermético -- esas SÍ corren siempre) -- 16 (U3, sin cambio) + 19 (constitución
           #   real: 14 antes + 5 nuevas) = 35.
-          grep -qE "^2574 passed, 35 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2574 tests CORRIDOS y exactamente 35 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 19 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 6 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 2 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
+          # 2574 -> 2573, 35 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 5, auditoría
+          #   adversarial, 2026-09-22 -- decisión de Fernando: SE RETIRA `ejecutor-vigia@.service`
+          #   (código muerto -- el camino real, `abrir_vigia` en mision_servicio.py, siempre lanzó
+          #   el vigía como subproceso directo, nunca por esa unidad; el journal de la unidad
+          #   -- verificado de nuevo el 2026-09-22 -- muestra exactamente DOS arranques, los dos
+          #   manuales de verificación del despliegue #190 del 2026-09-17, ninguno de una misión
+          #   real). -1 test (`test_la_unidad_lanza_este_modulo_con_la_mision_de_su_instancia`,
+          #   sobre el archivo de la unidad que ya no existe) -2 (UNIDADES en
+          #   test_ejecutor_cuenta_de_servicio.py pasó de 2 a 1 elemento -- ejecutor-vigia@.service
+          #   salió de ahí -- y son dos tests parametrizados sobre esa lista) +1
+          #   (test_abrir_vigia_por_defecto_lanza_el_modulo_como_subproceso_directo, en
+          #   test_ejecutor_mision_servicio.py: el default de `abrir_vigia` no tenía prueba propia,
+          #   antes lo cubría -- débil, indirecto -- el test de la unidad) +1
+          #   (test_la_unidad_del_vigia_no_existe_y_nadie_la_instala: guarda contra que la unidad
+          #   vuelva sola). Neto -1. Medido igual que las rondas 3/4, sin tocar nada fuera del
+          #   worktree.
+          grep -qE "^2573 passed, 35 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2573 tests CORRIDOS y exactamente 35 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 19 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 6 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 2 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

@@ -13,9 +13,18 @@ después de `arranque.exigir_contratos` con las máquinas de la misión. Orden:
 Cualquier otra salida del vigía pone la pausa `vigia_caido` (vigia.py); un SIGKILL deja
 el latido envejecer y el proxy vuelve a 423 en `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S`.
 
-La unidad es `ops/ejecutor/ejecutor-vigia@.service` (`%i` = id de la misión); la misión
-es un JSON `{"mision": texto, "hosts": [nombres]}` en `JAX_EJECUTOR_MISIONES/<id>.json`.
-Salida: códigos `clave=valor` (formato.py), nunca texto para personas.
+Este módulo NO es una unidad systemd (la plantilla `ejecutor-vigia@.service` que lo
+prometía se retiró el 2026-09-22: código muerto, el journal nunca mostró un solo
+arranque suyo -- ver DEUDA.md). Lo lanza `abrir_vigia` (`jax/ejecutor/mision_servicio.py`)
+como SUBPROCESO DIRECTO por cada turno (`python -m jax.ejecutor.contratos.vigia_servicio
+<ruta_mision>`), heredando la identidad del proceso que lo lanza -- en producción,
+`jax-platform` (`User=fruiz`), así que este módulo corre como `fruiz`. Eso es lo que hace
+coherente a M-1 más abajo (la huella la toma el controlador COMO FRUIZ, nunca como
+`axioma`): no es una cuenta de servicio aparte, es la misma identidad del proceso.
+La misión es un JSON `{"mision": texto, "hosts": [nombres]}` en
+`JAX_EJECUTOR_MISIONES/<id>.json` (`<id>` = `Turno.id_vigia`, `<mision_id>-t<n>`, o el
+UUID bare de la misión de humo). Salida: códigos `clave=valor` (formato.py), nunca texto
+para personas.
 """
 from __future__ import annotations
 

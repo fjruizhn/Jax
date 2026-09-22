@@ -14,7 +14,11 @@ import pytest
 
 OPS = Path(__file__).resolve().parents[1] / "ops" / "ejecutor"
 CUENTA_DE_SERVICIO = "jaxsvc"
-UNIDADES = ("jax-ejecutor-proxy.service", "ejecutor-vigia@.service")
+# `ejecutor-vigia@.service` salió de acá (ronda 5, auditoría adversarial 2026-09-22): la
+# unidad se RETIRÓ -- código muerto, nunca arrancó un vigía real (ver DEUDA.md). El vigía
+# corre como subproceso directo de `jax-platform` (`fruiz`), no como `jaxsvc`; este control
+# ya no le aplica.
+UNIDADES = ("jax-ejecutor-proxy.service",)
 INSTALADORES = ("instalar_contratos.sh", "instalar_vigia.sh", "instalar_registro_y_cerco.sh")
 
 
@@ -51,3 +55,15 @@ def test_los_instaladores_crean_los_directorios_para_la_cuenta_de_servicio(nombr
     texto = _texto_con_delegados(nombre)
     assert "-o fruiz" not in texto, f"{nombre} sigue creando directorios del operador"
     assert f"-o {CUENTA_DE_SERVICIO}" in texto
+
+
+def test_la_unidad_del_vigia_no_existe_y_nadie_la_instala():
+    """Ronda 5 (auditoría adversarial 2026-09-22): `ejecutor-vigia@.service` se retiró --
+    código muerto, el camino real (`abrir_vigia`) siempre lanzó el vigía como subproceso
+    directo. Guarda contra que vuelva sola (un merge viejo, una copia a mano) -- no contra
+    que se la MENCIONE (los comentarios que explican el retiro sí la nombran, a propósito)."""
+    assert not (OPS / "ejecutor-vigia@.service").exists()
+    for nombre in INSTALADORES:
+        lineas_de_codigo = [l for l in _texto_con_delegados(nombre).splitlines() if not l.strip().startswith("#")]
+        assert not any("ejecutor-vigia@" in l for l in lineas_de_codigo), \
+            f"{nombre} vuelve a INSTALAR la unidad retirada (fuera de un comentario)"

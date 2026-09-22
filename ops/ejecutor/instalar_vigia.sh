@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# ops/ejecutor/instalar_vigia.sh — plan 6 de SP1 en hall9000: la unidad del vigía por misión.
-# Corre como fruiz desde el checkout de producción (master); sudo para lo de root. Idempotente.
-# NO arranca ninguna misión: la unidad es una plantilla (ejecutor-vigia@<id>.service) y cada
-# instancia exige los seis contratos antes de latir. Reversión:
-#   sudo rm /etc/systemd/system/ejecutor-vigia@.service && sudo systemctl daemon-reload
+# ops/ejecutor/instalar_vigia.sh — prepara lo que el vigía necesita para correr. Corre como
+# fruiz desde el checkout de producción (master); sudo para lo de root. Idempotente.
+#
+# NO instala ninguna unidad systemd (ronda 5, auditoría adversarial 2026-09-22: la plantilla
+# `ejecutor-vigia@.service` que este script instalaba se RETIRÓ -- código muerto, el journal
+# nunca mostró un solo arranque suyo, ver DEUDA.md). El vigía (`vigia_servicio.py`) lo lanza
+# `abrir_vigia` (jax/ejecutor/mision_servicio.py) como SUBPROCESO DIRECTO de cada turno,
+# heredando la identidad de `jax-platform` (fruiz) -- no hay nada que instalar para eso. Lo
+# que SÍ sigue haciendo falta, y es lo que queda acá, es `JAX_EJECUTOR_MISIONES` con su ACL
+# (B-2, ronda 4) y la validación de los tiempos de latido.
 set -euo pipefail
 : "${JAX_EJECUTOR_MISIONES:?}" "${JAX_EJECUTOR_VIGIA_LATIDO:?}" "${JAX_EJECUTOR_VIGIA_LATIDO_MAX_S:?}"
 : "${JAX_EJECUTOR_VIGIA_LATIDO_CADA_S:?}" "${JAX_EJECUTOR_PAUSA:?}" "${JAX_EJECUTOR_LLAVES_ROOT:?}"
@@ -26,7 +31,4 @@ python3 -c "import sys; c, m = float(sys.argv[1]), float(sys.argv[2]); sys.exit(
 # Ejecutor (machine-id, políticas, etc.).
 "$REPO/ops/ejecutor/preparar_directorio_misiones.sh" "$JAX_EJECUTOR_MISIONES" "$JAX_EJECUTOR_ADMIN_USUARIO" \
   "$JAX_EJECUTOR_CUENTA"
-sudo install -o root -g root -m 0644 "$REPO/ops/ejecutor/ejecutor-vigia@.service" /etc/systemd/system/
-sudo systemctl daemon-reload
-systemctl cat ejecutor-vigia@verificacion.service >/dev/null
 echo "vigia_instalado=true misiones=\"$JAX_EJECUTOR_MISIONES\" commit=\"$(git -C "$REPO" rev-parse --short HEAD)\""

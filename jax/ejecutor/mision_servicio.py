@@ -11,9 +11,24 @@
 
 Camino gobernado: las dependencias reales son las MISMAS piezas que la misión de humo
 (scripts/ejecutor_contratos/mision_de_humo.py): `arranque.exigir_contratos`, el vigía de C5
-como proceso (`jax.ejecutor.contratos.vigia_servicio`, el módulo de la unidad
-ejecutor-vigia@), la jaula de la cuenta contra el proxy de C3, el registro encadenado, el
-auditor de C5 y la pausa del Ejecutor.
+como proceso (`abrir_vigia`, más abajo, lanza `jax.ejecutor.contratos.vigia_servicio` como
+SUBPROCESO DIRECTO -- no hay unidad systemd: `ejecutor-vigia@.service` se retiró el
+2026-09-22, código muerto que nunca arrancó en producción, ver DEUDA.md), la jaula de la
+cuenta contra el proxy de C3, el registro encadenado, el auditor de C5 y la pausa del
+Ejecutor.
+
+El vigía HEREDA la identidad de quien lanza ESTE proceso: en producción, `jax-platform`
+(`User=fruiz`, verificado con `systemctl cat jax-platform.service`), así que el vigía
+corre como `fruiz`. Eso es lo que hace COHERENTE a M-1 de la huella
+(`vigia_servicio.py::_principal`, `ssh fruiz@<host> sudo -n ...` vía
+`revocacion.argv_admin`): el mecanismo asume que el proceso que la toma es `fruiz`, y
+ahora se sabe que efectivamente lo es -- no una cuenta de servicio (`jaxsvc`) que, de
+hecho, nunca llegó a lanzar un vigía real (la unidad systemd que lo hubiera hecho así
+se retiró el 2026-09-22, código muerto). Para C5 (elección y llamada al auditor,
+`eleccion_c5.py`/`canario_c5.py`) NO hay acoplamiento con esta identidad: la elección
+sale de la DB y la llamada al auditor es HTTP saliente, ninguna de las dos depende de
+qué cuenta del sistema operativo lanzó el proceso -- si mañana el vigía corriera bajo
+otra cuenta con el mismo acceso a la DB y a la red, C5 seguiría igual.
 
 Topes sin defaults (Principio IV): JAX_EJECUTOR_TURNO_TOPE_S (lo que puede durar el cerebro
 en un turno) y JAX_EJECUTOR_VIGIA_ESPERA_S (lo que se espera a que el vigía verifique los

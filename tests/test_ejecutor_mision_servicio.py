@@ -102,6 +102,38 @@ def test_leer_pausa_fail_closed(tmp_path):
                                   "momento": None}
 
 
+# --- ronda 5, auditoría adversarial 2026-09-22: SIN unidad systemd -----------------------
+#
+# `ejecutor-vigia@.service` se retiró: código muerto, nunca arrancó en producción (verificado
+# por el coordinador contra el journal). El camino REAL es este -- `abrir_vigia` lanza
+# `vigia_servicio` como subproceso DIRECTO, heredando la identidad de quien corre ESTE
+# proceso (jax-platform, `fruiz`). Antes esto lo cubría (débilmente, indirecto) un test sobre
+# el contenido del archivo de la unidad; con la unidad fuera, el default de `abrir_vigia` es
+# lo único que documenta el comando real, y no tenía una prueba propia.
+def test_abrir_vigia_por_defecto_lanza_el_modulo_como_subproceso_directo(tmp_path, monkeypatch):
+    """Sin `argv=` explícito (el caso real, el que usa `dependencias_reales`), `abrir_vigia`
+    tiene que lanzar exactamente `python -m jax.ejecutor.contratos.vigia_servicio <ruta>` --
+    ni una unidad systemd, ni `sudo`, ni ningún cambio de cuenta: el proceso hereda la
+    identidad de quien lo llama."""
+    import sys
+
+    vistos = {}
+    original = asyncio.create_subprocess_exec
+
+    async def espia(*argv, **kwargs):
+        vistos["argv"] = argv
+        falso = tmp_path / "no_arranca_de_verdad.py"
+        falso.write_text("import sys; sys.exit(0)\n")
+        return await original(sys.executable, str(falso), **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", espia)
+    asyncio.run(S.abrir_vigia(tmp_path, "m-t9", "texto", frozenset({"a"})))
+    argv = vistos["argv"]
+    assert argv[0] == sys.executable
+    assert argv[1:3] == ("-m", "jax.ejecutor.contratos.vigia_servicio")
+    assert argv[3] == str(tmp_path / "m-t9.json")
+
+
 def test_el_vigia_se_abre_con_el_archivo_de_mision_y_se_cierra_con_sigterm(tmp_path, monkeypatch):
     """El vigía de verdad es `vigia_servicio`; acá un proceso falso que imprime lo que el vigía
     imprime al cerrar y termina con SIGTERM, para probar el manejo del proceso y del archivo."""
