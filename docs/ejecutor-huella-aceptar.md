@@ -1,4 +1,4 @@
-# Aceptar una huella `reportada` del Ejecutor (M-1, ronda 7)
+# Aceptar una huella `reportada` del Ejecutor (M-1, ronda 7; corregido en ronda 8)
 
 ## Qué es esto
 
@@ -26,14 +26,33 @@ programada: había que editar archivos a mano en el controlador. Ahora hay un ca
 
 ## Cómo aceptar
 
-Desde hall9000, como `fruiz` (nunca como `axioma` -- la cuenta de la jaula no puede
-aceptar sus propios cambios):
+Desde hall9000, como `jaxsvc` -- **NO** como `fruiz` a secas, y **NO** como `root`
+(M-1, ronda 8): el registro append-only de C3 (`/var/log/jax-ejecutor/registro.jsonl`)
+y el árbol de misiones (`JAX_EJECUTOR_MISIONES`) son de `jaxsvc`; `fruiz` sólo tiene
+`r--`/`r-x` sobre ellos por ACL (verificado en producción, `getfacl`, 2026-09-22) --
+NO puede escribir ahí. `sudo python -m ...` tampoco sirve: escribiría como `root`, con
+un dueño distinto al resto del árbol. El comando exacto:
 
 ```bash
 set -a; . <(sudo -n cat /etc/jax/.env); set +a
-PYTHONPATH=.:las_manos python3 -m jax.ejecutor.contratos.huella aceptar \
+sudo -u jaxsvc PYTHONPATH=.:las_manos JAX_EJECUTOR_MISIONES="$JAX_EJECUTOR_MISIONES" \
+  JAX_EJECUTOR_ADMIN_USUARIO="$JAX_EJECUTOR_ADMIN_USUARIO" JAX_EJECUTOR_REGISTRO="$JAX_EJECUTOR_REGISTRO" \
+  JAX_EJECUTOR_POLITICA="$JAX_EJECUTOR_POLITICA" JAX_EJECUTOR_PAUSA="$JAX_EJECUTOR_PAUSA" \
+  JAX_EJECUTOR_CUENTA="$JAX_EJECUTOR_CUENTA" \
+  python3 -m jax.ejecutor.contratos.huella aceptar \
   --host <nombre-de-la-maquina> --mision <mision_id>
 ```
+
+`sudo -u jaxsvc` cambia la identidad del PROCESO, pero `SUDO_UID` sigue siendo el uid
+de quien tecleó `sudo` (`fruiz`, o quien sea) -- por eso `aceptado_por` en la marca y en
+el registro sigue siendo la persona real, no `jaxsvc` (ver M-2 más abajo). `axioma`
+nunca puede correr esto: la CLI se niega si el uid invocante (resuelto por `SUDO_UID`)
+es el de la cuenta configurada en `JAX_EJECUTOR_CUENTA`.
+
+**Requisito nuevo en ronda 8:** la marca tiene que estar en estado `reportada` (no
+`abierta` ni `cerrada`) para que `aceptar` haga algo -- si no, devuelve
+`codigo=huella_no_reportada`. Es a propósito: no hay nada que aceptar si nunca se
+comparó, o si ya está limpia.
 
 Esto:
 
@@ -43,29 +62,37 @@ Esto:
    base -- lo que hay en la máquina en este momento pasa a ser "lo normal" de ahí en
    adelante.
 3. Registra la aceptación en el registro append-only de C3 (el mismo que audita cada
-   paso del cerebro, cadena encadenada en hall9000): quién aceptó (`$SUDO_USER`/`$USER`),
-   cuándo, y el diff completo que se aceptó -- evento `huella_aceptada`.
+   paso del cerebro, cadena encadenada en hall9000): quién aceptó (resuelto de
+   `SUDO_UID` vía `pwd`, nunca de `$SUDO_USER`/`$USER` como texto suelto), cuándo, el
+   diff completo que se aceptó, y el motivo si vino con `--sin-medir` -- evento
+   `huella_aceptada`.
 4. Deja la marca de esa máquina/misión en estado `abierta` de nuevo: dejó de bloquear.
-5. Borra la pausa del Ejecutor (`JAX_EJECUTOR_PAUSA`) -- sin esto el paso 4 no alcanza:
-   el arranque de la próxima misión (C5) sigue viendo la pausa puesta aunque la marca
-   ya no bloquee.
+5. Borra la pausa del Ejecutor (`JAX_EJECUTOR_PAUSA`) -- **pero SOLO si es la pausa de
+   ESTA huella** (mismo origen=`huella`, mismo host, misma misión; ronda 8, B-1). Si
+   C4 o C5 pausaron por su cuenta, o pausó la huella de OTRO host/misión, esa pausa se
+   deja intacta -- avisa con `codigo=pausa_de_otro_origen`, y el Ejecutor sigue frenado
+   por lo que sea que la puso.
 
 Con eso, el turno que sigue (de la misma misión) y cualquier misión nueva en esa
-máquina vuelven a abrir.
+máquina vuelven a abrir (salvo que siga pausado por otro motivo, ver el punto 5).
 
 ## La máquina ya no existe, o no responde
 
-Si la máquina de la marca `reportada` se dio de baja, o no contesta por ssh (y no vas a
-poder tomar una huella nueva de verdad), usa `--sin-medir`:
+Si la máquina de la marca `reportada` (o `abierta`, ronda 8: `--sin-medir` también
+acepta una marca que nunca se llegó a comparar) se dio de baja, o no contesta por ssh
+(y no vas a poder tomar una huella nueva de verdad), usa `--sin-medir` -- que desde
+ronda 8 EXIGE `--motivo`, sin excepción:
 
 ```bash
-python3 -m jax.ejecutor.contratos.huella aceptar --host <nombre> --mision <mision_id> --sin-medir
+sudo -u jaxsvc ... python3 -m jax.ejecutor.contratos.huella aceptar \
+  --host <nombre> --mision <mision_id> --sin-medir --motivo "máquina dada de baja el 2026-09-22"
 ```
 
 Hace lo mismo, pero SIN intentar tomar una huella nueva: la línea base que queda es la
 misma que tenía antes de reportarse (no una medición fresca), y el registro de C3 deja
-constancia de que se aceptó `sin_medir=true` -- para que quien lea el registro después
-sepa que esta aceptación NO está respaldada por una medición reciente de la máquina.
+constancia de que se aceptó `sin_medir=true` junto con el `motivo` -- para que quien lea
+el registro después sepa POR QUÉ esta aceptación no está respaldada por una medición
+reciente de la máquina. Sin `--motivo`, la CLI se niega con `codigo=motivo_obligatorio`.
 
 ## Qué NO hace este camino
 
@@ -73,8 +100,10 @@ sepa que esta aceptación NO está respaldada por una medición reciente de la m
 - No acepta un cambio que todavía no pasó: si la marca está `abierta` (nunca se comparó)
   no hay nada que aceptar -- `aceptar` devuelve `codigo=huella_no_encontrada` si la
   marca no está en estado que tenga un diff guardado, o si simplemente no existe.
-- No es axioma quien acepta: la CLI corre como `fruiz` (o quien sea `$SUDO_USER`), y eso
-  es lo que queda en el registro -- no hay forma de que la propia jaula se autorice.
+- No es axioma quien acepta: la CLI RECHAZA correr si el uid invocante (resuelto de
+  `SUDO_UID`, validado con `pwd`) es el de la cuenta `JAX_EJECUTOR_CUENTA` -- no hay
+  forma de que la propia jaula se autorice. LÍMITE declarado: un `root` arbitrario
+  podría falsear `SUDO_UID` antes de invocar esto; eso no se puede cerrar desde acá.
 
 ## Verificar que quedó aceptada
 
