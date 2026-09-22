@@ -29,6 +29,8 @@ if [ "$prog" = "install" ]; then
     esac
   done
   exec install "${args[@]}"
+elif [ "$prog" = "chown" ]; then
+  exit 0
 else
   exec "$prog" "$@"
 fi
@@ -104,16 +106,18 @@ def test_directorio_nuevo_queda_en_0700_no_0750(tmp_path):
 
 
 @requiere_setfacl
-def test_en_una_corrida_idempotente_no_se_toca_el_modo_de_un_directorio_existente(tmp_path):
-    """MINOR (ronda 6, sin ventana): en la segunda corrida, el directorio YA existe --
-    no se vuelve a llamar `install -d` (que haría un chmod y, de rebote, angostaría el
-    `mask::` de la ACL por un instante). El resultado final tiene que ser el mismo que
-    en la primera corrida, sin pasar por un estado intermedio distinto."""
+def test_en_una_corrida_idempotente_SI_reconverge_el_modo_de_un_directorio_existente(tmp_path):
+    """Ronda 7, punto 4 (reemplaza el criterio de la ronda 6): el modo/ACL se aplican
+    TAMBIÉN cuando el directorio ya existe -- si alguien (u otra instalación vieja) lo
+    dejó con permisos de más (`0770`, `group::rwx`), la corrida siguiente lo corrige,
+    no lo deja así "porque ya existía". Sin ventana: la corrección es UN solo
+    `setfacl -m` con todas las entradas juntas (base + nombradas + default), no un
+    `chmod` separado seguido de un `setfacl` -- no hay un estado intermedio distinto
+    del inicial o del final."""
     destino = tmp_path / "misiones"
     admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
     r1 = _correr(tmp_path, destino, admin, "nobody")
     assert r1.returncode == 0, r1.stderr
-    acl1 = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
 
     # Alguien deja el directorio con permisos "de más" a mano, para simular el estado
     # real que preexistiría en una corrida idempotente sobre producción.
@@ -121,12 +125,9 @@ def test_en_una_corrida_idempotente_no_se_toca_el_modo_de_un_directorio_existent
     r2 = _correr(tmp_path, destino, admin, "nobody")
     assert r2.returncode == 0, r2.stderr
     acl2 = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
-    # El script NO vuelve a poner 0700 (no llama install -d sobre un directorio que ya
-    # existe) -- lo único que garantiza son las entradas ACL nombradas, que sí quedan
-    # iguales las dos veces.
-    for linea in acl1.splitlines():
-        if linea.startswith(("user:", "default:user:")) and ":" in linea.split(":", 1)[1]:
-            assert linea in acl2, (linea, acl2)
+    assert "group::---" in acl2, acl2
+    assert f"user:{admin}:rwx" in acl2
+    assert "user:nobody:--x" in acl2
 
 
 @requiere_setfacl
@@ -167,3 +168,44 @@ def test_la_cuenta_puede_atravesar_pero_no_listar_ronda4_b2(tmp_path):
         assert listado_del_padre.returncode != 0
     finally:
         destino.chmod(0o770)
+
+
+@requiere_setfacl
+def test_directorio_existente_con_acl_vieja_de_produccion_se_corrige_ronda7(tmp_path):
+    """Ronda 7, punto 4: `apt install`/aaPanel demostraron el BLOCK -- y el directorio
+    de producción real, medido el 2026-09-22, tenía `drwxrwx---` con `group::rwx` (una
+    instalación de ANTES de que este script existiera). La ronda 6 sólo corregía el
+    modo/ACL al CREAR el directorio -- si ya existía con la ACL vieja, se quedaba así
+    para siempre. Este test replica exactamente esa ACL vieja y comprueba que el
+    script la corrige, no que la deja intacta."""
+    destino = tmp_path / "misiones"
+    admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    # ACL real de producción, previa a esta ronda: drwxrwx---, group::rwx.
+    destino.mkdir(parents=True)
+    destino.chmod(0o770)
+
+    r = _correr(tmp_path, destino, admin, "nobody")
+    assert r.returncode == 0, r.stderr
+
+    acl = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
+    assert "group::---" in acl, acl
+    assert f"user:{admin}:rwx" in acl
+    assert "user:nobody:--x" in acl
+    assert "other::---" in acl
+
+
+@requiere_setfacl
+def test_directorio_existente_con_acl_vieja_de_produccion_es_idempotente_ronda7(tmp_path):
+    """La corrección de una ACL vieja tiene que ser tan idempotente como la corrida
+    normal: correrlo dos veces sobre el mismo estado inicial "malo" no falla."""
+    destino = tmp_path / "misiones"
+    admin = subprocess.run(["id", "-un"], capture_output=True, text=True, check=True).stdout.strip()
+    destino.mkdir(parents=True)
+    destino.chmod(0o770)
+
+    r1 = _correr(tmp_path, destino, admin, "nobody")
+    assert r1.returncode == 0, r1.stderr
+    r2 = _correr(tmp_path, destino, admin, "nobody")
+    assert r2.returncode == 0, r2.stderr
+    acl = subprocess.run(["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True).stdout
+    assert "group::---" in acl

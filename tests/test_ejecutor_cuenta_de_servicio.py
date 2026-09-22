@@ -54,7 +54,11 @@ def _texto_con_delegados(nombre: str) -> str:
 def test_los_instaladores_crean_los_directorios_para_la_cuenta_de_servicio(nombre):
     texto = _texto_con_delegados(nombre)
     assert "-o fruiz" not in texto, f"{nombre} sigue creando directorios del operador"
-    assert f"-o {CUENTA_DE_SERVICIO}" in texto
+    assert "chown fruiz" not in texto, f"{nombre} le devuelve el dueño al operador"
+    # `-o jaxsvc` (install) o `chown jaxsvc:jaxsvc` (ronda 7,
+    # preparar_directorio_misiones.sh: setfacl atómico sin ventana, ver ese script) --
+    # las dos formas dejan a jaxsvc como dueño, que es lo único que este control pide.
+    assert f"-o {CUENTA_DE_SERVICIO}" in texto or f"chown {CUENTA_DE_SERVICIO}:" in texto
 
 
 def test_la_unidad_del_vigia_no_existe_y_nadie_la_instala():
