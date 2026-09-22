@@ -30,10 +30,11 @@ def test_jaxctl_is_readonly_command_surface():
     assert all(word not in result.stdout for word in ("dispatch", "grant", "approve", "cancel"))
 
 def test_readonly_b7_composition_is_not_a_public_dependency_injection_factory():
-    from policy.enforcement_evidence.status_engine import EnforcementStatusService, _runtime_readonly_status_service
+    from policy.enforcement_evidence.status_engine import EnforcementStatusService, _TrustedReadonlyStatusQuery, _runtime_readonly_status_service
     import inspect
     assert not hasattr(EnforcementStatusService, "for_readonly_query")
-    assert tuple(inspect.signature(EnforcementStatusService.query_control_status).parameters) == (
+    assert not hasattr(EnforcementStatusService, "query_control_status")
+    assert tuple(inspect.signature(_TrustedReadonlyStatusQuery.query_control_status).parameters) == (
         "self", "control_id", "control_version", "claim_level", "scope", "subjects", "as_of_utc")
     assert tuple(inspect.signature(_runtime_readonly_status_service).parameters) == ()
 

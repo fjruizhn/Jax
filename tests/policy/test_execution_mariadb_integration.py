@@ -221,9 +221,38 @@ def _b8_runtime_identity_fixture(tmp_path):
     path=tmp_path/"implementation-identity.json"; path.write_text(json.dumps(identity.projection()),encoding="utf-8")
     return evidence, path
 
-def _b7_counts():
-    tables=("evidence_blobs","evidence_artifacts","enforcement_observations","enforcement_assertions","assertion_artifacts","assertion_observations")
-    return {name:_scalar("SELECT COUNT(*) FROM jax_evidence."+name) for name in tables}
+def _b7_authoritative_fingerprint():
+    """Fingerprint every installed B7 table, including relationship tables.
+
+    The query surface is declared read-only.  A schema-wide content digest is
+    intentionally stronger than a selected table-count list: it detects any
+    INSERT, DELETE, or in-place UPDATE in the actual installed B7 migration.
+    """
+    def normalize(value):
+        if isinstance(value, bytes): return {"bytes_hex": value.hex()}
+        if isinstance(value, datetime): return {"datetime": value.isoformat()}
+        if value is None or isinstance(value, (bool, int, float, str)): return value
+        return {"text": str(value)}
+    connection=_connection()
+    try:
+        cursor=connection.cursor()
+        cursor.execute("SELECT table_name FROM information_schema.tables "
+                       "WHERE table_schema=%s AND table_type='BASE TABLE' ORDER BY table_name", ("jax_evidence",))
+        result={}
+        for (table,) in cursor.fetchall():
+            cursor.execute("SELECT column_name FROM information_schema.columns "
+                           "WHERE table_schema=%s AND table_name=%s ORDER BY ordinal_position", ("jax_evidence",table))
+            columns=tuple(item[0] for item in cursor.fetchall())
+            quoted=", ".join("`"+column.replace("`","``")+"`" for column in columns)
+            cursor.execute("SELECT "+quoted+" FROM `jax_evidence`.`"+table.replace("`","``")+"`")
+            rows=[json.dumps([normalize(value) for value in row], sort_keys=True, separators=(",",":"), ensure_ascii=True)
+                  for row in cursor.fetchall()]
+            rows.sort()
+            result[table]={"row_count":len(rows),
+                           "content_sha256":hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()}
+        return result
+    finally:
+        connection.close()
 
 def test_b8_jaxctl_control_real_mariadb_is_zero_write(monkeypatch, tmp_path, capsys):
     """The actual CLI/runtime/read-only B7 path cannot alter authoritative rows."""
@@ -231,20 +260,24 @@ def test_b8_jaxctl_control_real_mariadb_is_zero_write(monkeypatch, tmp_path, cap
     import policy.enforcement_evidence.implementation_identity as implementation_identity
     from jaxctl.commands import run
     monkeypatch.setattr(implementation_identity,"_DEPLOYMENT_IDENTITY_PATH",str(identity_path))
-    before=_b7_counts()
+    before=_b7_authoritative_fingerprint()
+    assert {"control_definitions","implementation_identities","evidence_blobs","evidence_artifacts",
+            "evidence_artifact_blobs","enforcement_observations","observation_artifacts",
+            "enforcement_assertions","assertion_artifacts","assertion_observations",
+            "test_evidence_manifests"}.issubset(before)
     status=run(["control","CTL.B6.GOVERNED_DISPATCH","--version","1","--claim","ENFORCED","--scope",'{"environment":"SANDBOX_RUNTIME"}',"--subjects",'[{"subject_type":"EXECUTION","identity":"b8-readonly"}]',"--json"])
     assert status == 0 and '"persisted":false' in capsys.readouterr().out
-    assert _b7_counts() == before
+    assert _b7_authoritative_fingerprint() == before
 
 def test_b8_jaxctl_control_unavailable_is_zero_write(monkeypatch, tmp_path, capsys):
     _evidence, identity_path=_b8_runtime_identity_fixture(tmp_path)
     import policy.enforcement_evidence.implementation_identity as implementation_identity
     from jaxctl.commands import run
     monkeypatch.setattr(implementation_identity,"_DEPLOYMENT_IDENTITY_PATH",str(identity_path)+".missing")
-    before=_b7_counts()
+    before=_b7_authoritative_fingerprint()
     status=run(["control","CTL.B6.GOVERNED_DISPATCH","--version","1","--claim","ENFORCED","--scope",'{"environment":"SANDBOX_RUNTIME"}',"--subjects",'[{"subject_type":"EXECUTION","identity":"b8-unavailable"}]',"--json"])
     assert status == 2 and '"status":"UNAVAILABLE"' in capsys.readouterr().out
-    assert _b7_counts() == before
+    assert _b7_authoritative_fingerprint() == before
 
 
 def _scalar(sql, args=()):

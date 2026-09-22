@@ -1,10 +1,11 @@
 """Deterministic, composition-owned claim derivation."""
 from __future__ import annotations
 from datetime import timedelta
+import weakref
 from .models import *
 from .control_registry import load_control_definition, require_trusted_definition
 from .evidence_store import is_trusted_implementation_identity
-from .errors import UnsupportedClaimLevelError, InvalidClaimScopeError
+from .errors import UnsupportedClaimLevelError, InvalidClaimScopeError, EvidenceArtifactUntrustedError
 
 def _matching(definition, identity, observations, scope, subjects):
  return tuple(x for x in observations if x.control_id==definition.control_id and x.control_version==definition.control_version and x.control_definition_hash==definition.control_definition_hash and x.implementation_identity_hash==identity.implementation_identity_hash and x.scope==scope and x.subject in subjects)
@@ -40,13 +41,14 @@ def derive_assertion(definition, identity, observations, *, claim_level, scope, 
   if not created or not duplicate: return AssertionVerdict.NOT_OBSERVED
  return AssertionVerdict.SUPPORTED
 
-class EnforcementStatusService:
- """Fixed application composition; requests cannot choose evidence subsets."""
+class _StatusDerivationService:
+ """Shared deterministic derivation mechanics; not a query capability."""
+ _readonly=False
  def __init__(self, lifecycle):
   # Lifecycle/identity/root are fixed at composition; requests only name a
   # claim.  In particular no request can redefine the source bytes that a
   # build manifest is compared against.
-  self._lifecycle=lifecycle; self._store=lifecycle._store; self._identity=lifecycle._identity; self._identity_provider=None; self._readonly=False
+  self._lifecycle=lifecycle; self._store=lifecycle._store; self._identity=lifecycle._identity; self._identity_provider=None
  def _written(self, identity=None, manifest_bytes=None):
   identity=identity or self._identity
   if not is_trusted_implementation_identity(identity) or identity.source_state is not SourceState.CLEAN: return False
@@ -97,44 +99,67 @@ class EnforcementStatusService:
   if trust_domains is None:
    trust_domains=tuple(sorted({a.trust_domain for o in observations for h in o.evidence_artifact_hashes for a in (self._store.load_evidence_artifact(h),)},key=lambda x:x.value))
   return definition, identity, observations, subjects, verdict, start, artifacts, trust_domains
- def query_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
-  """Authoritative read-only status derivation; never persists an assertion."""
-  definition, identity, observations, subjects, verdict, start, artifacts, trust_domains=self._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
-  return ControlStatusView(definition.control_id,definition.control_version,claim_level,verdict,identity.implementation_identity_hash,scope,subjects,as_of_utc,start,as_of_utc,tuple(sorted({o.reason_code for o in observations})),trust_domains,artifacts,tuple(o.observation_id for o in observations),as_of_utc)
+
+class EnforcementStatusService(_StatusDerivationService):
+ """Persisted B7 assertion lifecycle; it deliberately has no read-only query API."""
  def evaluate_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
   definition, identity, observations, subjects, verdict, start, artifacts, _=self._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
   assertion=EnforcementAssertion(definition.control_id,definition.control_version,definition.control_definition_hash,claim_level,verdict,identity.implementation_identity_hash,scope,subjects,artifacts,tuple(o.observation_id for o in observations),as_of_utc,start,as_of_utc)
   return self._lifecycle._EvidenceLifecycleService__persist_assertion(assertion)
 
+# This follows the existing exact-instance provenance pattern used for Block 6
+# issued artifacts.  It is neither a token nor a caller-provided marker: only
+# the fixed deployment composition below inserts the exact live object.
+_trusted_readonly_queries: dict[int, weakref.ReferenceType] = {}
+
+def _is_runtime_readonly_query(query):
+ ref=_trusted_readonly_queries.get(id(query))
+ return ref is not None and ref() is query
+
+class _TrustedReadonlyStatusQuery(_StatusDerivationService):
+ """Read-only view derivation, usable only by an exact composed instance.
+
+ Construction alone is intentionally insufficient.  A caller may create an
+ object with matching-looking dependencies, but it has no authoritative-query
+ provenance and therefore cannot produce an authoritative status view.
+ """
+ _readonly=True
+ def __init__(self, store, identity_provider, identity_reference_hash):
+  self._lifecycle=None; self._store=store; self._identity_provider=identity_provider
+  self._identity=type("IdentityReference",(),{"implementation_identity_hash":identity_reference_hash})()
+ def query_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
+  if not _is_runtime_readonly_query(self):
+   raise EvidenceArtifactUntrustedError("read-only status query is not fixed-composition provenance")
+  definition, identity, observations, subjects, verdict, start, artifacts, trust_domains=self._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
+  return ControlStatusView(definition.control_id,definition.control_version,claim_level,verdict,identity.implementation_identity_hash,scope,subjects,as_of_utc,start,as_of_utc,tuple(sorted({o.reason_code for o in observations})),trust_domains,artifacts,tuple(o.observation_id for o in observations),as_of_utc)
+
 def _build_runtime_readonly_status_composition():
  """Create the closed production-only B7 read-only composition boundary."""
- class RuntimeReadonlyStatusService(EnforcementStatusService):
-  """Local class: its zero-argument constructor owns all dependencies."""
-  def __init__(self):
-   import os
-   from .mariadb_store import MariaDBEvidenceStore
-   from .implementation_identity import TrustedImplementationIdentityProvider
-   try:
-    import pymysql
-    host=os.environ["JAX_DB_HOST"]; port=int(os.environ["JAX_DB_PORT"])
-   except (ImportError, KeyError, ValueError) as exc:
-    raise RuntimeError("MariaDB B7 composition unavailable") from exc
-   def connect():
-    return pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
-   store=MariaDBEvidenceStore(connect)
-   provider=TrustedImplementationIdentityProvider(store)
-   self._lifecycle=None; self._store=store; self._identity_provider=provider; self._readonly=True
-   # Deployment file supplies only the identity reference.  The authoritative
-   # row and manifest bytes are captured and verified inside the DB snapshot.
-   self._identity=type("IdentityReference",(),{"implementation_identity_hash":provider.identity_reference_hash()})()
  def build():
   """Construct the deployment reader with no caller-selectable dependencies.
 
   The database endpoint, identity file and provider are all fixed deployment
-  configuration.  Tests exercise this path by configuring that deployment
-  environment; they never receive a production DI constructor.
+  configuration.  The returned object has exact-instance provenance; merely
+  reconstructing it with the same dependencies cannot establish that trust.
   """
-  return RuntimeReadonlyStatusService()
+  try:
+   import os
+   from .mariadb_store import MariaDBEvidenceStore
+   from .implementation_identity import TrustedImplementationIdentityProvider
+   import pymysql
+   host=os.environ["JAX_DB_HOST"]; port=int(os.environ["JAX_DB_PORT"])
+  except (ImportError, KeyError, ValueError) as exc:
+   raise RuntimeError("MariaDB B7 composition unavailable") from exc
+  def connect():
+   return pymysql.connect(host=host,port=port,user=os.environ.get("JAX_DB_USER", ""),password=os.environ.get("JAX_DB_PASSWORD", ""),database=os.environ.get("JAX_DB_NAME", "jax_memory"),charset="utf8mb4",autocommit=False,connect_timeout=5)
+  store=MariaDBEvidenceStore(connect)
+  provider=TrustedImplementationIdentityProvider(store)
+  # Deployment file supplies only the identity reference.  The authoritative
+  # row and manifest bytes are captured and verified inside the DB snapshot.
+  query=_TrustedReadonlyStatusQuery(store,provider,provider.identity_reference_hash())
+  key=id(query)
+  _trusted_readonly_queries[key]=weakref.ref(query, lambda _ref, k=key: _trusted_readonly_queries.pop(k,None))
+  return query
  return build
 
 _runtime_readonly_status_service = _build_runtime_readonly_status_composition()

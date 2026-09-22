@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+import copy
 import pytest
 
 from policy.enforcement_evidence import *
@@ -123,32 +124,48 @@ def test_one_runtime_observation_never_mints_enforced():
  o=EnforcementObservation("obs-alone",d.control_id,1,d.control_definition_hash,a.subject,i.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",NOW,scope,(a.artifact_hash,))
  assert derive_assertion(d,i,(o,),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(a.subject,),as_of_utc=NOW) is AssertionVerdict.INSUFFICIENT_EVIDENCE
 
-def test_readonly_status_view_never_persists_and_matches_persisted_verdict():
+def test_persisted_status_service_has_no_readonly_query_capability():
  s=EvidenceStore(); lifecycle,_=composition(s); service=EnforcementStatusService(lifecycle)
  scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.EXECUTION,"x")
  before=(len(s._assertion_rows),len(s._observation_rows),len(s._artifact_rows))
- view=service.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
- assert isinstance(view,ControlStatusView) and view.persisted is False
- assert not isinstance(view,EnforcementAssertion)
- from policy.enforcement_evidence.evidence_store import is_trusted_assertion
- assert not is_trusted_assertion(view)
- assert (len(s._assertion_rows),len(s._observation_rows),len(s._artifact_rows)) == before
  persisted=service.evaluate_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
- assert view.verdict is persisted.verdict
+ assert isinstance(persisted,EnforcementAssertion)
+ assert not hasattr(service,"query_control_status")
+ with pytest.raises(AttributeError):
+  service.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
+ assert (len(s._assertion_rows),len(s._observation_rows),len(s._artifact_rows)) == (before[0]+1,before[1],before[2])
+
+def test_caller_constructed_readonly_query_cannot_mint_authoritative_view():
+ from policy.enforcement_evidence.status_engine import _TrustedReadonlyStatusQuery
+ from policy.enforcement_evidence.errors import EvidenceArtifactUntrustedError
+ s=EvidenceStore(); lifecycle,identity_value=composition(s)
+ scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.EXECUTION,"x")
+ provider=type("CallerProvider",(),{"verify_loaded_identity_bytes":lambda _self, value, manifest: {}})()
+ # A caller can construct arbitrary lifecycle/store/provider-shaped values,
+ # and can even copy dependencies from a legitimate persisted service.  None
+ # are an exact instance registered by the fixed runtime composition.
+ query=_TrustedReadonlyStatusQuery(s,provider,identity_value.implementation_identity_hash)
+ for query in (
+  query,
+  copy.copy(query),
+  _TrustedReadonlyStatusQuery(lifecycle._store,provider,identity_value.implementation_identity_hash),
+ ):
+  with pytest.raises(EvidenceArtifactUntrustedError):
+   query.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
+ assert not hasattr(EnforcementStatusService,"query_control_status")
 
 def test_readonly_query_uses_captured_snapshot_without_later_artifact_loads(monkeypatch):
  s=EvidenceStore(); lifecycle,identity_value=composition(s)
- service=EnforcementStatusService.__new__(EnforcementStatusService)
- service._lifecycle=None; service._store=s; service._identity=identity_value; service._readonly=True
- service._identity_provider=type("Fixed",(),{"verify_loaded_identity_bytes":lambda _self, value, manifest: {}})()
+ from policy.enforcement_evidence.status_engine import _TrustedReadonlyStatusQuery
+ service=_TrustedReadonlyStatusQuery(s,type("Fixed",(),{"verify_loaded_identity_bytes":lambda _self, value, manifest: {}})(),identity_value.implementation_identity_hash)
  captured=s.observations()
  # MariaDB supplies all verified observations/domains from one RR snapshot;
  # a later insert or artifact loader must not affect this query result.
  snapshot=type("Snapshot",(),{"identity":identity_value,"manifest_bytes":b"{}","observations":captured,"manifests":(),"trust_domains":()})()
  monkeypatch.setattr(s,"readonly_status_snapshot",lambda identity_hash, control_id, control_version: snapshot,raising=False)
  monkeypatch.setattr(s,"load_evidence_artifact",lambda _hash: (_ for _ in ()).throw(AssertionError("outside snapshot")))
- view=service.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME),subjects=(EvidenceSubject(EvidenceSubjectType.EXECUTION,"x"),),as_of_utc=NOW)
- assert view.persisted is False and view.supporting_observation_ids == ()
+ _definition, _identity, observations, _subjects, _verdict, _start, _artifacts, _domains=service._derive(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME),subjects=(EvidenceSubject(EvidenceSubjectType.EXECUTION,"x"),),as_of_utc=NOW)
+ assert observations == ()
 def test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape():
  import json
  from policy.enforcement_evidence.test_evidence import ingest_test_evidence_manifest, _TEST_CONTROL_MAP
