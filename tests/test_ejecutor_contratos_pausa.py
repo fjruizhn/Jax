@@ -55,3 +55,55 @@ def test_latido_fresco_viejo_o_ausente(tmp_path):
     assert P.latido_fresco(ruta, 5, ahora=mtime + 4) is True
     assert P.latido_fresco(ruta, 5, ahora=mtime + 6) is False
     assert P.latido_fresco(tmp_path / "x" / "latido", 5) is False
+
+
+# --- quitar_pausa_si (ronda 8, B-1): nunca levantar una pausa ajena --------------------
+
+def test_quitar_pausa_si_coincide_la_borra(tmp_path):
+    ruta = tmp_path / "PAUSA"
+    P.poner_pausa(ruta, {"origen": "huella", "host": "atemai", "mision_id": "m1"})
+    borro, datos = P.quitar_pausa_si(ruta, coincide=lambda d: d.get("origen") == "huella")
+    assert borro is True
+    assert datos["host"] == "atemai"
+    assert not ruta.exists()
+
+
+def test_quitar_pausa_si_no_coincide_la_deja(tmp_path):
+    ruta = tmp_path / "PAUSA"
+    P.poner_pausa(ruta, {"origen": "c4", "motivo": "freno"})
+    borro, datos = P.quitar_pausa_si(ruta, coincide=lambda d: d.get("origen") == "huella")
+    assert borro is False
+    assert datos["origen"] == "c4"
+    assert ruta.exists()
+    assert P.pausa_puesta(ruta) is True
+
+
+def test_quitar_pausa_si_sin_pausa_no_falla(tmp_path):
+    ruta = tmp_path / "PAUSA"
+    borro, datos = P.quitar_pausa_si(ruta, coincide=lambda d: True)
+    assert borro is False and datos is None
+
+
+def test_quitar_pausa_si_no_coincide_no_pisa_una_pausa_nueva_que_llego_en_el_medio(tmp_path, monkeypatch):
+    """La carrera de verdad: mientras `quitar_pausa_si` tiene la pausa vieja movida a
+    un temporal (no coincide, la va a reponer), otro proceso pone una pausa NUEVA en
+    la ruta original. Reponer con `os.link` (no `os.rename`) evita pisarla."""
+    import os as _os
+    ruta = tmp_path / "PAUSA"
+    P.poner_pausa(ruta, {"origen": "c4", "motivo": "freno"})
+
+    real_rename = _os.rename
+
+    def rename_con_carrera(src, dst):
+        real_rename(src, dst)
+        if str(src) == str(ruta):
+            # Justo después de "robarnos" la pausa vieja, otro proceso pone una nueva.
+            P.poner_pausa(ruta, {"origen": "c5", "motivo": "auditor"})
+
+    monkeypatch.setattr(_os, "rename", rename_con_carrera)
+    borro, datos = P.quitar_pausa_si(ruta, coincide=lambda d: d.get("origen") == "huella")
+    assert borro is False
+    assert datos["origen"] == "c4"  # lo que habíamos visto
+    # La pausa nueva (de C5) SIGUE ahí, intacta -- no se pisó.
+    contenido = json.loads(ruta.read_text())
+    assert contenido["origen"] == "c5"

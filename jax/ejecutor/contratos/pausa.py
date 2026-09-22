@@ -103,6 +103,41 @@ def poner_pausa(ruta: Path, datos: dict) -> bool:
         os.unlink(temporal)
 
 
+def quitar_pausa_si(ruta: Path, *, coincide) -> tuple:
+    """Borra la pausa en `ruta` SOLO si `coincide(datos)` es verdadero para su
+    contenido -- NUNCA una pausa ajena (ronda 8, B-1: antes de esto, `aceptar()` de la
+    huella borraba `JAX_EJECUTOR_PAUSA` a ciegas, aunque la hubiera puesto C4 o C5 por
+    otro motivo).
+
+    Sin carrera: `os.rename` agarra ATÓMICAMENTE lo que HAYA en `ruta` en este
+    instante, sea lo que sea (un solo syscall -- no hay una ventana de "leer y después
+    decidir" sobre el archivo original). Si lo que agarramos no coincide, se repone
+    con `os.link` -- que nunca PISA: si otro proceso ya volvió a poner algo distinto
+    en `ruta` mientras tanto, el link falla (`FileExistsError`) y se descarta la copia
+    en vez de destruir lo nuevo. Devuelve `(se_borro, datos_vistos_o_None)`."""
+    import secrets
+    ruta = Path(ruta)
+    tmp = ruta.parent / f".{ruta.name}.quitar-tmp-{os.getpid()}-{secrets.token_hex(4)}"
+    try:
+        os.rename(ruta, tmp)
+    except FileNotFoundError:
+        return False, None
+    try:
+        datos = json.loads(tmp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        datos = None
+    if isinstance(datos, dict) and coincide(datos):
+        os.unlink(tmp)
+        return True, datos
+    try:
+        os.link(tmp, ruta)
+    except FileExistsError:  # alguien más ya volvió a poner algo ahí -- lo suyo manda
+        pass
+    finally:
+        os.unlink(tmp)
+    return False, datos
+
+
 def latir(ruta: Path) -> None:
     """Marca que el vigía vive: crea el archivo o le actualiza la fecha."""
     ruta = Path(ruta)
