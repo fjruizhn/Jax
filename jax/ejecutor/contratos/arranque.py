@@ -287,12 +287,19 @@ def remoto_c6(llaves_root: str) -> str:
     q = shlex.quote(llaves_root)
     return (f'echo "llaves=$(stat -c \'%U %a\' {q} 2>/dev/null)"; '
             f'echo "freno=$(grep -c \' ejecutor-freno$\' {q} 2>/dev/null || true)"; '
-            'echo "revocador=$(stat -c \'%U %a\' /usr/local/sbin/ejecutor-revocar 2>/dev/null)"')
+            'echo "revocador=$(stat -c \'%U %a\' /usr/local/sbin/ejecutor-revocar 2>/dev/null)"; '
+            'echo "freno_remoto_sha=$(sha256sum /usr/local/sbin/ejecutor-freno-remoto 2>/dev/null | cut -d\' \' -f1)"; '
+            'echo "revocador_sha=$(sha256sum /usr/local/sbin/ejecutor-revocar 2>/dev/null | cut -d\' \' -f1)"')
 
 
-def leer_c6(salida: bytes, *, exige_freno: bool) -> tuple:
+def leer_c6(salida: bytes, *, exige_freno: bool, sha_freno_remoto: str | None = None,
+           sha_revocador: str | None = None) -> tuple:
     """Códigos de fallo de una máquina. La llave del freno sólo se exige en las remotas:
-    en la máquina local el freno mata por cgroup, sin ssh."""
+    en la máquina local el freno mata por cgroup, sin ssh. Ronda 4 (M-2): además del
+    dueño/modo, el CONTENIDO de `ejecutor-freno-remoto` y `ejecutor-revocar` instalados
+    tiene que ser BIT A BIT el del repo -- dueño/modo correctos no dicen nada del
+    contenido; `sha_*=None` (el default) no exige nada, para no romper llamadores viejos
+    que todavía no pasan el sha esperado."""
     vistas = dict(linea.split("=", 1) for linea in salida.decode(errors="replace").splitlines() if "=" in linea)
     codigos = []
     if vistas.get("llaves") != "root 644":
@@ -301,10 +308,17 @@ def leer_c6(salida: bytes, *, exige_freno: bool) -> tuple:
         codigos.append("sin_llave_del_freno")
     if vistas.get("revocador") != "root 755":
         codigos.append("sin_revocador")
+    if exige_freno and sha_freno_remoto is not None and vistas.get("freno_remoto_sha") != sha_freno_remoto:
+        codigos.append("freno_remoto_distinto_del_repo")
+    if sha_revocador is not None and vistas.get("revocador_sha") != sha_revocador:
+        codigos.append("revocador_distinto_del_repo")
     return tuple(codigos)
 
 
 async def verificar_c6_estatico(ctx: Contexto, hosts, *, correr=cuenta_axioma.correr_en_la_cuenta) -> tuple:
+    sha_freno_remoto = _sha((ctx.repo / "ops" / "ejecutor" / "ejecutor-freno-remoto").read_bytes())
+    sha_revocador = _sha((ctx.repo / "ops" / "ejecutor" / "ejecutor-revocar").read_bytes())
+
     async def una(h):
         remoto = remoto_c6(str(ctx.llaves_root))
         if not h.es_local:
@@ -313,7 +327,9 @@ async def verificar_c6_estatico(ctx: Contexto, hosts, *, correr=cuenta_axioma.co
         rc, salida, _ = await correr(ctx.cuenta, remoto, tope_s=_TOPE_C6_S)
         if rc != 0:
             return (Fallo("c6", "maquina_inalcanzable", (("host", h.nombre),)),)
-        return tuple(Fallo("c6", c, (("host", h.nombre),)) for c in leer_c6(salida, exige_freno=not h.es_local))
+        codigos = leer_c6(salida, exige_freno=not h.es_local, sha_freno_remoto=sha_freno_remoto,
+                          sha_revocador=sha_revocador)
+        return tuple(Fallo("c6", c, (("host", h.nombre),)) for c in codigos)
 
     resultados = await asyncio.gather(*(una(h) for h in hosts))
     return tuple(f for r in resultados for f in r)

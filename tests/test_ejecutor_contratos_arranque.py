@@ -2,6 +2,7 @@
 """El arranque del Ejecutor se niega si un contrato no está vivo. Pruebas falsas,
 archivos reales en tmp_path."""
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -218,6 +219,38 @@ def test_leer_c6(salida, exige_freno, codigos):
     assert AR.leer_c6(salida, exige_freno=exige_freno) == codigos
 
 
+# --- ronda 4, M-2: sha256 de ejecutor-freno-remoto/ejecutor-revocar contra el repo --------
+
+_SHA_FRENO_REMOTO = "ecf7b3fd58d7755df4ff40b5702813a1f3ff1bd9261028e169949dd73670450b"
+_SHA_REVOCADOR = "a5af7d9d8c45169ca4eaca6b94298935272fadaa38ddea43434820e70c32e82c"
+_C6_OK = (f"llaves=root 644\nfreno=1\nrevocador=root 755\n"
+         f"freno_remoto_sha={_SHA_FRENO_REMOTO}\nrevocador_sha={_SHA_REVOCADOR}\n").encode()
+
+
+def test_leer_c6_ok_cuando_las_sha_coinciden_con_el_repo():
+    assert AR.leer_c6(_C6_OK, exige_freno=True, sha_freno_remoto=_SHA_FRENO_REMOTO,
+                      sha_revocador=_SHA_REVOCADOR) == ()
+
+
+def test_leer_c6_marca_el_freno_remoto_distinto_del_repo():
+    salida = _C6_OK.replace(_SHA_FRENO_REMOTO.encode(), b"0" * 64, 1)
+    codigos = AR.leer_c6(salida, exige_freno=True, sha_freno_remoto=_SHA_FRENO_REMOTO, sha_revocador=_SHA_REVOCADOR)
+    assert "freno_remoto_distinto_del_repo" in codigos
+
+
+def test_leer_c6_marca_el_revocador_distinto_del_repo():
+    salida = _C6_OK.replace(_SHA_REVOCADOR.encode(), b"1" * 64)
+    codigos = AR.leer_c6(salida, exige_freno=True, sha_freno_remoto=_SHA_FRENO_REMOTO, sha_revocador=_SHA_REVOCADOR)
+    assert "revocador_distinto_del_repo" in codigos
+
+
+def test_leer_c6_no_exige_el_freno_remoto_en_la_local():
+    # exige_freno=False (local): el binario ejecutor-freno-remoto puede ni estar instalado.
+    salida = b"llaves=root 644\nfreno=0\nrevocador=root 755\nrevocador_sha=" + _SHA_REVOCADOR.encode() + b"\n"
+    assert AR.leer_c6(salida, exige_freno=False, sha_freno_remoto=_SHA_FRENO_REMOTO,
+                      sha_revocador=_SHA_REVOCADOR) == ()
+
+
 def test_c6_estatico_por_maquina_local_y_remota(tmp_path):
     hosts = (Host("hall9000", "127.0.0.1", 58291, "hypervisor", True),
              Host("bridge", "192.0.2.20", 58291, "clientes", False),
@@ -233,10 +266,31 @@ def test_c6_estatico_por_maquina_local_y_remota(tmp_path):
         return 0, b"llaves=root 644\nfreno=0\nrevocador=root 755\n", b""
 
     fallos = asyncio.run(AR.verificar_c6_estatico(_ctx(tmp_path), hosts, correr=correr))
-    assert fallos == (Fallo("c6", "maquina_inalcanzable", (("host", "bridge"),)),
-                      Fallo("c6", "sin_llave_del_freno", (("host", "atemai"),)))
+    # Ninguna de las dos salidas trae `*_sha`: las tres máquinas quedan con
+    # "revocador_distinto_del_repo" (dueño/modo sí cuadran, el contenido no se pudo
+    # comparar contra algo igual). hall9000 no exige el freno remoto, así que no suma
+    # "freno_remoto_distinto_del_repo".
+    assert fallos == (Fallo("c6", "revocador_distinto_del_repo", (("host", "hall9000"),)),
+                      Fallo("c6", "maquina_inalcanzable", (("host", "bridge"),)),
+                      Fallo("c6", "sin_llave_del_freno", (("host", "atemai"),)),
+                      Fallo("c6", "freno_remoto_distinto_del_repo", (("host", "atemai"),)),
+                      Fallo("c6", "revocador_distinto_del_repo", (("host", "atemai"),)))
     assert vistos[0] == AR.remoto_c6("/etc/ssh/authorized_keys.d/axioma")
     assert vistos[1].startswith("ssh -o BatchMode=yes") and "axioma@192.0.2.20" in vistos[1]
+
+
+def test_c6_estatico_ok_cuando_las_sha_remotas_coinciden_con_el_repo(tmp_path):
+    ctx = _ctx(tmp_path)
+    sha_freno = hashlib.sha256((ctx.repo / "ops/ejecutor/ejecutor-freno-remoto").read_bytes()).hexdigest()
+    sha_revocar = hashlib.sha256((ctx.repo / "ops/ejecutor/ejecutor-revocar").read_bytes()).hexdigest()
+    hosts = (Host("atemai", "192.0.2.11", 58291, "desarrollo", False),)
+
+    async def correr(c, remoto, *, entrada=b"", tope_s):
+        return 0, (f"llaves=root 644\nfreno=1\nrevocador=root 755\n"
+                   f"freno_remoto_sha={sha_freno}\nrevocador_sha={sha_revocar}\n").encode(), b""
+
+    fallos = asyncio.run(AR.verificar_c6_estatico(ctx, hosts, correr=correr))
+    assert fallos == ()
 
 
 # --- instalación ---------------------------------------------------------------
@@ -463,9 +517,10 @@ def _correr_solo_vm_y_local(vistos):
             return 0, "".join(f"alcance={ip}:{pt} cerrada\n" for ip, pt in ips).encode(), b""
         if "192.0.2.11" in remoto or "192.0.2.20" in remoto:
             return 255, b"", b"Connection refused"
+        salida_sha = f"freno_remoto_sha={_SHA_FRENO_REMOTO}\nrevocador_sha={_SHA_REVOCADOR}\n".encode()
         if remoto.startswith("ssh "):
-            return 0, b"llaves=root 644\nfreno=1\nrevocador=root 755\n", b""
-        return 0, b"llaves=root 644\nfreno=0\nrevocador=root 755\n", b""
+            return 0, b"llaves=root 644\nfreno=1\nrevocador=root 755\n" + salida_sha, b""
+        return 0, b"llaves=root 644\nfreno=0\nrevocador=root 755\n" + salida_sha, b""
     return correr
 
 
