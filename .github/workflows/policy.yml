@@ -1244,12 +1244,93 @@ jobs:
       # archivo). Mismos dos pasos que ese job: bubblewrap no viene en el runner, y en
       # Ubuntu 23.10+ AppArmor bloquea los user namespaces sin privilegios, que es
       # justamente lo que bwrap necesita.
-      - name: Instalar bubblewrap y habilitar user namespaces (para bwrap real)
+      #
+      # `exch` (PR #260, CI en rojo -- ronda 3 de este PR lo usaba, medido sólo en
+      # hall9000, nunca contra un runner real hasta que se abrió el PR). Verificado de
+      # verdad, no supuesto: el runner es `ubuntu-24.04` (`Set up job` del propio log
+      # de CI); Ubuntu 24.04 (noble) trae `util-linux` 2.39.3, y `exch` recién se
+      # agregó a util-linux el 2023-12-06 (commit cd094a05, upstream) -- entra en
+      # util-linux 2.40, que noble NO tiene ni en el paquete base ni en
+      # `util-linux-extra` (bajado y abierto el `.deb` real del archivo de Ubuntu:
+      # `fadvise fincore lsfd lsirq pipesz waitpid blkpr hwclock` -- SIN `exch`). Instalar
+      # `util-linux-extra` en este runner NO alcanza (primer intento, descartado tras
+      # verificarlo). hall9000 SÍ lo tiene porque corre Ubuntu 26.04 (`resolute`,
+      # util-linux 2.41+ vía Launchpad).
+      #
+      # En vez de perseguir un paquete/PPA con versiones cruzadas (riesgo real de
+      # incompatibilidad de glibc contra un runner más viejo), se instala un `exch`
+      # MÍNIMO -- sólo para este runner de CI, nunca para producción -- que hace
+      # EXACTAMENTE lo mismo que el real: un wrapper de dos argumentos sobre
+      # `renameat2(RENAME_EXCHANGE)`, vía `ctypes` contra la libc del sistema (glibc
+      # expone `renameat2()` desde 2.28, muy por debajo de lo que trae cualquier Ubuntu
+      # soportado) -- sin compilador, sin depender de los headers internos de
+      # util-linux (`c.h`/`nls.h`, que exigirían todo su árbol de build). El script
+      # real (`reemplazar_directorio_atomico.sh`) sólo le pide `command -v exch` y que
+      # intercambie dos rutas atómicamente -- exactamente lo que hace este shim.
+      #
+      # `/etc/claude-code` (PR #260, CI en rojo -- los 4 `test_bwrap_real_*` de
+      # test_ejecutor_contratos_cuenta_axioma.py, que las notas de rondas anteriores
+      # daban por "pasan sueltas en el runner real" SIN haberlo comprobado nunca contra
+      # un runner de verdad): el error real es `bwrap: Can't mkdir /etc/claude-code:
+      # Permission denied` -- `cuenta_axioma.py::_jaula` hace `--tmpfs /etc/claude-code`
+      # sobre el `/etc` REAL del host (`--dev-bind / /`), y un namespace de usuario sin
+      # privilegios no puede CREAR un directorio nuevo bajo un `/etc` que no es suyo,
+      # aunque root DENTRO del namespace sea el propio usuario. En hall9000 el
+      # directorio YA EXISTE -- lo crea la instalación real
+      # (`ops/ejecutor/instalar_contratos.sh:27`: `sudo install -d -o root -g root -m
+      # 0755 /etc/claude-code`), así que bwrap sólo MONTA encima, sin mkdir. El runner
+      # de CI es una máquina nueva que nunca corrió esa instalación. Se replica ACÁ el
+      # mismo `install -d` que usa producción -- no una ruta inventada para CI.
+      - name: Instalar bubblewrap y un exch mínimo para este runner (Ubuntu 24.04 no trae exch real)
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
             echo "(sysctl ausente en este kernel -- no aplica)"
           bwrap --version
+          sudo install -d -o root -g root -m 0755 /etc/claude-code
+          sudo tee /usr/local/bin/exch >/dev/null <<'EXCH_CI_SHIM'
+          #!/usr/bin/env python3
+          """exch MÍNIMO, sólo para CI (Ubuntu 24.04, sin util-linux >= 2.40): misma
+          interfaz de dos argumentos que el exch real de util-linux -- intercambia dos
+          rutas atómicamente vía renameat2(RENAME_EXCHANGE) por ctypes contra la libc
+          del sistema. En producción (hall9000, Ubuntu 26.04) se usa el exch real de
+          util-linux-extra; esto NO se instala ahí. Ver .github/workflows/policy.yml."""
+          import ctypes
+          import ctypes.util
+          import os
+          import sys
+
+          RENAME_EXCHANGE = 1 << 1
+          AT_FDCWD = -100
+
+
+          def main() -> int:
+              if len(sys.argv) != 3:
+                  print("uso: exch ORIGEN DESTINO", file=sys.stderr)
+                  return 1
+              libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+              origen, destino = sys.argv[1].encode(), sys.argv[2].encode()
+              rc = libc.renameat2(AT_FDCWD, origen, AT_FDCWD, destino, RENAME_EXCHANGE)
+              if rc != 0:
+                  err = ctypes.get_errno()
+                  print(f"exch: {os.strerror(err)}", file=sys.stderr)
+                  return 1
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          EXCH_CI_SHIM
+          sudo chmod 0755 /usr/local/bin/exch
+          command -v exch || { echo "exch shim no quedó instalado -- revisar el heredoc de arriba"; exit 1; }
+          # Prueba real, no sólo "está en el PATH": intercambia dos archivos de mentira
+          # y confirma que el contenido de verdad se intercambió.
+          tmp="$(mktemp -d)"
+          echo AAA > "$tmp/a"; echo BBB > "$tmp/b"
+          exch "$tmp/a" "$tmp/b"
+          [ "$(cat "$tmp/a")" = "BBB" ] && [ "$(cat "$tmp/b")" = "AAA" ] || \
+            { echo "el exch shim no intercambió de verdad -- ver /tmp de la prueba"; exit 1; }
+          rm -rf "$tmp"
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
@@ -3889,12 +3970,47 @@ jobs:
           #   sobre el nombre de la pausa, para que un nombre con `[`/`]`/`*`/`?` no haga
           #   matchear el patrón de más ni de menos.
           #   +11 tests netos: +7 en test_ejecutor_contratos_pausa.py (3 MINOR + 4 candado) y +4
-          #   en test_ejecutor_huella_aceptar.py (3 MINOR + el test de la carrera real). Medido
-          #   dos veces, mismo método (`bwrap --tmpfs`, sin tocar nada fuera del worktree): 2662
-          #   (wrapped) + 12 sueltas (mismas 4 `test_bwrap_real_*` + 8 de setfacl real, sin
-          #   cambio de ronda 9, confirmadas pasando sueltas de nuevo) = 2674.
-          grep -qE "^2674 passed, 42 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2674 tests CORRIDOS y exactamente 42 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 26 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 12 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 8 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
+          #   en test_ejecutor_huella_aceptar.py (3 MINOR + el test de la carrera real).
+          #
+          # CORRECCIÓN DE MÉTODO (PR #260, jax#260 en rojo -- 2 de los 4 checks fallando eran
+          # "tests-puros"; leído el log real con `gh run view --log-failed`, no supuesto): el
+          # `bwrap --tmpfs ...` que envolvía la corrida completa (método usado desde la ronda 3
+          # para simular "el runner no tiene claude-skills/el corpus de U3") tenía un efecto
+          # colateral que NADIE había verificado contra un runner real hasta que se abrió este
+          # PR -- namespaces de usuario ANIDADOS (bwrap-dentro-de-bwrap) rompen `setfacl` real y
+          # el propio `bwrap` interno, así que 12 tests que en realidad PASAN en CI (confirmado
+          # abajo) se venían tratando como "sueltas" por una limitación de la HERRAMIENTA DE
+          # MEDICIÓN, no del runner. El CI real reveló ADEMÁS dos causas de rojo genuinas, sin
+          # relación con el envoltorio: `exch` (util-linux) no existe en Ubuntu 24.04 (el runner
+          # real, confirmado en el log: `Image: ubuntu-24.04`; `exch` se agregó a util-linux
+          # recién el 2023-12-06, entra en la versión 2.40, y noble trae 2.39.3 -- verificado
+          # bajando el `.deb` real de `util-linux-extra` del archivo de Ubuntu, sin `exch`
+          # adentro) y `/etc/claude-code` no existe en un runner nuevo (`bwrap: Can't mkdir
+          # /etc/claude-code: Permission denied` -- en hall9000 existe porque
+          # `ops/ejecutor/instalar_contratos.sh` ya lo creó ahí; un runner de GH nunca corrió esa
+          # instalación). Los dos arreglados en el paso de arriba (el shim de `exch` vía ctypes +
+          # `sudo install -d ... /etc/claude-code`, el MISMO comando que usa la instalación real,
+          # no uno inventado para CI) -- verificados de a uno: el shim probado contra un
+          # intercambio real de contenido (no sólo "está en el PATH"), y el mkdir reproducido y
+          # corregido con un directorio de prueba antes de tocar el real.
+          #
+          # Medido con el MÉTODO DEL JOB, no el de antes: sin envolver nada en un `bwrap`
+          # externo -- `sudo unshare --mount` (namespace de MONTAJE, no de usuario -- no hay
+          # anidado de user namespaces, así que `setfacl`/`bwrap` internos corren normal) para
+          # tapar `~/claude-skills`, `~/ejecutor-fase0` Y `~/jax-platform` (los tres ausentes en
+          # un runner nuevo) con montajes bind vacíos, más las variables de DB DESHECHAS (este
+          # job no tiene `services: mariadb`). Verificado línea por línea contra el log real de
+          # CI (`gh run view --log-failed`, dos corridas del mismo push): incluso los NOMBRES de
+          # los 45 tests salteados coinciden exactamente, uno por uno, entre este método local y
+          # el runner real -- 16 de test_ejecutor_reproduccion_u3.py (sin el corpus de U3,
+          # estructural) + 26 que exigen la constitución REAL (25 de
+          # test_ejecutor_generar_claude_md.py + 1 de test_ejecutor_contratos_contexto.py) + 2 de
+          # test_base_por_sesion.py (sin `JAX_DB_HOST`, cubiertos aparte en
+          # jacobs-gobernanza-db) + 1 de test_cola_uso_escritores.py (sin checkout de
+          # jax-platform, lo cubre el job `mirror-sync`). Resultado, dos corridas: 2671 passed,
+          # 45 skipped, 1 xfailed -- EXACTO, sin ajustar a mano.
+          grep -qE "^2671 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2671 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
