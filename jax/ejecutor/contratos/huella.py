@@ -134,13 +134,65 @@ def _tramo_sbin_ejecutor() -> str:
 
 
 def comando_huella() -> str:
-    """El comando REMOTO para la huella -- sin `sudo -n` propio (lo corre el
-    controlador, envuelto en UN solo `sudo -n sh -c '<esto>'`, ver `vigia_servicio.py`
-    y `revocacion.argv_admin`). No depende de ninguna cuenta: ronda 6 quitó el log de
-    sudo, que era lo único que sí dependía de un nombre."""
+    """El texto de lo que había que medir -- YA NO se manda por ssh (ver el arreglo del
+    bug de producción, jax#260, 2026-09-22, en el docstring del módulo y en
+    `argv_huella_servicio`, más abajo): antes se envolvía en UN `sudo -n sh -c '<esto>'`
+    armado por `revocacion.argv_admin` como el ADMINISTRADOR; ahora la misma lógica
+    (RUTAS_CONTROLES + el glob de `/usr/local/sbin/ejecutor-*`, mismos binarios por ruta
+    absoluta) vive, ESTÁTICA, en `ops/ejecutor/ejecutor-huella` -- el comando forzado de
+    la llave PROPIA del servicio. Esta función sigue acá como la definición en Python de
+    QUÉ se mide (dato, no código, Principio IV); `tests/test_ejecutor_huella_sh.py`
+    verifica que el script real mide exactamente las mismas rutas."""
     tramos = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
     tramos.append(_tramo_sbin_ejecutor())
     return f'({" ; ".join(tramos)}) | {_SORT}'
+
+
+# --- EL CAMINO REMOTO: la llave PROPIA DEL SERVICIO, no la personal del administrador ---
+#
+# Bug de producción (jax#260, 2026-09-22, medido por Fernando): `vigia_servicio.py` lo
+# lanza `jax-platform` como SUBPROCESO -- y desde el 2026-09-17 (decisión de Fernando,
+# cuenta de servicio) `jax-platform.service` corre como `jaxsvc`
+# (`/etc/systemd/system/jax-platform.service.d/cuenta-de-servicio.conf: User=jaxsvc`),
+# NO como `fruiz`. Varios docstrings de este árbol (este módulo, `vigia_servicio.py`,
+# `ops/ejecutor/instalar_vigia.sh`) seguían afirmando "hereda la identidad de fruiz" --
+# ERA FALSO, corregido en esta ronda. `jaxsvc` no puede leer `~fruiz/.ssh/*` (600, dueño
+# `fruiz`), así que `revocacion.argv_admin` (sin `-i`, resolución de identidad por
+# DEFAULT de ssh) no encontraba ninguna llave utilizable: `vigia_no_latio=true rc=2`
+# medido en producción, el Ejecutor bloqueado por completo.
+#
+# El arreglo: una llave PROPIA del servicio (`JAX_EJECUTOR_HUELLA_LLAVE`, bajo
+# `/etc/jax/controlador/` -- ese directorio YA es `jaxsvc:jaxsvc 700`, igual que
+# `JAX_EJECUTOR_CONTROLADOR_LLAVE`, pero un PAR DISTINTO: ese es para `axioma@127.0.0.1`
+# local; éste, para el ADMINISTRADOR en cada remota) autorizada en cada máquina con
+# comando forzado hacia `ejecutor-huella` (`ops/ejecutor/ejecutor-huella` +
+# `ops/ejecutor/instalar_huella_en_maquina.sh`) -- mismo patrón que ya usa C4
+# (`ejecutor-freno-remoto`, `JAX_EJECUTOR_FRENO_LLAVE`). El comando forzado (`restrict`,
+# sin pty, sin reenvíos, `from=` acotado a hall9000) limita lo que esa llave puede hacer
+# aunque quien la lea quisiera abrir una shell con ella. `IdentitiesOnly=yes` hace
+# cumplir que ssh NUNCA ofrezca otra llave ni caiga a un agente -- sin eso, un fallo de
+# la llave del servicio podría hacer que ssh probara silenciosamente la personal del
+# administrador (si por algún accidente de entorno estuviera al alcance), que es
+# exactamente el defecto que este arreglo cierra.
+VARIABLE_HUELLA_LLAVE = "JAX_EJECUTOR_HUELLA_LLAVE"
+VARIABLE_HUELLA_KNOWN_HOSTS = "JAX_EJECUTOR_HUELLA_KNOWN_HOSTS"
+
+
+def argv_huella_servicio(h, *, llave: Path, known_hosts: Path, admin_usuario: str, tope_s: float) -> list[str]:
+    """El ssh REAL para tomar la huella -- reemplaza `revocacion.argv_admin` +
+    `comando_huella()` en el camino en vivo (ver el bloque de arriba). `-i llave` es la
+    llave PROPIA DEL SERVICIO (jaxsvc puede leerla) -- `IdentitiesOnly=yes` hace que ssh
+    NUNCA ofrezca otra. Se conecta como `admin_usuario` (la MISMA cuenta que
+    `JAX_EJECUTOR_ADMIN_USUARIO`, `fruiz`) -- lo que cambia es la CREDENCIAL, no de qué
+    cuenta es huésped: el comando forzado del lado remoto es lo que acota qué puede
+    hacer esa llave. `UserKnownHostsFile` dedicado (`known_hosts`): `jaxsvc` no comparte
+    el `$HOME/.ssh/known_hosts` de `fruiz` ni de `axioma`. El comando remoto que se
+    manda (`"ejecutor-huella"`) es cosmético -- el `command=` forzado en la remota lo
+    reemplaza siempre -- pero deja algo legible en el log de sshd sobre qué se pidió."""
+    return ["ssh", "-i", str(llave), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
+            "-o", f"ConnectTimeout={int(tope_s)}", "-p", str(h.puerto), f"{admin_usuario}@{h.ip}",
+            "ejecutor-huella"]
 
 
 @dataclass(frozen=True)
@@ -235,20 +287,24 @@ def leer_marca(ruta: Path) -> Marca:
 
 # --- la CLI de aceptación: `python -m jax.ejecutor.contratos.huella aceptar ...` --------
 #
-# Corre como FRUIZ (nunca axioma -- mismo criterio que toda la toma de huella). Ver
-# docs/ejecutor-huella-aceptar.md para el procedimiento completo y por qué existe.
+# Corre `sudo -u jaxsvc` (nunca `fruiz` a secas, nunca `axioma`, nunca `root` a secas --
+# ver `docs/ejecutor-huella-aceptar.md` para el porqué completo: el registro de C3 y
+# `JAX_EJECUTOR_MISIONES` son de `jaxsvc`). CORREGIDO (bug de producción, jax#260,
+# 2026-09-22): este comentario decía "corre como FRUIZ" -- ERA FALSO, y por eso
+# `_tomar_huella_actual` tenía el MISMO defecto que `vigia_servicio.py`: armaba el ssh
+# con `revocacion.argv_admin` (sin `-i`, resolución de identidad por default), que
+# `jaxsvc` no puede satisfacer con la llave personal de `fruiz`.
 
 async def _tomar_huella_actual(host_nombre: str, *, politica_ruta: Path, admin_usuario: str,
+                               huella_llave: Path, huella_known_hosts: Path,
                                tope_s: float = 30) -> Huella:
     """Toma la huella de AHORA MISMO contra `host_nombre`, leyendo su `ip`/`puerto` de
-    la política exportada (mismo camino que `vigia_servicio._tomar_huella` --
-    `revocacion.argv_admin` + un solo `sudo -n sh -c`). Import diferido: evita un ciclo
-    con `vigia_servicio` (que ya importa `huella`) y a `politica`/`revocacion`, que
-    `huella.py` no necesita para nada más que esto."""
-    import shlex
-
+    la política exportada -- mismo camino que `vigia_servicio._tomar_huella`:
+    `argv_huella_servicio` (la llave PROPIA del servicio, NUNCA la personal de
+    `admin_usuario` -- ver el bloque de arriba). Import diferido: evita un ciclo con
+    `vigia_servicio` (que ya importa `huella`) y a `politica`, que `huella.py` no
+    necesita para nada más que esto."""
     from jax.ejecutor.contratos import politica as P
-    from jax.ejecutor.contratos import revocacion
     from jax.ejecutor.contratos import vigia_servicio as V
 
     doc = json.loads(Path(politica_ruta).read_bytes())
@@ -256,7 +312,8 @@ async def _tomar_huella_actual(host_nombre: str, *, politica_ruta: Path, admin_u
     h = hosts.get(host_nombre)
     if h is None:
         raise ValueError("host_desconocido", host_nombre)
-    argv = revocacion.argv_admin(h, admin_usuario, f"sudo -n sh -c {shlex.quote(comando_huella())}")
+    argv = argv_huella_servicio(h, llave=huella_llave, known_hosts=huella_known_hosts,
+                                admin_usuario=admin_usuario, tope_s=tope_s)
     return await V.correr_huella_por_ssh(argv, host_nombre, tope_s=tope_s)
 
 
@@ -297,6 +354,7 @@ def _registrar_aceptacion(registro_ruta: Path, *, host: str, mision_id: str, ace
 async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: str, sin_medir: bool = False,
                   motivo: str | None = None, identidad_declarada_por: str = "proceso",
                   politica_ruta: Path | None = None, admin_usuario: str | None = None,
+                  huella_llave: Path | None = None, huella_known_hosts: Path | None = None,
                   registro_ruta: Path | None = None, pausa_ruta: Path | None = None,
                   tomar_huella_actual=None, registrar=_registrar_aceptacion,
                   ahora=None, salida=print) -> int:
@@ -319,9 +377,11 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
     se aceptó sin poder confirmar nada.
 
     `tomar_huella_actual`/`registrar` inyectables (tests): por default,
-    `tomar_huella_actual` es `_tomar_huella_actual` (ssh real, necesita
-    `politica_ruta`/`admin_usuario`) y `registrar` es `_registrar_aceptacion` (escribe
-    en el registro real de C3, necesita `registro_ruta`).
+    `tomar_huella_actual` es `_tomar_huella_actual` (ssh real con la llave PROPIA del
+    servicio -- necesita `politica_ruta`/`admin_usuario`/`huella_llave`/
+    `huella_known_hosts`; ver el arreglo del bug de producción jax#260, 2026-09-22, en
+    el docstring de `argv_huella_servicio`) y `registrar` es `_registrar_aceptacion`
+    (escribe en el registro real de C3, necesita `registro_ruta`).
 
     Barrido (ronda 9): al arrancar, limpia los temporales huérfanos que un kill puede
     haber dejado de una corrida anterior de `quitar_pausa_si` (`.{nombre}.quitar-tmp-*`
@@ -336,7 +396,8 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
         return 2
 
     tomar = tomar_huella_actual or (
-        lambda h: _tomar_huella_actual(h, politica_ruta=politica_ruta, admin_usuario=admin_usuario))
+        lambda h: _tomar_huella_actual(h, politica_ruta=politica_ruta, admin_usuario=admin_usuario,
+                                       huella_llave=huella_llave, huella_known_hosts=huella_known_hosts))
 
     ruta = ruta_huella(misiones, mision_id, host)
     try:
@@ -458,9 +519,15 @@ def principal(argv: list[str]) -> int:
     [--sin-medir --motivo "<texto>"]` -- lee `JAX_EJECUTOR_MISIONES`,
     `JAX_EJECUTOR_ADMIN_USUARIO`, `JAX_EJECUTOR_REGISTRO`, `JAX_EJECUTOR_PAUSA` (se
     borra al aceptar, y SÓLO si es la pausa de ESTA huella -- ver B-1 en `aceptar()`),
-    `JAX_EJECUTOR_CUENTA` (la cuenta del Ejecutor, `axioma`) y la política exportada
-    (`JAX_EJECUTOR_POLITICA`, misma que lee `cuenta_axioma.cuenta_desde_entorno`) del
-    entorno.
+    `JAX_EJECUTOR_CUENTA` (la cuenta del Ejecutor, `axioma`), la política exportada
+    (`JAX_EJECUTOR_POLITICA`, misma que lee `cuenta_axioma.cuenta_desde_entorno`) y,
+    desde el arreglo del bug de producción (jax#260, 2026-09-22),
+    `JAX_EJECUTOR_HUELLA_LLAVE`/`JAX_EJECUTOR_HUELLA_KNOWN_HOSTS` (la llave PROPIA del
+    servicio para volver a medir -- ver `argv_huella_servicio`) del entorno. Las dos
+    últimas se exigen SIEMPRE, aunque la corrida termine usando `--sin-medir`: mismo
+    criterio que ya regía para `politica_ruta`/`admin_usuario`, que tampoco hacían falta
+    para ese camino y de todos modos se piden por adelantado -- fail-closed sobre
+    configuración incompleta, no sobre si esta corrida en particular los va a usar.
 
     M-1 (ronda 8): el registro de C3 (`/var/log/jax-ejecutor/registro.jsonl`) y el
     árbol de misiones (`JAX_EJECUTOR_MISIONES`) son de `jaxsvc` -- `fruiz` sólo tiene
@@ -519,6 +586,8 @@ def principal(argv: list[str]) -> int:
         return asyncio.run(aceptar(
             misiones=Path(env["JAX_EJECUTOR_MISIONES"]), mision_id=args.mision_id, host=args.host,
             politica_ruta=Path(env["JAX_EJECUTOR_POLITICA"]), admin_usuario=env["JAX_EJECUTOR_ADMIN_USUARIO"],
+            huella_llave=Path(env["JAX_EJECUTOR_HUELLA_LLAVE"]),
+            huella_known_hosts=Path(env["JAX_EJECUTOR_HUELLA_KNOWN_HOSTS"]),
             registro_ruta=Path(env["JAX_EJECUTOR_REGISTRO"]), pausa_ruta=_pausa.ruta_de_la_pausa(env),
             aceptado_por=aceptado_por, sin_medir=args.sin_medir, motivo=args.motivo,
             identidad_declarada_por=declarada_por))

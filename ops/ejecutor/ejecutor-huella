@@ -1,0 +1,54 @@
+#!/bin/sh
+# ops/ejecutor/ejecutor-huella — comando forzado de la llave PROPIA DEL SERVICIO (arreglo
+# del bug de producción, jax#260, 2026-09-22: `jax-platform.service` corre como `jaxsvc`
+# desde el 2026-09-17, no como `fruiz` -- y `jaxsvc` no puede leer la llave personal de
+# fruiz, que es lo que el camino viejo necesitaba. Medido en producción:
+# `vigia_no_latio=true rc=2`, el Ejecutor bloqueado por completo).
+#
+# Se instala root 0755 en /usr/local/sbin de cada máquina del inventario
+# (ops/ejecutor/instalar_huella_en_maquina.sh, mismo patrón que
+# ops/ejecutor/instalar_en_maquina.sh instala ejecutor-freno-remoto y ejecutor-revocar).
+# La llave del servicio (JAX_EJECUTOR_HUELLA_LLAVE, jaxsvc:jaxsvc en hall9000 -- ver
+# jax/ejecutor/contratos/huella.py) queda en el authorized_keys del ADMINISTRADOR
+# (JAX_EJECUTOR_ADMIN_USUARIO) atada con:
+#
+#   command="sudo -n /usr/local/sbin/ejecutor-huella",restrict,from="<ip de hall9000>" \
+#     <tipo> <clave> ejecutor-huella-servicio
+#
+# `restrict` bloquea pty/reenvíos/agente/variables de entorno del cliente; `from=` acota
+# el origen; el `sudo -n` del comando forzado (con una regla de sudoers ACOTADA, sin
+# `ALL`, que sólo permite exactamente este binario sin argumentos -- ver
+# instalar_huella_en_maquina.sh) es lo que le da acceso de lectura a /etc/sudoers y
+# /root/.ssh/authorized_keys, que el administrador sin sudo -n no podría leer.
+#
+# SIN PARÁMETROS: no hay superficie de ataque -- lo que mide es fijo, nunca lo que
+# alguien mande por ssh (y de todos modos `restrict` + el sudoers acotado a "sin
+# argumentos" lo impedirían).
+#
+# MISMAS rutas y MISMA forma que `jax.ejecutor.contratos.huella.comando_huella()`
+# (RUTAS_CONTROLES + el glob de /usr/local/sbin/ejecutor-*, mismo orden, mismo formato
+# de salida) -- tests/test_ejecutor_huella_sh.py los mantiene sincronizados. Binarios por
+# RUTA ABSOLUTA (sin depender de `secure_path`: un root remoto también podría reemplazar
+# `sha256sum` en el PATH -- esto prueba "el Ejecutor no lo hizo por accidente", no "un
+# root de la máquina es incapaz de mentir", mismo límite documentado en huella.py).
+set -u
+FIND=/usr/bin/find
+SHA256SUM=/usr/bin/sha256sum
+SORT=/usr/bin/sort
+
+tramo() {
+  "$FIND" "$1" -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
+  "$FIND" "$1" -type l -printf "L %p -> %l\n" 2>/dev/null
+  "$FIND" "$1" -type d -printf "D %p\n" 2>/dev/null
+}
+
+{
+  tramo /etc/sudoers
+  tramo /etc/sudoers.d
+  tramo /etc/ssh/sshd_config
+  tramo /etc/ssh/sshd_config.d
+  tramo /etc/ssh/authorized_keys.d
+  tramo /root/.ssh/authorized_keys
+  "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
+  "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -type l -printf "L %p -> %l\n" 2>/dev/null
+} | "$SORT"

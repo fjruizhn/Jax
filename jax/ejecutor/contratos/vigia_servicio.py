@@ -17,10 +17,22 @@ Este módulo NO es una unidad systemd (la plantilla `ejecutor-vigia@.service` qu
 prometía se retiró el 2026-09-22: código muerto, el journal nunca mostró un solo
 arranque suyo -- ver DEUDA.md). Lo lanza `abrir_vigia` (`jax/ejecutor/mision_servicio.py`)
 como SUBPROCESO DIRECTO por cada turno (`python -m jax.ejecutor.contratos.vigia_servicio
-<ruta_mision>`), heredando la identidad del proceso que lo lanza -- en producción,
-`jax-platform` (`User=fruiz`), así que este módulo corre como `fruiz`. Eso es lo que hace
-coherente a M-1 más abajo (la huella la toma el controlador COMO FRUIZ, nunca como
-`axioma`): no es una cuenta de servicio aparte, es la misma identidad del proceso.
+<ruta_mision>`), heredando la identidad del proceso que lo lanza.
+
+CORREGIDO (bug de producción, jax#260, 2026-09-22; este párrafo decía lo contrario y
+ERA FALSO): en producción ese proceso es `jax-platform`, y desde el 2026-09-17 (decisión
+de Fernando, cuenta de servicio) `jax-platform.service` corre como `jaxsvc`
+(`/etc/systemd/system/jax-platform.service.d/cuenta-de-servicio.conf: User=jaxsvc`),
+NO como `fruiz` -- así que este módulo corre como `jaxsvc`, no como el administrador. Por
+eso M-1/`_tomar_huella` más abajo ya NO arma el ssh con `revocacion.argv_admin` (sin
+`-i`, resolución de identidad por DEFAULT): `jaxsvc` no puede leer `~fruiz/.ssh/*` (600,
+dueño `fruiz`), y ese camino medía `vigia_no_latio=true rc=2` en producción -- el
+Ejecutor bloqueado por completo. Usa en cambio `huella.argv_huella_servicio`, con una
+llave PROPIA del servicio (`JAX_EJECUTOR_HUELLA_LLAVE`, jaxsvc:jaxsvc) autorizada por
+comando forzado en cada remota (ver el docstring de ese módulo). El CONTROLADOR sigue
+siendo, nominalmente, el mismo administrador (`fruiz`, vía `JAX_EJECUTOR_ADMIN_USUARIO`)
+-- lo que cambió es la CREDENCIAL con la que se llega a esa cuenta, no de qué cuenta es
+huésped ni que siga sin ser `axioma`.
 La misión es un JSON `{"mision": texto, "hosts": [nombres]}` en
 `JAX_EJECUTOR_MISIONES/<id>.json` (`<id>` = `Turno.id_vigia`, `<mision_id>-t<n>`, o el
 UUID bare de la misión de humo). Salida: códigos `clave=valor` (formato.py), nunca texto
@@ -33,13 +45,12 @@ import json
 import logging
 import os
 import re
-import shlex
 import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, huella, pausa, politica, revocacion, vigia
+from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, huella, pausa, politica, vigia
 from jax.ejecutor.contratos import auditor as A
 
 log = logging.getLogger("ejecutor.vigia_servicio")
@@ -327,11 +338,12 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
 
 async def correr_huella_por_ssh(argv: list, host: str, *, tope_s: float, correr=None) -> huella.Huella:
     """La ejecución REAL detrás de `_principal._tomar_huella` -- corre `argv` (ya
-    armado por `revocacion.argv_admin`), EXIGE rc==0 (M-4, ronda 6: un mutante que
-    quite este chequeo dejaría pasar una huella de un comando que reventó a mitad de
-    camino, con salida parcial, como si fuera limpia) y arma la `Huella` desde stdout.
-    Extraída a nivel de módulo para poder probarla sin el resto de `_principal`
-    (conexión DB, política, etc.) -- M-4 pide un test de esta pieza."""
+    armado por `huella.argv_huella_servicio`, ronda de arreglo del bug de producción
+    jax#260, 2026-09-22), EXIGE rc==0 (M-4, ronda 6: un mutante que quite este chequeo
+    dejaría pasar una huella de un comando que reventó a mitad de camino, con salida
+    parcial, como si fuera limpia) y arma la `Huella` desde stdout. Extraída a nivel de
+    módulo para poder probarla sin el resto de `_principal` (conexión DB, política,
+    etc.) -- M-4 pide un test de esta pieza."""
     correr = correr or asyncio.create_subprocess_exec
     proc = await correr(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                         start_new_session=True)
@@ -393,11 +405,16 @@ async def _principal(ruta_mision: Path) -> int:
     # hall9000 eso es sólo `fruiz`. Ver `huella.py::principal` y `_registrar_aceptacion`
     # para el mismo razonamiento aplicado a la CLI de aceptación de huellas.
     remotas_con_sudo = hosts_con_sudo(mision.hosts, hosts_pol)
-    # M-1 (ronda 4): la huella la toma el CONTROLADOR como `fruiz` (JAX_EJECUTOR_ADMIN_USUARIO),
-    # NUNCA como `axioma` -- una cuenta sin privilegios no puede medirse a sí misma. Mismo
-    # camino que ya usan `ops/ejecutor/_maquina.sh` y `scripts/ejecutor_contratos/revocar.py`
-    # para C6/revocar: `revocacion.argv_admin` + UN solo `sudo -n sh -c '<script>'`.
+    # M-1 (ronda 4; corregido -- bug de producción jax#260, 2026-09-22): la huella la
+    # toma el CONTROLADOR (mismo administrador que `JAX_EJECUTOR_ADMIN_USUARIO`, nunca
+    # `axioma` -- una cuenta sin privilegios no puede medirse a sí misma), pero YA NO
+    # con la CREDENCIAL personal de ese administrador: este proceso corre como `jaxsvc`
+    # (ver el docstring del módulo), que no puede leer `~fruiz/.ssh/*`. Usa la llave
+    # PROPIA del servicio (`huella.argv_huella_servicio`, JAX_EJECUTOR_HUELLA_LLAVE) --
+    # ver el docstring de ese módulo para el porqué completo.
     admin_usuario = os.environ["JAX_EJECUTOR_ADMIN_USUARIO"]
+    huella_llave = Path(os.environ["JAX_EJECUTOR_HUELLA_LLAVE"])
+    huella_known_hosts = Path(os.environ["JAX_EJECUTOR_HUELLA_KNOWN_HOSTS"])
     misiones_dir = Path(os.environ["JAX_EJECUTOR_MISIONES"])
     mision_id = mision_id_desde_ruta(ruta_mision)
 
@@ -405,14 +422,14 @@ async def _principal(ruta_mision: Path) -> int:
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
 
     async def _tomar_huella(nombre_host: str) -> huella.Huella:
-        """El comando de `huella.comando_huella()` YA NO depende de la cuenta (B-1 se
-        fue: sin log de sudo que mirar, ronda 6) -- una sola forma, apertura y cierre
-        comparan lo mismo. `revocacion.argv_admin` + UN solo `sudo -n sh -c '<script>'`
-        -- mismo camino que `ops/ejecutor/_maquina.sh` y
-        `scripts/ejecutor_contratos/revocar.py` para C6/revocar. La ejecución de
-        verdad vive en `correr_huella_por_ssh` (a nivel de módulo, testeable aparte)."""
+        """`huella.argv_huella_servicio` -- una sola forma, apertura y cierre comparan
+        lo mismo. NUNCA `revocacion.argv_admin` (bug de producción jax#260, 2026-09-22:
+        ese camino resolvía la identidad por default de ssh, y este proceso corre como
+        `jaxsvc`, que no puede leer la llave personal de `admin_usuario`). La ejecución
+        de verdad vive en `correr_huella_por_ssh` (a nivel de módulo, testeable aparte)."""
         h = hosts_pol[nombre_host]
-        argv = revocacion.argv_admin(h, admin_usuario, f"sudo -n sh -c {shlex.quote(huella.comando_huella())}")
+        argv = huella.argv_huella_servicio(h, llave=huella_llave, known_hosts=huella_known_hosts,
+                                           admin_usuario=admin_usuario, tope_s=_TOPE_HUELLA_S)
         return await correr_huella_por_ssh(argv, nombre_host, tope_s=_TOPE_HUELLA_S)
 
     fin = asyncio.Event()

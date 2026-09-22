@@ -217,6 +217,8 @@ def test_principal_sin_marca_no_toca_la_red(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
     monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
     monkeypatch.setenv("JAX_EJECUTOR_CUENTA", "axioma-de-prueba-que-no-existe")
+    monkeypatch.setenv("JAX_EJECUTOR_HUELLA_LLAVE", str(tmp_path / "id_ejecutor_huella"))
+    monkeypatch.setenv("JAX_EJECUTOR_HUELLA_KNOWN_HOSTS", str(tmp_path / "known_hosts_huella"))
     rc = H.principal(["aceptar", "--host", "fantasma", "--mision", "11111111-1111-1111-1111-111111111111"])
     assert rc == 2
     assert "huella_no_encontrada" in capsys.readouterr().out
@@ -234,6 +236,8 @@ def test_principal_sin_medir_es_una_bandera_reconocida(tmp_path, monkeypatch, ca
     monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
     monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
     monkeypatch.setenv("JAX_EJECUTOR_CUENTA", "axioma-de-prueba-que-no-existe")
+    monkeypatch.setenv("JAX_EJECUTOR_HUELLA_LLAVE", str(tmp_path / "id_ejecutor_huella"))
+    monkeypatch.setenv("JAX_EJECUTOR_HUELLA_KNOWN_HOSTS", str(tmp_path / "known_hosts_huella"))
     rc = H.principal(["aceptar", "--host", "fantasma", "--mision", "11111111-1111-1111-1111-111111111111",
                       "--sin-medir", "--motivo", "prueba de la bandera"])
     assert rc == 2  # sigue sin marca -- pero no revienta por la bandera ni por el motivo
@@ -294,6 +298,8 @@ def test_principal_registra_aceptado_por_desde_sudo_uid_no_desde_sudo_user(tmp_p
     monkeypatch.setenv("JAX_EJECUTOR_POLITICA", str(tmp_path / "politica.json"))
     monkeypatch.setenv("JAX_EJECUTOR_PAUSA", str(tmp_path / "PAUSA"))
     monkeypatch.setenv("JAX_EJECUTOR_CUENTA", "axioma-de-prueba-que-no-existe")
+    monkeypatch.setenv("JAX_EJECUTOR_HUELLA_LLAVE", str(tmp_path / "id_ejecutor_huella"))
+    monkeypatch.setenv("JAX_EJECUTOR_HUELLA_KNOWN_HOSTS", str(tmp_path / "known_hosts_huella"))
     monkeypatch.setenv("SUDO_UID", str(os.getuid()))
     monkeypatch.setenv("SUDO_USER", "mentira-no-deberia-usarse")
     monkeypatch.setenv("USER", "otra-mentira")
@@ -368,3 +374,172 @@ def test_el_mutante_m5_sin_el_rechazo_de_axioma_muere(tmp_path, monkeypatch):
         assert rc == 2
     finally:
         modulo._resolver_identidad_invocante = original_resolver
+
+
+# --- arreglo del bug de producción (jax#260, 2026-09-22): la llave PROPIA del servicio,
+# NUNCA la personal del administrador -- `argv_huella_servicio` reemplaza
+# `revocacion.argv_admin` en el camino en vivo. Medido en producción: `jaxsvc` (dueño
+# real de `jax-platform.service` desde el 2026-09-17) no puede leer `~fruiz/.ssh/*`, y
+# el camino viejo (sin `-i`, resolución de identidad por default de ssh) daba
+# `vigia_no_latio=true rc=2`. -----------------------------------------------------------
+
+from jax.ejecutor.contratos.destinos import Host as _Host  # noqa: E402
+
+_HOST_DE_PRUEBA = _Host(nombre="atemai", ip="172.16.20.11", puerto=58291, rol="desarrollo", es_local=False)
+
+
+def test_argv_huella_servicio_usa_la_llave_del_servicio_con_identities_only():
+    argv = H.argv_huella_servicio(_HOST_DE_PRUEBA, llave=H.Path("/etc/jax/controlador/id_ejecutor_huella"),
+                                  known_hosts=H.Path("/etc/jax/controlador/known_hosts_huella"),
+                                  admin_usuario="fruiz", tope_s=30)
+    assert argv[0] == "ssh"
+    assert "-i" in argv
+    assert argv[argv.index("-i") + 1] == "/etc/jax/controlador/id_ejecutor_huella"
+    assert "IdentitiesOnly=yes" in argv
+    assert "BatchMode=yes" in argv
+    assert "StrictHostKeyChecking=yes" in argv
+    assert any(o == "UserKnownHostsFile=/etc/jax/controlador/known_hosts_huella" for o in argv)
+    assert "fruiz@172.16.20.11" in argv
+    assert "-p" in argv and argv[argv.index("-p") + 1] == "58291"
+
+
+def test_argv_huella_servicio_no_toma_parametros_extra_de_texto_de_mision():
+    """La firma es explícita (host, llave, known_hosts, admin_usuario, tope_s) -- no
+    hay un `texto_mision`/`declarado` que colarse acá (mismo criterio que
+    `hallazgos()`, ronda 6: sin declarado)."""
+    import inspect
+    firma = inspect.signature(H.argv_huella_servicio)
+    assert list(firma.parameters) == ["h", "llave", "known_hosts", "admin_usuario", "tope_s"]
+
+
+def test_tomar_huella_actual_usa_argv_huella_servicio_no_argv_admin():
+    """La comprobación explícita que pide el encargo: `huella.py` NO arma el ssh con la
+    llave personal del administrador -- ni `revocacion.argv_admin` (que resuelve la
+    identidad de ssh por DEFAULT, la llave de quien invoca) ni `comando_huella()`
+    aparecen en el cuerpo de `_tomar_huella_actual`; la única forma de llegar a la red
+    es `argv_huella_servicio`, con la llave del servicio."""
+    import inspect
+    fuente = inspect.getsource(H._tomar_huella_actual)
+    assert "argv_admin" not in fuente
+    assert "revocacion" not in fuente
+    assert "comando_huella" not in fuente
+    assert "argv_huella_servicio" in fuente
+
+
+def test_tomar_huella_actual_host_desconocido_no_llega_a_la_red(tmp_path, monkeypatch):
+    """`_tomar_huella_actual` contra un host que la política no conoce revienta ANTES
+    de tocar la red -- prueba que la resolución de host es lo primero, sin depender de
+    un valor por default silencioso."""
+    import asyncio
+
+    import jax.ejecutor.contratos.politica as P
+
+    monkeypatch.setattr(P, "validar", lambda doc: type("_P", (), {"hosts": ()})())
+    (tmp_path / "politica.json").write_text("{}")
+
+    async def escenario():
+        return await H._tomar_huella_actual(
+            "fantasma", politica_ruta=tmp_path / "politica.json", admin_usuario="fruiz",
+            huella_llave=tmp_path / "id_ejecutor_huella", huella_known_hosts=tmp_path / "known_hosts_huella")
+
+    with pytest.raises(ValueError, match="host_desconocido"):
+        asyncio.run(escenario())
+
+
+def test_tomar_huella_actual_arma_el_mismo_argv_que_argv_huella_servicio(tmp_path, monkeypatch):
+    """Con un host CONOCIDO, `_tomar_huella_actual` le pasa a `correr_huella_por_ssh`
+    EXACTAMENTE el argv que arma `argv_huella_servicio` -- ni un comando alternativo, ni
+    uno con la identidad por default."""
+    import asyncio
+
+    import jax.ejecutor.contratos.politica as P
+    import jax.ejecutor.contratos.vigia_servicio as V
+
+    monkeypatch.setattr(P, "validar", lambda doc: type("_P", (), {"hosts": (_HOST_DE_PRUEBA,)})())
+    (tmp_path / "politica.json").write_text("{}")
+
+    capturado = {}
+
+    async def correr_falso(argv, host, *, tope_s):
+        capturado["argv"], capturado["host"] = argv, host
+        return H.huella_desde_salida(host, b"abc  /etc/sudoers\n")
+
+    monkeypatch.setattr(V, "correr_huella_por_ssh", correr_falso)
+
+    llave, known_hosts = tmp_path / "id_ejecutor_huella", tmp_path / "known_hosts_huella"
+    resultado = asyncio.run(H._tomar_huella_actual(
+        "atemai", politica_ruta=tmp_path / "politica.json", admin_usuario="fruiz",
+        huella_llave=llave, huella_known_hosts=known_hosts, tope_s=30))
+
+    assert resultado.host == "atemai"
+    esperado = H.argv_huella_servicio(_HOST_DE_PRUEBA, llave=llave, known_hosts=known_hosts,
+                                      admin_usuario="fruiz", tope_s=30)
+    assert capturado["argv"] == esperado
+    assert capturado["host"] == "atemai"
+
+
+def test_el_mutante_sin_llave_propia_del_servicio_reproduce_el_bug_de_produccion():
+    """El mutante EXACTO que causó el defecto medido: `argv_huella_servicio` sin `-i
+    llave` deja que ssh resuelva la identidad por DEFAULT -- la llave personal del
+    administrador, que `jaxsvc` no puede leer (`vigia_no_latio=true rc=2` en
+    producción). Se reconstruye esa versión mutada y se confirma que el chequeo real
+    de arriba (`test_argv_huella_servicio_usa_la_llave_del_servicio_con_identities_only`)
+    no la habría dejado pasar."""
+    def mutado_sin_llave_propia(h, *, llave, known_hosts, admin_usuario, tope_s):
+        return ["ssh", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+                "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
+                "-o", f"ConnectTimeout={int(tope_s)}", "-p", str(h.puerto), f"{admin_usuario}@{h.ip}",
+                "ejecutor-huella"]
+
+    argv_real = H.argv_huella_servicio(_HOST_DE_PRUEBA, llave=H.Path("/etc/jax/controlador/id_ejecutor_huella"),
+                                       known_hosts=H.Path("/x"), admin_usuario="fruiz", tope_s=5)
+    argv_mutado = mutado_sin_llave_propia(_HOST_DE_PRUEBA, llave=H.Path("/etc/jax/controlador/id_ejecutor_huella"),
+                                          known_hosts=H.Path("/x"), admin_usuario="fruiz", tope_s=5)
+    assert "-i" in argv_real
+    assert "-i" not in argv_mutado  # el mutante "logra" pasar -- reproduce el bug de producción
+
+
+def test_el_mutante_sin_identities_only_muere():
+    """El segundo mutante: sin `IdentitiesOnly=yes`, ssh puede caer a OTRA llave (agente,
+    u otra de la personal del administrador) si la del servicio no funcionara -- el
+    mismo tipo de fuga que este arreglo cierra, un paso más sutil que "sin -i" porque
+    la llave del servicio SÍ se ofrece, pero no en exclusiva."""
+    def mutado_sin_identities_only(h, *, llave, known_hosts, admin_usuario, tope_s):
+        return ["ssh", "-i", str(llave), "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
+                "-o", f"ConnectTimeout={int(tope_s)}", "-p", str(h.puerto), f"{admin_usuario}@{h.ip}",
+                "ejecutor-huella"]
+
+    argv_real = H.argv_huella_servicio(_HOST_DE_PRUEBA, llave=H.Path("/x"), known_hosts=H.Path("/y"),
+                                       admin_usuario="fruiz", tope_s=5)
+    argv_mutado = mutado_sin_identities_only(_HOST_DE_PRUEBA, llave=H.Path("/x"), known_hosts=H.Path("/y"),
+                                             admin_usuario="fruiz", tope_s=5)
+    assert "IdentitiesOnly=yes" in argv_real
+    assert "IdentitiesOnly=yes" not in argv_mutado  # el mutante "logra" pasar sin el freno
+
+
+# --- fallo cerrado: script ausente en la remota / la llave no sirve --------------------
+
+def test_correr_huella_por_ssh_con_el_camino_del_servicio_permission_denied_revienta(tmp_path):
+    """La llave del servicio no está autorizada todavía (o el script no está instalado
+    en la remota): ssh sale con Permission denied, rc=255 -- `correr_huella_por_ssh`
+    (compartida por el camino viejo y el nuevo) tiene que reventar igual que con
+    cualquier otro rc != 0, nunca devolver una huella vacía o parcial como si fuera
+    válida."""
+    import asyncio
+
+    import jax.ejecutor.contratos.vigia_servicio as V
+
+    fake_ssh = tmp_path / "ssh"
+    fake_ssh.write_text("#!/bin/sh\necho 'Permission denied (publickey).' >&2\nexit 255\n")
+    fake_ssh.chmod(0o755)
+
+    argv = H.argv_huella_servicio(_HOST_DE_PRUEBA, llave=tmp_path / "id_ejecutor_huella",
+                                  known_hosts=tmp_path / "known_hosts_huella", admin_usuario="fruiz", tope_s=5)
+    argv[0] = str(fake_ssh)  # mismo argv que produce el código real, ssh real sustituido por el falso
+
+    async def escenario():
+        return await V.correr_huella_por_ssh(argv, "atemai", tope_s=5)
+
+    with pytest.raises(RuntimeError, match="huella_rc_255"):
+        asyncio.run(escenario())
