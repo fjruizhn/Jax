@@ -392,7 +392,7 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
                 borro, vista = pausa.quitar_pausa_si(
                     pausa_ruta, coincide=lambda d: (d.get("origen") == "huella" and d.get("host") == host
                                                     and d.get("mision_id") == mision_id))
-            except Exception as exc:
+            except Exception as exc:  # fail-soft: la huella YA se aceptó (marca+registro escritos); este paso es un efecto colateral, y se avisa con pausa_no_verificable -- no se traga en silencio
                 salida(f"codigo=pausa_no_verificable tipo={type(exc).__name__} detalle=\"{exc}\"")
             else:
                 # Nunca mudo (ronda 10): SIEMPRE dice qué pasó con la pausa, en los
@@ -447,7 +447,7 @@ def _resolver_identidad_invocante(env) -> tuple[int, str, str]:
         try:
             uid = int(valor)
             return uid, pwd.getpwuid(uid).pw_name, "sudo"
-        except (KeyError, OverflowError, ValueError):
+        except (KeyError, OverflowError, ValueError):  # fail-soft: SUDO_UID inválido o inexistente -- cae al os.getuid() real del proceso, el fallback documentado
             pass
     uid = os.getuid()
     return uid, pwd.getpwuid(uid).pw_name, "proceso"

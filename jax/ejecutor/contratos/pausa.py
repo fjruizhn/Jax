@@ -215,7 +215,7 @@ def quitar_pausa_si(ruta: Path, *, coincide) -> tuple:
     finally:
         try:
             os.unlink(tmp)
-        except FileNotFoundError:
+        except FileNotFoundError:  # fail-soft: tmp es NUESTRO temporal de esta llamada -- si ya no está, el objetivo (que no quede) ya se cumplió
             pass
 
 
@@ -250,7 +250,7 @@ def barrer_temporales_huerfanos(ruta: Path) -> int:
             try:
                 os.unlink(candidato)
                 borrados += 1
-            except FileNotFoundError:
+            except FileNotFoundError:  # fail-soft: otro barrido/limpieza ya se lo llevó entre el lstat y este unlink -- el objetivo (que no quede) ya se cumplió
                 pass
         return borrados
 
