@@ -1236,9 +1236,13 @@ class TrabajoHTTPTest(unittest.TestCase):
         programar la tarea falla, ningún worker va a correr su `finally`,
         así que `crear_trabajo()` tiene que sacar el control él mismo (y
         devolver el permiso, que ya cubre N-1)."""
+        def _create_task_que_falla(coro, *a, **kw):
+            coro.close()  # nunca se va a esperar: se cierra para no dejar un "never awaited"
+            raise RuntimeError("boom -- create_task")
+
         async def _correr():
             req = rutas_mod.TrabajoRequest(proyecto="p", rutas=[], usuario="ana@cliente.com")
-            with patch.object(rutas_mod.asyncio, "create_task", side_effect=RuntimeError("boom -- create_task")):
+            with patch.object(rutas_mod.asyncio, "create_task", side_effect=_create_task_que_falla):
                 with self.assertRaises(RuntimeError):
                     await rutas_mod.crear_trabajo(req)
 
