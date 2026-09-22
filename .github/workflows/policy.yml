@@ -3540,6 +3540,35 @@ jobs:
           grep -qE "^6 passed" /tmp/procesar_archivos_tests || {
             echo "PISO ROTO: se esperaban 6 tests CORRIDOS del guion de procesar_archivos. Si esto da '... skipped', openpyxl no se instalo."; exit 1; }
 
+      # Endpoint de Procesamiento de Archivos (2026-09-20): `procesamiento/`
+      # (jax#252) estaba terminado pero nadie lo llamaba desde HTTP.
+      # `POST /procesamiento/trabajos` + `GET /procesamiento/trabajos/{id}`
+      # encolan (JobStore/JobStatus REUSADOS, instancia propia -- ver el
+      # docstring de `las_manos/procesamiento_routes.py`) y nunca bloquean el
+      # request: un PDF escaneado de 30 paginas tarda ~80s medidos. Va en
+      # paso propio, mismo motivo que el resto de este nucleo: no tocar el
+      # piso numerico del bloque de arriba (2358 passed) por un archivo mas.
+      # `ingesta.ingerir` va SUSTITUIDO en estos tests (sin
+      # pdftoppm/tesseract/libreoffice reales) -- no necesita
+      # requirements-archivos.txt para pasar, pero corre DESPUES en este job
+      # porque comparte credenciales de servicio con `auth_servicio.py`
+      # (PERMISOS ganó las dos rutas nuevas para IDENTIDAD_PLATAFORMA, mismo
+      # mecanismo que ya cubre /jacobs/* -- ninguna autenticación nueva).
+      # 9 tests: caso feliz (estado/extractor/tamaño/carpeta, nunca el
+      # contenido del extracto); una ruta fuera del jail se rechaza SIN
+      # llamar a ingerir() y el resto del lote sigue; un archivo que revienta
+      # ingerir() no tumba el lote (los otros dos se procesan igual); el job
+      # pasa por RUNNING antes de COMPLETED; una ruta ausente dentro del
+      # jail se rechaza sin excepción; el POST no espera al trabajo (202
+      # antes de que termine un trabajo simulado de 2s); GET a un job
+      # desconocido da 404; GET trae estado+resultados de un job ya
+      # completado; la credencial `plataforma` accede y `jacobs` no (403).
+      - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
+        run: |
+          python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
+          grep -qE "^9 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 9 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
       # este job, que conserva arriba su entorno Python 3.12 sin alteraciones.

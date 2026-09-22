@@ -176,6 +176,7 @@ def _kill_switch_active() -> bool:
 from motor_registry.routes import router as motor_router
 from jacobs.routes import router as jacobs_router
 from jacobs import store as jacobs_store
+from procesamiento_routes import router as procesamiento_router
 
 app = FastAPI(
     title="LAS MANOS",
@@ -282,6 +283,7 @@ async def _jacobs_shutdown() -> None:
 
 app.include_router(motor_router)
 app.include_router(jacobs_router)
+app.include_router(procesamiento_router)
 
 @app.exception_handler(RequestValidationError)
 async def envelope_structural_rejection(request: Request, exc: RequestValidationError):
