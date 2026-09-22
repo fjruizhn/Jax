@@ -3493,8 +3493,30 @@ jobs:
           #   no el número local (2454/0), porque el runner de CI no tiene
           #   el corpus de U3 -- si el runner da otro número, manda el
           #   runner, igual criterio que el resto de este archivo.
-          grep -qE "^2440 passed, 19 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2440 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 nuevos de este fix round sin JAX_DB_HOST en este job)."; exit 1; }
+          # 2440 -> 2444 (Task 1-bis, fix round 2, 2026-09-22, MINOR-A de la
+          #   re-review): +4 en tests/test_store_columna_descarte_acotada.py,
+          #   puros -- test_la_ddl_de_visible_usa_la_expresion_esperada
+          #   (baranda mecánica: el DDL de la tupla `visible` del loop de
+          #   columnas y `store._EXPRESION_VISIBLE`, la fuente del chequeo
+          #   de drift, son dos copias escritas a mano -- no un f-string,
+          #   `ast.literal_eval` no acepta interpolación -- así que hace
+          #   falta un test que las mantenga sincronizadas) y
+          #   NormalizarExpresionGeneradaTest (+3: la forma real que
+          #   devuelve MariaDB normaliza igual a `_EXPRESION_VISIBLE`;
+          #   mayúsculas/espacios distintos del DDL fuente tampoco dan
+          #   falsa alarma, con subTest; y un control negativo -- la
+          #   expresión vieja de Ruling 18/`02fbaed` NO normaliza igual).
+          #   "19 skipped" no cambia (tests/test_base_por_sesion.py no se
+          #   tocó en este job -- sus dos MINOR-3 se wirearon en
+          #   jacobs-gobernanza-db, ver ese piso). Medido: local con
+          #   `JAX_DB_HOST` sin poner (mismas condiciones que este job, sin
+          #   MariaDB), tres corridas de los 165 archivos: 2459 passed
+          #   estable las tres, 2 skipped (mis dos de Ruling 19e, sin
+          #   cambio), 3 xfailed. Delta sobre la corrida anterior de este
+          #   mismo fix round (2455 -> 2459): +4, exacto a los 4 tests
+          #   nuevos de este archivo.
+          grep -qE "^2444 passed, 19 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2444 tests CORRIDOS y exactamente 19 skipped (16 sin el corpus de U3 + 1 sin explicar, ver nota de 2439/17 arriba, + 2 de Ruling 19e sin JAX_DB_HOST en este job)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4311,6 +4333,8 @@ jobs:
           jacobs/_modelo_real_test.py
           las_manos/_output_validator_db_drift_test.py
           tests/test_jacobs_descarte_db.py
+          tests/test_base_por_sesion.py::test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906
+          tests/test_base_por_sesion.py::test_columnas_copiables_excluye_solo_las_generadas
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -4338,6 +4362,8 @@ jobs:
             jacobs/_modelo_real_test.py \
             las_manos/_output_validator_db_drift_test.py \
             tests/test_jacobs_descarte_db.py \
+            tests/test_base_por_sesion.py::test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906 \
+            tests/test_base_por_sesion.py::test_columnas_copiables_excluye_solo_las_generadas \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -4841,8 +4867,53 @@ jobs:
           #   nuevos). Medido en local (127.0.0.1:3308, base de sesión
           #   jax_memory_test_auto<pid>), corrida completa de los 24
           #   archivos del job: 161 passed, 0 failed.
-          grep -qE "^161 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 161 tests CORRIDOS."; exit 1; }
+          # 161 -> 166 (Task 1-bis, fix round 2, 2026-09-22, dos MINOR de la
+          #   re-review): +5 en tests/test_jacobs_descarte_db.py (+3) y
+          #   tests/test_base_por_sesion.py (+2, dos NODE ID puntuales, no
+          #   el archivo entero -- ver más abajo).
+          #   MINOR-A (drift de la expresión de `visible`): +3,
+          #   DriftDeExpresionVisibleDBTest -- el chequeo de existencia
+          #   ("existe" -> `continue`) no alcanza para una columna
+          #   GENERATED: una base con `visible` ya creada pero con la
+          #   expresión VIEJA (commit `02fbaed`, sin "AND owner_ack_at IS
+          #   NOT NULL") pasaba en silencio. `store._verificar_expresion_visible`
+          #   compara `information_schema.COLUMNS.GENERATION_EXPRESSION`
+          #   normalizada contra `store._EXPRESION_VISIBLE` y aborta
+          #   `init_tables()` (RuntimeError, sin DDL automático -- modificar
+          #   una columna VIRTUAL indexada cae en la misma trampa del
+          #   1845/1846 de Ruling 19b) si difieren.
+          #   test_la_expresion_esperada_pasa_sin_error (el caso normal, dos
+          #   init_tables() seguidos no levantan);
+          #   test_una_expresion_vieja_frena_init_tables (la expresión de
+          #   02fbaed, creada a mano contra la base de TEST -- nunca
+          #   revirtiendo store.py -- dispara el RuntimeError con el
+          #   mensaje esperado/encontrado); y
+          #   test_normalizar_no_da_falsa_alarma_con_lo_que_devuelve_mariadb
+          #   (la forma REAL que guarda MariaDB, con backticks y
+          #   minúsculas, no dispara el drift check). Vistos en ROJO contra
+          #   el código sin el hook de `_verificar_expresion_visible`
+          #   (confirmado con `unittest.mock.patch.object` reemplazándolo
+          #   por un no-op, no revirtiendo store.py): la expresión vieja ya
+          #   NO frena `init_tables()`.
+          #   MINOR-3 (los dos tests de Ruling 19e, antes SIEMPRE
+          #   skipped en CI -- ver el piso de tests-puros): +2, ahora
+          #   corren acá TAMBIÉN, con MariaDB real de verdad, no sólo en
+          #   local. Se agregaron sus NODE ID puntuales
+          #   (`tests/test_base_por_sesion.py::test_copiar_filas_...` y
+          #   `::test_columnas_copiables_...`), no el archivo completo: el
+          #   resto de ese archivo son controles de aislamiento de sesión
+          #   con subprocess que no necesitan (ni quieren) correr acá de
+          #   nuevo. Mutación pedida por el coordinador (volver a
+          #   `SELECT *` en `_clonar_esquema`): confirmado a mano que
+          #   `test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906`
+          #   cae con `(1906, "The value specified for generated column
+          #   'visible' ... has been ignored")`.
+          #   Verde tras -- 166 passed, 0 failed (161 anteriores + 5
+          #   nuevos). Medido en local (127.0.0.1:3308, base de sesión
+          #   jax_memory_test_auto<pid>), corrida completa de los 24
+          #   archivos + 2 node ID del job: 166 passed, 0 failed.
+          grep -qE "^166 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 166 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

@@ -359,6 +359,84 @@ class CanarioTrampaInstantDBTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("1845", mensaje)
 
 
+class DriftDeExpresionVisibleDBTest(unittest.IsolatedAsyncioTestCase):
+    """MINOR-A (fix round 2, revisión del coordinador, 2026-09-22): el
+    chequeo de existencia del loop de columnas ("existe" -> `continue`) no
+    alcanza para una columna GENERATED -- una base con `visible` YA creada
+    pero con una expresión VIEJA (p.ej. la del commit `02fbaed`, sin "AND
+    owner_ack_at IS NOT NULL") pasaría ese chequeo en silencio.
+    `store._verificar_expresion_visible` compara
+    `information_schema.COLUMNS.GENERATION_EXPRESSION` contra
+    `store._EXPRESION_VISIBLE`, normalizada, y `init_tables()` se aborta si
+    difieren."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        await store.init_tables()
+
+    async def test_la_expresion_esperada_pasa_sin_error(self):
+        """Caso normal (lo que corre en CADA test de este archivo, ya
+        implícito) -- acá EXPLÍCITO: dos `init_tables()` seguidos, sin
+        tocar nada entre medio, no levantan."""
+        await store.init_tables()  # segunda llamada -- visible ya existe
+
+    async def test_una_expresion_vieja_frena_init_tables(self):
+        """La expresión de ANTES de Ruling 19a (commit 02fbaed): sin el AND
+        de ack. Se crea a mano contra la base de TEST -- nunca revirtiendo
+        store.py -- para simular una base que quedó atrás."""
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "ALTER TABLE jacobs_pipelines DROP INDEX idx_pipelines_visibles, "
+                    "DROP COLUMN visible, ALGORITHM=COPY"
+                )
+                await cur.execute(
+                    "ALTER TABLE jacobs_pipelines ADD COLUMN visible TINYINT(1) "
+                    "GENERATED ALWAYS AS (status NOT IN ('discarded','hidden')) VIRTUAL, "
+                    "ALGORITHM=INSTANT"
+                )
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                await store.init_tables()
+            mensaje = str(ctx.exception)
+            self.assertIn("expresión DISTINTA", mensaje)
+            self.assertIn("owner_ack_at", mensaje)
+            self.assertIn("02fbaed", mensaje)
+        finally:
+            # Restaurar ANTES de que termine el test -- otros tests de la
+            # misma sesión asumen la expresión correcta.
+            async with store.conexion() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "ALTER TABLE jacobs_pipelines DROP COLUMN visible, ALGORITHM=COPY"
+                    )
+            await store.init_tables()
+
+    async def test_normalizar_no_da_falsa_alarma_con_lo_que_devuelve_mariadb(self):
+        """La forma REAL que guarda MariaDB (con backticks y minúsculas,
+        distinta carácter por carácter del DDL fuente) no puede disparar el
+        drift check -- si esto fallara, CADA arranque normal levantaría."""
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT GENERATION_EXPRESSION FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' "
+                    "AND COLUMN_NAME='visible'"
+                )
+                (encontrada,) = await cur.fetchone()
+        self.assertNotEqual(
+            encontrada, store._EXPRESION_VISIBLE,
+            "MariaDB devolvió la expresión BYTE A BYTE igual al DDL fuente -- "
+            "este test dejó de probar la normalización (el punto es que son "
+            "distintas en forma pero iguales en significado)."
+        )
+        self.assertEqual(
+            store._normalizar_expresion_generada(encontrada),
+            store._normalizar_expresion_generada(store._EXPRESION_VISIBLE),
+        )
+        await store.init_tables()  # no debe levantar
+
+
 class Escenario1846DBTest(unittest.IsolatedAsyncioTestCase):
     """Ruling 19c (fix round 1, 2026-09-22): DROP INDEX
     idx_pipelines_descartados y volver a llamar init_tables() tiene que

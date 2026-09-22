@@ -1100,6 +1100,79 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
         await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
 
 
+#: Texto EXACTO de la expresión de `visible` -- ver la tupla ("visible", ...)
+#: del loop de columnas de `init_tables()`, que repite este mismo texto a
+#: mano dentro del DDL (no se arma con un f-string: el AST de ese loop se
+#: prueba con `ast.literal_eval`, que no acepta interpolación --
+#: tests/test_store_columna_descarte_acotada.py::test_la_ddl_de_visible_usa_la_expresion_esperada
+#: es la baranda mecánica que evita que las dos copias se desincronicen).
+#: Fuente única para `_verificar_expresion_visible` -- el chequeo de drift
+#: de MINOR-A (fix round 2, revisión del coordinador, 2026-09-22).
+_EXPRESION_VISIBLE = "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL"
+
+
+def _normalizar_expresion_generada(expr: str) -> str:
+    """Una expresión de columna GENERATED (la del DDL fuente, o la que
+    devuelve `information_schema.COLUMNS.GENERATION_EXPRESSION`) a una
+    forma comparable. Medido contra MariaDB 12.3.3 real (no documentación
+    genérica): al guardar una columna GENERATED, el servidor REESCRIBE la
+    expresión -- le pone backticks a cada identificador (`` `status` ``,
+    `` `owner_ack_at` ``) y pasa las palabras clave a minúscula (`not in`,
+    `and`, `is not null`), sin tocar los LITERALES de string ('discarded',
+    'hidden', que ya estaban en minúscula). `.split()` colapsa cualquier
+    corrida de espacios/saltos de línea a uno solo y recorta los bordes --
+    más simple que una regexp para el mismo efecto, sin importar `re`."""
+    return " ".join(expr.replace("`", "").split()).lower()
+
+
+async def _verificar_expresion_visible(cur) -> None:
+    """MINOR-A (fix round 2, revisión del coordinador, 2026-09-22): el
+    chequeo de existencia del loop de columnas (`if exists: continue`) NO
+    alcanza para una columna GENERATED -- confirma que la columna ESTÁ,
+    pero no que tenga la expresión de ESTA versión del código. Una base
+    que ya tenía `visible` con una expresión VIEJA (p.ej. la del commit
+    `02fbaed`, "status NOT IN (...)" SIN "AND owner_ack_at IS NOT NULL")
+    pasaría ese chequeo en silencio y serviría con la semántica equivocada
+    -- Ada, o algún llamador, verían `visible=1` en filas sin ack, que es
+    EXACTAMENTE el costo sin techo que Ruling 19a cerró.
+
+    FALLA CERRADO, sin DDL automático: `visible` está INDEXADA
+    (idx_pipelines_visibles) -- modificarla con un `ALTER` cae en la MISMA
+    trampa del 1845/1846 que Ruling 19b documentó para agregar OTRA
+    columna después de ella (ver el comentario de `idx_pipelines_visibles`
+    más abajo). Arreglarlo a mano (DROP INDEX + DROP COLUMN + recrear los
+    dos, con el `lock_wait_timeout` acotado de siempre) es una decisión
+    operativa, no algo que `init_tables()` pueda resolver solo."""
+    await cur.execute(
+        "SELECT GENERATION_EXPRESSION FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' "
+        "AND COLUMN_NAME='visible'"
+    )
+    fila = await cur.fetchone()
+    if not fila or fila[0] is None:
+        return  # el llamador ya confirmó que la columna existe; esto es defensivo, no el chequeo que decide eso
+    encontrada = _normalizar_expresion_generada(fila[0])
+    esperada = _normalizar_expresion_generada(_EXPRESION_VISIBLE)
+    if encontrada != esperada:
+        raise RuntimeError(
+            "jacobs_pipelines.visible existe pero con una expresión DISTINTA "
+            "de la esperada por esta versión de jax -- init_tables() se "
+            "aborta (fail-closed, contrato de Ruling 18/19a: jax-platform y "
+            "cualquier otro lector dependen de que 'visible' signifique lo "
+            "mismo en todos lados). "
+            f"Encontrada: {fila[0]!r}. Esperada: {_EXPRESION_VISIBLE!r}. "
+            "Esto pasa si la columna se creó con una versión anterior del "
+            "código (p.ej. sin 'AND owner_ack_at IS NOT NULL', commit "
+            "02fbaed) y esta base nunca se migró. NO se corrige solo: "
+            "'visible' está INDEXADA (idx_pipelines_visibles) y un ALTER "
+            "sobre una columna VIRTUAL indexada cae en la misma trampa del "
+            "1845/1846 de Ruling 19b -- hay que decidir a mano (DROP INDEX "
+            "idx_pipelines_visibles, DROP COLUMN visible, y recrear los dos "
+            "con el DDL de esta versión) antes de que este proceso pueda "
+            "arrancar contra esta base."
+        )
+
+
 async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> None:
     """Como `_crear_indice_acotado`, pero para una COLUMNA CONTRATO: Task 2
     (spec descartar-pipelines §3) escribe status_previo/descartado_por/
@@ -1326,6 +1399,13 @@ async def init_tables() -> None:
                 )
                 (exists,) = await cur.fetchone()
                 if exists:
+                    # MINOR-A (fix round 2, Ruling del coordinador,
+                    # 2026-09-22): `visible` es GENERATED -- "existe" no
+                    # dice "tiene la expresión de esta versión". Ninguna
+                    # otra columna de esta lista necesita este chequeo (son
+                    # todas columnas comunes: existir alcanza).
+                    if col == "visible":
+                        await _verificar_expresion_visible(cur)
                     continue
                 if acotado:
                     await _agregar_columna_acotada(cur, "jacobs_pipelines", col, ddl)

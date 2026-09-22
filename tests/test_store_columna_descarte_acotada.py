@@ -236,6 +236,68 @@ class FormaDelLoopDeColumnasTest(unittest.TestCase):
             f"que YA tiene idx_pipelines_visibles."
         )
 
+    def test_la_ddl_de_visible_usa_la_expresion_esperada(self):
+        """MINOR-A (fix round 2, 2026-09-22): `store._EXPRESION_VISIBLE` (la
+        fuente que usa `_verificar_expresion_visible` para el chequeo de
+        drift) y el texto DENTRO del DDL de la tupla `visible` del loop son
+        DOS copias escritas a mano -- no se arman con un f-string a propósito
+        (`ast.literal_eval` no acepta interpolación, ver el comentario de
+        `_EXPRESION_VISIBLE` en store.py). Esta es la baranda MECÁNICA que
+        reemplaza esa garantía: si alguien edita una copia y no la otra, cae
+        acá, normalizado (mismo criterio que la comparación en runtime, así
+        que un cambio de mayúsculas o espacios entre las dos copias NO hace
+        caer este test por las razones equivocadas)."""
+        (ddl_de_visible,) = [ddl for col, ddl, _a in _tuplas_del_loop_de_columnas() if col == "visible"]
+        self.assertIn(
+            store._normalizar_expresion_generada(store._EXPRESION_VISIBLE),
+            store._normalizar_expresion_generada(ddl_de_visible),
+            "el DDL de la tupla 'visible' no contiene (normalizado) el texto "
+            "de store._EXPRESION_VISIBLE -- las dos copias se desincronizaron",
+        )
+
+
+class NormalizarExpresionGeneradaTest(unittest.TestCase):
+    """MINOR-A (fix round 2, 2026-09-22): pura, sin DB. Casos tomados de lo
+    que MariaDB 12.3.3 REAL devuelve en `GENERATION_EXPRESSION` (medido
+    antes de escribir este test, no supuesto) más variantes de cómo
+    alguien podría escribir el MISMO DDL a mano."""
+
+    def test_forma_real_que_devuelve_mariadb(self):
+        # SHOW/information_schema tal cual se midió contra jax_memory_test:
+        # backticks en los identificadores, palabras clave en minúscula,
+        # los literales de string sin tocar.
+        devuelta = "`status` not in ('discarded','hidden') and `owner_ack_at` is not null"
+        self.assertEqual(
+            store._normalizar_expresion_generada(devuelta),
+            store._normalizar_expresion_generada(store._EXPRESION_VISIBLE),
+        )
+
+    def test_no_da_falsa_alarma_por_mayusculas_ni_espacios_del_ddl_fuente(self):
+        """El DDL fuente (como lo escribe un humano, ANTES de que MariaDB lo
+        reescriba) puede venir con mayúsculas distintas o espaciado
+        distinto del que MariaDB termina guardando -- normalizar tiene que
+        absorber eso, no sólo lo que ya viene canónico de information_schema."""
+        variantes = [
+            "status NOT IN ('discarded','hidden') AND owner_ack_at IS NOT NULL",
+            "status   not in  ('discarded','hidden')    and owner_ack_at is not null",
+            "STATUS NOT IN ('discarded','hidden') AND OWNER_ACK_AT IS NOT NULL",
+            "\n  status NOT IN ('discarded','hidden')\n  AND owner_ack_at IS NOT NULL  \n",
+        ]
+        esperada = store._normalizar_expresion_generada(store._EXPRESION_VISIBLE)
+        for variante in variantes:
+            with self.subTest(variante=variante):
+                self.assertEqual(store._normalizar_expresion_generada(variante), esperada)
+
+    def test_una_expresion_realmente_distinta_no_normaliza_igual(self):
+        """Control negativo: el normalizador absorbe FORMA, no CONTENIDO --
+        la expresión vieja (sin el AND de ack, Ruling 19a) tiene que seguir
+        distinguiéndose de la esperada después de normalizar."""
+        vieja = "`status` not in ('discarded','hidden')"
+        self.assertNotEqual(
+            store._normalizar_expresion_generada(vieja),
+            store._normalizar_expresion_generada(store._EXPRESION_VISIBLE),
+        )
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
