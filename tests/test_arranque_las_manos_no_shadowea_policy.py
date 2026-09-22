@@ -1,6 +1,20 @@
 """Arranque real de LAS MANOS: el cwd de uvicorn no puede colisionar con
 `policy/` de la raíz.
 
+**Qué prueba este archivo, en criollo (registro pedido en la ronda 2 de
+revisión de PR#262).** El nombre del módulo dice "arranque real" y eso es
+cierto en el sentido de que reproduce el `sys.path` real de producción --
+pero la firma VERDE de `test_arranque_real_no_colisiona_con_policy_de_la_raiz`
+es un `FileNotFoundError` sobre `implementation-identity.json` (o un
+`OperationalError` de pymysql): es decir, **el servicio NO llega a
+arrancar** en ninguno de los dos casos, ni con el fix ni sin él. Lo que
+este test prueba es la COLISIÓN DE NOMBRES específicamente -- que
+`_configure_b7_trusted_runtime` consiga importar `policy.enforcement_evidence`/
+`policy.execution_control` de la raíz sin que `las_manos/policy.py` se
+interponga -- no que LAS MANOS termine de levantar. Verificar el arranque
+COMPLETO (con MariaDB real y `/etc/jax/build/implementation-identity.json`
+presente) es un test aparte, de otro alcance, que no existe todavía.
+
 **El bug real (jax#260, visto en producción, rollback a e09c3b3).**
 `_configure_b7_trusted_runtime()` (`las_manos/server.py`, primera línea del
 startup event `_jacobs_init`, agregada por #260) importa
@@ -62,6 +76,20 @@ firmas conocidas de "ya pasé la colisión", o el test falla con el mensaje
 real. `test_allowlist_rechaza_el_guard_cortando_antes_de_los_imports` deja
 esa mutación (quitar `JAX_DEPLOYMENT_ID`) como regresión permanente.
 
+**El veredicto de la allowlist depende de que
+`/etc/jax/build/implementation-identity.json` NO EXISTA en la máquina que
+corre el test (registro pedido en la ronda 2 de revisión de PR#262).** Hoy
+eso es cierto tanto en CI como en los sandboxes de desarrollo donde se
+midió esto -- pero no es una garantía del código, es un hecho del entorno.
+Si mañana ese archivo aparece y es válido, `_configure_b7_trusted_runtime`
+sigue de largo hasta la conexión a MariaDB (puerto 1) y el resultado pasa a
+la rama `OperationalError` de `_firma_conocida_tras_el_fix` -- sigue en
+verde, sin cambios acá. Si en cambio aparece MAL FORMADO (JSON inválido),
+`TrustedImplementationIdentityProvider` levanta `json.JSONDecodeError` en
+vez de `FileNotFoundError`, que NO está en la allowlist -- el test se pone
+ROJO sin que haya ningún defecto de la colisión de nombres. Si eso pasa,
+el diagnóstico correcto es mirar ESE archivo, no sospechar del fix.
+
 **Sobre el despliegue (no es un test — nada de código lo puede verificar
 desde acá).** El fix depende de que el archivo viejo quede BORRADO del
 checkout de producción, no solo de que el nuevo exista: un `rsync` sin
@@ -74,10 +102,10 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import os
 import secrets
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
@@ -113,11 +141,23 @@ def _correr_arranque_real(tmp_path: Path, *, omitir: frozenset[str] = frozenset(
     `omitir`: nombres de variable a NO incluir -- lo usa el test de
     mutación para simular el guard cortando antes de los imports (quitar
     `JAX_DEPLOYMENT_ID`), sin duplicar la construcción del entorno.
+
+    **`HOME` es el REAL, no un `tmp_path` (MAJOR-3, ronda 2 de revisión de
+    PR#262).** `HOME` no es sólo "una ruta" -- Python lo usa para resolver
+    `site.ENABLE_USER_SITE` (`~/.local/lib/pythonX.Y/site-packages`). En
+    hall9000, `fastapi`/`pymysql` viven SÓLO ahí para el `python3` del
+    sistema (no en un venv del repo) -- pisar `HOME` con un `tmp_path`
+    vacío le saca esas rutas de `sys.path` al MISMO intérprete que sí las
+    tiene con su `HOME` real, y el resultado (`ModuleNotFoundError: No
+    module named 'fastapi'`) no dice nada del fix: lo rompe el propio test.
+    `_correr_arranque_real` no escribe nada bajo `HOME` en este camino (la
+    excepción sale antes de cualquier escritura), así que usar el real acá
+    no ensucia nada de verdad.
     """
     credencial_plataforma = secrets.token_urlsafe(32)
     credencial_jacobs = secrets.token_urlsafe(32)
     entorno = {
-        "HOME": str(tmp_path),
+        "HOME": os.environ.get("HOME", str(tmp_path)),
         "PATH": "/usr/bin:/bin",
         "PYTHONPATH": str(RAIZ),
         # Mismo patrón que conftest.py de la raíz: nada de esto toca una ruta
@@ -214,8 +254,13 @@ def test_arranque_real_no_colisiona_con_policy_de_la_raiz(tmp_path: Path) -> Non
         f"entorno del test, no el fix -- ver "
         f"test_allowlist_rechaza_el_guard_cortando_antes_de_los_imports). "
         f"Si es un ModuleNotFoundError sobre otra cosa (fastapi, pymysql, "
-        f"...), a ESTE intérprete le falta una dependencia -- correr con "
-        f"el venv del repo, no con un python3 del sistema. "
+        f"...), este MISMO intérprete no la está resolviendo en la corrida "
+        f"del proceso hijo -- antes de asumir que falta instalarla, revisar "
+        f"el entorno que arma `_correr_arranque_real` (MAJOR-3, ronda 2: "
+        f"un `HOME` que no sea el real le saca a Python el user site-packages "
+        f"donde puede vivir la dependencia, con el MISMO intérprete que sí "
+        f"la tiene con su `HOME` real -- no asumir que el intérprete es el "
+        f"problema sin comprobarlo). "
         f"resultado real: {resultado!r}"
     )
 
@@ -235,18 +280,30 @@ def test_allowlist_rechaza_el_guard_cortando_antes_de_los_imports(tmp_path: Path
     denylist, este test lo agarra."""
     resultado = _correr_arranque_real(tmp_path, omitir=frozenset({"JAX_DEPLOYMENT_ID"}))
 
-    assert (
-        "B7 trusted composition requires deployment and MariaDB configuration"
-        in resultado
-    ), (
-        f"se esperaba que quitar JAX_DEPLOYMENT_ID disparara el guard de "
-        f"_configure_b7_trusted_runtime (server.py:203-204) -- si el "
-        f"mensaje cambió, actualizar este test, no borrarlo: {resultado}"
-    )
+    # Se chequea la allowlist ANTES del texto exacto del guard (MAJOR-3,
+    # ronda 2 de revisión de PR#262): si el proceso hijo revienta por otra
+    # razón (por ejemplo un ModuleNotFoundError de dependencia por un
+    # entorno mal armado en _correr_arranque_real), esa falla NO matchea la
+    # allowlist tampoco -- pero el mensaje del chequeo de abajo ("si el
+    # mensaje cambió, actualizar este test") sería un diagnóstico FALSO
+    # para ese caso. Separar los dos evita que ese mensaje mienta.
     assert _firma_conocida_tras_el_fix(resultado) is None, (
         f"la allowlist NO debería aceptar el resultado del guard cortando "
         f"antes de los imports -- si esto pasa, la allowlist volvió a ser "
         f"lo bastante floja como para dar verde con el guard incompleto "
         f"(el defecto exacto de MAJOR-1, ronda 1 de revisión de PR#262): "
         f"{resultado}"
+    )
+    assert (
+        "B7 trusted composition requires deployment and MariaDB configuration"
+        in resultado
+    ), (
+        f"se esperaba que quitar JAX_DEPLOYMENT_ID disparara el guard de "
+        f"_configure_b7_trusted_runtime (server.py:203-204), pero el "
+        f"resultado no lo menciona Y TAMPOCO matchea la allowlist (el "
+        f"assert de arriba ya pasó) -- ANTES de tocar el texto de este "
+        f"test, confirmar que no es un problema del ENTORNO del proceso "
+        f"hijo (dependencia no resuelta, `HOME` incorrecto, etc. -- MAJOR-3, "
+        f"ronda 2) y sólo después, si el mensaje del guard de verdad "
+        f"cambió, actualizar este test: {resultado}"
     )
