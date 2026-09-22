@@ -2,6 +2,7 @@
 """El arranque de una misión: primero los contratos, después el vigía; sin contratos
 nunca late (y sin latido el proxy no sirve). Fin normal: el latido se borra."""
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -199,28 +200,17 @@ async def _vigilar_noop(cfg, auditar, fin):
 
 
 MISION_ID = "11111111-1111-1111-1111-111111111111"
+OTRA_MISION_ID = "22222222-2222-2222-2222-222222222222"
 
 
-def _log(sha="a" * 64):
-    return f"LOG /var/log/sudo-axioma.log 1 1 {sha}\n".encode()
-
-
-def _apertura(host, controles=b"", log=None):
+def _h(host, controles=None):
     from jax.ejecutor.contratos import huella as H
-    return H.huella_de_apertura_desde_salida(
-        host, (log or _log()) + b"===CONTROLES===\n" + controles + b"===PERSISTENCIA===\n===FIN===\n")
+    return H.huella_desde_salida(host, b"abc  /etc/sudoers\n" if controles is None else controles)
 
 
-def _cierre(host, controles=b"", persistencia=b"", log=None):
-    from jax.ejecutor.contratos import huella as H
-    return H.huella_de_cierre_desde_salida(
-        host, (log or _log()) + b"===CONTROLES===\n" + controles + b"===PERSISTENCIA===\n" + persistencia
-        + b"===FIN===\n")
-
-
-def test_sin_tomar_huella_apertura_no_se_toma_ninguna(tmp_path):
-    """`tomar_huella_apertura=None` (el default): cero llamadas, cero pausa -- los
-    llamadores que no la necesitan no cambian de comportamiento."""
+def test_sin_tomar_huella_no_se_toma_ninguna(tmp_path):
+    """`tomar_huella=None` (el default): cero llamadas, cero pausa -- los llamadores
+    que no la necesitan no cambian de comportamiento."""
     ctx = _ctx(tmp_path)
     llamadas = []
 
@@ -230,45 +220,46 @@ def test_sin_tomar_huella_apertura_no_se_toma_ninguna(tmp_path):
     async def escenario():
         return await S.correr_mision(ctx, MISION, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar,
                                      fin=asyncio.Event(), exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS,
-                                     hosts_con_sudo=("atemai",))  # sin tomar_huella_*: no debería usarse
+                                     hosts_con_sudo=("atemai",))  # sin tomar_huella: no debería usarse
     pausas = asyncio.run(escenario())
     assert llamadas == [] and pausas == ()
     assert not ctx.pausa.exists()
 
 
-def _tomadores(apertura_por_host: dict, cierre_por_host: dict):
-    async def tomar_apertura(host):
-        v = apertura_por_host[host]
-        if isinstance(v, Exception):
-            raise v
-        return v
+def _tomador_secuencia(mapa_por_llamada):
+    """`mapa_por_llamada = {host: [huella_1, huella_2, ...]}` -- la primera llamada por
+    host devuelve el primer elemento, la segunda el segundo, etc."""
+    contadores = {h: 0 for h in mapa_por_llamada}
 
-    async def tomar_cierre(host, *, tamano_apertura_log):
-        v = cierre_por_host[host]
-        if isinstance(v, Exception):
-            raise v
-        return v
-    return tomar_apertura, tomar_cierre
+    async def tomar(host):
+        i = contadores[host]
+        contadores[host] += 1
+        valor = mapa_por_llamada[host][i]
+        if isinstance(valor, Exception):
+            raise valor
+        return valor
+    return tomar
 
 
-def _correr_con_huella(ctx, mision, *, hosts_con_sudo, tomar_apertura, tomar_cierre, misiones, mision_id):
+def _correr_con_huella(ctx, mision, *, hosts_con_sudo, tomar_huella, misiones, mision_id):
     async def escenario():
         return await S.correr_mision(
             ctx, mision, latido_cada_s=0.05, lote_max=5, intervalo_s=1.0, auditar=_auditar, fin=asyncio.Event(),
             exigir=_exigir_ok, vigilar=_vigilar_noop, maquinas=MAQUINAS, hosts_con_sudo=hosts_con_sudo,
-            misiones=misiones, mision_id=mision_id, tomar_huella_apertura=tomar_apertura,
-            tomar_huella_cierre=tomar_cierre)
+            misiones=misiones, mision_id=mision_id, tomar_huella=tomar_huella)
     return asyncio.run(escenario())
 
 
-def test_huella_cambiada_y_no_declarada_pone_la_pausa(tmp_path):
-    antes = _apertura("atemai")
-    despues = _cierre("atemai", controles=b"def  /root/.ssh/authorized_keys\n")
-    tomar_apertura, tomar_cierre = _tomadores({"atemai": antes}, {"atemai": despues})
+def test_huella_cambiada_pone_la_pausa(tmp_path):
+    """Ronda 6: sin declarado -- cualquier cambio pausa, sin importar el texto de la
+    misión."""
+    antes = _h("atemai")
+    despues = _h("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
+    tomar_huella = _tomador_secuencia({"atemai": [antes, despues]})
     ctx = _ctx(tmp_path)
 
-    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_apertura=tomar_apertura,
-                                tomar_cierre=tomar_cierre, misiones=tmp_path / "misiones", mision_id=MISION_ID)
+    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                                misiones=tmp_path / "misiones", mision_id=MISION_ID)
     assert pausas == (("atemai", "huella_cambio_no_declarado"),)
     assert ctx.pausa.exists()
     import json
@@ -278,104 +269,299 @@ def test_huella_cambiada_y_no_declarada_pone_la_pausa(tmp_path):
     assert "authorized_keys" in datos["detalle"][0]
 
 
-def test_huella_cambiada_pero_declarada_en_la_mision_no_pausa(tmp_path):
-    antes = _apertura("hall9000")
-    despues = _cierre("hall9000", controles=b"def  /etc/crontab\n")
-    tomar_apertura, tomar_cierre = _tomadores({"hall9000": antes}, {"hall9000": despues})
-    mision = S.Mision("Voy a tocar /etc/crontab para el cliente en hall9000", frozenset({"hall9000"}))
-    ctx = _ctx(tmp_path)
-
-    pausas = _correr_con_huella(ctx, mision, hosts_con_sudo=("hall9000",), tomar_apertura=tomar_apertura,
-                                tomar_cierre=tomar_cierre, misiones=tmp_path / "misiones", mision_id=MISION_ID)
-    assert pausas == ()
-    assert not ctx.pausa.exists()
-
-
 def test_sin_cambio_en_la_huella_no_pausa(tmp_path):
-    antes = _apertura("atemai")
-    despues = _cierre("atemai")
-    tomar_apertura, tomar_cierre = _tomadores({"atemai": antes}, {"atemai": despues})
+    antes = _h("atemai")
+    despues = _h("atemai")
+    tomar_huella = _tomador_secuencia({"atemai": [antes, despues]})
     ctx = _ctx(tmp_path)
 
-    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_apertura=tomar_apertura,
-                                tomar_cierre=tomar_cierre, misiones=tmp_path / "misiones", mision_id=MISION_ID)
+    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                                misiones=tmp_path / "misiones", mision_id=MISION_ID)
     assert pausas == ()
     assert not ctx.pausa.exists()
 
 
-def test_persistencia_cambiada_y_no_declarada_informa_pero_no_pausa(tmp_path):
-    antes = _apertura("atemai")
-    despues = _cierre("atemai", persistencia=b"abc  /etc/systemd/system/cliente.service\n")
-    tomar_apertura, tomar_cierre = _tomadores({"atemai": antes}, {"atemai": despues})
+def test_huella_de_cierre_vacia_pausa_como_no_medible(tmp_path):
+    """MINOR (ronda 6): una huella de cierre vacía (no parsea/no midió nada real) no
+    es "sin cambios" -- es no-medible, y pausa."""
+    antes = _h("atemai")
+    tomar_huella = _tomador_secuencia({"atemai": [antes, _h("atemai", controles=b"")]})
     ctx = _ctx(tmp_path)
 
-    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_apertura=tomar_apertura,
-                                tomar_cierre=tomar_cierre, misiones=tmp_path / "misiones", mision_id=MISION_ID)
-    assert pausas == ()
-    assert not ctx.pausa.exists()
+    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                                misiones=tmp_path / "misiones", mision_id=MISION_ID)
+    assert pausas == (("atemai", "huella_no_medible"),)
 
 
-def test_huella_de_cierre_ilegible_ahora_PAUSA_ronda4(tmp_path):
-    """Ronda 4 (M-1): «el CIERRE falla cerrado» -- invierte el fail-soft de la ronda 3.
-    Perder la MEDICIÓN de cierre (ssh caído, timeout) es, por sí sola, un hallazgo
-    `huella_no_medible` que pausa, visible en el resultado del turno."""
-    antes = _apertura("atemai")
-    tomar_apertura, tomar_cierre = _tomadores({"atemai": antes}, {"atemai": RuntimeError("ssh caído")})
+def test_huella_de_cierre_ilegible_pausa(tmp_path):
+    """El CIERRE falla cerrado: perder la MEDICIÓN de cierre (ssh caído, timeout) es,
+    por sí sola, un hallazgo `huella_no_medible` que pausa."""
+    antes = _h("atemai")
+    tomar_huella = _tomador_secuencia({"atemai": [antes, RuntimeError("ssh caído")]})
     ctx = _ctx(tmp_path)
 
-    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_apertura=tomar_apertura,
-                                tomar_cierre=tomar_cierre, misiones=tmp_path / "misiones", mision_id=MISION_ID)
+    pausas = _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                                misiones=tmp_path / "misiones", mision_id=MISION_ID)
     assert pausas == (("atemai", "huella_no_medible"),)
     assert ctx.pausa.exists()
-    import json
-    datos = json.loads(ctx.pausa.read_text())
-    assert datos["origen"] == "huella" and datos["motivo"] == "huella_no_medible"
-    assert datos["host"] == "atemai"
 
 
-def test_apertura_de_apertura_que_revienta_no_abre_la_mision(tmp_path):
-    """M-3: `tomar_huella_apertura` que revienta se PROPAGA -- no hay try/except que la
-    trague. Sin huella de apertura, la misión no debe seguir."""
-    tomar_apertura, tomar_cierre = _tomadores({"atemai": RuntimeError("sin ssh")}, {})
+def test_apertura_que_revienta_no_abre_la_mision(tmp_path):
+    """M-3/M-4: `tomar_huella` que revienta al ABRIR se PROPAGA -- no hay try/except
+    que la trague. Sin huella de apertura, la misión no debe seguir."""
+    tomar_huella = _tomador_secuencia({"atemai": [RuntimeError("sin ssh")]})
     ctx = _ctx(tmp_path)
 
     with pytest.raises(RuntimeError):
-        _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_apertura=tomar_apertura,
-                          tomar_cierre=tomar_cierre, misiones=tmp_path / "misiones", mision_id=MISION_ID)
+        _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                          misiones=tmp_path / "misiones", mision_id=MISION_ID)
+
+
+def test_apertura_vacia_revienta(tmp_path):
+    """MINOR (ronda 6): una huella de APERTURA vacía es fallo -- la misión no abre."""
+    tomar_huella = _tomador_secuencia({"atemai": [_h("atemai", controles=b"")]})
+    ctx = _ctx(tmp_path)
+
+    with pytest.raises(RuntimeError, match="huella_apertura_vacia"):
+        _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_huella,
+                          misiones=tmp_path / "misiones", mision_id=MISION_ID)
 
 
 def test_turno_n_mas_1_no_blanquea_un_cambio_del_turno_n(tmp_path):
-    """M-1 (ronda 4): la línea base es la de la APERTURA DE LA MISIÓN, persistida por
-    `mision_id` -- no la del turno anterior. El turno 1 fija la huella de apertura; el
-    turno 2 (un `correr_mision` DISTINTO, misma `mision_id`) tiene que seguir
-    comparando contra esa MISMA apertura, aunque para el turno 2 un tomador ingenuo
-    "vería" el estado ya cambiado como su propio punto de partida."""
+    """La línea base es la de la APERTURA DE LA MISIÓN, persistida por `mision_id` --
+    no la del turno anterior. El turno 1 fija la huella de apertura; el turno 2 (un
+    `correr_mision` DISTINTO, misma `mision_id`) tiene que seguir comparando contra esa
+    MISMA apertura."""
     misiones = tmp_path / "misiones"
-    original = _apertura("atemai")
-    cambiado_sin_declarar = _cierre("atemai", controles=b"def  /root/.ssh/authorized_keys\n")
+    original = _h("atemai")
+    cambiado_sin_declarar = _h("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
 
     # Turno 1: abre limpio, cierra limpio (nadie detecta nada -- el cambio pasa DESPUÉS).
-    ta1, tc1 = _tomadores({"atemai": original}, {"atemai": _cierre("atemai")})
+    t1 = _tomador_secuencia({"atemai": [original, _h("atemai")]})
     ctx1 = _ctx(tmp_path)
-    pausas1 = _correr_con_huella(ctx1, MISION, hosts_con_sudo=("atemai",), tomar_apertura=ta1, tomar_cierre=tc1,
+    pausas1 = _correr_con_huella(ctx1, MISION, hosts_con_sudo=("atemai",), tomar_huella=t1,
                                  misiones=misiones, mision_id=MISION_ID)
     assert pausas1 == ()
 
-    # Turno 2: si `tomar_huella_apertura` se volviera a invocar y devolviera el estado YA
-    # cambiado, un baseline "del turno anterior" lo tomaría como normal. Para probar que
-    # NO pasa, el tomador de apertura del turno 2 directamente REVIENTA si se le llama --
-    # la única forma de que el turno 2 pase es que cargue la apertura PERSISTIDA del
-    # turno 1 sin volver a invocar `tomar_huella_apertura`.
-    async def apertura_no_deberia_llamarse(host):
-        raise AssertionError("turno 2 no debe volver a tomar la apertura: tiene que cargar la persistida")
+    # Turno 2: nadie dejó una marca pendiente (turno 1 cerró limpio) y ya existe una
+    # apertura persistida para esta `mision_id` -- así que la ÚNICA llamada a
+    # `tomar_huella` en todo el turno 2 tiene que ser la del CIERRE. Si el turno 2
+    # volviera a TOMAR la apertura (en vez de cargar la persistida), vería el estado
+    # YA cambiado y lo tomaría como su propio punto de partida -- exactamente lo que
+    # este test prueba que NO pasa.
+    llamadas = []
 
-    async def cierre_turno2(host, *, tamano_apertura_log):
+    async def tomar_turno2(host):
+        llamadas.append(host)
         return cambiado_sin_declarar
     ctx2 = _ctx(tmp_path)
-    pausas2 = _correr_con_huella(ctx2, MISION, hosts_con_sudo=("atemai",), tomar_apertura=apertura_no_deberia_llamarse,
-                                 tomar_cierre=cierre_turno2, misiones=misiones, mision_id=MISION_ID)
+    pausas2 = _correr_con_huella(ctx2, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar_turno2,
+                                 misiones=misiones, mision_id=MISION_ID)
+    assert len(llamadas) == 1  # sólo el cierre: ni la huérfana (no hay) ni una apertura nueva
     assert pausas2 == (("atemai", "huella_cambio_no_declarado"),)
     assert ctx2.pausa.exists()
+
+
+# --- M-1 (ronda 6): deuda de verificación huérfana --------------------------------------
+
+def test_huerfana_de_otra_mision_limpia_deja_abrir_y_la_marca(tmp_path):
+    misiones = tmp_path / "misiones"
+    huella_vieja = _h("atemai")
+    S._escribir_huella_persistida(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), huella_vieja, pendiente=True)
+
+    # La huérfana se revisa PRIMERO (misma huella=sin cambio), y RECIÉN DESPUÉS se toma
+    # la de esta misión nueva -- dos llamadas: la revisión de la huérfana, y la propia.
+    tomar = _tomador_secuencia({"atemai": [huella_vieja, _h("atemai")]})
+    ctx = _ctx(tmp_path)
+
+    async def abrir():
+        return await S.huella_de_apertura_de_la_mision(
+            misiones=misiones, mision_id=MISION_ID, host="atemai", tomar_huella=tomar,
+            pausar=P.poner_pausa, pausa_ruta=ctx.pausa)
+    resultado = asyncio.run(abrir())
+    assert resultado is not None
+    assert not ctx.pausa.exists()
+    # La huérfana quedó resuelta (pendiente=False), no borrada.
+    datos = json.loads(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai").read_text())
+    assert datos["pendiente"] is False
+
+
+def test_huerfana_con_cambio_no_deja_abrir_la_mision_nueva(tmp_path):
+    """M-1: «así un kill -9 o un reinicio no blanquean nada» -- una marca huérfana de
+    OTRA misión que cambió bloquea la apertura de ÉSTA, aunque su propia huella fuera
+    a salir limpia."""
+    misiones = tmp_path / "misiones"
+    huella_vieja = _h("atemai")
+    S._escribir_huella_persistida(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), huella_vieja, pendiente=True)
+
+    async def apertura_no_deberia_llamarse(host):
+        raise AssertionError("no debe abrir su propia huella si la huérfana falló")
+
+    huella_cambiada = _h("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
+    llamadas = {"n": 0}
+
+    async def tomar(host):
+        llamadas["n"] += 1
+        return huella_cambiada  # la revisión de la huérfana ve el cambio
+    ctx = _ctx(tmp_path)
+
+    with pytest.raises(S.HuellaHuerfanaNoResuelta):
+        _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar,
+                          misiones=misiones, mision_id=MISION_ID)
+    assert llamadas["n"] == 1  # sólo la revisión de la huérfana -- nunca llegó a abrir la propia
+    assert ctx.pausa.exists()
+    datos = json.loads(ctx.pausa.read_text())
+    assert datos["motivo"] == "huella_cambio_no_declarado"
+    # La marca huérfana SIGUE pendiente (no se limpió: siguió cambiada).
+    persistida = json.loads(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai").read_text())
+    assert persistida["pendiente"] is True
+
+
+def test_huerfana_ilegible_no_deja_abrir(tmp_path):
+    misiones = tmp_path / "misiones"
+    ruta = S.ruta_huella(misiones, OTRA_MISION_ID, "atemai")
+    ruta.parent.mkdir(parents=True)
+    ruta.write_text("{esto no es json valido")
+
+    async def tomar(host):
+        raise AssertionError("no debería llamarse: la marca ilegible ya corta antes")
+    ctx = _ctx(tmp_path)
+
+    with pytest.raises(S.HuellaHuerfanaNoResuelta):
+        _correr_con_huella(ctx, MISION, hosts_con_sudo=("atemai",), tomar_huella=tomar,
+                          misiones=misiones, mision_id=MISION_ID)
+    assert ctx.pausa.exists()
+
+
+def test_marca_no_pendiente_no_se_revisa_de_nuevo(tmp_path):
+    misiones = tmp_path / "misiones"
+    S._escribir_huella_persistida(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), _h("atemai"), pendiente=False)
+
+    llamadas = []
+
+    async def tomar(host):
+        llamadas.append(host)
+        return _h("atemai")
+    ctx = _ctx(tmp_path)
+
+    async def abrir():
+        return await S.huella_de_apertura_de_la_mision(
+            misiones=misiones, mision_id=MISION_ID, host="atemai", tomar_huella=tomar,
+            pausar=P.poner_pausa, pausa_ruta=ctx.pausa)
+    resultado = asyncio.run(abrir())
+    assert resultado is not None
+    assert llamadas == ["atemai"]  # una sola llamada: la propia apertura, sin volver a medir la ya resuelta
+
+
+def test_kill_9_deja_marca_pendiente_que_la_proxima_mision_encuentra(tmp_path):
+    """Simula un `kill -9`: la misión 1 abre (queda `pendiente=true`) y NUNCA cierra
+    (el proceso muere entre abrir y cerrar -- no se llega a
+    `_verificar_huellas_al_cierre`). La misión 2 (otra `mision_id`) tiene que
+    encontrarla al abrir."""
+    misiones = tmp_path / "misiones"
+    huella_real = _h("atemai")
+
+    async def escenario_mision_1():
+        ctx = _ctx(tmp_path)
+        await S.huella_de_apertura_de_la_mision(
+            misiones=misiones, mision_id=MISION_ID, host="atemai",
+            tomar_huella=_tomador_secuencia({"atemai": [huella_real]}), pausar=P.poner_pausa, pausa_ruta=ctx.pausa)
+        # "muere" acá -- nunca cierra.
+    asyncio.run(escenario_mision_1())
+
+    persistida = json.loads(S.ruta_huella(misiones, MISION_ID, "atemai").read_text())
+    assert persistida["pendiente"] is True
+
+    # Misión 2, mismo host, OTRA mision_id, huella actual IGUAL a la que dejó la 1 (nada
+    # cambió de verdad) -- tiene que abrir limpio (dos llamadas: la revisión de la
+    # huérfana de la 1, y la propia apertura de la 2) y limpiar la marca de la 1.
+    ctx2 = _ctx(tmp_path)
+    tomar2 = _tomador_secuencia({"atemai": [huella_real, huella_real]})
+
+    async def abrir_mision_2():
+        return await S.huella_de_apertura_de_la_mision(
+            misiones=misiones, mision_id=OTRA_MISION_ID, host="atemai", tomar_huella=tomar2,
+            pausar=P.poner_pausa, pausa_ruta=ctx2.pausa)
+    resultado2 = asyncio.run(abrir_mision_2())
+    assert resultado2 is not None
+    assert not ctx2.pausa.exists()
+    persistida = json.loads(S.ruta_huella(misiones, MISION_ID, "atemai").read_text())
+    assert persistida["pendiente"] is False
+
+
+
+# --- correr_huella_por_ssh (M-4, ronda 6: "test de _principal._tomar_huella") -----------
+
+class _ProcesoFalso:
+    def __init__(self, rc, stdout=b"", stderr=b""):
+        self.returncode = rc
+        self._stdout, self._stderr = stdout, stderr
+
+    async def communicate(self):
+        return self._stdout, self._stderr
+
+    def kill(self):
+        pass
+
+    async def wait(self):
+        return None
+
+
+def _correr_falso(rc, stdout=b"", stderr=b""):
+    async def correr(*argv, **kwargs):
+        return _ProcesoFalso(rc, stdout, stderr)
+    return correr
+
+
+def test_correr_huella_por_ssh_rc_cero_arma_la_huella():
+    async def escenario():
+        return await S.correr_huella_por_ssh(
+            ["ssh", "fruiz@atemai"], "atemai", tope_s=5,
+            correr=_correr_falso(0, stdout=b"abc  /etc/sudoers\n"))
+    h = asyncio.run(escenario())
+    assert h.host == "atemai" and "abc" in h.texto
+
+
+def test_correr_huella_por_ssh_rc_no_cero_revienta():
+    """M-4 (ronda 6): un rc != 0 NUNCA se convierte en huella -- ni vacía ni parcial."""
+    async def escenario():
+        return await S.correr_huella_por_ssh(
+            ["ssh", "fruiz@atemai"], "atemai", tope_s=5,
+            correr=_correr_falso(1, stdout=b"", stderr=b"Permission denied"))
+    with pytest.raises(RuntimeError, match="huella_rc_1"):
+        asyncio.run(escenario())
+
+
+def test_correr_huella_por_ssh_rc_no_cero_con_salida_parcial_tambien_revienta():
+    """El mutante concreto que pide matar: "quitar el chequeo del código de salida"
+    dejaría pasar ESTO como una huella válida -- rc=1 pero con líneas de salida (un
+    comando que empezó a andar y se cortó a mitad de camino)."""
+    async def escenario():
+        return await S.correr_huella_por_ssh(
+            ["ssh", "fruiz@atemai"], "atemai", tope_s=5,
+            correr=_correr_falso(1, stdout=b"abc  /etc/sudoers\n", stderr=b"algo fallo a mitad"))
+    with pytest.raises(RuntimeError, match="huella_rc_1"):
+        asyncio.run(escenario())
+
+
+def test_el_mutante_sin_chequeo_de_rc_muere(monkeypatch):
+    """Mata el mutante de verdad: parchea `correr_huella_por_ssh` para que se
+    comporte como si el chequeo de rc no existiera, y confirma que ESE comportamiento
+    es el que los dos tests de arriba no dejan pasar."""
+    import jax.ejecutor.contratos.vigia_servicio as modulo
+
+    async def version_mutada(argv, host, *, tope_s, correr=None):
+        correr = correr or asyncio.create_subprocess_exec
+        proc = await correr(*argv, stdout=None, stderr=None, start_new_session=True)
+        salida, _ = await proc.communicate()
+        # SIN el "if proc.returncode != 0: raise" -- el mutante.
+        return modulo.huella.huella_desde_salida(host, salida)
+
+    async def escenario():
+        return await version_mutada(
+            ["x"], "atemai", tope_s=5, correr=_correr_falso(1, stdout=b"abc  /etc/sudoers\n"))
+    resultado = asyncio.run(escenario())
+    assert modulo.huella.huella_valida(resultado) is True  # el mutante "logra" pasar -- por eso hay que matarlo
 
 
 # --- hosts_con_sudo (M-3, ronda 4: función extraída y testable por su cuenta) ------------

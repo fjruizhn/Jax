@@ -48,6 +48,12 @@ _TOPE_HUELLA_S = 30
 _SUFIJO_TURNO = re.compile(r"-t\d+$")
 
 
+class HuellaHuerfanaNoResuelta(RuntimeError):
+    """M-1 (ronda 6): una deuda de verificación huérfana (de esta u otra misión) que se
+    cortó entre abrir y cerrar con éxito, y que la revisión al arranque NO pudo cerrar
+    limpia (cambió, o no se pudo medir). La misión NUEVA no abre. `args[0]` es el host."""
+
+
 class MisionIlegible(ValueError):
     """`args[0]` es un código estable."""
 
@@ -101,7 +107,7 @@ def mision_id_desde_ruta(ruta_mision: Path) -> str:
     return _SUFIJO_TURNO.sub("", ruta_mision.stem)
 
 
-def ruta_huella_apertura(misiones: Path, mision_id: str, host: str) -> Path:
+def ruta_huella(misiones: Path, mision_id: str, host: str) -> Path:
     if not cuenta_axioma._MISION_ID_VALIDA.match(mision_id):
         raise cuenta_axioma.MisionIdInvalido(mision_id)
     if not host or "/" in host or host.strip() != host:
@@ -109,45 +115,96 @@ def ruta_huella_apertura(misiones: Path, mision_id: str, host: str) -> Path:
     return Path(misiones) / mision_id / "huella" / f"{host}.json"
 
 
-def _huella_a_json(h: huella.Huella) -> dict:
-    return {
-        "host": h.host, "controles": h.controles, "persistencia": h.persistencia,
-        "log": None if h.log is None else {"inode": h.log.inode, "tamano": h.log.tamano, "sha256": h.log.sha256},
-    }
+def _huella_persistida_a_json(h: huella.Huella, *, pendiente: bool) -> dict:
+    return {"host": h.host, "texto": h.texto, "pendiente": pendiente}
 
 
-def _huella_desde_json(d: dict) -> huella.Huella:
-    log_ = d.get("log")
-    return huella.Huella(host=d["host"], controles=d["controles"], persistencia=d["persistencia"],
-                         log=None if log_ is None else huella.InfoLog(**log_))
+def _huella_persistida_desde_json(d: dict) -> tuple:
+    return huella.Huella(host=d["host"], texto=d["texto"]), bool(d["pendiente"])
 
 
-def _persistir_huella_apertura(ruta: Path, h: huella.Huella) -> None:
+def _escribir_huella_persistida(ruta: Path, h: huella.Huella, *, pendiente: bool) -> None:
     ruta.parent.mkdir(parents=True, exist_ok=True)
     tmp = ruta.with_suffix(".tmp")
-    tmp.write_text(json.dumps(_huella_a_json(h)), encoding="utf-8")
+    tmp.write_text(json.dumps(_huella_persistida_a_json(h, pendiente=pendiente)), encoding="utf-8")
     os.replace(tmp, ruta)
 
 
-async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, host: str, tomar_huella) -> huella.Huella:
-    """La huella de APERTURA de la MISIÓN (ronda 4, M-1) -- NO la del turno. Si ya hay
-    una persistida para `(mision_id, host)`, la carga TAL CUAL y NUNCA la vuelve a
-    tomar: es el turno 1 el que la fija, y todos los turnos siguientes comparan contra
-    ESE momento cero. Así un cambio que el turno N no llegó a ver (o que su cierre no
-    llegó a medir) no queda blanqueado cuando el turno N+1 vuelve a mirar.
+async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella, pausar, pausa_ruta) -> bool:
+    """M-1 (ronda 6): «deuda de verificación que se arrastra». Al ABRIR una línea base
+    se escribe una marca `pendiente=true`; al CERRAR con una comparación limpia, se
+    borra (pasa a `pendiente=false`). Antes de que CUALQUIER misión nueva abra su
+    propia huella en `host`, revisa si hay una marca pendiente de OTRA vuelta -- de
+    esta misma misión (un turno que se cortó) o de otra -- que se cortó entre abrir y
+    cerrar con éxito (kill -9, reinicio: nada garantiza que esa vuelta haya llegado a
+    comparar). Compara esa línea base huérfana contra el estado ACTUAL: si cambió, o
+    si la marca es ilegible, o si no se puede volver a medir ahora, PAUSA y reporta
+    ANTES de dejar abrir nada nuevo -- fail-closed en los tres casos. Devuelve `False`
+    si la misión NO debe abrir."""
+    for ruta in sorted(Path(misiones).glob(f"*/huella/{host}.json")):
+        try:
+            d = json.loads(await asyncio.to_thread(ruta.read_text, "utf-8"))
+            antes, pendiente = _huella_persistida_desde_json(d)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            log.error("vigia_servicio huella_huerfana_ilegible ruta=%s tipo=%s", ruta, type(exc).__name__)
+            await asyncio.to_thread(pausar, pausa_ruta, {
+                "origen": "huella", "motivo": "huella_no_medible", "host": host,
+                "detalle": ["huerfana_ilegible", str(ruta)]})
+            return False
+        if not pendiente:
+            continue
+        try:
+            despues = await tomar_huella(host)
+        except Exception as exc:  # fail-soft: no medible se reporta como huella_no_medible y PAUSA (fail-closed) -- nunca se sigue como si nada
+            log.error("vigia_servicio huella_no_medible host=%s motivo=huerfana tipo=%s", host, type(exc).__name__)
+            await asyncio.to_thread(pausar, pausa_ruta, {
+                "origen": "huella", "motivo": "huella_no_medible", "host": host,
+                "detalle": ["huerfana", type(exc).__name__]})
+            return False
+        if not huella.huella_valida(despues) or huella.cambio(antes, despues):
+            log.critical("vigia_servicio huella_cambio_no_declarado host=%s motivo=huerfana", host)
+            detalle = ["huerfana"]
+            detalle += ["huella_de_ahora_vacia"] if not huella.huella_valida(despues) \
+                else list(huella.lineas_agregadas_o_quitadas(antes, despues)[:20])
+            await asyncio.to_thread(pausar, pausa_ruta, {
+                "origen": "huella", "motivo": "huella_cambio_no_declarado", "host": host, "detalle": detalle})
+            return False
+        await asyncio.to_thread(_escribir_huella_persistida, ruta, antes, pendiente=False)
+    return True
 
-    Deliberadamente SIN try/except acá (M-3, ronda 4): si `tomar_huella` revienta la
-    primera vez, la excepción se propaga -- una huella de apertura que no se pudo tomar
-    no es "sin cambios", es que la misión no debe abrir."""
-    ruta = ruta_huella_apertura(misiones, mision_id, host)
+
+async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, host: str, tomar_huella,
+                                          pausar, pausa_ruta) -> huella.Huella | None:
+    """La huella de APERTURA de la MISIÓN (ronda 4, M-1) -- NO la del turno. Primero
+    resuelve cualquier deuda huérfana en `host` (`verificar_huellas_huerfanas`); si esa
+    revisión encuentra un problema, ESTA misión tampoco abre (devuelve `None`) --
+    reportar el hallazgo no alcanza para blanquear la apertura nueva.
+
+    Si ya hay una línea base persistida para `(mision_id, host)`, la carga TAL CUAL y
+    NUNCA la vuelve a tomar: es el turno 1 el que la fija, y todos los turnos
+    siguientes comparan contra ESE momento cero. Así un cambio que el turno N no llegó
+    a ver no queda blanqueado cuando el turno N+1 vuelve a mirar.
+
+    Deliberadamente SIN try/except sobre `tomar_huella` (M-3/M-4, rondas 4/6): si
+    revienta la primera vez, la excepción se propaga -- una huella de apertura que no
+    se pudo tomar no es "sin cambios", es que la misión no debe abrir. MINOR (ronda 6):
+    una huella de apertura vacía (no parsea/no midió nada real) es el mismo fallo."""
+    ok = await verificar_huellas_huerfanas(misiones, host, tomar_huella=tomar_huella, pausar=pausar,
+                                           pausa_ruta=pausa_ruta)
+    if not ok:
+        return None
+    ruta = ruta_huella(misiones, mision_id, host)
     try:
         datos = await asyncio.to_thread(ruta.read_text, "utf-8")
     except FileNotFoundError:
         datos = None
     if datos is not None:
-        return _huella_desde_json(json.loads(datos))
-    h = await tomar_huella(host)
-    await asyncio.to_thread(_persistir_huella_apertura, ruta, h)
+        h, _pendiente = _huella_persistida_desde_json(json.loads(datos))
+    else:
+        h = await tomar_huella(host)
+        if not huella.huella_valida(h):
+            raise RuntimeError("huella_apertura_vacia")
+    await asyncio.to_thread(_escribir_huella_persistida, ruta, h, pendiente=True)
     return h
 
 
@@ -160,16 +217,17 @@ def hosts_con_sudo(hosts_mision, hosts_pol: dict) -> tuple:
     return tuple(sorted(n for n in hosts_mision if n in hosts_pol and not hosts_pol[n].es_local))
 
 
-async def _verificar_huellas_al_cierre(pausa_ruta: Path, mision: Mision, huellas_iniciales: dict,
-                                       hosts_con_sudo: tuple, *, tomar_huella_cierre, pausar) -> tuple:
-    """Ronda 4 (M-1): «el CIERRE falla cerrado». Si la huella de cierre de un host NO SE
-    PUEDE TOMAR (ssh caído, sudo denegado, lo que sea) o si no hubo huella de apertura
-    que comparar, es un hallazgo `huella_no_medible` y PONE LA PAUSA -- ya no el
-    `continue` silencioso de la ronda 3. Queda visible en el resultado del turno sin
-    tocar el formato de salida del vigía: `pausar()` escribe en `ctx.pausa`, y
-    `mision.py::correr_turno` YA lee esa pausa después de cerrar el vigía y hace
-    `codigo = "pausa_puesta"` si está puesta -- el mismo camino que cualquier otra
-    pausa. Devuelve `((host, motivo), ...)` -- vacío si todo midió limpio."""
+async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict, hosts_con_sudo: tuple,
+                                       misiones: Path, mision_id: str, *, tomar_huella, pausar) -> tuple:
+    """«El CIERRE falla cerrado». Si la huella de cierre de un host NO SE PUEDE TOMAR
+    (ssh caído, sudo denegado, lo que sea), sale vacía, o si no hubo huella de apertura
+    que comparar, es un hallazgo `huella_no_medible` y PONE LA PAUSA. Sin declarado
+    (ronda 6): cualquier cambio es `huella_cambio_no_declarado`, sin excepción. Una
+    comparación limpia borra la marca `pendiente` (M-1) -- deja de ser deuda para el
+    próximo arranque. Queda visible en el resultado del turno sin tocar el formato de
+    salida del vigía: `pausar()` escribe en `ctx.pausa`, y `mision.py::correr_turno` YA
+    lee esa pausa después de cerrar el vigía (`codigo = "pausa_puesta"` si está
+    puesta). Devuelve `((host, motivo), ...)` -- vacío si todo midió limpio."""
     motivos = []
     for h in hosts_con_sudo:
         antes = huellas_iniciales.get(h)
@@ -180,23 +238,29 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, mision: Mision, huellas
                 "origen": "huella", "motivo": "huella_no_medible", "host": h, "detalle": ["sin_huella_de_apertura"]})
             continue
         try:
-            despues = await tomar_huella_cierre(h, tamano_apertura_log=antes.log.tamano if antes.log else 0)
-        except Exception as exc:  # fail-soft: no medible se reporta como huella_no_medible y PAUSA (fail-closed en el resultado, ronda 4 M-1) -- nunca se sigue como si nada
+            despues = await tomar_huella(h)
+        except Exception as exc:  # fail-soft: no medible se reporta como huella_no_medible y PAUSA (fail-closed en el resultado) -- nunca se sigue como si nada
             log.error("vigia_servicio huella_no_medible host=%s tipo=%s", h, type(exc).__name__)
             motivos.append((h, "huella_no_medible"))
             await asyncio.to_thread(pausar, pausa_ruta, {
                 "origen": "huella", "motivo": "huella_no_medible", "host": h, "detalle": [type(exc).__name__]})
             continue
-        informe = huella.hallazgos_persistencia(antes, despues, mision.texto)
-        if informe:
-            log.warning("vigia_servicio huella_persistencia_cambiada host=%s lineas=%d", h, len(informe))
-        encontrados = huella.hallazgos_controles(antes, despues, mision.texto)
+        if not huella.huella_valida(despues):
+            log.error("vigia_servicio huella_no_medible host=%s motivo=huella_vacia", h)
+            motivos.append((h, "huella_no_medible"))
+            await asyncio.to_thread(pausar, pausa_ruta, {
+                "origen": "huella", "motivo": "huella_no_medible", "host": h, "detalle": ["huella_de_cierre_vacia"]})
+            continue
+        encontrados = huella.hallazgos(antes, despues)
         if encontrados:
             log.critical("vigia_servicio huella_cambio_no_declarado host=%s lineas=%d", h, len(encontrados))
             motivos.append((h, "huella_cambio_no_declarado"))
             await asyncio.to_thread(pausar, pausa_ruta, {
                 "origen": "huella", "motivo": "huella_cambio_no_declarado",
                 "host": h, "detalle": list(encontrados[:20])})
+            continue
+        await asyncio.to_thread(_escribir_huella_persistida, ruta_huella(misiones, mision_id, h),
+                                antes, pendiente=False)
     return tuple(motivos)
 
 
@@ -204,45 +268,75 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
                         intervalo_s: float, auditar, fin: asyncio.Event, exigir=arranque.exigir_contratos,
                         vigilar=vigia.vigilar, maquinas: tuple, hosts_con_sudo: tuple = (),
                         misiones: Path | None = None, mision_id: str | None = None,
-                        tomar_huella_apertura=None, tomar_huella_cierre=None,
-                        pausar=pausa.poner_pausa) -> tuple:
+                        tomar_huella=None, pausar=pausa.poner_pausa) -> tuple:
     """Lanza ContratosNoVerificados sin haber latido nunca si un contrato no está vivo.
 
-    `hosts_con_sudo`/`tomar_huella_apertura`/`tomar_huella_cierre` (M-1/M-2, ronda 3;
-    B-1/M-1/M-2 ronda 4): si se dan, se toma (o se carga, si ya existe -- ver
+    `hosts_con_sudo`/`tomar_huella` (M-1/M-2, ronda 3; B-1/M-1/M-2 ronda 4;
+    simplificado ronda 6): si se dan, se toma (o se carga, si ya existe -- ver
     `huella_de_apertura_de_la_mision`) una huella de cada host ANTES de latir y otra AL
-    CERRAR (fin normal); un cambio no declarado en el texto de la misión pone la pausa.
-    `tomar_huella_apertura=None` (el default): sin huella -- así los llamadores que no
-    la necesitan (o corren en un entorno sin ssh/sudo, como los tests que no la
-    ejercitan) no cambian de comportamiento. Devuelve los motivos de pausa por huella
-    (vacío si no se pidió huella o si todo midió limpio)."""
+    CERRAR (fin normal); cualquier cambio pone la pausa (sin declarado, ronda 6).
+    `tomar_huella=None` (el default): sin huella -- así los llamadores que no la
+    necesitan (o corren en un entorno sin ssh/sudo, como los tests que no la ejercitan)
+    no cambian de comportamiento.
+
+    M-1 (ronda 6): si CUALQUIER host tiene una deuda de verificación huérfana que no
+    se pudo resolver limpia, la misión NO ABRE -- ni siquiera para los demás hosts:
+    `huella_de_apertura_de_la_mision` devuelve `None` para ese host, y acá se propaga
+    `HuellaHuerfanaNoResuelta` ANTES de `vigilar()` (no se abre el proxy; `_principal`
+    la reporta con su propio código, no como un contrato más). Devuelve los motivos de
+    pausa por huella (vacío si no se pidió huella o si todo midió limpio)."""
     if ctx.hosts_mision != mision.hosts:
         raise ValueError("contexto_de_otra_mision")
     await exigir(ctx)
     if fin.is_set():  # lo pararon mientras se verificaban los contratos: no se abre nada
         log.info("vigia_servicio mision_cancelada_antes_de_abrir")
         return ()
+    huellas_iniciales = {}
+    if tomar_huella is not None and hosts_con_sudo:
+        for h in hosts_con_sudo:
+            baseline = await huella_de_apertura_de_la_mision(
+                misiones=misiones, mision_id=mision_id, host=h, tomar_huella=tomar_huella,
+                pausar=pausar, pausa_ruta=ctx.pausa)
+            if baseline is None:
+                log.critical("vigia_servicio mision_no_abre_por_huella_huerfana host=%s", h)
+                raise HuellaHuerfanaNoResuelta(h)
+            huellas_iniciales[h] = baseline
     desde = (await asyncio.to_thread(os.stat, ctx.registro)).st_size
     cfg = vigia.ConfigVigia(registro=ctx.registro, desde_byte=desde, mision=mision.texto, lote_max=lote_max,
                             intervalo_s=intervalo_s, pausa=ctx.pausa, latido=ctx.latido, latido_cada_s=latido_cada_s,
                             maquinas=maquinas)
-    huellas_iniciales = {}
-    if tomar_huella_apertura is not None and hosts_con_sudo:
-        huellas_iniciales = {
-            h: await huella_de_apertura_de_la_mision(
-                misiones=misiones, mision_id=mision_id, host=h, tomar_huella=tomar_huella_apertura)
-            for h in hosts_con_sudo}
     log.info("vigia_servicio mision_abierta desde_byte=%s hosts=%s", desde, ",".join(sorted(mision.hosts)))
     await vigilar(cfg, auditar, fin)
     # Sólo en el fin normal: con una excepción el latido se deja envejecer y vigia.py ya puso la pausa.
     await asyncio.to_thread(_borrar_latido, ctx.latido)
     pausas_de_huella = ()
-    if tomar_huella_apertura is not None and hosts_con_sudo:
+    if tomar_huella is not None and hosts_con_sudo:
         pausas_de_huella = await _verificar_huellas_al_cierre(
-            ctx.pausa, mision, huellas_iniciales, hosts_con_sudo,
-            tomar_huella_cierre=tomar_huella_cierre, pausar=pausar)
+            ctx.pausa, huellas_iniciales, hosts_con_sudo, misiones, mision_id,
+            tomar_huella=tomar_huella, pausar=pausar)
     log.info("vigia_servicio mision_cerrada")
     return pausas_de_huella
+
+
+async def correr_huella_por_ssh(argv: list, host: str, *, tope_s: float, correr=None) -> huella.Huella:
+    """La ejecución REAL detrás de `_principal._tomar_huella` -- corre `argv` (ya
+    armado por `revocacion.argv_admin`), EXIGE rc==0 (M-4, ronda 6: un mutante que
+    quite este chequeo dejaría pasar una huella de un comando que reventó a mitad de
+    camino, con salida parcial, como si fuera limpia) y arma la `Huella` desde stdout.
+    Extraída a nivel de módulo para poder probarla sin el resto de `_principal`
+    (conexión DB, política, etc.) -- M-4 pide un test de esta pieza."""
+    correr = correr or asyncio.create_subprocess_exec
+    proc = await correr(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                        start_new_session=True)
+    try:
+        salida, errores = await asyncio.wait_for(proc.communicate(), tope_s)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        proc.kill()
+        await proc.wait()
+        raise
+    if proc.returncode != 0:
+        raise RuntimeError(f"huella_rc_{proc.returncode}: {errores.decode(errors='replace')[:200]}")
+    return huella.huella_desde_salida(host, salida)
 
 
 async def _principal(ruta_mision: Path) -> int:
@@ -282,28 +376,16 @@ async def _principal(ruta_mision: Path) -> int:
     async def auditar(lote):
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
 
-    async def _tomar_huella(nombre_host: str, comando_remoto: str, *, cierre: bool) -> huella.Huella:
+    async def _tomar_huella(nombre_host: str) -> huella.Huella:
+        """El comando de `huella.comando_huella()` YA NO depende de la cuenta (B-1 se
+        fue: sin log de sudo que mirar, ronda 6) -- una sola forma, apertura y cierre
+        comparan lo mismo. `revocacion.argv_admin` + UN solo `sudo -n sh -c '<script>'`
+        -- mismo camino que `ops/ejecutor/_maquina.sh` y
+        `scripts/ejecutor_contratos/revocar.py` para C6/revocar. La ejecución de
+        verdad vive en `correr_huella_por_ssh` (a nivel de módulo, testeable aparte)."""
         h = hosts_pol[nombre_host]
-        argv = revocacion.argv_admin(h, admin_usuario, f"sudo -n sh -c {shlex.quote(comando_remoto)}")
-        proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE,
-                                                    stderr=asyncio.subprocess.PIPE, start_new_session=True)
-        try:
-            salida, errores = await asyncio.wait_for(proc.communicate(), _TOPE_HUELLA_S)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            proc.kill()
-            await proc.wait()
-            raise
-        if proc.returncode != 0:
-            raise RuntimeError(f"huella_rc_{proc.returncode}: {errores.decode(errors='replace')[:200]}")
-        armar = huella.huella_de_cierre_desde_salida if cierre else huella.huella_de_apertura_desde_salida
-        return armar(nombre_host, salida)
-
-    async def tomar_huella_apertura(nombre_host: str) -> huella.Huella:
-        return await _tomar_huella(nombre_host, huella.comando_apertura(ctx.cuenta.nombre), cierre=False)
-
-    async def tomar_huella_cierre(nombre_host: str, *, tamano_apertura_log: int) -> huella.Huella:
-        comando = huella.comando_cierre(ctx.cuenta.nombre, tamano_apertura_log=tamano_apertura_log)
-        return await _tomar_huella(nombre_host, comando, cierre=True)
+        argv = revocacion.argv_admin(h, admin_usuario, f"sudo -n sh -c {shlex.quote(huella.comando_huella())}")
+        return await correr_huella_por_ssh(argv, nombre_host, tope_s=_TOPE_HUELLA_S)
 
     fin = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -314,11 +396,19 @@ async def _principal(ruta_mision: Path) -> int:
             ctx, mision, latido_cada_s=latido_cada_s, lote_max=cfg.lote_max,
             intervalo_s=cfg.intervalo_s, auditar=auditar, fin=fin, maquinas=maquinas,
             hosts_con_sudo=remotas_con_sudo, misiones=misiones_dir, mision_id=mision_id,
-            tomar_huella_apertura=tomar_huella_apertura, tomar_huella_cierre=tomar_huella_cierre)
+            tomar_huella=_tomar_huella)
     except arranque.ContratosNoVerificados as exc:
         for f in exc.fallos:
             print(formato.campos((("contrato", f.contrato), ("codigo", f.codigo)) + tuple(f.datos)), flush=True)
         print(formato.campos((("arranco", False),)), flush=True)
+        return 1
+    except HuellaHuerfanaNoResuelta as exc:
+        # MINOR (ronda 6): código propio, NO un ContratosNoVerificados más -- así
+        # `mision.py::correr_turno` no lo confunde con "vigia_no_latio" (el vigía nunca
+        # llegó a latir, pero no porque un contrato esté caído: porque hay una deuda de
+        # huella sin resolver de otra vuelta).
+        print(formato.campos((("arranco", False), ("codigo", "huella_huerfana_no_resuelta"),
+                              ("host", exc.args[0] if exc.args else ""))), flush=True)
         return 1
     # `huella_pausada` SIEMPRE presente (visible en el resultado del turno, ronda 4 M-1):
     # nunca queda en verde en silencio -- vacío/False es el caso limpio, explícito igual.
@@ -341,6 +431,17 @@ def principal(argv) -> int:
                               ("tipo", type(exc).__name__), ("detalle", str(exc.args[0]) if exc.args else ""))),
               file=sys.stderr)
         return 2
+    except RuntimeError as exc:
+        # MINOR (ronda 6): un RuntimeError (huella_rc_*, huella_apertura_vacia, lo que
+        # `_tomar_huella`/`huella_de_apertura_de_la_mision` propaguen sin capturar
+        # arriba, M-3) se reporta con SU PROPIO código -- antes se colaba sin capturar
+        # y el proceso moría con una traza sin código estable; `mision.py::correr_turno`
+        # lo veía como "el vigía no latió" (`vigia_no_latio`), indistinguible de un
+        # contrato lento. Acá queda explícito qué pasó.
+        print(formato.campos((("arranco", False), ("codigo", "vigia_error_en_arranque"),
+                              ("tipo", type(exc).__name__), ("detalle", str(exc.args[0]) if exc.args else ""))),
+              file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
