@@ -962,6 +962,15 @@ _INDICES: list[tuple[str, str, str, bool]] = [
     ("jacobs_events", "idx_events_pipeline_tipo",
      "CREATE INDEX idx_events_pipeline_tipo ON jacobs_events "
      "(pipeline_id, event_type) ALGORITHM=INPLACE LOCK=NONE", True),
+    # 2026-09-22 (spec descartar-pipelines §6): la vista "Descartados" filtra
+    # por dueño + status y ordena por descartado_at; la de ocultos (todos los
+    # usuarios) por status + descartado_at. Sin estos, EXPLAIN da filesort.
+    ("jacobs_pipelines", "idx_pipelines_descartados",
+     "CREATE INDEX idx_pipelines_descartados ON jacobs_pipelines "
+     "(user_id, tenant_id, status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
+    ("jacobs_pipelines", "idx_pipelines_ocultos",
+     "CREATE INDEX idx_pipelines_ocultos ON jacobs_pipelines "
+     "(status, descartado_at) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
@@ -1075,6 +1084,15 @@ async def init_tables() -> None:
                 # en otro proceso/host).
                 ("devoluciones", "ALTER TABLE jacobs_pipelines ADD COLUMN "
                     "devoluciones INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
+                # 2026-09-22 (spec descartar-pipelines §3): a qué vuelve al
+                # recuperar, quién descartó (decide quién puede recuperar) y
+                # cuándo (orden de la vista). INSTANT: nunca copiar la tabla.
+                ("status_previo", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "status_previo VARCHAR(20) NULL, ALGORITHM=INSTANT"),
+                ("descartado_por", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "descartado_por VARCHAR(50) NULL, ALGORITHM=INSTANT"),
+                ("descartado_at", "ALTER TABLE jacobs_pipelines ADD COLUMN "
+                    "descartado_at DOUBLE NULL, ALGORITHM=INSTANT"),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "

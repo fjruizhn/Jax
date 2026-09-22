@@ -1360,6 +1360,7 @@ jobs:
           jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py
           jacobs/_veredicto_test.py jacobs/_devolucion_test.py
           jacobs/_devolucion_ejecutor_test.py
+          tests/test_jacobs_descarte.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -1501,6 +1502,7 @@ jobs:
             jacobs/_reaper_aviso_test.py jacobs/_continue_modelo_real_reset_test.py \
             jacobs/_veredicto_test.py jacobs/_devolucion_test.py \
             jacobs/_devolucion_ejecutor_test.py \
+            tests/test_jacobs_descarte.py \
             2>&1 | tee /tmp/out
           # 62 -> 71 el 2026-09-11 (LAS CUATRO DEL RENDIMIENTO):
           #   +2 test_no_blocking_in_async.py  -- el barrido del arbol y el
@@ -3342,8 +3344,18 @@ jobs:
           #   Conflicto de merge resuelto sumando: este PR y
           #   feat/sobre-fuente-no-confiable movieron el piso desde 2358 cada uno
           #   por su cuenta. Si el runner da otro número, manda el runner.
-          grep -qE "^2399 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2399 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2399 -> 2402 (feat/descartar-pipelines, Task 1, 2026-09-22):
+          #   tests/test_jacobs_descarte.py (+3, archivo nuevo, sin DB) --
+          #   test_los_estados_nuevos_existen y test_descartado_y_oculto_no_ocupan_cupo
+          #   vistos en ROJO contra el codigo viejo (ValueError: 'discarded' is
+          #   not a valid PipelineStatus, luego AttributeError) antes de agregar
+          #   PipelineStatus.discarded/hidden (jacobs/models.py) y sumarlos a
+          #   ESTADOS_SIN_CUPO (jacobs/policy.py); test_el_reaper_solo_cosecha_no_terminales
+          #   es una baranda de regresion (spec Sec.3: el reaper no toca los
+          #   estados nuevos) y YA pasaba contra el codigo viejo -- no hay
+          #   rojo que mostrar para ese caso, es defensivo.
+          grep -qE "^2402 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2402 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -4159,6 +4171,7 @@ jobs:
           las_manos/_catalog_from_db_test.py
           jacobs/_modelo_real_test.py
           las_manos/_output_validator_db_drift_test.py
+          tests/test_jacobs_descarte_db.py
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 (venv limpio, esquema de las migraciones): 14 passed.
         # 14 -> 15 el 2026-09-14 (tanda A v2): test_catalog_mode_db.py (+1) -- from_db() trae capability.mode. Requiere jax-platform con capability.mode (PR-A) en master. Visto en rojo.
@@ -4185,6 +4198,7 @@ jobs:
             las_manos/_catalog_from_db_test.py \
             jacobs/_modelo_real_test.py \
             las_manos/_output_validator_db_drift_test.py \
+            tests/test_jacobs_descarte_db.py \
             2>&1 | tee /tmp/out
           # 15 -> 19 el 2026-09-14 (PR-K): test_contrato_dispatch_db.py (+4) --
           #   limite_de_salida() contra la fila real sembrada (deepseek-v4-flash), la de
@@ -4411,8 +4425,21 @@ jobs:
           # passed, 0 failed, 0 skipped -- corrida completa de los 23 archivos
           # del job, no sólo el tocado. Si el runner da otro número, manda el
           # runner.
-          grep -qE "^125 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 125 tests CORRIDOS."; exit 1; }
+          # 125 -> 127 (feat/descartar-pipelines, Task 1, 2026-09-22): +2 en
+          # tests/test_jacobs_descarte_db.py (archivo nuevo) --
+          # test_columnas_del_descarte_existen y test_indices_del_descarte_existen
+          # contra jacobs_pipelines real: status_previo/descartado_por/descartado_at
+          # (ALTER TABLE ... ALGORITHM=INSTANT) e idx_pipelines_descartados/
+          # idx_pipelines_ocultos (CREATE INDEX ... ALGORITHM=INPLACE LOCK=NONE),
+          # los dos agregados a jacobs/store.py::init_tables()/_INDICES. NO
+          # ejecutado localmente (la barrera de produccion de esta sesion: la
+          # unica MariaDB alcanzable sin sourcear /etc/jax/.env es la de
+          # produccion en 127.0.0.1:3308); el piso de 127 se deriva de que el
+          # archivo aporta exactamente 2 tests nuevos sobre el 125 ya medido,
+          # sin tocar ningun otro archivo de este job. Si el runner da otro
+          # numero, manda el runner.
+          grep -qE "^127 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 127 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
