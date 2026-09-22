@@ -13,8 +13,11 @@ contra esa definición -- una sola fuente de verdad, dos formas (Python armaba u
 para mandarlo por ssh, el script ahora corre ESTÁTICO en la remota, pero mide las
 MISMAS rutas)."""
 import re
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 from jax.ejecutor.contratos import huella as H
 
@@ -49,10 +52,25 @@ def test_el_script_no_lee_argv_del_script_ignora_lo_que_le_manden():
 
 def test_el_script_mide_exactamente_las_mismas_rutas_que_rutas_controles():
     for ruta in H.RUTAS_CONTROLES:
-        assert f'tramo {ruta}\n' in TEXTO or TEXTO.count(f"tramo {ruta}") >= 1, ruta
-    # Y nada de más: cada línea `tramo <ruta>` del script está en RUTAS_CONTROLES.
+        assert TEXTO.count(f"tramo {ruta}") >= 1, ruta
+    # Y nada de más entre las rutas FIJAS: cada línea `tramo <ruta>` del script, salvo
+    # la del administrador (paramétrica, ver test de abajo), está en RUTAS_CONTROLES.
     rutas_del_script = re.findall(r"^\s{2}tramo (\S+)$", TEXTO, flags=re.MULTILINE)
-    assert set(rutas_del_script) == set(H.RUTAS_CONTROLES)
+    fijas = set(rutas_del_script) - {'"/home/$ADMIN_USUARIO/.ssh/authorized_keys"'}
+    assert fijas == set(H.RUTAS_CONTROLES)
+
+
+def test_el_script_mide_el_authorized_keys_del_administrador():
+    """LÍMITE 9 (ronda 2, auditoría adversarial 2026-09-22): el `authorized_keys` del
+    administrador es donde vive el acceso privilegiado real -- y donde este mismo
+    commit pone la llave del servicio; no medirlo dejaría el propio cambio invisible a
+    la huella."""
+    assert 'tramo "/home/$ADMIN_USUARIO/.ssh/authorized_keys"' in TEXTO
+    assert "ADMIN_USUARIO=fruiz" in TEXTO
+
+
+def test_el_script_usa_lc_all_c():
+    assert "export LC_ALL=C" in TEXTO
 
 
 def test_el_script_mide_el_glob_de_ejecutor_en_usr_local_sbin():
@@ -112,3 +130,120 @@ def test_correr_sin_privilegios_no_revienta_por_rutas_no_legibles():
     r = subprocess.run([str(GUION)], capture_output=True, timeout=30)
     assert r.returncode == 0
     assert r.stderr == b""
+
+
+# --- MAJOR-7 (ronda 2, auditoría adversarial 2026-09-22): la sincronía compara SALIDAS
+# sobre el MISMO árbol de prueba, no listas de rutas -- bwrap bind-monta contenido de
+# prueba encima de las rutas absolutas reales (mismo mecanismo que ya usa
+# jax/ejecutor/contratos/cuenta_axioma.py para la jaula del Ejecutor), sin tocar el
+# filesystem del host, y corre el script real Y `comando_huella()` (el texto que antes
+# viajaba por ssh) contra ese mismo árbol. -----------------------------------------------
+
+REQUIERE_BWRAP = pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap no disponible")
+_ADMIN_DE_PRUEBA = "fruiz"
+
+
+def _arbol_de_prueba(tmp_path: Path, *, con_sha256sum: bool = True) -> dict:
+    """Arma un árbol de prueba completo (las seis RUTAS_CONTROLES + el authorized_keys
+    del administrador + /usr/local/sbin con ejecutor-huella instalado de verdad) y
+    devuelve el mapeo {ruta_real: ruta_de_prueba} para bwrap. `con_sha256sum=False`
+    (MAJOR-6): el `sha256sum` que bwrap expone es un binario que SIEMPRE falla --
+    simula que el binario real está roto/ausente sin necesitar borrar nada del host."""
+    sudoers = tmp_path / "sudoers"; sudoers.write_text("root ALL=(ALL) ALL\n")
+    sudoers_d = tmp_path / "sudoers.d"; sudoers_d.mkdir()
+    (sudoers_d / "50-x").write_text("fruiz ALL=(ALL) NOPASSWD: ALL\n")
+    sshd_config = tmp_path / "sshd_config"; sshd_config.write_text("Port 58291\n")
+    sshd_config_d = tmp_path / "sshd_config.d"; sshd_config_d.mkdir()
+    authorized_keys_d = tmp_path / "authorized_keys.d"; authorized_keys_d.mkdir()
+    (authorized_keys_d / "axioma").write_text("ssh-ed25519 AAAAaxioma ejecutor-axioma\n")
+    root_authorized_keys = tmp_path / "root_authorized_keys"
+    root_authorized_keys.write_text("ssh-ed25519 AAAAroot root@hall9000\n")
+    admin_authorized_keys = tmp_path / "admin_authorized_keys"
+    admin_authorized_keys.write_text("ssh-ed25519 AAAAadmin fruiz@hall9000\n")
+    sbin = tmp_path / "sbin"; sbin.mkdir()
+    (sbin / "ejecutor-huella").write_bytes(GUION.read_bytes())
+    (sbin / "ejecutor-huella").chmod(0o755)
+    (sbin / "ejecutor-freno-remoto").write_text("#!/bin/sh\necho freno\n")
+    (sbin / "ejecutor-freno-remoto").chmod(0o755)
+
+    bin_falso = None
+    if not con_sha256sum:
+        bin_falso = tmp_path / "bin-falso"; bin_falso.mkdir()
+        (bin_falso / "sha256sum").write_text("#!/bin/sh\nexit 127\n")
+        (bin_falso / "sha256sum").chmod(0o755)
+
+    binds = {
+        "/etc/sudoers": sudoers,
+        "/etc/sudoers.d": sudoers_d,
+        "/etc/ssh/sshd_config": sshd_config,
+        "/etc/ssh/sshd_config.d": sshd_config_d,
+        "/etc/ssh/authorized_keys.d": authorized_keys_d,
+        "/root/.ssh/authorized_keys": root_authorized_keys,
+        f"/home/{_ADMIN_DE_PRUEBA}/.ssh/authorized_keys": admin_authorized_keys,
+        "/usr/local/sbin": sbin,
+    }
+    if bin_falso is not None:
+        binds["/usr/bin/sha256sum"] = bin_falso / "sha256sum"
+    return binds
+
+
+def _argv_bwrap(binds: dict) -> list:
+    argv = ["bwrap", "--dev-bind", "/", "/", "--die-with-parent", "--tmpfs", "/root"]
+    for real, prueba in binds.items():
+        argv += ["--bind", str(prueba), real]
+    return argv
+
+
+@REQUIERE_BWRAP
+def test_el_guion_y_comando_huella_dan_la_misma_salida_sobre_el_mismo_arbol(tmp_path):
+    binds = _arbol_de_prueba(tmp_path)
+    base = _argv_bwrap(binds)
+
+    salida_guion = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    comando = H.comando_huella(_ADMIN_DE_PRUEBA)
+    salida_python = subprocess.run(base + ["--", "/bin/sh", "-c", comando], capture_output=True, timeout=30)
+
+    assert salida_guion.returncode == 0, salida_guion.stderr
+    assert salida_python.returncode == 0, salida_python.stderr
+    assert salida_guion.stdout  # si saliera vacío, la comparación de abajo no probaría nada
+    assert salida_guion.stdout == salida_python.stdout
+
+
+@REQUIERE_BWRAP
+def test_el_mutante_xtype_f_a_type_f_rompe_la_sincronia(tmp_path):
+    """MAJOR-7, el mutante que pide matar: `-xtype f` (sigue symlinks al hashear) vs
+    `-type f` (NO los sigue -- hashea el symlink como archivo, `sha256sum` sobre un
+    link simbólico revienta con ENOENT/ELOOP según el caso) dan salidas DISTINTAS en
+    cuanto hay un symlink de por medio. Se arma un symlink real en el árbol de prueba y
+    se confirma que el guion (con `-xtype f`) y una variante mutada (con `-type f`)
+    YA NO COINCIDEN -- la comparación de salidas de arriba SÍ lo habría atrapado."""
+    binds = _arbol_de_prueba(tmp_path)
+    # Symlink real: sudoers.d/50-x -> un archivo por fuera, para que -xtype/-type difieran.
+    destino = tmp_path / "afuera.txt"; destino.write_text("contenido\n")
+    enlace = tmp_path / "sudoers.d" / "50-enlace"
+    enlace.symlink_to(destino)
+
+    guion_mutado = tmp_path / "ejecutor-huella-mutado"
+    guion_mutado.write_text(GUION.read_text().replace("-xtype f", "-type f"))
+    guion_mutado.chmod(0o755)
+
+    base = _argv_bwrap(binds)
+    salida_real = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    salida_mutada = subprocess.run(base + ["--", str(guion_mutado)], capture_output=True, timeout=30)
+
+    assert salida_real.returncode == 0 and salida_mutada.returncode == 0
+    assert salida_real.stdout != salida_mutada.stdout  # el mutante SÍ cambia la salida -- se lo detecta
+
+
+# --- MAJOR-6 (ronda 2): si falta el binario que hashea, la huella tiene que salir
+# INVÁLIDA -- no "vacía" (huella_valida() ya lo cazaba) sino "con líneas, pero sin
+# NINGÚN hash real". -----------------------------------------------------------------
+
+@REQUIERE_BWRAP
+def test_sin_sha256sum_la_huella_sale_invalida(tmp_path):
+    binds = _arbol_de_prueba(tmp_path, con_sha256sum=False)
+    base = _argv_bwrap(binds)
+    r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
+    assert r.returncode == 0  # el script no revienta -- rc=0 es justo el peligro que MAJOR-6 señala
+    h = H.huella_desde_salida("prueba", r.stdout)
+    assert H.huella_valida(h) is False, r.stdout

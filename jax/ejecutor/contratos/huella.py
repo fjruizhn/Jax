@@ -77,6 +77,12 @@ from jax.ejecutor.contratos import pausa
 #: y C6 (llaves) en cada máquina -- rutas verificadas contra
 #: ops/ejecutor/instalar_en_maquina.sh (2026-09-22), no inventadas. Dato, no código
 #: (Principio IV). NINGÚN cambio acá es legítimo durante una misión: sin declarado.
+#:
+#: LÍMITE 9 (ronda 2, auditoría adversarial 2026-09-22): esta tupla se queda FIJA a
+#: propósito -- el `authorized_keys` del ADMINISTRADOR (dónde vive el acceso
+#: privilegiado real, y dónde el arreglo de jax#260 puso la llave del servicio) SÍ entra
+#: a la huella, pero por `ruta_authorized_keys_admin(admin_usuario)` / `comando_huella
+#: (admin_usuario)` -- necesita saber la cuenta, y RUTAS_CONTROLES no depende de nada.
 RUTAS_CONTROLES = (
     "/etc/sudoers",
     "/etc/sudoers.d",
@@ -133,17 +139,40 @@ def _tramo_sbin_ejecutor() -> str:
     )
 
 
-def comando_huella() -> str:
+def ruta_authorized_keys_admin(admin_usuario: str) -> str:
+    """LÍMITE que ronda 2 cierra (auditoría adversarial 2026-09-22, punto 9): el
+    `authorized_keys` del ADMINISTRADOR (`JAX_EJECUTOR_ADMIN_USUARIO`, hoy `fruiz`) es
+    donde vive el acceso privilegiado real -- y donde este mismo arreglo pone la llave
+    del servicio (`instalar_huella_en_maquina.sh`). No medirlo dejaría el propio cambio
+    que este commit hace invisible a la huella. `/home/<admin>` sigue la MISMA
+    convención que ya usa `JAX_EJECUTOR_CUENTA_HOME` en `/etc/jax/.env`
+    (`/home/axioma`) -- no es una ruta inventada, es la que este inventario ya asume
+    para toda cuenta humana/de servicio."""
+    if not admin_usuario or "/" in admin_usuario or admin_usuario.strip() != admin_usuario:
+        raise ValueError("admin_usuario_invalido")
+    return f"/home/{admin_usuario}/.ssh/authorized_keys"
+
+
+def comando_huella(admin_usuario: str) -> str:
     """El texto de lo que había que medir -- YA NO se manda por ssh (ver el arreglo del
     bug de producción, jax#260, 2026-09-22, en el docstring del módulo y en
     `argv_huella_servicio`, más abajo): antes se envolvía en UN `sudo -n sh -c '<esto>'`
     armado por `revocacion.argv_admin` como el ADMINISTRADOR; ahora la misma lógica
-    (RUTAS_CONTROLES + el glob de `/usr/local/sbin/ejecutor-*`, mismos binarios por ruta
-    absoluta) vive, ESTÁTICA, en `ops/ejecutor/ejecutor-huella` -- el comando forzado de
-    la llave PROPIA del servicio. Esta función sigue acá como la definición en Python de
-    QUÉ se mide (dato, no código, Principio IV); `tests/test_ejecutor_huella_sh.py`
-    verifica que el script real mide exactamente las mismas rutas."""
+    (RUTAS_CONTROLES + el authorized_keys del administrador + el glob de
+    `/usr/local/sbin/ejecutor-*`, mismos binarios por ruta absoluta) vive, ESTÁTICA, en
+    `ops/ejecutor/ejecutor-huella` -- el comando forzado de la llave PROPIA del
+    servicio. Esta función sigue acá como la definición en Python de QUÉ se mide (dato,
+    no código, Principio IV); `tests/test_ejecutor_huella_sh.py` verifica -- comparando
+    SALIDAS sobre el mismo árbol de prueba, ronda 2 MAJOR-7, no sólo listas de rutas --
+    que el script real mide exactamente lo mismo.
+
+    Ronda 2 (LÍMITE 9): ya NO tiene firma vacía -- `admin_usuario` hace falta para
+    `ruta_authorized_keys_admin`. `test_comando_huella_no_pide_una_cuenta` (ronda 6)
+    queda retirado a propósito: la premisa que probaba ("no depende de ninguna
+    cuenta") dejó de ser cierta el día que la huella tuvo que empezar a vigilar SU
+    PROPIA llave de acceso, que vive en el `authorized_keys` de una cuenta concreta."""
     tramos = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
+    tramos.append(_tramo_ruta(ruta_authorized_keys_admin(admin_usuario)))
     tramos.append(_tramo_sbin_ejecutor())
     return f'({" ; ".join(tramos)}) | {_SORT}'
 
@@ -186,13 +215,64 @@ def argv_huella_servicio(h, *, llave: Path, known_hosts: Path, admin_usuario: st
     `JAX_EJECUTOR_ADMIN_USUARIO`, `fruiz`) -- lo que cambia es la CREDENCIAL, no de qué
     cuenta es huésped: el comando forzado del lado remoto es lo que acota qué puede
     hacer esa llave. `UserKnownHostsFile` dedicado (`known_hosts`): `jaxsvc` no comparte
-    el `$HOME/.ssh/known_hosts` de `fruiz` ni de `axioma`. El comando remoto que se
-    manda (`"ejecutor-huella"`) es cosmético -- el `command=` forzado en la remota lo
-    reemplaza siempre -- pero deja algo legible en el log de sshd sobre qué se pidió."""
-    return ["ssh", "-i", str(llave), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+    el `$HOME/.ssh/known_hosts` de `fruiz` ni de `axioma`. `-F /dev/null` (ronda 2,
+    MINOR): ignora CUALQUIER `~/.ssh/config`/`/etc/ssh/ssh_config` del proceso que
+    invoca -- sin esto, un `Host` con `ProxyJump`/`IdentityFile`/`User` para ese mismo
+    nombre o IP (heredado, a mano, o por accidente) podría pisar `-i`/`IdentitiesOnly`
+    en silencio; con `-F /dev/null` sólo cuentan las opciones que este comando pasa
+    explícitamente. El comando remoto que se manda (`"ejecutor-huella"`) es cosmético --
+    el `command=` forzado en la remota lo reemplaza siempre -- pero deja algo legible en
+    el log de sshd sobre qué se pidió."""
+    return ["ssh", "-F", "/dev/null", "-i", str(llave), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
             "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
             "-o", f"ConnectTimeout={int(tope_s)}", "-p", str(h.puerto), f"{admin_usuario}@{h.ip}",
             "ejecutor-huella"]
+
+
+# --- BLOCK-2/MAJOR-3 (ronda 2): la línea de authorized_keys del ADMINISTRADOR remoto, --
+# generada por PYTHON y TESTEABLE -- antes la armaba `instalar_huella_en_maquina.sh` en
+# una variable de bash sin ningún test. `actualizar_authorized_keys_admin` CONVERGE: si
+# ya hay una línea marcada (`MARCA_HUELLA_SERVICIO`), la REEMPLAZA -- por ejemplo si
+# `origen_ip` cambió porque hall9000 cambió de IP -- nunca la duplica ni dos entradas
+# compiten por el mismo comando forzado.
+
+MARCA_HUELLA_SERVICIO = "ejecutor-huella-servicio"
+#: MAJOR-5 (ronda 2): el sudoers acotado en la remota exige EXACTAMENTE este comando
+#: SIN argumentos -- `ejecutor-huella ""` en el sudoers.d, no sólo `ejecutor-huella` a
+#: secas. Verificado empíricamente (no supuesto, Principio I) en un contenedor Ubuntu
+#: 24.04 limpio, sudo 1.9.17p2, 2026-09-22: una regla NOPASSWD sin argumentos en el
+#: sudoers ACEPTA cualquier argumento (`sudo -n cmd hostil` → rc=0); sólo agregando la
+#: cadena vacía (`cmd ""`) sudo exige que la invocación NO tenga argumentos (`sudo -n
+#: cmd hostil` → rechazado, pide contraseña). Sin la comilla vacía, "sin argumentos: no
+#: hay superficie de ataque" habría sido una afirmación falsa sobre el propio sudoers.
+_COMANDO_FORZADO_HUELLA = "sudo -n /usr/local/sbin/ejecutor-huella"
+
+
+def linea_authorized_keys_servicio(tipo: str, clave: str, *, origen_ip: str) -> str:
+    """La línea que `instalar_huella_en_maquina.sh` agrega al `authorized_keys` del
+    administrador remoto -- `command=` forzado, `restrict` (sin pty/reenvíos/agente/
+    variables de entorno del cliente) y `from=` acotado al origen (hall9000). BLOCK-2:
+    si falta `command=`, `restrict` o `from=`, esto ya no protege nada -- por eso hay
+    tests que exigen los tres literalmente presentes y un mutante que los borra."""
+    if not tipo or not clave or "'" in clave or '"' in clave or " " in clave:
+        raise ValueError("llave_invalida")
+    if not origen_ip or '"' in origen_ip:
+        raise ValueError("origen_ip_invalido")
+    return f'command="{_COMANDO_FORZADO_HUELLA}",restrict,from="{origen_ip}" {tipo} {clave} {MARCA_HUELLA_SERVICIO}'
+
+
+def actualizar_authorized_keys_admin(actuales: str, *, tipo: str, clave: str, origen_ip: str) -> str:
+    """MAJOR-3: converge de verdad. Si ya hay una línea marcada
+    `MARCA_HUELLA_SERVICIO` en `actuales`, la QUITA y pone la nueva (con el `origen_ip`
+    -- o `tipo`/`clave`, si algún día rota -- actual) al final; si no hay ninguna, la
+    agrega. El resto del archivo (otras llaves del administrador, líneas propias)
+    queda intacto y en el mismo orden. Correr esto dos veces con los MISMOS argumentos
+    da el MISMO resultado (idempotente); con un `origen_ip` distinto, REEMPLAZA la
+    línea vieja en vez de duplicarla (convergente)."""
+    nueva = linea_authorized_keys_servicio(tipo, clave, origen_ip=origen_ip)
+    lineas = [l for l in actuales.splitlines() if not l.rstrip().endswith(f" {MARCA_HUELLA_SERVICIO}")]
+    lineas.append(nueva)
+    return "\n".join(lineas) + "\n"
 
 
 @dataclass(frozen=True)
@@ -205,12 +285,31 @@ def huella_desde_salida(host: str, salida: bytes) -> Huella:
     return Huella(host, salida.decode(errors="replace"))
 
 
+#: MAJOR-6 (ronda 2): 64 hex + dos espacios -- exactamente lo que imprime `sha256sum`.
+_LINEA_CON_HASH = re.compile(r"^[0-9a-f]{64}  ")
+
+
 def huella_valida(h: Huella) -> bool:
     """MINOR (ronda 6): una huella vacía (o que no trae ni una línea reconocible) no
     es "sin cambios" ni "máquina limpia" -- es que la medición no sirvió (comando mal
     formado, sudo denegado sin que rc lo reflejara, binarios ausentes). Fail-closed:
-    quien llama trata esto como no-medible, no como "todo en orden"."""
-    return bool(h.texto.strip())
+    quien llama trata esto como no-medible, no como "todo en orden".
+
+    MAJOR-6 (ronda 2, auditoría adversarial 2026-09-22): "no vacía" NO ALCANZABA. Si
+    `sha256sum` faltara en la remota (o cualquier binario que la huella use para medir
+    CONTENIDO), `find <ruta> -xtype f -exec sha256sum {} + 2>/dev/null` falla en
+    silencio -- pero los OTROS dos `find` del mismo tramo (`-type l -printf`, `-type d
+    -printf`) no dependen de `sha256sum` y SIGUEN produciendo líneas `L `/`D `. El
+    texto quedaba "no vacío" con sólo listados de directorios/symlinks y CERO hashes
+    de archivo -- ciego a todo cambio de CONTENIDO, e igual `huella_valida() is True`.
+    Ahora exige al menos UNA línea con forma de hash sha256 real. En cualquier
+    despliegue sano esto siempre existe (mínimo, el propio `ejecutor-huella` instalado
+    se hashea a sí mismo vía el glob de `/usr/local/sbin/ejecutor-*`) -- su ausencia es
+    la señal de que la medición no sirvió, no de que "no hay archivos que mirar"."""
+    texto = h.texto.strip()
+    if not texto:
+        return False
+    return any(_LINEA_CON_HASH.match(linea) for linea in texto.splitlines())
 
 
 def cambio(antes: Huella, despues: Huella) -> bool:

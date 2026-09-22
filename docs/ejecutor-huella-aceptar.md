@@ -5,10 +5,12 @@
 La huella del Ejecutor (`jax/ejecutor/contratos/huella.py`) mide, en cada máquina con
 sudo, los controles propios del Ejecutor -- `/etc/sudoers`, `sudoers.d/*`,
 `/etc/ssh/sshd_config`, `sshd_config.d/*`, `/etc/ssh/authorized_keys.d/*`,
-`/root/.ssh/authorized_keys` y los binarios `/usr/local/sbin/ejecutor-*`. Nada de eso
-debe cambiar NUNCA durante una misión. Si cambia, la huella pone la pausa del Ejecutor
-y la marca de esa máquina/misión queda en estado `reportada`, con el diff de lo que
-cambió guardado.
+`/root/.ssh/authorized_keys`, el `authorized_keys` del administrador (LÍMITE 9, ronda 2:
+donde vive el acceso privilegiado real, y donde el arreglo de jax#260 puso la llave
+propia del servicio -- no medirlo dejaría ese mismo cambio invisible a la huella) y los
+binarios `/usr/local/sbin/ejecutor-*`. Nada de eso debe cambiar NUNCA durante una
+misión. Si cambia, la huella pone la pausa del Ejecutor y la marca de esa
+máquina/misión queda en estado `reportada`, con el diff de lo que cambió guardado.
 
 Una marca `reportada` **bloquea cualquier misión nueva en esa máquina** hasta que
 alguien la acepte explícitamente -- a propósito: no se re-mide sola ni se destraba con
@@ -31,7 +33,16 @@ Desde hall9000, como `jaxsvc` -- **NO** como `fruiz` a secas, y **NO** como `roo
 y el árbol de misiones (`JAX_EJECUTOR_MISIONES`) son de `jaxsvc`; `fruiz` sólo tiene
 `r--`/`r-x` sobre ellos por ACL (verificado en producción, `getfacl`, 2026-09-22) --
 NO puede escribir ahí. `sudo python -m ...` tampoco sirve: escribiría como `root`, con
-un dueño distinto al resto del árbol. El comando exacto:
+un dueño distinto al resto del árbol.
+
+**Desde el arreglo del bug de producción (jax#260, ronda 2, 2026-09-22):** esta CLI
+también toma una huella nueva de la máquina (a menos que se use `--sin-medir`) -- y para
+eso necesita, además, `JAX_EJECUTOR_HUELLA_LLAVE` y `JAX_EJECUTOR_HUELLA_KNOWN_HOSTS` (la
+llave PROPIA del servicio, no la personal de `fruiz` -- ver
+`jax/ejecutor/contratos/huella.py::argv_huella_servicio` y
+`docs/ejecutor-huella-despliegue.md`). Las dos se exigen SIEMPRE, aunque la corrida use
+`--sin-medir`: mismo criterio que ya regía para `JAX_EJECUTOR_POLITICA`/
+`JAX_EJECUTOR_ADMIN_USUARIO`. El comando exacto:
 
 ```bash
 set -a; . <(sudo -n cat /etc/jax/.env); set +a
@@ -39,6 +50,8 @@ sudo -u jaxsvc PYTHONPATH=.:las_manos JAX_EJECUTOR_MISIONES="$JAX_EJECUTOR_MISIO
   JAX_EJECUTOR_ADMIN_USUARIO="$JAX_EJECUTOR_ADMIN_USUARIO" JAX_EJECUTOR_REGISTRO="$JAX_EJECUTOR_REGISTRO" \
   JAX_EJECUTOR_POLITICA="$JAX_EJECUTOR_POLITICA" JAX_EJECUTOR_PAUSA="$JAX_EJECUTOR_PAUSA" \
   JAX_EJECUTOR_CUENTA="$JAX_EJECUTOR_CUENTA" \
+  JAX_EJECUTOR_HUELLA_LLAVE="$JAX_EJECUTOR_HUELLA_LLAVE" \
+  JAX_EJECUTOR_HUELLA_KNOWN_HOSTS="$JAX_EJECUTOR_HUELLA_KNOWN_HOSTS" \
   python3 -m jax.ejecutor.contratos.huella aceptar \
   --host <nombre-de-la-maquina> --mision <mision_id>
 ```

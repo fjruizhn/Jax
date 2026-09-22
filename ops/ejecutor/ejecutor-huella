@@ -16,25 +16,38 @@
 #     <tipo> <clave> ejecutor-huella-servicio
 #
 # `restrict` bloquea pty/reenvíos/agente/variables de entorno del cliente; `from=` acota
-# el origen; el `sudo -n` del comando forzado (con una regla de sudoers ACOTADA, sin
-# `ALL`, que sólo permite exactamente este binario sin argumentos -- ver
-# instalar_huella_en_maquina.sh) es lo que le da acceso de lectura a /etc/sudoers y
-# /root/.ssh/authorized_keys, que el administrador sin sudo -n no podría leer.
+# el origen; el `sudo -n` del comando forzado -- con una regla de sudoers ACOTADA, sin
+# `ALL`, `... /usr/local/sbin/ejecutor-huella ""` (ronda 2, MAJOR-5: la cadena vacía NO
+# es decorativa -- sin ella sudo acepta CUALQUIER argumento pese a que el binario no los
+# lea; verificado en un contenedor limpio, ver huella.py) -- es lo que le da acceso de
+# lectura a /etc/sudoers y /root/.ssh/authorized_keys, que el administrador sin sudo -n
+# no podría leer.
 #
-# SIN PARÁMETROS: no hay superficie de ataque -- lo que mide es fijo, nunca lo que
-# alguien mande por ssh (y de todos modos `restrict` + el sudoers acotado a "sin
-# argumentos" lo impedirían).
+# SIN PARÁMETROS DE POSICIÓN (argv): no hay superficie de ataque por ahí, y de todos
+# modos `restrict` + el sudoers acotado a "sin argumentos" (arriba) lo impedirían aunque
+# los hubiera. ADMIN_USUARIO (abajo) es una CONSTANTE declarada acá, no un argumento ni
+# una variable de entorno heredada del cliente ssh (sshd no reenvía el entorno del
+# cliente salvo AcceptEnv, que este inventario no habilita a propósito -- sería abrir
+# una superficie nueva). Si el administrador cambiara, se edita ACÁ y se reinstala con
+# ops/ejecutor/instalar_huella_en_maquina.sh -- igual que ADMIN_USUARIO en el resto de
+# los guiones de ops/ejecutor.
 #
-# MISMAS rutas y MISMA forma que `jax.ejecutor.contratos.huella.comando_huella()`
-# (RUTAS_CONTROLES + el glob de /usr/local/sbin/ejecutor-*, mismo orden, mismo formato
-# de salida) -- tests/test_ejecutor_huella_sh.py los mantiene sincronizados. Binarios por
-# RUTA ABSOLUTA (sin depender de `secure_path`: un root remoto también podría reemplazar
-# `sha256sum` en el PATH -- esto prueba "el Ejecutor no lo hizo por accidente", no "un
-# root de la máquina es incapaz de mentir", mismo límite documentado en huella.py).
+# MISMA lógica que `jax.ejecutor.contratos.huella.comando_huella()` (RUTAS_CONTROLES +
+# el authorized_keys del administrador + el glob de /usr/local/sbin/ejecutor-*, mismo
+# orden, mismo formato de salida) -- tests/test_ejecutor_huella_sh.py compara las
+# SALIDAS de los dos sobre el mismo árbol de prueba (ronda 2, MAJOR-7), no sólo listas
+# de rutas. Binarios por RUTA ABSOLUTA (sin depender de `secure_path`: un root remoto
+# también podría reemplazar `sha256sum` en el PATH -- esto prueba "el Ejecutor no lo
+# hizo por accidente", no "un root de la máquina es incapaz de mentir", mismo límite
+# documentado en huella.py). `LC_ALL=C` (ronda 2, MINOR): el `sort` final y el `find
+# -printf` no dependen del locale de la sesión ssh -- dos huellas del MISMO estado
+# tienen que comparar textualmente IGUAL sin importar qué locale traía la conexión.
 set -u
+export LC_ALL=C
 FIND=/usr/bin/find
 SHA256SUM=/usr/bin/sha256sum
 SORT=/usr/bin/sort
+ADMIN_USUARIO=fruiz
 
 tramo() {
   "$FIND" "$1" -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
@@ -49,6 +62,7 @@ tramo() {
   tramo /etc/ssh/sshd_config.d
   tramo /etc/ssh/authorized_keys.d
   tramo /root/.ssh/authorized_keys
+  tramo "/home/$ADMIN_USUARIO/.ssh/authorized_keys"
   "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -xtype f -exec "$SHA256SUM" {} + 2>/dev/null
   "$FIND" /usr/local/sbin -maxdepth 1 -name 'ejecutor-*' -type l -printf "L %p -> %l\n" 2>/dev/null
 } | "$SORT"

@@ -67,22 +67,40 @@ done < "$ETAPA/kh-entradas"
 # 3. El script en la remota.
 sube "$REPO/ops/ejecutor/ejecutor-huella" /usr/local/sbin/ejecutor-huella 0755
 
-# 4. sudoers.d ACOTADO -- exactamente este binario, SIN argumentos, nunca ALL.
-printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/ejecutor-huella\n' "$ADMIN_LOCAL" > "$ETAPA/sudoers-huella"
+# 4. sudoers.d ACOTADO -- exactamente este binario, SIN argumentos, nunca ALL. MAJOR-5
+#    (ronda 2, auditoría adversarial 2026-09-22): la cadena vacía `""` NO es decorativa
+#    -- verificado en un contenedor Ubuntu 24.04 limpio (sudo 1.9.17p2, 2026-09-22) que
+#    SIN ella sudo acepta CUALQUIER argumento («sudo -n cmd hostil» → rc=0) aunque el
+#    binario no los use; sólo con `cmd ""` sudo exige que la invocación no tenga
+#    argumentos. Sin esto, "sin argumentos: no hay superficie de ataque" sería una
+#    afirmación falsa sobre el propio sudoers -- ver huella.py, _COMANDO_FORZADO_HUELLA.
+printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/ejecutor-huella ""\n' "$ADMIN_LOCAL" > "$ETAPA/sudoers-huella"
 sube "$ETAPA/sudoers-huella" /tmp/ejecutor-sudoers-huella-prueba 0440
 corre "visudo -cf /tmp/ejecutor-sudoers-huella-prueba && install -o root -g root -m 0440 /tmp/ejecutor-sudoers-huella-prueba /etc/sudoers.d/50-ejecutor-huella && rm /tmp/ejecutor-sudoers-huella-prueba && visudo -c >/dev/null"
 
-# 5. authorized_keys del ADMINISTRADOR en la remota: la línea con comando forzado,
-#    restrict y from= -- idempotente por la CLAVE pública (no por la línea entera: from=
-#    puede cambiar si hall9000 cambia de IP, y eso no debe duplicar la entrada).
-LINEA_AUTH="command=\"sudo -n /usr/local/sbin/ejecutor-huella\",restrict,from=\"$JAX_EJECUTOR_HUELLA_ORIGEN_IP\" $TIPO $CLAVE ejecutor-huella-servicio"
-corre "install -d -m 0700 ~$ADMIN_LOCAL/.ssh && touch ~$ADMIN_LOCAL/.ssh/authorized_keys && chmod 0600 ~$ADMIN_LOCAL/.ssh/authorized_keys"
-if corre "grep -qF $(printf %q "$CLAVE") ~$ADMIN_LOCAL/.ssh/authorized_keys"; then
-  echo "codigo=llave_huella_ya_autorizada host=\"$NOMBRE\""
+# 5. authorized_keys del ADMINISTRADOR en la remota -- BLOCK-2/MAJOR-3 (ronda 2): la
+#    línea la arma `huella.linea_authorized_keys_servicio` (Python, TESTEADO, no bash
+#    suelto), y `huella.actualizar_authorized_keys_admin` CONVERGE: si ya hay una marca
+#    `ejecutor-huella-servicio`, la REEMPLAZA (por ejemplo si `origen_ip` cambió) --
+#    nunca la duplica. MINOR (ronda 2): `install -o/-g "$ADMIN_LOCAL"` en el directorio
+#    Y el archivo -- antes, si `~$ADMIN_LOCAL/.ssh` no existía, `corre` (que ejecuta como
+#    ROOT vía sudo -n) lo creaba dueño ROOT, dejando al administrador sin poder tocar su
+#    propio `authorized_keys` nunca más.
+corre "install -d -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0700 ~$ADMIN_LOCAL/.ssh"
+ACTUALES="$(corre "cat ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null" || true)"
+printf '%s' "$ACTUALES" > "$ETAPA/actuales"
+( cd "$REPO" && PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import sys
+from jax.ejecutor.contratos.huella import actualizar_authorized_keys_admin
+actuales = open(sys.argv[1], encoding="utf-8").read()
+sys.stdout.write(actualizar_authorized_keys_admin(
+    actuales, tipo=sys.argv[2], clave=sys.argv[3], origen_ip=sys.argv[4]))
+' "$ETAPA/actuales" "$TIPO" "$CLAVE" "$JAX_EJECUTOR_HUELLA_ORIGEN_IP" ) > "$ETAPA/nuevas"
+if corre "cat ~$ADMIN_LOCAL/.ssh/authorized_keys 2>/dev/null" | cmp -s - "$ETAPA/nuevas"; then
+  echo "codigo=llave_huella_ya_convergida host=\"$NOMBRE\""
 else
-  echo "$LINEA_AUTH" > "$ETAPA/linea-auth"
-  sube "$ETAPA/linea-auth" /tmp/ejecutor-linea-huella 0600
-  corre "cat /tmp/ejecutor-linea-huella >> ~$ADMIN_LOCAL/.ssh/authorized_keys && rm -f /tmp/ejecutor-linea-huella"
+  sube "$ETAPA/nuevas" /tmp/ejecutor-authorized-huella 0600
+  corre "install -o $ADMIN_LOCAL -g $ADMIN_LOCAL -m 0600 /tmp/ejecutor-authorized-huella ~$ADMIN_LOCAL/.ssh/authorized_keys && rm -f /tmp/ejecutor-authorized-huella"
 fi
 
 echo "maquina_huella_instalada=\"$NOMBRE\" script_sha256=\"$(corre "sha256sum /usr/local/sbin/ejecutor-huella" | cut -d' ' -f1)\""

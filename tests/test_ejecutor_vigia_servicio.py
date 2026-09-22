@@ -202,10 +202,14 @@ async def _vigilar_noop(cfg, auditar, fin):
 MISION_ID = "11111111-1111-1111-1111-111111111111"
 OTRA_MISION_ID = "22222222-2222-2222-2222-222222222222"
 
+# Formas de hash REALES (MAJOR-6, ronda 2: huella_valida() exige 64 hex) -- no "abc"/"def".
+_HASH_A = "a" * 64
+_HASH_B = "b" * 64
+
 
 def _h(host, controles=None):
     from jax.ejecutor.contratos import huella as H
-    return H.huella_desde_salida(host, b"abc  /etc/sudoers\n" if controles is None else controles)
+    return H.huella_desde_salida(host, f"{_HASH_A}  /etc/sudoers\n".encode() if controles is None else controles)
 
 
 def test_sin_tomar_huella_no_se_toma_ninguna(tmp_path):
@@ -254,7 +258,7 @@ def test_huella_cambiada_pone_la_pausa(tmp_path):
     """Ronda 6: sin declarado -- cualquier cambio pausa, sin importar el texto de la
     misión."""
     antes = _h("atemai")
-    despues = _h("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
+    despues = _h("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
     tomar_huella = _tomador_secuencia({"atemai": [antes, despues]})
     ctx = _ctx(tmp_path)
 
@@ -334,7 +338,7 @@ def test_turno_n_mas_1_no_blanquea_un_cambio_del_turno_n(tmp_path):
     MISMA apertura."""
     misiones = tmp_path / "misiones"
     original = _h("atemai")
-    cambiado_sin_declarar = _h("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
+    cambiado_sin_declarar = _h("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
 
     # Turno 1: abre limpio, cierra limpio (nadie detecta nada -- el cambio pasa DESPUÉS).
     t1 = _tomador_secuencia({"atemai": [original, _h("atemai")]})
@@ -401,7 +405,7 @@ def test_huerfana_abierta_con_cambio_no_deja_abrir_y_queda_reportada(tmp_path):
     huella_vieja = _h("atemai")
     H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
 
-    huella_cambiada = _h("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
+    huella_cambiada = _h("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
     llamadas = {"n": 0}
 
     async def tomar(host):
@@ -653,9 +657,11 @@ def test_el_mutante_sin_chequeo_de_rc_muere(monkeypatch):
         # SIN el "if proc.returncode != 0: raise" -- el mutante.
         return modulo.huella.huella_desde_salida(host, salida)
 
+    _HASH = "a" * 64  # forma de hash real (MAJOR-6, ronda 2): huella_valida() exige 64 hex
+
     async def escenario():
         return await version_mutada(
-            ["x"], "atemai", tope_s=5, correr=_correr_falso(1, stdout=b"abc  /etc/sudoers\n"))
+            ["x"], "atemai", tope_s=5, correr=_correr_falso(1, stdout=f"{_HASH}  /etc/sudoers\n".encode()))
     resultado = asyncio.run(escenario())
     assert modulo.huella.huella_valida(resultado) is True  # el mutante "logra" pasar -- por eso hay que matarlo
 

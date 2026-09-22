@@ -45,15 +45,24 @@ def test_no_hay_mas_nivel_persistencia():
 
 
 def test_comando_huella_menciona_las_rutas_y_el_glob_de_ejecutor():
-    cmd = H.comando_huella()
+    cmd = H.comando_huella("fruiz")
     for ruta in H.RUTAS_CONTROLES:
         assert ruta in cmd, ruta
     assert "ejecutor-*" in cmd
     assert "/usr/local/sbin" in cmd
 
 
+def test_comando_huella_menciona_el_authorized_keys_del_administrador():
+    """LÍMITE 9 (ronda 2): el authorized_keys del administrador -- donde vive el acceso
+    privilegiado real, y donde este mismo arreglo pone la llave del servicio -- entra
+    a la huella. Con OTRO admin_usuario, la ruta medida cambia con él."""
+    assert "/home/fruiz/.ssh/authorized_keys" in H.comando_huella("fruiz")
+    assert "/home/otro-admin/.ssh/authorized_keys" in H.comando_huella("otro-admin")
+    assert "/home/fruiz/.ssh/authorized_keys" not in H.comando_huella("otro-admin")
+
+
 def test_comando_huella_no_mide_passwd_group_shadow_ronda7():
-    cmd = H.comando_huella()
+    cmd = H.comando_huella("fruiz")
     for ruta in ("/etc/passwd", "/etc/group", "/etc/shadow"):
         assert ruta not in cmd, ruta
 
@@ -63,7 +72,7 @@ def test_comando_huella_usa_rutas_absolutas_no_el_path():
     antes en el PATH. El comando usa binarios por ruta absoluta -- no ata la seguridad
     del contrato a que nadie haya tocado el PATH del shell remoto. `find -printf %l` da
     el destino de un symlink sin un `readlink` aparte."""
-    cmd = H.comando_huella()
+    cmd = H.comando_huella("fruiz")
     for binario in ("/usr/bin/find", "/usr/bin/sha256sum", "/usr/bin/sort"):
         assert binario in cmd, binario
     import re
@@ -74,7 +83,7 @@ def test_comando_huella_usa_rutas_absolutas_no_el_path():
 
 
 def test_huella_no_tiene_log_de_sudo_ni_atq_ni_sudo_io():
-    cmd = H.comando_huella()
+    cmd = H.comando_huella("fruiz")
     assert "sudo-io" not in cmd
     assert "sudo-" not in cmd  # ni /var/log/sudo-<cuenta>.log
     assert "atq" not in cmd
@@ -82,12 +91,25 @@ def test_huella_no_tiene_log_de_sudo_ni_atq_ni_sudo_io():
     assert "cron" not in cmd
 
 
-def test_comando_huella_no_pide_una_cuenta():
-    """El comando ya no depende del nombre de la cuenta (B-1 se fue: no hay log de
-    sudo que mirar) -- ronda 6."""
+def test_comando_huella_ahora_pide_el_admin_usuario_ronda2():
+    """Ronda 2 (LÍMITE 9): esto REEMPLAZA a `test_comando_huella_no_pide_una_cuenta`
+    (ronda 6) -- esa premisa dejó de ser cierta el día que la huella tuvo que empezar a
+    vigilar SU PROPIA llave de acceso, que vive en el `authorized_keys` de una cuenta
+    concreta (`ruta_authorized_keys_admin`). Sin `admin_usuario`, `comando_huella()` no
+    sabría qué ruta agregar."""
     import inspect
     firma = inspect.signature(H.comando_huella)
-    assert list(firma.parameters) == []
+    assert list(firma.parameters) == ["admin_usuario"]
+    with pytest.raises(TypeError):
+        H.comando_huella()
+
+
+def test_ruta_authorized_keys_admin_valida_el_nombre():
+    assert H.ruta_authorized_keys_admin("fruiz") == "/home/fruiz/.ssh/authorized_keys"
+    with pytest.raises(ValueError):
+        H.ruta_authorized_keys_admin("../etc")
+    with pytest.raises(ValueError):
+        H.ruta_authorized_keys_admin("")
 
 
 # --- estado, comparación: cualquier cambio es hallazgo, sin declarado -------------------
@@ -151,8 +173,27 @@ def test_huella_vacia_no_es_valida():
     assert H.huella_valida(H.huella_desde_salida("atemai", b"")) is False
 
 
-def test_huella_con_contenido_es_valida():
-    assert H.huella_valida(H.huella_desde_salida("atemai", b"abc  /etc/sudoers\n")) is True
+def test_huella_con_un_hash_real_es_valida():
+    hash64 = "a" * 64
+    salida = f"{hash64}  /etc/sudoers\n".encode()
+    assert H.huella_valida(H.huella_desde_salida("atemai", salida)) is True
+
+
+def test_huella_solo_con_lineas_d_o_l_no_es_valida_ronda2_major6():
+    """MAJOR-6 (ronda 2, auditoría adversarial 2026-09-22): si `sha256sum` faltara en
+    la remota, `find -exec sha256sum` falla en silencio pero los OTROS `find` del
+    mismo tramo (listado de directorios/symlinks) NO dependen de `sha256sum` y siguen
+    produciendo líneas -- "no vacía" no bastaba. Sin NINGÚN hash real, es lo mismo que
+    no medible."""
+    salida = b"D /etc/sudoers.d\nD /etc/ssh/sshd_config.d\nL /algo -> /otro\n"
+    assert H.huella_valida(H.huella_desde_salida("atemai", salida)) is False
+
+
+def test_huella_con_hash_de_menos_de_64_no_es_valida():
+    """Un hash truncado/corrupto (por ejemplo `sha256sum` reemplazado por algo que no
+    calcula sha256 de verdad) tampoco cuenta como medición real."""
+    salida = b"abc123  /etc/sudoers\n"
+    assert H.huella_valida(H.huella_desde_salida("atemai", salida)) is False
 
 
 # --- M-1, ronda 7: estados de la marca (abierta / reportada / cerrada) -----------------
@@ -401,6 +442,9 @@ def test_argv_huella_servicio_usa_la_llave_del_servicio_con_identities_only():
     assert any(o == "UserKnownHostsFile=/etc/jax/controlador/known_hosts_huella" for o in argv)
     assert "fruiz@172.16.20.11" in argv
     assert "-p" in argv and argv[argv.index("-p") + 1] == "58291"
+    # MINOR (ronda 2): -F /dev/null -- ningún ssh_config del proceso invocante puede
+    # pisar -i/IdentitiesOnly en silencio.
+    assert "-F" in argv and argv[argv.index("-F") + 1] == "/dev/null"
 
 
 def test_argv_huella_servicio_no_toma_parametros_extra_de_texto_de_mision():
@@ -543,3 +587,78 @@ def test_correr_huella_por_ssh_con_el_camino_del_servicio_permission_denied_revi
 
     with pytest.raises(RuntimeError, match="huella_rc_255"):
         asyncio.run(escenario())
+
+
+# --- BLOCK-2/MAJOR-3 (ronda 2, auditoría adversarial 2026-09-22): la línea de
+# authorized_keys del administrador remoto -- generada por PYTHON, testeable, y
+# CONVERGENTE (si ya hay una marcada, la reemplaza en vez de duplicarla). ----------------
+
+_TIPO = "ssh-ed25519"
+_CLAVE = "AAAAC3NzaC1lZDI1NTE5AAAAIGVzdG8tZXMtdW5hLWNsYXZlLWRlLXBydWViYQ"
+
+
+def test_linea_authorized_keys_servicio_trae_command_restrict_y_from():
+    linea = H.linea_authorized_keys_servicio(_TIPO, _CLAVE, origen_ip="172.16.20.5")
+    assert 'command="sudo -n /usr/local/sbin/ejecutor-huella"' in linea
+    assert ",restrict," in linea
+    assert 'from="172.16.20.5"' in linea
+    assert linea.endswith(f"{_TIPO} {_CLAVE} {H.MARCA_HUELLA_SERVICIO}")
+
+
+def test_linea_authorized_keys_servicio_rechaza_llave_o_ip_con_comillas():
+    with pytest.raises(ValueError):
+        H.linea_authorized_keys_servicio(_TIPO, 'clave"con-comillas', origen_ip="1.2.3.4")
+    with pytest.raises(ValueError):
+        H.linea_authorized_keys_servicio(_TIPO, _CLAVE, origen_ip='1.2.3.4"; rm -rf /')
+
+
+def test_el_mutante_que_borra_command_restrict_muere():
+    """BLOCK-2, el mutante que pide matar: una línea SIN `command=...,restrict,` sería
+    una llave de acceso COMPLETO (shell interactiva) en vez de una atada a un único
+    comando -- justo lo que este arreglo existe para evitar. Se reconstruye la versión
+    mutada y se confirma que el chequeo real de arriba no la habría dejado pasar."""
+    def mutado_sin_command_restrict(tipo, clave, *, origen_ip):
+        return f'from="{origen_ip}" {tipo} {clave} {H.MARCA_HUELLA_SERVICIO}'
+
+    linea_real = H.linea_authorized_keys_servicio(_TIPO, _CLAVE, origen_ip="172.16.20.5")
+    linea_mutada = mutado_sin_command_restrict(_TIPO, _CLAVE, origen_ip="172.16.20.5")
+    assert 'command="sudo -n /usr/local/sbin/ejecutor-huella",restrict,' in linea_real
+    assert 'command="sudo -n /usr/local/sbin/ejecutor-huella",restrict,' not in linea_mutada  # el mutante "pasaría"
+
+
+def test_actualizar_authorized_keys_admin_agrega_si_no_hay_marca():
+    actuales = "ssh-ed25519 AAAAotra otra-llave-del-administrador\n"
+    salida = H.actualizar_authorized_keys_admin(actuales, tipo=_TIPO, clave=_CLAVE, origen_ip="172.16.20.5")
+    assert "otra-llave-del-administrador" in salida  # el resto del archivo queda intacto
+    assert salida.count(H.MARCA_HUELLA_SERVICIO) == 1
+    assert 'from="172.16.20.5"' in salida
+
+
+def test_actualizar_authorized_keys_admin_es_idempotente():
+    actuales = "ssh-ed25519 AAAAotra otra-llave\n"
+    primera = H.actualizar_authorized_keys_admin(actuales, tipo=_TIPO, clave=_CLAVE, origen_ip="172.16.20.5")
+    segunda = H.actualizar_authorized_keys_admin(primera, tipo=_TIPO, clave=_CLAVE, origen_ip="172.16.20.5")
+    assert primera == segunda
+    assert segunda.count(H.MARCA_HUELLA_SERVICIO) == 1
+
+
+def test_actualizar_authorized_keys_admin_converge_major3():
+    """MAJOR-3: si `origen_ip` cambió (por ejemplo, hall9000 cambió de IP), la
+    re-corrida REEMPLAZA la línea vieja -- nunca queda una segunda entrada compitiendo
+    por el mismo comando forzado."""
+    actuales = "ssh-ed25519 AAAAotra otra-llave\n"
+    con_ip_vieja = H.actualizar_authorized_keys_admin(actuales, tipo=_TIPO, clave=_CLAVE, origen_ip="172.16.20.5")
+    con_ip_nueva = H.actualizar_authorized_keys_admin(con_ip_vieja, tipo=_TIPO, clave=_CLAVE, origen_ip="172.16.20.99")
+
+    assert con_ip_nueva.count(H.MARCA_HUELLA_SERVICIO) == 1  # UNA sola entrada, no dos
+    assert 'from="172.16.20.5"' not in con_ip_nueva  # la vieja se fue
+    assert 'from="172.16.20.99"' in con_ip_nueva  # quedó la nueva
+    assert "otra-llave" in con_ip_nueva  # las demás líneas del administrador, intactas
+
+
+def test_actualizar_authorized_keys_admin_no_toca_otras_llaves_del_administrador():
+    actuales = "ssh-ed25519 AAAA1 llave-personal-1\nssh-rsa AAAA2 llave-personal-2\n"
+    salida = H.actualizar_authorized_keys_admin(actuales, tipo=_TIPO, clave=_CLAVE, origen_ip="172.16.20.5")
+    assert "llave-personal-1" in salida
+    assert "llave-personal-2" in salida
+    assert salida.count("\n") == 3  # 2 líneas originales + 1 nueva

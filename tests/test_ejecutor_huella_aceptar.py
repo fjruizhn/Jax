@@ -16,9 +16,13 @@ from jax.ejecutor.contratos import vigia_servicio as S
 
 MISION_ID = "55555555-5555-5555-5555-555555555555"
 
+# Formas de hash REALES (MAJOR-6, ronda 2: huella_valida() exige 64 hex) -- no "abc"/"def".
+_HASH_A = "a" * 64
+_HASH_B = "b" * 64
+
 
 def _huella(host, controles=None):
-    return H.huella_desde_salida(host, b"abc  /etc/sudoers\n" if controles is None else controles)
+    return H.huella_desde_salida(host, f"{_HASH_A}  /etc/sudoers\n".encode() if controles is None else controles)
 
 
 def test_aceptar_muestra_el_diff_toma_linea_base_nueva_y_registra(tmp_path):
@@ -28,7 +32,7 @@ def test_aceptar_muestra_el_diff_toma_linea_base_nueva_y_registra(tmp_path):
     diff = ("def  /root/.ssh/authorized_keys",)
     H.escribir_marca(ruta, H.Marca(huella=_huella("atemai"), estado=H.REPORTADA, diff=diff))
 
-    nueva = _huella("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
+    nueva = _huella("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
     llamadas = []
 
     async def tomar_falso(host):
@@ -129,7 +133,7 @@ def test_escenario_completo_turno_1_cambia_un_control_pausa_acepta_turno_2_abre(
     pausa_ruta = tmp_path / "PAUSA"
 
     original = _huella("atemai")
-    cambiada = _huella("atemai", controles=b"abc  /etc/sudoers\ndef  /root/.ssh/authorized_keys\n")
+    cambiada = _huella("atemai", controles=f"{_HASH_A}  /etc/sudoers\n{_HASH_B}  /root/.ssh/authorized_keys\n".encode())
 
     # --- Turno 1: abre limpio, cierra con un cambio (apt install tocó un control). ---
     from jax.ejecutor.contratos.fallo import Fallo
@@ -619,7 +623,7 @@ def _tarea_aceptar_inmediata(misiones_str, mision_id, host, registro_str, pausa_
     from jax.ejecutor.contratos import huella as _H
 
     async def tomar_falso(h):
-        return _H.huella_desde_salida(h, b"abc  /etc/sudoers\n")
+        return _H.huella_desde_salida(h, f"{_HASH_A}  /etc/sudoers\n".encode())
 
     rc = asyncio.run(_H.aceptar(
         misiones=Path(misiones_str), mision_id=mision_id, host=host, aceptado_por="fruiz",
@@ -650,7 +654,7 @@ def _tarea_aceptar_con_demora_antes_del_unlink(misiones_str, mision_id, host, re
     _os.unlink = unlink_con_demora
 
     async def tomar_falso(h):
-        return _H.huella_desde_salida(h, b"abc  /etc/sudoers\n")
+        return _H.huella_desde_salida(h, f"{_HASH_A}  /etc/sudoers\n".encode())
 
     rc = asyncio.run(_H.aceptar(
         misiones=Path(misiones_str), mision_id=mision_id, host=host, aceptado_por="fruiz",
