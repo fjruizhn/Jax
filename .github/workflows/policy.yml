@@ -345,8 +345,16 @@ jobs:
           #   el pool de su loop ya existia antes de forzar MyISAM via
           #   init_command (la mutacion que lo haria pasar en falso), en vez de
           #   dar un falso verde.
-          grep -qE "^11 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 11 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 11 -> 14 el 2026-09-22 (PR#261, ronda 2 de revision, MINOR-1/MINOR-2):
+          #   NombreDePruebaTest (+3), pura y sin DB -- prueba que
+          #   `_con_nombre_de_prueba` revienta si el patron `EXISTS <tabla> (`
+          #   no aparece en el DDL (antes, `str.replace` era silencioso y
+          #   corria el DDL con el nombre REAL) y que los tres nombres de
+          #   tabla descartables llevan el sufijo de la sesion
+          #   (`_SUFIJO_DE_PRUEBA`), para que dos corridas concurrentes contra
+          #   la misma base compartida no se pisen sobre el mismo nombre.
+          grep -qE "^14 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en

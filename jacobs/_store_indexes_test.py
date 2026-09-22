@@ -51,7 +51,7 @@ from unittest import mock
 # Forzado, no setdefault: si el proceso ya sourceo /etc/jax/.env, JAX_DB_NAME
 # apunta a produccion y este test crearia indices ahi sin pasar por el camino
 # real. Mismo blindaje que _pipeline_identity_test.py.
-from base_de_test import fijar_base_de_test  # noqa: E402
+from base_de_test import VARIABLE_DEL_SUFIJO, fijar_base_de_test  # noqa: E402
 
 fijar_base_de_test()
 
@@ -151,16 +151,62 @@ class StoreIndexesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(antes, despues, "init_tables() duplico o perdio indices al repetirse")
 
 
+#: Sufijo de ESTE proceso para los nombres de tabla descartables -- MINOR-2
+#: de la ronda 2 de PR#261: los nombres eran constantes fijas, y dos
+#: corridas concurrentes contra la MISMA `jax_memory_test` (compartida --
+#: por ejemplo dentro de un job de CI que no define `JAX_TEST_DB_SUFIJO`, o
+#: dos sesiones locales que por lo que sea resuelven a la misma base) se
+#: pisarian sobre el MISMO nombre de tabla de prueba: un rojo espantoso
+#: (`Table ... already exists` a mitad de un `CREATE`, o un `DROP` de la
+#: sesion ajena) que no es un defecto del codigo bajo prueba, es una carrera
+#: de este test consigo mismo. Usa el sufijo de la SESION
+#: (`JAX_TEST_DB_SUFIJO`, ya fijado arriba por `fijar_base_de_test()` --
+#: el MISMO mecanismo que aisla la base entera por sesion, ver
+#: `base_de_test.py`) si esta puesto; si no (el caso de un job de CI, que
+#: corre en su propio contenedor MariaDB efimero y por eso no lo necesita),
+#: el PID de este proceso.
+_SUFIJO_DE_PRUEBA = os.environ.get(VARIABLE_DEL_SUFIJO) or str(os.getpid())
+
+
+def _con_nombre_de_prueba(ddl: str, tabla: str, tabla_prueba: str) -> str:
+    """Devuelve `ddl` (el texto de `store._DDL_JACOBS_*`) con `tabla`
+    renombrada a `tabla_prueba` en el header del `CREATE TABLE`. Revienta si
+    el reemplazo NO tuvo efecto -- MINOR-1 de la ronda 2 de PR#261:
+    `str.replace` es SILENCIOSO si el patron `f"EXISTS {tabla} ("` no
+    aparece (alguien reformatea el DDL con backticks alrededor del nombre,
+    o mete un salto de linea antes del parentesis). Sin este chequeo, el
+    DDL correria con el nombre REAL: contra una base vacia crearia
+    `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` de verdad, con solo
+    las columnas base del DDL (sin las de los ALTER ni los indices de
+    `_INDICES`), y la limpieza -- que solo dropea los nombres DE PRUEBA --
+    las dejaria asi para siempre."""
+    marca = f"EXISTS {tabla} ("
+    reemplazo = ddl.replace(marca, f"EXISTS {tabla_prueba} (", 1)
+    if reemplazo == ddl:
+        raise AssertionError(
+            f"el DDL de {tabla!r} no contiene {marca!r} -- el reemplazo al "
+            f"nombre de prueba ({tabla_prueba!r}) no tuvo efecto, y correr "
+            "este DDL tal cual crearia la tabla REAL. Revisar el formato de "
+            "la constante _DDL_* correspondiente en jacobs/store.py."
+        )
+    return reemplazo
+
+
 #: (tabla real, constante de DDL, nombre DESCARTABLE bajo el que se prueba).
 #: MAJOR-3 (revision 1, PR#261): antes se corria el DDL bajo el nombre REAL
 #: (con un DROP TABLE de la tabla compartida antes) -- el nombre descartable
 #: es lo que evita tocar `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` de
 #: la sesion. El DDL en si es el MISMO texto que corre `init_tables()`
 #: (`store._DDL_JACOBS_*`); solo cambia el nombre de la tabla que declara.
+#: El sufijo (`_SUFIJO_DE_PRUEBA`) es MINOR-2 de la ronda 2: sin el, dos
+#: procesos concurrentes se pisarian sobre el mismo nombre.
 _DDL_DE = (
-    ("jacobs_pipelines", "_DDL_JACOBS_PIPELINES", "jacobs_engine_probe_pipelines"),
-    ("jacobs_steps", "_DDL_JACOBS_STEPS", "jacobs_engine_probe_steps"),
-    ("jacobs_events", "_DDL_JACOBS_EVENTS", "jacobs_engine_probe_events"),
+    ("jacobs_pipelines", "_DDL_JACOBS_PIPELINES",
+     f"jacobs_engine_probe_pipelines_{_SUFIJO_DE_PRUEBA}"),
+    ("jacobs_steps", "_DDL_JACOBS_STEPS",
+     f"jacobs_engine_probe_steps_{_SUFIJO_DE_PRUEBA}"),
+    ("jacobs_events", "_DDL_JACOBS_EVENTS",
+     f"jacobs_engine_probe_events_{_SUFIJO_DE_PRUEBA}"),
 )
 
 
@@ -286,8 +332,8 @@ class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
                             "ENGINE=InnoDB pasaria igual aunque el codigo no lo diga."
                         )
                     for tabla, nombre_ddl, tabla_prueba in _DDL_DE:
-                        ddl = getattr(store, nombre_ddl).replace(
-                            f"EXISTS {tabla} (", f"EXISTS {tabla_prueba} (", 1)
+                        ddl = _con_nombre_de_prueba(
+                            getattr(store, nombre_ddl), tabla, tabla_prueba)
                         await cur.execute(f"DROP TABLE IF EXISTS {tabla_prueba}")
                         await cur.execute(ddl)
                     for tabla, _, tabla_prueba in _DDL_DE:
@@ -322,6 +368,49 @@ class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
         await store.init_tables()  # crea el pool de este loop con la cfg REAL
         with self.assertRaisesRegex(AssertionError, "la simulacion no aplico"):
             await self._crear_bajo_myisam_forzado()
+
+
+class NombreDePruebaTest(unittest.TestCase):
+    """Puras, sin DB -- prueban `_con_nombre_de_prueba` y `_DDL_DE` como
+    datos, mismo criterio que `FormaDelDDLTest` de
+    `tests/test_store_indice_duenio.py`."""
+
+    def test_revienta_si_el_patron_no_aparece(self):
+        """MINOR-1 (ronda 2, PR#261): si el DDL no tiene el header
+        `EXISTS <tabla> (` tal cual -- por ejemplo porque alguien le puso
+        backticks al nombre, o un salto de linea antes del parentesis --
+        `str.replace` no hace nada y devolveria el DDL SIN CAMBIAR. Este
+        test prueba que en cambio revienta."""
+        ddl_reformateado = (
+            "CREATE TABLE IF NOT EXISTS `jacobs_pipelines` (\n"
+            "    pipeline_id VARCHAR(36) PRIMARY KEY\n"
+            ") ENGINE=InnoDB"
+        )
+        with self.assertRaises(AssertionError):
+            _con_nombre_de_prueba(
+                ddl_reformateado, "jacobs_pipelines", "jacobs_engine_probe_pipelines_x")
+
+    def test_reemplaza_cuando_el_patron_aparece(self):
+        ddl = "CREATE TABLE IF NOT EXISTS jacobs_pipelines (\n    x INT\n) ENGINE=InnoDB"
+        nuevo = _con_nombre_de_prueba(ddl, "jacobs_pipelines", "jacobs_engine_probe_pipelines_x")
+        self.assertIn("EXISTS jacobs_engine_probe_pipelines_x (", nuevo)
+        self.assertNotIn("EXISTS jacobs_pipelines (", nuevo)
+
+    def test_los_tres_nombres_de_prueba_llevan_el_sufijo_de_esta_sesion(self):
+        """MINOR-2 (ronda 2, PR#261): si alguien vuelve a hardcodear un
+        nombre sin sufijo (regresion), esto lo detecta sin necesitar DB. La
+        limpieza (`EngineInnoDBTest._dropear_tablas_de_prueba`) itera este
+        MISMO `_DDL_DE` -- garantizar que los tres nombres llevan el sufijo
+        alcanza para garantizar que la limpieza dropea exactamente lo que
+        se creo, con el mismo sufijo, en la misma corrida."""
+        for _, _, tabla_prueba in _DDL_DE:
+            self.assertTrue(
+                tabla_prueba.endswith(_SUFIJO_DE_PRUEBA),
+                f"{tabla_prueba!r} no lleva el sufijo de esta sesion "
+                f"({_SUFIJO_DE_PRUEBA!r}) -- dos corridas concurrentes "
+                "contra la misma base compartida se pisarian sobre el "
+                "mismo nombre de tabla de prueba.",
+            )
 
 
 if __name__ == "__main__":
