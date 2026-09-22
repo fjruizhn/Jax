@@ -611,9 +611,17 @@ class TrabajoHTTPTest(unittest.TestCase):
             assert r.json()["estado"] == "cancelled"
             time.sleep(0.05)  # deja que el CancelledError se propague
 
-        assert marca == ["cancelado"], (
-            f"la tarea no se cortó de verdad (job_tasks.register() sin efecto): {marca}"
-        )
+            # La aserción va DENTRO del `with` -- al cerrar el bloque,
+            # `TestClient` apaga su loop y eso por sí solo puede cancelar
+            # cualquier tarea pendiente (incluida ésta), sin que tenga nada
+            # que ver con `job_tasks.cancel()`. Afuera del `with`, este test
+            # no distinguía "se canceló porque se lo pedí" de "se canceló
+            # porque el runner cerró el loop" -- confirmado a mano: con
+            # `job_tasks.register()` borrado, este assert acá adentro
+            # falla (`marca == []`, la tarea sigue en su `sleep(5)`).
+            assert marca == ["cancelado"], (
+                f"la tarea no se cortó de verdad (job_tasks.register() sin efecto): {marca}"
+            )
 
     # -- B-5: el done_callback de excepciones sigue wireado -----------------
     def test_B5_done_callback_registra_la_excepcion_no_capturada(self):

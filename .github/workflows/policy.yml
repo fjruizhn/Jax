@@ -3563,20 +3563,36 @@ jobs:
       # porque comparte credenciales de servicio con `auth_servicio.py`
       # (PERMISOS ganó las dos rutas nuevas para IDENTIDAD_PLATAFORMA, mismo
       # mecanismo que ya cubre /jacobs/* -- ninguna autenticación nueva).
-      # 9 tests: caso feliz (estado/extractor/tamaño/carpeta, nunca el
-      # contenido del extracto); una ruta fuera del jail se rechaza SIN
-      # llamar a ingerir() y el resto del lote sigue; un archivo que revienta
-      # ingerir() no tumba el lote (los otros dos se procesan igual); el job
-      # pasa por RUNNING antes de COMPLETED; una ruta ausente dentro del
-      # jail se rechaza sin excepción; el POST no espera al trabajo (202
-      # antes de que termine un trabajo simulado de 2s); GET a un job
-      # desconocido da 404; GET trae estado+resultados de un job ya
-      # completado; la credencial `plataforma` accede y `jacobs` no (403).
+      # 9 -> 29 (2026-09-21, ronda de arreglo tras revisión adversarial --
+      #   ver .superpowers/sdd/2026-09-20-procesamiento-archivos-nucleo/
+      #   endpoint-hallazgos.md y endpoint-report.md, 6 bloqueantes B-1..B-6).
+      #   +20 tests nuevos, uno por cada hallazgo (a veces varios por
+      #   hallazgo, para que cada mutación tenga SU test):
+      #     B-1: NUL entre rutas sanas no tumba el lote (la causa raíz vive
+      #       en las_manos/_tool_authority_test.py, +1 aparte, 26->27).
+      #     B-2: tope de rutas por pedido (422), sin capacidad (429), admite
+      #       con capacidad libre, los archivos del MISMO job se reparten
+      #       entre hilos (medido, no en un solo hilo), el semáforo se
+      #       libera tanto si el trabajo falla como si completa (2 tests).
+      #     B-3: reconcilia huérfanos al "arrancar" y no toca lo ya
+      #       terminado (2), cancelar job desconocido (404) y terminal
+      #       (409), cancelar corta la tarea EN VUELO (no sólo el registro),
+      #       la credencial jacobs no puede cancelar.
+      #     B-4: GET no bloquea el loop leyendo el resultado.
+      #     B-5: el trabajo no bloquea el loop (reescrito para medir el
+      #       RETRASO DEL LOOP, no el retorno del POST -- la versión vieja
+      #       no distinguía la mutación que saca el run_in_executor), una
+      #       excepción catastrófica marca failed (no dejar running
+      #       huérfano), el done_callback de excepciones sigue wireado.
+      #     B-6: usuario obligatorio (422 si falta), se registra como
+      #       `caller` del job.
+      #   9 + 20 = 29. Medido en local (mismo comando): 29 passed. Si el
+      #   runner da otro número, manda el runner.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^9 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 9 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^29 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 29 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
