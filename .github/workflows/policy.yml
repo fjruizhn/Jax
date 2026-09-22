@@ -1236,6 +1236,20 @@ jobs:
       # archivo es la fuente única; tests/test_requirements_completos.py falla si
       # un import de terceros no está fijado ahí o si este job deja de usarlo.
       - run: pip install -r requirements.txt pytest pytest-asyncio
+      # B-1/M-4 (ronda 3, auditoría adversarial 2026-09-22): las pruebas de bwrap REAL
+      # de tests/test_ejecutor_contratos_cuenta_axioma.py (pedido explícito del
+      # coordinador: "un test tiene que ejecutar bwrap de verdad") se saltan solas si
+      # bwrap no está -- pero un skip masivo se ve igual que verde (mismo criterio que
+      # hyde-containment, más abajo, que ya resolvió este mismo problema para su propio
+      # archivo). Mismos dos pasos que ese job: bubblewrap no viene en el runner, y en
+      # Ubuntu 23.10+ AppArmor bloquea los user namespaces sin privilegios, que es
+      # justamente lo que bwrap necesita.
+      - name: Instalar bubblewrap y habilitar user namespaces (para bwrap real)
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || \
+            echo "(sysctl ausente en este kernel -- no aplica)"
+          bwrap --version
       - run: >-
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
@@ -1263,6 +1277,7 @@ jobs:
           tests/test_ejecutor_generar_claude_md.py
           tests/test_ejecutor_contratos_contexto.py
           tests/test_ejecutor_reemplazar_directorio_atomico.py
+          tests/test_ejecutor_contratos_huella.py
           tests/test_ejecutor_cita.py
           tests/test_ejecutor_captura.py
           tests/test_ejecutor_hechos.py
@@ -1409,6 +1424,7 @@ jobs:
             tests/test_ejecutor_generar_claude_md.py \
             tests/test_ejecutor_contratos_contexto.py \
             tests/test_ejecutor_reemplazar_directorio_atomico.py \
+            tests/test_ejecutor_contratos_huella.py \
             tests/test_ejecutor_cita.py \
             tests/test_ejecutor_captura.py \
             tests/test_ejecutor_hechos.py \
@@ -3599,8 +3615,43 @@ jobs:
           #   controles positivos (un `import contexto` suelto sí se marca; una carga
           #   dinámica por la ruta completa declarada también) -- sin ellos no se sabe
           #   si el tripwire corregido sigue cazando algo o si sólo dejó de quejarse.
-          grep -qE "^2470 passed, 30 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2470 tests CORRIDOS y exactamente 30 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 14 de la constitución host-bound, ver notas arriba)."; exit 1; }
+          # 2470 -> 2506, 30 skipped sin cambio (feat/ejecutor-contexto-y-skills, ronda 3,
+          #   auditoría adversarial, 2026-09-22 -- NO-GO de la segunda auditoría sobre la
+          #   ronda 2, decisiones estructurales de Hyde). Medido de nuevo, dos veces, SIN
+          #   tocar nada fuera del worktree (regla nueva del coordinador: nunca `mv` la
+          #   constitución real de Fernando) -- esta vez con `bwrap --tmpfs
+          #   /home/fruiz/claude-skills --tmpfs /home/fruiz/ejecutor-fase0` envolviendo la
+          #   corrida entera (aísla la VISTA del proceso hijo, el host no se toca) en vez
+          #   de `mv`+restore. Las pruebas de bwrap REAL de
+          #   tests/test_ejecutor_contratos_cuenta_axioma.py (agregadas en esta ronda, ver
+          #   más abajo) invocan bwrap ELLAS MISMAS, y este runner no admite espacios de
+          #   nombres de usuario anidados -- se corrieron aparte, sin el envoltorio, una
+          #   sola vez (dan el mismo resultado con o sin la constitución real: no dependen
+          #   de ella) y se sumaron a mano al total de acá, con la aritmética completa
+          #   dejada en el propio commit para que se pueda repetir.
+          #   +36 tests-puros nuevos en total: tests/test_ejecutor_contratos_huella.py
+          #   (+15, M-1/M-2: integridad de los controles del Ejecutor por ESTADO, no por
+          #   texto de comando) y +21 en archivos que este paso YA corría --
+          #   tests/test_ejecutor_contratos_cuenta_axioma.py (+17: HOME efímero por
+          #   misión -- B-1/M-4 -- de las cuales 4 son bwrap REAL, ver arriba),
+          #   tests/test_ejecutor_vigia_servicio.py (+5: la huella al arrancar/cerrar una
+          #   misión pone la pausa si hay un cambio no declarado),
+          #   tests/test_payload_max_tokens_literal_tripwire.py (+9: M-3, todas las formas
+          #   de colar una sonda -- from X import, import X.Y dotted, importlib con ruta
+          #   dotted, ruta armada por partes -- con una lista EXPLÍCITA de excepciones en
+          #   vez de una heurística más fina), tests/test_ejecutor_reemplazar_directorio_
+          #   atomico.py (+2: `exch`/`renameat2` en vez de dos `mv` con ventana),
+          #   tests/test_ejecutor_generar_claude_md.py (+1 neto: LOS SEIS IMPOSIBLES ya no
+          #   es una sección de la identidad -- MINOR, traía un estado sin fecha y una
+          #   referencia a un bloque que no se incluye). `NUCLEO_REGLAS` (politica.py) se
+          #   REDUJO de 10 a 4 reglas (menos código de test, no más: los casos que sobran
+          #   pasaron a `test_el_nucleo_reducido_ya_no_bloquea_lo_legitimo`, dentro del
+          #   mismo archivo que ya corría acá) -- el número neto de tests-puros igual
+          #   creció porque se agregaron controles nuevos para los cuatro falsos positivos
+          #   reproducidos (systemctl enable de un cliente, chattr de un .user.ini, chmod
+          #   de un authorized_keys ajeno, una lectura con `>` que el _MUTA viejo atrapaba).
+          grep -qE "^2506 passed, 30 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2506 tests CORRIDOS y exactamente 30 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 14 de la constitución host-bound, ver notas arriba). Si corriste con bwrap real sin soporte de namespaces anidados, las 4 de test_bwrap_real_* en test_ejecutor_contratos_cuenta_axioma.py pueden fallar aparte -- no cuentan contra este piso, se miden sueltas (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

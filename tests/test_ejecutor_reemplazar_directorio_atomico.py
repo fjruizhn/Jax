@@ -133,3 +133,26 @@ def test_control_la_copia_ingenua_archivo_por_archivo_no_borra_lo_que_sobra(tmp_
     # Justo el defecto que M4 encontró: "skill-retirada" sigue ahí.
     assert (destino / "skill-retirada").exists()
     assert _arbol(destino) != _arbol(etapa)
+
+
+# --- reemplazo REALMENTE atómico, no dos `mv` (ronda 3, auditoría adversarial 2026-09-22) --
+
+def test_usa_exch_no_dos_mv_separados_cuando_destino_ya_existe():
+    """Regresión: la versión anterior hacía `mv DESTINO VIEJO` y DESPUÉS `mv NUEVO
+    DESTINO` -- entre esos dos hay una VENTANA real en la que DESTINO no existe. `exch`
+    (envuelve `renameat2(RENAME_EXCHANGE)`) intercambia los dos nombres en un solo
+    syscall: cero ventana. Este test es el freno contra que alguien vuelva a partir el
+    swap en dos pasos sin darse cuenta de por qué importa."""
+    texto = SCRIPT.read_text(encoding="utf-8")
+    assert "exch " in texto, "el script ya no usa exch -- ¿volvió el doble mv con ventana?"
+    # Cuando DESTINO existe, el ÚNICO mv/exch de esa rama tiene que ser el exch -- no un
+    # `mv "$DESTINO" "$VIEJO"` seguido de otro `mv` (eso es, literalmente, la ventana).
+    rama_destino_existe = texto.split('if sudo test -e "$DESTINO"; then', 1)[1].split("else", 1)[0]
+    assert 'mv -T "$DESTINO"' not in rama_destino_existe, "sigue moviendo DESTINO aparte: eso es la ventana"
+
+
+def test_exch_esta_disponible_en_este_runner():
+    """Si `exch` no está, el script se niega explícito (`exch_no_disponible`), no
+    calla ni degrada solo a un doble mv con ventana -- lo prueba el propio script:"""
+    r = subprocess.run(["bash", "-c", "command -v exch"], capture_output=True, text=True)
+    assert r.returncode == 0, "exch (util-linux) no está instalado en este runner"
