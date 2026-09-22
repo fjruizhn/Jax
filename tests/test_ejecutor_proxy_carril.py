@@ -404,7 +404,7 @@ _ENTORNO = {
     "JAX_EJECUTOR_PAUSA": "/etc/jax/interruptor/EJECUTOR_PAUSA",
     "JAX_EJECUTOR_VIGIA_LATIDO": "/var/lib/jax-ejecutor/vigia.latido",
     "JAX_EJECUTOR_VIGIA_LATIDO_MAX_S": "30",
-    "JAX_PROXY_CARRIL_MODELO": "qwen3.6-mesa-131k",
+    "JAX_PROXY_CARRIL_MODELO": "modelo-de-prueba-carril",
     "JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS": "1024",
 }
 
@@ -417,7 +417,7 @@ def test_config_sale_del_entorno_sin_upstream_hardcodeado():
     assert str(cfg.registro) == "/var/log/jax-ejecutor/registro.jsonl"
     assert (str(cfg.pausa), str(cfg.latido), cfg.latido_max_s) == (
         "/etc/jax/interruptor/EJECUTOR_PAUSA", "/var/lib/jax-ejecutor/vigia.latido", 30.0)
-    assert (cfg.modelo, cfg.max_salida_tokens) == ("qwen3.6-mesa-131k", 1024)
+    assert (cfg.modelo, cfg.max_salida_tokens) == ("modelo-de-prueba-carril", 1024)
 
 
 @pytest.mark.parametrize("variable", sorted(_ENTORNO))

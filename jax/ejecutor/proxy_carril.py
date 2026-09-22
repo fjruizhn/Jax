@@ -59,9 +59,25 @@ vigía que lata, el proxy responde 423 sin tocar el upstream, y el trozo que com
 C4 (freno en vuelo, plan 3 de SP1): el interruptor global de JAX (`JAX_KILL_SWITCH_PATH`,
 jax/core/interruptor.py, obligatorio: sin saber dónde está no arranca) frena igual que la
 pausa del Ejecutor. Con cualquiera de las dos puestas: 423 sin tocar el upstream (los
-resultados que ya corrieron se anotan igual), y lo que está en vuelo —esperando el carril,
-esperando al upstream o en pleno stream— se corta en menos de un segundo: 423 legible si
-todavía no salieron cabeceras, conexión abortada (stream truncado) si ya salieron.
+resultados que ya corrieron se anotan igual), y lo que está en vuelo —esperando el carril
+o en pleno stream— se corta en menos de un segundo: 423 legible si todavía no salieron
+cabeceras, conexión abortada (stream truncado) si ya salieron. Una petición que TODAVÍA no
+tiene el carril nunca lo obtiene con el freno puesto: `_reenviar` re-chequea al tomarlo
+(`jax/ejecutor/proxy_carril.py`, dentro de `carril_ejecutor_async`), así que el freno gana
+esa carrera SIEMPRE (es causal: cae antes de que el carril se libere, no en una ventana de
+sondeo) — cerrado 2026-09-21, causa de la intermitencia de CI del 2026-09-20.
+
+GARANTÍA REAL sobre lo que sigue, para no prometer de más: entre ESE re-chequeo y el primer
+byte devuelto por el upstream hay una suspensión sin re-chequeo propio (`await
+self.cliente.send(...)`, dentro de la sección crítica del carril), cubierta sólo por el
+vigía de `atender()`, que sondea cada `INTERVALO_DE_SONDEO` (0,25 s). Un freno que cae
+justo ahí, contra un upstream que responde completo en menos de 250 ms, se sirve entero —
+reproducido con un hook en `build_request` (2026-09-21): 200 completo, freno puesto todo
+el tiempo. "TODA petición" no es cierto en ese margen: es "toda petición que no gane la
+carrera de hasta 250 ms contra un upstream corto". Cerrar esa ventana exigiría un
+re-chequeo después de cada punto de suspensión del cliente HTTP (connect, cada byte
+leído), que hoy no existe — no se cerró en esta ronda; queda como límite conocido, no como
+deuda silenciada.
 
 Corre con:  python -m jax.ejecutor.proxy_carril
 """
@@ -109,6 +125,11 @@ EJECUTOR_PAUSADO = "ejecutor_pausado"
 VIGIA_SIN_LATIDO = "vigia_sin_latido"
 MODELO_NO_PERMITIDO = "modelo_no_permitido"
 SALIDA_NO_PERMITIDA = "salida_no_permitida"
+#: Fail-closed: el re-chequeo del freno AL TOMAR el carril (dentro de la sección crítica,
+#: un flock entre procesos) no pudo terminar a tiempo. Mismo criterio que
+#: `InterruptorSinConfigurar` en `_freno_puesto_ahora`: no saber si el freno está puesto
+#: se trata como puesto.
+FRENO_INDETERMINADO = "freno_indeterminado"
 #: Lo que el arnés manda de verdad (medido 2026-09-17, arnés 2.1.273 por este proxy, 43
 #: peticiones en g1_20260917/proxy_v3.jsonl: `HEAD /api/hello` y `POST /v1/messages`). El
 #: upstream es el Ollama de producción: nada más llega. SP3 (2026-09-17) cerró también las
@@ -131,6 +152,17 @@ _NO_REENVIAR = frozenset({
 _NO_DEVOLVER = _NO_REENVIAR - {b"content-length"}
 
 _TIMEOUT_UPSTREAM = httpx.Timeout(connect=10.0, read=None, write=None, pool=None)
+
+#: Tope del re-chequeo del freno AL TOMAR el carril. Ese chequeo corre DENTRO de la
+#: sección crítica (el carril es un `flock` entre procesos): sin tope, un `os.stat`
+#: colgado (montaje en mal estado de la raíz del interruptor o de la pausa) retendría el
+#: carril para siempre, y ni el propio vigía de `atender()` podría cortarlo -- usa el
+#: mismo executor de hilos para sus `os.stat`. Medido en hall9000 (2026-09-21): 0,017 ms
+#: con el executor ocioso, 449,8 ms con el executor lleno (4 `os.stat` en
+#: `asyncio.to_thread`). 2 s da >4x de margen sobre el peor caso medido, y sigue siendo
+#: una fracción chica del `tope_s` de producción (90 s): vencer acá no es gratis (fail-
+#: closed: se trata como frenado), pero tampoco compite con el tope real de la cola.
+_TOPE_FRENADO_AL_TOMAR_CARRIL_S = 2.0
 
 
 class ConfigInvalida(ValueError):
@@ -354,6 +386,16 @@ class _Proxy:
         """C4/C5: ¿interruptor de JAX, pausa del Ejecutor, o vigía sin latido? (stat: fuera del loop)."""
         return await asyncio.to_thread(self._frenado_ahora)
 
+    async def _frenado_con_tope(self, tope_s: float) -> str | None:
+        """Como `_frenado`, pero fail-closed si no contesta a tiempo. Para usar DENTRO de
+        una sección crítica (el carril tomado): sin tope, un `os.stat` colgado retendría
+        el `flock` para siempre, y el propio vigía de `atender()` -que usa el mismo
+        executor de hilos- tampoco podría cortarlo."""
+        try:
+            return await asyncio.wait_for(self._frenado(), tope_s)
+        except asyncio.TimeoutError:
+            return FRENO_INDETERMINADO
+
     async def _anotar(self, evento: dict) -> None:
         # write + fsync bloquean: fuera del event loop.
         await asyncio.to_thread(self.registro.anotar, evento)
@@ -377,8 +419,10 @@ class _Proxy:
         ruta = _ruta_sin_query(peticion.target)
         de_mensajes = metodo == "POST" and ruta in _RUTAS_DE_MENSAJES
         # Orden (C5 + SP3 + C4): con un freno puesto (interruptor de JAX, pausa del Ejecutor
-        # o vigía sin latido) TODA petición recibe 423 sin tocar el carril ni el upstream. La
-        # única que se lee antes de responder es un POST de mensajes que pasa la política de
+        # o vigía sin latido) una petición que llega HASTA ACÁ recibe 423 sin tocar el carril
+        # ni el upstream. La garantía real de punta a punta —con su margen conocido— está en
+        # la cabecera del módulo, no en esta línea sola. La única que se lee antes de
+        # responder es un POST de mensajes que pasa la política de
         # SP3 (modelo y salida): sus resultados de herramientas ya corrieron y tienen que
         # quedar en el registro de C3 (C4: el freno no borra el rastro). Lo demás, bajo freno,
         # ni se anota: una petición fuera de política no se anotaría tampoco sin freno.
@@ -423,6 +467,36 @@ class _Proxy:
             async with carril_ejecutor_async(self.cfg.raiz, self.cfg.tope_s):
                 _ESPERANDO_CARRIL -= 1
                 tomado = True
+                # C4: re-chequeo AL TOMAR el carril, antes de construir nada para el
+                # upstream. Sin esto, una petición que estaba en cola puede ganar el
+                # carril que el freno acaba de liberar (canceló a quien lo tenía) y
+                # llegar al upstream ANTES de que el vigía del freno de ESTA petición
+                # —que sondea cada INTERVALO_DE_SONDEO, no en cada instrucción— se
+                # entere. Medido: 2 fallos en 150 corridas bajo carga de CPU
+                # (2026-09-21), mismo `httpx.RemoteProtocolError` que en CI el
+                # 2026-09-20. El chequeo de más arriba no alcanza: el freno puede
+                # caer MIENTRAS se espera el carril, y esperar el carril no tiene
+                # ningún punto de re-chequeo propio. NO cierra la ventana entera: ver
+                # la cabecera del módulo para lo que queda abierto después de esto.
+                #
+                # A PROPÓSITO `_frenado_con_tope` (el predicado ANCHO: interruptor +
+                # pausa C5 + vigía SIN LATIDO), no `_freno_puesto_ahora` (el que sondea
+                # el vigía de `atender()`, que NO mira el latido). El vigía de
+                # `atender()` no puede sustituir a este chequeo para el caso del
+                # latido: `tope_s` de producción es 90 s contra
+                # `JAX_EJECUTOR_VIGIA_LATIDO_MAX_S` de 30 s -una petición puede esperar
+                # el carril hasta 3 veces la edad máxima del latido- y ese vigía jamás
+                # corta por latido caduco (sólo por interruptor o pausa). Sin este
+                # re-chequeo ancho, una petición podía obtener el carril y llegar al
+                # upstream con el auditor de C5 ya sin latido. Probado en
+                # test_ejecutor_proxy_freno.py::test_vigia_sin_latido_justo_al_tomar_el_carril_no_toca_upstream
+                # (falla si esto vuelve a ser `_freno_puesto_ahora`).
+                frenado = await self._frenado_con_tope(_TOPE_FRENADO_AL_TOMAR_CARRIL_S)
+                if frenado is not None:
+                    log.warning("proxy_carril %s metodo=%s ruta=%s", frenado, metodo, ruta)
+                    await _responder_error(conn, writer, 423, Motivo(frenado),
+                                           extra=((b"x-should-retry", b"false"),), metodo=metodo)
+                    return
                 cabeceras = [(k, v) for k, v in peticion.headers if k.lower() not in _NO_REENVIAR]
                 cabeceras.append((b"accept-encoding", b"identity"))
                 solicitud = self.cliente.build_request(

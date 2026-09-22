@@ -87,6 +87,21 @@ async def _reset_baseline(conn):
             "AND detail LIKE 'PROBE:%%'",
             (FACET,),
         )
+        # PASO 2 de main() hace que jax/core/model_catalog.py::record_resolved_version
+        # inserte una fila REAL en `model` para el modelo "drifteado"
+        # (INSERT IGNORE ... source='observed') -- eso quedaba en jax_memory_test
+        # para siempre (hallazgo 2026-09-21, catálogo de modelos de test
+        # contaminado: deepseek-v4-flash-DRIFTED-BY-PROBE, id 306, huérfano).
+        # Primero cualquier proposal que la referencie (FK RESTRICT, no
+        # CASCADE: borrar `model` antes revienta), después la fila de `model`
+        # misma. LIKE, no el nombre exacto: el modelo real de la faceta puede
+        # cambiar entre corridas y el sufijo es el marcador estable de ESTE probe.
+        await cur.execute(
+            "DELETE FROM model_binding_proposal WHERE "
+            "current_model_ref IN (SELECT id FROM model WHERE model_id LIKE '%-DRIFTED-BY-PROBE') "
+            "OR proposed_model_ref IN (SELECT id FROM model WHERE model_id LIKE '%-DRIFTED-BY-PROBE')"
+        )
+        await cur.execute("DELETE FROM model WHERE model_id LIKE '%-DRIFTED-BY-PROBE'")
 
 
 async def _dump_state(conn, label):

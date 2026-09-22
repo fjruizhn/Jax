@@ -16,7 +16,32 @@ from __future__ import annotations
 
 import unittest
 
+from facet_resolver import _db_conn
 from motor_registry.catalog import MotorCatalog
+
+
+async def _binding_vigente(facet_key: str) -> tuple[str, str]:
+    """(provider_id, model_id) que `facet_binding` declara HOY para
+    `facet_key`, en la base a la que este proceso está conectado (test o
+    producción, según JAX_DB_NAME) -- leído en vivo, nunca un literal.
+    Hallazgo 2026-09-21 (mismo pedido que el catálogo de modelos de
+    jax_memory_test): un literal como `kimi.model == 'kimi-k3'` se rompe
+    apenas alguien cambia el binding real, y ya pasó (jax#248, con la CLAVE
+    de faceta en vez del modelo, mismo patrón). Principio IV: el código es
+    lógica, no datos -- el dato vigente se LEE, no se copia a mano."""
+    conn = await _db_conn()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT provider_id, model_id FROM facet_binding "
+                "WHERE facet_key=%s AND role='primary'",
+                (facet_key,),
+            )
+            fila = await cur.fetchone()
+    finally:
+        conn.close()
+    assert fila is not None, f"'{facet_key}' no tiene binding primario en esta base"
+    return fila
 
 
 class CatalogFromDbTest(unittest.IsolatedAsyncioTestCase):
@@ -25,8 +50,11 @@ class CatalogFromDbTest(unittest.IsolatedAsyncioTestCase):
         kimi = catalog.get_motor("kimi")
         assert kimi is not None, "kimi no cargó desde DB"
         assert kimi.transport == "http_openai_compat", kimi.transport
-        assert kimi.provider_id == "moonshot", kimi.provider_id
-        assert kimi.model == "kimi-k3", kimi.model  # model reusa el campo existente (no model_id nuevo)
+        provider_id, model_id = await _binding_vigente("kimi")
+        assert kimi.provider_id == provider_id, (kimi.provider_id, provider_id)
+        # model reusa el campo existente (no model_id nuevo) -- ver
+        # motor_resolved (facet_binding, no motor.model_ref) más abajo.
+        assert kimi.model == model_id, (kimi.model, model_id)
         # max_tokens == 0, NO 8000 (arreglo-ci-3, 2026-09-18): este test nunca
         # había corrido en CI -- el detector de cobertura recién lo enganchó
         # esta noche, y afirmaba el valor VIEJO de antes de D1. D1 de Fernando
