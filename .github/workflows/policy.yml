@@ -3586,13 +3586,44 @@ jobs:
       #       huérfano), el done_callback de excepciones sigue wireado.
       #     B-6: usuario obligatorio (422 si falta), se registra como
       #       `caller` del job.
-      #   9 + 20 = 29. Medido en local (mismo comando): 29 passed. Si el
-      #   runner da otro número, manda el runner.
+      #   9 + 20 = 29.
+      # 29 -> 43 (2026-09-21, ronda 3 de arreglo -- ver endpoint-hallazgos-r2.md,
+      #   ruling estructural "el semáforo cuenta TRABAJOS y el pool cuenta
+      #   ARCHIVOS"): +14 tests nuevos.
+      #     N-1 (bloqueante): el permiso se filtraba si `_STORE.create()`/
+      #       `update()` reventaba -- `try/finally` alrededor de ese tramo.
+      #       +2 (directo sin HTTP, y por HTTP real -- éste último posible
+      #       porque `proyecto` es un `str` SIN `Field(min_length=...)`;
+      #       `usuario`, que SÍ lo tiene desde B-6, resultó estar protegido
+      #       ya por un detalle de pydantic-core 2.46.4, documentado en el
+      #       test).
+      #     N-2 (bloqueante): un nombre no codificable a UTF-8 se rechaza
+      #       ANTES del executor, nunca tumba el lote entero al escribir el
+      #       resultado. +3 (rechazo sin tumbar el lote, saneado unitario
+      #       del nombre, fallback ensure_ascii de última línea).
+      #     N-3: cancelar dejar de programar archivos nuevos, nunca mata un
+      #       hilo real -- CANCELLING mientras espera, CANCELLED sólo
+      #       cuando el último hilo en vuelo terminó. +3 (deja terminar lo
+      #       que ya arrancó, corta lo que esperaba en cola; cancela un
+      #       trabajo sin ningún hilo arrancado aún; la ruta HTTP marca
+      #       CANCELLING de una, no CANCELLED).
+      #     N-4/B-2: executor de E/S SEPARADO del de OCR; RUNNING se marca
+      #       cuando el PRIMER archivo arranca de verdad, no al admitir.
+      #       +2 (GET no espera detrás del pool de OCR saturado; RUNNING no
+      #       se adelanta mientras el archivo sigue en cola).
+      #     N-5: la mutación que más importa -- `run_in_executor(executor,
+      #       …)` → `run_in_executor(None, …)` -- con un espía sobre el
+      #       executor real en los TRES sitios (procesar, guardar
+      #       resultado, leer resultado). +3.
+      #   9 (piso original) + 20 (ronda 2) + 14 (ronda 3) = 43. Medido en
+      #   local (mismo comando) y en Docker (python:3.12-slim, requirements.txt
+      #   exacto): 43 passed en los dos. Si el runner da otro número, manda
+      #   el runner.
       - name: Endpoint de Procesamiento -- piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q las_manos/_procesamiento_routes_test.py 2>&1 | tee /tmp/procesamiento_routes_tests
-          grep -qE "^29 passed" /tmp/procesamiento_routes_tests || {
-            echo "PISO ROTO: se esperaban 29 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
+          grep -qE "^43 passed" /tmp/procesamiento_routes_tests || {
+            echo "PISO ROTO: se esperaban 43 tests CORRIDOS del endpoint de Procesamiento."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de

@@ -296,6 +296,14 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(executor_1_hilo.shutdown)
         loop = asyncio.get_running_loop()
         bloqueo = threading.Event()
+        # addCleanup es LIFO: registrado DESPUÉS del shutdown de arriba,
+        # corre ANTES -- si un assert de este test falla antes de la
+        # línea `bloqueo.set()` de más abajo, el hilo quedaría esperando
+        # PARA SIEMPRE y `executor.shutdown(wait=True)` colgaría el
+        # proceso entero (encontrado armando esta misma mutación: un
+        # `assert` que falla ANTES de liberar el hilo cuelga el test
+        # runner completo, no reporta un fallo limpio).
+        self.addCleanup(bloqueo.set)
         ocupa = loop.run_in_executor(executor_1_hilo, bloqueo.wait)
 
         self._archivo_en_workspace("a.pdf")
@@ -641,6 +649,7 @@ class TrabajoWorkerTest(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(executor_1_hilo.shutdown)
         loop = asyncio.get_running_loop()
         bloqueo = threading.Event()
+        self.addCleanup(bloqueo.set)  # mismo motivo que en el otro test con `bloqueo` -- ver ahí
         ocupa = loop.run_in_executor(executor_1_hilo, bloqueo.wait)  # ocupa el único hilo hasta que se libere a mano
 
         semaforo = asyncio.Semaphore(1)
