@@ -4002,6 +4002,25 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **VISTO PERO NO TOCADO — 2026-09-22, ronda 4 del contexto del Ejecutor (auditoría
+  adversarial, ítem M-1): `ops/ejecutor/ejecutor-vigia@.service` y el docstring de
+  `vigia_servicio.py` dicen que el vigía se lanza por ESA unidad systemd (`User=jaxsvc`,
+  `%i` = id de la misión), pero el camino REAL (`jax/ejecutor/mision_servicio.py::abrir_vigia`,
+  y también `scripts/ejecutor_contratos/mision_de_humo.py`) lo lanza como SUBPROCESO
+  DIRECTO (`sys.executable -m jax.ejecutor.contratos.vigia_servicio <ruta>`), nunca vía
+  `systemctl start ejecutor-vigia@<id>`.** Eso importa para M-1 (la huella la toma el
+  controlador COMO FRUIZ, `ssh fruiz@<host> sudo -n ...` vía `revocacion.argv_admin`,
+  implementado en esta ronda): el proceso hereda la identidad de quien lo lanza, y
+  `mision_servicio.py` lo lanza `jax-platform.service` (`User=fruiz`, verificado con
+  `systemctl cat jax-platform.service`), así que en el camino real el vigía SÍ corre como
+  fruiz y el mecanismo de esta ronda es coherente. Pero si `ejecutor-vigia@.service`
+  (`User=jaxsvc`) se llegara a usar de verdad en algún despliegue (no encontrado ningún
+  caller que lo haga), el vigía correría como `jaxsvc` y la huella-como-fruiz necesitaría
+  que jaxsvc tuviera acceso ssh equivalente al de fruiz -- lo que anularía el propósito de
+  M-1 ("que la cuenta sin privilegios no pueda falsearla"). No se tocó la unidad ni su
+  docstring: decidir si se retira (parece vestigial) o se documenta como un segundo modo
+  de arranque válido es una decisión de arquitectura, no de esta ronda.
+
 - **Anotado con fecha 2026-09-22 — `idx_pipelines_status (status)` quedó redundante con `idx_pipelines_ocultos (status, descartado_at)` (Task 1, fix round 1, spec `2026-09-22-descartar-pipelines`).** `idx_pipelines_ocultos` empieza por la misma columna (`status`) que `idx_pipelines_status`: por la regla del prefijo izquierdo de un índice compuesto, MariaDB puede resolver con el nuevo cualquier consulta que hoy elige el viejo filtrando solo por `status`. No se retira en este PR: el viejo puede tener lectores que esta ronda no auditó (el reaper vía `store.candidatos_del_reaper`, `pipeline_count_active`, el candado del cupo), y borrarlo a ciegas es exactamente el tipo de "arreglo" que la Regla Absoluta prohíbe. Retirarlo va en su **PROPIO PR**, con: (a) `EXPLAIN` de la consulta real del reaper (y de cualquier otro caller que filtre `jacobs_pipelines` solo por `status`) contra el índice nuevo, sin filesort ni caída a scan completo; (b) un grep de todos los callers que arman `WHERE status = ...`/`WHERE status IN (...)` sobre `jacobs_pipelines` para confirmar que ninguno depende de una propiedad de `idx_pipelines_status` que `idx_pipelines_ocultos` no cubra (por ejemplo, un `FORCE INDEX`/`USE INDEX` explícito, si existiera).
 
 - **`ejecutor_host.sudo` y `.machine_id` quedan desactualizadas y SIN LECTOR en el código —

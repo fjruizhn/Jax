@@ -145,15 +145,28 @@ class FalloDeEjemplo:
 # axioma-registro` (ops/ejecutor/instalar_en_maquina.sh), `/var/log/sudo-<cuenta>.log`
 # + `/var/log/sudo-io/` (idem, líneas 79-89), `/usr/local/sbin/ejecutor-revocar` y
 # `/usr/local/sbin/ejecutor-freno-remoto` (mismo instalador).
-_MUTA = r"(?:\brm\b|\bmv\b|\btruncate\b|\bshred\b|\bunlink\b|\bchmod\b|\bchown\b|\bdd\b|\btee\b|\bsed\s+-i\b)"
+#
+# `tee` es un caso aparte (MINOR, ronda 4, 2026-09-22): a diferencia de `rm`/`mv`/etc.,
+# que son destructivos SIN IMPORTAR el resto de la línea, `tee` sólo escribe donde se le
+# dice -- `echo 'nota sobre /etc/sudoers.d/...' | tee /tmp/nota.txt` NO toca el control,
+# aunque lo MENCIONE. Por eso `tee` sale de `_MUTA` (el genérico "verbo en cualquier
+# lado + objetivo en cualquier lado") y se prueba aparte, exigiendo que el objetivo sea
+# el ARGUMENTO de `tee` (con o sin `-a`), no cualquier otra parte de la línea.
+_MUTA = r"(?:\brm\b|\bmv\b|\btruncate\b|\bshred\b|\bunlink\b|\bchmod\b|\bchown\b|\bdd\b|\bsed\s+-i\b)"
 
 
 def _bash(comando: str) -> dict:
     return {"tool_name": "Bash", "tool_input": {"command": comando}}
 
 
+def _tee_hacia(objetivo: str) -> str:
+    """`tee`, con o sin `-a`, apuntando al `objetivo` como UNO DE SUS ARGUMENTOS --
+    no en cualquier otra parte de la línea."""
+    return fr"\btee\b(?:\s+-\S+)*(?:\s+\S+)*?\s+\S*(?:{objetivo})\S*"
+
+
 def _nucleo(codigo: str, objetivo: str, *, coincide: str, no_coincide: tuple[str, ...], id_: int) -> Regla:
-    cuerpo = fr"(?=.*{_MUTA})(?=.*(?:{objetivo}))"
+    cuerpo = fr"(?=.*(?:{_MUTA}|{_tee_hacia(objetivo)}))(?=.*(?:{objetivo}))"
     return Regla(
         id=id_, codigo=codigo, tipo="prohibido", herramientas=re.compile(r"Bash"), campo="command",
         patron=re.compile(cuerpo, re.S), ambito_hosts=frozenset(), ambito_roles=frozenset(), es_canario=False,

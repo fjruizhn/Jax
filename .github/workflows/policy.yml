@@ -1277,6 +1277,7 @@ jobs:
           tests/test_ejecutor_generar_claude_md.py
           tests/test_ejecutor_contratos_contexto.py
           tests/test_ejecutor_reemplazar_directorio_atomico.py
+          tests/test_ejecutor_preparar_directorio_misiones.py
           tests/test_ejecutor_contratos_huella.py
           tests/test_ejecutor_cita.py
           tests/test_ejecutor_captura.py
@@ -3650,8 +3651,34 @@ jobs:
           #   creció porque se agregaron controles nuevos para los cuatro falsos positivos
           #   reproducidos (systemctl enable de un cliente, chattr de un .user.ini, chmod
           #   de un authorized_keys ajeno, una lectura con `>` que el _MUTA viejo atrapaba).
-          grep -qE "^2506 passed, 30 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2506 tests CORRIDOS y exactamente 30 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 14 de la constitución host-bound, ver notas arriba). Si corriste con bwrap real sin soporte de namespaces anidados, las 4 de test_bwrap_real_* en test_ejecutor_contratos_cuenta_axioma.py pueden fallar aparte -- no cuentan contra este piso, se miden sueltas (ver nota arriba)."; exit 1; }
+          # 2506 -> 2574, 30 -> 35 skipped (feat/ejecutor-contexto-y-skills, ronda 4, auditoría
+          #   adversarial, 2026-09-22 -- NO-GO de la tercera auditoría: B-1 (log de sudo
+          #   solo-añadido por inode+tamaño+prefijo, no por tamaño a secas), M-1 (la huella la
+          #   toma el CONTROLADOR como fruiz -- `revocacion.argv_admin`, JAX_EJECUTOR_ADMIN_USUARIO
+          #   -- nunca como axioma; línea base persistida por `mision_id`, no por turno; el
+          #   cierre falla cerrado con `huella_no_medible`+pausa), M-2 (huella en dos niveles,
+          #   CONTROLES pausa/PERSISTENCIA sólo informa; símlinks por destino Y contenido
+          #   resuelto; declarado por ruta EXACTA; sha256 de ejecutor-freno-remoto/ejecutor-
+          #   revocar contra el repo en C6), B-2 (ACL explícita del directorio de misiones,
+          #   `ops/ejecutor/preparar_directorio_misiones.sh`, nuevo), M-3 (listas de rutas
+          #   LITERALES, no tautológicas; try/except que traga la apertura sigue fallando de
+          #   verdad) y M-4 (el CLAUDE.md ya no promete "se bloquea ahí mismo"/detección
+          #   "SIEMPRE"; jerarquía de autoridad PROPIA del Ejecutor, sin la sección del núcleo
+          #   que le da autoridad a un CLAUDE.md de proyecto -- vector de inyección acá).
+          #   Medido dos veces, sin tocar nada fuera del worktree, mismo método que la ronda 3
+          #   (`bwrap --tmpfs /home/fruiz/claude-skills --tmpfs /home/fruiz/ejecutor-fase0`
+          #   envolviendo la corrida entera). Bajo ESE bwrap externo, DOS pruebas NUEVAS de
+          #   `tests/test_ejecutor_preparar_directorio_misiones.py` (B-2, `setfacl` real) fallan
+          #   con "Invalid argument" -- el mismo tipo de límite que ya afecta a los 4
+          #   `test_bwrap_real_*` (namespaces/xattr anidados que este verificador no soporta,
+          #   NO el runner real de CI, que no envuelve nada): se miden SUELTAS, igual que ésas,
+          #   y pasan las 6 (confirmado, ver nota de abajo). 2568 (wrapped) + 6 (sueltas) = 2574.
+          #   Los skips pasan de 30 a 35: +5 son los `@requiere_constitucion_real` nuevos de M-4
+          #   (test_ejecutor_generar_claude_md.py, la identidad/autoridad se prueba también con
+          #   el DOBLE hermético -- esas SÍ corren siempre) -- 16 (U3, sin cambio) + 19 (constitución
+          #   real: 14 antes + 5 nuevas) = 35.
+          grep -qE "^2574 passed, 35 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2574 tests CORRIDOS y exactamente 35 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural -- + 19 que exigen la constitución REAL de esta máquina, no un doble -- ver notas arriba). Bajo el bwrap externo de este verificador (NO el runner real), 6 pruebas pueden fallar APARTE por límites de namespaces/xattr anidados y no cuentan contra este piso -- se miden sueltas: las 4 test_bwrap_real_* de test_ejecutor_contratos_cuenta_axioma.py y las 2 de setfacl real en test_ejecutor_preparar_directorio_misiones.py (ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

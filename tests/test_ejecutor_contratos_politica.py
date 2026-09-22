@@ -252,6 +252,11 @@ NUCLEO_YA_NO_BLOQUEA = {
     # tiene nada que ver con el núcleo. El caso prueba que NO es una regla `nucleo_*` la
     # que lo frena, no que un `rm` sin respaldo pase gratis (esa es otra regla, correcta).
     "systemd_unidad_de_mas": "ssh -tt -p 58291 axioma@bridge 'rm -f /etc/systemd/system/mio.service'",
+    # MINOR (ronda 4, 2026-09-22): `tee` sólo cuenta como mutación si su DESTINO es una
+    # ruta de control -- acá el destino es /tmp/nota.txt, la mención del control es sólo
+    # texto dentro de lo que se está anotando (un diagnóstico legítimo).
+    "tee_hacia_otro_lado_que_solo_menciona_el_control": _SSH + (
+        "\"echo 'revisando /etc/sudoers.d/50-ejecutor-axioma-registro' | tee /tmp/nota.txt\""),
 }
 
 
@@ -259,6 +264,20 @@ NUCLEO_YA_NO_BLOQUEA = {
 def test_el_nucleo_reducido_ya_no_bloquea_lo_legitimo(tmp_path, comando):
     d = P.evaluar(cargada(tmp_path), "Bash", {"command": comando}, AHORA)
     assert d.permitir is True or not (d.regla or "").startswith("nucleo_"), (comando, d)
+
+
+def test_tee_hacia_el_control_si_bloquea(tmp_path):
+    """El otro lado del MINOR: `tee` que SÍ apunta al control sigue prohibido -- no se
+    perdió la detección, se le puso destino."""
+    comando = _SSH + "'echo vacio | tee /etc/sudoers.d/50-ejecutor-axioma-registro'"
+    d = P.evaluar(cargada(tmp_path), "Bash", {"command": comando}, AHORA)
+    assert (d.permitir, d.codigo, d.regla) == (False, P.PROHIBIDO, "nucleo_sudoers_ejecutor")
+
+
+def test_tee_con_append_hacia_el_control_si_bloquea(tmp_path):
+    comando = _SSH + "'echo vacio | tee -a /var/log/sudo-axioma.log'"
+    d = P.evaluar(cargada(tmp_path), "Bash", {"command": comando}, AHORA)
+    assert (d.permitir, d.codigo, d.regla) == (False, P.PROHIBIDO, "nucleo_sudo_log")
 
 
 def test_nucleo_es_prohibido_y_gana_sobre_destructivo(tmp_path):
