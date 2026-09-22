@@ -50,6 +50,7 @@ from jax.muscles.base import HttpMuscle, MuscleError, GROUNDING_POLICIES
 from jax.muscles.subprocess_muscle import SubprocessMuscle
 from jax.muscles.ollama_muscle import OllamaMuscle
 from jax.memory.db import MemoryDB, detect_completeness_intent
+from jax.memory.b9 import ScopeContext, legacy_prompt_context, ScopeDenied
 
 CONFIG_PATH = "config/config.toml"
 
@@ -141,27 +142,27 @@ def _log_de_worker(modulo: str):
 
 
 def _lanzar_workers_background() -> None:
-    """Lanza worker de extraccion y embedding como subprocesos desacoplados.
-    start_new_session=True: sobreviven al cierre de JAX. Fallos al Popen se ignoran."""
-    env = os.environ.copy()
-    for modulo in ("jax.memory.worker", "jax.memory.embedding_worker"):
-        # Los dos usan logging.basicConfig, que por defecto escribe en STDERR: con
-        # DEVNULL se tiraba TODO su registro y un worker que muriera al importar no
-        # dejaba rastro (2026-09-20). Va a ARCHIVO y no a pipe porque el proceso es
-        # DESPRENDIDO a proposito (start_new_session): sobrevive al cierre de JAX, y un
-        # pipe muere con el padre. Un archivo por modulo: uno compartido mezclaria dos
-        # procesos y seria ilegible.
-        destino = _log_de_worker(modulo)
-        try:
-            subprocess.Popen(
-                [sys.executable, "-m", modulo],
-                env=env,
-                stdout=destino,
-                stderr=destino,
-                start_new_session=True,
-            )
-        except Exception:  # fail-soft: Popen de worker desacoplado; si falla el lanzamiento no hay nada que crea que corrio, y el proximo arranque lo reintenta
-            pass
+    """B9: scheduled production workers are owned by systemd, not the REPL."""
+    logging.getLogger(__name__).info("B9 worker ownership: systemd; REPL launch skipped")
+
+
+def _render_legacy_repl_memory(repl_uid, repl_tid, entries: list[tuple[str, str, str]]) -> str:
+    """Compatibility-only B9 prompt boundary for existing memory rows.
+
+    Until rows are adopted into canonical B9 objects, they are explicitly
+    incomplete legacy provenance and cannot be injected without tenant scope.
+    """
+    if not repl_tid:
+        return ""
+    try:
+        scope = ScopeContext(
+            actor_principal="jax-local-repl", actor_type="APPLICATION",
+            subject_user_id=str(repl_uid) if repl_uid else None,
+            tenant_id=str(repl_tid), calling_component="jax-local",
+        )
+        return legacy_prompt_context(scope, entries).render()
+    except ScopeDenied:
+        return ""
 
 
 def humanizar_error(label: str, err: Exception) -> str:
@@ -692,13 +693,14 @@ async def main() -> None:
         # Inyectar facts en los system_prompts de todas las facetas (scope individual).
         facts = await db.get_facts(only_unverified=False, limit=20, user_id=repl_uid)
         if facts:
-            lineas = [f"- {f['fact_text']}" for f in facts]
-            memoria_str = "Lo que sé de Fernando:\n" + "\n".join(lineas)
-            for nombre in ("jax_local", "jekyll", "hyde", "hipatia"):
-                if nombre in muscles:
-                    muscles[nombre].system_prompt = (
-                        memoria_str + "\n\n" + muscles[nombre].system_prompt
-                    )
+            memoria_str = _render_legacy_repl_memory(
+                repl_uid, repl_tid,
+                [("fact", str(f.get("id", f.get("fact_uuid", "unknown"))), f["fact_text"]) for f in facts],
+            )
+            if memoria_str:
+                for nombre in ("jax_local", "jekyll", "hyde", "hipatia"):
+                    if nombre in muscles:
+                        muscles[nombre].system_prompt = memoria_str + "\n\n" + muscles[nombre].system_prompt
     # --------------------------------------------------------------------
 
     # --- Hilo de conversacion en RAM (COMPARTIDO por todas las facetas) -
@@ -820,11 +822,11 @@ async def main() -> None:
                             only_unverified=False, fact_type=tipo_completeness,
                             limit=20, user_id=repl_uid)
                         if facts_completos:
-                            lineas_facts = [f"- {f['fact_text']}" for f in facts_completos]
-                            bloques_memoria.append(
-                                f"Todos los hechos guardados de tipo '{tipo_completeness}':\n"
-                                + "\n".join(lineas_facts)
+                            bloque = _render_legacy_repl_memory(
+                                repl_uid, repl_tid,
+                                [("fact", str(f.get("id", f.get("fact_uuid", "unknown"))), f["fact_text"]) for f in facts_completos],
                             )
+                            if bloque: bloques_memoria.append(bloque)
 
                     similares = await db.search_similar_messages(
                         user_text, limit=5, user_id=repl_uid, project_id=None,
@@ -848,15 +850,11 @@ async def main() -> None:
                         similares = []
                     relevantes = [r for r in similares if r["distancia"] < 0.8]
                     if relevantes:
-                        lineas = []
-                        for r in relevantes:
-                            fecha = r["started_at"].strftime("%Y-%m-%d") if r["started_at"] else "?"
-                            rol = "user" if r["role"] == "user" else "jax"
-                            lineas.append(f"[{fecha}] {rol}: {r['content']}")
-                        bloques_memoria.append(
-                            "Conversaciones relevantes de sesiones anteriores:\n"
-                            + "\n".join(lineas)
+                        bloque = _render_legacy_repl_memory(
+                            repl_uid, repl_tid,
+                            [("message", str(r.get("id", r.get("message_id", "unknown"))), r["content"]) for r in relevantes],
                         )
+                        if bloque: bloques_memoria.append(bloque)
 
                     if bloques_memoria:
                         history_for_invocation = [

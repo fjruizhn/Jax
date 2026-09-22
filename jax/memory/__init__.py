@@ -1,0 +1,9 @@
+"""JAX-owned memory modules.
+
+Legacy ``MemoryDB`` remains available during B9 adoption. New model-facing
+memory code must use the B9 boundary in :mod:`jax.memory.b9`.
+"""
+
+from .b9 import MemoryAPI, MemoryEnvelope, PromptMemoryContext, ScopeContext
+
+__all__ = ("MemoryAPI", "MemoryEnvelope", "PromptMemoryContext", "ScopeContext")

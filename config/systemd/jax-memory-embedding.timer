@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule JAX B9 embedding generation
+
+[Timer]
+OnCalendar=*:0/20
+Persistent=true
+Unit=jax-memory-embedding.service
+
+[Install]
+WantedBy=timers.target
