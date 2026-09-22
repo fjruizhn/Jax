@@ -369,3 +369,61 @@ Mismo comando del paso con piso del job `tests-puros` (sacado de `policy.yml` co
 - Los números de la base no coinciden con los que publicó la ronda 4 (19 failed / 2338 passed
   "en master `66129c0`"). No sé qué entorno usó esa ronda. Estos son los que medí yo, con el
   comando de arriba.
+
+## Ronda 5, segunda parte — H5-1 cerrado y H5-2 confirmado con otros parsers (2026-09-21)
+
+El coordinador aceptó `707d829` y pidió cerrar H5-1 en esta misma ronda.
+
+### H5-2: el YAML de `db14703` lo rechazan tres parsers distintos
+
+Probé en Docker `python:3.12` el `policy.yml` de `db14703` y el de HEAD:
+
+| Parser | `db14703` | HEAD |
+|---|---|---|
+| PyYAML (YAML 1.1) | ScannerError | OK |
+| ruamel.yaml (YAML 1.2) | ScannerError en la línea 3257 | OK |
+| actionlint 1.7.12 (Go) | `could not parse as YAML`, línea 3258 | sin errores de YAML |
+
+Lo que **no** probé es el parser del propio servicio de GitHub Actions, porque no hay forma de
+correrlo acá. Que tres implementaciones independientes lo rechacen, incluida una de YAML 1.2
+(donde U+2028 no es un salto de línea), hace muy probable que GitHub también lo rechace, pero
+no está medido.
+
+### H5-1: los diez escapes de separador en el `path`, un test por cada uno
+
+- Hay una tabla escrita a mano, `_SEPARADORES_DE_SPLITLINES`, con los diez separadores. De ella
+  se generan diez métodos `test_read_file_escapa_<nombre>_en_el_path`. Cada uno pone el
+  separador en el **path** (no en el contenido), y comprueba tres cosas:
+  1. que el encabezado, sin el `\n` estructural, dé **1** línea con `str.splitlines()`;
+  2. que el separador crudo no aparezca;
+  3. que aparezca su entidad.
+- La tabla **no** se lee de `tool_authority`. Si saliera de ahí, sacar un separador del código
+  también lo sacaría del test y nadie lo notaría.
+- Al importar, un `assert` compara la tabla con el conjunto de caracteres que `splitlines()`
+  reconoce, recorriendo todo Unicode. Si Python agrega un separador, o si alguien saca una fila
+  de la tabla, la recolección del test falla.
+- `_tool_authority_test.py`: 54 → 64.
+
+### Mutaciones de escape: una línea `.replace(...)` de `_escape_attr` sacada por corrida
+
+| Escape sacado | Resultado | Tests en rojo |
+|---|---|---|
+| `\n` → `&#10;` | 2 failed | escapa_lf_en_el_path, neutraliza_y_escapa_el_path_con_saltos_de_linea |
+| `\r` → `&#13;` | 2 failed | escapa_cr_en_el_path, escapa_retorno_de_carro_suelto_en_el_path |
+| `\v` → `&#11;` | 1 failed | escapa_vt_en_el_path |
+| `\f` → `&#12;` | 1 failed | escapa_ff_en_el_path |
+| `\x1c` → `&#28;` | 1 failed | escapa_fs_en_el_path |
+| `\x1d` → `&#29;` | 1 failed | escapa_gs_en_el_path |
+| `\x1e` → `&#30;` | 1 failed | escapa_rs_en_el_path |
+| `\x85` → `&#133;` | 1 failed | escapa_nel_en_el_path |
+| U+2028 → `&#8232;` | 1 failed | escapa_line_separator_en_el_path |
+| U+2029 → `&#8233;` | 1 failed | escapa_paragraph_separator_en_el_path |
+| (en el test) sacar la fila `nel` de la tabla | error de recolección | `la tabla de separadores no coincide con str.splitlines()` |
+
+Cada escape rompe **su** caso. Los ocho que antes sobrevivían ahora dan rojo.
+
+### Piso y suite
+
+El piso de `tests-puros` pasa de `2388` a `2398` (+10). La suite del commit final, medida con
+`git archive` en Python 3.12, está en el mensaje de ese commit y en la respuesta al
+coordinador. No la pongo acá porque este informe va dentro del mismo commit que se mide.

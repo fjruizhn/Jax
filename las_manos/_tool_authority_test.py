@@ -737,5 +737,59 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
             assert r["content"] is None, (tool_name, args, r)
 
 
+
+# --- ronda 5, H5-1: los diez escapes de separador en el PATH ---
+#
+# _escape_attr escapa los diez separadores de línea que reconoce
+# str.splitlines(), pero sólo \n (H-1) y \r (N-3) tenían test: sacar
+# cualquiera de los otros ocho dejaba la suite en verde. Los tests de
+# detección de la ronda 4 ponían el separador en el CONTENIDO, no en el
+# path, así que nunca pasaban por _escape_attr. Un test por separador,
+# generado de esta tabla, para que una regresión nombre exactamente cuál.
+# La tabla se escribe a mano, no se lee de tool_authority: si saliera de
+# ahí, sacar un separador de la lista del código también lo sacaría del
+# test, y el test no lo notaría.
+_SEPARADORES_DE_SPLITLINES = (
+    ("lf", "\n", "&#10;"),
+    ("cr", "\r", "&#13;"),
+    ("vt", "\v", "&#11;"),
+    ("ff", "\f", "&#12;"),
+    ("fs", "\x1c", "&#28;"),
+    ("gs", "\x1d", "&#29;"),
+    ("rs", "\x1e", "&#30;"),
+    ("nel", "\x85", "&#133;"),
+    ("line_separator", "\u2028", "&#8232;"),
+    ("paragraph_separator", "\u2029", "&#8233;"),
+)
+# La tabla tiene que cubrir exactamente lo que splitlines() reconoce como
+# separador de un carácter; si Python agrega uno, este assert lo dice.
+assert {sep for _, sep, _ in _SEPARADORES_DE_SPLITLINES} == {
+    chr(c) for c in range(0x110000) if len(("a" + chr(c) + "b").splitlines()) == 2
+}, "la tabla de separadores no coincide con str.splitlines()"
+
+
+def _test_path_con_separador(nombre, separador, entidad):
+    async def test(self):
+        ruta_rel = f"x{separador}y_{nombre}.txt"
+        ruta = self.workspace / ruta_rel
+        ruta.write_text("contenido\n")
+        r = await self._call("read_file", {"path": ruta_rel})
+        assert r["decision"] == "executed", r
+        # el encabezado va hasta el '\n' estructural que lo separa del
+        # contenido; ese último es nuestro y se excluye con [:-1].
+        fin_encabezado = r["content"].index('">\n') + 3
+        encabezado = r["content"][:fin_encabezado][:-1]
+        assert len(encabezado.splitlines()) == 1, (nombre, encabezado)
+        assert separador not in encabezado, (nombre, encabezado)
+        assert f'path="x{entidad}y_{nombre}.txt"' in encabezado, (nombre, encabezado)
+    test.__name__ = f"test_read_file_escapa_{nombre}_en_el_path"
+    return test
+
+
+for _nombre, _sep, _ent in _SEPARADORES_DE_SPLITLINES:
+    _t = _test_path_con_separador(_nombre, _sep, _ent)
+    setattr(ToolAuthorityTest, _t.__name__, _t)
+del _nombre, _sep, _ent, _t
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

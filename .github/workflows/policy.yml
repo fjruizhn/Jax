@@ -3326,8 +3326,17 @@ jobs:
           #   db14703. _escape_attr no se tocó. Delta medido con `git
           #   archive` de ESTE MISMO commit: 54+26=80 tests en los dos
           #   archivos contra 62+26=88 en la ronda 4. "17 skipped" no cambia.
-          grep -qE "^2388 passed, 17 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2388 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
+          # 2388 -> 2398 (feat/sobre-fuente-no-confiable, ronda 5, H5-1):
+          #   +10, puros. _escape_attr escapa los diez separadores de
+          #   str.splitlines() en el path, pero sólo \n y \r tenían test:
+          #   sacar cualquiera de los otros ocho dejaba la suite en verde. Un
+          #   test por separador, generado de una tabla escrita a mano (con un
+          #   assert en la importación que la compara contra lo que
+          #   splitlines() reconoce), con el separador en el PATH y
+          #   verificando que el encabezado quede en una sola línea. Los diez
+          #   escapes mutados uno por vez: cada uno rompe su propio caso.
+          grep -qE "^2398 passed, 17 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2398 tests CORRIDOS y exactamente 17 skipped (16 de ellos, tests/test_ejecutor_reproduccion_u3.py sin el corpus de U3 -- estructural, ver nota arriba)."; exit 1; }
 
       # JAX-POLICY-C14N/2 fija Unicode 16.0.0; Python 3.12 usa Unicode 15.0.0.
       # Se cambia el runtime solo despues de completar la suite historica de
