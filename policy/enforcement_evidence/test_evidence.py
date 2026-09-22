@@ -27,6 +27,7 @@ _TEST_CONTROL_MAP = {
  "tests/policy/test_enforcement_evidence_core.py::test_assertion_relationship_bounds_and_worker_result_ingestion": ("CTL.B6.GOVERNED_DISPATCH",),
  "tests/policy/test_enforcement_evidence_mariadb_api.py::test_repeatable_read_is_explicit_store_boundary": ("CTL.B6.ONE_DECISION_ONE_EXECUTION",),
  "tests/policy/test_enforcement_evidence_mariadb_api.py::test_readonly_status_snapshot_uses_readonly_repeatable_read_and_rolls_back": ("CTL.B6.ONE_DECISION_ONE_EXECUTION",),
+ "tests/policy/test_enforcement_evidence_mariadb_api.py::test_readonly_snapshot_rejects_manifest_with_missing_raw_output_blob": ("CTL.B6.ONE_DECISION_ONE_EXECUTION",),
  "tests/policy/test_worker_result_execution_binding.py::test_worker_result_requires_exact_authoritative_execution_and_job": ("CTL.B6.GOVERNED_DISPATCH",),
 }
 def ingest_test_evidence_manifest(store, manifest_bytes:bytes, raw_output:bytes|None=None, *, repository_id=None, commit_sha=None, implementation_identity_hash=None):
