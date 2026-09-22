@@ -84,3 +84,20 @@ class EnforcementAssertion:
  @property
  def assertion_hash(self): return domain_hash("JAX-ENFORCEMENT-ASSERTION/1",self.projection())
  def projection(self): return {"schema_version":self.schema_version,"kind":self.kind,"control_id":self.control_id,"control_version":self.control_version,"control_definition_hash":self.control_definition_hash,"claim_level":self.claim_level.value,"verdict":self.verdict.value,"implementation_identity_hash":self.implementation_identity_hash,"scope":{"environment":self.scope.environment.value,"deployment_id":self.scope.deployment_id,"database_scope_id":self.scope.database_scope_id,"coverage":self.scope.coverage.value},"subject_set":[x.projection() for x in self.subject_set],"evidence_artifact_hashes":list(self.evidence_artifact_hashes),"observation_ids":list(self.observation_ids),"as_of_utc":utc_text(self.as_of_utc),"evidence_window_start_utc":utc_text(self.evidence_window_start_utc),"evidence_window_end_utc":utc_text(self.evidence_window_end_utc),"trust_domains_used":[x.value for x in self.trust_domains_used],"reason_codes":list(self.reason_codes)}
+
+@dataclass(frozen=True)
+class ControlStatusView:
+ """Ephemeral result of an authoritative, read-only B7 derivation.
+
+ This is deliberately not an ``EnforcementAssertion``: it has no assertion
+ identity/hash and never represents persisted historical evidence.
+ """
+ control_id:str; control_version:int; claim_level:ClaimLevel; verdict:AssertionVerdict
+ implementation_identity_hash:str; scope:ClaimScope; subjects:tuple[EvidenceSubject,...]
+ as_of_utc:datetime; evidence_window_start_utc:datetime; evidence_window_end_utc:datetime
+ reason_codes:tuple[str,...]; trust_domains_used:tuple[EvidenceTrustDomain,...]
+ supporting_artifact_hashes:tuple[str,...]; supporting_observation_ids:tuple[str,...]
+ observed_at:datetime; classification:str="AUTHORITATIVE_READONLY_DERIVATION"; persisted:bool=False
+ def __post_init__(self):
+  if self.persisted is not False or self.classification != "AUTHORITATIVE_READONLY_DERIVATION": raise ValueError("ControlStatusView must be read-only")
+  require_hash(self.implementation_identity_hash)

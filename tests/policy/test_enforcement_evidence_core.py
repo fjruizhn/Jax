@@ -122,6 +122,27 @@ def test_one_runtime_observation_never_mints_enforced():
  s=EvidenceStore(); d,i,a=artifact(s); scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME)
  o=EnforcementObservation("obs-alone",d.control_id,1,d.control_definition_hash,a.subject,i.implementation_identity_hash,ObservationOutcome.SATISFIED,"SATISFIED",NOW,scope,(a.artifact_hash,))
  assert derive_assertion(d,i,(o,),claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(a.subject,),as_of_utc=NOW) is AssertionVerdict.INSUFFICIENT_EVIDENCE
+
+def test_readonly_status_view_never_persists_and_matches_persisted_verdict():
+ s=EvidenceStore(); lifecycle,_=composition(s); service=EnforcementStatusService(lifecycle)
+ scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME); subject=EvidenceSubject(EvidenceSubjectType.EXECUTION,"x")
+ before=(len(s._assertion_rows),len(s._observation_rows),len(s._artifact_rows))
+ view=service.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
+ assert isinstance(view,ControlStatusView) and view.persisted is False
+ assert not isinstance(view,EnforcementAssertion)
+ assert (len(s._assertion_rows),len(s._observation_rows),len(s._artifact_rows)) == before
+ persisted=service.evaluate_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=scope,subjects=(subject,),as_of_utc=NOW)
+ assert view.verdict is persisted.verdict
+
+def test_readonly_query_uses_captured_snapshot_without_later_artifact_loads(monkeypatch):
+ s=EvidenceStore(); lifecycle,_=composition(s); service=EnforcementStatusService(lifecycle)
+ captured=s.observations()
+ # MariaDB supplies all verified observations/domains from one RR snapshot;
+ # a later insert or artifact loader must not affect this query result.
+ monkeypatch.setattr(s,"readonly_status_snapshot",lambda identity_hash: (captured,(),()),raising=False)
+ monkeypatch.setattr(s,"load_evidence_artifact",lambda _hash: (_ for _ in ()).throw(AssertionError("outside snapshot")))
+ view=service.query_control_status(control_id="CTL.B6.GOVERNED_DISPATCH",control_version=1,claim_level=ClaimLevel.ENFORCED,scope=ClaimScope(ClaimEnvironment.SANDBOX_RUNTIME),subjects=(EvidenceSubject(EvidenceSubjectType.EXECUTION,"x"),),as_of_utc=NOW)
+ assert view.persisted is False and view.supporting_observation_ids == ()
 def test_canonical_ci_manifest_checks_raw_bytes_and_closed_shape():
  import json
  from policy.enforcement_evidence.test_evidence import ingest_test_evidence_manifest, _TEST_CONTROL_MAP

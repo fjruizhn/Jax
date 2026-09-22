@@ -46,17 +46,32 @@ class EnforcementStatusService:
   # Lifecycle/identity/root are fixed at composition; requests only name a
   # claim.  In particular no request can redefine the source bytes that a
   # build manifest is compared against.
-  self._lifecycle=lifecycle; self._store=lifecycle._store; self._identity=lifecycle._identity
+  self._lifecycle=lifecycle; self._store=lifecycle._store; self._identity=lifecycle._identity; self._identity_provider=None
+ @classmethod
+ def for_readonly_query(cls, store, identity_provider):
+  """Build a status reader from fixed composition without lifecycle writes.
+
+  The identity must already be an authoritative stored identity.  This is the
+  CLI/query seam; unlike ``EvidenceLifecycleService`` it never records it.
+  """
+  from .implementation_identity import TrustedImplementationIdentityProvider, _ControlledTestIdentityProvider
+  if not isinstance(identity_provider, (TrustedImplementationIdentityProvider, _ControlledTestIdentityProvider)):
+   raise AttributeError("identity provider must be fixed composition")
+  candidate=identity_provider.load()
+  value=store.load_implementation_identity(candidate.implementation_identity_hash)
+  self=cls.__new__(cls); self._lifecycle=None; self._store=store; self._identity=value; self._identity_provider=identity_provider
+  return self
  def _written(self):
   if not is_trusted_implementation_identity(self._identity) or self._identity.source_state is not SourceState.CLEAN: return False
   try:
    # Provider verification includes the complete frozen B5/B6/B7 source and
    # migration set.  A subset claim is never enough for WRITTEN.
-   self._lifecycle._verify_composed_identity_manifest()
+   if self._identity_provider is not None: self._identity_provider.verify_loaded_identity(self._identity)
+   else: self._lifecycle._verify_composed_identity_manifest()
    return True
   except Exception: return False  # fail-soft: unverifiable manifest is insufficient evidence.
- def _tested(self, definition, as_of):
-  manifests=self._store._test_manifests_for(self._identity.implementation_identity_hash); required=(definition.control_id,definition.control_version)
+ def _tested(self, definition, as_of, manifests=None):
+  manifests=manifests if manifests is not None else self._store._test_manifests_for(self._identity.implementation_identity_hash); required=(definition.control_id,definition.control_version)
   for m in manifests:
    try:
     from datetime import datetime
@@ -73,13 +88,27 @@ class EnforcementStatusService:
     if required_ids and set(reported) == required_ids and all(reported[x] == "PASSED" for x in required_ids): return True
    except Exception: pass  # fail-soft: malformed manifest is ineligible, never passing evidence.
   return False
- def evaluate_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
-  definition=load_control_definition(control_id,control_version); observations=self._store.observations()
-  written=self._written(); tested=self._tested(definition,as_of_utc) if written else False
-  verdict=derive_assertion(definition,self._identity,observations,claim_level=claim_level,scope=scope,subjects=tuple(subjects),as_of_utc=as_of_utc,written=written,tested=tested)
+ def _derive(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
+  """One complete, composition-owned derivation shared by both public paths."""
+  definition=load_control_definition(control_id,control_version)
+  if hasattr(self._store,"readonly_status_snapshot"):
+   observations, manifests, trust_domains=self._store.readonly_status_snapshot(self._identity.implementation_identity_hash)
+  else:
+   observations, manifests, trust_domains=self._store.observations(), None, None
+  subjects=tuple(subjects); written=self._written(); tested=self._tested(definition,as_of_utc,manifests) if written else False
+  verdict=derive_assertion(definition,self._identity,observations,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc,written=written,tested=tested)
   start=as_of_utc-(timedelta(hours=24) if claim_level is ClaimLevel.ENFORCED else timedelta(days=30))
   artifacts=tuple(sorted({h for o in observations for h in o.evidence_artifact_hashes}))
-  assertion=EnforcementAssertion(definition.control_id,definition.control_version,definition.control_definition_hash,claim_level,verdict,self._identity.implementation_identity_hash,scope,tuple(subjects),artifacts,tuple(o.observation_id for o in observations),as_of_utc,start,as_of_utc)
+  if trust_domains is None:
+   trust_domains=tuple(sorted({a.trust_domain for o in observations for h in o.evidence_artifact_hashes for a in (self._store.load_evidence_artifact(h),)},key=lambda x:x.value))
+  return definition, observations, subjects, verdict, start, artifacts, trust_domains
+ def query_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
+  """Authoritative read-only status derivation; never persists an assertion."""
+  definition, observations, subjects, verdict, start, artifacts, trust_domains=self._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
+  return ControlStatusView(definition.control_id,definition.control_version,claim_level,verdict,self._identity.implementation_identity_hash,scope,subjects,as_of_utc,start,as_of_utc,tuple(sorted({o.reason_code for o in observations})),trust_domains,artifacts,tuple(o.observation_id for o in observations),as_of_utc)
+ def evaluate_control_status(self, *, control_id, control_version, claim_level, scope, subjects, as_of_utc):
+  definition, observations, subjects, verdict, start, artifacts, _=self._derive(control_id=control_id,control_version=control_version,claim_level=claim_level,scope=scope,subjects=subjects,as_of_utc=as_of_utc)
+  assertion=EnforcementAssertion(definition.control_id,definition.control_version,definition.control_definition_hash,claim_level,verdict,self._identity.implementation_identity_hash,scope,subjects,artifacts,tuple(o.observation_id for o in observations),as_of_utc,start,as_of_utc)
   return self._lifecycle._EvidenceLifecycleService__persist_assertion(assertion)
 
 def evaluate_control_status(store, definition, identity, *, claim_level, scope, subjects, as_of_utc):

@@ -1,5 +1,7 @@
 # Deuda técnica — lista canónica
 
+> This is a non-authoritative ledger of technical debt, known limitations, and unresolved operational work. It cannot override policy, prove runtime or enforcement state, ratify authority, or authorize execution.
+
 Único lugar donde vive el estado vigente de la deuda técnica de JAX
 (`jax` + `jax-platform`). Antes de este documento (Bloque 2, 2026-08-21)
 esta lista no existía como checklist — vivía dispersa en las entradas de
@@ -5266,4 +5268,3 @@ En memoria de Jairo Urbina.
   funciona pero conserva la renovación periódica y su modo de fallo.
 
   **No se cambió nada.** Requiere tu autorización: son dominios de clientes.
-

@@ -124,3 +124,7 @@ proyecto, no un detalle legal secundario.
 ## Contribuir
 
 Ver [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Operación y adaptadores
+
+Los adaptadores no son autoridad. Para consultas actuales y procedimientos operativos, ver [AGENTS.md](AGENTS.md), [docs/operations](docs/operations/README.md) y [docs/runbooks](docs/runbooks/).
