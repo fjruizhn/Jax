@@ -977,13 +977,28 @@ _INDICES: list[tuple[str, str, str, bool]] = [
 # (lock_wait_timeout) es 86400 s: una transaccion larga sobre la tabla dejaria
 # el arranque colgado un dia entero, sin error.
 #
-# Costo de la espera (review de 05c028b): mientras el DDL espera su metadata
-# lock EXCLUSIVO (hasta estos 30 s), ese pedido queda en la cola del MDL y las
-# lecturas y escrituras NUEVAS sobre jacobs_pipelines se encolan detras de el.
-# Por eso la espera es corta: 30 s de Jacobs detenido como peor caso, no un dia.
-# Si vence, el indice no se crea (ERROR en el log); la red de seguridad es el
-# test de EXPLAIN de la plataforma en CI, que falla si la consulta de dueño no
-# usa este indice.
+# Costo de la espera (review de 05c028b; actualizado 2026-09-22, fix round 1
+# de Task 1 -- descartar-pipelines): mientras UN DDL espera su metadata lock
+# EXCLUSIVO (hasta estos 30 s), ese pedido queda en la cola del MDL y las
+# lecturas y escrituras NUEVAS sobre la tabla se encolan detras de el. Cada
+# DDL acotado paga SU PROPIA espera de hasta 30 s, y todos corren uno detras
+# de otro en la MISMA sesion de `init_tables()` -- el peor caso es la SUMA,
+# no 30 s fijos. Hoy hay CUATRO indices acotados en `_INDICES`
+# (idx_jacobs_pipelines_duenio, idx_pipelines_descartados e
+# idx_pipelines_ocultos sobre jacobs_pipelines; idx_events_pipeline_tipo
+# sobre jacobs_events): 4 x 30 s = 120 s de Jacobs detenido como peor caso si
+# los cuatro estan bloqueados a la vez, no un dia. Si vence, el indice no se
+# crea (ERROR en el log) y el arranque SIGUE -- la red de seguridad es el
+# test de EXPLAIN de la plataforma en CI, que falla si la consulta que lo
+# necesita no lo usa.
+#
+# Las columnas CONTRATO (status_previo/descartado_por/descartado_at, ver
+# `_agregar_columna_acotada` mas abajo) usan el MISMO limite pero NO son
+# "solo rendimiento": fallan CERRADO. La primera que vence el MDL aborta
+# `init_tables()` entero con una excepcion -- y como las columnas se agregan
+# ANTES que los indices en esta funcion, ese aborto ni siquiera llega a
+# intentar los 4 indices de arriba (no se suman a los 120 s: el arranque ya
+# se cayo antes).
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
 
@@ -1022,6 +1037,57 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
         await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
 
 
+async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> None:
+    """Como `_crear_indice_acotado`, pero para una COLUMNA CONTRATO: Task 2
+    (spec descartar-pipelines §3) escribe status_previo/descartado_por/
+    descartado_at en la MISMA transacción que la transición de estado. Una
+    columna que Jacobs cree que existe y no existe rompe esa escritura en
+    producción -- no es un SELECT lento, es un `Unknown column` en el UPDATE
+    de la transición. A diferencia de un índice (que solo acelera), esto
+    FALLA CERRADO (fix round 1 de Task 1, revisión 2026-09-22): si la espera
+    del metadata lock vence (1205), levanta la excepción y `init_tables()`
+    se aborta -- no sigue como si la columna estuviera.
+
+    Antes de levantar la excepción vuelve a mirar `information_schema`: LAS
+    MANOS, jax-platform y el Ejecutor llaman a `init_tables()` cada uno al
+    arrancar, así que dos procesos pueden intentar el MISMO `ADD COLUMN` a
+    la vez. El que pierde la carrera del metadata lock puede encontrar la
+    columna ya creada por el que ganó cuando reconsulta -- eso NO es un
+    fallo, es la misma columna llegando por el otro proceso, y seguir de
+    largo ahí es correcto (fail-closed protege contra "la columna no está",
+    no contra "otro proceso la creó primero")."""
+    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
+    (previo,) = await cur.fetchone()
+    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
+    try:
+        await cur.execute(ddl)
+    except aiomysql.OperationalError as e:
+        if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
+            raise
+        await cur.execute(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+            (tabla, columna),
+        )
+        (existe,) = await cur.fetchone()
+        if existe:
+            logger.warning(
+                "init_tables: %s.%s ya existe -- otro proceso ganó la carrera del "
+                "metadata lock mientras este esperaba %d s. No es un fallo.",
+                tabla, columna, _LOCK_WAIT_DDL_SEGUNDOS,
+            )
+            return
+        raise RuntimeError(
+            f"init_tables: no se pudo agregar {tabla}.{columna} -- otra "
+            f"transacción tiene la tabla y venció la espera de "
+            f"{_LOCK_WAIT_DDL_SEGUNDOS} s ({e}). Es una columna CONTRATO (spec "
+            f"descartar-pipelines §3, Task 2 la escribe): el arranque FALLA en "
+            f"vez de seguir sin ella."
+        ) from e
+    finally:
+        await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+
+
 async def init_tables() -> None:
     """Crea las tablas si no existen. Llamar al arrancar."""
     # desechable: _crear_indice_acotado cambia lock_wait_timeout de la SESION.
@@ -1043,22 +1109,31 @@ async def init_tables() -> None:
                     updated_at         DOUBLE NOT NULL
                 )
             """)
-            for col, ddl in [
-                ("user_id", "ALTER TABLE jacobs_pipelines ADD COLUMN user_id VARCHAR(50) NULL"),
-                ("tenant_id", "ALTER TABLE jacobs_pipelines ADD COLUMN tenant_id VARCHAR(50) NULL"),
+            # `acotado`: mismo criterio que `_INDICES` (T6-6, 2026-09-15) --
+            # el DDL corre con lock_wait_timeout acotado
+            # (`_agregar_columna_acotada`). Las columnas viejas (user_id..
+            # devoluciones) NO cambian de comportamiento: agregar el tercer
+            # elemento del tuple solo lo declara explícito (False), la rama
+            # `else` de abajo sigue siendo el `await cur.execute(ddl)` sin
+            # bound de siempre. Las tres nuevas del descarte SÍ van acotadas
+            # y además fallan CERRADO -- son un contrato de escritura de
+            # Task 2, no una aceleración (fix round 1, revisión 2026-09-22).
+            for col, ddl, acotado in [
+                ("user_id", "ALTER TABLE jacobs_pipelines ADD COLUMN user_id VARCHAR(50) NULL", False),
+                ("tenant_id", "ALTER TABLE jacobs_pipelines ADD COLUMN tenant_id VARCHAR(50) NULL", False),
                 # Ronda 5 (2026-08-20, T1): reemplaza el owner file de
                 # filesystem -- ver Pipeline.owner_ack_at en models.py.
-                ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL"),
+                ("owner_ack_at", "ALTER TABLE jacobs_pipelines ADD COLUMN owner_ack_at DOUBLE NULL", False),
                 # 2026-09-17 (spec prevuelo-y-continuar §5.3): época de corrida.
-                ("run_epoch", "ALTER TABLE jacobs_pipelines ADD COLUMN run_epoch INT NOT NULL DEFAULT 0"),
+                ("run_epoch", "ALTER TABLE jacobs_pipelines ADD COLUMN run_epoch INT NOT NULL DEFAULT 0", False),
                 # Frente F (2026-09-16): de quién es hijo un pipeline de Ada y a
                 # qué profundidad. ALGORITHM=INSTANT explícito: si MariaDB no
                 # puede agregarla sin copiar la tabla, FALLA en vez de bloquear
                 # las escrituras de Jacobs mientras copia.
                 ("parent_pipeline_id", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "parent_pipeline_id VARCHAR(36) NULL, ALGORITHM=INSTANT"),
+                    "parent_pipeline_id VARCHAR(36) NULL, ALGORITHM=INSTANT", False),
                 ("depth", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "depth INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
+                    "depth INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT", False),
                 # El árbitro devuelve (spec 2026-09-18-arbitro-devuelve-design
                 # §3.4): "hoy costo_max_aceptado_usd es un parámetro por
                 # pedido y NO se persiste" -- verificado contra este mismo
@@ -1075,7 +1150,7 @@ async def init_tables() -> None:
                 # cálculo fino de costo sigue viviendo en prevuelo, esto solo
                 # persiste el tope.
                 ("costo_max_aceptado_usd", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "costo_max_aceptado_usd DECIMAL(12,4) NULL, ALGORITHM=INSTANT"),
+                    "costo_max_aceptado_usd DECIMAL(12,4) NULL, ALGORITHM=INSTANT", False),
                 # Cuántas veces el árbitro ya devolvió ESTE pipeline (spec
                 # §3.3): el tope de vueltas vive en axioma_config
                 # (jacobs.tope_devoluciones, ver get_tope_devoluciones), pero
@@ -1083,16 +1158,18 @@ async def init_tables() -> None:
                 # pipeline -- nunca en memoria (un pipeline puede continuar
                 # en otro proceso/host).
                 ("devoluciones", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "devoluciones INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT"),
+                    "devoluciones INT NOT NULL DEFAULT 0, ALGORITHM=INSTANT", False),
                 # 2026-09-22 (spec descartar-pipelines §3): a qué vuelve al
                 # recuperar, quién descartó (decide quién puede recuperar) y
                 # cuándo (orden de la vista). INSTANT: nunca copiar la tabla.
+                # CONTRATO de Task 2 (escribe estas tres en la misma
+                # transacción que la transición): acotadas Y fail-closed.
                 ("status_previo", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "status_previo VARCHAR(20) NULL, ALGORITHM=INSTANT"),
+                    "status_previo VARCHAR(20) NULL, ALGORITHM=INSTANT", True),
                 ("descartado_por", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "descartado_por VARCHAR(50) NULL, ALGORITHM=INSTANT"),
+                    "descartado_por VARCHAR(50) NULL, ALGORITHM=INSTANT", True),
                 ("descartado_at", "ALTER TABLE jacobs_pipelines ADD COLUMN "
-                    "descartado_at DOUBLE NULL, ALGORITHM=INSTANT"),
+                    "descartado_at DOUBLE NULL, ALGORITHM=INSTANT", True),
             ]:
                 await cur.execute(
                     "SELECT COUNT(*) FROM information_schema.COLUMNS "
@@ -1100,7 +1177,11 @@ async def init_tables() -> None:
                     (col,),
                 )
                 (exists,) = await cur.fetchone()
-                if not exists:
+                if exists:
+                    continue
+                if acotado:
+                    await _agregar_columna_acotada(cur, "jacobs_pipelines", col, ddl)
+                else:
                     await cur.execute(ddl)
             await cur.execute("""
                 CREATE TABLE IF NOT EXISTS jacobs_steps (
