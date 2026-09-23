@@ -478,6 +478,24 @@ class RetiroDeIndicesTest(unittest.IsolatedAsyncioTestCase):
         await self._crear_el_viejo()
         await self._conserva_con_error()
 
+    async def test_un_solo_init_tables_crea_el_reemplazo_y_luego_retira_el_viejo(self):
+        """MINOR-1 (auditoria de jax#272): el ORDEN dentro de init_tables().
+        Base con el viejo y SIN el reemplazo (una base de antes de Descartar):
+        UN solo arranque tiene que dejar el reemplazo creado y el viejo
+        retirado. Si `_retirar_indices` corriera ANTES del loop de creacion,
+        veria el reemplazo ausente, conservaria el viejo, y recien despues se
+        crearia el reemplazo: el viejo sobreviviria a ese arranque. Visto en
+        rojo con `_retirar_indices` movido antes del loop."""
+        await self._sql("DROP INDEX IF EXISTS idx_pipelines_ocultos ON jacobs_pipelines")
+        await self._crear_el_viejo()
+        self.assertEqual(await self._columnas("idx_pipelines_ocultos"), [])
+        await store.init_tables()
+        self.assertEqual(await self._columnas("idx_pipelines_ocultos"), ["status", "descartado_at"],
+                         "init_tables() no creo el reemplazo")
+        self.assertEqual(await self._columnas("idx_pipelines_status"), [],
+                         "el viejo sobrevivio a un arranque que SI creo el reemplazo: "
+                         "_retirar_indices corrio antes del loop de creacion")
+
     async def test_dos_init_tables_en_paralelo_no_revientan(self):
         """Dos arranques solapados (o LAS MANOS + un script de loadtest/):
         los dos ven el viejo, uno lo borra y el otro recibe 1091 o no lo ve
@@ -489,6 +507,52 @@ class RetiroDeIndicesTest(unittest.IsolatedAsyncioTestCase):
                 store.init_tables(), store.init_tables(), return_exceptions=True)
             self.assertEqual([r for r in resultados if isinstance(r, BaseException)], [])
             self.assertEqual(await self._columnas("idx_pipelines_status"), [])
+
+
+class DdlAcotadoRestauradoTest(unittest.IsolatedAsyncioTestCase):
+    """MINOR-2 (auditoria de jax#272), pura y sin DB: si el DDL falla y
+    ADEMAS falla el `SET SESSION lock_wait_timeout` del finally, la excepcion
+    que sube tiene que ser la del DDL -- antes, la del SET la reemplazaba y el
+    log apuntaba al restaurado como punto de falla. El fallo del SET queda en
+    un ERROR del log."""
+
+    class _CursorFalso:
+        def __init__(self, error_ddl, error_set):
+            self.error_ddl = error_ddl
+            self.error_set = error_set
+            self.sets = 0
+
+        async def execute(self, sql, args=None):
+            if sql.startswith("SELECT @@SESSION.lock_wait_timeout"):
+                return
+            if sql.startswith("SET SESSION lock_wait_timeout"):
+                self.sets += 1
+                if self.sets == 2 and self.error_set is not None:
+                    raise self.error_set
+                return
+            if self.error_ddl is not None:
+                raise self.error_ddl
+
+        async def fetchone(self):
+            return (50,)
+
+    async def test_falla_el_ddl_y_el_restaurado_sube_la_del_ddl(self):
+        error_ddl = store.aiomysql.OperationalError(1846, "ALTER no soportado")
+        error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
+        cur = self._CursorFalso(error_ddl, error_set)
+        with self.assertLogs("jacobs.store", level="ERROR") as logs:
+            with self.assertRaises(store.aiomysql.OperationalError) as ctx:
+                await store._ddl_acotado(cur, "ALTER TABLE t DROP INDEX i")
+        self.assertIs(ctx.exception, error_ddl, "la excepcion del SET tapo la del ALTER")
+        self.assertTrue(any("lock_wait_timeout" in l for l in logs.output), logs.output)
+
+    async def test_ddl_bien_y_falla_el_restaurado_sube_la_del_set(self):
+        error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
+        cur = self._CursorFalso(None, error_set)
+        with self.assertLogs("jacobs.store", level="ERROR"):
+            with self.assertRaises(store.aiomysql.OperationalError) as ctx:
+                await store._ddl_acotado(cur, "ALTER TABLE t DROP INDEX i")
+        self.assertIs(ctx.exception, error_set)
 
 
 class NombreDePruebaTest(unittest.TestCase):

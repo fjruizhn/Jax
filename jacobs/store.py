@@ -1133,15 +1133,33 @@ async def _ddl_acotado(cur, ddl: str) -> bool:
     await cur.execute("SELECT @@SESSION.lock_wait_timeout")
     (previo,) = await cur.fetchone()
     await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
+    error_del_ddl: BaseException | None = None
     try:
         await cur.execute(ddl)
         return True
     except aiomysql.OperationalError as e:  # fail-soft SOLO para 1205: el llamador decide y lo registra; todo otro error sube
         if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
+            error_del_ddl = e
             raise
         return False
+    except BaseException as e:
+        error_del_ddl = e
+        raise
     finally:
-        await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+        # Si el restaurado falla con la excepcion del DDL en vuelo, la del SET
+        # la reemplazaria y el log apuntaria al punto de falla equivocado
+        # (MINOR-2, auditoria de jax#272): se registra el fallo del SET y
+        # sube la ORIGINAL. Sin excepcion previa, sube la del SET.
+        try:
+            await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+        except BaseException as error_del_set:
+            logger.error(
+                "_ddl_acotado: fallo el restaurado de lock_wait_timeout=%s "
+                "tras %r: %r", previo, ddl, error_del_set,
+            )
+            if error_del_ddl is not None:
+                raise error_del_ddl from error_del_set
+            raise
 
 
 async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
