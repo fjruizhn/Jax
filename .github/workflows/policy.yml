@@ -657,6 +657,10 @@ jobs:
           tests/test_accion_persona_retorno_no_ambiguo.py
           tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py
           tests/test_memoria_busqueda_facts.py
+          tests/test_b9_lifecycle_worker.py tests/test_b9_mariadb_adapter.py
+          tests/test_b9_persistent_api.py tests/test_b9_scope_authority.py
+          tests/test_b9_shared_memory.py tests/test_b9_systemd_ownership.py
+          tests/test_b9_worker_composition.py tests/test_project_scope_authority.py
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -669,7 +673,11 @@ jobs:
             tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py \
             tests/test_accion_persona_retorno_no_ambiguo.py \
             tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py \
-            tests/test_memoria_busqueda_facts.py 2>&1 | tee /tmp/out
+            tests/test_memoria_busqueda_facts.py \
+            tests/test_b9_lifecycle_worker.py tests/test_b9_mariadb_adapter.py \
+            tests/test_b9_persistent_api.py tests/test_b9_scope_authority.py \
+            tests/test_b9_shared_memory.py tests/test_b9_systemd_ownership.py \
+            tests/test_b9_worker_composition.py tests/test_project_scope_authority.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
           # (el scope copiado al mensaje, el centinela de que el scope de una
           # conversacion sigue siendo inmutable, el plan sin JOIN que si usa el
