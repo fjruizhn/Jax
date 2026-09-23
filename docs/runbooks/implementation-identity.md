@@ -60,6 +60,47 @@ cualquiera:
 Todo esto lo crea `policy/execution_control/migrations/001_governed_execution.sql`
 (7 tablas, 10 triggers).
 
+### Desplegar este PR en `/srv/jax-prod/jax` -- sin esto no hay paso 6 ni migraciones idempotentes
+**BLOCK-A, ronda 5 de revisión -- corrige una afirmación falsa de la
+ronda 4.** La ronda 4 decía que `/srv/jax-prod/jax` en `2794cf3` "YA es
+posterior al merge que agrega `scripts/generar_manifiesto_identidad.py`,
+así que ese checkout SÍ tiene el script hoy". **Eso es falso, verificado
+contra el árbol real, no contra lo que decía la ronda anterior**: el
+generador lo agrega `cd764f5`
+("feat(jax#260): generador del manifiesto de identidad de implementación"),
+que vive SÓLO en esta rama sin mergear (`feat/manifiesto-identidad`) --
+`git merge-base --is-ancestor cd764f5 2794cf3` confirma que NO es
+ancestro, y `git -C /srv/jax-prod/jax show HEAD:scripts/generar_manifiesto_identidad.py`
+da "path does not exist". El error de la ronda 4 fue medir el COMMIT
+correctamente (`2794cf3`, con fecha) pero SUPONER sin verificarlo que ese
+commit ya incluía el merge de este PR -- exactamente lo que el Principio
+I prohíbe: medir dos veces, no una vez y adivinar la segunda.
+
+Esto no es sólo el script ausente: las migraciones instaladas en
+`/srv/jax-prod/jax` en `2794cf3` tampoco tienen la idempotencia de la
+ronda 1 de revisión de este PR -- medido con `grep -c "CREATE TRIGGER IF
+NOT EXISTS"` contra el archivo real en ese commit: **0**, contra **22**
+en esta rama. Aplicar las migraciones del paso 4/5 tal como están hoy en
+disco corta en el primer `CREATE TRIGGER` con "already exists" ante
+cualquier re-run a medio aplicar (ver la nota de idempotencia más abajo).
+
+**Por eso este PR tiene que estar mergeado y desplegado en
+`/srv/jax-prod/jax` ANTES de tocar el paso 4/5 de abajo** -- el
+procedimiento normal de despliegue de este repo, corrido como `jaxsvc`
+por el mismo motivo de `dubious ownership` que el paso 6:
+
+```bash
+sudo -u jaxsvc git -C /srv/jax-prod/jax fetch origin
+sudo -u jaxsvc git -C /srv/jax-prod/jax reset --hard origin/master
+git -c safe.directory=/srv/jax-prod/jax -C /srv/jax-prod/jax log -1 --oneline   # confirmar el commit real
+test -x /srv/jax-prod/jax/scripts/generar_manifiesto_identidad.py && echo "OK -- el generador ya está en este checkout"
+```
+
+`origin/master` asume que este PR ya está mergeado a `master` en el
+remoto -- si todavía no lo está, este comando despliega lo último que SÍ
+está mergeado, NO este PR. Mergear es una decisión de Fernando, no algo
+que este runbook dispare por sí solo.
+
 ### 4 y 5. Aplicar las dos migraciones y otorgar privilegios -- una sola sesión, con un usuario ADMIN
 **Crear los esquemas (`CREATE SCHEMA`/`TABLE`/`TRIGGER`) no es un
 privilegio de aplicación, aunque el usuario de aplicación termine con
@@ -265,13 +306,25 @@ nuevo:
 
 ```bash
 mysql --defaults-extra-file="$CNF" <<EOF
-GRANT ALL PRIVILEGES ON jax_evidence.* TO 'jaxappuser'@'%';
-GRANT ALL PRIVILEGES ON jax_execution.* TO 'jaxappuser'@'%';
+GRANT ALL PRIVILEGES ON jax_evidence.* TO '<JAX_DB_USER>'@'<host>';
+GRANT ALL PRIVILEGES ON jax_execution.* TO '<JAX_DB_USER>'@'<host>';
 FLUSH PRIVILEGES;
 EOF
 ```
-(sustituir `'jaxappuser'@'%'` por el usuario real de `JAX_DB_USER` en
-`/etc/jax/.env` — no se cita a mano acá porque es una credencial.)
+(sustituir `<JAX_DB_USER>` por el usuario real de `JAX_DB_USER` en
+`/etc/jax/.env` — no se cita a mano acá porque es una credencial. **MINOR-C
+(ronda 5 de revisión): `<host>` también hay que sustituirlo, y NO por
+`%`.** "Sustituir por el usuario real" sin decir esto último deja
+`'jaxappuser'@'%'` → `'jax_user'@'%'` -- una cuenta que no existe: la
+cuenta real de este entorno tiene el host ACOTADO, no `%`. MariaDB
+matchea `GRANT`/autenticación por el par (usuario, host) EXACTO; un
+`GRANT` a `'jax_user'@'%'` cuando la cuenta real es
+`'jax_user'@'172.30.5.%'` crea una fila nueva sin tocar la real, y el
+usuario de aplicación real sigue sin los privilegios -- exactamente el
+mismo síntoma que MAJOR-1 pero por la razón contraria. Sacar el host
+EXACTO con `SELECT CURRENT_USER();` corrido por la propia aplicación (o,
+desde la cuenta admin, `SELECT user, host FROM mysql.user WHERE user =
+'<JAX_DB_USER>'`), no adivinarlo.)
 
 **Recién ahora se borra `$CNF`**, al final de los dos pasos:
 
@@ -279,23 +332,24 @@ EOF
 rm -f "$CNF"; trap - EXIT
 ```
 
-**Antes de generar, un aviso de secuencia (MINOR de la ronda 2, hecho
-corregido en la ronda 4 -- el commit citado había quedado obsoleto).** La
-ronda 1 citaba `e09c3b3`, correcto cuando se escribió pero superado por
-un deploy normal de otra sesión antes de que este PR llegara a esta
-ronda. **Medido en vivo en hall9000 el 2026-09-22 ~22:51 UTC**
-(`git -C /srv/jax-prod/jax rev-parse HEAD`): `/srv/jax-prod/jax` está en
-`2794cf3` -- YA es posterior al merge que agrega
-`scripts/generar_manifiesto_identidad.py`, así que ese checkout SÍ tiene
-el script hoy. **Esto es una VERDAD OPERACIONAL, caduca por diseño --
-volver a medir con el comando de arriba antes de confiar en este número,
-no reusarlo de este archivo.** Además, hoy mismo hay DOS estados
-distintos a la vez, y es justo el escenario que este runbook existe para
-manejar: el checkout en disco está en `2794cf3` (nuevo), pero el proceso
-`jax-las-manos` VIVO sigue corriendo desde las 14:38 CST con el código
-VIEJO (confirmado con `systemctl status`, ~8h de antigüedad contra un
-commit de las 22:38) -- eso es exactamente lo que la PRECONDICIÓN del
-paso 9 (antes de reiniciar) y el gate `INSUFFICIENT_EVIDENCE` existen
+**Antes de generar, un aviso de secuencia (MINOR de la ronda 2; hecho
+corregido en la ronda 4 y otra vez en la ronda 5 -- las dos veces por
+confiar en un número sin volver a medirlo en el momento correcto).** La
+ronda 1 citaba `e09c3b3`; la ronda 4 lo corrigió a `2794cf3` (medido en
+vivo el 2026-09-22 ~22:51 UTC) pero de ahí SUPUSO, sin verificarlo, que
+ese commit "ya era posterior al merge que agrega
+`scripts/generar_manifiesto_identidad.py`" -- **falso**: ese script lo
+agrega `cd764f5`, que en `2794cf3` todavía NO está mergeado (ver la
+sección nueva "Desplegar este PR en `/srv/jax-prod/jax`", antes del paso
+4/5, con la verificación real y el comando de despliegue). **Cualquier
+commit citado acá es una VERDAD OPERACIONAL, caduca por diseño -- volver
+a medir con `git -C /srv/jax-prod/jax rev-parse HEAD` en el momento,
+nunca reusar un número de este archivo, y nunca dar por hecho qué
+contiene un commit sin comprobarlo (`git merge-base --is-ancestor`, o
+`git show <commit>:<ruta>` sobre el archivo puntual).** Además, el mismo
+día hubo DOS estados distintos a la vez -- el checkout en disco más
+nuevo que el proceso `jax-las-manos` VIVO -- y es justo el escenario que
+la PRECONDICIÓN del paso 9 y el gate `INSUFFICIENT_EVIDENCE` existen
 para atrapar.
 
 El script importa `_V1_REQUIRED_SOURCE_PATHS` desde SU PROPIO checkout
@@ -305,14 +359,11 @@ contra un prod desactualizado, produce un manifiesto con la LISTA de
 archivos requerida por el código nuevo pero los BYTES del código viejo
 (cuando ni siquiera fallan por ausencia, dos versiones que no se
 corresponden). **Orden correcto, siempre:** 1) desplegar el código nuevo
-en `/srv/jax-prod/jax` primero (el paso normal de deploy de este repo);
+en `/srv/jax-prod/jax` primero (la sección nueva antes del paso 4/5, con
+la verificación de que el script YA está ahí -- no darlo por supuesto);
 2) recién ahí, invocar `/srv/jax-prod/jax/scripts/generar_manifiesto_identidad.py`
 -- el script DE ESE checkout, no el de un worktree de desarrollo -- con
-`--repo-root /srv/jax-prod/jax`; 3) volver a correr
-`git -C /srv/jax-prod/jax rev-parse HEAD` inmediatamente antes de
-generar -- el número de este párrafo es sólo evidencia de que hoy
-2026-09-22 el checkout YA tenía el script, no una garantía de que siga
-así cuando se ejecute este runbook.
+`--repo-root /srv/jax-prod/jax`.
 
 ### 6. Crear el directorio de destino, y generar el manifiesto directo ahí
 `/etc/jax` es `root:root 755` y `/etc/jax/build/` **no existe** la primera
@@ -629,6 +680,39 @@ else:
 
 # 3) grants del usuario de aplicación -- el mismo usuario que va a usar el
 #    proceso NUEVO, consultado con sus propias credenciales (MAJOR-1).
+#    MAJOR-A (ronda 5 de revisión): el chequeo de la ronda 4 era
+#    `"ALL PRIVILEGES" in grants and "jax_evidence" in grants and
+#    "jax_execution" in grants` -- un substring SIN esquema. El usuario de
+#    aplicación YA puede tener "ALL PRIVILEGES" sobre OTRO esquema (p.ej.
+#    jax_memory) y una línea cualquiera que sólo mencione "jax_evidence"
+#    (aunque sea con SELECT nomás) alcanza para dar el substring por
+#    satisfecho -- exactamente el escenario de MAJOR-1 (GRANT SELECT en
+#    vez de ALL PRIVILEGES) pasando GO y muriendo en el primer INSERT real.
+#    Se reusa acá el mismo parser con alcance real que ya se escribió para
+#    el chequeo de la cuenta admin en el paso 4/5 (MINOR-4), portado a
+#    Python en vez de bash.
+import re as _re
+
+
+def _grants_con_alcance_ok(texto_grants):
+    objetivos_validos = {"*.*", "`jax_evidence`.*", "jax_evidence.*",
+                          "`jax_execution`.*", "jax_execution.*"}
+    for linea in texto_grants.splitlines():
+        linea = linea.strip()
+        if not linea.upper().startswith("GRANT "):
+            continue
+        m = _re.match(r"^GRANT (.+) ON (\S+) TO .*$", linea, _re.IGNORECASE)
+        if not m:
+            continue
+        privilegios, objetivo = m.group(1), m.group(2)
+        if objetivo not in objetivos_validos:
+            continue   # privilegio sobre otro esquema: no cuenta para este gate
+        privs = [p.strip().upper() for p in privilegios.split(",")]
+        if "ALL PRIVILEGES" in privs:
+            return True
+    return False
+
+
 con = connect()
 try:
     cur = con.cursor()
@@ -636,10 +720,10 @@ try:
     grants = "\n".join(row[0] for row in cur.fetchall())
 finally:
     con.close()
-if "ALL PRIVILEGES" in grants and "jax_evidence" in grants and "jax_execution" in grants:
-    print("OK  grants del usuario de aplicación (ALL PRIVILEGES sobre jax_evidence y jax_execution)")
+if _grants_con_alcance_ok(grants):
+    print("OK  grants del usuario de aplicación (ALL PRIVILEGES sobre jax_evidence y jax_execution, con alcance real)")
 else:
-    fallas.append("grants del usuario de aplicación insuficientes (ver MAJOR-1, paso 4/5):\n" + grants)
+    fallas.append("grants del usuario de aplicación insuficientes o sin alcance sobre jax_evidence/jax_execution (ver MAJOR-1, paso 4/5):\n" + grants)
 
 if fallas:
     print("\nNO-GO -- no reiniciar. Fallas:")
@@ -798,7 +882,8 @@ retrying anything.
   `TRIGGER` — con el esquema perfectamente instalado pero sin
   `ALL PRIVILEGES` (paso 4/5), la consulta puede volver vacía y este mismo
   error aparece sin que falte nada de verdad. Confirmar con
-  `SHOW GRANTS FOR 'jaxappuser'@'%'` antes de tocar el esquema.
+  `SHOW GRANTS FOR '<JAX_DB_USER>'@'<host>';` (host EXACTO, no `%` --
+  MINOR-C, ver el `GRANT` del paso 4/5) antes de tocar el esquema.
 - `NO-GO: la cuenta admin no muestra CREATE+TRIGGER...` → paso 4/5, la
   cuenta usada para migrar no es admin -- no usar `$JAX_DB_USER` acá.
   **Esto es un AVISO, no un corte de shell** (ronda 4 de revisión — la
@@ -888,29 +973,71 @@ reiniciar el `NO-GO` no se resuelve rápido, el camino de vuelta es un
 `git reset --hard` al último commit que NO exige el manifiesto, más un
 reinicio.
 
-**1) Encontrar el commit al que volver.** El manifiesto lo exige
+**MAJOR-B (ronda 5 de revisión): el radio de impacto de este rollback,
+medido, no supuesto.** `a444a9e..2794cf3` son **180 commits**, 21 de
+ellos merges de PR -- incluidos #256, #257, #258, #259, **#260 (este
+mismo trabajo)**, #261, #262, #263 y #265. Un `git reset --hard` a
+`a444a9e` no vuelve atrás sólo el manifiesto: vuelve atrás TODO lo que
+esos 21 PRs cambiaron. Y `/srv/jax-prod/jax` no es sólo LAS MANOS --
+medido con `systemctl show -p WorkingDirectory` contra las unidades
+reales de este host, **seis servicios systemd** corren código de ESTE
+checkout: `jax-las-manos`, `jax-ejecutor-proxy`,
+`jax-limpiar-bases-de-test`, `jax-memory-synthesis`, `jax-memory-worker`,
+`jax-revisar-indice-vectorial` (los últimos cuatro además tienen su
+propio `.timer` que los dispara periódicamente). **El paso 2 de abajo
+sólo reinicia `jax-las-manos`** -- el `reset --hard` del código en disco
+afecta a los seis, pero los otros cinco siguen corriendo con el código
+VIEJO en memoria hasta que también se reinicien (o hasta que su próximo
+disparo de `.timer` los relance ya contra el código rebajado). Antes de
+decidir un rollback, confirmar con Fernando si alguno de los otros cinco
+importa para el incidente en curso -- normalmente no, para un rollback de
+emergencia acotado a LAS MANOS, pero es una decisión, no un hecho
+automático.
+
+**Cómo volver a avanzar después de un rollback.** Un `reset --hard` deja
+el checkout DETRÁS del remoto -- no alcanza con "esperar al próximo
+deploy": el próximo despliegue normal (`git fetch` + `reset --hard
+origin/master`, el mismo paso que este runbook agrega antes del paso 4/5)
+VUELVE A TRAER el commit con el manifiesto exigido, y sin completar los
+pasos 4 a 8 de este runbook antes de ese redeploy, se repite el mismo
+apagón. El camino de vuelta es: resolver la causa del `NO-GO` (ver el
+triage del paso 9), volver a desplegar (`git fetch` + `reset --hard
+origin/master`), completar los pasos 4 a 8 contra ese checkout, y recién
+ahí reintentar el paso 9 -- nunca reintentar el reinicio sin haber
+corrido la PRECONDICIÓN de nuevo.
+
+**1) Encontrar el commit al que volver -- como `jaxsvc`, no como el
+operador (BLOCK-B, ronda 5 de revisión -- corrige un comando que fallaba
+tal como estaba escrito).** El manifiesto lo exige
 `_configure_b7_trusted_runtime` (`las_manos/server.py`, jax#260). Esto se
 busca en el momento, con el repo real -- no se copia un hash citado en
 este archivo, porque puede haber más commits después que la reintroduzcan
-de otra forma:
+de otra forma. **La ronda 4 escribía esto con `cd /srv/jax-prod/jax` y
+`git log` directo, como el operador -- confirmado en rojo:** sale `fatal:
+detected dubious ownership`, `INTRODUCTORIO` queda vacío, y el paso 2 de
+abajo termina siendo `reset --hard "^"` -- justo en el peor momento para
+que un comando falle así. Mismo motivo que el paso 6: correr como
+`jaxsvc`, dueño del checkout:
 
 ```bash
-cd /srv/jax-prod/jax
-INTRODUCTORIO=$(git log -S"_configure_b7_trusted_runtime" --oneline --reverse -- las_manos/server.py | head -1 | cut -d' ' -f1)
+INTRODUCTORIO=$(sudo -u jaxsvc git -C /srv/jax-prod/jax log -S"_configure_b7_trusted_runtime" --oneline --reverse -- las_manos/server.py | head -1 | cut -d' ' -f1)
 OBJETIVO_ROLLBACK="${INTRODUCTORIO}^"
 # verificación: tiene que dar 0 -- ese commit todavía no tiene la función
-git show "$OBJETIVO_ROLLBACK":las_manos/server.py | grep -c _configure_b7_trusted_runtime
+sudo -u jaxsvc git -C /srv/jax-prod/jax show "$OBJETIVO_ROLLBACK":las_manos/server.py | grep -c _configure_b7_trusted_runtime
 ```
 
-Medido en vivo el 2026-09-22: `INTRODUCTORIO=55a9ad1` ("fix: close Block 7
-evidence trust boundaries"), `OBJETIVO_ROLLBACK=a444a9e` ("fix: preserve
-MariaDB integration migration isolation", 2026-09-21) — 0 coincidencias,
-confirmado. **Este hash también es una VERDAD OPERACIONAL de hoy: volver
-a correr el comando de arriba antes de confiar en un valor citado acá.**
+Medido en vivo el 2026-09-22, ya como `jaxsvc`: `INTRODUCTORIO=55a9ad1`
+("fix: close Block 7 evidence trust boundaries"),
+`OBJETIVO_ROLLBACK=a444a9e` ("fix: preserve MariaDB integration migration
+isolation", 2026-09-21) — 0 coincidencias, confirmado. **Este hash
+también es una VERDAD OPERACIONAL de hoy: volver a correr el comando de
+arriba antes de confiar en un valor citado acá.**
 
 **2) Rollback -- mismo usuario dueño del checkout que el paso 6 (mismo
 motivo: `dubious ownership` si se corre como cualquier otro usuario), y
-`sudo` en el restart igual que el MINOR-3 de arriba:**
+`sudo` en el restart igual que el MINOR-3 de arriba. Sólo reinicia
+`jax-las-manos` -- ver el radio de impacto de arriba antes de asumir que
+esto alcanza:**
 
 ```bash
 sudo -u jaxsvc git -C /srv/jax-prod/jax reset --hard "$OBJETIVO_ROLLBACK"
