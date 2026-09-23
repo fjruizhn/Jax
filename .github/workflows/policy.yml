@@ -670,8 +670,14 @@ jobs:
           #   la lista de `LLAMADORES` es datos, no un test; el piso se queda
           #   en 157. Corrida COMPLETA de este job confirmada en rojo antes
           #   del arreglo (mismo mensaje que reportó CI) y en verde después.
-          grep -qE "^157 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 157 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 157 -> 158 (2026-09-23, pendiente 631, índice por propiedad): +1 en
+          #   jacobs/_cupo_io_test.py -- PredicadoDelConteoTest (puro): el
+          #   predicado nuevo del EXPLAIN del cupo (índice con PREFIJO status,
+          #   ref/range, 'Using index', en vez de idx_pipelines_status por
+          #   nombre) rechaza una fila mala. Medido local, MISMO comando, base
+          #   de sesión: master 157 passed -> rama 158 passed.
+          grep -qE "^158 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 158 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -5562,8 +5568,15 @@ jobs:
           #   nuevo). Medido en local (127.0.0.1:3308, base de sesión
           #   jax_memory_test_auto<pid>), corrida completa de los 24
           #   archivos + 2 node ID del job: 167 passed, 0 failed.
-          grep -qE "^167 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 167 tests CORRIDOS."; exit 1; }
+          # 167 -> 169 (2026-09-23, pendiente 631, índice por propiedad): +1 en
+          #   tests/test_jacobs_continuar_db.py y +1 en
+          #   tests/test_jacobs_reaper_cas_db.py -- los dos puros: el predicado
+          #   nuevo (índice con PREFIJO status en vez de idx_pipelines_status
+          #   por nombre) rechaza una fila EXPLAIN mala. Medido local, MISMO
+          #   comando, base de sesión: master 160 -> rama 162 (+2; el local
+          #   da 7 menos que el runner en las dos ramas por igual).
+          grep -qE "^169 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 169 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira
