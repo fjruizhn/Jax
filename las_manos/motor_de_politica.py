@@ -8,6 +8,24 @@ comando no prohibido, blast radius aceptable.
 "Los principios no ejecutan rollback. Los principios no detienen un rm -rf."
 — Thot
 
+**Por qué este archivo NO se llama `policy.py` (renombrado 2026-09-22).**
+La raíz del repo tiene un paquete `policy/` (namespace package, sin
+`__init__.py`, a propósito: `policy/enforcement_evidence`,
+`policy/execution_control`, etc.). LAS MANOS arranca con
+`WorkingDirectory=las_manos/` vía `uvicorn server:app`, y con eso
+`sys.path[0]` termina siendo el directorio de trabajo actual (verificado a
+mano contra el venv real de producción, con y sin `PYTHONPATH`) — por
+delante de CUALQUIER `PYTHONPATH`. Un `las_manos/policy.py` shadowea
+`policy/` de la raíz para cualquier import de primer nivel (`import
+policy...`) hecho desde código que corre con ese cwd, y `PYTHONPATH` no lo
+arregla: el cwd siempre gana. jax#260 agregó
+`_configure_b7_trusted_runtime()` (`server.py`) importando
+`policy.enforcement_evidence.*`/`policy.execution_control.*` de la raíz, y
+la colisión tumbó el arranque en producción (rollback a `e09c3b3`). La
+solución que no depende del orden de `sys.path` es que los dos nombres de
+primer nivel sean distintos — de ahí este nombre.
+Ver `tests/test_arranque_las_manos_no_shadowea_policy.py`.
+
 En memoria de Jairo Urbina.
 """
 from __future__ import annotations

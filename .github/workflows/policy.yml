@@ -1476,6 +1476,8 @@ jobs:
           tests/test_facet_health_tabla_exclusiva.py
           tests/test_delete_de_tablas_compartidas.py
           tests/test_frente_e_retiros.py
+          tests/test_arranque_las_manos_no_shadowea_policy.py
+          tests/test_las_manos_no_shadowea_paquetes_de_la_raiz.py
           tests/test_credencial_sin_fallback_env.py
           tests/test_retiro_de_la_voz.py
           tests/test_max_steps_una_sola_constante.py
@@ -1626,6 +1628,8 @@ jobs:
             tests/test_facet_health_tabla_exclusiva.py \
             tests/test_delete_de_tablas_compartidas.py \
             tests/test_frente_e_retiros.py \
+            tests/test_arranque_las_manos_no_shadowea_policy.py \
+            tests/test_las_manos_no_shadowea_paquetes_de_la_raiz.py \
             tests/test_credencial_sin_fallback_env.py \
             tests/test_retiro_de_la_voz.py \
             tests/test_max_steps_una_sola_constante.py \
@@ -4042,8 +4046,24 @@ jobs:
           # jacobs-gobernanza-db) + 1 de test_cola_uso_escritores.py (sin checkout de
           # jax-platform, lo cubre el job `mirror-sync`). Resultado, dos corridas: 2671 passed,
           # 45 skipped, 1 xfailed -- EXACTO, sin ajustar a mano.
-          grep -qE "^2671 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2671 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          #
+          # 2671 -> 2673 (2026-09-22, fix/arranque-policy-shadow, ronda 1): +2 tests en
+          # tests/test_arranque_las_manos_no_shadowea_policy.py (jax#260 rompió el
+          # arranque real de LAS MANOS en producción -- las_manos/policy.py shadowea
+          # policy/ de la raíz porque uvicorn deja el cwd en sys.path[0], por delante
+          # de PYTHONPATH; renombrado a las_manos/motor_de_politica.py). Los dos
+          # arrancan un proceso Python nuevo (sin DB ni red: JAX_DB_PORT=1) -- no suman
+          # a "45 skipped" ni cambian ninguno de los otros conteos.
+          #
+          # 2673 -> 2674 (2026-09-22, misma rama, ronda 2 de revisión de PR#262,
+          # MAJOR-2): +1 test en tests/test_las_manos_no_shadowea_paquetes_de_la_raiz.py
+          # -- barrera para que el PRÓXIMO shadow (las_manos/ops.py, las_manos/tools.py,
+          # ...) no dependa de nuevo de que alguien lo diagnostique a mano en producción.
+          # Puro (sin DB, sin red, sólo filesystem + `git check-ignore`) -- no suma a
+          # "45 skipped" ni cambia ningún otro conteo. Verificado en rojo contra un
+          # `las_manos/ops.py` fantasma creado a propósito y borrado en el mismo paso.
+          grep -qE "^2674 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2674 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

@@ -59,7 +59,7 @@ _IMPORTS_RETIRADOS = {
     "jax/muscles/base.py": {"os", "decrypt_secret"},
     "jax/muscles/ollama_muscle.py": {"MuscleTimeoutError"},
     "las_manos/audit.py": {"os"},
-    "las_manos/policy.py": {"re"},
+    "las_manos/motor_de_politica.py": {"re"},
     "las_manos/server.py": {"uuid"},
 }
 
