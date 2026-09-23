@@ -365,6 +365,51 @@ la verificación de que el script YA está ahí -- no darlo por supuesto);
 -- el script DE ESE checkout, no el de un worktree de desarrollo -- con
 `--repo-root /srv/jax-prod/jax`.
 
+### 5.5. Sembrar las definiciones de control -- sin esto, el paso 9 NO PUEDE dar GO
+
+**Agregado por jax#266, tras ejecutar este runbook completo por primera vez
+el 2026-09-22 y chocarse con esto en el último paso.** Aplicar la migración
+del paso 4 deja `jax_evidence.control_definitions` **en CERO filas**: la
+migración crea la tabla, nada la llena. En producción **nadie la sembraba** --
+el único escritor era `MariaDBEvidenceStore.__persist_control_definition`,
+privado, y sólo lo llamaba la fixture `_b8_runtime_identity_fixture` de
+`tests/policy/test_execution_mariadb_integration.py`.
+
+Con la tabla vacía, `readonly_status_snapshot` (`mariadb_store.py`, función
+`capture()`) exige una fila EXACTA para la definición empaquetada, no la
+encuentra, y levanta `EvidenceArtifactIntegrityError("snapshot definition
+mismatch")`. El `except Exception` de `jaxctl/runtime.py::control_status` lo
+convierte en `{"classification":"UNAVAILABLE"}` con exit 2 **sin la clave
+`verdict`** -- o sea, el paso 9 de abajo, que sólo acepta `SUPPORTED`, era
+INALCANZABLE en cualquier despliegue nuevo, y su triage mandaba a revisar el
+usuario que corre `jaxctl`, que no era el problema.
+
+Se corre en CADA despliegue, igual que el manifiesto: es idempotente (el
+store inserta sólo si falta, y compara si ya está), y un control nuevo en el
+catálogo necesita su fila antes de que alguien lo consulte. Mismo patrón que
+los pasos 7 y 9 para las variables -- del proceso vivo, nunca sourceando
+`/etc/jax/.env`:
+
+```bash
+sudo -u jaxsvc bash -c '
+  cd /srv/jax-prod/jax &&
+  MAINPID=$(systemctl show -p MainPID --value jax-las-manos) &&
+  while IFS= read -r -d "" e; do
+    case "$e" in JAX_DB_HOST=*|JAX_DB_PORT=*|JAX_DB_USER=*|JAX_DB_PASSWORD=*) export "$e" ;;
+  esac; done < "/proc/$MAINPID/environ" &&
+  PYTHONPATH=/srv/jax-prod/jax /srv/jax-prod/jax/las_manos/.venv/bin/python3 \
+    scripts/sembrar_definiciones_de_control.py'
+```
+
+Imprime una línea por control (`sembrado` / `ya estaba`) y un resumen. Si sale
+`definition collision`, **no es algo que se arregle pisando la fila**: la base
+tiene una definición que no coincide con la del código desplegado, que es
+deriva entre los dos -- resolver eso antes de seguir.
+
+Si el primer despliegue todavía no tiene un `jax-las-manos` vivo de dónde leer
+el entorno, vale la misma excepción del paso 7 (`sudo -n cat /etc/jax/.env`
+una vez, exportando a mano).
+
 ### 6. Crear el directorio de destino, y generar el manifiesto directo ahí
 `/etc/jax` es `root:root 755` y `/etc/jax/build/` **no existe** la primera
 vez -- root lo crea una sola vez, con el dueño ya correcto, para que
@@ -923,6 +968,12 @@ retrying anything.
 - `UntrustedImplementationIdentityError` ("build manifest inválido o
   drift") → el código cambió después de generar el manifiesto del paso 6:
   regenerar (ver Fail-closed condition, abajo).
+- El paso 9 imprime `NO-GO: exit=... (sin campo verdict...)` con
+  `"detail":"Block 7 authoritative status unavailable"` → **primero mirar si
+  se corrió el paso 5.5**: con `control_definitions` vacía el síntoma es
+  EXACTAMENTE éste, y correr el sembrador lo resuelve sin tocar nada más
+  (medido en vivo el 2026-09-22, que es de donde salió ese paso). Recién si
+  el paso 5.5 ya se corrió, seguir con lo de abajo.
 - El paso 9 imprime `NO-GO: exit=... (sin campo verdict...)` → casi
   siempre `"classification":"UNAVAILABLE"` en `$SALIDA`: `jaxctl` no pudo
   leer o verificar la identidad -- lo primero a revisar es si corrió como
