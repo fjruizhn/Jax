@@ -944,8 +944,8 @@ jobs:
           #   despues de confirmar. Medido en local (MISMO comando, MariaDB
           #   real 127.0.0.1:3308): 76 -> 78 passed. Si el runner da otro
           #   numero, manda el runner.
-          grep -qE "^78 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 78 tests CORRIDOS (no skipeados)."; exit 1; }
+          grep -qE "^159 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 159 tests CORRIDOS (no skipeados)."; exit 1; }
 
   output-validator-regression:
     runs-on: ubuntu-latest
