@@ -16,7 +16,10 @@ from pathlib import Path
 RAIZ = Path(__file__).resolve().parents[2]
 REGLAS = RAIZ / "policy" / "rules"
 RAICES_DE_CODIGO = ("las_manos", "jax", "jacobs", "policy", "scripts", "procesamiento",
-                    "jaxctl", "loadtest", "ops", "config", "tests")
+                    "jaxctl", "loadtest", "ops", "config", "tests", "docs")
+# Fuera a propósito: rutas de OTRAS instalaciones (`/opt/jax/docs/…`, citadas con
+# su sha256 como texto verbatim), `~/…`, `./…` y URLs: no hay repo en CI contra el
+# cual comprobarlas, y adivinar da rojos falsos.
 EXTENSIONES = "py|md|toml|yaml|yml|json|sh"
 # Ruta relativa a una carpeta de código de este repo, o absoluta bajo el checkout
 # (/home/fruiz/jax/…). El lookbehind excluye `:` para que una cita HISTÓRICA con
