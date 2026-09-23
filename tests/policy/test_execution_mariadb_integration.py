@@ -439,6 +439,46 @@ def test_governed_execution_authoritative_mariadb_contract():
         store.load_execution(execution.execution_id)
 
 
+
+def _exigir_servidor_desechable() -> None:
+    """Freno del `DROP DATABASE jax_evidence`, atado a lo que se DESTRUYE.
+
+    (Revisión adversarial de jax#266, BLOCK nuevo.) La primera versión de este
+    freno miraba `JAX_DB_NAME.startswith("jax_memory_test")` -- y eso valida un
+    nombre mientras se borra OTRO: `jax_evidence` es fija, no deriva de
+    `JAX_DB_NAME` ni del sufijo de sesión de `base_de_test.py`. Host y puerto
+    salen del entorno, así que en hall9000 una sesión con `/etc/jax/.env`
+    cargado apunta a la MariaDB de PRODUCCIÓN (`127.0.0.1:3308`) con un
+    `JAX_DB_NAME` perfectamente válido -- y el `DROP` se llevaba puesta la
+    evidencia real, que es append-only por trigger y no se puede restaurar
+    desde adentro.
+
+    El freno correcto mira el SERVIDOR, no el nombre de la base de tests: un
+    servidor que hospeda `jax_memory` es producción (o una copia de ella) y
+    este test no corre ahí. En el contenedor del job de CI --
+    `MARIADB_DATABASE: jax_memory_test`, ver `.github/workflows/policy.yml` --
+    `jax_memory` no existe, así que el job sigue corriendo el test completo.
+
+    Falla en vez de saltear: este test es la ÚNICA prueba contra base real de
+    que la siembra siembra. Saltearlo en silencio en la máquina de desarrollo
+    sería exactamente el "verde sin haber hecho el trabajo" que el propio test
+    existe para impedir.
+    """
+    connection = _connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("SHOW DATABASES LIKE 'jax_memory'")
+        hospeda_produccion = cursor.fetchone() is not None
+    finally:
+        connection.close()
+    if hospeda_produccion:
+        raise AssertionError(
+            f"el servidor {os.environ.get('JAX_DB_HOST')}:{os.environ.get('JAX_DB_PORT')} "
+            "hospeda la base 'jax_memory': este test BORRA el esquema jax_evidence y no "
+            "puede correr ahí. Usá un MariaDB desechable (el job governed-execution-mariadb "
+            "levanta uno; en local, un contenedor propio).")
+
+
 def test_sembrar_definiciones_de_control_es_idempotente(tmp_path):
     """El paso de despliegue de jax#266, contra la MariaDB real y DESDE CERO.
 
@@ -471,13 +511,7 @@ def test_sembrar_definiciones_de_control_es_idempotente(tmp_path):
     from policy.enforcement_evidence.control_registry import load_control_definition
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
 
-    # FRENO: esto BORRA un esquema. Sólo puede correr contra una base de test.
-    # `jax_evidence` no está cubierto por las barreras de `base_de_test.py`
-    # (que miran `jax_memory`), así que el freno va acá, explícito.
-    base = os.environ.get("JAX_DB_NAME", "")
-    assert base.startswith("jax_memory_test"), (
-        f"JAX_DB_NAME={base!r} no es una base de test: este test borra el esquema "
-        "jax_evidence y NO puede correr contra producción")
+    _exigir_servidor_desechable()
 
     connection = _connection()
     try:
@@ -539,9 +573,33 @@ def test_persistir_una_definicion_exige_el_contexto_de_composicion_fija():
 
     evidence = MariaDBEvidenceStore(_connection)
 
-    # El store no expone NINGÚN escritor público para las definiciones.
-    assert not [nombre for nombre in dir(evidence)
-                if "persist" in nombre and not nombre.startswith("_")]
+    # La superficie pública del store es una LISTA CERRADA, no un filtro por
+    # nombre. (Revisión adversarial de jax#266, MINOR nuevo: el chequeo
+    # anterior buscaba la subcadena "persist", y un método público llamado
+    # `sembrar_definicion` que escribía igual lo pasaba en verde -- el mismo
+    # defecto de forma que buscar `window.confirm` y no ver `confirm(`.)
+    # Cualquier método público NUEVO rompe este test, se llame como se llame:
+    # agregarlo obliga a declarar acá que no escribe.
+    publicos = {nombre for nombre in dir(evidence)
+                if not nombre.startswith("_") and callable(getattr(evidence, nombre))}
+    assert publicos == {
+        # La ÚNICA escritura pública, y es contenido direccionado por hash:
+        # no puede pisar bytes distintos bajo el mismo hash (levanta
+        # EvidenceBlobHashMismatchError).
+        "put_evidence_blob",
+        # Todo lo demás es lectura.
+        "get_evidence_blob",
+        "load_implementation_identity",
+        "load_control_definition",
+        "load_evidence_artifact",
+        "load_assertion",
+        "load_enforcement_assertion",
+        "load_enforcement_observation",
+        "load_observation",
+        "observations",
+        "readonly_status_snapshot",
+        "derive_in_repeatable_read",
+    }, f"superficie pública del store cambiada: {sorted(publicos)}"
 
     with pytest.raises(EvidenceArtifactUntrustedError):
         evidence._MariaDBEvidenceStore__persist_control_definition(

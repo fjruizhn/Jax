@@ -46,8 +46,18 @@ def test_el_catalogo_declara_la_version_que_este_script_asume():
 
     catalogo = json.loads(RUTA_CATALOGO.read_text(encoding="utf-8"))
     assert catalogo["schema_version"] == "1.0"
-    assert {definicion.control_version for definicion in _controls.values()} == {VERSION_DEL_CATALOGO}
+    # Los IDs del catálogo son strings pelados, SIN versión embebida. Es lo
+    # que autoriza a `controles_empaquetados()` a ponerle VERSION_DEL_CATALOGO
+    # a cada uno. (Revisión adversarial de jax#266, MINOR nuevo: comparar
+    # `{d.control_version for d in _controls.values()} == {1}` era tautológico
+    # -- `ControlDefinition.__post_init__` YA rechaza cualquier versión != 1,
+    # así que ese assert no podía fallar por la vía que declaraba.)
+    assert all(isinstance(entrada, str) for entrada in catalogo["controls"])
+    assert not [entrada for entrada in catalogo["controls"] if "@" in entrada or "/v" in entrada], (
+        "el catálogo empezó a embeber versiones en el ID: `controles_empaquetados()` "
+        "las está ignorando y les pone VERSION_DEL_CATALOGO a todas")
     assert all(version == VERSION_DEL_CATALOGO for _cid, version in controles_empaquetados())
+    assert _controls
 
 
 def test_el_catalogo_vacio_o_ilegible_falla_cerrado(tmp_path: Path):
@@ -84,8 +94,9 @@ def test_los_bytes_sembrados_salen_del_REGISTRO_y_no_del_llamador():
     del registro -- la única que `require_trusted_definition` acepta, porque
     compara por identidad de objeto contra `_trusted`.
     """
+    import policy.enforcement_evidence.control_registry as registro
     from policy.enforcement_evidence.control_registry import (is_trusted_control_definition,
-                                                              load_control_definition)
+                                                              require_trusted_definition)
     from policy.enforcement_evidence.errors import EvidenceBlobMissingError
 
     recibidas = []
@@ -98,12 +109,27 @@ def test_los_bytes_sembrados_salen_del_REGISTRO_y_no_del_llamador():
             recibidas.append(definition)
             return definition
 
-    filas = sembrar(StoreDeMentira(), [("RULE.P10", 1)], emitir=lambda _linea: None)
+    # El sello de `_trusted` es GLOBAL y persiste entre tests: si otro test ya
+    # cargó este control, `is_trusted_control_definition` da True sin que ESTA
+    # siembra haya pasado por la API. Se vacía el sello a propósito para que el
+    # único sellador posible sea el `load_control_definition` de `sembrar()`.
+    # (Revisión adversarial de jax#266, MINOR nuevo: la versión anterior hacía
+    # `assert recibidas[0] is load_control_definition(...)` y esa MISMA llamada
+    # sellaba el objeto, con lo que el assert siguiente no podía fallar nunca.
+    # Mutación que la pasaba en verde: `sembrar()` tomando la definición del
+    # dict interno `_controls` en vez de la API que sella.)
+    sello_previo = dict(registro._trusted)
+    registro._trusted.clear()
+    try:
+        filas = sembrar(StoreDeMentira(), [("RULE.P10", 1)], emitir=lambda _linea: None)
 
-    assert filas == [("RULE.P10", 1, False)]
-    assert len(recibidas) == 1
-    assert recibidas[0] is load_control_definition("RULE.P10", 1)
-    assert is_trusted_control_definition(recibidas[0])
+        assert filas == [("RULE.P10", 1, False)]
+        assert len(recibidas) == 1
+        # Sellada por la propia siembra, con el sello vacío al empezar.
+        assert is_trusted_control_definition(recibidas[0])
+        require_trusted_definition(recibidas[0])   # el mismo guardia que usa el store
+    finally:
+        registro._trusted.update(sello_previo)
 
 
 def test_un_control_desconocido_corta_la_siembra():

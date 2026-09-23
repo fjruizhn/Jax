@@ -120,7 +120,18 @@ def _conexion():
         charset="utf8mb4", autocommit=False, connect_timeout=5)
 
 
-def sembrar(store, controles, *, emitir=print) -> list[tuple[str, int, bool]]:
+def _emitir_en_vivo(linea: str) -> None:
+    """`print` con `flush`: sin esto, con stdout redirigido a un log (que es
+    como el runbook lo corre, dentro de `sudo -u jaxsvc bash -c`), Python
+    bufferiza y las líneas salen recién al terminar el proceso. Un `SIGKILL`
+    a mitad (OOM, timeout de systemd) dejaba filas ya commiteadas y CERO
+    salida sobre cuáles -- justo el caso que la salida en vivo cubre.
+    Medido en la revisión adversarial de jax#266: `sys.stdout.line_buffering`
+    es False fuera de un TTY."""
+    print(linea, flush=True)
+
+
+def sembrar(store, controles, *, emitir=_emitir_en_vivo) -> list[tuple[str, int, bool]]:
     """Siembra cada control y devuelve (control_id, control_version, ya_estaba).
 
     `controles` son pares (control_id, control_version): la versión viaja
