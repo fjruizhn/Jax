@@ -62,8 +62,9 @@ _PRIMERA_COLUMNA_SQL = (
 def _fallas_del_conteo_por_status(fila, primera_columna):
     """Pendiente 631: se exige la PROPIEDAD del plan, no el nombre del índice.
     El COUNT del cupo va por ref/range sobre un índice que EMPIEZA por status
-    (hoy idx_pipelines_status / idx_pipelines_ocultos) y cubriente ('Using
-    index'). Devuelve la lista de fallas; vacía = pasa."""
+    (hoy idx_pipelines_ocultos; idx_pipelines_status se retiró el
+    2026-09-23) y cubriente ('Using index'). Devuelve la lista de fallas;
+    vacía = pasa."""
     fallas = []
     if fila.get("type") not in ("ref", "range"):
         fallas.append(f"type={fila.get('type')!r}, se esperaba ref o range")

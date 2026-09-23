@@ -957,8 +957,10 @@ _INDICES: list[tuple[str, str, str, bool]] = [
      "CREATE INDEX idx_steps_pipeline ON jacobs_steps (pipeline_id)", False),
     ("jacobs_steps", "idx_steps_status",
      "CREATE INDEX idx_steps_status ON jacobs_steps (status)", False),
-    ("jacobs_pipelines", "idx_pipelines_status",
-     "CREATE INDEX idx_pipelines_status ON jacobs_pipelines (status)", False),
+    # idx_pipelines_status (status) SALIO de esta lista el 2026-09-23
+    # (pendiente 631, parte B2): es redundante con idx_pipelines_ocultos
+    # (status, descartado_at), y ahora vive en `_INDICES_RETIRADOS` (abajo),
+    # que lo borra de las bases que todavia lo tienen.
     ("jacobs_pipelines", "idx_jacobs_pipelines_duenio",
      "CREATE INDEX idx_jacobs_pipelines_duenio ON jacobs_pipelines "
      "(user_id, tenant_id, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
@@ -1036,6 +1038,52 @@ _INDICES: list[tuple[str, str, str, bool]] = [
      "(user_id, tenant_id, visible, created_at) ALGORITHM=INPLACE LOCK=NONE", True),
 ]
 
+# --- Indices RETIRADOS -------------------------------------------------------
+# (tabla, indice retirado, indice que lo reemplaza, prefijo de columnas que el
+# reemplazo tiene que tener). `init_tables()` los borra DESPUES de crear los de
+# `_INDICES` -- ver `_retirar_indices`.
+#
+# Un indice que sale de `_INDICES` no desaparece de las bases que ya lo tienen
+# (produccion, las bases de test clonadas): sacarlo de la lista solo hace que
+# las bases NUEVAS no lo creen. Lo que se retira tiene que pasar por el MISMO
+# camino que lo que se crea -- init_tables() --, no por un DROP a mano que no
+# llega a un restore ni a otra copia de la base.
+#
+# idx_pipelines_status (status) -- pendiente 631, parte B2 (2026-09-23,
+# decision de Fernando): redundante con idx_pipelines_ocultos
+# (status, descartado_at). Medido en produccion: EXPLAIN identico con
+# IGNORE INDEX (idx_pipelines_status) en las cinco consultas que filtran por
+# status. Cada indice de
+# mas es una escritura de mas en cada INSERT/UPDATE de status. Los tests ya no
+# dependen del nombre (jax#271, jax-platform#158): exigen un indice con
+# PREFIJO status.
+#
+# El prefijo declarado es la PRECONDICION del borrado (fail-closed hacia
+# CONSERVAR): si el reemplazo no esta, esta IGNORED o no empieza por esas
+# columnas, el viejo NO se borra. idx_pipelines_ocultos es un indice acotado:
+# si su CREATE vence el lock_wait_timeout, el arranque sigue sin el, y borrar
+# el viejo en ese mismo arranque dejaria las consultas por status sin indice.
+_INDICES_RETIRADOS: list[tuple[str, str, str, tuple[str, ...]]] = [
+    ("jacobs_pipelines", "idx_pipelines_status", "idx_pipelines_ocultos", ("status",)),
+]
+
+# DROP INDEX en linea, sin caer en silencio a COPY. Medido contra MariaDB
+# 12.3.3 (2026-09-23, jacobs_pipelines CON la columna VIRTUAL `visible`
+# indexada por idx_pipelines_visibles -- la misma forma que produccion):
+#   ALGORITHM=INSTANT, LOCK=NONE -> 1846 "ALGORITHM=INSTANT is not supported.
+#                                   Reason: DROP INDEX. Try ALGORITHM=NOCOPY"
+#   ALGORITHM=NOCOPY,  LOCK=NONE -> OK
+#   ALGORITHM=INPLACE, LOCK=NONE -> OK
+# NOCOPY es el mas fuerte que funciona (INPLACE admite reconstruir la tabla;
+# NOCOPY no). Explicito para que, si una version futura no pudiera, FALLE con
+# error en vez de copiar la tabla bloqueando las escrituras de Jacobs.
+_ALGORITMO_DROP_INDEX = "ALGORITHM=NOCOPY, LOCK=NONE"
+
+# `Can't DROP INDEX ...; check that it exists`: otro init_tables() (dos
+# arranques solapados, un script de loadtest/) lo borro entre el chequeo de
+# information_schema y el DROP de este. El indice ya no esta: es un exito.
+_ER_CANT_DROP_FIELD_OR_KEY = 1091
+
 # Espera maxima por el metadata lock de un DDL acotado. El default de MariaDB
 # (lock_wait_timeout) es 86400 s: una transaccion larga sobre la tabla dejaria
 # el arranque colgado un dia entero, sin error.
@@ -1055,6 +1103,12 @@ _INDICES: list[tuple[str, str, str, bool]] = [
 # red de seguridad es el test de EXPLAIN de la plataforma en CI, que falla
 # si la consulta que lo necesita no lo usa.
 #
+# Desde 2026-09-23 se suma UN DDL acotado mas por cada indice de
+# `_INDICES_RETIRADOS` que todavia exista (hoy uno: idx_pipelines_status):
+# el peor caso pasa a 6 x 30 s = 180 s, y SOLO en el primer arranque despues
+# del despliegue -- en los siguientes el indice ya no esta y el chequeo de
+# information_schema lo salta sin DDL.
+#
 # Las columnas CONTRATO (status_previo/descartado_por/descartado_at/visible,
 # ver `_agregar_columna_acotada` mas abajo) usan el MISMO limite pero NO son
 # "solo rendimiento": fallan CERRADO. La primera que vence el MDL aborta
@@ -1064,6 +1118,48 @@ _INDICES: list[tuple[str, str, str, bool]] = [
 # se cayo antes).
 _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
+
+
+async def _ddl_acotado(cur, ddl: str) -> bool:
+    """Corre `ddl` con lock_wait_timeout de 30 s en ESTA sesion y restaura el
+    valor previo pase lo que pase (finally). True si corrio; False si vencio
+    la espera del metadata lock (1205). Cualquier OTRO error SUBE -- el
+    llamador decide que significa (p.ej. 1091 al retirar un indice).
+
+    Generalizado el 2026-09-23 de `_crear_indice_acotado` para que el DROP
+    de `_retirar_indices` tenga la misma espera acotada que el CREATE: sin
+    esto, un DROP detras de una transaccion larga esperaria el default de
+    MariaDB (86400 s) con el arranque de LAS MANOS colgado."""
+    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
+    (previo,) = await cur.fetchone()
+    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
+    error_del_ddl: BaseException | None = None
+    try:
+        await cur.execute(ddl)
+        return True
+    except aiomysql.OperationalError as e:  # fail-soft SOLO para 1205: el llamador decide y lo registra; todo otro error sube
+        if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
+            error_del_ddl = e
+            raise
+        return False
+    except BaseException as e:
+        error_del_ddl = e
+        raise
+    finally:
+        # Si el restaurado falla con la excepcion del DDL en vuelo, la del SET
+        # la reemplazaria y el log apuntaria al punto de falla equivocado
+        # (MINOR-2, auditoria de jax#272): se registra el fallo del SET y
+        # sube la ORIGINAL. Sin excepcion previa, sube la del SET.
+        try:
+            await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+        except BaseException as error_del_set:
+            logger.error(
+                "_ddl_acotado: fallo el restaurado de lock_wait_timeout=%s "
+                "tras %r: %r", previo, ddl, error_del_set,
+            )
+            if error_del_ddl is not None:
+                raise error_del_ddl from error_del_set
+            raise
 
 
 async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
@@ -1080,24 +1176,94 @@ async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
     una consulta lenta por el sistema caido. Cualquier OTRO error (INPLACE o
     LOCK=NONE no soportados, sintaxis) SUBE: no es una espera, es un DDL que
     no puede correr como se declaro."""
-    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
-    (previo,) = await cur.fetchone()
-    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
-    try:
-        await cur.execute(ddl)
+    if await _ddl_acotado(cur, ddl):
         return True
-    except aiomysql.OperationalError as e:  # fail-soft: el indice solo acelera; la consulta de dueño sigue correcta como scan; se reintenta en el proximo arranque
-        if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
-            raise
-        logger.error(
-            "init_tables: no se creo %s en %s -- otra transaccion tiene la tabla y "
-            "vencio la espera de %d s (%s). El arranque sigue SIN el indice (la "
-            "consulta de dueño hace scan); se reintenta en el proximo arranque.",
-            indice, tabla, _LOCK_WAIT_DDL_SEGUNDOS, e,
+    logger.error(
+        "init_tables: no se creo %s en %s -- otra transaccion tiene la tabla y "
+        "vencio la espera de %d s. El arranque sigue SIN el indice (la "
+        "consulta de dueño hace scan); se reintenta en el proximo arranque.",
+        indice, tabla, _LOCK_WAIT_DDL_SEGUNDOS,
+    )
+    return False
+
+
+async def _columnas_de_indice(cur, tabla: str, indice: str) -> list[tuple[str, str]]:
+    """(COLUMN_NAME, IGNORED) del indice, en orden de SEQ_IN_INDEX. Vacia si
+    el indice no existe."""
+    await cur.execute(
+        "SELECT COLUMN_NAME, IGNORED FROM information_schema.STATISTICS "
+        "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s "
+        "ORDER BY SEQ_IN_INDEX",
+        (tabla, indice),
+    )
+    return [(fila[0], fila[1]) for fila in await cur.fetchall()]
+
+
+async def _retirar_indices(cur) -> None:
+    """Borra los indices de `_INDICES_RETIRADOS` que todavia existan.
+
+    Corre DESPUES del loop de creacion de `init_tables()`, para que el
+    reemplazo ya haya tenido su oportunidad de crearse en este mismo arranque.
+
+    - El retirado no esta: nada (idempotente; el caso de todo arranque
+      despues del primero, y de toda base nueva).
+    - PRECONDICION, fail-closed hacia CONSERVAR: el reemplazo existe, no esta
+      IGNORED y sus primeras columnas (por SEQ_IN_INDEX) son el prefijo
+      declarado. Si algo de eso falla: ERROR en el log y el viejo se QUEDA.
+      Borrar un indice de mas sin su reemplazo deja las consultas por status
+      en scan; conservarlo solo cuesta la escritura de mas que ya se pagaba.
+    - DROP con `_ALGORITMO_DROP_INDEX` y espera acotada (`_ddl_acotado`):
+      1205 -> ERROR y el arranque sigue (se reintenta en el proximo);
+      1091 -> otro init_tables() lo borro primero: exito;
+      cualquier otro error SUBE (p.ej. si el motor no pudiera hacerlo
+      NOCOPY/LOCK=NONE: no se cae en silencio a COPY).
+    """
+    for tabla, retirado, reemplazo, prefijo in _INDICES_RETIRADOS:
+        await cur.execute(
+            "SELECT COUNT(*) FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
+            (tabla, retirado),
         )
-        return False
-    finally:
-        await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+        (existe,) = await cur.fetchone()
+        if not existe:
+            continue
+        columnas = await _columnas_de_indice(cur, tabla, reemplazo)
+        nombres = tuple(c for c, _ignored in columnas)
+        ignorado = any(ignored != "NO" for _c, ignored in columnas)
+        if not columnas or ignorado or nombres[: len(prefijo)] != prefijo:
+            motivo = (
+                "no existe" if not columnas
+                else "esta IGNORED" if ignorado
+                else f"sus columnas son {nombres!r}, no empiezan por {prefijo!r}"
+            )
+            logger.error(
+                "init_tables: NO se retira %s de %s -- su reemplazo %s %s. Se "
+                "CONSERVA (fail-closed): sin el reemplazo, borrarlo dejaria las "
+                "consultas por %s sin indice. Se reintenta en el proximo arranque.",
+                retirado, tabla, reemplazo, motivo, ", ".join(prefijo),
+            )
+            continue
+        try:
+            borrado = await _ddl_acotado(
+                cur, f"ALTER TABLE {tabla} DROP INDEX {retirado}, {_ALGORITMO_DROP_INDEX}")
+        except aiomysql.OperationalError as e:  # solo 1091 es exito (otro proceso lo borro); todo otro error sube
+            if not (e.args and e.args[0] == _ER_CANT_DROP_FIELD_OR_KEY):
+                raise
+            logger.warning(
+                "init_tables: %s ya no estaba en %s -- otro proceso lo retiro "
+                "primero. No es un fallo.", retirado, tabla,
+            )
+            continue
+        if borrado:
+            logger.info("init_tables: retirado %s de %s (reemplazo: %s).",
+                        retirado, tabla, reemplazo)
+        else:
+            logger.error(
+                "init_tables: no se retiro %s de %s -- otra transaccion tiene la "
+                "tabla y vencio la espera de %d s. El arranque sigue CON el indice "
+                "(solo cuesta una escritura de mas); se reintenta en el proximo "
+                "arranque.", retirado, tabla, _LOCK_WAIT_DDL_SEGUNDOS,
+            )
 
 
 #: Texto EXACTO de la expresión de `visible` -- ver la tupla ("visible", ...)
@@ -1622,6 +1788,10 @@ async def init_tables() -> None:
                 else:
                     await cur.execute(ddl)
 
+            # Y los retirados, DESPUES de crear: el borrado exige que su
+            # reemplazo exista, y este arranque es el que acaba de intentarlo.
+            await _retirar_indices(cur)
+
 
 # ----------------------------------------------------------------
 #  Pipeline CRUD
@@ -1717,8 +1887,10 @@ def _sql_candidatos_del_reaper(n_estados: int) -> str:
     consulta, el mayor timeout_seconds de los pasos EN CURSO (status
     'running' en jacobs_steps, el valor que el ejecutor aplica con
     asyncio.wait_for) de cada pipeline candidato. EXPLAIN en
-    tests/test_jacobs_reaper_cas_db.py: range por idx_pipelines_status y la
-    subconsulta ref por idx_steps_pipeline (a lo sumo 20 pasos por plan)."""
+    tests/test_jacobs_reaper_cas_db.py: range por un indice con PREFIJO
+    status (idx_pipelines_ocultos desde que idx_pipelines_status se retiro,
+    2026-09-23, pendiente 631) y la subconsulta ref por idx_steps_pipeline
+    (a lo sumo 20 pasos por plan)."""
     estados = ",".join(["%s"] * n_estados)
     return (
         "SELECT p.*, (SELECT MAX(s.timeout_seconds) FROM jacobs_steps s "

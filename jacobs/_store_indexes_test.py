@@ -44,6 +44,7 @@ Corre con:
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import unittest
 from unittest import mock
@@ -368,6 +369,190 @@ class EngineInnoDBTest(unittest.IsolatedAsyncioTestCase):
         await store.init_tables()  # crea el pool de este loop con la cfg REAL
         with self.assertRaisesRegex(AssertionError, "la simulacion no aplico"):
             await self._crear_bajo_myisam_forzado()
+
+
+class RetiroDeIndicesTest(unittest.IsolatedAsyncioTestCase):
+    """Pendiente 631, parte B2 (2026-09-23): `init_tables()` RETIRA
+    idx_pipelines_status (redundante con idx_pipelines_ocultos) de las bases
+    que todavia lo tienen -- produccion entre ellas.
+
+    POR QUE ES DE INTEGRACION Y NO SOLO PURO. En CI la base es nueva: sin el
+    viejo en `_INDICES`, nadie lo crea y el DROP no correria NUNCA. Aca se
+    crea A MANO sobre la tabla real (con la columna VIRTUAL `visible`
+    indexada, la forma de produccion, donde el ALGORITHM importa: ver
+    `store._ALGORITMO_DROP_INDEX`), y se exige que init_tables() lo borre,
+    que lo CONSERVE cuando el reemplazo no sirve (fail-closed), y que dos
+    init_tables() en paralelo no revienten (carrera del 1091)."""
+
+    async def asyncSetUp(self):
+        self.addAsyncCleanup(store.cerrar_pool)
+        self.addAsyncCleanup(self._restaurar)
+        await store.init_tables()
+        self.assertEqual(
+            await self._columnas("idx_pipelines_visibles"),
+            ["user_id", "tenant_id", "visible", "created_at"],
+            "la prueba tiene que correr con `visible` indexada (forma de produccion)",
+        )
+
+    async def _sql(self, sql: str) -> None:
+        async with store.conexion(desechable=True) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql)
+
+    async def _columnas(self, indice: str) -> list[str]:
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='jacobs_pipelines' "
+                    "AND INDEX_NAME=%s ORDER BY SEQ_IN_INDEX",
+                    (indice,),
+                )
+                return [r[0] for r in await cur.fetchall()]
+
+    async def _crear_el_viejo(self) -> None:
+        await self._sql("CREATE INDEX IF NOT EXISTS idx_pipelines_status ON jacobs_pipelines (status)")
+        self.assertEqual(await self._columnas("idx_pipelines_status"), ["status"])
+
+    async def _restaurar(self) -> None:
+        """Deja la tabla como la deja init_tables() de ESTA version: el
+        reemplazo sano (no IGNORED, columnas correctas) y sin el viejo."""
+        if await self._columnas("idx_pipelines_ocultos") not in ([], ["status", "descartado_at"]):
+            await self._sql("DROP INDEX idx_pipelines_ocultos ON jacobs_pipelines")
+        if await self._columnas("idx_pipelines_ocultos"):
+            await self._sql("ALTER TABLE jacobs_pipelines ALTER INDEX idx_pipelines_ocultos NOT IGNORED")
+        await self._sql("DROP INDEX IF EXISTS idx_pipelines_status ON jacobs_pipelines")
+        await store.init_tables()
+
+    async def _conserva_con_error(self) -> None:
+        with self.assertLogs("jacobs.store", level="ERROR") as logs:
+            await store.init_tables()
+        self.assertEqual(await self._columnas("idx_pipelines_status"), ["status"],
+                         "sin reemplazo valido el viejo se CONSERVA")
+        self.assertTrue(any("NO se retira idx_pipelines_status" in l for l in logs.output),
+                        logs.output)
+
+    async def test_init_tables_borra_el_indice_retirado_y_la_segunda_vez_no_hace_nada(self):
+        await self._crear_el_viejo()
+        await store.init_tables()
+        self.assertEqual(await self._columnas("idx_pipelines_status"), [],
+                         "init_tables() no retiro idx_pipelines_status")
+        self.assertEqual(await self._columnas("idx_pipelines_ocultos"), ["status", "descartado_at"])
+
+        ddls = []
+        real = store._ddl_acotado
+
+        async def espia(cur, ddl):
+            ddls.append(ddl)
+            return await real(cur, ddl)
+
+        with mock.patch.object(store, "_ddl_acotado", espia):
+            await store.init_tables()
+        self.assertEqual([d for d in ddls if "DROP INDEX" in d], [],
+                         "la segunda init_tables() no tiene que intentar ningun DROP")
+
+    async def test_sin_el_reemplazo_lo_conserva_y_deja_ERROR(self):
+        """El CREATE acotado de idx_pipelines_ocultos vencio el lock en este
+        mismo arranque (se simula saltandolo): el viejo NO se borra."""
+        await self._sql("DROP INDEX IF EXISTS idx_pipelines_ocultos ON jacobs_pipelines")
+        await self._crear_el_viejo()
+        real = store._crear_indice_acotado
+
+        async def vence_ocultos(cur, tabla, indice, ddl):
+            if indice == "idx_pipelines_ocultos":
+                return False
+            return await real(cur, tabla, indice, ddl)
+
+        with mock.patch.object(store, "_crear_indice_acotado", vence_ocultos):
+            await self._conserva_con_error()
+        self.assertEqual(await self._columnas("idx_pipelines_ocultos"), [])
+
+    async def test_reemplazo_IGNORED_lo_conserva_y_deja_ERROR(self):
+        await self._crear_el_viejo()
+        await self._sql("ALTER TABLE jacobs_pipelines ALTER INDEX idx_pipelines_ocultos IGNORED")
+        await self._conserva_con_error()
+
+    async def test_reemplazo_con_otro_prefijo_lo_conserva_y_deja_ERROR(self):
+        await self._sql("DROP INDEX IF EXISTS idx_pipelines_ocultos ON jacobs_pipelines")
+        await self._sql("CREATE INDEX idx_pipelines_ocultos ON jacobs_pipelines (descartado_at, status)")
+        await self._crear_el_viejo()
+        await self._conserva_con_error()
+
+    async def test_un_solo_init_tables_crea_el_reemplazo_y_luego_retira_el_viejo(self):
+        """MINOR-1 (auditoria de jax#272): el ORDEN dentro de init_tables().
+        Base con el viejo y SIN el reemplazo (una base de antes de Descartar):
+        UN solo arranque tiene que dejar el reemplazo creado y el viejo
+        retirado. Si `_retirar_indices` corriera ANTES del loop de creacion,
+        veria el reemplazo ausente, conservaria el viejo, y recien despues se
+        crearia el reemplazo: el viejo sobreviviria a ese arranque. Visto en
+        rojo con `_retirar_indices` movido antes del loop."""
+        await self._sql("DROP INDEX IF EXISTS idx_pipelines_ocultos ON jacobs_pipelines")
+        await self._crear_el_viejo()
+        self.assertEqual(await self._columnas("idx_pipelines_ocultos"), [])
+        await store.init_tables()
+        self.assertEqual(await self._columnas("idx_pipelines_ocultos"), ["status", "descartado_at"],
+                         "init_tables() no creo el reemplazo")
+        self.assertEqual(await self._columnas("idx_pipelines_status"), [],
+                         "el viejo sobrevivio a un arranque que SI creo el reemplazo: "
+                         "_retirar_indices corrio antes del loop de creacion")
+
+    async def test_dos_init_tables_en_paralelo_no_revientan(self):
+        """Dos arranques solapados (o LAS MANOS + un script de loadtest/):
+        los dos ven el viejo, uno lo borra y el otro recibe 1091 o no lo ve
+        mas. Ninguno sube excepcion. Tres rondas: la carrera no es
+        deterministica y una sola podria no cruzarse."""
+        for _ in range(3):
+            await self._crear_el_viejo()
+            resultados = await asyncio.gather(
+                store.init_tables(), store.init_tables(), return_exceptions=True)
+            self.assertEqual([r for r in resultados if isinstance(r, BaseException)], [])
+            self.assertEqual(await self._columnas("idx_pipelines_status"), [])
+
+
+class DdlAcotadoRestauradoTest(unittest.IsolatedAsyncioTestCase):
+    """MINOR-2 (auditoria de jax#272), pura y sin DB: si el DDL falla y
+    ADEMAS falla el `SET SESSION lock_wait_timeout` del finally, la excepcion
+    que sube tiene que ser la del DDL -- antes, la del SET la reemplazaba y el
+    log apuntaba al restaurado como punto de falla. El fallo del SET queda en
+    un ERROR del log."""
+
+    class _CursorFalso:
+        def __init__(self, error_ddl, error_set):
+            self.error_ddl = error_ddl
+            self.error_set = error_set
+            self.sets = 0
+
+        async def execute(self, sql, args=None):
+            if sql.startswith("SELECT @@SESSION.lock_wait_timeout"):
+                return
+            if sql.startswith("SET SESSION lock_wait_timeout"):
+                self.sets += 1
+                if self.sets == 2 and self.error_set is not None:
+                    raise self.error_set
+                return
+            if self.error_ddl is not None:
+                raise self.error_ddl
+
+        async def fetchone(self):
+            return (50,)
+
+    async def test_falla_el_ddl_y_el_restaurado_sube_la_del_ddl(self):
+        error_ddl = store.aiomysql.OperationalError(1846, "ALTER no soportado")
+        error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
+        cur = self._CursorFalso(error_ddl, error_set)
+        with self.assertLogs("jacobs.store", level="ERROR") as logs:
+            with self.assertRaises(store.aiomysql.OperationalError) as ctx:
+                await store._ddl_acotado(cur, "ALTER TABLE t DROP INDEX i")
+        self.assertIs(ctx.exception, error_ddl, "la excepcion del SET tapo la del ALTER")
+        self.assertTrue(any("lock_wait_timeout" in l for l in logs.output), logs.output)
+
+    async def test_ddl_bien_y_falla_el_restaurado_sube_la_del_set(self):
+        error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
+        cur = self._CursorFalso(None, error_set)
+        with self.assertLogs("jacobs.store", level="ERROR"):
+            with self.assertRaises(store.aiomysql.OperationalError) as ctx:
+                await store._ddl_acotado(cur, "ALTER TABLE t DROP INDEX i")
+        self.assertIs(ctx.exception, error_set)
 
 
 class NombreDePruebaTest(unittest.TestCase):
