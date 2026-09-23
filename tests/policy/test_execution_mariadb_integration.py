@@ -41,14 +41,25 @@ def _apply_migration() -> None:
     connection = _connection()
     try:
         cursor = connection.cursor()
-        # CI runs this focused suite against one service database.  The
-        # migration contains immutable trigger declarations, so replaying it
-        # after the first test is not a valid migration operation.
+        # El corte temprano existía porque los `CREATE TRIGGER` NO eran
+        # idempotentes: repetir la migración moría con "already exists". Desde
+        # jax#266 llevan `IF NOT EXISTS`, así que la mitad de triggers puede
+        # (y debe) aplicarse SIEMPRE.
+        #
+        # POR QUÉ IMPORTA, y no es cosmético (hallazgo de la ronda 4 de
+        # revisión, preexistente desde a14ebb2 del 2026-09-21):
+        # `test_governed_execution_authoritative_mariadb_contract` hace dos
+        # `DROP TRIGGER` sobre `jax_execution` y los COMMITEA sin recrearlos.
+        # Con el corte temprano, ningún test posterior los reponía: la
+        # protección append-only de `execution_authorizations` y
+        # `execution_records` quedaba destruida de forma PERMANENTE en ese
+        # servidor. Medido: tras correr este archivo, el esquema quedaba con 8
+        # triggers de los 10 de la migración. Aplicar siempre la mitad
+        # idempotente los repone en el siguiente `_apply_migration()`.
         cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='jax_execution' AND table_name='execution_records'")
-        if cursor.fetchone()[0]:
-            return
-        for statement in tables.split(";"):
-            if statement.strip(): cursor.execute(statement)
+        if not cursor.fetchone()[0]:
+            for statement in tables.split(";"):
+                if statement.strip(): cursor.execute(statement)
         for statement in triggers.split("//"):
             if statement.strip(): cursor.execute(statement)
         connection.commit()
@@ -632,3 +643,36 @@ def test_persistir_una_definicion_exige_el_contexto_de_composicion_fija():
     with pytest.raises(EvidenceArtifactUntrustedError):
         evidence._MariaDBEvidenceStore__persist_control_definition(
             load_control_definition("CTL.B6.GOVERNED_DISPATCH", 1))
+
+
+def test_la_migracion_repone_los_triggers_de_inmutabilidad():
+    """Ningún test puede dejar el esquema sin su protección append-only.
+
+    (Ronda 4 de revisión de jax#266; defecto PREEXISTENTE desde `a14ebb2`.)
+    `test_governed_execution_authoritative_mariadb_contract` dropea dos
+    triggers y los commitea sin recrearlos; con el corte temprano de
+    `_apply_migration()`, nadie los reponía nunca y el servidor quedaba con la
+    inmutabilidad de `execution_authorizations`/`execution_records` destruida
+    de forma permanente. Este test dropea uno a propósito y exige que la
+    migración lo reponga.
+    """
+    esperados = _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS "
+                        "WHERE TRIGGER_SCHEMA='jax_execution'")
+    _apply_migration()
+    assert _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS "
+                   "WHERE TRIGGER_SCHEMA='jax_execution'") >= esperados
+
+    connection = _connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DROP TRIGGER IF EXISTS jax_execution.execution_records_no_update")
+        connection.commit()
+    finally:
+        connection.close()
+    assert _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE "
+                   "TRIGGER_SCHEMA='jax_execution' AND TRIGGER_NAME='execution_records_no_update'") == 0
+
+    _apply_migration()
+
+    assert _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE "
+                   "TRIGGER_SCHEMA='jax_execution' AND TRIGGER_NAME='execution_records_no_update'") == 1
