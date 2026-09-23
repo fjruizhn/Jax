@@ -160,7 +160,6 @@ async def _preparar() -> list[str]:
 
 async def _limpiar():
     await _sql("DELETE FROM facts WHERE user_id = %s", (_USER,))
-    await _sql("DELETE FROM jax_users WHERE user_id = %s", (_USER,))
 
 
 @pytest.fixture
@@ -170,6 +169,7 @@ def limpio():
     yield
     async def _teardown():
         await _limpiar()
+        await _sql("DELETE FROM jax_users WHERE user_id = %s", (_USER,))
         for nombre in reversed([*list(_DDL), "jax_users"]):
             if nombre in creadas:
                 await _sql(f"DROP TABLE {nombre}")
