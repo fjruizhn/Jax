@@ -72,6 +72,49 @@ def _apply_evidence_migration() -> None:
         connection.commit()
     finally: connection.close()
 
+def test_migraciones_son_idempotentes_aplicadas_dos_veces():
+    """MINOR-7 (PR#264 ronda 2 de revisión): `IF NOT EXISTS` se agregó a
+    los 22+10 `CREATE TRIGGER` de las dos migraciones para que un re-run a
+    medio aplicar no muera en el primer trigger con "already exists" --
+    pero `_apply_migration()`/`_apply_evidence_migration()` de arriba
+    tienen un short-circuito (si la tabla ya existe, no ejecutan nada), así
+    que esa idempotencia nunca se ejercitaba de verdad. Este test aplica
+    las DOS migraciones completas DOS VECES seguidas, sin el
+    short-circuito, y prueba que la segunda pasada no falla.
+
+    Corre primero en el archivo (antes de `test_b7_real_mariadb_artifact_and_observation_relations`,
+    que DROPea triggers a propósito para probar detección de manipulación)
+    para no interferir con el estado que esos tests esperan encontrar: al
+    terminar este test, el esquema queda con TODO presente -- el mismo
+    estado final que dejaría una sola aplicación."""
+    for ruta in (
+        Path(__file__).parents[2] / "policy/execution_control/migrations/001_governed_execution.sql",
+        Path(__file__).parents[2] / "policy/enforcement_evidence/migrations/001_enforcement_evidence.sql",
+    ):
+        sql = ruta.read_text()
+        tables, triggers = sql.split("DELIMITER //", 1)
+        triggers, _ = triggers.split("DELIMITER ;", 1)
+        for intento in (1, 2):
+            connection = _connection()
+            try:
+                cursor = connection.cursor()
+                for statement in tables.split(";"):
+                    if statement.strip():
+                        cursor.execute(statement)
+                for statement in triggers.split("//"):
+                    if statement.strip():
+                        cursor.execute(statement)
+                connection.commit()
+            except Exception as exc:
+                connection.rollback()
+                raise AssertionError(
+                    f"{ruta.name} falló en el intento {intento} de 2 -- "
+                    "IF NOT EXISTS no está haciendo su trabajo"
+                ) from exc
+            finally:
+                connection.close()
+
+
 def test_b7_evidence_blob_real_mariadb_immutability():
     """CI-only real DB proof: bytes deduplicate and trigger blocks mutation."""
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore

@@ -1,3 +1,12 @@
+-- CREATE TRIGGER usa IF NOT EXISTS (soportado en MariaDB desde 10.1) para que
+-- un re-run a medio aplicar no muera en el primer trigger con "already
+-- exists" -- ese error se lee como "ya estaba migrado" mientras los
+-- triggers de inmutabilidad que faltan simplemente no se crean. Con IF NOT
+-- EXISTS, volver a correr esta migración completa siempre termina con las 7
+-- tablas y sus 10 triggers presentes (de esos 10, `inspect_database_control`
+-- en policy/enforcement_evidence/database_evidence.py sólo exige 4:
+-- execution_records y execution_events, UPDATE+DELETE), se haya cortado
+-- donde se haya cortado antes.
 CREATE SCHEMA IF NOT EXISTS jax_execution;
 
 CREATE TABLE IF NOT EXISTS jax_execution.execution_authorizations (
@@ -45,14 +54,14 @@ CREATE TABLE IF NOT EXISTS jax_execution.dry_run_artifacts (
 ) ENGINE=InnoDB;
 
 DELIMITER //
-CREATE TRIGGER jax_execution.execution_records_no_update BEFORE UPDATE ON jax_execution.execution_records FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution record'//
-CREATE TRIGGER jax_execution.execution_records_no_delete BEFORE DELETE ON jax_execution.execution_records FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution record'//
-CREATE TRIGGER jax_execution.execution_events_no_update BEFORE UPDATE ON jax_execution.execution_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution event'//
-CREATE TRIGGER jax_execution.execution_events_no_delete BEFORE DELETE ON jax_execution.execution_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution event'//
-CREATE TRIGGER jax_execution.execution_authorizations_no_update BEFORE UPDATE ON jax_execution.execution_authorizations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution authorization'//
-CREATE TRIGGER jax_execution.execution_authorizations_no_delete BEFORE DELETE ON jax_execution.execution_authorizations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution authorization'//
-CREATE TRIGGER jax_execution.human_approvals_no_update BEFORE UPDATE ON jax_execution.human_approvals FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable human approval'//
-CREATE TRIGGER jax_execution.human_approvals_no_delete BEFORE DELETE ON jax_execution.human_approvals FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable human approval'//
-CREATE TRIGGER jax_execution.dry_run_artifacts_no_update BEFORE UPDATE ON jax_execution.dry_run_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable dry run artifact'//
-CREATE TRIGGER jax_execution.dry_run_artifacts_no_delete BEFORE DELETE ON jax_execution.dry_run_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable dry run artifact'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.execution_records_no_update BEFORE UPDATE ON jax_execution.execution_records FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution record'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.execution_records_no_delete BEFORE DELETE ON jax_execution.execution_records FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution record'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.execution_events_no_update BEFORE UPDATE ON jax_execution.execution_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution event'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.execution_events_no_delete BEFORE DELETE ON jax_execution.execution_events FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution event'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.execution_authorizations_no_update BEFORE UPDATE ON jax_execution.execution_authorizations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution authorization'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.execution_authorizations_no_delete BEFORE DELETE ON jax_execution.execution_authorizations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable execution authorization'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.human_approvals_no_update BEFORE UPDATE ON jax_execution.human_approvals FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable human approval'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.human_approvals_no_delete BEFORE DELETE ON jax_execution.human_approvals FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable human approval'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.dry_run_artifacts_no_update BEFORE UPDATE ON jax_execution.dry_run_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable dry run artifact'//
+CREATE TRIGGER IF NOT EXISTS jax_execution.dry_run_artifacts_no_delete BEFORE DELETE ON jax_execution.dry_run_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable dry run artifact'//
 DELIMITER ;

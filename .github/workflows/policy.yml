@@ -81,6 +81,14 @@ jobs:
         with:
           python-version: "3.14"
       - run: pip install -r requirements.txt pytest
+      # jax#260: el generador de scripts/generar_manifiesto_identidad.py, sin
+      # el cual LAS MANOS no arranca desde master (FileNotFoundError en
+      # /etc/jax/build/implementation-identity.json). Paso propio, separado
+      # del siguiente: no lleva --junitxml, así que no puede tocar el
+      # _TEST_CONTROL_MAP que el paso "Emitir manifiesto B7 controlado" exige
+      # completo más abajo.
+      - name: Generador de identidad de implementación (jax#260)
+        run: PYTHONPATH=. python -m pytest tests/policy/test_generar_manifiesto_identidad.py -v
       # Do not run these from tests-puros: pytest then places tests/policy
       # ahead of the production policy package on sys.path.
       - name: Ejecutar controles B7 y capturar salida
