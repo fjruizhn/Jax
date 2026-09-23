@@ -406,8 +406,19 @@ jobs:
           #   del SET (rojo contra el `_ddl_acotado` anterior: 2 failed). Va en
           #   este archivo y no en tests-puros, mismo criterio que
           #   NombreDePruebaTest: el piso de tests-puros no cambia.
-          grep -qE "^22 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 22 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 22 -> 26 el 2026-09-23 (mismo defecto, el OTRO finally):
+          #   AgregarColumnaAcotadaRestauradoTest (+4), pura y sin DB --
+          #   `_agregar_columna_acotada` restauraba lock_wait_timeout en un
+          #   finally sin proteger. Ahora el par SET/restaurado vive en un
+          #   solo helper (`_lock_wait_acotado`) que usan los dos. Si falla
+          #   el ALTER (o el RuntimeError fail-closed del 1205) y tambien el
+          #   SET, sube la original con su causa intacta y el SET va a ERROR;
+          #   sin error previo sube la del SET. Rojo contra el store.py
+          #   anterior: 3 failed, 17 passed (el cuarto, restaurado sin
+          #   fallos, es guarda de regresion).
+          # 26 -> 27 (2026-09-23, auditoría de jax#273): +1 test de la cancelación durante el restaurado.
+          grep -qE "^27 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 27 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en
