@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""Todo llamador de `validar_eleccion` pasa TODOS sus parámetros, sin depender
-de un default.
+"""La prueba real de C5 hace lo MISMO que el Ejecutor real: mismas compuertas,
+mismo auditor.
 
 POR QUE EXISTE (2026-09-23). La compuerta `admite_mismo_proveedor` entró el
 2026-09-20 con default False ("un llamador olvidadizo obtiene el
 comportamiento estricto"). arranque.py la pasó; scripts/ejecutor_contratos/
-probar_c5.py no. La prueba real de C5, la que un tercero corre para saber si
-C5 está vivo, contestó `c5_vivo=false` con la compuerta ABIERTA durante tres
-días mientras producción arrancaba bien: la herramienta de verificación
-contradecía al sistema. El default estricto está bien para el código nuevo;
-en los llamadores conocidos, depender de él es este defecto.
+probar_c5.py no. La prueba que corre un tercero para saber si C5 está vivo
+contestó `c5_vivo=false` con la compuerta ABIERTA durante tres días, mientras
+producción arrancaba bien. Y elegía el auditor con `cfg.auditor_faceta`
+(`thot`, nube) mientras una misión real en hall9000 usa
+`auditor_faceta_local` (`el_juez`). La herramienta de verificación medía otro
+sistema.
 
 Suite pura: lee el AST, no importa nada del Ejecutor.
 """
@@ -20,41 +21,71 @@ from pathlib import Path
 
 RAIZ = Path(__file__).resolve().parents[1]
 DEFINICION = RAIZ / "jax" / "ejecutor" / "contratos" / "eleccion_c5.py"
-LLAMADORES = (
-    RAIZ / "scripts" / "ejecutor_contratos" / "probar_c5.py",
-    RAIZ / "jax" / "ejecutor" / "contratos" / "arranque.py",
-    RAIZ / "jax" / "ejecutor" / "contratos" / "eleccion_c5.py",
-)
+PROBAR_C5 = RAIZ / "scripts" / "ejecutor_contratos" / "probar_c5.py"
+FUNCIONES = ("validar_eleccion", "validar_proveedores")
+FUERA = {"tests", ".venv", "venv", "node_modules", ".git", "__pycache__", "workspace", "repo", "missions"}
 
 
-def _parametros() -> set[str]:
+def _parametros(funcion: str) -> set[str]:
     arbol = ast.parse(DEFINICION.read_text(encoding="utf-8"))
-    [fn] = [n for n in arbol.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)
-            and n.name == "validar_eleccion"]
+    [fn] = [n for n in arbol.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef) and n.name == funcion]
     return {a.arg for a in fn.args.kwonlyargs + fn.args.args}
 
 
-def _llamadas(ruta: Path):
-    for nodo in ast.walk(ast.parse(ruta.read_text(encoding="utf-8"))):
-        if isinstance(nodo, ast.Call):
-            f = nodo.func
-            nombre = f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
-            if nombre == "validar_eleccion":
-                yield nodo
+def _archivos():
+    """TODO .py del repo fuera de tests: un llamador nuevo en otro archivo entra solo."""
+    for ruta in RAIZ.rglob("*.py"):
+        partes = set(ruta.relative_to(RAIZ).parts)
+        if partes & FUERA or ruta.name.endswith("_test.py") or ruta.name.startswith("test_"):
+            continue
+        try:
+            yield ruta, ast.parse(ruta.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, PermissionError):
+            continue
+
+
+def _nombre(llamada: ast.Call) -> str | None:
+    f = llamada.func
+    return f.attr if isinstance(f, ast.Attribute) else getattr(f, "id", None)
+
+
+def _llamadas():
+    for ruta, arbol in _archivos():
+        for nodo in ast.walk(arbol):
+            if isinstance(nodo, ast.Call) and _nombre(nodo) in FUNCIONES:
+                yield ruta, nodo
 
 
 def test_hay_llamadores_que_revisar():
     # Si un refactor los renombra, este test tiene que enterarse, no quedar vacío.
-    assert sum(1 for r in LLAMADORES for _ in _llamadas(r)) >= 3
+    encontrados = {(r.name, _nombre(n)) for r, n in _llamadas()}
+    assert ("probar_c5.py", "validar_eleccion") in encontrados
+    assert ("arranque.py", "validar_eleccion") in encontrados
+    assert ("arranque.py", "validar_proveedores") in encontrados
 
 
 def test_cada_llamador_pasa_todos_los_parametros():
-    esperados = _parametros()
-    assert "admite_mismo_proveedor" in esperados
     faltan = {}
-    for ruta in LLAMADORES:
-        for llamada in _llamadas(ruta):
-            pasados = {k.arg for k in llamada.keywords}
-            if esperados - pasados:
-                faltan[f"{ruta.relative_to(RAIZ)}:{llamada.lineno}"] = sorted(esperados - pasados)
-    assert faltan == {}, f"llamadores que dependen de un default de validar_eleccion: {faltan}"
+    for ruta, llamada in _llamadas():
+        esperados = _parametros(_nombre(llamada))
+        pasados = {k.arg for k in llamada.keywords}  # **kwargs da arg None: cuenta como faltante
+        if esperados - pasados:
+            faltan[f"{ruta.relative_to(RAIZ)}:{llamada.lineno}"] = sorted(esperados - pasados)
+    assert faltan == {}, f"llamadores que dependen de un default: {faltan}"
+
+
+def test_la_compuerta_no_se_escribe_a_mano():
+    # `admite_mismo_proveedor=False` literal pasaría el test de arriba y reproduciría
+    # el defecto: el valor tiene que venir de la config (o de un parámetro que la trae).
+    literales = [f"{r.relative_to(RAIZ)}:{n.lineno}" for r, n in _llamadas()
+                 for k in n.keywords if k.arg == "admite_mismo_proveedor" and isinstance(k.value, ast.Constant)]
+    assert literales == []
+
+
+def test_probar_c5_elige_el_auditor_como_el_ejecutor_real():
+    arbol = ast.parse(PROBAR_C5.read_text(encoding="utf-8"))
+    nombres = {_nombre(n) for n in ast.walk(arbol) if isinstance(n, ast.Call)}
+    assert "elegir_y_resolver_auditor" in nombres
+    # Y no vuelve a elegir por su cuenta con la clave que no corresponde a hall9000.
+    atributos = {n.attr for n in ast.walk(arbol) if isinstance(n, ast.Attribute)}
+    assert "auditor_faceta" not in atributos
