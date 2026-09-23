@@ -4,7 +4,7 @@
 # CORPUS — JAX/Axioma, reglas normativas
 
 **Versión del corpus:** 0.1.0
-**SHA256:** `d641add34e2f4e616d6840fc80c17be705919521d0538200a2a49ceab01ed031`
+**SHA256:** `606e668774781ab831b17e36dc0300c89e7c79c02376eb73baf4bf1db2105d09`
 **Reglas:** 23
 
 | Estado | Cantidad |
@@ -47,6 +47,7 @@
    errores se propagan de verdad.
 
 Test corre limpio, exit 0, contra el estado real de ambos repos (verificado el mismo día, no en un momento anterior). El scanner sigue sin cubrir la forma más sutil del patrón (un fallback que retorna éxito por defecto sin excepción de por medio, ej. output_validator.py) — eso queda como residuo conocido, mismo tratamiento que Q13 (barrido de vocabulario) en REFORMAS-v3.1.md.
+Cierre parcial 2026-08-25: output_validator.py (la instancia nombrada explícitamente arriba como "residuo conocido") ya no es fail-open para CUALQUIER schema desconocido -- solo para los 7 declarados-pendientes en producción (_KNOWN_UNIMPLEMENTED_SCHEMAS). Un schema realmente no declarado (typo, capability mal configurada) ahora falla cerrado, con test de regresión (las_manos/_output_validator_test.py). El residuo general del patrón (cualquier función que pueda fallar abierto por valor de retorno en código no registrado en este corpus) sigue sin scanner automatizado -- eso sigue siendo trabajo futuro, no resuelto acá.
 
 
 
@@ -113,7 +114,8 @@ DISCREPANCIA CON LA TAREA: las rutas absolutas citadas en el encargo de esta fas
 - **Notas:** Tensión con el sistema actual: son DOS mecanismos identity-based paralelos, no uno, ambos en las_manos/config.toml pero gateados por código distinto:
 1. `facets.<nombre>.allowed_ops` (config.toml líneas 34-60) — gatea las
    11 operaciones `[ops.*]` (incluida `audit_log_read`) por identidad de
-   faceta, vía `PolicyEngine.check()` en las_manos/policy.py:62.
+   faceta, vía `PolicyEngine.check()` en las_manos/motor_de_politica.py
+   (el chequeo de `allowed_ops`; el módulo se renombró en jax#262).
 2. `capabilities.<nombre>.allowed_callers` / `allowed_motors`
    (config.toml líneas 169+) — gatea las capabilities de pipeline
    (code_swarm, refactor, etc.) por identidad de faceta llamante y de
@@ -243,7 +245,7 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 ### MA01 — El que supone se equivoca.
 
 - **Enunciado:** El que supone se equivoca.
-- **Origen:** Marina (atribución). /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md línea 15 ("Regla firmada por los cinco") y línea 232; también en /home/fruiz/jax/missions/bridge-migration.md línea 65-66 y línea 223; y citada en REFORMAS-v3.md Apéndice A1. Fraseo alternativo hallado en la misma fuente (AUTONOMIA_ANTIERROR.md, footer, línea 246): "No suponer nunca."
+- **Origen:** Marina (atribución). /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md línea 15 ("Regla firmada por los cinco") y línea 232; también en `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 65-66 y línea 223; y citada en REFORMAS-v3.md Apéndice A1. Fraseo alternativo hallado en la misma fuente (AUTONOMIA_ANTIERROR.md, footer, línea 246): "No suponer nunca."
 
 - **Estado:** CULTURAL
 - **Mecanismo de cumplimiento:** null
@@ -256,7 +258,7 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 ### MA02 — Saber no cuesta nada.
 
 - **Enunciado:** Saber no cuesta nada.
-- **Origen:** Marina — "Segundo principio fundacional" (six-impossible-things.html, contexto inmediato del Protocolo Hyde, ver [[HY01]]-[[HY04]]). También en /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y /home/fruiz/jax/missions/bridge-migration.md línea 66 ("Saber no cuesta nada — pregúntale al que de verdad sabe").
+- **Origen:** Marina — "Segundo principio fundacional" (six-impossible-things.html, contexto inmediato del Protocolo Hyde, ver [[HY01]]-[[HY04]]). También en /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 66 ("Saber no cuesta nada — pregúntale al que de verdad sabe").
 
 - **Estado:** CULTURAL
 - **Mecanismo de cumplimiento:** null
@@ -269,7 +271,7 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 ### MA03 — Mañana es el día que el fracasado tiene más que hacer.
 
 - **Enunciado:** Mañana es el día que el fracasado tiene más que hacer.
-- **Origen:** Marina — /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y /home/fruiz/jax/missions/bridge-migration.md línea 67; citada en REFORMAS-v3.md Apéndice A3, que la liga explícitamente a R5 ("Aplicable a R5. Compuerta de 30 días").
+- **Origen:** Marina — /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 67; citada en REFORMAS-v3.md Apéndice A3, que la liga explícitamente a R5 ("Aplicable a R5. Compuerta de 30 días").
 
 - **Estado:** CULTURAL
 - **Mecanismo de cumplimiento:** null

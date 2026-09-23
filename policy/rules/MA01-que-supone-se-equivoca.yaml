@@ -4,7 +4,7 @@ statement: >
 origin: >
   Marina (atribución). /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md línea
   15 ("Regla firmada por los cinco") y línea 232; también en
-  /home/fruiz/jax/missions/bridge-migration.md línea 65-66 y línea 223;
+  `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 65-66 y línea 223;
   y citada en REFORMAS-v3.md Apéndice A1. Fraseo alternativo hallado en
   la misma fuente (AUTONOMIA_ANTIERROR.md, footer, línea 246): "No suponer
   nunca."

@@ -146,6 +146,14 @@ jobs:
       - run: pip install pytest pyyaml
       - run: python -m pytest policy/tests/test_no_fail_open_except.py -v
       - run: python -m pytest policy/tests/test_stderr_no_se_tira.py -v
+      - run: python -m pytest policy/tests/test_reglas_citan_archivos_que_existen.py -v
+      # CORPUS.md es GENERADO de policy/rules/*.yaml. El 2026-09-23 se encontró desfasado:
+      # un párrafo de una regla (cierre parcial del 2026-08-25) nunca había llegado al corpus,
+      # y nada lo notaba. Regenerar y exigir que no cambie nada.
+      - name: CORPUS.md coincide con policy/rules
+        run: |
+          python policy/tools/generate_corpus.py
+          git diff --exit-code -- policy/generated/CORPUS.md || { echo "CORPUS.md desfasado: correr policy/tools/generate_corpus.py y commitear"; exit 1; }
       # Detector agregado 2026-09-20: un `run:` que no es bash valido mata el
       # job ANTES de que llegue a comprobar lo suyo, asi que el piso nunca se
       # compara y el hueco queda tapado por el verde del resto de la matriz.

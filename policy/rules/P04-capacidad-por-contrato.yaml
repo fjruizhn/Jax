@@ -16,7 +16,8 @@ notes: >
 
   1. `facets.<nombre>.allowed_ops` (config.toml líneas 34-60) — gatea las
      11 operaciones `[ops.*]` (incluida `audit_log_read`) por identidad de
-     faceta, vía `PolicyEngine.check()` en las_manos/policy.py:62.
+     faceta, vía `PolicyEngine.check()` en las_manos/motor_de_politica.py
+     (el chequeo de `allowed_ops`; el módulo se renombró en jax#262).
   2. `capabilities.<nombre>.allowed_callers` / `allowed_motors`
      (config.toml líneas 169+) — gatea las capabilities de pipeline
      (code_swarm, refactor, etc.) por identidad de faceta llamante y de
