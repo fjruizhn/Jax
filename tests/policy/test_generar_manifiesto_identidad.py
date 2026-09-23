@@ -39,7 +39,9 @@ En memoria de Jairo Urbina.
 """
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -200,3 +202,133 @@ def test_no_imprime_nada_que_parezca_un_secreto(tmp_path):
     salida = (result.stdout + result.stderr).lower()
     for palabra in ("password", "secret", "token", "private_key", "jax_db_password"):
         assert palabra not in salida
+
+
+# --- Ronda de revisión PR#264 -------------------------------------------
+#
+# 6. repository_id nunca lleva credenciales de un remoto HTTPS.
+# 7. --output es obligatorio salvo --production (nunca un default apuntando
+#    silenciosamente a /etc/jax/build/).
+# 8. --production y --output juntos es un error explícito, no "el último gana".
+# 9. arbol_sucio() no puede leer CLEAN cuando git status advirtió por stderr
+#    con exit 0 (el caso real: 'dubious ownership' o Permission denied sobre
+#    el checkout de producción, jaxsvc:jaxsvc corrido por otro usuario).
+
+
+def _cargar_modulo_generador():
+    """Carga scripts/generar_manifiesto_identidad.py como módulo Python para
+    probar su lógica pura (resolver_salidas) sin pasar por subprocess ni
+    arriesgar una escritura real en /etc/jax/."""
+    spec = importlib.util.spec_from_file_location("generar_manifiesto_identidad", _SCRIPT)
+    modulo = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(modulo)
+    return modulo
+
+
+def test_repository_id_sin_credenciales_en_remoto_https(tmp_path):
+    # Deliberadamente NO github.com: la v1 de este script (PR#264 ronda 1)
+    # partía el remoto con `url.split("github.com/", 1)[-1]` -- un remoto
+    # https://user:token@github.com/... "funcionaba" por COINCIDENCIA (el
+    # split cae justo después de las credenciales), pero cualquier remoto
+    # que no tenga ese substring literal (un espejo interno, GitLab, un
+    # proxy corporativo) caía al `else: tail = url` y filtraba la URL
+    # COMPLETA, credenciales incluidas, a una tabla con triggers
+    # no-update/no-delete. Este host prueba el caso real.
+    repo = _copia_temporal_del_repo(tmp_path)
+    token = "ghp_SuperSecretoDeMentira1234567890"
+    remoto = f"https://x-access-token:{token}@git.axioma-ia.internal/fjruizhn/Jax.git"
+    result = _run(["git", "remote", "set-url", "origin", remoto], cwd=repo)
+    assert result.returncode == 0, result.stderr
+
+    output = tmp_path / "out" / "implementation-identity.json"
+    manifest_output = tmp_path / "out" / "implementation-identity.manifest.json"
+    result = _generar(repo, output, manifest_output)
+    assert result.returncode == 0, result.stderr
+
+    data = json.loads(output.read_text())
+    assert data["repository_id"] == "fjruizhn/Jax"
+    assert token not in output.read_text()
+    assert token not in manifest_output.read_text()
+    assert token not in (result.stdout + result.stderr)
+
+
+def test_output_es_obligatorio_sin_production(tmp_path):
+    repo = _copia_temporal_del_repo(tmp_path)
+    result = _run([sys.executable, str(_SCRIPT), "--repo-root", str(repo)])
+    assert result.returncode != 0
+    assert "--output" in result.stderr
+    assert "--production" in result.stderr
+
+
+def test_output_y_production_juntos_es_error(tmp_path):
+    repo = _copia_temporal_del_repo(tmp_path)
+    result = _run([
+        sys.executable, str(_SCRIPT), "--repo-root", str(repo),
+        "--production", "--output", str(tmp_path / "otra-ruta.json"),
+    ])
+    assert result.returncode != 0
+    assert "--production" in result.stderr
+
+
+def test_resolver_salidas_production_usa_la_ruta_fija_de_despliegue():
+    modulo = _cargar_modulo_generador()
+    args = modulo._construir_parser().parse_args(["--repo-root", "/inexistente", "--production"])
+    output, manifest_output = modulo.resolver_salidas(args)
+    assert output == modulo._DEFAULT_OUTPUT
+    assert manifest_output == modulo._DEFAULT_OUTPUT.with_name(
+        modulo._DEFAULT_OUTPUT.name + ".manifest.json"
+    )
+
+
+def test_resolver_salidas_sin_output_ni_production_falla():
+    modulo = _cargar_modulo_generador()
+    args = modulo._construir_parser().parse_args(["--repo-root", "/inexistente"])
+    with pytest.raises(SystemExit):
+        modulo.resolver_salidas(args)
+
+
+def test_resolver_salidas_output_y_production_juntos_falla():
+    modulo = _cargar_modulo_generador()
+    args = modulo._construir_parser().parse_args([
+        "--repo-root", "/inexistente", "--production", "--output", "/tmp/x.json",
+    ])
+    with pytest.raises(SystemExit):
+        modulo.resolver_salidas(args)
+
+
+_FAKE_GIT_QUE_ADVIERTE_EN_STATUS = """#!/bin/sh
+# Simula el caso real de produccion: 'git status --porcelain' advierte por
+# stderr (dubious ownership, Permission denied sobre un archivo puntual...)
+# pero igual sale con codigo 0. $3 es el subcomando porque el script llama
+# siempre "git -C <root> <subcomando> ...".
+if [ "$3" = "status" ]; then
+  echo "warning: simulacion de advertencia de git para test (stderr, exit 0)" >&2
+  exit 0
+fi
+exec /usr/bin/git "$@"
+"""
+
+
+def test_arbol_sucio_se_niega_si_git_status_advierte_por_stderr_aunque_exit_sea_0(tmp_path):
+    repo = _copia_temporal_del_repo(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(_FAKE_GIT_QUE_ADVIERTE_EN_STATUS)
+    fake_git.chmod(0o755)
+
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+
+    output = tmp_path / "out" / "implementation-identity.json"
+    manifest_output = tmp_path / "out" / "implementation-identity.manifest.json"
+    result = subprocess.run(
+        [sys.executable, str(_SCRIPT), "--repo-root", str(repo),
+         "--output", str(output), "--manifest-output", str(manifest_output)],
+        capture_output=True, text=True, env=env,
+    )
+
+    assert result.returncode != 0
+    assert "no se puede confiar" in result.stderr
+    assert not output.exists()
+    assert not manifest_output.exists()

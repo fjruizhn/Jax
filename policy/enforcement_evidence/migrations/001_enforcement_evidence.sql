@@ -1,3 +1,10 @@
+-- CREATE TRIGGER usa IF NOT EXISTS (soportado en MariaDB desde 10.1) para que
+-- un re-run a medio aplicar no muera en el primer trigger con "already
+-- exists" -- ese error se lee como "ya estaba migrado" mientras los
+-- triggers de inmutabilidad que faltan simplemente no se crean. Con IF NOT
+-- EXISTS, volver a correr esta migración completa siempre termina con las
+-- 11 tablas y sus 22 triggers presentes, se haya cortado donde se haya
+-- cortado antes.
 CREATE SCHEMA IF NOT EXISTS jax_evidence;
 CREATE TABLE IF NOT EXISTS jax_evidence.control_definitions (control_definition_hash CHAR(71) PRIMARY KEY, control_id VARCHAR(128) NOT NULL, control_version INT UNSIGNED NOT NULL, canonical_definition JSON NOT NULL, UNIQUE(control_id, control_version)) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS jax_evidence.evidence_blobs (evidence_hash CHAR(71) PRIMARY KEY, size_bytes INT UNSIGNED NOT NULL, blob_bytes LONGBLOB NOT NULL) ENGINE=InnoDB;
@@ -11,26 +18,26 @@ CREATE TABLE IF NOT EXISTS jax_evidence.assertion_artifacts (assertion_hash CHAR
 CREATE TABLE IF NOT EXISTS jax_evidence.assertion_observations (assertion_hash CHAR(71) NOT NULL, observation_id CHAR(36) NOT NULL, PRIMARY KEY(assertion_hash, observation_id), FOREIGN KEY(assertion_hash) REFERENCES jax_evidence.enforcement_assertions(assertion_hash), FOREIGN KEY(observation_id) REFERENCES jax_evidence.enforcement_observations(observation_id)) ENGINE=InnoDB;
 CREATE TABLE IF NOT EXISTS jax_evidence.test_evidence_manifests (manifest_hash CHAR(71) PRIMARY KEY, implementation_identity_hash CHAR(71) NOT NULL, repository_id VARCHAR(255) NOT NULL, commit_sha CHAR(40) NOT NULL, job_id VARCHAR(255) NOT NULL, canonical_manifest JSON NOT NULL, UNIQUE KEY test_manifest_run (repository_id,commit_sha,implementation_identity_hash,job_id)) ENGINE=InnoDB;
 DELIMITER //
-CREATE TRIGGER jax_evidence.blobs_no_update BEFORE UPDATE ON jax_evidence.evidence_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.blobs_no_delete BEFORE DELETE ON jax_evidence.evidence_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.artifacts_no_update BEFORE UPDATE ON jax_evidence.evidence_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.artifacts_no_delete BEFORE DELETE ON jax_evidence.evidence_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.observations_no_update BEFORE UPDATE ON jax_evidence.enforcement_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.observations_no_delete BEFORE DELETE ON jax_evidence.enforcement_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.assertions_no_update BEFORE UPDATE ON jax_evidence.enforcement_assertions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.assertions_no_delete BEFORE DELETE ON jax_evidence.enforcement_assertions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.definitions_no_update BEFORE UPDATE ON jax_evidence.control_definitions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.definitions_no_delete BEFORE DELETE ON jax_evidence.control_definitions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.identities_no_update BEFORE UPDATE ON jax_evidence.implementation_identities FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.identities_no_delete BEFORE DELETE ON jax_evidence.implementation_identities FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.artifact_blobs_no_update BEFORE UPDATE ON jax_evidence.evidence_artifact_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.artifact_blobs_no_delete BEFORE DELETE ON jax_evidence.evidence_artifact_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.observation_artifacts_no_update BEFORE UPDATE ON jax_evidence.observation_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.observation_artifacts_no_delete BEFORE DELETE ON jax_evidence.observation_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.assertion_artifacts_no_update BEFORE UPDATE ON jax_evidence.assertion_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.assertion_artifacts_no_delete BEFORE DELETE ON jax_evidence.assertion_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.assertion_observations_no_update BEFORE UPDATE ON jax_evidence.assertion_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.assertion_observations_no_delete BEFORE DELETE ON jax_evidence.assertion_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.test_manifests_no_update BEFORE UPDATE ON jax_evidence.test_evidence_manifests FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
-CREATE TRIGGER jax_evidence.test_manifests_no_delete BEFORE DELETE ON jax_evidence.test_evidence_manifests FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.blobs_no_update BEFORE UPDATE ON jax_evidence.evidence_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.blobs_no_delete BEFORE DELETE ON jax_evidence.evidence_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.artifacts_no_update BEFORE UPDATE ON jax_evidence.evidence_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.artifacts_no_delete BEFORE DELETE ON jax_evidence.evidence_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.observations_no_update BEFORE UPDATE ON jax_evidence.enforcement_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.observations_no_delete BEFORE DELETE ON jax_evidence.enforcement_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.assertions_no_update BEFORE UPDATE ON jax_evidence.enforcement_assertions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.assertions_no_delete BEFORE DELETE ON jax_evidence.enforcement_assertions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.definitions_no_update BEFORE UPDATE ON jax_evidence.control_definitions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.definitions_no_delete BEFORE DELETE ON jax_evidence.control_definitions FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.identities_no_update BEFORE UPDATE ON jax_evidence.implementation_identities FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.identities_no_delete BEFORE DELETE ON jax_evidence.implementation_identities FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.artifact_blobs_no_update BEFORE UPDATE ON jax_evidence.evidence_artifact_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.artifact_blobs_no_delete BEFORE DELETE ON jax_evidence.evidence_artifact_blobs FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.observation_artifacts_no_update BEFORE UPDATE ON jax_evidence.observation_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.observation_artifacts_no_delete BEFORE DELETE ON jax_evidence.observation_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.assertion_artifacts_no_update BEFORE UPDATE ON jax_evidence.assertion_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.assertion_artifacts_no_delete BEFORE DELETE ON jax_evidence.assertion_artifacts FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.assertion_observations_no_update BEFORE UPDATE ON jax_evidence.assertion_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.assertion_observations_no_delete BEFORE DELETE ON jax_evidence.assertion_observations FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.test_manifests_no_update BEFORE UPDATE ON jax_evidence.test_evidence_manifests FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
+CREATE TRIGGER IF NOT EXISTS jax_evidence.test_manifests_no_delete BEFORE DELETE ON jax_evidence.test_evidence_manifests FOR EACH ROW SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='immutable evidence'//
 DELIMITER ;
