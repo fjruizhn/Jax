@@ -438,8 +438,7 @@ FAMILIAS = (
             ("jax-platform", JAX_PLATFORM_ROOT / "backend" / "api" / "chat.py"),
         ),
         # Los 10 sets, el orden de desempate y el mapa faceta -> (keywords, fuertes).
-        # _sin_tildes y el scoring quedan afuera: el de la Mesa tiene logs y
-        # docstring propios. Si un dia divergen por diseno, se declara con el marcador.
+        # El scoring queda afuera: el de la Mesa tiene logs propios. Si un dia divergen por diseno, se declara con el marcador.
         compartidos=(
             "KIMI_KW", "KIMI_STRONG",
             "HIPATIA_KW", "HIPATIA_STRONG",
@@ -452,6 +451,9 @@ FAMILIAS = (
             # igual que el REPL. El texto es el de Jairo Urbina: no se toca en una
             # sola copia.
             "EASTER_EGG_PATRON", "EASTER_EGG_TEXT", "es_easter_egg",
+            # es_easter_egg depende de ella: sin vigilarla, cambiarla en una sola
+            # copia cambia el disparo sin que nada avise (re-auditoría, MINOR-1).
+            "_sin_tildes",
         ),
         nota="Copia en jax-platform backend/api/chat.py (nombres alineados 2026-09-16). "
              "ORDEN DE MERGE: la plataforma primero -- contra un jax-platform con los "

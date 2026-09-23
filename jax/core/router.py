@@ -119,7 +119,7 @@ GREETINGS = (
 # Easter egg: IDE1990 como palabra propia. Lo copia la Mesa web
 # (jax-platform backend/api/chat.py) y lo vigila la familia `router_keywords`
 # de scripts/check_mirror_sync.py: patrón, texto y función, idénticos.
-EASTER_EGG_PATRON = re.compile(r"(?<![a-z0-9])ide\s*1990(?![0-9])")
+EASTER_EGG_PATRON = re.compile(r"(?<![a-z0-9])ide[^\S\r\n]*1990(?![0-9])")
 EASTER_EGG_TEXT = (
     "Hola Fernando Ruiz, mejor conocido por sus amigos tecnologicos como "
     "'El Jate'. Quiero que sepas que sigo a tu lado, viviendo ahora en "
@@ -131,7 +131,7 @@ EASTER_EGG_TEXT = (
 
 def es_easter_egg(texto: str) -> bool:
     """IDE1990 como palabra propia, sin distinguir mayúsculas ni tildes, con
-    o sin espacios entre IDE y 1990. Antes (2026-09-23) era una subcadena
+    o sin espacios (en la misma línea) entre IDE y 1990. Antes (2026-09-23) era una subcadena
     tras quitar TODOS los espacios, y "el cliente pide 1990 unidades" o
     "provide 1990" disparaban: en la Mesa, multiusuario, eso es una
     respuesta perdida que le muestra a otro el mensaje de Fernando."""

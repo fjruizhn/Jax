@@ -21,7 +21,7 @@ from jax.core.router import EASTER_EGG_TEXT, Router, es_easter_egg
 
 @pytest.mark.parametrize("texto", [
     "IDE1990", "ide1990", "IDE 1990", "IDE  1990", "  Ide1990  ", "Íde1990",
-    "hola IDE1990 que tal", "IDE1990!", "(ide1990)", "ＩＤＥ１９９０",
+    "hola IDE1990 que tal", "IDE1990!", "(ide1990)", "ＩＤＥ１９９０", "IDE\t1990",
 ])
 def test_dispara(texto):
     assert es_easter_egg(texto)
@@ -35,6 +35,8 @@ def test_dispara(texto):
     "IDE|990", "IDE2024",
     # Bordes numéricos y de palabra.
     "IDE19901", "IDE199", "tengo un IDE de 1990", "xide1990", "ide-1990",
+    # Un renglón que termina en IDE y otro que empieza en 1990 (lista pegada).
+    "Borland IDE\n1990: Turbo C++", "IDE\r\n1990",
 ])
 def test_no_dispara(texto):
     assert not es_easter_egg(texto)
