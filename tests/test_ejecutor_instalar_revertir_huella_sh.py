@@ -488,12 +488,22 @@ def test_instalar_funciona_con_un_home_resuelto_via_getent_con_espacio(tmp_path)
     ssh_admin = home_con_espacio / ".ssh"
     ssh_admin.mkdir(parents=True)
     (ssh_admin / "authorized_keys").write_text("ssh-ed25519 AAAAotra otra-llave-de-fruiz\n")
+    # `known_hosts` fabricado acá, igual que en `_arbol_remoto` (ver su docstring): el
+    # instalador siembra el known_hosts del servicio desde el del operador, y este test
+    # NO puede depender de que la máquina que lo corre tenga la entrada de
+    # `[127.0.0.1]:58291` (hall9000 sí la tiene; un runner de CI, no -- jax#263).
+    llave_host_falsa = tmp_path / "host_key_home_con_espacio"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(llave_host_falsa)],
+                   check=True, capture_output=True)
+    _tipo, _clave = llave_host_falsa.with_suffix(".pub").read_text().split()[:2]
+    (ssh_admin / "known_hosts").write_text(f"[127.0.0.1]:58291 {_tipo} {_clave}\n")
 
     politica_ruta = tmp_path / "politica.json"
     politica_ruta.write_text(json.dumps(_doc_politica()))
     binds = _arbol_remoto(tmp_path)
-    del binds[f"{ADMIN_HOME}/.ssh"]
-    binds[str(ssh_admin)] = ssh_admin  # bind idéntico -- ya está en su lugar real bajo tmp_path
+    # El HOME del proceso NO cambia: `~/.ssh` del operador se monta sobre este árbol, que
+    # es el mismo que el `getent` falso devuelve como home remoto (con espacio).
+    binds[f"{ADMIN_HOME}/.ssh"] = ssh_admin
 
     bin_falso = _bin_falso(tmp_path)
     getent_falso = bin_falso / "getent"
