@@ -1,4 +1,4 @@
-"""Toda ruta de código de ESTE repo citada en una regla de política existe.
+"""Toda ruta de ESTE repo citada en una regla de política existe (código, docs, config).
 
 POR QUE EXISTE (2026-09-23). jax#262 renombró `las_manos/policy.py` a
 `las_manos/motor_de_politica.py`. P04 y su `policy/generated/CORPUS.md` siguieron
@@ -17,13 +17,19 @@ RAIZ = Path(__file__).resolve().parents[2]
 REGLAS = RAIZ / "policy" / "rules"
 RAICES_DE_CODIGO = ("las_manos", "jax", "jacobs", "policy", "scripts", "procesamiento",
                     "jaxctl", "loadtest", "ops", "config", "tests")
-RUTA = re.compile(r"(?<![\w/.-])((?:%s)/[\w./-]+\.py)\b" % "|".join(RAICES_DE_CODIGO))
+EXTENSIONES = "py|md|toml|yaml|yml|json|sh"
+# Ruta relativa a una carpeta de código de este repo, o absoluta bajo el checkout
+# (/home/fruiz/jax/…). El lookbehind excluye `:` para que una cita HISTÓRICA con
+# revisión (`f6c8e7d^:missions/…`, archivo que ya no está en HEAD) no se exija
+# en el árbol: en CI el checkout es superficial y la revisión no está.
+RUTA = re.compile(r"(?<![\w/.:-])((?:%s)/[\w./-]+\.(?:%s))\b" % ("|".join(RAICES_DE_CODIGO), EXTENSIONES))
+ABSOLUTA = re.compile(r"/home/fruiz/jax/([\w./-]+\.(?:%s))\b" % EXTENSIONES)
 
 
 def _citas():
     for regla in sorted(REGLAS.glob("*.yaml")):
         for n, linea in enumerate(regla.read_text(encoding="utf-8").splitlines(), 1):
-            for ruta in RUTA.findall(linea):
+            for ruta in RUTA.findall(linea) + ABSOLUTA.findall(linea):
                 yield f"{regla.name}:{n}", ruta
 
 

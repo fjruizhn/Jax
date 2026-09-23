@@ -4,7 +4,7 @@
 # CORPUS — JAX/Axioma, reglas normativas
 
 **Versión del corpus:** 0.1.0
-**SHA256:** `af0219f4ed088a5a11236cfe19d0d9389b81c1c7fb3c88529c3d3a4ced43a457`
+**SHA256:** `606e668774781ab831b17e36dc0300c89e7c79c02376eb73baf4bf1db2105d09`
 **Reglas:** 23
 
 | Estado | Cantidad |
@@ -245,7 +245,7 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 ### MA01 — El que supone se equivoca.
 
 - **Enunciado:** El que supone se equivoca.
-- **Origen:** Marina (atribución). /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md línea 15 ("Regla firmada por los cinco") y línea 232; también en /home/fruiz/jax/missions/bridge-migration.md línea 65-66 y línea 223; y citada en REFORMAS-v3.md Apéndice A1. Fraseo alternativo hallado en la misma fuente (AUTONOMIA_ANTIERROR.md, footer, línea 246): "No suponer nunca."
+- **Origen:** Marina (atribución). /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md línea 15 ("Regla firmada por los cinco") y línea 232; también en `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 65-66 y línea 223; y citada en REFORMAS-v3.md Apéndice A1. Fraseo alternativo hallado en la misma fuente (AUTONOMIA_ANTIERROR.md, footer, línea 246): "No suponer nunca."
 
 - **Estado:** CULTURAL
 - **Mecanismo de cumplimiento:** null
@@ -258,7 +258,7 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 ### MA02 — Saber no cuesta nada.
 
 - **Enunciado:** Saber no cuesta nada.
-- **Origen:** Marina — "Segundo principio fundacional" (six-impossible-things.html, contexto inmediato del Protocolo Hyde, ver [[HY01]]-[[HY04]]). También en /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y /home/fruiz/jax/missions/bridge-migration.md línea 66 ("Saber no cuesta nada — pregúntale al que de verdad sabe").
+- **Origen:** Marina — "Segundo principio fundacional" (six-impossible-things.html, contexto inmediato del Protocolo Hyde, ver [[HY01]]-[[HY04]]). También en /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 66 ("Saber no cuesta nada — pregúntale al que de verdad sabe").
 
 - **Estado:** CULTURAL
 - **Mecanismo de cumplimiento:** null
@@ -271,7 +271,7 @@ Confirmado con Fernando (2026-08-15): se mantiene NORMATIVA_PENDIENTE, no CULTUR
 ### MA03 — Mañana es el día que el fracasado tiene más que hacer.
 
 - **Enunciado:** Mañana es el día que el fracasado tiene más que hacer.
-- **Origen:** Marina — /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y /home/fruiz/jax/missions/bridge-migration.md línea 67; citada en REFORMAS-v3.md Apéndice A3, que la liga explícitamente a R5 ("Aplicable a R5. Compuerta de 30 días").
+- **Origen:** Marina — /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 67; citada en REFORMAS-v3.md Apéndice A3, que la liga explícitamente a R5 ("Aplicable a R5. Compuerta de 30 días").
 
 - **Estado:** CULTURAL
 - **Mecanismo de cumplimiento:** null

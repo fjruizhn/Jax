@@ -21,13 +21,21 @@ def test_compara_las_tres_identidades_legacy_sin_corregirlas() -> None:
         "generated_corpus_embedded_sha256",
     }
     assert comparison.divergent is True
+    # FOTO ACTUALIZADA el 2026-09-23 (decisión de Fernando, jax#270). Antes:
+    # reglas c30424f9…, corpus embebido d641add3…. Cambiaron porque P04 citaba
+    # `las_manos/policy.py` (borrado en jax#262) y MA01-03 citaban por ruta
+    # absoluta `missions/bridge-migration.md` (sacado de HEAD en B1.4), y porque
+    # CORPUS.md estaba desfasado de sus reglas desde el 2026-08-25. Al
+    # regenerarlo, reglas y corpus embebido pasan a COINCIDIR (606e6687…): la
+    # divergencia que queda, y que esta foto sigue documentando, es la de
+    # VERSION (040f32…), que no se toca.
     assert comparison.identities == {
         "version_declared_rules_sha256":
             "040f32ea14ae2d21bcb53df3d03a7897151e745c388532fd3f603c867c963d60",
         "computed_raw_rules_sha256":
-            "c30424f98e78aa514144d22d48eb6f1203f8e0328fcbd88e356ef7ac5927af46",
+            "606e668774781ab831b17e36dc0300c89e7c79c02376eb73baf4bf1db2105d09",
         "generated_corpus_embedded_sha256":
-            "d641add34e2f4e616d6840fc80c17be705919521d0538200a2a49ceab01ed031",
+            "606e668774781ab831b17e36dc0300c89e7c79c02376eb73baf4bf1db2105d09",
     }
 
     ordered = sorted(

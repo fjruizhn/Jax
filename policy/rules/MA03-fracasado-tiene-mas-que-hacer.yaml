@@ -3,7 +3,7 @@ statement: >
   Mañana es el día que el fracasado tiene más que hacer.
 origin: >
   Marina — /home/fruiz/jax/docs/AUTONOMIA_ANTIERROR.md (footer) y
-  /home/fruiz/jax/missions/bridge-migration.md línea 67; citada en
+  `f6c8e7d^:missions/bridge-migration.md` (B1.4 lo sacó de HEAD) línea 67; citada en
   REFORMAS-v3.md Apéndice A3, que la liga explícitamente a R5
   ("Aplicable a R5. Compuerta de 30 días").
 status: CULTURAL
