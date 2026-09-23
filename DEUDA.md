@@ -4002,6 +4002,21 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **Anotado con fecha 2026-09-22 (PR#261, ronda 1 de revisión, MINOR-1) — el `ENGINE=InnoDB` de `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` en producción es una medición puntual, no una garantía continua.** `CREATE TABLE IF NOT EXISTS` nunca convierte una tabla que ya existe: el `ENGINE=InnoDB` explícito que agrega este PR a `jacobs/store.py` protege bases *nuevas* (dev, CI, un restore de desastre) contra el `default_storage_engine` del server, pero el hecho de que `jax_memory` en producción ya sea InnoDB hoy descansa en esta medición manual, de una sola vez:
+  - **Evidencia (2026-09-22, `SHOW TABLE STATUS`, sólo lectura, puerto 3308, base `jax_memory`):**
+    `jacobs_events`, `jacobs_pipelines`, `jacobs_steps`, `jacobs_subpipeline_tokens` y
+    `las_manos_human_gate_tokens` — las cinco `InnoDB`.
+  - **No hay detección automática de una deriva futura.** Nada en CI ni en `init_tables()`
+    vuelve a comprobar el `ENGINE` de una tabla que YA existe (sólo la crea si falta). Si
+    algún día alguien corriera un `ALTER TABLE ... ENGINE=` manual sobre `jax_memory` (algo
+    que este PR no hace ni habilita), o si producción se migrara a un server con otro
+    `default_storage_engine` y alguien recreara estas tablas a mano en vez de dejar que
+    `init_tables()` lo haga, nada avisaría. Si se quisiera cerrar ese hueco, un candidato es
+    un chequeo periódico (o al arrancar LAS MANOS) tipo
+    `SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND
+    TABLE_NAME IN (...) AND ENGINE <> 'InnoDB'` que loguee/alerte si da alguna fila — no se
+    escribió en este PR porque no lo pidió el encargo y sería ampliar el alcance.
+
 - **Anotado con fecha 2026-09-22 — `idx_pipelines_status (status)` quedó redundante con `idx_pipelines_ocultos (status, descartado_at)` (Task 1, fix round 1, spec `2026-09-22-descartar-pipelines`).** `idx_pipelines_ocultos` empieza por la misma columna (`status`) que `idx_pipelines_status`: por la regla del prefijo izquierdo de un índice compuesto, MariaDB puede resolver con el nuevo cualquier consulta que hoy elige el viejo filtrando solo por `status`. No se retira en este PR: el viejo puede tener lectores que esta ronda no auditó (el reaper vía `store.candidatos_del_reaper`, `pipeline_count_active`, el candado del cupo), y borrarlo a ciegas es exactamente el tipo de "arreglo" que la Regla Absoluta prohíbe. Retirarlo va en su **PROPIO PR**, con: (a) `EXPLAIN` de la consulta real del reaper (y de cualquier otro caller que filtre `jacobs_pipelines` solo por `status`) contra el índice nuevo, sin filesort ni caída a scan completo; (b) un grep de todos los callers que arman `WHERE status = ...`/`WHERE status IN (...)` sobre `jacobs_pipelines` para confirmar que ninguno depende de una propiedad de `idx_pipelines_status` que `idx_pipelines_ocultos` no cubra (por ejemplo, un `FORCE INDEX`/`USE INDEX` explícito, si existiera).
 
 - **CERRADO 2026-09-22 (ronda 5 del contexto del Ejecutor) — `ejecutor_host.sudo` y

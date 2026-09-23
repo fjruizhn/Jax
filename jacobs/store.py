@@ -1223,14 +1223,27 @@ async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> N
     columna que no existe. El contrato no es "quién escribe", es "algo de
     afuera depende de que exista"; por eso fail-closed aplica igual.
 
-    Antes de levantar la excepción vuelve a mirar `information_schema`: LAS
-    MANOS, jax-platform y el Ejecutor llaman a `init_tables()` cada uno al
-    arrancar, así que dos procesos pueden intentar el MISMO `ADD COLUMN` a
-    la vez. El que pierde la carrera del metadata lock puede encontrar la
-    columna ya creada por el que ganó cuando reconsulta -- eso NO es un
-    fallo, es la misma columna llegando por el otro proceso, y seguir de
-    largo ahí es correcto (fail-closed protege contra "la columna no está",
-    no contra "otro proceso la creó primero")."""
+    Antes de levantar la excepción vuelve a mirar `information_schema`: dos
+    procesos pueden intentar el MISMO `ADD COLUMN` a la vez -- por ejemplo un
+    reinicio de LAS MANOS con el proceso saliente todavía a mitad de su
+    `init_tables()` cuando el entrante arranca el suyo, o un script de este
+    mismo repo (`loadtest/`, la suite de tests) corriendo `init_tables()`
+    contra la misma base mientras LAS MANOS también arranca.
+
+    CORRECCIÓN (revisión final de la rama Descartar, 2026-09-22): este
+    comentario decía antes "LAS MANOS, jax-platform y el Ejecutor llaman a
+    `init_tables()` cada uno al arrancar" -- verificado FALSO contra el
+    código. Solo LAS MANOS lo llama (`las_manos/server.py:272`). jax-platform
+    ni siquiera lo nombra fuera de comentarios y dice explícitamente que NO
+    corre DDL sobre las tablas de `jax` (`backend/db/migrations.py`); el
+    Ejecutor (`jax/ejecutor/`) tampoco lo llama. Afirmar lo contrario podía
+    hacer pensar que reiniciar jax-platform ejecuta la migración -- el orden
+    de deploy invertido que produce 500s. El que pierde la carrera del
+    metadata lock puede encontrar la columna ya creada por el que ganó
+    cuando reconsulta -- eso NO es un fallo, es la misma columna llegando
+    por el otro proceso, y seguir de largo ahí es correcto (fail-closed
+    protege contra "la columna no está", no contra "otro proceso la creó
+    primero")."""
     await cur.execute("SELECT @@SESSION.lock_wait_timeout")
     (previo,) = await cur.fetchone()
     await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
@@ -1273,13 +1286,20 @@ async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> N
         await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
 
 
-async def init_tables() -> None:
-    """Crea las tablas si no existen. Llamar al arrancar."""
-    # desechable: _crear_indice_acotado cambia lock_wait_timeout de la SESION.
-    # Lo restaura en su finally, pero una sesion tocada no vuelve al pool.
-    async with conexion(desechable=True) as conn:
-        async with conn.cursor() as cur:
-            await cur.execute("""
+# Nombradas, no literales inline, por el mismo motivo que `_INDICES` (arriba):
+# revision final de la rama Descartar (2026-09-22, deuda con fecha) -- las
+# tres tienen que ser transaccionales (Ruling 9: `pipeline_transicion_descarte`
+# escribe el CAS de estado de `jacobs_pipelines` y el evento de auditoria de
+# `jacobs_events` en la MISMA transaccion; `jacobs_steps` tiene el mismo hueco
+# aunque hoy nada la escriba en una transaccion multi-tabla), y `ENGINE=InnoDB`
+# EXPLICITO es lo que hace esa garantia del CODIGO en vez de depender de
+# `default_storage_engine` del server. Nombrarlas deja probar el DDL exacto
+# contra una base real (`jacobs/_store_indexes_test.py::EngineInnoDBTest`)
+# sin pasar por el resto de `init_tables()` -- que tiene ALTERs con
+# ALGORITHM=INSTANT sobre `jacobs_pipelines` que sólo InnoDB soporta, y
+# reventarian antes de llegar a probar el ENGINE de `jacobs_steps`/
+# `jacobs_events` si se probara por el camino completo.
+_DDL_JACOBS_PIPELINES = """
                 CREATE TABLE IF NOT EXISTS jacobs_pipelines (
                     pipeline_id        VARCHAR(36) PRIMARY KEY,
                     name               TEXT NOT NULL,
@@ -1292,8 +1312,48 @@ async def init_tables() -> None:
                     context_refs       JSON,
                     created_at         DOUBLE NOT NULL,
                     updated_at         DOUBLE NOT NULL
-                )
-            """)
+                ) ENGINE=InnoDB
+            """
+
+_DDL_JACOBS_STEPS = """
+                CREATE TABLE IF NOT EXISTS jacobs_steps (
+                    step_id          VARCHAR(36) PRIMARY KEY,
+                    pipeline_id      VARCHAR(36) NOT NULL,
+                    step_index       INT NOT NULL,
+                    facet            VARCHAR(30) NOT NULL,
+                    capability       VARCHAR(50) NOT NULL,
+                    input_ref        TEXT,
+                    output_ref       TEXT,
+                    status           VARCHAR(20) NOT NULL,
+                    timeout_seconds  INT DEFAULT 300,
+                    retries_allowed  INT DEFAULT 0,
+                    skip_on_fail     BOOLEAN DEFAULT FALSE,
+                    trace_id         VARCHAR(36),
+                    started_at       DOUBLE,
+                    finished_at      DOUBLE,
+                    error            TEXT
+                ) ENGINE=InnoDB
+            """
+
+_DDL_JACOBS_EVENTS = """
+                CREATE TABLE IF NOT EXISTS jacobs_events (
+                    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    pipeline_id VARCHAR(36) NOT NULL,
+                    step_id     VARCHAR(36),
+                    event_type  VARCHAR(50) NOT NULL,
+                    payload     JSON,
+                    ts          DOUBLE NOT NULL
+                ) ENGINE=InnoDB
+            """
+
+
+async def init_tables() -> None:
+    """Crea las tablas si no existen. Llamar al arrancar."""
+    # desechable: _crear_indice_acotado cambia lock_wait_timeout de la SESION.
+    # Lo restaura en su finally, pero una sesion tocada no vuelve al pool.
+    async with conexion(desechable=True) as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(_DDL_JACOBS_PIPELINES)
             # `acotado`: mismo criterio que `_INDICES` (T6-6, 2026-09-15) --
             # el DDL corre con lock_wait_timeout acotado
             # (`_agregar_columna_acotada`). Las columnas viejas (user_id..
@@ -1452,25 +1512,7 @@ async def init_tables() -> None:
                     await _agregar_columna_acotada(cur, "jacobs_pipelines", col, ddl)
                 else:
                     await cur.execute(ddl)
-            await cur.execute("""
-                CREATE TABLE IF NOT EXISTS jacobs_steps (
-                    step_id          VARCHAR(36) PRIMARY KEY,
-                    pipeline_id      VARCHAR(36) NOT NULL,
-                    step_index       INT NOT NULL,
-                    facet            VARCHAR(30) NOT NULL,
-                    capability       VARCHAR(50) NOT NULL,
-                    input_ref        TEXT,
-                    output_ref       TEXT,
-                    status           VARCHAR(20) NOT NULL,
-                    timeout_seconds  INT DEFAULT 300,
-                    retries_allowed  INT DEFAULT 0,
-                    skip_on_fail     BOOLEAN DEFAULT FALSE,
-                    trace_id         VARCHAR(36),
-                    started_at       DOUBLE,
-                    finished_at      DOUBLE,
-                    error            TEXT
-                )
-            """)
+            await cur.execute(_DDL_JACOBS_STEPS)
             for col, ddl in [
                 ("motor", "ALTER TABLE jacobs_steps ADD COLUMN motor VARCHAR(30) NULL"),
                 # depends_on existía en jax_memory (prod) desde antes -- agregado
@@ -1510,16 +1552,7 @@ async def init_tables() -> None:
                 (exists,) = await cur.fetchone()
                 if not exists:
                     await cur.execute(ddl)
-            await cur.execute("""
-                CREATE TABLE IF NOT EXISTS jacobs_events (
-                    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-                    pipeline_id VARCHAR(36) NOT NULL,
-                    step_id     VARCHAR(36),
-                    event_type  VARCHAR(50) NOT NULL,
-                    payload     JSON,
-                    ts          DOUBLE NOT NULL
-                )
-            """)
+            await cur.execute(_DDL_JACOBS_EVENTS)
             # Frente F (2026-09-16): contrato de sub-pipelines. Se guarda SOLO
             # el sha256 del token. Tabla nueva -> el índice va en el CREATE (no
             # hay filas que migrar). Tiempos en DOUBLE epoch como el resto de
@@ -1566,8 +1599,12 @@ async def init_tables() -> None:
             # `CREATE INDEX` no acepta IF NOT EXISTS en MariaDB, asi que se
             # chequea information_schema primero -- mismo patron idempotente
             # que las columnas de arriba. init_tables() corre en CADA arranque
-            # de los tres procesos: si esto no fuera idempotente, el segundo
-            # arranque romperia en produccion.
+            # de LAS MANOS -- el unico proceso de produccion que lo llama
+            # (verificado 2026-09-22, ver el docstring de
+            # `_agregar_columna_acotada` mas arriba) -- y ademas de scripts
+            # de este repo (`loadtest/`) o de la suite de tests contra la
+            # misma base: si esto no fuera idempotente, el segundo arranque
+            # romperia en produccion.
             #
             # La lista vive en _INDICES (arriba) para que su forma se pruebe
             # sin DB (tests/test_store_indice_duenio.py).

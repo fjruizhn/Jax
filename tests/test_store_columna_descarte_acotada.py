@@ -133,10 +133,14 @@ class EsperaAcotadaFallaCerradoTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cur.ejecutados[-1], ("SET SESSION lock_wait_timeout=%s", (50,)))
 
     async def test_vencida_la_espera_pero_otro_proceso_ya_la_creo_no_es_fallo(self):
-        """Dos procesos de Jacobs (LAS MANOS, jax-platform, el Ejecutor)
-        llaman a init_tables() al arrancar: el que pierde la carrera del MDL
-        puede encontrar la columna ya creada por el que ganó. Eso NO es un
-        fallo."""
+        """Dos procesos pueden llamar a init_tables() a la vez contra la
+        misma base (un reinicio de LAS MANOS con el saliente todavía en
+        vuelo, o un script de este repo corriendo aparte) -- CORREGIDO
+        2026-09-22: solo LAS MANOS llama a init_tables() en producción
+        (`las_manos/server.py:272`); jax-platform y el Ejecutor NO lo hacen
+        (verificado contra el código, ver jacobs/store.py). El que pierde la
+        carrera del MDL puede encontrar la columna ya creada por el que
+        ganó. Eso NO es un fallo."""
         cur = _CursorFalso(previo=50, error_ddl=aiomysql.OperationalError(
             1205, "Lock wait timeout exceeded; try restarting transaction"),
             existe_tras_el_error=True)
