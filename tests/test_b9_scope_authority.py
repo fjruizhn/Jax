@@ -1,7 +1,10 @@
 import pytest
 
-from jax.memory.b9 import AuthorizationDenied, ScopeContext, ScopeDenied, Visibility
-from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
+from jax.memory.b9 import (AuthorizationDenied, MutationAuthorizationContext,
+                           MutationAuthorizationRequest, ScopeContext,
+                           ScopeDenied, Visibility)
+from jax.memory.scope_authority import (MariaDBScopeAuthorityResolver,
+                                        ProjectRole, ProjectScopeAuthorization)
 
 
 class Cursor:
@@ -25,6 +28,20 @@ class Acquire:
 
 class Pool:
     def __init__(self, row): self.conn = Conn(row)
+    def acquire(self): return Acquire(self.conn)
+
+
+class SequentialCursor:
+    def __init__(self, rows): self.rows=list(rows); self.calls=[]
+    async def __aenter__(self): return self
+    async def __aexit__(self, *_): pass
+    async def execute(self, sql, args): self.calls.append((sql,args))
+    async def fetchone(self): return self.rows.pop(0)
+class SequentialConn:
+    def __init__(self, rows): self.cursor_obj=SequentialCursor(rows)
+    def cursor(self): return self.cursor_obj
+class SequentialPool:
+    def __init__(self, rows): self.conn=SequentialConn(rows)
     def acquire(self): return Acquire(self.conn)
 
 
@@ -76,11 +93,74 @@ async def test_reviewer_authority_comes_from_persisted_role_not_caller_claim():
 
 
 @pytest.mark.asyncio
-async def test_service_actor_preserves_distinct_subject_after_membership_check():
+async def test_service_actor_preserves_subject_without_inheriting_subject_role():
     resolver = MariaDBScopeAuthorityResolver(Pool(("t1", "active", "reviewer")))
-    auth = await resolver.resolve_mutation(
-        scope(actor="service:memory-worker", actor_type="SERVICE"), "CREATE", Visibility.SYSTEM_INTERNAL
-    )
-    assert auth.scope.actor_principal == "service:memory-worker"
+    worker_scope = scope(actor="service:memory-extraction", actor_type="SERVICE")
+    worker_scope = ScopeContext(**{**worker_scope.__dict__, "calling_component": "memory-extraction"})
+    auth = await resolver.resolve_service_mutation(worker_scope, "CREATE", Visibility.SYSTEM_INTERNAL)
+    assert auth.scope.actor_principal == "service:memory-extraction"
     assert auth.scope.subject_user_id == "u1"
-    assert "memory_reviewer" in auth.resolved_roles
+    assert "memory_reviewer" not in auth.resolved_roles
+    assert "memory:verify" not in auth.resolved_capabilities
+
+
+@pytest.mark.asyncio
+async def test_service_cannot_copy_subject_membership_or_global_reviewer_authority():
+    # The third row represents an OWNER membership.  Service resolution must
+    # not query it and therefore cannot inherit it by copying subject_user_id.
+    resolver = MariaDBScopeAuthorityResolver(SequentialPool([
+        {"tenant_id": "t1", "status": "ACTIVE", "role": "admin"},
+        {"tenant_id": "t1", "status": "ACTIVE"},
+        {"membership_id": "m1", "tenant_id": "t1", "user_id": "u1", "project_role": "OWNER", "status": "ACTIVE"},
+    ]))
+    service = ScopeContext("service:memory-extraction", "SERVICE", "u1", "t1", "p1", calling_component="memory-extraction")
+    auth = await resolver.resolve_service_mutation(service, "CREATE", Visibility.PROJECT_SHARED)
+    assert auth.resolved_roles == frozenset({"memory_service"})
+    assert "project:membership:admin" not in auth.resolved_capabilities
+    assert "memory:project:verify" not in auth.resolved_capabilities
+    with pytest.raises(ScopeDenied, match="must use"):
+        await resolver.resolve_mutation(service, "VERIFY", Visibility.PROJECT_SHARED)
+
+
+@pytest.mark.asyncio
+async def test_fabricated_project_authorization_is_not_authority():
+    # A constructor call cannot replace the membership lookup; it is ignored
+    # and current DB state wins.
+    fake = ProjectScopeAuthorization("p1", "t1", "u1", "forged", ProjectRole.OWNER,
+                                     "ACTIVE", "ACTIVE", 0)
+    requested = ScopeContext("u1", "USER", "u1", "t1", "p1", project_authorization=fake)
+    resolver = MariaDBScopeAuthorityResolver(SequentialPool([
+        {"tenant_id": "t1", "status": "ACTIVE", "role": "member"},
+        {"tenant_id": "t1", "status": "ACTIVE"},
+        None,
+    ]))
+    with pytest.raises(ScopeDenied, match="membership is missing"):
+        await resolver.resolve_mutation(requested, "CREATE", Visibility.PROJECT_SHARED)
+
+
+@pytest.mark.asyncio
+async def test_transaction_resolver_rejects_constructed_authorization_context():
+    resolver = MariaDBScopeAuthorityResolver(Pool(None))
+    fabricated = MutationAuthorizationContext(scope(), "VERIFY", Visibility.USER_PRIVATE,
+                                              frozenset({"memory_admin"}), frozenset({"memory:admin"}), "forged")
+    class Cur:
+        async def execute(self, *_): pass
+        async def fetchone(self): return None
+    with pytest.raises(AuthorizationDenied, match="untrusted mutation request"):
+        await resolver.resolve_mutation_in_transaction(Cur(), fabricated)
+
+
+@pytest.mark.asyncio
+async def test_transaction_resolver_rechecks_current_membership_with_locks():
+    class Cur:
+        def __init__(self): self.rows = [
+            {"tenant_id": "t1", "status": "ACTIVE", "role": "member"},
+            {"tenant_id": "t1", "status": "ACTIVE"},
+            {"membership_id": "m", "tenant_id": "t1", "user_id": "u1", "project_role": "REVIEWER", "status": "ACTIVE"},
+        ]; self.calls=[]
+        async def execute(self, sql, args): self.calls.append(sql)
+        async def fetchone(self): return self.rows.pop(0)
+    cur=Cur(); request=MutationAuthorizationRequest(scope(project="p1"), "VERIFY", Visibility.PROJECT_SHARED)
+    auth=await MariaDBScopeAuthorityResolver(Pool(None)).resolve_mutation_in_transaction(cur, request)
+    assert "memory:project:verify" in auth.resolved_capabilities
+    assert all("FOR UPDATE" in sql for sql in cur.calls)

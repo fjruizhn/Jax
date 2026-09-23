@@ -7,10 +7,13 @@ from jax.memory.b9 import (
     ResolutionState, ScopeContext, ScopeDenied, Visibility,
 )
 from jax.memory.b9_resolvers import DesignatedSourceResolver
+from jax.memory.scope_authority import ProjectRole, _issue_project_authorization
 
 
 def scope(tenant="t1", subject="u1", actor="user:u1", project="p1"):
-    return ScopeContext(actor, "USER", subject, tenant, project, request_id="r")
+    authorization = None if project is None else _issue_project_authorization(str(project), tenant, subject, "test-membership", ProjectRole.OWNER)
+    return ScopeContext(actor, "USER", subject, tenant, project, request_id="r",
+                        project_authorization=authorization)
 
 
 def api(roles=("memory_admin",)):
@@ -59,7 +62,7 @@ def test_forged_role_is_not_an_authority_input():
 
 
 def test_actor_and_subject_are_distinct_provenance():
-    a=api(); worker=ScopeContext("service:memory-worker","SERVICE","u1","t1","p1",calling_component="worker")
+    a=api(); worker=ScopeContext("service:memory-worker","SERVICE","u1","t1","p1",calling_component="worker",project_authorization=scope().project_authorization)
     mid=a.create(worker,ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
     p=a._store.provenance[a._store.revisions[mid][-1].revision_id][0]
     assert (p.actor_principal,p.subject_user_id)==("service:memory-worker","u1")
@@ -149,8 +152,8 @@ def test_tombstone_expire_and_cross_tenant_rescope_preserve_history():
 
 def test_event_records_actor_delegation_component_and_trace():
     a=api(); worker=ScopeContext("service:worker","SERVICE","u1","t1","p1",
-                                 delegation="user-request",calling_component="memory-worker",
-                                 request_id="r",trace_id="trace")
+                                     delegation="user-request",calling_component="memory-worker",
+                                     request_id="r",trace_id="trace",project_authorization=scope().project_authorization)
     mid=a.create(worker,ObjectKind.FACT,"x",Visibility.USER_PRIVATE,user_id="u1")
     e=a._store.events[mid][0]
     assert (e.actor_type,e.delegation,e.calling_component,e.request_id,e.trace_id) == (

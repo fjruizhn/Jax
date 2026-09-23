@@ -33,8 +33,10 @@ import os
 import logging
 from typing import Awaitable, Callable
 
-from jax.memory.b9 import MutationAuthorizationContext, ObjectKind, Visibility
-from jax.memory.b9_mariadb import PersistentMemoryAPI
+from jax.memory.b9 import (MutationAuthorizationRequest, ObjectKind, ScopeContext,
+                           ScopeDenied, Visibility)
+from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
+from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.db import EMBED, MemoryDB
 from jax.core.registro_facetas import url_del_proveedor
 from jax.core.cliente_http_compartido import cerrar_cliente_http
@@ -51,24 +53,59 @@ class PersistentExtractionWriter:
     """Composition seam for extraction output.
 
     The resolver callback belongs to an authenticated composition layer.  It
-    returns an already-resolved context for each item; this worker never
-    derives tenant, membership, reviewer status, or delegation from a legacy
+    returns an untrusted *request scope* for each item.  The persistent API
+    resolves the narrow service policy inside its mutation transaction; this
+    worker never receives a membership decision or derives authority from a
     conversation row.
     """
     def __init__(self, api: PersistentMemoryAPI,
-                 resolve_auth: Callable[[dict, str, Visibility], Awaitable[MutationAuthorizationContext]]):
+                 build_request_scope: Callable[[dict, str, Visibility], Awaitable[ScopeContext]]):
         self._api = api
-        self._resolve_auth = resolve_auth
+        self._build_request_scope = build_request_scope
 
     async def persist(self, conversation: dict, kind: ObjectKind, content: str) -> str:
         visibility = Visibility.PROJECT_SHARED if conversation.get("project_id") else Visibility.USER_PRIVATE
-        auth = await self._resolve_auth(conversation, "CREATE", visibility)
+        scope = await self._build_request_scope(conversation, "CREATE", visibility)
+        if scope.actor_type != "SERVICE" or scope.actor_principal != "service:memory-extraction":
+            raise ScopeDenied("extraction requires the fixed memory-extraction service principal")
+        # The source row is canonical worker input, not an authority claim.
+        # It may only be written under its exact namespace; widening/re-scoping
+        # requires an explicit B9 operation and is not available to extraction.
+        if (str(conversation.get("tenant_id")) != str(scope.tenant_id)
+                or str(conversation.get("user_id")) != str(scope.subject_user_id)
+                or (str(conversation.get("project_id")) if conversation.get("project_id") else None)
+                   != (str(scope.project_id) if scope.project_id else None)):
+            raise ScopeDenied("extraction source scope does not match service request scope")
+        request = MutationAuthorizationRequest(scope, "CREATE", visibility)
         return await self._api.create_memory(
-            auth, kind, content, visibility,
-            user_id=auth.scope.subject_user_id if visibility is Visibility.USER_PRIVATE else None,
-            project_id=auth.scope.project_id if visibility is Visibility.PROJECT_SHARED else None,
+            request, kind, content, visibility,
+            user_id=scope.subject_user_id if visibility is Visibility.USER_PRIVATE else None,
+            project_id=scope.project_id if visibility is Visibility.PROJECT_SHARED else None,
             transformation_id="conversation-extraction", provider="deepseek", model="deepseek-v4-flash",
         )
+
+
+def build_persistent_extraction_writer(pool: object) -> PersistentExtractionWriter:
+    """Build the scheduled worker's fixed-policy B9 composition.
+
+    ``tenant_id``/``user_id``/``project_id`` come from the canonical stored
+    conversation row.  The resulting request has no membership or role; the
+    persistent API revalidates the service operation and exact scope in its
+    own transaction.
+    """
+    api = PersistentMemoryAPI(MariaDBB9Store(pool), MariaDBScopeAuthorityResolver(pool))
+
+    async def source_scope(row: dict, _operation: str, _visibility: Visibility) -> ScopeContext:
+        tenant_id, user_id = row.get("tenant_id"), row.get("user_id")
+        if tenant_id is None or user_id is None:
+            raise ScopeDenied("extraction source lacks canonical tenant or subject")
+        return ScopeContext(
+            "service:memory-extraction", "SERVICE", str(user_id), str(tenant_id),
+            str(row["project_id"]) if row.get("project_id") is not None else None,
+            calling_component="memory-extraction",
+        )
+
+    return PersistentExtractionWriter(api, source_scope)
 
 
 # Bloque de categorias prohibidas — compartido entre el extractor (worker.py)
@@ -435,6 +472,12 @@ async def run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | N
         if not pendientes:
             logger.info("No hay conversaciones pendientes de procesar.")
             return
+
+        # No legacy fallback once this B9 path is selected.  A project row
+        # without canonical scope data is rejected by the writer/resolver,
+        # rather than being silently written tenant-wide or user-private.
+        if b9_writer is None:
+            b9_writer = build_persistent_extraction_writer(db.pool)
 
         logger.info(f"Procesando {len(pendientes)} conversacion(es)...")
         extractor = await build_extractor()

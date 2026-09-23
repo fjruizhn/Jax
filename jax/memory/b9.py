@@ -72,6 +72,10 @@ class ScopeContext:
     calling_component: str | None = None
     request_id: str | None = None
     trace_id: str | None = None
+    # Resolver output is retained as decision provenance.  It is *not* a
+    # capability: every sensitive execution boundary must resolve/revalidate
+    # the request against its designated authority source again.
+    project_authorization: Any | None = None
 
     def validate(self) -> None:
         """Reject incomplete or self-asserted acting contexts before use.
@@ -84,6 +88,20 @@ class ScopeContext:
             raise ScopeDenied("tenant scope is required")
         if not self.actor_principal or not self.actor_type:
             raise ScopeDenied("authenticated actor is required")
+        if self.project_id:
+            authorization = self.project_authorization
+            # This is deliberately only an internal consistency check.  A
+            # Python object (including an object with an ``is_resolved``
+            # attribute) cannot prove authorization.  The database-backed
+            # resolver is the authority boundary.
+            if authorization is None:
+                raise ScopeDenied("project scope requires resolver decision provenance")
+            if (str(getattr(authorization, "project_id", "")) != str(self.project_id)
+                    or str(getattr(authorization, "tenant_id", "")) != str(self.tenant_id)
+                    or str(getattr(authorization, "subject_user_id", "")) != str(self.subject_user_id)
+                    or getattr(authorization, "project_status", None) != "ACTIVE"
+                    or getattr(authorization, "membership_status", None) != "ACTIVE"):
+                raise ScopeDenied("project authorization does not match scope")
         if self.actor_type == "USER":
             if not self.subject_user_id:
                 raise ScopeDenied("user actor requires subject")
@@ -98,12 +116,31 @@ class ScopeContext:
 
 @dataclass(frozen=True)
 class MutationAuthorizationContext:
+    """Resolver output and audit provenance, never a bearer capability.
+
+    Sensitive stores must call their configured resolver while executing the
+    request/transaction.  In particular, callers must not be authorized just
+    because they can instantiate this dataclass.
+    """
     scope: ScopeContext
     operation: str
     target_visibility: Visibility
     resolved_roles: frozenset[str]
     resolved_capabilities: frozenset[str]
     authority_source: str
+
+
+@dataclass(frozen=True)
+class MutationAuthorizationRequest:
+    """Untrusted mutation inputs submitted to the designated resolver.
+
+    This deliberately contains no roles, capabilities or prior authorization
+    result.  It is the only value a caller may carry into a persistent B9
+    mutation boundary.
+    """
+    scope: ScopeContext
+    operation: str
+    target_visibility: Visibility
 
 
 class MembershipResolver(Protocol):
