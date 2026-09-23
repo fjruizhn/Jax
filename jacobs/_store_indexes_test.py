@@ -555,6 +555,87 @@ class DdlAcotadoRestauradoTest(unittest.IsolatedAsyncioTestCase):
         self.assertIs(ctx.exception, error_set)
 
 
+class AgregarColumnaAcotadaRestauradoTest(unittest.IsolatedAsyncioTestCase):
+    """Mismo defecto que MINOR-2 de `_ddl_acotado`, en el OTRO `finally` que
+    restauraba `lock_wait_timeout` sin proteger: `_agregar_columna_acotada`.
+    Pura y sin DB. Si el ALTER de la columna contrato falla (o vence la
+    espera y la columna no esta: RuntimeError) y ADEMAS falla el SET del
+    finally, tiene que subir la excepcion del ALTER, no la del SET; el
+    fallo del SET queda en un ERROR del log. Sin error previo, sube la del
+    SET -- tambien con su ERROR en el log."""
+
+    class _CursorFalso:
+        def __init__(self, error_ddl, error_set, columna_existe=0):
+            self.error_ddl = error_ddl
+            self.error_set = error_set
+            self.columna_existe = columna_existe
+            self.sets = 0
+            self._ultima = None
+
+        async def execute(self, sql, args=None):
+            self._ultima = sql
+            if sql.startswith("SELECT @@SESSION.lock_wait_timeout"):
+                return
+            if sql.startswith("SELECT COUNT(*) FROM information_schema.COLUMNS"):
+                return
+            if sql.startswith("SET SESSION lock_wait_timeout"):
+                self.sets += 1
+                if self.sets == 2 and self.error_set is not None:
+                    raise self.error_set
+                return
+            if self.error_ddl is not None:
+                raise self.error_ddl
+
+        async def fetchone(self):
+            if self._ultima.startswith("SELECT COUNT(*)"):
+                return (self.columna_existe,)
+            return (50,)
+
+    _DDL = "ALTER TABLE jacobs_pipelines ADD COLUMN descartado_at DOUBLE NULL"
+
+    async def test_falla_el_alter_y_el_restaurado_sube_la_del_alter(self):
+        error_ddl = store.aiomysql.OperationalError(1846, "ALTER no soportado")
+        error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
+        cur = self._CursorFalso(error_ddl, error_set)
+        with self.assertLogs("jacobs.store", level="ERROR") as logs:
+            with self.assertRaises(store.aiomysql.OperationalError) as ctx:
+                await store._agregar_columna_acotada(
+                    cur, "jacobs_pipelines", "descartado_at", self._DDL)
+        self.assertIs(ctx.exception, error_ddl, "la excepcion del SET tapo la del ALTER")
+        self.assertIs(ctx.exception.__cause__, error_set)
+        self.assertTrue(any("lock_wait_timeout" in l for l in logs.output), logs.output)
+
+    async def test_vence_la_espera_sin_columna_y_falla_el_restaurado_sube_el_runtimeerror(self):
+        """La rama fail-closed (1205 y la columna no esta) levanta un
+        RuntimeError que dice POR QUE no arranca; el SET fallido no puede
+        reemplazarlo."""
+        error_ddl = store.aiomysql.OperationalError(1205, "Lock wait timeout exceeded")
+        error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
+        cur = self._CursorFalso(error_ddl, error_set, columna_existe=0)
+        with self.assertLogs("jacobs.store", level="ERROR"):
+            with self.assertRaises(RuntimeError) as ctx:
+                await store._agregar_columna_acotada(
+                    cur, "jacobs_pipelines", "descartado_at", self._DDL)
+        self.assertIn("descartado_at", str(ctx.exception))
+        self.assertIs(ctx.exception.__cause__, error_ddl,
+                      "el SET fallido piso la causa (el 1205) del RuntimeError")
+
+    async def test_alter_bien_y_falla_el_restaurado_sube_la_del_set_con_error_en_log(self):
+        error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
+        cur = self._CursorFalso(None, error_set)
+        with self.assertLogs("jacobs.store", level="ERROR"):
+            with self.assertRaises(store.aiomysql.OperationalError) as ctx:
+                await store._agregar_columna_acotada(
+                    cur, "jacobs_pipelines", "descartado_at", self._DDL)
+        self.assertIs(ctx.exception, error_set)
+
+    async def test_sin_fallos_restaura_el_valor_previo(self):
+        cur = self._CursorFalso(None, None)
+        await store._agregar_columna_acotada(
+            cur, "jacobs_pipelines", "descartado_at", self._DDL)
+        self.assertEqual(cur.sets, 2, "no restauro lock_wait_timeout")
+
+
 class NombreDePruebaTest(unittest.TestCase):
     """Puras, sin DB -- prueban `_con_nombre_de_prueba` y `_DDL_DE` como
     datos, mismo criterio que `FormaDelDDLTest` de

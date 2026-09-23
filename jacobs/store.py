@@ -1120,6 +1120,51 @@ _LOCK_WAIT_DDL_SEGUNDOS = 30
 _ER_LOCK_WAIT_TIMEOUT = 1205
 
 
+@asynccontextmanager
+async def _lock_wait_acotado(cur, contexto: str) -> AsyncIterator[None]:
+    """Pone lock_wait_timeout=30 s en ESTA sesion para el cuerpo del `async
+    with` y restaura el valor previo pase lo que pase.
+
+    Unico dueño del par SET/restaurado (2026-09-23): antes cada llamador tenia
+    su propio `finally`, y el arreglo de MINOR-2 (auditoria de jax#272) se
+    hizo en `_ddl_acotado` y quedo SIN hacer en `_agregar_columna_acotada`.
+    Si el restaurado falla con una excepcion del cuerpo en vuelo, la del SET
+    la reemplazaria y el log apuntaria al punto de falla equivocado: se
+    registra el fallo del SET como ERROR y sube la ORIGINAL, encadenada
+    (`__cause__` = la del SET). Sin excepcion previa, sube la del SET, tambien
+    con su ERROR en el log."""
+    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
+    (previo,) = await cur.fetchone()
+    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
+    error_del_cuerpo: BaseException | None = None
+    try:
+        yield
+    except BaseException as e:
+        error_del_cuerpo = e
+        raise
+    finally:
+        try:
+            await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+        except BaseException as error_del_set:
+            logger.error(
+                "%s: fallo el restaurado de lock_wait_timeout=%s: %r",
+                contexto, previo, error_del_set,
+            )
+            if error_del_cuerpo is not None:
+                # Si la original ya trae su causa (p.ej. el RuntimeError
+                # fail-closed de `_agregar_columna_acotada`, causado por el
+                # 1205), no se pisa: el SET fallido va en una nota y en el log.
+                error_del_cuerpo.add_note(
+                    f"ademas fallo el restaurado de lock_wait_timeout={previo}: "
+                    f"{error_del_set!r}"
+                )
+                if error_del_cuerpo.__cause__ is None:
+                    raise error_del_cuerpo from error_del_set
+                raise error_del_cuerpo
+            raise
+
+
+
 async def _ddl_acotado(cur, ddl: str) -> bool:
     """Corre `ddl` con lock_wait_timeout de 30 s en ESTA sesion y restaura el
     valor previo pase lo que pase (finally). True si corrio; False si vencio
@@ -1130,37 +1175,14 @@ async def _ddl_acotado(cur, ddl: str) -> bool:
     de `_retirar_indices` tenga la misma espera acotada que el CREATE: sin
     esto, un DROP detras de una transaccion larga esperaria el default de
     MariaDB (86400 s) con el arranque de LAS MANOS colgado."""
-    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
-    (previo,) = await cur.fetchone()
-    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
-    error_del_ddl: BaseException | None = None
-    try:
-        await cur.execute(ddl)
-        return True
-    except aiomysql.OperationalError as e:  # fail-soft SOLO para 1205: el llamador decide y lo registra; todo otro error sube
-        if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
-            error_del_ddl = e
-            raise
-        return False
-    except BaseException as e:
-        error_del_ddl = e
-        raise
-    finally:
-        # Si el restaurado falla con la excepcion del DDL en vuelo, la del SET
-        # la reemplazaria y el log apuntaria al punto de falla equivocado
-        # (MINOR-2, auditoria de jax#272): se registra el fallo del SET y
-        # sube la ORIGINAL. Sin excepcion previa, sube la del SET.
+    async with _lock_wait_acotado(cur, f"_ddl_acotado({ddl!r})"):
         try:
-            await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
-        except BaseException as error_del_set:
-            logger.error(
-                "_ddl_acotado: fallo el restaurado de lock_wait_timeout=%s "
-                "tras %r: %r", previo, ddl, error_del_set,
-            )
-            if error_del_ddl is not None:
-                raise error_del_ddl from error_del_set
-            raise
-
+            await cur.execute(ddl)
+            return True
+        except aiomysql.OperationalError as e:  # fail-soft SOLO para 1205: el llamador decide y lo registra; todo otro error sube
+            if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
+                raise
+            return False
 
 async def _crear_indice_acotado(cur, tabla: str, indice: str, ddl: str) -> bool:
     """Corre `ddl` con lock_wait_timeout de 30 s en ESTA sesion y restaura el
@@ -1410,46 +1432,42 @@ async def _agregar_columna_acotada(cur, tabla: str, columna: str, ddl: str) -> N
     por el otro proceso, y seguir de largo ahí es correcto (fail-closed
     protege contra "la columna no está", no contra "otro proceso la creó
     primero")."""
-    await cur.execute("SELECT @@SESSION.lock_wait_timeout")
-    (previo,) = await cur.fetchone()
-    await cur.execute("SET SESSION lock_wait_timeout=%s", (_LOCK_WAIT_DDL_SEGUNDOS,))
-    try:
-        await cur.execute(ddl)
-    except aiomysql.OperationalError as e:
-        if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
-            raise
-        await cur.execute(
-            "SELECT COUNT(*) FROM information_schema.COLUMNS "
-            "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
-            (tabla, columna),
-        )
-        (existe,) = await cur.fetchone()
-        if existe:
-            logger.warning(
-                "init_tables: %s.%s ya existe -- otro proceso ganó la carrera del "
-                "metadata lock mientras este esperaba %d s. No es un fallo.",
-                tabla, columna, _LOCK_WAIT_DDL_SEGUNDOS,
+    async with _lock_wait_acotado(cur, f"_agregar_columna_acotada({tabla}.{columna})"):
+        try:
+            await cur.execute(ddl)
+        except aiomysql.OperationalError as e:
+            if not (e.args and e.args[0] == _ER_LOCK_WAIT_TIMEOUT):
+                raise
+            await cur.execute(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                (tabla, columna),
             )
-            # Fix round 3 (revisión del coordinador, 2026-09-22): "otro
-            # proceso la creó primero" es correcto SÓLO si creó la MISMA
-            # columna -- para 'visible' (GENERATED) eso incluye que haya
-            # usado la expresión de ESTA versión del código, no cualquier
-            # cosa. Mismo chequeo de drift que la rama feliz (exists=True
-            # sin pasar por acá): sin esto, la carrera del metadata lock
-            # sería un segundo camino que se salta el fail-closed de
-            # Ruling 18/19a/fix-round-3.
-            if columna == "visible":
-                await _verificar_expresion_visible(cur)
-            return
-        raise RuntimeError(
-            f"init_tables: no se pudo agregar {tabla}.{columna} -- otra "
-            f"transacción tiene la tabla y venció la espera de "
-            f"{_LOCK_WAIT_DDL_SEGUNDOS} s ({e}). Es una columna CONTRATO (spec "
-            f"descartar-pipelines §3, Task 2 la escribe): el arranque FALLA en "
-            f"vez de seguir sin ella."
-        ) from e
-    finally:
-        await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
+            (existe,) = await cur.fetchone()
+            if existe:
+                logger.warning(
+                    "init_tables: %s.%s ya existe -- otro proceso ganó la carrera del "
+                    "metadata lock mientras este esperaba %d s. No es un fallo.",
+                    tabla, columna, _LOCK_WAIT_DDL_SEGUNDOS,
+                )
+                # Fix round 3 (revisión del coordinador, 2026-09-22): "otro
+                # proceso la creó primero" es correcto SÓLO si creó la MISMA
+                # columna -- para 'visible' (GENERATED) eso incluye que haya
+                # usado la expresión de ESTA versión del código, no cualquier
+                # cosa. Mismo chequeo de drift que la rama feliz (exists=True
+                # sin pasar por acá): sin esto, la carrera del metadata lock
+                # sería un segundo camino que se salta el fail-closed de
+                # Ruling 18/19a/fix-round-3.
+                if columna == "visible":
+                    await _verificar_expresion_visible(cur)
+                return
+            raise RuntimeError(
+                f"init_tables: no se pudo agregar {tabla}.{columna} -- otra "
+                f"transacción tiene la tabla y venció la espera de "
+                f"{_LOCK_WAIT_DDL_SEGUNDOS} s ({e}). Es una columna CONTRATO (spec "
+                f"descartar-pipelines §3, Task 2 la escribe): el arranque FALLA en "
+                f"vez de seguir sin ella."
+            ) from e
 
 
 # Nombradas, no literales inline, por el mismo motivo que `_INDICES` (arriba):
