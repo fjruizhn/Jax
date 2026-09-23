@@ -4145,8 +4145,11 @@ jobs:
           # para `[127.0.0.1]:58291` (cierto en hall9000, que tiene su propio sshd ahí; falso
           # en un runner nuevo, sin ningún sshd escuchando) -- ahora genera una llave de host
           # efímera propia y arma esa línea a mano, autosuficiente.
-          grep -qE "^2801 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2801 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # B9 gives scheduled worker ownership to systemd: three obsolete
+          # REPL worker-launch/log tests were replaced by one regression that
+          # proves the REPL launches none.  The intended suite delta is -2.
+          grep -qE "^2799 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2799 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
