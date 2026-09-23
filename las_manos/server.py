@@ -7,7 +7,7 @@ FastAPI escuchando SOLO en 127.0.0.1:7777 (sin exposición de red en fase 1).
 Flujo de cada /execute:
     1. Kill switch  — ¿existe el archivo de JAX_KILL_SWITCH_PATH? Si sí, nada se ejecuta.
     2. audit.log_request
-    3. policy.check — faceta, ambiente, operación, comando.
+    3. motor_de_politica.check — faceta, ambiente, operación, comando.
     4. human gate   — si la operación lo exige, validar token de Fernando.
     5. dry-run      — si la operación lo exige, ejecutar simulación primero.
     6. ejecución    — el worker real corre lo aprobado.
@@ -39,7 +39,7 @@ from crypto_secrets import decrypt_provider_keys_in_env
 decrypt_provider_keys_in_env()
 
 from audit import AuditLog, environment_from_target
-from policy import PolicyEngine
+from motor_de_politica import PolicyEngine
 from planner import Planner
 from envelope import IntentEnvelope, validate as validate_envelope
 from workers import ssh_worker, file_worker, rsync_worker
@@ -63,7 +63,7 @@ def _load_environments() -> dict[str, list[str]]:
     /etc/jax/.env vía JAX_ENV_<AMBIENTE>_HOSTS, no en config.toml (repo
     público, ronda 9). Sin la env var, ese ambiente queda vacío --
     PolicyEngine._resolve_env() rechaza cualquier host que caiga ahí
-    (fail-closed, ver policy.py), nunca se cae a una IP conocida."""
+    (fail-closed, ver motor_de_politica.py), nunca se cae a una IP conocida."""
     return {
         env: [h.strip() for h in os.getenv(f"JAX_ENV_{env.upper()}_HOSTS", "").split(",") if h.strip()]
         for env in ("staging", "prod", "bridge", "local")
@@ -91,7 +91,13 @@ GATE_CFG = CONFIG["human_gate"]
 #: mismo patrón que JAX_KILL_SWITCH_PATH/JAX_FACET_SEAL_PATH/JAX_REPO_BASE.
 AUDIT_LOG_PATH = os.getenv("JAX_AUDIT_LOG_PATH", SERVER_CFG["audit_log"])
 audit = AuditLog(AUDIT_LOG_PATH)
-policy = PolicyEngine(CONFIG)
+# Nombre distinto de `policy` a propósito (registro de la ronda 1 de
+# revisión de PR#262, fix/arranque-policy-shadow): un global `policy` acá
+# es inofensivo hoy (namespace de módulo, no de import), pero es exactamente
+# la ambigüedad que este fix vino a eliminar -- y una variable de módulo con
+# ese nombre invita a que alguien, más adelante, escriba `import policy`
+# esperando esto en vez del paquete de la raíz. Ver motor_de_politica.py.
+motor_de_politica = PolicyEngine(CONFIG)
 planner = Planner(CONFIG)
 
 
@@ -485,7 +491,7 @@ async def execute(req: IntentEnvelope) -> dict:
 
     # ---- 3) Policy check ----
     command = _extract_command(req.requested_capability, req.params)
-    result = policy.check(
+    result = motor_de_politica.check(
         facet=req.facet_id,
         operation=req.requested_capability,
         target_host=req.target_host,

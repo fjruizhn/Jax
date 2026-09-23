@@ -10,7 +10,7 @@ from jax.ejecutor.contratos import registro as R
 from jax.ejecutor.contratos.cuenta_axioma import Cuenta
 from jax.ejecutor.contratos.fallo import Fallo
 
-C = Cuenta("axioma", 58291, Path("/k"), Path("/n"), Path("/l"), Path("/p"))
+C = Cuenta("axioma", 58291, Path("/k"), Path("/n"), Path("/l"), Path("/p"), Path("/home/axioma"))
 
 
 def _registro(tmp_path):

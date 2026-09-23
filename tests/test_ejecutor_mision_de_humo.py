@@ -64,6 +64,22 @@ def test_afirmaciones_fail_closed_y_cita_literal():
     assert H.afirmaciones_del_texto('{"maquina": "x"}') == ()
 
 
+def test_pasos_del_stream_cuenta_tambien_las_llamadas_a_skill():
+    """El arnés del Ejecutor tiene `Skill` en --allowedTools (cerebros.toml `skills`,
+    2026-09-22): una llamada a Skill es un PASO de la misión igual que una a Bash --
+    tiene que contarse en `pasos_del_stream` (el conteo de `cerebro_termino` y el
+    chequeo de `registro_cuadra` contra C3), no perderse en silencio como si nunca
+    hubiera pasado."""
+    pedida_skill = {"type": "assistant", "message": {"content": [
+        {"type": "tool_use", "id": "s1", "name": "Skill", "input": {"skill": "endureciendo", "args": ""}}]}}
+    crudo = _stream(_pedida("t1", CMD), _resultado("t1", [{"type": "text", "text": "ejecutor-prueba\n"}]),
+                    pedida_skill, _resultado("s1", [{"type": "text", "text": "ok\n"}]),
+                    _pedida("t2", "ls", nombre="Read"), {"type": "result", "result": "[]"})
+    pedidas, resultados, final = H.pasos_del_stream(crudo)
+    assert set(pedidas) == {"t1", "s1"}  # Bash y Skill cuentan; Read sigue afuera
+    assert "s1" in resultados
+
+
 def test_sha_de_resultado_es_el_del_registro_de_c3():
     from jax.ejecutor.contratos import lectura
     contenido = [{"type": "text", "text": "ñ 1"}]
@@ -154,3 +170,14 @@ def test_sigue_fail_closed_con_lo_que_no_es_una_afirmacion():
     assert H.afirmaciones_del_texto("```") == ()
     assert H.afirmaciones_del_texto("```json\n```") == ()
     assert H.afirmaciones_del_texto(None) == ()
+
+
+def test_el_id_de_mision_es_un_uuid_canonico():
+    """jax#263, medido en producción el 2026-09-23: el vigía valida `mision_id` como UUID
+    (`cuenta_axioma.MisionIdInvalido`, por el directorio por misión de la jaula). El id
+    viejo (`humo-<fecha>-<hex>`) hacía que la misión de humo NUNCA latiera: `arranco=false
+    codigo=configuracion_invalida tipo=MisionIdInvalido`."""
+    import re
+    texto = _RUTA.read_text(encoding="utf-8")
+    assert "id_mision = str(uuid.uuid4())" in texto
+    assert not re.search(r'id_mision\s*=\s*f"humo-', texto)

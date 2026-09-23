@@ -41,14 +41,25 @@ def _apply_migration() -> None:
     connection = _connection()
     try:
         cursor = connection.cursor()
-        # CI runs this focused suite against one service database.  The
-        # migration contains immutable trigger declarations, so replaying it
-        # after the first test is not a valid migration operation.
+        # El corte temprano existía porque los `CREATE TRIGGER` NO eran
+        # idempotentes: repetir la migración moría con "already exists". Desde
+        # jax#266 llevan `IF NOT EXISTS`, así que la mitad de triggers puede
+        # (y debe) aplicarse SIEMPRE.
+        #
+        # POR QUÉ IMPORTA, y no es cosmético (hallazgo de la ronda 4 de
+        # revisión, preexistente desde a14ebb2 del 2026-09-21):
+        # `test_governed_execution_authoritative_mariadb_contract` hace dos
+        # `DROP TRIGGER` sobre `jax_execution` y los COMMITEA sin recrearlos.
+        # Con el corte temprano, ningún test posterior los reponía: la
+        # protección append-only de `execution_authorizations` y
+        # `execution_records` quedaba destruida de forma PERMANENTE en ese
+        # servidor. Medido: tras correr este archivo, el esquema quedaba con 8
+        # triggers de los 10 de la migración. Aplicar siempre la mitad
+        # idempotente los repone en el siguiente `_apply_migration()`.
         cursor.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='jax_execution' AND table_name='execution_records'")
-        if cursor.fetchone()[0]:
-            return
-        for statement in tables.split(";"):
-            if statement.strip(): cursor.execute(statement)
+        if not cursor.fetchone()[0]:
+            for statement in tables.split(";"):
+                if statement.strip(): cursor.execute(statement)
         for statement in triggers.split("//"):
             if statement.strip(): cursor.execute(statement)
         connection.commit()
@@ -71,6 +82,49 @@ def _apply_evidence_migration() -> None:
             if statement.strip(): cursor.execute(statement)
         connection.commit()
     finally: connection.close()
+
+def test_migraciones_son_idempotentes_aplicadas_dos_veces():
+    """MINOR-7 (PR#264 ronda 2 de revisión): `IF NOT EXISTS` se agregó a
+    los 22+10 `CREATE TRIGGER` de las dos migraciones para que un re-run a
+    medio aplicar no muera en el primer trigger con "already exists" --
+    pero `_apply_migration()`/`_apply_evidence_migration()` de arriba
+    tienen un short-circuito (si la tabla ya existe, no ejecutan nada), así
+    que esa idempotencia nunca se ejercitaba de verdad. Este test aplica
+    las DOS migraciones completas DOS VECES seguidas, sin el
+    short-circuito, y prueba que la segunda pasada no falla.
+
+    Corre primero en el archivo (antes de `test_b7_real_mariadb_artifact_and_observation_relations`,
+    que DROPea triggers a propósito para probar detección de manipulación)
+    para no interferir con el estado que esos tests esperan encontrar: al
+    terminar este test, el esquema queda con TODO presente -- el mismo
+    estado final que dejaría una sola aplicación."""
+    for ruta in (
+        Path(__file__).parents[2] / "policy/execution_control/migrations/001_governed_execution.sql",
+        Path(__file__).parents[2] / "policy/enforcement_evidence/migrations/001_enforcement_evidence.sql",
+    ):
+        sql = ruta.read_text()
+        tables, triggers = sql.split("DELIMITER //", 1)
+        triggers, _ = triggers.split("DELIMITER ;", 1)
+        for intento in (1, 2):
+            connection = _connection()
+            try:
+                cursor = connection.cursor()
+                for statement in tables.split(";"):
+                    if statement.strip():
+                        cursor.execute(statement)
+                for statement in triggers.split("//"):
+                    if statement.strip():
+                        cursor.execute(statement)
+                connection.commit()
+            except Exception as exc:
+                connection.rollback()
+                raise AssertionError(
+                    f"{ruta.name} falló en el intento {intento} de 2 -- "
+                    "IF NOT EXISTS no está haciendo su trabajo"
+                ) from exc
+            finally:
+                connection.close()
+
 
 def test_b7_evidence_blob_real_mariadb_immutability():
     """CI-only real DB proof: bytes deduplicate and trigger blocks mutation."""
@@ -129,12 +183,23 @@ def test_b7_writer_failure_rolls_back_real_governed_execution():
     request=build_execution_request(decision, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x": 1}, timeout_seconds=60)
     auth=authorize_execution(decision, request, catalog(), now_utc=now)
     store=MariaDBExecutionStore(_connection); store.insert_authorization(auth)
+    # DELTA, no conteo absoluto ni acotado por decision_id. (Revisión
+    # adversarial de jax#266, ronda 3.) El conteo de tabla completa de master
+    # sólo pasaba contra una base virgen; acotarlo por `decision_id` lo dejó
+    # LÓGICAMENTE MUERTO -- el JOIN exige una fila en `execution_records` con
+    # ese decision_id, y el assert de arriba ya aseveró que son 0, así que
+    # nunca podía ser el que falle. El delta es independiente del estado Y
+    # sensible al escenario que el nombre del test promete: `execution_events`
+    # NO tiene FK, así que un evento commiteado por su propia conexión
+    # sobrevive al rollback y queda huérfano -- eso se le escapaba a la
+    # versión acotada y lo caza éste.
+    eventos_antes=_scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE event_type='EXECUTION_CREATED'")
     def fail(_cursor, _record): raise RuntimeError("forced B7 persistence failure")
     store.execution_evidence_writer=fail
     with pytest.raises(RuntimeError): create_execution(store, auth, now_utc=now)
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_authorization_consumptions WHERE authorization_id=%s",(auth.authorization_id,)) == 0
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_records WHERE decision_id=%s",(decision.decision_id,)) == 0
-    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE event_type='EXECUTION_CREATED'") == 0
+    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE event_type='EXECUTION_CREATED'") == eventos_antes
 
 def test_b7_dispatch_writer_failure_rolls_back_dispatch_event():
     from policy.execution_control.service import dispatch_execution
@@ -213,11 +278,16 @@ def _b8_runtime_identity_fixture(tmp_path):
     manifest=evidence.put_evidence_blob(json.dumps({"schema_version":"1.0","kind":"JAX_BUILD_MANIFEST","files":files},sort_keys=True,separators=(",",":")).encode())
     identity=ImplementationIdentity("fjruizhn/Jax","1"*40,"2"*40,SourceState.CLEAN,manifest.evidence_hash)
     EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity))
-    for definition in _controls.values():
-        # Persist only the packaged registry instance; raw module values do
-        # not themselves carry the trusted-definition provenance marker.
-        evidence._MariaDBEvidenceStore__persist_control_definition(
-            load_control_definition(definition.control_id, definition.control_version))
+    # jax#266: el MISMO camino que corre el paso de despliegue
+    # (scripts/sembrar_definiciones_de_control.py), incluido el contexto de
+    # composición fija que `__persist_control_definition` ahora exige. Antes
+    # esta fixture era el ÚNICO llamador del escritor en todo el repo -- esa
+    # era justamente la señal de que producción no tenía camino para sembrar.
+    from scripts.sembrar_definiciones_de_control import sembrar as _sembrar_definiciones
+    _sembrar_definiciones(
+        evidence,
+        [(definition.control_id, definition.control_version) for definition in _controls.values()],
+        emitir=lambda _linea: None)
     path=tmp_path/"implementation-identity.json"; path.write_text(json.dumps(identity.projection()),encoding="utf-8")
     return evidence, path
 
@@ -389,3 +459,220 @@ def test_governed_execution_authoritative_mariadb_contract():
         store.load_authorization(auth.authorization_id)
     with pytest.raises(Exception):
         store.load_execution(execution.execution_id)
+
+
+
+def _exigir_servidor_desechable() -> None:
+    """Freno del `DROP DATABASE jax_evidence`, atado a lo que se DESTRUYE.
+
+    (Revisión adversarial de jax#266, BLOCK nuevo.) La primera versión de este
+    freno miraba `JAX_DB_NAME.startswith("jax_memory_test")` -- y eso valida un
+    nombre mientras se borra OTRO: `jax_evidence` es fija, no deriva de
+    `JAX_DB_NAME` ni del sufijo de sesión de `base_de_test.py`. Host y puerto
+    salen del entorno, así que en hall9000 una sesión con `/etc/jax/.env`
+    cargado apunta a la MariaDB de PRODUCCIÓN (`127.0.0.1:3308`) con un
+    `JAX_DB_NAME` perfectamente válido -- y el `DROP` se llevaba puesta la
+    evidencia real, que es append-only por trigger y no se puede restaurar
+    desde adentro.
+
+    El freno correcto mira el SERVIDOR, no el nombre de la base de tests: un
+    servidor que hospeda `jax_memory` es producción (o una copia de ella) y
+    este test no corre ahí. En el contenedor del job de CI --
+    `MARIADB_DATABASE: jax_memory_test`, ver `.github/workflows/policy.yml` --
+    `jax_memory` no existe, así que el job sigue corriendo el test completo.
+
+    Falla en vez de saltear: este test es la ÚNICA prueba contra base real de
+    que la siembra siembra. Saltearlo en silencio en la máquina de desarrollo
+    sería exactamente el "verde sin haber hecho el trabajo" que el propio test
+    existe para impedir.
+    """
+    # PRIMERA barrera, y la que manda: un opt-in POSITIVO. La inferencia de
+    # abajo es buena pero es una inferencia sobre OTRA base, y `SHOW DATABASES`
+    # está filtrado por privilegios: con una cuenta de mínimo privilegio que no
+    # vea `jax_memory`, la inferencia pasa en verde aunque la base exista
+    # (reproducido en la revisión adversarial de jax#266, ronda 3). Quien
+    # declara que este servidor es desechable es quien lo levanta, no una
+    # deducción. El job `governed-execution-mariadb` la exporta.
+    if os.environ.get("JAX_EVIDENCE_TEST_DESTRUCTIVE") != "1":
+        raise AssertionError(
+            "este test BORRA el esquema jax_evidence: exige "
+            "JAX_EVIDENCE_TEST_DESTRUCTIVE=1, que sólo se pone en un MariaDB "
+            "desechable (lo hace el job governed-execution-mariadb). No se "
+            "saltea en silencio: es la única prueba contra base real de que la "
+            "siembra siembra.")
+
+    # SEGUNDA barrera, independiente: aunque alguien exporte la variable por
+    # costumbre, un servidor que hospeda `jax_memory` es producción o una copia.
+    # El `\_` va escapado: en LIKE, `_` es comodín de un carácter.
+    connection = _connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute(r"SHOW DATABASES LIKE 'jax\_memory'")
+        hospeda_produccion = cursor.fetchone() is not None
+    finally:
+        connection.close()
+    if hospeda_produccion:
+        raise AssertionError(
+            f"el servidor {os.environ.get('JAX_DB_HOST')}:{os.environ.get('JAX_DB_PORT')} "
+            "hospeda la base 'jax_memory': este test BORRA el esquema jax_evidence y no "
+            "puede correr ahí. Usá un MariaDB desechable (el job governed-execution-mariadb "
+            "levanta uno; en local, un contenedor propio).")
+
+
+def test_sembrar_definiciones_de_control_es_idempotente(tmp_path):
+    """El paso de despliegue de jax#266, contra la MariaDB real y DESDE CERO.
+
+    Defecto original, medido en vivo el 2026-09-22: `control_definitions`
+    quedaba en CERO filas tras aplicar la migración porque en producción
+    nadie la sembraba (el único escritor era el privado
+    `__persist_control_definition`, llamado sólo por la fixture de este
+    archivo). Con la tabla vacía, `readonly_status_snapshot` levanta
+    `EvidenceArtifactIntegrityError("snapshot definition mismatch")` y
+    `jaxctl control` sale `UNAVAILABLE` con exit 2 -- el paso 9 del runbook
+    `docs/runbooks/implementation-identity.md`, que sólo acepta `SUPPORTED`,
+    era inalcanzable en cualquier despliegue nuevo.
+
+    ESTE TEST SE PARA EN UNA BASE VIRGEN A PROPÓSITO (revisión adversarial
+    de jax#266, BLOCK-1). La versión anterior no lo hacía y **pasaba con la
+    siembra destripada**: los tests B8 de este mismo archivo corren ANTES,
+    su fixture ya siembra los 11 controles, `_apply_evidence_migration()`
+    sale temprano si el esquema existe y la base es de sesión -- así que
+    cuando este test llegaba, la tabla ya estaba completa y su primer
+    `sembrar()` no insertaba una sola fila. Un control que no puede fallar no
+    valida nada, y menos éste, que es la única prueba contra base real de un
+    PR que existe para garantizar que alguien siembre.
+
+    `DROP SCHEMA` y no `DELETE`: la tabla es append-only por diseño
+    (`definitions_no_delete`), no hay forma de vaciarla desde adentro. Los
+    tests que corren después se reabastecen solos -- sus fixtures llaman
+    `_apply_evidence_migration()` y vuelven a sembrar.
+    """
+    from scripts.sembrar_definiciones_de_control import controles_empaquetados, sembrar
+    from policy.enforcement_evidence.control_registry import load_control_definition
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+
+    _exigir_servidor_desechable()
+
+    connection = _connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DROP DATABASE IF EXISTS jax_evidence")
+        connection.commit()
+    finally:
+        connection.close()
+    _apply_evidence_migration()
+
+    evidence = MariaDBEvidenceStore(_connection)
+    controles = controles_empaquetados()
+
+    # PRECONDICIÓN, medida y aseverada: la migración deja la tabla VACÍA.
+    # Es el hecho que motivó todo el PR; si algún día la migración sembrara,
+    # este assert avisa y el script pasa a ser redundante.
+    assert _b7_authoritative_fingerprint()["control_definitions"]["row_count"] == 0
+
+    lineas = []
+    primera = sembrar(evidence, controles, emitir=lineas.append)
+    # La PRIMERA pasada siembra de verdad: todas nuevas. Esto es lo que se
+    # rompe si `sembrar()` deja de escribir -- verificado en rojo quitándole
+    # la llamada a persistir (EvidenceBlobMissingError en la comprobación de
+    # abajo) y también dejándola escribir sin contexto de composición fija.
+    assert [ya_estaba for *_resto, ya_estaba in primera] == [False] * len(controles)
+    assert len(lineas) == len(controles) and all("sembrado" in linea for linea in lineas)
+
+    huella_tras_sembrar = _b7_authoritative_fingerprint()["control_definitions"]
+    assert huella_tras_sembrar["row_count"] == len(controles)
+
+    # Todas las definiciones del catálogo cargan desde la BASE, con los bytes
+    # exactos de la definición empaquetada (load_control_definition del store
+    # compara contra el registro y levanta si difieren).
+    for control_id, control_version in controles:
+        desde_la_base = evidence.load_control_definition(control_id, control_version)
+        assert desde_la_base.control_definition_hash == load_control_definition(
+            control_id, control_version).control_definition_hash
+
+    # Segunda pasada: idempotente de verdad -- el MISMO digest de contenido de
+    # la tabla, no sólo "no tiró excepción".
+    segunda = sembrar(evidence, controles, emitir=lambda _linea: None)
+    assert [ya_estaba for *_resto, ya_estaba in segunda] == [True] * len(controles)
+    assert _b7_authoritative_fingerprint()["control_definitions"] == huella_tras_sembrar
+
+
+def test_persistir_una_definicion_exige_el_contexto_de_composicion_fija():
+    """Tener el store NO alcanza para escribir en `control_definitions`.
+
+    (Revisión adversarial de jax#266, MAJOR-2.) `__persist_control_definition`
+    era el ÚNICO escritor de este store que no pedía
+    `_require_fixed_composition_write()`, y el PR original agregaba encima un
+    método PÚBLICO que lo llamaba -- o sea, una capacidad de escritura sobre
+    el esquema inmutable de evidencia entregada como método de objeto, viva en
+    el store que `las_manos/server.py` construye al arrancar.
+    """
+    from policy.enforcement_evidence.control_registry import load_control_definition
+    from policy.enforcement_evidence.errors import EvidenceArtifactUntrustedError
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+
+    evidence = MariaDBEvidenceStore(_connection)
+
+    # La superficie pública del store es una LISTA CERRADA, no un filtro por
+    # nombre. (Revisión adversarial de jax#266, MINOR nuevo: el chequeo
+    # anterior buscaba la subcadena "persist", y un método público llamado
+    # `sembrar_definicion` que escribía igual lo pasaba en verde -- el mismo
+    # defecto de forma que buscar `window.confirm` y no ver `confirm(`.)
+    # Cualquier método público NUEVO rompe este test, se llame como se llame:
+    # agregarlo obliga a declarar acá que no escribe.
+    publicos = {nombre for nombre in dir(evidence) if not nombre.startswith("_")}
+    assert publicos == {
+        # La ÚNICA escritura pública, y es contenido direccionado por hash:
+        # no puede pisar bytes distintos bajo el mismo hash (levanta
+        # EvidenceBlobHashMismatchError).
+        "put_evidence_blob",
+        # Todo lo demás es lectura.
+        "get_evidence_blob",
+        "load_implementation_identity",
+        "load_control_definition",
+        "load_evidence_artifact",
+        "load_assertion",
+        "load_enforcement_assertion",
+        "load_enforcement_observation",
+        "load_observation",
+        "observations",
+        "readonly_status_snapshot",
+        "derive_in_repeatable_read",
+    }, f"superficie pública del store cambiada: {sorted(publicos)}"
+
+    with pytest.raises(EvidenceArtifactUntrustedError):
+        evidence._MariaDBEvidenceStore__persist_control_definition(
+            load_control_definition("CTL.B6.GOVERNED_DISPATCH", 1))
+
+
+def test_la_migracion_repone_los_triggers_de_inmutabilidad():
+    """Ningún test puede dejar el esquema sin su protección append-only.
+
+    (Ronda 4 de revisión de jax#266; defecto PREEXISTENTE desde `a14ebb2`.)
+    `test_governed_execution_authoritative_mariadb_contract` dropea dos
+    triggers y los commitea sin recrearlos; con el corte temprano de
+    `_apply_migration()`, nadie los reponía nunca y el servidor quedaba con la
+    inmutabilidad de `execution_authorizations`/`execution_records` destruida
+    de forma permanente. Este test dropea uno a propósito y exige que la
+    migración lo reponga.
+    """
+    esperados = _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS "
+                        "WHERE TRIGGER_SCHEMA='jax_execution'")
+    _apply_migration()
+    assert _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS "
+                   "WHERE TRIGGER_SCHEMA='jax_execution'") >= esperados
+
+    connection = _connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DROP TRIGGER IF EXISTS jax_execution.execution_records_no_update")
+        connection.commit()
+    finally:
+        connection.close()
+    assert _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE "
+                   "TRIGGER_SCHEMA='jax_execution' AND TRIGGER_NAME='execution_records_no_update'") == 0
+
+    _apply_migration()
+
+    assert _scalar("SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE "
+                   "TRIGGER_SCHEMA='jax_execution' AND TRIGGER_NAME='execution_records_no_update'") == 1

@@ -26,12 +26,21 @@ async def _con_inventario(accion):
                     await cur.execute("INSERT IGNORE INTO ejecutor_host (nombre, ip, puerto, rol, es_local) "
                                       "VALUES (%s, %s, 58291, %s, %s)", (nombre, ip, rol, local))
                 # Con la tabla vacía el optimizador puede no mostrar el índice: se mide con filas.
+                # jax-platform#149 (C2 «respaldo antes de la misión») agrega `respaldado_at` NOT NULL
+                # y vuelve `metodo` un ENUM. El CI de jax clona el master de jax-platform, así que
+                # este INSERT tiene que valer con el esquema de antes y con el de después:
+                # 'recreacion' es un método válido en los dos, y la columna nueva va sólo si existe.
+                await cur.execute("SHOW COLUMNS FROM ejecutor_punto_restauracion LIKE 'respaldado_at'")
+                con_respaldado_at = bool(await cur.fetchall())
+                columnas = "host_nombre, referencia, metodo, restaurado_y_verificado_at, verificado_por, evidencia"
+                valores = "%s, %s, 'recreacion', UTC_TIMESTAMP() - INTERVAL %s MINUTE, 'test', 'test'"
+                if con_respaldado_at:
+                    columnas += ", respaldado_at"
+                    valores += ", UTC_TIMESTAMP() - INTERVAL %s MINUTE"
                 for k in range(200):
                     await cur.execute(
-                        "INSERT INTO ejecutor_punto_restauracion (host_nombre, referencia, metodo, "
-                        "restaurado_y_verificado_at, verificado_por, evidencia) VALUES (%s, %s, 'prueba', "
-                        "UTC_TIMESTAMP() - INTERVAL %s MINUTE, 'test', 'test')",
-                        (INVENTARIO[k % 4][0], f"prueba-{k}", k))
+                        f"INSERT INTO ejecutor_punto_restauracion ({columnas}) VALUES ({valores})",
+                        (INVENTARIO[k % 4][0], f"prueba-{k}", k) + ((k,) if con_respaldado_at else ()))
             await conn.commit()
             return await accion(conn)
     finally:

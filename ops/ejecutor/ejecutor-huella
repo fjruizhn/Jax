@@ -1,0 +1,206 @@
+#!/bin/sh
+# ops/ejecutor/ejecutor-huella — comando forzado de la llave PROPIA DEL SERVICIO (arreglo
+# del bug de producción, jax#260, 2026-09-22: `jax-platform.service` corre como `jaxsvc`
+# desde el 2026-09-17, no como `fruiz` -- y `jaxsvc` no puede leer la llave personal de
+# fruiz, que es lo que el camino viejo necesitaba. Medido en producción:
+# `vigia_no_latio=true rc=2`, el Ejecutor bloqueado por completo).
+#
+# Se instala root 0755 en /usr/local/sbin de cada máquina del inventario
+# (ops/ejecutor/instalar_huella_en_maquina.sh, mismo patrón que
+# ops/ejecutor/instalar_en_maquina.sh instala ejecutor-freno-remoto y ejecutor-revocar).
+# La llave del servicio (JAX_EJECUTOR_HUELLA_LLAVE, jaxsvc:jaxsvc en hall9000 -- ver
+# jax/ejecutor/contratos/huella.py) queda en el authorized_keys del ADMINISTRADOR
+# (JAX_EJECUTOR_ADMIN_USUARIO) atada con:
+#
+#   command="sudo -n /usr/local/sbin/ejecutor-huella",restrict,from="<ip de hall9000>" \
+#     <tipo> <clave> ejecutor-huella-servicio
+#
+# `restrict` bloquea pty/reenvíos/agente/variables de entorno del cliente; `from=` acota
+# el origen; el `sudo -n` del comando forzado -- con una regla de sudoers ACOTADA, sin
+# `ALL`, `... /usr/local/sbin/ejecutor-huella ""` (ronda 2, MAJOR-5: la cadena vacía NO
+# es decorativa -- sin ella sudo acepta CUALQUIER argumento pese a que el binario no los
+# lea; verificado en un contenedor limpio, ver huella.py) -- es lo que le da acceso de
+# lectura a /etc/sudoers y /root/.ssh/authorized_keys, que el administrador sin sudo -n
+# no podría leer.
+#
+# SIN PARÁMETROS DE POSICIÓN (argv): no hay superficie de ataque por ahí, y de todos
+# modos `restrict` + el sudoers acotado a "sin argumentos" (arriba) lo impedirían aunque
+# los hubiera.
+#
+# ADMIN_USUARIO (ronda 3, MAJOR-4) se LEE de un archivo que `instalar_huella_en_maquina.sh`
+# escribe (root 0644, una sola línea): /etc/ejecutor-huella/admin_usuario -- NO de argv,
+# NO del entorno heredado del cliente ssh. Ese archivo es una de las RUTAS_CONTROLES
+# (jax/ejecutor/contratos/huella.py): tamperearlo se ve en la huella igual que cualquier
+# otro control. El HOME del administrador (ronda 3, MAJOR-5) sale de `getent passwd`, el
+# passwd REAL de esta máquina, no de una convención `/home/<usuario>`.
+#
+# RONDA 4 (auditoría adversarial 2026-09-22): cada ruta declarada (RUTAS_CONTROLES +
+# `tramo_admin`) emite SIEMPRE una de cuatro cosas, en vez de desaparecer en silencio
+# cuando no existe o cuando no se pudo medir (las dos daban CERO líneas con el `find`
+# de ronda 3, y `huella_valida(rutas=...)` trataba ambas como medición inválida):
+#   - `<sha256>  <ruta>`           -- es un archivo regular, esto es su contenido;
+#   - `D <ruta>` (+ su listado)    -- es un directorio, existe (aunque esté vacío);
+#   - `A <ruta>`                   -- MEDIDO y CONFIRMADO ausente (no es un error);
+#   - `E <ruta> <motivo>`          -- NO se pudo medir (permiso denegado, tipo raro,
+#                                      sha256sum/find roto) -- esto SÍ es inválido, ver
+#                                      `huella_valida()` en huella.py.
+# Que una ruta pase de `A` a existir (o al revés) sigue siendo un CAMBIO real, y pausa
+# -- es la señal que este mecanismo existe para dar.
+#
+# MAJOR-G (ronda 5, auditoría adversarial 2026-09-22): el texto de la ronda 4 acá mismo
+# decía "`/root/.ssh/authorized_keys` NO EXISTE en hall9000, atemai NI prod" -- ERA
+# FALSO. Medido el 2026-09-22 (Fernando): esa ruta SÍ existe (archivo vacío, 0600,
+# dueño root) en hall9000, atemai Y prod; sólo FALTA en `bridge`. El arreglo de arriba
+# sigue haciendo falta igual -- bridge es la máquina SANA donde de verdad da `A`, y la
+# ronda 3 la bloqueaba ahí exactamente como si la medición hubiera fallado -- pero el
+# hecho concreto que se citaba estaba mal, y quedaba mal en tres lugares más (huella.py,
+# los dos docs de runbook): corregido en todos.
+#
+# MISMA lógica que `jax.ejecutor.contratos.huella.comando_huella()` (RUTAS_CONTROLES +
+# el authorized_keys del administrador, mismo orden, mismo formato de salida) --
+# tests/test_ejecutor_huella_sh.py compara las SALIDAS de los dos sobre el mismo árbol
+# de prueba (ronda 2, MAJOR-7), no sólo listas de rutas. Binarios por RUTA ABSOLUTA (sin
+# depender de `secure_path`: un root remoto también podría reemplazar `sha256sum` en el
+# PATH -- esto prueba "el Ejecutor no lo hizo por accidente", no "un root de la máquina
+# es incapaz de mentir", mismo límite documentado en huella.py). `LC_ALL=C` (ronda 2,
+# MINOR): el `sort` final y los mensajes de `stat` no dependen del locale de la sesión
+# ssh -- dos huellas del MISMO estado tienen que comparar textualmente IGUAL sin
+# importar qué locale traía la conexión (y el motivo de un `E` queda en inglés siempre,
+# reconocible por el grep de más abajo).
+set -u
+export LC_ALL=C
+FIND=/usr/bin/find
+SHA256SUM=/usr/bin/sha256sum
+SORT=/usr/bin/sort
+GETENT=/usr/bin/getent
+STAT=/usr/bin/stat
+MKTEMP=/usr/bin/mktemp
+# MINOR (ronda 6, auditoría adversarial 2026-09-22): `cat`/`rm` se llamaban SIN ruta
+# absoluta -- inconsistente con el LÍMITE que ya se documenta arriba para
+# find/sha256sum/sort/getent/stat/mktemp (sin `secure_path`, un root remoto podría
+# reemplazar un binario en el PATH). Mismo criterio, ahora también acá.
+CAT=/usr/bin/cat
+RM=/usr/bin/rm
+ADMIN_USUARIO_ARCHIVO=/etc/ejecutor-huella/admin_usuario
+
+# tramo(): UNA línea de estado por `ruta` (hash/D/A/E, ronda 4) + el listado recursivo
+# si es un directorio. `stat` (sin `-L`): no sigue symlinks -- un tipo que no sea
+# "regular file"/"regular empty file"/"directory" en la ruta declarada MISMA (por
+# ejemplo, un symlink puesto donde se espera un archivo) es `E`, no se intenta adivinar
+# qué hacer con él.
+#
+# BLOCK-E (ronda 5, auditoría adversarial 2026-09-22): el caso ARCHIVO ya tenía guarda
+# (`sha256sum` sin salida -> `E ... sha256sum_fallo`); el caso DIRECTORIO no la tenía --
+# los tres `find` iban con `2>/dev/null` y SIN mirar su `$?`, así que un `find` roto (un
+# subdirectorio sin permiso a mitad de camino, por ejemplo) hacía desaparecer TODAS las
+# líneas de contenido en silencio, y el guion de todos modos imprimía `D <ruta>` -- la
+# huella pasaba por buena sin haber podido enumerar el contenido real. Ahora la salida
+# de los tres `find` se junta en un archivo aparte y su `$?` se mira ANTES de decidir si
+# el estado es `D` (los tres a cero) o `E ... find_fallo` (cualquiera de los tres
+# no-cero) -- comprobado por el auditor con bwrap.
+tramo() {
+  ruta="$1"
+  err="$("$MKTEMP")"
+  tipo="$("$STAT" -c '%F' "$ruta" 2>"$err")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if grep -q "No such file or directory" "$err"; then
+      echo "A $ruta"
+    else
+      motivo="$(tr '\n' ' ' < "$err" | tr -s ' ')"
+      echo "E $ruta ${motivo:-motivo_desconocido}"
+    fi
+    "$RM" -f "$err"
+    return 0
+  fi
+  "$RM" -f "$err"
+  case "$tipo" in
+    "regular file"|"regular empty file")
+      linea_hash="$("$SHA256SUM" "$ruta" 2>/dev/null)"
+      if [ -n "$linea_hash" ]; then
+        echo "$linea_hash"
+      else
+        echo "E $ruta sha256sum_fallo"
+      fi
+      ;;
+    directory)
+      salida="$("$MKTEMP")"
+      errd="$("$MKTEMP")"
+      "$FIND" "$ruta" -mindepth 1 -xtype f -exec "$SHA256SUM" {} + >"$salida" 2>>"$errd"
+      rc1=$?
+      "$FIND" "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+      rc2=$?
+      "$FIND" "$ruta" -mindepth 1 -type d -printf "D %p\n" >>"$salida" 2>>"$errd"
+      rc3=$?
+      if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ] || [ "$rc3" -ne 0 ]; then
+        echo "E $ruta find_fallo"
+      else
+        echo "D $ruta"
+        "$CAT" "$salida"
+      fi
+      "$RM" -f "$salida" "$errd"
+      ;;
+    *)
+      echo "E $ruta tipo_no_esperado:$tipo"
+      ;;
+  esac
+}
+
+# tramo_sbin_ejecutor(): BLOCK-E, punto 2 (ronda 5) -- el glob de binarios propios tenía
+# el MISMO defecto que el caso directorio de arriba (dos `find` con `2>/dev/null` sin
+# mirar `$?`) y además NO estaba representado en `huella_valida(rutas=...)` en absoluto
+# ("su desaparición total no invalida nada", por diseño de ronda 4). Ahora reporta su
+# propio estado (`D`/`E ... find_fallo`) bajo el sentinela `$1/$2` (un `*` literal que
+# nunca puede colisionar con un archivo real) -- `RUTAS_DECLARADAS_POR_DEFAULT`
+# (huella.py) lo exige como cualquier otra ruta declarada.
+tramo_sbin_ejecutor() {
+  base="$1"
+  patron="$2"
+  salida="$("$MKTEMP")"
+  errd="$("$MKTEMP")"
+  "$FIND" "$base" -maxdepth 1 -name "$patron" -xtype f -exec "$SHA256SUM" {} + >"$salida" 2>>"$errd"
+  rc1=$?
+  "$FIND" "$base" -maxdepth 1 -name "$patron" -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+  rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    echo "E $base/$patron find_fallo"
+  else
+    echo "D $base/$patron"
+    "$CAT" "$salida"
+  fi
+  "$RM" -f "$salida" "$errd"
+}
+
+# tramo_admin(): MAJOR-C (ronda 4) -- NUNCA `return 0` mudo. Si no se puede determinar
+# la CUENTA (archivo de config ausente/vacío, o `getent` no la resuelve), es una medición
+# rota -- `E` con un identificador (no una ruta de archivo real, porque no hay ninguna
+# que reportar) -- nunca silencio. Una vez resuelta la cuenta, la RUTA RESUELTA
+# (`$admin_home/.ssh/authorized_keys`) pasa por `tramo()` como cualquier otra: si el
+# archivo no existe, es `A` (medido y confirmado); si `sha256sum` falla, es `E`. Si
+# alguien cambia el HOME del administrador en el passwd, la ruta que aparece en la
+# huella CAMBIA -- eso es un hallazgo, no algo que este guion deba ocultar.
+tramo_admin() {
+  admin_usuario="$("$CAT" "$ADMIN_USUARIO_ARCHIVO" 2>/dev/null)"
+  if [ -z "$admin_usuario" ]; then
+    echo "E (admin_usuario) archivo_ausente_o_vacio:$ADMIN_USUARIO_ARCHIVO"
+    return 0
+  fi
+  admin_home="$("$GETENT" passwd "$admin_usuario" 2>/dev/null | cut -d: -f6)"
+  if [ -z "$admin_home" ]; then
+    echo "E ($admin_usuario) getent_no_resuelve"
+    return 0
+  fi
+  tramo "$admin_home/.ssh/authorized_keys"
+}
+
+{
+  tramo /etc/sudoers
+  tramo /etc/sudoers.d
+  tramo /etc/ssh/sshd_config
+  tramo /etc/ssh/sshd_config.d
+  tramo /etc/ssh/authorized_keys.d
+  tramo /root/.ssh/authorized_keys
+  tramo /etc/ejecutor-huella
+  tramo_admin
+  tramo_sbin_ejecutor /usr/local/sbin 'ejecutor-*'
+} | "$SORT"

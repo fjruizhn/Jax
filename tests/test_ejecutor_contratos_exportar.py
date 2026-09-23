@@ -25,7 +25,9 @@ RESPALDOS = [("bridge", datetime(2026, 9, 17, 6, 0))]
 def test_documento_firmado_y_legible():
     doc = exportar.documento(HOSTS, REGLAS, RESPALDOS, "86400", "2026-09-17T12:00:00+00:00")
     p = politica.validar(doc)
-    assert [r.codigo for r in p.reglas] == ["canario_c1", "migrate"]
+    # Las de la DB, seguidas por el NÚCLEO (LÍMITE, código -- nunca DB; politica.py).
+    assert [r.codigo for r in p.reglas[:2]] == ["canario_c1", "migrate"]
+    assert {r.codigo for r in p.reglas[2:]} == {r.codigo for r in politica.NUCLEO_REGLAS}
     assert p.reglas[1].ambito_roles == frozenset({"produccion", "clientes"})
     assert doc["respaldos"] == {"bridge": "2026-09-17T06:00:00+00:00"}
     assert politica.autoprueba(p) == ()

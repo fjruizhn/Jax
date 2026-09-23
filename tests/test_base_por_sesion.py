@@ -347,3 +347,90 @@ def test_el_sufijo_automatico_se_registra_para_borrarse_al_salir(monkeypatch):
     fn, args = registrados[0]
     assert fn is _borrar_al_salir
     assert args == (f"{BASE_COMPARTIDA}_{sufijo}",)
+
+
+# ---------------------------------------------------------------------------
+# MINOR-3 (fix round 1 de Task 1-bis, 2026-09-22, Ruling 19e): clonar una
+# tabla con una columna GENERATED y filas rompía con 1906 -- `visible`
+# (Ruling 18, jacobs_pipelines) es la primera columna generada que pasa por
+# `_clonar_esquema()`, y la plantilla compartida (`jax_memory_test`) SÍ
+# puede tener filas en esa tabla. `_columnas_copiables()`/`_copiar_filas()`
+# arreglan esto con una lista EXPLÍCITA de columnas (sin las GENERATED), no
+# `SELECT *`. Se prueba contra la base de la SESIÓN (no `jax_memory_test`,
+# la plantilla real, para no tocarla) con dos tablas propias, desechables:
+# origen (con datos) y destino (vacía, misma forma) en una SEGUNDA base
+# creada y borrada por el propio test.
+# ---------------------------------------------------------------------------
+
+import uuid as _uuid  # noqa: E402
+
+from base_de_test import _columnas_copiables, _copiar_filas  # noqa: E402
+
+
+@pytest.mark.skipif(not os.environ.get("JAX_DB_HOST"), reason="necesita la MariaDB real")
+def test_copiar_filas_excluye_columnas_generadas_y_no_revienta_con_1906():
+    async def _cuerpo():
+        from jacobs import store
+
+        origen = nombre_base_de_test()  # la base de ESTA sesión, ya existe
+        destino = f"{origen}_clon{_uuid.uuid4().hex[:8]}"
+        tabla = f"_diag_gen_{_uuid.uuid4().hex[:8]}"
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(f"CREATE DATABASE `{destino}`")
+                try:
+                    ddl = (
+                        f"CREATE TABLE `{{esquema}}`.`{tabla}` ("
+                        "id INT PRIMARY KEY, status VARCHAR(20) NOT NULL, "
+                        "visible TINYINT(1) GENERATED ALWAYS AS "
+                        "(status NOT IN ('discarded','hidden')) VIRTUAL)"
+                    )
+                    await cur.execute(ddl.format(esquema=origen))
+                    await cur.execute(ddl.format(esquema=destino))
+                    await cur.executemany(
+                        f"INSERT INTO `{origen}`.`{tabla}` (id, status) VALUES (%s,%s)",
+                        [(1, "completed"), (2, "discarded"), (3, "running")],
+                    )
+                    # El paso que rompía: `SELECT *`/`INSERT ... SELECT *`
+                    # incluiría `visible` -- 1906. `_copiar_filas` no.
+                    await _copiar_filas(cur, origen, destino, tabla)
+                    await cur.execute(
+                        f"SELECT id, status, visible FROM `{destino}`.`{tabla}` ORDER BY id"
+                    )
+                    filas = await cur.fetchall()
+                finally:
+                    await cur.execute(f"DROP TABLE IF EXISTS `{origen}`.`{tabla}`")
+                    await cur.execute(f"DROP DATABASE IF EXISTS `{destino}`")
+            await conn.commit()
+        return filas
+
+    filas = asyncio.run(_cuerpo())
+    assert list(filas) == [(1, "completed", 1), (2, "discarded", 0), (3, "running", 1)], (
+        "las filas copiadas no coinciden -- o no llegaron, o `visible` no se "
+        "recalculó igual en la tabla destino"
+    )
+
+
+@pytest.mark.skipif(not os.environ.get("JAX_DB_HOST"), reason="necesita la MariaDB real")
+def test_columnas_copiables_excluye_solo_las_generadas():
+    async def _cuerpo():
+        from jacobs import store
+
+        origen = nombre_base_de_test()
+        tabla = f"_diag_cols_{_uuid.uuid4().hex[:8]}"
+        async with store.conexion() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    f"CREATE TABLE `{origen}`.`{tabla}` ("
+                    "id INT PRIMARY KEY, status VARCHAR(20) NOT NULL, "
+                    "visible TINYINT(1) GENERATED ALWAYS AS "
+                    "(status NOT IN ('discarded','hidden')) VIRTUAL)"
+                )
+                try:
+                    return await _columnas_copiables(cur, origen, tabla)
+                finally:
+                    await cur.execute(f"DROP TABLE IF EXISTS `{origen}`.`{tabla}`")
+            await conn.commit()
+
+    columnas = asyncio.run(_cuerpo())
+    assert columnas == ["id", "status"]

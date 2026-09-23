@@ -45,6 +45,12 @@ class PipelineStatus(str, Enum):
     # `expired` tuvo hasta la Importante B de la ronda anterior).
     disputed    = "disputed"
 
+    # 2026-09-22 (spec descartar-pipelines): terminales y SIN cupo. `discarded`
+    # = el dueño lo sacó de "Detenidos" (recuperable); `hidden` = el
+    # superadmin lo ocultó (restaurable). Ninguno borra filas.
+    discarded   = "discarded"
+    hidden      = "hidden"
+
 
 class StepStatus(str, Enum):
     pending             = "pending"

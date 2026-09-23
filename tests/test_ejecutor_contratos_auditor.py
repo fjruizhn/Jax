@@ -163,6 +163,15 @@ def test_las_instrucciones_dicen_que_la_maquina_de_la_mision_es_la_elegida():
     assert "maquinas_de_la_mision" in texto
 
 
+def test_las_instrucciones_mencionan_que_un_paso_puede_ser_una_skill():
+    """Minor (auditoría adversarial 2026-09-22): mision.py cuenta las llamadas a Skill
+    como pasos (cerebros.toml `skills`) -- el auditor tiene que saber que se va a
+    encontrar con ellas, no sólo con comandos de Bash."""
+    from pathlib import Path
+    texto = (Path(A.__file__).parent / "auditor_instrucciones.md").read_text()
+    assert "Skill" in texto
+
+
 @pytest.mark.parametrize("maquinas", [(), ("hall9000",)])
 def test_un_lote_sin_maquinas_no_se_construye(maquinas):
     """Con la lista vacía, las instrucciones hacen que TODO paso parezca salirse (visto en los canarios

@@ -4002,6 +4002,59 @@ retractaciones, que no se borran. Ninguno requiere acción.
 
 ## Anotado, no bloquea
 
+- **Anotado con fecha 2026-09-22 (PR#261, ronda 1 de revisión, MINOR-1) — el `ENGINE=InnoDB` de `jacobs_pipelines`/`jacobs_steps`/`jacobs_events` en producción es una medición puntual, no una garantía continua.** `CREATE TABLE IF NOT EXISTS` nunca convierte una tabla que ya existe: el `ENGINE=InnoDB` explícito que agrega este PR a `jacobs/store.py` protege bases *nuevas* (dev, CI, un restore de desastre) contra el `default_storage_engine` del server, pero el hecho de que `jax_memory` en producción ya sea InnoDB hoy descansa en esta medición manual, de una sola vez:
+  - **Evidencia (2026-09-22, `SHOW TABLE STATUS`, sólo lectura, puerto 3308, base `jax_memory`):**
+    `jacobs_events`, `jacobs_pipelines`, `jacobs_steps`, `jacobs_subpipeline_tokens` y
+    `las_manos_human_gate_tokens` — las cinco `InnoDB`.
+  - **No hay detección automática de una deriva futura.** Nada en CI ni en `init_tables()`
+    vuelve a comprobar el `ENGINE` de una tabla que YA existe (sólo la crea si falta). Si
+    algún día alguien corriera un `ALTER TABLE ... ENGINE=` manual sobre `jax_memory` (algo
+    que este PR no hace ni habilita), o si producción se migrara a un server con otro
+    `default_storage_engine` y alguien recreara estas tablas a mano en vez de dejar que
+    `init_tables()` lo haga, nada avisaría. Si se quisiera cerrar ese hueco, un candidato es
+    un chequeo periódico (o al arrancar LAS MANOS) tipo
+    `SELECT ENGINE FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND
+    TABLE_NAME IN (...) AND ENGINE <> 'InnoDB'` que loguee/alerte si da alguna fila — no se
+    escribió en este PR porque no lo pidió el encargo y sería ampliar el alcance.
+
+- **Anotado con fecha 2026-09-22 — `idx_pipelines_status (status)` quedó redundante con `idx_pipelines_ocultos (status, descartado_at)` (Task 1, fix round 1, spec `2026-09-22-descartar-pipelines`).** `idx_pipelines_ocultos` empieza por la misma columna (`status`) que `idx_pipelines_status`: por la regla del prefijo izquierdo de un índice compuesto, MariaDB puede resolver con el nuevo cualquier consulta que hoy elige el viejo filtrando solo por `status`. No se retira en este PR: el viejo puede tener lectores que esta ronda no auditó (el reaper vía `store.candidatos_del_reaper`, `pipeline_count_active`, el candado del cupo), y borrarlo a ciegas es exactamente el tipo de "arreglo" que la Regla Absoluta prohíbe. Retirarlo va en su **PROPIO PR**, con: (a) `EXPLAIN` de la consulta real del reaper (y de cualquier otro caller que filtre `jacobs_pipelines` solo por `status`) contra el índice nuevo, sin filesort ni caída a scan completo; (b) un grep de todos los callers que arman `WHERE status = ...`/`WHERE status IN (...)` sobre `jacobs_pipelines` para confirmar que ninguno depende de una propiedad de `idx_pipelines_status` que `idx_pipelines_ocultos` no cubra (por ejemplo, un `FORCE INDEX`/`USE INDEX` explícito, si existiera).
+
+- **CERRADO 2026-09-22 (ronda 5 del contexto del Ejecutor) — `ejecutor_host.sudo` y
+  `.machine_id` YA NO EXISTEN en producción: jax-platform#149 las eliminó de la tabla.
+  Verificado hoy, de nuevo, de solo lectura (`SHOW COLUMNS FROM ejecutor_host`, puerto
+  3308): las columnas no aparecen -- sólo `nombre, ip, puerto, rol, es_local,
+  con_datos_de_clientes, api_only, activo, created_at`. Texto original de la decisión,
+  como histórico:**
+  `ejecutor_host.sudo` y `.machine_id` quedan desactualizadas y SIN LECTOR en el código —
+  DECISIÓN 2026-09-22 (ronda 2 del contexto del Ejecutor, auditoría adversarial M6).
+  La migración que las llenaba (`jax/memory/migrations.py::ensure_schema()`,
+  `_EJECUTOR_HOST_MACHINE_ID`, agregada en la ronda 1) se QUITÓ: ninguna pieza del código lee
+  esas dos columnas (verificado con `grep` sobre el árbol — sólo el propio migrador y su test
+  las tocaban), y la fuente única del sudo/machine-id que de verdad importa (lo que
+  `generar_claude_md.py` pone en el CLAUDE.md de axioma) es `scripts/ejecutor_fase0/
+  maquinas.toml`, que ya lo tenía. Mantener la migración corriendo en CADA `connect()` del
+  memory worker/LAS MANOS/síntesis tenía dos costos sin beneficio: (1) pisaba, en cada
+  arranque, cualquier corrección manual que Fernando hiciera directo en la DB (el propio
+  ledger, `~/ejecutor-producto/LEDGER.md`, ya decía "se corrigen por migración en PR, no a
+  mano" — pero una migración que se REPITE en cada connect es peor que una corrida una vez);
+  (2) ataba la salud de la memoria (`ensure_schema()` es lo que decide si `jax_memory` está al
+  día) a una tabla de otro dominio (`ejecutor_host`, de jax-platform) — ver B3 en el job
+  `memory-vector-zero-io` (`.github/workflows/policy.yml`) para el patrón de acoplamiento que
+  ese job ya vigila para otras columnas.
+  - **Verificado en producción, 2026-09-22 (SELECT de solo lectura, puerto 3308):** las cinco
+    filas de `ejecutor_host` (`atemai`, `bridge`, `ejecutor-prueba`, `hall9000`, `prod`) están
+    HOY con `sudo=0` y `machine_id=NULL` — la migración de la ronda 1 nunca llegó a
+    producción (esta rama no está desplegada), así que quitarla no revierte nada que
+    estuviera en uso.
+  - **`ejecutor-prueba` (auditoría, ítem MINOR):** no tiene línea en `maquinas.toml` (nunca
+    tuvo sudo real — VM desechable de la Fase 2) y su `machine_id` en la DB es `NULL`/no
+    verificado hoy; no se inventó un valor. Con esta migración retirada, no queda ningún
+    artefacto de este repo donde agregarle una línea de machine-id tenga sentido.
+  - **Si algún día algo SÍ necesita leer `ejecutor_host.sudo`/`.machine_id` desde jax:**
+    escribir ese lector primero (Principio IX — el contrato antes que la capacidad), y recién
+    ahí decidir si hace falta una migración de nuevo, en el repo que corresponda
+    (jax-platform, dueño de la tabla) o acá si el lector vive en jax.
+
 - **Anotado con fecha 2026-10-17 — revisar el tamaño del pool del store de Jacobs sólo si el uso real lo pide (Ruling R52, 2026-09-17).** `JAX_DB_POOL_MAX=10` (default derivado en `jacobs/store.py::db_pool_max`). La carga final del pre-vuelo dio el umbral 10× NO CUMPLIDO (p95 c25/c1 = 17,14×; c50/c1 = 30,39×) con 0 errores en todas las concurrencias y p95 absoluto 2,74/17,15/46,97/83,26 ms a c=1/10/25/50. La sesión principal lo aceptó por escrito: la relación mide encolamiento contra un pool de 10 con concurrencia de 25 y 50, muy por encima de la demanda real (`MAX_PARALLEL_PIPELINES=3`; el pre-vuelo lo dispara una persona desde la Mesa), y el pool se dimensionó contra una MariaDB compartida (151 conexiones, 96 en uso).
   - **Qué lo dispara (observación, no calendario):** uso real por encima de **10 pre-vuelos concurrentes sostenidos**. Dónde se ve: (a) en el journal de `jax-las-manos`, 503 `prevuelo_no_disponible` cuyo motivo es un `TimeoutError` esperando turno del pool (un pedido HTTP espera a lo sumo `JAX_DB_CONNECT_TIMEOUT_SECONDS`), que es el síntoma de cola llena; (b) en `jacobs_events` / la Mesa, `/jacobs/preflight` y `POST /jacobs/pipeline` solapados en la misma ventana de segundos por más de 10 pedidos; (c) en el perfil (`scripts/perfil_prevuelo.py trabajadores`), la fase `acquire` dominando el total con la concurrencia real medida, no con una inventada.
   - **Qué hacer si pasa:** volver a medir con la concurrencia real observada (lotes y sostenida, el procedimiento de la Task 15) y recién entonces evaluar subir el pool, contra el presupuesto de conexiones del servidor MariaDB compartido. Sin ese número medido, no se toca: subir el pool para que el ratio dé bien sería acomodar la medición al criterio.

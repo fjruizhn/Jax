@@ -78,6 +78,17 @@ class MariaDBEvidenceStore:
             return _loaded(_identities,value)
         finally: con.close()
     def __persist_control_definition(self, definition):
+        # jax#266: el MISMO guardia que los demás escritores de este store
+        # (`__record_identity`, `__record_artifact`, `__record_observation`...).
+        # Era el único que NO lo pedía, y la revisión adversarial lo marcó:
+        # sin esto, cualquier camino del runtime que tenga una referencia al
+        # store podía escribir en `control_definitions` -- una tabla con
+        # `definitions_no_update`/`definitions_no_delete`, o sea irreversible.
+        # La siembra de despliegue entra al contexto a propósito
+        # (scripts/sembrar_definiciones_de_control.py), igual que el ciclo de
+        # vida fijo lo hace para la identidad y los artefactos.
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
         from .control_registry import require_trusted_definition
         require_trusted_definition(definition)
         h=definition.control_definition_hash; payload=canonical_bytes(definition.projection()).decode("utf-8")

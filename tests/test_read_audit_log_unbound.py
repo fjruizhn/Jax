@@ -11,7 +11,12 @@ from pathlib import Path
 LAS_MANOS = Path(__file__).resolve().parent.parent / "las_manos"
 sys.path.insert(0, str(LAS_MANOS))
 
-from policy import PolicyEngine  # noqa: E402
+# `motor_de_politica`, no `policy` (2026-09-22): `las_manos/policy.py`
+# shadowaba el paquete `policy/` de la raíz para cualquier proceso que
+# arrancara con este directorio en `sys.path[0]` -- que es exactamente lo
+# que uvicorn hace en producción. Ver
+# tests/test_arranque_las_manos_no_shadowea_policy.py.
+from motor_de_politica import PolicyEngine  # noqa: E402
 
 
 def _engine_without_audit_log_read_for(facet: str) -> PolicyEngine:

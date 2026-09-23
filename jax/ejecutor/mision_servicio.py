@@ -11,9 +11,32 @@
 
 Camino gobernado: las dependencias reales son las MISMAS piezas que la misión de humo
 (scripts/ejecutor_contratos/mision_de_humo.py): `arranque.exigir_contratos`, el vigía de C5
-como proceso (`jax.ejecutor.contratos.vigia_servicio`, el módulo de la unidad
-ejecutor-vigia@), la jaula de la cuenta contra el proxy de C3, el registro encadenado, el
-auditor de C5 y la pausa del Ejecutor.
+como proceso (`abrir_vigia`, más abajo, lanza `jax.ejecutor.contratos.vigia_servicio` como
+SUBPROCESO DIRECTO -- no hay unidad systemd: `ejecutor-vigia@.service` se retiró el
+2026-09-22, código muerto que nunca arrancó en producción, ver DEUDA.md), la jaula de la
+cuenta contra el proxy de C3, el registro encadenado, el auditor de C5 y la pausa del
+Ejecutor.
+
+El vigía HEREDA la identidad de quien lanza ESTE proceso: en producción, `jax-platform`
+-- y desde el 2026-09-17 (decisión de Fernando, cuenta de servicio) ESO es `jaxsvc`
+(`/etc/systemd/system/jax-platform.service.d/cuenta-de-servicio.conf: User=jaxsvc`), no
+`fruiz`. CORREGIDO (bug de producción jax#260, 2026-09-22): este párrafo decía lo
+contrario, con un "verificado con `systemctl cat jax-platform.service`" que en realidad
+sólo había mirado la unidad BASE, sin sus drop-ins -- `systemctl cat` los lista a los
+tres si se lee la salida completa; medido de nuevo, `sudo cat` de cada
+`.service.d/*.conf`, 2026-09-22. El vigía corre como `jaxsvc`, y `jaxsvc` no puede leer
+la llave personal de `fruiz` (`~fruiz/.ssh/*`, 600) -- por eso la huella
+(`vigia_servicio.py::_principal`) YA NO arma el ssh con `revocacion.argv_admin` (que
+resuelve la identidad por default, la de quien invoca): usa una llave PROPIA del
+servicio (`huella.argv_huella_servicio`, `JAX_EJECUTOR_HUELLA_LLAVE`, jaxsvc:jaxsvc),
+autorizada en cada remota por comando forzado -- mismo patrón que ya usa C4
+(`ejecutor-freno-remoto`). El CONTROLADOR nominal sigue siendo el mismo administrador
+(`fruiz`, vía `JAX_EJECUTOR_ADMIN_USUARIO`); lo que cambió es la credencial, no la
+cuenta. Para C5 (elección y llamada al auditor, `eleccion_c5.py`/`canario_c5.py`) NO hay
+acoplamiento con esta identidad: la elección sale de la DB y la llamada al auditor es
+HTTP saliente, ninguna de las dos depende de qué cuenta del sistema operativo lanzó el
+proceso -- si mañana el vigía corriera bajo otra cuenta con el mismo acceso a la DB y a
+la red, C5 seguiría igual.
 
 Topes sin defaults (Principio IV): JAX_EJECUTOR_TURNO_TOPE_S (lo que puede durar el cerebro
 en un turno) y JAX_EJECUTOR_VIGIA_ESPERA_S (lo que se espera a que el vigía verifique los
@@ -38,7 +61,11 @@ from jax.ejecutor.contratos.registro import verificar_cadena
 
 VARIABLE_TOPE = "JAX_EJECUTOR_TURNO_TOPE_S"
 VARIABLE_ESPERA = "JAX_EJECUTOR_VIGIA_ESPERA_S"
-_CIERRE_VIGIA_S = 200  # TimeoutStopSec de la unidad (150) + margen: el vigía audita lo pendiente al parar
+_CIERRE_VIGIA_S = 200  # MINOR (ronda 6): ya no hay unidad systemd de la que citar un TimeoutStopSec
+# (ejecutor-vigia@.service se retiró, ronda 5) -- el número sale de lo que el vigía hace de
+# verdad al recibir SIGTERM: audita el último lote pendiente, y auditor_cliente.auditar()
+# tiene un tope de 120 s por lote. 200 = 120 + margen para el resto del cierre (borrar el
+# latido, etc.), no un valor heredado de una unidad que nunca arrancó en producción.
 
 
 class SinConfigurar(RuntimeError):
@@ -183,10 +210,19 @@ def dependencias_reales(env, turno: M.Turno, *, tope_s: float, espera_s: float) 
         return await asyncio.to_thread(pausa.latido_fresco, ctx.latido, ctx.latido_max_s)
 
     async def cerebro(ctx, prompt, sesion, reanudar):
+        # B-1/M-4 (ronda 3): el directorio de "$HOME/.claude/projects" es POR MISIÓN, no
+        # por turno -- mismo directorio en todos los turnos de `turno.mision_id`, así
+        # "--resume" encuentra la sesión que el turno anterior dejó. Se prepara (dueño
+        # axioma) ANTES de cada turno: barato si ya existe (`install -d` es idempotente)
+        # y así no hace falta un paso previo separado que pueda quedar desincronizado.
+        directorio_projects = cuenta_axioma.ruta_projects_de_la_mision(
+            Path(env["JAX_EJECUTOR_MISIONES"]), turno.mision_id)
+        await cuenta_axioma.preparar_directorio_projects(ctx.cuenta, directorio_projects)
         remoto = cuenta_axioma.remoto_claude(
             ctx.cuenta, base_url=f"http://127.0.0.1:{ctx.puerto_proxy}", modelo=env["JAX_PROXY_CARRIL_MODELO"],
-            prompt=prompt, herramientas="Bash", max_salida_tokens=int(env["JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"]),
-            sesion=sesion, reanudar=reanudar)
+            prompt=prompt, herramientas="Bash,Skill",
+            max_salida_tokens=int(env["JAX_PROXY_CARRIL_MAX_SALIDA_TOKENS"]),
+            sesion=sesion, reanudar=reanudar, directorio_projects=directorio_projects)
         rc, crudo, _ = await cuenta_axioma.correr_en_la_cuenta(ctx.cuenta, remoto, entrada=b"sin-clave\n",
                                                                tope_s=tope_s)
         return rc, crudo

@@ -1,22 +1,38 @@
-# Inventario del examen de la Fase 0. machine-id medidos el 2026-09-15.
+# Inventario del examen de la Fase 0. `sudo` y `machine_id` verificados el
+# 2026-09-22 (~/ejecutor-producto/LEDGER.md, "FASE 3 (sudo) APLICADA" y
+# "SUDO EN LAS CUATRO"): axioma tiene sudo real en las cuatro. `machine_id` es
+# el contrato de acceso del spec §3.4: antes de operar sobre una IP con NAT,
+# `cat /etc/machine-id` tiene que coincidir con este valor -- nunca el
+# hostname. Trampa conocida: 179.49.115.33:58291 lleva a prod, no al bridge.
 [hall9000]
 ip = "127.0.0.1"
+puerto = 58291
+machine_id = "37ce158242c649fa80804a8c17b83ca4"
+# sudo = false (corregido 2026-09-22, auditoría adversarial M2): acá corrés DENTRO de la
+# jaula bwrap, que arranca con NoNewPrivs -- no hay sudo local posible aunque la cuenta
+# esté en el grupo. Antes decía `true`, heredado del resto del inventario sin verificarlo
+# en ESTA máquina (Principio I: el que supone se equivoca).
+sudo = false
 descripcion = "hall9000 (172.16.20.5): host KVM de JAX y de las VMs. Aquí corres tú: comandos locales."
 local = true
 
 [atemai]
 ip = "172.16.20.11"
 puerto = 58291
+machine_id = "95e56bf6da0d41f993a3e36869699af1"
+sudo = true
 descripcion = "atemai (.11): servidor de desarrollo y de correo."
 
 [prod]
 ip = "172.16.20.10"
 puerto = 58291
 machine_id = "da476dce01ea4c3e9e72a8078a3ffd48"
+sudo = true
 descripcion = "prod (.10): VM de producción."
 
 [bridge]
 ip = "172.16.20.20"
 puerto = 58291
 machine_id = "ee090efa28cd46a7a0bff22d34e57eb4"
+sudo = true
 descripcion = "bridge (.20): hosting de clientes en producción."

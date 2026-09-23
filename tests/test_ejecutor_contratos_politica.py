@@ -64,7 +64,12 @@ def cargada(tmp_path, **cambios):
 
 def test_carga_una_politica_sana(tmp_path):
     p = cargada(tmp_path)
-    assert [r.codigo for r in p.reglas] == ["canario_c1", "apt_full_upgrade_bridge", "borrar_archivos", "env_por_ruta"]
+    # Las de la DB, en orden, seguidas por el NÚCLEO (LÍMITE, código -- nunca DB; ver
+    # su bloque en politica.py): SIEMPRE presentes, aunque el doc no las declare.
+    codigos = [r.codigo for r in p.reglas]
+    assert codigos[:4] == ["canario_c1", "apt_full_upgrade_bridge", "borrar_archivos", "env_por_ruta"]
+    assert set(codigos[4:]) == {r.codigo for r in P.NUCLEO_REGLAS}
+    assert len(codigos[4:]) == len(P.NUCLEO_REGLAS)
 
 
 def test_archivo_ausente(tmp_path):
@@ -179,6 +184,124 @@ def test_lo_que_no_se_entiende_se_bloquea(tmp_path, tool_name, tool_input, codig
 def test_lo_inocuo_pasa(tmp_path):
     assert P.evaluar(cargada(tmp_path), "Bash", {"command": "uptime"}, AHORA) == \
         P.Decision(True, P.PERMITIDO, None, ("hall9000",))
+
+
+# --- NÚCLEO: la propia protección del Ejecutor (LÍMITE, auditoría 2026-09-22) --------
+#
+# Con root en una máquina, axioma PODRÍA anular C3/C4/C6 ahí -- eso no lo cierra
+# ninguna regla. Lo que SÍ se puede probar es que tocar sus propios controles queda
+# PROHIBIDO aunque la política de la DB no diga una palabra sobre eso (doc_base() no
+# declara ninguna regla "nucleo_*"): el núcleo se agrega SIEMPRE, en `validar()`.
+
+_SSH = "ssh -tt -p 58291 axioma@atemai "
+NUCLEO_CASOS = {
+    _SSH + "'rm -f /etc/sudoers.d/50-ejecutor-axioma-registro'": "nucleo_sudoers_ejecutor",
+    _SSH + "'rm -f /usr/local/sbin/ejecutor-freno-remoto'": "nucleo_freno_remoto",
+    _SSH + "'chmod 000 /usr/local/sbin/ejecutor-revocar'": "nucleo_revocar",
+    _SSH + "'rm -f /var/log/sudo-axioma.log'": "nucleo_sudo_log",
+    _SSH + "'rm -rf /var/log/sudo-io/axioma'": "nucleo_sudo_log",
+}
+
+
+@pytest.mark.parametrize("comando, codigo_esperado", list(NUCLEO_CASOS.items()))
+def test_nucleo_protege_sus_controles_aunque_la_db_no_diga_nada(tmp_path, comando, codigo_esperado):
+    """`doc_base()` no declara NINGUNA regla `nucleo_*`: si esto pasa, es porque
+    `validar()` las agrega solo, no porque la política de prueba las trajera."""
+    assert not any(r["codigo"].startswith("nucleo_") for r in doc_base()["reglas"])
+    p = cargada(tmp_path)
+    d = P.evaluar(p, "Bash", {"command": comando}, AHORA)
+    assert (d.permitir, d.codigo, d.regla) == (False, P.PROHIBIDO, codigo_esperado)
+
+
+NUCLEO_CONTROLES = {
+    _SSH + "'cat /etc/sudoers.d/50-ejecutor-axioma-registro'",   # leer, no tocar
+    _SSH + "'ls -la /usr/local/sbin/ejecutor-freno-remoto'",
+    _SSH + "'stat /usr/local/sbin/ejecutor-revocar'",
+    _SSH + "'cat /var/log/sudo-axioma.log'",
+    _SSH + "'uptime'",
+}
+
+
+@pytest.mark.parametrize("comando", sorted(NUCLEO_CONTROLES))
+def test_nucleo_no_bloquea_lectura_ni_lo_inocuo(tmp_path, comando):
+    """El núcleo protege contra TOCAR sus propios controles, no contra mirarlos: un
+    diagnóstico legítimo (¿existe el revocador? ¿qué dice el log?) tiene que seguir
+    pasando, o el núcleo se vuelve una regla que bloquea trabajo real."""
+    d = P.evaluar(cargada(tmp_path), "Bash", {"command": comando}, AHORA)
+    assert d.permitir is True, (comando, d)
+
+
+# --- REDUCIDO (ronda 3, 2026-09-22): lo que el núcleo YA NO bloquea, a propósito -------
+#
+# Los cuatro casos reales que la auditoría reprodujo ANTES del arreglo (falsos positivos
+# sobre trabajo legítimo): `systemctl enable` de un servicio del CLIENTE, `chattr -i` de
+# un `.user.ini` (PHP-FPM en hosting compartido), `chmod` del `authorized_keys` de OTRA
+# cuenta (no la de axioma), y una LECTURA (`ls`) redirigida a un archivo que el `>`
+# suelto de `_MUTA` marcaba como si escribiera el objetivo. Los cuatro tienen que pasar
+# ahora -- y lo genérico (authorized_keys, chattr, cron, unidades de systemd) se cubre
+# con la huella ESTRUCTURAL (`verificar_huella.py`), no con más regex."""
+NUCLEO_YA_NO_BLOQUEA = {
+    "systemctl_enable_de_cliente": _SSH + "'systemctl enable cliente-app.service'",
+    "chattr_de_user_ini": _SSH + "\"chattr -i /var/www/cliente/.user.ini\"",
+    "chmod_authorized_keys_ajeno": _SSH + "\"chmod 600 /home/cliente/.ssh/authorized_keys\"",
+    "lectura_redirigida_del_freno_remoto": _SSH + "\"ls -la /usr/local/sbin/ejecutor-freno-remoto > /tmp/salida.txt\"",
+    "crontab_editar": _SSH + "'crontab -e'",
+    "cron_d_archivo": _SSH + "\"echo '* * * * * root touch /tmp/x' > /etc/cron.d/persistencia\"",
+    # "bridge", no "atemai": doc_base() sólo tiene respaldo vigente ahí -- un `rm` liso
+    # sin backup dispara la regla DB "borrar_archivos" (destructivo_sin_respaldo), que no
+    # tiene nada que ver con el núcleo. El caso prueba que NO es una regla `nucleo_*` la
+    # que lo frena, no que un `rm` sin respaldo pase gratis (esa es otra regla, correcta).
+    "systemd_unidad_de_mas": "ssh -tt -p 58291 axioma@bridge 'rm -f /etc/systemd/system/mio.service'",
+    # MINOR (ronda 4, 2026-09-22): `tee` sólo cuenta como mutación si su DESTINO es una
+    # ruta de control -- acá el destino es /tmp/nota.txt, la mención del control es sólo
+    # texto dentro de lo que se está anotando (un diagnóstico legítimo).
+    "tee_hacia_otro_lado_que_solo_menciona_el_control": _SSH + (
+        "\"echo 'revisando /etc/sudoers.d/50-ejecutor-axioma-registro' | tee /tmp/nota.txt\""),
+}
+
+
+@pytest.mark.parametrize("comando", list(NUCLEO_YA_NO_BLOQUEA.values()), ids=list(NUCLEO_YA_NO_BLOQUEA))
+def test_el_nucleo_reducido_ya_no_bloquea_lo_legitimo(tmp_path, comando):
+    d = P.evaluar(cargada(tmp_path), "Bash", {"command": comando}, AHORA)
+    assert d.permitir is True or not (d.regla or "").startswith("nucleo_"), (comando, d)
+
+
+def test_tee_hacia_el_control_si_bloquea(tmp_path):
+    """El otro lado del MINOR: `tee` que SÍ apunta al control sigue prohibido -- no se
+    perdió la detección, se le puso destino."""
+    comando = _SSH + "'echo vacio | tee /etc/sudoers.d/50-ejecutor-axioma-registro'"
+    d = P.evaluar(cargada(tmp_path), "Bash", {"command": comando}, AHORA)
+    assert (d.permitir, d.codigo, d.regla) == (False, P.PROHIBIDO, "nucleo_sudoers_ejecutor")
+
+
+def test_tee_con_append_hacia_el_control_si_bloquea(tmp_path):
+    comando = _SSH + "'echo vacio | tee -a /var/log/sudo-axioma.log'"
+    d = P.evaluar(cargada(tmp_path), "Bash", {"command": comando}, AHORA)
+    assert (d.permitir, d.codigo, d.regla) == (False, P.PROHIBIDO, "nucleo_sudo_log")
+
+
+def test_nucleo_es_prohibido_y_gana_sobre_destructivo(tmp_path):
+    """`prohibido` siempre gana sobre `destructivo_sin_respaldo` (evaluar(), orden ya
+    establecido) -- el núcleo es `tipo="prohibido"`, así que ni con un respaldo
+    vigente de esa máquina se puede tocar un control propio."""
+    p = cargada(tmp_path, respaldos={"atemai": AHORA.isoformat()})
+    d = P.evaluar(p, "Bash", {"command": _SSH + "'rm -f /usr/local/sbin/ejecutor-revocar'"}, AHORA)
+    assert (d.permitir, d.codigo) == (False, P.PROHIBIDO)
+
+
+def test_nucleo_no_se_puede_apagar_declarandolo_en_la_db(tmp_path):
+    """Ni siquiera una regla `nucleo_*` DECLARADA en la DB (con un patrón manso, "que
+    nunca coincide con nada") lo desactiva -- `validar()` rechaza el choque de código
+    en vez de dejar que la última declaración gane."""
+    doc = {k: v for k, v in doc_base().items() if k != "sha256"}
+    doc["reglas"].append({
+        "id": 999, "codigo": "nucleo_revocar", "tipo": "destructivo", "herramientas": "Bash", "campo": "command",
+        "patron": "esto-no-coincide-nunca-con-nada-real", "ambito_hosts": [], "ambito_roles": [], "es_canario": False,
+        "ejemplos_coincide": [_bash("esto-no-coincide-nunca-con-nada-real")], "ejemplos_no_coincide": [],
+    })
+    with pytest.raises(P.PoliticaIlegible) as e:
+        P.cargar(escribir(tmp_path, P.firmar(doc)), uid_de_la_cuenta=OTRO_UID)
+    assert e.value.codigo == "regla_duplicada"
 
 
 # --- autoprueba ---------------------------------------------------------------
