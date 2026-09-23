@@ -1309,6 +1309,12 @@ jobs:
             echo "(sysctl ausente en este kernel -- no aplica)"
           bwrap --version
           sudo install -d -o root -g root -m 0755 /etc/claude-code
+          # `/etc/ejecutor-huella` (jax#263): misma razón exacta que `/etc/claude-code` de
+          # arriba. Los tests de `tests/test_ejecutor_huella_sh.py` montan su propio
+          # `admin_usuario` de prueba ahí con bwrap, y un namespace sin privilegios no puede
+          # CREAR el punto de montaje bajo el `/etc` del runner. En hall9000 ya existe. Se
+          # replica el mismo `install -d` que hace `instalar_huella_en_maquina.sh`.
+          sudo install -d -o root -g root -m 0755 /etc/ejecutor-huella
           # /usr/bin, NO /usr/local/bin: test_ejecutor_reemplazar_directorio_atomico.py
           # corre el script con env={"PATH": "<bin-de-sudo-falso>:/usr/bin:/bin"} --
           # hermético a propósito, sin el PATH ambiente del runner. Es además la ruta
