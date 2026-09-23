@@ -16,6 +16,19 @@ import pytest
 
 from jax.ejecutor.contratos import huella as H
 
+#: FIX CI (ronda 8, auditoría adversarial 2026-09-22): estos tests pasaban "fruiz" a
+#: `comando_huella()`/`ruta_authorized_keys_admin()` -- las dos hacen `pwd.getpwnam`
+#: DE VERDAD -- y "fruiz" sólo existe en hall9000, la máquina donde se escribieron.
+#: En el runner de GitHub (`ubuntu-latest`) esa cuenta no existe -- `ValueError:
+#: admin_usuario_sin_passwd`, 14 tests rotos, medido en jax#263 CI, run 35797502554.
+#: `_ADMIN_REAL` es la cuenta que DE VERDAD corre el proceso -- existe en cualquier
+#: máquina por definición (mismo idioma que ya usan los tests de
+#: `_resolver_identidad_invocante`, más abajo en este archivo). `_OTRO_ADMIN_REAL`
+#: es una SEGUNDA cuenta real, universal en cualquier POSIX -- nunca "axioma" a
+#: secas, que tampoco existe en el runner.
+_ADMIN_REAL = pwd.getpwuid(os.getuid()).pw_name
+_OTRO_ADMIN_REAL = "root"
+
 
 def test_rutas_controles_es_exactamente_la_lista_esperada():
     assert H.RUTAS_CONTROLES == (
@@ -46,7 +59,7 @@ def test_no_hay_mas_nivel_persistencia():
 
 
 def test_comando_huella_menciona_las_rutas_y_el_glob_de_ejecutor():
-    cmd = H.comando_huella("fruiz")
+    cmd = H.comando_huella(_ADMIN_REAL)
     for ruta in H.RUTAS_CONTROLES:
         assert ruta in cmd, ruta
     assert "ejecutor-*" in cmd
@@ -59,15 +72,17 @@ def test_comando_huella_menciona_el_authorized_keys_del_administrador():
     a la huella. Con OTRO admin_usuario, la ruta medida cambia con él.
 
     MAJOR-5 (ronda 3): `ruta_authorized_keys_admin` ahora sale de `pwd.getpwnam` real
-    -- se usan DOS cuentas reales de esta máquina (`fruiz`, `axioma`), no un nombre
-    inventado que ya no resolvería."""
-    assert "/home/fruiz/.ssh/authorized_keys" in H.comando_huella("fruiz")
-    assert "/home/axioma/.ssh/authorized_keys" in H.comando_huella("axioma")
-    assert "/home/fruiz/.ssh/authorized_keys" not in H.comando_huella("axioma")
+    -- se usan DOS cuentas reales de esta máquina (`_ADMIN_REAL`, `_OTRO_ADMIN_REAL`),
+    no un nombre inventado que ya no resolvería."""
+    ruta_real = H.ruta_authorized_keys_admin(_ADMIN_REAL)
+    ruta_otra = H.ruta_authorized_keys_admin(_OTRO_ADMIN_REAL)
+    assert ruta_real in H.comando_huella(_ADMIN_REAL)
+    assert ruta_otra in H.comando_huella(_OTRO_ADMIN_REAL)
+    assert ruta_real not in H.comando_huella(_OTRO_ADMIN_REAL)
 
 
 def test_comando_huella_no_mide_passwd_group_shadow_ronda7():
-    cmd = H.comando_huella("fruiz")
+    cmd = H.comando_huella(_ADMIN_REAL)
     for ruta in ("/etc/passwd", "/etc/group", "/etc/shadow"):
         assert ruta not in cmd, ruta
 
@@ -77,7 +92,7 @@ def test_comando_huella_usa_rutas_absolutas_no_el_path():
     antes en el PATH. El comando usa binarios por ruta absoluta -- no ata la seguridad
     del contrato a que nadie haya tocado el PATH del shell remoto. `find -printf %l` da
     el destino de un symlink sin un `readlink` aparte."""
-    cmd = H.comando_huella("fruiz")
+    cmd = H.comando_huella(_ADMIN_REAL)
     for binario in ("/usr/bin/find", "/usr/bin/sha256sum", "/usr/bin/sort"):
         assert binario in cmd, binario
     import re
@@ -88,7 +103,7 @@ def test_comando_huella_usa_rutas_absolutas_no_el_path():
 
 
 def test_huella_no_tiene_log_de_sudo_ni_atq_ni_sudo_io():
-    cmd = H.comando_huella("fruiz")
+    cmd = H.comando_huella(_ADMIN_REAL)
     assert "sudo-io" not in cmd
     assert "sudo-" not in cmd  # ni /var/log/sudo-<cuenta>.log
     assert "atq" not in cmd
@@ -110,7 +125,8 @@ def test_comando_huella_ahora_pide_el_admin_usuario_ronda2():
 
 
 def test_ruta_authorized_keys_admin_valida_el_nombre():
-    assert H.ruta_authorized_keys_admin("fruiz") == "/home/fruiz/.ssh/authorized_keys"
+    home_esperado = pwd.getpwnam(_ADMIN_REAL).pw_dir
+    assert H.ruta_authorized_keys_admin(_ADMIN_REAL) == f"{home_esperado}/.ssh/authorized_keys"
     with pytest.raises(ValueError):
         H.ruta_authorized_keys_admin("../etc")
     with pytest.raises(ValueError):

@@ -5,17 +5,24 @@ existe pero difiere, la REEMPLAZA) y MAJOR-4 (la reversión VERIFICA -- guion, s
 línea ya no están -- y sale ≠0 si algo sigue; no deja copias con la llave).
 
 Corren los guiones REALES de punta a punta, sin red: `_maquina.sh` resuelve el host de
-prueba contra una `politica.json` armada acá (IP `127.0.0.1`, puerto `58291` -- una
-entrada que YA está en el `known_hosts` real de quien corre el test, así que
-`ssh-keygen -F` del paso 2 del instalador encuentra algo sin necesitar red). Las rutas
-absolutas que los guiones hardcodean (`/usr/local/sbin/...`, `/etc/sudoers.d/...`,
-`~fruiz/.ssh/...`) se REDIRIGEN con bwrap (mismo mecanismo que
-jax/ejecutor/contratos/cuenta_axioma.py y tests/test_ejecutor_huella_sh.py MAJOR-7) a un
-árbol de prueba -- nunca al filesystem real del host. Un `sudo`/`ssh` FALSOS en el PATH
-(mismo truco que tests/test_ejecutor_preparar_directorio_misiones.py) hacen que todo
-corra como el usuario del test, sin privilegios reales."""
+prueba contra una `politica.json` armada acá (IP `127.0.0.1`, puerto `58291`). FIX CI
+(ronda 8, auditoría adversarial 2026-09-22): esto decía que la entrada de
+`[127.0.0.1]:58291` "YA está en el `known_hosts` real de quien corre el test" -- ERA
+CIERTO sólo en hall9000 (su propio sshd escucha ahí); en el runner de CI no hay ningún
+sshd en ese puerto, `ssh-keygen -F` no encontraba nada y el instalador abortaba
+(medido en jax#263). Ahora `_arbol_remoto` genera una llave de host PROPIA y efímera
+y arma esa línea a mano -- autosuficiente, nunca depende del `known_hosts` real de la
+máquina que corre el test. Las rutas absolutas que los guiones hardcodean
+(`/usr/local/sbin/...`, `/etc/sudoers.d/...`, el `.ssh` del ADMINISTRADOR -- la cuenta
+que de verdad corre el proceso, `ADMIN`/`ADMIN_HOME`, nunca un nombre fijo) se
+REDIRIGEN con bwrap (mismo mecanismo que jax/ejecutor/contratos/cuenta_axioma.py y
+tests/test_ejecutor_huella_sh.py MAJOR-7) a un árbol de prueba -- nunca al filesystem
+real del host. Un `sudo`/`ssh` FALSOS en el PATH (mismo truco que
+tests/test_ejecutor_preparar_directorio_misiones.py) hacen que todo corra como el
+usuario del test, sin privilegios reales."""
 import json
 import os
+import pwd
 import shutil
 import subprocess
 from pathlib import Path
@@ -28,7 +35,14 @@ REVERTIR = RAIZ / "ops" / "ejecutor" / "revertir_huella_en_maquina.sh"
 GUION_HUELLA = RAIZ / "ops" / "ejecutor" / "ejecutor-huella"
 
 REQUIERE_BWRAP = pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap no disponible")
-ADMIN = "fruiz"
+#: FIX CI (ronda 8, auditoría adversarial 2026-09-22): `ADMIN = "fruiz"` sólo existe
+#: en hall9000 -- en el runner de CI, `getent passwd`/`pwd.getpwnam` de los guiones
+#: reales no resuelven nada (medido en jax#263). La cuenta que de verdad corre el
+#: proceso existe en cualquier máquina, por definición. `ADMIN_HOME` sale del passwd
+#: REAL -- nunca se asume la convención `/home/<usuario>` (el propio guion ya dejó de
+#: asumirla, ronda 3, MAJOR-5; este archivo lo seguía haciendo).
+ADMIN = pwd.getpwuid(os.getuid()).pw_name
+ADMIN_HOME = pwd.getpwnam(ADMIN).pw_dir
 ORIGEN_IP_1 = "172.16.20.5"
 ORIGEN_IP_2 = "172.16.20.99"
 
@@ -209,24 +223,32 @@ def _arbol_remoto(tmp_path: Path) -> dict:
     sólo `authorized_keys`: `install` reemplaza el archivo con un rename atómico, y
     reemplazar el propio punto de montaje de bwrap con eso da `Device or resource
     busy` (probado) -- montando el directorio, `install` reemplaza un archivo DENTRO,
-    que sí es libre. Se copia `known_hosts` real (sólo la entrada de `127.0.0.1`, la
-    IP de prueba) para que `ssh-keygen -F` del paso 2 del instalador encuentre algo
-    sin tocar el `known_hosts` real completo."""
+    que sí es libre.
+
+    FIX CI (ronda 8, auditoría adversarial 2026-09-22): esto copiaba la entrada de
+    `[127.0.0.1]:58291` del `known_hosts` REAL de quien corre el test -- en hall9000
+    existe (su propio sshd escucha ahí, y fruiz ya se conectó a sí mismo alguna vez);
+    en el runner de CI no hay NINGÚN sshd en ese puerto, así que esa entrada nunca
+    existió -- `ssh-keygen -F` del paso 2 del instalador no encontraba nada, `test -s`
+    fallaba, y el instalador entero abortaba (`set -euo pipefail`), medido en jax#263.
+    Ahora se genera una llave de host PROPIA, efímera, y se arma la línea de
+    `known_hosts` a mano -- autosuficiente, sin depender de que exista un sshd real
+    en ese puerto ni de qué `known_hosts` traiga la máquina que corre el test."""
     sbin = tmp_path / "remote-sbin"; sbin.mkdir(exist_ok=True)
     sudoers_d = tmp_path / "remote-sudoersd"; sudoers_d.mkdir(exist_ok=True)
     ejecutor_huella_dir = tmp_path / "remote-ejecutor-huella"; ejecutor_huella_dir.mkdir(exist_ok=True)
     ssh_admin = tmp_path / "remote-ssh-admin"; ssh_admin.mkdir(exist_ok=True)
     (ssh_admin / "authorized_keys").write_text("ssh-ed25519 AAAAotra otra-llave-de-fruiz\n")
-    kh_real = Path.home() / ".ssh" / "known_hosts"
-    entradas = subprocess.run(["ssh-keygen", "-F", "[127.0.0.1]:58291", "-f", str(kh_real)],
-                              capture_output=True, text=True).stdout
-    entradas = "\n".join(l for l in entradas.splitlines() if not l.startswith("#")) + "\n"
-    (ssh_admin / "known_hosts").write_text(entradas)
+    llave_host_falsa = tmp_path / "host_key_de_prueba"
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(llave_host_falsa)],
+                   check=True, capture_output=True)
+    tipo, clave = llave_host_falsa.with_suffix(".pub").read_text().split()[:2]
+    (ssh_admin / "known_hosts").write_text(f"[127.0.0.1]:58291 {tipo} {clave}\n")
     return {
         "/usr/local/sbin": sbin,
         "/etc/sudoers.d": sudoers_d,
         "/etc/ejecutor-huella": ejecutor_huella_dir,
-        f"/home/{ADMIN}/.ssh": ssh_admin,
+        f"{ADMIN_HOME}/.ssh": ssh_admin,
     }
 
 
@@ -241,12 +263,12 @@ def test_instalar_dos_veces_con_el_mismo_origen_es_idempotente(tmp_path):
 
     r1 = subprocess.run(base, capture_output=True, timeout=60, cwd=str(RAIZ))
     assert r1.returncode == 0, r1.stderr.decode()
-    contenido1 = ((binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys")).read_text()
+    contenido1 = ((binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys")).read_text()
     assert "ejecutor-huella-servicio" in contenido1
 
     r2 = subprocess.run(base, capture_output=True, timeout=60, cwd=str(RAIZ))
     assert r2.returncode == 0, r2.stderr.decode()
-    contenido2 = ((binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys")).read_text()
+    contenido2 = ((binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys")).read_text()
     assert contenido1 == contenido2  # idempotente: nada cambió en la segunda corrida
     assert contenido2.count("ejecutor-huella-servicio") == 1  # una sola entrada, no dos
 
@@ -262,7 +284,7 @@ def test_instalar_con_origen_ip_distinto_converge_major3(tmp_path):
         ["bash", str(INSTALAR), "prueba-huella"]
     r1 = subprocess.run(argv1, capture_output=True, timeout=60, cwd=str(RAIZ))
     assert r1.returncode == 0, r1.stderr.decode()
-    contenido1 = ((binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys")).read_text()
+    contenido1 = ((binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys")).read_text()
     assert f'from="{ORIGEN_IP_1}"' in contenido1
 
     env2 = _entorno_de_prueba(tmp_path, politica_ruta, origen_ip=ORIGEN_IP_2)
@@ -270,7 +292,7 @@ def test_instalar_con_origen_ip_distinto_converge_major3(tmp_path):
         ["bash", str(INSTALAR), "prueba-huella"]
     r2 = subprocess.run(argv2, capture_output=True, timeout=60, cwd=str(RAIZ))
     assert r2.returncode == 0, r2.stderr.decode()
-    contenido2 = ((binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys")).read_text()
+    contenido2 = ((binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys")).read_text()
 
     assert contenido2.count("ejecutor-huella-servicio") == 1  # MAJOR-3: reemplazada, no duplicada
     assert f'from="{ORIGEN_IP_1}"' not in contenido2  # la vieja se fue
@@ -297,7 +319,7 @@ def test_revertir_funciona_aunque_la_llave_se_haya_regenerado_major3(tmp_path):
     r_instalar = subprocess.run(argv_base + ["bash", str(INSTALAR), "prueba-huella"],
                                 capture_output=True, timeout=60, cwd=str(RAIZ))
     assert r_instalar.returncode == 0, r_instalar.stderr.decode()
-    contenido_antes = (binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys").read_text()
+    contenido_antes = (binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys").read_text()
     assert "ejecutor-huella-servicio" in contenido_antes
     clave_vieja = [l for l in contenido_antes.splitlines() if "ejecutor-huella-servicio" in l][0].split()[-2]
 
@@ -316,7 +338,7 @@ def test_revertir_funciona_aunque_la_llave_se_haya_regenerado_major3(tmp_path):
     assert r_revertir.returncode == 0, r_revertir.stderr.decode()
     assert b"verificado=true" in r_revertir.stdout
 
-    contenido_despues = (binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys").read_text()
+    contenido_despues = (binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys").read_text()
     assert "ejecutor-huella-servicio" not in contenido_despues  # la línea VIEJA se fue
     assert clave_vieja not in contenido_despues
 
@@ -334,7 +356,7 @@ def test_instalar_y_revertir_no_deja_nada_atras_major4(tmp_path):
     assert r_instalar.returncode == 0, r_instalar.stderr.decode()
     assert (binds["/usr/local/sbin"] / "ejecutor-huella").exists()
     assert (binds["/etc/sudoers.d"] / "50-ejecutor-huella").exists()
-    assert "ejecutor-huella-servicio" in ((binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys")).read_text()
+    assert "ejecutor-huella-servicio" in ((binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys")).read_text()
 
     r_revertir = subprocess.run(argv_base + ["bash", str(REVERTIR), "prueba-huella"],
                                 capture_output=True, timeout=60, cwd=str(RAIZ))
@@ -343,7 +365,7 @@ def test_instalar_y_revertir_no_deja_nada_atras_major4(tmp_path):
 
     assert not (binds["/usr/local/sbin"] / "ejecutor-huella").exists()
     assert not (binds["/etc/sudoers.d"] / "50-ejecutor-huella").exists()
-    contenido_final = ((binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys")).read_text()
+    contenido_final = ((binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys")).read_text()
     assert "ejecutor-huella-servicio" not in contenido_final
     assert "otra-llave-de-fruiz" in contenido_final  # lo que no era del arreglo, se queda
     # MAJOR-4: ninguna copia con la llave adentro en ningún lado del árbol "remoto".
@@ -424,7 +446,7 @@ def test_instalar_no_inyecta_comandos_via_tmpdir_hostil_major_d(tmp_path):
 
     assert not marcador.exists(), "el TMPDIR hostil ejecutó el touch inyectado -- MAJOR-D sin cerrar"
     assert r_instalar.returncode == 0, r_instalar.stderr.decode()
-    contenido = (binds[f"/home/{ADMIN}/.ssh"] / "authorized_keys").read_text()
+    contenido = (binds[f"{ADMIN_HOME}/.ssh"] / "authorized_keys").read_text()
     assert "ejecutor-huella-servicio" in contenido  # el instalador igual terminó bien
 
 
@@ -470,7 +492,7 @@ def test_instalar_funciona_con_un_home_resuelto_via_getent_con_espacio(tmp_path)
     politica_ruta = tmp_path / "politica.json"
     politica_ruta.write_text(json.dumps(_doc_politica()))
     binds = _arbol_remoto(tmp_path)
-    del binds[f"/home/{ADMIN}/.ssh"]
+    del binds[f"{ADMIN_HOME}/.ssh"]
     binds[str(ssh_admin)] = ssh_admin  # bind idéntico -- ya está en su lugar real bajo tmp_path
 
     bin_falso = _bin_falso(tmp_path)

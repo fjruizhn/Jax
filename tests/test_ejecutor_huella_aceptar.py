@@ -7,7 +7,8 @@ de correo de aaPanel) cambia un control durante el turno 1 -> pausa y queda REPO
 import asyncio
 import json
 import multiprocessing
-import time
+import os
+import pwd
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,12 @@ import pytest
 from jax.ejecutor.contratos import huella as H
 from jax.ejecutor.contratos import pausa as P
 from jax.ejecutor.contratos import vigia_servicio as S
+
+#: FIX CI (ronda 8, auditoría adversarial 2026-09-22): BLOCK-J pasaba "fruiz" a
+#: `ruta_authorized_keys_admin()` -- pwd.getpwnam real, sólo resuelve en hall9000.
+#: En el runner de CI esa cuenta no existe (medido en jax#263, 3 tests rotos). La
+#: cuenta que de verdad corre el proceso existe en cualquier máquina, por definición.
+_ADMIN_REAL = pwd.getpwuid(os.getuid()).pw_name
 
 MISION_ID = "55555555-5555-5555-5555-555555555555"
 
@@ -154,7 +161,7 @@ def test_aceptar_rechaza_una_medicion_invalida_no_la_toma_como_linea_base_major_
 # ruta del administrador. -----------------------------------------------------------
 
 def test_aceptar_con_admin_usuario_rechaza_si_falla_su_propia_ruta_block_j(tmp_path):
-    admin = "fruiz"
+    admin = _ADMIN_REAL
     ruta_admin = H.ruta_authorized_keys_admin(admin)
     misiones = tmp_path / "misiones"
     registro = tmp_path / "registro.jsonl"
@@ -196,7 +203,7 @@ def test_aceptar_con_admin_usuario_y_medicion_completa_acepta_block_j(tmp_path):
     """Contraparte de la de arriba: con la ruta del administrador TAMBIÉN medida y
     sana, `aceptar()` con `admin_usuario` tiene que aceptar igual que sin él -- pasar
     `admin_usuario` no es, por sí solo, motivo de rechazo."""
-    admin = "fruiz"
+    admin = _ADMIN_REAL
     ruta_admin = H.ruta_authorized_keys_admin(admin)
     misiones = tmp_path / "misiones"
     registro = tmp_path / "registro.jsonl"
@@ -231,7 +238,7 @@ def test_el_mutante_que_ignora_admin_usuario_en_aceptar_muere_block_j():
     `RUTAS_DECLARADAS_POR_DEFAULT` sin importar qué se pase. Con una medición rota
     ÚNICAMENTE en la ruta del administrador, el código real la rechaza; el mutante
     la deja pasar."""
-    admin = "fruiz"
+    admin = _ADMIN_REAL
     ruta_admin = H.ruta_authorized_keys_admin(admin)
     rota = H.huella_desde_salida("atemai", _base_completa() + f"E {ruta_admin} find_fallo\n".encode())
 

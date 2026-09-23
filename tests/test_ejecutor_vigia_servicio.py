@@ -3,6 +3,8 @@
 nunca late (y sin latido el proxy no sirve). Fin normal: el latido se borra."""
 import asyncio
 import json
+import os
+import pwd
 from pathlib import Path
 
 import pytest
@@ -17,6 +19,13 @@ from jax.ejecutor.contratos.registro import Registro
 
 MISION = S.Mision("uptime de hall9000", frozenset({"hall9000"}))
 MAQUINAS = (A.Maquina("hall9000", "192.0.2.5", 58291),)
+
+#: FIX CI (ronda 8, auditoría adversarial 2026-09-22): BLOCK-F/MAJOR-L pasaban
+#: "fruiz" a `ruta_authorized_keys_admin()`/`JAX_EJECUTOR_ADMIN_USUARIO` -- las dos
+#: rutas terminan en `pwd.getpwnam` real, que sólo resuelve en hall9000. En el
+#: runner de CI esa cuenta no existe (medido en jax#263, 5 tests rotos). La cuenta
+#: que de verdad corre el proceso existe en cualquier máquina, por definición.
+_ADMIN_REAL = pwd.getpwuid(os.getuid()).pw_name
 
 
 def _ctx(tmp_path, hosts=frozenset({"hall9000"})):
@@ -355,7 +364,7 @@ def test_apertura_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
     mock agotado al llegar al cierre: falla por lo que importa, `pytest.raises` sin
     haber visto el `RuntimeError` esperado."""
     from jax.ejecutor.contratos import huella as H
-    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    ruta_admin = H.ruta_authorized_keys_admin(_ADMIN_REAL)
     tomar_huella = _tomador_secuencia({"atemai": [_h("atemai"), _h("atemai")]})  # SIN la línea del admin
     ctx = _ctx(tmp_path)
 
@@ -369,7 +378,7 @@ def test_cierre_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
     aislar SOLO el chequeo del cierre); el CIERRE deja de traer esa línea -- tiene que
     pausar como no-medible, no pasar como si nada."""
     from jax.ejecutor.contratos import huella as H
-    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    ruta_admin = H.ruta_authorized_keys_admin(_ADMIN_REAL)
     con_admin = _base_completa() + f"A {ruta_admin}\n".encode()
     antes = _h("atemai", controles=con_admin)
     despues = _h("atemai")  # el cierre YA NO trae la línea del admin
@@ -398,7 +407,7 @@ def test_huerfana_exige_la_ruta_extra_del_administrador_block_f(tmp_path):
     `assert` de abajo lo dice con claridad."""
     from jax.ejecutor.contratos import huella as H
     misiones = tmp_path / "misiones"
-    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    ruta_admin = H.ruta_authorized_keys_admin(_ADMIN_REAL)
     huella_vieja = _h("atemai")  # SIN la línea del admin
     H.escribir_marca(S.ruta_huella(misiones, OTRA_MISION_ID, "atemai"), H.Marca(huella=huella_vieja, estado=H.ABIERTA))
 
@@ -431,7 +440,7 @@ def test_apertura_valida_la_marca_ya_persistida_major_l(tmp_path):
     marca ya persistida, no hay nada que remedir."""
     from jax.ejecutor.contratos import huella as H
     misiones = tmp_path / "misiones"
-    ruta_admin = H.ruta_authorized_keys_admin("fruiz")
+    ruta_admin = H.ruta_authorized_keys_admin(_ADMIN_REAL)
     persistida = _h("atemai")  # SIN la línea del admin
     H.escribir_marca(S.ruta_huella(misiones, MISION_ID, "atemai"), H.Marca(huella=persistida, estado=H.CERRADA))
 
@@ -874,7 +883,7 @@ class _ConexionFalsa:
         return False
 
 
-def _entorno_principal(tmp_path, *, admin="fruiz"):
+def _entorno_principal(tmp_path, *, admin=_ADMIN_REAL):
     politica_ruta = tmp_path / "politica.json"
     def _bash(comando):
         return {"tool_name": "Bash", "tool_input": {"command": comando}}
@@ -915,7 +924,7 @@ def test_principal_pasa_la_ruta_extra_del_administrador_de_verdad_block_f(tmp_pa
     import jacobs.store as jstore
     from jax.ejecutor.contratos import eleccion_c5, huella as H
 
-    admin = "fruiz"
+    admin = _ADMIN_REAL
     env = _entorno_principal(tmp_path, admin=admin)
     for k, v in env.items():
         monkeypatch.setenv(k, v)

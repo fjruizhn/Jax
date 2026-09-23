@@ -13,6 +13,7 @@ contra esa definición -- una sola fuente de verdad, dos formas (Python armaba u
 para mandarlo por ssh, el script ahora corre ESTÁTICO en la remota, pero mide las
 MISMAS rutas)."""
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -119,7 +120,7 @@ def test_el_script_usa_cat_y_rm_por_ruta_absoluta_minor():
 def test_comando_huella_usa_cat_y_rm_por_ruta_absoluta_minor():
     """Mismo chequeo que arriba, sobre el texto que arma `comando_huella()` -- el
     mutante que la ronda 6 señaló vivía justo en la asimetría entre los dos."""
-    comando = H.comando_huella("fruiz")
+    comando = H.comando_huella(pwd.getpwuid(os.getuid()).pw_name)
     lineas_de_codigo = [l for l in comando.splitlines() if not l.lstrip().startswith("#")]
     for linea in lineas_de_codigo:
         assert not re.search(r'(^|[^"$A-Za-z_/])cat ', linea), linea
@@ -177,11 +178,17 @@ def test_correr_sin_privilegios_no_revienta_por_rutas_no_legibles():
 
 REQUIERE_BWRAP = pytest.mark.skipif(shutil.which("bwrap") is None, reason="bwrap no disponible")
 #: MAJOR-4 (ronda 3): DOS usuarios reales y distintos de este mismo host (`getent
-#: passwd` los tiene que poder resolver de verdad dentro del bwrap) -- nunca "fruiz"
-#: fijo. `axioma` es una cuenta real en hall9000 con home propio; se usa acá sólo como
-#: SEGUNDO admin de prueba, no porque axioma vaya a ser admin_usuario en producción.
-_ADMIN_DE_PRUEBA = "fruiz"
-_OTRO_ADMIN_DE_PRUEBA = "axioma"
+#: passwd` los tiene que poder resolver de verdad dentro del bwrap) -- nunca un
+#: nombre fijo. FIX CI (ronda 8, auditoría adversarial 2026-09-22): esto decía "nunca
+#: 'fruiz' fijo" en la letra pero lo hacía en el código -- "fruiz"/"axioma" sólo
+#: existen en hall9000; en el runner de CI, ValueError/KeyError (medido en jax#263,
+#: bloque de tests colgado del wireado nuevo de este archivo). `_ADMIN_DE_PRUEBA` es
+#: la cuenta que de verdad corre el proceso (existe en cualquier máquina, por
+#: definición); `_OTRO_ADMIN_DE_PRUEBA` es `root`, universal en cualquier POSIX --
+#: no porque root vaya a ser admin_usuario en producción, sólo como SEGUNDO admin de
+#: prueba con home propio y distinto.
+_ADMIN_DE_PRUEBA = pwd.getpwuid(os.getuid()).pw_name
+_OTRO_ADMIN_DE_PRUEBA = "root"
 
 
 def _arbol_de_prueba(tmp_path: Path, *, admin_usuario: str = _ADMIN_DE_PRUEBA, con_sha256sum: bool = True) -> dict:
@@ -408,8 +415,10 @@ def test_tramo_admin_incluye_la_ruta_resuelta_major_c(tmp_path):
     r = subprocess.run(base + ["--", str(GUION)], capture_output=True, timeout=30)
     assert r.returncode == 0
     salida = r.stdout.decode()
-    assert "/home/axioma/.ssh/authorized_keys" in salida
-    assert "/home/fruiz/.ssh/authorized_keys" not in salida
+    home_otro = pwd.getpwnam(_OTRO_ADMIN_DE_PRUEBA).pw_dir
+    home_principal = pwd.getpwnam(_ADMIN_DE_PRUEBA).pw_dir
+    assert f"{home_otro}/.ssh/authorized_keys" in salida
+    assert f"{home_principal}/.ssh/authorized_keys" not in salida
 
 
 @REQUIERE_BWRAP
