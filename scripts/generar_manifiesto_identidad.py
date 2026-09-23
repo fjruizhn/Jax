@@ -334,6 +334,19 @@ def main(argv: list[str] | None = None) -> int:
         identity, manifest_bytes = construir_identidad(
             repo_root, repository_id=repository_id, allow_dirty=args.allow_dirty,
         )
+        # PR#264 ronda 3: estas dos escrituras NO son atómicas ENTRE SÍ (si
+        # el proceso muere a mitad de camino, una queda escrita y la otra
+        # no). El orden es el seguro a propósito: el manifest primero,
+        # la identidad después. Un manifest huérfano sin identidad es
+        # inofensivo -- nada lo lee todavía, ni el arranque (que sólo
+        # consulta MariaDB, nunca este archivo local) ni el runbook (su
+        # paso de instalar el blob viene DESPUÉS de que este comando
+        # termine). El orden inverso sí sería un problema real: una
+        # identidad ya escrita mientras el manifest que le corresponde
+        # todavía no existe en disco -- el paso siguiente del runbook
+        # (instalar el blob) fallaría intentando leer un archivo que el
+        # propio comando que lo iba a crear no llegó a terminar. Nunca
+        # invertir este orden.
         escribir_atomico(manifest_output, manifest_bytes)
         identity_bytes = (json.dumps(identity, indent=2, sort_keys=True) + "\n").encode("utf-8")
         escribir_atomico(output, identity_bytes)
