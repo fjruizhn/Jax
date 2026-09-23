@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import secrets
+import uuid
 import signal
 import sys
 import time
@@ -122,7 +122,11 @@ async def principal(maquina: str) -> int:
         return 1
     dice(("proxy_antes_del_vigia", await _estado_proxy(ctx.puerto_proxy)))
 
-    id_mision = f"humo-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+    # UUID canónico, no "humo-<fecha>-<hex>" (jax#263): el directorio por misión de la
+    # jaula (`cuenta_axioma.preparar_directorio_projects`) y la marca de huella exigen un
+    # `mision_id` UUID -- con el nombre viejo el vigía sale `MisionIdInvalido` y la misión
+    # de humo nunca late. Medido en producción el 2026-09-23.
+    id_mision = str(uuid.uuid4())
     ruta_mision = Path(env["JAX_EJECUTOR_MISIONES"]) / f"{id_mision}.json"
     ruta_mision.write_text(json.dumps({"mision": texto_mision, "hosts": [maquina]}), encoding="utf-8")
     desde = ctx.registro.stat().st_size
