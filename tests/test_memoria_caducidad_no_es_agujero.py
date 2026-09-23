@@ -85,6 +85,19 @@ requiere_db_de_prueba = pytest.mark.skipif(
 )
 
 _USER = 990_040   # reservado para este archivo
+_TENANT = 990_040
+
+# This I/O module bootstraps the memory tables itself because the CI MariaDB
+# service is empty.  B9's scope query now intentionally resolves the tenant
+# from the DB-backed user row, so the fixture must provide that authority too.
+_IDENTITY_DDL = """
+CREATE TABLE IF NOT EXISTS jax_users (
+    user_id BIGINT NOT NULL PRIMARY KEY,
+    tenant_id BIGINT NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    role VARCHAR(32) NOT NULL
+)
+"""
 
 
 def _vec(pos: int, valor: float = 1.0) -> list[float]:
@@ -125,6 +138,16 @@ _DDL = _esquema_memoria.ddl()
 
 async def _preparar() -> list[str]:
     creadas = []
+    existe_usuario = await _sql(
+        "SELECT 1 FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'jax_users'", fetch=True)
+    if not existe_usuario:
+        await _sql(_IDENTITY_DDL)
+        creadas.append("jax_users")
+    await _sql(
+        "INSERT INTO jax_users (user_id, tenant_id, status, role) VALUES (%s, %s, 'active', 'viewer') "
+        "ON DUPLICATE KEY UPDATE tenant_id=VALUES(tenant_id), status='active', role='viewer'",
+        (_USER, _TENANT))
     for nombre, ddl in _DDL.items():
         existe = await _sql(
             "SELECT 1 FROM information_schema.TABLES "
@@ -137,6 +160,7 @@ async def _preparar() -> list[str]:
 
 async def _limpiar():
     await _sql("DELETE FROM facts WHERE user_id = %s", (_USER,))
+    await _sql("DELETE FROM jax_users WHERE user_id = %s", (_USER,))
 
 
 @pytest.fixture
@@ -146,7 +170,7 @@ def limpio():
     yield
     async def _teardown():
         await _limpiar()
-        for nombre in reversed(list(_DDL)):
+        for nombre in reversed([*list(_DDL), "jax_users"]):
             if nombre in creadas:
                 await _sql(f"DROP TABLE {nombre}")
     asyncio.run(_teardown())
