@@ -385,8 +385,18 @@ jobs:
           #   tabla descartables llevan el sufijo de la sesion
           #   (`_SUFIJO_DE_PRUEBA`), para que dos corridas concurrentes contra
           #   la misma base compartida no se pisen sobre el mismo nombre.
-          grep -qE "^14 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 14 -> 19 el 2026-09-23 (pendiente 631, parte B2):
+          #   _store_indexes_test.py suma RetiroDeIndicesTest (+5) -- crea
+          #   idx_pipelines_status A MANO sobre la tabla real (con `visible`
+          #   indexada) y exige que init_tables() lo retire, que la segunda
+          #   corrida no intente ningun DROP, que lo CONSERVE con ERROR si el
+          #   reemplazo falta / esta IGNORED / tiene otro prefijo, y que dos
+          #   init_tables() en paralelo no revienten (carrera del 1091). Tiene
+          #   que ser de integracion: en esta base nueva nadie crea el viejo y
+          #   el DROP no correria nunca. Visto en rojo contra el store.py viejo
+          #   (5 failed).
+          grep -qE "^19 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 19 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en
@@ -4141,8 +4151,17 @@ jobs:
           # para `[127.0.0.1]:58291` (cierto en hall9000, que tiene su propio sshd ahí; falso
           # en un runner nuevo, sin ningún sshd escuchando) -- ahora genera una llave de host
           # efímera propia y arma esa línea a mano, autosuficiente.
-          grep -qE "^2801 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2801 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # 2801 -> 2813 el 2026-09-23 (pendiente 631, parte B2: retirar
+          #   idx_pipelines_status): +12 puras en tests/test_store_indice_duenio.py
+          #   (FormaDeLosRetiradosTest +4: ningun nombre en _INDICES y en
+          #   _INDICES_RETIRADOS a la vez, cada reemplazo se crea con el prefijo
+          #   declarado, DROP NOCOPY/LOCK=NONE; RetirarIndicesTest +8: no-op si no
+          #   existe, DROP acotado y restaurado, conserva con reemplazo ausente/
+          #   IGNORED/otro prefijo, 1205 -> ERROR y sigue, 1091 -> exito, otro
+          #   error sube). Los 45 skipped no cambian. Medido en local (archivo
+          #   solo: 5 -> 17); manda el runner.
+          grep -qE "^2813 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2813 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
