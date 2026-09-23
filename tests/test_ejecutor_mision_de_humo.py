@@ -170,3 +170,14 @@ def test_sigue_fail_closed_con_lo_que_no_es_una_afirmacion():
     assert H.afirmaciones_del_texto("```") == ()
     assert H.afirmaciones_del_texto("```json\n```") == ()
     assert H.afirmaciones_del_texto(None) == ()
+
+
+def test_el_id_de_mision_es_un_uuid_canonico():
+    """jax#263, medido en producción el 2026-09-23: el vigía valida `mision_id` como UUID
+    (`cuenta_axioma.MisionIdInvalido`, por el directorio por misión de la jaula). El id
+    viejo (`humo-<fecha>-<hex>`) hacía que la misión de humo NUNCA latiera: `arranco=false
+    codigo=configuracion_invalida tipo=MisionIdInvalido`."""
+    import re
+    texto = _RUTA.read_text(encoding="utf-8")
+    assert "id_mision = str(uuid.uuid4())" in texto
+    assert not re.search(r'id_mision\s*=\s*f"humo-', texto)
