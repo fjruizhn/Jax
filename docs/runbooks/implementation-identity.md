@@ -60,13 +60,15 @@ cualquiera:
 Todo esto lo crea `policy/execution_control/migrations/001_governed_execution.sql`
 (7 tablas, 10 triggers).
 
-### 4 y 5. Aplicar las dos migraciones y otorgar `INSERT` -- una sola sesión, con un usuario ADMIN
-**`CREATE SCHEMA`/`TABLE`/`TRIGGER` no son privilegios de aplicación.**
-`$JAX_DB_USER` de `/etc/jax/.env` es (debe ser) un usuario de mínimo
-privilegio -- el que este mismo paso le otorga `INSERT`/`SELECT` al final,
-nunca DDL. Todo lo de abajo usa una cuenta ADMINISTRATIVA aparte, provista
-por quien lo ejecuta (nunca la misma que `$JAX_DB_USER`, y nunca escrita
-en este archivo).
+### 4 y 5. Aplicar las dos migraciones y otorgar privilegios -- una sola sesión, con un usuario ADMIN
+**Crear los esquemas (`CREATE SCHEMA`/`TABLE`/`TRIGGER`) no es un
+privilegio de aplicación, aunque el usuario de aplicación termine con
+`ALL PRIVILEGES` sobre sus DOS esquemas propios (MAJOR-1, ver el `GRANT`
+de abajo).** `$JAX_DB_USER` de `/etc/jax/.env` sigue acotado a
+`jax_evidence`/`jax_execution` -- nunca a otro esquema, y nunca es la
+cuenta que aplica las migraciones. Todo lo de abajo (crear los esquemas)
+usa una cuenta ADMINISTRATIVA aparte, provista por quien lo ejecuta (nunca
+la misma que `$JAX_DB_USER`, y nunca escrita en este archivo).
 
 **Los pasos 4 y 5 son UNA sola sesión de shell, de punta a punta.** La
 ronda anterior los separaba y el archivo de credenciales (`$CNF`) se
@@ -101,25 +103,73 @@ EOF
 unset JAX_DB_ADMIN_PASSWORD
 ```
 
-**`SHOW GRANTS` con gate de verdad, no sólo un print.** La ronda anterior
-imprimía los grants y confiaba en que el operador los leyera -- esto CORTA
-el script si la cuenta no alcanza, ANTES de tocar DDL:
+**`SHOW GRANTS` con AVISO explícito, todavía no un corte real de shell
+(ronda 4 de revisión — corrige una afirmación falsa de la ronda
+anterior).** La ronda anterior decía que esto "CORTA el script"; medido
+de verdad con un pty real: un comando que falla bajo `set -e` en una
+shell interactiva SÍ la cierra por completo, exactamente igual que
+`exit` — que es lo que este bloque explícitamente decidió evitar. Sin
+`set -e` activo (que es el caso acá), `false` no corta absolutamente
+nada por sí sola: sólo dejar `$? != 0` e imprimir el mensaje. Si el
+operador sigue pegando los bloques de abajo en la misma terminal, van a
+intentar correr igual — MariaDB los va a rechazar por falta de
+privilegio recién ahí, no antes. Este chequeo es un AVISO temprano con
+mensaje claro, no una compuerta de shell: **si ves el `NO-GO` de abajo,
+frená vos, no sigas pegando.**
+
+**MINOR-4 (ronda 4 de revisión): el chequeo anterior no podía fallar de
+verdad.** `grep -qi '\bCREATE\b'` matchea el substring `CREATE` DENTRO de
+`CREATE VIEW` (un privilegio real y mucho más débil), y no mira sobre QUÉ
+objeto está el privilegio — una cuenta con `CREATE VIEW, TRIGGER` en
+`jax_evidence` pasaba como si tuviera `CREATE TABLE` global. Confirmado
+en rojo contra el código viejo, con `GRANT CREATE VIEW, SELECT, TRIGGER
+ON \`jax_evidence\`.*` como único grant no-`ALL PRIVILEGES`: el chequeo
+viejo decía "OK (CREATE + TRIGGER)". El chequeo nuevo parsea cada línea
+`GRANT ...`, separa privilegios por coma con match EXACTO (no substring),
+y sólo cuenta privilegios otorgados sobre `*.*` o sobre alguno de los dos
+esquemas de este PR:
 
 ```bash
 GRANTS=$(mysql --defaults-extra-file="$CNF" -N -e "SHOW GRANTS FOR CURRENT_USER();")
-if echo "$GRANTS" | grep -qi "ALL PRIVILEGES"; then
-  echo "cuenta admin OK (ALL PRIVILEGES)."
-elif echo "$GRANTS" | grep -qi '\bCREATE\b' && echo "$GRANTS" | grep -qi '\bTRIGGER\b'; then
-  echo "cuenta admin OK (CREATE + TRIGGER)."
+
+cuenta_ok=0
+while IFS= read -r linea; do
+  case "$linea" in
+    GRANT\ *) ;;
+    *) continue ;;
+  esac
+  objetivo=$(echo "$linea" | sed -E 's/^GRANT .* ON ([^ ]+) TO .*$/\1/I')
+  case "$objetivo" in
+    '*.*'|'`jax_evidence`.*'|jax_evidence.\*|'`jax_execution`.*'|jax_execution.\*) ;;
+    *) continue ;;   # privilegio sobre otro esquema: no cuenta para este gate
+  esac
+  privilegios=$(echo "$linea" | sed -E 's/^GRANT (.*) ON .*$/\1/I')
+  if echo "$privilegios" | grep -qi "ALL PRIVILEGES"; then cuenta_ok=1; break; fi
+  tiene_create=0; tiene_trigger=0
+  while IFS= read -r priv; do
+    priv=$(echo "$priv" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+    case "$priv" in
+      [Cc][Rr][Ee][Aa][Tt][Ee]) tiene_create=1 ;;
+      [Tt][Rr][Ii][Gg][Gg][Ee][Rr]) tiene_trigger=1 ;;
+    esac
+  done < <(echo "$privilegios" | tr ',' '\n')
+  if [ "$tiene_create" = "1" ] && [ "$tiene_trigger" = "1" ]; then cuenta_ok=1; break; fi
+done <<< "$GRANTS"
+
+if [ "$cuenta_ok" = "1" ]; then
+  echo "cuenta admin OK (CREATE+TRIGGER o ALL PRIVILEGES, con alcance real)."
 else
-  echo "NO-GO: la cuenta admin no muestra CREATE+TRIGGER (ni ALL PRIVILEGES):" >&2
+  echo "NO-GO: la cuenta admin no muestra CREATE+TRIGGER (ni ALL PRIVILEGES) con" >&2
+  echo "alcance sobre *.*, jax_evidence o jax_execution:" >&2
   echo "$GRANTS" >&2
   echo "-- PARAR ACÁ. No seguir pegando los bloques de abajo con esta cuenta." >&2
-  false   # deja $? != 0 a propósito: no se usa exit/return -- este bloque se
-          # pega interactivo, y `exit` cerraría la terminal entera en vez de
-          # sólo frenar este chequeo. MariaDB igual rechaza el DDL sin este
-          # privilegio -- esto es un fail-fast con mensaje claro, no la
-          # única barrera real.
+  false   # deja $? != 0 a propósito -- NO usa exit/return, y TAMPOCO se activa
+          # set -e alrededor: medido de verdad con un pty real, `set -e` + un
+          # comando que falla SÍ cierra una shell interactiva entera, igual que
+          # `exit` -- exactamente lo que este bloque evita. Esto es un AVISO con
+          # mensaje claro, no un corte de shell; MariaDB rechaza el DDL sin este
+          # privilegio de todos modos, esa es la barrera real. Si ves el NO-GO de
+          # arriba, frená vos: no sigas pegando los bloques de abajo.
 fi
 ```
 
@@ -187,15 +237,36 @@ migraciones completas DOS VECES seguidas (sin el atajo de
 `_apply_migration`, que no vuelve a ejecutar nada si la tabla ya existe) y
 confirma que la segunda pasada no falla.
 
-**Otorgar `INSERT`/`SELECT` al usuario de aplicación, con la MISMA sesión
-y el MISMO `$CNF` de arriba** (el arranque escribe la identidad vía
-`__record_identity` y los artefactos de `DatabaseControlInspector` — sin
-`INSERT`, la primera escritura del arranque falla):
+**Otorgar `ALL PRIVILEGES` al usuario de aplicación sobre LOS DOS
+esquemas, con la MISMA sesión y el MISMO `$CNF` de arriba (MAJOR-1, ronda
+4 de revisión — corrige un `GRANT` que tumbaba el primer despacho
+gobernado real).** La ronda anterior daba `INSERT, SELECT` en
+`jax_evidence` y sólo `SELECT` en `jax_execution`. Dos problemas reales,
+verificados contra el código, no supuestos:
+- `policy/execution_control/storage.py` hace `INSERT` en `jax_execution`
+  en varios caminos (`insert_authorization`, `create_execution` — dos
+  `INSERT`, incluido el de `execution_authorization_consumptions` —,
+  `append_event`, `consume_approval`, `save_dry_run`; líneas 82, 108, 109,
+  112, 178, 187, 200). Con sólo `SELECT`, LAS MANOS arranca bien — el
+  fallo no aparece hasta el primer despacho gobernado real, que muere con
+  `1142 (42000): INSERT command denied`.
+- `information_schema.triggers` sólo lista los triggers para los que
+  quien consulta tiene el privilegio `TRIGGER` sobre ese esquema. Con
+  `SELECT` solamente, la consulta de triggers del paso 3
+  (`inspect_database_control()`) puede devolver CERO filas aun con el
+  esquema perfectamente instalado, y el arranque falla con
+  `DatabaseObservationMismatchError` sin que falte nada de verdad.
+
+**Decisión del controlador:** `jax_evidence` y `jax_execution` son
+esquemas dedicados de esta aplicación, no compartidos con ningún otro
+sistema — `ALL PRIVILEGES` sobre los dos, en vez de ir ampliando una
+lista de privilegios mínimos cada vez que aparece un camino de escritura
+nuevo:
 
 ```bash
 mysql --defaults-extra-file="$CNF" <<EOF
-GRANT INSERT, SELECT ON jax_evidence.* TO 'jaxappuser'@'%';
-GRANT SELECT ON jax_execution.* TO 'jaxappuser'@'%';
+GRANT ALL PRIVILEGES ON jax_evidence.* TO 'jaxappuser'@'%';
+GRANT ALL PRIVILEGES ON jax_execution.* TO 'jaxappuser'@'%';
 FLUSH PRIVILEGES;
 EOF
 ```
@@ -208,21 +279,40 @@ EOF
 rm -f "$CNF"; trap - EXIT
 ```
 
-**Antes de generar, un aviso de secuencia (MINOR de la ronda 2 de
-revisión).** `/srv/jax-prod/jax` hoy corre `e09c3b3` — un commit ANTERIOR
-al que agrega `scripts/generar_manifiesto_identidad.py`, así que ese
-checkout ni siquiera tiene el script todavía. El script importa
-`_V1_REQUIRED_SOURCE_PATHS` desde SU PROPIO checkout (el de donde se
-invoca), pero hashea los archivos de `--repo-root` — si se lo corre desde
-un worktree nuevo (`--repo-root /srv/jax-prod/jax`) contra un prod
-desactualizado, produce un manifiesto con la LISTA de archivos requerida
-por el código nuevo pero los BYTES del código viejo (cuando ni siquiera
-fallan por ausencia, dos versiones que no se corresponden). **Orden
-correcto, siempre:** 1) desplegar el código nuevo en `/srv/jax-prod/jax`
-primero (el paso normal de deploy de este repo); 2) recién ahí, invocar
-`/srv/jax-prod/jax/scripts/generar_manifiesto_identidad.py` -- el script
-DE ESE checkout, no el de un worktree de desarrollo -- con
-`--repo-root /srv/jax-prod/jax`.
+**Antes de generar, un aviso de secuencia (MINOR de la ronda 2, hecho
+corregido en la ronda 4 -- el commit citado había quedado obsoleto).** La
+ronda 1 citaba `e09c3b3`, correcto cuando se escribió pero superado por
+un deploy normal de otra sesión antes de que este PR llegara a esta
+ronda. **Medido en vivo en hall9000 el 2026-09-22 ~22:51 UTC**
+(`git -C /srv/jax-prod/jax rev-parse HEAD`): `/srv/jax-prod/jax` está en
+`2794cf3` -- YA es posterior al merge que agrega
+`scripts/generar_manifiesto_identidad.py`, así que ese checkout SÍ tiene
+el script hoy. **Esto es una VERDAD OPERACIONAL, caduca por diseño --
+volver a medir con el comando de arriba antes de confiar en este número,
+no reusarlo de este archivo.** Además, hoy mismo hay DOS estados
+distintos a la vez, y es justo el escenario que este runbook existe para
+manejar: el checkout en disco está en `2794cf3` (nuevo), pero el proceso
+`jax-las-manos` VIVO sigue corriendo desde las 14:38 CST con el código
+VIEJO (confirmado con `systemctl status`, ~8h de antigüedad contra un
+commit de las 22:38) -- eso es exactamente lo que la PRECONDICIÓN del
+paso 9 (antes de reiniciar) y el gate `INSUFFICIENT_EVIDENCE` existen
+para atrapar.
+
+El script importa `_V1_REQUIRED_SOURCE_PATHS` desde SU PROPIO checkout
+(el de donde se invoca), pero hashea los archivos de `--repo-root` — si
+se lo corre desde un worktree nuevo (`--repo-root /srv/jax-prod/jax`)
+contra un prod desactualizado, produce un manifiesto con la LISTA de
+archivos requerida por el código nuevo pero los BYTES del código viejo
+(cuando ni siquiera fallan por ausencia, dos versiones que no se
+corresponden). **Orden correcto, siempre:** 1) desplegar el código nuevo
+en `/srv/jax-prod/jax` primero (el paso normal de deploy de este repo);
+2) recién ahí, invocar `/srv/jax-prod/jax/scripts/generar_manifiesto_identidad.py`
+-- el script DE ESE checkout, no el de un worktree de desarrollo -- con
+`--repo-root /srv/jax-prod/jax`; 3) volver a correr
+`git -C /srv/jax-prod/jax rev-parse HEAD` inmediatamente antes de
+generar -- el número de este párrafo es sólo evidencia de que hoy
+2026-09-22 el checkout YA tenía el script, no una garantía de que siga
+así cuando se ejecute este runbook.
 
 ### 6. Crear el directorio de destino, y generar el manifiesto directo ahí
 `/etc/jax` es `root:root 755` y `/etc/jax/build/` **no existe** la primera
@@ -410,23 +500,191 @@ Run identity/build-manifest verification.
 
 ### 9. Confirmar el arranque, y que el claim sea `SUPPORTED` -- nada menos que eso
 
-**Sobre `set -e` y bloques compartiendo una sola terminal (ronda 3 de
-revisión).** Si un operador va pegando los bloques de este runbook, uno
-tras otro, EN LA MISMA terminal, el `set -euo pipefail` del paso 4/5
-persiste ahí -- no se apaga solo al terminar ese bloque de código, porque
-`set -e` es una opción de la shell, no del bloque de markdown. Sin
-neutralizarlo, este paso 9 (que existe justamente para leer códigos de
-salida != 0 como DATOS, no como fallas) se corta solo: en
-`systemctl is-active` si el servicio no llegó a levantar (exit 3), en
-`curl` si `/health` no contesta (exit 7), o en `SALIDA=$(...)` si `jaxctl`
-devuelve `UNAVAILABLE` (exit 2) -- el operador nunca llega a ver el
-`NO-GO: UNAVAILABLE` de abajo, la terminal simplemente termina ahí. Cada
-bloque de este paso empieza con `set +e` explícito para no depender de que
-nadie se acuerde:
+**Sobre `set +e` en este paso (ronda 3 de revisión, razón corregida en la
+ronda 4 -- la justificación original citaba un problema que la propia
+ronda 3 ya había cerrado).** La ronda 3 decía que el `set -euo pipefail`
+del paso 4/5 "persiste" en la misma terminal y por eso corta este paso
+solo. **Eso es falso tal como quedó escrito ese mismo bloque**: el
+`set -euo pipefail` de ahí vive DENTRO de un subshell entre paréntesis
+(`( set -euo pipefail; ... )`, ver el backup del paso 4/5) desde la
+propia ronda 3 -- las opciones de shell de un subshell no se propagan al
+padre, así que no hay ningún `set -e` heredado esperando acá (ver también
+el MAJOR-4 de la ronda 4, en el paso 4/5: ni ESE `set -e` ni el `false`
+de la validación de grants cortan la terminal del operador). La razón
+real para el `set +e` explícito de abajo es más simple y sigue siendo
+válida por sí sola: este paso existe justamente para LEER códigos de
+salida != 0 como DATOS, no como fallas -- `systemctl is-active` si el
+servicio no llegó a levantar (exit 3), `curl` si `/health` no contesta
+(exit 7), o `SALIDA=$(...)` si `jaxctl` devuelve `UNAVAILABLE` (exit 2).
+Sin `set +e` explícito acá, cualquier `set -e` que el operador tenga
+activo en su PROPIA sesión (su `.bashrc`, o haber pegado a mano algún
+`set -e` de otra parte) cortaría este paso antes de que se vea el
+`NO-GO` de abajo -- ese es el riesgo real, no una fuga del paso 4/5. Cada
+bloque de este paso empieza con `set +e` explícito para no depender de
+que nadie se acuerde ni de qué trae el operador puesto:
 
 ```bash
 set +e
-systemctl restart jax-las-manos      # o esperar al próximo deploy
+```
+
+**MAJOR-3 (ronda 4 de revisión): PRECONDICIÓN antes de reiniciar --
+producción es una puerta de un solo sentido.** Hoy LAS MANOS sirve
+tráfico desde un proceso YA VIVO con el código VIEJO (medido en vivo,
+2026-09-22: el proceso corre desde las 14:38 CST, mientras que
+`/srv/jax-prod/jax` en disco está en un commit de las 22:38 -- ver la
+nota de VERDAD OPERACIONAL antes del paso 6). Reiniciar aplica el código
+nuevo de una sola vez: si el manifiesto no está bien instalado, el blob
+no está en la base, o algún esquema/grant está incompleto,
+`_configure_b7_trusted_runtime` tira el arranque completo y LAS MANOS
+queda ABAJO -- no hay modo degradado (ver el punto 3 más arriba). **No
+reiniciar sin correr esto primero**, con las funciones REALES de
+producción -- no una reimplementación propia del chequeo, para no confiar
+en una segunda versión del mismo criterio que se pueda desincronizar de
+la real:
+
+```bash
+cd /srv/jax-prod/jax
+
+ESPERADAS_TABLAS_EVIDENCE=$(grep -c '^CREATE TABLE' policy/enforcement_evidence/migrations/001_enforcement_evidence.sql)
+ESPERADOS_TRIGGERS_EVIDENCE=$(grep -c '^CREATE TRIGGER' policy/enforcement_evidence/migrations/001_enforcement_evidence.sql)
+ESPERADAS_TABLAS_EXECUTION=$(grep -c '^CREATE TABLE' policy/execution_control/migrations/001_governed_execution.sql)
+ESPERADOS_TRIGGERS_EXECUTION=$(grep -c '^CREATE TRIGGER' policy/execution_control/migrations/001_governed_execution.sql)
+
+cat > /tmp/precondicion_reinicio.py <<PY
+# Conteos calculados AHORA MISMO contra las migraciones reales de este
+# checkout -- nunca hardcodeados a mano, para no quedar desincronizados si
+# el archivo de migración cambia en un commit futuro.
+ESPERADAS_TABLAS_EVIDENCE = $ESPERADAS_TABLAS_EVIDENCE
+ESPERADOS_TRIGGERS_EVIDENCE = $ESPERADOS_TRIGGERS_EVIDENCE
+ESPERADAS_TABLAS_EXECUTION = $ESPERADAS_TABLAS_EXECUTION
+ESPERADOS_TRIGGERS_EXECUTION = $ESPERADOS_TRIGGERS_EXECUTION
+
+import os, sys
+from datetime import datetime, timezone
+
+import pymysql
+from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+from policy.enforcement_evidence.implementation_identity import TrustedImplementationIdentityProvider
+from policy.enforcement_evidence.database_evidence import inspect_database_control
+
+
+def connect():
+    return pymysql.connect(
+        host=os.environ["JAX_DB_HOST"], port=int(os.environ["JAX_DB_PORT"]),
+        user=os.environ["JAX_DB_USER"], password=os.environ["JAX_DB_PASSWORD"],
+        database=os.environ.get("JAX_DB_NAME", "jax_memory"),
+        charset="utf8mb4", autocommit=False, connect_timeout=5)
+
+
+fallas = []
+
+# 1) manifiesto instalado y legible por jaxsvc, blob en la base, y verifica
+#    contra los bytes REALES de /srv/jax -- la MISMA llamada que hace el
+#    arranque real (TrustedImplementationIdentityProvider.load()), de sólo
+#    lectura: no escribe nada.
+try:
+    TrustedImplementationIdentityProvider(MariaDBEvidenceStore(connect)).load()
+    print("OK  manifiesto+identidad instalados, legibles por jaxsvc, blob en la base, y verifican contra /srv/jax")
+except Exception as exc:
+    fallas.append(f"manifiesto/identidad: {exc!r}")
+
+# 2) esquema jax_execution: la MISMA inspección que corre el arranque real
+#    (también de sólo lectura) más la completitud de la migración entera
+#    (el arranque sólo mira una parte; acá se mira todo).
+try:
+    inspect_database_control(
+        connect, "CTL.B6.ONE_DECISION_ONE_EXECUTION", 1,
+        deployment_id=os.environ["JAX_DEPLOYMENT_ID"],
+        observed_at_utc=datetime.now(timezone.utc))
+    print("OK  jax_execution pasa la misma inspección que corre el arranque real")
+except Exception as exc:
+    fallas.append(f"jax_execution (inspección de arranque): {exc!r}")
+
+con = connect()
+try:
+    cur = con.cursor()
+    cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='jax_evidence'")
+    n_tablas_evidence = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='jax_evidence'")
+    n_triggers_evidence = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='jax_execution'")
+    n_tablas_execution = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM information_schema.triggers WHERE trigger_schema='jax_execution'")
+    n_triggers_execution = cur.fetchone()[0]
+finally:
+    con.close()
+
+# jax_evidence no tiene inspector de arranque propio (el arranque sólo la
+# USA, no la inspecciona primero) -- esto llena ese hueco antes de apostar
+# un reinicio.
+if n_tablas_evidence != ESPERADAS_TABLAS_EVIDENCE or n_triggers_evidence != ESPERADOS_TRIGGERS_EVIDENCE:
+    fallas.append(f"esquema jax_evidence incompleto: {n_tablas_evidence} tablas (esperadas {ESPERADAS_TABLAS_EVIDENCE}), {n_triggers_evidence} triggers (esperados {ESPERADOS_TRIGGERS_EVIDENCE})")
+else:
+    print(f"OK  esquema jax_evidence completo ({n_tablas_evidence} tablas, {n_triggers_evidence} triggers)")
+
+if n_tablas_execution != ESPERADAS_TABLAS_EXECUTION or n_triggers_execution != ESPERADOS_TRIGGERS_EXECUTION:
+    fallas.append(f"esquema jax_execution incompleto: {n_tablas_execution} tablas (esperadas {ESPERADAS_TABLAS_EXECUTION}), {n_triggers_execution} triggers (esperados {ESPERADOS_TRIGGERS_EXECUTION})")
+else:
+    print(f"OK  esquema jax_execution completo ({n_tablas_execution} tablas, {n_triggers_execution} triggers)")
+
+# 3) grants del usuario de aplicación -- el mismo usuario que va a usar el
+#    proceso NUEVO, consultado con sus propias credenciales (MAJOR-1).
+con = connect()
+try:
+    cur = con.cursor()
+    cur.execute("SHOW GRANTS FOR CURRENT_USER()")
+    grants = "\n".join(row[0] for row in cur.fetchall())
+finally:
+    con.close()
+if "ALL PRIVILEGES" in grants and "jax_evidence" in grants and "jax_execution" in grants:
+    print("OK  grants del usuario de aplicación (ALL PRIVILEGES sobre jax_evidence y jax_execution)")
+else:
+    fallas.append("grants del usuario de aplicación insuficientes (ver MAJOR-1, paso 4/5):\n" + grants)
+
+if fallas:
+    print("\nNO-GO -- no reiniciar. Fallas:")
+    for f in fallas:
+        print(" -", f)
+    sys.exit(1)
+
+print("\nGO -- las precondiciones pasan. Recién ahora es seguro reiniciar.")
+PY
+
+sudo -u jaxsvc bash -c '
+  cd /srv/jax-prod/jax &&
+  MAINPID=$(systemctl show -p MainPID --value jax-las-manos) &&
+  while IFS= read -r -d "" entrada; do
+    case "$entrada" in
+      JAX_DB_HOST=*|JAX_DB_PORT=*|JAX_DB_USER=*|JAX_DB_PASSWORD=*|JAX_DEPLOYMENT_ID=*) export "$entrada" ;;
+    esac
+  done < "/proc/$MAINPID/environ" &&
+  PYTHONPATH=/srv/jax-prod/jax /srv/jax-prod/jax/las_manos/.venv/bin/python3 /tmp/precondicion_reinicio.py
+'
+PRECOND=$?
+rm -f /tmp/precondicion_reinicio.py
+
+if [ "$PRECOND" = "0" ]; then
+  sudo systemctl restart jax-las-manos
+else
+  echo "NO-GO: no reiniciar -- resolver los fallos de arriba primero." >&2
+fi
+```
+
+Esto lee del proceso VIEJO todavía vivo (el que está por reiniciarse) --
+funciona porque `JAX_DB_*`/`JAX_DEPLOYMENT_ID` no cambian entre el código
+viejo y el nuevo, sólo cambian los ARCHIVOS que se están verificando. Si
+`jax-las-manos` no está corriendo todavía (primer despliegue absoluto,
+sin ningún proceso vivo de dónde leer), usar `sudo -n cat /etc/jax/.env`
+una vez, igual que la excepción ya documentada en el paso 7.
+
+**MINOR-3 (ronda 4 de revisión): al `systemctl restart` de arriba le
+faltaba `sudo`.** A diferencia de todos los demás comandos privilegiados
+de este runbook, sin `sudo` esto pide una contraseña interactiva y falla
+sin tty si se pega en un pipe o un script no interactivo -- ya corregido
+arriba (`sudo systemctl restart jax-las-manos`, condicionado a que la
+precondición haya dado `PRECOND=0`).
+
+```bash
 systemctl is-active jax-las-manos    # esperado: active (código != 0 es información, no un corte)
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7777/health   # esperado: 200
 ```
@@ -532,17 +790,39 @@ retrying anything.
   configuration")` → paso 1, variable de entorno vacía.
 - Error crudo de MariaDB ("table ... doesn't exist") → paso 2, esquema
   `jax_evidence` no aplicado.
-- `DatabaseObservationMismatchError` → paso 3, `jax_execution` incompleto
-  (tabla, índice único o trigger ausente) — leer el mensaje, dice cuál de
-  los cuatro.
+- `DatabaseObservationMismatchError` → normalmente paso 3, `jax_execution`
+  incompleto (tabla, índice único o trigger ausente) — leer el mensaje,
+  dice cuál de los cuatro. **Pero también puede ser un falso positivo de
+  privilegios (MAJOR-1, ronda 4 de revisión):** `information_schema.triggers`
+  sólo devuelve los triggers para los que `JAX_DB_USER` tiene el privilegio
+  `TRIGGER` — con el esquema perfectamente instalado pero sin
+  `ALL PRIVILEGES` (paso 4/5), la consulta puede volver vacía y este mismo
+  error aparece sin que falte nada de verdad. Confirmar con
+  `SHOW GRANTS FOR 'jaxappuser'@'%'` antes de tocar el esquema.
 - `NO-GO: la cuenta admin no muestra CREATE+TRIGGER...` → paso 4/5, la
-  cuenta usada para migrar no es admin -- no usar `$JAX_DB_USER` acá; esto
-  CORTA el script antes de tocar DDL, no es sólo un aviso.
-- el subshell del backup corta (con `set -e`, sin instalar nada) → paso
-  4/5, falló el `mysqldump` de verdad (credenciales/permisos/disco) --
-  resolver ESO antes de reintentar, no saltarse el backup.
-- Error de MariaDB por permisos al insertar (`1142` / `command denied`) →
-  paso 5, falta el `GRANT INSERT`.
+  cuenta usada para migrar no es admin -- no usar `$JAX_DB_USER` acá.
+  **Esto es un AVISO, no un corte de shell** (ronda 4 de revisión — la
+  afirmación anterior de que "corta" el script era falsa): deja `$?` != 0
+  y el mensaje en pantalla, pero si el operador sigue pegando los bloques
+  de abajo en la misma terminal, van a intentar correr igual -- MariaDB
+  los va a rechazar por falta de privilegio recién ahí, no antes. Frenar
+  acá es responsabilidad de quien pega los bloques, no del script (ver la
+  nota "SHOW GRANTS con AVISO explícito" más arriba, con la medición real
+  de por qué no se usa `set -e` para esto).
+- el subshell del backup sale con `$? != 0` (por su propio `set -e`
+  interno) sin haber terminado los backups → paso 4/5, falló el
+  `mysqldump` de verdad (credenciales/permisos/disco). **Esto tampoco
+  corta la sesión** (ronda 4 de revisión — misma corrección que la entrada
+  de arriba): el `set -e` de ese bloque vive SÓLO dentro del subshell
+  entre paréntesis, no se propaga a la terminal que lo invocó. Revisar
+  `echo $?` inmediatamente después de ese bloque y resolver el fallo real
+  ANTES de pegar las migraciones de abajo -- no saltarse el backup.
+- Error de MariaDB por permisos (`1142` / `command denied`, en un
+  `INSERT` sobre `jax_execution` o en cualquier otra operación) → paso 5,
+  falta el `GRANT ALL PRIVILEGES` sobre el esquema que reclama el error
+  (ronda 4 de revisión — la ronda anterior sólo otorgaba `SELECT` en
+  `jax_execution`, y `policy/execution_control/storage.py` sí hace
+  `INSERT` ahí; ver MAJOR-1).
 - `ERROR: ...` (ya no traceback crudo, desde la ronda 2 de revisión) sobre
   `/etc/jax/build/` al GENERAR (paso 6) → falta el paso `sudo install -d
   -o jaxsvc -g jaxsvc -m 750 /etc/jax/build`.
@@ -577,6 +857,13 @@ retrying anything.
   observación real con `outcome=ERROR` para este control/identidad/scope
   (`status_engine.py:24`) -- no es un problema del manifiesto en sí,
   revisar qué observación falló antes de reintentar nada de este runbook.
+- El paso 9 imprime `NO-GO: exit=0 "verdict":"FAILED"` (MINOR-5, ronda 4
+  de revisión -- faltaba en esta lista) → `status_engine.py:23`, existe
+  una observación real, para este control/identidad/scope, con
+  `outcome=FAILED`. A diferencia de `UNVERIFIABLE` (`outcome=ERROR`, la
+  observación en sí falló al evaluarse), acá el control SÍ se evaluó y el
+  resultado fue negativo -- revisar qué observación dio `FAILED` antes de
+  reintentar nada de este runbook; tampoco es un problema del manifiesto.
 ## Fail-closed condition
 Drift or missing identity: stop.
 
@@ -592,7 +879,51 @@ cerrado igual que un archivo ausente, porque los hashes ya no coinciden.
 Regenerar (pasos 6-7 de arriba) es el arreglo — no hay actualización
 parcial/incremental.
 ## Recovery / escalation
-Redeploy verified build or escalate.
+
+**Rollback real, con comandos -- no "escalar" en abstracto (MAJOR-3,
+ronda 4 de revisión).** El paso 9 es una puerta de un solo sentido: un
+reinicio que sale mal deja LAS MANOS abajo hasta que se resuelva. Si la
+PRECONDICIÓN de antes del reinicio no se corrió, o si después de
+reiniciar el `NO-GO` no se resuelve rápido, el camino de vuelta es un
+`git reset --hard` al último commit que NO exige el manifiesto, más un
+reinicio.
+
+**1) Encontrar el commit al que volver.** El manifiesto lo exige
+`_configure_b7_trusted_runtime` (`las_manos/server.py`, jax#260). Esto se
+busca en el momento, con el repo real -- no se copia un hash citado en
+este archivo, porque puede haber más commits después que la reintroduzcan
+de otra forma:
+
+```bash
+cd /srv/jax-prod/jax
+INTRODUCTORIO=$(git log -S"_configure_b7_trusted_runtime" --oneline --reverse -- las_manos/server.py | head -1 | cut -d' ' -f1)
+OBJETIVO_ROLLBACK="${INTRODUCTORIO}^"
+# verificación: tiene que dar 0 -- ese commit todavía no tiene la función
+git show "$OBJETIVO_ROLLBACK":las_manos/server.py | grep -c _configure_b7_trusted_runtime
+```
+
+Medido en vivo el 2026-09-22: `INTRODUCTORIO=55a9ad1` ("fix: close Block 7
+evidence trust boundaries"), `OBJETIVO_ROLLBACK=a444a9e` ("fix: preserve
+MariaDB integration migration isolation", 2026-09-21) — 0 coincidencias,
+confirmado. **Este hash también es una VERDAD OPERACIONAL de hoy: volver
+a correr el comando de arriba antes de confiar en un valor citado acá.**
+
+**2) Rollback -- mismo usuario dueño del checkout que el paso 6 (mismo
+motivo: `dubious ownership` si se corre como cualquier otro usuario), y
+`sudo` en el restart igual que el MINOR-3 de arriba:**
+
+```bash
+sudo -u jaxsvc git -C /srv/jax-prod/jax reset --hard "$OBJETIVO_ROLLBACK"
+sudo systemctl restart jax-las-manos
+systemctl is-active jax-las-manos   # esperado: active
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7777/health   # esperado: 200
+```
+
+**3) Si el rollback tampoco levanta**, el problema no es el manifiesto —
+es otra cosa (algo recién introducido por el mismo deploy, o
+infraestructura). Recién ahí corresponde `journalctl -u jax-las-manos -n
+100` y escalar a Fernando con esa evidencia -- no antes, y no en lugar de
+intentar el rollback de arriba.
 ## Prohibited actions
 Do not hand-edit CLEAN identity claims.
 
