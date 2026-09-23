@@ -395,16 +395,37 @@ sudo -u jaxsvc bash -c '
   cd /srv/jax-prod/jax &&
   MAINPID=$(systemctl show -p MainPID --value jax-las-manos) &&
   while IFS= read -r -d "" e; do
-    case "$e" in JAX_DB_HOST=*|JAX_DB_PORT=*|JAX_DB_USER=*|JAX_DB_PASSWORD=*) export "$e" ;;
+    case "$e" in JAX_DB_HOST=*|JAX_DB_PORT=*|JAX_DB_USER=*|JAX_DB_PASSWORD=*|JAX_DB_NAME=*) export "$e" ;;
   esac; done < "/proc/$MAINPID/environ" &&
   PYTHONPATH=/srv/jax-prod/jax /srv/jax-prod/jax/las_manos/.venv/bin/python3 \
     scripts/sembrar_definiciones_de_control.py'
 ```
 
-Imprime una línea por control (`sembrado` / `ya estaba`) y un resumen. Si sale
-`definition collision`, **no es algo que se arregle pisando la fila**: la base
-tiene una definición que no coincide con la del código desplegado, que es
-deriva entre los dos -- resolver eso antes de seguir.
+(`JAX_DB_NAME` va en el `case` aunque el script tenga `"jax_memory"` de
+default -- el mismo default que `jaxctl/runtime.py`. Heredarlo del proceso
+vivo es lo correcto: si alguna vez difiere, el fallo tiene que ser de
+conexión y no una escritura silenciosa en la base equivocada.)
+
+Imprime una línea por control APENAS lo siembra (`sembrado` / `ya estaba`) y
+un resumen al final. La salida es en vivo a propósito: cada `persist`
+commitea su propia conexión, así que un fallo a mitad deja las anteriores
+escritas y el operador tiene que ver cuáles.
+
+**Si la base ya tiene OTRA definición para el mismo control** (deriva entre el
+código desplegado y la base), el error real es de MariaDB -- medido el
+2026-09-23 contra una base con una fila vieja puesta a mano:
+
+    pymysql.err.IntegrityError: (1062, "Duplicate entry
+    'CTL.B6.GOVERNED_DISPATCH-1' for key 'control_id'")
+
+**y NO `EvidenceArtifactIntegrityError("definition collision")`**, como decía
+la primera versión de este paso: el `SELECT ... FOR UPDATE` busca por
+`control_definition_hash`, así que una definición distinta tiene otro hash,
+no matchea, y el `INSERT` choca contra `UNIQUE(control_id, control_version)`.
+La rama de "definition collision" sólo es alcanzable con el MISMO hash y
+distinto payload, o sea una colisión de SHA-256. En cualquiera de los dos
+casos, **no se arregla pisando la fila** (la tabla es append-only): hay que
+resolver la deriva entre el código y la base.
 
 Si el primer despliegue todavía no tiene un `jax-las-manos` vivo de dónde leer
 el entorno, vale la misma excepción del paso 7 (`sudo -n cat /etc/jax/.env`

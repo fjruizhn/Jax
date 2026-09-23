@@ -77,26 +77,18 @@ class MariaDBEvidenceStore:
             from .evidence_store import _loaded, _identities
             return _loaded(_identities,value)
         finally: con.close()
-    def persist_packaged_control_definition(self, control_id, control_version=1):
-        """Siembra de despliegue: copia a la base la definición EMPAQUETADA.
-
-        Existe porque hasta jax#266 nada sembraba `control_definitions` en
-        producción -- el único escritor era `__persist_control_definition`,
-        privado, y sólo lo llamaba un test. Con la tabla vacía,
-        `readonly_status_snapshot` levanta `EvidenceArtifactIntegrityError
-        ("snapshot definition mismatch")` y CUALQUIER consulta de estado sale
-        `UNAVAILABLE` (medido en vivo el 2026-09-22 desplegando jax#260).
-
-        El llamador NOMBRA un control; nunca aporta los bytes. La definición
-        sale de `load_control_definition`, que es la única fuente que
-        `require_trusted_definition` acepta -- esta firma no puede usarse para
-        instalar una definición ajena, que es la razón por la que el escritor
-        real sigue siendo privado.
-        """
-        from .control_registry import load_control_definition
-        return self.__persist_control_definition(
-            load_control_definition(control_id, control_version))
     def __persist_control_definition(self, definition):
+        # jax#266: el MISMO guardia que los demás escritores de este store
+        # (`__record_identity`, `__record_artifact`, `__record_observation`...).
+        # Era el único que NO lo pedía, y la revisión adversarial lo marcó:
+        # sin esto, cualquier camino del runtime que tenga una referencia al
+        # store podía escribir en `control_definitions` -- una tabla con
+        # `definitions_no_update`/`definitions_no_delete`, o sea irreversible.
+        # La siembra de despliegue entra al contexto a propósito
+        # (scripts/sembrar_definiciones_de_control.py), igual que el ciclo de
+        # vida fijo lo hace para la identidad y los artefactos.
+        from .evidence_store import _require_fixed_composition_write
+        _require_fixed_composition_write()
         from .control_registry import require_trusted_definition
         require_trusted_definition(definition)
         h=definition.control_definition_hash; payload=canonical_bytes(definition.projection()).decode("utf-8")

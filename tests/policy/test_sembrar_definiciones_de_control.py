@@ -2,10 +2,10 @@
 
 La siembra contra una base real vive en
 `tests/policy/test_execution_mariadb_integration.py`
-(`test_sembrar_definiciones_de_control_es_idempotente`), que es el único job
-con una MariaDB levantada. Acá va lo que se puede probar sin base: que el
-catálogo empaquetado y el registro no se desincronicen, y que el llamador no
-pueda aportar los bytes de una definición.
+(`test_sembrar_definiciones_de_control_es_idempotente`, que se para en un
+esquema VIRGEN a propósito, y
+`test_persistir_una_definicion_exige_el_contexto_de_composicion_fija`).
+Acá va lo que se puede probar sin base.
 """
 from __future__ import annotations
 
@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.sembrar_definiciones_de_control import RUTA_CATALOGO, controles_empaquetados
+from scripts.sembrar_definiciones_de_control import (RUTA_CATALOGO, VERSION_DEL_CATALOGO,
+                                                     controles_empaquetados, sembrar)
 
 
 def test_el_catalogo_empaquetado_y_el_registro_no_se_desincronizan():
@@ -28,7 +29,25 @@ def test_el_catalogo_empaquetado_y_el_registro_no_se_desincronizan():
     """
     from policy.enforcement_evidence.control_registry import _controls
 
-    assert set(controles_empaquetados()) == set(_controls)
+    assert {control_id for control_id, _version in controles_empaquetados()} == set(_controls)
+
+
+def test_el_catalogo_declara_la_version_que_este_script_asume():
+    """`controls/v1.json` lista IDs pelados: la versión la pone el script.
+
+    Mientras el catálogo sea `schema_version: "1.0"`, asumir la versión
+    `VERSION_DEL_CATALOGO` no inventa nada -- `ControlDefinition.__post_init__`
+    rechaza cualquier otra. El día que exista un v2, el catálogo tiene que
+    decirlo y este test se pone rojo ANTES de que el sembrador ignore el
+    control nuevo en silencio (que volvería a dar `UNAVAILABLE` sin causa
+    visible).
+    """
+    from policy.enforcement_evidence.control_registry import _controls
+
+    catalogo = json.loads(RUTA_CATALOGO.read_text(encoding="utf-8"))
+    assert catalogo["schema_version"] == "1.0"
+    assert {definicion.control_version for definicion in _controls.values()} == {VERSION_DEL_CATALOGO}
+    assert all(version == VERSION_DEL_CATALOGO for _cid, version in controles_empaquetados())
 
 
 def test_el_catalogo_vacio_o_ilegible_falla_cerrado(tmp_path: Path):
@@ -43,23 +62,62 @@ def test_el_catalogo_vacio_o_ilegible_falla_cerrado(tmp_path: Path):
     with pytest.raises(RuntimeError, match="catálogo de controles"):
         controles_empaquetados(sin_clave)
 
+    otra_version = tmp_path / "v2.json"
+    otra_version.write_text(json.dumps({"schema_version": "2.0", "controls": ["RULE.P10"]}),
+                            encoding="utf-8")
+    with pytest.raises(RuntimeError, match="schema_version inesperada"):
+        controles_empaquetados(otra_version)
+
 
 def test_la_ruta_por_defecto_del_catalogo_existe():
     """El default no es una ruta escrita de memoria: tiene que resolver a un archivo real."""
     assert RUTA_CATALOGO.is_file()
 
 
-def test_el_sembrador_nombra_el_control_y_nunca_aporta_la_definicion():
-    """La firma pública acepta un ID, no una `ControlDefinition`.
+def test_los_bytes_sembrados_salen_del_REGISTRO_y_no_del_llamador():
+    """La propiedad de fondo, ejercitada: el llamador no puede aportar la definición.
 
-    Es la diferencia entre sembrar y poder instalar una definición ajena: los
-    bytes salen de `load_control_definition` adentro del store, que es la
-    única fuente que `require_trusted_definition` acepta. Si alguien cambiara
-    la firma para recibir el objeto, este test avisa.
+    (Revisión adversarial de jax#266, MINOR-1: la versión anterior de este
+    test sólo miraba `inspect.signature`, y un cuerpo reescrito para leer los
+    bytes de otro lado la pasaba intacta.) Acá se usa un store de mentira que
+    CAPTURA lo que recibe: lo que llega tiene que ser exactamente la instancia
+    del registro -- la única que `require_trusted_definition` acepta, porque
+    compara por identidad de objeto contra `_trusted`.
     """
-    import inspect
+    from policy.enforcement_evidence.control_registry import (is_trusted_control_definition,
+                                                              load_control_definition)
+    from policy.enforcement_evidence.errors import EvidenceBlobMissingError
 
-    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+    recibidas = []
 
-    firma = inspect.signature(MariaDBEvidenceStore.persist_packaged_control_definition)
-    assert list(firma.parameters) == ["self", "control_id", "control_version"]
+    class StoreDeMentira:
+        def load_control_definition(self, control_id, control_version=1):
+            raise EvidenceBlobMissingError("sin fila")
+
+        def _MariaDBEvidenceStore__persist_control_definition(self, definition):
+            recibidas.append(definition)
+            return definition
+
+    filas = sembrar(StoreDeMentira(), [("RULE.P10", 1)], emitir=lambda _linea: None)
+
+    assert filas == [("RULE.P10", 1, False)]
+    assert len(recibidas) == 1
+    assert recibidas[0] is load_control_definition("RULE.P10", 1)
+    assert is_trusted_control_definition(recibidas[0])
+
+
+def test_un_control_desconocido_corta_la_siembra():
+    """Un ID que el registro no conoce no se siembra ni a medias: corta ahí."""
+    from policy.enforcement_evidence.errors import UnknownControlError
+
+    from policy.enforcement_evidence.errors import EvidenceBlobMissingError
+
+    class StoreQueNuncaDeberiaEscribir:
+        def load_control_definition(self, control_id, control_version=1):
+            raise EvidenceBlobMissingError("sin fila")
+
+        def _MariaDBEvidenceStore__persist_control_definition(self, definition):
+            raise AssertionError("no debería escribirse un control desconocido")
+
+    with pytest.raises(UnknownControlError):
+        sembrar(StoreQueNuncaDeberiaEscribir(), [("CTL.NO.EXISTE", 1)], emitir=lambda _l: None)

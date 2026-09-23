@@ -256,13 +256,16 @@ def _b8_runtime_identity_fixture(tmp_path):
     manifest=evidence.put_evidence_blob(json.dumps({"schema_version":"1.0","kind":"JAX_BUILD_MANIFEST","files":files},sort_keys=True,separators=(",",":")).encode())
     identity=ImplementationIdentity("fjruizhn/Jax","1"*40,"2"*40,SourceState.CLEAN,manifest.evidence_hash)
     EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity))
-    for definition in _controls.values():
-        # jax#266: la MISMA entrada pública que usa el paso de despliegue
-        # (scripts/sembrar_definiciones_de_control.py). Antes esto llamaba al
-        # escritor privado por su nombre mangleado, y esa era justamente la
-        # señal de que producción no tenía ningún camino para sembrar.
-        evidence.persist_packaged_control_definition(
-            definition.control_id, definition.control_version)
+    # jax#266: el MISMO camino que corre el paso de despliegue
+    # (scripts/sembrar_definiciones_de_control.py), incluido el contexto de
+    # composición fija que `__persist_control_definition` ahora exige. Antes
+    # esta fixture era el ÚNICO llamador del escritor en todo el repo -- esa
+    # era justamente la señal de que producción no tenía camino para sembrar.
+    from scripts.sembrar_definiciones_de_control import sembrar as _sembrar_definiciones
+    _sembrar_definiciones(
+        evidence,
+        [(definition.control_id, definition.control_version) for definition in _controls.values()],
+        emitir=lambda _linea: None)
     path=tmp_path/"implementation-identity.json"; path.write_text(json.dumps(identity.projection()),encoding="utf-8")
     return evidence, path
 
@@ -437,7 +440,7 @@ def test_governed_execution_authoritative_mariadb_contract():
 
 
 def test_sembrar_definiciones_de_control_es_idempotente(tmp_path):
-    """El paso de despliegue de jax#266, contra la MariaDB real.
+    """El paso de despliegue de jax#266, contra la MariaDB real y DESDE CERO.
 
     Defecto original, medido en vivo el 2026-09-22: `control_definitions`
     quedaba en CERO filas tras aplicar la migración porque en producción
@@ -449,33 +452,97 @@ def test_sembrar_definiciones_de_control_es_idempotente(tmp_path):
     `docs/runbooks/implementation-identity.md`, que sólo acepta `SUPPORTED`,
     era inalcanzable en cualquier despliegue nuevo.
 
-    No se puede probar el estado "tabla vacía" acá: `definitions_no_delete`
-    hace la tabla inmutable a propósito, así que una vez sembrada en esta
-    base no hay vuelta atrás. Lo que sí se prueba, y es lo que el despliegue
-    necesita: la siembra deja TODO el catálogo presente y volver a correrla
-    no cambia una sola fila.
+    ESTE TEST SE PARA EN UNA BASE VIRGEN A PROPÓSITO (revisión adversarial
+    de jax#266, BLOCK-1). La versión anterior no lo hacía y **pasaba con la
+    siembra destripada**: los tests B8 de este mismo archivo corren ANTES,
+    su fixture ya siembra los 11 controles, `_apply_evidence_migration()`
+    sale temprano si el esquema existe y la base es de sesión -- así que
+    cuando este test llegaba, la tabla ya estaba completa y su primer
+    `sembrar()` no insertaba una sola fila. Un control que no puede fallar no
+    valida nada, y menos éste, que es la única prueba contra base real de un
+    PR que existe para garantizar que alguien siembre.
+
+    `DROP SCHEMA` y no `DELETE`: la tabla es append-only por diseño
+    (`definitions_no_delete`), no hay forma de vaciarla desde adentro. Los
+    tests que corren después se reabastecen solos -- sus fixtures llaman
+    `_apply_evidence_migration()` y vuelven a sembrar.
     """
     from scripts.sembrar_definiciones_de_control import controles_empaquetados, sembrar
     from policy.enforcement_evidence.control_registry import load_control_definition
     from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
 
-    _apply_evidence_migration()
-    evidence = MariaDBEvidenceStore(_connection)
-    control_ids = controles_empaquetados()
+    # FRENO: esto BORRA un esquema. Sólo puede correr contra una base de test.
+    # `jax_evidence` no está cubierto por las barreras de `base_de_test.py`
+    # (que miran `jax_memory`), así que el freno va acá, explícito.
+    base = os.environ.get("JAX_DB_NAME", "")
+    assert base.startswith("jax_memory_test"), (
+        f"JAX_DB_NAME={base!r} no es una base de test: este test borra el esquema "
+        "jax_evidence y NO puede correr contra producción")
 
-    sembrar(evidence, control_ids)
+    connection = _connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("DROP DATABASE IF EXISTS jax_evidence")
+        connection.commit()
+    finally:
+        connection.close()
+    _apply_evidence_migration()
+
+    evidence = MariaDBEvidenceStore(_connection)
+    controles = controles_empaquetados()
+
+    # PRECONDICIÓN, medida y aseverada: la migración deja la tabla VACÍA.
+    # Es el hecho que motivó todo el PR; si algún día la migración sembrara,
+    # este assert avisa y el script pasa a ser redundante.
+    assert _b7_authoritative_fingerprint()["control_definitions"]["row_count"] == 0
+
+    lineas = []
+    primera = sembrar(evidence, controles, emitir=lineas.append)
+    # La PRIMERA pasada siembra de verdad: todas nuevas. Esto es lo que se
+    # rompe si `sembrar()` deja de escribir -- verificado en rojo quitándole
+    # la llamada a persistir (EvidenceBlobMissingError en la comprobación de
+    # abajo) y también dejándola escribir sin contexto de composición fija.
+    assert [ya_estaba for *_resto, ya_estaba in primera] == [False] * len(controles)
+    assert len(lineas) == len(controles) and all("sembrado" in linea for linea in lineas)
+
     huella_tras_sembrar = _b7_authoritative_fingerprint()["control_definitions"]
+    assert huella_tras_sembrar["row_count"] == len(controles)
 
     # Todas las definiciones del catálogo cargan desde la BASE, con los bytes
     # exactos de la definición empaquetada (load_control_definition del store
     # compara contra el registro y levanta si difieren).
-    for control_id in control_ids:
-        desde_la_base = evidence.load_control_definition(control_id)
-        assert desde_la_base.control_definition_hash == load_control_definition(control_id).control_definition_hash
+    for control_id, control_version in controles:
+        desde_la_base = evidence.load_control_definition(control_id, control_version)
+        assert desde_la_base.control_definition_hash == load_control_definition(
+            control_id, control_version).control_definition_hash
 
-    # Segunda pasada: idempotente de verdad -- misma cantidad de filas y el
-    # MISMO digest de contenido, no sólo "no tiró excepción".
-    segunda = sembrar(evidence, control_ids)
-    assert [ya_estaba for _cid, ya_estaba in segunda] == [True] * len(control_ids)
+    # Segunda pasada: idempotente de verdad -- el MISMO digest de contenido de
+    # la tabla, no sólo "no tiró excepción".
+    segunda = sembrar(evidence, controles, emitir=lambda _linea: None)
+    assert [ya_estaba for *_resto, ya_estaba in segunda] == [True] * len(controles)
     assert _b7_authoritative_fingerprint()["control_definitions"] == huella_tras_sembrar
-    assert huella_tras_sembrar["row_count"] >= len(control_ids)
+
+
+def test_persistir_una_definicion_exige_el_contexto_de_composicion_fija():
+    """Tener el store NO alcanza para escribir en `control_definitions`.
+
+    (Revisión adversarial de jax#266, MAJOR-2.) `__persist_control_definition`
+    era el ÚNICO escritor de este store que no pedía
+    `_require_fixed_composition_write()`, y el PR original agregaba encima un
+    método PÚBLICO que lo llamaba -- o sea, una capacidad de escritura sobre
+    el esquema inmutable de evidencia entregada como método de objeto, viva en
+    el store que `las_manos/server.py` construye al arrancar.
+    """
+    from policy.enforcement_evidence.control_registry import load_control_definition
+    from policy.enforcement_evidence.errors import EvidenceArtifactUntrustedError
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+
+    evidence = MariaDBEvidenceStore(_connection)
+
+    # El store no expone NINGÚN escritor público para las definiciones.
+    assert not [nombre for nombre in dir(evidence)
+                if "persist" in nombre and not nombre.startswith("_")]
+
+    with pytest.raises(EvidenceArtifactUntrustedError):
+        evidence._MariaDBEvidenceStore__persist_control_definition(
+            load_control_definition("CTL.B6.GOVERNED_DISPATCH", 1))
