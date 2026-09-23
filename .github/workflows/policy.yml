@@ -416,8 +416,9 @@ jobs:
           #   sin error previo sube la del SET. Rojo contra el store.py
           #   anterior: 3 failed, 17 passed (el cuarto, restaurado sin
           #   fallos, es guarda de regresion).
-          grep -qE "^26 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 26 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 26 -> 27 (2026-09-23, auditoría de jax#273): +1 test de la cancelación durante el restaurado.
+          grep -qE "^27 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 27 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en

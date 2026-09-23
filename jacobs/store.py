@@ -1146,6 +1146,13 @@ async def _lock_wait_acotado(cur, contexto: str) -> AsyncIterator[None]:
         try:
             await cur.execute("SET SESSION lock_wait_timeout=%s", (int(previo),))
         except BaseException as error_del_set:
+            # Una cancelación que llega DURANTE el restaurado manda: si se la
+            # tragara, la tarea terminaría con otra excepción y el contador
+            # cancelling() quedaría sin descontar (auditoría de jax#273).
+            if isinstance(error_del_set, asyncio.CancelledError):
+                if error_del_cuerpo is not None:
+                    error_del_set.add_note(f"{contexto}: el cuerpo ya había fallado: {error_del_cuerpo!r}")
+                raise
             logger.error(
                 "%s: fallo el restaurado de lock_wait_timeout=%s: %r",
                 contexto, previo, error_del_set,

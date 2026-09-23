@@ -619,6 +619,19 @@ class AgregarColumnaAcotadaRestauradoTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("descartado_at", str(ctx.exception))
         self.assertIs(ctx.exception.__cause__, error_ddl,
                       "el SET fallido piso la causa (el 1205) del RuntimeError")
+        # Auditoría de jax#273: sin la nota, la excepción no muestra que la
+        # sesión quedó con el lock_wait_timeout acotado.
+        self.assertIn("lock_wait_timeout", "".join(getattr(ctx.exception, "__notes__", [])))
+
+    async def test_una_cancelacion_durante_el_restaurado_no_se_pierde(self):
+        """Si el cuerpo falló y la cancelación llega en el SET de restaurado,
+        sube el CancelledError (no se traga), con el error del cuerpo en una nota."""
+        error_ddl = store.aiomysql.OperationalError(1062, "otro error del ALTER")
+        cur = self._CursorFalso(error_ddl, asyncio.CancelledError(), columna_existe=0)
+        with self.assertRaises(asyncio.CancelledError) as ctx:
+            await store._agregar_columna_acotada(
+                cur, "jacobs_pipelines", "descartado_at", self._DDL)
+        self.assertIn("otro error del ALTER", "".join(getattr(ctx.exception, "__notes__", [])))
 
     async def test_alter_bien_y_falla_el_restaurado_sube_la_del_set_con_error_en_log(self):
         error_set = store.aiomysql.OperationalError(2013, "conexion perdida en el SET")
