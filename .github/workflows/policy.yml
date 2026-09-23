@@ -1406,7 +1406,7 @@ jobs:
           python -m pytest -v
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
-          tests/test_vocativo_faceta.py
+          tests/test_vocativo_faceta.py tests/test_router_easter_egg.py
           tests/test_identity_context.py tests/test_jacobs_director.py
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
