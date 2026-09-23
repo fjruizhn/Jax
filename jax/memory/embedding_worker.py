@@ -121,7 +121,7 @@ async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter |
         try:
             await writer.persist(row["memory_id"], identity, tuple(vector), Visibility(row["visibility"]))
             completed += 1
-        except Exception:
+        except Exception:  # fail-soft: one embedding failure must not stop the batch
             logger.exception("B9 embedding failed for memory %s", row["memory_id"])
             failed += 1
     return completed, failed

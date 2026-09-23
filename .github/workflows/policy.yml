@@ -648,7 +648,9 @@ jobs:
       # pip install (no en hall9000, donde todo esta instalado): con los 4
       # paquetes, 10 tests colectados; sin cryptography, error de coleccion.
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
-      - run: pip install -r requirements.txt pytest
+      # B9 persistence/authority tests are async; use the same supported
+      # plugin contract as the other async database jobs.
+      - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: >-
           PYTHONPATH=. python -m pytest -v
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
