@@ -448,10 +448,15 @@ FAMILIAS = (
             "ADA_KW", "ADA_STRONG",
             "_TIEBREAK",
             "_KW_SETS",
+            # El easter egg (2026-09-23): la Mesa lo copia para reconocer IDE1990
+            # igual que el REPL. El texto es el de Jairo Urbina: no se toca en una
+            # sola copia.
+            "EASTER_EGG_TRIGGER", "EASTER_EGG_TEXT",
         ),
         nota="Copia en jax-platform backend/api/chat.py (nombres alineados 2026-09-16). "
              "ORDEN DE MERGE: la plataforma primero -- contra un jax-platform con los "
-             "nombres viejos (_KIMI_KW...) esta familia da 'falta' en los 12 simbolos.",
+             "nombres viejos (_KIMI_KW...) esta familia da 'falta' en los 12 simbolos, "
+             "y sin el easter egg (anterior al 2026-09-23) da 'falta' en esos 2.",
     ),
     Familia(
         nombre="tope_pipelines",
