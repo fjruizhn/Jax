@@ -1407,6 +1407,7 @@ jobs:
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
           tests/test_vocativo_faceta.py tests/test_router_easter_egg.py
+          tests/test_probar_c5_pasa_todas_las_compuertas.py
           tests/test_identity_context.py tests/test_jacobs_director.py
           tests/test_memory_correction.py tests/test_memory_helpers.py
           tests/test_read_audit_log_unbound.py tests/test_template_hash.py
@@ -1561,6 +1562,7 @@ jobs:
             tests/test_capability_unbound_schema.py tests/test_chunking.py \
             tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py \
             tests/test_vocativo_faceta.py tests/test_router_easter_egg.py \
+            tests/test_probar_c5_pasa_todas_las_compuertas.py \
             tests/test_identity_context.py tests/test_jacobs_director.py \
             tests/test_memory_correction.py tests/test_memory_helpers.py \
             tests/test_read_audit_log_unbound.py tests/test_template_hash.py \
@@ -4094,6 +4096,8 @@ jobs:
           # 2771 -> 2797 (jax#267): +26, tests/test_router_easter_egg.py (criterio del
           # easter egg IDE1990, compartido con la Mesa). Cuenta hecha a mano: la confirma
           # el runner de este PR o el piso se rompe y muestra el número real.
+          # 2797 -> 2801: +4, tests/test_probar_c5_pasa_todas_las_compuertas.py (los llamadores
+          # de validar_eleccion no dependen de un default; probar_c5.py mentía c5_vivo=false).
           # NOTA DE REBASE (2026-09-22, jax#263 sobre jax#262): master subió el piso de 2671
           # a 2674 (+3) mientras esta rama lo subía de 2671 a 2767 (+96). Resuelto SUMANDO las
           # dos deltas: 2674 + 96 = 2770. Si el runner dice otro número, manda el runner.
@@ -4123,8 +4127,8 @@ jobs:
           # para `[127.0.0.1]:58291` (cierto en hall9000, que tiene su propio sshd ahí; falso
           # en un runner nuevo, sin ningún sshd escuchando) -- ahora genera una llave de host
           # efímera propia y arma esa línea a mano, autosuficiente.
-          grep -qE "^2797 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2797 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          grep -qE "^2801 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2801 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

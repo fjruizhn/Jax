@@ -68,25 +68,42 @@ async def principal(args) -> int:
     async with conexion(desechable=True) as conn:
         cfg = await eleccion_c5.leer_config(conn)
         cerebro = await resolve_facet(args.cerebro or cfg.cerebro_faceta)
-        auditor_f = await resolve_facet(args.auditor or cfg.auditor_faceta)
-        local = await eleccion_c5.es_local(conn, auditor_f.provider_id)
         # Dato REAL del inventario, no supuesto: hall9000 SÍ tiene con_datos_de_clientes=1
         # (JAX_EJECUTOR_INVENTARIO). Un `frozenset()` a mano acá afirmaba en código lo
         # contrario -- inofensivo hoy (este script sólo manda canarios y la trampa/limpia
         # SINTÉTICAS, nunca datos reales de hall9000), pero es un dato falso escrito a
         # mano, y `validar_eleccion` existe justamente para no tener que confiar en eso.
-        con_clientes, conocidos = await eleccion_c5.hosts_de_la_mision(conn, frozenset({"hall9000"}))
+        # El auditor lo elige la MISMA función que usa el Ejecutor real
+        # (eleccion_c5.elegir_y_resolver_auditor), con el mismo hecho: hall9000 tiene datos
+        # de clientes -> auditor_faceta_local. Antes era `cfg.auditor_faceta` a secas: sin
+        # --auditor, esta prueba medía `thot` (nube) mientras una misión real en hall9000
+        # usa `el_juez` (auditoría 2026-09-23). --auditor sigue forzando otra, para MEDIR.
+        if args.auditor:
+            # Forzada para MEDIR: no se resuelve antes la de producción (si esa faceta no
+            # estuviera bindeada, el --auditor dejaría de servir justo para medir otra).
+            auditor_f = await resolve_facet(args.auditor)
+            con_clientes, conocidos = await eleccion_c5.hosts_de_la_mision(conn, frozenset({"hall9000"}))
+        else:
+            auditor_f, con_clientes, conocidos = await eleccion_c5.elegir_y_resolver_auditor(
+                conn, cfg=cfg, hosts_mision=frozenset({"hall9000"}), resolve_facet=resolve_facet)
+        local = await eleccion_c5.es_local(conn, auditor_f.provider_id)
     if args.url_auditor:
         auditor_f = dataclasses.replace(auditor_f, base_url=args.url_auditor)
     if args.instrucciones:
         auditor_cliente._INSTRUCCIONES = Path(args.instrucciones)
     print(formato.campos((("cerebro", cerebro.key), ("proveedor_cerebro", cerebro.provider_id),
                           ("auditor", auditor_f.key), ("proveedor_auditor", auditor_f.provider_id),
-                          ("compuerta_datos_de_clientes", cfg.admite_datos_de_clientes))))
+                          ("compuerta_datos_de_clientes", cfg.admite_datos_de_clientes),
+                          ("compuerta_mismo_proveedor", cfg.admite_mismo_proveedor))))
     fallos = [(f.codigo, f.datos) for f in eleccion_c5.validar_eleccion(
         proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id, auditor_es_local=local,
         admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset({"hall9000"}),
-        hosts_con_clientes=con_clientes, hosts_conocidos=conocidos)]
+        hosts_con_clientes=con_clientes, hosts_conocidos=conocidos,
+        # La compuerta del 2026-09-20. Sin este argumento el default estricto (False)
+        # hacía que ESTA prueba diera c5_vivo=false con la compuerta abierta, mientras
+        # el arranque real (arranque.py) sí la pasaba: la prueba contradecía a
+        # producción. tests/test_probar_c5_pasa_todas_las_compuertas.py lo vigila.
+        admite_mismo_proveedor=cfg.admite_mismo_proveedor)]
 
     async def auditar(lote):
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
