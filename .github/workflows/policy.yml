@@ -59,6 +59,12 @@ jobs:
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       JAX_EXECUTION_TEST_MARIADB: "1"
+      # jax#266: este job levanta su propio contenedor, que muere con el job --
+      # es el único lugar donde está bien que un test DROPee `jax_evidence`
+      # para pararse en un esquema virgen. Sin esta variable el test falla
+      # (no se saltea): es la única prueba contra base real de que la siembra
+      # siembra, y saltearla en silencio sería el verde sin trabajo de siempre.
+      JAX_EVIDENCE_TEST_DESTRUCTIVE: "1"
       JAX_DB_HOST: 127.0.0.1
       JAX_DB_PORT: "3306"
       JAX_DB_USER: root
@@ -89,6 +95,16 @@ jobs:
       # completo más abajo.
       - name: Generador de identidad de implementación (jax#260)
         run: PYTHONPATH=. python -m pytest tests/policy/test_generar_manifiesto_identidad.py -v
+      # jax#266: la siembra de `control_definitions`, sin la cual el paso 9 del
+      # runbook de identidad (jaxctl con verdict SUPPORTED) es inalcanzable en
+      # cualquier despliegue nuevo -- la tabla queda vacía y toda consulta de
+      # estado sale UNAVAILABLE. Paso propio, por el mismo motivo que el de
+      # arriba: sin --junitxml, así no toca el _TEST_CONTROL_MAP que el paso
+      # "Emitir manifiesto B7 controlado" exige completo. La parte que necesita
+      # una MariaDB real corre en el job governed-execution-mariadb
+      # (test_sembrar_definiciones_de_control_es_idempotente).
+      - name: Siembra de definiciones de control (jax#266)
+        run: PYTHONPATH=. python -m pytest tests/policy/test_sembrar_definiciones_de_control.py -v
       # Do not run these from tests-puros: pytest then places tests/policy
       # ahead of the production policy package on sys.path.
       - name: Ejecutar controles B7 y capturar salida
