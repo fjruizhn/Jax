@@ -458,7 +458,8 @@ FAMILIAS = (
         nota="Copia en jax-platform backend/api/chat.py (nombres alineados 2026-09-16). "
              "ORDEN DE MERGE: la plataforma primero -- contra un jax-platform con los "
              "nombres viejos (_KIMI_KW...) esta familia da 'falta' en los 12 simbolos, "
-             "y sin el easter egg (anterior al 2026-09-23) da 'falta' en esos 3.",
+             "y sin el easter egg (anterior al 2026-09-23) da 'falta' en esos 3 "
+             "y DRIFT en _sin_tildes (su docstring era otro).",
     ),
     Familia(
         nombre="tope_pipelines",
