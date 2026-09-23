@@ -4,7 +4,7 @@
 # CORPUS — JAX/Axioma, reglas normativas
 
 **Versión del corpus:** 0.1.0
-**SHA256:** `d641add34e2f4e616d6840fc80c17be705919521d0538200a2a49ceab01ed031`
+**SHA256:** `af0219f4ed088a5a11236cfe19d0d9389b81c1c7fb3c88529c3d3a4ced43a457`
 **Reglas:** 23
 
 | Estado | Cantidad |
@@ -47,6 +47,7 @@
    errores se propagan de verdad.
 
 Test corre limpio, exit 0, contra el estado real de ambos repos (verificado el mismo día, no en un momento anterior). El scanner sigue sin cubrir la forma más sutil del patrón (un fallback que retorna éxito por defecto sin excepción de por medio, ej. output_validator.py) — eso queda como residuo conocido, mismo tratamiento que Q13 (barrido de vocabulario) en REFORMAS-v3.1.md.
+Cierre parcial 2026-08-25: output_validator.py (la instancia nombrada explícitamente arriba como "residuo conocido") ya no es fail-open para CUALQUIER schema desconocido -- solo para los 7 declarados-pendientes en producción (_KNOWN_UNIMPLEMENTED_SCHEMAS). Un schema realmente no declarado (typo, capability mal configurada) ahora falla cerrado, con test de regresión (las_manos/_output_validator_test.py). El residuo general del patrón (cualquier función que pueda fallar abierto por valor de retorno en código no registrado en este corpus) sigue sin scanner automatizado -- eso sigue siendo trabajo futuro, no resuelto acá.
 
 
 
@@ -113,7 +114,8 @@ DISCREPANCIA CON LA TAREA: las rutas absolutas citadas en el encargo de esta fas
 - **Notas:** Tensión con el sistema actual: son DOS mecanismos identity-based paralelos, no uno, ambos en las_manos/config.toml pero gateados por código distinto:
 1. `facets.<nombre>.allowed_ops` (config.toml líneas 34-60) — gatea las
    11 operaciones `[ops.*]` (incluida `audit_log_read`) por identidad de
-   faceta, vía `PolicyEngine.check()` en las_manos/policy.py:62.
+   faceta, vía `PolicyEngine.check()` en las_manos/motor_de_politica.py
+   (el chequeo de `allowed_ops`; el módulo se renombró en jax#262).
 2. `capabilities.<nombre>.allowed_callers` / `allowed_motors`
    (config.toml líneas 169+) — gatea las capabilities de pipeline
    (code_swarm, refactor, etc.) por identidad de faceta llamante y de
