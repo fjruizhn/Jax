@@ -80,10 +80,12 @@ def test_cada_llamador_pasa_todos_los_parametros():
 
 
 def _viene_de_la_config(valor: ast.expr) -> bool:
-    """`cfg.admite_mismo_proveedor` o el parámetro homónimo que la trae de más arriba.
-    Se exige la forma buena en vez de prohibir las malas: `False`, `not True` o
-    `bool(0)` quedan todos afuera."""
-    return (isinstance(valor, ast.Attribute) and valor.attr == "admite_mismo_proveedor") or \
+    """`cfg.admite_mismo_proveedor` (la ConfigC5 leída de axioma_config) o el parámetro
+    homónimo que la trae de más arriba. Se exige la forma buena en vez de prohibir las
+    malas: `False`, `not True`, `bool(0)` o `args.admite_mismo_proveedor` (un flag con
+    default propio) quedan todos afuera."""
+    return (isinstance(valor, ast.Attribute) and valor.attr == "admite_mismo_proveedor"
+            and isinstance(valor.value, ast.Name) and valor.value.id == "cfg") or \
            (isinstance(valor, ast.Name) and valor.id == "admite_mismo_proveedor")
 
 
