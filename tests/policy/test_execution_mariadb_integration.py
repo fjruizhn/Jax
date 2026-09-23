@@ -177,7 +177,17 @@ def test_b7_writer_failure_rolls_back_real_governed_execution():
     with pytest.raises(RuntimeError): create_execution(store, auth, now_utc=now)
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_authorization_consumptions WHERE authorization_id=%s",(auth.authorization_id,)) == 0
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_records WHERE decision_id=%s",(decision.decision_id,)) == 0
-    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE event_type='EXECUTION_CREATED'") == 0
+    # Acotado a ESTA decisión. Antes contaba los `EXECUTION_CREATED` de TODA la
+    # tabla, así que sólo pasaba contra una base virgen: en la segunda corrida
+    # seguida contra el mismo servidor daba `assert 10 == 0` por las filas que
+    # habían dejado los demás tests -- reproducido también contra `origin/master`,
+    # o sea que es un defecto preexistente, no de jax#266. En CI no se veía
+    # porque el contenedor es nuevo en cada job, que es justo lo que esconde
+    # una dependencia de estado global.
+    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events e "
+                   "JOIN jax_execution.execution_records r ON r.execution_id=e.execution_id "
+                   "WHERE e.event_type='EXECUTION_CREATED' AND r.decision_id=%s",
+                   (decision.decision_id,)) == 0
 
 def test_b7_dispatch_writer_failure_rolls_back_dispatch_event():
     from policy.execution_control.service import dispatch_execution
