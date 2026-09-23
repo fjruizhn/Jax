@@ -257,10 +257,12 @@ def _b8_runtime_identity_fixture(tmp_path):
     identity=ImplementationIdentity("fjruizhn/Jax","1"*40,"2"*40,SourceState.CLEAN,manifest.evidence_hash)
     EvidenceLifecycleService(evidence,_ControlledTestIdentityProvider(identity))
     for definition in _controls.values():
-        # Persist only the packaged registry instance; raw module values do
-        # not themselves carry the trusted-definition provenance marker.
-        evidence._MariaDBEvidenceStore__persist_control_definition(
-            load_control_definition(definition.control_id, definition.control_version))
+        # jax#266: la MISMA entrada pública que usa el paso de despliegue
+        # (scripts/sembrar_definiciones_de_control.py). Antes esto llamaba al
+        # escritor privado por su nombre mangleado, y esa era justamente la
+        # señal de que producción no tenía ningún camino para sembrar.
+        evidence.persist_packaged_control_definition(
+            definition.control_id, definition.control_version)
     path=tmp_path/"implementation-identity.json"; path.write_text(json.dumps(identity.projection()),encoding="utf-8")
     return evidence, path
 
@@ -432,3 +434,48 @@ def test_governed_execution_authoritative_mariadb_contract():
         store.load_authorization(auth.authorization_id)
     with pytest.raises(Exception):
         store.load_execution(execution.execution_id)
+
+
+def test_sembrar_definiciones_de_control_es_idempotente(tmp_path):
+    """El paso de despliegue de jax#266, contra la MariaDB real.
+
+    Defecto original, medido en vivo el 2026-09-22: `control_definitions`
+    quedaba en CERO filas tras aplicar la migración porque en producción
+    nadie la sembraba (el único escritor era el privado
+    `__persist_control_definition`, llamado sólo por la fixture de este
+    archivo). Con la tabla vacía, `readonly_status_snapshot` levanta
+    `EvidenceArtifactIntegrityError("snapshot definition mismatch")` y
+    `jaxctl control` sale `UNAVAILABLE` con exit 2 -- el paso 9 del runbook
+    `docs/runbooks/implementation-identity.md`, que sólo acepta `SUPPORTED`,
+    era inalcanzable en cualquier despliegue nuevo.
+
+    No se puede probar el estado "tabla vacía" acá: `definitions_no_delete`
+    hace la tabla inmutable a propósito, así que una vez sembrada en esta
+    base no hay vuelta atrás. Lo que sí se prueba, y es lo que el despliegue
+    necesita: la siembra deja TODO el catálogo presente y volver a correrla
+    no cambia una sola fila.
+    """
+    from scripts.sembrar_definiciones_de_control import controles_empaquetados, sembrar
+    from policy.enforcement_evidence.control_registry import load_control_definition
+    from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+
+    _apply_evidence_migration()
+    evidence = MariaDBEvidenceStore(_connection)
+    control_ids = controles_empaquetados()
+
+    sembrar(evidence, control_ids)
+    huella_tras_sembrar = _b7_authoritative_fingerprint()["control_definitions"]
+
+    # Todas las definiciones del catálogo cargan desde la BASE, con los bytes
+    # exactos de la definición empaquetada (load_control_definition del store
+    # compara contra el registro y levanta si difieren).
+    for control_id in control_ids:
+        desde_la_base = evidence.load_control_definition(control_id)
+        assert desde_la_base.control_definition_hash == load_control_definition(control_id).control_definition_hash
+
+    # Segunda pasada: idempotente de verdad -- misma cantidad de filas y el
+    # MISMO digest de contenido, no sólo "no tiró excepción".
+    segunda = sembrar(evidence, control_ids)
+    assert [ya_estaba for _cid, ya_estaba in segunda] == [True] * len(control_ids)
+    assert _b7_authoritative_fingerprint()["control_definitions"] == huella_tras_sembrar
+    assert huella_tras_sembrar["row_count"] >= len(control_ids)

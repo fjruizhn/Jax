@@ -77,6 +77,25 @@ class MariaDBEvidenceStore:
             from .evidence_store import _loaded, _identities
             return _loaded(_identities,value)
         finally: con.close()
+    def persist_packaged_control_definition(self, control_id, control_version=1):
+        """Siembra de despliegue: copia a la base la definición EMPAQUETADA.
+
+        Existe porque hasta jax#266 nada sembraba `control_definitions` en
+        producción -- el único escritor era `__persist_control_definition`,
+        privado, y sólo lo llamaba un test. Con la tabla vacía,
+        `readonly_status_snapshot` levanta `EvidenceArtifactIntegrityError
+        ("snapshot definition mismatch")` y CUALQUIER consulta de estado sale
+        `UNAVAILABLE` (medido en vivo el 2026-09-22 desplegando jax#260).
+
+        El llamador NOMBRA un control; nunca aporta los bytes. La definición
+        sale de `load_control_definition`, que es la única fuente que
+        `require_trusted_definition` acepta -- esta firma no puede usarse para
+        instalar una definición ajena, que es la razón por la que el escritor
+        real sigue siendo privado.
+        """
+        from .control_registry import load_control_definition
+        return self.__persist_control_definition(
+            load_control_definition(control_id, control_version))
     def __persist_control_definition(self, definition):
         from .control_registry import require_trusted_definition
         require_trusted_definition(definition)
