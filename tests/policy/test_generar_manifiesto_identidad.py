@@ -332,3 +332,25 @@ def test_arbol_sucio_se_niega_si_git_status_advierte_por_stderr_aunque_exit_sea_
     assert "no se puede confiar" in result.stderr
     assert not output.exists()
     assert not manifest_output.exists()
+
+
+def test_permission_error_al_escribir_no_sale_como_traceback_crudo(tmp_path):
+    """BLOQUE-1 de la ronda 2 de revisión (PR#264): las dos llamadas a
+    escribir_atomico() vivían FUERA del try/except de main(). El caso real:
+    /etc/jax/build/ no existe todavía y jaxsvc no puede crearlo bajo
+    /etc/jax (root:root 755) -- PermissionError sin capturar, traceback
+    crudo en vez de un `ERROR: ...` con exit 1."""
+    repo = _copia_temporal_del_repo(tmp_path)
+    sin_permiso = tmp_path / "sin-permiso"
+    sin_permiso.mkdir()
+    sin_permiso.chmod(0o000)
+    try:
+        output = sin_permiso / "sub" / "implementation-identity.json"
+        manifest_output = sin_permiso / "sub" / "implementation-identity.manifest.json"
+        result = _generar(repo, output, manifest_output)
+
+        assert result.returncode != 0
+        assert result.stderr.strip().startswith("ERROR:")
+        assert "Traceback" not in result.stderr
+    finally:
+        sin_permiso.chmod(0o755)  # para que tmp_path se pueda limpiar solo

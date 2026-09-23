@@ -325,18 +325,21 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = args.repo_root.resolve()
 
+    # PR#264 ronda 2 (BLOQUE-1): las dos escrituras atómicas estaban FUERA
+    # de este try/except -- un PermissionError real de producción (p.ej.
+    # /etc/jax/build/ sin crear todavía, mkdir() sobre /etc/jax con jaxsvc)
+    # salía como traceback crudo en vez de un ERROR: prolijo con exit 1.
     try:
         repository_id = args.repository_id or repository_id_desde_remoto(repo_root)
         identity, manifest_bytes = construir_identidad(
             repo_root, repository_id=repository_id, allow_dirty=args.allow_dirty,
         )
-    except (ArbolSucioError, EstadoDelArbolIndeterminadoError, FileNotFoundError, RuntimeError) as exc:
+        escribir_atomico(manifest_output, manifest_bytes)
+        identity_bytes = (json.dumps(identity, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        escribir_atomico(output, identity_bytes)
+    except (ArbolSucioError, EstadoDelArbolIndeterminadoError, FileNotFoundError, RuntimeError, OSError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-
-    escribir_atomico(manifest_output, manifest_bytes)
-    identity_bytes = (json.dumps(identity, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    escribir_atomico(output, identity_bytes)
 
     print(f"identidad escrita en {output} (source_state={identity['source_state']})")
     print(f"build manifest escrito en {manifest_output}")

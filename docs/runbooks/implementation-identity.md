@@ -60,27 +60,74 @@ cualquiera:
 Todo esto lo crea `policy/execution_control/migrations/001_governed_execution.sql`
 (7 tablas, 10 triggers).
 
-### 4. Aplicar las dos migraciones si faltan, con backup antes
-```bash
-set -a; . <(sudo -n cat /etc/jax/.env); set +a
+### 4. Aplicar las dos migraciones si faltan, con backup antes -- con un usuario ADMIN
+**`CREATE SCHEMA`/`TABLE`/`TRIGGER` no son privilegios de aplicación.**
+`$JAX_DB_USER` de `/etc/jax/.env` es (debe ser) un usuario de mínimo
+privilegio -- el que el paso 5 le otorga `INSERT`/`SELECT` a propósito,
+nunca DDL. Este paso usa una cuenta ADMINISTRATIVA aparte, provista por
+quien lo ejecuta (nunca la misma que `$JAX_DB_USER`, y nunca escrita en
+este archivo). Un archivo de *defaults* con permisos `600` evita que la
+contraseña quede visible en `ps` para cualquier usuario del host
+(`-p$PASSWORD` en la línea de comandos sí queda visible así):
 
-# Backup primero (regla del carpintero) -- aunque los esquemas sean nuevos,
-# nunca se asume que están vacíos sin mirar.
-B=~/backups/jax_evidence_execution_pre_260_$(date +%F-%H%M).sql
-mysql -h$JAX_DB_HOST -P$JAX_DB_PORT -u$JAX_DB_USER -p$JAX_DB_PASSWORD \
-  -e "SHOW DATABASES LIKE 'jax_evidence'; SHOW DATABASES LIKE 'jax_execution';"
-( umask 077; mysqldump --single-transaction --skip-lock-tables --no-tablespaces \
-    --databases jax_evidence jax_execution \
-    -h$JAX_DB_HOST -P$JAX_DB_PORT -u$JAX_DB_USER -p$JAX_DB_PASSWORD \
-    > "$B" 2>/dev/null || echo "(esquemas aún no existen -- backup vacío, esperado la primera vez)" )
+```bash
+set -a; . <(sudo -n cat /etc/jax/.env); set +a   # sólo para HOST/PORT
+
+read -srp "Usuario admin de MariaDB: " JAX_DB_ADMIN_USER; echo
+read -srp "Password de $JAX_DB_ADMIN_USER: " JAX_DB_ADMIN_PASSWORD; echo
+
+CNF=$(mktemp); trap 'rm -f "$CNF"' EXIT; chmod 600 "$CNF"
+cat > "$CNF" <<EOF
+[client]
+host=$JAX_DB_HOST
+port=$JAX_DB_PORT
+user=$JAX_DB_ADMIN_USER
+password=$JAX_DB_ADMIN_PASSWORD
+EOF
+unset JAX_DB_ADMIN_PASSWORD
+
+# Chequeo previo: si esta cuenta no tiene DDL, mejor enterarse ACÁ que a
+# mitad de una migración a medio aplicar.
+mysql --defaults-extra-file="$CNF" -e "SHOW GRANTS FOR CURRENT_USER();"
+```
+
+**Backup antes -- de verdad fail-closed, no silencioso.** La versión
+anterior de este paso tenía `2>/dev/null || echo "(esquemas aún no
+existen...)"`, que se traga CUALQUIER error (credenciales, permisos,
+disco) e inventa una causa que puede ser falsa -- en un segundo intento,
+con `jax_evidence` ya poblado, un dump que falla de verdad deja un archivo
+vacío y un mensaje tranquilizador, y el paso siguiente aplica DDL sin
+backup real. La distinción correcta es "el esquema no existe" (se
+verifica ANTES, con `SHOW DATABASES`, no se infiere del resultado del
+dump) contra "cualquier otro error" (que corta, con `set -e`):
+
+```bash
+set -euo pipefail
+
+evidence_existe=$(mysql --defaults-extra-file="$CNF" -N -e "SHOW DATABASES LIKE 'jax_evidence'" | wc -l)
+execution_existe=$(mysql --defaults-extra-file="$CNF" -N -e "SHOW DATABASES LIKE 'jax_execution'" | wc -l)
+
+if [ "$evidence_existe" = "0" ] && [ "$execution_existe" = "0" ]; then
+  echo "los dos esquemas son nuevos -- nada que respaldar todavía."
+else
+  B=~/backups/jax_evidence_execution_pre_260_$(date +%F-%H%M).sql
+  ( umask 077
+    mysqldump --defaults-extra-file="$CNF" --single-transaction --skip-lock-tables --no-tablespaces \
+      --databases jax_evidence jax_execution > "$B" )
+  # Sin `set -e` esto no cortaría solo: CON `set -e`, un mysqldump que
+  # falla de verdad (no "no existe la base", sino permisos/disco/red)
+  # termina el script ACÁ, antes de tocar DDL.
+  echo "backup en $B ($(stat -c%s "$B") bytes)"
+fi
 ```
 
 **`DELIMITER` es una directiva del cliente `mysql`, no SQL** — el
 `mysql` CLI interactivo o alimentado por stdin la entiende nativamente:
 
 ```bash
-mysql -h$JAX_DB_HOST -P$JAX_DB_PORT -u$JAX_DB_USER -p$JAX_DB_PASSWORD < policy/enforcement_evidence/migrations/001_enforcement_evidence.sql
-mysql -h$JAX_DB_HOST -P$JAX_DB_PORT -u$JAX_DB_USER -p$JAX_DB_PASSWORD < policy/execution_control/migrations/001_governed_execution.sql
+mysql --defaults-extra-file="$CNF" < policy/enforcement_evidence/migrations/001_enforcement_evidence.sql
+mysql --defaults-extra-file="$CNF" < policy/execution_control/migrations/001_governed_execution.sql
+rm -f "$CNF"; trap - EXIT
 ```
 
 Si el camino de aplicación NO pasa por el cliente `mysql` (por ejemplo, un
@@ -99,13 +146,18 @@ en el primer trigger con "already exists", que se lee como "ya estaba
 migrado" mientras los triggers de inmutabilidad que faltan simplemente
 nunca se crean. Con `IF NOT EXISTS`, volver a correr cualquiera de las dos
 migraciones completas siempre termina con todo presente, se haya cortado
-donde se haya cortado antes.
+donde se haya cortado antes -- **ejercitado de verdad** en
+`test_migraciones_son_idempotentes_aplicadas_dos_veces`
+(`tests/policy/test_execution_mariadb_integration.py`), que aplica las dos
+migraciones completas DOS VECES seguidas (sin el atajo de
+`_apply_migration`, que no vuelve a ejecutar nada si la tabla ya existe) y
+confirma que la segunda pasada no falla.
 
 ### 5. El usuario de la DB del servicio necesita `INSERT` en `jax_evidence.*`
 El arranque escribe la identidad (`__record_identity`) y los artefactos de
 evidencia del propio `DatabaseControlInspector` — sin `INSERT`, la primera
-escritura del arranque falla. Verificar/otorgar (con un usuario con
-privilegio de administración, no con el de la aplicación):
+escritura del arranque falla. Otorgar con la MISMA cuenta admin del paso 4
+(reconstruir `$CNF` si ya se borró):
 
 ```sql
 GRANT INSERT, SELECT ON jax_evidence.* TO 'jaxappuser'@'%';
@@ -113,20 +165,63 @@ GRANT SELECT ON jax_execution.* TO 'jaxappuser'@'%';
 FLUSH PRIVILEGES;
 ```
 (sustituir `'jaxappuser'@'%'` por el usuario real de `JAX_DB_USER` en
-`/etc/jax/.env` — no se cita a mano acá porque es una credencial).
+`/etc/jax/.env` — no se cita a mano acá porque es una credencial; aplicar
+con `mysql --defaults-extra-file="$CNF"`, nunca `-p` en la línea de
+comandos).
 
-### 6. Generar el manifiesto sobre el commit exacto desplegado
+**Antes de generar, un aviso de secuencia (MINOR de la ronda 2 de
+revisión).** `/srv/jax-prod/jax` hoy corre `e09c3b3` — un commit ANTERIOR
+al que agrega `scripts/generar_manifiesto_identidad.py`, así que ese
+checkout ni siquiera tiene el script todavía. El script importa
+`_V1_REQUIRED_SOURCE_PATHS` desde SU PROPIO checkout (el de donde se
+invoca), pero hashea los archivos de `--repo-root` — si se lo corre desde
+un worktree nuevo (`--repo-root /srv/jax-prod/jax`) contra un prod
+desactualizado, produce un manifiesto con la LISTA de archivos requerida
+por el código nuevo pero los BYTES del código viejo (cuando ni siquiera
+fallan por ausencia, dos versiones que no se corresponden). **Orden
+correcto, siempre:** 1) desplegar el código nuevo en `/srv/jax-prod/jax`
+primero (el paso normal de deploy de este repo); 2) recién ahí, invocar
+`/srv/jax-prod/jax/scripts/generar_manifiesto_identidad.py` -- el script
+DE ESE checkout, no el de un worktree de desarrollo -- con
+`--repo-root /srv/jax-prod/jax`.
+
+### 6. Crear el directorio de destino, y generar el manifiesto directo ahí
+`/etc/jax` es `root:root 755` y `/etc/jax/build/` **no existe** la primera
+vez -- root lo crea una sola vez, con el dueño ya correcto, para que
+`jaxsvc` pueda escribir ahí directamente de acá en adelante:
+
 ```bash
-sudo -u jaxsvc python3 scripts/generar_manifiesto_identidad.py \
-    --repo-root /srv/jax-prod/jax --production
+sudo install -d -o jaxsvc -g jaxsvc -m 750 /etc/jax/build
 ```
 
-`--production` fija las rutas de salida a
-`/etc/jax/build/implementation-identity.json` y su `.manifest.json` — el
-script ya no tiene un default silencioso ahí (ronda PR#264: un `--output`
-con default apuntando a la ruta real de despliegue hacía que cualquier
-corrida de prueba sin `--output` explícito intentara escribir ahí por
-accidente).
+Sin este paso, `escribir_atomico()` intenta `mkdir(parents=True)` sobre
+`/etc/jax/build/` corriendo como `jaxsvc`, que no puede crear nada bajo
+`/etc/jax` (root:root 755) → `PermissionError`. Desde la ronda 2 de
+revisión el script atrapa esto y lo reporta como `ERROR: ...` con exit 1
+(antes salía como traceback crudo) -- pero la solución sigue siendo crear
+el directorio, no leer el traceback.
+
+Con el directorio ya en manos de `jaxsvc`, generar escribe DIRECTO en la
+ruta final -- no hace falta un paso aparte de "instalar" ni ningún
+`chown`:
+
+```bash
+sudo -u jaxsvc /srv/jax-prod/jax/scripts/generar_manifiesto_identidad.py \
+    --repo-root /srv/jax-prod/jax --production \
+    --manifest-output /etc/jax/build/implementation-identity.manifest.json
+```
+
+(`--manifest-output` explícito por legibilidad: el default de
+`--production` sin esa opción es
+`implementation-identity.json.manifest.json`, técnicamente correcto pero
+confuso de citar a mano en el paso siguiente -- ver MAYOR-6 de la ronda 2,
+abajo.)
+
+`--production` fija la identidad en
+`/etc/jax/build/implementation-identity.json` — el script ya no tiene un
+default silencioso ahí (ronda 1 de revisión: un `--output` con default
+apuntando a la ruta real de despliegue hacía que cualquier corrida de
+prueba sin `--output` explícito intentara escribir ahí por accidente).
 
 **`sudo -u jaxsvc` es obligatorio, no cosmético.** `/srv/jax-prod/jax` es
 `jaxsvc:jaxsvc`; corrido como cualquier otro usuario (`fruiz` incluido),
@@ -143,54 +238,75 @@ es el dueño.
 El script se niega igual (nunca produce un `CLEAN` falso) si `git status`
 advierte por **stderr** con código de salida 0 — el mismo síntoma que
 "dubious ownership" pero sin el 128: un `Permission denied` puntual sobre
-algún archivo del checkout. Antes de esta ronda, `arbol_sucio()` sólo leía
-stdout y ese caso pasaba desapercibido.
+algún archivo del checkout. Antes de la ronda 1 de revisión, `arbol_sucio()`
+sólo leía stdout y ese caso pasaba desapercibido.
 
-### 7. Instalar la identidad — el `chown` es OBLIGATORIO
-`/etc/jax` es `root:root 755` → el JSON generado en el paso 6 (si se copia
-a mano, o si `sudo -u jaxsvc` no tenía permiso de escritura en
-`/etc/jax/build/` y hubo que generar como root y copiar) siempre termina
-propiedad de quien lo escribió. El proceso de LAS MANOS corre como
-`jaxsvc` (drop-in `cuenta-de-servicio.conf`). Sin `chown jaxsvc:jaxsvc`,
-el arranque muere con `PermissionError` al intentar `open()` un archivo
-`600` que no le pertenece:
+**Ruta alternativa, sólo para inspeccionar sin tocar `/etc/jax/`** (por
+ejemplo, para mirar el JSON antes de decidir si instalarlo): generar a un
+`--output` de scratch, y recién si se ve bien, copiarlo a mano --
+`install` necesita origen y destino DISTINTOS, así que esto NUNCA se hace
+con `--production` apuntando al mismo lugar dos veces:
 
 ```bash
-sudo install -o jaxsvc -g jaxsvc -m 600 /ruta/generada/implementation-identity.json /etc/jax/build/implementation-identity.json
-sudo install -o jaxsvc -g jaxsvc -m 600 /ruta/generada/implementation-identity.json.manifest.json /etc/jax/build/implementation-identity.manifest.json
+sudo -u jaxsvc /srv/jax-prod/jax/scripts/generar_manifiesto_identidad.py \
+    --repo-root /srv/jax-prod/jax \
+    --output /tmp/dry-run-identity.json \
+    --manifest-output /tmp/dry-run-identity.manifest.json
+# revisar /tmp/dry-run-identity.json a mano; recién entonces:
+sudo install -o jaxsvc -g jaxsvc -m 600 /tmp/dry-run-identity.json /etc/jax/build/implementation-identity.json
+sudo install -o jaxsvc -g jaxsvc -m 600 /tmp/dry-run-identity.manifest.json /etc/jax/build/implementation-identity.manifest.json
+sudo rm -f /tmp/dry-run-identity.json /tmp/dry-run-identity.manifest.json
 ```
 
-Si el paso 6 ya corrió como `jaxsvc` con `/etc/jax/build/` escribible por
-ese usuario, este `chown` es un no-op — pero se ejecuta SIEMPRE, no
-condicionalmente: no hay forma barata de saber desde este runbook si el
-paso anterior ya dejó el dueño correcto, y `chown` sobre el dueño correcto
-no tiene efecto secundario.
-
 **Nunca instalar un artefacto `DIRTY`** (`source_state: "DIRTY"` en el
-JSON) en esta ruta — ver la advertencia del paso 9.
+JSON) en `/etc/jax/build/` — ver la advertencia del paso 9.
 
-### 8. Instalar el blob del build manifest, y el símlink `/srv/jax`
+### 7. Instalar el blob del build manifest en la base de evidencia
 La identidad sólo lleva `build_manifest_blob_hash` — un *puntero*.
 `verify_build_manifest` lo resuelve con
 `store.get_evidence_blob(...)`, y en producción `store` es
 `MariaDBEvidenceStore`, leyendo `jax_evidence.evidence_blobs`. Insertar los
 bytes generados en el paso 6 (`put_evidence_blob` es idempotente,
-direccionado por contenido):
+direccionado por contenido).
+
+**Esto NO es un script de Python cualquiera.** `policy.enforcement_evidence`
+sólo es importable con el mismo intérprete/`PYTHONPATH` que usa el
+servicio real -- el mismo venv que systemd invoca
+(`/srv/jax-prod/jax/las_manos/.venv/bin/python3`), parado en la raíz del
+repo, con `PYTHONPATH=/srv/jax-prod/jax` (el mismo que fija el drop-in
+`z-pythonpath.conf`). Y `/etc/jax/.env` tiene valores que pueden llevar
+espacios o comillas -- `env $(cat archivo | xargs)` los rompe; `. archivo`
+en un subshell no:
 
 ```bash
-sudo -u jaxsvc env $(sudo -n cat /etc/jax/.env | xargs) python3 - <<'PY'
+cat > /tmp/instalar_blob_manifiesto.py <<'PY'
 import os
-from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
 import pymysql
+from policy.enforcement_evidence.mariadb_store import MariaDBEvidenceStore
+
 def connect():
     return pymysql.connect(host=os.environ["JAX_DB_HOST"], port=int(os.environ["JAX_DB_PORT"]),
         user=os.environ["JAX_DB_USER"], password=os.environ["JAX_DB_PASSWORD"],
         database=os.environ.get("JAX_DB_NAME", "jax_memory"), charset="utf8mb4", autocommit=False)
+
 data = open("/etc/jax/build/implementation-identity.manifest.json", "rb").read()
 MariaDBEvidenceStore(connect).put_evidence_blob(data)
+print("blob instalado")
 PY
+
+sudo -u jaxsvc bash -c '
+  cd /srv/jax-prod/jax &&
+  set -a; . /etc/jax/.env; set +a &&
+  PYTHONPATH=/srv/jax-prod/jax /srv/jax-prod/jax/las_manos/.venv/bin/python3 /tmp/instalar_blob_manifiesto.py
+'
+rm -f /tmp/instalar_blob_manifiesto.py
 ```
 
+(`jaxsvc` puede leer `/etc/jax/.env` directamente -- es `root:jaxsvc 640` --
+no hace falta `sudo -n cat` acá como en los pasos 4/5, que corren como un
+usuario distinto.)
+
+### 8. El símlink `/srv/jax`
 **El desajuste `/srv/jax` vs `/srv/jax-prod/jax`.**
 `_DEPLOYMENT_REPOSITORY_ROOT` en
 `policy/enforcement_evidence/implementation_identity.py` es la constante
@@ -219,7 +335,7 @@ explícita y auditable.
 ## Verification
 Run identity/build-manifest verification.
 
-### 9. Confirmar el arranque, y que el claim no haya quedado STALE
+### 9. Confirmar el arranque, y que el claim no haya quedado STALE ni UNAVAILABLE
 ```bash
 systemctl restart jax-las-manos      # o esperar al próximo deploy
 systemctl is-active jax-las-manos    # esperado: active
@@ -234,19 +350,65 @@ la diferencia es `status_engine.derive_assertion`, que hace `STALE`
 cualquier claim B7 cuya identidad no sea `CLEAN` — en silencio, sin que el
 arranque ni el health-check lo digan. Por eso el paso final es consultar
 un claim de verdad, con la herramienta de sólo-lectura que ya existe
-(`jaxctl`, `docs/operations/operational-manual.md`):
+(`jaxctl`, `docs/operations/operational-manual.md`).
+
+**`jaxctl` tiene que correr como `jaxsvc` -- si no, el gate lee verde
+cuando en realidad falló.** El JSON de identidad es `600` propiedad de
+`jaxsvc`; si se consulta como el operador (`fruiz`, o quien sea que esté
+corriendo este runbook), `jaxctl` NO puede leer el archivo, y
+`jaxctl/runtime.py::control_status` tiene un `except Exception` amplio que
+convierte CUALQUIER falla en `UnavailableSource` →
+`{"classification":"UNAVAILABLE",...}`, **sin la clave `"verdict"` en
+absoluto**, exit 2. Si el chequeo sólo busca los strings `"STALE"` o
+`"UNVERIFIABLE"` en la salida, NINGUNO de los dos aparece -- y un operador
+apurado lee eso como GO. Mismo patrón que `test_b8_jaxctl_control_unavailable_is_zero_write`
+(`tests/policy/test_execution_mariadb_integration.py`) ya prueba contra
+una MariaDB real: identidad no legible → `status == 2` y
+`"status":"UNAVAILABLE"` en la salida, sin ninguna mención a `STALE`.
 
 ```bash
-set -a; . <(sudo -n cat /etc/jax/.env); set +a
-python3 -m jaxctl control CTL.B6.GOVERNED_DISPATCH --version 1 --claim WRITTEN \
+cat > /tmp/verificar_claim.sh <<'EOF'
+#!/bin/bash
+set -a; . /etc/jax/.env; set +a
+cd /srv/jax-prod/jax
+export PYTHONPATH=/srv/jax-prod/jax
+exec /srv/jax-prod/jax/las_manos/.venv/bin/python3 -m jaxctl control \
+    CTL.B6.GOVERNED_DISPATCH --version 1 --claim WRITTEN \
     --scope '{"environment":"SANDBOX_RUNTIME"}' --subjects '[]' --json
+EOF
+chmod +x /tmp/verificar_claim.sh
+
+SALIDA=$(sudo -u jaxsvc /tmp/verificar_claim.sh); EXIT=$?
+rm -f /tmp/verificar_claim.sh
+echo "$SALIDA"
 ```
 
-`"verdict":"STALE"` en la salida = el manifiesto instalado no es `CLEAN`,
-o describe un commit distinto al que corre. `"verdict":"UNVERIFIABLE"` =
-la identidad ni siquiera pasó `is_trusted_implementation_identity` (no
-llegó a instalarse por el camino confiable). Ninguno de los dos es GO,
-aunque `/health` haya dado 200.
+**El chequeo tiene que ser explícito sobre los TRES resultados posibles**,
+no sólo buscar la palabra "STALE":
+
+```bash
+if [ "$EXIT" != "0" ]; then
+  echo "NO-GO: jaxctl salió con código $EXIT"
+elif echo "$SALIDA" | grep -q '"classification":"UNAVAILABLE"'; then
+  echo "NO-GO: UNAVAILABLE -- jaxctl no pudo leer o verificar la identidad (ver 'detail' arriba). ¿Corrió como jaxsvc?"
+elif echo "$SALIDA" | grep -q '"verdict":"STALE"'; then
+  echo "NO-GO: STALE -- el manifiesto instalado no es CLEAN, o describe un commit distinto al que corre"
+else
+  echo "sin UNAVAILABLE ni STALE -- revisar 'verdict' igual a mano antes de dar GO"
+fi
+```
+
+**Corrección sobre `"verdict":"UNVERIFIABLE"` (ronda 2 de revisión):** ese
+verdict es, en la práctica, INALCANZABLE a través de `jaxctl` -- no porque
+no exista en el código (`derive_assertion` sí lo puede devolver), sino
+porque el camino real de `jaxctl` (`query_control_status` →
+`TrustedImplementationIdentityProvider` → `MariaDBEvidenceStore.readonly_status_snapshot`)
+**lanza una excepción antes** de llegar a construir un `ControlStatusView`
+en cualquier escenario donde la identidad no sea de fiar (archivo
+inaccesible, hash que no matchea, fila ausente en la DB) -- y esa
+excepción es exactamente lo que produce `UNAVAILABLE` de arriba. Lo que
+hay que vigilar es `classification == "UNAVAILABLE"`, no el string
+`"UNVERIFIABLE"`.
 
 If either check fails, read `journalctl -u jax-las-manos -n 50` before
 retrying anything.
@@ -259,24 +421,34 @@ retrying anything.
 - `DatabaseObservationMismatchError` → paso 3, `jax_execution` incompleto
   (tabla, índice único o trigger ausente) — leer el mensaje, dice cuál de
   los cuatro.
+- `SHOW GRANTS FOR CURRENT_USER()` sin `CREATE`/`TRIGGER`/`ALTER` → paso 4,
+  la cuenta usada para migrar no es admin -- no usar `$JAX_DB_USER` acá.
+- `mysqldump` corta el script (con `set -e`) sin instalar nada → paso 4,
+  falló el backup por algo real (credenciales/permisos/disco) -- resolver
+  ESO antes de reintentar, no saltarse el backup.
 - Error de MariaDB por permisos al insertar (`1142` / `command denied`) →
   paso 5, falta el `GRANT INSERT`.
+- `ERROR: ...` (ya no traceback crudo, desde la ronda 2 de revisión) sobre
+  `/etc/jax/build/` al GENERAR (paso 6) → falta el paso `sudo install -d
+  -o jaxsvc -g jaxsvc -m 750 /etc/jax/build`.
 - `git ... fatal: detected dubious ownership in repository at
   '/srv/jax-prod/jax'` → paso 6, no se corrió como `jaxsvc` (o falta
   `safe.directory`).
-- `FileNotFoundError` sobre `/etc/jax/build/implementation-identity.json`
-  → el paso 7 no se hizo, o se hizo en una ruta distinta a la fija.
-- `PermissionError` al abrir ese mismo archivo → paso 7, falta el `chown`
-  (o se hizo con el dueño equivocado).
-- `EvidenceBlobMissingError` → paso 8, el blob nunca se insertó en
-  `jax_evidence.evidence_blobs` (o el símlink `/srv/jax` apunta a otro
-  lado y el hash no coincide con lo que hay en disco).
+- `ModuleNotFoundError: No module named 'policy'` en el paso 7 → no se usó
+  el intérprete del venv del servicio, o falta `PYTHONPATH=/srv/jax-prod/jax`,
+  o no se hizo `cd /srv/jax-prod/jax` primero.
+- `EvidenceBlobMissingError` → paso 7, el blob nunca se insertó en
+  `jax_evidence.evidence_blobs` (o el símlink `/srv/jax` del paso 8 apunta
+  a otro lado y el hash no coincide con lo que hay en disco).
 - `UntrustedImplementationIdentityError` ("build manifest inválido o
   drift") → el código cambió después de generar el manifiesto del paso 6:
   regenerar (ver Fail-closed condition, abajo).
+- `"classification":"UNAVAILABLE"` en el paso 9 → `jaxctl` no pudo leer o
+  verificar la identidad -- lo primero a revisar es si corrió como
+  `jaxsvc`; si ya corrió como `jaxsvc`, leer `"detail"` en la salida.
 - `"verdict":"STALE"` con todo lo anterior en verde → paso 9, se instaló
   (o quedó) un manifiesto `DIRTY`; regenerar sin `--allow-dirty` e
-  instalar de nuevo (pasos 6-8).
+  instalar de nuevo (pasos 6-7).
 ## Fail-closed condition
 Drift or missing identity: stop.
 
@@ -289,7 +461,7 @@ archivo listado contra lo que hay en disco y falla ante cualquier
 discrepancia). Desplegar código nuevo con el `implementation-identity.json`
 de ayer no sirve una identidad vieja-pero-funcional en silencio: falla
 cerrado igual que un archivo ausente, porque los hashes ya no coinciden.
-Regenerar (pasos 6-8 de arriba) es el arreglo — no hay actualización
+Regenerar (pasos 6-7 de arriba) es el arreglo — no hay actualización
 parcial/incremental.
 ## Recovery / escalation
 Redeploy verified build or escalate.
