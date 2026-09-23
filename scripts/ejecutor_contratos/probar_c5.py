@@ -82,11 +82,17 @@ async def principal(args) -> int:
         auditor_cliente._INSTRUCCIONES = Path(args.instrucciones)
     print(formato.campos((("cerebro", cerebro.key), ("proveedor_cerebro", cerebro.provider_id),
                           ("auditor", auditor_f.key), ("proveedor_auditor", auditor_f.provider_id),
-                          ("compuerta_datos_de_clientes", cfg.admite_datos_de_clientes))))
+                          ("compuerta_datos_de_clientes", cfg.admite_datos_de_clientes),
+                          ("compuerta_mismo_proveedor", cfg.admite_mismo_proveedor))))
     fallos = [(f.codigo, f.datos) for f in eleccion_c5.validar_eleccion(
         proveedor_cerebro=cerebro.provider_id, proveedor_auditor=auditor_f.provider_id, auditor_es_local=local,
         admite_datos_de_clientes=cfg.admite_datos_de_clientes, hosts_mision=frozenset({"hall9000"}),
-        hosts_con_clientes=con_clientes, hosts_conocidos=conocidos)]
+        hosts_con_clientes=con_clientes, hosts_conocidos=conocidos,
+        # La compuerta del 2026-09-20. Sin este argumento el default estricto (False)
+        # hacía que ESTA prueba diera c5_vivo=false con la compuerta abierta, mientras
+        # el arranque real (arranque.py) sí la pasaba: la prueba contradecía a
+        # producción. tests/test_probar_c5_pasa_todas_las_compuertas.py lo vigila.
+        admite_mismo_proveedor=cfg.admite_mismo_proveedor)]
 
     async def auditar(lote):
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
