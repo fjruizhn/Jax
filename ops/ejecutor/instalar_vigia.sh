@@ -6,8 +6,10 @@
 # `ejecutor-vigia@.service` que este script instalaba se RETIRÓ -- código muerto, el journal
 # nunca mostró un solo arranque suyo, ver DEUDA.md). El vigía (`vigia_servicio.py`) lo lanza
 # `abrir_vigia` (jax/ejecutor/mision_servicio.py) como SUBPROCESO DIRECTO de cada turno,
-# heredando la identidad de `jax-platform` (fruiz) -- no hay nada que instalar para eso. Lo
-# que SÍ sigue haciendo falta, y es lo que queda acá, es `JAX_EJECUTOR_MISIONES` con su ACL
+# heredando la identidad de `jax-platform` -- CORREGIDO (bug de producción jax#260,
+# 2026-09-22, este comentario decía "fruiz"; ERA FALSO desde el 2026-09-17, cuando
+# jax-platform.service pasó a `User=jaxsvc`): no hay nada que instalar para eso. Lo que
+# SÍ sigue haciendo falta, y es lo que queda acá, es `JAX_EJECUTOR_MISIONES` con su ACL
 # (B-2, ronda 4) y la validación de los tiempos de latido.
 set -euo pipefail
 : "${JAX_EJECUTOR_MISIONES:?}" "${JAX_EJECUTOR_VIGIA_LATIDO:?}" "${JAX_EJECUTOR_VIGIA_LATIDO_MAX_S:?}"

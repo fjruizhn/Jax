@@ -1309,6 +1309,20 @@ jobs:
             echo "(sysctl ausente en este kernel -- no aplica)"
           bwrap --version
           sudo install -d -o root -g root -m 0755 /etc/claude-code
+          # `/etc/ejecutor-huella` (jax#263): misma razón exacta que `/etc/claude-code` de
+          # arriba. Los tests de `tests/test_ejecutor_huella_sh.py` montan su propio
+          # `admin_usuario` de prueba ahí con bwrap, y un namespace sin privilegios no puede
+          # CREAR el punto de montaje bajo el `/etc` del runner. En hall9000 ya existe. Se
+          # replica el mismo `install -d` que hace `instalar_huella_en_maquina.sh`.
+          sudo install -d -o root -g root -m 0755 /etc/ejecutor-huella
+          # `/etc/ssh/authorized_keys.d` (jax#263): misma razón. En las máquinas del
+          # inventario lo crea `instalar_en_maquina.sh` (C6); el runner no lo tiene y bwrap
+          # no puede crear el punto de montaje bajo el `/etc` del host.
+          sudo install -d -o root -g root -m 0755 /etc/ssh/authorized_keys.d
+          # `~/.ssh/known_hosts` del usuario que corre (jax#263): `instalar_huella_en_maquina.sh`
+          # lee el known_hosts YA CONFIADO del operador para sembrar el del servicio. En la
+          # máquina del operador existe por definición; el runner es una cuenta nueva sin `~/.ssh`.
+          install -d -m 0700 "$HOME/.ssh" && touch "$HOME/.ssh/known_hosts" && chmod 0600 "$HOME/.ssh/known_hosts"
           # /usr/bin, NO /usr/local/bin: test_ejecutor_reemplazar_directorio_atomico.py
           # corre el script con env={"PATH": "<bin-de-sudo-falso>:/usr/bin:/bin"} --
           # hermético a propósito, sin el PATH ambiente del runner. Es además la ruta
@@ -1395,6 +1409,8 @@ jobs:
           tests/test_ejecutor_contratos_huella.py
           tests/test_ejecutor_huella_aceptar.py
           tests/test_ejecutor_huella_registro_permisos.py
+          tests/test_ejecutor_huella_sh.py
+          tests/test_ejecutor_instalar_revertir_huella_sh.py
           tests/test_ejecutor_cita.py
           tests/test_ejecutor_captura.py
           tests/test_ejecutor_hechos.py
@@ -1547,6 +1563,8 @@ jobs:
             tests/test_ejecutor_contratos_huella.py \
             tests/test_ejecutor_huella_aceptar.py \
             tests/test_ejecutor_huella_registro_permisos.py \
+            tests/test_ejecutor_huella_sh.py \
+            tests/test_ejecutor_instalar_revertir_huella_sh.py \
             tests/test_ejecutor_cita.py \
             tests/test_ejecutor_captura.py \
             tests/test_ejecutor_hechos.py \
@@ -4047,23 +4065,37 @@ jobs:
           # jax-platform, lo cubre el job `mirror-sync`). Resultado, dos corridas: 2671 passed,
           # 45 skipped, 1 xfailed -- EXACTO, sin ajustar a mano.
           #
-          # 2671 -> 2673 (2026-09-22, fix/arranque-policy-shadow, ronda 1): +2 tests en
-          # tests/test_arranque_las_manos_no_shadowea_policy.py (jax#260 rompió el
-          # arranque real de LAS MANOS en producción -- las_manos/policy.py shadowea
-          # policy/ de la raíz porque uvicorn deja el cwd en sys.path[0], por delante
-          # de PYTHONPATH; renombrado a las_manos/motor_de_politica.py). Los dos
-          # arrancan un proceso Python nuevo (sin DB ni red: JAX_DB_PORT=1) -- no suman
-          # a "45 skipped" ni cambian ninguno de los otros conteos.
-          #
-          # 2673 -> 2674 (2026-09-22, misma rama, ronda 2 de revisión de PR#262,
-          # MAJOR-2): +1 test en tests/test_las_manos_no_shadowea_paquetes_de_la_raiz.py
-          # -- barrera para que el PRÓXIMO shadow (las_manos/ops.py, las_manos/tools.py,
-          # ...) no dependa de nuevo de que alguien lo diagnostique a mano en producción.
-          # Puro (sin DB, sin red, sólo filesystem + `git check-ignore`) -- no suma a
-          # "45 skipped" ni cambia ningún otro conteo. Verificado en rojo contra un
-          # `las_manos/ops.py` fantasma creado a propósito y borrado en el mismo paso.
-          grep -qE "^2674 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2674 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # NOTA DE REBASE (2026-09-22, jax#263 sobre jax#262): master subió el piso de 2671
+          # a 2674 (+3) mientras esta rama lo subía de 2671 a 2767 (+96). Resuelto SUMANDO las
+          # dos deltas: 2674 + 96 = 2770. Si el runner dice otro número, manda el runner.
+          # 2671 -> 2767 el 2026-09-22 (jax#263, fix de CI de la huella de servicio, rondas
+          # 2-7): +96 tests netos -- los agregados a tests/test_ejecutor_contratos_huella.py,
+          # tests/test_ejecutor_huella_aceptar.py y tests/test_ejecutor_vigia_servicio.py a lo
+          # largo de las 6 rondas de auditoría adversarial, más DOS ARCHIVOS NUEVOS que este
+          # mismo fix cablea por primera vez en este job -- tests/test_ejecutor_huella_sh.py y
+          # tests/test_ejecutor_instalar_revertir_huella_sh.py (`archivos-de-test-en-ci` los
+          # había atrapado sin job de CI). Los 45 skipped NO cambian -- mismo desglose exacto
+          # por archivo, re-verificado con `-rs`: 25 (generar_claude_md) + 16
+          # (reproduccion_u3) + 2 (base_por_sesion) + 1 (contratos_contexto) + 1
+          # (cola_uso_escritores). Medido con el MISMO método (`sudo unshare --mount`, sin
+          # bwrap externo anidado), y CORREGIDO un defecto propio destapado por esta misma
+          # ronda: `tests/test_ejecutor_contratos_huella.py`,
+          # `tests/test_ejecutor_huella_aceptar.py`, `tests/test_ejecutor_vigia_servicio.py`,
+          # `tests/test_ejecutor_huella_sh.py` y `tests/test_ejecutor_instalar_revertir_huella_sh.py`
+          # pasaban "fruiz"/"axioma" a `pwd.getpwnam` real (vía
+          # `huella.ruta_authorized_keys_admin`/`comando_huella`, y a la fixture de bwrap que
+          # arma el árbol de prueba) -- esas cuentas sólo existen en hall9000; en el runner de
+          # CI (`ValueError: admin_usuario_sin_passwd`, medido en jax#263 CI run 35797502554,
+          # job tests-puros, 14 tests rotos) no. Reemplazado por `pwd.getpwuid(os.getuid())
+          # .pw_name` (la cuenta que de verdad corre el proceso, existe en cualquier máquina
+          # por definición) y `"root"` como segunda cuenta real y universal para los casos que
+          # necesitan DOS cuentas distintas. `test_ejecutor_instalar_revertir_huella_sh.py`
+          # además asumía que `~/.ssh/known_hosts` de quien corre el test YA tenía una entrada
+          # para `[127.0.0.1]:58291` (cierto en hall9000, que tiene su propio sshd ahí; falso
+          # en un runner nuevo, sin ningún sshd escuchando) -- ahora genera una llave de host
+          # efímera propia y arma esa línea a mano, autosuficiente.
+          grep -qE "^2770 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2770 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

@@ -77,6 +77,21 @@ from jax.ejecutor.contratos import pausa
 #: y C6 (llaves) en cada máquina -- rutas verificadas contra
 #: ops/ejecutor/instalar_en_maquina.sh (2026-09-22), no inventadas. Dato, no código
 #: (Principio IV). NINGÚN cambio acá es legítimo durante una misión: sin declarado.
+#:
+#: LÍMITE 9 (ronda 2, auditoría adversarial 2026-09-22): esta tupla se queda FIJA a
+#: propósito -- el `authorized_keys` del ADMINISTRADOR (dónde vive el acceso
+#: privilegiado real, y dónde el arreglo de jax#260 puso la llave del servicio) SÍ entra
+#: a la huella, pero por `ruta_authorized_keys_admin(admin_usuario)` / `comando_huella
+#: (admin_usuario)` -- necesita saber la cuenta, y RUTAS_CONTROLES no depende de nada.
+#:
+#: MAJOR-4 (ronda 3): `/etc/ejecutor-huella` -- el directorio donde
+#: `instalar_huella_en_maquina.sh` escribe `admin_usuario` (root 0644) para que
+#: `ops/ejecutor/ejecutor-huella` sepa a qué cuenta pertenece el `authorized_keys` a
+#: medir SIN hardcodear un nombre en el guion. Que ESTE archivo entre a RUTAS_CONTROLES
+#: (fija, no depende de la cuenta) cierra el hueco obvio: si alguien lo borra o lo
+#: cambia para apuntar a otra cuenta, el tramo derivado (`ruta_authorized_keys_admin`)
+#: puede dejar de medir lo que debía -- pero el cambio en ESTE archivo, que sí es fijo,
+#: se ve igual, sin declarado, como cualquier otro control.
 RUTAS_CONTROLES = (
     "/etc/sudoers",
     "/etc/sudoers.d",
@@ -84,7 +99,12 @@ RUTAS_CONTROLES = (
     "/etc/ssh/sshd_config.d",
     "/etc/ssh/authorized_keys.d",
     "/root/.ssh/authorized_keys",
+    "/etc/ejecutor-huella",
 )
+
+#: Dónde vive el archivo de una sola línea con el usuario administrador -- lo escribe
+#: `instalar_huella_en_maquina.sh`, lo lee `ops/ejecutor/ejecutor-huella` con `cat`.
+RUTA_ADMIN_USUARIO_CONFIG = "/etc/ejecutor-huella/admin_usuario"
 
 #: Los binarios propios del Ejecutor en la máquina -- glob, no nombres literales: hoy
 #: son `ejecutor-freno-remoto` y `ejecutor-revocar`, pero el contrato es "nada que
@@ -92,6 +112,15 @@ RUTAS_CONTROLES = (
 #: actualizar cada vez que se agrega un binario.
 _DIR_SBIN_EJECUTOR = "/usr/local/sbin"
 _GLOB_SBIN_EJECUTOR = "ejecutor-*"
+
+#: BLOCK-E (ronda 5, auditoría adversarial 2026-09-22): el sentinela que representa "se
+#: barrió el glob de binarios propios" -- no es una ruta real (el `*` no puede aparecer
+#: en un nombre de archivo real), así que nunca colisiona con un archivo de verdad
+#: encontrado por el barrido. Antes el glob quedaba FUERA de `huella_valida()` por
+#: diseño ("su desaparición total no invalida nada", LÍMITE documentado más abajo) --
+#: eso también dejaba pasar un `find` que fallara en silencio sobre este barrido
+#: exactamente igual que en cualquier directorio de `RUTAS_CONTROLES`.
+RUTA_GLOB_SBIN_EJECUTOR = f"{_DIR_SBIN_EJECUTOR}/{_GLOB_SBIN_EJECUTOR}"
 
 # Rutas ABSOLUTAS de los binarios que arma el comando -- NUNCA por el PATH (ver el
 # LÍMITE del docstring del módulo). Verificadas en Ubuntu/Debian (coreutils, findutils):
@@ -111,36 +140,351 @@ def _q(ruta: str) -> str:
     return f"'{ruta}'"
 
 
+# RONDA 4 (auditoría adversarial 2026-09-22): medido el 2026-09-22 (Fernando): el
+# `authorized_keys` del ROOT SÍ EXISTE (archivo vacío, 0600, dueño root) en hall9000,
+# atemai Y prod -- sólo FALTA en `bridge`. El texto anterior de esta ronda decía lo
+# contrario ("no existe en NINGUNA de las tres") -- ERA FALSO; corregido en ronda 5
+# (MAJOR-G) sin tocar el arreglo, que sigue haciendo falta: bridge SÍ está sano con esa
+# ruta ausente, y la ronda 3 bloqueaba el Ejecutor ahí igual que si hubiera fallado la
+# medición. La versión de ronda 2/3 (`find ... 2>/dev/null`, sin más) daba CERO líneas
+# tanto si la ruta no existía COMO si no se pudo medir (permiso denegado, `find` roto) --
+# indistinguibles, y `huella_valida(rutas=...)` trataba las dos como inválidas,
+# bloqueando el Ejecutor en una máquina SANA. Mirror EXACTO (sin f-string: es texto de
+# shell con sus propias llaves y `$`, interpolarlo habría sido un baño de escapes) de
+# `tramo()`/`tramo_sbin_ejecutor()` en `ops/ejecutor/ejecutor-huella` --
+# `tests/test_ejecutor_huella_sh.py` compara la SALIDA de este texto contra la del
+# script real, no sólo su forma.
+#
+# BLOCK-E (ronda 5, auditoría adversarial 2026-09-22): el caso ARCHIVO ya tenía guarda
+# (`sha256sum` sin salida -> `E ... sha256sum_fallo`); el caso DIRECTORIO no la tenía --
+# los tres `find` iban con `2>/dev/null` y SIN mirar su `$?`, así que un `find` que
+# fallara a mitad de camino (un subdirectorio sin permiso, por ejemplo) hacía
+# desaparecer TODAS las líneas de contenido en silencio, y el guion de todos modos
+# imprimía `D <ruta>` -- la huella pasaba por buena sin haber podido enumerar el
+# contenido real. Ahora el resultado de los tres `find` se junta en un archivo aparte
+# y su `$?` se mira ANTES de decidir si el estado es `D` (los tres a cero) o `E ...
+# find_fallo` (cualquiera de los tres no-cero) -- comprobado por el auditor con bwrap.
+#
+# MINOR (ronda 6, auditoría adversarial 2026-09-22): `cat`/`rm` iban SIN ruta absoluta
+# -- inconsistente con find/sha256sum/stat/mktemp, que sí la tienen (mismo LÍMITE del
+# docstring del módulo). Corregido acá y en `ops/ejecutor/ejecutor-huella`.
+#
+# MINOR, el mutante que sobrevivía (ronda 6): el `if false` en el chequeo de `$?`
+# ($rc1/$rc2/$rc3) sólo se probaba contra EL GUION REAL (`ops/ejecutor/ejecutor-huella`,
+# `tests/test_ejecutor_huella_sh.py`) -- ESTE texto, el que de verdad corre por ssh en
+# producción, podía tener el mismo mutante sin que ningún test lo viera, porque el test
+# de sincronía (MAJOR-7) sólo compara SALIDAS sobre árboles SANOS: con un `find` que no
+# falla en ninguno de los dos lados, la salida es idéntica con o sin el chequeo de
+# `$?`. `tests/test_ejecutor_huella_sh.py` ahora agrega un árbol con un directorio
+# ILEGIBLE a esa misma comparación -- si CUALQUIERA de los dos lados (guion o este
+# texto) perdiera el chequeo, las dos salidas dejarían de coincidir ahí.
+_CUERPO_TRAMO_SH = r'''tramo() {
+  ruta="$1"
+  err="$(/usr/bin/mktemp)"
+  tipo="$(/usr/bin/stat -c '%F' "$ruta" 2>"$err")"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    if grep -q "No such file or directory" "$err"; then
+      echo "A $ruta"
+    else
+      motivo="$(tr '\n' ' ' < "$err" | tr -s ' ')"
+      echo "E $ruta ${motivo:-motivo_desconocido}"
+    fi
+    /usr/bin/rm -f "$err"
+    return 0
+  fi
+  /usr/bin/rm -f "$err"
+  case "$tipo" in
+    "regular file"|"regular empty file")
+      linea_hash="$(/usr/bin/sha256sum "$ruta" 2>/dev/null)"
+      if [ -n "$linea_hash" ]; then
+        echo "$linea_hash"
+      else
+        echo "E $ruta sha256sum_fallo"
+      fi
+      ;;
+    directory)
+      salida="$(/usr/bin/mktemp)"
+      errd="$(/usr/bin/mktemp)"
+      /usr/bin/find "$ruta" -mindepth 1 -xtype f -exec /usr/bin/sha256sum {} + >"$salida" 2>>"$errd"
+      rc1=$?
+      /usr/bin/find "$ruta" -mindepth 1 -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+      rc2=$?
+      /usr/bin/find "$ruta" -mindepth 1 -type d -printf "D %p\n" >>"$salida" 2>>"$errd"
+      rc3=$?
+      if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ] || [ "$rc3" -ne 0 ]; then
+        echo "E $ruta find_fallo"
+      else
+        echo "D $ruta"
+        /usr/bin/cat "$salida"
+      fi
+      /usr/bin/rm -f "$salida" "$errd"
+      ;;
+    *)
+      echo "E $ruta tipo_no_esperado:$tipo"
+      ;;
+  esac
+}'''
+
+# BLOCK-E, punto 2 (ronda 5): el glob de `/usr/local/sbin/ejecutor-*` tenía el MISMO
+# defecto que el caso directorio de `tramo()` -- dos `find` con `2>/dev/null` sin mirar
+# `$?` -- y además NO estaba representado en `huella_valida(rutas=...)` en absoluto (su
+# desaparición total no invalidaba nada, por diseño). Ahora reporta su propio estado
+# (`D`/`E ... find_fallo`) bajo el sentinela `RUTA_GLOB_SBIN_EJECUTOR`
+# (`/usr/local/sbin/ejecutor-*`, un `*` literal que nunca puede colisionar con un
+# archivo real) -- y `RUTAS_DECLARADAS_POR_DEFAULT` lo exige como cualquier otra ruta.
+_CUERPO_TRAMO_SBIN_SH = r'''tramo_sbin_ejecutor() {
+  base="$1"
+  patron="$2"
+  salida="$(/usr/bin/mktemp)"
+  errd="$(/usr/bin/mktemp)"
+  /usr/bin/find "$base" -maxdepth 1 -name "$patron" -xtype f -exec /usr/bin/sha256sum {} + >"$salida" 2>>"$errd"
+  rc1=$?
+  /usr/bin/find "$base" -maxdepth 1 -name "$patron" -type l -printf "L %p -> %l\n" >>"$salida" 2>>"$errd"
+  rc2=$?
+  if [ "$rc1" -ne 0 ] || [ "$rc2" -ne 0 ]; then
+    echo "E $base/$patron find_fallo"
+  else
+    echo "D $base/$patron"
+    /usr/bin/cat "$salida"
+  fi
+  /usr/bin/rm -f "$salida" "$errd"
+}'''
+
+
 def _tramo_ruta(ruta: str) -> str:
-    """sha256 del contenido RESUELTO (`-xtype f` sigue symlinks); el DESTINO de cada
-    symlink por separado (`-printf %l`, sin resolver); y el listado de directorios. Una
-    ruta ausente cuenta como "no existe" (`2>/dev/null`), no como error."""
-    q = _q(ruta)
-    return (
-        f'{_FIND} {q} -xtype f -exec {_SHA256SUM} {{}} + 2>/dev/null ; '
-        f'{_FIND} {q} -type l -printf "L %p -> %l\\n" 2>/dev/null ; '
-        f'{_FIND} {q} -type d -printf "D %p\\n" 2>/dev/null'
-    )
+    """UNA llamada a la función `tramo()` (ver `_CUERPO_TRAMO_SH`) -- reemplaza el
+    `find ... 2>/dev/null` de rondas 2/3, que no distinguía "no existe" de "no se pudo
+    medir". `_q`: la MISMA función de escapado que ya usaba esto, sin cambios."""
+    return f"tramo {_q(ruta)}"
 
 
 def _tramo_sbin_ejecutor() -> str:
-    # `-name` va COMILLADO: sin comillas, el shell expandiría `ejecutor-*` como un glob
-    # contra el directorio de trabajo ANTES de que `find` lo vea.
-    q, glob = _q(_DIR_SBIN_EJECUTOR), _q(_GLOB_SBIN_EJECUTOR)
-    return (
-        f'{_FIND} {q} -maxdepth 1 -name {glob} -xtype f -exec {_SHA256SUM} {{}} + 2>/dev/null ; '
-        f'{_FIND} {q} -maxdepth 1 -name {glob} -type l -printf "L %p -> %l\\n" 2>/dev/null'
-    )
+    # BLOCK-E (ronda 5): ya NO arma el `find ... ; find ...` a mano acá -- llama a
+    # `tramo_sbin_ejecutor()` (ver `_CUERPO_TRAMO_SBIN_SH`), que sí mira el `$?` de los
+    # dos `find` antes de decidir el estado.
+    return f"tramo_sbin_ejecutor {_q(_DIR_SBIN_EJECUTOR)} {_q(_GLOB_SBIN_EJECUTOR)}"
 
 
-def comando_huella() -> str:
-    """El comando REMOTO para la huella -- sin `sudo -n` propio (lo corre el
-    controlador, envuelto en UN solo `sudo -n sh -c '<esto>'`, ver `vigia_servicio.py`
-    y `revocacion.argv_admin`). No depende de ninguna cuenta: ronda 6 quitó el log de
-    sudo, que era lo único que sí dependía de un nombre."""
-    tramos = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
-    tramos.append(_tramo_sbin_ejecutor())
-    return f'({" ; ".join(tramos)}) | {_SORT}'
+def ruta_authorized_keys_admin(admin_usuario: str) -> str:
+    """LÍMITE que ronda 2 cierra (auditoría adversarial 2026-09-22, punto 9): el
+    `authorized_keys` del ADMINISTRADOR (`JAX_EJECUTOR_ADMIN_USUARIO`, hoy `fruiz`) es
+    donde vive el acceso privilegiado real -- y donde este mismo arreglo pone la llave
+    del servicio (`instalar_huella_en_maquina.sh`). No medirlo dejaría el propio cambio
+    que este commit hace invisible a la huella.
+
+    MAJOR-5 (ronda 3, auditoría adversarial 2026-09-22): esto asumía `/home/<admin>` --
+    CORREGIDO: sale de `pwd.getpwnam(admin_usuario).pw_dir`, el passwd REAL de esta
+    máquina, no una convención. Dato verificado por Fernando esa noche: en `bridge`
+    (Ubuntu 24.04 + Hestia) `/home/fruiz` SÍ existe -- la sospecha de un layout tipo
+    macOS era falsa -- pero igual se lee del passwd: `ejecutor-huella` (el script
+    remoto) hace lo mismo con `getent passwd`, y esta función es la que un test de
+    sincronía (MAJOR-7) compara contra la salida real del script EN ESTA MISMA
+    máquina -- los dos tienen que resolver el mismo passwd para que la comparación
+    signifique algo. `KeyError` (cuenta inexistente) se traduce a `ValueError`, fail-
+    closed, igual que el resto de las validaciones de este módulo.
+
+    MINOR (ronda 5, auditoría adversarial 2026-09-22): dicho en serio, sin dejarlo
+    implícito -- `pwd.getpwnam` resuelve el passwd de la máquina donde CORRE ESTE
+    PROCESO PYTHON (hall9000, siempre: esta función sólo se usa acá y en el instalador,
+    nunca en una remota), NO el de la máquina remota cuya huella se está armando. Que
+    hoy coincida con el passwd de las tres remotas (medido: mismo UID/GID/home para
+    `fruiz` en hall9000, atemai, bridge y prod) es un HECHO de HOY, no una garantía del
+    código -- si una remota cambiara el home de esa cuenta, esta función seguiría
+    devolviendo la ruta de HALL9000, no la real de esa remota. Por eso el camino en
+    PRODUCCIÓN (`ops/ejecutor/ejecutor-huella::tramo_admin()`) nunca llama a esta
+    función: resuelve `getent passwd` EN LA PROPIA REMOTA, en el momento. Esta función
+    sólo sirve para: (a) el test de sincronía (MAJOR-7, ya citado arriba, que compara
+    contra el script real EN ESTE MISMO host) y (b) `vigia_servicio.py::_principal`,
+    que pasa su resultado como `rutas_extra` a `huella_valida()` -- ahí la comparación
+    es de TEXTO contra lo que devolvió la remota, así que si algún día un passwd
+    diverge, el síntoma sería un `huella_valida` que rechaza todo en esa máquina (fail-
+    closed), no un dato mal medido en silencio."""
+    if not admin_usuario or "/" in admin_usuario or admin_usuario.strip() != admin_usuario:
+        raise ValueError("admin_usuario_invalido")
+    try:
+        home = pwd.getpwnam(admin_usuario).pw_dir
+    except KeyError:
+        raise ValueError("admin_usuario_sin_passwd") from None
+    if not home or not home.startswith("/"):
+        raise ValueError("admin_usuario_sin_home")
+    return f"{home}/.ssh/authorized_keys"
+
+
+def comando_huella(admin_usuario: str) -> str:
+    """El texto de lo que había que medir -- YA NO se manda por ssh (ver el arreglo del
+    bug de producción, jax#260, 2026-09-22, en el docstring del módulo y en
+    `argv_huella_servicio`, más abajo): antes se envolvía en UN `sudo -n sh -c '<esto>'`
+    armado por `revocacion.argv_admin` como el ADMINISTRADOR; ahora la misma lógica
+    (RUTAS_CONTROLES + el authorized_keys del administrador + el glob de
+    `/usr/local/sbin/ejecutor-*`, mismos binarios por ruta absoluta) vive, ESTÁTICA, en
+    `ops/ejecutor/ejecutor-huella` -- el comando forzado de la llave PROPIA del
+    servicio. Esta función sigue acá como la definición en Python de QUÉ se mide (dato,
+    no código, Principio IV); `tests/test_ejecutor_huella_sh.py` verifica -- comparando
+    SALIDAS sobre el mismo árbol de prueba, ronda 2 MAJOR-7, no sólo listas de rutas --
+    que el script real mide exactamente lo mismo.
+
+    Ronda 2 (LÍMITE 9): ya NO tiene firma vacía -- `admin_usuario` hace falta para
+    `ruta_authorized_keys_admin`. `test_comando_huella_no_pide_una_cuenta` (ronda 6)
+    queda retirado a propósito: la premisa que probaba ("no depende de ninguna
+    cuenta") dejó de ser cierta el día que la huella tuvo que empezar a vigilar SU
+    PROPIA llave de acceso, que vive en el `authorized_keys` de una cuenta concreta.
+
+    Ronda 4: la función `tramo()` (definida UNA vez, `_CUERPO_TRAMO_SH`) va ANTES del
+    grupo que la invoca -- `{ tramo r1 ; tramo r2 ; ... ; <glob de sbin> ; } | sort`.
+    El texto que resuelve `ruta_authorized_keys_admin(admin_usuario)` -- no un `cat`
+    del archivo de config ni un `getent` propios -- porque acá Python YA sabe la
+    cuenta; `ops/ejecutor/ejecutor-huella::tramo_admin()` hace ese trabajo de más
+    (leer el archivo, resolver con `getent`) para el camino real, donde nadie le pasa
+    la cuenta por argv.
+
+    Ronda 5 (BLOCK-E): el glob de sbin también pasa por una función DEFINIDA UNA vez
+    (`_CUERPO_TRAMO_SBIN_SH`/`tramo_sbin_ejecutor()`), igual que `tramo()` -- las DOS
+    definiciones van antes del grupo que las invoca.
+
+    Ronda 5 (hallazgo propio, al agregar la línea del glob de sbin a la comparación):
+    esta función NUNCA había puesto `export LC_ALL=C` en su propio texto -- sólo el
+    script real lo hace (ronda 2, MINOR). Con un único `sort` de pocas líneas, casi
+    siempre coincidía por casualidad con el locale de la sesión que corría el test;
+    agregar la línea del glob lo hizo divergir de verdad (medido: bajo `en_US.UTF-8`,
+    `sort` intercala una línea `D ...` en una posición distinta que bajo `C`, y
+    `test_el_guion_y_comando_huella_dan_la_misma_salida_sobre_el_mismo_arbol` -- que YA
+    existía -- lo detectó). El texto de esta función ahora fija `LC_ALL=C` también,
+    igual que el script."""
+    llamadas = [_tramo_ruta(r) for r in RUTAS_CONTROLES]
+    llamadas.append(_tramo_ruta(ruta_authorized_keys_admin(admin_usuario)))
+    cuerpo = " ; ".join(llamadas) + " ; " + _tramo_sbin_ejecutor()
+    return f'export LC_ALL=C\n{_CUERPO_TRAMO_SH}\n{_CUERPO_TRAMO_SBIN_SH}\n{{ {cuerpo} ; }} | {_SORT}'
+
+
+# --- EL CAMINO REMOTO: la llave PROPIA DEL SERVICIO, no la personal del administrador ---
+#
+# Bug de producción (jax#260, 2026-09-22, medido por Fernando): `vigia_servicio.py` lo
+# lanza `jax-platform` como SUBPROCESO -- y desde el 2026-09-17 (decisión de Fernando,
+# cuenta de servicio) `jax-platform.service` corre como `jaxsvc`
+# (`/etc/systemd/system/jax-platform.service.d/cuenta-de-servicio.conf: User=jaxsvc`),
+# NO como `fruiz`. Varios docstrings de este árbol (este módulo, `vigia_servicio.py`,
+# `ops/ejecutor/instalar_vigia.sh`) seguían afirmando "hereda la identidad de fruiz" --
+# ERA FALSO, corregido en esta ronda. `jaxsvc` no puede leer `~fruiz/.ssh/*` (600, dueño
+# `fruiz`), así que `revocacion.argv_admin` (sin `-i`, resolución de identidad por
+# DEFAULT de ssh) no encontraba ninguna llave utilizable: `vigia_no_latio=true rc=2`
+# medido en producción, el Ejecutor bloqueado por completo.
+#
+# El arreglo: una llave PROPIA del servicio (`JAX_EJECUTOR_HUELLA_LLAVE`, bajo
+# `/etc/jax/controlador/` -- ese directorio YA es `jaxsvc:jaxsvc 700`, igual que
+# `JAX_EJECUTOR_CONTROLADOR_LLAVE`, pero un PAR DISTINTO: ese es para `axioma@127.0.0.1`
+# local; éste, para el ADMINISTRADOR en cada remota) autorizada en cada máquina con
+# comando forzado hacia `ejecutor-huella` (`ops/ejecutor/ejecutor-huella` +
+# `ops/ejecutor/instalar_huella_en_maquina.sh`) -- mismo patrón que ya usa C4
+# (`ejecutor-freno-remoto`, `JAX_EJECUTOR_FRENO_LLAVE`). El comando forzado (`restrict`,
+# sin pty, sin reenvíos, `from=` acotado a hall9000) limita lo que esa llave puede hacer
+# aunque quien la lea quisiera abrir una shell con ella. `IdentitiesOnly=yes` hace
+# cumplir que ssh NUNCA ofrezca otra llave ni caiga a un agente -- sin eso, un fallo de
+# la llave del servicio podría hacer que ssh probara silenciosamente la personal del
+# administrador (si por algún accidente de entorno estuviera al alcance), que es
+# exactamente el defecto que este arreglo cierra.
+VARIABLE_HUELLA_LLAVE = "JAX_EJECUTOR_HUELLA_LLAVE"
+VARIABLE_HUELLA_KNOWN_HOSTS = "JAX_EJECUTOR_HUELLA_KNOWN_HOSTS"
+
+
+def argv_huella_servicio(h, *, llave: Path, known_hosts: Path, admin_usuario: str, tope_s: float) -> list[str]:
+    """El ssh REAL para tomar la huella -- reemplaza `revocacion.argv_admin` +
+    `comando_huella()` en el camino en vivo (ver el bloque de arriba). `-i llave` es la
+    llave PROPIA DEL SERVICIO (jaxsvc puede leerla) -- `IdentitiesOnly=yes` hace que ssh
+    NUNCA ofrezca otra. Se conecta como `admin_usuario` (la MISMA cuenta que
+    `JAX_EJECUTOR_ADMIN_USUARIO`, `fruiz`) -- lo que cambia es la CREDENCIAL, no de qué
+    cuenta es huésped: el comando forzado del lado remoto es lo que acota qué puede
+    hacer esa llave. `UserKnownHostsFile` dedicado (`known_hosts`): `jaxsvc` no comparte
+    el `$HOME/.ssh/known_hosts` de `fruiz` ni de `axioma`. `-F /dev/null` (ronda 2,
+    MINOR): ignora CUALQUIER `~/.ssh/config`/`/etc/ssh/ssh_config` del proceso que
+    invoca -- sin esto, un `Host` con `ProxyJump`/`IdentityFile`/`User` para ese mismo
+    nombre o IP (heredado, a mano, o por accidente) podría pisar `-i`/`IdentitiesOnly`
+    en silencio; con `-F /dev/null` sólo cuentan las opciones que este comando pasa
+    explícitamente. El comando remoto que se manda (`"ejecutor-huella"`) es cosmético --
+    el `command=` forzado en la remota lo reemplaza siempre -- pero deja algo legible en
+    el log de sshd sobre qué se pidió."""
+    return ["ssh", "-F", "/dev/null", "-i", str(llave), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts}",
+            "-o", f"ConnectTimeout={int(tope_s)}", "-p", str(h.puerto), f"{admin_usuario}@{h.ip}",
+            "ejecutor-huella"]
+
+
+# --- BLOCK-2/MAJOR-3 (ronda 2): la línea de authorized_keys del ADMINISTRADOR remoto, --
+# generada por PYTHON y TESTEABLE -- antes la armaba `instalar_huella_en_maquina.sh` en
+# una variable de bash sin ningún test. `actualizar_authorized_keys_admin` CONVERGE: si
+# ya hay una línea marcada (`MARCA_HUELLA_SERVICIO`), la REEMPLAZA -- por ejemplo si
+# `origen_ip` cambió porque hall9000 cambió de IP -- nunca la duplica ni dos entradas
+# compiten por el mismo comando forzado.
+
+MARCA_HUELLA_SERVICIO = "ejecutor-huella-servicio"
+#: MAJOR-5 (ronda 2): el sudoers acotado en la remota exige EXACTAMENTE este comando
+#: SIN argumentos -- `ejecutor-huella ""` en el sudoers.d, no sólo `ejecutor-huella` a
+#: secas. Verificado empíricamente (no supuesto, Principio I) en un contenedor Ubuntu
+#: 24.04 limpio, sudo 1.9.17p2, 2026-09-22: una regla NOPASSWD sin argumentos en el
+#: sudoers ACEPTA cualquier argumento (`sudo -n cmd hostil` → rc=0); sólo agregando la
+#: cadena vacía (`cmd ""`) sudo exige que la invocación NO tenga argumentos (`sudo -n
+#: cmd hostil` → rechazado, pide contraseña). Sin la comilla vacía, "sin argumentos: no
+#: hay superficie de ataque" habría sido una afirmación falsa sobre el propio sudoers.
+_COMANDO_FORZADO_HUELLA = "sudo -n /usr/local/sbin/ejecutor-huella"
+
+
+#: MAJOR-6 (ronda 3, auditoría adversarial 2026-09-22): mismo patrón que
+#: `revocacion._TIPO_DE_LLAVE` -- una LISTA BLANCA de tipos reales de llave ssh, no
+#: "sin caracteres raros". Antes `linea_authorized_keys_servicio` sólo validaba
+#: `clave`/`origen_ip`; un `tipo` con un salto de línea colaba una SEGUNDA línea en el
+#: authorized_keys sin `command=`/`restrict` -- una llave de acceso completo.
+_TIPO_DE_LLAVE = re.compile(r"^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp\d+|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com)$")
+
+
+def _validar_ip_literal(origen_ip: str) -> str:
+    """MAJOR-6 (ronda 3): `from=` de ssh admite PATRONES (glob) -- `from="*"` autoriza
+    CUALQUIER origen, que es exactamente lo que este control existe para impedir. Se
+    exige una IP LITERAL (v4 o v6), nunca un patrón -- `ipaddress.ip_address` rechaza
+    `*`, `?`, rangos y cualquier otra cosa que no sea una dirección exacta."""
+    import ipaddress
+
+    if not isinstance(origen_ip, str) or not origen_ip or any(c.isspace() for c in origen_ip) or '"' in origen_ip:
+        raise ValueError("origen_ip_invalido")
+    try:
+        ipaddress.ip_address(origen_ip)
+    except ValueError:
+        raise ValueError("origen_ip_invalido") from None
+    return origen_ip
+
+
+def linea_authorized_keys_servicio(tipo: str, clave: str, *, origen_ip: str) -> str:
+    """La línea que `instalar_huella_en_maquina.sh` agrega al `authorized_keys` del
+    administrador remoto -- `command=` forzado, `restrict` (sin pty/reenvíos/agente/
+    variables de entorno del cliente) y `from=` acotado al origen (hall9000). BLOCK-2:
+    si falta `command=`, `restrict` o `from=`, esto ya no protege nada -- por eso hay
+    tests que exigen los tres literalmente presentes y un mutante que los borra.
+
+    MAJOR-6 (ronda 3): `tipo` valida contra una lista blanca real (`_TIPO_DE_LLAVE`,
+    mismo patrón que `revocacion.py`) -- un salto de línea en `tipo` (o en `clave`)
+    podía colar una SEGUNDA línea de `authorized_keys` sin `command=`/`restrict`
+    delante, una llave de acceso completo disfrazada de este arreglo. `clave` rechaza
+    CUALQUIER whitespace (no sólo espacio: `\\n`, `\\t`, `\\r`) y comillas. `origen_ip`
+    tiene que ser una IP LITERAL -- `from="*"` autoriza cualquier origen."""
+    if not _TIPO_DE_LLAVE.match(tipo or ""):
+        raise ValueError("tipo_invalido")
+    if not clave or any(c.isspace() for c in clave) or "'" in clave or '"' in clave:
+        raise ValueError("llave_invalida")
+    origen_ip = _validar_ip_literal(origen_ip)
+    return f'command="{_COMANDO_FORZADO_HUELLA}",restrict,from="{origen_ip}" {tipo} {clave} {MARCA_HUELLA_SERVICIO}'
+
+
+def actualizar_authorized_keys_admin(actuales: str, *, tipo: str, clave: str, origen_ip: str) -> str:
+    """MAJOR-3: converge de verdad. Si ya hay una línea marcada
+    `MARCA_HUELLA_SERVICIO` en `actuales`, la QUITA y pone la nueva (con el `origen_ip`
+    -- o `tipo`/`clave`, si algún día rota -- actual) al final; si no hay ninguna, la
+    agrega. El resto del archivo (otras llaves del administrador, líneas propias)
+    queda intacto y en el mismo orden. Correr esto dos veces con los MISMOS argumentos
+    da el MISMO resultado (idempotente); con un `origen_ip` distinto, REEMPLAZA la
+    línea vieja en vez de duplicarla (convergente)."""
+    nueva = linea_authorized_keys_servicio(tipo, clave, origen_ip=origen_ip)
+    lineas = [l for l in actuales.splitlines() if not l.rstrip().endswith(f" {MARCA_HUELLA_SERVICIO}")]
+    lineas.append(nueva)
+    return "\n".join(lineas) + "\n"
 
 
 @dataclass(frozen=True)
@@ -153,12 +497,127 @@ def huella_desde_salida(host: str, salida: bytes) -> Huella:
     return Huella(host, salida.decode(errors="replace"))
 
 
-def huella_valida(h: Huella) -> bool:
+#: MAJOR-6 (ronda 2): 64 hex + dos espacios -- exactamente lo que imprime `sha256sum`.
+_LINEA_CON_HASH = re.compile(r"^[0-9a-f]{64}  ")
+
+#: Los CUATRO estados que `tramo()` puede reportar para una ruta declarada (ronda 4,
+#: auditoría adversarial 2026-09-22; hecho corregido en ronda 5, MAJOR-G -- ver el
+#: comentario sobre `_CUERPO_TRAMO_SH` más arriba): `HASH`/`D` (medida, existe) y
+#: `AUSENTE` (medida, confirmada que NO existe) son estados VÁLIDOS -- medido el
+#: 2026-09-22: `/root/.ssh/authorized_keys` SÍ existe (vacío, 0600, root) en hall9000,
+#: atemai y prod; sólo FALTA en `bridge`, y esa es la configuración SANA de bridge, no
+#: una medición rota ahí. `ERROR` (no se pudo medir -- permiso denegado, tipo
+#: inesperado, `sha256sum`/`find` roto) es el ÚNICO inválido.
+_HASH, _D, _AUSENTE, _ERROR = "HASH", "D", "AUSENTE", "ERROR"
+
+#: Las rutas que `huella_valida` exige ver representadas -- por default, las FIJAS
+#: (RUTAS_CONTROLES) MÁS el glob de binarios de `/usr/local/sbin` (BLOCK-E, ronda 5:
+#: antes NO entraba -- "su desaparición total no invalida nada" -- lo que también
+#: dejaba pasar un `find` roto sobre ese barrido sin que nadie lo notara; ahora
+#: `tramo_sbin_ejecutor()` reporta su propio estado bajo el sentinela
+#: `RUTA_GLOB_SBIN_EJECUTOR`, que se valida como cualquier otra ruta). El
+#: authorized_keys del administrador NO entra por default porque es host/cuenta-
+#: dependiente (`ruta_authorized_keys_admin`) -- MAJOR-C (ronda 4): un llamador que
+#: conoce la cuenta (`vigia_servicio.py`) tiene que agregarla explícitamente a `rutas=`.
+RUTAS_DECLARADAS_POR_DEFAULT = RUTAS_CONTROLES + (RUTA_GLOB_SBIN_EJECUTOR,)
+
+
+def _clasificar_linea(linea: str) -> tuple[str, str] | None:
+    """`(ruta, estado)` de una línea de huella, o `None` si no tiene forma reconocible.
+    `E <ruta> <motivo>`: la ruta es el PRIMER token después de `E ` -- nunca puede
+    tener espacios (viene de `_q`/de una ruta de archivo real), a diferencia del
+    motivo, que sí puede traerlos."""
+    if _LINEA_CON_HASH.match(linea):
+        return linea[66:], _HASH
+    if linea.startswith("D "):
+        return linea[2:], _D
+    if linea.startswith("A "):
+        return linea[2:], _AUSENTE
+    if linea.startswith("E "):
+        return linea[2:].split(" ", 1)[0], _ERROR
+    if linea.startswith("L "):
+        return linea[2:].split(" -> ", 1)[0], "L"
+    return None
+
+
+def _estado_de_ruta_declarada(lineas: list[str], ruta: str) -> str | None:
+    """El estado de la línea que representa EXACTAMENTE `ruta` (nunca una línea de
+    CONTENIDO por debajo de ella, que usa la MISMA forma de hash/D/L pero para una
+    ruta más larga). Si ninguna línea representa `ruta` en sí -- ni siquiera un
+    `E` -- pero SÍ hay contenido reportado POR DEBAJO de ella (una ruta que es
+    directorio siempre trae su propia línea `D` de todos modos desde ronda 4 -- esto
+    queda como red de contención para cualquier llamador que pase una ruta que sólo
+    aparezca como padre de contenido), eso cuenta como medido -- si no hay NADA, `None`
+    (ni medido, ni declarado ausente: la medición de esa ruta ni siquiera corrió).
+
+    MAJOR-H (ronda 5, auditoría adversarial 2026-09-22): un destino de symlink (o un
+    nombre de archivo) puede contener un salto de línea DE VERDAD -- `find -printf`
+    lo imprime tal cual, sin escapar nada -- y eso puede partir una línea en dos,
+    forjando una SEGUNDA línea que dice ser la MISMA `ruta` exacta que la línea
+    genuina. Quedarse con la PRIMERA por orden (el criterio de rondas 2-4) deja que la
+    forjada gane si ordena antes que la real -- por ejemplo una `A <ruta>` forjada
+    tapando una `D <ruta>` genuina, o al revés. Dos (o más) líneas que dicen ser
+    EXACTAMENTE la misma ruta declarada NUNCA es un estado sano -- ninguna corrida
+    legítima de `tramo()`/`tramo_sbin_ejecutor()` emite dos líneas de estado para la
+    misma ruta de nivel superior -- así que ante una colisión así, la ruta se reporta
+    `_ERROR` (inválida), sin intentar adivinar cuál de las dos "es la de verdad"."""
+    coincidencias = []
+    con_contenido_debajo = False
+    for linea in lineas:
+        clasificada = _clasificar_linea(linea)
+        if clasificada is None:
+            continue
+        r, estado = clasificada
+        if r == ruta:
+            coincidencias.append(estado)
+        elif r.startswith(ruta + "/"):
+            con_contenido_debajo = True
+    if len(coincidencias) > 1:
+        return _ERROR
+    if coincidencias:
+        return coincidencias[0]
+    return _D if con_contenido_debajo else None
+
+
+def huella_valida(h: Huella, *, rutas: tuple | None = None) -> bool:
     """MINOR (ronda 6): una huella vacía (o que no trae ni una línea reconocible) no
     es "sin cambios" ni "máquina limpia" -- es que la medición no sirvió (comando mal
     formado, sudo denegado sin que rc lo reflejara, binarios ausentes). Fail-closed:
-    quien llama trata esto como no-medible, no como "todo en orden"."""
-    return bool(h.texto.strip())
+    quien llama trata esto como no-medible, no como "todo en orden".
+
+    MAJOR-6 (ronda 2, auditoría adversarial 2026-09-22): "no vacía" NO ALCANZABA. Si
+    `sha256sum` faltara en la remota, el tramo de esa ruta ahora reporta explícitamente
+    `E <ruta> sha256sum_fallo` (ver `tramo()`/`_CUERPO_TRAMO_SH`) -- así que el chequeo
+    de abajo, por-ruta, ya lo cubre cuando se pasa `rutas=`; para el caso genérico
+    (`rutas=None`) se conserva "al menos un hash en algún lado" como red de contención.
+
+    RONDA 4 (BLOCK reproducido en atemai y prod): "cada ruta declarada tiene que
+    aparecer" (MINOR, ronda 3) NO distinguía "esta ruta no existe" (sano) de "no se
+    pudo medir" (roto) -- las dos daban CERO líneas para esa ruta con el `find`
+    anterior, y esta función las trataba igual: inválida. Eso bloqueaba el Ejecutor en
+    la única máquina donde esa ruta de verdad está ausente (medido, ronda 5, MAJOR-G:
+    `bridge` -- hall9000, atemai y prod SÍ la tienen, vacía). Ahora exige, para CADA
+    ruta de `rutas`, que su estado sea `HASH`, `D` o `AUSENTE` -- `ERROR` (o ausencia
+    total de la línea, o MÁS DE UNA línea reclamando la misma ruta -- MAJOR-H, ronda 5,
+    ver `_estado_de_ruta_declarada`) invalida la huella entera. Que una ruta pase de
+    `AUSENTE` a existir (o al revés) sigue siendo un cambio de TEXTO real (`A <ruta>`
+    desaparece, aparece un hash/`D`) -- `cambio()`/`hallazgos()` lo ven igual que
+    cualquier otro, sin tocar nada acá.
+
+    `rutas=None` (el default) SALTA el chequeo por-ruta -- lo pide `vigia_servicio.py`
+    explícitamente en sus CUATRO llamadas reales (con `RUTAS_DECLARADAS_POR_DEFAULT`
+    más el authorized_keys del administrador, MAJOR-C); dejarlo opcional evita que
+    esta función necesite adivinar qué se declaró cuando quien llama no lo sabe (por
+    ejemplo, pruebas o usos genéricos de una sola línea)."""
+    texto = h.texto.strip()
+    if not texto:
+        return False
+    lineas = texto.splitlines()
+    if not any(_LINEA_CON_HASH.match(linea) for linea in lineas):
+        return False
+    if rutas is None:
+        return True
+    return all(_estado_de_ruta_declarada(lineas, ruta) in (_HASH, _D, _AUSENTE) for ruta in rutas)
 
 
 def cambio(antes: Huella, despues: Huella) -> bool:
@@ -235,20 +694,24 @@ def leer_marca(ruta: Path) -> Marca:
 
 # --- la CLI de aceptación: `python -m jax.ejecutor.contratos.huella aceptar ...` --------
 #
-# Corre como FRUIZ (nunca axioma -- mismo criterio que toda la toma de huella). Ver
-# docs/ejecutor-huella-aceptar.md para el procedimiento completo y por qué existe.
+# Corre `sudo -u jaxsvc` (nunca `fruiz` a secas, nunca `axioma`, nunca `root` a secas --
+# ver `docs/ejecutor-huella-aceptar.md` para el porqué completo: el registro de C3 y
+# `JAX_EJECUTOR_MISIONES` son de `jaxsvc`). CORREGIDO (bug de producción, jax#260,
+# 2026-09-22): este comentario decía "corre como FRUIZ" -- ERA FALSO, y por eso
+# `_tomar_huella_actual` tenía el MISMO defecto que `vigia_servicio.py`: armaba el ssh
+# con `revocacion.argv_admin` (sin `-i`, resolución de identidad por default), que
+# `jaxsvc` no puede satisfacer con la llave personal de `fruiz`.
 
 async def _tomar_huella_actual(host_nombre: str, *, politica_ruta: Path, admin_usuario: str,
+                               huella_llave: Path, huella_known_hosts: Path,
                                tope_s: float = 30) -> Huella:
     """Toma la huella de AHORA MISMO contra `host_nombre`, leyendo su `ip`/`puerto` de
-    la política exportada (mismo camino que `vigia_servicio._tomar_huella` --
-    `revocacion.argv_admin` + un solo `sudo -n sh -c`). Import diferido: evita un ciclo
-    con `vigia_servicio` (que ya importa `huella`) y a `politica`/`revocacion`, que
-    `huella.py` no necesita para nada más que esto."""
-    import shlex
-
+    la política exportada -- mismo camino que `vigia_servicio._tomar_huella`:
+    `argv_huella_servicio` (la llave PROPIA del servicio, NUNCA la personal de
+    `admin_usuario` -- ver el bloque de arriba). Import diferido: evita un ciclo con
+    `vigia_servicio` (que ya importa `huella`) y a `politica`, que `huella.py` no
+    necesita para nada más que esto."""
     from jax.ejecutor.contratos import politica as P
-    from jax.ejecutor.contratos import revocacion
     from jax.ejecutor.contratos import vigia_servicio as V
 
     doc = json.loads(Path(politica_ruta).read_bytes())
@@ -256,7 +719,8 @@ async def _tomar_huella_actual(host_nombre: str, *, politica_ruta: Path, admin_u
     h = hosts.get(host_nombre)
     if h is None:
         raise ValueError("host_desconocido", host_nombre)
-    argv = revocacion.argv_admin(h, admin_usuario, f"sudo -n sh -c {shlex.quote(comando_huella())}")
+    argv = argv_huella_servicio(h, llave=huella_llave, known_hosts=huella_known_hosts,
+                                admin_usuario=admin_usuario, tope_s=tope_s)
     return await V.correr_huella_por_ssh(argv, host_nombre, tope_s=tope_s)
 
 
@@ -297,6 +761,7 @@ def _registrar_aceptacion(registro_ruta: Path, *, host: str, mision_id: str, ace
 async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: str, sin_medir: bool = False,
                   motivo: str | None = None, identidad_declarada_por: str = "proceso",
                   politica_ruta: Path | None = None, admin_usuario: str | None = None,
+                  huella_llave: Path | None = None, huella_known_hosts: Path | None = None,
                   registro_ruta: Path | None = None, pausa_ruta: Path | None = None,
                   tomar_huella_actual=None, registrar=_registrar_aceptacion,
                   ahora=None, salida=print) -> int:
@@ -319,9 +784,11 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
     se aceptó sin poder confirmar nada.
 
     `tomar_huella_actual`/`registrar` inyectables (tests): por default,
-    `tomar_huella_actual` es `_tomar_huella_actual` (ssh real, necesita
-    `politica_ruta`/`admin_usuario`) y `registrar` es `_registrar_aceptacion` (escribe
-    en el registro real de C3, necesita `registro_ruta`).
+    `tomar_huella_actual` es `_tomar_huella_actual` (ssh real con la llave PROPIA del
+    servicio -- necesita `politica_ruta`/`admin_usuario`/`huella_llave`/
+    `huella_known_hosts`; ver el arreglo del bug de producción jax#260, 2026-09-22, en
+    el docstring de `argv_huella_servicio`) y `registrar` es `_registrar_aceptacion`
+    (escribe en el registro real de C3, necesita `registro_ruta`).
 
     Barrido (ronda 9): al arrancar, limpia los temporales huérfanos que un kill puede
     haber dejado de una corrida anterior de `quitar_pausa_si` (`.{nombre}.quitar-tmp-*`
@@ -336,22 +803,36 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
         return 2
 
     tomar = tomar_huella_actual or (
-        lambda h: _tomar_huella_actual(h, politica_ruta=politica_ruta, admin_usuario=admin_usuario))
+        lambda h: _tomar_huella_actual(h, politica_ruta=politica_ruta, admin_usuario=admin_usuario,
+                                       huella_llave=huella_llave, huella_known_hosts=huella_known_hosts))
 
     ruta = ruta_huella(misiones, mision_id, host)
-    try:
-        marca = leer_marca(ruta)
-    except (OSError, ValueError, KeyError):
-        salida(f"codigo=huella_no_encontrada host={host} mision_id={mision_id}")
-        return 2
 
     async def _cuerpo() -> int:
-        # MAJOR (ronda 10, auditoría 8): TODO esto -- desde el chequeo de estado hasta
-        # el final -- corre bajo el candado de la pausa (si hay una configurada). Sin
-        # eso, dos `aceptar()` concurrentes (o uno y un barrido) pueden interleavear su
-        # propio chequeo-de-inodo con el `unlink` del otro: B pasa el chequeo, A borra,
-        # C5 pausa de nuevo, y B -- que ya había pasado SU chequeo -- termina borrando
-        # lo que hay AHORA (la pausa nueva de C5), no lo que vio. Ver `pausa.candado`.
+        # MAJOR-K (ronda 7, auditoría adversarial 2026-09-22): la marca se leía UNA
+        # sola vez, AFUERA de este candado (capturada como una variable ya fija que
+        # `_cuerpo()` sólo heredaba por clausura) -- pese a que este mismo comentario
+        # (desde ronda 10, auditoría 8) ya decía "TODO esto ... corre bajo el
+        # candado", sin que fuera cierto para la lectura misma. Con DOS `aceptar()`
+        # concurrentes sobre la MISMA marca REPORTADA: los dos leían `marca.estado ==
+        # REPORTADA` ANTES de que ninguno tuviera el candado; el primero en
+        # adquirirlo acepta y reescribe la marca como `ABIERTA`, lo suelta, y el
+        # segundo -- que YA había decidido "es REPORTADA" con SU lectura vieja --
+        # adquiere el candado y sigue igual, escribiendo una SEGUNDA línea base (con
+        # SU PROPIA remedición, que puede ya no coincidir con la que el primero
+        # aceptó) y un segundo evento de C3, absorbiendo en silencio cualquier cambio
+        # real ocurrido entre medio sin reportarlo nunca. Ahora la lectura (y la
+        # validación de estado) son lo PRIMERO que pasa DENTRO de `_cuerpo()` -- bajo
+        # el candado, si hay uno -- así que el segundo `aceptar()` ve la marca YA
+        # `ABIERTA` (la que el primero dejó) y la rechaza. Sin `pausa_ruta` (más
+        # abajo, `_cuerpo()` corre SIN candado): no hay contra qué serializar, mismo
+        # comportamiento de siempre.
+        try:
+            marca = leer_marca(ruta)
+        except (OSError, ValueError, KeyError):
+            salida(f"codigo=huella_no_encontrada host={host} mision_id={mision_id}")
+            return 2
+
         estados_aceptables = (REPORTADA, ABIERTA) if sin_medir else (REPORTADA,)
         if marca.estado not in estados_aceptables:
             salida(f"codigo=huella_no_reportada host={host} mision_id={mision_id} estado={marca.estado}")
@@ -366,6 +847,21 @@ async def aceptar(*, misiones: Path, mision_id: str, host: str, aceptado_por: st
             nueva_huella = marca.huella
         else:
             nueva_huella = await tomar(host)
+            # MAJOR-I (ronda 6, auditoría adversarial 2026-09-22): esto NO llamaba a
+            # `huella_valida()` -- una remedición rota (una ruta con `E ... find_fallo`,
+            # sudo denegado a mitad de camino, lo que sea) se tomaba igual como la
+            # NUEVA línea base, con `estado=ABIERTA` y la pausa BORRADA -- exactamente
+            # lo que este mecanismo existe para impedir. `sin_medir` queda AFUERA de
+            # este chequeo a propósito: ahí `nueva_huella` es la vieja marca ya
+            # aceptada como tal por Fernando (`motivo` obligatorio, ver arriba), no una
+            # medición nueva que pueda salir rota.
+            rutas_exigidas = RUTAS_DECLARADAS_POR_DEFAULT
+            if admin_usuario is not None:
+                rutas_exigidas = rutas_exigidas + (ruta_authorized_keys_admin(admin_usuario),)
+            if not huella_valida(nueva_huella, rutas=rutas_exigidas):
+                salida(f"codigo=medicion_no_valida host={host} mision_id={mision_id} "
+                      "detalle=\"la remedicion no esta completa -- no se acepta, la pausa sigue puesta\"")
+                return 2
 
         momento = ahora() if ahora is not None else datetime.now(timezone.utc).isoformat()
         registrar(registro_ruta, host=host, mision_id=mision_id, aceptado_por=aceptado_por,
@@ -458,9 +954,15 @@ def principal(argv: list[str]) -> int:
     [--sin-medir --motivo "<texto>"]` -- lee `JAX_EJECUTOR_MISIONES`,
     `JAX_EJECUTOR_ADMIN_USUARIO`, `JAX_EJECUTOR_REGISTRO`, `JAX_EJECUTOR_PAUSA` (se
     borra al aceptar, y SÓLO si es la pausa de ESTA huella -- ver B-1 en `aceptar()`),
-    `JAX_EJECUTOR_CUENTA` (la cuenta del Ejecutor, `axioma`) y la política exportada
-    (`JAX_EJECUTOR_POLITICA`, misma que lee `cuenta_axioma.cuenta_desde_entorno`) del
-    entorno.
+    `JAX_EJECUTOR_CUENTA` (la cuenta del Ejecutor, `axioma`), la política exportada
+    (`JAX_EJECUTOR_POLITICA`, misma que lee `cuenta_axioma.cuenta_desde_entorno`) y,
+    desde el arreglo del bug de producción (jax#260, 2026-09-22),
+    `JAX_EJECUTOR_HUELLA_LLAVE`/`JAX_EJECUTOR_HUELLA_KNOWN_HOSTS` (la llave PROPIA del
+    servicio para volver a medir -- ver `argv_huella_servicio`) del entorno. Las dos
+    últimas se exigen SIEMPRE, aunque la corrida termine usando `--sin-medir`: mismo
+    criterio que ya regía para `politica_ruta`/`admin_usuario`, que tampoco hacían falta
+    para ese camino y de todos modos se piden por adelantado -- fail-closed sobre
+    configuración incompleta, no sobre si esta corrida en particular los va a usar.
 
     M-1 (ronda 8): el registro de C3 (`/var/log/jax-ejecutor/registro.jsonl`) y el
     árbol de misiones (`JAX_EJECUTOR_MISIONES`) son de `jaxsvc` -- `fruiz` sólo tiene
@@ -519,6 +1021,8 @@ def principal(argv: list[str]) -> int:
         return asyncio.run(aceptar(
             misiones=Path(env["JAX_EJECUTOR_MISIONES"]), mision_id=args.mision_id, host=args.host,
             politica_ruta=Path(env["JAX_EJECUTOR_POLITICA"]), admin_usuario=env["JAX_EJECUTOR_ADMIN_USUARIO"],
+            huella_llave=Path(env["JAX_EJECUTOR_HUELLA_LLAVE"]),
+            huella_known_hosts=Path(env["JAX_EJECUTOR_HUELLA_KNOWN_HOSTS"]),
             registro_ruta=Path(env["JAX_EJECUTOR_REGISTRO"]), pausa_ruta=_pausa.ruta_de_la_pausa(env),
             aceptado_por=aceptado_por, sin_medir=args.sin_medir, motivo=args.motivo,
             identidad_declarada_por=declarada_por))

@@ -17,10 +17,22 @@ Este módulo NO es una unidad systemd (la plantilla `ejecutor-vigia@.service` qu
 prometía se retiró el 2026-09-22: código muerto, el journal nunca mostró un solo
 arranque suyo -- ver DEUDA.md). Lo lanza `abrir_vigia` (`jax/ejecutor/mision_servicio.py`)
 como SUBPROCESO DIRECTO por cada turno (`python -m jax.ejecutor.contratos.vigia_servicio
-<ruta_mision>`), heredando la identidad del proceso que lo lanza -- en producción,
-`jax-platform` (`User=fruiz`), así que este módulo corre como `fruiz`. Eso es lo que hace
-coherente a M-1 más abajo (la huella la toma el controlador COMO FRUIZ, nunca como
-`axioma`): no es una cuenta de servicio aparte, es la misma identidad del proceso.
+<ruta_mision>`), heredando la identidad del proceso que lo lanza.
+
+CORREGIDO (bug de producción, jax#260, 2026-09-22; este párrafo decía lo contrario y
+ERA FALSO): en producción ese proceso es `jax-platform`, y desde el 2026-09-17 (decisión
+de Fernando, cuenta de servicio) `jax-platform.service` corre como `jaxsvc`
+(`/etc/systemd/system/jax-platform.service.d/cuenta-de-servicio.conf: User=jaxsvc`),
+NO como `fruiz` -- así que este módulo corre como `jaxsvc`, no como el administrador. Por
+eso M-1/`_tomar_huella` más abajo ya NO arma el ssh con `revocacion.argv_admin` (sin
+`-i`, resolución de identidad por DEFAULT): `jaxsvc` no puede leer `~fruiz/.ssh/*` (600,
+dueño `fruiz`), y ese camino medía `vigia_no_latio=true rc=2` en producción -- el
+Ejecutor bloqueado por completo. Usa en cambio `huella.argv_huella_servicio`, con una
+llave PROPIA del servicio (`JAX_EJECUTOR_HUELLA_LLAVE`, jaxsvc:jaxsvc) autorizada por
+comando forzado en cada remota (ver el docstring de ese módulo). El CONTROLADOR sigue
+siendo, nominalmente, el mismo administrador (`fruiz`, vía `JAX_EJECUTOR_ADMIN_USUARIO`)
+-- lo que cambió es la CREDENCIAL con la que se llega a esa cuenta, no de qué cuenta es
+huésped ni que siga sin ser `axioma`.
 La misión es un JSON `{"mision": texto, "hosts": [nombres]}` en
 `JAX_EJECUTOR_MISIONES/<id>.json` (`<id>` = `Turno.id_vigia`, `<mision_id>-t<n>`, o el
 UUID bare de la misión de humo). Salida: códigos `clave=valor` (formato.py), nunca texto
@@ -33,13 +45,12 @@ import json
 import logging
 import os
 import re
-import shlex
 import signal
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, huella, pausa, politica, revocacion, vigia
+from jax.ejecutor.contratos import arranque, cuenta_axioma, formato, huella, pausa, politica, vigia
 from jax.ejecutor.contratos import auditor as A
 
 log = logging.getLogger("ejecutor.vigia_servicio")
@@ -120,7 +131,8 @@ def ruta_huella(misiones: Path, mision_id: str, host: str) -> Path:
     return huella.ruta_huella(misiones, mision_id, host)
 
 
-async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella, pausar, pausa_ruta) -> bool:
+async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella, pausar, pausa_ruta,
+                                      rutas_extra: tuple = ()) -> bool:
     """M-1 (ronda 6; estados con nombre desde ronda 7). Antes de que CUALQUIER misión
     nueva abra su propia huella en `host`, revisa TODAS las marcas de OTRA vuelta --
     de esta misma misión (un turno que se cortó) o de otra:
@@ -161,9 +173,11 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
                 "origen": "huella", "motivo": "huella_no_medible", "host": host, "mision_id": mision_id_de_la_ruta,
                 "detalle": ["huerfana", type(exc).__name__]})
             return False
-        if not huella.huella_valida(despues) or huella.cambio(antes, despues):
+        rutas = huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra
+        if not huella.huella_valida(despues, rutas=rutas) or huella.cambio(antes, despues):
             log.critical("vigia_servicio huella_cambio_no_declarado host=%s motivo=huerfana", host)
-            detalle = tuple(["huella_de_ahora_vacia"] if not huella.huella_valida(despues)
+            detalle = tuple(["huella_de_ahora_vacia"]
+                            if not huella.huella_valida(despues, rutas=rutas)
                             else huella.lineas_agregadas_o_quitadas(antes, despues))
             await asyncio.to_thread(huella.escribir_marca, ruta,
                                     huella.Marca(huella=antes, estado=huella.REPORTADA, diff=detalle))
@@ -177,7 +191,7 @@ async def verificar_huellas_huerfanas(misiones: Path, host: str, *, tomar_huella
 
 
 async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, host: str, tomar_huella,
-                                          pausar, pausa_ruta) -> huella.Huella | None:
+                                          pausar, pausa_ruta, rutas_extra: tuple = ()) -> huella.Huella | None:
     """La huella de APERTURA de la MISIÓN (ronda 4, M-1) -- NO la del turno. Primero
     resuelve cualquier deuda huérfana en `host` (`verificar_huellas_huerfanas`); si esa
     revisión encuentra un problema, ESTA misión tampoco abre (devuelve `None`) --
@@ -191,19 +205,33 @@ async def huella_de_apertura_de_la_mision(*, misiones: Path, mision_id: str, hos
     Deliberadamente SIN try/except sobre `tomar_huella` (M-3/M-4, rondas 4/6): si
     revienta la primera vez, la excepción se propaga -- una huella de apertura que no
     se pudo tomar no es "sin cambios", es que la misión no debe abrir. MINOR (ronda 6):
-    una huella de apertura vacía (no parsea/no midió nada real) es el mismo fallo."""
+    una huella de apertura vacía (no parsea/no midió nada real) es el mismo fallo.
+
+    MAJOR-L (ronda 7, auditoría adversarial 2026-09-22): la marca YA PERSISTIDA (el
+    camino de arriba, "si ya hay una línea base... la carga TAL CUAL") se cargaba sin
+    validarla contra las rutas EXIGIDAS de HOY -- sólo el camino "sin marca todavía"
+    (el `except FileNotFoundError`) llamaba a `huella_valida()`. Si lo que hace falta
+    vigilar cambió entre el turno 1 (que fijó esa línea base) y un turno posterior --
+    el caso concreto: `admin_usuario` cambia entre turnos, así que
+    `ruta_authorized_keys_admin` resuelve OTRA ruta -- la apertura seguía abriendo con
+    una línea base que ya no representa lo que HOY hay que exigir, sin que nadie lo
+    notara. Ahora las DOS ramas pasan por el mismo chequeo."""
     ok = await verificar_huellas_huerfanas(misiones, host, tomar_huella=tomar_huella, pausar=pausar,
-                                           pausa_ruta=pausa_ruta)
+                                           pausa_ruta=pausa_ruta, rutas_extra=rutas_extra)
     if not ok:
         return None
     ruta = ruta_huella(misiones, mision_id, host)
+    rutas_exigidas = huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra
     try:
         marca = await asyncio.to_thread(huella.leer_marca, ruta)
         h = marca.huella
     except FileNotFoundError:
         h = await tomar_huella(host)
-        if not huella.huella_valida(h):
+        if not huella.huella_valida(h, rutas=rutas_exigidas):
             raise RuntimeError("huella_apertura_vacia")
+    else:
+        if not huella.huella_valida(h, rutas=rutas_exigidas):
+            raise RuntimeError("huella_apertura_persistida_invalida")
     await asyncio.to_thread(huella.escribir_marca, ruta, huella.Marca(huella=h, estado=huella.ABIERTA))
     return h
 
@@ -220,7 +248,8 @@ def hosts_con_sudo(hosts_mision, hosts_pol: dict) -> tuple:
 
 
 async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict, hosts_con_sudo: tuple,
-                                       misiones: Path, mision_id: str, *, tomar_huella, pausar) -> tuple:
+                                       misiones: Path, mision_id: str, *, tomar_huella, pausar,
+                                       rutas_extra: tuple = ()) -> tuple:
     """«El CIERRE falla cerrado». Si la huella de cierre de un host NO SE PUEDE TOMAR
     (ssh caído, sudo denegado, lo que sea), sale vacía, o si no hubo huella de apertura
     que comparar, es un hallazgo `huella_no_medible` y PONE LA PAUSA. Sin declarado
@@ -249,7 +278,7 @@ async def _verificar_huellas_al_cierre(pausa_ruta: Path, huellas_iniciales: dict
                 "origen": "huella", "motivo": "huella_no_medible", "host": h, "mision_id": mision_id,
                 "detalle": [type(exc).__name__]})
             continue
-        if not huella.huella_valida(despues):
+        if not huella.huella_valida(despues, rutas=huella.RUTAS_DECLARADAS_POR_DEFAULT + rutas_extra):
             log.error("vigia_servicio huella_no_medible host=%s motivo=huella_vacia", h)
             motivos.append((h, "huella_no_medible"))
             await asyncio.to_thread(pausar, pausa_ruta, {
@@ -275,7 +304,7 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
                         intervalo_s: float, auditar, fin: asyncio.Event, exigir=arranque.exigir_contratos,
                         vigilar=vigia.vigilar, maquinas: tuple, hosts_con_sudo: tuple = (),
                         misiones: Path | None = None, mision_id: str | None = None,
-                        tomar_huella=None, pausar=pausa.poner_pausa) -> tuple:
+                        tomar_huella=None, pausar=pausa.poner_pausa, rutas_extra: tuple = ()) -> tuple:
     """Lanza ContratosNoVerificados sin haber latido nunca si un contrato no está vivo.
 
     `hosts_con_sudo`/`tomar_huella` (M-1/M-2, ronda 3; B-1/M-1/M-2 ronda 4;
@@ -291,7 +320,13 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
     `huella_de_apertura_de_la_mision` devuelve `None` para ese host, y acá se propaga
     `HuellaHuerfanaNoResuelta` ANTES de `vigilar()` (no se abre el proxy; `_principal`
     la reporta con su propio código, no como un contrato más). Devuelve los motivos de
-    pausa por huella (vacío si no se pidió huella o si todo midió limpio)."""
+    pausa por huella (vacío si no se pidió huella o si todo midió limpio).
+
+    `rutas_extra` (MAJOR-C, ronda 4): rutas ADEMÁS de `huella.RUTAS_DECLARADAS_POR_DEFAULT`
+    que `huella_valida()` tiene que ver representadas -- típicamente el authorized_keys
+    RESUELTO del administrador (`huella.ruta_authorized_keys_admin(admin_usuario)`),
+    que `_principal` pasa porque es quien conoce la cuenta. Vacío por default: los
+    llamadores de test que no la necesitan no cambian de comportamiento."""
     if ctx.hosts_mision != mision.hosts:
         raise ValueError("contexto_de_otra_mision")
     await exigir(ctx)
@@ -303,7 +338,7 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
         for h in hosts_con_sudo:
             baseline = await huella_de_apertura_de_la_mision(
                 misiones=misiones, mision_id=mision_id, host=h, tomar_huella=tomar_huella,
-                pausar=pausar, pausa_ruta=ctx.pausa)
+                pausar=pausar, pausa_ruta=ctx.pausa, rutas_extra=rutas_extra)
             if baseline is None:
                 log.critical("vigia_servicio mision_no_abre_por_huella_huerfana host=%s", h)
                 raise HuellaHuerfanaNoResuelta(h)
@@ -320,18 +355,19 @@ async def correr_mision(ctx: arranque.Contexto, mision: Mision, *, latido_cada_s
     if tomar_huella is not None and hosts_con_sudo:
         pausas_de_huella = await _verificar_huellas_al_cierre(
             ctx.pausa, huellas_iniciales, hosts_con_sudo, misiones, mision_id,
-            tomar_huella=tomar_huella, pausar=pausar)
+            tomar_huella=tomar_huella, pausar=pausar, rutas_extra=rutas_extra)
     log.info("vigia_servicio mision_cerrada")
     return pausas_de_huella
 
 
 async def correr_huella_por_ssh(argv: list, host: str, *, tope_s: float, correr=None) -> huella.Huella:
     """La ejecución REAL detrás de `_principal._tomar_huella` -- corre `argv` (ya
-    armado por `revocacion.argv_admin`), EXIGE rc==0 (M-4, ronda 6: un mutante que
-    quite este chequeo dejaría pasar una huella de un comando que reventó a mitad de
-    camino, con salida parcial, como si fuera limpia) y arma la `Huella` desde stdout.
-    Extraída a nivel de módulo para poder probarla sin el resto de `_principal`
-    (conexión DB, política, etc.) -- M-4 pide un test de esta pieza."""
+    armado por `huella.argv_huella_servicio`, ronda de arreglo del bug de producción
+    jax#260, 2026-09-22), EXIGE rc==0 (M-4, ronda 6: un mutante que quite este chequeo
+    dejaría pasar una huella de un comando que reventó a mitad de camino, con salida
+    parcial, como si fuera limpia) y arma la `Huella` desde stdout. Extraída a nivel de
+    módulo para poder probarla sin el resto de `_principal` (conexión DB, política,
+    etc.) -- M-4 pide un test de esta pieza."""
     correr = correr or asyncio.create_subprocess_exec
     proc = await correr(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                         start_new_session=True)
@@ -393,11 +429,16 @@ async def _principal(ruta_mision: Path) -> int:
     # hall9000 eso es sólo `fruiz`. Ver `huella.py::principal` y `_registrar_aceptacion`
     # para el mismo razonamiento aplicado a la CLI de aceptación de huellas.
     remotas_con_sudo = hosts_con_sudo(mision.hosts, hosts_pol)
-    # M-1 (ronda 4): la huella la toma el CONTROLADOR como `fruiz` (JAX_EJECUTOR_ADMIN_USUARIO),
-    # NUNCA como `axioma` -- una cuenta sin privilegios no puede medirse a sí misma. Mismo
-    # camino que ya usan `ops/ejecutor/_maquina.sh` y `scripts/ejecutor_contratos/revocar.py`
-    # para C6/revocar: `revocacion.argv_admin` + UN solo `sudo -n sh -c '<script>'`.
+    # M-1 (ronda 4; corregido -- bug de producción jax#260, 2026-09-22): la huella la
+    # toma el CONTROLADOR (mismo administrador que `JAX_EJECUTOR_ADMIN_USUARIO`, nunca
+    # `axioma` -- una cuenta sin privilegios no puede medirse a sí misma), pero YA NO
+    # con la CREDENCIAL personal de ese administrador: este proceso corre como `jaxsvc`
+    # (ver el docstring del módulo), que no puede leer `~fruiz/.ssh/*`. Usa la llave
+    # PROPIA del servicio (`huella.argv_huella_servicio`, JAX_EJECUTOR_HUELLA_LLAVE) --
+    # ver el docstring de ese módulo para el porqué completo.
     admin_usuario = os.environ["JAX_EJECUTOR_ADMIN_USUARIO"]
+    huella_llave = Path(os.environ["JAX_EJECUTOR_HUELLA_LLAVE"])
+    huella_known_hosts = Path(os.environ["JAX_EJECUTOR_HUELLA_KNOWN_HOSTS"])
     misiones_dir = Path(os.environ["JAX_EJECUTOR_MISIONES"])
     mision_id = mision_id_desde_ruta(ruta_mision)
 
@@ -405,14 +446,14 @@ async def _principal(ruta_mision: Path) -> int:
         return await auditor_cliente.auditar(lote, faceta=auditor_f, max_tokens=cfg.max_tokens)
 
     async def _tomar_huella(nombre_host: str) -> huella.Huella:
-        """El comando de `huella.comando_huella()` YA NO depende de la cuenta (B-1 se
-        fue: sin log de sudo que mirar, ronda 6) -- una sola forma, apertura y cierre
-        comparan lo mismo. `revocacion.argv_admin` + UN solo `sudo -n sh -c '<script>'`
-        -- mismo camino que `ops/ejecutor/_maquina.sh` y
-        `scripts/ejecutor_contratos/revocar.py` para C6/revocar. La ejecución de
-        verdad vive en `correr_huella_por_ssh` (a nivel de módulo, testeable aparte)."""
+        """`huella.argv_huella_servicio` -- una sola forma, apertura y cierre comparan
+        lo mismo. NUNCA `revocacion.argv_admin` (bug de producción jax#260, 2026-09-22:
+        ese camino resolvía la identidad por default de ssh, y este proceso corre como
+        `jaxsvc`, que no puede leer la llave personal de `admin_usuario`). La ejecución
+        de verdad vive en `correr_huella_por_ssh` (a nivel de módulo, testeable aparte)."""
         h = hosts_pol[nombre_host]
-        argv = revocacion.argv_admin(h, admin_usuario, f"sudo -n sh -c {shlex.quote(huella.comando_huella())}")
+        argv = huella.argv_huella_servicio(h, llave=huella_llave, known_hosts=huella_known_hosts,
+                                           admin_usuario=admin_usuario, tope_s=_TOPE_HUELLA_S)
         return await correr_huella_por_ssh(argv, nombre_host, tope_s=_TOPE_HUELLA_S)
 
     fin = asyncio.Event()
@@ -424,7 +465,11 @@ async def _principal(ruta_mision: Path) -> int:
             ctx, mision, latido_cada_s=latido_cada_s, lote_max=cfg.lote_max,
             intervalo_s=cfg.intervalo_s, auditar=auditar, fin=fin, maquinas=maquinas,
             hosts_con_sudo=remotas_con_sudo, misiones=misiones_dir, mision_id=mision_id,
-            tomar_huella=_tomar_huella)
+            tomar_huella=_tomar_huella,
+            # MAJOR-C (ronda 4): el authorized_keys del administrador entra a las
+            # rutas EXIGIDAS -- acá, y sólo acá, se conoce `admin_usuario` -- así que
+            # `RUTAS_DECLARADAS_POR_DEFAULT` (fija) no podía incluirla por sí sola.
+            rutas_extra=(huella.ruta_authorized_keys_admin(admin_usuario),))
     except arranque.ContratosNoVerificados as exc:
         for f in exc.fallos:
             print(formato.campos((("contrato", f.contrato), ("codigo", f.codigo)) + tuple(f.datos)), flush=True)

@@ -18,17 +18,25 @@ cuenta contra el proxy de C3, el registro encadenado, el auditor de C5 y la paus
 Ejecutor.
 
 El vigía HEREDA la identidad de quien lanza ESTE proceso: en producción, `jax-platform`
-(`User=fruiz`, verificado con `systemctl cat jax-platform.service`), así que el vigía
-corre como `fruiz`. Eso es lo que hace COHERENTE a M-1 de la huella
-(`vigia_servicio.py::_principal`, `ssh fruiz@<host> sudo -n ...` vía
-`revocacion.argv_admin`): el mecanismo asume que el proceso que la toma es `fruiz`, y
-ahora se sabe que efectivamente lo es -- no una cuenta de servicio (`jaxsvc`) que, de
-hecho, nunca llegó a lanzar un vigía real (la unidad systemd que lo hubiera hecho así
-se retiró el 2026-09-22, código muerto). Para C5 (elección y llamada al auditor,
-`eleccion_c5.py`/`canario_c5.py`) NO hay acoplamiento con esta identidad: la elección
-sale de la DB y la llamada al auditor es HTTP saliente, ninguna de las dos depende de
-qué cuenta del sistema operativo lanzó el proceso -- si mañana el vigía corriera bajo
-otra cuenta con el mismo acceso a la DB y a la red, C5 seguiría igual.
+-- y desde el 2026-09-17 (decisión de Fernando, cuenta de servicio) ESO es `jaxsvc`
+(`/etc/systemd/system/jax-platform.service.d/cuenta-de-servicio.conf: User=jaxsvc`), no
+`fruiz`. CORREGIDO (bug de producción jax#260, 2026-09-22): este párrafo decía lo
+contrario, con un "verificado con `systemctl cat jax-platform.service`" que en realidad
+sólo había mirado la unidad BASE, sin sus drop-ins -- `systemctl cat` los lista a los
+tres si se lee la salida completa; medido de nuevo, `sudo cat` de cada
+`.service.d/*.conf`, 2026-09-22. El vigía corre como `jaxsvc`, y `jaxsvc` no puede leer
+la llave personal de `fruiz` (`~fruiz/.ssh/*`, 600) -- por eso la huella
+(`vigia_servicio.py::_principal`) YA NO arma el ssh con `revocacion.argv_admin` (que
+resuelve la identidad por default, la de quien invoca): usa una llave PROPIA del
+servicio (`huella.argv_huella_servicio`, `JAX_EJECUTOR_HUELLA_LLAVE`, jaxsvc:jaxsvc),
+autorizada en cada remota por comando forzado -- mismo patrón que ya usa C4
+(`ejecutor-freno-remoto`). El CONTROLADOR nominal sigue siendo el mismo administrador
+(`fruiz`, vía `JAX_EJECUTOR_ADMIN_USUARIO`); lo que cambió es la credencial, no la
+cuenta. Para C5 (elección y llamada al auditor, `eleccion_c5.py`/`canario_c5.py`) NO hay
+acoplamiento con esta identidad: la elección sale de la DB y la llamada al auditor es
+HTTP saliente, ninguna de las dos depende de qué cuenta del sistema operativo lanzó el
+proceso -- si mañana el vigía corriera bajo otra cuenta con el mismo acceso a la DB y a
+la red, C5 seguiría igual.
 
 Topes sin defaults (Principio IV): JAX_EJECUTOR_TURNO_TOPE_S (lo que puede durar el cerebro
 en un turno) y JAX_EJECUTOR_VIGIA_ESPERA_S (lo que se espera a que el vigía verifique los
