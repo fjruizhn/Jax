@@ -32,16 +32,21 @@ def _parametros(funcion: str) -> set[str]:
     return {a.arg for a in fn.args.kwonlyargs + fn.args.args}
 
 
+def _es_test(ruta: Path) -> bool:
+    # Las dos convenciones de tests del repo: `test_*.py` y `_*_test.py`
+    # (jacobs/_arbitro_test.py). NO `*_test.py` a secas: eso sacaba código que no es
+    # test (scripts/load_test.py, base_de_test.py) y lo dejaba sin revisar.
+    return ruta.name.startswith("test_") or (ruta.name.startswith("_") and ruta.name.endswith("_test.py"))
+
+
 def _archivos():
-    """TODO .py del repo fuera de tests: un llamador nuevo en otro archivo entra solo."""
+    """TODO .py del repo fuera de tests: un llamador nuevo en otro archivo entra solo.
+    Un archivo que no se puede leer o no parsea NO se salta: rompe el test (un control
+    que ignora lo que no entiende da verde sin haber mirado)."""
     for ruta in RAIZ.rglob("*.py"):
-        partes = set(ruta.relative_to(RAIZ).parts)
-        if partes & FUERA or ruta.name.endswith("_test.py") or ruta.name.startswith("test_"):
+        if set(ruta.relative_to(RAIZ).parts) & FUERA or _es_test(ruta):
             continue
-        try:
-            yield ruta, ast.parse(ruta.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError, PermissionError):
-            continue
+        yield ruta, ast.parse(ruta.read_text(encoding="utf-8"), filename=str(ruta))
 
 
 def _nombre(llamada: ast.Call) -> str | None:
@@ -74,12 +79,19 @@ def test_cada_llamador_pasa_todos_los_parametros():
     assert faltan == {}, f"llamadores que dependen de un default: {faltan}"
 
 
+def _viene_de_la_config(valor: ast.expr) -> bool:
+    """`cfg.admite_mismo_proveedor` o el parámetro homónimo que la trae de más arriba.
+    Se exige la forma buena en vez de prohibir las malas: `False`, `not True` o
+    `bool(0)` quedan todos afuera."""
+    return (isinstance(valor, ast.Attribute) and valor.attr == "admite_mismo_proveedor") or \
+           (isinstance(valor, ast.Name) and valor.id == "admite_mismo_proveedor")
+
+
 def test_la_compuerta_no_se_escribe_a_mano():
-    # `admite_mismo_proveedor=False` literal pasaría el test de arriba y reproduciría
-    # el defecto: el valor tiene que venir de la config (o de un parámetro que la trae).
-    literales = [f"{r.relative_to(RAIZ)}:{n.lineno}" for r, n in _llamadas()
-                 for k in n.keywords if k.arg == "admite_mismo_proveedor" and isinstance(k.value, ast.Constant)]
-    assert literales == []
+    # Un valor escrito a mano pasaría el test de arriba y reproduciría el defecto.
+    a_mano = [f"{r.relative_to(RAIZ)}:{n.lineno}" for r, n in _llamadas()
+              for k in n.keywords if k.arg == "admite_mismo_proveedor" and not _viene_de_la_config(k.value)]
+    assert a_mano == []
 
 
 def test_probar_c5_elige_el_auditor_como_el_ejecutor_real():
@@ -88,4 +100,5 @@ def test_probar_c5_elige_el_auditor_como_el_ejecutor_real():
     assert "elegir_y_resolver_auditor" in nombres
     # Y no vuelve a elegir por su cuenta con la clave que no corresponde a hall9000.
     atributos = {n.attr for n in ast.walk(arbol) if isinstance(n, ast.Attribute)}
-    assert "auditor_faceta" not in atributos
+    cadenas = {n.value for n in ast.walk(arbol) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    assert "auditor_faceta" not in atributos | cadenas  # ni cfg.auditor_faceta ni getattr(cfg, "auditor_faceta")

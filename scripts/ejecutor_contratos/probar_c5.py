@@ -78,10 +78,14 @@ async def principal(args) -> int:
         # de clientes -> auditor_faceta_local. Antes era `cfg.auditor_faceta` a secas: sin
         # --auditor, esta prueba medía `thot` (nube) mientras una misión real en hall9000
         # usa `el_juez` (auditoría 2026-09-23). --auditor sigue forzando otra, para MEDIR.
-        auditor_f, con_clientes, conocidos = await eleccion_c5.elegir_y_resolver_auditor(
-            conn, cfg=cfg, hosts_mision=frozenset({"hall9000"}), resolve_facet=resolve_facet)
         if args.auditor:
+            # Forzada para MEDIR: no se resuelve antes la de producción (si esa faceta no
+            # estuviera bindeada, el --auditor dejaría de servir justo para medir otra).
             auditor_f = await resolve_facet(args.auditor)
+            con_clientes, conocidos = await eleccion_c5.hosts_de_la_mision(conn, frozenset({"hall9000"}))
+        else:
+            auditor_f, con_clientes, conocidos = await eleccion_c5.elegir_y_resolver_auditor(
+                conn, cfg=cfg, hosts_mision=frozenset({"hall9000"}), resolve_facet=resolve_facet)
         local = await eleccion_c5.es_local(conn, auditor_f.provider_id)
     if args.url_auditor:
         auditor_f = dataclasses.replace(auditor_f, base_url=args.url_auditor)
