@@ -158,11 +158,42 @@ def test_explain_del_update_con_corte_de_avance_usa_la_clave_primaria():
         assert "filesort" not in (f.get("Extra") or "") and "temporary" not in (f.get("Extra") or ""), filas
 
 
+_PRIMERA_COLUMNA_SQL = (
+    "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s "
+    "AND SEQ_IN_INDEX = 1"
+)
+
+
+def _fallas_del_barrido_por_status(fila, primera_columna):
+    """Pendiente 631: se exige la PROPIEDAD, no el nombre del índice. MariaDB
+    elige de forma inestable entre idx_pipelines_status e idx_pipelines_ocultos
+    (status, descartado_at); los dos sirven. La fila `p` del barrido tiene que
+    ir por rango (`status IN (...)`) sobre un índice que EMPIECE por status.
+    No se pide 'Using index': el barrido trae `p.*`. Devuelve las fallas."""
+    fallas = []
+    if fila.get("type") != "range":
+        fallas.append(f"type={fila.get('type')!r}, se esperaba range")
+    if primera_columna != "status":
+        fallas.append(f"el índice {fila.get('key')!r} empieza por {primera_columna!r}, no por 'status'")
+    return fallas
+
+
+def test_el_predicado_del_barrido_rechaza_una_fila_mala():
+    """El control tiene que poder fallar: una fila que no va por status y
+    recorre la tabla entera se rechaza por las dos razones."""
+    mala = {"table": "p", "key": "idx_jacobs_pipelines_duenio", "type": "ALL", "Extra": "Using where"}
+    assert len(_fallas_del_barrido_por_status(mala, "user_id")) == 2
+    buena = {"table": "p", "key": "idx_pipelines_ocultos", "type": "range", "Extra": "Using index condition"}
+    assert _fallas_del_barrido_por_status(buena, "status") == []
+
+
 def test_explain_de_la_consulta_del_barrido():
-    """R36, LAS CUATRO #1: el barrido filtra jacobs_pipelines por status
-    (idx_pipelines_status) y la subconsulta correlacionada lee los pasos de
-    CADA candidato por idx_steps_pipeline (ref por pipeline_id; el filtro por
-    status corre sobre a lo sumo 20 pasos, el tope duro de un plan)."""
+    """R36, LAS CUATRO #1: el barrido filtra jacobs_pipelines por status (un
+    índice con prefijo status: hoy idx_pipelines_status / idx_pipelines_ocultos)
+    y la subconsulta correlacionada lee los pasos de CADA candidato por
+    idx_steps_pipeline (ref por pipeline_id; el filtro por status corre sobre a
+    lo sumo 20 pasos, el tope duro de un plan)."""
     async def todo():
         sql = store._sql_candidatos_del_reaper(3)
         conn = await store.conexion_dedicada()
@@ -170,13 +201,20 @@ def test_explain_de_la_consulta_del_barrido():
             async with conn.cursor() as cur:
                 await cur.execute("EXPLAIN " + sql, ("pending", "running", "interrupted"))
                 cols = [d[0] for d in cur.description]
-                return [dict(zip(cols, r)) for r in await cur.fetchall()]
+                filas = [dict(zip(cols, r)) for r in await cur.fetchall()]
+                p = next((f for f in filas if f["table"] == "p"), None)
+                primera = None
+                if p is not None and p["key"]:
+                    await cur.execute(_PRIMERA_COLUMNA_SQL, ("jacobs_pipelines", p["key"]))
+                    fila = await cur.fetchone()
+                    primera = fila[0] if fila else None
+                return filas, primera
         finally:
             conn.close()
-    filas = asyncio.run(todo())
+    filas, primera = asyncio.run(todo())
     por_tabla = {f["table"]: f for f in filas}
     assert set(por_tabla) == {"p", "s"}, filas
-    assert por_tabla["p"]["key"] == "idx_pipelines_status" and por_tabla["p"]["type"] == "range", filas
+    assert _fallas_del_barrido_por_status(por_tabla["p"], primera) == [], filas
     assert por_tabla["s"]["key"] in ("idx_steps_pipeline",) and por_tabla["s"]["type"] == "ref", filas
     for f in filas:
         assert "filesort" not in (f.get("Extra") or "") and "temporary" not in (f.get("Extra") or ""), filas

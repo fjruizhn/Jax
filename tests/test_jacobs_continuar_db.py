@@ -149,6 +149,48 @@ def test_continuar_resetea_modelo_real_contra_la_db_real():
     )
 
 
+async def _primera_columna(tabla, indice):
+    """Primera columna del índice `indice` de `tabla` (None si no existe)."""
+    if not indice:
+        return None
+    conn = await store.conexion_dedicada()
+    try:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s "
+                "AND SEQ_IN_INDEX = 1", (tabla, indice))
+            fila = await cur.fetchone()
+            return fila[0] if fila else None
+    finally:
+        conn.close()
+
+
+def _fallas_del_conteo_por_status(fila, primera_columna):
+    """Pendiente 631: se exige la PROPIEDAD, no el nombre. El COUNT del cupo
+    va por ref/range sobre un índice que EMPIEZA por status y es cubriente
+    ('Using index': no toca la tabla). Devuelve la lista de fallas."""
+    fallas = []
+    if fila.get("type") not in ("ref", "range"):
+        fallas.append(f"type={fila.get('type')!r}, se esperaba ref o range")
+    if primera_columna != "status":
+        fallas.append(f"el índice {fila.get('key')!r} empieza por {primera_columna!r}, no por 'status'")
+    if "Using index" not in (fila.get("Extra") or ""):
+        fallas.append(f"Extra={fila.get('Extra')!r} sin 'Using index'")
+    return fallas
+
+
+def test_el_predicado_del_conteo_rechaza_una_fila_mala():
+    """El control tiene que poder fallar: una fila que no va por status,
+    recorre la tabla y no es cubriente se rechaza por las tres razones."""
+    mala = {"table": "jacobs_pipelines", "key": "idx_jacobs_pipelines_duenio", "type": "ALL",
+            "Extra": "Using where"}
+    assert len(_fallas_del_conteo_por_status(mala, "user_id")) == 3
+    buena = {"table": "jacobs_pipelines", "key": "idx_pipelines_ocultos", "type": "range",
+             "Extra": "Using where; Using index"}
+    assert _fallas_del_conteo_por_status(buena, "status") == []
+
+
 def test_explain_del_update_final_de_continuar_usa_la_clave_primaria():
     """Ola final F7 (revisión final m8): la tercera consulta de la
     transacción, _SQL_PIPELINE_CONTINUAR, no tenía EXPLAIN al lado de las
@@ -160,25 +202,30 @@ def test_explain_del_update_final_de_continuar_usa_la_clave_primaria():
             # El último parámetro es el tope del cupo: desde el 2026-09-17 el
             # UPDATE lleva la condición adentro (JOIN con la derivada del
             # recuento), así que el EXPLAIN mide la sentencia REAL, con su JOIN.
-            return await _explain(store._SQL_PIPELINE_CONTINUAR, (
+            filas = await _explain(store._SQL_PIPELINE_CONTINUAR, (
                 json.dumps([s.model_dump() for s in pasos], ensure_ascii=False),
                 json.dumps(pipeline.context, ensure_ascii=False), 2, time.time(), pid, 0,
                 MAX_PARALLEL_PIPELINES,
             ))
+            conteo = [f for f in filas if f["table"] == "jacobs_pipelines"]
+            primera = await _primera_columna("jacobs_pipelines", conteo[0]["key"]) if len(conteo) == 1 else None
+            return filas, primera
         finally:
             await _borrar(pid)
-    filas = asyncio.run(cuerpo())
+    filas, primera = asyncio.run(cuerpo())
     assert filas, "EXPLAIN vacío"
     # Tres filas de plan desde el 2026-09-17, y cada una tiene que justificarse:
     #   1. la fila del pipeline, por PRIMARY;
     #   2. la tabla DERIVADA del cupo -- sale type=ALL porque es materializada,
     #      pero tiene UNA fila (el COUNT): un "scan" de una fila no es un scan,
     #      y por eso se exige rows<=1 en vez de mirar sólo el type;
-    #   3. el COUNT de adentro, por idx_pipelines_status (el mismo índice que
-    #      usa el INSERT de la reserva: una sola fuente, un solo índice).
-    por_clave = {f["key"] for f in filas}
-    assert "PRIMARY" in por_clave, filas
-    assert "idx_pipelines_status" in por_clave, filas
+    #   3. el COUNT de adentro, por un índice con prefijo status (hoy
+    #      idx_pipelines_status / idx_pipelines_ocultos; pendiente 631: MariaDB
+    #      elige entre los dos de forma inestable y los dos sirven), cubriente.
+    (pipeline_fila,) = [f for f in filas if f["table"] == "p"]
+    assert pipeline_fila["key"] == "PRIMARY", filas
+    (conteo,) = [f for f in filas if f["table"] == "jacobs_pipelines"]
+    assert _fallas_del_conteo_por_status(conteo, primera) == [], filas
     for f in filas:
         derivada = str(f.get("table") or "").startswith("<derived")
         if derivada:
