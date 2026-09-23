@@ -172,22 +172,23 @@ def test_b7_writer_failure_rolls_back_real_governed_execution():
     request=build_execution_request(decision, authenticated_caller_id="jacobs", capability="CAP", motor="m", environment=ExecutionEnvironment.SANDBOX, target_kind="JAX_WORKSPACE", target_value="JAX_WORKSPACE", prompt="p", context={"x": 1}, timeout_seconds=60)
     auth=authorize_execution(decision, request, catalog(), now_utc=now)
     store=MariaDBExecutionStore(_connection); store.insert_authorization(auth)
+    # DELTA, no conteo absoluto ni acotado por decision_id. (Revisión
+    # adversarial de jax#266, ronda 3.) El conteo de tabla completa de master
+    # sólo pasaba contra una base virgen; acotarlo por `decision_id` lo dejó
+    # LÓGICAMENTE MUERTO -- el JOIN exige una fila en `execution_records` con
+    # ese decision_id, y el assert de arriba ya aseveró que son 0, así que
+    # nunca podía ser el que falle. El delta es independiente del estado Y
+    # sensible al escenario que el nombre del test promete: `execution_events`
+    # NO tiene FK, así que un evento commiteado por su propia conexión
+    # sobrevive al rollback y queda huérfano -- eso se le escapaba a la
+    # versión acotada y lo caza éste.
+    eventos_antes=_scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE event_type='EXECUTION_CREATED'")
     def fail(_cursor, _record): raise RuntimeError("forced B7 persistence failure")
     store.execution_evidence_writer=fail
     with pytest.raises(RuntimeError): create_execution(store, auth, now_utc=now)
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_authorization_consumptions WHERE authorization_id=%s",(auth.authorization_id,)) == 0
     assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_records WHERE decision_id=%s",(decision.decision_id,)) == 0
-    # Acotado a ESTA decisión. Antes contaba los `EXECUTION_CREATED` de TODA la
-    # tabla, así que sólo pasaba contra una base virgen: en la segunda corrida
-    # seguida contra el mismo servidor daba `assert 10 == 0` por las filas que
-    # habían dejado los demás tests -- reproducido también contra `origin/master`,
-    # o sea que es un defecto preexistente, no de jax#266. En CI no se veía
-    # porque el contenedor es nuevo en cada job, que es justo lo que esconde
-    # una dependencia de estado global.
-    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events e "
-                   "JOIN jax_execution.execution_records r ON r.execution_id=e.execution_id "
-                   "WHERE e.event_type='EXECUTION_CREATED' AND r.decision_id=%s",
-                   (decision.decision_id,)) == 0
+    assert _scalar("SELECT COUNT(*) FROM jax_execution.execution_events WHERE event_type='EXECUTION_CREATED'") == eventos_antes
 
 def test_b7_dispatch_writer_failure_rolls_back_dispatch_event():
     from policy.execution_control.service import dispatch_execution
@@ -474,10 +475,28 @@ def _exigir_servidor_desechable() -> None:
     sería exactamente el "verde sin haber hecho el trabajo" que el propio test
     existe para impedir.
     """
+    # PRIMERA barrera, y la que manda: un opt-in POSITIVO. La inferencia de
+    # abajo es buena pero es una inferencia sobre OTRA base, y `SHOW DATABASES`
+    # está filtrado por privilegios: con una cuenta de mínimo privilegio que no
+    # vea `jax_memory`, la inferencia pasa en verde aunque la base exista
+    # (reproducido en la revisión adversarial de jax#266, ronda 3). Quien
+    # declara que este servidor es desechable es quien lo levanta, no una
+    # deducción. El job `governed-execution-mariadb` la exporta.
+    if os.environ.get("JAX_EVIDENCE_TEST_DESTRUCTIVE") != "1":
+        raise AssertionError(
+            "este test BORRA el esquema jax_evidence: exige "
+            "JAX_EVIDENCE_TEST_DESTRUCTIVE=1, que sólo se pone en un MariaDB "
+            "desechable (lo hace el job governed-execution-mariadb). No se "
+            "saltea en silencio: es la única prueba contra base real de que la "
+            "siembra siembra.")
+
+    # SEGUNDA barrera, independiente: aunque alguien exporte la variable por
+    # costumbre, un servidor que hospeda `jax_memory` es producción o una copia.
+    # El `\_` va escapado: en LIKE, `_` es comodín de un carácter.
     connection = _connection()
     try:
         cursor = connection.cursor()
-        cursor.execute("SHOW DATABASES LIKE 'jax_memory'")
+        cursor.execute(r"SHOW DATABASES LIKE 'jax\_memory'")
         hospeda_produccion = cursor.fetchone() is not None
     finally:
         connection.close()
@@ -590,8 +609,7 @@ def test_persistir_una_definicion_exige_el_contexto_de_composicion_fija():
     # defecto de forma que buscar `window.confirm` y no ver `confirm(`.)
     # Cualquier método público NUEVO rompe este test, se llame como se llame:
     # agregarlo obliga a declarar acá que no escribe.
-    publicos = {nombre for nombre in dir(evidence)
-                if not nombre.startswith("_") and callable(getattr(evidence, nombre))}
+    publicos = {nombre for nombre in dir(evidence) if not nombre.startswith("_")}
     assert publicos == {
         # La ÚNICA escritura pública, y es contenido direccionado por hash:
         # no puede pisar bytes distintos bajo el mismo hash (levanta

@@ -147,3 +147,32 @@ def test_un_control_desconocido_corta_la_siembra():
 
     with pytest.raises(UnknownControlError):
         sembrar(StoreQueNuncaDeberiaEscribir(), [("CTL.NO.EXISTE", 1)], emitir=lambda _l: None)
+
+
+def test_la_salida_de_la_siembra_se_vacia_en_cada_linea(monkeypatch):
+    """`flush` en cada línea, o un SIGKILL a mitad se lleva el log entero.
+
+    (Revisión adversarial de jax#266, ronda 3, MINOR-C: el arreglo del flush
+    no tenía test, y quitarlo dejaba la suite en verde.) Medido en esa misma
+    revisión: sin `flush`, con stdout redirigido a un archivo, un `SIGKILL`
+    tras sembrar 3 controles dejaba el log con CERO líneas -- y las 3 filas
+    ya commiteadas en la base.
+    """
+    import sys
+
+    from scripts.sembrar_definiciones_de_control import _emitir_en_vivo, sembrar
+
+    class SalidaQueCuenta:
+        def __init__(self): self.escrituras = 0; self.vaciados = 0
+        def write(self, _texto): self.escrituras += 1
+        def flush(self): self.vaciados += 1
+
+    salida = SalidaQueCuenta()
+    monkeypatch.setattr(sys, "stdout", salida)
+    _emitir_en_vivo("una línea")
+    assert salida.escrituras >= 1 and salida.vaciados >= 1
+
+    # Y es el emisor POR DEFECTO de sembrar(): un default que no vacía deja el
+    # despliegue sin salida aunque `_emitir_en_vivo` esté perfecto.
+    import inspect
+    assert inspect.signature(sembrar).parameters["emitir"].default is _emitir_en_vivo

@@ -59,6 +59,12 @@ jobs:
           --health-interval=5s --health-timeout=5s --health-retries=20
     env:
       JAX_EXECUTION_TEST_MARIADB: "1"
+      # jax#266: este job levanta su propio contenedor, que muere con el job --
+      # es el único lugar donde está bien que un test DROPee `jax_evidence`
+      # para pararse en un esquema virgen. Sin esta variable el test falla
+      # (no se saltea): es la única prueba contra base real de que la siembra
+      # siembra, y saltearla en silencio sería el verde sin trabajo de siempre.
+      JAX_EVIDENCE_TEST_DESTRUCTIVE: "1"
       JAX_DB_HOST: 127.0.0.1
       JAX_DB_PORT: "3306"
       JAX_DB_USER: root
