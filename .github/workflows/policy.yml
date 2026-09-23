@@ -1315,6 +1315,10 @@ jobs:
           # CREAR el punto de montaje bajo el `/etc` del runner. En hall9000 ya existe. Se
           # replica el mismo `install -d` que hace `instalar_huella_en_maquina.sh`.
           sudo install -d -o root -g root -m 0755 /etc/ejecutor-huella
+          # `/etc/ssh/authorized_keys.d` (jax#263): misma razón. En las máquinas del
+          # inventario lo crea `instalar_en_maquina.sh` (C6); el runner no lo tiene y bwrap
+          # no puede crear el punto de montaje bajo el `/etc` del host.
+          sudo install -d -o root -g root -m 0755 /etc/ssh/authorized_keys.d
           # /usr/bin, NO /usr/local/bin: test_ejecutor_reemplazar_directorio_atomico.py
           # corre el script con env={"PATH": "<bin-de-sudo-falso>:/usr/bin:/bin"} --
           # hermético a propósito, sin el PATH ambiente del runner. Es además la ruta
