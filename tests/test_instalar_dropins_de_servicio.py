@@ -78,6 +78,66 @@ def test_falla_si_la_ruta_absoluta_no_esta_en_el_manifiesto(tmp_path):
     assert "ninguna fila coincide" in resultado.stderr
 
 
+def _repo_adulterado(tmp_path: Path, repo_rel: str, instalada: str, contenido: str = "[Service]\n") -> Path:
+    """Un REPO de mentira, completo, con su propio
+    ops/manifiesto-arranque-instalado.tsv de UNA fila -- para probar los
+    rechazos de m2 (auditoría escalón 3, MINOR-3) contra un manifiesto
+    ADULTERADO, sin tocar jamás el manifiesto real de este árbol."""
+    repo = tmp_path / "repo"
+    (repo / "ops").mkdir(parents=True)
+    (repo / "ops" / "manifiesto-arranque-instalado.tsv").write_text(
+        f"{repo_rel}\t{instalada}\n", encoding="utf-8"
+    )
+    archivo = repo / repo_rel
+    archivo.parent.mkdir(parents=True, exist_ok=True)
+    archivo.write_text(contenido, encoding="utf-8")
+    return repo
+
+
+def test_rechaza_fila_con_puntos_dobles(tmp_path):
+    repo = _repo_adulterado(
+        tmp_path, "config/z-pythonpath.conf",
+        "/etc/systemd/system/jax-malo.service.d/../../../tmp/evil.conf",
+    )
+    resultado = subprocess.run(
+        [str(SCRIPT), "jax-malo.service.d", str(repo), str(tmp_path / "destdir")],
+        capture_output=True, text=True,
+    )
+    assert resultado.returncode != 0
+    assert "rechazada" in resultado.stderr, resultado.stderr
+
+
+def test_rechaza_nombre_de_archivo_invalido(tmp_path):
+    repo = _repo_adulterado(
+        tmp_path, "config/z-pythonpath.conf",
+        "/etc/systemd/system/jax-malo2.service.d/evil;rm.conf",
+    )
+    resultado = subprocess.run(
+        [str(SCRIPT), "jax-malo2.service.d", str(repo), str(tmp_path / "destdir")],
+        capture_output=True, text=True,
+    )
+    assert resultado.returncode != 0
+    assert "inválido" in resultado.stderr, resultado.stderr
+
+
+def test_rechaza_archivo_de_repo_que_resuelve_fuera_del_repo(tmp_path):
+    fuera = tmp_path / "fuera-del-repo.conf"
+    fuera.write_text("[Service]\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "ops").mkdir(parents=True)
+    (repo / "ops" / "manifiesto-arranque-instalado.tsv").write_text(
+        "escape.conf\t/etc/systemd/system/jax-malo3.service.d/escape.conf\n", encoding="utf-8"
+    )
+    (repo / "escape.conf").symlink_to(fuera)
+
+    resultado = subprocess.run(
+        [str(SCRIPT), "jax-malo3.service.d", str(repo), str(tmp_path / "destdir")],
+        capture_output=True, text=True,
+    )
+    assert resultado.returncode != 0
+    assert "fuera del repo" in resultado.stderr, resultado.stderr
+
+
 def test_todo_bajo_destdir_nunca_fuera(tmp_path):
     """Instala las 4 unidades y el guion de sanidad: TODO lo escrito queda
     bajo tmp_path, nada se sale -- si algo colgara de una ruta absoluta sin

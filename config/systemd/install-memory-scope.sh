@@ -3,8 +3,26 @@
 # B9 does not restart platform services as a side effect of memory setup.
 set -euo pipefail
 ENVF=/etc/jax/.env
-SD=/home/fruiz/jax/config/systemd
-REPO="$(dirname "$(dirname "$SD")")"
+
+# MAJOR-3 (auditoría escalón 3, ronda 2): antes REPO/SD estaban fijos a
+# /home/fruiz/jax -- el checkout de TRABAJO de un agente, en rama ajena, sin
+# el guion nuevo. Corriendo como root eso copiaría lo que el agente tuviera
+# puesto en ese momento, no lo que el repo versiona. REPO se deriva del
+# propio guion (igual que ops/ejecutor/instalar_registro_y_cerco.sh) y se
+# EXIGE que sea /srv/jax-prod/jax -- no "parecido", exactamente esa ruta.
+REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
+if [ "$REPO" != /srv/jax-prod/jax ]; then
+  echo "install-memory-scope.sh: este guion corre desde $REPO -- tiene que ser /srv/jax-prod/jax (el checkout de producción), no un checkout de trabajo. Abortando." >&2
+  exit 1
+fi
+SD="$REPO/config/systemd"
+
+# El mismo freno que ExecStartPre ya exige en caliente (master + árbol
+# limpio), ACÁ TAMBIÉN, antes de copiar nada -- si /srv/jax-prod/jax no
+# está en las condiciones que checkout-de-produccion.conf va a exigirle al
+# servicio de todos modos, mejor que este guion aborte ahora que dejar
+# unidades instaladas contra un checkout que ni siquiera va a arrancar.
+/usr/local/sbin/jax-checkout-de-produccion-sano.sh "$REPO"
 
 echo "== 1) JAX_REPL_* en $ENVF =="
 if ! grep -q '^JAX_REPL_USER_ID=' "$ENVF"; then

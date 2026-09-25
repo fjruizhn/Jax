@@ -137,3 +137,34 @@ def test_verificar_arranque_instalado_da_cero_en_produccion():
         f"ops/verificar-arranque-instalado.sh salió {resultado.returncode}:\n"
         f"stdout: {resultado.stdout}\nstderr: {resultado.stderr}"
     )
+
+
+def test_env_de_produccion_no_tiene_clave_pythonpath():
+    """Auditoría escalón 3, ronda 2, MAJOR-2 (2): PYTHONPATH tiene que
+    llegar SIEMPRE por el z-pythonpath.conf de CADA unidad -- nunca por
+    `EnvironmentFile=/etc/jax/.env`, que las 4 unidades comparten. Una
+    clave PYTHONPATH ahí se aplicaría por igual a las 4 (systemd aplica
+    primero el EnvironmentFile y DESPUÉS los Environment= de los drop-ins,
+    así que hoy no rompería nada -- pero sería una segunda fuente de verdad
+    para el mismo valor, exactamente lo que este árbol existe para evitar).
+
+    Sólo el NOMBRE de la clave, nunca su valor -- ni siquiera para esta
+    aserción hace falta leerlo, y el resto de las claves de /etc/jax/.env
+    con valores de /home/fruiz (ver
+    test_los_archivos_de_unidad_no_apuntan_al_checkout_de_trabajo) es una
+    tarea aparte, no de este test."""
+    motivo = _motivo_de_skip_fuera_de_produccion()
+    if motivo:
+        pytest.skip(motivo)
+    resultado = subprocess.run(
+        ["sudo", "-n", "grep", "-oE", "^[A-Za-z_][A-Za-z0-9_]*=", "/etc/jax/.env"],
+        capture_output=True, text=True,
+    )
+    assert resultado.returncode == 0, (
+        f"no se pudo leer /etc/jax/.env con sudo -n (código {resultado.returncode}): {resultado.stderr}"
+    )
+    claves = {linea.rstrip("=") for linea in resultado.stdout.splitlines() if linea.strip()}
+    assert "PYTHONPATH" not in claves, (
+        "/etc/jax/.env tiene una clave PYTHONPATH -- pisaría (o duplicaría) el "
+        "z-pythonpath.conf de cada unidad, la única fuente de verdad que este árbol versiona"
+    )

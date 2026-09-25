@@ -67,21 +67,32 @@ def test_las_unidades_le_dan_un_hogar_propio_a_la_cuenta(nombre):
 
 
 @pytest.mark.parametrize("nombre", UNIDADES)
-def test_la_configuracion_efectiva_no_apunta_al_checkout_de_trabajo(nombre):
+def test_los_archivos_de_unidad_no_apuntan_al_checkout_de_trabajo(nombre):
     """Auditoría escalón 3, M1: el PYTHONPATH efectivo de jax-ejecutor-proxy,
     jax-memory-worker y jax-memory-synthesis apuntaba a /home/fruiz/jax -- el
     checkout de TRABAJO de un agente, en rama ajena, no el de producción.
-    Ningún valor de la configuración EFECTIVA (ni WorkingDirectory=, ni
+    Ningún valor de la unidad base + sus drop-ins (ni WorkingDirectory=, ni
     ExecStart=, ni PYTHONPATH dentro de Environment=, nada) puede mencionar
     /home/fruiz -- lo que corre en producción tiene que salir siempre de
-    /srv/jax-prod/jax."""
+    /srv/jax-prod/jax.
+
+    ACOTACIÓN (auditoría escalón 3, ronda 2, MAJOR-2): esto cubre SÓLO los
+    archivos de unidad (lo que arma este control). El PROCESO real además
+    hereda `EnvironmentFile=/etc/jax/.env`, compartido por las 4 unidades, y
+    ESE archivo sí tiene hoy claves con valores de /home/fruiz
+    (JAX_AUDIT_LOG_PATH, JAX_REPO_BASE, JAX_MISSIONS_DIR, JAX_CONFIG_PATH,
+    JAX_WORKSPACE_DIR -- nombres de clave confirmados con
+    `sudo -n grep -oE` sobre el archivo real, nunca sus valores). Arreglar
+    esas claves es una tarea aparte, de quien las declaró; este test NO
+    afirma nada sobre la configuración EFECTIVA completa del proceso, sólo
+    sobre lo que este árbol versiona y audita: los archivos de unidad."""
     simples, entorno = configuracion_efectiva(nombre)
     ofensores = {
         clave: valor
         for clave, valor in {**simples, **{f"Environment:{k}": v for k, v in entorno.items()}}.items()
         if "/home/fruiz" in valor
     }
-    assert not ofensores, f"{nombre}: la configuración EFECTIVA todavía apunta a /home/fruiz: {ofensores!r}"
+    assert not ofensores, f"{nombre}: los archivos de unidad todavía apuntan a /home/fruiz: {ofensores!r}"
 
 
 def _texto_con_delegados(nombre: str) -> str:

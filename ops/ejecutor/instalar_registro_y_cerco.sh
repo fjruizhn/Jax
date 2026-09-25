@@ -13,6 +13,11 @@ set -euo pipefail
 : "${JAX_EJECUTOR_FRENO_REMOTOS?}"
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 test "$(git -C "$REPO" branch --show-current)" = master
+# MAJOR-3 (auditoría escalón 3, ronda 2): faltaba el árbol LIMPIO -- una
+# rama correcta con cambios sin comitear (un experimento a medias, un
+# archivo tocado a mano) también es un checkout que no es fiable copiar a
+# unidades de producción.
+test -z "$(git -C "$REPO" status --porcelain)"
 PY="$REPO/.venv/bin/python"
 MARCA="$(date +%Y%m%d-%H%M%S)"
 
