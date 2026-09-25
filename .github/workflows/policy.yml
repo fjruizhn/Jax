@@ -720,7 +720,7 @@ jobs:
       # plugin contract as the other async database jobs.
       - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: >-
-          PYTHONPATH=. python -m pytest -v
+          PYTHONPATH=. python -m pytest -v --junitxml=/tmp/b9-memory-first.xml
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
           tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py
@@ -731,6 +731,23 @@ jobs:
           tests/test_b9_persistent_api.py tests/test_b9_scope_authority.py
           tests/test_b9_shared_memory.py tests/test_b9_systemd_ownership.py
           tests/test_b9_worker_composition.py tests/test_project_scope_authority.py
+      - name: Publicar fallos de memoria B9
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('/tmp/b9-memory-first.xml')
+          if path.exists():
+              for case in ET.parse(path).iter('testcase'):
+                  failure = case.find('failure')
+                  if failure is None:
+                      failure = case.find('error')
+                  if failure is not None:
+                      summary = (failure.get('message') or failure.text or 'pytest failure').splitlines()[0][:240]
+                      summary = summary.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f"::error title=B9 memory test::{case.get('classname')}.{case.get('name')}: {summary}")
+          PY
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -1421,7 +1438,7 @@ jobs:
           env -i PATH=/usr/bin:/bin bash -c 'command -v exch' || \
             { echo "exch no aparece con PATH=/usr/bin:/bin -- el mismo PATH hermético que usa test_ejecutor_reemplazar_directorio_atomico.py::_correr"; exit 1; }
       - run: >-
-          python -m pytest -v
+          python -m pytest -v --junitxml=/tmp/tests-puros-first.xml
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
           tests/test_vocativo_faceta.py tests/test_router_easter_egg.py
@@ -1573,6 +1590,23 @@ jobs:
           jacobs/_devolucion_ejecutor_test.py
           tests/test_jacobs_descarte.py
           tests/test_store_columna_descarte_acotada.py
+      - name: Publicar fallos de tests puros
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('/tmp/tests-puros-first.xml')
+          if path.exists():
+              for case in ET.parse(path).iter('testcase'):
+                  failure = case.find('failure')
+                  if failure is None:
+                      failure = case.find('error')
+                  if failure is not None:
+                      summary = (failure.get('message') or failure.text or 'pytest failure').splitlines()[0][:240]
+                      summary = summary.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f"::error title=Pure test::{case.get('classname')}.{case.get('name')}: {summary}")
+          PY
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
