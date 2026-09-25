@@ -1427,6 +1427,11 @@ jobs:
       # archivo es la fuente única; tests/test_requirements_completos.py falla si
       # un import de terceros no está fijado ahí o si este job deja de usarlo.
       - run: pip install -r requirements.txt pytest pytest-asyncio
+      # las_manos/_tool_authority_test.py::test_5c_... (BLOCK-1 de
+      # ops/permisos_proyectos.py, 2026-09-25) necesita setfacl/getfacl -- sin este paso
+      # el test se saltaría solo, y BLOCK-3b pedía que fuera determinista en vez de
+      # depender de lo que ya venga instalado en el runner.
+      - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       # B-1/M-4 (ronda 3, auditoría adversarial 2026-09-22): las pruebas de bwrap REAL
       # de tests/test_ejecutor_contratos_cuenta_axioma.py (pedido explícito del
       # coordinador: "un test tiene que ejecutar bwrap de verdad") se saltan solas si
@@ -4302,8 +4307,29 @@ jobs:
           # B9 gives scheduled worker ownership to systemd: three obsolete
           # REPL worker-launch/log tests were replaced by one regression (-2).
           # The combined floor is 2813 - 2 = 2811; the 45 skips are unchanged.
-          grep -qE "^2811 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2811 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          #
+          # 2811 -> 2812 (2026-09-25, las_manos/_tool_authority_test.py::test_5c_write_file_
+          # queda_escribible_por_grupo_bajo_acl_por_defecto -- reproduce B1 de
+          # ops/permisos_proyectos.py contra el escritor real de LAS MANOS): +1 test puro,
+          # determinista porque este job ahora instala acl explícito (paso de arriba) --
+          # antes hubiera dependido de lo que trajera el runner. Medido en hall9000 con el
+          # MISMO método que ya usa este job (sudo unshare --mount tapando
+          # ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform): la corrida completa dio
+          # 2811 passed (con test_5c incluido) porque test_arranque_las_manos_no_shadowea_
+          # policy.py::test_arranque_real_no_colisiona_con_policy_de_la_raiz falló con
+          # PermissionError sobre /etc/jax/build/implementation-identity.json -- reproducido
+          # también CORRIENDO ESE ARCHIVO SOLO, sin nada de esta ronda cerca: es una
+          # limitación de correr esa prueba específica como fruiz en hall9000 fuera de un
+          # runner real (necesita ese archivo con permisos que sólo jaxsvc/root tienen
+          # ahí), NO algo que esta ronda rompió. Con esa única falla explicada aparte, el
+          # delta neto de esta ronda es +1 sobre el piso anterior (2811 -> 2812); los 45
+          # skipped no cambian. NOTA DE RE-MEDICIÓN (regla 5, SESIONES EN PARALELO): la
+          # rama ops/versionar-drop-ins (PR #274) sube este mismo piso a 2821 por una
+          # causa completamente distinta (no relacionada) -- quien integre esa rama
+          # DESPUÉS de esta, o esta DESPUÉS de esa, tiene que re-medir sobre master en
+          # vez de sumar los deltas a ciegas.
+          grep -qE "^2812 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2812 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -5872,6 +5898,19 @@ jobs:
   # `sudo unshare --mount` tapando /home/fruiz/jax-workspace (tmpfs vacío encima, namespace
   # de montaje propio -- mismo método que usa el job arranque-instalado-versionado para
   # simular el runner real): 15 passed, 1 skipped.
+  # ops/permisos_proyectos.py -- segunda ronda de auditoría (2026-09-25, 3 BLOCK/3
+  # MAJOR/6 MINOR sobre la primera reescritura en Python, commit 4f117a7). El núcleo
+  # privilegiado ahora vive instalado (root:root 0755) para que el proceso re-ejecutado
+  # con sudo -n ... -I nunca importe nada del checkout -- este job instala esa misma
+  # copia ANTES de correr los tests, igual que hace un operador real (ver el runbook).
+  # Piso MEDIDO en un contenedor LIMPIO (no en hall9000, a propósito -- BLOCK-3a: el
+  # respaldo en el HOME de fruiz rompía en un runner sin ese directorio, y el propio
+  # usuario que corre los tests, que en GitHub Actions se llama "runner", no "fruiz",
+  # destapó una segunda categoría de fallos): `docker run ubuntu:24.04` con un usuario
+  # `runner` con NOPASSWD:ALL (mismo esquema que el runner real de GitHub Actions),
+  # `acl` instalado, sin ningún checkout previo -- 28 passed, 1 skipped (el que necesita
+  # /home/fruiz/jax-workspace/proyectos real, que ningún runner de GitHub Actions tiene).
+  # Si esto da "29 passed", este runner SÍ tiene ese árbol -- no es el runner esperado.
   permisos-proyectos:
     runs-on: ubuntu-latest
     steps:
@@ -5881,14 +5920,11 @@ jobs:
           python-version: "3.12"
       - run: sudo apt-get -qq update && sudo apt-get -qq install -y acl
       - run: pip install pytest
+      - name: Instalar el núcleo privilegiado (root:root 0755) -- BLOCK-2
+        run: sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
       - run: PYTHONPATH=. python -m pytest tests/test_permisos_proyectos.py -v
       - name: Piso exacto de tests CORRIDOS (no skipeados)
-        # Medido 2026-09-25 en hall9000 con sudo unshare --mount tapando
-        # /home/fruiz/jax-workspace: 15 passed, 1 skipped (el que necesita
-        # /home/fruiz/jax-workspace/proyectos real, que ningún runner de GitHub Actions
-        # tiene). Si esto da "16 passed", este runner SÍ tiene ese árbol -- no es el
-        # runner esperado, revisar antes de asumir que el piso subió.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^15 passed, 1 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 15 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
+          grep -qE "^28 passed, 1 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 28 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }

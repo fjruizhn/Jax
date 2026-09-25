@@ -562,10 +562,12 @@ async def _write_file(*, job_id: str, tool_name: str, caller: str, resolved: Pat
             # grupo=0, así que el archivo final queda con máscara ACL 0 para el grupo por
             # más que el texto de la ACL siga mostrando "rwx": el permiso EFECTIVO es
             # "---", verificado empíricamente en hall9000. os.fchmod ANTES de os.replace
-            # deja pedido 0664 (rw para dueño y grupo), que la ACL por defecto ya no
-            # reduce a cero -- así el archivo final queda escribible por el grupo del
-            # workspace como se espera, no sólo por su dueño.
-            os.fchmod(fd, 0o664)
+            # deja pedido 0660 (rw para dueño y grupo, NADA para otros -- MINOR m-c, ronda 2:
+            # 0664 dejaba el archivo legible por cualquiera fuera de proyectos/, donde no
+            # hay ACL por defecto que lo recorte), que la ACL por defecto ya no reduce a
+            # cero dentro de proyectos/ -- así el archivo final queda escribible por el
+            # grupo del workspace como se espera, no sólo por su dueño.
+            os.fchmod(fd, 0o660)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(content)
             os.replace(tmp_path, resolved)
