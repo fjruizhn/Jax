@@ -385,8 +385,40 @@ jobs:
           #   tabla descartables llevan el sufijo de la sesion
           #   (`_SUFIJO_DE_PRUEBA`), para que dos corridas concurrentes contra
           #   la misma base compartida no se pisen sobre el mismo nombre.
-          grep -qE "^14 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 14 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 14 -> 19 el 2026-09-23 (pendiente 631, parte B2):
+          #   _store_indexes_test.py suma RetiroDeIndicesTest (+5) -- crea
+          #   idx_pipelines_status A MANO sobre la tabla real (con `visible`
+          #   indexada) y exige que init_tables() lo retire, que la segunda
+          #   corrida no intente ningun DROP, que lo CONSERVE con ERROR si el
+          #   reemplazo falta / esta IGNORED / tiene otro prefijo, y que dos
+          #   init_tables() en paralelo no revienten (carrera del 1091). Tiene
+          #   que ser de integracion: en esta base nueva nadie crea el viejo y
+          #   el DROP no correria nunca. Visto en rojo contra el store.py viejo
+          #   (5 failed).
+          # 19 -> 22 el 2026-09-23 (auditoria de jax#272, MINOR-1/MINOR-2):
+          #   RetiroDeIndicesTest (+1) -- un solo init_tables() sobre una base
+          #   con el viejo y SIN el reemplazo deja el reemplazo creado y el
+          #   viejo retirado: sostiene que `_retirar_indices` corre DESPUES del
+          #   loop de creacion (rojo con la llamada movida antes del loop:
+          #   1 failed, 18 passed). DdlAcotadoRestauradoTest (+2), pura y sin
+          #   DB -- si falla el DDL y tambien el SET del finally, sube la del
+          #   DDL y el fallo del SET queda en ERROR; sin DDL fallido, sube la
+          #   del SET (rojo contra el `_ddl_acotado` anterior: 2 failed). Va en
+          #   este archivo y no en tests-puros, mismo criterio que
+          #   NombreDePruebaTest: el piso de tests-puros no cambia.
+          # 22 -> 26 el 2026-09-23 (mismo defecto, el OTRO finally):
+          #   AgregarColumnaAcotadaRestauradoTest (+4), pura y sin DB --
+          #   `_agregar_columna_acotada` restauraba lock_wait_timeout en un
+          #   finally sin proteger. Ahora el par SET/restaurado vive en un
+          #   solo helper (`_lock_wait_acotado`) que usan los dos. Si falla
+          #   el ALTER (o el RuntimeError fail-closed del 1205) y tambien el
+          #   SET, sube la original con su causa intacta y el SET va a ERROR;
+          #   sin error previo sube la del SET. Rojo contra el store.py
+          #   anterior: 3 failed, 17 passed (el cuarto, restaurado sin
+          #   fallos, es guarda de regresion).
+          # 26 -> 27 (2026-09-23, auditoría de jax#273): +1 test de la cancelación durante el restaurado.
+          grep -qE "^27 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 27 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Task 9 (2026-09-18, historial-y-arreglos-de-pipeline): el historial de la
   # Mesa necesita prompt/modelo_real/depends_on por paso en
@@ -670,8 +702,14 @@ jobs:
           #   la lista de `LLAMADORES` es datos, no un test; el piso se queda
           #   en 157. Corrida COMPLETA de este job confirmada en rojo antes
           #   del arreglo (mismo mensaje que reportó CI) y en verde después.
-          grep -qE "^157 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 157 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 157 -> 158 (2026-09-23, pendiente 631, índice por propiedad): +1 en
+          #   jacobs/_cupo_io_test.py -- PredicadoDelConteoTest (puro): el
+          #   predicado nuevo del EXPLAIN del cupo (índice con PREFIJO status,
+          #   ref/range, 'Using index', en vez de idx_pipelines_status por
+          #   nombre) rechaza una fila mala. Medido local, MISMO comando, base
+          #   de sesión: master 157 passed -> rama 158 passed.
+          grep -qE "^158 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 158 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -4199,11 +4237,20 @@ jobs:
           # para `[127.0.0.1]:58291` (cierto en hall9000, que tiene su propio sshd ahí; falso
           # en un runner nuevo, sin ningún sshd escuchando) -- ahora genera una llave de host
           # efímera propia y arma esa línea a mano, autosuficiente.
+          # 2801 -> 2813 el 2026-09-23 (pendiente 631, parte B2: retirar
+          #   idx_pipelines_status): +12 puras en tests/test_store_indice_duenio.py
+          #   (FormaDeLosRetiradosTest +4: ningun nombre en _INDICES y en
+          #   _INDICES_RETIRADOS a la vez, cada reemplazo se crea con el prefijo
+          #   declarado, DROP NOCOPY/LOCK=NONE; RetirarIndicesTest +8: no-op si no
+          #   existe, DROP acotado y restaurado, conserva con reemplazo ausente/
+          #   IGNORED/otro prefijo, 1205 -> ERROR y sigue, 1091 -> exito, otro
+          #   error sube). Los 45 skipped no cambian. Medido en local (archivo
+          #   solo: 5 -> 17); manda el runner.
           # B9 gives scheduled worker ownership to systemd: three obsolete
-          # REPL worker-launch/log tests were replaced by one regression that
-          # proves the REPL launches none.  The intended suite delta is -2.
-          grep -qE "^2799 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2799 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # REPL worker-launch/log tests were replaced by one regression (-2).
+          # The combined floor is 2813 - 2 = 2811; the 45 skips are unchanged.
+          grep -qE "^2811 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2811 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del
@@ -5629,8 +5676,15 @@ jobs:
           #   nuevo). Medido en local (127.0.0.1:3308, base de sesión
           #   jax_memory_test_auto<pid>), corrida completa de los 24
           #   archivos + 2 node ID del job: 167 passed, 0 failed.
-          grep -qE "^167 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 167 tests CORRIDOS."; exit 1; }
+          # 167 -> 169 (2026-09-23, pendiente 631, índice por propiedad): +1 en
+          #   tests/test_jacobs_continuar_db.py y +1 en
+          #   tests/test_jacobs_reaper_cas_db.py -- los dos puros: el predicado
+          #   nuevo (índice con PREFIJO status en vez de idx_pipelines_status
+          #   por nombre) rechaza una fila EXPLAIN mala. Medido local, MISMO
+          #   comando, base de sesión: master 160 -> rama 162 (+2; el local
+          #   da 7 menos que el runner en las dos ramas por igual).
+          grep -qE "^169 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 169 tests CORRIDOS."; exit 1; }
           # 94 -> 87 el 2026-09-17 (union del cupo): se RETIRA
           #   tests/test_jacobs_candado_activos_db.py (-7) junto con el GET_LOCK que
           #   probaba. Bajar un piso solo se justifica cuando se retira

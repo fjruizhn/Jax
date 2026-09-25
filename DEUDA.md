@@ -416,6 +416,32 @@ su fecha de última verificación real, no una nueva.
   (ms, dentro de la varianza de bcrypt). `db/seed.py` es ruta de alto riesgo:
   el commit lleva `JAX_PRECOMMIT_ALLOW_PATH=1`, deliberado y revisado.
 
+## Cerrado en código, despliegue pendiente — retiro de `idx_pipelines_status` (pendiente 631, parte B2, 2026-09-23)
+
+- **Qué:** `idx_pipelines_status (status)` sale de `_INDICES` y entra en `_INDICES_RETIRADOS` de
+  `jacobs/store.py`; `init_tables()` lo borra (`_retirar_indices`) DESPUÉS de crear los índices, con
+  `ALTER TABLE ... DROP INDEX ..., ALGORITHM=NOCOPY, LOCK=NONE` y `lock_wait_timeout` acotado
+  (`_ddl_acotado`, generalizado de `_crear_indice_acotado`). Redundante con `idx_pipelines_ocultos
+  (status, descartado_at)`: EXPLAIN de producción idéntico con `IGNORE INDEX` en las cinco consultas
+  (verificación del escalón 3). Los tests ya exigían la propiedad y no el nombre (jax#271, jax-platform#158).
+- **Precondición fail-closed hacia CONSERVAR:** el reemplazo existe, no está IGNORED y empieza por
+  `status`; si no, ERROR en el log y el viejo se queda. 1205 → ERROR y el arranque sigue; 1091 → éxito
+  (otro `init_tables()` lo borró; ejercitado 38 veces en 20 rondas de 3 `init_tables()` a la vez); otro error sube.
+- **ALGORITHM medido (MariaDB 12.3.3, tabla con `visible` VIRTUAL indexada):** INSTANT → `1846 ... Reason:
+  DROP INDEX. Try ALGORITHM=NOCOPY`; NOCOPY y INPLACE con LOCK=NONE → OK. Se fija NOCOPY.
+- **Carga del cupo (regla 4), con y sin el índice**, contra `jax_memory_test_<sesión>` con los MISMOS índices
+  que producción (la plantilla trae `idx_jacobs_pipelines_cola`/`_raiz`, que producción no tiene; se
+  quitaron), pool 10, cupo 3, 30 rondas por celda y dos repeticiones alternadas, c=10/25/50, dos mezclas
+  (solo `INSERT…SELECT` de la reserva; mitad reserva + mitad `UPDATE…JOIN` de la época):
+  **cero contenciones agotadas en las 48 celdas**, el cupo nunca pasó de 3. Con 60 filas (≈ producción,
+  `TABLE_ROWS`=59) el plan del COUNT es `idx_pipelines_ocultos` CON y SIN el viejo (el retiro no cambia el
+  plan); con 3000 filas pasa de `idx_pipelines_status` a `idx_pipelines_ocultos`. Solo reserva, 3000 filas,
+  p95 en ms con/sin: c=10 9,8-9,3 / 8,5-12,4; c=25 20,9-34,3 / 24,2-36,2; c=50 58,4-61,0 / 69,7-70,3;
+  máximo absoluto de las 48 celdas 211 ms (60 filas, sin, c=50), lejos del presupuesto de 1,0 s. Los 1213
+  por celda son del mismo orden con y sin (c=50: 2429-3099 con, 2350-3064 sin).
+- **Tests:** `tests/test_store_indice_duenio.py` +12 puras; `jacobs/_store_indexes_test.py::RetiroDeIndicesTest`
+  +5 de integración (5 rojas contra el `store.py` viejo). Pisos: tests-puros 2801 → 2813, facet-health-io 14 → 19.
+
 ## Medido — procesamiento de archivos: rendimiento, utilidad, caché y calidad de señal sobre 23 documentos reales (2026-09-21)
 
 **Task 10 de la rama `feat/procesamiento-archivos`** (worktree

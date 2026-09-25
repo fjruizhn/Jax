@@ -52,6 +52,28 @@ from jacobs.models import Pipeline  # noqa: E402
 
 PREFIJO = "cupo-io-test-"
 
+_PRIMERA_COLUMNA_SQL = (
+    "SELECT COLUMN_NAME FROM information_schema.STATISTICS "
+    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s "
+    "AND SEQ_IN_INDEX = 1"
+)
+
+
+def _fallas_del_conteo_por_status(fila, primera_columna):
+    """Pendiente 631: se exige la PROPIEDAD del plan, no el nombre del índice.
+    El COUNT del cupo va por ref/range sobre un índice que EMPIEZA por status
+    (hoy idx_pipelines_ocultos; idx_pipelines_status se retiró el
+    2026-09-23) y cubriente ('Using index'). Devuelve la lista de fallas;
+    vacía = pasa."""
+    fallas = []
+    if fila.get("type") not in ("ref", "range"):
+        fallas.append(f"type={fila.get('type')!r}, se esperaba ref o range")
+    if primera_columna != "status":
+        fallas.append(f"el índice {fila.get('key')!r} empieza por {primera_columna!r}, no por 'status'")
+    if "Using index" not in (fila.get("Extra") or ""):
+        fallas.append(f"Extra={fila.get('Extra')!r} sin 'Using index'")
+    return fallas
+
 
 def _pipeline(nombre: str) -> Pipeline:
     ahora = time.time()
@@ -253,14 +275,33 @@ class CupoEnLaBaseTest(unittest.IsolatedAsyncioTestCase):
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute("EXPLAIN " + cupo.SQL_RESERVAR, cupo.parametros_de_reserva(p, 3))
                 filas = await cur.fetchall()
+                conteo = [f for f in filas if f["table"] == "jacobs_pipelines"]
+                self.assertEqual(len(conteo), 1, f"se esperaba UNA fila del COUNT: {filas}")
+                primera = None
+                if conteo[0]["key"]:
+                    await cur.execute(_PRIMERA_COLUMNA_SQL, ("jacobs_pipelines", conteo[0]["key"]))
+                    fila = await cur.fetchone()
+                    primera = fila["COLUMN_NAME"] if fila else None
 
-        conteo = [f for f in filas if f["table"] == "jacobs_pipelines" and f["key"]]
-        self.assertTrue(conteo, f"el COUNT del cupo no usa índice: {filas}")
-        self.assertEqual(conteo[0]["key"], "idx_pipelines_status")
+        # Pendiente 631: la PROPIEDAD, no el nombre (MariaDB elige de forma
+        # inestable entre idx_pipelines_status e idx_pipelines_ocultos).
+        self.assertEqual(_fallas_del_conteo_por_status(conteo[0], primera), [], filas)
         for f in filas:
             extra = f.get("Extra") or ""
             self.assertNotIn("filesort", extra)
             self.assertNotIn("Using temporary", extra)
+
+
+class PredicadoDelConteoTest(unittest.TestCase):
+    """El control del EXPLAIN tiene que poder fallar (pendiente 631)."""
+
+    def test_rechaza_una_fila_mala(self):
+        mala = {"table": "jacobs_pipelines", "key": "idx_jacobs_pipelines_duenio",
+                "type": "ALL", "Extra": "Using where"}
+        self.assertEqual(len(_fallas_del_conteo_por_status(mala, "user_id")), 3)
+        buena = {"table": "jacobs_pipelines", "key": "idx_pipelines_ocultos",
+                 "type": "range", "Extra": "Using where; Using index"}
+        self.assertEqual(_fallas_del_conteo_por_status(buena, "status"), [])
 
 
 @unittest.skipUnless(os.getenv("JAX_DB_HOST"), "necesita la MariaDB real (jax_memory_test)")
