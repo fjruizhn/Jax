@@ -140,13 +140,17 @@ def test_verificar_arranque_instalado_da_cero_en_produccion():
 
 
 def test_env_de_produccion_no_tiene_clave_pythonpath():
-    """Auditoría escalón 3, ronda 2, MAJOR-2 (2): PYTHONPATH tiene que
-    llegar SIEMPRE por el z-pythonpath.conf de CADA unidad -- nunca por
+    """Auditoría escalón 3, ronda 2, MAJOR-2 (2) -- justificación corregida
+    en ronda 3, MINOR-1: PYTHONPATH tiene que llegar SIEMPRE por el
+    z-pythonpath.conf de CADA unidad -- nunca por
     `EnvironmentFile=/etc/jax/.env`, que las 4 unidades comparten. Una
-    clave PYTHONPATH ahí se aplicaría por igual a las 4 (systemd aplica
-    primero el EnvironmentFile y DESPUÉS los Environment= de los drop-ins,
-    así que hoy no rompería nada -- pero sería una segunda fuente de verdad
-    para el mismo valor, exactamente lo que este árbol existe para evitar).
+    clave PYTHONPATH ahí NO sería inofensiva: systemd.exec(5) es explícito
+    -- "Settings from these files [EnvironmentFile=] override settings
+    made with Environment=" (man systemd.exec, la sección de
+    EnvironmentFile=) -- es decir, EnvironmentFile= se aplica DESPUÉS y
+    PISA lo que haya puesto el Environment= de z-pythonpath.conf, no al
+    revés. Una clave PYTHONPATH en /etc/jax/.env rompería el PYTHONPATH
+    por-unidad de las 4 unidades, silenciosamente.
 
     Sólo el NOMBRE de la clave, nunca su valor -- ni siquiera para esta
     aserción hace falta leerlo, y el resto de las claves de /etc/jax/.env
@@ -156,15 +160,57 @@ def test_env_de_produccion_no_tiene_clave_pythonpath():
     motivo = _motivo_de_skip_fuera_de_produccion()
     if motivo:
         pytest.skip(motivo)
+    # MINOR-1: la regex acepta espacios/tabs delante de la clave y un
+    # `export ` opcional -- formas reales de escribir un .env que
+    # `^[A-Za-z_]...` sin más se perdería.
     resultado = subprocess.run(
-        ["sudo", "-n", "grep", "-oE", "^[A-Za-z_][A-Za-z0-9_]*=", "/etc/jax/.env"],
+        ["sudo", "-n", "grep", "-oE", "^[[:space:]]*(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=", "/etc/jax/.env"],
         capture_output=True, text=True,
     )
     assert resultado.returncode == 0, (
         f"no se pudo leer /etc/jax/.env con sudo -n (código {resultado.returncode}): {resultado.stderr}"
     )
-    claves = {linea.rstrip("=") for linea in resultado.stdout.splitlines() if linea.strip()}
+    claves = {
+        linea.rstrip("=").split()[-1]
+        for linea in resultado.stdout.splitlines() if linea.strip()
+    }
     assert "PYTHONPATH" not in claves, (
         "/etc/jax/.env tiene una clave PYTHONPATH -- pisaría (o duplicaría) el "
         "z-pythonpath.conf de cada unidad, la única fuente de verdad que este árbol versiona"
+    )
+
+
+def test_git_en_srv_jax_prod_necesita_safe_directory():
+    """Auditoría escalón 3, ronda 3, MAJOR-2: /srv/jax-prod/jax es
+    jaxsvc:jaxsvc -- `git rev-parse`/`status` ahí dan "detected dubious
+    ownership" (rc=128) sin `-c safe.directory=...`, tanto sin sudo como
+    con `sudo -n`. Con el flag, sólo lectura, funcionan -- esto es lo que
+    config/systemd/install-memory-scope.sh, ops/ejecutor/instalar_registro_y_cerco.sh
+    y ops/instalar-dropins-de-servicio.sh (instalación real, sin DESTDIR)
+    usan para poder derivar REPO y comprobar rama/limpieza contra ese
+    checkout."""
+    motivo = _motivo_de_skip_fuera_de_produccion()
+    if motivo:
+        pytest.skip(motivo)
+
+    sin_flag = subprocess.run(
+        ["git", "-C", RAIZ_PRODUCCION, "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    assert sin_flag.returncode == 128, f"se esperaba 'dubious ownership' sin safe.directory: {sin_flag!r}"
+    assert "dubious ownership" in sin_flag.stderr
+
+    con_flag = subprocess.run(
+        ["git", "-c", f"safe.directory={RAIZ_PRODUCCION}", "-C", RAIZ_PRODUCCION, "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    assert con_flag.returncode == 0, con_flag.stderr
+    assert con_flag.stdout.strip() == RAIZ_PRODUCCION
+
+    con_flag_root = subprocess.run(
+        ["sudo", "-n", "git", "-c", f"safe.directory={RAIZ_PRODUCCION}", "-C", RAIZ_PRODUCCION, "status", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    assert con_flag_root.returncode == 0, (
+        f"sudo -n git -c safe.directory status debería dar 0: {con_flag_root!r}"
     )

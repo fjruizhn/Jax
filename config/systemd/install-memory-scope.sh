@@ -4,15 +4,25 @@
 set -euo pipefail
 ENVF=/etc/jax/.env
 
-# MAJOR-3 (auditoría escalón 3, ronda 2): antes REPO/SD estaban fijos a
+# MAJOR-3/ronda-2 (auditoría escalón 3): antes REPO/SD estaban fijos a
 # /home/fruiz/jax -- el checkout de TRABAJO de un agente, en rama ajena, sin
 # el guion nuevo. Corriendo como root eso copiaría lo que el agente tuviera
 # puesto en ese momento, no lo que el repo versiona. REPO se deriva del
 # propio guion (igual que ops/ejecutor/instalar_registro_y_cerco.sh) y se
 # EXIGE que sea /srv/jax-prod/jax -- no "parecido", exactamente esa ruta.
-REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
-if [ "$REPO" != /srv/jax-prod/jax ]; then
-  echo "install-memory-scope.sh: este guion corre desde $REPO -- tiene que ser /srv/jax-prod/jax (el checkout de producción), no un checkout de trabajo. Abortando." >&2
+#
+# MAJOR-2 (ronda 3): /srv/jax-prod/jax es jaxsvc:jaxsvc -- `git rev-parse`
+# ahí da "detected dubious ownership" (rc=128), tanto como fruiz como como
+# root, sin `-c safe.directory=...`. Se declara por invocación (nunca en la
+# config global), literal (todavía no se sabe si $REPO va a ser
+# /srv/jax-prod/jax -- eso es justo lo que esta línea intenta averiguar), no
+# variable: si el resultado no es exactamente esa ruta, la excepción de
+# safe.directory declarada tampoco aplicaba a donde sea que $0 vivía, y el
+# chequeo de abajo aborta igual.
+RUTA_PRODUCCION=/srv/jax-prod/jax
+REPO="$(git -c safe.directory="$RUTA_PRODUCCION" -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
+if [ "$REPO" != "$RUTA_PRODUCCION" ]; then
+  echo "install-memory-scope.sh: este guion corre desde $REPO -- tiene que ser $RUTA_PRODUCCION (el checkout de producción), no un checkout de trabajo. Abortando." >&2
   exit 1
 fi
 SD="$REPO/config/systemd"

@@ -563,20 +563,29 @@ la lista real):
     ronda 2, M3: llamarlo "camino normal" sin esta letra chica es lo que
     dejaba a `install-memory-scope.sh` copiando en silencio lo que hubiera
     en `/home/fruiz/jax` en ese momento -- el checkout de TRABAJO de un
-    agente, en rama ajena). `config/systemd/install-memory-scope.sh` (B9)
-    y `ops/ejecutor/instalar_registro_y_cerco.sh` (proxy del Ejecutor)
-    derivan `REPO` de su propia ubicación (`git rev-parse
-    --show-toplevel`) y ABORTAN si no se cumple, ANTES de tocar nada:
-    `REPO` es exactamente `/srv/jax-prod/jax` (sólo `install-memory-scope.sh`
-    lo exige explícito; `instalar_registro_y_cerco.sh` ya vivía siempre
-    bajo su propio `$REPO`, así que ahí alcanza con la rama), está en
-    `master`, y el árbol está limpio (`git status --porcelain` vacío) --
-    esto último corrido por `/usr/local/sbin/jax-checkout-de-produccion-sano.sh
-    "$REPO"` en `install-memory-scope.sh` (el mismo guion que
-    `checkout-de-produccion.conf` ya exige en caliente vía `ExecStartPre`)
-    y por un `git status --porcelain` propio en
-    `instalar_registro_y_cerco.sh`. Recién entonces: el guion de sanidad y
-    los drop-ins de SU unidad (`ops/instalar-dropins-de-servicio.sh`, ver
+    agente, en rama ajena). `config/systemd/install-memory-scope.sh` (B9),
+    `ops/ejecutor/instalar_registro_y_cerco.sh` (proxy del Ejecutor) y
+    `ops/instalar-dropins-de-servicio.sh` cuando corre SIN `DESTDIR`
+    (instalación real -- ronda 3, MAJOR-2) derivan `REPO` y ABORTAN si no
+    se cumple, ANTES de tocar nada: `REPO` es exactamente
+    `/srv/jax-prod/jax` (literal, no "parecido"), está en `master`, y el
+    árbol está limpio.
+    **`/srv/jax-prod/jax` es `jaxsvc:jaxsvc`** (ronda 3, MAJOR-2): `git
+    rev-parse`/`status` ahí dan "detected dubious ownership" (rc=128), como
+    `fruiz` y como `root`, sin `-c safe.directory=/srv/jax-prod/jax`
+    declarado POR INVOCACIÓN (nunca en la config global -- mismo criterio
+    que `ops/sbin/jax-checkout-de-produccion-sano.sh` ya usaba). Y el
+    chequeo de árbol limpio en sí corre con `sudo` (root, con
+    `safe.directory`): como `fruiz`, `git status --porcelain` da `rc=0`
+    IGUAL, pero con avisos "Permission denied" sólo en stderr sobre
+    subdirectorios de `jaxsvc` (`las_manos/workspace`, `las_manos/repo`,
+    `las_manos/missions`) que `fruiz` no puede listar -- un chequeo que
+    sólo mirara `stdout` se habría tragado el aviso y dado el árbol por
+    limpio sin haber podido verlo entero. Los tres guiones tratan
+    CUALQUIER stderr de ese `git status` como fallo, no sólo lo que
+    aparece en stdout.
+    Recién con las precondiciones cumplidas: el guion de sanidad y los
+    drop-ins de SU unidad (`ops/instalar-dropins-de-servicio.sh`, ver
     abajo) ANTES que la unidad base, y recién entonces la unidad base y
     `daemon-reload` -- nunca deja la base sola en `/etc` a mitad de camino
     (M5). Que el instalador automatice varios `install` en el orden
@@ -606,38 +615,66 @@ la lista real):
   los contienen. Sale 0 sólo si TODO eso se cumple; imprime cada diferencia
   si no.
   **Que no haya NINGÚN archivo de más participando del arranque de cada
-  unidad** se resuelve DISTINTO según dónde corre (auditoría escalón 3,
-  ronda 2, MAJOR-1 -- la primera versión de este chequeo sólo miraba 3
-  rutas fijas por unidad; `systemd-analyze unit-paths` en hall9000, systemd
-  259, da 12, y además systemd busca drop-ins por PREFIJO CON GUION
-  (`jax-.service.d/`, `jax-ejecutor-.service.d/`, `jax-memory-.service.d/`,
-  aplicables a las 4 unidades por su nombre común) y en `.../service.d/`
-  genérico para TODO `.service` -- un intruso en cualquiera de esas rutas
-  pasaba con `rc=0`; reproducido con 4 intrusos reales antes de este
-  arreglo, ver la Biblioteca del cierre de este hallazgo):
-  - **En producción, la verdad la da systemd mismo**: `systemctl cat
-    <unidad>` (permitido -- la regla de esta rama es "systemctl cat" como
-    máximo) imprime una línea `# /ruta` por cada archivo que de verdad
-    fusiona, con toda la jerarquía ya resuelta. Se compara ese conjunto
-    contra lo que el manifiesto declara para la unidad.
-  - **En modo de prueba** (`RAIZ_PRUEBA`, vacío por defecto -- existe SÓLO
-    para poder ejercitar esta lógica contra un árbol bajo `/tmp` sin tocar
-    el `/etc` real, nunca se usa para instalar) no hay systemd real al que
-    preguntarle: se recorre a mano la enumeración completa (las 12 rutas ×
-    cada prefijo con guion de la unidad × el genérico de tipo). Un
-    directorio que EXISTE pero no se puede LISTAR (`-r`/`-x`) es un FALLO
-    ("NO SE PUDO LEER"), no un `continue` silencioso (MINOR-1).
+  unidad** se resuelve en DOS sentidos independientes, los dos exigidos
+  siempre en producción (auditoría escalón 3, ronda 3, MAJOR-1 -- la
+  versión de la ronda 2 sólo miraba lo que `systemctl cat`/`show`
+  reportan CARGADO, que no es lo mismo que lo que hay en DISCO: un
+  intruso recién copiado sin `daemon-reload` pasaría en verde si sólo se
+  mirara eso):
+  - **Lo que hay REALMENTE en disco**: las 12 rutas de
+    `systemd-analyze unit-paths` (hall9000, systemd 259) × cada prefijo con
+    guion de la unidad (`jax-.service.d/`, `jax-ejecutor-.service.d/`,
+    `jax-memory-.service.d/`, aplicables a las 4 unidades por su nombre
+    común) × el genérico de tipo (`service.d/`/`timer.d/`, para TODA
+    unidad de ese tipo) -- NUNCA mirando contenido de archivo, sólo
+    nombres. Un directorio que EXISTE pero no se puede LISTAR (`-r`/`-x`)
+    es un FALLO ("NO SE PUDO LEER"), no un `continue` silencioso
+    (MINOR-1, ronda 2). Corre siempre, en producción y en modo de prueba
+    (`RAIZ_PRUEBA`, vacío por defecto = disco real -- existe SÓLO para
+    poder ejercitar esta lógica contra un árbol bajo `/tmp` sin tocar el
+    `/etc` real, nunca se usa para instalar).
+  - **Lo que systemd tiene CARGADO -- sólo en producción**: `systemctl
+    show -p FragmentPath -p DropInPaths --value <unidad>` (lectura pura;
+    se probó primero si el entorno lo permitía, y lo permite). Si
+    `systemctl` avisa algo por `stderr` (p.ej. "changed on disk"), NO se
+    descarta: cuenta como fallo. Si `systemctl show` falla del todo
+    (unidad inexistente, systemctl roto), mensaje claro Y el guion sigue
+    revisando las demás unidades -- no aborta la corrida entera por una
+    sola (MINOR-2).
+    **BLOCK-1 (ronda 3, RECHAZO)**: la primera versión de este chequeo
+    raspaba `systemctl cat` con `grep '^# /'` para sacar las rutas -- y
+    también atrapaba CONTENIDO: una línea de comentario dentro de un
+    `.conf` que empezara con `# /` (como
+    `# /srv/jax-prod/jax/.venv/bin/python (el mismo intérprete...)`, que
+    estuvo en el `z-pythonpath.conf` del proxy) se contaba como si fuera
+    la cabecera real que antepone systemd -- ese MISMO archivo, ya
+    esperado, habría salido como "de más" apenas se instalara. Arreglado
+    de raíz: `systemctl show` con `-p` no imprime NINGÚN contenido, sólo
+    los dos valores pedidos; la enumeración de disco tampoco mira nunca
+    contenido, sólo nombres de archivo. El comentario del propio
+    `z-pythonpath.conf` del proxy se reescribió para que ninguna línea
+    empiece con `# /`, y hay una prueba dedicada
+    (`tests/test_verificar_arranque_instalado.py::test_block1_...`) que
+    siembra esa línea exacta en un drop-in y confirma que NUNCA cuenta
+    como archivo de más.
   `tests/test_arranque_instalado.py` ejercita la forma del repo siempre
   (también en CI, sin necesitar el host de producción) y, sólo en el host
   de producción (existe `/srv/jax-prod/jax` sí o sólo sí), corre el guion
   de verdad y EXIGE 0 -- ya no hace skip si falta algo instalado (M3:
   antes, un drop-in sin instalar en el host de producción real daba skip
-  silencioso en vez de rojo). Cableado al job `arranque-instalado-versionado`
-  de `.github/workflows/policy.yml`.
-  **Hoy este test da ROJO en hall9000** (que SÍ es el host de producción):
-  faltan instalar los 3 `z-pythonpath.conf` nuevos de M1 (proxy,
-  memory-worker, memory-synthesis) -- esperado y reportado, no oculto; los
-  instala la sesión principal.
+  silencioso en vez de rojo). `tests/test_verificar_arranque_instalado.py`
+  (ronda 3, MAJOR-3) prueba los dos modos: `RAIZ_PRUEBA` con los 5
+  intrusos reales (los 4 del auditor de la ronda 2 + uno nuevo en
+  `/run/systemd/system/service.d/`), y el modo de producción alimentando
+  un `systemctl` de mentira (`tests/fixtures/systemctl-falso-para-pruebas.sh`,
+  en el `PATH`, nunca instalado) que responde mal SÓLO para
+  `jax-las-manos.service` -- prueba que "cargado" y "disco" son chequeos
+  independientes sin tocar nunca `/etc`. Cableado al job
+  `arranque-instalado-versionado` de `.github/workflows/policy.yml`.
+  **Hoy `test_verificar_arranque_instalado_da_cero_en_produccion` da ROJO
+  en hall9000** (que SÍ es el host de producción): faltan instalar los 3
+  `z-pythonpath.conf` nuevos de M1 (proxy, memory-worker, memory-synthesis)
+  -- esperado y reportado, no oculto; los instala la sesión principal.
 - **`ops/instalar-dropins-de-servicio.sh <unidad>.service.d|/ruta/absoluta
   <REPO> [DESTDIR]`**: lee `ops/manifiesto-arranque-instalado.tsv` y copia
   las filas que coincidan -- por prefijo de directorio de drop-ins, o por
@@ -652,6 +689,12 @@ la lista real):
   `config/systemd/install-memory-scope.sh` y
   `ops/ejecutor/instalar_registro_y_cerco.sh` lo invocan para su guion de
   sanidad y sus drop-ins, ANTES de instalar su propia unidad base.
+  **Con `DESTDIR` vacío (instalación real) exige lo mismo que los otros
+  dos instaladores** (ronda 3, MAJOR-2): `REPO` es `/srv/jax-prod/jax`,
+  `master`, árbol limpio (mismo `-c safe.directory=...` + `sudo git status`
+  tratando cualquier stderr como fallo). Con `DESTDIR` puesto (pruebas) no
+  se exige nada de esto -- un `$REPO` de mentira en un test no tiene por
+  qué ser `/srv/jax-prod/jax`.
   **`DESTDIR` (vacío por defecto) es el ÚNICO lugar de este árbol que lo
   acepta** (M4): los otros dos instaladores tocan el sistema real en otras
   líneas (nftables, `/etc/jax/.env`, `systemctl restart` de servicios
@@ -689,9 +732,17 @@ la lista real):
   con valores de `/home/fruiz`. Arreglar esas claves es tarea de quien las
   declaró, no de este árbol -- lo único que este árbol exige (`sudo -n`,
   sólo nombres de clave) es que `/etc/jax/.env` NO tenga una clave
-  `PYTHONPATH`, que pisaría o duplicaría el `z-pythonpath.conf` de cada
-  unidad (`test_env_de_produccion_no_tiene_clave_pythonpath`, sólo en
-  producción).
+  `PYTHONPATH`. **No sería inofensiva** (justificación corregida en ronda
+  3, MINOR-1): `man systemd.exec`, sección `EnvironmentFile=`, es
+  explícito -- "Settings from these files override settings made with
+  Environment=" -- `EnvironmentFile=/etc/jax/.env` se aplica DESPUÉS y
+  PISA el `Environment=PYTHONPATH=...` de `z-pythonpath.conf`, no al
+  revés (`test_env_de_produccion_no_tiene_clave_pythonpath`, sólo en
+  producción; la regex acepta espacios/tabs delante y un `export `
+  opcional).
+- **NO en esta ronda (auditoría escalón 3, ronda 3, MINOR-4)**: un job de
+  `.github/workflows/policy.yml` clona `jax-platform` sin fijar un SHA --
+  visto, no tocado acá, va en otro PR de otra sesión.
 
 **De dónde salen `JAX_DB_HOST`/`PORT`/`USER`/`PASSWORD` (ronda 3 de
 revisión).** Este paso NO carga `/etc/jax/.env` directo -- ni con un punto

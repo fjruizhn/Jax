@@ -34,6 +34,48 @@ PATRON_O_RUTA="${1:?uso: instalar-dropins-de-servicio.sh <unidad>.service.d|/rut
 REPO="${2:?uso: instalar-dropins-de-servicio.sh <unidad>.service.d|/ruta/absoluta <REPO> [DESTDIR]}"
 DESTDIR="${3:-}"
 
+# MAJOR-2 (auditoría escalón 3, ronda 3): con DESTDIR vacío esto es una
+# instalación REAL contra /etc -- exige lo mismo que install-memory-scope.sh/
+# instalar_registro_y_cerco.sh: REPO es exactamente /srv/jax-prod/jax (no un
+# checkout de trabajo), en master, y con el árbol limpio. Con DESTDIR puesto
+# (pruebas) no se exige nada de esto -- un $REPO de mentira en un test no
+# tiene por qué ser /srv/jax-prod/jax.
+#
+# /srv/jax-prod/jax es jaxsvc:jaxsvc: `git rev-parse`/`status` ahí dan
+# "detected dubious ownership" (rc=128) tanto como fruiz como como root sin
+# `-c safe.directory=...` -- se declara por invocación, nunca en la config
+# global (mismo criterio que ops/sbin/jax-checkout-de-produccion-sano.sh).
+# El chequeo de árbol limpio corre con `sudo` (root, con safe.directory):
+# como fruiz, `git status --porcelain` da rc=0 pero con avisos
+# "Permission denied" en stderr sobre subdirectorios de jaxsvc
+# (las_manos/workspace, las_manos/repo, las_manos/missions) que fruiz no
+# puede listar -- CUALQUIER stderr cuenta como fallo, no sólo lo que
+# aparece en stdout.
+RUTA_PRODUCCION=/srv/jax-prod/jax
+if [ -z "$DESTDIR" ]; then
+  if [ "$REPO" != "$RUTA_PRODUCCION" ]; then
+    echo "instalar-dropins-de-servicio: instalación real (sin DESTDIR) pero REPO=$REPO -- tiene que ser $RUTA_PRODUCCION. Abortando." >&2
+    exit 1
+  fi
+  rama="$(git -c safe.directory="$RUTA_PRODUCCION" -C "$REPO" branch --show-current)"
+  [ "$rama" = master ] || {
+    echo "instalar-dropins-de-servicio: $REPO está en la rama '$rama', no en master. Abortando." >&2
+    exit 1
+  }
+  archivo_err_status="$(mktemp)"
+  sucio="$(sudo git -c safe.directory="$RUTA_PRODUCCION" -C "$REPO" status --porcelain 2>"$archivo_err_status")"
+  err_status="$(cat -- "$archivo_err_status")"; rm -f -- "$archivo_err_status"
+  if [ -n "$err_status" ]; then
+    echo "instalar-dropins-de-servicio: git status avisó algo en $REPO (tratado como fallo): $err_status" >&2
+    exit 1
+  fi
+  [ -z "$sucio" ] || {
+    echo "instalar-dropins-de-servicio: $REPO tiene cambios sin comitear -- abortando:
+$sucio" >&2
+    exit 1
+  }
+fi
+
 MANIFIESTO="$REPO/ops/manifiesto-arranque-instalado.tsv"
 [ -f "$MANIFIESTO" ] || {
   echo "instalar-dropins-de-servicio: no se encontró el manifiesto: $MANIFIESTO" >&2

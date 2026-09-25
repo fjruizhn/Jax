@@ -221,8 +221,8 @@ jobs:
   # salta sola fuera del host de producción de jax -- medido en hall9000 con
   # `sudo unshare --mount` tapando /srv/jax-prod (mismo método que usa el job
   # de tests-puros para simular el runner real, ver más abajo): 8 passed,
-  # 2 skipped. Si un runner llegara a tener /srv/jax-prod/jax, este piso lo
-  # atrapa (9 o 10 passed rompe el grep).
+  # 3 skipped. Si un runner llegara a tener /srv/jax-prod/jax, este piso lo
+  # atrapa (más passed rompe el grep).
   arranque-instalado-versionado:
     runs-on: ubuntu-latest
     steps:
@@ -237,14 +237,14 @@ jobs:
         # /srv/jax-prod (tmpfs vacío sobre /srv/jax-prod, namespace de
         # montaje propio -- así el guion que exige ese directorio para NO
         # saltarse ve exactamente lo que vería un runner de GitHub Actions
-        # nuevo): 8 passed, 2 skipped. Subió de "8 passed, 1 skipped" con
-        # test_env_de_produccion_no_tiene_clave_pythonpath (auditoría
-        # escalón 3, ronda 2, MAJOR-2), que también sólo corre en el host
+        # nuevo): 8 passed, 3 skipped. Subió de "8 passed, 2 skipped" con
+        # test_git_en_srv_jax_prod_necesita_safe_directory (auditoría
+        # escalón 3, ronda 3, MAJOR-2), que también sólo corre en el host
         # de producción.
         run: |
           python -m pytest -q tests/test_arranque_instalado.py 2>&1 | tee /tmp/arranque_instalado
-          grep -qE "^8 passed, 2 skipped" /tmp/arranque_instalado || {
-            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados) y exactamente 2 skipped (test_verificar_arranque_instalado_da_cero_en_produccion y test_env_de_produccion_no_tiene_clave_pythonpath, que sólo corren en el host de producción de jax). Si esto da más passed, este runner tiene /srv/jax-prod/jax -- no es el runner esperado, revisar antes de asumir que el piso subió."; exit 1; }
+          grep -qE "^8 passed, 3 skipped" /tmp/arranque_instalado || {
+            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados) y exactamente 3 skipped (test_verificar_arranque_instalado_da_cero_en_produccion, test_env_de_produccion_no_tiene_clave_pythonpath y test_git_en_srv_jax_prod_necesita_safe_directory, que sólo corren en el host de producción de jax). Si esto da más passed, este runner tiene /srv/jax-prod/jax -- no es el runner esperado, revisar antes de asumir que el piso subió."; exit 1; }
       # ops/instalar-dropins-de-servicio.sh contra un DESTDIR temporal
       # (auditoría escalón 3, M4): el único guion de instalación de este
       # árbol que acepta DESTDIR -- los otros dos
@@ -266,6 +266,24 @@ jobs:
           python -m pytest -q tests/test_instalar_dropins_de_servicio.py 2>&1 | tee /tmp/instalar_dropins
           grep -qE "^8 passed" /tmp/instalar_dropins || {
             echo "PISO ROTO: se esperaban 8 tests CORRIDOS de tests/test_instalar_dropins_de_servicio.py."; exit 1; }
+      # El chequeo "ningún archivo de más participa del arranque" (M2, con
+      # todas sus rondas: BLOCK-1, MAJOR-1, MAJOR-3 de la ronda 3). Usa
+      # sudo (para instalar árboles de prueba con dueño root:root, igual
+      # que el guion real) y el systemctl real del runner (para los tests
+      # con systemctl de mentira que SÍ requieren producción, ver el skip
+      # de abajo).
+      - run: python -m pytest tests/test_verificar_arranque_instalado.py -v
+      - name: Piso exacto -- verificar-arranque-instalado.sh, chequeo de más
+        # Medido 2026-09-25 en hall9000 con sudo unshare --mount tapando
+        # /srv/jax-prod (mismo método que el resto de este job): 8 passed,
+        # 2 skipped -- los 2 tests con systemctl de mentira necesitan
+        # jax-las-manos.service REALMENTE instalado en /etc (para que el
+        # disco, que no pasa por el systemctl falso, coincida con el
+        # manifiesto), y eso es sólo el host de producción real.
+        run: |
+          python -m pytest -q tests/test_verificar_arranque_instalado.py 2>&1 | tee /tmp/verificar_arranque
+          grep -qE "^8 passed, 2 skipped" /tmp/verificar_arranque || {
+            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados) y exactamente 2 skipped de tests/test_verificar_arranque_instalado.py. Si esto da más passed, este runner tiene /srv/jax-prod/jax -- no es el runner esperado."; exit 1; }
 
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest
