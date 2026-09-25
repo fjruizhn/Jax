@@ -5931,14 +5931,19 @@ jobs:
         run: sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
       - run: PYTHONPATH=. python -m pytest tests/test_permisos_proyectos.py -v
       - name: Piso exacto de tests CORRIDOS (no skipeados)
-        # Medido 2026-09-25 en un contenedor LIMPIO ubuntu:24.04 (usuario runner,
-        # NOPASSWD:ALL, sin /etc/jax/.env -- no en hall9000): 39 passed, 2 skipped. Los
-        # dos skips son estructurales fuera de un host de jax real:
+        # Medido 2026-09-25 (ronda 4, sobre 46223fd + los cambios de esta ronda) en un
+        # contenedor LIMPIO ubuntu:24.04 (usuario runner, NOPASSWD:ALL, sin
+        # /etc/jax/.env -- no en hall9000): 48 passed, 2 skipped. Sube de 39 a 48 (+9)
+        # por los tests nuevos de la ronda 4 (m1: respaldo con FIFO/control negativo sin
+        # FIFO; m2: bloque incompleto/marcador de fin faltante; m5: dos raices
+        # posicionales/sudo -n roto; m6: group:: igual a la entrada nombrada/lo detecta
+        # si diverge/unidad de _permiso_efectivo). Los dos skips siguen siendo
+        # estructurales fuera de un host de jax real:
         # test_aplicar_rechaza_explicitamente_por_raiz_no_configurada_cuando_env_es_legible
-        # (no hay /etc/jax/.env acá) y el test (b) de lectura/escritura cruzada contra
-        # /home/fruiz/jax-workspace/proyectos real. Si esto da "41 passed", este runner
-        # SÍ tiene ambos -- no es el runner esperado.
+        # (no hay /etc/jax/.env aca) y el test (b) de lectura/escritura cruzada contra
+        # /home/fruiz/jax-workspace/proyectos real. Si esto da "50 passed", este runner
+        # SI tiene ambos -- no es el runner esperado.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^39 passed, 2 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 39 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }
+          grep -qE "^48 passed, 2 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 48 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }

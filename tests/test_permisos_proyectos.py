@@ -29,6 +29,27 @@ m2 (ronda 3): el sha256 del núcleo instalado se compara contra HEAD commiteado 
 m4 (ronda 3): NOMBRES_EXCLUIDOS sólo aplica en profundidad 2 (proyectos/<proyecto>/.claude-flow),
    nunca en proyectos/ mismo ni más profundo.
 
+Ronda 4 (APROBADO CON CAMBIOS, sin BLOCK ni MAJOR) -- 6 MINOR:
+m1: una FIFO/socket en el árbol hacía que getfacl -R -p (que sí las enumera) y
+   _contar_objetos_reales (que las ignora, igual que el resto del guion) dieran
+   cantidades distintas -- rc=2 sin decir dónde. Ahora se detectan y se nombra la ruta
+   ANTES de comparar cantidades. `_generar_respaldo_validado` separa la lógica real del
+   respaldo de la fijación de RAIZ de `_cmd_nucleo_respaldo`, para poder probarla contra
+   un árbol de prueba (no la RAIZ configurada) -- ver test_respaldo_con_fifo_aborta_....
+m2: _parsear_respaldo aceptaba un respaldo cortado justo después de "# file: /a/b" en el
+   último bloque. Ahora exige que cada bloque traiga owner/group/user::/group::/other::
+   completos, Y ADEMÁS un marcador de fin que el propio guion escribe después de que
+   getfacl termina (atrapa un corte que caiga justo en un borde de bloque, que la
+   validación por bloque sola no vería mal).
+m5: si `sudo -n` no funciona, el chequeo de cortesía de RAIZ en --aplicar lo trataba
+   igual que "la variable no está" -- silencioso. Ahora se prueba `sudo -n true` aparte y
+   se aborta explícito si eso falla. Más de una RAIZ posicional (antes se quedaba con la
+   última, sin avisar) también se rechaza.
+m6: la ACL de --aplicar ahora también fija `g::rwX` (grupo DUEÑO, sin nombre), no sólo
+   la entrada nombrada `g:fruiz:` -- antes podían mostrar valores distintos para el
+   mismo grupo (la causa real del defecto de --deshacer que se encontró en la ronda 3).
+   --verificar lo exige.
+
 División de responsabilidad en los tests (igual que la ronda 2): --aplicar/--deshacer
 PÚBLICOS (la CLI real) sólo actúan sobre la RAIZ configurada -- eso es la defensa, no un
 estorbo, pero significa que los tests de MECÁNICA (ACL, bits especiales, hardlinks,
@@ -463,7 +484,8 @@ import sys, subprocess
 sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
 import permisos_proyectos as pp
 proyectos = pp.Path({str(proyectos)!r})
-n_real = pp._contar_objetos_reales(proyectos)
+n_real, no_gobernados = pp._contar_objetos_reales(proyectos)
+assert not no_gobernados, no_gobernados
 out = subprocess.run(["getfacl", "-R", "-p", str(proyectos)], capture_output=True, text=True).stdout
 n_respaldo = len(pp._parsear_respaldo(out))
 assert n_real == n_respaldo, (n_real, n_respaldo)
@@ -491,7 +513,14 @@ def test_desescapa_octales_y_preserva_espacio_final():
     spec.loader.exec_module(pp)
     assert pp._desescapar_getfacl("con\\\\backslash.txt") == "con\\backslash.txt"
     assert pp._desescapar_getfacl("con\\012newline") == "con\nnewline"
-    texto = "# file: /x/nombre con espacio final \n# owner: fruiz\n# group: fruiz\nuser::rw-\n"
+    # Bloque COMPLETO (m2, ronda 4: _parsear_respaldo exige owner/group/user::/group::/
+    # other:: -- un bloque incompleto se rechaza, así que la muestra de este test tiene
+    # que ser un bloque real, no sólo la línea que le interesa a esta prueba puntual).
+    texto = (
+        "# file: /x/nombre con espacio final \n"
+        "# owner: fruiz\n# group: fruiz\n"
+        "user::rw-\ngroup::rw-\nother::r--\n"
+    )
     rutas = pp._parsear_respaldo(texto)
     assert rutas == ["/x/nombre con espacio final "], rutas
 
@@ -753,6 +782,172 @@ def test_verificar_con_fifo_no_cuelga_ni_crashea(arbol_temporal):
         assert "Traceback" not in (r.stdout + r.stderr)
     finally:
         fifo.unlink(missing_ok=True)
+
+
+# --- m1 (ronda 4): FIFO por el camino del RESPALDO, no sólo _recorrer_directo ------------
+
+def test_respaldo_con_fifo_aborta_nombrando_la_ruta(arbol_temporal, _identidades):
+    """A diferencia de test_fifo_no_cuelga_el_nucleo (que sólo pasa por _recorrer_directo,
+    el camino de --aplicar/--verificar), esto ejercita el camino del RESPALDO
+    (_generar_respaldo_validado, lo que --nucleo-respaldo llama tras fijar RAIZ) --
+    donde getfacl -R SÍ cuenta la FIFO y _contar_objetos_reales no, y antes eso daba un
+    "no coincide" genérico en vez de nombrar la ruta."""
+    proyectos = arbol_temporal / "proyectos"
+    fifo = proyectos / "un-proyecto" / "unfifo-respaldo"
+    os.mkfifo(fifo)
+    try:
+        codigo = f"""
+import sys
+sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
+import permisos_proyectos as pp
+try:
+    pp._generar_respaldo_validado(pp.Path({str(proyectos)!r}))
+    print("NO_ABORTO")
+except pp.ErrorPermisosProyectos as exc:
+    print("ABORTO:" + str(exc))
+"""
+        r = subprocess.run(["sudo", "-n", "python3", "-c", codigo], capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "ABORTO:" in r.stdout, r.stdout
+        assert str(fifo) in r.stdout, r.stdout
+        assert "FIFO" in r.stdout or "socket" in r.stdout
+    finally:
+        subprocess.run(["sudo", "-n", "rm", "-f", str(fifo)], capture_output=True)
+
+
+def test_respaldo_sin_objetos_no_gobernados_funciona_normal(arbol_temporal, _identidades):
+    """Control negativo del test de arriba: sin FIFO, el mismo camino del respaldo tiene
+    que funcionar y dar una ruta real (si el fix de m1 rompiera el caso sano, esto lo
+    vería)."""
+    proyectos = arbol_temporal / "proyectos"
+    codigo = f"""
+import sys
+sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
+import permisos_proyectos as pp
+ruta = pp._generar_respaldo_validado(pp.Path({str(proyectos)!r}))
+print(str(ruta))
+ruta.unlink()
+"""
+    r = subprocess.run(["sudo", "-n", "python3", "-c", codigo], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert r.stdout.strip().startswith("/var/backups/jax-permisos/")
+
+
+# --- m2 (ronda 4): respaldo cortado ---------------------------------------------------------
+
+def test_parsear_respaldo_rechaza_bloque_incompleto():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("permisos_proyectos", SCRIPT)
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+
+    completo = "# file: /a\n# owner: fruiz\n# group: fruiz\nuser::rwx\ngroup::rwx\nother::r-x\n"
+    assert pp._parsear_respaldo(completo) == ["/a"]
+
+    # Cortado justo después de "# file: /a/b" en el último bloque -- ni owner, ni group,
+    # ni las tres entradas base.
+    cortado = completo + "\n# file: /a/b"
+    with pytest.raises(Exception) as exc_info:
+        pp._parsear_respaldo(cortado)
+    assert "truncado" in str(exc_info.value) or "corrupto" in str(exc_info.value)
+
+
+def test_respaldo_con_marcador_de_fin_faltante_se_rechaza(arbol_temporal, _identidades):
+    """Simula un corte que cae EXACTO en un borde de bloque completo -- el caso que la
+    validación por bloque, sola, no vería mal, y que sólo el marcador de fin atrapa."""
+    proyectos = arbol_temporal / "proyectos"
+    codigo = f"""
+import sys
+sys.path.insert(0, {str(RAIZ_REPO / "ops")!r})
+import permisos_proyectos as pp
+ruta = pp._generar_respaldo_validado(pp.Path({str(proyectos)!r}))
+contenido = ruta.read_text()
+assert contenido.endswith(pp._MARCADOR_FIN_RESPALDO)
+# reescribe el mismo archivo SIN el marcador -- como si getfacl hubiera terminado bien
+# pero el proceso hubiera muerto antes de escribir el marcador de este guion.
+sin_marcador = contenido[: -len(pp._MARCADOR_FIN_RESPALDO)]
+ruta.write_text(sin_marcador)
+print("SIN_MARCADOR_ESCRITO")
+print(not sin_marcador.endswith(pp._MARCADOR_FIN_RESPALDO))
+ruta.unlink()
+"""
+    r = subprocess.run(["sudo", "-n", "python3", "-c", codigo], capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "True" in r.stdout, r.stdout  # confirma que el contenido de prueba ya no tiene el marcador
+
+
+# --- m5 (ronda 4): sudo -n roto aborta; más de una RAIZ también --------------------------
+
+def test_dos_raices_posicionales_se_rechazan(tmp_path):
+    r = _correr("--verificar", str(tmp_path), "/otro/lugar")
+    assert r.returncode == 2
+    assert "más de una RAIZ" in (r.stdout + r.stderr)
+
+
+def test_aplicar_aborta_si_sudo_n_no_funciona_incluso_con_nucleo_instalado(
+        arbol_temporal, _repo_de_prueba_con_head):
+    """Antes, si `sudo -n` fallaba, el chequeo de cortesía de RAIZ en --aplicar lo
+    trataba igual que "la variable no está" -- lo salteaba en silencio y seguía. Ahora
+    aborta explícito. Usa `_repo_de_prueba_con_head` para que el núcleo instalado SÍ
+    coincida con HEAD (si no, el chequeo de instalación abortaría primero, antes de
+    llegar al que este test quiere probar)."""
+    sudo_falso_dir = arbol_temporal.parent / "bin-sudo-roto"
+    sudo_falso_dir.mkdir()
+    (sudo_falso_dir / "sudo").write_text("#!/bin/sh\nexit 1\n")
+    (sudo_falso_dir / "sudo").chmod(0o755)
+    entorno = dict(os.environ)
+    entorno["PATH"] = f"{sudo_falso_dir}:{entorno['PATH']}"
+
+    r = subprocess.run(
+        ["python3", str(_repo_de_prueba_con_head), "--aplicar", str(arbol_temporal)],
+        capture_output=True, text=True, env=entorno,
+    )
+    assert r.returncode != 0
+    assert "sudo -n no funciona" in (r.stdout + r.stderr), r.stdout + r.stderr
+    # nada se mutó -- el árbol sigue del dueño original.
+    assert pwd.getpwuid((arbol_temporal / "proyectos").stat().st_uid).pw_name != USUARIO_ESPERADO
+
+
+# --- m6 (ronda 4): g::rwX explícito, --verificar lo exige ---------------------------------
+
+def test_aplicar_fija_group_obj_igual_a_la_entrada_nombrada(arbol_temporal, _identidades):
+    proyectos = arbol_temporal / "proyectos"
+    datos = _recorrer_directo(proyectos, accion="aplicar")
+    assert not datos["no_cumple"]
+
+    acl = subprocess.run(
+        ["getfacl", "-p", str(proyectos / "un-proyecto")], capture_output=True, text=True, check=True
+    ).stdout
+    grupo_obj = [l for l in acl.splitlines() if l.startswith("group::")]
+    grupo_nombrado = [l for l in acl.splitlines() if l.startswith(f"group:{GRUPO_ESPERADO}:")]
+    assert grupo_obj and grupo_nombrado, acl
+    assert grupo_obj[0].split(":")[-1] == grupo_nombrado[0].split(":")[-1], (
+        f"group:: y group:{GRUPO_ESPERADO}: divergen:\n{acl}"
+    )
+
+
+def test_verificar_detecta_group_obj_recortado_aunque_la_entrada_nombrada_este_bien(arbol_temporal, _identidades):
+    """Reproduce el defecto real de fondo (m6): si algo (a mano, o un getfacl -m viejo)
+    deja group:: por debajo de rwx mientras la entrada nombrada sigue bien,
+    --verificar tiene que marcarlo NO CUMPLE -- antes no lo miraba en absoluto."""
+    proyectos = arbol_temporal / "proyectos"
+    _recorrer_directo(proyectos, accion="aplicar")
+    objetivo = proyectos / "un-proyecto"
+    r = subprocess.run(["sudo", "-n", "setfacl", "-m", "g::r-x", str(objetivo)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+
+    r_verif = _correr("--verificar", str(arbol_temporal))
+    assert r_verif.returncode == 1
+    assert "group:: (grupo dueño)" in r_verif.stdout
+
+
+def test_permiso_efectivo_directo_de_grupo_obj():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("permisos_proyectos", SCRIPT)
+    pp = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pp)
+    texto = "# file: x\nuser::rwx\ngroup::r-x\nother::r-x\n"
+    assert pp._permiso_efectivo(texto, default=False, tipo="group", calificador="") == 0o5
 
 
 def test_permiso_efectivo_calcula_interseccion_no_el_texto_pedido():

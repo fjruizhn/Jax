@@ -52,6 +52,60 @@ autenticación ni autorización de ningún servicio. **`--aplicar` y
 de Fernando.** `--verificar` es siempre de solo lectura, corre sin privilegio,
 y no necesita GO.
 
+## Aplicación en producción: BLOQUEADA hasta desplegar el fchmod(0o660) de tool_authority.py
+**No correr `--aplicar` contra `/home/fruiz/jax-workspace` real todavía --
+falta un requisito previo.** El fix de la ronda 2 (`las_manos/motor_registry/
+tool_authority.py::_write_file`, `os.fchmod(fd, 0o660)` antes de
+`os.replace`) sólo vive en este checkout/rama -- **no está desplegado en
+`/srv/jax-prod`, que es de donde corre LAS MANOS real** (requiere el proceso
+normal de despliegue de este repo, B9). Sin ese fix desplegado, un archivo
+que LAS MANOS (jaxsvc) escriba DESPUÉS de `--aplicar` -- con `mkstemp()`,
+0600 explícito -- queda con ACL efectiva `---` para el grupo pese a la ACL
+por defecto de `proyectos/` (el mismo defecto que motivó el fix, ver B1 en
+el docstring del guion), y `fruiz` no podría leerlo/escribirlo. Aplicar los
+permisos nuevos SIN el fix desplegado dejaría el árbol pareciendo correcto
+(`--verificar` daría `0`) mientras la escritura real de LAS MANOS lo sigue
+rompiendo por otro lado.
+
+**Cuando el fix ya esté en `/srv/jax-prod` y Fernando dé el GO**, el
+procedimiento (7 pasos) es:
+
+1. **Instalar + sha256.** `sudo install -o root -g root -m 0755
+   ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos` desde el
+   checkout que tenga el commit aprobado, y confirmar con `--verificar` (la
+   línea "núcleo privilegiado NO instalado..." no debe aparecer).
+2. **Línea base.** `find /home/fruiz/jax-workspace/proyectos \( -type d -o
+   -type f \) -printf '%y %m %U:%G\n' | sort | uniq -c` -- guardar la salida.
+   Es lo que permite confirmar más tarde que "Verificar primero" y la tabla
+   de `--deshacer` siguen describiendo el árbol real (ver la nota de VERDAD
+   OPERACIONAL en "Reversión" más abajo).
+3. **Chequeo previo de FIFO y hardlinks.** `find /home/fruiz/jax-workspace/proyectos
+   -type p -o -type s` (FIFO/socket -- tienen que dar vacío, si no `--aplicar`
+   fallará en el respaldo, ver m1) y `find ... -type f -links +1` (hardlinks
+   -- tienen que dar vacío, si no `--aplicar` los reporta y no los muta,
+   pero conviene saberlo antes, no durante).
+4. **Ventana.** Avisar antes de aplicar -- aunque `--aplicar` no interrumpe
+   lectores/escritores concurrentes ya en curso (probado,
+   `test_aplicar_no_interrumpe_un_lector_escritor_concurrente`), es la
+   primera vez que corre contra el árbol real y conviene tener a alguien
+   mirando.
+5. **Aplicar.** `python3 ops/permisos_proyectos.py --aplicar`. Revisar la
+   salida: cero `HARDLINK RECHAZADO`, cero `SYMLINK saltado` inesperado, y
+   que termine en "OK: ... aplicado y verificado."
+6. **Verificación cruzada jaxsvc↔fruiz.** En un subdirectorio de prueba
+   PROPIO (que se borra al terminar, nunca sobre datos reales): `jaxsvc` crea
+   un archivo, `fruiz` lo lee y le agrega una línea; `fruiz` crea un archivo,
+   `jaxsvc` lo lee y le agrega una línea. Los dos sentidos tienen que
+   funcionar (esto es exactamente lo que prueba
+   `test_jaxsvc_y_fruiz_leen_y_escriben_cruzado_en_un_subdirectorio_propio`,
+   que ya corre así contra el árbol real -- correrlo a mano si hace falta
+   repetir la comprobación sin pytest).
+7. **Reversión, probada, no sólo documentada.** Antes de dar la aplicación
+   por cerrada, confirmar que `python3 ops/permisos_proyectos.py --deshacer`
+   funciona contra el árbol real (Principio VII: un freno sin prueba no es
+   freno) -- y que después de correrlo, la línea base del paso 2 vuelve a
+   coincidir.
+
 ## Instalar/actualizar el núcleo
 ```bash
 sudo install -o root -g root -m 0755 \
@@ -127,8 +181,24 @@ estado que hall9000 tiene medido HOY con `stat` real, fuera de
 
 | | dueño | grupo | modo | ACL |
 |---|---|---|---|---|
-| 108 directorios medidos | fruiz | fruiz | 0775 | ninguna |
-| 249 archivos medidos | fruiz | fruiz | 0664 | ninguna |
+| 107 directorios medidos (alcance real, sin `.claude-flow`) | fruiz | fruiz | 0775 | ninguna |
+| 248 archivos medidos (alcance real, sin `.claude-flow`) | fruiz | fruiz | 0664 | ninguna |
+
+(El árbol completo, incluido `.claude-flow`, tiene más objetos -- lo que
+importa para `--deshacer` es sólo lo que está a su alcance, que es lo medido
+arriba. Confirmado el 2026-09-25: `--verificar` contra la producción real da
+`rc=1` con **355 NO CUMPLE** -- exactamente 107+248, el árbol entero sin
+aplicar todavía.)
+
+**Esta tabla es una VERDAD OPERACIONAL, no una constante -- caduca.** Es
+exacta sólo porque el árbol medido el 2026-09-25 era homogéneo (TODO fuera de
+`.claude-flow` estaba ya en `fruiz:fruiz 0775`/`0664`, sin excepciones). Si
+pasó tiempo desde esa fecha, alguien pudo haber creado un archivo con un modo
+distinto a mano, o agregado un proyecto nuevo con otra convención -- antes de
+correr `--deshacer` en producción, volver a medir con el mismo comando que
+generó esta tabla (`find ... -printf '%y %m %U:%G\n' | sort | uniq -c`, ver
+"Aplicación en producción" más abajo) y confirmar que sigue siendo cierto, o
+`--deshacer` reproduciría un estado que YA NO es el real.
 
 En vez de fijar `0775`/`0664` a fuego, el modo se DERIVA del `rwx` que el
 DUEÑO ya tiene en cada objeto en el momento de deshacer (lo que en el árbol

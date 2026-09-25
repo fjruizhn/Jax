@@ -120,6 +120,16 @@ def _raiz_configurada_privilegiada() -> Path:
     return Path(absoluta)
 
 
+def _sudo_n_funciona() -> bool:
+    """m5 (ronda 4): chequeo AISLADO de si `sudo -n` en sí funciona, separado de si
+    /etc/jax/.env tiene o no la variable -- para que un llamador pueda distinguir "sudo
+    no funciona" (abortar) de "sudo funciona pero no hay nada que comparar" (seguir)."""
+    try:
+        return subprocess.run(["sudo", "-n", "true"], capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def _raiz_por_defecto() -> str:
     """m1/m-f (rondas 2 y 3): si `sudo -n` no puede leer /etc/jax/.env (root:jaxsvc 640)
     y no se dio una RAIZ explícita, esto FALLA -- nunca un valor fijo por adivinanza.
@@ -433,10 +443,17 @@ def _revisar_o_mutar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, 
             faltas.append(f"ACL de acceso efectiva insuficiente para u:{USUARIO}")
         if _permiso_efectivo(texto_acl, default=False, tipo="group", calificador=GRUPO) & 0o7 != 0o7:
             faltas.append(f"ACL de acceso efectiva insuficiente para g:{GRUPO}")
+        # m6 (ronda 4): la entrada de grupo DUEÑO (sin nombre) tiene que coincidir --
+        # si no, getfacl muestra dos entradas de grupo con valores distintos para el
+        # mismo grupo, y --deshacer puede terminar pisado por la vieja (ver ronda 3).
+        if _permiso_efectivo(texto_acl, default=False, tipo="group", calificador="") & 0o7 != 0o7:
+            faltas.append("ACL de acceso efectiva insuficiente para group:: (grupo dueño)")
         if _permiso_efectivo(texto_acl, default=True, tipo="user", calificador=USUARIO) & 0o7 != 0o7:
             faltas.append(f"ACL por defecto efectiva insuficiente para u:{USUARIO}")
         if _permiso_efectivo(texto_acl, default=True, tipo="group", calificador=GRUPO) & 0o7 != 0o7:
             faltas.append(f"ACL por defecto efectiva insuficiente para g:{GRUPO}")
+        if _permiso_efectivo(texto_acl, default=True, tipo="group", calificador="") & 0o7 != 0o7:
+            faltas.append("ACL por defecto efectiva insuficiente para group:: (grupo dueño)")
 
     if faltas:
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
@@ -451,7 +468,14 @@ def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
     finally:
         os.close(fd_real)
 
-    entrada = f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,m::rwx"
+    # m6 (ronda 4): g::rwX (la entrada de grupo DUEÑO, sin nombre) además de
+    # g:{GRUPO}:rwX (la entrada NOMBRADA) -- antes sólo se tocaba la nombrada, y como
+    # $GRUPO es también el grupo dueño de estos objetos, `getfacl` mostraba dos
+    # entradas para el mismo grupo con valores que podían DIVERGIR (la nombrada
+    # correcta, la dueño con lo que tuviera de antes de --aplicar) -- confuso para
+    # cualquiera que lea la ACL, y root-cause real del defecto de --deshacer
+    # encontrado en la ronda 3 (ver el docstring de _deshacer_objeto).
+    entrada = f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx"
     _setfacl(fd_path, entrada)
     _setfacl(fd_path, entrada, default=True)
 
@@ -503,6 +527,9 @@ def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mut
             faltas.append(f"ACL de acceso efectiva insuficiente para u:{USUARIO}")
         if _permiso_efectivo(texto_acl, default=False, tipo="group", calificador=GRUPO) & 0o6 != 0o6:
             faltas.append(f"ACL de acceso efectiva insuficiente para g:{GRUPO}")
+        # m6 (ronda 4): ver la nota equivalente en _revisar_o_mutar_directorio.
+        if _permiso_efectivo(texto_acl, default=False, tipo="group", calificador="") & 0o6 != 0o6:
+            faltas.append("ACL de acceso efectiva insuficiente para group:: (grupo dueño)")
 
     if faltas:
         resultado.no_cumple.append(f"{ruta}: {'; '.join(faltas)}")
@@ -517,7 +544,7 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
     finally:
         os.close(fd_real)
 
-    _setfacl(fd_path, f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,m::rwx")
+    _setfacl(fd_path, f"u:{USUARIO}:rwX,g:{GRUPO}:rwX,g::rwX,m::rwx")
 
     fd_real = _reabrir_real(fd_path, os.O_RDONLY)
     try:
@@ -685,11 +712,26 @@ def _desescapar_getfacl(texto: str) -> str:
     return _RE_ESCAPE.sub(_uno, texto)
 
 
+_MARCADOR_FIN_RESPALDO = "# JAX_PERMISOS_PROYECTOS_RESPALDO_COMPLETO\n"
+
+
 def _parsear_respaldo(contenido: str) -> list[str]:
     """Devuelve la lista de rutas que el respaldo registra -- sólo para el conteo
     forense (MAJOR-1). Ya no se usa para restaurar nada: no hace falta distinguir
-    directorio de archivo ni guardar owner/ACL (ver el BLOCK-1 de esta ronda, que
-    retiró reconstruir-desde-respaldo por completo)."""
+    directorio de archivo ni guardar owner/ACL (ver el BLOCK-1 de la ronda 3, que
+    retiró reconstruir-desde-respaldo por completo).
+
+    m2 (ronda 4): un respaldo cortado a mitad de escritura -- incluso justo después de
+    "# file: /a/b" en el ÚLTIMO bloque, sin nada más -- pasaba antes como válido, porque
+    esta función sólo miraba si la primera línea de cada bloque empezaba con "# file:".
+    Ahora exige que cada bloque traiga owner, group, y las tres entradas base
+    (user::/group::/other::) -- lo que `getfacl -p` SIEMPRE escribe para un bloque
+    completo, verificado empíricamente. Un bloque incompleto hace que TODO el respaldo
+    se rechace (no sólo ese bloque): un respaldo parcialmente confiable no es un
+    respaldo confiable. `_cmd_nucleo_respaldo`, además, exige el marcador de fin
+    (`_MARCADOR_FIN_RESPALDO`) que él mismo escribe después de que `getfacl` termina --
+    eso atrapa un corte que caiga EXACTO en un borde de bloque (un caso que la
+    validación por bloque, sola, no vería mal)."""
     rutas = []
     bloques = contenido.split("\n\n")
     for bloque in bloques:
@@ -699,23 +741,44 @@ def _parsear_respaldo(contenido: str) -> list[str]:
         # NO se hace .strip() sobre el resto -- un espacio final es parte del nombre
         # real (ver el docstring de _desescapar_getfacl).
         ruta = _desescapar_getfacl(lineas[0][len("# file:"):].lstrip(" ").rstrip("\r\n"))
+
+        tiene_owner = any(l.startswith("# owner:") for l in lineas)
+        tiene_group = any(l.startswith("# group:") for l in lineas)
+        tiene_triada = (
+            any(l.startswith("user::") for l in lineas)
+            and any(l.startswith("group::") for l in lineas)
+            and any(l.startswith("other::") for l in lineas)
+        )
+        if not (tiene_owner and tiene_group and tiene_triada):
+            raise ErrorPermisosProyectos(
+                f"el respaldo está truncado o corrupto: el bloque de {ruta!r} no trae "
+                f"owner/group/user::/group::/other:: completos -- no es confiable, se descarta"
+            )
         rutas.append(ruta)
     return rutas
 
 
-def _contar_objetos_reales(proyectos: Path) -> int:
+def _contar_objetos_reales(proyectos: Path) -> tuple[int, list[str]]:
     """Recorrido de sólo lectura, SIN aplicar NOMBRES_EXCLUIDOS (getfacl -R tampoco lo
     sabe), que cuenta cada directorio y archivo regular real bajo proyectos/ (incluido
-    proyectos/ mismo), symlinks excluidos -- el mismo universo que `getfacl -R -p`
-    enumera. Sirve para comprobar, de forma independiente, que el respaldo tiene la
-    cantidad de entradas que debería (MAJOR-1: rc==0 de getfacl no alcanza)."""
+    proyectos/ mismo), symlinks excluidos. Devuelve `(cantidad, no_gobernados)` --
+    `no_gobernados` son rutas que no son symlink, directorio, ni archivo regular (FIFO,
+    socket, device...). `getfacl -R -p` SÍ las enumera como su propio bloque "# file:"
+    (verificado empíricamente: una FIFO aparece igual que cualquier archivo), pero este
+    guion las ignora en todos sus recorridos (igual que `_caminar`) -- así que si el
+    árbol tiene alguna, el conteo NUNCA podría coincidir con el del respaldo por más que
+    todo lo demás esté bien. `_cmd_nucleo_respaldo` revisa `no_gobernados` ANTES de
+    comparar cantidades, para poder nombrar la ruta exacta en vez de dejar un "no
+    coincide" genérico que no dice dónde está el problema."""
     contador = 0
+    no_gobernados: list[str] = []
 
-    def _contar_hijos(dir_fd: int) -> None:
+    def _contar_hijos(dir_fd: int, ruta: str) -> None:
         nonlocal contador
         with os.scandir(dir_fd) as it:
             entradas = list(it)
         for entrada in entradas:
+            ruta_hija = f"{ruta}/{entrada.name}"
             fd_path = _abrir_o_path(entrada.name, dir_fd)
             if fd_path is None:
                 continue
@@ -730,11 +793,13 @@ def _contar_objetos_reales(proyectos: Path) -> int:
                     except PermissionError:
                         continue
                     try:
-                        _contar_hijos(fd_listable)
+                        _contar_hijos(fd_listable, ruta_hija)
                     finally:
                         os.close(fd_listable)
                 elif stat.S_ISREG(st.st_mode):
                     contador += 1
+                else:
+                    no_gobernados.append(ruta_hija)
             finally:
                 os.close(fd_path)
 
@@ -742,22 +807,22 @@ def _contar_objetos_reales(proyectos: Path) -> int:
     try:
         fd_proyectos = _abrir_o_path(proyectos.name, fd_raiz)
         if fd_proyectos is None:
-            return 0
+            return 0, no_gobernados
         try:
             st = os.fstat(fd_proyectos)
             if stat.S_ISLNK(st.st_mode):
-                return 0
+                return 0, no_gobernados
             contador += 1
             fd_listable = _reabrir_real(fd_proyectos, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                _contar_hijos(fd_listable)
+                _contar_hijos(fd_listable, str(proyectos))
             finally:
                 os.close(fd_listable)
         finally:
             os.close(fd_proyectos)
     finally:
         os.close(fd_raiz)
-    return contador
+    return contador, no_gobernados
 
 
 def _hacer_respaldo() -> Path:
@@ -771,6 +836,73 @@ def _hacer_respaldo() -> Path:
     return Path(ruta_texto)
 
 
+def _generar_respaldo_validado(proyectos: Path) -> Path:
+    """El núcleo real de --nucleo-respaldo, separado de la fijación de RAIZ que hace
+    _cmd_nucleo_respaldo() -- así los tests pueden ejercitar esta lógica (m1, m2, ronda
+    4) contra un árbol de prueba arbitrario, sin pasar por la RAIZ configurada. Corre
+    como root (mkstemp en RUTA_RESPALDOS, que es root:root 0700). Levanta
+    ErrorPermisosProyectos con el motivo si el respaldo no es confiable -- nunca deja un
+    archivo parcial: se borra en el propio `finally`."""
+    RUTA_RESPALDOS.mkdir(parents=True, exist_ok=True)
+    os.chmod(RUTA_RESPALDOS, 0o700)
+    fd, ruta_txt = tempfile.mkstemp(dir=str(RUTA_RESPALDOS), prefix="proyectos-", suffix=".acl")
+    ruta = Path(ruta_txt)
+    ok = False
+    try:
+        with os.fdopen(fd, "wb") as f:
+            r = subprocess.run(["getfacl", "-R", "-p", str(proyectos)], stdout=f, stderr=subprocess.PIPE)
+            if r.returncode == 0:
+                # m2 (ronda 4): marcador de fin escrito por ESTE proceso, como paso
+                # aparte de lo que getfacl escribió -- atrapa un corte que caiga justo
+                # en un borde de bloque, que la validación por bloque de
+                # _parsear_respaldo, sola, no vería mal.
+                f.write(_MARCADOR_FIN_RESPALDO.encode("utf-8"))
+            f.flush()
+            os.fsync(f.fileno())
+        if r.returncode != 0:
+            raise ErrorPermisosProyectos(f"getfacl rc={r.returncode}: {r.stderr.decode(errors='replace')}")
+
+        # MAJOR-1 (ronda 3): rc==0 no es evidencia suficiente (verificado empíricamente:
+        # getfacl -R -p ... > /dev/full también da rc==0). Se relee lo escrito, se exige
+        # el marcador de fin, y se compara la cantidad de entradas contra un recorrido
+        # independiente del árbol real.
+        contenido = ruta.read_text(encoding="utf-8", errors="surrogateescape")
+        if not contenido.strip():
+            raise ErrorPermisosProyectos("el respaldo quedó vacío")
+        if not contenido.endswith(_MARCADOR_FIN_RESPALDO):
+            raise ErrorPermisosProyectos(
+                "el respaldo parece truncado (falta el marcador de fin) -- no es confiable"
+            )
+        contenido_sin_marcador = contenido[: -len(_MARCADOR_FIN_RESPALDO)]
+
+        n_respaldo = len(_parsear_respaldo(contenido_sin_marcador))
+
+        # m1 (ronda 4): una FIFO/socket/device en el árbol hace que getfacl -R la
+        # enumere (verificado empíricamente) pero _contar_objetos_reales la ignore
+        # (igual que --verificar/--aplicar) -- eso nunca podría dar el mismo número por
+        # más que todo lo demás esté bien. Se detecta y se nombra la ruta ANTES de
+        # comparar cantidades, en vez de dejar un "no coincide" genérico.
+        n_real, no_gobernados = _contar_objetos_reales(proyectos)
+        if no_gobernados:
+            raise ErrorPermisosProyectos(
+                "el árbol tiene objetos que no son symlink, directorio ni archivo "
+                "regular (FIFO/socket/device) -- getfacl los cuenta, este guion no, así "
+                "que el respaldo nunca sería confiable mientras estén: "
+                + ", ".join(no_gobernados)
+            )
+        if n_respaldo != n_real:
+            raise ErrorPermisosProyectos(
+                f"el respaldo tiene {n_respaldo} entradas pero el recorrido real ve "
+                f"{n_real} -- no es confiable"
+            )
+
+        ok = True
+        return ruta
+    finally:
+        if not ok:
+            ruta.unlink(missing_ok=True)
+
+
 def _cmd_nucleo_respaldo() -> int:
     if os.geteuid() != 0:
         print("el núcleo de respaldo tiene que correr como root", file=sys.stderr)
@@ -781,42 +913,13 @@ def _cmd_nucleo_respaldo() -> int:
         print(str(exc), file=sys.stderr)
         return 2
 
-    RUTA_RESPALDOS.mkdir(parents=True, exist_ok=True)
-    os.chmod(RUTA_RESPALDOS, 0o700)
-    fd, ruta_txt = tempfile.mkstemp(dir=str(RUTA_RESPALDOS), prefix="proyectos-", suffix=".acl")
-    ruta = Path(ruta_txt)
-    ok = False
     try:
-        with os.fdopen(fd, "wb") as f:
-            r = subprocess.run(["getfacl", "-R", "-p", str(proyectos)], stdout=f, stderr=subprocess.PIPE)
-            f.flush()
-            os.fsync(f.fileno())
-        if r.returncode != 0:
-            print(f"getfacl rc={r.returncode}: {r.stderr.decode(errors='replace')}", file=sys.stderr)
-            return 1
-
-        # MAJOR-1: rc==0 no es evidencia suficiente (verificado empíricamente: getfacl
-        # -R -p ... > /dev/full también da rc==0). Se relee lo escrito y se compara la
-        # cantidad de entradas contra un recorrido independiente del árbol real.
-        contenido = ruta.read_text(encoding="utf-8", errors="surrogateescape")
-        if not contenido.strip():
-            print("el respaldo quedó vacío", file=sys.stderr)
-            return 1
-        n_respaldo = len(_parsear_respaldo(contenido))
-        n_real = _contar_objetos_reales(proyectos)
-        if n_respaldo != n_real:
-            print(
-                f"el respaldo tiene {n_respaldo} entradas pero el recorrido real ve "
-                f"{n_real} -- no es confiable, se descarta", file=sys.stderr,
-            )
-            return 1
-
-        ok = True
-        print(str(ruta))
-        return 0
-    finally:
-        if not ok:
-            ruta.unlink(missing_ok=True)
+        ruta = _generar_respaldo_validado(proyectos)
+    except ErrorPermisosProyectos as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(str(ruta))
+    return 0
 
 
 # ============================================================================
@@ -869,6 +972,20 @@ def _cmd_aplicar(raiz: str) -> int:
     # Chequeo de cortesía: la RAIZ pedida tiene que ser la configurada -- el núcleo la
     # vuelve a comprobar de forma independiente y es la aplicación real de esto, pero
     # fallar acá antes de intentar el respaldo evita un mensaje confuso.
+    #
+    # m5 (ronda 4): si `sudo -n` en sí no puede correr (no hay ticket, sudo no está,
+    # timeout), _raiz_por_defecto() devolvía "" -- lo mismo que devuelve cuando
+    # /etc/jax/.env es legible pero simplemente no tiene la variable -- y este chequeo
+    # trataba los dos casos igual: "no hay nada que comparar, seguir". Eso es fallar
+    # ABIERTO ante un problema del propio chequeo, no ante una ausencia legítima. Ahora
+    # se prueba `sudo -n true` aparte primero: si ESO falla, se aborta con un motivo
+    # explícito; sólo si sudo -n funciona pero la variable no está, se sigue de largo
+    # (ahí sí no hay nada que comparar).
+    if not _sudo_n_funciona():
+        raise ErrorPermisosProyectos(
+            "no se pudo confirmar la RAIZ configurada (sudo -n no funciona) -- "
+            "--aplicar no sigue sin poder hacer esa comparación."
+        )
     configurada = _raiz_por_defecto()
     if configurada:
         absoluta_pedida = os.path.realpath(str(proyectos))
@@ -989,11 +1106,36 @@ _MODOS = ("--verificar", "--aplicar", "--deshacer",
           "--nucleo-privilegiado", "--nucleo-respaldo", "--nucleo-deshacer")
 _MODOS_SIN_ARGUMENTOS = ("--deshacer", "--nucleo-privilegiado", "--nucleo-respaldo", "--nucleo-deshacer")
 
+_AYUDA = f"""\
+uso: permisos_proyectos.py [--verificar [RAIZ] | --aplicar | --deshacer]
+
+  --verificar [RAIZ]  Solo lectura. Sin RAIZ, usa la configurada en {RUTA_ENV}.
+                       Es el modo por defecto si no se da ningún flag.
+  --aplicar            Dueño {USUARIO}, grupo {GRUPO}, setgid, ACL de acceso y por
+                       defecto. Sólo actúa sobre la RAIZ configurada (nunca acepta
+                       una RAIZ distinta) -- necesita el GO de Fernando en producción.
+  --deshacer           DETERMINISTA, sin argumentos: lleva el árbol a
+                       {DUENO_ORIGINAL}:{GRUPO} 0775 (directorios) / 0664 (archivos),
+                       sin ninguna ACL -- el estado medido con `stat` real en
+                       producción el 2026-09-25. Esa tabla es una VERDAD
+                       OPERACIONAL, no una constante: sólo es exacta mientras el
+                       árbol siga homogéneo desde esa fecha -- volver a medir antes
+                       de usarlo si pasó tiempo (ver
+                       docs/runbooks/workspace-proyectos.md).
+
+Sin ningún flag, equivale a --verificar.
+"""
+
 
 def main(argv: list[str]) -> int:
+    if any(a in ("-h", "--help") for a in argv):
+        print(_AYUDA, end="")
+        return 0
+
     modo = None
     raiz_arg = None
     modos_vistos = 0
+    raices_vistas = 0
 
     for a in argv:
         if a in _MODOS:
@@ -1004,9 +1146,15 @@ def main(argv: list[str]) -> int:
             return 2
         else:
             raiz_arg = a
+            raices_vistas += 1
 
     if modos_vistos > 1:
         print("modos repetidos -- se pasó más de un flag de modo", file=sys.stderr)
+        return 2
+    # m5 (ronda 4): antes, una segunda RAIZ posicional pisaba en silencio a la primera
+    # (quedaba la ÚLTIMA, sin avisar) -- ahora es un rechazo explícito.
+    if raices_vistas > 1:
+        print(f"más de una RAIZ -- se dieron {raices_vistas} argumentos posicionales", file=sys.stderr)
         return 2
     if modo is None:
         modo = "--verificar"
