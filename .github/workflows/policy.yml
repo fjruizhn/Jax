@@ -5861,3 +5861,31 @@ jobs:
           # dos archivos) y 107 passed -- el mismo "CI se queda rojo hasta que..." de
           # arriba, no una regresión de este cambio. Si el runner da otro número, manda
           # el runner.
+
+  # ops/permisos-proyectos.sh (2026-09-25, spec
+  # docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md §5): proyectos/ del
+  # workspace tiene que ser escribible por jaxsvc (LAS MANOS, jax-platform) y por fruiz, con
+  # herencia. Job propio, sin DB: la parte (b) del test (sudo -u jaxsvc contra
+  # /home/fruiz/jax-workspace/proyectos real) se salta sola fuera del host de producción de
+  # jax -- medido en hall9000 con `sudo unshare --mount` tapando /home/fruiz/jax-workspace
+  # (tmpfs vacío encima, namespace de montaje propio -- mismo método que usa el job
+  # arranque-instalado-versionado para simular el runner real): 4 passed, 1 skipped.
+  permisos-proyectos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: PYTHONPATH=. python -m pytest tests/test_permisos_proyectos.py -v
+      - name: Piso exacto de tests CORRIDOS (no skipeados)
+        # Medido 2026-09-25 en hall9000 con sudo unshare --mount tapando
+        # /home/fruiz/jax-workspace: 4 passed, 1 skipped (el que necesita
+        # /home/fruiz/jax-workspace/proyectos real, que ningún runner de GitHub Actions
+        # tiene). Si esto da "5 passed", este runner SÍ tiene ese árbol -- no es el
+        # runner esperado, revisar antes de asumir que el piso subió.
+        run: |
+          PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
+          grep -qE "^4 passed, 1 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 4 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
