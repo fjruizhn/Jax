@@ -31,7 +31,11 @@ from __future__ import annotations
 import asyncio
 import os
 import logging
+from typing import Awaitable, Callable
 
+from jax.memory.b9 import MutationAuthorizationRequest, ScopeContext, ScopeDenied, Visibility
+from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
+from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.db import MemoryDB
 from jax.memory.worker import (
     FORBIDDEN_CATEGORIES_BLOCK,
@@ -46,6 +50,50 @@ logging.basicConfig(
     format="%(asctime)s [synthesis] %(levelname)s: %(message)s",
 )
 logger = logging.getLogger("jax.memory.synthesis_worker")
+
+
+class PersistentSynthesisWriter:
+    """B9-only synthesis sink using request inputs, never bearer authority."""
+    def __init__(self, api: PersistentMemoryAPI,
+                 build_request_scope: Callable[[int | None, int | None, tuple[str, ...], str, Visibility], Awaitable[ScopeContext]]):
+        self._api = api
+        self._build_request_scope = build_request_scope
+
+    async def persist(self, user_id: int | None, project_id: int | None, content: str,
+                      source_revision_ids: tuple[str, ...]) -> str:
+        scope = await self._build_request_scope(
+            user_id, project_id, source_revision_ids, "SYNTHESIZE", Visibility.SYSTEM_INTERNAL
+        )
+        if scope.actor_type != "SERVICE" or scope.actor_principal != "service:memory-synthesis":
+            raise ScopeDenied("synthesis requires the fixed memory-synthesis service principal")
+        if (str(user_id) if user_id is not None else None) != (str(scope.subject_user_id) if scope.subject_user_id else None):
+            raise ScopeDenied("synthesis subject does not match its source scope")
+        if (str(project_id) if project_id is not None else None) != (str(scope.project_id) if scope.project_id else None):
+            raise ScopeDenied("synthesis project does not match its source scope")
+        # Source revision scope equality itself is rechecked by the persistent
+        # B9 synthesis operation while it locks those revisions.  This writer
+        # carries only the exact source IDs and cannot promote their scope.
+        request = MutationAuthorizationRequest(scope, "SYNTHESIZE", Visibility.SYSTEM_INTERNAL)
+        return await self._api.synthesize_memory(
+            request, content, source_revision_ids, provider="deepseek", model="deepseek-v4-flash",
+            transformation_version="b9-worker-v1",
+        )
+
+
+def build_persistent_synthesis_writer_for_scope(pool: object, tenant_id: int | str) -> PersistentSynthesisWriter:
+    """Bind a run item to its canonical DB tenant without user role inheritance."""
+    api = PersistentMemoryAPI(MariaDBB9Store(pool), MariaDBScopeAuthorityResolver(pool))
+
+    async def source_scope(user_id: int | None, project_id: int | None,
+                           _source_revision_ids: tuple[str, ...], _operation: str,
+                           _visibility: Visibility) -> ScopeContext:
+        if user_id is None:
+            raise ScopeDenied("automated synthesis requires an originating subject")
+        return ScopeContext("service:memory-synthesis", "SERVICE", str(user_id), str(tenant_id),
+                            str(project_id) if project_id is not None else None,
+                            calling_component="memory-synthesis")
+
+    return PersistentSynthesisWriter(api, source_scope)
 
 
 # Scope minimo para que valga la pena buscar patrones. Menos que esto y no
@@ -112,7 +160,8 @@ async def build_synthesizer() -> HttpMuscle:
 
 
 async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
-                        user_id: int | None, project_id: int | None) -> int:
+                        user_id: int | None, project_id: int | None,
+                        *, b9_writer: PersistentSynthesisWriter | None = None) -> int:
     """Procesa UN scope (user_id, project_id). Devuelve cuantos insights guardo."""
     facts = await db.get_facts(only_unverified=False, only_verified=True,
                                limit=50, user_id=user_id, project_id=project_id)
@@ -144,12 +193,23 @@ async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
         # Solo se guardan los ids que realmente vinieron en la entrada — un
         # id inventado por el LLM (alucinado) se descarta, no rompe el save.
         source_ids = [i for i in insight.get("source_ids", []) if i in valid_ids]
-        saved = await db.save_fact(
-            insight["text"], insight.get("type", "user"),
-            source_facet="synthesis",
-            user_id=user_id, project_id=project_id,
-            source_fact_ids=source_ids or None,
-        )
+        if b9_writer:
+            source_revision_ids = tuple(
+                str(f["b9_revision_id"]) for f in facts if f["id"] in source_ids and f.get("b9_revision_id")
+            )
+            # B9 synthesis requires exact B9 revision lineage.  Do not turn a
+            # legacy integer id into provenance or silently use raw facts.
+            if len(source_revision_ids) != len(source_ids) or len(source_revision_ids) < 2:
+                logger.error("scope user=%s project=%s: B9 lineage unavailable; synthesis skipped", user_id, project_id)
+                continue
+            saved = await b9_writer.persist(user_id, project_id, insight["text"], source_revision_ids)
+        else:
+            saved = await db.save_fact(
+                insight["text"], insight.get("type", "user"),
+                source_facet="synthesis",
+                user_id=user_id, project_id=project_id,
+                source_fact_ids=source_ids or None,
+            )
         if saved:
             n_saved += 1
 
@@ -159,7 +219,7 @@ async def process_scope(db: MemoryDB, synthesizer: HttpMuscle,
     return n_saved
 
 
-async def run_once() -> None:
+async def run_once(*, b9_writer: PersistentSynthesisWriter | None = None) -> None:
     """Una corrida del sintetizador: recorre todos los scopes con suficientes
     facts verificados y busca insights en cada uno."""
     jax_db_host = os.environ.get("JAX_DB_HOST")
@@ -191,7 +251,13 @@ async def run_once() -> None:
         synthesizer = await build_synthesizer()
         total = 0
         for scope in scopes:
-            total += await process_scope(db, synthesizer, scope["user_id"], scope["project_id"])
+            writer = b9_writer
+            if writer is None:
+                tenant_id = scope.get("tenant_id")
+                if tenant_id is None:
+                    raise ScopeDenied("synthesis source scope lacks canonical tenant")
+                writer = build_persistent_synthesis_writer_for_scope(db.pool, tenant_id)
+            total += await process_scope(db, synthesizer, scope["user_id"], scope["project_id"], b9_writer=writer)
         logger.info(f"Corrida terminada: {total} insight(s) nuevo(s) en total.")
     finally:
         await db.close()

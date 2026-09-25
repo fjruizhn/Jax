@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule JAX B9 lifecycle reconciliation
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=jax-memory-lifecycle.service
+
+[Install]
+WantedBy=timers.target

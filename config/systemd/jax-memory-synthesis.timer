@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule JAX B9 memory synthesis
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=jax-memory-synthesis.service
+
+[Install]
+WantedBy=timers.target

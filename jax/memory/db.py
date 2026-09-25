@@ -909,21 +909,21 @@ class MemoryDB:
     @db_error_handler
     async def get_unprocessed_conversations(self, limit: int = 10) -> Optional[list]:
         """Devuelve conversaciones cerradas que el worker aun no proceso.
-        Retorna lista de dicts {id, uuid, user_id, project_id} o None si fallo.
+        Retorna lista de dicts {id, uuid, tenant_id, user_id, project_id} o None si fallo.
         user_id/project_id viajan para que los facts hereden el scope de origen."""
         if not self.pool:
             return None
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT id, conversation_uuid, user_id, project_id FROM conversations "
+                    "SELECT id, conversation_uuid, tenant_id, user_id, project_id FROM conversations "
                     "WHERE ended_at IS NOT NULL AND memory_processed = FALSE "
                     "ORDER BY ended_at ASC LIMIT %s",
                     (limit,),
                 )
                 rows = await cur.fetchall()
-                return [{"id": r[0], "uuid": r[1], "user_id": r[2],
-                         "project_id": r[3]} for r in rows]
+                return [{"id": r[0], "uuid": r[1], "tenant_id": r[2], "user_id": r[3],
+                         "project_id": r[4]} for r in rows]
 
     @db_error_handler
     async def get_conversation_messages(self, conv_id: int) -> Optional[list]:
@@ -1888,10 +1888,11 @@ class MemoryDB:
         async with self.pool.acquire() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cur:
                 await cur.execute(
-                    "SELECT user_id, project_id, COUNT(*) AS n_facts FROM facts "
+                    "SELECT f.user_id, f.project_id, u.tenant_id, COUNT(*) AS n_facts FROM facts f "
+                    "JOIN jax_users u ON u.user_id=f.user_id "
                     "WHERE is_verified = TRUE AND superseded_by IS NULL "
                     "AND (expires_at IS NULL OR expires_at > NOW()) "
-                    "GROUP BY user_id, project_id "
+                    "GROUP BY f.user_id, f.project_id, u.tenant_id "
                     "HAVING COUNT(*) >= %s",
                     (min_facts,),
                 )

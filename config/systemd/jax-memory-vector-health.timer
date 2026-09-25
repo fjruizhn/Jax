@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule JAX B9 vector health check
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=jax-memory-vector-health.service
+
+[Install]
+WantedBy=timers.target

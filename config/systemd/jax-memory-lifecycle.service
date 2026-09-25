@@ -1,0 +1,13 @@
+[Unit]
+Description=JAX B9 memory lifecycle reconciliation
+After=network-online.target mariadb.service
+
+[Service]
+Type=oneshot
+User=jaxsvc
+Group=jaxsvc
+WorkingDirectory=/srv/jax-prod/jax
+EnvironmentFile=/etc/jax/.env
+ExecStart=/srv/jax-prod/jax/.venv/bin/python -m jax.memory.lifecycle_worker
+StandardOutput=journal
+StandardError=journal

@@ -754,15 +754,38 @@ jobs:
       # pip install (no en hall9000, donde todo esta instalado): con los 4
       # paquetes, 10 tests colectados; sin cryptography, error de coleccion.
       # Desde E-19 (2026-09-16) todo sale de requirements.txt.
-      - run: pip install -r requirements.txt pytest
+      # B9 persistence/authority tests are async; use the same supported
+      # plugin contract as the other async database jobs.
+      - run: pip install -r requirements.txt pytest pytest-asyncio
       - run: >-
-          PYTHONPATH=. python -m pytest -v
+          PYTHONPATH=. python -m pytest -v --junitxml=/tmp/b9-memory-first.xml
           tests/test_memory_vector_zero_io.py tests/test_worker_backfill.py
           tests/test_memory_scope_denormalized.py tests/test_migrar_embeddings_io.py
           tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py
           tests/test_accion_persona_retorno_no_ambiguo.py
           tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py
           tests/test_memoria_busqueda_facts.py
+          tests/test_b9_lifecycle_worker.py tests/test_b9_mariadb_adapter.py
+          tests/test_b9_persistent_api.py tests/test_b9_scope_authority.py
+          tests/test_b9_shared_memory.py tests/test_b9_systemd_ownership.py
+          tests/test_b9_worker_composition.py tests/test_project_scope_authority.py
+      - name: Publicar fallos de memoria B9
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('/tmp/b9-memory-first.xml')
+          if path.exists():
+              for case in ET.parse(path).iter('testcase'):
+                  failure = case.find('failure')
+                  if failure is None:
+                      failure = case.find('error')
+                  if failure is not None:
+                      summary = (failure.get('message') or failure.text or 'pytest failure').splitlines()[0][:240]
+                      summary = summary.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f"::error title=B9 memory test::{case.get('classname')}.{case.get('name')}: {summary}")
+          PY
       # 8 contra la DB (4 de busqueda + 4 del backfill de embeddings en ceros)
       # + 2 puros del worker. Subido de 4 a 10 el 2026-09-11 (reintento de
       # embeddings en el worker): cada test nuevo se vio en rojo antes del
@@ -775,7 +798,11 @@ jobs:
             tests/test_memoria_facts_comportamiento.py tests/test_memoria_retorno_no_ambiguo.py \
             tests/test_accion_persona_retorno_no_ambiguo.py \
             tests/test_memoria_caducidad_no_es_agujero.py tests/test_indice_vectorial.py \
-            tests/test_memoria_busqueda_facts.py 2>&1 | tee /tmp/out
+            tests/test_memoria_busqueda_facts.py \
+            tests/test_b9_lifecycle_worker.py tests/test_b9_mariadb_adapter.py \
+            tests/test_b9_persistent_api.py tests/test_b9_scope_authority.py \
+            tests/test_b9_shared_memory.py tests/test_b9_systemd_ownership.py \
+            tests/test_b9_worker_composition.py tests/test_project_scope_authority.py 2>&1 | tee /tmp/out
           # 10 -> 16 el 2026-09-11: test_memory_scope_denormalized.py agrega 6
           # (el scope copiado al mensaje, el centinela de que el scope de una
           # conversacion sigue siendo inmutable, el plan sin JOIN que si usa el
@@ -972,8 +999,28 @@ jobs:
           #   despues de confirmar. Medido en local (MISMO comando, MariaDB
           #   real 127.0.0.1:3308): 76 -> 78 passed. Si el runner da otro
           #   numero, manda el runner.
-          grep -qE "^78 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 78 tests CORRIDOS (no skipeados)."; exit 1; }
+          # PR #269, HEAD 79b504f: runner midió 186 passed en esta segunda corrida.
+          grep -qE "^186 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 186 tests CORRIDOS (no skipeados)."; exit 1; }
+      - name: Publicar resumen de segunda corrida de memoria
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('/tmp/out')
+          if path.exists():
+              lines = path.read_text(errors='replace').splitlines()
+              for line in lines:
+                  if re.match(r'^(FAILED|ERROR) [^\s]+', line):
+                      name = line.split(' ', 2)[1]
+                      print(f'::error title=B9 memory repeat testcase::{name}')
+              for line in reversed(lines):
+                  if re.search(r'\b\d+ (?:passed|failed|error|errors|skipped)\b', line):
+                      summary = line.strip('= ').replace('%', '%25')[:240]
+                      print(f'::error title=B9 memory repeat summary::{summary}')
+                      break
+          PY
 
   output-validator-regression:
     runs-on: ubuntu-latest
@@ -1449,7 +1496,7 @@ jobs:
           env -i PATH=/usr/bin:/bin bash -c 'command -v exch' || \
             { echo "exch no aparece con PATH=/usr/bin:/bin -- el mismo PATH hermético que usa test_ejecutor_reemplazar_directorio_atomico.py::_correr"; exit 1; }
       - run: >-
-          python -m pytest -v
+          python -m pytest -v --junitxml=/tmp/tests-puros-first.xml
           tests/test_capability_unbound_schema.py tests/test_chunking.py
           tests/test_completeness_intent.py tests/test_dispatch_step_reroute.py
           tests/test_vocativo_faceta.py tests/test_router_easter_egg.py
@@ -1601,6 +1648,23 @@ jobs:
           jacobs/_devolucion_ejecutor_test.py
           tests/test_jacobs_descarte.py
           tests/test_store_columna_descarte_acotada.py
+      - name: Publicar fallos de tests puros
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path('/tmp/tests-puros-first.xml')
+          if path.exists():
+              for case in ET.parse(path).iter('testcase'):
+                  failure = case.find('failure')
+                  if failure is None:
+                      failure = case.find('error')
+                  if failure is not None:
+                      summary = (failure.get('message') or failure.text or 'pytest failure').splitlines()[0][:240]
+                      summary = summary.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      print(f"::error title=Pure test::{case.get('classname')}.{case.get('name')}: {summary}")
+          PY
       - name: Piso exacto de tests CORRIDOS
         # Medido 2026-09-11 en venv limpio: 62 passed, 0 failed.
         run: |
@@ -4182,8 +4246,11 @@ jobs:
           #   IGNORED/otro prefijo, 1205 -> ERROR y sigue, 1091 -> exito, otro
           #   error sube). Los 45 skipped no cambian. Medido en local (archivo
           #   solo: 5 -> 17); manda el runner.
-          grep -qE "^2813 passed, 45 skipped" /tmp/out || {
-            echo "PISO ROTO: se esperaban 2813 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
+          # B9 gives scheduled worker ownership to systemd: three obsolete
+          # REPL worker-launch/log tests were replaced by one regression (-2).
+          # The combined floor is 2813 - 2 = 2811; the 45 skips are unchanged.
+          grep -qE "^2811 passed, 45 skipped" /tmp/out || {
+            echo "PISO ROTO: se esperaban 2811 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
       # Nucleo de procesamiento de archivos (2026-09-20, ficha + huella sha256):
       # sin DB ni red, va en paso propio para no tocar el piso numerico del

@@ -6,6 +6,7 @@ Description=JAX — Worker de memoria cada 20 min (automatiza la destilacion de 
 OnBootSec=5min
 OnUnitActiveSec=20min
 Persistent=true
+Unit=jax-memory-worker.service
 
 [Install]
 WantedBy=timers.target
