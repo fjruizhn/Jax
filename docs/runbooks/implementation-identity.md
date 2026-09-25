@@ -534,64 +534,106 @@ repo, con `PYTHONPATH=/srv/jax-prod/jax` (el mismo que fija el drop-in
 **El arranque de systemd está versionado en el repo** (decisión de
 Fernando, 2026-09-25, opción A -- **el repo describe lo que corre, y
 producción no se toca**, decisión reafirmada el mismo día al cerrar el
-hallazgo de abajo): los cuatro drop-ins de cada servicio
-(`checkout-de-produccion.conf`, `cuenta-de-servicio.conf`, y para
-`jax-las-manos` además `z-pythonpath.conf`) que hasta entonces sólo vivían
-en `/etc` de hall9000 viven ahora en `config/systemd/jax-las-manos.service.d/`
-(y, para los otros tres servicios de B9/el proxy del Ejecutor, en
-`config/systemd/*.service.d/` y `ops/ejecutor/jax-ejecutor-proxy.service.d/`),
-junto con las CUATRO unidades base (`jax-las-manos.service`,
-`jax-memory-worker.service`, `jax-memory-synthesis.service`,
-`jax-ejecutor-proxy.service`) y el guion de sanidad
-`ops/sbin/jax-checkout-de-produccion-sano.sh` -- 14 archivos en total, ver
-`ops/manifiesto-arranque-instalado.tsv`. Las cuatro unidades base son el
-fragmento CRUDO tal como está instalado en `/etc` (`User=fruiz`,
-`WorkingDirectory=/home/fruiz/jax...`, sin `Environment=HOME=`) -- el
-`User=jaxsvc`/`WorkingDirectory=/srv/jax-prod/jax`/`HOME` propio llegan
-SIEMPRE por los drop-ins, nunca horneados en la base. Ningún consumidor
-del repo depende ya de que la base sola describa el resultado final
-(ver el punto de la configuración EFECTIVA, abajo).
-- **Instalación**: a mano, con GO de Fernando --
-  `sudo cp <archivo del repo> <ruta de /etc o /usr/local/sbin correspondiente
-  (ver ops/manifiesto-arranque-instalado.tsv)>` seguido de
-  `sudo systemctl daemon-reload` y, si corresponde, un reinicio del
-  servicio afectado. Esto NO se automatiza: cada copia es una decisión de
-  desplegar arranque nuevo a un servicio de producción.
+hallazgo de abajo, y otra vez al cerrar los 6 MAJOR/4 MINOR de la
+auditoría escalón 3 sobre jax#274): **19 archivos** en total (contados,
+no una cifra redonda -- ver `ops/manifiesto-arranque-instalado.tsv`, que es
+la lista real):
+- 4 unidades base: `jax-las-manos.service`, `jax-memory-worker.service`,
+  `jax-memory-synthesis.service`, `jax-ejecutor-proxy.service`. Son el
+  fragmento CRUDO tal como está instalado en `/etc` (`User=fruiz`,
+  `WorkingDirectory=/home/fruiz/jax...`, sin `Environment=HOME=`) -- el
+  `User=jaxsvc`/`WorkingDirectory=/srv/jax-prod/jax`/`HOME`/`PYTHONPATH`
+  propios llegan SIEMPRE por los drop-ins, nunca horneados en la base.
+  Ningún consumidor del repo depende ya de que la base sola describa el
+  resultado final (ver el punto de la configuración EFECTIVA, abajo).
+- 12 drop-ins: TRES por cada una de las 4 unidades --
+  `checkout-de-produccion.conf`, `cuenta-de-servicio.conf` y
+  `z-pythonpath.conf` (el PYTHONPATH efectivo de las 3 últimas apuntaba a
+  `/home/fruiz/jax` -- el checkout de TRABAJO de un agente, en rama ajena,
+  no el de producción; cerrado en la misma auditoría, ver el hallazgo M1
+  más abajo).
+- 2 timers (`jax-memory-worker.timer`, `jax-memory-synthesis.timer`),
+  también copia byte a byte de lo instalado (el de synthesis decía
+  `OnCalendar=hourly` en el repo contra `*-*-* 04:30:00` instalado -- el
+  repo mentía sobre CUÁNDO corre, no sólo sobre cómo).
+- 1 guion de sanidad, `ops/sbin/jax-checkout-de-produccion-sano.sh`.
+- **Instalación, con GO de Fernando** -- dos caminos, no contradictorios:
+  - **El camino normal es correr el instalador del servicio**
+    (`config/systemd/install-memory-scope.sh` para B9,
+    `ops/ejecutor/instalar_registro_y_cerco.sh` para el proxy del
+    Ejecutor): cada uno instala el guion de sanidad y los drop-ins de SU
+    unidad (`ops/instalar-dropins-de-servicio.sh`, ver abajo) ANTES que la
+    unidad base, y recién entonces la unidad base y `daemon-reload` --
+    nunca deja la base sola en `/etc` a mitad de camino (auditoría
+    escalón 3, M5). Que el instalador automatice varios `install` en el
+    orden correcto NO es lo mismo que automatizar CUÁNDO correr el
+    instalador: eso lo sigue decidiendo una persona, con GO de Fernando,
+    igual que antes.
+  - **`jax-las-manos` (y cualquier archivo suelto que aún no tenga
+    instalador propio) se copia a mano**: `sudo cp <archivo del repo>
+    <ruta de /etc o /usr/local/sbin correspondiente (ver
+    ops/manifiesto-arranque-instalado.tsv)>` seguido de `sudo systemctl
+    daemon-reload` y, si corresponde, un reinicio del servicio afectado.
 - **Verificación**: `ops/verificar-arranque-instalado.sh` compara, archivo
   por archivo según `ops/manifiesto-arranque-instalado.tsv`, lo que hay en
-  el repo contra lo instalado (sale 0 si coincide, y imprime cada
-  diferencia si no). `tests/test_arranque_instalado.py` ejercita la forma
-  del repo siempre (también en CI, sin necesitar el host de producción) y,
-  sólo en el host de producción, corre el guion de verdad -- cableado al
+  el repo contra lo instalado -- byte a byte, que lo instalado NUNCA sea un
+  symlink, dueño `root:root` y modo `644` (`755` el `.sh`), y que no haya
+  NINGÚN `*.conf` de más en los directorios `<unidad>.d/` de cada unidad
+  del manifiesto (ni en las rutas específicas ni en las genéricas que
+  systemd aplica a todo `.service`) -- auditoría escalón 3, M2/m3. Sale 0
+  sólo si TODO eso se cumple; imprime cada diferencia si no. `RAIZ_PRUEBA`
+  (vacío por defecto) existe sólo para poder ejercitar esta lógica contra
+  un árbol de prueba bajo `/tmp` sin tocar el `/etc` real -- nunca se usa
+  para instalar. `tests/test_arranque_instalado.py` ejercita la forma del
+  repo siempre (también en CI, sin necesitar el host de producción) y,
+  sólo en el host de producción (existe `/srv/jax-prod/jax` sí o sólo sí),
+  corre el guion de verdad y EXIGE 0 -- ya no hace skip si falta algo
+  instalado (auditoría escalón 3, M3: antes, un drop-in sin instalar en el
+  host de producción real daba skip silencioso en vez de rojo). Cableado al
   job `arranque-instalado-versionado` de `.github/workflows/policy.yml`
   (piso medido: 8 passed, 1 skipped fuera del host de producción).
-- **Los instaladores YA instalan los drop-ins, derivados del manifiesto**:
-  `ops/instalar-dropins-de-servicio.sh <unidad>.service.d <REPO> [DESTDIR]`
-  lee `ops/manifiesto-arranque-instalado.tsv`, filtra las filas de esa
-  unidad y copia cada una (`sudo install -o root -g root -m 0644`) --
-  nunca una lista de archivos aparte. `config/systemd/install-memory-scope.sh`
-  y `ops/ejecutor/instalar_registro_y_cerco.sh` lo invocan justo antes de
-  su propio `daemon-reload`, para `jax-memory-worker.service.d` y
-  `jax-ejecutor-proxy.service.d` respectivamente. `DESTDIR` (vacío por
-  defecto, comportamiento de siempre) existe sólo para poder probar la
-  instalación de las unidades systemd con una raíz temporal, sin tocar el
-  `/etc` real -- el resto de esos dos guiones (nftables, `/etc/jax/.env`,
-  `systemctl restart` de servicios reales) NO respeta `DESTDIR` y sigue
-  tocando el sistema real siempre; por eso no se prueban de punta a punta,
-  sólo la instalación de unidades (probada con éxito contra un `DESTDIR`
-  temporal, ver la Biblioteca del cierre de este hallazgo, 2026-09-25).
-- **La configuración EFECTIVA, no sólo la base, es lo que se audita**:
-  `tests/test_ejecutor_cuenta_de_servicio.py::_configuracion_efectiva`
-  fusiona la unidad base con sus drop-ins en el mismo orden que systemd
-  (base primero, después cada `*.conf` de `<unidad>.d/` en orden
-  alfabético -- el mismo criterio por el que `z-pythonpath.conf` en
-  `jax-las-manos.service.d/` se aplica último a propósito) y exige
-  `User=jaxsvc`/`HOME=/var/lib/jaxsvc` en el resultado fusionado, no en el
-  archivo base solo. Antes (cuando la base ya declaraba `jaxsvc` a mano)
-  mirar sólo la base alcanzaba; ahora que la base es el fragmento crudo,
-  sólo la EFECTIVA prueba algo real -- verificado con un control negativo:
-  quitar `cuenta-de-servicio.conf` hace fallar el test con el `User`/`HOME`
-  reales (`fruiz`/ninguno).
+  **Hoy este test da ROJO en hall9000** (que SÍ es el host de producción):
+  faltan instalar los 3 `z-pythonpath.conf` nuevos de M1 (proxy,
+  memory-worker, memory-synthesis) -- esperado y reportado, no oculto; los
+  instala la sesión principal.
+- **`ops/instalar-dropins-de-servicio.sh <unidad>.service.d|/ruta/absoluta
+  <REPO> [DESTDIR]`**: lee `ops/manifiesto-arranque-instalado.tsv` y copia
+  las filas que coincidan -- por prefijo de directorio de drop-ins, o por
+  ruta instalada exacta (así instala también
+  `/usr/local/sbin/jax-checkout-de-produccion-sano.sh`, auditoría escalón
+  3, M5) -- nunca una lista de archivos aparte. Rechaza filas con `..`,
+  nombres de archivo que no matcheen `^[A-Za-z0-9._-]+\.(conf|sh)$`, y
+  cualquier archivo del repo cuyo `realpath` caiga fuera de `$REPO`
+  (auditoría escalón 3, m2 -- defensa en profundidad: el manifiesto es del
+  propio repo, no un insumo externo, pero este guion corre con `sudo`).
+  `config/systemd/install-memory-scope.sh` y
+  `ops/ejecutor/instalar_registro_y_cerco.sh` lo invocan para su guion de
+  sanidad y sus drop-ins, ANTES de instalar su propia unidad base.
+  **`DESTDIR` (vacío por defecto) es el ÚNICO lugar de este árbol que lo
+  acepta** (auditoría escalón 3, M4): los otros dos instaladores tocan el
+  sistema real en otras líneas (nftables, `/etc/jax/.env`, `systemctl
+  restart` de servicios reales) y un `DESTDIR` ahí sería engañoso -- no se
+  prueban de punta a punta. `tests/test_instalar_dropins_de_servicio.py`
+  (5 tests, cableado al mismo job de CI, piso medido) SÍ ejercita este
+  guion de punta a punta contra un `DESTDIR` de `tmp_path`: instala una
+  unidad completa, instala el guion de sanidad con modo 755, y confirma
+  que los dos casos "no está en el manifiesto" abortan.
+- **La configuración EFECTIVA, no sólo la base, es lo que se audita**, para
+  las 4 unidades (antes sólo cubría el proxy del Ejecutor -- auditoría
+  escalón 3, m1): `tests/manifiesto_arranque.py::configuracion_efectiva`
+  (compartida con `tests/test_arranque_instalado.py`) fusiona la unidad
+  base con sus drop-ins en el mismo orden que systemd (base primero,
+  después cada `*.conf` de `<unidad>.d/` en orden alfabético -- el mismo
+  criterio por el que `z-pythonpath.conf` se aplica último a propósito),
+  mirando sólo la sección `[Service]` y parseando `Environment=` con
+  `shlex.split` (multi-asignación por línea; un `Environment=` vacío borra
+  la lista acumulada, semántica real de systemd.exec(5)).
+  `tests/test_ejecutor_cuenta_de_servicio.py` exige, para las 4 unidades:
+  `User=jaxsvc`/`HOME=/var/lib/jaxsvc` en el resultado fusionado (no en el
+  archivo base solo -- verificado con un control negativo: quitar
+  `cuenta-de-servicio.conf` hace fallar el test con el `User`/`HOME`
+  reales, `fruiz`/ninguno), y que NINGÚN valor de la configuración EFECTIVA
+  mencione `/home/fruiz` (M1).
 
 **De dónde salen `JAX_DB_HOST`/`PORT`/`USER`/`PASSWORD` (ronda 3 de
 revisión).** Este paso NO carga `/etc/jax/.env` directo -- ni con un punto

@@ -12,68 +12,44 @@ from pathlib import Path
 
 import pytest
 
+from manifiesto_arranque import configuracion_efectiva
+
 OPS = Path(__file__).resolve().parents[1] / "ops" / "ejecutor"
 CUENTA_DE_SERVICIO = "jaxsvc"
 # `ejecutor-vigia@.service` salió de acá (ronda 5, auditoría adversarial 2026-09-22): la
 # unidad se RETIRÓ -- código muerto, nunca arrancó un vigía real (ver DEUDA.md). El vigía
 # corre como subproceso directo de `jax-platform` (`fruiz`), no como `jaxsvc`; este control
 # ya no le aplica.
-UNIDADES = ("jax-ejecutor-proxy.service",)
+#
+# Las 4 unidades del manifiesto de arranque (auditoría escalón 3, m1: antes
+# sólo cubría jax-ejecutor-proxy.service -- extendida a las 4 para que
+# las-manos y los dos workers de memoria también queden bajo este control).
+UNIDADES = (
+    "jax-las-manos.service",
+    "jax-memory-worker.service",
+    "jax-memory-synthesis.service",
+    "jax-ejecutor-proxy.service",
+)
 INSTALADORES = ("instalar_contratos.sh", "instalar_vigia.sh", "instalar_registro_y_cerco.sh")
 
-
-def _configuracion_efectiva(nombre: str) -> tuple[dict[str, str], dict[str, str]]:
-    """La configuración EFECTIVA de una unidad: la unidad base MÁS sus
-    drop-ins, en el mismo orden en que systemd los aplica de verdad
-    (systemd.unit(5): primero la unidad base, después cada `*.conf` de
-    `<nombre>.d/` en orden alfabético del nombre de archivo) -- el último
-    valor de cada clave gana (mismo criterio que ya usa a propósito
-    `z-pythonpath.conf` en jax-las-manos.service.d/, cuyo prefijo `z-`
-    existe justamente para aplicarse último).
-
-    Desde ops/versionar-drop-ins (2026-09-25) la unidad base en el repo es
-    el fragmento CRUDO tal como está instalado en /etc (`User=fruiz`, sin
-    `Environment=HOME=`) -- el `User=jaxsvc`/`HOME` propio llegan por
-    `cuenta-de-servicio.conf`. Mirar sólo la base (como hacía este archivo
-    antes) ya no prueba nada real: pasaría igual si alguien borrara el
-    drop-in. Por eso este control arma la EFECTIVA -- exactamente lo que
-    corre -- y no sólo el archivo base.
-
-    Devuelve (simples, entorno): `simples` son las claves de asignación
-    única (`User=`, `Group=`, ...) con el último valor visto; `entorno` es
-    el resultado de fusionar TODAS las líneas `Environment=VAR=valor` --
-    cada variable por separado, el último valor de esa variable gana (así
-    como systemd trata Environment=: agrega variables nuevas y pisa las
-    que ya existían con el mismo nombre, no pisa el bloque entero)."""
-    base = OPS / nombre
-    directorio_dropins = OPS / f"{nombre}.d"
-    archivos = [base]
-    if directorio_dropins.is_dir():
-        archivos += sorted(directorio_dropins.glob("*.conf"))
-
-    simples: dict[str, str] = {}
-    entorno: dict[str, str] = {}
-    for archivo in archivos:
-        for linea in archivo.read_text(encoding="utf-8").splitlines():
-            linea = linea.strip()
-            if not linea or linea.startswith("#") or linea.startswith("["):
-                continue
-            if "=" not in linea:
-                continue
-            clave, _, valor = linea.partition("=")
-            if clave == "Environment":
-                if not valor:
-                    continue
-                var, _, val = valor.partition("=")
-                entorno[var] = val
-            else:
-                simples[clave] = valor
-    return simples, entorno
+# `_configuracion_efectiva` vive en tests/manifiesto_arranque.py (compartida
+# con tests/test_arranque_instalado.py) desde la auditoría escalón 3 (m1):
+# ahí se resuelve la unidad base + drop-ins de CUALQUIER unidad del
+# manifiesto, con Environment= parseado con shlex.split (multi-asignación,
+# vacío borra la lista) y separado por sección [Service] -- lo que antes
+# vivía acá duplicado y sólo sabía buscar en ops/ejecutor/.
 
 
 @pytest.mark.parametrize("nombre", UNIDADES)
 def test_las_unidades_corren_como_la_cuenta_de_servicio(nombre):
-    simples, _ = _configuracion_efectiva(nombre)
+    """Desde ops/versionar-drop-ins (2026-09-25) la unidad base en el repo es
+    el fragmento CRUDO tal como está instalado en /etc (`User=fruiz`, sin
+    `Environment=HOME=`) -- el `User=jaxsvc`/`HOME` propio llegan por
+    `cuenta-de-servicio.conf`. Mirar sólo la base ya no prueba nada real:
+    pasaría igual si alguien borrara el drop-in. Por eso este control mira
+    la configuración EFECTIVA -- exactamente lo que corre -- y no sólo el
+    archivo base."""
+    simples, _ = configuracion_efectiva(nombre)
     assert simples.get("User") == CUENTA_DE_SERVICIO, (
         f"{nombre}: la configuración EFECTIVA (unidad base + drop-ins, último valor gana) "
         f"no corre como {CUENTA_DE_SERVICIO} -- User efectivo: {simples.get('User')!r}"
@@ -83,11 +59,29 @@ def test_las_unidades_corren_como_la_cuenta_de_servicio(nombre):
 @pytest.mark.parametrize("nombre", UNIDADES)
 def test_las_unidades_le_dan_un_hogar_propio_a_la_cuenta(nombre):
     """Sin HOME propio, ssh busca known_hosts en el del operador y el turno muere con 255."""
-    _, entorno = _configuracion_efectiva(nombre)
+    _, entorno = configuracion_efectiva(nombre)
     assert entorno.get("HOME") == "/var/lib/jaxsvc", (
         f"{nombre}: la configuración EFECTIVA no fija HOME propio -- HOME efectivo: "
         f"{entorno.get('HOME')!r}"
     )
+
+
+@pytest.mark.parametrize("nombre", UNIDADES)
+def test_la_configuracion_efectiva_no_apunta_al_checkout_de_trabajo(nombre):
+    """Auditoría escalón 3, M1: el PYTHONPATH efectivo de jax-ejecutor-proxy,
+    jax-memory-worker y jax-memory-synthesis apuntaba a /home/fruiz/jax -- el
+    checkout de TRABAJO de un agente, en rama ajena, no el de producción.
+    Ningún valor de la configuración EFECTIVA (ni WorkingDirectory=, ni
+    ExecStart=, ni PYTHONPATH dentro de Environment=, nada) puede mencionar
+    /home/fruiz -- lo que corre en producción tiene que salir siempre de
+    /srv/jax-prod/jax."""
+    simples, entorno = configuracion_efectiva(nombre)
+    ofensores = {
+        clave: valor
+        for clave, valor in {**simples, **{f"Environment:{k}": v for k, v in entorno.items()}}.items()
+        if "/home/fruiz" in valor
+    }
+    assert not ofensores, f"{nombre}: la configuración EFECTIVA todavía apunta a /home/fruiz: {ofensores!r}"
 
 
 def _texto_con_delegados(nombre: str) -> str:

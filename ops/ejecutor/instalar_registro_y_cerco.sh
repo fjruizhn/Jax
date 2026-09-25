@@ -15,14 +15,6 @@ REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 test "$(git -C "$REPO" branch --show-current)" = master
 PY="$REPO/.venv/bin/python"
 MARCA="$(date +%Y%m%d-%H%M%S)"
-# DESTDIR (ops/versionar-drop-ins, 2026-09-25): vacío por defecto -- MISMO
-# comportamiento de siempre, instala contra el /etc real. Sólo existe para
-# poder probar la instalación de las unidades systemd (base + drop-ins) con
-# una raíz temporal, sin tocar el sistema real -- el resto del guion (cerco
-# de nftables, registro, systemctl restart) no lo respeta y sigue tocando
-# el sistema real siempre: no se prueba de punta a punta con DESTDIR, sólo
-# la parte de instalación de unidades.
-: "${DESTDIR:=}"
 
 # Registro: directorio de la cuenta de SERVICIO (jaxsvc) 0750 -- la cuenta de la JAULA ni lo
 # lista --, archivo 0640, append-only. Desde 2026-09-17 los servicios no corren como el
@@ -65,10 +57,14 @@ sudo nft -c -f "$ETAPA/cerco.nft"
 sudo install -d -o root -g root -m 0755 /etc/jax-ejecutor-cerco
 sudo install -o root -g root -m 0644 "$ETAPA/cerco.nft" /etc/jax-ejecutor-cerco/cerco.nft
 sudo install -o root -g root -m 0644 "$REPO/ops/ejecutor/ejecutor-cerco.service" /etc/systemd/system/
-sudo install -o root -g root -m 0644 "$REPO/ops/ejecutor/jax-ejecutor-proxy.service" "${DESTDIR}/etc/systemd/system/"
-# Drop-ins versionados del proxy (ops/versionar-drop-ins, 2026-09-25): derivados
-# de ops/manifiesto-arranque-instalado.tsv, no de una lista aparte acá.
-"$REPO/ops/instalar-dropins-de-servicio.sh" jax-ejecutor-proxy.service.d "$REPO" "$DESTDIR"
+# Orden a propósito (auditoría escalón 3, M5): el guion de sanidad y los
+# drop-ins del proxy ANTES que su unidad base -- así, si esto se interrumpe
+# a mitad de camino, nunca queda la unidad base sola en /etc sin lo que
+# necesita para arrancar bien. Las dos líneas siguientes son la MISMA
+# fuente que ops/manifiesto-arranque-instalado.tsv, nunca una lista aparte.
+"$REPO/ops/instalar-dropins-de-servicio.sh" /usr/local/sbin/jax-checkout-de-produccion-sano.sh "$REPO"
+"$REPO/ops/instalar-dropins-de-servicio.sh" jax-ejecutor-proxy.service.d "$REPO"
+sudo install -o root -g root -m 0644 "$REPO/ops/ejecutor/jax-ejecutor-proxy.service" /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable ejecutor-cerco.service
 sudo systemctl restart ejecutor-cerco.service
