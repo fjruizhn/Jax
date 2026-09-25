@@ -348,9 +348,10 @@ async def _b9_ci_test_pool(*, authority=False, legacy=False):
     """One-connection temporary schema, restricted to the isolated CI database."""
     import os
     import aiomysql
-    database=os.getenv("JAX_DB_NAME","")
-    if not database.endswith("_test") or not os.getenv("JAX_DB_HOST"):
+    from base_de_test import exigir_base_de_test
+    if not os.getenv("JAX_DB_HOST"):
         pytest.skip("requires an isolated CI test database")
+    database=exigir_base_de_test()
     pool=await aiomysql.create_pool(
         host=os.environ["JAX_DB_HOST"],port=int(os.getenv("JAX_DB_PORT","3306")),
         user=os.getenv("JAX_DB_USER","root"),password=os.getenv("JAX_DB_PASSWORD",""),db=database,
