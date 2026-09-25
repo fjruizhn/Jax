@@ -961,8 +961,9 @@ jobs:
           #   despues de confirmar. Medido en local (MISMO comando, MariaDB
           #   real 127.0.0.1:3308): 76 -> 78 passed. Si el runner da otro
           #   numero, manda el runner.
-          grep -qE "^159 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 159 tests CORRIDOS (no skipeados)."; exit 1; }
+          # PR #269, HEAD 79b504f: runner midió 186 passed en esta segunda corrida.
+          grep -qE "^186 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 186 tests CORRIDOS (no skipeados)."; exit 1; }
       - name: Publicar resumen de segunda corrida de memoria
         if: failure()
         run: |
