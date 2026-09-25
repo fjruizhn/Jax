@@ -12,6 +12,15 @@ detecta esto (y, para esas tres claves, que jaxsvc pueda leer -- y en el
 log de auditoria y REPO_BASE/documents, escribir) y sale distinto de cero
 mientras siga asi.
 
+Auditoría de escalón 3 (PR jax#277): `ops/rutas-de-produccion.sh` es ahora
+un envoltorio FINO que sólo valida el argumento y delega en
+`ops/rutas_de_produccion_verificador.py` (módulo Python importable y
+probado aparte, ver tests/test_rutas_de_produccion_verificador.py -- ahí
+viven los 6 casos donde la versión anterior en bash fallaba abierto). Este
+archivo prueba el envoltorio: que exista, tenga el bit ejecutable, rechace
+argumentos inválidos sin sudo, y que el guion completo (el envoltorio +
+el módulo al que delega) siga fallando hoy contra producción real.
+
 Dos partes, mismo criterio que tests/test_arranque_instalado.py
 (ops/versionar-drop-ins, PR jax#274):
 
@@ -20,8 +29,9 @@ Dos partes, mismo criterio que tests/test_arranque_instalado.py
     (no solo en el filesystem de quien corrio el checkout), rechaza
     cualquier argumento que no sea --verificar SIN necesitar sudo, y las
     excepciones documentadas (JAX_MISSIONS_DIR, JAX_BIN -- tienen
-    consumidor real pero no se mueven en este cambio; ver el comentario del
-    propio guion) siguen con motivo escrito.
+    consumidor real pero no se mueven en este cambio; viven ahora en
+    `EXCEPCIONES_FASE_A` de ops/rutas_de_produccion_verificador.py, no en
+    el propio .sh) siguen con motivo escrito.
 
 (b) SOLO en el host de produccion de jax (existe /srv/jax-prod/jax): corre
     el guion DE VERDAD y exige codigo 0. Fuera de ese host, skip con el
@@ -49,11 +59,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "ops" / "rutas-de-produccion.sh"
+MODULO_VERIFICADOR = ROOT / "ops" / "rutas_de_produccion_verificador.py"
 
 RAIZ_PRODUCCION = "/srv/jax-prod/jax"
 
-# Mismas claves y mismo motivo que el propio guion (ver su comentario de
-# cabecera) -- si alguna vez divergen, este test lo nota.
+# Mismas claves y mismo motivo que EXCEPCIONES_FASE_A del propio módulo --
+# si alguna vez divergen, este test lo nota.
 CLAVES_EXCEPCION = ("JAX_MISSIONS_DIR", "JAX_BIN")
 
 
@@ -85,19 +96,20 @@ def test_las_excepciones_del_guion_siguen_con_motivo_escrito():
     """JAX_MISSIONS_DIR y JAX_BIN tienen un consumidor real (verificado
     2026-09-25: jax-platform backend/api/command.py) pero no se mueven en
     este cambio -- moverlos decide desde que checkout corre cada mision, una
-    decision de arquitectura mayor que Fernando no tomo todavia. El guion
-    tiene que seguir nombrandolas explicitamente, con el motivo, no
-    omitirlas en silencio."""
-    fuente = SCRIPT.read_text(encoding="utf-8")
+    decision de arquitectura mayor que Fernando no tomo todavia. Desde la
+    auditoria de escalon 3 (PR jax#277) el motivo vive en
+    EXCEPCIONES_FASE_A de ops/rutas_de_produccion_verificador.py, no en el
+    .sh -- este test sigue esas claves ahi, no las deja omitirse en
+    silencio."""
+    fuente = MODULO_VERIFICADOR.read_text(encoding="utf-8")
     for clave in CLAVES_EXCEPCION:
         assert clave in fuente, (
-            f"{clave} ya no aparece en ops/rutas-de-produccion.sh -- "
+            f"{clave} ya no aparece en ops/rutas_de_produccion_verificador.py -- "
             "si se retiro del .env o se decidio su destino, este test y el "
-            "comentario del guion tienen que actualizarse juntos, no quedar "
-            "desincronizados")
+            "modulo tienen que actualizarse juntos, no quedar desincronizados")
     assert "pendiente" in fuente.lower(), (
-        "el guion ya no marca JAX_MISSIONS_DIR/JAX_BIN como pendientes de "
-        "decision -- ¿se resolvio? actualiza este test y el comentario")
+        "el modulo ya no marca JAX_MISSIONS_DIR/JAX_BIN como pendientes de "
+        "decision -- ¿se resolvio? actualiza este test y el modulo")
 
 
 def _motivo_de_skip_fuera_de_produccion() -> str | None:
