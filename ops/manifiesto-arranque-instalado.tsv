@@ -1,8 +1,10 @@
 config/systemd/jax-las-manos.service	/etc/systemd/system/jax-las-manos.service
 config/systemd/jax-memory-synthesis.service	/etc/systemd/system/jax-memory-synthesis.service
+config/systemd/jax-memory-worker.service	/etc/systemd/system/jax-memory-worker.service
 config/systemd/jax-las-manos.service.d/checkout-de-produccion.conf	/etc/systemd/system/jax-las-manos.service.d/checkout-de-produccion.conf
 config/systemd/jax-las-manos.service.d/z-pythonpath.conf	/etc/systemd/system/jax-las-manos.service.d/z-pythonpath.conf
 config/systemd/jax-las-manos.service.d/cuenta-de-servicio.conf	/etc/systemd/system/jax-las-manos.service.d/cuenta-de-servicio.conf
+ops/ejecutor/jax-ejecutor-proxy.service	/etc/systemd/system/jax-ejecutor-proxy.service
 ops/ejecutor/jax-ejecutor-proxy.service.d/checkout-de-produccion.conf	/etc/systemd/system/jax-ejecutor-proxy.service.d/checkout-de-produccion.conf
 ops/ejecutor/jax-ejecutor-proxy.service.d/cuenta-de-servicio.conf	/etc/systemd/system/jax-ejecutor-proxy.service.d/cuenta-de-servicio.conf
 config/systemd/jax-memory-worker.service.d/checkout-de-produccion.conf	/etc/systemd/system/jax-memory-worker.service.d/checkout-de-produccion.conf

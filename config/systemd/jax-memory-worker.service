@@ -6,10 +6,10 @@ Wants=docker.service
 
 [Service]
 Type=oneshot
-User=jaxsvc
-Group=jaxsvc
-WorkingDirectory=/srv/jax-prod/jax
+User=fruiz
+WorkingDirectory=/home/fruiz/jax
 EnvironmentFile=/etc/jax/.env
-ExecStart=/srv/jax-prod/jax/.venv/bin/python -m jax.memory.worker
+Environment=PYTHONPATH=/home/fruiz/jax
+ExecStart=/home/fruiz/jax/.venv/bin/python -m jax.memory.worker
 StandardOutput=journal
 StandardError=journal

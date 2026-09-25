@@ -22,18 +22,72 @@ UNIDADES = ("jax-ejecutor-proxy.service",)
 INSTALADORES = ("instalar_contratos.sh", "instalar_vigia.sh", "instalar_registro_y_cerco.sh")
 
 
+def _configuracion_efectiva(nombre: str) -> tuple[dict[str, str], dict[str, str]]:
+    """La configuración EFECTIVA de una unidad: la unidad base MÁS sus
+    drop-ins, en el mismo orden en que systemd los aplica de verdad
+    (systemd.unit(5): primero la unidad base, después cada `*.conf` de
+    `<nombre>.d/` en orden alfabético del nombre de archivo) -- el último
+    valor de cada clave gana (mismo criterio que ya usa a propósito
+    `z-pythonpath.conf` en jax-las-manos.service.d/, cuyo prefijo `z-`
+    existe justamente para aplicarse último).
+
+    Desde ops/versionar-drop-ins (2026-09-25) la unidad base en el repo es
+    el fragmento CRUDO tal como está instalado en /etc (`User=fruiz`, sin
+    `Environment=HOME=`) -- el `User=jaxsvc`/`HOME` propio llegan por
+    `cuenta-de-servicio.conf`. Mirar sólo la base (como hacía este archivo
+    antes) ya no prueba nada real: pasaría igual si alguien borrara el
+    drop-in. Por eso este control arma la EFECTIVA -- exactamente lo que
+    corre -- y no sólo el archivo base.
+
+    Devuelve (simples, entorno): `simples` son las claves de asignación
+    única (`User=`, `Group=`, ...) con el último valor visto; `entorno` es
+    el resultado de fusionar TODAS las líneas `Environment=VAR=valor` --
+    cada variable por separado, el último valor de esa variable gana (así
+    como systemd trata Environment=: agrega variables nuevas y pisa las
+    que ya existían con el mismo nombre, no pisa el bloque entero)."""
+    base = OPS / nombre
+    directorio_dropins = OPS / f"{nombre}.d"
+    archivos = [base]
+    if directorio_dropins.is_dir():
+        archivos += sorted(directorio_dropins.glob("*.conf"))
+
+    simples: dict[str, str] = {}
+    entorno: dict[str, str] = {}
+    for archivo in archivos:
+        for linea in archivo.read_text(encoding="utf-8").splitlines():
+            linea = linea.strip()
+            if not linea or linea.startswith("#") or linea.startswith("["):
+                continue
+            if "=" not in linea:
+                continue
+            clave, _, valor = linea.partition("=")
+            if clave == "Environment":
+                if not valor:
+                    continue
+                var, _, val = valor.partition("=")
+                entorno[var] = val
+            else:
+                simples[clave] = valor
+    return simples, entorno
+
+
 @pytest.mark.parametrize("nombre", UNIDADES)
 def test_las_unidades_corren_como_la_cuenta_de_servicio(nombre):
-    lineas = [l.strip() for l in (OPS / nombre).read_text().splitlines()]
-    assert f"User={CUENTA_DE_SERVICIO}" in lineas, f"{nombre} no corre como {CUENTA_DE_SERVICIO}"
-    assert not any(l.startswith("User=fruiz") for l in lineas)
+    simples, _ = _configuracion_efectiva(nombre)
+    assert simples.get("User") == CUENTA_DE_SERVICIO, (
+        f"{nombre}: la configuración EFECTIVA (unidad base + drop-ins, último valor gana) "
+        f"no corre como {CUENTA_DE_SERVICIO} -- User efectivo: {simples.get('User')!r}"
+    )
 
 
 @pytest.mark.parametrize("nombre", UNIDADES)
 def test_las_unidades_le_dan_un_hogar_propio_a_la_cuenta(nombre):
     """Sin HOME propio, ssh busca known_hosts en el del operador y el turno muere con 255."""
-    texto = (OPS / nombre).read_text()
-    assert "Environment=HOME=/var/lib/jaxsvc" in texto
+    _, entorno = _configuracion_efectiva(nombre)
+    assert entorno.get("HOME") == "/var/lib/jaxsvc", (
+        f"{nombre}: la configuración EFECTIVA no fija HOME propio -- HOME efectivo: "
+        f"{entorno.get('HOME')!r}"
+    )
 
 
 def _texto_con_delegados(nombre: str) -> str:
