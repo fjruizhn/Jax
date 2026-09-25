@@ -344,22 +344,21 @@ async def test_aud007_persistent_verify_after_expire_rejects_transition():
     assert conn.rolled and not conn.committed
 
 
-@pytest.mark.asyncio
-async def test_aud004_content_purge_scrubs_physical_b9_storage():
-    """The CI MariaDB service must leave no recoverable B9 payload or vector."""
+async def _b9_ci_test_pool(*, authority=False, legacy=False):
+    """One-connection temporary schema, restricted to the isolated CI database."""
     import os
     import aiomysql
     database=os.getenv("JAX_DB_NAME","")
-    if not database.endswith("_test"):
+    if not database.endswith("_test") or not os.getenv("JAX_DB_HOST"):
         pytest.skip("requires an isolated CI test database")
     pool=await aiomysql.create_pool(
-        host=os.getenv("JAX_DB_HOST","127.0.0.1"),port=int(os.getenv("JAX_DB_PORT","3306")),
+        host=os.environ["JAX_DB_HOST"],port=int(os.getenv("JAX_DB_PORT","3306")),
         user=os.getenv("JAX_DB_USER","root"),password=os.getenv("JAX_DB_PASSWORD",""),db=database,
         minsize=1,maxsize=1,cursorclass=aiomysql.DictCursor,
     )
     try:
         tables=(
-            "CREATE TEMPORARY TABLE memory_objects (memory_id CHAR(36) PRIMARY KEY, object_kind VARCHAR(32), tenant_id VARCHAR(128), created_at DATETIME(6), legacy_source_type VARCHAR(64), legacy_source_namespace VARCHAR(255), legacy_source_key VARCHAR(255))",
+            "CREATE TEMPORARY TABLE memory_objects (memory_id CHAR(36) PRIMARY KEY, object_kind VARCHAR(32), tenant_id VARCHAR(128), created_at DATETIME(6), legacy_source_type VARCHAR(64), legacy_source_namespace VARCHAR(255), legacy_source_key VARCHAR(255), UNIQUE KEY uq_memory_legacy_binding (legacy_source_type, legacy_source_namespace, legacy_source_key))",
             "CREATE TEMPORARY TABLE memory_revisions (revision_id CHAR(36) PRIMARY KEY, memory_id CHAR(36), content_digest CHAR(71), visibility VARCHAR(32), user_id VARCHAR(128), project_id VARCHAR(128), lifecycle_state VARCHAR(32), created_at DATETIME(6), payload LONGBLOB, provenance_status VARCHAR(64), prior_revision_id CHAR(36))",
             "CREATE TEMPORARY TABLE memory_revision_payloads (revision_id CHAR(36) PRIMARY KEY, payload LONGBLOB, purged_at DATETIME(6), purge_reason VARCHAR(255))",
             "CREATE TEMPORARY TABLE memory_provenance (provenance_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), source_revisions JSON, transformation_id VARCHAR(128), transformation_version VARCHAR(64), actor_principal VARCHAR(255), actor_type VARCHAR(64), subject_user_id VARCHAR(128), provider VARCHAR(128), model VARCHAR(255), created_at DATETIME(6), limitations TEXT)",
@@ -367,9 +366,144 @@ async def test_aud004_content_purge_scrubs_physical_b9_storage():
             "CREATE TEMPORARY TABLE memory_projections (memory_id CHAR(36) PRIMARY KEY, current_revision_id CHAR(36), current_lifecycle_state VARCHAR(32), current_verification_state BOOLEAN, canonical_history_digest CHAR(71), reconciliation_required BOOLEAN)",
             "CREATE TEMPORARY TABLE embedding_generations (generation_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), embedding_space_id CHAR(71), generated_at DATETIME(6), embedding_payload LONGBLOB)",
         )
+        if authority:
+            tables+=(
+                "CREATE TEMPORARY TABLE jax_users (user_id VARCHAR(128), tenant_id VARCHAR(128), status VARCHAR(16), role VARCHAR(32), PRIMARY KEY (user_id,tenant_id))",
+                "CREATE TEMPORARY TABLE jax_project_scope (project_id VARCHAR(128) PRIMARY KEY, tenant_id VARCHAR(128), status VARCHAR(16))",
+                "CREATE TEMPORARY TABLE jax_project_membership (membership_id CHAR(36) PRIMARY KEY, project_id VARCHAR(128), tenant_id VARCHAR(128), user_id VARCHAR(128), project_role VARCHAR(16), status VARCHAR(16))",
+            )
+        if legacy:
+            tables+=("CREATE TEMPORARY TABLE memory_legacy_bindings (legacy_source_type VARCHAR(64), legacy_source_namespace VARCHAR(255), legacy_source_key VARCHAR(255), memory_id CHAR(36), binding_state VARCHAR(32), created_at DATETIME(6), PRIMARY KEY (legacy_source_type, legacy_source_namespace, legacy_source_key))",)
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
                 for ddl in tables: await cur.execute(ddl)
+        return pool
+    except Exception:
+        pool.close()
+        await pool.wait_closed()
+        raise
+
+
+async def _seed_project_membership(pool):
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute("INSERT INTO jax_users VALUES (%s,%s,'ACTIVE','member')",("user-1","tenant-1"))
+            for project, role in (("project-a","CONTRIBUTOR"),("project-b","VIEWER")):
+                await cur.execute("INSERT INTO jax_project_scope VALUES (%s,%s,'ACTIVE')",(project,"tenant-1"))
+                await cur.execute("INSERT INTO jax_project_membership VALUES (%s,%s,%s,%s,%s,'ACTIVE')",
+                                  ("membership-"+project,project,"tenant-1","user-1",role))
+        await conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_aud003_real_membership_authorizes_project_read_end_to_end():
+    from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
+    pool=await _b9_ci_test_pool(authority=True)
+    try:
+        await _seed_project_membership(pool)
+        resolver=MariaDBScopeAuthorityResolver(pool)
+        api=PersistentMemoryAPI(MariaDBB9Store(pool),resolver)
+        reader=MariaDBB9Reader(pool,resolver)
+        source=await api.create_memory(auth("CREATE",Visibility.PROJECT_SHARED,project_id="project-a"),
+                                       ObjectKind.FACT,"project A",Visibility.PROJECT_SHARED,project_id="project-a")
+        result=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.PROJECT_SHARED,project_id="project-a"))
+        assert {item.identity.memory_id for item in result} == {source}
+        with pytest.raises(AuthorizationDenied):
+            await reader.retrieve(ScopeContext("user-1","USER","user-1","tenant-1",project_id="project-a"))
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_aud001_real_project_synthesis_is_invisible_to_project_b_and_tenant_only():
+    from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
+    pool=await _b9_ci_test_pool(authority=True)
+    try:
+        await _seed_project_membership(pool)
+        resolver=MariaDBScopeAuthorityResolver(pool)
+        api=PersistentMemoryAPI(MariaDBB9Store(pool),resolver)
+        reader=MariaDBB9Reader(pool,resolver)
+        source=await api.create_memory(auth("CREATE",Visibility.PROJECT_SHARED,project_id="project-a"),
+                                       ObjectKind.FACT,"project A",Visibility.PROJECT_SHARED,project_id="project-a")
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT current_revision_id FROM memory_projections WHERE memory_id=%s",(source,))
+                revision_id=(await cur.fetchone())["current_revision_id"]
+        derived=await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL,project_id="project-a"),
+                                            "project summary",(revision_id,),provider="p",model="m",transformation_version="1")
+        project_a=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.PROJECT_SHARED,project_id="project-a"))
+        project_b=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.PROJECT_SHARED,project_id="project-b"))
+        tenant_only=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.TENANT_SHARED))
+        assert derived in {item.identity.memory_id for item in project_a}
+        assert derived not in {item.identity.memory_id for item in project_b}
+        assert derived not in {item.identity.memory_id for item in tenant_only}
+        assert not project_b and not tenant_only
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+async def _apply_aud005_migration(pool):
+    from pathlib import Path
+    path=Path(__file__).resolve().parents[1]/"jax/memory/b9_migrations/004_tenant_legacy_binding.sql"
+    sql="\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("--"))
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            for statement in sql.split(";"):
+                if statement.strip(): await cur.execute(statement)
+
+
+@pytest.mark.asyncio
+async def test_aud005_real_migration_qualifies_legacy_binding_by_tenant():
+    pool=await _b9_ci_test_pool(legacy=True)
+    old_id="00000000-0000-0000-0000-000000000010"
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT INTO memory_objects (memory_id,object_kind,tenant_id,created_at,legacy_source_type,legacy_source_namespace,legacy_source_key) VALUES (%s,'FACT','tenant-1',NOW(6),'facts','legacy','same')",(old_id,))
+                await cur.execute("INSERT INTO memory_legacy_bindings VALUES ('facts','legacy','same',%s,'ACTIVE',NOW(6))",(old_id,))
+            await conn.commit()
+        await _apply_aud005_migration(pool)
+        api=PersistentMemoryAPI(MariaDBB9Store(pool),TxResolver())
+        first=await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),
+                                             "facts","legacy","same",ObjectKind.FACT,"original")
+        other_scope=ScopeContext("user-1","USER","user-1","tenant-2")
+        other_auth=MutationAuthorizationRequest(other_scope,"IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL)
+        second=await api.import_legacy_memory(other_auth,"facts","legacy","same",ObjectKind.FACT,"other")
+        repeat=await api.import_legacy_memory(other_auth,"facts","legacy","same",ObjectKind.FACT,"other")
+        assert first == old_id and second != first and repeat == second
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT tenant_id,memory_id FROM memory_legacy_bindings WHERE legacy_source_key='same' ORDER BY tenant_id")
+                assert [(r["tenant_id"],r["memory_id"]) for r in await cur.fetchall()] == [
+                    ("tenant-1",first),("tenant-2",second)]
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_aud005_real_migration_fails_closed_on_ambiguous_legacy_row():
+    pool=await _b9_ci_test_pool(legacy=True)
+    try:
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("INSERT INTO memory_legacy_bindings VALUES ('facts','legacy','orphan',%s,'ACTIVE',NOW(6))",
+                                  ("00000000-0000-0000-0000-000000000011",))
+            await conn.commit()
+        with pytest.raises(Exception):
+            await _apply_aud005_migration(pool)
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT tenant_id FROM memory_legacy_bindings WHERE legacy_source_key='orphan'")
+                assert (await cur.fetchone())["tenant_id"] is None
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@pytest.mark.asyncio
+async def test_aud004_content_purge_scrubs_physical_b9_storage():
+    """The CI MariaDB service must leave no recoverable B9 payload or vector."""
+    pool=await _b9_ci_test_pool()
+    try:
         api=PersistentMemoryAPI(MariaDBB9Store(pool),TxResolver())
         memory_id=await api.create_memory(auth(),ObjectKind.FACT,"aud004 payload",Visibility.USER_PRIVATE,user_id="user-1")
         await api.correct_memory(auth("CORRECT"),memory_id,"aud004 revised payload")
