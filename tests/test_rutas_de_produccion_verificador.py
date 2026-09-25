@@ -641,3 +641,138 @@ def test_jaxsvc_puede_leer_da_false_para_ruta_absoluta_inexistente():
         pytest.skip(motivo)
     from rutas_de_produccion_verificador import jaxsvc_puede_leer
     assert jaxsvc_puede_leer("/no/existe/de/verdad/2026-09-25") is False
+
+
+# --- Ronda 4, MINOR-6: mock puro (corre en CUALQUIER CI, sin sudo/jaxsvc) --
+# que exige el argv EXACTO -- mutación de control: reintroducir "--" en el
+# código tiene que hacer fallar este test. Probado a mano (ver el informe):
+# con "--" reintroducido, `capturado["argv"]` trae un elemento de más y el
+# `==` estricto falla; sin él, pasa.
+# ---------------------------------------------------------------------------
+
+def test_jaxsvc_puede_leer_arma_argv_exacto_sin_guion_guion():
+    capturado = {}
+
+    def ejecutar_capturando(argv):
+        capturado["argv"] = argv
+        from subprocess import CompletedProcess
+        return CompletedProcess(argv, 0, stdout="", stderr="")
+
+    from rutas_de_produccion_verificador import jaxsvc_puede_leer
+    jaxsvc_puede_leer("/algun/archivo", ejecutar_capturando)
+    assert capturado["argv"] == ["sudo", "-n", "-u", "jaxsvc", "test", "-r", "/algun/archivo"]
+
+
+def test_jaxsvc_puede_escribir_arma_argv_exacto_sin_guion_guion():
+    capturado = {}
+
+    def ejecutar_capturando(argv):
+        capturado["argv"] = argv
+        from subprocess import CompletedProcess
+        return CompletedProcess(argv, 0, stdout="", stderr="")
+
+    from rutas_de_produccion_verificador import jaxsvc_puede_escribir
+    jaxsvc_puede_escribir("/algun/archivo", ejecutar_capturando)
+    assert capturado["argv"] == ["sudo", "-n", "-u", "jaxsvc", "test", "-w", "/algun/archivo"]
+
+
+# --- Ronda 4, MINOR-1: JAX_KILL_SWITCH_PATH con realpath -m, no con el
+# valor crudo -- travesía, symlink de directorio, y ruta relativa.
+# ---------------------------------------------------------------------------
+
+def test_kill_switch_con_travesia_hacia_home_falla():
+    """`/etc/jax/../../home/fruiz/PAUSE` -- el string crudo NO empieza con
+    "/home", pero resuelto (realpath -m) SÍ termina ahí."""
+    entorno = dict(ENTORNO_SANO)
+    entorno["JAX_KILL_SWITCH_PATH"] = ["/etc/jax/../../home/fruiz/PAUSE"]
+
+    def resolver_m(ruta):
+        return "/home/fruiz/PAUSE" if ruta == "/etc/jax/../../home/fruiz/PAUSE" else ruta
+    resultado = verificar_fase_a(
+        entorno, _resolver_identidad(), resolver_permitiendo_ausente=resolver_m)
+    assert not resultado.ok
+    motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_KILL_SWITCH_PATH")
+    assert "/home/" in motivo
+
+
+def test_kill_switch_symlink_de_directorio_hacia_home_falla():
+    """Un symlink de directorio (no del archivo final) que lleva a /home --
+    realpath -m sigue symlinks de los componentes intermedios."""
+    entorno = dict(ENTORNO_SANO)
+    entorno["JAX_KILL_SWITCH_PATH"] = ["/etc/jax/interruptor-symlink/PAUSE"]
+
+    def resolver_m(ruta):
+        return "/home/fruiz/interruptor-real/PAUSE" if ruta == "/etc/jax/interruptor-symlink/PAUSE" else ruta
+    resultado = verificar_fase_a(
+        entorno, _resolver_identidad(), resolver_permitiendo_ausente=resolver_m)
+    assert not resultado.ok
+
+
+def test_kill_switch_ruta_relativa_falla_con_hallazgo():
+    """PAUSE relativa -- MINOR-2 la rechaza en _valor_unico_normalizado
+    ANTES de llegar a ningún resolver."""
+    entorno = dict(ENTORNO_SANO)
+    entorno["JAX_KILL_SWITCH_PATH"] = ["PAUSE"]
+    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    assert not resultado.ok
+    motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_KILL_SWITCH_PATH")
+    assert "absoluta" in motivo
+
+
+def test_kill_switch_ausente_pero_absoluto_sigue_pasando():
+    """Caso sano intacto: ausente (realpath -m devuelve la misma ruta
+    porque nada la desvía) sigue pasando."""
+    entorno = dict(ENTORNO_SANO)
+    entorno["JAX_KILL_SWITCH_PATH"] = ["/etc/jax/interruptor/PAUSE"]
+
+    def resolver_m(ruta):
+        return ruta  # nada la desvía, ausente y sin travesía
+    resultado = verificar_fase_a(
+        entorno, _resolver_identidad(), resolver_permitiendo_ausente=resolver_m)
+    assert resultado.ok, resultado.problemas
+
+
+# --- Ronda 4, MINOR-2: ruta no absoluta -> Hallazgo, no traceback --------
+
+def test_clave_en_alcance_no_absoluta_da_hallazgo_no_traceback():
+    entorno = dict(ENTORNO_SANO)
+    entorno["JAX_CONFIG_PATH"] = ["config/relativo.toml"]
+    # No debe levantar ninguna excepción -- si _valor_unico_normalizado no
+    # atrapara esto, jaxsvc_puede_leer (llamado indirectamente si Fase A
+    # diera ok) levantaría ValueError sin capturar.
+    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    assert not resultado.ok
+    motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_CONFIG_PATH")
+    assert "absoluta" in motivo
+
+
+def test_clave_fuera_de_alcance_no_absoluta_da_hallazgo_no_traceback():
+    entorno = dict(ENTORNO_SANO)
+    entorno["JAX_OTRA_RUTA_DIR"] = ["relativo/tambien"]
+    resultado = verificar_fase_a(entorno, _resolver_identidad())
+    assert not resultado.ok
+    motivo = next(h.motivo for h in resultado.problemas if h.clave == "JAX_OTRA_RUTA_DIR")
+    assert "absoluta" in motivo
+
+
+def test_verificar_de_punta_a_punta_con_ruta_relativa_no_revienta():
+    """Fin a fin: una clave en alcance con valor relativo no debe hacer
+    que verificar() levante una excepción -- tiene que devolver (False,
+    reporte), como cualquier otro problema."""
+    texto = (
+        "JAX_CONFIG_PATH=config/relativo.toml\n"
+        "JAX_AUDIT_LOG_PATH=/var/log/jax/las_manos/audit.jsonl\n"
+        "JAX_REPO_BASE=/srv/jax-data/repo\n"
+    )
+    import rutas_de_produccion_verificador as mod
+    original_resolver = mod.resolver_como_jaxsvc
+    original_fase_c = mod.verificar_fase_c
+    try:
+        mod.resolver_como_jaxsvc = lambda ruta, ejecutar=None: ruta
+        mod.verificar_fase_c = lambda resolver: mod.ResultadoFaseC()
+        ok, reporte = mod.verificar(texto)  # no debe lanzar
+    finally:
+        mod.resolver_como_jaxsvc = original_resolver
+        mod.verificar_fase_c = original_fase_c
+    assert not ok
+    assert "absoluta" in reporte

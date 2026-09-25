@@ -51,8 +51,13 @@ CLAVE: `JAX_CONFIG_PATH` sólo bajo `/srv/jax-prod/jax/config/`,
 `JAX_AUDIT_LOG_PATH` sólo bajo `/var/log/jax/las_manos/`, `JAX_REPO_BASE`
 sólo exactamente `/srv/jax-data/repo`.
 
-`ops/rutas-de-produccion.sh` es un envoltorio fino: lee `/etc/jax/.env` con
-`sudo -n cat`, le pasa el TEXTO a este módulo por stdin (`ENV_FILE` no es
+`ops/rutas-de-produccion.sh` es un envoltorio fino que sólo valida el
+argumento y exec-ea este módulo (`_main`, más abajo) -- NO le pasa nada por
+stdin. Este módulo hace su propio `sudo -n cat /etc/jax/.env` (ver `_main`).
+Corrección ronda 4 (MINOR-5): esta misma frase, con la afirmación de stdin
+ya corregida, quedó repetida acá con el texto viejo -- se había arreglado
+en el docstring de `ops/rutas-de-produccion.sh` (ronda 3) pero no en ESTE
+módulo. La ruta de `/etc/jax/.env` sigue fija (`ENV_FILE` no es
 configurable por entorno, a propósito).
 
 En memoria de Jairo Urbina.
@@ -244,7 +249,18 @@ class ResultadoFaseA:
 
 def _valor_unico_normalizado(clave: str, crudos: list[str]) -> tuple[str | None, str | None]:
     """(valor, None) si la clave aparece exactamente una vez con un valor
-    normalizable y no vacío. (None, motivo) en cualquier otro caso."""
+    normalizable, no vacío y ABSOLUTO. (None, motivo) en cualquier otro
+    caso.
+
+    Ronda 4, MINOR-2: antes esto no comprobaba que el valor fuera absoluto
+    -- una ruta relativa pasaba de acá directo a `resolver()` (que la
+    resolvería contra el cwd del subproceso, un resultado impredecible, no
+    un error) o a `jaxsvc_puede_leer/escribir`, que SÍ levanta ValueError
+    si no empieza con "/" -- pero nada atrapaba esa excepción: un
+    traceback sin capturar tumbaba `verificar()` entero en vez de dar un
+    Hallazgo legible. El chequeo se hace UNA vez, acá, para las dos claves
+    en alcance y las de fuera de alcance por igual (mismo choke point que
+    usan las dos)."""
     if not crudos:
         return None, "clave ausente en /etc/jax/.env"
     if len(crudos) > 1:
@@ -255,6 +271,8 @@ def _valor_unico_normalizado(clave: str, crudos: list[str]) -> tuple[str | None,
         return None, str(exc)
     if not valor:
         return None, "valor vacío"
+    if not valor.startswith("/"):
+        return None, f"ruta no absoluta: {valor!r}"
     return valor, None
 
 
@@ -262,6 +280,7 @@ def verificar_fase_a(
     entorno: dict[str, list[str]],
     resolver: Callable[[str], str | None],
     errores_de_parseo: list[Hallazgo] | None = None,
+    resolver_permitiendo_ausente: Callable[[str], str | None] | None = None,
 ) -> ResultadoFaseA:
     """`resolver(ruta_cruda) -> ruta_real | None`. En producción,
     `resolver_como_jaxsvc` (sudo -n -u jaxsvc realpath -e). En tests, un
@@ -282,6 +301,9 @@ def verificar_fase_a(
           saltaban en silencio con `continue`, dejando un hueco fail-open
           para cualquier clave de ruta futura que no fuera una de las tres
           en alcance."""
+    if resolver_permitiendo_ausente is None:
+        resolver_permitiendo_ausente = resolver_como_jaxsvc_permitiendo_ausente
+
     resultado = ResultadoFaseA()
     resultado.problemas.extend(errores_de_parseo or [])
 
@@ -311,15 +333,18 @@ def verificar_fase_a(
         if motivo:
             resultado.problemas.append(Hallazgo(clave, motivo))
             continue
-        real = resolver(valor)
-        if real is None:
-            if clave in EXISTENCIA_OPCIONAL:
-                # Ronda 3, MINOR-6d: exenta de "tiene que existir", pero NO
-                # del chequeo de /home que sigue -- se usa el valor
-                # normalizado (no resuelto) como mejor aproximación de "la
-                # ruta real" cuando no hay nada que resolver.
-                real = valor
-            else:
+        if clave in EXISTENCIA_OPCIONAL:
+            # Ronda 4, MINOR-1: `realpath -m` (permite ausencia) en vez de
+            # usar el valor crudo -- resuelve travesías y symlinks aunque
+            # el archivo final no exista.
+            real = resolver_permitiendo_ausente(valor)
+            if real is None:
+                resultado.problemas.append(
+                    Hallazgo(clave, f"{valor}: no se pudo resolver ni con realpath -m (¿ruta inválida?)"))
+                continue
+        else:
+            real = resolver(valor)
+            if real is None:
                 resultado.problemas.append(
                     Hallazgo(clave, f"{valor}: no se pudo resolver la ruta real (¿no existe? ¿sin permiso?)"))
                 continue
@@ -348,6 +373,23 @@ def resolver_como_jaxsvc(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real
     cuenta real que usa estas rutas, no fruiz ni root. `None` si no existe o
     sin permiso."""
     r = ejecutar(["sudo", "-n", "-u", "jaxsvc", "realpath", "-e", "--", ruta])
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def resolver_como_jaxsvc_permitiendo_ausente(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> str | None:
+    """`realpath -m` (canonicaliza aunque la ruta NO exista) corrido como
+    jaxsvc -- para las claves de EXISTENCIA_OPCIONAL (ronda 4, MINOR-1).
+    Antes, cuando `realpath -e` fallaba (el caso SANO para estas claves),
+    el chequeo de /home comparaba el valor CRUDO del `.env`, sin resolver
+    -- una travesía (`/etc/jax/../../home/fruiz/PAUSE`) o un symlink de
+    directorio hacia /home nunca se detectaban, porque el string crudo no
+    empieza con "/home". `realpath -m` resuelve `..` y symlinks de los
+    componentes que SÍ existen (todo, salvo quizás el último) sin exigir
+    que el archivo final esté presente -- exactamente lo que hace falta
+    para juzgar la ruta REAL de algo cuya ausencia es normal."""
+    r = ejecutar(["sudo", "-n", "-u", "jaxsvc", "realpath", "-m", "--", ruta])
     if r.returncode != 0:
         return None
     return r.stdout.strip()

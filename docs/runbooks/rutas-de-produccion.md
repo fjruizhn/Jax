@@ -78,6 +78,93 @@ secciones correspondientes de este documento, más abajo -- el documento
 completo queda actualizado para la PRÓXIMA vez que haga falta (reversión,
 u otro corte de esta naturaleza), no sólo como bitácora de lo ya hecho.
 
+**Ronda 4, MAJOR-1(a):** la marca `~/rutas-prod.paso4-completo` (que R3 de
+la Reversión exige, ver más abajo) no existía en el host real, porque se
+agregó a este runbook DESPUÉS del corte -- Paso 4 nunca la escribió
+retroactivamente. **Hyde la creó a mano en hall9000** con el texto
+`20260925-061300 retroactiva: Paso 4 verificado 64/64 sha256 (Hyde, creada
+2026-09-25 06:30)` -- documentado acá para que quede constancia de que esa
+marca no salió de una ejecución real del Paso 4, sino de una verificación
+posterior (el sha256 de 64/64 archivos, ya reportado arriba) traducida a la
+misma marca que el runbook espera.
+
+## Pendiente de esta ronda — reparación de ACLs (MINOR-3, MINOR-4)
+
+**PROPUESTO, NO EJECUTADO por esta sesión** -- para que lo corra Fernando o
+quien tenga el GO.
+
+### Causa raíz (determinada, ver el informe de esta ronda para la evidencia completa)
+
+El corte perdió las ACL con nombre (`user:jaxsvc:...`, 67-72 entradas según
+cómo se cuenten) que `documents/` y su contenido tenían en el checkout de
+trabajo. **No es el `rsync -aHAX` de Paso 4 en sí, ni el `setfacl` de
+MAJOR-4** (los dos preservan ACL correctamente, probado en aislamiento,
+incluso contra un XFS real como `/srv/jax-data`) -- es el **diseño de DOS
+pasadas** que este runbook tenía hasta la ronda 3 (Paso 0 "de adelanto" +
+Paso 4 "final"): cuando la segunda pasada de `rsync -A` encuentra un
+archivo que ya dejó igual la primera, lo salta -- y ese salto BORRA la
+entrada de ACL con nombre en vez de dejarla o reaplicarla. Reproducido de
+forma determinística, con `--itemize-changes` mostrando la bandera de
+cambio de ACL/xattr exactamente en los archivos salteados. `--checksum` en
+la segunda pasada NO lo evita. La ronda 4 ya sacó la pasada "de adelanto"
+del Paso 0 (ver ahí) para que esto no vuelva a pasar en el PRÓXIMO corte --
+esta sección es sólo sobre reparar el que YA ocurrió.
+
+### Reparación propuesta
+
+```bash
+# 1. Restaurar las ACLs perdidas: --ignore-times fuerza a rsync a
+#    reexaminar CADA archivo de verdad (no confiar en "ya está igual") --
+#    es lo que, probado, SÍ reaplica el ACL correctamente. Sin --delete,
+#    para no tocar nada escrito en /srv/jax-data/repo desde el corte.
+sudo rsync -aHAX --numeric-ids --ignore-times /home/fruiz/jax/repo/ /srv/jax-data/repo/
+
+# 2. Este rsync acaba de traer de vuelta el "other::r--" original --
+#    reaplicar el endurecimiento de MAJOR-4 (Paso 4) que eso deshizo:
+sudo chmod -R o-rwx /srv/jax-data/repo
+sudo setfacl -R -m o::--- -m d:o::--- /srv/jax-data/repo
+SOBRANTES="$(sudo find /srv/jax-data/repo \( -perm -o=r -o -perm -o=w -o -perm -o=x \) 2>/dev/null | wc -l)"
+[ "$SOBRANTES" -eq 0 ] && echo "MAJOR-4 OK" || echo "ATENCION: $SOBRANTES con acceso 'other'"
+
+# 3. Verificación "jaxsvc lee todo lo que leía antes":
+sudo find /srv/jax-data/repo -type f | while IFS= read -r f; do
+  sudo -u jaxsvc test -r "$f" || echo "NO LEGIBLE: $f"
+done
+echo "verificación completa -- sin líneas 'NO LEGIBLE' arriba, jaxsvc lee todo"
+```
+
+### MINOR-4 — dos preguntas de diseño, con evidencia, sin ejecutar nada
+
+**¿`/srv/jax-data/repo` pasa a dueño `jaxsvc`?** Evidencia del código (grep
+sobre `jacobs/executor.py` y `jax-platform/backend/api/admin/repository.py`):
+el ÚNICO consumidor que escribe ahí es `jacobs/executor.py`
+(`_persist_step_to_repo`, dentro de LAS MANOS), y el único que lee es
+`jax-platform` vía `admin/repository.py` -- **los dos corren como
+`jaxsvc`** (HECHOS de la tarea original). `fruiz` no es un consumidor en
+tiempo de ejecución, sólo un operador humano ocasional. Hoy el modelo
+mezcla dos mecanismos: permisos de grupo (`fruiz:jaxsvc 775`, que alcanza
+para directorios) y ACL con nombre (necesarias porque ARCHIVOS
+individuales tienen grupo `fruiz`, no `jaxsvc`, heredado de cuando se
+crearon en el checkout de trabajo) -- la mezcla es exactamente lo frágil
+que este incidente mostró. Pasar a dueño (o al menos grupo uniforme)
+`jaxsvc`, con `setgid` en los directorios para que lo nuevo herede el
+grupo, sacaría la dependencia de ACL para el caso de uso real. Es una
+decisión de superficie de acceso (¿pierde `fruiz` algo hoy?) que no le
+corresponde a este runbook tomar sola.
+
+**¿`.claude-flow/` se purga del repo de producción?** Evidencia: `grep -rn
+"claude-flow"` sobre TODO el código de aplicación (`las_manos/`, `jacobs/`,
+`jax/`, `jax-platform`) da CERO resultados fuera de dos listas de exclusión
+de un escáner de tests (`policy/tests/test_archivos_de_test_wireados_en_ci.py`
+y `test_auditor_c5_punto_unico.py`, que ignoran ESE nombre de carpeta al
+recorrer el árbol -- no lo usan como dato). Ningún camino de LAS MANOS ni de
+jax-platform lee o escribe `.claude-flow/`: es un directorio de estado de
+una herramienta de agentes (el paquete npm `claude-flow`) que quedó
+mezclado ahí porque algún agente trabajó DENTRO de `documents/` en algún
+momento, no un dato de producción. Candidato razonable a purgar, pero es
+contenido (posible memoria/histórico de sesiones de agentes) que alguien
+podría querer conservar -- decisión de Fernando, no de esta sesión.
+
 ## Prerrequisito -- y la decisión de NO desplegar (MAJOR-C)
 
 **Este runbook NO exige mergear ni desplegar esta rama en
@@ -227,7 +314,24 @@ else
 fi
 
 sudo mkdir -p /srv/jax-data/repo
-sudo rsync -aHAX --numeric-ids /home/fruiz/jax/repo/ /srv/jax-data/repo/
+
+# NO se hace una copia "de adelanto" del repo acá (ronda 4, MAJOR-3): las
+# revisiones 1-3 de este documento SÍ la hacían -- una pasada de rsync -A
+# temprana (este Paso) y otra final con --delete (Paso 4), pensadas para
+# achicar la ventana. Causa raíz real, reproducida (ver el informe de esta
+# ronda): cuando la SEGUNDA pasada de `rsync -aHAX` encuentra un archivo
+# que YA está igual (mismo tamaño/mtime que dejó la primera pasada), rsync
+# lo salta -- y ese salto NO reaplica el ACL con nombre (`user:jaxsvc:...`),
+# lo BORRA. Confirmado con `--itemize-changes` (el archivo sin cambios sale
+# marcado con la bandera de "cambio de xattr/ACL" y pierde la entrada con
+# nombre; un archivo nuevo, transferido de verdad, la conserva) y
+# reproducido tanto en ext4→ext4 como en un XFS real (loopback, el mismo
+# tipo de filesystem que /srv/jax-data) -- no es un problema de los flags
+# usados, es la interacción entre dos invocaciones separadas de rsync -A
+# sobre el mismo destino. `--checksum` en la segunda pasada NO lo evita
+# (probado). La única transferencia del repo es la del Paso 4 -- un solo
+# rsync -A, nunca uno "de adelanto" seguido de otro "final" sobre el mismo
+# árbol.
 
 sudo mkdir -p /var/log/jax/las_manos
 sudo chown jaxsvc:jaxsvc /var/log/jax/las_manos
@@ -367,7 +471,8 @@ fi
 # Marca de "Paso 4 terminó de verdad" (ronda 3, MINOR-3): R3 (reversión) la
 # comprueba antes de sincronizar de vuelta -- sin esto, R3 sólo podía
 # adivinar si el rsync final había corrido mirando si /srv/jax-data/repo
-# existía, y esa carpeta también la crea el Paso 0 (la pasada NO final).
+# existía, y ese directorio también lo crea el Paso 0 (con mkdir, aunque ya
+# no con una copia de adelanto -- ver ronda 4, MAJOR-3).
 date +%Y%m%d-%H%M%S > ~/rutas-prod.paso4-completo
 )
 ```
@@ -555,7 +660,8 @@ anterior de este documento decía que este archivo "no vive dentro de
 ningún árbol que `git clean` necesite poder tocar" -- **eso es falso**.
 `/home/fruiz/jax` SÍ es un checkout git (el de trabajo de un agente), y
 `las_manos/logs/` SÍ está adentro; lo que pasa es que `.gitignore:26`
-(`logs/`) ya lo excluye de un `git clean -fd` NORMAL (sin `-x`), así que
+(`*/logs/` -- no `logs/` a secas, que es la línea 25; corregido ronda 4,
+MINOR-5) ya lo excluye de un `git clean -fd` NORMAL (sin `-x`), así que
 `chattr +i` no agrega protección contra ESE caso -- sólo contra un `git
 clean -fdx` (que sí incluye archivos ignorados) o contra una escritura
 accidental de algún script viejo. Es una protección real, sólo que el
@@ -587,6 +693,12 @@ temprano (antes del Paso 5), no hay `~/rutas-prod.N0` -- R2 no aplica. Si
 falló antes del Paso 4, no hay nada nuevo en `/srv/jax-data/repo` que
 sincronizar de vuelta -- R3 no aplica.
 
+**Toda la secuencia de abajo (preámbulo + R1-R5) se probó de punta a punta
+en `/tmp`, con `sudo unshare --mount`, reproduciendo el estado real
+posterior al corte** (incluido el `chattr +i` del Paso 9 -- eso sólo se
+puede probar con root de verdad, no con un mock) -- ver la evidencia en el
+informe de esta ronda.
+
 ```bash
 (
 set -euo pipefail
@@ -597,6 +709,24 @@ if [ ! -f "$BACKUP" ]; then
   exit 1
 fi
 echo "BACKUP=$BACKUP (TS=$TS)"
+
+# MAJOR-1(b), ronda 4: el Paso 9 dejó el audit log viejo INMUTABLE
+# (`chattr +i`) a propósito. R2 (más abajo) necesita escribirle (`tee -a`)
+# -- sin esto, `tee -a` falla con EPERM y la reversión aborta CON LOS
+# SERVICIOS YA DETENIDOS (si esto corriera después de R1). Por eso va acá,
+# en el preámbulo, ANTES de tocar ningún servicio: si quitar +i fallara,
+# mejor enterarse ahora que a mitad de una ventana de corte.
+OLD_AUDIT=/home/fruiz/jax/las_manos/logs/audit.jsonl
+if lsattr "$OLD_AUDIT" 2>/dev/null | grep -q '^....i'; then
+  sudo chattr -i "$OLD_AUDIT"
+  if lsattr "$OLD_AUDIT" 2>/dev/null | grep -q '^....i'; then
+    echo "ABORTAR: no se pudo quitar +i de $OLD_AUDIT"
+    exit 1
+  fi
+  echo "OK: +i retirado de $OLD_AUDIT"
+else
+  echo "OK: $OLD_AUDIT ya no tiene +i (o el filesystem no lo soporta)"
+fi
 )
 ```
 
@@ -659,17 +789,23 @@ MINOR-3):**
 (
 set -euo pipefail
 # La marca de ~/rutas-prod.paso4-completo (NO sólo "existe /srv/jax-data/repo",
-# que también crea el Paso 0 con la pasada NO final) confirma que el rsync
-# FINAL de verdad corrió -- si el corte falló entre el Paso 0 y el Paso 4,
-# /srv/jax-data/repo existe pero con datos parciales/viejos, y sincronizarlos
-# de vuelta sería un error.
+# que también crea el Paso 0 con un mkdir vacío) confirma que el ÚNICO
+# rsync del repo (Paso 4, ronda 4: ya no hay una pasada de adelanto en el
+# Paso 0) de verdad corrió -- si el corte falló antes del Paso 4,
+# /srv/jax-data/repo existe pero vacío o con datos parciales, y
+# sincronizarlos de vuelta sería un error.
 if [ -f ~/rutas-prod.paso4-completo ]; then
-  # -u (--update): nunca sobrescribe un archivo del lado de trabajo que sea
-  # MÁS NUEVO que el de /srv/jax-data/repo -- si algo escribió ahí después
-  # del corte (no debería, con los servicios apuntando a la ruta nueva, pero
-  # por si acaso) no se pisa con una copia más vieja.
-  sudo rsync -aHAX -u --numeric-ids /srv/jax-data/repo/ /home/fruiz/jax/repo/
-  echo "R3 OK: sincronizado de vuelta"
+  # --ignore-existing (ronda 4, MAJOR-3): NUNCA toca un archivo que ya
+  # existe en el destino (/home/fruiz/jax/repo), aunque el contenido sea
+  # igual -- sólo trae lo genuinamente NUEVO. Reemplaza a -u (--update):
+  # -u todavía deja que rsync "reexamine" archivos con igual contenido, y
+  # eso es EXACTAMENTE lo que le borró el ACL con nombre a los documentos
+  # originales en la primera versión de este runbook (ver la nota del
+  # Paso 0) -- probado que --ignore-existing NO tiene ese problema: dejé
+  # ACL rotas del lado del origen a propósito y el destino, que ya tenía
+  # el archivo, salió intacto.
+  sudo rsync -aHAX --ignore-existing --numeric-ids /srv/jax-data/repo/ /home/fruiz/jax/repo/
+  echo "R3 OK: sincronizado de vuelta (sólo lo nuevo; nada preexistente se tocó)"
 else
   echo "R3: no existe ~/rutas-prod.paso4-completo -- el Paso 4 nunca terminó, nada confiable que sincronizar"
 fi
