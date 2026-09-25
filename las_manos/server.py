@@ -44,6 +44,7 @@ from planner import Planner
 from envelope import IntentEnvelope, validate as validate_envelope
 from workers import ssh_worker, file_worker, rsync_worker
 from interruptor import interruptor_activo, ruta_del_interruptor
+from config_entorno import ruta_absoluta_requerida
 import human_gate
 
 # El freno ANTES de cualquier otra configuración (2026-09-16, frente B): sin
@@ -77,19 +78,21 @@ CONFIG["environments"] = _load_environments()
 SERVER_CFG = CONFIG["server"]
 GATE_CFG = CONFIG["human_gate"]
 
-#: `config.toml` trae `audit_log` como ruta absoluta del home de producción
-#: (`/home/fruiz/jax/las_manos/logs/audit.jsonl`) -- mismo criterio que
-#: `JAX_WORKSPACE_DIR`/`WORKSPACE_ROOT` en tool_authority.py: un default de
-#: producción, pero SIEMPRE overrideable, nunca el único camino. Sin esto,
-#: cualquier test que importe `server` (aunque sea indirecto, vía
-#: `from server import app`) dispara `AuditLog.__init__` -> `mkdir` sobre ESA
-#: ruta literal, que en cualquier runner de CI o checkout que no sea
-#: /home/fruiz/jax revienta con PermissionError o FileNotFoundError --
-#: violación directa de "sin hardcoding" (2026-09-18, detector de cobertura:
-#: las_manos/motor_registry/_authorize_facet_endpoint_test.py). `conftest.py`
-#: de la raíz fija JAX_AUDIT_LOG_PATH a un temporal antes de cualquier import,
+#: Hasta el 2026-09-25 `config.toml` traía `audit_log` como ruta absoluta del
+#: checkout de TRABAJO (`/home/fruiz/jax/las_manos/logs/audit.jsonl`) y esta
+#: línea caía ahí en silencio si faltaba JAX_AUDIT_LOG_PATH -- el mismo
+#: checkout que /etc/jax/.env usaba para las otras rutas de producción
+#: (ops/rutas-de-produccion.sh, docs/runbooks/rutas-de-produccion.md). Un
+#: fallback silencioso a esa ruta no es "sin hardcoding" (Principio IV): es
+#: hardcoding con un paso extra, y un checkout de trabajo no es un lugar
+#: seguro para la auditoría de producción -- puede estar en otra rama o no
+#: existir. Mismo criterio que `JAX_KILL_SWITCH_PATH` en interruptor.py: sin
+#: la variable, `EntornoInvalido` (vía `ruta_absoluta_requerida`), nunca un
+#: default conocido reintroducido con otro nombre. `conftest.py` de la raíz
+#: sigue fijando JAX_AUDIT_LOG_PATH a un temporal antes de cualquier import,
 #: mismo patrón que JAX_KILL_SWITCH_PATH/JAX_FACET_SEAL_PATH/JAX_REPO_BASE.
-AUDIT_LOG_PATH = os.getenv("JAX_AUDIT_LOG_PATH", SERVER_CFG["audit_log"])
+#: Ver las_manos/_server_audit_log_entorno_test.py.
+AUDIT_LOG_PATH = ruta_absoluta_requerida("JAX_AUDIT_LOG_PATH")
 audit = AuditLog(AUDIT_LOG_PATH)
 # Nombre distinto de `policy` a propósito (registro de la ronda 1 de
 # revisión de PR#262, fix/arranque-policy-shadow): un global `policy` acá
