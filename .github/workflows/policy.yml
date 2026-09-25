@@ -256,34 +256,38 @@ jobs:
       # guion real.
       - run: python -m pytest tests/test_instalar_dropins_de_servicio.py -v
       - name: Piso exacto -- instalar-dropins-de-servicio.sh contra DESTDIR
-        # Medido 2026-09-25 en hall9000: 8 passed, sin skips (no depende del
-        # host de producción -- todo corre contra un DESTDIR de tmp_path).
-        # Subió de 5 a 8 con los 3 rechazos de m2 probados contra un
-        # manifiesto ADULTERADO en un $REPO temporal (auditoría escalón 3,
-        # ronda 2, MINOR-3): .., nombre de archivo inválido, realpath fuera
-        # del repo.
+        # Medido 2026-09-25 en hall9000 con sudo unshare --mount tapando
+        # /srv/jax-prod (mismo método que el resto de este job): 11 passed,
+        # sin skips (no depende del host de producción -- todo corre
+        # contra un DESTDIR de tmp_path). Subió de 8 a 11 con los 3 casos
+        # de DESTDIR-que-resuelve-a-raíz (auditoría escalón 3, ronda 4,
+        # MINOR-1): "/", "" y "/tmp/../" tratados como instalación real.
         run: |
           python -m pytest -q tests/test_instalar_dropins_de_servicio.py 2>&1 | tee /tmp/instalar_dropins
-          grep -qE "^8 passed" /tmp/instalar_dropins || {
-            echo "PISO ROTO: se esperaban 8 tests CORRIDOS de tests/test_instalar_dropins_de_servicio.py."; exit 1; }
+          grep -qE "^11 passed" /tmp/instalar_dropins || {
+            echo "PISO ROTO: se esperaban 11 tests CORRIDOS de tests/test_instalar_dropins_de_servicio.py."; exit 1; }
       # El chequeo "ningún archivo de más participa del arranque" (M2, con
-      # todas sus rondas: BLOCK-1, MAJOR-1, MAJOR-3 de la ronda 3). Usa
-      # sudo (para instalar árboles de prueba con dueño root:root, igual
-      # que el guion real) y el systemctl real del runner (para los tests
-      # con systemctl de mentira que SÍ requieren producción, ver el skip
-      # de abajo).
+      # todas sus rondas: BLOCK-1 y MAJOR-1/3 de la ronda 3, MAJOR-A de la
+      # ronda 4). Usa sudo (para instalar árboles de prueba con dueño
+      # root:root, igual que el guion real, que ahora corre ENTERO como
+      # root) y el systemctl real del runner (para los tests con
+      # systemctl de mentira que SÍ requieren producción, ver el skip de
+      # abajo).
       - run: python -m pytest tests/test_verificar_arranque_instalado.py -v
       - name: Piso exacto -- verificar-arranque-instalado.sh, chequeo de más
         # Medido 2026-09-25 en hall9000 con sudo unshare --mount tapando
-        # /srv/jax-prod (mismo método que el resto de este job): 8 passed,
+        # /srv/jax-prod (mismo método que el resto de este job): 9 passed,
         # 2 skipped -- los 2 tests con systemctl de mentira necesitan
         # jax-las-manos.service REALMENTE instalado en /etc (para que el
         # disco, que no pasa por el systemctl falso, coincida con el
-        # manifiesto), y eso es sólo el host de producción real.
+        # manifiesto), y eso es sólo el host de producción real. Subió de
+        # 8 a 9 con test_directorio_ilegible_y_vacio_da_rc_1 (auditoría
+        # escalón 3, ronda 4, MAJOR-A) -- no depende del host, corre
+        # siempre.
         run: |
           python -m pytest -q tests/test_verificar_arranque_instalado.py 2>&1 | tee /tmp/verificar_arranque
-          grep -qE "^8 passed, 2 skipped" /tmp/verificar_arranque || {
-            echo "PISO ROTO: se esperaban 8 tests CORRIDOS (no skipeados) y exactamente 2 skipped de tests/test_verificar_arranque_instalado.py. Si esto da más passed, este runner tiene /srv/jax-prod/jax -- no es el runner esperado."; exit 1; }
+          grep -qE "^9 passed, 2 skipped" /tmp/verificar_arranque || {
+            echo "PISO ROTO: se esperaban 9 tests CORRIDOS (no skipeados) y exactamente 2 skipped de tests/test_verificar_arranque_instalado.py. Si esto da más passed, este runner tiene /srv/jax-prod/jax -- no es el runner esperado."; exit 1; }
 
   ci-usa-la-mariadb-de-produccion:
     runs-on: ubuntu-latest

@@ -538,6 +538,22 @@ hallazgo de abajo, y otra vez al cerrar los 6 MAJOR/4 MINOR de la
 auditoría escalón 3 sobre jax#274): **19 archivos** en total (contados,
 no una cifra redonda -- ver `ops/manifiesto-arranque-instalado.tsv`, que es
 la lista real):
+
+> **VERDAD OPERACIONAL, no verificada por otra fuente (2026-09-25,
+> subagente de la ronda 4)**: `jax-las-manos.service` quedó con
+> `NeedDaemonReload=yes` real en hall9000 por un error operativo del
+> subagente que hizo esta ronda -- una prueba negativa contra
+> `/etc/systemd/system/jax-las-manos.service.d/z-pythonpath.conf`
+> (agregar una línea y restaurarla) que debió correr contra un árbol de
+> prueba y corrió contra el `/etc` real. El CONTENIDO del archivo está
+> confirmado idéntico al del repo (sin `DIFIERE`); el servicio en sí
+> sigue corriendo con lo que tenía cargado antes, sin reinicio. Falta
+> `sudo systemctl daemon-reload` para que `verificar-arranque-instalado.sh`
+> vuelva a dar 0 -- **no lo corrió el subagente** (no está autorizado a
+> escribir en producción vía `systemctl` más allá de `show`/`cat`).
+> Caduca en cuanto alguien con autoridad corra el `daemon-reload` y lo
+> confirme: esta nota queda vieja apenas eso pase, bórrela quien lo
+> verifique.
 - 4 unidades base: `jax-las-manos.service`, `jax-memory-worker.service`,
   `jax-memory-synthesis.service`, `jax-ejecutor-proxy.service`. Son el
   fragmento CRUDO tal como está instalado en `/etc` (`User=fruiz`,
@@ -607,74 +623,87 @@ la lista real):
     `:/srv/jax-prod/jax/las_manos`) -- nunca `/home/fruiz`. Sin este paso,
     "el guion de verificación dio 0" sólo prueba que /etc está bien, no
     que el servicio ya arrancó con eso.
-- **Verificación**: `ops/verificar-arranque-instalado.sh` compara, archivo
-  por archivo según `ops/manifiesto-arranque-instalado.tsv`, lo que hay en
-  el repo contra lo instalado -- byte a byte, que lo instalado NUNCA sea un
-  symlink (ni el archivo ni su directorio padre -- MINOR-4), dueño
-  `root:root` y modo `644`/`755` en archivos y `755` en los directorios que
-  los contienen. Sale 0 sólo si TODO eso se cumple; imprime cada diferencia
-  si no.
-  **Que no haya NINGÚN archivo de más participando del arranque de cada
-  unidad** se resuelve en DOS sentidos independientes, los dos exigidos
-  siempre en producción (auditoría escalón 3, ronda 3, MAJOR-1 -- la
-  versión de la ronda 2 sólo miraba lo que `systemctl cat`/`show`
-  reportan CARGADO, que no es lo mismo que lo que hay en DISCO: un
-  intruso recién copiado sin `daemon-reload` pasaría en verde si sólo se
-  mirara eso):
-  - **Lo que hay REALMENTE en disco**: las 12 rutas de
-    `systemd-analyze unit-paths` (hall9000, systemd 259) × cada prefijo con
-    guion de la unidad (`jax-.service.d/`, `jax-ejecutor-.service.d/`,
-    `jax-memory-.service.d/`, aplicables a las 4 unidades por su nombre
-    común) × el genérico de tipo (`service.d/`/`timer.d/`, para TODA
-    unidad de ese tipo) -- NUNCA mirando contenido de archivo, sólo
-    nombres. Un directorio que EXISTE pero no se puede LISTAR (`-r`/`-x`)
-    es un FALLO ("NO SE PUDO LEER"), no un `continue` silencioso
-    (MINOR-1, ronda 2). Corre siempre, en producción y en modo de prueba
-    (`RAIZ_PRUEBA`, vacío por defecto = disco real -- existe SÓLO para
-    poder ejercitar esta lógica contra un árbol bajo `/tmp` sin tocar el
-    `/etc` real, nunca se usa para instalar).
-  - **Lo que systemd tiene CARGADO -- sólo en producción**: `systemctl
-    show -p FragmentPath -p DropInPaths --value <unidad>` (lectura pura;
-    se probó primero si el entorno lo permitía, y lo permite). Si
-    `systemctl` avisa algo por `stderr` (p.ej. "changed on disk"), NO se
-    descarta: cuenta como fallo. Si `systemctl show` falla del todo
-    (unidad inexistente, systemctl roto), mensaje claro Y el guion sigue
-    revisando las demás unidades -- no aborta la corrida entera por una
-    sola (MINOR-2).
-    **BLOCK-1 (ronda 3, RECHAZO)**: la primera versión de este chequeo
-    raspaba `systemctl cat` con `grep '^# /'` para sacar las rutas -- y
-    también atrapaba CONTENIDO: una línea de comentario dentro de un
-    `.conf` que empezara con `# /` (como
-    `# /srv/jax-prod/jax/.venv/bin/python (el mismo intérprete...)`, que
-    estuvo en el `z-pythonpath.conf` del proxy) se contaba como si fuera
-    la cabecera real que antepone systemd -- ese MISMO archivo, ya
-    esperado, habría salido como "de más" apenas se instalara. Arreglado
-    de raíz: `systemctl show` con `-p` no imprime NINGÚN contenido, sólo
-    los dos valores pedidos; la enumeración de disco tampoco mira nunca
-    contenido, sólo nombres de archivo. El comentario del propio
-    `z-pythonpath.conf` del proxy se reescribió para que ninguna línea
-    empiece con `# /`, y hay una prueba dedicada
-    (`tests/test_verificar_arranque_instalado.py::test_block1_...`) que
-    siembra esa línea exacta en un drop-in y confirma que NUNCA cuenta
-    como archivo de más.
+- **Verificación**: `ops/verificar-arranque-instalado.sh [RAIZ_PRUEBA]`
+  compara, archivo por archivo según `ops/manifiesto-arranque-instalado.tsv`,
+  lo que hay en el repo contra lo instalado -- byte a byte, que lo
+  instalado NUNCA sea un symlink (ni el archivo ni su directorio padre),
+  dueño `root:root` y modo `644`/`755` en archivos y `755` en los
+  directorios que los contienen. Sale 0 sólo si TODO eso se cumple; sale 2
+  si no hay `sudo` disponible (fallo cerrado); imprime cada diferencia y
+  sale 1 en cualquier otro caso.
+  **Simplificado de raíz en la ronda 4** (RECHAZADA la ronda 3 por 2
+  MAJOR que ella misma había introducido, tras ya 3 rondas de parches
+  sobre el mismo guion):
+  - **Corre ENTERO como root** (`sudo -n`, re-exec al principio si no lo
+    es ya -- RAIZ_PRUEBA pasa a ser un ARGUMENTO posicional, no una
+    variable de entorno, porque `sudo` resetea el entorno a
+    `secure_path`/mínimo y una variable puesta antes del re-exec no
+    sobrevive ese salto). Así desaparece de raíz el caso "un directorio
+    que `fruiz` no puede listar" -- medido: `systemd-delta` sin root ve
+    15 líneas contra 48 con root en la misma corrida. Sin `sudo`
+    disponible, o si `sudo -n` no alcanza: FALLA CERRADO (`exit 2`),
+    nunca sigue como usuario sin privilegios fingiendo que pudo revisar
+    todo.
+  - **Disco**: la verdad la da `systemd-delta --no-pager
+    --type=overridden,extended,redirected,masked,equivalent` (lee las 12
+    rutas de `systemd-analyze unit-paths`, incluidas `system.control`,
+    `transient`, `generator.early`, y la jerarquía de prefijos con guion,
+    todo resuelto por systemd mismo -- ya no una enumeración a mano) más
+    `systemctl show -p FragmentPath` para el fragmento BASE activo (un
+    fragmento servido desde `system.control`/`transient` en vez de
+    `/etc/systemd/system/<u>` no matchea el manifiesto -> DIFERENCIA,
+    sin que `systemd-delta` tenga que resolver eso). Bajo `RAIZ_PRUEBA`
+    (sólo para tests -- no hay systemd real al que preguntarle por un
+    árbol de `/tmp`) se mantiene la enumeración a mano, cubriendo las 12
+    rutas × prefijos con guion × genérico de tipo.
+  - **Cargado**: `systemctl show -p FragmentPath -p DropInPaths
+    -p NeedDaemonReload --value <unidad>`, y se EXIGE
+    `NeedDaemonReload=no` -- la señal REAL y estructurada de "lo cargado
+    puede no reflejar el disco" (la ronda 3 rascaba avisos de texto libre
+    por stderr; esto es una propiedad de systemd, no un mensaje). Si
+    `systemctl show` falla del todo (unidad inexistente, systemctl
+    roto), mensaje claro Y el guion sigue revisando las demás unidades
+    -- no aborta la corrida entera por una sola.
+  - **MAJOR-A (ronda 4, motivo del RECHAZO de la ronda 3)**: la ronda 3
+    hacía `fallo=1` DESDE DENTRO de funciones invocadas vía `$(...)` --
+    esa asignación vive en un SUBSHELL y se pierde en cuanto termina,
+    aunque el mensaje ya se haya impreso por stderr; el `rc=1` real
+    dependía de que ALGÚN OTRO chequeo (una lista incompleta, por
+    ejemplo) tropezara con el mismo problema. Ahora las funciones sólo
+    imprimen su LISTA por stdout y señalan su ESTADO por código de
+    salida (nunca tocan `fallo` ellas mismas); el llamador, fuera de
+    cualquier subshell (`if ! x="$(funcion ...)"; then fallo=1; fi`), es
+    quien pone `fallo=1`. Prueba dedicada
+    (`tests/test_verificar_arranque_instalado.py::test_directorio_ilegible_y_vacio_da_rc_1`)
+    que aísla el caso EXACTO donde el bug viejo se escondía (una ruta que
+    debería ser directorio y no lo es, pero que -- de poder leerse --
+    aportaría CERO archivos, así que ningún otro chequeo la delata) --
+    **verificado contra el código viejo antes de arreglar**: reintroducir
+    el patrón `fallo=1` dentro de la función hace fallar este test
+    (confirmado a mano, restaurado de inmediato).
+  - **BLOCK-1 (ronda 3, RECHAZO -- ya resuelto, no reabierto en la
+    ronda 4)**: la versión de la ronda 3 raspaba `systemctl cat` con
+    `grep '^# /'` y confundía una línea de COMENTARIO dentro de un
+    `.conf` (como la que tenía el propio `z-pythonpath.conf` del proxy)
+    con la cabecera real de systemd. `systemctl show -p` con propiedades
+    explícitas nunca imprime contenido, así que esto ya no puede pasar
+    por diseño; prueba dedicada que siembra esa línea exacta y confirma
+    que nunca cuenta como archivo de más.
   `tests/test_arranque_instalado.py` ejercita la forma del repo siempre
   (también en CI, sin necesitar el host de producción) y, sólo en el host
-  de producción (existe `/srv/jax-prod/jax` sí o sólo sí), corre el guion
-  de verdad y EXIGE 0 -- ya no hace skip si falta algo instalado (M3:
-  antes, un drop-in sin instalar en el host de producción real daba skip
-  silencioso en vez de rojo). `tests/test_verificar_arranque_instalado.py`
-  (ronda 3, MAJOR-3) prueba los dos modos: `RAIZ_PRUEBA` con los 5
-  intrusos reales (los 4 del auditor de la ronda 2 + uno nuevo en
-  `/run/systemd/system/service.d/`), y el modo de producción alimentando
-  un `systemctl` de mentira (`tests/fixtures/systemctl-falso-para-pruebas.sh`,
-  en el `PATH`, nunca instalado) que responde mal SÓLO para
-  `jax-las-manos.service` -- prueba que "cargado" y "disco" son chequeos
-  independientes sin tocar nunca `/etc`. Cableado al job
+  de producción, corre el guion de verdad y EXIGE 0 -- no hace skip si
+  falta algo instalado. `tests/test_verificar_arranque_instalado.py` (11
+  tests) prueba: `RAIZ_PRUEBA` con los 5 intrusos reales (los 4 del
+  auditor de la ronda 2 + uno nuevo en `/run/systemd/system/service.d/`,
+  ronda 4), el caso de MAJOR-A, BLOCK-1, y el modo de producción
+  alimentando un `systemctl` de mentira
+  (`tests/fixtures/systemctl-falso-para-pruebas.sh`) que sólo intercepta
+  la consulta CARGADA de `jax-las-manos.service` (nunca la de sólo
+  `FragmentPath`, para no ensuciar el lado disco) -- invocado con `sudo -n
+  env PATH=...` DIRECTO desde el test (no vía la variable de entorno
+  `RAIZ_PRUEBA`, que no sobreviviría el re-exec como root del guion si
+  éste tuviera que hacerlo de nuevo). Cableado al job
   `arranque-instalado-versionado` de `.github/workflows/policy.yml`.
-  **Hoy `test_verificar_arranque_instalado_da_cero_en_produccion` da ROJO
-  en hall9000** (que SÍ es el host de producción): faltan instalar los 3
-  `z-pythonpath.conf` nuevos de M1 (proxy, memory-worker, memory-synthesis)
-  -- esperado y reportado, no oculto; los instala la sesión principal.
 - **`ops/instalar-dropins-de-servicio.sh <unidad>.service.d|/ruta/absoluta
   <REPO> [DESTDIR]`**: lee `ops/manifiesto-arranque-instalado.tsv` y copia
   las filas que coincidan -- por prefijo de directorio de drop-ins, o por
@@ -692,7 +721,14 @@ la lista real):
   **Con `DESTDIR` vacío (instalación real) exige lo mismo que los otros
   dos instaladores** (ronda 3, MAJOR-2): `REPO` es `/srv/jax-prod/jax`,
   `master`, árbol limpio (mismo `-c safe.directory=...` + `sudo git status`
-  tratando cualquier stderr como fallo). Con `DESTDIR` puesto (pruebas) no
+  tratando cualquier stderr como fallo, y `--no-optional-locks` en las
+  tres invocaciones de `git` -- ronda 4, MINOR-2 -- en los tres
+  instaladores). **Un `DESTDIR` que RESUELVE a `/`** (vacío, o algo como
+  `/tmp/../`) se normaliza con `realpath -m` y se trata EXACTAMENTE como
+  "sin DESTDIR" (ronda 4, MINOR-1): sin esto, `"$DESTDIR$instalada"`
+  habría escrito sobre el `/etc` real de todos modos, pero saltándose los
+  frenos de REPO/master/limpio porque `[ -z "$DESTDIR" ]` daba falso con
+  algo que en los hechos apunta a la raíz. Con `DESTDIR` puesto (pruebas) no
   se exige nada de esto -- un `$REPO` de mentira en un test no tiene por
   qué ser `/srv/jax-prod/jax`.
   **`DESTDIR` (vacío por defecto) es el ÚNICO lugar de este árbol que lo

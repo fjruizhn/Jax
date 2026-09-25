@@ -17,12 +17,12 @@ set -euo pipefail
 # invocación (nunca en la config global), literal -- es la ruta que este
 # guion EXIGE más abajo, no una que se calcula después.
 RUTA_PRODUCCION=/srv/jax-prod/jax
-REPO="$(git -c safe.directory="$RUTA_PRODUCCION" -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
+REPO="$(git --no-optional-locks -c safe.directory="$RUTA_PRODUCCION" -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 if [ "$REPO" != "$RUTA_PRODUCCION" ]; then
   echo "instalar_registro_y_cerco.sh: este guion corre desde $REPO -- tiene que ser $RUTA_PRODUCCION. Abortando." >&2
   exit 1
 fi
-test "$(git -c safe.directory="$REPO" -C "$REPO" branch --show-current)" = master
+test "$(git --no-optional-locks -c safe.directory="$REPO" -C "$REPO" branch --show-current)" = master
 # MAJOR-3/ronda-2: faltaba el árbol LIMPIO -- una rama correcta con cambios
 # sin comitear (un experimento a medias, un archivo tocado a mano) también
 # es un checkout que no es fiable copiar a unidades de producción.
@@ -34,7 +34,7 @@ test "$(git -c safe.directory="$REPO" -C "$REPO" branch --show-current)" = maste
 # sólo en stderr, así que un `test -z "$(...)"` que sólo mirara stdout se
 # habría tragado el aviso. Acá CUALQUIER stderr cuenta como fallo.
 ARCHIVO_ERR_STATUS="$(mktemp)"
-SUCIO="$(sudo git -c safe.directory="$REPO" -C "$REPO" status --porcelain 2>"$ARCHIVO_ERR_STATUS")"
+SUCIO="$(sudo git --no-optional-locks -c safe.directory="$REPO" -C "$REPO" status --porcelain 2>"$ARCHIVO_ERR_STATUS")"
 ERR_STATUS="$(cat -- "$ARCHIVO_ERR_STATUS")"; rm -f -- "$ARCHIVO_ERR_STATUS"
 if [ -n "$ERR_STATUS" ]; then
   echo "instalar_registro_y_cerco.sh: git status avisó algo en $REPO (tratado como fallo): $ERR_STATUS" >&2

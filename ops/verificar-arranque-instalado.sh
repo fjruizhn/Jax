@@ -1,75 +1,86 @@
 #!/usr/bin/env bash
-# ops/verificar-arranque-instalado.sh
+# ops/verificar-arranque-instalado.sh [RAIZ_PRUEBA]
 #
-# Compara, archivo por archivo, la configuración de arranque de systemd que
-# vive en el repo contra la que está instalada en /etc y /usr/local/sbin de
-# esta máquina. Sólo lectura: no escribe en /etc, no reinicia nada. En
-# producción corre `systemctl show` (lectura pura, sin efecto -- auditoría
-# escalón 3, ronda 3, BLOCK-1: se probó primero si el entorno lo permite, y
-# lo permite; si algún día no, la alternativa documentada es `systemctl cat`
-# tomando SÓLO líneas de cabecera reales, nunca contenido). Sale 0 ó no
+# Compara la configuración de arranque de systemd que vive en el repo
+# contra la que está instalada y CARGADA en esta máquina. Sólo lectura: no
+# escribe en /etc, no reinicia nada, no hace daemon-reload. Sale 0 ó no
 # según lo que hay, nunca cambia nada.
 #
-# Decisión de Fernando (2026-09-25, opción A): versionar en el repo el
-# arranque de systemd que hoy sólo vivía en /etc de hall9000, y añadir esta
-# verificación para que el drift entre repo e instalado se note solo.
+# RONDA 4 -- simplificado de raíz (no otro parche) después de 3 rondas de
+# auditoría sobre este mismo guion:
 #
-# El manifiesto (repo -> instalado) vive en un archivo aparte,
-# ops/manifiesto-arranque-instalado.tsv, para que este guion y
-# tests/test_arranque_instalado.py lean EXACTAMENTE la misma lista -- dos
-# listas que puedan divergir son peor que una sola que puede fallar.
+#   1. Corre ENTERO como root (`sudo -n`, re-exec al principio). Así
+#      desaparece de raíz el caso "un directorio que fruiz no puede
+#      listar" (ronda 3, MAJOR-2, resuelto ahí sólo para el chequeo de
+#      árbol limpio de los instaladores -- acá se elimina la causa, no el
+#      síntoma). Sin `sudo` disponible, o si `sudo -n` no alcanza: FALLA
+#      CERRADO (rc=2), nunca sigue como usuario sin privilegios fingiendo
+#      que pudo revisar todo (medido: `systemd-delta` sin root ve 15
+#      líneas contra 48 con root en esta misma máquina -- sin root, este
+#      guion mentiría en verde por lo que no pudo ver).
+#   2. Disco: la verdad la da `systemd-delta`, no una enumeración a mano
+#      de directorios -- lee las 12 rutas de `systemd-analyze unit-paths`
+#      (incluidas system.control, transient, generator.early) Y la
+#      jerarquía de prefijos con guion, todo resuelto por systemd mismo.
+#      Más `systemctl show -p FragmentPath` para el fragmento BASE activo
+#      -- un fragmento servido desde system.control/transient en vez de
+#      /etc/systemd/system/<u> tiene que dar DIFERENCIA, y `systemd-delta`
+#      no resuelve por sí solo CUÁL fragmento está activo, sólo que hay
+#      varios con el mismo nombre.
+#   3. Cargado: `systemctl show -p FragmentPath -p DropInPaths
+#      -p NeedDaemonReload`, y se EXIGE `NeedDaemonReload=no` -- la señal
+#      real y estructurada de "lo cargado puede no reflejar el disco", en
+#      vez de rascar avisos de texto libre por stderr.
+#   4. MAJOR-A (ronda 4, RECHAZO de la ronda 3): NINGUNA función asigna
+#      `fallo=1` (variable del script principal) DESDE DENTRO de una
+#      sustitución de comando `$(...)` -- esa asignación vive en un
+#      SUBSHELL y se pierde en cuanto termina, aunque el mensaje ya se
+#      haya impreso por stderr. Las funciones ahora sólo hacen dos cosas:
+#      imprimen su LISTA por stdout, y señalan su ESTADO por código de
+#      salida (nunca tocan `fallo` ellas mismas) -- el LLAMADOR, fuera de
+#      cualquier subshell, es quien pone `fallo=1` mirando ese código
+#      (`if ! x="$(funcion ...)"; then fallo=1; fi`).
 #
-# Salida: 0 si TODO lo de abajo se cumple. Distinto de 0, con CADA
-# diferencia impresa, si no (y sigue revisando el resto -- MINOR-2: una
-# unidad que systemctl no puede mostrar no aborta el guion, sólo cuenta
-# como fallo):
+# El manifiesto (repo -> instalado) vive en ops/manifiesto-arranque-instalado.tsv,
+# para que este guion y tests/test_arranque_instalado.py lean EXACTAMENTE
+# la misma lista.
+#
+# Salida: 0 si TODO lo de abajo se cumple. Distinto de 0 (2 si no hay
+# root disponible; 1 en cualquier otro fallo), con CADA diferencia
+# impresa, si no -- y sigue revisando el resto (una unidad que
+# `systemctl`/`systemd-delta` no puedan resolver no aborta la corrida).
 #   1. cada archivo del manifiesto existe en el repo y en lo instalado, y
-#      son byte a byte idénticos (el guion .sh además con el bit ejecutable
-#      en los dos lados);
+#      son byte a byte idénticos (el guion .sh además con el bit
+#      ejecutable en los dos lados);
 #   2. lo instalado NUNCA es un symlink, ni el archivo ni su directorio
-#      padre (un symlink podría apuntar a otra cosa sin que ningún cmp lo
-#      note si el destino coincidiera hoy y cambiara mañana);
+#      padre;
 #   3. propietario root:root en archivos y directorios, modo 644 en
-#      archivos (755 en el .sh) y 755 en los directorios que los contienen;
+#      archivos (755 en el .sh) y 755 en los directorios que los
+#      contienen;
 #   4. NINGÚN archivo de más participa del arranque de cada unidad del
-#      manifiesto -- en DOS sentidos independientes, los dos exigidos
-#      (auditoría escalón 3, ronda 3, MAJOR-1: `systemctl show`/`cat`
-#      reflejan lo CARGADO, no el disco -- un intruso recién copiado sin
-#      `daemon-reload` pasaría en verde si sólo se mirara eso):
-#      a) lo que hay REALMENTE en disco: las 12 rutas de
-#         `systemd-analyze unit-paths` (systemd 259, hall9000) × cada
-#         prefijo con guion de la unidad × el genérico de tipo -- NUNCA
-#         mirando contenido de archivo, sólo nombres (BLOCK-1: una versión
-#         anterior raspaba `systemctl cat` con grep '^# /' y confundía
-#         líneas de COMENTARIO dentro de un .conf, como
-#         "# /srv/jax-prod/jax/.venv/bin/python (el mismo intérprete...)",
-#         con la cabecera real que antepone systemd -- eso ya no puede
-#         pasar: esta enumeración no lee contenido de ningún archivo);
-#      b) lo que systemd tiene CARGADO: `systemctl show -p FragmentPath
-#         -p DropInPaths --value <unidad>` (lectura pura). Si systemctl
-#         avisa algo por stderr (p.ej. "changed on disk"), NO se descarta:
-#         cuenta como fallo.
+#      manifiesto (disco vía `systemd-delta` + fragmento vía `systemctl
+#      show`), y lo que systemd tiene CARGADO coincide (`systemctl show`)
+#      con `NeedDaemonReload=no`.
 set -euo pipefail
-# LC_ALL=C: rutas de archivo se comparan byte a byte, no con reglas de
-# colación de es_ES/en_US -- sin esto, `sort -u`/`comm` bajo un locale
-# UTF-8 pueden desacordar sobre qué es "orden" y `comm` se niega a
-# comparar ("input is not in sorted order"), aunque para un ojo humano
-# las dos listas se vean ordenadas.
 export LC_ALL=C
+
+RAIZ_PRUEBA="${1:-}"
+
+# --- 1) Corre ENTERO como root, sólo lectura -----------------------------
+if [ "$(id -u)" -ne 0 ]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "verificar-arranque-instalado: no hay sudo disponible -- no se puede correr como root. Fallo cerrado." >&2
+    exit 2
+  fi
+  if ! sudo -n true 2>/dev/null; then
+    echo "verificar-arranque-instalado: sudo -n no alcanza (¿pide contraseña?) -- no se puede correr como root. Fallo cerrado." >&2
+    exit 2
+  fi
+  exec sudo -n "$0" "$RAIZ_PRUEBA"
+fi
 
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 MANIFIESTO="$REPO/ops/manifiesto-arranque-instalado.tsv"
-
-# RAIZ_PRUEBA: vacío por defecto -- SIN esto, ninguna línea de este guion
-# cambia, sigue leyendo /etc, /run, /usr/lib reales y consultando el
-# systemd real de esta máquina. Con RAIZ_PRUEBA puesto, la enumeración de
-# disco se corre contra un árbol de prueba bajo /tmp Y se DESACTIVA la
-# consulta a systemctl (no tendría sentido: systemctl sólo conoce el /etc
-# real, nunca un árbol de prueba) -- existe SÓLO para poder ejercitar la
-# lógica de este guion sin escribir NUNCA en el /etc real. No se documenta
-# en el manifiesto ni en el runbook de instalación: nadie lo usa para
-# instalar, sólo para probar este guion antes de confiar en él.
-RAIZ_PRUEBA="${RAIZ_PRUEBA:-}"
 
 [ -f "$MANIFIESTO" ] || {
   echo "verificar-arranque-instalado: no se encontró el manifiesto: $MANIFIESTO" >&2
@@ -81,8 +92,9 @@ revisados=0
 
 verificar_propietario_y_modo() {
   # $1 = ruta real a stat-ear (con RAIZ_PRUEBA si aplica), $2 = ruta a
-  # mostrar en los mensajes (siempre la de producción, nunca la de prueba),
-  # $3 = "1" si es el .sh (755), si no 644.
+  # mostrar en los mensajes (siempre la de producción), $3 = "1" si es el
+  # .sh (755), si no 644. Llamada DIRECTA (nunca dentro de $(...)): puede
+  # tocar `fallo` ella misma sin violar MAJOR-A.
   local real="$1" mostrar="$2" es_sh="$3" propietario grupo modo esperado
   read -r propietario grupo modo < <(stat -c '%U %G %a' "$real" 2>/dev/null) || {
     echo "NO SE PUDO LEER propietario/modo: $mostrar" >&2
@@ -104,11 +116,7 @@ verificar_propietario_y_modo() {
 declare -A DIRS_PADRE_REVISADOS
 
 verificar_directorio_padre() {
-  # El directorio que CONTIENE cada archivo instalado tampoco puede ser un
-  # symlink ni tener dueño o modo raros -- root:root 755, siempre, para los
-  # directorios que este árbol versiona. $1 = ruta real del ARCHIVO
-  # instalado (con RAIZ_PRUEBA si aplica), $2 = ruta del archivo a mostrar
-  # (siempre la de producción).
+  # Llamada DIRECTA (nunca dentro de $(...)): igual criterio que arriba.
   local archivo_real="$1" archivo_mostrar="$2" dir_real dir_mostrar propietario grupo modo
   dir_real="$(dirname -- "$archivo_real")"
   dir_mostrar="$(dirname -- "$archivo_mostrar")"
@@ -186,10 +194,8 @@ if [ "$revisados" -eq 0 ]; then
   exit 1
 fi
 
-# --- Ningún archivo de más participa del arranque (M2) ------------------
-#
-# Las 12 rutas reales de `systemd-analyze unit-paths` en hall9000 (systemd
-# 259).
+# --- 4) Ningún archivo de más participa del arranque ---------------------
+
 UNIT_PATHS_SYSTEMD=(
   "/etc/systemd/system.control"
   "/run/systemd/system.control"
@@ -206,12 +212,10 @@ UNIT_PATHS_SYSTEMD=(
 )
 
 prefijos_de_guion() {
-  # systemd.unit(5): para una unidad "foo-bar-baz.service", los drop-ins se
-  # buscan en foo-bar-baz.service.d/, foo-bar-.service.d/ y foo-.service.d/
-  # -- el nombre completo y cada truncado después de un guion, de derecha a
-  # izquierda, sin bajar de un componente. $1 = nombre SIN sufijo (ej.
-  # jax-memory-worker). Imprime un prefijo por línea, empezando por el
-  # nombre completo.
+  # systemd.unit(5): para "foo-bar-baz.service", los drop-ins se buscan en
+  # foo-bar-baz.service.d/, foo-bar-.service.d/ y foo-.service.d/. $1 =
+  # nombre SIN sufijo. Imprime un prefijo por línea, del más largo al más
+  # corto. Función PURA: sólo stdout, nunca toca `fallo`.
   local base="$1" partes n i j prefijo
   IFS='-' read -ra partes <<< "$base"
   n=${#partes[@]}
@@ -226,17 +230,19 @@ prefijos_de_guion() {
 }
 
 enumerar_dropins_en_disco() {
-  # $1 = unidad, $2 = nombre sin sufijo, $3 = tipo (service|timer),
-  # $4 = raíz (RAIZ_PRUEBA o vacío = disco real). Imprime, una ruta de
-  # PRODUCCIÓN por línea (sin el prefijo de raíz), la unidad base si
-  # existe y cada *.conf real bajo cualquier directorio que systemd.unit(5)
-  # busque para esta unidad, en cualquiera de las 12 rutas. NUNCA mira
-  # contenido de archivo -- sólo existencia y nombre (BLOCK-1: por diseño,
-  # esto no puede confundir una línea de comentario con un archivo).
-  # Un directorio que EXISTE pero no se puede LISTAR (-r/-x) es un FALLO
-  # explícito, no un "no había nada que mirar".
+  # SÓLO PARA MODO DE PRUEBA (RAIZ_PRUEBA no vacío): enumeración a mano de
+  # las 12 rutas × prefijos con guion × genérico de tipo -- no hay systemd
+  # real al que preguntarle por un árbol de /tmp. En producción, este
+  # chequeo lo hace `obtener_reales_disco_produccion` (systemd-delta), no
+  # esta función.
+  #
+  # $1=unidad $2=nombre-sin-sufijo $3=tipo $4=raíz. FUNCIÓN PURA (MAJOR-A,
+  # ronda 4): imprime la lista por stdout, nunca toca `fallo`; devuelve 1
+  # si algún directorio existente no se pudo LISTAR (el llamador decide
+  # qué hacer con eso).
   local unidad="$1" nombre_sin_sufijo="$2" tipo="$3" raiz="$4"
   local prefijos=() dirs_relativos=() p rel ruta_base dir conf
+  local hubo_error=0
 
   mapfile -t prefijos < <(prefijos_de_guion "$nombre_sin_sufijo")
   for p in "${prefijos[@]}"; do
@@ -253,7 +259,7 @@ enumerar_dropins_en_disco() {
       if [ -e "$dir" ] || [ -L "$dir" ]; then
         if [ ! -d "$dir" ] || [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
           echo "NO SE PUDO LEER: $ruta_base/$rel (existe pero no es un directorio legible/listable)" >&2
-          fallo=1
+          hubo_error=1
           continue
         fi
         for conf in "$dir"/*.conf; do
@@ -263,39 +269,65 @@ enumerar_dropins_en_disco() {
       fi
     done
   done
+  return "$hubo_error"
+}
+
+obtener_reales_disco_produccion() {
+  # SÓLO PRODUCCIÓN (RAIZ_PRUEBA vacío). La verdad la da systemd mismo:
+  # `systemctl show -p FragmentPath` para el fragmento BASE activo (si
+  # está servido desde system.control/transient en vez de
+  # /etc/systemd/system/<u>, esto no matchea el manifiesto -> DIFERENCIA,
+  # sin que `systemd-delta` tenga que resolverlo) + `systemd-delta` para
+  # los drop-ins reales (ya resolvió las 12 rutas y los prefijos con
+  # guion). FUNCIÓN PURA (MAJOR-A): stdout = lista, código de salida =
+  # estado, nunca toca `fallo`.
+  local unidad="$1" fragmento
+  if ! fragmento="$(systemctl show -p FragmentPath --value "$unidad" 2>&1)"; then
+    echo "SYSTEMCTL SHOW (FragmentPath) FALLÓ para $unidad: $fragmento" >&2
+    return 1
+  fi
+  if [ -z "$fragmento" ]; then
+    echo "systemctl show -p FragmentPath no devolvió nada para $unidad (¿no existe la unidad?)" >&2
+    return 1
+  fi
+  echo "$fragmento"
+  systemd-delta --no-pager --type=overridden,extended,redirected,masked,equivalent 2>/dev/null \
+    | grep -E "^\[EXTENDED\][[:space:]]+/etc/systemd/system/${unidad}[[:space:]]" \
+    | sed -E 's/^\[EXTENDED\][[:space:]]+[^[:space:]]+[[:space:]]+(->|→)[[:space:]]+//'
+  return 0
 }
 
 obtener_reales_cargado() {
-  # $1 = unidad. Imprime, una ruta de producción por línea, lo que systemd
-  # tiene CARGADO ahora mismo: FragmentPath + cada DropInPath
-  # (`systemctl show`, lectura pura, sin tocar contenido de ningún archivo
-  # -- inmune por diseño al BLOCK-1). Si systemctl avisa algo por stderr
-  # (p.ej. unidad con archivos "changed on disk"), NO se descarta: se
-  # imprime y cuenta como fallo (MAJOR-1 -- es justo la señal de que esta
-  # vista puede no reflejar el disco). Si systemctl falla (unidad
-  # inexistente, systemctl roto), mensaje claro; la función no imprime
-  # nada más y el llamador sigue con la unidad siguiente (MINOR-2).
-  local unidad="$1" salida archivo_err err
+  # SÓLO PRODUCCIÓN. Lo que systemd tiene CARGADO ahora mismo:
+  # `systemctl show -p FragmentPath -p DropInPaths -p NeedDaemonReload`.
+  # `NeedDaemonReload` distinto de "no" es la señal REAL (no un aviso de
+  # texto libre por stderr) de que esta vista puede no reflejar el disco.
+  # FUNCIÓN PURA (MAJOR-A): stdout = lista, código de salida = estado,
+  # nunca toca `fallo`.
+  local unidad="$1" salida archivo_err err need_reload hubo_error=0
   archivo_err="$(mktemp)"
-  if ! salida="$(systemctl show -p FragmentPath -p DropInPaths --value "$unidad" 2>"$archivo_err")"; then
+  if ! salida="$(systemctl show -p FragmentPath -p DropInPaths -p NeedDaemonReload --value "$unidad" 2>"$archivo_err")"; then
     echo "SYSTEMCTL SHOW FALLÓ para $unidad (¿la unidad no existe?): $(cat -- "$archivo_err")" >&2
-    fallo=1
     rm -f -- "$archivo_err"
-    return
+    return 1
   fi
-  err="$(cat -- "$archivo_err")"
-  rm -f -- "$archivo_err"
+  err="$(cat -- "$archivo_err")"; rm -f -- "$archivo_err"
   if [ -n "$err" ]; then
     echo "AVISO DE SYSTEMCTL (no descartado) para $unidad: $err" >&2
-    fallo=1
+    hubo_error=1
+  fi
+  need_reload="$(printf '%s\n' "$salida" | sed -n '3p')"
+  if [ "$need_reload" != no ]; then
+    echo "NeedDaemonReload=$need_reload para $unidad -- lo cargado por systemd puede no reflejar el disco" >&2
+    hubo_error=1
   fi
   printf '%s\n' "$salida" | sed -n '1p'
   printf '%s\n' "$salida" | sed -n '2p' | tr ' ' '\n' | sed '/^$/d'
+  return "$hubo_error"
 }
 
 reportar_diferencia() {
-  # $1 = unidad, $2 = origen ("disco" o "cargado por systemd"),
-  # $3 = esperados (multilínea), $4 = reales (multilínea).
+  # Llamada DIRECTA: puede tocar `fallo`.
   local unidad="$1" origen="$2" esperados="$3" reales="$4" sobran faltan
   sobran="$(comm -13 <(printf '%s\n' "$esperados") <(printf '%s\n' "$reales"))"
   faltan="$(comm -23 <(printf '%s\n' "$esperados") <(printf '%s\n' "$reales"))"
@@ -308,6 +340,7 @@ reportar_diferencia() {
     echo "  el manifiesto los pide y NO participan del arranque:" >&2
     while IFS= read -r x; do echo "    $x" >&2; done <<< "$faltan"
   fi
+  fallo=1
 }
 
 unidades="$(awk -F'\t' '$2 ~ /^\/etc\/systemd\/system\/[^\/]+\.(service|timer)$/ { n=split($2,a,"/"); print a[n] }' "$MANIFIESTO" | sort -u)"
@@ -320,22 +353,28 @@ while IFS= read -r unidad; do
   esperados="$( { echo "/etc/systemd/system/$unidad"; awk -F'\t' -v pref="/etc/systemd/system/$unidad.d/" \
     'index($2, pref) == 1 {print $2}' "$MANIFIESTO"; } | sort -u)"
 
-  # a) Lo que hay REALMENTE en disco -- siempre, con RAIZ_PRUEBA (vacío en
-  #    producción = disco real; un árbol de prueba en tests).
-  reales_disco="$(enumerar_dropins_en_disco "$unidad" "$nombre_sin_sufijo" "$tipo" "$RAIZ_PRUEBA" | sort -u)"
+  # a) Disco.
+  if [ -z "$RAIZ_PRUEBA" ]; then
+    if ! reales_disco="$(obtener_reales_disco_produccion "$unidad" | sort -u)"; then
+      fallo=1
+    fi
+  else
+    if ! reales_disco="$(enumerar_dropins_en_disco "$unidad" "$nombre_sin_sufijo" "$tipo" "$RAIZ_PRUEBA" | sort -u)"; then
+      fallo=1
+    fi
+  fi
   if [ "$reales_disco" != "$esperados" ]; then
     reportar_diferencia "$unidad" "disco" "$esperados" "$reales_disco"
-    fallo=1
   fi
 
-  # b) Lo que systemd tiene CARGADO -- SÓLO en producción (RAIZ_PRUEBA
-  #    vacío): preguntarle a systemctl por un árbol de prueba no tendría
-  #    sentido, sólo conoce el /etc real de esta máquina.
+  # b) Cargado -- sólo producción (preguntarle a systemctl por un árbol de
+  #    prueba no tendría sentido).
   if [ -z "$RAIZ_PRUEBA" ]; then
-    reales_cargado="$(obtener_reales_cargado "$unidad" | sort -u)"
+    if ! reales_cargado="$(obtener_reales_cargado "$unidad" | sort -u)"; then
+      fallo=1
+    fi
     if [ "$reales_cargado" != "$esperados" ]; then
       reportar_diferencia "$unidad" "cargado por systemd" "$esperados" "$reales_cargado"
-      fallo=1
     fi
   fi
 done <<< "$unidades"

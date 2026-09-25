@@ -52,18 +52,31 @@ DESTDIR="${3:-}"
 # puede listar -- CUALQUIER stderr cuenta como fallo, no sólo lo que
 # aparece en stdout.
 RUTA_PRODUCCION=/srv/jax-prod/jax
+
+# MINOR-1 (ronda 4): un DESTDIR que RESUELVE a "/" (p.ej. "", ".." desde
+# la raíz, o un symlink que apunte ahí) tiene que tratarse EXACTAMENTE
+# como "sin DESTDIR" -- si no, "$DESTDIR$instalada" más abajo termina
+# escribiendo sobre el /etc real de todos modos, pero saltándose los
+# frenos de esta sección porque `[ -z "$DESTDIR" ]` daba falso con algo
+# que en los hechos apunta a la raíz. `realpath -m` no exige que exista
+# (DESTDIR de prueba típicamente no existe todavía).
+if [ -n "$DESTDIR" ]; then
+  DESTDIR="$(realpath -m -- "$DESTDIR")"
+  [ "$DESTDIR" = / ] && DESTDIR=""
+fi
+
 if [ -z "$DESTDIR" ]; then
   if [ "$REPO" != "$RUTA_PRODUCCION" ]; then
     echo "instalar-dropins-de-servicio: instalación real (sin DESTDIR) pero REPO=$REPO -- tiene que ser $RUTA_PRODUCCION. Abortando." >&2
     exit 1
   fi
-  rama="$(git -c safe.directory="$RUTA_PRODUCCION" -C "$REPO" branch --show-current)"
+  rama="$(git --no-optional-locks -c safe.directory="$RUTA_PRODUCCION" -C "$REPO" branch --show-current)"
   [ "$rama" = master ] || {
     echo "instalar-dropins-de-servicio: $REPO está en la rama '$rama', no en master. Abortando." >&2
     exit 1
   }
   archivo_err_status="$(mktemp)"
-  sucio="$(sudo git -c safe.directory="$RUTA_PRODUCCION" -C "$REPO" status --porcelain 2>"$archivo_err_status")"
+  sucio="$(sudo git --no-optional-locks -c safe.directory="$RUTA_PRODUCCION" -C "$REPO" status --porcelain 2>"$archivo_err_status")"
   err_status="$(cat -- "$archivo_err_status")"; rm -f -- "$archivo_err_status"
   if [ -n "$err_status" ]; then
     echo "instalar-dropins-de-servicio: git status avisó algo en $REPO (tratado como fallo): $err_status" >&2

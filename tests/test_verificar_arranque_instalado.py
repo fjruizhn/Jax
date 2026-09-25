@@ -90,8 +90,11 @@ def _sembrar_intruso(ruta: Path, contenido: str = "[Service]\n") -> None:
 
 
 def _correr(tmp_path: Path) -> subprocess.CompletedProcess:
-    entorno = dict(os.environ, RAIZ_PRUEBA=str(tmp_path))
-    return subprocess.run([str(SCRIPT)], capture_output=True, text=True, env=entorno)
+    """RAIZ_PRUEBA ahora es un ARGUMENTO posicional, no una variable de
+    entorno (ronda 4): el guion se re-ejecuta a sí mismo como root vía
+    `sudo -n`, y `sudo` resetea el entorno a `secure_path` -- una variable
+    de entorno puesta ACÁ no sobreviviría ese salto, un argumento sí."""
+    return subprocess.run([str(SCRIPT), str(tmp_path)], capture_output=True, text=True)
 
 
 def test_arbol_completo_da_cero(tmp_path):
@@ -131,6 +134,40 @@ def test_intruso_con_nombre_no_conf_no_cuenta(tmp_path):
     assert resultado.returncode == 0, resultado.stderr
 
 
+def test_directorio_ilegible_y_vacio_da_rc_1(tmp_path):
+    """MAJOR-A (ronda 4, RECHAZO de la ronda 3): la ronda 3 hacía
+    `fallo=1` DESDE DENTRO de una función invocada vía `$(...)` -- esa
+    asignación vive en un SUBSHELL (la sustitución de comando) y se pierde
+    en cuanto termina, así que el `rc=1` real dependía de que ALGÚN OTRO
+    chequeo (una lista incompleta, por ejemplo) tropezara con el mismo
+    problema. Acá se aísla el caso EXACTO donde eso no pasa: una ruta de
+    la enumeración que DEBERÍA ser un directorio de drop-ins pero es un
+    ARCHIVO regular -- no se puede LISTAR (`[ -d ]` da falso), pero si
+    pudiera leerse igual no aportaría ningún .conf (no es un directorio).
+    NOTA: `chmod 000` NO sirve para esto -- el guion corre como root desde
+    la ronda 4, y root ignora los bits de permiso de un directorio (los
+    probé: un directorio 000 root:root sigue siendo listable por root).
+    Un archivo donde se espera un directorio SÍ falla para cualquiera,
+    root incluido. Ni con la ruta "legible" ni con esta cambia el
+    CONTENIDO de "lo real" (cero archivos en los dos casos) -- la ÚNICA
+    señal de que algo anda mal es el mensaje "NO SE PUDO LEER" y el código
+    de salida de la función que lo emite. Si alguien reintroduce el patrón
+    `fallo=1` dentro de `$(...)`, este test pasa de rc=1 a rc=0 y falla."""
+    _construir_arbol_completo(tmp_path)
+    # Ruta real de la enumeración (jax-.service.d/ es el prefijo con guion
+    # común a las 4 unidades .service) bajo una de las 12 rutas -- un
+    # ARCHIVO, no un directorio.
+    ruta = tmp_path / "run/systemd/generator/jax-.service.d"
+    subprocess.run(["sudo", "install", "-d", "-o", "root", "-g", "root", "-m", "0755", str(ruta.parent)], check=True)
+    subprocess.run(["sudo", "install", "-o", "root", "-g", "root", "-m", "0644", "/dev/null", str(ruta)], check=True)
+    resultado = _correr(tmp_path)
+    assert resultado.returncode == 1, (
+        f"una ruta que debería ser directorio y es un archivo tiene que dar rc=1 -- "
+        f"si esto da 0, el fallo se perdió en un subshell (MAJOR-A). stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
+    )
+    assert "NO SE PUDO LEER" in resultado.stderr, resultado.stderr
+
+
 def test_block1_comentario_con_hash_slash_en_el_contenido_no_cuenta(tmp_path):
     """BLOCK-1 (ronda 3): el bug real -- una línea de COMENTARIO dentro de
     un .conf legítimo que empieza con "# /" (como
@@ -162,20 +199,27 @@ def test_block1_comentario_con_hash_slash_en_el_contenido_no_cuenta(tmp_path):
 
 def _correr_con_systemctl_falso(modo: str) -> subprocess.CompletedProcess:
     """Antepone al PATH un `systemctl` de mentira (tests/fixtures/) que
-    sólo intercepta `show ... jax-las-manos.service` -- delega al real
-    para todo lo demás, incluida la enumeración de disco (que ni siquiera
-    pasa por systemctl). Nunca escribe en /etc. RAIZ_PRUEBA deliberadamente
-    AUSENTE: es el único camino donde se consulta systemctl."""
+    sólo intercepta la consulta CARGADA (`-p ... NeedDaemonReload`) de
+    jax-las-manos.service -- delega al real para todo lo demás, incluida
+    la consulta de sólo-FragmentPath del lado DISCO. Nunca escribe en /etc.
+
+    Ronda 4: el guion se re-ejecuta a sí mismo como root vía `sudo -n`, y
+    ESE `sudo` resetea el PATH a `secure_path` (confirmado en hall9000) --
+    un PATH de mentira puesto en el entorno de ESTE proceso no
+    sobreviviría ese salto. Por eso acá se invoca `sudo -n env PATH=...`
+    DIRECTAMENTE: el guion arranca ya como root (UID 0) y salta su propio
+    re-exec, así que el PATH que `sudo -n env` fija sí llega intacto a la
+    corrida real."""
     with tempfile.TemporaryDirectory() as d:
         bin_falso = Path(d)
         enlace = bin_falso / "systemctl"
         shutil.copy(SYSTEMCTL_FALSO, enlace)
         enlace.chmod(0o755)
-        entorno = dict(os.environ)
-        entorno["PATH"] = f"{bin_falso}:{entorno['PATH']}"
-        entorno["SYSTEMCTL_FALSO_MODO"] = modo
-        entorno.pop("RAIZ_PRUEBA", None)
-        return subprocess.run([str(SCRIPT)], capture_output=True, text=True, env=entorno)
+        path_con_falso = f"{bin_falso}:{os.environ.get('PATH', '')}"
+        return subprocess.run(
+            ["sudo", "-n", "env", f"PATH={path_con_falso}", f"SYSTEMCTL_FALSO_MODO={modo}", str(SCRIPT), ""],
+            capture_output=True, text=True,
+        )
 
 
 @pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
@@ -200,12 +244,26 @@ def test_systemctl_que_falla_dice_algo_claro_y_sigue_con_las_demas():
     """MINOR-2 (ronda 3): si `systemctl show` falla para una unidad
     (inexistente, systemctl roto), el guion dice algo claro Y sigue
     revisando el resto -- no aborta toda la corrida por una sola unidad.
-    Las otras 3 unidades (memory-worker, memory-synthesis, proxy) siguen
-    apareciendo en la salida con sus propios resultados."""
+
+    Las otras unidades del manifiesto están instaladas correctamente de
+    verdad en esta máquina -- así que "siguió revisándolas" NO se prueba
+    buscando sus nombres en stderr (si están bien, no imprimen nada, punto
+    y punto es la señal correcta, no la ausencia de nombre). La prueba
+    real es que el guion llega a su ÚLTIMA línea (el resumen final, que
+    sólo se imprime DESPUÉS del bucle completo sobre las 6 unidades) --
+    si hubiera abortado a mitad de camino (el bug que MAJOR-A de la ronda
+    3 dejó posible con `fallo=1` perdido en un subshell), esa línea final
+    nunca aparecería."""
     resultado = _correr_con_systemctl_falso("falla")
     assert resultado.returncode != 0
     assert "SYSTEMCTL SHOW FALLÓ para jax-las-manos.service" in resultado.stderr, resultado.stderr
-    # Siguió: las otras unidades del manifiesto también se mencionan (no se
-    # cortó la corrida en la primera que falló).
-    for otra in ("jax-memory-worker.service", "jax-memory-synthesis.service", "jax-ejecutor-proxy.service"):
-        assert otra in resultado.stderr, f"{otra} no aparece -- ¿el guion abortó antes de llegar a ella?"
+    assert "verificar-arranque-instalado: hay diferencias entre el repo y lo instalado" in resultado.stderr, (
+        f"no se ve la línea final del guion -- ¿abortó a mitad de la corrida?: {resultado.stderr!r}"
+    )
+    # Ninguna OTRA unidad reportó una DIFERENCIA propia (todas están bien
+    # instaladas) -- confirma que el único problema sembrado fue el de
+    # jax-las-manos.service, no que el guion se haya salteado al resto sin
+    # revisarlas.
+    lineas_diferencia = [l for l in resultado.stderr.splitlines() if l.startswith("DIFERENCIA")]
+    for linea in lineas_diferencia:
+        assert "jax-las-manos.service" in linea, f"unidad inesperada con DIFERENCIA propia: {linea!r}"

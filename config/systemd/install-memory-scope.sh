@@ -20,7 +20,7 @@ ENVF=/etc/jax/.env
 # safe.directory declarada tampoco aplicaba a donde sea que $0 vivía, y el
 # chequeo de abajo aborta igual.
 RUTA_PRODUCCION=/srv/jax-prod/jax
-REPO="$(git -c safe.directory="$RUTA_PRODUCCION" -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
+REPO="$(git --no-optional-locks -c safe.directory="$RUTA_PRODUCCION" -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
 if [ "$REPO" != "$RUTA_PRODUCCION" ]; then
   echo "install-memory-scope.sh: este guion corre desde $REPO -- tiene que ser $RUTA_PRODUCCION (el checkout de producción), no un checkout de trabajo. Abortando." >&2
   exit 1

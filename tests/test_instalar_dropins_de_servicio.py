@@ -155,3 +155,21 @@ def test_todo_bajo_destdir_nunca_fuera(tmp_path):
     instalados = list(tmp_path.rglob("*"))
     archivos = [p for p in instalados if p.is_file()]
     assert len(archivos) == 13, f"se esperaban 13 archivos instalados (12 drop-ins + el guion), hubo {len(archivos)}: {archivos}"
+
+
+@pytest.mark.parametrize("destdir_literal", ["/", "", "/tmp/../"])
+def test_destdir_que_resuelve_a_raiz_se_trata_como_instalacion_real(destdir_literal):
+    """MINOR-1 (ronda 4): un DESTDIR que resuelve a "/" (vacío, o algo como
+    "/tmp/../") tiene que tratarse EXACTAMENTE como si no hubiera DESTDIR
+    -- si no, "$DESTDIR$instalada" compone la ruta real de /etc de todos
+    modos, pero se saltea los frenos de REPO/master/limpio porque
+    `[ -z "$DESTDIR" ]` da falso con algo que en los hechos apunta a la
+    raíz. Se prueba desde este worktree (no es /srv/jax-prod/jax) --
+    tiene que abortar con el mensaje de "instalación real", nunca
+    proceder silenciosamente como si fuera un DESTDIR de prueba."""
+    resultado = subprocess.run(
+        [str(SCRIPT), "jax-las-manos.service.d", str(ROOT), destdir_literal],
+        capture_output=True, text=True,
+    )
+    assert resultado.returncode != 0
+    assert "instalación real (sin DESTDIR)" in resultado.stderr, resultado.stderr
