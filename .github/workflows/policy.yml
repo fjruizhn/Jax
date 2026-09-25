@@ -1152,8 +1152,8 @@ jobs:
       - name: Piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q tests/test_rutas_de_produccion.py tests/test_rutas_de_produccion_verificador.py 2>&1 | tee /tmp/rutas_de_produccion
-          grep -qE "^45 passed, 1 skipped" /tmp/rutas_de_produccion || {
-            echo "PISO ROTO: se esperaban 45 tests CORRIDOS (no skipeados) y exactamente 1 skipped (test_verificar_rutas_de_produccion_da_cero_en_produccion, que solo corre en el host de produccion de jax). Si esto da '46 passed', este runner tiene /srv/jax-prod/jax -- no es el runner esperado, revisar antes de asumir que el piso subio."; exit 1; }
+          grep -qE "^47 passed, 4 skipped" /tmp/rutas_de_produccion || {
+            echo "PISO ROTO: se esperaban 47 tests CORRIDOS (no skipeados) y exactamente 4 skipped (los que sólo corren en el host de producción de jax: test_verificar_rutas_de_produccion_da_cero_en_produccion y tres de jaxsvc_puede_leer/escribir contra el comando real, ronda 3 de la auditoría). Si el número de skipped baja, revisar antes de asumir que el piso subió -- este runner podría tener /srv/jax-prod/jax."; exit 1; }
 
   # Sello de invalidacion cross-proceso del cache de facet_resolver (Q3,
   # 2026-09-01). El job de al lado (facet-resolver-sync) verifica que los dos

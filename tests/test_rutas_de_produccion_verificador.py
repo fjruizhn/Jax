@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ops"))
 
 from rutas_de_produccion_verificador import (  # noqa: E402
     EXCEPCIONES_FASE_A,
+    EXISTENCIA_OPCIONAL,
     KEYS_EN_ALCANCE,
     PERMITIDOS_POR_CLAVE,
     ValorAmbiguo,
@@ -291,20 +292,33 @@ def test_caso_6_workspace_dir_bajo_home_es_excepcion_declarada_no_pasa_por_accid
         "funcionando")
 
 
-def test_jax_kill_switch_path_es_excepcion_declarada_por_existencia_opcional():
-    """Hallazgo real de esta ronda: JAX_KILL_SWITCH_PATH sólo existe cuando
+def test_jax_kill_switch_path_ausente_pasa_pero_bajo_home_falla():
+    """Hallazgo real de la ronda 2: JAX_KILL_SWITCH_PATH sólo existe cuando
     JAX está pausado -- `realpath -e` fallando (ruta ausente) es el estado
-    SANO por defecto. Sin esta excepción, el endurecimiento genérico de
-    "realpath fallido -> FALLA" convertiría el estado normal en una falsa
-    alarma permanente."""
-    assert "JAX_KILL_SWITCH_PATH" in EXCEPCIONES_FASE_A
-    entorno = dict(ENTORNO_SANO)
-    entorno["JAX_KILL_SWITCH_PATH"] = ["/etc/jax/interruptor/PAUSE"]
+    SANO por defecto. Ronda 3, MINOR-6d: la excepción es MÁS ANGOSTA de lo
+    que parecía -- exime sólo la existencia, no la ubicación. Si esta clave
+    apuntara bajo /home/, seguiría siendo un problema real (el freno de
+    emergencia no debería vivir en el home de un usuario)."""
+    assert "JAX_KILL_SWITCH_PATH" in EXISTENCIA_OPCIONAL
+    assert "JAX_KILL_SWITCH_PATH" not in EXCEPCIONES_FASE_A
+
+    entorno_ausente = dict(ENTORNO_SANO)
+    entorno_ausente["JAX_KILL_SWITCH_PATH"] = ["/etc/jax/interruptor/PAUSE"]
 
     def resolver_ausente(ruta):
         return None if ruta == "/etc/jax/interruptor/PAUSE" else ruta
-    resultado = verificar_fase_a(entorno, resolver_ausente)
+    resultado = verificar_fase_a(entorno_ausente, resolver_ausente)
     assert resultado.ok, resultado.problemas
+
+    entorno_bajo_home = dict(ENTORNO_SANO)
+    entorno_bajo_home["JAX_KILL_SWITCH_PATH"] = ["/home/fruiz/PAUSE"]
+
+    def resolver_ausente_bajo_home(ruta):
+        return None if ruta == "/home/fruiz/PAUSE" else ruta
+    resultado_home = verificar_fase_a(entorno_bajo_home, resolver_ausente_bajo_home)
+    assert not resultado_home.ok, "JAX_KILL_SWITCH_PATH bajo /home/ (aunque ausente) tendria que fallar"
+    motivo = next(h.motivo for h in resultado_home.problemas if h.clave == "JAX_KILL_SWITCH_PATH")
+    assert "/home/" in motivo
 
 
 def test_cualquier_otra_ruta_bajo_home_sin_excepcion_falla():
@@ -417,14 +431,32 @@ def test_fase_b_pasa_si_jaxsvc_puede_todo():
 
 # --- Fase C: verdad efectiva contra /proc/<MainPID>/environ -----------------
 
-def test_fase_c_sin_pid_se_reporta_como_aviso_no_como_problema():
+def test_fase_c_sin_ningun_servicio_revisado_es_problema():
+    """Ronda 3, MINOR-1: antes, con los DOS servicios sin PID,
+    `resultado.problemas` quedaba vacío -- "todo bien" por accidente, sin
+    haber verificado NADA. Ahora es un problema explícito."""
     resultado = verificar_fase_c(
         _resolver_identidad(),
         obtener_pid=lambda servicio: None,
     )
-    assert not resultado.problemas
+    assert resultado.problemas, "sin ningun servicio revisado, Fase C tiene que fallar, no dar verde por vacio"
     assert set(resultado.servicios_sin_pid) == {"jax-las-manos", "jax-platform"}
     assert resultado.servicios_revisados == []
+
+
+def test_fase_c_un_servicio_sin_pid_pero_el_otro_sano_no_es_problema_por_eso_solo():
+    """Con AL MENOS UN servicio revisado de verdad, que el otro esté
+    inactivo es un aviso (servicios_sin_pid), no una falla por sí sola --
+    distinto del caso "los dos sin PID" de arriba."""
+    environ_sano = {clave: valores[0] for clave, valores in ENTORNO_SANO.items()}
+    resultado = verificar_fase_c(
+        _resolver_identidad(),
+        obtener_pid=lambda servicio: "123" if servicio == "jax-las-manos" else None,
+        leer_environ=lambda pid: dict(environ_sano),
+    )
+    assert not resultado.problemas, resultado.problemas
+    assert resultado.servicios_revisados == ["jax-las-manos"]
+    assert resultado.servicios_sin_pid == ["jax-platform"]
 
 
 def test_fase_c_entorno_vivo_sano_pasa():
@@ -546,3 +578,66 @@ def test_verificar_de_punta_a_punta_un_error_de_parseo_tira_todo_abajo():
         mod.verificar_fase_c = original_fase_c
     assert not ok
     assert "línea 4" in reporte
+
+
+# --- Ronda 3: DEFECTO real -- jaxsvc_puede_leer/escribir usaban `test -- `,
+# que `test` no soporta (a diferencia de `realpath`, que sí). Los tests de
+# arriba de Fase B sólo ejercitaban un `ejecutar` de mentira -- nunca el
+# comando real -- así que nadie lo vio hasta correr `--verificar` de verdad
+# contra producción (Paso 8.4 del runbook). Estos SÍ corren el comando real.
+# ---------------------------------------------------------------------------
+
+RAIZ_PRODUCCION = "/srv/jax-prod/jax"
+
+
+def _motivo_de_skip_fuera_de_produccion() -> str | None:
+    if not Path(RAIZ_PRODUCCION).is_dir():
+        return f"esta máquina no tiene {RAIZ_PRODUCCION} -- no es el host de producción de jax"
+    return None
+
+
+def test_jaxsvc_puede_leer_contra_el_comando_real_no_el_mock():
+    """El caso que habría atrapado el DEFECTO de ronda 3: SIN mock,
+    contra una ruta que jaxsvc SÍ puede leer de verdad
+    (config.toml del checkout de despliegue, jaxsvc:jaxsvc 664). Con el
+    `--` viejo, `sudo -u jaxsvc test -r -- <ruta>` daba rc=2 (error de uso
+    de `test`, no una respuesta real) y esta función devolvía `False`
+    incondicionalmente -- este test habría fallado con el código viejo."""
+    motivo = _motivo_de_skip_fuera_de_produccion()
+    if motivo:
+        pytest.skip(motivo)
+    from rutas_de_produccion_verificador import jaxsvc_puede_leer
+    assert jaxsvc_puede_leer("/srv/jax-prod/jax/config/config.toml") is True
+
+
+def test_jaxsvc_puede_escribir_contra_el_comando_real_no_el_mock():
+    motivo = _motivo_de_skip_fuera_de_produccion()
+    if motivo:
+        pytest.skip(motivo)
+    from rutas_de_produccion_verificador import jaxsvc_puede_escribir
+    # /srv/jax-data/repo/documents: jaxsvc escribe ahí de verdad
+    # (jacobs/executor.py._persist_step_to_repo) -- si esto no existe,
+    # el corte de producción de esta tarea no llegó a correr todavía.
+    ruta = "/srv/jax-data/repo/documents"
+    if not Path(ruta).is_dir():
+        pytest.skip(f"{ruta} no existe -- el corte de producción no corrió")
+    assert jaxsvc_puede_escribir(ruta) is True
+
+
+def test_jaxsvc_puede_leer_rechaza_ruta_no_absoluta_sin_necesitar_produccion():
+    """La defensa que reemplaza a `--`: sin necesitar sudo ni jaxsvc, una
+    ruta relativa (que nunca debería llegar acá, pero por si acaso) se
+    rechaza ANTES de construir el comando de `test`."""
+    from rutas_de_produccion_verificador import jaxsvc_puede_leer
+    with pytest.raises(ValueError):
+        jaxsvc_puede_leer("ruta/relativa")
+
+
+def test_jaxsvc_puede_leer_da_false_para_ruta_absoluta_inexistente():
+    """Sin mock: una ruta absoluta que no existe da False de verdad (no un
+    error de uso de `test` disfrazado de False)."""
+    motivo = _motivo_de_skip_fuera_de_produccion()
+    if motivo:
+        pytest.skip(motivo)
+    from rutas_de_produccion_verificador import jaxsvc_puede_leer
+    assert jaxsvc_puede_leer("/no/existe/de/verdad/2026-09-25") is False

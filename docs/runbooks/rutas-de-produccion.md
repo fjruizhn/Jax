@@ -23,6 +23,61 @@ archivo dentro de un checkout que `git clean` necesita poder tocar.
 ejecutar esto contra producción (jerarquía de autoridad); este documento no
 lo sustituye.
 
+## EJECUTADO 2026-09-25 06:12-06:13 (Hyde)
+
+**El corte ya se hizo.** Pasos 2-9 de este runbook, commit `c42896b`
+(código en `/etc/jax/.env`, no un despliegue -- ver MAJOR-C: se cortó
+contra `bd10297`, ya desplegado). Resultado, evidencia literal:
+
+- `jax-las-manos` y `jax-platform`: `active` los dos.
+- `/health` (LAS MANOS) y `/api/health` (jax-platform): `200`/`200`.
+- `/proc/<MainPID>/environ` de los DOS servicios: las tres rutas nuevas
+  presentes (`/srv/jax-prod/jax/config/config.toml`,
+  `/var/log/jax/las_manos/audit.jsonl`, `/srv/jax-data/repo`).
+- `JAX_REPO_BASE`: 64 archivos, sha256 idéntico origen/destino.
+- `JAX_AUDIT_LOG_PATH`: 1501 líneas, sha256 idéntico.
+- `chattr +i` puesto en la copia vieja de trabajo (Paso 9).
+- 0 errores en el journal de los dos servicios tras el arranque.
+
+**Ronda 3 de la auditoría de escalón 3 (ejecutada DESPUÉS del corte, sobre
+el resultado real): APROBADO, 6 MINOR.** Uno de ellos, encontrado
+ejecutando el Paso 8.4 de verdad contra esta producción ya cortada, era un
+**DEFECTO real en `ops/rutas_de_produccion_verificador.py`**, no en el
+corte en sí: `jaxsvc_puede_leer`/`jaxsvc_puede_escribir` armaban `sudo -n -u
+jaxsvc test -r -- <ruta>` -- `test` (a diferencia de `realpath`) NO soporta
+`--` como fin de opciones; con 3 argumentos da SIEMPRE `returncode=2` (error
+de uso), nunca una respuesta real. Fase B reportaba "jaxsvc no puede
+LEER/ESCRIBIR" para las tres claves en alcance INCONDICIONALMENTE, aunque
+el corte estuviera perfecto -- un falso negativo del verificador, no un
+problema de producción. Confirmado en vivo:
+
+```
+$ sudo -u jaxsvc test -r -- /srv/jax-prod/jax/config/config.toml; echo $?
+2
+$ sudo -u jaxsvc test -r /srv/jax-prod/jax/config/config.toml; echo $?
+0
+```
+
+Corregido (quitar `--`, exigir ruta absoluta como defensa en su lugar) y
+re-verificado contra la producción YA CORTADA:
+
+```
+$ ./ops/rutas-de-produccion.sh --verificar
+rutas-de-produccion: todas las rutas de producción en alcance están fuera
+de /home, jaxsvc tiene el acceso que necesita, y el entorno VIVO de 2
+servicio(s) coincide (7 claves de ruta revisadas)
+$ echo $?
+0
+```
+
+Los otros 5 MINOR de la ronda 3 (Fase C no falla ante 0 servicios
+revisados, guardia previa en R2, marca de Paso 4 completo para R3, motivo
+corregido de Paso 9, JWT fuera de `argv` en 8.3, `-c safe.directory` y
+`sudo cmp` en el propio texto del runbook) están aplicados en las
+secciones correspondientes de este documento, más abajo -- el documento
+completo queda actualizado para la PRÓXIMA vez que haga falta (reversión,
+u otro corte de esta naturaleza), no sólo como bitácora de lo ya hecho.
+
 ## Prerrequisito -- y la decisión de NO desplegar (MAJOR-C)
 
 **Este runbook NO exige mergear ni desplegar esta rama en
@@ -40,7 +95,11 @@ a este runbook resolver ni esperar.
 
 **Decisión (Hyde, con la evidencia de la auditoría):** el corte se hace
 contra el código YA DESPLEGADO (commit `bd10297`, verificado con
-`sudo git -C /srv/jax-prod/jax log -1`). Ese `server.py` resuelve
+`sudo git -c safe.directory=/srv/jax-prod/jax -C /srv/jax-prod/jax log -1`
+-- el `-c safe.directory=...` puesto así, inline, no persiste ningún config
+global; sin él, git rechaza el checkout con "dubious ownership" porque
+corre como root vía sudo sobre un directorio de otro dueño, verificado
+2026-09-25). Ese `server.py` resuelve
 `AUDIT_LOG_PATH` con `os.getenv("JAX_AUDIT_LOG_PATH", SERVER_CFG["audit_log"])`
 -- todavía sin el fail-closed de esta rama, pero eso no hace falta para el
 corte: con la variable PUESTA (que es exactamente lo que este runbook
@@ -196,13 +255,14 @@ sudo cp -p /etc/jax/.env "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
 sudo chown root:root "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
 sudo chmod 600 "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}"
 
-TAM_ORIGEN="$(sudo stat -c%s /etc/jax/.env)"
-TAM_BACKUP="$(sudo stat -c%s "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}")"
-MODO_BACKUP="$(sudo stat -c%a /etc/jax/.env.backup-pre-rutas-de-produccion-${TS})"
-if [ "$TAM_ORIGEN" = "$TAM_BACKUP" ] && [ "$MODO_BACKUP" = "600" ]; then
-  echo "Backup OK: mismo tamaño ($TAM_ORIGEN bytes), modo 600"
+# cmp byte a byte (ronda 3, MINOR): comparar tamaños es más débil -- dos
+# archivos distintos pueden coincidir en tamaño por casualidad. cmp -s
+# confirma que son el MISMO contenido, no sólo el mismo largo.
+MODO_BACKUP="$(sudo stat -c%a "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}")"
+if sudo cmp -s /etc/jax/.env "/etc/jax/.env.backup-pre-rutas-de-produccion-${TS}" && [ "$MODO_BACKUP" = "600" ]; then
+  echo "Backup OK: idéntico byte a byte, modo 600"
 else
-  echo "ABORTAR: backup no coincide (tamaño $TAM_BACKUP vs $TAM_ORIGEN, modo $MODO_BACKUP)"
+  echo "ABORTAR: backup no coincide byte a byte con el original, o el modo no es 600 (modo: $MODO_BACKUP)"
   exit 1
 fi
 )
@@ -303,6 +363,12 @@ else
   echo "ABORTAR: $SOBRANTES archivo(s) siguen con permiso 'other'"
   exit 1
 fi
+
+# Marca de "Paso 4 terminó de verdad" (ronda 3, MINOR-3): R3 (reversión) la
+# comprueba antes de sincronizar de vuelta -- sin esto, R3 sólo podía
+# adivinar si el rsync final había corrido mirando si /srv/jax-data/repo
+# existía, y esa carpeta también la crea el Paso 0 (la pasada NO final).
+date +%Y%m%d-%H%M%S > ~/rutas-prod.paso4-completo
 )
 ```
 
@@ -433,16 +499,27 @@ Las dos salidas tienen que mostrar `/srv/jax-prod/jax/config/config.toml`,
 **8.3 — Por efecto: un documento del repo se sirve.**
 
 `GET /api/admin/repo/file` exige `require_superadmin` (JWT de sesión) --
-usar un token de una sesión de superadmin ya autenticada:
+usar un token de una sesión de superadmin ya autenticada, puesto en
+`$JWT_SUPERADMIN` (variable de shell, no argumento de proceso). El token
+NUNCA va en la línea de comandos de `curl` (ronda 3, MINOR-5: `-H
+"Authorization: Bearer $JWT..."` deja el token visible en `ps aux` a
+cualquiera con shell en la máquina, igual que `-p"$PW"` de mysql) -- va en
+un archivo de config de `curl` temporal, modo 600, borrado al salir:
 
 ```bash
-curl -s -o /dev/null -w 'GET /api/admin/repo -> %{http_code}\n' \
-  -H "Authorization: Bearer $JWT_SUPERADMIN" \
+(
+set -euo pipefail
+CURLCFG="$(mktemp)"
+trap 'rm -f "$CURLCFG"' EXIT
+chmod 600 "$CURLCFG"
+printf 'header = "Authorization: Bearer %s"\n' "$JWT_SUPERADMIN" > "$CURLCFG"
+
+curl -s -K "$CURLCFG" -o /dev/null -w 'GET /api/admin/repo -> %{http_code}\n' \
   http://127.0.0.1:8080/api/admin/repo
 
-curl -s -o /dev/null -w 'GET /api/admin/repo/file -> %{http_code}\n' \
-  -H "Authorization: Bearer $JWT_SUPERADMIN" \
+curl -s -K "$CURLCFG" -o /dev/null -w 'GET /api/admin/repo/file -> %{http_code}\n' \
   "http://127.0.0.1:8080/api/admin/repo/file?path=documents/04e02b09_00_hipatia.md"
+)
 ```
 
 Las dos tienen que dar `200`. Alternativa: abrir el panel de administración
@@ -473,16 +550,24 @@ lsattr /home/fruiz/jax/las_manos/logs/audit.jsonl
 ```
 
 **La copia de trabajo** (`/home/fruiz/jax/las_manos/logs/audit.jsonl`) se
-congela con `chattr +i` -- no vive dentro de ningún árbol que `git clean`
-necesite poder tocar.
+congela con `chattr +i`. Corrección (ronda 3, MINOR-4): la revisión
+anterior de este documento decía que este archivo "no vive dentro de
+ningún árbol que `git clean` necesite poder tocar" -- **eso es falso**.
+`/home/fruiz/jax` SÍ es un checkout git (el de trabajo de un agente), y
+`las_manos/logs/` SÍ está adentro; lo que pasa es que `.gitignore:26`
+(`logs/`) ya lo excluye de un `git clean -fd` NORMAL (sin `-x`), así que
+`chattr +i` no agrega protección contra ESE caso -- sólo contra un `git
+clean -fdx` (que sí incluye archivos ignorados) o contra una escritura
+accidental de algún script viejo. Es una protección real, sólo que el
+motivo original estaba mal explicado.
 
 **La copia del checkout DE DESPLIEGUE**
 (`/srv/jax-prod/jax/las_manos/logs/audit.jsonl`, si existe, ya
-desactualizada desde 2026-09-20) **NO se marca `+i`** (ronda 2, MINOR): ese
-archivo vive dentro de un árbol que un futuro `git clean -fdx` sobre ese
-checkout necesita poder limpiar -- un inmutable ahí rompe esa operación de
-mantenimiento sin ninguna ganancia real (ya es una copia vieja, no la
-fuente de verdad de nada). En su lugar, sólo lectura:
+desactualizada desde 2026-09-20) **NO se marca `+i`**: ese archivo SÍ vive
+dentro de un árbol donde un futuro `git clean -fdx` (o un redeploy que
+regenere el checkout) necesita poder tocarlo -- un inmutable ahí rompería
+esa operación de mantenimiento sin ninguna ganancia real (ya es una copia
+vieja, no la fuente de verdad de nada). En su lugar, sólo lectura:
 
 ```bash
 sudo test -f /srv/jax-prod/jax/las_manos/logs/audit.jsonl && \
@@ -539,12 +624,22 @@ else
   if sudo cmp -s "$OLD" "$NEW"; then
     # Idempotente: si esto es una reversion REPETIDA (o nunca hubo
     # escrituras nuevas desde el corte), OLD y NEW ya coinciden -- anexar
-    # de nuevo duplicaria las lineas. Antes (ronda 1) esta comparacion
-    # comparaba tail -n +N0+1 del VIEJO contra el NUEVO COMPLETO -- dos
-    # slices de largo distinto que nunca daban igual si N0>0, y bajo
-    # `cmd && echo` con set -e NO abortaba aunque el cmp fallara siempre.
+    # de nuevo duplicaria las lineas. Antes esta comparacion comparaba
+    # tail -n +N0+1 del VIEJO contra el NUEVO COMPLETO -- dos slices de
+    # largo distinto que nunca daban igual si N0>0, y bajo `cmd && echo`
+    # con set -e NO abortaba aunque el cmp fallara siempre (MAJOR-B).
     echo "R2: ya coinciden byte a byte -- nada que anexar"
   else
+    # Guardia PREVIA (ronda 3, MINOR-2): antes de anexar, confirmar que el
+    # viejo, TAL COMO ESTÁ HOY, son exactamente las primeras N0 líneas del
+    # nuevo -- si el viejo cambió por cualquier otro motivo desde que se
+    # congeló (Paso 5), anexar a ciegas mezclaría dos historias que no
+    # encajan. `head -n N0 NEW | cmp - OLD` compara ESA porción del nuevo
+    # contra el viejo completo sin escribir nada todavía.
+    if ! sudo sh -c "head -n '$N0' '$NEW' | cmp -s - '$OLD'"; then
+      echo "ABORTAR: el audit log viejo no coincide con las primeras $N0 líneas del nuevo -- algo lo cambió desde el Paso 5, no se anexa a ciegas"
+      exit 1
+    fi
     sudo tail -n +"$((N0 + 1))" "$NEW" | sudo tee -a "$OLD" > /dev/null
     if sudo cmp -s "$OLD" "$NEW"; then
       echo "R2 OK: el audit log viejo coincide byte a byte con el nuevo"
@@ -557,16 +652,26 @@ fi
 )
 ```
 
-**R3 — rsync de `documents/` de vuelta, SIN `--delete` (adaptativo):**
+**R3 — rsync de `documents/` de vuelta, SIN `--delete`, adaptativo (ronda 3,
+MINOR-3):**
 
 ```bash
 (
 set -euo pipefail
-if [ -d /srv/jax-data/repo ]; then
-  sudo rsync -aHAX --numeric-ids /srv/jax-data/repo/ /home/fruiz/jax/repo/
+# La marca de ~/rutas-prod.paso4-completo (NO sólo "existe /srv/jax-data/repo",
+# que también crea el Paso 0 con la pasada NO final) confirma que el rsync
+# FINAL de verdad corrió -- si el corte falló entre el Paso 0 y el Paso 4,
+# /srv/jax-data/repo existe pero con datos parciales/viejos, y sincronizarlos
+# de vuelta sería un error.
+if [ -f ~/rutas-prod.paso4-completo ]; then
+  # -u (--update): nunca sobrescribe un archivo del lado de trabajo que sea
+  # MÁS NUEVO que el de /srv/jax-data/repo -- si algo escribió ahí después
+  # del corte (no debería, con los servicios apuntando a la ruta nueva, pero
+  # por si acaso) no se pisa con una copia más vieja.
+  sudo rsync -aHAX -u --numeric-ids /srv/jax-data/repo/ /home/fruiz/jax/repo/
   echo "R3 OK: sincronizado de vuelta"
 else
-  echo "R3: /srv/jax-data/repo no existe -- el Paso 0/4 nunca corrio, nada que sincronizar"
+  echo "R3: no existe ~/rutas-prod.paso4-completo -- el Paso 4 nunca terminó, nada confiable que sincronizar"
 fi
 )
 ```

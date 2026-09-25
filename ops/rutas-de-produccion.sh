@@ -10,10 +10,14 @@
 # escalon 3, PR jax#277, MAJOR-3: la version anterior de este guion en bash
 # fallaba ABIERTO en 6 casos reales).
 #
-# La ruta de /etc/jax/.env esta FIJA acá, nunca configurable por variable de
-# entorno: nadie desvia la verificacion de produccion con un ENV_FILE
-# puesto por error. El texto del archivo se lee UNA vez con sudo -n cat y se
-# le pasa al modulo Python por stdin.
+# La ruta de /etc/jax/.env esta FIJA en el modulo Python (nunca configurable
+# por variable de entorno): nadie desvia la verificacion de produccion con
+# un ENV_FILE puesto por error. Este guion NO lee el archivo ni se lo pasa
+# por stdin -- ese comentario decia eso en una version anterior y ya no es
+# cierto (ronda 3 de la auditoria de escalon 3, jax#277, MINOR-6a): el
+# modulo hace su propio `sudo -n cat /etc/jax/.env` internamente
+# (rutas_de_produccion_verificador.py:_main). Este guion sólo valida el
+# argumento y exec-ea el modulo.
 set -euo pipefail
 
 if [ "${1:-}" != "--verificar" ]; then

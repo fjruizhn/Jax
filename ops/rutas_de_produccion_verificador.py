@@ -106,18 +106,25 @@ EXCEPCIONES_FASE_A: dict[str, str] = {
         "código de un agente ni un dato de producción, es un directorio de "
         "trabajo aparte. Se queda."
     ),
+}
+
+#: Claves con EXISTENCIA OPCIONAL: exentas SÓLO de "la ruta real tiene que
+#: existir" (realpath fallido no es FALLA para éstas), pero NO exentas del
+#: chequeo de /home/* -- ronda 3 (MINOR-6d): antes JAX_KILL_SWITCH_PATH
+#: estaba en EXCEPCIONES_FASE_A, que la saltaba ENTERA (ni existencia NI
+#: /home). Si alguna vez apuntara a /home/algo, eso seguiría siendo un
+#: problema real (el freno de emergencia no debería vivir en el home de un
+#: usuario) -- sólo su AUSENCIA es sana.
+EXISTENCIA_OPCIONAL: dict[str, str] = {
     "JAX_KILL_SWITCH_PATH": (
         "existencia OPCIONAL a propósito, no un error -- verificado 2026-09-25: "
         "es el archivo del freno de emergencia (interruptor.py): PRESENTE "
         "significa 'JAX pausado', AUSENTE significa 'operando normal'. "
         "`realpath -e` (exige existencia) fallando es el estado SANO por "
         "defecto -- tratar eso como una violación de ruta sería fail-open al "
-        "revés: alarmar en el caso normal. Ronda 2 de la auditoría de "
-        "escalón 3 (jax#277) volvió el chequeo genérico estricto ante "
-        "'realpath fallido', y ESE endurecimiento sacó a la luz este caso: "
-        "antes pasaba de largo por accidente (el chequeo viejo ignoraba en "
-        "silencio una ruta que no resolvía), no porque estuviera bien "
-        "declarado. Corre igual bajo /etc/jax/, nunca bajo /home/."
+        "revés: alarmar en el caso normal. Pero si ALGUNA VEZ apuntara bajo "
+        "/home/, eso SÍ seguiría siendo un problema -- sólo la existencia es "
+        "opcional, no la ubicación (ronda 3, MINOR-6d)."
     ),
 }
 
@@ -306,9 +313,16 @@ def verificar_fase_a(
             continue
         real = resolver(valor)
         if real is None:
-            resultado.problemas.append(
-                Hallazgo(clave, f"{valor}: no se pudo resolver la ruta real (¿no existe? ¿sin permiso?)"))
-            continue
+            if clave in EXISTENCIA_OPCIONAL:
+                # Ronda 3, MINOR-6d: exenta de "tiene que existir", pero NO
+                # del chequeo de /home que sigue -- se usa el valor
+                # normalizado (no resuelto) como mejor aproximación de "la
+                # ruta real" cuando no hay nada que resolver.
+                real = valor
+            else:
+                resultado.problemas.append(
+                    Hallazgo(clave, f"{valor}: no se pudo resolver la ruta real (¿no existe? ¿sin permiso?)"))
+                continue
         if _bajo_prefijo(real, "/home"):
             resultado.problemas.append(
                 Hallazgo(clave, f"{valor} (real: {real}) está bajo /home/ -- sin excepción declarada"))
@@ -339,12 +353,39 @@ def resolver_como_jaxsvc(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real
     return r.stdout.strip()
 
 
+def _exigir_ruta_absoluta_para_test(ruta: str) -> None:
+    """`test` (a diferencia de `realpath`) NO soporta `--` como fin de
+    opciones -- ver DEFECTO de ronda 3 (jax#277) más abajo. Sin `--`, la
+    única defensa contra que un valor se interprete como una opción de
+    `test` es que sea absoluta: una ruta que empieza con "/" nunca puede
+    empezar con "-", así que nunca se confunde con un flag."""
+    if not ruta.startswith("/"):
+        raise ValueError(f"ruta no absoluta, me niego a pasarla a test sin --: {ruta!r}")
+
+
 def jaxsvc_puede_leer(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> bool:
-    return ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-r", "--", ruta]).returncode == 0
+    """DEFECTO real (ronda 3 de la auditoría de escalón 3, jax#277,
+    encontrado ejecutando el Paso 8.4 del runbook contra producción real):
+    esta función usaba `sudo -n -u jaxsvc test -r -- <ruta>`. `test` (a
+    diferencia de `realpath`, que sí soporta `--`) NO tiene noción de
+    "fin de opciones" -- con 3 argumentos (`-r`, `--`, la ruta) da un error
+    de uso, `returncode=2`, SIEMPRE, sin importar si la ruta es legible.
+    `ops/rutas-de-produccion.sh --verificar` reportaba "jaxsvc no puede
+    LEER" para las tres claves en alcance en TODOS los casos -- un falso
+    negativo incondicional. Confirmado en vivo contra producción real
+    (2026-09-25): `sudo -u jaxsvc test -r -- archivo` → rc=2; `sudo -u
+    jaxsvc test -r archivo` (sin `--`) → rc=0. Ninguno de los tests de este
+    módulo lo atrapó porque todos probaban contra un `ejecutar` de mentira,
+    nunca el comando real -- ver
+    `tests/test_rutas_de_produccion_verificador.py::test_jaxsvc_puede_leer_contra_el_comando_real_no_el_mock`."""
+    _exigir_ruta_absoluta_para_test(ruta)
+    return ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-r", ruta]).returncode == 0
 
 
 def jaxsvc_puede_escribir(ruta: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> bool:
-    return ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-w", "--", ruta]).returncode == 0
+    """Mismo DEFECTO que `jaxsvc_puede_leer` -- ver ahí."""
+    _exigir_ruta_absoluta_para_test(ruta)
+    return ejecutar(["sudo", "-n", "-u", "jaxsvc", "test", "-w", ruta]).returncode == 0
 
 
 @dataclass
@@ -446,6 +487,17 @@ def verificar_fase_c(
             if not any(_bajo_prefijo(real, p) for p in permitidos):
                 resultado.problemas.append(
                     Hallazgo(f"{servicio}:{clave}", f"{valor_vivo} (real: {real}) no está bajo ninguno de {permitidos}"))
+
+    if not resultado.servicios_revisados:
+        # Ronda 3, MINOR-1: si NINGÚN servicio pudo revisarse, Fase C no
+        # verificó nada -- eso no es "todo bien" (problemas vacío == verde
+        # por accidente), es "no se sabe". Antes quedaba como mero aviso en
+        # servicios_sin_pid y el resultado general daba OK igual.
+        resultado.problemas.append(Hallazgo(
+            "Fase C",
+            "ningún servicio pudo revisarse (todos sin MainPID) -- Fase C no verificó nada, "
+            "no se puede dar por buena la verdad efectiva"))
+
     return resultado
 
 
