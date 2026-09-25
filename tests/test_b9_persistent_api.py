@@ -442,14 +442,18 @@ async def test_aud001_real_project_synthesis_is_invisible_to_project_b_and_tenan
         pool.close(); await pool.wait_closed()
 
 
-async def _apply_aud005_migration(pool):
+def _aud005_migration_statements():
     from pathlib import Path
     path=Path(__file__).resolve().parents[1]/"jax/memory/b9_migrations/004_tenant_legacy_binding.sql"
     sql="\n".join(line for line in path.read_text().splitlines() if not line.lstrip().startswith("--"))
+    return [statement for statement in sql.split(";") if statement.strip()]
+
+
+async def _apply_aud005_migration(pool):
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
-            for statement in sql.split(";"):
-                if statement.strip(): await cur.execute(statement)
+            for statement in _aud005_migration_statements():
+                await cur.execute(statement)
 
 
 @pytest.mark.asyncio
@@ -489,10 +493,10 @@ async def test_aud005_real_migration_fails_closed_on_ambiguous_legacy_row():
                 await cur.execute("INSERT INTO memory_legacy_bindings VALUES ('facts','legacy','orphan',%s,'ACTIVE',NOW(6))",
                                   ("00000000-0000-0000-0000-000000000011",))
             await conn.commit()
-        with pytest.raises(Exception):
-            await _apply_aud005_migration(pool)
-        async with pool.acquire() as conn:
             async with conn.cursor() as cur:
+                with pytest.raises(Exception):
+                    for statement in _aud005_migration_statements():
+                        await cur.execute(statement)
                 await cur.execute("SELECT tenant_id FROM memory_legacy_bindings WHERE legacy_source_key='orphan'")
                 assert (await cur.fetchone())["tenant_id"] is None
     finally:
