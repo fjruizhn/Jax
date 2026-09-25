@@ -963,6 +963,25 @@ jobs:
           #   numero, manda el runner.
           grep -qE "^159 passed" /tmp/out || {
             echo "PISO ROTO: se esperaban 159 tests CORRIDOS (no skipeados)."; exit 1; }
+      - name: Publicar resumen de segunda corrida de memoria
+        if: failure()
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          path = Path('/tmp/out')
+          if path.exists():
+              lines = path.read_text(errors='replace').splitlines()
+              for line in lines:
+                  if re.match(r'^(FAILED|ERROR) [^\s]+', line):
+                      name = line.split(' ', 2)[1]
+                      print(f'::error title=B9 memory repeat testcase::{name}')
+              for line in reversed(lines):
+                  if re.search(r'\b\d+ (?:passed|failed|error|errors|skipped)\b', line):
+                      summary = line.strip('= ').replace('%', '%25')[:240]
+                      print(f'::error title=B9 memory repeat summary::{summary}')
+                      break
+          PY
 
   output-validator-regression:
     runs-on: ubuntu-latest
