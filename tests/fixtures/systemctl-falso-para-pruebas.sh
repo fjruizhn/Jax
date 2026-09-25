@@ -3,23 +3,29 @@
 # instala ni se usa fuera de un PATH temporal de un test, y nunca escribe
 # nada.
 #
-# Ronda 4: el guion real hace DOS consultas `show` distintas para
-# jax-las-manos.service -- `-p FragmentPath` sola (lado DISCO, en
-# obtener_reales_disco_produccion) y `-p FragmentPath -p DropInPaths
-# -p NeedDaemonReload` (lado CARGADO, en obtener_reales_cargado). Este
-# systemctl falso SÓLO intercepta la segunda (matchea por la presencia de
-# "NeedDaemonReload" entre los argumentos, no sólo por el nombre de la
-# unidad) -- así el lado DISCO sigue viendo el systemctl real (y por lo
-# tanto el disco real, correcto) mientras el lado CARGADO ve la respuesta
-# de mentira. Cualquier otra invocación delega al systemctl real.
+# Ronda 5: la capa DISCO ya NO llama a `systemctl` en absoluto (un solo
+# camino -- `enumerar_dropins_en_disco` -- para producción y pruebas,
+# nunca `systemd-delta` ni `systemctl show` de ese lado). La ÚNICA
+# consulta real a `systemctl` que queda en todo el guion es la de la capa
+# CARGADO (`-p FragmentPath -p DropInPaths -p NeedDaemonReload`, sólo
+# producción) -- así que este systemctl falso sólo necesita interceptar
+# ESA, para jax-las-manos.service (matchea por la presencia de
+# "NeedDaemonReload" entre los argumentos, además del nombre de la
+# unidad, para no interceptar por accidente otra consulta). Cualquier otra
+# invocación delega al systemctl real.
 #
 # $SYSTEMCTL_FALSO_MODO:
-#   incompleto (default): responde OK pero SIN z-pythonpath.conf -- para
-#     probar que "lo cargado" y el manifiesto pueden desacordar aunque el
-#     disco esté perfecto.
+#   incompleto (default): responde OK, NeedDaemonReload=no, pero SIN
+#     z-pythonpath.conf -- para probar que "lo cargado" y el manifiesto
+#     pueden desacordar aunque el disco esté perfecto.
 #   falla: sale con error, como si la unidad no existiera o systemctl
 #     estuviera roto -- para probar que el guion no aborta, sigue con las
 #     demás unidades y da rc=1 al final.
+#   necesita_reload: responde OK, con TODOS los drop-ins reales (nada
+#     falta), pero NeedDaemonReload=yes -- para probar el chequeo de
+#     NeedDaemonReload en aislamiento, sin que ningún otro desacuerdo
+#     (DropInPaths incompleto, systemctl roto) sea lo que en realidad hace
+#     fallar el test (MAJOR-2, ronda 5).
 set -euo pipefail
 REAL=/usr/bin/systemctl
 MODO="${SYSTEMCTL_FALSO_MODO:-incompleto}"
@@ -30,8 +36,13 @@ if [ "${1:-}" = show ] && [ "$ultimo" = jax-las-manos.service ] && [[ " $* " == 
     exit 1
   fi
   printf '/etc/systemd/system/jax-las-manos.service\n'
-  printf '/etc/systemd/system/jax-las-manos.service.d/checkout-de-produccion.conf /etc/systemd/system/jax-las-manos.service.d/cuenta-de-servicio.conf\n'
-  printf 'no\n'
+  if [ "$MODO" = necesita_reload ]; then
+    printf '/etc/systemd/system/jax-las-manos.service.d/checkout-de-produccion.conf /etc/systemd/system/jax-las-manos.service.d/cuenta-de-servicio.conf /etc/systemd/system/jax-las-manos.service.d/z-pythonpath.conf\n'
+    printf 'yes\n'
+  else
+    printf '/etc/systemd/system/jax-las-manos.service.d/checkout-de-produccion.conf /etc/systemd/system/jax-las-manos.service.d/cuenta-de-servicio.conf\n'
+    printf 'no\n'
+  fi
   exit 0
 fi
 exec "$REAL" "$@"

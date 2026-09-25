@@ -1,26 +1,44 @@
 """ops/verificar-arranque-instalado.sh -- el chequeo de "ningún archivo de
-más participa del arranque" (auditoría escalón 3, rondas 2 y 3).
+más participa del arranque" (auditoría escalón 3, rondas 2 a 5).
 
-Cuatro frentes:
+Ronda 5 -- UN SOLO CAMINO: la capa DISCO (`enumerar_dropins_en_disco`) es
+la MISMA función, con la MISMA lógica, tanto en producción (RAIZ="/",
+recorriendo /etc, /run y /usr reales) como en los tests de este archivo
+(RAIZ=árbol bajo /tmp vía RAIZ_PRUEBA) -- ya no hay dos implementaciones
+separadas (el `systemd-delta` de las rondas 3-4 se quitó del todo: no veía
+generator/transient/system.control ni los prefijos con guion, y como sólo
+corría en producción, ningún test lo ejercitaba de verdad). Eso significa
+que TODOS los tests de aquí, incluidos los que sólo usan RAIZ_PRUEBA bajo
+/tmp, prueban el código que corre en producción -- no una simulación aparte.
+
+Frentes cubiertos:
 
 (a) RAIZ_PRUEBA con un árbol de 19 archivos completo y correcto -> 0.
-(b) RAIZ_PRUEBA con cada uno de los 5 intrusos reales que la ronda 2 de la
-    auditoría reprodujo contra la versión vieja del guion (4 del auditor +
-    uno nuevo en /run/systemd/system/service.d/, MAJOR-3 ronda 3) -> cada
-    uno detectado.
+(b) RAIZ_PRUEBA con cada intruso real reproducido en las rondas 2, 3 y 5
+    de la auditoría (fragmento y drop-in de más, en cada una de las 12
+    rutas de systemd-analyze unit-paths que aplica, incluidas
+    system.control, generator, transient y los genéricos service.d/
+    timer.d bajo /run) -> cada uno detectado.
 (c) BLOCK-1 (ronda 3): un drop-in LEGÍTIMO cuyo CONTENIDO tiene una línea
     que empieza con "# /" (como el bug real: un comentario dentro de
     z-pythonpath.conf que una versión vieja del guion, basada en
     `systemctl cat` + grep, confundía con la cabecera que antepone
     systemd) NO cuenta como archivo de más -- el guion actual nunca mira
     contenido, sólo nombres.
-(d) MAJOR-1 (ronda 3): en producción, lo CARGADO por systemd (`systemctl
-    show`) y lo que hay en DISCO son dos chequeos independientes -- un
-    `systemctl` que informa mal (aunque el disco esté perfecto) tiene que
+(d) MAJOR-1 (ronda 3) / MAJOR-2 (ronda 5): en producción, lo CARGADO por
+    systemd (`systemctl show -p FragmentPath -p DropInPaths -p
+    NeedDaemonReload`) y lo que hay en DISCO son dos chequeos
+    independientes -- un `systemctl` que informa mal, o que devuelve
+    NeedDaemonReload=yes aunque los DropInPaths estén completos, tiene que
     hacer fallar el guion igual. Se prueba con un `systemctl` de mentira
     en el PATH que responde mal SÓLO para jax-las-manos.service (que hoy
     está instalado correctamente de verdad) y delega al real para
     cualquier otra unidad -- nunca se escribe en /etc.
+(e) MINOR-1 (ronda 5): RAIZ_PRUEBA="/" se normaliza a modo producción
+    (capa cargado incluida), no a un modo de prueba sin capa cargado.
+(f) La lista fija UNIT_PATHS_SYSTEMD (versionada en el guion porque
+    systemd-analyze no se puede correr contra un árbol de prueba) se
+    compara contra la real, sólo en producción, para que no derive.
 """
 from __future__ import annotations
 
@@ -110,9 +128,26 @@ def test_arbol_completo_da_cero(tmp_path):
     "etc/systemd/system.control/jax-las-manos.service.d/z-pythonpath.conf",
     "usr/local/lib/systemd/system/jax-memory-worker.service.d/zz.conf",
     "run/systemd/generator/jax-ejecutor-proxy.service.d/runtime-intruso.conf",
-    # El quinto, nuevo en esta ronda (MAJOR-3, ronda 3): genérico de tipo
-    # bajo /run, una ruta de las 12 que la primera enumeración no probaba.
+    # El quinto, nuevo en la ronda 3 (MAJOR-3): genérico de tipo bajo
+    # /run, una ruta de las 12 que la primera enumeración no probaba.
     "run/systemd/system/service.d/top.conf",
+    # Ronda 5 (punto 3 del coordinador) -- FRAGMENTO (el archivo <unidad>
+    # en sí, no un drop-in) de más en una ruta de MÁS prioridad que
+    # /etc/systemd/system: de verdad reemplazaría al fragmento real.
+    "etc/systemd/system.control/jax-las-manos.service",
+    # Fragmento de más en una ruta de MENOS prioridad que
+    # /etc/systemd/system (system.control > ... > etc/systemd/system >
+    # ... > run/systemd/system, ver UNIT_PATHS_SYSTEMD en el guion): hoy
+    # no reemplaza a nada -- pero es un duplicado dormido que se
+    # activaría solo si el de /etc alguna vez desaparece, y el manifiesto
+    # declara UNA sola ubicación válida.
+    "run/systemd/system/jax-las-manos.service",
+    # Drop-in en transient (una de las 12 rutas, ronda 5).
+    "run/systemd/transient/jax-las-manos.service.d/rogue.conf",
+    # El de timer en /run que pidió el coordinador -- genérico de tipo
+    # (timer.d/, no service.d/) bajo una ruta de /run, para una unidad
+    # .timer del manifiesto.
+    "run/systemd/system/timer.d/rogue.conf",
 ])
 def test_cada_intruso_se_detecta(tmp_path, ruta_relativa):
     _construir_arbol_completo(tmp_path)
@@ -197,11 +232,12 @@ def test_block1_comentario_con_hash_slash_en_el_contenido_no_cuenta(tmp_path):
     assert "DIFIERE" in resultado.stderr, resultado.stderr
 
 
-def _correr_con_systemctl_falso(modo: str) -> subprocess.CompletedProcess:
+def _correr_con_systemctl_falso(modo: str, raiz: str = "") -> subprocess.CompletedProcess:
     """Antepone al PATH un `systemctl` de mentira (tests/fixtures/) que
     sólo intercepta la consulta CARGADA (`-p ... NeedDaemonReload`) de
-    jax-las-manos.service -- delega al real para todo lo demás, incluida
-    la consulta de sólo-FragmentPath del lado DISCO. Nunca escribe en /etc.
+    jax-las-manos.service -- delega al real para todo lo demás. Nunca
+    escribe en /etc. `raiz` es el argumento posicional que recibe el
+    guion (RAIZ_PRUEBA); por default "" (producción).
 
     Ronda 4: el guion se re-ejecuta a sí mismo como root vía `sudo -n`, y
     ESE `sudo` resetea el PATH a `secure_path` (confirmado en hall9000) --
@@ -217,7 +253,7 @@ def _correr_con_systemctl_falso(modo: str) -> subprocess.CompletedProcess:
         enlace.chmod(0o755)
         path_con_falso = f"{bin_falso}:{os.environ.get('PATH', '')}"
         return subprocess.run(
-            ["sudo", "-n", "env", f"PATH={path_con_falso}", f"SYSTEMCTL_FALSO_MODO={modo}", str(SCRIPT), ""],
+            ["sudo", "-n", "env", f"PATH={path_con_falso}", f"SYSTEMCTL_FALSO_MODO={modo}", str(SCRIPT), raiz],
             capture_output=True, text=True,
         )
 
@@ -267,3 +303,86 @@ def test_systemctl_que_falla_dice_algo_claro_y_sigue_con_las_demas():
     lineas_diferencia = [l for l in resultado.stderr.splitlines() if l.startswith("DIFERENCIA")]
     for linea in lineas_diferencia:
         assert "jax-las-manos.service" in linea, f"unidad inesperada con DIFERENCIA propia: {linea!r}"
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+@pytest.mark.skipif(_NO_ES_PRODUCCION, reason=_MOTIVO_SKIP_PRODUCCION)
+def test_need_daemon_reload_yes_hace_fallar_con_todo_lo_demas_correcto():
+    """MAJOR-2 (ronda 5): el chequeo de NeedDaemonReload se prueba
+    AISLADO -- el systemctl falso en modo "necesita_reload" devuelve el
+    FragmentPath y los 3 DropInPaths reales completos (nada falta, nada
+    sobra) pero NeedDaemonReload=yes. Si el chequeo de NeedDaemonReload se
+    borrara del guion, este test pasaría a dar 0 -- lo reproduje a mano
+    quitando esas 4 líneas de una COPIA del guion (obtener_reales_cargado
+    sin el `if [ "$need_reload" != no ]; then ... fi`) y confirmé que ESTE
+    test específico falla contra esa copia (restaurada de inmediato, sin
+    afectar la rama)."""
+    resultado = _correr_con_systemctl_falso("necesita_reload")
+    assert resultado.returncode != 0, (
+        f"NeedDaemonReload=yes con todo lo demás correcto tiene que fallar -- "
+        f"si da 0, el chequeo se perdió. stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
+    )
+    assert "NeedDaemonReload=yes" in resultado.stderr, resultado.stderr
+    assert "jax-las-manos.service" in resultado.stderr, resultado.stderr
+    # Aísla que el fallo vino del chequeo NeedDaemonReload y no de un
+    # desacuerdo de contenido (DropInPaths incompleto u otra cosa): en este
+    # modo lo cargado coincide byte a byte con el manifiesto.
+    assert "DIFERENCIA (cargado por systemd)" not in resultado.stderr, resultado.stderr
+
+
+def test_raiz_prueba_que_resuelve_a_raiz_activa_la_capa_cargado():
+    """MINOR-1 (ronda 5): un RAIZ_PRUEBA que resuelve a "/" tiene que
+    tratarse EXACTAMENTE como si no se hubiera pasado nada -- modo
+    PRODUCCIÓN, con la capa CARGADO incluida. Se prueba con el systemctl
+    de mentira en modo "incompleto" (miente sobre jax-las-manos.service,
+    el disco real está bien) pasando "/" EXPLÍCITO como RAIZ_PRUEBA: si la
+    capa cargado no se activara con "/", esto daría 0 (sólo miraría el
+    disco, que está perfecto); si se activa, tiene que dar 1, igual que
+    sin pasar nada."""
+    if not SYSTEMCTL_FALSO.is_file():
+        pytest.skip("falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+    if _NO_ES_PRODUCCION:
+        pytest.skip(_MOTIVO_SKIP_PRODUCCION)
+    resultado_barra = _correr_con_systemctl_falso("incompleto", raiz="/")
+    assert resultado_barra.returncode != 0, (
+        f"RAIZ_PRUEBA='/' tiene que activar la capa cargado -- si da 0, se está "
+        f"tratando como modo de prueba (sólo disco). stdout={resultado_barra.stdout!r}"
+    )
+    assert "cargado por systemd" in resultado_barra.stderr, resultado_barra.stderr
+
+
+def _unit_paths_versionadas() -> list[str]:
+    """Extrae el array UNIT_PATHS_SYSTEMD del propio guion -- para
+    comparar la lista fija contra la real sin mantener una copia manual
+    que pudiera desincronizarse."""
+    texto = SCRIPT.read_text(encoding="utf-8")
+    inicio = texto.index("UNIT_PATHS_SYSTEMD=(")
+    fin = texto.index(")", inicio)
+    bloque = texto[inicio:fin]
+    rutas = []
+    for linea in bloque.splitlines()[1:]:
+        linea = linea.strip().strip('"')
+        if linea:
+            rutas.append(linea)
+    return rutas
+
+
+def test_unit_paths_versionadas_coinciden_con_la_real():
+    """Ronda 5: UNIT_PATHS_SYSTEMD está fijo (versionado) en el guion
+    porque `systemd-analyze` no se puede correr contra un árbol de prueba
+    -- pero eso significa que puede desincronizarse de la realidad si una
+    versión nueva de systemd cambia el orden (el orden ES la prioridad) o
+    agrega/quita una ruta. Sólo corre en el host de producción real,
+    compara la lista fija contra `systemd-analyze unit-paths`, línea por
+    línea Y EN EL MISMO ORDEN."""
+    if _NO_ES_PRODUCCION:
+        pytest.skip(_MOTIVO_SKIP_PRODUCCION)
+    real = subprocess.run(
+        ["sudo", "-n", "systemd-analyze", "unit-paths"],
+        capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    versionada = _unit_paths_versionadas()
+    assert versionada == real, (
+        f"UNIT_PATHS_SYSTEMD (guion) != systemd-analyze unit-paths (real):\n"
+        f"  guion: {versionada}\n  real:  {real}"
+    )

@@ -539,21 +539,14 @@ auditoría escalón 3 sobre jax#274): **19 archivos** en total (contados,
 no una cifra redonda -- ver `ops/manifiesto-arranque-instalado.tsv`, que es
 la lista real):
 
-> **VERDAD OPERACIONAL, no verificada por otra fuente (2026-09-25,
-> subagente de la ronda 4)**: `jax-las-manos.service` quedó con
-> `NeedDaemonReload=yes` real en hall9000 por un error operativo del
-> subagente que hizo esta ronda -- una prueba negativa contra
-> `/etc/systemd/system/jax-las-manos.service.d/z-pythonpath.conf`
-> (agregar una línea y restaurarla) que debió correr contra un árbol de
-> prueba y corrió contra el `/etc` real. El CONTENIDO del archivo está
-> confirmado idéntico al del repo (sin `DIFIERE`); el servicio en sí
-> sigue corriendo con lo que tenía cargado antes, sin reinicio. Falta
-> `sudo systemctl daemon-reload` para que `verificar-arranque-instalado.sh`
-> vuelva a dar 0 -- **no lo corrió el subagente** (no está autorizado a
-> escribir en producción vía `systemctl` más allá de `show`/`cat`).
-> Caduca en cuanto alguien con autoridad corra el `daemon-reload` y lo
-> confirme: esta nota queda vieja apenas eso pase, bórrela quien lo
-> verifique.
+> **CADUCADA (confirmado 2026-09-25, ronda 5)**: la nota anterior sobre
+> `jax-las-manos.service` con `NeedDaemonReload=yes` real en hall9000 ya
+> no aplica -- `sudo -n ops/verificar-arranque-instalado.sh` contra la
+> producción real dio `EXIT=0` ("repo e instalado coinciden, 19
+> archivos"), lo que sólo es posible con `NeedDaemonReload=no` en las 4
+> unidades (el guion actual lo exige explícitamente, ver más abajo). No
+> fue el subagente de esta ronda quien corrió el `daemon-reload` --
+> alguien con autoridad lo resolvió entre rondas.
 - 4 unidades base: `jax-las-manos.service`, `jax-memory-worker.service`,
   `jax-memory-synthesis.service`, `jax-ejecutor-proxy.service`. Son el
   fragmento CRUDO tal como está instalado en `/etc` (`User=fruiz`,
@@ -631,79 +624,111 @@ la lista real):
   directorios que los contienen. Sale 0 sólo si TODO eso se cumple; sale 2
   si no hay `sudo` disponible (fallo cerrado); imprime cada diferencia y
   sale 1 en cualquier otro caso.
-  **Simplificado de raíz en la ronda 4** (RECHAZADA la ronda 3 por 2
-  MAJOR que ella misma había introducido, tras ya 3 rondas de parches
-  sobre el mismo guion):
+  **UN SOLO CAMINO (ronda 5)** -- RECHAZADA la ronda 4 porque tenía DOS
+  implementaciones distintas de la capa disco (`systemd-delta` en
+  producción, una enumeración a mano bajo `RAIZ_PRUEBA`): eso dejaba a
+  los tests probando un camino que producción nunca ejecutaba, y
+  `systemd-delta` medido en hall9000 NO veía `generator`, `transient`,
+  `system.control` ni los prefijos con guion. Ahora hay una única función,
+  `enumerar_dropins_en_disco RAIZ`, que corre igual con `RAIZ="/"` en
+  producción y con el árbol temporal en las pruebas -- los mismos tests
+  que corren bajo `RAIZ_PRUEBA` ejercitan el código que corre en
+  producción, no una simulación aparte:
   - **Corre ENTERO como root** (`sudo -n`, re-exec al principio si no lo
     es ya -- RAIZ_PRUEBA pasa a ser un ARGUMENTO posicional, no una
     variable de entorno, porque `sudo` resetea el entorno a
     `secure_path`/mínimo y una variable puesta antes del re-exec no
-    sobrevive ese salto). Así desaparece de raíz el caso "un directorio
-    que `fruiz` no puede listar" -- medido: `systemd-delta` sin root ve
-    15 líneas contra 48 con root en la misma corrida. Sin `sudo`
-    disponible, o si `sudo -n` no alcanza: FALLA CERRADO (`exit 2`),
-    nunca sigue como usuario sin privilegios fingiendo que pudo revisar
-    todo.
-  - **Disco**: la verdad la da `systemd-delta --no-pager
-    --type=overridden,extended,redirected,masked,equivalent` (lee las 12
-    rutas de `systemd-analyze unit-paths`, incluidas `system.control`,
-    `transient`, `generator.early`, y la jerarquía de prefijos con guion,
-    todo resuelto por systemd mismo -- ya no una enumeración a mano) más
-    `systemctl show -p FragmentPath` para el fragmento BASE activo (un
-    fragmento servido desde `system.control`/`transient` en vez de
-    `/etc/systemd/system/<u>` no matchea el manifiesto -> DIFERENCIA,
-    sin que `systemd-delta` tenga que resolver eso). Bajo `RAIZ_PRUEBA`
-    (sólo para tests -- no hay systemd real al que preguntarle por un
-    árbol de `/tmp`) se mantiene la enumeración a mano, cubriendo las 12
-    rutas × prefijos con guion × genérico de tipo.
-  - **Cargado**: `systemctl show -p FragmentPath -p DropInPaths
+    sobrevive ese salto). Sin `sudo` disponible, o si `sudo -n` no
+    alcanza: FALLA CERRADO (`exit 2`), nunca sigue como usuario sin
+    privilegios fingiendo que pudo revisar todo.
+  - **`RAIZ_PRUEBA` que resuelve a `/`** (vacío, o algo como `/tmp/../`)
+    se normaliza con `realpath -m` y se trata EXACTAMENTE como "sin
+    RAIZ_PRUEBA" -- modo PRODUCCIÓN, con la capa cargado incluida (ronda
+    5, MINOR-1; prueba dedicada
+    `test_raiz_prueba_que_resuelve_a_raiz_activa_la_capa_cargado`).
+  - **Disco -- SIEMPRE la misma función, sólo cambia la raíz que
+    recibe.** `enumerar_dropins_en_disco` recorre `UNIT_PATHS_SYSTEMD`,
+    una lista FIJA de las 12 rutas reales de `systemd-analyze unit-paths`
+    (en hall9000, systemd 259), versionada EN ESE ORDEN porque
+    `systemd-analyze` no se puede correr contra un árbol de prueba bajo
+    `/tmp`: `/etc/systemd/system.control`, `/run/systemd/system.control`,
+    `/run/systemd/transient`, `/run/systemd/generator.early`,
+    `/etc/systemd/system`, `/etc/systemd/system.attached`,
+    `/run/systemd/system`, `/run/systemd/system.attached`,
+    `/run/systemd/generator`, `/usr/local/lib/systemd/system`,
+    `/usr/lib/systemd/system`, `/run/systemd/generator.late` -- el orden
+    ES la prioridad (la primera ruta en la que aparece el fragmento de la
+    unidad es la efectiva). El orden real medido en hall9000 difiere del
+    que el guion de la ronda 5 tenía al escribirse por primera vez
+    (`generator.early` va DESPUÉS de `transient` y ANTES de
+    `/etc/systemd/system`, no al final) -- se detectó exactamente por el
+    test que compara la lista fija contra la real (ver abajo), y quedó
+    corregido antes de cerrar la ronda. Para cada unidad, `RAIZ` +
+    cada ruta: el fragmento base `<unidad>` (cualquier fragmento fuera de
+    `/etc/systemd/system/<u>` en CUALQUIER ruta, de mayor o menor
+    prioridad, es DIFERENCIA -- el de mayor prioridad porque de verdad la
+    reemplaza, el de menor porque es un duplicado dormido que el
+    manifiesto no declara) + los drop-ins en `<unidad>.d/`, en cada
+    prefijo con guion de `systemd.unit(5)` (`jax-.service.d`,
+    `jax-memory-.service.d`, …) y en el genérico de tipo (`service.d/`,
+    `timer.d/`). Nunca se traga errores: un directorio que debería ser
+    legible/listable y no lo es, o una ruta de fragmento que existe pero
+    no es un archivo regular, cuentan como fallo de enumeración
+    (`rc≠0`), no como "cero archivos ahí" silencioso (ronda 5, MINOR-2).
+    `systemd-delta` se quitó del todo -- ya no forma parte de este
+    guion, en ningún modo.
+  - **Cargado -- SÓLO PRODUCCIÓN, sin cambios de lógica desde la ronda
+    4.** `systemctl show -p FragmentPath -p DropInPaths
     -p NeedDaemonReload --value <unidad>`, y se EXIGE
     `NeedDaemonReload=no` -- la señal REAL y estructurada de "lo cargado
-    puede no reflejar el disco" (la ronda 3 rascaba avisos de texto libre
-    por stderr; esto es una propiedad de systemd, no un mensaje). Si
-    `systemctl show` falla del todo (unidad inexistente, systemctl
-    roto), mensaje claro Y el guion sigue revisando las demás unidades
-    -- no aborta la corrida entera por una sola.
-  - **MAJOR-A (ronda 4, motivo del RECHAZO de la ronda 3)**: la ronda 3
-    hacía `fallo=1` DESDE DENTRO de funciones invocadas vía `$(...)` --
-    esa asignación vive en un SUBSHELL y se pierde en cuanto termina,
-    aunque el mensaje ya se haya impreso por stderr; el `rc=1` real
-    dependía de que ALGÚN OTRO chequeo (una lista incompleta, por
-    ejemplo) tropezara con el mismo problema. Ahora las funciones sólo
-    imprimen su LISTA por stdout y señalan su ESTADO por código de
-    salida (nunca tocan `fallo` ellas mismas); el llamador, fuera de
-    cualquier subshell (`if ! x="$(funcion ...)"; then fallo=1; fi`), es
-    quien pone `fallo=1`. Prueba dedicada
-    (`tests/test_verificar_arranque_instalado.py::test_directorio_ilegible_y_vacio_da_rc_1`)
-    que aísla el caso EXACTO donde el bug viejo se escondía (una ruta que
-    debería ser directorio y no lo es, pero que -- de poder leerse --
-    aportaría CERO archivos, así que ningún otro chequeo la delata) --
-    **verificado contra el código viejo antes de arreglar**: reintroducir
-    el patrón `fallo=1` dentro de la función hace fallar este test
-    (confirmado a mano, restaurado de inmediato).
-  - **BLOCK-1 (ronda 3, RECHAZO -- ya resuelto, no reabierto en la
-    ronda 4)**: la versión de la ronda 3 raspaba `systemctl cat` con
-    `grep '^# /'` y confundía una línea de COMENTARIO dentro de un
-    `.conf` (como la que tenía el propio `z-pythonpath.conf` del proxy)
-    con la cabecera real de systemd. `systemctl show -p` con propiedades
-    explícitas nunca imprime contenido, así que esto ya no puede pasar
-    por diseño; prueba dedicada que siembra esa línea exacta y confirma
-    que nunca cuenta como archivo de más.
+    puede no reflejar el disco". Prueba dedicada, con un `systemctl` de
+    mentira en modo `necesita_reload` que devuelve los 3 drop-ins reales
+    COMPLETOS (nada falta) pero `NeedDaemonReload=yes`, para aislar este
+    chequeo de cualquier otro desacuerdo -- **verificado contra el
+    código viejo antes de cerrar**: se quitó el bloque del chequeo de una
+    COPIA del guion (nunca de la rama) y se confirmó que ESE test
+    específico falla contra esa copia (script devuelve 0 cuando no
+    debería), restaurada de inmediato y confirmada byte a byte idéntica
+    con `diff` (ronda 5, MAJOR-2). Si `systemctl show` falla del todo
+    (unidad inexistente, systemctl roto), mensaje claro Y el guion sigue
+    revisando las demás unidades -- no aborta la corrida entera por una
+    sola.
+  - **MAJOR-A (ronda 4, sigue vigente en la ronda 5)**: ninguna función
+    invocada vía `$(...)` toca la variable `fallo` desde dentro (esa
+    asignación viviría en un SUBSHELL y se perdería); sólo imprimen su
+    LISTA por stdout y señalan su ESTADO por código de salida, y el
+    llamador, fuera de cualquier subshell (`if ! x="$(funcion ...)"; then
+    fallo=1; fi`), es quien pone `fallo=1`. Prueba dedicada
+    (`test_directorio_ilegible_y_vacio_da_rc_1`), verificada contra el
+    código viejo antes de arreglar.
+  - **BLOCK-1 (ronda 3, ya resuelto)**: `systemctl show -p` con
+    propiedades explícitas nunca imprime contenido de archivo, así que
+    una línea de comentario tipo `# /algo` dentro de un `.conf` legítimo
+    nunca puede confundirse con una cabecera de systemd -- y ahora la
+    capa disco ni siquiera llama a `systemctl`, así que ese riesgo
+    desapareció de raíz.
   `tests/test_arranque_instalado.py` ejercita la forma del repo siempre
   (también en CI, sin necesitar el host de producción) y, sólo en el host
   de producción, corre el guion de verdad y EXIGE 0 -- no hace skip si
-  falta algo instalado. `tests/test_verificar_arranque_instalado.py` (11
-  tests) prueba: `RAIZ_PRUEBA` con los 5 intrusos reales (los 4 del
-  auditor de la ronda 2 + uno nuevo en `/run/systemd/system/service.d/`,
-  ronda 4), el caso de MAJOR-A, BLOCK-1, y el modo de producción
-  alimentando un `systemctl` de mentira
-  (`tests/fixtures/systemctl-falso-para-pruebas.sh`) que sólo intercepta
-  la consulta CARGADA de `jax-las-manos.service` (nunca la de sólo
-  `FragmentPath`, para no ensuciar el lado disco) -- invocado con `sudo -n
-  env PATH=...` DIRECTO desde el test (no vía la variable de entorno
-  `RAIZ_PRUEBA`, que no sobreviviría el re-exec como root del guion si
-  éste tuviera que hacerlo de nuevo). Cableado al job
-  `arranque-instalado-versionado` de `.github/workflows/policy.yml`.
+  falta algo instalado. `tests/test_verificar_arranque_instalado.py` (18
+  tests) prueba: `RAIZ_PRUEBA` con un árbol completo (0) y con 9 intrusos
+  reales por el camino ÚNICO (fragmento y drop-in de más en cada una de
+  las rutas relevantes de `UNIT_PATHS_SYSTEMD`, incluidas
+  `system.control` con fragmento de mayor Y de menor prioridad,
+  `generator`, `transient`, y el genérico `timer.d/` bajo `/run`),
+  BLOCK-1, MAJOR-A, MAJOR-2 (con reproducción contra el código viejo),
+  MINOR-1 (`RAIZ_PRUEBA="/"` activa la capa cargado), y la lista fija
+  `UNIT_PATHS_SYSTEMD` comparada contra `systemd-analyze unit-paths` real
+  (sólo en producción, para que la lista versionada no derive en
+  silencio). Los tests con `systemctl` de mentira
+  (`tests/fixtures/systemctl-falso-para-pruebas.sh`) sólo intercepta
+  la consulta CARGADA de `jax-las-manos.service` (la capa disco ya no
+  llama a `systemctl` en absoluto, así que no hay nada más que
+  interceptar) -- invocado con `sudo -n env PATH=...` DIRECTO desde el
+  test (no vía la variable de entorno `RAIZ_PRUEBA`, que no sobreviviría
+  el re-exec como root del guion si éste tuviera que hacerlo de nuevo).
+  Cableado al job `arranque-instalado-versionado` de
+  `.github/workflows/policy.yml`.
 - **`ops/instalar-dropins-de-servicio.sh <unidad>.service.d|/ruta/absoluta
   <REPO> [DESTDIR]`**: lee `ops/manifiesto-arranque-instalado.tsv` y copia
   las filas que coincidan -- por prefijo de directorio de drop-ins, o por
