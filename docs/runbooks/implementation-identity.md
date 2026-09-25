@@ -531,6 +531,51 @@ servicio real -- el mismo venv que systemd invoca
 repo, con `PYTHONPATH=/srv/jax-prod/jax` (el mismo que fija el drop-in
 `z-pythonpath.conf`).
 
+**El arranque de systemd está versionado en el repo** (decisión de
+Fernando, 2026-09-25, opción A): los cuatro drop-ins de cada servicio
+(`checkout-de-produccion.conf`, `cuenta-de-servicio.conf`, y para
+`jax-las-manos` además `z-pythonpath.conf`) que hasta entonces sólo vivían
+en `/etc` de hall9000 viven ahora en `config/systemd/jax-las-manos.service.d/`
+(y, para los otros tres servicios de B9/el proxy del Ejecutor, en
+`config/systemd/*.service.d/` y `ops/ejecutor/jax-ejecutor-proxy.service.d/`),
+junto con las unidades base de `jax-las-manos.service` y
+`jax-memory-synthesis.service` y el guion de sanidad
+`ops/sbin/jax-checkout-de-produccion-sano.sh` -- 12 archivos en total, ver
+`ops/manifiesto-arranque-instalado.tsv`.
+- **Instalación**: a mano, con GO de Fernando --
+  `sudo cp <archivo del repo> <ruta de /etc o /usr/local/sbin correspondiente
+  (ver ops/manifiesto-arranque-instalado.tsv)>` seguido de
+  `sudo systemctl daemon-reload` y, si corresponde, un reinicio del
+  servicio afectado. Esto NO se automatiza: cada copia es una decisión de
+  desplegar arranque nuevo a un servicio de producción.
+- **Verificación**: `ops/verificar-arranque-instalado.sh` compara, archivo
+  por archivo según `ops/manifiesto-arranque-instalado.tsv`, lo que hay en
+  el repo contra lo instalado (sale 0 si coincide, y imprime cada
+  diferencia si no). `tests/test_arranque_instalado.py` ejercita la forma
+  del repo siempre (también en CI, sin necesitar el host de producción) y,
+  sólo en el host de producción, corre el guion de verdad -- cableado al
+  job `arranque-instalado-versionado` de `.github/workflows/policy.yml`
+  (piso medido: 8 passed, 1 skipped fuera del host de producción).
+- **Las unidades base de `jax-memory-worker.service` y
+  `jax-ejecutor-proxy.service` NO se reemplazaron**, aunque también
+  difieren de lo instalado (`User=jaxsvc`/`/srv/jax-prod/jax` en el repo
+  vs `User=fruiz`/`/home/fruiz/jax` en `/etc` -- el mismo patrón que
+  `jax-las-manos.service`, donde el repo YA describe el resultado de
+  fusionar base + drop-ins en vez del fragmento base solo). A diferencia
+  de `jax-memory-synthesis.service`, acá SÍ hay dependencias reales sobre
+  el contenido actual del repo: `tests/test_ejecutor_cuenta_de_servicio.py`
+  exige `User=jaxsvc` y `Environment=HOME=/var/lib/jaxsvc` directo en
+  `ops/ejecutor/jax-ejecutor-proxy.service` (sin pasar por un drop-in), y
+  `config/systemd/install-memory-scope.sh` instala
+  `jax-memory-worker.service` tal cual a `/etc/systemd/system/` sin
+  instalar `cuenta-de-servicio.conf` por separado -- reemplazar cualquiera
+  de los dos por el fragmento crudo de `/etc` dejaría a ese instalador
+  desplegando un servicio corriendo como `fruiz`. Pendiente para quien
+  reconcilie esto de fondo: o esos dos consumidores pasan a asumir que el
+  `User=jaxsvc` llega por `cuenta-de-servicio.conf` (como ya asume
+  `jax-las-manos`/`jax-memory-synthesis`), o las unidades base se quedan
+  como están a propósito. Ninguna de las dos decisiones se tomó acá.
+
 **De dónde salen `JAX_DB_HOST`/`PORT`/`USER`/`PASSWORD` (ronda 3 de
 revisión).** Este paso NO carga `/etc/jax/.env` directo -- ni con un punto
 ni con `source` pegados a la ruta, y ni siquiera pasando por
@@ -597,7 +642,10 @@ nunca puede redirigir la verificación a otra raíz. Pero producción vive en
 `/srv/jax-prod/jax` — verificado en vivo en hall9000:
 `systemctl status jax-las-manos` muestra
 `WorkingDirectory=/srv/jax-prod/jax/las_manos`, del drop-in
-`checkout-de-produccion.conf` (2026-09-20). La resolución es un
+`checkout-de-produccion.conf` (2026-09-20) -- versionado en
+`config/systemd/jax-las-manos.service.d/checkout-de-produccion.conf`
+(y su equivalente para cada uno de los otros tres servicios) desde
+2026-09-25, ver el punto anterior. La resolución es un
 **símlink**, creado por root (`/srv/` es root-owned; `/srv/jax-prod/jax` es
 `jaxsvc:jaxsvc`), como paso de despliegue explícito, no un cambio de
 código:
