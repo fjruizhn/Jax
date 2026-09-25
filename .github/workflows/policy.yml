@@ -491,6 +491,19 @@ jobs:
       JAX_DB_USER: root
       JAX_DB_PASSWORD: ci
       JAX_DB_NAME: jax_memory_test
+      # 2026-09-25: jax-platform#155 (fix(migrations): bootstrap canonical B9
+      # core schema, integrado 09:04Z) hizo que _apply_jax_b9_core_migrations y
+      # _apply_jax_project_authority_migration (backend/db/migrations.py:21,
+      # ~97 y ~147 de jax-platform) exijan JAX_REPO_PATH para cargar
+      # jax/memory/b9_migrations y project_authority_migrations.py -- DDL que
+      # jax-platform NO copia, sólo ejecuta desde el checkout de JAX. Sin esta
+      # variable el paso "Esquema de gobernanza con SUS migraciones" muere con
+      # RuntimeError: JAX_REPO_PATH is required to run JAX-owned B9 migrations
+      # (y un RuntimeError: Event loop is closed secundario, del pool que no
+      # llega a cerrarse limpio tras la excepción). github.workspace es el
+      # checkout de ESTE repo (jax) que ya trae el actions/checkout@v4 de
+      # arriba: es el árbol dueño de esas migraciones, no una copia.
+      JAX_REPO_PATH: ${{ github.workspace }}
       PYTHONPATH: .:las_manos
     steps:
       - uses: actions/checkout@v4
@@ -507,6 +520,46 @@ jobs:
       - name: Clonar jax-platform (sus migraciones crean la gobernanza)
         run: git clone --depth=1 https://github.com/fjruizhn/jax-platform.git /tmp/jax-platform
       - run: pip install -r /tmp/jax-platform/backend/requirements.txt
+      - name: Esquema de MEMORIA de jax (projects -- FK de la migracion 003)
+        # jax-platform#155 agrego jax_project_scope.project_id -> projects(id)
+        # a la migracion 003 (jax/memory/project_authority_migrations.py).
+        # `projects` es DDL de JAX (jax_memory_schema.sql:149), no de
+        # jax-platform -- run_migrations() nunca la crea (cero CREATE TABLE
+        # projects en backend/db/migrations.py, verificado). Sin este paso
+        # "Esquema de gobernanza con SUS migraciones" muere con:
+        #   pymysql.err.OperationalError: (1005, "Can't create table
+        #   `jax_memory_test`.`jax_project_scope` (errno: 150 'Foreign key
+        #   constraint is incorrectly formed')")
+        #
+        # Mismo tratamiento sed/mysql que ~/jax-platform/.github/workflows/policy.yml
+        # (job backend-tests-con-db, paso "Crear el esquema de MEMORIA..."): el
+        # cliente mysql/mariadb parte las sentencias, nunca un split a mano en
+        # Python (hay ';' dentro de sentencias, p.ej. el DEFAULT del vector cero
+        # de embedding_bge_m3). El unico recorte es el encabezado CREATE
+        # DATABASE/USE jax_memory -- la base ya la crea
+        # services.mariadb.env.MARIADB_DATABASE de este job; ninguna sentencia
+        # CREATE TABLE se toca. No clona jax: este job YA es el checkout de jax
+        # (actions/checkout@v4 de arriba), a diferencia de backend-tests-con-db
+        # (que clona jax en otro repo, jax-platform).
+        #
+        # ORDEN (jax-platform backend/base_de_test.py:539-546): la migracion 003
+        # corre DESPUES de jax_tenants, dentro del propio run_migrations() (que
+        # crea jax_tenants antes de llamar a
+        # _apply_jax_project_authority_migration). jax_memory_schema.sql NO
+        # trae jax_project_scope -- esa tabla es solo del runner de plataforma
+        # -- asi que no hay colision entre este paso y run_migrations() de
+        # abajo. No hace falta jacobs.store.init_tables() antes de este paso:
+        # jax_memory_schema.sql no tiene ninguna FK hacia tablas de Jacobs (sus
+        # unicas referencias son conversations/messages/projects, todas del
+        # mismo archivo) -- el orden init_tables -> schema.sql de
+        # backend-tests-con-db es para SUS propios tests, que si tocan
+        # jacobs.store; este job no lo necesita para que la migracion 003
+        # resuelva su FK.
+        run: |
+          sed -e '/^CREATE DATABASE IF NOT EXISTS jax_memory$/,/;$/d' \
+              -e "s/^USE jax_memory;$/USE \`$JAX_DB_NAME\`;/" \
+              jax_memory_schema.sql \
+            | mysql -h "$JAX_DB_HOST" -P "$JAX_DB_PORT" -u"$JAX_DB_USER" -p"$JAX_DB_PASSWORD" "$JAX_DB_NAME"
       - name: Esquema de gobernanza con SUS migraciones
         working-directory: /tmp/jax-platform/backend
         run: |
@@ -4995,6 +5048,19 @@ jobs:
       JAX_DB_USER: root
       JAX_DB_PASSWORD: ci
       JAX_DB_NAME: jax_memory_test
+      # 2026-09-25: jax-platform#155 (fix(migrations): bootstrap canonical B9
+      # core schema, integrado 09:04Z) hizo que _apply_jax_b9_core_migrations y
+      # _apply_jax_project_authority_migration (backend/db/migrations.py:21,
+      # ~97 y ~147 de jax-platform) exijan JAX_REPO_PATH para cargar
+      # jax/memory/b9_migrations y project_authority_migrations.py -- DDL que
+      # jax-platform NO copia, sólo ejecuta desde el checkout de JAX. Sin esta
+      # variable el paso "Esquema de gobernanza con SUS migraciones" muere con
+      # RuntimeError: JAX_REPO_PATH is required to run JAX-owned B9 migrations
+      # (y un RuntimeError: Event loop is closed secundario, del pool que no
+      # llega a cerrarse limpio tras la excepción). github.workspace es el
+      # checkout de ESTE repo (jax) que ya trae el actions/checkout@v4 de
+      # arriba: es el árbol dueño de esas migraciones, no una copia.
+      JAX_REPO_PATH: ${{ github.workspace }}
       PYTHONPATH: .:las_manos
       # las_manos/motor_registry/_authorize_facet_endpoint_test.py (agregado
       # 2026-09-18, detector de archivos de test sin CI) levanta el server.app
@@ -5028,6 +5094,46 @@ jobs:
       # requirements.txt de jax-platform. Sin este paso la COLECCIÓN del test
       # falla con ModuleNotFoundError, antes de correr un solo caso (medido).
       - run: pip install -r requirements.txt
+      - name: Esquema de MEMORIA de jax (projects -- FK de la migracion 003)
+        # jax-platform#155 agrego jax_project_scope.project_id -> projects(id)
+        # a la migracion 003 (jax/memory/project_authority_migrations.py).
+        # `projects` es DDL de JAX (jax_memory_schema.sql:149), no de
+        # jax-platform -- run_migrations() nunca la crea (cero CREATE TABLE
+        # projects en backend/db/migrations.py, verificado). Sin este paso
+        # "Esquema de gobernanza con SUS migraciones" muere con:
+        #   pymysql.err.OperationalError: (1005, "Can't create table
+        #   `jax_memory_test`.`jax_project_scope` (errno: 150 'Foreign key
+        #   constraint is incorrectly formed')")
+        #
+        # Mismo tratamiento sed/mysql que ~/jax-platform/.github/workflows/policy.yml
+        # (job backend-tests-con-db, paso "Crear el esquema de MEMORIA..."): el
+        # cliente mysql/mariadb parte las sentencias, nunca un split a mano en
+        # Python (hay ';' dentro de sentencias, p.ej. el DEFAULT del vector cero
+        # de embedding_bge_m3). El unico recorte es el encabezado CREATE
+        # DATABASE/USE jax_memory -- la base ya la crea
+        # services.mariadb.env.MARIADB_DATABASE de este job; ninguna sentencia
+        # CREATE TABLE se toca. No clona jax: este job YA es el checkout de jax
+        # (actions/checkout@v4 de arriba), a diferencia de backend-tests-con-db
+        # (que clona jax en otro repo, jax-platform).
+        #
+        # ORDEN (jax-platform backend/base_de_test.py:539-546): la migracion 003
+        # corre DESPUES de jax_tenants, dentro del propio run_migrations() (que
+        # crea jax_tenants antes de llamar a
+        # _apply_jax_project_authority_migration). jax_memory_schema.sql NO
+        # trae jax_project_scope -- esa tabla es solo del runner de plataforma
+        # -- asi que no hay colision entre este paso y run_migrations() de
+        # abajo. No hace falta jacobs.store.init_tables() antes de este paso:
+        # jax_memory_schema.sql no tiene ninguna FK hacia tablas de Jacobs (sus
+        # unicas referencias son conversations/messages/projects, todas del
+        # mismo archivo) -- el orden init_tables -> schema.sql de
+        # backend-tests-con-db es para SUS propios tests, que si tocan
+        # jacobs.store; este job no lo necesita para que la migracion 003
+        # resuelva su FK.
+        run: |
+          sed -e '/^CREATE DATABASE IF NOT EXISTS jax_memory$/,/;$/d' \
+              -e "s/^USE jax_memory;$/USE \`$JAX_DB_NAME\`;/" \
+              jax_memory_schema.sql \
+            | mysql -h "$JAX_DB_HOST" -P "$JAX_DB_PORT" -u"$JAX_DB_USER" -p"$JAX_DB_PASSWORD" "$JAX_DB_NAME"
       - name: Esquema de gobernanza con SUS migraciones
         working-directory: /tmp/jax-platform/backend
         run: |
