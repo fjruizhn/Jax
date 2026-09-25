@@ -32,6 +32,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -661,6 +662,47 @@ class ToolAuthorityTest(unittest.IsolatedAsyncioTestCase):
             ["git", "show", f"{first['git_sha']}:v.txt"], cwd=self.workspace, capture_output=True, text=True,
         )
         assert show_prev.stdout == "version 1", show_prev.stdout
+
+    # --- 5c. B1 (auditoría 2026-09-25 de ops/permisos_proyectos.py): mkstemp() crea en
+    # 0600 explícito -- bajo un directorio con ACL POSIX por defecto (proyectos/ del
+    # workspace la lleva, spec 2026-09-22 §5), eso deja el archivo final con la ACL de
+    # grupo EFECTIVAMENTE en "---" aunque el TEXTO siga mostrando "rwx" (verificado
+    # empíricamente en hall9000, no supuesto). Visto en rojo contra el código sin el
+    # os.fchmod(fd, 0o664) de _write_file: este test falla porque el grupo queda con
+    # permiso efectivo 0, no con el texto pedido.
+    async def test_5c_write_file_queda_escribible_por_grupo_bajo_acl_por_defecto(self):
+        if shutil.which("setfacl") is None or shutil.which("getfacl") is None:
+            self.skipTest("setfacl/getfacl no están instalados")
+        # Mismo patrón que ops/permisos_proyectos.py aplicaría sobre proyectos/: ACL de
+        # acceso y por defecto con una entrada de grupo nombrada + máscara explícita.
+        grupo_de_prueba = subprocess.run(
+            ["id", "-gn"], capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        r_acl = subprocess.run(
+            ["setfacl", "-d", "-m", f"g:{grupo_de_prueba}:rwx,m::rwx", str(self.workspace)],
+            capture_output=True, text=True,
+        )
+        assert r_acl.returncode == 0, r_acl.stderr
+
+        r = await self._call("write_file", {"path": "bajo-acl.txt", "content": "hola"})
+        assert r["decision"] == "executed", r
+
+        destino = self.workspace / "bajo-acl.txt"
+        acl_texto = subprocess.run(
+            ["getfacl", "-p", str(destino)], capture_output=True, text=True, check=True,
+        ).stdout
+        # El TEXTO puede seguir diciendo "rwx" -- lo que importa es la línea EFECTIVA
+        # (getfacl la anota con "#effective:" cuando la máscara recorta lo pedido; si no
+        # hay anotación, el efectivo es el texto tal cual). Cualquiera de las dos formas
+        # tiene que mostrar escritura de grupo, nunca "---".
+        lineas_grupo = [
+            linea for linea in acl_texto.splitlines()
+            if linea.startswith(f"group:{grupo_de_prueba}:") or linea.startswith("group::")
+        ]
+        assert lineas_grupo, f"no se encontró entrada de grupo en la ACL:\n{acl_texto}"
+        assert any("#effective:---" not in linea and "w" in linea.split("#")[0] for linea in lineas_grupo), (
+            f"el grupo quedó sin escritura efectiva pese a la ACL por defecto:\n{acl_texto}"
+        )
 
     # --- 6. tool inventado ---
     async def test_6_tool_inventado_rechaza(self):
