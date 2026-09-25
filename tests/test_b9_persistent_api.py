@@ -354,7 +354,7 @@ async def _b9_ci_test_pool(*, authority=False, legacy=False):
     pool=await aiomysql.create_pool(
         host=os.environ["JAX_DB_HOST"],port=int(os.getenv("JAX_DB_PORT","3306")),
         user=os.getenv("JAX_DB_USER","root"),password=os.getenv("JAX_DB_PASSWORD",""),db=database,
-        minsize=1,maxsize=1,cursorclass=aiomysql.DictCursor,
+        minsize=1,maxsize=1,cursorclass=aiomysql.DictCursor,connect_timeout=5,
     )
     try:
         tables=(
