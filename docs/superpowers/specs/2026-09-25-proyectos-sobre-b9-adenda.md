@@ -1,8 +1,9 @@
 # Proyectos sobre la autoridad de B9 — adenda al spec del 2026-09-22
 
 > Fecha: 2026-09-25 · Autor: Mr. Hyde · Continúa: `2026-09-22-proyectos-y-selector-design.md`
-> Estado: adenda para Fernando. Separa lo que se construye YA (compatible con las dos
-> lecturas) de tres decisiones de AUTORIDAD que son suyas.
+> Estado: adenda para Fernando. **v2 tras la auditoría de escalón 3 del 2026-09-25, que RECHAZÓ
+> la v1 con 3 BLOCK.** La v1 describía B9 por su código y sus docstrings, no por lo que corre.
+> Esta versión lo corrige: Proyectos queda BLOQUEADO detrás de B9 (§5).
 
 ## 1 · Por qué hace falta
 
@@ -24,9 +25,15 @@ dicen cosas distintas.
 
 ## 2 · Hechos nuevos que corrigen el spec del 22
 
-- **§1.3 ya no es cierto.** `/chat` valida `project_id` contra B9 desde jax-platform#155:
-  responde 403 `project_scope_denied` sin membresía ACTIVE. Los 241 huérfanos siguen en la
-  base, pero ya no pueden crecer por `/chat`.
+- **§1.3 SIGUE SIENDO CIERTO EN PRODUCCIÓN — hueco de seguridad vivo.** La validación de B9
+  (`_scope_for_chat`, jax-platform#155) está en master pero **no desplegada**. Producción
+  corre `1c600fd` (#160, arrancado el 2026-09-23 09:28); verificado el 2026-09-25 que
+  `grep -c _scope_for_chat /srv/jax-prod/jax-platform/backend/api/chat.py` da 0. Cualquier
+  usuario activo que arme a mano un `/chat` con `project_id=1` lee y escribe la memoria de
+  HAMURABI, y los huérfanos pueden seguir creciendo. La interfaz nunca manda `project_id`.
+- **B9 no está desplegado en ninguna de sus partes.** En `jax_memory` de producción no existe
+  ninguna tabla `jax_project_%` ni `memory_%`, verificado el 2026-09-25. `projects` tiene una
+  sola fila: HAMURABI (id 1). La migración 003 está escrita para no aplicarse sola.
 - **§1.5 y §8 «entra al restic»: ya estaba.** `/home/fruiz/jax-workspace` entra en el respaldo
   de SISTEMA desde el 2026-09-22 (`SISTEMA_RUTAS` de `backup-hall9000.sh` incluye
   `/home/fruiz`). Verificado el 2026-09-25: `restic ls --recursive latest` de
@@ -53,10 +60,35 @@ dicen cosas distintas.
 | — | `REVIEWER`: verifica memoria. No se ofrece en la pantalla de Proyectos: no está en el spec |
 | crear proyecto | fila en `projects` + `jax_project_scope` ACTIVE + membresía `OWNER` del creador, en UNA transacción, con su evento |
 | invitar / cambiar / quitar | `ProjectAuthorityAdmin`, sin reimplementar nada |
-| «un proyecto nunca se queda sin dueño» | **B9 NO lo impide hoy** (`revoke_member` y `change_project_role` no cuentan OWNERs). Se agrega en `project_authority.py`, bajo el mismo `FOR UPDATE` |
-| LAS MANOS recibe `project_uuid` | valida `projects` + `jax_project_scope.status='ACTIVE'` |
+| «un proyecto nunca se queda sin dueño» | **B9 NO lo impide hoy** (`revoke_member` y `change_project_role` no cuentan OWNERs). Hace falta: bloquear `jax_project_scope` del proyecto OBJETIVO con `FOR UPDATE` antes de contar (sin eso hay *write skew*), contar solo OWNER ACTIVE cuyo `jax_users` esté ACTIVE, y decidir la excepción del superadmin que da el spec del 22. Es código de B9: reabre su auditoría |
+| LAS MANOS recibe `project_uuid` | valida `projects` + `jax_project_scope.status='ACTIVE'`. Que el alcance esté ACTIVE es propiedad del PROYECTO, no permiso del llamante: el papel lo verifica jax-platform al encolar, y hay que decidir si se vuelve a verificar al ejecutar (TOCTOU) o si se usa una política de servicio de B9. `scripts/procesar_archivos.py` queda fuera del modelo de papeles |
 
-## 4 · Tres decisiones de AUTORIDAD que son de Fernando
+## 3-bis · Defecto de B9: no hay forma de crear el primer alcance ni el primer miembro
+
+Lo encontró la auditoría de escalón 3 corriendo el resolvedor real en memoria, con un cursor
+falso. **Hyde NO lo reprodujo por su cuenta**: entra como hallazgo de auditoría, no como hecho
+verificado por él. Lo que sí verificó Hyde son B1 y B2 (§2).
+- Todo método de `ProjectAuthorityAdmin` pide `PROJECT_SHARED` (`project_authority.py:38-40`).
+- El resolvedor real, con `project_id`, exige que el alcance exista y esté ACTIVE y que haya
+  membresía; sin `project_id`, rechaza (`scope_authority.py:96-107, 219`).
+- Resultado:
+  - `bind_legacy_project_scope` da `PROJECT_SCOPE_UNBOUND`;
+  - que un superadmin se agregue como miembro da `project membership is missing`;
+  - reactivar un alcance DISABLED da `project scope is disabled`.
+- Los tests (`tests/test_project_scope_authority.py:10-15`) usan `_TrustedAdminResolver`, que
+  devuelve `memory:admin` sin leer nada: el control no puede fallar.
+- **Lavado de autoridad:** un superadmin que sea VIEWER del proyecto 1 puede enlazar el 2,
+  porque se valida el alcance de la PETICIÓN y `_admin_shape` deja pasar `memory:admin` para
+  cualquier `project_id` (`project_authority.py:24`).
+- Otros agujeros del mismo código:
+  - `bind_legacy_project_scope` acepta un `tenant_id` que elige quien llama;
+  - `grant_member` no mira el `status` del alcance;
+  - `change_project_role` puede promover a OWNER una fila REVOKED.
+
+**Es código de B9, que lleva Codex** (`[EN CURSO: macbook-pro.codex]`). Se le deja anotado.
+Hyde no lo reescribe por su cuenta.
+
+## 4 · Decisiones de AUTORIDAD que son de Fernando
 
 Sus decisiones del 22 y el contrato de B9 del 23 (los dos integrados por él) se contradicen.
 No se resuelven por inferencia.
@@ -85,6 +117,17 @@ No se resuelven por inferencia.
   cambia el contrato de B9.
 - (b) Sin «archivado legible»: archivar = DISABLED, y nadie lo lee hasta que se reactive.
 
+**D4 · ¿Cómo nace la autoridad, y `admin` es lo mismo que `superadmin`?**
+- B9 trata `admin`, `superadmin` y `super_admin` como administración global
+  (`scope_authority.py:46`, `project_authority.py:54`); el spec habla solo de superadmin.
+- Hace falta una operación de arranque que se resuelva contra el proyecto OBJETIVO, con
+  `CREATE_PROJECT` atómico (`projects` + alcance + OWNER + evento en una sola transacción),
+  y que exija que el tenant del administrador sea el del proyecto.
+
+**D5 · ¿Qué campo manda en «archivado»?**
+Hay tres: `projects.status` (ENUM que ya incluye `archived`), `jax_project_scope.status`
+y el `estado` que proponía el spec del 22. Uno solo tiene que mandar.
+
 **Recomendación de Hyde:**
 - D1 (a) y D3 (a): son las decisiones que Fernando ya tomó el 22, y B9 no las consideró
   porque se escribió después sin tenerlas delante.
@@ -92,19 +135,20 @@ No se resuelven por inferencia.
   al superadmin como miembro cuesta un clic que queda en el registro. **D2 (b) contradice lo
   que Fernando decidió el 22**, así que se la presento, no la aplico.
 
-## 5 · Qué se construye YA (vale con cualquier respuesta a D1–D3)
+## 5 · Orden real (reemplaza la lista «se construye YA» de la v1)
 
-1. **Permisos de `proyectos/`** para `jaxsvc` (§5 del spec), con un test que escribe como `jaxsvc`.
-2. **LAS MANOS con `project_uuid`**: valida `projects` + scope ACTIVE; carpeta `proyectos/<uuid>/`.
-3. **API de Proyectos** en jax-platform:
-   - crear, SOLO superadmin por ahora (lo más estricto de D1; se abre si Fernando elige D1-a);
-   - «mis proyectos»;
-   - miembros vía `ProjectAuthorityAdmin`, con la regla de «nunca sin dueño».
-4. **Subida por lotes** con los topes aprobados, y el **Selector**.
-5. **Selector de proyecto en el chat.**
-6. **Respaldo del chat** (§10 del spec).
-7. **LACTOVI** como primer proyecto real: se crea, Fernando queda como OWNER y su carpeta
-   pasa a `proyectos/<uuid>/`, con verificación de sha256.
+0. **Cerrar el hueco de producción de `/chat`**: desplegar jax-platform#155. Antes hay que
+   aplicar B9 001-004 en producción con respaldo verificado y enlazar HAMURABI (spec §9.4).
+   Si no, todo chat de proyecto da 403 (falla cerrado). **B9 es de Codex; el GO, de Fernando.**
+1. Codex arregla el arranque de B9 (§3-bis) con tests contra el resolvedor REAL, y pasa
+   auditoría nueva.
+2. Fernando decide D1–D5.
+3. Recién entonces: API de Proyectos, miembros, subida por lotes, Selector, selector de
+   proyecto en el chat, respaldo del chat con proyecto, y LACTOVI.
 
-**Queda para después de D1–D3:** archivar, ocultar y destruir; los 241 huérfanos (van a un
-proyecto archivado: D3); las FKs de `project_id` (van después de los huérfanos).
+**Lo único independiente de B9, y que se hace ya:** permisos de `proyectos/` para `jaxsvc`
+(§5 del spec del 22). Sin eso LAS MANOS no puede escribir, con o sin B9.
+
+**Invariante hasta migrar los huérfanos (m2 de la auditoría):** ningún `projects.id` en el
+rango 900001–1400055. Si no, un proyecto nuevo heredaría memoria ajena. Hoy
+`AUTO_INCREMENT` va en 2.
