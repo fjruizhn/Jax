@@ -16,7 +16,7 @@ from .b9 import (
     EventKind, Lifecycle, MemoryEnvelope, MemoryEvent, MemoryObject, MemoryProjection,
     MemoryProvenance, MemoryRevision, MutationAuthorizationContext, MutationAuthorizationRequest, ObjectKind,
     PromptMemoryContext, ReconciliationRequired, ScopeContext, ScopeDenied, Visibility,
-    _derive_projection, _digest, _uuid7,
+    SYNTHESIS_SOURCE_KINDS, _derive_projection, _digest, _uuid7,
 )
 
 
@@ -175,6 +175,10 @@ class PersistentMemoryAPI:
         if operation == "VERIFY" and "memory:project:verify" not in caps:
             raise AuthorizationDenied("project verification requires REVIEWER")
         if operation in {"CREATE", "CORRECT", "SUPERSEDE", "EXPIRE", "TOMBSTONE", "CONTENT_PURGE", "RE_SCOPE", "SYNTHESIZE"} and "memory:project:write" not in caps:
+            if (operation == "SYNTHESIZE" and auth.scope.actor_type == "SERVICE"
+                    and auth.scope.actor_principal == "service:memory-synthesis"
+                    and "memory:service:synthesize" in caps):
+                return
             raise AuthorizationDenied("project mutation requires CONTRIBUTOR")
 
     @staticmethod
@@ -214,7 +218,7 @@ class PersistentMemoryAPI:
         await cur.execute("INSERT INTO memory_projections (memory_id,current_revision_id,current_lifecycle_state,current_verification_state,canonical_history_digest,reconciliation_required) VALUES (%s,%s,%s,%s,%s,%s) ON DUPLICATE KEY UPDATE current_revision_id=VALUES(current_revision_id),current_lifecycle_state=VALUES(current_lifecycle_state),current_verification_state=VALUES(current_verification_state),canonical_history_digest=VALUES(canonical_history_digest),reconciliation_required=VALUES(reconciliation_required)",
                           (projection.memory_id,projection.current_revision_id,projection.current_lifecycle.value if projection.current_lifecycle else None,projection.current_verification,projection.canonical_history_digest,projection.reconciliation_required))
         if binding:
-            await cur.execute("INSERT INTO memory_legacy_bindings (legacy_source_type,legacy_source_namespace,legacy_source_key,memory_id,binding_state,created_at) VALUES (%s,%s,%s,%s,'ACTIVE',FROM_UNIXTIME(%s))", (*binding,obj.memory_id,obj.created_at))
+            await cur.execute("INSERT INTO memory_legacy_bindings (tenant_id,legacy_source_type,legacy_source_namespace,legacy_source_key,memory_id,binding_state,created_at) VALUES (%s,%s,%s,%s,%s,'ACTIVE',FROM_UNIXTIME(%s))", (obj.tenant_id,*binding,obj.memory_id,obj.created_at))
 
     async def create_memory(self, auth: MutationAuthorizationRequest, kind: ObjectKind, content: str,
                             visibility: Visibility, *, user_id: str | None=None, project_id: str | None=None,
@@ -243,7 +247,7 @@ class PersistentMemoryAPI:
         binding=(legacy_type,legacy_namespace,legacy_key)
         async def op(cur: Any) -> str:
             resolved=await self._auth(cur,auth,"IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL); scope=resolved.scope
-            await cur.execute("SELECT memory_id,binding_state FROM memory_legacy_bindings WHERE legacy_source_type=%s AND legacy_source_namespace=%s AND legacy_source_key=%s FOR UPDATE", binding)
+            await cur.execute("SELECT memory_id,binding_state FROM memory_legacy_bindings WHERE tenant_id=%s AND legacy_source_type=%s AND legacy_source_namespace=%s AND legacy_source_key=%s FOR UPDATE", (scope.tenant_id,*binding))
             existing=await cur.fetchone()
             if existing:
                 return existing["memory_id"] if isinstance(existing,Mapping) else existing[0]
@@ -314,6 +318,8 @@ class PersistentMemoryAPI:
                 or "memory:project:verify" in resolved.resolved_capabilities
             ):
                 raise AuthorizationDenied("verification requires resolved reviewer authority")
+            if event_kind is EventKind.VERIFY and old.lifecycle not in {Lifecycle.ACTIVE,Lifecycle.VERIFIED}:
+                raise ScopeDenied("memory lifecycle is not eligible for verification")
             if event_kind in {EventKind.CORRECT,EventKind.SUPERSEDE,EventKind.RE_SCOPE} and old.payload is None and content is None:
                 raise ScopeDenied("purged payload cannot be revised")
             now=time.time(); rid=_uuid7(); payload=None if purge_payload else (content if content is not None else old.payload)
@@ -330,6 +336,7 @@ class PersistentMemoryAPI:
                 # retaining the safe immutable revision/event tombstone.
                 await cur.execute("DELETE p FROM memory_revision_payloads p JOIN memory_revisions r ON r.revision_id=p.revision_id WHERE r.memory_id=%s", (memory_id,))
                 await cur.execute("DELETE e FROM embedding_generations e JOIN memory_revisions r ON r.revision_id=e.revision_id WHERE r.memory_id=%s", (memory_id,))
+                await cur.execute("UPDATE memory_revisions SET payload=NULL WHERE memory_id=%s", (memory_id,))
             await self._write(cur,obj,rev,prov,event,projection); return rid
         return await self._store.mutation(op)
 
@@ -355,10 +362,33 @@ class PersistentMemoryAPI:
         if not source_revision_ids: raise B9Error("synthesis needs source revisions")
         async def op(cur: Any) -> str:
             resolved=await self._auth(cur,auth,"SYNTHESIZE",Visibility.SYSTEM_INTERNAL); scope=resolved.scope
+            sources=[]
+            for source_id in source_revision_ids:
+                await cur.execute(
+                    "SELECT r.revision_id,r.memory_id,o.object_kind,o.tenant_id,r.visibility,r.user_id,r.project_id,"
+                    "r.lifecycle_state,p.payload,pr.current_revision_id FROM memory_revisions r "
+                    "JOIN memory_objects o ON o.memory_id=r.memory_id "
+                    "JOIN memory_projections pr ON pr.memory_id=o.memory_id "
+                    "LEFT JOIN memory_revision_payloads p ON p.revision_id=r.revision_id "
+                    "WHERE r.revision_id=%s AND pr.reconciliation_required=FALSE FOR UPDATE", (source_id,))
+                row=await cur.fetchone()
+                if (not isinstance(row,Mapping) or row["tenant_id"] != scope.tenant_id
+                        or row["revision_id"] != row["current_revision_id"]
+                        or row["lifecycle_state"] not in {"ACTIVE","VERIFIED"}
+                        or row["payload"] is None or row["object_kind"] not in {kind.value for kind in SYNTHESIS_SOURCE_KINDS}):
+                    raise ScopeDenied("source revision is ineligible for synthesis")
+                if row["visibility"] == Visibility.USER_PRIVATE.value and row["user_id"] != scope.subject_user_id:
+                    raise ScopeDenied("source subject mismatch")
+                if row["project_id"] is not None and row["project_id"] != scope.project_id:
+                    raise ScopeDenied("source project mismatch")
+                sources.append(row)
+            effective={(r["visibility"],r["user_id"],r["project_id"]) for r in sources}
+            if len(effective) != 1: raise ScopeDenied("synthesis sources have different scopes")
+            visibility_value,user_id,project_id=effective.pop()
+            visibility=Visibility(visibility_value)
+            self._project_permissions(resolved,"SYNTHESIZE",visibility)
             now=time.time(); mid,rid=_uuid7(),_uuid7(); obj=MemoryObject(mid,ObjectKind.SYNTHESIS,scope.tenant_id,now)
-            # System-internal worker outputs remain in the exact project
-            # namespace when their authorized source scope is project-bound.
-            rev=MemoryRevision(rid,mid,_digest(content),Visibility.SYSTEM_INTERNAL,None,scope.project_id,Lifecycle.ACTIVE,now,content,"COMPLETE")
+            rev=MemoryRevision(rid,mid,_digest(content),visibility,user_id,project_id,Lifecycle.ACTIVE,now,content,"COMPLETE")
             self._assert_project_binding(scope, rev)
             prov=MemoryProvenance(_uuid7(),rid,source_revision_ids,"synthesis",transformation_version,scope.actor_principal,scope.actor_type,scope.subject_user_id,provider,model,now)
             event=self._event(scope,resolved,mid,rid,EventKind.SYNTHESIZE,now,{"derivation_depth":1})
@@ -443,11 +473,14 @@ class MariaDBB9Reader:
             except Exception:
                 await conn.rollback()
                 raise
-        return await self.retrieve(decision.scope, limit=limit)
+        return await self._retrieve_scoped(decision.scope, limit=limit)
 
     async def retrieve(self, scope: ScopeContext, *, limit: int = 20) -> tuple[MemoryEnvelope, ...]:
         if scope.project_id:
             raise AuthorizationDenied("project retrieval requires retrieve_authorized")
+        return await self._retrieve_scoped(scope, limit=limit)
+
+    async def _retrieve_scoped(self, scope: ScopeContext, *, limit: int = 20) -> tuple[MemoryEnvelope, ...]:
         scope.validate()
         if limit < 1 or limit > 100:
             raise ScopeDenied("retrieval limit outside bounded range")
@@ -474,7 +507,7 @@ class MariaDBB9Reader:
                         "WHERE o.tenant_id=%s AND pr.reconciliation_required=FALSE "
                         "AND r.lifecycle_state NOT IN ('TOMBSTONED','PURGED','EXPIRED') "
                         "AND (r.visibility <> 'USER_PRIVATE' OR r.user_id=%s) "
-                        "AND (r.visibility <> 'PROJECT_SHARED' OR r.project_id=%s) "
+                        "AND (r.project_id IS NULL OR r.project_id=%s) "
                         "ORDER BY r.created_at DESC LIMIT %s",
                         (scope.tenant_id, scope.subject_user_id, scope.project_id, limit),
                     )

@@ -6,7 +6,7 @@ from jax.memory.b9 import (
     AuthorizationDenied, EventKind, Lifecycle, MemoryEvent, MemoryRevision,
     MutationAuthorizationContext, MutationAuthorizationRequest, ObjectKind, ScopeContext, ScopeDenied, Visibility, _derive_projection,
 )
-from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
+from jax.memory.b9_mariadb import MariaDBB9Store, MariaDBB9Reader, PersistentMemoryAPI
 
 
 class Cursor:
@@ -214,12 +214,186 @@ async def test_persistent_legacy_binding_and_synthesis_are_transactional():
     conn=ScriptConn([None]); api=make_api(conn)
     mid=await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),"facts","legacy","k",ObjectKind.FACT,None)
     assert mid and conn.committed and any("memory_legacy_bindings" in sql for sql,_ in conn.cursor_obj.calls)
-    conn=Conn(); api=make_api(conn)
+    source={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
+            "visibility":"USER_PRIVATE","user_id":"user-1","project_id":None,"lifecycle_state":"ACTIVE",
+            "payload":"source","current_revision_id":"source-r"}
+    conn=ScriptConn([source]); api=make_api(conn)
     worker_scope=ScopeContext("worker/extract","SERVICE","user-1","tenant-1",request_id="job-1")
     worker_auth=MutationAuthorizationRequest(worker_scope,"SYNTHESIZE",Visibility.SYSTEM_INTERNAL)
     mid=await api.synthesize_memory(worker_auth,"derived",("source-r",),provider="p",model="m",transformation_version="1")
     prov=[args for sql,args in conn.cursor_obj.calls if "INSERT INTO memory_provenance" in sql][0]
     assert mid and prov[5:8] == ("worker/extract","SERVICE","user-1") and prov[8:10] == ("p","m")
+
+
+@pytest.mark.asyncio
+async def test_aud003_authorized_project_read_uses_scoped_query_without_external_guard():
+    row={"memory_id":"m1","object_kind":"FACT","tenant_id":"tenant-1","object_created_at":1,
+         "revision_id":"r1","content_digest":"sha256:x","visibility":"PROJECT_SHARED","user_id":None,
+         "project_id":"project-a","lifecycle_state":"ACTIVE","revision_created_at":1,"payload":"project fact",
+         "provenance_status":"COMPLETE","prior_revision_id":None}
+    conn=ScriptConn(many=[[row],[]]); resolver=TxResolver(project_role="VIEWER")
+    reader=MariaDBB9Reader(Pool(conn),resolver)
+    result=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.PROJECT_SHARED,project_id="project-a"))
+    assert len(result)==1 and result[0].revision.payload == "project fact"
+    assert any("r.project_id=%s" in sql for sql,_ in conn.cursor_obj.calls)
+    assert any(args == ("tenant-1","user-1","project-a",20) for _,args in conn.cursor_obj.calls)
+    with pytest.raises(AuthorizationDenied):
+        await reader.retrieve(ScopeContext("user-1","USER","user-1","tenant-1",project_id="project-a"))
+
+
+@pytest.mark.asyncio
+async def test_aud001_persistent_project_synthesis_retains_source_scope():
+    source={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
+            "visibility":"PROJECT_SHARED","user_id":None,"project_id":"project-a","lifecycle_state":"ACTIVE",
+            "payload":"source","current_revision_id":"source-r"}
+    conn=ScriptConn([source]); api=make_api(conn,TxResolver(project_role="CONTRIBUTOR"))
+    await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL,project_id="project-a"),
+                                "derived",("source-r",),provider="p",model="m",transformation_version="1")
+    revision_args=next(args for sql,args in conn.cursor_obj.calls if "INSERT INTO memory_revisions" in sql)
+    assert revision_args[3] == "PROJECT_SHARED" and revision_args[5] == "project-a"
+
+
+@pytest.mark.asyncio
+async def test_aud001_project_service_synthesis_uses_resolved_service_policy():
+    from jax.memory.scope_authority import ProjectScopeAuthorization
+    class ServiceResolver:
+        async def resolve_mutation_in_transaction(self, cur, scope, operation, visibility):
+            resolved=replace(scope,project_authorization=ProjectScopeAuthorization(
+                "project-a","tenant-1","user-1",None,None,"SERVICE_POLICY","ACTIVE",1.0))
+            return MutationAuthorizationContext(resolved,operation,visibility,frozenset({"memory_service"}),
+                                                frozenset({"memory:service:synthesize"}),"service-policy")
+    source={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
+            "visibility":"PROJECT_SHARED","user_id":None,"project_id":"project-a","lifecycle_state":"ACTIVE",
+            "payload":"source","current_revision_id":"source-r"}
+    conn=ScriptConn([source]); api=make_api(conn,ServiceResolver())
+    service=ScopeContext("service:memory-synthesis","SERVICE","user-1","tenant-1",project_id="project-a")
+    await api.synthesize_memory(MutationAuthorizationRequest(service,"SYNTHESIZE",Visibility.SYSTEM_INTERNAL),
+                                "derived",("source-r",),provider="p",model="m",transformation_version="1")
+    assert conn.committed
+
+
+@pytest.mark.asyncio
+async def test_aud004_persistent_purge_erases_revision_column_payloads_and_vectors():
+    conn,api=lifecycle_api()
+    await api.content_purge(auth("CONTENT_PURGE"),"m1")
+    sql="\n".join(sql for sql,_ in conn.cursor_obj.calls)
+    assert "UPDATE memory_revisions SET payload=NULL WHERE memory_id=%s" in sql
+    assert "DELETE p FROM memory_revision_payloads" in sql
+    assert "DELETE e FROM embedding_generations" in sql
+
+
+@pytest.mark.asyncio
+async def test_aud005_persistent_legacy_query_and_insert_are_tenant_qualified():
+    conn=ScriptConn([None]); api=make_api(conn)
+    await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),"facts","legacy","k",ObjectKind.FACT,None)
+    statements=[(sql,args) for sql,args in conn.cursor_obj.calls if "memory_legacy_bindings" in sql]
+    assert all("tenant_id" in sql for sql,_ in statements)
+    assert all("tenant-1" in args for _,args in statements)
+
+
+def test_aud005_migration_derives_existing_tenant_from_bound_object():
+    from pathlib import Path
+    migration=(Path(__file__).resolve().parents[1]/"jax/memory/b9_migrations/004_tenant_legacy_binding.sql").read_text()
+    assert "JOIN memory_objects" in migration
+    assert "o.tenant_id" in migration
+    assert "PRIMARY KEY (tenant_id, legacy_source_type, legacy_source_namespace, legacy_source_key)" in migration
+    assert "UNIQUE KEY uq_memory_legacy_binding_tenant (tenant_id, legacy_source_type, legacy_source_namespace, legacy_source_key)" in migration
+
+
+@pytest.mark.asyncio
+async def test_aud006_persistent_synthesis_rejects_missing_source_revision():
+    conn=ScriptConn([None]); api=make_api(conn)
+    with pytest.raises(ScopeDenied):
+        await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL),"derived",("missing",),
+                                    provider="p",model="m",transformation_version="1")
+    assert conn.rolled and not conn.committed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", [
+    {"tenant_id":"tenant-2"}, {"current_revision_id":"newer"}, {"lifecycle_state":"EXPIRED"},
+    {"payload":None}, {"object_kind":"SYNTHESIS"}, {"object_kind":"CONVERSATION"},
+    {"project_id":"project-b"},
+])
+async def test_aud006_persistent_synthesis_rejects_ineligible_source_revision(change):
+    row={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
+         "visibility":"PROJECT_SHARED","user_id":None,"project_id":"project-a","lifecycle_state":"ACTIVE",
+         "payload":"source","current_revision_id":"source-r"}
+    row.update(change)
+    conn=ScriptConn([row]); api=make_api(conn,TxResolver(project_role="CONTRIBUTOR"))
+    with pytest.raises(ScopeDenied):
+        await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL,project_id="project-a"),
+                                    "derived",("source-r",),provider="p",model="m",transformation_version="1")
+    assert conn.rolled and not conn.committed
+
+
+@pytest.mark.asyncio
+async def test_aud007_persistent_verify_after_expire_rejects_transition():
+    conn,api=lifecycle_api()
+    current,revision,event,stored=current_rows()
+    current["lifecycle_state"]="EXPIRED"
+    revision["lifecycle_state"]="EXPIRED"
+    projection=_derive_projection("m1",[MemoryRevision("r1","m1","sha256:old",Visibility.USER_PRIVATE,
+        "user-1",None,Lifecycle.EXPIRED,1,"old")],[MemoryEvent("e1","m1","r1",EventKind.CREATE,
+        "user-1","user-1","test-authority",1,{},actor_type="USER")])
+    stored.update(current_lifecycle_state="EXPIRED",current_verification_state=False,
+                  canonical_history_digest=projection.canonical_history_digest)
+    conn=ScriptConn([current,stored],[[revision],[event]])
+    api=make_api(conn,TxResolver(roles={"memory_reviewer"}))
+    with pytest.raises(ScopeDenied): await api.verify_memory(auth("VERIFY"),"m1",method="human")
+    assert conn.rolled and not conn.committed
+
+
+@pytest.mark.asyncio
+async def test_aud004_content_purge_scrubs_physical_b9_storage():
+    """The CI MariaDB service must leave no recoverable B9 payload or vector."""
+    import os
+    import aiomysql
+    database=os.getenv("JAX_DB_NAME","")
+    if not database.endswith("_test"):
+        pytest.skip("requires an isolated CI test database")
+    pool=await aiomysql.create_pool(
+        host=os.getenv("JAX_DB_HOST","127.0.0.1"),port=int(os.getenv("JAX_DB_PORT","3306")),
+        user=os.getenv("JAX_DB_USER","root"),password=os.getenv("JAX_DB_PASSWORD",""),db=database,
+        minsize=1,maxsize=1,cursorclass=aiomysql.DictCursor,
+    )
+    try:
+        tables=(
+            "CREATE TEMPORARY TABLE memory_objects (memory_id CHAR(36) PRIMARY KEY, object_kind VARCHAR(32), tenant_id VARCHAR(128), created_at DATETIME(6), legacy_source_type VARCHAR(64), legacy_source_namespace VARCHAR(255), legacy_source_key VARCHAR(255))",
+            "CREATE TEMPORARY TABLE memory_revisions (revision_id CHAR(36) PRIMARY KEY, memory_id CHAR(36), content_digest CHAR(71), visibility VARCHAR(32), user_id VARCHAR(128), project_id VARCHAR(128), lifecycle_state VARCHAR(32), created_at DATETIME(6), payload LONGBLOB, provenance_status VARCHAR(64), prior_revision_id CHAR(36))",
+            "CREATE TEMPORARY TABLE memory_revision_payloads (revision_id CHAR(36) PRIMARY KEY, payload LONGBLOB, purged_at DATETIME(6), purge_reason VARCHAR(255))",
+            "CREATE TEMPORARY TABLE memory_provenance (provenance_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), source_revisions JSON, transformation_id VARCHAR(128), transformation_version VARCHAR(64), actor_principal VARCHAR(255), actor_type VARCHAR(64), subject_user_id VARCHAR(128), provider VARCHAR(128), model VARCHAR(255), created_at DATETIME(6), limitations TEXT)",
+            "CREATE TEMPORARY TABLE memory_events (event_id CHAR(36) PRIMARY KEY, memory_id CHAR(36), revision_id CHAR(36), event_kind VARCHAR(32), actor_principal VARCHAR(255), subject_user_id VARCHAR(128), authority_source VARCHAR(255), occurred_at DATETIME(6), details JSON, compensates_event_id CHAR(36), actor_type VARCHAR(64), delegation VARCHAR(255), calling_component VARCHAR(255), request_id VARCHAR(255), trace_id VARCHAR(255))",
+            "CREATE TEMPORARY TABLE memory_projections (memory_id CHAR(36) PRIMARY KEY, current_revision_id CHAR(36), current_lifecycle_state VARCHAR(32), current_verification_state BOOLEAN, canonical_history_digest CHAR(71), reconciliation_required BOOLEAN)",
+            "CREATE TEMPORARY TABLE embedding_generations (generation_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), embedding_space_id CHAR(71), generated_at DATETIME(6), embedding_payload LONGBLOB)",
+        )
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                for ddl in tables: await cur.execute(ddl)
+        api=PersistentMemoryAPI(MariaDBB9Store(pool),TxResolver())
+        memory_id=await api.create_memory(auth(),ObjectKind.FACT,"aud004 payload",Visibility.USER_PRIVATE,user_id="user-1")
+        await api.correct_memory(auth("CORRECT"),memory_id,"aud004 revised payload")
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT revision_id FROM memory_revisions WHERE memory_id=%s ORDER BY created_at LIMIT 1",(memory_id,))
+                revision_id=(await cur.fetchone())["revision_id"]
+                await cur.execute("INSERT INTO embedding_generations VALUES (%s,%s,%s,NOW(6),%s)",
+                                  ("00000000-0000-0000-0000-000000000001",revision_id,"space",b"derived vector"))
+            await conn.commit()
+        await api.content_purge(auth("CONTENT_PURGE"),memory_id)
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT payload FROM memory_revisions WHERE memory_id=%s",(memory_id,))
+                assert all(row["payload"] is None for row in await cur.fetchall())
+                await cur.execute("SELECT p.payload FROM memory_revision_payloads p JOIN memory_revisions r ON r.revision_id=p.revision_id WHERE r.memory_id=%s",(memory_id,))
+                assert all(row["payload"] is None for row in await cur.fetchall())
+                await cur.execute("SELECT e.embedding_payload FROM embedding_generations e JOIN memory_revisions r ON r.revision_id=e.revision_id WHERE r.memory_id=%s",(memory_id,))
+                assert not await cur.fetchall()
+                await cur.execute("SELECT current_lifecycle_state FROM memory_projections WHERE memory_id=%s",(memory_id,))
+                assert (await cur.fetchone())["current_lifecycle_state"] == "PURGED"
+    finally:
+        pool.close()
+        await pool.wait_closed()
 
 
 @pytest.mark.asyncio

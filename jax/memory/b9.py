@@ -48,6 +48,9 @@ class ObjectKind(str, Enum):
     CONVERSATION="CONVERSATION"; MESSAGE="MESSAGE"; FACT="FACT"; DECISION_MEMORY="DECISION_MEMORY"
     ACTION_ITEM="ACTION_ITEM"; PERSON_PREFERENCE="PERSON_PREFERENCE"; SYNTHESIS="SYNTHESIS"; REFERENCE="REFERENCE"
 
+SYNTHESIS_SOURCE_KINDS=frozenset({ObjectKind.MESSAGE,ObjectKind.FACT,ObjectKind.DECISION_MEMORY,
+                                  ObjectKind.ACTION_ITEM,ObjectKind.PERSON_PREFERENCE,ObjectKind.REFERENCE})
+
 class Visibility(str, Enum):
     USER_PRIVATE="USER_PRIVATE"; PROJECT_SHARED="PROJECT_SHARED"; TENANT_SHARED="TENANT_SHARED"; SYSTEM_INTERNAL="SYSTEM_INTERNAL"
 
@@ -100,7 +103,9 @@ class ScopeContext:
                     or str(getattr(authorization, "tenant_id", "")) != str(self.tenant_id)
                     or str(getattr(authorization, "subject_user_id", "")) != str(self.subject_user_id)
                     or getattr(authorization, "project_status", None) != "ACTIVE"
-                    or getattr(authorization, "membership_status", None) != "ACTIVE"):
+                    or (getattr(authorization, "membership_status", None) != "ACTIVE" and not (
+                        self.actor_type == "SERVICE" and self.actor_principal == "service:memory-synthesis"
+                        and getattr(authorization, "membership_status", None) == "SERVICE_POLICY"))):
                 raise ScopeDenied("project authorization does not match scope")
         if self.actor_type == "USER":
             if not self.subject_user_id:
@@ -305,7 +310,10 @@ class PromptMemoryContext:
                 label="HISTORICAL MEMORY"
             else:
                 label="UNVERIFIED MEMORY"
-            sections.append(f"[{label} id={e.identity.memory_id} revision={e.revision.revision_id}]\n{e.revision.payload}")
+            # A single JSON string is data, even when its contents contain
+            # newlines or text resembling a section header.
+            payload=json.dumps(e.revision.payload, ensure_ascii=True).replace("[", "\\u005b").replace("]", "\\u005d")
+            sections.append(f"[{label} id={e.identity.memory_id} revision={e.revision.revision_id}]\n{payload}")
         return "\n\n".join(sections)
 
 
@@ -321,12 +329,12 @@ def legacy_prompt_context(scope: ScopeContext, entries: Iterable[tuple[str, str,
         raise ScopeDenied("legacy prompt memory requires validated scope") from exc
     envelopes=[]
     for kind, source_key, content in entries:
-        now=time.time(); mid="legacy:" + _digest((kind, source_key))
+        now=time.time(); mid="legacy:" + _digest((scope.tenant_id,kind, source_key))
         obj=MemoryObject(mid, ObjectKind.FACT if kind == "fact" else ObjectKind.MESSAGE, scope.tenant_id, now,
                          (kind, "jax_memory", source_key))
-        rev=MemoryRevision("legacy-revision:" + _digest((kind,source_key,content)),mid,_digest(content),Visibility.USER_PRIVATE,
+        rev=MemoryRevision("legacy-revision:" + _digest((scope.tenant_id,kind,source_key,content)),mid,_digest(content),Visibility.USER_PRIVATE,
                            scope.subject_user_id,scope.project_id,Lifecycle.ACTIVE,now,content,"LEGACY_PROVENANCE_INCOMPLETE")
-        prov=MemoryProvenance("legacy-provenance:" + _digest((kind,source_key)),rev.revision_id,(),"legacy-prompt-adapter","1",
+        prov=MemoryProvenance("legacy-provenance:" + _digest((scope.tenant_id,kind,source_key)),rev.revision_id,(),"legacy-prompt-adapter","1",
                               scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now,label)
         envelopes.append(MemoryEnvelope(obj,rev,(prov,),(),{"legacy":True}))
     return PromptMemoryContext(tuple(envelopes))
@@ -372,7 +380,7 @@ class InMemoryB9Store:
     def __init__(self):
         self.objects: dict[str, MemoryObject] = {}; self.revisions: dict[str, list[MemoryRevision]] = {}
         self.events: dict[str, list[MemoryEvent]] = {}; self.provenance: dict[str, list[MemoryProvenance]] = {}
-        self.projections: dict[str, MemoryProjection] = {}; self.bindings: dict[tuple[str,str,str], str] = {}
+        self.projections: dict[str, MemoryProjection] = {}; self.bindings: dict[tuple[str,str,str,str], str] = {}
         self.embeddings: dict[str, list[EmbeddingGeneration]] = {}
         self.embedding_spaces: dict[str, EmbeddingSpaceIdentity] = {}
         self._lock = threading.RLock()
@@ -463,7 +471,7 @@ class MemoryAPI:
             raise ScopeDenied("cross-tenant retrieval")
         if revision.visibility is Visibility.USER_PRIVATE and revision.user_id != scope.subject_user_id:
             raise ScopeDenied("private retrieval denied")
-        if revision.visibility is Visibility.PROJECT_SHARED and (
+        if revision.project_id is not None and (
             not scope.project_id or revision.project_id != scope.project_id
         ):
             raise ScopeDenied("project retrieval denied")
@@ -497,14 +505,15 @@ class MemoryAPI:
 
     def import_legacy(self, scope: ScopeContext, legacy_type: str, legacy_namespace: str, legacy_key: str,
                       kind: ObjectKind, content: str | None) -> str:
-        binding=(legacy_type, legacy_namespace, legacy_key); auth=self._authorize(scope,"IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL)
+        binding=(legacy_type, legacy_namespace, legacy_key); key=(scope.tenant_id,*binding)
+        auth=self._authorize(scope,"IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL)
         def work(s: InMemoryB9Store) -> str:
-            if binding in s.bindings: return s.bindings[binding]
+            if key in s.bindings: return s.bindings[key]
             now=time.time(); mid,rid=_uuid7(),_uuid7(); obj=MemoryObject(mid,kind,scope.tenant_id,now,binding)
             payload=content; rev=MemoryRevision(rid,mid,_digest(content or ""),Visibility.SYSTEM_INTERNAL,None,None,Lifecycle.ACTIVE,now,payload,"LEGACY_PROVENANCE_INCOMPLETE")
             prov=MemoryProvenance(_uuid7(),rid,(),"legacy-import","1",scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now,"LEGACY_PROVENANCE_INCOMPLETE")
             event=self._event(scope,auth,mid,rid,EventKind.IMPORT_LEGACY,now)
-            s._commit(obj,rev,prov,event); s.bindings[binding]=mid; return mid
+            s._commit(obj,rev,prov,event); s.bindings[key]=mid; return mid
         return self._store.transaction(work)
 
     def revise(self, scope: ScopeContext, memory_id: str, content: str, *, visibility: Visibility | None=None,
@@ -574,6 +583,8 @@ class MemoryAPI:
         auth=self._authorize(scope,"VERIFY",old.visibility)
         if obj.tenant_id != scope.tenant_id or not auth.resolved_roles.intersection({"memory_reviewer","memory_admin"}):
             raise AuthorizationDenied("verification requires resolved reviewer authority")
+        if old.lifecycle not in {Lifecycle.ACTIVE, Lifecycle.VERIFIED}:
+            raise ScopeDenied("memory lifecycle is not eligible for verification")
         def work(s: InMemoryB9Store) -> str:
             now=time.time(); rid=_uuid7(); rev=replace(old,revision_id=rid,lifecycle=Lifecycle.VERIFIED,created_at=now,prior_revision_id=old.revision_id)
             prov=MemoryProvenance(_uuid7(),rid,(old.revision_id,),"human-verification",method,scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now,limitations)
@@ -584,16 +595,21 @@ class MemoryAPI:
     def synthesize(self, scope: ScopeContext, source_ids: Iterable[str], content: str, *, provider: str | None, model: str | None, transformation_version: str) -> str:
         source_ids=tuple(source_ids)
         if not source_ids: raise B9Error("synthesis needs source memory")
-        sources=[self._store.revisions[i][-1] for i in source_ids]
-        for memory_id, revision in zip(source_ids, sources):
-            self._canonical_for_mutation(memory_id)
-            self._assert_read_scope(scope, self._store.objects[memory_id], revision)
-        if any(self._store.objects[i].kind is ObjectKind.SYNTHESIS for i in source_ids): raise B9Error("recursive automated synthesis prohibited")
-        # Synthesis cannot self-verify and begins unverified even from verified inputs.
-        auth=self._authorize(scope,"SYNTHESIZE",Visibility.SYSTEM_INTERNAL)
         def work(s: InMemoryB9Store) -> str:
+            sources=[]
+            for memory_id in source_ids:
+                self._canonical_for_mutation(memory_id)
+                obj=s.objects[memory_id]; revision=s.revisions[memory_id][-1]
+                self._assert_read_scope(scope,obj,revision)
+                if obj.kind not in SYNTHESIS_SOURCE_KINDS or revision.lifecycle not in {Lifecycle.ACTIVE,Lifecycle.VERIFIED} or revision.payload is None:
+                    raise ScopeDenied("source revision is ineligible for synthesis")
+                sources.append(revision)
+            effective_scope={(r.visibility,r.user_id,r.project_id) for r in sources}
+            if len(effective_scope) != 1: raise ScopeDenied("synthesis sources have different scopes")
+            visibility,user_id,project_id=effective_scope.pop()
+            auth=self._authorize(scope,"SYNTHESIZE",visibility)
             now=time.time(); mid,rid=_uuid7(),_uuid7(); obj=MemoryObject(mid,ObjectKind.SYNTHESIS,scope.tenant_id,now)
-            rev=MemoryRevision(rid,mid,_digest(content),Visibility.SYSTEM_INTERNAL,None,None,Lifecycle.ACTIVE,now,content,"COMPLETE")
+            rev=MemoryRevision(rid,mid,_digest(content),visibility,user_id,project_id,Lifecycle.ACTIVE,now,content,"COMPLETE")
             prov=MemoryProvenance(_uuid7(),rid,tuple(x.revision_id for x in sources),"synthesis",transformation_version,scope.actor_principal,scope.actor_type,scope.subject_user_id,provider,model,now)
             event=self._event(scope,auth,mid,rid,EventKind.SYNTHESIZE,now,{"derivation_depth":1})
             s._commit(obj,rev,prov,event); return mid
@@ -607,7 +623,10 @@ class MemoryAPI:
             now=time.time(); rid=_uuid7(); rev=replace(old,revision_id=rid,lifecycle=Lifecycle.PURGED,created_at=now,payload=None,prior_revision_id=old.revision_id)
             prov=MemoryProvenance(_uuid7(),rid,(old.revision_id,),"content-purge","1",scope.actor_principal,scope.actor_type,scope.subject_user_id,None,None,now)
             event=self._event(scope,auth,memory_id,rid,EventKind.CONTENT_PURGE,now)
-            s._commit(obj,rev,prov,event); return rid
+            s._commit(obj,rev,prov,event)
+            s.revisions[memory_id]=[replace(r,payload=None) for r in s.revisions[memory_id]]
+            for r in s.revisions[memory_id]: s.embeddings.pop(r.revision_id,None)
+            return rid
         return self._store.transaction(work)
 
     def tombstone(self, scope: ScopeContext, memory_id: str, *, reason: str) -> str:
@@ -671,7 +690,7 @@ class MemoryAPI:
             rev=self._store.revisions[memory_id][-1]
             if visibility is not None and rev.visibility is not visibility: continue
             if rev.visibility is Visibility.USER_PRIVATE and rev.user_id != scope.subject_user_id: continue
-            if rev.visibility is Visibility.PROJECT_SHARED and (not scope.project_id or rev.project_id != scope.project_id): continue
+            if rev.project_id is not None and (not scope.project_id or rev.project_id != scope.project_id): continue
             if rev.lifecycle in {Lifecycle.TOMBSTONED,Lifecycle.PURGED,Lifecycle.EXPIRED} or rev.payload is None: continue
             results.append(self.envelope(scope,memory_id))
         return tuple(results)
