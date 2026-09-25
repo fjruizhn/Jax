@@ -4323,11 +4323,18 @@ jobs:
           # runner real (necesita ese archivo con permisos que sólo jaxsvc/root tienen
           # ahí), NO algo que esta ronda rompió. Con esa única falla explicada aparte, el
           # delta neto de esta ronda es +1 sobre el piso anterior (2811 -> 2812); los 45
-          # skipped no cambian. NOTA DE RE-MEDICIÓN (regla 5, SESIONES EN PARALELO): la
-          # rama ops/versionar-drop-ins (PR #274) sube este mismo piso a 2821 por una
-          # causa completamente distinta (no relacionada) -- quien integre esa rama
-          # DESPUÉS de esta, o esta DESPUÉS de esa, tiene que re-medir sobre master en
-          # vez de sumar los deltas a ciegas.
+          # skipped no cambian. RE-MEDIDO 2026-09-25 (ronda 3, m5) sobre master actual
+          # (4192cc6, "Merge pull request #278") en un worktree aparte, con SOLO
+          # las_manos/motor_registry/tool_authority.py y las_manos/_tool_authority_test.py
+          # superpuestos encima (el resto de esta rama -- ops/permisos_proyectos.py,
+          # tests/test_permisos_proyectos.py -- no toca ningun archivo de este job):
+          # mismo resultado exacto, 2811 passed + 1 failed (la misma falla preexistente,
+          # no relacionada) + 45 skipped + 1 xfailed -- confirma que 4192cc6 no movio
+          # este piso por su cuenta. NOTA DE RE-MEDICION (regla 5, SESIONES EN PARALELO):
+          # la rama ops/versionar-drop-ins (PR #274, todavia sin integrar) sube este
+          # mismo piso a 2821 por una causa completamente distinta (no relacionada) --
+          # quien integre esa rama DESPUES de esta, o esta DESPUES de esa, tiene que
+          # re-medir sobre master en vez de sumar los deltas a ciegas.
           grep -qE "^2812 passed, 45 skipped" /tmp/out || {
             echo "PISO ROTO: se esperaban 2812 tests CORRIDOS y exactamente 45 skipped (16 de test_ejecutor_reproduccion_u3.py sin el corpus de U3 + 26 que exigen la constitución REAL + 2 de test_base_por_sesion.py sin JAX_DB_HOST + 1 de test_cola_uso_escritores.py sin checkout de jax-platform -- ver notas arriba). Medido con sudo unshare --mount tapando ~/claude-skills, ~/ejecutor-fase0 y ~/jax-platform, sin envolver la corrida en un bwrap externo (eso rompía setfacl/bwrap internos por namespaces anidados y daba falsos rojos -- corregido en esta misma ronda, ver nota arriba)."; exit 1; }
 
@@ -5924,7 +5931,14 @@ jobs:
         run: sudo install -o root -g root -m 0755 ops/permisos_proyectos.py /usr/local/sbin/jax-permisos-proyectos
       - run: PYTHONPATH=. python -m pytest tests/test_permisos_proyectos.py -v
       - name: Piso exacto de tests CORRIDOS (no skipeados)
+        # Medido 2026-09-25 en un contenedor LIMPIO ubuntu:24.04 (usuario runner,
+        # NOPASSWD:ALL, sin /etc/jax/.env -- no en hall9000): 39 passed, 2 skipped. Los
+        # dos skips son estructurales fuera de un host de jax real:
+        # test_aplicar_rechaza_explicitamente_por_raiz_no_configurada_cuando_env_es_legible
+        # (no hay /etc/jax/.env acá) y el test (b) de lectura/escritura cruzada contra
+        # /home/fruiz/jax-workspace/proyectos real. Si esto da "41 passed", este runner
+        # SÍ tiene ambos -- no es el runner esperado.
         run: |
           PYTHONPATH=. python -m pytest -q tests/test_permisos_proyectos.py 2>&1 | tee /tmp/permisos_proyectos
-          grep -qE "^28 passed, 1 skipped" /tmp/permisos_proyectos || {
-            echo "PISO ROTO: se esperaban 28 tests CORRIDOS (no skipeados) y exactamente 1 skipped."; exit 1; }
+          grep -qE "^39 passed, 2 skipped" /tmp/permisos_proyectos || {
+            echo "PISO ROTO: se esperaban 39 tests CORRIDOS (no skipeados) y exactamente 2 skipped."; exit 1; }

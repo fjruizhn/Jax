@@ -1,72 +1,55 @@
 #!/usr/bin/env python3
-# ops/permisos_proyectos.py [--verificar|--aplicar|--revertir RESPALDO] [RAIZ] — spec
-# docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md §5 (corrección de
-# brief, 2026-09-25): RAIZ/proyectos/ y todo lo de abajo queda DUEÑO jaxsvc, GRUPO fruiz
-# con escritura, setgid en directorios, ACL POSIX de acceso y por defecto
-# `u:jaxsvc:rwX,g:fruiz:rwX,m::rwx`.
+# ops/permisos_proyectos.py [--verificar [RAIZ] | --aplicar | --deshacer] — spec
+# docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md §5: RAIZ/proyectos/ y
+# todo lo de abajo queda DUEÑO jaxsvc, GRUPO fruiz con escritura, setgid en directorios,
+# ACL POSIX de acceso y por defecto `u:jaxsvc:rwX,g:fruiz:rwX,m::rwx`.
 #
-# SEGUNDA RONDA (2026-09-25) -- RECHAZADO con 3 BLOCK, 3 MAJOR, 6 MINOR sobre la primera
-# reescritura en Python (commit 4f117a7). Cada hallazgo real, con su defensa, documentado
-# donde corresponde en el código de abajo. Resumen para quien audite de nuevo:
+# TERCERA RONDA (2026-09-25) -- RECHAZADO de nuevo, esta vez con 2 BLOCK sobre el DISEÑO
+# de la reversión de la ronda 2 (json.py/-I y MAJOR-1/2/3 de esa ronda quedaron cerrados
+# por construcción, no hubo que tocarlos de nuevo). Los dos:
 #
-# BLOCK-1 (la reversión documentada, `sudo setfacl --restore`, sigue symlinks por NOMBRE
-#   como root): se retira esa recomendación por completo. `--revertir RESPALDO` es un modo
-#   nuevo que parsea el respaldo (con los escapes octales de getfacl) y aplica cada entrada
-#   con el MISMO recorrido seguro (dir_fd + dos-veces-nunca-por-nombre) que usa --aplicar --
-#   si algo que el respaldo recuerda como directorio/archivo hoy es un symlink o cambió de
-#   tipo, lo salta y lo reporta, nunca lo toca. Ver `_revertir` y
-#   `test_revertir_no_contamina_si_algo_se_volvio_symlink`.
+# BLOCK-1 (reconstruir el árbol desde un respaldo de texto, aunque el recorrido en sí
+#   fuera seguro, tenía cuatro fallas de DISEÑO: (a) el respaldo real de producción no
+#   trae "default:" en sus bloques de directorio salvo que YA tenga ACL por defecto -- el
+#   parser decidía "es directorio" mirando eso, así que un directorio SIN ACL todavía
+#   (el estado de HOY) se leía como archivo; (b) no restauraba setgid ni los bits
+#   especiales, ni el resto de la máscara; (c) un nombre de archivo con un espacio al
+#   final se recortaba al desescapar; (d) `--nucleo-revertir <respaldo> <ruta>` aceptaba
+#   CUALQUIER respaldo Y cualquier ruta -- alguien podía fabricar un respaldo con
+#   entradas para archivos arbitrarios y pedirle al núcleo root que les hiciera chown).
+#   SOLUCIÓN, no parche: se elimina reconstruir-desde-respaldo por completo.
+#   `--deshacer`/`--nucleo-deshacer` es un modo nuevo, DETERMINISTA: no lee ningún
+#   archivo de estado -- lleva el árbol al único estado que production tiene hoy medido
+#   con `stat` real (dueño fruiz:fruiz, sin ninguna ACL, sin bits especiales; el modo se
+#   deriva del rwx que el DUEÑO ya tiene en cada objeto, que en el árbol ya aplicado da
+#   exactamente 0775/0664 -- los dos casos reales medidos en hall9000 el 2026-09-25,
+#   fuera de `.claude-flow`, que este guion nunca toca). El respaldo de `getfacl -R -p`
+#   se conserva como REGISTRO FORENSE únicamente -- nunca se usa para reconstruir nada.
 #
-# BLOCK-2 (el núcleo root se re-ejecutaba desde `__file__` sin `-I`: en un despliegue real
-#   `ops/` puede ser escribible por jaxsvc, que podría plantar un `json.py` que se
-#   importaría en vez del de la librería estándar -- reproducido empíricamente en hall9000
-#   el 2026-09-25: SIN `-I`, un `json.py` de mentira en el directorio del script se
-#   importa y corre como root; CON `-I`, `sys.path` no incluye el directorio del script y
-#   se importa el `json` real): el núcleo se instala en `/usr/local/sbin/jax-permisos-proyectos`
-#   (root:root, 0755, con toda la cadena de directorios padre también root y sin escritura
-#   de grupo/otros -- verificado antes de cada `--aplicar`), y se invoca SIEMPRE con
-#   `sudo -n /usr/bin/python3 -I <esa ruta>`. Además, el núcleo privilegiado ya no acepta
-#   cualquier ruta -- valida que la RAIZ pedida sea exactamente la configurada
-#   (`JAX_WORKSPACE_DIR` de `/etc/jax/.env`, leído directo -- el proceso ya es root) antes
-#   de tocar nada; hoy, sin este chequeo, se le podía pedir `/etc` y lo recorría igual.
+# BLOCK-2 (con --revertir eliminado, sus tres puntos de entrada al núcleo tenían un
+#   problema compartido: aceptaban una ruta arbitraria como argumento -- incluso
+#   validada contra symlinks, seguía siendo una ruta que el LLAMADOR elegía). Las TRES
+#   entradas del núcleo (`--nucleo-privilegiado`, `--nucleo-respaldo`,
+#   `--nucleo-deshacer`) ya NO aceptan ningún argumento de ruta -- cada una resuelve
+#   `PROYECTOS` de forma independiente, siempre desde `/etc/jax/.env`, siempre la misma
+#   función. Un argumento de más en cualquiera de las tres (`--nucleo-respaldo /etc/ssh`,
+#   `--nucleo-deshacer /var/tmp/x`) se rechaza sin tocar nada. Modos repetidos
+#   (`--aplicar --verificar`) también se rechazan.
 #
-# BLOCK-3 (CI): (a) el respaldo vivía en el $HOME de fruiz, que en un runner limpio con
-#   `useradd --no-create-home` no existe y `/home` no es escribible por un usuario sin
-#   privilegio -- se movió a `/var/backups/jax-permisos` (root, 0700, creado por el propio
-#   núcleo privilegiado). (b) el test nuevo de B1 en `las_manos/_tool_authority_test.py`
-#   sube el piso de `tests-puros` -- ver `.github/workflows/policy.yml` y el mensaje de
-#   commit para el número medido y la nota de re-medición (regla 5 de SESIONES EN PARALELO).
-#
-# MAJOR-1 (--verificar, sin privilegio, reventaba con PermissionError contra un archivo
-#   0600 de jaxsvc en vez de reportarlo): TODA apertura usa `O_PATH` (nunca requiere
-#   permiso de lectura sobre el objetivo, sólo travesía sobre el padre -- verificado
-#   empíricamente: `getfacl`/`fstat` vía `/proc/self/fd/N` de un descriptor O_PATH
-#   funcionan igual aunque el proceso no tenga NINGÚN permiso sobre el archivo). `EACCES`
-#   al intentar LISTAR un directorio (no al abrirlo) se reporta como NO CUMPLE y no se
-#   desciende ahí; cualquier otra excepción no prevista sale con código 2, no con un
-#   traceback a medias.
-#
-# MAJOR-2 (TOCTOU entre un `lstat` para clasificar y un `open` posterior -- una ventana
-#   real para que un hardlink o una FIFO se cuelen, y abrir una FIFO sin O_NONBLOCK CUELGA
-#   el núcleo root): se elimina el `lstat` previo por completo. Cada entrada se abre UNA
-#   sola vez con `O_PATH|O_NOFOLLOW` y se clasifica con `fstat` sobre ESE MISMO descriptor
-#   -- no hay ventana entre "mirar" y "abrir" porque es la misma operación. Verificado
-#   empíricamente: `O_PATH` sobre una FIFO no bloquea (a diferencia de un `open` normal) y
-#   `O_PATH|O_NOFOLLOW` sobre un symlink NO falla con ELOOP -- da un descriptor que
-#   `fstat` identifica como symlink, sin haber tocado el objetivo ni una sola vez.
-#
-# MAJOR-3: el test que reproduce B1 exige `returncode == 0` de --aplicar, no se salta si
-#   falla (ver tests/test_permisos_proyectos.py).
-#
-# MINOR: m-a --verificar compara también el dueño (uid), no sólo el grupo. m-b la
-#   exclusión de nombres con "." se reduce a una lista EXPLÍCITA (`NOMBRES_EXCLUIDOS`, hoy
-#   sólo `.claude-flow`) que se imprime cuando se salta algo. m-c `_write_file` usa 0o660,
-#   no 0o664 (fuera de proyectos/ no hay ACL que recorte "other"). m-d el respaldo parcial
-#   se borra si falla, sin un `except: raise` vacío. m-f sin `sudo -n` disponible, la
-#   resolución de RAIZ por defecto falla cerrado en vez de adivinar un valor fijo.
+# Además: MAJOR-1 de esta ronda -- `getfacl -R -p ... > archivo` puede dar rc==0 aunque
+# la escritura haya fallado (verificado empíricamente: `getfacl ... > /dev/full` da
+# rc==0). El respaldo ahora hace `fsync`, se relee, se parsea, y se compara la cantidad
+# de entradas contra un recorrido independiente del árbol real -- si no coinciden, el
+# respaldo se descarta y `--aplicar` aborta sin mutar nada. m1: sin `/etc/jax/.env`
+# legible, todo lo que necesita `PROYECTOS` falla cerrado -- ya no hay ningún valor de
+# reserva. m2: el sha256 del núcleo instalado se compara contra el CONTENIDO COMMITEADO
+# en HEAD (`git show HEAD:ops/permisos_proyectos.py`), no contra el working tree; la
+# cadena de directorios padre se revisa con `lstat` (nunca sigue un symlink). m4: la
+# exclusión de `NOMBRES_EXCLUIDOS` sólo aplica al primer nivel de cada proyecto
+# (`proyectos/<proyecto>/.claude-flow`), nunca en `proyectos/` mismo ni más profundo, y
+# se reporta.
 from __future__ import annotations
 
-import errno
 import grp
 import hashlib
 import json
@@ -80,12 +63,13 @@ import sys
 import tempfile
 from pathlib import Path
 
-USUARIO = "jaxsvc"  # dueño nuevo, y entrada ACL nombrada de usuario
-GRUPO = "fruiz"  # grupo nuevo, y entrada ACL nombrada de grupo
+USUARIO = "jaxsvc"  # dueño tras --aplicar, y entrada ACL nombrada de usuario
+GRUPO = "fruiz"  # grupo tras --aplicar, y entrada ACL nombrada de grupo
+DUENO_ORIGINAL = "fruiz"  # a quien --deshacer devuelve el dueño (mismo nombre que GRUPO
+# -- son dos roles distintos que hoy coinciden en la misma cuenta del sistema)
 
-# m-b: lista EXPLÍCITA, no "cualquier nombre con punto" -- decisión del coordinador hasta
-# que Fernando diga otra cosa. Estado propio de herramientas (típicamente 700) que no se
-# toca ni se recorre.
+# m4 (ronda 3): sólo en el primer nivel de cada proyecto, nunca en proyectos/ mismo ni
+# más profundo -- ver _caminar, que sólo aplica esto cuando profundidad == 2.
 NOMBRES_EXCLUIDOS = frozenset({".claude-flow"})
 
 RUTA_INSTALADA = Path("/usr/local/sbin/jax-permisos-proyectos")
@@ -106,21 +90,40 @@ class ErrorPermisosProyectos(Exception):
 
 def _leer_workspace_dir_directo() -> str | None:
     """Sólo para el núcleo privilegiado (ya es root): lee /etc/jax/.env directo, sin
-    sudo -n -- root puede leer un archivo root:jaxsvc 640 sin ayuda."""
+    sudo -n -- root puede leer un archivo root:jaxsvc 640 sin ayuda. None si no se pudo
+    leer o la variable no está -- m1, sin valor de reserva: el llamador decide fallar."""
     try:
         contenido = RUTA_ENV.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     for linea in contenido.splitlines():
         if linea.startswith("JAX_WORKSPACE_DIR="):
-            return linea.split("=", 1)[1].strip()
+            valor = linea.split("=", 1)[1].strip()
+            return valor or None
     return None
 
 
+def _raiz_configurada_privilegiada() -> Path:
+    """Sólo la usan las tres entradas del núcleo (ya son root). m1: sin
+    JAX_WORKSPACE_DIR legible, esto FALLA -- nunca un valor fijo por adivinanza."""
+    workspace = _leer_workspace_dir_directo()
+    if not workspace:
+        raise ErrorPermisosProyectos(
+            f"no se pudo leer JAX_WORKSPACE_DIR de {RUTA_ENV} -- sin valor de reserva."
+        )
+    proyectos_str = os.path.join(workspace, "proyectos")
+    absoluta = os.path.abspath(proyectos_str)
+    if os.path.islink(absoluta) or os.path.realpath(absoluta) != absoluta:
+        raise ErrorPermisosProyectos(f"{absoluta} es (o cuelga de) un symlink -- no se sigue nunca")
+    if not os.path.isdir(absoluta):
+        raise ErrorPermisosProyectos(f"{absoluta} no existe")
+    return Path(absoluta)
+
+
 def _raiz_por_defecto() -> str:
-    """m-f: si no hay sudo -n disponible para leer /etc/jax/.env (root:jaxsvc 640) y no
-    se dio una RAIZ explícita, esto FALLA -- ya no inventa un valor fijo por adivinanza.
-    Devuelve la cadena vacía como señal de "no se pudo resolver"; el llamador decide."""
+    """m1/m-f (rondas 2 y 3): si `sudo -n` no puede leer /etc/jax/.env (root:jaxsvc 640)
+    y no se dio una RAIZ explícita, esto FALLA -- nunca un valor fijo por adivinanza.
+    Cadena vacía = "no se pudo resolver"; el llamador decide."""
     try:
         salida = subprocess.run(
             ["sudo", "-n", "grep", "^JAX_WORKSPACE_DIR=", str(RUTA_ENV)],
@@ -164,27 +167,21 @@ def _validar_y_obtener_proyectos(raiz: str) -> Path:
 
 
 # ============================================================================
-# Apertura segura: SIEMPRE O_PATH, SIEMPRE por descriptor (MAJOR-1, MAJOR-2)
+# Apertura segura: SIEMPRE O_PATH, SIEMPRE por descriptor
 # ============================================================================
 #
-# O_PATH no requiere NINGÚN permiso sobre el objetivo (ni de lectura, ni de escritura, ni
-# de ejecución) -- sólo travesía sobre los directorios padre, que ya se tiene por haber
-# llegado hasta acá. Verificado empíricamente en hall9000 (2026-09-25):
-#   - fstat() sobre un descriptor O_PATH funciona siempre.
-#   - getfacl/setfacl vía /proc/self/fd/N de un descriptor O_PATH funcionan siempre,
-#     incluso contra un archivo 0600 de otro dueño.
-#   - O_PATH|O_NOFOLLOW sobre una FIFO NO bloquea (a diferencia de un open() normal).
-#   - O_PATH|O_NOFOLLOW sobre un symlink NO falla con ELOOP: da un descriptor que fstat()
-#     identifica como symlink, sin tocar el objetivo.
-#   - fchown/fchmod SÍ necesitan un descriptor "real" (no O_PATH) -- se reabre vía
-#     /proc/self/fd/N, lo cual (corriendo como root) nunca falla por permisos.
-# Con esto, clasificar y actuar son la MISMA apertura: no hay ventana entre "mirar qué es"
-# y "usarlo" en la que algo se pueda haber sustituido (MAJOR-2).
+# O_PATH no requiere NINGÚN permiso sobre el objetivo -- sólo travesía sobre los
+# directorios padre, que ya se tiene por haber llegado hasta acá. Verificado
+# empíricamente en hall9000: fstat()/getfacl()/setfacl() vía /proc/self/fd/N de un
+# descriptor O_PATH funcionan siempre (incluso contra un archivo 0600 ajeno); sobre una
+# FIFO NO bloquea; sobre un symlink NO falla -- da un descriptor que fstat() identifica
+# como symlink, sin tocar el objetivo. fchown/fchmod necesitan un descriptor "real" --
+# se reabre vía /proc/self/fd/N, que corriendo como root nunca falla por permisos.
+# Clasificar y actuar son la MISMA apertura: no hay ventana entre "mirar qué es" y
+# "usarlo" en la que algo se pueda haber sustituido.
 
 def _abrir_o_path(nombre: str, dir_fd: int) -> int | None:
-    """None si la entrada desapareció entre el listado y esta apertura (ENOENT) -- no es
-    un fallo, ya no está. Cualquier otro error se propaga (por ejemplo, un padre inválido
-    a esta altura sería un fallo real, no algo a saltear en silencio)."""
+    """None si la entrada desapareció entre el listado y esta apertura (ENOENT)."""
     try:
         return os.open(nombre, os.O_PATH | os.O_NOFOLLOW, dir_fd=dir_fd)
     except FileNotFoundError:
@@ -192,10 +189,6 @@ def _abrir_o_path(nombre: str, dir_fd: int) -> int | None:
 
 
 def _reabrir_real(fd_path: int, flags: int) -> int:
-    """A partir de un descriptor O_PATH, un descriptor "real" para operaciones que O_PATH
-    no soporta directo (fchown/fchmod, listar un directorio). Corriendo como root, esto
-    nunca falla por permisos del objetivo (DAC override); corriendo sin privilegio, SÍ
-    puede fallar con EACCES -- el llamador decide qué hacer con eso."""
     return os.open(f"/proc/self/fd/{fd_path}", flags)
 
 
@@ -218,8 +211,20 @@ def _setfacl(fd_path: int, entrada: str, *, default: bool = False) -> None:
         raise ErrorPermisosProyectos(f"setfacl falló sobre el descriptor {fd_path}: {r.stderr}")
 
 
+def _limpiar_acl(fd_path: int, ruta: str) -> None:
+    """--deshacer: quita la ACL de acceso Y por defecto por completo (verificado que
+    `-b -k` no falla sobre un archivo, aunque -k no tenga nada que hacer ahí)."""
+    os.set_inheritable(fd_path, True)
+    r = subprocess.run(
+        ["setfacl", "-b", "-k", f"/proc/self/fd/{fd_path}"],
+        pass_fds=(fd_path,), capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise ErrorPermisosProyectos(f"setfacl -b -k falló sobre {ruta}: {r.stderr}")
+
+
 # ============================================================================
-# ACL: parseo y permiso EFECTIVO (B1, ronda 1)
+# ACL: parseo y permiso EFECTIVO
 # ============================================================================
 
 _RE_ENTRADA = re.compile(r"^(default:)?(user|group|mask|other)(?::([^:]*))?:([rwx-]{3})")
@@ -278,10 +283,34 @@ def _es_nombre_excluido(nombre: str) -> bool:
 
 
 # ============================================================================
-# Recorrido seguro
+# Recorrido seguro (compartido por verificar, aplicar y deshacer)
 # ============================================================================
 
-def _caminar(dir_fd: int, ruta: str, *, mutar: bool, resultado: Resultado, hook_de_prueba=None) -> None:
+def _procesar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, accion: str,
+                          resultado: Resultado) -> None:
+    if accion == "deshacer":
+        _deshacer_objeto(fd_path, ruta, resultado)
+        return
+    _revisar_o_mutar_directorio(fd_path, ruta, st, mutar=(accion == "aplicar"), resultado=resultado)
+
+
+def _procesar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, accion: str,
+                       resultado: Resultado) -> None:
+    if st.st_nlink > 1:
+        resultado.hardlinks_rechazados.append(f"{ruta} (nlink={st.st_nlink})")
+        return
+    if accion == "deshacer":
+        _deshacer_objeto(fd_path, ruta, resultado)
+        return
+    _revisar_o_mutar_archivo(fd_path, ruta, st, mutar=(accion == "aplicar"), resultado=resultado)
+
+
+def _caminar(dir_fd: int, ruta: str, profundidad: int, *, accion: str, resultado: Resultado,
+             hook_de_prueba=None) -> None:
+    """`profundidad` es la profundidad de las ENTRADAS que se listan en esta llamada,
+    relativa a `proyectos/` (sus hijos directos son profundidad 1). m4: la exclusión de
+    NOMBRES_EXCLUIDOS sólo aplica en profundidad 2 -- proyectos/<proyecto>/.claude-flow,
+    nunca en proyectos/ mismo (profundidad 1) ni más abajo."""
     if hook_de_prueba is not None:
         hook_de_prueba(ruta)
 
@@ -292,13 +321,13 @@ def _caminar(dir_fd: int, ruta: str, *, mutar: bool, resultado: Resultado, hook_
         nombre = entrada.name
         ruta_hija = f"{ruta}/{nombre}"
 
-        if _es_nombre_excluido(nombre):
+        if profundidad == 2 and _es_nombre_excluido(nombre):
             resultado.excluidos.append(ruta_hija)
             continue
 
         fd_path = _abrir_o_path(nombre, dir_fd)
         if fd_path is None:
-            continue  # desapareció entre el listado y esta apertura -- ya no está
+            continue
 
         try:
             try:
@@ -311,7 +340,7 @@ def _caminar(dir_fd: int, ruta: str, *, mutar: bool, resultado: Resultado, hook_
                 continue
 
             if stat.S_ISDIR(st.st_mode):
-                _revisar_o_mutar_directorio(fd_path, ruta_hija, st, mutar=mutar, resultado=resultado)
+                _procesar_directorio(fd_path, ruta_hija, st, accion=accion, resultado=resultado)
                 resultado.dirs_procesados += 1
                 try:
                     fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
@@ -319,13 +348,14 @@ def _caminar(dir_fd: int, ruta: str, *, mutar: bool, resultado: Resultado, hook_
                     resultado.no_cumple.append(f"{ruta_hija}: sin permiso para listar el contenido (EACCES)")
                     continue
                 try:
-                    _caminar(fd_listable, ruta_hija, mutar=mutar, resultado=resultado, hook_de_prueba=hook_de_prueba)
+                    _caminar(fd_listable, ruta_hija, profundidad + 1, accion=accion,
+                             resultado=resultado, hook_de_prueba=hook_de_prueba)
                 finally:
                     os.close(fd_listable)
                 continue
 
             if stat.S_ISREG(st.st_mode):
-                _revisar_o_mutar_archivo(fd_path, ruta_hija, st, mutar=mutar, resultado=resultado)
+                _procesar_archivo(fd_path, ruta_hija, st, accion=accion, resultado=resultado)
                 resultado.archivos_procesados += 1
                 continue
 
@@ -334,7 +364,7 @@ def _caminar(dir_fd: int, ruta: str, *, mutar: bool, resultado: Resultado, hook_
             os.close(fd_path)
 
 
-def _recorrer(proyectos: Path, *, mutar: bool, hook_de_prueba=None) -> Resultado:
+def _recorrer(proyectos: Path, *, accion: str, hook_de_prueba=None) -> Resultado:
     resultado = Resultado()
     fd_raiz = os.open(str(proyectos.parent), os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -345,11 +375,12 @@ def _recorrer(proyectos: Path, *, mutar: bool, hook_de_prueba=None) -> Resultado
             st = os.fstat(fd_proyectos)
             if stat.S_ISLNK(st.st_mode):
                 raise ErrorPermisosProyectos(f"{proyectos} se volvió un symlink justo antes de abrirlo")
-            _revisar_o_mutar_directorio(fd_proyectos, str(proyectos), st, mutar=mutar, resultado=resultado)
+            _procesar_directorio(fd_proyectos, str(proyectos), st, accion=accion, resultado=resultado)
             resultado.dirs_procesados += 1
             fd_listable = _reabrir_real(fd_proyectos, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                _caminar(fd_listable, str(proyectos), mutar=mutar, resultado=resultado, hook_de_prueba=hook_de_prueba)
+                _caminar(fd_listable, str(proyectos), 1, accion=accion, resultado=resultado,
+                         hook_de_prueba=hook_de_prueba)
             finally:
                 os.close(fd_listable)
         finally:
@@ -360,7 +391,7 @@ def _recorrer(proyectos: Path, *, mutar: bool, hook_de_prueba=None) -> Resultado
 
 
 # ============================================================================
-# Chequeo/corrección de un directorio
+# --verificar / --aplicar: chequeo/corrección de un directorio o archivo
 # ============================================================================
 
 def _revisar_o_mutar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, mutar: bool,
@@ -370,8 +401,6 @@ def _revisar_o_mutar_directorio(fd_path: int, ruta: str, st: os.stat_result, *, 
         st = os.fstat(fd_path)
 
     faltas = []
-
-    # m-a: dueño, no sólo grupo.
     try:
         dueno_real = pwd.getpwuid(st.st_uid).pw_name
     except KeyError:
@@ -439,16 +468,8 @@ def _mutar_directorio(fd_path: int, ruta: str, resultado: Resultado) -> None:
         os.close(fd_real)
 
 
-# ============================================================================
-# Chequeo/corrección de un archivo
-# ============================================================================
-
 def _revisar_o_mutar_archivo(fd_path: int, ruta: str, st: os.stat_result, *, mutar: bool,
                               resultado: Resultado) -> None:
-    if st.st_nlink > 1:
-        resultado.hardlinks_rechazados.append(f"{ruta} (nlink={st.st_nlink})")
-        return
-
     if mutar:
         _mutar_archivo(fd_path, ruta, resultado)
         st = os.fstat(fd_path)
@@ -508,37 +529,77 @@ def _mutar_archivo(fd_path: int, ruta: str, resultado: Resultado) -> None:
         os.close(fd_real)
 
 
-def _reporte_legible(resultado: Resultado) -> tuple[str, bool]:
-    lineas = []
-    for r in resultado.no_cumple:
-        lineas.append(f"NO CUMPLE: {r}")
-    for r in resultado.hardlinks_rechazados:
-        lineas.append(f"HARDLINK RECHAZADO (no se muta, nlink>1): {r}")
-    for r in resultado.symlinks_saltados:
-        lineas.append(f"SYMLINK saltado (no se sigue, no se reporta como falta): {r}")
-    for r in resultado.excluidos:
-        lineas.append(f"excluido por nombre (sin tocar): {r}")
-    ok = not resultado.no_cumple and not resultado.hardlinks_rechazados
-    return "\n".join(lineas), ok
+# ============================================================================
+# --deshacer: vuelve al estado conocido de hoy (BLOCK-1, ronda 3)
+# ============================================================================
+#
+# Medido con `stat` real en hall9000 el 2026-09-25, fuera de `.claude-flow` (que este
+# guion nunca toca): TODO `proyectos/` es hoy fruiz:fruiz, sin ninguna ACL, sin ningún
+# bit especial -- 108 directorios en 0775, 249 archivos en 0664 (find ... -printf,
+# ver el runbook). Las únicas excepciones medidas (2 directorios en 0700, 1 archivo en
+# 0600) viven DENTRO de `.claude-flow`, que --deshacer -- igual que --verificar y
+# --aplicar -- nunca alcanza. En vez de fijar 0775/0664 a fuego, el modo se DERIVA del
+# rwx que el dueño YA tiene en cada objeto (lo que en el árbol ya aplicado da
+# exactamente esos dos números) -- así, si algún día un objeto real dentro del alcance
+# de este guion resultara ser una excepción legítima, --deshacer no lo fuerza a
+# 0775/0664, preserva lo que su dueño ya podía hacer.
+
+def _modo_deshecho(modo_actual: int) -> int:
+    propietario = (modo_actual >> 6) & 0o7
+    return (propietario << 6) | (propietario << 3) | (propietario & 0o5)
+
+
+def _deshacer_objeto(fd_path: int, ruta: str, resultado: Resultado) -> None:
+    """Orden verificado empíricamente (hall9000 y en un contenedor limpio, 2026-09-25):
+    cuando hay ACL extendida, el bit de GRUPO que se ve por `stat` plano es la MÁSCARA,
+    no la entrada `group::` real -- `_mutar_directorio`/`_mutar_archivo` sólo tocan la
+    entrada NOMBRADA `g:fruiz:`, nunca `group::` (la entrada "grupo dueño" tradicional),
+    así que ésta puede seguir teniendo el valor que tenía al crearse el archivo (0644 si
+    quien lo creó tenía umask 022, como jaxsvc en producción). Si se calcula/aplica el
+    modo ANTES de quitar la ACL, `setfacl -b` (que corre después) revela esa entrada
+    `group::` vieja y pisa el modo recién puesto. Por eso acá la ACL se quita PRIMERO, y
+    el modo se calcula y aplica DESPUÉS, como paso final -- el chmod explícito manda
+    sobre lo que hubiera antes, sin nadie corriendo después que lo pueda revertir."""
+    uid = pwd.getpwnam(DUENO_ORIGINAL).pw_uid
+    gid = grp.getgrnam(GRUPO).gr_gid
+    fd_real = _reabrir_real(fd_path, os.O_RDONLY)
+    try:
+        os.fchown(fd_real, uid, gid)
+    finally:
+        os.close(fd_real)
+
+    _limpiar_acl(fd_path, ruta)
+
+    fd_real = _reabrir_real(fd_path, os.O_RDONLY)
+    try:
+        st_ahora = os.fstat(fd_real)
+        nuevo_modo = _modo_deshecho(st_ahora.st_mode)
+        if nuevo_modo != stat.S_IMODE(st_ahora.st_mode):
+            os.fchmod(fd_real, nuevo_modo)
+    finally:
+        os.close(fd_real)
 
 
 # ============================================================================
-# Instalación del núcleo privilegiado (BLOCK-2)
+# Instalación del núcleo privilegiado
 # ============================================================================
 
-def _sha256_de(ruta: Path) -> str:
-    return hashlib.sha256(ruta.read_bytes()).hexdigest()
+def _sha256_de(datos: bytes) -> str:
+    return hashlib.sha256(datos).hexdigest()
 
 
 def _cadena_es_de_root_sin_escritura_de_grupo_u_otros(ruta: Path) -> str | None:
-    """None si toda la cadena (la propia ruta y cada padre hasta la raíz) es de root y
-    ninguno es escribible por grupo u otros. Si no, el motivo."""
+    """None si toda la cadena (la propia ruta y cada padre hasta la raíz) es de root, sin
+    escritura de grupo/otros, y NINGUNO es un symlink -- m2 (ronda 3): lstat en cada
+    nivel, nunca stat (que seguiría un symlink intermedio sin decirlo)."""
     actual = ruta
     while True:
         try:
-            st = actual.stat()
+            st = os.lstat(actual)
         except OSError as exc:
             return f"{actual} no se pudo leer: {exc}"
+        if stat.S_ISLNK(st.st_mode):
+            return f"{actual} es un symlink -- no se sigue nunca"
         if st.st_uid != 0:
             return f"{actual} no es de root (uid={st.st_uid})"
         if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
@@ -548,23 +609,44 @@ def _cadena_es_de_root_sin_escritura_de_grupo_u_otros(ruta: Path) -> str | None:
         actual = actual.parent
 
 
+def _sha256_del_head_committeado() -> tuple[str | None, str]:
+    """m2 (ronda 3): el contenido COMMITEADO en HEAD, no el del working tree (que puede
+    tener cambios sin commitear que nadie más ve). None + motivo si no se pudo obtener."""
+    repo_script = Path(os.path.abspath(__file__))
+    try:
+        raiz_repo = subprocess.run(
+            ["git", "-C", str(repo_script.parent), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if raiz_repo.returncode != 0:
+            return None, f"no es un checkout de git: {raiz_repo.stderr.strip()}"
+        ruta_relativa = repo_script.relative_to(raiz_repo.stdout.strip())
+        contenido = subprocess.run(
+            ["git", "-C", raiz_repo.stdout.strip(), "show", f"HEAD:{ruta_relativa}"],
+            capture_output=True, timeout=10,
+        )
+        if contenido.returncode != 0:
+            return None, f"git show HEAD:{ruta_relativa} falló: {contenido.stderr.decode(errors='replace')}"
+    except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+        return None, f"no se pudo consultar git: {exc}"
+    return _sha256_de(contenido.stdout), ""
+
+
 def _verificar_instalacion() -> str | None:
-    """None si el núcleo instalado existe, su cadena de directorios es segura, y su
-    contenido coincide byte a byte con este archivo del repo. Si no, el motivo."""
+    """None si el núcleo instalado existe, su cadena de directorios es segura (lstat,
+    root, sin escritura de grupo/otros), y su sha256 coincide con el HEAD commiteado."""
     if not RUTA_INSTALADA.is_file():
         return f"{RUTA_INSTALADA} no está instalado"
     motivo_cadena = _cadena_es_de_root_sin_escritura_de_grupo_u_otros(RUTA_INSTALADA)
     if motivo_cadena:
         return motivo_cadena
-    repo = Path(os.path.abspath(__file__))
-    if _sha256_de(RUTA_INSTALADA) != _sha256_de(repo):
-        return f"{RUTA_INSTALADA} no coincide con {repo} (sha256 distinto -- reinstalar)"
+    sha_head, motivo_git = _sha256_del_head_committeado()
+    if sha_head is None:
+        return f"no se pudo obtener el sha256 de HEAD para comparar: {motivo_git}"
+    if _sha256_de(RUTA_INSTALADA.read_bytes()) != sha_head:
+        return f"{RUTA_INSTALADA} no coincide con HEAD:ops/permisos_proyectos.py (sha256 distinto -- reinstalar)"
     return None
 
-
-# ============================================================================
-# Respaldo (BLOCK-3a: /var/backups/jax-permisos, root, 0700) y reversión (BLOCK-1)
-# ============================================================================
 
 def _invocar_nucleo(*args: str) -> subprocess.CompletedProcess:
     motivo = _verificar_instalacion()
@@ -582,56 +664,19 @@ def _invocar_nucleo(*args: str) -> subprocess.CompletedProcess:
     )
 
 
-def _hacer_respaldo(proyectos: Path) -> Path:
-    """El directorio de respaldos es root:root 0700 (BLOCK-3a) -- el proceso sin
-    privilegio que llama a esto NO PUEDE stat/leer el archivo resultante directamente
-    (ni falta que hace: `--nucleo-respaldo`, corriendo como root, ya comprobó tamaño>0
-    ANTES de imprimir la ruta -- rc==0 con una ruta impresa ES la garantía)."""
-    r = _invocar_nucleo("--nucleo-respaldo", str(proyectos))
-    if r.returncode != 0:
-        raise ErrorPermisosProyectos(f"el respaldo falló: {r.stdout}{r.stderr} -- no se aplicó ningún cambio.")
-    ruta_texto = r.stdout.strip()
-    if not ruta_texto:
-        raise ErrorPermisosProyectos("el respaldo no devolvió ninguna ruta -- no se aplicó ningún cambio.")
-    return Path(ruta_texto)
-
-
-def _cmd_nucleo_respaldo(proyectos_str: str) -> int:
-    """Corre como root. m-d: si algo falla, el archivo parcial se borra -- nunca queda un
-    respaldo incompleto pareciendo uno bueno."""
-    if os.geteuid() != 0:
-        print("el núcleo de respaldo tiene que correr como root", file=sys.stderr)
-        return 2
-    RUTA_RESPALDOS.mkdir(parents=True, exist_ok=True)
-    os.chmod(RUTA_RESPALDOS, 0o700)
-    fd, ruta_txt = tempfile.mkstemp(dir=str(RUTA_RESPALDOS), prefix="proyectos-", suffix=".acl")
-    ruta = Path(ruta_txt)
-    ok = False
-    try:
-        with os.fdopen(fd, "wb") as f:
-            r = subprocess.run(["getfacl", "-R", "-p", proyectos_str], stdout=f, stderr=subprocess.PIPE)
-        if r.returncode != 0:
-            print(f"getfacl rc={r.returncode}: {r.stderr.decode(errors='replace')}", file=sys.stderr)
-            return 1
-        if ruta.stat().st_size == 0:
-            print("el respaldo quedó vacío", file=sys.stderr)
-            return 1
-        ok = True
-        print(str(ruta))
-        return 0
-    finally:
-        if not ok:
-            ruta.unlink(missing_ok=True)
-
-
-# --- Parseo del respaldo (BLOCK-1): octal-unescape de getfacl -----------------------------
+# ============================================================================
+# Respaldo: REGISTRO FORENSE únicamente (ronda 3 -- ya no se usa para revertir nada)
+# ============================================================================
 
 _RE_ESCAPE = re.compile(r"\\\\|\\[0-7]{3}")
 
 
 def _desescapar_getfacl(texto: str) -> str:
-    """getfacl -p escapa '\\' como '\\\\' y cualquier byte problemático (verificado:
-    newline embebido) como '\\OOO' (3 dígitos octales) en la línea '# file: ...'."""
+    """getfacl -p escapa '\\' como '\\\\' y cualquier byte problemático como '\\OOO' (3
+    dígitos octales) en la línea '# file: ...'. Un espacio al FINAL del nombre también
+    se escapa (verificado: si no, getfacl -R -p perdería el espacio al re-parsear su
+    propia salida) -- por eso este desescape opera sobre la línea completa, sin recortar
+    espacios antes de aplicarlo (ver _parsear_respaldo)."""
     def _uno(m: re.Match) -> str:
         s = m.group(0)
         if s == "\\\\":
@@ -640,116 +685,56 @@ def _desescapar_getfacl(texto: str) -> str:
     return _RE_ESCAPE.sub(_uno, texto)
 
 
-class _RegistroRespaldo:
-    __slots__ = ("ruta", "es_dir", "owner", "group", "acl_texto")
-
-    def __init__(self, ruta: str, es_dir: bool, owner: str, group: str, acl_texto: str):
-        self.ruta = ruta
-        self.es_dir = es_dir
-        self.owner = owner
-        self.group = group
-        self.acl_texto = acl_texto
-
-
-def _parsear_respaldo(contenido: str) -> dict[str, _RegistroRespaldo]:
-    registros: dict[str, _RegistroRespaldo] = {}
+def _parsear_respaldo(contenido: str) -> list[str]:
+    """Devuelve la lista de rutas que el respaldo registra -- sólo para el conteo
+    forense (MAJOR-1). Ya no se usa para restaurar nada: no hace falta distinguir
+    directorio de archivo ni guardar owner/ACL (ver el BLOCK-1 de esta ronda, que
+    retiró reconstruir-desde-respaldo por completo)."""
+    rutas = []
     bloques = contenido.split("\n\n")
     for bloque in bloques:
         lineas = [l for l in bloque.splitlines() if l.strip()]
         if not lineas or not lineas[0].startswith("# file:"):
             continue
-        ruta = _desescapar_getfacl(lineas[0][len("# file:"):].strip())
-        owner = group = ""
-        for l in lineas[1:]:
-            if l.startswith("# owner:"):
-                owner = l[len("# owner:"):].strip()
-            elif l.startswith("# group:"):
-                group = l[len("# group:"):].strip()
-        es_dir = any(l.startswith("default:") for l in lineas)
-        registros[ruta] = _RegistroRespaldo(ruta, es_dir, owner, group, "\n".join(lineas))
-    return registros
+        # NO se hace .strip() sobre el resto -- un espacio final es parte del nombre
+        # real (ver el docstring de _desescapar_getfacl).
+        ruta = _desescapar_getfacl(lineas[0][len("# file:"):].lstrip(" ").rstrip("\r\n"))
+        rutas.append(ruta)
+    return rutas
 
 
-def _extraer_entrada_acl(texto: str, *, default: bool, usuario: str, grupo: str) -> str:
-    """Reconstruye el argumento -m que setfacl necesita, a partir de lo que el respaldo
-    tenía para user:<usuario> y group:<grupo> -- sólo esas dos entradas nombradas (las que
-    este guion controla), nunca el resto tal cual (evita reinyectar entradas ajenas)."""
-    u = _permisos_de(texto, default, "user", usuario) or "---"
-    g = _permisos_de(texto, default, "group", grupo) or "---"
-    return f"u:{usuario}:{u},g:{grupo}:{g},m::rwx"
+def _contar_objetos_reales(proyectos: Path) -> int:
+    """Recorrido de sólo lectura, SIN aplicar NOMBRES_EXCLUIDOS (getfacl -R tampoco lo
+    sabe), que cuenta cada directorio y archivo regular real bajo proyectos/ (incluido
+    proyectos/ mismo), symlinks excluidos -- el mismo universo que `getfacl -R -p`
+    enumera. Sirve para comprobar, de forma independiente, que el respaldo tiene la
+    cantidad de entradas que debería (MAJOR-1: rc==0 de getfacl no alcanza)."""
+    contador = 0
 
-
-def _revertir(respaldo_path: str, proyectos: Path, resultado: Resultado) -> None:
-    """BLOCK-1: recorre el árbol ACTUAL con el mismo caminante seguro (dir_fd +
-    O_PATH|O_NOFOLLOW) -- nunca abre nada por nombre resuelto desde la raíz. Para cada
-    objeto que el recorrido visita, si el respaldo tiene un registro Y el tipo actual
-    coincide con lo registrado (directorio/archivo), restaura dueño/grupo/ACL/setgid. Si
-    el objeto es un symlink (el recorrido ya lo filtra) o cambió de tipo respecto al
-    respaldo, se salta y se reporta -- nunca se toca."""
-    try:
-        contenido = Path(respaldo_path).read_text(encoding="utf-8", errors="surrogateescape")
-    except OSError as exc:
-        raise ErrorPermisosProyectos(f"no se pudo leer el respaldo {respaldo_path}: {exc}") from exc
-    if not contenido.strip():
-        raise ErrorPermisosProyectos(f"el respaldo {respaldo_path} está vacío")
-    registros = _parsear_respaldo(contenido)
-    if not registros:
-        raise ErrorPermisosProyectos(f"el respaldo {respaldo_path} no tiene ningún registro reconocible")
-
-    def _por_objeto(fd_path: int, ruta: str, st: os.stat_result, es_dir: bool) -> None:
-        reg = registros.get(ruta)
-        if reg is None:
-            return  # no estaba en el respaldo -- no se toca (m3, criterio conservador)
-        if reg.es_dir != es_dir:
-            resultado.no_cumple.append(f"{ruta}: cambió de tipo desde el respaldo -- no se revierte")
-            return
-
-        uid = pwd.getpwnam(reg.owner).pw_uid if reg.owner else -1
-        gid = grp.getgrnam(reg.group).gr_gid if reg.group else -1
-        if uid != -1 or gid != -1:
-            fd_real = _reabrir_real(fd_path, os.O_RDONLY)
-            try:
-                os.fchown(fd_real, uid, gid)
-            finally:
-                os.close(fd_real)
-
-        entrada = _extraer_entrada_acl(reg.acl_texto, default=False, usuario=USUARIO, grupo=GRUPO)
-        _setfacl(fd_path, entrada)
-        if es_dir:
-            entrada_d = _extraer_entrada_acl(reg.acl_texto, default=True, usuario=USUARIO, grupo=GRUPO)
-            _setfacl(fd_path, entrada_d, default=True)
-
-    def _recorrer_para_revertir(dir_fd: int, ruta: str) -> None:
+    def _contar_hijos(dir_fd: int) -> None:
+        nonlocal contador
         with os.scandir(dir_fd) as it:
             entradas = list(it)
         for entrada in entradas:
-            nombre = entrada.name
-            ruta_hija = f"{ruta}/{nombre}"
-            if _es_nombre_excluido(nombre):
-                continue
-            fd_path = _abrir_o_path(nombre, dir_fd)
+            fd_path = _abrir_o_path(entrada.name, dir_fd)
             if fd_path is None:
                 continue
             try:
                 st = os.fstat(fd_path)
                 if stat.S_ISLNK(st.st_mode):
-                    resultado.symlinks_saltados.append(ruta_hija)
                     continue
                 if stat.S_ISDIR(st.st_mode):
-                    _por_objeto(fd_path, ruta_hija, st, True)
+                    contador += 1
                     try:
                         fd_listable = _reabrir_real(fd_path, os.O_RDONLY | os.O_DIRECTORY)
                     except PermissionError:
                         continue
                     try:
-                        _recorrer_para_revertir(fd_listable, ruta_hija)
+                        _contar_hijos(fd_listable)
                     finally:
                         os.close(fd_listable)
                 elif stat.S_ISREG(st.st_mode):
-                    if st.st_nlink > 1:
-                        resultado.hardlinks_rechazados.append(f"{ruta_hija} (nlink={st.st_nlink})")
-                        continue
-                    _por_objeto(fd_path, ruta_hija, st, False)
+                    contador += 1
             finally:
                 os.close(fd_path)
 
@@ -757,44 +742,81 @@ def _revertir(respaldo_path: str, proyectos: Path, resultado: Resultado) -> None
     try:
         fd_proyectos = _abrir_o_path(proyectos.name, fd_raiz)
         if fd_proyectos is None:
-            raise ErrorPermisosProyectos(f"{proyectos} desapareció justo antes de revertir")
+            return 0
         try:
             st = os.fstat(fd_proyectos)
             if stat.S_ISLNK(st.st_mode):
-                raise ErrorPermisosProyectos(f"{proyectos} es un symlink -- revertir se niega")
-            _por_objeto(fd_proyectos, str(proyectos), st, True)
+                return 0
+            contador += 1
             fd_listable = _reabrir_real(fd_proyectos, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                _recorrer_para_revertir(fd_listable, str(proyectos))
+                _contar_hijos(fd_listable)
             finally:
                 os.close(fd_listable)
         finally:
             os.close(fd_proyectos)
     finally:
         os.close(fd_raiz)
+    return contador
 
 
-def _cmd_nucleo_revertir(respaldo_str: str, proyectos_str: str) -> int:
+def _hacer_respaldo() -> Path:
+    """Registro forense únicamente -- ya no se usa para revertir nada (ver --deshacer)."""
+    r = _invocar_nucleo("--nucleo-respaldo")
+    if r.returncode != 0:
+        raise ErrorPermisosProyectos(f"el respaldo falló: {r.stdout}{r.stderr} -- no se aplicó ningún cambio.")
+    ruta_texto = r.stdout.strip()
+    if not ruta_texto:
+        raise ErrorPermisosProyectos("el respaldo no devolvió ninguna ruta -- no se aplicó ningún cambio.")
+    return Path(ruta_texto)
+
+
+def _cmd_nucleo_respaldo() -> int:
     if os.geteuid() != 0:
-        print("el núcleo de reversión tiene que correr como root", file=sys.stderr)
+        print("el núcleo de respaldo tiene que correr como root", file=sys.stderr)
         return 2
-    proyectos = Path(proyectos_str)
-    absoluta = os.path.abspath(str(proyectos))
-    if os.path.realpath(absoluta) != absoluta or os.path.islink(absoluta):
-        print(f"{proyectos} es (o cuelga de) un symlink", file=sys.stderr)
-        return 2
-    resultado = Resultado()
     try:
-        _revertir(respaldo_str, proyectos, resultado)
+        proyectos = _raiz_configurada_privilegiada()
     except ErrorPermisosProyectos as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    print(json.dumps({
-        "no_cumple": resultado.no_cumple,
-        "symlinks_saltados": resultado.symlinks_saltados,
-        "hardlinks_rechazados": resultado.hardlinks_rechazados,
-    }))
-    return 0
+
+    RUTA_RESPALDOS.mkdir(parents=True, exist_ok=True)
+    os.chmod(RUTA_RESPALDOS, 0o700)
+    fd, ruta_txt = tempfile.mkstemp(dir=str(RUTA_RESPALDOS), prefix="proyectos-", suffix=".acl")
+    ruta = Path(ruta_txt)
+    ok = False
+    try:
+        with os.fdopen(fd, "wb") as f:
+            r = subprocess.run(["getfacl", "-R", "-p", str(proyectos)], stdout=f, stderr=subprocess.PIPE)
+            f.flush()
+            os.fsync(f.fileno())
+        if r.returncode != 0:
+            print(f"getfacl rc={r.returncode}: {r.stderr.decode(errors='replace')}", file=sys.stderr)
+            return 1
+
+        # MAJOR-1: rc==0 no es evidencia suficiente (verificado empíricamente: getfacl
+        # -R -p ... > /dev/full también da rc==0). Se relee lo escrito y se compara la
+        # cantidad de entradas contra un recorrido independiente del árbol real.
+        contenido = ruta.read_text(encoding="utf-8", errors="surrogateescape")
+        if not contenido.strip():
+            print("el respaldo quedó vacío", file=sys.stderr)
+            return 1
+        n_respaldo = len(_parsear_respaldo(contenido))
+        n_real = _contar_objetos_reales(proyectos)
+        if n_respaldo != n_real:
+            print(
+                f"el respaldo tiene {n_respaldo} entradas pero el recorrido real ve "
+                f"{n_real} -- no es confiable, se descarta", file=sys.stderr,
+            )
+            return 1
+
+        ok = True
+        print(str(ruta))
+        return 0
+    finally:
+        if not ok:
+            ruta.unlink(missing_ok=True)
 
 
 # ============================================================================
@@ -803,15 +825,25 @@ def _cmd_nucleo_revertir(respaldo_str: str, proyectos_str: str) -> int:
 
 def _cmd_verificar(raiz: str) -> int:
     proyectos = _validar_y_obtener_proyectos(raiz)
-    resultado = _recorrer(proyectos, mutar=False)
-    texto, ok = _reporte_legible(resultado)
-    if texto:
-        print(texto)
+    resultado = _recorrer(proyectos, accion="verificar")
+
+    lineas = []
+    for r in resultado.no_cumple:
+        lineas.append(f"NO CUMPLE: {r}")
+    for r in resultado.hardlinks_rechazados:
+        lineas.append(f"HARDLINK RECHAZADO (no se muta, nlink>1): {r}")
+    for r in resultado.symlinks_saltados:
+        lineas.append(f"SYMLINK saltado (no se sigue, no se reporta como falta): {r}")
+    for r in resultado.excluidos:
+        lineas.append(f"excluido por nombre (sin tocar): {r}")
+    if lineas:
+        print("\n".join(lineas))
 
     motivo_instalacion = _verificar_instalacion()
     if motivo_instalacion:
         print(f"núcleo privilegiado NO instalado de forma segura: {motivo_instalacion}")
 
+    ok = not resultado.no_cumple and not resultado.hardlinks_rechazados
     if ok:
         print(f"OK: {proyectos} cumple (dueño {USUARIO}, grupo {GRUPO}, setgid, sin bits "
               f"espurios, ACL de acceso y por defecto efectivas, sin hardlinks).")
@@ -822,11 +854,35 @@ def _cmd_verificar(raiz: str) -> int:
 def _cmd_aplicar(raiz: str) -> int:
     proyectos = _validar_y_obtener_proyectos(raiz)
 
-    ruta_respaldo = _hacer_respaldo(proyectos)
-    print(f"Respaldo: {ruta_respaldo} (revertir con: "
-          f"python3 {os.path.abspath(__file__)} --revertir {ruta_respaldo} {proyectos.parent})")
+    # La integridad del núcleo instalado se revisa ANTES que cualquier otra cosa -- si
+    # no es de confianza, ninguna otra comprobación (ni siquiera cuál RAIZ se pidió)
+    # importa todavía. _invocar_nucleo() la vuelve a exigir de todas formas cuando de
+    # verdad se invoca; esto sólo adelanta el mismo motivo con un mensaje más claro.
+    motivo_instalacion = _verificar_instalacion()
+    if motivo_instalacion:
+        raise ErrorPermisosProyectos(
+            f"el núcleo privilegiado no está instalado de forma segura ({motivo_instalacion}) -- "
+            f"instalar con: sudo install -o root -g root -m 0755 "
+            f"{os.path.abspath(__file__)} {RUTA_INSTALADA}"
+        )
 
-    r = _invocar_nucleo("--nucleo-privilegiado", str(proyectos))
+    # Chequeo de cortesía: la RAIZ pedida tiene que ser la configurada -- el núcleo la
+    # vuelve a comprobar de forma independiente y es la aplicación real de esto, pero
+    # fallar acá antes de intentar el respaldo evita un mensaje confuso.
+    configurada = _raiz_por_defecto()
+    if configurada:
+        absoluta_pedida = os.path.realpath(str(proyectos))
+        absoluta_configurada = os.path.realpath(os.path.join(configurada, "proyectos"))
+        if absoluta_pedida != absoluta_configurada:
+            raise ErrorPermisosProyectos(
+                f"{absoluta_pedida} no es la RAIZ configurada ({absoluta_configurada}) -- "
+                f"--aplicar sólo actúa sobre la RAIZ configurada en {RUTA_ENV}."
+            )
+
+    ruta_respaldo = _hacer_respaldo()
+    print(f"Respaldo (registro forense -- NO se usa para revertir, ver --deshacer): {ruta_respaldo}")
+
+    r = _invocar_nucleo("--nucleo-privilegiado")
     if r.returncode != 0:
         raise ErrorPermisosProyectos(
             f"el núcleo privilegiado falló rc={r.returncode}:\nstdout={r.stdout}\nstderr={r.stderr}"
@@ -858,55 +914,45 @@ def _cmd_aplicar(raiz: str) -> int:
     return codigo
 
 
-def _cmd_revertir(respaldo: str, raiz: str) -> int:
-    proyectos = _validar_y_obtener_proyectos(raiz)
-    # No se comprueba Path(respaldo).is_file() acá: el directorio de respaldos es
-    # root:root 0700 (BLOCK-3a), así que un proceso sin privilegio no puede ni stat-earlo.
-    # --nucleo-revertir (que ya corre como root) es quien valida que exista.
-    r = _invocar_nucleo("--nucleo-revertir", respaldo, str(proyectos))
+def _cmd_deshacer() -> int:
+    """Sin argumento de RAIZ -- siempre la configurada (ver el docstring del módulo,
+    BLOCK-2 de esta ronda)."""
+    r = _invocar_nucleo("--nucleo-deshacer")
     if r.returncode != 0:
         raise ErrorPermisosProyectos(
-            f"el núcleo de reversión falló rc={r.returncode}:\nstdout={r.stdout}\nstderr={r.stderr}"
+            f"el núcleo de deshacer falló rc={r.returncode}:\nstdout={r.stdout}\nstderr={r.stderr}"
         )
     try:
         datos = json.loads(r.stdout)
     except json.JSONDecodeError as exc:
-        raise ErrorPermisosProyectos(f"el núcleo de reversión no devolvió JSON válido: {exc}\n{r.stdout}")
+        raise ErrorPermisosProyectos(f"el núcleo de deshacer no devolvió JSON válido: {exc}\n{r.stdout}")
 
-    for ruta in datos["symlinks_saltados"]:
-        print(f"SYMLINK saltado, NO revertido: {ruta}")
     for ruta in datos["hardlinks_rechazados"]:
-        print(f"HARDLINK, NO revertido: {ruta}")
-    for r_ in datos["no_cumple"]:
-        print(f"NO REVERTIDO: {r_}")
+        print(f"HARDLINK, NO deshecho: {ruta}")
+    for ruta in datos["symlinks_saltados"]:
+        print(f"SYMLINK saltado, NO deshecho: {ruta}")
+    for ruta in datos.get("excluidos", []):
+        print(f"excluido por nombre (sin tocar): {ruta}")
+    print(f"Deshechos: {datos['dirs_procesados']} directorios, {datos['archivos_procesados']} archivos.")
 
-    if datos["symlinks_saltados"] or datos["hardlinks_rechazados"] or datos["no_cumple"]:
-        print("--revertir encontró rutas que no pudo (o no debía) tocar -- ver arriba.", file=sys.stderr)
+    if datos["hardlinks_rechazados"]:
+        print("--deshacer encontró hardlinks -- no se tocaron, y el resultado es un fallo.", file=sys.stderr)
         return 1
-    print("OK: reversión completa.")
+    print("OK: deshecho.")
     return 0
 
 
-def _cmd_nucleo_privilegiado(proyectos_str: str) -> int:
+def _cmd_nucleo_privilegiado() -> int:
     if os.geteuid() != 0:
         print("el núcleo privilegiado tiene que correr como root (sudo -n)", file=sys.stderr)
         return 2
-    proyectos = Path(proyectos_str)
-    absoluta = os.path.abspath(str(proyectos))
-    if os.path.realpath(absoluta) != absoluta or os.path.islink(absoluta):
-        print(f"{proyectos} es (o cuelga de) un symlink", file=sys.stderr)
+    try:
+        proyectos = _raiz_configurada_privilegiada()
+    except ErrorPermisosProyectos as exc:
+        print(str(exc), file=sys.stderr)
         return 2
 
-    # BLOCK-2: el núcleo YA NO acepta cualquier ruta -- sólo la configurada. Re-deriva la
-    # respuesta de forma INDEPENDIENTE (lee /etc/jax/.env directo, ya es root) en vez de
-    # confiar en lo que el padre sin privilegio haya resuelto.
-    workspace_configurado = _leer_workspace_dir_directo() or "/home/fruiz/jax-workspace"
-    esperado = os.path.realpath(os.path.join(workspace_configurado, "proyectos"))
-    if absoluta != esperado:
-        print(f"RAIZ rechazada: {absoluta} no es la RAIZ configurada ({esperado})", file=sys.stderr)
-        return 2
-
-    resultado = _recorrer(proyectos, mutar=True)
+    resultado = _recorrer(proyectos, accion="aplicar")
     print(json.dumps({
         "dirs_procesados": resultado.dirs_procesados,
         "archivos_procesados": resultado.archivos_procesados,
@@ -918,54 +964,71 @@ def _cmd_nucleo_privilegiado(proyectos_str: str) -> int:
     return 0
 
 
+def _cmd_nucleo_deshacer() -> int:
+    if os.geteuid() != 0:
+        print("el núcleo de deshacer tiene que correr como root (sudo -n)", file=sys.stderr)
+        return 2
+    try:
+        proyectos = _raiz_configurada_privilegiada()
+    except ErrorPermisosProyectos as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
+    resultado = _recorrer(proyectos, accion="deshacer")
+    print(json.dumps({
+        "dirs_procesados": resultado.dirs_procesados,
+        "archivos_procesados": resultado.archivos_procesados,
+        "symlinks_saltados": resultado.symlinks_saltados,
+        "hardlinks_rechazados": resultado.hardlinks_rechazados,
+        "excluidos": resultado.excluidos,
+    }))
+    return 0
+
+
+_MODOS = ("--verificar", "--aplicar", "--deshacer",
+          "--nucleo-privilegiado", "--nucleo-respaldo", "--nucleo-deshacer")
+_MODOS_SIN_ARGUMENTOS = ("--deshacer", "--nucleo-privilegiado", "--nucleo-respaldo", "--nucleo-deshacer")
+
+
 def main(argv: list[str]) -> int:
-    modo = "--verificar"
+    modo = None
     raiz_arg = None
-    nucleo_arg = None
-    revertir_respaldo = None
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if a in ("--verificar", "--aplicar"):
+    modos_vistos = 0
+
+    for a in argv:
+        if a in _MODOS:
             modo = a
-        elif a == "--revertir":
-            modo = "--revertir"
-            i += 1
-            revertir_respaldo = argv[i]
-        elif a == "--nucleo-privilegiado":
-            i += 1
-            nucleo_arg = argv[i]
-            modo = "--nucleo-privilegiado"
-        elif a == "--nucleo-respaldo":
-            i += 1
-            nucleo_arg = argv[i]
-            modo = "--nucleo-respaldo"
-        elif a == "--nucleo-revertir":
-            i += 1
-            r1 = argv[i]
-            i += 1
-            r2 = argv[i]
-            nucleo_arg = (r1, r2)
-            modo = "--nucleo-revertir"
+            modos_vistos += 1
         elif a.startswith("--"):
             print(f"opción desconocida: {a}", file=sys.stderr)
             return 2
         else:
             raiz_arg = a
-        i += 1
+
+    if modos_vistos > 1:
+        print("modos repetidos -- se pasó más de un flag de modo", file=sys.stderr)
+        return 2
+    if modo is None:
+        modo = "--verificar"
+
+    # BLOCK-2 (ronda 3): --deshacer y las tres entradas del núcleo NO aceptan ningún
+    # argumento de ruta -- siempre actúan sobre la RAIZ configurada.
+    if modo in _MODOS_SIN_ARGUMENTOS and raiz_arg is not None:
+        print(f"{modo} no acepta argumentos -- se dio {raiz_arg!r}", file=sys.stderr)
+        return 2
 
     try:
         if modo == "--nucleo-privilegiado":
-            return _cmd_nucleo_privilegiado(nucleo_arg)
+            return _cmd_nucleo_privilegiado()
         if modo == "--nucleo-respaldo":
-            return _cmd_nucleo_respaldo(nucleo_arg)
-        if modo == "--nucleo-revertir":
-            return _cmd_nucleo_revertir(*nucleo_arg)
+            return _cmd_nucleo_respaldo()
+        if modo == "--nucleo-deshacer":
+            return _cmd_nucleo_deshacer()
+        if modo == "--deshacer":
+            return _cmd_deshacer()
         raiz = _resolver_raiz(raiz_arg)
         if modo == "--verificar":
             return _cmd_verificar(raiz)
-        if modo == "--revertir":
-            return _cmd_revertir(revertir_respaldo, raiz)
         return _cmd_aplicar(raiz)
     except ErrorPermisosProyectos as exc:
         print(str(exc), file=sys.stderr)
