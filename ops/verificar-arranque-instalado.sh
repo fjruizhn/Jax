@@ -123,20 +123,52 @@ else
   RAIZ_DISCO="$RAIZ_PRUEBA_ARG"
 fi
 
+# MINOR-B (ronda 7): en producción, `systemctl` se resuelve por RUTA
+# ABSOLUTA de una lista fija -- NUNCA por PATH (un PATH alterado, o un
+# `systemctl` de más temprano en el PATH, podría hacer correr un binario
+# distinto del que el operador cree). Cada candidata se verifica
+# root:root y SIN bit de escritura para grupo NI para otros antes de
+# aceptarla -- un binario "systemctl" escribible por group/other en
+# cualquiera de estas rutas ya sería una máquina comprometida, pero el
+# guion no lo da por sentado, lo mide.
+resolver_systemctl_de_produccion() {
+  local candidata propietario grupo modo modo_octal bits_grupo bits_otros
+  for candidata in /usr/bin/systemctl /bin/systemctl; do
+    [ -e "$candidata" ] || continue
+    read -r propietario grupo modo < <(stat -c '%U %G %a' "$candidata" 2>/dev/null) || continue
+    [ "$propietario" = root ] && [ "$grupo" = root ] || continue
+    modo_octal="0$modo"
+    bits_grupo=$(( (modo_octal / 8) % 8 ))
+    bits_otros=$(( modo_octal % 8 ))
+    if (( (bits_grupo & 2) != 0 || (bits_otros & 2) != 0 )); then
+      continue
+    fi
+    echo "$candidata"
+    return 0
+  done
+  return 1
+}
+
 # MINOR-1 (ronda 6): la capa CARGADO es SIEMPRE producción... salvo que
 # el propio modo de prueba pida explícitamente activarla, con SU PROPIO
 # systemctl de mentira -- `SYSTEMCTL_DE_PRUEBA` (ruta a un binario
 # systemctl-compatible), sólo respetada si NO es producción. En
 # producción esta variable NUNCA se lee: nada inyectado desde afuera
-# puede cambiar qué `systemctl` corre contra el sistema real. Esto es lo
-# que permite que las pruebas de la capa cargado, de NeedDaemonReload y
-# del alias cargado corran en CUALQUIER runner (CI incluido) contra un
-# árbol de RAIZ_PRUEBA + un systemctl de mentira, sin depender de que
+# puede cambiar qué `systemctl` corre contra el sistema real (ver
+# también MINOR-B, arriba: en producción la ruta es siempre absoluta y
+# verificada, nunca esta variable). Esto es lo que permite que las
+# pruebas de la capa cargado, de NeedDaemonReload y del alias cargado
+# corran en CUALQUIER runner (CI incluido) contra un árbol de
+# RAIZ_PRUEBA + un systemctl de mentira, sin depender de que
 # jax-las-manos.service esté instalado de verdad en /etc.
-SYSTEMCTL_CMD=systemctl
+SYSTEMCTL_CMD=""
 CAPA_CARGADO_ACTIVA=0
 if [ "$ES_PRODUCCION" = 1 ]; then
   CAPA_CARGADO_ACTIVA=1
+  if ! SYSTEMCTL_CMD="$(resolver_systemctl_de_produccion)"; then
+    echo "verificar-arranque-instalado: no se encontró un systemctl de confianza (root:root, sin escritura de grupo/otros) en /usr/bin ni /bin -- fallo cerrado." >&2
+    exit 2
+  fi
 elif [ -n "${SYSTEMCTL_DE_PRUEBA:-}" ]; then
   CAPA_CARGADO_ACTIVA=1
   SYSTEMCTL_CMD="$SYSTEMCTL_DE_PRUEBA"
@@ -299,6 +331,61 @@ prefijos_de_guion() {
   done
 }
 
+resolver_cadena_alias() {
+  # MAJOR-1 (ronda 7): un alias puede ser una CADENA -- `a -> .b -> unidad`
+  # o `a -> b -> unidad` -- no sólo un salto directo. Sigue la cadena,
+  # UN eslabón por vez, DENTRO DEL MISMO DIRECTORIO (systemd resuelve así
+  # los alias reales: symlinks relativos, mismo nivel). Si un eslabón
+  # apunta fuera del directorio (destino con "/", sea relativo a otra
+  # ruta o absoluto), la cadena se corta ahí -- ese último salto YA se
+  # comparó contra $unidad antes de cortar, así que no se pierde el caso
+  # de un solo salto "hacia afuera".
+  #
+  # $1=dir_padre (con raíz) $2=ruta_base (para mostrar) $3=nombre inicial
+  # $4=unidad buscada.
+  #
+  # Si la cadena TERMINA (por nombre base) en $unidad: imprime UNA línea
+  # por CADA eslabón (todos los nombres intermedios, no sólo el último) y
+  # devuelve 0. Si no termina ahí (o el primer nombre no es symlink):
+  # devuelve 1, sin imprimir nada -- no es un error, es "no es alias". Si
+  # hay un CICLO (un nombre se repite en la propia cadena): lo reporta
+  # por stderr y devuelve 2 -- ESO sí es un error real (una configuración
+  # rota que ningún administrador querría), el llamador lo cuenta como
+  # fallo de enumeración (MINOR-2: nunca se traga un error).
+  #
+  # FUNCIÓN PURA (MAJOR-A): nunca toca `hubo_error` ni `fallo` -- sólo
+  # imprime por stdout y devuelve estado por código de salida; el
+  # llamador decide qué hacer con el 2.
+  local dir_padre="$1" ruta_base="$2" unidad="$4"
+  local -a vistos=()
+  local actual="$3" ruta_actual destino destino_base v tope=10 i=0
+  while [ "$i" -lt "$tope" ]; do
+    i=$((i + 1))
+    for v in "${vistos[@]}"; do
+      if [ "$v" = "$actual" ]; then
+        echo "CICLO DE ALIAS en $ruta_base: ${vistos[*]} -> $actual (de nuevo)" >&2
+        return 2
+      fi
+    done
+    vistos+=("$actual")
+    ruta_actual="$dir_padre/$actual"
+    [ -L "$ruta_actual" ] || return 1
+    destino="$(readlink -- "$ruta_actual")" || return 1
+    destino_base="$(basename -- "$destino")"
+    if [ "$destino_base" = "$unidad" ]; then
+      for v in "${vistos[@]}"; do
+        echo "$ruta_base/$v (alias no declarado de $unidad, cadena: ${vistos[*]} -> $unidad)"
+      done
+      return 0
+    fi
+    case "$destino" in
+      */*) return 1 ;;
+    esac
+    actual="$destino_base"
+  done
+  return 1
+}
+
 enumerar_dropins_en_disco() {
   # ÚNICA implementación -- producción (RAIZ="/") y pruebas (RAIZ=árbol
   # bajo /tmp) pasan por acá, nunca dos caminos distintos (ronda 5, causa
@@ -329,7 +416,7 @@ enumerar_dropins_en_disco() {
   local unidad="$1" nombre_sin_sufijo="$2" tipo="$3" raiz="$4"
   local raiz_efectiva="${raiz%/}"
   local prefijos=() dirs_relativos=() p rel ruta_base dir conf archivo_base
-  local dir_padre entry entry_base destino
+  local dir_padre entry entry_base opciones_shopt_previas
   local hubo_error=0
 
   mapfile -t prefijos < <(prefijos_de_guion "$nombre_sin_sufijo")
@@ -370,16 +457,27 @@ enumerar_dropins_en_disco() {
     done
   done
 
-  # ALIAS (ronda 6, MAJOR-1): man systemd.unit(5) -- "drop-ins for the
-  # aliased name and all aliases are loaded". Un symlink de PRIMER NIVEL
-  # en cualquiera de las 12 rutas, cuyo destino (por nombre base) sea esta
-  # unidad, hace que systemd cargue TAMBIÉN los drop-ins del nombre del
-  # alias -- aunque el manifiesto sólo declare la unidad real. El
-  # manifiesto no declara alias (hoy ninguno existe): cualquiera que
-  # aparezca es una diferencia, sin excepción. Reproducido contra el
-  # código de la ronda 5: un symlink
+  # ALIAS (ronda 6, MAJOR-1; cadenas y nombres ocultos, ronda 7, MAJOR-1):
+  # man systemd.unit(5) -- "drop-ins for the aliased name and all aliases
+  # are loaded". Un symlink de PRIMER NIVEL en cualquiera de las 12
+  # rutas, cuyo destino (por nombre base, siguiendo la CADENA completa si
+  # el alias apunta a OTRO symlink -- `a -> .b -> unidad`, `a -> b ->
+  # unidad`) sea esta unidad, hace que systemd cargue TAMBIÉN los
+  # drop-ins de CADA nombre de la cadena -- aunque el manifiesto sólo
+  # declare la unidad real. El manifiesto no declara alias (hoy ninguno
+  # existe): cualquiera que aparezca es una diferencia, sin excepción.
+  #
+  # Reproducido contra el código de la ronda 5: un symlink
   # `otro-alias.service -> jax-las-manos.service` más
   # `otro-alias.service.d/evil.conf` daba rc=0.
+  #
+  # Ronda 7, MAJOR-1 (auditor, con systemd-analyze en hall9000, systemd
+  # 259): un alias OCULTO (`.oculto.service -> jax-las-manos.service`)
+  # también se carga de verdad -- pero el glob `"$dir_padre"/*` de la
+  # ronda 6 NUNCA ve nombres que empiecen con "." (comportamiento
+  # estándar de shell, no un bug de systemd). Con `dotglob` el mismo `*`
+  # ve TODO -- systemd mismo no distingue "oculto" de "visible" para
+  # cargar drop-ins, así que este guion tampoco puede hacerlo.
   for ruta_base in "${UNIT_PATHS_SYSTEMD[@]}"; do
     dir_padre="$raiz_efectiva$ruta_base"
     [ -e "$dir_padre" ] || continue
@@ -388,16 +486,25 @@ enumerar_dropins_en_disco() {
       hubo_error=1
       continue
     fi
+    opciones_shopt_previas="$(shopt -p dotglob nullglob)"
+    shopt -s dotglob nullglob
     for entry in "$dir_padre"/*; do
-      [ -e "$entry" ] || [ -L "$entry" ] || continue
-      [ -L "$entry" ] || continue
       entry_base="$(basename -- "$entry")"
+      # bash NUNCA matchea "." ni ".." con "*", con o sin dotglob (está
+      # documentado) -- este `case` es sólo defensa en profundidad, no
+      # depende de esa garantía para estar completo.
+      case "$entry_base" in
+        .|..) continue ;;
+      esac
+      [ -L "$entry" ] || continue
       [ "$entry_base" = "$unidad" ] && continue
-      destino="$(readlink -- "$entry")" || continue
-      if [ "$(basename -- "$destino")" = "$unidad" ]; then
-        echo "$ruta_base/$entry_base (alias no declarado de $unidad)"
+      if resolver_cadena_alias "$dir_padre" "$ruta_base" "$entry_base" "$unidad"; then
+        :
+      elif [ $? -eq 2 ]; then
+        hubo_error=1
       fi
     done
+    eval "$opciones_shopt_previas"
   done
   return "$hubo_error"
 }
@@ -453,7 +560,20 @@ obtener_reales_cargado() {
     echo "NeedDaemonReload=$need_reload para $unidad -- lo cargado por systemd puede no reflejar el disco" >&2
     hubo_error=1
   fi
-  if [ "$nombres" != "$id" ]; then
+  # MINOR-C (ronda 7): un `systemctl show` que omite `Id`/`Names` (o
+  # devuelve `Id` de OTRA unidad) tiene que fallar EXPLÍCITAMENTE -- con
+  # los dos vacíos, `"$nombres" != "$id"` de la ronda 6 daba `"" != ""` =
+  # falso, así que un systemctl roto de esa forma específica pasaba
+  # desapercibido. Orden: primero vacíos, después Id correcto, recién
+  # después Names == Id -- para que el mensaje sea el más específico
+  # posible y no se pisen entre sí.
+  if [ -z "$id" ] || [ -z "$nombres" ]; then
+    echo "Id/Names VACÍOS para $unidad -- systemctl show no los devolvió" >&2
+    hubo_error=1
+  elif [ "$id" != "$unidad" ]; then
+    echo "Id=$id != la unidad pedida ($unidad) -- systemctl respondió por otra unidad" >&2
+    hubo_error=1
+  elif [ "$nombres" != "$id" ]; then
     echo "Names=$nombres != Id=$id para $unidad -- hay un alias cargado que el manifiesto no declara" >&2
     hubo_error=1
   fi

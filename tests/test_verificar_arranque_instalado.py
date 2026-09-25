@@ -1,5 +1,5 @@
 """ops/verificar-arranque-instalado.sh -- el chequeo de "ningún archivo de
-más participa del arranque" (auditoría escalón 3, rondas 2 a 5).
+más participa del arranque" (auditoría escalón 3, rondas 2 a 7).
 
 Ronda 5 -- UN SOLO CAMINO: la capa DISCO (`enumerar_dropins_en_disco`) es
 la MISMA función, con la MISMA lógica, tanto en producción (RAIZ="/",
@@ -27,13 +27,14 @@ Frentes cubiertos:
     contenido, sólo nombres.
 (d) MAJOR-1 (ronda 3) / MAJOR-2 (ronda 5): en producción, lo CARGADO por
     systemd (`systemctl show -p FragmentPath -p DropInPaths -p
-    NeedDaemonReload`) y lo que hay en DISCO son dos chequeos
-    independientes -- un `systemctl` que informa mal, o que devuelve
-    NeedDaemonReload=yes aunque los DropInPaths estén completos, tiene que
-    hacer fallar el guion igual. Se prueba con un `systemctl` de mentira
-    en el PATH que responde mal SÓLO para jax-las-manos.service (que hoy
-    está instalado correctamente de verdad) y delega al real para
-    cualquier otra unidad -- nunca se escribe en /etc.
+    NeedDaemonReload -p Id -p Names`) y lo que hay en DISCO son dos
+    chequeos independientes -- un `systemctl` que informa mal, o que
+    devuelve NeedDaemonReload=yes aunque los DropInPaths estén completos,
+    tiene que hacer fallar el guion igual. Desde la ronda 7 se prueba de
+    forma HERMÉTICA (`SYSTEMCTL_DE_PRUEBA` + `RAIZ_PRUEBA`, ver (j)) --
+    el shadowing de `systemctl` por PATH en producción de las rondas 3-6
+    se quitó, porque MINOR-B (ronda 7) hace que producción resuelva
+    `systemctl` por ruta ABSOLUTA verificada, nunca por PATH.
 (e) MINOR-1 (ronda 5): RAIZ_PRUEBA="/" se normaliza a modo producción
     (capa cargado incluida), no a un modo de prueba sin capa cargado.
 (f) La lista fija UNIT_PATHS_SYSTEMD (versionada en el guion porque
@@ -55,11 +56,34 @@ Frentes cubiertos:
 (i) MINOR-2 (ronda 6): `systemctl show` ya no se llama con `--value` --
     medido en hall9000, el orden de salida NO respeta el orden de los
     `-p` pedidos -- se parsea `Clave=valor` por clave.
+(j) MAJOR-1 (ronda 7): los alias también pueden ser OCULTOS (nombre con
+    "." inicial -- el glob de la ronda 6 no los veía, confirmado cargados
+    de verdad por el auditor con systemd-analyze) y pueden formar
+    CADENAS (`a -> b -> unidad`, `a -> .b -> unidad`) -- el mensaje
+    nombra TODOS los eslabones, no sólo el último.
+(k) MINOR-A (ronda 7): `SYSTEMCTL_DE_PRUEBA` nunca se lee en producción,
+    ni siquiera si está puesta -- probado con prueba de mutación
+    (reintroducir la lectura en una copia del guion hace fallar el test).
+(l) MINOR-B (ronda 7): en producción, `systemctl` se resuelve por ruta
+    ABSOLUTA fija (/usr/bin/systemctl o /bin/systemctl), verificada
+    root:root y sin escritura de grupo/otros -- nunca por PATH. Esto
+    retiró el shadowing por PATH que las rondas 3-6 usaban para probar la
+    capa cargado en "producción" -- esas pruebas se reemplazaron por la
+    capa cargado HERMÉTICA (`SYSTEMCTL_DE_PRUEBA` + `RAIZ_PRUEBA`, ver
+    (d)), que corre en cualquier runner.
+(m) MINOR-C (ronda 7): `Id`/`Names` vacíos, o `Id` distinto de la unidad
+    pedida, fallan explícitamente -- con la ronda 6 sola, un systemctl
+    que omitiera los dos campos daba `"" != ""` = sin diferencia.
+(n) MINOR-D (ronda 7): el systemctl de mentira NUNCA delega al real
+    (`exec "$REAL"` se quitó del todo) -- cualquier unidad desconocida,
+    o cualquier invocación que no sea la consulta cargado esperada, sale
+    con error. Las unidades "conocidas" se leen de
+    ops/manifiesto-arranque-instalado.tsv, no de una lista copiada a
+    mano.
 """
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -220,6 +244,62 @@ def test_alias_sin_dropin_propio_tambien_se_detecta(tmp_path):
     assert "alias no declarado de jax-las-manos.service" in resultado.stderr, resultado.stderr
 
 
+def test_alias_oculto_en_etc_se_detecta(tmp_path):
+    """MAJOR-1 (ronda 7, auditor): un alias OCULTO (nombre que empieza
+    con ".") también se carga de verdad -- confirmado por el auditor con
+    `systemd-analyze` en hall9000 (systemd 259). El glob `"$dir_padre"/*`
+    de la ronda 6 NUNCA ve nombres que empiecen con "." (comportamiento
+    estándar de shell -- no depende de systemd), así que
+    `.oculto.service -> jax-las-manos.service` se colaba sin detectar."""
+    _construir_arbol_completo(tmp_path)
+    base = tmp_path / "etc/systemd/system"
+    _sembrar_symlink(base / ".oculto.service", "jax-las-manos.service")
+    resultado = _correr(tmp_path)
+    assert resultado.returncode != 0, f"alias oculto no detectado -- stdout: {resultado.stdout}"
+    assert "alias no declarado de jax-las-manos.service" in resultado.stderr, resultado.stderr
+
+
+def test_alias_oculto_en_run_se_detecta(tmp_path):
+    """Mismo caso que arriba, pero bajo /run (una ruta de mayor prioridad
+    dinámica, no la que declara el manifiesto) -- confirma que la
+    detección de ocultos no está atada a una sola de las 12 rutas."""
+    _construir_arbol_completo(tmp_path)
+    base = tmp_path / "run/systemd/system"
+    _sembrar_symlink(base / ".oculto.service", "jax-las-manos.service")
+    resultado = _correr(tmp_path)
+    assert resultado.returncode != 0, f"alias oculto en /run no detectado -- stdout: {resultado.stdout}"
+    assert "alias no declarado de jax-las-manos.service" in resultado.stderr, resultado.stderr
+
+
+def test_cadena_de_alias_con_intermedio_oculto_se_detecta(tmp_path):
+    """MAJOR-1 (ronda 7): una CADENA de alias -- `a -> .b -> unidad` --
+    no sólo un salto directo. `man systemd.unit(5)` no distingue "cuántos
+    saltos": todos los nombres de la cadena quedan aliaseados. El mensaje
+    tiene que nombrar los DOS eslabones (a y .b), no sólo el último."""
+    _construir_arbol_completo(tmp_path)
+    base = tmp_path / "etc/systemd/system"
+    _sembrar_symlink(base / ".intermedio-oculto.service", "jax-las-manos.service")
+    _sembrar_symlink(base / "cabeza-de-cadena.service", ".intermedio-oculto.service")
+    resultado = _correr(tmp_path)
+    assert resultado.returncode != 0, f"cadena de alias no detectada -- stdout: {resultado.stdout}"
+    assert "cabeza-de-cadena.service" in resultado.stderr, resultado.stderr
+    assert ".intermedio-oculto.service" in resultado.stderr, resultado.stderr
+
+
+def test_cadena_de_alias_visible_se_detecta(tmp_path):
+    """Misma cadena, pero con los dos nombres VISIBLES (`a -> b ->
+    unidad`, sin ningún "." de por medio) -- para separar "sigue
+    cadenas" de "ve ocultos": este caso prueba sólo lo primero."""
+    _construir_arbol_completo(tmp_path)
+    base = tmp_path / "etc/systemd/system"
+    _sembrar_symlink(base / "eslabon-b.service", "jax-las-manos.service")
+    _sembrar_symlink(base / "eslabon-a.service", "eslabon-b.service")
+    resultado = _correr(tmp_path)
+    assert resultado.returncode != 0, f"cadena de alias no detectada -- stdout: {resultado.stdout}"
+    assert "eslabon-a.service" in resultado.stderr, resultado.stderr
+    assert "eslabon-b.service" in resultado.stderr, resultado.stderr
+
+
 def test_intruso_con_nombre_no_conf_no_cuenta(tmp_path):
     """Control negativo del propio control negativo: un archivo que NO
     termina en .conf (systemd no lo lee como drop-in) no tiene que
@@ -293,123 +373,69 @@ def test_block1_comentario_con_hash_slash_en_el_contenido_no_cuenta(tmp_path):
     assert "DIFIERE" in resultado.stderr, resultado.stderr
 
 
-def _correr_con_systemctl_falso(modo: str, raiz: str = "") -> subprocess.CompletedProcess:
-    """Antepone al PATH un `systemctl` de mentira (tests/fixtures/) que
-    sólo intercepta la consulta CARGADA (`-p ... NeedDaemonReload`) de
-    jax-las-manos.service -- delega al real para todo lo demás. Nunca
-    escribe en /etc. `raiz` es el argumento posicional que recibe el
-    guion (RAIZ_PRUEBA); por default "" (producción).
-
-    Ronda 4: el guion se re-ejecuta a sí mismo como root vía `sudo -n`, y
-    ESE `sudo` resetea el PATH a `secure_path` (confirmado en hall9000) --
-    un PATH de mentira puesto en el entorno de ESTE proceso no
-    sobreviviría ese salto. Por eso acá se invoca `sudo -n env PATH=...`
-    DIRECTAMENTE: el guion arranca ya como root (UID 0) y salta su propio
-    re-exec, así que el PATH que `sudo -n env` fija sí llega intacto a la
-    corrida real."""
-    with tempfile.TemporaryDirectory() as d:
-        bin_falso = Path(d)
-        enlace = bin_falso / "systemctl"
-        shutil.copy(SYSTEMCTL_FALSO, enlace)
-        enlace.chmod(0o755)
-        path_con_falso = f"{bin_falso}:{os.environ.get('PATH', '')}"
-        return subprocess.run(
-            ["sudo", "-n", "env", f"PATH={path_con_falso}", f"SYSTEMCTL_FALSO_MODO={modo}", str(SCRIPT), raiz],
-            capture_output=True, text=True,
-        )
+# Ronda 7, MINOR-B: `systemctl` en producción se resuelve por RUTA
+# ABSOLUTA fija (/usr/bin/systemctl o /bin/systemctl), NUNCA por PATH --
+# el shadowing por PATH que usaban las pruebas de las rondas 3-5
+# (`_correr_con_systemctl_falso`, ahora borrado) YA NO FUNCIONA contra
+# producción, A PROPÓSITO: es exactamente lo que MINOR-B existe para
+# impedir. Las pruebas de la capa cargado que necesitan un systemctl de
+# mentira usan `SYSTEMCTL_DE_PRUEBA` bajo `RAIZ_PRUEBA`
+# (`_correr_con_capa_cargado_de_prueba`, más abajo) -- HERMÉTICAS,
+# corren en cualquier runner, ver ronda 6.
 
 
 @pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
 @pytest.mark.skipif(_NO_ES_PRODUCCION, reason=_MOTIVO_SKIP_PRODUCCION)
-def test_systemctl_que_informa_mal_hace_fallar_aunque_el_disco_este_bien():
-    """MAJOR-1 (ronda 3): lo CARGADO por systemd y lo que hay en DISCO son
-    dos chequeos independientes. jax-las-manos.service está instalado
-    correctamente de verdad en esta máquina (disco perfecto) -- un
-    `systemctl show` de mentira que "olvida" reportar un drop-in real
-    tiene que hacer fallar el guion igual, aunque el disco esté bien."""
-    resultado = _correr_con_systemctl_falso("incompleto")
-    assert resultado.returncode != 0
-    assert "DIFERENCIA (cargado por systemd) entre lo que jax-las-manos.service" in resultado.stderr, resultado.stderr
-    # El disco (real, jamás tocado) SÍ coincide -- aísla que el fallo vino
-    # del systemctl falso, no de un problema real en /etc.
-    assert "DIFERENCIA (disco) entre lo que jax-las-manos.service" not in resultado.stderr, resultado.stderr
+def test_produccion_ignora_systemctl_de_prueba_aunque_este_puesta():
+    """MINOR-A (ronda 7): `SYSTEMCTL_DE_PRUEBA` NUNCA se lee en
+    producción -- ni siquiera si está puesta en el entorno. Se corre el
+    guion en modo PRODUCCIÓN de verdad (RAIZ_PRUEBA vacío) con
+    `SYSTEMCTL_DE_PRUEBA` apuntando al systemctl de mentira en modo
+    "falla" (que, si se leyera, haría fallar TODO con "SYSTEMCTL SHOW
+    FALLÓ"): el resultado tiene que ser IDÉNTICO al de correr sin esa
+    variable -- rc=0, 19 archivos.
 
-
-@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
-@pytest.mark.skipif(_NO_ES_PRODUCCION, reason=_MOTIVO_SKIP_PRODUCCION)
-def test_systemctl_que_falla_dice_algo_claro_y_sigue_con_las_demas():
-    """MINOR-2 (ronda 3): si `systemctl show` falla para una unidad
-    (inexistente, systemctl roto), el guion dice algo claro Y sigue
-    revisando el resto -- no aborta toda la corrida por una sola unidad.
-
-    Las otras unidades del manifiesto están instaladas correctamente de
-    verdad en esta máquina -- así que "siguió revisándolas" NO se prueba
-    buscando sus nombres en stderr (si están bien, no imprimen nada, punto
-    y punto es la señal correcta, no la ausencia de nombre). La prueba
-    real es que el guion llega a su ÚLTIMA línea (el resumen final, que
-    sólo se imprime DESPUÉS del bucle completo sobre las 6 unidades) --
-    si hubiera abortado a mitad de camino (el bug que MAJOR-A de la ronda
-    3 dejó posible con `fallo=1` perdido en un subshell), esa línea final
-    nunca aparecería."""
-    resultado = _correr_con_systemctl_falso("falla")
-    assert resultado.returncode != 0
-    assert "SYSTEMCTL SHOW FALLÓ para jax-las-manos.service" in resultado.stderr, resultado.stderr
-    assert "verificar-arranque-instalado: hay diferencias entre el repo y lo instalado" in resultado.stderr, (
-        f"no se ve la línea final del guion -- ¿abortó a mitad de la corrida?: {resultado.stderr!r}"
+    **Prueba de mutación**: en una COPIA del guion se cambió la rama de
+    producción para que leyera `SYSTEMCTL_CMD="${SYSTEMCTL_DE_PRUEBA:-$SYSTEMCTL_CMD}"`
+    en vez de resolver por ruta absoluta (la vulnerabilidad que este test
+    existe para atrapar) y se confirmó que ESTE test específico pasa a
+    fallar contra esa copia -- restaurada de inmediato y confirmada byte
+    a byte idéntica con `diff` (ver el informe de la ronda 7)."""
+    resultado = subprocess.run(
+        ["sudo", "-n", "env", f"SYSTEMCTL_DE_PRUEBA={SYSTEMCTL_FALSO}", "SYSTEMCTL_FALSO_MODO=falla", str(SCRIPT), ""],
+        capture_output=True, text=True,
     )
-    # Ninguna OTRA unidad reportó una DIFERENCIA propia (todas están bien
-    # instaladas) -- confirma que el único problema sembrado fue el de
-    # jax-las-manos.service, no que el guion se haya salteado al resto sin
-    # revisarlas.
-    lineas_diferencia = [l for l in resultado.stderr.splitlines() if l.startswith("DIFERENCIA")]
-    for linea in lineas_diferencia:
-        assert "jax-las-manos.service" in linea, f"unidad inesperada con DIFERENCIA propia: {linea!r}"
-
-
-@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
-@pytest.mark.skipif(_NO_ES_PRODUCCION, reason=_MOTIVO_SKIP_PRODUCCION)
-def test_need_daemon_reload_yes_hace_fallar_con_todo_lo_demas_correcto():
-    """MAJOR-2 (ronda 5): el chequeo de NeedDaemonReload se prueba
-    AISLADO -- el systemctl falso en modo "necesita_reload" devuelve el
-    FragmentPath y los 3 DropInPaths reales completos (nada falta, nada
-    sobra) pero NeedDaemonReload=yes. Si el chequeo de NeedDaemonReload se
-    borrara del guion, este test pasaría a dar 0 -- lo reproduje a mano
-    quitando esas 4 líneas de una COPIA del guion (obtener_reales_cargado
-    sin el `if [ "$need_reload" != no ]; then ... fi`) y confirmé que ESTE
-    test específico falla contra esa copia (restaurada de inmediato, sin
-    afectar la rama)."""
-    resultado = _correr_con_systemctl_falso("necesita_reload")
-    assert resultado.returncode != 0, (
-        f"NeedDaemonReload=yes con todo lo demás correcto tiene que fallar -- "
-        f"si da 0, el chequeo se perdió. stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
+    assert resultado.returncode == 0, (
+        f"producción con SYSTEMCTL_DE_PRUEBA puesta (modo falla) tiene que dar 0 igual -- "
+        f"si falla, la variable se está leyendo en producción. stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
     )
-    assert "NeedDaemonReload=yes" in resultado.stderr, resultado.stderr
-    assert "jax-las-manos.service" in resultado.stderr, resultado.stderr
-    # Aísla que el fallo vino del chequeo NeedDaemonReload y no de un
-    # desacuerdo de contenido (DropInPaths incompleto u otra cosa): en este
-    # modo lo cargado coincide byte a byte con el manifiesto.
-    assert "DIFERENCIA (cargado por systemd)" not in resultado.stderr, resultado.stderr
+    assert "19 archivos" in resultado.stdout, resultado.stdout
 
 
 def test_raiz_prueba_que_resuelve_a_raiz_activa_la_capa_cargado():
     """MINOR-1 (ronda 5): un RAIZ_PRUEBA que resuelve a "/" tiene que
     tratarse EXACTAMENTE como si no se hubiera pasado nada -- modo
-    PRODUCCIÓN, con la capa CARGADO incluida. Se prueba con el systemctl
-    de mentira en modo "incompleto" (miente sobre jax-las-manos.service,
-    el disco real está bien) pasando "/" EXPLÍCITO como RAIZ_PRUEBA: si la
-    capa cargado no se activara con "/", esto daría 0 (sólo miraría el
-    disco, que está perfecto); si se activa, tiene que dar 1, igual que
-    sin pasar nada."""
-    if not SYSTEMCTL_FALSO.is_file():
-        pytest.skip("falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+    PRODUCCIÓN, con la capa CARGADO incluida.
+
+    Ronda 7: ya no se prueba con un systemctl de mentira vía PATH (ver
+    MINOR-B, arriba -- ese shadowing ya no funciona contra producción a
+    propósito). En cambio, se compara la corrida REAL sin argumento
+    contra la corrida REAL con "/" -- tienen que dar EXACTAMENTE lo
+    mismo (mismo rc, mismo stdout): si "/" saltara la capa cargado, la
+    corrida sería más rápida pero el resultado sería indistinguible en
+    este host (todo está bien instalado) -- así que la prueba real no es
+    el resultado, es que las DOS corridas sean IDÉNTICAS entre sí, no
+    sólo "las dos con rc=0"."""
     if _NO_ES_PRODUCCION:
         pytest.skip(_MOTIVO_SKIP_PRODUCCION)
-    resultado_barra = _correr_con_systemctl_falso("incompleto", raiz="/")
-    assert resultado_barra.returncode != 0, (
-        f"RAIZ_PRUEBA='/' tiene que activar la capa cargado -- si da 0, se está "
-        f"tratando como modo de prueba (sólo disco). stdout={resultado_barra.stdout!r}"
+    sin_argumento = subprocess.run(["sudo", "-n", str(SCRIPT), ""], capture_output=True, text=True)
+    con_barra = subprocess.run(["sudo", "-n", str(SCRIPT), "/"], capture_output=True, text=True)
+    assert sin_argumento.returncode == 0, sin_argumento.stderr
+    assert con_barra.returncode == sin_argumento.returncode
+    assert con_barra.stdout == sin_argumento.stdout, (
+        f"RAIZ_PRUEBA='/' tiene que dar EXACTAMENTE el mismo resultado que sin argumento -- "
+        f"sin argumento: {sin_argumento.stdout!r}; con '/': {con_barra.stdout!r}"
     )
-    assert "cargado por systemd" in resultado_barra.stderr, resultado_barra.stderr
 
 
 def _unit_paths_versionadas() -> list[str]:
@@ -528,3 +554,39 @@ def test_capa_cargado_de_prueba_detecta_alias_cargado(tmp_path):
         f"si da 0, el chequeo se perdió. stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
     )
     assert "Names=jax-las-manos.service otro-alias.service != Id=jax-las-manos.service" in resultado.stderr, resultado.stderr
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+def test_capa_cargado_de_prueba_systemctl_falla(tmp_path):
+    """Reemplaza a `test_systemctl_que_falla_dice_algo_claro_y_sigue_con_las_demas`
+    (rondas 3-6, borrado en la ronda 7 porque dependía de shadowear
+    `systemctl` por PATH en producción -- MINOR-B ya no lo permite) --
+    misma propiedad (si `systemctl show` falla del todo, el guion sigue
+    revisando las demás unidades y da rc=1 al final, con un mensaje
+    claro), probada de forma HERMÉTICA con RAIZ_PRUEBA +
+    SYSTEMCTL_DE_PRUEBA en vez de necesitar producción real."""
+    _construir_arbol_completo(tmp_path)
+    resultado = _correr_con_capa_cargado_de_prueba(tmp_path, "falla")
+    assert resultado.returncode != 0
+    assert "SYSTEMCTL SHOW FALLÓ para jax-las-manos.service" in resultado.stderr, resultado.stderr
+    assert "verificar-arranque-instalado: hay diferencias entre el repo y lo instalado" in resultado.stderr, (
+        f"no se ve la línea final del guion -- ¿abortó a mitad de la corrida?: {resultado.stderr!r}"
+    )
+    lineas_diferencia = [l for l in resultado.stderr.splitlines() if l.startswith("DIFERENCIA")]
+    for linea in lineas_diferencia:
+        assert "jax-las-manos.service" in linea, f"unidad inesperada con DIFERENCIA propia: {linea!r}"
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+def test_capa_cargado_de_prueba_id_names_vacios(tmp_path):
+    """MINOR-C (ronda 7): un `systemctl show` que omite `Id` y `Names`
+    (los deja vacíos) tiene que fallar EXPLÍCITAMENTE -- con la ronda 6
+    sola, `"$nombres" != "$id"` daba `"" != ""` = FALSO, así que este
+    caso pasaba desapercibido."""
+    _construir_arbol_completo(tmp_path)
+    resultado = _correr_con_capa_cargado_de_prueba(tmp_path, "sin_id_names")
+    assert resultado.returncode != 0, (
+        f"Id/Names vacíos tiene que fallar -- si da 0, el chequeo no cubre este caso. "
+        f"stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
+    )
+    assert "Id/Names VACÍOS para jax-las-manos.service" in resultado.stderr, resultado.stderr
