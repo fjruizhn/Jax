@@ -29,12 +29,27 @@
 # ubicación válida para el fragmento (`/etc/systemd/system/<u>`) -- un
 # fragmento en CUALQUIER otra ruta (mayor prioridad, que de verdad lo
 # reemplazaría, o menor prioridad, un duplicado dormido que se activaría
-# solo si el de /etc alguna vez desaparece) es una DIFERENCIA.
+# solo si el de /etc alguna vez desaparece) es una DIFERENCIA. TAMBIÉN es
+# DIFERENCIA (MAJOR-1, ronda 6) cualquier symlink de PRIMER NIVEL, en
+# cualquiera de las 12 rutas, cuyo destino sea (por nombre base) una
+# unidad del manifiesto: man systemd.unit(5) dice que systemd carga los
+# drop-ins del nombre aliaseado Y de todos sus alias -- el manifiesto no
+# declara alias (hoy ninguno existe), así que cualquiera que aparezca es
+# una diferencia, exista o no todavía un drop-in bajo su propio nombre.
 #
-# La capa CARGADO (SÓLO producción: preguntarle a systemd por un árbol de
-# `/tmp` no tiene sentido) usa `systemctl show -p FragmentPath
-# -p DropInPaths -p NeedDaemonReload` y exige `NeedDaemonReload=no` -- la
-# señal REAL y estructurada de "lo cargado puede no reflejar el disco".
+# La capa CARGADO -- producción SIEMPRE, y en modo prueba SÓLO si
+# `SYSTEMCTL_DE_PRUEBA` (ruta a un systemctl de mentira) está puesta,
+# nunca de otro modo (MINOR-1, ronda 6: preguntarle a UN systemctl real
+# por un árbol de `/tmp` no tiene sentido, pero un systemctl DE MENTIRA sí
+# puede responder sobre ese árbol, para que estas pruebas corran en
+# cualquier runner) -- usa `systemctl show -p FragmentPath -p DropInPaths
+# -p NeedDaemonReload -p Id -p Names` (SIN `--value`, parseado por
+# `Clave=valor`: MINOR-2, ronda 6 -- el orden de salida real NO respeta
+# el orden en que se piden las propiedades, medido en hall9000) y exige
+# `NeedDaemonReload=no` -- la señal REAL y estructurada de "lo cargado
+# puede no reflejar el disco" -- y `Names` == `Id` (MAJOR-1, ronda 6: si
+# hay más de un nombre cargado, hay un alias activo que el manifiesto no
+# declara).
 #
 # MAJOR-A (ronda 4, sostenido): ninguna función asigna `fallo=1` (variable
 # del script principal) DESDE DENTRO de una sustitución de comando
@@ -106,6 +121,25 @@ if [ -z "$RAIZ_PRUEBA_ARG" ]; then
 else
   ES_PRODUCCION=0
   RAIZ_DISCO="$RAIZ_PRUEBA_ARG"
+fi
+
+# MINOR-1 (ronda 6): la capa CARGADO es SIEMPRE producción... salvo que
+# el propio modo de prueba pida explícitamente activarla, con SU PROPIO
+# systemctl de mentira -- `SYSTEMCTL_DE_PRUEBA` (ruta a un binario
+# systemctl-compatible), sólo respetada si NO es producción. En
+# producción esta variable NUNCA se lee: nada inyectado desde afuera
+# puede cambiar qué `systemctl` corre contra el sistema real. Esto es lo
+# que permite que las pruebas de la capa cargado, de NeedDaemonReload y
+# del alias cargado corran en CUALQUIER runner (CI incluido) contra un
+# árbol de RAIZ_PRUEBA + un systemctl de mentira, sin depender de que
+# jax-las-manos.service esté instalado de verdad en /etc.
+SYSTEMCTL_CMD=systemctl
+CAPA_CARGADO_ACTIVA=0
+if [ "$ES_PRODUCCION" = 1 ]; then
+  CAPA_CARGADO_ACTIVA=1
+elif [ -n "${SYSTEMCTL_DE_PRUEBA:-}" ]; then
+  CAPA_CARGADO_ACTIVA=1
+  SYSTEMCTL_CMD="$SYSTEMCTL_DE_PRUEBA"
 fi
 
 REPO="$(git -C "$(dirname "$(readlink -f "$0")")" rev-parse --show-toplevel)"
@@ -295,6 +329,7 @@ enumerar_dropins_en_disco() {
   local unidad="$1" nombre_sin_sufijo="$2" tipo="$3" raiz="$4"
   local raiz_efectiva="${raiz%/}"
   local prefijos=() dirs_relativos=() p rel ruta_base dir conf archivo_base
+  local dir_padre entry entry_base destino
   local hubo_error=0
 
   mapfile -t prefijos < <(prefijos_de_guion "$nombre_sin_sufijo")
@@ -334,19 +369,66 @@ enumerar_dropins_en_disco() {
       fi
     done
   done
+
+  # ALIAS (ronda 6, MAJOR-1): man systemd.unit(5) -- "drop-ins for the
+  # aliased name and all aliases are loaded". Un symlink de PRIMER NIVEL
+  # en cualquiera de las 12 rutas, cuyo destino (por nombre base) sea esta
+  # unidad, hace que systemd cargue TAMBIÉN los drop-ins del nombre del
+  # alias -- aunque el manifiesto sólo declare la unidad real. El
+  # manifiesto no declara alias (hoy ninguno existe): cualquiera que
+  # aparezca es una diferencia, sin excepción. Reproducido contra el
+  # código de la ronda 5: un symlink
+  # `otro-alias.service -> jax-las-manos.service` más
+  # `otro-alias.service.d/evil.conf` daba rc=0.
+  for ruta_base in "${UNIT_PATHS_SYSTEMD[@]}"; do
+    dir_padre="$raiz_efectiva$ruta_base"
+    [ -e "$dir_padre" ] || continue
+    if [ ! -d "$dir_padre" ] || [ ! -r "$dir_padre" ] || [ ! -x "$dir_padre" ]; then
+      echo "NO SE PUDO LEER (alias): $ruta_base (existe pero no es un directorio legible/listable)" >&2
+      hubo_error=1
+      continue
+    fi
+    for entry in "$dir_padre"/*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      [ -L "$entry" ] || continue
+      entry_base="$(basename -- "$entry")"
+      [ "$entry_base" = "$unidad" ] && continue
+      destino="$(readlink -- "$entry")" || continue
+      if [ "$(basename -- "$destino")" = "$unidad" ]; then
+        echo "$ruta_base/$entry_base (alias no declarado de $unidad)"
+      fi
+    done
+  done
   return "$hubo_error"
 }
 
 obtener_reales_cargado() {
-  # SÓLO PRODUCCIÓN. Lo que systemd tiene CARGADO ahora mismo:
-  # `systemctl show -p FragmentPath -p DropInPaths -p NeedDaemonReload`.
-  # `NeedDaemonReload` distinto de "no" es la señal REAL (no un aviso de
-  # texto libre por stderr) de que esta vista puede no reflejar el disco.
+  # SÓLO PRODUCCIÓN (o modo prueba con SYSTEMCTL_DE_PRUEBA, ronda 6,
+  # MINOR-1 -- ver más abajo dónde se llama). Lo que systemd tiene
+  # CARGADO ahora mismo: `systemctl show -p FragmentPath -p DropInPaths
+  # -p NeedDaemonReload -p Id -p Names`. `NeedDaemonReload` distinto de
+  # "no" es la señal REAL (no un aviso de texto libre por stderr) de que
+  # esta vista puede no reflejar el disco.
+  #
+  # MINOR-2 (ronda 6): SIN `--value` -- `systemctl show` no respeta el
+  # orden de los `-p` pedidos (medido en hall9000: pedidos en el orden
+  # FragmentPath/DropInPaths/NeedDaemonReload/Id/Names, la salida real
+  # vino Id/Names/FragmentPath/DropInPaths/NeedDaemonReload). Se parsea
+  # cada línea como `Clave=valor` y se arma por CLAVE, nunca por posición.
+  #
+  # MAJOR-1 (ronda 6): man systemd.unit(5) -- "drop-ins for the aliased
+  # name and all aliases are loaded". `Names` trae TODOS los nombres bajo
+  # los que systemd tiene cargada esta unidad (el Id + cualquier alias);
+  # si `Names` != `Id`, hay un alias cargado que el manifiesto no
+  # declara -- aunque el disco por sí solo (sin systemd corriendo) no
+  # pueda verlo, lo cargado sí.
+  #
   # FUNCIÓN PURA (MAJOR-A): stdout = lista, código de salida = estado,
   # nunca toca `fallo`.
-  local unidad="$1" salida archivo_err err need_reload hubo_error=0
+  local unidad="$1" salida archivo_err err hubo_error=0
+  local linea clave valor frag="" dropins="" need_reload="" id="" nombres=""
   archivo_err="$(mktemp)"
-  if ! salida="$(systemctl show -p FragmentPath -p DropInPaths -p NeedDaemonReload --value "$unidad" 2>"$archivo_err")"; then
+  if ! salida="$("$SYSTEMCTL_CMD" show -p FragmentPath -p DropInPaths -p NeedDaemonReload -p Id -p Names "$unidad" 2>"$archivo_err")"; then
     echo "SYSTEMCTL SHOW FALLÓ para $unidad (¿la unidad no existe?): $(cat -- "$archivo_err")" >&2
     rm -f -- "$archivo_err"
     return 1
@@ -356,13 +438,27 @@ obtener_reales_cargado() {
     echo "AVISO DE SYSTEMCTL (no descartado) para $unidad: $err" >&2
     hubo_error=1
   fi
-  need_reload="$(printf '%s\n' "$salida" | sed -n '3p')"
+  while IFS= read -r linea; do
+    clave="${linea%%=*}"
+    valor="${linea#*=}"
+    case "$clave" in
+      FragmentPath) frag="$valor" ;;
+      DropInPaths) dropins="$valor" ;;
+      NeedDaemonReload) need_reload="$valor" ;;
+      Id) id="$valor" ;;
+      Names) nombres="$valor" ;;
+    esac
+  done <<< "$salida"
   if [ "$need_reload" != no ]; then
     echo "NeedDaemonReload=$need_reload para $unidad -- lo cargado por systemd puede no reflejar el disco" >&2
     hubo_error=1
   fi
-  printf '%s\n' "$salida" | sed -n '1p'
-  printf '%s\n' "$salida" | sed -n '2p' | tr ' ' '\n' | sed '/^$/d'
+  if [ "$nombres" != "$id" ]; then
+    echo "Names=$nombres != Id=$id para $unidad -- hay un alias cargado que el manifiesto no declara" >&2
+    hubo_error=1
+  fi
+  printf '%s\n' "$frag"
+  printf '%s\n' "$dropins" | tr ' ' '\n' | sed '/^$/d'
   return "$hubo_error"
 }
 
@@ -401,8 +497,9 @@ while IFS= read -r unidad; do
     reportar_diferencia "$unidad" "disco" "$esperados" "$reales_disco"
   fi
 
-  # b) Cargado -- sólo producción.
-  if [ "$ES_PRODUCCION" = 1 ]; then
+  # b) Cargado -- producción, o modo prueba con SYSTEMCTL_DE_PRUEBA
+  # (ronda 6, MINOR-1).
+  if [ "$CAPA_CARGADO_ACTIVA" = 1 ]; then
     if ! reales_cargado="$(obtener_reales_cargado "$unidad" | sort -u)"; then
       fallo=1
     fi

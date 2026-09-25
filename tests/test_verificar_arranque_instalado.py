@@ -39,6 +39,22 @@ Frentes cubiertos:
 (f) La lista fija UNIT_PATHS_SYSTEMD (versionada en el guion porque
     systemd-analyze no se puede correr contra un árbol de prueba) se
     compara contra la real, sólo en producción, para que no derive.
+(g) MAJOR-1 (ronda 6): un symlink de PRIMER NIVEL cuyo destino sea (por
+    nombre base) una unidad del manifiesto es un ALIAS no declarado --
+    `man systemd.unit(5)`, "drop-ins for the aliased name and all
+    aliases are loaded". Se prueba en DOS capas independientes: disco
+    (`otro-alias.service -> jax-las-manos.service`, con y sin drop-in
+    propio) y cargado (`Names` != `Id` con un systemctl de mentira, con
+    reproducción contra el guion sin el chequeo antes de cerrarlo).
+(h) MINOR-1 (ronda 6): la capa cargado es inyectable con
+    `SYSTEMCTL_DE_PRUEBA` (SOLO en modo prueba, nunca en producción) --
+    esto hace que las pruebas de capa cargado, NeedDaemonReload y alias
+    cargado corran en CUALQUIER runner (ubuntu-latest de CI incluido),
+    activándose sobre un árbol de RAIZ_PRUEBA en vez de depender de que
+    jax-las-manos.service esté instalado de verdad en /etc.
+(i) MINOR-2 (ronda 6): `systemctl show` ya no se llama con `--value` --
+    medido en hall9000, el orden de salida NO respeta el orden de los
+    `-p` pedidos -- se parsea `Clave=valor` por clave.
 """
 from __future__ import annotations
 
@@ -157,6 +173,51 @@ def test_cada_intruso_se_detecta(tmp_path, ruta_relativa):
         f"el intruso {ruta_relativa} NO se detectó -- stdout: {resultado.stdout}"
     )
     assert "DE MÁS" in resultado.stderr, resultado.stderr
+
+
+def _sembrar_symlink(link: Path, destino: str) -> None:
+    """Symlink de PRIMER NIVEL apuntando a `destino` (nombre relativo, en
+    el mismo directorio) -- para reproducir un alias no declarado. El
+    directorio padre puede terminar root:root 755 -- fruiz no puede crear
+    el link ahí directo, mismo criterio que _sembrar_intruso."""
+    subprocess.run(["sudo", "install", "-d", "-o", "root", "-g", "root", "-m", "0755", str(link.parent)], check=True)
+    subprocess.run(["sudo", "ln", "-s", destino, str(link)], check=True)
+
+
+def test_alias_de_primer_nivel_con_dropin_propio_se_detecta(tmp_path):
+    """MAJOR-1 (ronda 6): `man systemd.unit(5)` -- "drop-ins for the
+    aliased name and all aliases are loaded". Un symlink de PRIMER NIVEL
+    (`otro-alias.service -> jax-las-manos.service`) más SU PROPIO drop-in
+    (`otro-alias.service.d/evil.conf`) hace que systemd cargue ESE
+    drop-in también para jax-las-manos.service -- el manifiesto no
+    declara alias (hoy ninguno existe), así que esto tiene que dar rc!=0.
+
+    **Reproducido contra el código de la ronda 5 (commit 5c52fe5, antes
+    de este fix)**: el mismo árbol daba `rc=0` -- el guion nunca miraba
+    symlinks de primer nivel que no fueran el nombre EXACTO de la unidad
+    (confirmado a mano contra la rama sin el fix, antes de escribir el
+    fix; ver el informe de la ronda 6)."""
+    _construir_arbol_completo(tmp_path)
+    base = tmp_path / "etc/systemd/system"
+    _sembrar_symlink(base / "otro-alias.service", "jax-las-manos.service")
+    _sembrar_intruso(base / "otro-alias.service.d" / "evil.conf")
+    resultado = _correr(tmp_path)
+    assert resultado.returncode != 0, f"alias no detectado -- stdout: {resultado.stdout}"
+    assert "alias no declarado de jax-las-manos.service" in resultado.stderr, resultado.stderr
+
+
+def test_alias_sin_dropin_propio_tambien_se_detecta(tmp_path):
+    """El symlink SOLO (sin ningún drop-in propio todavía) también cuenta
+    -- la sola presencia del alias es la diferencia, no hace falta que ya
+    tenga un drop-in cargado para ser un riesgo: alguien podría agregarle
+    uno más tarde sin que el manifiesto se entere, y para entonces ya
+    seria tarde si el guion sólo mirara "¿tiene drop-in el alias?"."""
+    _construir_arbol_completo(tmp_path)
+    base = tmp_path / "etc/systemd/system"
+    _sembrar_symlink(base / "otro-alias-vacio.service", "jax-las-manos.service")
+    resultado = _correr(tmp_path)
+    assert resultado.returncode != 0, f"alias no detectado -- stdout: {resultado.stdout}"
+    assert "alias no declarado de jax-las-manos.service" in resultado.stderr, resultado.stderr
 
 
 def test_intruso_con_nombre_no_conf_no_cuenta(tmp_path):
@@ -386,3 +447,84 @@ def test_unit_paths_versionadas_coinciden_con_la_real():
         f"UNIT_PATHS_SYSTEMD (guion) != systemd-analyze unit-paths (real):\n"
         f"  guion: {versionada}\n  real:  {real}"
     )
+
+
+def _correr_con_capa_cargado_de_prueba(tmp_path: Path, modo: str) -> subprocess.CompletedProcess:
+    """MINOR-1 (ronda 6): activa la capa cargado sobre un árbol de
+    RAIZ_PRUEBA (NO el /etc real) con `SYSTEMCTL_DE_PRUEBA` apuntando
+    DIRECTO al systemctl de mentira -- corre en CUALQUIER runner, CI
+    incluido, sin depender de que jax-las-manos.service esté instalado de
+    verdad. `tmp_path` tiene que tener ya el árbol completo (llamar
+    `_construir_arbol_completo` antes). A diferencia de
+    `_correr_con_systemctl_falso` (que shadowea `systemctl` en el PATH
+    para la corrida SIN RAIZ_PRUEBA, producción real), acá no hace falta
+    PATH-shadowing: el guion invoca `"$SYSTEMCTL_CMD"` por su ruta
+    absoluta, así que basta con pasarle esa ruta directo."""
+    return subprocess.run(
+        ["sudo", "-n", "env", f"SYSTEMCTL_DE_PRUEBA={SYSTEMCTL_FALSO}", f"SYSTEMCTL_FALSO_MODO={modo}",
+         str(SCRIPT), str(tmp_path)],
+        capture_output=True, text=True,
+    )
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+def test_capa_cargado_de_prueba_correcta_da_cero(tmp_path):
+    """MINOR-1 (ronda 6): activar la capa cargado bajo RAIZ_PRUEBA, por sí
+    solo, no tiene que hacer fallar nada cuando el systemctl de mentira
+    coincide de verdad con el árbol -- corre en ubuntu-latest (CI), sin
+    /srv/jax-prod/jax."""
+    _construir_arbol_completo(tmp_path)
+    resultado = _correr_con_capa_cargado_de_prueba(tmp_path, "correcto")
+    assert resultado.returncode == 0, (
+        f"con disco Y cargado perfectos, esto tiene que dar 0 -- "
+        f"stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
+    )
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+def test_capa_cargado_de_prueba_detecta_desacuerdo(tmp_path):
+    """MINOR-1 (ronda 6): mismo caso que
+    test_systemctl_que_informa_mal_hace_fallar_aunque_el_disco_este_bien
+    (ronda 3) pero corriendo en CUALQUIER runner -- disco perfecto
+    (RAIZ_PRUEBA), cargado incompleto (systemctl de mentira)."""
+    _construir_arbol_completo(tmp_path)
+    resultado = _correr_con_capa_cargado_de_prueba(tmp_path, "incompleto")
+    assert resultado.returncode != 0
+    assert "DIFERENCIA (cargado por systemd) entre lo que jax-las-manos.service" in resultado.stderr, resultado.stderr
+    assert "DIFERENCIA (disco) entre lo que jax-las-manos.service" not in resultado.stderr, resultado.stderr
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+def test_capa_cargado_de_prueba_need_daemon_reload(tmp_path):
+    """MINOR-1 (ronda 6): mismo caso que
+    test_need_daemon_reload_yes_hace_fallar_con_todo_lo_demas_correcto
+    (ronda 5) pero corriendo en CUALQUIER runner."""
+    _construir_arbol_completo(tmp_path)
+    resultado = _correr_con_capa_cargado_de_prueba(tmp_path, "necesita_reload")
+    assert resultado.returncode != 0
+    assert "NeedDaemonReload=yes" in resultado.stderr, resultado.stderr
+    assert "DIFERENCIA (cargado por systemd)" not in resultado.stderr, resultado.stderr
+
+
+@pytest.mark.skipif(not SYSTEMCTL_FALSO.is_file(), reason="falta tests/fixtures/systemctl-falso-para-pruebas.sh")
+def test_capa_cargado_de_prueba_detecta_alias_cargado(tmp_path):
+    """MAJOR-1 (ronda 6): `Names` != `Id` (un alias cargado que el
+    manifiesto no declara) tiene que fallar SOLO, aislado de cualquier
+    otro desacuerdo -- el systemctl de mentira en modo "alias_cargado"
+    devuelve los 3 drop-ins reales completos y NeedDaemonReload=no, pero
+    Names trae un segundo nombre.
+
+    **Verificado contra el código sin el chequeo antes de darlo por
+    bueno**: se quitó el bloque `if [ "$nombres" != "$id" ]; then ...` de
+    una COPIA del guion (nunca de la rama) y se confirmó que ESTE test
+    específico pasa a fallar contra esa copia (el guion daba 0 con un
+    alias cargado y todo lo demás perfecto) -- restaurada de inmediato y
+    confirmada byte a byte idéntica con `diff` (ver el informe de la
+    ronda 6)."""
+    _construir_arbol_completo(tmp_path)
+    resultado = _correr_con_capa_cargado_de_prueba(tmp_path, "alias_cargado")
+    assert resultado.returncode != 0, (
+        f"Names != Id con todo lo demás correcto tiene que fallar -- "
+        f"si da 0, el chequeo se perdió. stdout={resultado.stdout!r} stderr={resultado.stderr!r}"
+    )
+    assert "Names=jax-las-manos.service otro-alias.service != Id=jax-las-manos.service" in resultado.stderr, resultado.stderr

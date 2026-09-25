@@ -623,7 +623,11 @@ la lista real):
   dueño `root:root` y modo `644`/`755` en archivos y `755` en los
   directorios que los contienen. Sale 0 sólo si TODO eso se cumple; sale 2
   si no hay `sudo` disponible (fallo cerrado); imprime cada diferencia y
-  sale 1 en cualquier otro caso.
+  sale 1 en cualquier otro caso. **En producción se corre así**: `sudo -n
+  ops/verificar-arranque-instalado.sh` (sin argumento -- `RAIZ_PRUEBA`
+  vacío es modo producción), que hoy tiene que dar `rc=0` con
+  `verificar-arranque-instalado: repo e instalado coinciden (19
+  archivos)` -- confirmado contra la producción real al cerrar la ronda 6.
   **UN SOLO CAMINO (ronda 5)** -- RECHAZADA la ronda 4 porque tenía DOS
   implementaciones distintas de la capa disco (`systemd-delta` en
   producción, una enumeración a mano bajo `RAIZ_PRUEBA`): eso dejaba a
@@ -663,37 +667,89 @@ la lista real):
     (`generator.early` va DESPUÉS de `transient` y ANTES de
     `/etc/systemd/system`, no al final) -- se detectó exactamente por el
     test que compara la lista fija contra la real (ver abajo), y quedó
-    corregido antes de cerrar la ronda. Para cada unidad, `RAIZ` +
-    cada ruta: el fragmento base `<unidad>` (cualquier fragmento fuera de
-    `/etc/systemd/system/<u>` en CUALQUIER ruta, de mayor o menor
-    prioridad, es DIFERENCIA -- el de mayor prioridad porque de verdad la
-    reemplaza, el de menor porque es un duplicado dormido que el
-    manifiesto no declara) + los drop-ins en `<unidad>.d/`, en cada
-    prefijo con guion de `systemd.unit(5)` (`jax-.service.d`,
-    `jax-memory-.service.d`, …) y en el genérico de tipo (`service.d/`,
-    `timer.d/`). Nunca se traga errores: un directorio que debería ser
+    corregido antes de cerrar la ronda. Para cada unidad, en cada una de
+    esas 12 rutas + `RAIZ`, se revisan DOS cosas:
+    - el fragmento base `<unidad>` (cualquier fragmento fuera de
+      `/etc/systemd/system/<u>` en CUALQUIER ruta, de mayor o menor
+      prioridad, es DIFERENCIA -- el de mayor prioridad porque de verdad
+      la reemplaza, el de menor porque es un duplicado dormido que el
+      manifiesto no declara) + los drop-ins en `<unidad>.d/`, en cada
+      prefijo con guion de `systemd.unit(5)` (`jax-.service.d`,
+      `jax-memory-.service.d`, …) y en el genérico de tipo (`service.d/`,
+      `timer.d/`);
+    - **ALIAS no declarado (MAJOR-1, ronda 6)**: `man systemd.unit(5)`
+      -- "drop-ins for the aliased name and all aliases are loaded".
+      Cualquier symlink de PRIMER NIVEL, en cualquiera de las 12 rutas,
+      cuyo destino sea (por nombre base) una unidad del manifiesto, es
+      DIFERENCIA -- exista o no todavía un drop-in propio bajo el
+      nombre del alias, porque systemd carga los drop-ins de CUALQUIER
+      nombre bajo el que la unidad quede aliaseada, no sólo el nombre
+      "canónico". El manifiesto no declara alias hoy (ninguno existe).
+      **Reproducido contra el código de la ronda 5** (commit `5c52fe5`):
+      un árbol con `etc/systemd/system/otro-alias.service ->
+      jax-las-manos.service` + `otro-alias.service.d/evil.conf` daba
+      `rc=0` -- el guion nunca miraba symlinks de primer nivel que no
+      fueran el nombre EXACTO de la unidad. Dos tests dedicados (con y
+      sin drop-in propio del alias).
+    Nunca se traga errores: un directorio que debería ser
     legible/listable y no lo es, o una ruta de fragmento que existe pero
     no es un archivo regular, cuentan como fallo de enumeración
     (`rc≠0`), no como "cero archivos ahí" silencioso (ronda 5, MINOR-2).
     `systemd-delta` se quitó del todo -- ya no forma parte de este
     guion, en ningún modo.
-  - **Cargado -- SÓLO PRODUCCIÓN, sin cambios de lógica desde la ronda
-    4.** `systemctl show -p FragmentPath -p DropInPaths
-    -p NeedDaemonReload --value <unidad>`, y se EXIGE
-    `NeedDaemonReload=no` -- la señal REAL y estructurada de "lo cargado
-    puede no reflejar el disco". Prueba dedicada, con un `systemctl` de
-    mentira en modo `necesita_reload` que devuelve los 3 drop-ins reales
-    COMPLETOS (nada falta) pero `NeedDaemonReload=yes`, para aislar este
-    chequeo de cualquier otro desacuerdo -- **verificado contra el
-    código viejo antes de cerrar**: se quitó el bloque del chequeo de una
-    COPIA del guion (nunca de la rama) y se confirmó que ESE test
-    específico falla contra esa copia (script devuelve 0 cuando no
-    debería), restaurada de inmediato y confirmada byte a byte idéntica
-    con `diff` (ronda 5, MAJOR-2). Si `systemctl show` falla del todo
-    (unidad inexistente, systemctl roto), mensaje claro Y el guion sigue
-    revisando las demás unidades -- no aborta la corrida entera por una
-    sola.
-  - **MAJOR-A (ronda 4, sigue vigente en la ronda 5)**: ninguna función
+  - **Cargado -- producción SIEMPRE, y en modo prueba SÓLO si
+    `SYSTEMCTL_DE_PRUEBA` está puesta (ronda 6, MINOR-1).**
+    `SYSTEMCTL_DE_PRUEBA` es una ruta a un `systemctl` de mentira,
+    respetada ÚNICAMENTE cuando el guion NO está en modo producción
+    (`ES_PRODUCCION != 1`) -- en producción esta variable nunca se lee,
+    así que nada inyectado desde afuera puede cambiar qué `systemctl`
+    corre contra el sistema real. Esto es lo que permite que las
+    pruebas de la capa cargado corran en CUALQUIER runner (ubuntu-latest
+    de CI incluido), activándose sobre un árbol de `RAIZ_PRUEBA` con un
+    `systemctl` de mentira en vez de depender de que
+    `jax-las-manos.service` esté instalado de verdad en `/etc`.
+    `systemctl show -p FragmentPath -p DropInPaths -p NeedDaemonReload
+    -p Id -p Names <unidad>` -- **SIN `--value`** (MINOR-2, ronda 6):
+    medido en hall9000, `systemctl show` NO respeta el orden en que se
+    piden las propiedades (pedidas
+    `FragmentPath/DropInPaths/NeedDaemonReload/Id/Names`, la salida real
+    vino `Id/Names/FragmentPath/DropInPaths/NeedDaemonReload`) -- el
+    guion parsea cada línea como `Clave=valor` y arma el resultado por
+    CLAVE, nunca por posición. Se EXIGEN dos cosas:
+    - `NeedDaemonReload=no` -- la señal REAL y estructurada de "lo
+      cargado puede no reflejar el disco". Prueba dedicada, con un
+      `systemctl` de mentira en modo `necesita_reload` que devuelve los
+      3 drop-ins reales COMPLETOS (nada falta) pero
+      `NeedDaemonReload=yes`, para aislar este chequeo de cualquier otro
+      desacuerdo -- **verificado contra el código viejo antes de
+      cerrar** (ronda 5, MAJOR-2).
+    - **`Names` == `Id`** (MAJOR-1, ronda 6): `Names` trae TODOS los
+      nombres bajo los que systemd tiene cargada la unidad (el `Id` +
+      cualquier alias); si hay más de uno, hay un alias CARGADO que el
+      manifiesto no declara -- esto lo detecta aunque el disco por sí
+      solo (sin systemd corriendo, o en modo prueba sin
+      `SYSTEMCTL_DE_PRUEBA`) no pueda verlo. Prueba dedicada, con un
+      `systemctl` de mentira en modo `alias_cargado` que devuelve todo
+      completo y `NeedDaemonReload=no`, pero `Names=jax-las-manos.service
+      otro-alias.service` -- **verificado contra el código viejo antes
+      de cerrar**: se quitó el bloque `if [ "$nombres" != "$id" ]; then
+      ... fi` de una copia del guion (nunca de la rama) y se confirmó
+      que ESE test específico pasa a fallar contra esa copia (el guion
+      daba 0 con un alias cargado y todo lo demás perfecto), restaurada
+      de inmediato y confirmada byte a byte idéntica con `diff`.
+
+    Si `systemctl show` falla del todo (unidad inexistente, systemctl
+    roto), mensaje claro Y el guion sigue revisando las demás unidades
+    -- no aborta la corrida entera por una sola.
+
+    El `systemctl` de mentira (`tests/fixtures/systemctl-falso-para-pruebas.sh`)
+    es HERMÉTICO desde la ronda 6: responde con datos correctos (calcados
+    del manifiesto) para las 6 unidades declaradas, no sólo
+    `jax-las-manos.service` -- así la capa cargado de prueba nunca cae al
+    `systemctl` real, en ningún runner (confirmado rompiendo a propósito
+    el `systemctl` real de respaldo en una copia del fixture y viendo que
+    los tests de esta capa siguen en verde).
+  - **MAJOR-A (ronda 4, sigue vigente)**: ninguna función
     invocada vía `$(...)` toca la variable `fallo` desde dentro (esa
     asignación viviría en un SUBSHELL y se perdería); sólo imprimen su
     LISTA por stdout y señalan su ESTADO por código de salida, y el
@@ -704,29 +760,33 @@ la lista real):
   - **BLOCK-1 (ronda 3, ya resuelto)**: `systemctl show -p` con
     propiedades explícitas nunca imprime contenido de archivo, así que
     una línea de comentario tipo `# /algo` dentro de un `.conf` legítimo
-    nunca puede confundirse con una cabecera de systemd -- y ahora la
-    capa disco ni siquiera llama a `systemctl`, así que ese riesgo
-    desapareció de raíz.
+    nunca puede confundirse con una cabecera de systemd -- y la capa
+    disco ni siquiera llama a `systemctl`, así que ese riesgo desapareció
+    de raíz.
   `tests/test_arranque_instalado.py` ejercita la forma del repo siempre
   (también en CI, sin necesitar el host de producción) y, sólo en el host
   de producción, corre el guion de verdad y EXIGE 0 -- no hace skip si
-  falta algo instalado. `tests/test_verificar_arranque_instalado.py` (18
-  tests) prueba: `RAIZ_PRUEBA` con un árbol completo (0) y con 9 intrusos
+  falta algo instalado. `tests/test_verificar_arranque_instalado.py` (24
+  tests) prueba: `RAIZ_PRUEBA` con un árbol completo (0), con 9 intrusos
   reales por el camino ÚNICO (fragmento y drop-in de más en cada una de
   las rutas relevantes de `UNIT_PATHS_SYSTEMD`, incluidas
   `system.control` con fragmento de mayor Y de menor prioridad,
-  `generator`, `transient`, y el genérico `timer.d/` bajo `/run`),
-  BLOCK-1, MAJOR-A, MAJOR-2 (con reproducción contra el código viejo),
-  MINOR-1 (`RAIZ_PRUEBA="/"` activa la capa cargado), y la lista fija
-  `UNIT_PATHS_SYSTEMD` comparada contra `systemd-analyze unit-paths` real
-  (sólo en producción, para que la lista versionada no derive en
-  silencio). Los tests con `systemctl` de mentira
-  (`tests/fixtures/systemctl-falso-para-pruebas.sh`) sólo intercepta
-  la consulta CARGADA de `jax-las-manos.service` (la capa disco ya no
-  llama a `systemctl` en absoluto, así que no hay nada más que
-  interceptar) -- invocado con `sudo -n env PATH=...` DIRECTO desde el
-  test (no vía la variable de entorno `RAIZ_PRUEBA`, que no sobreviviría
-  el re-exec como root del guion si éste tuviera que hacerlo de nuevo).
+  `generator`, `transient`, y el genérico `timer.d/` bajo `/run`) y con 2
+  alias no declarados (con y sin drop-in propio); BLOCK-1, MAJOR-A,
+  MAJOR-2, MINOR-1 (`RAIZ_PRUEBA="/"` activa la capa cargado), la lista
+  fija `UNIT_PATHS_SYSTEMD` comparada contra `systemd-analyze unit-paths`
+  real (sólo en producción, para que la lista versionada no derive en
+  silencio), y la capa cargado HERMÉTICA de la ronda 6
+  (correcto/desacuerdo/NeedDaemonReload/alias-cargado, vía
+  `SYSTEMCTL_DE_PRUEBA` + `RAIZ_PRUEBA`, corriendo en cualquier runner).
+
+  **Piso medido con `sudo unshare --mount` tapando `/srv/jax-prod`
+  (simulando un runner de CI sin el checkout de producción): 19 passed, 5
+  skipped** (ronda 6; era 13/5 en la ronda 5) -- los 5 que siguen skipped
+  son los que de verdad necesitan producción real: `jax-las-manos.service`
+  instalado de verdad en `/etc` (2 tests de la ronda 3/4) o
+  `systemd-analyze unit-paths`/`RAIZ_PRUEBA="/"` reales (3 tests de la
+  ronda 5) -- ninguno de estos 5 tiene equivalente hermético todavía.
   Cableado al job `arranque-instalado-versionado` de
   `.github/workflows/policy.yml`.
 - **`ops/instalar-dropins-de-servicio.sh <unidad>.service.d|/ruta/absoluta
