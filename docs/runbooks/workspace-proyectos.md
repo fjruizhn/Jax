@@ -5,149 +5,195 @@
 tanto por la cuenta de servicio `jaxsvc` (LAS MANOS y jax-platform corren como
 ella, `UMask=0022` medido con `systemctl show`) como por `fruiz` (corre
 `scripts/procesar_archivos.py` a mano), con herencia para todo lo que se cree
-después — spec
-`docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md` §5.
-Medido el 2026-09-25 **antes** de aplicar nada: `proyectos/` es `fruiz:fruiz
-775` sin ACL y `sudo -u jaxsvc test -w proyectos` da NO — jaxsvc no puede
-escribir ahí hoy.
+después — spec `docs/superpowers/specs/2026-09-22-proyectos-y-selector-design.md`
+§5. **Corrección de brief, 2026-09-25**: el dueño nuevo es `jaxsvc`, no `fruiz`
+(una decisión anterior lo tenía al revés; era un error). Medido el 2026-09-25
+antes de aplicar nada: `proyectos/` es `fruiz:fruiz 775` sin ACL y
+`sudo -u jaxsvc test -w proyectos` da NO — jaxsvc no puede escribir ahí hoy.
 
 ## Scope
-`$JAX_WORKSPACE_DIR/proyectos` y todo lo que haya debajo. Nunca
-`$JAX_WORKSPACE_DIR` completo (ahí conviven `calculadora.html`,
-`run_tests.sh`, etc. que no son parte de este contrato) ni ninguna otra ruta.
-`ops/permisos-proyectos.sh` lo hace cumplir: rechaza una RAIZ vacía, `/`, o
-una ruta sin `proyectos/`.
+`$JAX_WORKSPACE_DIR/proyectos` y todo lo que haya debajo, **salvo** cualquier
+entrada cuyo nombre empiece con `.` (estado propio de alguna herramienta —
+p.ej. algo como `.claude-flow`, típicamente `700` — que no se toca ni se
+recorre: `--verificar` la ignora, `--aplicar` no le otorga nada). Nunca
+`$JAX_WORKSPACE_DIR` completo. `ops/permisos_proyectos.py` lo hace cumplir:
+rechaza una RAIZ vacía, `/`, una ruta sin `proyectos/`, o cuyo `proyectos/`
+sea (o cuelgue de) un symlink.
 
 ## Preconditions
-- `setfacl`/`getfacl` instalados (`/usr/bin/setfacl`, `/usr/bin/getfacl` en
-  hall9000, verificado).
-- `sudo -n` disponible para quien aplica: hace falta para `chgrp` (fruiz no
-  es miembro del grupo `jaxsvc`, así que no puede cambiar un archivo a ese
-  grupo sin privilegio — `CAP_CHOWN`) y para el `chmod g+s` final (ver más
-  abajo, "por qué el orden importa").
-- Los grupos/cuentas `fruiz` y `jaxsvc` ya existen en el host de producción.
+- `setfacl`/`getfacl` instalados.
+- `sudo -n` disponible para quien aplica: **todo** el trabajo mutante corre
+  como root (`chown`, `chmod`, `setfacl` — nunca como el usuario que invoca,
+  ver "Por qué todo corre como root" más abajo).
+- Las cuentas `jaxsvc` y `fruiz` ya existen en el host de producción, y el
+  grupo primario de `fruiz` es un grupo también llamado `fruiz` (lo que
+  `useradd` crea por defecto).
 
 ## Authority impact
 Cambia quién puede leer/escribir/borrar dentro de `proyectos/` — no toca
 autenticación ni autorización de ningún servicio, sólo permisos POSIX de
-archivo. **`--aplicar` contra el workspace real de producción
+archivo y ACL. **`--aplicar` contra el workspace real de producción
 (`/home/fruiz/jax-workspace`) necesita el GO explícito de Fernando** antes de
-correr — no es una operación de solo lectura, y toca el árbol donde viven los
-proyectos de clientes reales (p.ej. `lacteos-victoria`). `--verificar` es
-siempre de solo lectura y no necesita GO.
+correr. `--verificar` es siempre de solo lectura (corre sin privilegio, sin
+sudo) y no necesita GO.
 
 ## Safe procedure
-**Verificar primero, siempre** (no hace falta GO):
+**Verificar primero, siempre** (no hace falta GO, no hace falta sudo):
 ```bash
 cd /ruta/al/checkout/de/jax
-ops/permisos-proyectos.sh --verificar
+python3 ops/permisos_proyectos.py --verificar
 ```
 Sin argumentos, usa `JAX_WORKSPACE_DIR` de `/etc/jax/.env` (leído con
-`sudo -n grep`, nunca sourceado directo — `/etc/jax/.env` es `root:jaxsvc
-640`) o, si esa variable no está, `/home/fruiz/jax-workspace`. Sale `0` si
-todo `proyectos/` cumple; `1` e imprime cada ruta que no cumple si no.
+`sudo -n grep`) o, si esa variable no está, `/home/fruiz/jax-workspace`. Sale
+`0` si todo `proyectos/` cumple; `1` e imprime cada ruta que no cumple si no.
 
 **Aplicar, con el GO de Fernando ya obtenido:**
 ```bash
-ops/permisos-proyectos.sh --aplicar
+python3 ops/permisos_proyectos.py --aplicar
 ```
-Antes de tocar nada, guarda un respaldo completo y restaurable en
-`~/respaldos-permisos/proyectos-<fecha>.acl` (`getfacl -R -p`, con las rutas
-absolutas y el flag `-s-`/setgid incluido — verificado en hall9000 el
-2026-09-25 que ese archivo alcanza para reponer owner/group/ACL/setgid de
-punta a punta con `setfacl --restore`, ver "Cómo revertir" más abajo). Luego
-aplica, en este orden exacto — **no reordenar, ver la nota debajo**:
-1. `sudo chgrp -R jaxsvc proyectos/`
-2. `setfacl -R -m u:fruiz:rwX,g:jaxsvc:rwX,m::rwx proyectos/` (ACL de acceso)
-3. `setfacl -R -d -m u:fruiz:rwX,g:jaxsvc:rwX,m::rwx proyectos/` (ACL por
-   defecto — esto es lo que hace que un archivo nuevo, creado por cualquiera
-   de las dos cuentas con cualquier umask, herede el grupo y quede
-   escribible: **el umask se ignora cuando hay ACL por defecto puesta**,
-   verificado empíricamente, no supuesto)
-4. `sudo find proyectos/ -type d -exec chmod g+s {} +` (setgid en
-   directorios, **al final**)
-Es idempotente: correrlo dos veces deja el mismo estado y termina en `0`.
+Antes de tocar nada, corre `sudo -n getfacl -R -p` sobre TODO el árbol hacia
+un archivo con nombre único (`tempfile.mkstemp`, nunca predecible) en
+`/home/fruiz/respaldos-permisos/`, y **exige código 0 y tamaño > 0 antes de
+mutar nada** — si el respaldo falla por cualquier motivo, `--aplicar` aborta
+sin haber tocado el árbol (verificado con un `sudo` que falla a propósito).
+El mensaje impreso trae la **ruta absoluta** del respaldo — nunca `~`, que
+bajo `sudo` no se expande igual (`HOME` puede cambiar).
 
-**Por qué el orden del paso 4 importa (verificado en hall9000, 2026-09-25).**
-`fruiz` no pertenece al grupo `jaxsvc`. Cualquier llamada a `setfacl(1)`
-corrida como `fruiz` sobre un directorio cuyo grupo es `jaxsvc` **limpia en
-silencio el bit setgid** que ya estuviera puesto — es el mismo mecanismo del
-kernel que limpia `S_ISGID` en `chmod(2)` cuando el llamador no pertenece al
-grupo del archivo y no tiene `CAP_FSETID`; Linux lo aplica también a
-directorios, aunque la letra de `chmod(2)` sólo hable de archivos regulares.
-Por eso el `chmod g+s` va siempre **después** de los dos `setfacl` y siempre
-con `sudo` (a root nunca se le limpia el bit). Poner el `chmod g+s` antes
-"funciona" en apariencia (`chmod -v` confirma el cambio) pero el siguiente
-`setfacl` se lo vuelve a quitar sin avisar.
+Luego, todo el trabajo mutante corre en un solo proceso hijo lanzado con
+`sudo -n python3 ops/permisos_proyectos.py --nucleo-privilegiado <proyectos>`
+(un detalle interno del propio guion, no algo que se invoque a mano), que
+para cada directorio y archivo del árbol:
+1. `fchown` a `jaxsvc:fruiz` (sobre el descriptor ya abierto, nunca sobre una
+   ruta de texto — ver "Por qué todo corre como root").
+2. `setfacl` de acceso (`u:jaxsvc:rwX,g:fruiz:rwX,m::rwx`) y, en
+   directorios, también por defecto — vía `/proc/self/fd/N`, nunca la ruta.
+3. En directorios: asegura el bit setgid y **quita** cualquier setuid/sticky
+   que hubiera (ver "El `mkdir` de este host" más abajo). En archivos: quita
+   cualquier bit especial (setuid/setgid/sticky) que hubiera.
+4. Si el objeto es un **hardlink** (`nlink > 1`), **no lo muta** — lo reporta
+   como fallo (ver "Hardlinks" más abajo).
+5. Si un nombre resultó ser (o se volvió, a mitad de la corrida) un symlink,
+   **nunca lo sigue** — lo salta y lo reporta.
+
+Es idempotente: correrlo dos veces deja el mismo estado y termina en `0`
+(salvo que haya un hardlink, que siempre falla — ver abajo).
+
+## Por qué todo corre como root, y por qué recorre con descriptores, no rutas
+**Amenaza real, no teórica.** `jaxsvc` tiene escritura de grupo sobre
+`$JAX_WORKSPACE_DIR` (`fruiz:jaxsvc 775`) — un proceso de jaxsvc con un bug,
+o comprometido, puede en cualquier momento borrar `proyectos` y ponerle en su
+lugar un symlink a, por ejemplo, `/etc`. Si el recorrido de este guion
+(que corre como root, porque el dueño/grupo/ACL nuevos ya no son los de quien
+lo invoca) siguiera ese symlink, terminaría haciendo `chown`/`chmod`/`setfacl`
+como root sobre archivos arbitrarios del sistema.
+
+La defensa: cada componente del árbol se abre con `O_NOFOLLOW` relativo al
+descriptor del directorio padre (`dir_fd`), nunca con una ruta de texto
+vuelta a resolver desde la raíz. Si un nombre se convirtió en symlink —
+incluso a mitad de la corrida, después de haber sido listado como
+directorio — el `open(..., O_NOFOLLOW)` sobre ese nombre falla con `ELOOP`
+en vez de seguirlo. Las mutaciones actúan sobre el descriptor ya abierto
+(`fchown`, `fchmod`) o, para `setfacl` (que no tiene una forma nativa de
+operar sobre un descriptor), sobre `/proc/self/fd/N` — que apunta al inodo
+del descriptor, no a un nombre que se pueda haber vuelto a sustituir.
+
+Probado empíricamente en hall9000 (2026-09-25, no supuesto): un directorio
+reemplazado por un symlink a un directorio real DESPUÉS de haberlo abierto
+con `O_NOFOLLOW` no contamina el objetivo del symlink cuando la ACL se
+aplica vía `/proc/self/fd`; y un directorio raíz (`proyectos/`) que sea
+symlink se rechaza antes de tocar nada. Los dos casos están automatizados en
+`tests/test_permisos_proyectos.py`
+(`test_symlink_en_el_punto_de_partida_se_rechaza`,
+`test_symlink_sustituido_a_mitad_de_la_corrida_no_contamina_el_objetivo`).
+
+## El permiso EFECTIVO, no el texto de la ACL
+Un archivo creado con `tempfile.mkstemp()` (modo `0600` explícito) bajo un
+directorio con ACL por defecto recibe entradas de ACL que **siguen
+mostrando "rwx" en el texto** pero cuyo permiso **efectivo** (entrada ∧
+máscara) es `---`: el algoritmo de creación de ACL interseca el modo pedido
+con la ACL por defecto, y `0600` pide grupo=0, así que la máscara resultante
+también es 0 — verificado empíricamente en hall9000 el 2026-09-25.
+`--verificar` calcula ese efectivo bit a bit (`_permiso_efectivo` en el
+propio guion), nunca confía en el texto pedido. El escritor real que
+disparaba esto — `las_manos/motor_registry/tool_authority.py::_write_file`
+— se corrigió en el mismo cambio que este guion: `os.fchmod(fd, 0o664)`
+antes de `os.replace`, con test
+(`las_manos/_tool_authority_test.py::test_5c_...`).
+
+## El `mkdir` de este host agrega bits espurios — mitigado, no sólo documentado
+`/usr/bin/mkdir` en hall9000 resuelve a `coreutils-from-uutils`
+(uutils-coreutils 0.8.0, paquete experimental de Ubuntu), no a GNU
+coreutils. Verificado el 2026-09-25, con el mismo directorio padre (ACL por
+defecto con entradas nombradas ya puesta): `/usr/bin/mkdir` crea el
+directorio nuevo en `7775` (agrega **setuid + sticky** espurios), mientras
+que `/usr/bin/gnumkdir` (GNU real) y `os.mkdir()` de Python dan `775`
+(correcto) sobre el mismo padre. El sticky espurio le impide a `fruiz`
+borrar un archivo de `jaxsvc` (y viceversa) — exactamente lo que este
+esquema existe para permitir.
+
+**Ya no es sólo un riesgo documentado**: `--verificar` exige que ningún
+directorio tenga setuid ni sticky (el setgid sí, es el bit legítimo) y que
+ningún archivo tenga ningún bit especial; `--aplicar` los quita y reporta
+cada ruta corregida (`test_verificar_detecta_y_aplicar_quita_bits_espurios_de_un_directorio`,
+que reproduce el `7775` real). No se decidió una corrección de host
+(`update-alternatives` a GNU mkdir, reportar el defecto río arriba a
+uutils) — sigue pendiente para quien tenga autoridad sobre el paquete de
+coreutils del host; mientras tanto, cada `--aplicar` limpia lo que haya.
+
+## Hardlinks
+Un archivo con `nlink > 1` comparte inodo con alguna otra ruta que puede
+estar fuera de `proyectos/` por completo — cambiarle dueño o permiso desde
+acá cambiaría también esa otra ruta. `--verificar` y `--aplicar` lo rechazan
+sin tocarlo: `--aplicar` termina en `1` si encontró alguno (reportado en la
+salida como `HARDLINK RECHAZADO`). Medido el 2026-09-25: la producción real
+hoy no tiene ninguno (`find proyectos -type f -links +1` da 0) — es una
+defensa hacia adelante, no una situación actual conocida.
 
 ## Verification
 ```bash
-ops/permisos-proyectos.sh --verificar
+python3 ops/permisos_proyectos.py --verificar
 ```
-`0` = cumple (grupo `jaxsvc`, setgid en cada directorio, ACL de acceso y por
-defecto con `fruiz`/`jaxsvc` en cada directorio, grupo y ACL de acceso en
-cada archivo). `1` = no cumple, con la lista completa de rutas. El PR que
-agrega este guion incluye `tests/test_permisos_proyectos.py`, que lo ejercita
-contra un árbol temporal en cada corrida de CI (job `permisos-proyectos` de
-`.github/workflows/policy.yml`) y, sólo en el host de producción de jax
-(donde exista `/home/fruiz/jax-workspace/proyectos` y `sudo -n -u jaxsvc
-true` funcione), corre además una prueba real: `sudo -u jaxsvc` crea y borra
-un archivo dentro de `proyectos/`.
+`0` = cumple (dueño `jaxsvc`, grupo `fruiz`, setgid en cada directorio, sin
+setuid/sticky espurios, ACL de acceso y por defecto con permiso EFECTIVO
+suficiente para `jaxsvc`/`fruiz` en cada directorio, grupo y ACL de acceso
+efectiva en cada archivo, sin bits especiales en archivos, sin hardlinks).
+`1` = no cumple, con la lista completa de rutas y el motivo de cada una.
+
+`tests/test_permisos_proyectos.py` lo ejercita en cada corrida de CI (job
+`permisos-proyectos` de `.github/workflows/policy.yml`, piso medido "15
+passed, 1 skipped") y, sólo en el host de producción de jax, corre además
+una prueba de lectura/escritura cruzada real: un subdirectorio temporal
+propio dentro de `proyectos/` (que el propio test borra al terminar) donde
+`jaxsvc` crea algo y `fruiz` lo lee/escribe, y al revés.
 
 ## Fail-closed condition
-Si `--verificar` da `1` contra producción, `proyectos/` sigue sin ser
-escribible por una de las dos cuentas — no se asume que "probablemente ya
-está bien". Si `--aplicar` termina pero su `--verificar` final también da
-`1` (mensaje "`--aplicar` terminó pero `--verificar` final encontró fallos"),
-el árbol quedó en un estado parcial: no declarar la tarea cumplida, revisar
-la salida y, si hace falta, revertir (ver abajo) antes de reintentar.
+Si `--verificar` da `1` contra producción, `proyectos/` sigue sin estar en
+el estado que ambas cuentas necesitan. Si `--aplicar` encuentra un hardlink,
+termina en `1` aunque haya corregido todo lo demás — un hardlink sin resolver
+no es un estado parcial aceptable, es una decisión pendiente sobre qué
+hacer con ese archivo. Si el respaldo previo falla, `--aplicar` no aplica
+nada (ver "Safe procedure").
 
 ## Recovery / escalation
-**Revertir** al estado de antes de `--aplicar`, con el respaldo que el
-propio `--aplicar` dejó en `~/respaldos-permisos/`:
+**Revertir** al estado de antes de `--aplicar`, con el respaldo (ruta
+absoluta, impresa por el propio `--aplicar`):
 ```bash
-sudo setfacl --restore=~/respaldos-permisos/proyectos-<fecha>.acl
+sudo setfacl --restore=/home/fruiz/respaldos-permisos/proyectos-XXXXXXXX.acl
 ```
-Verificado en hall9000 (2026-09-25): esto repone owner, group, ACL de acceso
-y por defecto, y el bit setgid, exactamente como estaban antes — de punta a
-punta, con una sola orden, corrida como root (el grupo a restaurar es
-`jaxsvc`, y restaurar `chgrp` necesita el mismo privilegio que aplicarlo).
-Si el respaldo no alcanza o el estado quedó irreconocible, escalar a
-Fernando antes de intentar nada más manual sobre `proyectos/` — es el árbol
-de proyectos de clientes reales.
+Verificado en hall9000 (2026-09-25): repone owner, group, ACL de acceso y
+por defecto, y el bit setgid, de punta a punta, con una sola orden. Si el
+respaldo no alcanza o el estado quedó irreconocible, escalar a Fernando
+antes de intentar nada más manual sobre `proyectos/`.
 
 ## Prohibited actions
 - No correr `--aplicar` contra el workspace real sin el GO explícito de
-  Fernando (`--verificar` sí, en cualquier momento, es de solo lectura).
-- No reordenar los cuatro pasos de `--aplicar` (ver "por qué el orden
-  importa" arriba) ni mover el `chmod g+s` fuera de `sudo`.
-- No cambiar el dueño (`fruiz` se queda) ni tocar nada fuera de
-  `$RAIZ/proyectos` — `ops/permisos-proyectos.sh` ya lo rechaza, pero
-  tampoco se hace a mano por fuera del guion.
-- No usar `chmod -R` a secas sobre `proyectos/` para "simplificar": pisa la
-  ACL sin avisar y dos cuentas pueden volver a quedar sin escritura cruzada.
-
-## Riesgos conocidos
-**El `mkdir` por defecto de este host (hall9000) tiene un defecto verificado
-que agrega bits espurios a directorios nuevos creados bajo un padre con ACL
-por defecto.** `/usr/bin/mkdir` resuelve hoy a `coreutils-from-uutils`
-(uutils-coreutils 0.8.0, paquete experimental de Ubuntu), no a GNU
-coreutils. Verificado el 2026-09-25, con el mismo directorio padre (ACL por
-defecto con entradas nombradas ya puesta) y sin ningún otro cambio:
-
-| Herramienta que crea el directorio nuevo | Resultado |
-|---|---|
-| `/usr/bin/mkdir` (uutils, el que resuelve por `$PATH`) | `7775` — agrega **setuid + sticky** espurios |
-| `/usr/bin/gnumkdir` (GNU coreutils real, mismo host) | `775` — correcto |
-| `os.mkdir()` de Python | `775` — correcto |
-
-El sticky espurio le **impide a `fruiz` borrar un archivo de `jaxsvc`** (y
-viceversa) dentro de ese directorio — exactamente lo que este esquema de
-permisos existe para permitir. Los servicios de `jaxsvc` (LAS MANOS,
-jax-platform) crean directorios con Python, no con `mkdir`, así que no les
-pega; **cualquier script de shell que use `mkdir` a secas bajo `proyectos/`
-sí queda expuesto** el día que alguien lo escriba. `ops/permisos-proyectos.sh`
-no crea directorios nuevos (sólo corrige los que ya existen), así que no lo
-sufre. No se decidió una corrección de host (`update-alternatives` a GNU
-mkdir, reportar el defecto río arriba a uutils, u otra) en esta ronda — queda
-para quien tenga la autoridad de tocar el paquete de coreutils del host.
+  Fernando (`--verificar` sí, en cualquier momento).
+- No mutar nada por ruta de texto "a mano" (un `chown -R`/`chmod -R` directo
+  se salta toda la defensa contra symlinks de este guion).
+- No cambiar `USUARIO`/`GRUPO` en el guion sin actualizar el spec aprobado
+  primero — es una decisión de Fernando, no un parámetro de conveniencia.
+- No tocar nada fuera de `$RAIZ/proyectos`, ni las entradas cuyo nombre
+  empieza con `.`.
+- Nunca invocar `--nucleo-privilegiado` a mano: es el mecanismo interno con
+  el que `--aplicar` re-ejecuta el núcleo mutante como root; asume que ya
+  se validó todo lo que el modo público valida primero.
