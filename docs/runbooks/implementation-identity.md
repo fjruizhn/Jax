@@ -531,6 +531,425 @@ servicio real -- el mismo venv que systemd invoca
 repo, con `PYTHONPATH=/srv/jax-prod/jax` (el mismo que fija el drop-in
 `z-pythonpath.conf`).
 
+**El arranque de systemd está versionado en el repo** (decisión de
+Fernando, 2026-09-25, opción A -- **el repo describe lo que corre, y
+producción no se toca**, decisión reafirmada el mismo día al cerrar el
+hallazgo de abajo, y otra vez al cerrar los 6 MAJOR/4 MINOR de la
+auditoría escalón 3 sobre jax#274): **19 archivos** en total (contados,
+no una cifra redonda -- ver `ops/manifiesto-arranque-instalado.tsv`, que es
+la lista real):
+
+> **CADUCADA (confirmado 2026-09-25, ronda 5)**: la nota anterior sobre
+> `jax-las-manos.service` con `NeedDaemonReload=yes` real en hall9000 ya
+> no aplica -- `sudo -n ops/verificar-arranque-instalado.sh` contra la
+> producción real dio `EXIT=0` ("repo e instalado coinciden, 19
+> archivos"), lo que sólo es posible con `NeedDaemonReload=no` en las 4
+> unidades (el guion actual lo exige explícitamente, ver más abajo). No
+> fue el subagente de esta ronda quien corrió el `daemon-reload` --
+> alguien con autoridad lo resolvió entre rondas.
+- 4 unidades base: `jax-las-manos.service`, `jax-memory-worker.service`,
+  `jax-memory-synthesis.service`, `jax-ejecutor-proxy.service`. Son el
+  fragmento CRUDO tal como está instalado en `/etc` (`User=fruiz`,
+  `WorkingDirectory=/home/fruiz/jax...`, sin `Environment=HOME=`) -- el
+  `User=jaxsvc`/`WorkingDirectory=/srv/jax-prod/jax`/`HOME`/`PYTHONPATH`
+  propios llegan SIEMPRE por los drop-ins, nunca horneados en la base.
+  Ningún consumidor del repo depende ya de que la base sola describa el
+  resultado final (ver el punto de la configuración EFECTIVA, abajo).
+- 12 drop-ins: TRES por cada una de las 4 unidades --
+  `checkout-de-produccion.conf`, `cuenta-de-servicio.conf` y
+  `z-pythonpath.conf` (el PYTHONPATH efectivo de las 3 últimas apuntaba a
+  `/home/fruiz/jax` -- el checkout de TRABAJO de un agente, en rama ajena,
+  no el de producción; cerrado en la misma auditoría, ver el hallazgo M1
+  más abajo).
+- 2 timers (`jax-memory-worker.timer`, `jax-memory-synthesis.timer`),
+  también copia byte a byte de lo instalado (el de synthesis decía
+  `OnCalendar=hourly` en el repo contra `*-*-* 04:30:00` instalado -- el
+  repo mentía sobre CUÁNDO corre, no sólo sobre cómo).
+- 1 guion de sanidad, `ops/sbin/jax-checkout-de-produccion-sano.sh`.
+- **Instalación, con GO de Fernando** -- dos caminos, no contradictorios:
+  - **El camino normal es correr el instalador del servicio -- SÓLO
+    cuando cumple sus propias precondiciones** (auditoría escalón 3,
+    ronda 2, M3: llamarlo "camino normal" sin esta letra chica es lo que
+    dejaba a `install-memory-scope.sh` copiando en silencio lo que hubiera
+    en `/home/fruiz/jax` en ese momento -- el checkout de TRABAJO de un
+    agente, en rama ajena). `config/systemd/install-memory-scope.sh` (B9),
+    `ops/ejecutor/instalar_registro_y_cerco.sh` (proxy del Ejecutor) y
+    `ops/instalar-dropins-de-servicio.sh` cuando corre SIN `DESTDIR`
+    (instalación real -- ronda 3, MAJOR-2) derivan `REPO` y ABORTAN si no
+    se cumple, ANTES de tocar nada: `REPO` es exactamente
+    `/srv/jax-prod/jax` (literal, no "parecido"), está en `master`, y el
+    árbol está limpio.
+    **`/srv/jax-prod/jax` es `jaxsvc:jaxsvc`** (ronda 3, MAJOR-2): `git
+    rev-parse`/`status` ahí dan "detected dubious ownership" (rc=128), como
+    `fruiz` y como `root`, sin `-c safe.directory=/srv/jax-prod/jax`
+    declarado POR INVOCACIÓN (nunca en la config global -- mismo criterio
+    que `ops/sbin/jax-checkout-de-produccion-sano.sh` ya usaba). Y el
+    chequeo de árbol limpio en sí corre con `sudo` (root, con
+    `safe.directory`): como `fruiz`, `git status --porcelain` da `rc=0`
+    IGUAL, pero con avisos "Permission denied" sólo en stderr sobre
+    subdirectorios de `jaxsvc` (`las_manos/workspace`, `las_manos/repo`,
+    `las_manos/missions`) que `fruiz` no puede listar -- un chequeo que
+    sólo mirara `stdout` se habría tragado el aviso y dado el árbol por
+    limpio sin haber podido verlo entero. Los tres guiones tratan
+    CUALQUIER stderr de ese `git status` como fallo, no sólo lo que
+    aparece en stdout.
+    Recién con las precondiciones cumplidas: el guion de sanidad y los
+    drop-ins de SU unidad (`ops/instalar-dropins-de-servicio.sh`, ver
+    abajo) ANTES que la unidad base, y recién entonces la unidad base y
+    `daemon-reload` -- nunca deja la base sola en `/etc` a mitad de camino
+    (M5). Que el instalador automatice varios `install` en el orden
+    correcto NO es lo mismo que automatizar CUÁNDO correr el instalador:
+    eso lo sigue decidiendo una persona, con GO de Fernando.
+  - **`jax-las-manos` (y cualquier archivo suelto que aún no tenga
+    instalador propio) se copia a mano**: `sudo cp <archivo del repo>
+    <ruta de /etc o /usr/local/sbin correspondiente (ver
+    ops/manifiesto-arranque-instalado.tsv)>` seguido de `sudo systemctl
+    daemon-reload` y, si corresponde, un reinicio del servicio afectado.
+  - **Después de instalar, la prueba es por EFECTO, no por archivo**
+    (auditoría escalón 3, ronda 2, MINOR-2): que los archivos coincidan no
+    prueba que el proceso YA VIVO los esté usando -- systemd no relee
+    `Environment=` de un servicio corriendo hasta que se reinicia. Tras
+    reiniciar (`sudo systemctl restart <unidad>`), confirmar en el PROCESO
+    REAL, no en el disco: `sudo cat /proc/$(systemctl show -p MainPID
+    --value <unidad>)/environ | tr '\0' '\n' | grep PYTHONPATH` tiene que
+    mostrar `/srv/jax-prod/jax` (y, para el proxy,
+    `:/srv/jax-prod/jax/las_manos`) -- nunca `/home/fruiz`. Sin este paso,
+    "el guion de verificación dio 0" sólo prueba que /etc está bien, no
+    que el servicio ya arrancó con eso.
+- **Verificación**: `ops/verificar-arranque-instalado.sh [RAIZ_PRUEBA]`
+  compara, archivo por archivo según `ops/manifiesto-arranque-instalado.tsv`,
+  lo que hay en el repo contra lo instalado -- byte a byte, que lo
+  instalado NUNCA sea un symlink (ni el archivo ni su directorio padre),
+  dueño `root:root` y modo `644`/`755` en archivos y `755` en los
+  directorios que los contienen. Sale 0 sólo si TODO eso se cumple; sale 2
+  si no hay `sudo` disponible (fallo cerrado); imprime cada diferencia y
+  sale 1 en cualquier otro caso. **En producción se corre así**: `sudo -n
+  ops/verificar-arranque-instalado.sh` (sin argumento -- `RAIZ_PRUEBA`
+  vacío es modo producción), que hoy tiene que dar `rc=0` con
+  `verificar-arranque-instalado: repo e instalado coinciden (19
+  archivos)` -- confirmado contra la producción real al cerrar la ronda 6.
+  **UN SOLO CAMINO (ronda 5)** -- RECHAZADA la ronda 4 porque tenía DOS
+  implementaciones distintas de la capa disco (`systemd-delta` en
+  producción, una enumeración a mano bajo `RAIZ_PRUEBA`): eso dejaba a
+  los tests probando un camino que producción nunca ejecutaba, y
+  `systemd-delta` medido en hall9000 NO veía `generator`, `transient`,
+  `system.control` ni los prefijos con guion. Ahora hay una única función,
+  `enumerar_dropins_en_disco RAIZ`, que corre igual con `RAIZ="/"` en
+  producción y con el árbol temporal en las pruebas -- los mismos tests
+  que corren bajo `RAIZ_PRUEBA` ejercitan el código que corre en
+  producción, no una simulación aparte:
+  - **Corre ENTERO como root** (`sudo -n`, re-exec al principio si no lo
+    es ya -- RAIZ_PRUEBA pasa a ser un ARGUMENTO posicional, no una
+    variable de entorno, porque `sudo` resetea el entorno a
+    `secure_path`/mínimo y una variable puesta antes del re-exec no
+    sobrevive ese salto). Sin `sudo` disponible, o si `sudo -n` no
+    alcanza: FALLA CERRADO (`exit 2`), nunca sigue como usuario sin
+    privilegios fingiendo que pudo revisar todo.
+  - **`RAIZ_PRUEBA` que resuelve a `/`** (vacío, o algo como `/tmp/../`)
+    se normaliza con `realpath -m` y se trata EXACTAMENTE como "sin
+    RAIZ_PRUEBA" -- modo PRODUCCIÓN, con la capa cargado incluida (ronda
+    5, MINOR-1; prueba dedicada
+    `test_raiz_prueba_que_resuelve_a_raiz_activa_la_capa_cargado`). Desde
+    la ronda 7 esta prueba ya NO usa un `systemctl` de mentira (MINOR-B,
+    más abajo, lo impide en producción) -- compara DOS corridas reales
+    (sin argumento, y con `/`) y exige que den EXACTAMENTE el mismo
+    resultado.
+  - **Disco -- SIEMPRE la misma función, sólo cambia la raíz que
+    recibe.** `enumerar_dropins_en_disco` recorre `UNIT_PATHS_SYSTEMD`,
+    una lista FIJA de las 12 rutas reales de `systemd-analyze unit-paths`
+    (en hall9000, systemd 259), versionada EN ESE ORDEN porque
+    `systemd-analyze` no se puede correr contra un árbol de prueba bajo
+    `/tmp`: `/etc/systemd/system.control`, `/run/systemd/system.control`,
+    `/run/systemd/transient`, `/run/systemd/generator.early`,
+    `/etc/systemd/system`, `/etc/systemd/system.attached`,
+    `/run/systemd/system`, `/run/systemd/system.attached`,
+    `/run/systemd/generator`, `/usr/local/lib/systemd/system`,
+    `/usr/lib/systemd/system`, `/run/systemd/generator.late` -- el orden
+    ES la prioridad (la primera ruta en la que aparece el fragmento de la
+    unidad es la efectiva). El orden real medido en hall9000 difiere del
+    que el guion de la ronda 5 tenía al escribirse por primera vez
+    (`generator.early` va DESPUÉS de `transient` y ANTES de
+    `/etc/systemd/system`, no al final) -- se detectó exactamente por el
+    test que compara la lista fija contra la real (ver abajo), y quedó
+    corregido antes de cerrar la ronda. Para cada unidad, en cada una de
+    esas 12 rutas + `RAIZ`, se revisan DOS cosas:
+    - el fragmento base `<unidad>` (cualquier fragmento fuera de
+      `/etc/systemd/system/<u>` en CUALQUIER ruta, de mayor o menor
+      prioridad, es DIFERENCIA -- el de mayor prioridad porque de verdad
+      la reemplaza, el de menor porque es un duplicado dormido que el
+      manifiesto no declara) + los drop-ins en `<unidad>.d/`, en cada
+      prefijo con guion de `systemd.unit(5)` (`jax-.service.d`,
+      `jax-memory-.service.d`, …) y en el genérico de tipo (`service.d/`,
+      `timer.d/`);
+    - **ALIAS no declarado (MAJOR-1, ronda 6; cadenas y nombres ocultos,
+      MAJOR-1, ronda 7)**: `man systemd.unit(5)` -- "drop-ins for the
+      aliased name and all aliases are loaded". Cualquier symlink de
+      PRIMER NIVEL, en cualquiera de las 12 rutas, cuyo destino sea (por
+      nombre base) una unidad del manifiesto, es DIFERENCIA -- exista o
+      no todavía un drop-in propio bajo el nombre del alias, porque
+      systemd carga los drop-ins de CUALQUIER nombre bajo el que la
+      unidad quede aliaseada, no sólo el nombre "canónico". El
+      manifiesto no declara alias hoy (ninguno existe). **Reproducido
+      contra el código de la ronda 5** (commit `5c52fe5`): un árbol con
+      `etc/systemd/system/otro-alias.service -> jax-las-manos.service` +
+      `otro-alias.service.d/evil.conf` daba `rc=0` -- el guion nunca
+      miraba symlinks de primer nivel que no fueran el nombre EXACTO de
+      la unidad.
+
+      Ronda 7 (auditor, con `systemd-analyze` en hall9000, systemd 259):
+      dos huecos más, ambos REALMENTE cargados por systemd, no sólo
+      teóricos:
+      - **Alias OCULTOS** (nombre que empieza con "."): el glob
+        `"$dir_padre"/*` de la ronda 6 NUNCA ve nombres que empiecen con
+        "." -- comportamiento estándar de shell, no un bug de systemd.
+        Con `dotglob` (activado y restaurado por directorio con
+        `shopt -p`/`shopt -s`) el mismo `*` ve TODO. **Reproducido
+        contra el código de la ronda 6** (commit `7115cb1`, corrido EN
+        SU LUGAR REAL en el repo -- una copia fuera del repo no puede
+        resolver `git rev-parse --show-toplevel`): un árbol con
+        `.oculto.service -> jax-las-manos.service` daba `rc=0` en `/etc`
+        y en `/run` por igual.
+      - **Cadenas de alias** (`a -> b -> unidad`, `a -> .b -> unidad`):
+        `resolver_cadena_alias` sigue la cadena UN eslabón por vez,
+        DENTRO DEL MISMO DIRECTORIO (systemd resuelve así los alias
+        reales -- symlinks relativos, mismo nivel; un eslabón que
+        apunta fuera del directorio corta la cadena ahí, ya comparado
+        contra la unidad antes de cortar). Si la cadena TERMINA en la
+        unidad, el mensaje nombra TODOS los eslabones, no sólo el
+        último -- un ciclo (un nombre que se repite en su propia
+        cadena) se reporta aparte y cuenta como fallo de enumeración
+        (tope de 10 saltos, defensa en profundidad). **Reproducido
+        contra el código de la ronda 6**: una cadena con un intermedio
+        oculto (`cabeza-de-cadena.service -> .intermedio-oculto.service
+        -> jax-las-manos.service`) daba `rc=0`. Cuatro tests dedicados
+        (oculto en `/etc`, oculto en `/run`, cadena con intermedio
+        oculto, cadena visible).
+    Nunca se traga errores: un directorio que debería ser
+    legible/listable y no lo es, o una ruta de fragmento que existe pero
+    no es un archivo regular, cuentan como fallo de enumeración
+    (`rc≠0`), no como "cero archivos ahí" silencioso (ronda 5, MINOR-2).
+    `systemd-delta` se quitó del todo -- ya no forma parte de este
+    guion, en ningún modo.
+  - **`systemctl` en producción se resuelve por RUTA ABSOLUTA, nunca por
+    PATH (MINOR-B, ronda 7).** `resolver_systemctl_de_produccion` prueba
+    una lista FIJA de candidatas (`/usr/bin/systemctl`,
+    `/bin/systemctl`), y sólo acepta la primera que sea root:root y SIN
+    bit de escritura para grupo NI para otros (verificado con `stat`,
+    aritmética sobre el modo octal -- no un `case` sobre el string). Si
+    ninguna candidata pasa: FALLA CERRADO (`exit 2`). Antes de la ronda
+    7, el guion invocaba el `systemctl` literal (resuelto por PATH), y
+    las pruebas de las rondas 3-6 aprovechaban eso para shadowearlo con
+    un `systemctl` de mentira puesto ANTES en el PATH -- MINOR-B cierra
+    esa puerta a propósito: ni una variable de entorno ni un PATH
+    alterado pueden cambiar qué binario corre contra la producción real.
+  - **Cargado -- producción SIEMPRE (con el `systemctl` resuelto arriba),
+    y en modo prueba SÓLO si `SYSTEMCTL_DE_PRUEBA` está puesta (ronda 6,
+    MINOR-1; NUNCA en producción, MINOR-A, ronda 7).**
+    `SYSTEMCTL_DE_PRUEBA` es una ruta a un `systemctl` de mentira,
+    respetada ÚNICAMENTE cuando el guion NO está en modo producción
+    (`ES_PRODUCCION != 1`) -- en producción esta variable nunca se lee,
+    así que nada inyectado desde afuera puede cambiar qué `systemctl`
+    corre contra el sistema real. **Prueba de mutación (MINOR-A, ronda
+    7)**: se corre el guion en modo PRODUCCIÓN de verdad con
+    `SYSTEMCTL_DE_PRUEBA` puesta apuntando a un systemctl de mentira que
+    haría fallar todo si se leyera -- tiene que dar EXACTAMENTE el mismo
+    resultado que sin esa variable. Verificado reintroduciendo la
+    lectura (`SYSTEMCTL_CMD="${SYSTEMCTL_DE_PRUEBA:-systemctl}"`, la
+    vulnerabilidad exacta que este test existe para atrapar) en una
+    copia del guion y confirmando que ESE test específico pasa a fallar
+    contra esa copia, restaurada de inmediato y confirmada byte a byte
+    idéntica con `diff`. Esto es lo que permite que las pruebas de la
+    capa cargado corran en CUALQUIER runner (ubuntu-latest de CI
+    incluido), activándose sobre un árbol de `RAIZ_PRUEBA` con un
+    `systemctl` de mentira en vez de depender de que
+    `jax-las-manos.service` esté instalado de verdad en `/etc`.
+    `systemctl show -p FragmentPath -p DropInPaths -p NeedDaemonReload
+    -p Id -p Names <unidad>` -- **SIN `--value`** (MINOR-2, ronda 6):
+    medido en hall9000, `systemctl show` NO respeta el orden en que se
+    piden las propiedades (pedidas
+    `FragmentPath/DropInPaths/NeedDaemonReload/Id/Names`, la salida real
+    vino `Id/Names/FragmentPath/DropInPaths/NeedDaemonReload`) -- el
+    guion parsea cada línea como `Clave=valor` y arma el resultado por
+    CLAVE, nunca por posición. Se EXIGEN tres cosas:
+    - `NeedDaemonReload=no` -- la señal REAL y estructurada de "lo
+      cargado puede no reflejar el disco". Prueba dedicada, con un
+      `systemctl` de mentira en modo `necesita_reload` que devuelve los
+      3 drop-ins reales COMPLETOS (nada falta) pero
+      `NeedDaemonReload=yes`, para aislar este chequeo de cualquier otro
+      desacuerdo -- **verificado contra el código viejo antes de
+      cerrar** (ronda 5, MAJOR-2).
+    - **`Id` y `Names` NO vacíos, e `Id` igual a la unidad pedida**
+      (MINOR-C, ronda 7): con la ronda 6 sola, `"$nombres" != "$id"`
+      daba `"" != ""` = FALSO cuando un `systemctl show` roto omitía los
+      dos campos -- pasaba desapercibido. Prueba dedicada, con un
+      `systemctl` de mentira en modo `sin_id_names` que devuelve todos
+      los drop-ins reales y `NeedDaemonReload=no`, pero `Id=`/`Names=`
+      vacíos.
+    - **`Names` == `Id`** (MAJOR-1, ronda 6): `Names` trae TODOS los
+      nombres bajo los que systemd tiene cargada la unidad (el `Id` +
+      cualquier alias); si hay más de uno, hay un alias CARGADO que el
+      manifiesto no declara -- esto lo detecta aunque el disco por sí
+      solo (sin systemd corriendo, o en modo prueba sin
+      `SYSTEMCTL_DE_PRUEBA`) no pueda verlo. Prueba dedicada, con un
+      `systemctl` de mentira en modo `alias_cargado` que devuelve todo
+      completo y `NeedDaemonReload=no`, pero `Names=jax-las-manos.service
+      otro-alias.service` -- **verificado contra el código viejo antes
+      de cerrar**: se quitó el bloque `if [ "$nombres" != "$id" ]; then
+      ... fi` de una copia del guion (nunca de la rama) y se confirmó
+      que ESE test específico pasa a fallar contra esa copia (el guion
+      daba 0 con un alias cargado y todo lo demás perfecto), restaurada
+      de inmediato y confirmada byte a byte idéntica con `diff`.
+
+    Si `systemctl show` falla del todo (unidad inexistente, systemctl
+    roto), mensaje claro Y el guion sigue revisando las demás unidades
+    -- no aborta la corrida entera por una sola. Esta prueba en sí
+    (`test_capa_cargado_de_prueba_systemctl_falla`) es HERMÉTICA desde
+    la ronda 7 -- reemplaza a
+    `test_systemctl_que_falla_dice_algo_claro_y_sigue_con_las_demas` de
+    las rondas 3-6, que necesitaba shadowear `systemctl` en producción
+    (ver MINOR-B, ya no es posible ni tiene sentido intentarlo).
+
+    El `systemctl` de mentira (`tests/fixtures/systemctl-falso-para-pruebas.sh`)
+    es HERMÉTICO desde la ronda 6: responde con datos correctos (calcados
+    del manifiesto) para las 6 unidades declaradas, no sólo
+    `jax-las-manos.service` -- así la capa cargado de prueba nunca cae al
+    `systemctl` real, en ningún runner (confirmado rompiendo a propósito
+    el `systemctl` real de respaldo en una copia del fixture y viendo que
+    los tests de esta capa siguen en verde). **MINOR-D (ronda 7)**: el
+    fixture ya NO delega NUNCA a un `systemctl` real (`exec "$REAL" "$@"`
+    se quitó del todo) -- cualquier invocación que no sea la consulta
+    cargado esperada, o que pida una unidad que no esté en el manifiesto,
+    sale con error explícito. Las unidades "conocidas" tampoco están
+    copiadas a mano en un `case`: se LEEN de
+    `ops/manifiesto-arranque-instalado.tsv` con el mismo criterio (awk)
+    que usa el guion real, así que el fixture no puede desincronizarse
+    del manifiesto en silencio.
+  - **MAJOR-A (ronda 4, sigue vigente)**: ninguna función
+    invocada vía `$(...)` toca la variable `fallo` desde dentro (esa
+    asignación viviría en un SUBSHELL y se perdería); sólo imprimen su
+    LISTA por stdout y señalan su ESTADO por código de salida, y el
+    llamador, fuera de cualquier subshell (`if ! x="$(funcion ...)"; then
+    fallo=1; fi`), es quien pone `fallo=1`. Prueba dedicada
+    (`test_directorio_ilegible_y_vacio_da_rc_1`), verificada contra el
+    código viejo antes de arreglar.
+  - **BLOCK-1 (ronda 3, ya resuelto)**: `systemctl show -p` con
+    propiedades explícitas nunca imprime contenido de archivo, así que
+    una línea de comentario tipo `# /algo` dentro de un `.conf` legítimo
+    nunca puede confundirse con una cabecera de systemd -- y la capa
+    disco ni siquiera llama a `systemctl`, así que ese riesgo desapareció
+    de raíz.
+  `tests/test_arranque_instalado.py` ejercita la forma del repo siempre
+  (también en CI, sin necesitar el host de producción) y, sólo en el host
+  de producción, corre el guion de verdad y EXIGE 0 -- no hace skip si
+  falta algo instalado. `tests/test_verificar_arranque_instalado.py` (28
+  tests) prueba: `RAIZ_PRUEBA` con un árbol completo (0), con 9 intrusos
+  reales por el camino ÚNICO (fragmento y drop-in de más en cada una de
+  las rutas relevantes de `UNIT_PATHS_SYSTEMD`, incluidas
+  `system.control` con fragmento de mayor Y de menor prioridad,
+  `generator`, `transient`, y el genérico `timer.d/` bajo `/run`) y con 4
+  alias no declarados (con y sin drop-in propio, oculto en `/etc` y en
+  `/run`, cadena con intermedio oculto, cadena visible); BLOCK-1, MAJOR-A,
+  MAJOR-2, MINOR-1 (`RAIZ_PRUEBA="/"` activa la capa cargado, comparando
+  dos corridas reales), la lista fija `UNIT_PATHS_SYSTEMD` comparada
+  contra `systemd-analyze unit-paths` real (sólo en producción, para que
+  la lista versionada no derive en silencio), la prueba de mutación de
+  MINOR-A, y la capa cargado HERMÉTICA
+  (correcto/desacuerdo/NeedDaemonReload/alias-cargado/systemctl-falla/
+  Id-Names-vacíos, vía `SYSTEMCTL_DE_PRUEBA` + `RAIZ_PRUEBA`, corriendo en
+  cualquier runner).
+
+  **Piso medido con `sudo unshare --mount` tapando `/srv/jax-prod`
+  (simulando un runner de CI sin el checkout de producción): 25 passed, 3
+  skipped** (ronda 7; era 19/5 en la ronda 6) -- MINOR-B (arriba) retiró
+  el shadowing de `systemctl` por PATH que las rondas 3-6 usaban en
+  producción, así que 3 tests de esas rondas se retiraron y se
+  reemplazaron por sus equivalentes herméticos (o por la comparación
+  directa contra producción real de MINOR-1, sin systemctl de mentira).
+  De los 5 tests production-only de la ronda 6, **2 SÍ tenían equivalente
+  hermético desde esa misma ronda** (el desacuerdo de disco y el
+  NeedDaemonReload aislado) -- corrección de una imprecisión de esta
+  misma sección en la ronda 6, que decía que ninguno lo tenía. Los 3 que
+  siguen skipped son los que de verdad necesitan producción real:
+  `jax-las-manos.service` instalado de verdad en `/etc` + el `systemctl`
+  real (1 test, MINOR-A), y `systemd-analyze unit-paths`/`RAIZ_PRUEBA="/"`
+  reales (2 tests). Cableado al job `arranque-instalado-versionado` de
+  `.github/workflows/policy.yml`.
+- **`ops/instalar-dropins-de-servicio.sh <unidad>.service.d|/ruta/absoluta
+  <REPO> [DESTDIR]`**: lee `ops/manifiesto-arranque-instalado.tsv` y copia
+  las filas que coincidan -- por prefijo de directorio de drop-ins, o por
+  ruta instalada exacta (así instala también
+  `/usr/local/sbin/jax-checkout-de-produccion-sano.sh`, M5) -- nunca una
+  lista de archivos aparte. Rechaza filas con `..`, nombres de archivo que
+  no matcheen `^[A-Za-z0-9._-]+\.(conf|sh)$`, y cualquier archivo del repo
+  cuyo `realpath` caiga fuera de `$REPO` (m2 -- defensa en profundidad: el
+  manifiesto es del propio repo, no un insumo externo, pero este guion
+  corre con `sudo`); los tres rechazos, probados con un manifiesto
+  ADULTERADO en un `$REPO` temporal (`tests/test_instalar_dropins_de_servicio.py`).
+  `config/systemd/install-memory-scope.sh` y
+  `ops/ejecutor/instalar_registro_y_cerco.sh` lo invocan para su guion de
+  sanidad y sus drop-ins, ANTES de instalar su propia unidad base.
+  **Con `DESTDIR` vacío (instalación real) exige lo mismo que los otros
+  dos instaladores** (ronda 3, MAJOR-2): `REPO` es `/srv/jax-prod/jax`,
+  `master`, árbol limpio (mismo `-c safe.directory=...` + `sudo git status`
+  tratando cualquier stderr como fallo, y `--no-optional-locks` en las
+  tres invocaciones de `git` -- ronda 4, MINOR-2 -- en los tres
+  instaladores). **Un `DESTDIR` que RESUELVE a `/`** (vacío, o algo como
+  `/tmp/../`) se normaliza con `realpath -m` y se trata EXACTAMENTE como
+  "sin DESTDIR" (ronda 4, MINOR-1): sin esto, `"$DESTDIR$instalada"`
+  habría escrito sobre el `/etc` real de todos modos, pero saltándose los
+  frenos de REPO/master/limpio porque `[ -z "$DESTDIR" ]` daba falso con
+  algo que en los hechos apunta a la raíz. Con `DESTDIR` puesto (pruebas) no
+  se exige nada de esto -- un `$REPO` de mentira en un test no tiene por
+  qué ser `/srv/jax-prod/jax`.
+  **`DESTDIR` (vacío por defecto) es el ÚNICO lugar de este árbol que lo
+  acepta** (M4): los otros dos instaladores tocan el sistema real en otras
+  líneas (nftables, `/etc/jax/.env`, `systemctl restart` de servicios
+  reales) y un `DESTDIR` ahí sería engañoso -- no se prueban de punta a
+  punta. `tests/test_instalar_dropins_de_servicio.py` (cableado al mismo
+  job de CI, piso medido) SÍ ejercita este guion de punta a punta contra un
+  `DESTDIR` de `tmp_path`.
+- **La configuración de los ARCHIVOS DE UNIDAD, no sólo la base, es lo que
+  se audita**, para las 4 unidades (antes sólo cubría el proxy del
+  Ejecutor -- m1): `tests/manifiesto_arranque.py::configuracion_efectiva`
+  (compartida con `tests/test_arranque_instalado.py`) fusiona la unidad
+  base con sus drop-ins en el mismo orden que systemd (base primero,
+  después cada `*.conf` de `<unidad>.d/` en orden alfabético -- el mismo
+  criterio por el que `z-pythonpath.conf` se aplica último a propósito),
+  mirando sólo la sección `[Service]` y parseando `Environment=` con
+  `shlex.split` (multi-asignación por línea; un `Environment=` vacío borra
+  la lista acumulada, semántica real de systemd.exec(5)).
+  `tests/test_ejecutor_cuenta_de_servicio.py` exige, para las 4 unidades:
+  `User=jaxsvc`/`HOME=/var/lib/jaxsvc` en el resultado fusionado (no en el
+  archivo base solo -- verificado con un control negativo: quitar
+  `cuenta-de-servicio.conf` hace fallar el test con el `User`/`HOME`
+  reales, `fruiz`/ninguno), y que NINGÚN valor de los ARCHIVOS DE UNIDAD
+  mencione `/home/fruiz` (M1) -- `test_los_archivos_de_unidad_no_apuntan_al_checkout_de_trabajo`.
+  **ACOTACIÓN (auditoría escalón 3, ronda 2, MAJOR-2): esa aserción cubre
+  SÓLO los archivos de unidad.** El PROCESO real además hereda
+  `EnvironmentFile=/etc/jax/.env`, compartido por las 4 unidades, y ESE
+  archivo sí tiene hoy (nombres de clave confirmados con `sudo -n
+  grep -oE`, nunca sus valores) `JAX_AUDIT_LOG_PATH` (consumida en
+  `las_manos/server.py:92`), `JAX_REPO_BASE` (`jacobs/executor.py:54`),
+  `JAX_WORKSPACE_DIR` (`procesamiento/extractores/ocr.py:76`,
+  `jacobs/executor.py:123`, `las_manos/motor_registry/tool_authority.py:64`,
+  `jax/core/main.py:137`, `jax/muscles/subprocess_muscle.py:55`), y
+  `JAX_MISSIONS_DIR`/`JAX_CONFIG_PATH` (sin consumidor encontrado en este
+  repo -- puede vivir en jax-platform, o estar huérfana; no verificado)
+  con valores de `/home/fruiz`. Arreglar esas claves es tarea de quien las
+  declaró, no de este árbol -- lo único que este árbol exige (`sudo -n`,
+  sólo nombres de clave) es que `/etc/jax/.env` NO tenga una clave
+  `PYTHONPATH`. **No sería inofensiva** (justificación corregida en ronda
+  3, MINOR-1): `man systemd.exec`, sección `EnvironmentFile=`, es
+  explícito -- "Settings from these files override settings made with
+  Environment=" -- `EnvironmentFile=/etc/jax/.env` se aplica DESPUÉS y
+  PISA el `Environment=PYTHONPATH=...` de `z-pythonpath.conf`, no al
+  revés (`test_env_de_produccion_no_tiene_clave_pythonpath`, sólo en
+  producción; la regex acepta espacios/tabs delante y un `export `
+  opcional).
+- **NO en esta ronda (auditoría escalón 3, ronda 3, MINOR-4)**: un job de
+  `.github/workflows/policy.yml` clona `jax-platform` sin fijar un SHA --
+  visto, no tocado acá, va en otro PR de otra sesión.
+
 **De dónde salen `JAX_DB_HOST`/`PORT`/`USER`/`PASSWORD` (ronda 3 de
 revisión).** Este paso NO carga `/etc/jax/.env` directo -- ni con un punto
 ni con `source` pegados a la ruta, y ni siquiera pasando por
@@ -597,7 +1016,10 @@ nunca puede redirigir la verificación a otra raíz. Pero producción vive en
 `/srv/jax-prod/jax` — verificado en vivo en hall9000:
 `systemctl status jax-las-manos` muestra
 `WorkingDirectory=/srv/jax-prod/jax/las_manos`, del drop-in
-`checkout-de-produccion.conf` (2026-09-20). La resolución es un
+`checkout-de-produccion.conf` (2026-09-20) -- versionado en
+`config/systemd/jax-las-manos.service.d/checkout-de-produccion.conf`
+(y su equivalente para cada uno de los otros tres servicios) desde
+2026-09-25, ver el punto anterior. La resolución es un
 **símlink**, creado por root (`/srv/` es root-owned; `/srv/jax-prod/jax` es
 `jaxsvc:jaxsvc`), como paso de despliegue explícito, no un cambio de
 código:

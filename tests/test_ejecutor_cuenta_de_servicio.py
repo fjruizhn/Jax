@@ -12,28 +12,87 @@ from pathlib import Path
 
 import pytest
 
+from manifiesto_arranque import configuracion_efectiva
+
 OPS = Path(__file__).resolve().parents[1] / "ops" / "ejecutor"
 CUENTA_DE_SERVICIO = "jaxsvc"
 # `ejecutor-vigia@.service` salió de acá (ronda 5, auditoría adversarial 2026-09-22): la
 # unidad se RETIRÓ -- código muerto, nunca arrancó un vigía real (ver DEUDA.md). El vigía
 # corre como subproceso directo de `jax-platform` (`fruiz`), no como `jaxsvc`; este control
 # ya no le aplica.
-UNIDADES = ("jax-ejecutor-proxy.service",)
+#
+# Las 4 unidades del manifiesto de arranque (auditoría escalón 3, m1: antes
+# sólo cubría jax-ejecutor-proxy.service -- extendida a las 4 para que
+# las-manos y los dos workers de memoria también queden bajo este control).
+UNIDADES = (
+    "jax-las-manos.service",
+    "jax-memory-worker.service",
+    "jax-memory-synthesis.service",
+    "jax-ejecutor-proxy.service",
+)
 INSTALADORES = ("instalar_contratos.sh", "instalar_vigia.sh", "instalar_registro_y_cerco.sh")
+
+# `_configuracion_efectiva` vive en tests/manifiesto_arranque.py (compartida
+# con tests/test_arranque_instalado.py) desde la auditoría escalón 3 (m1):
+# ahí se resuelve la unidad base + drop-ins de CUALQUIER unidad del
+# manifiesto, con Environment= parseado con shlex.split (multi-asignación,
+# vacío borra la lista) y separado por sección [Service] -- lo que antes
+# vivía acá duplicado y sólo sabía buscar en ops/ejecutor/.
 
 
 @pytest.mark.parametrize("nombre", UNIDADES)
 def test_las_unidades_corren_como_la_cuenta_de_servicio(nombre):
-    lineas = [l.strip() for l in (OPS / nombre).read_text().splitlines()]
-    assert f"User={CUENTA_DE_SERVICIO}" in lineas, f"{nombre} no corre como {CUENTA_DE_SERVICIO}"
-    assert not any(l.startswith("User=fruiz") for l in lineas)
+    """Desde ops/versionar-drop-ins (2026-09-25) la unidad base en el repo es
+    el fragmento CRUDO tal como está instalado en /etc (`User=fruiz`, sin
+    `Environment=HOME=`) -- el `User=jaxsvc`/`HOME` propio llegan por
+    `cuenta-de-servicio.conf`. Mirar sólo la base ya no prueba nada real:
+    pasaría igual si alguien borrara el drop-in. Por eso este control mira
+    la configuración EFECTIVA -- exactamente lo que corre -- y no sólo el
+    archivo base."""
+    simples, _ = configuracion_efectiva(nombre)
+    assert simples.get("User") == CUENTA_DE_SERVICIO, (
+        f"{nombre}: la configuración EFECTIVA (unidad base + drop-ins, último valor gana) "
+        f"no corre como {CUENTA_DE_SERVICIO} -- User efectivo: {simples.get('User')!r}"
+    )
 
 
 @pytest.mark.parametrize("nombre", UNIDADES)
 def test_las_unidades_le_dan_un_hogar_propio_a_la_cuenta(nombre):
     """Sin HOME propio, ssh busca known_hosts en el del operador y el turno muere con 255."""
-    texto = (OPS / nombre).read_text()
-    assert "Environment=HOME=/var/lib/jaxsvc" in texto
+    _, entorno = configuracion_efectiva(nombre)
+    assert entorno.get("HOME") == "/var/lib/jaxsvc", (
+        f"{nombre}: la configuración EFECTIVA no fija HOME propio -- HOME efectivo: "
+        f"{entorno.get('HOME')!r}"
+    )
+
+
+@pytest.mark.parametrize("nombre", UNIDADES)
+def test_los_archivos_de_unidad_no_apuntan_al_checkout_de_trabajo(nombre):
+    """Auditoría escalón 3, M1: el PYTHONPATH efectivo de jax-ejecutor-proxy,
+    jax-memory-worker y jax-memory-synthesis apuntaba a /home/fruiz/jax -- el
+    checkout de TRABAJO de un agente, en rama ajena, no el de producción.
+    Ningún valor de la unidad base + sus drop-ins (ni WorkingDirectory=, ni
+    ExecStart=, ni PYTHONPATH dentro de Environment=, nada) puede mencionar
+    /home/fruiz -- lo que corre en producción tiene que salir siempre de
+    /srv/jax-prod/jax.
+
+    ACOTACIÓN (auditoría escalón 3, ronda 2, MAJOR-2): esto cubre SÓLO los
+    archivos de unidad (lo que arma este control). El PROCESO real además
+    hereda `EnvironmentFile=/etc/jax/.env`, compartido por las 4 unidades, y
+    ESE archivo sí tiene hoy claves con valores de /home/fruiz
+    (JAX_AUDIT_LOG_PATH, JAX_REPO_BASE, JAX_MISSIONS_DIR, JAX_CONFIG_PATH,
+    JAX_WORKSPACE_DIR -- nombres de clave confirmados con
+    `sudo -n grep -oE` sobre el archivo real, nunca sus valores). Arreglar
+    esas claves es una tarea aparte, de quien las declaró; este test NO
+    afirma nada sobre la configuración EFECTIVA completa del proceso, sólo
+    sobre lo que este árbol versiona y audita: los archivos de unidad."""
+    simples, entorno = configuracion_efectiva(nombre)
+    ofensores = {
+        clave: valor
+        for clave, valor in {**simples, **{f"Environment:{k}": v for k, v in entorno.items()}}.items()
+        if "/home/fruiz" in valor
+    }
+    assert not ofensores, f"{nombre}: los archivos de unidad todavía apuntan a /home/fruiz: {ofensores!r}"
 
 
 def _texto_con_delegados(nombre: str) -> str:
