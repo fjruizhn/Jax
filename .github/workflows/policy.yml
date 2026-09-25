@@ -1132,12 +1132,15 @@ jobs:
   # tapando /srv/jax-prod (mismo metodo que ops/versionar-drop-ins, PR
   # jax#274, para reproducir lo que ve este runner): 4 passed, 1 skipped.
   rutas-de-produccion-fuera-del-checkout-de-trabajo:
-    # Auditoria de escalon 3 (PR jax#277, MAJOR-3): la logica de Fase A/Fase B
-    # vive ahora en ops/rutas_de_produccion_verificador.py (modulo Python
-    # importable y probado), no en el .sh -- este job corre los dos archivos
-    # de test: el del envoltorio (tests/test_rutas_de_produccion.py) y el del
-    # modulo (tests/test_rutas_de_produccion_verificador.py, los 6 casos
-    # donde la version anterior fallaba abierto + la clave duplicada).
+    # Auditoria de escalon 3 (PR jax#277, dos rondas): la logica de
+    # Fase A/Fase B/Fase C vive ahora en ops/rutas_de_produccion_verificador.py
+    # (modulo Python importable y probado), no en el .sh -- este job corre los
+    # dos archivos de test: el del envoltorio (tests/test_rutas_de_produccion.py)
+    # y el del modulo (tests/test_rutas_de_produccion_verificador.py -- ronda 1:
+    # los 6 casos donde la version en bash fallaba abierto + clave duplicada;
+    # ronda 2 (MAJOR-A): lineas indentadas/con espacio junto al "=" que systemd
+    # SI aplica y el parser de ronda 1 ignoraba en silencio, permitidos POR
+    # CLAVE, y Fase C contra /proc/<MainPID>/environ real).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -1149,8 +1152,8 @@ jobs:
       - name: Piso exacto de tests CORRIDOS (no skipeados)
         run: |
           python -m pytest -q tests/test_rutas_de_produccion.py tests/test_rutas_de_produccion_verificador.py 2>&1 | tee /tmp/rutas_de_produccion
-          grep -qE "^29 passed, 1 skipped" /tmp/rutas_de_produccion || {
-            echo "PISO ROTO: se esperaban 29 tests CORRIDOS (no skipeados) y exactamente 1 skipped (test_verificar_rutas_de_produccion_da_cero_en_produccion, que solo corre en el host de produccion de jax). Si esto da '30 passed', este runner tiene /srv/jax-prod/jax -- no es el runner esperado, revisar antes de asumir que el piso subio."; exit 1; }
+          grep -qE "^45 passed, 1 skipped" /tmp/rutas_de_produccion || {
+            echo "PISO ROTO: se esperaban 45 tests CORRIDOS (no skipeados) y exactamente 1 skipped (test_verificar_rutas_de_produccion_da_cero_en_produccion, que solo corre en el host de produccion de jax). Si esto da '46 passed', este runner tiene /srv/jax-prod/jax -- no es el runner esperado, revisar antes de asumir que el piso subio."; exit 1; }
 
   # Sello de invalidacion cross-proceso del cache de facet_resolver (Q3,
   # 2026-09-01). El job de al lado (facet-resolver-sync) verifica que los dos

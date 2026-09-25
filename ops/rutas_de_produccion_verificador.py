@@ -1,60 +1,59 @@
 #!/usr/bin/env python3
 """ops/rutas_de_produccion_verificador.py -- la lógica de
 `ops/rutas-de-produccion.sh --verificar`, en un módulo Python importable y
-probado (auditoría de escalón 3, PR jax#277, MAJOR-3: el guion original en
-bash fallaba ABIERTO en 6 casos reales -- clave en alcance ausente, valor
-vacío, valor entre comillas, espacios junto al `=`, un symlink que resuelve
-a `/home/fruiz/jax`, y `JAX_WORKSPACE_DIR` pasando en silencio sin ninguna
-excepción declarada).
+probado.
+
+Historia de las dos rondas de auditoría de escalón 3 sobre PR jax#277:
+
+**Ronda 1 (MAJOR-3):** el guion original en bash fallaba ABIERTO en 6 casos
+reales -- clave en alcance ausente, valor vacío, valor entre comillas,
+espacios junto al `=`, un symlink que resuelve a `/home/fruiz/jax`, y
+`JAX_WORKSPACE_DIR` pasando en silencio sin ninguna excepción declarada.
+Se reescribió acá, en Python, con una lista de PERMITIDOS (no de
+prohibidos) y excepciones declaradas con motivo.
+
+**Ronda 2 (MAJOR-A):** el parser de la ronda 1 seguía fallando abierto:
+`_LINEA.match` corría sobre la línea SIN recortar y, cuando una línea no
+calzaba el patrón estricto, la ignoraba EN SILENCIO en vez de reportarla.
+Dos casos reales que systemd SÍ aplica (y este módulo antes no veía en
+absoluto):
+
+  - `  JAX_CONFIG_PATH=/home/fruiz/jax/...` (indentada): el `^` del regex
+    exige que la clave empiece en la posición 0 -- con espacio antes, la
+    línea entera se descartaba como si no existiera, y si ANTES había una
+    línea limpia con el valor correcto, ese valor correcto "ganaba" en la
+    lectura de este módulo mientras que systemd, que SÍ interpreta la
+    indentada como una asignación válida (gana la última), terminaba
+    cargando la ruta mala.
+  - `JAX_AUDIT_LOG_PATH = /home/fruiz/jax/...` (espacio junto al `=`):
+    mismo problema -- la línea no calzaba, se ignoraba, y si coexistía con
+    una línea limpia anterior, este módulo reportaba "todo bien" mientras
+    la variable de entorno REAL podía terminar siendo otra.
+
+El arreglo: `parsear_env` ya NO ignora nada. Toda línea no vacía y no
+comentario que no calce `^NOMBRE=valor$` exacto (sin espacio antes del
+nombre, sin espacio antes del `=`) es un ERROR DE PARSEO, con su número de
+línea, y CUALQUIER error de parseo -- esté cerca de una clave en alcance o
+no -- tira abajo el resultado completo de `verificar()`: si este módulo no
+puede leer el archivo con confianza, no certifica nada. Líneas que terminan
+que terminan en una barra invertida (continuación de línea de systemd, que este módulo no reproduce) se
+tratan igual, como error de parseo.
+
+Además, ronda 2 agrega una fase de VERDAD EFECTIVA (Fase C): en vez de
+confiar sólo en la lectura estática del archivo, lee `/proc/<MainPID>/environ`
+de `jax-las-manos` y `jax-platform` de verdad (sudo -n) y compara contra la
+MISMA lista de permitidos -- lo que el kernel dice que el proceso tiene
+cargado, no lo que este módulo interpretó que debería tener.
+
+Y la lista de permitidos pasa de ser compartida (Fase A ronda 1: cualquiera
+de las 3 claves podía apuntar a cualquiera de los 3 destinos) a ser POR
+CLAVE: `JAX_CONFIG_PATH` sólo bajo `/srv/jax-prod/jax/config/`,
+`JAX_AUDIT_LOG_PATH` sólo bajo `/var/log/jax/las_manos/`, `JAX_REPO_BASE`
+sólo exactamente `/srv/jax-data/repo`.
 
 `ops/rutas-de-produccion.sh` es un envoltorio fino: lee `/etc/jax/.env` con
-`sudo -n cat`, le pasa el TEXTO a este módulo (nunca hace a este módulo leer
-la ruta por su cuenta -- `ENV_FILE` no es configurable por entorno, a
-propósito, para que nadie pueda desviar la verificación de producción con
-una variable de entorno puesta por error), y usa `resolver_como_jaxsvc` /
-`jaxsvc_puede` (subprocesos `sudo -n -u jaxsvc realpath -e` / `test -r|-w`)
-para las partes que de verdad necesitan tocar el filesystem como esa cuenta
-de servicio.
-
-Diseño fail-closed en cada punto donde el guion viejo fallaba abierto:
-
-- **Ausente / duplicada / vacía**: cada clave de `KEYS_EN_ALCANCE` tiene que
-  aparecer EXACTAMENTE una vez en el archivo y con un valor no vacío tras
-  normalizar. Cero apariciones, dos o más, o un valor vacío -- las tres son
-  FALLA, nunca "no se dice nada".
-- **Comillas / espacios junto al `=`**: `_LINEA` exige `NOMBRE=valor` sin
-  espacio entre el nombre y el `=` (una línea `JAX_BIN = /x` no matchea esa
-  forma exacta y la clave queda AUSENTE -- exactamente el caso de arriba, no
-  un valor mal leído en silencio). `normalizar_valor` sólo acepta un valor
-  SIN comillas y sin espacio en ningún extremo, o un valor COMPLETO entre
-  comillas dobles o simples (sin comillas embebidas, sin escapes) -- una
-  mezcla ambigua (`"algo` sin cerrar, comillas mixtas, espacio antes o
-  después de un valor sin comillas) levanta `ValorAmbiguo`: no se adivina lo
-  que systemd habría hecho, se rechaza.
-- **Symlink hacia el checkout de trabajo**: las tres claves en alcance se
-  comparan por su ruta REAL (`realpath -e`, corrido como `jaxsvc` -- la
-  cuenta que de verdad las usa), no por el string crudo del `.env`. Un
-  symlink que apunte a `/home/fruiz/jax/...` se atrapa aunque el valor
-  literal del `.env` diga otra cosa.
-- **Lista de PERMITIDOS, no de prohibidos**: para las tres claves en
-  alcance, la ruta real tiene que empezar con `/srv/jax-prod/`,
-  `/srv/jax-data/` o `/var/log/jax/` -- cualquier otra cosa es FALLA, así
-  sea `/home/fruiz/jax` o cualquier lugar que a nadie se le ocurrió excluir
-  todavía. Antes era una lista de PROHIBIDOS (`/home/fruiz/jax/`,
-  `/home/fruiz/.local/`): cualquier ruta que no coincidiera pasaba, aunque
-  fuera otra ruta igual de mala.
-- **`JAX_WORKSPACE_DIR` como excepción DECLARADA, no como suerte de
-  string**: el chequeo genérico (para el resto de las claves de ruta, las
-  que no están en alcance) es ahora contra `/home/*` completo, no sólo
-  `/home/fruiz/jax/` -- una red más ancha. `JAX_WORKSPACE_DIR` vive bajo
-  `/home/fruiz/jax-workspace` A PROPÓSITO (decisión de diseño de la tarea
-  original: no es checkout de código ni dato de producción) y está en
-  `EXCEPCIONES_FASE_A` con el motivo escrito, igual que
-  `JAX_MISSIONS_DIR`/`JAX_BIN`. Antes "pasaba" solo porque su valor no
-  empezaba exactamente con `/home/fruiz/jax/` (con barra) -- un accidente
-  de substring, no una decisión verificada.
-
-Sin encoding: se asume UTF-8, igual que el resto del repo.
+`sudo -n cat`, le pasa el TEXTO a este módulo por stdin (`ENV_FILE` no es
+configurable por entorno, a propósito).
 
 En memoria de Jairo Urbina.
 """
@@ -66,8 +65,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 # ---------------------------------------------------------------------------
-#  Constantes -- mismo criterio de "clave de ruta" en todo el repo: sólo los
-#  sufijos de abajo se leen o imprimen (nunca credenciales, tokens, hosts).
+#  Constantes
 # ---------------------------------------------------------------------------
 
 SUFIJOS_DE_RUTA = ("_PATH", "_DIR", "_BASE", "_BIN", "_FILE", "_LOG")
@@ -75,13 +73,18 @@ SUFIJOS_DE_RUTA = ("_PATH", "_DIR", "_BASE", "_BIN", "_FILE", "_LOG")
 #: Las tres claves que ESTE cambio mueve (ver docs/runbooks/rutas-de-produccion.md).
 KEYS_EN_ALCANCE = ("JAX_CONFIG_PATH", "JAX_AUDIT_LOG_PATH", "JAX_REPO_BASE")
 
-#: Lista de PERMITIDOS (no de prohibidos) para las claves en alcance -- ver
-#: docstring del módulo.
-PERMITIDOS_EN_ALCANCE = ("/srv/jax-prod/", "/srv/jax-data/", "/var/log/jax/")
+#: Lista de PERMITIDOS, POR CLAVE (ronda 2, MINOR): antes era una lista
+#: compartida entre las tres claves -- JAX_CONFIG_PATH podía "pasar" apuntando
+#: a /srv/jax-data (el destino de JAX_REPO_BASE) sin que nada lo objetara.
+#: Cada clave tiene ahora exactamente el destino que le corresponde.
+PERMITIDOS_POR_CLAVE: dict[str, tuple[str, ...]] = {
+    "JAX_CONFIG_PATH": ("/srv/jax-prod/jax/config/",),
+    "JAX_AUDIT_LOG_PATH": ("/var/log/jax/las_manos/",),
+    "JAX_REPO_BASE": ("/srv/jax-data/repo",),
+}
 
 #: Claves de ruta EXCLUIDAS del chequeo genérico "nada bajo /home/*", con
-#: motivo escrito -- nunca por omisión (mismo criterio que EXCEPCIONES en
-#: policy/tests/test_archivos_de_test_wireados_en_ci.py).
+#: motivo escrito -- nunca por omisión.
 EXCEPCIONES_FASE_A: dict[str, str] = {
     "JAX_MISSIONS_DIR": (
         "consumidor real (jax-platform/backend/api/command.py: "
@@ -103,6 +106,19 @@ EXCEPCIONES_FASE_A: dict[str, str] = {
         "código de un agente ni un dato de producción, es un directorio de "
         "trabajo aparte. Se queda."
     ),
+    "JAX_KILL_SWITCH_PATH": (
+        "existencia OPCIONAL a propósito, no un error -- verificado 2026-09-25: "
+        "es el archivo del freno de emergencia (interruptor.py): PRESENTE "
+        "significa 'JAX pausado', AUSENTE significa 'operando normal'. "
+        "`realpath -e` (exige existencia) fallando es el estado SANO por "
+        "defecto -- tratar eso como una violación de ruta sería fail-open al "
+        "revés: alarmar en el caso normal. Ronda 2 de la auditoría de "
+        "escalón 3 (jax#277) volvió el chequeo genérico estricto ante "
+        "'realpath fallido', y ESE endurecimiento sacó a la luz este caso: "
+        "antes pasaba de largo por accidente (el chequeo viejo ignoraba en "
+        "silencio una ruta que no resolvía), no porque estuviera bien "
+        "declarado. Corre igual bajo /etc/jax/, nunca bajo /home/."
+    ),
 }
 
 #: Claves con sufijo de ruta que NO son una ruta de sistema de archivos --
@@ -113,9 +129,13 @@ NO_ES_RUTA_DE_FILESYSTEM: dict[str, str] = {
     "PIPELINE_DETAIL_PATH": "misma plantilla, alias sin prefijo JAX_.",
 }
 
-# NOMBRE=valor, SIN espacio entre el nombre y el "=" -- ver docstring del
-# módulo: una línea con espacio ahí (`JAX_BIN = /x`) no matchea, y la clave
-# queda como "ausente" en vez de leerse mal en silencio.
+#: Los dos servicios de producción cuyo entorno VIVO se audita en Fase C.
+SERVICIOS = ("jax-las-manos", "jax-platform")
+
+# NOMBRE=valor -- SIN espacio antes del nombre (systemd NO ignora la
+# indentación, la aplica; este módulo, al no poder confiar en reproducir esa
+# semántica exacta, prefiere marcar la línea como error de parseo antes que
+# adivinar) y SIN espacio entre el nombre y el "=".
 _LINEA = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 
 
@@ -123,27 +143,46 @@ def es_clave_de_ruta(clave: str) -> bool:
     return clave.endswith(SUFIJOS_DE_RUTA)
 
 
-def parsear_env(texto: str) -> dict[str, list[str]]:
-    """clave -> lista de valores CRUDOS (sin normalizar) en el orden en que
-    aparecen. Una clave con 2+ entradas es una clave DUPLICADA -- se detecta
-    acá (longitud de la lista), no se resuelve "el último gana" como haría
-    systemd: para las claves en alcance eso es ambiguo a propósito y
-    `clasificar_alcance` lo rechaza.
+@dataclass
+class Hallazgo:
+    clave: str
+    motivo: str
 
-    Comentario = línea cuyo primer carácter no blanco es "#". Líneas en
-    blanco se ignoran. Sin continuación de línea ni escapes de systemd más
-    allá de lo que `normalizar_valor` entiende explícitamente -- ver ahí."""
-    resultado: dict[str, list[str]] = {}
-    for linea in texto.splitlines():
+
+def parsear_env(texto: str) -> tuple[dict[str, list[str]], list[Hallazgo]]:
+    """(clave -> lista de valores CRUDOS en orden de aparición, errores de
+    parseo con número de línea). YA NO IGNORA NADA EN SILENCIO (ronda 2,
+    MAJOR-A): toda línea no vacía y no comentario que no calce
+    `^NOMBRE=valor$` exacto, o cuyo valor termine en `\\` (continuación de
+    línea de systemd que este módulo no reproduce), es un error de parseo.
+
+    Comentario = línea cuyo primer carácter no blanco es "#". Una línea
+    INDENTADA nunca es un comentario válido para este chequeo aunque
+    empiece con espacios y luego "#": si `despojada` empieza con "#" se
+    trata iguialmente como comentario (systemd sí permite comentarios
+    indentados) -- lo que NO se permite es una asignación indentada."""
+    entorno: dict[str, list[str]] = {}
+    errores: list[Hallazgo] = []
+    for numero, linea in enumerate(texto.splitlines(), start=1):
         despojada = linea.strip()
         if not despojada or despojada.startswith("#"):
             continue
         m = _LINEA.match(linea)
         if not m:
+            errores.append(Hallazgo(
+                f"línea {numero}",
+                f"no calza NOMBRE=valor exacto (¿indentada? ¿espacio junto al \"=\"?): {linea!r}",
+            ))
             continue
         clave, crudo = m.group(1), m.group(2)
-        resultado.setdefault(clave, []).append(crudo)
-    return resultado
+        if crudo.endswith("\\"):
+            errores.append(Hallazgo(
+                f"línea {numero}",
+                f"termina en \"\\\" (continuación de línea de systemd, no soportada por este parser): {linea!r}",
+            ))
+            continue
+        entorno.setdefault(clave, []).append(crudo)
+    return entorno, errores
 
 
 class ValorAmbiguo(ValueError):
@@ -176,10 +215,14 @@ def normalizar_valor(crudo: str) -> str:
     )
 
 
-@dataclass
-class Hallazgo:
-    clave: str
-    motivo: str
+def _bajo_prefijo(ruta: str, prefijo: str) -> bool:
+    """Chequeo de prefijo con límite de path: `/srv/jax-data/repo` SÍ cubre
+    `/srv/jax-data/repo` y `/srv/jax-data/repo/documents`, pero NO
+    `/srv/jax-data/repo-otro-nombre` -- un `str.startswith` pelado sí lo
+    dejaría pasar, que es exactamente el tipo de fail-open que este módulo
+    entero existe para cerrar."""
+    prefijo = prefijo.rstrip("/")
+    return ruta == prefijo or ruta.startswith(prefijo + "/")
 
 
 @dataclass
@@ -211,21 +254,29 @@ def _valor_unico_normalizado(clave: str, crudos: list[str]) -> tuple[str | None,
 def verificar_fase_a(
     entorno: dict[str, list[str]],
     resolver: Callable[[str], str | None],
+    errores_de_parseo: list[Hallazgo] | None = None,
 ) -> ResultadoFaseA:
     """`resolver(ruta_cruda) -> ruta_real | None`. En producción,
     `resolver_como_jaxsvc` (sudo -n -u jaxsvc realpath -e). En tests, un
-    dict de mentira -- así un symlink se prueba sin tocar el filesystem.
-    `None` significa "no se pudo resolver" (no existe, sin permiso): eso
-    también es un problema de Fase A, se reporta como tal.
+    dict de mentira.
 
-    Dos chequeos:
+    Tres chequeos:
+      (0) Cualquier error de parseo (línea indentada, espacio junto al "=",
+          continuación de línea) tira abajo el resultado ENTERO -- no
+          importa si está lejos de las claves en alcance: si el parseo no
+          es confiable, nada de lo que sigue lo es tampoco.
       (1) Las tres claves de KEYS_EN_ALCANCE: exactamente una vez, valor no
-          vacío, ruta REAL dentro de PERMITIDOS_EN_ALCANCE.
+          vacío, ruta REAL dentro de SU PROPIO PERMITIDOS_POR_CLAVE (ronda
+          2: ya no una lista compartida).
       (2) El resto de las claves de ruta presentes: ruta REAL fuera de
           /home/* -- salvo las de EXCEPCIONES_FASE_A y las de
-          NO_ES_RUTA_DE_FILESYSTEM (no se resuelven ni se chequean, no son
-          rutas de filesystem)."""
+          NO_ES_RUTA_DE_FILESYSTEM. Duplicadas, valores ambiguos o rutas que
+          no resuelven TAMBIÉN son FALLA acá (ronda 2, MINOR): antes se
+          saltaban en silencio con `continue`, dejando un hueco fail-open
+          para cualquier clave de ruta futura que no fuera una de las tres
+          en alcance."""
     resultado = ResultadoFaseA()
+    resultado.problemas.extend(errores_de_parseo or [])
 
     for clave in KEYS_EN_ALCANCE:
         resultado.revisadas += 1
@@ -238,30 +289,29 @@ def verificar_fase_a(
             resultado.problemas.append(
                 Hallazgo(clave, f"{valor}: no se pudo resolver la ruta real (¿no existe? ¿sin permiso?)"))
             continue
-        if not any(real.startswith(p) for p in PERMITIDOS_EN_ALCANCE):
+        permitidos = PERMITIDOS_POR_CLAVE[clave]
+        if not any(_bajo_prefijo(real, p) for p in permitidos):
             resultado.problemas.append(
-                Hallazgo(clave, f"{valor} (real: {real}) no está bajo ninguno de {PERMITIDOS_EN_ALCANCE}"))
+                Hallazgo(clave, f"{valor} (real: {real}) no está bajo ninguno de {permitidos}"))
 
     for clave, crudos in entorno.items():
         if clave in KEYS_EN_ALCANCE or clave in EXCEPCIONES_FASE_A or clave in NO_ES_RUTA_DE_FILESYSTEM:
             continue
         if not es_clave_de_ruta(clave):
             continue
-        if len(crudos) != 1:
-            continue  # ambigüedad de una clave fuera de alcance no es lo que esta fase audita
-        try:
-            valor = normalizar_valor(crudos[0])
-        except ValorAmbiguo:
-            continue
-        if not valor:
-            continue
         resultado.revisadas += 1
-        real = resolver(valor) or valor
-        if real.startswith("/home/") or real.startswith("/home"):
-            # startswith("/home") a secas cubre tambien el caso limite "/home" pelado
-            if real == "/home" or real.startswith("/home/"):
-                resultado.problemas.append(
-                    Hallazgo(clave, f"{valor} (real: {real}) está bajo /home/ -- sin excepción declarada"))
+        valor, motivo = _valor_unico_normalizado(clave, crudos)
+        if motivo:
+            resultado.problemas.append(Hallazgo(clave, motivo))
+            continue
+        real = resolver(valor)
+        if real is None:
+            resultado.problemas.append(
+                Hallazgo(clave, f"{valor}: no se pudo resolver la ruta real (¿no existe? ¿sin permiso?)"))
+            continue
+        if _bajo_prefijo(real, "/home"):
+            resultado.problemas.append(
+                Hallazgo(clave, f"{valor} (real: {real}) está bajo /home/ -- sin excepción declarada"))
 
     return resultado
 
@@ -326,34 +376,122 @@ def verificar_fase_b(
 
 
 # ---------------------------------------------------------------------------
-#  CLI -- envoltura fina. `ops/rutas-de-produccion.sh --verificar` hace
-#  `sudo -n cat /etc/jax/.env` y le pasa el TEXTO a este módulo por stdin;
-#  la ruta del archivo nunca es configurable por variable de entorno.
+#  Fase C (ronda 2, MAJOR-A) -- verdad EFECTIVA: lo que el kernel dice que
+#  los procesos reales tienen cargado en su entorno, no lo que este módulo
+#  interpretó que /etc/jax/.env dice. Independiente de Fase A/B -- corre
+#  siempre, aporta evidencia aparte.
+# ---------------------------------------------------------------------------
+
+def obtener_main_pid(servicio: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> str | None:
+    r = ejecutar(["systemctl", "show", "-p", "MainPID", "--value", servicio])
+    if r.returncode != 0:
+        return None
+    valor = r.stdout.strip()
+    if not valor or valor == "0":
+        return None
+    return valor
+
+
+def leer_environ_del_proceso(pid: str, ejecutar: EjecutarSudo = _ejecutar_sudo_real) -> dict[str, str] | None:
+    """`/proc/<pid>/environ`: pares NOMBRE=valor separados por NUL, sin
+    ningún tipo de citado de shell -- lo que systemd cargó de VERDAD, sin
+    pasar por la interpretación de este módulo."""
+    r = ejecutar(["sudo", "-n", "cat", f"/proc/{pid}/environ"])
+    if r.returncode != 0:
+        return None
+    entorno: dict[str, str] = {}
+    for par in r.stdout.split("\x00"):
+        if not par or "=" not in par:
+            continue
+        clave, _, valor = par.partition("=")
+        entorno[clave] = valor
+    return entorno
+
+
+@dataclass
+class ResultadoFaseC:
+    problemas: list[Hallazgo] = field(default_factory=list)
+    servicios_revisados: list[str] = field(default_factory=list)
+    servicios_sin_pid: list[str] = field(default_factory=list)
+
+
+def verificar_fase_c(
+    resolver: Callable[[str], str | None],
+    obtener_pid: Callable[[str], str | None] = obtener_main_pid,
+    leer_environ: Callable[[str], dict[str, str] | None] = leer_environ_del_proceso,
+) -> ResultadoFaseC:
+    resultado = ResultadoFaseC()
+    for servicio in SERVICIOS:
+        pid = obtener_pid(servicio)
+        if pid is None:
+            resultado.servicios_sin_pid.append(servicio)
+            continue
+        resultado.servicios_revisados.append(servicio)
+        entorno_vivo = leer_environ(pid)
+        if entorno_vivo is None:
+            resultado.problemas.append(
+                Hallazgo(servicio, f"no se pudo leer /proc/{pid}/environ (sudo -n sin permiso?)"))
+            continue
+        for clave in KEYS_EN_ALCANCE:
+            valor_vivo = entorno_vivo.get(clave)
+            if valor_vivo is None:
+                resultado.problemas.append(Hallazgo(f"{servicio}:{clave}", "no está en el entorno vivo del proceso"))
+                continue
+            real = resolver(valor_vivo)
+            if real is None:
+                resultado.problemas.append(
+                    Hallazgo(f"{servicio}:{clave}", f"{valor_vivo}: no se pudo resolver la ruta real"))
+                continue
+            permitidos = PERMITIDOS_POR_CLAVE[clave]
+            if not any(_bajo_prefijo(real, p) for p in permitidos):
+                resultado.problemas.append(
+                    Hallazgo(f"{servicio}:{clave}", f"{valor_vivo} (real: {real}) no está bajo ninguno de {permitidos}"))
+    return resultado
+
+
+# ---------------------------------------------------------------------------
+#  CLI -- envoltura fina.
 # ---------------------------------------------------------------------------
 
 def verificar(texto_env: str) -> tuple[bool, str]:
-    """(ok, reporte). `ok=False` con CUALQUIER problema de Fase A o Fase B."""
-    entorno = parsear_env(texto_env)
-    fase_a = verificar_fase_a(entorno, resolver_como_jaxsvc)
+    """(ok, reporte). `ok=False` con CUALQUIER problema de Fase A, Fase B o
+    Fase C (errores de parseo incluidos, vía Fase A)."""
+    entorno, errores_de_parseo = parsear_env(texto_env)
+    fase_a = verificar_fase_a(entorno, resolver_como_jaxsvc, errores_de_parseo)
     fase_b = verificar_fase_b(entorno, _ejecutar_sudo_real) if fase_a.ok else ResultadoFaseB()
+    fase_c = verificar_fase_c(resolver_como_jaxsvc)
 
     lineas: list[str] = []
     if fase_a.problemas:
-        lineas.append("FASE A -- claves de ruta con problemas:")
+        lineas.append("FASE A -- claves de ruta con problemas (incluye errores de parseo):")
         for h in fase_a.problemas:
             lineas.append(f"  {h.clave}: {h.motivo}")
     if fase_b.problemas:
         lineas.append("FASE B -- jaxsvc no tiene el acceso que necesita:")
         for h in fase_b.problemas:
             lineas.append(f"  {h.clave}: {h.motivo}")
+    if fase_c.problemas:
+        lineas.append("FASE C -- el entorno VIVO de un proceso no coincide con lo permitido:")
+        for h in fase_c.problemas:
+            lineas.append(f"  {h.clave}: {h.motivo}")
+    if fase_c.servicios_sin_pid:
+        lineas.append(
+            "FASE C -- aviso: no se pudo obtener MainPID (¿servicio inactivo?) de: "
+            + ", ".join(fase_c.servicios_sin_pid))
 
-    if fase_a.problemas or fase_b.problemas:
+    hay_problemas = bool(fase_a.problemas or fase_b.problemas or fase_c.problemas)
+    if hay_problemas:
         return False, "\n".join(lineas)
-    return True, (
+
+    resumen = (
         f"rutas-de-produccion: todas las rutas de producción en alcance están "
-        f"fuera de /home y jaxsvc tiene el acceso que necesita "
+        f"fuera de /home, jaxsvc tiene el acceso que necesita, y el entorno "
+        f"VIVO de {len(fase_c.servicios_revisados)} servicio(s) coincide "
         f"({fase_a.revisadas} claves de ruta revisadas)"
     )
+    if fase_c.servicios_sin_pid:
+        resumen += "\n" + lineas[-1]  # el aviso de servicios sin PID, igual en verde
+    return True, resumen
 
 
 def _main(argv: list[str]) -> int:
