@@ -649,7 +649,7 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
@@ -657,7 +657,7 @@ jobs:
             tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
             las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py \
             jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py \
-            jacobs/_devolucion_persistencia_test.py 2>&1 | tee /tmp/out
+            jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -835,8 +835,28 @@ jobs:
           #   ref/range, 'Using index', en vez de idx_pipelines_status por
           #   nombre) rechaza una fila mala. Medido local, MISMO comando, base
           #   de sesión: master 157 passed -> rama 158 passed.
-          grep -qE "^158 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 158 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 158 -> 172 el 2026-09-25 (PR-J1, D1-D5/section 3-bis): +14 de
+          #   tests/test_project_authority_mariadb.py, contra el resolvedor REAL de
+          #   project_authority.py y esta misma MariaDB -- este job ya clona
+          #   jax-platform y corre SUS migraciones (run_migrations()), que llaman a
+          #   apply_project_authority_migration() de este repo y por eso ya aplican
+          #   005 (ARCHIVED/HIDDEN/DISABLED, grant_origin/pre_admin_*,
+          #   jax_project_creation_request) antes de que corra un solo test. Medido
+          #   local, MISMO comando, jax-platform clonado y run_migrations() real: sin
+          #   el archivo nuevo, 158 passed; con él, 172 passed.
+          # 172 -> 177 el 2026-09-26 (ronda 2 de PR-J1, rama de descenso de
+          #   sync_tenant_admin_memberships_in_transaction, propuesta §2.17 aprobada
+          #   por Fernando): +5 en tests/test_project_authority_mariadb.py -- sin
+          #   membresía previa (queda REVOKED), con membresía EXPLICIT previa (se
+          #   restaura pre_admin_role/pre_admin_status), la fila CREATOR no se toca,
+          #   único OWNER activo -> LastOwnerRequired('proyecto_sin_duenio') con
+          #   rollback total (0 cambios, 0 eventos), y actor de otro tenant ->
+          #   ProjectRoleInsufficient. Medido con la credencial de pruebas dedicada
+          #   (~/.config/jax/test-db.env, usuario jax_test, sin acceso a producción),
+          #   MISMO comando, jax-platform clonado y run_migrations() real: 172 -> 177
+          #   passed.
+          grep -qE "^177 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 177 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE
@@ -1127,8 +1147,20 @@ jobs:
           #   real 127.0.0.1:3308): 76 -> 78 passed. Si el runner da otro
           #   numero, manda el runner.
           # PR #269, HEAD 79b504f: runner midió 186 passed en esta segunda corrida.
-          grep -qE "^186 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 186 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 186 -> 185 el 2026-09-26 (ronda 2 de PR-J1): -1 por
+          #   tests/test_project_scope_authority.py, que dejó de usar el resolver
+          #   double `_TrustedAdminResolver` (2 tests viejos de la API retirada de
+          #   project_authority.py se fueron, +1 meta-test que impide que ese double
+          #   reaparezca). El piso de 186 asumía además que
+          #   tests/test_memoria_caducidad_no_es_agujero.py corría sus 5 tests --
+          #   estaban rotos (1364 Field 'email'/'password_hash' doesn't have a
+          #   default value: el fixture nunca ponía esas columnas ni creaba la fila
+          #   de jax_tenants que su FK exige) y se arreglaron en esta misma ronda, así
+          #   que vuelven a contar como CORRIDOS. Medido con la credencial de pruebas
+          #   dedicada (~/.config/jax/test-db.env, usuario jax_test), MISMO comando:
+          #   185 passed.
+          grep -qE "^185 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 185 tests CORRIDOS (no skipeados)."; exit 1; }
       - name: Publicar resumen de segunda corrida de memoria
         if: failure()
         run: |

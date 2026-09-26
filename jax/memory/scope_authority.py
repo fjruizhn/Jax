@@ -15,11 +15,33 @@ class ProjectRole(str, Enum):
     VIEWER="VIEWER"; CONTRIBUTOR="CONTRIBUTOR"; REVIEWER="REVIEWER"; OWNER="OWNER"
 
 
+#: Tenant-wide administration roles. Shared with `project_authority.py` (H7:
+#: the set used to be duplicated in the two modules and could drift).
+TENANT_ADMIN_ROLES = frozenset({"admin", "superadmin", "super_admin"})
+
+
+class ProjectLifecycle(str, Enum):
+    ACTIVE="ACTIVE"; ARCHIVED="ARCHIVED"; HIDDEN="HIDDEN"; DISABLED="DISABLED"
+
+
 @dataclass(frozen=True)
 class ProjectScopeAuthorization:
     project_id: str; tenant_id: str; subject_user_id: str; membership_id: str | None
     project_role: ProjectRole | None; membership_status: str; project_status: str; resolved_at: float
     source_identity_version: str | None = None
+
+
+@dataclass(frozen=True)
+class ProjectReadAuthorization:
+    """Result of `resolve_project_read`: a read-only lifecycle-aware decision.
+
+    Distinct from `ProjectScopeAuthorization` (which only ever recognizes
+    ACTIVE) on purpose: D3 needs a resolver path that also allows ARCHIVED to
+    members and HIDDEN to tenant admins, without touching the ACTIVE-only
+    mutation/service paths (H3).
+    """
+    project_id: int; tenant_id: int; user_id: int; project_role: ProjectRole
+    lifecycle: ProjectLifecycle; is_tenant_admin: bool; grant_origin: str
 
 
 def _issue_project_authorization(project_id: str, tenant_id: str, subject_user_id: str, membership_id: str | None,
@@ -43,7 +65,7 @@ class MariaDBScopeAuthorityResolver:
     """Each resolution reads current `jax_users`, scope and membership state."""
     authority_source = "jax_users+jax_project_scope+jax_project_membership"
     _TENANT_AUTHORITY_SOURCE = "jax_users.active_tenant_role"
-    _ADMIN_ROLES=frozenset({"admin","superadmin","super_admin"})
+    _ADMIN_ROLES=TENANT_ADMIN_ROLES
     _REVIEWER_ROLES=frozenset({"reviewer","memory_reviewer"})
     # Deliberately narrow, code-owned worker contract.  Subject identity is
     # provenance only and cannot add a user/project role to a service actor.
@@ -128,6 +150,45 @@ class MariaDBScopeAuthorityResolver:
         except ValueError as e: raise ScopeDenied("project membership role is invalid") from e
         auth=_issue_project_authorization(str(requested.project_id),str(tenant),str(requested.subject_user_id),str(mid),project_role,mstatus,status)
         return replace(requested,tenant_id=str(tenant),project_authorization=auth)
+
+    async def resolve_project_read(self, requested: ScopeContext) -> ProjectReadAuthorization:
+        """Lifecycle-aware read resolution (D3): ACTIVE/ARCHIVED for members,
+        HIDDEN only for a DB-backed tenant admin, DISABLED never.
+
+        Deliberately independent from `resolve_project_scope`/`resolve_scope`
+        (H3): those stay ACTIVE-only for every mutation and memory path, and
+        are not modified so their existing ARCHIVED/HIDDEN denial is
+        preserved by construction.
+        """
+        self._require_subject(requested)
+        if not requested.project_id: raise ScopeDenied("project id is required for project read resolution")
+        _, role = await self._tenant_user(requested)
+        project = await self._one("SELECT tenant_id,status FROM jax_project_scope WHERE project_id=%s LIMIT 1",(requested.project_id,))
+        if not project: raise ScopeDenied("PROJECT_SCOPE_UNBOUND")
+        tenant, status = self._value(project,"tenant_id",0), str(self._value(project,"status",1) or "").upper()
+        if str(tenant)!=str(requested.tenant_id): raise ScopeDenied("project tenant mismatch")
+        member = await self._one(
+            "SELECT project_role,status,grant_origin FROM jax_project_membership WHERE project_id=%s AND user_id=%s LIMIT 1",
+            (requested.project_id, requested.subject_user_id))
+        if not member: raise ScopeDenied("project membership is missing")
+        mrole, mstatus, morigin = (
+            self._value(member,"project_role",0), str(self._value(member,"status",1) or "").upper(),
+            self._value(member,"grant_origin",2))
+        if mstatus!="ACTIVE": raise ScopeDenied("project membership is revoked")
+        try: lifecycle=ProjectLifecycle(status)
+        except ValueError as e: raise ScopeDenied("project scope lifecycle is invalid") from e
+        try: project_role=ProjectRole(str(mrole or "").upper())
+        except ValueError as e: raise ScopeDenied("project membership role is invalid") from e
+        is_admin = role in TENANT_ADMIN_ROLES
+        if lifecycle is ProjectLifecycle.DISABLED: raise ScopeDenied("project scope is disabled")
+        if lifecycle is ProjectLifecycle.HIDDEN and not is_admin: raise ScopeDenied("project scope is hidden")
+        return ProjectReadAuthorization(int(requested.project_id), int(tenant), int(requested.subject_user_id),
+                                        project_role, lifecycle, is_admin, str(morigin or ""))
+
+    async def is_active_tenant_admin(self, requested: ScopeContext) -> bool:
+        """Whether the current DB-backed role of the subject is a tenant admin."""
+        _, role = await self._tenant_user(requested)
+        return role in TENANT_ADMIN_ROLES
 
     async def resolve_scope(self, requested: ScopeContext) -> ScopeContext:
         self._require_subject(requested)

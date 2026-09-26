@@ -1,24 +1,10 @@
+import pathlib
+
 import pytest
 
-from jax.memory.b9 import (AuthorizationDenied, MutationAuthorizationContext,
-                           MutationAuthorizationRequest, ScopeContext, ScopeDenied, Visibility)
+from jax.memory.b9 import (AuthorizationDenied, ScopeContext, ScopeDenied, Visibility)
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.scope_authority import ProjectRole
-from jax.memory.project_authority import ProjectAuthorityAdmin
-
-
-class _TrustedAdminResolver:
-    """Test double for the designated transaction resolver, not caller input."""
-    async def resolve_mutation_in_transaction(self, _cur, request, operation, visibility):
-        return MutationAuthorizationContext(request.scope, operation, visibility,
-                                            frozenset({"memory_admin"}),
-                                            frozenset({"memory:admin"}), "db-test")
-
-
-def _admin_request(operation="GRANT_MEMBER"):
-    return MutationAuthorizationRequest(
-        ScopeContext("user:7", "USER", "7", "1", "9"), operation, Visibility.PROJECT_SHARED
-    )
 
 
 class Cursor:
@@ -69,53 +55,22 @@ async def test_requested_project_id_does_not_bypass_membership_lookup():
     with pytest.raises(ScopeDenied,match="missing"): await MariaDBScopeAuthorityResolver(pool).resolve_scope(requested())
 
 
-@pytest.mark.asyncio
-async def test_grant_rejects_target_user_from_another_tenant_before_insert():
-    class Store:
-        async def mutation(self, operation):
-            class Cur:
-                def __init__(self): self.rows=[{"status":"ACTIVE","role":"admin"},{"tenant_id":1,"status":"ACTIVE"},{"tenant_id":2,"status":"ACTIVE"}]; self.calls=[]
-                async def execute(self, sql, args): self.calls.append((sql,args))
-                async def fetchone(self): return self.rows.pop(0)
-            self.cur=Cur()
-            return await operation(self.cur)
-    with pytest.raises(ScopeDenied,match="target user tenant"):
-        await ProjectAuthorityAdmin(Store(), _TrustedAdminResolver()).grant_member(
-            _admin_request(),9,1,8,ProjectRole.VIEWER)
+def test_no_trusted_admin_resolver_double_reappears():
+    """Section 3-bis (2026-09-25 plan): project-authority tests exercise the
+    REAL transactional resolver against MariaDB (see
+    `test_project_authority_mariadb.py`), never a resolver double that always
+    answers "admin, allowed" the way the retired test double for
+    `resolve_mutation_in_transaction` used to. A grep across the test tree,
+    not an import check, so it still catches a reintroduction under a
+    different call site.
 
-
-def test_bind_legacy_scope_is_global_admin_only_idempotent_and_audited():
-    class Store:
-        def __init__(self, rows): self.rows = rows; self.calls = []
-        async def mutation(self, operation):
-            store = self
-            class Cur:
-                async def execute(self, sql, args): store.calls.append((sql, args))
-                async def fetchone(self): return store.rows.pop(0)
-            return await operation(Cur())
-
-    async def run():
-        # The pre-existing global role is DB data; the caller does not pass an
-        # is_admin flag.  A project OWNER cannot satisfy bootstrap=True.
-        request = _admin_request("BIND_LEGACY_PROJECT_SCOPE")
-        created = Store([
-            {"status":"ACTIVE", "role":"admin"}, {"id": 9}, None, {"tenant_id": 1},
-        ])
-        assert await ProjectAuthorityAdmin(created, _TrustedAdminResolver()).bind_legacy_project_scope(request, 9, 1) is True
-        sql = "\n".join(query for query, _ in created.calls)
-        assert "INSERT INTO jax_project_scope" in sql
-        assert "BIND_LEGACY_PROJECT_SCOPE" in str(created.calls)
-
-        repeat = Store([
-            {"status":"ACTIVE", "role":"admin"}, {"id": 9}, {"tenant_id": 1, "status":"ACTIVE"},
-        ])
-        assert await ProjectAuthorityAdmin(repeat, _TrustedAdminResolver()).bind_legacy_project_scope(request, 9, 1) is False
-        assert "BIND_LEGACY_PROJECT_SCOPE_NOOP" in str(repeat.calls)
-
-        conflict = Store([
-            {"status":"ACTIVE", "role":"admin"}, {"id": 9}, {"tenant_id": 2, "status":"ACTIVE"},
-        ])
-        with pytest.raises(ScopeDenied, match="conflicting"):
-            await ProjectAuthorityAdmin(conflict, _TrustedAdminResolver()).bind_legacy_project_scope(request, 9, 1)
-    import asyncio
-    asyncio.run(run())
+    The forbidden name is assembled at runtime (never written out whole in
+    this file) so this very check does not flag itself as an offender.
+    """
+    forbidden = "_Trusted" + "AdminResolver"
+    here = pathlib.Path(__file__).resolve().parent
+    offenders = [
+        str(path) for path in here.glob("test_project_*.py")
+        if forbidden in path.read_text(encoding="utf-8")
+    ]
+    assert not offenders, "forbidden resolver double reappeared in: " + repr(offenders)

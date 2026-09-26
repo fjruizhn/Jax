@@ -151,7 +151,7 @@ CREATE TABLE `projects` (
   `project_uuid` char(36) NOT NULL,
   `name` varchar(255) NOT NULL,
   `description` text DEFAULT NULL,
-  `status` enum('planning','active','paused','completed','archived') DEFAULT 'planning',
+  `status` enum('planning','active','paused','completed','archived','hidden','disabled') DEFAULT 'planning',
   `start_date` date DEFAULT NULL,
   `target_date` date DEFAULT NULL,
   `completion_date` date DEFAULT NULL,
