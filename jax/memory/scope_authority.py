@@ -61,6 +61,21 @@ def bind_worker_project_scope(*_: Any, **__: Any) -> ScopeContext:
     raise ScopeDenied("workers must resolve a fixed service operation policy")
 
 
+def require_subject(scope: ScopeContext) -> None:
+    """Baseline authenticated-subject checks: tenant/actor/subject present,
+    no delegation, and for a USER actor, principal/subject consistency
+    (bare id or the `user:<id>` form). Module-level so it is a single source
+    of truth -- `MariaDBScopeAuthorityResolver._require_subject` delegates
+    here, and `project_authority.py`'s stricter human-actor check builds on
+    top of it instead of duplicating it (ronda 3, BLOCK B1)."""
+    if not scope.tenant_id or not scope.actor_principal or not scope.actor_type or not scope.subject_user_id:
+        raise ScopeDenied("authenticated tenant subject is required")
+    if scope.delegation:
+        raise ScopeDenied("delegation authority is unavailable")
+    if scope.actor_type == "USER" and scope.actor_principal not in {scope.subject_user_id, f"user:{scope.subject_user_id}"}:
+        raise ScopeDenied("user actor and subject do not match")
+
+
 class MariaDBScopeAuthorityResolver:
     """Each resolution reads current `jax_users`, scope and membership state."""
     authority_source = "jax_users+jax_project_scope+jax_project_membership"
@@ -89,11 +104,7 @@ class MariaDBScopeAuthorityResolver:
     def _active(value: Any) -> bool: return str(value or "").upper() == "ACTIVE"
     @staticmethod
     def _require_subject(scope: ScopeContext) -> None:
-        if not scope.tenant_id or not scope.actor_principal or not scope.actor_type or not scope.subject_user_id:
-            raise ScopeDenied("authenticated tenant subject is required")
-        if scope.delegation: raise ScopeDenied("delegation authority is unavailable")
-        if scope.actor_type == "USER" and scope.actor_principal not in {scope.subject_user_id,f"user:{scope.subject_user_id}"}:
-            raise ScopeDenied("user actor and subject do not match")
+        require_subject(scope)
     async def _one(self, sql: str, args: tuple[Any,...]) -> Any:
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:

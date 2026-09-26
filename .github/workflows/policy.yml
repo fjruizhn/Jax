@@ -649,7 +649,7 @@ jobs:
           asyncio.run(main())
           print("run_migrations OK")
           PY
-      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py
+      - run: python -m pytest -v jacobs/_subpipeline_contrato_io_test.py tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py scripts/_b9_revertir_005_test.py
       - name: Piso exacto de tests CORRIDOS
         # Los dos archivos se saltan sin JAX_DB_HOST: un skip masivo se ve verde.
         run: |
@@ -657,7 +657,8 @@ jobs:
             tests/test_subpipeline_contrato_rutas.py jacobs/_store_pool_test.py \
             las_manos/_human_gate_io_test.py jacobs/_cupo_io_test.py \
             jacobs/_pipeline_identity_test.py jacobs/_step_motor_test.py \
-            jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py 2>&1 | tee /tmp/out
+            jacobs/_devolucion_persistencia_test.py tests/test_project_authority_mariadb.py \
+            scripts/_b9_revertir_005_test.py 2>&1 | tee /tmp/out
           # 31 el 2026-09-16 (frente F): 20 contra la base (esquema 5, emision 7,
           #   consumo 8 con la carrera de 20, la carrera forzada, el EXPLAIN y el paso
           #   de Ada terminado con padre running) + 11 por la ruta con el arnes que
@@ -855,8 +856,19 @@ jobs:
           #   (~/.config/jax/test-db.env, usuario jax_test, sin acceso a producción),
           #   MISMO comando, jax-platform clonado y run_migrations() real: 172 -> 177
           #   passed.
-          grep -qE "^177 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 177 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 177 -> 194 el 2026-09-26 (ronda 3 de PR-J1, auditoria de escalon 3
+          #   RECHAZADA sobre el commit 6403d5f -- BLOCK B1, MAJOR M1/M2/M3 y 8
+          #   MINOR): +15 en tests/test_project_authority_mariadb.py (34 en total,
+          #   antes 19 -- B1 actor humano canonico x4, el deadlock 1213 real contra
+          #   el chat x1, sync ya no confia en flags del llamador x3, ultimo dueno
+          #   con tipo exacto x1, y los MINOR 1/2/3/4/5/8 x6) + 2 en
+          #   scripts/_b9_revertir_005_test.py (nuevo, MINOR 6). Cada punto de la
+          #   ronda 3 se vio en rojo contra 6403d5f antes del arreglo (repros
+          #   standalone, documentados en los tests). Medido con la credencial de
+          #   pruebas dedicada (~/.config/jax/test-db.env, usuario jax_test), MISMO
+          #   comando, jax-platform clonado y run_migrations() real: 194 passed.
+          grep -qE "^194 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 194 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

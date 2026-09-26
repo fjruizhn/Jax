@@ -60,17 +60,43 @@ def test_no_trusted_admin_resolver_double_reappears():
     REAL transactional resolver against MariaDB (see
     `test_project_authority_mariadb.py`), never a resolver double that always
     answers "admin, allowed" the way the retired test double for
-    `resolve_mutation_in_transaction` used to. A grep across the test tree,
-    not an import check, so it still catches a reintroduction under a
-    different call site.
+    `resolve_mutation_in_transaction` used to.
 
-    The forbidden name is assembled at runtime (never written out whole in
-    this file) so this very check does not flag itself as an offender.
+    Ronda 3, MINOR 7 (auditor de escalón 3, 2026-09-26): esto buscaba un
+    nombre EXACTO en un subconjunto de archivos (`test_project_*.py`). Un
+    double con otro nombre, o pasado a `ProjectAuthorityAdmin` desde
+    cualquier otro archivo de `tests/`, no lo hubiera detectado. Ahora es
+    un escaneo AST de TODO `tests/`, por patrón: cualquier clase que define
+    un método `resolve_*` Y que además aparece como argumento en una
+    llamada a `ProjectAuthorityAdmin(...)` en el MISMO archivo -- sin
+    importar cómo se llame la clase. Esto no marca dobles legítimos de
+    OTROS subsistemas (p.ej. `TxResolver` en `test_b9_persistent_api.py`,
+    que implementa `resolve_mutation_in_transaction` pero nunca se pasa a
+    `ProjectAuthorityAdmin`): el patrón es la combinación de las dos cosas,
+    no el nombre del método por sí solo.
     """
-    forbidden = "_Trusted" + "AdminResolver"
+    import ast
+
     here = pathlib.Path(__file__).resolve().parent
-    offenders = [
-        str(path) for path in here.glob("test_project_*.py")
-        if forbidden in path.read_text(encoding="utf-8")
-    ]
-    assert not offenders, "forbidden resolver double reappeared in: " + repr(offenders)
+    offenders: list[str] = []
+    for path in here.glob("*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+        except SyntaxError:
+            continue
+        resolver_like_classes = {
+            node.name for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef)
+            and any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("resolve_")
+                   for item in node.body)
+        }
+        if not resolver_like_classes:
+            continue
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "ProjectAuthorityAdmin"):
+                continue
+            for arg in (*node.args, *(kw.value for kw in node.keywords)):
+                if isinstance(arg, ast.Name) and arg.id in resolver_like_classes:
+                    offenders.append(f"{path.name}: {arg.id} passed to ProjectAuthorityAdmin(...)")
+    assert not offenders, "resolver double passed to ProjectAuthorityAdmin: " + repr(offenders)
