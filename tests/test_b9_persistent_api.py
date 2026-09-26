@@ -211,16 +211,18 @@ async def test_projection_mismatch_marks_and_fails_closed():
 
 @pytest.mark.asyncio
 async def test_persistent_legacy_binding_and_synthesis_are_transactional():
-    conn=ScriptConn([None]); api=make_api(conn)
-    mid=await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),"facts","legacy","k",ObjectKind.FACT,None)
+    legacy={'id':1,'fact_text':'original','user_id':'user-1','project_id':None,'superseded_by':None,'expires_at':None}
+    owner={'user_id':'user-1','tenant_id':'tenant-1','status':'ACTIVE'}
+    conn=ScriptConn([legacy,owner,None]); api=make_api(conn,TxResolver(roles={'memory_admin'},caps={'memory:admin'}))
+    mid=await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),"facts","legacy","1",ObjectKind.FACT,"original")
     assert mid and conn.committed and any("memory_legacy_bindings" in sql for sql,_ in conn.cursor_obj.calls)
     source={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
             "visibility":"USER_PRIVATE","user_id":"user-1","project_id":None,"lifecycle_state":"ACTIVE",
-            "payload":"source","current_revision_id":"source-r"}
-    conn=ScriptConn([source]); api=make_api(conn)
+            "payload":"source","current_revision_id":"source-r","current_verification_state":True}
+    conn=ScriptConn([source,dict(source,revision_id="source-r2",current_revision_id="source-r2",memory_id="source-m2")]); api=make_api(conn)
     worker_scope=ScopeContext("worker/extract","SERVICE","user-1","tenant-1",request_id="job-1")
     worker_auth=MutationAuthorizationRequest(worker_scope,"SYNTHESIZE",Visibility.SYSTEM_INTERNAL)
-    mid=await api.synthesize_memory(worker_auth,"derived",("source-r",),provider="p",model="m",transformation_version="1")
+    mid=await api.synthesize_memory(worker_auth,"derived",("source-r","source-r2"),provider="p",model="m",transformation_version="1")
     prov=[args for sql,args in conn.cursor_obj.calls if "INSERT INTO memory_provenance" in sql][0]
     assert mid and prov[5:8] == ("worker/extract","SERVICE","user-1") and prov[8:10] == ("p","m")
 
@@ -236,7 +238,7 @@ async def test_aud003_authorized_project_read_uses_scoped_query_without_external
     result=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.PROJECT_SHARED,project_id="project-a"))
     assert len(result)==1 and result[0].revision.payload == "project fact"
     assert any("r.project_id=%s" in sql for sql,_ in conn.cursor_obj.calls)
-    assert any(args == ("tenant-1","user-1","project-a",20) for _,args in conn.cursor_obj.calls)
+    assert any(args == ("tenant-1","USER_PRIVATE","user-1","project-a",20) for _,args in conn.cursor_obj.calls)
     with pytest.raises(AuthorizationDenied):
         await reader.retrieve(ScopeContext("user-1","USER","user-1","tenant-1",project_id="project-a"))
 
@@ -245,10 +247,10 @@ async def test_aud003_authorized_project_read_uses_scoped_query_without_external
 async def test_aud001_persistent_project_synthesis_retains_source_scope():
     source={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
             "visibility":"PROJECT_SHARED","user_id":None,"project_id":"project-a","lifecycle_state":"ACTIVE",
-            "payload":"source","current_revision_id":"source-r"}
-    conn=ScriptConn([source]); api=make_api(conn,TxResolver(project_role="CONTRIBUTOR"))
+            "payload":"source","current_revision_id":"source-r","current_verification_state":True}
+    conn=ScriptConn([source,dict(source,revision_id="source-r2",current_revision_id="source-r2",memory_id="source-m2")]); api=make_api(conn,TxResolver(project_role="CONTRIBUTOR"))
     await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL,project_id="project-a"),
-                                "derived",("source-r",),provider="p",model="m",transformation_version="1")
+                                "derived",("source-r","source-r2"),provider="p",model="m",transformation_version="1")
     revision_args=next(args for sql,args in conn.cursor_obj.calls if "INSERT INTO memory_revisions" in sql)
     assert revision_args[3] == "PROJECT_SHARED" and revision_args[5] == "project-a"
 
@@ -264,11 +266,11 @@ async def test_aud001_project_service_synthesis_uses_resolved_service_policy():
                                                 frozenset({"memory:service:synthesize"}),"service-policy")
     source={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
             "visibility":"PROJECT_SHARED","user_id":None,"project_id":"project-a","lifecycle_state":"ACTIVE",
-            "payload":"source","current_revision_id":"source-r"}
-    conn=ScriptConn([source]); api=make_api(conn,ServiceResolver())
+            "payload":"source","current_revision_id":"source-r","current_verification_state":True}
+    conn=ScriptConn([source,dict(source,revision_id="source-r2",current_revision_id="source-r2",memory_id="source-m2")]); api=make_api(conn,ServiceResolver())
     service=ScopeContext("service:memory-synthesis","SERVICE","user-1","tenant-1",project_id="project-a")
     await api.synthesize_memory(MutationAuthorizationRequest(service,"SYNTHESIZE",Visibility.SYSTEM_INTERNAL),
-                                "derived",("source-r",),provider="p",model="m",transformation_version="1")
+                                "derived",("source-r","source-r2"),provider="p",model="m",transformation_version="1")
     assert conn.committed
 
 
@@ -284,8 +286,10 @@ async def test_aud004_persistent_purge_erases_revision_column_payloads_and_vecto
 
 @pytest.mark.asyncio
 async def test_aud005_persistent_legacy_query_and_insert_are_tenant_qualified():
-    conn=ScriptConn([None]); api=make_api(conn)
-    await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),"facts","legacy","k",ObjectKind.FACT,None)
+    legacy={'id':1,'fact_text':'original','user_id':'user-1','project_id':None,'superseded_by':None,'expires_at':None}
+    owner={'user_id':'user-1','tenant_id':'tenant-1','status':'ACTIVE'}
+    conn=ScriptConn([legacy,owner,None]); api=make_api(conn,TxResolver(roles={'memory_admin'},caps={'memory:admin'}))
+    await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),"facts","legacy","1",ObjectKind.FACT,"original")
     statements=[(sql,args) for sql,args in conn.cursor_obj.calls if "memory_legacy_bindings" in sql]
     assert all("tenant_id" in sql for sql,_ in statements)
     assert all("tenant-1" in args for _,args in statements)
@@ -304,7 +308,7 @@ def test_aud005_migration_derives_existing_tenant_from_bound_object():
 async def test_aud006_persistent_synthesis_rejects_missing_source_revision():
     conn=ScriptConn([None]); api=make_api(conn)
     with pytest.raises(ScopeDenied):
-        await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL),"derived",("missing",),
+        await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL),"derived",("missing","missing2"),
                                     provider="p",model="m",transformation_version="1")
     assert conn.rolled and not conn.committed
 
@@ -318,12 +322,12 @@ async def test_aud006_persistent_synthesis_rejects_missing_source_revision():
 async def test_aud006_persistent_synthesis_rejects_ineligible_source_revision(change):
     row={"revision_id":"source-r","memory_id":"source-m","object_kind":"FACT","tenant_id":"tenant-1",
          "visibility":"PROJECT_SHARED","user_id":None,"project_id":"project-a","lifecycle_state":"ACTIVE",
-         "payload":"source","current_revision_id":"source-r"}
+         "payload":"source","current_revision_id":"source-r","current_verification_state":True}
     row.update(change)
     conn=ScriptConn([row]); api=make_api(conn,TxResolver(project_role="CONTRIBUTOR"))
     with pytest.raises(ScopeDenied):
         await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL,project_id="project-a"),
-                                    "derived",("source-r",),provider="p",model="m",transformation_version="1")
+                                    "derived",("source-r","source-r2"),provider="p",model="m",transformation_version="1")
     assert conn.rolled and not conn.committed
 
 
@@ -360,7 +364,7 @@ async def _b9_ci_test_pool(*, authority=False, legacy=False):
     try:
         tables=(
             "CREATE TEMPORARY TABLE memory_objects (memory_id CHAR(36) PRIMARY KEY, object_kind VARCHAR(32), tenant_id VARCHAR(128), created_at DATETIME(6), legacy_source_type VARCHAR(64), legacy_source_namespace VARCHAR(255), legacy_source_key VARCHAR(255), UNIQUE KEY uq_memory_legacy_binding (legacy_source_type, legacy_source_namespace, legacy_source_key))",
-            "CREATE TEMPORARY TABLE memory_revisions (revision_id CHAR(36) PRIMARY KEY, memory_id CHAR(36), content_digest CHAR(71), visibility VARCHAR(32), user_id VARCHAR(128), project_id VARCHAR(128), lifecycle_state VARCHAR(32), created_at DATETIME(6), payload LONGBLOB, provenance_status VARCHAR(64), prior_revision_id CHAR(36))",
+            "CREATE TEMPORARY TABLE memory_revisions (revision_id CHAR(36) PRIMARY KEY, memory_id CHAR(36), content_digest CHAR(71), visibility VARCHAR(32), user_id VARCHAR(128), project_id VARCHAR(128), lifecycle_state VARCHAR(32), created_at DATETIME(6), payload LONGBLOB, provenance_status VARCHAR(64), prior_revision_id CHAR(36),tenant_id VARCHAR(128))",
             "CREATE TEMPORARY TABLE memory_revision_payloads (revision_id CHAR(36) PRIMARY KEY, payload LONGBLOB, purged_at DATETIME(6), purge_reason VARCHAR(255))",
             "CREATE TEMPORARY TABLE memory_provenance (provenance_id CHAR(36) PRIMARY KEY, revision_id CHAR(36), source_revisions JSON, transformation_id VARCHAR(128), transformation_version VARCHAR(64), actor_principal VARCHAR(255), actor_type VARCHAR(64), subject_user_id VARCHAR(128), provider VARCHAR(128), model VARCHAR(255), created_at DATETIME(6), limitations TEXT)",
             "CREATE TEMPORARY TABLE memory_events (event_id CHAR(36) PRIMARY KEY, memory_id CHAR(36), revision_id CHAR(36), event_kind VARCHAR(32), actor_principal VARCHAR(255), subject_user_id VARCHAR(128), authority_source VARCHAR(255), occurred_at DATETIME(6), details JSON, compensates_event_id CHAR(36), actor_type VARCHAR(64), delegation VARCHAR(255), calling_component VARCHAR(255), request_id VARCHAR(255), trace_id VARCHAR(255))",
@@ -428,10 +432,18 @@ async def test_aud001_real_project_synthesis_is_invisible_to_project_b_and_tenan
                                        ObjectKind.FACT,"project A",Visibility.PROJECT_SHARED,project_id="project-a")
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
-                await cur.execute("SELECT current_revision_id FROM memory_projections WHERE memory_id=%s",(source,))
-                revision_id=(await cur.fetchone())["current_revision_id"]
+                await cur.execute("UPDATE jax_project_membership SET project_role='REVIEWER' WHERE project_id='project-a'")
+            await conn.commit()
+        source2=await api.create_memory(auth("CREATE",Visibility.PROJECT_SHARED,project_id="project-a"),
+                                       ObjectKind.FACT,"project A detail",Visibility.PROJECT_SHARED,project_id="project-a")
+        await api.verify_memory(auth("VERIFY",Visibility.PROJECT_SHARED,project_id="project-a"),source,method="human test")
+        await api.verify_memory(auth("VERIFY",Visibility.PROJECT_SHARED,project_id="project-a"),source2,method="human test")
+        async with pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT current_revision_id FROM memory_projections WHERE memory_id IN (%s,%s)",(source,source2))
+                revision_ids=tuple(row['current_revision_id'] for row in await cur.fetchall())
         derived=await api.synthesize_memory(auth("SYNTHESIZE",Visibility.SYSTEM_INTERNAL,project_id="project-a"),
-                                            "project summary",(revision_id,),provider="p",model="m",transformation_version="1")
+                                            "project summary",revision_ids,provider="p",model="m",transformation_version="1")
         project_a=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.PROJECT_SHARED,project_id="project-a"))
         project_b=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.PROJECT_SHARED,project_id="project-b"))
         tenant_only=await reader.retrieve_authorized(auth("RETRIEVE",Visibility.TENANT_SHARED))
@@ -468,19 +480,17 @@ async def test_aud005_real_migration_qualifies_legacy_binding_by_tenant():
                 await cur.execute("INSERT INTO memory_legacy_bindings VALUES ('facts','legacy','same',%s,'ACTIVE',NOW(6))",(old_id,))
             await conn.commit()
         await _apply_aud005_migration(pool)
-        api=PersistentMemoryAPI(MariaDBB9Store(pool),TxResolver())
-        first=await api.import_legacy_memory(auth("IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL),
-                                             "facts","legacy","same",ObjectKind.FACT,"original")
-        other_scope=ScopeContext("user-1","USER","user-1","tenant-2")
-        other_auth=MutationAuthorizationRequest(other_scope,"IMPORT_LEGACY",Visibility.SYSTEM_INTERNAL)
-        second=await api.import_legacy_memory(other_auth,"facts","legacy","same",ObjectKind.FACT,"other")
-        repeat=await api.import_legacy_memory(other_auth,"facts","legacy","same",ObjectKind.FACT,"other")
-        assert first == old_id and second != first and repeat == second
+        # The migration's namespace uniqueness is independent of adoption's
+        # new locked-source authority contract. Exercise the physical keys.
+        second_id="00000000-0000-0000-0000-000000000011"
         async with pool.acquire() as conn:
             async with conn.cursor() as cur:
+                await cur.execute("INSERT INTO memory_objects (memory_id,object_kind,tenant_id,created_at,legacy_source_type,legacy_source_namespace,legacy_source_key) VALUES (%s,'FACT','tenant-2',NOW(6),'facts','legacy','same')",(second_id,))
+                await cur.execute("INSERT INTO memory_legacy_bindings (tenant_id,legacy_source_type,legacy_source_namespace,legacy_source_key,memory_id,binding_state,created_at) VALUES ('tenant-2','facts','legacy','same',%s,'ACTIVE',NOW(6))",(second_id,))
+                with pytest.raises(Exception):
+                    await cur.execute("INSERT INTO memory_legacy_bindings (tenant_id,legacy_source_type,legacy_source_namespace,legacy_source_key,memory_id,binding_state,created_at) VALUES ('tenant-2','facts','legacy','same',%s,'ACTIVE',NOW(6))",(second_id,))
                 await cur.execute("SELECT tenant_id,memory_id FROM memory_legacy_bindings WHERE legacy_source_key='same' ORDER BY tenant_id")
-                assert [(r["tenant_id"],r["memory_id"]) for r in await cur.fetchall()] == [
-                    ("tenant-1",first),("tenant-2",second)]
+                assert [(r['tenant_id'],r['memory_id']) for r in await cur.fetchall()]==[('tenant-1',old_id),('tenant-2',second_id)]
     finally:
         pool.close(); await pool.wait_closed()
 

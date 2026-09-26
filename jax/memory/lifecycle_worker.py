@@ -81,20 +81,43 @@ def projection_mismatches(revision_rows: Iterable[Mapping[str, Any]],
 
 
 async def scan_and_mark(pool: Any) -> tuple[str, ...]:
-    """Detect and persist only the reconciliation flag; never repair state."""
-    async with pool.acquire() as conn:
-        async with conn.cursor(aiomysql.DictCursor) as cur:
-            await cur.execute("SELECT revision_id,memory_id,content_digest,visibility,user_id,project_id,lifecycle_state,created_at,payload,provenance_status,prior_revision_id FROM memory_revisions ORDER BY memory_id,created_at,revision_id")
-            revisions = await cur.fetchall()
-            await cur.execute("SELECT event_id,memory_id,revision_id,event_kind,actor_principal,subject_user_id,authority_source,occurred_at,details,compensates_event_id,actor_type,delegation,calling_component,request_id,trace_id FROM memory_events ORDER BY memory_id,occurred_at,event_id")
-            events = await cur.fetchall()
-            await cur.execute("SELECT memory_id,current_revision_id,current_lifecycle_state,current_verification_state,canonical_history_digest FROM memory_projections")
-            projections = await cur.fetchall()
-            mismatches = projection_mismatches(revisions, events, projections)
-            if mismatches:
-                await cur.executemany("UPDATE memory_projections SET reconciliation_required=TRUE WHERE memory_id=%s", ((memory_id,) for memory_id in mismatches))
-        await conn.commit()
-    return mismatches
+    """Lock objects before projections; reread history in the same transaction.
+
+    Keyset batches bound memory and lock duration. Flags are sticky: this
+    scanner never clears reconciliation or rewrites canonical state.
+    """
+    mismatches = []
+    last = ""
+    batch_size = int(os.getenv("JAX_MEMORY_LIFECYCLE_BATCH_SIZE", "100"))
+    if not 1 <= batch_size <= 1000:
+        raise ValueError("invalid lifecycle batch size")
+    while True:
+        async with pool.acquire() as conn:
+            await conn.begin()
+            try:
+                async with conn.cursor(aiomysql.DictCursor) as cur:
+                    await cur.execute("SELECT memory_id FROM memory_objects WHERE memory_id>%s ORDER BY memory_id LIMIT %s FOR UPDATE", (last, batch_size))
+                    objects = await cur.fetchall()
+                    if not objects:
+                        await conn.commit()
+                        break
+                    for obj in objects:
+                        mid = obj["memory_id"]
+                        await cur.execute("SELECT memory_id,current_revision_id,current_lifecycle_state,current_verification_state,canonical_history_digest FROM memory_projections WHERE memory_id=%s FOR UPDATE", (mid,))
+                        projections = await cur.fetchall()
+                        await cur.execute("SELECT revision_id,memory_id,content_digest,visibility,user_id,project_id,lifecycle_state,created_at,payload,provenance_status,prior_revision_id FROM memory_revisions WHERE memory_id=%s ORDER BY created_at,revision_id FOR UPDATE", (mid,))
+                        revisions = await cur.fetchall()
+                        await cur.execute("SELECT event_id,memory_id,revision_id,event_kind,actor_principal,subject_user_id,authority_source,occurred_at,details,compensates_event_id,actor_type,delegation,calling_component,request_id,trace_id FROM memory_events WHERE memory_id=%s ORDER BY occurred_at,event_id FOR UPDATE", (mid,))
+                        events = await cur.fetchall()
+                        if not projections or projection_mismatches(revisions, events, projections):
+                            mismatches.append(str(mid))
+                            await cur.execute("UPDATE memory_projections SET reconciliation_required=TRUE WHERE memory_id=%s", (mid,))
+                    last = str(objects[-1]["memory_id"])
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+    return tuple(mismatches)
 
 
 async def _pool_from_environment() -> Any:
@@ -123,4 +146,4 @@ async def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    raise SystemExit(asyncio.run(asyncio.wait_for(main(), float(os.getenv("JAX_MEMORY_RUN_TIMEOUT_SECONDS", "840")))))
