@@ -56,6 +56,7 @@ def read_credentials(path):
 async def operate(args,credentials):
     import aiomysql
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+    from jax.core.db_connect_config import db_connect_timeout_seconds
     from jax.memory.b9 import ScopeContext,MutationAuthorizationRequest,Visibility,AuthorizationDenied
     from jax.memory.b9_mariadb import MariaDBB9Store,PersistentMemoryAPI,MariaDBB9Reader
     from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
@@ -64,7 +65,7 @@ async def operate(args,credentials):
     if args.verify_owner_id==args.verify_other_user_id:raise ValueError('reader_diagnostic_requires_distinct_identities')
     # Validate the reviewed plan before opening a connection or attempting writes.
     plan=private_read(args.plan);validate_plan(plan)
-    pool=await aiomysql.create_pool(host=credentials['JAX_DB_HOST'],port=int(credentials['JAX_DB_PORT']),user=credentials['JAX_DB_USER'],password=credentials['JAX_DB_PASSWORD'],db=credentials['JAX_DB_NAME'],cursorclass=aiomysql.DictCursor,minsize=1,maxsize=3,autocommit=False,connect_timeout=10)
+    pool=await aiomysql.create_pool(host=credentials['JAX_DB_HOST'],port=int(credentials['JAX_DB_PORT']),user=credentials['JAX_DB_USER'],password=credentials['JAX_DB_PASSWORD'],db=credentials['JAX_DB_NAME'],cursorclass=aiomysql.DictCursor,minsize=1,maxsize=3,autocommit=False,connect_timeout=db_connect_timeout_seconds())
     async def count(table):
         if table not in {'memory_events','memory_objects','memory_legacy_bindings'}:raise ValueError('count_allowlist')
         async with pool.acquire() as conn:

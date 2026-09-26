@@ -246,17 +246,31 @@ MAX_CHARS_PER_EXTRACTION = 12000
 
 
 def _chunk_conversation(conv_text: str, max_chars: int = MAX_CHARS_PER_EXTRACTION) -> list[str]:
-    """Bound every chunk, including an oversized single message."""
-    if max_chars<=0: raise ValueError('chunk size must be positive')
-    chunks=[]; current=''
-    for line in conv_text.splitlines(keepends=True):
-        while line:
-            remaining=max_chars-len(current)
-            current+=line[:remaining]; line=line[remaining:]
-            if len(current)==max_chars:
-                chunks.append(current); current=''
-    if current or not chunks: chunks.append(current)
+    """Pack whole lines; hard-split only lines exceeding the chunk limit."""
+    if max_chars <= 0:
+        raise ValueError('chunk size must be positive')
+    chunks: list[str] = []
+    current: str | None = None
+    for line in conv_text.split('\n'):
+        if len(line) > max_chars:
+            if current is not None:
+                chunks.append(current)
+                current = None
+            # No truncation: all complete fragments and the remainder survive.
+            while len(line) > max_chars:
+                chunks.append(line[:max_chars])
+                line = line[max_chars:]
+        if current is None:
+            current = line
+        elif len(current) + 1 + len(line) <= max_chars:
+            current += '\n' + line
+        else:
+            chunks.append(current)
+            current = line
+    if current is not None:
+        chunks.append(current)
     return chunks
+
 
 
 def _parse_json(raw: str) -> dict | None:
