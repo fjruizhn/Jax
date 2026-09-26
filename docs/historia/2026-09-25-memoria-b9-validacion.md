@@ -58,3 +58,12 @@ en PENDIENTES.md. Los subagentes no operaron SSH, bases ni producción.
 Pendiente dentro de este encargo: revisión del SHA exacto, integración por PR,
 aplicación productiva explícita, adopción idempotente y ciclo observado con un
 turno autenticado que recupere un hecho legacy conocido. No se declara cierre.
+
+Continuación del26-sep: CI detectó cuatro módulos nuevos sin ejecución y doce
+capturas de error sin contrato escrito. Se añadieron los comentarios de fallo
+visible sin cambiar comportamiento y un job propio con MariaDB12.3.3 vacío,
+jax_test limitado a su base y102 pruebas sin skips. La misma receta pasó en
+una base vacía real.31 controles locales de CI pasan. Otro job reveló que la
+migración B9 de jax-platform exige JAX_REPO_PATH; CI ahora apunta al checkout
+actual mediante github.workspace. El cambio de workflow queda sujeto a la
+regla de integración de Fernando, sin usar la excepción automática de Codex.

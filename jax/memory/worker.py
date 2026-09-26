@@ -520,7 +520,7 @@ async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadli
         await jobs.fail(conv_id,token,type(error).__name__,quarantine=True)
         logger.error('conv %s: quarantined %s',conv_id,type(error).__name__)
         return False
-    except Exception as error:
+    except Exception as error:  # fail-soft: aislar esta conversación permite revisar las demás; devuelve False y _run_once contabiliza el fallo para terminar con código no cero.
         # Lost commit acknowledgement is UNKNOWN; completion is resolved by the locked DB markers.
         await jobs.fail(conv_id,token,type(error).__name__,unknown=committing)
         logger.error('conv %s: failed %s',conv_id,type(error).__name__)
@@ -557,7 +557,7 @@ async def _run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | 
                     if job.get('quarantined'):
                         failures+=1
                     elif not await process_claimed(db,extractor,conv,writer,jobs,job,budget,deadline): failures+=1
-            except Exception as error:
+            except Exception as error:  # fail-soft: un reclamo fallido no bloquea la cola; failures obliga a relanzar al final y systemd observa código no cero.
                 failures+=1
                 logger.error('conv %s: claim failed %s',conv['id'],type(error).__name__)
         if failures: raise RuntimeError(f'memory extraction failures: {failures}')

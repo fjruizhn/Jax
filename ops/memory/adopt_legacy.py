@@ -128,7 +128,7 @@ def main(argv=None):
         result=asyncio.run(asyncio.wait_for(operate(args,credentials),args.timeout_seconds))
         print(json.dumps(result,sort_keys=True))
         return 0
-    except Exception as error:
+    except Exception as error:  # fail-closed: expose only the error type and return rc=1; the entry point exits unsuccessfully
         print(json.dumps({'status':'FAIL','error_type':type(error).__name__}))
         return 1
 
