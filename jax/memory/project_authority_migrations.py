@@ -86,6 +86,15 @@ _CHK_SCOPE_STATUS_V2 = "chk_jax_project_scope_status_v2"
 _CHK_MEMBERSHIP_ORIGIN = "chk_jax_project_membership_origin"
 _CHK_MEMBERSHIP_PRE_ADMIN = "chk_jax_project_membership_pre_admin"
 _IDX_MEMBERSHIP_USER_LIST = "idx_jax_project_membership_user_list"
+#: Ronda 4, MAJOR MJ-2: `jax_users` is platform-owned (jax-platform's own
+#: migrations create the table), but the admin-set read this module needs
+#: (`_read_tenant_admins`) has to hit an index by tenant, or MariaDB falls
+#: back to a full table scan under REPEATABLE READ -- which next-key-locks
+#: rows across every tenant, not just the one being read (worse than the
+#: `FOR UPDATE` this round removes). Declared and guarded here rather than
+#: in jax-platform's own migrations because this module is the only reader
+#: that needs it, same reasoning as 005e for jax_project_membership.
+_IDX_USERS_TENANT_ROLE_STATUS = "idx_jax_users_tenant_role_status"
 
 _LEGACY_STATUS_ENUM = "ENUM('planning','active','paused','completed','archived')"
 _LIFECYCLE_STATUS_ENUM = ("ENUM('planning','active','paused','completed','archived','hidden','disabled') "
@@ -185,6 +194,11 @@ async def _apply_project_lifecycle_migration(cursor: Any) -> None:
     current_type = await _column_type(cursor, "projects", "status")
     if current_type is not None and "hidden" not in current_type:
         await cursor.execute("ALTER TABLE projects MODIFY COLUMN status " + _LIFECYCLE_STATUS_ENUM)
+    # 005h (MAJOR MJ-2): guarded like every other step here, even though
+    # `jax_users` is not this module's own table -- only created if missing.
+    if not await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_ROLE_STATUS):
+        await cursor.execute(
+            "CREATE INDEX " + _IDX_USERS_TENANT_ROLE_STATUS + " ON jax_users (tenant_id, role, status)")
 
 
 async def revert_project_lifecycle_migration(cursor: Any) -> None:
@@ -218,6 +232,8 @@ async def revert_project_lifecycle_migration(cursor: Any) -> None:
     await cursor.execute("DROP TABLE IF EXISTS jax_project_creation_request")
     if await _index_exists(cursor, "jax_project_membership", _IDX_MEMBERSHIP_USER_LIST):
         await cursor.execute("DROP INDEX " + _IDX_MEMBERSHIP_USER_LIST + " ON jax_project_membership")
+    if await _index_exists(cursor, "jax_users", _IDX_USERS_TENANT_ROLE_STATUS):
+        await cursor.execute("DROP INDEX " + _IDX_USERS_TENANT_ROLE_STATUS + " ON jax_users")
     for name in (_CHK_MEMBERSHIP_ORIGIN, _CHK_MEMBERSHIP_PRE_ADMIN):
         if await _check_constraint_exists(cursor, name):
             await cursor.execute("ALTER TABLE jax_project_membership DROP CONSTRAINT " + name)

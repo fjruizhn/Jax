@@ -55,48 +55,61 @@ async def test_requested_project_id_does_not_bypass_membership_lookup():
     with pytest.raises(ScopeDenied,match="missing"): await MariaDBScopeAuthorityResolver(pool).resolve_scope(requested())
 
 
-def test_no_trusted_admin_resolver_double_reappears():
+def test_ningun_resolver_falso_se_usa_como_si_fuera_el_real():
     """Section 3-bis (2026-09-25 plan): project-authority tests exercise the
     REAL transactional resolver against MariaDB (see
-    `test_project_authority_mariadb.py`), never a resolver double that always
-    answers "admin, allowed" the way the retired test double for
+    `test_project_authority_mariadb.py`), never a resolver double that
+    always answers "admin, allowed" the way the retired test double for
     `resolve_mutation_in_transaction` used to.
 
-    Ronda 3, MINOR 7 (auditor de escalón 3, 2026-09-26): esto buscaba un
-    nombre EXACTO en un subconjunto de archivos (`test_project_*.py`). Un
-    double con otro nombre, o pasado a `ProjectAuthorityAdmin` desde
-    cualquier otro archivo de `tests/`, no lo hubiera detectado. Ahora es
-    un escaneo AST de TODO `tests/`, por patrón: cualquier clase que define
-    un método `resolve_*` Y que además aparece como argumento en una
-    llamada a `ProjectAuthorityAdmin(...)` en el MISMO archivo -- sin
-    importar cómo se llame la clase. Esto no marca dobles legítimos de
-    OTROS subsistemas (p.ej. `TxResolver` en `test_b9_persistent_api.py`,
-    que implementa `resolve_mutation_in_transaction` pero nunca se pasa a
-    `ProjectAuthorityAdmin`): el patrón es la combinación de las dos cosas,
-    no el nombre del método por sí solo.
+    Ronda 4, MINOR 3 (auditor de escalón 3, 2026-09-26): el meta-test
+    anterior (ronda 3, MINOR 7) buscaba una clase pasada como SEGUNDO
+    ARGUMENTO de `ProjectAuthorityAdmin(...)` -- ese constructor ya no toma
+    ningún resolver (ronda 4, MINOR 3 de este mismo cambio: parámetro
+    muerto retirado), así que ese patrón dejó de proteger nada. Ahora
+    detecta algo real: cualquier clase, en un archivo que MENCIONE
+    `project_authority` (acota el barrido: no marca dobles legítimos de
+    OTROS subsistemas, p.ej. `TxResolver` en `test_b9_persistent_api.py`,
+    que no toca `project_authority` en absoluto), que define
+    `resolve_project_read` o `resolve_mutation_in_transaction` -- y que
+    ADEMÁS se usa (por `Name`, instanciada o el nombre de la clase mismo) en
+    cualquier otro `Call` del mismo archivo. Detección por `Name` y por
+    `Call`, no por la firma de un constructor puntual que puede cambiar.
     """
     import ast
 
     here = pathlib.Path(__file__).resolve().parent
     offenders: list[str] = []
     for path in here.glob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        if "project_authority" not in text:
+            continue
         try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
+            tree = ast.parse(text, str(path))
         except SyntaxError:
             continue
-        resolver_like_classes = {
+        fake_resolver_classes = {
             node.name for node in ast.walk(tree)
             if isinstance(node, ast.ClassDef)
-            and any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("resolve_")
+            and any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                   and item.name in ("resolve_project_read", "resolve_mutation_in_transaction")
                    for item in node.body)
         }
-        if not resolver_like_classes:
+        if not fake_resolver_classes:
             continue
+        instance_names = {
+            target.id
+            for node in ast.walk(tree) if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+            and node.value.func.id in fake_resolver_classes
+            for target in node.targets if isinstance(target, ast.Name)
+        }
+        watched = fake_resolver_classes | instance_names
         for node in ast.walk(tree):
-            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                    and node.func.id == "ProjectAuthorityAdmin"):
+            if not isinstance(node, ast.Call):
                 continue
+            func_name = node.func.id if isinstance(node.func, ast.Name) else None
             for arg in (*node.args, *(kw.value for kw in node.keywords)):
-                if isinstance(arg, ast.Name) and arg.id in resolver_like_classes:
-                    offenders.append(f"{path.name}: {arg.id} passed to ProjectAuthorityAdmin(...)")
-    assert not offenders, "resolver double passed to ProjectAuthorityAdmin: " + repr(offenders)
+                if isinstance(arg, ast.Name) and arg.id in watched and arg.id != func_name:
+                    offenders.append(f"{path.name}: {arg.id} used in {func_name or '<call>'}(...)")
+    assert not offenders, "fake resolver used as if real: " + repr(offenders)

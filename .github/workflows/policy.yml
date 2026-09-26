@@ -867,8 +867,23 @@ jobs:
           #   standalone, documentados en los tests). Medido con la credencial de
           #   pruebas dedicada (~/.config/jax/test-db.env, usuario jax_test), MISMO
           #   comando, jax-platform clonado y run_migrations() real: 194 passed.
-          grep -qE "^194 passed" /tmp/out || {
-            echo "PISO ROTO: se esperaban 194 tests CORRIDOS (no skipeados)."; exit 1; }
+          # 194 -> 204 el 2026-09-26 (ronda 4 de PR-J1, re-auditoria de escalon 3
+          #   sobre b9d13c8 -- RECHAZADO por MAJOR MJ-1/MJ-2 y 4 MINOR): +10 en
+          #   tests/test_project_authority_mariadb.py -- interbloqueo 1213 real
+          #   contra el chat para revoke_member, change_project_role (descenso de
+          #   OWNER) y el descenso de sync (x3, MJ-1: _count_other_active_owners ya
+          #   no bloquea jax_users de terceros), EXPLAIN + create_project de otro
+          #   tenant sin bloquear el chat (x2, MJ-2: idx_jax_users_tenant_role_status,
+          #   migracion 005h), el invariante estatico de terceros nunca bloqueados
+          #   (x1), subject_user_id no canonico (x1, MINOR 1), 1213/1205 ->
+          #   ProjectAuthorityRetryable sin texto del driver (x1, MINOR 2), el
+          #   constructor sin authorization_resolver (x1, MINOR 3) y las exportaciones
+          #   nuevas (x1, MINOR 4). Cada MAJOR se vio en rojo contra b9d13c8 con dos
+          #   conexiones reales y una barrera (mismas mitades del resolvedor que usa
+          #   el auditor). Medido con la credencial de pruebas dedicada, MISMO
+          #   comando, jax-platform clonado y run_migrations() real: 204 passed.
+          grep -qE "^204 passed" /tmp/out || {
+            echo "PISO ROTO: se esperaban 204 tests CORRIDOS (no skipeados)."; exit 1; }
 
   # Busqueda vectorial de la memoria contra embeddings "vector cero"
   # (2026-09-11). El 500 del chat de ese dia salio de VEC_DISTANCE_COSINE

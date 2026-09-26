@@ -11,18 +11,19 @@ from .scope_authority import (MariaDBScopeAuthorityResolver, ProjectLifecycle, P
                               TENANT_ADMIN_ROLES)
 from .project_authority_migrations import (PROJECT_AUTHORITY_DDL, apply_project_authority_migration,
                                            revert_project_lifecycle_migration)
-from .project_authority import (AlreadyMember, CreatedProject, IdempotencyKeyConflict, LastOwnerRequired,
-                                MemberNotFound, ProjectAuthorityAdmin, ProjectAuthorityError,
-                                ProjectNotVisible, ProjectRoleInsufficient, ProjectStateConflict,
-                                ReservedProjectIdRange, TargetUserNotEligible, TenantAdminMembershipProtected)
+from .project_authority import (AlreadyMember, CreatedProject, IdempotencyKeyConflict, InvalidIdempotencyKey,
+                                LastOwnerRequired, MemberNotFound, ProjectAuthorityAdmin, ProjectAuthorityError,
+                                ProjectAuthorityRetryable, ProjectNotVisible, ProjectRoleInsufficient,
+                                ProjectStateConflict, ReservedProjectIdRange, TargetUserNotEligible,
+                                TenantAdminMembershipProtected)
 
 __all__ = (
     "MemoryAPI", "MemoryEnvelope", "PromptMemoryContext", "ScopeContext", "DesignatedSourceResolver",
     "MariaDBScopeAuthorityResolver", "ProjectScopeAuthorityResolver", "ProjectScopeAuthorization",
     "ProjectReadAuthorization", "ProjectRole", "ProjectLifecycle", "TENANT_ADMIN_ROLES",
     "PROJECT_AUTHORITY_DDL", "apply_project_authority_migration", "revert_project_lifecycle_migration",
-    "ProjectAuthorityAdmin", "ProjectAuthorityError", "ProjectNotVisible", "ProjectRoleInsufficient",
-    "ProjectStateConflict", "LastOwnerRequired", "TenantAdminMembershipProtected", "AlreadyMember",
-    "MemberNotFound", "TargetUserNotEligible", "IdempotencyKeyConflict", "ReservedProjectIdRange",
-    "CreatedProject",
+    "ProjectAuthorityAdmin", "ProjectAuthorityError", "ProjectAuthorityRetryable", "ProjectNotVisible",
+    "ProjectRoleInsufficient", "ProjectStateConflict", "LastOwnerRequired", "TenantAdminMembershipProtected",
+    "AlreadyMember", "MemberNotFound", "TargetUserNotEligible", "IdempotencyKeyConflict",
+    "InvalidIdempotencyKey", "ReservedProjectIdRange", "CreatedProject",
 )

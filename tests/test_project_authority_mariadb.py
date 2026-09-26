@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -174,7 +175,7 @@ def _request(scope: ScopeContext, operation: str) -> MutationAuthorizationReques
 
 
 def _admin(pool) -> ProjectAuthorityAdmin:
-    return ProjectAuthorityAdmin(MariaDBB9Store(pool), MariaDBScopeAuthorityResolver(pool))
+    return ProjectAuthorityAdmin(MariaDBB9Store(pool))
 
 
 async def _admins_sin_ownership(tenant_id: int):
@@ -911,7 +912,7 @@ async def test_orden_de_bloqueo_primera_sentencia_de_cada_transaccion_es_tenant_
         admin_user = await _crear_usuario(tenant_id, role="admin")
 
         store = _RecordingStore(pool)
-        admin_api = ProjectAuthorityAdmin(store, MariaDBScopeAuthorityResolver(pool))
+        admin_api = ProjectAuthorityAdmin(store)
         create_scope = _scope(creator, tenant_id, None)
         created = await admin_api.create_project(
             _request(create_scope, "CREATE_PROJECT"), name="orden", description=None,
@@ -923,7 +924,7 @@ async def test_orden_de_bloqueo_primera_sentencia_de_cada_transaccion_es_tenant_
         assert "jax_tenants" in write_tx[0][0] and "FOR UPDATE" in write_tx[0][0]
 
         store3 = _RecordingStore(pool)
-        admin_api3 = ProjectAuthorityAdmin(store3, MariaDBScopeAuthorityResolver(pool))
+        admin_api3 = ProjectAuthorityAdmin(store3)
         owner_scope = _scope(creator, tenant_id, created.project_id)
         await admin_api3.set_project_lifecycle(
             _request(owner_scope, "SET_PROJECT_LIFECYCLE"), created.project_id, ProjectLifecycle.ARCHIVED)
@@ -936,7 +937,7 @@ async def test_orden_de_bloqueo_primera_sentencia_de_cada_transaccion_es_tenant_
         legacy_admin = await _crear_usuario(LEGACY_PROJECT_TENANT_ID, role="admin")
         legacy_owner = await _crear_usuario(LEGACY_PROJECT_TENANT_ID, role="operator")
         store2 = _RecordingStore(pool)
-        admin_api2 = ProjectAuthorityAdmin(store2, MariaDBScopeAuthorityResolver(pool))
+        admin_api2 = ProjectAuthorityAdmin(store2)
         bootstrap_scope = _scope(legacy_admin, LEGACY_PROJECT_TENANT_ID, legacy_project_id)
         await admin_api2.bootstrap_existing_project(
             _request(bootstrap_scope, "BOOTSTRAP_PROJECT"), legacy_project_id, owner_user_id=legacy_owner)
@@ -961,7 +962,7 @@ async def test_orden_de_bloqueo_primera_sentencia_de_cada_transaccion_es_tenant_
         target_email = f"orden-target-{uuid.uuid4().hex[:8]}@test.invalid"
         target_id = await _crear_usuario(tenant_id, role="operator", email=target_email)
         store4 = _RecordingStore(pool)
-        admin_api4 = ProjectAuthorityAdmin(store4, MariaDBScopeAuthorityResolver(pool))
+        admin_api4 = ProjectAuthorityAdmin(store4)
         await admin_api4.grant_member(
             _request(owner_scope_2, "GRANT_MEMBER"), segundo.project_id, email=target_email, role=ProjectRole.VIEWER)
         grant_calls = store4.mutations[0]
@@ -970,7 +971,7 @@ async def test_orden_de_bloqueo_primera_sentencia_de_cada_transaccion_es_tenant_
         assert i_user_target < i_scope_grant, grant_calls
 
         store5 = _RecordingStore(pool)
-        admin_api5 = ProjectAuthorityAdmin(store5, MariaDBScopeAuthorityResolver(pool))
+        admin_api5 = ProjectAuthorityAdmin(store5)
         await admin_api5.change_project_role(
             _request(owner_scope_2, "CHANGE_PROJECT_ROLE"), segundo.project_id, target_id, ProjectRole.CONTRIBUTOR)
         change_calls = store5.mutations[0]
@@ -979,7 +980,7 @@ async def test_orden_de_bloqueo_primera_sentencia_de_cada_transaccion_es_tenant_
         assert i_user_target2 < i_scope_change, change_calls
 
         store6 = _RecordingStore(pool)
-        admin_api6 = ProjectAuthorityAdmin(store6, MariaDBScopeAuthorityResolver(pool))
+        admin_api6 = ProjectAuthorityAdmin(store6)
         await admin_api6.revoke_member(_request(owner_scope_2, "REVOKE_MEMBER"), segundo.project_id, target_id)
         revoke_calls = store6.mutations[0]
         i_user_target3 = _first_index(revoke_calls, sql_contains="FROM jax_users", arg=target_id)
@@ -1089,7 +1090,7 @@ async def test_orden_de_bloqueo_evita_1213_contra_el_chat_real():
             # target-row lock so it interleaves with t1's own scope-row wait.
             store = _PausingStore(pool, "FROM jax_users WHERE email=%s AND tenant_id=%s FOR UPDATE",
                                   e_t2_ready, e_go_t2)
-            admin_api = ProjectAuthorityAdmin(store, resolver)
+            admin_api = ProjectAuthorityAdmin(store)
             owner_scope = _scope(owner, tenant_id, project_id)
             try:
                 await admin_api.grant_member(
@@ -1117,7 +1118,329 @@ async def test_orden_de_bloqueo_evita_1213_contra_el_chat_real():
 
 
 # --------------------------------------------------------------------------
-# BLOCK B1, ronda 3 (2026-09-26): every public operation requires a human,
+# MAJOR MJ-1, ronda 4 (2026-09-26): re-audit of b9d13c8 found that
+# `_count_other_active_owners` still `JOIN ... FOR UPDATE`-locked the
+# `jax_users` row of every OTHER active owner of the project (a third
+# party -- never the actor, never the destino) whenever a demotion/
+# revocation counted remaining owners. If that third owner was concurrently
+# chatting about the SAME project, its transaction (`jax_users` first, then
+# `jax_project_scope`) could deadlock with this one (`jax_project_scope`
+# first -- via `_resolve_project_actor_cur` -- then the third owner's
+# `jax_users` row). Verified in RED against b9d13c8 with two real
+# connections and a barrier (same technique as `test_orden_de_bloqueo_...`
+# above): `t2` (the chat, as the third owner) died with
+# `OperationalError(1213, 'Deadlock found...')`.
+#
+# The fix (`_count_other_active_owners`) locks ONLY `jax_project_membership`
+# rows for the project, then reads `jax_users.status` for the surviving
+# owner ids with a PLAIN `SELECT` (no `FOR UPDATE`) -- safe under the
+# tenant-row lock invariant documented in the module. Below: the SAME
+# barrier reused for `revoke_member`, `change_project_role` (OWNER
+# demotion), and the descent branch of
+# `sync_tenant_admin_memberships_in_transaction` -- each paused right at
+# that plain read (`FROM jax_users WHERE user_id IN (`), which never blocks
+# a concurrent holder of that row's `FOR UPDATE` lock, so there is nothing
+# left to deadlock on.
+# --------------------------------------------------------------------------
+
+async def _tercer_owner_deadlock_scenario(pool, tenant_id, project_id, owner_c):
+    """Runs the chat, as `owner_c`, paused right before its `jax_project_scope`
+    lock -- the SAME shape `test_orden_de_bloqueo_evita_1213_contra_el_chat_real`
+    uses for the destino side. Returns the outcome dict key "t2" once resolved
+    (populated by the caller's driver)."""
+    resolver = MariaDBScopeAuthorityResolver(pool)
+
+    async def t2_chat_as_owner_c(ready, go, outcome):
+        conn = await aiomysql.connect(db=_DB, cursorclass=aiomysql.DictCursor, autocommit=False, **_conn_params())
+        try:
+            async with conn.cursor() as real_cur:
+                wrapped = _PausingCursor(
+                    real_cur, "FROM jax_project_scope WHERE project_id=%s FOR UPDATE", ready, go)
+                scope_c = _scope(owner_c, tenant_id, project_id)
+                try:
+                    await resolver.resolve_mutation_in_transaction(wrapped, scope_c, "RETRIEVE", Visibility.PROJECT_SHARED)
+                    outcome["t2"] = "ok"
+                except Exception as e:
+                    outcome["t2"] = e
+            await conn.commit()
+        finally:
+            conn.close()
+
+    return t2_chat_as_owner_c
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_interbloqueo_revoke_member_no_bloquea_jax_users_de_terceros():
+    pool = await _pool(maxsize=4)
+    try:
+        tenant_id = await _crear_tenant()
+        owner_a = await _crear_usuario(tenant_id, role="operator")
+        owner_b = await _crear_usuario(tenant_id, role="operator")
+        owner_c = await _crear_usuario(tenant_id, role="operator")
+        project_id = await _crear_proyecto_activo(tenant_id)
+        await _crear_scope(project_id, tenant_id)
+        for uid in (owner_a, owner_b, owner_c):
+            await _crear_membresia(project_id, tenant_id, uid, role="OWNER")
+
+        e_t1_ready, e_t2_ready = asyncio.Event(), asyncio.Event()
+        e_go_t1, e_go_t2 = asyncio.Event(), asyncio.Event()
+        outcome: dict[str, Any] = {}
+        t2_chat_as_owner_c = await _tercer_owner_deadlock_scenario(pool, tenant_id, project_id, owner_c)
+
+        async def t1_revoke():
+            store = _PausingStore(pool, "FROM jax_users WHERE user_id IN (", e_t1_ready, e_go_t1)
+            api = ProjectAuthorityAdmin(store)
+            scope_a = _scope(owner_a, tenant_id, project_id)
+            try:
+                await api.revoke_member(_request(scope_a, "REVOKE_MEMBER"), project_id, owner_b)
+                outcome["t1"] = "ok"
+            except Exception as e:
+                outcome["t1"] = e
+
+        t1_task = asyncio.create_task(t1_revoke())
+        t2_task = asyncio.create_task(t2_chat_as_owner_c(e_t2_ready, e_go_t2, outcome))
+        await asyncio.wait_for(e_t1_ready.wait(), timeout=10)
+        await asyncio.wait_for(e_t2_ready.wait(), timeout=10)
+        e_go_t1.set()
+        e_go_t2.set()
+        await asyncio.wait_for(asyncio.gather(t1_task, t2_task), timeout=10)
+
+        assert outcome.get("t1") == "ok", outcome
+        assert outcome.get("t2") == "ok", outcome
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_interbloqueo_change_project_role_descenso_de_owner_no_bloquea_jax_users_de_terceros():
+    pool = await _pool(maxsize=4)
+    try:
+        tenant_id = await _crear_tenant()
+        owner_a = await _crear_usuario(tenant_id, role="operator")
+        owner_b = await _crear_usuario(tenant_id, role="operator")
+        owner_c = await _crear_usuario(tenant_id, role="operator")
+        project_id = await _crear_proyecto_activo(tenant_id)
+        await _crear_scope(project_id, tenant_id)
+        for uid in (owner_a, owner_b, owner_c):
+            await _crear_membresia(project_id, tenant_id, uid, role="OWNER")
+
+        e_t1_ready, e_t2_ready = asyncio.Event(), asyncio.Event()
+        e_go_t1, e_go_t2 = asyncio.Event(), asyncio.Event()
+        outcome: dict[str, Any] = {}
+        t2_chat_as_owner_c = await _tercer_owner_deadlock_scenario(pool, tenant_id, project_id, owner_c)
+
+        async def t1_demote():
+            store = _PausingStore(pool, "FROM jax_users WHERE user_id IN (", e_t1_ready, e_go_t1)
+            api = ProjectAuthorityAdmin(store)
+            scope_a = _scope(owner_a, tenant_id, project_id)
+            try:
+                await api.change_project_role(
+                    _request(scope_a, "CHANGE_PROJECT_ROLE"), project_id, owner_b, ProjectRole.VIEWER)
+                outcome["t1"] = "ok"
+            except Exception as e:
+                outcome["t1"] = e
+
+        t1_task = asyncio.create_task(t1_demote())
+        t2_task = asyncio.create_task(t2_chat_as_owner_c(e_t2_ready, e_go_t2, outcome))
+        await asyncio.wait_for(e_t1_ready.wait(), timeout=10)
+        await asyncio.wait_for(e_t2_ready.wait(), timeout=10)
+        e_go_t1.set()
+        e_go_t2.set()
+        await asyncio.wait_for(asyncio.gather(t1_task, t2_task), timeout=10)
+
+        assert outcome.get("t1") == "ok", outcome
+        assert outcome.get("t2") == "ok", outcome
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_interbloqueo_descenso_de_sync_no_bloquea_jax_users_de_terceros():
+    """Reproducción B del auditor: el descenso de
+    `sync_tenant_admin_memberships_in_transaction` llama a
+    `_count_other_active_owners` igual que `revoke_member`/
+    `change_project_role` -- mismo defecto, mismo arreglo, mismo tipo de
+    prueba. `x` desciende de admin en un proyecto donde `owner_c` es OTRO
+    OWNER activo que está chateando sobre el mismo proyecto al mismo tiempo.
+    """
+    pool = await _pool(maxsize=4)
+    try:
+        tenant_id = await _crear_tenant()
+        promoter = await _crear_usuario(tenant_id, role="admin")
+        x = await _crear_usuario(tenant_id, role="operator")
+        owner_c = await _crear_usuario(tenant_id, role="operator")
+        project_id = await _crear_proyecto_activo(tenant_id)
+        await _crear_scope(project_id, tenant_id)
+        await _crear_membresia(project_id, tenant_id, owner_c, role="OWNER")
+        promoter_scope = _scope(promoter, tenant_id, None)
+        await _promote_to_admin(pool, promoter_scope, tenant_id, x)
+
+        e_t1_ready, e_t2_ready = asyncio.Event(), asyncio.Event()
+        e_go_t1, e_go_t2 = asyncio.Event(), asyncio.Event()
+        outcome: dict[str, Any] = {}
+        t2_chat_as_owner_c = await _tercer_owner_deadlock_scenario(pool, tenant_id, project_id, owner_c)
+
+        async def t1_demote_sync():
+            admin_api = ProjectAuthorityAdmin(MariaDBB9Store(pool))
+            conn = await pool.acquire()
+            try:
+                await conn.begin()
+                async with conn.cursor() as real_cur:
+                    wrapped = _PausingCursor(real_cur, "FROM jax_users WHERE user_id IN (", e_t1_ready, e_go_t1)
+                    try:
+                        await wrapped.execute("SELECT tenant_id FROM jax_tenants WHERE tenant_id=%s FOR UPDATE",
+                                             (tenant_id,))
+                        await wrapped.fetchone()
+                        await wrapped.execute(
+                            "SELECT user_id FROM jax_users WHERE tenant_id=%s AND role IN "
+                            "('admin','superadmin','super_admin') AND status='active' ORDER BY user_id",
+                            (tenant_id,))
+                        await wrapped.fetchall()
+                        await wrapped.execute("UPDATE jax_users SET role='operator' WHERE user_id=%s", (x,))
+                        await admin_api.sync_tenant_admin_memberships_in_transaction(
+                            wrapped, actor_scope=promoter_scope, user_id=x, tenant_id=tenant_id)
+                        outcome["t1"] = "ok"
+                    except Exception as e:
+                        outcome["t1"] = e
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+            finally:
+                pool.release(conn)
+
+        t1_task = asyncio.create_task(t1_demote_sync())
+        t2_task = asyncio.create_task(t2_chat_as_owner_c(e_t2_ready, e_go_t2, outcome))
+        await asyncio.wait_for(e_t1_ready.wait(), timeout=10)
+        await asyncio.wait_for(e_t2_ready.wait(), timeout=10)
+        e_go_t1.set()
+        e_go_t2.set()
+        await asyncio.wait_for(asyncio.gather(t1_task, t2_task), timeout=10)
+
+        assert outcome.get("t1") == "ok", outcome
+        assert outcome.get("t2") == "ok", outcome
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+# --------------------------------------------------------------------------
+# MAJOR MJ-2, ronda 4: `_read_tenant_admins` reads the tenant's admin set
+# WITHOUT `FOR UPDATE` (module invariant), via
+# `idx_jax_users_tenant_role_status` (migration 005h).
+# --------------------------------------------------------------------------
+
+@requiere_db_de_prueba
+@asincrono
+async def test_explain_lectura_de_admins_usa_indice_por_tenant():
+    """MJ-2 pide EXPLAIN con `type=ref` y sin recorrer `PRIMARY`. El plan
+    NATURAL de MariaDB, en esta base, ya elige un índice simple por
+    `tenant_id` (pre-existente, de la FK) antes que el nuevo compuesto --
+    ambos dan `type=ref`, así que el plan natural ya cumple el pedido. Para
+    confirmar que el índice NUEVO (`idx_jax_users_tenant_role_status`,
+    migración 005h) es en sí mismo válido y usable -- no solo que existe --
+    se fuerza con `FORCE INDEX` y se repite la verificación."""
+    tenant_id = await _crear_tenant()
+    await _crear_usuario(tenant_id, role="admin")
+    natural = await _sql(
+        "EXPLAIN SELECT user_id FROM jax_users WHERE tenant_id=%s AND role IN ('admin','superadmin','super_admin') "
+        "AND status='active' ORDER BY user_id", (tenant_id,), fetch=True)
+    assert natural, natural
+    assert natural[0]["type"] != "ALL", natural[0]
+    assert natural[0]["key"] is not None and natural[0]["key"] != "PRIMARY", natural[0]
+
+    forced = await _sql(
+        "EXPLAIN SELECT user_id FROM jax_users FORCE INDEX (idx_jax_users_tenant_role_status) "
+        "WHERE tenant_id=%s AND role IN ('admin','superadmin','super_admin') AND status='active' "
+        "ORDER BY user_id", (tenant_id,), fetch=True)
+    assert forced, forced
+    assert forced[0]["key"] == "idx_jax_users_tenant_role_status", forced[0]
+    assert forced[0]["type"] in ("ref", "range"), forced[0]
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_create_project_de_otro_tenant_no_bloquea_el_chat_de_este_tenant():
+    """MJ-2: leer el conjunto de admins de OTRO tenant durante un
+    `create_project` en vuelo no debe bloquear en absoluto al chat de un
+    usuario de ESTE tenant -- son índices/tenants distintos, y con MJ-2 esa
+    lectura ni siquiera toma `FOR UPDATE`."""
+    pool = await _pool(maxsize=4)
+    try:
+        tenant1 = await _crear_tenant("t1")
+        tenant2 = await _crear_tenant("t2")
+        creator2 = await _crear_usuario(tenant2, role="operator")
+        await _crear_usuario(tenant2, role="admin")
+        user1 = await _crear_usuario(tenant1, role="operator")
+        project1 = await _crear_proyecto_activo(tenant1)
+        await _crear_scope(project1, tenant1)
+        await _crear_membresia(project1, tenant1, user1, role="CONTRIBUTOR")
+
+        resolver = MariaDBScopeAuthorityResolver(pool)
+        e_t1_ready, e_go_t1 = asyncio.Event(), asyncio.Event()
+        outcome: dict[str, Any] = {}
+
+        async def t1_create_en_tenant2():
+            store = _PausingStore(pool, "FROM jax_users WHERE tenant_id=%s AND role IN", e_t1_ready, e_go_t1)
+            api = ProjectAuthorityAdmin(store)
+            scope2 = _scope(creator2, tenant2, None)
+            try:
+                await api.create_project(
+                    _request(scope2, "CREATE_PROJECT"), name="p", description=None,
+                    idempotency_key=str(uuid.uuid4()))
+                outcome["t1"] = "ok"
+            except Exception as e:
+                outcome["t1"] = e
+
+        t1_task = asyncio.create_task(t1_create_en_tenant2())
+        await asyncio.wait_for(e_t1_ready.wait(), timeout=10)
+        # t1 is paused MID transaction, holding tenant2's tenant-row lock and
+        # about to read (not lock) tenant2's admin set. The chat, for a
+        # DIFFERENT tenant's user, must complete with a SHORT timeout --
+        # never wait on t1 at all.
+        scope1 = _scope(user1, tenant1, project1)
+        async with aiomysql.connect(db=_DB, cursorclass=aiomysql.DictCursor, autocommit=True,
+                                    **_conn_params()) as conn:
+            async with conn.cursor() as cur:
+                await asyncio.wait_for(
+                    resolver.resolve_mutation_in_transaction(cur, scope1, "RETRIEVE", Visibility.PROJECT_SHARED),
+                    timeout=2)
+        e_go_t1.set()
+        await asyncio.wait_for(t1_task, timeout=10)
+        assert outcome.get("t1") == "ok", outcome
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+# --------------------------------------------------------------------------
+# Module invariant, ronda 4: no project-authority operation locks a
+# `jax_users` row that is not the actor's or the destino's.
+# --------------------------------------------------------------------------
+
+def test_invariante_ningun_tercero_se_bloquea_en_jax_users():
+    """Escaneo estatico del modulo: ninguna sentencia SQL de
+    `project_authority.py` combina `jax_users` con `FOR UPDATE` salvo las
+    dos formas permitidas (bloquear la fila del ACTOR o la del DESTINO, por
+    `user_id=%s` puntual) -- nunca un `JOIN`/`WHERE ... IN (...)` con
+    `FOR UPDATE` que alcance filas de terceros."""
+    import inspect
+
+    from jax.memory import project_authority
+
+    source = inspect.getsource(project_authority)
+    # Cada SELECT ... FOR UPDATE sobre jax_users tiene que ser un lookup
+    # puntual del actor o del destino -- por user_id=%s (el caso comun) o por
+    # email=%s (grant_member invita por correo antes de conocer el user_id
+    # del destino) -- nunca un JOIN ni un IN (...) que alcance terceros.
+    matches = list(re.finditer(r"SELECT[^\"]*?FROM jax_users[^\"]*?FOR UPDATE", source))
+    assert matches, "no se encontro ningun SELECT ... FROM jax_users ... FOR UPDATE: el escaneo no prueba nada"
+    for match in matches:
+        statement = match.group(0)
+        assert "JOIN" not in statement, statement
+        assert " IN (" not in statement, statement
+        assert "user_id=%s" in statement or "email=%s" in statement, statement
 # unambiguous USER actor. Verified in RED against the pre-fix code
 # (standalone repro): a SERVICE scope created a project outright, and a
 # forged `actor_principal` ("user:999999") with a real subject id granted
@@ -1559,17 +1882,102 @@ def test_wrap_unexpected_db_error_mapea_errores_crudos_y_respeta_los_propios():
 
     from jax.memory.project_authority import ProjectNotVisible, _wrap_unexpected_db_error
 
-    raw = pymysql.err.IntegrityError(1452, "Cannot add or update a child row")
+    driver_text = "Cannot add or update a child row -- SOME INTERNAL PATH /etc/x"
+    raw = pymysql.err.IntegrityError(1452, driver_text)
     wrapped = _wrap_unexpected_db_error(raw)
     assert isinstance(wrapped, ProjectAuthorityError)
     assert wrapped.code == "error_de_base_de_datos"
     assert wrapped.__cause__ is raw
+    # Ronda 4, MINOR 2: nunca el texto crudo del driver dentro del mensaje
+    # publico -- solo queda en __cause__, para quien lea el traceback.
+    assert driver_text not in str(wrapped)
 
     own = ProjectNotVisible("already ours")
     assert _wrap_unexpected_db_error(own) is own
 
     plain = ValueError("not a db error")
     assert _wrap_unexpected_db_error(plain) is plain
+
+
+def test_wrap_unexpected_db_error_1213_y_1205_dan_retryable_sin_texto_del_driver():
+    """Ronda 4, MINOR 2: 1213 (deadlock) y 1205 (lock-wait timeout) son
+    contencion transitoria, nunca un problema de esquema/autoridad -- se
+    mapean a `ProjectAuthorityRetryable` (code "reintentar"), nunca al
+    generico `error_de_base_de_datos`, y tampoco incrustan el texto del
+    driver en el mensaje."""
+    import pymysql.err
+
+    from jax.memory.project_authority import ProjectAuthorityRetryable, _wrap_unexpected_db_error
+
+    for errno in (1213, 1205):
+        driver_text = f"Some driver message for {errno} with a path /srv/x"
+        raw = pymysql.err.OperationalError(errno, driver_text)
+        wrapped = _wrap_unexpected_db_error(raw)
+        assert isinstance(wrapped, ProjectAuthorityRetryable), (errno, wrapped)
+        assert wrapped.code == "reintentar"
+        assert wrapped.__cause__ is raw
+        assert driver_text not in str(wrapped)
+
+
+@requiere_db_de_prueba
+@asincrono
+async def test_subject_user_id_no_canonico_es_rechazado_antes_de_cualquier_sql():
+    """Ronda 4, MINOR 1: `subject_user_id` tiene que matchear
+    `^[1-9]\\d{0,9}$` antes de cualquier consulta -- nunca depender de que
+    MariaDB rechace un valor no-numerico por su cuenta (modo estricto,
+    coercion de tipos), que es un detalle de configuracion, no un contrato.
+
+    Visto en rojo contra el codigo previo a esta ronda (repro standalone,
+    restaurado a mano contra b9d13c8): un valor como "<id real> OR 1=1" no
+    daba un `ValueError` sin capturar, pero SI daba un
+    `ProjectAuthorityError` generico ("unexpected database error: (1265,
+    'Data truncated ...')") -- una falla de una consulta real, dependiente
+    de que el modo estricto de MariaDB este activado, en vez de un rechazo
+    limpio antes de tocar la base. Con el arreglo: `AuthorizationDenied`
+    inmediato, mismo mensaje para cualquier valor no canonico.
+    """
+    pool = await _pool()
+    try:
+        admin_api = _admin(pool)
+        tenant_id = await _crear_tenant()
+        real_user = await _crear_usuario(tenant_id, role="operator")
+        await _crear_usuario(tenant_id, role="admin")
+        # "" no llega al chequeo de MINOR 1 -- `require_subject` (capa mas
+        # basica, ya existente) la rechaza antes por "ausente", con
+        # `ScopeDenied`. Las demas SI son el caso que MINOR 1 cierra:
+        # valores presentes pero no canonicos.
+        for malformed, expected in (
+            (f"{real_user} OR 1=1", AuthorizationDenied), ("0" + str(real_user), AuthorizationDenied),
+            ("-1", AuthorizationDenied), ("abc", AuthorizationDenied), ("", ScopeDenied),
+        ):
+            scope = ScopeContext(f"user:{malformed}", "USER", malformed, str(tenant_id), None)
+            with pytest.raises(expected):
+                await admin_api.create_project(
+                    _request(scope, "CREATE_PROJECT"), name="p-minor1", description=None,
+                    idempotency_key=str(uuid.uuid4()))
+        rows = await _sql("SELECT COUNT(*) AS n FROM projects WHERE name='p-minor1'", fetch=True)
+        assert rows[0]["n"] == 0
+    finally:
+        pool.close(); await pool.wait_closed()
+
+
+def test_projectauthorityadmin_no_toma_authorization_resolver():
+    """Ronda 4, MINOR 3: el parametro `authorization_resolver` -- codigo
+    muerto, nunca leido -- se quito del constructor."""
+    import inspect
+
+    params = inspect.signature(ProjectAuthorityAdmin.__init__).parameters
+    assert list(params) == ["self", "store"], params
+
+
+def test_exports_invalid_idempotency_key_y_retryable():
+    """Ronda 4, MINOR 4."""
+    import jax.memory as jm
+
+    assert jm.InvalidIdempotencyKey is InvalidIdempotencyKey
+    assert jm.ProjectAuthorityRetryable.__name__ == "ProjectAuthorityRetryable"
+    assert "InvalidIdempotencyKey" in jm.__all__
+    assert "ProjectAuthorityRetryable" in jm.__all__
 
 
 @requiere_db_de_prueba

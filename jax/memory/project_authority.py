@@ -20,8 +20,8 @@ memory reads/writes, H3/H4). It has its own transactional resolver,
 Every mutation here takes `jax_tenants(tenant_id) FOR UPDATE` as its first
 statement (a per-tenant mutex), then locks the ACTOR's own row, then (ronda 3,
 MAJOR M1) any DESTINO row this operation touches, all BEFORE the project
-scope/membership rows: `tenant -> admins -> actor -> destino -> projects ->
-scope -> membership -> events` (plan section 2.1). The chat's own resolver
+scope/membership rows: `tenant -> actor -> destino -> projects -> scope ->
+membership -> events` (plan section 2.1). The chat's own resolver
 (`scope_authority.py`'s `_tenant_user_cur` -> `_project_membership_cur`)
 locks a user row before the scope row for the SAME reason; the two now agree,
 so they cannot deadlock (MariaDB error 1213) over the same pair of rows --
@@ -37,11 +37,33 @@ principal form, not a bare id. Before this fix a SERVICE-typed scope or a
 USER scope whose `actor_principal` did not match its `subject_user_id` sailed
 straight through every operation, misattributing (or fully forging) the
 audit trail in `jax_project_membership_event`.
+
+INVARIANTE (ronda 4, 2026-09-26, decisión de la sesión principal): ninguna
+operación de este módulo bloquea (`FOR UPDATE`) una fila de `jax_users` que
+no sea la del ACTOR o la del DESTINO -- nunca la de un tercero (otro OWNER
+que se está contando, un admin del conjunto que se está leyendo). La
+serialización de cambios a `jax_users.role`/`jax_users.status` la da,
+enteramente, el candado de `jax_tenants(tenant_id) FOR UPDATE` que esta
+transacción ya tomó como primera sentencia: TODO escritor de
+`jax_users.role`/`status` (este módulo y la transacción propia de la
+plataforma en `jax_users`, plan sección 4) tiene que tomar ese MISMO candado
+antes de escribir. Bajo esa garantía, leer `jax_users.status`/`role` de un
+tercero sin `FOR UPDATE` es una lectura consistente, no una carrera: nadie
+más puede estar cambiándola mientras este candado siga en pie. Violar este
+invariante fue exactamente el defecto de la ronda 3
+(`_count_other_active_owners` y `_lock_tenant_admins` bloqueaban filas de
+terceros vía `JOIN ... FOR UPDATE`), reproducido en rojo con dos conexiones
+reales y una barrera contra `revoke_member`, `change_project_role` y el
+descenso de `sync_tenant_admin_memberships_in_transaction` -- ver
+`test_interbloqueo_...` en `tests/test_project_authority_mariadb.py` y
+`test_invariante_ningun_tercero_se_bloquea_en_jax_users`.
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import re
 import time
 import unicodedata
 import uuid as uuid_module
@@ -51,6 +73,8 @@ from typing import Any, Awaitable, Callable
 from .b9 import (AuthorizationDenied, MutationAuthorizationRequest, ScopeContext,
                  ScopeDenied, Visibility, _uuid7)
 from .scope_authority import ProjectLifecycle, ProjectRole, TENANT_ADMIN_ROLES, require_subject
+
+_logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -114,6 +138,15 @@ class ReservedProjectIdRange(ProjectAuthorityError):
     code = "id_reservado"
 
 
+class ProjectAuthorityRetryable(ProjectAuthorityError):
+    """Ronda 4, MINOR 2: a transient MariaDB contention error (1213 deadlock,
+    1205 lock-wait timeout) that a caller can retry as-is -- never a schema
+    or authority problem. Kept distinct from the generic DB-error wrapper on
+    purpose: a caller that sees `code == "reintentar"` knows to retry the
+    same request; anything else means stop and look."""
+    code = "reintentar"
+
+
 #: See spec Sec9.3: legacy orphaned ids fall in this INT range. A newly
 #: created project landing here is a data-corruption signal, not a normal
 #: collision -- the whole transaction is rolled back and nothing is written.
@@ -170,15 +203,36 @@ def _is_raw_db_error(exc: Exception) -> bool:
     return module.startswith("pymysql") or module.startswith("aiomysql")
 
 
+#: MariaDB 1213 (ER_LOCK_DEADLOCK) and 1205 (ER_LOCK_WAIT_TIMEOUT): transient
+#: contention, never a schema/authority problem -- mapped to
+#: `ProjectAuthorityRetryable`, never to the generic DB-error wrapper.
+_RETRYABLE_MYSQL_ERRNOS = frozenset({1213, 1205})
+
+
 def _wrap_unexpected_db_error(exc: Exception) -> Exception:
-    """Ronda 3, MINOR 2: no raw DB error may leak past this module's public
-    API -- a CHECK/FK violation this code should have prevented, a lock-wait
-    timeout, anything unmapped. `ProjectAuthorityError` subclasses and
-    already-expected control-flow exceptions pass through untouched."""
+    """Ronda 3, MINOR 2 / ronda 4, MINOR 2: no raw DB error may leak past
+    this module's public API -- a CHECK/FK violation this code should have
+    prevented, a lock-wait timeout, anything unmapped. `ProjectAuthorityError`
+    subclasses and already-expected control-flow exceptions pass through
+    untouched.
+
+    Ronda 4: the driver's own message text (`str(exc)`) is never embedded in
+    the exception this raises -- a caller-facing message built from raw
+    driver text is one string-match change away from leaking implementation
+    detail (or breaking every caller that matches on it). The original is
+    logged here, once, and kept as `__cause__` for anyone reading a traceback
+    -- never as text inside the message a caller might display or match on.
+    """
     if isinstance(exc, ProjectAuthorityError):
         return exc
     if _is_raw_db_error(exc):
-        wrapped = ProjectAuthorityError(f"unexpected database error: {exc}", code="error_de_base_de_datos")
+        args = getattr(exc, "args", None)
+        errno = args[0] if args else None
+        _logger.warning("unexpected database error in project_authority (errno=%s): %s", errno, exc)
+        if errno in _RETRYABLE_MYSQL_ERRNOS:
+            wrapped: ProjectAuthorityError = ProjectAuthorityRetryable("transient database contention, retry")
+        else:
+            wrapped = ProjectAuthorityError("unexpected database error", code="error_de_base_de_datos")
         wrapped.__cause__ = exc
         return wrapped
     return exc
@@ -199,20 +253,33 @@ def _validate_idempotency_key(idempotency_key: str) -> None:
         raise InvalidIdempotencyKey("idempotency_key must be the canonical UUID form")
 
 
+#: A `jax_users.user_id` is an INT AUTO_INCREMENT: positive, no leading zero,
+#: at most 10 digits (fits a signed 32-bit int with room to spare). Ronda 4,
+#: MINOR 1: `subject_user_id` has to match this BEFORE any SQL or any bare
+#: `int(...)` call downstream -- a non-numeric or malformed value must never
+#: reach a query as a raw parameter, and must never raise an uncaught
+#: `ValueError` out of this module either.
+_SUBJECT_USER_ID_RE = re.compile(r"^[1-9]\d{0,9}$")
+
+
 def _require_project_actor_subject(scope: ScopeContext) -> None:
     """Ronda 3, BLOCK B1. Reuses `scope_authority.require_subject` for the
     baseline checks (tenant/actor/subject present, no delegation, and for a
-    USER actor, principal/subject consistency) and adds the two constraints
+    USER actor, principal/subject consistency) and adds the constraints
     specific to project administration, which `require_subject` deliberately
     does not enforce on its own (it also serves SERVICE actors elsewhere):
-    the actor must be a USER, and the principal must be the exact canonical
+    the actor must be a USER, the principal must be the exact canonical
     `user:<subject_user_id>` form -- never a bare id, never anyone else's
-    identity. Every `_event()` row's `actor_principal` comes straight from
-    `scope.actor_principal`; this is what keeps that column truthful.
+    identity -- and (ronda 4, MINOR 1) `subject_user_id` itself has to be a
+    canonical positive integer string. Every `_event()` row's
+    `actor_principal` comes straight from `scope.actor_principal`; this is
+    what keeps that column truthful.
     """
     require_subject(scope)
     if scope.actor_type != "USER":
         raise AuthorizationDenied("project administration requires a USER actor")
+    if not _SUBJECT_USER_ID_RE.match(str(scope.subject_user_id or "")):
+        raise AuthorizationDenied("subject_user_id must be a canonical positive integer")
     if scope.actor_principal != f"user:{scope.subject_user_id}":
         raise AuthorizationDenied("actor principal must be the canonical user:<id> form")
 
@@ -243,8 +310,14 @@ class ProjectAuthorityAdmin:
     after a concurrent revoke committed first.
     """
 
-    def __init__(self, store: Any, authorization_resolver: Any):
-        self._store, self._authorization_resolver = store, authorization_resolver
+    def __init__(self, store: Any):
+        # Ronda 4, MINOR 3: dropped the `authorization_resolver` parameter --
+        # it was never read (H6: no production caller ever existed, and this
+        # class resolves its own authority in-transaction via
+        # `_resolve_project_actor_cur`, never through an injected resolver).
+        # Dead code left in a constructor is a trap for the next reader who
+        # assumes it does something.
+        self._store = store
 
     # -- shared row helpers -------------------------------------------------
 
@@ -259,12 +332,24 @@ class ProjectAuthorityAdmin:
             raise ProjectNotVisible("tenant does not exist")
 
     @staticmethod
-    async def _lock_tenant_admins(cur: Any, tenant_id: Any) -> list[int]:
-        # jax_users' collation is case-insensitive (fixed by a test): this
-        # still matches a role stored as e.g. 'Admin'.
+    async def _read_tenant_admins(cur: Any, tenant_id: Any) -> list[int]:
+        """Ronda 4, MAJOR MJ-2: reads the tenant's admin set WITHOUT `FOR
+        UPDATE` -- these are third-party `jax_users` rows (not the actor's,
+        not a destino's), and the module invariant is that only the
+        actor's/destino's rows ever get locked here. Safe as a plain read
+        under the tenant-row lock this transaction already holds (see the
+        module docstring): no concurrent writer of `jax_users.role`/`status`
+        in this tenant can be running without that same lock. Uses
+        `idx_jax_users_tenant_role_status` (migration 005h) so this is an
+        index range scan, not a table scan that would also grab
+        next-key locks on unrelated tenants' rows under REPEATABLE READ.
+
+        jax_users' collation is case-insensitive (fixed by a test): this
+        still matches a role stored as e.g. 'Admin'.
+        """
         await cur.execute(
             f"SELECT user_id FROM jax_users WHERE tenant_id=%s AND role IN ({_ADMIN_ROLE_PLACEHOLDERS}) "
-            "AND status='active' ORDER BY user_id FOR UPDATE",
+            "AND status='active' ORDER BY user_id",
             (tenant_id, *_ADMIN_ROLE_PARAMS))
         rows = await cur.fetchall()
         return [int(ProjectAuthorityAdmin._value(r, "user_id", 0)) for r in rows]
@@ -276,15 +361,28 @@ class ProjectAuthorityAdmin:
 
     @staticmethod
     async def _count_other_active_owners(cur: Any, project_id: Any, excluded_user_id: Any) -> int:
-        # A locking read (current read, not a snapshot): it must see any
-        # concurrent revoke/demote that already committed, to avoid write skew
-        # between two OWNERs revoking each other at the same time.
+        """Ronda 4, MAJOR MJ-1: locks ONLY `jax_project_membership` rows for
+        this project (a locking read -- it must see any concurrent
+        revoke/demote that already committed, to avoid write skew between
+        two OWNERs revoking each other at the same time). It does NOT lock
+        the matching `jax_users` rows anymore: those belong to OTHER
+        owners, never the actor or the destino, and locking them was
+        exactly the deadlock this round fixed (`test_interbloqueo_...`).
+        `jax_users.status` is read separately, WITHOUT `FOR UPDATE` -- safe
+        under the tenant-row lock this transaction already holds (module
+        invariant).
+        """
         await cur.execute(
-            "SELECT COUNT(*) AS n FROM jax_project_membership m "
-            "JOIN jax_users u ON u.user_id=m.user_id "
-            "WHERE m.project_id=%s AND m.user_id<>%s AND m.status='ACTIVE' "
-            "AND m.project_role='OWNER' AND u.status='active' FOR UPDATE",
+            "SELECT user_id FROM jax_project_membership WHERE project_id=%s AND user_id<>%s "
+            "AND status='ACTIVE' AND project_role='OWNER' FOR UPDATE",
             (project_id, excluded_user_id))
+        owner_ids = [int(ProjectAuthorityAdmin._value(r, "user_id", 0)) for r in await cur.fetchall()]
+        if not owner_ids:
+            return 0
+        placeholders = ",".join(["%s"] * len(owner_ids))
+        await cur.execute(
+            f"SELECT COUNT(*) AS n FROM jax_users WHERE user_id IN ({placeholders}) AND status='active'",
+            tuple(owner_ids))
         row = await cur.fetchone()
         return int(ProjectAuthorityAdmin._value(row, "n", 0))
 
@@ -333,7 +431,7 @@ class ProjectAuthorityAdmin:
             raise ProjectNotVisible("actor is not an active tenant member")
         is_tenant_admin = str(self._value(actor_row, "role", 1) or "").lower() in TENANT_ADMIN_ROLES
         if lock_admins:
-            await self._lock_tenant_admins(cur, scope.tenant_id)
+            await self._read_tenant_admins(cur, scope.tenant_id)
         # Destino BEFORE the project scope row (plan 2.1 / MAJOR M1): the
         # chat's own resolver locks a user row before the scope row for the
         # same reason, and the two now agree on which comes first.
@@ -433,7 +531,7 @@ class ProjectAuthorityAdmin:
 
         async def op(cur: Any) -> CreatedProject:
             await self._lock_tenant(cur, scope.tenant_id)
-            admin_ids = await self._lock_tenant_admins(cur, scope.tenant_id)
+            admin_ids = await self._read_tenant_admins(cur, scope.tenant_id)
             await cur.execute("SELECT status FROM jax_users WHERE user_id=%s AND tenant_id=%s FOR UPDATE",
                               (scope.subject_user_id, scope.tenant_id))
             actor = await cur.fetchone()
@@ -522,7 +620,7 @@ class ProjectAuthorityAdmin:
                 actor_role = str(self._value(actor, "role", 1) or "").lower()
                 if actor_status != "ACTIVE" or actor_role not in TENANT_ADMIN_ROLES:
                     raise ProjectRoleInsufficient("bootstrap requires an active tenant administrator")
-                admin_ids = await self._lock_tenant_admins(cur, scope.tenant_id)
+                admin_ids = await self._read_tenant_admins(cur, scope.tenant_id)
                 # Destino (the intended owner) BEFORE `projects`/scope
                 # (MAJOR M1): same reordering as grant/change/revoke.
                 await cur.execute("SELECT status FROM jax_users WHERE user_id=%s AND tenant_id=%s FOR UPDATE",
