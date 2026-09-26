@@ -73,11 +73,6 @@ jobs:
       JAX_TEST_DB_SUFIJO: ""
       LAS_MANOS_URL: http://las-manos.invalid:7777
       JAX_OLLAMA_URL: http://ollama.invalid:11434
-      JAX_USAGE_SPOOL_DIR: ${{ runner.temp }}/memory-b9/usage
-      JAX_REPO_BASE: ${{ runner.temp }}/memory-b9/repo
-      JAX_AUDIT_LOG_PATH: ${{ runner.temp }}/memory-b9/audit.jsonl
-      JAX_FACET_SEAL_PATH: ${{ runner.temp }}/memory-b9/facet-seal.json
-      JAX_KILL_SWITCH_PATH: ${{ runner.temp }}/memory-b9/PAUSE
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -86,6 +81,13 @@ jobs:
           python-version: "3.14"
       - run: pip install -r requirements.txt pytest pytest-asyncio
       - name: Regresiones B9 con MariaDB efímera y usuario limitado
+        # runner.temp is available in step env, not job env.
+        env:
+          JAX_USAGE_SPOOL_DIR: ${{ runner.temp }}/memory-b9/usage
+          JAX_REPO_BASE: ${{ runner.temp }}/memory-b9/repo
+          JAX_AUDIT_LOG_PATH: ${{ runner.temp }}/memory-b9/audit.jsonl
+          JAX_FACET_SEAL_PATH: ${{ runner.temp }}/memory-b9/facet-seal.json
+          JAX_KILL_SWITCH_PATH: ${{ runner.temp }}/memory-b9/PAUSE
         # This container starts empty. Each DB test creates its own temporary
         # tables; jax_test has grants only on jax_memory_test, never production.
         # The root conftest's governance bootstrap reads host configuration;
