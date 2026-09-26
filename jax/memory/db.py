@@ -530,7 +530,8 @@ class MemoryDB:
     # Ciclo de vida del pool
     # --------------------------------------------------------
     async def connect(self, host: str, user: str, password: str,
-                      database: str, port: int | None = None) -> bool:
+                      database: str, port: int | None = None, *,
+                      migrate_schema: bool = True) -> bool:
         """Inicializa el pool. Devuelve True si conecto, False si fallo
         (sin lanzar excepcion: JAX debe arrancar aunque la memoria falle)."""
         if port is None:
@@ -607,7 +608,14 @@ class MemoryDB:
             # describe como "una migracion a medias que se ve como JAX se olvido
             # de todo". Y todo JAX seguia arrancando como si el esquema
             # estuviera al dia, con una unica linea de log que nadie mira.
-            self.schema_ok = await ensure_schema(self.pool)
+            self.schema_ok = (await ensure_schema(self.pool) if migrate_schema
+                              else await self.check_schema_readiness())
+            if not migrate_schema and not self.schema_ok:
+                logger.error("MemoryDB worker schema readiness failed; deployment migration required")
+                self.pool.close()
+                await self.pool.wait_closed()
+                self.pool=None
+                return False
             if not self.schema_ok:
                 logger.error(
                     "MemoryDB: el esquema NO esta al dia y no se pudo completar la "
@@ -619,8 +627,70 @@ class MemoryDB:
             return True
         except Exception as e:  # fail-soft: no se traga el fallo, se reporta como return False y self.pool=None; el caller decide si arranca sin memoria (JAX debe arrancar aunque la DB no responda)
             logger.error(f"MemoryDB no pudo conectar: {e}")
+            if self.pool is not None:
+                self.pool.close()
+                await self.pool.wait_closed()
             self.pool = None
             return False
+
+    async def check_schema_readiness(self) -> bool:
+        """Read-only worker schema contract; never performs installation/backfill.
+
+        Missing tables/columns are a failed deployment, not permission for a
+        timer to mutate schema or fabricate legacy ownership at startup.
+        """
+        required={
+            'conversations':{'id','conversation_uuid','tenant_id','user_id','project_id','ended_at','memory_processed','memory_processed_at'},
+            'messages':{'id','conversation_id','turn_number','role','content','user_id','project_id',EMBED.column},
+            'facts':{'id','fact_text','user_id','project_id','verified_by','superseded_by_user',EMBED.column},
+            'memory_objects':{'memory_id','object_kind','tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key'},
+            'memory_revisions':{'tenant_id','revision_id','memory_id','content_digest','visibility','user_id','project_id','lifecycle_state','prior_revision_id'},
+            'memory_revision_payloads':{'revision_id','payload'},
+            'memory_provenance':{'provenance_id','revision_id','source_revisions','limitations'},
+            'memory_events':{'event_id','memory_id','revision_id','event_kind','actor_principal','authority_source','request_id','trace_id'},
+            'memory_projections':{'memory_id','current_revision_id','current_verification_state','canonical_history_digest','reconciliation_required'},
+            'memory_legacy_bindings':{'tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key','memory_id','binding_state'},
+            'embedding_spaces':{'embedding_space_id','dimension'},
+            'embedding_generations':{'generation_id','revision_id','embedding_space_id','embedding_payload'},
+            'memory_extraction_jobs':{'conversation_id','state','claim_token','lease_until','attempts','next_attempt_at','input_digest','frozen_output','output_digest','request_id','trace_id','run_id'},
+            'memory_extraction_results':{'conversation_id','item_index','content_digest','memory_id','revision_id'},
+            'memory_synthesis_jobs':{'job_key','tenant_id','user_id','project_id','source_revision_ids','transformation_version','state','claim_token','frozen_output','lease_until'},
+            'memory_synthesis_job_items':{'job_key','item_key','memory_id'},
+        }
+        if self.pool is None: return False
+        async with self.pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT TABLE_NAME,COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE()")
+                actual={}
+                for table,column in await cur.fetchall(): actual.setdefault(table,set()).add(column)
+                if not all(columns.issubset(actual.get(table,set())) for table,columns in required.items()): return False
+                await cur.execute("SELECT TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() AND NON_UNIQUE=0 ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX")
+                unique={}
+                for table,index,position,column in await cur.fetchall():
+                    unique.setdefault(table,{}).setdefault(index,[]).append(column)
+                await cur.execute("SELECT TABLE_NAME,INDEX_NAME,COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA=DATABASE() ORDER BY TABLE_NAME,INDEX_NAME,SEQ_IN_INDEX")
+                ordered_indexes={}
+                for table,index,column in await cur.fetchall():
+                    ordered_indexes.setdefault(table,{}).setdefault(index,[]).append(column)
+                required_ordered={
+                    'memory_revisions':[
+                        ('tenant_id','visibility','user_id','project_id','created_at','revision_id'),
+                        ('tenant_id','visibility','project_id','created_at','revision_id')],
+                    'memory_provenance':[('revision_id','created_at','provenance_id')]}
+                if not all(expected in {tuple(parts) for parts in ordered_indexes.get(table,{}).values()} for table,expectations in required_ordered.items() for expected in expectations): return False
+                await cur.execute("SELECT COLUMN_NAME,REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='memory_revisions' AND CONSTRAINT_NAME='fk_memory_revision_tenant' AND REFERENCED_TABLE_NAME='memory_objects' ORDER BY ORDINAL_POSITION")
+                if tuple(await cur.fetchall())!=(('memory_id','memory_id'),('tenant_id','tenant_id')): return False
+                await cur.execute("SELECT ACTION_TIMING,EVENT_MANIPULATION FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA=DATABASE() AND TRIGGER_NAME='memory_revision_tenant_compat' AND EVENT_OBJECT_TABLE='memory_revisions'")
+                if await cur.fetchone()!=('BEFORE','INSERT'): return False
+        required_unique={
+            'memory_extraction_jobs':('conversation_id',),
+            'memory_extraction_results':('conversation_id','item_index'),
+            'memory_synthesis_jobs':('job_key',),
+            'memory_synthesis_job_items':('job_key','item_key'),
+            'memory_legacy_bindings':('tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key'),
+            'memory_objects':('tenant_id','legacy_source_type','legacy_source_namespace','legacy_source_key'),
+        }
+        return all(columns in {tuple(parts) for parts in unique.get(table,{}).values()} for table,columns in required_unique.items())
 
     async def close(self):
         """Cierra el pool tras esperar las tareas pendientes de guardado."""

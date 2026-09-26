@@ -22,11 +22,13 @@ import argparse
 import json
 import logging
 import os
+import uuid
 from typing import Awaitable, Callable
 
 import aiomysql
 
 from jax.memory.db import MemoryDB, _col, _zero_embedding_sql
+from jax.memory.mapping_pool import MappingPool
 from jax.memory.b9 import (EmbeddingSpaceIdentity, MutationAuthorizationRequest,
                            ScopeContext, ScopeDenied, Visibility)
 from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
@@ -52,17 +54,19 @@ class PersistentEmbeddingWriter:
         self._build_request_scope = build_request_scope
 
     async def persist(self, memory_id: str, identity: EmbeddingSpaceIdentity,
-                      vector: tuple[float, ...], visibility: Visibility) -> str:
+                      vector: tuple[float, ...], visibility: Visibility, *, expected_revision_id: str | None = None) -> str:
         scope = await self._build_request_scope(memory_id, "RE_EMBED", visibility)
         if scope.actor_type != "SERVICE" or scope.actor_principal != "service:embedding":
             raise ScopeDenied("embedding requires the fixed embedding service principal")
         return await self._api.reembed_memory(
-            MutationAuthorizationRequest(scope, "RE_EMBED", visibility), memory_id, identity, vector
+            MutationAuthorizationRequest(scope, "RE_EMBED", visibility), memory_id, identity, vector,
+            expected_revision_id=expected_revision_id
         )
 
 
 def build_persistent_embedding_writer(pool: object) -> PersistentEmbeddingWriter:
     """Compose re-embedding from a stored revision's exact canonical scope."""
+    pool = MappingPool(pool)
     api = PersistentMemoryAPI(MariaDBB9Store(pool), MariaDBScopeAuthorityResolver(pool))
 
     async def revision_scope(memory_id: str, _operation: str, _visibility: Visibility) -> ScopeContext:
@@ -86,7 +90,7 @@ def build_persistent_embedding_writer(pool: object) -> PersistentEmbeddingWriter
             raise ScopeDenied("embedding revision lacks canonical tenant or subject")
         return ScopeContext("service:embedding", "SERVICE", str(subject_user_id), str(tenant_id),
                             str(project_id) if project_id is not None else None,
-                            calling_component="embedding")
+                            calling_component="embedding", request_id=str(uuid.uuid4()), trace_id=str(uuid.uuid4()))
 
     return PersistentEmbeddingWriter(api, revision_scope)
 
@@ -100,13 +104,14 @@ async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter |
     async with db.pool.acquire() as conn:
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
-                "SELECT o.memory_id,r.visibility,p.payload FROM memory_objects o "
+                "SELECT o.memory_id,r.revision_id,r.visibility,p.payload FROM memory_objects o "
                 "JOIN memory_projections pr ON pr.memory_id=o.memory_id "
                 "JOIN memory_revisions r ON r.revision_id=pr.current_revision_id "
                 "JOIN memory_revision_payloads p ON p.revision_id=r.revision_id "
-                "LEFT JOIN embedding_generations g ON g.revision_id=r.revision_id "
-                "WHERE r.lifecycle_state IN ('ACTIVE','VERIFIED') AND g.generation_id IS NULL "
-                "ORDER BY r.created_at LIMIT %s", (BATCH_SIZE,)
+                "LEFT JOIN embedding_generations g ON g.revision_id=r.revision_id AND g.embedding_space_id=%s "
+                "WHERE pr.reconciliation_required=FALSE AND pr.current_lifecycle_state IN ('ACTIVE','VERIFIED') "
+                "AND p.payload IS NOT NULL AND g.generation_id IS NULL "
+                "ORDER BY r.created_at,r.revision_id LIMIT %s", (identity.embedding_space_id,BATCH_SIZE,)
             )
             rows = await cur.fetchall()
     completed = failed = 0
@@ -114,12 +119,13 @@ async def run_b9_embeddings(db: MemoryDB, *, writer: PersistentEmbeddingWriter |
         payload = row["payload"]
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8", "replace")
-        vector = await db.get_embedding(payload or "")
-        if vector is None:
-            failed += 1
-            continue
         try:
-            await writer.persist(row["memory_id"], identity, tuple(vector), Visibility(row["visibility"]))
+            vector = await asyncio.wait_for(db.get_embedding(payload or ""), float(os.getenv("JAX_MEMORY_EMBED_CALL_TIMEOUT_SECONDS", "120")))
+            if vector is None:
+                failed += 1
+                continue
+            await writer.persist(row["memory_id"], identity, tuple(vector), Visibility(row["visibility"]),
+                                 expected_revision_id=row["revision_id"])
             completed += 1
         except Exception:  # fail-soft: one embedding failure must not stop the batch
             logger.exception("B9 embedding failed for memory %s", row["memory_id"])
@@ -148,9 +154,11 @@ async def run_b9_vector_health() -> int:
                 await cur.execute(
                     "SELECT COUNT(*) FROM memory_projections p "
                     "JOIN memory_revisions r ON r.revision_id=p.current_revision_id "
-                    "LEFT JOIN embedding_generations g ON g.revision_id=r.revision_id "
+                    "JOIN memory_revision_payloads x ON x.revision_id=r.revision_id "
+                    "LEFT JOIN embedding_generations g ON g.revision_id=r.revision_id AND g.embedding_space_id=%s "
                     "WHERE r.lifecycle_state IN ('ACTIVE','VERIFIED') "
-                    "AND r.payload IS NOT NULL AND g.generation_id IS NULL"
+                    "AND p.reconciliation_required=FALSE AND x.payload IS NOT NULL AND g.generation_id IS NULL",
+                    (EmbeddingSpaceIdentity("b9-v1", "ollama", CONFIG.model, None, CONFIG.dim, "unit", "cosine").embedding_space_id,)
                 )
                 (missing,) = await cur.fetchone()
     finally:
@@ -289,7 +297,7 @@ async def procesar_facts(db: MemoryDB) -> tuple[int, int]:
     return procesados, fallidos
 
 
-async def main() -> None:
+async def main() -> int:
     jax_db_host = os.environ.get("JAX_DB_HOST")
     if not jax_db_host:
         raise RuntimeError(
@@ -298,44 +306,46 @@ async def main() -> None:
             "jax-dual-mariadb-instances). Sourceá /etc/jax/.env."
         )
     db = MemoryDB()
-    ok = await db.connect(
-        host=jax_db_host,
-        user=os.getenv("JAX_DB_USER", ""),
-        password=os.getenv("JAX_DB_PASSWORD", ""),
-        database=os.getenv("JAX_DB_NAME", "jax_memory"),
-    )
-    if not ok:
-        print("[embedding_worker] No pude conectar a la base. Verificar variables de entorno.")
-        return
+    try:
+        ok = await db.connect(
+            host=jax_db_host,
+            user=os.getenv("JAX_DB_USER", ""),
+            password=os.getenv("JAX_DB_PASSWORD", ""),
+            database=os.getenv("JAX_DB_NAME", "jax_memory"), migrate_schema=False,
+        )
+        if not ok:
+            print("[embedding_worker] No pude conectar a la base. Verificar variables de entorno.")
+            return 1
+        print("=" * 56)
+        print("  JAX — Worker de embeddings")
+        print("=" * 56)
 
-    print("=" * 56)
-    print("  JAX — Worker de embeddings")
-    print("=" * 56)
+        print("\n[1/2] Procesando mensajes...")
+        m_ok, m_fail = await procesar_mensajes(db)
+        print(f"  => Mensajes: {m_ok} vectorizados, {m_fail} fallidos.")
 
-    print("\n[1/2] Procesando mensajes...")
-    m_ok, m_fail = await procesar_mensajes(db)
-    print(f"  => Mensajes: {m_ok} vectorizados, {m_fail} fallidos.")
+        print("\n[2/2] Procesando facts...")
+        f_ok, f_fail = await procesar_facts(db)
+        print(f"  => Facts: {f_ok} vectorizados, {f_fail} fallidos.")
 
-    print("\n[2/2] Procesando facts...")
-    f_ok, f_fail = await procesar_facts(db)
-    print(f"  => Facts: {f_ok} vectorizados, {f_fail} fallidos.")
+        print("\n[3/3] Procesando revisiones B9...")
+        b9_ok, b9_fail = await run_b9_embeddings(db)
+        print(f"  => B9: {b9_ok} vectorizados, {b9_fail} fallidos.")
 
-    print("\n[3/3] Procesando revisiones B9...")
-    b9_ok, b9_fail = await run_b9_embeddings(db)
-    print(f"  => B9: {b9_ok} vectorizados, {b9_fail} fallidos.")
+        print("\n" + "=" * 56)
+        print(f"  Total procesado: {m_ok + f_ok + b9_ok} vectores guardados.")
+        if m_fail + f_fail + b9_fail > 0:
+            print(f"  Fallidos: {m_fail + f_fail + b9_fail} (ver logs para detalle).")
+        print("=" * 56)
 
-    print("\n" + "=" * 56)
-    print(f"  Total procesado: {m_ok + f_ok + b9_ok} vectores guardados.")
-    if m_fail + f_fail + b9_fail > 0:
-        print(f"  Fallidos: {m_fail + f_fail + b9_fail} (ver logs para detalle).")
-    print("=" * 56)
-
-    await db.close()
-    await cerrar_cliente_http()
+        return int(m_fail + f_fail + b9_fail > 0)
+    finally:
+        await db.close()
+        await cerrar_cliente_http()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="JAX memory embedding worker")
     parser.add_argument("--health", action="store_true", help="check B9 embedding-generation coverage only")
     args = parser.parse_args()
-    raise SystemExit(asyncio.run(run_b9_vector_health() if args.health else main()) or 0)
+    raise SystemExit(asyncio.run(asyncio.wait_for(run_b9_vector_health() if args.health else main(), float(os.getenv("JAX_MEMORY_RUN_TIMEOUT_SECONDS", "840")))) or 0)

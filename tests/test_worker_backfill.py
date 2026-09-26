@@ -20,6 +20,7 @@ from jax.memory import worker
 class _DBFalsa:
     def __init__(self, backfill_falla: bool = False):
         self.backfill_falla = backfill_falla
+        self.pool = object()
         self.tablas: list[str] = []
         self.pidio_conversaciones = False
         self.cerrada = False
@@ -43,6 +44,11 @@ class _DBFalsa:
 
 def _correr(monkeypatch, db: _DBFalsa):
     monkeypatch.setattr(worker, "MemoryDB", lambda: db)
+    class Jobs:
+        def __init__(self,*args,**kwargs): pass
+        async def pending(self,limit):
+            return await db.get_unprocessed_conversations(limit)
+    monkeypatch.setattr(worker,"ExtractionJobs",Jobs)
     monkeypatch.setenv("JAX_DB_HOST", "db-de-test")
     asyncio.run(worker.run_once())
 
