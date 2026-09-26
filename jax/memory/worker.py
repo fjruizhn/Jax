@@ -31,11 +31,17 @@ import asyncio
 import json
 import os
 import logging
+import time
+import uuid
+from dataclasses import replace
 from typing import Awaitable, Callable
 
 from jax.memory.b9 import (MutationAuthorizationRequest, ObjectKind, ScopeContext,
                            ScopeDenied, Visibility)
 from jax.memory.b9_mariadb import MariaDBB9Store, PersistentMemoryAPI
+from jax.memory.mapping_pool import MappingPool
+from jax.memory.extraction_jobs import ExtractionJobs, normalize_extraction, source_digest
+from jax.memory.b9 import AuthorizationDenied, B9Error
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.db import EMBED, MemoryDB
 from jax.core.registro_facetas import url_del_proveedor
@@ -62,6 +68,13 @@ class PersistentExtractionWriter:
                  build_request_scope: Callable[[dict, str, Visibility], Awaitable[ScopeContext]]):
         self._api = api
         self._build_request_scope = build_request_scope
+
+    async def persist_frozen(self, conversation: dict, job: dict) -> tuple[str, ...]:
+        visibility=Visibility.PROJECT_SHARED if conversation.get('project_id') is not None else Visibility.USER_PRIVATE
+        scope=await self._build_request_scope(conversation,'CREATE',visibility)
+        scope=replace(scope,request_id=job['request_id'],trace_id=job['trace_id'])
+        return await self._api.persist_conversation_extraction(
+            MutationAuthorizationRequest(scope,'CREATE',visibility),conversation['id'],job['claim_token'])
 
     async def persist(self, conversation: dict, kind: ObjectKind, content: str) -> str:
         visibility = Visibility.PROJECT_SHARED if conversation.get("project_id") else Visibility.USER_PRIVATE
@@ -93,6 +106,7 @@ def build_persistent_extraction_writer(pool: object) -> PersistentExtractionWrit
     persistent API revalidates the service operation and exact scope in its
     own transaction.
     """
+    pool=MappingPool(pool)
     api = PersistentMemoryAPI(MariaDBB9Store(pool), MariaDBScopeAuthorityResolver(pool))
 
     async def source_scope(row: dict, _operation: str, _visibility: Visibility) -> ScopeContext:
@@ -232,24 +246,31 @@ MAX_CHARS_PER_EXTRACTION = 12000
 
 
 def _chunk_conversation(conv_text: str, max_chars: int = MAX_CHARS_PER_EXTRACTION) -> list[str]:
-    """Parte conv_text en trozos de hasta max_chars, cortando en limites de
-    linea (nunca a mitad de un mensaje). Conversaciones cortas: un solo
-    trozo (comportamiento identico al de antes de esta funcion)."""
-    if len(conv_text) <= max_chars:
-        return [conv_text]
-    lineas = conv_text.split("\n")
+    """Pack whole lines; hard-split only lines exceeding the chunk limit."""
+    if max_chars <= 0:
+        raise ValueError('chunk size must be positive')
     chunks: list[str] = []
-    actual: list[str] = []
-    largo = 0
-    for linea in lineas:
-        if largo + len(linea) + 1 > max_chars and actual:
-            chunks.append("\n".join(actual))
-            actual, largo = [], 0
-        actual.append(linea)
-        largo += len(linea) + 1
-    if actual:
-        chunks.append("\n".join(actual))
+    current: str | None = None
+    for line in conv_text.split('\n'):
+        if len(line) > max_chars:
+            if current is not None:
+                chunks.append(current)
+                current = None
+            # No truncation: all complete fragments and the remainder survive.
+            while len(line) > max_chars:
+                chunks.append(line[:max_chars])
+                line = line[max_chars:]
+        if current is None:
+            current = line
+        elif len(current) + 1 + len(line) <= max_chars:
+            current += '\n' + line
+        else:
+            chunks.append(current)
+            current = line
+    if current is not None:
+        chunks.append(current)
     return chunks
+
 
 
 def _parse_json(raw: str) -> dict | None:
@@ -293,7 +314,19 @@ async def process_one(db: MemoryDB, extractor: HttpMuscle, conv: dict,
                       *, b9_writer: PersistentExtractionWriter | None = None) -> bool:
     """Procesa UNA conversacion. Devuelve True si la marco procesada."""
     conv_id = conv["id"]
+    if b9_writer is not None:
+        run_seconds=_positive_limit('JAX_MEMORY_RUN_TIMEOUT_SECONDS',840)
+        lease_seconds=_positive_limit('JAX_MEMORY_LEASE_SECONDS',900)
+        if lease_seconds<=run_seconds: raise ValueError('extraction lease must exceed run deadline')
+        jobs=ExtractionJobs(MappingPool(db.pool),lease_seconds=lease_seconds,max_attempts=_positive_limit('JAX_MEMORY_MAX_ATTEMPTS',3))
+        job=await jobs.claim(conv_id,run_id=str(uuid.uuid4()))
+        if job is None: return False
+        if job.get('quarantined'): return False
+        return await process_claimed(db,extractor,conv,b9_writer,jobs,job,
+            {'calls':0,'max_calls':_positive_limit('JAX_MEMORY_MAX_CALLS',40)},time.monotonic()+run_seconds)
     messages = await db.get_conversation_messages(conv_id)
+    if messages is None:
+        raise RuntimeError('conversation messages unavailable')
     if not messages:
         # Sin mensajes: marcar procesada igual (no hay nada que extraer)
         await db.mark_processed(conv_id)
@@ -443,50 +476,114 @@ async def _recalcular_embeddings_en_ceros(db: MemoryDB) -> None:
             logger.info(f"embeddings en ceros ({tabla}): {r}")
 
 
-async def run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | None = None) -> None:
-    """Una corrida de extracción, propiedad exclusiva del timer systemd.
+def _positive_limit(name: str, default: int) -> int:
+    value=int(os.environ.get(name,str(default)))
+    if value<=0: raise ValueError(f'{name} must be positive')
+    return value
 
-    El trabajo de embeddings es otra clase de trabajo y pertenece únicamente
-    a ``jax-memory-embedding``.  No se duplica desde el extractor.
-    """
-    jax_db_host = os.environ.get("JAX_DB_HOST")
-    if not jax_db_host:
-        raise RuntimeError(
-            "JAX_DB_HOST no está seteado -- sin default silencioso a "
-            "localhost (esa instancia está muerta, ver memoria "
-            "jax-dual-mariadb-instances). Sourceá /etc/jax/.env."
-        )
-    db = MemoryDB()
-    ok = await db.connect(
-        host=jax_db_host,
-        user=os.getenv("JAX_DB_USER", ""),
-        password=os.getenv("JAX_DB_PASSWORD", ""),
-        database=os.getenv("JAX_DB_NAME", "jax_memory"),
-    )
-    if not ok:
-        logger.error("No se pudo conectar a la memoria. Abortando corrida.")
-        return
 
+async def process_claimed(db, extractor, conv, writer, jobs, job, budget, deadline):
+    """Read/extract outside write transaction; retry only immutable frozen results."""
+    conv_id=conv['id']; token=job['claim_token']; committing=False
     try:
-        pendientes = await db.get_unprocessed_conversations(limit=limit)
-        if not pendientes:
-            logger.info("No hay conversaciones pendientes de procesar.")
+        # Validate origin policy before any paid work; final API re-resolves under locks.
+        visibility=Visibility.PROJECT_SHARED if conv.get('project_id') is not None else Visibility.USER_PRIVATE
+        scope=await writer._build_request_scope(conv,'CREATE',visibility)
+        async def preflight(cur):
+            resolved=await writer._api._auth(cur,MutationAuthorizationRequest(scope,'CREATE',visibility),'CREATE',visibility)
+            writer._api._project_permissions(resolved,'CREATE',visibility)
+        await writer._api._store.mutation(preflight)
+        max_messages=_positive_limit('JAX_MEMORY_MAX_MESSAGES',1000)
+        max_chars=_positive_limit('JAX_MEMORY_MAX_CHARS',96000)
+        max_items=_positive_limit('JAX_MEMORY_MAX_ITEMS',100)
+        max_item_chars=_positive_limit('JAX_MEMORY_MAX_ITEM_CHARS',12000)
+        await jobs.validate_message_bounds(conv_id,max_messages,max_chars)
+        messages=await db.get_conversation_messages(conv_id)
+        if messages is None: raise RuntimeError('conversation messages unavailable')
+        if len(messages)>max_messages: raise ValueError('conversation message limit exceeded')
+        conv_text='\n'.join(f"{m['role']}: {m['content']}" for m in messages)
+        if len(conv_text)>max_chars: raise ValueError('conversation character limit exceeded')
+        digest=source_digest(conv,messages)
+        if job.get('frozen_output') is not None:
+            if digest!=job['input_digest']: raise ScopeDenied('frozen extraction source changed')
+            items=json.loads(job['frozen_output'])
+        else:
+            data={'facts':[],'decisions':[],'action_items':[]}
+            chunks=_chunk_conversation(conv_text,_positive_limit('JAX_MEMORY_CHUNK_CHARS',12000)) if messages else []
+            if len(chunks)>_positive_limit('JAX_MEMORY_MAX_CHUNKS',8): raise ValueError('conversation chunk limit exceeded')
+            for chunk in chunks:
+                if budget['calls']>=budget['max_calls']: raise RuntimeError('run call limit exceeded')
+                left=deadline-time.monotonic()
+                if left<=0: raise RuntimeError('run deadline exceeded')
+                budget['calls']+=1
+                raw=await asyncio.wait_for(extractor.invoke(EXTRACTION_PROMPT.format(conversation=chunk),decorate=False),timeout=min(left,120))
+                if not isinstance(raw,str) or len(raw)>_positive_limit('JAX_MEMORY_MAX_RESPONSE_CHARS',240000):
+                    raise ValueError('extraction response limit exceeded')
+                parsed=_parse_json(raw)
+                # Validate full chunk before accumulating; never skip malformed entries.
+                normalize_extraction(parsed,max_items=max_items,max_text_chars=max_item_chars)
+                for category in data: data[category].extend(parsed.get(category,[]))
+                normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars)
+            items=normalize_extraction(data,max_items=max_items,max_text_chars=max_item_chars)
+            await jobs.freeze(conv_id,token,digest,items)
+        committing=True
+        await writer.persist_frozen(conv,job)
+        logger.info('conv %s: committed %s extraction items',conv_id,len(items))
+        return True
+    except (ScopeDenied,AuthorizationDenied,ValueError) as error:
+        await jobs.fail(conv_id,token,type(error).__name__,quarantine=True)
+        logger.error('conv %s: quarantined %s',conv_id,type(error).__name__)
+        return False
+    except Exception as error:  # fail-soft: aislar esta conversación permite revisar las demás; devuelve False y _run_once contabiliza el fallo para terminar con código no cero.
+        # Lost commit acknowledgement is UNKNOWN; completion is resolved by the locked DB markers.
+        await jobs.fail(conv_id,token,type(error).__name__,unknown=committing)
+        logger.error('conv %s: failed %s',conv_id,type(error).__name__)
+        return False
+
+
+async def _run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | None = None) -> None:
+    host=os.environ.get('JAX_DB_HOST')
+    if not host: raise RuntimeError('JAX_DB_HOST is required')
+    db=MemoryDB(); failures=0
+    try:
+        ok=await db.connect(host=host,user=os.getenv('JAX_DB_USER',''),password=os.getenv('JAX_DB_PASSWORD',''),database=os.getenv('JAX_DB_NAME','jax_memory'),migrate_schema=False)
+        if not ok: raise RuntimeError('memory connection failed')
+        run_seconds=_positive_limit('JAX_MEMORY_RUN_TIMEOUT_SECONDS',840)
+        lease_seconds=_positive_limit('JAX_MEMORY_LEASE_SECONDS',900)
+        if lease_seconds<=run_seconds: raise ValueError('extraction lease must exceed run deadline')
+        jobs=ExtractionJobs(MappingPool(db.pool),lease_seconds=lease_seconds,max_attempts=_positive_limit('JAX_MEMORY_MAX_ATTEMPTS',3))
+        pending=await jobs.pending(limit)
+        if pending is None: raise RuntimeError('memory queue unavailable')
+        if not pending:
+            logger.info('No pending conversations')
             return
-
-        # No legacy fallback once this B9 path is selected.  A project row
-        # without canonical scope data is rejected by the writer/resolver,
-        # rather than being silently written tenant-wide or user-private.
-        if b9_writer is None:
-            b9_writer = build_persistent_extraction_writer(db.pool)
-
-        logger.info(f"Procesando {len(pendientes)} conversacion(es)...")
-        extractor = await build_extractor()
-        for conv in pendientes:
-            await process_one(db, extractor, conv, b9_writer=b9_writer)
+        writer=b9_writer or build_persistent_extraction_writer(db.pool)
+        extractor=await build_extractor()
+        budget={'calls':0,'max_calls':_positive_limit('JAX_MEMORY_MAX_CALLS',40)}
+        deadline=time.monotonic()+run_seconds
+        run_id=str(uuid.uuid4())
+        for conv in pending:
+            if time.monotonic()>=deadline:
+                failures+=1; break
+            try:
+                job=await jobs.claim(conv['id'],run_id=run_id)
+                if job is not None:
+                    if job.get('quarantined'):
+                        failures+=1
+                    elif not await process_claimed(db,extractor,conv,writer,jobs,job,budget,deadline): failures+=1
+            except Exception as error:  # fail-soft: un reclamo fallido no bloquea la cola; failures obliga a relanzar al final y systemd observa código no cero.
+                failures+=1
+                logger.error('conv %s: claim failed %s',conv['id'],type(error).__name__)
+        if failures: raise RuntimeError(f'memory extraction failures: {failures}')
     finally:
         await db.close()
         await cerrar_cliente_http()
 
 
-if __name__ == "__main__":
+async def run_once(limit: int = 10, *, b9_writer: PersistentExtractionWriter | None = None) -> None:
+    await asyncio.wait_for(_run_once(limit,b9_writer=b9_writer),
+        timeout=_positive_limit('JAX_MEMORY_RUN_TIMEOUT_SECONDS',840))
+
+
+if __name__ == '__main__':
     asyncio.run(run_once())
