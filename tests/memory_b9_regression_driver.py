@@ -204,7 +204,8 @@ class Driver:
             assert len(await self.api.persist_conversation_extraction(auth,cid,job['claim_token']))==4,"ACK_authorized_idempotency"
             forged=MutationAuthorizationRequest(ScopeContext('service:memory-extraction','SERVICE','4','1',None,calling_component='memory-extraction'),'CREATE',Visibility.USER_PRIVATE)
             try:await self.api.persist_conversation_extraction(forged,cid,job['claim_token'])
-            except ScopeDenied:pass
+            except ScopeDenied:  # fail-soft: expected denial of a forged subject retry; the else branch fails if accepted
+                pass
             else:raise AssertionError("ACK_unauthorized_retry_accepted")
         await self.case("ACK_lost_commit_response",lost_ack)
         async def invalid():
@@ -227,7 +228,8 @@ class Driver:
             second=await jobs.claim(cid,run_id=str(uuid.uuid4()));assert first['claim_token']!=second['claim_token'],"LEASE_token_not_replaced"
             writer=W.build_persistent_extraction_writer(self.pool)
             try: await writer.persist_frozen(conv,first)
-            except ScopeDenied: pass
+            except ScopeDenied:  # fail-soft: expected denial of a replaced lease token; the else branch fails if accepted
+                pass
             else: raise AssertionError("LEASE_old_writer_accepted")
             await self.query("UPDATE messages SET content='changed integration source' WHERE conversation_id=%s",(cid,))
             budget={'calls':0,'max_calls':40}
@@ -258,12 +260,14 @@ class Driver:
             assert second==mid and await self.total()-before==2,"ADOPT_repeated_events"
             operator=MutationAuthorizationRequest(ScopeContext('user:4','USER','4','1',None,calling_component='legacy-adoption'),'IMPORT_LEGACY',Visibility.SYSTEM_INTERNAL)
             try:await self.api.import_legacy_memory(operator,'facts','legacy',str(fid),ObjectKind.FACT,content,visibility=Visibility.USER_PRIVATE,user_id='1',expected_source_digest=source_hash)
-            except AuthorizationDenied:pass
+            except AuthorizationDenied:  # fail-soft: expected denial of operator legacy import; the else branch fails if accepted
+                pass
             else:raise AssertionError("ADOPT_operator_import_allowed")
             assert not await self.reader.retrieve(ScopeContext('user:4','USER','4','1',None),limit=100),"ADOPT_private_leak"
             await self.query("UPDATE facts SET fact_text='changed synthetic legacy source' WHERE id=%s",(fid,))
             try:await self.api.import_legacy_memory(auth,'facts','legacy',str(fid),ObjectKind.FACT,content,visibility=Visibility.USER_PRIVATE,user_id='1',expected_source_digest=source_hash)
-            except ScopeDenied:pass
+            except ScopeDenied:  # fail-soft: expected denial of changed legacy content; the else branch fails if accepted
+                pass
             else:raise AssertionError("ADOPT_changed_source_allowed")
             assert await self.total()-before==2 and await scan_and_mark(self.pool)==(),"ADOPT_noncanonical_history"
         await self.case("ADOPT_real_source_and_dedup",adoption)
@@ -279,7 +283,8 @@ class Driver:
             writer=build_persistent_synthesis_writer_for_scope(self.pool,1)
             await writer.preflight(1,None,revisions,'USER_PRIVATE')
             try:await writer.preflight(9,None,revisions,'USER_PRIVATE')
-            except ScopeDenied:pass
+            except ScopeDenied:  # fail-soft: expected denial of inactive synthesis subject; the else branch fails if accepted
+                pass
             else:raise AssertionError('SYNTH_inactive_preflight_accepted')
             jobs=SynthesisJobs(self.mapping)
             claim=await jobs.claim(1,1,None,revisions,'b9-worker-v1');assert claim is not None,"SYNTH_claim_missing"
@@ -295,7 +300,8 @@ class Driver:
             assert mid==repeat and await self.total()-before==1,"SYNTH_duplicate_publication"
             await self.api.correct_memory(MutationAuthorizationRequest(authuser,'CORRECT',Visibility.USER_PRIVATE),sources[0]['memory_id'],'corrected synthetic synthesis source')
             try:await self.api.synthesize_memory(auth,'insight using revoked revision',tuple(revisions),provider='test',model='test',transformation_version='integration-revoked')
-            except ScopeDenied:pass
+            except ScopeDenied:  # fail-soft: expected denial of revoked synthesis revision; the else branch fails if accepted
+                pass
             else:raise AssertionError("SYNTH_revoked_source_accepted")
             assert await scan_and_mark(self.pool)==(),"SYNTH_noncanonical_history"
         await self.case("SYNTH_verified_dedup_and_revocation",synthesis)
@@ -359,7 +365,8 @@ class Driver:
             userauth=MutationAuthorizationRequest(ScopeContext('user:1','USER','1','1',None),'CORRECT',Visibility.USER_PRIVATE)
             await self.api.correct_memory(userauth,mid,'corrected integration source')
             try:await self.api.reembed_memory(auth,mid,identity,(.1,.2),expected_revision_id=rid)
-            except ScopeDenied:pass
+            except ScopeDenied:  # fail-soft: expected denial of obsolete embedding revision; the else branch fails if accepted
+                pass
             else:raise AssertionError("EMBED_stale_revision_accepted")
         await self.case("EMBED_stale_and_dedup",embedding)
         async def lifecycle():
@@ -384,7 +391,7 @@ async def main():
         assert await driver.scalar('SELECT COUNT(*) FROM conversations')==0,'fresh_database_required'
         assert await driver.scalar('SELECT COUNT(*) FROM memory_objects')==0,'fresh_database_required'
         await driver.cases()
-    except Exception as error:
+    except Exception as error:  # fail-closed: emit sanitized failing-case metadata and return rc=1 to the process entry point
         print(json.dumps({'status':'FAIL','error_type':type(error).__name__,'failed_case':getattr(driver,'current','setup'),'completed':driver.results},sort_keys=True))
         return 1
     finally:

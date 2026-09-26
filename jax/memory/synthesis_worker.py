@@ -300,7 +300,7 @@ async def run_once(*, b9_writer=None):
             try:
                 writer = b9_writer or build_persistent_synthesis_writer_for_scope(pool, scope["tenant_id"])
                 await process_scope(db,synthesizer,scope["user_id"],scope["project_id"],b9_writer=writer,tenant_id=scope["tenant_id"],visibility=scope["visibility"],deadline=deadline)
-            except Exception:
+            except Exception:  # fail-soft: isolate this scope, log its failure, increment failures, and return nonzero after processing the remaining scopes
                 logger.exception("B9 synthesis scope failed")
                 failed += 1
         return int(failed > 0)

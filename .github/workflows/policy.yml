@@ -38,11 +38,83 @@ on:
 # se retarget-ea un PR existente -- sin esto, el propio retarget que
 # resuelve el problema de arriba tampoco dispara una corrida sola.
 
+# B9 migrations used by ephemeral schema bootstraps belong to this checkout.
+env:
+  JAX_REPO_PATH: ${{ github.workspace }}
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  memory-b9-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      mariadb:
+        image: mariadb:12.3.3
+        env:
+          MARIADB_ROOT_PASSWORD: ci-root
+          MARIADB_DATABASE: jax_memory_test
+          MARIADB_USER: jax_test
+          MARIADB_PASSWORD: ci-test
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      CI: "true"
+      PYTHONPATH: .
+      JAX_DB_HOST: 127.0.0.1
+      JAX_DB_PORT: "3306"
+      JAX_DB_USER: jax_test
+      JAX_DB_PASSWORD: ci-test
+      JAX_DB_NAME: jax_memory_test
+      JAX_TEST_DB_SUFIJO: ""
+      LAS_MANOS_URL: http://las-manos.invalid:7777
+      JAX_OLLAMA_URL: http://ollama.invalid:11434
+      JAX_USAGE_SPOOL_DIR: ${{ runner.temp }}/memory-b9/usage
+      JAX_REPO_BASE: ${{ runner.temp }}/memory-b9/repo
+      JAX_AUDIT_LOG_PATH: ${{ runner.temp }}/memory-b9/audit.jsonl
+      JAX_FACET_SEAL_PATH: ${{ runner.temp }}/memory-b9/facet-seal.json
+      JAX_KILL_SWITCH_PATH: ${{ runner.temp }}/memory-b9/PAUSE
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          # Same interpreter as the measured isolated nine-module suite.
+          python-version: "3.14"
+      - run: pip install -r requirements.txt pytest pytest-asyncio
+      - name: Regresiones B9 con MariaDB efímera y usuario limitado
+        # This container starts empty. Each DB test creates its own temporary
+        # tables; jax_test has grants only on jax_memory_test, never production.
+        # The root conftest's governance bootstrap reads host configuration;
+        # this explicit boundary does not load it or migrate any shared schema.
+        # Measured 2026-09-26 against MariaDB 12.3.3: 102 passed, no skips/errors.
+        run: |
+          set -euo pipefail
+          python -m pytest --confcutdir=tests \
+            tests/test_memory_readonly_connect.py \
+            tests/test_memory_extraction_jobs.py \
+            tests/test_b9_persistent_api.py \
+            tests/test_b9_mariadb_adapter.py \
+            tests/test_memory_aux_regressions.py \
+            tests/test_b9_worker_composition.py \
+            tests/test_worker_backfill.py \
+            tests/test_url_proveedor_workers_memoria.py \
+            tests/test_legacy_adoption.py \
+            -q --junitxml="$RUNNER_TEMP/memory-b9.xml"
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+          cases = list(ET.parse(Path(os.environ['RUNNER_TEMP']) / 'memory-b9.xml').iter('testcase'))
+          incomplete = [case for case in cases if any(case.find(tag) is not None for tag in ('failure', 'error', 'skipped'))]
+          if len(cases) < 102 or incomplete:
+              raise SystemExit(f'B9 regression incomplete: {len(cases)} cases, {len(incomplete)} failed/error/skipped; minimum 102, none skipped')
+          print(f'B9 regression: {len(cases)} passed, 0 failed, 0 errors, 0 skipped')
+          PY
+
   governed-execution-mariadb:
     runs-on: ubuntu-latest
     services:
