@@ -67,3 +67,14 @@ una base vacía real.31 controles locales de CI pasan. Otro job reveló que la
 migración B9 de jax-platform exige JAX_REPO_PATH; CI ahora apunta al checkout
 actual mediante github.workspace. El cambio de workflow queda sujeto a la
 regla de integración de Fernando, sin usar la excepción automática de Codex.
+
+La primera ejecución completa del nuevo job reveló un sufijo de base vacío
+rechazado por el guard. Se fijaron nombre y sufijo coherentes para la instancia
+efímera, conservando intacto el guard. GitHub además rechazó runner.temp en
+env de job: las rutas se movieron a env del paso. Las pruebas puras detectaron
+un create_pool nuevo sin connect_timeout y una regresión de reconstrucción
+de líneas del chunker. Se usa el helper compartido de timeout y se preservan
+los límites de línea normales, cortando únicamente mensajes individuales
+sobredimensionados sin truncarlos. Se conservan las aserciones anteriores y
+se cubren líneas vacías y newline final. Estas correcciones requieren una
+nueva revisión del SHA exacto y CI remoto; no acreditan despliegue.

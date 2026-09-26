@@ -55,7 +55,7 @@ jobs:
         image: mariadb:12.3.3
         env:
           MARIADB_ROOT_PASSWORD: ci-root
-          MARIADB_DATABASE: jax_memory_test
+          MARIADB_DATABASE: jax_memory_test_memb9_ci
           MARIADB_USER: jax_test
           MARIADB_PASSWORD: ci-test
         ports: ["3306:3306"]
@@ -69,8 +69,8 @@ jobs:
       JAX_DB_PORT: "3306"
       JAX_DB_USER: jax_test
       JAX_DB_PASSWORD: ci-test
-      JAX_DB_NAME: jax_memory_test
-      JAX_TEST_DB_SUFIJO: ""
+      JAX_DB_NAME: jax_memory_test_memb9_ci
+      JAX_TEST_DB_SUFIJO: memb9_ci
       LAS_MANOS_URL: http://las-manos.invalid:7777
       JAX_OLLAMA_URL: http://ollama.invalid:11434
     steps:
@@ -89,7 +89,7 @@ jobs:
           JAX_FACET_SEAL_PATH: ${{ runner.temp }}/memory-b9/facet-seal.json
           JAX_KILL_SWITCH_PATH: ${{ runner.temp }}/memory-b9/PAUSE
         # This container starts empty. Each DB test creates its own temporary
-        # tables; jax_test has grants only on jax_memory_test, never production.
+        # tables; jax_test has grants only on this job's suffixed test DB, never production.
         # The root conftest's governance bootstrap reads host configuration;
         # this explicit boundary does not load it or migrate any shared schema.
         # Measured 2026-09-26 against MariaDB 12.3.3: 102 passed, no skips/errors.

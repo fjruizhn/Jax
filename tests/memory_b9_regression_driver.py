@@ -24,6 +24,7 @@ from jax.memory.mapping_pool import MappingPool
 from jax.memory.scope_authority import MariaDBScopeAuthorityResolver
 from jax.memory.extraction_jobs import ExtractionJobs, normalize_extraction, source_digest
 from jax.memory.lifecycle_worker import scan_and_mark
+from jax.core.db_connect_config import db_connect_timeout_seconds
 from jax.memory.legacy_adoption import source_content, row_digest
 from jax.memory.synthesis_jobs import SynthesisJobs, digest as synthesis_digest
 from jax.memory.synthesis_worker import build_persistent_synthesis_writer_for_scope
@@ -385,7 +386,7 @@ async def main():
         raise RuntimeError('test_database_guard')
     for name in ('JAX_DB_HOST','JAX_DB_PORT','JAX_DB_PASSWORD'):
         if not env.get(name):raise RuntimeError('test_configuration_missing')
-    pool=await aiomysql.create_pool(host=env['JAX_DB_HOST'],port=int(env['JAX_DB_PORT']),user=env['JAX_DB_USER'],password=env['JAX_DB_PASSWORD'],db=env['JAX_DB_NAME'],minsize=1,maxsize=8,autocommit=False,charset='utf8mb4')
+    pool=await aiomysql.create_pool(host=env['JAX_DB_HOST'],port=int(env['JAX_DB_PORT']),user=env['JAX_DB_USER'],password=env['JAX_DB_PASSWORD'],db=env['JAX_DB_NAME'],minsize=1,maxsize=8,autocommit=False,charset='utf8mb4',connect_timeout=db_connect_timeout_seconds())
     driver=Driver(pool)
     try:
         assert await driver.scalar('SELECT COUNT(*) FROM conversations')==0,'fresh_database_required'
